@@ -75,7 +75,23 @@ const (
 	EDENotifyZoneInErrorState         // target zone in error state
 	EDENotifyUnknownType              // unsupported NOTIFY RRtype
 	EDENotifyNotPermitted             // source not permitted by the zone's allow-notify ACL
+
+	// UPDATE apply-stage failures. Everything above rejects a message before
+	// anything is attempted; these two say the message was accepted and
+	// authorized, and then the change itself did not happen.
+	//
+	// RFC 2136 §3.4.2.5 makes NOERROR a statement that the update HAS been
+	// made, so both of these answer SERVFAIL. The EDE is what tells the client
+	// which kind of not-made it was, because the two want different reactions:
+	// a retry is pointless for the first and correct for the second.
+	EDEZoneUpdateNotApplied   // authorized, but the change could not be applied or made durable
+	EDEZoneUpdateApplyTimeout // authorized, but the server stopped waiting for the apply to finish
 )
+
+// NOTE for anyone adding codes above: append at the END of the const block.
+// These are iota-numbered and they travel on the wire, so inserting in the
+// middle silently changes the meaning of every code after it -- including ones
+// already emitted to clients and sitting in someone's logs.
 
 var EDECodeToString = map[uint16]string{
 	EDEDNSSECBogus:                 "DNSSEC Bogus", // RFC 8914
@@ -108,6 +124,9 @@ var EDECodeToString = map[uint16]string{
 	EDENotifyZoneInErrorState:         "target zone is in error state",
 	EDENotifyUnknownType:              "unsupported NOTIFY RRtype",
 	EDENotifyNotPermitted:             "source not permitted by allow-notify ACL",
+
+	EDEZoneUpdateNotApplied:   "update was authorized but could not be applied or made durable",
+	EDEZoneUpdateApplyTimeout: "timed out waiting for the update to be applied; it may or may not have taken effect",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response

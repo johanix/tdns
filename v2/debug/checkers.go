@@ -58,11 +58,11 @@ type Checker struct {
 
 func NewChecker(ledger *Ledger, report *Report, delta time.Duration) *Checker {
 	return &Checker{
-		ledger:      ledger,
-		report:      report,
-		delta:       delta,
-		serialFP:    map[uint32]string{},
-		firstSeen:   map[uint32]time.Time{},
+		ledger:    ledger,
+		report:    report,
+		delta:     delta,
+		serialFP:  map[uint32]string{},
+		firstSeen: map[uint32]time.Time{},
 	}
 }
 

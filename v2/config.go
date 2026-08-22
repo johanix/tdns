@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"net"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -57,10 +58,13 @@ type Config struct {
 	// Peers is the top-level peers: block — one declaration per remote
 	// server, referenced from upstreams:/notify:/downstreams:/allow-notify:
 	// as `- peers: [ id, ... ]` entries (docs/2026-07-21-peers-xfr-auth-design.md).
-	Peers      map[string]PeerDef `yaml:"peers" mapstructure:"peers"`
-	Dnssec     DnssecConf         `yaml:"dnssec" mapstructure:"dnssec"`
-	Keys       KeyConf            `yaml:"keys" mapstructure:"keys"`
-	Keystore   KeystoreConf       `yaml:"keystore" mapstructure:"keystore"`
+	Peers map[string]PeerDef `yaml:"peers" mapstructure:"peers"`
+	// Journal is the journal: block -- deployment-wide settings for the delta
+	// journal (Phase 2 persistence).
+	Journal    JournalConf  `yaml:"journal" mapstructure:"journal"`
+	Dnssec     DnssecConf   `yaml:"dnssec" mapstructure:"dnssec"`
+	Keys       KeyConf      `yaml:"keys" mapstructure:"keys"`
+	Keystore   KeystoreConf `yaml:"keystore" mapstructure:"keystore"`
 	Db         DbConf
 	Registrars map[string][]string
 	Log        LogConf
@@ -223,6 +227,85 @@ type DnsEngineConf struct {
 	//              the serial stays put — secondaries don't see a regression
 	//              and don't trigger an unnecessary AXFR.
 	OutboundSoaSerial string `yaml:"outbound_soa_serial,omitempty" mapstructure:"outbound_soa_serial" validate:"omitempty,oneof=keep unixtime persist"`
+
+	// TransferSrc is the server-global source address for OUTBOUND zone
+	// transfers -- the local address we bind before dialling an upstream, i.e.
+	// the address the primary's allow-transfer/provide-xfr ACL will see.
+	//
+	// Without it the kernel picks a source from the outgoing interface, which on
+	// a multi-homed server is generally NOT the address the operator publishes
+	// as the secondary's identity. A primary whose ACL names that published
+	// address then refuses us, and the only workaround is to open the ACL to
+	// any -- which is how this was found (a lab secondary advertising .53 while
+	// transferring from whatever the route picked).
+	//
+	// A LIST, so both families can be named: the entry whose family matches the
+	// upstream is used, and an upstream with no matching entry is dialled
+	// unbound rather than failed. Per-zone ZoneConf.TransferSrc overrides this;
+	// empty there inherits.
+	TransferSrc []string `yaml:"transfer_src,omitempty" mapstructure:"transfer_src"`
+}
+
+// ValidateTransferSrc checks a transfer-src list. Every entry must be a bare IP
+// literal: an address is what gets bound as the local address, so a hostname, an
+// addr:port, or a typo has nothing usable in it.
+//
+// This has to be a hard config error rather than a skip. The failure mode of
+// skipping is silent and actively misleading: the entry is ignored, no source
+// matches, and the transfer is dialled UNBOUND -- which is exactly the bug
+// transfer-src exists to fix, now hidden behind a config that looks like the fix
+// is in place. An operator who writes "172.16.0.53:53" would see transfers
+// refused by the upstream ACL and no reason anywhere.
+//
+// ValidateAllTransferSrc checks every transfer-src in a parsed config: the
+// server-global list, each zone's override, and each template's.
+//
+// One function, called from BOTH the daemon loader (ParseConfig) and
+// `config check` (ValidateConfig). The first cut validated the global list in
+// both but the per-zone overrides only in the loader, so `config check` passed
+// configs the daemon then refused -- which defeats the purpose of having a
+// check command at all.
+//
+// Templates matter as much as zones and were missed by both: a template is a
+// ZoneConf, and ExpandTemplate gap-fills its transfer-src onto every primary
+// expanded from it, so a bad value there reaches real zones.
+func ValidateAllTransferSrc(conf *Config) error {
+	if err := ValidateTransferSrc("dnsengine.transfer_src", conf.DnsEngine.TransferSrc); err != nil {
+		return err
+	}
+	for _, z := range conf.Zones {
+		if err := ValidateTransferSrc(fmt.Sprintf("zone %s: transfer-src", z.Name), z.TransferSrc); err != nil {
+			return err
+		}
+	}
+	for _, t := range conf.Templates {
+		if err := ValidateTransferSrc(fmt.Sprintf("template %s: transfer-src", t.Name), t.TransferSrc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// where names the config key, so the message points at the right one of the
+// global list and a per-zone override.
+func ValidateTransferSrc(where string, srcs []string) error {
+	for _, s := range srcs {
+		t := strings.TrimSpace(s)
+		if t == "" {
+			return fmt.Errorf("%s: empty entry; remove it or give an IP address", where)
+		}
+		if net.ParseIP(t) != nil {
+			continue
+		}
+		// Name the likely mistake rather than only rejecting it.
+		if _, _, err := net.SplitHostPort(t); err == nil {
+			return fmt.Errorf("%s: %q includes a port; transfer-src is a source ADDRESS only "+
+				"(the source port is chosen by the kernel)", where, s)
+		}
+		return fmt.Errorf("%s: %q is not an IP address (a hostname is not usable here: "+
+			"the value is bound as the local address before any lookup)", where, s)
+	}
+	return nil
 }
 
 type ImrEngineConf struct {
@@ -398,6 +481,44 @@ type ApiServerAppConf struct {
 
 type DbConf struct {
 	File string // `validate:"required"`
+}
+
+// JournalConf is the journal: block. A block rather than a top-level key for
+// the same reason keystore: is one -- the journal has further deployment-wide
+// knobs coming (retention, auto-sync thresholds) and they belong together.
+type JournalConf struct {
+	// Active is a KILL-SWITCH, not a tuning knob.
+	//
+	// Persistence is what makes an applied update survive a restart, and the
+	// point of Phase 2 is that a client told NOERROR may forget the update.
+	// Turning it off breaks that promise, so this is deliberately NOT per-zone:
+	// that would make "applied" mean different things on different zones, and a
+	// zone with it off looks identical to one with it on until the restart that
+	// loses data.
+	//
+	// It exists because of how the journal failed in practice. When it broke on
+	// a live parent zone the symptom was not lost data -- it was that EVERY
+	// update was refused, and clearing that needed a code change, a rebuild and
+	// a redeploy. One config value is a better answer at 3am on another
+	// continent.
+	//
+	// Pointer, following imrengine's active:, so that ABSENT MEANS ON. A plain
+	// bool defaults to false, which would silently disable persistence for every
+	// existing config on upgrade -- the exact failure this subsystem exists to
+	// prevent.
+	//
+	// Off stops NEW deltas being recorded. An existing journal is still replayed
+	// on load: flipping the switch must not discard changes already recorded, or
+	// the escape hatch becomes a second way to lose data.
+	Active *bool `yaml:"active" mapstructure:"active"`
+}
+
+// JournalActive reports whether delta persistence is enabled. Absent config
+// means enabled.
+func JournalActive() bool {
+	confMu.RLock()
+	defer confMu.RUnlock()
+	return Conf.Journal.Active == nil || *Conf.Journal.Active
 }
 
 // KeystoreConf is the keystore: block. Today it carries only pre-load, but the

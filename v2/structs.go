@@ -144,17 +144,28 @@ type ZoneData struct {
 	// Never read directly — call zd.EffectiveOutboundSoaSerial(), which
 	// resolves the zone/global tiers.
 	OutboundSoaSerial string
-	FirstZoneLoad     bool // true until first zone data has been loaded
-	Verbose           bool
-	Debug             bool
-	IxfrChain         []Ixfr
-	PrimariesConf     []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
-	Upstreams         []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
-	Notify            []PeerConf // downstream secondaries that we notify (addr + key)
-	AllowNotify       []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
-	Downstreams       []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
-	DownstreamAuth    []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
-	Zonefile          string
+	// TransferSrc is the per-zone source address for OUTBOUND transfers, i.e.
+	// what the upstream's allow-transfer ACL sees. Never read directly — call
+	// zd.EffectiveTransferSrc(), which falls back to dnsengine.transfer_src.
+	TransferSrc []string
+	// TransferSrcTier records which tier TransferSrc was resolved FROM, and is
+	// set only when TransferSrc was populated by resolution rather than by
+	// configuration -- i.e. on the scratch zone an inbound AXFR is received
+	// into, which is handed an already-resolved list. Empty on a normal zone,
+	// where EffectiveTransferSrcWithSource derives the tier itself. Without it
+	// a globally-configured source is reported as coming from the zone.
+	TransferSrcTier string
+	FirstZoneLoad   bool // true until first zone data has been loaded
+	Verbose         bool
+	Debug           bool
+	IxfrChain       []Ixfr
+	PrimariesConf   []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
+	Upstreams       []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
+	Notify          []PeerConf // downstream secondaries that we notify (addr + key)
+	AllowNotify     []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
+	Downstreams     []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
+	DownstreamAuth  []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
+	Zonefile        string
 	// Template names the config template an API-provisioned zone was expanded
 	// from (zone add --template). Persisted in the dynamic config entry so a
 	// restart re-expands it; the update policy is deliberately NOT persisted —
@@ -223,6 +234,53 @@ type ZoneData struct {
 	// zone replacement): updateIxfrChainLocked clears the delta history
 	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked.
 	wsIxfrEpochReset bool
+	// wsPersistDelta marks the next publish as a real content change whose
+	// delta belongs in the ZoneDelta table (Phase 2). Only the applier sets
+	// it. Every other publish -- refresh, reload, signalSynth-only, and above
+	// all the replay of persisted deltas during load -- leaves it clear. A
+	// replay that re-persisted what it just replayed would double the stored
+	// history on every restart.
+	wsPersistDelta bool
+	// fileSerial is the SOA serial of the zone FILE as last read from or
+	// written to disk. It is NOT CurrentSerial: a zone that re-signs or
+	// republishes during load advances CurrentSerial well past what the file
+	// says, and the delta journal has to be anchored to the file, because the
+	// file is what the next load starts from. Guarded by zd.mu.
+	fileSerial uint32
+	// deltasReplayed records that the persisted deltas have already been
+	// applied on top of the zone file CURRENTLY loaded. Set by
+	// ReplayPersistedDeltas on success and cleared by
+	// applyRefreshReplacementLocked whenever the zone is re-read from file, so
+	// a genuine reload replays again while a repeated completion attempt for
+	// the same load does not. Guarded by zd.mu.
+	deltasReplayed bool
+	// fileDigest is the ZONEMD digest of the zone FILE as last read from or
+	// written to disk, the companion to fileSerial. The serial says which
+	// version the file claims to be; the digest says whether it is actually
+	// that version -- a file can be regenerated, restored or reformatted
+	// without the serial moving. Empty when the zone did not come from a file.
+	// Guarded by zd.mu.
+	fileDigest string
+	// fileStatPath, fileModTime and fileSize are the stat of the zone file as
+	// tdns last LOOKED at it -- the cheap gate in front of the digest, so a
+	// refresh of an untouched file does not parse and digest a zone to learn
+	// that nothing happened. In memory only and deliberately not persisted: a
+	// zero value means "not looked at in this process", which is exactly right
+	// for a first load, and a restart re-establishes them by parsing once.
+	//
+	// Unlike fileDigest, these are recorded whether or not the file was
+	// ADOPTED, because they answer a different question -- "have we already
+	// looked at this exact file?" rather than "which file is the zone
+	// serving?". Guarded by zd.mu.
+	fileStatPath string
+	fileModTime  time.Time
+	fileSize     int64
+	// wsPersistErr carries a failed delta write from publishWorkingSetLocked
+	// back to the applier. A publish whose delta could not be persisted is
+	// refused outright -- serving a change that is certain to vanish at the
+	// next restart is worse than not serving it -- and this is how the applier
+	// learns to report that rather than claim success.
+	wsPersistErr error
 	// ixfrChainMaxBytes bounds the retained IXFR delta history (estimated
 	// wire bytes). 0 => DefaultIxfrChainMaxBytes; negative => retention
 	// disabled (IXFR queries are answered with full transfers). From zone
@@ -328,6 +386,14 @@ type ZoneConf struct {
 	// non-empty string counts as set, so an explicit "keep" beats a template
 	// "persist").
 	OutboundSoaSerial string `yaml:"outbound_soa_serial,omitempty" mapstructure:"outbound_soa_serial" validate:"omitempty,oneof=keep unixtime persist"`
+	// TransferSrc is the per-zone override of the server-global
+	// dnsengine.transfer_src: the local address to bind when dialling this
+	// zone's upstreams, which is what the primary's allow-transfer ACL sees.
+	// Empty (the default) inherits the global. Set it on a TEMPLATE to give a
+	// whole class of zones one source address -- the same granularity argument
+	// as OutboundSoaSerial above, and the reason a dynamically-provisioned
+	// secondary can get a source address without the API having to carry one.
+	TransferSrc []string `yaml:"transfer-src,omitempty" mapstructure:"transfer-src"`
 	// EffectiveDnssecPolicy / DnssecPolicyOverridden / DnssecPolicyConfigBase
 	// are display-only fields populated by the list-zones handler: the policy
 	// actually bound to the running zone; whether it came from a dynamic
@@ -675,6 +741,28 @@ type Ixfr struct {
 type OwnerData struct {
 	Name    string
 	RRtypes *RRTypeStore
+
+	// NSEC holds this owner's denial-of-existence record and its signature,
+	// as a property rather than as an RRset inside RRtypes.
+	//
+	// It is derived data: the signer computes it from the shape of the zone,
+	// and nothing outside the signer may author it. RRSIGs are already held
+	// this way -- as a field on the RRset they cover -- and the placement is
+	// what keeps two whole classes of bug unrepresentable:
+	//
+	//   - a name whose last real RRset is deleted has nothing left in RRtypes,
+	//     so it stops existing, instead of lingering for ever with only its own
+	//     NSEC to keep it alive and the chain asserting that it exists;
+	//
+	//   - the delta journal flattens rrset.RRs from the owner's RRtypes, so a
+	//     regenerated NSEC cannot be recorded there as though an operator had
+	//     written it, and cannot then be replayed or reported as a conflict
+	//     against a zone file.
+	//
+	// It is emitted to the wire like any other record: zone file, AXFR, IXFR
+	// and the ZONEMD digest all include it. See
+	// docs/2026-08-22-nsec-chain-correctness.md §3.
+	NSEC core.RRset
 }
 
 type ChildDelegationData struct {
@@ -800,10 +888,13 @@ type ZoneRefresher struct {
 	// "inherit the server-global setting" and is a valid, self-consistent
 	// value, so it is always copied — no "only if non-empty" guard.
 	OutboundSoaSerial string
-	MultiSigner       string
-	Force             bool // force refresh, ignoring SOA serial
-	Wait              bool // wait for refresh to complete before responding
-	Response          chan RefresherResponse
+	// TransferSrc carries the per-zone outbound-transfer source to the
+	// RefreshEngine (copied to zd.TransferSrc on merge). Empty inherits.
+	TransferSrc []string
+	MultiSigner string
+	Force       bool // force refresh, ignoring SOA serial
+	Wait        bool // wait for refresh to complete before responding
+	Response    chan RefresherResponse
 }
 
 type RefresherResponse struct {
@@ -975,10 +1066,10 @@ type PrivateKeyCache struct {
 	CS            crypto.Signer `json:"-"`
 	RR            dns.RR        `json:"-"`
 	KeyType       uint16
-	Algorithm  uint8
-	KeyId      uint16
-	KeyRR      dns.KEY
-	DnskeyRR   dns.DNSKEY
+	Algorithm     uint8
+	KeyId         uint16
+	KeyRR         dns.KEY
+	DnskeyRR      dns.DNSKEY
 }
 
 type Sig0ActiveKeys struct {
@@ -1005,11 +1096,55 @@ type KeyDB struct {
 	// reload, so it is stored behind an atomic.Pointer for lock-free reads and a
 	// race-free swap. Access via AuthOption()/SetOptions(), never directly.
 	options atomic.Pointer[map[AuthOption]string]
-	// OutboundSoaSerial is the resolved mode for outbound SOA serials:
+	// outboundSoaSerial is the resolved mode for outbound SOA serials:
 	// OutboundSoaSerialKeep / OutboundSoaSerialUnixtime / OutboundSoaSerialPersist.
 	// Sourced from DnsEngineConf.OutboundSoaSerial at parse, defaulted to
 	// OutboundSoaSerialKeep if unset.
-	OutboundSoaSerial string
+	//
+	// Behind an atomic.Pointer for the same reason as options above: written
+	// wholesale by config reload, read from zone-serving goroutines. Access via
+	// OutboundSoaSerialMode()/SetOutboundSoaSerial(), never directly.
+	outboundSoaSerial atomic.Pointer[string]
+	// transferSrc is the server-global source address list for outbound zone
+	// transfers (dnsengine.transfer_src). Per-zone ZoneData.TransferSrc wins;
+	// see zd.EffectiveTransferSrc(). Same reload-vs-read exposure as the two
+	// above; access via TransferSrcList()/SetTransferSrc().
+	transferSrc atomic.Pointer[[]string]
+}
+
+// SetOutboundSoaSerial replaces the server-global outbound serial mode. Called
+// at parse and on every config reload.
+func (kdb *KeyDB) SetOutboundSoaSerial(mode string) {
+	m := mode
+	kdb.outboundSoaSerial.Store(&m)
+}
+
+// OutboundSoaSerialMode returns the server-global outbound serial mode, or ""
+// if none has been set.
+func (kdb *KeyDB) OutboundSoaSerialMode() string {
+	if m := kdb.outboundSoaSerial.Load(); m != nil {
+		return *m
+	}
+	return ""
+}
+
+// SetTransferSrc replaces the server-global outbound-transfer source list.
+// Stores a copy, so a caller that later mutates the slice it passed cannot
+// change what serving goroutines observe.
+func (kdb *KeyDB) SetTransferSrc(srcs []string) {
+	cp := append([]string(nil), srcs...)
+	kdb.transferSrc.Store(&cp)
+}
+
+// TransferSrcList returns the server-global outbound-transfer source list.
+// Returns a copy: the caller receives a stable snapshot that a concurrent
+// reload cannot mutate underneath it.
+func (kdb *KeyDB) TransferSrcList() []string {
+	s := kdb.transferSrc.Load()
+	if s == nil || len(*s) == 0 {
+		return nil
+	}
+	return append([]string(nil), (*s)...)
 }
 
 // Lock and Unlock expose the mutex for code that moves to

@@ -1,0 +1,5 @@
+apiservers:
+   - name:        tdns-auth
+     baseurl:     https://127.0.0.1:8400/api/v1
+     apikey:      ixfrtest-secret
+     authmethod:  X-API-Key

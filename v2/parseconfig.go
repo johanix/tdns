@@ -377,6 +377,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return err
 	}
 
+	// transfer_src: same reasoning as dynamiczones above -- the decoder takes
+	// any string, and a bad entry here fails silently at transfer time rather
+	// than loudly at load.
+	if err := ValidateAllTransferSrc(conf); err != nil {
+		return err
+	}
+
 	if len(md.Unused) > 0 {
 		// Split the unused keys into two buckets: keys that match a known
 		// DEPRECATED/RENAMED config shape (the config lags the code — emit
@@ -507,6 +514,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 			// responder kept the stale startup map. SetOptions swaps the map
 			// atomically, so the per-query lock-free readers are race-free.
 			conf.Internal.KeyDB.SetOptions(conf.DnsEngine.Options)
+			conf.Internal.KeyDB.SetTransferSrc(conf.DnsEngine.TransferSrc)
 			if err := applyOutboundSoaSerial(conf.Internal.KeyDB, conf.DnsEngine.OutboundSoaSerial); err != nil {
 				return err
 			}
@@ -595,6 +603,7 @@ func (conf *Config) InitializeKeyDB() error {
 	}
 	conf.Internal.KeyDB = kdb
 
+	kdb.SetTransferSrc(conf.DnsEngine.TransferSrc)
 	if err := applyOutboundSoaSerial(kdb, conf.DnsEngine.OutboundSoaSerial); err != nil {
 		return err
 	}
@@ -614,7 +623,7 @@ func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
 	if mode == "" {
 		mode = OutboundSoaSerialKeep
 	}
-	kdb.OutboundSoaSerial = mode
+	kdb.SetOutboundSoaSerial(mode)
 
 	// Create the table unconditionally. The mode is now a PER-ZONE setting that
 	// merely defaults to this global one (zd.EffectiveOutboundSoaSerial), so any
@@ -930,6 +939,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zd.mu.Lock()
 		options, zconf.OutboundSoaSerial = zd.applyOptionNormalization(zonetype, options, zconf.OutboundSoaSerial)
 		zd.mu.Unlock()
+		// Validated per zone as well as globally: a per-zone override is the
+		// more likely place for a typo, and it silently shadows a correct
+		// global list rather than falling back to it.
+		if err := ValidateTransferSrc(fmt.Sprintf("zone %s: transfer-src", zname), zconf.TransferSrc); err != nil {
+			return nil, nil, err
+		}
+		zd.TransferSrc = zconf.TransferSrc
 
 		var outopts []string
 		for o, val := range options {
@@ -1339,6 +1355,48 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 	// than letting it silently misbehave.
 	if options[OptAllowChildUpdates] && zconf.DelegationBackend == "" {
 		return UpdatePolicy{}, fmt.Errorf("allow-child-updates requires delegationbackend to be configured (e.g. 'delegationbackend: direct')")
+	}
+
+	// Conflict resolution: exactly one of the two is always set on the zone.
+	//
+	// Setting both is a contradiction, not a preference order, so it is a hard
+	// config error rather than a silent pick.
+	//
+	// Otherwise db-wins is MATERIALISED here rather than left to be inferred at
+	// each decision point. A default that lives in the code as "if neither is
+	// set, assume db-wins" has to be remembered everywhere it is asked, and the
+	// day one site forgets, a zone quietly resolves conflicts the other way.
+	// Setting it once means the merge faces a question with two answers rather
+	// than three, and `zone status` reports what the zone actually runs under
+	// instead of a blank the operator has to interpret.
+	if options[OptOnConflictDBWins] && options[OptOnConflictZonefileWins] {
+		return UpdatePolicy{}, fmt.Errorf(
+			"zone options on-conflict-db-wins and on-conflict-zonefile-wins are mutually exclusive;" +
+				" set one or neither (neither means on-conflict-db-wins)")
+	}
+	if !options[OptOnConflictZonefileWins] {
+		options[OptOnConflictDBWins] = true
+	}
+
+	// With the conflict options settled, the backend can be checked against
+	// them. Order matters: rule (2) below reads OptOnConflictDBWins.
+	// Only when the backend can actually run. Without allow-child-updates
+	// nothing ever reaches the backend, so a combination that "cannot work" has
+	// no effect to speak of -- and failing here would mark the zone broken and
+	// refuse to load it over a setting that does nothing.
+	//
+	// delegationBackendUnusedWarning is the right response to that case, and it
+	// only gets the chance to say so if we do not error first.
+	if options[OptAllowChildUpdates] {
+		if err := validateDelegationBackendCombination(zconf, options); err != nil {
+			return UpdatePolicy{}, err
+		}
+	}
+	if msg := delegationBackendUnusedWarning(zconf, options); msg != "" {
+		lgConfig.Warn(msg, "zone", zconf.Name)
+	}
+	if msg := delegationBackendContract(zconf, options); msg != "" {
+		lgConfig.Info(msg, "zone", zconf.Name, "backend", zconf.DelegationBackend)
 	}
 
 	switch zconf.UpdatePolicy.Zone.Type {

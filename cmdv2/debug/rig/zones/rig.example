@@ -1,0 +1,8 @@
+; The IXFR/journal rig zone. Deliberately tiny, and UNSIGNED: the zone runs with
+; inline-signing, so tdns-auth signs what it serves and rewrites this file only
+; when asked (write / sync / freeze).
+rig.example.	300	IN	SOA	ns.rig.example. hostmaster.rig.example. 1 1800 900 604800 300
+rig.example.	300	IN	NS	ns.rig.example.
+ns.rig.example.	300	IN	A	127.0.0.1
+static.rig.example.	300	IN	TXT	"never changes"
+www.rig.example.	300	IN	A	192.0.2.1
