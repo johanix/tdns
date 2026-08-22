@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -127,5 +128,36 @@ func TestZoneFileWriterEmitsTheNsecProperty(t *testing.T) {
 	}
 	if !strings.Contains(f, "alpha.prop.example.") {
 		t.Fatalf("the written zone file lost alpha:\n%s", f)
+	}
+}
+
+// An NSEC at a wildcard owner describes that owner. It must not be expanded to
+// a queried name the way an address record is: doing so invents a record
+// asserting what exists either side of a name that has no NSEC at all.
+func TestNsecIsNotWildcardExpanded(t *testing.T) {
+	od := &OwnerData{Name: "*.prop.example.", RRtypes: NewRRTypeStore()}
+	rr, err := dns.NewRR("*.prop.example. 300 IN NSEC ns.prop.example. A RRSIG NSEC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	od.NSEC = core.RRset{Name: "*.prop.example.", RRtype: dns.TypeNSEC, RRs: []dns.RR{rr}}
+
+	// Queried directly at the wildcard owner: answered.
+	if _, ok := ownerRRsetForQuery(od, dns.TypeNSEC, false); !ok {
+		t.Error("an NSEC queried at its own (wildcard) owner was not answered")
+	}
+	// Reached by wildcard expansion for some other name: not answered, so the
+	// ordinary wildcard-NODATA path handles it.
+	if _, ok := ownerRRsetForQuery(od, dns.TypeNSEC, true); ok {
+		t.Error("the wildcard's NSEC was expanded to a queried name")
+	}
+	// Other types are still expanded as usual.
+	arr, err := dns.NewRR("*.prop.example. 300 IN A 10.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	od.RRtypes.Set(dns.TypeA, core.RRset{Name: "*.prop.example.", RRtype: dns.TypeA, RRs: []dns.RR{arr}})
+	if _, ok := ownerRRsetForQuery(od, dns.TypeA, true); !ok {
+		t.Error("a wildcard A record is no longer expanded")
 	}
 }

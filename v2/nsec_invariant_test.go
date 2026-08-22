@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -184,11 +185,24 @@ func TestRestitchUnderLockNoSelfDeadlock(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := signingTestZone(t, kdb)
 
+	// A staged change, or restitchNsecLocked returns at its "nothing changed"
+	// guard and the test proves nothing: the deadlock is in the signing path,
+	// which is only reached when there is something to re-sign.
+	rr, err := dns.NewRR("newname.inv.example. 3600 IN A 10.1.2.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	done := make(chan struct{})
 	go func() {
 		zd.mu.Lock()
 		defer zd.mu.Unlock()
 		zd.ensureWorkingSet()
+		zd.stageRRsetLocked("newname.inv.example.",
+			core.RRset{Name: "newname.inv.example.", RRtype: dns.TypeA, RRs: []dns.RR{rr}})
+		if changed := changedChainNames(zd.snapshot.Load(), zd.workingSet); len(changed) == 0 {
+			panic("test setup: no staged change, so the signing path is never reached")
+		}
 		zd.restitchNsecLocked()
 		close(done)
 	}()
@@ -198,5 +212,17 @@ func TestRestitchUnderLockNoSelfDeadlock(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("restitchNsecLocked deadlocked while zd.mu was held" +
 			" (re-entrant zd.mu via EnsureActiveDnssecKeys -> PublishDnskeyRRs)")
+	}
+
+	// And it got far enough to sign: an unsigned or missing NSEC here would
+	// mean the run completed without exercising the path the test is about.
+	zd.mu.Lock()
+	od := zd.stagedOwner("newname.inv.example.")
+	zd.mu.Unlock()
+	if od == nil || len(od.NSEC.RRs) == 0 {
+		t.Fatal("the restitch did not give the new name an NSEC, so it never reached signing")
+	}
+	if len(od.NSEC.RRSIGs) == 0 {
+		t.Fatal("the restitch left the new name's NSEC unsigned")
 	}
 }

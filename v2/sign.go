@@ -717,7 +717,9 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 		// which is not visible here because this server synthesises its own
 		// denial and never consults the chain.
 		if cur := zd.stagedOwner(name); cur != nil && len(cur.NSEC.RRs) > 0 {
-			nsec := cur.NSEC
+			// A copy: signing clamps TTLs in place, and these records are
+			// shared with the snapshot currently being served.
+			nsec := cloneRRset(cur.NSEC)
 			nsec.RRSIGs = nil
 			resigned, err := zd.SignRRset(&nsec, zd.ZoneName, dak, true, clamp)
 			if err != nil {
@@ -937,7 +939,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		// The NSEC property, for the same reason as in ResignZone: it is not
 		// an RRtypes entry, so nothing above signs it.
 		if cur := zd.stagedOwner(name); cur != nil && len(cur.NSEC.RRs) > 0 {
-			nsec := cur.NSEC
+			nsec := cloneRRset(cur.NSEC)
 			nsec.RRSIGs = nil
 			nsec, _ = MaybeSignRRset(nsec, zd.ZoneName)
 			zd.stageNsecLocked(name, nsec)
@@ -1071,6 +1073,13 @@ func (zd *ZoneData) nsecRRForLocked(name, next string, ttl uint32, dak *DnssecKe
 		}
 		if rrt == 0 {
 			lgSigner.Warn("NSEC chain: unexpected zero rrtype", "name", name, "rrtype", rrt)
+			continue
+		}
+		// Deleting the last RR of an RRset can leave the type entry behind
+		// holding nothing. The bitmap must describe the records that exist,
+		// not the entries that remain -- the same distinction ownerHasData
+		// draws for the name as a whole.
+		if len(owner.RRtypes.GetOnlyRRSet(rrt).RRs) == 0 {
 			continue
 		}
 		tmap = append(tmap, int(rrt))

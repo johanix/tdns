@@ -145,11 +145,19 @@ var ErrZoneUnsigned = fmt.Errorf("zone must be signed but has no stored signatur
 // would look as though it had no NSEC and the query would fall through to a
 // synthesised denial -- claiming the record is absent while the zone, the
 // zone file and every transfer of it say otherwise.
-func ownerRRsetForQuery(od *OwnerData, qtype uint16) (core.RRset, bool) {
+func ownerRRsetForQuery(od *OwnerData, qtype uint16, wildcardExpanded bool) (core.RRset, bool) {
 	if od == nil {
 		return core.RRset{}, false
 	}
 	if qtype == dns.TypeNSEC {
+		// Never through a wildcard. An NSEC at a wildcard owner describes that
+		// owner and is not expanded to the queried name (RFC 4035): answering
+		// with one would invent a record asserting what exists either side of a
+		// name that has no NSEC at all. Falling through leaves the ordinary
+		// wildcard-NODATA path to answer.
+		if wildcardExpanded {
+			return core.RRset{}, false
+		}
 		if len(od.NSEC.RRs) > 0 {
 			return od.NSEC, true
 		}
@@ -938,7 +946,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	lgHandler.Debug("checking for exact match", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName)
 
 	if tdnsSpecialTypes[qtype] || standardDNSTypes[qtype] {
-		if rrset, ok := ownerRRsetForQuery(owner, qtype); ok && len(rrset.RRs) > 0 {
+		if rrset, ok := ownerRRsetForQuery(owner, qtype, qname != origqname); ok && len(rrset.RRs) > 0 {
 			if qtype == dns.TypeSOA {
 				rrset = zd.soaForResponseFrom(snap, apex)
 			}

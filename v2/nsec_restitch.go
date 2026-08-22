@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"sort"
+	"time"
 
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -142,6 +143,22 @@ func (zd *ZoneData) restitchNsecLocked() {
 		}
 	}
 
+	// The same clamp the other signing paths resolve. Signing an NSEC with a
+	// nil clamp would leave these records outside the TTL ceiling the rest of
+	// the zone is held to, so the chain would drift above the policy after
+	// every update that touched it.
+	var clamp *ClampParams
+	if zd.DnssecPolicy != nil {
+		var cerr error
+		clamp, cerr = ClampParamsForZone(zd.KeyDB, zd.ZoneName, zd.DnssecPolicy, time.Now())
+		if cerr != nil {
+			lgSigner.Error("publish: cannot resolve clamp parameters to restitch the NSEC"+
+				" chain; refusing rather than signing outside the policy",
+				"zone", zd.ZoneName, "err", cerr)
+			return
+		}
+	}
+
 	ttl := zd.nsecTTLLocked()
 	rewritten := 0
 	for name := range affected {
@@ -159,7 +176,7 @@ func (zd *ZoneData) restitchNsecLocked() {
 			continue
 		}
 		rs := core.RRset{RRs: []dns.RR{nsecrr}}
-		if _, err := zd.SignRRset(&rs, zd.ZoneName, dak, true, nil); err != nil {
+		if _, err := zd.SignRRset(&rs, zd.ZoneName, dak, true, clamp); err != nil {
 			// An unsigned NSEC is worse than a stale one: a validator rejects
 			// the proof outright rather than merely disagreeing with it.
 			lgSigner.Error("publish: could not sign the NSEC record; leaving the"+
@@ -193,16 +210,10 @@ func chainPredecessor(chain []string, target string) (string, bool) {
 	if i == 0 {
 		return chain[len(chain)-1], true
 	}
-	pred := chain[i-1]
-	if pred == target {
-		// target is in the chain at i-1 only if the search overshot; guard
-		// against returning the name as its own predecessor.
-		if i-2 < 0 {
-			return chain[len(chain)-1], true
-		}
-		return chain[i-2], true
-	}
-	return pred, true
+	// chain[i-1] is strictly less than target by construction -- the search
+	// returns the FIRST index that is not less than target -- so it can never
+	// be target itself.
+	return chain[i-1], true
 }
 
 // withoutDerivedRecords drops the RRsets a journal must not carry.

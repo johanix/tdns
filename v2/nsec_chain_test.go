@@ -60,39 +60,70 @@ func TestWorkingOwnerNamesAreInCanonicalOrder(t *testing.T) {
 	}
 }
 
-// The chain built from that order must be a single cycle covering every name
-// exactly once and returning to the apex -- which is what a validator checks
-// and what a lexicographic order silently breaks.
+// The chain the GENERATOR produces must be a single cycle covering every
+// authoritative name once and closing on the apex.
+//
+// Built from the generated NSEC records, not from a sorted slice: deriving the
+// successor relation from the same ordering the test asserts would only prove
+// that sorting is self-consistent.
 func TestNsecChainIsACanonicalCycle(t *testing.T) {
-	names := []string{
-		"clean.example.",
-		"ns.clean.example.",
-		"alpha.clean.example.",
-		"deep.sub.clean.example.",
-		"sub.clean.example.",
+	const z = `cycle.example.	300	IN	SOA	ns.cycle.example. hostmaster.cycle.example. 1 1800 900 604800 300
+cycle.example.	300	IN	NS	ns.cycle.example.
+ns.cycle.example.	300	IN	A	127.0.0.1
+alpha.cycle.example.	300	IN	A	10.0.0.1
+deep.sub.cycle.example.	300	IN	A	10.0.0.2
+`
+	zd := testZone(t, "cycle.example.", z)
+	zd.ensureWorkingSet()
+	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true}
+	if err := zd.GenerateNsecChainWithDak(&DnssecKeys{}); err != nil {
+		t.Fatalf("GenerateNsecChainWithDak: %v", err)
 	}
-	sort.Slice(names, func(i, j int) bool { return canonicalOwnerLess(names[i], names[j]) })
 
-	// Walk the chain the generator would build and verify it returns to the
-	// start after exactly len(names) hops, visiting each name once.
 	next := map[string]string{}
-	for i, n := range names {
-		next[n] = names[(i+1)%len(names)]
+	for _, name := range zd.workingOwnerNamesLocked() {
+		od := zd.stagedOwner(name)
+		if od == nil || len(od.NSEC.RRs) == 0 {
+			continue
+		}
+		nsec, ok := od.NSEC.RRs[0].(*dns.NSEC)
+		if !ok {
+			t.Fatalf("%s: NSEC property holds a %T", name, od.NSEC.RRs[0])
+		}
+		next[name] = nsec.NextDomain
+	}
+	if len(next) == 0 {
+		t.Fatal("the generator produced no chain at all")
 	}
 
+	apex := "cycle.example."
+	if _, ok := next[apex]; !ok {
+		t.Fatal("the apex has no NSEC")
+	}
 	seen := map[string]bool{}
-	cur := names[0]
-	for range names {
+	cur := apex
+	for range next {
 		if seen[cur] {
-			t.Fatalf("chain revisits %q before closing: %v", cur, names)
+			t.Fatalf("the chain revisits %q before closing", cur)
 		}
 		seen[cur] = true
-		cur = next[cur]
+		nxt, ok := next[cur]
+		if !ok {
+			t.Fatalf("%q points at %q, which has no NSEC", cur, nxt)
+		}
+		if nxt != apex && !canonicalOwnerLess(cur, nxt) {
+			t.Errorf("%q -> %q goes backwards in canonical order", cur, nxt)
+		}
+		cur = nxt
 	}
-	if cur != names[0] {
-		t.Fatalf("chain does not close on the first name: ended at %q, want %q", cur, names[0])
+	if cur != apex {
+		t.Fatalf("the chain does not close on the apex; ended at %q", cur)
 	}
-	if names[0] != dns.Fqdn("clean.example.") {
-		t.Fatalf("the apex must sort first in canonical order; got %q", names[0])
+	if len(seen) != len(next) {
+		t.Fatalf("the chain covers %d of %d names -- it is not one cycle", len(seen), len(next))
+	}
+	// The apex sorts first in canonical order; lexicographically it would not.
+	if first := next[apex]; first != "alpha.cycle.example." {
+		t.Fatalf("apex points at %q, want alpha.cycle.example.", first)
 	}
 }
