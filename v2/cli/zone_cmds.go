@@ -202,13 +202,6 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 		Use:   "nsec",
 		Short: "Prefix command, not usable by itself",
 	}
-	nsecGenerate := &cobra.Command{
-		Use:   "generate",
-		Short: "Generate NSEC records for a zone",
-		Run: func(cmd *cobra.Command, args []string) {
-			runZoneSimpleCmd(role, "generate-nsec")
-		},
-	}
 	nsecShow := &cobra.Command{
 		Use:   "show",
 		Short: "Show the NSEC chain for a zone",
@@ -216,7 +209,7 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 			runZoneShowNsec(role)
 		},
 	}
-	nsec.AddCommand(nsecGenerate, nsecShow)
+	nsec.AddCommand(nsecShow)
 
 	// Dynamic-zones management (add/delete/modify/list-dynamic). No --store
 	// flag: dynamic zones are map-only. The --tsig-* flags are accepted now but
@@ -327,7 +320,7 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 }
 
 // runZoneSimpleCmd runs a ZonePost command after PrepArgs("childzone")
-// and only reports resp.Msg on success. Used by sign, freeze, thaw, generate-nsec.
+// and only reports resp.Msg on success. Used by sign, freeze and thaw.
 func runZoneSimpleCmd(role, command string) {
 	PrepArgs("childzone")
 

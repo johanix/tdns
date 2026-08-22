@@ -254,6 +254,27 @@ type ZoneData struct {
 	// a genuine reload replays again while a repeated completion attempt for
 	// the same load does not. Guarded by zd.mu.
 	deltasReplayed bool
+	// fileDigest is the ZONEMD digest of the zone FILE as last read from or
+	// written to disk, the companion to fileSerial. The serial says which
+	// version the file claims to be; the digest says whether it is actually
+	// that version -- a file can be regenerated, restored or reformatted
+	// without the serial moving. Empty when the zone did not come from a file.
+	// Guarded by zd.mu.
+	fileDigest string
+	// fileStatPath, fileModTime and fileSize are the stat of the zone file as
+	// tdns last LOOKED at it -- the cheap gate in front of the digest, so a
+	// refresh of an untouched file does not parse and digest a zone to learn
+	// that nothing happened. In memory only and deliberately not persisted: a
+	// zero value means "not looked at in this process", which is exactly right
+	// for a first load, and a restart re-establishes them by parsing once.
+	//
+	// Unlike fileDigest, these are recorded whether or not the file was
+	// ADOPTED, because they answer a different question -- "have we already
+	// looked at this exact file?" rather than "which file is the zone
+	// serving?". Guarded by zd.mu.
+	fileStatPath string
+	fileModTime  time.Time
+	fileSize     int64
 	// wsPersistErr carries a failed delta write from publishWorkingSetLocked
 	// back to the applier. A publish whose delta could not be persisted is
 	// refused outright -- serving a change that is certain to vanish at the
@@ -720,6 +741,28 @@ type Ixfr struct {
 type OwnerData struct {
 	Name    string
 	RRtypes *RRTypeStore
+
+	// NSEC holds this owner's denial-of-existence record and its signature,
+	// as a property rather than as an RRset inside RRtypes.
+	//
+	// It is derived data: the signer computes it from the shape of the zone,
+	// and nothing outside the signer may author it. RRSIGs are already held
+	// this way -- as a field on the RRset they cover -- and the placement is
+	// what keeps two whole classes of bug unrepresentable:
+	//
+	//   - a name whose last real RRset is deleted has nothing left in RRtypes,
+	//     so it stops existing, instead of lingering for ever with only its own
+	//     NSEC to keep it alive and the chain asserting that it exists;
+	//
+	//   - the delta journal flattens rrset.RRs from the owner's RRtypes, so a
+	//     regenerated NSEC cannot be recorded there as though an operator had
+	//     written it, and cannot then be replayed or reported as a conflict
+	//     against a zone file.
+	//
+	// It is emitted to the wire like any other record: zone file, AXFR, IXFR
+	// and the ZONEMD digest all include it. See
+	// docs/2026-08-22-nsec-chain-correctness.md §3.
+	NSEC core.RRset
 }
 
 type ChildDelegationData struct {

@@ -453,3 +453,93 @@ func (kdb *KeyDB) LastZoneDeltaSerial(zone string) (uint32, bool, error) {
 	}
 	return uint32(toSerial.Int64), true, nil
 }
+
+// ReplaceZoneJournal atomically swaps a zone's whole journal for a single
+// delta. Used by the merge: after reconciling with a replaced zone file, the
+// old chain describes a file that no longer exists, and the one delta that
+// matters is "the difference between the file in hand and what is now served".
+//
+// One transaction, because the intermediate state -- old chain gone, new delta
+// not yet written -- is a zone with no record of its unwritten changes at all.
+// A crash there would lose them.
+// throughID bounds the delete to the rows the caller actually observed. The
+// replacement rows are derived from a snapshot taken at some earlier instant,
+// so a delta persisted after that snapshot is represented nowhere in them --
+// and an unbounded delete would erase it, leaving a change recorded in neither
+// the file nor the journal. Rows above throughID are left alone; at worst a
+// concurrent change ends up described twice, which re-applies idempotently,
+// rather than once too few, which loses it.
+func (kdb *KeyDB) ReplaceZoneJournal(zone string, fromSerial, toSerial uint32,
+	removed, added []core.RRset, throughID int64) error {
+
+	if kdb == nil || kdb.DB == nil {
+		return fmt.Errorf("ReplaceZoneJournal: no database")
+	}
+	// Normalise before the errors below quote it, not after.
+	zone = dns.Fqdn(zone)
+	if !serialNewer(toSerial, fromSerial) {
+		return fmt.Errorf("ReplaceZoneJournal: zone %s: %d -> %d does not advance the serial",
+			zone, fromSerial, toSerial)
+	}
+
+	rows := make([]ZoneDeltaRR, 0, len(removed)+len(added))
+	for _, rrset := range removed {
+		for _, rr := range rrset.RRs {
+			rows = append(rows, ZoneDeltaRR{Action: ZoneDeltaDel, RR: rr.String()})
+		}
+	}
+	for _, rrset := range added {
+		for _, rr := range rrset.RRs {
+			rows = append(rows, ZoneDeltaRR{Action: ZoneDeltaAdd, RR: rr.String()})
+		}
+	}
+
+	// Refuse rather than erase. The DELETE below clears the whole chain, so
+	// replacing it with nothing would leave a zone whose unwritten changes are
+	// recorded in neither the file nor the journal -- and return nil, so the
+	// caller books it as success and the next restart loses them silently.
+	//
+	// This is reachable with non-empty removed/added whose RRsets all hold no
+	// RRs, which the caller's len(removed)==0 && len(added)==0 test does not
+	// catch because it counts RRsets rather than records. Clearing the journal
+	// on purpose is what DeleteZoneDeltas is for.
+	if len(rows) == 0 {
+		return fmt.Errorf("ReplaceZoneJournal: zone %s: refusing to replace the journal with an"+
+			" empty delta (%d -> %d); use DeleteZoneDeltas to clear it deliberately",
+			zone, fromSerial, toSerial)
+	}
+
+	tx, err := kdb.Begin("ReplaceZoneJournal")
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+
+	if throughID > 0 {
+		if _, err := tx.Exec(`DELETE FROM ZoneDelta WHERE zone=? AND id<=?`, zone, throughID); err != nil {
+			return fmt.Errorf("ReplaceZoneJournal: clearing the old chain: %v", err)
+		}
+	} else if _, err := tx.Exec(`DELETE FROM ZoneDelta WHERE zone=?`, zone); err != nil {
+		return fmt.Errorf("ReplaceZoneJournal: clearing the old chain: %v", err)
+	}
+
+	const insertSql = `
+INSERT INTO ZoneDelta (zone, fromserial, toserial, seq, action, rr) VALUES (?, ?, ?, ?, ?, ?)`
+	for i, row := range rows {
+		if _, err := tx.Exec(insertSql, zone, fromSerial, toSerial, i, row.Action, row.RR); err != nil {
+			return fmt.Errorf("ReplaceZoneJournal: zone %s serial %d->%d: %v",
+				zone, fromSerial, toSerial, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("ReplaceZoneJournal: commit: %v", err)
+	}
+	committed = true
+	return nil
+}

@@ -153,24 +153,39 @@ Adds do not conflict. An add at an owner/type the new file also populates
 simply unions, and a `replacerrset` carries its own removes, so genuine
 replacements are caught by the rule above.
 
-### 5.2 The mirror case
+### 5.2 The mirror case does not exist (corrected)
 
-There is a second, equally detectable contest with no record to point at:
+This section previously claimed a second, symmetric contest — *the
+journal adds R and the new file lacks R, so the operator deleted it*.
+**That case does not exist**, and implementing it would have flagged
+every ordinary journal entry as a conflict.
 
-> The journal **adds** R, and the new file does not contain R.
+A journal ADD implies the **old** file lacked that record: the delta was
+computed as the difference from that file, so anything it adds was absent
+there. Therefore:
 
-The operator either deleted R or is working from a file that predates it.
-Replaying re-adds it, so their deletion is silently undone. Same conflict,
-same resolution, but what lost is an *absence*, not a record. It must be
-reported, or the artefact in §6 would cover only the half of the
-conflicts that happen to be expressible as records.
+- the new file also lacks it → it agrees with the old file, and the
+  operator removed nothing;
+- the new file has it → the operator added the same record
+  independently, which is agreement.
+
+Neither is a conflict and neither needs resolving. The consequence is
+that §5.1 is the whole rule, every inverse is an `ADD`, and the artefact
+in §6 never contains a `DEL`.
+
+**One conflict does stay invisible**, and no care in the implementation
+would surface it: an operator who regenerates the file from the *live
+zone* while deliberately omitting a record the journal added. That file
+is indistinguishable from one that simply predates the addition, and
+telling them apart needs the old file's contents, which is not something
+we store. Named here rather than papered over.
 
 ### 5.3 Summary
 
 | Situation | Merged result | Reported |
 |---|---|---|
 | journal deletes R, file has R | R absent | yes |
-| journal adds R, file lacks R | R present | yes |
+| journal adds R, file lacks R | R present | no — the old file lacked it too (§5.2) |
 | journal adds R, file has R | R present | no — agreement |
 | file changed something the journal never touches | file's version | no — uncontested |
 | journal touches something the file never had | journal's version | no — uncontested |
@@ -194,7 +209,11 @@ undo the merge's decisions in favour of your zone file*:
 | Conflict | Instruction |
 |---|---|
 | journal deleted R, your file had R | `ADD R` |
-| journal added R, your file lacked R | `DEL R` |
+
+There is only one row, for the reason given in §5.2, so an artefact
+consists entirely of `ADD` lines. The format still carries `DEL` — it is
+shared with `journal purge` and `journal list --instructions`, which do
+emit both.
 
 So an operator who disagrees with the merge inspects it and feeds it
 straight back through `tdns-cli auth zone update`. The descriptive
@@ -276,6 +295,12 @@ holds `…03`.
 whether the file changed regardless of who asked; two behaviours for one
 situation is how this class of bug returns. A crash-restart with content
 in the journal must apply it — that is the entire point of the journal.
+
+Stages 1–3 wired only the startup path, and the sentence above stayed
+untrue until Stage 4 (§13, #362): reload went through the serial-gated
+refresh instead, which reached neither the digest nor the merge. The
+class of bug returned exactly as predicted, in both of the directions a
+serial comparison is wrong in.
 
 The per-zone option:
 
@@ -452,7 +477,7 @@ format with it — writer, parser, `writeInstructionFile`, and the
 lines. So `.rejected` is now "compose different comment lines and call
 the existing writer", and Stage 2 shrinks accordingly.
 
-### Stages 1–3 — a sibling branch off #348
+### Stages 1–3 — DONE, on `feature/zonefile-journal-reconciliation`
 
 `feature/zonefile-journal-reconciliation`, cut from
 `feature/api-zone-updates-phase2` and initially targeting it, so GitHub
@@ -465,24 +490,99 @@ reconciliation to unrelated DSYNC work. A sibling keeps the review depth
 where it is; the one shared file at risk of collision with #349 is
 `guide/zone-updates.md`.
 
-| Stage | Content | ~LOC (revised after Stage 0) |
-|---|---|---|
-| 1 | ZONEMD + `ZoneFileState` + detection only; still refuses on mismatch, but with a precise verdict and no false positives from formatting | 450 |
-| 2 | merge, re-anchor, `.rejected`, serial floor | ~800 (was 1100; the instruction format shipped in Stage 0) |
-| 3 | the option and `on-conflict-zonefile-wins` | 150 |
+| Stage | Content | Estimate | Actual | Commit |
+|---|---|---|---|---|
+| 1 | ZONEMD + `ZoneFileState` + detection | 450 | ~960 | `5a84937`, `c622ba2` |
+| 2 | merge, re-anchor, `.rejected`, serial floor | ~800 | ~890 | `93235ab`, `47f0c62` |
+| 3 | the option, defaulted at parse | 150 | ~330 | `4aad47a` |
+| 4 | reload takes the same path (#362) | — | ~190 | `feature/reload-reconciliation` |
+
+### Stage 4 — reload takes the same path
+
+Not foreseen as a stage: §9 states the property, and the startup path
+was taken to be the only path that reads a zone file. It is not. An
+explicit `zone reload` and the refresh ticker both re-read a primary's
+file through `Refresh` → `FetchFromFile`, which decided on the SOA
+serial and never reached the digest.
+
+Three things had to change, and they are all consequences of the same
+mistake:
+
+- **Detection.** The parser short-circuits as soon as it sees an SOA
+  whose serial matches the last one read. `FetchFromFile` now parses the
+  whole file unconditionally and decides on the digest, falling back to
+  the serial only where there is no recorded identity to compare
+  against. `--force` re-applies an unchanged file rather than parsing it
+  and discarding the result.
+- **Reconciliation.** The merge/replay tail of `replayZoneDeltasOnLoad`
+  became `ReconcileZoneFileWithJournal`, which both entry points call.
+  Not on a first load from `FetchFromFile`, though: that path must
+  reconcile after the DNSSEC policy is bound, or replay signs with a nil
+  policy and mints five-minute RRSIGs.
+- **The serial floor.** A reload adopts the new file as the journal's
+  anchor but bumped the served serial by one, so a file whose serial had
+  jumped ahead left the anchor above the zone and `PersistZoneDelta`
+  refused every subsequent update. The reload now lands strictly newer
+  than both, which is what §8 already required of the merge — it just
+  has to hold when there is no journal to merge, too.
+
+- **A stat gate in front of the digest.** Deciding on content means
+  parsing and digesting the whole zone on every refresh interval, where
+  the serial comparison it replaces stopped at the first SOA. Measured on
+  a delegation-heavy zone: 133 ms at 22.5k records, 1.6 s at 225k, 9.3 s
+  at 1.1M — the digest being some 80% of each — against 21–35 µs for the
+  early return. The ticker calls `Refresh` inline in the refresh engine,
+  so that is not just CPU but head-of-line blocking for every other zone.
+  The file's mtime and size, recorded in memory at every read and every
+  write, now decide whether to look at all; the digest still decides what
+  looking means. One full parse per zone per process start, 17 µs
+  thereafter. §4.1's objection to byte-level comparison does not apply to
+  it: that objection is to false POSITIVES from reordering, comments and
+  whitespace, and a stat gate can only produce a false negative — a file
+  rewritten to the same size with its mtime restored.
+
+  The gate has one coupling that is not obvious and is easy to reintroduce.
+  The identity is recorded on success only, so that a load which could not
+  deal with the file leaves the previous identity in place and the next load
+  sees the file as CHANGED and retries. A cached stat saying "nothing has
+  touched it" defeats that retry entirely — the next refresh does not read
+  the file at all, and the merge is not attempted again until the process
+  restarts. So the two are set together and dropped together: **a cached stat
+  is only ever trusted while a recorded identity describes the file it
+  names.** Neither branch had this defect on its own; it appeared only when
+  the two were merged.
+
+One judgement call beyond the issue: a dirty primary was refused a
+reload outright. Since both replay and merge set that flag at every
+load, the refusal made `zone reload` permanently unavailable to exactly
+the zones this design is about. It now refuses only what it was
+protecting — changes the journal is not recording, i.e. no database or
+`journal: active: false`.
+
+Stage 1 ran over because the RFC 8976 digest is more than a hash call:
+canonical ordering (labels compared right-to-left, case-insensitively)
+and RFC 4034 §6.2 RDATA down-casing had to be written, neither existing
+in the tree. Validated against all three Appendix A vectors — and A.2
+caught a real bug, out-of-zone data not being excluded, that A.1 and A.3
+cannot see.
 
 Stage 1 is worth having on its own even if 2 never shipped: it replaces a
 serial comparison that lies about reformatted files with a content digest
 that doesn't.
 
-**Before Stage 2, resolve the delegation-backend question.** A zone with
-`delegationbackend: db` has a second DB-side content source —
-`ChildDelegationData` — which is not in the journal and which §5 does not
-account for. `dnslab.` is such a zone. Whether child delegation data is
-re-applied on top of a merged zone, double-applied, or lost is unknown,
-and the answer could change the merge rule. It is the largest unknown in
-this design and it should be settled before code is written against §5,
-not after.
+**The delegation-backend question — resolved, and it does not affect
+§5.** `ChildDelegationData` is not zone content. `DBDelegationBackend`
+writes rows and touches neither the served zone nor the zone file (the
+`CHILD-UPDATE` branch of the updater dispatches solely to the backend),
+so a merge has nothing to reconcile it against. §5 stands unchanged.
+
+That investigation did surface something separate and worth its own
+work: nothing validates the *combination* of application role, zone type
+and delegation backend. The only rule today is that
+`allow-child-updates` requires some backend. Combinations that cannot
+work — `direct` on an instance that does not serve the zone, `direct` on
+a secondary — are accepted silently. Tracked separately; not part of this
+design.
 
 ## 14. Verification
 

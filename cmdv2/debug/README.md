@@ -31,6 +31,16 @@ same tool run against a tdns branch, a tdns release, and BIND/NSD/Knot.
 DNSSEC-validation families, differential A/B, agent flows) are planned
 as additional compositions on the same engine.
 
+## The shell rig beside it
+
+`rig/` holds an older, shell-based integration rig: a tdns-auth primary against
+a real BIND9 secondary, 88 assertions covering IXFR, the delta journal, restart
+replay, and zone-file/journal reconciliation across both restart and reload. It
+reaches what this framework cannot yet — stopping and restarting the primary,
+editing its zone file underneath it, and letting a second implementation decide
+whether to follow. Those scenarios belong on this engine eventually; see
+[rig/README.md](rig/README.md).
+
 ## Commands
 
 - **`tdns-debug probe --target <name> [--dns <addr:port>]`**
