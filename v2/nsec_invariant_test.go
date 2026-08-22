@@ -275,10 +275,59 @@ func TestDelegationChangesReconcileChainMembership(t *testing.T) {
 	assertChainInvariant(t, zd, "after the delegation was removed")
 }
 
-// NOTE: the refusal path -- publishLocked aborting when restitchNsecLocked
-// returns an error -- has no test here. Injecting a signing failure into this
-// fixture proved harder than the assertion is worth: clearing zd.KeyDB makes
-// zoneMaintainsItsOwnChain skip the restitch entirely (and panics the publish
-// elsewhere), and a policy naming an unsupported algorithm hangs in key
-// generation rather than failing. Both are worth looking at on their own;
-// neither makes a good lever for this test.
+// The refusal path runs with zd.mu HELD, and the obvious way to report the
+// failure -- zd.SetError -- takes zd.mu itself. Getting that wrong deadlocks
+// the publish at exactly the moment it is trying to tell someone the zone
+// could not be published, which is the worst possible time to hang.
+//
+// It also has to put the serial back. The bump happens before the repair runs,
+// so a refusal that leaves it advanced makes publishSync report a serial that
+// no snapshot carries.
+//
+// Driven directly rather than through an injected signing failure: clearing
+// the KeyDB makes the restitch skip itself rather than fail, and a policy
+// naming an unsupported algorithm hangs in key generation instead of
+// returning an error. Both are worth looking at separately; neither is a good
+// lever for this.
+func TestRefusingAnUnrepairableChainDoesNotDeadlockOrKeepTheSerial(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := signingTestZone(t, kdb)
+
+	const prevSerial = 41
+	zd.mu.Lock()
+	zd.CurrentSerial = 42 // as if the publish had already bumped it
+	zd.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		zd.mu.Lock() // the publishWorkingSetLocked context
+		defer zd.mu.Unlock()
+		zd.refuseUnrepairableChainLocked(prevSerial, fmt.Errorf("no keys"))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("refusing the publish deadlocked while zd.mu was held" +
+			" (re-entrant zd.mu via SetError)")
+	}
+
+	zd.mu.Lock()
+	got := zd.CurrentSerial
+	zd.mu.Unlock()
+	if got != prevSerial {
+		t.Fatalf("the serial was left at %d after a refused publish, want %d rolled back;"+
+			" publishSync would report a serial no snapshot carries", got, prevSerial)
+	}
+
+	var found bool
+	for _, e := range zd.ErrorList() {
+		if e.Type == DnssecPolicyWarning {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("a refused publish recorded no error against the zone")
+	}
+}

@@ -408,18 +408,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// it. Doing it in a later pass would publish a second serial and leave a
 	// window in which the served chain contradicts the served zone.
 	if err := zd.restitchNsecLocked(); err != nil {
-		// Refuse the publish. Serving a zone whose chain does not describe it
-		// is the failure this whole path exists to prevent, and a secondary
-		// cannot repair it -- having no private key, it answers denial from
-		// whatever chain it is handed. The change stays staged in the working
-		// set, so the next publish retries it; the zone goes on serving the
-		// previous snapshot, which is at least self-consistent.
-		lg.Error("publish: refusing to publish, because the NSEC chain could not be"+
-			" repaired to describe this zone; the previous snapshot is still being"+
-			" served and the change remains staged",
-			"zone", zd.ZoneName, "error", err)
-		zd.SetError(DnssecPolicyWarning,
-			"the NSEC chain could not be repaired, so the zone was not published: %v", err)
+		zd.refuseUnrepairableChainLocked(prevSerial, err)
 		return
 	}
 
@@ -684,6 +673,30 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		zd.Status = ZoneStatusReady
 	}
 	return nil
+}
+
+// refuseUnrepairableChainLocked abandons a publish whose NSEC chain could not
+// be repaired. Runs with zd.mu HELD, which is the whole reason it exists as a
+// function: the obvious spelling of this -- zd.SetError -- takes zd.mu itself
+// and deadlocks the publish it is trying to report on.
+//
+// Serving a zone whose chain does not describe it is the failure this path
+// exists to prevent, and a secondary cannot repair it: having no private key,
+// it answers denial from whatever chain it was handed. So the previous
+// snapshot goes on being served, which is at least self-consistent, and the
+// change stays staged in the working set for the next publish to retry.
+//
+// The serial is rolled back with it. It was advanced before the repair ran,
+// and leaving it advanced would have publishSync report a serial to its caller
+// that no snapshot carries and no secondary will ever be offered.
+func (zd *ZoneData) refuseUnrepairableChainLocked(prevSerial uint32, err error) {
+	zd.CurrentSerial = prevSerial
+	lg.Error("publish: refusing to publish, because the NSEC chain could not be"+
+		" repaired to describe this zone; the previous snapshot is still being"+
+		" served and the change remains staged",
+		"zone", zd.ZoneName, "error", err)
+	zd.setErrorLocked(DnssecPolicyWarning,
+		"the NSEC chain could not be repaired, so the zone was not published: %v", err)
 }
 
 func (zd *ZoneData) buildSnapshotLocked(serial uint32, data map[string]*OwnerData, signalSynth map[string]*core.RRset) *zoneSnapshot {
