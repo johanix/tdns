@@ -709,6 +709,26 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 				newrrsigs++
 			}
 		}
+
+		// The NSEC property is signed like any other RRset. It is not in
+		// RRtypes, so the loop above cannot reach it -- and an unsigned NSEC
+		// makes the whole chain useless to the secondaries that depend on it,
+		// which is not visible here because this server synthesises its own
+		// denial and never consults the chain.
+		if cur := zd.stagedOwner(name); cur != nil && len(cur.NSEC.RRs) > 0 {
+			nsec := cur.NSEC
+			nsec.RRSIGs = nil
+			resigned, err := zd.SignRRset(&nsec, zd.ZoneName, dak, true, clamp)
+			if err != nil {
+				lgSigner.Error("ResignZone: signing the NSEC failed",
+					"zone", zd.ZoneName, "name", name, "err", err)
+				return newrrsigs, err
+			}
+			zd.stageNsecLocked(name, nsec)
+			if resigned {
+				newrrsigs++
+			}
+		}
 	}
 
 	zd.publishLocked(zd.generation.Load())
@@ -912,6 +932,15 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 				}
 			}
 		}
+
+		// The NSEC property, for the same reason as in ResignZone: it is not
+		// an RRtypes entry, so nothing above signs it.
+		if cur := zd.stagedOwner(name); cur != nil && len(cur.NSEC.RRs) > 0 {
+			nsec := cur.NSEC
+			nsec.RRSIGs = nil
+			nsec, _ = MaybeSignRRset(nsec, zd.ZoneName)
+			zd.stageNsecLocked(name, nsec)
+		}
 	}
 
 	zd.publishLocked(zd.generation.Load())
@@ -968,8 +997,6 @@ func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
 	var nextidx int
 	var nextname string
 
-	var hasRRSIG bool
-
 	for idx, name := range names {
 		owner := zd.stagedOwner(name)
 		if owner == nil {
@@ -984,7 +1011,9 @@ func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
 		var tmap = []int{int(dns.TypeNSEC)}
 		for _, rrt := range owner.RRtypes.Keys() {
 			if rrt == dns.TypeRRSIG {
-				hasRRSIG = true
+				// Unreachable: SortFunc routes RRSIGs into the .RRSIGs field of
+				// the RRset they cover, never into an RRtypes key. Kept as a
+				// guard in case that ever changes.
 				continue
 			}
 			if rrt != dns.TypeNSEC {
@@ -994,7 +1023,9 @@ func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
 				tmap = append(tmap, int(rrt))
 			}
 		}
-		if hasRRSIG || ((zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && len(dak.KSKs) > 0) {
+		// Every authoritative name in a signed zone carries at least the RRSIG
+		// over its own NSEC, so the zone-level condition is the whole answer.
+		if (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && len(dak.KSKs) > 0 {
 			tmap = append(tmap, int(dns.TypeRRSIG))
 		}
 
@@ -1014,9 +1045,7 @@ func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
 		if err != nil {
 			return err
 		}
-		tmp := owner.RRtypes.GetOnlyRRSet(dns.TypeNSEC)
-		tmp.RRs = []dns.RR{nsecrr}
-		zd.stageRRsetLocked(name, tmp)
+		zd.stageNsecLocked(name, core.RRset{RRs: []dns.RR{nsecrr}})
 
 	}
 
@@ -1040,8 +1069,7 @@ func (zd *ZoneData) ShowNsecChain() ([]string, error) {
 			continue
 		}
 		if name != zd.ZoneName {
-			rrs := owner.RRtypes.GetOnlyRRSet(dns.TypeNSEC).RRs
-			if len(rrs) == 1 {
+			if rrs := owner.NSEC.RRs; len(rrs) == 1 {
 				nsecrrs = append(nsecrrs, rrs[0].String())
 			}
 		}

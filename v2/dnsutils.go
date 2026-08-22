@@ -445,6 +445,12 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 			return 0, nil
 		}
 	}
+	// The NSEC property travels in the transfer like any other record. The
+	// receiving secondary has no private key and cannot synthesise denial, so
+	// the chain it gets here is the only one it will ever have.
+	if len(apex.NSEC.RRs) > 0 && !appendRRset(bs, apex.NSEC) {
+		return 0, nil
+	}
 
 	names := make([]string, 0, len(snap.Data))
 	for name := range snap.Data {
@@ -464,6 +470,9 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 			if !appendRRset(bs, rrset) {
 				return 0, nil
 			}
+		}
+		if len(omap.NSEC.RRs) > 0 && !appendRRset(bs, omap.NSEC) {
+			return 0, nil
 		}
 	}
 
@@ -718,10 +727,28 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 			}
 		}
 
+	case *dns.NSEC:
+		// NSEC is a property of the owner, not an RRset of its own: see
+		// OwnerData.NSEC. Parsed here so a zone file written by this server --
+		// or by anything else -- round-trips, and so a secondary loading a
+		// signed zone from disk keeps the chain it was given.
+		switch ztype {
+		case MapZone:
+			omap.NSEC.Name, omap.NSEC.RRtype, omap.NSEC.Class = owner, dns.TypeNSEC, dns.ClassINET
+			omap.NSEC.RRs = append(omap.NSEC.RRs, rr)
+		}
+
 	case *dns.RRSIG:
 		rrt := v.TypeCovered
 		switch ztype {
 		case MapZone:
+			if rrt == dns.TypeNSEC {
+				// Follows its NSEC into the property rather than into
+				// RRtypes[NSEC], which no longer exists.
+				omap.NSEC.Name, omap.NSEC.RRtype, omap.NSEC.Class = owner, dns.TypeNSEC, dns.ClassINET
+				omap.NSEC.RRSIGs = append(omap.NSEC.RRSIGs, rr)
+				break
+			}
 			tmp = omap.RRtypes.GetOnlyRRSet(rrt)
 			tmp.RRSIGs = append(tmp.RRSIGs, rr)
 			omap.RRtypes.Set(rrt, tmp)
@@ -896,6 +923,12 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 			count += len(rrset.RRs) + len(rrset.RRSIGs)
 		}
 	}
+	// The NSEC property is written like any other record. A secondary that
+	// loads this file in the absence of its primary has no private key and
+	// answers denial from the chain in the file, so leaving it out would hand
+	// that secondary a signed zone it cannot prove anything with.
+	zonedata += RRsetToString(&apex.NSEC)
+	count += len(apex.NSEC.RRs) + len(apex.NSEC.RRSIGs)
 
 	// Rest of zone
 	names := make([]string, 0, len(snap.Data))
@@ -911,6 +944,8 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 		if omap == nil {
 			continue
 		}
+		zonedata += RRsetToString(&omap.NSEC)
+		count += len(omap.NSEC.RRs) + len(omap.NSEC.RRSIGs)
 		for _, rrt := range omap.RRtypes.Keys() {
 			rrl := omap.RRtypes.GetOnlyRRSet(rrt)
 			zonedata += RRsetToString(&rrl)

@@ -741,6 +741,28 @@ type Ixfr struct {
 type OwnerData struct {
 	Name    string
 	RRtypes *RRTypeStore
+
+	// NSEC holds this owner's denial-of-existence record and its signature,
+	// as a property rather than as an RRset inside RRtypes.
+	//
+	// It is derived data: the signer computes it from the shape of the zone,
+	// and nothing outside the signer may author it. RRSIGs are already held
+	// this way -- as a field on the RRset they cover -- and the placement is
+	// what keeps two whole classes of bug unrepresentable:
+	//
+	//   - a name whose last real RRset is deleted has nothing left in RRtypes,
+	//     so it stops existing, instead of lingering for ever with only its own
+	//     NSEC to keep it alive and the chain asserting that it exists;
+	//
+	//   - the delta journal flattens rrset.RRs from the owner's RRtypes, so a
+	//     regenerated NSEC cannot be recorded there as though an operator had
+	//     written it, and cannot then be replayed or reported as a conflict
+	//     against a zone file.
+	//
+	// It is emitted to the wire like any other record: zone file, AXFR, IXFR
+	// and the ZONEMD digest all include it. See
+	// docs/2026-08-22-nsec-chain-correctness.md §3.
+	NSEC core.RRset
 }
 
 type ChildDelegationData struct {

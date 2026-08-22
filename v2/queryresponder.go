@@ -138,6 +138,26 @@ var ErrZoneUnsigned = fmt.Errorf("zone must be signed but has no stored signatur
 // pre-computed RRSIGs. Every other RRset served through signRRsetForZone is
 // stored zone data that must already carry its RRSIGs (a signed zone signs its
 // data at SignZone time), so a missing RRSIG there means the zone is broken.
+// ownerRRsetForQuery resolves an owner's RRset for an explicit query.
+//
+// NSEC is a property rather than an RRtypes entry (see OwnerData.NSEC), so a
+// direct query for it has to be answered from there. Without this the name
+// would look as though it had no NSEC and the query would fall through to a
+// synthesised denial -- claiming the record is absent while the zone, the
+// zone file and every transfer of it say otherwise.
+func ownerRRsetForQuery(od *OwnerData, qtype uint16) (core.RRset, bool) {
+	if od == nil {
+		return core.RRset{}, false
+	}
+	if qtype == dns.TypeNSEC {
+		if len(od.NSEC.RRs) > 0 {
+			return od.NSEC, true
+		}
+		return core.RRset{}, false
+	}
+	return od.RRtypes.Get(qtype)
+}
+
 func isSynthesizedDenial(rrset core.RRset) bool {
 	for _, rr := range rrset.RRs {
 		if rr.Header().Rrtype == dns.TypeNSEC {
@@ -918,7 +938,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	lgHandler.Debug("checking for exact match", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName)
 
 	if tdnsSpecialTypes[qtype] || standardDNSTypes[qtype] {
-		if rrset, ok := owner.RRtypes.Get(qtype); ok && len(rrset.RRs) > 0 {
+		if rrset, ok := ownerRRsetForQuery(owner, qtype); ok && len(rrset.RRs) > 0 {
 			if qtype == dns.TypeSOA {
 				rrset = zd.soaForResponseFrom(snap, apex)
 			}

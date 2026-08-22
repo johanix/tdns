@@ -35,6 +35,11 @@ func (zd *ZoneData) cloneOwner(name string) *OwnerData {
 			rs, _ := src.RRtypes.Get(t)
 			nod.RRtypes.Set(t, rs)
 		}
+		// The NSEC property travels with the owner. Rebuilding an owner from
+		// its RRtypes alone would drop the chain entry silently, and the name
+		// would fall out of the chain on the next publish without anything
+		// having asked for that.
+		nod.NSEC = src.NSEC
 	}
 	zd.workingSet[name] = nod
 	return nod
@@ -271,6 +276,30 @@ func (zd *ZoneData) stageRRsetLocked(name string, rs core.RRset) {
 	rs.RRtype = rrtype
 	zd.ensureWorkingSet()
 	zd.cloneOwner(name).RRtypes.Set(rrtype, cloneRRset(rs))
+}
+
+// stageNsecLocked sets an owner's NSEC property. Unlike stageRRsetLocked it
+// cannot bring an owner into existence: an NSEC belongs to a name that has
+// authoritative data, and staging one for a name with none would recreate the
+// ghosts the property exists to prevent.
+func (zd *ZoneData) stageNsecLocked(name string, rs core.RRset) {
+	zd.ensureWorkingSet()
+	od := zd.stagedOwner(name)
+	if od == nil {
+		return
+	}
+	rs.Name, rs.RRtype, rs.Class = name, dns.TypeNSEC, dns.ClassINET
+	zd.cloneOwner(name).NSEC = cloneRRset(rs)
+}
+
+// stageNsecDeleteLocked drops an owner's NSEC property, for a name leaving the
+// chain.
+func (zd *ZoneData) stageNsecDeleteLocked(name string) {
+	zd.ensureWorkingSet()
+	if od := zd.stagedOwner(name); od == nil {
+		return
+	}
+	zd.cloneOwner(name).NSEC = core.RRset{}
 }
 
 func (zd *ZoneData) stageDeleteLocked(name string, rrtype uint16) {
