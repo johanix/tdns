@@ -407,7 +407,21 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// that secondaries receive the change together with the data that caused
 	// it. Doing it in a later pass would publish a second serial and leave a
 	// window in which the served chain contradicts the served zone.
-	zd.restitchNsecLocked()
+	if err := zd.restitchNsecLocked(); err != nil {
+		// Refuse the publish. Serving a zone whose chain does not describe it
+		// is the failure this whole path exists to prevent, and a secondary
+		// cannot repair it -- having no private key, it answers denial from
+		// whatever chain it is handed. The change stays staged in the working
+		// set, so the next publish retries it; the zone goes on serving the
+		// previous snapshot, which is at least self-consistent.
+		lg.Error("publish: refusing to publish, because the NSEC chain could not be"+
+			" repaired to describe this zone; the previous snapshot is still being"+
+			" served and the change remains staged",
+			"zone", zd.ZoneName, "error", err)
+		zd.SetError(DnssecPolicyWarning,
+			"the NSEC chain could not be repaired, so the zone was not published: %v", err)
+		return
+	}
 
 	data := zd.workingSet
 	oldSnap := zd.snapshot.Load()

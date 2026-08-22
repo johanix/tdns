@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"fmt"
 	"sort"
 	"time"
 
@@ -91,20 +92,20 @@ func (zd *ZoneData) zoneMaintainsItsOwnChain() bool {
 //
 // In every case the predecessor is rewritten too, which is why the affected set
 // is the changed names plus their predecessors and never the whole zone.
-func (zd *ZoneData) restitchNsecLocked() {
+func (zd *ZoneData) restitchNsecLocked() error {
 	if !zd.zoneMaintainsItsOwnChain() {
-		return
+		return nil
 	}
 
 	changed := changedChainNames(zd.snapshot.Load(), zd.workingSet)
 	if len(changed) == 0 {
-		return
+		return nil
 	}
 
 	all := zd.workingOwnerNamesLocked()
 	chain := zd.chainNamesLocked(all)
 	if len(chain) == 0 {
-		return
+		return nil
 	}
 	pos := make(map[string]int, len(chain))
 	for i, n := range chain {
@@ -116,13 +117,39 @@ func (zd *ZoneData) restitchNsecLocked() {
 	// deadlocks. Same reasoning as the SOA re-sign alongside this.
 	dak, err := zd.EnsureActiveDnssecKeys(zd.KeyDB, true)
 	if err != nil {
-		lgSigner.Error("publish: cannot resolve keys to restitch the NSEC chain;"+
-			" the zone is being published with a chain that does not describe it",
-			"zone", zd.ZoneName, "err", err)
-		return
+		return fmt.Errorf("resolving keys to restitch the NSEC chain: %w", err)
 	}
 
 	affected := map[string]bool{}
+
+	// Membership first, over EVERY name rather than the changed ones.
+	//
+	// A delegation appearing or disappearing moves other names into or out of
+	// the chain without changing those names at all: add NS at child.example.
+	// and everything beneath it becomes the child's data, still holding the
+	// NSEC it was given while it was ours. Reconciling only the changed names
+	// leaves those behind, and the chain stops being a single cycle.
+	for _, name := range all {
+		_, inChain := pos[name]
+		od := zd.stagedOwner(name)
+		hasNsec := od != nil && len(od.NSEC.RRs) > 0
+		switch {
+		case !inChain && hasNsec:
+			zd.stageNsecDeleteLocked(name)
+			if !ownerHasData(zd.stagedOwner(name)) {
+				zd.stageOwnerDeleteLocked(name)
+			}
+			if pred, ok := chainPredecessor(chain, name); ok {
+				affected[pred] = true
+			}
+		case inChain && !hasNsec:
+			affected[name] = true
+			if pred, ok := chainPredecessor(chain, name); ok {
+				affected[pred] = true
+			}
+		}
+	}
+
 	for _, name := range changed {
 		if _, stillIn := pos[name]; stillIn {
 			affected[name] = true
@@ -152,10 +179,7 @@ func (zd *ZoneData) restitchNsecLocked() {
 		var cerr error
 		clamp, cerr = ClampParamsForZone(zd.KeyDB, zd.ZoneName, zd.DnssecPolicy, time.Now())
 		if cerr != nil {
-			lgSigner.Error("publish: cannot resolve clamp parameters to restitch the NSEC"+
-				" chain; refusing rather than signing outside the policy",
-				"zone", zd.ZoneName, "err", cerr)
-			return
+			return fmt.Errorf("resolving clamp parameters to restitch the NSEC chain: %w", cerr)
 		}
 	}
 
@@ -168,21 +192,17 @@ func (zd *ZoneData) restitchNsecLocked() {
 		}
 		next := chain[(i+1)%len(chain)]
 		nsecrr, err := zd.nsecRRForLocked(name, next, ttl, dak)
-		if err != nil || nsecrr == nil {
-			if err != nil {
-				lgSigner.Error("publish: could not build the NSEC record",
-					"zone", zd.ZoneName, "name", name, "err", err)
-			}
+		if err != nil {
+			return fmt.Errorf("building the NSEC for %s: %w", name, err)
+		}
+		if nsecrr == nil {
 			continue
 		}
 		rs := core.RRset{RRs: []dns.RR{nsecrr}}
 		if _, err := zd.SignRRset(&rs, zd.ZoneName, dak, true, clamp); err != nil {
 			// An unsigned NSEC is worse than a stale one: a validator rejects
 			// the proof outright rather than merely disagreeing with it.
-			lgSigner.Error("publish: could not sign the NSEC record; leaving the"+
-				" previous one in place",
-				"zone", zd.ZoneName, "name", name, "err", err)
-			continue
+			return fmt.Errorf("signing the NSEC for %s: %w", name, err)
 		}
 		zd.stageNsecLocked(name, rs)
 		rewritten++
@@ -192,6 +212,7 @@ func (zd *ZoneData) restitchNsecLocked() {
 		lgSigner.Debug("publish: restitched the NSEC chain",
 			"zone", zd.ZoneName, "changed", len(changed), "rewritten", rewritten)
 	}
+	return nil
 }
 
 // chainPredecessor returns the name immediately before target in the chain,

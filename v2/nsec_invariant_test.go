@@ -226,3 +226,59 @@ func TestRestitchUnderLockNoSelfDeadlock(t *testing.T) {
 		t.Fatal("the restitch left the new name's NSEC unsigned")
 	}
 }
+
+// A delegation appearing or disappearing moves OTHER names into or out of the
+// chain without changing those names at all. Reconciling only the names whose
+// own data changed leaves the rest behind: glue keeps the NSEC it was given
+// while it was still ours, and the chain stops being a single cycle.
+func TestDelegationChangesReconcileChainMembership(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := signingTestZone(t, kdb)
+
+	// A name that will become glue once the delegation appears.
+	applyRR(t, zd, kdb, VerbAddRR, "ns1.sub.inv.example. 3600 IN A 10.5.5.5")
+	assertChainInvariant(t, zd, "before the delegation")
+
+	stageNS := func(present bool) {
+		zd.mu.Lock()
+		zd.ensureWorkingSet()
+		if present {
+			rr, err := dns.NewRR("sub.inv.example. 3600 IN NS ns1.sub.inv.example.")
+			if err != nil {
+				t.Fatal(err)
+			}
+			zd.stageRRsetLocked("sub.inv.example.",
+				core.RRset{Name: "sub.inv.example.", RRtype: dns.TypeNS, RRs: []dns.RR{rr}})
+		} else {
+			zd.stageDeleteLocked("sub.inv.example.", dns.TypeNS)
+		}
+		zd.mu.Unlock()
+		zd.requestPublish(true)
+	}
+
+	// Delegation ADDED: ns1.sub is now the child's data and must leave the chain.
+	stageNS(true)
+	snap := zd.publishedSnapshot()
+	if od := getOwnerFrom(snap, "ns1.sub.inv.example."); od != nil && len(od.NSEC.RRs) > 0 {
+		t.Error("glue below a new delegation kept its NSEC, so the chain still claims it")
+	}
+	assertChainInvariant(t, zd, "after the delegation was added")
+
+	// Delegation REMOVED: the name is ours again and needs an NSEC.
+	stageNS(false)
+	snap = zd.publishedSnapshot()
+	od := getOwnerFrom(snap, "ns1.sub.inv.example.")
+	if od == nil || len(od.NSEC.RRs) == 0 {
+		t.Error("a name that re-entered the chain when its delegation went away got no NSEC," +
+			" so its existence cannot be proven")
+	}
+	assertChainInvariant(t, zd, "after the delegation was removed")
+}
+
+// NOTE: the refusal path -- publishLocked aborting when restitchNsecLocked
+// returns an error -- has no test here. Injecting a signing failure into this
+// fixture proved harder than the assertion is worth: clearing zd.KeyDB makes
+// zoneMaintainsItsOwnChain skip the restitch entirely (and panics the publish
+// elsewhere), and a policy naming an unsupported algorithm hangs in key
+// generation rather than failing. Both are worth looking at on their own;
+// neither makes a good lever for this test.
