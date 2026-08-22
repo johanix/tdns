@@ -283,6 +283,24 @@ func (zd *ZoneData) recordZoneFileStat(fname string, st os.FileInfo) {
 	zd.mu.Unlock()
 }
 
+// forgetZoneFileStat drops the cached stat, so the next refresh reads the file
+// again instead of trusting that nothing has happened to it.
+//
+// Called when a load could not finish dealing with the file it read. The
+// recorded identity is deliberately left stale in that case so the next load
+// sees the file as changed and retries; the cached stat would otherwise stop
+// that next load from ever looking.
+func (zd *ZoneData) forgetZoneFileStat() {
+	if zd == nil {
+		return
+	}
+	zd.mu.Lock()
+	zd.fileStatPath = ""
+	zd.fileModTime = time.Time{}
+	zd.fileSize = 0
+	zd.mu.Unlock()
+}
+
 // Return updated, error
 func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
 

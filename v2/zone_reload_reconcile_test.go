@@ -643,3 +643,88 @@ example. 3600 IN SOA ns.example. hostmaster.example. 100 7200 1800 604800 7200
 			gotTime, gotSize, st.ModTime(), st.Size())
 	}
 }
+
+// TestAFailedMergeIsRetriedDespiteTheStatGate. Recording the file identity only
+// once a load has dealt with the file means a failed merge deliberately leaves
+// the old identity in place, so the next load sees the file as CHANGED again
+// and retries. The cached stat must not defeat that: nothing has touched the
+// file in the meantime, so a refresh that trusted the stat would skip the file
+// and never attempt the merge again until the process restarted.
+func TestAFailedMergeIsRetriedDespiteTheStatGate(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, reloadBase)
+	refreshOnce(t, zd) // establish both the identity and the cached stat
+
+	// A journal that contests a record the file still has, so the merge has to
+	// write a .rejected artefact before it may apply anything.
+	actions, err := BuildZoneUpdateActions("example.", ZoneUpdateSpec{
+		Verb: VerbDelRR, RRs: []string{"www.example. 3600 IN A 192.0.2.1"},
+	})
+	if err != nil {
+		t.Fatalf("BuildZoneUpdateActions: %v", err)
+	}
+	if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
+		Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: actions,
+	}, kdb); err != nil {
+		t.Fatalf("delrr: %v", err)
+	}
+
+	operatorEdit(t, zd, `example.	3600	IN	SOA	ns.example. hostmaster.example. 100 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+www.example.	3600	IN	A	192.0.2.1
+operator.example.	3600	IN	A	10.9.9.9
+`)
+
+	// Make the artefact unwritable: the merge refuses rather than resolve
+	// conflicts it cannot report.
+	dir := filepath.Dir(zd.Zonefile)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	before, _, err := kdb.GetZoneFileState("example.")
+	if err != nil {
+		t.Fatalf("GetZoneFileState: %v", err)
+	}
+
+	refreshOnce(t, zd)
+
+	after, _, err := kdb.GetZoneFileState("example.")
+	if err != nil {
+		t.Fatalf("GetZoneFileState: %v", err)
+	}
+	if after.Digest != before.Digest {
+		t.Fatal("a failed merge recorded the new file's identity; the next load would call it" +
+			" unchanged and never retry")
+	}
+	zd.mu.Lock()
+	cached := zd.fileModTime
+	zd.mu.Unlock()
+	if !cached.IsZero() {
+		t.Error("a failed merge left the cached stat in place; the next refresh would skip the" +
+			" file and never retry the merge")
+	}
+
+	// The retry: nothing has touched the file, and it must be read anyway.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	refreshOnce(t, zd)
+
+	if hasARRset(t, zd, "www.example.") {
+		t.Error("the retried merge did not resolve the conflict")
+	}
+	matches, err := filepath.Glob(zd.Zonefile + ".*.rejected")
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(matches) == 0 {
+		t.Error("the retried merge wrote no artefact")
+	}
+	if final, _, err := kdb.GetZoneFileState("example."); err != nil {
+		t.Fatalf("GetZoneFileState: %v", err)
+	} else if final.Digest == before.Digest {
+		t.Error("the successful retry did not record the new file's identity")
+	}
+}

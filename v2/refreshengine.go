@@ -347,16 +347,33 @@ func (zd *ZoneData) reconcileZoneFileWithJournal(verdict ZoneFileVerdict, prev *
 	// So record on success only. A failure leaves the old identity in place,
 	// the next load sees CHANGED again, and the merge is retried. Repeating
 	// the report until it succeeds is the point, not a cost.
+	//
+	// The cached zone file stat has to follow the identity, for the same
+	// reason. That stat is what decides whether the next refresh READS the
+	// file at all, so leaving it in place after a failed reconciliation would
+	// suppress exactly the retry the unrecorded identity is there to provoke:
+	// nothing has touched the file, the refresh skips it, and the merge is not
+	// attempted again until the process restarts. The two are therefore set
+	// together and dropped together -- a cached stat is only ever trusted
+	// while a recorded identity describes the file it names.
 	zd.mu.Lock()
 	digest, serial := zd.fileDigest, zd.fileSerial
 	zd.mu.Unlock()
+	dealtWith := false
+	defer func() {
+		if !dealtWith {
+			zd.forgetZoneFileStat()
+		}
+	}()
 	recordFileIdentity := func() {
 		if digest == "" {
 			return
 		}
 		if err := zd.RecordZoneFileState(serial, digest); err != nil {
 			lg.Warn("could not record the zone file identity", "zone", zd.ZoneName, "error", err)
+			return
 		}
+		dealtWith = true
 	}
 
 	// A CHANGED file takes the merge path, not the replay path. Replay asserts
