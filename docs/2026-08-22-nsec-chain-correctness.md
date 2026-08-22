@@ -161,55 +161,73 @@ nobody edited.
 
 Both collectors must include the property, identically.
 
-## 4. Plan
+## 4. What was done
 
-| Stage | Work |
-|---|---|
-| 1 | Canonical ordering — reuse `canonicalOwnerLess` |
-| 2 | NSEC as an owner property |
-| 3 | Generator correctness: TTL from SOA minimum, exclude non-authoritative names, delegation bitmaps, drop dead code |
-| 4 | Restitch and resign at publish, before the snapshot swap |
-| 5 | Verification harness |
+| Stage | Work | Status |
+|---|---|---|
+| 1 | Canonical ordering — reuse `canonicalOwnerLess` | done |
+| 2 | NSEC as an owner property | done |
+| 3 | Chain scope (delegations, glue) and NSEC TTL | done |
+| 4 | Restitch and resign at publish, before the snapshot swap | done |
+| 5 | Chain invariant check | done |
 
-Stage 1 is independent and shippable alone. Stage 2 is a pure refactor with
-no behavioural change — it is worth doing before stage 4 rather than after,
-because the restitch logic is written against wherever NSEC lives.
+An empty-non-terminal stage was planned and dropped: §2.6 records why.
 
-### Stage 4 in detail
+### Stage 4, as built
 
-The restitch belongs inside `publishSync`, before the snapshot swap, in this
-order:
+The restitch runs inside `publishSync`, before the delta is computed and
+before the snapshot swap:
 
 1. staged changes are already in the working set
-2. derive the changed names
-3. restitch NSEC around them — insert, delete, re-link neighbours
+2. derive the changed names — from authoritative data only, never from the
+   NSEC property, or the restitch responds to its own output
+3. restitch NSEC around them: insert, delete, re-link neighbours
 4. sign the affected NSEC RRsets
 5. bump the serial and set the SOA
-6. journal delta (NSEC absent by construction) → persist
-7. IXFR delta (NSEC included)
+6. journal delta, with NSEC filtered out → persist
+7. IXFR delta, with NSEC included
 8. snapshot swap
 
-Steps 3 and 4 run with `zd.mu` already held, so both chain generation and
-signing need `Locked` variants. `GenerateNsecChainWithDak` is currently
-reached only from callers that take the lock themselves; calling it from
-`publishSync` as it stands deadlocks.
+Steps 3 and 4 run with `zd.mu` held, so the keys are resolved once with
+`zdLocked=true` and passed into `SignRRset`. Without that it reaches
+`EnsureActiveDnssecKeys`, re-locks `zd.mu` and hangs the publish — the same
+trap the SOA re-sign already had, and now covered by its own test.
 
-Finding a name's neighbours requires an ordered view of the authoritative
-names. The working set is a map, so this is a sorted index maintained
-alongside it. The index is keyed by a function rather than by canonical name
-directly: NSEC3, if it is ever wanted, differs in the ordering key (hashed)
-rather than in the machinery. No other NSEC3 preparation is included —
-opt-out and NSEC3PARAM semantics differ enough that guessing now would
-likely be wrong.
+Neighbours are found by sorting the chain names per publish. Only the NSECs
+that actually change are rebuilt and signed, which is the expensive part; the
+sort is not. A maintained ordered index would remove the sort as well and is
+the obvious next optimisation, but it is not needed for correctness.
+
+### The journal filter, which stage 4 forced
+
+Step 7 is why `computeZoneDelta` diffs the NSEC property: a secondary must
+receive chain changes. But that same function feeds the journal, so NSECs
+began being recorded there as authored data — and replayed into an owner's
+`RRtypes` on restart, reinstating the ghosts the property model removes. It
+showed up as duplicate NSEC records after a restart, one from the property
+and one from the replayed journal.
+
+So the journal delta drops NSEC while the IXFR delta keeps it. The journal
+answers "what did someone change about this zone", and a regenerated record
+is not an answer to it.
 
 ## 5. Testing
 
-Two properties, checked directly rather than through queries:
+Two properties, checked against the zone as published rather than through
+queries:
 
-- the chain is a single cycle in canonical order, covering exactly the
-  authoritative names, closing on the apex;
-- after any sequence of adds and deletes, that still holds — including that
-  a deleted name is gone from the chain and an added name is in it.
+- the chain covers exactly the authoritative names, and is one cycle in
+  canonical order closing on the apex, every link signed;
+- that still holds after a sequence of inserts (middle, end, immediately
+  after the apex), deletes (middle, last) and a bitmap change.
 
-Plus `dnssec-verify` over an AXFR in the integration rig, which is what
-would have caught all of this years earlier.
+Writing that check found two defects that the end-to-end verification had
+missed, both recorded in the commit that adds it: an early return that
+skipped the "owns data" filter for any zone without a delegation, and an
+existence test that counted RRtypes entries rather than records, so a name
+whose last record was deleted still counted as present.
+
+The end-to-end check is `dig AXFR` piped into `dnssec-verify`. On the zone
+BIND 9.18 was given for comparison, tdns produces the same chain: the same
+links, the same TTLs, the delegation point present, its glue and the empty
+non-terminal absent.
