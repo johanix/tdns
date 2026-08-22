@@ -25,6 +25,8 @@ PPORT=5400
 SPORT=5401
 ZONE=rig.example.
 DIG="/usr/pkg/bin/dig +time=2 +tries=1"
+VERIFY=/usr/pkg/bin/dnssec-verify
+DELV=/usr/pkg/bin/delv
 CLI="$SRC/cmdv2/cli/tdns-cli --config $R/tdns-cli.yaml"
 
 # Fail here rather than three sections in. An SRC that is unset, stale or simply
@@ -140,10 +142,17 @@ reset_rig() {
   rm -f $R/named/rig.example.db $R/named/rig.example.db.jnl
   nohup /usr/pkg/sbin/named -c $R/named/named.conf -f >> $R/named/stdout.log 2>&1 &
 
-  # Wait for the fresh AXFR to land.
+  # Wait for the fresh AXFR to land AND for the secondary to reach the serial
+  # the primary is serving. Waiting only for an answer returns while the
+  # transfer is still in flight, and section A then compares the two serials
+  # immediately -- reporting a propagation delay as a convergence failure.
   _n=0
   while [ $_n -lt 60 ]; do
-    [ -n "$(soa $SPORT)" ] && return 0
+    _p=$(soa $PPORT)
+    _s=$(soa $SPORT)
+    if [ -n "$_p" ] && [ -n "$_s" ] && [ "$_s" -ge "$_p" ] 2>/dev/null; then
+      return 0
+    fi
     _n=$((_n+1)); sleep 0.5
   done
   return 1
@@ -706,6 +715,68 @@ NAH=$(ls $R/zones/rig.example.*.rejected 2>/dev/null | wc -l | tr -d ' ')
   && ok "the journalled change survived the restart" || bad "a journalled change was lost"
 [ "$(rr $PPORT h6-file-$RUN.$ZONE a)" = "10.14.0.1" ] \
   && ok "the reloaded file content survived the restart" || bad "reloaded file content was lost"
+
+note "I. the zone is still validly signed"
+# Every assertion above is a plain query, and no plain query can see the NSEC
+# chain: this server answers denial from records it synthesises per query and
+# never reads the chain it stores. A secondary has no private key, cannot
+# synthesise, and answers denial FROM that chain -- so the chain is only
+# observable as a whole, which is what dnssec-verify checks.
+#
+# That blind spot is why a wrong chain went unnoticed for a long time. Both
+# copies are checked: the primary's, and the one the secondary was actually
+# handed.
+if [ ! -x "$VERIFY" ]; then
+  echo "SKIP no $VERIFY; the NSEC chain is NOT being checked"
+else
+  $DIG @127.0.0.1 -p $PPORT "$ZONE" axfr > $R/verify.axfr 2>&1
+  if $VERIFY -o "$ZONE" $R/verify.axfr >/dev/null 2>&1; then
+    ok "the primary's zone passes dnssec-verify"
+  else
+    bad "the primary's zone FAILS dnssec-verify: $($VERIFY -o "$ZONE" $R/verify.axfr 2>&1 | grep -iE 'bad|missing|mismatch' | head -2 | tr '\n' ' ')"
+  fi
+
+  $DIG @127.0.0.1 -p $SPORT "$ZONE" axfr > $R/verify-sec.axfr 2>&1
+  if [ -s $R/verify-sec.axfr ] && $VERIFY -o "$ZONE" $R/verify-sec.axfr >/dev/null 2>&1; then
+    ok "the SECONDARY's copy passes dnssec-verify"
+  else
+    bad "the secondary's copy FAILS dnssec-verify: $($VERIFY -o "$ZONE" $R/verify-sec.axfr 2>&1 | grep -iE 'bad|missing|mismatch' | head -2 | tr '\n' ' ')"
+  fi
+fi
+
+# And the same thing through a real validator, which is the form the failure
+# actually takes in the field. dnssec-verify reads the zone offline; this asks
+# the SECONDARY -- which cannot synthesise, having no private key -- and makes
+# a validating resolver judge the proof it gets back.
+#
+# The three absent names sort before, within and after the chain, so a chain
+# broken at the wrap is caught as well as one broken in the middle.
+if [ ! -x "$DELV" ]; then
+  echo "SKIP no $DELV; denial proofs are NOT being validated"
+else
+  _ksk=$($DIG +short @127.0.0.1 -p $PPORT "$ZONE" dnskey 2>/dev/null | awk '$1==257 {print $4}' | head -1)
+  if [ -z "$_ksk" ]; then
+    bad "could not read the zone's KSK, so denial proofs were not validated"
+  else
+    printf 'trust-anchors {\n  %s static-key 257 3 15 "%s";\n};\n' "$ZONE" "$_ksk" > $R/anchor.key
+    if $DELV -a $R/anchor.key +root="$ZONE" @127.0.0.1 -p $SPORT "www.$ZONE" A 2>&1 | grep -q "fully validated"; then
+      ok "a validator accepts a POSITIVE answer from the secondary"
+    else
+      bad "a validator rejects a positive answer from the secondary"
+    fi
+    _bad=0
+    for _absent in aaaa nosuchname zzzz; do
+      $DELV -a $R/anchor.key +root="$ZONE" @127.0.0.1 -p $SPORT "$_absent.$ZONE" A 2>&1 |
+        grep -q "negative response, fully validated" || _bad=$((_bad+1))
+    done
+    if [ "$_bad" = "0" ]; then
+      ok "a validator accepts the secondary's DENIAL proofs, read from the stored chain"
+    else
+      bad "$_bad of 3 denial proofs from the secondary FAILED validation -- the stored chain is wrong"
+    fi
+  fi
+fi
+
 echo "================================"
 echo "PASS: $PASS   FAIL: $FAIL"
 [ "$FAIL" = "0" ] || exit 1
