@@ -1002,6 +1002,12 @@ func (zd *ZoneData) chainNamesLocked(names []string) []string {
 
 	out := make([]string, 0, len(names))
 	for _, name := range names {
+		// A name that owns no RRsets is not in the zone, whatever the working
+		// set still has an entry for. Giving it an NSEC is what turns a deleted
+		// name into a ghost that proves its own existence for ever.
+		if od := zd.stagedOwner(name); od == nil || od.RRtypes.Count() == 0 {
+			continue
+		}
 		occluded := false
 		for _, del := range delegations {
 			// Label-aware: a plain suffix test also matches
@@ -1038,6 +1044,52 @@ func (zd *ZoneData) nsecTTLLocked() uint32 {
 	return soa.RRs[0].Header().Ttl
 }
 
+// nsecRRForLocked builds the NSEC record for one name, pointing at next.
+//
+// Shared by the full generator and the incremental restitch so the two cannot
+// disagree about what an NSEC looks like -- a chain half-built by one and half
+// by the other is exactly the kind of drift that does not show up in a query.
+//
+// Returns nil when the name owns nothing (it is not in the chain).
+func (zd *ZoneData) nsecRRForLocked(name, next string, ttl uint32, dak *DnssecKeys) (dns.RR, error) {
+	owner := zd.stagedOwner(name)
+	if owner == nil {
+		return nil, nil
+	}
+
+	tmap := []int{int(dns.TypeNSEC)}
+	for _, rrt := range owner.RRtypes.Keys() {
+		if rrt == dns.TypeRRSIG {
+			// Unreachable: SortFunc routes RRSIGs into the .RRSIGs field of the
+			// RRset they cover, never into an RRtypes key. Kept as a guard in
+			// case that ever changes.
+			continue
+		}
+		if rrt == dns.TypeNSEC {
+			continue
+		}
+		if rrt == 0 {
+			lgSigner.Warn("NSEC chain: unexpected zero rrtype", "name", name, "rrtype", rrt)
+			continue
+		}
+		tmap = append(tmap, int(rrt))
+	}
+	// Every authoritative name in a signed zone carries at least the RRSIG over
+	// its own NSEC, so the zone-level condition is the whole answer.
+	if dak != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && len(dak.KSKs) > 0 {
+		tmap = append(tmap, int(dns.TypeRRSIG))
+	}
+
+	sort.Ints(tmap) // the NSEC type bitmap must be in order
+	rrts := make([]string, len(tmap))
+	for i, t := range tmap {
+		rrts[i] = dns.TypeToString[uint16(t)]
+	}
+
+	items := append([]string{name, strconv.FormatUint(uint64(ttl), 10), "IN", "NSEC", next}, rrts...)
+	return dns.NewRR(strings.Join(items, " "))
+}
+
 // GenerateNsecChainWithDak builds or refreshes the NSEC chain using the given active DNSSEC keys.
 func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
 	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
@@ -1068,59 +1120,16 @@ func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
 	// default, which is unrelated to the zone's negative-caching TTL.
 	ttl := zd.nsecTTLLocked()
 
-	var nextidx int
-	var nextname string
-
 	for idx, name := range names {
-		owner := zd.stagedOwner(name)
-		if owner == nil {
-			continue
-		}
-
-		nextidx = idx + 1
-		if nextidx == len(names) {
-			nextidx = 0
-		}
-		nextname = names[nextidx]
-		var tmap = []int{int(dns.TypeNSEC)}
-		for _, rrt := range owner.RRtypes.Keys() {
-			if rrt == dns.TypeRRSIG {
-				// Unreachable: SortFunc routes RRSIGs into the .RRSIGs field of
-				// the RRset they cover, never into an RRtypes key. Kept as a
-				// guard in case that ever changes.
-				continue
-			}
-			if rrt != dns.TypeNSEC {
-				if rrt == 0 {
-					lgSigner.Warn("NSEC chain: unexpected zero rrtype", "name", name, "rrtype", rrt)
-				}
-				tmap = append(tmap, int(rrt))
-			}
-		}
-		// Every authoritative name in a signed zone carries at least the RRSIG
-		// over its own NSEC, so the zone-level condition is the whole answer.
-		if (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && len(dak.KSKs) > 0 {
-			tmap = append(tmap, int(dns.TypeRRSIG))
-		}
-
-		// log.Printf("GenerateNsecChain: name: %s tmap: %v", name, tmap)
-
-		sort.Ints(tmap) // unfortunately the NSEC TypeBitMap must be in order...
-		var rrts = make([]string, len(tmap))
-		for idx, t := range tmap {
-			rrts[idx] = dns.TypeToString[uint16(t)]
-		}
-
-		// log.Printf("GenerateNsecChain: creating NSEC RR for name %s: %v %v", name, tmap, rrts)
-
-		items := []string{name, strconv.FormatUint(uint64(ttl), 10), "IN", "NSEC", nextname}
-		items = append(items, rrts...)
-		nsecrr, err := dns.NewRR(strings.Join(items, " "))
+		next := names[(idx+1)%len(names)]
+		nsecrr, err := zd.nsecRRForLocked(name, next, ttl, dak)
 		if err != nil {
 			return err
 		}
+		if nsecrr == nil {
+			continue
+		}
 		zd.stageNsecLocked(name, core.RRset{RRs: []dns.RR{nsecrr}})
-
 	}
 
 	return nil

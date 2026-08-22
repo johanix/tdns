@@ -397,6 +397,13 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 
 	zd.resignWorkingSetSOAIfSigned()
 
+	// The chain must describe the snapshot about to be published, so it is
+	// repaired HERE -- before the delta is computed and before the swap, so
+	// that secondaries receive the change together with the data that caused
+	// it. Doing it in a later pass would publish a second serial and leave a
+	// window in which the served chain contradicts the served zone.
+	zd.restitchNsecLocked()
+
 	data := zd.workingSet
 	oldSnap := zd.snapshot.Load()
 
@@ -440,6 +447,17 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 				"zone", zd.ZoneName, "serial", serial)
 		} else if oldSnap != nil && zd.KeyDB != nil {
 			removed, added, _ := computeZoneDelta(zd.ZoneName, oldSnap.Data, data)
+			// The journal carries authored data only. NSEC is derived -- this
+			// publish just regenerated it -- and the same delta computation
+			// feeds the IXFR chain, where secondaries DO need it.
+			//
+			// Journalling it would replay regenerated records onto a zone file
+			// as though an operator had written them, and the zone-file
+			// reconciliation would then report conflicts on records nobody
+			// authored and offer .rejected artefacts full of them. It also
+			// reinstates the ghosts the property model removes, by putting
+			// NSEC back into an owner's RRtypes on replay.
+			removed, added = withoutDerivedRecords(removed), withoutDerivedRecords(added)
 			if len(removed) > 0 || len(added) > 0 {
 				// What this delta chains FROM.
 				//
