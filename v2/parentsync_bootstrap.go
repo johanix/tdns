@@ -36,7 +36,11 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 			break
 		}
 		lgElect.Info("ParentSyncAfterKeyPublication: waiting for IMR engine", "zone", zone, "attempt", i+1)
-		time.Sleep(2 * time.Second)
+		if !sleepOrDone(ctx, 2*time.Second) {
+			lgElect.Info("ParentSyncAfterKeyPublication: shutting down while waiting for the IMR engine",
+				"zone", zone)
+			return
+		}
 	}
 	if imr == nil {
 		lgElect.Error("ParentSyncAfterKeyPublication: IMR engine not available after waiting", "zone", zone)

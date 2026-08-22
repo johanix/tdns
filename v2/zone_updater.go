@@ -412,6 +412,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				// outlive the failure and could complete a cleanup for a key
 				// this update never actually added.
 				ceremonyKey, ceremonyDeferred := (*dns.KEY)(nil), false
+				keyStoreFailed := false
 				if addKey, hasDel, ok := bootstrapCeremony(ur.Actions); ok && hasDel && !ur.Trusted {
 					ceremonyKey, ceremonyDeferred = addKey, true
 				}
@@ -444,7 +445,15 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 
 						_, err := kdb.Sig0TrustMgmt(tx, tppost)
 						if err != nil {
-							lg.Error("kdb.Sig0TrustMgmt failed", "error", err)
+							// The key did not land. Everything downstream of
+							// here -- async verification, and completing a
+							// bootstrap DEL-ANY-KEY -- acts on a key that is in
+							// the store, so neither may be scheduled for one
+							// that is not.
+							lg.Error("kdb.Sig0TrustMgmt failed", "error", err,
+								"keyname", keyrr.Header().Name, "keyid", keyrr.KeyTag())
+							keyStoreFailed = true
+							continue
 						}
 
 						// Queue untrusted child-update adds for async verification.
@@ -469,7 +478,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				// stored, so once it is validated and promoted to trusted the
 				// child's superseded keys may be removed. Registered only now,
 				// because the key had to actually land first.
-				if ceremonyDeferred && err == nil {
+				if ceremonyDeferred && err == nil && !keyStoreFailed {
 					registerPendingKeyReplacement(ceremonyKey.Header().Name, ceremonyKey.KeyTag())
 					lg.Info("ZoneUpdater: deferring DEL-ANY-KEY from self-signed bootstrap until new key is trusted",
 						"child", ceremonyKey.Header().Name, "keyid", ceremonyKey.KeyTag())

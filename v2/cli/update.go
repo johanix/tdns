@@ -530,7 +530,12 @@ cmdloop:
 					fmt.Printf("  the parent refused the update; the key may be known but not trusted\n")
 				}
 				// The composed actions are kept so they can be retried or
-				// edited rather than silently discarded on a failure.
+				// edited rather than silently discarded on a failure. The
+				// MESSAGE is not: it is already signed over the old actions, and
+				// leaving it set would make the next `send` skip signing and
+				// transmit the stale message instead of the edited one.
+				msg = nil
+				msgSigned = false
 				continue
 			}
 			fmt.Printf("Update accepted, rcode: %d (%s)\n", rcode, dns.RcodeToString[rcode])
