@@ -378,6 +378,39 @@ LOC figures are rough order-of-magnitude, implementation and tests separately.
 
 Rough total: **~590 implementation, ~840 test, ~1430 LOC.**
 
+### Open decisions that block implementation
+
+The design is settled; these four are not, and three of them gate specific items.
+
+**D1 (blocks A1) — what is the intended DS set for a zone that is not in a
+rollover?** "Use the source the rollover engine uses" is the right direction and
+not yet a specification. `ComputeTargetDSSetForZone` builds on
+`loadTargetKSKsForRollover`, whose query selects SEP keys in `created`,
+`ds-published`, `standby`, `published`, `active` and `retired`, and returns
+index bounds for the engine to consume in phases. Calling it from the general
+child-sync path would publish a DS for keys that are merely generated, and for
+retired ones. A narrower key-state set has to be named — and which states belong
+in it is a policy question, not an implementation detail. The `LEFT JOIN` on
+`RolloverKeyState` means the function is at least usable for zones with no
+rollover state; it is the state filter that is wrong for this caller, not the
+plumbing.
+
+**D2 (blocks A2, small) — skip only DS, or skip the whole sync, while
+`RolloverInProgress` is set?** Recommendation is DS only: NS and glue changes
+are independent of a key rollover, and a rollover window is days wide, so
+suppressing everything would stall legitimate delegation edits for the duration.
+
+**D3 (blocks C1 / #384) — is the coherence check mandatory, configurable, or
+advisory?** Discussed on the issue. The RFC 8078 delete sentinel must remain
+expressible in every variant.
+
+**D4 (blocks A3) — should intent be expressed as CDS internally?** A decision,
+not an implementation slot. Nothing else depends on it.
+
+A2 is implementable today given D2. C1 is implementable given D3. A1 is not
+implementable until D1 is answered. A4 needs its own read-only investigation
+before it can be sized at all.
+
 ### Ordering
 
 1. **A2 first.** Cheapest item on the list, and it is the one that makes the
