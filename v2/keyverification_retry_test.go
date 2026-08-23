@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
@@ -91,4 +92,41 @@ func TestParseKeygenAlgorithmTakesAValue(t *testing.T) {
 			t.Errorf("parseKeygenAlgorithm(%q) = %d, want %d", tc.in, got, tc.want)
 		}
 	}
+}
+
+// The unit tests above prove waitOrDone behaves; this one proves the goroutine
+// actually uses it. Start the real verification goroutine with an
+// already-cancelled context and assert it is gone within a bounded time.
+//
+// With no IMR registered the goroutine takes the "IMR not yet available" branch
+// and waits out the backoff -- which is precisely where the old time.Sleep
+// stranded it past shutdown, for 10s on the first attempt and doubling from
+// there. Under the old code this test would still see it running at the
+// deadline.
+func TestTriggerChildKeyVerificationExitsOnCancellation(t *testing.T) {
+	savedImr := Globals.ImrEngine
+	Globals.ImrEngine = nil
+	t.Cleanup(func() { Globals.ImrEngine = savedImr })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Let anything already in flight settle, so the baseline is meaningful.
+	time.Sleep(50 * time.Millisecond)
+	before := runtime.NumGoroutine()
+
+	kdb := &KeyDB{}
+	kdb.TriggerChildKeyVerification(ctx, "child.example.", 12345,
+		"child.example. 3600 IN KEY 256 3 15 x")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= before {
+			return // it exited
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the verification goroutine was still running 5s after a cancelled"+
+		" context (goroutines %d -> %d); it is sleeping through shutdown instead"+
+		" of selecting on ctx.Done()", before, runtime.NumGoroutine())
 }
