@@ -253,6 +253,19 @@ func DsyncApiPostDelegation() func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Coherence: authorised is not the same as correct. The policy above
+		// decides whether this principal may touch these RRtypes; it says
+		// nothing about whether the delegation that results still works. The
+		// parent checks that itself, on every channel, because a check done by
+		// the requesting client is not a check.
+		if cerr := CheckDelegationCoherence(child, zd.currentChildDS(child), actions,
+			imrDnskeyFetcher(Conf.Internal.ImrEngine)); cerr != nil {
+			lgDsyncApi.Warn("DSYNC API update refused as incoherent",
+				"zone", zd.ZoneName, "child", child, "principal", cred.Principal, "err", cerr)
+			dsyncApiError(w, http.StatusConflict, "%v", cerr)
+			return
+		}
+
 		if zd.KeyDB == nil || zd.KeyDB.UpdateQ == nil {
 			dsyncApiError(w, http.StatusServiceUnavailable, "zone updater is not available")
 			return
