@@ -160,18 +160,26 @@ func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, 
 		lgDns.Warn("error from AuthQuery for DS", "server", pserver, "zone", zd.ZoneName, "err", err)
 		// DS query failure — skip DS comparison entirely
 	} else if len(p_dsrrs) > 0 || len(apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs) > 0 {
-		// Compute local DS from KSK DNSKEYs
-		var childDS []dns.RR
-		for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
-			if dnskey, ok := rr.(*dns.DNSKEY); ok {
-				if dnskey.Flags&dns.SEP != 0 {
-					ds := dnskey.ToDS(dns.SHA256)
-					if ds != nil {
-						childDS = append(childDS, ds)
-					}
-				}
-			}
+		// What the parent should hold comes from the keystore, not from the
+		// published DNSKEY RRset. Under multi-DS the new DS is placed at the
+		// parent BEFORE its DNSKEY appears in the zone, so a set derived from
+		// published keys is missing exactly the record the rollover just added
+		// and would report it for deletion.
+		//
+		// An unknown intent is not an empty one: it means tdns does not manage
+		// this zone's keys, and the parent's DS is then none of our business.
+		intent, ierr := DSIntentForZone(zd.KeyDB, zd.ZoneName, dns.SHA256)
+		if ierr != nil {
+			lgDns.Warn("AnalyseZoneDelegation: could not determine the DS intent; leaving the parent DS alone",
+				"zone", zd.ZoneName, "err", ierr)
+			return nil
 		}
+		if !intent.Known {
+			lgDns.Debug("AnalyseZoneDelegation: no keystore KSKs for this zone; leaving the parent DS alone",
+				"zone", zd.ZoneName)
+			return nil
+		}
+		childDS := intent.Set
 
 		dsdiff, dsadds, dsremoves := core.RRsetDiffer(zd.ZoneName, childDS,
 			p_dsrrs, dns.TypeDS, zd.Logger, Globals.Verbose, Globals.Debug)
@@ -181,8 +189,11 @@ func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, 
 			resp.DSRemoves = append(resp.DSRemoves, dsremoves...)
 		}
 
-		// Compute NewDS for replace mode
+		// Compute NewDS for replace mode. Authoritative even when empty: an
+		// un-signed zone whose keys tdns holds is a real instruction to
+		// withdraw the DS, not an absence of opinion.
 		resp.NewDS = childDS
+		resp.NewDSKnown = true
 	}
 
 	return nil
