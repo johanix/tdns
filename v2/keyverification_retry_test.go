@@ -98,16 +98,20 @@ func TestParseKeygenAlgorithmTakesAValue(t *testing.T) {
 // actually uses it. Start the real verification goroutine with an
 // already-cancelled context and assert it is gone within a bounded time.
 //
-// With no IMR registered the goroutine takes the "IMR not yet available" branch
-// and waits out the backoff -- which is precisely where the old time.Sleep
-// stranded it past shutdown, for 10s on the first attempt and doubling from
-// there. Under the old code this test would still see it running at the
-// deadline.
+// Whichever branch it takes, the goroutine reaches a wait: with no IMR it is the
+// "IMR not yet available" retry, and with one it is the post-attempt backoff.
+// Both are where the old time.Sleep stranded it past shutdown -- 10s on the
+// first attempt, doubling from there. Under the old code this test still sees it
+// running at the deadline.
 func TestTriggerChildKeyVerificationExitsOnCancellation(t *testing.T) {
-	savedImr := Globals.ImrEngine
-	Globals.ImrEngine = nil
-	t.Cleanup(func() { Globals.ImrEngine = savedImr })
-
+	// Deliberately does NOT touch Globals.ImrEngine. Setting and restoring it
+	// races the goroutine that reads it, and the restore in a t.Cleanup can run
+	// while the goroutine is still live -- the goroutine-count check below is a
+	// heuristic, not a completion signal, so there is nothing to order against.
+	//
+	// It is not needed either: every wait in the retry loop goes through
+	// waitOrDone(ctx), so a cancelled context makes the goroutine exit promptly
+	// whichever branch it takes, IMR or no IMR.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
