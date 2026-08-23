@@ -216,12 +216,17 @@ func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS 
 		m.RemoveRRset([]dns.RR{rrA, rrAAAA})
 	}
 
-	// Remove all existing DS records for the child zone (if we have new DS)
-	if len(newDS) > 0 {
-		rrDS := new(dns.DS)
-		rrDS.Hdr = dns.RR_Header{Name: child, Rrtype: dns.TypeDS, Class: dns.ClassANY, Ttl: 3600}
-		m.RemoveRRset([]dns.RR{rrDS})
-	}
+	// Remove all existing DS records for the child zone.
+	//
+	// Unconditionally, including when the child has no DS to put back. This is
+	// a REPLACE: the parent's delegation is made to match the child's, and an
+	// unsigned child means no DS. Skipping the removal for an empty newDS left
+	// a DS in the parent for a zone that cannot answer for it, which is not a
+	// harmless leftover -- every validator then declares the whole child zone
+	// bogus. Synchronisation that cannot express "no DS" cannot repair that.
+	rrDS := new(dns.DS)
+	rrDS.Hdr = dns.RR_Header{Name: child, Rrtype: dns.TypeDS, Class: dns.ClassANY, Ttl: 3600}
+	m.RemoveRRset([]dns.RR{rrDS})
 
 	// Add all new NS records
 	m.Insert(newNS)

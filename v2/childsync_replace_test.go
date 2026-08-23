@@ -90,8 +90,15 @@ func TestCreateChildReplaceUpdateStructure(t *testing.T) {
 	}
 }
 
-// Replace with no DS (unsigned zone) still replaces NS+glue and does not add a
-// DS — the unsigned-zone case the UPDATE path serves that NOTIFY cannot.
+// Replace with no DS (unsigned zone) replaces NS+glue AND deletes the parent's
+// DS RRset, adding none back — the unsigned-zone case the UPDATE path serves
+// that NOTIFY cannot.
+//
+// It used to assert the opposite: that an unsigned replace left the DS alone.
+// That reading of "absent means leave alone" is wrong for a REPLACE. A DS in
+// the parent for a child that is not signed makes every validator declare the
+// child bogus, so leaving it is not caution, it is an outage that no later
+// transfer repairs.
 func TestCreateChildReplaceUpdateUnsigned(t *testing.T) {
 	m, err := CreateChildReplaceUpdate("example.", "child.example.",
 		[]dns.RR{mustRR(t, "child.example. 3600 IN NS ns1.child.example.")},
@@ -100,9 +107,22 @@ func TestCreateChildReplaceUpdateUnsigned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateChildReplaceUpdate (unsigned): %v", err)
 	}
+
+	var delDS, addDS int
 	for _, rr := range m.Ns {
-		if rr.Header().Rrtype == dns.TypeDS {
-			t.Fatalf("unsigned replace must not touch DS, got %v", rr)
+		if rr.Header().Rrtype != dns.TypeDS {
+			continue
 		}
+		if rr.Header().Class == dns.ClassANY {
+			delDS++
+			continue
+		}
+		addDS++
+	}
+	if delDS != 1 {
+		t.Errorf("DS RRset deletions = %d, want 1 (unsigned child must clear the parent DS)", delDS)
+	}
+	if addDS != 0 {
+		t.Errorf("added DS = %d, want 0", addDS)
 	}
 }
