@@ -900,6 +900,22 @@ func noteServerWithoutAddresses(zoneName, nsname string) {
 		"note", "either the server map was populated without addresses, or the nameserver has no address records; reported once per zone/server")
 }
 
+// refusalIndicatesLameness reports whether a refusal rcode is evidence that the
+// answering server is lame for the zone, and should therefore be put into a
+// backoff.
+//
+// A DS is PARENT-side data. A server authoritative for the child answers
+// REFUSED or NOTAUTH to a DS query for that child -- correctly, and it says
+// nothing about whether that server is lame for the zone it does serve. It
+// should not be queried for a DS in the first place, but a stray query must not
+// be able to disable the server either.
+func refusalIndicatesLameness(qtype uint16, rcode int) bool {
+	if qtype == dns.TypeDS && (rcode == dns.RcodeRefused || rcode == dns.RcodeNotAuth) {
+		return false
+	}
+	return true
+}
+
 func candidateTransports(server *cache.AuthServer, qname string, requireEncrypted bool) []core.Transport {
 	if server == nil {
 		if requireEncrypted {
@@ -1347,6 +1363,29 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			// Other servers / other transports stay available.
 			switch rcode {
 			case dns.RcodeRefused, dns.RcodeNotAuth, dns.RcodeServerFailure, dns.RcodeNotImplemented:
+				// A DS is PARENT-side data. A server authoritative for the child
+				// answers REFUSED or NOTAUTH to a DS query for that child --
+				// correctly, and it says nothing whatever about whether that
+				// server is lame for the zone it does serve.
+				//
+				// Booking it as a lame delegation was fatal for any zone reached
+				// through a single server: the backoff removed the only address
+				// there was, prioritizeServers then had nothing to offer, and
+				// every later query for the zone ended with no auth-server
+				// attempt at all. A stub zone with a trust anchor hit this during
+				// startup, because validating the anchor's NS RRset backfills the
+				// DS before the first ordinary query arrives.
+				//
+				// Genuine lameness still gets recorded: a server that is really
+				// lame refuses the other qtypes too, and those take the branch
+				// below.
+				if !refusalIndicatesLameness(qtype, rcode) {
+					if Globals.Debug {
+						lg.Printf("IterativeDNSQuery: %s from %s@%s for a DS query (%s) — parent-side data, not evidence of lameness; not recording a backoff",
+							dns.RcodeToString[rcode], addr, nsname, qname)
+					}
+					continue
+				}
 				if Globals.Debug {
 					lg.Printf("IterativeDNSQuery: %s response from %s@%s over %s for %s %s (likely lame delegation for zone %q)",
 						dns.RcodeToString[rcode], addr, nsname, core.TransportToString[wireTransport], qname, dns.TypeToString[qtype], zoneName)
