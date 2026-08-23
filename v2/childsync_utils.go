@@ -13,7 +13,6 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // This is only called from the CLI command "tdns-cli ddns sync" and uses a SIG(0) key from the
@@ -409,7 +408,7 @@ func (zd *ZoneData) BestSyncScheme(ctx context.Context, imr *Imr) (string, *Dsyn
 		lgDns.Warn("BestSyncScheme: no DSYNC RRs found, synching not possible", "zone", zd.ZoneName, "parent", dsync_res.Parent)
 		return "", nil, fmt.Errorf("no DSYNC RRs for %s found in parent %s", zd.ZoneName, dsync_res.Parent)
 	}
-	schemes := viper.GetStringSlice("delegationsync.child.schemes")
+	schemes := DelegationSyncConfig().Child.Schemes
 	if len(schemes) == 0 {
 		lgDns.Error("BestSyncScheme: no synchronization schemes configured", "zone", zd.ZoneName)
 		return "", nil, fmt.Errorf("no synchronizations schemes configured for child %s", zd.ZoneName)

@@ -499,7 +499,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				for _, pv := range toVerify {
 					lg.Info("ZoneUpdater: triggering child key verification",
 						"zone", pv.childZone, "keyid", pv.keyid)
-					kdb.TriggerChildKeyVerification(pv.childZone, pv.keyid, pv.keyRR)
+					kdb.TriggerChildKeyVerification(ctx, pv.childZone, pv.keyid, pv.keyRR)
 				}
 			default:
 				lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)
