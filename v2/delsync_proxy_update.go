@@ -414,13 +414,24 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
 	}
 
 	// Sign as the child with the agent's SIG(0) key.
+	// A keystore failure and an absent key are different problems: collapsing
+	// them reported "no active SIG(0) key" for a broken keystore, sending the
+	// operator to look at key publication instead of at the database.
 	sak, kerr := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
-	if kerr != nil || sak == nil || len(sak.Keys) == 0 {
+	if kerr != nil {
+		return "", fmt.Errorf("ProxyUpdateParent: keystore lookup for %s: %w", zd.ZoneName, kerr)
+	}
+	if sak == nil || len(sak.Keys) == 0 {
 		return "", fmt.Errorf("ProxyUpdateParent: no active SIG(0) key for %s", zd.ZoneName)
 	}
 	smsg, serr := SignMsg(*m, zd.ZoneName, sak)
-	if serr != nil || smsg == nil {
-		return "", fmt.Errorf("ProxyUpdateParent: sign UPDATE: %w", serr)
+	if serr != nil {
+		return "", fmt.Errorf("ProxyUpdateParent: sign UPDATE for %s: %w", zd.ZoneName, serr)
+	}
+	if smsg == nil {
+		// %w on a nil error rendered as "%!w(<nil>)", which says nothing.
+		return "", fmt.Errorf("ProxyUpdateParent: signing UPDATE for %s produced no message and no error",
+			zd.ZoneName)
 	}
 
 	rcode, _, uerr := SendUpdate(smsg, zd.Parent, target.Addresses)

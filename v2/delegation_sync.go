@@ -427,19 +427,30 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 	var rcode uint8
 	var ur UpdateResult
 
-	msg, err := zd.walkSyncPlan(plan, func(cand SyncCandidate) (string, error) {
+	msg, err := zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
 		var m string
 		var e error
+		var candRcode uint8
+		var candUr UpdateResult
 		switch cand.Scheme {
 		case "UPDATE":
-			m, rcode, ur, e = zd.SyncZoneDelegationViaUpdate(kdb, syncstate, cand.Target)
+			m, candRcode, candUr, e = zd.SyncZoneDelegationViaUpdate(kdb, syncstate, cand.Target)
 		case "NOTIFY":
-			m, rcode, e = zd.SyncZoneDelegationViaNotify(kdb, notifyq, syncstate, cand.Target)
+			m, candRcode, e = zd.SyncZoneDelegationViaNotify(kdb, notifyq, syncstate, cand.Target)
 		case "API":
-			m, rcode, e = zd.SyncZoneDelegationViaApi(ctx, imr, syncstate, cand.Target)
+			m, candRcode, e = zd.SyncZoneDelegationViaApi(ctx, imr, syncstate, cand.Target)
 		default:
 			e = fmt.Errorf("unknown scheme %q in plan", cand.Scheme)
 		}
+		if e != nil {
+			// Only a SUCCEEDING attempt may publish its result, which is what
+			// the comment above always claimed. SyncZoneDelegationViaUpdate
+			// returns a POPULATED UpdateResult alongside its error, so assigning
+			// unconditionally paired a failed UPDATE's TargetStatus with a later
+			// transport's rcode, and the caller stored that as the outcome.
+			return m, e
+		}
+		rcode, ur = candRcode, candUr
 		return m, e
 	})
 

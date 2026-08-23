@@ -346,7 +346,7 @@ func TestWalkSyncPlanContinuesPastAFailure(t *testing.T) {
 	}}
 
 	var tried []string
-	msg, err := zd.walkSyncPlan(plan, func(c SyncCandidate) (string, error) {
+	msg, err := zd.walkSyncPlan(context.Background(), plan, func(c SyncCandidate) (string, error) {
 		tried = append(tried, c.Scheme)
 		if c.Scheme == "API" {
 			return "sent via API", nil
@@ -371,7 +371,7 @@ func TestWalkSyncPlanStopsAtTheFirstSuccess(t *testing.T) {
 	plan := &ParentSyncPlan{Candidates: []SyncCandidate{{Scheme: "UPDATE"}, {Scheme: "NOTIFY"}}}
 
 	var tried []string
-	msg, err := zd.walkSyncPlan(plan, func(c SyncCandidate) (string, error) {
+	msg, err := zd.walkSyncPlan(context.Background(), plan, func(c SyncCandidate) (string, error) {
 		tried = append(tried, c.Scheme)
 		return "sent via " + c.Scheme, nil
 	})
@@ -395,7 +395,7 @@ func TestWalkSyncPlanReportsEveryFailure(t *testing.T) {
 		Skipped:    []SkippedScheme{{"NOTIFY", "zone is unsigned"}},
 	}
 
-	_, err := zd.walkSyncPlan(plan, func(c SyncCandidate) (string, error) {
+	_, err := zd.walkSyncPlan(context.Background(), plan, func(c SyncCandidate) (string, error) {
 		return "", fmt.Errorf("%s exploded", c.Scheme)
 	})
 	if err == nil {
@@ -405,5 +405,73 @@ func TestWalkSyncPlanReportsEveryFailure(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q is missing %q", err, want)
 		}
+	}
+}
+
+// The walk must stop between candidates when the context is cancelled. Each
+// candidate is a network round trip over a different transport, and the senders
+// observe cancellation unevenly -- the UPDATE path reaches SendUpdate, which
+// takes no context at all. Without a check in the walk, a shutdown left it
+// working through the rest of the plan.
+func TestWalkSyncPlanStopsOnCancellation(t *testing.T) {
+	zd := &ZoneData{ZoneName: "child.example."}
+	plan := &ParentSyncPlan{
+		Parent: "example.",
+		Candidates: []SyncCandidate{
+			{Scheme: "UPDATE"}, {Scheme: "API"}, {Scheme: "NOTIFY"},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var attempts int
+	_, err := zd.walkSyncPlan(ctx, plan, func(c SyncCandidate) (string, error) {
+		attempts++
+		return "sent", nil
+	})
+
+	if attempts != 0 {
+		t.Errorf("walk attempted %d candidate(s) on a cancelled context; it must stop before the first", attempts)
+	}
+	if err == nil {
+		t.Fatal("walk reported success on a cancelled context")
+	}
+	if !strings.Contains(err.Error(), "abandoned") {
+		t.Errorf("error does not say the walk was abandoned: %v", err)
+	}
+}
+
+// Cancellation partway through must not be reported as "every scheme failed":
+// the remaining transports were never tried, and saying they failed would send
+// an operator looking for a fault that does not exist.
+func TestWalkSyncPlanCancelledMidwayReportsWhatWasTried(t *testing.T) {
+	zd := &ZoneData{ZoneName: "child.example."}
+	plan := &ParentSyncPlan{
+		Parent: "example.",
+		Candidates: []SyncCandidate{
+			{Scheme: "UPDATE"}, {Scheme: "API"}, {Scheme: "NOTIFY"},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var attempts int
+	_, err := zd.walkSyncPlan(ctx, plan, func(c SyncCandidate) (string, error) {
+		attempts++
+		cancel() // shutdown arrives during the first attempt
+		return "", fmt.Errorf("%s unreachable", c.Scheme)
+	})
+
+	if attempts != 1 {
+		t.Errorf("walk made %d attempts, want 1 before noticing cancellation", attempts)
+	}
+	if err == nil {
+		t.Fatal("walk reported success")
+	}
+	if !strings.Contains(err.Error(), "abandoned") {
+		t.Errorf("error should say the walk was abandoned, not that every scheme failed: %v", err)
+	}
+	if !strings.Contains(err.Error(), "UPDATE failed") {
+		t.Errorf("error should still name the attempt that was actually made: %v", err)
 	}
 }

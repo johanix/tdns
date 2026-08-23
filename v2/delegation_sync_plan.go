@@ -367,7 +367,7 @@ func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan
 		return "no usable sync scheme; nothing forwarded (" + plan.Summary() + ")", nil
 	}
 
-	return zd.walkSyncPlan(plan, func(cand SyncCandidate) (string, error) {
+	return zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
 		switch cand.Scheme {
 		case "UPDATE":
 			return zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target)
@@ -393,11 +393,24 @@ func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan
 //
 // All failures are returned together. A caller shown only the last one cannot
 // tell which transport was even expected to work.
-func (zd *ZoneData) walkSyncPlan(plan *ParentSyncPlan,
+func (zd *ZoneData) walkSyncPlan(ctx context.Context, plan *ParentSyncPlan,
 	send func(SyncCandidate) (string, error)) (string, error) {
 
 	var failures []string
 	for _, cand := range plan.Candidates {
+		// Each candidate is a network round trip over a different transport, and
+		// the senders observe cancellation unevenly -- ProxyUpdateParent reaches
+		// SendUpdate, which takes no context at all. Without a check here the
+		// walk works its way through the rest of the plan after everything else
+		// has shut down.
+		if cerr := ctx.Err(); cerr != nil {
+			if len(failures) > 0 {
+				return "", fmt.Errorf("zone %s: sync abandoned (%w) after %s",
+					zd.ZoneName, cerr, strings.Join(failures, "; "))
+			}
+			return "", fmt.Errorf("zone %s: sync abandoned before any attempt: %w",
+				zd.ZoneName, cerr)
+		}
 		msg, err := send(cand)
 		if err == nil {
 			if len(failures) > 0 {
