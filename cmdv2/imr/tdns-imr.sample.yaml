@@ -58,9 +58,19 @@ imrengine:
 
    # Stub / forward zones: answer these from the named servers instead of
    # iterating from the root.
+   # Stub zones: names resolved by asking a named server directly instead of
+   # iterating from the root.
+   #
+   # `servers:` is a list of OBJECTS, not a list of addresses. A bare list of
+   # IPs does not decode into []AuthServer, and the daemon refuses to start.
+   # `addrs:` holds BARE IP literals -- no port, no host:port.
+   # `alpn:` is optional and defaults to do53.
    # stubs:
-   #    - zone:     internal.example.
-   #      servers:  [ 192.0.2.53, 2001:db8::53 ]
+   #    - zone:  internal.example.
+   #      servers:
+   #         - name:   ns1.internal.example.
+   #           addrs:  [ 192.0.2.53, 2001:db8::53 ]
+   #           alpn:   [ do53 ]
 
    # Optional IMR debug log, separate from log.file below.
    # logging:

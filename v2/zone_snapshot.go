@@ -285,3 +285,59 @@ func (zd *ZoneData) soaForResponseFrom(snap *zoneSnapshot, apex *OwnerData) core
 	}
 	return rs
 }
+
+// ownerForAnalysis returns the owner data for qname in a zone that may not have
+// published a snapshot yet.
+//
+// GetOwner serves from the PUBLISHED snapshot. That is right for a live zone,
+// and wrong for the scratch ZoneData that FetchFromUpstream and FetchFromFile
+// hand to the OnZonePreRefresh callbacks: it holds the freshly parsed zone in
+// zd.Data and publishes nothing until the hard flip afterwards. Every callback
+// reading the incoming zone through GetOwner therefore saw an EMPTY zone --
+// which is how the delegation diff came to dereference a nil apex.
+//
+// Reading zd.Data in place costs nothing. Building a snapshot just so GetOwner
+// can serve it would copy every OwnerData in the zone, on a refresh path that is
+// already the subject of open scaling work.
+//
+// Order matters: the published snapshot wins where it exists, because after a
+// flip the load path may leave zd.Data empty while the snapshot holds the truth.
+// The fallback is only for the not-yet-published case.
+func (zd *ZoneData) ownerForAnalysis(qname string) (*OwnerData, error) {
+	if zd == nil {
+		return nil, fmt.Errorf("ownerForAnalysis: zone data is nil")
+	}
+	if zd.ZoneStore != MapZone {
+		return nil, fmt.Errorf("ownerForAnalysis: only supported for MapZone, not %s",
+			ZoneStoreToString[zd.ZoneStore])
+	}
+	if snap := zd.publishedSnapshot(); snap != nil {
+		return getOwnerFrom(snap, qname), nil
+	}
+	if zd.Data == nil {
+		return nil, nil
+	}
+	od, ok := zd.Data.Get(qname)
+	if !ok {
+		return nil, nil
+	}
+	odCopy := od
+	return &odCopy, nil
+}
+
+// rrsetForAnalysis is ownerForAnalysis's RRset counterpart. Unlike GetRRset it
+// does not panic when the apex owner is absent: on the pre-refresh path that is
+// a reachable state, not a can't-happen.
+func (zd *ZoneData) rrsetForAnalysis(qname string, rrtype uint16) (*core.RRset, error) {
+	owner, err := zd.ownerForAnalysis(qname)
+	if err != nil {
+		return nil, err
+	}
+	if owner == nil {
+		return nil, nil
+	}
+	if rrset, exists := owner.RRtypes.Get(rrtype); exists {
+		return &rrset, nil
+	}
+	return nil, nil
+}
