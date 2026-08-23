@@ -131,23 +131,41 @@ constraint enforces itself.
 So double-DS carries through a proxy, and the earlier conclusion that fancier
 ceremonies require the primary to manage sync itself does not apply to it.
 
-### The proxy inherits the parent's §4.1 obligations
+### Validation stays with the parent, on every channel
 
-By consuming CDS and asserting the result over UPDATE or the API, the proxy
-bypasses the parent's own scanner — which is where §4.1 would normally be
-enforced. It therefore takes on those checks itself:
+An earlier version of this document claimed the proxy inherits the parent's
+§4.1 duties, on the grounds that consuming CDS directly bypasses the parent's
+scanner. That is wrong, and wrong in a way worth naming, because it is the same
+category error as the DNSKEY/CDS one: it put a parent-side responsibility onto a
+child-side client.
 
-- **Continuity** is the important one. The proxy must refuse to send a
-  CDS-derived DS set that would leave the delegation unvalidatable: at least one
-  DS in the resulting set must match a DNSKEY currently published in the child.
-  The delete sentinel is the deliberate exception, being an explicit request to
-  go insecure.
-- **Location** is satisfied by construction, since the proxy reads the apex.
-- **Signer** exists to stop an attacker injecting a CDS. The proxy's evidence is
-  different in kind: an authenticated (TSIG) transfer from its configured
-  primary, asserted onward over its own authenticated channel — SIG(0) for
-  UPDATE, or an API credential. Whether to additionally verify the CDS RRSIG is
-  an open implementation question, not settled here.
+**The parent verifies its own requirements, on every channel, regardless of how
+the change arrived** — its own CDS scanner, a NOTIFY(CDS), a DNS UPDATE, or the
+DSYNC API. A child employing a proxy does not cause any check to be skipped,
+because none of the checks were ever the child's to perform.
+
+Three reasons this is not a matter of taste:
+
+- **A check performed by the requester is not a check.** The proxy is the party
+  making the request. A parent relying on the proxy's verification is relying on
+  a buggy or compromised proxy to refuse itself.
+- **The proxy cannot know the requirements.** RFC 7344 §4.1 is a floor, not a
+  ceiling. A parent may require a minimum algorithm, particular digest types, a
+  DS count limit, or that a given registrant is not on hold. None of that is
+  discoverable by the child, so "inherit the duties" is not implementable.
+- **Pre-filtering is actively harmful.** If the proxy's idea of Continuity
+  differs from the parent's actual policy, it silently refuses changes the
+  parent would have accepted. Sending the request and surfacing the parent's own
+  rejection gives the operator the real reason.
+
+So the proxy delivers the child's stated intent faithfully and reports what the
+parent says. A rejection is a normal outcome to be surfaced, not a failure the
+proxy should have prevented.
+
+The parent side already works this way for authorization: the DSYNC API handler
+applies the zone's `updatepolicy.child` through `ApproveActionsForPrincipal`,
+the same function the DDNS path uses, with the authenticated principal where the
+SIG(0) signer name goes.
 
 ## The one remaining inference: an unsigned child
 
@@ -201,7 +219,17 @@ Nothing here is authorised for implementation yet.
    `AnalyseZoneDelegation`. Unlike the proxy it has a keystore and a rollover
    engine, so the fix is different — point it at the same helpers the rollover
    engine uses — but the double-DS exposure is the same.
-6. **Verify the double-writer question before the rollover work lands.** For a
+6. **The parent checks authorization but not coherence on its push paths.**
+   `ApproveActionsForPrincipal` decides whether a principal may touch an RRtype
+   at a name; it says nothing about whether the resulting delegation still
+   works. The scanner path applies an RFC 7344/8078 gate, but the UPDATE and API
+   paths have no continuity check at all, so a principal fully authorised to
+   manage a child's DS can push a set that breaks the delegation and the parent
+   will publish it. This is a parent-side gap on the parent's own channels, not
+   something a proxy should compensate for, and whether the check should be
+   mandatory or configurable is undecided.
+
+7. **Verify the double-writer question before the rollover work lands.** For a
    zone with both rollover and delegation-sync enabled, the rollover engine
    publishes the *target* DS set while the reconcile path computes the
    *published* one. The reconcile would remove a pre-published DS during exactly
