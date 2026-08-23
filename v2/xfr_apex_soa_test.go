@@ -29,6 +29,14 @@ func TestTransferredApexSOARejectsIncompleteTransfers(t *testing.T) {
 		&dns.NS{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeNS}, Ns: "ns1." + zone},
 	}})
 
+	// An SOA RRset whose first record is not an SOA cannot come off the wire,
+	// but it is what the type assertion guards, and an unasserted type
+	// assertion is a panic like any other.
+	apexWrongType := &OwnerData{Name: zone, RRtypes: NewRRTypeStore()}
+	apexWrongType.RRtypes.Set(dns.TypeSOA, core.RRset{RRs: []dns.RR{
+		&dns.NS{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeNS}, Ns: "ns1." + zone},
+	}})
+
 	tests := []struct {
 		name    string
 		zd      *ZoneData
@@ -37,6 +45,7 @@ func TestTransferredApexSOARejectsIncompleteTransfers(t *testing.T) {
 		{"no apex at all", withOwner(nil), "delivered no apex"},
 		{"apex with nil RRtypes", withOwner(&OwnerData{Name: zone}), "carries no RRsets"},
 		{"apex without SOA", withOwner(apexNoSOA), "apex with no SOA"},
+		{"apex SOA RRset holding a non-SOA", withOwner(apexWrongType), "holds a *dns.NS"},
 	}
 
 	for _, tc := range tests {
