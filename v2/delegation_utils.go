@@ -117,7 +117,43 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 			resp.AAAARemoves = append(resp.AAAARemoves, removes...)
 		}
 	}
-	// 4. Compare DS RRsets between parent and child
+	// 4. Compare DS RRsets between parent and child -- unless a KSK rollover is
+	// in flight, in which case the DS RRset is not this function's to have an
+	// opinion about.
+	//
+	// A rollover deliberately puts the parent and the child's published
+	// DNSKEYs out of step: a double-DS roll places the new DS at the parent
+	// BEFORE the matching DNSKEY appears in the zone. The comparison below
+	// derives the child's DS from published SEP DNSKEYs, so it sees that new DS
+	// as surplus and reports it for removal. Acting on that deletes the DS the
+	// rollover just placed, and the roll then swaps onto a KSK the parent has
+	// no DS for.
+	//
+	// The engine owns the DS while it is rolling, and sources its set from the
+	// keystore and the rollover target rather than from published keys. Only
+	// the DS dimension is suppressed: NS and glue are independent of a key roll,
+	// and a rollover window is days wide, so suppressing the whole comparison
+	// would stall ordinary delegation edits for the duration. Those are
+	// analysed above and their results stand.
+	//
+	// Written as a wrapped block rather than an early return so that anything
+	// added after this point is not silently skipped along with the DS.
+	if !zd.rolloverOwnsDS() {
+		if err := zd.compareParentDS(&resp, pserver, apex); err != nil {
+			return resp, err
+		}
+	}
+
+	return resp, nil
+}
+
+// compareParentDS fills in the DS dimension of a delegation analysis: it asks
+// the parent what DS it holds, derives what the child's published SEP DNSKEYs
+// imply, and records the difference.
+//
+// Split out of AnalyseZoneDelegation so the rollover suppression above reads as
+// one decision rather than an early return threaded through the function.
+func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, apex *OwnerData) error {
 	// Query parent for DS records
 	p_dsrrs, err := AuthQuery(zd.ZoneName, pserver, dns.TypeDS)
 	if err != nil {
@@ -149,7 +185,7 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 		resp.NewDS = childDS
 	}
 
-	return resp, nil
+	return nil
 }
 
 // Only used from CLI (tdns-cli ddns sync)
@@ -527,4 +563,41 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	lgDns.Debug("DnskeysChanged: comparing keys", "newkeys", newkeys.RRs, "oldkeys", oldkeys.RRs)
 	differ, _, _ = core.RRsetDiffer(zd.ZoneName, newkeys.RRs, oldkeys.RRs, dns.TypeDNSKEY, zd.Logger, Globals.Verbose, Globals.Debug)
 	return differ, nil
+}
+
+
+// rolloverOwnsDS reports whether a KSK rollover is in flight for this zone, in
+// which case the rollover engine -- not the delegation-sync comparison --
+// decides what DS the parent should hold.
+//
+// The flag is durable per-zone state the engine already maintains: set when a
+// roll starts, cleared when it completes, and consulted in several places
+// across the rollover and signing subsystems. It is read here, where the DS
+// comparison happens, rather than at each of the producers that feed
+// SyncZoneDelegation, so that all of them are covered by one check.
+//
+// A missing keystore or an unreadable row means "not rolling". That matches
+// every other reader of this flag, and the failure it risks -- syncing DS
+// during a roll -- is what happens today anyway, whereas guessing "rolling"
+// would silently freeze DS synchronisation for a zone that is not rolling.
+//
+// Suppression is logged each time: a rollover that dies without clearing the
+// flag would otherwise stop DS synchronisation indefinitely with nothing said
+// about why.
+func (zd *ZoneData) rolloverOwnsDS() bool {
+	if zd == nil || zd.KeyDB == nil {
+		return false
+	}
+	row, err := LoadRolloverZoneRow(zd.KeyDB, zd.ZoneName)
+	if err != nil {
+		lgDns.Warn("AnalyseZoneDelegation: could not read rollover state; treating the zone as not rolling",
+			"zone", zd.ZoneName, "err", err)
+		return false
+	}
+	if row == nil || !row.RolloverInProgress {
+		return false
+	}
+	lgDns.Info("AnalyseZoneDelegation: KSK rollover in progress; leaving the DS RRset to the rollover engine",
+		"zone", zd.ZoneName)
+	return true
 }
