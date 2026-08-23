@@ -339,7 +339,16 @@ func BailiwickNS(zonename string, nsrrs []dns.RR) ([]string, error) {
 	var ns_inbailiwick []string
 	for _, rr := range nsrrs {
 		if ns, ok := rr.(*dns.NS); ok {
-			if strings.HasSuffix(ns.Ns, zonename) {
+			// Compared on LABEL boundaries: a bare strings.HasSuffix accepts
+			// "ns.notexample.com." as in-bailiwick for "example.com.", because
+			// the suffix matches across a label boundary. That name is in a
+			// different zone entirely, so treating it as in-bailiwick means
+			// looking for glue where none can exist.
+			//
+			// dns.IsSubDomain compares whole labels, and is case-insensitive as
+			// DNS requires -- the old comparison also missed "NS.EXAMPLE.COM."
+			// for the same zone.
+			if dns.IsSubDomain(dns.Fqdn(zonename), dns.Fqdn(ns.Ns)) {
 				ns_inbailiwick = append(ns_inbailiwick, ns.Ns)
 			}
 		}
