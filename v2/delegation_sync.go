@@ -412,6 +412,8 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 		msg, rcode, ur, err = zd.SyncZoneDelegationViaUpdate(kdb, syncstate, dsynctarget)
 	case "NOTIFY":
 		msg, rcode, err = zd.SyncZoneDelegationViaNotify(kdb, notifyq, syncstate, dsynctarget)
+	case "API":
+		msg, rcode, err = zd.SyncZoneDelegationViaApi(ctx, imr, syncstate, dsynctarget)
 	}
 
 	return msg, rcode, ur, err

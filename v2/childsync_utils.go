@@ -434,6 +434,38 @@ schemeLoop:
 				break schemeLoop
 			}
 
+		case "api":
+			lgDns.Debug("BestSyncScheme: checking API alternative")
+			// The API scheme needs the DSYNC lookup to have DNSSEC-validated,
+			// and this is the check that makes DsyncResult.Validated mean
+			// something. The DSYNC record names the target whose URI carries
+			// the endpoint this client then sends a bearer credential to, so an
+			// unvalidated lookup lets whoever can answer the query choose where
+			// the credential goes. NOTIFY and UPDATE do not carry a secret and
+			// are not gated this way.
+			//
+			// allow-insecure is the same switch DiscoverDsyncApiEndpoint uses
+			// for its own requireDnssec, so one setting governs the whole path
+			// rather than half of it.
+			if !dsync_res.Validated && !DelegationSyncConfig().Child.Api.AllowInsecure {
+				lgDns.Warn("BestSyncScheme: skipping the API scheme:"+
+					" the DSYNC lookup did not DNSSEC-validate and"+
+					" delegationsync.child.api.allow-insecure is not set",
+					"qname", dsync_res.Qname, "parent", dsync_res.Parent)
+				continue schemeLoop
+			}
+			for _, drr := range dsync_res.Rdata {
+				if drr.Scheme == core.SchemeAPI {
+					active_drr = drr
+					break
+				}
+			}
+			if active_drr != nil {
+				lgDns.Debug("BestSyncScheme: found working API config")
+				active_scheme = "API"
+				break schemeLoop
+			}
+
 		case "notify":
 			lgDns.Debug("BestSyncScheme: checking NOTIFY alternative")
 			for _, drr := range dsync_res.Rdata {
@@ -463,16 +495,24 @@ schemeLoop:
 		lgDns.Debug("BestSyncScheme: DSYNC RR", "qname", dsync_res.Qname, "rdata", drr.String())
 	}
 
-	tmp, err := net.LookupHost(active_drr.Target)
-	if err != nil {
-		return "", nil, fmt.Errorf("error: %v", err)
-	}
-	for _, addr := range tmp {
-		dsynctarget.Addresses = append(dsynctarget.Addresses, net.JoinHostPort(addr, fmt.Sprintf("%d", active_drr.Port)))
-	}
+	// NOTIFY and UPDATE send DNS to the target, so it has to resolve to an
+	// address here. The API scheme's target is a service description point --
+	// the URI published there names the endpoint, and that URL's own host is
+	// what resolves, later and by ordinary means. Address records at an API
+	// target are optional, so resolving it would fail on a correctly
+	// configured parent.
+	if active_drr.Scheme != core.SchemeAPI {
+		tmp, err := net.LookupHost(active_drr.Target)
+		if err != nil {
+			return "", nil, fmt.Errorf("error: %v", err)
+		}
+		for _, addr := range tmp {
+			dsynctarget.Addresses = append(dsynctarget.Addresses, net.JoinHostPort(addr, fmt.Sprintf("%d", active_drr.Port)))
+		}
 
-	if Globals.Verbose {
-		fmt.Printf("%s has the IP addresses: %v\n", active_drr.Target, dsynctarget.Addresses)
+		if Globals.Verbose {
+			fmt.Printf("%s has the IP addresses: %v\n", active_drr.Target, dsynctarget.Addresses)
+		}
 	}
 	dsynctarget.Port = active_drr.Port
 	dsynctarget.Name = active_drr.Target

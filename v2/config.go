@@ -59,6 +59,11 @@ type Config struct {
 	// server, referenced from upstreams:/notify:/downstreams:/allow-notify:
 	// as `- peers: [ id, ... ]` entries (docs/2026-07-21-peers-xfr-auth-design.md).
 	Peers map[string]PeerDef `yaml:"peers" mapstructure:"peers"`
+	// DelegationSync is the delegationsync: block. Partial by design — see
+	// the type comment in config_delegationsync.go. No validate tags and not
+	// registered in ValidateConfig's configsections, so a config without the
+	// block is exactly as valid as it was before this field existed.
+	DelegationSync DelegationSyncConf `yaml:"delegationsync" mapstructure:"delegationsync"`
 	// Journal is the journal: block -- deployment-wide settings for the delta
 	// journal (Phase 2 persistence).
 	Journal    JournalConf  `yaml:"journal" mapstructure:"journal"`

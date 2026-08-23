@@ -219,6 +219,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 			switch ur.Cmd {
 			case "DEFERRED-UPDATE":
 				lg.Error("ZoneUpdater: received deferred update on wrong queue", "description", ur.Description)
+				ur.respond(false, fmt.Errorf("deferred update sent to the wrong queue"))
 				continue
 
 			case "CHILD-UPDATE":
@@ -241,20 +242,34 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				backend := zd.DelegationBackend
 				zd.mu.Unlock()
 
+				// Every exit from here answers ur.Resp. A caller that is
+				// waiting for the change to be durable before it says so --
+				// the RFC 2136 responder, and the DSYNC API handler -- has no
+				// other way to find out, and silence costs it a full
+				// UpdateApplyTimeout before it gives up and reports failure
+				// for an update that may well have succeeded.
 				if !allowChildUpdates {
 					lg.Warn("ZoneUpdater: zone does not allow child updates, dropping CHILD-UPDATE", "zone", ur.ZoneName)
+					ur.respond(false, fmt.Errorf("zone %s does not allow child updates", ur.ZoneName))
 					continue
 				}
 				if backend == nil {
 					lg.Error("ZoneUpdater: zone allows child updates but has no DelegationBackend, dropping CHILD-UPDATE (invariant violation)", "zone", ur.ZoneName)
+					ur.respond(false, fmt.Errorf("zone %s has no delegation backend", ur.ZoneName))
 					continue
 				}
 				if err := backend.ApplyChildUpdate(ur.ZoneName, ur); err != nil {
 					lg.Error("ZoneUpdater: DelegationBackend.ApplyChildUpdate failed",
 						"backend", backend.Name(), "error", err)
+					ur.respond(false, err)
 				} else {
 					lg.Info("ZoneUpdater: CHILD-UPDATE applied",
 						"zone", ur.ZoneName, "backend", backend.Name())
+					// ApplyChildUpdate is durable by the time it returns: the
+					// direct backend has written the zone file, the db backend
+					// has written the row. So this is the same promise the
+					// ZONE-UPDATE path makes.
+					ur.respond(true, nil)
 					// OptDirty is managed by the backend: 'direct' sets
 					// then clears it via WriteZone after persisting; DB-
 					// and zonefile-backends don't touch in-memory zone
@@ -393,6 +408,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				tx, err := kdb.Begin("UpdaterEngine")
 				if err != nil {
 					lg.Error("kdb.Begin failed", "error", err)
+					ur.respond(false, fmt.Errorf("truststore update not started: %v", err))
+					continue
 				}
 				type pendingVerification struct {
 					childZone string
@@ -400,6 +417,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					keyRR     string
 				}
 				var toVerify []pendingVerification
+				var applyErr error
+			trustLoop:
 				for _, rr := range ur.Actions {
 					var subcommand string
 					switch rr.Header().Class {
@@ -408,48 +427,75 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					case dns.ClassNONE:
 						subcommand = "delete"
 					case dns.ClassANY:
-						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: class ANY (delete RRset) not supported, ignoring")
-						continue
+						applyErr = fmt.Errorf("class ANY (delete RRset) is not supported for a truststore update")
+						break trustLoop
 					default:
-						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: unknown class, ignoring", "rr", rr.String())
-						continue
+						applyErr = fmt.Errorf("unknown class %s in truststore update", dns.ClassToString[rr.Header().Class])
+						break trustLoop
 					}
 
-					if keyrr, ok := rr.(*dns.KEY); ok {
-						tppost := TruststorePost{
-							SubCommand: subcommand,
-							Src:        "child-update",
-							Keyname:    keyrr.Header().Name,
-							Keyid:      int(keyrr.KeyTag()),
-							KeyRR:      rr.String(),
-							Validated:  ur.Validated,
-							Trusted:    ur.Trusted,
-						}
-
-						_, err := kdb.Sig0TrustMgmt(tx, tppost)
-						if err != nil {
-							lg.Error("kdb.Sig0TrustMgmt failed", "error", err)
-						}
-
-						// Queue untrusted child-update adds for async verification.
-						if subcommand == "add" && !ur.Trusted {
-							toVerify = append(toVerify, pendingVerification{
-								childZone: keyrr.Header().Name,
-								keyid:     uint16(keyrr.KeyTag()),
-								keyRR:     rr.String(),
-							})
-						}
-					} else {
-						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: not a KEY RR", "rr", rr.String())
+					keyrr, ok := rr.(*dns.KEY)
+					if !ok {
+						applyErr = fmt.Errorf("truststore update is not a KEY RR")
+						break trustLoop
 					}
+					tppost := TruststorePost{
+						SubCommand: subcommand,
+						Src:        "child-update",
+						Keyname:    keyrr.Header().Name,
+						Keyid:      int(keyrr.KeyTag()),
+						KeyRR:      rr.String(),
+						Validated:  ur.Validated,
+						Trusted:    ur.Trusted,
+					}
+
+					// Sig0TrustMgmt reports storage failures two ways: a
+					// returned error (canonicalisation, begin), and resp.Error
+					// with a nil error (the SQL Exec paths). Both are a failed
+					// update; checking only err is how a KEY upload that did
+					// not land used to be answered NOERROR.
+					resp, err := kdb.Sig0TrustMgmt(tx, tppost)
+					if err != nil {
+						applyErr = err
+						break trustLoop
+					}
+					if resp != nil && resp.Error {
+						applyErr = fmt.Errorf("truststore update failed: %s", resp.ErrorMsg)
+						break trustLoop
+					}
+
+					if subcommand == "add" && !ur.Trusted {
+						toVerify = append(toVerify, pendingVerification{
+							childZone: keyrr.Header().Name,
+							keyid:     uint16(keyrr.KeyTag()),
+							keyRR:     rr.String(),
+						})
+					}
+				}
+				if applyErr != nil {
+					lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE failed", "error", applyErr)
+					if rerr := tx.Rollback(); rerr != nil {
+						lg.Error("tx.Rollback failed", "error", rerr)
+					}
+					ur.respond(false, applyErr)
+					continue
+				}
+				if len(ur.Actions) == 0 {
+					if rerr := tx.Rollback(); rerr != nil {
+						lg.Error("tx.Rollback failed", "error", rerr)
+					}
+					ur.respond(false, fmt.Errorf("truststore update contained no records"))
+					continue
 				}
 				err = tx.Commit()
 				if err != nil {
 					lg.Error("tx.Commit failed", "error", err)
+					ur.respond(false, fmt.Errorf("truststore update not committed: %v", err))
+					continue
 				}
+				ur.respond(true, nil)
 				logUpdateActions("TRUSTSTORE-UPDATE", ur.Actions)
 
-				// Trigger async DNS verification for newly stored untrusted child keys.
 				for _, pv := range toVerify {
 					lg.Info("ZoneUpdater: triggering child key verification",
 						"zone", pv.childZone, "keyid", pv.keyid)
@@ -457,6 +503,10 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				}
 			default:
 				lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)
+				// Including this one: a caller waiting on a command the
+				// updater does not implement should be told so, not left to
+				// time out.
+				ur.respond(false, fmt.Errorf("unknown update command %q", ur.Cmd))
 			}
 			lg.Info("ZoneUpdater: update request completed", "type", ur.Cmd)
 		}

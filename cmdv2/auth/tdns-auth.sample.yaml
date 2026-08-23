@@ -172,11 +172,65 @@ delegationsync:
             # `generator` are not.
             algorithm:  ED25519
 
+      # The API scheme (docs/2026-08-11-dsync-api-scheme.md): for children that
+      # cannot sign a DNS message and therefore cannot use the UPDATE scheme.
+      # Not in `schemes:` above, so none of this is published until you put it
+      # there. Prefer UPDATE where the child can manage it.
+      #
+      # Three records are published, all in one update:
+      #    _dsync.{ZONENAME}   DSYNC CDS API 443 dsync-api.{ZONENAME}
+      #    dsync-api.{ZONENAME} URI  1 1 "https://dsync-api.{ZONENAME}:443/dsync/v1"
+      #    dsync-api.{ZONENAME} TXT  "tdns-child-api-v1.0"
+      #
+      # Note that unlike notify/update the target is NOT a host that receives
+      # DNS -- it is where the URI and TXT describing the endpoint live. Hence
+      # no `addresses:` is required: the URI's own host resolves normally. Set
+      # addresses only if the target is a name this zone serves and nothing
+      # else publishes its address.
+      #
+      # A child will refuse this endpoint unless the parent zone is signed and
+      # these records validate: the credential is a bearer token, so an
+      # unvalidated lookup could send it to an attacker.
+      # api:
+      #    types:     [ CDS, CSYNC ]
+      #    target:    dsync-api.{ZONENAME}     # {ZONENAME} expanded at run-time
+      #    baseurl:   "https://{TARGET}:{PORT}/dsync/v1"   # both {} are required
+      #    port:      443
+      #    dialect:   tdns-child-api-v1.0      # published in the TXT
+      #    listen:    [ "0.0.0.0:443" ]        # the DSYNC-API listener
+      #    cert:      /etc/tdns/dsync-api.crt
+      #    key:       /etc/tdns/dsync-api.key
+
    child:
       # in child zones, we attempt the following schemes, if the parent supports
       # them and we're allowed to modify the child zone (adding CDS, CSYNC, KEY
       # RRs, re-signing, etc):
+      #
+      # Preference order. Put "api" last: it is the fallback for children that
+      # cannot sign a DNS message, not the first choice. It also requires the
+      # PARENT zone to be signed -- the endpoint is discovered from DNS and the
+      # credential is a bearer token, so an unvalidated lookup could send it to
+      # an attacker.
       schemes:  [ notify, update ]      # REQUIRED for child-side delegation sync
+
+      # Credentials for the api scheme, one per parent, obtained out of band
+      # from the parent operator. Without one, a parent offering only "api"
+      # logs a single line saying so and does not retry -- a credential cannot
+      # arrive by retrying.
+      #
+      # A LIST, not a map keyed by parent name: viper splits keys on ".", so a
+      # map key like "example." gets split and the credential reads back empty
+      # with nothing logged anywhere.
+      # api:
+      #    credentials:
+      #       - parent:   example.
+      #         username: child1.example.
+      #         key:      REPLACE-ME
+      #    # Permits BOTH a plain-http endpoint and one discovered without
+      #    # DNSSEC validation. Deliberately one switch: they are the same
+      #    # protection from two sides, and turning off one while believing
+      #    # the other holds leaves none. Lab only.
+      #    allow-insecure: false
       update:
          keygen:
             # `algorithm` and `generator` are read on the child side; `mode` is not.

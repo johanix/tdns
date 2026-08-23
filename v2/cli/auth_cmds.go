@@ -18,6 +18,10 @@ func init() {
 	AuthCmd.AddCommand(NewPingCmd("auth"))
 	AuthCmd.AddCommand(NewDaemonCmd("auth"))
 	AuthCmd.AddCommand(NewZoneCmd("auth"))
+	// The DSYNC API scheme is a parent-side facility, so it hangs off auth
+	// only. Unlike the keystore commands it embeds no algorithm list in its
+	// help, so it needs no deferral until algorithms are registered.
+	AuthCmd.AddCommand(NewDsyncApiCmd("auth"))
 
 	// Keystore and truststore are wired by the binary's own init()
 	// after the binary has registered its DNSSEC algorithms — the
