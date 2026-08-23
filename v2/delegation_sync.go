@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // Update mode constants for parent delegation updates
@@ -192,11 +191,15 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 	}
 }
 
-func parseKeygenAlgorithm(configKey string, defaultAlg uint8) (uint8, error) {
-	algstr := viper.GetString(configKey)
+// parseKeygenAlgorithm resolves a configured algorithm NAME to its code. It
+// takes the value rather than a config key: reading the key here was the last
+// place the delegationsync block was still consulted through viper, which is
+// never populated in tdns-auth or tdns-agent, so every one of these settings was
+// silently ignored no matter what an operator wrote.
+func parseKeygenAlgorithm(algstr string, defaultAlg uint8) (uint8, error) {
 	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	if alg == 0 {
-		lgDns.Warn("unknown keygen algorithm, using default", "algorithm", algstr, "configKey", configKey, "default", dns.AlgorithmToString[defaultAlg])
+		lgDns.Warn("unknown keygen algorithm, using default", "algorithm", algstr, "default", dns.AlgorithmToString[defaultAlg])
 		alg = defaultAlg
 	}
 	return alg, nil
@@ -214,7 +217,7 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm("delegationsync.child.update.keygen.algorithm", dns.ED25519)
+	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Child.Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("DelegationSyncSetup: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
@@ -248,7 +251,7 @@ func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm("delegationsync.parent.update.keygen.algorithm", dns.ED25519)
+	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Parent.Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("ParentSig0KeyPrep: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
@@ -266,7 +269,7 @@ func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm("delegationsync.child.update.keygen.algorithm", dns.ED25519)
+	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Child.Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("MusicSig0KeyPrep: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err

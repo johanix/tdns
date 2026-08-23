@@ -17,7 +17,12 @@ import (
 // This block was read with viper.GetString/GetStringSlice from a dozen call
 // sites. It is now modelled in full and this struct is the ONLY reader: the
 // keygen and key-verification subtrees under parent.update and child.update
-// are here too, and no viper.Get("delegationsync...") call remains.
+// are here too. No viper read of the delegationsync block remains, with one
+// deliberate exception: the child keygen MODE is still read from viper in
+// sig0_utils.go and is intentionally NOT modelled here -- the sample config
+// says "`algorithm` and `generator` are read on the child side; `mode` is
+// not", and modelling it would turn a setting that has never had any effect
+// into a live one.
 //
 // Why it was unwound: viper splits keys on ".". Any config shape with a dotted
 // key silently arrives empty, the setting reads back as its zero value, and

@@ -142,21 +142,47 @@ func matchKeyRR(rrs []dns.RR, keyRR string) bool {
 	return false
 }
 
+// waitOrDone sleeps for d, or returns false the moment ctx is cancelled.
+//
+// A plain time.Sleep kept the key-verification retry goroutine alive past
+// shutdown for as long as the backoff had left to run -- and the backoff
+// doubles, so with a configured retry-interval that could be a long time after
+// everything else had stopped.
+func waitOrDone(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// keyVerificationRetrySettings resolves the retry budget, substituting defaults
+// for anything non-positive. Zero means "unset"; a NEGATIVE max-attempts used to
+// skip the loop entirely and abandon verification silently, and a negative
+// interval turned the backoff into a busy loop.
+func keyVerificationRetrySettings(kv DsyncKeyVerificationConf) (int, time.Duration) {
+	maxAttempts := kv.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	retryInterval := kv.RetryInterval
+	if retryInterval <= 0 {
+		retryInterval = 10 * time.Second
+	}
+	return maxAttempts, retryInterval
+}
+
 // TriggerChildKeyVerification starts an async verification of a child KEY
 // that was just stored in the TrustStore. It uses the KeyBootstrapper's
 // retry pattern: verify via DNS lookup, retry with backoff, then trust.
-func (kdb *KeyDB) TriggerChildKeyVerification(childZone string, keyid uint16, keyRR string) {
+func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone string, keyid uint16, keyRR string) {
 	go func() {
-		maxAttempts := DelegationSyncConfig().Parent.Update.KeyVerification.MaxAttempts
-		if maxAttempts == 0 {
-			maxAttempts = 5
-		}
-		retryInterval := DelegationSyncConfig().Parent.Update.KeyVerification.RetryInterval
-		if retryInterval == 0 {
-			retryInterval = 10 * time.Second
-		}
 
-		ctx := context.Background()
+		maxAttempts, retryInterval := keyVerificationRetrySettings(
+			DelegationSyncConfig().Parent.Update.KeyVerification)
 
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			imr := Globals.ImrEngine
@@ -164,7 +190,9 @@ func (kdb *KeyDB) TriggerChildKeyVerification(childZone string, keyid uint16, ke
 				lgSigner.Warn("TriggerChildKeyVerification: IMR engine not yet available, will retry",
 					"zone", childZone, "keyid", keyid, "attempt", attempt)
 				if attempt < maxAttempts {
-					time.Sleep(retryInterval)
+					if !waitOrDone(ctx, retryInterval) {
+						return
+					}
 					retryInterval *= 2
 				}
 				continue
@@ -225,7 +253,9 @@ func (kdb *KeyDB) TriggerChildKeyVerification(childZone string, keyid uint16, ke
 			if attempt < maxAttempts {
 				lgSigner.Info("child key not yet verifiable, will retry",
 					"zone", childZone, "keyid", keyid, "delay", retryInterval)
-				time.Sleep(retryInterval)
+				if !waitOrDone(ctx, retryInterval) {
+					return
+				}
 				retryInterval *= 2 // exponential backoff
 			}
 		}
