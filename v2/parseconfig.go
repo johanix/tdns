@@ -108,6 +108,14 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 		ZeroFields: true,
 		Metadata:   md,
 		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			// Durations written the way the config documents them: `8s`, `1h`.
+			// Without this the only shape that decodes into a time.Duration
+			// field is a raw nanosecond integer, so `query_budget: 8s` -- the
+			// form tdns-imr.sample.yaml shows -- fails the decode and the
+			// daemon does not start. The hook fires only for time.Duration
+			// targets, so it does not loosen the strictness that keeps a scalar
+			// out of a slice or a quoted integer out of a uint16.
+			mapstructure.StringToTimeDurationHookFunc(),
 			stringToPeerConfHook(),
 			stringToAclEntryHook(),
 			legacyDynamicAllowedHook(),

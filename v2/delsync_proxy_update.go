@@ -166,7 +166,7 @@ func (zd *ZoneData) proxyEnsureSig0Key(kdb *KeyDB) error {
 	if sak != nil && len(sak.Keys) > 0 {
 		return nil
 	}
-	alg, err := parseKeygenAlgorithm("delegationsync.child.update.keygen.algorithm", dns.ED25519)
+	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Child.Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		return fmt.Errorf("keygen algorithm: %w", err)
 	}
