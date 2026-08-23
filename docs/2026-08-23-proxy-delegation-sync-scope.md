@@ -290,6 +290,123 @@ the open question of whether the check should be mandatory or configurable.
 | un-signing | knows directly; does it act? unverified | explicit rule, three justifications |
 | extra hazard | two writers disagreeing inside one daemon | none — single source once CDS is used |
 
+## Investigation: are the two DS writers gated against each other?
+
+Answer: **no.** The gate primitive exists and is maintained; the delegation-sync
+path simply never reads it. Investigated 2026-08-23, read-only.
+
+**Writer 1 — the rollover engine.** `ksk_rollover_automated.go` calls
+`PushDSRRsetForRollover`, which sources its DS set from `dsSetFromSnapshot` /
+`ComputeTargetDSSetForZone` — keystore and rollover target. Correct source. It
+never consults delegation-sync state.
+
+**Writer 2 — delegation sync.** `SyncZoneDelegation` ships DS on both modes:
+replace passes `syncstate.NewDS`, delta appends `syncstate.DSRemoves`. Three
+producers feed it:
+
+| producer | trigger | evidence used | gated? |
+|---|---|---|---|
+| `SYNC-DELEGATION` (`zone_updater.go`) | any non-internal zone update | update diff (`ZoneUpdateChangesDelegationDataNG`) | partly — `!ur.InternalUpdate` |
+| `EXPLICIT-SYNC-DELEGATION` (`apihandler_funcs.go`) | operator, via API/CLI | full `AnalyseZoneDelegation` | **no** |
+| `EXPLICIT-SYNC-DELEGATION` (`parentsync_bootstrap.go`) | after key publication, `parentsync=agent` zones | full `AnalyseZoneDelegation` | **no** |
+
+There is no startup reconcile for tdns-auth child zones —
+`DELEGATION-SYNC-SETUP` runs `DelegationSyncSetup`, which is key preparation
+only. That is a meaningful difference from the proxy, which does have
+`ProxyStartupReconcile`, and it narrows the exposure.
+
+**The collision.** During the double-DS window the parent holds {old, new} while
+the child publishes only {old} as SEP DNSKEYs. Any ungated producer runs
+`AnalyseZoneDelegation`, which computes the child DS set from published SEP keys,
+yielding `DSRemoves = {new}` and `InSync = false`. `SyncZoneDelegation` then
+removes the pre-published DS — explicitly in delta mode, implicitly in replace
+mode by replacing the set with {old}. The rollover subsequently swaps to the new
+KSK, whose DS is gone, and the zone goes bogus.
+
+Realistically this needs an operator-triggered sync inside the window, which is
+a DS TTL wide. That is not exotic: an operator running a rollover is exactly the
+person likely to be inspecting delegation state.
+
+**The cheap fix.** `RolloverInProgress` already exists as durable per-zone state
+(`ksk_rollover_zone_state.go`), is set when a rollover starts
+(`ksk_rollover_atomic.go`), cleared when it completes
+(`ksk_rollover_automated.go`), and is consulted in seven places across the
+rollover and signing subsystems — `sign.go` among them. The delegation-sync path
+reads it nowhere. Making the reconcile leave DS alone while a rollover is in
+progress is a read of an already-maintained flag, not new machinery.
+
+### A severe finding on the way past
+
+`computeNewDS` returns early when the update touched no DNSKEY:
+
+```go
+if len(dss.DNSKEYAdds) == 0 && len(dss.DNSKEYRemoves) == 0 {
+        return  // dss.NewDS stays nil
+}
+```
+
+So on the update-driven path an NS-or-glue-only change leaves `NewDS` nil **by
+design**, and replace mode calls `CreateChildReplaceUpdate(..., nil)`. The
+`if len(newDS) > 0` guard in that function is what stops the DS being deleted.
+
+That guard is load-bearing, and not for the reason its comment gave. The New*
+fields are conditionally populated according to what the update touched, so an
+empty `NewDS` means "this update has no DS opinion" rather than "the child has
+no DS". PR #382 removed the guard on the reasoning that "absent means leave
+alone is wrong for a REPLACE", which is true of an authoritative empty set and
+false of this one. Had it landed, **an ordinary NS edit to a signed child zone
+would have deleted the parent DS and inserted nothing.**
+
+Recorded because it is the sharpest illustration of the theme: the same empty
+slice means different things depending on which path filled it, and only the
+producer knows which.
+
+## Implementation plan
+
+LOC figures are rough order-of-magnitude, implementation and tests separately.
+
+| # | item | files | impl | test | risk |
+|---|---|---|---|---|---|
+| A2 | reconcile leaves DS alone while `RolloverInProgress` | `delegation_sync.go`, dispatch | 60 | 90 | **low** — flag already maintained; only choice is skip-DS vs skip-all |
+| A1 | tdns-auth DS from keystore/target, not published DNSKEYs | `delegation_utils.go`, `zone_updater.go` | 120 | 180 | **high** — changes what every tdns-auth child publishes upward |
+| A4 | verify and fix un-signing propagation | tbd after investigation | 70 | 90 | **medium** — scope unknown until investigated |
+| A3 | CDS as the internal intent contract | wide | — | — | **decision first**; if adopted, large |
+| B1 | proxy DS content from CDS/CDNSKEY | `delsync_proxy_update.go`, `delsync_proxy_api.go` | 140 | 200 | **medium** — new source, but confined to the proxy |
+| B2 | "in sync" for DS = parent DS vs CDS-implied DS | `delsync_proxy*.go` | 70 | 100 | **medium** — changes when the proxy sends at all |
+| C1 | #384 coherence gate on UPDATE and API | `dsync_api_delegation.go`, `updateresponder.go` | 130 | 180 | **medium-high** — a false rejection blocks a legitimate change |
+| — | #382 disposition: abandon commit 1 | — | 0 | 0 | none |
+
+Rough total: **~590 implementation, ~840 test, ~1430 LOC.**
+
+### Ordering
+
+1. **A2 first.** Cheapest item on the list, and it is the one that makes the
+   double-DS window safe. It also does not depend on A1: even after the DS
+   source is fixed, not writing DS during a rollover is the right belt-and-braces
+   behaviour.
+2. **A1 next.** The actual fix. Highest risk on the list, because it changes what
+   every tdns-auth child zone publishes to its parent, so it wants stronger
+   verification than unit tests alone.
+3. **C1 in parallel.** Independent of everything else; touches only parent-side
+   code.
+4. **A4 after its investigation.** Cannot be sized honestly before that.
+5. **B1 and B2 after #343 lands**, for the reason given below.
+6. **A3 needs a decision, not an implementation slot.**
+
+### Sequencing against the open PRs
+
+**#343 before B1/B2.** The DNSKEY-derived DS is already on main and already
+shipped on the proxy UPDATE path, so holding #343 protects nobody — it only
+delays a reviewed refactor. #343 rewrites `delsync_proxy_update.go` by ~176
+lines, i.e. precisely the function B1 changes, so fixing on main first guarantees
+a conflict inside DS logic that is mid-redesign. Land it, then fix once, covering
+both transports, on a base that is not moving.
+
+**A2 before #351.** #351 is what makes DS pre-publishing real, so it is what
+opens the window described above. #351's own code is correct — it sources from
+the target snapshot — so this is not a defect in #351. But the capability it
+enables is unsafe to use until A2 lands.
+
 ## Work outstanding
 
 Nothing here is authorised for implementation.
