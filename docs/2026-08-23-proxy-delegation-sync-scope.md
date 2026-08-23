@@ -1,18 +1,21 @@
-# What a delegation-sync proxy may synchronise, and why DS is different
+# What a delegation-sync proxy may synchronise, and where DS comes from
 
-**Status:** design agreed 2026-08-23, implementation outstanding. PR #382 is in
-draft pending the rework described here. Recorded because the reasoning is
-non-obvious and was arrived at by first getting it wrong twice.
+**Status:** design agreed 2026-08-23, implementation not started and not
+authorised. PR #382 is superseded; #343 needs re-scoping. Recorded because the
+reasoning is non-obvious and was arrived at through three wrong answers, each of
+which is written down below so it is not re-adopted.
 
 ## The question
 
 A `delegation-sync-proxy` is a tdns-agent acting as secondary for a primary that
 is unaware of DSYNC — it watches transfers and forwards the child's delegation
-data to the parent. What delegation data is it entitled to assert?
+data to the parent. What delegation data may it assert, and on what evidence?
 
-The obvious answer, and the name of the subsystem, is "all of it: keep the
-parent in sync with the child". That is right for NS and glue and wrong for DS,
-and the reason it is wrong for DS generalises.
+NS and glue are easy: synchronise present state. Every intermediate state of a
+nameserver migration is valid on its face, so what the child currently serves is
+always the right answer.
+
+DS is not, and the rest of this document is about why, and what to do instead.
 
 ## The property that separates DS from NS
 
@@ -21,142 +24,212 @@ from what the child's current zone content implies.**
 
 That is DNSSEC's TTL-bounded ordering. In a double-DS KSK rollover the child
 publishes the new DS in the parent *first*, waits out the DS TTL, and only then
-swaps the KSK in its own DNSKEY RRset. Between those steps the parent legitimately
-holds a DS that maps to no published SEP DNSKEY. The state looks inconsistent
-and is correct.
+swaps the KSK in its own DNSKEY RRset. Between those steps the parent
+legitimately holds a DS that maps to no published SEP DNSKEY. The state looks
+inconsistent and is correct.
 
-NS and glue have no such property. Every intermediate state of a nameserver
-migration is valid on its face, so reflecting present state is always right.
+So from a snapshot of the child zone, these two are **the same observation**:
 
-## Why the proxy cannot participate in DS
+- a DS with no matching DNSKEY, because a double-DS rollover is mid-flight;
+- a DS with no matching DNSKEY, because it is stale from a key that is gone.
 
-From a snapshot of the child zone, these two are **the same observation**:
+Nothing in the zone content distinguishes them. Only *intent* does.
 
-- the parent holds a DS with no matching DNSKEY, because a double-DS rollover is
-  in progress and the child has not swapped yet;
-- the parent holds a DS with no matching DNSKEY, because it is stale from a key
-  that is gone.
+## The category error: DNSKEY is not a request for a DS
 
-Nothing in the zone distinguishes them. Only *intent* does, and intent is not in
-the zone — it is in whatever is driving the rollover, on a clock.
+The proxy derived the DS set by walking the child's DNSKEY RRset and taking
+SHA-256 of the SEP-flagged keys. That is the root mistake, and it is not fixable
+by making the derivation cleverer.
 
-The proxy has no access to it, and this is structural rather than an
-implementation gap. It secondaries a zone whose keys belong to the primary's
-operator: there is no keystore to consult, no policy, no target key set, no plan.
-It sees exactly one thing, the zone as transferred, and a rollover is a sequence
-of states with timing.
+**Publishing a DNSKEY is not a request for a DS. Publishing a CDS is.**
 
-The consequence is stronger than "the proxy cannot help with rollovers". A proxy
-that synchronises DS on present state **actively breaks** a rollover the primary's
-operator is running out of band, by removing the DS they just placed. So the
-proxy cannot be a lesser participant in DS; it has to be a non-participant. A
-partial one is worse than none, because the primary is then unable to manage the
-operation itself either — both are writing the same RRset with different answers.
+DNSKEY says "this key exists in my zone". CDS says "this is what I want my
+parent to publish". They are different assertions and only the second is
+addressed to the parent. The proxy was reading the first as though it were the
+second.
 
-## Three DS sources, one of which can see forward
+RFC 7344 §4 puts it directly: *"The CDS/CDNSKEY RRset expresses what the Child
+would like the DS RRset to look like after the change; it is a 'replace'
+operation"* — and, decisively for the no-signal case, *"If neither CDS nor
+CDNSKEY RRset is present in the Child, this means that no change is needed."*
 
-The codebase already embodies the distinction, which is what makes the boundary
-credible rather than merely convenient:
+Once DNSKEY and CDS are separated, the case analysis over "which SEP keys exist
+versus which DS the parent holds" disappears. The proxy does not need to
+classify those combinations, because none of them is a statement addressed to
+it.
 
-| driver | DS source | sees intent |
-|---|---|---|
-| KSK rollover engine | keystore + target key snapshot + policy | **yes** |
-| tdns-auth child reconcile | published SEP DNSKEYs | no |
-| delegation-sync proxy | published SEP DNSKEYs of another operator's zone | no, structurally |
+## Where DS content may come from
 
-`pushDSRRsetViaApi` sources its DS set from `dsSetFromSnapshot` /
-`ComputeTargetDSSetForZone` — the keystore and the rollover target — not from
-the DNSKEY RRset. That is precisely the knowledge of future intent: it can place
-the DS for a key it has generated and not yet published.
+| source of DS content | verdict |
+|---|---|
+| derived from the child's DNSKEY RRset | the proxy inventing intent — forbidden |
+| derived from the child's CDS/CDNSKEY | the proxy delivering the child's own assertion — correct |
 
-`AnalyseZoneDelegation` and `proxyCurrentDelegationRRs` both derive DS by walking
-the published DNSKEY RRset and taking SHA-256 of the SEP-flagged keys. For the
-proxy that is the only thing available. For tdns-auth's own child path it is a
-fixable gap, not a structural one — it *has* a keystore, and should use the same
-helpers the rollover engine does.
+This is the whole rule. It is not "the proxy stays out of DS", which was an
+earlier and wrong version of this document: staying out assumes the parent will
+notice the CDS by itself, and a parent with no CDS scanner never will. Removing
+that assumption is precisely why DSYNC exists — the child *tells* the parent
+something changed rather than waiting to be noticed.
 
-## Agreed scope for the proxy
+## Agreed proxy behaviour
 
-- **NS and glue** — synchronise present state. Stateless, always safe.
-- **DS** — not a participant, with exactly one exception (below).
-- **CDS/CDNSKEY** — forward the signal, do not interpret it. Already the
-  behaviour: a CDS change drives NOTIFY(CDS) and the parent's scanner decides.
+| child state | proxy action |
+|---|---|
+| NS or glue differ from the parent | synchronise present state |
+| **CDS/CDNSKEY present** | deliver it, over whichever scheme the parent advertises: NOTIFY(CDS), DS add/remove via UPDATE, or DS push via the DSYNC API |
+| CDS absent, child signed | no DS opinion — per RFC 7344 §4, "no change is needed" |
+| CDS absent, child unsigned (no DNSKEY RRset at all) | remove the parent's DS |
 
-That last point keeps the restriction cheap rather than limiting. A primary
-running a rollover behind a proxy still has a channel: publish CDS, and the
-parent acts on it. The proxy stays a courier and never a decision-maker about DS.
+The second row is the substantive change. The proxy already *detects* a CDS
+change (`ProxyDelegationAnalysis.CdsChanged`) but the only thing it does with one
+is send NOTIFY(CDS) — which serves a parent that runs a scanner and does nothing
+for one that does not. A parent advertising UPDATE or API is asking for the
+*content*, not a nudge, and the proxy has the content.
 
-## The one exception: an unsigned child
+### What falls out of using CDS as the source
 
-If the child has **no DNSKEY RRset at all**, the proxy must declare an empty DS
-so the parent removes what it holds.
+- **The digest-algorithm problem disappears.** CDS states exactly which digests
+  the child wants — SHA-256, SHA-384, or both. Deriving stops, so SHA-256-only
+  stops being a limitation and a parent holding SHA-384 stops looking
+  permanently out of sync.
+- **The delete sentinel needs no special case.** `CDS 0 0 0 0` is simply another
+  thing to deliver. It is the child's own statement, so no inference is involved.
+- **"In sync" gets a correct definition for DS**: parent DS versus *CDS-implied*
+  DS, rather than versus DNSKEY-derived DS. Idempotent and convergent — act
+  while they differ, stop when they match.
+- **Timing stays with the child.** CDS means "do this now"; an operator
+  sequences a ceremony by choosing when to change CDS, exactly as they would
+  sequence a registrar submission. The proxy needs no notion of rollover state.
+  It delivers a set.
+- **The conversion already exists.** CDS rdata is format-identical to DS, and
+  the parent-side scanner already performs this translation.
 
-This is not a softening of the rule; it is the one state the rule does not cover,
-for three independent reasons:
+## Standby keys and double-DS are expressible through CDS
 
-1. **There is no future intent to protect.** Pre-publishing a DS for a zone that
-   is not signed breaks it immediately and buys nothing, so no rollover procedure
-   produces this state deliberately.
-2. **The state is an active outage.** A DS in the parent for a child that is not
-   signed makes every validating resolver declare the whole child zone bogus.
-   Leaving it is not caution — it preserves the breakage, and no later transfer
-   repairs it, because the child never changes in a way that would trigger a
-   removal.
-3. **The child cannot signal for itself.** RFC 8078 CDS-delete is unavailable
-   here: `ProcessCDSNotify` requires DNSSEC validation whenever a DS already
-   exists, and an unsigned child has no key to validate with. The channel is shut
-   exactly when it would be needed.
+This was checked rather than assumed, because it decides whether a proxied
+primary can run a KSK rollover at all.
 
-**The predicate is "no DNSKEY RRset", not "no DS derivable".** An empty derived
-DS set means "no SEP-flagged DNSKEY", which is not the same thing: the SEP bit is
+**A CDS may request a DS for a key that is not yet in the child's DNSKEY
+RRset.** RFC 7344 §4.1 gives exactly three acceptance rules — Location, Signer,
+Continuity — and none of them constrains the CDS *content* to published keys.
+The Signer rule constrains the signing key only: *"MUST be signed with a key
+that is represented in both the current DNSKEY and DS RRsets, unless the Parent
+uses the CDS or CDNSKEY RRset for initial enrollment."*
+
+The RFC is explicit that this is deliberate. §1 points at RFC 6781 §4.1.2 and
+notes it *"allows for publication of standby keys"*; §2.2.2 says the child
+operator *"may want to publish a new DS record in the Parent, either because
+they are changing keys or because they want to publish a standby key."*
+
+**Continuity is what makes it safe:** *"MUST NOT break the current delegation if
+applied to DS RRset."* In a double-DS rollover the child publishes CDS = {old,
+new}; applying that retains the old DS, the delegation still validates, and the
+parent accepts. A child publishing CDS = {new} alone before the new DNSKEY
+exists would break the delegation, and the parent MUST ignore it. The ordering
+constraint enforces itself.
+
+So double-DS carries through a proxy, and the earlier conclusion that fancier
+ceremonies require the primary to manage sync itself does not apply to it.
+
+### The proxy inherits the parent's §4.1 obligations
+
+By consuming CDS and asserting the result over UPDATE or the API, the proxy
+bypasses the parent's own scanner — which is where §4.1 would normally be
+enforced. It therefore takes on those checks itself:
+
+- **Continuity** is the important one. The proxy must refuse to send a
+  CDS-derived DS set that would leave the delegation unvalidatable: at least one
+  DS in the resulting set must match a DNSKEY currently published in the child.
+  The delete sentinel is the deliberate exception, being an explicit request to
+  go insecure.
+- **Location** is satisfied by construction, since the proxy reads the apex.
+- **Signer** exists to stop an attacker injecting a CDS. The proxy's evidence is
+  different in kind: an authenticated (TSIG) transfer from its configured
+  primary, asserted onward over its own authenticated channel — SIG(0) for
+  UPDATE, or an API credential. Whether to additionally verify the CDS RRSIG is
+  an open implementation question, not settled here.
+
+## The one remaining inference: an unsigned child
+
+If the child has **no DNSKEY RRset at all**, the proxy removes the parent's DS
+even without a CDS saying so. This is the only place the proxy acts on state
+rather than on a statement, and it is justified on three independent grounds:
+
+1. **No procedure produces this state deliberately.** Pre-publishing a DS for an
+   unsigned zone breaks it immediately and buys nothing, so it is not a step in
+   any ceremony. Every superficially similar case has a reading under which it
+   is deliberate; this one has none.
+2. **The state is an active outage.** A DS in the parent for an unsigned child
+   makes every validating resolver declare the whole child zone bogus. Leaving
+   it preserves the breakage, and no later transfer repairs it, because the
+   child never changes in a way that would trigger a removal.
+3. **The child cannot state it.** RFC 8078 CDS-delete requires a validation the
+   child cannot provide: the parent-side scanner requires DNSSEC validation
+   whenever a DS already exists, and an unsigned child has no key to validate
+   with. The channel is shut exactly when it would be needed.
+
+An operator who knows to publish an unsigned `CDS 0 0 0 0` is handled by the
+CDS row anyway, on the proxy's own authenticated channel. This rule is the
+safety net for the operator who does not.
+
+**The predicate is "no DNSKEY RRset", not "no derivable DS".** An empty derived
+DS set means "no SEP-flagged DNSKEY", which is a different thing: the SEP bit is
 advisory and validators ignore it, so a zone signed with a KSK that does not set
 it yields an empty derived set while being properly signed with a legitimate
-parent DS. Keying the removal off the derived set would wipe that DS. The
-distinction also cannot be made inside `CreateChildReplaceUpdate`, whose only DS
-input is the derived set — the caller has to state the intent explicitly.
+parent DS. Keying the removal off the derived set would wipe that DS.
 
 ## Work outstanding
 
-1. **PR #382, DS commit — rework.** `CreateChildReplaceUpdate` currently decides
-   from `len(newDS)`. It must take explicit DS intent from the caller: *clear*
-   when the child has no DNSKEY RRset, *hands-off* otherwise. The non-proxy caller
-   keeps today's behaviour so the change stays proxy-scoped.
-2. **PR #382, apex-SOA commit — split out.** Unrelated to any of this (a nil
-   dereference on the transfer success path) and ready; it should not wait behind
-   a design question.
-3. **tdns-auth child path — separate issue.** `AnalyseZoneDelegation` derives DS
-   from published DNSKEYs where the keystore is available, so double-DS is broken
-   for tdns-auth's own child sync too. Unlike the proxy this is fixable: point it
-   at the rollover engine's helpers.
-4. **Verify the double-writer question before the rollover work lands.** For a
+Nothing here is authorised for implementation yet.
+
+1. **Make CDS the DS source on the proxy path.** `proxyCurrentDelegationRRs`
+   should stop returning a DS set derived from DNSKEYs; the UPDATE and API paths
+   should take their DS content from the child's CDS/CDNSKEY, with the
+   Continuity check above. NS and glue are unaffected.
+2. **Redefine "in sync" for DS** as parent-DS versus CDS-implied-DS, and stop DS
+   differences that the proxy has no opinion about from marking the delegation
+   out of sync — otherwise a child with no CDS, or one using SHA-384, is
+   permanently out of sync and the reconcile re-sends NS and glue on every start
+   with no DS change to show for it.
+3. **PR #382 is superseded.** Its DS commit decided from `len(newDS)`, which is
+   both the wrong predicate and the wrong source. Its unrelated apex-SOA panic
+   fix has been split out so it can land on its own.
+4. **PR #343 needs re-scoping.** Its current DS handling is DNSKEY-derived; that
+   is pre-existing on the branch rather than introduced by the recent commits,
+   but it is the thing this design replaces.
+5. **tdns-auth's own child path** has the same DNSKEY-derived DS in
+   `AnalyseZoneDelegation`. Unlike the proxy it has a keystore and a rollover
+   engine, so the fix is different — point it at the same helpers the rollover
+   engine uses — but the double-DS exposure is the same.
+6. **Verify the double-writer question before the rollover work lands.** For a
    zone with both rollover and delegation-sync enabled, the rollover engine
-   publishes the *target* DS set while the reconcile path computes the *published*
-   one. The reconcile would remove a pre-published DS during exactly the window
-   the rollover created it. Whether the two are gated against each other is
-   unknown and needs checking.
+   publishes the *target* DS set while the reconcile path computes the
+   *published* one. The reconcile would remove a pre-published DS during exactly
+   the window the rollover created it. Whether the two are gated against each
+   other is unknown.
 
-## How this was reached
+## Three wrong answers, recorded
 
-Worth recording, because the first two answers were both wrong in instructive
-ways.
+**First: "the proxy should stay silent about DS unless it can prove an
+un-signing."** Backwards. It treated DS-retention as the safe default and
+removal as the dangerous act, when the state being protected is an outage.
+Inaction is not neutral when the preserved state is itself broken.
 
-The thread began with a review finding that the proxy could tell a parent to
-delete a DS it never placed, and a proposal to make the proxy silent about DS
-whenever it could not prove an un-signing. That was **backwards**: it treated
-DS-retention as the safe default and removal as the dangerous act, when the state
-being "protected" is an outage. Inaction is not neutral when the preserved state
-is itself broken.
+**Second: "parent DS tracks child DS, empty included."** Right for the unsigned
+case, wrong as a general rule — applied literally it deletes a DS during a
+legitimate double-DS rollover. Synchronising present state is correct only where
+present state determines the correct answer.
 
-The correction — parent DS tracks child DS, empty included — was then applied too
-broadly, in a form that would delete a DS during a legitimate double-DS rollover.
-Synchronising present state is right only where present state determines the
-correct answer.
+**Third: "the proxy is a non-participant in DS, and forwards CDS as NOTIFY."**
+The failure here was subtler: it conflated *inferring* DS intent from state,
+which the proxy must not do, with *acting* on DS at all, which it must. Limiting
+the proxy to NOTIFY silently assumes the parent runs a CDS scanner. A parent
+without one never notices, which is the very gap DSYNC was created to close.
 
-A third argument, that the proxy should guard against acting on an incomplete
-zone copy, was also wrong and is recorded here so it is not reintroduced: AXFR is
-framed by its SOA, `dns.Transfer.In` reports a stream that ends without the
-closing SOA as an error, and the data is discarded. A partial zone copy does not
-reach the analysis. Guarding against one would mask a transfer bug rather than
-fix it. (The separate nil-apex guard in `apexRRsetChanged` is still needed, but
-for an unrelated reason: `new_zd` is a scratch zone, which carries `Ready=true`
-with no published snapshot.)
+A fourth, on a different point, is recorded so it is not reintroduced: **guarding
+against an incomplete zone copy.** AXFR is framed by its SOA, `dns.Transfer.In`
+reports a stream that ends without the closing SOA as an error, and the data is
+discarded — a partial zone copy never reaches the analysis. Guarding against one
+would mask a transfer bug rather than fix it. (The separate nil-apex guard in
+`apexRRsetChanged` is still needed, for an unrelated reason: `new_zd` is a
+scratch zone, which carries `Ready=true` with no published snapshot.)
