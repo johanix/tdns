@@ -188,7 +188,7 @@ func GenerateKeyMaterial(owner string, rrtype uint16, alg uint8, keytype string)
 		pkc.PrivateKey = privkeyPEM
 
 	case "external":
-		keygenprog := viper.GetString("delegationsync.child.update.keygen.generator")
+		keygenprog := DelegationSyncConfig().Child.Update.Keygen.Generator
 		if keygenprog == "" {
 			return nil, fmt.Errorf("error: key generator program not specified (keygenprog=%s, modekey=%s)", keygenprog, modekey)
 		}

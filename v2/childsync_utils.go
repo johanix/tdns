@@ -13,7 +13,6 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // This is only called from the CLI command "tdns-cli ddns sync" and uses a SIG(0) key from the
@@ -340,7 +339,16 @@ func BailiwickNS(zonename string, nsrrs []dns.RR) ([]string, error) {
 	var ns_inbailiwick []string
 	for _, rr := range nsrrs {
 		if ns, ok := rr.(*dns.NS); ok {
-			if strings.HasSuffix(ns.Ns, zonename) {
+			// Compared on LABEL boundaries: a bare strings.HasSuffix accepts
+			// "ns.notexample.com." as in-bailiwick for "example.com.", because
+			// the suffix matches across a label boundary. That name is in a
+			// different zone entirely, so treating it as in-bailiwick means
+			// looking for glue where none can exist.
+			//
+			// dns.IsSubDomain compares whole labels, and is case-insensitive as
+			// DNS requires -- the old comparison also missed "NS.EXAMPLE.COM."
+			// for the same zone.
+			if dns.IsSubDomain(dns.Fqdn(zonename), dns.Fqdn(ns.Ns)) {
 				ns_inbailiwick = append(ns_inbailiwick, ns.Ns)
 			}
 		}
@@ -400,7 +408,7 @@ func (zd *ZoneData) BestSyncScheme(ctx context.Context, imr *Imr) (string, *Dsyn
 		lgDns.Warn("BestSyncScheme: no DSYNC RRs found, synching not possible", "zone", zd.ZoneName, "parent", dsync_res.Parent)
 		return "", nil, fmt.Errorf("no DSYNC RRs for %s found in parent %s", zd.ZoneName, dsync_res.Parent)
 	}
-	schemes := viper.GetStringSlice("delegationsync.child.schemes")
+	schemes := DelegationSyncConfig().Child.Schemes
 	if len(schemes) == 0 {
 		lgDns.Error("BestSyncScheme: no synchronization schemes configured", "zone", zd.ZoneName)
 		return "", nil, fmt.Errorf("no synchronizations schemes configured for child %s", zd.ZoneName)

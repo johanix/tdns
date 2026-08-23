@@ -44,7 +44,7 @@ func NewDebugCmd(role string, extras ...*cobra.Command) *cobra.Command {
 			fmt.Println("debug sig0 called")
 		},
 	}
-	defalg := viper.GetString("delegationsync.child.update.keygen.algorithm")
+	defalg := tdns.DelegationSyncConfig().Child.Update.Keygen.Algorithm
 	sig0.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", defalg,
 		sig0AlgorithmsHelp("Algorithm to use for SIG(0)"))
 	sig0.PersistentFlags().StringVarP(&tdns.Globals.Rrtype, "rrtype", "r", "", "rrtype to use for SIG(0)")
