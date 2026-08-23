@@ -102,7 +102,7 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 			log.Printf("ValidateRRset: FindClosestKnownZone(%q) returned %d servers", signer, len(servers))
 		}
 		if len(servers) == 0 {
-			if sm, ok := rrcache.ServerMap.Get("."); ok {
+			if sm, ok := rrcache.ServerMapCopy("."); ok {
 				servers = sm
 			}
 		}
@@ -911,7 +911,7 @@ func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher
 		return nil
 	}
 	if len(servers) == 0 {
-		if sm, ok := rrcache.ServerMap.Get("."); ok {
+		if sm, ok := rrcache.ServerMapCopy("."); ok {
 			servers = sm
 		}
 	}

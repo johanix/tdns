@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	edns0 "github.com/johanix/tdns/v2/edns0"
@@ -723,7 +724,19 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 		if len(transports) == 0 {
 			continue
 		}
-		for _, addr := range server.GetAddrs() {
+		addrs := server.GetAddrs()
+		if len(addrs) == 0 {
+			// A server in the map with no addresses contributes nothing and,
+			// until now, said nothing either -- indistinguishable in the logs
+			// from a server that was tried and failed. It is never normal: it
+			// is either a defect in how the map was populated, or a delegation
+			// whose nameserver has no address records. Worth a line even when
+			// other servers carry the query, because nothing else will ever
+			// mention it.
+			noteServerWithoutAddresses(zoneName, nsname)
+			continue
+		}
+		for _, addr := range addrs {
 			for rank, t := range transports {
 				if !server.IsAddrXportAvailable(addr, t) {
 					if Globals.Debug {
@@ -759,6 +772,17 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 				tuples = append(tuples, tup)
 			}
 		}
+	}
+
+	// A zero-tuple result is always a dead end: the query loop below never
+	// runs, the caller sees attempts==0, and the only trace is a phrase inside
+	// an error string. It is never normal and never recoverable, so say why --
+	// at WARN, and not gated on debug, because this is exactly the state that
+	// is impossible to diagnose after the fact.
+	if len(tuples) == 0 && len(suspectTuples) == 0 {
+		lgDns.Warn("prioritizeServers: no usable (server, addr, transport) tuples; the query cannot be sent",
+			"qname", qname, "zone", zoneName, "servers", len(serverMap),
+			"require_encrypted", requireEncrypted, "why", explainNoTuples(serverMap, zone, qname, requireEncrypted))
 	}
 
 	sortTuplesByRankThenRTT(tuples)
@@ -815,6 +839,67 @@ func sortTuplesByRankThenRTT(tuples []ServerAddrXportTuple) {
 // wins when its share dominates. When not requireEncrypted and do53_share is
 // 0, Do53 is still appended last as a reliability fallback. requireEncrypted
 // excludes Do53 entirely (independent of OOTS).
+// explainNoTuples says, per server, why it contributed no (addr, transport)
+// tuple. Written for the case that produced #344: a server that is present in
+// the map and named in the logs, but yields nothing -- which until now looked
+// identical to having no server at all.
+func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
+	qname string, requireEncrypted bool) string {
+
+	if len(serverMap) == 0 {
+		return "no servers in the map for this zone"
+	}
+	reasons := make([]string, 0, len(serverMap))
+	for nsname, server := range serverMap {
+		switch {
+		case server == nil:
+			reasons = append(reasons, fmt.Sprintf("%s: nil server entry", nsname))
+			continue
+		case len(candidateTransports(server, qname, requireEncrypted)) == 0:
+			reasons = append(reasons, fmt.Sprintf("%s: no usable transport (encryption required, none available)", nsname))
+			continue
+		}
+		addrs := server.GetAddrs()
+		if len(addrs) == 0 {
+			// The silent case: present, named in every log line, and unusable.
+			reasons = append(reasons, fmt.Sprintf("%s: no addresses", nsname))
+			continue
+		}
+		var serverBackoff, zoneBackoff int
+		for _, addr := range addrs {
+			for _, t := range candidateTransports(server, qname, requireEncrypted) {
+				if !server.IsAddrXportAvailable(addr, t) {
+					serverBackoff++
+					continue
+				}
+				if zone != nil && !zone.IsZoneAddrXportAvailable(addr, t) {
+					zoneBackoff++
+				}
+			}
+		}
+		reasons = append(reasons, fmt.Sprintf("%s: %d addr(s), %d in server backoff, %d in zone backoff",
+			nsname, len(addrs), serverBackoff, zoneBackoff))
+	}
+	sort.Strings(reasons)
+	return strings.Join(reasons, "; ")
+}
+
+// serversWithoutAddresses remembers which (zone, server) pairs have already been
+// reported, so a permanently address-less server is named once rather than on
+// every query. The condition is a standing state, not an event: repeating it per
+// query would bury the log without adding information.
+var serversWithoutAddresses sync.Map
+
+func noteServerWithoutAddresses(zoneName, nsname string) {
+	key := zoneName + "|" + nsname
+	if _, seen := serversWithoutAddresses.LoadOrStore(key, struct{}{}); seen {
+		return
+	}
+	lgDns.Warn("prioritizeServers: server has no addresses and cannot be queried",
+		"ns", nsname, "zone", zoneName,
+		"note", "either the server map was populated without addresses, or the nameserver has no address records; reported once per zone/server")
+}
+
 func candidateTransports(server *cache.AuthServer, qname string, requireEncrypted bool) []core.Transport {
 	if server == nil {
 		if requireEncrypted {
@@ -1544,15 +1629,10 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	// Collect any glue from Additional
 	glue4Map := map[string]core.RRset{}
 	glue6Map := map[string]core.RRset{}
-	serverMapOrig, exist := imr.Cache.ServerMap.Get(zonename)
-
-	// Create a copy of the map to avoid concurrent map read/write errors
-	// The original map is stored in a concurrent map and may be read by other goroutines
-	serverMap := make(map[string]*cache.AuthServer)
-	if exist {
-		for k, v := range serverMapOrig {
-			serverMap[k] = v
-		}
+	// ServerMapCopy, not ServerMap.Get: this map is edited below and handed on.
+	serverMap, exist := imr.Cache.ServerMapCopy(zonename)
+	if !exist {
+		serverMap = map[string]*cache.AuthServer{}
 	}
 
 	// Prune expired auth servers for this zone before updating
@@ -3324,7 +3404,7 @@ func (imr *Imr) DefaultDNSKEYFetcher(ctx context.Context, name string) (*core.RR
 	}
 	_ = best // could be used for logging
 	if len(servers) == 0 {
-		if sm, ok := imr.Cache.ServerMap.Get("."); ok {
+		if sm, ok := imr.Cache.ServerMapCopy("."); ok {
 			servers = sm
 		}
 	}
@@ -3346,7 +3426,7 @@ func (imr *Imr) DefaultRRsetFetcher(ctx context.Context, qname string, qtype uin
 	}
 	_ = best // could be used for logging
 	if len(servers) == 0 {
-		if sm, ok := imr.Cache.ServerMap.Get("."); ok {
+		if sm, ok := imr.Cache.ServerMapCopy("."); ok {
 			servers = sm
 		}
 	}
