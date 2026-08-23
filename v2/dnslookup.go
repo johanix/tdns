@@ -724,6 +724,14 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 		if len(transports) == 0 {
 			continue
 		}
+		if server == nil {
+			// GetAddrs is nil-safe, so this does not crash -- but a nil entry
+			// and a server with no addresses are different faults, and saying
+			// "no addresses" about a nil entry sends the reader looking for a
+			// nameserver that was never there.
+			noteServerProblem(zoneName, nsname, "nil server entry in the server map")
+			continue
+		}
 		addrs := server.GetAddrs()
 		if len(addrs) == 0 {
 			// A server in the map with no addresses contributes nothing and,
@@ -733,7 +741,7 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 			// whose nameserver has no address records. Worth a line even when
 			// other servers carry the query, because nothing else will ever
 			// mention it.
-			noteServerWithoutAddresses(zoneName, nsname)
+			noteServerProblem(zoneName, nsname, "no addresses")
 			continue
 		}
 		for _, addr := range addrs {
@@ -884,20 +892,57 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 	return strings.Join(reasons, "; ")
 }
 
-// serversWithoutAddresses remembers which (zone, server) pairs have already been
-// reported, so a permanently address-less server is named once rather than on
-// every query. The condition is a standing state, not an event: repeating it per
-// query would bury the log without adding information.
-var serversWithoutAddresses sync.Map
+// Unusable-server reports are deduplicated: the condition is a standing state,
+// not an event, so repeating it per query would bury the log without adding
+// information. The state is bounded in both directions -- entries expire so a
+// problem that persists is re-reported eventually, and the table is capped so a
+// resolver meeting an unbounded number of broken delegations cannot grow it
+// without limit.
+const (
+	unusableServerRepeat  = time.Hour
+	unusableServerMaxKeys = 1024
+)
 
-func noteServerWithoutAddresses(zoneName, nsname string) {
-	key := zoneName + "|" + nsname
-	if _, seen := serversWithoutAddresses.LoadOrStore(key, struct{}{}); seen {
+var (
+	unusableServersMu sync.Mutex
+	unusableServers   = map[string]time.Time{}
+)
+
+// noteServerProblem reports, once per zone/server per repeat interval, that a
+// server in the map cannot be queried and why.
+func noteServerProblem(zoneName, nsname, reason string) {
+	key := zoneName + "|" + nsname + "|" + reason
+
+	unusableServersMu.Lock()
+	now := time.Now()
+	if last, seen := unusableServers[key]; seen && now.Sub(last) < unusableServerRepeat {
+		unusableServersMu.Unlock()
 		return
 	}
-	lgDns.Warn("prioritizeServers: server has no addresses and cannot be queried",
-		"ns", nsname, "zone", zoneName,
-		"note", "either the server map was populated without addresses, or the nameserver has no address records; reported once per zone/server")
+	unusableServers[key] = now
+	if len(unusableServers) > unusableServerMaxKeys {
+		// Drop what has aged out first; if that is not enough, drop arbitrary
+		// entries until the table is back under the cap. Go randomises map
+		// iteration, so this is effectively random eviction -- the worst it
+		// costs is a repeated warning, which is much cheaper than unbounded
+		// growth in an error path.
+		for k, t := range unusableServers {
+			if now.Sub(t) >= unusableServerRepeat {
+				delete(unusableServers, k)
+			}
+		}
+		for k := range unusableServers {
+			if len(unusableServers) <= unusableServerMaxKeys {
+				break
+			}
+			delete(unusableServers, k)
+		}
+	}
+	unusableServersMu.Unlock()
+
+	lgDns.Warn("prioritizeServers: server cannot be queried",
+		"ns", nsname, "zone", zoneName, "reason", reason,
+		"note", "reported once per zone/server/reason per hour")
 }
 
 // refusalIndicatesLameness reports whether a refusal rcode is evidence that the

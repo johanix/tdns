@@ -1,8 +1,10 @@
 package tdns
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/johanix/tdns/v2/cache"
 )
@@ -72,26 +74,127 @@ func TestExplainNoTuplesNamesTheServer(t *testing.T) {
 	}
 }
 
-// A permanently address-less server must be reported once, not on every query:
-// it is a standing state, not an event.
-func TestNoteServerWithoutAddressesIsReportedOnce(t *testing.T) {
-	zone, ns := "dedupe-test.example.", "ns1.dedupe-test.example."
-	serversWithoutAddresses.Delete(zone + "|" + ns)
-	t.Cleanup(func() { serversWithoutAddresses.Delete(zone + "|" + ns) })
+// An unusable server must be reported once per interval, not per query: it is a
+// standing state, not an event.
+func TestNoteServerProblemIsReportedOncePerInterval(t *testing.T) {
+	zone, ns, reason := "dedupe-test.example.", "ns1.dedupe-test.example.", "no addresses"
+	key := zone + "|" + ns + "|" + reason
 
-	noteServerWithoutAddresses(zone, ns)
-	if _, ok := serversWithoutAddresses.Load(zone + "|" + ns); !ok {
+	unusableServersMu.Lock()
+	delete(unusableServers, key)
+	unusableServersMu.Unlock()
+	t.Cleanup(func() {
+		unusableServersMu.Lock()
+		delete(unusableServers, key)
+		unusableServersMu.Unlock()
+	})
+
+	noteServerProblem(zone, ns, reason)
+	unusableServersMu.Lock()
+	first, ok := unusableServers[key]
+	unusableServersMu.Unlock()
+	if !ok {
 		t.Fatal("first report did not record the pair")
 	}
-	// Second call must be a no-op rather than a second log line.
-	noteServerWithoutAddresses(zone, ns)
 
-	// A different server in the same zone is still reported.
-	other := "ns2.dedupe-test.example."
-	serversWithoutAddresses.Delete(zone + "|" + other)
-	t.Cleanup(func() { serversWithoutAddresses.Delete(zone + "|" + other) })
-	noteServerWithoutAddresses(zone, other)
-	if _, ok := serversWithoutAddresses.Load(zone + "|" + other); !ok {
-		t.Error("a second server in the same zone was suppressed; dedupe is too coarse")
+	// A second call inside the interval must not refresh the timestamp, or a
+	// server reported continuously would never be re-reported.
+	noteServerProblem(zone, ns, reason)
+	unusableServersMu.Lock()
+	second := unusableServers[key]
+	unusableServersMu.Unlock()
+	if !second.Equal(first) {
+		t.Error("a suppressed report still refreshed the timestamp")
+	}
+}
+
+// Distinct reasons for the same server are tracked separately: a nil map entry
+// and a server with no addresses are different faults.
+func TestNoteServerProblemSeparatesReasons(t *testing.T) {
+	zone, ns := "reasons.example.", "ns1.reasons.example."
+	keys := []string{
+		zone + "|" + ns + "|no addresses",
+		zone + "|" + ns + "|nil server entry in the server map",
+	}
+	t.Cleanup(func() {
+		unusableServersMu.Lock()
+		for _, k := range keys {
+			delete(unusableServers, k)
+		}
+		unusableServersMu.Unlock()
+	})
+
+	noteServerProblem(zone, ns, "no addresses")
+	noteServerProblem(zone, ns, "nil server entry in the server map")
+
+	unusableServersMu.Lock()
+	defer unusableServersMu.Unlock()
+	for _, k := range keys {
+		if _, ok := unusableServers[k]; !ok {
+			t.Errorf("reason not tracked separately: %s", k)
+		}
+	}
+}
+
+// The table must stay bounded. A resolver can meet an unbounded number of broken
+// delegations, and a dedup cache that never evicts is a slow leak on an error
+// path.
+func TestNoteServerProblemBoundsItsState(t *testing.T) {
+	unusableServersMu.Lock()
+	saved := unusableServers
+	unusableServers = map[string]time.Time{}
+	unusableServersMu.Unlock()
+	t.Cleanup(func() {
+		unusableServersMu.Lock()
+		unusableServers = saved
+		unusableServersMu.Unlock()
+	})
+
+	for i := 0; i < unusableServerMaxKeys*2; i++ {
+		noteServerProblem(fmt.Sprintf("zone%d.example.", i), "ns1.example.", "no addresses")
+	}
+
+	unusableServersMu.Lock()
+	n := len(unusableServers)
+	unusableServersMu.Unlock()
+	if n > unusableServerMaxKeys {
+		t.Errorf("dedup table holds %d entries, cap is %d; it grows without bound",
+			n, unusableServerMaxKeys)
+	}
+	if n == 0 {
+		t.Error("dedup table was emptied entirely; every server would be re-reported every query")
+	}
+}
+
+// A nil entry in the server map must not crash the resolver, and must be
+// reported as what it is. GetAddrs is nil-safe on its receiver, so this never
+// panicked -- but "no addresses" was the wrong thing to say about it, and would
+// send an operator looking for a nameserver that was never there.
+func TestPrioritizeServersHandlesANilServerEntry(t *testing.T) {
+	imr := newTestImr(t)
+
+	serverMap := map[string]*cache.AuthServer{
+		"ns1.example.": nil,
+		"ns2.example.": {Name: "ns2.example.", Addrs: []string{"192.0.2.2"}},
+	}
+
+	// Must not panic, and the healthy server must still be usable: one bad map
+	// entry cannot be allowed to take the whole zone down with it.
+	_, _, tuples := imr.prioritizeServers("foo.example.", serverMap, false)
+	if len(tuples) == 0 {
+		t.Fatal("a nil entry suppressed the healthy server alongside it")
+	}
+	for _, tup := range tuples {
+		if tup.NSName == "ns1.example." {
+			t.Error("the nil entry produced a tuple")
+		}
+	}
+
+	// And with ONLY a nil entry, still no panic and no tuples.
+	_, _, tuples = imr.prioritizeServers("foo.example.", map[string]*cache.AuthServer{
+		"ns1.example.": nil,
+	}, false)
+	if len(tuples) != 0 {
+		t.Errorf("a nil-only server map produced %d tuples", len(tuples))
 	}
 }
