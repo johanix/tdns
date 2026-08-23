@@ -219,7 +219,8 @@ Nothing here is authorised for implementation yet.
    `AnalyseZoneDelegation`. Unlike the proxy it has a keystore and a rollover
    engine, so the fix is different — point it at the same helpers the rollover
    engine uses — but the double-DS exposure is the same.
-6. **The parent checks authorization but not coherence on its push paths.**
+6. **The parent checks authorization but not coherence on its push paths**
+   (filed as issue #384).
    `ApproveActionsForPrincipal` decides whether a principal may touch an RRtype
    at a name; it says nothing about whether the resulting delegation still
    works. The scanner path applies an RFC 7344/8078 gate, but the UPDATE and API
