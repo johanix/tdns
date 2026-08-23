@@ -13,6 +13,12 @@ import (
 // (advertised UPDATE? × advertised NOTIFY?) × (auto, prefer-update,
 // prefer-notify, force-update, force-notify), plus an empty-string
 // default-preference cell and an unknown-preference error cell.
+//
+// The API rows below cover the third advertisement axis. API is a last resort,
+// not a peer of the DNS transports: it is chosen only when the parent offers no
+// DNS transport at all, and it never rescues a force-* pin, because a pin names
+// the transport the operator requires and silently satisfying it with a
+// different one would defeat the point.
 func TestDecideRolloverSchemes(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -53,8 +59,27 @@ func TestDecideRolloverSchemes(t *testing.T) {
 		{"force-notify/notify-only", false, true, false, DsyncSchemePreferenceForceNotify, []core.DsyncScheme{core.SchemeNotify}, ""},
 		{"force-notify/both", true, true, false, DsyncSchemePreferenceForceNotify, []core.DsyncScheme{core.SchemeNotify}, ""},
 
+		// API as last resort: chosen only when no DNS transport is advertised.
+		{"auto/api-only", false, false, true, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeAPI}, ""},
+		{"auto/api+update", true, false, true, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeUpdate}, ""},
+		{"auto/api+notify", false, true, true, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeNotify}, ""},
+		{"auto/api+both", true, true, true, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeUpdate, core.SchemeNotify}, ""},
+
+		{"prefer-update/api-only", false, false, true, DsyncSchemePreferencePreferUpdate, []core.DsyncScheme{core.SchemeAPI}, ""},
+		{"prefer-update/api+update", true, false, true, DsyncSchemePreferencePreferUpdate, []core.DsyncScheme{core.SchemeUpdate}, ""},
+		{"prefer-update/api+notify", false, true, true, DsyncSchemePreferencePreferUpdate, []core.DsyncScheme{core.SchemeNotify}, ""},
+
+		{"prefer-notify/api-only", false, false, true, DsyncSchemePreferencePreferNotify, []core.DsyncScheme{core.SchemeAPI}, ""},
+		{"prefer-notify/api+notify", false, true, true, DsyncSchemePreferencePreferNotify, []core.DsyncScheme{core.SchemeNotify}, ""},
+		{"prefer-notify/api+update", true, false, true, DsyncSchemePreferencePreferNotify, []core.DsyncScheme{core.SchemeUpdate}, ""},
+
+		// A pin is a pin: API must not stand in for the transport it names.
+		{"force-update/api-only", false, false, true, DsyncSchemePreferenceForceUpdate, nil, "force-update"},
+		{"force-notify/api-only", false, false, true, DsyncSchemePreferenceForceNotify, nil, "force-notify"},
+
 		// edge cases
 		{"empty-pref-defaults-to-auto/both", true, true, false, "", []core.DsyncScheme{core.SchemeUpdate, core.SchemeNotify}, ""},
+		{"empty-pref-defaults-to-auto/api-only", false, false, true, "", []core.DsyncScheme{core.SchemeAPI}, ""},
 		{"unknown-pref", true, true, false, "weird", nil, "invalid dsync-scheme-preference"},
 	}
 
