@@ -899,14 +899,32 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 // recurse into ValidateDNSKEYs(parent) → backfillDS(parent) → … strictly
 // UP the tree, ending at the root / a configured trust anchor. It never
 // re-enters for `name` itself, so there is no unbounded recursion.
+// parentOf returns the parent zone name of a domain name. The root is its own
+// parent; callers must not ask for the root's DS.
+func parentOf(name string) string {
+	labels := dns.SplitDomainName(name)
+	if len(labels) <= 1 {
+		return "."
+	}
+	return dns.Fqdn(strings.Join(labels[1:], "."))
+}
+
 func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher RRsetFetcher) *CachedRRset {
 	if fetcher == nil || name == "." {
 		return nil
 	}
-	_, servers, err := rrcache.FindClosestKnownZone(name)
+	// A DS lives in the PARENT zone, so it must be fetched from the parent's
+	// servers. Asking FindClosestKnownZone(name) returns the servers for `name`
+	// itself, which are authoritative for the child and not for the DS -- they
+	// answer REFUSED, entirely correctly. That refusal was then booked as a
+	// lame delegation, putting the (addr, transport) into a zone backoff, after
+	// which prioritizeServers had nothing left to offer and every subsequent
+	// query for the zone failed without a single auth-server attempt.
+	parent := parentOf(name)
+	_, servers, err := rrcache.FindClosestKnownZone(parent)
 	if err != nil {
 		if rrcache.Verbose {
-			log.Printf("backfillDS: FindClosestKnownZone(%q) failed: %v", name, err)
+			log.Printf("backfillDS: FindClosestKnownZone(%q) failed: %v", parent, err)
 		}
 		return nil
 	}
