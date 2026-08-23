@@ -158,7 +158,7 @@ func rrsetFor(rrsets []DsyncApiRRset, owner, rrtype string) (DsyncApiRRset, bool
 func TestProxyApiRRsetsAreBuiltFromTheServedZone(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiSignedZone())
 
-	rrsets := zd.proxyApiRRsets(&ProxyDelegationAnalysis{NsOrGlueChanged: true})
+	rrsets := zd.proxyApiRRsets()
 	if len(rrsets) == 0 {
 		t.Fatal("no rrsets built from a zone that plainly has a delegation")
 	}
@@ -189,40 +189,32 @@ func TestProxyApiRRsetsAreBuiltFromTheServedZone(t *testing.T) {
 	}
 }
 
-// The un-signing case: no SEP keys AND we watched the DNSKEY RRset change in
-// this very transfer. Only then is an explicit empty DS -- "remove it" -- sent.
-func TestProxyApiRRsetsDeclareEmptyDSOnObservedUnsigning(t *testing.T) {
+// A child with no SEP DNSKEYs declares an EMPTY DS, so the parent removes what
+// it holds. This is the un-signing case and the never-signed case at once: the
+// request states what the child's DS is, and for an unsigned child that is
+// nothing.
+//
+// It used to require a witness -- proof that the DNSKEY RRset changed in the
+// transfer that left the zone unsigned -- so that a never-signed zone would not
+// wipe a DS placed out of band. That protected the wrong state. A DS in the
+// parent for an unsigned child makes every validator declare the child bogus,
+// so removing it is the repair; and the witness never appears at all on the
+// steady-state path for a zone that was never signed, so the DS stayed.
+func TestProxyApiRRsetsDeclareEmptyDSWhenTheChildIsUnsigned(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
 
-	rrsets := zd.proxyApiRRsets(&ProxyDelegationAnalysis{DnskeyChanged: true})
+	rrsets := zd.proxyApiRRsets()
 	ds, ok := rrsetFor(rrsets, proxyApiZone, "DS")
 	if !ok {
-		t.Fatal("no DS rrset after an observed un-signing; the parent would keep a stale DS")
+		t.Fatal("no DS rrset for an unsigned child; the parent would keep a DS that makes the child bogus")
 	}
 	if len(ds.RRs) != 0 {
 		t.Errorf("DS rrset has %d RRs, want 0 (empty means remove): %v", len(ds.RRs), ds.RRs)
 	}
-}
 
-// A zone that was never signed must NOT send an empty DS: absent means "leave
-// alone", and a DS the registrant placed out of band is none of the proxy's
-// business. Without the DnskeyChanged witness there is no evidence of an
-// un-signing to act on.
-func TestProxyApiRRsetsLeaveDSAloneWithoutAnUnsigningWitness(t *testing.T) {
-	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
-
-	for name, analysis := range map[string]*ProxyDelegationAnalysis{
-		"no dnskey change": {NsOrGlueChanged: true},
-		"nil analysis":     nil,
-	} {
-		rrsets := zd.proxyApiRRsets(analysis)
-		if _, ok := rrsetFor(rrsets, proxyApiZone, "DS"); ok {
-			t.Errorf("%s: a DS rrset was sent; that would wipe a DS this agent never placed", name)
-		}
-		// The rest of the delegation still goes out.
-		if _, ok := rrsetFor(rrsets, proxyApiZone, "NS"); !ok {
-			t.Errorf("%s: no NS rrset", name)
-		}
+	// The rest of the delegation still goes out.
+	if _, ok := rrsetFor(rrsets, proxyApiZone, "NS"); !ok {
+		t.Error("no NS rrset")
 	}
 }
 

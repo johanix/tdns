@@ -257,17 +257,19 @@ func TestProxyAnalysisFromSyncStatusMapsOntoTheActMapping(t *testing.T) {
 	}
 }
 
-// A DS the parent holds that the child can no longer support is exactly the
-// un-signing case, and the synthesised analysis must carry the witness the API
-// path needs to declare an empty DS.
-func TestProxyAnalysisFromSyncStatusWitnessesUnsigning(t *testing.T) {
+// A DS the parent holds that the child does not support still counts as a
+// change, so the startup reconcile treats the delegation as out of sync and
+// sends. What it must NOT do is decide the DS question on its own: the API
+// payload states the child's DS regardless of how the analysis was built, so a
+// parent-vs-child comparison and a transfer diff reach the same request.
+func TestProxyAnalysisFromSyncStatusReportsADSDisagreement(t *testing.T) {
 	a := proxyAnalysisFromSyncStatus(DelegationSyncStatus{DSRemoves: []dns.RR{&dns.DS{}}})
-	if !a.DnskeyChanged {
-		t.Fatal("a DS removal did not set DnskeyChanged, so the API path would leave a stale DS")
+	if !a.anyChange() {
+		t.Fatal("a DS disagreement produced no change, so the reconcile would send nothing")
 	}
 
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone()) // unsigned
-	rrsets := zd.proxyApiRRsets(a)
+	rrsets := zd.proxyApiRRsets()
 	ds, ok := rrsetFor(rrsets, proxyApiZone, "DS")
 	if !ok || len(ds.RRs) != 0 {
 		t.Fatalf("want an explicit empty DS rrset, got present=%v rrs=%v", ok, ds.RRs)

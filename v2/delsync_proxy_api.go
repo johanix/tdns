@@ -120,7 +120,7 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 		"parent", parent, "target", endpoint.Target, "endpoint", endpoint.Url,
 		"dialect", endpoint.Dialect)
 
-	rrsets := zd.proxyApiRRsets(analysis)
+	rrsets := zd.proxyApiRRsets()
 	if len(rrsets) == 0 {
 		// An empty request is refused as malformed by the endpoint, and rightly
 		// so: nothing to declare has to mean nothing, not "remove everything".
@@ -141,20 +141,26 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 // proxyApiRRsets renders the served zone's delegation in the declarative form
 // the endpoint takes.
 //
-// The DS rule is the one place this differs from the tdns-auth child path, and
-// it is a consequence of "absent means leave alone". A zone with no SEP DNSKEYs
-// produces no DS, so DsyncApiRRsetsFromSyncStatus omits DS entirely and the
-// parent keeps whatever DS it already has. For a zone that was never signed
-// that is exactly right -- a DS the registrant set out of band is none of this
-// agent's business. For a zone that just STOPPED being signed it is wrong: the
-// UPDATE replace path would delete the DS RRset, and leaving it behind is a
-// broken chain of trust that nothing else will clean up.
+// The DS needs saying explicitly. A zone with no SEP DNSKEYs produces no DS, so
+// DsyncApiRRsetsFromSyncStatus omits DS from the request entirely, and under
+// "absent means leave alone" the parent then keeps whatever DS it holds. For an
+// unsigned child that is the one state worth avoiding: a DS in the parent for a
+// child that cannot answer for it makes every validating resolver declare the
+// whole child zone bogus.
 //
-// So an explicit empty DS -- the declarative form's "remove this" -- is sent
-// only when the analysis witnessed the DNSKEY RRset change in the very transfer
-// that left the zone unsigned. Without that witness the request stays silent
-// about DS, which keeps a never-signed zone from wiping a DS it did not place.
-func (zd *ZoneData) proxyApiRRsets(analysis *ProxyDelegationAnalysis) []DsyncApiRRset {
+// So an empty DS RRset -- the declarative form's "remove this" -- is declared
+// whenever the child has no SEP DNSKEYs, and the parent removes what it has.
+// This is delegation SYNCHRONISATION: the parent's delegation is made to match
+// the child's, and "no DS" is a state the child can be in.
+//
+// This used to be gated on the analysis having witnessed the DNSKEY RRset
+// change in the transfer that left the zone unsigned, so that a never-signed
+// zone would not wipe a DS some registrant had placed out of band. That gets
+// the risk backwards. Such a DS broke the child the moment it appeared, and
+// removing it is the repair, not an overreach -- while the gate also silently
+// skipped the removal on the steady-state path, where a never-signed zone
+// never produces the witness at all.
+func (zd *ZoneData) proxyApiRRsets() []DsyncApiRRset {
 	newNS, newA, newAAAA, newDS := zd.proxyCurrentDelegationRRs()
 
 	rrsets := DsyncApiRRsetsFromSyncStatus(zd.ZoneName, DelegationSyncStatus{
@@ -166,9 +172,9 @@ func (zd *ZoneData) proxyApiRRsets(analysis *ProxyDelegationAnalysis) []DsyncApi
 		NewDS:    newDS,
 	})
 
-	if len(newDS) == 0 && analysis != nil && analysis.DnskeyChanged {
-		lgDns.Info("delegation-sync-proxy: zone has no SEP DNSKEYs and the DNSKEY RRset just changed;"+
-			" declaring an empty DS so the parent removes the stale one", "zone", zd.ZoneName)
+	if len(newDS) == 0 {
+		lgDns.Info("delegation-sync-proxy: zone has no SEP DNSKEYs;"+
+			" declaring an empty DS so the parent removes any DS it holds", "zone", zd.ZoneName)
 		rrsets = append(rrsets, DsyncApiRRset{
 			Owner: dns.Fqdn(zd.ZoneName),
 			Type:  dns.TypeToString[dns.TypeDS],
