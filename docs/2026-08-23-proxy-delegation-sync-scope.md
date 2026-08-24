@@ -470,7 +470,9 @@ enables is unsafe to use until A2 lands.
 
 ## Work outstanding
 
-Nothing here is authorised for implementation.
+Implemented 2026-08-23 and awaiting review: **A1, A2, A4** in PR #385, **C1** in
+PR #386. **B1 and B2** remain deferred until #343 lands, for the conflict reason
+below. **A3** is not built and will not be until D4 is answered.
 
 **Role A — tdns-auth as primary**
 
