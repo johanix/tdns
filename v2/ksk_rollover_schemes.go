@@ -53,22 +53,30 @@ type schemeChoice struct {
 // Filter rule for UPDATE: any UPDATE-scheme DSYNC RR (UPDATE
 // advertisements are RRtype-agnostic by spec).
 //
+// Filter rule for API: same as UPDATE, RRtype-agnostic. The endpoint
+// manages DS directly (dsyncApiManagedTypes), so what the DSYNC RR
+// nominally covers does not constrain what can be pushed over it. API
+// is only ever chosen as a last resort — see decideRolloverSchemes.
+//
 // The boolean returns (updateAdvertised, notifyAdvertised) reflect
 // what the parent's DSYNC RRset itself contains, independent of the
 // policy's scheme preference. Dispatcher persists these so status
 // output can distinguish "parent doesn't advertise this scheme" from
 // "engine hasn't pushed via this scheme yet".
-func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *DnssecPolicy) ([]schemeChoice, bool, bool, error) {
-	if zd == nil || imr == nil || pol == nil {
-		return nil, false, false, fmt.Errorf("pickRolloverSchemes: nil argument")
-	}
+//
+// API advertisement is deliberately NOT returned or persisted here:
+// that would mean a third tri-state column in RolloverZoneState and a
+// schema change, for an observability nicety. The gap is that status
+// output cannot yet say "the parent advertises API" — worth adding
+// with the next schema change, not on its own.
 
-	dsync, err := imr.DsyncDiscovery(ctx, zd.ZoneName, Globals.Verbose)
-	if err != nil {
-		return nil, false, false, fmt.Errorf("DsyncDiscovery: %w", err)
-	}
-
-	var updateRR, notifyRR *core.DSYNC
+// selectRolloverDsyncRRs picks the first usable DSYNC RR per scheme from a
+// discovery result.
+//
+// Split out of pickRolloverSchemes so the gates below can be tested without a
+// live IMR: the surrounding function's first act is a network discovery, which
+// would otherwise make the API DNSSEC gate untestable.
+func selectRolloverDsyncRRs(dsync DsyncResult, zoneName string) (updateRR, notifyRR, apiRR *core.DSYNC) {
 	for _, rr := range dsync.Rdata {
 		if rr == nil {
 			continue
@@ -85,12 +93,53 @@ func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *Dnsse
 			if notifyRR == nil {
 				notifyRR = rr
 			}
+		case core.SchemeAPI:
+			// RRtype-agnostic like UPDATE: the endpoint manages DS
+			// directly (dsyncApiManagedTypes), so what the DSYNC RR
+			// nominally covers does not constrain what can be pushed.
+			//
+			// But it is gated on the DSYNC lookup having DNSSEC-validated,
+			// which UPDATE and NOTIFY are not. This RR names the target
+			// whose URI carries the endpoint the push then sends a bearer
+			// credential to, so an unvalidated lookup lets whoever can
+			// answer the query choose where that credential goes.
+			// Discovering URI/TXT at the (possibly attacker-chosen) target
+			// does not close it: a spoofed DSYNC names a zone whose own
+			// records validate perfectly well.
+			//
+			// Same gate, same switch, as the delegation-sync planner.
+			if !dsync.Validated && !DelegationSyncConfig().Child.Api.AllowInsecure {
+				lgRollover.Warn("pickRolloverSchemes: ignoring the API scheme:"+
+					" the DSYNC lookup did not DNSSEC-validate and"+
+					" delegationsync.child.api.allow-insecure is not set",
+					"zone", zoneName)
+				continue
+			}
+			if apiRR == nil {
+				apiRR = rr
+			}
 		}
 	}
+	return updateRR, notifyRR, apiRR
+}
+
+func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *DnssecPolicy) ([]schemeChoice, bool, bool, error) {
+	if zd == nil || imr == nil || pol == nil {
+		return nil, false, false, fmt.Errorf("pickRolloverSchemes: nil argument")
+	}
+
+	dsync, err := imr.DsyncDiscovery(ctx, zd.ZoneName, Globals.Verbose)
+	if err != nil {
+		return nil, false, false, fmt.Errorf("DsyncDiscovery: %w", err)
+	}
+
+	updateRR, notifyRR, apiRR := selectRolloverDsyncRRs(dsync, zd.ZoneName)
 	updateAdvertised := updateRR != nil
 	notifyAdvertised := notifyRR != nil
+	apiAdvertised := apiRR != nil
 
-	want, derr := decideRolloverSchemes(updateAdvertised, notifyAdvertised, pol.Rollover.DsyncSchemePreference)
+	want, derr := decideRolloverSchemes(updateAdvertised, notifyAdvertised, apiAdvertised,
+		pol.Rollover.DsyncSchemePreference)
 	if derr != nil {
 		return nil, updateAdvertised, notifyAdvertised, fmt.Errorf("zone %s: %w", zd.ZoneName, derr)
 	}
@@ -103,10 +152,23 @@ func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *Dnsse
 			rr = updateRR
 		case core.SchemeNotify:
 			rr = notifyRR
+		case core.SchemeAPI:
+			rr = apiRR
 		}
 		if rr == nil {
 			// Should not happen — categorization above guarantees the
 			// chosen scheme has an advertised RR. Defensive only.
+			continue
+		}
+		if scheme == core.SchemeAPI {
+			// No address resolution for API. Its DSYNC target is a
+			// service description point: the URI published there names
+			// the host that actually resolves, and address records at
+			// the target itself are optional. Requiring A/AAAA would
+			// fail on a CORRECTLY configured parent.
+			out = append(out, schemeChoice{Scheme: scheme, Target: &DsyncTarget{
+				Name: rr.Target, Scheme: rr.Scheme, Port: rr.Port, RR: rr,
+			}})
 			continue
 		}
 		target, terr := resolveDsyncTarget(ctx, imr, rr)
@@ -140,6 +202,30 @@ func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *Dnsse
 // from the DSYNC RRset) and the policy's preference, returns the
 // list of schemes the engine should attempt this push.
 //
+// API IS THE LAST RESORT, never a co-equal choice. It is reached only
+// when neither UPDATE nor NOTIFY is available, so every deployment
+// where one of those is advertised behaves exactly as before. Two
+// reasons, and they agree:
+//
+//   - the design says so. "Preference order is the operator's and
+//     defaults to putting api last: it is the fallback, not the
+//     choice" (dsync-api-scheme §11), because the credential is a
+//     bearer token and the scheme inherits a hard dependency on the
+//     parent zone being signed that UPDATE does not have (§8).
+//   - it costs something the others do not. Under "auto" against a
+//     both-advertising parent the engine dispatches UPDATE and NOTIFY
+//     in PARALLEL; adding API to that would put a credential on the
+//     wire on every push for no gain when a DNS transport already
+//     works.
+//
+// What this closes: before, a parent advertising ONLY the API scheme
+// left both booleans false, which is errNoUsableScheme, which is
+// child-config:waiting-for-parent -- a softfail that never hardfails.
+// The rollover waited forever on a parent that could have accepted
+// the DS immediately (dsyncApiManagedTypes includes DS).
+//
+// force-update / force-notify do NOT fall back to API. Force is force.
+//
 // Pulled out of pickRolloverSchemes so it can be exhaustively
 // table-tested without standing up an Imr or a parent zone.
 //
@@ -153,7 +239,7 @@ func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *Dnsse
 //   - "invalid preference value" is a config error (operator typo),
 //     not a parent issue; returned with no sentinel and dispatched as
 //     child-config:local-error.
-func decideRolloverSchemes(updateAdvertised, notifyAdvertised bool, preference string) ([]core.DsyncScheme, error) {
+func decideRolloverSchemes(updateAdvertised, notifyAdvertised, apiAdvertised bool, preference string) ([]core.DsyncScheme, error) {
 	pref := preference
 	if pref == "" {
 		pref = defaultDsyncSchemePreference
@@ -167,6 +253,8 @@ func decideRolloverSchemes(updateAdvertised, notifyAdvertised bool, preference s
 			return []core.DsyncScheme{core.SchemeUpdate}, nil
 		case notifyAdvertised:
 			return []core.DsyncScheme{core.SchemeNotify}, nil
+		case apiAdvertised:
+			return []core.DsyncScheme{core.SchemeAPI}, nil
 		default:
 			return nil, errNoUsableScheme
 		}
@@ -176,6 +264,8 @@ func decideRolloverSchemes(updateAdvertised, notifyAdvertised bool, preference s
 			return []core.DsyncScheme{core.SchemeUpdate}, nil
 		case notifyAdvertised:
 			return []core.DsyncScheme{core.SchemeNotify}, nil
+		case apiAdvertised:
+			return []core.DsyncScheme{core.SchemeAPI}, nil
 		default:
 			return nil, errNoUsableScheme
 		}
@@ -185,6 +275,8 @@ func decideRolloverSchemes(updateAdvertised, notifyAdvertised bool, preference s
 			return []core.DsyncScheme{core.SchemeNotify}, nil
 		case updateAdvertised:
 			return []core.DsyncScheme{core.SchemeUpdate}, nil
+		case apiAdvertised:
+			return []core.DsyncScheme{core.SchemeAPI}, nil
 		default:
 			return nil, errNoUsableScheme
 		}
@@ -255,6 +347,8 @@ func schemeName(s core.DsyncScheme) string {
 		return "UPDATE"
 	case core.SchemeNotify:
 		return "NOTIFY"
+	case core.SchemeAPI:
+		return "API"
 	default:
 		return fmt.Sprintf("scheme%d", s)
 	}
