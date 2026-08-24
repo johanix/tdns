@@ -69,17 +69,14 @@ type schemeChoice struct {
 // schema change, for an observability nicety. The gap is that status
 // output cannot yet say "the parent advertises API" — worth adding
 // with the next schema change, not on its own.
-func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *DnssecPolicy) ([]schemeChoice, bool, bool, error) {
-	if zd == nil || imr == nil || pol == nil {
-		return nil, false, false, fmt.Errorf("pickRolloverSchemes: nil argument")
-	}
 
-	dsync, err := imr.DsyncDiscovery(ctx, zd.ZoneName, Globals.Verbose)
-	if err != nil {
-		return nil, false, false, fmt.Errorf("DsyncDiscovery: %w", err)
-	}
-
-	var updateRR, notifyRR, apiRR *core.DSYNC
+// selectRolloverDsyncRRs picks the first usable DSYNC RR per scheme from a
+// discovery result.
+//
+// Split out of pickRolloverSchemes so the gates below can be tested without a
+// live IMR: the surrounding function's first act is a network discovery, which
+// would otherwise make the API DNSSEC gate untestable.
+func selectRolloverDsyncRRs(dsync DsyncResult, zoneName string) (updateRR, notifyRR, apiRR *core.DSYNC) {
 	for _, rr := range dsync.Rdata {
 		if rr == nil {
 			continue
@@ -100,11 +97,43 @@ func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *Dnsse
 			// RRtype-agnostic like UPDATE: the endpoint manages DS
 			// directly (dsyncApiManagedTypes), so what the DSYNC RR
 			// nominally covers does not constrain what can be pushed.
+			//
+			// But it is gated on the DSYNC lookup having DNSSEC-validated,
+			// which UPDATE and NOTIFY are not. This RR names the target
+			// whose URI carries the endpoint the push then sends a bearer
+			// credential to, so an unvalidated lookup lets whoever can
+			// answer the query choose where that credential goes.
+			// Discovering URI/TXT at the (possibly attacker-chosen) target
+			// does not close it: a spoofed DSYNC names a zone whose own
+			// records validate perfectly well.
+			//
+			// Same gate, same switch, as the delegation-sync planner.
+			if !dsync.Validated && !DelegationSyncConfig().Child.Api.AllowInsecure {
+				lgRollover.Warn("pickRolloverSchemes: ignoring the API scheme:"+
+					" the DSYNC lookup did not DNSSEC-validate and"+
+					" delegationsync.child.api.allow-insecure is not set",
+					"zone", zoneName)
+				continue
+			}
 			if apiRR == nil {
 				apiRR = rr
 			}
 		}
 	}
+	return updateRR, notifyRR, apiRR
+}
+
+func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *DnssecPolicy) ([]schemeChoice, bool, bool, error) {
+	if zd == nil || imr == nil || pol == nil {
+		return nil, false, false, fmt.Errorf("pickRolloverSchemes: nil argument")
+	}
+
+	dsync, err := imr.DsyncDiscovery(ctx, zd.ZoneName, Globals.Verbose)
+	if err != nil {
+		return nil, false, false, fmt.Errorf("DsyncDiscovery: %w", err)
+	}
+
+	updateRR, notifyRR, apiRR := selectRolloverDsyncRRs(dsync, zd.ZoneName)
 	updateAdvertised := updateRR != nil
 	notifyAdvertised := notifyRR != nil
 	apiAdvertised := apiRR != nil
