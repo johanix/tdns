@@ -1605,6 +1605,22 @@ func computeNewDS(dss *DelegationSyncStatus, zd *ZoneData) {
 		return
 	}
 
+	// Not while the rollover engine owns the DS.
+	//
+	// The keystore intent below deliberately excludes `created` keys, because
+	// outside a rollover a key that has had no DS placed should not have one
+	// published on its behalf. During a rollover that exclusion is exactly
+	// wrong: the engine has already sent the DS for a key that is still
+	// `created`, so an authoritative set computed here omits it and replace
+	// mode deletes it.
+	//
+	// AnalyseZoneDelegation defers to the engine for the same reason. This is
+	// the other way in: an ordinary UPDATE that happens to touch a DNSKEY,
+	// arriving while a DS-work phase is in flight.
+	if zd.rolloverOwnsDS() {
+		return
+	}
+
 	// The DS set comes from the keystore, not from the DNSKEY RRset this update
 	// happens to produce.
 	//

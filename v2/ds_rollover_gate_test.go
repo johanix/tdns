@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/miekg/dns"
 )
 
 func gateTestKeyDB(t *testing.T) *KeyDB {
@@ -136,6 +138,57 @@ func TestRolloverOwnsDS(t *testing.T) {
 		zd := &ZoneData{ZoneName: zone, KeyDB: kdb}
 		if zd.rolloverOwnsDS() {
 			t.Error("a rollover on a sibling zone suppressed this zone's DS sync")
+		}
+	})
+}
+
+// The update path defers to the rollover engine for the same reason the
+// analysis path does.
+//
+// The keystore intent excludes `created` keys, which is right outside a
+// rollover and exactly wrong during one: the engine has already sent the DS for
+// a key that is still `created`, so an authoritative set computed here omits it
+// and replace mode deletes it. AnalyseZoneDelegation was gated; this path was
+// the other way in, reached by an ordinary UPDATE that happens to touch a
+// DNSKEY while a DS-work phase is in flight.
+func TestComputeNewDSDefersWhileTheEngineOwnsTheDS(t *testing.T) {
+	const zone = "child.example."
+
+	newDss := func() *DelegationSyncStatus {
+		return &DelegationSyncStatus{
+			ZoneName:      zone,
+			DNSKEYRemoves: []dns.RR{&dns.DNSKEY{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY}}},
+		}
+	}
+
+	t.Run("during a DS-work phase: no DS opinion", func(t *testing.T) {
+		kdb := gateTestKeyDB(t)
+		seedRolloverRowPhase(t, kdb, zone, 0, rolloverPhasePendingParentPush)
+		zd := &ZoneData{ZoneName: zone, KeyDB: kdb}
+
+		dss := newDss()
+		computeNewDS(dss, zd)
+
+		if dss.NewDSKnown {
+			t.Fatal("the update path claimed an authoritative DS set while the engine" +
+				" owned the DS; replace mode would delete the pre-published record")
+		}
+		if len(dss.NewDS) != 0 {
+			t.Errorf("NewDS carried %d records", len(dss.NewDS))
+		}
+	})
+
+	t.Run("idle: the update path answers as usual", func(t *testing.T) {
+		kdb := gateTestKeyDB(t)
+		seedRolloverRowPhase(t, kdb, zone, 0, rolloverPhaseIdle)
+		seedKey(t, kdb, zone, DnskeyStateActive, 257, pubA)
+		zd := &ZoneData{ZoneName: zone, KeyDB: kdb}
+
+		dss := newDss()
+		computeNewDS(dss, zd)
+
+		if !dss.NewDSKnown {
+			t.Fatal("an idle zone produced no DS answer; the DS change would be dropped")
 		}
 	})
 }
