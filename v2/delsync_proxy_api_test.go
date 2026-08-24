@@ -201,7 +201,7 @@ func TestProxyApiRRsetsAreBuiltFromTheServedZone(t *testing.T) {
 	}
 }
 
-// A child with no SEP DNSKEYs declares an EMPTY DS, so the parent removes what
+// A child with no DNSKEY RRset at all declares an EMPTY DS, so the parent removes what
 // it holds. This is the un-signing case and the never-signed case at once: the
 // request states what the child's DS is, and for an unsigned child that is
 // nothing.

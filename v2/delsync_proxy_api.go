@@ -61,8 +61,13 @@ const proxyApiDiscoveryTimeout = 60 * time.Second
 // NOT come from the ProxyDelegationAnalysis deltas: DelegationDataChangedNG
 // fills only the Adds/Removes fields, never the New* ones that the declarative
 // form is built from, so feeding it the analysis would produce an empty request
-// and a silent no-op. The analysis is the trigger and the un-signing witness
-// (see the DS rule below), not the payload.
+// and a silent no-op. The analysis is the trigger, not the payload.
+//
+// It is no longer the un-signing witness either, and nothing in this function
+// reads it: the DS question is decided by hasDnskeyRRset alone. The parameter
+// stays for the uniform SyncWithParent dispatch signature. Said explicitly
+// because the previous wording sent a reader looking for a witness check that
+// does not exist.
 func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *DsyncTarget,
 	analysis *ProxyDelegationAnalysis) (string, error) {
 
