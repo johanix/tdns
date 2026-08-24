@@ -149,9 +149,23 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 		}
 	}
 
-	// apex, _ := zd.Data[zd.ZoneName]
-	apex, _ := zd.Data.Get(zd.ZoneName)
-	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
+	// A completed transfer always carries the apex SOA -- for AXFR the closing
+	// SOA is what ends the stream, and dns.Transfer.In reports a stream that
+	// ends without it as an error, handled above. So reaching this point
+	// without one means the peer sent something that is not this zone.
+	//
+	// This used to take the lookup result unchecked and index the SOA RRset
+	// directly. Both steps panic on the way through: a miss leaves RRtypes nil,
+	// and an apex without an SOA leaves the RRset empty. That is a panic on the
+	// success path of every zone transfer, reachable only through a peer that
+	// is already misbehaving -- which is precisely when a nameserver must stay
+	// up. An error discards the data, which is what a transfer that did not
+	// deliver a zone deserves.
+	soa, serr := zd.transferredApexSOA(upstream)
+	if serr != nil {
+		return 0, serr
+	}
+
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
 	// The journal anchors to the FILE, not to whatever the serial becomes
@@ -159,11 +173,33 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 	zd.fileSerial = soa.Serial
 
 	zd.Logger.Printf("*** Zone %s transferred from upstream %s. No errors.", zd.ZoneName, upstream)
-	if zd.Data.IsEmpty() {
-		return 0, nil
-	}
 
 	return soa.Serial, nil
+}
+
+// transferredApexSOA returns the apex SOA of a just-received zone, or an error
+// if the peer did not deliver one.
+func (zd *ZoneData) transferredApexSOA(upstream string) (*dns.SOA, error) {
+	apex, ok := zd.Data.Get(zd.ZoneName)
+	if !ok {
+		return nil, fmt.Errorf("ZoneTransferIn %s: transfer from %s delivered no apex",
+			zd.ZoneName, upstream)
+	}
+	if apex.RRtypes == nil {
+		return nil, fmt.Errorf("ZoneTransferIn %s: apex from %s carries no RRsets",
+			zd.ZoneName, upstream)
+	}
+	soaRRs := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs
+	if len(soaRRs) == 0 {
+		return nil, fmt.Errorf("ZoneTransferIn %s: transfer from %s delivered an apex with no SOA",
+			zd.ZoneName, upstream)
+	}
+	soa, ok := soaRRs[0].(*dns.SOA)
+	if !ok {
+		return nil, fmt.Errorf("ZoneTransferIn %s: apex SOA RRset from %s holds a %T",
+			zd.ZoneName, upstream, soaRRs[0])
+	}
+	return soa, nil
 }
 
 // batchState holds the state for zone transfer batching
