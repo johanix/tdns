@@ -13,6 +13,9 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -166,7 +169,15 @@ func TestPlanApiGateOnCredential(t *testing.T) {
 func TestPlanApiGateUsesTheChildSpecificCredential(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
 	zd.Parent = "example."
-	res := DsyncResult{Rdata: []*core.DSYNC{dsyncRR(core.SchemeAPI, dns.TypeANY, "dsync-api.example.")}}
+	// Validated, or this test proves nothing: the DNSSEC gate runs BEFORE the
+	// credential gate, so an unvalidated result is skipped for that reason and
+	// the credential lookup never happens. The assertion below -- no candidate
+	// -- would then hold even if another child's credential were wrongly
+	// accepted.
+	res := DsyncResult{
+		Validated: true,
+		Rdata:     []*core.DSYNC{dsyncRR(core.SchemeAPI, dns.TypeANY, "dsync-api.example.")},
+	}
 
 	// A credential that names a DIFFERENT child under the same parent must not
 	// satisfy this zone's gate.
@@ -176,6 +187,11 @@ func TestPlanApiGateUsesTheChildSpecificCredential(t *testing.T) {
 	zd.planConsiderApi(res, plan)
 	if hasCandidate(plan, "API") {
 		t.Fatal("another child's credential satisfied this zone's API gate")
+	}
+	// And it must be skipped for the CREDENTIAL reason, not the DNSSEC one.
+	reason, _ := skipReason(plan, "API")
+	if !strings.Contains(reason, "credential") {
+		t.Errorf("skip reason %q should name the credential, not something earlier in the gate order", reason)
 	}
 }
 
@@ -484,7 +500,6 @@ func TestWalkSyncPlanCancelledMidwayReportsWhatWasTried(t *testing.T) {
 	}
 }
 
-
 // The API scheme must not be planned off an unvalidated DSYNC lookup. The DSYNC
 // RR names the target whose URI carries the endpoint a bearer credential is
 // posted to, so whoever can answer that query would choose where the credential
@@ -522,5 +537,51 @@ func TestPlanApiRequiresAValidatedDsyncLookup(t *testing.T) {
 	zd.planConsiderApi(unvalidated, plan)
 	if !hasCandidate(plan, "API") {
 		t.Fatalf("allow-insecure did not re-enable the API scheme: %s", plan.Summary())
+	}
+}
+
+// No viper read of the delegationsync block may come back.
+//
+// config_delegationsync.go states the rule and the reason: the block is modelled
+// in full, that struct is its only reader, and viper was unwound because it
+// splits keys on "." and returns the zero value with no sign anything went
+// wrong. On top of that, tdns-auth and tdns-agent never call
+// viper.ReadInConfig() at all, so a viper read of this block returns empty in
+// exactly the daemons that depend on it -- silently.
+//
+// BuildParentSyncPlan reintroduced one anyway, and the effect was total: no
+// schemes meant an unusable plan and every configured transport skipped.
+// Nothing caught it, because the failure looks identical to "not configured".
+//
+// A source-level guard rather than a behavioural one, because that is what the
+// invariant actually is: a rule about call sites, of which the sole documented
+// exception (the child keygen mode in sig0_utils.go) is not in this package's
+// delegation-sync planning code.
+func TestNoViperReadsOfTheDelegationsyncBlock(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	// sig0_utils.go holds the one deliberate exception, documented in
+	// config_delegationsync.go: the child keygen MODE.
+	allowed := map[string]bool{"sig0_utils.go": true}
+
+	pat := regexp.MustCompile(`viper\.Get[A-Za-z]*\("delegationsync\.`)
+	for _, f := range files {
+		if allowed[filepath.Base(f)] || strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			if pat.MatchString(line) {
+				t.Errorf("%s:%d reads the delegationsync block from viper: %s\n"+
+					"    Use DelegationSyncConfig(). viper returns empty in tdns-auth and"+
+					" tdns-agent, which never read a config file into viper.",
+					f, i+1, strings.TrimSpace(line))
+			}
+		}
 	}
 }

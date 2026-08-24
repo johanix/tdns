@@ -60,7 +60,6 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // SyncRole is which of the two callers is building the plan. It selects the
@@ -177,7 +176,18 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 		return plan, nil
 	}
 
-	schemes := viper.GetStringSlice("delegationsync.child.schemes")
+	// The typed config, not viper. config_delegationsync.go states the rule:
+	// this block is modelled in full and that struct is its only reader, with
+	// one named exception that is not this one. The reason it was unwound is
+	// that viper splits keys on "." and returns the zero value with no sign
+	// anything went wrong -- and tdns-auth and tdns-agent never call
+	// viper.ReadInConfig() at all, so a viper read here returns empty in
+	// exactly the daemons that run this plan.
+	//
+	// The failure was total and silent: no schemes meant SkippedScheme{"all"},
+	// an unusable plan, and every configured transport ignored. zone_utils.go
+	// reads the same setting through DelegationSyncConfig(); now so does this.
+	schemes := DelegationSyncConfig().Child.Schemes
 	if len(schemes) == 0 {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{
 			Scheme: "all", Reason: "no schemes configured in delegationsync.child.schemes"})
