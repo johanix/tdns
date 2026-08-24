@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	edns0 "github.com/johanix/tdns/v2/edns0"
@@ -723,7 +724,27 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 		if len(transports) == 0 {
 			continue
 		}
-		for _, addr := range server.GetAddrs() {
+		if server == nil {
+			// GetAddrs is nil-safe, so this does not crash -- but a nil entry
+			// and a server with no addresses are different faults, and saying
+			// "no addresses" about a nil entry sends the reader looking for a
+			// nameserver that was never there.
+			noteServerProblem(zoneName, nsname, "nil server entry in the server map")
+			continue
+		}
+		addrs := server.GetAddrs()
+		if len(addrs) == 0 {
+			// A server in the map with no addresses contributes nothing and,
+			// until now, said nothing either -- indistinguishable in the logs
+			// from a server that was tried and failed. It is never normal: it
+			// is either a defect in how the map was populated, or a delegation
+			// whose nameserver has no address records. Worth a line even when
+			// other servers carry the query, because nothing else will ever
+			// mention it.
+			noteServerProblem(zoneName, nsname, "no addresses")
+			continue
+		}
+		for _, addr := range addrs {
 			for rank, t := range transports {
 				if !server.IsAddrXportAvailable(addr, t) {
 					if Globals.Debug {
@@ -759,6 +780,17 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 				tuples = append(tuples, tup)
 			}
 		}
+	}
+
+	// A zero-tuple result is always a dead end: the query loop below never
+	// runs, the caller sees attempts==0, and the only trace is a phrase inside
+	// an error string. It is never normal and never recoverable, so say why --
+	// at WARN, and not gated on debug, because this is exactly the state that
+	// is impossible to diagnose after the fact.
+	if len(tuples) == 0 && len(suspectTuples) == 0 {
+		lgDns.Warn("prioritizeServers: no usable (server, addr, transport) tuples; the query cannot be sent",
+			"qname", qname, "zone", zoneName, "servers", len(serverMap),
+			"require_encrypted", requireEncrypted, "why", explainNoTuples(serverMap, zone, qname, requireEncrypted))
 	}
 
 	sortTuplesByRankThenRTT(tuples)
@@ -815,6 +847,120 @@ func sortTuplesByRankThenRTT(tuples []ServerAddrXportTuple) {
 // wins when its share dominates. When not requireEncrypted and do53_share is
 // 0, Do53 is still appended last as a reliability fallback. requireEncrypted
 // excludes Do53 entirely (independent of OOTS).
+// explainNoTuples says, per server, why it contributed no (addr, transport)
+// tuple. Written for the case that produced #344: a server that is present in
+// the map and named in the logs, but yields nothing -- which until now looked
+// identical to having no server at all.
+func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
+	qname string, requireEncrypted bool) string {
+
+	if len(serverMap) == 0 {
+		return "no servers in the map for this zone"
+	}
+	reasons := make([]string, 0, len(serverMap))
+	for nsname, server := range serverMap {
+		switch {
+		case server == nil:
+			reasons = append(reasons, fmt.Sprintf("%s: nil server entry", nsname))
+			continue
+		case len(candidateTransports(server, qname, requireEncrypted)) == 0:
+			reasons = append(reasons, fmt.Sprintf("%s: no usable transport (encryption required, none available)", nsname))
+			continue
+		}
+		addrs := server.GetAddrs()
+		if len(addrs) == 0 {
+			// The silent case: present, named in every log line, and unusable.
+			reasons = append(reasons, fmt.Sprintf("%s: no addresses", nsname))
+			continue
+		}
+		var serverBackoff, zoneBackoff int
+		for _, addr := range addrs {
+			for _, t := range candidateTransports(server, qname, requireEncrypted) {
+				if !server.IsAddrXportAvailable(addr, t) {
+					serverBackoff++
+					continue
+				}
+				if zone != nil && !zone.IsZoneAddrXportAvailable(addr, t) {
+					zoneBackoff++
+				}
+			}
+		}
+		reasons = append(reasons, fmt.Sprintf("%s: %d addr(s), %d in server backoff, %d in zone backoff",
+			nsname, len(addrs), serverBackoff, zoneBackoff))
+	}
+	sort.Strings(reasons)
+	return strings.Join(reasons, "; ")
+}
+
+// Unusable-server reports are deduplicated: the condition is a standing state,
+// not an event, so repeating it per query would bury the log without adding
+// information. The state is bounded in both directions -- entries expire so a
+// problem that persists is re-reported eventually, and the table is capped so a
+// resolver meeting an unbounded number of broken delegations cannot grow it
+// without limit.
+const (
+	unusableServerRepeat  = time.Hour
+	unusableServerMaxKeys = 1024
+)
+
+var (
+	unusableServersMu sync.Mutex
+	unusableServers   = map[string]time.Time{}
+)
+
+// noteServerProblem reports, once per zone/server per repeat interval, that a
+// server in the map cannot be queried and why.
+func noteServerProblem(zoneName, nsname, reason string) {
+	key := zoneName + "|" + nsname + "|" + reason
+
+	unusableServersMu.Lock()
+	now := time.Now()
+	if last, seen := unusableServers[key]; seen && now.Sub(last) < unusableServerRepeat {
+		unusableServersMu.Unlock()
+		return
+	}
+	unusableServers[key] = now
+	if len(unusableServers) > unusableServerMaxKeys {
+		// Drop what has aged out first; if that is not enough, drop arbitrary
+		// entries until the table is back under the cap. Go randomises map
+		// iteration, so this is effectively random eviction -- the worst it
+		// costs is a repeated warning, which is much cheaper than unbounded
+		// growth in an error path.
+		for k, t := range unusableServers {
+			if now.Sub(t) >= unusableServerRepeat {
+				delete(unusableServers, k)
+			}
+		}
+		for k := range unusableServers {
+			if len(unusableServers) <= unusableServerMaxKeys {
+				break
+			}
+			delete(unusableServers, k)
+		}
+	}
+	unusableServersMu.Unlock()
+
+	lgDns.Warn("prioritizeServers: server cannot be queried",
+		"ns", nsname, "zone", zoneName, "reason", reason,
+		"note", "reported once per zone/server/reason per hour")
+}
+
+// refusalIndicatesLameness reports whether a refusal rcode is evidence that the
+// answering server is lame for the zone, and should therefore be put into a
+// backoff.
+//
+// A DS is PARENT-side data. A server authoritative for the child answers
+// REFUSED or NOTAUTH to a DS query for that child -- correctly, and it says
+// nothing about whether that server is lame for the zone it does serve. It
+// should not be queried for a DS in the first place, but a stray query must not
+// be able to disable the server either.
+func refusalIndicatesLameness(qtype uint16, rcode int) bool {
+	if qtype == dns.TypeDS && (rcode == dns.RcodeRefused || rcode == dns.RcodeNotAuth) {
+		return false
+	}
+	return true
+}
+
 func candidateTransports(server *cache.AuthServer, qname string, requireEncrypted bool) []core.Transport {
 	if server == nil {
 		if requireEncrypted {
@@ -1262,6 +1408,29 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			// Other servers / other transports stay available.
 			switch rcode {
 			case dns.RcodeRefused, dns.RcodeNotAuth, dns.RcodeServerFailure, dns.RcodeNotImplemented:
+				// A DS is PARENT-side data. A server authoritative for the child
+				// answers REFUSED or NOTAUTH to a DS query for that child --
+				// correctly, and it says nothing whatever about whether that
+				// server is lame for the zone it does serve.
+				//
+				// Booking it as a lame delegation was fatal for any zone reached
+				// through a single server: the backoff removed the only address
+				// there was, prioritizeServers then had nothing to offer, and
+				// every later query for the zone ended with no auth-server
+				// attempt at all. A stub zone with a trust anchor hit this during
+				// startup, because validating the anchor's NS RRset backfills the
+				// DS before the first ordinary query arrives.
+				//
+				// Genuine lameness still gets recorded: a server that is really
+				// lame refuses the other qtypes too, and those take the branch
+				// below.
+				if !refusalIndicatesLameness(qtype, rcode) {
+					if Globals.Debug {
+						lg.Printf("IterativeDNSQuery: %s from %s@%s for a DS query (%s) — parent-side data, not evidence of lameness; not recording a backoff",
+							dns.RcodeToString[rcode], addr, nsname, qname)
+					}
+					continue
+				}
 				if Globals.Debug {
 					lg.Printf("IterativeDNSQuery: %s response from %s@%s over %s for %s %s (likely lame delegation for zone %q)",
 						dns.RcodeToString[rcode], addr, nsname, core.TransportToString[wireTransport], qname, dns.TypeToString[qtype], zoneName)
@@ -1544,15 +1713,10 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	// Collect any glue from Additional
 	glue4Map := map[string]core.RRset{}
 	glue6Map := map[string]core.RRset{}
-	serverMapOrig, exist := imr.Cache.ServerMap.Get(zonename)
-
-	// Create a copy of the map to avoid concurrent map read/write errors
-	// The original map is stored in a concurrent map and may be read by other goroutines
-	serverMap := make(map[string]*cache.AuthServer)
-	if exist {
-		for k, v := range serverMapOrig {
-			serverMap[k] = v
-		}
+	// ServerMapCopy, not ServerMap.Get: this map is edited below and handed on.
+	serverMap, exist := imr.Cache.ServerMapCopy(zonename)
+	if !exist {
+		serverMap = map[string]*cache.AuthServer{}
 	}
 
 	// Prune expired auth servers for this zone before updating
@@ -3324,7 +3488,7 @@ func (imr *Imr) DefaultDNSKEYFetcher(ctx context.Context, name string) (*core.RR
 	}
 	_ = best // could be used for logging
 	if len(servers) == 0 {
-		if sm, ok := imr.Cache.ServerMap.Get("."); ok {
+		if sm, ok := imr.Cache.ServerMapCopy("."); ok {
 			servers = sm
 		}
 	}
@@ -3346,7 +3510,7 @@ func (imr *Imr) DefaultRRsetFetcher(ctx context.Context, qname string, qtype uin
 	}
 	_ = best // could be used for logging
 	if len(servers) == 0 {
-		if sm, ok := imr.Cache.ServerMap.Get("."); ok {
+		if sm, ok := imr.Cache.ServerMapCopy("."); ok {
 			servers = sm
 		}
 	}

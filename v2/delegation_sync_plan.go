@@ -289,6 +289,27 @@ func (zd *ZoneData) planConsiderApi(res DsyncResult, plan *ParentSyncPlan) {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{"API", "parent does not advertise it"})
 		return
 	}
+	// THE gate that makes API different from the other two, and the one thing
+	// BestSyncScheme did that this planner must not lose.
+	//
+	// The DSYNC RR names the target whose URI carries the endpoint this client
+	// then posts a bearer credential to. If the DSYNC lookup did not
+	// DNSSEC-validate, whoever can answer that query chooses where the
+	// credential goes. Validating the URI and TXT records AT the discovered
+	// target does not help: a spoofed DSYNC names an attacker-controlled zone
+	// whose own URI/TXT then validate perfectly well, and the credential is
+	// posted there.
+	//
+	// NOTIFY and UPDATE carry no secret and are deliberately not gated this
+	// way. allow-insecure is the same switch DiscoverDsyncApiEndpoint uses for
+	// its own requireDnssec, so one setting governs the whole path rather than
+	// half of it.
+	if !res.Validated && !DelegationSyncConfig().Child.Api.AllowInsecure {
+		plan.Skipped = append(plan.Skipped, SkippedScheme{"API",
+			"the DSYNC lookup did not DNSSEC-validate and" +
+				" delegationsync.child.api.allow-insecure is not set"})
+		return
+	}
 	// The credential arrives out of band by definition (§10), so its absence
 	// is settled here rather than after a round trip: there is nothing to wait
 	// for and nothing to retry.
@@ -367,7 +388,7 @@ func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan
 		return "no usable sync scheme; nothing forwarded (" + plan.Summary() + ")", nil
 	}
 
-	return zd.walkSyncPlan(plan, func(cand SyncCandidate) (string, error) {
+	return zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
 		switch cand.Scheme {
 		case "UPDATE":
 			return zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target)
@@ -393,11 +414,24 @@ func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan
 //
 // All failures are returned together. A caller shown only the last one cannot
 // tell which transport was even expected to work.
-func (zd *ZoneData) walkSyncPlan(plan *ParentSyncPlan,
+func (zd *ZoneData) walkSyncPlan(ctx context.Context, plan *ParentSyncPlan,
 	send func(SyncCandidate) (string, error)) (string, error) {
 
 	var failures []string
 	for _, cand := range plan.Candidates {
+		// Each candidate is a network round trip over a different transport, and
+		// the senders observe cancellation unevenly -- ProxyUpdateParent reaches
+		// SendUpdate, which takes no context at all. Without a check here the
+		// walk works its way through the rest of the plan after everything else
+		// has shut down.
+		if cerr := ctx.Err(); cerr != nil {
+			if len(failures) > 0 {
+				return "", fmt.Errorf("zone %s: sync abandoned (%w) after %s",
+					zd.ZoneName, cerr, strings.Join(failures, "; "))
+			}
+			return "", fmt.Errorf("zone %s: sync abandoned before any attempt: %w",
+				zd.ZoneName, cerr)
+		}
 		msg, err := send(cand)
 		if err == nil {
 			if len(failures) > 0 {

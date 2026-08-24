@@ -250,6 +250,17 @@ func writeRejectedArtefactInstructions(zonefile string, zone string, serial uint
 	// never overwrite an artefact holding something else, because the operator
 	// may be part-way through replaying it and the losing records exist nowhere
 	// else.
+	//
+	// Whatever occupies the path has to be a regular file first. os.ReadFile on
+	// a DIRECTORY succeeds on some systems (NetBSD returns raw dirent bytes)
+	// and fails on others, so without this check the same directory either
+	// diverted the artefact to a sibling name or fell through to the rename --
+	// platform-dependent behaviour for an operator mistake that should simply
+	// be reported.
+	if fi, serr := os.Stat(path); serr == nil && !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("cannot write the rejected-records artefact for zone %s:"+
+			" %s exists and is not a regular file", zone, path)
+	}
 	if existing, rerr := os.ReadFile(path); rerr == nil {
 		if bytes.Equal(existing, buf.Bytes()) {
 			return path, nil

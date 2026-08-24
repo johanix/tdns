@@ -8,9 +8,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // Update mode constants for parent delegation updates
@@ -160,29 +160,25 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					}
 				}
 
-			case "PROXY-SYNC":
-				// delegation-sync-proxy: an agent secondary forwards a detected
-				// change to the parent on behalf of a DSYNC-unaware primary,
-				// over whichever of UPDATE / API / NOTIFY is actually usable.
-				msg, perr := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr(), ds.ProxyAnalysis)
-				if perr != nil {
-					lgDns.Error("DelegationSyncher: proxy sync failed", "zone", ds.ZoneName, "err", perr)
-				} else {
-					lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "msg", msg)
+			case "PROXY-SYNC", "PROXY-UPDATE-SETUP":
+				// Both need an IMR: the parent's DSYNC records are discovered,
+				// not configured. At startup the zone's first transfer routinely
+				// arrives before InitImrEngine has finished priming, and the
+				// plan then skips every scheme with "no IMR available" and
+				// nothing retries -- so a restarted proxy forwarded nothing at
+				// all until the child zone happened to change again.
+				//
+				// Put the request back rather than running it against a nil
+				// IMR, and let it return exactly when the IMR is announced.
+				if !conf.Internal.ImrReady.Published() {
+					deferForImr(ctx, delsyncq, conf.Internal.ImrReady, ds)
+					continue
 				}
-
-			case "PROXY-UPDATE-SETUP":
-				// delegation-sync-proxy, first load: build the sync plan (which
-				// runs the §10.8 KEY-bootstrap state machine as the UPDATE gate)
-				// and, if any transport is usable, do a one-time parent-vs-child
-				// reconcile — catching drift from while the agent was down
-				// without re-sending on every restart. Off the refresh path
-				// (DSYNC discovery + parent compare are network).
-				msg, perr := zd.ProxyStartupReconcile(ctx, kdb, notifyq, imr())
-				if perr != nil {
-					lgDns.Error("DelegationSyncher: proxy startup reconcile error", "zone", ds.ZoneName, "err", perr)
-				} else {
-					lgDns.Info("DelegationSyncher: proxy startup reconcile", "zone", ds.ZoneName, "msg", msg)
+				switch ds.Command {
+				case "PROXY-SYNC":
+					proxySync(ctx, zd, kdb, notifyq, imr(), ds)
+				case "PROXY-UPDATE-SETUP":
+					proxyStartupReconcile(ctx, zd, kdb, notifyq, imr(), ds)
 				}
 
 			default:
@@ -192,11 +188,15 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 	}
 }
 
-func parseKeygenAlgorithm(configKey string, defaultAlg uint8) (uint8, error) {
-	algstr := viper.GetString(configKey)
+// parseKeygenAlgorithm resolves a configured algorithm NAME to its code. It
+// takes the value rather than a config key: reading the key here was the last
+// place the delegationsync block was still consulted through viper, which is
+// never populated in tdns-auth or tdns-agent, so every one of these settings was
+// silently ignored no matter what an operator wrote.
+func parseKeygenAlgorithm(algstr string, defaultAlg uint8) (uint8, error) {
 	alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	if alg == 0 {
-		lgDns.Warn("unknown keygen algorithm, using default", "algorithm", algstr, "configKey", configKey, "default", dns.AlgorithmToString[defaultAlg])
+		lgDns.Warn("unknown keygen algorithm, using default", "algorithm", algstr, "default", dns.AlgorithmToString[defaultAlg])
 		alg = defaultAlg
 	}
 	return alg, nil
@@ -208,13 +208,13 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 		return nil
 	}
 
-	// algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
+	// algstr := DelegationSyncConfig().Child.Update.Keygen.Algorithm
 	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	// if alg == 0 {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm("delegationsync.child.update.keygen.algorithm", dns.ED25519)
+	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Child.Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("DelegationSyncSetup: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
@@ -242,13 +242,13 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 }
 
 func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
-	// algstr := viper.GetString("delegationsync.parent.update.keygen.algorithm")
+	// algstr := DelegationSyncConfig().Parent.Update.Keygen.Algorithm
 	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	// if alg == 0 {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm("delegationsync.parent.update.keygen.algorithm", dns.ED25519)
+	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Parent.Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("ParentSig0KeyPrep: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
@@ -260,13 +260,13 @@ func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
 // MusicSig0KeyPrep and ParentSig0KeyPrep are identical except for the source of the keygen algorithm
 // which is specified in the relevant section of the configuration file.
 func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
-	// algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
+	// algstr := DelegationSyncConfig().Child.Update.Keygen.Algorithm
 	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	// if alg == 0 {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm("delegationsync.child.update.keygen.algorithm", dns.ED25519)
+	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Child.Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("MusicSig0KeyPrep: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
@@ -424,19 +424,30 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 	var rcode uint8
 	var ur UpdateResult
 
-	msg, err := zd.walkSyncPlan(plan, func(cand SyncCandidate) (string, error) {
+	msg, err := zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
 		var m string
 		var e error
+		var candRcode uint8
+		var candUr UpdateResult
 		switch cand.Scheme {
 		case "UPDATE":
-			m, rcode, ur, e = zd.SyncZoneDelegationViaUpdate(kdb, syncstate, cand.Target)
+			m, candRcode, candUr, e = zd.SyncZoneDelegationViaUpdate(kdb, syncstate, cand.Target)
 		case "NOTIFY":
-			m, rcode, e = zd.SyncZoneDelegationViaNotify(kdb, notifyq, syncstate, cand.Target)
+			m, candRcode, e = zd.SyncZoneDelegationViaNotify(kdb, notifyq, syncstate, cand.Target)
 		case "API":
-			m, rcode, e = zd.SyncZoneDelegationViaApi(ctx, imr, syncstate, cand.Target)
+			m, candRcode, e = zd.SyncZoneDelegationViaApi(ctx, imr, syncstate, cand.Target)
 		default:
 			e = fmt.Errorf("unknown scheme %q in plan", cand.Scheme)
 		}
+		if e != nil {
+			// Only a SUCCEEDING attempt may publish its result, which is what
+			// the comment above always claimed. SyncZoneDelegationViaUpdate
+			// returns a POPULATED UpdateResult alongside its error, so assigning
+			// unconditionally paired a failed UPDATE's TargetStatus with a later
+			// transport's rcode, and the caller stored that as the outcome.
+			return m, e
+		}
+		rcode, ur = candRcode, candUr
 		return m, e
 	})
 
@@ -610,4 +621,80 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 
 	msg := fmt.Sprintf("SyncZoneDelegationViaNotify: Sent notify request(s) for zone %s to NotifierEngine", zd.ZoneName)
 	return msg, dns.RcodeSuccess, nil
+}
+
+// imrWaitWarnAfter is how long a deferred request waits before saying so
+// loudly. It does not bound the wait -- a proxy zone cannot do anything useful
+// without an IMR, so giving up would silently drop work rather than fix
+// anything -- it just stops a misconfigured process from waiting in silence.
+const imrWaitWarnAfter = 60 * time.Second
+
+// deferForImr puts a proxy request back on the queue once the IMR is up.
+//
+// The re-enqueue happens from its own goroutine: DelegationSyncher is the only
+// reader of delsyncq, so sending from the loop itself would deadlock as soon as
+// the channel filled.
+//
+// It waits on the readiness signal rather than re-checking the IMR pointer on a
+// timer. Polling a field another goroutine writes is a data race whichever way
+// it is dressed up, and a bounded poll has to answer a question it cannot --
+// how long is priming allowed to take -- by dropping the request when it
+// guesses low. A one-shot PROXY-UPDATE-SETUP dropped that way means the startup
+// reconcile never runs for that zone until the child next changes.
+func deferForImr(ctx context.Context, delsyncq chan DelegationSyncRequest,
+	ready *ImrReadiness, ds DelegationSyncRequest) {
+
+	lgDns.Info("DelegationSyncher: IMR not up yet, deferring proxy work until it is",
+		"zone", ds.ZoneName, "command", ds.Command)
+
+	go func() {
+		warn := time.NewTimer(imrWaitWarnAfter)
+		defer warn.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-warn.C:
+				lgDns.Warn("DelegationSyncher: still waiting for the IMR;"+
+					" proxy work for this zone cannot start without one",
+					"zone", ds.ZoneName, "command", ds.Command, "waited", imrWaitWarnAfter)
+			case <-ready.Ready():
+				select {
+				case delsyncq <- ds:
+				case <-ctx.Done():
+				}
+				return
+			}
+		}
+	}()
+}
+
+// proxySync forwards a detected change to the parent on behalf of a
+// DSYNC-unaware primary, over whichever of UPDATE / API / NOTIFY is usable.
+func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan NotifyRequest,
+	imr *Imr, ds DelegationSyncRequest) {
+
+	msg, err := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr, ds.ProxyAnalysis)
+	if err != nil {
+		lgDns.Error("DelegationSyncher: proxy sync failed", "zone", ds.ZoneName, "err", err)
+		return
+	}
+	lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "msg", msg)
+}
+
+// proxyStartupReconcile builds the sync plan on first load (which runs the
+// KEY-bootstrap state machine as the UPDATE gate) and, if any transport is
+// usable, does a one-time parent-vs-child reconcile -- catching drift from
+// while the agent was down, without re-sending on every restart. Off the
+// refresh path, since DSYNC discovery and the parent compare are both network.
+func proxyStartupReconcile(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan NotifyRequest,
+	imr *Imr, ds DelegationSyncRequest) {
+
+	msg, err := zd.ProxyStartupReconcile(ctx, kdb, notifyq, imr)
+	if err != nil {
+		lgDns.Error("DelegationSyncher: proxy startup reconcile error", "zone", ds.ZoneName, "err", err)
+		return
+	}
+	lgDns.Info("DelegationSyncher: proxy startup reconcile", "zone", ds.ZoneName, "msg", msg)
 }

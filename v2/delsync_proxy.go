@@ -91,16 +91,31 @@ func (zd *ZoneData) ProxyDelegationPreRefresh(new_zd *ZoneData) {
 
 // apexRRsetChanged reports whether the apex RRset of type rrtype differs between
 // the served zone (zd) and the incoming zone (new_zd), using the canonical
-// RRset comparison. A missing owner / RRset on either side is treated as an
-// empty set, so an appearance or disappearance counts as a change.
+// RRset comparison. A missing RRset on either side is treated as an empty set,
+// so an appearance or disappearance of the RRset counts as a change.
+//
+// A missing APEX in the incoming zone is different, and is not a change. The
+// absence does not come from the wire: AXFR is framed by its SOA, and a stream
+// that ends without the closing one is reported as a failed transfer long
+// before the data reaches here. It comes from the snapshot model. new_zd is a
+// scratch zone, and a scratch zone carries Ready=true with no published
+// snapshot, so the accessor legitimately finds nothing -- the same nil that
+// used to segfault the delegation diff.
+//
+// Treating that as an empty set would report the served zone's CDS/CSYNC as
+// removed and notify the parent about a change no child made. An RRset removal
+// from a zone that still HAS an apex stays detectable, which is the case that
+// carries real intent.
 func (zd *ZoneData) apexRRsetChanged(new_zd *ZoneData, rrtype uint16) bool {
 	var oldRRs, newRRs []dns.RR
 	if oldapex, err := zd.GetOwner(zd.ZoneName); err == nil && oldapex != nil {
 		oldRRs = oldapex.RRtypes.GetOnlyRRSet(rrtype).RRs
 	}
-	if newapex, err := new_zd.GetOwner(zd.ZoneName); err == nil && newapex != nil {
-		newRRs = newapex.RRtypes.GetOnlyRRSet(rrtype).RRs
+	newapex, err := new_zd.ownerForAnalysis(zd.ZoneName)
+	if err != nil || newapex == nil {
+		return false
 	}
+	newRRs = newapex.RRtypes.GetOnlyRRSet(rrtype).RRs
 	differ, _, _ := core.RRsetDiffer(zd.ZoneName, newRRs, oldRRs, rrtype, zd.Logger, Globals.Verbose, Globals.Debug)
 	return differ
 }
