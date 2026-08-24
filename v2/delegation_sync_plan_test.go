@@ -124,7 +124,13 @@ func TestPlanRecordsNotAdvertisedSeparately(t *testing.T) {
 func TestPlanApiGateOnCredential(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
 	zd.Parent = "example."
-	res := DsyncResult{Rdata: []*core.DSYNC{dsyncRR(core.SchemeAPI, dns.TypeANY, "dsync-api.example.")}}
+	// Validated: the DSYNC lookup DNSSEC-validated, so the credential gate
+	// below is what is actually being exercised. The validation gate itself has
+	// its own test.
+	res := DsyncResult{
+		Validated: true,
+		Rdata:     []*core.DSYNC{dsyncRR(core.SchemeAPI, dns.TypeANY, "dsync-api.example.")},
+	}
 
 	// No credential: skipped, with a reason naming where to fix it.
 	setChildApiCredentials(t)
@@ -257,17 +263,19 @@ func TestProxyAnalysisFromSyncStatusMapsOntoTheActMapping(t *testing.T) {
 	}
 }
 
-// A DS the parent holds that the child can no longer support is exactly the
-// un-signing case, and the synthesised analysis must carry the witness the API
-// path needs to declare an empty DS.
-func TestProxyAnalysisFromSyncStatusWitnessesUnsigning(t *testing.T) {
+// A DS the parent holds that the child does not support still counts as a
+// change, so the startup reconcile treats the delegation as out of sync and
+// sends. What it must NOT do is decide the DS question on its own: the API
+// payload states the child's DS regardless of how the analysis was built, so a
+// parent-vs-child comparison and a transfer diff reach the same request.
+func TestProxyAnalysisFromSyncStatusReportsADSDisagreement(t *testing.T) {
 	a := proxyAnalysisFromSyncStatus(DelegationSyncStatus{DSRemoves: []dns.RR{&dns.DS{}}})
-	if !a.DnskeyChanged {
-		t.Fatal("a DS removal did not set DnskeyChanged, so the API path would leave a stale DS")
+	if !a.anyChange() {
+		t.Fatal("a DS disagreement produced no change, so the reconcile would send nothing")
 	}
 
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone()) // unsigned
-	rrsets := zd.proxyApiRRsets(a)
+	rrsets := zd.proxyApiRRsets()
 	ds, ok := rrsetFor(rrsets, proxyApiZone, "DS")
 	if !ok || len(ds.RRs) != 0 {
 		t.Fatalf("want an explicit empty DS rrset, got present=%v rrs=%v", ok, ds.RRs)
@@ -346,7 +354,7 @@ func TestWalkSyncPlanContinuesPastAFailure(t *testing.T) {
 	}}
 
 	var tried []string
-	msg, err := zd.walkSyncPlan(plan, func(c SyncCandidate) (string, error) {
+	msg, err := zd.walkSyncPlan(context.Background(), plan, func(c SyncCandidate) (string, error) {
 		tried = append(tried, c.Scheme)
 		if c.Scheme == "API" {
 			return "sent via API", nil
@@ -371,7 +379,7 @@ func TestWalkSyncPlanStopsAtTheFirstSuccess(t *testing.T) {
 	plan := &ParentSyncPlan{Candidates: []SyncCandidate{{Scheme: "UPDATE"}, {Scheme: "NOTIFY"}}}
 
 	var tried []string
-	msg, err := zd.walkSyncPlan(plan, func(c SyncCandidate) (string, error) {
+	msg, err := zd.walkSyncPlan(context.Background(), plan, func(c SyncCandidate) (string, error) {
 		tried = append(tried, c.Scheme)
 		return "sent via " + c.Scheme, nil
 	})
@@ -395,7 +403,7 @@ func TestWalkSyncPlanReportsEveryFailure(t *testing.T) {
 		Skipped:    []SkippedScheme{{"NOTIFY", "zone is unsigned"}},
 	}
 
-	_, err := zd.walkSyncPlan(plan, func(c SyncCandidate) (string, error) {
+	_, err := zd.walkSyncPlan(context.Background(), plan, func(c SyncCandidate) (string, error) {
 		return "", fmt.Errorf("%s exploded", c.Scheme)
 	})
 	if err == nil {
@@ -405,5 +413,114 @@ func TestWalkSyncPlanReportsEveryFailure(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q is missing %q", err, want)
 		}
+	}
+}
+
+// The walk must stop between candidates when the context is cancelled. Each
+// candidate is a network round trip over a different transport, and the senders
+// observe cancellation unevenly -- the UPDATE path reaches SendUpdate, which
+// takes no context at all. Without a check in the walk, a shutdown left it
+// working through the rest of the plan.
+func TestWalkSyncPlanStopsOnCancellation(t *testing.T) {
+	zd := &ZoneData{ZoneName: "child.example."}
+	plan := &ParentSyncPlan{
+		Parent: "example.",
+		Candidates: []SyncCandidate{
+			{Scheme: "UPDATE"}, {Scheme: "API"}, {Scheme: "NOTIFY"},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var attempts int
+	_, err := zd.walkSyncPlan(ctx, plan, func(c SyncCandidate) (string, error) {
+		attempts++
+		return "sent", nil
+	})
+
+	if attempts != 0 {
+		t.Errorf("walk attempted %d candidate(s) on a cancelled context; it must stop before the first", attempts)
+	}
+	if err == nil {
+		t.Fatal("walk reported success on a cancelled context")
+	}
+	if !strings.Contains(err.Error(), "abandoned") {
+		t.Errorf("error does not say the walk was abandoned: %v", err)
+	}
+}
+
+// Cancellation partway through must not be reported as "every scheme failed":
+// the remaining transports were never tried, and saying they failed would send
+// an operator looking for a fault that does not exist.
+func TestWalkSyncPlanCancelledMidwayReportsWhatWasTried(t *testing.T) {
+	zd := &ZoneData{ZoneName: "child.example."}
+	plan := &ParentSyncPlan{
+		Parent: "example.",
+		Candidates: []SyncCandidate{
+			{Scheme: "UPDATE"}, {Scheme: "API"}, {Scheme: "NOTIFY"},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var attempts int
+	_, err := zd.walkSyncPlan(ctx, plan, func(c SyncCandidate) (string, error) {
+		attempts++
+		cancel() // shutdown arrives during the first attempt
+		return "", fmt.Errorf("%s unreachable", c.Scheme)
+	})
+
+	if attempts != 1 {
+		t.Errorf("walk made %d attempts, want 1 before noticing cancellation", attempts)
+	}
+	if err == nil {
+		t.Fatal("walk reported success")
+	}
+	if !strings.Contains(err.Error(), "abandoned") {
+		t.Errorf("error should say the walk was abandoned, not that every scheme failed: %v", err)
+	}
+	if !strings.Contains(err.Error(), "UPDATE failed") {
+		t.Errorf("error should still name the attempt that was actually made: %v", err)
+	}
+}
+
+
+// The API scheme must not be planned off an unvalidated DSYNC lookup. The DSYNC
+// RR names the target whose URI carries the endpoint a bearer credential is
+// posted to, so whoever can answer that query would choose where the credential
+// goes. This gate existed in BestSyncScheme and was lost when the planner
+// replaced it.
+//
+// Validating URI/TXT at the discovered target does not substitute: a spoofed
+// DSYNC names an attacker-controlled zone whose own records validate fine.
+func TestPlanApiRequiresAValidatedDsyncLookup(t *testing.T) {
+	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
+	zd.Parent = "example."
+	setChildApiCredentials(t, DsyncApiChildCredentialConf{
+		Parent: "example.", Username: "u", Key: "k"})
+
+	unvalidated := DsyncResult{
+		Validated: false,
+		Rdata:     []*core.DSYNC{dsyncRR(core.SchemeAPI, dns.TypeANY, "dsync-api.example.")},
+	}
+
+	plan := &ParentSyncPlan{Parent: "example."}
+	zd.planConsiderApi(unvalidated, plan)
+	if hasCandidate(plan, "API") {
+		t.Fatal("API was planned off an unvalidated DSYNC lookup;" +
+			" the bearer credential could be posted to an attacker-chosen endpoint")
+	}
+	reason, _ := skipReason(plan, "API")
+	if !strings.Contains(reason, "DNSSEC-validate") {
+		t.Errorf("skip reason %q should say the lookup did not validate", reason)
+	}
+
+	// allow-insecure is the operator saying they accept that, and it is the
+	// same switch DiscoverDsyncApiEndpoint honours.
+	setChildApiAllowInsecure(t, true)
+	plan = &ParentSyncPlan{Parent: "example."}
+	zd.planConsiderApi(unvalidated, plan)
+	if !hasCandidate(plan, "API") {
+		t.Fatalf("allow-insecure did not re-enable the API scheme: %s", plan.Summary())
 	}
 }

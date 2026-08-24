@@ -628,7 +628,7 @@ configured parent. Skipped for `SchemeAPI` only.
 | 2 | Policy extraction (+ the §16.4 fix) | built, tested against a verbatim replica |
 | 3 | Credential store + CLI | built, live-verified on foffe |
 | 4 | The listener | built, live-verified on foffe |
-| 5 | Child side | built, unit-tested |
+| 5 | Child side | built, live-verified (2026-08-23, see below) |
 
 Verified live on foffe (`/var/tmp/dsyncapi`, parent `dsynctest.example.`):
 the three records resolve and decode correctly; `401` with no credentials and
@@ -654,27 +654,43 @@ three pieces work:
   the child: the child's IMR fetched and validated the parent's DNSKEY RRset
   and recorded it as a trust anchor.
 
-- **The child's IMR cannot resolve the parent through a stub**, which stops
-  `AnalyseZoneDelegation` before any DSYNC-API code runs. The stub registers
-  (`adding stub zone=dsynctest.example. servers=ns1.dsynctest.example.
-  (127.0.0.2)`) and the trust-anchor DNSKEY bootstrap uses it successfully, but
-  an ordinary query for the parent's SOA or NS reports *"no auth-server
-  attempts made"* and SERVFAILs. That is an IMR stub-resolution issue, not a
-  DSYNC-API one — it would block any child-side delegation sync against a
-  stub-reached parent, on any scheme. Worth its own look; it belongs with the
-  other imr nits rather than here.
+- ~~**The child's IMR cannot resolve the parent through a stub**, which stops
+  `AnalyseZoneDelegation` before any DSYNC-API code runs.~~ **Fixed 2026-08-23**
+  (#344, PR #380). Root cause: `backfillDS` selected servers with
+  `FindClosestKnownZone(name)` — the servers for the zone *itself* — and asked
+  them for that zone's DS. A DS is parent-side data, so those servers answer
+  REFUSED, correctly; the refusal was booked as a lame delegation, the resulting
+  zone-scoped backoff removed the only address a stub zone has, and every
+  subsequent query ended with no auth-server attempt. Two fixes: ask the parent's
+  servers, and stop reading a refused DS query as evidence of lameness. The
+  diagnostics added alongside (#346) are what located it — one run named the
+  cause outright.
 
-So the client's guards are unit-tested (including that no `Authorization`
-header is sent before a refusal), the transport and credential path is verified
-live against the real listener, and the one untested seam is
-`DiscoverDsyncApiEndpoint` reading URI+TXT through an IMR — which needs the
-stub issue fixed first.
+**The child half now works end to end.** Verified on the training lab
+2026-08-23, with a DSYNC-unaware BIND primary and `tdns-agent` beside it as a
+`delegation-sync-proxy`:
 
-Two lab notes from the run, neither a code issue: `127.0.0.2` needs an explicit
-`ifconfig lo0 alias` on NetBSD (a `127.0.0.1/8` on lo0 does not make the whole
-/8 bindable), and the IMR sample config shows `stubs: servers: [ 192.0.2.53 ]`
-as bare IPs, which does not decode — `AuthServer` needs the map form with
-`name:` and `addrs:`.
+- the operator edits the child zone in BIND; BIND NOTIFYs the proxy; the proxy
+  transfers with TSIG, detects the delegation change, discovers the parent's
+  endpoint from the DSYNC + URI + TXT records, and POSTs the delegation — the
+  parent applies it and serves it. Repeated across seven separate glue changes.
+- **with `allow-insecure: false`**, i.e. the DNSSEC-validated discovery path
+  exercised rather than bypassed: the credential is sent only after the URI and
+  TXT records validate. `dog <target> uri +sigchase` reports `Result: secure`
+  from the lab root through the parent to the target.
+- the startup reconcile catches up drift that happened while the agent was down
+  (#372, PR #377): proxy work is deferred until the IMR is up rather than
+  skipped, then runs.
+
+So `DiscoverDsyncApiEndpoint` reading URI+TXT through an IMR — the one untested
+seam when this was written — is now the path the lab runs on.
+
+Two lab notes from the earlier run, neither a code issue: `127.0.0.2` needs an
+explicit `ifconfig lo0 alias` on NetBSD (a `127.0.0.1/8` on lo0 does not make
+the whole /8 bindable); and the IMR sample config showed `stubs: servers: [
+192.0.2.53 ]` as bare IPs, which does not decode — **that one was a code issue
+after all, fixed as #347 in PR #380**, along with a test that pins both the
+working form and the rejection of the old one.
 
 ---
 

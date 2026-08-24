@@ -885,6 +885,34 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 	return nil
 }
 
+// ServerMapCopy returns a shallow copy of a zone's server map, for callers that
+// pass it on to a query.
+//
+// ServerMap.Get hands out the map STORED in the cache, and IterativeDNSQuery
+// writes into the map it is given (adding servers resolved from glue, pruning
+// expired ones). A caller that forwards the stored map therefore edits the cache
+// in place, from a code path that only meant to read it -- while
+// FindClosestKnownZone, returning the same data, has always copied for exactly
+// this reason. Two accessors with opposite aliasing rules is a footgun with no
+// upside.
+//
+// The copy is shallow, like FindClosestKnownZone's: the *AuthServer values are
+// shared, so per-server state (addresses, transports, backoffs) is still common
+// to all holders. That is deliberate -- backoff learned on one query should
+// inform the next -- and it is only the map itself that must not be edited
+// underneath the cache.
+func (rrcache *RRsetCacheT) ServerMapCopy(zone string) (map[string]*AuthServer, bool) {
+	stored, ok := rrcache.ServerMap.Get(zone)
+	if !ok {
+		return nil, false
+	}
+	cp := make(map[string]*AuthServer, len(stored))
+	for k, v := range stored {
+		cp[k] = v
+	}
+	return cp, true
+}
+
 func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[string]*AuthServer, error) {
 	// Iterate through known zone names and return the longest match.
 	var bestmatch string

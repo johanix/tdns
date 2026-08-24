@@ -1801,10 +1801,10 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 	}
 
 	// Fetch the DNSKEY RRset for the anchor, using current known servers
-	serverMap, ok := imr.Cache.ServerMap.Get(anchorName)
+	serverMap, ok := imr.Cache.ServerMapCopy(anchorName)
 	if !ok || len(serverMap) == 0 {
 		// fallback to root servers if we do not have a server mapping for this name yet
-		serverMap, ok = imr.Cache.ServerMap.Get(".")
+		serverMap, ok = imr.Cache.ServerMapCopy(".")
 		if !ok || len(serverMap) == 0 {
 			return fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
 		}

@@ -45,6 +45,17 @@ func setChildApiCredentials(t *testing.T, creds ...DsyncApiChildCredentialConf) 
 	t.Cleanup(func() { SetDelegationSyncConfig(*prev) })
 }
 
+// setChildApiAllowInsecure flips delegationsync.child.api.allow-insecure while
+// preserving whatever credentials the test already configured.
+func setChildApiAllowInsecure(t *testing.T, v bool) {
+	t.Helper()
+	prev := DelegationSyncConfig()
+	next := *prev
+	next.Child.Api.AllowInsecure = v
+	SetDelegationSyncConfig(next)
+	t.Cleanup(func() { SetDelegationSyncConfig(*prev) })
+}
+
 // ---------------------------------------------------------------------------
 // Credential selection
 // ---------------------------------------------------------------------------
@@ -158,7 +169,7 @@ func rrsetFor(rrsets []DsyncApiRRset, owner, rrtype string) (DsyncApiRRset, bool
 func TestProxyApiRRsetsAreBuiltFromTheServedZone(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiSignedZone())
 
-	rrsets := zd.proxyApiRRsets(&ProxyDelegationAnalysis{NsOrGlueChanged: true})
+	rrsets := zd.proxyApiRRsets()
 	if len(rrsets) == 0 {
 		t.Fatal("no rrsets built from a zone that plainly has a delegation")
 	}
@@ -179,50 +190,43 @@ func TestProxyApiRRsetsAreBuiltFromTheServedZone(t *testing.T) {
 		t.Errorf("AAAA glue for ns2 = %v (present=%v), want exactly 1 RR", aaaa.RRs, ok)
 	}
 
-	// A signed zone declares its DS, derived from the SEP DNSKEY.
-	ds, ok := rrsetFor(rrsets, proxyApiZone, "DS")
-	if !ok {
-		t.Fatal("no DS rrset for a zone with a SEP DNSKEY")
-	}
-	if len(ds.RRs) != 1 {
-		t.Errorf("DS rrset has %d RRs, want 1: %v", len(ds.RRs), ds.RRs)
+	// A signed zone declares NO DS. The proxy cannot know what the parent
+	// should hold: a multi-DS rollover places the new DS before its DNSKEY is
+	// published, so anything derived from the served zone is missing exactly
+	// the record the rollover just placed. Omitting DS leaves the parent with
+	// what it has, which is right until the child's own CDS is forwarded (B1).
+	if _, ok := rrsetFor(rrsets, proxyApiZone, "DS"); ok {
+		t.Error("a DS rrset was declared for a signed child;" +
+			" the proxy has no way to know what the parent should hold")
 	}
 }
 
-// The un-signing case: no SEP keys AND we watched the DNSKEY RRset change in
-// this very transfer. Only then is an explicit empty DS -- "remove it" -- sent.
-func TestProxyApiRRsetsDeclareEmptyDSOnObservedUnsigning(t *testing.T) {
+// A child with no SEP DNSKEYs declares an EMPTY DS, so the parent removes what
+// it holds. This is the un-signing case and the never-signed case at once: the
+// request states what the child's DS is, and for an unsigned child that is
+// nothing.
+//
+// It used to require a witness -- proof that the DNSKEY RRset changed in the
+// transfer that left the zone unsigned -- so that a never-signed zone would not
+// wipe a DS placed out of band. That protected the wrong state. A DS in the
+// parent for an unsigned child makes every validator declare the child bogus,
+// so removing it is the repair; and the witness never appears at all on the
+// steady-state path for a zone that was never signed, so the DS stayed.
+func TestProxyApiRRsetsDeclareEmptyDSWhenTheChildIsUnsigned(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
 
-	rrsets := zd.proxyApiRRsets(&ProxyDelegationAnalysis{DnskeyChanged: true})
+	rrsets := zd.proxyApiRRsets()
 	ds, ok := rrsetFor(rrsets, proxyApiZone, "DS")
 	if !ok {
-		t.Fatal("no DS rrset after an observed un-signing; the parent would keep a stale DS")
+		t.Fatal("no DS rrset for an unsigned child; the parent would keep a DS that makes the child bogus")
 	}
 	if len(ds.RRs) != 0 {
 		t.Errorf("DS rrset has %d RRs, want 0 (empty means remove): %v", len(ds.RRs), ds.RRs)
 	}
-}
 
-// A zone that was never signed must NOT send an empty DS: absent means "leave
-// alone", and a DS the registrant placed out of band is none of the proxy's
-// business. Without the DnskeyChanged witness there is no evidence of an
-// un-signing to act on.
-func TestProxyApiRRsetsLeaveDSAloneWithoutAnUnsigningWitness(t *testing.T) {
-	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
-
-	for name, analysis := range map[string]*ProxyDelegationAnalysis{
-		"no dnskey change": {NsOrGlueChanged: true},
-		"nil analysis":     nil,
-	} {
-		rrsets := zd.proxyApiRRsets(analysis)
-		if _, ok := rrsetFor(rrsets, proxyApiZone, "DS"); ok {
-			t.Errorf("%s: a DS rrset was sent; that would wipe a DS this agent never placed", name)
-		}
-		// The rest of the delegation still goes out.
-		if _, ok := rrsetFor(rrsets, proxyApiZone, "NS"); !ok {
-			t.Errorf("%s: no NS rrset", name)
-		}
+	// The rest of the delegation still goes out.
+	if _, ok := rrsetFor(rrsets, proxyApiZone, "NS"); !ok {
+		t.Error("no NS rrset")
 	}
 }
 
@@ -326,5 +330,57 @@ func TestDsyncApiSupportedDialectMatchesTheParentSide(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("supported dialects %v do not include %q", dsyncApiSupportedDialects, DsyncApiDialectV1)
+	}
+}
+
+
+// The one DS statement a proxy may make, and the predicate that decides it.
+//
+// A child with no DNSKEY RRset at all is unambiguously broken if the parent
+// holds a DS, and it cannot say so itself -- RFC 8078 CDS-delete needs a
+// validation it has no key to provide. But the test is the ABSENCE OF THE
+// RRSET, not an empty derived DS set: SEP is advisory, so a zone signed with a
+// flags-256 CSK derives nothing while being perfectly signed, and conflating
+// the two would tell the parent to delete a working child's DS.
+func TestProxyApiDSStatementDependsOnTheDnskeyRRsetNotTheSEPBit(t *testing.T) {
+	cskZone := proxyApiBaseZone() +
+		"api.example.	3600 IN DNSKEY 256 3 15 l02Woi0iS8Aa25FQkUd9RMzZHJpBoRQwAQEX1SxZJA4=\n"
+
+	tests := []struct {
+		name      string
+		zone      string
+		wantEmpty bool
+	}{
+		{"no DNSKEY RRset at all: declare an empty DS", proxyApiBaseZone(), true},
+		{"SEP-flagged KSK: say nothing about DS", proxyApiSignedZone(), false},
+		{"flags-256 CSK is signed too: say nothing about DS", cskZone, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := testZone(t, proxyApiZone, tc.zone)
+			rrsets := zd.proxyApiRRsets()
+
+			ds, ok := rrsetFor(rrsets, proxyApiZone, "DS")
+			if tc.wantEmpty {
+				if !ok {
+					t.Fatal("no DS rrset for a child with no DNSKEY RRset;" +
+						" the parent would keep a DS that makes it bogus")
+				}
+				if len(ds.RRs) != 0 {
+					t.Errorf("DS rrset has %d RRs, want 0 (empty means remove)", len(ds.RRs))
+				}
+				return
+			}
+			if ok {
+				t.Errorf("a DS rrset was declared for a signed child: %v", ds.RRs)
+			}
+		})
+	}
+
+	// The rest of the delegation goes out either way.
+	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
+	if _, ok := rrsetFor(zd.proxyApiRRsets(), proxyApiZone, "NS"); !ok {
+		t.Error("no NS rrset")
 	}
 }
