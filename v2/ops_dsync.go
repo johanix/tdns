@@ -59,7 +59,17 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		// into the live RRset, visible to queries, with no serial bump and no
 		// journal entry. The bug is invisible until a zone happens to have the
 		// capacity, which makes it exactly the kind that survives testing.
-		published := owner.RRtypes.GetOnlyRRSet(core.TypeDSYNC).RRs
+		// An owner can exist without a DSYNC RRset -- _dsync.<zone> may carry a
+		// TXT and nothing else -- and an owner with no RRtypes at all is a
+		// dereference away from taking the process down. Neither is a reason to
+		// fail publication: both mean "nothing published yet", which is the
+		// case this function exists to fix.
+		var published []dns.RR
+		if owner.RRtypes != nil {
+			if existing, ok := owner.RRtypes.Get(core.TypeDSYNC); ok {
+				published = existing.RRs
+			}
+		}
 		rrset.RRs = append(make([]dns.RR, 0, len(published)), published...)
 	}
 	publishedSchemes := publishedDsyncSchemes(rrset.RRs)

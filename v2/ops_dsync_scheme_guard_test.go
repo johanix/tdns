@@ -111,3 +111,42 @@ func TestPublishedDsyncSliceIsCopiedNotAliased(t *testing.T) {
 		t.Error("the working copy shares its backing array with the published RRset")
 	}
 }
+
+// _dsync.<zone> can exist without a DSYNC RRset -- carrying only a TXT, say --
+// and an owner with no RRtypes at all is a dereference away from taking the
+// process down. Neither is a reason to fail publication: both mean "nothing
+// published yet", which is precisely the case PublishDsyncRRs exists to fix.
+func TestPublishedDsyncSchemesHandlesAnOwnerWithoutDsync(t *testing.T) {
+	t.Run("no DSYNC RRset at the owner", func(t *testing.T) {
+		od := &OwnerData{Name: "_dsync.example.", RRtypes: NewRRTypeStore()}
+		od.RRtypes.Set(dns.TypeTXT, core.RRset{RRs: []dns.RR{
+			mustDsyncRR(t, "_dsync.example. 7200 IN TXT \"not a dsync record\""),
+		}})
+
+		var published []dns.RR
+		if od.RRtypes != nil {
+			if existing, ok := od.RRtypes.Get(core.TypeDSYNC); ok {
+				published = existing.RRs
+			}
+		}
+		if len(published) != 0 {
+			t.Errorf("an owner with no DSYNC RRset yielded %d records", len(published))
+		}
+		if got := publishedDsyncSchemes(published); len(got) != 0 {
+			t.Errorf("schemes from an absent RRset = %v, want none", got)
+		}
+	})
+
+	t.Run("owner with nil RRtypes", func(t *testing.T) {
+		od := &OwnerData{Name: "_dsync.example."}
+		var published []dns.RR
+		if od.RRtypes != nil {
+			if existing, ok := od.RRtypes.Get(core.TypeDSYNC); ok {
+				published = existing.RRs
+			}
+		}
+		if len(published) != 0 {
+			t.Errorf("an owner with nil RRtypes yielded %d records", len(published))
+		}
+	})
+}
