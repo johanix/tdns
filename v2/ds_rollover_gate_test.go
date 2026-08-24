@@ -24,16 +24,11 @@ func gateTestKeyDB(t *testing.T) *KeyDB {
 // so the gate can be exercised without driving a whole rollover.
 func seedRolloverRow(t *testing.T, kdb *KeyDB, zone string, inProgress int) {
 	t.Helper()
-	seedRolloverRowPhase(t, kdb, zone, inProgress, rolloverPhaseIdle)
-}
-
-func seedRolloverRowPhase(t *testing.T, kdb *KeyDB, zone string, inProgress int, phase string) {
-	t.Helper()
 	_, err := kdb.DB.Exec(
-		`INSERT INTO RolloverZoneState (zone, rollover_in_progress, rollover_phase) VALUES (?, ?, ?)`,
-		zone, inProgress, phase)
+		`INSERT INTO RolloverZoneState (zone, rollover_in_progress) VALUES (?, ?)`,
+		zone, inProgress)
 	if err != nil {
-		t.Fatalf("seed RolloverZoneState(%s, %d, %s): %v", zone, inProgress, phase, err)
+		t.Fatalf("seed RolloverZoneState(%s, %d): %v", zone, inProgress, err)
 	}
 }
 
@@ -81,50 +76,6 @@ func TestRolloverOwnsDS(t *testing.T) {
 		if !zd.rolloverOwnsDS() {
 			t.Fatal("rollover_in_progress=1 was NOT reported as rolling;" +
 				" the reconcile would delete the DS the rollover just placed")
-		}
-	})
-
-	// The window the flag alone did not cover, and the reason this gate reads
-	// the phase. Only AtomicRollover sets RolloverInProgress. The engine's idle
-	// branch arms pending-parent-push directly for steady-state pipeline
-	// maintenance and pushes a DS with the flag still false, so gating on the
-	// flag left the reconcile free to delete the DS the engine had just sent --
-	// exactly the outage this is here to prevent.
-	t.Run("a DS-push phase counts even with the flag clear", func(t *testing.T) {
-		for _, phase := range []string{
-			rolloverPhasePendingParentPush,
-			rolloverPhasePendingParentObserve,
-			rolloverPhasePushSoftfail,
-			rolloverPhasePendingChildPublish,
-			rolloverPhasePendingChildWithdraw,
-		} {
-			t.Run(phase, func(t *testing.T) {
-				kdb := gateTestKeyDB(t)
-				seedRolloverRowPhase(t, kdb, zone, 0, phase)
-				zd := &ZoneData{ZoneName: zone, KeyDB: kdb}
-				if !zd.rolloverOwnsDS() {
-					t.Fatalf("phase %q with the flag clear was treated as not rolling;"+
-						" the reconcile would delete the DS the engine just pushed", phase)
-				}
-			})
-		}
-	})
-
-	t.Run("an explicitly idle phase with the flag clear is not rolling", func(t *testing.T) {
-		kdb := gateTestKeyDB(t)
-		seedRolloverRowPhase(t, kdb, zone, 0, rolloverPhaseIdle)
-		zd := &ZoneData{ZoneName: zone, KeyDB: kdb}
-		if zd.rolloverOwnsDS() {
-			t.Error("an idle zone was treated as rolling; DS sync would never run")
-		}
-	})
-
-	t.Run("an empty phase with the flag clear is not rolling", func(t *testing.T) {
-		kdb := gateTestKeyDB(t)
-		seedRolloverRowPhase(t, kdb, zone, 0, "")
-		zd := &ZoneData{ZoneName: zone, KeyDB: kdb}
-		if zd.rolloverOwnsDS() {
-			t.Error("a zone with no recorded phase was treated as rolling")
 		}
 	})
 

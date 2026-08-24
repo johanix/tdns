@@ -587,34 +587,24 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 }
 
 
-// rolloverOwnsDS reports whether the rollover engine currently owns this zone's
-// DS RRset, in which case the delegation-sync comparison must not touch it.
+// rolloverOwnsDS reports whether a KSK rollover is in flight for this zone, in
+// which case the rollover engine -- not the delegation-sync comparison --
+// decides what DS the parent should hold.
 //
-// The test is the rollover PHASE, not the RolloverInProgress flag. The flag is
-// set only by AtomicRollover, which is one of two ways the engine comes to push
-// a DS. The other is the idle branch's steady-state pipeline maintenance: when
-// the target DS set differs from what has been submitted it arms
-// pending-parent-push directly, and pushes on the next tick, with the flag
-// never set at all. Gating on the flag alone therefore left open exactly the
-// window this check exists to close -- the engine sends a DS for a key that is
-// still `created`, the comparison below derives the child's set from keys that
-// warrant one, does not find it, and reports the just-sent DS for removal.
+// The flag is durable per-zone state the engine already maintains: set when a
+// roll starts, cleared when it completes, and consulted in several places
+// across the rollover and signing subsystems. It is read here, where the DS
+// comparison happens, rather than at each of the producers that feed
+// SyncZoneDelegation, so that all of them are covered by one check.
 //
-// Any phase other than idle means the engine has DS work in hand:
-// pending-child-publish and pending-child-withdraw bracket the push,
-// pending-parent-push and pending-parent-observe are the push and its
-// confirmation, and parent-push-softfail is a push being retried. The flag is
-// still consulted as well, so a zone mid-swap is covered even if its phase is
-// momentarily idle.
+// A missing keystore or an unreadable row means "not rolling". That matches
+// every other reader of this flag, and the failure it risks -- syncing DS
+// during a roll -- is what happens today anyway, whereas guessing "rolling"
+// would silently freeze DS synchronisation for a zone that is not rolling.
 //
-// An absent row, an empty phase or an unreadable keystore all mean "not
-// rolling". That matches every other reader of this state, and the failure it
-// risks is the behaviour that exists today, whereas guessing "rolling" would
-// silently freeze DS synchronisation for a zone that is not rolling at all.
-//
-// Suppression is logged each time: a rollover that dies without returning the
-// zone to idle would otherwise stop DS synchronisation indefinitely with
-// nothing said about why.
+// Suppression is logged each time: a rollover that dies without clearing the
+// flag would otherwise stop DS synchronisation indefinitely with nothing said
+// about why.
 func (zd *ZoneData) rolloverOwnsDS() bool {
 	if zd == nil || zd.KeyDB == nil {
 		return false
@@ -625,14 +615,10 @@ func (zd *ZoneData) rolloverOwnsDS() bool {
 			"zone", zd.ZoneName, "err", err)
 		return false
 	}
-	if row == nil {
+	if row == nil || !row.RolloverInProgress {
 		return false
 	}
-	phaseBusy := row.RolloverPhase != "" && row.RolloverPhase != rolloverPhaseIdle
-	if !row.RolloverInProgress && !phaseBusy {
-		return false
-	}
-	lgDns.Info("AnalyseZoneDelegation: rollover engine owns the DS RRset for this zone; leaving it alone",
-		"zone", zd.ZoneName, "phase", row.RolloverPhase, "in_progress", row.RolloverInProgress)
+	lgDns.Info("AnalyseZoneDelegation: KSK rollover in progress; leaving the DS RRset to the rollover engine",
+		"zone", zd.ZoneName)
 	return true
 }

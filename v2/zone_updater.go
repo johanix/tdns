@@ -1598,46 +1598,44 @@ func computeNewGlue(dss *DelegationSyncStatus, zoneName string, ddata *Delegatio
 // by deriving DS records from the current KSK DNSKEYs in the zone.
 func computeNewDS(dss *DelegationSyncStatus, zd *ZoneData) {
 	if len(dss.DNSKEYAdds) == 0 && len(dss.DNSKEYRemoves) == 0 {
-		// The update said nothing about DNSKEYs, so it says nothing about DS.
-		// NewDSKnown stays false and replace mode leaves the parent's DS alone,
-		// which is the whole reason the flag exists: an NS-only edit must not
-		// be read as "this child has no DS".
 		return
 	}
 
-	// The DS set comes from the keystore, not from the DNSKEY RRset this update
-	// happens to produce.
-	//
-	// Deriving it here from published keys was wrong twice over. It hashed only
-	// SEP-flagged keys, and the SEP bit is advisory -- a zone signed with a
-	// flags-256 CSK produced an empty set, which now reads as "withdraw the DS"
-	// and would make a perfectly good child bogus. And it could not see a
-	// rollover: a key whose DS is at the parent but whose DNSKEY is not
-	// published yet is absent from any set derived from the zone, so the update
-	// path would hand replace mode a set missing it.
-	//
-	// DSIntentForZone answers the question the parent actually needs answered,
-	// from the state machine that owns it, and says whether it has an answer at
-	// all.
-	intent, err := DSIntentForZone(zd.KeyDB, zd.ZoneName, dns.SHA256)
-	if err != nil {
-		lg.Warn("computeNewDS: could not determine the DS intent; leaving the parent DS alone",
-			"zone", zd.ZoneName, "err", err)
-		return
-	}
-	if !intent.Known {
-		// No keystore KSKs: tdns does not manage this zone's keys, so its DS is
-		// not ours to restate. Not the same as "the zone has no DS".
-		lg.Debug("computeNewDS: no keystore KSKs for this zone; leaving the parent DS alone",
-			"zone", zd.ZoneName)
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
 		return
 	}
 
-	// Authoritative, empty included: a zone whose keys tdns holds and none of
-	// which warrant a DS has been un-signed, and the parent should stop
-	// publishing one.
-	dss.NewDS = intent.Set
-	dss.NewDSKnown = true
+	// Build the effective post-update DNSKEY set:
+	// start from current, remove DNSKEYRemoves, add DNSKEYAdds.
+	effective := make(map[uint16]*dns.DNSKEY)
+	for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
+		if dk, ok := rr.(*dns.DNSKEY); ok {
+			if dk.Flags&dns.SEP != 0 {
+				effective[dk.KeyTag()] = dk
+			}
+		}
+	}
+	for _, rr := range dss.DNSKEYRemoves {
+		if dk, ok := rr.(*dns.DNSKEY); ok {
+			delete(effective, dk.KeyTag())
+		}
+	}
+	for _, rr := range dss.DNSKEYAdds {
+		if dk, ok := rr.(*dns.DNSKEY); ok {
+			if dk.Flags&dns.SEP != 0 {
+				effective[dk.KeyTag()] = dk
+			}
+		}
+	}
+
+	var newDS []dns.RR
+	for _, dk := range effective {
+		if ds := dk.ToDS(dns.SHA256); ds != nil {
+			newDS = append(newDS, ds)
+		}
+	}
+	dss.NewDS = newDS
 }
 
 // updateReplacesRRset reports whether actions contain at least one record to
