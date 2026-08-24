@@ -13,53 +13,79 @@ import (
 // (advertised UPDATE? × advertised NOTIFY?) × (auto, prefer-update,
 // prefer-notify, force-update, force-notify), plus an empty-string
 // default-preference cell and an unknown-preference error cell.
+//
+// The API rows below cover the third advertisement axis. API is a last resort,
+// not a peer of the DNS transports: it is chosen only when the parent offers no
+// DNS transport at all, and it never rescues a force-* pin, because a pin names
+// the transport the operator requires and silently satisfying it with a
+// different one would defeat the point.
 func TestDecideRolloverSchemes(t *testing.T) {
 	tests := []struct {
 		name       string
 		update     bool
 		notify     bool
+		api        bool
 		preference string
 		want       []core.DsyncScheme
 		wantErr    string // substring match; empty = no error expected
 	}{
 		// auto
-		{"auto/none", false, false, DsyncSchemePreferenceAuto, nil, "no rollover-usable DSYNC"},
-		{"auto/update-only", true, false, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeUpdate}, ""},
-		{"auto/notify-only", false, true, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeNotify}, ""},
-		{"auto/both-parallel", true, true, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeUpdate, core.SchemeNotify}, ""},
+		{"auto/none", false, false, false, DsyncSchemePreferenceAuto, nil, "no rollover-usable DSYNC"},
+		{"auto/update-only", true, false, false, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeUpdate}, ""},
+		{"auto/notify-only", false, true, false, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeNotify}, ""},
+		{"auto/both-parallel", true, true, false, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeUpdate, core.SchemeNotify}, ""},
 
 		// prefer-update
-		{"prefer-update/none", false, false, DsyncSchemePreferencePreferUpdate, nil, "no rollover-usable DSYNC"},
-		{"prefer-update/update-only", true, false, DsyncSchemePreferencePreferUpdate, []core.DsyncScheme{core.SchemeUpdate}, ""},
-		{"prefer-update/notify-only", false, true, DsyncSchemePreferencePreferUpdate, []core.DsyncScheme{core.SchemeNotify}, ""},
-		{"prefer-update/both", true, true, DsyncSchemePreferencePreferUpdate, []core.DsyncScheme{core.SchemeUpdate}, ""},
+		{"prefer-update/none", false, false, false, DsyncSchemePreferencePreferUpdate, nil, "no rollover-usable DSYNC"},
+		{"prefer-update/update-only", true, false, false, DsyncSchemePreferencePreferUpdate, []core.DsyncScheme{core.SchemeUpdate}, ""},
+		{"prefer-update/notify-only", false, true, false, DsyncSchemePreferencePreferUpdate, []core.DsyncScheme{core.SchemeNotify}, ""},
+		{"prefer-update/both", true, true, false, DsyncSchemePreferencePreferUpdate, []core.DsyncScheme{core.SchemeUpdate}, ""},
 
 		// prefer-notify
-		{"prefer-notify/none", false, false, DsyncSchemePreferencePreferNotify, nil, "no rollover-usable DSYNC"},
-		{"prefer-notify/update-only", true, false, DsyncSchemePreferencePreferNotify, []core.DsyncScheme{core.SchemeUpdate}, ""},
-		{"prefer-notify/notify-only", false, true, DsyncSchemePreferencePreferNotify, []core.DsyncScheme{core.SchemeNotify}, ""},
-		{"prefer-notify/both", true, true, DsyncSchemePreferencePreferNotify, []core.DsyncScheme{core.SchemeNotify}, ""},
+		{"prefer-notify/none", false, false, false, DsyncSchemePreferencePreferNotify, nil, "no rollover-usable DSYNC"},
+		{"prefer-notify/update-only", true, false, false, DsyncSchemePreferencePreferNotify, []core.DsyncScheme{core.SchemeUpdate}, ""},
+		{"prefer-notify/notify-only", false, true, false, DsyncSchemePreferencePreferNotify, []core.DsyncScheme{core.SchemeNotify}, ""},
+		{"prefer-notify/both", true, true, false, DsyncSchemePreferencePreferNotify, []core.DsyncScheme{core.SchemeNotify}, ""},
 
 		// force-update
-		{"force-update/none", false, false, DsyncSchemePreferenceForceUpdate, nil, "force-update"},
-		{"force-update/update-only", true, false, DsyncSchemePreferenceForceUpdate, []core.DsyncScheme{core.SchemeUpdate}, ""},
-		{"force-update/notify-only", false, true, DsyncSchemePreferenceForceUpdate, nil, "force-update"},
-		{"force-update/both", true, true, DsyncSchemePreferenceForceUpdate, []core.DsyncScheme{core.SchemeUpdate}, ""},
+		{"force-update/none", false, false, false, DsyncSchemePreferenceForceUpdate, nil, "force-update"},
+		{"force-update/update-only", true, false, false, DsyncSchemePreferenceForceUpdate, []core.DsyncScheme{core.SchemeUpdate}, ""},
+		{"force-update/notify-only", false, true, false, DsyncSchemePreferenceForceUpdate, nil, "force-update"},
+		{"force-update/both", true, true, false, DsyncSchemePreferenceForceUpdate, []core.DsyncScheme{core.SchemeUpdate}, ""},
 
 		// force-notify
-		{"force-notify/none", false, false, DsyncSchemePreferenceForceNotify, nil, "force-notify"},
-		{"force-notify/update-only", true, false, DsyncSchemePreferenceForceNotify, nil, "force-notify"},
-		{"force-notify/notify-only", false, true, DsyncSchemePreferenceForceNotify, []core.DsyncScheme{core.SchemeNotify}, ""},
-		{"force-notify/both", true, true, DsyncSchemePreferenceForceNotify, []core.DsyncScheme{core.SchemeNotify}, ""},
+		{"force-notify/none", false, false, false, DsyncSchemePreferenceForceNotify, nil, "force-notify"},
+		{"force-notify/update-only", true, false, false, DsyncSchemePreferenceForceNotify, nil, "force-notify"},
+		{"force-notify/notify-only", false, true, false, DsyncSchemePreferenceForceNotify, []core.DsyncScheme{core.SchemeNotify}, ""},
+		{"force-notify/both", true, true, false, DsyncSchemePreferenceForceNotify, []core.DsyncScheme{core.SchemeNotify}, ""},
+
+		// API as last resort: chosen only when no DNS transport is advertised.
+		{"auto/api-only", false, false, true, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeAPI}, ""},
+		{"auto/api+update", true, false, true, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeUpdate}, ""},
+		{"auto/api+notify", false, true, true, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeNotify}, ""},
+		{"auto/api+both", true, true, true, DsyncSchemePreferenceAuto, []core.DsyncScheme{core.SchemeUpdate, core.SchemeNotify}, ""},
+
+		{"prefer-update/api-only", false, false, true, DsyncSchemePreferencePreferUpdate, []core.DsyncScheme{core.SchemeAPI}, ""},
+		{"prefer-update/api+update", true, false, true, DsyncSchemePreferencePreferUpdate, []core.DsyncScheme{core.SchemeUpdate}, ""},
+		{"prefer-update/api+notify", false, true, true, DsyncSchemePreferencePreferUpdate, []core.DsyncScheme{core.SchemeNotify}, ""},
+
+		{"prefer-notify/api-only", false, false, true, DsyncSchemePreferencePreferNotify, []core.DsyncScheme{core.SchemeAPI}, ""},
+		{"prefer-notify/api+notify", false, true, true, DsyncSchemePreferencePreferNotify, []core.DsyncScheme{core.SchemeNotify}, ""},
+		{"prefer-notify/api+update", true, false, true, DsyncSchemePreferencePreferNotify, []core.DsyncScheme{core.SchemeUpdate}, ""},
+
+		// A pin is a pin: API must not stand in for the transport it names.
+		{"force-update/api-only", false, false, true, DsyncSchemePreferenceForceUpdate, nil, "force-update"},
+		{"force-notify/api-only", false, false, true, DsyncSchemePreferenceForceNotify, nil, "force-notify"},
 
 		// edge cases
-		{"empty-pref-defaults-to-auto/both", true, true, "", []core.DsyncScheme{core.SchemeUpdate, core.SchemeNotify}, ""},
-		{"unknown-pref", true, true, "weird", nil, "invalid dsync-scheme-preference"},
+		{"empty-pref-defaults-to-auto/both", true, true, false, "", []core.DsyncScheme{core.SchemeUpdate, core.SchemeNotify}, ""},
+		{"empty-pref-defaults-to-auto/api-only", false, false, true, "", []core.DsyncScheme{core.SchemeAPI}, ""},
+		{"unknown-pref", true, true, false, "weird", nil, "invalid dsync-scheme-preference"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := decideRolloverSchemes(tt.update, tt.notify, tt.preference)
+			got, err := decideRolloverSchemes(tt.update, tt.notify, tt.api, tt.preference)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("want error containing %q, got nil", tt.wantErr)
@@ -89,21 +115,24 @@ func TestDecideRolloverSchemesSentinel(t *testing.T) {
 		name              string
 		update            bool
 		notify            bool
+		api               bool
 		preference        string
 		wantWrapsSentinel bool
 	}{
-		{"auto/none wraps", false, false, DsyncSchemePreferenceAuto, true},
-		{"prefer-update/none wraps", false, false, DsyncSchemePreferencePreferUpdate, true},
-		{"prefer-notify/none wraps", false, false, DsyncSchemePreferencePreferNotify, true},
-		{"force-update/none wraps", false, false, DsyncSchemePreferenceForceUpdate, true},
-		{"force-update/notify-only wraps", false, true, DsyncSchemePreferenceForceUpdate, true},
-		{"force-notify/none wraps", false, false, DsyncSchemePreferenceForceNotify, true},
-		{"force-notify/update-only wraps", true, false, DsyncSchemePreferenceForceNotify, true},
-		{"unknown-pref does NOT wrap", true, true, "weird", false},
+		{"auto/none wraps", false, false, false, DsyncSchemePreferenceAuto, true},
+		{"prefer-update/none wraps", false, false, false, DsyncSchemePreferencePreferUpdate, true},
+		{"prefer-notify/none wraps", false, false, false, DsyncSchemePreferencePreferNotify, true},
+		{"force-update/none wraps", false, false, false, DsyncSchemePreferenceForceUpdate, true},
+		{"force-update/notify-only wraps", false, true, false, DsyncSchemePreferenceForceUpdate, true},
+		{"force-notify/none wraps", false, false, false, DsyncSchemePreferenceForceNotify, true},
+		{"force-notify/update-only wraps", true, false, false, DsyncSchemePreferenceForceNotify, true},
+		{"force-update/api-only wraps", false, false, true, DsyncSchemePreferenceForceUpdate, true},
+		{"force-notify/api-only wraps", false, false, true, DsyncSchemePreferenceForceNotify, true},
+		{"unknown-pref does NOT wrap", true, true, false, "weird", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := decideRolloverSchemes(tt.update, tt.notify, tt.preference)
+			_, err := decideRolloverSchemes(tt.update, tt.notify, tt.api, tt.preference)
 			if err == nil {
 				t.Fatalf("want error, got nil")
 			}

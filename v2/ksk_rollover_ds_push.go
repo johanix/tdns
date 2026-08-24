@@ -35,6 +35,24 @@ type KSKDSPushResult struct {
 	Detail       string
 }
 
+// legacyUpdateTarget resolves the parent's UPDATE target without a scheme
+// plan, for the two paths that bypass pickRolloverSchemes (no policy, no
+// IMR). It preserves the DS-then-ANY lookup pushDSRRsetViaUpdate used to do
+// inline.
+//
+// Note that the planned path is deliberately NOT this: pickRolloverSchemes
+// accepts any UPDATE-scheme DSYNC RR, because UPDATE advertisements are
+// RRtype-agnostic by spec. This narrower DS-then-ANY form could fail to find
+// a target the planner had already accepted, which is exactly the
+// inconsistency that made the rediscovery worth removing.
+func legacyUpdateTarget(ctx context.Context, imr *Imr, child string) (*DsyncTarget, error) {
+	t, err := imr.LookupDSYNCTarget(ctx, child, dns.TypeDS, core.SchemeUpdate)
+	if err == nil {
+		return t, nil
+	}
+	return imr.LookupDSYNCTarget(ctx, child, dns.TypeANY, core.SchemeUpdate)
+}
+
 // BuildChildWholeDSUpdate builds a DNS UPDATE for the parent zone that replaces the
 // child's entire DS RRset (DEL ANY DS at the delegation owner, then ADD the given set).
 func BuildChildWholeDSUpdate(parent, child string, newDS []dns.RR) (*dns.Msg, error) {
@@ -271,11 +289,23 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 		}
 	}
 
-	if deps.Policy == nil {
-		return pushDSRRsetViaUpdate(ctx, deps)
-	}
-	if deps.Imr == nil {
-		return pushDSRRsetViaUpdate(ctx, deps)
+	// No scheme plan is possible without a policy or a resolver. These two
+	// paths bypass pickRolloverSchemes, so they resolve the UPDATE target the
+	// way pushDSRRsetViaUpdate used to do inline -- kept identical, including
+	// the error category, so the pre-plan behaviour is unchanged. Every other
+	// path now gets its target from the plan.
+	if deps.Policy == nil || deps.Imr == nil {
+		if deps.Zone == nil || deps.KDB == nil || deps.Imr == nil {
+			// Let the callee's nil-argument check produce the same
+			// child-config:local-error it always did.
+			return pushDSRRsetViaUpdate(ctx, deps, nil)
+		}
+		target, terr := legacyUpdateTarget(ctx, deps.Imr, dns.Fqdn(deps.Zone.ZoneName))
+		if terr != nil {
+			return KSKDSPushResult{Category: SoftfailTransport, Scheme: "UPDATE"},
+				fmt.Errorf("pushDSRRsetViaUpdate: DSYNC target: %w", terr)
+		}
+		return pushDSRRsetViaUpdate(ctx, deps, target)
 	}
 
 	choices, parentUpdate, parentNotify, err := pickRolloverSchemes(ctx, deps.Zone, deps.Imr, deps.Policy)
@@ -343,11 +373,14 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 		ch := choices[0]
 		switch ch.Scheme {
 		case core.SchemeUpdate:
-			res, perr := pushDSRRsetViaUpdate(ctx, deps)
+			res, perr := pushDSRRsetViaUpdate(ctx, deps, ch.Target)
 			results[0] = pathResultLite{scheme: "UPDATE", res: res, err: perr}
 		case core.SchemeNotify:
 			res, perr := pushDSRRsetViaNotify(ctx, deps, ch.Target)
 			results[0] = pathResultLite{scheme: "NOTIFY", res: res, err: perr}
+		case core.SchemeAPI:
+			res, perr := pushDSRRsetViaApi(ctx, deps, ch.Target)
+			results[0] = pathResultLite{scheme: "API", res: res, err: perr}
 		default:
 			return KSKDSPushResult{
 				Category: SoftfailChildConfigLocalError,
@@ -364,11 +397,14 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 				defer wg.Done()
 				switch ch.Scheme {
 				case core.SchemeUpdate:
-					res, perr := pushDSRRsetViaUpdate(ctx, deps)
+					res, perr := pushDSRRsetViaUpdate(ctx, deps, ch.Target)
 					results[i] = pathResultLite{scheme: "UPDATE", res: res, err: perr}
 				case core.SchemeNotify:
 					res, perr := pushDSRRsetViaNotify(ctx, deps, ch.Target)
 					results[i] = pathResultLite{scheme: "NOTIFY", res: res, err: perr}
+				case core.SchemeAPI:
+					res, perr := pushDSRRsetViaApi(ctx, deps, ch.Target)
+					results[i] = pathResultLite{scheme: "API", res: res, err: perr}
 				default:
 					results[i] = pathResultLite{
 						scheme: schemeName(ch.Scheme),
@@ -501,7 +537,7 @@ func mergeFailureCategory(a, b string) string {
 // SIG(0) key, and sends it. On rcode NOERROR, updates
 // last_ds_submitted_index_* when indexRangeKnown from
 // ComputeTargetDSSetForZone.
-func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps) (KSKDSPushResult, error) {
+func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps, target *DsyncTarget) (KSKDSPushResult, error) {
 	var out KSKDSPushResult
 	zd := deps.Zone
 	kdb := deps.KDB
@@ -509,6 +545,10 @@ func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps) (KSKDSPu
 	if zd == nil || kdb == nil || imr == nil {
 		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaUpdate: nil argument")
+	}
+	if target == nil || len(target.Addresses) == 0 {
+		out.Category = SoftfailChildConfigLocalError
+		return out, fmt.Errorf("pushDSRRsetViaUpdate: no usable UPDATE target for zone %s", zd.ZoneName)
 	}
 	child := dns.Fqdn(zd.ZoneName)
 	parent := dns.Fqdn(zd.Parent)
@@ -565,16 +605,7 @@ func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps) (KSKDSPu
 		return out, fmt.Errorf("pushDSRRsetViaUpdate: SignMsg: %w", err)
 	}
 
-	dsyncTarget, err := imr.LookupDSYNCTarget(ctx, child, dns.TypeDS, core.SchemeUpdate)
-	if err != nil {
-		dsyncTarget, err = imr.LookupDSYNCTarget(ctx, child, dns.TypeANY, core.SchemeUpdate)
-		if err != nil {
-			out.Category = SoftfailTransport
-			return out, fmt.Errorf("pushDSRRsetViaUpdate: DSYNC target: %w", err)
-		}
-	}
-
-	rcode, ur, err := SendUpdate(smsg, parent, dsyncTarget.Addresses)
+	rcode, ur, err := SendUpdate(smsg, parent, target.Addresses)
 	out.Rcode = rcode
 	out.UpdateResult = ur
 	if err != nil {

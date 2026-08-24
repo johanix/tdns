@@ -217,6 +217,22 @@ func pickDsyncApiUrl(rrs []dns.RR) (string, error) {
 	return pool[len(pool)-1].target, nil
 }
 
+// DsyncApiHttpError is a non-200 answer from the parent's endpoint.
+//
+// Typed rather than a formatted string because the status code is the
+// difference between "fix your config" and "retry later" (§7.3), and a caller
+// that has to decide which should not be doing substring matching on an error
+// message. The rendered message is unchanged from what this returned before.
+type DsyncApiHttpError struct {
+	StatusCode int
+	Status     string
+	Body       string
+}
+
+func (e *DsyncApiHttpError) Error() string {
+	return fmt.Sprintf("the parent refused the delegation update: %s: %s", e.Status, e.Body)
+}
+
 // DsyncApiClientCredential is what a child holds for one parent.
 type DsyncApiClientCredential struct {
 	Parent   string
@@ -278,8 +294,11 @@ func DsyncApiPostDelegationRequest(ctx context.Context, endpoint *DsyncApiEndpoi
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("the parent refused the delegation update: %s: %s",
-			resp.Status, strings.TrimSpace(string(respBody)))
+		return nil, &DsyncApiHttpError{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Body:       strings.TrimSpace(string(respBody)),
+		}
 	}
 
 	var out DsyncApiDelegation
