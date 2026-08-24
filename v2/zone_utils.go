@@ -1177,28 +1177,26 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		// For the moment we receive both updates and notifies on the same address as the rest of
 		// the DNS service. Doesn't have to be that way, but for now it is.
 
-		owner, err := zd.GetOwner("_dsync." + zd.ZoneName)
-		if err != nil {
-			lg.Error("SetupZoneSync: error getting _dsync owner", "zone", zd.ZoneName, "err", err)
+		// The _dsync owner is no longer read here: PublishDsyncRRs looks it up
+		// itself, and reading it here only ever served the all-or-nothing guard
+		// removed below.
+
+		// PublishDsyncRRs is called unconditionally, and decides per scheme
+		// what is missing.
+		//
+		// This used to skip the call entirely when any DSYNC record existed,
+		// on the reasoning that an existing RRset is the operator's and should
+		// not be rewritten. That reasoning is right and the guard was in the
+		// wrong place: it is now inside PublishDsyncRRs, per scheme, so adding
+		// a scheme to a zone that already publishes DSYNC actually publishes
+		// it. With the guard here, that case did nothing at all -- no record,
+		// no error, no warning -- and the documented remedy was to unpublish
+		// the whole RRset and republish, which discards the operator's own
+		// records.
+		lg.Debug("SetupZoneSync: reconciling the DSYNC RRset", "zone", zd.ZoneName)
+		if err := zd.PublishDsyncRRs(); err != nil {
+			lg.Error("PublishDsyncRRs failed", "zone", zd.ZoneName, "err", err)
 			return err
-		}
-
-		var dsync_rrset core.RRset
-		var exist bool
-		if owner != nil {
-			dsync_rrset, exist = owner.RRtypes.Get(core.TypeDSYNC)
-		}
-
-		if exist && len(dsync_rrset.RRs) > 0 {
-			// If there is a DSYNC RRset, we assume that it is correct and will not modify
-			lg.Debug("SetupZoneSync: DSYNC RRset exists, will not modify", "zone", zd.ZoneName)
-		} else {
-			lg.Debug("SetupZoneSync: no DSYNC RRset in zone, will add", "zone", zd.ZoneName)
-			err := zd.PublishDsyncRRs()
-			if err != nil {
-				lg.Error("PublishDsyncRRs failed", "zone", zd.ZoneName, "err", err)
-				return err
-			}
 		}
 
 		// Figure out if there is a DSYNC RR with scheme UPDATE; if so, we need to ensure that
