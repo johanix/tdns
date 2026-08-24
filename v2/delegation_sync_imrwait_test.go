@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -75,6 +76,7 @@ func TestDeferForImrHonoursContextCancellation(t *testing.T) {
 	q := make(chan DelegationSyncRequest, 1)
 	ready := NewImrReadiness()
 
+	before := runtime.NumGoroutine()
 	deferForImr(ctx, q, ready, DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: "child.example."})
 	cancel()
 
@@ -83,6 +85,22 @@ func TestDeferForImrHonoursContextCancellation(t *testing.T) {
 	case got := <-q:
 		t.Fatalf("a cancelled request was re-enqueued without the IMR ever being ready: %+v", got)
 	case <-time.After(200 * time.Millisecond):
+	}
+
+	// An empty queue alone would also be satisfied by a worker that ignored
+	// ctx.Done() and blocked forever, which is the failure this is really
+	// about: one leaked goroutine per deferred request, for the life of the
+	// process. So require the worker to be gone within a bounded time.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if runtime.NumGoroutine() <= before {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the deferred worker did not exit within 3s of cancellation"+
+				" (goroutines: %d before, %d now)", before, runtime.NumGoroutine())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
