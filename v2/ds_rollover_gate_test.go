@@ -164,6 +164,12 @@ func TestComputeNewDSDefersWhileTheEngineOwnsTheDS(t *testing.T) {
 	t.Run("during a DS-work phase: no DS opinion", func(t *testing.T) {
 		kdb := gateTestKeyDB(t)
 		seedRolloverRowPhase(t, kdb, zone, 0, rolloverPhasePendingParentPush)
+		// An active key MUST be seeded, or this test proves nothing: with no
+		// keystore rows DSIntentForZone reports an unknown intent anyway, and
+		// NewDSKnown stays false whether the deferral is there or not. The
+		// first version of this test omitted it and passed with the deferral
+		// removed.
+		seedKey(t, kdb, zone, DnskeyStateActive, 257, pubA)
 		zd := &ZoneData{ZoneName: zone, KeyDB: kdb}
 
 		dss := newDss()
