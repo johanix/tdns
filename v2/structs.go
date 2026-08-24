@@ -962,11 +962,6 @@ type DelegationSyncRequest struct {
 	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
 	// set the proxy NOTIFY action keys on (delegation-sync-proxy).
 	ProxyAnalysis *ProxyDelegationAnalysis
-	// ImrWaits counts how many times this request has been put back on the
-	// queue because the IMR was not up yet. Proxy work cannot start without one
-	// -- the parent's DSYNC records are discovered, not configured -- and at
-	// startup the first zone transfer regularly beats InitImrEngine to it.
-	ImrWaits int
 }
 
 type BumperData struct {

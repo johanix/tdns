@@ -169,13 +169,10 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				// nothing retries -- so a restarted proxy forwarded nothing at
 				// all until the child zone happened to change again.
 				//
-				// Put the request back rather than running it against a nil IMR.
-				if imr() == nil {
-					if deferForImr(ctx, delsyncq, ds, imrWaitInterval) {
-						continue
-					}
-					lgDns.Error("DelegationSyncher: giving up waiting for the IMR",
-						"zone", ds.ZoneName, "command", ds.Command, "waits", ds.ImrWaits)
+				// Put the request back rather than running it against a nil
+				// IMR, and let it return exactly when the IMR is announced.
+				if !conf.Internal.ImrReady.Published() {
+					deferForImr(ctx, delsyncq, conf.Internal.ImrReady, ds)
 					continue
 				}
 				switch ds.Command {
@@ -612,47 +609,51 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 	return msg, dns.RcodeSuccess, nil
 }
 
-// maxImrWaits / imrWaitInterval bound the wait for the IMR. Roughly a minute in
-// total: long enough to cover priming (a handful of queries to the root servers
-// named in the hints), short enough that a permanently absent IMR is reported
-// rather than retried forever.
-const (
-	maxImrWaits     = 30
-	imrWaitInterval = 2 * time.Second
-)
+// imrWaitWarnAfter is how long a deferred request waits before saying so
+// loudly. It does not bound the wait -- a proxy zone cannot do anything useful
+// without an IMR, so giving up would silently drop work rather than fix
+// anything -- it just stops a misconfigured process from waiting in silence.
+const imrWaitWarnAfter = 60 * time.Second
 
-// deferForImr puts a proxy request back on the queue after a short delay, so it
-// runs once the IMR is up. Reports whether it was deferred; false means the
-// budget is spent and the caller should give up.
+// deferForImr puts a proxy request back on the queue once the IMR is up.
 //
 // The re-enqueue happens from its own goroutine: DelegationSyncher is the only
 // reader of delsyncq, so sending from the loop itself would deadlock as soon as
 // the channel filled.
-// The delay is a parameter rather than a package var so tests can shorten it
-// without writing shared state that the spawned goroutines read concurrently.
+//
+// It waits on the readiness signal rather than re-checking the IMR pointer on a
+// timer. Polling a field another goroutine writes is a data race whichever way
+// it is dressed up, and a bounded poll has to answer a question it cannot --
+// how long is priming allowed to take -- by dropping the request when it
+// guesses low. A one-shot PROXY-UPDATE-SETUP dropped that way means the startup
+// reconcile never runs for that zone until the child next changes.
 func deferForImr(ctx context.Context, delsyncq chan DelegationSyncRequest,
-	ds DelegationSyncRequest, delay time.Duration) bool {
-	if ds.ImrWaits >= maxImrWaits {
-		return false
-	}
-	ds.ImrWaits++
-	if ds.ImrWaits == 1 {
-		lgDns.Info("DelegationSyncher: IMR not up yet, deferring proxy work",
-			"zone", ds.ZoneName, "command", ds.Command, "retry_in", delay)
-	}
+	ready *ImrReadiness, ds DelegationSyncRequest) {
+
+	lgDns.Info("DelegationSyncher: IMR not up yet, deferring proxy work until it is",
+		"zone", ds.ZoneName, "command", ds.Command)
+
 	go func() {
-		timer := time.NewTimer(delay)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-		case <-timer.C:
+		warn := time.NewTimer(imrWaitWarnAfter)
+		defer warn.Stop()
+
+		for {
 			select {
-			case delsyncq <- ds:
 			case <-ctx.Done():
+				return
+			case <-warn.C:
+				lgDns.Warn("DelegationSyncher: still waiting for the IMR;"+
+					" proxy work for this zone cannot start without one",
+					"zone", ds.ZoneName, "command", ds.Command, "waited", imrWaitWarnAfter)
+			case <-ready.Ready():
+				select {
+				case delsyncq <- ds:
+				case <-ctx.Done():
+				}
+				return
 			}
 		}
 	}()
-	return true
 }
 
 // proxySync forwards a detected change to the parent on behalf of a
