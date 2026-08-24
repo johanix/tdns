@@ -378,38 +378,66 @@ LOC figures are rough order-of-magnitude, implementation and tests separately.
 
 Rough total: **~590 implementation, ~840 test, ~1430 LOC.**
 
-### Open decisions that block implementation
+### Decisions
 
-The design is settled; these four are not, and three of them gate specific items.
+**Only multi-DS rollovers are supported.** The KSK rollover engine implements
+double-DS (called multi-DS here, since the parent may hold more than two DS RRs)
+and will not gain double-signature.
 
-**D1 (blocks A1) — what is the intended DS set for a zone that is not in a
-rollover?** "Use the source the rollover engine uses" is the right direction and
-not yet a specification. `ComputeTargetDSSetForZone` builds on
-`loadTargetKSKsForRollover`, whose query selects SEP keys in `created`,
-`ds-published`, `standby`, `published`, `active` and `retired`, and returns
-index bounds for the engine to consume in phases. Calling it from the general
-child-sync path would publish a DS for keys that are merely generated, and for
-retired ones. A narrower key-state set has to be named — and which states belong
-in it is a policy question, not an implementation detail. The `LEFT JOIN` on
-`RolloverKeyState` means the function is at least usable for zones with no
-rollover state; it is the state filter that is wrong for this caller, not the
-plumbing.
+The reason is post-quantum. Double-signature requires both KSKs in the DNSKEY
+RRset and that RRset signed by both, and with falcon-, sqisign- or qruov-sized
+keys that is a response-size problem rather than a stylistic preference.
+Multi-DS keeps key material out of the zone until it is needed — the engine says
+so itself, in `TransitionRolloverKskDsPublishedToPublished`: DS hashes are
+post-quantum-opaque, DNSKEYs reveal the public key.
 
-**D2 (blocks A2, small) — skip only DS, or skip the whole sync, while
-`RolloverInProgress` is set?** Recommendation is DS only: NS and glue changes
-are independent of a key rollover, and a rollover window is days wide, so
-suppressing everything would stall legitimate delegation edits for the duration.
+The usual reason to prefer double-signature is that it halves the parent
+interactions, one DS replace instead of add-then-remove. That is a real
+advantage when talking to the parent is painful — and making it not painful is
+what DSYNC, CDS automation and the proxy exist for. Adopting the method
+optimised for expensive parent interaction, inside the project removing that
+expense, would be optimising for a constraint being eliminated.
 
-**D3 (blocks C1 / #384) — is the coherence check mandatory, configurable, or
-advisory?** Discussed on the issue. The RFC 8078 delete sentinel must remain
-expressible in every variant.
+It is also not a flag but a second state machine: `created → ds-published →
+published → standby → active` encodes DS-first throughout, and double-signature
+inverts that ordering. Every DS-source rule in this document would need an
+"unless double-signature" clause, and the reconcile would need to know which
+method a zone was part-way through.
+
+What would reopen it: a parent that caps the DS count at one, or a deployment
+whose operator requires double-signature. Neither is impossible; both should be
+real before the cost is paid.
+
+**D1 — the intended DS set (A1): resolved.** One state table with two views,
+option (c). The engine's *target* view stays as it is. The reconcile's *current*
+view is `ds-published`, `published`, `standby`, `active` — everything from the
+moment the DS is placed at the parent until it is withdrawn.
+
+`published` belongs in it: under multi-DS it is the state *after* `ds-published`,
+so such a key already has its DS at the parent, and leaving it out would have the
+reconcile delete that DS and `standby` put it back. `created` is out because no
+DS has been placed yet, and `retired` is out because its DS is being withdrawn.
+
+**Implement the current view as a per-key predicate, not a list of state names.**
+The question being asked is "should this key's DS be at the parent right now",
+and a state list is only a proxy for it. Under multi-DS-only both spell the same
+answer, so the cost is a shape choice; if a second rollover method ever arrives,
+a predicate survives and a name list silently misclassifies. Given how much of
+this document is about a value meaning different things on different paths,
+encoding the fact rather than a proxy is worth the small extra effort.
+
+**D2 — suppression during a rollover (A2): resolved.** DS only. NS and glue are
+independent of a key roll, and a rollover window is days wide.
+
+**D3 — the parent's coherence check (C1 / #384): resolved.** Mandatory. No knob
+to misconfigure, and consistent with what the CDS channel is specified to do.
+The RFC 8078 delete sentinel remains expressible.
+
+### Still open
 
 **D4 (blocks A3) — should intent be expressed as CDS internally?** A decision,
-not an implementation slot. Nothing else depends on it.
-
-A2 is implementable today given D2. C1 is implementable given D3. A1 is not
-implementable until D1 is answered. A4 needs its own read-only investigation
-before it can be sized at all.
+not an implementation slot. Nothing else depends on it, and A3 is not being
+built until it is answered.
 
 ### Ordering
 
@@ -442,7 +470,9 @@ enables is unsafe to use until A2 lands.
 
 ## Work outstanding
 
-Nothing here is authorised for implementation.
+Implemented 2026-08-23 and awaiting review: **A1, A2, A4** in PR #385, **C1** in
+PR #386. **B1 and B2** remain deferred until #343 lands, for the conflict reason
+below. **A3** is not built and will not be until D4 is answered.
 
 **Role A — tdns-auth as primary**
 
