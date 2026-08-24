@@ -41,18 +41,14 @@ type DSIntent struct {
 // Written this way so that a state added later has to be classified explicitly
 // rather than silently defaulting to "no DS", which would express itself as a
 // DS deletion.
-func dsBelongsAtParent(state string) bool {
+func dsBelongsAtParent(state string) (belongs, recognised bool) {
 	switch state {
 	case DnskeyStateDsPublished, DnskeyStatePublished, DnskeyStateStandby, DnskeyStateActive:
-		return true
+		return true, true
 	case DnskeyStateCreated, DnskeyStateRetired, DnskeyStateRemoved:
-		return false
+		return false, true
 	default:
-		// An unrecognised state is not evidence that the key's DS should go.
-		// Treating it as "no DS" would turn a schema addition into a removal.
-		lgDns.Warn("dsBelongsAtParent: unrecognised DNSKEY state; not counting it toward the DS set",
-			"state", state)
-		return false
+		return false, false
 	}
 }
 
@@ -101,7 +97,21 @@ func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error
 			return DSIntent{}, fmt.Errorf("DSIntentForZone: scan key row for %s: %w", zonename, err)
 		}
 		seen = true
-		if !dsBelongsAtParent(state) {
+
+		belongs, recognised := dsBelongsAtParent(state)
+		if !recognised {
+			// A state this code does not know about makes the whole answer
+			// unsafe, not merely incomplete. Excluding the key from Set while
+			// still reporting Known would present an empty or short set as
+			// authoritative, and replace mode would delete DS records on the
+			// strength of a state nobody has classified yet. Refusing to have
+			// an opinion is the only outcome that cannot turn a schema addition
+			// into a DS removal.
+			lgDns.Warn("DSIntentForZone: unrecognised DNSKEY state; declining to state a DS intent for this zone",
+				"zone", zonename, "state", state)
+			return DSIntent{}, nil
+		}
+		if !belongs {
 			continue
 		}
 		rr, perr := dns.NewRR(keyrr)

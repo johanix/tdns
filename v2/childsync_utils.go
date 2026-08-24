@@ -257,8 +257,13 @@ func CreateChildReplaceUpdateWithDS(parent, child string, newNS, newA, newAAAA, 
 	m.Insert(newA)
 	m.Insert(newAAAA)
 
-	// Add all new DS records
-	m.Insert(newDS)
+	// Add all new DS records -- under the same gate as the removal above. A
+	// caller with no DS opinion must produce a message that says nothing about
+	// DS at all; inserting while declining to remove would leave the parent
+	// holding both the old records and the new ones.
+	if dsKnown {
+		m.Insert(newDS)
+	}
 
 	m.SetEdns0(1232, true) // Enable EDNS0 for EDE support in responses
 

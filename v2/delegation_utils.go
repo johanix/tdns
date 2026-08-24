@@ -442,6 +442,13 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 			dss.DSAdds = append(dss.DSAdds, dsadds...)
 			dss.DSRemoves = append(dss.DSRemoves, dsremoves...)
 			dss.NewDS = newDS
+			// This set is derived from the published DNSKEY RRset, which is an
+			// answer only when it produced something. An empty result here does
+			// not mean the child has no DS -- it means this diff found no SEP
+			// keys to hash, which is also what a transfer carrying no DNSKEYs
+			// looks like. Saying so explicitly keeps replace mode behaving as
+			// it did before the flag existed.
+			dss.NewDSKnown = len(newDS) > 0
 			dss.InSync = false
 		}
 	}
@@ -511,6 +518,9 @@ func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus,
 		}
 		_, dss.DSAdds, dss.DSRemoves = core.RRsetDiffer(zd.ZoneName, newDS, oldDS, dns.TypeDS, zd.Logger, Globals.Verbose, Globals.Debug)
 		dss.NewDS = newDS
+		// Same as above: derived from published keys, so an answer only when
+		// non-empty.
+		dss.NewDSKnown = len(newDS) > 0
 	}
 
 	return differ, dss, nil

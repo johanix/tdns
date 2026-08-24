@@ -58,18 +58,74 @@ func TestDSBelongsAtParent(t *testing.T) {
 	no := []string{DnskeyStateCreated, DnskeyStateRetired, DnskeyStateRemoved}
 
 	for _, st := range yes {
-		if !dsBelongsAtParent(st) {
+		belongs, recognised := dsBelongsAtParent(st)
+		if !recognised {
+			t.Errorf("state %q was not recognised", st)
+		}
+		if !belongs {
 			t.Errorf("state %q should have a DS at the parent, got false", st)
 		}
 	}
 	for _, st := range no {
-		if dsBelongsAtParent(st) {
+		belongs, recognised := dsBelongsAtParent(st)
+		if !recognised {
+			t.Errorf("state %q was not recognised", st)
+		}
+		if belongs {
 			t.Errorf("state %q should NOT have a DS at the parent, got true", st)
 		}
 	}
-	// An unrecognised state must not read as a DS removal.
-	if dsBelongsAtParent("some-future-state") {
-		t.Error("an unrecognised state was counted toward the DS set")
+	if _, recognised := dsBelongsAtParent("some-future-state"); recognised {
+		t.Error("an unrecognised state was reported as recognised")
+	}
+}
+
+// A state this code does not classify must make the whole intent unknown, not
+// merely trim the set. Reporting Known with a short set would have replace mode
+// delete DS records on the strength of a state nobody has classified -- turning
+// a schema addition into a DS removal, which is exactly what the predicate
+// exists to prevent.
+func TestDSIntentUnknownWhenAKeyHasAnUnrecognisedState(t *testing.T) {
+	kdb := intentTestKeyDB(t)
+	seedKey(t, kdb, "child.example.", DnskeyStateActive, 257, pubA)
+	seedKey(t, kdb, "child.example.", "some-future-state", 257, pubB)
+
+	intent, err := DSIntentForZone(kdb, "child.example.", dns.SHA256)
+	if err != nil {
+		t.Fatalf("DSIntentForZone: %v", err)
+	}
+	if intent.Known {
+		t.Fatal("an unrecognised key state still produced an authoritative intent;" +
+			" replace mode would delete the parent DS on the strength of it")
+	}
+	if len(intent.Set) != 0 {
+		t.Errorf("unknown intent carried %d DS records", len(intent.Set))
+	}
+}
+
+// The regression the gated insert prevents: a producer with no DS opinion must
+// not add DS records while declining to remove the old ones, which would leave
+// the parent holding both.
+func TestReplaceUpdateAddsNoDSWhenTheQuestionIsUnanswered(t *testing.T) {
+	dk := &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: "child.example.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags:     257,
+		Protocol:  3,
+		Algorithm: dns.ED25519,
+		PublicKey: pubA,
+	}
+	ds := dk.ToDS(dns.SHA256)
+
+	m, err := CreateChildReplaceUpdateWithDS("example.", "child.example.",
+		[]dns.RR{mustRR(t, "child.example. 3600 IN NS ns1.child.example.")},
+		nil, nil, []dns.RR{ds}, false)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	for _, rr := range m.Ns {
+		if rr.Header().Rrtype == dns.TypeDS {
+			t.Fatalf("an unanswered DS question still produced a DS record: %v", rr)
+		}
 	}
 }
 
