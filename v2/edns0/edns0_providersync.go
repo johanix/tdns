@@ -11,8 +11,6 @@ import (
 
 // EDNS0 Provider-Synchronization option constants
 const (
-	EDNS0_PROVIDERSYNC_OPTION_CODE = 65002 // TBD: Replace with actual IANA assigned code
-
 	// OPERATION field values
 	PROVIDERSYNC_OP_FORBIDDEN = 0
 	PROVIDERSYNC_OP_HELLO     = 1
