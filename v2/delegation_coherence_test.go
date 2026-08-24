@@ -43,13 +43,25 @@ func delOneDS(ds *dns.DS) dns.RR {
 	return c
 }
 
+// fetcherFor returns a fetcher whose answer DNSSEC-validated.
 func fetcherFor(keys ...*dns.DNSKEY) dnskeyFetcher {
-	return func(string) ([]dns.RR, error) {
+	return fetcherValidated(true, keys...)
+}
+
+// fetcherUnvalidated returns a fetcher whose answer did NOT validate -- the
+// normal state for a child with no DS at its parent, and what an attacker
+// supplies for one that has.
+func fetcherUnvalidated(keys ...*dns.DNSKEY) dnskeyFetcher {
+	return fetcherValidated(false, keys...)
+}
+
+func fetcherValidated(validated bool, keys ...*dns.DNSKEY) dnskeyFetcher {
+	return func(string) ([]dns.RR, bool, error) {
 		var out []dns.RR
 		for _, k := range keys {
 			out = append(out, k)
 		}
-		return out, nil
+		return out, validated, nil
 	}
 }
 
@@ -65,9 +77,9 @@ func TestCoherenceIgnoresUpdatesThatDoNotTouchDS(t *testing.T) {
 	}
 
 	called := false
-	fetch := func(string) ([]dns.RR, error) {
+	fetch := func(string) ([]dns.RR, bool, error) {
 		called = true
-		return nil, fmt.Errorf("should not have been called")
+		return nil, false, fmt.Errorf("should not have been called")
 	}
 
 	if err := CheckDelegationCoherence(cohChild, []dns.RR{ds}, []dns.RR{ns}, fetch); err != nil {
@@ -84,9 +96,9 @@ func TestCoherenceAllowsClearingTheDS(t *testing.T) {
 	_, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 
 	called := false
-	fetch := func(string) ([]dns.RR, error) {
+	fetch := func(string) ([]dns.RR, bool, error) {
 		called = true
-		return nil, nil
+		return nil, true, nil
 	}
 	if err := CheckDelegationCoherence(cohChild, []dns.RR{ds}, []dns.RR{delDSRRset()}, fetch); err != nil {
 		t.Fatalf("clearing the DS was refused: %v", err)
@@ -146,7 +158,7 @@ func TestCoherenceAllowsBootstrappingWithAMatchingDS(t *testing.T) {
 func TestCoherenceRefusesWhenTheDNSKEYLookupFails(t *testing.T) {
 	_, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 
-	fetch := func(string) ([]dns.RR, error) { return nil, fmt.Errorf("no route to host") }
+	fetch := func(string) ([]dns.RR, bool, error) { return nil, false, fmt.Errorf("no route to host") }
 	err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)}, fetch)
 	if err == nil {
 		t.Fatal("a DS change was accepted despite the DNSKEY lookup failing")
@@ -232,9 +244,9 @@ func TestCoherenceIgnoresANoOpDSChange(t *testing.T) {
 	_, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 
 	called := false
-	fetch := func(string) ([]dns.RR, error) {
+	fetch := func(string) ([]dns.RR, bool, error) {
 		called = true
-		return nil, fmt.Errorf("should not have been called")
+		return nil, false, fmt.Errorf("should not have been called")
 	}
 
 	// Re-adding the DS that is already published changes nothing.
@@ -246,23 +258,56 @@ func TestCoherenceIgnoresANoOpDSChange(t *testing.T) {
 	}
 }
 
-// An unvalidated DNSKEY answer must not bless a DS. The whole point of the
-// check is to stop the parent publishing something nothing can validate, and an
-// attacker-supplied key set would otherwise certify exactly that.
-func TestCoherenceRefusesAnUnvalidatedDNSKEYAnswer(t *testing.T) {
+// An unvalidated DNSKEY answer must not bless a DS **when the child already has
+// one**. That is the attack: supply keys nothing can authenticate and have the
+// parent certify a DS that breaks the chain.
+func TestCoherenceRefusesAnUnvalidatedAnswerWhenTheChildAlreadyHasADS(t *testing.T) {
+	liveKey, liveDS := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
+	_, otherDS := cohKey(t, "1G+3r1iVxr1l3jWgTnKEWXDNQSa8iiRWS/5Hi1ECTE1=")
+
+	err := CheckDelegationCoherence(cohChild,
+		[]dns.RR{liveDS},
+		[]dns.RR{addDS(otherDS)},
+		fetcherUnvalidated(liveKey))
+	if err == nil {
+		t.Fatal("a DS change was accepted on the strength of an unvalidated DNSKEY answer" +
+			" for a child that already has a DS")
+	}
+	if !strings.Contains(err.Error(), "did not DNSSEC-validate") {
+		t.Errorf("unexpected refusal reason: %v", err)
+	}
+
+	// The same change with a validated answer is fine.
+	if err := CheckDelegationCoherence(cohChild, []dns.RR{liveDS},
+		[]dns.RR{addDS(otherDS)}, fetcherFor(liveKey)); err != nil {
+		t.Fatalf("a validated answer was refused: %v", err)
+	}
+}
+
+// ...and it MUST be accepted when the child has no DS yet, because that child
+// is insecure by definition and can never produce a validated answer. This is
+// RFC 8078 bootstrap: adding the first DS is what creates the chain, so
+// demanding validation first refuses the only update that would fix it.
+//
+// An earlier version of this check got this wrong and argued for it in a
+// comment, conflating "currently insecure" with "would be bogus". The tests did
+// not catch it because the stub fetcher had no notion of validation at all --
+// production refused what the tests said was allowed.
+func TestCoherenceAllowsBootstrapWithAnUnvalidatedAnswer(t *testing.T) {
 	key, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 
-	// The fetcher itself reports the failure, as imrDnskeyFetcher does for an
-	// unvalidated response.
-	fetch := func(string) ([]dns.RR, error) {
-		return nil, fmt.Errorf("DNSKEY RRset for %s did not DNSSEC-validate", cohChild)
+	// No DS at the parent: the first one.
+	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)},
+		fetcherUnvalidated(key)); err != nil {
+		t.Fatalf("first-DS bootstrap was refused: %v", err)
 	}
-	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)}, fetch); err == nil {
-		t.Fatal("a DS was accepted on the strength of an unvalidated DNSKEY answer")
-	}
-	// Sanity: the same DS with a validated answer is fine.
-	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)}, fetcherFor(key)); err != nil {
-		t.Fatalf("a validated matching DS was refused: %v", err)
+
+	// The DS must still match a key the child actually publishes. Bootstrap
+	// relaxes the validation requirement, not the matching one.
+	_, unrelatedDS := cohKey(t, "1G+3r1iVxr1l3jWgTnKEWXDNQSa8iiRWS/5Hi1ECTE1=")
+	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(unrelatedDS)},
+		fetcherUnvalidated(key)); err == nil {
+		t.Error("bootstrap accepted a DS matching no published key")
 	}
 }
 

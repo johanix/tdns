@@ -31,11 +31,17 @@ import (
 // point. A check performed by the requesting client is not a check, and a
 // client cannot know a given parent's local requirements anyway.
 
-// dnskeyFetcher returns the DNSKEY RRset the child currently publishes.
+// dnskeyFetcher returns the DNSKEY RRset the child currently publishes, and
+// whether that answer DNSSEC-validated.
+//
+// The two travel together because only the caller can decide what an
+// unvalidated answer means: for a child that already has a DS it is an attack,
+// and for a child that has none it is the normal state of affairs. A fetcher
+// that decided on its own could only get one of those right.
 //
 // Injected rather than called directly so the rule below can be tested without
 // a network, and so the parent can choose how it looks the child up.
-type dnskeyFetcher func(child string) ([]dns.RR, error)
+type dnskeyFetcher func(child string) (keys []dns.RR, validated bool, err error)
 
 // dsAfterActions applies the DS-affecting records of an RFC 2136 update to the
 // parent's current DS RRset for child, and reports the result.
@@ -225,9 +231,35 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 		return fmt.Errorf("cannot verify that %s would still validate: no way to look up its DNSKEYs", child)
 	}
 
-	keys, err := fetch(child)
+	keys, validated, err := fetch(child)
 	if err != nil {
 		return fmt.Errorf("cannot verify that %s would still validate: DNSKEY lookup failed: %w", child, err)
+	}
+
+	// An unvalidated DNSKEY answer is only meaningful when there is something to
+	// validate against.
+	//
+	// If the parent already publishes a DS, a chain exists, the answer must
+	// chain through it, and an unvalidated one is exactly what an attacker would
+	// supply to make a bogus DS look fine.
+	//
+	// If the parent publishes no DS, the child is insecure -- and demanding a
+	// validated answer would make it permanently so. That is RFC 8078
+	// bootstrap: the child has keys, no DS chains to them yet, and adding the
+	// first DS is what creates the chain. Requiring validation here refuses the
+	// one update that would fix it, so an authorised child could go insecure and
+	// never come back via UPDATE or the API.
+	//
+	// This is the distinction an earlier version of this function got wrong, and
+	// argued for in a comment: "currently insecure" is not "would be bogus".
+	// What still protects the bootstrap case is everything else -- the update is
+	// authenticated and authorised, and the DS must match a key the child
+	// actually publishes. It is the same carve-out the CDS scanner makes for
+	// onboarding when no DS exists.
+	if len(currentDS) > 0 && !validated {
+		return fmt.Errorf(
+			"the DNSKEY RRset for %s did not DNSSEC-validate, and it already has a DS"+
+				" at this parent: an unvalidated answer cannot authorise changing it", child)
 	}
 
 	for _, dsrr := range resulting {
@@ -295,34 +327,24 @@ func imrDnskeyFetcher(imr *Imr) dnskeyFetcher {
 	if imr == nil {
 		return nil
 	}
-	return func(child string) ([]dns.RR, error) {
+	return func(child string) ([]dns.RR, bool, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		resp, err := imr.ImrQuery(ctx, dns.Fqdn(child), dns.TypeDNSKEY, dns.ClassINET, nil)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if resp == nil || resp.RRset == nil {
-			return nil, fmt.Errorf("no DNSKEY RRset returned for %s", child)
+			return nil, false, fmt.Errorf("no DNSKEY RRset returned for %s", child)
 		}
 		if resp.Error {
-			return nil, fmt.Errorf("DNSKEY lookup for %s failed: %s", child, resp.ErrorMsg)
+			return nil, false, fmt.Errorf("DNSKEY lookup for %s failed: %s", child, resp.ErrorMsg)
 		}
-		// The answer has to be authenticated. This check exists to stop the
-		// parent publishing a DS that nothing can validate, and an unvalidated
-		// DNSKEY answer is exactly what an attacker would supply to make a
-		// bogus DS look fine -- the check would then certify the breakage
-		// rather than prevent it.
-		//
-		// A child that is currently insecure cannot produce a validated DNSKEY
-		// answer, but it does not need to: this fetch only runs when the
-		// resulting DS set is non-empty, and a DS whose child is insecure is
-		// the state being refused anyway.
-		if !resp.Validated {
-			return nil, fmt.Errorf("DNSKEY RRset for %s did not DNSSEC-validate", child)
-		}
-		return resp.RRset.RRs, nil
+		// Report whether it validated; do not decide what that means. Only the
+		// caller knows whether the child already has a DS, which is what
+		// separates an attack from an ordinary bootstrap.
+		return resp.RRset.RRs, resp.Validated, nil
 	}
 }
 
