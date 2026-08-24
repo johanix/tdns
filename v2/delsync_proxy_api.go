@@ -141,27 +141,31 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 // proxyApiRRsets renders the served zone's delegation in the declarative form
 // the endpoint takes.
 //
-// The DS needs saying explicitly. A zone with no SEP DNSKEYs produces no DS, so
-// DsyncApiRRsetsFromSyncStatus omits DS from the request entirely, and under
-// "absent means leave alone" the parent then keeps whatever DS it holds. For an
-// unsigned child that is the one state worth avoiding: a DS in the parent for a
-// child that cannot answer for it makes every validating resolver declare the
-// whole child zone bogus.
+// DS is deliberately absent from the request, with one exception below.
 //
-// So an empty DS RRset -- the declarative form's "remove this" -- is declared
-// whenever the child has no SEP DNSKEYs, and the parent removes what it has.
-// This is delegation SYNCHRONISATION: the parent's delegation is made to match
-// the child's, and "no DS" is a state the child can be in.
+// The proxy has no business asserting a DS set for a signed child. It sees only
+// the zone as transferred, and the DS the parent should hold is not derivable
+// from that: a multi-DS rollover puts the new DS at the parent BEFORE the
+// matching DNSKEY appears, so anything derived from published keys is missing
+// exactly the record the rollover just placed. Deriving it from SEP-flagged
+// keys is wrong a second way, since SEP is advisory -- a zone signed with a
+// flags-256 CSK yields an empty set, and declaring that empty set tells the
+// parent to delete the DS of a perfectly good child.
 //
-// This used to be gated on the analysis having witnessed the DNSKEY RRset
-// change in the transfer that left the zone unsigned, so that a never-signed
-// zone would not wipe a DS some registrant had placed out of band. That gets
-// the risk backwards. Such a DS broke the child the moment it appeared, and
-// removing it is the repair, not an overreach -- while the gate also silently
-// skipped the removal on the steady-state path, where a never-signed zone
-// never produces the witness at all.
+// The child's own statement about DS is its CDS/CDNSKEY RRset, and forwarding
+// that is B1 in docs/2026-08-23-proxy-delegation-sync-scope.md. Until it lands,
+// omitting DS leaves the parent holding what it already has, which is right in
+// every case except the one below.
+//
+// The exception: a child with NO DNSKEY RRset at all. There is no procedure
+// that produces "unsigned child, DS at the parent" on purpose, the state makes
+// every validating resolver declare the whole child bogus, and the child cannot
+// signal its way out because RFC 8078 CDS-delete needs a validation it has no
+// key to provide. The predicate is the absence of the RRset, NOT an empty
+// derived set -- those are different questions and conflating them is what
+// would delete a CSK-signed child's DS.
 func (zd *ZoneData) proxyApiRRsets() []DsyncApiRRset {
-	newNS, newA, newAAAA, newDS := zd.proxyCurrentDelegationRRs()
+	newNS, newA, newAAAA, _ := zd.proxyCurrentDelegationRRs()
 
 	rrsets := DsyncApiRRsetsFromSyncStatus(zd.ZoneName, DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
@@ -169,12 +173,11 @@ func (zd *ZoneData) proxyApiRRsets() []DsyncApiRRset {
 		NewNS:    newNS,
 		NewA:     newA,
 		NewAAAA:  newAAAA,
-		NewDS:    newDS,
 	})
 
-	if len(newDS) == 0 {
-		lgDns.Info("delegation-sync-proxy: zone has no SEP DNSKEYs;"+
-			" declaring an empty DS so the parent removes any DS it holds", "zone", zd.ZoneName)
+	if !zd.hasDnskeyRRset() {
+		lgDns.Info("delegation-sync-proxy: child publishes no DNSKEY RRset;"+
+			" declaring an empty DS so the parent stops making it bogus", "zone", zd.ZoneName)
 		rrsets = append(rrsets, DsyncApiRRset{
 			Owner: dns.Fqdn(zd.ZoneName),
 			Type:  dns.TypeToString[dns.TypeDS],
@@ -183,4 +186,20 @@ func (zd *ZoneData) proxyApiRRsets() []DsyncApiRRset {
 	}
 
 	return rrsets
+}
+
+// hasDnskeyRRset reports whether the served zone publishes any DNSKEY at its
+// apex, SEP-flagged or not.
+//
+// The SEP bit is deliberately not consulted. It is advisory, validators ignore
+// it, and a zone signed with a flags-256 CSK is signed -- reading "no SEP key"
+// as "not signed" is how a working child gets its DS deleted.
+func (zd *ZoneData) hasDnskeyRRset() bool {
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil || apex.RRtypes == nil {
+		// Unknown, not empty. Saying "no DNSKEYs" on a failed lookup would turn
+		// a transient read error into a DS withdrawal.
+		return true
+	}
+	return len(apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs) > 0
 }
