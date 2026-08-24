@@ -607,55 +607,27 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	// Coherence: the policy above decided whether this child MAY change these
 	// RRtypes. Whether the delegation that results still works is a separate
 	// question, and the parent answers it on every channel -- the DSYNC API
-	// handler applies the same check. See CheckDelegationCoherence.
+	// handler applies the same check.
 	//
-	// Scoped to the child's own name: r.Ns carries the update records, and the
-	// check is a no-op unless they change that child's DS.
-	if len(r.Question) > 0 {
-		child := childNameFromUpdate(zd.ZoneName, r)
-		if child != "" {
-			if cerr := CheckDelegationCoherence(child, zd.currentChildDS(child), r.Ns,
-				imrDnskeyFetcher(Conf.Internal.ImrEngine)); cerr != nil {
-				lgHandler.Warn("child update refused as incoherent",
-					"zone", zd.ZoneName, "child", child, "err", cerr)
-				return false, false, cerr
-			}
-		}
+	// A refusal here is permanent, so it must not answer SERVFAIL. Returning an
+	// error alone did: applyValidationFailure reads us.ValidationRcode, which
+	// is still NOERROR because the signature validated perfectly well, and its
+	// fail-closed branch substitutes SERVFAIL. A child's rollover engine
+	// categorises that as a transport softfail and retries a hard no for as
+	// long as it is configured to, which is why the rcode is set explicitly
+	// alongside an EDE that names the reason.
+	if cerr := zd.CheckDelegationCoherenceForUpdate(r.Ns,
+		imrDnskeyFetcher(Conf.Internal.ImrEngine)); cerr != nil {
+		lgHandler.Warn("child update refused as incoherent",
+			"zone", zd.ZoneName, "err", cerr)
+		us.ValidationRcode = dns.RcodeRefused
+		us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
+		return false, false, cerr
 	}
 
 	return true, updateZone, nil
 }
 
-// childNameFromUpdate finds which delegation an update is about: the shortest
-// name under the parent that the update's records sit at or below.
-//
-// An update touching several children at once is not something the child path
-// produces -- the policy is evaluated per record against a single principal --
-// so the first owner below the apex identifies the delegation.
-func childNameFromUpdate(parent string, r *dns.Msg) string {
-	parent = dns.Fqdn(parent)
-	best := ""
-	for _, rr := range r.Ns {
-		name := dns.Fqdn(rr.Header().Name)
-		if !dns.IsSubDomain(parent, name) || strings.EqualFold(name, parent) {
-			continue
-		}
-		labels := dns.CountLabel(name) - dns.CountLabel(parent)
-		if labels < 1 {
-			continue
-		}
-		// Trim to exactly one label below the parent: that is the delegation.
-		idx := dns.Split(name)
-		if len(idx) < labels {
-			continue
-		}
-		cand := name[idx[labels-1]:]
-		if best == "" || dns.CountLabel(cand) < dns.CountLabel(best) {
-			best = cand
-		}
-	}
-	return best
-}
 
 // Updates to auth data must be validated.
 func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg) (bool, bool, error) {

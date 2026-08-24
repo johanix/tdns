@@ -258,7 +258,7 @@ func DsyncApiPostDelegation() func(w http.ResponseWriter, r *http.Request) {
 		// nothing about whether the delegation that results still works. The
 		// parent checks that itself, on every channel, because a check done by
 		// the requesting client is not a check.
-		if cerr := CheckDelegationCoherence(child, zd.currentChildDS(child), actions,
+		if cerr := zd.CheckDelegationCoherenceForUpdate(actions,
 			imrDnskeyFetcher(Conf.Internal.ImrEngine)); cerr != nil {
 			lgDsyncApi.Warn("DSYNC API update refused as incoherent",
 				"zone", zd.ZoneName, "child", child, "principal", cred.Principal, "err", cerr)
