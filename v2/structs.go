@@ -802,6 +802,11 @@ type DelegationSyncStatus struct {
 	DNSKEYRemoves []dns.RR `json:"-"`
 	DSAdds        []dns.RR `json:"-"`
 	DSRemoves     []dns.RR `json:"-"`
+	// NewDSKnown reports whether NewDS is an answer. An empty NewDS means
+	// "withdraw the DS" when this is set and "no opinion about DS" when it is
+	// not; the two are opposite instructions that look identical as a nil
+	// slice, so the flag travels with the field and must be read first.
+	NewDSKnown bool `json:"-"`
 	Error         bool
 	ErrorMsg      string
 	UpdateResult  UpdateResult // Experimental

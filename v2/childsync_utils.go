@@ -169,7 +169,31 @@ func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, 
 // It removes all existing NS records for the child and deletes A/AAAA glue for any in-bailiwick nameservers
 // discovered among the provided new NS, A, and AAAA records, then inserts the new NS and glue RRs.
 // Returns an error if parent or child is empty or equal to ".".
+// CreateChildReplaceUpdate builds a replace-mode update that says nothing about
+// DS unless newDS is non-empty.
+//
+// That rule is right for callers whose newDS is only populated in some cases:
+// an empty slice there means "this caller has no DS opinion", and deleting the
+// parent's DS RRset on the strength of it would remove a DS on the basis of a
+// field nobody filled in. Callers that can tell the difference should use
+// CreateChildReplaceUpdateWithDS and say so explicitly.
 func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS []dns.RR) (*dns.Msg, error) {
+	return CreateChildReplaceUpdateWithDS(parent, child, newNS, newA, newAAAA, newDS, len(newDS) > 0)
+}
+
+// CreateChildReplaceUpdateWithDS is CreateChildReplaceUpdate with the DS
+// question answered explicitly.
+//
+// dsKnown says whether newDS is an answer. When it is, an empty newDS deletes
+// the parent's DS RRset and adds nothing back -- the correct outcome for a zone
+// that is no longer signed, where leaving the DS makes every validating
+// resolver declare the whole child bogus. When it is not, the DS RRset is left
+// untouched no matter what newDS holds.
+//
+// The distinction cannot be recovered from the slice. An empty DS set is the
+// same nil either way, and which of the two it means depends on who filled it
+// in, so the answer is a parameter rather than an inference.
+func CreateChildReplaceUpdateWithDS(parent, child string, newNS, newA, newAAAA, newDS []dns.RR, dsKnown bool) (*dns.Msg, error) {
 	if parent == "." || parent == "" {
 		return nil, fmt.Errorf("parent zone name not specified. Terminating")
 	}
@@ -216,8 +240,11 @@ func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS 
 		m.RemoveRRset([]dns.RR{rrA, rrAAAA})
 	}
 
-	// Remove all existing DS records for the child zone (if we have new DS)
-	if len(newDS) > 0 {
+	// Remove all existing DS records for the child zone, but only when the
+	// caller has actually answered the DS question. See the doc comments above:
+	// an empty newDS from a caller that cannot tell "unsigned" from "no
+	// opinion" must not delete anything.
+	if dsKnown {
 		rrDS := new(dns.DS)
 		rrDS.Hdr = dns.RR_Header{Name: child, Rrtype: dns.TypeDS, Class: dns.ClassANY, Ttl: 3600}
 		m.RemoveRRset([]dns.RR{rrDS})
@@ -230,8 +257,13 @@ func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS 
 	m.Insert(newA)
 	m.Insert(newAAAA)
 
-	// Add all new DS records
-	m.Insert(newDS)
+	// Add all new DS records -- under the same gate as the removal above. A
+	// caller with no DS opinion must produce a message that says nothing about
+	// DS at all; inserting while declining to remove would leave the parent
+	// holding both the old records and the new ones.
+	if dsKnown {
+		m.Insert(newDS)
+	}
 
 	m.SetEdns0(1232, true) // Enable EDNS0 for EDE support in responses
 

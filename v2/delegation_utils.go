@@ -117,25 +117,69 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 			resp.AAAARemoves = append(resp.AAAARemoves, removes...)
 		}
 	}
-	// 4. Compare DS RRsets between parent and child
+	// 4. Compare DS RRsets between parent and child -- unless a KSK rollover is
+	// in flight, in which case the DS RRset is not this function's to have an
+	// opinion about.
+	//
+	// A rollover deliberately puts the parent and the child's published
+	// DNSKEYs out of step: a double-DS roll places the new DS at the parent
+	// BEFORE the matching DNSKEY appears in the zone. The comparison below
+	// derives the child's DS from published SEP DNSKEYs, so it sees that new DS
+	// as surplus and reports it for removal. Acting on that deletes the DS the
+	// rollover just placed, and the roll then swaps onto a KSK the parent has
+	// no DS for.
+	//
+	// The engine owns the DS while it is rolling, and sources its set from the
+	// keystore and the rollover target rather than from published keys. Only
+	// the DS dimension is suppressed: NS and glue are independent of a key roll,
+	// and a rollover window is days wide, so suppressing the whole comparison
+	// would stall ordinary delegation edits for the duration. Those are
+	// analysed above and their results stand.
+	//
+	// Written as a wrapped block rather than an early return so that anything
+	// added after this point is not silently skipped along with the DS.
+	if !zd.rolloverOwnsDS() {
+		if err := zd.compareParentDS(&resp, pserver, apex); err != nil {
+			return resp, err
+		}
+	}
+
+	return resp, nil
+}
+
+// compareParentDS fills in the DS dimension of a delegation analysis: it asks
+// the parent what DS it holds, derives what the child's published SEP DNSKEYs
+// imply, and records the difference.
+//
+// Split out of AnalyseZoneDelegation so the rollover suppression above reads as
+// one decision rather than an early return threaded through the function.
+func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, apex *OwnerData) error {
 	// Query parent for DS records
 	p_dsrrs, err := AuthQuery(zd.ZoneName, pserver, dns.TypeDS)
 	if err != nil {
 		lgDns.Warn("error from AuthQuery for DS", "server", pserver, "zone", zd.ZoneName, "err", err)
 		// DS query failure — skip DS comparison entirely
 	} else if len(p_dsrrs) > 0 || len(apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs) > 0 {
-		// Compute local DS from KSK DNSKEYs
-		var childDS []dns.RR
-		for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
-			if dnskey, ok := rr.(*dns.DNSKEY); ok {
-				if dnskey.Flags&dns.SEP != 0 {
-					ds := dnskey.ToDS(dns.SHA256)
-					if ds != nil {
-						childDS = append(childDS, ds)
-					}
-				}
-			}
+		// What the parent should hold comes from the keystore, not from the
+		// published DNSKEY RRset. Under multi-DS the new DS is placed at the
+		// parent BEFORE its DNSKEY appears in the zone, so a set derived from
+		// published keys is missing exactly the record the rollover just added
+		// and would report it for deletion.
+		//
+		// An unknown intent is not an empty one: it means tdns does not manage
+		// this zone's keys, and the parent's DS is then none of our business.
+		intent, ierr := DSIntentForZone(zd.KeyDB, zd.ZoneName, dns.SHA256)
+		if ierr != nil {
+			lgDns.Warn("AnalyseZoneDelegation: could not determine the DS intent; leaving the parent DS alone",
+				"zone", zd.ZoneName, "err", ierr)
+			return nil
 		}
+		if !intent.Known {
+			lgDns.Debug("AnalyseZoneDelegation: no keystore KSKs for this zone; leaving the parent DS alone",
+				"zone", zd.ZoneName)
+			return nil
+		}
+		childDS := intent.Set
 
 		dsdiff, dsadds, dsremoves := core.RRsetDiffer(zd.ZoneName, childDS,
 			p_dsrrs, dns.TypeDS, zd.Logger, Globals.Verbose, Globals.Debug)
@@ -145,11 +189,14 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 			resp.DSRemoves = append(resp.DSRemoves, dsremoves...)
 		}
 
-		// Compute NewDS for replace mode
+		// Compute NewDS for replace mode. Authoritative even when empty: an
+		// un-signed zone whose keys tdns holds is a real instruction to
+		// withdraw the DS, not an absence of opinion.
 		resp.NewDS = childDS
+		resp.NewDSKnown = true
 	}
 
-	return resp, nil
+	return nil
 }
 
 // Only used from CLI (tdns-cli ddns sync)
@@ -395,6 +442,13 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 			dss.DSAdds = append(dss.DSAdds, dsadds...)
 			dss.DSRemoves = append(dss.DSRemoves, dsremoves...)
 			dss.NewDS = newDS
+			// This set is derived from the published DNSKEY RRset, which is an
+			// answer only when it produced something. An empty result here does
+			// not mean the child has no DS -- it means this diff found no SEP
+			// keys to hash, which is also what a transfer carrying no DNSKEYs
+			// looks like. Saying so explicitly keeps replace mode behaving as
+			// it did before the flag existed.
+			dss.NewDSKnown = len(newDS) > 0
 			dss.InSync = false
 		}
 	}
@@ -464,6 +518,9 @@ func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus,
 		}
 		_, dss.DSAdds, dss.DSRemoves = core.RRsetDiffer(zd.ZoneName, newDS, oldDS, dns.TypeDS, zd.Logger, Globals.Verbose, Globals.Debug)
 		dss.NewDS = newDS
+		// Same as above: derived from published keys, so an answer only when
+		// non-empty.
+		dss.NewDSKnown = len(newDS) > 0
 	}
 
 	return differ, dss, nil
@@ -527,4 +584,55 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	lgDns.Debug("DnskeysChanged: comparing keys", "newkeys", newkeys.RRs, "oldkeys", oldkeys.RRs)
 	differ, _, _ = core.RRsetDiffer(zd.ZoneName, newkeys.RRs, oldkeys.RRs, dns.TypeDNSKEY, zd.Logger, Globals.Verbose, Globals.Debug)
 	return differ, nil
+}
+
+
+// rolloverOwnsDS reports whether the rollover engine currently owns this zone's
+// DS RRset, in which case the delegation-sync comparison must not touch it.
+//
+// The test is the rollover PHASE, not the RolloverInProgress flag. The flag is
+// set only by AtomicRollover, which is one of two ways the engine comes to push
+// a DS. The other is the idle branch's steady-state pipeline maintenance: when
+// the target DS set differs from what has been submitted it arms
+// pending-parent-push directly, and pushes on the next tick, with the flag
+// never set at all. Gating on the flag alone therefore left open exactly the
+// window this check exists to close -- the engine sends a DS for a key that is
+// still `created`, the comparison below derives the child's set from keys that
+// warrant one, does not find it, and reports the just-sent DS for removal.
+//
+// Any phase other than idle means the engine has DS work in hand:
+// pending-child-publish and pending-child-withdraw bracket the push,
+// pending-parent-push and pending-parent-observe are the push and its
+// confirmation, and parent-push-softfail is a push being retried. The flag is
+// still consulted as well, so a zone mid-swap is covered even if its phase is
+// momentarily idle.
+//
+// An absent row, an empty phase or an unreadable keystore all mean "not
+// rolling". That matches every other reader of this state, and the failure it
+// risks is the behaviour that exists today, whereas guessing "rolling" would
+// silently freeze DS synchronisation for a zone that is not rolling at all.
+//
+// Suppression is logged each time: a rollover that dies without returning the
+// zone to idle would otherwise stop DS synchronisation indefinitely with
+// nothing said about why.
+func (zd *ZoneData) rolloverOwnsDS() bool {
+	if zd == nil || zd.KeyDB == nil {
+		return false
+	}
+	row, err := LoadRolloverZoneRow(zd.KeyDB, zd.ZoneName)
+	if err != nil {
+		lgDns.Warn("AnalyseZoneDelegation: could not read rollover state; treating the zone as not rolling",
+			"zone", zd.ZoneName, "err", err)
+		return false
+	}
+	if row == nil {
+		return false
+	}
+	phaseBusy := row.RolloverPhase != "" && row.RolloverPhase != rolloverPhaseIdle
+	if !row.RolloverInProgress && !phaseBusy {
+		return false
+	}
+	lgDns.Info("AnalyseZoneDelegation: rollover engine owns the DS RRset for this zone; leaving it alone",
+		"zone", zd.ZoneName, "phase", row.RolloverPhase, "in_progress", row.RolloverInProgress)
+	return true
 }
