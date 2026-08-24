@@ -156,23 +156,6 @@ func TestCoherenceRefusesWhenTheDNSKEYLookupFails(t *testing.T) {
 	}
 }
 
-// A ZSK must not satisfy the rule: a DS that hashes a non-SEP key is not a
-// usable entry point.
-func TestCoherenceIgnoresNonSEPKeys(t *testing.T) {
-	dk := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: cohChild, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     256, // ZONE, no SEP
-		Protocol:  3,
-		Algorithm: dns.ED25519,
-		PublicKey: "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=",
-	}
-	ds := dk.ToDS(dns.SHA256)
-
-	err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)}, fetcherFor(dk))
-	if err == nil {
-		t.Fatal("a DS hashing a ZSK was accepted as an entry point")
-	}
-}
 
 // Deleting the whole name (ClassANY/TypeANY) takes the DS with it.
 func TestCoherenceTreatsDeleteAllAsClearingTheDS(t *testing.T) {
@@ -188,41 +171,114 @@ func TestCoherenceTreatsDeleteAllAsClearingTheDS(t *testing.T) {
 	}
 }
 
-// childNameFromUpdate does label arithmetic, which is easy to get subtly wrong
-// and produces a plausible-looking name when it does.
-func TestChildNameFromUpdate(t *testing.T) {
-	mk := func(names ...string) *dns.Msg {
-		m := new(dns.Msg)
-		m.SetUpdate("example.")
-		for _, n := range names {
-			m.Ns = append(m.Ns, &dns.NS{
-				Hdr: dns.RR_Header{Name: n, Rrtype: dns.TypeNS, Class: dns.ClassINET},
-				Ns:  "ns1." + n,
-			})
-		}
-		return m
+// The delegation an update is about is the owner of its DS records -- no label
+// arithmetic, so a multi-label child works by construction. The earlier version
+// trimmed names to one label below the apex, which silently skipped the check
+// for foo.bar.example. of example.: an authorised principal could publish a
+// bogus DS there and the parent would take it.
+func TestChildrenWithDSChanges(t *testing.T) {
+	ds := func(owner string, class uint16) dns.RR {
+		return &dns.DS{Hdr: dns.RR_Header{Name: owner, Rrtype: dns.TypeDS, Class: class}}
+	}
+	ns := func(owner string) dns.RR {
+		return &dns.NS{Hdr: dns.RR_Header{Name: owner, Rrtype: dns.TypeNS, Class: dns.ClassINET}, Ns: "ns1." + owner}
+	}
+	anyDel := func(owner string) dns.RR {
+		return &dns.ANY{Hdr: dns.RR_Header{Name: owner, Rrtype: dns.TypeANY, Class: dns.ClassANY}}
 	}
 
 	tests := []struct {
-		name  string
-		names []string
-		want  string
+		name    string
+		actions []dns.RR
+		want    []string
 	}{
-		{"apex of the child", []string{"child.example."}, "child.example."},
-		{"glue under the child", []string{"ns1.child.example."}, "child.example."},
-		{"deeper name still maps to the delegation", []string{"a.b.child.example."}, "child.example."},
-		{"child apex and its glue together", []string{"child.example.", "ns1.child.example."}, "child.example."},
-		{"records at the parent apex are not a delegation", []string{"example."}, ""},
-		{"names outside the parent are ignored", []string{"child.other."}, ""},
-		{"no records", nil, ""},
+		{"single-label child", []dns.RR{ds("child.example.", dns.ClassINET)}, []string{"child.example."}},
+		{"multi-label child", []dns.RR{ds("foo.bar.example.", dns.ClassINET)}, []string{"foo.bar.example."}},
+		{"DS delete counts", []dns.RR{ds("child.example.", dns.ClassANY)}, []string{"child.example."}},
+		{"delete-all takes the DS with it", []dns.RR{anyDel("child.example.")}, []string{"child.example."}},
+		{"NS-only touches no DS", []dns.RR{ns("child.example.")}, nil},
+		{"records at the apex are not a delegation", []dns.RR{ds("example.", dns.ClassINET)}, nil},
+		{"names outside the parent are ignored", []dns.RR{ds("child.other.", dns.ClassINET)}, nil},
+		{
+			"two children in one update",
+			[]dns.RR{ds("a.example.", dns.ClassINET), ds("b.example.", dns.ClassANY)},
+			[]string{"a.example.", "b.example."},
+		},
+		{
+			"the same child twice is listed once",
+			[]dns.RR{ds("child.example.", dns.ClassANY), ds("child.example.", dns.ClassINET)},
+			[]string{"child.example."},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := childNameFromUpdate("example.", mk(tc.names...))
-			if got != tc.want {
-				t.Errorf("childNameFromUpdate = %q, want %q", got, tc.want)
+			got := childrenWithDSChanges("example.", tc.actions)
+			if len(got) != len(tc.want) {
+				t.Fatalf("children = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if !strings.EqualFold(got[i], tc.want[i]) {
+					t.Errorf("children[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
 			}
 		})
+	}
+}
+
+// A request that mentions DS but leaves the set unchanged must not be refused,
+// and must not make an unrelated NS edit depend on the child being reachable.
+func TestCoherenceIgnoresANoOpDSChange(t *testing.T) {
+	_, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
+
+	called := false
+	fetch := func(string) ([]dns.RR, error) {
+		called = true
+		return nil, fmt.Errorf("should not have been called")
+	}
+
+	// Re-adding the DS that is already published changes nothing.
+	if err := CheckDelegationCoherence(cohChild, []dns.RR{ds}, []dns.RR{addDS(ds)}, fetch); err != nil {
+		t.Fatalf("a no-op DS re-add was refused: %v", err)
+	}
+	if called {
+		t.Error("a no-op DS change triggered a DNSKEY lookup")
+	}
+}
+
+// An unvalidated DNSKEY answer must not bless a DS. The whole point of the
+// check is to stop the parent publishing something nothing can validate, and an
+// attacker-supplied key set would otherwise certify exactly that.
+func TestCoherenceRefusesAnUnvalidatedDNSKEYAnswer(t *testing.T) {
+	key, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
+
+	// The fetcher itself reports the failure, as imrDnskeyFetcher does for an
+	// unvalidated response.
+	fetch := func(string) ([]dns.RR, error) {
+		return nil, fmt.Errorf("DNSKEY RRset for %s did not DNSSEC-validate", cohChild)
+	}
+	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)}, fetch); err == nil {
+		t.Fatal("a DS was accepted on the strength of an unvalidated DNSKEY answer")
+	}
+	// Sanity: the same DS with a validated answer is fine.
+	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)}, fetcherFor(key)); err != nil {
+		t.Fatalf("a validated matching DS was refused: %v", err)
+	}
+}
+
+// SEP is advisory and validators ignore it, so a DS hashing a flags-256 CSK is
+// a usable entry point and must not be refused.
+func TestCoherenceAcceptsAZoneBitCSK(t *testing.T) {
+	csk := &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: cohChild, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags:     256, // ZONE, no SEP
+		Protocol:  3,
+		Algorithm: dns.ED25519,
+		PublicKey: "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=",
+	}
+	ds := csk.ToDS(dns.SHA256)
+
+	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)}, fetcherFor(csk)); err != nil {
+		t.Fatalf("a DS hashing a ZONE-bit CSK was refused: %v", err)
 	}
 }

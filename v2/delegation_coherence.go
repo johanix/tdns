@@ -6,6 +6,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -112,6 +113,75 @@ func sameRecord(a, b dns.RR) bool {
 	return dns.IsDuplicate(na, nb)
 }
 
+
+// sameDSSet reports whether two DS RRsets hold the same records, order aside.
+func sameDSSet(a, b []dns.RR) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	used := make([]bool, len(b))
+	for _, x := range a {
+		found := false
+		for i, y := range b {
+			if used[i] {
+				continue
+			}
+			if sameRecord(x, y) {
+				used[i] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// childrenWithDSChanges returns the delegations an update touches the DS of.
+//
+// The owner name of a DS record IS the delegation it belongs to, so there is no
+// arithmetic to get wrong here and multi-label children work by construction --
+// which an earlier version of this code, trimming names to one label below the
+// apex, did not: a DS for foo.bar.example. of example. was silently skipped.
+//
+// TypeANY at a name counts, because deleting every RRset at a delegation takes
+// its DS with it.
+func childrenWithDSChanges(parent string, actions []dns.RR) []string {
+	parent = dns.Fqdn(parent)
+	seen := map[string]bool{}
+	var out []string
+	for _, rr := range actions {
+		h := rr.Header()
+		if h.Rrtype != dns.TypeDS && h.Rrtype != dns.TypeANY {
+			continue
+		}
+		name := dns.Fqdn(h.Name)
+		if !dns.IsSubDomain(parent, name) || strings.EqualFold(name, parent) {
+			continue
+		}
+		key := strings.ToLower(name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, name)
+	}
+	return out
+}
+
+// CheckDelegationCoherenceForUpdate applies the coherence rule to every
+// delegation whose DS the update touches.
+func (zd *ZoneData) CheckDelegationCoherenceForUpdate(actions []dns.RR, fetch dnskeyFetcher) error {
+	for _, child := range childrenWithDSChanges(zd.ZoneName, actions) {
+		if err := CheckDelegationCoherence(child, zd.currentChildDS(child), actions, fetch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // CheckDelegationCoherence reports whether applying actions would leave child's
 // delegation unvalidatable, and refuses it if so.
 //
@@ -135,8 +205,15 @@ func sameRecord(a, b dns.RR) bool {
 func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch dnskeyFetcher) error {
 	child = dns.Fqdn(child)
 
-	resulting, touched := dsAfterActions(child, currentDS, actions)
-	if !touched {
+	resulting, mentioned := dsAfterActions(child, currentDS, actions)
+	if !mentioned {
+		return nil
+	}
+	// Mentioning DS is not changing it. A no-op DS delete alongside an NS edit,
+	// or a re-send of the DS already published, leaves the parent exactly where
+	// it was -- and making that depend on the child being reachable would add a
+	// failure mode to a request that changes nothing.
+	if sameDSSet(currentDS, resulting) {
 		return nil
 	}
 	if len(resulting) == 0 {
@@ -160,7 +237,14 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 		}
 		for _, keyrr := range keys {
 			dk, ok := keyrr.(*dns.DNSKEY)
-			if !ok || dk.Flags&dns.SEP == 0 {
+			if !ok {
+				continue
+			}
+			// Deliberately not filtered on the SEP bit. SEP is advisory and
+			// validators ignore it, so a DS hashing a flags-256 CSK is a
+			// perfectly usable entry point. Requiring SEP here would refuse a
+			// working delegation on the strength of a hint.
+			if dk.Flags&dns.ZONE == 0 {
 				continue
 			}
 			computed := dk.ToDS(ds.DigestType)
@@ -224,6 +308,19 @@ func imrDnskeyFetcher(imr *Imr) dnskeyFetcher {
 		}
 		if resp.Error {
 			return nil, fmt.Errorf("DNSKEY lookup for %s failed: %s", child, resp.ErrorMsg)
+		}
+		// The answer has to be authenticated. This check exists to stop the
+		// parent publishing a DS that nothing can validate, and an unvalidated
+		// DNSKEY answer is exactly what an attacker would supply to make a
+		// bogus DS look fine -- the check would then certify the breakage
+		// rather than prevent it.
+		//
+		// A child that is currently insecure cannot produce a validated DNSKEY
+		// answer, but it does not need to: this fetch only runs when the
+		// resulting DS set is non-empty, and a DS whose child is insecure is
+		// the state being refused anyway.
+		if !resp.Validated {
+			return nil, fmt.Errorf("DNSKEY RRset for %s did not DNSSEC-validate", child)
 		}
 		return resp.RRset.RRs, nil
 	}
