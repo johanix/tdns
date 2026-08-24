@@ -289,6 +289,27 @@ func (zd *ZoneData) planConsiderApi(res DsyncResult, plan *ParentSyncPlan) {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{"API", "parent does not advertise it"})
 		return
 	}
+	// THE gate that makes API different from the other two, and the one thing
+	// BestSyncScheme did that this planner must not lose.
+	//
+	// The DSYNC RR names the target whose URI carries the endpoint this client
+	// then posts a bearer credential to. If the DSYNC lookup did not
+	// DNSSEC-validate, whoever can answer that query chooses where the
+	// credential goes. Validating the URI and TXT records AT the discovered
+	// target does not help: a spoofed DSYNC names an attacker-controlled zone
+	// whose own URI/TXT then validate perfectly well, and the credential is
+	// posted there.
+	//
+	// NOTIFY and UPDATE carry no secret and are deliberately not gated this
+	// way. allow-insecure is the same switch DiscoverDsyncApiEndpoint uses for
+	// its own requireDnssec, so one setting governs the whole path rather than
+	// half of it.
+	if !res.Validated && !DelegationSyncConfig().Child.Api.AllowInsecure {
+		plan.Skipped = append(plan.Skipped, SkippedScheme{"API",
+			"the DSYNC lookup did not DNSSEC-validate and" +
+				" delegationsync.child.api.allow-insecure is not set"})
+		return
+	}
 	// The credential arrives out of band by definition (§10), so its absence
 	// is settled here rather than after a round trip: there is nothing to wait
 	// for and nothing to retry.

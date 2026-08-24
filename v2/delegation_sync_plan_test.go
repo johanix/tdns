@@ -124,7 +124,13 @@ func TestPlanRecordsNotAdvertisedSeparately(t *testing.T) {
 func TestPlanApiGateOnCredential(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
 	zd.Parent = "example."
-	res := DsyncResult{Rdata: []*core.DSYNC{dsyncRR(core.SchemeAPI, dns.TypeANY, "dsync-api.example.")}}
+	// Validated: the DSYNC lookup DNSSEC-validated, so the credential gate
+	// below is what is actually being exercised. The validation gate itself has
+	// its own test.
+	res := DsyncResult{
+		Validated: true,
+		Rdata:     []*core.DSYNC{dsyncRR(core.SchemeAPI, dns.TypeANY, "dsync-api.example.")},
+	}
 
 	// No credential: skipped, with a reason naming where to fix it.
 	setChildApiCredentials(t)
@@ -475,5 +481,46 @@ func TestWalkSyncPlanCancelledMidwayReportsWhatWasTried(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "UPDATE failed") {
 		t.Errorf("error should still name the attempt that was actually made: %v", err)
+	}
+}
+
+
+// The API scheme must not be planned off an unvalidated DSYNC lookup. The DSYNC
+// RR names the target whose URI carries the endpoint a bearer credential is
+// posted to, so whoever can answer that query would choose where the credential
+// goes. This gate existed in BestSyncScheme and was lost when the planner
+// replaced it.
+//
+// Validating URI/TXT at the discovered target does not substitute: a spoofed
+// DSYNC names an attacker-controlled zone whose own records validate fine.
+func TestPlanApiRequiresAValidatedDsyncLookup(t *testing.T) {
+	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
+	zd.Parent = "example."
+	setChildApiCredentials(t, DsyncApiChildCredentialConf{
+		Parent: "example.", Username: "u", Key: "k"})
+
+	unvalidated := DsyncResult{
+		Validated: false,
+		Rdata:     []*core.DSYNC{dsyncRR(core.SchemeAPI, dns.TypeANY, "dsync-api.example.")},
+	}
+
+	plan := &ParentSyncPlan{Parent: "example."}
+	zd.planConsiderApi(unvalidated, plan)
+	if hasCandidate(plan, "API") {
+		t.Fatal("API was planned off an unvalidated DSYNC lookup;" +
+			" the bearer credential could be posted to an attacker-chosen endpoint")
+	}
+	reason, _ := skipReason(plan, "API")
+	if !strings.Contains(reason, "DNSSEC-validate") {
+		t.Errorf("skip reason %q should say the lookup did not validate", reason)
+	}
+
+	// allow-insecure is the operator saying they accept that, and it is the
+	// same switch DiscoverDsyncApiEndpoint honours.
+	setChildApiAllowInsecure(t, true)
+	plan = &ParentSyncPlan{Parent: "example."}
+	zd.planConsiderApi(unvalidated, plan)
+	if !hasCandidate(plan, "API") {
+		t.Fatalf("allow-insecure did not re-enable the API scheme: %s", plan.Summary())
 	}
 }
