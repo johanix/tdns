@@ -53,7 +53,14 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		return fmt.Errorf("PublishDsyncRRs: error fetching _dsync owner for zone %s: %v", zd.ZoneName, err)
 	}
 	if owner != nil {
-		rrset.RRs = owner.RRtypes.GetOnlyRRSet(core.TypeDSYNC).RRs
+		// Copy, do not alias. The published RRset's backing array usually has
+		// spare capacity -- zone-file load sizes slices generously -- so an
+		// append onto it below would write a synthesized DSYNC record straight
+		// into the live RRset, visible to queries, with no serial bump and no
+		// journal entry. The bug is invisible until a zone happens to have the
+		// capacity, which makes it exactly the kind that survives testing.
+		published := owner.RRtypes.GetOnlyRRSet(core.TypeDSYNC).RRs
+		rrset.RRs = append(make([]dns.RR, 0, len(published)), published...)
 	}
 	publishedSchemes := publishedDsyncSchemes(rrset.RRs)
 	alreadyPublished := len(rrset.RRs)
