@@ -604,8 +604,30 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	lgHandler.Info("child update approved")
 	updateZone := !unvalidatedKeyUpload
 
+	// Coherence: the policy above decided whether this child MAY change these
+	// RRtypes. Whether the delegation that results still works is a separate
+	// question, and the parent answers it on every channel -- the DSYNC API
+	// handler applies the same check.
+	//
+	// A refusal here is permanent, so it must not answer SERVFAIL. Returning an
+	// error alone did: applyValidationFailure reads us.ValidationRcode, which
+	// is still NOERROR because the signature validated perfectly well, and its
+	// fail-closed branch substitutes SERVFAIL. A child's rollover engine
+	// categorises that as a transport softfail and retries a hard no for as
+	// long as it is configured to, which is why the rcode is set explicitly
+	// alongside an EDE that names the reason.
+	if cerr := zd.CheckDelegationCoherenceForUpdate(r.Ns,
+		imrDnskeyFetcher(Conf.Internal.ImrEngine)); cerr != nil {
+		lgHandler.Warn("child update refused as incoherent",
+			"zone", zd.ZoneName, "err", cerr)
+		us.ValidationRcode = dns.RcodeRefused
+		us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
+		return false, false, cerr
+	}
+
 	return true, updateZone, nil
 }
+
 
 // Updates to auth data must be validated.
 func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg) (bool, bool, error) {
