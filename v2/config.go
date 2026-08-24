@@ -721,6 +721,10 @@ type InternalDnsConf struct {
 	ResignQ             chan *ZoneData     // the names of zones that should be kept re-signed should be sent into this channel
 	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 	ImrEngine           *Imr
+	// ImrReady is closed once ImrEngine has been stored, giving other engines
+	// a synchronised way to learn it is usable. Read ImrEngine only after
+	// receiving from it -- see ImrReadiness.
+	ImrReady            *ImrReadiness
 	Scanner             *Scanner      // Scanner instance for async job tracking
 	TsigKeyStore        *TsigKeyStore // name->secret store for replication TSIG (Improvement 2)
 }
