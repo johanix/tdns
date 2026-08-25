@@ -72,12 +72,34 @@ func clarifyXfrError(zone, upstream string, err error) error {
 // OUR consumption stops promptly. For an AXFR of a large zone that is still the
 // bulk of the work (parse, sort, insert), which is the point.
 func (zd *ZoneData) drainTransferEnvelopes(ctx context.Context, answerChan <-chan *dns.Envelope,
-	upstream string, firstSoaSeen bool) (int, error) {
+	upstream string, firstSoaSeen bool, abort func()) (int, error) {
 
 	count := 0
 	for {
 		select {
 		case <-ctx.Done():
+			// Abandoning the stream here is NOT enough, and getting this wrong
+			// is worse than not cancelling at all. dns.Transfer's reader
+			// goroutine sends on an UNBUFFERED channel (xfr.go inAxfr:
+			// `c <- &Envelope{...}`), so if we simply stop receiving it parks
+			// forever on its next send. Its deferred t.Close()/close(c) never
+			// run, and the goroutine AND its socket leak for the life of the
+			// process -- once per cancelled transfer.
+			//
+			// So: close the connection first, which makes the reader's next
+			// ReadMsg fail immediately, then keep receiving until it has sent
+			// that final error envelope and closed the channel. Bounded, because
+			// after the close the reader is at most one send from returning.
+			if abort != nil {
+				abort()
+			}
+			drained := drainRemainder(answerChan, transferDrainGrace)
+			if !drained {
+				// Should not happen: the reader is one send from exiting once
+				// the connection is closed. Say so rather than leak silently.
+				lg.Warn("ZoneTransferIn: transfer reader did not exit after cancellation; goroutine may be retained",
+					"zone", zd.ZoneName, "upstream", upstream, "grace", transferDrainGrace)
+			}
 			return count, fmt.Errorf("ZoneTransferIn %s from %s: %w", zd.ZoneName, upstream, ctx.Err())
 
 		case envelope, ok := <-answerChan:
@@ -92,6 +114,31 @@ func (zd *ZoneData) drainTransferEnvelopes(ctx context.Context, answerChan <-cha
 				count++
 				firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
 			}
+		}
+	}
+}
+
+// transferDrainGrace bounds how long a cancelled transfer waits for the
+// library's reader goroutine to notice the closed connection and exit. It is
+// short on purpose: the reader is at most one channel send away from returning
+// once the socket is closed, so anything longer would be waiting on a bug.
+const transferDrainGrace = 5 * time.Second
+
+// drainRemainder consumes and discards whatever the reader still sends, until
+// it closes the channel or the grace period expires. Reports whether the
+// channel actually closed (i.e. the reader goroutine finished).
+func drainRemainder(ch <-chan *dns.Envelope, grace time.Duration) bool {
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return true
+			}
+			// discard; we are on the way out
+		case <-timer.C:
+			return false
 		}
 	}
 }
@@ -177,7 +224,7 @@ func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint
 	}
 
 	// count was previously computed and discarded; log it rather than drop it.
-	count, err := zd.drainTransferEnvelopes(ctx, answerChan, upstream, false)
+	count, err := zd.drainTransferEnvelopes(ctx, answerChan, upstream, false, func() { _ = transfer.Close() })
 	if err != nil {
 		return 0, err
 	}

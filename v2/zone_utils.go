@@ -386,6 +386,13 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Zonefile)
 	// Capture prior status so an error or no-op (unchanged) file read of an
 	// already-ready zone is restored to it, not left stuck in `loading`.
+	// Parsing a large zone file is not instant, and neither is the publish +
+	// callback work below. A cancelled refresh must not go on to apply data to
+	// a daemon that is shutting down.
+	if cerr := ctx.Err(); cerr != nil {
+		return false, fmt.Errorf("FetchFromFile %s: %w", zd.ZoneName, cerr)
+	}
+
 	prevStatus := zd.GetStatus()
 	zd.SetStatus(ZoneStatusLoading)
 
@@ -474,6 +481,16 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	}
 
 	new_zd.Ready = true
+
+	// Re-check before the hard flip: parsing the file may have taken a while,
+	// and publishing a replacement (plus running the refresh callbacks) after
+	// the engine has been cancelled applies data to a daemon on its way out.
+	// Checked here rather than only up front so a long parse cannot slip
+	// through the earlier gate.
+	if cerr := ctx.Err(); cerr != nil {
+		zd.SetStatus(prevStatus)
+		return false, fmt.Errorf("FetchFromFile %s: %w", zd.ZoneName, cerr)
+	}
 
 	// Pre-refresh callbacks: analysis of old vs new zone data + modification of new_zd.
 	// MP roles (agent, combiner, signer) register callbacks to detect HSYNC/DNSKEY/delegation
@@ -572,6 +589,14 @@ func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force
 	transferred := false
 	var lastErr error
 	for _, up := range zd.Upstreams {
+		// Stop the fallback walk once the caller has given up. Without this, a
+		// shutdown that cancels mid-transfer would go on to start a FRESH AXFR
+		// attempt against every remaining upstream -- each one dialling, each
+		// one immediately cancelled -- which is the opposite of what
+		// cancellation is for.
+		if cerr := ctx.Err(); cerr != nil {
+			return false, fmt.Errorf("AXFR of %s: %w", zd.ZoneName, cerr)
+		}
 		upstream := up.Addr
 		lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", upstream)
 		new_zd = newTransferScratchZone(zd)

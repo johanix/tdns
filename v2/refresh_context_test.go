@@ -49,7 +49,7 @@ func TestDrainStopsOnCancellation(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := zd.drainTransferEnvelopes(ctx, answerChan, "192.0.2.1:53", false)
+		_, err := zd.drainTransferEnvelopes(ctx, answerChan, "192.0.2.1:53", false, func() { close(answerChan) })
 		done <- err
 	}()
 
@@ -70,16 +70,20 @@ func TestDrainStopsWhenCancelledMidStream(t *testing.T) {
 	answerChan := make(chan *dns.Envelope)
 	ctx, cancel := context.WithCancel(context.Background())
 
+	aborted := make(chan struct{})
 	go func() {
 		rr, _ := dns.NewRR("example. 3600 IN TXT \"one\"")
 		answerChan <- &dns.Envelope{RR: []dns.RR{rr}}
 		cancel() // engine shuts down mid-stream
-		// Keep the stream "open" but silent, as a real peer would be.
+		// Mimic the library reader: it exits only once the connection is
+		// closed, and closing the channel is its last act.
+		<-aborted
+		close(answerChan)
 	}()
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := zd.drainTransferEnvelopes(ctx, answerChan, "192.0.2.1:53", false)
+		_, err := zd.drainTransferEnvelopes(ctx, answerChan, "192.0.2.1:53", false, func() { close(aborted) })
 		done <- err
 	}()
 
@@ -104,7 +108,7 @@ func TestDrainCompletesNormally(t *testing.T) {
 	answerChan <- &dns.Envelope{RR: []dns.RR{soa, txt}}
 	close(answerChan)
 
-	count, err := zd.drainTransferEnvelopes(context.Background(), answerChan, "192.0.2.1:53", false)
+	count, err := zd.drainTransferEnvelopes(context.Background(), answerChan, "192.0.2.1:53", false, nil)
 	if err != nil {
 		t.Fatalf("normal drain returned an error: %v", err)
 	}
@@ -121,8 +125,72 @@ func TestDrainPropagatesEnvelopeError(t *testing.T) {
 	answerChan <- &dns.Envelope{Error: errors.New("bad TSIG")}
 	close(answerChan)
 
-	_, err := zd.drainTransferEnvelopes(context.Background(), answerChan, "192.0.2.1:53", false)
+	_, err := zd.drainTransferEnvelopes(context.Background(), answerChan, "192.0.2.1:53", false, nil)
 	if err == nil {
 		t.Fatal("an envelope error must surface")
+	}
+}
+
+// TestDrainReleasesReaderOnCancellation is the regression test for the leak the
+// first version of this change introduced.
+//
+// dns.Transfer's reader goroutine sends on an UNBUFFERED channel, so simply
+// abandoning the drain parks it forever on its next send: its deferred
+// t.Close()/close(c) never run and the goroutine AND socket are retained for
+// the life of the process, once per cancelled transfer. Stopping promptly but
+// leaking is worse than not cancelling at all.
+//
+// The fake reader below reproduces that shape exactly -- it blocks on an
+// unbuffered send and only exits once its "connection" is closed -- and the
+// test asserts it actually finishes.
+func TestDrainReleasesReaderOnCancellation(t *testing.T) {
+	zd := drainTestZone()
+	answerChan := make(chan *dns.Envelope) // unbuffered, like the library's
+	connClosed := make(chan struct{})
+	readerDone := make(chan struct{})
+
+	go func() { // stand-in for dns.Transfer.inAxfr
+		defer close(readerDone)
+		defer close(answerChan) // the deferred close(c) that must be reachable
+		rr, _ := dns.NewRR("example. 3600 IN TXT \"one\"")
+		for {
+			select {
+			case answerChan <- &dns.Envelope{RR: []dns.RR{rr}}:
+				// keeps streaming while anyone receives
+			case <-connClosed:
+				return // ReadMsg fails once the socket is closed
+			}
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := zd.drainTransferEnvelopes(ctx, answerChan, "192.0.2.1:53", false,
+		func() { close(connClosed) })
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("drain returned %v, want a wrapped context.Canceled", err)
+	}
+
+	select {
+	case <-readerDone:
+		// reader exited: its deferred cleanup ran, no goroutine or socket leak
+	case <-time.After(2 * time.Second):
+		t.Fatal("reader goroutine still parked after cancellation: goroutine and socket leaked")
+	}
+}
+
+// TestDrainRemainderGivesUp bounds the failure mode: if the reader does not
+// exit even after its connection is closed, the drain must not hang forever
+// waiting for it.
+func TestDrainRemainderGivesUp(t *testing.T) {
+	stuck := make(chan *dns.Envelope) // never written, never closed
+
+	start := time.Now()
+	if drained := drainRemainder(stuck, 50*time.Millisecond); drained {
+		t.Error("drainRemainder claimed the channel closed when it never did")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("drainRemainder blocked for %v; the grace period is not bounding it", elapsed)
 	}
 }
