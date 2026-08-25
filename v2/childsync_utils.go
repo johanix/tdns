@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -37,7 +38,14 @@ type TargetUpdateStatus struct {
 // Note: the target.Addresses must already be in addr:port format.
 // func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error) {
 // func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, UpdateResult) {
-func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
+// SendUpdate sends a DNS UPDATE to the first address that answers.
+//
+// ctx bounds the whole attempt, not just the dial: the exchange goes through
+// ExchangeContext, so a cancelled root context abandons a request already on
+// the wire rather than waiting out the client timeout. Without it the sync plan
+// could stop between candidates but not during one, which is the half of a
+// shutdown that actually takes time.
+func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
 	if zonename == "." {
 		lgDns.Error("SendUpdate: zone name not specified")
 		return 0, UpdateResult{}, fmt.Errorf("zone name not specified")
@@ -76,7 +84,10 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 
 		lgDns.Debug("sending update message", "msg", msg.String())
 
-		res, _, err := client.Exchange(msg, dst)
+		if cerr := ctx.Err(); cerr != nil {
+			return 0, UpdateResult{}, fmt.Errorf("UPDATE to %s abandoned: %w", zonename, cerr)
+		}
+		res, _, err := client.ExchangeContext(ctx, msg, dst)
 		if err != nil {
 			lgDns.Warn("error from dns.Exchange, trying next address", "dst", dst, "err", err)
 			ur.TargetStatus[dst] = TargetUpdateStatus{

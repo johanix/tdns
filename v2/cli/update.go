@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -511,7 +512,7 @@ cmdloop:
 
 			fmt.Printf("Sending update to %s\n", server)
 			dump.P(msg)
-			rcode, ur, err := tdns.SendUpdate(msg, zone, []string{server})
+			rcode, ur, err := tdns.SendUpdate(context.Background(), msg, zone, []string{server})
 			if err != nil {
 				fmt.Printf("Error sending update: %v\n", err)
 				continue

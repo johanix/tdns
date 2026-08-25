@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -68,7 +69,7 @@ func TestSendUpdateForcesTCP(t *testing.T) {
 		t.Fatalf("test message unexpectedly large (%d bytes); it must be small to prove TCP is forced", m.Len())
 	}
 
-	rcode, _, err := SendUpdate(m, "child.example.", []string{ln.Addr().String()})
+	rcode, _, err := SendUpdate(context.Background(), m, "child.example.", []string{ln.Addr().String()})
 	if err != nil {
 		t.Fatalf("SendUpdate: %v", err)
 	}
@@ -78,4 +79,62 @@ func TestSendUpdateForcesTCP(t *testing.T) {
 	if atomic.LoadInt32(&gotTCP) == 0 {
 		t.Error("responder received no TCP query — the UPDATE was not delivered over TCP")
 	}
+}
+
+// A cancelled context must abandon an UPDATE already on the wire, not wait out
+// the client timeout. The sync plan could stop between candidates before this;
+// what it could not do was stop during one, which is the half of a shutdown
+// that actually takes time.
+func TestSendUpdateHonoursCancellation(t *testing.T) {
+	// A listener that accepts and then never answers, so the exchange is
+	// pending for as long as it is allowed to be.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+
+	m := new(dns.Msg)
+	m.SetUpdate("child.example.")
+
+	t.Run("already cancelled: returns without dialling", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		start := time.Now()
+		_, _, err := SendUpdate(ctx, m, "child.example.", []string{ln.Addr().String()})
+		if err == nil {
+			t.Fatal("a cancelled SendUpdate returned no error")
+		}
+		if took := time.Since(start); took > time.Second {
+			t.Errorf("took %v to notice an already-cancelled context", took)
+		}
+	})
+
+	t.Run("cancelled mid-flight: returns promptly", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _, _ = SendUpdate(ctx, m, "child.example.", []string{ln.Addr().String()})
+		}()
+
+		time.Sleep(150 * time.Millisecond) // let the exchange get under way
+		cancel()
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("SendUpdate did not return within 5s of cancellation;" +
+				" a shutdown would wait out the client timeout instead")
+		}
+	})
 }

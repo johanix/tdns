@@ -84,9 +84,9 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 		return fmt.Errorf("error: Keyfile not specified, signing update not possible")
 	}
 
-	rcode, _, err := SendUpdate(smsg, Globals.ParentZone, dsynctarget.Addresses)
+	rcode, _, err := SendUpdate(ctx, smsg, Globals.ParentZone, dsynctarget.Addresses)
 	if err != nil {
-		return fmt.Errorf("error from SendUpdate(%v): %v", dsynctarget, err)
+		return fmt.Errorf("error from SendUpdate(ctx, %v): %v", dsynctarget, err)
 	} else {
 		lgDns.Info("SendUpdate completed", "parent", Globals.ParentZone, "target", dsynctarget.Addresses, "rcode", dns.RcodeToString[rcode])
 	}
