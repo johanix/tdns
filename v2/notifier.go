@@ -94,9 +94,21 @@ func Notifier(ctx context.Context, conf *Config, notifyreqQ chan NotifyRequest) 
 // response. err is non-nil only when no target produced a usable
 // response at all (transport-level failure across the board).
 //
-// ctx cancels in-flight per-target sends. On daemon shutdown, the
-// caller cancels ctx and the per-target loop exits at the next
-// iteration boundary or via ExchangeContext returning early.
+// ctx bounds the per-target loop, but does NOT interrupt a send already on the
+// wire. On daemon shutdown the loop stops at the next iteration boundary --
+// each target is preceded by a ctx.Err() check -- while whichever send is in
+// flight runs to completion.
+//
+// The distinction is not pedantic and this comment used to get it wrong, by
+// claiming the loop also exits "via ExchangeContext returning early".
+// ExchangeContext hands the context to the dial and then uses only
+// ctx.Deadline() to tighten the socket deadlines; it never watches ctx.Done().
+// This client sets no Timeout either, so the fork's 2s default applies: a
+// shutdown during an unanswered NOTIFY waits those two seconds out.
+//
+// Bounded and short, so it is a known cost rather than a hang. Interrupting it
+// would mean closing the connection on cancellation, as SendUpdate does via
+// exchangeCancellable in childsync_utils.go.
 func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, targets []string) (int, []dns.EDNS0_EDE, error) {
 	if zd.ZoneName == "." {
 		return dns.RcodeServerFailure, nil, fmt.Errorf("zone %q: error: zone name not specified. Ignoring notify request", zd.ZoneName)

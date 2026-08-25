@@ -15,14 +15,24 @@ import (
 
 // Cancellation of the refresh/transfer chain.
 //
-// NOTE on what is and is not worth asserting here. Most of this change is
-// signature plumbing whose effect is already covered by the standard library:
-// dns.Client.ExchangeContext honours ctx by itself, so the SOA-probe path
-// returns a context error with or without tdns's own checks, and a test cannot
-// tell the two apart. The genuinely NEW behaviour is the envelope drain loop --
-// dns.Transfer.In has no context-aware variant, so without an explicit select
-// the daemon would keep parsing and sorting a large zone long after the engine
-// asked it to stop. That is what these tests target.
+// NOTE on what is and is not worth asserting here. The genuinely NEW behaviour
+// is the envelope drain loop -- dns.Transfer.In has no context-aware variant, so
+// without an explicit select the daemon would keep parsing and sorting a large
+// zone long after the engine asked it to stop. That is what these tests target.
+//
+// This note used to give a second reason, that the SOA-probe path needed no
+// test because "dns.Client.ExchangeContext honours ctx by itself" and a test
+// could not tell tdns's own checks apart from the library's. That premise is
+// false. ExchangeContext hands the context to the dial and then uses only
+// ctx.Deadline() to tighten socket deadlines; it never watches ctx.Done(). On a
+// cancellable-but-deadlineless context -- which is what a shutdown context is --
+// it does not return early at all.
+//
+// So the probe path returns promptly BECAUSE of tdns's own ctx checks between
+// probes, not in spite of needing none, and a test could tell the difference:
+// remove them and a cancelled probe waits out the client's 2s default. Left as
+// a correction rather than a new test, since what these tests target is
+// unchanged -- but the reasoning above should not be reused to skip one.
 
 func drainTestZone() *ZoneData {
 	return &ZoneData{
