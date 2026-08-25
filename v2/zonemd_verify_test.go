@@ -1,9 +1,14 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
+	"log"
+	"net"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -445,5 +450,205 @@ func TestVerifyZonemdSurvivesOnAMirroringSecondary(t *testing.T) {
 	}
 	if eff[OptPublishZonemd] {
 		t.Error("publish-zonemd survived, so the two are not being told apart")
+	}
+}
+
+// ---- the gate on the inbound-transfer path ----
+
+// startRRListAXFRServer serves a fixed record list over AXFR, and answers the
+// SOA probe that precedes it.
+//
+// A ZoneData-backed server cannot be used here: the zone under test must serve
+// a ZONEMD that does NOT describe it, which a zone with publish-zonemd would
+// by construction never produce.
+func startRRListAXFRServer(t *testing.T, zone string, rrs []dns.RR) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	var soa dns.RR
+	for _, rr := range rrs {
+		if rr.Header().Rrtype == dns.TypeSOA {
+			soa = rr
+			break
+		}
+	}
+	if soa == nil {
+		t.Fatal("the record list has no SOA")
+	}
+
+	mux := dns.NewServeMux()
+	mux.HandleFunc(zone, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		if len(r.Question) == 1 && r.Question[0].Qtype == dns.TypeSOA {
+			m.Answer = []dns.RR{soa}
+			_ = w.WriteMsg(m)
+			return
+		}
+		// AXFR: SOA, the records, SOA.
+		tr := new(dns.Transfer)
+		ch := make(chan *dns.Envelope, 1)
+		out := append([]dns.RR{soa}, rrs...)
+		out = append(out, soa)
+		go func() { ch <- &dns.Envelope{RR: out}; close(ch) }()
+		_ = tr.Out(w, r, ch)
+	})
+
+	started := make(chan struct{})
+	srv := &dns.Server{Listener: ln, Handler: mux, NotifyStartedFunc: func() { close(started) }}
+	go func() { _ = srv.ActivateAndServe() }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the test AXFR server did not start")
+	}
+	return ln.Addr().String(), func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	}
+}
+
+// upstreamZoneText is the zone the fake primary serves, at a serial ahead of
+// what the secondary already has so the transfer is not discarded as unchanged.
+func upstreamZoneText(t *testing.T, correctDigest bool) []dns.RR {
+	t.Helper()
+	const body = `up.example.	3600	IN	SOA	ns.up.example. hostmaster.up.example. 200 7200 1800 604800 7200
+up.example.	3600	IN	NS	ns.up.example.
+ns.up.example.	3600	IN	A	192.0.2.1
+fresh.up.example.	3600	IN	A	10.4.4.4
+`
+	digest := strings.Repeat("ab", 48)
+	if correctDigest {
+		d, err := ZoneDigestHex("up.example.", parseZoneRRs(t, "up.example.", body),
+			ZonemdSchemeSimple, ZonemdAlgSHA384)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest = d
+	}
+	return parseZoneRRs(t, "up.example.",
+		body+"up.example.\t3600\tIN\tZONEMD\t200 1 1 "+digest+"\n")
+}
+
+// secondaryOf builds a Ready secondary already serving some content, pointed
+// at addr.
+func secondaryOf(t *testing.T, kdb *KeyDB, addr string) *ZoneData {
+	t.Helper()
+	const held = `up.example.	3600	IN	SOA	ns.up.example. hostmaster.up.example. 100 7200 1800 604800 7200
+up.example.	3600	IN	NS	ns.up.example.
+held.up.example.	3600	IN	A	192.0.2.9
+`
+	zd := &ZoneData{
+		ZoneName:  "up.example.",
+		ZoneStore: MapZone,
+		ZoneType:  Secondary,
+		Logger:    log.New(os.Stderr, "", 0),
+		Options:   map[ZoneOption]bool{OptVerifyZonemd: true},
+		KeyDB:     kdb,
+		Upstreams: []PeerConf{{Addr: addr, Key: NOKEY}},
+	}
+	if _, _, err := zd.ReadZoneData(held, true); err != nil {
+		t.Fatalf("ReadZoneData: %v", err)
+	}
+	zd.Ready = true
+	zd.IncomingSerial = 100
+	zd.InstallInitialSnapshot()
+	t.Cleanup(zd.stopPublisher)
+	registerZones(t, zd)
+	return zd
+}
+
+// The case verify-zonemd exists for. A secondary cannot re-derive a digest it
+// was not given, so checking the one it WAS given is its only assurance that
+// what it is about to serve is what its primary published.
+func TestVerifyZonemdGateRefusesACorruptTransfer(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	addr, stop := startRRListAXFRServer(t, "up.example.", upstreamZoneText(t, false))
+	defer stop()
+
+	zd := secondaryOf(t, kdb, addr)
+	before := zd.publishedSnapshot().Serial
+
+	updated, err := zd.FetchFromUpstream(false, false, false, nil, &Config{})
+	if err == nil {
+		t.Fatal("a transferred zone whose ZONEMD does not describe it was adopted")
+	}
+	if updated {
+		t.Error("the transfer reported the zone as updated")
+	}
+	if !strings.Contains(err.Error(), "ZONEMD") {
+		t.Errorf("the refusal does not say what failed: %v", err)
+	}
+
+	snap := zd.publishedSnapshot()
+	if snap.Serial != before {
+		t.Errorf("the secondary stopped serving what it had: serial %d, was %d",
+			snap.Serial, before)
+	}
+	if _, ok := snap.Data["held.up.example."]; !ok {
+		t.Error("the previously held content is gone")
+	}
+	if _, ok := snap.Data["fresh.up.example."]; ok {
+		t.Error("content from the refused transfer reached the served snapshot")
+	}
+}
+
+// ...and a transfer whose digest does describe it is adopted.
+func TestVerifyZonemdGateAcceptsAGoodTransfer(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	addr, stop := startRRListAXFRServer(t, "up.example.", upstreamZoneText(t, true))
+	defer stop()
+
+	zd := secondaryOf(t, kdb, addr)
+	if _, err := zd.FetchFromUpstream(false, false, false, nil, &Config{}); err != nil {
+		t.Fatalf("a transfer whose ZONEMD describes it was refused: %v", err)
+	}
+	snap := zd.publishedSnapshot()
+	if _, ok := snap.Data["fresh.up.example."]; !ok {
+		t.Error("the transferred content was not adopted")
+	}
+	if _, ok := snap.Data["held.up.example."]; ok {
+		t.Error("the old content survived a whole-zone replacement")
+	}
+}
+
+// warn adopts a transfer that fails, for the rollout.
+func TestVerifyZonemdGateWarnModeAdoptsATransfer(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	addr, stop := startRRListAXFRServer(t, "up.example.", upstreamZoneText(t, false))
+	defer stop()
+
+	zd := secondaryOf(t, kdb, addr)
+	zd.mu.Lock()
+	zd.zonemdOnVerifyFailure = ZonemdOnFailureWarn
+	zd.mu.Unlock()
+
+	if _, err := zd.FetchFromUpstream(false, false, false, nil, &Config{}); err != nil {
+		t.Fatalf("warn mode refused the transfer: %v", err)
+	}
+	if _, ok := zd.publishedSnapshot().Data["fresh.up.example."]; !ok {
+		t.Error("warn mode did not adopt the transfer")
+	}
+}
+
+// Without the option the check does not run, so a corrupt digest upstream is
+// not this server's problem.
+func TestVerifyZonemdGateOffAdoptsACorruptTransfer(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	addr, stop := startRRListAXFRServer(t, "up.example.", upstreamZoneText(t, false))
+	defer stop()
+
+	zd := secondaryOf(t, kdb, addr)
+	zd.SetOption(OptVerifyZonemd, false)
+
+	if _, err := zd.FetchFromUpstream(false, false, false, nil, &Config{}); err != nil {
+		t.Fatalf("a transfer was refused without verify-zonemd set: %v", err)
+	}
+	if _, ok := zd.publishedSnapshot().Data["fresh.up.example."]; !ok {
+		t.Error("the transfer was not adopted")
 	}
 }

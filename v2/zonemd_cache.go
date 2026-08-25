@@ -168,6 +168,19 @@ func (zd *ZoneData) zonemdDigestsLocked(scheme uint8, algs []uint8) (map[uint8]s
 		stats.WireBytes += len(block)
 
 		switch {
+		case hit && stats.CachedBytes+len(block) > budget:
+			// Held from an earlier pass, but no longer within the budget --
+			// which happens when an operator LOWERS wire-cache-max-bytes.
+			// Evicting here is what makes the setting mean what it says: keep
+			// it and a shrink would free nothing until the owners happened to
+			// change, so a server under memory pressure would be told the
+			// budget applied while the old one was still resident.
+			//
+			// Stable rather than thrashing: the walk is in canonical order, so
+			// the same prefix fits and the same tail is evicted on every pass.
+			delete(zd.zonemdCache, name)
+			stats.Hits++
+
 		case hit:
 			stats.Hits++
 			stats.CachedBytes += len(block)
@@ -193,7 +206,8 @@ func (zd *ZoneData) zonemdDigestsLocked(scheme uint8, algs []uint8) (map[uint8]s
 	// Entries for owners that have LEFT the zone are never visited above, so
 	// they are never counted and never dropped. len(cache) > the number of
 	// entries this pass accounted for is exactly the condition that says some
-	// exist.
+	// exist. (Evictions above already removed their own entries, so they do
+	// not make this fire spuriously.)
 	if len(zd.zonemdCache) > stats.CachedOwners {
 		for name := range zd.zonemdCache {
 			if _, live := data[name]; !live {

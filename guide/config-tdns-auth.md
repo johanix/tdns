@@ -544,6 +544,18 @@ so a primary that fixes its digest is picked up without intervention.
 rollout, where the first thing to find out is whether your own primaries would
 have passed.
 
+**What it attests, and when.** The check runs at the moment a zone is adopted,
+on the content that arrived. For a secondary that mirrors an upstream, that is
+the whole story: the zone it serves is the zone it verified.
+
+On a **primary** it is not a continuous attestation of what is being served.
+Anything that changes the zone after adoption — a replayed delta journal, a
+DDNS or API update, transport-signal synthesis — changes content the check
+never saw. That is not a gap in the check; it is what those features do. A
+primary with `publish-zonemd` recomputes its own digest on the next publish
+anyway, which is the attestation that matters there; `verify-zonemd` on a
+primary tells you only that the FILE it loaded was internally consistent.
+
 ### Checking a ZONEMD by hand
 
 ```bash

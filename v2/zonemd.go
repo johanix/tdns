@@ -306,17 +306,43 @@ func digestBlock(apex string, rrs []dns.RR) ([]byte, error) {
 		// that comparison sorts a shorter RDATA first unconditionally, where
 		// §6.3 wants a left-justified octet comparison in which a shorter RDATA
 		// sorts first only when it is a PREFIX of the longer.
-		return bytes.Compare(entries[i].rdata, entries[j].rdata) < 0
+		if c := bytes.Compare(entries[i].rdata, entries[j].rdata); c != 0 {
+			return c < 0
+		}
+		// Equal RDATA at the same type: duplicates, which §3.3.1 counts once.
+		// The whole wire decides between them, which with everything up to the
+		// RDATA equal means the TTL decides -- so the LOWEST TTL sorts first
+		// and is the one kept below.
+		//
+		// This is not a second ordering rule; it is what makes the choice
+		// DETERMINISTIC. Without it the survivor would be whichever the caller
+		// happened to hand over first, and the digest of a zone read from a
+		// file could differ from the digest of the same zone walked from a
+		// snapshot. Keeping the lowest also agrees with dnspython, which
+		// collapses such a pair to one rdata at the lower TTL whatever order
+		// it reads them in, and with RFC 2181 §5.2 on a malformed RRset.
+		return bytes.Compare(entries[i].wire, entries[j].wire) < 0
 	})
 
+	// Duplicates count once (§3.3.1). A duplicate is owner, class, type and
+	// RDATA -- NOT the TTL: two records differing only in TTL are one record
+	// in a malformed RRset (RFC 2181 §5.2), and miekg's own IsDuplicate
+	// ignores the TTL for the same reason. Comparing whole wire records here
+	// would hash both and disagree with every implementation that stores an
+	// RRset's TTL once, dnspython included.
+	//
+	// The sort put them adjacent with the lowest TTL first, so this is a scan
+	// and the survivor is the low-TTL copy.
 	block := make([]byte, 0, total)
-	var prev []byte
+	var prevRdata []byte
+	var prevTyp uint16
+	first := true
 	for _, e := range entries {
-		if prev != nil && bytes.Equal(prev, e.wire) {
+		if !first && e.typ == prevTyp && bytes.Equal(prevRdata, e.rdata) {
 			continue
 		}
 		block = append(block, e.wire...)
-		prev = e.wire
+		prevRdata, prevTyp, first = e.rdata, e.typ, false
 	}
 	return block, nil
 }

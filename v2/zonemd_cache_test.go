@@ -292,3 +292,56 @@ func benchmarkZonemdDigest(b *testing.B, budget int) {
 		zd.mu.Unlock()
 	}
 }
+
+// Lowering wire-cache-max-bytes must free memory. Keeping already-admitted
+// blocks would mean a shrink frees nothing until the owners happen to change,
+// so a server under memory pressure would be told the budget applied while the
+// old one was still resident.
+func TestWireCacheEvictsWhenTheBudgetShrinks(t *testing.T) {
+	zd := cacheTestZone(t, 200, 0)
+	full := cacheStats(zd)
+	if full.CachedOwners != full.Owners {
+		t.Fatalf("test setup: only %d of %d owners cached", full.CachedOwners, full.Owners)
+	}
+
+	// Shrink to a quarter, then publish again without changing anything.
+	shrunk := full.CachedBytes / 4
+	zd.mu.Lock()
+	zd.zonemdWireCacheMaxBytes = shrunk
+	zd.mu.Unlock()
+	if _, err := zd.publishSync(); err != nil {
+		t.Fatal(err)
+	}
+
+	after := cacheStats(zd)
+	if after.CachedBytes > shrunk {
+		t.Errorf("the cache still holds %d bytes against a %d budget; a shrink"+
+			" freed nothing", after.CachedBytes, shrunk)
+	}
+	if after.CachedOwners >= full.CachedOwners {
+		t.Errorf("no owners were evicted: %d cached, was %d",
+			after.CachedOwners, full.CachedOwners)
+	}
+	if after.CachedOwners == 0 {
+		t.Error("everything was evicted; the shrink should keep what fits")
+	}
+	zd.mu.Lock()
+	held := len(zd.zonemdCache)
+	zd.mu.Unlock()
+	if held != after.CachedOwners {
+		t.Errorf("the cache map holds %d entries but reports %d cached owners;"+
+			" evicted blocks are still resident", held, after.CachedOwners)
+	}
+	assertZonemdMatchesSnapshot(t, zd, "after shrinking the budget")
+
+	// Stable, not thrashing: the walk is in canonical order, so the same
+	// prefix fits on every pass.
+	if _, err := zd.publishSync(); err != nil {
+		t.Fatal(err)
+	}
+	again := cacheStats(zd)
+	if again.CachedOwners != after.CachedOwners {
+		t.Errorf("the cached set moved between two identical passes: %d then %d",
+			after.CachedOwners, again.CachedOwners)
+	}
+}

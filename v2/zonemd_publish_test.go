@@ -647,3 +647,83 @@ func TestZonemdSettingsDiffer(t *testing.T) {
 		})
 	}
 }
+
+// A publish that drops the ZONEMD leaves the apex NSEC claiming a type the
+// zone no longer carries, and repairs it. If that repair CANNOT be made, the
+// publish must be refused rather than completed: an NSEC asserting a ZONEMD
+// the apex does not own is a signed proof that contradicts the zone, which is
+// the defect refuseUnrepairableChainLocked exists to keep off the wire. A
+// missing digest is fine; a broken chain is not.
+//
+// Drives abandonZonemdLocked directly. The publish path's half of this is one
+// line -- `if !zd.updateZonemdLocked(...) { return }` -- and what needs pinning
+// is the decision, which is here: the serial is rolled back, the previous
+// snapshot is still served, and the caller is told to stop.
+func TestAbandoningTheZonemdRefusesThePublishWhenTheChainCannotBeRepaired(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := zonemdSigningTestZone(t, kdb)
+	assertZonemdMatchesSnapshot(t, zd, "before")
+
+	beforeSerial := zd.publishedSnapshot().Serial
+	beforeSnap := zd.publishedSnapshot()
+
+	// Break key resolution, which is what restitchNsecLocked needs to sign the
+	// NSECs it rewrites. Closing the keystore is the bluntest honest way to
+	// make it fail; nothing else in the publish is touched.
+	if err := kdb.DB.Close(); err != nil {
+		t.Fatalf("closing the keystore: %v", err)
+	}
+
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	// Something must have changed, or restitchNsecLocked returns at its
+	// "nothing changed" guard and never reaches the signing that now fails.
+	zd.stageRRsetLocked("newname.md.example.", core.RRset{
+		Name: "newname.md.example.", Class: dns.ClassINET, RRtype: dns.TypeA,
+		RRs: []dns.RR{mustRR(t, "newname.md.example. 3600 IN A 10.5.5.5")},
+	})
+	cont := zd.abandonZonemdLocked(beforeSerial, fmt.Errorf("forced failure"))
+	gotSerial := zd.CurrentSerial
+	zd.mu.Unlock()
+
+	if cont {
+		t.Fatal("the publish was allowed to continue with an apex NSEC that claims" +
+			" a ZONEMD the zone no longer carries")
+	}
+	if gotSerial != beforeSerial {
+		t.Errorf("the serial was not rolled back: %d, want %d", gotSerial, beforeSerial)
+	}
+	if zd.publishedSnapshot() != beforeSnap {
+		t.Error("a new snapshot was installed by a publish that should have been refused")
+	}
+	if !zd.HasError(DnssecPolicyWarning) {
+		t.Error("the refusal is not visible to the operator as a zone error")
+	}
+}
+
+// The ordinary failure is unchanged: a zone that cannot produce a digest is
+// published WITHOUT one, and the publish continues.
+func TestAbandoningTheZonemdContinuesWhenTheChainRepairsCleanly(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := zonemdSigningTestZone(t, kdb)
+	beforeSerial := zd.publishedSnapshot().Serial
+
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	cont := zd.abandonZonemdLocked(beforeSerial, fmt.Errorf("forced failure"))
+	staged := zd.stagedOwner(zd.ZoneName)
+	zd.mu.Unlock()
+
+	if !cont {
+		t.Fatal("a repairable chain refused the publish; a missing digest is not" +
+			" a reason to take the zone off the air")
+	}
+	if len(staged.RRtypes.GetOnlyRRSet(dns.TypeZONEMD).RRs) != 0 {
+		t.Error("the ZONEMD was not dropped")
+	}
+	for _, tt := range staged.NSEC.RRs[0].(*dns.NSEC).TypeBitMap {
+		if tt == dns.TypeZONEMD {
+			t.Error("the apex NSEC still claims a ZONEMD the zone no longer carries")
+		}
+	}
+}

@@ -198,3 +198,69 @@ func TestZoneDigestSortsRRSIGsByRdataNotByTTL(t *testing.T) {
 		}
 	}
 }
+
+// RFC 8976 §3.3.1 counts duplicate RRs once, and a duplicate is owner, class,
+// type and RDATA -- NOT the TTL. Two records differing only in TTL are one
+// record in a malformed RRset (RFC 2181 §5.2), which is how miekg's own
+// IsDuplicate treats them ("ignore TTL") and how dnspython reads them: it
+// keeps one rdata at the LOWER TTL, whichever order it read them in.
+//
+// Comparing whole wire records here would hash both and produce a digest no
+// other implementation reproduces -- the same class of divergence as the sort
+// tiebreak above, found the same way.
+//
+// The expected values are dnspython 2.8.0's, so the survivor's TTL is pinned
+// too: a version of this that counted once but kept the 7200 copy would
+// produce a different digest and fail here.
+const duplicateTTLZone = `dup.example.	3600	IN	SOA	ns.dup.example. hostmaster.dup.example. 5 7200 1800 604800 7200
+dup.example.	3600	IN	NS	ns.dup.example.
+ns.dup.example.	3600	IN	A	192.0.2.1
+two.dup.example.	3600	IN	A	10.0.0.1
+two.dup.example.	7200	IN	A	10.0.0.1
+`
+
+func TestZoneDigestCountsATTLOnlyDuplicateOnce(t *testing.T) {
+	rrs := parseZoneRRs(t, "dup.example.", duplicateTTLZone)
+	if len(rrs) != 5 {
+		t.Fatalf("the fixture parsed to %d records, want 5 (both TTL copies)", len(rrs))
+	}
+
+	for _, tc := range []struct {
+		alg  uint8
+		want string
+	}{
+		{ZonemdAlgSHA384, "6f129a52fe5f0b26a69dcf94dae196cf39c7a08d6ec42c728ba7920d844b6d63" +
+			"c5d650ca19f98182d9622ac53bf1bad1"},
+		{ZonemdAlgSHA512, "9bd20eb5514bc19afefc896bccc0225151e657629ca2d5c731f391d955b3f0cf" +
+			"d36a16fc2fd82c04afdb8ab229fc13bf6dc664b6c0d983f3321ef4d8cd9a328c"},
+	} {
+		got, err := ZoneDigestHex("dup.example.", rrs, ZonemdSchemeSimple, tc.alg)
+		if err != nil {
+			t.Fatalf("%s: %v", zonemdAlgName(tc.alg), err)
+		}
+		if got != tc.want {
+			t.Errorf("%s digest disagrees with dnspython\n  got:  %s\n  want: %s",
+				zonemdAlgName(tc.alg), got, tc.want)
+		}
+	}
+
+	// ...and the answer must not depend on which copy the caller hands over
+	// first, or a zone read from a file would digest differently from the same
+	// zone walked from a snapshot.
+	reversed := append([]dns.RR(nil), rrs...)
+	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
+		reversed[i], reversed[j] = reversed[j], reversed[i]
+	}
+	a, err := ZoneDigestHex("dup.example.", rrs, ZonemdSchemeSimple, ZonemdAlgSHA384)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ZoneDigestHex("dup.example.", reversed, ZonemdSchemeSimple, ZonemdAlgSHA384)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Errorf("the digest depends on input order when a TTL-only duplicate is"+
+			" present\n  forward:  %s\n  reversed: %s", a, b)
+	}
+}

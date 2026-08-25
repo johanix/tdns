@@ -231,18 +231,27 @@ func (zd *ZoneData) ensureZonemdPresenceLocked() {
 // reads. Move it later and the digest stops describing what is published;
 // move it earlier and it stops covering the NSEC records.
 //
+// Returns false when the publish must be ABANDONED. That is not the ordinary
+// failure: a zone that cannot produce a digest is published without one (see
+// abandonZonemdLocked). It happens only when dropping the ZONEMD leaves an
+// apex NSEC that still claims the type and the chain cannot be repaired --
+// at which point the zone is in the state refuseUnrepairableChainLocked
+// exists to keep off the wire.
+//
+// prevSerial is the serial to restore if the publish is abandoned.
+//
 // Runs with zd.mu held.
-func (zd *ZoneData) updateZonemdLocked(serial uint32) {
+func (zd *ZoneData) updateZonemdLocked(serial, prevSerial uint32) bool {
 	if zd.workingSet == nil {
-		return
+		return true
 	}
 	if !zd.zoneManagesZonemd() || !zd.zonemdSignableLocked() {
 		zd.zonemdDigests = nil
 		zd.zonemdDigestSerial = 0
-		return
+		return true
 	}
 	if zd.workingSet[zd.ZoneName] == nil {
-		return
+		return true
 	}
 
 	scheme, algs := zd.zonemdSchemeLocked(), zd.zonemdAlgsLocked()
@@ -253,8 +262,7 @@ func (zd *ZoneData) updateZonemdLocked(serial uint32) {
 	// reused rather than rebuilt. See zonemd_cache.go.
 	digests, derr := zd.zonemdDigestsLocked(scheme, algs)
 	if derr != nil {
-		zd.abandonZonemdLocked(fmt.Errorf("computing the digest: %w", derr))
-		return
+		return zd.abandonZonemdLocked(prevSerial, fmt.Errorf("computing the digest: %w", derr))
 	}
 
 	ttl := zd.zonemdTTLLocked()
@@ -266,8 +274,8 @@ func (zd *ZoneData) updateZonemdLocked(serial uint32) {
 	for _, alg := range algs {
 		digest, ok := digests[alg]
 		if !ok {
-			zd.abandonZonemdLocked(fmt.Errorf("no %s digest was produced", zonemdAlgName(alg)))
-			return
+			return zd.abandonZonemdLocked(prevSerial,
+				fmt.Errorf("no %s digest was produced", zonemdAlgName(alg)))
 		}
 		rs.RRs = append(rs.RRs, &dns.ZONEMD{
 			Hdr: dns.RR_Header{
@@ -290,20 +298,19 @@ func (zd *ZoneData) updateZonemdLocked(serial uint32) {
 		// the SOA re-sign and the NSEC restitch alongside this.
 		dak, err := zd.EnsureActiveDnssecKeys(zd.KeyDB, true)
 		if err != nil {
-			zd.abandonZonemdLocked(fmt.Errorf("resolving keys to sign the ZONEMD: %w", err))
-			return
+			return zd.abandonZonemdLocked(prevSerial,
+				fmt.Errorf("resolving keys to sign the ZONEMD: %w", err))
 		}
 		var clamp *ClampParams
 		if zd.DnssecPolicy != nil {
 			clamp, err = ClampParamsForZone(zd.KeyDB, zd.ZoneName, zd.DnssecPolicy, time.Now())
 			if err != nil {
-				zd.abandonZonemdLocked(fmt.Errorf("resolving clamp parameters to sign the ZONEMD: %w", err))
-				return
+				return zd.abandonZonemdLocked(prevSerial,
+					fmt.Errorf("resolving clamp parameters to sign the ZONEMD: %w", err))
 			}
 		}
 		if _, err := zd.SignRRset(&rs, zd.ZoneName, dak, true, clamp); err != nil {
-			zd.abandonZonemdLocked(fmt.Errorf("signing the ZONEMD: %w", err))
-			return
+			return zd.abandonZonemdLocked(prevSerial, fmt.Errorf("signing the ZONEMD: %w", err))
 		}
 	}
 
@@ -312,6 +319,7 @@ func (zd *ZoneData) updateZonemdLocked(serial uint32) {
 	zd.zonemdDigests = digests
 	zd.zonemdDigestSerial = serial
 	zd.noteZonemdStateLocked("")
+	return true
 }
 
 // abandonZonemdLocked drops the ZONEMD from a publish that cannot produce a
@@ -324,11 +332,16 @@ func (zd *ZoneData) updateZonemdLocked(serial uint32) {
 // zone has been tampered with. Absent is a state RFC 8976 defines and a
 // verifier handles; wrong is not.
 //
-// The publish itself is NOT refused. An unrepairable NSEC chain is refused
-// because a secondary answers denial from whatever chain it is handed and
-// cannot fix it; a missing ZONEMD costs the zone nothing but its digest, and
-// taking the zone off the air over it would be the larger failure.
-func (zd *ZoneData) abandonZonemdLocked(err error) {
+// Publishing WITHOUT a digest is the ordinary outcome, and the publish
+// continues: an unrepairable NSEC chain is refused because a secondary answers
+// denial from whatever chain it is handed and cannot fix it, whereas a missing
+// ZONEMD costs the zone nothing but its digest, and taking a zone off the air
+// over that would be the larger failure.
+//
+// Returns false only when the chain cannot be brought back into agreement with
+// the zone, which is the one case where publishing anyway would put the very
+// inconsistency this function exists to avoid onto the wire.
+func (zd *ZoneData) abandonZonemdLocked(prevSerial uint32, err error) bool {
 	zd.removeZonemdLocked()
 	zd.noteZonemdStateLocked(err.Error())
 
@@ -337,11 +350,23 @@ func (zd *ZoneData) abandonZonemdLocked(err error) {
 	// alone it would assert a type the apex no longer owns, and the NXRRSET
 	// proof for ZONEMD would fail. A second restitch is O(zone) and this is a
 	// path that should never run twice in a row.
-	if rerr := zd.restitchNsecLocked(); rerr != nil {
-		lgSigner.Error("the NSEC chain could not be repaired after dropping the ZONEMD;"+
-			" the apex NSEC may claim a type the zone does not carry",
-			"zone", zd.ZoneName, "error", rerr)
+	rerr := zd.restitchNsecLocked()
+	if rerr == nil {
+		return true
 	}
+
+	// Dropping the ZONEMD has left the apex NSEC claiming a type the zone does
+	// not carry, and the chain cannot be repaired. Publishing now would serve a
+	// signed proof that contradicts the zone -- which is exactly what
+	// refuseUnrepairableChainLocked refuses on the primary restitch path, and
+	// there is no reason for this path to be laxer about the same defect.
+	//
+	// The previous snapshot goes on being served, self-consistent, and the
+	// change stays staged for the next publish to retry.
+	zd.refuseUnrepairableChainLocked(prevSerial,
+		fmt.Errorf("the ZONEMD could not be computed (%v) and the apex NSEC could"+
+			" not be repaired after dropping it: %w", err, rerr))
+	return false
 }
 
 // removeZonemdLocked drops the apex ZONEMD RRset and forgets everything

@@ -430,7 +430,14 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// the LAST step that may change zone content: everything below only reads
 	// the working set. Writing the ZONEMD RDATA and its RRSIG here cannot
 	// invalidate what was just computed, because ZoneDigest excludes both.
-	zd.updateZonemdLocked(serial)
+	//
+	// A zone that cannot produce a digest is published WITHOUT one. The one
+	// case that refuses the publish is a chain left claiming a ZONEMD the zone
+	// no longer carries -- the same defect the restitch above refuses, reached
+	// from the other side.
+	if !zd.updateZonemdLocked(serial, prevSerial) {
+		return
+	}
 
 	data := zd.workingSet
 	oldSnap := zd.snapshot.Load()
