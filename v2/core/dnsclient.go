@@ -78,8 +78,16 @@ func IsEncryptedTransport(t Transport) bool {
 // IterativeDNSQuery bounds the wider walk — is enough in practice
 // and avoids threading ctx through ~50 call sites for negligible
 // benefit. If a use case ever appears where mid-Exchange
-// cancellation matters (very long DoH bodies?), an ExchangeContext
+// cancellation matters (very long DoH bodies?), a context-aware
 // variant can be added without breaking this interface.
+//
+// Note for whoever does: dns.Client.ExchangeContext is NOT sufficient
+// on its own. It passes the context to the dial and then uses only
+// ctx.Deadline() to tighten socket deadlines -- it never watches
+// ctx.Done() -- so a cancellable context with no deadline leaves a
+// read running to the client's timeout. Interrupting one means closing
+// the connection on cancellation; see exchangeCancellable in
+// childsync_utils.go for the shape.
 type DNSClienter interface {
 	Exchange(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error)
 	ExchangeWithResult(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error)
