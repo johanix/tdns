@@ -147,12 +147,6 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 	return resp, nil
 }
 
-// compareParentDS fills in the DS dimension of a delegation analysis: it asks
-// the parent what DS it holds, derives what the child's published SEP DNSKEYs
-// imply, and records the difference.
-//
-// Split out of AnalyseZoneDelegation so the rollover suppression above reads as
-// one decision rather than an early return threaded through the function.
 // unmanagedZoneNeedsDSRepair reports whether a zone whose keys tdns does not
 // manage is nonetheless in a state that needs the parent's attention: the
 // parent holds a DS and the child publishes no DNSKEY RRset at all.
@@ -177,6 +171,19 @@ func unmanagedZoneNeedsDSRepair(apex *OwnerData, parentDS []dns.RR) bool {
 	return len(apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs) == 0
 }
 
+// compareParentDS fills in the DS dimension of a delegation analysis: it asks
+// the parent what DS it holds, works out what this zone's keys say it should
+// hold, and records the difference.
+//
+// What the child "should" hold comes from the keystore, not from the published
+// DNSKEY RRset -- a rollover places a DS at the parent before the matching
+// DNSKEY appears, so anything derived from published keys omits exactly the
+// record just placed. For a zone whose keys tdns does not manage there is no
+// such view at all, and the one state that needs none is handled by
+// unmanagedZoneNeedsDSRepair.
+//
+// Split out of AnalyseZoneDelegation so the rollover suppression there reads as
+// one decision rather than an early return threaded through the function.
 func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, apex *OwnerData) error {
 	// Query parent for DS records
 	p_dsrrs, err := AuthQuery(zd.ZoneName, pserver, dns.TypeDS)
