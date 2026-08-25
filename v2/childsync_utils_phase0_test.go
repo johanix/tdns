@@ -2,7 +2,9 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -114,27 +116,57 @@ func TestSendUpdateHonoursCancellation(t *testing.T) {
 		if err == nil {
 			t.Fatal("a cancelled SendUpdate returned no error")
 		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("the error does not carry the cancel cause: %v", err)
+		}
 		if took := time.Since(start); took > time.Second {
 			t.Errorf("took %v to notice an already-cancelled context", took)
 		}
 	})
 
-	t.Run("cancelled mid-flight: returns promptly", func(t *testing.T) {
+	// The bound and the error both matter, and the first version of this test
+	// had neither right.
+	//
+	// dns.Client{Net: "tcp"} leaves Timeout at 0, and the fork then applies its
+	// own 2s dnsTimeout to the read. A plain Exchange therefore returns in
+	// about two seconds all by itself, so a 5s bound could not tell
+	// cancellation from the client giving up -- reverting ExchangeContext left
+	// the test passing. The bound is now well under that 2s, and the error is
+	// required to carry context.Canceled rather than being discarded.
+	t.Run("cancelled mid-flight: returns with the cancel cause", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan struct{})
+		type result struct {
+			err error
+			at  time.Time
+		}
+		done := make(chan result, 1)
 		go func() {
-			defer close(done)
-			_, _, _ = SendUpdate(ctx, m, "child.example.", []string{ln.Addr().String()})
+			_, _, err := SendUpdate(ctx, m, "child.example.", []string{ln.Addr().String()})
+			done <- result{err: err, at: time.Now()}
 		}()
 
 		time.Sleep(150 * time.Millisecond) // let the exchange get under way
+		cancelledAt := time.Now()
 		cancel()
 
 		select {
-		case <-done:
+		case r := <-done:
+			if took := r.at.Sub(cancelledAt); took > 500*time.Millisecond {
+				t.Errorf("SendUpdate took %v after cancellation; the 2s client"+
+					" timeout, not the cancel, is what ended it", took)
+			}
+			if r.err == nil {
+				t.Fatal("a cancelled SendUpdate returned no error")
+			}
+			if !errors.Is(r.err, context.Canceled) {
+				t.Fatalf("the error does not carry the cancel cause, so a caller"+
+					" cannot tell a shutdown from a transport failure: %v", r.err)
+			}
+			if !strings.Contains(r.err.Error(), "abandoned") {
+				t.Errorf("error should say the UPDATE was abandoned: %v", r.err)
+			}
 		case <-time.After(5 * time.Second):
-			t.Fatal("SendUpdate did not return within 5s of cancellation;" +
-				" a shutdown would wait out the client timeout instead")
+			t.Fatal("SendUpdate did not return within 5s of cancellation")
 		}
 	})
 }
