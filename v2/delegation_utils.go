@@ -153,6 +153,30 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 //
 // Split out of AnalyseZoneDelegation so the rollover suppression above reads as
 // one decision rather than an early return threaded through the function.
+// unmanagedZoneNeedsDSRepair reports whether a zone whose keys tdns does not
+// manage is nonetheless in a state that needs the parent's attention: the
+// parent holds a DS and the child publishes no DNSKEY RRset at all.
+//
+// Split out so the decision can be tested. compareParentDS reaches it only
+// after a live AuthQuery to the parent, and a test that re-derived the
+// condition instead of calling this would pass with the check removed -- which
+// is what the first attempt did.
+//
+// The test is the ABSENCE of the RRset, not an empty derived DS set: SEP is
+// advisory, so a zone signed with a flags-256 CSK derives nothing while being
+// perfectly signed.
+func unmanagedZoneNeedsDSRepair(apex *OwnerData, parentDS []dns.RR) bool {
+	if len(parentDS) == 0 {
+		return false
+	}
+	if apex == nil || apex.RRtypes == nil {
+		// Unknown, not unsigned. A zone whose apex cannot be read is not
+		// evidence that the child publishes no keys.
+		return false
+	}
+	return len(apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs) == 0
+}
+
 func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, apex *OwnerData) error {
 	// Query parent for DS records
 	p_dsrrs, err := AuthQuery(zd.ZoneName, pserver, dns.TypeDS)
@@ -175,6 +199,36 @@ func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, 
 			return nil
 		}
 		if !intent.Known {
+			// tdns does not manage this zone's keys, so it has no view of what
+			// the parent's DS SHOULD be -- with one state that needs no view.
+			//
+			// A child publishing no DNSKEY RRset at all while the parent holds
+			// a DS is unambiguously broken: every validating resolver declares
+			// the whole child bogus, no procedure produces the state on
+			// purpose, and the child cannot signal its way out because
+			// CDS-delete needs a validation it has no key for. That is the
+			// exception the scope doc grants, and the API payload already acts
+			// on it -- but only if something reports the delegation as out of
+			// sync first.
+			//
+			// Returning unconditionally here is what stopped that. The DS
+			// dimension never reached InSync for a proxied zone, matching NS
+			// and glue were enough to call it synchronised, and
+			// ProxyStartupReconcile bailed before the repair could run. An
+			// agent restarting while the child was already unsigned left the
+			// zone bogus indefinitely -- steady-state un-signing worked,
+			// because the DNSKEY removal is itself a transfer change.
+			//
+			// Deliberately no DSAdds/DSRemoves and no NewDS: this says the
+			// delegation needs attention, not what the DS set should become.
+			// Deciding that from published keys is what B1 replaces.
+			if unmanagedZoneNeedsDSRepair(apex, p_dsrrs) {
+				lgDns.Info("AnalyseZoneDelegation: parent holds a DS for a child that publishes"+
+					" no DNSKEY RRset; reporting the delegation as out of sync so the repair can run",
+					"zone", zd.ZoneName, "parent_ds", len(p_dsrrs))
+				resp.InSync = false
+				return nil
+			}
 			lgDns.Debug("AnalyseZoneDelegation: no keystore KSKs for this zone; leaving the parent DS alone",
 				"zone", zd.ZoneName)
 			return nil
