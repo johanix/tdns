@@ -30,46 +30,6 @@ type schemeChoice struct {
 	Target *DsyncTarget
 }
 
-// pickRolloverSchemes consults the parent's DSYNC RRset and the policy's
-// dsync-scheme-preference and returns the list of scheme/target pairs
-// the rollover engine should attempt for this push. The returned slice
-// is non-empty on success and may contain one or two entries: one for
-// any single-scheme outcome, two when "auto" is chosen against a
-// parent advertising both UPDATE and NOTIFY (parallel dispatch).
-//
-// On "no usable scheme" — parent advertises nothing the policy will
-// accept — pickRolloverSchemes returns a non-nil error. The dispatcher
-// translates that error into a child-config:waiting-for-parent softfail
-// that never hardfails (Phase 6); recovery happens automatically when
-// the parent starts advertising a scheme matching the policy.
-//
-// Filter rule for NOTIFY: matches DSYNC RRs with RRtype == TypeCDS or
-// RRtype == TypeANY. The rollover engine pushes DS by publishing CDS;
-// CSYNC-only NOTIFY advertisements do not satisfy the rollover's
-// requirements. (BestSyncScheme uses a different filter — CSYNC or
-// ANY — because it serves the general delegation-sync path, which is
-// CSYNC-driven. Don't unify.)
-//
-// Filter rule for UPDATE: any UPDATE-scheme DSYNC RR (UPDATE
-// advertisements are RRtype-agnostic by spec).
-//
-// Filter rule for API: same as UPDATE, RRtype-agnostic. The endpoint
-// manages DS directly (dsyncApiManagedTypes), so what the DSYNC RR
-// nominally covers does not constrain what can be pushed over it. API
-// is only ever chosen as a last resort — see decideRolloverSchemes.
-//
-// The boolean returns (updateAdvertised, notifyAdvertised) reflect
-// what the parent's DSYNC RRset itself contains, independent of the
-// policy's scheme preference. Dispatcher persists these so status
-// output can distinguish "parent doesn't advertise this scheme" from
-// "engine hasn't pushed via this scheme yet".
-//
-// API advertisement is deliberately NOT returned or persisted here:
-// that would mean a third tri-state column in RolloverZoneState and a
-// schema change, for an observability nicety. The gap is that status
-// output cannot yet say "the parent advertises API" — worth adding
-// with the next schema change, not on its own.
-
 // selectRolloverDsyncRRs picks the first usable DSYNC RR per scheme from a
 // discovery result.
 //
@@ -123,6 +83,45 @@ func selectRolloverDsyncRRs(dsync DsyncResult, zoneName string) (updateRR, notif
 	return updateRR, notifyRR, apiRR
 }
 
+// pickRolloverSchemes consults the parent's DSYNC RRset and the policy's
+// dsync-scheme-preference and returns the list of scheme/target pairs
+// the rollover engine should attempt for this push. The returned slice
+// is non-empty on success and may contain one or two entries: one for
+// any single-scheme outcome, two when "auto" is chosen against a
+// parent advertising both UPDATE and NOTIFY (parallel dispatch).
+//
+// On "no usable scheme" — parent advertises nothing the policy will
+// accept — pickRolloverSchemes returns a non-nil error. The dispatcher
+// translates that error into a child-config:waiting-for-parent softfail
+// that never hardfails (Phase 6); recovery happens automatically when
+// the parent starts advertising a scheme matching the policy.
+//
+// Filter rule for NOTIFY: matches DSYNC RRs with RRtype == TypeCDS or
+// RRtype == TypeANY. The rollover engine pushes DS by publishing CDS;
+// CSYNC-only NOTIFY advertisements do not satisfy the rollover's
+// requirements. (BestSyncScheme uses a different filter — CSYNC or
+// ANY — because it serves the general delegation-sync path, which is
+// CSYNC-driven. Don't unify.)
+//
+// Filter rule for UPDATE: any UPDATE-scheme DSYNC RR (UPDATE
+// advertisements are RRtype-agnostic by spec).
+//
+// Filter rule for API: same as UPDATE, RRtype-agnostic. The endpoint
+// manages DS directly (dsyncApiManagedTypes), so what the DSYNC RR
+// nominally covers does not constrain what can be pushed over it. API
+// is only ever chosen as a last resort — see decideRolloverSchemes.
+//
+// The boolean returns (updateAdvertised, notifyAdvertised) reflect
+// what the parent's DSYNC RRset itself contains, independent of the
+// policy's scheme preference. Dispatcher persists these so status
+// output can distinguish "parent doesn't advertise this scheme" from
+// "engine hasn't pushed via this scheme yet".
+//
+// API advertisement is deliberately NOT returned or persisted here:
+// that would mean a third tri-state column in RolloverZoneState and a
+// schema change, for an observability nicety. The gap is that status
+// output cannot yet say "the parent advertises API" — worth adding
+// with the next schema change, not on its own.
 func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *DnssecPolicy) ([]schemeChoice, bool, bool, error) {
 	if zd == nil || imr == nil || pol == nil {
 		return nil, false, false, fmt.Errorf("pickRolloverSchemes: nil argument")
