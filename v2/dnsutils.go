@@ -677,19 +677,29 @@ func (zd *ZoneData) refuseTransfer(w dns.ResponseWriter, r *dns.Msg) (int, error
 	return 0, nil
 }
 
-func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, error) {
+func (zd *ZoneData) ReadZoneFile(ctx context.Context, filename string, force bool) (bool, uint32, error) {
 	zd.Logger.Printf("ReadZoneData: zone: %s", zd.ZoneName)
 
 	f, err := os.Open(filename)
 	if err != nil {
 		return false, 0, fmt.Errorf("ReadZoneFile: Error: failed to read %s: %v", filename, err)
 	}
-	return zd.ParseZoneFromReader(bufio.NewReader(f), force, filename)
+	return zd.ParseZoneFromReader(ctx, bufio.NewReader(f), force, filename)
 }
 
+// ReadZoneData parses a zone from a string already in memory.
+//
+// Deliberately not context-aware, and deliberately not a TODO. The cancellation
+// check inside ParseZoneFromReader exists for the file path, where parsing is
+// the long uninterruptible stretch of a refresh that a shutdown may need to
+// abandon. Here the caller already holds the entire zone: there is no I/O to
+// abort, and threading a context to reach this call would mean adding one to
+// CreateAutoZone and to a dozen test helpers for no cancellation anyone can
+// observe. If a caller ever parses a string large enough for that to be wrong,
+// give this function a ctx then.
 func (zd *ZoneData) ReadZoneData(zoneData string, force bool) (bool, uint32, error) {
 	zd.Logger.Printf("ReadZoneData: zone: %s", zd.ZoneName)
-	return zd.ParseZoneFromReader(strings.NewReader(zoneData), force, "")
+	return zd.ParseZoneFromReader(context.Background(), strings.NewReader(zoneData), force, "")
 }
 
 // The receiver must be a ZoneData the caller owns exclusively. This writes the
@@ -703,7 +713,7 @@ func (zd *ZoneData) ReadZoneData(zoneData string, force bool) (bool, uint32, err
 // invariant belongs to the caller instead. FetchFromFile shows the pattern for
 // a registered zone: parse into a scratch new_zd, then copy the fields across
 // under the lock.
-func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string) (bool, uint32, error) {
+func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force bool, filename string) (bool, uint32, error) {
 	zd.Logger.Printf("ParseZoneFromReader: zone: %s", zd.ZoneName)
 
 	switch zd.ZoneStore {
@@ -720,7 +730,23 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 	checkedForUnchanged := false
 	serialChanged := false // Track whether serial actually changed
 
+	// Parsing a large zone file is the longest uninterruptible stretch on the
+	// load path, so it is where a cancelled refresh would otherwise sit until
+	// the file ran out. Checked every parseCancelCheckInterval records rather
+	// than every record: ctx.Err() is cheap but not free, and a zone big enough
+	// for the wait to matter is big enough that a few thousand records of
+	// latency is not what anyone is waiting on.
+	const parseCancelCheckInterval = 2048
+	parsed := 0
+
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+		parsed++
+		if parsed%parseCancelCheckInterval == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return false, 0, fmt.Errorf("zone %s: parsing %s abandoned after %d records: %w",
+					zd.ZoneName, filename, parsed, cerr)
+			}
+		}
 		if Globals.Debug {
 			//  zd.Logger.Printf("ReadZoneData: parsed RR: %s", rr.String())
 		}
