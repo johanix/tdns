@@ -71,7 +71,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	refreshCounters *core.ConcurrentMap[string, *RefreshCounter],
 	tryPostpass func(string)) (bool, error) {
 
-	updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
+	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, zr.Force, conf)
 	if err != nil {
 		return false, err
 	}
@@ -769,13 +769,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							})
 						}
 						// XXX: Should do refresh in parallel
-						go func(zd *ZoneData, zone string, force bool, conf *Config, zr ZoneRefresher) {
+						go func(ctx context.Context, zd *ZoneData, zone string, force bool, conf *Config, zr ZoneRefresher) {
 							// Snapshot the generation at dispatch. The pre-persist
 							// guard below drops the persist if the zone was deleted
 							// or replaced mid-refresh (generation bumped), closing
 							// the resurrection race (B5b).
 							gen := zd.generation.Load()
-							updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, force, conf)
+							updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, force, conf)
 							if err != nil {
 								lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 								zd.SetError(RefreshError, "refresh error: %v", err)
@@ -890,7 +890,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 									Msg: fmt.Sprintf("zone %s: reloaded (updated=%v)", zone, updated),
 								}
 							}
-						}(zd, zone, zr.Force, conf, zr)
+						}(ctx, zd, zone, zr.Force, conf, zr)
 					}
 				} else {
 					// DYNAMIC ZONE: not from config (catalog member, API-created).
@@ -1105,7 +1105,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						continue
 					}
 
-					updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, false, conf)
+					updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, false, conf)
 					rc.CurRefresh = rc.SOARefresh
 					if err != nil {
 						lgEngine.Error("zone refresh failed", "zone", zone, "error", err)

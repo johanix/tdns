@@ -168,7 +168,6 @@ func TestCoherenceRefusesWhenTheDNSKEYLookupFails(t *testing.T) {
 	}
 }
 
-
 // Deleting the whole name (ClassANY/TypeANY) takes the DS with it.
 func TestCoherenceTreatsDeleteAllAsClearingTheDS(t *testing.T) {
 	_, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")

@@ -26,7 +26,11 @@ var lg = Logger("zones")
 // handle initial-load gracefully can check with errors.Is.
 var ErrZoneNotReady = errors.New("zone data is not yet ready")
 
-func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, error) {
+// Refresh reloads the zone: from its file for a primary, from an upstream for a
+// secondary. ctx bounds the whole operation -- primary resolution, the SOA
+// probe, and the transfer itself -- so a shutdown or a cancelled request stops
+// in-flight work instead of running to completion against a dead engine.
+func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, conf *Config) (bool, error) {
 	var updated bool
 
 	// Collect dynamic RRs before refresh (they will be lost during refresh)
@@ -45,7 +49,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 	case Primary:
 		// zd.Logger.Printf("zd.Refresh(): Should reload zone %s from file %s", zd.ZoneName, zd.ZoneFile)
 
-		updated, err := zd.FetchFromFile(verbose, debug, force, dynamicRRs)
+		updated, err := zd.FetchFromFile(ctx, verbose, debug, force, dynamicRRs)
 		if err != nil {
 			return false, err
 		}
@@ -60,13 +64,13 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 		// surfaces a refresh error and we retry next cycle — never a permanent
 		// quarantine.
 		if len(zd.PrimariesConf) > 0 {
-			if res := resolvePrimaries(context.Background(), conf.Internal.ImrEngine, zd.PrimariesConf); len(res.Resolved) > 0 {
+			if res := resolvePrimaries(ctx, conf.Internal.ImrEngine, zd.PrimariesConf); len(res.Resolved) > 0 {
 				zd.Upstreams = res.Resolved
 			} else {
 				lg.Warn("zone refresh: no primary resolved this cycle, will retry next refresh", "zone", zd.ZoneName, "unresolved", res.Unresolved)
 			}
 		}
-		do_transfer, upstream_serial, err := zd.DoTransfer(conf)
+		do_transfer, upstream_serial, err := zd.DoTransfer(ctx, conf)
 		if err != nil {
 			return false, err
 		}
@@ -77,7 +81,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 			} else if force {
 				lg.Debug("forced retransfer regardless of SOA serial", "zone", zd.ZoneName)
 			}
-			updated, err = zd.FetchFromUpstream(verbose, debug, force, dynamicRRs, conf)
+			updated, err = zd.FetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf)
 			if err != nil {
 				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
@@ -112,7 +116,7 @@ func firstUpstreamAddr(upstreams []PeerConf) string {
 // A usable NOERROR+SOA from any primary is honoured (transfer decided on
 // serial). If every primary answered but none gave a usable SOA, we back off
 // quietly (no transfer, no error); only all-unreachable is a hard error.
-func (zd *ZoneData) DoTransfer(conf *Config) (bool, uint32, error) {
+func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32, error) {
 	if zd == nil {
 		panic("DoTransfer: zd == nil")
 	}
@@ -121,38 +125,97 @@ func (zd *ZoneData) DoTransfer(conf *Config) (bool, uint32, error) {
 		return false, 0, fmt.Errorf("DoTransfer: zone %s has no upstreams configured", zd.ZoneName)
 	}
 
-	sawResponse := false
-	var lastErr error
-	for _, up := range zd.Upstreams {
-		upstream := up.Addr
-		if _, _, err := net.SplitHostPort(upstream); err != nil {
+	// zd.Upstreams is mutated in place under zd.mu by the refresh engine, so
+	// range over a copy rather than the live slice.
+	zd.mu.Lock()
+	upstreams := make([]PeerConf, len(zd.Upstreams))
+	copy(upstreams, zd.Upstreams)
+	zd.mu.Unlock()
+
+	// Phase 1 -- resolve everything that reads config, under a single read
+	// lock, with NO network I/O. conf is the mutable global and a reload
+	// replaces its contents wholesale; resolving per-upstream inside the probe
+	// loop below would let a reload landing midway hand later primaries
+	// TLS/TSIG material from a different config generation than earlier ones.
+	// Snapshot once, then probe. (Same shape as ProbeUpstreamSerials; this is
+	// the live path that motivated it.)
+	//
+	// The lock is NOT held across the exchanges: a probe blocks until the peer
+	// answers or times out, and holding confMu for that would stall every
+	// config reload behind an unreachable primary.
+	type probePlan struct {
+		up       PeerConf
+		upstream string
+		client   *dns.Client
+		keyName  string
+		tsigAlgo string
+		err      error // config-resolution failure; this upstream is skipped
+	}
+	plans := make([]probePlan, 0, len(upstreams))
+
+	confMu.RLock()
+	for _, up := range upstreams {
+		p := probePlan{up: up, upstream: up.Addr}
+		if _, _, err := net.SplitHostPort(p.upstream); err != nil {
 			// If error, assume no port was specified
-			upstream = net.JoinHostPort(upstream, defaultPortForPeer(up))
-			lg.Debug("DoTransfer: no port specified for upstream, using transport default", "zone", zd.ZoneName, "upstream", upstream)
+			p.upstream = net.JoinHostPort(p.upstream, defaultPortForPeer(up))
+			lg.Debug("DoTransfer: no port specified for upstream, using transport default", "zone", zd.ZoneName, "upstream", p.upstream)
 		}
-		// Fresh message per attempt: TSIG signing adds an RR with a per-attempt
-		// timestamp and this upstream's key.
-		m := new(dns.Msg)
-		m.SetQuestion(zd.ZoneName, dns.TypeSOA)
-		c := new(dns.Client)
+		p.client = new(dns.Client)
 		// XoT peer: probe the SOA over the same verified-TLS channel the
 		// transfer itself will use (same pin/dane/pkix gate).
 		if tlsCfg, terr := conf.ClientTLSConfigForPeer(up); terr != nil {
-			lg.Error("DoTransfer: TLS setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", terr)
-			lastErr = terr
+			p.err = terr
+			plans = append(plans, p)
 			continue
 		} else if tlsCfg != nil {
-			c.Net = "tcp-tls"
-			c.TLSConfig = tlsCfg
+			p.client.Net = "tcp-tls"
+			p.client.TLSConfig = tlsCfg
 		}
-		provider, serr := SignForPeer(m, up.Key, conf)
+		provider, algo, serr := TsigMaterialForPeer(up.Key, conf)
 		if serr != nil {
-			lg.Error("DoTransfer: TSIG sign setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", serr)
-			lastErr = serr
+			p.err = serr
+			plans = append(plans, p)
 			continue
 		}
-		c.TsigProvider = provider // nil for NOKEY => plain exchange (no MAC)
-		r, _, err := c.Exchange(m, upstream)
+		p.client.TsigProvider = provider // nil for NOKEY => plain exchange (no MAC)
+		if provider != nil {
+			p.keyName, p.tsigAlgo = up.Key, algo
+		}
+		plans = append(plans, p)
+	}
+	confMu.RUnlock()
+
+	// Phase 2 -- network only. Nothing here reads shared config.
+	sawResponse := false
+	var lastErr error
+	for i := range plans {
+		p := &plans[i]
+		up, upstream := p.up, p.upstream
+
+		if p.err != nil {
+			lg.Error("DoTransfer: peer config setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", p.err)
+			lastErr = p.err
+			continue
+		}
+		// Nobody is waiting for this result any more; stop walking upstreams.
+		if cerr := ctx.Err(); cerr != nil {
+			return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
+		}
+
+		// Fresh message per attempt: TSIG signing adds an RR with a per-attempt
+		// timestamp and this upstream's key. Stamped here, not during the
+		// snapshot above: the probes are sequential and each can block until it
+		// times out, so a timestamp taken in phase 1 could be outside the fudge
+		// window by the time a later message is sent, and the peer would answer
+		// BADTIME.
+		m := new(dns.Msg)
+		m.SetQuestion(zd.ZoneName, dns.TypeSOA)
+		if p.keyName != "" {
+			StampTsigForPeer(m, p.keyName, p.tsigAlgo)
+		}
+		c := p.client
+		r, _, err := c.ExchangeContext(ctx, m, upstream)
 		if err != nil {
 			// Transport failure (or a TSIG response-verify failure) — try the next sibling.
 			lg.Warn("DoTransfer: SOA probe failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", err)
@@ -301,7 +364,7 @@ func (zd *ZoneData) forgetZoneFileStat() {
 }
 
 // Return updated, error
-func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
+func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
 
 	// The cheap question first, and BEFORE the read: has anything touched the
 	// file since we last looked? Taken before rather than after so that a file
@@ -488,7 +551,7 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 // force means the operator explicitly asked for a retransfer, so the zone is
 // re-fetched and re-applied even when upstream's serial has not moved. See the
 // unchanged-serial check below for why that matters.
-func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
+func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {
 		return false, fmt.Errorf("FetchFromUpstream: zone %s has no upstreams configured", zd.ZoneName)
@@ -512,7 +575,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*
 		upstream := up.Addr
 		lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", upstream)
 		new_zd = newTransferScratchZone(zd)
-		if _, err := new_zd.ZoneTransferIn(up, zd.IncomingSerial, "axfr", conf); err != nil {
+		if _, err := new_zd.ZoneTransferIn(ctx, up, zd.IncomingSerial, "axfr", conf); err != nil {
 			lg.Warn("FetchFromUpstream: AXFR from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
 			continue

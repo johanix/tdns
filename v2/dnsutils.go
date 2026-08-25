@@ -58,7 +58,48 @@ func clarifyXfrError(zone, upstream string, err error) error {
 // ZoneTransferIn pulls the zone from the upstream primary described by up:
 // AXFR/IXFR over Do53, or over TLS (XoT, RFC 9103) when up.Transport is dot.
 // TSIG (up.Key) and TLS are independent layers and may be combined.
-func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, conf *Config) (uint32, error) {
+// drainTransferEnvelopes consumes the AXFR/IXFR envelope stream, feeding each
+// RR to the zone's sort function, and stops early if ctx is cancelled.
+//
+// Extracted from ZoneTransferIn so the cancellation behaviour is reachable from
+// a test: driving it through ZoneTransferIn means dialling a real upstream, and
+// a test that cannot reach the loop cannot prove anything about it.
+//
+// Note what cancelling does NOT do. dns.Transfer.In has no context-aware
+// variant, and adding one to the johanix/dns fork was rejected -- every fork
+// line is a line to re-apply on every upstream sync. So the library's reader
+// goroutine and its socket are left to finish or error out on their own; only
+// OUR consumption stops promptly. For an AXFR of a large zone that is still the
+// bulk of the work (parse, sort, insert), which is the point.
+func (zd *ZoneData) drainTransferEnvelopes(ctx context.Context, answerChan <-chan *dns.Envelope,
+	upstream string, firstSoaSeen bool) (int, error) {
+
+	count := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return count, fmt.Errorf("ZoneTransferIn %s from %s: %w", zd.ZoneName, upstream, ctx.Err())
+
+		case envelope, ok := <-answerChan:
+			if !ok {
+				return count, nil // channel closed: the transfer finished normally
+			}
+			if envelope.Error != nil {
+				zd.Logger.Printf("ZoneTransfer: zone %s error: %v", zd.ZoneName, envelope.Error)
+				return count, clarifyXfrError(zd.ZoneName, upstream, envelope.Error)
+			}
+			for _, rr := range envelope.RR {
+				count++
+				firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
+			}
+		}
+	}
+}
+
+// ctx bounds the transfer. An AXFR of a large zone is the longest-running
+// network operation in the daemon, so a shutdown landing mid-stream should stop
+// it rather than let it run to completion against an engine that is going away.
+func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint32, ttype string, conf *Config) (uint32, error) {
 	upstream := up.Addr
 	if upstream == "" {
 		Fatal("ZoneTransfer: upstream not set")
@@ -135,19 +176,12 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 		return 0, clarifyXfrError(zd.ZoneName, upstream, err)
 	}
 
-	count := 0
-	firstSoaSeen := false
-	for envelope := range answerChan {
-		if envelope.Error != nil {
-			zd.Logger.Printf("ZoneTransfer: zone %s error: %v", zd.ZoneName, envelope.Error)
-			return 0, clarifyXfrError(zd.ZoneName, upstream, envelope.Error)
-		}
-
-		for _, rr := range envelope.RR {
-			count++
-			firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
-		}
+	// count was previously computed and discarded; log it rather than drop it.
+	count, err := zd.drainTransferEnvelopes(ctx, answerChan, upstream, false)
+	if err != nil {
+		return 0, err
 	}
+	lg.Debug("ZoneTransferIn: stream drained", "zone", zd.ZoneName, "upstream", upstream, "rrs", count)
 
 	// A completed transfer always carries the apex SOA -- for AXFR the closing
 	// SOA is what ends the stream, and dns.Transfer.In reports a stream that
