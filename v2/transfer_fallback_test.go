@@ -118,7 +118,7 @@ func TestDoTransfer_SignsWithKey(t *testing.T) {
 		t.Fatalf("LoadTsigKeys: %v", err)
 	}
 	zd := &ZoneData{ZoneName: zone, Upstreams: []PeerConf{{Addr: good, Key: "tkey"}}}
-	if _, serial, err := zd.DoTransfer(conf); err != nil || serial != 42 {
+	if _, serial, err := zd.DoTransfer(context.Background(), conf); err != nil || serial != 42 {
 		t.Fatalf("signed SOA probe: serial=%d err=%v, want 42/nil", serial, err)
 	}
 
@@ -131,7 +131,7 @@ func TestDoTransfer_SignsWithKey(t *testing.T) {
 	// Wrong secret -> the server rejects with NOTAUTH, so the probe gets no usable
 	// SOA: it must back off quietly (no error) without warranting a transfer and
 	// crucially without ever reading the upstream's real serial.
-	xfr, serial, err := zd2.DoTransfer(bad)
+	xfr, serial, err := zd2.DoTransfer(context.Background(), bad)
 	if err != nil {
 		t.Fatalf("wrong secret should back off without accepting data, got err=%v", err)
 	}
@@ -142,7 +142,7 @@ func TestDoTransfer_SignsWithKey(t *testing.T) {
 
 func TestDoTransfer_NoUpstreams(t *testing.T) {
 	zd := &ZoneData{ZoneName: "example.test."}
-	if _, _, err := zd.DoTransfer(&Config{}); err == nil {
+	if _, _, err := zd.DoTransfer(context.Background(), &Config{}); err == nil {
 		t.Fatal("expected an error when no upstreams are configured")
 	}
 }
@@ -157,7 +157,7 @@ func TestDoTransfer_RefusedAdvancesToNextPrimary(t *testing.T) {
 	defer stop2()
 
 	zd := &ZoneData{ZoneName: zone, Upstreams: []PeerConf{{Addr: refusing}, {Addr: good}}}
-	xfr, serial, err := zd.DoTransfer(&Config{})
+	xfr, serial, err := zd.DoTransfer(context.Background(), &Config{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestDoTransfer_TransportErrorAdvancesToNextPrimary(t *testing.T) {
 
 	// 127.0.0.1:1 has no listener -> connection refused / timeout (transport).
 	zd := &ZoneData{ZoneName: zone, Upstreams: []PeerConf{{Addr: "127.0.0.1:1"}, {Addr: good}}}
-	_, serial, err := zd.DoTransfer(&Config{})
+	_, serial, err := zd.DoTransfer(context.Background(), &Config{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestDoTransfer_AllRefusedQuietBackoff(t *testing.T) {
 	defer s2()
 
 	zd := &ZoneData{ZoneName: zone, Upstreams: []PeerConf{{Addr: r1}, {Addr: r2}}}
-	xfr, _, err := zd.DoTransfer(&Config{})
+	xfr, _, err := zd.DoTransfer(context.Background(), &Config{})
 	if err != nil {
 		t.Fatalf("all-REFUSED should back off quietly, got error: %v", err)
 	}
@@ -209,14 +209,14 @@ func TestDoTransfer_AllRefusedQuietBackoff(t *testing.T) {
 // When no primary is reachable at all, surface a hard error.
 func TestDoTransfer_AllUnreachableIsError(t *testing.T) {
 	zd := &ZoneData{ZoneName: "example.test.", Upstreams: []PeerConf{{Addr: "127.0.0.1:1"}, {Addr: "127.0.0.1:2"}}}
-	if _, _, err := zd.DoTransfer(&Config{}); err == nil {
+	if _, _, err := zd.DoTransfer(context.Background(), &Config{}); err == nil {
 		t.Fatal("expected an error when every upstream is unreachable")
 	}
 }
 
 func TestFetchFromUpstream_NoUpstreams(t *testing.T) {
 	zd := &ZoneData{ZoneName: "example.test."}
-	if _, err := zd.FetchFromUpstream(false, false, false, nil, &Config{}); err == nil {
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err == nil {
 		t.Fatal("expected an error when no upstreams are configured")
 	}
 }
