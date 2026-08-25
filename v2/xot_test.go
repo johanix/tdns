@@ -703,7 +703,7 @@ func TestXoT_ZoneTransferInOverDoT(t *testing.T) {
 	pinPeer := PeerConf{Addr: srv.addr, Key: "tkey", Transport: TransportDoT,
 		TLSAuth: TLSAuthPin, Pins: []string{SPKISHA256(leaf)}}
 	sec := newTestSecondary(t, pinPeer)
-	serial, err := sec.ZoneTransferIn(pinPeer, 0, "axfr", conf)
+	serial, err := sec.ZoneTransferIn(context.Background(), pinPeer, 0, "axfr", conf)
 	if err != nil {
 		t.Fatalf("XoT pull (pin+tsig) failed: %v", err)
 	}
@@ -718,7 +718,7 @@ func TestXoT_ZoneTransferInOverDoT(t *testing.T) {
 	badPeer := pinPeer
 	badPeer.Pins = []string{base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))}
 	secBad := newTestSecondary(t, badPeer)
-	if _, err := secBad.ZoneTransferIn(badPeer, 0, "axfr", conf); err == nil {
+	if _, err := secBad.ZoneTransferIn(context.Background(), badPeer, 0, "axfr", conf); err == nil {
 		t.Fatal("XoT pull with wrong pin must fail")
 	}
 
@@ -728,7 +728,7 @@ func TestXoT_ZoneTransferInOverDoT(t *testing.T) {
 	daneConf := testXfrConf(t)
 	daneConf.Internal.ImrEngine = daneTestConf(t, leaf, serverPort(t, srv), cache.ValidationStateSecure, true).Internal.ImrEngine
 	secDane := newTestSecondary(t, danePeer)
-	if _, err := secDane.ZoneTransferIn(danePeer, 0, "axfr", daneConf); err != nil {
+	if _, err := secDane.ZoneTransferIn(context.Background(), danePeer, 0, "axfr", daneConf); err != nil {
 		t.Fatalf("XoT pull (dane+tsig) failed: %v", err)
 	}
 }
@@ -747,7 +747,7 @@ func TestXoT_DoTransferSOAProbeOverDoT(t *testing.T) {
 	pinPeer := PeerConf{Addr: srv.addr, Key: "tkey", Transport: TransportDoT,
 		TLSAuth: TLSAuthPin, Pins: []string{SPKISHA256(leaf)}}
 	sec := newTestSecondary(t, pinPeer)
-	should, serial, err := sec.DoTransfer(conf)
+	should, serial, err := sec.DoTransfer(context.Background(), conf)
 	if err != nil {
 		t.Fatalf("SOA probe over DoT failed: %v", err)
 	}
@@ -759,7 +759,7 @@ func TestXoT_DoTransferSOAProbeOverDoT(t *testing.T) {
 	badPeer := pinPeer
 	badPeer.Pins = []string{base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))}
 	secBad := newTestSecondary(t, badPeer)
-	if _, _, err := secBad.DoTransfer(conf); err == nil {
+	if _, _, err := secBad.DoTransfer(context.Background(), conf); err == nil {
 		t.Fatal("SOA probe with wrong pin must fail")
 	}
 }

@@ -515,7 +515,7 @@ func TestDialTransferConnBindsSource(t *testing.T) {
 				}
 			}()
 
-			conn, derr := dialTransferConn(ln.Addr().String(), nil, []string{tc.src}, 2*time.Second)
+			conn, derr := dialTransferConn(context.Background(), ln.Addr().String(), nil, []string{tc.src}, 2*time.Second)
 			if derr != nil {
 				t.Fatalf("dial %s: %v", ln.Addr(), derr)
 			}
@@ -560,7 +560,7 @@ func TestDialTransferConnBindsSource(t *testing.T) {
 			}
 			defer ln.Close()
 
-			conn, derr := dialTransferConn(ln.Addr().String(), nil, []string{tc.absent}, 2*time.Second)
+			conn, derr := dialTransferConn(context.Background(), ln.Addr().String(), nil, []string{tc.absent}, 2*time.Second)
 			if conn != nil {
 				conn.Close()
 			}
@@ -579,7 +579,7 @@ func TestDialTransferConnBindsSource(t *testing.T) {
 		}
 		defer ln.Close()
 
-		conn, derr := dialTransferConn(ln.Addr().String(), nil, []string{"::1"}, 2*time.Second)
+		conn, derr := dialTransferConn(context.Background(), ln.Addr().String(), nil, []string{"::1"}, 2*time.Second)
 		if derr != nil {
 			t.Fatalf("unexpected error: %v", derr)
 		}
