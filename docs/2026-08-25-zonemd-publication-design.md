@@ -420,7 +420,7 @@ publishing a ZONEMD (§3.5).
 1. **Publish.** DONE — see §10. Option, config, `ensureZonemdPresenceLocked` +
    `updateZonemdLocked`, signing, journal exclusion, DDNS/API gate, role
    normalization, removal-on-flip, P2 sort keys. Tests per §7.
-2. **Cost.** P3 wire cache, benchmarked on a large zone. NOT DONE.
+2. **Cost.** DONE — see §12. P3 wire cache, benchmarked.
 3. **Verify.** DONE — see §11. `verify-zonemd`, the CLI surface, `dog`.
 
 ## 9. Effort estimate
@@ -645,5 +645,96 @@ returning a bool.
 
 ### Still open
 
-Phase 2's per-RRset wire cache. The digest re-encodes every RR on every
-publish, which is now also the cost of every verification.
+Phase 2's wire cache — since done; see §12.
+
+## 12. Phase 2 as built
+
+One commit. `v2/zonemd_cache.go` plus a restructuring of `ZoneDigest`.
+
+### What changed
+
+`ZoneDigest` is now defined by decomposition: a zone's digest is the
+concatenation of its OWNERS' digests in canonical owner order. That is not a
+refactor for tidiness — RFC 8976 orders by (owner, type, RDATA), so every
+record at one name sorts into a contiguous run, and an owner's contribution is
+a self-contained block that depends on nothing outside it. `digestBlock` builds
+one; both the cached publish path and the uncached path every verification uses
+go through it, so the two cannot drift.
+
+The cache is one block per owner name, kept on `ZoneData` and validated by
+**pointer identity of the `*OwnerData`**. §4 had sketched a per-RRset cache
+invalidated at each staging site and flagged it as the risky part; that turned
+out to be unnecessary. Every mutation in `zone_mutation.go` goes through
+`cloneOwner` (fresh `OwnerData`), installs a caller's fresh one, or deletes the
+entry — nothing is mutated in place, which is the copy-on-write invariant the
+snapshot design already enforces with a CI grep gate. A touched owner is a new
+pointer and misses; an untouched one is the same pointer and hits. **There is
+no invalidation code**, so there is none to get wrong.
+
+### The budget
+
+`zonemd.wire-cache-max-bytes`, with `ixfr-chain-max-bytes`' sentinels: 0/unset
+takes the 64 MiB default, negative disables. Self-selecting (an ordinary zone
+never reaches it), and degrading in proportion (a larger zone caches what fits
+and re-renders the remainder) rather than at a cliff.
+
+Accounting is free: the digest pass walks every owner in order anyway, so it
+carries a running total and keeps a freshly built block only while under
+budget. Entries for owners that have left the zone are pruned when
+`len(cache) > ` the number accounted for this pass, which is exactly the
+condition that says some exist.
+
+It does **not** bound host memory across a fleet — a per-zone cap times N zones
+can still exhaust the box. The config documentation says so rather than
+implying otherwise.
+
+### Publish only
+
+The cache is read and written by the publish path alone, under `zd.mu`.
+`zone zonemd verify` and the `verify-zonemd` gate always rebuild. Not a
+concession to locking: a verification that read cached bytes would be verifying
+the cache rather than the zone, and one stale entry would let a wrong digest
+pass. `TestVerificationDoesNotUseTheWireCache` poisons every cached block and
+asserts that verification still succeeds.
+
+Confining it to the locked path also means no `OwnerData` shared with a
+published snapshot is written off-lock.
+
+### Measured
+
+5000-name zone (≈10,000 records), one name changed per publish:
+
+| | ns/op | allocs/op |
+| --- | ---: | ---: |
+| cached | 1,695,217 | 25,169 |
+| uncached | 28,808,743 | 295,217 |
+
+**17× faster, 11.7× fewer allocations.**
+
+Part of that is not the cache at all: `canonicalOwnerOrder` now sorts
+(key, name) pairs instead of looking each key up in a map, which costs one
+allocation per name instead of about six. Every publish of every signed zone
+pays that ordering for the NSEC chain, so the win is not confined to zonemd
+zones. It took the cached digest from 2.65 ms to 1.70 ms on its own.
+
+Blocks do not depend on the hash, so a zone publishing SHA-384 and SHA-512
+renders once and hashes twice.
+
+Verified live: the cached digest verifies through `dog`, the CLI and
+dnspython's independent implementation, and still does with
+`wire-cache-max-bytes: -1`.
+
+### Against the estimate
+
+§9 predicted 150–250 production and 150–250 test. Actual: ~230 production
+(~200 in `zonemd_cache.go`, the rest config and reporting) and ~280 test. Close
+— the one place the estimate was wrong was in the other direction, since the
+invalidation risk it priced in did not materialise.
+
+### Deliberately not done
+
+The remaining cached cost is `canonicalSortKey`'s own allocations — `Fqdn`,
+`ToLower` and `SplitDomainName` per name. Removing them means hand-rolling DNS
+label splitting including escape handling, in a function the NSEC chain order
+depends on, for perhaps another 30%. Not worth it: a subtle bug there produces
+a chain order no validator accepts and no query reveals.

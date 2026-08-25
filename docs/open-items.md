@@ -132,19 +132,24 @@ against current codebase.
 
 ### 13. ZONEMD Publication and Verification
 - **Source**: 2026-08-25-zonemd-publication-design.md
-- **Status**: Phases 1 and 3 done on
-  `feature/zonemd-publication`; phase 2 open
-- **Done (publish)**: the `publish-zonemd` zone option with a
+- **Status**: Complete on `feature/zonemd-publication`
+  (phases 1-3); ready for review
+- **Publish**: the `publish-zonemd` zone option with a
   `zonemd:` config block. The digest is computed and signed
   inside every publish, between `ensureZonemdPresenceLocked`
   (before the NSEC restitch, so the apex bitmap lists ZONEMD)
   and `updateZonemdLocked` (after it, since the digest covers
   the NSECs). Journal exclusion, DDNS/API refusal, secondary
   normalization and removal-on-flip all in.
-- **Done (verify)**: `verify-zonemd` gates both adoption
-  paths with refuse/warn; `zone zonemd status|verify` and
+- **Verify**: `verify-zonemd` gates both adoption paths with
+  refuse/warn; `zone zonemd status|verify` and
   `dog AXFR +zonemd` both exit non-zero on a bad digest.
   Unsupported scheme/algorithm is kept distinct from invalid.
+- **Cost**: per-owner wire cache validated by OwnerData
+  pointer identity, bounded by `zonemd.wire-cache-max-bytes`
+  (0/unset = 64 MiB, negative = off). 17x faster per publish,
+  11.7x fewer allocations, measured. Publish path only --
+  verification always rebuilds.
 - **Also fixed**: `ZoneDigest` broke sort ties on the whole
   wire record and therefore on the TTL, where RFC 4034 §6.3
   wants canonical RDATA. Every signed zone was affected; the
@@ -152,10 +157,10 @@ against current codebase.
   cross-checking against dnspython. `ZoneFileState` grew a
   `digest_variant` column so the changed digests re-baseline
   instead of reporting every signed zone's file as edited.
-- **Phase 2 (open)**: per-RRset wire cache. The sort keys
-  landed (10k names: 21.9ms/953k allocs -> 3.7ms/60k allocs)
-  but the digest still re-encodes every RR on every publish,
-  which is now also the cost of every verification.
+- **Not done, deliberately**: `canonicalSortKey`'s own
+  allocations. Removing them means hand-rolling DNS label
+  escaping in a function the NSEC chain order depends on, for
+  ~30%.
 
 ## Docs Needing Status Updates
 
