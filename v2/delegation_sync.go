@@ -171,7 +171,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				// Put the request back rather than running it against a nil
 				// IMR, and let it return exactly when the IMR is announced.
 				if !conf.Internal.ImrReady.Published() {
-					deferForImr(ctx, delsyncq, conf.Internal.ImrReady, ds)
+					_ = deferForImr(ctx, delsyncq, conf.Internal.ImrReady, ds)
 					continue
 				}
 				switch ds.Command {
@@ -431,7 +431,7 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 		var candUr UpdateResult
 		switch cand.Scheme {
 		case "UPDATE":
-			m, candRcode, candUr, e = zd.SyncZoneDelegationViaUpdate(kdb, syncstate, cand.Target)
+			m, candRcode, candUr, e = zd.SyncZoneDelegationViaUpdate(ctx, kdb, syncstate, cand.Target)
 		case "NOTIFY":
 			m, candRcode, e = zd.SyncZoneDelegationViaNotify(kdb, notifyq, syncstate, cand.Target)
 		case "API":
@@ -454,7 +454,7 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 	return msg, rcode, ur, err
 }
 
-func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate DelegationSyncStatus,
+func (zd *ZoneData) SyncZoneDelegationViaUpdate(ctx context.Context, kdb *KeyDB, syncstate DelegationSyncStatus,
 	dsynctarget *DsyncTarget) (string, uint8, UpdateResult, error) {
 
 	// dump.P(syncstate)
@@ -537,7 +537,7 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	lgDns.Info("SyncZoneDelegationViaUpdate: sending the signed update",
 		"target", dsynctarget.Name, "addresses", dsynctarget.Addresses, "port", dsynctarget.Port)
 
-	rcode, ur, err := SendUpdate(smsg, zd.Parent, dsynctarget.Addresses)
+	rcode, ur, err := SendUpdate(ctx, smsg, zd.Parent, dsynctarget.Addresses)
 	if err != nil {
 		lgDns.Error("error from SendUpdate", "zone", zd.Parent, "err", err)
 		return "", 0, ur, err
@@ -642,13 +642,20 @@ const imrWaitWarnAfter = 60 * time.Second
 // how long is priming allowed to take -- by dropping the request when it
 // guesses low. A one-shot PROXY-UPDATE-SETUP dropped that way means the startup
 // reconcile never runs for that zone until the child next changes.
+// The returned channel is closed when the deferred worker exits, whether it
+// re-enqueued or gave up on cancellation. Production ignores it; it exists so a
+// test can wait for THIS worker rather than watching the process-wide goroutine
+// count, which an unrelated goroutine starting or stopping makes meaningless in
+// either direction.
 func deferForImr(ctx context.Context, delsyncq chan DelegationSyncRequest,
-	ready *ImrReadiness, ds DelegationSyncRequest) {
+	ready *ImrReadiness, ds DelegationSyncRequest) <-chan struct{} {
 
 	lgDns.Info("DelegationSyncher: IMR not up yet, deferring proxy work until it is",
 		"zone", ds.ZoneName, "command", ds.Command)
 
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		warn := time.NewTimer(imrWaitWarnAfter)
 		defer warn.Stop()
 
@@ -669,6 +676,7 @@ func deferForImr(ctx context.Context, delsyncq chan DelegationSyncRequest,
 			}
 		}
 	}()
+	return done
 }
 
 // proxySync forwards a detected change to the parent on behalf of a
