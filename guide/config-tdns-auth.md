@@ -403,6 +403,187 @@ not sign.
 | `fold-case` | Case-insensitive owner-name matching |
 | `black-lies` | Compact denial of existence: synthesize a minimally covering NSEC rather than serving precomputed NSEC records |
 | `add-transport-signal` | Synthesize SVCB transport-signal RRs into the Additional section |
+| `publish-zonemd` | Maintain the apex ZONEMD RRset (RFC 8976). See below |
+| `verify-zonemd` | Check a zone's apex ZONEMD before adopting it, on every load and inbound transfer. See below |
+
+### `publish-zonemd`
+
+The server computes the zone's message digest inside every publish, over the
+snapshot that publish is about to install, and signs it with the rest of the
+zone. `ZONEMD.Serial` therefore always equals the SOA serial being served, and
+the digest always describes the zone the recipient just received -- over AXFR,
+over IXFR, or from the zone file.
+
+It works on unsigned zones too; it is not part of the DNSSEC policy.
+
+Parameters go in a per-zone `zonemd:` block, which is only read when the option
+is set:
+
+```yaml
+zones:
+   - name:      example.com.
+     zonefile:  /etc/tdns/zones/example.com.zone
+     type:      primary
+     options:   [ publish-zonemd ]
+     zonemd:
+        algorithms: [ 1 ]   # 1 = SHA-384 (default), 2 = SHA-512
+        scheme:     1       # SIMPLE; the only scheme RFC 8976 defines
+```
+
+An empty block, or none, means SIMPLE/SHA-384 -- the mandatory-to-implement
+algorithm and the one every published ZONEMD in the wild uses. Listing several
+algorithms publishes one ZONEMD RR per algorithm. A block the server cannot
+make sense of drops the OPTION rather than the zone: the zone keeps serving,
+without a digest, and says so in `tdns-cli auth zone list`.
+
+While the option is set the apex ZONEMD belongs to the server. A DNS UPDATE or
+API update that tries to write it is refused, and `update delete <apex>` retains
+it the way it retains SOA and NS.
+
+**Cost, and the wire cache.** The digest is a single hash over every record in
+the zone, and RFC 8976 offers no way to update one incrementally, so every
+publish is O(zone). Two things bring that down.
+
+`publish-cadence` coalesces a burst of updates into one publish, so the cost is
+per-publish and not per-update; a large zone under continuous dynamic update
+wants it raised.
+
+And the server keeps each owner name's records in their canonical wire form, so
+a publish re-renders only the names it changed. Rendering is the expensive half
+of a digest — measured at 17x on a 10,000-record zone where one name changed —
+and it is what `wire-cache-max-bytes` bounds:
+
+```yaml
+     zonemd:
+        wire-cache-max-bytes: 67108864   # 0/unset = 64 MiB, negative = off
+```
+
+Same convention as `ixfr-chain-max-bytes`: **0 or unset takes the default,
+negative disables caching entirely.**
+
+The budget exists because the saving and the memory cost both scale with zone
+size, so the zones that gain most are the ones that can least afford it — and
+on a PQ-signed zone an RRSIG's RDATA is kilobytes rather than a hundred bytes.
+A byte budget is self-selecting: an ordinary zone never reaches it and gets the
+whole benefit, while a zone larger than the budget caches what fits and
+re-renders the remainder, so the saving degrades in proportion rather than
+disappearing.
+
+**This is a PER-ZONE figure and does not bound the host's memory.** A server
+with many large zones multiplies it; size the number accordingly, or set it
+per-zone on the few zones that are large.
+
+`tdns-cli auth zone zonemd status` reports both halves of the trade — what the
+cache holds, what a full cache would need, and how long the last digest took —
+so it can be tuned from measurements:
+
+```
+   wire cache:     41.2 MiB of 64.0 MiB budget, 812004 of 812004 owners
+   last digest:    186ms, 812001 of 812004 owners reused
+```
+
+The cache is used by the publish path only. `zone zonemd verify` and the
+`verify-zonemd` check below always rebuild from the records: a verification
+that read cached bytes would be verifying the cache rather than the zone.
+
+**Turning it off.** Removing the option removes the record: the next publish
+takes the server's ZONEMD out and restitches the apex NSEC bitmap. Do it while
+the server is running -- a config reload is enough. After a restart the server
+can no longer tell its own ZONEMD from one you wrote by hand, so it leaves
+whatever the zone file holds alone, and you would have to delete the record
+from the file yourself.
+
+A ZONEMD you wrote into the zone file of a zone that does not carry the option
+is your record throughout: the server never rewrites or removes it.
+
+**Secondaries.** `publish-zonemd` originates content, so `tdns-auth` strips it
+from a secondary that mirrors an upstream zone, with the usual "secondary zone
+may not originate content" message. An inline-signing secondary keeps it: it
+re-signs what it receives, so any digest from upstream is already invalid for
+what it serves.
+
+### `verify-zonemd`
+
+Check the apex ZONEMD before adopting a zone -- on every load from the zone
+file and every inbound transfer. The check runs on the zone that has just
+arrived and not yet been published, which is the last moment at which the
+answer can still change what the server does.
+
+The case it exists for is a secondary. A secondary cannot re-derive a digest it
+was not given, so checking the one it *was* given is the only assurance it has
+that what it is about to serve is what its primary published. It is not
+stripped on a mirroring secondary, unlike `publish-zonemd`: verifying what you
+received is not originating anything.
+
+```yaml
+zones:
+   - name:      example.com.
+     type:      secondary
+     options:   [ verify-zonemd ]
+     zonemd:
+        on-verify-failure: refuse   # refuse (default) | warn
+```
+
+**What counts as a failure.** Only a digest that this build can check and that
+does not describe the zone. Specifically:
+
+| Zone state | Result |
+|------------|--------|
+| No apex ZONEMD | Adopted. The option says "check the digest if there is one" |
+| Digest verifies | Adopted |
+| Digest does not verify | Refused (or adopted with a loud log, under `warn`) |
+| ZONEMD names a different serial than the SOA | Refused: RFC 8976 binds the digest to a serial |
+| Scheme or hash algorithm not implemented here | Adopted, with a warning. Reserved and unknown codepoints are how a publisher says "not for you"; refusing would make every future algorithm an outage |
+| Two ZONEMD RRs with the same scheme and algorithm | Refused: the pair is what names which digest was checked |
+
+A refusal is not final. The server keeps serving what it already had, the
+refresh engine records a `refresh` error, and the next refresh tries again --
+so a primary that fixes its digest is picked up without intervention.
+
+`on-verify-failure: warn` adopts the zone and logs at ERROR. It is for the
+rollout, where the first thing to find out is whether your own primaries would
+have passed.
+
+**What it attests, and when.** The check runs at the moment a zone is adopted,
+on the content that arrived. For a secondary that mirrors an upstream, that is
+the whole story: the zone it serves is the zone it verified.
+
+On a **primary** it is not a continuous attestation of what is being served.
+Anything that changes the zone after adoption — a replayed delta journal, a
+DDNS or API update, transport-signal synthesis — changes content the check
+never saw. That is not a gap in the check; it is what those features do. A
+primary with `publish-zonemd` recomputes its own digest on the next publish
+anyway, which is the attestation that matters there; `verify-zonemd` on a
+primary tells you only that the FILE it loaded was internally consistent.
+
+### Checking a ZONEMD by hand
+
+```bash
+tdns-cli auth zone zonemd status -z example.com.
+```
+
+reports what the zone publishes and how it is configured, without recomputing
+anything.
+
+```bash
+tdns-cli auth zone zonemd verify -z example.com.
+```
+
+digests the zone as served and compares, the way a recipient would. It exits
+non-zero when the digest does not verify, so it works in a check script. Add
+`--ignore-serial` to digest against the serial each ZONEMD *names* rather than
+the SOA's -- a diagnostic for a zone digested before its serial moved, not a
+laxer check.
+
+To check somebody else's zone, `dog` verifies what it transfers:
+
+```bash
+dog @ns.example.com AXFR example.com. +tcp +zonemd
+```
+
+which also exits non-zero on a zone that fails. `+zonemd` needs an AXFR: an
+IXFR returns a difference rather than a zone, and `dog` refuses instead of
+digesting one.
 
 **Multi-provider and catalog**
 

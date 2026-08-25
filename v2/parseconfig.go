@@ -1070,11 +1070,41 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			newOpts[opt] = val
 		}
 
+		// Resolved here rather than in parseZoneOptions, which has nowhere to
+		// put a value. It cannot fail: the option only survives the switch
+		// when the block validates, so an off zone resolves the defaults and
+		// nothing reads them.
+		zonemdSet, _ := resolveZonemdConf(zconf.Zonemd)
+
 		zdp.mu.Lock()
+		// Whether this parse changes what the zone should publish. Captured
+		// before the assignment, because a reload that turns publish-zonemd
+		// OFF (or switches its algorithms) changes nothing in the zone itself,
+		// so no publish would otherwise be queued -- and the stale ZONEMD
+		// would go on being served until something unrelated touched the zone.
+		zonemdChanged := zonemdSettingsDiffer(
+			zdp.Options[OptPublishZonemd], zdp.zonemdScheme, zdp.zonemdAlgs,
+			newOpts[OptPublishZonemd], zonemdSet.Scheme, zonemdSet.Algorithms)
 		zdp.Options = newOpts
 		zdp.publishCadence = publishCadence
 		zdp.ixfrChainMaxBytes = zconf.IxfrChainMaxBytes
+		zdp.zonemdScheme = zonemdSet.Scheme
+		zdp.zonemdAlgs = zonemdSet.Algorithms
+		zdp.zonemdOnVerifyFailure = zonemdSet.OnVerifyFailure
+		// A changed budget takes effect on the next digest: zonemdDigestsLocked
+		// reads it every pass, admits within it and prunes what no longer fits
+		// on the pass after that. Nothing to invalidate here.
+		zdp.zonemdWireCacheMaxBytes = zonemdSet.WireCacheMaxBytes
+		// A zone that has never published has nothing to correct, and the
+		// first load publishes with the new settings anyway.
+		zonemdChanged = zonemdChanged && zdp.snapshot.Load() != nil
 		zdp.mu.Unlock()
+
+		if zonemdChanged {
+			lgConfig.Info("zonemd configuration changed; republishing the zone to apply it",
+				"zone", zname, "publish", newOpts[OptPublishZonemd])
+			zdp.requestPublish(false)
+		}
 
 		invokeOptionHandlers(zname, options)
 

@@ -63,7 +63,11 @@ func TestJournalDeltaExcludesNsecButKeepsEverythingElse(t *testing.T) {
 		mk("example.", dns.TypeNSEC),
 		mk("bravo.example.", dns.TypeTXT),
 	}
-	out := withoutDerivedRecords(in)
+	// A zone that does NOT manage its own ZONEMD: the exclusion is
+	// NSEC-only, and an apex ZONEMD would be operator data belonging in the
+	// journal. See TestJournalDeltaExcludesManagedZonemd for the other half.
+	zd := &ZoneData{ZoneName: "example.", Options: map[ZoneOption]bool{}}
+	out := zd.withoutDerivedRecords(in)
 
 	if len(out) != 2 {
 		t.Fatalf("expected the two authored RRsets, got %d: %+v", len(out), out)

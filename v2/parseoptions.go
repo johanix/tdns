@@ -215,6 +215,26 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 				lg.Error("option ignored: DNSSEC policy not set", "zone", zname, "option", ZoneOptionToString[opt])
 			}
 
+		case OptPublishZonemd, OptVerifyZonemd:
+			// The `zonemd` block is only consulted for a zone that asks for
+			// one, so a leftover block under a zone whose option was removed
+			// is inert rather than an error.
+			//
+			// A bad block rejects the OPTION, not the zone: an unpublishable
+			// digest is a degraded zone, not an unusable one, and taking a
+			// zone off the air over a mistyped hash algorithm would be the
+			// larger failure. The ConfigError is how the operator finds out.
+			if _, err := resolveZonemdConf(zconf.Zonemd); err != nil {
+				lg.Error("option ignored: invalid zonemd configuration",
+					"zone", zname, "option", ZoneOptionToString[opt], "err", err)
+				if zd != nil {
+					zd.SetError(ConfigError, "zonemd: %v", err)
+				}
+				continue
+			}
+			options[opt] = true
+			cleanoptions = append(cleanoptions, opt)
+
 		case OptMultiProvider:
 			if !invokeOptionValidator(opt, conf, zname, zd, options) {
 				continue

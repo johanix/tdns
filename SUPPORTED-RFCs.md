@@ -146,6 +146,40 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 
 ## Zone Management
 
+### RFC 8976 - Message Digest for DNS Zones (ZONEMD)
+**Status**: ✅ Fully Supported (SIMPLE scheme; SHA-384 and SHA-512)
+**Implementation**: `tdns/v2/zonemd.go`, `tdns/v2/zonemd_publish.go`, `tdns/v2/zonemd_verify.go`, `tdns/v2/zonemd_cache.go`, `tdns/v2/cli/zone_zonemd_cmds.go`
+**Notes**:
+- **Digest**: SIMPLE scheme (the only one defined), SHA-384 (§5 codepoint 1)
+  and SHA-512 (codepoint 2). Canonical ordering per RFC 4034 §6.1/§6.3,
+  RDATA domain-name case folding per §6.2, and the §3.3.1 exclusions
+  (apex ZONEMD, the RRSIGs covering it, out-of-zone names, duplicates).
+  Checked against the RFC's Appendix A vectors and cross-checked against
+  dnspython's independent implementation.
+- **Publishing** (`publish-zonemd` zone option): the digest is computed and
+  signed INSIDE every publish, over the snapshot that publish installs, so
+  `ZONEMD.Serial` always equals the SOA serial being served and the digest
+  always describes what a recipient receives — over AXFR, over IXFR or from
+  the zone file. Works on unsigned zones; not part of the DNSSEC policy.
+  One ZONEMD RR per configured algorithm (`zonemd.algorithms`).
+- **Verification** (`verify-zonemd` zone option): the apex ZONEMD is checked
+  before a zone is adopted, on every load from file and every inbound
+  transfer. `zonemd.on-verify-failure` selects `refuse` (default) or `warn`.
+  An unimplemented scheme or hash algorithm is reported as *unsupported*
+  rather than invalid — reserved codepoints are how a publisher says
+  "not for you".
+- **Operator surface**: `tdns-cli auth zone zonemd status|verify` (exits
+  non-zero on a bad digest) and `dog AXFR ... +zonemd` for verifying a
+  remote zone. `+ignoreserial` / `--ignore-serial` digest against the serial
+  each ZONEMD names, as a diagnostic.
+- **Cost**: the canonical wire form is cached per owner name, bounded by
+  `zonemd.wire-cache-max-bytes`, so a publish re-renders only the names it
+  changed.
+- **Not implemented**: no scheme other than SIMPLE, which is the only one
+  the registry defines.
+
+---
+
 ### RFC 9432 - DNS Catalog Zones
 **Status**: ✅ Fully Supported  
 **Implementation**: `tdns/v2/catalog.go`, `tdns/v2/apihandler_catalog.go`, `tdns/v2/cli/catalog_cmds.go`, `tdns/v2/refreshengine.go`  

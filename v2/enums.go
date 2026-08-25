@@ -63,6 +63,21 @@ const (
 	// values are positional, so inserting mid-list renumbers everything after.
 	OptOnConflictDBWins
 	OptOnConflictZonefileWins
+	// OptPublishZonemd makes the server maintain the zone's apex ZONEMD
+	// RRset (RFC 8976): computed inside every publish, over the snapshot
+	// that publish is about to install, and signed with it. Off, the apex
+	// ZONEMD is ordinary operator data and the server never touches it.
+	//
+	// Appended at the end for the same reason the two options above were:
+	// ZoneOption values are positional, so inserting mid-list renumbers
+	// everything after.
+	OptPublishZonemd
+	// OptVerifyZonemd makes the server check a zone's apex ZONEMD before
+	// adopting it -- on every load from file and every inbound transfer. The
+	// companion to publish-zonemd and independent of it: the interesting case
+	// is a secondary verifying what a primary sent, and a secondary does not
+	// publish a digest of its own.
+	OptVerifyZonemd
 	optZoneOptionTdnsSentinel
 )
 
@@ -99,6 +114,8 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptAllowApiUpdates:         "allow-api-updates",
 	OptOnConflictDBWins:        "on-conflict-db-wins",
 	OptOnConflictZonefileWins:  "on-conflict-zonefile-wins",
+	OptPublishZonemd:           "publish-zonemd",
+	OptVerifyZonemd:            "verify-zonemd",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -127,6 +144,8 @@ var StringToZoneOption = map[string]ZoneOption{
 	"allow-api-updates":          OptAllowApiUpdates,
 	"on-conflict-db-wins":        OptOnConflictDBWins,
 	"on-conflict-zonefile-wins":  OptOnConflictZonefileWins,
+	"publish-zonemd":             OptPublishZonemd,
+	"verify-zonemd":              OptVerifyZonemd,
 }
 
 type ImrOption uint8

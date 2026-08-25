@@ -817,6 +817,15 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 		}
 	}
 
+	// Refuse (or, on replay, drop) any attempt to write the apex ZONEMD of a
+	// zone that maintains its own. Done BEFORE the lock and before anything is
+	// staged, so the update is rejected whole rather than half-applied.
+	filteredActions, zerr := zd.filterManagedZonemdActions(ur.Actions, ur.Replay)
+	if zerr != nil {
+		return false, zerr
+	}
+	ur.Actions = filteredActions
+
 	zd.mu.Lock()
 	defer func() {
 		if updated {
@@ -892,6 +901,15 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 			var deleted, denied, retained int
 			for _, t := range owner.RRtypes.Keys() {
 				if isApex && apexRetainedOnDelname(t) {
+					retained++
+					continue
+				}
+				// The apex ZONEMD is retained for the same reason SOA and NS
+				// are: while publish-zonemd is on it is the server's record,
+				// and the next publish would recreate it anyway. Deleting it
+				// here would make DELNAME report a deletion that does not
+				// survive the breath after it.
+				if isApex && t == dns.TypeZONEMD && zd.zoneManagesZonemd() {
 					retained++
 					continue
 				}

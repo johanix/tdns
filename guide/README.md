@@ -30,7 +30,11 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   `split_algorithms` and `large_algorithms`),
   [tdns-imr](config-tdns-imr.md) (trust anchors, stub zones,
   the `imrengine.tuning.*` knobs) and
-  [tdns-agent](config-tdns-agent.md) (placeholder).
+  [tdns-agent](config-tdns-agent.md) (placeholder). The tdns-auth
+  page also covers ZONEMD (RFC 8976): `publish-zonemd`,
+  `verify-zonemd`, the `zonemd:` parameter block including
+  `wire-cache-max-bytes`, and checking a digest by hand with
+  `zone zonemd status|verify` or `dog +zonemd`.
 
 - [Changing Zone Content: DDNS and the Management API](zone-updates.md)
   -- The two channels that change a running primary zone

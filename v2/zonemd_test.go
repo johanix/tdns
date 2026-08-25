@@ -146,3 +146,121 @@ NS2.EXAMPLE.  3600   IN  AAAA    2001:db8::63
 		})
 	}
 }
+
+// A signed zone puts two RRSIGs at one owner with DIFFERENT TTLs: the one over
+// the NSEC carries the SOA minimum, the rest carry the TTL of what they cover.
+// They share an owner name and a type, so the sort has to break the tie on
+// RDATA -- RFC 4034 §6.3 -- and the RRSIG RDATA starts with the type covered.
+//
+// Comparing whole wire records instead reaches the TTL field first and decides
+// there, giving an order no other implementation reproduces. Nothing in RFC
+// 8976's Appendix A catches it: every TTL in those vectors is the same, so the
+// tiebreak never fires.
+//
+// The expected values below were produced by dnspython 2.8.0's independent
+// RFC 8976 implementation (Zone.compute_digest), not by this code. That is the
+// point of them: a digest this package agrees with itself about is worth
+// nothing, because the whole purpose of publishing one is that somebody else
+// can reproduce it.
+const ttlOrderZone = `ttlorder.example.	3600	IN	SOA	ns.ttlorder.example. hostmaster.ttlorder.example. 7 7200 1800 604800 7200
+ttlorder.example.	3600	IN	NS	ns.ttlorder.example.
+ttlorder.example.	3600	IN	RRSIG	NS 15 2 3600 20260924000000 20260825000000 1111 ttlorder.example. AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+ttlorder.example.	3600	IN	RRSIG	SOA 15 2 3600 20260924000000 20260825000000 1111 ttlorder.example. BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+ttlorder.example.	3600	IN	DNSKEY	257 3 15 TeEjjb0sCAkP9wO/0UXAcdfRhfSdkUf9PnPkLklRR04=
+ttlorder.example.	3600	IN	RRSIG	DNSKEY 15 2 3600 20260924000000 20260825000000 1111 ttlorder.example. CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+ttlorder.example.	7200	IN	NSEC	ns.ttlorder.example. NS SOA RRSIG NSEC DNSKEY ZONEMD
+ttlorder.example.	7200	IN	RRSIG	NSEC 15 2 7200 20260924000000 20260825000000 1111 ttlorder.example. DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
+ns.ttlorder.example.	3600	IN	A	192.0.2.1
+ns.ttlorder.example.	3600	IN	RRSIG	A 15 3 3600 20260924000000 20260825000000 1111 ttlorder.example. EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+ns.ttlorder.example.	7200	IN	NSEC	ttlorder.example. A RRSIG NSEC
+ns.ttlorder.example.	7200	IN	RRSIG	NSEC 15 3 7200 20260924000000 20260825000000 1111 ttlorder.example. FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+`
+
+func TestZoneDigestSortsRRSIGsByRdataNotByTTL(t *testing.T) {
+	rrs := parseZoneRRs(t, "ttlorder.example.", ttlOrderZone)
+
+	for _, tc := range []struct {
+		alg  uint8
+		want string
+	}{
+		{ZonemdAlgSHA384, "b74b05422c040c5ebf74406eb5d310302b289f6c4dca1de9a8bb6818a08b4b18" +
+			"a270f68476bc45c221149d16143ff2b2"},
+		{ZonemdAlgSHA512, "3e07069316f394a904ec99ce0d753f33242df90f7e3f9937bb6317b846073134" +
+			"8491c93226e3bb58311170156ef7ea13f531e8dbd3244eaa05f76785c54558f6"},
+	} {
+		got, err := ZoneDigestHex("ttlorder.example.", rrs, ZonemdSchemeSimple, tc.alg)
+		if err != nil {
+			t.Fatalf("%s: %v", zonemdAlgName(tc.alg), err)
+		}
+		if got != tc.want {
+			t.Errorf("%s digest disagrees with dnspython\n  got:  %s\n  want: %s",
+				zonemdAlgName(tc.alg), got, tc.want)
+		}
+	}
+}
+
+// RFC 8976 §3.3.1 counts duplicate RRs once, and a duplicate is owner, class,
+// type and RDATA -- NOT the TTL. Two records differing only in TTL are one
+// record in a malformed RRset (RFC 2181 §5.2), which is how miekg's own
+// IsDuplicate treats them ("ignore TTL") and how dnspython reads them: it
+// keeps one rdata at the LOWER TTL, whichever order it read them in.
+//
+// Comparing whole wire records here would hash both and produce a digest no
+// other implementation reproduces -- the same class of divergence as the sort
+// tiebreak above, found the same way.
+//
+// The expected values are dnspython 2.8.0's, so the survivor's TTL is pinned
+// too: a version of this that counted once but kept the 7200 copy would
+// produce a different digest and fail here.
+const duplicateTTLZone = `dup.example.	3600	IN	SOA	ns.dup.example. hostmaster.dup.example. 5 7200 1800 604800 7200
+dup.example.	3600	IN	NS	ns.dup.example.
+ns.dup.example.	3600	IN	A	192.0.2.1
+two.dup.example.	3600	IN	A	10.0.0.1
+two.dup.example.	7200	IN	A	10.0.0.1
+`
+
+func TestZoneDigestCountsATTLOnlyDuplicateOnce(t *testing.T) {
+	rrs := parseZoneRRs(t, "dup.example.", duplicateTTLZone)
+	if len(rrs) != 5 {
+		t.Fatalf("the fixture parsed to %d records, want 5 (both TTL copies)", len(rrs))
+	}
+
+	for _, tc := range []struct {
+		alg  uint8
+		want string
+	}{
+		{ZonemdAlgSHA384, "6f129a52fe5f0b26a69dcf94dae196cf39c7a08d6ec42c728ba7920d844b6d63" +
+			"c5d650ca19f98182d9622ac53bf1bad1"},
+		{ZonemdAlgSHA512, "9bd20eb5514bc19afefc896bccc0225151e657629ca2d5c731f391d955b3f0cf" +
+			"d36a16fc2fd82c04afdb8ab229fc13bf6dc664b6c0d983f3321ef4d8cd9a328c"},
+	} {
+		got, err := ZoneDigestHex("dup.example.", rrs, ZonemdSchemeSimple, tc.alg)
+		if err != nil {
+			t.Fatalf("%s: %v", zonemdAlgName(tc.alg), err)
+		}
+		if got != tc.want {
+			t.Errorf("%s digest disagrees with dnspython\n  got:  %s\n  want: %s",
+				zonemdAlgName(tc.alg), got, tc.want)
+		}
+	}
+
+	// ...and the answer must not depend on which copy the caller hands over
+	// first, or a zone read from a file would digest differently from the same
+	// zone walked from a snapshot.
+	reversed := append([]dns.RR(nil), rrs...)
+	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
+		reversed[i], reversed[j] = reversed[j], reversed[i]
+	}
+	a, err := ZoneDigestHex("dup.example.", rrs, ZonemdSchemeSimple, ZonemdAlgSHA384)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ZoneDigestHex("dup.example.", reversed, ZonemdSchemeSimple, ZonemdAlgSHA384)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Errorf("the digest depends on input order when a TTL-only duplicate is"+
+			" present\n  forward:  %s\n  reversed: %s", a, b)
+	}
+}
