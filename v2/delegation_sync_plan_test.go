@@ -89,7 +89,7 @@ func TestPlanExcludesNotifyForAnUnsignedZone(t *testing.T) {
 	res := DsyncResult{Rdata: []*core.DSYNC{dsyncRR(core.SchemeNotify, dns.TypeCSYNC, "notify.example.")}}
 
 	// nil imr is safe: the gate must refuse before any address resolution.
-	zd.planConsiderNotify(context.Background(), nil, res, plan)
+	zd.planConsiderNotify(context.Background(), nil, res, plan, SyncRoleChild)
 
 	if hasCandidate(plan, "NOTIFY") {
 		t.Fatal("NOTIFY became a candidate for an unsigned zone")
@@ -111,7 +111,7 @@ func TestPlanRecordsNotAdvertisedSeparately(t *testing.T) {
 	plan := &ParentSyncPlan{Parent: "example."}
 	res := DsyncResult{Rdata: []*core.DSYNC{dsyncRR(core.SchemeUpdate, dns.TypeANY, "upd.example.")}}
 
-	zd.planConsiderNotify(context.Background(), nil, res, plan)
+	zd.planConsiderNotify(context.Background(), nil, res, plan, SyncRoleChild)
 
 	reason, ok := skipReason(plan, "NOTIFY")
 	if !ok {
@@ -583,5 +583,167 @@ func TestNoViperReadsOfTheDelegationsyncBlock(t *testing.T) {
 					f, i+1, strings.TrimSpace(line))
 			}
 		}
+	}
+}
+
+// A NOTIFY the parent cannot act on must not be planned for a proxied zone.
+//
+// The walk stops at the first success and a vacuous NOTIFY looks like one, so
+// with the shipped `schemes: [notify, update]` a signed zone publishing neither
+// CDS nor CSYNC would have its NOTIFY "succeed" and the UPDATE and API
+// transports this plan exists to offer would never run. That is the ordinary
+// state of a DSYNC-unaware primary: it signs, and has never heard of CDS.
+//
+// Only the SKIP path is driven through planConsiderNotify. The accept path
+// continues into target resolution, which needs a live IMR, so what the gate
+// decides is tested through zoneHasCdsOrCsync directly rather than by
+// contorting the plan call.
+func TestPlanNotifyNeedsSomethingTheParentCanRead(t *testing.T) {
+	notifyRR := []*core.DSYNC{dsyncRR(core.SchemeNotify, dns.TypeCSYNC, "notify.example.")}
+
+	signedNoSignal := proxyApiBaseZone() +
+		"api.example.	3600 IN DNSKEY 257 3 15 l02Woi0iS8Aa25FQkUd9RMzZHJpBoRQwAQEX1SxZJA4=\n"
+
+	t.Run("proxy, signed, no CDS or CSYNC: skipped", func(t *testing.T) {
+		zd := testZone(t, proxyApiZone, signedNoSignal)
+		plan := &ParentSyncPlan{Parent: "example."}
+		zd.planConsiderNotify(context.Background(), nil, DsyncResult{Rdata: notifyRR}, plan, SyncRoleProxy)
+		if hasCandidate(plan, "NOTIFY") {
+			t.Fatal("NOTIFY was planned for a zone with nothing for the parent to read;" +
+				" it would succeed vacuously and stop the walk before UPDATE/API")
+		}
+		reason, _ := skipReason(plan, "NOTIFY")
+		if !strings.Contains(reason, "neither CDS nor CSYNC") {
+			t.Errorf("skip reason %q should say why there is nothing to read", reason)
+		}
+	})
+
+	// The child path publishes its own CDS as part of signing, so applying the
+	// same test there would race its first publication for no benefit. A child
+	// with no CDS must still reach target resolution.
+	t.Run("child role is not subject to the CDS test", func(t *testing.T) {
+		zd := testZone(t, proxyApiZone, signedNoSignal)
+		plan := &ParentSyncPlan{Parent: "example."}
+		func() {
+			defer func() { _ = recover() }() // target resolution needs a live IMR
+			zd.planConsiderNotify(context.Background(), nil, DsyncResult{Rdata: notifyRR}, plan, SyncRoleChild)
+		}()
+		if reason, skipped := skipReason(plan, "NOTIFY"); skipped &&
+			strings.Contains(reason, "neither CDS nor CSYNC") {
+			t.Errorf("the proxy-only CDS test was applied to the child role: %s", reason)
+		}
+	})
+}
+
+// What the gate above decides, tested directly.
+func TestZoneHasCdsOrCsync(t *testing.T) {
+	signed := proxyApiBaseZone() +
+		"api.example.	3600 IN DNSKEY 257 3 15 l02Woi0iS8Aa25FQkUd9RMzZHJpBoRQwAQEX1SxZJA4=\n"
+
+	tests := []struct {
+		name string
+		zone string
+		want bool
+	}{
+		{"signed, publishes neither", signed, false},
+		{"publishes CDS", signed +
+			"api.example.	3600 IN CDS 12345 15 2 0000000000000000000000000000000000000000000000000000000000000000\n", true},
+		{"publishes CSYNC", signed + "api.example.	3600 IN CSYNC 66 3 A NS AAAA\n", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := zoneHasCdsOrCsync(testZone(t, proxyApiZone, tc.zone)); got != tc.want {
+				t.Errorf("zoneHasCdsOrCsync = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// An unreadable apex must not remove a transport the operator configured.
+	t.Run("unreadable apex is not evidence of absence", func(t *testing.T) {
+		if !zoneHasCdsOrCsync(&ZoneData{ZoneName: "broken.example."}) {
+			t.Error("a zone whose apex cannot be read was treated as publishing neither")
+		}
+	})
+}
+
+// A parent advertising exactly "DSYNC NOTIFY CDS" offers NOTIFY. The filter
+// inherited from BestSyncScheme accepted CSYNC and ANY only, so such a parent
+// read as offering nothing -- while this code sends CDS notifies on any DNSKEY
+// change and from the startup synthesis.
+func TestFindDsyncAcceptsNotifyCDS(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rtype uint16
+		want  bool
+	}{
+		{"NOTIFY(CDS)", dns.TypeCDS, true},
+		{"NOTIFY(CSYNC)", dns.TypeCSYNC, true},
+		{"NOTIFY(ANY)", dns.TypeANY, true},
+		{"NOTIFY(DS) is not a signal type", dns.TypeDS, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := DsyncResult{Rdata: []*core.DSYNC{dsyncRR(core.SchemeNotify, tc.rtype, "notify.example.")}}
+			got := findDsync(res, core.SchemeNotify, true) != nil
+			if got != tc.want {
+				t.Errorf("findDsync matched=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The startup hole: a proxied child that is already unsigned while the parent
+// still holds a DS.
+//
+// compareParentDS returns early for a zone whose keys tdns does not manage --
+// every proxied zone -- so the DS dimension never reached InSync. Matching NS
+// and glue were enough to call the delegation synchronised, and
+// ProxyStartupReconcile bails on InSync, so the empty-DS repair never ran on
+// restart. Steady-state un-signing was unaffected: the DNSKEY removal is itself
+// a transfer change.
+//
+// Driven through unmanagedZoneNeedsDSRepair rather than by re-deriving the
+// condition here. The first version of this test did the latter and would have
+// passed with the check deleted.
+func TestUnsignedChildWithParentDSNeedsRepair(t *testing.T) {
+	signed := proxyApiBaseZone() +
+		"api.example.\t3600 IN DNSKEY 257 3 15 l02Woi0iS8Aa25FQkUd9RMzZHJpBoRQwAQEX1SxZJA4=\n"
+	csk := proxyApiBaseZone() +
+		"api.example.\t3600 IN DNSKEY 256 3 15 l02Woi0iS8Aa25FQkUd9RMzZHJpBoRQwAQEX1SxZJA4=\n"
+
+	ds, err := dns.NewRR("api.example. 3600 IN DS 12345 15 2 " +
+		"0000000000000000000000000000000000000000000000000000000000000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	apexOf := func(t *testing.T, zone string) *OwnerData {
+		t.Helper()
+		zd := testZone(t, proxyApiZone, zone)
+		apex, err := zd.GetOwner(zd.ZoneName)
+		if err != nil || apex == nil {
+			t.Fatalf("apex: %v", err)
+		}
+		return apex
+	}
+
+	tests := []struct {
+		name     string
+		apex     *OwnerData
+		parentDS []dns.RR
+		want     bool
+	}{
+		{"unsigned child, parent holds a DS", apexOf(t, proxyApiBaseZone()), []dns.RR{ds}, true},
+		{"unsigned child, parent holds none", apexOf(t, proxyApiBaseZone()), nil, false},
+		{"signed child, parent holds a DS", apexOf(t, signed), []dns.RR{ds}, false},
+		{"flags-256 CSK is signed too", apexOf(t, csk), []dns.RR{ds}, false},
+		{"unreadable apex is not evidence", nil, []dns.RR{ds}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unmanagedZoneNeedsDSRepair(tc.apex, tc.parentDS); got != tc.want {
+				t.Errorf("unmanagedZoneNeedsDSRepair = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

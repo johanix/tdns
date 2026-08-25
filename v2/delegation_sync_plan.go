@@ -205,7 +205,7 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 		case "api":
 			zd.planConsiderApi(dsyncRes, plan)
 		case "notify":
-			zd.planConsiderNotify(ctx, imr, dsyncRes, plan)
+			zd.planConsiderNotify(ctx, imr, dsyncRes, plan, role)
 		default:
 			plan.Skipped = append(plan.Skipped, SkippedScheme{
 				Scheme: scheme, Reason: "unknown scheme name in delegationsync.child.schemes"})
@@ -263,9 +263,21 @@ func findDsync(res DsyncResult, scheme core.DsyncScheme, wantNotifyType bool) *c
 		if drr.Scheme != scheme {
 			continue
 		}
-		// NOTIFY is only actionable for the types that can be signalled about;
-		// this preserves the filter BestSyncScheme applied for years.
-		if wantNotifyType && drr.Type != dns.TypeCSYNC && drr.Type != dns.TypeANY {
+		// NOTIFY is only actionable for the types that can be signalled about.
+		//
+		// CDS belongs in that set and was missing: the filter inherited from
+		// BestSyncScheme accepted CSYNC and ANY only, so a parent advertising
+		// exactly "DSYNC NOTIFY CDS" was reported as not offering NOTIFY at
+		// all. That was survivable while CDS notifies were rare; this code
+		// sends them on any DNSKEY change and from the startup synthesis, so
+		// the mismatch is now load-bearing.
+		//
+		// No preference between the accepted types is expressed, deliberately:
+		// emitProxyNotifies sends CDS and CSYNC to the SAME target list, so one
+		// advertised NOTIFY target serves both signals and choosing between
+		// them would decide nothing.
+		if wantNotifyType &&
+			drr.Type != dns.TypeCDS && drr.Type != dns.TypeCSYNC && drr.Type != dns.TypeANY {
 			continue
 		}
 		return drr
@@ -339,7 +351,22 @@ func (zd *ZoneData) planConsiderApi(res DsyncResult, plan *ParentSyncPlan) {
 	})
 }
 
-func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncResult, plan *ParentSyncPlan) {
+// zoneHasCdsOrCsync reports whether the served zone publishes either of the
+// records a parent re-scans after a NOTIFY.
+//
+// An apex that cannot be read is treated as HAVING them: an unreadable zone is
+// not evidence that the child publishes nothing, and guessing "no" would remove
+// a transport the operator configured on the strength of a failed lookup.
+func zoneHasCdsOrCsync(zd *ZoneData) bool {
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil || apex.RRtypes == nil {
+		return true
+	}
+	return len(apex.RRtypes.GetOnlyRRSet(dns.TypeCDS).RRs) > 0 ||
+		len(apex.RRtypes.GetOnlyRRSet(dns.TypeCSYNC).RRs) > 0
+}
+
+func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncResult, plan *ParentSyncPlan, role SyncRole) {
 	drr := findDsync(res, core.SchemeNotify, true)
 	if drr == nil {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{"NOTIFY", "parent does not advertise it"})
@@ -359,6 +386,27 @@ func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncR
 	if !zoneIsSigned(zd) {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{"NOTIFY",
 			"zone is unsigned; a NOTIFY would leave the parent nothing it can validate"})
+		return
+	}
+	// The other half of the same gate, and the one the proxy actually meets.
+	//
+	// Being signed is not enough for a NOTIFY to mean anything. What the parent
+	// re-scans is CDS and CSYNC, so a zone that publishes neither leaves it with
+	// nothing to act on however well it validates -- and that is the ordinary
+	// state of a DSYNC-unaware primary, which is exactly the zone a proxy
+	// serves. It signs; it has never heard of CDS.
+	//
+	// It matters because the walk stops at the first success and a vacuous
+	// NOTIFY looks like one. The shipped sample configs put notify first, so
+	// without this the UPDATE and API transports this whole plan exists to
+	// offer would never be reached for such a zone.
+	//
+	// Scoped to the proxy role. A tdns-auth child publishes its own CDS as part
+	// of signing, so the same test there would race its first publication for
+	// no benefit.
+	if role == SyncRoleProxy && !zoneHasCdsOrCsync(zd) {
+		plan.Skipped = append(plan.Skipped, SkippedScheme{"NOTIFY",
+			"proxied zone publishes neither CDS nor CSYNC; a NOTIFY would leave the parent nothing to read"})
 		return
 	}
 	target, terr := resolveDsyncTarget(ctx, imr, drr)
