@@ -65,9 +65,6 @@ type RefreshCounter struct {
 	Zonefile       string
 }
 
-// initialLoadZone handles the first load of a zone: refresh, counter setup,
-// post-init hooks, OnFirstLoad callbacks, and downstream notification.
-// Called for both newly-created zones and pre-registered zone stubs.
 // noteRefreshFailure records a failed refresh, EXCEPT when the failure is the
 // context being cancelled.
 //
@@ -90,6 +87,9 @@ func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 	return true
 }
 
+// initialLoadZone handles the first load of a zone: refresh, counter setup,
+// post-init hooks, OnFirstLoad callbacks, and downstream notification.
+// Called for both newly-created zones and pre-registered zone stubs.
 func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefresher, conf *Config,
 	refreshCounters *core.ConcurrentMap[string, *RefreshCounter],
 	tryPostpass func(string)) (bool, error) {

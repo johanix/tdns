@@ -572,7 +572,6 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	return true, nil
 }
 
-// Return updated, err
 // shouldDiscardUnchangedTransfer reports whether a completed transfer should be
 // thrown away because it carries the serial we already have.
 //
@@ -589,6 +588,9 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 	return incomingSerial == currentSerial && !force
 }
 
+// FetchFromUpstream pulls the zone from one of its configured primaries.
+// Returns whether the zone was updated.
+//
 // force means the operator explicitly asked for a retransfer, so the zone is
 // re-fetched and re-applied even when upstream's serial has not moved. See the
 // unchanged-serial check below for why that matters.
