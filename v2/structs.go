@@ -905,10 +905,10 @@ type DelegationSyncStatus struct {
 	// "withdraw the DS" when this is set and "no opinion about DS" when it is
 	// not; the two are opposite instructions that look identical as a nil
 	// slice, so the flag travels with the field and must be read first.
-	NewDSKnown bool `json:"-"`
-	Error         bool
-	ErrorMsg      string
-	UpdateResult  UpdateResult // Experimental
+	NewDSKnown   bool `json:"-"`
+	Error        bool
+	ErrorMsg     string
+	UpdateResult UpdateResult // Experimental
 	// Complete new delegation data for replace mode
 	NewNS   []dns.RR `json:"-"`
 	NewA    []dns.RR `json:"-"`
