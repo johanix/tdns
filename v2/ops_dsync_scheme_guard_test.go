@@ -116,37 +116,53 @@ func TestPublishedDsyncSliceIsCopiedNotAliased(t *testing.T) {
 // and an owner with no RRtypes at all is a dereference away from taking the
 // process down. Neither is a reason to fail publication: both mean "nothing
 // published yet", which is precisely the case PublishDsyncRRs exists to fix.
-func TestPublishedDsyncSchemesHandlesAnOwnerWithoutDsync(t *testing.T) {
-	t.Run("no DSYNC RRset at the owner", func(t *testing.T) {
-		od := &OwnerData{Name: "_dsync.example.", RRtypes: NewRRTypeStore()}
-		od.RRtypes.Set(dns.TypeTXT, core.RRset{RRs: []dns.RR{
-			mustDsyncRR(t, "_dsync.example. 7200 IN TXT \"not a dsync record\""),
-		}})
+//
+// Driven through publishedDsyncRRs, the function PublishDsyncRRs actually
+// calls. An earlier version restated the guard inline and would have gone on
+// passing if the production path regressed to an unsafe dereference.
+func TestPublishedDsyncRRs(t *testing.T) {
+	withTxt := &OwnerData{Name: "_dsync.example.", RRtypes: NewRRTypeStore()}
+	withTxt.RRtypes.Set(dns.TypeTXT, core.RRset{RRs: []dns.RR{
+		mustDsyncRR(t, "_dsync.example. 7200 IN TXT \"not a dsync record\""),
+	}})
 
-		var published []dns.RR
-		if od.RRtypes != nil {
-			if existing, ok := od.RRtypes.Get(core.TypeDSYNC); ok {
-				published = existing.RRs
-			}
-		}
-		if len(published) != 0 {
-			t.Errorf("an owner with no DSYNC RRset yielded %d records", len(published))
-		}
-		if got := publishedDsyncSchemes(published); len(got) != 0 {
-			t.Errorf("schemes from an absent RRset = %v, want none", got)
-		}
-	})
+	withDsync := &OwnerData{Name: "_dsync.example.", RRtypes: NewRRTypeStore()}
+	withDsync.RRtypes.Set(core.TypeDSYNC, core.RRset{RRs: []dns.RR{
+		mustDsyncRR(t, "_dsync.example. 7200 IN DSYNC ANY UPDATE 5359 upd.example."),
+	}})
 
-	t.Run("owner with nil RRtypes", func(t *testing.T) {
-		od := &OwnerData{Name: "_dsync.example."}
-		var published []dns.RR
-		if od.RRtypes != nil {
-			if existing, ok := od.RRtypes.Get(core.TypeDSYNC); ok {
-				published = existing.RRs
+	for _, tc := range []struct {
+		name  string
+		owner *OwnerData
+		want  int
+	}{
+		{"nil owner", nil, 0},
+		{"owner with nil RRtypes", &OwnerData{Name: "_dsync.example."}, 0},
+		{"owner with a TXT but no DSYNC", withTxt, 0},
+		{"owner with a DSYNC", withDsync, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := publishedDsyncRRs(tc.owner); len(got) != tc.want {
+				t.Errorf("publishedDsyncRRs returned %d records, want %d", len(got), tc.want)
 			}
+		})
+	}
+
+	// The copy, not the alias: appending to the result must leave the published
+	// RRset untouched, and the two must not share a backing array.
+	t.Run("result is a copy", func(t *testing.T) {
+		got := publishedDsyncRRs(withDsync)
+		if len(got) != 1 {
+			t.Fatalf("setup: got %d records", len(got))
 		}
-		if len(published) != 0 {
-			t.Errorf("an owner with nil RRtypes yielded %d records", len(published))
+		_ = append(got, mustDsyncRR(t, "_dsync.example. 7200 IN DSYNC ANY API 443 api.example."))
+
+		published, _ := withDsync.RRtypes.Get(core.TypeDSYNC)
+		if len(published.RRs) != 1 {
+			t.Errorf("the published RRset grew to %d records", len(published.RRs))
+		}
+		if &got[0] == &published.RRs[0] {
+			t.Error("the result shares its backing array with the published RRset")
 		}
 	})
 }
