@@ -103,7 +103,6 @@ func dsAfterActions(child string, currentDS, actions []dns.RR) (result []dns.RR,
 	return result, touched
 }
 
-
 // sameRecord reports whether two records are the same owner, type and rdata,
 // ignoring class and TTL.
 //
@@ -118,7 +117,6 @@ func sameRecord(a, b dns.RR) bool {
 	na.Header().Ttl, nb.Header().Ttl = 0, 0
 	return dns.IsDuplicate(na, nb)
 }
-
 
 // sameDSSet reports whether two DS RRsets hold the same records, order aside.
 func sameDSSet(a, b []dns.RR) bool {

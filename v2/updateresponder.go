@@ -628,7 +628,6 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	return true, updateZone, nil
 }
 
-
 // Updates to auth data must be validated.
 func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg) (bool, bool, error) {
 

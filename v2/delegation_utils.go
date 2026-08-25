@@ -647,7 +647,6 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	return differ, nil
 }
 
-
 // rolloverOwnsDS reports whether the rollover engine currently owns this zone's
 // DS RRset, in which case the delegation-sync comparison must not touch it.
 //
