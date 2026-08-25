@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -262,7 +263,7 @@ func TestVerifyZonemdGateRefusesACorruptZone(t *testing.T) {
 	bad = strings.Replace(bad, "ZONEMD\t100 1 1", "ZONEMD\t101 1 1", 1)
 	operatorEdit(t, zd, bad)
 
-	updated, err := zd.Refresh(false, false, false, &Config{})
+	updated, err := zd.Refresh(context.Background(), false, false, false, &Config{})
 	if err == nil {
 		t.Fatal("a zone whose ZONEMD does not describe it was adopted without complaint")
 	}
@@ -299,7 +300,7 @@ func TestVerifyZonemdGateAcceptsAGoodZone(t *testing.T) {
 	good = body + "example.\t3600\tIN\tZONEMD\t101 1 1 " + d + "\n"
 	operatorEdit(t, zd, good)
 
-	if _, err := zd.Refresh(false, false, false, &Config{}); err != nil {
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
 		t.Fatalf("a zone whose ZONEMD describes it was refused: %v", err)
 	}
 	if _, ok := zd.publishedSnapshot().Data["new.example."]; !ok {
@@ -318,7 +319,7 @@ func TestVerifyZonemdGateAcceptsAZoneWithNoZonemd(t *testing.T) {
 
 	operatorEdit(t, zd, strings.Replace(vzGateBase, " 100 7200", " 101 7200", 1)+
 		"other.example.\t3600\tIN\tA\t10.0.0.8\n")
-	if _, err := zd.Refresh(false, false, false, &Config{}); err != nil {
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
 		t.Fatalf("a zone with no ZONEMD was refused: %v", err)
 	}
 	if _, ok := zd.publishedSnapshot().Data["other.example."]; !ok {
@@ -342,7 +343,7 @@ func TestVerifyZonemdGateWarnModeAdopts(t *testing.T) {
 		"www.example.\t3600\tIN\tA\t192.0.2.1\nwarned.example.\t3600\tIN\tA\t10.0.0.7", 1)
 	operatorEdit(t, zd, bad)
 
-	if _, err := zd.Refresh(false, false, false, &Config{}); err != nil {
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
 		t.Fatalf("warn mode refused the zone: %v", err)
 	}
 	if _, ok := zd.publishedSnapshot().Data["warned.example."]; !ok {
@@ -360,7 +361,7 @@ func TestVerifyZonemdGateIsOffByDefault(t *testing.T) {
 	bad = strings.Replace(bad, "ZONEMD\t100 1 1", "ZONEMD\t101 1 1", 1)
 	operatorEdit(t, zd, bad)
 
-	if _, err := zd.Refresh(false, false, false, &Config{}); err != nil {
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
 		t.Fatalf("a zone was refused without verify-zonemd set: %v", err)
 	}
 }
@@ -573,7 +574,7 @@ func TestVerifyZonemdGateRefusesACorruptTransfer(t *testing.T) {
 	zd := secondaryOf(t, kdb, addr)
 	before := zd.publishedSnapshot().Serial
 
-	updated, err := zd.FetchFromUpstream(false, false, false, nil, &Config{})
+	updated, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{})
 	if err == nil {
 		t.Fatal("a transferred zone whose ZONEMD does not describe it was adopted")
 	}
@@ -604,7 +605,7 @@ func TestVerifyZonemdGateAcceptsAGoodTransfer(t *testing.T) {
 	defer stop()
 
 	zd := secondaryOf(t, kdb, addr)
-	if _, err := zd.FetchFromUpstream(false, false, false, nil, &Config{}); err != nil {
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
 		t.Fatalf("a transfer whose ZONEMD describes it was refused: %v", err)
 	}
 	snap := zd.publishedSnapshot()
@@ -627,7 +628,7 @@ func TestVerifyZonemdGateWarnModeAdoptsATransfer(t *testing.T) {
 	zd.zonemdOnVerifyFailure = ZonemdOnFailureWarn
 	zd.mu.Unlock()
 
-	if _, err := zd.FetchFromUpstream(false, false, false, nil, &Config{}); err != nil {
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
 		t.Fatalf("warn mode refused the transfer: %v", err)
 	}
 	if _, ok := zd.publishedSnapshot().Data["fresh.up.example."]; !ok {
@@ -645,10 +646,48 @@ func TestVerifyZonemdGateOffAdoptsACorruptTransfer(t *testing.T) {
 	zd := secondaryOf(t, kdb, addr)
 	zd.SetOption(OptVerifyZonemd, false)
 
-	if _, err := zd.FetchFromUpstream(false, false, false, nil, &Config{}); err != nil {
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
 		t.Fatalf("a transfer was refused without verify-zonemd set: %v", err)
 	}
 	if _, ok := zd.publishedSnapshot().Data["fresh.up.example."]; !ok {
 		t.Error("the transfer was not adopted")
+	}
+}
+
+// The gate digests the whole incoming zone, which for a large one takes real
+// time, and it sits between the caller's own cancellation checks. Verifying a
+// zone for a daemon on its way out is work nobody will use, and doing it
+// delays the shutdown by a full digest -- the same reasoning that puts a check
+// in front of the parse and the publish either side of it.
+func TestVerifyZonemdGateHonoursCancellation(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	addr, stop := startRRListAXFRServer(t, "up.example.", upstreamZoneText(t, true))
+	defer stop()
+
+	zd := secondaryOf(t, kdb, addr)
+	before := zd.publishedSnapshot().Serial
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := zd.FetchFromUpstream(ctx, false, false, false, nil, &Config{}); err == nil {
+		t.Fatal("a cancelled transfer was adopted")
+	}
+	if got := zd.publishedSnapshot().Serial; got != before {
+		t.Errorf("a cancelled refresh changed what is served: serial %d, was %d", got, before)
+	}
+
+	// And the gate itself reports the cancellation rather than digesting: with
+	// a cancelled context it must not reach the verification at all.
+	incoming := testZone(t, "up.example.", `up.example.	3600	IN	SOA	ns.up.example. hostmaster.up.example. 200 7200 1800 604800 7200
+up.example.	3600	IN	NS	ns.up.example.
+`)
+	t.Cleanup(incoming.stopPublisher)
+	err := zd.gateIncomingZonemd(ctx, incoming, "test")
+	if err == nil {
+		t.Fatal("the gate ran with a cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("the gate did not report the cancellation: %v", err)
 	}
 }

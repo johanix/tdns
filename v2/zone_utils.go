@@ -489,7 +489,7 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	// verify-zonemd, on the zone about to be adopted and not yet on the zone
 	// being served. This is the last point at which a refusal still means
 	// anything. See gateIncomingZonemd.
-	if err := zd.gateIncomingZonemd(&new_zd, "the zone file"); err != nil {
+	if err := zd.gateIncomingZonemd(ctx, &new_zd, "the zone file"); err != nil {
 		zd.SetStatus(prevStatus)
 		// Drop the cached stat, for the same reason the failed-adoption path
 		// below does: this file was considered and declined, so the next
@@ -690,7 +690,7 @@ func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force
 	// case the option exists for: a secondary cannot re-derive a digest it was
 	// not given, so checking the one it WAS given is the only assurance it has
 	// that the zone it is about to serve is the zone its primary published.
-	if err := zd.gateIncomingZonemd(&new_zd, "upstream"); err != nil {
+	if err := zd.gateIncomingZonemd(ctx, &new_zd, "upstream"); err != nil {
 		zd.SetStatus(prevStatus)
 		return false, err
 	}

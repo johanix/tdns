@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -348,9 +349,18 @@ func (zd *ZoneData) verifyZonemdOfWorkingData(opts VerifyZonemdOpts) (*ZonemdRep
 //
 // zd is the LIVE zone (whose options and failure mode apply); incoming is the
 // scratch zone being considered.
-func (zd *ZoneData) gateIncomingZonemd(incoming *ZoneData, source string) error {
+func (zd *ZoneData) gateIncomingZonemd(ctx context.Context, incoming *ZoneData, source string) error {
 	if zd == nil || incoming == nil || !zd.Options[OptVerifyZonemd] {
 		return nil
+	}
+
+	// Digesting a large zone takes real time, and this runs between the
+	// caller's own cancellation checks. Verifying a zone for a daemon that is
+	// shutting down is work nobody will use, and doing it delays the shutdown
+	// by the length of a full digest -- the same reasoning that puts a check
+	// in front of the parse and the publish either side of here.
+	if cerr := ctx.Err(); cerr != nil {
+		return fmt.Errorf("verify-zonemd %s: %w", zd.ZoneName, cerr)
 	}
 
 	report, err := incoming.verifyZonemdOfWorkingData(VerifyZonemdOpts{})
