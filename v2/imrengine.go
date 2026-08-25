@@ -241,10 +241,24 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		}
 	}
 
-	conf.Internal.ImrEngine = imr
-	Globals.ImrEngine = imr
+	conf.publishImr(imr)
 	lgImr.Info("InitImrEngine: IMR initialized and available")
 	return nil
+}
+
+// publishImr stores the finished Imr and announces it, in that order.
+//
+// One function rather than three statements at the call site, because the order
+// is the entire safety property and it is invisible: the stores must happen
+// BEFORE the close, so that a goroutine which has received from ImrReady is
+// guaranteed by the memory model to see a fully constructed Imr rather than a
+// pointer it may or may not observe. Written inline, the announce is one stray
+// edit away from moving above the stores, or from being dropped altogether --
+// and neither mistake shows up in a test that builds an ImrReadiness directly.
+func (conf *Config) publishImr(imr *Imr) {
+	conf.Internal.ImrEngine = imr
+	Globals.ImrEngine = imr
+	conf.Internal.ImrReady.Publish()
 }
 
 func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {

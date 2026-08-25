@@ -12,33 +12,68 @@ import (
 	"github.com/miekg/dns"
 )
 
+// publishedDsyncSchemes reports which DSYNC schemes an existing RRset already
+// carries, so PublishDsyncRRs can leave those alone and synthesize only the
+// rest. Anything that is not a DSYNC record is ignored rather than treated as
+// an error: the caller's job is to add what is missing, not to police what the
+// operator put there.
+func publishedDsyncSchemes(rrs []dns.RR) map[core.DsyncScheme]bool {
+	out := map[core.DsyncScheme]bool{}
+	for _, rr := range rrs {
+		prr, ok := rr.(*dns.PrivateRR)
+		if !ok {
+			continue
+		}
+		if d, ok := prr.Data.(*core.DSYNC); ok {
+			out[d.Scheme] = true
+		}
+	}
+	return out
+}
+
 func (zd *ZoneData) PublishDsyncRRs() error {
 	lg.Debug("PublishDsyncRRs", "zone", zd.ZoneName)
 	rrset := core.RRset{
 		Name: zd.ZoneName,
 	}
 
-	// Verify that there is no DSYNC RRset already present.
+	// An existing DSYNC record is the operator's and is never rewritten -- but
+	// the guard is PER SCHEME, not all-or-nothing.
 	//
-	// Note that this is all-or-nothing and deliberately left that way: an
-	// existing DSYNC RRset is treated as the operator's, and tdns does not
-	// add to it. The consequence, worth knowing before deploying a new
-	// scheme: adding "api" to delegationsync.parent.schemes on a zone that
-	// already publishes DSYNC records does nothing until the existing RRset
-	// is removed (UnpublishDsyncRRs) and republished. Making the guard
-	// per-scheme would change behaviour on the working NOTIFY/UPDATE paths,
-	// which does not belong in the PR that adds a scheme.
+	// All-or-nothing meant that adding a scheme to a zone which already
+	// published DSYNC records did nothing whatsoever, silently: no record, no
+	// error, no warning. The documented remedy was to unpublish the RRset and
+	// republish it, which also threw away the operator's own records and, until
+	// recently, could not run at all because the delete it built did not parse.
+	//
+	// So: whatever is already published stays exactly as it is, and only
+	// schemes with no DSYNC record of their own are synthesized.
 	owner, err := zd.GetOwner("_dsync." + zd.ZoneName)
 	if err != nil {
 		return fmt.Errorf("PublishDsyncRRs: error fetching _dsync owner for zone %s: %v", zd.ZoneName, err)
 	}
 	if owner != nil {
-		rrset.RRs = owner.RRtypes.GetOnlyRRSet(core.TypeDSYNC).RRs
-		if len(rrset.RRs) > 0 {
-			lg.Debug("DSYNC RRset already present, not synthesizing", "zone", zd.ZoneName)
-			return nil
+		// Copy, do not alias. The published RRset's backing array usually has
+		// spare capacity -- zone-file load sizes slices generously -- so an
+		// append onto it below would write a synthesized DSYNC record straight
+		// into the live RRset, visible to queries, with no serial bump and no
+		// journal entry. The bug is invisible until a zone happens to have the
+		// capacity, which makes it exactly the kind that survives testing.
+		// An owner can exist without a DSYNC RRset -- _dsync.<zone> may carry a
+		// TXT and nothing else -- and an owner with no RRtypes at all is a
+		// dereference away from taking the process down. Neither is a reason to
+		// fail publication: both mean "nothing published yet", which is the
+		// case this function exists to fix.
+		var published []dns.RR
+		if owner.RRtypes != nil {
+			if existing, ok := owner.RRtypes.Get(core.TypeDSYNC); ok {
+				published = existing.RRs
+			}
 		}
+		rrset.RRs = append(make([]dns.RR, 0, len(published)), published...)
 	}
+	publishedSchemes := publishedDsyncSchemes(rrset.RRs)
+	alreadyPublished := len(rrset.RRs)
 
 	ttl := 7200
 	addr_rrs := []dns.RR{}
@@ -73,6 +108,11 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 
 	for _, scheme := range dsc.Schemes {
 		lg.Debug("checking DSYNC scheme", "zone", zd.ZoneName, "scheme", scheme)
+		if sv, known := core.StringToScheme[strings.ToUpper(scheme)]; known && publishedSchemes[sv] {
+			lg.Debug("DSYNC scheme already published, leaving it alone",
+				"zone", zd.ZoneName, "scheme", scheme)
+			continue
+		}
 		switch s := strings.ToUpper(scheme); s {
 		case "NOTIFY":
 			replacer := zd.ZoneName
@@ -213,6 +253,14 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	}
 
 	if !dsync_added {
+		// Every configured scheme is already published: nothing to do, and not
+		// an error. Only a zone that ends up with no DSYNC records at all has
+		// a broken configuration worth reporting.
+		if alreadyPublished > 0 {
+			lg.Debug("every configured DSYNC scheme is already published, nothing to do",
+				"zone", zd.ZoneName, "records", alreadyPublished)
+			return nil
+		}
 		return fmt.Errorf("no DSYNC RRs added for zone %s", zd.ZoneName)
 	}
 

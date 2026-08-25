@@ -94,12 +94,18 @@ func (zd *ZoneData) ProxyDelegationPreRefresh(new_zd *ZoneData) {
 // RRset comparison. A missing RRset on either side is treated as an empty set,
 // so an appearance or disappearance of the RRset counts as a change.
 //
-// A missing APEX in the incoming zone is different, and is not a change: a zone
-// without an apex is a broken or empty transfer, not a child that withdrew
-// every record at once. Treating it as an empty set would report the served
-// zone's CDS/CSYNC as removed and send the parent a notification about a
-// transfer that failed. An RRset removal from a zone that still HAS an apex
-// stays detectable, which is the case that carries real intent.
+// A missing APEX in the incoming zone is different, and is not a change. The
+// absence does not come from the wire: AXFR is framed by its SOA, and a stream
+// that ends without the closing one is reported as a failed transfer long
+// before the data reaches here. It comes from the snapshot model. new_zd is a
+// scratch zone, and a scratch zone carries Ready=true with no published
+// snapshot, so the accessor legitimately finds nothing -- the same nil that
+// used to segfault the delegation diff.
+//
+// Treating that as an empty set would report the served zone's CDS/CSYNC as
+// removed and notify the parent about a change no child made. An RRset removal
+// from a zone that still HAS an apex stays detectable, which is the case that
+// carries real intent.
 func (zd *ZoneData) apexRRsetChanged(new_zd *ZoneData, rrtype uint16) bool {
 	var oldRRs, newRRs []dns.RR
 	if oldapex, err := zd.GetOwner(zd.ZoneName); err == nil && oldapex != nil {
@@ -166,28 +172,23 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 // them itself. NOTIFY is the only scheme used here (D3/D9); if the parent does
 // not advertise a NOTIFY DSYNC target, this is a no-op (not an error — the
 // parent may not offer the service, or may want UPDATE, which is later work).
-func (zd *ZoneData) ProxyNotifyParent(ctx context.Context, notifyq chan NotifyRequest, imr *Imr, analysis *ProxyDelegationAnalysis) (string, error) {
+// The NOTIFY target is the CALLER's to supply, from the single discovery done
+// while the sync plan was built.
+//
+// It used to call BestSyncScheme itself, which is what broke the fallback from
+// UPDATE: that returned the operator's PREFERRED scheme, so a fallback into
+// here was handed "UPDATE" again, failed the scheme != "NOTIFY" check, and
+// reported that the parent advertised no NOTIFY target while it was advertising
+// one. A function that is reached BY a fallback must not re-decide which scheme
+// the caller wanted.
+func (zd *ZoneData) ProxyNotifyParent(ctx context.Context, notifyq chan NotifyRequest,
+	analysis *ProxyDelegationAnalysis, dsynctarget *DsyncTarget) (string, error) {
+
 	if analysis == nil || !analysis.anyChange() {
 		return "no change to proxy", nil
 	}
-	if zd.Parent == "" || zd.Parent == "." {
-		p, err := imr.ParentZone(zd.ZoneName)
-		if err != nil {
-			return "", fmt.Errorf("ProxyNotifyParent: ParentZone(%s): %w", zd.ZoneName, err)
-		}
-		zd.Parent = p
-	}
-
-	scheme, dsynctarget, err := zd.BestSyncScheme(ctx, imr)
-	if err != nil {
-		return "", fmt.Errorf("ProxyNotifyParent: BestSyncScheme(%s): %w", zd.ZoneName, err)
-	}
-	// NOTIFY-only for now (D3/D9). If the parent advertises only UPDATE we
-	// cannot proxy yet; report and stop without error.
-	if scheme != "NOTIFY" || dsynctarget == nil || len(dsynctarget.Addresses) == 0 {
-		lgDns.Info("delegation-sync-proxy: parent does not advertise a usable NOTIFY DSYNC target; nothing forwarded",
-			"zone", zd.ZoneName, "parent", zd.Parent, "scheme", scheme)
-		return "parent advertises no NOTIFY DSYNC target; nothing forwarded", nil
+	if dsynctarget == nil || len(dsynctarget.Addresses) == 0 {
+		return "", fmt.Errorf("ProxyNotifyParent: no usable NOTIFY target for %s", zd.ZoneName)
 	}
 
 	sent := zd.emitProxyNotifies(ctx, notifyq, analysis, dsynctarget.Addresses)

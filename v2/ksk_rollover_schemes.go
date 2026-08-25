@@ -99,9 +99,16 @@ func selectRolloverDsyncRRs(dsync DsyncResult, zoneName string) (updateRR, notif
 // Filter rule for NOTIFY: matches DSYNC RRs with RRtype == TypeCDS or
 // RRtype == TypeANY. The rollover engine pushes DS by publishing CDS;
 // CSYNC-only NOTIFY advertisements do not satisfy the rollover's
-// requirements. (BestSyncScheme uses a different filter — CSYNC or
-// ANY — because it serves the general delegation-sync path, which is
-// CSYNC-driven. Don't unify.)
+// requirements.
+//
+// The delegation-sync plan uses a WIDER filter — CDS, CSYNC or ANY — and the
+// two should still not be unified. Both halves of the old note here had gone
+// stale: it named BestSyncScheme, which this branch deletes, and it explained
+// the divergence by that path being CSYNC-driven, which stopped being true when
+// it began emitting NOTIFY(CDS) on any DNSKEY change and from the startup
+// synthesis. A parent advertising only NOTIFY(CDS) is usable to it. This filter
+// stays narrower because the rollover has exactly one signal to send, and a
+// parent offering only CSYNC cannot carry it.
 //
 // Filter rule for UPDATE: any UPDATE-scheme DSYNC RR (UPDATE
 // advertisements are RRtype-agnostic by spec).
