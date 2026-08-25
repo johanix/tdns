@@ -130,7 +130,7 @@ func canonicalSortKey(name string) []byte {
 // HINFO is deliberately absent: RFC 4034 §6.2 lists it twice by mistake, and
 // RFC 6840 §5.1 records that it holds no domain names and is not subject to
 // case conversion.
-func canonicalRRWire(rr dns.RR) ([]byte, error) {
+func canonicalRRWire(rr dns.RR) ([]byte, int, error) {
 	r := dns.Copy(rr)
 	r.Header().Name = dns.CanonicalName(r.Header().Name)
 
@@ -188,9 +188,33 @@ func canonicalRRWire(rr dns.RR) ([]byte, error) {
 	buf := make([]byte, dns.Len(r)+1)
 	off, err := dns.PackRR(r, buf, 0, nil, false)
 	if err != nil {
-		return nil, fmt.Errorf("ZONEMD: packing %s: %v", rr.Header().Name, err)
+		return nil, 0, fmt.Errorf("ZONEMD: packing %s: %v", rr.Header().Name, err)
 	}
-	return buf[:off], nil
+	return buf[:off], rdataOffset(buf[:off]), nil
+}
+
+// rdataOffset returns the index at which the RDATA begins in an uncompressed
+// wire-format RR: past the owner name, then the fixed TYPE, CLASS, TTL and
+// RDLENGTH fields.
+//
+// Name compression is disabled for canonical form (RFC 4034 §6.2), so the name
+// is a plain sequence of length-prefixed labels ending in a zero octet and can
+// be walked without a message to resolve pointers against.
+func rdataOffset(wire []byte) int {
+	i := 0
+	for i < len(wire) {
+		l := int(wire[i])
+		if l == 0 {
+			i++
+			break
+		}
+		i += 1 + l
+	}
+	// TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2)
+	if i+10 > len(wire) {
+		return len(wire)
+	}
+	return i + 10
 }
 
 // ZoneDigest computes the RFC 8976 digest over rrs for the given apex.
@@ -212,9 +236,10 @@ func ZoneDigest(apex string, rrs []dns.RR, scheme, alg uint8) ([]byte, error) {
 	apex = dns.CanonicalName(apex)
 
 	type entry struct {
-		wire []byte
-		key  []byte
-		typ  uint16
+		wire  []byte
+		rdata []byte
+		key   []byte
+		typ   uint16
 	}
 	var entries []entry
 
@@ -260,11 +285,12 @@ func ZoneDigest(apex string, rrs []dns.RR, scheme, alg uint8) ([]byte, error) {
 			}
 		}
 
-		wire, err := canonicalRRWire(rr)
+		wire, rdoff, err := canonicalRRWire(rr)
 		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, entry{wire: wire, key: keyFor(hdr.Name), typ: hdr.Rrtype})
+		entries = append(entries, entry{wire: wire, rdata: wire[rdoff:],
+			key: keyFor(hdr.Name), typ: hdr.Rrtype})
 	}
 
 	sort.SliceStable(entries, func(i, j int) bool {
@@ -274,7 +300,19 @@ func ZoneDigest(apex string, rrs []dns.RR, scheme, alg uint8) ([]byte, error) {
 		if entries[i].typ != entries[j].typ {
 			return entries[i].typ < entries[j].typ
 		}
-		return bytes.Compare(entries[i].wire, entries[j].wire) < 0
+		// RDATA, not the whole wire. The two differ for records that share an
+		// owner and a type but not a TTL -- which in a signed zone is every
+		// apex with an RRSIG over its NSEC (TTL from the SOA minimum) beside
+		// RRSIGs over everything else (TTL from the records they cover).
+		// Comparing the whole wire reaches the TTL field first and decides
+		// there, producing an order RFC 4034 §6.3 does not describe and a
+		// digest no other implementation reproduces.
+		//
+		// Not the wire minus the TTL either: RDLENGTH precedes the RDATA, so
+		// that comparison sorts a shorter RDATA first unconditionally, where
+		// §6.3 wants a left-justified octet comparison in which a shorter
+		// RDATA sorts first only when it is a PREFIX of the longer.
+		return bytes.Compare(entries[i].rdata, entries[j].rdata) < 0
 	})
 
 	// Duplicates count once (§3.3.1). After the sort they are adjacent, so this

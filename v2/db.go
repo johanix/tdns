@@ -207,6 +207,13 @@ func dbMigrateSchema(db *sql.DB) {
 		// MAX(active_seq)+1 over the zone's ZSK rows, stamped at standby→active.
 		{"DnssecKeyStore", "active_seq", "ALTER TABLE DnssecKeyStore ADD COLUMN active_seq INTEGER"},
 		{"Sig0KeyStore", "parent_state", "ALTER TABLE Sig0KeyStore ADD COLUMN parent_state INTEGER DEFAULT 0"},
+		// Which digest computation produced the stored value. Defaults to 0,
+		// which is exactly right: every row an older tdns wrote used the
+		// pre-RDATA-sort digest, and 0 is the codepoint for that. The compare
+		// path reads a foreign variant as "unknown", so those rows re-baseline
+		// on the next write instead of accusing the operator of editing a file
+		// they never touched.
+		{"ZoneFileState", "digest_variant", "ALTER TABLE ZoneFileState ADD COLUMN digest_variant INTEGER NOT NULL DEFAULT 0"},
 		// Rollover overhaul phase 2: softfail-state columns on RolloverZoneState.
 		// All NULL/0-default so existing testbed rows remain valid post-migration.
 		{"RolloverZoneState", "hardfail_count", "ALTER TABLE RolloverZoneState ADD COLUMN hardfail_count INTEGER NOT NULL DEFAULT 0"},
