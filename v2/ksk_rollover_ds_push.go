@@ -605,7 +605,7 @@ func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps, target *
 		return out, fmt.Errorf("pushDSRRsetViaUpdate: SignMsg: %w", err)
 	}
 
-	rcode, ur, err := SendUpdate(smsg, parent, target.Addresses)
+	rcode, ur, err := SendUpdate(ctx, smsg, parent, target.Addresses)
 	out.Rcode = rcode
 	out.UpdateResult = ur
 	if err != nil {

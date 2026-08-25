@@ -38,7 +38,7 @@ func reloadZone(t *testing.T, kdb *KeyDB, zoneText string) *ZoneData {
 		KeyDB:        kdb,
 		UpdatePolicy: policyAllowing(dns.TypeA, dns.TypeTXT),
 	}
-	if _, _, err := zd.ReadZoneFile(path, true); err != nil {
+	if _, _, err := zd.ReadZoneFile(context.Background(), path, true); err != nil {
 		t.Fatalf("ReadZoneFile: %v", err)
 	}
 	zd.Ready = true

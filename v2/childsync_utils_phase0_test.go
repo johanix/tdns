@@ -1,7 +1,10 @@
 package tdns
 
 import (
+	"context"
+	"errors"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -68,7 +71,7 @@ func TestSendUpdateForcesTCP(t *testing.T) {
 		t.Fatalf("test message unexpectedly large (%d bytes); it must be small to prove TCP is forced", m.Len())
 	}
 
-	rcode, _, err := SendUpdate(m, "child.example.", []string{ln.Addr().String()})
+	rcode, _, err := SendUpdate(context.Background(), m, "child.example.", []string{ln.Addr().String()})
 	if err != nil {
 		t.Fatalf("SendUpdate: %v", err)
 	}
@@ -78,4 +81,92 @@ func TestSendUpdateForcesTCP(t *testing.T) {
 	if atomic.LoadInt32(&gotTCP) == 0 {
 		t.Error("responder received no TCP query — the UPDATE was not delivered over TCP")
 	}
+}
+
+// A cancelled context must abandon an UPDATE already on the wire, not wait out
+// the client timeout. The sync plan could stop between candidates before this;
+// what it could not do was stop during one, which is the half of a shutdown
+// that actually takes time.
+func TestSendUpdateHonoursCancellation(t *testing.T) {
+	// A listener that accepts and then never answers, so the exchange is
+	// pending for as long as it is allowed to be.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+
+	m := new(dns.Msg)
+	m.SetUpdate("child.example.")
+
+	t.Run("already cancelled: returns without dialling", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		start := time.Now()
+		_, _, err := SendUpdate(ctx, m, "child.example.", []string{ln.Addr().String()})
+		if err == nil {
+			t.Fatal("a cancelled SendUpdate returned no error")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("the error does not carry the cancel cause: %v", err)
+		}
+		if took := time.Since(start); took > time.Second {
+			t.Errorf("took %v to notice an already-cancelled context", took)
+		}
+	})
+
+	// The bound and the error both matter, and the first version of this test
+	// had neither right.
+	//
+	// dns.Client{Net: "tcp"} leaves Timeout at 0, and the fork then applies its
+	// own 2s dnsTimeout to the read. A plain Exchange therefore returns in
+	// about two seconds all by itself, so a 5s bound could not tell
+	// cancellation from the client giving up -- reverting ExchangeContext left
+	// the test passing. The bound is now well under that 2s, and the error is
+	// required to carry context.Canceled rather than being discarded.
+	t.Run("cancelled mid-flight: returns with the cancel cause", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		type result struct {
+			err error
+			at  time.Time
+		}
+		done := make(chan result, 1)
+		go func() {
+			_, _, err := SendUpdate(ctx, m, "child.example.", []string{ln.Addr().String()})
+			done <- result{err: err, at: time.Now()}
+		}()
+
+		time.Sleep(150 * time.Millisecond) // let the exchange get under way
+		cancelledAt := time.Now()
+		cancel()
+
+		select {
+		case r := <-done:
+			if took := r.at.Sub(cancelledAt); took > 500*time.Millisecond {
+				t.Errorf("SendUpdate took %v after cancellation; the 2s client"+
+					" timeout, not the cancel, is what ended it", took)
+			}
+			if r.err == nil {
+				t.Fatal("a cancelled SendUpdate returned no error")
+			}
+			if !errors.Is(r.err, context.Canceled) {
+				t.Fatalf("the error does not carry the cancel cause, so a caller"+
+					" cannot tell a shutdown from a transport failure: %v", r.err)
+			}
+			if !strings.Contains(r.err.Error(), "abandoned") {
+				t.Errorf("error should say the UPDATE was abandoned: %v", r.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("SendUpdate did not return within 5s of cancellation")
+		}
+	})
 }

@@ -12,6 +12,34 @@ import (
 	"github.com/miekg/dns"
 )
 
+// publishedDsyncRRs returns a COPY of the DSYNC records already published at an
+// owner, and is the only thing that should read them.
+//
+// Copy, not alias. The published RRset's backing array usually has spare
+// capacity -- a zone-file load sizes slices generously -- so appending onto it
+// writes a synthesized DSYNC record straight into the live RRset, visible to
+// queries, with no serial bump and no journal entry. That failure is invisible
+// until a zone happens to have the capacity.
+//
+// An owner can also exist without a DSYNC RRset -- _dsync.<zone> may carry a
+// TXT and nothing else -- and an owner with no RRtypes at all is a dereference
+// away from taking the process down. Neither is a reason to fail publication:
+// both mean "nothing published yet", which is the case the caller exists to fix.
+//
+// Extracted so the tests exercise this rather than restating it. They used to
+// re-implement the guard inline, which meant they would have gone on passing if
+// the production path regressed to an unsafe dereference.
+func publishedDsyncRRs(owner *OwnerData) []dns.RR {
+	if owner == nil || owner.RRtypes == nil {
+		return nil
+	}
+	existing, ok := owner.RRtypes.Get(core.TypeDSYNC)
+	if !ok {
+		return nil
+	}
+	return append(make([]dns.RR, 0, len(existing.RRs)), existing.RRs...)
+}
+
 // publishedDsyncSchemes reports which DSYNC schemes an existing RRset already
 // carries, so PublishDsyncRRs can leave those alone and synthesize only the
 // rest. Anything that is not a DSYNC record is ignored rather than treated as
@@ -59,18 +87,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		// into the live RRset, visible to queries, with no serial bump and no
 		// journal entry. The bug is invisible until a zone happens to have the
 		// capacity, which makes it exactly the kind that survives testing.
-		// An owner can exist without a DSYNC RRset -- _dsync.<zone> may carry a
-		// TXT and nothing else -- and an owner with no RRtypes at all is a
-		// dereference away from taking the process down. Neither is a reason to
-		// fail publication: both mean "nothing published yet", which is the
-		// case this function exists to fix.
-		var published []dns.RR
-		if owner.RRtypes != nil {
-			if existing, ok := owner.RRtypes.Get(core.TypeDSYNC); ok {
-				published = existing.RRs
-			}
-		}
-		rrset.RRs = append(make([]dns.RR, 0, len(published)), published...)
+		rrset.RRs = publishedDsyncRRs(owner)
 	}
 	publishedSchemes := publishedDsyncSchemes(rrset.RRs)
 	alreadyPublished := len(rrset.RRs)

@@ -2,7 +2,6 @@ package tdns
 
 import (
 	"context"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -22,7 +21,7 @@ func TestDeferForImrRequeuesOnceTheImrIsReady(t *testing.T) {
 	ready := NewImrReadiness()
 	ds := DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: "child.example."}
 
-	deferForImr(ctx, q, ready, ds)
+	_ = deferForImr(ctx, q, ready, ds)
 
 	// Nothing yet: the IMR has not been announced.
 	select {
@@ -52,7 +51,7 @@ func TestDeferForImrRequeuesImmediatelyWhenAlreadyReady(t *testing.T) {
 	ready := NewImrReadiness()
 	ready.Publish()
 
-	deferForImr(ctx, q, ready, DelegationSyncRequest{Command: "PROXY-UPDATE-SETUP", ZoneName: "child.example."})
+	_ = deferForImr(ctx, q, ready, DelegationSyncRequest{Command: "PROXY-UPDATE-SETUP", ZoneName: "child.example."})
 
 	select {
 	case <-q:
@@ -76,8 +75,7 @@ func TestDeferForImrHonoursContextCancellation(t *testing.T) {
 	q := make(chan DelegationSyncRequest, 1)
 	ready := NewImrReadiness()
 
-	before := runtime.NumGoroutine()
-	deferForImr(ctx, q, ready, DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: "child.example."})
+	done := deferForImr(ctx, q, ready, DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: "child.example."})
 	cancel()
 
 	// The IMR never arrives, so nothing should ever be re-enqueued.
@@ -90,17 +88,17 @@ func TestDeferForImrHonoursContextCancellation(t *testing.T) {
 	// An empty queue alone would also be satisfied by a worker that ignored
 	// ctx.Done() and blocked forever, which is the failure this is really
 	// about: one leaked goroutine per deferred request, for the life of the
-	// process. So require the worker to be gone within a bounded time.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if runtime.NumGoroutine() <= before {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the deferred worker did not exit within 3s of cancellation"+
-				" (goroutines: %d before, %d now)", before, runtime.NumGoroutine())
-		}
-		time.Sleep(20 * time.Millisecond)
+	// process. So require THIS worker to be gone within a bounded time.
+	//
+	// Waiting on the worker's own completion channel rather than on
+	// runtime.NumGoroutine(): a process-wide count is not evidence about one
+	// goroutine. An unrelated goroutine exiting would satisfy it while this
+	// worker stayed blocked, and an unrelated one starting would fail it for
+	// nothing. The first version of this test did exactly that.
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the deferred worker did not exit within 3s of cancellation")
 	}
 }
 

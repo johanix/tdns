@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
@@ -267,7 +268,7 @@ mx.example.	3600	IN	MX	10 Mail.Example.
 		ZoneStore: MapZone,
 		Logger:    log.New(os.Stderr, "", 0),
 	}
-	if _, _, rerr := reread.ReadZoneFile(path, true); rerr != nil {
+	if _, _, rerr := reread.ReadZoneFile(context.Background(), path, true); rerr != nil {
 		t.Fatalf("ReadZoneFile: %v", rerr)
 	}
 	back, err := reread.zoneDigestOfWorkingData()

@@ -429,7 +429,7 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	// while `zone reload` reported success. --force did not help either -- it
 	// parsed the file to validate it and then reported "not updated", so the
 	// parse was thrown away.
-	serialMoved, _, err := new_zd.ReadZoneFile(zd.Zonefile, true)
+	serialMoved, _, err := new_zd.ReadZoneFile(ctx, zd.Zonefile, true)
 	if err != nil {
 		lg.Error("ReadZoneFile failed", "zone", zd.ZoneName, "err", err)
 		zd.SetStatus(prevStatus)
