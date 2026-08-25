@@ -678,12 +678,22 @@ func (zd *ZoneData) refuseTransfer(w dns.ResponseWriter, r *dns.Msg) (int, error
 }
 
 func (zd *ZoneData) ReadZoneFile(ctx context.Context, filename string, force bool) (bool, uint32, error) {
-	zd.Logger.Printf("ReadZoneData: zone: %s", zd.ZoneName)
+	zd.Logger.Printf("ReadZoneFile: zone: %s", zd.ZoneName)
 
 	f, err := os.Open(filename)
 	if err != nil {
 		return false, 0, fmt.Errorf("ReadZoneFile: Error: failed to read %s: %v", filename, err)
 	}
+	// The handle was never closed, on any path. It leaked on success too --
+	// every zone load, for as long as it took the finalizer to notice -- so a
+	// server reloading zones often could accumulate descriptors it was not
+	// using. Cancellation makes the same leak easier to reach, since a parse
+	// now returns before EOF, but it did not introduce it.
+	//
+	// Safe as a defer: ParseZoneFromReader consumes the reader within the call
+	// and does not retain it past return.
+	defer f.Close()
+
 	return zd.ParseZoneFromReader(ctx, bufio.NewReader(f), force, filename)
 }
 
