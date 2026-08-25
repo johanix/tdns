@@ -259,13 +259,23 @@ UNIQUE (keyname)
 	// wrote it: SOA serial plus a ZONEMD digest of its contents. One row per
 	// zone -- this is a "what does the file look like now" record, not a
 	// history -- so the zone is the primary key and writes are upserts.
+	//
+	// digest_variant identifies WHICH computation produced the digest. The
+	// value is private to tdns and has nothing to do with the RFC's scheme or
+	// algorithm registries: it exists because a fix to the digest code changes
+	// every stored digest, and a row written by the previous version has to
+	// read as "no basis for comparison" rather than as "this file has been
+	// edited" -- which, across a fleet of signed zones, is the difference
+	// between a silent re-baseline and every zone reporting tampering at once.
+	// See zoneFileDigestVariant.
 	"ZoneFileState": `CREATE TABLE IF NOT EXISTS 'ZoneFileState' (
-		zone       VARCHAR(255) NOT NULL PRIMARY KEY,
-		serial     INTEGER NOT NULL,
-		digest     VARCHAR(128) NOT NULL,
-		scheme     INTEGER NOT NULL,
-		algorithm  INTEGER NOT NULL,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		zone           VARCHAR(255) NOT NULL PRIMARY KEY,
+		serial         INTEGER NOT NULL,
+		digest         VARCHAR(128) NOT NULL,
+		scheme         INTEGER NOT NULL,
+		algorithm      INTEGER NOT NULL,
+		digest_variant INTEGER NOT NULL DEFAULT 0,
+		updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`,
 
 	"ZoneDelta": `CREATE TABLE IF NOT EXISTS 'ZoneDelta' (

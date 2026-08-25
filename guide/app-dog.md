@@ -62,6 +62,8 @@ Do53-TCP and DoT only).
 | `+SHORT` | Print only the answer RDATA (same as `--short`) |
 | `+SIGCHASE`, `+SIGCHA`, `+SC` | Walk and validate the DNSSEC chain |
 | `+ALGCHASE`, `+ALGCHA`, `+AC` | As `+sigchase`, annotating each algorithm number with its name |
+| `+ZONEMD`, `+ZMD` | After an AXFR, verify the zone's apex ZONEMD (RFC 8976) against what arrived. Exits non-zero if it does not verify. Refused for IXFR, which returns a difference rather than a zone |
+| `+IGNORESERIAL`, `+IGNSER` | With `+ZONEMD`: digest against the serial each ZONEMD names rather than the SOA's. A diagnostic for a zone digested before its serial moved, not a laxer check |
 | `+TCP` | Force Do53 over TCP |
 | `+TLS`, `+DOT` | DoT (default port 853) |
 | `+HTTPS`, `+DOH` | DoH (default port 443) |

@@ -83,7 +83,7 @@ type ZoneMergeResult struct {
 func rrKey(rr dns.RR) string {
 	c := dns.Copy(rr)
 	c.Header().Ttl = 0
-	if wire, err := canonicalRRWire(c); err == nil {
+	if wire, _, err := canonicalRRWire(c); err == nil {
 		return string(wire)
 	}
 	// Packing failed, which for a record we just parsed means something exotic.

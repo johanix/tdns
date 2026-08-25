@@ -350,6 +350,13 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 		return err
 	}
 
+	// +zonemd: keep the transferred records so the zone's own digest can be
+	// checked against them once the transfer completes. Only when asked --
+	// holding a whole zone in memory is the cost of the check, and a plain
+	// `dog AXFR` streams and forgets.
+	verifyZonemd := options["zonemd"] == "true"
+	var collected []dns.RR
+
 	// Track the first envelope error so a failed AXFR/IXFR (bad rcode, or a
 	// failed TSIG verification on the response) is returned to the caller
 	// instead of looking successful.
@@ -440,11 +447,55 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 				fmt.Printf("%s\n", rr.String())
 			}
 		}
+		if verifyZonemd {
+			collected = append(collected, envelope.RR...)
+		}
 		if Globals.Debug {
 			fmt.Printf("Done printing %d RRs in envelope\n", len(envelope.RR))
 		}
 	}
-	return xfrErr
+	if xfrErr != nil {
+		return xfrErr
+	}
+	if verifyZonemd {
+		return printZonemdVerification(zname, ttype, collected,
+			options["ignoreserial"] == "true")
+	}
+	return nil
+}
+
+// printZonemdVerification reports whether a transferred zone's apex ZONEMD
+// describes what was received.
+//
+// The verdict is folded into the return value, so `dog AXFR +zonemd` exits
+// non-zero on a zone that fails. A check that always succeeds is not a check,
+// and this is the form of the command that ends up in somebody's monitoring.
+//
+// An IXFR is refused rather than checked. What comes back is a difference, not
+// a zone, and digesting a difference produces a number that means nothing --
+// which is worse than declining, because it looks like an answer.
+func printZonemdVerification(zname string, ttype uint16, rrs []dns.RR, ignoreSerial bool) error {
+	fmt.Printf("\n;; ZONEMD verification\n")
+	if ttype == dns.TypeIXFR {
+		fmt.Printf(";; refusing: an IXFR returns a difference, not a zone; use AXFR\n")
+		return fmt.Errorf("ZONEMD cannot be verified from an IXFR")
+	}
+
+	report, err := VerifyZonemd(zname, rrs, VerifyZonemdOpts{IgnoreSerial: ignoreSerial})
+	if err != nil {
+		fmt.Printf(";; could not verify: %v\n", err)
+		return err
+	}
+	for _, line := range strings.Split(report.Summary(), "\n") {
+		fmt.Printf(";; %s\n", line)
+	}
+	switch report.verdict() {
+	case ZonemdInvalid:
+		return fmt.Errorf("the ZONEMD of %s does not describe the zone that was transferred", zname)
+	case ZonemdAbsent:
+		fmt.Printf(";; the zone publishes no ZONEMD, so there is nothing to verify\n")
+	}
+	return nil
 }
 
 // rdataOnly returns just the RDATA portion of an RR's presentation form,

@@ -477,8 +477,9 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 		// fork (the KSK rollover engine's BuildChildWholeDSUpdate already relies
 		// on the fix in production).
 		lgDns.Info("SyncZoneDelegationViaUpdate: using replace mode", "zone", zd.ZoneName)
-		m, err = CreateChildReplaceUpdate(zd.Parent, zd.ZoneName,
-			syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA, syncstate.NewDS)
+		m, err = CreateChildReplaceUpdateWithDS(zd.Parent, zd.ZoneName,
+			syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA,
+			syncstate.NewDS, syncstate.NewDSKnown)
 		if err != nil {
 			return "", 0, UpdateResult{}, err
 		}

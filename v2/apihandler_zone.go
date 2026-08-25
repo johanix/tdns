@@ -171,6 +171,21 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = err.Error()
 			}
 
+		case "zonemd":
+			// status and verify are one command with a subcommand, not two
+			// commands, because they answer the same question -- the only
+			// difference is whether the server pays to recompute the digest.
+			verify := zp.SubCommand == "verify"
+			st, err := zd.ZonemdStatusReport(verify, VerifyZonemdOpts{
+				IgnoreSerial: zp.IgnoreSerial,
+			})
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				break
+			}
+			resp.Zonemd = st
+
 		case "show-nsec-chain":
 			resp.Names, err = zd.ShowNsecChain()
 			if err != nil {

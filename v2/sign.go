@@ -667,6 +667,8 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 		}
 	}
 
+	managesZonemd := zd.zoneManagesZonemd()
+
 	newrrsigs := 0
 	for _, name := range names {
 		owner := zd.stagedOwner(name)
@@ -675,6 +677,14 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 		}
 		for _, rrt := range owner.RRtypes.Keys() {
 			if rrt == dns.TypeRRSIG {
+				continue
+			}
+			// The apex ZONEMD is signed by the publish that computes its
+			// digest, which runs after this pass -- and after the NSEC
+			// restitch, whose output the digest covers. A signature made here
+			// would be over a value that is about to be replaced and never
+			// reaches the wire. See zonemd_publish.go.
+			if managesZonemd && rrt == dns.TypeZONEMD && name == zd.ZoneName {
 				continue
 			}
 			if rrt == dns.TypeNS && name != zd.ZoneName {
@@ -890,6 +900,8 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 
 	lgSigner.Debug("zone delegations", "zone", zd.ZoneName, "delegations", delegations)
 
+	managesZonemd := zd.zoneManagesZonemd()
+
 	var maxObservedTTL uint32
 	for _, name := range names {
 		// log.Printf("SignZone: signing RRsets under name %s", name)
@@ -902,6 +914,14 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			rrset := owner.RRtypes.GetOnlyRRSet(rrt)
 			if rrt == dns.TypeRRSIG {
 				continue // should not happen
+			}
+			// The apex ZONEMD is signed by the publish that computes its
+			// digest, which runs after this pass -- and after the NSEC
+			// restitch, whose output the digest covers. A signature made here
+			// would be over a value that is about to be replaced and never
+			// reaches the wire. See zonemd_publish.go.
+			if managesZonemd && rrt == dns.TypeZONEMD && name == zd.ZoneName {
+				continue
 			}
 			if rrt == dns.TypeNS && name != zd.ZoneName {
 				continue // dont' sign delegations

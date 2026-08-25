@@ -7,6 +7,7 @@
 package tdns
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -149,7 +150,7 @@ func TestXoT_FetchFromUpstreamPKIX(t *testing.T) {
 	Zones.Set(sec.ZoneName, sec)
 	t.Cleanup(func() { Zones.Remove(sec.ZoneName) })
 
-	updated, err := sec.FetchFromUpstream(false, false, false, nil, conf)
+	updated, err := sec.FetchFromUpstream(context.Background(), false, false, false, nil, conf)
 	if err != nil {
 		t.Fatalf("FetchFromUpstream over dot+pkix: %v", err)
 	}
