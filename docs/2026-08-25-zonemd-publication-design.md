@@ -267,15 +267,53 @@ Staged:
   with `bytes.Compare`. This also speeds up `workingOwnerNamesLocked`, which
   every signed-zone publish already pays for the NSEC restitch, so it is worth
   doing whether or not ZONEMD ships.
-- **P3 — cached wire encodings.** Keep the canonical wire form per RRset,
-  invalidated when the RRset is staged. A publish that touched three owners
-  then re-encodes three owners instead of the zone. This removes the dominant
-  term.
+- **P3 — cached wire encodings, under a per-zone byte budget.** Keep the
+  canonical wire form, so a publish that touched three owners re-encodes three
+  owners instead of the zone. This removes the dominant term.
+
+  Cache per OWNER, not per RRset. Records at one owner sort next to each other,
+  so an owner's contribution to the hash is one contiguous block; and every
+  mutation path in zone_mutation.go either goes through `cloneOwner` (which
+  builds a fresh `OwnerData`), installs a caller's fresh one, or deletes the
+  entry. Nothing is mutated in place — that is the copy-on-write invariant the
+  snapshot design already enforces with a CI gate — so **owner-pointer identity
+  is the cache validity check** and there is no invalidation code to get wrong.
+
+  The budget is the point, not a refinement. Both the saving and the cost scale
+  with zone size, so the zones that most need the cache are the ones that can
+  least afford it, and on a PQ-signed zone the RRSIG RDATA is kilobytes rather
+  than ~100 bytes. So: `zonemd.wire-cache-max-bytes`, with the semantics
+  `ixfr-chain-max-bytes` already has in this tree — 0/unset = default, negative
+  = disabled — plus a global default and a per-zone override.
+
+  Two properties make a byte budget better than an on/off switch. It is
+  SELF-SELECTING: a small zone never reaches the cap and gets the whole win, a
+  huge one caches what fits, and the operator does not have to know which zones
+  are big. And it degrades PROPORTIONALLY: fill in canonical order and
+  re-encode the remainder, so a zone half again the budget keeps most of the
+  win instead of none of it.
+
+  No separate accounting. The digest pass walks every owner in order anyway, so
+  it carries a running total and keeps a freshly built block only while the
+  total is under budget. What it cannot do is bound memory across a FLEET: a
+  per-zone cap times N zones can still exhaust the host, and the config
+  documentation has to say so rather than imply otherwise.
+
+  The cache is used by the PUBLISH path only. `zone zonemd verify` and the
+  `verify-zonemd` gate build from the records every time — not as a
+  concession, but because a verification that reads cached bytes verifies the
+  cache rather than the zone, and a stale entry would make a wrong digest pass.
+  Confining the cache to the locked publish path also means no shared
+  `OwnerData` is ever mutated off-lock.
 - **P4 — only if measurement demands it.** Per-owner contiguous buffers so the
-  hash pass reads fewer, larger slices.
+  hash pass reads fewer, larger slices. Largely subsumed by P3, whose blocks
+  are already per-owner and contiguous.
 
 Ship P1 and P2 together; P3 behind a benchmark on a zone of the size that
 motivated the 9-second measurement.
+
+P3 also pays for itself twice on a zone publishing two algorithms: the
+canonical blocks do not depend on the hash, so two digests cost one encode.
 
 One operational guard: on the first publish of a zonemd zone, log the measured
 digest time at INFO, and at WARN above a threshold (say 250 ms). An operator

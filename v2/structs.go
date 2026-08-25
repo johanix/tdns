@@ -296,6 +296,16 @@ type ZoneData struct {
 	// meaningful only when OptVerifyZonemd is set. Written at parse time under
 	// zd.mu, like the two fields above.
 	zonemdOnVerifyFailure string
+	// zonemdWireCacheMaxBytes bounds the canonical-wire cache the publish path
+	// keeps so it re-renders only what changed. 0/unset =>
+	// DefaultZonemdWireCacheBytes; negative => caching disabled. Same sentinel
+	// convention as ixfrChainMaxBytes above, deliberately.
+	zonemdWireCacheMaxBytes int
+	// zonemdCache holds one rendered block per owner name, tagged with the
+	// *OwnerData it came from -- pointer identity is the validity check. Read
+	// and written ONLY by the publish path under zd.mu; see zonemd_cache.go.
+	zonemdCache      map[string]zonemdCacheEntry
+	zonemdCacheStats ZonemdCacheStats
 	// zonemdManaged records that the apex ZONEMD RRset now in this zone was
 	// put there by us rather than by the operator. It is what makes turning
 	// the option OFF remove our record while leaving a hand-authored one
@@ -526,6 +536,19 @@ type ZonemdConf struct {
 	// SIMPLE is defined, so this exists to reject a config that asks for
 	// something else rather than to offer a choice.
 	Scheme uint8 `yaml:"scheme" mapstructure:"scheme"`
+	// WireCacheMaxBytes bounds the canonical-wire cache that lets a publish
+	// re-render only the owners it changed. 0/unset =>
+	// DefaultZonemdWireCacheBytes (64 MiB); negative => caching disabled.
+	//
+	// The budget matters because the saving and the cost both scale with zone
+	// size: the zones that gain most from the cache are the ones that can least
+	// afford it, and on a PQ-signed zone an RRSIG's RDATA is kilobytes rather
+	// than a hundred bytes. A byte budget is self-selecting -- a small zone
+	// never reaches it -- and degrades in proportion rather than at a cliff.
+	//
+	// PER ZONE. A server with many large zones multiplies it; this does not
+	// bound the host's memory across a fleet.
+	WireCacheMaxBytes int `yaml:"wire-cache-max-bytes" mapstructure:"wire-cache-max-bytes"`
 	// OnVerifyFailure decides what a failed `verify-zonemd` check does:
 	// "refuse" (the default) declines the zone and keeps serving what the
 	// server already had, "warn" adopts it and logs.

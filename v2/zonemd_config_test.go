@@ -58,21 +58,22 @@ zones:
 	if got.Scheme != 1 {
 		t.Errorf("scheme did not decode: %d", got.Scheme)
 	}
-	scheme, algs, err := resolveZonemdConf(got)
+	set, err := resolveZonemdConf(got)
 	if err != nil {
 		t.Fatalf("the decoded block does not resolve: %v", err)
 	}
-	if scheme != 1 || fmt.Sprint(algs) != "[1 2]" {
-		t.Errorf("resolved to scheme %d algorithms %v", scheme, algs)
+	if set.Scheme != 1 || fmt.Sprint(set.Algorithms) != "[1 2]" {
+		t.Errorf("resolved to scheme %d algorithms %v", set.Scheme, set.Algorithms)
 	}
 
 	// A zone with no block resolves to the defaults rather than failing.
-	scheme, algs, err = resolveZonemdConf(zones[1].Zonemd)
+	set, err = resolveZonemdConf(zones[1].Zonemd)
 	if err != nil {
 		t.Fatalf("an absent block does not resolve: %v", err)
 	}
-	if scheme != ZonemdSchemeSimple || fmt.Sprint(algs) != "[1]" {
-		t.Errorf("an absent block resolved to scheme %d algorithms %v", scheme, algs)
+	if set.Scheme != ZonemdSchemeSimple || fmt.Sprint(set.Algorithms) != "[1]" {
+		t.Errorf("an absent block resolved to scheme %d algorithms %v",
+			set.Scheme, set.Algorithms)
 	}
 }
 

@@ -440,10 +440,51 @@ While the option is set the apex ZONEMD belongs to the server. A DNS UPDATE or
 API update that tries to write it is refused, and `update delete <apex>` retains
 it the way it retains SOA and NS.
 
-**Cost.** The digest is a single hash over every record in the zone, and RFC
-8976 offers no way to update one incrementally, so every publish is O(zone).
-The `publish-cadence` setting already coalesces a burst of updates into one
-publish; a large zone under continuous dynamic update wants that raised.
+**Cost, and the wire cache.** The digest is a single hash over every record in
+the zone, and RFC 8976 offers no way to update one incrementally, so every
+publish is O(zone). Two things bring that down.
+
+`publish-cadence` coalesces a burst of updates into one publish, so the cost is
+per-publish and not per-update; a large zone under continuous dynamic update
+wants it raised.
+
+And the server keeps each owner name's records in their canonical wire form, so
+a publish re-renders only the names it changed. Rendering is the expensive half
+of a digest — measured at 17x on a 10,000-record zone where one name changed —
+and it is what `wire-cache-max-bytes` bounds:
+
+```yaml
+     zonemd:
+        wire-cache-max-bytes: 67108864   # 0/unset = 64 MiB, negative = off
+```
+
+Same convention as `ixfr-chain-max-bytes`: **0 or unset takes the default,
+negative disables caching entirely.**
+
+The budget exists because the saving and the memory cost both scale with zone
+size, so the zones that gain most are the ones that can least afford it — and
+on a PQ-signed zone an RRSIG's RDATA is kilobytes rather than a hundred bytes.
+A byte budget is self-selecting: an ordinary zone never reaches it and gets the
+whole benefit, while a zone larger than the budget caches what fits and
+re-renders the remainder, so the saving degrades in proportion rather than
+disappearing.
+
+**This is a PER-ZONE figure and does not bound the host's memory.** A server
+with many large zones multiplies it; size the number accordingly, or set it
+per-zone on the few zones that are large.
+
+`tdns-cli auth zone zonemd status` reports both halves of the trade — what the
+cache holds, what a full cache would need, and how long the last digest took —
+so it can be tuned from measurements:
+
+```
+   wire cache:     41.2 MiB of 64.0 MiB budget, 812004 of 812004 owners
+   last digest:    186ms, 812001 of 812004 owners reused
+```
+
+The cache is used by the publish path only. `zone zonemd verify` and the
+`verify-zonemd` check below always rebuild from the records: a verification
+that read cached bytes would be verifying the cache rather than the zone.
 
 **Turning it off.** Removing the option removes the record: the next publish
 takes the server's ZONEMD out and restitches the apex NSEC bitmap. Do it while

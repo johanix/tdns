@@ -572,7 +572,7 @@ func TestResolveZonemdConf(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			scheme, algs, err := resolveZonemdConf(tc.in)
+			set, err := resolveZonemdConf(tc.in)
 			if tc.wantErr != "" {
 				if err == nil {
 					t.Fatalf("expected an error containing %q, got none", tc.wantErr)
@@ -585,11 +585,11 @@ func TestResolveZonemdConf(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if scheme != tc.wantScheme {
-				t.Errorf("scheme: got %d want %d", scheme, tc.wantScheme)
+			if set.Scheme != tc.wantScheme {
+				t.Errorf("scheme: got %d want %d", set.Scheme, tc.wantScheme)
 			}
-			if fmt.Sprint(algs) != fmt.Sprint(tc.wantAlgs) {
-				t.Errorf("algorithms: got %v want %v", algs, tc.wantAlgs)
+			if fmt.Sprint(set.Algorithms) != fmt.Sprint(tc.wantAlgs) {
+				t.Errorf("algorithms: got %v want %v", set.Algorithms, tc.wantAlgs)
 			}
 		})
 	}

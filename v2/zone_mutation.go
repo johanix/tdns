@@ -1,9 +1,7 @@
 package tdns
 
 import (
-	"bytes"
 	"fmt"
-	"sort"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -194,13 +192,9 @@ func (zd *ZoneData) workingOwnerNamesLocked() []string {
 	// on every publish of every signed zone, so the cost is O(n log n)
 	// allocations where O(n) will do. canonicalSortKey's byte order IS
 	// canonical order, so the result is identical.
-	keys := make(map[string][]byte, len(names))
-	for _, n := range names {
-		keys[n] = canonicalSortKey(n)
-	}
-	sort.Slice(names, func(i, j int) bool {
-		return bytes.Compare(keys[names[i]], keys[names[j]]) < 0
-	})
+	//
+	// Shared with the digest, which needs the same order over the same names.
+	canonicalOwnerOrder(names)
 	return names
 }
 

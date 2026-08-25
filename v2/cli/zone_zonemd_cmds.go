@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/spf13/cobra"
@@ -116,6 +117,10 @@ func printZonemdStatus(st *tdns.ZonemdStatus, verified bool) {
 		fmt.Printf("   verify-zonemd:  off\n")
 	}
 
+	if st.Cache != nil {
+		printZonemdCache(st.Cache)
+	}
+
 	r := st.Report
 	if r == nil || len(r.Checks) == 0 {
 		fmt.Printf("   published:      none\n")
@@ -154,6 +159,40 @@ func printZonemdStatus(st *tdns.ZonemdStatus, verified bool) {
 		default:
 			fmt.Printf("      FAILED: %s\n", c.Reason)
 		}
+	}
+}
+
+// printZonemdCache reports the wire cache, which is the memory an operator is
+// spending to keep publishes fast. Both halves of the trade are shown -- what
+// is held and what the last digest took -- because tuning one without seeing
+// the other is how you end up setting it twice.
+func printZonemdCache(c *tdns.ZonemdCacheStats) {
+	fmt.Printf("   wire cache:     ")
+	if c.MaxBytes == 0 {
+		fmt.Printf("disabled (last digest %s over %s of zone data)\n",
+			c.LastDigest.Round(time.Millisecond), humanBytes(c.WireBytes))
+		return
+	}
+	fmt.Printf("%s of %s budget, %d of %d owners",
+		humanBytes(c.CachedBytes), humanBytes(c.MaxBytes), c.CachedOwners, c.Owners)
+	if c.CachedBytes < c.WireBytes {
+		fmt.Printf(" (zone needs %s for a full cache)", humanBytes(c.WireBytes))
+	}
+	fmt.Printf("\n")
+	fmt.Printf("   last digest:    %s, %d of %d owners reused\n",
+		c.LastDigest.Round(time.Millisecond), c.Hits, c.Owners)
+}
+
+func humanBytes(n int) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
 	}
 }
 

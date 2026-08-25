@@ -217,50 +217,48 @@ func rdataOffset(wire []byte) int {
 	return i + 10
 }
 
-// ZoneDigest computes the RFC 8976 digest over rrs for the given apex.
+// A zone's digest is the concatenation of its OWNERS' digests, in canonical
+// owner order.
 //
-// Exclusions, per §3.3.1: the apex ZONEMD RRset and the RRSIGs covering it are
-// omitted (a digest cannot cover itself), and duplicate RRs count once.
+// That decomposition is not an implementation detail, it is what makes the
+// digest cacheable. The RFC's ordering is (owner, type, RDATA), so every
+// record at one owner name sorts into one contiguous run -- an owner's
+// contribution to the hash is a single block of bytes that depends on nothing
+// outside that owner. A publish that changes three names can therefore reuse
+// the blocks of every name it did not touch. See zonemd_cache.go.
 //
-// Only the SIMPLE scheme is implemented. It is the only one defined, and the
-// registry exists for a scheme that has not been specified.
-func ZoneDigest(apex string, rrs []dns.RR, scheme, alg uint8) ([]byte, error) {
-	if scheme != ZonemdSchemeSimple {
-		return nil, fmt.Errorf("ZONEMD: unsupported scheme %d (only SIMPLE=%d is defined)",
-			scheme, ZonemdSchemeSimple)
-	}
-	h, err := zonemdHasher(alg)
-	if err != nil {
-		return nil, err
-	}
-	apex = dns.CanonicalName(apex)
+// The blocks do not depend on the hash algorithm either, so a zone publishing
+// both SHA-384 and SHA-512 encodes once and hashes twice.
 
+// digestBlock renders the records of ONE owner name into the bytes that owner
+// contributes to the digest: each record in RFC 4034 §6.2 canonical form,
+// ordered by type and then by canonical RDATA (§6.3), with duplicates counted
+// once (RFC 8976 §3.3.1).
+//
+// Duplicate suppression is per-owner and that is complete: two records are
+// duplicates only if their canonical wire forms are identical, and the wire
+// form begins with the owner name, so duplicates always share an owner.
+//
+// apex governs the two exclusions, both of which apply only AT the apex: the
+// ZONEMD RRset (a digest cannot cover itself) and the RRSIGs covering it. A
+// ZONEMD at any other owner is ordinary zone data and is digested like
+// anything else -- RFC 8976's Appendix A.2 has one, to catch implementations
+// that exclude by type alone.
+func digestBlock(apex string, rrs []dns.RR) ([]byte, error) {
 	type entry struct {
 		wire  []byte
 		rdata []byte
-		key   []byte
 		typ   uint16
 	}
 	var entries []entry
-
-	// One key per OWNER, not per RR: a zone has several records at most names
-	// and the key depends only on the name.
-	keyCache := make(map[string][]byte)
-	keyFor := func(name string) []byte {
-		if k, ok := keyCache[name]; ok {
-			return k
-		}
-		k := canonicalSortKey(name)
-		keyCache[name] = k
-		return k
-	}
+	var total int
 
 	for _, rr := range rrs {
 		if rr == nil {
 			continue
 		}
 		hdr := rr.Header()
-		atApex := dns.CanonicalName(hdr.Name) == apex
+		name := dns.CanonicalName(hdr.Name)
 
 		// Out-of-zone data is excluded (§3.3.1). A loaded zone should not carry
 		// any, but a zone FILE can -- nothing stops an operator writing an
@@ -268,20 +266,17 @@ func ZoneDigest(apex string, rrs []dns.RR, scheme, alg uint8) ([]byte, error) {
 		// over files. Including it would make the digest depend on records the
 		// zone does not own. RFC 8976's own Appendix A.2 vector carries a
 		// `foo.test.` record for exactly this reason.
-		if !dns.IsSubDomain(apex, dns.CanonicalName(hdr.Name)) {
+		if !dns.IsSubDomain(apex, name) {
 			continue
 		}
-
-		// The digest cannot cover itself -- but only the APEX ZONEMD RRset is
-		// excluded. A ZONEMD at any other owner is ordinary zone data and is
-		// digested like anything else (A.2 has one, to catch implementations
-		// that exclude by type alone).
-		if atApex && hdr.Rrtype == dns.TypeZONEMD {
-			continue
-		}
-		if atApex && hdr.Rrtype == dns.TypeRRSIG {
-			if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeZONEMD {
+		if name == apex {
+			if hdr.Rrtype == dns.TypeZONEMD {
 				continue
+			}
+			if hdr.Rrtype == dns.TypeRRSIG {
+				if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeZONEMD {
+					continue
+				}
 			}
 		}
 
@@ -289,44 +284,125 @@ func ZoneDigest(apex string, rrs []dns.RR, scheme, alg uint8) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, entry{wire: wire, rdata: wire[rdoff:],
-			key: keyFor(hdr.Name), typ: hdr.Rrtype})
+		entries = append(entries, entry{wire: wire, rdata: wire[rdoff:], typ: hdr.Rrtype})
+		total += len(wire)
+	}
+	if len(entries) == 0 {
+		return nil, nil
 	}
 
 	sort.SliceStable(entries, func(i, j int) bool {
-		if c := bytes.Compare(entries[i].key, entries[j].key); c != 0 {
-			return c < 0
-		}
 		if entries[i].typ != entries[j].typ {
 			return entries[i].typ < entries[j].typ
 		}
 		// RDATA, not the whole wire. The two differ for records that share an
 		// owner and a type but not a TTL -- which in a signed zone is every
 		// apex with an RRSIG over its NSEC (TTL from the SOA minimum) beside
-		// RRSIGs over everything else (TTL from the records they cover).
-		// Comparing the whole wire reaches the TTL field first and decides
-		// there, producing an order RFC 4034 §6.3 does not describe and a
-		// digest no other implementation reproduces.
+		// RRSIGs over everything else. Comparing the whole wire reaches the TTL
+		// field first and decides there, producing an order RFC 4034 §6.3 does
+		// not describe and a digest no other implementation reproduces.
 		//
 		// Not the wire minus the TTL either: RDLENGTH precedes the RDATA, so
 		// that comparison sorts a shorter RDATA first unconditionally, where
-		// §6.3 wants a left-justified octet comparison in which a shorter
-		// RDATA sorts first only when it is a PREFIX of the longer.
+		// §6.3 wants a left-justified octet comparison in which a shorter RDATA
+		// sorts first only when it is a PREFIX of the longer.
 		return bytes.Compare(entries[i].rdata, entries[j].rdata) < 0
 	})
 
-	// Duplicates count once (§3.3.1). After the sort they are adjacent, so this
-	// is a scan rather than a set.
+	block := make([]byte, 0, total)
 	var prev []byte
 	for _, e := range entries {
 		if prev != nil && bytes.Equal(prev, e.wire) {
 			continue
 		}
-		h.Write(e.wire)
+		block = append(block, e.wire...)
 		prev = e.wire
 	}
+	return block, nil
+}
 
+// groupByOwner buckets a flat record list by canonical owner name.
+func groupByOwner(rrs []dns.RR) map[string][]dns.RR {
+	out := make(map[string][]dns.RR)
+	for _, rr := range rrs {
+		if rr == nil {
+			continue
+		}
+		name := dns.CanonicalName(rr.Header().Name)
+		out[name] = append(out[name], rr)
+	}
+	return out
+}
+
+// canonicalOwnerOrder sorts owner names into RFC 4034 §6.1 canonical order.
+//
+// Sorts (key, name) pairs rather than looking each key up in a map. The map
+// spelling is the obvious one and costs about six allocations per name to the
+// pair slice's one -- which for a zone with a million owners is the difference
+// between the sort being noticeable and being the whole cost. Every publish of
+// every signed zone pays this ordering for the NSEC chain, so it is worth the
+// extra four lines.
+func canonicalOwnerOrder(names []string) {
+	type keyed struct {
+		key  []byte
+		name string
+	}
+	tmp := make([]keyed, len(names))
+	for i, n := range names {
+		tmp[i] = keyed{canonicalSortKey(n), n}
+	}
+	sort.Slice(tmp, func(i, j int) bool {
+		return bytes.Compare(tmp[i].key, tmp[j].key) < 0
+	})
+	for i := range tmp {
+		names[i] = tmp[i].name
+	}
+}
+
+// ZoneDigest computes the RFC 8976 digest over rrs for the given apex.
+//
+// Exclusions, per §3.3.1: the apex ZONEMD RRset and the RRSIGs covering it are
+// omitted (a digest cannot cover itself), and duplicate RRs count once.
+//
+// Only the SIMPLE scheme is implemented. It is the only one defined, and the
+// registry exists for a scheme that has not been specified.
+//
+// This is the uncached path, over a flat record list: what a zone file parse,
+// an AXFR and every verification hand it. The publish path goes through
+// zonemd_cache.go instead, and the two share digestBlock so they cannot
+// disagree about what a digest is.
+func ZoneDigest(apex string, rrs []dns.RR, scheme, alg uint8) ([]byte, error) {
+	h, err := zonemdHasherForScheme(scheme, alg)
+	if err != nil {
+		return nil, err
+	}
+	apex = dns.CanonicalName(apex)
+
+	byOwner := groupByOwner(rrs)
+	names := make([]string, 0, len(byOwner))
+	for name := range byOwner {
+		names = append(names, name)
+	}
+	canonicalOwnerOrder(names)
+
+	for _, name := range names {
+		block, berr := digestBlock(apex, byOwner[name])
+		if berr != nil {
+			return nil, berr
+		}
+		h.Write(block)
+	}
 	return h.Sum(nil), nil
+}
+
+// zonemdHasherForScheme resolves the hash for a (scheme, algorithm) pair,
+// rejecting a scheme that is not SIMPLE.
+func zonemdHasherForScheme(scheme, alg uint8) (hash.Hash, error) {
+	if scheme != ZonemdSchemeSimple {
+		return nil, fmt.Errorf("ZONEMD: unsupported scheme %d (only SIMPLE=%d is defined)",
+			scheme, ZonemdSchemeSimple)
+	}
+	return zonemdHasher(alg)
 }
 
 // ZoneDigestHex is ZoneDigest rendered as lowercase hex, which is how the

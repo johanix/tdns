@@ -353,6 +353,10 @@ type ZonemdStatus struct {
 	// Report is present for `verify`, and for `status` carries the published
 	// records without a recomputation (every Computed field empty).
 	Report *ZonemdReport `json:"report,omitempty"`
+	// Cache is what the last publish's digest cost and what it is holding, so
+	// the memory/CPU trade behind wire-cache-max-bytes is tuned from
+	// measurements rather than guesses. Nil when the zone has not digested yet.
+	Cache *ZonemdCacheStats `json:"cache,omitempty"`
 }
 type ZoneDsyncPost struct {
 	Command   string // status | bootstrap | ...

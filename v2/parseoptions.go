@@ -224,7 +224,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			// digest is a degraded zone, not an unusable one, and taking a
 			// zone off the air over a mistyped hash algorithm would be the
 			// larger failure. The ConfigError is how the operator finds out.
-			if _, _, err := resolveZonemdConf(zconf.Zonemd); err != nil {
+			if _, err := resolveZonemdConf(zconf.Zonemd); err != nil {
 				lg.Error("option ignored: invalid zonemd configuration",
 					"zone", zname, "option", ZoneOptionToString[opt], "err", err)
 				if zd != nil {

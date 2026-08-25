@@ -246,23 +246,29 @@ func (zd *ZoneData) updateZonemdLocked(serial uint32) {
 	}
 
 	scheme, algs := zd.zonemdSchemeLocked(), zd.zonemdAlgsLocked()
-	rrs := zd.workingSetRRsForDigestLocked()
+
+	// Every algorithm in one pass. The canonical blocks do not depend on the
+	// hash, so a zone publishing SHA-384 and SHA-512 renders once and hashes
+	// twice -- and the blocks of every owner this publish did not touch are
+	// reused rather than rebuilt. See zonemd_cache.go.
+	digests, derr := zd.zonemdDigestsLocked(scheme, algs)
+	if derr != nil {
+		zd.abandonZonemdLocked(fmt.Errorf("computing the digest: %w", derr))
+		return
+	}
 
 	ttl := zd.zonemdTTLLocked()
-	digests := make(map[uint8]string, len(algs))
 	rs := core.RRset{
 		Name:   zd.ZoneName,
 		Class:  dns.ClassINET,
 		RRtype: dns.TypeZONEMD,
 	}
 	for _, alg := range algs {
-		digest, err := ZoneDigestHex(zd.ZoneName, rrs, scheme, alg)
-		if err != nil {
-			zd.abandonZonemdLocked(fmt.Errorf("computing the %s digest: %w",
-				zonemdAlgName(alg), err))
+		digest, ok := digests[alg]
+		if !ok {
+			zd.abandonZonemdLocked(fmt.Errorf("no %s digest was produced", zonemdAlgName(alg)))
 			return
 		}
-		digests[alg] = digest
 		rs.RRs = append(rs.RRs, &dns.ZONEMD{
 			Hdr: dns.RR_Header{
 				Name:   zd.ZoneName,
@@ -350,6 +356,10 @@ func (zd *ZoneData) removeZonemdLocked() {
 	zd.zonemdManaged = false
 	zd.zonemdDigests = nil
 	zd.zonemdDigestSerial = 0
+	// Nothing is going to read the rendered blocks again until the zone
+	// publishes a digest once more, and by then every owner will have been
+	// re-rendered anyway. Holding them meanwhile is memory for nothing.
+	zd.dropZonemdCacheLocked()
 }
 
 // noteZonemdStateLocked logs a change in whether the zone can publish a
@@ -372,21 +382,6 @@ func (zd *ZoneData) noteZonemdStateLocked(errmsg string) {
 			"zone", zd.ZoneName, "error", errmsg)
 	}
 	zd.zonemdLastErr = errmsg
-}
-
-// workingSetRRsForDigestLocked flattens the staged zone into the RR list the
-// digest is computed over.
-//
-// Goes through ownerRRsForDigest, like the two zone-file collectors, so the
-// digest published in the ZONEMD and the digest recorded as the zone file's
-// identity see exactly the same records. They are the same computation over
-// the same content and must not be able to drift.
-func (zd *ZoneData) workingSetRRsForDigestLocked() []dns.RR {
-	var out []dns.RR
-	for _, od := range zd.workingSet {
-		out = append(out, ownerRRsForDigest(od)...)
-	}
-	return out
 }
 
 // zonemdAlgName renders an RFC 8976 hash algorithm for a log line.
@@ -437,54 +432,63 @@ func (zd *ZoneData) cachedZonemdDigestLocked(serial uint32, scheme, alg uint8) (
 // duplicates are rejected rather than deduplicated -- two ZONEMD RRs with the
 // same (scheme, algorithm) pair is a malformed RRset, and silently collapsing
 // it would hide a config the operator got wrong.
-func resolveZonemdConf(zc ZonemdConf) (uint8, []uint8, error) {
-	scheme, algs, _, err := resolveZonemdConfFull(zc)
-	return scheme, algs, err
+// zonemdSettings is a zone's validated ZONEMD configuration.
+type zonemdSettings struct {
+	Scheme            uint8
+	Algorithms        []uint8
+	OnVerifyFailure   string
+	WireCacheMaxBytes int
 }
 
-// resolveZonemdConfFull additionally resolves the verification failure mode,
-// which only `verify-zonemd` reads. Split so the publish side keeps its
-// three-value signature and its call sites stay legible.
-func resolveZonemdConfFull(zc ZonemdConf) (uint8, []uint8, string, error) {
-	scheme := zc.Scheme
-	if scheme == 0 {
-		scheme = ZonemdSchemeSimple
+func resolveZonemdConf(zc ZonemdConf) (zonemdSettings, error) {
+	out := zonemdSettings{
+		Scheme:            zc.Scheme,
+		OnVerifyFailure:   zc.OnVerifyFailure,
+		WireCacheMaxBytes: zc.WireCacheMaxBytes,
 	}
-	if scheme != ZonemdSchemeSimple {
-		return 0, nil, "", fmt.Errorf("scheme %d is not implemented (only SIMPLE=%d is defined)",
-			scheme, ZonemdSchemeSimple)
+	if out.Scheme == 0 {
+		out.Scheme = ZonemdSchemeSimple
+	}
+	if out.Scheme != ZonemdSchemeSimple {
+		return zonemdSettings{}, fmt.Errorf(
+			"scheme %d is not implemented (only SIMPLE=%d is defined)",
+			out.Scheme, ZonemdSchemeSimple)
 	}
 
-	onFailure := zc.OnVerifyFailure
-	switch onFailure {
+	switch out.OnVerifyFailure {
 	case "":
-		onFailure = ZonemdOnFailureRefuse
+		out.OnVerifyFailure = ZonemdOnFailureRefuse
 	case ZonemdOnFailureRefuse, ZonemdOnFailureWarn:
 	default:
-		return 0, nil, "", fmt.Errorf("on-verify-failure %q is not one of %q or %q",
+		return zonemdSettings{}, fmt.Errorf("on-verify-failure %q is not one of %q or %q",
 			zc.OnVerifyFailure, ZonemdOnFailureRefuse, ZonemdOnFailureWarn)
 	}
 
+	// wire-cache-max-bytes takes any value: 0 is the default, negative
+	// disables, and a positive figure too small to hold one owner's records
+	// simply caches nothing -- which is a legitimate way to say "off" and not
+	// worth a separate error for.
+
 	if len(zc.Algorithms) == 0 {
-		return scheme, []uint8{ZonemdAlgSHA384}, onFailure, nil
+		out.Algorithms = []uint8{ZonemdAlgSHA384}
+		return out, nil
 	}
 	seen := map[uint8]bool{}
-	algs := make([]uint8, 0, len(zc.Algorithms))
 	for _, alg := range zc.Algorithms {
 		switch alg {
 		case ZonemdAlgSHA384, ZonemdAlgSHA512:
 		default:
-			return 0, nil, "", fmt.Errorf("hash algorithm %d is not implemented"+
+			return zonemdSettings{}, fmt.Errorf("hash algorithm %d is not implemented"+
 				" (%d=SHA-384, %d=SHA-512)", alg, ZonemdAlgSHA384, ZonemdAlgSHA512)
 		}
 		if seen[alg] {
-			return 0, nil, "", fmt.Errorf("hash algorithm %d (%s) is listed twice",
+			return zonemdSettings{}, fmt.Errorf("hash algorithm %d (%s) is listed twice",
 				alg, zonemdAlgName(alg))
 		}
 		seen[alg] = true
-		algs = append(algs, alg)
+		out.Algorithms = append(out.Algorithms, alg)
 	}
-	return scheme, algs, onFailure, nil
+	return out, nil
 }
 
 // zonemdSettingsDiffer reports whether two resolved configurations would

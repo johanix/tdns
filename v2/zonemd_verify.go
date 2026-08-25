@@ -437,6 +437,13 @@ func (zd *ZoneData) ZonemdStatusReport(verify bool, opts VerifyZonemdOpts) (*Zon
 	zd.mu.Lock()
 	st.Scheme, st.Algorithms = zd.zonemdSchemeLocked(), zd.zonemdAlgsLocked()
 	st.OnVerifyFailure = zd.zonemdOnVerifyFailure
+	// Reported for a zone that has actually digested something. A zone that
+	// publishes no ZONEMD has no cache and saying "0 of 0" about it would be
+	// noise dressed as information.
+	if zd.zonemdCacheStats.Owners > 0 {
+		cs := zd.zonemdCacheStats
+		st.Cache = &cs
+	}
 	zd.mu.Unlock()
 	if st.OnVerifyFailure == "" {
 		st.OnVerifyFailure = ZonemdOnFailureRefuse

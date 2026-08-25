@@ -64,13 +64,7 @@ func TestCanonicalSortKeyProducesTheSameOrderAsTheComparator(t *testing.T) {
 		})
 
 		byKey := append([]string(nil), names...)
-		keys := make(map[string][]byte, len(byKey))
-		for _, nm := range byKey {
-			keys[nm] = canonicalSortKey(nm)
-		}
-		sort.SliceStable(byKey, func(i, j int) bool {
-			return bytes.Compare(keys[byKey[i]], keys[byKey[j]]) < 0
-		})
+		canonicalOwnerOrder(byKey)
 
 		for i := range byComparator {
 			if byComparator[i] != byKey[i] {
@@ -85,13 +79,7 @@ func TestCanonicalSortKeyProducesTheSameOrderAsTheComparator(t *testing.T) {
 // the one a lexicographic sort gets wrong.
 func TestCanonicalSortKeyPutsTheApexFirst(t *testing.T) {
 	names := []string{"ns.clean.example.", "alpha.clean.example.", "clean.example."}
-	keys := map[string][]byte{}
-	for _, n := range names {
-		keys[n] = canonicalSortKey(n)
-	}
-	sort.Slice(names, func(i, j int) bool {
-		return bytes.Compare(keys[names[i]], keys[names[j]]) < 0
-	})
+	canonicalOwnerOrder(names)
 	if names[0] != "clean.example." {
 		t.Errorf("the apex is not first: %v", names)
 	}
@@ -126,13 +114,7 @@ func benchmarkOwnerSort(b *testing.B, n int, useKeys bool) {
 	for i := 0; i < b.N; i++ {
 		names := append([]string(nil), base...)
 		if useKeys {
-			keys := make(map[string][]byte, len(names))
-			for _, nm := range names {
-				keys[nm] = canonicalSortKey(nm)
-			}
-			sort.Slice(names, func(i, j int) bool {
-				return bytes.Compare(keys[names[i]], keys[names[j]]) < 0
-			})
+			canonicalOwnerOrder(names)
 		} else {
 			sort.Slice(names, func(i, j int) bool {
 				return canonicalOwnerLess(names[i], names[j])

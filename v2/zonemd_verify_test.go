@@ -416,7 +416,7 @@ func TestResolveZonemdConfOnVerifyFailure(t *testing.T) {
 			name = "(unset)"
 		}
 		t.Run(name, func(t *testing.T) {
-			_, _, got, err := resolveZonemdConfFull(ZonemdConf{OnVerifyFailure: tc.in})
+			set, err := resolveZonemdConf(ZonemdConf{OnVerifyFailure: tc.in})
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("%q was accepted", tc.in)
@@ -426,8 +426,8 @@ func TestResolveZonemdConfOnVerifyFailure(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%q was rejected: %v", tc.in, err)
 			}
-			if got != tc.want {
-				t.Errorf("%q resolved to %q, want %q", tc.in, got, tc.want)
+			if set.OnVerifyFailure != tc.want {
+				t.Errorf("%q resolved to %q, want %q", tc.in, set.OnVerifyFailure, tc.want)
 			}
 		})
 	}
