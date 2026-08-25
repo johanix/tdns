@@ -494,6 +494,11 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	// Checked here rather than only up front so a long parse cannot slip
 	// through the earlier gate.
 	if cerr := ctx.Err(); cerr != nil {
+		// Same reasoning as the gate after the callbacks below: the stat was
+		// recorded by the read above, and we are not adopting the file, so
+		// leaving it behind would make the next refresh skip a change that was
+		// never applied. Narrower window than that gate, identical consequence.
+		zd.forgetZoneFileStat()
 		zd.SetStatus(prevStatus)
 		return false, fmt.Errorf("FetchFromFile %s: %w", zd.ZoneName, cerr)
 	}

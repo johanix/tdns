@@ -1258,6 +1258,12 @@ func dialTransferConn(parent context.Context, upstream string, tlsCfg *tls.Confi
 	}
 	// Derive from the caller's context, so a shutdown landing in a bound-source
 	// dial returns immediately instead of waiting out the full dial timeout.
+	//
+	// The ctx has to reach the CONNECT, not just the lookup: for an IP-literal
+	// upstream -- the common case -- pickTransferSrc does no resolution at all,
+	// so passing ctx only there would leave the 2s dial uncancellable while the
+	// comment claimed otherwise. Hence DialContext, and tls.Dialer rather than
+	// tls.DialWithDialer so the handshake runs under the same ctx too.
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
@@ -1268,13 +1274,14 @@ func dialTransferConn(parent context.Context, upstream string, tlsCfg *tls.Confi
 	d := &net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{IP: src}}
 
 	if tlsCfg != nil {
-		c, err := tls.DialWithDialer(d, network, upstream, tlsCfg)
+		td := &tls.Dialer{NetDialer: d, Config: tlsCfg}
+		c, err := td.DialContext(ctx, network, upstream)
 		if err != nil {
 			return nil, err
 		}
 		return &dns.Conn{Conn: c}, nil
 	}
-	c, err := d.Dial(network, upstream)
+	c, err := d.DialContext(ctx, network, upstream)
 	if err != nil {
 		return nil, err
 	}

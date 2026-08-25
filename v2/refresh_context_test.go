@@ -3,6 +3,7 @@ package tdns
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"testing"
@@ -223,5 +224,38 @@ func TestCancelledRefreshDoesNotStrandZoneStatus(t *testing.T) {
 	if got := zd.GetStatus(); got != ZoneStatusReady {
 		t.Errorf("zone left in status %v after a cancelled refresh, want %v (unchanged)",
 			ZoneStatusToString[got], ZoneStatusToString[ZoneStatusReady])
+	}
+}
+
+// TestNoteRefreshFailureIgnoresCancellation: a cancelled refresh is a shutdown,
+// not a sick zone. Flagging it RefreshError leaves a healthy zone marked failed
+// -- invisible at process death, wrong the moment ctx bounds a single refresh.
+func TestNoteRefreshFailureIgnoresCancellation(t *testing.T) {
+	realErr := errors.New("upstream refused the transfer")
+
+	zd := &ZoneData{ZoneName: "example.", Options: map[ZoneOption]bool{}}
+	if failed := noteRefreshFailure(zd, "example.", realErr, "zone refresh failed"); !failed {
+		t.Error("a real refresh failure should be reported as a failure")
+	}
+	if !zd.HasError(RefreshError) {
+		t.Error("a real refresh failure should set RefreshError")
+	}
+
+	zd2 := &ZoneData{ZoneName: "example.", Options: map[ZoneOption]bool{}}
+	if failed := noteRefreshFailure(zd2, "example.", context.Canceled, "zone refresh failed"); failed {
+		t.Error("cancellation should not be reported as a refresh failure")
+	}
+	if zd2.HasError(RefreshError) {
+		t.Error("a cancelled refresh must not flag the zone RefreshError")
+	}
+
+	// Wrapped cancellation counts too -- that is how it arrives from the chain.
+	zd3 := &ZoneData{ZoneName: "example.", Options: map[ZoneOption]bool{}}
+	wrapped := fmt.Errorf("AXFR of example.: %w", context.Canceled)
+	if noteRefreshFailure(zd3, "example.", wrapped, "zone refresh failed") {
+		t.Error("wrapped cancellation should not be reported as a refresh failure")
+	}
+	if zd3.HasError(RefreshError) {
+		t.Error("wrapped cancellation must not flag the zone RefreshError")
 	}
 }
