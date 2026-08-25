@@ -132,25 +132,28 @@ against current codebase.
 
 ### 13. ZONEMD Publication
 - **Source**: 2026-08-25-zonemd-publication-design.md
-- **Status**: Designed, not implemented
-- **Description**: `v2/zonemd.go` is a correct RFC 8976
-  SIMPLE implementation used only as a private detector for
-  zone-file identity (`ZoneFileState`). Making it a
-  published record needs a `publish-zonemd` zone option and
-  two new steps inside `publishWorkingSetLocked`: stage the
-  apex ZONEMD before `restitchNsecLocked` so the NSEC bitmap
-  lists it, then compute and sign the digest after, as the
-  last content mutation before the snapshot swap.
-- **Also needs**: conditional ZONEMD exclusion in
-  `withoutDerivedRecords`, a DDNS/API gate on the apex
-  ZONEMD RRset, `OptPublishZonemd` in `originationOptions`,
-  and removal-on-flip when the option goes off.
-- **Cost**: the digest is not incrementally updatable, so
-  every publish is O(zone). Measured at ~7 s for 1.1M
-  records (`zone_utils.go:237`); the design stages cached
-  canonical sort keys and cached wire encodings against it.
-- **Phase 3**: `verify-zonemd` for secondaries plus a
-  `zone zonemd verify` CLI, the half labstuff already has as
+- **Status**: Phase 1 done on `feature/zonemd-publication`;
+  phases 2-3 open
+- **Done**: the `publish-zonemd` zone option with a `zonemd:`
+  config block. The digest is computed and signed inside
+  every publish, between `ensureZonemdPresenceLocked` (before
+  the NSEC restitch, so the apex bitmap lists ZONEMD) and
+  `updateZonemdLocked` (after it, since the digest covers the
+  NSECs). Journal exclusion, DDNS/API refusal, secondary
+  normalization and removal-on-flip all in.
+- **Also fixed**: `ZoneDigest` broke sort ties on the whole
+  wire record and therefore on the TTL, where RFC 4034 §6.3
+  wants canonical RDATA. Every signed zone was affected; the
+  RFC's Appendix A vectors do not catch it. Found by
+  cross-checking against dnspython. `ZoneFileState` grew a
+  `digest_variant` column so the changed digests re-baseline
+  instead of reporting every signed zone's file as edited.
+- **Phase 2**: per-RRset wire cache. The sort keys landed
+  (10k names: 21.9ms/953k allocs -> 3.7ms/60k allocs) but
+  the digest still re-encodes every RR on every publish.
+- **Phase 3**: `verify-zonemd` for secondaries, a
+  `zone zonemd status|verify` CLI, and client-side verify in
+  `dog` -- the half labstuff already has as
   `axfr-cli zone verify`.
 
 ## Docs Needing Status Updates

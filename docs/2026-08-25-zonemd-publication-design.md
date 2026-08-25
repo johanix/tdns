@@ -379,7 +379,7 @@ publishing a ZONEMD (§3.5).
 
 ## 8. Phasing
 
-1. **Publish.** Option, config, `ensureZonemdPresenceLocked` +
+1. **Publish.** DONE — see §10. Option, config, `ensureZonemdPresenceLocked` +
    `updateZonemdLocked`, signing, journal exclusion, DDNS/API gate, role
    normalization, removal-on-flip, P2 sort keys. Tests per §7.
 2. **Cost.** P3 wire cache, benchmarked on a large zone.
@@ -461,3 +461,83 @@ sort-key change in `canonicalOwnerLess`'s callers.
 Phase 1 is the only phase that has to land as a unit — a half-implemented
 ZONEMD publishes a wrong digest, which is the one outcome §3.2 rules out.
 Phases 2 and 3 are independently shippable and independently skippable.
+
+## 10. Phase 1 as built
+
+On `feature/zonemd-publication`, in two commits.
+
+### What landed
+
+`v2/zonemd_publish.go` holds the feature. `ensureZonemdPresenceLocked` and
+`updateZonemdLocked` sit either side of `restitchNsecLocked` in
+`publishWorkingSetLocked`, exactly as §3.1 describes. Around them:
+
+- `OptPublishZonemd` with a `zonemd:` config block (`ZonemdConf` on
+  `ZoneConf`), template-inherited through the existing reflective gap-fill;
+- the option in `originationOptions`, so a mirroring secondary is stripped;
+- `withoutDerivedRecords` conditional on whether the zone manages its ZONEMD,
+  so an operator-authored one still journals;
+- the apex ZONEMD refused to DNS UPDATE and the API, dropped on replay, and
+  retained by DELNAME;
+- `dns.TypeZONEMD` skipped in the two apex loops of `SignZone`/`ResignZone`;
+- `ZoneDigestOfPublished` reusing the digest the publish already computed;
+- removal on the option flip, driven from the config parse.
+
+### Two things the design did not anticipate
+
+**The digest was wrong for signed zones.** Cross-checking the published record
+against dnspython 2.8.0 turned up a disagreement in the pre-existing
+`ZoneDigest`: the sort broke ties between RRsets sharing an owner and a type on
+the whole wire record, and therefore on the TTL, where RFC 4034 §6.3 wants
+canonical RDATA. Every signed zone tdns produces has the triggering shape — the
+RRSIG over the NSEC carries the SOA minimum, the rest carry what they cover.
+The RFC's own Appendix A vectors do not catch it, because their TTLs are
+uniform. Neither does any self-consistent test.
+
+`v2/zonemd_test.go` now pins the two digests dnspython computes for a fixture
+built to have that shape, which converts the test from self-agreement into
+cross-implementation agreement.
+
+**Fixing it changes every stored file-identity digest.** `ZoneFileState` grew a
+`digest_variant` column: a row from the previous computation reads as
+`ZoneFileUnknown` and re-baselines, rather than reporting the file as edited.
+Without it, the first restart after the upgrade would have every signed zone in
+a fleet accusing its operator at once — the failure the detector exists to
+avoid, reached from the other side. Bump `zoneFileDigestVariant` whenever a
+change to `ZoneDigest` changes its output for unchanged content.
+
+### Cost, measured
+
+The P2 sort keys are in (`canonicalSortKey`), used by the digest sort and by
+`workingOwnerNamesLocked`. Sorting 10k owner names:
+
+| | ns/op | allocs/op |
+| --- | ---: | ---: |
+| `canonicalOwnerLess` pairwise | 21,917,643 | 952,994 |
+| precomputed keys | 3,684,356 | 60,036 |
+
+5.9× faster, 16× fewer allocations. Every publish of every signed zone already
+paid that sort for the NSEC chain, so the win is not confined to zonemd zones.
+
+The P3 wire cache is not done; the full digest still re-encodes every RR on
+every publish.
+
+### Against the estimate
+
+§9 predicted 470–680 production lines and 400–550 test for phase 1. Actual:
+~530 production in `zonemd_publish.go` plus ~230 across thirteen existing
+files, and ~930 test across four files. Over on both counts, and the overrun is
+almost entirely the two items above — neither of which was in the plan.
+
+### Left for later
+
+- `InstallInitialSnapshot` builds a snapshot straight from `zd.Data` without
+  passing through the publish path, so a zone created by `CreateAutoZone`
+  serves without a ZONEMD until its first publish. Harmless (absent, not
+  wrong) and self-correcting, but it means the record is not present from the
+  very first served serial for that one path.
+- Turning the option off after a restart cannot remove the record: the server
+  can no longer tell its own ZONEMD from a hand-authored one. Documented in
+  `guide/config-tdns-auth.md`.
+- No operator surface yet beyond the log: `zone zonemd status|verify` is
+  phase 3.
