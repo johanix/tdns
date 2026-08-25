@@ -333,7 +333,6 @@ func TestDsyncApiSupportedDialectMatchesTheParentSide(t *testing.T) {
 	}
 }
 
-
 // The one DS statement a proxy may make, and the predicate that decides it.
 //
 // A child with no DNSKEY RRset at all is unambiguously broken if the parent
