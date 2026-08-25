@@ -194,3 +194,32 @@ func TestDrainRemainderGivesUp(t *testing.T) {
 		t.Errorf("drainRemainder blocked for %v; the grace period is not bounding it", elapsed)
 	}
 }
+
+// TestCancelledRefreshDoesNotStrandZoneStatus: a cancelled refresh has changed
+// nothing, so it must leave the zone reporting the status it had before.
+//
+// Getting this wrong is quiet but lasting: the zone keeps serving correctly
+// while `zone list` shows it stuck in `loading` for the life of the process,
+// which is exactly the sort of thing an operator chases for an afternoon.
+func TestCancelledRefreshDoesNotStrandZoneStatus(t *testing.T) {
+	zd := &ZoneData{
+		ZoneName:  "example.",
+		ZoneType:  Secondary,
+		Options:   map[ZoneOption]bool{},
+		Upstreams: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
+		Data:      core.NewCmap[OwnerData](),
+		Logger:    log.New(io.Discard, "", 0),
+	}
+	zd.SetStatus(ZoneStatusReady)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := zd.FetchFromUpstream(ctx, false, false, false, nil, &Config{}); err == nil {
+		t.Fatal("a cancelled FetchFromUpstream should report the cancellation")
+	}
+	if got := zd.GetStatus(); got != ZoneStatusReady {
+		t.Errorf("zone left in status %v after a cancelled refresh, want %v (unchanged)",
+			ZoneStatusToString[got], ZoneStatusToString[ZoneStatusReady])
+	}
+}

@@ -499,6 +499,13 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 		cb(zd, &new_zd)
 	}
 
+	// Last gate before the hard flip, after the callbacks have run. See the
+	// matching comment on the upstream path.
+	if cerr := ctx.Err(); cerr != nil {
+		zd.SetStatus(prevStatus)
+		return false, fmt.Errorf("FetchFromFile %s: %w", zd.ZoneName, cerr)
+	}
+
 	// Publish replacement: working set from refreshed data + dynamic RRs.
 	zd.mu.Lock()
 	firstLoad := zd.FirstZoneLoad
@@ -595,6 +602,10 @@ func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force
 		// one immediately cancelled -- which is the opposite of what
 		// cancellation is for.
 		if cerr := ctx.Err(); cerr != nil {
+			// Restore the prior status: a cancelled refresh has not changed
+			// anything, and leaving the zone in `loading` would misreport a
+			// perfectly good zone for as long as the process lives.
+			zd.SetStatus(prevStatus)
 			return false, fmt.Errorf("AXFR of %s: %w", zd.ZoneName, cerr)
 		}
 		upstream := up.Addr
@@ -641,6 +652,16 @@ func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force
 	// Pre-refresh callbacks: analysis of old vs new zone data + modification of new_zd.
 	for _, cb := range zd.OnZonePreRefresh {
 		cb(zd, &new_zd)
+	}
+
+	// Last gate before the hard flip. The transfer and the pre-refresh
+	// callbacks both take real time -- an AXFR of a large zone, then MP roles
+	// doing HSYNC/DNSKEY analysis -- so cancellation can land after the earlier
+	// checks passed. Publishing replacement data into a daemon that is shutting
+	// down is exactly what the caller asked us not to do.
+	if cerr := ctx.Err(); cerr != nil {
+		zd.SetStatus(prevStatus)
+		return false, fmt.Errorf("FetchFromUpstream %s: %w", zd.ZoneName, cerr)
 	}
 
 	// Publish replacement: working set from transferred data + dynamic RRs.
