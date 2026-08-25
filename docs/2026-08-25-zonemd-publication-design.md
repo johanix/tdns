@@ -382,8 +382,8 @@ publishing a ZONEMD (§3.5).
 1. **Publish.** DONE — see §10. Option, config, `ensureZonemdPresenceLocked` +
    `updateZonemdLocked`, signing, journal exclusion, DDNS/API gate, role
    normalization, removal-on-flip, P2 sort keys. Tests per §7.
-2. **Cost.** P3 wire cache, benchmarked on a large zone.
-3. **Verify.** `verify-zonemd`, the CLI surface, `dog`.
+2. **Cost.** P3 wire cache, benchmarked on a large zone. NOT DONE.
+3. **Verify.** DONE — see §11. `verify-zonemd`, the CLI surface, `dog`.
 
 ## 9. Effort estimate
 
@@ -541,3 +541,71 @@ almost entirely the two items above — neither of which was in the plan.
   `guide/config-tdns-auth.md`.
 - No operator surface yet beyond the log: `zone zonemd status|verify` is
   phase 3.
+
+## 11. Phase 3 as built
+
+One commit. `v2/zonemd_verify.go` holds it: one `VerifyZonemd` that every
+caller goes through, differing only in where the records come from.
+
+### Surfaces
+
+- **`verify-zonemd`** checks the apex ZONEMD before a zone is adopted, on both
+  adoption paths (`FetchFromFile`, `FetchFromUpstream`), on the scratch zone
+  and before the pre-refresh callbacks. `zonemd.on-verify-failure` selects
+  refuse (default) or warn. Not stripped on a mirroring secondary — verifying
+  what you received originates nothing, and the secondary is the role the
+  option is for.
+- **`zone zonemd status`** reads the published RRset without recomputing;
+  **`zone zonemd verify`** digests and compares, exiting non-zero on failure so
+  it works in a check script. `--ignore-serial` for a zone digested before its
+  serial moved.
+- **`dog AXFR +zonemd`** verifies somebody else's zone and exits non-zero on
+  failure. It refuses an IXFR rather than digesting a difference.
+
+### The distinction the code is built around
+
+A digest that cannot be CHECKED is not a digest that FAILS. RFC 8976 reserves
+codepoints so a publisher can say "not for you", so an unimplemented scheme or
+hash yields `unsupported` and the zone is adopted with a warning. The
+alternative makes every future algorithm an outage for every zone that adopts
+it before this build does.
+
+The verdicts, and what each does to an inbound zone:
+
+| State | Verdict | Inbound zone |
+| --- | --- | --- |
+| no apex ZONEMD | absent | adopted |
+| digest verifies | valid | adopted |
+| digest does not verify | invalid | refused (warn: adopted, logged) |
+| ZONEMD names another serial | invalid | refused |
+| scheme/hash not implemented | unsupported | adopted, warned |
+| duplicate (scheme, algorithm) | invalid | refused |
+
+A refusal is not final: the refresh engine records it and retries, so a primary
+that fixes its digest is picked up without intervention.
+
+### Verified against a live server, not only in tests
+
+A `tdns-auth` with an inline-signed zone publishing SHA-384 and SHA-512:
+
+- `dog AXFR +zonemd`, `zone zonemd status`, and `zone zonemd verify` all agree;
+- dnspython 2.8.0 verifies the same live AXFR independently, both algorithms;
+- three successive API updates advance the serial 4→5→6 and the digest verifies
+  at each one;
+- a second zone carrying a hand-written wrong digest fails in `dog` and in the
+  CLI, both exiting 1, and — with `publish-zonemd` off — the server leaves that
+  operator-authored record untouched;
+- `IXFR +zonemd` is refused with exit 1.
+
+### Against the estimate
+
+§9 predicted 410–580 production and 200–300 test. Actual: ~700 production
+(~480 in `zonemd_verify.go`, ~180 in the CLI, the rest spread across the
+option, config, API and dog) and ~450 test. Over on both, mostly because the
+verdict taxonomy turned out to be worth building explicitly rather than
+returning a bool.
+
+### Still open
+
+Phase 2's per-RRset wire cache. The digest re-encodes every RR on every
+publish, which is now also the cost of every verification.
