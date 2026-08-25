@@ -215,7 +215,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 				lg.Error("option ignored: DNSSEC policy not set", "zone", zname, "option", ZoneOptionToString[opt])
 			}
 
-		case OptPublishZonemd:
+		case OptPublishZonemd, OptVerifyZonemd:
 			// The `zonemd` block is only consulted for a zone that asks for
 			// one, so a leftover block under a zone whose option was removed
 			// is inert rather than an error.

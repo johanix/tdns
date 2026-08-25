@@ -883,6 +883,21 @@ func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]st
 		options["sigchase"] = "true"
 		options["algchase"] = "true"
 		return options, nil
+	case "+ZONEMD", "+ZMD":
+		// Verify the transferred zone's apex ZONEMD (RFC 8976) against the
+		// records that arrived. Meaningful only with AXFR: an IXFR returns a
+		// difference, which has no digest, and the transfer path refuses
+		// rather than producing a meaningless one.
+		options["zonemd"] = "true"
+		return options, nil
+	case "+IGNORESERIAL", "+IGNSER":
+		// Digest against the serial each ZONEMD names rather than the one the
+		// SOA carries -- the question "was this digest right for the serial it
+		// claims?", which is what an operator wants when a pipeline digests a
+		// zone and then bumps its serial. NOT a laxer verification: a zone that
+		// only passes this way is one no RFC 8976 verifier will accept.
+		options["ignoreserial"] = "true"
+		return options, nil
 	case "+TCP":
 		// A pre-existing "Do53" is the default ParseServer writes when
 		// the user supplied @host without a scheme; treat it as an

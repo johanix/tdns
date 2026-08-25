@@ -261,6 +261,10 @@ type ZonePost struct {
 	// UpdateRrtype address an RRset or a name for delrrset/delname. See
 	// BuildZoneUpdateActions, which both this channel and the DDNS channel
 	// translate through.
+	// IgnoreSerial is the "zone zonemd verify" escape hatch: digest against
+	// the serial each ZONEMD names rather than the one the SOA carries. A
+	// diagnostic, not a laxer check -- see VerifyZonemdOpts.
+	IgnoreSerial bool
 	UpdateVerb   string
 	UpdateRRs    []string
 	UpdateName   string
@@ -322,6 +326,33 @@ type ZoneResponse struct {
 	// reading it out of Msg: when it is empty, Instructions above is the only
 	// remaining copy and the client must not let it go unprinted.
 	Artefact string `json:"artefact,omitempty"`
+	// Zonemd carries the report for "zone zonemd status|verify".
+	Zonemd *ZonemdStatus `json:"zonemd,omitempty"`
+}
+
+// ZonemdStatus is the API view of a zone's ZONEMD: what it publishes, whether
+// it is configured to maintain one, and -- for `verify` -- whether a
+// recomputation reproduces it.
+//
+// Status and verify share a type because they answer the same question at
+// different cost. Status reads the published RRset and reports it; verify pays
+// for the digest and reports whether it agrees. An operator asking "is my
+// ZONEMD right?" should not have to know which command computes.
+type ZonemdStatus struct {
+	Zone string `json:"zone"`
+	// Publishing and Verifying report the zone's options, so an empty report
+	// can be told apart from a zone that was never asked to publish one.
+	Publishing bool `json:"publishing"`
+	Verifying  bool `json:"verifying"`
+	// Algorithms and Scheme are the configured parameters, meaningful when
+	// Publishing.
+	Algorithms []uint8 `json:"algorithms,omitempty"`
+	Scheme     uint8   `json:"scheme,omitempty"`
+	// OnVerifyFailure is the configured failure mode, meaningful when Verifying.
+	OnVerifyFailure string `json:"on_verify_failure,omitempty"`
+	// Report is present for `verify`, and for `status` carries the published
+	// records without a recomputation (every Computed field empty).
+	Report *ZonemdReport `json:"report,omitempty"`
 }
 type ZoneDsyncPost struct {
 	Command   string // status | bootstrap | ...

@@ -292,6 +292,10 @@ type ZoneData struct {
 	// under zd.mu, like ixfrChainMaxBytes above.
 	zonemdAlgs   []uint8
 	zonemdScheme uint8
+	// zonemdOnVerifyFailure is the resolved ZonemdConf.OnVerifyFailure,
+	// meaningful only when OptVerifyZonemd is set. Written at parse time under
+	// zd.mu, like the two fields above.
+	zonemdOnVerifyFailure string
 	// zonemdManaged records that the apex ZONEMD RRset now in this zone was
 	// put there by us rather than by the operator. It is what makes turning
 	// the option OFF remove our record while leaving a hand-authored one
@@ -522,7 +526,23 @@ type ZonemdConf struct {
 	// SIMPLE is defined, so this exists to reject a config that asks for
 	// something else rather than to offer a choice.
 	Scheme uint8 `yaml:"scheme" mapstructure:"scheme"`
+	// OnVerifyFailure decides what a failed `verify-zonemd` check does:
+	// "refuse" (the default) declines the zone and keeps serving what the
+	// server already had, "warn" adopts it and logs.
+	//
+	// Refuse is the default because the point of asking for verification is to
+	// find out that a zone is not what its publisher says it is, and adopting
+	// it anyway answers the question without acting on it. Warn exists for the
+	// rollout, where the first thing an operator needs to know is whether
+	// their own primaries would have passed.
+	OnVerifyFailure string `yaml:"on-verify-failure" mapstructure:"on-verify-failure"`
 }
+
+// ZONEMD verification failure modes (ZonemdConf.OnVerifyFailure).
+const (
+	ZonemdOnFailureRefuse = "refuse"
+	ZonemdOnFailureWarn   = "warn"
+)
 
 // DnssecPolicyView is a display-only projection of the DnssecPolicy bound to a
 // zone, carried in ZoneConf.PolicyDetail and populated only by the `zone desc`

@@ -438,17 +438,35 @@ func (zd *ZoneData) cachedZonemdDigestLocked(serial uint32, scheme, alg uint8) (
 // same (scheme, algorithm) pair is a malformed RRset, and silently collapsing
 // it would hide a config the operator got wrong.
 func resolveZonemdConf(zc ZonemdConf) (uint8, []uint8, error) {
+	scheme, algs, _, err := resolveZonemdConfFull(zc)
+	return scheme, algs, err
+}
+
+// resolveZonemdConfFull additionally resolves the verification failure mode,
+// which only `verify-zonemd` reads. Split so the publish side keeps its
+// three-value signature and its call sites stay legible.
+func resolveZonemdConfFull(zc ZonemdConf) (uint8, []uint8, string, error) {
 	scheme := zc.Scheme
 	if scheme == 0 {
 		scheme = ZonemdSchemeSimple
 	}
 	if scheme != ZonemdSchemeSimple {
-		return 0, nil, fmt.Errorf("scheme %d is not implemented (only SIMPLE=%d is defined)",
+		return 0, nil, "", fmt.Errorf("scheme %d is not implemented (only SIMPLE=%d is defined)",
 			scheme, ZonemdSchemeSimple)
 	}
 
+	onFailure := zc.OnVerifyFailure
+	switch onFailure {
+	case "":
+		onFailure = ZonemdOnFailureRefuse
+	case ZonemdOnFailureRefuse, ZonemdOnFailureWarn:
+	default:
+		return 0, nil, "", fmt.Errorf("on-verify-failure %q is not one of %q or %q",
+			zc.OnVerifyFailure, ZonemdOnFailureRefuse, ZonemdOnFailureWarn)
+	}
+
 	if len(zc.Algorithms) == 0 {
-		return scheme, []uint8{ZonemdAlgSHA384}, nil
+		return scheme, []uint8{ZonemdAlgSHA384}, onFailure, nil
 	}
 	seen := map[uint8]bool{}
 	algs := make([]uint8, 0, len(zc.Algorithms))
@@ -456,17 +474,17 @@ func resolveZonemdConf(zc ZonemdConf) (uint8, []uint8, error) {
 		switch alg {
 		case ZonemdAlgSHA384, ZonemdAlgSHA512:
 		default:
-			return 0, nil, fmt.Errorf("hash algorithm %d is not implemented"+
+			return 0, nil, "", fmt.Errorf("hash algorithm %d is not implemented"+
 				" (%d=SHA-384, %d=SHA-512)", alg, ZonemdAlgSHA384, ZonemdAlgSHA512)
 		}
 		if seen[alg] {
-			return 0, nil, fmt.Errorf("hash algorithm %d (%s) is listed twice",
+			return 0, nil, "", fmt.Errorf("hash algorithm %d (%s) is listed twice",
 				alg, zonemdAlgName(alg))
 		}
 		seen[alg] = true
 		algs = append(algs, alg)
 	}
-	return scheme, algs, nil
+	return scheme, algs, onFailure, nil
 }
 
 // zonemdSettingsDiffer reports whether two resolved configurations would

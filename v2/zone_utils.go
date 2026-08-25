@@ -410,6 +410,19 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		return false, nil // new zone not loaded, but not returning any error
 	}
 
+	// verify-zonemd, on the zone about to be adopted and not yet on the zone
+	// being served. This is the last point at which a refusal still means
+	// anything. See gateIncomingZonemd.
+	if err := zd.gateIncomingZonemd(&new_zd, "the zone file"); err != nil {
+		zd.SetStatus(prevStatus)
+		// Drop the cached stat, for the same reason the failed-adoption path
+		// below does: this file was considered and declined, so the next
+		// refresh has to look at it again rather than skip it as untouched.
+		// Without this a primary that fixes its digest is never picked up.
+		zd.forgetZoneFileStat()
+		return false, err
+	}
+
 	new_zd.Ready = true
 
 	// Pre-refresh callbacks: analysis of old vs new zone data + modification of new_zd.
@@ -546,6 +559,15 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*
 	if new_zd.IncomingSerial == zd.IncomingSerial {
 		lg.Info("FetchFromUpstream: forced retransfer, re-applying zone despite unchanged serial",
 			"zone", zd.ZoneName, "serial", zd.IncomingSerial)
+	}
+
+	// verify-zonemd, on what upstream just sent and before it is adopted. The
+	// case the option exists for: a secondary cannot re-derive a digest it was
+	// not given, so checking the one it WAS given is the only assurance it has
+	// that the zone it is about to serve is the zone its primary published.
+	if err := zd.gateIncomingZonemd(&new_zd, "upstream"); err != nil {
+		zd.SetStatus(prevStatus)
+		return false, err
 	}
 
 	new_zd.Ready = true

@@ -404,6 +404,7 @@ not sign.
 | `black-lies` | Compact denial of existence: synthesize a minimally covering NSEC rather than serving precomputed NSEC records |
 | `add-transport-signal` | Synthesize SVCB transport-signal RRs into the Additional section |
 | `publish-zonemd` | Maintain the apex ZONEMD RRset (RFC 8976). See below |
+| `verify-zonemd` | Check a zone's apex ZONEMD before adopting it, on every load and inbound transfer. See below |
 
 ### `publish-zonemd`
 
@@ -459,6 +460,77 @@ from a secondary that mirrors an upstream zone, with the usual "secondary zone
 may not originate content" message. An inline-signing secondary keeps it: it
 re-signs what it receives, so any digest from upstream is already invalid for
 what it serves.
+
+### `verify-zonemd`
+
+Check the apex ZONEMD before adopting a zone -- on every load from the zone
+file and every inbound transfer. The check runs on the zone that has just
+arrived and not yet been published, which is the last moment at which the
+answer can still change what the server does.
+
+The case it exists for is a secondary. A secondary cannot re-derive a digest it
+was not given, so checking the one it *was* given is the only assurance it has
+that what it is about to serve is what its primary published. It is not
+stripped on a mirroring secondary, unlike `publish-zonemd`: verifying what you
+received is not originating anything.
+
+```yaml
+zones:
+   - name:      example.com.
+     type:      secondary
+     options:   [ verify-zonemd ]
+     zonemd:
+        on-verify-failure: refuse   # refuse (default) | warn
+```
+
+**What counts as a failure.** Only a digest that this build can check and that
+does not describe the zone. Specifically:
+
+| Zone state | Result |
+|------------|--------|
+| No apex ZONEMD | Adopted. The option says "check the digest if there is one" |
+| Digest verifies | Adopted |
+| Digest does not verify | Refused (or adopted with a loud log, under `warn`) |
+| ZONEMD names a different serial than the SOA | Refused: RFC 8976 binds the digest to a serial |
+| Scheme or hash algorithm not implemented here | Adopted, with a warning. Reserved and unknown codepoints are how a publisher says "not for you"; refusing would make every future algorithm an outage |
+| Two ZONEMD RRs with the same scheme and algorithm | Refused: the pair is what names which digest was checked |
+
+A refusal is not final. The server keeps serving what it already had, the
+refresh engine records a `refresh` error, and the next refresh tries again --
+so a primary that fixes its digest is picked up without intervention.
+
+`on-verify-failure: warn` adopts the zone and logs at ERROR. It is for the
+rollout, where the first thing to find out is whether your own primaries would
+have passed.
+
+### Checking a ZONEMD by hand
+
+```bash
+tdns-cli auth zone zonemd status -z example.com.
+```
+
+reports what the zone publishes and how it is configured, without recomputing
+anything.
+
+```bash
+tdns-cli auth zone zonemd verify -z example.com.
+```
+
+digests the zone as served and compares, the way a recipient would. It exits
+non-zero when the digest does not verify, so it works in a check script. Add
+`--ignore-serial` to digest against the serial each ZONEMD *names* rather than
+the SOA's -- a diagnostic for a zone digested before its serial moved, not a
+laxer check.
+
+To check somebody else's zone, `dog` verifies what it transfers:
+
+```bash
+dog @ns.example.com AXFR example.com. +tcp +zonemd
+```
+
+which also exits non-zero on a zone that fails. `+zonemd` needs an AXFR: an
+IXFR returns a difference rather than a zone, and `dog` refuses instead of
+digesting one.
 
 **Multi-provider and catalog**
 

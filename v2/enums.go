@@ -72,6 +72,12 @@ const (
 	// ZoneOption values are positional, so inserting mid-list renumbers
 	// everything after.
 	OptPublishZonemd
+	// OptVerifyZonemd makes the server check a zone's apex ZONEMD before
+	// adopting it -- on every load from file and every inbound transfer. The
+	// companion to publish-zonemd and independent of it: the interesting case
+	// is a secondary verifying what a primary sent, and a secondary does not
+	// publish a digest of its own.
+	OptVerifyZonemd
 	optZoneOptionTdnsSentinel
 )
 
@@ -109,6 +115,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptOnConflictDBWins:        "on-conflict-db-wins",
 	OptOnConflictZonefileWins:  "on-conflict-zonefile-wins",
 	OptPublishZonemd:           "publish-zonemd",
+	OptVerifyZonemd:            "verify-zonemd",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -138,6 +145,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"on-conflict-db-wins":        OptOnConflictDBWins,
 	"on-conflict-zonefile-wins":  OptOnConflictZonefileWins,
 	"publish-zonemd":             OptPublishZonemd,
+	"verify-zonemd":              OptVerifyZonemd,
 }
 
 type ImrOption uint8

@@ -1074,7 +1074,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// put a value. It cannot fail: the option only survives the switch
 		// when the block validates, so an off zone resolves the defaults and
 		// nothing reads them.
-		zonemdScheme, zonemdAlgs, _ := resolveZonemdConf(zconf.Zonemd)
+		zonemdScheme, zonemdAlgs, zonemdOnFailure, _ := resolveZonemdConfFull(zconf.Zonemd)
 
 		zdp.mu.Lock()
 		// Whether this parse changes what the zone should publish. Captured
@@ -1090,6 +1090,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zdp.ixfrChainMaxBytes = zconf.IxfrChainMaxBytes
 		zdp.zonemdScheme = zonemdScheme
 		zdp.zonemdAlgs = zonemdAlgs
+		zdp.zonemdOnVerifyFailure = zonemdOnFailure
 		// A zone that has never published has nothing to correct, and the
 		// first load publishes with the new settings anyway.
 		zonemdChanged = zonemdChanged && zdp.snapshot.Load() != nil
