@@ -37,8 +37,6 @@ type TargetUpdateStatus struct {
 }
 
 // Note: the target.Addresses must already be in addr:port format.
-// func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error) {
-// func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, UpdateResult) {
 // exchangeCancellable performs a DNS exchange that a cancelled context actually
 // interrupts.
 //
@@ -78,11 +76,17 @@ func exchangeCancellable(ctx context.Context, client *dns.Client, msg *dns.Msg, 
 
 // SendUpdate sends a DNS UPDATE to the first address that answers.
 //
-// ctx bounds the whole attempt, not just the dial: the exchange goes through
-// ExchangeContext, so a cancelled root context abandons a request already on
-// the wire rather than waiting out the client timeout. Without it the sync plan
-// could stop between candidates but not during one, which is the half of a
-// shutdown that actually takes time.
+// ctx bounds the whole attempt, not just the dial. The exchange goes through
+// exchangeCancellable, which is what makes that true: ExchangeContext alone
+// would not, since it never watches ctx.Done() and a cancellable-but-deadlineless
+// context would leave a read running to the client's own timeout. A cancelled
+// root context therefore abandons a request already on the wire, rather than
+// the sync plan being able to stop between candidates but not during one --
+// which is the half of a shutdown that actually takes time.
+//
+// A cancel is reported as such, wrapping context.Canceled, and never as a
+// transport failure. The difference matters to walkSyncPlan: a failed transport
+// means try the next one, an abandoned one means stop and say so.
 func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
 	if zonename == "." {
 		lgDns.Error("SendUpdate: zone name not specified")
