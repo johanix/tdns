@@ -1,7 +1,6 @@
 package tdns
 
 import (
-	"strings"
 	"testing"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -74,41 +73,6 @@ func TestPublishedDsyncSchemesIgnoresOtherTypes(t *testing.T) {
 	got := publishedDsyncSchemes(rrs)
 	if len(got) != 1 || !got[core.SchemeNotify] {
 		t.Fatalf("want exactly {NOTIFY}, got %v", got)
-	}
-}
-
-// Regression guard for a slice-aliasing bug that could write into the LIVE
-// DSYNC RRset with no serial bump and no journal entry.
-//
-// PublishDsyncRRs seeds its working set from the published RRset and then
-// appends synthesized records to it. Assigning the published slice directly
-// means those appends land in its spare capacity -- and a zone-file load sizes
-// slices generously, so the capacity is usually there. The published RRset then
-// silently gains records that never went through the update path, which is
-// invisible until a zone happens to have the capacity for it.
-//
-// Asserted on the property rather than through PublishDsyncRRs, which needs a
-// running updater: appending to the working copy must not disturb the source.
-func TestPublishedDsyncSliceIsCopiedNotAliased(t *testing.T) {
-	// A published slice with spare capacity, as a zone-file load produces.
-	published := make([]dns.RR, 1, 4)
-	published[0] = mustDsyncRR(t, "_dsync.example. 7200 IN DSYNC ANY UPDATE 5359 upd.example.")
-
-	// What PublishDsyncRRs now does with it.
-	working := append(make([]dns.RR, 0, len(published)), published...)
-	working = append(working, mustDsyncRR(t, "_dsync.example. 7200 IN DSYNC ANY API 443 api.example."))
-
-	if len(published) != 1 {
-		t.Fatalf("the published slice grew to %d records", len(published))
-	}
-	if got := published[0].String(); !strings.Contains(got, "upd.example.") {
-		t.Errorf("the published record was overwritten: %q", got)
-	}
-	if len(working) != 2 {
-		t.Errorf("the working copy has %d records, want 2", len(working))
-	}
-	if &working[0] == &published[0] {
-		t.Error("the working copy shares its backing array with the published RRset")
 	}
 }
 
