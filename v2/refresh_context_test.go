@@ -38,8 +38,10 @@ func drainTestZone() *ZoneData {
 // closes (an upstream that accepted the connection and then went quiet, or
 // simply a very large zone) must not pin the drain loop once ctx is cancelled.
 //
-// The channel is deliberately never closed and never written to, so the ONLY
-// way this test can finish is the ctx branch of the select.
+// The channel is never written to, so the ONLY way this test can finish is the
+// ctx branch of the select. (abort closes it, standing in for the library
+// reader exiting once its connection is closed --
+// TestDrainReleasesReaderOnCancellation models that reader properly.)
 func TestDrainStopsOnCancellation(t *testing.T) {
 	zd := drainTestZone()
 	answerChan := make(chan *dns.Envelope) // never written, never closed

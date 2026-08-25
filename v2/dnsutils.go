@@ -55,9 +55,6 @@ func clarifyXfrError(zone, upstream string, err error) error {
 	return err
 }
 
-// ZoneTransferIn pulls the zone from the upstream primary described by up:
-// AXFR/IXFR over Do53, or over TLS (XoT, RFC 9103) when up.Transport is dot.
-// TSIG (up.Key) and TLS are independent layers and may be combined.
 // drainTransferEnvelopes consumes the AXFR/IXFR envelope stream, feeding each
 // RR to the zone's sort function, and stops early if ctx is cancelled.
 //
@@ -65,12 +62,19 @@ func clarifyXfrError(zone, upstream string, err error) error {
 // a test: driving it through ZoneTransferIn means dialling a real upstream, and
 // a test that cannot reach the loop cannot prove anything about it.
 //
-// Note what cancelling does NOT do. dns.Transfer.In has no context-aware
-// variant, and adding one to the johanix/dns fork was rejected -- every fork
-// line is a line to re-apply on every upstream sync. So the library's reader
-// goroutine and its socket are left to finish or error out on their own; only
-// OUR consumption stops promptly. For an AXFR of a large zone that is still the
-// bulk of the work (parse, sort, insert), which is the point.
+// On cancellation it does NOT simply walk away. abort() closes the transfer
+// connection, then the remaining envelopes are drained until the library's
+// reader closes the channel. That sequence is required, not tidiness:
+// dns.Transfer.inAxfr sends on an UNBUFFERED channel, so a receiver that stops
+// receiving parks it forever on its next send, its deferred t.Close()/close(c)
+// never run, and the goroutine AND socket are retained for the life of the
+// process. Closing the connection makes the reader's next ReadMsg fail, which
+// puts it one send away from returning.
+//
+// (dns.Transfer.In has no context-aware variant and adding one to the
+// johanix/dns fork was rejected -- every fork line is re-applied on every
+// upstream sync -- which is why cancellation is handled here rather than in the
+// library.)
 func (zd *ZoneData) drainTransferEnvelopes(ctx context.Context, answerChan <-chan *dns.Envelope,
 	upstream string, firstSoaSeen bool, abort func()) (int, error) {
 
@@ -143,6 +147,10 @@ func drainRemainder(ch <-chan *dns.Envelope, grace time.Duration) bool {
 	}
 }
 
+// ZoneTransferIn pulls the zone from the upstream primary described by up:
+// AXFR/IXFR over Do53, or over TLS (XoT, RFC 9103) when up.Transport is dot.
+// TSIG (up.Key) and TLS are independent layers and may be combined.
+//
 // ctx bounds the transfer. An AXFR of a large zone is the longest-running
 // network operation in the daemon, so a shutdown landing mid-stream should stop
 // it rather than let it run to completion against an engine that is going away.
@@ -197,7 +205,7 @@ func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint
 	// evidence is in the far end's log -- which is where an afternoon goes.
 	src, tier := zd.EffectiveTransferSrcWithSource()
 	if len(src) > 0 {
-		conn, derr := dialTransferConn(upstream, tlsCfg, src, transfer.DialTimeout)
+		conn, derr := dialTransferConn(ctx, upstream, tlsCfg, src, transfer.DialTimeout)
 		if derr != nil {
 			return 0, fmt.Errorf("ZoneTransferIn %s: dial %s: %w", zd.ZoneName, upstream, derr)
 		}
@@ -1241,11 +1249,16 @@ func pickTransferSrc(ctx context.Context, lookup func(context.Context, string) (
 // reverse) is a guaranteed failure, and for a dual-stack hostname upstream that
 // is not a hypothetical. The hostname is still what gets dialled, so SNI and
 // certificate verification on the XoT path are unchanged.
-func dialTransferConn(upstream string, tlsCfg *tls.Config, srcs []string, timeout time.Duration) (*dns.Conn, error) {
+func dialTransferConn(parent context.Context, upstream string, tlsCfg *tls.Config, srcs []string, timeout time.Duration) (*dns.Conn, error) {
 	if timeout == 0 {
 		timeout = 2 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	if parent == nil {
+		parent = context.Background()
+	}
+	// Derive from the caller's context, so a shutdown landing in a bound-source
+	// dial returns immediately instead of waiting out the full dial timeout.
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	src, network := pickTransferSrc(ctx, nil, upstream, srcs)

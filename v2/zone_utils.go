@@ -217,6 +217,12 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		c := p.client
 		r, _, err := c.ExchangeContext(ctx, m, upstream)
 		if err != nil {
+			// A cancelled exchange is not a sick primary: every sibling would
+			// fail the same way. Return it as cancellation rather than letting
+			// the loop treat it as "try the next one".
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, err)
+			}
 			// Transport failure (or a TSIG response-verify failure) — try the next sibling.
 			lg.Warn("DoTransfer: SOA probe failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
@@ -502,6 +508,12 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	// Last gate before the hard flip, after the callbacks have run. See the
 	// matching comment on the upstream path.
 	if cerr := ctx.Err(); cerr != nil {
+		// Drop the cached stat recorded by the read above. We parsed the file
+		// but are NOT adopting it, so leaving the stat behind would make the
+		// next refresh see an unchanged file and skip it -- the zone would
+		// silently never pick up this edit. Same reason the persist-failure
+		// path below forgets it.
+		zd.forgetZoneFileStat()
 		zd.SetStatus(prevStatus)
 		return false, fmt.Errorf("FetchFromFile %s: %w", zd.ZoneName, cerr)
 	}
@@ -595,7 +607,14 @@ func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force
 	var new_zd ZoneData
 	transferred := false
 	var lastErr error
-	for _, up := range zd.Upstreams {
+	// zd.Upstreams is mutated in place under zd.mu by the refresh engine, so
+	// walk a copy rather than the live slice -- the same race DoTransfer and
+	// ProbeUpstreamSerials already copy to avoid.
+	zd.mu.Lock()
+	upstreams := make([]PeerConf, len(zd.Upstreams))
+	copy(upstreams, zd.Upstreams)
+	zd.mu.Unlock()
+	for _, up := range upstreams {
 		// Stop the fallback walk once the caller has given up. Without this, a
 		// shutdown that cancels mid-transfer would go on to start a FRESH AXFR
 		// attempt against every remaining upstream -- each one dialling, each

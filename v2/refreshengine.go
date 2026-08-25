@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -776,7 +777,14 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							// the resurrection race (B5b).
 							gen := zd.generation.Load()
 							updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, force, conf)
-							if err != nil {
+							if err != nil && errors.Is(err, context.Canceled) {
+								// A cancelled refresh is a shutdown, not a sick
+								// zone. Marking it RefreshError would leave a
+								// perfectly healthy zone flagged as failed --
+								// harmless at process death, wrong the moment
+								// ctx is ever used to bound a single refresh.
+								lgEngine.Info("zone refresh cancelled", "zone", zone)
+							} else if err != nil {
 								lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 								zd.SetError(RefreshError, "refresh error: %v", err)
 								zd.LatestError = time.Now()
