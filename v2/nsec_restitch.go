@@ -243,10 +243,23 @@ func chainPredecessor(chain []string, target string) (string, bool) {
 // record a secondary must see. The journal answers a different question --
 // what did someone change about this zone -- and NSEC is not an answer to it:
 // it is recomputed from the zone's shape on every publish.
-func withoutDerivedRecords(rrsets []core.RRset) []core.RRset {
+//
+// ZONEMD is the same kind of record and is dropped for the same reason, but
+// only for a zone that MANAGES one. Where the server maintains it, journalling
+// it would replay a digest computed for one serial onto a zone file at
+// another, as though an operator had written it, and the reconciliation would
+// report conflicts on a record nobody authored. Where the server does not, an
+// apex ZONEMD is ordinary operator data and belongs in the journal like
+// anything else they wrote -- which is why this takes the zone rather than
+// deciding by type alone.
+func (zd *ZoneData) withoutDerivedRecords(rrsets []core.RRset) []core.RRset {
+	managed := zd != nil && zd.zoneManagesZonemd()
 	out := rrsets[:0:0]
 	for _, rs := range rrsets {
 		if rs.RRtype == dns.TypeNSEC {
+			continue
+		}
+		if managed && rs.RRtype == dns.TypeZONEMD && rs.Name == zd.ZoneName {
 			continue
 		}
 		out = append(out, rs)

@@ -56,9 +56,14 @@ func zonemdHasher(alg uint8) (hash.Hash, error) {
 // case-insensitive octet string, with a shorter name sorting first when it is
 // a suffix of the longer.
 //
-// Not a plain string comparison. "z.example." precedes "a.b.example." here,
-// because the rightmost differing label decides -- which is the whole point of
-// canonical order and the thing a lexicographic sort gets wrong.
+// Not a plain string comparison. For a zone `clean.example.` holding `alpha`,
+// `bravo` and `ns` beneath it, a lexicographic sort puts the apex in the
+// MIDDLE -- alpha, bravo, clean.example., ns -- because it compares from the
+// left and the apex is a suffix, not a prefix. Canonical order puts the apex
+// first, where the NSEC chain needs it.
+//
+// For a bulk sort use canonicalSortKey instead: this allocates on every
+// comparison, which an O(n log n) sort over a large zone feels.
 func canonicalOwnerLess(a, b string) bool {
 	al := dns.SplitDomainName(strings.ToLower(dns.Fqdn(a)))
 	bl := dns.SplitDomainName(strings.ToLower(dns.Fqdn(b)))
@@ -70,6 +75,45 @@ func canonicalOwnerLess(a, b string) bool {
 	}
 	// One is a suffix of the other; the shorter (fewer labels) sorts first.
 	return len(al) < len(bl)
+}
+
+// canonicalSortKey renders a name as a byte string whose plain bytewise order
+// IS canonical name order, so a bulk sort can compare precomputed keys with
+// bytes.Compare instead of re-splitting both names on every comparison.
+//
+// canonicalOwnerLess costs two Fqdn calls, two ToLower calls and two
+// SplitDomainName allocations per comparison, and it is called O(n log n)
+// times -- by the NSEC chain sort on every publish of a signed zone, and by
+// the digest sort on every publish of a zonemd zone. Over a large zone that is
+// the dominant cost of both.
+//
+// The encoding: labels lowercased and emitted right-to-left, each terminated
+// by 0x00 0x00, with any 0x00 INSIDE a label escaped to 0x00 0x01. The escape
+// is what makes the order exact rather than merely usual. A label may legally
+// contain a zero octet, and without the escape such a label would collide with
+// the separator and sort as though it were two labels -- a name ordering that
+// is wrong in a way no test zone would ever show, and that would put the NSEC
+// chain in an order no validator accepts.
+//
+// The terminator gives the "shorter name first" rule for free: `example.` is
+// "example\x00\x00", `a.example.` is "example\x00\x00a\x00\x00", and a prefix
+// sorts before what extends it.
+func canonicalSortKey(name string) []byte {
+	labels := dns.SplitDomainName(strings.ToLower(dns.Fqdn(name)))
+	// One byte per character plus a two-byte terminator per label, which is
+	// exact for the overwhelmingly common case of no zero octets.
+	key := make([]byte, 0, len(name)+2*len(labels)+2)
+	for i := len(labels) - 1; i >= 0; i-- {
+		for j := 0; j < len(labels[i]); j++ {
+			if c := labels[i][j]; c == 0x00 {
+				key = append(key, 0x00, 0x01)
+			} else {
+				key = append(key, c)
+			}
+		}
+		key = append(key, 0x00, 0x00)
+	}
+	return key
 }
 
 // canonicalRRWire renders one RR in RFC 4034 §6.2 canonical form: the owner
@@ -169,10 +213,22 @@ func ZoneDigest(apex string, rrs []dns.RR, scheme, alg uint8) ([]byte, error) {
 
 	type entry struct {
 		wire []byte
-		name string
+		key  []byte
 		typ  uint16
 	}
 	var entries []entry
+
+	// One key per OWNER, not per RR: a zone has several records at most names
+	// and the key depends only on the name.
+	keyCache := make(map[string][]byte)
+	keyFor := func(name string) []byte {
+		if k, ok := keyCache[name]; ok {
+			return k
+		}
+		k := canonicalSortKey(name)
+		keyCache[name] = k
+		return k
+	}
 
 	for _, rr := range rrs {
 		if rr == nil {
@@ -208,12 +264,12 @@ func ZoneDigest(apex string, rrs []dns.RR, scheme, alg uint8) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, entry{wire: wire, name: hdr.Name, typ: hdr.Rrtype})
+		entries = append(entries, entry{wire: wire, key: keyFor(hdr.Name), typ: hdr.Rrtype})
 	}
 
 	sort.SliceStable(entries, func(i, j int) bool {
-		if !strings.EqualFold(entries[i].name, entries[j].name) {
-			return canonicalOwnerLess(entries[i].name, entries[j].name)
+		if c := bytes.Compare(entries[i].key, entries[j].key); c != 0 {
+			return c < 0
 		}
 		if entries[i].typ != entries[j].typ {
 			return entries[i].typ < entries[j].typ

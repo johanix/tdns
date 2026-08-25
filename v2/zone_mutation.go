@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"bytes"
 	"fmt"
 	"sort"
 	"time"
@@ -183,10 +184,23 @@ func (zd *ZoneData) workingOwnerNamesLocked() []string {
 	// will accept and which no query against the signer will reveal, because
 	// denial is answered by compact denial rather than from the chain.
 	//
-	// The two differ whenever a label boundary falls inside a shared prefix:
-	// "ns.example." sorts after "alpha.example." canonically but before
-	// "clean.example." as a plain string.
-	sort.Slice(names, func(i, j int) bool { return canonicalOwnerLess(names[i], names[j]) })
+	// The two differ whenever a name is a SUFFIX of another rather than a
+	// prefix, which for a zone is every name in it against the apex: a
+	// lexicographic sort of `clean.example.` with `alpha` and `ns` beneath it
+	// puts the apex in the middle.
+	//
+	// Sorted on precomputed keys rather than by comparing names pairwise.
+	// canonicalOwnerLess allocates six times per comparison and this sort runs
+	// on every publish of every signed zone, so the cost is O(n log n)
+	// allocations where O(n) will do. canonicalSortKey's byte order IS
+	// canonical order, so the result is identical.
+	keys := make(map[string][]byte, len(names))
+	for _, n := range names {
+		keys[n] = canonicalSortKey(n)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		return bytes.Compare(keys[names[i]], keys[names[j]]) < 0
+	})
 	return names
 }
 
@@ -402,6 +416,12 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 
 	zd.resignWorkingSetSOAIfSigned()
 
+	// Whether the apex carries a ZONEMD is settled BEFORE the restitch, so the
+	// apex NSEC bitmap describes the record set this snapshot will hold. The
+	// digest itself cannot be computed yet: it covers the NSEC records the
+	// restitch is about to write. See zonemd_publish.go.
+	zd.ensureZonemdPresenceLocked()
+
 	// The chain must describe the snapshot about to be published, so it is
 	// repaired HERE -- before the delta is computed and before the swap, so
 	// that secondaries receive the change together with the data that caused
@@ -411,6 +431,12 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.refuseUnrepairableChainLocked(prevSerial, err)
 		return
 	}
+
+	// And now the digest, over a working set that is finally complete. This is
+	// the LAST step that may change zone content: everything below only reads
+	// the working set. Writing the ZONEMD RDATA and its RRSIG here cannot
+	// invalidate what was just computed, because ZoneDigest excludes both.
+	zd.updateZonemdLocked(serial)
 
 	data := zd.workingSet
 	oldSnap := zd.snapshot.Load()
@@ -465,7 +491,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 			// authored and offer .rejected artefacts full of them. It also
 			// reinstates the ghosts the property model removes, by putting
 			// NSEC back into an owner's RRtypes on replay.
-			removed, added = withoutDerivedRecords(removed), withoutDerivedRecords(added)
+			removed, added = zd.withoutDerivedRecords(removed), zd.withoutDerivedRecords(added)
 			if len(removed) > 0 || len(added) > 0 {
 				// What this delta chains FROM.
 				//

@@ -165,7 +165,19 @@ func (zd *ZoneData) ZoneDigestOfPublished() (string, error) {
 	if zd == nil {
 		return "", fmt.Errorf("no zone")
 	}
-	rrs := zoneRRsFromSnapshot(zd.publishedSnapshot())
+	snap := zd.publishedSnapshot()
+	if snap == nil {
+		return "", fmt.Errorf("zone %s: nothing published to digest", zd.ZoneName)
+	}
+	// A zone that publishes a ZONEMD has already computed this exact value for
+	// this exact serial. ZoneDigest excludes the apex ZONEMD and the RRSIG
+	// covering it, so the published digest and the file-identity digest are one
+	// computation over one set of records -- recomputing would return the
+	// identical string at the cost of digesting the whole zone again.
+	if d, ok := zd.cachedZonemdDigest(snap.Serial, ZonemdSchemeSimple, zoneFileStateAlg); ok {
+		return d, nil
+	}
+	rrs := zoneRRsFromSnapshot(snap)
 	if len(rrs) == 0 {
 		return "", fmt.Errorf("zone %s: nothing published to digest", zd.ZoneName)
 	}

@@ -286,11 +286,38 @@ type ZoneData struct {
 	// disabled (IXFR queries are answered with full transfers). From zone
 	// config ixfr-chain-max-bytes; written at parse time under zd.mu.
 	ixfrChainMaxBytes int
-	lastPublish       time.Time
-	publishWake       chan struct{}
-	publisherOnce     sync.Once
-	publishStop       chan struct{}
-	publishStopOnce   sync.Once
+	// zonemdAlgs and zonemdScheme are the resolved RFC 8976 parameters for
+	// this zone's published ZONEMD, from the zone config's `zonemd` block.
+	// Meaningful only when OptPublishZonemd is set. Written at parse time
+	// under zd.mu, like ixfrChainMaxBytes above.
+	zonemdAlgs   []uint8
+	zonemdScheme uint8
+	// zonemdManaged records that the apex ZONEMD RRset now in this zone was
+	// put there by us rather than by the operator. It is what makes turning
+	// the option OFF remove our record while leaving a hand-authored one
+	// alone. In memory only: after a restart with the option off, a ZONEMD in
+	// the zone file is indistinguishable from operator data and is treated as
+	// such. Guarded by zd.mu.
+	zonemdManaged bool
+	// zonemdDigests caches the digests computed by the last publish, keyed by
+	// RFC 8976 hash algorithm, and zonemdDigestSerial is the serial they
+	// describe.
+	//
+	// The point is the SHA-384 entry: ZoneDigest excludes the apex ZONEMD and
+	// its RRSIG, so the value published in the ZONEMD RR is bit-for-bit the
+	// value ZoneFileState wants, and a zone write can record its file identity
+	// without digesting the whole zone a second time. Guarded by zd.mu.
+	zonemdDigests      map[uint8]string
+	zonemdDigestSerial uint32
+	// zonemdLastErr is the last reason this zone could not publish a ZONEMD,
+	// empty when it can. Held only so the failure is logged on transition
+	// rather than on every publish. Guarded by zd.mu.
+	zonemdLastErr   string
+	lastPublish     time.Time
+	publishWake     chan struct{}
+	publisherOnce   sync.Once
+	publishStop     chan struct{}
+	publishStopOnce sync.Once
 	// RemoteDNSKEYs holds DNSKEY RRs from other signers (multi-signer mode 4).
 	// These are DNSKEYs found in the incoming zone that do not match keys in our
 	// local keystore. They are preserved across resignings and merged into the
@@ -466,6 +493,35 @@ type ZoneConf struct {
 	// ("pending"|"loading"|"ready"|"error") populated by the list handlers from
 	// ZoneStatus + the error registry. Not config; not serialized to YAML.
 	Provisioning string `yaml:"-" mapstructure:"-"`
+	// Zonemd parameterises the `publish-zonemd` option. Separate from the
+	// option because Options is a map[ZoneOption]bool by construction and
+	// cannot carry a value; separate from the DNSSEC policy because ZONEMD is
+	// not DNSSEC — an unsigned zone may publish one, and binding the
+	// parameters to a policy would make it need one first.
+	Zonemd ZonemdConf `yaml:"zonemd" mapstructure:"zonemd"`
+}
+
+// ZonemdConf is the per-zone ZONEMD parameter block:
+//
+//	zones:
+//	  example.com:
+//	    options: [ publish-zonemd ]
+//	    zonemd:
+//	      algorithms: [ 1 ]   # 1 = SHA-384 (default), 2 = SHA-512
+//	      scheme: 1           # SIMPLE; the only scheme RFC 8976 defines
+//
+// Both fields are optional; an empty block means SIMPLE/SHA-384. Ignored
+// entirely unless the zone carries the publish-zonemd option, so a leftover
+// block on a zone whose option was removed is inert rather than an error.
+type ZonemdConf struct {
+	// Algorithms are the RFC 8976 hash algorithm codepoints to publish, one
+	// apex ZONEMD RR each. Empty => [1] (SHA-384), the mandatory-to-implement
+	// algorithm and the one every published ZONEMD in the wild uses.
+	Algorithms []uint8 `yaml:"algorithms" mapstructure:"algorithms"`
+	// Scheme is the RFC 8976 collation scheme. 0 (unset) => 1 (SIMPLE). Only
+	// SIMPLE is defined, so this exists to reject a config that asks for
+	// something else rather than to offer a choice.
+	Scheme uint8 `yaml:"scheme" mapstructure:"scheme"`
 }
 
 // DnssecPolicyView is a display-only projection of the DnssecPolicy bound to a

@@ -403,6 +403,62 @@ not sign.
 | `fold-case` | Case-insensitive owner-name matching |
 | `black-lies` | Compact denial of existence: synthesize a minimally covering NSEC rather than serving precomputed NSEC records |
 | `add-transport-signal` | Synthesize SVCB transport-signal RRs into the Additional section |
+| `publish-zonemd` | Maintain the apex ZONEMD RRset (RFC 8976). See below |
+
+### `publish-zonemd`
+
+The server computes the zone's message digest inside every publish, over the
+snapshot that publish is about to install, and signs it with the rest of the
+zone. `ZONEMD.Serial` therefore always equals the SOA serial being served, and
+the digest always describes the zone the recipient just received -- over AXFR,
+over IXFR, or from the zone file.
+
+It works on unsigned zones too; it is not part of the DNSSEC policy.
+
+Parameters go in a per-zone `zonemd:` block, which is only read when the option
+is set:
+
+```yaml
+zones:
+   - name:      example.com.
+     zonefile:  /etc/tdns/zones/example.com.zone
+     type:      primary
+     options:   [ publish-zonemd ]
+     zonemd:
+        algorithms: [ 1 ]   # 1 = SHA-384 (default), 2 = SHA-512
+        scheme:     1       # SIMPLE; the only scheme RFC 8976 defines
+```
+
+An empty block, or none, means SIMPLE/SHA-384 -- the mandatory-to-implement
+algorithm and the one every published ZONEMD in the wild uses. Listing several
+algorithms publishes one ZONEMD RR per algorithm. A block the server cannot
+make sense of drops the OPTION rather than the zone: the zone keeps serving,
+without a digest, and says so in `tdns-cli auth zone list`.
+
+While the option is set the apex ZONEMD belongs to the server. A DNS UPDATE or
+API update that tries to write it is refused, and `update delete <apex>` retains
+it the way it retains SOA and NS.
+
+**Cost.** The digest is a single hash over every record in the zone, and RFC
+8976 offers no way to update one incrementally, so every publish is O(zone).
+The `publish-cadence` setting already coalesces a burst of updates into one
+publish; a large zone under continuous dynamic update wants that raised.
+
+**Turning it off.** Removing the option removes the record: the next publish
+takes the server's ZONEMD out and restitches the apex NSEC bitmap. Do it while
+the server is running -- a config reload is enough. After a restart the server
+can no longer tell its own ZONEMD from one you wrote by hand, so it leaves
+whatever the zone file holds alone, and you would have to delete the record
+from the file yourself.
+
+A ZONEMD you wrote into the zone file of a zone that does not carry the option
+is your record throughout: the server never rewrites or removes it.
+
+**Secondaries.** `publish-zonemd` originates content, so `tdns-auth` strips it
+from a secondary that mirrors an upstream zone, with the usual "secondary zone
+may not originate content" message. An inline-signing secondary keeps it: it
+re-signs what it receives, so any digest from upstream is already invalid for
+what it serves.
 
 **Multi-provider and catalog**
 

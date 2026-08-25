@@ -130,6 +130,29 @@ against current codebase.
 - **Description**: CLI commands to purge old stale data
   from agent/combiner databases.
 
+### 13. ZONEMD Publication
+- **Source**: 2026-08-25-zonemd-publication-design.md
+- **Status**: Designed, not implemented
+- **Description**: `v2/zonemd.go` is a correct RFC 8976
+  SIMPLE implementation used only as a private detector for
+  zone-file identity (`ZoneFileState`). Making it a
+  published record needs a `publish-zonemd` zone option and
+  two new steps inside `publishWorkingSetLocked`: stage the
+  apex ZONEMD before `restitchNsecLocked` so the NSEC bitmap
+  lists it, then compute and sign the digest after, as the
+  last content mutation before the snapshot swap.
+- **Also needs**: conditional ZONEMD exclusion in
+  `withoutDerivedRecords`, a DDNS/API gate on the apex
+  ZONEMD RRset, `OptPublishZonemd` in `originationOptions`,
+  and removal-on-flip when the option goes off.
+- **Cost**: the digest is not incrementally updatable, so
+  every publish is O(zone). Measured at ~7 s for 1.1M
+  records (`zone_utils.go:237`); the design stages cached
+  canonical sort keys and cached wire encodings against it.
+- **Phase 3**: `verify-zonemd` for secondaries plus a
+  `zone zonemd verify` CLI, the half labstuff already has as
+  `axfr-cli zone verify`.
+
 ## Docs Needing Status Updates
 
 The following design documents have items marked as pending

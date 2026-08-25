@@ -63,6 +63,15 @@ const (
 	// values are positional, so inserting mid-list renumbers everything after.
 	OptOnConflictDBWins
 	OptOnConflictZonefileWins
+	// OptPublishZonemd makes the server maintain the zone's apex ZONEMD
+	// RRset (RFC 8976): computed inside every publish, over the snapshot
+	// that publish is about to install, and signed with it. Off, the apex
+	// ZONEMD is ordinary operator data and the server never touches it.
+	//
+	// Appended at the end for the same reason the two options above were:
+	// ZoneOption values are positional, so inserting mid-list renumbers
+	// everything after.
+	OptPublishZonemd
 	optZoneOptionTdnsSentinel
 )
 
@@ -99,6 +108,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptAllowApiUpdates:         "allow-api-updates",
 	OptOnConflictDBWins:        "on-conflict-db-wins",
 	OptOnConflictZonefileWins:  "on-conflict-zonefile-wins",
+	OptPublishZonemd:           "publish-zonemd",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -127,6 +137,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"allow-api-updates":          OptAllowApiUpdates,
 	"on-conflict-db-wins":        OptOnConflictDBWins,
 	"on-conflict-zonefile-wins":  OptOnConflictZonefileWins,
+	"publish-zonemd":             OptPublishZonemd,
 }
 
 type ImrOption uint8

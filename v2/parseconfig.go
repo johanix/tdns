@@ -1070,11 +1070,36 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			newOpts[opt] = val
 		}
 
+		// Resolved here rather than in parseZoneOptions, which has nowhere to
+		// put a value. It cannot fail: the option only survives the switch
+		// when the block validates, so an off zone resolves the defaults and
+		// nothing reads them.
+		zonemdScheme, zonemdAlgs, _ := resolveZonemdConf(zconf.Zonemd)
+
 		zdp.mu.Lock()
+		// Whether this parse changes what the zone should publish. Captured
+		// before the assignment, because a reload that turns publish-zonemd
+		// OFF (or switches its algorithms) changes nothing in the zone itself,
+		// so no publish would otherwise be queued -- and the stale ZONEMD
+		// would go on being served until something unrelated touched the zone.
+		zonemdChanged := zonemdSettingsDiffer(
+			zdp.Options[OptPublishZonemd], zdp.zonemdScheme, zdp.zonemdAlgs,
+			newOpts[OptPublishZonemd], zonemdScheme, zonemdAlgs)
 		zdp.Options = newOpts
 		zdp.publishCadence = publishCadence
 		zdp.ixfrChainMaxBytes = zconf.IxfrChainMaxBytes
+		zdp.zonemdScheme = zonemdScheme
+		zdp.zonemdAlgs = zonemdAlgs
+		// A zone that has never published has nothing to correct, and the
+		// first load publishes with the new settings anyway.
+		zonemdChanged = zonemdChanged && zdp.snapshot.Load() != nil
 		zdp.mu.Unlock()
+
+		if zonemdChanged {
+			lgConfig.Info("zonemd configuration changed; republishing the zone to apply it",
+				"zone", zname, "publish", newOpts[OptPublishZonemd])
+			zdp.requestPublish(false)
+		}
 
 		invokeOptionHandlers(zname, options)
 
