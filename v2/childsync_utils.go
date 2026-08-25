@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
@@ -38,6 +39,43 @@ type TargetUpdateStatus struct {
 // Note: the target.Addresses must already be in addr:port format.
 // func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error) {
 // func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, UpdateResult) {
+// exchangeCancellable performs a DNS exchange that a cancelled context actually
+// interrupts.
+//
+// client.ExchangeContext is not enough on its own, which is easy to miss: it
+// passes the context to the dial and then uses only ctx.Deadline() to tighten
+// the socket deadlines. It never watches ctx.Done(). A context that is
+// cancellable but carries no deadline -- which is what a shutdown context is --
+// therefore leaves a read in progress running to the client's own timeout,
+// 2 seconds by default in this fork. Cancelling looked like it worked because
+// the call did return; it returned on the timeout.
+//
+// Closing the connection is what actually stops it. The watcher goroutine exits
+// on either branch, so nothing is left behind when the exchange completes
+// normally, and the read error that a close produces is turned into the
+// abandoned error by the ctx.Err() check at the call site.
+func exchangeCancellable(ctx context.Context, client *dns.Client, msg *dns.Msg, dst string) (*dns.Msg, time.Duration, error) {
+	conn, err := client.DialContext(ctx, dst)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer conn.Close()
+
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-ctx.Done():
+			// Unblocks a read that has already begun; the exchange returns an
+			// error on a closed connection, which the caller reads as abandoned.
+			conn.Close()
+		case <-finished:
+		}
+	}()
+
+	return client.ExchangeWithConnContext(ctx, msg, conn)
+}
+
 // SendUpdate sends a DNS UPDATE to the first address that answers.
 //
 // ctx bounds the whole attempt, not just the dial: the exchange goes through
@@ -87,8 +125,24 @@ func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []stri
 		if cerr := ctx.Err(); cerr != nil {
 			return 0, UpdateResult{}, fmt.Errorf("UPDATE to %s abandoned: %w", zonename, cerr)
 		}
-		res, _, err := client.ExchangeContext(ctx, msg, dst)
+		res, _, err := exchangeCancellable(ctx, client, msg, dst)
 		if err != nil {
+			// A cancel DURING the exchange arrives here as an ordinary error,
+			// and must not be filed as one. Falling through would record a
+			// fabricated per-target failure and, with a single address -- the
+			// usual DSYNC target -- end the loop and return "all target
+			// addresses responded with errors or were unreachable". walkSyncPlan
+			// then reports that every available scheme failed, which is exactly
+			// the diagnosis the plan's own comments say a shutdown must not
+			// produce: the remaining transports were never tried, they were
+			// abandoned.
+			//
+			// The pre-loop check above only catches a cancel BETWEEN addresses.
+			// This is the one the exchange was made context-aware for.
+			if cerr := ctx.Err(); cerr != nil {
+				return 0, ur, fmt.Errorf("UPDATE to %s abandoned mid-exchange with %s: %w",
+					zonename, dst, cerr)
+			}
 			lgDns.Warn("error from dns.Exchange, trying next address", "dst", dst, "err", err)
 			ur.TargetStatus[dst] = TargetUpdateStatus{
 				Error:      true,
