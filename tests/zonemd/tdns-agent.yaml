@@ -1,0 +1,143 @@
+templates:
+   - name: lenient
+     zonemd:
+        on-verify-failure: warn
+
+service:
+   name:       ZONEMD-AGENT
+   verbose:    true
+log:
+   file:       /var/tmp/zonemd/log/tdns-agent.log
+   level:      debug
+db:
+   file:       /var/tmp/zonemd/tdns-agent/agent.db
+dnsengine:
+   addresses:  [ 127.0.0.1:5312 ]
+   transports: [ do53 ]
+apiserver:
+   addresses:  [ 127.0.0.1:8312 ]
+   apikey:     zonemd-test-key
+   certfile:   /var/tmp/zonemd/certs/localhost.crt
+   keyfile:    /var/tmp/zonemd/certs/localhost.key
+
+zones:
+   # tdns verifying a digest tdns produced
+   - name:      good.zonemd.test.
+     type:      secondary
+     zonefile:  /var/tmp/zonemd/tdns-agent/zones/good.zone
+     store:     map
+     options:   [ verify-zonemd ]
+     upstreams:
+        - addr: "127.0.0.1:5311"
+          key:  NOKEY
+     allow-notify:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   # THE GATE: a wrong digest must be refused, and the zone not adopted
+   - name:      bad.zonemd.test.
+     type:      secondary
+     zonefile:  /var/tmp/zonemd/tdns-agent/zones/bad.zone
+     store:     map
+     options:   [ verify-zonemd ]
+     zonemd:
+        on-verify-failure: refuse
+     upstreams:
+        - addr: "127.0.0.1:5311"
+          key:  NOKEY
+     allow-notify:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   # same wrong digest, but the rollout setting: adopt and complain
+   - name:      warn.zonemd.test.
+     type:      secondary
+     zonefile:  /var/tmp/zonemd/tdns-agent/zones/warn.zone
+     store:     map
+     options:   [ verify-zonemd ]
+     zonemd:
+        on-verify-failure: warn
+     upstreams:
+        - addr: "127.0.0.1:5311"
+          key:  NOKEY
+     allow-notify:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   # CROSS-IMPLEMENTATION: tdns verifying a digest Knot produced
+   - name:      knotgen.zonemd.test.
+     type:      secondary
+     zonefile:  /var/tmp/zonemd/tdns-agent/zones/knotgen.zone
+     store:     map
+     options:   [ verify-zonemd ]
+     upstreams:
+        - addr: "127.0.0.1:5315"
+          key:  NOKEY
+     allow-notify:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   - name:      none.zonemd.test.
+     type:      secondary
+     zonefile:  /var/tmp/zonemd/tdns-agent/zones/none.zone
+     store:     map
+     options:   [ verify-zonemd ]
+     upstreams:
+        - addr: "127.0.0.1:5311"
+          key:  NOKEY
+     allow-notify:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   - name:      unsup.zonemd.test.
+     type:      secondary
+     zonefile:  /var/tmp/zonemd/tdns-agent/zones/unsup.zone
+     store:     map
+     options:   [ verify-zonemd ]
+     upstreams:
+        - addr: "127.0.0.1:5311"
+          key:  NOKEY
+     allow-notify:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   # inherits the whole zonemd block from the template
+   - name:      tmpl.zonemd.test.
+     type:      secondary
+     template:  lenient
+     store:     map
+     options:   [ verify-zonemd ]
+     upstreams:
+        - addr: "127.0.0.1:5311"
+          key:  NOKEY
+
+   # sets ONE zonemd field itself; does it still inherit on-verify-failure?
+   - name:      tmplpart.zonemd.test.
+     type:      secondary
+     template:  lenient
+     store:     map
+     options:   [ verify-zonemd ]
+     zonemd:
+        algorithms: [ 1 ]
+     upstreams:
+        - addr: "127.0.0.1:5311"
+          key:  NOKEY
+

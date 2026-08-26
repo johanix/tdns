@@ -1,0 +1,9 @@
+$TTL 120
+unsup.zonemd.test.	120	IN	SOA	ns1.zonemd.test. hostmaster.zonemd.test. (
+				2026082501 3600 600 604800 120 )
+unsup.zonemd.test.	120	IN	NS	ns1.zonemd.test.
+www.unsup.zonemd.test.	120	IN	A	192.0.2.10
+mail.unsup.zonemd.test.	120	IN	MX	10 mx.unsup.zonemd.test.
+mx.unsup.zonemd.test.	120	IN	A	192.0.2.11
+txt.unsup.zonemd.test.	120	IN	TXT	"round-1"
+unsup.zonemd.test.	120	IN	ZONEMD	2026082501 1 240 DEADBEEF96FA17DEB540CDC4B2D4D5956D432F7DD92DCFB73F445F1B4F3A709D6CCC69BB87293A9BB3B63A4F0D4E3D55

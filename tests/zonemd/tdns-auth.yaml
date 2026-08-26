@@ -1,0 +1,106 @@
+service:
+   name:       ZONEMD-AUTH
+   verbose:    true
+log:
+   file:       /var/tmp/zonemd/log/tdns-auth.log
+   level:      debug
+db:
+   file:       /var/tmp/zonemd/tdns-auth/auth.db
+dnsengine:
+   addresses:  [ 127.0.0.1:5311 ]
+   transports: [ do53 ]
+apiserver:
+   addresses:  [ 127.0.0.1:8311 ]
+   apikey:     zonemd-test-key
+   certfile:   /var/tmp/zonemd/certs/localhost.crt
+   keyfile:    /var/tmp/zonemd/certs/localhost.key
+imrengine:
+   active:     false
+
+zones:
+   # The server maintains this zone's apex ZONEMD itself (two algorithms).
+   - name:      good.zonemd.test.
+     type:      primary
+     zonefile:  /var/tmp/zonemd/zones/good.zonemd.test.zone
+     store:     map
+     options:   [ publish-zonemd ]
+     zonemd:
+        algorithms: [ 1, 2 ]
+     notify:
+        - addr: "127.0.0.1:5315"
+          key:  NOKEY
+        - addr: "127.0.0.1:5312"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   # No publish-zonemd: the WRONG ZONEMD in the zone file is ordinary operator
+   # data and tdns serves it untouched. This is the zone the gates must refuse.
+   - name:      bad.zonemd.test.
+     type:      primary
+     zonefile:  /var/tmp/zonemd/zones/bad.zonemd.test.zone
+     store:     map
+     notify:
+        - addr: "127.0.0.1:5315"
+          key:  NOKEY
+        - addr: "127.0.0.1:5312"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   # Same wrong digest; its consumer runs on-verify-failure: warn.
+   - name:      warn.zonemd.test.
+     type:      primary
+     zonefile:  /var/tmp/zonemd/zones/warn.zonemd.test.zone
+     store:     map
+     notify:
+        - addr: "127.0.0.1:5312"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   - name:      none.zonemd.test.
+     type:      primary
+     zonefile:  /var/tmp/zonemd/zones/none.zonemd.test.zone
+     store:     map
+     notify:
+        - addr: "127.0.0.1:5315"
+          key:  NOKEY
+        - addr: "127.0.0.1:5312"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   - name:      unsup.zonemd.test.
+     type:      primary
+     zonefile:  /var/tmp/zonemd/zones/unsup.zonemd.test.zone
+     store:     map
+     notify:
+        - addr: "127.0.0.1:5315"
+          key:  NOKEY
+        - addr: "127.0.0.1:5312"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   - name:      tmpl.zonemd.test.
+     type:      primary
+     zonefile:  /var/tmp/zonemd/zones/tmpl.zonemd.test.zone
+     store:     map
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   - name:      tmplpart.zonemd.test.
+     type:      primary
+     zonefile:  /var/tmp/zonemd/zones/tmplpart.zonemd.test.zone
+     store:     map
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+

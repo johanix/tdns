@@ -1,0 +1,124 @@
+service:
+   name:       XOT-AGENT
+   verbose:    true
+   debug:      false
+
+log:
+   file:       /var/tmp/xotinterop/log/tdns-agent.log
+   level:      debug
+
+db:
+   file:       /var/tmp/xotinterop/tdns-agent/agent.db
+
+dnsengine:
+   addresses:  [ 127.0.0.1:5302 ]
+   transports: [ do53, dot ]
+   ports:
+      dot:     [ "5402" ]
+   certfile:   /var/tmp/xotinterop/certs/ns-tdnsagent.xot.test.crt
+   keyfile:    /var/tmp/xotinterop/certs/ns-tdnsagent.xot.test.key
+
+apiserver:
+   addresses:  [ 127.0.0.1:8302 ]
+   apikey:     xot-interop-test-key
+   certfile:   /var/tmp/xotinterop/certs/ns-tdnsagent.xot.test.crt
+   keyfile:    /var/tmp/xotinterop/certs/ns-tdnsagent.xot.test.key
+
+zones:
+   # Direction B: pull from NSD over XoT, SPKI-pin-verified
+   - name:      b-nsd.xot.test.
+     type:      secondary
+     zonefile:  /var/tmp/xotinterop/tdns-agent/zones/b-nsd.xot.test.zone
+     store:     map
+     upstreams:
+        - addr:      "127.0.0.1:5403"
+          key:       NOKEY
+          transport: dot
+          tls-auth:  pin
+          tls-name:  ns-nsd.xot.test
+          pins:
+             - "@PIN_NSD@"
+     allow-notify:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   # Direction B: pull from BIND9 over XoT, SPKI-pin-verified
+   - name:      b-bind.xot.test.
+     type:      secondary
+     zonefile:  /var/tmp/xotinterop/tdns-agent/zones/b-bind.xot.test.zone
+     store:     map
+     upstreams:
+        - addr:      "127.0.0.1:5404"
+          key:       NOKEY
+          transport: dot
+          tls-auth:  pin
+          tls-name:  ns-bind.xot.test
+          pins:
+             - "@PIN_BIND@"
+     allow-notify:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   # Direction B: pull from Knot over XoT, SPKI-pin-verified
+   - name:      b-knot.xot.test.
+     type:      secondary
+     zonefile:  /var/tmp/xotinterop/tdns-agent/zones/b-knot.xot.test.zone
+     store:     map
+     upstreams:
+        - addr:      "127.0.0.1:5405"
+          key:       NOKEY
+          transport: dot
+          tls-auth:  pin
+          tls-name:  ns-knot.xot.test
+          pins:
+             - "@PIN_KNOT@"
+     allow-notify:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   # NEGATIVE 1: PKIX, deliberately WRONG hostname -> must fail
+   - name:      neg1.xot.test.
+     type:      secondary
+     store:     map
+     upstreams:
+        - addr:      "127.0.0.1:5401"
+          key:       NOKEY
+          transport: dot
+          tls-auth:  pkix
+          tls-name:  wrong.xot.test
+          ca-file:   /var/tmp/xotinterop/ca/xot-ca.crt
+
+   # NEGATIVE 2: PKIX, correct hostname but WRONG CA -> must fail
+   - name:      neg2.xot.test.
+     type:      secondary
+     store:     map
+     upstreams:
+        - addr:      "127.0.0.1:5401"
+          key:       NOKEY
+          transport: dot
+          tls-auth:  pkix
+          tls-name:  ns-tdnsauth.xot.test
+          ca-file:   /var/tmp/xotinterop/ca/bogus-ca.crt
+
+   # NEGATIVE 3: pin mode with a WRONG pin -> must fail
+   - name:      neg3.xot.test.
+     type:      secondary
+     store:     map
+     upstreams:
+        - addr:      "127.0.0.1:5401"
+          key:       NOKEY
+          transport: dot
+          tls-auth:  pin
+          tls-name:  ns-tdnsauth.xot.test
+          pins:
+             - "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
