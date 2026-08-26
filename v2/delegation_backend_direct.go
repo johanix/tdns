@@ -27,27 +27,55 @@ func (b *DirectDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateR
 	if !updated {
 		return nil
 	}
-	// Persist to source zonefile so accumulated child updates survive a
-	// restart. Without this, every CHILD-UPDATE only mutates RAM, gets
-	// lost on next start, and the scanner re-discovers the "missing"
-	// delegation on first NOTIFY — re-accumulating from scratch. The
-	// in-memory mutation set OptDirty; WriteZone clears it on success.
-	if b.zd.Zonefile == "" {
-		lg.Debug("DirectDelegationBackend: no source zonefile, skipping persist", "zone", b.zd.ZoneName)
+	// The change is already durable: ApplyChildUpdateToZoneData publishes,
+	// and the publish path persists a delta (Phase 2 — see the wsPersistDelta
+	// assignment there, and PersistZoneDelta in publishWorkingSetLocked). The
+	// journal is what carries a child update across a restart, exactly as it
+	// does for every other kind of change.
+	//
+	// So writing the zone file here is not persistence, it is an eager FOLD of
+	// that journal: WriteZone rewrites the whole file and deletes the deltas
+	// up to that serial. On a parent that accepts delegation updates at any
+	// rate, that is a full zone-file rewrite per update, and it defeats the
+	// mechanism the journal exists to provide. Folding is "zone sync"'s job,
+	// on the operator's schedule.
+	//
+	// Two cases still want the eager write, and they are the same two the
+	// ZONE-UPDATE path uses (see the apiPrimary write in zone_updater.go,
+	// which calls itself the mirror of this one):
+	//
+	//   - an API-managed primary, whose content has no other on-disk home;
+	//   - no journal to carry it — `journal: active: false`, or no keystore —
+	//     where memory really would be the only copy.
+	b.zd.mu.Lock()
+	apiManaged := b.zd.Options[OptApiManagedZone]
+	b.zd.mu.Unlock()
+	if !apiManaged && JournalActive() && b.kdb != nil {
+		lg.Debug("DirectDelegationBackend: change is in the journal; leaving the zone file to 'zone sync'",
+			"zone", b.zd.ZoneName, "file", b.zd.Zonefile)
 		return nil
 	}
+
+	// Reached only in the two cases above, so this really is the last copy —
+	// and there is nowhere to put it. Not "skipping persist": the persist
+	// either already happened in the journal, or there is no journal and this
+	// zone was configured without a file to fall back on.
+	if b.zd.Zonefile == "" {
+		lg.Warn("DirectDelegationBackend: no journal and no zone file; this change exists only in memory",
+			"zone", b.zd.ZoneName, "apiManaged", apiManaged, "journal", JournalActive())
+		return nil
+	}
+
 	msg, werr := b.zd.WriteZone(true, false)
 	if werr != nil {
-		// Propagate the persistence failure. The in-memory state did
-		// receive the update, but the zonefile didn't — and if the
-		// daemon restarts before the next successful update lands, the
-		// change is lost on reload and the scanner will rediscover the
-		// "missing" delegation and re-accumulate. Surface the error
-		// upstream so operators see it and can act.
-		lg.Warn("DirectDelegationBackend: failed to persist zone after CHILD-UPDATE", "zone", b.zd.ZoneName, "file", b.zd.Zonefile, "error", werr)
-		return fmt.Errorf("persist zone after CHILD-UPDATE: %w", werr)
+		// Surface it: in the two cases that reach here the file is the only
+		// durable copy, so a failed write means a restart before the next
+		// successful one loses the change and the scanner rediscovers the
+		// "missing" delegation and re-accumulates.
+		lg.Warn("DirectDelegationBackend: failed to write zone file after CHILD-UPDATE", "zone", b.zd.ZoneName, "file", b.zd.Zonefile, "error", werr)
+		return fmt.Errorf("write zone file after CHILD-UPDATE: %w", werr)
 	}
-	lg.Info("DirectDelegationBackend: persisted zone after CHILD-UPDATE", "zone", b.zd.ZoneName, "msg", msg)
+	lg.Info("DirectDelegationBackend: wrote zone file after CHILD-UPDATE", "zone", b.zd.ZoneName, "msg", msg)
 	return nil
 }
 
