@@ -126,8 +126,17 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = err.Error()
 			} else {
 				resp.Delegation = dd
-				resp.Msg = fmt.Sprintf("%s: %d owner name(s) of delegation data for %s",
-					zd.ZoneName, len(dd.RRsets), dd.Child)
+				// The two response shapes count different things: a listing
+				// counts child zones, a per-child report counts the owner
+				// names its records sit at. One message for both named a
+				// child that is not there and called children owner names.
+				if dd.Child == "" {
+					resp.Msg = fmt.Sprintf("%s: %d child zone(s) with delegation data",
+						zd.ZoneName, len(dd.RRsets))
+				} else {
+					resp.Msg = fmt.Sprintf("%s: %d owner name(s) of delegation data for %s",
+						zd.ZoneName, len(dd.RRsets), dd.Child)
+				}
 			}
 
 		// The delta journal's operator surface. Not in
