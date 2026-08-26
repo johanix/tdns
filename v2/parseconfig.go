@@ -1563,13 +1563,33 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		zconf.DnssecPolicy = tmpl.DnssecPolicy
 	}
 
+	// Zonemd: merged FIELD BY FIELD, not copied whole. Under the shallow rule
+	// below a struct field is taken from the template only when the zone's is
+	// entirely zero, so a zone that sets one field of the block -- say
+	// `algorithms` -- would silently drop every other field the template gave
+	// it, `on-verify-failure` included. That is the wrong direction for a
+	// block that carries policy: the zone author sets the field they care
+	// about and has no reason to expect the fleet-wide setting beside it to
+	// vanish. Merging per field means the zone overrides what it names and
+	// inherits the rest.
+	//
+	// (The gapFillStruct caveat applies within the block: a leaf counts as set
+	// only when non-zero, so a zone cannot override a template's value back to
+	// the zero value. For wire-cache-max-bytes, whose 0 means "default", the
+	// way to say "not the template's size" is the explicit -1 that disables
+	// caching.)
+	gapFillStruct(reflect.ValueOf(&zconf.Zonemd).Elem(),
+		reflect.ValueOf(&tmpl.Zonemd).Elem(), nil, false)
+
 	// --- generic gap-fill for every other config field (zone wins) ---
-	// Shallow (deep=false): zones have no nested config block that wants a
-	// recursive merge — UpdatePolicy is copied whole if the zone left it unset.
+	// Shallow (deep=false): UpdatePolicy is copied whole if the zone left it
+	// unset. Zonemd is the one nested block that wants a per-field merge and
+	// is handled above.
 	// A template config never sets runtime/display fields, so IsZero skips them.
 	bespoke := map[string]bool{
 		"Name": true, "Template": true, // never copied from a template
 		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, // handled above
+		"Zonemd": true, // handled above (per-field merge, not whole-block copy)
 		// DynamicZones is a property of the TEMPLATE (API-instantiable), not
 		// of the zones stamped out from it — never copied.
 		"DynamicZones": true,

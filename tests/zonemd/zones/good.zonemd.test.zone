@@ -1,0 +1,8 @@
+$TTL 120
+good.zonemd.test.	120	IN	SOA	ns1.zonemd.test. hostmaster.zonemd.test. (
+				2026082501 3600 600 604800 120 )
+good.zonemd.test.	120	IN	NS	ns1.zonemd.test.
+www.good.zonemd.test.	120	IN	A	192.0.2.10
+mail.good.zonemd.test.	120	IN	MX	10 mx.good.zonemd.test.
+mx.good.zonemd.test.	120	IN	A	192.0.2.11
+txt.good.zonemd.test.	120	IN	TXT	"round-1"

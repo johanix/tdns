@@ -1,0 +1,14 @@
+$TTL 120
+a.xot.test.	120	IN	SOA	ns-tdnsauth.xot.test. hostmaster.xot.test. (
+				2026082501	; serial
+				3600		; refresh
+				600		; retry
+				604800		; expire
+				120 )		; minimum
+a.xot.test.	120	IN	NS	ns-tdnsauth.xot.test.
+a.xot.test.	120	IN	NS	ns-nsd.xot.test.
+a.xot.test.	120	IN	NS	ns-bind.xot.test.
+a.xot.test.	120	IN	NS	ns-knot.xot.test.
+www.a.xot.test.		120	IN	A	192.0.2.1
+mail.a.xot.test.	120	IN	AAAA	2001:db8::25
+marker.a.xot.test.	120	IN	TXT	"round-1"

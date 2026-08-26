@@ -1,0 +1,5 @@
+$TTL 120
+neg2.xot.test.	120	IN	SOA	ns-tdnsauth.xot.test. hostmaster.xot.test. (
+				2026082501 3600 600 604800 120 )
+neg2.xot.test.	120	IN	NS	ns-tdnsauth.xot.test.
+canary.neg2.xot.test.	120	IN	TXT	"must-not-transfer"

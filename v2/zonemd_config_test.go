@@ -138,3 +138,43 @@ func TestBadZonemdBlockDropsTheOptionAndReportsIt(t *testing.T) {
 		t.Errorf("the operator is not told why the option was dropped: %+v", zd.ErrorList())
 	}
 }
+
+// A zone that sets ONE field of the zonemd block must still inherit the
+// others from its template.
+//
+// This is not the same question as "does the zone's own block win", which the
+// test above covers: the fields there collide, so either answer keeps the
+// zone's intent. Here they do not collide. Under a whole-block copy -- the
+// rule ExpandTemplate applies to every other nested config field -- a zone
+// naming `algorithms` counts as having set the block, and the template's
+// `on-verify-failure` is dropped without a word. That silently downgrades a
+// fleet-wide policy to whatever the field's default happens to be, which for
+// a verdict the operator has deliberately made strict is the wrong direction.
+func TestZonemdBlockMergesFieldByFieldWithItsTemplate(t *testing.T) {
+	tmpl := &ZoneConf{
+		Name:        "verifying-secondary",
+		Type:        "secondary",
+		OptionsStrs: []string{"verify-zonemd"},
+		Zonemd: ZonemdConf{
+			Algorithms:      []uint8{1, 2},
+			OnVerifyFailure: ZonemdOnFailureWarn,
+		},
+	}
+
+	// The zone speaks only about algorithms.
+	merged, err := ExpandTemplate(ZoneConf{
+		Name: "a.example.", Template: "verifying-secondary",
+		Zonemd: ZonemdConf{Algorithms: []uint8{1}},
+	}, tmpl, AppTypeAuth)
+	if err != nil {
+		t.Fatalf("ExpandTemplate: %v", err)
+	}
+	if fmt.Sprint(merged.Zonemd.Algorithms) != "[1]" {
+		t.Errorf("the zone's own algorithms were overwritten by the template: %+v",
+			merged.Zonemd)
+	}
+	if merged.Zonemd.OnVerifyFailure != ZonemdOnFailureWarn {
+		t.Errorf("the template's on-verify-failure was dropped because the zone set a"+
+			" different field of the same block: %+v", merged.Zonemd)
+	}
+}
