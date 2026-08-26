@@ -47,10 +47,6 @@ func (b *DirectDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateR
 	//   - an API-managed primary, whose content has no other on-disk home;
 	//   - no journal to carry it — `journal: active: false`, or no keystore —
 	//     where memory really would be the only copy.
-	if b.zd.Zonefile == "" {
-		lg.Debug("DirectDelegationBackend: no source zonefile, skipping persist", "zone", b.zd.ZoneName)
-		return nil
-	}
 	b.zd.mu.Lock()
 	apiManaged := b.zd.Options[OptApiManagedZone]
 	b.zd.mu.Unlock()
@@ -59,18 +55,27 @@ func (b *DirectDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateR
 			"zone", b.zd.ZoneName, "file", b.zd.Zonefile)
 		return nil
 	}
+
+	// Reached only in the two cases above, so this really is the last copy —
+	// and there is nowhere to put it. Not "skipping persist": the persist
+	// either already happened in the journal, or there is no journal and this
+	// zone was configured without a file to fall back on.
+	if b.zd.Zonefile == "" {
+		lg.Warn("DirectDelegationBackend: no journal and no zone file; this change exists only in memory",
+			"zone", b.zd.ZoneName, "apiManaged", apiManaged, "journal", JournalActive())
+		return nil
+	}
+
 	msg, werr := b.zd.WriteZone(true, false)
 	if werr != nil {
-		// Propagate the persistence failure. The in-memory state did
-		// receive the update, but the zonefile didn't — and if the
-		// daemon restarts before the next successful update lands, the
-		// change is lost on reload and the scanner will rediscover the
-		// "missing" delegation and re-accumulate. Surface the error
-		// upstream so operators see it and can act.
-		lg.Warn("DirectDelegationBackend: failed to persist zone after CHILD-UPDATE", "zone", b.zd.ZoneName, "file", b.zd.Zonefile, "error", werr)
-		return fmt.Errorf("persist zone after CHILD-UPDATE: %w", werr)
+		// Surface it: in the two cases that reach here the file is the only
+		// durable copy, so a failed write means a restart before the next
+		// successful one loses the change and the scanner rediscovers the
+		// "missing" delegation and re-accumulates.
+		lg.Warn("DirectDelegationBackend: failed to write zone file after CHILD-UPDATE", "zone", b.zd.ZoneName, "file", b.zd.Zonefile, "error", werr)
+		return fmt.Errorf("write zone file after CHILD-UPDATE: %w", werr)
 	}
-	lg.Info("DirectDelegationBackend: persisted zone after CHILD-UPDATE", "zone", b.zd.ZoneName, "msg", msg)
+	lg.Info("DirectDelegationBackend: wrote zone file after CHILD-UPDATE", "zone", b.zd.ZoneName, "msg", msg)
 	return nil
 }
 
