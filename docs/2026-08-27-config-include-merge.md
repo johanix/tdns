@@ -189,6 +189,107 @@ effort-to-risk ratio, and it comes first:
 6. A round trip of real `tdns-zonegen` output `include:`d into a config that
    already has `zones:` and `dnssec:` — the case that motivated this.
 
+## Risk: what may break
+
+The change is additive by construction — nothing behaves differently unless a
+config uses one of the five keys in more than one file. That bounds the blast
+radius but does not make it zero, and two of these are worth deciding about
+before any code is written.
+
+**R1. A config with an accidental duplicate zone name loses that zone.**
+Today a repeated zone name is silently last-wins and the zone *is* served.
+Afterwards it is quarantined and *not* served. So an upgrade can take a zone
+off the air — in a change whose stated purpose is availability.
+
+The counter-argument is that such a config was already broken, just quietly:
+nobody could say which of the two definitions was live. But the transition is
+real. `config check` reports it before a restart, which is the mitigation, and
+is an argument for shipping the check *first*, ahead of the enforcement.
+
+**R2. This is not only a startup path.** `processConfigFile` has six call
+sites, and four of them are runtime reloads:
+
+```
+ParseConfig(reload bool)        reloadTemplatesFromFile()
+reloadDnssecFromFile()          reloadZonesFromFile()
+reloadTsigKeysFromFile()        checkReloadPolicyGuardrail()
+```
+
+A merge bug therefore does not merely prevent a server from starting, where it
+would be obvious. It can land mid-reload on a server that is up and serving —
+including via the SIGHUP watcher, which nobody is watching. This is the main
+reason the testing comes first.
+
+**R3. Configs that currently rely on last-wins across includes.** If two
+included files both carry `zones:`, today the later silently replaces the
+earlier; afterwards both are served. A config that "worked" by accident starts
+serving zones the operator believed were inactive. This is not hypothetical:
+`CheckDynamicConfigFileIncluded` exists because the dynamic-zones file
+`include:`d alongside a normal zones file produced exactly this collision.
+
+**R4. The template hard error becomes soft.** A config that today refuses to
+load will afterwards load with some zones quarantined. That is the intent, but
+an operator using the refusal as a gate ("it won't start if I got it wrong")
+loses it. Lower severity, still a semantic change.
+
+**R5. `dnssec.policies` stops being replaceable wholesale.** Anyone using an
+included file to substitute the entire policy set gets a merge instead, and any
+same-named policy in both files becomes a duplicate — rejected, with zones
+bound to it failing through the existing unusable-policy path.
+
+**R6. `LoadRawConfigMap` is exported.** Provenance needs an extra return value
+or a result struct, so its signature changes. In-tree that is `config check`
+plus six internal call sites, all mechanical. Out of tree, anything pinning
+tdns/v2 breaks at its next repin rather than silently.
+
+**R7. List order becomes include-order dependent.** Concatenation makes the
+order of `zones:` and `templates:` depend on which file was included first.
+Nothing should care — but "should" is doing work in that sentence, and it wants
+checking rather than assuming, particularly anywhere a lookup takes a first
+match instead of an exact one.
+
+**R8. The legacy `tdns/` tree keeps the old semantics.** It carries its own
+copy of `processConfigFile` and is not being changed, consistent with the
+delete-don't-patch rule for that tree. Apps still built against it — in
+tdns-apps, `reporter` and `scanner` — keep replace-on-include. Worth knowing
+before someone reports it as a bug.
+
+### The two decisions this raises
+
+- **Ship enforcement and reporting together, or reporting first?** Given R1,
+  there is a case for landing `config check`'s duplicate reporting in one
+  release and the runtime quarantine in the next, so operators can find their
+  accidental duplicates before a restart acts on them.
+- **Does R3 need a migration note?** Anyone with two `zones:`-bearing includes
+  is currently losing zones silently. They will gain them back, which is
+  correct, but should not be a surprise.
+
+## Extent
+
+Rough sizes, production code and tests separated because the ratio is unusual
+here — the risk is concentrated in a path with no test coverage at all today.
+
+| Work | LOC | Notes |
+|---|---|---|
+| Merge strategies + allowlist | 90–120 | New file. Table of paths, three strategy functions, dispatcher. Replaces ~15 lines in `processConfigFile`. |
+| Provenance threading | 40–60 | Plus ~15 lines of mechanical signature updates across the six call sites. |
+| Duplicate detection: zones | ~20 | Seen-map in `ParseZones` (a 645-line function, so placement matters more than size) plus `SetError`. |
+| Duplicate detection: templates | ~25 | Replace the hard error; track unusable names; consult that set when a zone expands its template. |
+| Duplicate detection: policies | ~15 | Reuses the existing `DnssecPolicy.Error` path. |
+| `config check` reporting | 40–60 | New check plus output. It already loads the raw map, so this is presentation over data it has. |
+| `CheckDynamicConfigFileIncluded` rewrite | ~10 | Comment and message only; the check itself stays. |
+| **Production subtotal** | **240–310** | |
+| Tests | 350–500 | Six categories from the testing section, table-driven over temp-dir fixtures. Includes the first tests this path has ever had. |
+| **Total** | **~600–800** | |
+
+Two things that could move this materially:
+
+- If provenance turns out to want a proper result struct rather than another
+  return value, the mechanical edits grow but the design gets cleaner. Worth
+  deciding at the start rather than discovering at the end.
+- If R1 leads to splitting reporting from enforcement, this becomes two smaller
+  changes rather than one, with the total slightly higher.
+
 ## Not in scope
 
 - Letting an included file *remove* something. There is no need yet, and the
