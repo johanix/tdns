@@ -108,6 +108,28 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = err.Error()
 			}
 
+		// The read half of "update". Without it the API is asymmetric: a
+		// client can write a delegation and then has no way to confirm what
+		// the server actually holds except by querying the public DNS -- a
+		// different channel, with different authentication and caching, and
+		// blind to anything accepted but not yet published.
+		//
+		// That matters most for a client that keeps delegation data in its own
+		// store and has to reconcile it against the server. Read-after-write
+		// over ONE authenticated channel is what makes such a reconciliation
+		// trustworthy; inferring server state from the public view is not the
+		// same thing.
+		case "get-delegation":
+			dd, err := zd.ApiZoneGetDelegation(zp)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Delegation = dd
+				resp.Msg = fmt.Sprintf("%s: %d owner name(s) of delegation data for %s",
+					zd.ZoneName, len(dd.RRsets), dd.Child)
+			}
+
 		// The delta journal's operator surface. Not in
 		// originationAPICommands: none of these change zone content, they
 		// change what is stored about it, and a secondary that somehow
