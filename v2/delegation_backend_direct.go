@@ -27,13 +27,36 @@ func (b *DirectDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateR
 	if !updated {
 		return nil
 	}
-	// Persist to source zonefile so accumulated child updates survive a
-	// restart. Without this, every CHILD-UPDATE only mutates RAM, gets
-	// lost on next start, and the scanner re-discovers the "missing"
-	// delegation on first NOTIFY — re-accumulating from scratch. The
-	// in-memory mutation set OptDirty; WriteZone clears it on success.
+	// The change is already durable: ApplyChildUpdateToZoneData publishes,
+	// and the publish path persists a delta (Phase 2 — see the wsPersistDelta
+	// assignment there, and PersistZoneDelta in publishWorkingSetLocked). The
+	// journal is what carries a child update across a restart, exactly as it
+	// does for every other kind of change.
+	//
+	// So writing the zone file here is not persistence, it is an eager FOLD of
+	// that journal: WriteZone rewrites the whole file and deletes the deltas
+	// up to that serial. On a parent that accepts delegation updates at any
+	// rate, that is a full zone-file rewrite per update, and it defeats the
+	// mechanism the journal exists to provide. Folding is "zone sync"'s job,
+	// on the operator's schedule.
+	//
+	// Two cases still want the eager write, and they are the same two the
+	// ZONE-UPDATE path uses (see the apiPrimary write in zone_updater.go,
+	// which calls itself the mirror of this one):
+	//
+	//   - an API-managed primary, whose content has no other on-disk home;
+	//   - no journal to carry it — `journal: active: false`, or no keystore —
+	//     where memory really would be the only copy.
 	if b.zd.Zonefile == "" {
 		lg.Debug("DirectDelegationBackend: no source zonefile, skipping persist", "zone", b.zd.ZoneName)
+		return nil
+	}
+	b.zd.mu.Lock()
+	apiManaged := b.zd.Options[OptApiManagedZone]
+	b.zd.mu.Unlock()
+	if !apiManaged && JournalActive() && b.kdb != nil {
+		lg.Debug("DirectDelegationBackend: change is in the journal; leaving the zone file to 'zone sync'",
+			"zone", b.zd.ZoneName, "file", b.zd.Zonefile)
 		return nil
 	}
 	msg, werr := b.zd.WriteZone(true, false)
