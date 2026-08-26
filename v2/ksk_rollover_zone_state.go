@@ -110,6 +110,9 @@ ON CONFLICT(zone) DO NOTHING`
 }
 
 func LoadRolloverZoneRow(kdb *KeyDB, zone string) (*RolloverZoneRow, error) {
+	if kdb == nil || kdb.DB == nil {
+		return nil, fmt.Errorf("LoadRolloverZoneRow: no database")
+	}
 	zone = strings.TrimSpace(zone)
 	const q = `
 SELECT zone,
