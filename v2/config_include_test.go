@@ -92,8 +92,8 @@ dnssec:
   policies:
     house:
       algorithm: ED25519
-  large_algorithms: [ MLDSA87 ]
-  split_algorithms:
+  large-algorithms: [ MLDSA87 ]
+  split-algorithms:
     MLDSA87: [ ED25519 ]
 `,
 		"generated.yaml": `
@@ -104,8 +104,8 @@ dnssec:
   policies:
     generated:
       algorithm: ED25519
-  large_algorithms: [ MLDSA87, FALCON512 ]
-  split_algorithms:
+  large-algorithms: [ MLDSA87, FALCON512 ]
+  split-algorithms:
     MLDSA87: [ FALCON512 ]
     MLDSA44: [ ED25519 ]
 `,
@@ -122,10 +122,10 @@ dnssec:
 	if d["completeness"] != "relaxed" {
 		t.Errorf("a sibling key must survive the nested merge: %v", d["completeness"])
 	}
-	if la := d["large_algorithms"].([]interface{}); len(la) != 2 {
-		t.Errorf("large_algorithms should union to {MLDSA87, FALCON512}, got %v", la)
+	if la := d["large-algorithms"].([]interface{}); len(la) != 2 {
+		t.Errorf("large-algorithms should union to {MLDSA87, FALCON512}, got %v", la)
 	}
-	split := d["split_algorithms"].(map[string]interface{})
+	split := d["split-algorithms"].(map[string]interface{})
 	if m87 := split["MLDSA87"].([]interface{}); len(m87) != 2 {
 		t.Errorf("a KSK in both files should end up allowing both ZSKs, got %v", m87)
 	}
@@ -346,12 +346,12 @@ zones:
     type: primary
     dnssecpolicy: default
 `,
-		// As emitted: a policy per algorithm pair, the split_algorithms those
-		// pairs require, the derived large_algorithms, one zone per pair.
+		// As emitted: a policy per algorithm pair, the split-algorithms those
+		// pairs require, the derived large-algorithms, one zone per pair.
 		"auth-pq-zones.yaml": `
 dnssec:
-  large_algorithms: [ MLDSA87, FALCON512 ]
-  split_algorithms:
+  large-algorithms: [ MLDSA87, FALCON512 ]
+  split-algorithms:
     MLDSA87: [ ED25519 ]
   policies:
     mldsa87-ed25519:
@@ -438,7 +438,7 @@ func TestProvenanceWhenTheMainFileLacksTheKey(t *testing.T) {
 // would otherwise break this feature in total silence.
 //
 // The allowlist is a set of YAML key PATHS. tdns#406 respells every config key
-// with hyphens -- dnssec.large_algorithms becomes dnssec.large-algorithms --
+// with hyphens -- dnssec.large_algorithms became dnssec.large-algorithms --
 // and keeps no alias. Nothing in the merge would complain: an allowlist entry
 // naming a path that no longer exists simply never matches, so an opted-in
 // include quietly goes back to replacing, which is the exact behaviour this
@@ -527,4 +527,56 @@ func TestCollisionComparesZoneNamesLikeTheDaemon(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCollisionKeysNonZonesExactly is the other half of how collisions are
+// compared. Zones fold, because they are DNS names; templates and policies do
+// NOT, because they are map keys.
+//
+// buildTemplateMap does Templates[tmpl.Name] and every lookup matches exactly,
+// so `Foo` and `foo` are two distinct templates that both load. Folding them
+// here would report a collision the daemon does not have -- and for
+// dnssec.policies the collision path DELETES the name, so folding would remove
+// a policy the daemon would have kept, from a config it starts on happily.
+func TestCollisionKeysNonZonesExactly(t *testing.T) {
+	t.Run("templates differing only in case are two templates", func(t *testing.T) {
+		main := writeFiles(t, map[string]string{
+			"main.yaml": "include:\n  - {file: inc.yaml, merge: true}\ntemplates:\n  - name: Signing\n",
+			"inc.yaml":  "templates:\n  - name: signing\n",
+		})
+		st := newMergeState()
+		cfg, _, err := processConfigFile(main, filepath.Dir(main), 0, st)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if n := len(st.Collisions()); n != 0 {
+			t.Errorf("the daemon keys templates exactly, so these are two templates, "+
+				"not a collision; got %d: %+v", n, st.Collisions())
+		}
+		if got := len(cfg["templates"].([]interface{})); got != 2 {
+			t.Errorf("both templates should survive the union, got %d", got)
+		}
+	})
+
+	t.Run("policies differing only in case are not deleted", func(t *testing.T) {
+		main := writeFiles(t, map[string]string{
+			"main.yaml": "include:\n  - {file: inc.yaml, merge: true}\n" +
+				"dnssec:\n  policies:\n    Alpha:\n      algorithm: ED25519\n",
+			"inc.yaml": "dnssec:\n  policies:\n    alpha:\n      algorithm: ED25519\n",
+		})
+		st := newMergeState()
+		cfg, _, err := processConfigFile(main, filepath.Dir(main), 0, st)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if n := len(st.Collisions()); n != 0 {
+			t.Errorf("policies are keyed exactly too; got %d collisions: %+v", n, st.Collisions())
+		}
+		policies := cfg["dnssec"].(map[string]interface{})["policies"].(map[string]interface{})
+		for _, want := range []string{"Alpha", "alpha"} {
+			if _, ok := policies[want]; !ok {
+				t.Errorf("policy %q was deleted as a false collision: %v", want, policies)
+			}
+		}
+	})
 }

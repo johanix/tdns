@@ -151,22 +151,22 @@ func TestListenAddressesNeverConcatenate(t *testing.T) {
 }
 
 func TestLargeAlgorithmsUnionDeduplicates(t *testing.T) {
-	dst := yml(t, "dnssec:\n  large_algorithms: [ MLDSA87, FALCON512 ]\n")
-	src := yml(t, "dnssec:\n  large_algorithms: [ FALCON512, MLDSA44 ]\n")
+	dst := yml(t, "dnssec:\n  large-algorithms: [ MLDSA87, FALCON512 ]\n")
+	src := yml(t, "dnssec:\n  large-algorithms: [ FALCON512, MLDSA44 ]\n")
 	merge(t, dst, src, true)
 
-	got := dst["dnssec"].(map[string]interface{})["large_algorithms"].([]interface{})
+	got := dst["dnssec"].(map[string]interface{})["large-algorithms"].([]interface{})
 	if len(got) != 3 {
 		t.Fatalf("union should deduplicate, got %v", got)
 	}
 }
 
 func TestSplitAlgorithmsUnionsLeafLists(t *testing.T) {
-	dst := yml(t, "dnssec:\n  split_algorithms:\n    MLDSA87: [ ED25519 ]\n")
-	src := yml(t, "dnssec:\n  split_algorithms:\n    MLDSA87: [ FALCON512 ]\n    MLDSA44: [ ED25519 ]\n")
+	dst := yml(t, "dnssec:\n  split-algorithms:\n    MLDSA87: [ ED25519 ]\n")
+	src := yml(t, "dnssec:\n  split-algorithms:\n    MLDSA87: [ FALCON512 ]\n    MLDSA44: [ ED25519 ]\n")
 	merge(t, dst, src, true)
 
-	split := dst["dnssec"].(map[string]interface{})["split_algorithms"].(map[string]interface{})
+	split := dst["dnssec"].(map[string]interface{})["split-algorithms"].(map[string]interface{})
 	m87 := split["MLDSA87"].([]interface{})
 	if len(m87) != 2 {
 		t.Fatalf("a KSK present in both files should allow both ZSKs, got %v", m87)

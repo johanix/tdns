@@ -19,7 +19,7 @@
 #        merge: true                     # combines
 #
 # Merging is limited to zones, templates, dnssec.policies,
-# dnssec.large_algorithms and dnssec.split_algorithms. Everything else replaces
+# dnssec.large-algorithms and dnssec.split-algorithms. Everything else replaces
 # even when merge: true -- notably dnsengine.addresses and apiserver.addresses,
 # where combining would silently widen what the server listens on. See
 # guide/configuration.md.

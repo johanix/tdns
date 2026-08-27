@@ -91,8 +91,8 @@ Merging applies **only to these paths**, and only for an include that asked:
 | `zones` | concatenated; a repeated zone name is an error |
 | `templates` | concatenated; a repeated template name is an error |
 | `dnssec.policies` | merged by policy name; a repeated name is an error |
-| `dnssec.large_algorithms` | combined as a set |
-| `dnssec.split_algorithms` | merged by KSK, the ZSK lists combined as sets |
+| `dnssec.large-algorithms` | combined as a set |
+| `dnssec.split-algorithms` | merged by KSK, the ZSK lists combined as sets |
 
 Everything else replaces, whether or not the include asked to merge. That is
 deliberate rather than an oversight: `dnsengine.addresses`, `apiserver.addresses`
@@ -100,7 +100,7 @@ and `dnsengine.transports` are lists too, and combining those would silently mak
 the server listen on more addresses than the file in front of you names — the
 same shape of mistake as widening an ACL, and harder to notice.
 
-Note that merging `dnssec.split_algorithms` **widens** which KSK/ZSK algorithm
+Note that merging `dnssec.split-algorithms` **widens** which KSK/ZSK algorithm
 pairings the server will accept. That is usually what you want when a generated
 file brings its own pairings, but it is a widening, not a restatement.
 

@@ -61,8 +61,8 @@ var mergeAllowlist = map[string]mergeStrategy{
 	"zones":                   concatNamed,
 	"templates":               concatNamed,
 	"dnssec.policies":         mergeNamedMap,
-	"dnssec.large_algorithms": unionStrings,
-	"dnssec.split_algorithms": mergeMapOfStringLists,
+	"dnssec.large-algorithms": unionStrings,
+	"dnssec.split-algorithms": mergeMapOfStringLists,
 }
 
 // isAllowlistPrefix reports whether any allowlisted path lives strictly below
@@ -163,22 +163,29 @@ func originFrom(src *mergeState, path, name, fallback string) string {
 func originKey(path, name string) string { return path + "\x00" + name }
 
 // collationKey is the name two contributions are compared under to decide
-// whether they are the same item.
+// whether they are the same item. Each collection is compared the way the
+// DAEMON keys it, and they are not keyed alike.
 //
-// Zones use the daemon's own rule (zoneNameKey: FQDN-normalized and
-// case-folded), because otherwise the merge and the ParseZones pre-pass
-// disagree: "example.com" from one file and "example.com." from another are one
-// zone to the daemon and get quarantined, but comparing the raw YAML strings
-// here saw two items and never logged which two files they came from -- so the
-// operator is told the zone is broken and not told where either half lives.
+// Zones fold: zoneNameKey is FQDN-normalized and case-folded, because zone
+// names are DNS names and RFC 4343 makes two spellings one zone. Without it the
+// merge and the ParseZones pre-pass disagree -- "example.com" from one file and
+// "example.com." from another are one zone to the daemon and get quarantined,
+// but comparing raw YAML strings here saw two items and never logged which two
+// files they came from, so the operator is told the zone is broken and not told
+// where either half lives.
 //
-// Everything else is a plain identifier, folded for case only, matching what
-// config check does for template names.
+// Templates and policies do NOT fold. They are map keys, not DNS names:
+// buildTemplateMap does Templates[tmpl.Name] and every lookup matches exactly,
+// so `Foo` and `foo` are two distinct templates that both load. Folding them
+// here would report a collision the daemon does not have -- and for
+// dnssec.policies the collision path DELETES the name, so it would remove a
+// policy the daemon would have kept. config check reached the same conclusion
+// for template names and warns rather than failing on a case-differing pair.
 func collationKey(path, name string) string {
 	if path == "zones" {
 		return zoneNameKey(name)
 	}
-	return strings.ToLower(strings.TrimSpace(name))
+	return name
 }
 
 // noteOrigin records where an item came from, returning the earlier file and
@@ -367,7 +374,7 @@ func applyStrategy(s mergeStrategy, path string, dstVal, srcVal interface{},
 				continue
 			}
 			// Union the leaves. This WIDENS what the server will accept --
-			// for split_algorithms, which KSK/ZSK pairings are permitted --
+			// for split-algorithms, which KSK/ZSK pairings are permitted --
 			// so it is a widening, not a restatement. Bounded: it only gates
 			// policy parse, and only for an include that opted in.
 			merged, err := applyStrategy(unionStrings, path+"."+key, existing, srcMap[key], srcFile, st, srcState)
