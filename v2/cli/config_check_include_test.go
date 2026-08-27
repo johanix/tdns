@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -75,7 +76,7 @@ func TestConfigCheckMatchesDaemonIncludeMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadRawConfigMap: %v", err)
 	}
-	v, err := loadConfigViper(main, &ccReport{})
+	v, err := loadConfigViper(main, newCCReport())
 	if err != nil {
 		t.Fatalf("loadConfigViper: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestConfigCheckSeesNestedIncludes(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "mid.yaml"), []byte("include:\n  - leaf.yaml\n"), 0644)
 	os.WriteFile(filepath.Join(dir, "leaf.yaml"), []byte("db:\n  file: /var/db/from-leaf.db\n"), 0644)
 
-	v, err := loadConfigViper(main, &ccReport{})
+	v, err := loadConfigViper(main, newCCReport())
 	if err != nil {
 		t.Fatalf("loadConfigViper: %v", err)
 	}
@@ -129,7 +130,79 @@ func TestConfigCheckMissingIncludeIsAnError(t *testing.T) {
 	main := filepath.Join(dir, "main.yaml")
 	os.WriteFile(main, []byte("include:\n  - nope.yaml\nservice:\n  name: TEST\n"), 0644)
 
-	if _, err := loadConfigViper(main, &ccReport{}); err == nil {
+	if _, err := loadConfigViper(main, newCCReport()); err == nil {
 		t.Error("a missing include must fail the load, as it does for the daemon")
+	}
+}
+
+// TestCheckDuplicateNames covers the reporting step that has to land before
+// anything enforces duplicates, since enforcement turns a silently-last-wins
+// zone into one that is not served at all.
+func TestCheckDuplicateNames(t *testing.T) {
+	cases := []struct {
+		name      string
+		cfg       tdns.Config
+		wantFails int
+		wantIn    string
+	}{
+		{
+			name: "no duplicates",
+			cfg: tdns.Config{Zones: []tdns.ZoneConf{{Name: "a.example."}, {Name: "b.example."}},
+				Templates: []tdns.ZoneConf{{Name: "signing-primary"}}},
+		},
+		{
+			name:      "same zone twice",
+			cfg:       tdns.Config{Zones: []tdns.ZoneConf{{Name: "a.example."}, {Name: "a.example."}}},
+			wantFails: 1,
+			wantIn:    "a.example. is defined twice",
+		},
+		{
+			// The case comparing raw strings would miss: ParseZones fqdn-ifies
+			// first, so these are already one zone to the daemon.
+			name:      "trailing dot is not a distinction",
+			cfg:       tdns.Config{Zones: []tdns.ZoneConf{{Name: "a.example"}, {Name: "a.example."}}},
+			wantFails: 1,
+			wantIn:    "a.example. is defined twice",
+		},
+		{
+			name: "same template twice",
+			cfg: tdns.Config{Templates: []tdns.ZoneConf{
+				{Name: "signing-primary"}, {Name: "signing-primary"}}},
+			wantFails: 1,
+			wantIn:    `template "signing-primary" is defined twice`,
+		},
+		{
+			name: "three of the same zone reports each repeat",
+			cfg: tdns.Config{Zones: []tdns.ZoneConf{
+				{Name: "a.example."}, {Name: "a.example."}, {Name: "a.example."}}},
+			wantFails: 2,
+		},
+	}
+
+	// Indexed, not ranged: tdns.Config embeds a sync.Once, so a range copy is
+	// a lock copy and go vet rightly objects.
+	for i := range cases {
+		tc := &cases[i]
+		t.Run(tc.name, func(t *testing.T) {
+			rep := newCCReport()
+			checkDuplicateNames(&tc.cfg, rep)
+			fails, _ := rep.counts()
+			if fails != tc.wantFails {
+				t.Errorf("fails = %d, want %d", fails, tc.wantFails)
+			}
+			if tc.wantIn != "" {
+				var found bool
+				for _, results := range rep.byGroup {
+					for _, res := range results {
+						if strings.Contains(res.msg, tc.wantIn) {
+							found = true
+						}
+					}
+				}
+				if !found {
+					t.Errorf("no finding contained %q", tc.wantIn)
+				}
+			}
+		})
 	}
 }

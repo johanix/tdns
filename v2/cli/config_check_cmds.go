@@ -354,6 +354,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	checkApiServer(&cfg, cfgPath, rep)
 	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
+	checkDuplicateNames(&cfg, rep)
 	checkPeers(&cfg, rep)
 	checkApiServerCorrelation(role, &cfg, rep)
 
@@ -1549,4 +1550,66 @@ func extraLines(s string) []string {
 		}
 	}
 	return out
+}
+
+// checkDuplicateNames reports two definitions of one name in a collection of
+// named objects.
+//
+// The daemon does not currently notice this for zones: ParseZones fqdn-ifies
+// each name and get-or-creates the ZoneData, so a repeated name is silently
+// last-wins and only one of the two definitions is ever served -- with nothing
+// saying which. Reporting it here is what lets an operator find such a config
+// BEFORE the daemon starts refusing to serve either, which is what it will do
+// once duplicate enforcement lands.
+//
+// Templates are checked too, and there the daemon already refuses the whole
+// config (buildTemplateMap returns an error). Reporting it is still worth
+// doing: a FAIL naming the template beats a startup error naming it, because
+// this runs before the restart.
+//
+// DNSSEC policies need no check. `policies` is a YAML mapping, and yaml.v3
+// rejects duplicate keys outright, so two policies of one name never survive
+// parsing to reach any code here.
+func checkDuplicateNames(cfg *tdns.Config, rep *ccReport) {
+	// Zones compare as FQDNs because that is what the daemon compares:
+	// ParseZones opens with zname := dns.Fqdn(zconf.Name), so "example.com"
+	// and "example.com." are already one zone to it. Comparing raw strings
+	// here would miss exactly the duplicate it then collapses.
+	seenZone := map[string]int{}
+	dupZones := 0
+	for i := range cfg.Zones {
+		name := dns.Fqdn(cfg.Zones[i].Name)
+		if name == "." {
+			continue // an unnamed entry is a different complaint, made elsewhere
+		}
+		if first, dup := seenZone[name]; dup {
+			dupZones++
+			rep.fail("Zones", "duplicate",
+				fmt.Sprintf("zone %s is defined twice (entries %d and %d)", name, first+1, i+1),
+				"remove one definition; only one is served today, and which one is not defined")
+			continue
+		}
+		seenZone[name] = i
+	}
+
+	seenTmpl := map[string]int{}
+	for i := range cfg.Templates {
+		name := cfg.Templates[i].Name
+		if name == "" {
+			continue
+		}
+		if first, dup := seenTmpl[name]; dup {
+			rep.fail("Zones", "duplicate template",
+				fmt.Sprintf("template %q is defined twice (entries %d and %d)", name, first+1, i+1),
+				"remove one definition; the daemon refuses to start on this")
+			continue
+		}
+		seenTmpl[name] = i
+	}
+
+	if dupZones == 0 && len(seenTmpl) == len(cfg.Templates) {
+		rep.pass("Zones", "duplicate",
+			fmt.Sprintf("no duplicate names among %d zone(s) and %d template(s)",
+				len(cfg.Zones), len(cfg.Templates)))
+	}
 }
