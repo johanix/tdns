@@ -333,6 +333,34 @@ type ZoneResponse struct {
 	Zonemd *ZonemdStatus `json:"zonemd,omitempty"`
 	// Delegation carries the report for "zone delegation get".
 	Delegation *ChildDelegationReport `json:"delegation,omitempty"`
+	// Name carries the report for "get-name".
+	Name *ZoneNameReport `json:"name,omitempty"`
+}
+
+// ZoneNameReport is what a zone publishes at one owner name.
+//
+// Keyed by RR type in presentation format, for the same reasons
+// ChildDelegationReport is: dns.RR is an interface and does not survive a JSON
+// round trip, and every consumer either prints these or re-parses them with
+// dns.NewRR.
+//
+// Flatter than ChildDelegationReport, which spans several owner names because a
+// delegation does -- the child's own NS and DS plus glue at whatever names
+// those NS records point to. This one is asked about a single name and answers
+// about that name only.
+//
+// An empty RRsets is the answer "this zone publishes nothing there", not an
+// error: it is what a client provisioning a name for the first time gets, and
+// it has to be distinguishable from a failed read.
+type ZoneNameReport struct {
+	Zone string `json:"zone"`
+	Name string `json:"name"`
+	// RRsets maps RR type -> records, e.g.
+	//   "A" -> ["ns1.provider.example. 300 IN A 192.0.2.48"]
+	// RRSIG, NSEC and NSEC3 are never present: they are the signer's, and
+	// returning them would invite a read-modify-write that tries to author
+	// them.
+	RRsets map[string][]string `json:"rrsets,omitempty"`
 }
 
 // ChildDelegationReport is what a parent currently holds for one delegated child.

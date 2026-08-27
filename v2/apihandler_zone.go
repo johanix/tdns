@@ -119,6 +119,27 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 		// over ONE authenticated channel is what makes such a reconciliation
 		// trustworthy; inferring server state from the public view is not the
 		// same thing.
+		// The same read-after-write argument as get-delegation above, for
+		// ordinary names in the zone rather than for a delegated child: a
+		// client that provisions records here has to be able to tell "already
+		// correct" from "not there yet". Without it, it either republishes on
+		// every pass -- which on a signed zone re-signs and bumps the serial
+		// forever -- or keeps a private copy of what it believes it wrote,
+		// which drifts the moment anyone edits the zone by hand.
+		//
+		// Not in originationAPICommands: it changes nothing, and a secondary
+		// being asked what it holds at a name is a fair question.
+		case "get-name":
+			nr, err := zd.ApiZoneGetName(zp)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Name = nr
+				resp.Msg = fmt.Sprintf("%s: %d RRset(s) at %s",
+					zd.ZoneName, len(nr.RRsets), nr.Name)
+			}
+
 		case "get-delegation":
 			dd, err := zd.ApiZoneGetDelegation(zp)
 			if err != nil {
