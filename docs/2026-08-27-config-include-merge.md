@@ -100,6 +100,41 @@ A bare string stays a bare string, so every existing config keeps its exact
 current behaviour. Zonegen stops printing "do not include this file" and starts
 printing "include it with `merge: true`".
 
+The map form is spelled out so the parser has no discretion: `file:` is
+required; `merge:` defaults to false, so `{file: x.yaml}` behaves exactly like
+the bare string; an unknown key in the map, or `merge: true` with no `file:`,
+is a hard error rather than a silently ignored entry.
+
+**Implementation constraint, and the one that decides whether this works at
+all:** allowlisted paths are *dotted*, and `dnssec.policies` is not a top-level
+key. In the current merge, `dnssec` matches the map branch and `policies` is
+assigned by the **inner** loop:
+
+```go
+for k2, v2 := range newMap {
+    existingMap[k2] = v2        // <- dnssec.policies is assigned HERE
+}
+```
+
+A dispatcher that only intercepts top-level keys would leave `dnssec.policies`
+replacing, and the motivating case would not work. Every allowlisted path must
+be intercepted at the point of assignment, nested ones included. Other
+`dnssec:` sub-keys — `completeness`, `kasp`, `templates`,
+`dnskey_query_transport` — keep included-wins.
+
+**Replace after merge still replaces.** In
+
+```yaml
+include:
+  - file: zonegen-auth.yaml
+    merge: true
+  - other-zones.yaml          # bare string: replace
+```
+
+the result is only `other-zones.yaml`. That follows from "bare string =
+replace" and is not a special case, but it is the mixed-list footgun, so the
+clobber WARN below must fire for it and there is a test for it.
+
 ### The allowlist
 
 Merging applies only to these paths. Everything else replaces, opted in or not.
@@ -186,6 +221,12 @@ Per review S4, the zone check must be a **pre-pass over `conf.Zones` before the
 enqueues a refresh, so checking inline would leave the first definition already
 live and possibly queued twice.
 
+The comparison is on `dns.Fqdn(name)`, not the raw string. `ParseZones` starts
+with `zname := dns.Fqdn(zconf.Name)`, so `example.com` and `example.com.` are
+already the same zone to the daemon — a pre-pass comparing raw names would miss
+exactly the duplicate the body then silently collapses. `config check` must use
+the same rule; a decoded `Config.Zones` has not been FQDN-normalised yet.
+
 ### Templates keep the hard error
 
 The first draft softened duplicate templates to per-zone quarantine. On review,
@@ -210,6 +251,13 @@ The merge must therefore carry, per allowlisted item, its originating file —
 for those paths only, not the whole config. Concat order is: including file
 first, then each include in list order, nested leaves first. Provenance is the
 leaf path.
+
+That has an implementation constraint: provenance is attached when an item is
+**read from a file**, and carried through the recursive `processConfigFile`
+call. It cannot be stamped when a parent merges a child's already-flattened
+map, because by then the child has itself merged its own includes and a nested
+item would be blamed on the intermediate file rather than the leaf that
+actually contains it.
 
 Per review S6: if two files disagree about a key's **type** (`zones:` a list in
 one, a map in another) that is a hard error, never a silent fallback to
@@ -251,6 +299,17 @@ were written against; new behaviour requires asking for it.
 - Any config that does not use `merge: true`. Behaviour is identical, with one
   addition: a WARN when a replace clobbers an allowlisted key.
 - Any path not on the allowlist, opted in or not.
+- The other include readers. `cmdv2/cli/root.go`, `cmdv2/debug/root.go` and
+  `v2/cli/cert_init_cmds.go` each do `GetStringSlice("include")` and will
+  silently skip a map-form entry. That is acceptable for a CLI overlay, whose
+  job is not to answer "would the daemon start" — `ValidateConfig` /
+  `decodeConfigFile` answers that. They should NOT be taught to stringify the
+  map, which would `stat` a garbage path. `config check` is the one that
+  genuinely must agree, and the prerequisite fix is what makes it.
+
+  Note that non-string include entries are *already* silently skipped today
+  (`inc.(string)` simply fails). This work gives them meaning, so it is a
+  behaviour change for that shape — for anyone who has one, which is unlikely.
 
 The first draft claimed single-file configs were untouched. **That was wrong**,
 and the review was right to catch it: duplicate-zone detection changes
@@ -272,7 +331,7 @@ in a compatibility section.
 | R7 | List order becomes include-order dependent for merged includes. Should not matter; wants checking anywhere a lookup takes first-match. | Low. |
 | R8 | The legacy `tdns/` tree keeps its own `processConfigFile` and old semantics, so `reporter` and `scanner` in tdns-apps diverge. | Low, consistent with delete-don't-patch. |
 | R9 | `split_algorithms` union widens accepted KSK/ZSK pairings. | Low; documented, opt-in only. |
-| R10 | The `config check` fix changes what check reports for configs that are *already* inconsistent — some will start failing a check they used to pass. That is the bug being fixed, and it will look like a regression. | Medium. Needs saying in the release note. |
+| R10 | The `config check` fix changes what check reports for configs that are *already* inconsistent — some will start failing a check they used to pass. That is the bug being fixed, and it will look like a regression. Two further alignments come with it: **nested includes** become visible to those checks (viper was single-level, `processConfigFile` recurses to 10), and a **missing include** fails at load rather than WARN-and-continue — it already failed later via `ValidateConfig`, so the old WARN was the misleading half. | Medium. Needs saying in the release note. |
 
 ### Sequencing
 
@@ -280,6 +339,13 @@ in a compatibility section.
    before any reporting can be trusted.
 2. **Duplicate reporting in `config check`.** Read-only. Lets operators find
    accidental duplicates before anything enforces them.
+
+   Scope note: this step can only see **single-file** duplicates. Cross-file
+   collisions do not exist yet — a replace include *removes* the earlier list,
+   so there is nothing for check to compare. That is the point: step 2 exists
+   to mitigate R1, the accidental duplicate inside one `zones:` block. Merge
+   collisions arrive with step 3, and the way to catch them is to run
+   `config check` after adding `merge: true` and before reloading.
 3. **Enforcement and opt-in merge.** After operators have had a release to
    clean up.
 
@@ -314,8 +380,12 @@ point: tests first.
 2. Non-allowlisted keys still replacing even when opted in — specifically
    `dnsengine.addresses`, the case the allowlist exists for.
 3. A bare-string include still replacing, and emitting the clobber WARN.
+   Including the mixed list — a `merge: true` include followed by a bare-string
+   one — where the result is replace and the WARN fires.
+   Map-form spec: `{file: x}` with no `merge` behaves as a bare string;
+   an unknown key, or `merge: true` with no `file:`, is a hard error.
 4. Duplicate detection per object kind, including the single-file case with no
-   `include:` at all.
+   `include:` at all, and `example.com` vs `example.com.` counting as one zone.
 5. Provenance: the error names both files; nested includes name the leaf.
 6. YAML type mismatch across files is a hard error.
 7. **`config check` and the daemon agree** — the same config through both, same
@@ -353,3 +423,22 @@ checking each claim produced:
 | S7 — `split_algorithms` union is a widening | **Accepted.** Documented as a widening rather than "the same fact twice". |
 | Recommendation: opt-in | **Accepted**, plus the clobber WARN, so operators who never opt in still stop losing zones silently. |
 | Recommendation: do not bundle the template change | **Accepted.** Reverted to the hard error. |
+
+### Re-review
+
+The revision was re-reviewed
+([`2026-08-27-config-include-merge-rereview.md`](2026-08-27-config-include-merge-rereview.md)):
+**safe to implement**, with S5 formally retracted — yaml.v3's `uniqueKeys`
+default does reject duplicate map keys, so the plan's refutation stood.
+
+Seven specification nits came back and are all folded in above: step 2's scope
+(N1), FQDN comparison in the duplicate pre-pass (N2), intercepting nested
+assignments rather than only top-level keys (N3), replace-after-merge and the
+map-form spec (N4/N5-map), the other include readers keeping string-only
+semantics (N5), the two extra alignments the `config check` fix brings (N6),
+and provenance being born at the leaf (N7).
+
+N3 is the one that would have cost real time: `dnssec.policies` is assigned by
+the inner loop of the existing map merge, so a dispatcher hooked only to
+top-level keys would compile, pass most tests, and leave the motivating case
+broken.
