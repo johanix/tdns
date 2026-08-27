@@ -280,3 +280,83 @@ func TestDuplicateZoneComparesFqdn(t *testing.T) {
 		t.Errorf("dup.example and dup.example. are one zone; broken=%v", broken)
 	}
 }
+
+// TestGeneratedConfigCanBeIncluded is the case this whole change exists for: a
+// generator emits the zones and dnssec blocks its zones need, and the operator
+// includes that file instead of splicing its contents into the server config
+// by hand. The fixture mirrors what tdns-zonegen writes.
+func TestGeneratedConfigCanBeIncluded(t *testing.T) {
+	main := writeFiles(t, map[string]string{
+		"main.yaml": `
+include:
+  - file: auth-pq-zones.yaml
+    merge: true
+dnssec:
+  completeness: relaxed
+  policies:
+    default:
+      algorithm: ED25519
+      mode: ksk-zsk
+zones:
+  - name: house.example.
+    type: primary
+    dnssecpolicy: default
+`,
+		// As emitted: a policy per algorithm pair, the split_algorithms those
+		// pairs require, the derived large_algorithms, one zone per pair.
+		"auth-pq-zones.yaml": `
+dnssec:
+  large_algorithms: [ MLDSA87, FALCON512 ]
+  split_algorithms:
+    MLDSA87: [ ED25519 ]
+  policies:
+    mldsa87-ed25519:
+      algorithm: ED25519
+      mode: ksk-zsk
+      ksk:
+        algorithm: MLDSA87
+    falcon512-falcon512:
+      algorithm: FALCON512
+      mode: ksk-zsk
+zones:
+  - name: pq.example.
+    type: primary
+    dnssecpolicy: ed25519-ed25519
+  - name: mldsa87-ed25519.pq.example.
+    type: primary
+    dnssecpolicy: mldsa87-ed25519
+  - name: falcon512-falcon512.pq.example.
+    type: primary
+    dnssecpolicy: falcon512-falcon512
+`,
+	})
+	cfg, st := loadWith(t, main)
+
+	names := zoneNames(t, cfg)
+	if len(names) != 4 {
+		t.Fatalf("the server's own zone plus the three generated ones = 4, got %v", names)
+	}
+	var haveHouse bool
+	for _, n := range names {
+		if n == "house.example." {
+			haveHouse = true
+		}
+	}
+	if !haveHouse {
+		t.Error("the server's pre-existing zone must survive being added to")
+	}
+
+	d := cfg["dnssec"].(map[string]interface{})
+	pol := d["policies"].(map[string]interface{})
+	if len(pol) != 3 {
+		t.Errorf("the hand-written policy and both generated ones should coexist: %v",
+			sortedStringKeys(pol))
+	}
+	if d["completeness"] != "relaxed" {
+		t.Error("a deployment-wide dnssec setting must not be lost to the include")
+	}
+	if len(st.Collisions()) != 0 || len(st.Clobbers()) != 0 {
+		t.Errorf("nothing should be reported for a clean generated include: %+v %+v",
+			st.Collisions(), st.Clobbers())
+	}
+}
