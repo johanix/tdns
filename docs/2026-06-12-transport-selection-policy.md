@@ -75,7 +75,7 @@ Two of these are *decision rules* ("meta" values), the rest are
   not the mechanism). This reproduces today's default behavior.
 
 - **`use_ds_signal`** — DNSKEY-specific meta-value: if the cached parent
-  DS uses a large algorithm (`dnssec.large_algorithms`), escalate this
+  DS uses a large algorithm (`dnssec.large-algorithms`), escalate this
   query to `encrypted_or_tcp`; otherwise behave as
   `use_transport_signal`.
 
@@ -134,12 +134,12 @@ Resolution of the **config policy** for a query of type Q:
 
 ### Migration from the current keys
 
-The `dnssec.large_algorithms` list stays (it is what `use_ds_signal`
-consults). The `dnssec.dnskey_query_transport` key added earlier today
+The `dnssec.large-algorithms` list stays (it is what `use_ds_signal`
+consults). The `dnssec.dnskey-query-transport` key added earlier today
 is **renamed and relocated** into `transport_selection.dnskey`, with the
 value vocabulary updated:
 
-| old `dnssec.dnskey_query_transport` | new `transport_selection.dnskey` |
+| old `dnssec.dnskey-query-transport` | new `transport_selection.dnskey` |
 |-------------------------------------|----------------------------------|
 | `force_udp` | `use_transport_signal` (or `none` to ignore signals) |
 | `use_ds_signal` | `use_ds_signal` |
@@ -270,7 +270,7 @@ at every step.
   per-level validation (`use_ds_signal` rejected under `default`).
 - Derived `Internal.TransportSelection` holding resolved
   `map[uint16]TransportPolicy` (per-qtype) + a default.
-- Remove `dnssec.dnskey_query_transport`; move semantics to
+- Remove `dnssec.dnskey-query-transport`; move semantics to
   `transport_selection.dnskey`.
 - **Verify**: config round-trips; `parseTransportPolicy` unit tests for
   all six values, default, bad value, `use_ds_signal`-under-default
@@ -337,7 +337,7 @@ at every step.
 ### Step 5 — Sample config + docs
 
 - Update `cmdv2/imr/tdns-imr.sample.yaml`: replace the `dnssec`
-  `dnskey_query_transport` block with a `transport_selection:` block,
+  `dnskey-query-transport` block with a `transport_selection:` block,
   documenting all six values and the default.
 - Mark the three superseded docs with a "superseded by this doc" note.
 - Update memory file `project_part3_ds_signaling.md`.

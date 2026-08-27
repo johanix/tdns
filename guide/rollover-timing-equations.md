@@ -117,8 +117,8 @@ knob or observation that supplies its value.
 |--------|------|--------|--------------------|
 | `parent_prop` | duration | operator estimate via `rollover.ds-publish-delay` | Parent-side primary→secondary AXFR/IXFR + parent registry-pipeline latency. Time between "child sent UPDATE / NOTIFY accepted by parent" and "parent's secondaries serve the new DS RRset." |
 | `DS_TTL` | duration | **observable** in DS responses (every DS poll carries the TTL field) | TTL of the DS RRset at the parent. Bounds how long resolvers cache the old DS after parent publishes a new one. |
-| `child_prop` | duration | `kasp.propagation_delay` | Child-side primary→secondary propagation. Time between "child primary publishes new DNSKEY RRset" and "all child secondaries serve it." |
-| `DNSKEY_TTL` | duration | derived: `min(ttls.dnskey, ttls.max_served)` clamped further by K-step clamping near rollover | TTL of the DNSKEY RRset as actually served to validators. Bounds how long resolvers cache the old DNSKEY RRset after the child publishes a new one. |
+| `child_prop` | duration | `kasp.propagation-delay` | Child-side primary→secondary propagation. Time between "child primary publishes new DNSKEY RRset" and "all child secondaries serve it." |
+| `DNSKEY_TTL` | duration | derived: `min(ttls.dnskey, ttls.max-served)` clamped further by K-step clamping near rollover | TTL of the DNSKEY RRset as actually served to validators. Bounds how long resolvers cache the old DNSKEY RRset after the child publishes a new one. |
 | `KSK_lifetime` | duration | `ksk.lifetime` config knob | Rollover cadence — the policy-driven interval between successive KSK activations. Steady-state: `T_roll_n − T_roll_{n−1} = KSK_lifetime`. |
 | `retirement_period` | duration | `effective_margin = max(clamping.margin, max_observed_TTL)` in current engine | The hold time between a KSK transitioning to retired (at T_roll_n) and being removed (at T_roll_n + retirement_period). During the retirement period the key's DNSKEY is still in the zone but the engine no longer signs new things with it. Sized so that all cached RRSIGs by the retiring key have flushed by the time it's removed (see §5.1). |
 | `N` | dimensionless | `rollover.num-ds` config knob | Number of DS records the engine maintains at the parent simultaneously (active + N−1 future). Internal pipeline depth is `N + 1`: the extra key sits in `created` with its DS push in flight to the parent and joins the N-at-parent set once the parent observes it. |
@@ -315,7 +315,7 @@ retirement_period  ≥  min(DNSKEY_TTL, KSK.SigValidity)       (E5)
 ```
 
 where `DNSKEY_TTL` is the **served** DNSKEY TTL per §9 /
-E13 (`min(ttls.dnskey, ttls.max_served)`), not the
+E13 (`min(ttls.dnskey, ttls.max-served)`), not the
 operator-configured `ttls.dnskey` alone. This matters
 operationally: it lets operators run long RRSIG validities
 (7–10 days for weekend safety) alongside short served TTLs
@@ -534,10 +534,10 @@ Three knobs collapse into the served TTL:
 
 1. **`ttls.dnskey`** — operator's intended DNSKEY TTL
    (e.g. 2h).
-2. **`ttls.max_served`** — zone-wide TTL ceiling. The
+2. **`ttls.max-served`** — zone-wide TTL ceiling. The
    serving layer clamps any RRset's TTL down to this
    on-the-wire. So the served DNSKEY TTL is
-   `min(ttls.dnskey, ttls.max_served)`.
+   `min(ttls.dnskey, ttls.max-served)`.
 3. **K-step clamping near rollover** — when clamping is
    enabled, TTLs progressively reduce to `clamping.margin`
    as `T_roll_n` approaches. A validator that queries
@@ -546,7 +546,7 @@ Three knobs collapse into the served TTL:
 For the cache-flush invariant the engine must use the
 **largest TTL a validator might have cached just before
 `T_DNSKEY_pub_n`**. That's
-`min(ttls.dnskey, ttls.max_served)` when clamping has not
+`min(ttls.dnskey, ttls.max-served)` when clamping has not
 yet kicked in for the upcoming rollover. K-step clamping
 shortens this further but is conservative (not relied on
 by the invariant).
@@ -554,10 +554,10 @@ by the invariant).
 So the operator-facing rule:
 
 ```
-DNSKEY_TTL  =  min(ttls.dnskey, ttls.max_served)             (E13)
+DNSKEY_TTL  =  min(ttls.dnskey, ttls.max-served)             (E13)
 ```
 
-If `ttls.max_served` is set (recommended for any zone
+If `ttls.max-served` is set (recommended for any zone
 with auto-rollover), it's the value that matters.
 
 
@@ -598,9 +598,9 @@ Concrete numbers from the `fastroll` policy:
 ```
 KSK.lifetime         = 10m
 rollover.ds-publish-delay = 30s
-kasp.propagation_delay    = 1m
+kasp.propagation-delay    = 1m
 ttls.dnskey          = 2h
-ttls.max_served      = 5m
+ttls.max-served      = 5m
 clamping.margin      = 5m
 rollover.num-ds      = 3
 ```
@@ -609,8 +609,8 @@ Derived parameters:
 
 ```
 parent_prop  = ds-publish-delay  = 30s
-child_prop   = kasp.propagation_delay  = 1m
-DNSKEY_TTL   = min(ttls.dnskey, ttls.max_served)  = min(2h, 5m)  = 5m
+child_prop   = kasp.propagation-delay  = 1m
+DNSKEY_TTL   = min(ttls.dnskey, ttls.max-served)  = min(2h, 5m)  = 5m
 DS_TTL       = (observed from DS responses; assume ≈ parent's policy = 5m for this testbed)
 ```
 

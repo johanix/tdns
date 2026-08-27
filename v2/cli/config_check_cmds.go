@@ -612,7 +612,7 @@ func checkDnssecPolicies(v *viper.Viper, rep *ccReport, online bool, role string
 				continue
 			}
 			rep.fail(g, "policy", ln,
-				"fix the policy (algorithm/lifetime/mode), or allowlist a differing KSK/ZSK pair in dnssec.split_algorithms")
+				"fix the policy (algorithm/lifetime/mode), or allowlist a differing KSK/ZSK pair in dnssec.split-algorithms")
 		}
 		return
 	}
@@ -1586,21 +1586,44 @@ func extraLines(s string) []string {
 // rejects duplicate keys outright, so two policies of one name never survive
 // parsing to reach any code here.
 func checkDuplicateTemplates(cfg *tdns.Config, rep *ccReport) {
+	// Keyed by EXACT name, because that is how the daemon keys them:
+	// buildTemplateMap does Templates[tmpl.Name], and every lookup
+	// (Templates[zconf.Template]) matches the same way. Folding case here made
+	// config check stricter than the daemon -- `Foo` and `foo` are two distinct
+	// templates that both load, so failing them said "the daemon refuses to
+	// start on this" about a config the daemon starts on quite happily.
+	//
+	// Zone names fold (lc + FQDN, see zoneKey) because they are DNS names and
+	// RFC 4343 makes two spellings one zone. A template name is a map key, not
+	// a DNS name, and no such rule applies.
 	seen := map[string]int{}
+	folded := map[string]int{}
 	dups := 0
 	for i := range cfg.Templates {
 		name := cfg.Templates[i].Name
 		if name == "" {
 			continue // an unnamed template is a different complaint, made elsewhere
 		}
-		if first, dup := seen[lc(name)]; dup {
+		if first, dup := seen[name]; dup {
 			dups++
 			rep.fail("Zones", "duplicate template",
 				fmt.Sprintf("template %q is defined twice (entries %d and %d)", name, first+1, i+1),
 				"remove one definition; the daemon refuses to start on this")
 			continue
 		}
-		seen[lc(name)] = i
+		seen[name] = i
+
+		// Still worth saying, just not as a refusal: two templates differing
+		// only in case load as two, so a zone naming one of them silently gets
+		// whichever it spelled -- which is the bug if one of the two is a typo.
+		if first, near := folded[lc(name)]; near {
+			rep.warn("Zones", "template name case",
+				fmt.Sprintf("templates %q and %q differ only in case (entries %d and %d)",
+					cfg.Templates[first].Name, name, first+1, i+1),
+				"the daemon keys templates by exact name, so both load as distinct templates; if one is a typo, zones naming it get that one silently")
+		} else {
+			folded[lc(name)] = i
+		}
 	}
 
 	if dups == 0 {

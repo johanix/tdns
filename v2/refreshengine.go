@@ -156,7 +156,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		// error categories (rollover policy, parent DSYNC blockers,
 		// config errors) are independent and must survive.
 		zd.ClearError(RefreshError)
-		// Apply outbound_soa_serial mode for the serial we'll advertise
+		// Apply outbound-soa-serial mode for the serial we'll advertise
 		// to secondaries.
 		// MUST-NOT-MODIFY: neither outbound mode may rewrite the serial of a
 		// tdns-auth secondary that did not originate this content. Clear any
@@ -172,7 +172,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 			switch zd.EffectiveOutboundSoaSerial() {
 			case OutboundSoaSerialUnixtime:
 				zd.CurrentSerial = uint32(time.Now().Unix())
-				lgEngine.Info("zone loaded; outbound_soa_serial=unixtime",
+				lgEngine.Info("zone loaded; outbound-soa-serial=unixtime",
 					"zone", zone, "serial", zd.CurrentSerial)
 				serialChanged = true
 			case OutboundSoaSerialPersist:
@@ -182,7 +182,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 				// honour — moving zd.CurrentSerial backwards would break
 				// secondaries.
 				if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
-					lgEngine.Info("zone loaded; outbound_soa_serial=persist (restored saved serial)",
+					lgEngine.Info("zone loaded; outbound-soa-serial=persist (restored saved serial)",
 						"zone", zone, "incoming", zd.CurrentSerial, "persisted", saved)
 					zd.CurrentSerial = saved
 					serialChanged = true
@@ -1128,7 +1128,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// Successful refresh clears RefreshError. Other categories
 						// (rollover-policy, parent-DSYNC, config) survive.
 						zd.ClearError(RefreshError)
-						// Apply outbound_soa_serial mode after upstream refresh —
+						// Apply outbound-soa-serial mode after upstream refresh —
 						// but never for a mirroring secondary (MUST-NOT-MODIFY;
 						// applyRefreshReplacementLocked already set the serial
 						// to upstream's and nothing may move it off that).
@@ -1150,7 +1150,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							switch zd.EffectiveOutboundSoaSerial() {
 							case OutboundSoaSerialUnixtime:
 								zd.CurrentSerial = uint32(time.Now().Unix())
-								lgEngine.Info("zone updated from upstream; outbound_soa_serial=unixtime",
+								lgEngine.Info("zone updated from upstream; outbound-soa-serial=unixtime",
 									"zone", zone, "serial", zd.CurrentSerial)
 								serialChanged = true
 							case OutboundSoaSerialPersist:

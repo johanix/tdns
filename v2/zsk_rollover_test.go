@@ -35,6 +35,6 @@ func TestZskRemovalMargin(t *testing.T) {
 		t.Fatalf("margin = %v, want %v", got, want)
 	}
 	if zskRemovalMargin(prop, 0) != prop {
-		t.Fatal("zero max TTL should leave propagation_delay only")
+		t.Fatal("zero max TTL should leave propagation-delay only")
 	}
 }

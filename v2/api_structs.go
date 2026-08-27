@@ -240,10 +240,13 @@ type ZonePost struct {
 	Command    string
 	SubCommand string
 	Zone       string
-	Policy     string // target DNSSEC policy name for the "policy-set" command
-	Force      bool
-	Wait       bool
-	Timeout    string
+	// ChildZone names the delegated child whose delegation data
+	// "get-delegation" reads out of the parent named by Zone.
+	ChildZone string `json:"childzone,omitempty"`
+	Policy    string // target DNSSEC policy name for the "policy-set" command
+	Force     bool
+	Wait      bool
+	Timeout   string
 	// Dynamic-zones management (add/modify). No Store field — dynamic zones are
 	// map-only. Primaries carries the structured {addr, key} list; each key is a
 	// keys.tsig name, an inline TsigName (below), or NOKEY. Options are ZoneOption
@@ -290,7 +293,7 @@ type ZonePost struct {
 	TsigSecret string
 	TsigAlgo   string
 	// TransferSrc is the per-zone source address for this zone's OUTBOUND
-	// transfers. Optional: unset inherits dnsengine.transfer_src, and unset
+	// transfers. Optional: unset inherits dnsengine.transfer-src, and unset
 	// there means the kernel chooses, which is the pre-existing behaviour.
 	//
 	// It has to be settable here rather than only in the config file, because
@@ -328,6 +331,30 @@ type ZoneResponse struct {
 	Artefact string `json:"artefact,omitempty"`
 	// Zonemd carries the report for "zone zonemd status|verify".
 	Zonemd *ZonemdStatus `json:"zonemd,omitempty"`
+	// Delegation carries the report for "zone delegation get".
+	Delegation *ChildDelegationReport `json:"delegation,omitempty"`
+}
+
+// ChildDelegationReport is what a parent currently holds for one delegated child.
+//
+// Grouped by owner name and RR type, in presentation format, because that is
+// the shape the question has: "what does the parent publish for this child",
+// where the answer spans the child name itself (NS, DS) and the glue at
+// whatever names those NS records point to.
+//
+// Presentation strings rather than dns.RR: dns.RR is an interface and does not
+// survive a JSON round trip, and every consumer of this either prints it or
+// re-parses it with dns.NewRR.
+type ChildDelegationReport struct {
+	Parent string
+	Child  string
+	// RRsets maps owner name -> RR type -> records, e.g.
+	//   "alpha.example." -> "NS" -> ["alpha.example. 120 IN NS ns.alpha.example."]
+	RRsets map[string]map[string][]string `json:"rrsets,omitempty"`
+	// Backend names the delegation backend that answered, so a client can tell
+	// "the zone holds nothing for this child" from "this server records
+	// delegations somewhere other than the zone you are looking at".
+	Backend string `json:"backend,omitempty"`
 }
 
 // ZonemdStatus is the API view of a zone's ZONEMD: what it publishes, whether

@@ -308,7 +308,7 @@ Load-time cross-checks (per zone, after expansion):
   `x509.Verify` against the entry's CA pool with `ExtKeyUsageClientAuth`
   (the handshake verified nothing, so this code does), dane = the existing
   validated-TLSA machinery (`lookupTLSAValidated`, fail closed, honoring
-  `require_dnssec_validation`). Failure → REFUSED, with the mechanism
+  `require-dnssec-validation`). Failure → REFUSED, with the mechanism
   decision logged.
 - **Everything else** — queries on all transports, NOTIFY, cert-less DoT
   clients — never reaches this code.

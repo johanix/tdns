@@ -266,7 +266,7 @@ func verifyClientCertPKIX(leaf *x509.Certificate, presented []*x509.Certificate,
 // verifyClientCertDANE matches the presented client certificate against the
 // DNSSEC-validated TLSA RRset at _853._tcp.<name>. Fails closed: no IMR,
 // lookup failure, or a not-secure state all refuse (the lab-mode
-// require_dnssec_validation escape hatch is honored inside the lookup).
+// require-dnssec-validation escape hatch is honored inside the lookup).
 func verifyClientCertDANE(ctx context.Context, leaf *x509.Certificate, name string, imr *Imr) error {
 	if imr == nil {
 		return fmt.Errorf("tls-dane requires the built-in IMR")

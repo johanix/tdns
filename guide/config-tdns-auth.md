@@ -669,7 +669,7 @@ dnsengine:
       doq:   [ 853 ]
    certfile:  /etc/tdns/certs/server.crt
    keyfile:   /etc/tdns/certs/server.key
-   outbound_soa_serial:  keep
+   outbound-soa-serial:  keep
    options:
       - minimal-responses
 ```
@@ -682,13 +682,13 @@ dnsengine:
 | `ports.dot` | `853` | listen ports for DoT |
 | `ports.doh` | `443` | listen ports for DoH |
 | `ports.doq` | `853` | listen ports for DoQ (only 853 is truly supported) |
-| `outbound_soa_serial` | `keep` | `keep`, `unixtime` or `persist` |
+| `outbound-soa-serial` | `keep` | `keep`, `unixtime` or `persist` |
 | `options` | — | server-wide options, below |
 
 `ports.do53` is **not read**. Do53 always listens on the ports embedded in
 `addresses`.
 
-`outbound_soa_serial` controls the SOA serial advertised to secondaries.
+`outbound-soa-serial` controls the SOA serial advertised to secondaries.
 `keep` sends the inbound serial unchanged. `unixtime` uses the load time.
 `persist` remembers the last serial in the database, so a restart with no zone
 change does not regress the serial and does not provoke a needless AXFR — the
@@ -706,7 +706,7 @@ Two `options:` values are recognized:
 ## DNSSEC policies
 
 All DNSSEC configuration lives under one top-level `dnssec:` block with six
-sub-keys: `completeness`, `large_algorithms`, `split_algorithms`, `templates`,
+sub-keys: `completeness`, `large-algorithms`, `split-algorithms`, `templates`,
 `policies` and `kasp`.
 
 A zone selects one policy by name with `dnssecpolicy: <name>`. If the config
@@ -738,7 +738,7 @@ dnssec:
             parent-agent:  127.0.0.1:5354 # required when method != none
          ttls:
             dnskey:      2h
-            # max_served: 5m
+            # max-served: 5m
          clamping:
             enabled:  true
             margin:   1h           # REQUIRED when enabled
@@ -795,7 +795,7 @@ from it.
 Templates are not usable policies. A zone cannot reference one, and an unknown
 template name quarantines just that policy.
 
-### split_algorithms
+### split-algorithms
 
 A policy whose KSK and ZSK algorithms differ is **rejected at config load**
 unless that exact pair is allowlisted. This fails closed, so an accidental
@@ -803,7 +803,7 @@ mismatch is caught rather than silently deployed.
 
 ```yaml
 dnssec:
-   split_algorithms:
+   split-algorithms:
       RSASHA512: [ ED25519, ECDSAP256SHA256 ]
 ```
 
@@ -812,13 +812,13 @@ that KSK may pair with. Policies using the same algorithm for both roles always
 work and need no entry. An algorithm name this binary does not know is skipped
 with a warning — which means the pair it would have permitted stays forbidden.
 
-### large_algorithms
+### large-algorithms
 
 Algorithms whose DNSKEY and RRSIG payloads are large for UDP.
 
 ```yaml
 dnssec:
-   large_algorithms: [ RSASHA512, MLDSA87, FALCON1024 ]
+   large-algorithms: [ RSASHA512, MLDSA87, FALCON1024 ]
 ```
 
 Listing an algorithm here makes the internal resolver fetch a child zone's
@@ -852,10 +852,10 @@ key signing through the drain window. An unknown value is a hard config error.
 
 | Key | Default |
 |-----|---------|
-| `propagation_delay` | `1h` |
-| `check_interval` | `1m` |
-| `standby_zsk_count` | `1` |
-| `standby_ksk_count` | `0` |
+| `propagation-delay` | `1h` |
+| `check-interval` | `1m` |
+| `standby-zsk-count` | `1` |
+| `standby-ksk-count` | `0` |
 
 For the rollover machinery these policies drive, see
 [Automatic DNSSEC Rollovers](key-rollover.md) and

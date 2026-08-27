@@ -21,7 +21,10 @@ type ApiDetails struct {
 	AuthMethod string `validate:"required" yaml:"authmethod"`
 	RootCA     string `yaml:"rootca"`
 	Command    string `yaml:"command,omitempty"`
-	ConfigFile string `yaml:"config_file,omitempty"`
+	// mapstructure as well as yaml: the CLI roots decode this file with
+	// viper.Unmarshal, which never consults yaml tags. "config-file" does not
+	// match the field name, so without this tag it decodes to "" in silence.
+	ConfigFile string `yaml:"config-file,omitempty" mapstructure:"config-file"`
 }
 
 // CliConf is the parsed CLI config. Each CLI binary's root.go populates
@@ -65,7 +68,7 @@ func init() {
 
 // apiConfig is the most recent CliConf passed to InitApiClients. Used
 // by getApiDetailsByClientKey to look up per-server config (command
-// path for "daemon start", config_file for "keys generate", etc.)
+// path for "daemon start", config-file for "keys generate", etc.)
 // without reaching back into viper.
 var apiConfig *CliConf
 

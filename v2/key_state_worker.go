@@ -33,10 +33,10 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 			if d > 0 {
 				propagationDelay = d
 			} else {
-				lgSigner.Warn("kasp.propagation_delay must be positive, using default", "value", kasp.PropagationDelay, "default", defaultPropagationDelay)
+				lgSigner.Warn("kasp.propagation-delay must be positive, using default", "value", kasp.PropagationDelay, "default", defaultPropagationDelay)
 			}
 		} else {
-			lgSigner.Warn("invalid kasp.propagation_delay, using default", "value", kasp.PropagationDelay, "default", defaultPropagationDelay, "err", err)
+			lgSigner.Warn("invalid kasp.propagation-delay, using default", "value", kasp.PropagationDelay, "default", defaultPropagationDelay, "err", err)
 		}
 	}
 
@@ -46,10 +46,10 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 			if d > 0 {
 				checkInterval = d
 			} else {
-				lgSigner.Warn("kasp.check_interval must be positive, using default", "value", kasp.CheckInterval, "default", defaultCheckInterval)
+				lgSigner.Warn("kasp.check-interval must be positive, using default", "value", kasp.CheckInterval, "default", defaultCheckInterval)
 			}
 		} else {
-			lgSigner.Warn("invalid kasp.check_interval, using default", "value", kasp.CheckInterval, "default", defaultCheckInterval, "err", err)
+			lgSigner.Warn("invalid kasp.check-interval, using default", "value", kasp.CheckInterval, "default", defaultCheckInterval, "err", err)
 		}
 	}
 
@@ -71,11 +71,11 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 
-	lgSigner.Info("KeyStateWorker started", "propagation_delay", propagationDelay, "standby_zsk_count", standbyZskCount, "standby_ksk_count", standbyKskCount, "check_interval", checkInterval)
+	lgSigner.Info("KeyStateWorker started", "propagation-delay", propagationDelay, "standby-zsk-count", standbyZskCount, "standby-ksk-count", standbyKskCount, "check-interval", checkInterval)
 
 	// Cross-check: any rollover policy whose attempt-timeout (=
 	// confirm-timeout, derived from ds-publish-delay × 1.2 by default)
-	// is shorter than 2 × check_interval will starve observe polling
+	// is shorter than 2 × check-interval will starve observe polling
 	// — the next observe-tick lands past the attempt-timeout cliff
 	// before any poll runs. Warn at startup so the operator catches
 	// the misconfiguration without first losing a rollover cycle.
@@ -84,11 +84,11 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 			continue
 		}
 		if pol.Rollover.ConfirmTimeout > 0 && pol.Rollover.ConfirmTimeout < 2*checkInterval {
-			lgSigner.Warn("rollover: kasp.check_interval too coarse for policy attempt-timeout; observe polling will be starved",
+			lgSigner.Warn("rollover: kasp.check-interval too coarse for policy attempt-timeout; observe polling will be starved",
 				"policy", name,
 				"attempt_timeout", pol.Rollover.ConfirmTimeout,
-				"check_interval", checkInterval,
-				"remedy", "lower kasp.check_interval (must be < attempt-timeout / 2) or raise rollover.ds-publish-delay")
+				"check-interval", checkInterval,
+				"remedy", "lower kasp.check-interval (must be < attempt-timeout / 2) or raise rollover.ds-publish-delay")
 		}
 	}
 
@@ -217,7 +217,7 @@ func transitionRetiredToRemoved(ctx context.Context, conf *Config, kdb *KeyDB, n
 		if key.Flags&dns.SEP == 0 {
 			maxTTL, err := LoadZoneSigningMaxTTL(kdb, key.ZoneName)
 			if err != nil {
-				lgSigner.Warn("KeyStateWorker: LoadZoneSigningMaxTTL failed, using propagation_delay only", "zone", key.ZoneName, "err", err)
+				lgSigner.Warn("KeyStateWorker: LoadZoneSigningMaxTTL failed, using propagation-delay only", "zone", key.ZoneName, "err", err)
 			} else {
 				margin = zskRemovalMargin(propagationDelay, maxTTL)
 			}

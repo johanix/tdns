@@ -620,8 +620,8 @@ That shapes the requirements:
    (`imrengine.stubs` itself is no longer an obstacle: the resolution failure
    in `2026-08-11-imr-stub-resolution-broken.md` was fixed by 13f29229, whose
    Status line is stale.)
-3. `imrengine.trust-anchor-file` (or `trust_anchor_ds`) pointing at that
-   anchor. `imrengine.require_dnssec_validation: false` exists as a lab escape
+3. `imrengine.trust-anchor-file` (or `trust-anchor-ds`) pointing at that
+   anchor. `imrengine.require-dnssec-validation: false` exists as a lab escape
    hatch and is honoured with a warning — useful to separate "TLSA matching is
    wrong" from "the chain does not validate", but a pass under it is **not** a
    DANE pass and must not be recorded as one.

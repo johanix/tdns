@@ -133,7 +133,7 @@ func CheckE11(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult { return c
 
 // checkE5: retirement_period ≥ min(DNSKEY_TTL, SigValidity.DNSKEY), per
 // spec §4.5.1. DNSKEY_TTL here is the **served** TTL (E13 form,
-// min(ttls.dnskey, ttls.max_served)), NOT the operator-configured
+// min(ttls.dnskey, ttls.max-served)), NOT the operator-configured
 // ttls.dnskey alone — validators can only cache DNSKEY for as long
 // as the served TTL says. Sizing E5 against the unclamped
 // ttls.dnskey would punish operators who use a high configured TTL
@@ -171,7 +171,7 @@ func checkE5(pol *DnssecPolicy) InvariantResult {
 		Message: fmt.Sprintf("E5: clamping.margin (%s) < min(served DNSKEY_TTL, sigvalidity.dnskey) (%s); "+
 			"retirement period too short to flush DNSKEY/RRSIG caches before next rollover",
 			pol.Clamping.Margin, floor),
-		Suggestion: fmt.Sprintf("Raise clamping.margin to ≥ %s, OR lower min(ttls.dnskey, ttls.max_served) and/or sigvalidity.dnskey so their min is ≤ %s.",
+		Suggestion: fmt.Sprintf("Raise clamping.margin to ≥ %s, OR lower min(ttls.dnskey, ttls.max-served) and/or sigvalidity.dnskey so their min is ≤ %s.",
 			floor, pol.Clamping.Margin),
 	}
 }
@@ -181,7 +181,7 @@ func checkE5(pol *DnssecPolicy) InvariantResult {
 // at config-load time. Resolution order matches the wire-shape spec
 // in §4.8 / E13:
 //
-//   - both ttls.dnskey and ttls.max_served set → min of the two
+//   - both ttls.dnskey and ttls.max-served set → min of the two
 //   - only one set → that one
 //   - neither set → 0 (caller treats as "skip")
 //

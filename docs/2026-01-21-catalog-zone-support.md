@@ -139,37 +139,37 @@ tdns.RegisterCatalogZoneCallback(func(update *CatalogZoneUpdate) error {
 ```yaml
 catalog:
   # Group prefixes define how to categorize groups in catalog zones
-  # These are REQUIRED if you have config_groups defined
-  group_prefixes:
+  # These are REQUIRED if you have config-groups defined
+  group-prefixes:
     config: "config"   # Groups starting with this prefix are config groups
     signing: "sign"    # Groups starting with this prefix are signing groups
     # Use "none" to explicitly disable a group type
     # Service groups have no prefix (any group not matching config/signing)
 
   # Config groups provide configuration for auto-configured member zones
-  config_groups:
+  config-groups:
     # Config group names should match the configured prefix (e.g., "config_kdc")
     config_kdc:
       upstream: "127.0.0.1:5353"     # Where to AXFR from (required for auto-config)
-      tsig_key: "kdc-key"             # TSIG key name (optional)
+      tsig-key: "kdc-key"             # TSIG key name (optional)
       store: "map"                    # Zone store type (defaults to "map" if not specified)
       options: []                     # Zone options (if any)
 
     config_edge:
       upstream: "192.0.2.1:5353"     # Different upstream
-      tsig_key: "edge-key"
+      tsig-key: "edge-key"
       store: "map"                    # Defaults to "map" if omitted
       options: []
 
     config_central:
       upstream: "198.51.100.5:5353"
-      tsig_key: "central-key"
+      tsig-key: "central-key"
       store: "map"
       options: ["online-signing"]
 
   # Optional: Document what signing groups mean (for reference only)
   # Catalog already defines signing behavior, this is just documentation (RFC 9432 terminology)
-  signing_groups:
+  signing-groups:
     sign_edge_zsk:
       description: "Edge signing with ZSK only"
     sign_edge_full:
@@ -256,14 +256,14 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
     case OptCatalogZone:
         // Hard fail: catalog zone requires valid catalog configuration
         if conf.Catalog.ConfigGroups == nil {
-            log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.config_groups is missing or incorrectly structured", zname)
+            log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.config-groups is missing or incorrectly structured", zname)
         }
         
         // Validate catalog configuration
         // (Policy is now per-zone via catalog-member-auto-create/auto-delete options)
-        // Check for required group_prefixes and config_groups
+        // Check for required group-prefixes and config-groups
         if len(conf.Catalog.ConfigGroups) > 0 && conf.Catalog.GroupPrefixes.Config == "" {
-            log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.group_prefixes is not set", zname)
+            log.Fatalf("FATAL: Zone %s is configured as a catalog zone, but catalog.group-prefixes is not set", zname)
         }
         
         // Catalog zones can be primary or secondary
@@ -284,9 +284,9 @@ Add catalog configuration structures:
 ```go
 type CatalogConf struct {
     Policy        CatalogPolicy              `yaml:"policy" mapstructure:"policy"`
-    GroupPrefixes GroupPrefixesConf            `yaml:"group_prefixes" mapstructure:"group_prefixes"`
-    ConfigGroups  map[string]*ConfigGroupConfig `yaml:"config_groups" mapstructure:"config_groups"`
-    SigningGroups map[string]*SigningGroupInfo `yaml:"signing_groups" mapstructure:"signing_groups"`
+    GroupPrefixes GroupPrefixesConf            `yaml:"group-prefixes" mapstructure:"group-prefixes"`
+    ConfigGroups  map[string]*ConfigGroupConfig `yaml:"config-groups" mapstructure:"config-groups"`
+    SigningGroups map[string]*SigningGroupInfo `yaml:"signing-groups" mapstructure:"signing-groups"`
 }
 
 type CatalogPolicy struct {
@@ -300,7 +300,7 @@ type CatalogPolicy struct {
 type MetaGroupConfig struct {
     Name     string   `yaml:"-" mapstructure:"-"`      // Populated from map key
     Upstream string   `yaml:"upstream" mapstructure:"upstream"`
-    TsigKey  string   `yaml:"tsig_key" mapstructure:"tsig_key"`
+    TsigKey  string   `yaml:"tsig-key" mapstructure:"tsig-key"`
     Store    string   `yaml:"store" mapstructure:"store"` // Defaults to "map" if not specified
     Options  []string `yaml:"options" mapstructure:"options"`
 }
@@ -927,13 +927,13 @@ catalog:
   # Group type prefixes (REQUIRED - defines which groups have special semantics)
   # These prefixes identify group types in catalog zones and trigger special behavior
   # Use "none" to disable a group type (no special semantics, all groups are ordinary)
-  group_prefixes:
+  group-prefixes:
     config:  "config"     # Prefix for config/transfer groups (e.g., "configKdc")
     signing: "sign"       # Prefix for signing groups (e.g., "signEdge")
   
   # Config groups define zone transfer settings for auto-configuration
   # Only ONE config group allowed per zone (enforced if prefix != "none")
-  config_groups:
+  config-groups:
     kdc:                  # Full group name in catalog: "configkdc"
       upstream: "127.0.0.1:5353"
       store: map          # Optional, defaults to "map"
@@ -946,7 +946,7 @@ catalog:
   
   # Signing groups (documentation only, not used for auto-configuration)
   # Only ONE signing group allowed per zone (enforced if prefix != "none")
-  signing_groups:
+  signing-groups:
     edge_zsk:             # Full group name in catalog: "signedge_zsk"
       description: "Edge signing with ZSK only"
     kdc:                  # Full group name in catalog: "signkdc"
@@ -956,11 +956,11 @@ dynamiczones:
   configfile: /var/lib/tdns/dynamic-zones.yaml  # Absolute path to dynamic config file
   zonedirectory: /var/lib/tdns/zones            # Absolute path to zone file directory
   
-  catalog_zones:
+  catalog-zones:
     allowed: true          # Whether catalog zones are allowed
     storage: persistent    # "memory" or "persistent"
   
-  catalog_members:
+  catalog-members:
     allowed: true          # Whether catalog member zones are allowed
     storage: persistent    # "memory" or "persistent"
     add: auto              # "auto" or "manual" - Enable auto-configuration from catalog
@@ -974,7 +974,7 @@ dynamiczones:
 **Field Descriptions:**
 
 **Catalog Configuration:**
-- `group_prefixes`: **REQUIRED** - Defines which group types have special semantics
+- `group-prefixes`: **REQUIRED** - Defines which group types have special semantics
   - `config`: Prefix for config/transfer groups (used for auto-configuration)
     - Groups starting with this prefix are **config groups**
     - Only ONE config group allowed per zone
@@ -988,12 +988,12 @@ dynamiczones:
   - **Note:** Operator controls separator by including it in prefix (e.g., `"config_"` vs `"config"`)
   - **Validation:** Prefixes must contain valid DNS label characters, cannot start/end with hyphen
   - **Interoperability:** Different implementations can use different prefixes to identify their special groups
-- `config_groups`: Config group definitions (used when auto-configuring zones from catalog)
+- `config-groups`: Config group definitions (used when auto-configuring zones from catalog)
   - Key is the group name suffix (full name in catalog = `{prefix}{name}`)
   - `upstream`: Where to AXFR member zones from (required)
   - `store`: Zone store type - `xfr`, `map`, or `slice` (optional, defaults to `map`)
   - `options`: Zone options array (optional)
-- `signing_groups`: Signing group definitions (documentation only)
+- `signing-groups`: Signing group definitions (documentation only)
   - Key is the group name suffix (full name in catalog = `{prefix}{name}`)
   - `description`: Human-readable description of signing policy
 
@@ -1008,10 +1008,10 @@ dynamiczones:
   - Server must have write access to this directory
   - Server may create directory if it doesn't exist
   - Zone files use standard zone file format
-- `catalog_zones`: Configuration for catalog zones (primary catalog zone publishers)
+- `catalog-zones`: Configuration for catalog zones (primary catalog zone publishers)
   - `allowed`: Whether catalog zones are allowed (default: `true`)
   - `storage`: `memory` or `persistent` (default: `memory`)
-- `catalog_members`: Configuration for catalog member zones (secondary zones from catalog)
+- `catalog-members`: Configuration for catalog member zones (secondary zones from catalog)
   - `allowed`: Whether catalog member zones are allowed (default: `true`)
   - `storage`: `memory` or `persistent` (default: `memory`)
   - `add`: `auto` or `manual` - Enable auto-configuration from catalog
@@ -1021,9 +1021,9 @@ dynamiczones:
   - `storage`: `memory` or `persistent` (default: `memory`)
 
 **Backward Compatibility:**
-- Old `catalog.policy.zones.add/remove` settings are migrated to `dynamiczones.catalog_members.add/remove`
-- Old `meta_groups` name is migrated to `config_groups` with deprecation warning
-- Hardcoded `"meta_"` and `"sign_"` prefixes are replaced with configurable `group_prefixes`
+- Old `catalog.policy.zones.add/remove` settings are migrated to `dynamiczones.catalog-members.add/remove`
+- Old `meta-groups` name is migrated to `config-groups` with deprecation warning
+- Hardcoded `"meta_"` and `"sign_"` prefixes are replaced with configurable `group-prefixes`
 
 **Include Statement:**
 The dynamic config file should be included in the main config file:
@@ -1035,10 +1035,10 @@ include:
 dynamiczones:
   configfile: /etc/tdns/dynamic-zones.yaml
   zonedirectory: /var/lib/tdns/zones
-  catalog_zones:
+  catalog-zones:
     allowed: true
     storage: persistent
-  catalog_members:
+  catalog-members:
     allowed: true
     storage: persistent
     add: auto
@@ -1057,7 +1057,7 @@ If `dynamiczones.configfile` is specified but the file is not included via `incl
   - Update zone file whenever catalog zone is regenerated
 
 **For Member Zones (Secondary, from catalog):**
-- When `dynamiczones.catalog_members.storage: persistent`:
+- When `dynamiczones.catalog-members.storage: persistent`:
   - **Only write zone file after successful inbound zone transfer** (when zone data is available)
   - Do NOT write zone file immediately after auto-configuration (before first transfer)
   - Update zone file on subsequent successful transfers
@@ -1171,7 +1171,7 @@ zones:
   - Check if `dynamiczones.configfile` is set
   - If set, check if file is included via `include:` statement
   - If not included, log warning (not hard fail)
-  - If included and `dynamiczones.catalog_zones.storage: persistent` or `dynamiczones.catalog_members.storage: persistent`:
+  - If included and `dynamiczones.catalog-zones.storage: persistent` or `dynamiczones.catalog-members.storage: persistent`:
     - Load dynamic config file
     - Load zone files for dynamic zones (with error handling for corrupted files)
 
@@ -1185,7 +1185,7 @@ zones:
   - If not included, log warning (not hard fail)
   - Dynamic zones will not be loaded on startup if not included
 - If validation fails, log error and fall back to `memory` mode for that zone type
-- Validate that `catalog_members.add` and `catalog_members.remove` are either `auto` or `manual`
+- Validate that `catalog-members.add` and `catalog-members.remove` are either `auto` or `manual`
 
 #### Migration Considerations
 
@@ -1196,7 +1196,7 @@ zones:
 - Zone files can be manually edited (server will overwrite on next update)
 - **Breaking change:** Global `catalog.policy.zones.add/remove` settings are replaced with per-catalog-zone options `catalog-member-auto-create` and `catalog-member-auto-delete`
   - This allows different policies for different catalog zones
-  - Old global settings in `dynamiczones.catalog_members.add/remove` are deprecated
+  - Old global settings in `dynamiczones.catalog-members.add/remove` are deprecated
   - Use zone options for finer-grained control
 
 ### Constructing Catalog Zones (Not Implemented Yet)
@@ -1260,14 +1260,14 @@ zones:
 ### KRS (Catalog Zone Consumer with Auto-Configuration)
 ```yaml
 catalog:
-  group_prefixes:
+  group-prefixes:
     config: "config"
     signing: "sign"
   
-  config_groups:
+  config-groups:
     config_kdc:
       upstream: "127.0.0.1:5353"
-      tsig_key: "kdc-key"
+      tsig-key: "kdc-key"
       store: "map"              # Defaults to "map" if not specified
       options: []
 
@@ -1290,11 +1290,11 @@ zones:
 ### tdns-auth (Catalog Zone Consumer, Manual Config)
 ```yaml
 catalog:
-  group_prefixes:
+  group-prefixes:
     config: "config"
     signing: "sign"
   
-  config_groups: {}            # Not needed if auto-config disabled
+  config-groups: {}            # Not needed if auto-config disabled
 
 zones:
   catalog.example.:
@@ -1406,8 +1406,8 @@ Result: Warning logged, uses first signing group (`sign_edge_zsk`).
 
 ### Auto-Configuration
 1. **Enable per-zone** - Add `catalog-member-auto-create` option to catalog zone
-2. **Configure config groups** - Define upstreams and TSIG in `catalog.config_groups`
-3. **Configure group prefixes** - Set `catalog.group_prefixes.config` and `.signing`
+2. **Configure config groups** - Define upstreams and TSIG in `catalog.config-groups`
+3. **Configure group prefixes** - Set `catalog.group-prefixes.config` and `.signing`
 4. **Verify auto-config** - Logs show "Auto-configuring zone" messages
 4. **Check Zones map** - Auto-configured zones appear with `OptAutomaticZone`
 5. **Test zone transfer** - Auto-configured zones successfully transfer data

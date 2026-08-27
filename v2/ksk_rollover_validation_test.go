@@ -39,7 +39,7 @@ func TestCheckE5(t *testing.T) {
 		{
 			// Rapid-rollover pattern: long configured TTL clamped low.
 			// E5 must use the SERVED TTL = min(2h, 5m) = 5m, not 2h.
-			name: "long ttls.dnskey clamped by max_served -> uses served TTL -> pass",
+			name: "long ttls.dnskey clamped by max-served -> uses served TTL -> pass",
 			pol: func() *DnssecPolicy {
 				p := &DnssecPolicy{}
 				p.Clamping.Enabled = true

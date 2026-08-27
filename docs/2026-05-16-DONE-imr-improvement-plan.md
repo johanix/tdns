@@ -142,31 +142,31 @@ than carrying its own ad-hoc config plumbing.
 // loadImrTuningDefaults.
 type ImrTuningConf struct {
    Backoff       BackoffConf       `yaml:"backoff" mapstructure:"backoff"`
-   AddressFamily AddressFamilyConf `yaml:"address_family" mapstructure:"address_family"`
+   AddressFamily AddressFamilyConf `yaml:"address-family" mapstructure:"address-family"`
    Discovery     DiscoveryConf     `yaml:"discovery" mapstructure:"discovery"`
-   QueryBudget   time.Duration     `yaml:"query_budget" mapstructure:"query_budget"`
-   UpgradeIndirectCacheHits *bool `yaml:"upgrade_indirect_cache_hits" mapstructure:"upgrade_indirect_cache_hits"`
+   QueryBudget   time.Duration     `yaml:"query-budget" mapstructure:"query-budget"`
+   UpgradeIndirectCacheHits *bool `yaml:"upgrade-indirect-cache-hits" mapstructure:"upgrade-indirect-cache-hits"`
 }
 
 type BackoffConf struct {
-   FirstFailure   time.Duration `yaml:"first_failure" mapstructure:"first_failure"`
-   MaxFailure     time.Duration `yaml:"max_failure" mapstructure:"max_failure"`
+   FirstFailure   time.Duration `yaml:"first-failure" mapstructure:"first-failure"`
+   MaxFailure     time.Duration `yaml:"max-failure" mapstructure:"max-failure"`
    Multiplier     float64       `yaml:"multiplier" mapstructure:"multiplier"`
-   JitterFraction float64       `yaml:"jitter_fraction" mapstructure:"jitter_fraction"`
-   RoutingFailure time.Duration `yaml:"routing_failure" mapstructure:"routing_failure"`
-   LameDelegation time.Duration `yaml:"lame_delegation" mapstructure:"lame_delegation"`
+   JitterFraction float64       `yaml:"jitter-fraction" mapstructure:"jitter-fraction"`
+   RoutingFailure time.Duration `yaml:"routing-failure" mapstructure:"routing-failure"`
+   LameDelegation time.Duration `yaml:"lame-delegation" mapstructure:"lame-delegation"`
 }
 
 type AddressFamilyConf struct {
-   WindowDuration  time.Duration `yaml:"window_duration" mapstructure:"window_duration"`
-   FailureThreshold int          `yaml:"failure_threshold" mapstructure:"failure_threshold"`
-   SuspectDuration time.Duration `yaml:"suspect_duration" mapstructure:"suspect_duration"`
-   ProbeInterval   time.Duration `yaml:"probe_interval" mapstructure:"probe_interval"`
+   WindowDuration  time.Duration `yaml:"window-duration" mapstructure:"window-duration"`
+   FailureThreshold int          `yaml:"failure-threshold" mapstructure:"failure-threshold"`
+   SuspectDuration time.Duration `yaml:"suspect-duration" mapstructure:"suspect-duration"`
+   ProbeInterval   time.Duration `yaml:"probe-interval" mapstructure:"probe-interval"`
 }
 
 type DiscoveryConf struct {
-   RetryAfterFailure time.Duration `yaml:"retry_after_failure" mapstructure:"retry_after_failure"`
-   MaxFailures       int           `yaml:"max_failures" mapstructure:"max_failures"`
+   RetryAfterFailure time.Duration `yaml:"retry-after-failure" mapstructure:"retry-after-failure"`
+   MaxFailures       int           `yaml:"max-failures" mapstructure:"max-failures"`
 }
 ```
 

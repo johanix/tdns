@@ -62,7 +62,7 @@ Non-goals:
 
 ---
 
-# Shared — algorithm classification (`dnssec.large_algorithms`)
+# Shared — algorithm classification (`dnssec.large-algorithms`)
 
 Both parts need to know which algorithm numbers are "large": Part B to
 decide on TCP, and Part A to warn when a large algorithm signs the bulk
@@ -80,7 +80,7 @@ type DnssecConf struct {
    // LargeAlgorithms lists DNSSEC algorithm numbers whose DNSKEY/RRSIG
    // sizes are large for UDP transport. Consumed by the IMR (Part B,
    // DS-based TCP) and the signer (Part A.4, CSK/ZSK warning).
-   LargeAlgorithms []uint8 `yaml:"large_algorithms" mapstructure:"large_algorithms"`
+   LargeAlgorithms []uint8 `yaml:"large-algorithms" mapstructure:"large-algorithms"`
 }
 // in Config:
 Dnssec DnssecConf `yaml:"dnssec" mapstructure:"dnssec"`
@@ -101,7 +101,7 @@ dnssec:
    # Algorithm numbers whose DNSKEY RRsets are large. The IMR queries
    # such a child's DNSKEY over TCP when the parent DS uses one; the
    # signer warns if one is used to sign the bulk of a zone.
-   large_algorithms: [ 199 ]   # 199 = ML-DSA-44 (our private-use code point)
+   large-algorithms: [ 199 ]   # 199 = ML-DSA-44 (our private-use code point)
 ```
 
 ---
@@ -294,7 +294,7 @@ indent):
 
 ```yaml
 dnssec:
-   split_algorithms:                # required for the mixed pair below
+   split-algorithms:                # required for the mixed pair below
       RSASHA512: [ ECDSAP256SHA256 ]
 
 dnssecpolicies:
@@ -308,7 +308,7 @@ dnssecpolicies:
          lifetime:   30d
 ```
 
-See A.3.9 for the `split_algorithms` gate that the mixed pair requires.
+See A.3.9 for the `split-algorithms` gate that the mixed pair requires.
 
 ### A.3.9 Gating which KSK/ZSK algorithm pairs are allowed (2026-06-16)
 
@@ -316,14 +316,14 @@ Per-role algorithm support (A.3.1–A.3.4) lets a policy name any KSK
 algorithm with any ZSK algorithm. Not every combination should be
 operationally permitted, so a deployment-wide allowlist gates which
 *mixed* pairs are accepted. This lives under the shared `dnssec:`
-block, not under `dnssecpolicies:` — like `large_algorithms`, it is a
+block, not under `dnssecpolicies:` — like `large-algorithms`, it is a
 property of the deployment, not of any single named policy, and every
 policy is validated against it.
 
 ```yaml
 dnssec:
-   large_algorithms: [ 10 ]
-   split_algorithms:                  # kskAlg -> permitted zskAlgs
+   large-algorithms: [ 10 ]
+   split-algorithms:                  # kskAlg -> permitted zskAlgs
       RSASHA512: [ ED25519, ECDSAP256SHA256 ]
       # FALCON512: [ ED25519 ]        # PQ algs, registered at runtime
 ```
@@ -334,7 +334,7 @@ Semantics (fail closed):
 - A policy whose KSK and ZSK algorithms **differ** is rejected at
   config parse unless that exact pair is listed. Error:
   `policy %q: KSK algorithm A may not pair with ZSK algorithm B; not
-  listed in dnssec.split_algorithms`.
+  listed in dnssec.split-algorithms`.
 
 Implementation:
 - `DnssecConf.SplitAlgorithms map[string][]string` (`config.go`),
@@ -347,7 +347,7 @@ Implementation:
   rule. Wired into all three parse paths: runtime config load
   (`parseconfig.go`), `parseDnssecPolicyConfImpl`, and the standalone
   `ValidateDnssecPoliciesFromFile` CLI validator (which reads a
-  `dnssec.split_algorithms` block from the validated file).
+  `dnssec.split-algorithms` block from the validated file).
 - Tests: `TestValidateSplitAlgorithm`, `TestBuildSplitAlgorithmSet`,
   `TestParseDnssecPolicyConfSplitGate` (`large_ksk_test.go`).
 
@@ -368,7 +368,7 @@ defeating the point. The signer must warn (not reject) in that case.
 ### A.4.1 The condition
 
 Warn when the algorithm that signs non-DNSKEY RRsets is in
-`dnssec.large_algorithms`. The effective bulk-signing algorithm is:
+`dnssec.large-algorithms`. The effective bulk-signing algorithm is:
 
  - `mode: csk` → the CSK algorithm (`policy.Algorithm`); **headline case**.
  - otherwise → `policy.ZSKAlgorithm`.
@@ -438,7 +438,7 @@ zone-signing role. For the pure-CLI path with no live `zd`, emit a
 ### A.4.6 Tests
 
  - Policy with `mode: csk` and a CSK algorithm in
-   `dnssec.large_algorithms` produces `DnssecPolicyWarning` on the zone;
+   `dnssec.large-algorithms` produces `DnssecPolicyWarning` on the zone;
    not service- or rollover-impacting (`HasErrorOtherThan` tolerates it
    where appropriate).
  - Large `zsk.algorithm` triggers the same warning.
@@ -486,7 +486,7 @@ zone-signing role. For the pure-CLI path with no live `zd`, emit a
 
 ## B.2 Config: large algorithm numbers (shared block)
 
-The list lives in the shared `dnssec.large_algorithms` block (see the
+The list lives in the shared `dnssec.large-algorithms` block (see the
 Shared section), not under `imrengine`. The IMR copies the derived set
 from config into the `Imr` struct (`tdns/v2/imrengine.go:27`) so the
 hot path does not reach back into `Config` on every query:
@@ -507,7 +507,7 @@ func (imr *Imr) isLargeAlgorithm(alg uint8) bool {
 }
 ```
 
-Config sample is the `dnssec.large_algorithms` block shown in the
+Config sample is the `dnssec.large-algorithms` block shown in the
 Shared section; nothing IMR-specific to add to `imrengine:`.
 
 ## B.3 The decision hook (single, central)
@@ -680,7 +680,7 @@ over TCP directly." Surface the encountered-counter wherever
 # Implementation order
 
 Parts A and B are independent and can land separately, but both depend
-on the shared `dnssec.large_algorithms` block — land that first.
+on the shared `dnssec.large-algorithms` block — land that first.
 
 0. **Shared:** `DnssecConf`/`Config.Dnssec` + derived set +
    `conf.IsLargeAlgorithm`. Trivial; unblocks A.4 and B.
@@ -712,7 +712,7 @@ Build after each Go change:
 
 **Resolved (2026-05-21):**
  - *Config home for the large-alg list* → shared top-level
-   `dnssec.large_algorithms`, consumed by both signer and IMR (see the
+   `dnssec.large-algorithms`, consumed by both signer and IMR (see the
    Shared section). Not under `imrengine`.
  - *CSK/large algorithm* → **warn, never reject**, via a non-impacting
    `DnssecPolicyWarning` error type; condition is "large algorithm in a
@@ -729,9 +729,9 @@ Still open:
    private-use code point) and is implemented in our miekg/dns fork
    (see `2026-05-13-miekg-dns-pluggable-algorithms-proposal.md`), so a
    genuine PQC KSK on 199 is testable where that fork is in use, with
-   `dnssec.large_algorithms: [ 199 ]`. Where the fork is not available,
+   `dnssec.large-algorithms: [ 199 ]`. Where the fork is not available,
    substitute a classical stand-in (e.g. RSASHA512 KSK + ECDSAP256 ZSK)
-   and set `dnssec.large_algorithms` to match the stand-in KSK alg so
+   and set `dnssec.large-algorithms` to match the stand-in KSK alg so
    the warning (A.4) and TCP path (B) still fire.
 3. **`SetWarning` sugar.** Skipped for now (A.4.2 reuses `SetError`
    with a non-impacting type, per the `RolloverPolicyWarning`
@@ -742,7 +742,7 @@ Still open:
 Shared:
  - `tdns/v2/config.go` — `DnssecConf` + `Config.Dnssec`; derived
    large-alg set + `conf.IsLargeAlgorithm`.
- - sample YAML — top-level `dnssec.large_algorithms` block.
+ - sample YAML — top-level `dnssec.large-algorithms` block.
 
 Part A:
  - `tdns/v2/structs.go` — `DnssecPolicyConf` per-role `Algorithm`

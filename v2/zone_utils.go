@@ -1164,9 +1164,9 @@ func FindZoneNG(qname string) *ZoneData {
 // EffectiveOutboundSoaSerial resolves the outbound serial mode actually in
 // force for this zone, newest tier first:
 //
-//  1. the per-zone setting (zones: <z>: outbound_soa_serial, possibly
+//  1. the per-zone setting (zones: <z>: outbound-soa-serial, possibly
 //     inherited from the zone's template via ExpandTemplate's gap-fill);
-//  2. the server-global dnsengine.outbound_soa_serial (resolved onto the
+//  2. the server-global dnsengine.outbound-soa-serial (resolved onto the
 //     KeyDB at parse time by applyOutboundSoaSerial);
 //  3. OutboundSoaSerialKeep, the documented default.
 //
@@ -1177,7 +1177,7 @@ func FindZoneNG(qname string) *ZoneData {
 // act on it"; the callers pair it with the origination predicate.
 // EffectiveTransferSrc returns the source addresses to bind when dialling this
 // zone's upstreams, resolving the per-zone value over the server-global
-// dnsengine.transfer_src. Empty means "let the kernel choose", which is the
+// dnsengine.transfer-src. Empty means "let the kernel choose", which is the
 // behaviour every zone had before this existed.
 func (zd *ZoneData) EffectiveTransferSrc() []string {
 	srcs, _ := zd.EffectiveTransferSrcWithSource()
@@ -1197,7 +1197,7 @@ func (zd *ZoneData) EffectiveTransferSrcWithSource() (srcs []string, source stri
 	}
 	if zd.KeyDB != nil {
 		if srcs := zd.KeyDB.TransferSrcList(); len(srcs) > 0 {
-			return srcs, "global" // dnsengine.transfer_src
+			return srcs, "global" // dnsengine.transfer-src
 		}
 	}
 	return nil, "default"
@@ -1219,14 +1219,14 @@ func (zd *ZoneData) EffectiveOutboundSoaSerialWithSource() (mode, source string)
 	}
 	if zd.KeyDB != nil {
 		if mode := zd.KeyDB.OutboundSoaSerialMode(); mode != "" {
-			return mode, "global" // dnsengine.outbound_soa_serial
+			return mode, "global" // dnsengine.outbound-soa-serial
 		}
 	}
 	return OutboundSoaSerialKeep, "default"
 }
 
 // nextOutboundSerial returns the next SOA serial that should be advertised
-// to downstreams given zd.CurrentSerial and the effective outbound_soa_serial
+// to downstreams given zd.CurrentSerial and the effective outbound-soa-serial
 // mode (per-zone, else server-global):
 //   - "" / "keep" / "persist": prev + 1 (legacy behaviour; "persist" only
 //     differs in that the resulting serial is also written to OutgoingSerials)
@@ -1248,7 +1248,7 @@ func nextOutboundSerial(zd *ZoneData) uint32 {
 }
 
 // BumpSerialOnly advances the SOA serial per the configured
-// outbound_soa_serial mode and rewrites the apex SOA RR (and its
+// outbound-soa-serial mode and rewrites the apex SOA RR (and its
 // RRSIG, when the zone is signed). Does not notify downstreams.
 // Use when the caller will handle notification separately or when
 // notification is not appropriate (e.g. inside a NOTIFY handler

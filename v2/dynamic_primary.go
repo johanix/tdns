@@ -386,7 +386,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		// pre-registered with ZoneType already Primary, and the RefreshEngine
 		// merge block that would otherwise copy it off the ZoneRefresher is
 		// gated on `zd.ZoneType == 0`. Relying on the zr path alone would
-		// silently drop a template's outbound_soa_serial and leave the zone on
+		// silently drop a template's outbound-soa-serial and leave the zone on
 		// the server-global default.
 		OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,
 		TransferSrc:       spec.Zconf.TransferSrc,
@@ -472,7 +472,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		DnssecPolicy:   spec.Zconf.DnssecPolicy,
 		Force:          true, // load from file regardless of serial
 
-		// Template-expanded: a template carrying outbound_soa_serial gives
+		// Template-expanded: a template carrying outbound-soa-serial gives
 		// every zone stamped from it that serial policy (the intended
 		// granularity — see the per-zone config model in the design doc).
 		OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,

@@ -35,7 +35,7 @@ because the existing gates sit at **call sites**, and the applier they feed
 | 6 | **New Fix E** — role gate on `resignWorkingSetSOAIfSigned` | See 3 |
 | 7 | **`delegation-sync-parent` added to the turn-off list** (now 4 options, was 3) | See 1 |
 | 8 | **Fix A widened**: persist/unixtime suppression at six sites, not two | Rev 1 named only the refresh-engine overrides |
-| 9 | **New: `outbound_soa_serial` becomes per-zone** (config schema change) | It is server-global today, so it cannot be role-scoped at config level at all |
+| 9 | **New: `outbound-soa-serial` becomes per-zone** (config schema change) | It is server-global today, so it cannot be role-scoped at config level at all |
 | 10 | **Fix C widened**: second handler, catalog handler, `policy-reset`, freeze/thaw refusal + the missing `return`s | Rev 1's action list was short by several, and the guards it relied on don't return |
 | 11 | **Migration section rewritten** — severity is per-serial-mode, not universal | In the default `keep` mode the backwards jump already happens at every restart today |
 | 12 | **New: forced-transfer contract** | Force must apply whatever upstream has; today it works for a lower serial only incidentally, and no-ops on an equal one |
@@ -58,7 +58,7 @@ a full `OptOnlineSigning` consumer survey (~40 sites):
 - Item 3 decided: stale persisted serials are **cleared**. Item 5 decided:
   freeze/thaw `return`s land as a **separate commit in the same PR**.
 
-**Rev 2.2 (2026-07-26)** — closes §12 item 1: per-zone `outbound_soa_serial`
+**Rev 2.2 (2026-07-26)** — closes §12 item 1: per-zone `outbound-soa-serial`
 is **folded into this PR** (own commit pair, first). The invasiveness scoping
 showed ~120–180 lines + tests, not the feared doubling — template propagation
 is free via `ExpandTemplate`'s generic gap-fill, the six read sites are lines
@@ -486,11 +486,11 @@ flag as a possible future soft-warning, not a gate in this doc.
 paths are unreachable, so they need no special handling — stating that explicitly
 avoids a future "why isn't this gated" question.
 
-## 5. Config model change: `outbound_soa_serial` must become per-zone
+## 5. Config model change: `outbound-soa-serial` must become per-zone
 
 **This is a schema change and the largest single item in rev 2.**
 
-`outbound_soa_serial` is **server-global** today: [config.go:223](../v2/config.go)
+`outbound-soa-serial` is **server-global** today: [config.go:223](../v2/config.go)
 → `applyOutboundSoaSerial(kdb, …)` ([parseconfig.go:609](../v2/parseconfig.go)) →
 `kdb.OutboundSoaSerial`, which every zone reads off the shared KeyDB
 ([zone_mutation.go:336](../v2/zone_mutation.go),
@@ -504,7 +504,7 @@ setting; rejecting `persist` for a secondary would break the co-hosted primaries
 
 Resolution (both parts land in this PR — see the sequencing decision below):
 
-1. **The schema change:** `outbound_soa_serial` becomes a **per-zone** setting —
+1. **The schema change:** `outbound-soa-serial` becomes a **per-zone** setting —
    in practice per **template**, since that is how zone policy is curated. The
    global value becomes the default (empty per-zone field = inherit). This is
    the right model independent of this invariant: outbound serial policy is a
@@ -696,7 +696,7 @@ genuinely re-fetches and re-applies.
   code, passes on the fix. Plus: signing (inline) secondary still advances;
   `unixtime`/`persist` on a pure secondary does not rewrite the serial at **any** of
   the six sites; the persisted row is cleared.
-- **Per-zone `outbound_soa_serial` (§5):** zone-level value wins over template;
+- **Per-zone `outbound-soa-serial` (§5):** zone-level value wins over template;
   template fills a gap when the zone is silent; explicit `keep` under a
   `persist` template wins (the gap-fill zero-value caveat does not bite);
   empty everywhere → global default applies; a config-reload flip of the
@@ -775,7 +775,7 @@ Still open (does not block starting implementation):
 
 Closed since rev 2 (rulings 2026-07-26):
 
-1. **§5 sequencing** — CLOSED (rev 2.2): per-zone `outbound_soa_serial` is
+1. **§5 sequencing** — CLOSED (rev 2.2): per-zone `outbound-soa-serial` is
    **folded into this PR** as its own commit pair; invasiveness scoping showed
    ~120–180 lines + tests, not the feared doubling. Details in §5.
 2. **`online-signing` normalization** — CLOSED (rev 2.1): normalized **off** on
@@ -793,7 +793,7 @@ Closed since rev 2 (rulings 2026-07-26):
   secondary serial actually mirrors upstream. Land this first.
 - Independent of the IXFR-out work already merged (#328).
 - Suggested single PR `feature/secondary-zones-immutable`: per-zone
-  `outbound_soa_serial` (§5, own commit pair, first) + Fix A (serial mirror +
+  `outbound-soa-serial` (§5, own commit pair, first) + Fix A (serial mirror +
   six-site suppression via the effective-mode helper) + Fix B (normalizer) +
   Fix C (freeze/thaw `return`s as a separate commit, then the API gate) + Fix D
   (applier gate) + Fix E (re-sign role gate) + §7 diagnostics + §9
@@ -806,7 +806,7 @@ Per work item, in §13's commit order:
 
 | # | Work item | Files touched (non-test) | Code LOC (±) |
 |---|---|---|---|
-| 1 | Per-zone `outbound_soa_serial` (§5) | structs.go (ZoneConf + ZoneData fields), refreshengine.go (ZoneRefresher + 3 copy sites), parseconfig.go (zr construction, unconditional table), zone_utils.go (effective-mode helper), dynamic_zones.go (round-trip ×2) | ~50 |
+| 1 | Per-zone `outbound-soa-serial` (§5) | structs.go (ZoneConf + ZoneData fields), refreshengine.go (ZoneRefresher + 3 copy sites), parseconfig.go (zr construction, unconditional table), zone_utils.go (effective-mode helper), dynamic_zones.go (round-trip ×2) | ~50 |
 | 2 | Fix A — mirror + six-site suppression + row-clear + backwards-jump ERROR | zone_mutation.go, refreshengine.go ×2 blocks, zone_utils.go (`nextOutboundSerial`, `mayOriginate` helper), db_outgoing_serial.go (delete func) | ~85 |
 | 3 | Fix B — normalizer + serial-mode sibling + ~7 call sites + as-configured/effective split | new option_normalize.go (or parseoptions.go), parseconfig.go, dynamic_zones.go, dynamic_primary.go, refreshengine.go (chokepoint ×3 + effective-type caveat), structs.go + dynamic_zones.go (as-configured storage + serializer) | ~105 |
 | 4 | Freeze/thaw `return`s (own commit) | apihandler_zone.go | ~6 |
@@ -862,7 +862,7 @@ unit tests cannot cover that the way the testbed can.
 
 | Item | Status | Commit(s) |
 |---|---|---|
-| §5 per-zone `outbound_soa_serial` (schema + plumbing) | **DONE** | `c5dc33a` |
+| §5 per-zone `outbound-soa-serial` (schema + plumbing) | **DONE** | `c5dc33a` |
 | §5 per-zone mode tests | **DONE** | `095374a` |
 | Fix A — serial mirror + six-site suppression + row-clear + backwards ERROR | **DONE** (mutation-verified) | `a030ab4` |
 | Fix E — role gate on the per-publish SOA re-sign | **DONE** | `1fa3f36` |

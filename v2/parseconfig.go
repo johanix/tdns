@@ -110,7 +110,7 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 		DecodeHook: mapstructure.ComposeDecodeHookFunc(
 			// Durations written the way the config documents them: `8s`, `1h`.
 			// Without this the only shape that decodes into a time.Duration
-			// field is a raw nanosecond integer, so `query_budget: 8s` -- the
+			// field is a raw nanosecond integer, so `query-budget: 8s` -- the
 			// form tdns-imr.sample.yaml shows -- fails the decode and the
 			// daemon does not start. The hook fires only for time.Duration
 			// targets, so it does not loosen the strictness that keeps a scalar
@@ -312,7 +312,7 @@ type deprecatedConfigKey struct {
 //
 // Keep advice concrete: name the new location and, ideally, the change date
 // or doc so an operator can find the migration.
-var deprecatedConfigKeys = []deprecatedConfigKey{
+var deprecatedConfigKeys = append([]deprecatedConfigKey{
 	// Config restructure 2026-06-16 (per-role KSK/ZSK algorithms + nesting):
 	// the DNSSEC config moved under a single top-level `dnssec:` block.
 	{match: "dnssecpolicies", exact: true,
@@ -320,9 +320,9 @@ var deprecatedConfigKeys = []deprecatedConfigKey{
 	{match: "kasp", exact: true,
 		advice: "`kasp:` moved under `dnssec:` as `dnssec.kasp:` (restructure 2026-06-16)"},
 	{match: "large_algorithms", exact: true,
-		advice: "`large_algorithms:` moved under `dnssec:` as `dnssec.large_algorithms:` (restructure 2026-06-16)"},
+		advice: "`large-algorithms:` moved under `dnssec:` as `dnssec.large-algorithms:` (restructure 2026-06-16)"},
 	{match: "split_algorithms", exact: true,
-		advice: "`split_algorithms:` moved under `dnssec:` as `dnssec.split_algorithms:` (restructure 2026-06-16)"},
+		advice: "`split-algorithms:` moved under `dnssec:` as `dnssec.split-algorithms:` (restructure 2026-06-16)"},
 	// sigvalidity reshape: was a per-key scalar (ksk/zsk/csk: sigvalidity: X);
 	// is now a policy-level subtree `sigvalidity: { default, dnskey, ds }`
 	// with `default` required.
@@ -339,6 +339,127 @@ var deprecatedConfigKeys = []deprecatedConfigKey{
 		advice: "zone key is `dnssecpolicy:` (one word, no hyphen); `dnssec-policy:` is ignored, leaving the zone unsigned"},
 	{match: ".multi_signer",
 		advice: "zone key is `multisigner:` (one word, no underscore); `multi_signer:` is ignored"},
+}, underscoreSpellingMigrations()...)
+
+// snakeCaseConfigKeys lists every config key that was spelled with underscores
+// before the 2026-08-27 rename to hyphens. Kept as data so the migration
+// advice below cannot drift from the rename itself.
+//
+// This registry is not cosmetic. Config is loaded through viper, which
+// silently ignores a key it cannot map -- the same failure that left
+// trust-anchor-ds parsing to "" for as long as it lacked a mapstructure tag.
+// Without an entry here, an operator whose config still says
+// "propagation-delay:" would get no error, no warning, and a rollover engine
+// quietly running on defaults.
+var snakeCaseConfigKeys = []string{
+	"address_family",
+	"catalog_members",
+	"catalog_zones",
+	"check_interval",
+	"config_file",
+	"config_groups",
+	"dnskey_query_transport",
+	"failure_threshold",
+	"first_failure",
+	"group_prefixes",
+	"jitter_fraction",
+	"lame_delegation",
+	"large_algorithms",
+	"max_failure",
+	"max_failures",
+	"max_served",
+	"meta_groups",
+	"outbound_soa_serial",
+	"probe_interval",
+	"propagation_delay",
+	"query_budget",
+	"require_dnssec_validation",
+	"retry_after_failure",
+	"routing_failure",
+	"signing_groups",
+	"split_algorithms",
+	"standby_ksk_count",
+	"standby_zsk_count",
+	"suspect_duration",
+	"transfer_src",
+	"trust_anchor_dnskey",
+	"trust_anchor_file",
+	"trust_anchor_ds",
+	"tsig_key",
+	"upgrade_indirect_cache_hits",
+	"window_duration",
+}
+
+// SnakeCaseKeysIn walks a decoded YAML tree and returns, as dotted paths, any
+// key still using a pre-2026-08-27 snake_case spelling.
+//
+// deprecatedConfigKeys only ever sees the decoder's unused-key list, so it
+// covers the main config load and nothing else. A file read by a plain
+// yaml.Unmarshal -- the offline `dnssec policy validate --file` path, and the
+// IMR config that dog reads for trust anchors -- drops a renamed key in
+// silence. For an allowlist like split-algorithms that means reporting a
+// perfectly good configuration as broken; for a trust anchor it means falling
+// through to the compiled-in IANA root keys and calling every other root
+// bogus. Driven off the same snakeCaseConfigKeys list so no two loaders can
+// disagree about what an old spelling is.
+func SnakeCaseKeysIn(node any, path string) []string {
+	old := make(map[string]bool, len(snakeCaseConfigKeys))
+	for _, k := range snakeCaseConfigKeys {
+		old[k] = true
+	}
+	var found []string
+	var walk func(any, string)
+	walk = func(n any, at string) {
+		switch v := n.(type) {
+		case map[string]any:
+			for k, child := range v {
+				here := k
+				if at != "" {
+					here = at + "." + k
+				}
+				if old[strings.ToLower(k)] {
+					found = append(found, here)
+				}
+				walk(child, here)
+			}
+		case []any:
+			for _, child := range v {
+				walk(child, at)
+			}
+		}
+	}
+	walk(node, path)
+	sort.Strings(found)
+	return found
+}
+
+// SnakeCaseKeyAdvice renders the migration advice for keys found by
+// SnakeCaseKeysIn, naming each new spelling.
+func SnakeCaseKeyAdvice(keys []string) string {
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		leaf := k
+		if i := strings.LastIndex(k, "."); i >= 0 {
+			leaf = k[i+1:]
+		}
+		parts = append(parts, fmt.Sprintf("%s (now %s)", k, strings.ReplaceAll(leaf, "_", "-")))
+	}
+	return strings.Join(parts, ", ") + " — config keys use hyphens, not underscores (2026-08-27)"
+}
+
+// underscoreSpellingMigrations turns snakeCaseConfigKeys into deprecated-key
+// entries. Each is a LEAF match ("." + name): these keys sit under several
+// different parents, and the old spelling is unambiguous wherever it appears.
+func underscoreSpellingMigrations() []deprecatedConfigKey {
+	out := make([]deprecatedConfigKey, 0, len(snakeCaseConfigKeys))
+	for _, old := range snakeCaseConfigKeys {
+		out = append(out, deprecatedConfigKey{
+			match: "." + old,
+			advice: fmt.Sprintf("`%s:` is now spelled `%s:` (config keys use hyphens, not underscores, 2026-08-27)",
+				old, strings.ReplaceAll(old, "_", "-")),
+		})
+	}
+	return out
 }
 
 // classifyUnusedConfigKeys splits mapstructure's unused-key list into keys
@@ -425,7 +546,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return err
 	}
 
-	// transfer_src: same reasoning as dynamiczones above -- the decoder takes
+	// transfer-src: same reasoning as dynamiczones above -- the decoder takes
 	// any string, and a bad entry here fails silently at transfer time rather
 	// than loudly at load.
 	if err := ValidateAllTransferSrc(conf); err != nil {
@@ -450,7 +571,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
-	// Parse the entire dnssec: block (large_algorithms, split_algorithms,
+	// Parse the entire dnssec: block (large-algorithms, split-algorithms,
 	// kasp, and the named policies) into conf.Internal.*. The zone-reload
 	// paths call this same helper so reloading zones also refreshes the
 	// policy definitions they depend on. ParseZones (later) validates zone
@@ -523,7 +644,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	conf.migrateCatalogPolicyToDynamicZones()
 	conf.migrateMetaGroupsToConfigGroups()
 
-	// Validate group prefixes (required if config_groups or signing_groups are defined)
+	// Validate group prefixes (required if config-groups or signing-groups are defined)
 	if err := conf.validateGroupPrefixes(); err != nil {
 		return err
 	}
@@ -551,7 +672,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	SetDelegationSyncConfig(conf.DelegationSync)
 
 	// On first start: build the KeyDB. On reload: keep the existing
-	// KeyDB but re-apply outbound_soa_serial so a config edit takes
+	// KeyDB but re-apply outbound-soa-serial so a config edit takes
 	// effect without a full restart.
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent:
@@ -666,10 +787,10 @@ func (conf *Config) InitializeKeyDB() error {
 	return nil
 }
 
-// applyOutboundSoaSerial resolves the configured outbound_soa_serial mode
+// applyOutboundSoaSerial resolves the configured outbound-soa-serial mode
 // onto the KeyDB and ensures the persist-mode table exists. Called from
 // InitializeKeyDB on first start AND from the reload path in ParseConfig
-// so a config edit that flips dnsengine.outbound_soa_serial takes effect
+// so a config edit that flips dnsengine.outbound-soa-serial takes effect
 // without a full restart.
 func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
 	// Default to "keep" when unset. Validation (oneof=keep|unixtime|persist)
@@ -1406,7 +1527,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 }
 
 // warnGlobalOutboundSerialSuppressed tells the operator, once per parse, that a
-// server-wide outbound_soa_serial of persist/unixtime is being ignored for the
+// server-wide outbound-soa-serial of persist/unixtime is being ignored for the
 // tdns-auth secondaries on this server.
 //
 // The option normalizer warns per zone about an EXPLICIT per-zone mode, but a
@@ -1450,7 +1571,7 @@ func warnGlobalOutboundSerialSuppressed(conf *Config, suppressed []string) {
 		return
 	}
 	sort.Strings(suppressed)
-	lgConfig.Warn("global outbound_soa_serial is suppressed for secondary zones",
+	lgConfig.Warn("global outbound-soa-serial is suppressed for secondary zones",
 		"mode", mode, "count", len(suppressed), "zones", suppressed,
 		"reason", "a secondary must serve the serial it received from upstream, unmodified")
 }
@@ -1987,8 +2108,8 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 	return t, nil
 }
 
-// parseDnssecConfig resolves the entire dnssec: block (large_algorithms,
-// split_algorithms, kasp, and the named policies) from conf.Dnssec into the
+// parseDnssecConfig resolves the entire dnssec: block (large-algorithms,
+// split-algorithms, kasp, and the named policies) from conf.Dnssec into the
 // derived conf.Internal.* structures. Called from ParseConfig at startup, and
 // from the zone-reload paths so that reloading zones also refreshes the policy
 // definitions they depend on (closing the "reload policies before zones" gap).
@@ -2308,37 +2429,37 @@ func (conf *Config) setDynamicZonesDefaults() {
 }
 
 // migrateCatalogPolicyToDynamicZones handles backward compatibility by migrating
-// catalog.policy.zones.add/remove to dynamiczones.catalog_members.add/remove
+// catalog.policy.zones.add/remove to dynamiczones.catalog-members.add/remove
 func (conf *Config) migrateCatalogPolicyToDynamicZones() {
 	if conf.Catalog == nil {
 		return
 	}
-	// If catalog.policy.zones.add is set but dynamiczones.catalog_members.add is not,
+	// If catalog.policy.zones.add is set but dynamiczones.catalog-members.add is not,
 	// migrate the value
 	if conf.Catalog.Policy.Zones.Add != "" && conf.DynamicZones.CatalogMembers.Add == "" {
 		conf.DynamicZones.CatalogMembers.Add = conf.Catalog.Policy.Zones.Add
-		lgConfig.Warn("catalog.policy.zones.add is deprecated, use dynamiczones.catalog_members.add instead", "migratedValue", conf.Catalog.Policy.Zones.Add)
+		lgConfig.Warn("catalog.policy.zones.add is deprecated, use dynamiczones.catalog-members.add instead", "migratedValue", conf.Catalog.Policy.Zones.Add)
 	}
 
-	// If catalog.policy.zones.remove is set but dynamiczones.catalog_members.remove is not,
+	// If catalog.policy.zones.remove is set but dynamiczones.catalog-members.remove is not,
 	// migrate the value
 	if conf.Catalog.Policy.Zones.Remove != "" && conf.DynamicZones.CatalogMembers.Remove == "" {
 		conf.DynamicZones.CatalogMembers.Remove = conf.Catalog.Policy.Zones.Remove
-		lgConfig.Warn("catalog.policy.zones.remove is deprecated, use dynamiczones.catalog_members.remove instead", "migratedValue", conf.Catalog.Policy.Zones.Remove)
+		lgConfig.Warn("catalog.policy.zones.remove is deprecated, use dynamiczones.catalog-members.remove instead", "migratedValue", conf.Catalog.Policy.Zones.Remove)
 	}
 }
 
 // migrateMetaGroupsToConfigGroups handles backward compatibility by migrating
-// catalog.meta_groups to catalog.config_groups
+// catalog.meta-groups to catalog.config-groups
 func (conf *Config) migrateMetaGroupsToConfigGroups() {
 	if conf.Catalog == nil {
 		return
 	}
-	// If meta_groups is set but config_groups is empty, migrate
+	// If meta-groups is set but config-groups is empty, migrate
 	if len(conf.Catalog.MetaGroups) > 0 && len(conf.Catalog.ConfigGroups) == 0 {
 		conf.Catalog.ConfigGroups = conf.Catalog.MetaGroups
-		lgConfig.Warn("catalog.meta_groups is deprecated, use catalog.config_groups instead", "migratedGroups", len(conf.Catalog.MetaGroups))
-		// Clear meta_groups after migration
+		lgConfig.Warn("catalog.meta-groups is deprecated, use catalog.config-groups instead", "migratedGroups", len(conf.Catalog.MetaGroups))
+		// Clear meta-groups after migration
 		conf.Catalog.MetaGroups = nil
 	}
 }
@@ -2365,12 +2486,12 @@ func (conf *Config) validateDynamicZonesConfig(includedFiles []string) {
 	conf.CheckDynamicConfigFileIncluded(includedFiles)
 }
 
-// validateGroupPrefixes validates catalog.group_prefixes configuration
+// validateGroupPrefixes validates catalog.group-prefixes configuration
 func (conf *Config) validateGroupPrefixes() error {
 	if conf.Catalog == nil {
 		return nil
 	}
-	// Check if config_groups or signing_groups are defined
+	// Check if config-groups or signing-groups are defined
 	hasConfigGroups := len(conf.Catalog.ConfigGroups) > 0
 	hasSigningGroups := len(conf.Catalog.SigningGroups) > 0
 
@@ -2379,12 +2500,12 @@ func (conf *Config) validateGroupPrefixes() error {
 		return nil
 	}
 
-	// If groups are defined, group_prefixes is REQUIRED
+	// If groups are defined, group-prefixes is REQUIRED
 	if conf.Catalog.GroupPrefixes.Config == "" || conf.Catalog.GroupPrefixes.Signing == "" {
-		return fmt.Errorf("catalog.group_prefixes is REQUIRED when catalog.config_groups or catalog.signing_groups are configured.\n" +
+		return fmt.Errorf("catalog.group-prefixes is REQUIRED when catalog.config-groups or catalog.signing-groups are configured.\n" +
 			"Please add:\n" +
 			"  catalog:\n" +
-			"    group_prefixes:\n" +
+			"    group-prefixes:\n" +
 			"      config: \"config\"    # or \"config_\" or \"none\"\n" +
 			"      signing: \"sign\"     # or \"sign_\" or \"none\"")
 	}
@@ -2392,14 +2513,14 @@ func (conf *Config) validateGroupPrefixes() error {
 	// Validate config prefix
 	if conf.Catalog.GroupPrefixes.Config != "none" {
 		if err := validateGroupPrefix(conf.Catalog.GroupPrefixes.Config, "config"); err != nil {
-			return fmt.Errorf("invalid catalog.group_prefixes.config: %w", err)
+			return fmt.Errorf("invalid catalog.group-prefixes.config: %w", err)
 		}
 	}
 
 	// Validate signing prefix
 	if conf.Catalog.GroupPrefixes.Signing != "none" {
 		if err := validateGroupPrefix(conf.Catalog.GroupPrefixes.Signing, "signing"); err != nil {
-			return fmt.Errorf("invalid catalog.group_prefixes.signing: %w", err)
+			return fmt.Errorf("invalid catalog.group-prefixes.signing: %w", err)
 		}
 	}
 
@@ -2407,17 +2528,17 @@ func (conf *Config) validateGroupPrefixes() error {
 	if conf.Catalog.GroupPrefixes.Config != "none" && conf.Catalog.GroupPrefixes.Signing != "none" {
 		// Check for exact equality
 		if conf.Catalog.GroupPrefixes.Config == conf.Catalog.GroupPrefixes.Signing {
-			return fmt.Errorf("catalog.group_prefixes.config and catalog.group_prefixes.signing must be different (both are: %q)", conf.Catalog.GroupPrefixes.Config)
+			return fmt.Errorf("catalog.group-prefixes.config and catalog.group-prefixes.signing must be different (both are: %q)", conf.Catalog.GroupPrefixes.Config)
 		}
 
 		// Check for substring/prefix conflicts to prevent misclassification
 		// e.g., "config" and "config_" would cause issues as one is a prefix of the other
 		if strings.HasPrefix(conf.Catalog.GroupPrefixes.Config, conf.Catalog.GroupPrefixes.Signing) {
-			return fmt.Errorf("catalog.group_prefixes.config (%q) cannot start with catalog.group_prefixes.signing (%q) - this would cause misclassification in group detection",
+			return fmt.Errorf("catalog.group-prefixes.config (%q) cannot start with catalog.group-prefixes.signing (%q) - this would cause misclassification in group detection",
 				conf.Catalog.GroupPrefixes.Config, conf.Catalog.GroupPrefixes.Signing)
 		}
 		if strings.HasPrefix(conf.Catalog.GroupPrefixes.Signing, conf.Catalog.GroupPrefixes.Config) {
-			return fmt.Errorf("catalog.group_prefixes.signing (%q) cannot start with catalog.group_prefixes.config (%q) - this would cause misclassification in group detection",
+			return fmt.Errorf("catalog.group-prefixes.signing (%q) cannot start with catalog.group-prefixes.config (%q) - this would cause misclassification in group detection",
 				conf.Catalog.GroupPrefixes.Signing, conf.Catalog.GroupPrefixes.Config)
 		}
 	}

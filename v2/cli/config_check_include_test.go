@@ -195,11 +195,15 @@ func TestCheckDuplicateNames(t *testing.T) {
 			wantIn:    `template "signing-primary" is defined twice`,
 		},
 		{
-			name: "template case is not a distinction",
+			// The daemon keys templates by exact name, so these are two
+			// distinct templates and both load. Reporting a FAIL here made
+			// config check refuse a config the daemon accepts, and told the
+			// operator the daemon would not start -- which was untrue. It is
+			// still reported, as a WARN, checked separately below.
+			name: "template case is a distinction to the daemon",
 			cfg: tdns.Config{Templates: []tdns.ZoneConf{
 				{Name: "Signing-Primary"}, {Name: "signing-primary"}}},
-			wantFails: 1,
-			wantIn:    "is defined twice",
+			wantFails: 0,
 		},
 		{
 			name: "three of the same zone reports each repeat",
@@ -243,5 +247,40 @@ func TestCheckDuplicateNames(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The other half of the template-name contract (the daemon half is pinned by
+// TestBuildTemplateMapKeysTemplatesExactly in the tdns package): case variants
+// are not a duplicate, but they are worth saying out loud, because a zone
+// naming the typo'd one silently gets that template rather than the intended
+// one.
+func TestTemplateCaseVariantsWarnButDoNotFail(t *testing.T) {
+	cfg := tdns.Config{Templates: []tdns.ZoneConf{
+		{Name: "Signing-Primary"}, {Name: "signing-primary"}}}
+	rep := newCCReport()
+	checkDuplicateTemplates(&cfg, rep)
+
+	var fails, warns []string
+	for _, results := range rep.byGroup {
+		for _, res := range results {
+			switch res.level {
+			case ccFAIL:
+				fails = append(fails, res.check+": "+res.msg)
+			case ccWARN:
+				warns = append(warns, res.check+": "+res.msg)
+			}
+		}
+	}
+	if len(fails) != 0 {
+		t.Errorf("case variants must not fail — the daemon starts on this: %v", fails)
+	}
+	if len(warns) != 1 {
+		t.Fatalf("want exactly one warning about the case variance, got %d: %v", len(warns), warns)
+	}
+	for _, want := range []string{"Signing-Primary", "signing-primary", "differ only in case"} {
+		if !strings.Contains(warns[0], want) {
+			t.Errorf("warning does not mention %q: %s", want, warns[0])
+		}
 	}
 }

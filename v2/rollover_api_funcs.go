@@ -20,9 +20,9 @@ import (
 // the function still returns a valid struct (Headline=OK, no policy
 // summary, no derived timing fields).
 //
-// checkInterval is kasp.check_interval (0 means "unknown / not
+// checkInterval is kasp.check-interval (0 means "unknown / not
 // applicable"). Used purely to populate the Warnings field by
-// re-running the same kasp.check_interval / attempt-timeout
+// re-running the same kasp.check-interval / attempt-timeout
 // invariant check that key_state_worker logs at startup. Surfacing
 // it on every status query catches the case where the operator
 // edited the YAML but didn't restart, or where rollover-driven
@@ -221,7 +221,7 @@ func applyInFlightPublicationLabels(out *RolloverStatus) {
 // populateRolloverWarnings re-runs the cross-config invariant check
 // that key_state_worker.go logs once at daemon startup, surfacing it
 // on every status query. The most operationally consequential one
-// today: kasp.check_interval must be < attempt-timeout / 2, otherwise
+// today: kasp.check-interval must be < attempt-timeout / 2, otherwise
 // observe-poll cadence is starved and rollover attempts deterministically
 // time out before any poll fires.
 //
@@ -245,7 +245,7 @@ func populateRolloverWarnings(out *RolloverStatus, pol *DnssecPolicy, checkInter
 	}
 	if checkInterval > 0 && pol.Rollover.ConfirmTimeout > 0 && pol.Rollover.ConfirmTimeout < 2*checkInterval {
 		out.Warnings = append(out.Warnings,
-			fmt.Sprintf("kasp.check_interval (%s) is too coarse for attempt-timeout (%s); observe polling will be starved — lower kasp.check_interval to < attempt-timeout/2 or raise rollover.ds-publish-delay",
+			fmt.Sprintf("kasp.check-interval (%s) is too coarse for attempt-timeout (%s); observe polling will be starved — lower kasp.check-interval to < attempt-timeout/2 or raise rollover.ds-publish-delay",
 				checkInterval, pol.Rollover.ConfirmTimeout))
 	}
 	if pol.Rollover.NumDS > 0 {

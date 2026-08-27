@@ -2,7 +2,7 @@ package tdns
 
 import "testing"
 
-// Per-zone outbound_soa_serial (design doc §5). The mode used to be
+// Per-zone outbound-soa-serial (design doc §5). The mode used to be
 // server-global; these tests pin the tier resolution (zone -> global ->
 // "keep"), the template interaction, and the persistence round-trip.
 

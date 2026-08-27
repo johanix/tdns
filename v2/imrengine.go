@@ -1443,11 +1443,11 @@ func (imr *Imr) parseTrustAnchorsFromConfig(conf *Config) (map[string][]*dns.DS,
 	if taDNSKEY != "" {
 		rr, err := dns.NewRR(taDNSKEY)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to parse trust_anchor_dnskey: %v", err)
+			return nil, nil, fmt.Errorf("failed to parse trust-anchor-dnskey: %v", err)
 		}
 		dk, ok := rr.(*dns.DNSKEY)
 		if !ok {
-			return nil, nil, fmt.Errorf("trust_anchor_dnskey is not a DNSKEY RR: %T", rr)
+			return nil, nil, fmt.Errorf("trust-anchor-dnskey is not a DNSKEY RR: %T", rr)
 		}
 		name := dns.Fqdn(dk.Hdr.Name)
 		dnskeysByName[name] = append(dnskeysByName[name], dk)
@@ -1457,11 +1457,11 @@ func (imr *Imr) parseTrustAnchorsFromConfig(conf *Config) (map[string][]*dns.DS,
 	if taDS != "" {
 		rr, err := dns.NewRR(taDS)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to parse trust_anchor_ds: %v", err)
+			return nil, nil, fmt.Errorf("failed to parse trust-anchor-ds: %v", err)
 		}
 		ds, ok := rr.(*dns.DS)
 		if !ok {
-			return nil, nil, fmt.Errorf("trust_anchor_ds is not a DS RR: %T", rr)
+			return nil, nil, fmt.Errorf("trust-anchor-ds is not a DS RR: %T", rr)
 		}
 		name := dns.Fqdn(ds.Hdr.Name)
 		dsByName[name] = append(dsByName[name], ds)

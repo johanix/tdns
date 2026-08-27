@@ -56,7 +56,7 @@ Branch: `feature/zone-snapshot-correctness` (off `main`).
 | `RepopulateDynamicRRs` | **done** | `repopulateWorkingSetLocked`; folded into refresh publish |
 | `CreateTransportSignalRRs` | **done** | `commitTransportSignalLocked` |
 | Catalog (`regenerateCatalogZone`, create version TXT) | **done** | working-set rebuild + publish |
-| Post-refresh serial override (`outbound_soa_serial`) | **done** | republish instead of `setApexSOASerial` on served data |
+| Post-refresh serial override (`outbound-soa-serial`) | **done** | republish instead of `setApexSOASerial` on served data |
 | `PublishCsyncRR` | **unchanged** | already routes via internal `ZONE-UPDATE` → staged RFC2136 |
 | `dnsutils.SortFunc` (zone file load into `new_zd`) | **intentionally unchanged** | draft build target; consumed by refresh publish |
 | `tdns-cli debug zone-txlog` + `/debug` handler | **done** | `pendingChanges()` → `zone-txlog` command + JSON view |

@@ -38,7 +38,7 @@ This work adds:
               +----------------->| published |
               |                  +-----+-----+
               |                        |
-              |        (propagation_delay elapsed)
+              |        (propagation-delay elapsed)
               |                        |
               v                        v
         +-----------+           +-----------+
@@ -59,7 +59,7 @@ This work adds:
         |  retired  |  (still in DNSKEY RRset, RRSIGs expiring)
         +-----+-----+
               |
-              |  (propagation_delay elapsed)
+              |  (propagation-delay elapsed)
               v
         +-----------+
         |  removed  |  (kept in DB for audit trail, excluded from DNSKEY RRset)
@@ -88,17 +88,17 @@ Keys excluded:
 
 The `KeyStateWorker` goroutine runs on a configurable ticker and performs three checks:
 
-1. **published -> standby**: Keys where `time.Since(published_at) >= propagation_delay`
-2. **retired -> removed**: Keys where `time.Since(retired_at) >= propagation_delay`
+1. **published -> standby**: Keys where `time.Since(published_at) >= propagation-delay`
+2. **retired -> removed**: Keys where `time.Since(retired_at) >= propagation-delay`
 3. **Standby key maintenance**: For each signing zone, ensures the configured number of standby keys exist for both ZSKs and KSKs. Pipeline-aware: won't generate new keys if `published` or `mpdist` keys of that type are already in flight.
 
 ### KASP Configuration
 
 ```yaml
 kasp:
-    propagation_delay: 1h       # time for DNSKEY RRset to propagate through caches
+    propagation-delay: 1h       # time for DNSKEY RRset to propagate through caches
     standby_key_count: 1        # standby keys per type (ZSK + KSK) per zone
-    check_interval: 1m          # KeyStateWorker tick rate
+    check-interval: 1m          # KeyStateWorker tick rate
 ```
 
 All values have sensible defaults if omitted.
@@ -129,7 +129,7 @@ Default keytype is ZSK. The rollover:
 3. In a transaction: standby -> active, active -> retired (sets `retired_at`)
 4. Triggers zone re-sign via `ResignQ`
 
-The retired key remains in the DNSKEY RRset until `KeyStateWorker` transitions it to `removed` after `propagation_delay`.
+The retired key remains in the DNSKEY RRset until `KeyStateWorker` transitions it to `removed` after `propagation-delay`.
 
 ## Re-sign Triggers
 
@@ -180,7 +180,7 @@ Existing databases are migrated automatically via `ALTER TABLE ADD COLUMN`.
 
 4. **Removed keys kept in DB**: State `removed` rows stay for audit trail, matching the KDC pattern.
 
-5. **Single `propagation_delay`**: Used for both published->standby and retired->removed. Simplifies config while being correct (both transitions wait for cache expiry).
+5. **Single `propagation-delay`**: Used for both published->standby and retired->removed. Simplifies config while being correct (both transitions wait for cache expiry).
 
 6. **Pipeline awareness**: `KeyStateWorker` won't generate new keys if `published` or `mpdist` keys of the same type are already in the pipeline, preventing key accumulation.
 

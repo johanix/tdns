@@ -698,7 +698,7 @@ type DynamicZoneInput struct {
 	TsigSecret string
 	TsigAlgo   string
 	// TransferSrc is the per-zone outbound-transfer source address. Optional;
-	// empty inherits dnsengine.transfer_src. On modify, nil means "leave as is"
+	// empty inherits dnsengine.transfer-src. On modify, nil means "leave as is"
 	// and a non-nil empty slice means "clear" -- the two are distinguishable
 	// because the caller built this struct, so the distinction is honest here
 	// in a way a JSON round-trip alone would not be.
@@ -1049,7 +1049,7 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 //
 // nil means the caller said nothing: keep what the zone has. A non-nil slice
 // REPLACES, including a non-nil empty one, which clears the per-zone value so
-// the zone falls back to dnsengine.transfer_src. Collapsing those two into
+// the zone falls back to dnsengine.transfer-src. Collapsing those two into
 // "empty means unchanged" would make a per-zone setting impossible to remove
 // without deleting and re-adding the zone -- which for a secondary means
 // dropping and re-pulling it.

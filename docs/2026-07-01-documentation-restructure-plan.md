@@ -129,7 +129,7 @@ The guide only needs the **group-level** how-to pages in §3.
 | `zones[].options[]` | **Missing** | no enumerated reference anywhere — strong reference candidate |
 | `dnssec.policies.*` | **Wrong** in key-rollover.md | see §4.3 |
 | `dnssec.templates.*` | Covered | sample config (this session) |
-| `dnssec.{completeness,large_algorithms,split_algorithms,kasp}` | Covered | key-rollover.md / sample |
+| `dnssec.{completeness,large-algorithms,split-algorithms,kasp}` | Covered | key-rollover.md / sample |
 | `delegationsync:` | Covered | special-features.md §1 |
 | `db:` | Covered | — |
 | `log:` (level, subsystems) | Covered | sample config (this session) |
@@ -161,11 +161,11 @@ not trust, the agent summary here.)
 
 ### 4.4 Notable MISSING config blocks (undocumented anywhere)
 
-- **`imr.tuning.*`** (~14 keys): `backoff.{first_failure,max_failure,multiplier,
-  jitter_fraction,routing_failure,lame_delegation}`,
-  `address_family.{window_duration,failure_threshold,suspect_duration,
-  probe_interval}`, `discovery.{retry_after_failure,max_failures}`,
-  `query_budget`, `upgrade_indirect_cache_hits`. Defaults in
+- **`imr.tuning.*`** (~14 keys): `backoff.{first-failure,max-failure,multiplier,
+  jitter-fraction,routing-failure,lame-delegation}`,
+  `address-family.{window-duration,failure-threshold,suspect-duration,
+  probe-interval}`, `discovery.{retry-after-failure,max-failures}`,
+  `query-budget`, `upgrade-indirect-cache-hits`. Defaults in
   `v2/config.go` `LoadImrTuningDefaults`.
 - **`imr.stubs[]`**: `zone`, `servers` — stub/forward zones.
 - **`keybootstrap.consistent-lookup.{iterations,interval,nameservers}`**.

@@ -24,7 +24,7 @@ I resolved all four hunks (union of struct fields, with one deletion), and the
 result **`go build ./...` and `go vet ./...` clean** in the `v2` module.
 
 **Verdict: LOW complexity, essentially mechanical.** There is exactly *one*
-judgment call (a representation change for `large_algorithms`, codepoints →
+judgment call (a representation change for `large-algorithms`, codepoints →
 names), and main's side is clearly the right one. #257's transport-selection
 feature survives fully intact.
 
@@ -122,9 +122,9 @@ main's full field set (including `LargeAlgorithms []string`) and add #257's
 `DNSKEYTransport string`. Final resolved fields:
 
 ```go
-DNSKEYTransport string                      `yaml:"dnskey_query_transport" ...`  // from #257
-LargeAlgorithms []string                    `yaml:"large_algorithms" ...`        // main's type wins
-SplitAlgorithms map[string][]string         `yaml:"split_algorithms" ...`        // from main
+DNSKEYTransport string                      `yaml:"dnskey-query-transport" ...`  // from #257
+LargeAlgorithms []string                    `yaml:"large-algorithms" ...`        // main's type wins
+SplitAlgorithms map[string][]string         `yaml:"split-algorithms" ...`        // from main
 Templates       map[string]DnssecPolicyConf `yaml:"templates" ...`               // from main
 Policies        map[string]DnssecPolicyConf `yaml:"policies" ...`                // from main
 Kasp            KaspConf                     `yaml:"kasp" ...`                    // from main
@@ -132,7 +132,7 @@ Completeness    string                       `yaml:"completeness" ...`          
 ```
 
 **This is the one real decision in the whole merge.** main deliberately moved
-`large_algorithms` from codepoints to names because non-standardized PQ
+`large-algorithms` from codepoints to names because non-standardized PQ
 codepoints are assigned per-deployment at runtime by `algorithms.Register`, so a
 bare codepoint could mean different algorithms on the IMR vs. the signer. That
 reasoning is sound and supersedes #257's codepoint list. Adopting it costs #257
@@ -168,17 +168,17 @@ No logic overlap. **Complexity: trivial.**
 
 **The tension.** The same two changes as 4.1, in doc/sample form:
 
-- **#257**: `large_algorithms: [ 10 ]` (codepoint) + a new
-  `dnskey_query_transport: use_ds_signal` line and its explanatory comment.
-- **main**: `large_algorithms: [ RSASHA512 ]` (name).
+- **#257**: `large-algorithms: [ 10 ]` (codepoint) + a new
+  `dnskey-query-transport: use_ds_signal` line and its explanatory comment.
+- **main**: `large-algorithms: [ RSASHA512 ]` (name).
 
 **Resolution:** adopt main's **name** form and keep #257's new
-`dnskey_query_transport` line; merge the two comment blocks. Final:
+`dnskey-query-transport` line; merge the two comment blocks. Final:
 
 ```yaml
 dnssec:
-   large_algorithms: [ RSASHA512 ]
-   dnskey_query_transport: use_ds_signal
+   large-algorithms: [ RSASHA512 ]
+   dnskey-query-transport: use_ds_signal
 ```
 
 **Complexity: trivial**, but it *must* track the 4.1 decision (name, not
@@ -200,7 +200,7 @@ field's element type."
 
 A clean textual merge can still hide a **compile or behavior break**, because
 git merges *lines*, not *meaning*. The obvious candidate here: #257 was written
-against `large_algorithms` as **codepoints (`[]uint8`)**, and main changed the
+against `large-algorithms` as **codepoints (`[]uint8`)**, and main changed the
 representation to **names (`[]string`)**. If #257's downstream code still assumed
 codepoints, we'd get a silent break that no conflict marker would show.
 
@@ -222,7 +222,7 @@ on a clean seam:
   needs **zero changes**.
 
 I also confirmed #257's **derivation wiring survived** the auto-merge (otherwise
-an operator's `dnskey_query_transport:` value would be silently ignored):
+an operator's `dnskey-query-transport:` value would be silently ignored):
 
 ```
 v2/parseconfig.go:336   dnskeyXport, err := parseDNSKEYTransportPolicy(conf.Dnssec.DNSKEYTransport)
@@ -281,11 +281,11 @@ real work:
   build env (`GOROOT=/opt/local/lib/go`, and the `WITH_LIBOQS/SQISIGN/QRUOV`
   env if you want the PQ-tagged paths). This dry-run only did `build` + `vet`.
 - **Exercise the transport-selection feature end-to-end** against real/large-KSK
-  child zones: the four `dnskey_query_transport` modes (`force_udp`,
+  child zones: the four `dnskey-query-transport` modes (`force_udp`,
   `use_ds_signal`, `try_encrypted`, `force_encrypted`).
-- **Re-validate the `large_algorithms` name path specifically.** #257 was
+- **Re-validate the `large-algorithms` name path specifically.** #257 was
   authored against codepoints; the merged world is name-based. Confirm that a
-  sample config with `large_algorithms: [ RSASHA512 ]` (and an unknown name)
+  sample config with `large-algorithms: [ RSASHA512 ]` (and an unknown name)
   behaves as intended: known name → codepoint set populated; unknown name →
   hard config error.
 

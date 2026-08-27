@@ -58,7 +58,7 @@ Phase machine:
 
 ```
 idle
-  → pending-child-publish      (wait propagation_delay)
+  → pending-child-publish      (wait propagation-delay)
   → pending-parent-push        (send DS UPDATE and/or publish CDS)
   → pending-parent-observe     (POLL parent until DS actually appears)
   → idle                       (on confirm: advance keys)
@@ -106,7 +106,7 @@ produces a bogus zone:
 
 - The new-alg KSK is activated immediately, bypassing the `standby` gate —
   its DS is never pushed to or confirmed at the parent.
-- After propagation_delay the old-alg KSK goes retired → removed and its
+- After propagation-delay the old-alg KSK goes retired → removed and its
   RRSIGs are stripped.
 - The parent's only DS is now the old-alg one, whose key and signature are
   being removed, with no confirmed new-alg DS to fall back to → no working
@@ -149,7 +149,7 @@ Two hard constraints govern the old-alg key while it is being phased out.
   old-alg DNSKEY is already gone, that cached RRSIG references an absent
   key → bogus. This is what `retired` is for: the DNSKEY stays published
   and the old RRSIGs stay served (the additive signer never strips a
-  non-active key's signature, `sign.go:180-197`) for propagation_delay +
+  non-active key's signature, `sign.go:180-197`) for propagation-delay +
   max served TTL (`zskRemovalMargin`, `key_state_worker.go:209-222`), then
   removed + strip.
 
@@ -209,7 +209,7 @@ In RELAXED mode the old-alg key's drain state is plain `retired`, verified
 to work as-is: `FetchZoneDnskeysSql` keeps `retired` DNSKEYs in the served
 RRset, the additive signer preserves their already-made RRSIGs without
 refreshing them, and the retired→removed worker holds the key for
-propagation_delay + max TTL before stripping. No new state, no change to
+propagation-delay + max TTL before stripping. No new state, no change to
 the drain path.
 
 ### 3.3 Why it is safe
@@ -228,7 +228,7 @@ about how the zone is served:
 - `retired` drains correctly: a retired key's DNSKEY stays in the apex
   RRset (`ops_dnskey.go:24`) and its already-made RRSIGs stay served (the
   additive signer never strips a non-active key's signature) for
-  propagation_delay + max TTL, so every cached old signature can be
+  propagation-delay + max TTL, so every cached old signature can be
   validated against the still-present DNSKEY until it expires; then the
   key is removed and its signatures stripped.
 
@@ -369,7 +369,7 @@ instant in both. The mode is a GLOBAL config choice (§4.4).
 
 DECISION: completeness mode is a GLOBAL setting,
 `dnssec.completeness: strict|relaxed`, default `strict`. It sits in the
-`dnssec:` block alongside `split_algorithms` / `large_algorithms`, which
+`dnssec:` block alongside `split-algorithms` / `large-algorithms`, which
 are likewise deployment-wide.
 
 It is NOT per-zone or per-policy, for two reasons:
@@ -395,7 +395,7 @@ structural difference between the two modes for a ZSK roll — not merely a
 reconcile-retire detail:
 
 - RELAXED: completeness does not require per-algorithm coverage, so the
-  zone needs `standby_zsk_count` standby ZSKs in TOTAL, regardless of
+  zone needs `standby-zsk-count` standby ZSKs in TOTAL, regardless of
   algorithm. Count standbys BY ROLE (flags), algorithm-agnostic. The
   result is ONE FIFO pipeline that merely spans algorithms during a
   transition (§3.1, §4.6). This is the NEW code.
@@ -456,7 +456,7 @@ carry the new algorithm. Everything else rides the existing machinery:
   in the middle, no out-of-order promotion.
 - The new algorithm enters the pipeline only when the maintainer would
   NATURALLY generate the next key (a standby was promoted, count dropped
-  below `standby_zsk_count`). That key — and every key after it — is the
+  below `standby-zsk-count`). That key — and every key after it — is the
   new algorithm.
 - Promotion stays FIFO (oldest `published_at` first, `keystore.go:1353`):
   old-alg standbys promote first (in turn) and drain; new-alg standbys
@@ -468,7 +468,7 @@ THE THROTTLE: with N standbys + 1 active, a fully-natural roll takes N+1
 operator accelerates with `asap` (§8.1): each `asap` promotes the NEXT
 FIFO standby now. Because the existing same-alg standbys are already fully
 propagated (parallel propagation), successive `asap`s execute back-to-back
-(bounded only by max(propagation_delay, DNSKEY TTL) for the retire/drain
+(bounded only by max(propagation-delay, DNSKEY TTL) for the retire/drain
 side, not by lifetime). So the operator dials the speed — ride the
 cadence, or `asap` through the old-alg spares to reach the new algorithm
 in roughly one propagation/TTL window plus the time for a fresh new-alg
@@ -683,7 +683,7 @@ build + `go test -race`).
   standby maintenance counts standbys BY ROLE (flags) only, not
   (role, alg); (b) the existing algorithm-based standby/published deletion
   (sign.go:338-375) is SKIPPED for same-role ZSK keys, and a NEW
-  total-count cap is ADDED — keep the oldest `standby_zsk_count` standby
+  total-count cap is ADDED — keep the oldest `standby-zsk-count` standby
   ZSKs (any algorithm), delete the YOUNGEST surplus, NEVER by algorithm
   alone (there is no count cap today — see §8.3); (c) maintainer and cap
   share ONE role-total count (else they oscillate); (d) FIFO promotion is
@@ -947,7 +947,7 @@ Role-only standby counting (D5): in RELAXED mode, standby maintenance
 counts standby ZSKs BY ROLE (flags), NOT (role, alg). Change
 `maintainStandbyKeysForType`/`countKeysByFlagsAndAlg`
 (key_state_worker.go:269,318) so that in relaxed mode "do I have
-`standby_zsk_count` standby ZSKs?" ignores algorithm — N old-alg standbys
+`standby-zsk-count` standby ZSKs?" ignores algorithm — N old-alg standbys
 satisfy the count and NOTHING is generated. Only when the count actually
 drops (a standby was promoted) does the maintainer generate, and that new
 key carries the new algorithm. STRICT mode keeps today's per-alg counting.
@@ -959,7 +959,7 @@ count-based cap today. The loop at sign.go:338-375 inside
 `reconcileActiveKeyAlgorithms` removes standby/published keys PURELY on
 ALGORITHM MISMATCH (delete any standby/published key whose alg ≠ policy
 alg; KSK case respects `rolloverInProgress`). It is not a
-`standby_zsk_count` cap and has no notion of "surplus." So the relaxed
+`standby-zsk-count` cap and has no notion of "surplus." So the relaxed
 change is two distinct things, NOT "adjust the cap":
 
 1. SKIP the algorithm-based deletion for same-role ZSK keys in RELAXED
@@ -969,7 +969,7 @@ change is two distinct things, NOT "adjust the cap":
    wrong-alg standby genuinely is a leftover.)
 2. ADD a new TOTAL-COUNT CAP (this does not exist yet) as the
    DNSKEY-RRset-bloat safety valve relaxed mode still needs: keep the
-   oldest `standby_zsk_count` standby ZSKs (by `published_at`, ANY
+   oldest `standby-zsk-count` standby ZSKs (by `published_at`, ANY
    algorithm), delete the YOUNGEST surplus, never by algorithm. Put it
    wherever fits cleanly (in the maintainer, or a small dedicated pass) —
    but the maintainer's generate-count and this cap MUST use ONE shared
@@ -1032,7 +1032,7 @@ roll.
 Rapid-asap drain transient (accepted, no throttle): `asap`-ing faster
 than the retire/drain side clears can transiently hold MULTIPLE retired
 old-alg ZSKs in the DNSKEY RRset at once (each draining on its own
-max(propagation_delay, DNSKEY TTL) timer). This is SAFE (retired keys
+max(propagation-delay, DNSKEY TTL) timer). This is SAFE (retired keys
 staying published is the drain contract) and self-clearing; it is the
 operator's explicit choice to go fast. Do NOT add a throttle (the KSK
 asap path does not either). Note it for operators.
@@ -1120,7 +1120,7 @@ Step 2 (relaxed alg roll):
   path).
 - T1 — relaxed-mode reconcile with active ZSK alg ≠ policy alg: does NOT
   retire the active ZSK (the §2 unsafe path is gated off).
-- T3 — ROLE-ONLY COUNT (D5): standby_zsk_count=2, two OLD-alg standbys
+- T3 — ROLE-ONLY COUNT (D5): standby-zsk-count=2, two OLD-alg standbys
   present, policy ZSK alg changed to new. The maintainer generates
   NOTHING (role-only count sees 2 standbys ≥ 2) — assert NO new-alg key is
   minted and the two old-alg standbys are untouched. (Inverts the earlier
@@ -1128,7 +1128,7 @@ Step 2 (relaxed alg roll):
 - T3b — GENERATE-ON-DRAIN (D5): from T3's state, after one standby is
   promoted (count drops to 1), the maintainer generates ONE key and it is
   the NEW algorithm. The old-alg standby that remains is untouched.
-- T4 — SWEEP CAP (D5): with standby_zsk_count=2 and THREE standby ZSKs
+- T4 — SWEEP CAP (D5): with standby-zsk-count=2 and THREE standby ZSKs
   present (e.g. a stray extra), the relaxed sweep deletes the YOUNGEST one
   (back to 2), keeps the oldest two regardless of algorithm; it does NOT
   delete an old-alg standby merely for being old-alg. Assert maintainer +
@@ -1142,7 +1142,7 @@ Step 2 (relaxed alg roll):
   the OLDEST `published_at`, deterministically, regardless of row/insertion
   order. Asserts the `ORDER BY published_at` fix (§8.3). Independent of
   algorithm — also covers same-alg rollover correctness.
-- T5 — full sequence via asap (standby_zsk_count=2): change-policy (new
+- T5 — full sequence via asap (standby-zsk-count=2): change-policy (new
   alg) → maintainer generates nothing (T3) → `asap` promotes old-alg
   standby#1 → active (old active → retired, draining); `asap` again
   promotes old-alg standby#2 → active immediately (already propagated) →
@@ -1197,7 +1197,7 @@ existing reconcile code would otherwise run the §2 unsafe path.
 
 NOTED, not built (no gating needed this step):
 - Large-zone secondary-propagation wait for the ZSK switch (§6 item 5):
-  `transitionPublishedToStandby` uses `propagation_delay` only. Document
+  `transitionPublishedToStandby` uses `propagation-delay` only. Document
   the limitation in operator docs; do not build the secondary-observation
   wait now.
 - `policy-cleanup` during an in-progress relaxed roll: after promotion the

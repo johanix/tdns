@@ -165,7 +165,7 @@ downgrade intended XoT to plaintext Do53.
 | **`connectionState` + TSIG wrapper** | `tsigSignResponseWriter.Unwrap()` exists; walker reaches fork `ConnectionStater`; DoT harness tests exercise the production wrapper shape. |
 | **Listener mTLS policy** | Auth DoT uses `RequestClientCert` only (`do53.go` → `true`); IMR DoT passes `false`. Cert-less ADoT queries still work (`TestDownstreamAuth_MUSTs`). |
 | **Outbound pin/DANE gates** | `InsecureSkipVerify` only with non-nil `VerifyConnection`; mismatch/no-cert abort handshake (`xot_test.go`). PKIX uses stdlib verify. Constant-time pin compare. |
-| **DANE fail-closed** | No IMR / lookup fail / non-secure (when required) → error. Lab `require_dnssec_validation=false` honored with warning (by design). |
+| **DANE fail-closed** | No IMR / lookup fail / non-secure (when required) → error. Lab `require-dnssec-validation=false` honored with warning (by design). |
 | **Hostname→IP resolution** | `buildUpstreams` preserves/fills `TLSName` for DoT so SNI/DANE base survives. |
 | **Fork `Transfer.TLS` + TSIG** | `replace` → `johanix/dns`; TSIG MAC on same TLS `Conn`; `TestXoT_TransferTSIGInsideTLS`. |
 | **PKI constraints** | CA `pathlen 0` + `CertSign`; leaves `IsCA=false`, no CertSign; `SignCSR` `CheckSignature` + SAN copy; leaf-as-parent fails verify (`pki_test.go`). API cannot mint a sub-CA. |
