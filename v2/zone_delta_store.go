@@ -74,7 +74,7 @@ type ZoneDeltaRecord struct {
 // framing. That is exactly what we want: the serial is restored explicitly at
 // the end of a replay, and a replayed SOA record would fight that.
 //
-// An empty delta is not persisted. Serial-only advances (outbound_soa_serial =
+// An empty delta is not persisted. Serial-only advances (outbound-soa-serial =
 // unixtime, for instance) publish with no content change, and recording those
 // would grow the table without ever changing a replay's outcome.
 func (kdb *KeyDB) PersistZoneDelta(zone string, fromSerial, toSerial uint32, removed, added []core.RRset) error {

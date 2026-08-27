@@ -27,7 +27,7 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   `allow-notify:` / `downstreams:` ACLs, zone declarations
   and options, the zone template system, the `dnsengine:`
   block, DNSSEC policies including policy templates,
-  `split_algorithms` and `large_algorithms`),
+  `split-algorithms` and `large-algorithms`),
   [tdns-imr](config-tdns-imr.md) (trust anchors, stub zones,
   the `imrengine.tuning.*` knobs) and
   [tdns-agent](config-tdns-agent.md) (placeholder). The tdns-auth

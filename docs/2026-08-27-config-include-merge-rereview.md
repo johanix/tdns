@@ -37,7 +37,7 @@ ticked in the outcomes table.
 - **Allowlist still binds opted-in includes**, so `dnsengine.addresses` cannot
   be concatenated by asking. The known gaps (`dnssec.templates`, `keys.tsig`)
   are listed as add-when-needed, not forgotten.
-- **`split_algorithms` union is called a widening**, not “the same fact twice”.
+- **`split-algorithms` union is called a widening**, not “the same fact twice”.
 - **Templates stay fail-closed.** The 100k-zone argument is correctly scoped to
   a zone *referencing* a bad template (already quarantined), not to a template
   *defined twice*.
@@ -67,7 +67,7 @@ view. That is why check can green-light a policy the daemon never loaded.
 | S4 | Duplicate handling is not ~20 lines | **Closed.** Pre-pass, re-costed ~40. |
 | S5 | yaml.v3 last-wins on duplicate map keys | **Retracted.** Plan was right; first review was not. |
 | S6 | Type mismatch unspecified | **Closed.** Hard error. |
-| S7 | `split_algorithms` is a widening | **Closed.** Documented, opt-in only, R9. |
+| S7 | `split-algorithms` is a widening | **Closed.** Documented, opt-in only, R9. |
 | Opt-in | Preferred alternative | **Adopted**, plus the clobber WARN. |
 | Do not soften templates | Keep the hard error | **Adopted.** |
 
@@ -105,7 +105,7 @@ the zonegen case does not work.
 
 The dispatcher has to intercept **every** allowlisted path as it is assigned,
 including nested ones under the existing one-level map merge. Other `dnssec:`
-subkeys (`completeness`, `kasp`, `templates`, `dnskey_query_transport`) keep
+subkeys (`completeness`, `kasp`, `templates`, `dnskey-query-transport`) keep
 included-wins.
 
 ### N4. Replace after merge wipes the concat

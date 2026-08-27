@@ -63,7 +63,7 @@ func kskIndexPushNeeded(row *RolloverZoneRow, low, high int, indexOK bool, haveD
 // All dependencies are passed via RolloverEngineDeps so the engine has no
 // implicit globals. The orchestrator (KeyStateWorker) iterates its zones,
 // builds deps for each, and calls this. deps.PropagationDelay is the
-// kasp.propagation_delay used by pending-child-publish.
+// kasp.propagation-delay used by pending-child-publish.
 func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	zd := deps.Zone
 	if zd == nil {
@@ -258,7 +258,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			lgSigner.Info("rollover: arming DS push", "zone", zone)
 		}
 	case rolloverPhasePendingChildPublish:
-		// §8.8: wait kasp.propagation_delay from rollover_phase_at, then
+		// §8.8: wait kasp.propagation-delay from rollover_phase_at, then
 		// arm the DS push. Real child-secondary observation is post-4
 		// future work; here we use a fixed wait.
 		if t, ok := parseOptionalTime(row.RolloverPhaseAt); ok {
@@ -725,7 +725,7 @@ WHERE zone = ?`, zone); err != nil {
 // observe-phase poll exactly initial-wait after a successful UPDATE,
 // independent of the worker tick cadence. Without this, the first
 // parent-DS query is gated on the next KeyStateWorker tick, which can
-// be up to kasp.check_interval seconds away — and if that exceeds
+// be up to kasp.check-interval seconds away — and if that exceeds
 // attempt-timeout (= ds-publish-delay × 1.2 by default), the engine
 // declares the attempt timed out before any poll has ever fired.
 //
@@ -738,7 +738,7 @@ WHERE zone = ?`, zone); err != nil {
 // sleeping, the goroutine is gone but the DB state still carries
 // observe_started_at + observe_next_poll_at. The next worker tick
 // after restart picks up where this left off (at the cost of being
-// bounded by check_interval — same as the pre-fix behavior). No state
+// bounded by check-interval — same as the pre-fix behavior). No state
 // is lost; just slower recovery.
 func scheduleFastObservePoll(ctx context.Context, deps RolloverEngineDeps, initial time.Duration) {
 	if initial <= 0 {
@@ -965,7 +965,7 @@ func parseOptionalTime(s sql.NullString) (time.Time, bool) {
 //	T_publish_i = T_roll_i − child_prop − DNSKEY_TTL
 //
 // where T_roll_i = active.active_at + i × KSK.Lifetime, child_prop is
-// kasp.propagation_delay (the configured estimate of how long it takes
+// kasp.propagation-delay (the configured estimate of how long it takes
 // the new RRset to reach all child secondaries), and DNSKEY_TTL is the
 // served-wire TTL of the DNSKEY RRset. The − DNSKEY_TTL term guarantees
 // the cache-flush invariant E3:

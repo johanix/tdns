@@ -416,7 +416,7 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 	// (3) Lift the serial BEFORE applying, so the publish the apply performs
 	// lands above everything already served rather than needing a second bump
 	// afterwards (which secondaries would see as two changes, and which the
-	// configured outbound_soa_serial mode would have to be fought over twice).
+	// configured outbound-soa-serial mode would have to be fought over twice).
 	//
 	// LoadOutgoingSerial is the durable record of what secondaries have been
 	// handed. Without this floor the merged zone can publish BELOW a serial one

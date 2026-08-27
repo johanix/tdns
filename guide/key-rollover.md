@@ -103,7 +103,7 @@ dnssec:
             dsync-scheme-preference:     auto
          ttls:
             dnskey:     1h
-            max_served: 8h
+            max-served: 8h
          clamping:
             enabled: true
             margin:  15m
@@ -200,7 +200,7 @@ Full reference of policy parameters:
 | `rollover.parent-cds-poll-estimate` | no | `1m` | Parent's CDS fetch latency (NOTIFY scheme) |
 | `rollover.standby-time` | no | `1m` | Pause between propagation-complete and AtomicRollover |
 | `ttls.dnskey` | no | (zone default) | TTL for DNSKEY RRset |
-| `ttls.max_served` | no | unbounded | Maximum TTL the daemon will serve |
+| `ttls.max-served` | no | unbounded | Maximum TTL the daemon will serve |
 | `clamping.enabled` | no | `false` | Whether to clamp TTLs near rollover |
 | `clamping.margin` | yes if `clamping.enabled` | -- | TTL floor and retired-KSK hold time |
 
@@ -602,7 +602,7 @@ dnssec:
             ds-publish-delay: 30s
          ttls:
             dnskey: 60s
-            max_served: 300s
+            max-served: 300s
          clamping:
             enabled: true
             margin: 60s
@@ -617,7 +617,7 @@ Notes:
   but appropriate for a local testbed where outages are
   minutes, not days. The engine resigns DNSKEY RRSIGs as
   they approach expiry.
-- `ttls.max_served: 300s` caps everything in the zone at
+- `ttls.max-served: 300s` caps everything in the zone at
   five minutes; combined with `clamping.margin: 60s`,
   the engine can do an unscheduled rollover within ~5
   minutes if needed.
@@ -659,7 +659,7 @@ dnssec:
             softfail-delay: 1h
          ttls:
             dnskey: 1h
-            max_served: 8h
+            max-served: 8h
          clamping:
             enabled: true
             margin: 15m
@@ -673,7 +673,7 @@ Notes:
   days remaining. Friday-evening signing failure leaves
   you 7 days of validity in caches -- comfortably more
   than any plausible long weekend plus diagnosis time.
-- `ttls.max_served: 8h` caps zone TTLs at eight hours,
+- `ttls.max-served: 8h` caps zone TTLs at eight hours,
   bounding the cache-flush window for emergency
   rollovers. With `clamping.margin: 15m`, an unscheduled
   rollover can fire about eight hours after request.
@@ -718,7 +718,7 @@ dnssec:
             softfail-delay: 1h
          ttls:
             dnskey: 1h
-            max_served: 8h
+            max-served: 8h
          clamping:
             enabled: true
             margin: 15m
@@ -747,7 +747,7 @@ flushes faster as the rollover approaches. This shortens
 the window during which old DNSKEY data could be cached
 past a rollover.
 
-For most production deployments with `ttls.max_served`
+For most production deployments with `ttls.max-served`
 set, you do not need clamping enabled -- the always-on
 TTL ceiling already gives you a known cache-flush bound.
 Clamping is more useful for zones where you want to keep

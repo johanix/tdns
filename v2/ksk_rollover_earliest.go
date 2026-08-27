@@ -215,11 +215,11 @@ func ComputeEarliestRollover(kdb *KeyDB, zone string, pol *DnssecPolicy, now tim
 		if tPub, err := RolloverKeyPublishedAt(kdb, zone, toKid); err == nil && tPub != nil {
 			child := pol.Rollover.DsPublishDelay // not the right knob — see below
 			_ = child
-			// child_prop comes from kasp.propagation_delay, not the
+			// child_prop comes from kasp.propagation-delay, not the
 			// policy. ComputeEarliestRollover doesn't currently take
 			// it as a parameter; use a conservative observed proxy
 			// via the DNSKEY TTL alone. The runtime engine reads
-			// kasp.propagation_delay directly via deps.PropagationDelay
+			// kasp.propagation-delay directly via deps.PropagationDelay
 			// when transitioning published → standby. For ASAP-time
 			// math the dominant term in typical configs is DNSKEY_TTL.
 			if dnskeyTTL, ok := effectiveServedDnskeyTTL(kdb, zone, pol); ok {

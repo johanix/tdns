@@ -231,7 +231,7 @@ func TestValidateTransferSrc(t *testing.T) {
 		{"good then bad still fails", []string{"172.16.0.53", "oops"}, "not an IP address"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateTransferSrc("dnsengine.transfer_src", tc.srcs)
+			err := ValidateTransferSrc("dnsengine.transfer-src", tc.srcs)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("ValidateTransferSrc(%v) = %v, want nil", tc.srcs, err)
@@ -339,7 +339,7 @@ func TestValidateAllTransferSrc(t *testing.T) {
 		{
 			name:    "bad global",
 			conf:    &Config{DnsEngine: DnsEngineConf{TransferSrc: []string{"172.16.0.53:53"}}},
-			wantErr: "dnsengine.transfer_src",
+			wantErr: "dnsengine.transfer-src",
 		},
 		{
 			name:    "bad zone override is caught here too",
@@ -459,7 +459,7 @@ func TestTransferSrcListIsACopy(t *testing.T) {
 // TestScratchZoneReportsResolvedTier: the scratch zone is handed an
 // already-resolved source list, so without carrying the tier it would report
 // every source as coming from the zone -- including one that actually came from
-// dnsengine.transfer_src. That lands in the ZoneTransferIn log, which exists
+// dnsengine.transfer-src. That lands in the ZoneTransferIn log, which exists
 // precisely so an operator does not have to guess where the address came from.
 func TestScratchZoneReportsResolvedTier(t *testing.T) {
 	// Global tier: no per-zone value, KeyDB supplies it.

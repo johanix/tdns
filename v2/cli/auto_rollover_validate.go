@@ -220,7 +220,7 @@ func renderValidateReport(cfgPath, zone, policyName string, pol *tdns.DnssecPoli
 		(time.Duration(pol.SigValidity.DNSKEY) * time.Second).String(),
 		(time.Duration(pol.SigValidity.DS) * time.Second).String())
 	fmt.Printf("Clamping: enabled=%t margin=%s\n", pol.Clamping.Enabled, pol.Clamping.Margin)
-	fmt.Printf("TTLs:    dnskey=%ss max_served=%ss parent-ds(override)=%ss child-ds(fallback)=%ss\n",
+	fmt.Printf("TTLs:    dnskey=%ss max-served=%ss parent-ds(override)=%ss child-ds(fallback)=%ss\n",
 		fmt.Sprintf("%d", pol.TTLS.DNSKEY),
 		fmt.Sprintf("%d", pol.TTLS.MaxServed),
 		fmt.Sprintf("%d", pol.TTLS.ParentDS),

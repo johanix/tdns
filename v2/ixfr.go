@@ -104,7 +104,7 @@ func (zd *ZoneData) updateIxfrChainLocked(old *zoneSnapshot, newSerial uint32, n
 	}
 
 	// An empty delta still appends a link: a serial-only advance (e.g.
-	// outbound_soa_serial=unixtime) is a legal empty difference sequence and
+	// outbound-soa-serial=unixtime) is a legal empty difference sequence and
 	// keeps the chain contiguous.
 	link := Ixfr{
 		FromSerial: old.Serial,

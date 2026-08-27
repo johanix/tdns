@@ -227,7 +227,7 @@ log:
    level:  info
 
 # One DNSSEC policy, referenced by the signed zone below. ED25519 for both
-# roles (same algorithm needs no split_algorithms entry), static keys.
+# roles (same algorithm needs no split-algorithms entry), static keys.
 dnssec:
    policies:
       default:

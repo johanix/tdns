@@ -243,10 +243,10 @@ type ZonePost struct {
 	// ChildZone names the delegated child whose delegation data
 	// "get-delegation" reads out of the parent named by Zone.
 	ChildZone string `json:"childzone,omitempty"`
-	Policy     string // target DNSSEC policy name for the "policy-set" command
-	Force      bool
-	Wait       bool
-	Timeout    string
+	Policy    string // target DNSSEC policy name for the "policy-set" command
+	Force     bool
+	Wait      bool
+	Timeout   string
 	// Dynamic-zones management (add/modify). No Store field — dynamic zones are
 	// map-only. Primaries carries the structured {addr, key} list; each key is a
 	// keys.tsig name, an inline TsigName (below), or NOKEY. Options are ZoneOption
@@ -293,7 +293,7 @@ type ZonePost struct {
 	TsigSecret string
 	TsigAlgo   string
 	// TransferSrc is the per-zone source address for this zone's OUTBOUND
-	// transfers. Optional: unset inherits dnsengine.transfer_src, and unset
+	// transfers. Optional: unset inherits dnsengine.transfer-src, and unset
 	// there means the kernel chooses, which is the pre-existing behaviour.
 	//
 	// It has to be settable here rather than only in the config file, because

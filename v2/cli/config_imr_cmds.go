@@ -191,11 +191,11 @@ func checkImrTrustAnchors(cfg *tdns.Config, rep *ccReport) {
 	case hasAnchor:
 		rep.pass(g, "anchor", "a DNSSEC trust anchor is configured")
 	case !requireValidation:
-		rep.info(g, "anchor", "no trust anchor, but require_dnssec_validation is false (lab mode) — validation disabled")
+		rep.info(g, "anchor", "no trust anchor, but require-dnssec-validation is false (lab mode) — validation disabled")
 	default:
 		rep.fail(g, "anchor",
 			"no trust anchor configured and DNSSEC validation is on (the default) — the resolver validates against an empty anchor set and everything is BOGUS",
-			"set imrengine.trust-anchor-file (or trust_anchor_ds), or set imrengine.require_dnssec_validation: false for lab use")
+			"set imrengine.trust-anchor-file (or trust-anchor-ds), or set imrengine.require-dnssec-validation: false for lab use")
 	}
 }
 
@@ -377,10 +377,10 @@ imrengine:
    # the box without a root trust anchor. To make it a validating resolver,
    # supply a root anchor and flip this to true:
    #   trust-anchor-file:          /etc/tdns/root.key
-   #   require_dnssec_validation:  true
+   #   require-dnssec-validation:  true
    # or paste the current root DS inline:
-   #   trust_anchor_ds: ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
-   require_dnssec_validation:  false
+   #   trust-anchor-ds: ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+   require-dnssec-validation:  false
 
 apiserver:
    addresses:  [ 127.0.0.1:{{APIPORT}} ]

@@ -135,7 +135,7 @@ type RolloverStatus struct {
 
 	// Warnings carry runtime configuration concerns the engine wants
 	// to surface to the operator on every status query — currently
-	// the kasp.check_interval / attempt-timeout coupling check, but
+	// the kasp.check-interval / attempt-timeout coupling check, but
 	// designed to grow as more cross-config invariants are caught.
 	// Empty slice means no warnings; rendered below the hint line.
 	Warnings []string `json:"warnings,omitempty"`

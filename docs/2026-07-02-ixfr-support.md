@@ -48,7 +48,7 @@ What the 2026-07-02 sketch guessed at is now checked against code:
   catalog version-TXT injection (apihandler_catalog.go), transport-signal
   commits (tsignal.go), `RepopulateDynamicRRs` (zone_utils.go). Publishes that
   bump the serial without changing content also exist
-  (outbound_soa_serial=unixtime/persist restore, refreshengine.go). Both must
+  (outbound-soa-serial=unixtime/persist restore, refreshengine.go). Both must
   be handled by retention (§4.1).
 * Wholesale zone replacement on the SAME `ZoneData` happens only in
   `applyRefreshReplacementLocked` (refresh/AXFR-in/reload). `ModifyDynamicZone`
@@ -113,7 +113,7 @@ new snapshot's copied chain always ends exactly at the new snapshot's serial.
 * else: compute the delta, append
   `Ixfr{FromSerial: old.Serial, ToSerial: newSerial, FromSOA, ToSOA, Removed,
   Added, EstBytes}`; an EMPTY delta still appends a link (serial-only advance,
-  e.g. outbound_soa_serial=unixtime — the empty step keeps the chain
+  e.g. outbound-soa-serial=unixtime — the empty step keeps the chain
   contiguous and is legal RFC 1995 wire: `SOA(from) SOA(to)`).
 * trim: while total `EstBytes` exceeds the budget (or link count > hard cap),
   drop the OLDEST link; if the newest link alone exceeds the budget →

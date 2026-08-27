@@ -20,7 +20,7 @@ For the command-line tools, see the generated [CLI reference](../reference/cli/)
   -- Minimal working example, TSIG keys, the `allow-notify:` and
   `downstreams:` ACLs, zone declarations (every zone option, and the
   template system), the `dnsengine:` block, and DNSSEC policies
-  (policy templates, `split_algorithms`, `large_algorithms`).
+  (policy templates, `split-algorithms`, `large-algorithms`).
 
 - [tdns-imr configuration](config-tdns-imr.md)
   -- Minimal working example, trust anchors, stub zones, and the

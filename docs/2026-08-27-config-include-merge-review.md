@@ -41,7 +41,7 @@ include it.
 | `ParseZones` has no duplicate zone-name check | Confirmed. Two entries with the same name are last-wins on the same `ZoneData`. |
 | Duplicate template name is a hard `ParseConfig` error | Confirmed. `buildTemplateMap` error is returned; startup refuses the config. |
 | Allowlist excludes listen addresses | Correct. Concatenating `dnsengine.addresses` / `apiserver.addresses` would silently widen listeners. |
-| Zonegen emits exactly four of the five keys | `large_algorithms`, `split_algorithms`, `policies`, `zones`. `templates` is the generalization. |
+| Zonegen emits exactly four of the five keys | `large-algorithms`, `split-algorithms`, `policies`, `zones`. `templates` is the generalization. |
 | Reload uses the same merge | Confirmed. Four runtime re-reads call `processConfigFile`, including SIGHUP `ReloadZoneConfig`. |
 
 ## Safety findings
@@ -57,7 +57,7 @@ states, or missing from it.
 | S4 | `ParseZones` duplicate handling is not ~20 lines if “neither wins” | The loop get-or-creates `ZoneData`, mutates it, and queues refresh. A second same-name entry overwrites the first and may queue twice. Rejecting both needs a pre-pass before any enqueue, or the first definition is already live. |
 | S5 | Policy duplicates in one file are undetectable after `yaml.Unmarshal` | `policies` is a YAML map. `gopkg.in/yaml.v3` last-wins on duplicate keys before merge runs. “Single-file duplicate detection for all three kinds” only works for list-shaped objects (`zones`, `templates`). |
 | S6 | Type mismatch is unspecified | If one file has `zones:` as a list and another as a map, today’s code replaces. After concat, a type-assert failure must be a hard error, not a silent fallback to replace. |
-| S7 | `split_algorithms` union is a silent widening of crypto policy | Same class as concatenating listen addresses, lower blast radius: it only gates policy parse. For zonegen it is the right direction. Treat it as a documented widening, not as “the same fact stated twice”. |
+| S7 | `split-algorithms` union is a silent widening of crypto policy | Same class as concatenating listen addresses, lower blast radius: it only gates policy parse. For zonegen it is the right direction. Treat it as a documented widening, not as “the same fact stated twice”. |
 
 ### The two decisions in the plan
 

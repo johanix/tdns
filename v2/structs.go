@@ -140,13 +140,13 @@ type ZoneData struct {
 	CurrentSerial  uint32 // SOA serial after local bumping
 	// OutboundSoaSerial is the PER-ZONE outbound serial mode (keep | unixtime
 	// | persist), sourced from the zone's config (possibly via its template).
-	// Empty means "inherit the server-global dnsengine.outbound_soa_serial".
+	// Empty means "inherit the server-global dnsengine.outbound-soa-serial".
 	// Never read directly — call zd.EffectiveOutboundSoaSerial(), which
 	// resolves the zone/global tiers.
 	OutboundSoaSerial string
 	// TransferSrc is the per-zone source address for OUTBOUND transfers, i.e.
 	// what the upstream's allow-transfer ACL sees. Never read directly — call
-	// zd.EffectiveTransferSrc(), which falls back to dnsengine.transfer_src.
+	// zd.EffectiveTransferSrc(), which falls back to dnsengine.transfer-src.
 	TransferSrc []string
 	// TransferSrcTier records which tier TransferSrc was resolved FROM, and is
 	// set only when TransferSrc was populated by resolution rather than by
@@ -420,15 +420,15 @@ type ZoneConf struct {
 	DelegationBackend string `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
 	DnssecPolicy      string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
 	// OutboundSoaSerial is the per-zone override of the server-global
-	// dnsengine.outbound_soa_serial. Empty (the default) inherits the global.
+	// dnsengine.outbound-soa-serial. Empty (the default) inherits the global.
 	// Set it on a TEMPLATE to give a whole class of zones a serial policy —
 	// that is the intended granularity; a zone that sets it explicitly wins
 	// over its template (ExpandTemplate gap-fills only unset fields, and a
 	// non-empty string counts as set, so an explicit "keep" beats a template
 	// "persist").
-	OutboundSoaSerial string `yaml:"outbound_soa_serial,omitempty" mapstructure:"outbound_soa_serial" validate:"omitempty,oneof=keep unixtime persist"`
+	OutboundSoaSerial string `yaml:"outbound-soa-serial,omitempty" mapstructure:"outbound-soa-serial" validate:"omitempty,oneof=keep unixtime persist"`
 	// TransferSrc is the per-zone override of the server-global
-	// dnsengine.transfer_src: the local address to bind when dialling this
+	// dnsengine.transfer-src: the local address to bind when dialling this
 	// zone's upstreams, which is what the primary's allow-transfer ACL sees.
 	// Empty (the default) inherits the global. Set it on a TEMPLATE to give a
 	// whole class of zones one source address -- the same granularity argument
@@ -698,7 +698,7 @@ type DnssecPolicyRolloverConf struct {
 // DnssecPolicyTtlsConf is the YAML `ttls:` subtree under a DNSSEC policy.
 type DnssecPolicyTtlsConf struct {
 	DNSKEY    string `yaml:"dnskey" mapstructure:"dnskey"`
-	MaxServed string `yaml:"max_served" mapstructure:"max_served"`
+	MaxServed string `yaml:"max-served" mapstructure:"max-served"`
 	// ParentDS is an optional override for the parent's DS RRset TTL when
 	// the engine cannot observe it (parent unreachable at zone init,
 	// testbed determinism, registries that gate DS queries). Used by the
@@ -1210,7 +1210,7 @@ type KeyDB struct {
 	// OutboundSoaSerialMode()/SetOutboundSoaSerial(), never directly.
 	outboundSoaSerial atomic.Pointer[string]
 	// transferSrc is the server-global source address list for outbound zone
-	// transfers (dnsengine.transfer_src). Per-zone ZoneData.TransferSrc wins;
+	// transfers (dnsengine.transfer-src). Per-zone ZoneData.TransferSrc wins;
 	// see zd.EffectiveTransferSrc(). Same reload-vs-read exposure as the two
 	// above; access via TransferSrcList()/SetTransferSrc().
 	transferSrc atomic.Pointer[[]string]

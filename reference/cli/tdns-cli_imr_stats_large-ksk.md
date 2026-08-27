@@ -5,7 +5,7 @@ Show large-KSK IMR DS and DNSKEY lookup statistics
 ### Synopsis
 
 Counters for evaluating direct-TCP DNSKEY fetching when parent DS
-signals a large KSK algorithm (dnssec.large_algorithms).
+signals a large KSK algorithm (dnssec.large-algorithms).
 
 DS RRsets are counted when cached from referrals; large-alg DS RRs are
 counted individually per algorithm. DNSKEY lookups are counted at the

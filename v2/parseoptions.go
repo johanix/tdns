@@ -247,39 +247,39 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			// Catalog zone requires valid catalog configuration
 			// Note: options[OptCatalogZone] was already set in pre-scan above
 
-			// Check for group_prefixes (required if config_groups exist)
+			// Check for group-prefixes (required if config-groups exist)
 			if conf.Catalog != nil && len(conf.Catalog.ConfigGroups) > 0 && (conf.Catalog.GroupPrefixes.Config == "" || conf.Catalog.GroupPrefixes.Signing == "") {
-				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.group_prefixes is missing. Please ensure your config has:\n"+
+				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.group-prefixes is missing. Please ensure your config has:\n"+
 					"catalog:\n"+
-					"  group_prefixes:\n"+
+					"  group-prefixes:\n"+
 					"    config: \"config\"\n"+
 					"    signing: \"sign\"\n"+
-					"  config_groups:\n"+
+					"  config-groups:\n"+
 					"    example:\n"+
 					"      upstream: \"primary-server:port\"\n"+
 					"      store: map\n", zname)
-				lg.Error("catalog zone missing group_prefixes config", "zone", zname, "detail", errorMsg)
+				lg.Error("catalog zone missing group-prefixes config", "zone", zname, "detail", errorMsg)
 				if zd != nil {
 					zd.SetError(ConfigError, "%s", errorMsg)
 				}
 				continue
 			}
 
-			// Check for config_groups (or legacy meta_groups)
+			// Check for config-groups (or legacy meta-groups)
 			if conf.Catalog == nil || (conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil) {
-				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.config_groups is missing or incorrectly structured. Please ensure your config has:\n"+
+				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.config-groups is missing or incorrectly structured. Please ensure your config has:\n"+
 					"catalog:\n"+
-					"  group_prefixes:\n"+
+					"  group-prefixes:\n"+
 					"    config: \"config\"\n"+
 					"    signing: \"sign\"\n"+
-					"  config_groups:\n"+
+					"  config-groups:\n"+
 					"    example:\n"+
 					"      upstream: \"primary-server:port\"\n"+
 					"      store: map\n"+
 					"dynamiczones:\n"+
-					"  catalog_members:\n"+
+					"  catalog-members:\n"+
 					"    add: auto\n", zname)
-				lg.Error("catalog zone missing config_groups", "zone", zname, "detail", errorMsg)
+				lg.Error("catalog zone missing config-groups", "zone", zname, "detail", errorMsg)
 				if zd != nil {
 					zd.SetError(ConfigError, "%s", errorMsg)
 				}

@@ -183,7 +183,7 @@ documents the wrong formula:
 // propagationDelay, where T_roll_i = active.active_at + i × KSK.Lifetime
 ```
 
-`propagationDelay` is sourced from `kasp.propagation_delay` only
+`propagationDelay` is sourced from `kasp.propagation-delay` only
 (`key_state_worker.go:30-40`). The function has no parameter for
 `DNSKEY_TTL` at all — its signature
 `(conf, kdb, now, propagationDelay)` (`ksk_rollover_automated.go:776`)
@@ -202,7 +202,7 @@ the bug the §4 spec was written to flag.**
 
 ---
 
-## E13 — effective `DNSKEY_TTL = min(ttls.dnskey, ttls.max_served)`
+## E13 — effective `DNSKEY_TTL = min(ttls.dnskey, ttls.max-served)`
 
 **Verdict:** DIVERGES (E13 is computed for the served wire TTL via
 the clamp pipeline, but the value is **not** consumed by E12).
@@ -219,7 +219,7 @@ But E12's call site does not use it.
 `TransitionRolloverKskDsPublishedToStandby` only receives
 `propagationDelay`. Even if E12 were corrected to subtract a DNSKEY
 TTL, no caller currently passes one in, and there is no
-`min(ttls.dnskey, ttls.max_served)` expression in the rollover-engine
+`min(ttls.dnskey, ttls.max-served)` expression in the rollover-engine
 path. **Operational consequence:** even fixing E12 requires plumbing
 the clamped DNSKEY TTL through to this function.
 
@@ -315,7 +315,7 @@ completion). Order is correct per §4.5(b).
    change, even though `pol` is already available via
    `Zones.Get(zoneName).DnssecPolicy` inside the loop
    (`ksk_rollover_automated.go:794-798`). The fix is local (compute
-   `min(ttls.dnskey, ttls.max_served)` from the per-zone policy and
+   `min(ttls.dnskey, ttls.max-served)` from the per-zone policy and
    subtract it in addition to `propagationDelay`).
 
 3. **`completeRolloverWithdraw` adds one-tick latency to E6.** The

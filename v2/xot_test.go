@@ -592,7 +592,7 @@ func TestXoT_DANEModeEndToEnd(t *testing.T) {
 
 // TestXoT_DANEFailsClosedOnUnvalidated: an unvalidated TLSA is refused when
 // validation is required (the default), and accepted only in explicit lab mode
-// (require_dnssec_validation: false).
+// (require-dnssec-validation: false).
 func TestXoT_DANEFailsClosedOnUnvalidated(t *testing.T) {
 	zd := loadTestTransferZone(t, basicZone)
 	cert, leaf := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
@@ -610,7 +610,7 @@ func TestXoT_DANEFailsClosedOnUnvalidated(t *testing.T) {
 	}
 
 	// Lab mode: insecure state is accepted (with a warning), matching the
-	// imrengine.require_dnssec_validation escape hatch semantics.
+	// imrengine.require-dnssec-validation escape hatch semantics.
 	confLab := daneTestConf(t, leaf, port, cache.ValidationStateInsecure, false)
 	if _, err := xotTransfer(t, confLab, peer, srv, zd.ZoneName); err != nil {
 		t.Fatalf("lab-mode transfer failed: %v", err)

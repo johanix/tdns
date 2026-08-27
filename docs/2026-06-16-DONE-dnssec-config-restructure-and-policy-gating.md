@@ -33,22 +33,22 @@ governs zones (Zone.Errors, visible in `auth zone list`).
 - **Nest under dnssec:** — dnssecpolicies: -> dnssec.policies:, and
   kasp: -> dnssec.kasp:. Config-breaking, acceptable under the
   no-backwards-compat rule (operator migrates own config). The
-  split_algorithms / large_algorithms guardrails were already under
+  split-algorithms / large-algorithms guardrails were already under
   dnssec:; this puts the policies and KASP there too, so DNSSEC config
   is one block.
 
-- **Keep the name large_algorithms (do NOT rename)** — an earlier idea
+- **Keep the name large-algorithms (do NOT rename)** — an earlier idea
   was to rename it (e.g. large_dnskey_hints) because the name reads as
   "large KSK" when it is really an IMR transport-decision input. PR
   #257's transport-selection design resolves this differently and
   better: the field stays, and becomes ONE input among several
   transport-selection policy values. Its design doc states plainly:
-  "The dnssec.large_algorithms list stays (it is what use_ds_signal
+  "The dnssec.large-algorithms list stays (it is what use_ds_signal
   consults)." Renaming now would fight the direction we are merging
   into. So: keep the name.
 
 - **Algorithm NAMES, not codepoints, in config** — both
-  large_algorithms and split_algorithms list algorithms by name
+  large-algorithms and split-algorithms list algorithms by name
   (RSASHA512, FALCON512), resolved through the running binary's
   registry. Two reasons this is load-bearing, not cosmetic:
     1. Codepoints structurally defeat validation. A bare uint8 dropped
@@ -65,10 +65,10 @@ governs zones (Zone.Errors, visible in `auth zone list`).
 
 - **Unknown-algorithm handling differs by site** ("hard fail only
   where used"):
-    - large_algorithms: unknown name -> HARD config error, server
+    - large-algorithms: unknown name -> HARD config error, server
       refuses to start. It actively drives the IMR's transport
       decision, so a typo must not silently disable TCP.
-    - split_algorithms: unknown name -> WARN + skip. Pure allowlist
+    - split-algorithms: unknown name -> WARN + skip. Pure allowlist
       data; an unregistered algorithm can never be requested, so a
       missing entry is harmless. (Runtime-only: registration is known
       only inside the daemon.)
@@ -109,12 +109,12 @@ governs zones (Zone.Errors, visible in `auth zone list`).
     dnssec:
        # IMR: DNSKEY-over-non-UDP when a referral DS uses one of these.
        # Names, not codepoints. Unknown name = hard config error.
-       large_algorithms: [ RSASHA512 ]
+       large-algorithms: [ RSASHA512 ]
 
        # Which mixed KSK/ZSK algorithm pairs a policy may use.
        # kskAlg -> permitted zskAlgs. Same-alg policies always pass.
        # Differing pair must be listed or the policy is rejected.
-       split_algorithms:
+       split-algorithms:
           RSASHA512: [ ED25519, ECDSAP256SHA256 ]
 
        # Named policies a zone references via dnssec_policy.
@@ -124,8 +124,8 @@ governs zones (Zone.Errors, visible in `auth zone list`).
 
        # Key and Signing Policy for the KeyStateWorker.
        kasp:
-          propagation_delay: 1h
-          standby_zsk_count: 1
+          propagation-delay: 1h
+          standby-zsk-count: 1
 
 
 ## Steps
@@ -136,15 +136,15 @@ governs zones (Zone.Errors, visible in `auth zone list`).
    (dnssecPoliciesYAML, minimalConfigForValidate) moved policies under
    dnssec:. Samples migrated (auth, agent). Commit 491bb05.
 
-2. [done] **split_algorithms gate (fail closed).** New
-   dnssec.split_algorithms allowlist; validateSplitAlgorithm rejects a
+2. [done] **split-algorithms gate (fail closed).** New
+   dnssec.split-algorithms allowlist; validateSplitAlgorithm rejects a
    mixed pair not listed; same-alg always passes. Wired into runtime
    load, ParseDnssecPolicyConf, and the offline validator. Also fixed
    the automated KSK-rollover pipeline-fill bug (was generating rolled
    KSKs with pol.Algorithm instead of pol.KSKAlgorithm). Commit
    491bb05.
 
-3. [done] **large_algorithms -> names + hard-fail.** Field is now
+3. [done] **large-algorithms -> names + hard-fail.** Field is now
    []string; buildLargeAlgorithmSet resolves via the registry and
    returns an error on an unknown name; ParseConfig propagates it.
    Samples (auth/imr/agent) updated to names. Commit 3dc9909.
@@ -156,7 +156,7 @@ governs zones (Zone.Errors, visible in `auth zone list`).
    stray "policy accepted" log. Commit 39c3fd8.
 
    (The originally-separate "unknown-alg semantics" step folded in
-   here: split_algorithms warn+skip and policy-error-state were already
+   here: split-algorithms warn+skip and policy-error-state were already
    the behavior; this step added the visible error record.)
 
 5. [done] **CLI `tdns-cli auth keystore dnssec policies`.** Server-API
@@ -169,7 +169,7 @@ governs zones (Zone.Errors, visible in `auth zone list`).
    RolloverMethod.String() added. Server handler case in APIkeystore
    ranges conf.Internal.DnssecPolicies. CLI in cli/policies.go.
    LIVE-VERIFIED against a modern auth server: default/fastroll healthy,
-   large-ksk (RSASHA512 KSK + ED25519 ZSK) ok via split_algorithms, a
+   large-ksk (RSASHA512 KSK + ED25519 ZSK) ok via split-algorithms, a
    "broken" policy (alg FOOBAR) shows ERROR + reason, server started
    regardless (resilient startup confirmed end-to-end).
 
@@ -178,7 +178,7 @@ governs zones (Zone.Errors, visible in `auth zone list`).
 
 7. [merge] **Merge into #257 (imr-transport-selection-wip).** With
    explicit operator approval. Reconcile the overlapping files: convert
-   #257's `large_algorithms: [ 10 ]` sample to names; settle the metric
+   #257's `large-algorithms: [ 10 ]` sample to names; settle the metric
    rename (#257 renames DNSKEYLookupForcedTCP -> DNSKEYLookupBypassed);
    adopt #257's enum vocabulary where the two diffs touch the same
    hunks (config.go DnssecConf/InternalConf, parseconfig.go around the
@@ -187,7 +187,7 @@ governs zones (Zone.Errors, visible in `auth zone list`).
 
 ## Key files
 
-- v2/config.go — DnssecConf (large_algorithms []string, split_algorithms,
+- v2/config.go — DnssecConf (large-algorithms []string, split-algorithms,
   policies, kasp), InternalConf.
 - v2/structs.go — DnssecPolicy (Error field), DnssecPolicyConf.
 - v2/large_ksk.go — buildLargeAlgorithmSet (names, hard-fail),
@@ -201,4 +201,4 @@ governs zones (Zone.Errors, visible in `auth zone list`).
 - Samples: cmdv2/auth/tdns-auth.sample.yaml,
   cmdv2/imr/tdns-imr.sample.yaml, cmdv2/agent/tdns-agent.sample.yaml.
 - Related design: 2026-05-21-large-ksk-distinct-algs-and-imr-tcp-signal.md
-  (A.3.9 documents the split_algorithms gate).
+  (A.3.9 documents the split-algorithms gate).

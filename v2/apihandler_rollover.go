@@ -43,8 +43,8 @@ func APIRolloverStatus(conf *Config) func(w http.ResponseWriter, r *http.Request
 			pol = zd.DnssecPolicy
 		}
 
-		// Surface the kasp.check_interval / attempt-timeout invariant
-		// in every status response. Uses the parsed kasp.check_interval
+		// Surface the kasp.check-interval / attempt-timeout invariant
+		// in every status response. Uses the parsed kasp.check-interval
 		// the same way KeyStateWorker does at startup.
 		var checkInterval time.Duration
 		if conf.Dnssec.Kasp.CheckInterval != "" {
@@ -55,7 +55,7 @@ func APIRolloverStatus(conf *Config) func(w http.ResponseWriter, r *http.Request
 		if checkInterval == 0 {
 			checkInterval = time.Minute // defaultCheckInterval
 		}
-		// kasp.propagation_delay drives the ds-published → standby
+		// kasp.propagation-delay drives the ds-published → standby
 		// timing computed in populateNextTransitions.
 		var propagationDelay time.Duration
 		if conf.Dnssec.Kasp.PropagationDelay != "" {

@@ -314,7 +314,7 @@ func ServerTLSConfigForDoT(conf *Config, cert *tls.Certificate, requestClientCer
 // TLSA cache (populated, with validation state, by SVCB/TSYNC discovery and
 // direct TLSA answers) is consulted first; otherwise the RRset is fetched and
 // validated through the in-process IMR. The imr.RequireDnssecValidation
-// lab-mode escape hatch (config: imrengine.require_dnssec_validation) is
+// lab-mode escape hatch (config: imrengine.require-dnssec-validation) is
 // honored, with a loud warning, to match how the rest of tdns treats TLSA.
 func (conf *Config) lookupTLSAValidated(name, port string) (*core.RRset, error) {
 	// Outbound secondary-pull path: a background refresh, not a request, so it
@@ -338,7 +338,7 @@ func lookupTLSAValidatedIMR(ctx context.Context, imr *Imr, name, port string) (*
 			return true
 		}
 		if !requireSecure {
-			lg.Warn("xot: accepting non-secure TLSA RRset because require_dnssec_validation is disabled (lab mode)", "owner", owner, "state", cache.ValidationStateToString[state])
+			lg.Warn("xot: accepting non-secure TLSA RRset because require-dnssec-validation is disabled (lab mode)", "owner", owner, "state", cache.ValidationStateToString[state])
 			return true
 		}
 		return false

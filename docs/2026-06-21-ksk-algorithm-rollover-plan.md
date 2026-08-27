@@ -64,7 +64,7 @@ state machine (eval §1):
 
 ```
 idle
-  → pending-child-publish      (wait propagation_delay; DNSKEY to secondaries)
+  → pending-child-publish      (wait propagation-delay; DNSKEY to secondaries)
   → pending-parent-push        (send DS UPDATE and/or publish CDS + NOTIFY)
   → pending-parent-observe     (POLL parent until DS set matches)
   → idle                       (on confirm: advance keys; shrink old DS)
@@ -184,7 +184,7 @@ implemented):
    new-alg.
 2. **Mint** a new-alg KSK into `created` (pipeline-fill, when the engine
    would naturally generate the next pipeline key — see §6 on counting).
-3. **Publish** its DNSKEY; wait `propagation_delay`
+3. **Publish** its DNSKEY; wait `propagation-delay`
    (pending-child-publish).
 4. **Push** the DS — now a MIXED set: old-alg DS (from the active
    old-alg KSK) + new-alg DS (from the created/ds-published new-alg KSK)
@@ -399,8 +399,8 @@ correct; this section is the audit checklist, not a list of known bugs.
   reviewer does not "fix" a non-bug. (A separate future concern is
   multiple digest types per DS, unrelated to this roll.)
 
-- **K9b — `pending-child-publish` propagation_delay** is a single
-  zone-wide `kasp.propagation_delay` (`ksk_rollover_automated.go:~265`).
+- **K9b — `pending-child-publish` propagation-delay** is a single
+  zone-wide `kasp.propagation-delay` (`ksk_rollover_automated.go:~265`).
   Both old and new alg DNSKEYs propagate as one RRset (the apex DNSKEY
   RRset), so a single delay is correct. NO change.
 
@@ -424,7 +424,7 @@ correct; this section is the audit checklist, not a list of known bugs.
 - **K9e — large new-alg KSK (PQ).** A MAYO5/SNOVA KSK DNSKEY is large;
   the apex DNSKEY RRset during the overlap holds old-alg + new-alg
   DNSKEYs + their RRSIGs and the CDS spans both. This RRset goes over TCP
-  regardless (eval §3.2.1), and `dnssec.large_algorithms` already drives
+  regardless (eval §3.2.1), and `dnssec.large-algorithms` already drives
   the IMR transport decision (`large_ksk.go`). VERIFY the overlap-window
   apex DNSKEY/CDS RRset transports correctly when one algorithm is large
   (it should — this is the alg-split steady state the large-alg work

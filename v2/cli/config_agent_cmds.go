@@ -277,7 +277,7 @@ imrengine:
    addresses:   [ 127.0.0.1:5453, '[::1]:5453' ]
    transports:  [ do53 ]
    # In a lab without a complete DNSSEC chain, relax validation:
-   #   require_dnssec_validation: false
+   #   require-dnssec-validation: false
 
 # Zone templates. Both are SECONDARY templates — see the note at the top.
 # The commented-out zone below uses the first one.

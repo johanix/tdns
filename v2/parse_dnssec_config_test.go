@@ -29,9 +29,9 @@ func TestParseDnssecConfig(t *testing.T) {
 	conf.Dnssec.Policies = map[string]DnssecPolicyConf{
 		// Healthy same-algorithm policy.
 		"plain": policyConf("ED25519", "", ""),
-		// Healthy mixed pair, permitted by split_algorithms.
+		// Healthy mixed pair, permitted by split-algorithms.
 		"split-ok": policyConf("ED25519", "RSASHA512", "ED25519"),
-		// Mixed pair NOT in split_algorithms → broken (Error set).
+		// Mixed pair NOT in split-algorithms → broken (Error set).
 		"split-bad": policyConf("ED25519", "ECDSAP256SHA256", "ED25519"),
 		// Unknown algorithm → broken.
 		"bad-alg": policyConf("FOOBAR", "", ""),
@@ -41,7 +41,7 @@ func TestParseDnssecConfig(t *testing.T) {
 		t.Fatalf("parseDnssecConfig: %v", err)
 	}
 
-	// large_algorithms resolved.
+	// large-algorithms resolved.
 	if !conf.IsLargeAlgorithm(dns.RSASHA512) {
 		t.Fatal("RSASHA512 should be a large algorithm")
 	}
@@ -147,7 +147,7 @@ func TestParseDnssecConfig_RoleEnforcement(t *testing.T) {
 	registerKSKOnlyStub(t)
 
 	conf := &Config{}
-	// Permit BOTH mixed pairings via split_algorithms so the split check
+	// Permit BOTH mixed pairings via split-algorithms so the split check
 	// passes and the role check is the only thing that can reject a
 	// policy — otherwise validateSplitAlgorithm (which runs first) would
 	// mask the role violation we are trying to test.

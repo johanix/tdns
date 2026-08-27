@@ -120,7 +120,7 @@ Summary of what landed:
 - **Helper cleanups** — `SendAgentMgmtCmd` (in both repos, independent implementations) lost its `prefix` parameter; role hardcoded to `"agent"` inside. `SendAgentHsyncCommand` same shape. `executeCombinerRequest` lost its `cmdName` parameter; role hardcoded to `"combiner"` inside. `DebugAgentQueueStatusCmd` hardcoded to `"agent"`.
 - **Latent bug fixed in passing** — `mpcli signer zone {reload,write,list,bump}` previously hit the *auth* daemon because the four Run bodies in the old `zone_cmds.go` hardcoded `"auth"`. The `NewZoneCmd("signer")` factory now routes them correctly.
 - **File migration** — `distrib_cmds.go` and `transaction_cmds.go` moved from `tdns/v2/cli` to `tdns-mp/v2/cli` (their endpoints are served exclusively by tdns-mp daemons; the tdns-cli wiring was dead).
-- **Dead code removal** — `GetCommandContext` function deleted from `ping.go`. `deadcode_hsync_cmds.go` and `deadcode_hsync_debug_cmds.go` deleted. `getClientKeyFromParent` and `getApiDetailsByClientKey` retained — still used by daemon / keys helpers for `apiservers[].config_file` / `apiservers[].command` lookup.
+- **Dead code removal** — `GetCommandContext` function deleted from `ping.go`. `deadcode_hsync_cmds.go` and `deadcode_hsync_debug_cmds.go` deleted. `getClientKeyFromParent` and `getApiDetailsByClientKey` retained — still used by daemon / keys helpers for `apiservers[].config-file` / `apiservers[].command` lookup.
 
 **Not verified** — Phase 6 smoke-test matrix (`ping`, `zone list`, combiner zone/data, signer `zone mplist`, mpcli router/peer/gossip) has not been run on a real lab. Builds are green but runtime behaviour needs lab testing before declaring the refactor shipped.
 
