@@ -39,8 +39,8 @@ default — `/etc/tdns/tdns-auth.yaml`, `/etc/tdns/tdns-imr.yaml` and so on.
 Override with `--config <path>`. No TDNS application reads configuration from
 environment variables.
 
-**Includes.** A top-level `include:` list splices other YAML files into the
-main config before it is parsed. Includes may nest, to a depth of 10.
+**Includes.** A top-level `include:` list pulls other YAML files into the main
+config before it is parsed. Includes may nest, to a depth of 10.
 
 ```yaml
 include:
@@ -48,6 +48,78 @@ include:
    - auth-zones.yaml
    - /var/lib/tdns/dynamic-zones.yaml
 ```
+
+*An included file REPLACES, it does not add.* This is the part that surprises
+people, so it is worth being precise about:
+
+- A **list** — `zones:`, `templates:` — in an included file replaces the whole
+  list. If the main config has three zones and an include names one, the server
+  serves **one** zone.
+- A **map** merges, but only one level down. `dnssec:` in an included file
+  merges with `dnssec:` in the main config key by key, so `dnssec.completeness`
+  in one and `dnssec.kasp` in the other both survive — but if both files set
+  `dnssec.policies`, the included file's policies replace the main config's
+  entirely.
+- The **included file wins**, which is the opposite of most config systems.
+
+A replace that actually discards something is logged, so it is not silent:
+
+```
+[WARN/config] include replaced a config section rather than adding to it
+   key=zones replaced-by=/etc/tdns/generated.yaml entries-dropped=3
+   hint=this is the historical behaviour; use `- {file: ..., merge: true}` to combine instead
+```
+
+**Merging an include.** To combine rather than replace, ask for it per include:
+
+```yaml
+include:
+   - auth-templates.yaml           # replaces, as always
+   - file: generated-zones.yaml
+     merge: true                   # combines
+```
+
+A bare string is always a replace, so every config written before this existed
+behaves exactly as it did. The map form takes `file:` (required) and `merge:`
+(optional, default false) and nothing else; an unknown key, or `merge: true`
+with no `file:`, is an error rather than a silently ignored entry.
+
+Merging applies **only to these paths**, and only for an include that asked:
+
+| Path | How it combines |
+|---|---|
+| `zones` | concatenated; a repeated zone name is an error |
+| `templates` | concatenated; a repeated template name is an error |
+| `dnssec.policies` | merged by policy name; a repeated name is an error |
+| `dnssec.large_algorithms` | combined as a set |
+| `dnssec.split_algorithms` | merged by KSK, the ZSK lists combined as sets |
+
+Everything else replaces, whether or not the include asked to merge. That is
+deliberate rather than an oversight: `dnsengine.addresses`, `apiserver.addresses`
+and `dnsengine.transports` are lists too, and combining those would silently make
+the server listen on more addresses than the file in front of you names — the
+same shape of mistake as widening an ACL, and harder to notice.
+
+Note that merging `dnssec.split_algorithms` **widens** which KSK/ZSK algorithm
+pairings the server will accept. That is usually what you want when a generated
+file brings its own pairings, but it is a widening, not a restatement.
+
+**Two definitions of one name.** Whether they come from one file or from a
+merged include, a repeated name is never resolved by picking one:
+
+- A **zone** defined twice is served under *neither* definition. It stays
+  visible in `zone list` carrying a config error, and every other zone is
+  unaffected — a server does not stop over one zone pasted twice.
+- A **DNSSEC policy** defined twice is dropped, and any zone naming it fails to
+  resolve its policy and is quarantined the same way.
+- A **template** defined twice fails config load, because every zone expanded
+  from it would otherwise be a coin flip.
+- A repeated key inside a *mapping* — two policies of one name in one file —
+  is rejected by the YAML parser before any of this is reached.
+
+Run `tdns-cli <role> config check` to find duplicates before a restart acts on
+them; it reports them without changing anything. It reads the config through the
+same loader the daemon uses, so what it reports is what the daemon will do.
 
 **The `log:` block is special.** It is read directly out of the *main* config
 file, early, before includes are resolved. It must therefore appear at the top

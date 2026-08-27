@@ -6,14 +6,31 @@
 #   - auth-zones.sample.yaml:     Zone declarations (rename to .yaml in production)
 #   - dynamic-zones.yaml:         Auto-generated dynamic zones (created by server)
 #
+# An included file REPLACES what it names; it does not add to it. A file
+# carrying zones: replaces the whole zones: list, so the two entries below work
+# because each owns a different key (templates: and zones:) -- not because
+# includes combine.
+#
+# To combine instead, ask per include:
+#
+#   include:
+#      - auth-zones.yaml                 # replaces
+#      - file: generated-zones.yaml
+#        merge: true                     # combines
+#
+# Merging is limited to zones, templates, dnssec.policies,
+# dnssec.large_algorithms and dnssec.split_algorithms. Everything else replaces
+# even when merge: true -- notably dnsengine.addresses and apiserver.addresses,
+# where combining would silently widen what the server listens on. See
+# guide/configuration.md.
 include:
    - auth-templates.sample.yaml          # Zone templates (rename to .yaml when deploying)
    - auth-zones.sample.yaml              # Zone declarations (rename to .yaml when deploying)
    # NOTE: do NOT include the dynamiczones configfile here. Dynamic zones are
    # loaded at startup on their own (with their API-managed/catalog markers);
-   # including the file would route them through the static zone parser (which
-   # drops the markers) and its zones: list would OVERRIDE the zones: of the
-   # other included files (include merges replace list-valued keys).
+   # including the file routes them through the static zone parser, which drops
+   # the markers so they degrade to looking static. merge: true does not help:
+   # it keeps both zone sets and still strips the markers.
 
 service:
    name:              TDNS-AUTH
