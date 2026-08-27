@@ -281,6 +281,34 @@ func TestDuplicateZoneComparesFqdn(t *testing.T) {
 	}
 }
 
+// The case half: DNS names are case-insensitive (RFC 4343), so these are one
+// zone written twice. Zones is a case-SENSITIVE Cmap, so without folding the
+// comparison the loader would build two entries and answer from whichever one
+// the query's case happened to match -- the same silent last-wins this change
+// exists to end, just spelled differently. Both entries must be quarantined.
+func TestDuplicateZoneComparesCaseInsensitively(t *testing.T) {
+	Zones = core.NewCmap[*ZoneData]()
+	conf := &Config{Zones: []ZoneConf{
+		{Name: "Dup.Example.", Type: "primary", Store: "map", Zonefile: "/nonexistent"},
+		{Name: "dup.example.", Type: "primary", Store: "map", Zonefile: "/nonexistent"},
+	}}
+	_, broken, err := conf.ParseZones(context.Background(), false)
+	if err != nil {
+		t.Fatalf("ParseZones: %v", err)
+	}
+	want := map[string]bool{"Dup.Example.": false, "dup.example.": false}
+	for _, z := range broken {
+		if _, ok := want[z]; ok {
+			want[z] = true
+		}
+	}
+	for z, got := range want {
+		if !got {
+			t.Errorf("%s differs from its twin only in case; it must be quarantined too. broken=%v", z, broken)
+		}
+	}
+}
+
 // TestGeneratedConfigCanBeIncluded is the case this whole change exists for: a
 // generator emits the zones and dnssec blocks its zones need, and the operator
 // includes that file instead of splicing its contents into the server config

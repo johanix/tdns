@@ -692,6 +692,20 @@ func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
 	return nil
 }
 
+// zoneNameKey is the key two zone declarations are compared under to decide
+// whether they are the same zone: case-folded and FQDN-normalized. DNS names
+// are case-insensitive (RFC 4343), and tdns accepts a name with or without its
+// trailing dot, so "Example.com" and "example.com." are one zone written twice.
+//
+// It is a COMPARISON key only. Zones stay registered under dns.Fqdn(name) with
+// their case as written, so which names the daemon answers for is unchanged --
+// only whether two declarations are recognised as one. tdns-cli's config check
+// compares under the same rule, so what it reports and what this quarantines
+// are the same set.
+func zoneNameKey(name string) string {
+	return strings.ToLower(dns.Fqdn(strings.TrimSpace(name)))
+}
+
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
 //
 // Returns (allZones, brokenZones, err). allZones lists zones whose
@@ -734,15 +748,15 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 	duplicateZones := map[string]bool{}
 	seenZoneName := map[string]bool{}
 	for i := range conf.Zones {
-		zname := dns.Fqdn(conf.Zones[i].Name)
-		if zname == "." {
+		zkey := zoneNameKey(conf.Zones[i].Name)
+		if zkey == "." {
 			continue // an unnamed entry is caught by the validation below
 		}
-		if seenZoneName[zname] {
-			duplicateZones[zname] = true
+		if seenZoneName[zkey] {
+			duplicateZones[zkey] = true
 			continue
 		}
-		seenZoneName[zname] = true
+		seenZoneName[zkey] = true
 	}
 
 	// Process each zone configuration
@@ -769,7 +783,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// Quarantining it rather than refusing the whole config is the same
 		// trade the loader makes everywhere else: a host carrying a hundred
 		// thousand zones does not stop because one of them was pasted twice.
-		if duplicateZones[zname] {
+		if duplicateZones[zoneNameKey(zname)] {
 			lgConfig.Error("zone defined more than once; not serving it under either definition",
 				"zone", zname)
 			zd.SetError(ConfigError, "zone %s is defined more than once in the configuration; "+
