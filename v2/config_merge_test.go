@@ -87,16 +87,53 @@ func TestMergeNestedPoliciesByName(t *testing.T) {
 }
 
 func TestNonAllowlistedNestedKeysStillReplace(t *testing.T) {
-	dst := yml(t, "dnssec:\n  kasp:\n    check_interval: 1m\n    propagation_delay: 1h\n")
-	src := yml(t, "dnssec:\n  kasp:\n    check_interval: 5m\n")
+	// The loader has always merged exactly ONE level: two top-level maps have
+	// their children assigned wholesale. So an include carrying a partial
+	// dnssec.kasp replaces the whole kasp map and the siblings it omits are
+	// gone -- decoder defaults then apply.
+	//
+	// This must hold whether or not the include opted in, because opting in
+	// buys the ALLOWLIST, not a deeper merge. An earlier version of this file
+	// recursed unconditionally, which quietly made those siblings survive; and
+	// this test, written against that behaviour, asserted they survived while
+	// its name said they should not.
+	for _, doMerge := range []bool{false, true} {
+		name := "bare include"
+		if doMerge {
+			name = "merge: true"
+		}
+		t.Run(name, func(t *testing.T) {
+			dst := yml(t, "dnssec:\n  kasp:\n    check_interval: 1m\n    propagation_delay: 1h\n")
+			src := yml(t, "dnssec:\n  kasp:\n    check_interval: 5m\n")
+			merge(t, dst, src, doMerge)
+
+			kasp := dst["dnssec"].(map[string]interface{})["kasp"].(map[string]interface{})
+			if kasp["check_interval"] != "5m" {
+				t.Errorf("included file should win for a non-allowlisted key: %v", kasp)
+			}
+			if _, survived := kasp["propagation_delay"]; survived {
+				t.Errorf("a non-allowlisted nested map must be REPLACED, not deep-merged; "+
+					"the sibling should be gone: %v", kasp)
+			}
+		})
+	}
+}
+
+// TestAllowlistedNestedKeyIsStillReachable is the other half: the recursion
+// that F1 restricted must still go deep enough to reach dnssec.policies, which
+// is the case the whole feature exists for. Restricting it to "no recursion at
+// all" would compile, keep the test above green, and silently break the
+// motivating example.
+func TestAllowlistedNestedKeyIsStillReachable(t *testing.T) {
+	dst := yml(t, "dnssec:\n  policies:\n    alpha:\n      algorithm: ED25519\n")
+	src := yml(t, "dnssec:\n  policies:\n    beta:\n      algorithm: ED25519\n")
 	merge(t, dst, src, true)
 
-	kasp := dst["dnssec"].(map[string]interface{})["kasp"].(map[string]interface{})
-	if kasp["check_interval"] != "5m" {
-		t.Errorf("included file should win for a non-allowlisted key: %v", kasp)
-	}
-	if kasp["propagation_delay"] != "1h" {
-		t.Errorf("one-level map merge should keep the sibling: %v", kasp)
+	policies := dst["dnssec"].(map[string]interface{})["policies"].(map[string]interface{})
+	for _, want := range []string{"alpha", "beta"} {
+		if _, ok := policies[want]; !ok {
+			t.Errorf("policy %q lost; an opted-in dnssec.policies must union: %v", want, policies)
+		}
 	}
 }
 
@@ -145,7 +182,7 @@ func TestCollisionNamesBothFiles(t *testing.T) {
 	st := newMergeState()
 	// The including file's own items have to be recorded before it merges,
 	// which is what processConfigFile does for the file it just read.
-	recordOrigins("zones", dst["zones"], "main.yaml", st, false)
+	recordOrigins("zones", dst["zones"], "main.yaml", st, nil, false)
 	if err := mergeConfigMaps(dst, src, "", "inc.yaml", true, st, nil); err != nil {
 		t.Fatalf("merge: %v", err)
 	}

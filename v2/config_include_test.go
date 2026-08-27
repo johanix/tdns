@@ -8,6 +8,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -159,13 +161,19 @@ func TestIncludeMapFormSpec(t *testing.T) {
 	cases := []struct {
 		name, include string
 		wantErr       string
+		// wantZones is what zones: must hold afterwards, for the cases that
+		// succeed. Asserting only err == nil would pass just as happily if the
+		// map form silently MERGED by default, which is the one thing the
+		// spec says it must not do.
+		wantZones []string
 	}{
-		{"merge omitted means replace", "  - {file: inc.yaml}", ""},
-		{"merge false means replace", "  - {file: inc.yaml, merge: false}", ""},
-		{"unknown key", "  - {file: inc.yaml, mrege: true}", "unknown key"},
-		{"missing file", "  - {merge: true}", "no file"},
-		{"merge not a bool", "  - {file: inc.yaml, merge: yes-please}", "must be true or false"},
-		{"entry is a number", "  - 42", "must be a path"},
+		{"merge omitted means replace", "  - {file: inc.yaml}", "", []string{"b.example."}},
+		{"merge false means replace", "  - {file: inc.yaml, merge: false}", "", []string{"b.example."}},
+		{"merge true unions", "  - {file: inc.yaml, merge: true}", "", []string{"a.example.", "b.example."}},
+		{"unknown key", "  - {file: inc.yaml, mrege: true}", "unknown key", nil},
+		{"missing file", "  - {merge: true}", "no file", nil},
+		{"merge not a bool", "  - {file: inc.yaml, merge: yes-please}", "must be true or false", nil},
+		{"entry is a number", "  - 42", "must be a path", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,10 +182,18 @@ func TestIncludeMapFormSpec(t *testing.T) {
 				"inc.yaml":  "zones:\n  - name: b.example.\n",
 			})
 			st := newMergeState()
-			_, _, err := processConfigFile(main, filepath.Dir(main), 0, st)
+			cfg, _, err := processConfigFile(main, filepath.Dir(main), 0, st)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
+				}
+				var got []string
+				for _, z := range cfg["zones"].([]interface{}) {
+					got = append(got, z.(map[string]interface{})["name"].(string))
+				}
+				sort.Strings(got)
+				if strings.Join(got, ",") != strings.Join(tc.wantZones, ",") {
+					t.Errorf("zones = %v, want %v", got, tc.wantZones)
 				}
 				return
 			}
@@ -386,5 +402,129 @@ zones:
 	if len(st.Collisions()) != 0 || len(st.Clobbers()) != 0 {
 		t.Errorf("nothing should be reported for a clean generated include: %+v %+v",
 			st.Collisions(), st.Clobbers())
+	}
+}
+
+// TestProvenanceWhenTheMainFileLacksTheKey covers the hole the nested-collision
+// test above cannot reach.
+//
+// That test puts zones: on main, so the merge takes the "destination already
+// has this key" path. When main does NOT carry the key -- the common shape of a
+// config that delegates a whole section to an include -- the assign path runs
+// instead, and it used to stamp the file doing the merging rather than the file
+// the item was read from. The result was a collision report blaming the
+// intermediate file, which contains nothing.
+func TestProvenanceWhenTheMainFileLacksTheKey(t *testing.T) {
+	main := writeFiles(t, map[string]string{
+		"main.yaml": "include:\n  - {file: mid.yaml, merge: true}\nservice:\n  name: T\n",
+		"mid.yaml":  "include:\n  - {file: leaf.yaml, merge: true}\n",
+		"leaf.yaml": "zones:\n  - name: a.example.\n",
+	})
+	st := newMergeState()
+	if _, _, err := processConfigFile(main, filepath.Dir(main), 0, st); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got, ok := st.OriginOf("zones", "a.example.")
+	if !ok {
+		t.Fatal("no origin recorded for the zone at all")
+	}
+	if filepath.Base(got) != "leaf.yaml" {
+		t.Errorf("origin = %s, want leaf.yaml -- the intermediate file defines no zones",
+			filepath.Base(got))
+	}
+}
+
+// TestAllowlistSpellingMatchesTheConfigStruct is a tripwire for a rename that
+// would otherwise break this feature in total silence.
+//
+// The allowlist is a set of YAML key PATHS. tdns#406 respells every config key
+// with hyphens -- dnssec.large_algorithms becomes dnssec.large-algorithms --
+// and keeps no alias. Nothing in the merge would complain: an allowlist entry
+// naming a path that no longer exists simply never matches, so an opted-in
+// include quietly goes back to replacing, which is the exact behaviour this
+// whole change exists to fix. Green tests written against the old spelling
+// would stay green.
+//
+// So: every allowlisted path must resolve to a real yaml key on Config. When
+// #406 lands, this goes red until the allowlist is updated to match.
+func TestAllowlistSpellingMatchesTheConfigStruct(t *testing.T) {
+	for path := range mergeAllowlist {
+		if !yamlPathExists(reflect.TypeOf(Config{}), strings.Split(path, ".")) {
+			t.Errorf("allowlist path %q does not exist as a yaml key on Config; "+
+				"if a config key was renamed, the allowlist must be renamed with it "+
+				"or opted-in merging silently reverts to replace", path)
+		}
+	}
+}
+
+// yamlPathExists walks a dotted yaml path through a struct's yaml tags.
+func yamlPathExists(t reflect.Type, parts []string) bool {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if len(parts) == 0 {
+		return true
+	}
+	if t.Kind() != reflect.Struct {
+		// A map-valued node (dnssec.policies) has no further struct to walk;
+		// reaching it means the path exists.
+		return t.Kind() == reflect.Map
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		tag := strings.Split(f.Tag.Get("yaml"), ",")[0]
+		if tag == "" {
+			tag = strings.ToLower(f.Name)
+		}
+		if tag != parts[0] {
+			continue
+		}
+		ft := f.Type
+		for ft.Kind() == reflect.Ptr {
+			ft = ft.Elem()
+		}
+		if len(parts) == 1 {
+			return true
+		}
+		return yamlPathExists(ft, parts[1:])
+	}
+	return false
+}
+
+// TestCollisionComparesZoneNamesLikeTheDaemon closes the gap between what the
+// merge calls a collision and what ParseZones calls a duplicate.
+//
+// The merge compared the raw YAML strings, so "example.com" in one file and
+// "example.com." in another looked like two different zones and no collision
+// was reported. The pre-pass then compared them with zoneNameKey, saw one zone
+// declared twice, and quarantined it. The operator was told the zone is broken
+// and never told which two files it came from -- the one piece of information
+// the merge is uniquely able to supply, since after merging nothing remembers.
+func TestCollisionComparesZoneNamesLikeTheDaemon(t *testing.T) {
+	for _, tc := range []struct{ name, mainZone, incZone string }{
+		{"trailing dot", "example.com", "example.com."},
+		{"case", "Example.com.", "example.com."},
+		{"both", "EXAMPLE.COM", "example.com."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			main := writeFiles(t, map[string]string{
+				"main.yaml": "include:\n  - {file: inc.yaml, merge: true}\nzones:\n  - name: " + tc.mainZone + "\n",
+				"inc.yaml":  "zones:\n  - name: " + tc.incZone + "\n",
+			})
+			st := newMergeState()
+			if _, _, err := processConfigFile(main, filepath.Dir(main), 0, st); err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			cols := st.Collisions()
+			if len(cols) != 1 {
+				t.Fatalf("%q and %q are one zone to the daemon; want 1 collision, got %d",
+					tc.mainZone, tc.incZone, len(cols))
+			}
+			// And it must name both files, which is the useful half.
+			if filepath.Base(cols[0].First) != "main.yaml" || filepath.Base(cols[0].Again) != "inc.yaml" {
+				t.Errorf("collision should name both files, got %s and %s",
+					filepath.Base(cols[0].First), filepath.Base(cols[0].Again))
+			}
+		})
 	}
 }

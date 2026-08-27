@@ -751,7 +751,7 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 		if first, dup := seen[zoneKey(zname)]; dup {
 			rep.fail(g, zname,
 				fmt.Sprintf("duplicate zone declaration (entries %d and %d)", first+1, i+1),
-				"remove the duplicate entry; only one is served today, and which one is not defined")
+				"remove the duplicate entry; a zone defined twice is served under NEITHER definition")
 			continue
 		}
 		seen[zoneKey(zname)] = i

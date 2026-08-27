@@ -65,6 +65,17 @@ var mergeAllowlist = map[string]mergeStrategy{
 	"dnssec.split_algorithms": mergeMapOfStringLists,
 }
 
+// isAllowlistPrefix reports whether any allowlisted path lives strictly below
+// this one, i.e. whether recursing is needed to reach one.
+func isAllowlistPrefix(path string) bool {
+	for k := range mergeAllowlist {
+		if strings.HasPrefix(k, path+".") {
+			return true
+		}
+	}
+	return false
+}
+
 // nameCollision records one allowlisted item defined in two files.
 //
 // It carries both file paths because that is the useful half of "X is defined
@@ -151,6 +162,25 @@ func originFrom(src *mergeState, path, name, fallback string) string {
 
 func originKey(path, name string) string { return path + "\x00" + name }
 
+// collationKey is the name two contributions are compared under to decide
+// whether they are the same item.
+//
+// Zones use the daemon's own rule (zoneNameKey: FQDN-normalized and
+// case-folded), because otherwise the merge and the ParseZones pre-pass
+// disagree: "example.com" from one file and "example.com." from another are one
+// zone to the daemon and get quarantined, but comparing the raw YAML strings
+// here saw two items and never logged which two files they came from -- so the
+// operator is told the zone is broken and not told where either half lives.
+//
+// Everything else is a plain identifier, folded for case only, matching what
+// config check does for template names.
+func collationKey(path, name string) string {
+	if path == "zones" {
+		return zoneNameKey(name)
+	}
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
 // noteOrigin records where an item came from, returning the earlier file and
 // true if this name has been seen before.
 func (m *mergeState) noteOrigin(path, name, file string) (string, bool) {
@@ -207,28 +237,41 @@ func mergeConfigMaps(dst, src map[string]interface{}, prefix, srcFile string,
 			st.findings.Clobbers = append(st.findings.Clobbers, clobber{
 				Path: path, By: srcFile, Lost: countItems(existing),
 			})
-			recordOrigins(path, v, srcFile, st, true)
+			recordOrigins(path, v, srcFile, st, srcState, true)
 			dst[k] = v
 
 		case exists:
-			// Both maps: the historical one-level merge, except that we
-			// recurse so a nested allowlisted path is still intercepted.
 			dstMap, ok1 := existing.(map[string]interface{})
 			srcMap, ok2 := v.(map[string]interface{})
-			if ok1 && ok2 {
+			// Recurse ONLY as far as the historical merge went, plus whatever
+			// is needed to reach a nested allowlisted key.
+			//
+			// The loader has always merged exactly one level: two top-level
+			// maps have their children assigned wholesale into the destination.
+			// Recursing unconditionally -- which an earlier version of this did
+			// -- deep-merges every nested map instead, so an include carrying a
+			// partial dnssec.kasp stopped dropping the siblings it omits. That
+			// is a silent change to what a BARE-STRING include does, on the
+			// default path this whole opt-in design exists to leave alone, and
+			// it is live on every SIGHUP.
+			//
+			// prefix == "" reproduces that one level. isAllowlistPrefix carries
+			// the recursion further only where an allowlisted path actually
+			// lives below (today: dnssec, for dnssec.policies and friends).
+			if ok1 && ok2 && (prefix == "" || isAllowlistPrefix(path)) {
 				if err := mergeConfigMaps(dstMap, srcMap, path, srcFile, doMerge, st, srcState); err != nil {
 					return err
 				}
 				continue
 			}
 			if allowlisted {
-				recordOrigins(path, v, srcFile, st, true)
+				recordOrigins(path, v, srcFile, st, srcState, true)
 			}
 			dst[k] = v
 
 		default:
 			if allowlisted {
-				recordOrigins(path, v, srcFile, st, false)
+				recordOrigins(path, v, srcFile, st, srcState, false)
 			}
 			dst[k] = v
 		}
@@ -252,11 +295,12 @@ func applyStrategy(s mergeStrategy, path string, dstVal, srcVal interface{},
 			if name == "" {
 				continue
 			}
+			key := collationKey(path, name)
 			// The item's own origin, not the file that happens to be merging
 			// it: with a nested include those differ, and the leaf is the one
 			// worth naming.
-			from := originFrom(srcState, path, name, srcFile)
-			if first, dup := st.noteOrigin(path, name, from); dup {
+			from := originFrom(srcState, path, key, srcFile)
+			if first, dup := st.noteOrigin(path, key, from); dup {
 				st.findings.Collisions = append(st.findings.Collisions, nameCollision{
 					Path: path, Name: name, First: first, Again: from,
 				})
@@ -304,7 +348,8 @@ func applyStrategy(s mergeStrategy, path string, dstVal, srcVal interface{},
 				delete(dstMap, name)
 				continue
 			}
-			st.noteOrigin(path, name, originFrom(srcState, path, name, srcFile))
+			key := collationKey(path, name)
+			st.noteOrigin(path, key, originFrom(srcState, path, key, srcFile))
 			dstMap[name] = srcMap[name]
 		}
 		return dstMap, nil
@@ -347,7 +392,15 @@ func typeMismatch(path string, dstVal, srcVal interface{}, want string) error {
 // when the value is assigned rather than merged. replaced says the value
 // displaced an earlier one, in which case earlier origins for this path are
 // dropped -- they refer to items that are no longer in the config.
-func recordOrigins(path string, v interface{}, srcFile string, st *mergeState, replaced bool) {
+// recordOrigins notes where each allowlisted item came from.
+//
+// srcState is the child's own origin map, consulted per item: with a nested
+// include the file doing the merging and the file the item was READ from are
+// different, and the leaf is the one worth naming. Stamping srcFile instead --
+// which this did on the assign paths -- blames the intermediate file whenever
+// the destination did not already carry the key, which is the common shape of
+// a main config that delegates a whole section to an include.
+func recordOrigins(path string, v interface{}, srcFile string, st, srcState *mergeState, replaced bool) {
 	if replaced {
 		for k := range st.origin {
 			if strings.HasPrefix(k, path+"\x00") {
@@ -359,12 +412,13 @@ func recordOrigins(path string, v interface{}, srcFile string, st *mergeState, r
 	case []interface{}:
 		for _, item := range val {
 			if name := itemName(item); name != "" {
-				st.noteOrigin(path, name, srcFile)
+				key := collationKey(path, name)
+				st.noteOrigin(path, key, originFrom(srcState, path, key, srcFile))
 			}
 		}
 	case map[string]interface{}:
 		for name := range val {
-			st.noteOrigin(path, name, srcFile)
+			st.noteOrigin(path, collationKey(path, name), srcFile)
 		}
 	}
 }

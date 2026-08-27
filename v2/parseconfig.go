@@ -235,7 +235,7 @@ func processConfigFile(file string, baseDir string, depth int, st *mergeState) (
 	// nested collision needs to be able to name.
 	for path := range mergeAllowlist {
 		if v, ok := lookupPath(config, path); ok {
-			recordOrigins(path, v, file, st, false)
+			recordOrigins(path, v, file, st, nil, false)
 		}
 	}
 
