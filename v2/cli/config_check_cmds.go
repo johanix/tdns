@@ -354,6 +354,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	checkApiServer(&cfg, cfgPath, rep)
 	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
+	checkDuplicateTemplates(&cfg, rep)
 	checkPeers(&cfg, rep)
 	checkApiServerCorrelation(role, &cfg, rep)
 
@@ -399,33 +400,41 @@ func finishCheckconf(rep *ccReport) {
 // Config loading (mirrors cmdv2/cli/root.go initConfig include handling)
 // ---------------------------------------------------------------------------
 
-// loadConfigViper reads path into a fresh viper instance and merges any
-// top-level include: files (single level, non-recursive), exactly as the
-// daemon/CLI loaders do. A missing include is reported as a WARN, not fatal.
-func loadConfigViper(path string, rep *ccReport) (*viper.Viper, error) {
-	v := viper.New()
-	v.SetConfigFile(path)
-	if err := v.ReadInConfig(); err != nil {
+// loadConfigViper returns the merged config view that every check below reads,
+// produced by THE DAEMON'S OWN LOADER and then handed to viper.
+//
+// It used to resolve include: itself, with viper's MergeInConfig. That was not
+// the same algorithm: viper deep-merges maps, while the daemon's
+// processConfigFile replaces a nested map wholesale. The two therefore
+// disagreed, and the disagreement was the wrong way round -- check saw MORE
+// than the daemon would:
+//
+//	dnssec.policies    daemon = [beta]    config check = [alpha beta]
+//
+// So a zone referencing a policy that lives only in the main config passed
+// `config check` and then failed at startup, because the daemon never loaded
+// it. The whole point of this command is to answer "would the daemon start",
+// and it was answering about a config the daemon never sees.
+//
+// LoadRawConfigMap IS that loader, so parity is not something to maintain by
+// hand -- there is now one implementation. Two behaviours change as a result,
+// both of them alignments:
+//
+//   - Nested includes are visible. Viper's loop was single-level;
+//     processConfigFile recurses.
+//   - A missing include fails the load instead of warning and carrying on.
+//     ValidateConfig already refused such a config later, so the WARN was the
+//     misleading half, not the useful one.
+//
+// rep is unused now and kept for signature stability across the call sites.
+func loadConfigViper(path string, _ *ccReport) (*viper.Viper, error) {
+	raw, _, err := tdns.LoadRawConfigMap(path)
+	if err != nil {
 		return nil, err
 	}
-	for _, inc := range v.GetStringSlice("include") {
-		incPath := inc
-		if !filepath.IsAbs(incPath) {
-			incPath = filepath.Join(filepath.Dir(path), incPath)
-		}
-		if _, err := os.Stat(incPath); err != nil {
-			if os.IsNotExist(err) {
-				rep.warn("Config file", "include",
-					fmt.Sprintf("included file not found: %s", incPath),
-					"create the file or remove it from the include: list")
-				continue
-			}
-			return nil, fmt.Errorf("stat include %s: %w", incPath, err)
-		}
-		v.SetConfigFile(incPath)
-		if err := v.MergeInConfig(); err != nil {
-			return nil, fmt.Errorf("merge include %s: %w", incPath, err)
-		}
+	v := viper.New()
+	if err := v.MergeConfigMap(raw); err != nil {
+		return nil, fmt.Errorf("building the merged config view for %s: %w", path, err)
 	}
 	return v, nil
 }
@@ -715,7 +724,13 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 		}
 	}
 
-	seen := map[string]bool{}
+	// Zone names compare case-folded AND FQDN-normalized, because a collision
+	// under either spelling is a collision to the daemon: ParseZones opens with
+	// dns.Fqdn(zconf.Name), so "example.com" and "example.com." are one zone to
+	// it, and DNS names are case-insensitive by definition (RFC 4343), so
+	// "Example.com." is that same zone a third time. Comparing raw strings here
+	// would miss exactly the collisions the daemon then has to resolve.
+	seen := map[string]int{}
 	for i := range cfg.Zones {
 		z := cfg.Zones[i]
 		zname := z.Name
@@ -728,15 +743,18 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 			rep.fail(g, zlabel, "zone has no name", "every zone needs a name")
 			continue
 		}
-		// A missing trailing dot is NOT flagged: tdns accepts zone names both
-		// with and without it, and the daemon canonicalizes to FQDN internally
-		// (correlateZones already compares dns.Fqdn-normalized names), so a
-		// non-FQDN name is not a defect.
-		if seen[lc(zname)] {
-			rep.fail(g, zname, "duplicate zone declaration", "remove the duplicate entry")
+		// A missing trailing dot is NOT flagged on its own: tdns accepts zone
+		// names both with and without it, and the daemon canonicalizes to FQDN
+		// internally (correlateZones already compares dns.Fqdn-normalized names),
+		// so a non-FQDN name is not by itself a defect. It only matters when it
+		// makes two entries the same zone, which zoneKey below catches.
+		if first, dup := seen[zoneKey(zname)]; dup {
+			rep.fail(g, zname,
+				fmt.Sprintf("duplicate zone declaration (entries %d and %d)", first+1, i+1),
+				"remove the duplicate entry; only one is served today, and which one is not defined")
 			continue
 		}
-		seen[lc(zname)] = true
+		seen[zoneKey(zname)] = i
 
 		// Resolve the effective zone (apply template gap-fill for the fields we check).
 		eff := effectiveZone(z, templateNames)
@@ -1320,6 +1338,15 @@ func checkPolicyAlgVsActiveKeys(cfg *tdns.Config, v *viper.Viper, rep *ccReport,
 
 func lc(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
+// zoneKey is the comparison key for a zone name: case-folded, then
+// FQDN-normalized, so every spelling of one zone collapses to one key. lc runs
+// first because it trims, and trimming after dns.Fqdn would strip the dot it
+// just added.
+//
+// This is a COMPARISON key only. Nothing is registered under it: the daemon
+// still stores zones under dns.Fqdn(name) with case preserved.
+func zoneKey(name string) string { return dns.Fqdn(lc(name)) }
+
 func absClean(p string) string {
 	if p == "" {
 		return p
@@ -1541,4 +1568,43 @@ func extraLines(s string) []string {
 		}
 	}
 	return out
+}
+
+// checkDuplicateTemplates reports a template name defined twice.
+//
+// Zones are NOT checked here: checkZones already reports duplicate zone
+// declarations, and it compares with zoneKey, so it catches every spelling.
+// Reporting them a second time here would print two FAIL lines for one defect.
+//
+// Templates get their own check because checkZones only ever consults the
+// template map, which has already collapsed the duplicate by the time it looks.
+// The daemon refuses the whole config on this (buildTemplateMap returns an
+// error), so a FAIL naming the template is still worth printing: it runs
+// before the restart that would otherwise just fail.
+//
+// DNSSEC policies need no check. `policies` is a YAML mapping, and yaml.v3
+// rejects duplicate keys outright, so two policies of one name never survive
+// parsing to reach any code here.
+func checkDuplicateTemplates(cfg *tdns.Config, rep *ccReport) {
+	seen := map[string]int{}
+	dups := 0
+	for i := range cfg.Templates {
+		name := cfg.Templates[i].Name
+		if name == "" {
+			continue // an unnamed template is a different complaint, made elsewhere
+		}
+		if first, dup := seen[lc(name)]; dup {
+			dups++
+			rep.fail("Zones", "duplicate template",
+				fmt.Sprintf("template %q is defined twice (entries %d and %d)", name, first+1, i+1),
+				"remove one definition; the daemon refuses to start on this")
+			continue
+		}
+		seen[lc(name)] = i
+	}
+
+	if dups == 0 {
+		rep.pass("Zones", "duplicate template",
+			fmt.Sprintf("no duplicate names among %d template(s)", len(cfg.Templates)))
+	}
 }
