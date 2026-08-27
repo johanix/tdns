@@ -138,6 +138,13 @@ func TestConfigCheckMissingIncludeIsAnError(t *testing.T) {
 // TestCheckDuplicateNames covers the reporting step that has to land before
 // anything enforces duplicates, since enforcement turns a silently-last-wins
 // zone into one that is not served at all.
+//
+// It drives BOTH checks that can report a duplicate -- checkZones for zones,
+// checkDuplicateTemplates for templates -- and counts only the duplicate
+// findings among everything else checkZones emits. Counting across both is the
+// point: the two used to overlap, so an exact duplicate produced two FAIL lines
+// for one defect while each check separately missed a spelling the other caught.
+// wantFails pins one report per defect, not merely "at least one".
 func TestCheckDuplicateNames(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -154,7 +161,7 @@ func TestCheckDuplicateNames(t *testing.T) {
 			name:      "same zone twice",
 			cfg:       tdns.Config{Zones: []tdns.ZoneConf{{Name: "a.example."}, {Name: "a.example."}}},
 			wantFails: 1,
-			wantIn:    "a.example. is defined twice",
+			wantIn:    "duplicate zone declaration (entries 1 and 2)",
 		},
 		{
 			// The case comparing raw strings would miss: ParseZones fqdn-ifies
@@ -162,7 +169,23 @@ func TestCheckDuplicateNames(t *testing.T) {
 			name:      "trailing dot is not a distinction",
 			cfg:       tdns.Config{Zones: []tdns.ZoneConf{{Name: "a.example"}, {Name: "a.example."}}},
 			wantFails: 1,
-			wantIn:    "a.example. is defined twice",
+			wantIn:    "duplicate zone declaration",
+		},
+		{
+			// DNS names are case-insensitive (RFC 4343), so these are one zone --
+			// but Zones is a case-sensitive Cmap, so the daemon would build two
+			// entries and serve whichever one the query's case happened to match.
+			name:      "case is not a distinction",
+			cfg:       tdns.Config{Zones: []tdns.ZoneConf{{Name: "A.Example."}, {Name: "a.example."}}},
+			wantFails: 1,
+			wantIn:    "duplicate zone declaration",
+		},
+		{
+			// Both normalizations at once, in one pair.
+			name:      "case and trailing dot together",
+			cfg:       tdns.Config{Zones: []tdns.ZoneConf{{Name: "A.EXAMPLE"}, {Name: "a.example."}}},
+			wantFails: 1,
+			wantIn:    "duplicate zone declaration",
 		},
 		{
 			name: "same template twice",
@@ -170,6 +193,13 @@ func TestCheckDuplicateNames(t *testing.T) {
 				{Name: "signing-primary"}, {Name: "signing-primary"}}},
 			wantFails: 1,
 			wantIn:    `template "signing-primary" is defined twice`,
+		},
+		{
+			name: "template case is not a distinction",
+			cfg: tdns.Config{Templates: []tdns.ZoneConf{
+				{Name: "Signing-Primary"}, {Name: "signing-primary"}}},
+			wantFails: 1,
+			wantIn:    "is defined twice",
 		},
 		{
 			name: "three of the same zone reports each repeat",
@@ -185,22 +215,31 @@ func TestCheckDuplicateNames(t *testing.T) {
 		tc := &cases[i]
 		t.Run(tc.name, func(t *testing.T) {
 			rep := newCCReport()
-			checkDuplicateNames(&tc.cfg, rep)
-			fails, _ := rep.counts()
-			if fails != tc.wantFails {
-				t.Errorf("fails = %d, want %d", fails, tc.wantFails)
+			checkZones(&tc.cfg, rep, false, "server")
+			checkDuplicateTemplates(&tc.cfg, rep)
+
+			// checkZones reports plenty besides duplicates on these skeletal
+			// zones (no type, no store, no zonefile). Only duplicates are ours.
+			var dupFails []string
+			for _, results := range rep.byGroup {
+				for _, res := range results {
+					if res.level == ccFAIL && strings.Contains(res.check+res.msg, "duplicat") {
+						dupFails = append(dupFails, res.check+": "+res.msg)
+					}
+				}
+			}
+			if len(dupFails) != tc.wantFails {
+				t.Errorf("duplicate fails = %d, want %d: %v", len(dupFails), tc.wantFails, dupFails)
 			}
 			if tc.wantIn != "" {
 				var found bool
-				for _, results := range rep.byGroup {
-					for _, res := range results {
-						if strings.Contains(res.msg, tc.wantIn) {
-							found = true
-						}
+				for _, f := range dupFails {
+					if strings.Contains(f, tc.wantIn) {
+						found = true
 					}
 				}
 				if !found {
-					t.Errorf("no finding contained %q", tc.wantIn)
+					t.Errorf("no duplicate finding contained %q: %v", tc.wantIn, dupFails)
 				}
 			}
 		})

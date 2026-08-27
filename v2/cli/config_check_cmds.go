@@ -354,7 +354,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	checkApiServer(&cfg, cfgPath, rep)
 	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
-	checkDuplicateNames(&cfg, rep)
+	checkDuplicateTemplates(&cfg, rep)
 	checkPeers(&cfg, rep)
 	checkApiServerCorrelation(role, &cfg, rep)
 
@@ -724,7 +724,13 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 		}
 	}
 
-	seen := map[string]bool{}
+	// Zone names compare case-folded AND FQDN-normalized, because a collision
+	// under either spelling is a collision to the daemon: ParseZones opens with
+	// dns.Fqdn(zconf.Name), so "example.com" and "example.com." are one zone to
+	// it, and DNS names are case-insensitive by definition (RFC 4343), so
+	// "Example.com." is that same zone a third time. Comparing raw strings here
+	// would miss exactly the collisions the daemon then has to resolve.
+	seen := map[string]int{}
 	for i := range cfg.Zones {
 		z := cfg.Zones[i]
 		zname := z.Name
@@ -737,15 +743,18 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 			rep.fail(g, zlabel, "zone has no name", "every zone needs a name")
 			continue
 		}
-		// A missing trailing dot is NOT flagged: tdns accepts zone names both
-		// with and without it, and the daemon canonicalizes to FQDN internally
-		// (correlateZones already compares dns.Fqdn-normalized names), so a
-		// non-FQDN name is not a defect.
-		if seen[lc(zname)] {
-			rep.fail(g, zname, "duplicate zone declaration", "remove the duplicate entry")
+		// A missing trailing dot is NOT flagged on its own: tdns accepts zone
+		// names both with and without it, and the daemon canonicalizes to FQDN
+		// internally (correlateZones already compares dns.Fqdn-normalized names),
+		// so a non-FQDN name is not by itself a defect. It only matters when it
+		// makes two entries the same zone, which zoneKey below catches.
+		if first, dup := seen[zoneKey(zname)]; dup {
+			rep.fail(g, zname,
+				fmt.Sprintf("duplicate zone declaration (entries %d and %d)", first+1, i+1),
+				"remove the duplicate entry; only one is served today, and which one is not defined")
 			continue
 		}
-		seen[lc(zname)] = true
+		seen[zoneKey(zname)] = i
 
 		// Resolve the effective zone (apply template gap-fill for the fields we check).
 		eff := effectiveZone(z, templateNames)
@@ -1329,6 +1338,15 @@ func checkPolicyAlgVsActiveKeys(cfg *tdns.Config, v *viper.Viper, rep *ccReport,
 
 func lc(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
+// zoneKey is the comparison key for a zone name: case-folded, then
+// FQDN-normalized, so every spelling of one zone collapses to one key. lc runs
+// first because it trims, and trimming after dns.Fqdn would strip the dot it
+// just added.
+//
+// This is a COMPARISON key only. Nothing is registered under it: the daemon
+// still stores zones under dns.Fqdn(name) with case preserved.
+func zoneKey(name string) string { return dns.Fqdn(lc(name)) }
+
 func absClean(p string) string {
 	if p == "" {
 		return p
@@ -1552,64 +1570,41 @@ func extraLines(s string) []string {
 	return out
 }
 
-// checkDuplicateNames reports two definitions of one name in a collection of
-// named objects.
+// checkDuplicateTemplates reports a template name defined twice.
 //
-// The daemon does not currently notice this for zones: ParseZones fqdn-ifies
-// each name and get-or-creates the ZoneData, so a repeated name is silently
-// last-wins and only one of the two definitions is ever served -- with nothing
-// saying which. Reporting it here is what lets an operator find such a config
-// BEFORE the daemon starts refusing to serve either, which is what it will do
-// once duplicate enforcement lands.
+// Zones are NOT checked here: checkZones already reports duplicate zone
+// declarations, and it compares with zoneKey, so it catches every spelling.
+// Reporting them a second time here would print two FAIL lines for one defect.
 //
-// Templates are checked too, and there the daemon already refuses the whole
-// config (buildTemplateMap returns an error). Reporting it is still worth
-// doing: a FAIL naming the template beats a startup error naming it, because
-// this runs before the restart.
+// Templates get their own check because checkZones only ever consults the
+// template map, which has already collapsed the duplicate by the time it looks.
+// The daemon refuses the whole config on this (buildTemplateMap returns an
+// error), so a FAIL naming the template is still worth printing: it runs
+// before the restart that would otherwise just fail.
 //
 // DNSSEC policies need no check. `policies` is a YAML mapping, and yaml.v3
 // rejects duplicate keys outright, so two policies of one name never survive
 // parsing to reach any code here.
-func checkDuplicateNames(cfg *tdns.Config, rep *ccReport) {
-	// Zones compare as FQDNs because that is what the daemon compares:
-	// ParseZones opens with zname := dns.Fqdn(zconf.Name), so "example.com"
-	// and "example.com." are already one zone to it. Comparing raw strings
-	// here would miss exactly the duplicate it then collapses.
-	seenZone := map[string]int{}
-	dupZones := 0
-	for i := range cfg.Zones {
-		name := dns.Fqdn(cfg.Zones[i].Name)
-		if name == "." {
-			continue // an unnamed entry is a different complaint, made elsewhere
-		}
-		if first, dup := seenZone[name]; dup {
-			dupZones++
-			rep.fail("Zones", "duplicate",
-				fmt.Sprintf("zone %s is defined twice (entries %d and %d)", name, first+1, i+1),
-				"remove one definition; only one is served today, and which one is not defined")
-			continue
-		}
-		seenZone[name] = i
-	}
-
-	seenTmpl := map[string]int{}
+func checkDuplicateTemplates(cfg *tdns.Config, rep *ccReport) {
+	seen := map[string]int{}
+	dups := 0
 	for i := range cfg.Templates {
 		name := cfg.Templates[i].Name
 		if name == "" {
-			continue
+			continue // an unnamed template is a different complaint, made elsewhere
 		}
-		if first, dup := seenTmpl[name]; dup {
+		if first, dup := seen[lc(name)]; dup {
+			dups++
 			rep.fail("Zones", "duplicate template",
 				fmt.Sprintf("template %q is defined twice (entries %d and %d)", name, first+1, i+1),
 				"remove one definition; the daemon refuses to start on this")
 			continue
 		}
-		seenTmpl[name] = i
+		seen[lc(name)] = i
 	}
 
-	if dupZones == 0 && len(seenTmpl) == len(cfg.Templates) {
-		rep.pass("Zones", "duplicate",
-			fmt.Sprintf("no duplicate names among %d zone(s) and %d template(s)",
-				len(cfg.Zones), len(cfg.Templates)))
+	if dups == 0 {
+		rep.pass("Zones", "duplicate template",
+			fmt.Sprintf("no duplicate names among %d template(s)", len(cfg.Templates)))
 	}
 }
