@@ -1,0 +1,358 @@
+/*
+ * Copyright (c) 2026 Johan Stenstam, johani@johani.org
+ *
+ * Merging an include:d config file into the one that included it.
+ *
+ * The default is what it has always been: the included file replaces. Merging
+ * happens only for an include that asked for it, and even then only for the
+ * paths on the allowlist below.
+ *
+ * Design note in docs/2026-08-27-config-include-merge.md. The short version of
+ * why merging is not simply the default: the failure being fixed ("I included
+ * a file that contributes zones and lost the ones I had") and the failure
+ * default-on would introduce ("I upgraded and started serving zones that were
+ * being clobbered on purpose") are opposites, and only the second arrives
+ * unattended -- processConfigFile is reached from four runtime reload paths,
+ * one of them the SIGHUP watcher.
+ */
+
+package tdns
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
+
+// mergeStrategy is how one allowlisted path combines two files' contributions.
+//
+// Three strategies rather than one because these are three kinds of thing. A
+// collection of named objects cannot be deep-merged -- combining two
+// definitions of one zone produces a zone neither file describes -- while a
+// set genuinely is the same fact stated twice.
+type mergeStrategy int
+
+const (
+	// concatNamed: a list of maps each carrying a "name". Concatenate;
+	// a repeated name is a collision.
+	concatNamed mergeStrategy = iota
+	// unionStrings: a list of strings with set semantics.
+	unionStrings
+	// mergeNamedMap: a map keyed by object name. Merge by key; a key in both
+	// is a collision.
+	mergeNamedMap
+	// mergeMapOfStringLists: a map whose values are string lists. Merge by
+	// key, union the leaves.
+	mergeMapOfStringLists
+)
+
+// mergeAllowlist is the whole of what an opted-in include may combine.
+// Everything else replaces, opted in or not.
+//
+// Deliberately absent: dnsengine.addresses, apiserver.addresses,
+// dnsengine.transports. Concatenating those would silently make a server
+// listen on more addresses than the file in front of you says -- the same
+// class of failure as widening an ACL, and worse than the clobber this is
+// fixing, because a clobber is at least visible in what the server runs.
+//
+// dnssec.templates (policy templates) and keys.tsig are the same shape as
+// entries here and are deliberately left off until something needs them.
+var mergeAllowlist = map[string]mergeStrategy{
+	"zones":                   concatNamed,
+	"templates":               concatNamed,
+	"dnssec.policies":         mergeNamedMap,
+	"dnssec.large_algorithms": unionStrings,
+	"dnssec.split_algorithms": mergeMapOfStringLists,
+}
+
+// nameCollision records one allowlisted item defined in two files.
+//
+// It carries both file paths because that is the useful half of "X is defined
+// twice", and it is the half the merge would otherwise discard: once two maps
+// are combined, nothing remembers which file each key came from.
+type nameCollision struct {
+	Path  string // allowlisted path, e.g. "zones"
+	Name  string // the item's name
+	First string // file the first definition came from
+	Again string // file the second came from
+}
+
+func (c nameCollision) Error() string {
+	return fmt.Sprintf("%s: %q is defined in both %s and %s", c.Path, c.Name, c.First, c.Again)
+}
+
+// clobber records a replace that discarded a non-empty allowlisted key.
+//
+// The replace still happens -- this is the WARN that makes it visible. Without
+// it, opt-in would leave the original complaint unaddressed for everyone who
+// does not opt in: they would still lose their zones, still silently.
+type clobber struct {
+	Path string
+	By   string // the file that replaced it
+	Lost int    // how many items were dropped, where countable
+}
+
+// mergeState is the bookkeeping one whole load accumulates.
+type mergeState struct {
+	// origin maps "<path>\x00<name>" to the file the item was read from.
+	// Provenance is attached when an item is read from ITS OWN file and
+	// carried up, never stamped by a parent -- otherwise a nested include
+	// gets blamed on the intermediate file that merged it.
+	origin     map[string]string
+	Collisions []nameCollision
+	Clobbers   []clobber
+}
+
+func newMergeState() *mergeState {
+	return &mergeState{origin: map[string]string{}}
+}
+
+func originKey(path, name string) string { return path + "\x00" + name }
+
+// noteOrigin records where an item came from, returning the earlier file and
+// true if this name has been seen before.
+func (m *mergeState) noteOrigin(path, name, file string) (string, bool) {
+	k := originKey(path, name)
+	if prev, seen := m.origin[k]; seen {
+		return prev, true
+	}
+	m.origin[k] = file
+	return "", false
+}
+
+// OriginOf reports the file an allowlisted item was read from.
+func (m *mergeState) OriginOf(path, name string) (string, bool) {
+	f, ok := m.origin[originKey(path, name)]
+	return f, ok
+}
+
+// mergeConfigMaps folds src (from srcFile) into dst.
+//
+// doMerge is the include's own opt-in. When false this behaves exactly as the
+// loader always has -- one level of map merge, replace for everything else --
+// with the single addition that replacing a non-empty allowlisted key is
+// recorded as a clobber.
+//
+// prefix is the dotted path of dst within the config, so nested allowlisted
+// paths resolve. That matters more than it looks: dnssec.policies is NOT a
+// top-level key. In the pre-existing merge, "dnssec" takes the map branch and
+// "policies" is assigned by the inner loop -- so a dispatcher hooked only to
+// top-level keys would compile, pass most tests, and leave the motivating case
+// still replacing.
+func mergeConfigMaps(dst, src map[string]interface{}, prefix, srcFile string,
+	doMerge bool, st *mergeState) error {
+
+	for _, k := range sortedStringKeys(src) {
+		v := src[k]
+		path := k
+		if prefix != "" {
+			path = prefix + "." + k
+		}
+
+		strategy, allowlisted := mergeAllowlist[path]
+		existing, exists := dst[k]
+
+		switch {
+		case allowlisted && doMerge && exists:
+			merged, err := applyStrategy(strategy, path, existing, v, srcFile, st)
+			if err != nil {
+				return err
+			}
+			dst[k] = merged
+
+		case allowlisted && !doMerge && exists && !isEmptyValue(existing):
+			// The replace still happens; it just stops being silent.
+			st.Clobbers = append(st.Clobbers, clobber{
+				Path: path, By: srcFile, Lost: countItems(existing),
+			})
+			recordOrigins(path, v, srcFile, st, true)
+			dst[k] = v
+
+		case exists:
+			// Both maps: the historical one-level merge, except that we
+			// recurse so a nested allowlisted path is still intercepted.
+			dstMap, ok1 := existing.(map[string]interface{})
+			srcMap, ok2 := v.(map[string]interface{})
+			if ok1 && ok2 {
+				if err := mergeConfigMaps(dstMap, srcMap, path, srcFile, doMerge, st); err != nil {
+					return err
+				}
+				continue
+			}
+			if allowlisted {
+				recordOrigins(path, v, srcFile, st, true)
+			}
+			dst[k] = v
+
+		default:
+			if allowlisted {
+				recordOrigins(path, v, srcFile, st, false)
+			}
+			dst[k] = v
+		}
+	}
+	return nil
+}
+
+// applyStrategy combines one allowlisted path's two contributions.
+func applyStrategy(s mergeStrategy, path string, dstVal, srcVal interface{},
+	srcFile string, st *mergeState) (interface{}, error) {
+
+	switch s {
+	case concatNamed:
+		dstList, ok1 := dstVal.([]interface{})
+		srcList, ok2 := srcVal.([]interface{})
+		if !ok1 || !ok2 {
+			return nil, typeMismatch(path, dstVal, srcVal, "a list")
+		}
+		for _, item := range srcList {
+			name := itemName(item)
+			if name != "" {
+				if first, dup := st.noteOrigin(path, name, srcFile); dup {
+					st.Collisions = append(st.Collisions, nameCollision{
+						Path: path, Name: name, First: first, Again: srcFile,
+					})
+				}
+			}
+		}
+		return append(dstList, srcList...), nil
+
+	case unionStrings:
+		dstList, ok1 := dstVal.([]interface{})
+		srcList, ok2 := srcVal.([]interface{})
+		if !ok1 || !ok2 {
+			return nil, typeMismatch(path, dstVal, srcVal, "a list")
+		}
+		seen := map[string]bool{}
+		out := make([]interface{}, 0, len(dstList)+len(srcList))
+		for _, item := range append(append([]interface{}{}, dstList...), srcList...) {
+			s := fmt.Sprint(item)
+			if seen[s] {
+				continue
+			}
+			seen[s] = true
+			out = append(out, item)
+		}
+		return out, nil
+
+	case mergeNamedMap:
+		dstMap, ok1 := dstVal.(map[string]interface{})
+		srcMap, ok2 := srcVal.(map[string]interface{})
+		if !ok1 || !ok2 {
+			return nil, typeMismatch(path, dstVal, srcVal, "a mapping")
+		}
+		for _, name := range sortedStringKeys(srcMap) {
+			if _, clash := dstMap[name]; clash {
+				first, _ := st.OriginOf(path, name)
+				st.Collisions = append(st.Collisions, nameCollision{
+					Path: path, Name: name, First: first, Again: srcFile,
+				})
+				// Neither definition wins. Picking one arbitrarily is how a
+				// zone ends up signed by a policy nobody wrote down; the
+				// caller turns the collision into a rejection.
+				continue
+			}
+			st.noteOrigin(path, name, srcFile)
+			dstMap[name] = srcMap[name]
+		}
+		return dstMap, nil
+
+	case mergeMapOfStringLists:
+		dstMap, ok1 := dstVal.(map[string]interface{})
+		srcMap, ok2 := srcVal.(map[string]interface{})
+		if !ok1 || !ok2 {
+			return nil, typeMismatch(path, dstVal, srcVal, "a mapping")
+		}
+		for _, key := range sortedStringKeys(srcMap) {
+			existing, have := dstMap[key]
+			if !have {
+				dstMap[key] = srcMap[key]
+				continue
+			}
+			// Union the leaves. This WIDENS what the server will accept --
+			// for split_algorithms, which KSK/ZSK pairings are permitted --
+			// so it is a widening, not a restatement. Bounded: it only gates
+			// policy parse, and only for an include that opted in.
+			merged, err := applyStrategy(unionStrings, path+"."+key, existing, srcMap[key], srcFile, st)
+			if err != nil {
+				return nil, err
+			}
+			dstMap[key] = merged
+		}
+		return dstMap, nil
+	}
+	return nil, fmt.Errorf("%s: unknown merge strategy", path)
+}
+
+// typeMismatch is a hard error rather than a silent fall back to replace: two
+// files disagreeing about whether zones: is a list or a mapping is a mistake,
+// and quietly picking one of them is how it survives to production.
+func typeMismatch(path string, dstVal, srcVal interface{}, want string) error {
+	return fmt.Errorf("%s: cannot merge %T with %T; both must be %s", path, dstVal, srcVal, want)
+}
+
+// recordOrigins notes provenance for a whole allowlisted value at once, used
+// when the value is assigned rather than merged. replaced says the value
+// displaced an earlier one, in which case earlier origins for this path are
+// dropped -- they refer to items that are no longer in the config.
+func recordOrigins(path string, v interface{}, srcFile string, st *mergeState, replaced bool) {
+	if replaced {
+		for k := range st.origin {
+			if strings.HasPrefix(k, path+"\x00") {
+				delete(st.origin, k)
+			}
+		}
+	}
+	switch val := v.(type) {
+	case []interface{}:
+		for _, item := range val {
+			if name := itemName(item); name != "" {
+				st.noteOrigin(path, name, srcFile)
+			}
+		}
+	case map[string]interface{}:
+		for name := range val {
+			st.noteOrigin(path, name, srcFile)
+		}
+	}
+}
+
+// itemName pulls the "name" out of one entry of a named collection.
+func itemName(item interface{}) string {
+	m, ok := item.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	for _, k := range []string{"name", "Name"} {
+		if n, ok := m[k].(string); ok {
+			return n
+		}
+	}
+	return ""
+}
+
+func countItems(v interface{}) int {
+	switch val := v.(type) {
+	case []interface{}:
+		return len(val)
+	case map[string]interface{}:
+		return len(val)
+	}
+	return 0
+}
+
+func isEmptyValue(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	return countItems(v) == 0
+}
+
+func sortedStringKeys(m map[string]interface{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
