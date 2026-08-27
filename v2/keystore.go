@@ -775,7 +775,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		// Collapse the double-signed window left by a policy change: remove the
 		// zone's RETIRED keys (and their RRSIGs) NOW, keeping the active keys,
 		// instead of waiting for the KeyStateWorker to age them out after
-		// propagation_delay. Operator-chosen: it accelerates removal, so a
+		// propagation-delay. Operator-chosen: it accelerates removal, so a
 		// resolver still caching ONLY an old (now-removed) DNSKEY briefly can't
 		// validate until it re-queries; the active new-alg keys already serve.
 		// Distinct from `clear`, which deletes ALL keys and regenerates.

@@ -603,7 +603,7 @@ func checkDnssecPolicies(v *viper.Viper, rep *ccReport, online bool, role string
 				continue
 			}
 			rep.fail(g, "policy", ln,
-				"fix the policy (algorithm/lifetime/mode), or allowlist a differing KSK/ZSK pair in dnssec.split_algorithms")
+				"fix the policy (algorithm/lifetime/mode), or allowlist a differing KSK/ZSK pair in dnssec.split-algorithms")
 		}
 		return
 	}

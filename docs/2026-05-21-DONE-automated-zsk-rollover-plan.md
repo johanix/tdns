@@ -76,7 +76,7 @@ Reasons to extend it rather than fork a worker:
    ordering for free.
  - **Lock reuse.** The per-zone rollover lock that serialises the KSK
    engine against API mutators is reused by the ZSK step.
- - **Cadence.** The 1-minute `check_interval` over-samples ZSK
+ - **Cadence.** The 1-minute `check-interval` over-samples ZSK
    lifetimes (hours+); no dedicated ticker is warranted.
  - **Less machinery.** No second goroutine lifecycle, config interval,
    or duplicated zone iteration.

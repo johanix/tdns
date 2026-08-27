@@ -159,7 +159,7 @@ applyRefreshReplacementLocked / publishLocked / commitTransportSignalLocked   (h
 ```
 
 Reachability: guarded only by `isLarge(alg)`, i.e. the algorithm being listed in
-`dnssec.large_algorithms`. That is exactly the live **PQ-DNSSEC** configuration
+`dnssec.large-algorithms`. That is exactly the live **PQ-DNSSEC** configuration
 (MLDSA/FALCON/…). The re-lock fires **before** the DNSKEY publish that #2 fixed,
 so 23710d1 did not cover it — and 23710d1's regression test uses ED25519 (not a
 large algorithm), so `WarnLargeAlgZoneSigningRole` returned early and never hit

@@ -149,7 +149,7 @@ func TestT9RelaxedReconcileIdempotentMidRoll(t *testing.T) {
 	}
 }
 
-// T3 — role-only count: standby_zsk_count=2, two OLD-alg standbys present, policy
+// T3 — role-only count: standby-zsk-count=2, two OLD-alg standbys present, policy
 // ZSK alg changed to NEW. The maintainer generates NOTHING (role-only count sees
 // 2 ≥ 2), and the two old-alg standbys are untouched.
 func TestT3RoleOnlyCountGeneratesNothing(t *testing.T) {
@@ -223,7 +223,7 @@ func TestT3bGenerateOnDrainUsesNewAlg(t *testing.T) {
 	}
 }
 
-// T4 — sweep cap: standby_zsk_count=2, THREE standby ZSKs present; the relaxed
+// T4 — sweep cap: standby-zsk-count=2, THREE standby ZSKs present; the relaxed
 // cap deletes the YOUNGEST one (back to 2), keeps the oldest two regardless of
 // algorithm — never deletes by algorithm. Maintainer + cap agree (no oscillation).
 func TestT4SweepCapDeletesYoungestSurplus(t *testing.T) {
@@ -318,7 +318,7 @@ func TestT4cFifoOrderingByPublishedAt(t *testing.T) {
 	}
 }
 
-// T5 — full sequence via asap (standby_zsk_count=2): change-policy binds new alg;
+// T5 — full sequence via asap (standby-zsk-count=2): change-policy binds new alg;
 // the maintainer generates nothing; successive RolloverKey (asap) promotes the
 // old-alg standbys FIFO; once they drain the maintainer mints new-alg keys; a
 // further promotion activates a new-alg key. No instant with zero ZSK coverage;

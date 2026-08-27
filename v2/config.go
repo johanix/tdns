@@ -90,7 +90,7 @@ type DnssecConf struct {
 	//                       to TCP, never UDP.
 	//   "force_encrypted" - bypass for all DNSKEY; encrypted only, fail the
 	//                       query if the server advertises no encrypted transport.
-	DNSKEYTransport string `yaml:"dnskey_query_transport" mapstructure:"dnskey_query_transport"`
+	DNSKEYTransport string `yaml:"dnskey-query-transport" mapstructure:"dnskey-query-transport"`
 
 	// LargeAlgorithms lists the DNSSEC algorithms whose DNSKEY/RRSIG sizes are
 	// large for UDP. The IMR may query child DNSKEY over TCP when a parent DS
@@ -103,14 +103,14 @@ type DnssecConf struct {
 	// case-insensitive and resolves against the algorithm metadata registry, so
 	// a name or family this binary recognizes but cannot itself sign with still
 	// counts; an entry that matches no known algorithm is a hard config error.
-	LargeAlgorithms []string `yaml:"large_algorithms" mapstructure:"large_algorithms"`
+	LargeAlgorithms []string `yaml:"large-algorithms" mapstructure:"large-algorithms"`
 
 	// SplitAlgorithms gates which KSK/ZSK algorithm pairs a policy may use.
 	// Keyed by KSK algorithm name; the value lists ZSK algorithm names that
 	// algorithm's KSK is permitted to pair with. A policy whose KSK and ZSK
 	// algorithms differ is rejected at parse time unless the pair appears
 	// here. Same-algorithm policies are always allowed and need no entry.
-	SplitAlgorithms map[string][]string `yaml:"split_algorithms" mapstructure:"split_algorithms"`
+	SplitAlgorithms map[string][]string `yaml:"split-algorithms" mapstructure:"split-algorithms"`
 
 	// Templates are named, partial DNSSEC policies. A policy may set
 	// `template: <name>` to inherit (deep-merge) the gaps in its own definition
@@ -154,32 +154,32 @@ const (
 //
 //	dnssec:
 //	    kasp:
-//	        propagation_delay: 1h
-//	        standby_zsk_count: 1
-//	        standby_ksk_count: 0
-//	        check_interval: 1m
+//	        propagation-delay: 1h
+//	        standby-zsk-count: 1
+//	        standby-ksk-count: 0
+//	        check-interval: 1m
 type KaspConf struct {
 	// PropagationDelay is how long to wait for DNSKEY RRsets to propagate
 	// through all caches before allowing state transitions.
 	// Used for published→standby and retired→removed transitions.
 	// Accepts Go duration strings: "1h", "3600s", "90m".
 	// Default: "1h".
-	PropagationDelay string `yaml:"propagation_delay" mapstructure:"propagation_delay"`
+	PropagationDelay string `yaml:"propagation-delay" mapstructure:"propagation-delay"`
 
 	// StandbyZskCount is the number of standby ZSKs to maintain per zone.
 	// When the count drops below this, the KeyStateWorker generates new ZSKs.
 	// Default: 1. A value of 0 (or omitted) means use the default.
-	StandbyZskCount int `yaml:"standby_zsk_count" mapstructure:"standby_zsk_count"`
+	StandbyZskCount int `yaml:"standby-zsk-count" mapstructure:"standby-zsk-count"`
 
 	// StandbyKskCount is the number of standby KSKs to maintain per zone.
 	// When the count drops below this, the KeyStateWorker generates new KSKs.
 	// Default: 0 (no standby KSKs). Set to 1+ to enable standby KSK maintenance.
-	StandbyKskCount int `yaml:"standby_ksk_count" mapstructure:"standby_ksk_count"`
+	StandbyKskCount int `yaml:"standby-ksk-count" mapstructure:"standby-ksk-count"`
 
 	// CheckInterval is how often the KeyStateWorker runs its checks.
 	// Accepts Go duration strings: "1m", "60s", "5m".
 	// Default: "1m".
-	CheckInterval string `yaml:"check_interval" mapstructure:"check_interval"`
+	CheckInterval string `yaml:"check-interval" mapstructure:"check-interval"`
 }
 
 type AppDetails struct {
@@ -231,7 +231,7 @@ type DnsEngineConf struct {
 	//              new value back. On clean restart with no zone change,
 	//              the serial stays put — secondaries don't see a regression
 	//              and don't trigger an unnecessary AXFR.
-	OutboundSoaSerial string `yaml:"outbound_soa_serial,omitempty" mapstructure:"outbound_soa_serial" validate:"omitempty,oneof=keep unixtime persist"`
+	OutboundSoaSerial string `yaml:"outbound-soa-serial,omitempty" mapstructure:"outbound-soa-serial" validate:"omitempty,oneof=keep unixtime persist"`
 
 	// TransferSrc is the server-global source address for OUTBOUND zone
 	// transfers -- the local address we bind before dialling an upstream, i.e.
@@ -248,7 +248,7 @@ type DnsEngineConf struct {
 	// upstream is used, and an upstream with no matching entry is dialled
 	// unbound rather than failed. Per-zone ZoneConf.TransferSrc overrides this;
 	// empty there inherits.
-	TransferSrc []string `yaml:"transfer_src,omitempty" mapstructure:"transfer_src"`
+	TransferSrc []string `yaml:"transfer-src,omitempty" mapstructure:"transfer-src"`
 }
 
 // ValidateTransferSrc checks a transfer-src list. Every entry must be a bare IP
@@ -275,7 +275,7 @@ type DnsEngineConf struct {
 // ZoneConf, and ExpandTemplate gap-fills its transfer-src onto every primary
 // expanded from it, so a bad value there reaches real zones.
 func ValidateAllTransferSrc(conf *Config) error {
-	if err := ValidateTransferSrc("dnsengine.transfer_src", conf.DnsEngine.TransferSrc); err != nil {
+	if err := ValidateTransferSrc("dnsengine.transfer-src", conf.DnsEngine.TransferSrc); err != nil {
 		return err
 	}
 	for _, z := range conf.Zones {
@@ -325,10 +325,15 @@ type ImrEngineConf struct {
 	Options     map[ImrOption]string `yaml:"-" mapstructure:"-"`
 	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
 	// full RR text (zonefile format). DS is preferred as it is more convenient.
-	TrustAnchorDS     string `yaml:"trust_anchor_ds"`
-	TrustAnchorDNSKEY string `yaml:"trust_anchor_dnskey"`
+	// mapstructure tags are load bearing: the daemons populate Config with
+	// viper.Unmarshal, which keys off mapstructure and ignores yaml. Without
+	// them these three parsed to "" no matter what the config said, so every
+	// trust anchor was silently dropped and the resolver validated against an
+	// empty anchor set.
+	TrustAnchorDS     string `yaml:"trust-anchor-ds" mapstructure:"trust-anchor-ds"`
+	TrustAnchorDNSKEY string `yaml:"trust-anchor-dnskey" mapstructure:"trust-anchor-dnskey"`
 	// Unbound-style file with one RR per line (DNSKEY and/or DS). Absolute path.
-	TrustAnchorFile string `yaml:"trust-anchor-file"`
+	TrustAnchorFile string `yaml:"trust-anchor-file" mapstructure:"trust-anchor-file"`
 	Verbose         bool
 	Debug           bool
 	Logging         ImrLoggingConf `yaml:"logging" mapstructure:"logging"`
@@ -336,7 +341,7 @@ type ImrEngineConf struct {
 	// records must have a secure DNSSEC validation state. Set to false to allow
 	// indeterminate/insecure records during lab/development when the full DNSSEC
 	// chain is not yet established.
-	RequireDnssecValidation *bool `yaml:"require_dnssec_validation" mapstructure:"require_dnssec_validation"`
+	RequireDnssecValidation *bool `yaml:"require-dnssec-validation" mapstructure:"require-dnssec-validation"`
 	// Tuning holds runtime-tunable behaviour knobs (backoff, RTT,
 	// address-family tracking, discovery state, etc.). All fields
 	// are optional in YAML; LoadImrTuningDefaults fills zero values.
@@ -349,45 +354,45 @@ type ImrEngineConf struct {
 // callers can just embed an empty ImrTuningConf and have it work.
 type ImrTuningConf struct {
 	Backoff       BackoffConf       `yaml:"backoff" mapstructure:"backoff"`
-	AddressFamily AddressFamilyConf `yaml:"address_family" mapstructure:"address_family"`
+	AddressFamily AddressFamilyConf `yaml:"address-family" mapstructure:"address-family"`
 	Discovery     DiscoveryConf     `yaml:"discovery" mapstructure:"discovery"`
-	QueryBudget   time.Duration     `yaml:"query_budget" mapstructure:"query_budget"`
+	QueryBudget   time.Duration     `yaml:"query-budget" mapstructure:"query-budget"`
 	// UpgradeIndirectCacheHits controls whether cache hits with an
 	// indirect context (Glue, Referral, Hint) trigger a fresh query
 	// to "upgrade" the data quality. nil = legacy behaviour (true).
 	// tdns-mp overrides this to false in its default config to cut
 	// gossip-driven query volume.
-	UpgradeIndirectCacheHits *bool `yaml:"upgrade_indirect_cache_hits" mapstructure:"upgrade_indirect_cache_hits"`
+	UpgradeIndirectCacheHits *bool `yaml:"upgrade-indirect-cache-hits" mapstructure:"upgrade-indirect-cache-hits"`
 }
 
 // BackoffConf tunes per-(address, transport) backoff behaviour
 // after a failed query. Replaces the hardcoded 2 min / 1 h constants
 // that lived in cache/authserver.go.
 type BackoffConf struct {
-	FirstFailure   time.Duration `yaml:"first_failure" mapstructure:"first_failure"`
-	MaxFailure     time.Duration `yaml:"max_failure" mapstructure:"max_failure"`
+	FirstFailure   time.Duration `yaml:"first-failure" mapstructure:"first-failure"`
+	MaxFailure     time.Duration `yaml:"max-failure" mapstructure:"max-failure"`
 	Multiplier     float64       `yaml:"multiplier" mapstructure:"multiplier"`
-	JitterFraction float64       `yaml:"jitter_fraction" mapstructure:"jitter_fraction"`
-	RoutingFailure time.Duration `yaml:"routing_failure" mapstructure:"routing_failure"`
-	LameDelegation time.Duration `yaml:"lame_delegation" mapstructure:"lame_delegation"`
+	JitterFraction float64       `yaml:"jitter-fraction" mapstructure:"jitter-fraction"`
+	RoutingFailure time.Duration `yaml:"routing-failure" mapstructure:"routing-failure"`
+	LameDelegation time.Duration `yaml:"lame-delegation" mapstructure:"lame-delegation"`
 }
 
 // AddressFamilyConf tunes per-process IPv4/IPv6 reachability
 // tracking (deprioritise a family after N distinct failures in a
 // sliding window, probe periodically to detect recovery).
 type AddressFamilyConf struct {
-	WindowDuration   time.Duration `yaml:"window_duration" mapstructure:"window_duration"`
-	FailureThreshold int           `yaml:"failure_threshold" mapstructure:"failure_threshold"`
-	SuspectDuration  time.Duration `yaml:"suspect_duration" mapstructure:"suspect_duration"`
-	ProbeInterval    time.Duration `yaml:"probe_interval" mapstructure:"probe_interval"`
+	WindowDuration   time.Duration `yaml:"window-duration" mapstructure:"window-duration"`
+	FailureThreshold int           `yaml:"failure-threshold" mapstructure:"failure-threshold"`
+	SuspectDuration  time.Duration `yaml:"suspect-duration" mapstructure:"suspect-duration"`
+	ProbeInterval    time.Duration `yaml:"probe-interval" mapstructure:"probe-interval"`
 }
 
 // DiscoveryConf tunes the discovery state machine used for
 // transport-signal (SVCB / TSYNC) and TLSA lookups, replacing
 // the fire-and-forget goroutine pattern.
 type DiscoveryConf struct {
-	RetryAfterFailure time.Duration `yaml:"retry_after_failure" mapstructure:"retry_after_failure"`
-	MaxFailures       int           `yaml:"max_failures" mapstructure:"max_failures"`
+	RetryAfterFailure time.Duration `yaml:"retry-after-failure" mapstructure:"retry-after-failure"`
+	MaxFailures       int           `yaml:"max-failures" mapstructure:"max-failures"`
 }
 
 // LoadImrTuningDefaults fills missing or invalid fields with sensible
@@ -583,11 +588,11 @@ func (k KeystorePreloadConf) Dirs() map[string]string {
 
 // CatalogConf defines configuration for catalog zone support (RFC 9432)
 type CatalogConf struct {
-	GroupPrefixes GroupPrefixesConf             `yaml:"group_prefixes" mapstructure:"group_prefixes"`
+	GroupPrefixes GroupPrefixesConf             `yaml:"group-prefixes" mapstructure:"group-prefixes"`
 	Policy        CatalogPolicy                 `yaml:"policy" mapstructure:"policy"` // Deprecated, kept for backward compatibility
-	ConfigGroups  map[string]*ConfigGroupConfig `yaml:"config_groups" mapstructure:"config_groups"`
-	MetaGroups    map[string]*ConfigGroupConfig `yaml:"meta_groups" mapstructure:"meta_groups"` // Deprecated, kept for backward compatibility
-	SigningGroups map[string]*SigningGroupInfo  `yaml:"signing_groups" mapstructure:"signing_groups"`
+	ConfigGroups  map[string]*ConfigGroupConfig `yaml:"config-groups" mapstructure:"config-groups"`
+	MetaGroups    map[string]*ConfigGroupConfig `yaml:"meta-groups" mapstructure:"meta-groups"` // Deprecated, kept for backward compatibility
+	SigningGroups map[string]*SigningGroupInfo  `yaml:"signing-groups" mapstructure:"signing-groups"`
 }
 
 // CatalogPolicy defines policy for how catalog zones are processed
@@ -609,7 +614,7 @@ type GroupPrefixesConf struct {
 type ConfigGroupConfig struct {
 	Name     string   `yaml:"-" mapstructure:"-"` // Populated from map key
 	Upstream string   `yaml:"upstream" mapstructure:"upstream"`
-	TsigKey  string   `yaml:"tsig_key" mapstructure:"tsig_key"`
+	TsigKey  string   `yaml:"tsig-key" mapstructure:"tsig-key"`
 	Store    string   `yaml:"store" mapstructure:"store"`
 	Options  []string `yaml:"options" mapstructure:"options"`
 }
@@ -626,8 +631,8 @@ type SigningGroupInfo struct {
 type DynamicZonesConf struct {
 	ConfigFile     string                   `yaml:"configfile" mapstructure:"configfile"`           // Absolute path to dynamic config file
 	ZoneDirectory  string                   `yaml:"zonedirectory" mapstructure:"zonedirectory"`     // Absolute path to zone file directory
-	CatalogZones   DynamicZoneTypeConf      `yaml:"catalog_zones" mapstructure:"catalog_zones"`     // Configuration for catalog zones
-	CatalogMembers DynamicCatalogMemberConf `yaml:"catalog_members" mapstructure:"catalog_members"` // Configuration for catalog member zones
+	CatalogZones   DynamicZoneTypeConf      `yaml:"catalog-zones" mapstructure:"catalog-zones"`     // Configuration for catalog zones
+	CatalogMembers DynamicCatalogMemberConf `yaml:"catalog-members" mapstructure:"catalog-members"` // Configuration for catalog member zones
 	Dynamic        DynamicApiZoneConf       `yaml:"dynamic" mapstructure:"dynamic"`                 // Configuration for direct API-created zones
 }
 
@@ -797,22 +802,22 @@ type InternalConf struct {
 // extraction.
 const defaultKaspPropagationDelay = time.Hour
 
-// validateKaspPropagationDelay rejects invalid kasp.propagation_delay at config load.
+// validateKaspPropagationDelay rejects invalid kasp.propagation-delay at config load.
 func validateKaspPropagationDelay(s string) error {
 	if s == "" {
 		return nil
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		return fmt.Errorf("kasp.propagation_delay: invalid duration %q: %w", s, err)
+		return fmt.Errorf("kasp.propagation-delay: invalid duration %q: %w", s, err)
 	}
 	if d <= 0 {
-		return fmt.Errorf("kasp.propagation_delay: must be positive, got %s", d)
+		return fmt.Errorf("kasp.propagation-delay: must be positive, got %s", d)
 	}
 	return nil
 }
 
-// KaspPropagationDelay returns the configured kasp.propagation_delay, or 1h.
+// KaspPropagationDelay returns the configured kasp.propagation-delay, or 1h.
 func (conf *Config) KaspPropagationDelay() time.Duration {
 	if conf == nil || conf.Dnssec.Kasp.PropagationDelay == "" {
 		return defaultKaspPropagationDelay
@@ -820,10 +825,10 @@ func (conf *Config) KaspPropagationDelay() time.Duration {
 	d, err := time.ParseDuration(conf.Dnssec.Kasp.PropagationDelay)
 	if err != nil || d <= 0 {
 		if err != nil {
-			lgConfig.Warn("invalid kasp.propagation_delay, using default",
+			lgConfig.Warn("invalid kasp.propagation-delay, using default",
 				"value", conf.Dnssec.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay, "err", err)
 		} else {
-			lgConfig.Warn("kasp.propagation_delay must be positive, using default",
+			lgConfig.Warn("kasp.propagation-delay must be positive, using default",
 				"value", conf.Dnssec.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay)
 		}
 		return defaultKaspPropagationDelay

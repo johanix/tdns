@@ -26,7 +26,7 @@ Single-org setup: no explicit enrollment. Generate JOSE keypairs, configure each
 
 2. **CLI** (implemented)
    - Keys are under **tdns-cli**, not the server binaries. Agent and combiner are daemons only (no subcommands).
-   - **Agent**: `tdns-cli agent keys generate [-o path]`, `tdns-cli agent keys show`. Uses the agent's config file (set `config_file` for the tdns-agent entry in tdns-cli's apiservers, or pass `--server-config`).
+   - **Agent**: `tdns-cli agent keys generate [-o path]`, `tdns-cli agent keys show`. Uses the agent's config file (set `config-file` for the tdns-agent entry in tdns-cli's apiservers, or pass `--server-config`).
    - **Combiner**: `tdns-cli combiner keys generate [-o path]`, `tdns-cli combiner keys show`. Same idea with combiner config file.
 
 3. **Runtime**

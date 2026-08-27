@@ -757,7 +757,7 @@ regenerates), this only touches retired keys.
 Accelerating removal means a resolver still caching only an old (now-removed)
 DNSKEY briefly cannot validate until it re-queries; the active keys already
 serve. Normally you can just wait for the KeyStateWorker to age the retired
-keys out after propagation_delay.`,
+keys out after propagation-delay.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename")
 			zone := tdns.Globals.Zonename

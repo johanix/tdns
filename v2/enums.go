@@ -194,7 +194,7 @@ var StringToAuthOption = map[string]AuthOption{
 	"minimal-responses": AuthOptMinimalResponses,
 }
 
-// outbound_soa_serial mode values for DnsEngine.OutboundSoaSerial.
+// outbound-soa-serial mode values for DnsEngine.OutboundSoaSerial.
 const (
 	OutboundSoaSerialKeep     = "keep"     // outbound = inbound serial (default)
 	OutboundSoaSerialUnixtime = "unixtime" // outbound = time.Now().Unix()

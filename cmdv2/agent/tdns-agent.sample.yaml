@@ -122,10 +122,10 @@ keybootstrap:
       nameservers:	all	# one | all
 
 dnssec:
-   large_algorithms: [ RSASHA512 ]   # by name; stand-in for large KSK
+   large-algorithms: [ RSASHA512 ]   # by name; stand-in for large KSK
 
    # Authorizes the "large-ksk" policy's mixed KSK/ZSK pair below.
-   split_algorithms:
+   split-algorithms:
       RSASHA512: [ ECDSAP256SHA256 ]
 
    policies:
@@ -184,10 +184,10 @@ imrengine:
    logging:
       enabled:		false
       file:		/var/log/tdns/imr-debug.log
-   # require_dnssec_validation: when true (default), TLSA lookups used for API transport
+   # require-dnssec-validation: when true (default), TLSA lookups used for API transport
    # peer verification must have a secure DNSSEC validation state. Set to false in lab
    # environments where the full DNSSEC chain is not yet established.
-   require_dnssec_validation: true
+   require-dnssec-validation: true
 
 log:
    file:		/var/log/tdns/tdns-agent.log

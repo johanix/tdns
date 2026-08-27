@@ -810,13 +810,13 @@ func fetchRolloverStatusOffline(z string) *tdns.RolloverStatus {
 	}
 	defer kdb.DB.Close()
 	// Offline path: the daemon isn't running, so we can't query its
-	// kasp.check_interval. Pass 0, which suppresses the warning —
+	// kasp.check-interval. Pass 0, which suppresses the warning —
 	// surfacing it requires daemon-runtime context, and the operator
 	// running offline-mode is doing postmortem analysis where the
 	// warning would be noise.
 	// Offline mode: no daemon-runtime kasp config in scope. Pass
-	// 0 for both check_interval and propagation_delay; the
-	// renderer treats unknown propagation_delay as "skip the
+	// 0 for both check-interval and propagation-delay; the
+	// renderer treats unknown propagation-delay as "skip the
 	// ds-published timing math" which is the right thing for
 	// postmortem use anyway.
 	s, err := tdns.ComputeRolloverStatus(kdb, z, pol, 0, 0, time.Now())

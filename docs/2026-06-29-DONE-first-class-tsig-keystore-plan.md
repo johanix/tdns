@@ -51,7 +51,7 @@ Layered onto `tsig-on-replication` (PR #269 → `dynamic-zones-mgmt`).
 | Dynamic keys persisted in dynamic-zones YAML `keys:` block | `v2/dynamic_zones.go:316` (`DynamicConfigFile`), `:432,509,536` |
 | Inline `stageInlineTsigKey`/`commitStagedTsigKey` | `v2/dynamic_zones.go:667,690` |
 | Provision/Modify dynamic zone | `v2/dynamic_zones.go:710,891` |
-| Catalog `tsig_key` name-only, validated via `tsigKeyDefined` | `v2/catalog.go:383,384`; `ConfigGroupConfig.TsigKey` `config.go:395`; `Catalog.ConfigGroups` `config.go:371` |
+| Catalog `tsig-key` name-only, validated via `tsigKeyDefined` | `v2/catalog.go:383,384`; `ConfigGroupConfig.TsigKey` `config.go:395`; `Catalog.ConfigGroups` `config.go:371` |
 | CLI client keystore `ParseTsigKeys(*KeyConf)` → `Globals.TsigKeys` | `v2/tsig_utils.go:10,21` |
 | KeyDB + `Tx` + `Begin` | `v2/db.go:283,63`; CRUD `v2/keystore.go:18,302` |
 | Schema map + table DDL | `v2/db_schema.go:11,51,68`; `dbSetupTables/dbMigrateSchema/dbMigrateData` `v2/db.go:97,164,120` |
@@ -367,7 +367,7 @@ sha384→48, sha512→64; matches `tsig-keygen`). Validate `algorithm` via
   `origin=api, owner=api` key via the keystore path and references it. **Create-if-
   absent / error on differing secret** (§7) — the behaviour change in `commitStagedTsigKey`
   (`dynamic_zones.go:690`); update CLI help and `tsig_dynzone_test.go`.
-- **Catalog `tsig_key`:** unchanged — a name reference validated against the store
+- **Catalog `tsig-key`:** unchanged — a name reference validated against the store
   (`catalog.go:383,384`); creates no key. (`owner=catalog` keys are how an operator
   pre-provisions.)
 - **Retire** the dynamic-zones YAML `keys:` block (§13 migration); drop the reload

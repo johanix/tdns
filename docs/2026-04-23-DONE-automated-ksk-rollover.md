@@ -47,7 +47,7 @@ pieces together into a fully automated KSK rollover:
   `pending-parent-push` → `pending-parent-observe`); CLI `ds-push` /
   `query-parent` remain for debugging
 - no parameter coupling — the timing constants in `KaspConf`
-  (`propagation_delay`) and in `DnssecPolicy` (`SigValidity`) are
+  (`propagation-delay`) and in `DnssecPolicy` (`SigValidity`) are
   independent of each other and independent of key lifetime
 
 The goal of this project is to close those gaps and enable rapid KSK
@@ -2130,7 +2130,7 @@ lags the computed range (requires every contributing KSK to have
 with §7.2 exponential backoff and `confirm-timeout` hard-fail (review fix
 landed alongside 4A; see §13 commit notes), persist `last_ds_confirmed_*`,
 advance `created → ds-published`, then `ds-published → standby` after
-`kasp.propagation_delay`, and **bootstrap** `standby → active` when no active
+`kasp.propagation-delay`, and **bootstrap** `standby → active` when no active
 KSK exists.
 
 **Explicitly out of scope for 4A** (now mapped to specific later phases):
@@ -2208,7 +2208,7 @@ pipeline opens.
   - trigger re-sign of DNSKEY + apex
 - `v2/ksk_rollover_automated.go` (extend) — two new phase cases:
   - `pending-child-publish`: advance after a fixed wait of
-    `kasp.propagation_delay` from `rollover_phase_at`. Future work
+    `kasp.propagation-delay` from `rollover_phase_at`. Future work
     can replace this with actual secondary-observation. Transitions
     to `pending-parent-push`.
   - `pending-child-withdraw`: for any KSK in `retired` past

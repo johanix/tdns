@@ -72,7 +72,7 @@ Rules enforced at config load (violations quarantine the zone):
 
 The TLSA lookup (`_<port>._tcp.<name>`) goes through the built-in validating
 IMR and **fails closed**: no IMR, a failed lookup, or a not-provably-secure
-RRset all abort the transfer. The `imrengine.require_dnssec_validation:
+RRset all abort the transfer. The `imrengine.require-dnssec-validation:
 false` lab-mode escape hatch is honored (with a loud warning), consistent
 with how tdns treats TLSA elsewhere.
 

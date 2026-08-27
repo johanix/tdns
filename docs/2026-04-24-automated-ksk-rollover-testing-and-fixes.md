@@ -61,13 +61,13 @@ The body of the document is organised as:
 - DS push to parent: SIG(0)-signed UPDATE accepted.
 - Parent observation: parent-agent DS query returns matching set,
   worker advances `created → ds-published`.
-- `ds-published → standby` after `kasp.propagation_delay`.
+- `ds-published → standby` after `kasp.propagation-delay`.
 - Scheduled trigger: `rolloverDue` fires `AtomicRollover`,
   `active_at + ksk.lifetime` reached.
 - AtomicRollover swap: active→retired, oldest-standby→active,
   `rollover_in_progress=true`, phase advances to
   `pending-child-publish`.
-- `pending-child-publish` waits `kasp.propagation_delay`, then
+- `pending-child-publish` waits `kasp.propagation-delay`, then
   `pending-parent-push` issues a fresh DS UPDATE for the new key
   set (with retired key DS retained).
 - `pending-parent-observe` confirms parent has the new DS RRset.
@@ -91,7 +91,7 @@ The body of the document is organised as:
 - **K-step clamp visible at multiple step boundaries.** With a
   short ksk.lifetime + long-enough margin, only K=1 ever runs.
   Need a config that produces multiple visible K transitions.
-- **Validate that `ttls.max_served` actually pulls
+- **Validate that `ttls.max-served` actually pulls
   `max_observed_ttl` down across a full sign cycle**, so
   `effective_margin` shrinks to `policy.clamping.margin`. Last
   observed: stuck at the inbound-zonefile TTL value because the
@@ -268,7 +268,7 @@ serial, which was lower than the last-served serial.
 
 **Fix (commit `4c7dbd3`)**: combined `service.reset_soa_serial`
 (bool) and `dnsengine.options: [persist-outbound-serial]` into a
-single `dnsengine.outbound_soa_serial: keep|unixtime|persist`
+single `dnsengine.outbound-soa-serial: keep|unixtime|persist`
 field. `persist` saves the bumped serial to DB and restores it on
 restart, so secondaries don't see regression.
 
@@ -321,7 +321,7 @@ in the future.
 **Fix (commit `80f24ef`)**: stamp `active_at` only when currently
 NULL. Same idempotency that `active_seq` already had.
 
-### 2.13 ttls.max_served added
+### 2.13 ttls.max-served added
 
 **Symptom (motivation, not a bug)**: testing
 `pending-child-withdraw` with `ksk.lifetime: 10m, margin: 5m`
@@ -329,11 +329,11 @@ should have completed in 5m. Instead took 1h, because the zone's
 RRsets had 3600s TTLs from the source zonefile, so
 `max_observed_ttl` was 3600 → `effective_margin = 1h`.
 
-**Fix (commit `1777952`)**: new `ttls.max_served` policy field.
+**Fix (commit `1777952`)**: new `ttls.max-served` policy field.
 When set, `SignRRset` clamps every served TTL down to
-`min(operator_ttl, K*margin if K>0, max_served)`. Validation:
-`max_served >= 60s` (warn-and-bump if lower); reject hard if
-`max_served < clamping.margin` when clamping is enabled.
+`min(operator_ttl, K*margin if K>0, max-served)`. Validation:
+`max-served >= 60s` (warn-and-bump if lower); reject hard if
+`max-served < clamping.margin` when clamping is enabled.
 
 ### 2.14 CLI ergonomics
 
@@ -367,7 +367,7 @@ the current phase.
 
 ### 3.1 max_observed_ttl doesn't converge until next rollover
 
-After setting `ttls.max_served`, the next `SignZone` pass clamps
+After setting `ttls.max-served`, the next `SignZone` pass clamps
 header TTLs but the `max_observed_ttl` recorded in
 `ZoneSigningState` is still the pre-clamp value (the loop reads
 TTLs *before* `SignRRset` mutates them). Only the *second* sign
@@ -376,7 +376,7 @@ passes only happen at rollover events — so `effective_margin`
 takes a full extra cycle to shrink.
 
 **Plan**: force a sign pass when policy is loaded with
-`max_served` set, or change the sign loop to record post-clamp
+`max-served` set, or change the sign loop to record post-clamp
 TTLs (consult `UnclampedTTL` and the active clamp ceiling rather
 than the header).
 
@@ -479,7 +479,7 @@ multi-DS rollover:
 - Two-range bookkeeping: submitted vs. confirmed (§6.1)
 - Key-state advance `created → ds-published` (transactional, §9.4)
 - Time-based advance `ds-published → standby` after
-  `kasp.propagation_delay`
+  `kasp.propagation-delay`
 - Bootstrap promotion `standby → active` when no active SEP key
   exists
 
@@ -586,13 +586,13 @@ transition runs on a testable timescale:
 
 ```yaml
 kasp:
-  propagation_delay: 30s
-  check_interval:    10s
+  propagation-delay: 30s
+  check-interval:    10s
 ```
 
-`propagation_delay` is what
+`propagation-delay` is what
 `TransitionRolloverKskDsPublishedToStandby` waits for after the DS
-is observed at the parent. `check_interval` controls how often the
+is observed at the parent. `check-interval` controls how often the
 `KeyStateWorker` (and thus the rollover tick) fires. Short values
 make the pipeline observable in real time; production values would
 be minutes to hours.
@@ -642,13 +642,13 @@ If the parent hasn't published yet, the query returns no match;
 `observe_next_poll_at` doubles (2s → 4s → 8s → … capped at
 `confirm-poll-max`).
 
-**5. Propagation wait** (`kasp.propagation_delay` after
+**5. Propagation wait** (`kasp.propagation-delay` after
 observation):
 ```
 rollover: ds-published→standby  zone=child.example. keyid=<N>
 ```
 SEP keys in `ds-published` advance to `standby` once
-`now - ds_observed_at >= propagation_delay`.
+`now - ds_observed_at >= propagation-delay`.
 
 **6. Bootstrap activation** (if the child had no active SEP key):
 ```

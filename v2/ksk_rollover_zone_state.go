@@ -1019,7 +1019,7 @@ func StateSinceForDnssecKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps)
 		// ZSKs have no RolloverKeyState row and DnssecKeyStore has no
 		// standby_at column (the published→standby transition stamps
 		// nothing). Use published_at as the state-since: for a ZSK the
-		// published→standby gap is just propagation_delay, so published_at
+		// published→standby gap is just propagation-delay, so published_at
 		// is effectively "standby since". KSKs fall through to the
 		// RolloverKeyState lookups below.
 		if k.Flags&dns.SEP == 0 && k.PublishedAt != nil {

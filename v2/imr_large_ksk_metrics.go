@@ -25,7 +25,7 @@ var (
 )
 
 // LargeKskDSAlgCount holds the number of individual DS RRs seen for one
-// large algorithm (dnssec.large_algorithms).
+// large algorithm (dnssec.large-algorithms).
 type LargeKskDSAlgCount struct {
 	Algorithm uint8
 	Count     uint64
@@ -38,7 +38,7 @@ type LargeKskImrMetrics struct {
 	DSDLargeRRByAlgorithm []LargeKskDSAlgCount
 	DNSKEYLookupTotal     uint64
 	// DNSKEYLookupBypassed counts DNSKEY lookups that bypassed the server's
-	// probabilistic transport selection per the dnskey_query_transport policy.
+	// probabilistic transport selection per the dnskey-query-transport policy.
 	// The transport actually chosen may be do53-tcp OR an encrypted transport
 	// (DoQ/DoT/DoH) depending on the server's advertised capabilities.
 	DNSKEYLookupBypassed uint64

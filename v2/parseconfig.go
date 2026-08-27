@@ -302,7 +302,7 @@ type deprecatedConfigKey struct {
 //
 // Keep advice concrete: name the new location and, ideally, the change date
 // or doc so an operator can find the migration.
-var deprecatedConfigKeys = []deprecatedConfigKey{
+var deprecatedConfigKeys = append([]deprecatedConfigKey{
 	// Config restructure 2026-06-16 (per-role KSK/ZSK algorithms + nesting):
 	// the DNSSEC config moved under a single top-level `dnssec:` block.
 	{match: "dnssecpolicies", exact: true,
@@ -310,9 +310,9 @@ var deprecatedConfigKeys = []deprecatedConfigKey{
 	{match: "kasp", exact: true,
 		advice: "`kasp:` moved under `dnssec:` as `dnssec.kasp:` (restructure 2026-06-16)"},
 	{match: "large_algorithms", exact: true,
-		advice: "`large_algorithms:` moved under `dnssec:` as `dnssec.large_algorithms:` (restructure 2026-06-16)"},
+		advice: "`large_algorithms:` moved under `dnssec:` as `dnssec.large-algorithms:` (restructure 2026-06-16)"},
 	{match: "split_algorithms", exact: true,
-		advice: "`split_algorithms:` moved under `dnssec:` as `dnssec.split_algorithms:` (restructure 2026-06-16)"},
+		advice: "`split_algorithms:` moved under `dnssec:` as `dnssec.split-algorithms:` (restructure 2026-06-16)"},
 	// sigvalidity reshape: was a per-key scalar (ksk/zsk/csk: sigvalidity: X);
 	// is now a policy-level subtree `sigvalidity: { default, dnskey, ds }`
 	// with `default` required.
@@ -329,6 +329,69 @@ var deprecatedConfigKeys = []deprecatedConfigKey{
 		advice: "zone key is `dnssecpolicy:` (one word, no hyphen); `dnssec-policy:` is ignored, leaving the zone unsigned"},
 	{match: ".multi_signer",
 		advice: "zone key is `multisigner:` (one word, no underscore); `multi_signer:` is ignored"},
+}, underscoreSpellingMigrations()...)
+
+// snakeCaseConfigKeys lists every config key that was spelled with underscores
+// before the 2026-08-27 rename to hyphens. Kept as data so the migration
+// advice below cannot drift from the rename itself.
+//
+// This registry is not cosmetic. Config is loaded through viper, which
+// silently ignores a key it cannot map -- the same failure that left
+// trust-anchor-ds parsing to "" for as long as it lacked a mapstructure tag.
+// Without an entry here, an operator whose config still says
+// "propagation_delay:" would get no error, no warning, and a rollover engine
+// quietly running on defaults.
+var snakeCaseConfigKeys = []string{
+	"address_family",
+	"catalog_members",
+	"catalog_zones",
+	"check_interval",
+	"config_file",
+	"config_groups",
+	"dnskey_query_transport",
+	"failure_threshold",
+	"first_failure",
+	"group_prefixes",
+	"jitter_fraction",
+	"lame_delegation",
+	"large_algorithms",
+	"max_failure",
+	"max_failures",
+	"max_served",
+	"meta_groups",
+	"outbound_soa_serial",
+	"probe_interval",
+	"propagation_delay",
+	"query_budget",
+	"require_dnssec_validation",
+	"retry_after_failure",
+	"routing_failure",
+	"signing_groups",
+	"split_algorithms",
+	"standby_ksk_count",
+	"standby_zsk_count",
+	"suspect_duration",
+	"transfer_src",
+	"trust_anchor_dnskey",
+	"trust_anchor_ds",
+	"tsig_key",
+	"upgrade_indirect_cache_hits",
+	"window_duration",
+}
+
+// underscoreSpellingMigrations turns snakeCaseConfigKeys into deprecated-key
+// entries. Each is a LEAF match ("." + name): these keys sit under several
+// different parents, and the old spelling is unambiguous wherever it appears.
+func underscoreSpellingMigrations() []deprecatedConfigKey {
+	out := make([]deprecatedConfigKey, 0, len(snakeCaseConfigKeys))
+	for _, old := range snakeCaseConfigKeys {
+		out = append(out, deprecatedConfigKey{
+			match: "." + old,
+			advice: fmt.Sprintf("`%s:` is now spelled `%s:` (config keys use hyphens, not underscores, 2026-08-27)",
+				old, strings.ReplaceAll(old, "_", "-")),
+		})
+	}
+	return out
 }
 
 // classifyUnusedConfigKeys splits mapstructure's unused-key list into keys

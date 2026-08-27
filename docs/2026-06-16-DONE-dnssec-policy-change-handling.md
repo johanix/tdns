@@ -66,7 +66,7 @@ Retiring an old-algorithm key, rather than deleting it:
   DOUBLE-SIGNED (old sigs + new sigs) and stays fully validatable
   throughout — no outage.
 - The existing KeyStateWorker carries retired→removed after
-  propagation_delay (+ maxTTL margin for ZSKs); at removal the old sigs
+  propagation-delay (+ maxTTL margin for ZSKs); at removal the old sigs
   are stripped (Phase 2). Cleanup is automatic, on the right schedule.
 
 This gives us the ZONE-SIDE of an algorithm rollover for free. The piece
@@ -292,7 +292,7 @@ TestParseDnssecConfig.
 
 Pull the parsing of the ENTIRE `dnssec:` block out of ParseConfig into a
 standalone helper — parseDnssecConfig(conf) — that resolves policies +
-split_algorithms + large_algorithms + kasp into the conf.Internal.*
+split-algorithms + large-algorithms + kasp into the conf.Internal.*
 structures (including the broken-policy error states from Phase 4 /
 already-landed work). ParseConfig calls it; nothing else changes there.
 
@@ -308,9 +308,9 @@ Two payoffs:
 It also makes the policies-before-zones dependency an explicit invariant
 of the reload path rather than an accident of call order in ParseConfig.
 
-- Scope: ENTIRE dnssec: block (policies + split_algorithms +
-  large_algorithms + kasp). They are parsed and validated together — a
-  policy's validity depends on split_algorithms — so they cannot be split.
+- Scope: ENTIRE dnssec: block (policies + split-algorithms +
+  large-algorithms + kasp). They are parsed and validated together — a
+  policy's validity depends on split-algorithms — so they cannot be split.
 - Files: parseconfig.go (extract), a new test file.
 - Risk: LOW. Pure refactor + tests; behavior identical, just relocated.
   One caveat: confirm ParseConfig does nothing BETWEEN the dnssec parse

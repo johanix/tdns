@@ -311,28 +311,28 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 	}
 	out.SigValidity = sv
 
-	// max_served must be parsed AFTER clamping so the cross-check against
+	// max-served must be parsed AFTER clamping so the cross-check against
 	// clamping.margin sees the resolved margin value.
 	if s := strings.TrimSpace(conf.Ttls.MaxServed); s != "" {
 		d, err := parseExtendedDuration(s)
 		if err != nil {
-			return fmt.Errorf("dnssec policy %q: ttls.max_served: %w", policyName, err)
+			return fmt.Errorf("dnssec policy %q: ttls.max-served: %w", policyName, err)
 		}
 		// Floor at 60s with a warning. Below clock-skew the value is
 		// nonsense in practice but it's not security-relevant to clamp
 		// TTLs aggressively, so bump-and-warn rather than reject.
 		if d < 60*time.Second {
-			lgConfig.Warn("dnssec policy: ttls.max_served below 60s clock-skew floor; raised to 60s",
+			lgConfig.Warn("dnssec policy: ttls.max-served below 60s clock-skew floor; raised to 60s",
 				"policy", policyName, "configured", d.String())
 			d = 60 * time.Second
 		}
-		// Reject when max_served < clamping.margin and clamping is enabled.
-		// The math still works (max_served wins as the always-on ceiling),
+		// Reject when max-served < clamping.margin and clamping is enabled.
+		// The math still works (max-served wins as the always-on ceiling),
 		// but it makes no operational sense: the steady-state ceiling is
 		// stricter than the rollover-time floor. Almost certainly a
 		// misconfiguration — fail closed so the operator notices.
 		if out.Clamping.Enabled && out.Clamping.Margin > 0 && d < out.Clamping.Margin {
-			return fmt.Errorf("dnssec policy %q: ttls.max_served (%s) must be >= clamping.margin (%s); "+
+			return fmt.Errorf("dnssec policy %q: ttls.max-served (%s) must be >= clamping.margin (%s); "+
 				"the always-on TTL ceiling cannot be stricter than the rollover-time floor",
 				policyName, d, out.Clamping.Margin)
 		}
@@ -565,13 +565,13 @@ func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy) {
 }
 
 // dnssecPoliciesYAML is the top-level shape for `tdns zone keystore dnssec policy validate --file`.
-// Mirrors the daemon config: policies and the split_algorithms allowlist
+// Mirrors the daemon config: policies and the split-algorithms allowlist
 // both live under the dnssec: block.
 type dnssecPoliciesYAML struct {
 	Dnssec struct {
 		Templates       map[string]DnssecPolicyConf `yaml:"templates"`
 		Policies        map[string]DnssecPolicyConf `yaml:"policies"`
-		SplitAlgorithms map[string][]string         `yaml:"split_algorithms"`
+		SplitAlgorithms map[string][]string         `yaml:"split-algorithms"`
 	} `yaml:"dnssec"`
 }
 
