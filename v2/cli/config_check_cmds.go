@@ -399,33 +399,41 @@ func finishCheckconf(rep *ccReport) {
 // Config loading (mirrors cmdv2/cli/root.go initConfig include handling)
 // ---------------------------------------------------------------------------
 
-// loadConfigViper reads path into a fresh viper instance and merges any
-// top-level include: files (single level, non-recursive), exactly as the
-// daemon/CLI loaders do. A missing include is reported as a WARN, not fatal.
-func loadConfigViper(path string, rep *ccReport) (*viper.Viper, error) {
-	v := viper.New()
-	v.SetConfigFile(path)
-	if err := v.ReadInConfig(); err != nil {
+// loadConfigViper returns the merged config view that every check below reads,
+// produced by THE DAEMON'S OWN LOADER and then handed to viper.
+//
+// It used to resolve include: itself, with viper's MergeInConfig. That was not
+// the same algorithm: viper deep-merges maps, while the daemon's
+// processConfigFile replaces a nested map wholesale. The two therefore
+// disagreed, and the disagreement was the wrong way round -- check saw MORE
+// than the daemon would:
+//
+//	dnssec.policies    daemon = [beta]    config check = [alpha beta]
+//
+// So a zone referencing a policy that lives only in the main config passed
+// `config check` and then failed at startup, because the daemon never loaded
+// it. The whole point of this command is to answer "would the daemon start",
+// and it was answering about a config the daemon never sees.
+//
+// LoadRawConfigMap IS that loader, so parity is not something to maintain by
+// hand -- there is now one implementation. Two behaviours change as a result,
+// both of them alignments:
+//
+//   - Nested includes are visible. Viper's loop was single-level;
+//     processConfigFile recurses.
+//   - A missing include fails the load instead of warning and carrying on.
+//     ValidateConfig already refused such a config later, so the WARN was the
+//     misleading half, not the useful one.
+//
+// rep is unused now and kept for signature stability across the call sites.
+func loadConfigViper(path string, _ *ccReport) (*viper.Viper, error) {
+	raw, _, err := tdns.LoadRawConfigMap(path)
+	if err != nil {
 		return nil, err
 	}
-	for _, inc := range v.GetStringSlice("include") {
-		incPath := inc
-		if !filepath.IsAbs(incPath) {
-			incPath = filepath.Join(filepath.Dir(path), incPath)
-		}
-		if _, err := os.Stat(incPath); err != nil {
-			if os.IsNotExist(err) {
-				rep.warn("Config file", "include",
-					fmt.Sprintf("included file not found: %s", incPath),
-					"create the file or remove it from the include: list")
-				continue
-			}
-			return nil, fmt.Errorf("stat include %s: %w", incPath, err)
-		}
-		v.SetConfigFile(incPath)
-		if err := v.MergeInConfig(); err != nil {
-			return nil, fmt.Errorf("merge include %s: %w", incPath, err)
-		}
+	v := viper.New()
+	if err := v.MergeConfigMap(raw); err != nil {
+		return nil, fmt.Errorf("building the merged config view for %s: %w", path, err)
 	}
 	return v, nil
 }
