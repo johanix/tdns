@@ -107,6 +107,20 @@ func imrConfigAnchors(cfgPath string, logf func(format string, args ...any)) ([]
 		return nil, nil, ""
 	}
 
+	// This is a plain yaml.Unmarshal against a struct that knows only the
+	// current spellings, so a config still saying trust_anchor_ds: unmarshals
+	// into nothing at all. Left unsaid, the caller would fall through to the
+	// compiled-in IANA root DS records and report every other root bogus --
+	// the exact parity gap this loader exists to close, reopened for the
+	// length of the migration. The main config loader reports the rename; so
+	// must this one.
+	var generic any
+	if err := yaml.Unmarshal(data, &generic); err == nil {
+		if stale := SnakeCaseKeysIn(generic, ""); len(stale) > 0 {
+			logf("imrConfigAnchors: %s: deprecated config key(s): %s", cfgPath, SnakeCaseKeyAdvice(stale))
+		}
+	}
+
 	var dss []*dns.DS
 	var keys []*dns.DNSKEY
 	var srcs []string

@@ -2,6 +2,9 @@ package tdns
 
 import (
 	"fmt"
+
+	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -38,16 +41,19 @@ func tagName(f reflect.StructField, key string) (string, bool) {
 	return strings.Split(v, ",")[0], true
 }
 
-// A config key is only reachable if mapstructure can map it: the daemons load
-// Config with viper.Unmarshal, which reads mapstructure and ignores yaml.
-// mapstructure falls back to the field name, so a yaml key that differs from
-// the lowercased field name and carries no mapstructure tag is silently
-// dropped -- no error, no warning, the zero value.
+// Config is decoded by two different tag conventions, and a key is only fully
+// reachable if BOTH see it:
 //
-// That is exactly how imrengine.trust-anchor-ds, trust-anchor-dnskey and
-// trust-anchor-file parsed to "" no matter what the config said, leaving the
-// resolver validating against an empty anchor set. This test exists so that
-// class of bug cannot come back by way of a new field.
+//   - the daemon's decodeConfigMap sets mapstructure's TagName to "yaml";
+//   - viper.Unmarshal -- config check and the CLI roots -- uses mapstructure
+//     tags, falling back to the field name when there is none.
+//
+// So a yaml key that differs from its lowercased field name and carries no
+// mapstructure tag is read by the daemon and silently missed by everything on
+// the viper path. That is what the three imrengine trust-anchor keys did: the
+// running resolver had its anchor, while checkImrTrustAnchors read "" and
+// reported "no trust anchor configured". This test exists so that class of
+// divergence cannot come back by way of a new field.
 func TestConfigYamlKeysAreMappableByViper(t *testing.T) {
 	var problems []string
 	walkConfigFields(reflect.TypeOf(Config{}), "", map[reflect.Type]bool{}, func(where string, f reflect.StructField) {
@@ -70,6 +76,14 @@ func TestConfigYamlKeysAreMappableByViper(t *testing.T) {
 	sort.Strings(problems)
 	for _, p := range problems {
 		t.Error(p)
+	}
+
+	// A walk that stops reaching fields -- a renamed type, a recursion guard
+	// that fires too early -- would make every check above pass vacuously.
+	n := 0
+	walkConfigFields(reflect.TypeOf(Config{}), "", map[reflect.Type]bool{}, func(string, reflect.StructField) { n++ })
+	if n < 400 {
+		t.Errorf("walk reached only %d fields; it should cover the whole Config tree (~540)", n)
 	}
 }
 
@@ -161,5 +175,57 @@ dnssec:
 			continue
 		}
 		t.Logf("%-18s -> %v", tc.name, err)
+	}
+}
+
+// The two decoders must agree. Running both over the same document is the only
+// check that cannot drift from reality: the tag rules above are a proxy for
+// this, and a proxy can be wrong.
+func TestBothDecodersSeeTheSameTrustAnchors(t *testing.T) {
+	const doc = `
+imrengine:
+   trust-anchor-ds: ". IN DS 56910 15 2 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+   trust-anchor-dnskey: ". IN DNSKEY 257 3 15 dem0H2M22a8CDAe0PDZoGBBCBB2fHJ1fe39FkhNToAA="
+   trust-anchor-file: /some/root.key
+`
+	var raw map[string]any
+	if err := yaml.Unmarshal([]byte(doc), &raw); err != nil {
+		t.Fatalf("yaml: %v", err)
+	}
+
+	// Daemon path: decodeConfigMap, TagName "yaml".
+	var viaDaemon Config
+	if err := decodeConfigMap(raw, &viaDaemon, nil); err != nil {
+		t.Fatalf("decodeConfigMap: %v", err)
+	}
+
+	// config check / CLI path: viper, mapstructure tags.
+	f := filepath.Join(t.TempDir(), "imr.yaml")
+	if err := os.WriteFile(f, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v := viper.New()
+	v.SetConfigFile(f)
+	if err := v.ReadInConfig(); err != nil {
+		t.Fatalf("ReadInConfig: %v", err)
+	}
+	var viaViper Config
+	if err := v.Unmarshal(&viaViper); err != nil {
+		t.Fatalf("viper.Unmarshal: %v", err)
+	}
+
+	for _, tc := range []struct{ name, daemon, viper string }{
+		{"trust-anchor-ds", viaDaemon.Imr.TrustAnchorDS, viaViper.Imr.TrustAnchorDS},
+		{"trust-anchor-dnskey", viaDaemon.Imr.TrustAnchorDNSKEY, viaViper.Imr.TrustAnchorDNSKEY},
+		{"trust-anchor-file", viaDaemon.Imr.TrustAnchorFile, viaViper.Imr.TrustAnchorFile},
+	} {
+		switch {
+		case tc.daemon == "":
+			t.Errorf("%s: daemon decoder (TagName yaml) read nothing", tc.name)
+		case tc.viper == "":
+			t.Errorf("%s: viper decoder (mapstructure) read nothing — config check would report no anchor", tc.name)
+		case tc.daemon != tc.viper:
+			t.Errorf("%s: decoders disagree: daemon %q vs viper %q", tc.name, tc.daemon, tc.viper)
+		}
 	}
 }

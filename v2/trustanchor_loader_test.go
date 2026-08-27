@@ -1,8 +1,10 @@
 package tdns
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -71,5 +73,30 @@ func TestImrConfigAnchorsReadsAllThree(t *testing.T) {
 			continue
 		}
 		t.Logf("%-20s: %d DS, %d DNSKEY, source=%q", tc.name, len(ds), len(keys), src)
+	}
+}
+
+// An IMR config still using the pre-rename spelling yields no anchors here,
+// and LoadDefaultTrustAnchors then falls through to the compiled-in IANA root
+// DS records — so dog would call any other root bogus. The daemon's config
+// loader reports the rename; this loader must too, or the parity this file
+// exists to provide is gone for the length of the migration.
+func TestImrConfigAnchorsReportsOldSpelling(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "imr.yaml")
+	os.WriteFile(f, []byte("imrengine:\n   trust_anchor_ds: \". IN DS 56910 15 2 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20\"\n"), 0o644)
+
+	var logged []string
+	ds, keys, src := imrConfigAnchors(f, func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	})
+
+	if len(ds) != 0 || len(keys) != 0 || src != "" {
+		t.Fatalf("old spelling must not decode: got %d DS, %d DNSKEY, source %q", len(ds), len(keys), src)
+	}
+	joined := strings.Join(logged, "\n")
+	if !strings.Contains(joined, "trust_anchor_ds") || !strings.Contains(joined, "trust-anchor-ds") {
+		t.Errorf("expected advice naming both the old and new spelling, got:\n%s", joined)
+	} else {
+		t.Logf("reported: %s", joined)
 	}
 }

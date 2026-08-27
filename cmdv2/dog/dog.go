@@ -574,10 +574,13 @@ func showDNSMessageTrace() bool {
 // KSK DNSKEY is converted to its SHA-256 DS equivalent so the chaser, which
 // keys off DS, can anchor the root regardless of file format.
 func loadChaserAnchors() []*dns.DS {
+	// Not gated on --verbose. Every message on this path means an anchor the
+	// operator configured is NOT being used -- a stale key spelling, an
+	// unreadable file, an RR that would not parse. The chase still produces a
+	// verdict afterwards, and a verdict reached with the wrong anchors is the
+	// one failure a user cannot spot from the output.
 	taLogf := func(format string, args ...any) {
-		if tdns.Globals.Verbose {
-			fmt.Fprintf(os.Stderr, format+"\n", args...)
-		}
+		fmt.Fprintf(os.Stderr, ";; "+format+"\n", args...)
 	}
 	dss, keys, taSource := tdns.LoadDefaultTrustAnchors(trustAnchorFile, taLogf)
 	for _, k := range keys {

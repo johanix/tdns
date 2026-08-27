@@ -325,11 +325,13 @@ type ImrEngineConf struct {
 	Options     map[ImrOption]string `yaml:"-" mapstructure:"-"`
 	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
 	// full RR text (zonefile format). DS is preferred as it is more convenient.
-	// mapstructure tags are load bearing: the daemons populate Config with
-	// viper.Unmarshal, which keys off mapstructure and ignores yaml. Without
-	// them these three parsed to "" no matter what the config said, so every
-	// trust anchor was silently dropped and the resolver validated against an
-	// empty anchor set.
+	// Both tags are load bearing, because Config is decoded by two different
+	// tag conventions: the daemon's decodeConfigMap sets TagName "yaml"
+	// (parseconfig.go), while viper.Unmarshal -- used by config check and the
+	// CLI roots -- keys off mapstructure and falls back to the field name.
+	// With a yaml tag only, as these three had, the daemon read the key and
+	// config check did not: checkImrTrustAnchors saw "" and reported "no
+	// trust anchor configured" for a resolver that in fact had one.
 	TrustAnchorDS     string `yaml:"trust-anchor-ds" mapstructure:"trust-anchor-ds"`
 	TrustAnchorDNSKEY string `yaml:"trust-anchor-dnskey" mapstructure:"trust-anchor-dnskey"`
 	// Unbound-style file with one RR per line (DNSKEY and/or DS). Absolute path.
