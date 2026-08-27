@@ -243,10 +243,10 @@ type ZonePost struct {
 	// ChildZone names the delegated child whose delegation data
 	// "get-delegation" reads out of the parent named by Zone.
 	ChildZone string `json:"childzone,omitempty"`
-	Policy     string // target DNSSEC policy name for the "policy-set" command
-	Force      bool
-	Wait       bool
-	Timeout    string
+	Policy    string // target DNSSEC policy name for the "policy-set" command
+	Force     bool
+	Wait      bool
+	Timeout   string
 	// Dynamic-zones management (add/modify). No Store field — dynamic zones are
 	// map-only. Primaries carries the structured {addr, key} list; each key is a
 	// keys.tsig name, an inline TsigName (below), or NOKEY. Options are ZoneOption

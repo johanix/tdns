@@ -120,7 +120,7 @@ A dispatcher that only intercepts top-level keys would leave `dnssec.policies`
 replacing, and the motivating case would not work. Every allowlisted path must
 be intercepted at the point of assignment, nested ones included. Other
 `dnssec:` sub-keys — `completeness`, `kasp`, `templates`,
-`dnskey_query_transport` — keep included-wins.
+`dnskey-query-transport` — keep included-wins.
 
 **Replace after merge still replaces.** In
 
@@ -144,20 +144,20 @@ Merging applies only to these paths. Everything else replaces, opted in or not.
 | `zones` | list of named maps | concatenate; duplicate `name` is an error |
 | `templates` | list of named maps | concatenate; duplicate `name` is an error |
 | `dnssec.policies` | map of named maps | merge by policy name; duplicate name is an error |
-| `dnssec.large_algorithms` | list of strings | union |
-| `dnssec.split_algorithms` | map of string lists | merge by KSK name, union the ZSK lists |
+| `dnssec.large-algorithms` | list of strings | union |
+| `dnssec.split-algorithms` | map of string lists | merge by KSK name, union the ZSK lists |
 
 Three strategies, because these are three kinds of thing:
 
 - **Collections of named objects** (`zones`, `templates`, `dnssec.policies`).
   Two definitions of one name is a conflict, not something to merge — deep
   merging two zone definitions produces a zone neither file describes.
-- **Sets** (`large_algorithms`). The same algorithm in two files is the same
+- **Sets** (`large-algorithms`). The same algorithm in two files is the same
   fact stated twice. Union.
-- **Maps of sets** (`split_algorithms`). Merge at the KSK level, union the
+- **Maps of sets** (`split-algorithms`). Merge at the KSK level, union the
   leaf lists.
 
-`split_algorithms` deserves a caveat the first draft did not give it: unioning
+`split-algorithms` deserves a caveat the first draft did not give it: unioning
 it **widens which KSK/ZSK pairings the server will accept**. That is the right
 direction for the motivating case and it only gates policy parse, but it is a
 widening, not a restatement. Documented as such.
@@ -330,7 +330,7 @@ in a compatibility section.
 | R6 | `LoadRawConfigMap` signature changes for provenance. In-tree: `config check` plus six call sites. Out of tree: breaks at next repin, loudly. | Low. |
 | R7 | List order becomes include-order dependent for merged includes. Should not matter; wants checking anywhere a lookup takes first-match. | Low. |
 | R8 | The legacy `tdns/` tree keeps its own `processConfigFile` and old semantics, so `reporter` and `scanner` in tdns-apps diverge. | Low, consistent with delete-don't-patch. |
-| R9 | `split_algorithms` union widens accepted KSK/ZSK pairings. | Low; documented, opt-in only. |
+| R9 | `split-algorithms` union widens accepted KSK/ZSK pairings. | Low; documented, opt-in only. |
 | R10 | The `config check` fix changes what check reports for configs that are *already* inconsistent — some will start failing a check they used to pass. That is the bug being fixed, and it will look like a regression. Two further alignments come with it: **nested includes** become visible to those checks (viper was single-level, `processConfigFile` recurses to 10), and a **missing include** fails at load rather than WARN-and-continue — it already failed later via `ValidateConfig`, so the old WARN was the misleading half. | Medium. Needs saying in the release note. |
 
 ### Sequencing
@@ -420,7 +420,7 @@ checking each claim produced:
 | S4 — zone duplicate handling is not ~20 lines | **Accepted.** Now a documented pre-pass, re-costed to ~40. |
 | S5 — yaml.v3 last-wins on duplicate map keys | **Refuted.** yaml.v3 *rejects* them, verified. Single-file policy duplicates are already a parse error; the gap is only list-shaped collections. |
 | S6 — type mismatch unspecified | **Accepted.** Hard error, specified. |
-| S7 — `split_algorithms` union is a widening | **Accepted.** Documented as a widening rather than "the same fact twice". |
+| S7 — `split-algorithms` union is a widening | **Accepted.** Documented as a widening rather than "the same fact twice". |
 | Recommendation: opt-in | **Accepted**, plus the clobber WARN, so operators who never opt in still stop losing zones silently. |
 | Recommendation: do not bundle the template change | **Accepted.** Reverted to the hard error. |
 
