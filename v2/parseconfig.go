@@ -714,6 +714,37 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 	// freshly resolved role/mode; see warnGlobalOutboundSerialSuppressed.
 	var serialSuppressedZones []string
 
+	// Duplicate names are found in a PRE-PASS, before the loop below touches
+	// anything.
+	//
+	// It cannot be done inline. That loop get-or-creates the ZoneData, mutates
+	// it and enqueues a refresh, so by the time a second entry of the same name
+	// came round the first would already be live and possibly queued -- and
+	// "neither definition wins" would be a thing we said rather than a thing
+	// that happened.
+	//
+	// Comparison is on the FQDN because that is what the daemon compares:
+	// zname := dns.Fqdn(zconf.Name) right below means example.com and
+	// example.com. are already one zone, and a raw-string check would miss
+	// exactly the pair this loop then silently collapses.
+	//
+	// This applies to a single zones: block as much as to a merged one. Before
+	// this, two entries of one name were last-wins with nothing recording
+	// which of them was being served.
+	duplicateZones := map[string]bool{}
+	seenZoneName := map[string]bool{}
+	for i := range conf.Zones {
+		zname := dns.Fqdn(conf.Zones[i].Name)
+		if zname == "." {
+			continue // an unnamed entry is caught by the validation below
+		}
+		if seenZoneName[zname] {
+			duplicateZones[zname] = true
+			continue
+		}
+		seenZoneName[zname] = true
+	}
+
 	// Process each zone configuration
 	for i := range conf.Zones {
 		zconf := &conf.Zones[i]
@@ -732,6 +763,20 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				FirstZoneLoad: true,
 			}
 			Zones.Set(zname, zd)
+		}
+
+		// A zone defined more than once is served under NEITHER definition.
+		// Quarantining it rather than refusing the whole config is the same
+		// trade the loader makes everywhere else: a host carrying a hundred
+		// thousand zones does not stop because one of them was pasted twice.
+		if duplicateZones[zname] {
+			lgConfig.Error("zone defined more than once; not serving it under either definition",
+				"zone", zname)
+			zd.SetError(ConfigError, "zone %s is defined more than once in the configuration; "+
+				"remove the extra definition", zname)
+			broken_zones = append(broken_zones, zname)
+			all_zones = append(all_zones, zname)
+			continue
 		}
 		zd.Zonefile = zconf.Zonefile
 		if zd.Error {

@@ -5,10 +5,13 @@
 package tdns
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // writeFiles lays out a config tree and returns the path of the first file.
@@ -218,5 +221,62 @@ func TestTypeMismatchAcrossFilesIsFatal(t *testing.T) {
 	st := newMergeState()
 	if _, _, err := processConfigFile(main, filepath.Dir(main), 0, st); err == nil {
 		t.Error("a list/mapping disagreement across files must be fatal")
+	}
+}
+
+// TestDuplicateZoneIsQuarantined covers the single-file case that has been
+// silently last-wins for as long as the loader has existed: two entries of one
+// name, no include: anywhere. Neither is served now, and both the zone list and
+// the broken list say so.
+func TestDuplicateZoneIsQuarantined(t *testing.T) {
+	Zones = core.NewCmap[*ZoneData]()
+	conf := &Config{Zones: []ZoneConf{
+		{Name: "dup.example.", Type: "primary", Store: "map", Zonefile: "/nonexistent"},
+		{Name: "dup.example.", Type: "primary", Store: "map", Zonefile: "/nonexistent"},
+		{Name: "fine.example.", Type: "primary", Store: "map", Zonefile: "/nonexistent"},
+	}}
+	// The healthy zone reaches the refresh enqueue, which needs a channel.
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+
+	all, broken, err := conf.ParseZones(context.Background(), false)
+	if err != nil {
+		t.Fatalf("ParseZones: %v", err)
+	}
+
+	var brokenDup bool
+	for _, z := range broken {
+		if z == "dup.example." {
+			brokenDup = true
+		}
+	}
+	if !brokenDup {
+		t.Errorf("the duplicated zone should be broken, got broken=%v", broken)
+	}
+	zd, ok := Zones.Get("dup.example.")
+	if !ok {
+		t.Fatal("the duplicated zone should still be visible in the zone list")
+	}
+	if zd.Error == false || !strings.Contains(zd.ErrorMsg, "more than once") {
+		t.Errorf("the zone should carry a duplicate error, got err=%v msg=%q", zd.Error, zd.ErrorMsg)
+	}
+	if len(all) == 0 {
+		t.Errorf("all_zones should still list something, got %v", all)
+	}
+}
+
+// The FQDN case: two spellings of one name are one zone to the daemon, so they
+// are a duplicate even though the strings differ.
+func TestDuplicateZoneComparesFqdn(t *testing.T) {
+	Zones = core.NewCmap[*ZoneData]()
+	conf := &Config{Zones: []ZoneConf{
+		{Name: "dup.example", Type: "primary", Store: "map", Zonefile: "/nonexistent"},
+		{Name: "dup.example.", Type: "primary", Store: "map", Zonefile: "/nonexistent"},
+	}}
+	_, broken, err := conf.ParseZones(context.Background(), false)
+	if err != nil {
+		t.Fatalf("ParseZones: %v", err)
+	}
+	if len(broken) == 0 || broken[0] != "dup.example." {
+		t.Errorf("dup.example and dup.example. are one zone; broken=%v", broken)
 	}
 }
