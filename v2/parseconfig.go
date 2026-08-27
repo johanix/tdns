@@ -379,6 +379,61 @@ var snakeCaseConfigKeys = []string{
 	"window_duration",
 }
 
+// SnakeCaseKeysIn walks a decoded YAML tree and returns, as dotted paths, any
+// key still using a pre-2026-08-27 snake_case spelling.
+//
+// deprecatedConfigKeys only ever sees what viper reports as unused, so it
+// covers the daemon's config load and nothing else. A file read by a plain
+// yaml.Unmarshal -- the offline `dnssec policy validate --file` path -- drops a
+// renamed key in silence, and for an allowlist like split-algorithms that means
+// reporting a perfectly good configuration as broken. Driven off the same
+// snakeCaseConfigKeys list so the two paths cannot disagree about what an old
+// spelling is.
+func SnakeCaseKeysIn(node any, path string) []string {
+	old := make(map[string]bool, len(snakeCaseConfigKeys))
+	for _, k := range snakeCaseConfigKeys {
+		old[k] = true
+	}
+	var found []string
+	var walk func(any, string)
+	walk = func(n any, at string) {
+		switch v := n.(type) {
+		case map[string]any:
+			for k, child := range v {
+				here := k
+				if at != "" {
+					here = at + "." + k
+				}
+				if old[strings.ToLower(k)] {
+					found = append(found, here)
+				}
+				walk(child, here)
+			}
+		case []any:
+			for _, child := range v {
+				walk(child, at)
+			}
+		}
+	}
+	walk(node, path)
+	sort.Strings(found)
+	return found
+}
+
+// SnakeCaseKeyAdvice renders the migration advice for keys found by
+// SnakeCaseKeysIn, naming each new spelling.
+func SnakeCaseKeyAdvice(keys []string) string {
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		leaf := k
+		if i := strings.LastIndex(k, "."); i >= 0 {
+			leaf = k[i+1:]
+		}
+		parts = append(parts, fmt.Sprintf("%s (now %s)", k, strings.ReplaceAll(leaf, "_", "-")))
+	}
+	return strings.Join(parts, ", ") + " — config keys use hyphens, not underscores (2026-08-27)"
+}
+
 // underscoreSpellingMigrations turns snakeCaseConfigKeys into deprecated-key
 // entries. Each is a LEAF match ("." + name): these keys sit under several
 // different parents, and the old spelling is unambiguous wherever it appears.

@@ -19,13 +19,17 @@ imrengine:
 `
 	f := filepath.Join(t.TempDir(), "imr.yaml")
 	os.WriteFile(f, []byte(doc), 0o644)
-	viper.Reset()
-	viper.SetConfigFile(f)
-	if err := viper.ReadInConfig(); err != nil {
+	// An isolated instance, not viper.Reset() on the package global: other
+	// tests in this package drive that global, and resetting it here would
+	// reach into them. The global merely delegates to a singleton built the
+	// same way, so this exercises the identical mapping path.
+	v := viper.New()
+	v.SetConfigFile(f)
+	if err := v.ReadInConfig(); err != nil {
 		t.Fatalf("ReadInConfig: %v", err)
 	}
 	var c Config
-	if err := viper.Unmarshal(&c); err != nil {
+	if err := v.Unmarshal(&c); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 	for name, got := range map[string]string{

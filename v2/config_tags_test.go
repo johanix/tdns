@@ -2,6 +2,8 @@ package tdns
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -101,5 +103,63 @@ func TestSnakeCaseKeysHaveMigrationAdvice(t *testing.T) {
 		if want := strings.ReplaceAll(old, "_", "-"); !strings.Contains(dep[0].advice, want) {
 			t.Errorf("%q: advice does not name the new spelling %q: %s", old, want, dep[0].advice)
 		}
+	}
+}
+
+// loadDnssecPoliciesYAML is a plain yaml.Unmarshal, so it never reaches the
+// deprecatedConfigKeys registry that covers the daemon's viper load. Without
+// its own check, a policy file still using split_algorithms would have its
+// allowlist silently dropped and a valid mixed-algorithm pair reported broken.
+func TestLoadDnssecPoliciesYAMLReportsOldSpellings(t *testing.T) {
+	write := func(body string) string {
+		p := filepath.Join(t.TempDir(), "policies.yaml")
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	const current = `
+dnssec:
+   split-algorithms:
+      mixed: [ ED25519, RSASHA256 ]
+   policies:
+      p1:
+         algorithm: ED25519
+         ttls:
+            max-served: 8h
+`
+	if _, err := loadDnssecPoliciesYAML(write(current)); err != nil {
+		t.Errorf("current spelling should load, got: %v", err)
+	}
+
+	for _, tc := range []struct{ name, body, want string }{
+		{"split_algorithms", `
+dnssec:
+   split_algorithms:
+      mixed: [ ED25519, RSASHA256 ]
+   policies:
+      p1:
+         algorithm: ED25519
+`, "split-algorithms"},
+		{"ttls.max_served", `
+dnssec:
+   policies:
+      p1:
+         algorithm: ED25519
+         ttls:
+            max_served: 8h
+`, "max-served"},
+	} {
+		_, err := loadDnssecPoliciesYAML(write(tc.body))
+		if err == nil {
+			t.Errorf("%s: expected an error naming the new spelling, got none", tc.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error does not name %q: %v", tc.name, tc.want, err)
+			continue
+		}
+		t.Logf("%-18s -> %v", tc.name, err)
 	}
 }

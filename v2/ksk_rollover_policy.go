@@ -672,6 +672,17 @@ func loadDnssecPoliciesYAML(path string) (dnssecPoliciesYAML, error) {
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return root, fmt.Errorf("yaml: %w", err)
 	}
+	// This is a plain yaml.Unmarshal, so a key using the old snake_case
+	// spelling unmarshals into nothing and is simply absent -- silently
+	// dropping split-algorithms here would make the validator report a
+	// legitimately allowlisted mixed-algorithm pair as broken. Report it
+	// instead; that is the whole job of a validator.
+	var generic any
+	if err := yaml.Unmarshal(data, &generic); err == nil {
+		if stale := SnakeCaseKeysIn(generic, ""); len(stale) > 0 {
+			return root, fmt.Errorf("deprecated config key(s): %s", SnakeCaseKeyAdvice(stale))
+		}
+	}
 	if len(root.Dnssec.Policies) == 0 {
 		return root, errors.New("no dnssec.policies: block found (policies live under the dnssec: key)")
 	}
