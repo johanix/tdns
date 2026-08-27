@@ -60,7 +60,7 @@ type ConfigEntry struct {
 // like `Provide-Xfr:` look accepted while the daemon leaves it unknown and
 // silently drops it. Returns the merged map and the list of included files.
 func LoadRawConfigMap(file string) (map[string]interface{}, []string, error) {
-	return processConfigFile(file, filepath.Dir(file), 0)
+	return processConfigFile(file, filepath.Dir(file), 0, newMergeState())
 }
 
 // decodeConfigFile turns a config FILE into a Config exactly as the daemon
@@ -78,7 +78,7 @@ func LoadRawConfigMap(file string) (map[string]interface{}, []string, error) {
 func decodeConfigFile(cfgfile string, conf *Config) (mapstructure.Metadata, []string, map[string]string, error) {
 	var md mapstructure.Metadata
 
-	configMap, includedFiles, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, includedFiles, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		return md, nil, nil, err
 	}
@@ -146,7 +146,13 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 	return nil
 }
 
-func processConfigFile(file string, baseDir string, depth int) (map[string]interface{}, []string, error) {
+// processConfigFile reads one config file and folds in whatever it include:s.
+//
+// st carries provenance and findings across the whole recursive load. It is
+// threaded rather than returned because an item's origin has to be recorded
+// where it is READ -- a parent stamping its own name on an already-flattened
+// child map would blame a nested include on the file that merged it.
+func processConfigFile(file string, baseDir string, depth int, st *mergeState) (map[string]interface{}, []string, error) {
 	if depth > 10 {
 		return nil, nil, errors.New("maximum include depth exceeded (10 levels)")
 	}
@@ -223,48 +229,52 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 	// Track included files
 	includedFiles := make([]string, 0)
 
+	// Record what THIS file contributes, before folding in anything it
+	// includes. It has to happen for every file, not only ones with an
+	// include: block -- a leaf that includes nothing is exactly the file a
+	// nested collision needs to be able to name.
+	for path := range mergeAllowlist {
+		if v, ok := lookupPath(config, path); ok {
+			recordOrigins(path, v, file, st, nil, false)
+		}
+	}
+
 	// Handle includes if present
 	if includes, ok := config["include"].([]interface{}); ok {
 		delete(config, "include")
+
 		for _, inc := range includes {
-			if includeFile, ok := inc.(string); ok {
-				var fullPath string
-				if filepath.IsAbs(includeFile) {
-					// If the included file path is absolute, use it as is
-					fullPath = includeFile
-				} else {
-					// If the included file path is relative, join it with the base directory
-					fullPath = filepath.Join(baseDir, includeFile)
-				}
-				fullPath = filepath.Clean(fullPath)
-				includedFiles = append(includedFiles, fullPath)
-
-				included, subIncluded, err := processConfigFile(fullPath, filepath.Dir(fullPath), depth+1)
-				if err != nil {
-					return nil, nil, err
-				}
-
-				// Merge included config
-				for k, v := range included {
-					if existing, exists := config[k]; exists {
-						// If both are maps, merge them
-						if existingMap, ok1 := existing.(map[string]interface{}); ok1 {
-							if newMap, ok2 := v.(map[string]interface{}); ok2 {
-								for k2, v2 := range newMap {
-									existingMap[k2] = v2
-								}
-								continue
-							}
-						}
-					}
-					// Otherwise just override
-					config[k] = v
-				}
-
-				// Add sub-included files to our list
-				includedFiles = append(includedFiles, subIncluded...)
+			entry, err := parseIncludeEntry(inc)
+			if err != nil {
+				return nil, nil, fmt.Errorf("%s: include: %v", file, err)
 			}
+			fullPath := entry.File
+			if !filepath.IsAbs(fullPath) {
+				fullPath = filepath.Join(baseDir, fullPath)
+			}
+			fullPath = filepath.Clean(fullPath)
+			includedFiles = append(includedFiles, fullPath)
+
+			// The child gets its own origin map so the items it returns carry
+			// the file each was actually READ from, however deep. Merging into
+			// one shared map would blame a nested include on this file.
+			childState := st.forChild()
+			included, subIncluded, err := processConfigFile(fullPath, filepath.Dir(fullPath), depth+1, childState)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			if err := mergeConfigMaps(config, included, "", fullPath, entry.Merge, st, childState); err != nil {
+				return nil, nil, fmt.Errorf("%s: merging %s: %v", file, fullPath, err)
+			}
+			st.adopt(childState)
+
+			includedFiles = append(includedFiles, subIncluded...)
 		}
+	}
+
+	if depth == 0 {
+		st.report(file)
 	}
 
 	return config, includedFiles, nil
@@ -495,7 +505,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	// Process the config file and all includes
-	configMap, includedFiles, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, includedFiles, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
@@ -803,6 +813,20 @@ func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
 	return nil
 }
 
+// zoneNameKey is the key two zone declarations are compared under to decide
+// whether they are the same zone: case-folded and FQDN-normalized. DNS names
+// are case-insensitive (RFC 4343), and tdns accepts a name with or without its
+// trailing dot, so "Example.com" and "example.com." are one zone written twice.
+//
+// It is a COMPARISON key only. Zones stay registered under dns.Fqdn(name) with
+// their case as written, so which names the daemon answers for is unchanged --
+// only whether two declarations are recognised as one. tdns-cli's config check
+// compares under the same rule, so what it reports and what this quarantines
+// are the same set.
+func zoneNameKey(name string) string {
+	return strings.ToLower(dns.Fqdn(strings.TrimSpace(name)))
+}
+
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
 //
 // Returns (allZones, brokenZones, err). allZones lists zones whose
@@ -825,6 +849,37 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 	// freshly resolved role/mode; see warnGlobalOutboundSerialSuppressed.
 	var serialSuppressedZones []string
 
+	// Duplicate names are found in a PRE-PASS, before the loop below touches
+	// anything.
+	//
+	// It cannot be done inline. That loop get-or-creates the ZoneData, mutates
+	// it and enqueues a refresh, so by the time a second entry of the same name
+	// came round the first would already be live and possibly queued -- and
+	// "neither definition wins" would be a thing we said rather than a thing
+	// that happened.
+	//
+	// Comparison is on the FQDN because that is what the daemon compares:
+	// zname := dns.Fqdn(zconf.Name) right below means example.com and
+	// example.com. are already one zone, and a raw-string check would miss
+	// exactly the pair this loop then silently collapses.
+	//
+	// This applies to a single zones: block as much as to a merged one. Before
+	// this, two entries of one name were last-wins with nothing recording
+	// which of them was being served.
+	duplicateZones := map[string]bool{}
+	seenZoneName := map[string]bool{}
+	for i := range conf.Zones {
+		zkey := zoneNameKey(conf.Zones[i].Name)
+		if zkey == "." {
+			continue // an unnamed entry is caught by the validation below
+		}
+		if seenZoneName[zkey] {
+			duplicateZones[zkey] = true
+			continue
+		}
+		seenZoneName[zkey] = true
+	}
+
 	// Process each zone configuration
 	for i := range conf.Zones {
 		zconf := &conf.Zones[i]
@@ -843,6 +898,20 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				FirstZoneLoad: true,
 			}
 			Zones.Set(zname, zd)
+		}
+
+		// A zone defined more than once is served under NEITHER definition.
+		// Quarantining it rather than refusing the whole config is the same
+		// trade the loader makes everywhere else: a host carrying a hundred
+		// thousand zones does not stop because one of them was pasted twice.
+		if duplicateZones[zoneNameKey(zname)] {
+			lgConfig.Error("zone defined more than once; not serving it under either definition",
+				"zone", zname)
+			zd.SetError(ConfigError, "zone %s is defined more than once in the configuration; "+
+				"remove the extra definition", zname)
+			broken_zones = append(broken_zones, zname)
+			all_zones = append(all_zones, zname)
+			continue
 		}
 		zd.Zonefile = zconf.Zonefile
 		if zd.Error {
@@ -1825,7 +1894,7 @@ func (conf *Config) reloadTemplatesFromFile() error {
 		return nil
 	}
 
-	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
@@ -1864,7 +1933,7 @@ func (conf *Config) reloadDnssecFromFile() error {
 		return conf.parseDnssecConfig()
 	}
 
-	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
@@ -1906,7 +1975,7 @@ func (conf *Config) reloadZonesFromFile() error {
 		return nil
 	}
 
-	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
@@ -1943,7 +2012,7 @@ func (conf *Config) reloadTsigKeysFromFile() error {
 		return nil
 	}
 
-	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}

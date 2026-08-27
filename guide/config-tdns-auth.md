@@ -79,6 +79,11 @@ refuse its own secondaries until you say otherwise. See
 Zones are usually kept in a separate file and pulled in with `include:`; see
 [`auth-zones.sample.yaml`](../cmdv2/auth/auth-zones.sample.yaml).
 
+If zones come from *more than one* file — a hand-written set plus a generated
+one, say — note that an ordinary include **replaces** the `zones:` list rather
+than adding to it. Use `- {file: ..., merge: true}` to combine them; see
+[Includes](configuration.md#conventions-common-to-all-tdns-applications).
+
 ## TSIG configuration
 
 TSIG keys may be declared statically in the config file, or added at runtime to

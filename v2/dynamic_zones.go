@@ -646,9 +646,18 @@ func (conf *Config) RemoveDynamicZoneFromConfig(zoneName string) error {
 // zones are loaded at startup by LoadDynamicZoneFiles (which re-derives the
 // ApiManaged/SourceCatalog markers and, for template primaries, re-expands the
 // template); including the file additionally routes them through ParseZones,
-// which loses the markers (the zones degrade to looking static) — and the
-// include merge OVERRIDES list-valued keys, so a dynamic file carrying zones:
-// clobbers the zones: of any other config file. Returns true if included.
+// which loses the markers, and the zones degrade to looking static. Returns
+// true if included.
+//
+// The warning used to carry a second reason: that the include merge overrode
+// list-valued keys, so a dynamic file carrying zones: clobbered the zones: of
+// every other config file. That is no longer the whole story — an include can
+// now ask to merge instead — but it does not make the situation better. A
+// bare include still replaces, which is the old clobber; and one that asks to
+// merge keeps both sets while still stripping the dynamic zones of their
+// markers, which trades a loud failure for a quiet one. Either way the answer
+// is the same: do not include this file.
+//
 // (Historical note: this check used to warn in the opposite direction, from
 // before LoadDynamicZoneFiles owned the boot path.)
 func (conf *Config) CheckDynamicConfigFileIncluded(includedFiles []string) bool {
@@ -662,7 +671,7 @@ func (conf *Config) CheckDynamicConfigFileIncluded(includedFiles []string) bool 
 	for _, includedFile := range includedFiles {
 		includedFileAbs := filepath.Clean(includedFile)
 		if configFileAbs == includedFileAbs {
-			lg.Warn("dynamiczones.configfile is listed in include:; remove it — dynamic zones load at startup on their own, and the include path both drops their API-managed/catalog markers and overrides any zones: list from other config files", "path", conf.DynamicZones.ConfigFile)
+			lg.Warn("dynamiczones.configfile is listed in include:; remove it — dynamic zones load at startup on their own, and routing them through the include path drops their API-managed/catalog markers so they degrade to looking static. Merging the include does not help: it keeps both zone sets and still strips the markers", "path", conf.DynamicZones.ConfigFile)
 			return true
 		}
 	}
