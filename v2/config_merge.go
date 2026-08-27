@@ -92,19 +92,61 @@ type clobber struct {
 	Lost int    // how many items were dropped, where countable
 }
 
-// mergeState is the bookkeeping one whole load accumulates.
-type mergeState struct {
-	// origin maps "<path>\x00<name>" to the file the item was read from.
-	// Provenance is attached when an item is read from ITS OWN file and
-	// carried up, never stamped by a parent -- otherwise a nested include
-	// gets blamed on the intermediate file that merged it.
-	origin     map[string]string
+// mergeFindings is what a whole load accumulates, shared down the recursion.
+type mergeFindings struct {
 	Collisions []nameCollision
 	Clobbers   []clobber
 }
 
+// mergeState is per CONFIG MAP, not per load, and that distinction is the
+// whole of N7.
+//
+// A shared first-wins origin map cannot express what a collision needs: two
+// definitions of one name have two different origins, and one map keyed by
+// name can only hold one. With per-map origins, a child returns the origins of
+// ITS items -- ultimately the leaf file each was read from -- and the parent
+// compares its own against the child's. Merge them into one shared map and a
+// nested include gets blamed on the intermediate file that merged it, which is
+// precisely the wrong half of "X is defined in A and B".
+type mergeState struct {
+	origin   map[string]string // "<path>\x00<name>" -> file the item was READ from
+	findings *mergeFindings    // shared across the load
+}
+
 func newMergeState() *mergeState {
-	return &mergeState{origin: map[string]string{}}
+	return &mergeState{origin: map[string]string{}, findings: &mergeFindings{}}
+}
+
+// forChild returns a state for a nested config map, sharing the findings but
+// starting a fresh origin map so the child records its own provenance.
+func (m *mergeState) forChild() *mergeState {
+	return &mergeState{origin: map[string]string{}, findings: m.findings}
+}
+
+// Collisions and Clobbers read through to the shared findings.
+func (m *mergeState) Collisions() []nameCollision { return m.findings.Collisions }
+func (m *mergeState) Clobbers() []clobber         { return m.findings.Clobbers }
+
+// adopt takes over the origins of a map that has been merged into this one,
+// for items this state does not already know. Not overwriting is what keeps
+// the FIRST definition first.
+func (m *mergeState) adopt(child *mergeState) {
+	for k, v := range child.origin {
+		if _, have := m.origin[k]; !have {
+			m.origin[k] = v
+		}
+	}
+}
+
+// originFrom reports where an incoming item came from, preferring the source
+// map own record (the leaf) over the file that happens to be merging it.
+func originFrom(src *mergeState, path, name, fallback string) string {
+	if src != nil {
+		if f, ok := src.origin[originKey(path, name)]; ok {
+			return f
+		}
+	}
+	return fallback
 }
 
 func originKey(path, name string) string { return path + "\x00" + name }
@@ -140,7 +182,7 @@ func (m *mergeState) OriginOf(path, name string) (string, bool) {
 // top-level keys would compile, pass most tests, and leave the motivating case
 // still replacing.
 func mergeConfigMaps(dst, src map[string]interface{}, prefix, srcFile string,
-	doMerge bool, st *mergeState) error {
+	doMerge bool, st *mergeState, srcState *mergeState) error {
 
 	for _, k := range sortedStringKeys(src) {
 		v := src[k]
@@ -154,7 +196,7 @@ func mergeConfigMaps(dst, src map[string]interface{}, prefix, srcFile string,
 
 		switch {
 		case allowlisted && doMerge && exists:
-			merged, err := applyStrategy(strategy, path, existing, v, srcFile, st)
+			merged, err := applyStrategy(strategy, path, existing, v, srcFile, st, srcState)
 			if err != nil {
 				return err
 			}
@@ -162,7 +204,7 @@ func mergeConfigMaps(dst, src map[string]interface{}, prefix, srcFile string,
 
 		case allowlisted && !doMerge && exists && !isEmptyValue(existing):
 			// The replace still happens; it just stops being silent.
-			st.Clobbers = append(st.Clobbers, clobber{
+			st.findings.Clobbers = append(st.findings.Clobbers, clobber{
 				Path: path, By: srcFile, Lost: countItems(existing),
 			})
 			recordOrigins(path, v, srcFile, st, true)
@@ -174,7 +216,7 @@ func mergeConfigMaps(dst, src map[string]interface{}, prefix, srcFile string,
 			dstMap, ok1 := existing.(map[string]interface{})
 			srcMap, ok2 := v.(map[string]interface{})
 			if ok1 && ok2 {
-				if err := mergeConfigMaps(dstMap, srcMap, path, srcFile, doMerge, st); err != nil {
+				if err := mergeConfigMaps(dstMap, srcMap, path, srcFile, doMerge, st, srcState); err != nil {
 					return err
 				}
 				continue
@@ -196,7 +238,7 @@ func mergeConfigMaps(dst, src map[string]interface{}, prefix, srcFile string,
 
 // applyStrategy combines one allowlisted path's two contributions.
 func applyStrategy(s mergeStrategy, path string, dstVal, srcVal interface{},
-	srcFile string, st *mergeState) (interface{}, error) {
+	srcFile string, st *mergeState, srcState *mergeState) (interface{}, error) {
 
 	switch s {
 	case concatNamed:
@@ -207,12 +249,17 @@ func applyStrategy(s mergeStrategy, path string, dstVal, srcVal interface{},
 		}
 		for _, item := range srcList {
 			name := itemName(item)
-			if name != "" {
-				if first, dup := st.noteOrigin(path, name, srcFile); dup {
-					st.Collisions = append(st.Collisions, nameCollision{
-						Path: path, Name: name, First: first, Again: srcFile,
-					})
-				}
+			if name == "" {
+				continue
+			}
+			// The item's own origin, not the file that happens to be merging
+			// it: with a nested include those differ, and the leaf is the one
+			// worth naming.
+			from := originFrom(srcState, path, name, srcFile)
+			if first, dup := st.noteOrigin(path, name, from); dup {
+				st.findings.Collisions = append(st.findings.Collisions, nameCollision{
+					Path: path, Name: name, First: first, Again: from,
+				})
 			}
 		}
 		return append(dstList, srcList...), nil
@@ -244,15 +291,20 @@ func applyStrategy(s mergeStrategy, path string, dstVal, srcVal interface{},
 		for _, name := range sortedStringKeys(srcMap) {
 			if _, clash := dstMap[name]; clash {
 				first, _ := st.OriginOf(path, name)
-				st.Collisions = append(st.Collisions, nameCollision{
-					Path: path, Name: name, First: first, Again: srcFile,
+				st.findings.Collisions = append(st.findings.Collisions, nameCollision{
+					Path: path, Name: name, First: first,
+					Again: originFrom(srcState, path, name, srcFile),
 				})
-				// Neither definition wins. Picking one arbitrarily is how a
-				// zone ends up signed by a policy nobody wrote down; the
-				// caller turns the collision into a rejection.
+				// NEITHER definition wins: the first is removed too. Picking
+				// one arbitrarily is how a zone ends up signed by a policy
+				// nobody wrote down. Deleting it also gives the right
+				// downstream behaviour for free -- a zone naming the policy
+				// now fails to resolve it and is quarantined by the existing
+				// unusable-policy path, while every other zone keeps serving.
+				delete(dstMap, name)
 				continue
 			}
-			st.noteOrigin(path, name, srcFile)
+			st.noteOrigin(path, name, originFrom(srcState, path, name, srcFile))
 			dstMap[name] = srcMap[name]
 		}
 		return dstMap, nil
@@ -273,7 +325,7 @@ func applyStrategy(s mergeStrategy, path string, dstVal, srcVal interface{},
 			// for split_algorithms, which KSK/ZSK pairings are permitted --
 			// so it is a widening, not a restatement. Bounded: it only gates
 			// policy parse, and only for an include that opted in.
-			merged, err := applyStrategy(unionStrings, path+"."+key, existing, srcMap[key], srcFile, st)
+			merged, err := applyStrategy(unionStrings, path+"."+key, existing, srcMap[key], srcFile, st, srcState)
 			if err != nil {
 				return nil, err
 			}
@@ -355,4 +407,90 @@ func sortedStringKeys(m map[string]interface{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// includeEntry is one entry of the include: list.
+//
+// A bare string is the historical form and still means replace. The map form
+// is the only way to ask for merging, so every config written before this
+// existed keeps its exact behaviour.
+type includeEntry struct {
+	File  string
+	Merge bool
+}
+
+// parseIncludeEntry accepts "file.yaml" or {file: file.yaml, merge: true}.
+//
+// Anything else is an error rather than a skip. Today a non-string entry is
+// silently ignored (the type assertion simply fails), which means a mistyped
+// include does nothing and says nothing. Since this work gives the map form
+// meaning, the quiet skip has to go with it.
+func parseIncludeEntry(inc interface{}) (includeEntry, error) {
+	switch v := inc.(type) {
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return includeEntry{}, fmt.Errorf("empty include entry")
+		}
+		return includeEntry{File: v}, nil
+
+	case map[string]interface{}:
+		e := includeEntry{}
+		for _, k := range sortedStringKeys(v) {
+			switch k {
+			case "file":
+				f, ok := v[k].(string)
+				if !ok || strings.TrimSpace(f) == "" {
+					return includeEntry{}, fmt.Errorf("include: file must be a non-empty string")
+				}
+				e.File = f
+			case "merge":
+				m, ok := v[k].(bool)
+				if !ok {
+					return includeEntry{}, fmt.Errorf("include %q: merge must be true or false", e.File)
+				}
+				e.Merge = m
+			default:
+				return includeEntry{}, fmt.Errorf("include: unknown key %q (expected file, merge)", k)
+			}
+		}
+		if e.File == "" {
+			return includeEntry{}, fmt.Errorf("include: an entry has no file")
+		}
+		return e, nil
+	}
+	return includeEntry{}, fmt.Errorf("include: entry must be a path or {file, merge}, got %T", inc)
+}
+
+// lookupPath walks a dotted path into a raw config map.
+func lookupPath(m map[string]interface{}, path string) (interface{}, bool) {
+	cur := interface{}(m)
+	for _, part := range strings.Split(path, ".") {
+		asMap, ok := cur.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		cur, ok = asMap[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
+// report logs what the load found, once, at the top of the recursion.
+//
+// A clobber is a WARN and not an error: replacing is still legal and still
+// what happens. Saying so is what keeps opt-in from leaving the original
+// complaint unaddressed for operators who never opt in -- they lose zones
+// exactly as before, but no longer silently, and the message names the remedy.
+func (m *mergeState) report(mainFile string) {
+	for _, c := range m.findings.Clobbers {
+		lgConfig.Warn("include replaced a config section rather than adding to it",
+			"config", mainFile, "key", c.Path, "replaced-by", c.By, "entries-dropped", c.Lost,
+			"hint", "this is the historical behaviour; use `- {file: "+c.By+", merge: true}` to combine instead")
+	}
+	for _, c := range m.findings.Collisions {
+		lgConfig.Error("config item defined twice; neither definition is used",
+			"config", mainFile, "key", c.Path, "name", c.Name, "first", c.First, "again", c.Again)
+	}
 }

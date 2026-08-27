@@ -237,7 +237,7 @@ func (conf *Config) dryParseDnssecPolicies() (policies map[string]DnssecPolicy, 
 	if cfgfile == "" {
 		return nil, false, false
 	}
-	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		lgConfig.Warn("reload guardrail: could not read config for dry-run; skipping guardrail", "err", err)
 		return nil, false, false

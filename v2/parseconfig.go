@@ -60,7 +60,7 @@ type ConfigEntry struct {
 // like `Provide-Xfr:` look accepted while the daemon leaves it unknown and
 // silently drops it. Returns the merged map and the list of included files.
 func LoadRawConfigMap(file string) (map[string]interface{}, []string, error) {
-	return processConfigFile(file, filepath.Dir(file), 0)
+	return processConfigFile(file, filepath.Dir(file), 0, newMergeState())
 }
 
 // decodeConfigFile turns a config FILE into a Config exactly as the daemon
@@ -78,7 +78,7 @@ func LoadRawConfigMap(file string) (map[string]interface{}, []string, error) {
 func decodeConfigFile(cfgfile string, conf *Config) (mapstructure.Metadata, []string, map[string]string, error) {
 	var md mapstructure.Metadata
 
-	configMap, includedFiles, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, includedFiles, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		return md, nil, nil, err
 	}
@@ -146,7 +146,13 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 	return nil
 }
 
-func processConfigFile(file string, baseDir string, depth int) (map[string]interface{}, []string, error) {
+// processConfigFile reads one config file and folds in whatever it include:s.
+//
+// st carries provenance and findings across the whole recursive load. It is
+// threaded rather than returned because an item's origin has to be recorded
+// where it is READ -- a parent stamping its own name on an already-flattened
+// child map would blame a nested include on the file that merged it.
+func processConfigFile(file string, baseDir string, depth int, st *mergeState) (map[string]interface{}, []string, error) {
 	if depth > 10 {
 		return nil, nil, errors.New("maximum include depth exceeded (10 levels)")
 	}
@@ -223,48 +229,52 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 	// Track included files
 	includedFiles := make([]string, 0)
 
+	// Record what THIS file contributes, before folding in anything it
+	// includes. It has to happen for every file, not only ones with an
+	// include: block -- a leaf that includes nothing is exactly the file a
+	// nested collision needs to be able to name.
+	for path := range mergeAllowlist {
+		if v, ok := lookupPath(config, path); ok {
+			recordOrigins(path, v, file, st, false)
+		}
+	}
+
 	// Handle includes if present
 	if includes, ok := config["include"].([]interface{}); ok {
 		delete(config, "include")
+
 		for _, inc := range includes {
-			if includeFile, ok := inc.(string); ok {
-				var fullPath string
-				if filepath.IsAbs(includeFile) {
-					// If the included file path is absolute, use it as is
-					fullPath = includeFile
-				} else {
-					// If the included file path is relative, join it with the base directory
-					fullPath = filepath.Join(baseDir, includeFile)
-				}
-				fullPath = filepath.Clean(fullPath)
-				includedFiles = append(includedFiles, fullPath)
-
-				included, subIncluded, err := processConfigFile(fullPath, filepath.Dir(fullPath), depth+1)
-				if err != nil {
-					return nil, nil, err
-				}
-
-				// Merge included config
-				for k, v := range included {
-					if existing, exists := config[k]; exists {
-						// If both are maps, merge them
-						if existingMap, ok1 := existing.(map[string]interface{}); ok1 {
-							if newMap, ok2 := v.(map[string]interface{}); ok2 {
-								for k2, v2 := range newMap {
-									existingMap[k2] = v2
-								}
-								continue
-							}
-						}
-					}
-					// Otherwise just override
-					config[k] = v
-				}
-
-				// Add sub-included files to our list
-				includedFiles = append(includedFiles, subIncluded...)
+			entry, err := parseIncludeEntry(inc)
+			if err != nil {
+				return nil, nil, fmt.Errorf("%s: include: %v", file, err)
 			}
+			fullPath := entry.File
+			if !filepath.IsAbs(fullPath) {
+				fullPath = filepath.Join(baseDir, fullPath)
+			}
+			fullPath = filepath.Clean(fullPath)
+			includedFiles = append(includedFiles, fullPath)
+
+			// The child gets its own origin map so the items it returns carry
+			// the file each was actually READ from, however deep. Merging into
+			// one shared map would blame a nested include on this file.
+			childState := st.forChild()
+			included, subIncluded, err := processConfigFile(fullPath, filepath.Dir(fullPath), depth+1, childState)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			if err := mergeConfigMaps(config, included, "", fullPath, entry.Merge, st, childState); err != nil {
+				return nil, nil, fmt.Errorf("%s: merging %s: %v", file, fullPath, err)
+			}
+			st.adopt(childState)
+
+			includedFiles = append(includedFiles, subIncluded...)
 		}
+	}
+
+	if depth == 0 {
+		st.report(file)
 	}
 
 	return config, includedFiles, nil
@@ -374,7 +384,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	// Process the config file and all includes
-	configMap, includedFiles, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, includedFiles, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
@@ -1704,7 +1714,7 @@ func (conf *Config) reloadTemplatesFromFile() error {
 		return nil
 	}
 
-	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
@@ -1743,7 +1753,7 @@ func (conf *Config) reloadDnssecFromFile() error {
 		return conf.parseDnssecConfig()
 	}
 
-	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
@@ -1785,7 +1795,7 @@ func (conf *Config) reloadZonesFromFile() error {
 		return nil
 	}
 
-	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
@@ -1822,7 +1832,7 @@ func (conf *Config) reloadTsigKeysFromFile() error {
 		return nil
 	}
 
-	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}

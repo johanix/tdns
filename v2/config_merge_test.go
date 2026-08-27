@@ -24,7 +24,7 @@ func yml(t *testing.T, s string) map[string]interface{} {
 func merge(t *testing.T, dst, src map[string]interface{}, doMerge bool) *mergeState {
 	t.Helper()
 	st := newMergeState()
-	if err := mergeConfigMaps(dst, src, "", "inc.yaml", doMerge, st); err != nil {
+	if err := mergeConfigMaps(dst, src, "", "inc.yaml", doMerge, st, nil); err != nil {
 		t.Fatalf("mergeConfigMaps: %v", err)
 	}
 	return st
@@ -55,8 +55,8 @@ func TestWithoutOptInZonesStillReplace(t *testing.T) {
 		t.Fatalf("a bare include must still replace, got %v", got)
 	}
 	// ...but it stops being silent.
-	if len(st.Clobbers) != 1 || st.Clobbers[0].Path != "zones" || st.Clobbers[0].Lost != 1 {
-		t.Errorf("replacing a non-empty allowlisted key must be recorded: %+v", st.Clobbers)
+	if len(st.Clobbers()) != 1 || st.Clobbers()[0].Path != "zones" || st.Clobbers()[0].Lost != 1 {
+		t.Errorf("replacing a non-empty allowlisted key must be recorded: %+v", st.Clobbers())
 	}
 }
 
@@ -64,8 +64,8 @@ func TestClobberNotReportedWhenNothingWasLost(t *testing.T) {
 	dst := yml(t, "zones: []\n")
 	src := yml(t, "zones:\n  - name: b.example.\n")
 	st := merge(t, dst, src, false)
-	if len(st.Clobbers) != 0 {
-		t.Errorf("replacing an empty key is not a clobber: %+v", st.Clobbers)
+	if len(st.Clobbers()) != 0 {
+		t.Errorf("replacing an empty key is not a clobber: %+v", st.Clobbers())
 	}
 }
 
@@ -146,13 +146,13 @@ func TestCollisionNamesBothFiles(t *testing.T) {
 	// The including file's own items have to be recorded before it merges,
 	// which is what processConfigFile does for the file it just read.
 	recordOrigins("zones", dst["zones"], "main.yaml", st, false)
-	if err := mergeConfigMaps(dst, src, "", "inc.yaml", true, st); err != nil {
+	if err := mergeConfigMaps(dst, src, "", "inc.yaml", true, st, nil); err != nil {
 		t.Fatalf("merge: %v", err)
 	}
-	if len(st.Collisions) != 1 {
-		t.Fatalf("collisions = %+v, want 1", st.Collisions)
+	if len(st.Collisions()) != 1 {
+		t.Fatalf("collisions = %+v, want 1", st.Collisions())
 	}
-	c := st.Collisions[0]
+	c := st.Collisions()[0]
 	if c.First != "main.yaml" || c.Again != "inc.yaml" {
 		t.Errorf("a collision must name both files, got %+v", c)
 	}
@@ -166,15 +166,16 @@ func TestPolicyCollisionKeepsNeitherDefinition(t *testing.T) {
 	src := yml(t, "dnssec:\n  policies:\n    alpha:\n      algorithm: RSASHA256\n")
 	st := merge(t, dst, src, true)
 
-	if len(st.Collisions) != 1 {
-		t.Fatalf("collisions = %+v, want 1", st.Collisions)
+	if len(st.Collisions()) != 1 {
+		t.Fatalf("collisions = %+v, want 1", st.Collisions())
 	}
-	// The first definition is left in place and the collision is reported;
-	// the caller rejects the policy rather than letting either win.
+	// NEITHER survives. A zone naming this policy then fails to resolve it and
+	// is quarantined by the existing unusable-policy path, which is the right
+	// outcome: the server keeps serving every other zone, and no zone is
+	// signed by a policy nobody wrote down.
 	pol := dst["dnssec"].(map[string]interface{})["policies"].(map[string]interface{})
-	alpha := pol["alpha"].(map[string]interface{})
-	if alpha["algorithm"] != "ED25519" {
-		t.Errorf("the second definition must not silently win: %v", alpha)
+	if _, still := pol["alpha"]; still {
+		t.Errorf("a collided policy must not survive under either definition: %v", pol)
 	}
 }
 
@@ -182,7 +183,7 @@ func TestTypeMismatchIsAHardError(t *testing.T) {
 	dst := yml(t, "zones:\n  - name: a.example.\n")
 	src := yml(t, "zones:\n  a.example.:\n    type: primary\n")
 	st := newMergeState()
-	err := mergeConfigMaps(dst, src, "", "inc.yaml", true, st)
+	err := mergeConfigMaps(dst, src, "", "inc.yaml", true, st, nil)
 	if err == nil {
 		t.Fatal("a list/mapping disagreement must be an error, not a silent replace")
 	}
