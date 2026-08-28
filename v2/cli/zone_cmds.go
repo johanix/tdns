@@ -318,6 +318,8 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	AttachZoneZonemdCmds(c, role)
 	// The read half of "zone update": what the parent holds for a child.
 	AttachZoneDelegationCmds(c, role)
+	// ...and for an ordinary name in the zone.
+	AttachZoneNameCmds(c, role)
 	for _, e := range extras {
 		c.AddCommand(e)
 	}
