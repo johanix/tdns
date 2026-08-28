@@ -411,3 +411,52 @@ Sites the review confirms belong to later stages, not #419: `rrset_utils`
 (outbound `AuthQueryEngine`), `sign.go` (canonical operands since #417),
 `NSInBailiwick` (stage 4, done), `ops_delegation_read` (stage 4, done), and the
 `Conf.Zones[i].Name` pair from #417 FINDING 2, which is still open.
+
+
+## Review of #421 (external, 2026-08-28)
+
+`tdns-project/reviews/2026-08-28-tdns-PR421-imr-and-cache-review.md`.
+Verdict: request changes -- four findings, all inside #421's own surface.
+All four addressed. Two of them were breakage this PR introduced.
+
+**FINDING 1 — the `_dns.` prefix test folded and the strip did not.** I changed
+`strings.HasPrefix(owner, "_dns.")` to fold the name and left the
+`strings.TrimPrefix(owner, "_dns.")` beside it comparing bytes, so
+`_DNS.ns1.example.` cleared the test and then kept its prefix: `baseName` stayed
+the whole owner and the transport signal was dropped. `baseFromTLSAOwner`, in
+the same commit, already had the right pattern -- fold to test, slice the
+original by `len(prefix)` so the base name keeps the case it arrived with. The
+prefix is a named constant now, so the test and the strip cannot drift again.
+
+**FINDING 2 — `ServerMap` folded the zone and not the nameserver.** The type is
+`NameMap[map[string]*AuthServer]`: the outer key folds, the inner one was still
+the bytes an upstream sent. Worse, this PR *introduced* a miss --
+`collectInBailiwickNS` now returns canonical names with a comment saying they
+are used as map keys downstream, and they were being looked up in a map keyed by
+wire spelling. Every subscript of that inner map (31 of them) goes through a
+shared `cache.ServerKey` now. Not a second `NameMap`: a concurrent map per zone
+would be the wrong shape for a handful of nameservers, as the review says.
+
+`GetOrCreateAuthServer` stopping the identity split is not the same as the
+per-zone map finding the server. Both were needed.
+
+**FINDING 3 — the zone-backoff dump compared a now-canonical key to a raw
+filter.** Also breakage from this PR: before `ZoneMap` became a `NameMap`, a
+filter matching the stored spelling worked. Fixed by routing it through
+`ZoneMatchesSelector`, which the sibling handler already used -- two copies of
+one predicate is how the drift happened, so there is one now.
+
+**FINDING 4 — `dns.CanonicalName` still building keys in `FlushDomain` and the
+TLSA store.** Converted. Worth noting how nearly this went untested: the first
+version of the test used ASCII fixtures, where `dns.CanonicalName` and
+`CanonicalizeName` agree exactly, so reverting the fix stayed green. It only
+became a real test once it stored two nameservers differing by a single
+non-UTF-8 octet -- which is the entire reason the two functions are not
+interchangeable.
+
+**Left for later, as the review confirms:** `rrset_utils` (outbound
+`AuthQueryEngine`), `sign.go` (canonical operands since #417), and the
+`Conf.Zones[i].Name` pair from #417 FINDING 2, still open. The review also notes
+`visitedZones`'s composite key mixes a folded qname with a wire-sourced
+zonename, so a mixed-case repeat referral would miss the loop detector -- not in
+this diff, not requested, and worth picking up.

@@ -257,3 +257,107 @@ func TestBaseFromTLSAOwnerIgnoresCase(t *testing.T) {
 		}
 	}
 }
+
+// The per-zone server map is a plain map held inside a NameMap. The OUTER key
+// (the zone) folds because NameMap folds it. The INNER key (the nameserver) is
+// a name off the wire too, and it has to fold by the same function on both
+// sides -- an insert under the spelling an upstream used and a lookup under the
+// canonical form are the same miss as any other.
+//
+// Two things depend on that map finding its entries: transport-signal
+// application (`_dns.<ns>` SVCB/TSYNC answers) and in-bailiwick glue
+// revalidation, which looks up the hosts collectInBailiwickNS returns.
+func TestServerMapInnerKeysFold(t *testing.T) {
+	rrcache := testCache(t)
+
+	// Stored under the spelling an upstream happened to send.
+	if err := rrcache.AddServers("Example.COM.", map[string]*AuthServer{
+		"NS1.Example.COM.": {Name: "NS1.Example.COM."},
+		"ns2.example.com.": {Name: "ns2.example.com."},
+	}); err != nil {
+		t.Fatalf("AddServers: %v", err)
+	}
+
+	sm, ok := rrcache.ServerMapCopy("EXAMPLE.COM.")
+	if !ok {
+		t.Fatal("ServerMapCopy missed the zone; the outer key did not fold")
+	}
+	if len(sm) != 2 {
+		t.Fatalf("server map has %d entries, want 2: %v", len(sm), sm)
+	}
+
+	for _, spelling := range []string{
+		"ns1.example.com.", "NS1.Example.COM.", "NS1.EXAMPLE.COM.", "nS1.eXaMpLe.CoM.",
+	} {
+		if _, ok := sm[ServerKey(spelling)]; !ok {
+			t.Errorf("sm[ServerKey(%q)] missed -- a nameserver stored under one "+
+				"spelling is not found under another, so its transport signals "+
+				"and glue revalidation are dropped", spelling)
+		}
+	}
+	if _, ok := sm[ServerKey("ns3.example.com.")]; ok {
+		t.Error("a nameserver that was never stored was found")
+	}
+
+	// And the keys really are canonical, not merely reachable through the
+	// helper: collectInBailiwickNS hands canonical names straight to this map.
+	for k := range sm {
+		if k != core.CanonicalizeName(k) {
+			t.Errorf("server map key %q is not canonical", k)
+		}
+	}
+}
+
+// TLSA records are keyed by (nameserver, owner) inside ServerTLSA. The outer
+// map folds; the inner one is a plain map that was keyed with
+// dns.CanonicalName, which is right about case but rewrites non-UTF-8 octets.
+func TestTLSAKeysFoldOnBothLevels(t *testing.T) {
+	rrcache := testCache(t)
+	owner := "_853._tcp.ns1.example.com."
+
+	rr, err := dns.NewRR(owner + " 300 IN TLSA 3 1 1 " +
+		"0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF")
+	if err != nil {
+		t.Fatalf("building the TLSA: %v", err)
+	}
+	rrcache.StoreTLSAForServer("NS1.Example.COM.", owner,
+		&core.RRset{Name: owner, RRtype: dns.TypeTLSA, RRs: []dns.RR{rr}},
+		ValidationStateSecure)
+
+	for _, base := range []string{"ns1.example.com.", "NS1.EXAMPLE.COM.", "NS1.Example.COM."} {
+		for _, own := range []string{owner, "_853._TCP.NS1.EXAMPLE.COM."} {
+			if got := rrcache.LookupTLSAForServer(base, own); got == nil {
+				t.Errorf("LookupTLSAForServer(%q, %q) = nil; stored under a "+
+					"different spelling of the same two names", base, own)
+			}
+		}
+	}
+	if got := rrcache.LookupTLSAForServer("ns2.example.com.", owner); got != nil {
+		t.Error("a TLSA was returned for a nameserver it was not stored under")
+	}
+
+	// And the reason these keys use core.CanonicalizeName rather than
+	// dns.CanonicalName, which agrees with it on every ASCII name above.
+	// dns.CanonicalName runs the name through strings.Map, so a lone 0xfe and a
+	// lone 0xff both come back as U+FFFD and the two nameservers share one
+	// bucket -- whichever was stored second answers for both.
+	store := func(base string) {
+		rr, err := dns.NewRR(owner + " 300 IN TLSA 3 1 1 " +
+			"0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF")
+		if err != nil {
+			t.Fatalf("building the TLSA: %v", err)
+		}
+		rrcache.StoreTLSAForServer(base, base,
+			&core.RRset{Name: base, RRtype: dns.TypeTLSA, RRs: []dns.RR{rr}},
+			ValidationStateSecure)
+	}
+	fe, ff := "ns\xfe1.example.", "ns\xff1.example."
+	store(fe)
+	store(ff)
+	if rrcache.LookupTLSAForServer(fe, fe) == nil || rrcache.LookupTLSAForServer(ff, ff) == nil {
+		t.Error("a TLSA stored under a name with a raw octet could not be read back")
+	}
+	if rrcache.LookupTLSAForServer(fe, ff) != nil || rrcache.LookupTLSAForServer(ff, fe) != nil {
+		t.Error("two nameservers differing only by a non-UTF-8 octet share one TLSA bucket")
+	}
+}
