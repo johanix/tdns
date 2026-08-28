@@ -927,7 +927,6 @@ func (zd *ZoneData) SetOption(option ZoneOption, value bool) {
 // everything through the *From helpers, so every read in one response comes from
 // the same serial — no intra-response tearing. snap==nil yields nil (the caller
 // SERVFAILs / refuses).
-// getOwnerFrom reads one owner from a pinned snapshot.
 //
 // The key is folded: snapshot keys are canonical (see snapshotMapFromData), and
 // a caller may hold a name in any spelling -- from the wire, from an API
@@ -1153,21 +1152,6 @@ func IsIxfr(rrs []dns.RR) bool {
 	return false
 }
 
-// FindZone returns the closest enclosing zone this server is authoritative for:
-// the zone that holds qname, or the zone above the child zone qname falls in.
-// nil when there is none.
-//
-// Matching is case-insensitive throughout, because Zones is keyed canonically
-// and Get folds what it is given.
-//
-// It did not used to be. The previous implementation walked the qname as
-// written, and only if that found nothing walked a lowercased copy, telling the
-// caller through a second return value which pass had succeeded so it could
-// rewrite the qname to match. That rescued a mixed-case ZONE SUFFIX and nothing
-// else: a query whose suffix matched the stored zone exactly but whose
-// left-hand labels did not -- WWW.example.com. against example.com. -- took the
-// first pass, kept its spelling, and went on to miss the exact-keyed owner
-// lookup. The zone was found and the name inside it was not. See tdns#415.
 // normalizeZoneName folds zd.ZoneName to canonical form.
 //
 // A zone name is an identifier the operator chose in a config file, not data
@@ -1193,6 +1177,21 @@ func (zd *ZoneData) normalizeZoneName() {
 	}
 }
 
+// FindZone returns the closest enclosing zone this server is authoritative for:
+// the zone that holds qname, or the zone above the child zone qname falls in.
+// nil when there is none.
+//
+// Matching is case-insensitive throughout, because Zones is keyed canonically
+// and Get folds what it is given.
+//
+// It did not used to be. The previous implementation walked the qname as
+// written, and only if that found nothing walked a lowercased copy, telling the
+// caller through a second return value which pass had succeeded so it could
+// rewrite the qname to match. That rescued a mixed-case ZONE SUFFIX and nothing
+// else: a query whose suffix matched the stored zone exactly but whose
+// left-hand labels did not -- WWW.example.com. against example.com. -- took the
+// first pass, kept its spelling, and went on to miss the exact-keyed owner
+// lookup. The zone was found and the name inside it was not. See tdns#415.
 func FindZone(qname string) *ZoneData {
 	labels := strings.Split(qname, ".")
 	for i := 0; i < len(labels)-1; i++ {

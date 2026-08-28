@@ -196,3 +196,44 @@ discarding it already.
 it is ASCII-only — but must not be used to build a key, for the U+FFFD reason
 above. `core.CanonicalizeName` is the key builder; `core.EqualNames` is the
 comparison. Both live in `v2/core` so the sibling repos can use them.
+
+
+## Review of #417 (external, 2026-08-28)
+
+`docs/2026-08-28-pr417-case-insensitive-names-review.md`, on `main`. Verdict:
+approve as stage 1; no change required to #417 itself. Three findings.
+
+**FINDING 1 — the query-path self-referral.** Already the subject of #419, and
+the reviewer places it there. Two sites #419 has NOT yet converted, found by
+the review and confirmed against the stack tip:
+
+- `IsChildDelegation` (`zone_utils.go`), `qname == zd.ZoneName` — a mixed-case
+  apex has NS, so it classifies as a child.
+- `queryresponder.go:329`, `cdd.ChildName == qname` — a DS query for an in-zone
+  name with a mis-cased zone suffix takes `handleDSQuery`'s grandparent-referral
+  arm against the fake apex delegation.
+
+**FINDING 2 — config-side equality left behind by folding `zd.ZoneName`.**
+`zoneNameKey` is fixed here, in #417: it is a key function, and #417 is what
+falsified its comment (which claimed zones stay registered in the case they were
+written in). It now shares `core.CanonicalizeName` with the registry, and a test
+pins that the two agree — including that neither Unicode-folds, so two zones
+differing only by U+212A are not quarantined as duplicates of each other.
+
+The two `dns.Fqdn(Conf.Zones[i].Name) == zd.ZoneName` comparisons in
+`apihandler_zone.go` are NOT fixed here. They are comparison sites, and a zone
+declared `Example.COM.` currently loses its config policy through them — a
+regression the series introduces, so it must not ship unfixed. Scheduled with
+FINDING 1's sites, pending the review of #419.
+
+**FINDING 3 — comment drift.** Fixed here: `normalizeZoneName` had been inserted
+between `FindZone`'s godoc and `FindZone` itself, so `go doc FindZone` showed
+nothing and `go doc normalizeZoneName` showed the history of #415; and a second
+godoc had been stacked on `getOwnerFrom`'s existing one. The `EqualNames`
+comment naming `dns.CanonicalName` as the map key is fixed in #416, where it
+lives -- it was advice to do the exact unsafe thing this stage exists to stop.
+
+**Method note the review makes, worth keeping.** Stage 1's tests never send a
+query, so the self-referral could not have gone red under "revert the fix and
+watch the test fail". That check verifies a fix is load-bearing; it says nothing
+about consequences elsewhere. Only driving the path does.

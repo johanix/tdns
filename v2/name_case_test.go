@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // Owners spelled in several cases, INCLUDING the zone-name part. A hand-written
@@ -260,5 +261,47 @@ func TestZoneNameIsCanonicalAfterLoad(t *testing.T) {
 		if _, err := zd.GetSOA(); err != nil {
 			t.Errorf("zone declared %q cannot read its own SOA: %v", declared, err)
 		}
+	}
+}
+
+// zoneNameKey decides whether two config declarations are the same zone, and
+// the Zones registry decides which entry a query reaches. They have to agree:
+// two declarations quarantined as duplicates must land on one registry entry,
+// and one that is NOT a duplicate must be reachable on its own.
+//
+// They are the same function now. This pins that, because two functions that
+// agree today are two functions that can drift -- and the old comment here
+// claimed zones stayed registered in the case they were written in, which
+// stopped being true when zd.ZoneName started being folded.
+func TestZoneNameKeyAgreesWithTheRegistry(t *testing.T) {
+	for _, name := range []string{
+		"example.com.", "Example.COM.", "EXAMPLE.COM", "  eXaMpLe.CoM  ",
+		"child.example.com.", "_dns.example.com.",
+	} {
+		key := zoneNameKey(name)
+		zd := &ZoneData{ZoneName: core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(name)))}
+		Zones.Set(zd.ZoneName, zd)
+
+		got, ok := Zones.Get(key)
+		if !ok || got != zd {
+			t.Errorf("zoneNameKey(%q) = %q, which does not reach the zone the registry "+
+				"stored under %q", name, key, zd.ZoneName)
+		}
+		Zones.Remove(zd.ZoneName)
+	}
+
+	// Folding is ASCII-only in both. strings.ToLower would make these one key,
+	// quarantining two distinct zones as duplicates of each other.
+	kelvin, ascii := "K.example.", "k.example."
+	if strings.ToLower(kelvin) != ascii {
+		t.Skip("this Go version no longer folds U+212A onto k")
+	}
+	if zoneNameKey(kelvin) == zoneNameKey(ascii) {
+		t.Errorf("zoneNameKey collapses %q and %q onto one key: two different zones "+
+			"would be reported as duplicate declarations", kelvin, ascii)
+	}
+	// ...while the ordinary ASCII case still collapses, which is the point.
+	if zoneNameKey("Example.COM") != zoneNameKey("example.com.") {
+		t.Error("zoneNameKey no longer recognises two spellings of one zone")
 	}
 }
