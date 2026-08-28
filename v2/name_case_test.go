@@ -278,16 +278,15 @@ func TestZoneNameKeyAgreesWithTheRegistry(t *testing.T) {
 		"example.com.", "Example.COM.", "EXAMPLE.COM", "  eXaMpLe.CoM  ",
 		"child.example.com.", "_dns.example.com.",
 	} {
-		key := zoneNameKey(name)
-		zd := &ZoneData{ZoneName: core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(name)))}
-		Zones.Set(zd.ZoneName, zd)
-
-		got, ok := Zones.Get(key)
-		if !ok || got != zd {
-			t.Errorf("zoneNameKey(%q) = %q, which does not reach the zone the registry "+
-				"stored under %q", name, key, zd.ZoneName)
+		// Asserted as STRING EQUALITY against the name the registry stores
+		// under, not by looking the key up. Zones is a NameMap and folds on
+		// Get, so a round trip through it would succeed even if zoneNameKey
+		// returned a mixed-case spelling -- which is the claim under test.
+		zoneName := core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(name)))
+		if key := zoneNameKey(name); key != zoneName {
+			t.Errorf("zoneNameKey(%q) = %q, but the registry stores this zone under %q; "+
+				"they are supposed to be the same function", name, key, zoneName)
 		}
-		Zones.Remove(zd.ZoneName)
 	}
 
 	// Folding is ASCII-only in both. strings.ToLower would make these one key,

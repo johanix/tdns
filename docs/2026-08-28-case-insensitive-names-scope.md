@@ -209,9 +209,15 @@ the review and confirmed against the stack tip:
 
 - `IsChildDelegation` (`zone_utils.go`), `qname == zd.ZoneName` — a mixed-case
   apex has NS, so it classifies as a child.
-- `queryresponder.go:329`, `cdd.ChildName == qname` — a DS query for an in-zone
-  name with a mis-cased zone suffix takes `handleDSQuery`'s grandparent-referral
-  arm against the fake apex delegation.
+
+I also listed `queryresponder.go:329`'s `cdd.ChildName == qname` here as an
+unconverted defect. **That was wrong**, and the re-review is right to strike it:
+both strings come from the same walk of the same qname, so they match by
+construction whenever the walk returns a real child. It looked like a bug only
+while `findDelegationFrom` was still handing back the apex as a fake child —
+which is the defect, and the one `EqualNames` on the walk stop actually fixes.
+#419 correctly left the `==` alone and covered the path with DS shapes in the
+query differential instead. Do not convert it.
 
 **FINDING 2 — config-side equality left behind by folding `zd.ZoneName`.**
 `zoneNameKey` is fixed here, in #417: it is a key function, and #417 is what
