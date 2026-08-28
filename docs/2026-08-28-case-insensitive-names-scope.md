@@ -616,3 +616,33 @@ case-collision test still passes and covers the ASCII behaviour, but the
 difference between the two folders only shows for a BIND key file whose zone
 name carries a non-UTF-8 octet, and building that fixture is out of proportion
 to the change. Said plainly rather than left looking covered.
+
+
+## Re-review of #423 (external, 2026-08-28)
+
+Findings 1-2 accepted, the `sign.go` niggle accepted, **approved as stage 5.**
+That completes review of stages 1-5.
+
+The re-review doubts one claim in my follow-up: that reverting
+`canonicalRRWire`'s fold reddens `TestZoneDigestDistinguishesRawOctets`, on the
+grounds that A RDATA carries no names and two owners collapsed to U+FFFD could
+still concatenate to the same bytes. Re-checked, and that reasoning is exactly
+why it fails: collapsing both owners on the wire makes the two-owner zone hash
+identically to the one-owner zone, which is the equality the test forbids.
+
+    a zone with two owners differing by one octet digests the same as a zone
+    where both records sit at one owner
+
+**One deferral worth a decision rather than a wait.** `VerifyZonemd`
+(`zonemd_verify.go:150,156`) folds its apex, and the owners it compares against
+it, with `dns.CanonicalName` -- while `ZoneDigest` now folds with
+`CanonicalizeName`. Both are EXPORTED. For an apex carrying a non-UTF-8 octet
+the two disagree about which records sit at the apex, so the digest excludes one
+set and the verifier looks at another. `zonemd_cache.go:126` is the same fold
+but is identity on a canonical `zd.ZoneName`, so it is cosmetic.
+
+The re-review says to move it "when that file is next open". As with the
+`InBailiwick` NOTE, nothing schedules that: stage 6 is CLI and debug, stage 7 is
+enforcement, and neither goes near `zonemd_verify.go`. It is three lines, in the
+sibling of the file this stage exists to make consistent. Recommend taking it
+into stage 6 as a named extra, the way this stage took the two items it owed.
