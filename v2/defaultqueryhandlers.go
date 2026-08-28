@@ -10,6 +10,7 @@ import (
 	"context"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -22,7 +23,7 @@ var lgHandler = Logger("handler")
 // This exported function is kept for backward compatibility or for apps that want
 // to handle .server. queries earlier in the handler chain.
 func ServerQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
-	qname := strings.ToLower(req.Qname)
+	qname := core.CanonicalizeName(req.Qname)
 
 	// Only handle .server. queries with ClassCHAOS
 	if !strings.HasSuffix(qname, ".server.") || req.Msg.Question[0].Qclass != dns.ClassCHAOS {
@@ -81,7 +82,9 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 
 	// Check if this is a reporter app handling error channel queries (RFC9567)
 	if Globals.App.Type == AppTypeReporter {
-		if strings.HasPrefix(qname, "_er.") {
+		// Prefix test on the folded name; the original is what gets reported on,
+		// so the client still sees the name it asked about.
+		if strings.HasPrefix(core.CanonicalizeName(qname), "_er.") {
 			edns0.ErrorChannelReporter(qname, qtype, w, r)
 			return nil
 		}

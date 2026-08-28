@@ -1013,7 +1013,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	}
 
 	lgHandler.Debug("checking for SOA query", "zone", zd.ZoneName)
-	if qtype == dns.TypeSOA && qname == zd.ZoneName {
+	if qtype == dns.TypeSOA && core.EqualNames(qname, zd.ZoneName) {
 		zd.handleSOAQuery(m, w, apex, snap, sigs, msgoptions, minimalResponses)
 		w.WriteMsg(m)
 		return nil
@@ -1021,7 +1021,10 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 	// AXFR and IXFR are handled by the zone transfer code
 	if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
-		if qname == zd.ZoneName {
+		// A transfer request for the apex, however the client spelled it. A
+		// byte comparison answered NOTAUTH for EXAMPLE. on a zone stored as
+		// example. -- a secondary that upcased its request got no zone.
+		if core.EqualNames(qname, zd.ZoneName) {
 			lgHandler.Debug("serving zone transfer", "store", ZoneStoreToString[zd.ZoneStore], "qname", qname)
 			zd.ZoneTransferOut(ctx, w, r, imr)
 			return nil

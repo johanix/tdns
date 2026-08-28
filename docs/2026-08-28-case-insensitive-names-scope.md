@@ -130,7 +130,7 @@ land first, the rest are parallel.
 | # | Area | Sites | Contents |
 |---|---|---:|---|
 | 1 | Boundary | ~10 | **DONE.** `core.CanonicalizeName` + `core.NameMap`; canonical keys for `Zones`, `zd.Data`, the snapshot and the working set; `GetOwner`/`FindZone`/`SortFunc`; `zd.ZoneName` folded at construction. Fixes all four confirmed defects. |
-| 2 | Auth query + update | ~35 | `queryresponder`, `updateresponder`, `zone_updater`, `zone_update_verbs`, `defaultqueryhandlers`, `rrset_utils` |
+| 2 | Auth query + update | ~29 | **DONE.** `queryresponder`, `auth_utils`, `updateresponder`, `zone_updater`, `zone_update_verbs`, `defaultqueryhandlers`, `ops_uri`/`ops_svcb`/`ops_key`, `dnsutils`, `zone_utils` |
 | 3 | IMR + cache | ~25 | `dnslookup`, `imrengine`, `cache/*` — wire-sourced names, so the most reachable after #1 |
 | 4 | Delegation / childsync / dsync | ~20 | includes the `HasSuffix` label-boundary bugs |
 | 5 | Keystore / sign / zonemd | ~20 | `sign.go`'s apex tests are latent-severe: a miss signs a delegation NS or skips the apex NS |
@@ -196,3 +196,42 @@ discarding it already.
 it is ASCII-only — but must not be used to build a key, for the U+FFFD reason
 above. `core.CanonicalizeName` is the key builder; `core.EqualNames` is the
 comparison. Both live in `v2/core` so the sibling repos can use them.
+
+
+## Addendum, after PR 2
+
+148 → 119 sites. Two defects found that the static scan had classed as ordinary
+`==`/`HasSuffix` sites, both of which turned out to be worse than the label
+suggested.
+
+**The server referred queries to itself.** `findDelegationFrom`
+(`auth_utils.go:26`) walks up from the qname looking for a child delegation and
+stops at `child == zd.ZoneName`. Compared byte-wise, so a query spelling the
+zone-name part in any other case never recognised the apex, picked up the
+**apex NS RRset as though it were a child delegation**, and answered a referral
+to itself instead of the data. `WWW.EXAMPLE.` in `example.` did it;
+`WWW.example.` did not, which is why it had never been noticed.
+
+PR 1 made this reachable. Before it, a fully mis-cased qname failed the
+`Zones.Get` fast path, went through `FindZone`'s fold, and was rewritten to
+lowercase before it got here. PR 1 removed that rewrite because the lookups fold
+themselves — correct, but it let the raw spelling travel further into the query
+path than it used to. The scan had this site; the severity only appeared when
+the whole path was driven end to end.
+
+**`selfsub` was not bounded by label.** The child update policy asked
+`strings.HasSuffix(rr.Header().Name, us.SignerName)`. That is true for
+`evilchild.example.` against `child.example.` — a signer authorised for one name
+could write records under a different name that merely ends with it. Now
+`dns.IsSubDomain`. Confirmed by restoring the old check and watching the test
+approve `evilchild.example.`, `xchild.example.` and `notchild.example.`
+
+**Method note.** The end-to-end differential test — ask the same question in
+four spellings, require identical responses — found both. Neither would have
+come out of reading the 149-site list, and the second is not a
+case-sensitivity bug at all. Worth repeating for the IMR path in PR 3: drive it,
+don't only read it.
+
+**Still not converted, deliberately:** `sign.go`'s apex tests. Its operands are
+owner-map keys against `zd.ZoneName`, both canonical since PR 1, so they are
+safe by construction; they belong to PR 5 with the rest of the signer.

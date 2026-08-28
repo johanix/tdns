@@ -1564,7 +1564,7 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 		} else if sak != nil && len(sak.Keys) > 0 {
 			var keyRRs []dns.RR
 			for _, pkc := range sak.Keys {
-				if strings.HasSuffix(pkc.KeyRR.Header().Name, zd.ZoneName) {
+				if dns.IsSubDomain(zd.ZoneName, pkc.KeyRR.Header().Name) {
 					keyRRs = append(keyRRs, &pkc.KeyRR)
 				}
 			}
