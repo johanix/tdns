@@ -361,3 +361,50 @@ func TestTLSAKeysFoldOnBothLevels(t *testing.T) {
 		t.Error("two nameservers differing only by a non-UTF-8 octet share one TLSA bucket")
 	}
 }
+
+// FlushAll keeps the root NS RRset and the glue for the nameservers it names.
+// It collects those nameserver names into a set, then walks the cache deciding
+// what to keep by looking each owner up in that set -- so the set has to be
+// built and read with ONE function. It was built with CanonicalizeName and read
+// with dns.CanonicalName, which agree on every ASCII name and part company on
+// the first octet that is not valid UTF-8. At that point the priming glue is
+// flushed as though it were ordinary cached data, and the resolver has to start
+// from the hints again.
+func TestFlushAllKeepsRootGlueKeyedConsistently(t *testing.T) {
+	rrcache := testCache(t)
+	const nsName = "ns\xff1.root-servers.example."
+
+	rootNS, err := dns.NewRR(". 3600 IN NS " + nsName)
+	if err != nil {
+		t.Fatalf("building the root NS: %v", err)
+	}
+	rrcache.Set(".", dns.TypeNS, &CachedRRset{
+		Name: ".", RRtype: dns.TypeNS,
+		RRset:      &core.RRset{Name: ".", RRtype: dns.TypeNS, RRs: []dns.RR{rootNS}},
+		Expiration: time.Now().Add(time.Hour),
+	})
+	rrcache.Set(nsName, dns.TypeA, &CachedRRset{
+		Name: nsName, RRtype: dns.TypeA,
+		RRset:      aRRset(t, "ns1.root-servers.example.", "192.0.2.1"),
+		Expiration: time.Now().Add(time.Hour),
+	})
+	// Something ordinary, which FlushAll is supposed to remove.
+	rrcache.Set("www.example.com.", dns.TypeA, &CachedRRset{
+		Name: "www.example.com.", RRtype: dns.TypeA,
+		RRset:      aRRset(t, "www.example.com.", "192.0.2.2"),
+		Expiration: time.Now().Add(time.Hour),
+	})
+
+	rrcache.FlushAll()
+
+	if got := rrcache.Get(nsName, dns.TypeA); got == nil {
+		t.Error("glue for a root nameserver was flushed: the set of root NS hosts " +
+			"was built with one key function and read with another")
+	}
+	if got := rrcache.Get(".", dns.TypeNS); got == nil {
+		t.Error("the root NS RRset itself was flushed")
+	}
+	if got := rrcache.Get("www.example.com.", dns.TypeA); got != nil {
+		t.Error("FlushAll kept ordinary cached data; it is supposed to remove it")
+	}
+}
