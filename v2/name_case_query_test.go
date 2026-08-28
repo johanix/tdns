@@ -135,6 +135,12 @@ func TestQueryPathIgnoresCase(t *testing.T) {
 		{"wildcard", "anything.wild.example.", dns.TypeA},
 		{"delegation referral", "host.child.example.", dns.TypeA},
 		{"delegation name itself", "child.example.", dns.TypeNS},
+		// DS is trapped at the top of QueryResponder and answered from the
+		// nearest hosted ancestor, so it exercises the delegation walk on a
+		// different path from the referral above.
+		{"DS at a delegation", "child.example.", dns.TypeDS},
+		{"DS for an ordinary in-zone name", "www.example.", dns.TypeDS},
+		{"DS at the apex", "example.", dns.TypeDS},
 		// AXFR/IXFR are dispatched by a separate apex test further down
 		// QueryResponder, which answered NOTAUTH for a mis-cased apex -- a
 		// secondary that upcased its request simply got no zone.

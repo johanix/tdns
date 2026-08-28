@@ -280,3 +280,97 @@ zone for `example.`), the negative-answer SOA gate (same shape — an SOA for
 `ample.` authorising a denial for `example.`), the SOA-authorises-this-denial
 test in `dnslookup`, the DS-and-RRSIG pair in a referral, and the `_853._udp`
 TLSA owner prefixes.
+
+## Review of #417 (external, 2026-08-28)
+
+`docs/2026-08-28-pr417-case-insensitive-names-review.md`, on `main`. Verdict:
+approve as stage 1; no change required to #417 itself. Three findings.
+
+**FINDING 1 — the query-path self-referral.** Already the subject of #419, and
+the reviewer places it there. Two sites #419 has NOT yet converted, found by
+the review and confirmed against the stack tip:
+
+- `IsChildDelegation` (`zone_utils.go`), `qname == zd.ZoneName` — a mixed-case
+  apex has NS, so it classifies as a child.
+
+I also listed `queryresponder.go:329`'s `cdd.ChildName == qname` here as an
+unconverted defect. **That was wrong**, and the re-review is right to strike it:
+both strings come from the same walk of the same qname, so they match by
+construction whenever the walk returns a real child. It looked like a bug only
+while `findDelegationFrom` was still handing back the apex as a fake child —
+which is the defect, and the one `EqualNames` on the walk stop actually fixes.
+#419 correctly left the `==` alone and covered the path with DS shapes in the
+query differential instead. Do not convert it.
+
+**FINDING 2 — config-side equality left behind by folding `zd.ZoneName`.**
+`zoneNameKey` is fixed here, in #417: it is a key function, and #417 is what
+falsified its comment (which claimed zones stay registered in the case they were
+written in). It now shares `core.CanonicalizeName` with the registry, and a test
+pins that the two agree — including that neither Unicode-folds, so two zones
+differing only by U+212A are not quarantined as duplicates of each other.
+
+The two `dns.Fqdn(Conf.Zones[i].Name) == zd.ZoneName` comparisons in
+`apihandler_zone.go` are NOT fixed here. They are comparison sites, and a zone
+declared `Example.COM.` currently loses its config policy through them — a
+regression the series introduces, so it must not ship unfixed. Scheduled with
+FINDING 1's sites, pending the review of #419.
+
+**FINDING 3 — comment drift.** Fixed here: `normalizeZoneName` had been inserted
+between `FindZone`'s godoc and `FindZone` itself, so `go doc FindZone` showed
+nothing and `go doc normalizeZoneName` showed the history of #415; and a second
+godoc had been stacked on `getOwnerFrom`'s existing one. The `EqualNames`
+comment naming `dns.CanonicalName` as the map key is fixed in #416, where it
+lives -- it was advice to do the exact unsafe thing this stage exists to stop.
+
+**Method note the review makes, worth keeping.** Stage 1's tests never send a
+query, so the self-referral could not have gone red under "revert the fix and
+watch the test fail". That check verifies a fix is load-bearing; it says nothing
+about consequences elsewhere. Only driving the path does.
+
+## Review of #419 (external, 2026-08-28)
+
+`tdns-project/reviews/2026-08-28-tdns-PR419-query-and-update-review.md`.
+Verdict: request changes -- four findings, all inside #419's own surface.
+All four addressed.
+
+**FINDING 1 — `IsChildDelegation`.** Converted. The review is right that this is
+not merely the same hole as `findDelegationFrom`: `UpdateResponder` now folds
+the zone-section qname, so the apex branch is entered correctly, and the damage
+is one level in -- the OWNERS inside that branch are passed to
+`IsChildDelegation`, so an apex NS update spelled `EXAMPLE.` was classified as a
+CHILD update and judged against `allow-child-updates` instead of
+`allow-updates`.
+
+**FINDING 2 — three sites missed in `ZoneUpdateChangesDelegationDataNG`.** A
+real miss, and worth naming the cause: the replacement list for that file was
+assembled by hand from a 17-line enumeration, and three lines were dropped
+between enumerating and patching. The re-sweep after the fix (`grep` for any
+remaining wire-owner-vs-apex `==` in the six files) is what should have run
+before the PR, not after the review.
+
+**FINDING 3 — the glue walk's `childDel != ancestor`.** Converted.
+
+**FINDING 4 — 14 unrelated `docs/` files, ~3000 lines.** `git add -A` swept
+untracked review documents from the working tree into the commit. Removed with
+`git rm --cached`, so they return to being untracked rather than being deleted
+from disk. Net diff against the base is now clean.
+
+`v2/probe_src_test.go` keeps its two-line gofmt change: the file was merged
+unformatted in #410, and un-formatting it again to tidy this diff would leave
+the tree worse than it found it.
+
+**Coverage.** New tests for findings 1 and 2, each verified by reverting the
+fix. The pre-switch apex-NS guard needed a differential test rather than a
+value assertion -- it only has an effect for a DUPLICATE apex NS add, every
+other path setting `InSync` from its own arm, and whether "in sync" is right
+for a duplicate add is a separate question from whether spelling may change it.
+DS shapes added to the query differential, as the review suggested.
+
+FINDING 3 is **not covered by a test**. It sits inside `UpdateResponder`'s
+message-driven classification, which has no unit harness at all; building one
+for a one-line fix is out of proportion to this PR, and worth doing on its own.
+
+Sites the review confirms belong to later stages, not #419: `rrset_utils`
+(outbound `AuthQueryEngine`), `sign.go` (canonical operands since #417),
+`NSInBailiwick` (stage 4, done), `ops_delegation_read` (stage 4, done), and the
+`Conf.Zones[i].Name` pair from #417 FINDING 2, which is still open.
