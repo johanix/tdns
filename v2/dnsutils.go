@@ -1183,9 +1183,10 @@ func RRsetToString(rrset *core.RRset) string {
 // both case-sensitive and blind to label boundaries -- it calls
 // ns.evilexample. in-bailiwick for example.
 //
-// NOTE: this has no callers. NSInBailiwick in scanner_csync.go is the live twin
-// and still carries the HasSuffix version; it is fixed with the rest of the
-// scanner rather than here.
+// NOTE: this has no callers. NSInBailiwick in scanner_csync.go is the live
+// twin, fixed the same way in the delegation stage of this series, and
+// BailiwickNS is a third spelling of the same predicate. The three should be
+// one function.
 func InBailiwick(zone string, ns *dns.NS) bool {
 	return dns.IsSubDomain(zone, ns.Ns)
 }

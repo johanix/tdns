@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -459,14 +460,14 @@ func resolveBindKeyState(dir, base string, flags uint16, opts BindConvertOptions
 func manifestHasKey(m *KeystoreManifest, class, zone string, keyid uint16) bool {
 	if class == "sig0" {
 		for _, k := range m.Sig0 {
-			if strings.EqualFold(k.Zone, zone) && k.Keyid == keyid {
+			if core.EqualNames(k.Zone, zone) && k.Keyid == keyid {
 				return true
 			}
 		}
 		return false
 	}
 	for _, k := range m.Dnssec {
-		if strings.EqualFold(k.Zone, zone) && k.Keyid == keyid {
+		if core.EqualNames(k.Zone, zone) && k.Keyid == keyid {
 			return true
 		}
 	}

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -65,8 +66,11 @@ func zonemdHasher(alg uint8) (hash.Hash, error) {
 // For a bulk sort use canonicalSortKey instead: this allocates on every
 // comparison, which an O(n log n) sort over a large zone feels.
 func canonicalOwnerLess(a, b string) bool {
-	al := dns.SplitDomainName(strings.ToLower(dns.Fqdn(a)))
-	bl := dns.SplitDomainName(strings.ToLower(dns.Fqdn(b)))
+	// core.CanonicalizeName, NOT strings.ToLower. RFC 4034 6.1 orders names as
+	// OCTET strings with US-ASCII A-Z folded and nothing else; strings.ToLower
+	// folds by Unicode, and gets this wrong twice over. See canonicalSortKey.
+	al := dns.SplitDomainName(core.CanonicalizeName(dns.Fqdn(a)))
+	bl := dns.SplitDomainName(core.CanonicalizeName(dns.Fqdn(b)))
 
 	for i, j := len(al)-1, len(bl)-1; i >= 0 && j >= 0; i, j = i-1, j-1 {
 		if c := strings.Compare(al[i], bl[j]); c != 0 {
@@ -99,7 +103,23 @@ func canonicalOwnerLess(a, b string) bool {
 // "example\x00\x00", `a.example.` is "example\x00\x00a\x00\x00", and a prefix
 // sorts before what extends it.
 func canonicalSortKey(name string) []byte {
-	labels := dns.SplitDomainName(strings.ToLower(dns.Fqdn(name)))
+	// core.CanonicalizeName, NOT strings.ToLower. This key IS the canonical
+	// order: it decides the NSEC chain and the order records are fed to the
+	// ZONEMD digest, so getting it wrong produces a chain no validator accepts
+	// and a digest that matches no other implementation. RFC 4034 6.1 folds
+	// US-ASCII A-Z and leaves every other octet alone. strings.ToLower breaks
+	// that in two separate ways:
+	//
+	//   U+212A KELVIN SIGN folds onto "k", so \u212a.example. and k.example. --
+	//   two different names -- produce the SAME key and occupy one position.
+	//
+	//   A byte that is not valid UTF-8 is rewritten to U+FFFD, so ns\xff1. is
+	//   ordered by three bytes it does not contain.
+	//
+	// The comment below is right that this is "wrong in a way no test zone
+	// would ever show"; it was describing the zero-octet case and the folding
+	// had the same property.
+	labels := dns.SplitDomainName(core.CanonicalizeName(dns.Fqdn(name)))
 	// One byte per character plus a two-byte terminator per label, which is
 	// exact for the overwhelmingly common case of no zero octets.
 	key := make([]byte, 0, len(name)+2*len(labels)+2)
@@ -258,7 +278,7 @@ func digestBlock(apex string, rrs []dns.RR) ([]byte, error) {
 			continue
 		}
 		hdr := rr.Header()
-		name := dns.CanonicalName(hdr.Name)
+		name := core.CanonicalizeName(hdr.Name)
 
 		// Out-of-zone data is excluded (§3.3.1). A loaded zone should not carry
 		// any, but a zone FILE can -- nothing stops an operator writing an
@@ -269,7 +289,15 @@ func digestBlock(apex string, rrs []dns.RR) ([]byte, error) {
 		if !dns.IsSubDomain(apex, name) {
 			continue
 		}
-		if name == apex {
+		// The apex exclusion decides whether the ZONEMD RRset is fed to its own
+		// digest, and a miss digests the record the digest is supposed to be.
+		//
+		// Every caller inside tdns passes a canonical apex, and name is folded
+		// by the same function a few lines up, so == was correct as it stood.
+		// EqualNames because ZoneDigest and ZoneDigestHex are EXPORTED: an
+		// outside caller's apex is not covered by that invariant, and this is
+		// not a place to find out.
+		if core.EqualNames(name, apex) {
 			if hdr.Rrtype == dns.TypeZONEMD {
 				continue
 			}

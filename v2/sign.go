@@ -655,7 +655,7 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 
 	var delegations []string
 	for _, name := range names {
-		if name == zd.ZoneName {
+		if core.EqualNames(name, zd.ZoneName) {
 			continue
 		}
 		owner := zd.stagedOwner(name)
@@ -693,7 +693,7 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 			if rrt == dns.TypeA || rrt == dns.TypeAAAA {
 				var isglue bool
 				for _, del := range delegations {
-					if name != del && dns.IsSubDomain(del, name) {
+					if !core.EqualNames(name, del) && dns.IsSubDomain(del, name) {
 						isglue = true
 						break
 					}
@@ -886,7 +886,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 
 	var delegations []string
 	for _, name := range names {
-		if name == zd.ZoneName {
+		if core.EqualNames(name, zd.ZoneName) {
 			continue
 		}
 		owner := zd.stagedOwner(name)
@@ -931,7 +931,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			if rrt == dns.TypeA || rrt == dns.TypeAAAA {
 				// log.Printf("SignZone: checking whether %s %s is a glue record for a delegation", name, dns.TypeToString[uint16(rrt)])
 				for _, del := range delegations {
-					if name != del && dns.IsSubDomain(del, name) {
+					if !core.EqualNames(name, del) && dns.IsSubDomain(del, name) {
 						lgSigner.Debug("not signing glue record", "zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[uint16(rrt)], "delegation", del)
 						wasglue = true
 						continue
@@ -988,7 +988,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 func (zd *ZoneData) chainNamesLocked(names []string) []string {
 	var delegations []string
 	for _, name := range names {
-		if name == zd.ZoneName {
+		if core.EqualNames(name, zd.ZoneName) {
 			continue
 		}
 		od := zd.stagedOwner(name)
@@ -1016,7 +1016,7 @@ func (zd *ZoneData) chainNamesLocked(names []string) []string {
 		for _, del := range delegations {
 			// Label-aware: a plain suffix test also matches
 			// "notexample.com." against "example.com.".
-			if name != del && dns.IsSubDomain(del, name) {
+			if !core.EqualNames(name, del) && dns.IsSubDomain(del, name) {
 				occluded = true
 				break
 			}
@@ -1162,7 +1162,7 @@ func (zd *ZoneData) ShowNsecChain() ([]string, error) {
 		if owner == nil {
 			continue
 		}
-		if name != zd.ZoneName {
+		if !core.EqualNames(name, zd.ZoneName) {
 			if rrs := owner.NSEC.RRs; len(rrs) == 1 {
 				nsecrrs = append(nsecrrs, rrs[0].String())
 			}

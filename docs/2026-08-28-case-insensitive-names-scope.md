@@ -133,7 +133,7 @@ land first, the rest are parallel.
 | 2 | Auth query + update | ~29 | **DONE.** `queryresponder`, `auth_utils`, `updateresponder`, `zone_updater`, `zone_update_verbs`, `defaultqueryhandlers`, `ops_uri`/`ops_svcb`/`ops_key`, `dnsutils`, `zone_utils` |
 | 3 | IMR + cache | ~24 | **DONE.** `dnslookup`, `imrengine`, `imr_helpers`, `chase`, `apihandler_imr`, `cache/*` — plus the cache's own name-keyed indexes |
 | 4 | Delegation / childsync / dsync | ~20 | **DONE.** `childsync_utils`, `scanner_csync`, `dsync_api_*`, `delegation_coherence`, `delegation_backend_*`, `config_delegationsync`, `ops_delegation_read` |
-| 5 | Keystore / sign / zonemd | ~20 | `sign.go`'s apex tests are latent-severe: a miss signs a delegation NS or skips the apex NS |
+| 5 | Keystore / sign / zonemd | ~20 | **DONE.** `zonemd` canonical ordering, `sign`, `keystore_bulk`, `bind_convert`, `rollover_lock`, plus the two items the series owed |
 | 6 | CLI + debug | ~23 | cosmetic, but `keystore_cmds.go:1018` `log.Fatalf`s on a case mismatch |
 | 7 | Enforcement | — | see below |
 
@@ -520,3 +520,52 @@ Also confirmed as correctly out of stage 4, unchanged from the earlier lists:
 keying in-bailiwick NS sets with `dns.CanonicalName` (ASCII agrees; the
 non-UTF-8 shape is the same one #421's TLSA keys had), and consolidating the
 three in-bailiwick predicates.
+
+
+## Addendum, after PR 5
+
+96 → 85.
+
+**The canonical-order folder was `strings.ToLower`.** `canonicalSortKey` and
+`canonicalOwnerLess` implement RFC 4034 §6.1 ordering, and that order is not a
+presentation detail: it IS the NSEC chain, and it is the order records are fed
+to the ZONEMD digest. §6.1 orders names as OCTET strings with US-ASCII A-Z
+folded and nothing else. `strings.ToLower` broke that twice over:
+
+    canonicalSortKey("\u212a.example.")  == canonicalSortKey("k.example.")
+    canonicalSortKey("ns\xff1.example.") -- keyed on ef bf bd, bytes the name does not contain
+
+Two distinct names sharing one position is a chain no validator accepts and a
+digest no other implementation computes. The comment above `canonicalSortKey`
+already said this class of bug is "wrong in a way no test zone would ever show"
+— it was describing the zero-octet case, and the folding had the same property.
+
+**Also converted:** the keystore's bulk selector (it decides which PRIVATE keys
+an export writes out, and under Unicode folding a selector for one zone also
+selected another), the per-zone rollover lock key, the signer's apex and
+delegation-occlusion tests, the BIND keystore's zone matching, and the apex
+ZONEMD exclusion.
+
+**The two items the series owed are in here**, because nothing later was going
+to touch those files:
+
+- `apihandler_zone.go`'s two `Conf.Zones[i].Name == zd.ZoneName` scans -- the
+  regression this series introduced in #417 by folding `zd.ZoneName` while
+  `ZoneConf.Name` keeps the operator's spelling. A zone declared `Example.COM.`
+  could not find its own config entry: list-zones lost its policy name and
+  policy-reset refused, reporting the zone as having no configured policy.
+- The NOTE on `InBailiwick` saying `NSInBailiwick` "still carries the HasSuffix
+  version". #422 fixed it and the sentence became false.
+
+**Not claimed as a fix.** The apex test inside `digestBlock` is `EqualNames`
+now, but `==` was already correct there: every in-tree caller passes a canonical
+apex and `name` is folded a few lines above by the same function. It is defended
+because `ZoneDigest`/`ZoneDigestHex` are exported and an outside caller's apex is
+not covered by that invariant. The comment says so rather than implying a bug.
+
+**Method, again.** Two of the five new tests passed against the unfixed code on
+the first attempt, because ASCII fixtures make `strings.ToLower` and
+`CanonicalizeName` indistinguishable. Both only became tests once they used an
+input where the two folders disagree. That is now three stages running where the
+first draft of a test proved nothing; the ASCII happy path is not evidence for
+any claim in this series.
