@@ -490,3 +490,33 @@ follow-up harder to verify than the fix is worth. The residue is that a
 first-pass OOTS or glue record whose NS is spelled differently *within the same
 referral* can miss; later queries go through `serverMap`, which folds. Recorded
 here so it is a decision rather than an oversight.
+
+
+## Review of #422 (external, 2026-08-28)
+
+`tdns-project/reviews/2026-08-28-tdns-PR422-delegation-and-dsync-review.md`.
+Verdict: approve as stage 4. **No change requested.**
+
+That completes review of stages 1-4. All four are approved; #417, #419 and
+#421 each went through a re-review after their findings were addressed.
+
+One item the review raises and parks, recorded here so it does not rot:
+
+**The NOTE on `InBailiwick` (`dnsutils.go`) is now false.** It says
+`NSInBailiwick` "still carries the HasSuffix version; it is fixed with the rest
+of the scanner rather than here." I wrote that in #419 pointing forward at this
+PR, and this PR fixed it. The review's instruction is not to pull `dnsutils.go`
+into #422's diff for one line, and to update it when someone next touches that
+comment.
+
+Worth flagging that "next touches" has no owner: stages 5-7 are keystore, CLI
+and enforcement, none of which go near `dnsutils.go`, and the series lands as
+one merge -- so on current plans the sentence becomes false on `main` and stays
+that way. It is one line and it is wrong. Left as the review asks, but it should
+be picked up by whichever stage is convenient rather than left to chance.
+
+Also confirmed as correctly out of stage 4, unchanged from the earlier lists:
+`rrset_utils` (outbound `AuthQueryEngine`), `Conf.Zones[i].Name`, `scanner.go`
+keying in-bailiwick NS sets with `dns.CanonicalName` (ASCII agrees; the
+non-UTF-8 shape is the same one #421's TLSA keys had), and consolidating the
+three in-bailiwick predicates.
