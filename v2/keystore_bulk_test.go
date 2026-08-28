@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -397,9 +398,14 @@ func TestBulkImportTsigYamlIsTruth(t *testing.T) {
 	inConfig := func(names ...string) TsigBulkPolicy {
 		set := map[string]bool{}
 		for _, n := range names {
-			set[dns.CanonicalName(n)] = true
+			set[core.CanonicalizeName(dns.Fqdn(n))] = true
 		}
-		return TsigBulkPolicy{StillInConfig: func(name string) bool { return set[dns.CanonicalName(name)] }}
+		// The same key function the production writer uses. A helper that keys
+		// its fake set one way against a store keyed another is the store/lookup
+		// split under test, reproduced in the test.
+		return TsigBulkPolicy{StillInConfig: func(name string) bool {
+			return set[core.CanonicalizeName(dns.Fqdn(name))]
+		}}
 	}
 
 	// Declared in the YAML: the config owns it, so an import may not replace it

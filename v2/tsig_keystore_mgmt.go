@@ -8,9 +8,6 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-
-	core "github.com/johanix/tdns/v2/core"
-	"github.com/miekg/dns"
 )
 
 // TsigKeyMgmt implements DB CRUD for the global TSIG keystore. Mutations return
@@ -273,9 +270,9 @@ func overwriteApproved(name string, kp KeystorePost) bool {
 	if kp.Force {
 		return true
 	}
-	c := core.CanonicalizeName(dns.Fqdn(name))
+	c := tsigKeyKey(name)
 	for _, n := range kp.TsigOverwrite {
-		if core.CanonicalizeName(dns.Fqdn(n)) == c {
+		if tsigKeyKey(n) == c {
 			return true
 		}
 	}
@@ -389,14 +386,14 @@ func (kdb *KeyDB) tsigKeyMgmtPurge(conf *Config, tx *Tx, kp KeystorePost, resp *
 	if !kp.Force && len(kp.TsigOverwrite) > 0 {
 		approved := make(map[string]bool, len(kp.TsigOverwrite))
 		for _, n := range kp.TsigOverwrite {
-			approved[core.CanonicalizeName(dns.Fqdn(n))] = true
+			approved[tsigKeyKey(n)] = true
 		}
 		toDelete = nil
 		for _, row := range candidates {
 			// Canonicalize the candidate side too: approved is keyed by
 			// CanonicalName, so a non-canonical stored keyname would otherwise
 			// silently fail to match and be left undeleted.
-			if approved[core.CanonicalizeName(dns.Fqdn(row.Keyname))] {
+			if approved[tsigKeyKey(row.Keyname)] {
 				toDelete = append(toDelete, row)
 			}
 		}

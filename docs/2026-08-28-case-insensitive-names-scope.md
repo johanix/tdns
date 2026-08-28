@@ -831,3 +831,63 @@ not the measure -- much of the work was in indexes, which a comparison scan
 cannot see, and the scan itself over-counted commented-out code. The measure is
 that the gate passes with nothing excused, and that it catches every defect this
 series actually produced.
+
+
+## Review of #425 (external, 2026-08-28)
+
+Verdict: request changes -- two findings, both in files this PR owns. Both
+addressed.
+
+**FINDING 1 — I converted the TSIG map writers and left a SQL one that claimed
+parity with them.** `keystore_bulk.go` still wrote name and algorithm with
+`dns.CanonicalName`, above a comment saying it did it "exactly as
+insertTsigKeystore/updateTsigKeystore do" -- true when written, false the moment
+this commit moved those two.
+
+The sharp part is the review's: **the gate could not see it.** A SQL bind is not
+a map key. An empty allowlist was not evidence that site was fine, and I had
+presented it as though it were.
+
+Fixed by extracting `tsigKeyKey`, a NAMED function every TSIG writer and reader
+now calls -- 41 sites. That turns an inline expression which could not be tested
+and could not be seen into one the gate's return-check does see and a unit test
+can call. Two writers that must agree should call one function, so that "do they
+still agree?" has an answer.
+
+**FINDING 2 — `ExtractDistributionIDFromQNAME` had no test.** Now covered in
+both directions: `evila1b2kdc.example.com.` against zone `kdc.example.com.` is
+an error, `a1b2.KDC.example.com.` still yields `a1b2`, and the ID keeps its own
+case. Reverting either the `IsSubDomain` test or the slice-by-length extraction
+reddens it.
+
+**A mistake worth recording.** The script that rewrote the 41 sites to
+`tsigKeyKey` also rewrote the body of `tsigKeyKey` itself, leaving
+`return tsigKeyKey(s)` -- infinite recursion, caught by the compiler through an
+"imported and not used" error rather than by anything I did. A mechanical
+rewrite that includes its own definition in its input is a trap worth naming.
+
+## What the gate does not see
+
+The review enumerates the blind spots, and they belong here rather than in a PR
+description:
+
+| Blind spot | Consequence |
+|---|---|
+| SQL binds | FINDING 1 above; fixed by naming the function instead |
+| `NameMap.Set(fold(x))` -- a method call, not an index | A wrapper could be fed a lossy fold |
+| Struct composite keys, e.g. `sets[key{fold(n), rrtype}]` | The fold is inside a literal, not the whole key |
+| `r.Header().Name = fold(...)` | Reverting #423's hashing leftover stays green |
+| Two SAFE wrappers disagreeing (`CanonicalizeName` with vs without `Fqdn`) | Exactly the trailing-dot slip made twice in this stage |
+| Byte-wise `==` / `!=` on names | `rrset_utils`, `ksk_rollover_cli` remain open |
+| `switch strings.ToLower(alg)` | Not a key, not a comparison the checks model |
+| `foldpair` when the fold is assigned to a local first | A one-hop dataflow gap |
+
+`keyfold` is weaker than the "written with X, read with Y" correlator the #424
+addendum asked for -- it catches lossy-vs-safe, not safe-vs-safe. It was
+sufficient for all five historical defects, and the two it could not have seen
+(the SQL bind, the trailing-dot pair) are both now behind named functions
+instead. Naming a function is the cheap general answer to a blind spot: it makes
+the thing testable and visible at once.
+
+**The gate is not wired into CI.** This repo has no in-tree CI config; the
+Makefile target says to run it. Until someone adds it, the gate is opt-in.

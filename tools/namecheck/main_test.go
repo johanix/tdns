@@ -34,7 +34,7 @@ func runOn(t *testing.T, fixture string) ([]finding, map[string]int) {
 
 // Each of the three checks fires on the shape it exists for. The fixture is one
 // function per shape, so a count is a meaningful assertion.
-func TestChecksFireOnTheShapesTheyNameQ(t *testing.T) {
+func TestChecksFireOnTheShapesTheyName(t *testing.T) {
 	findings, byCheck := runOn(t, "bad.go.txt")
 
 	for check, want := range map[string]int{
