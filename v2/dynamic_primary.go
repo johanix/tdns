@@ -380,7 +380,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	// engine's config merge, so everything must be carried here.
 	msc := ConfLive().MultiSigner[spec.Zconf.MultiSigner]
 	zd := &ZoneData{
-		ZoneName: name,
+		ZoneName: core.CanonicalizeName(name),
 		ZoneType: Primary,
 		// Set directly, like every other field here: this ZoneData is
 		// pre-registered with ZoneType already Primary, and the RefreshEngine
@@ -404,7 +404,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		MultiSigner:       &msc,
 		DelegationSyncQ:   conf.Internal.DelegationSyncQ,
 		Status:            ZoneStatusPending,
-		Data:              core.NewCmap[OwnerData](),
+		Data:              core.NewNameMap[OwnerData](),
 		KeyDB:             conf.Internal.KeyDB,
 		FirstZoneLoad:     true,
 		publishCadence:    spec.PublishCadence,

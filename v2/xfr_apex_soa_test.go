@@ -17,7 +17,7 @@ func TestTransferredApexSOARejectsIncompleteTransfers(t *testing.T) {
 	const zone = "example."
 
 	withOwner := func(od *OwnerData) *ZoneData {
-		zd := &ZoneData{ZoneName: zone, Data: core.NewCmap[OwnerData]()}
+		zd := &ZoneData{ZoneName: zone, Data: core.NewNameMap[OwnerData]()}
 		if od != nil {
 			zd.Data.Set(zone, *od)
 		}
@@ -65,7 +65,7 @@ func TestTransferredApexSOARejectsIncompleteTransfers(t *testing.T) {
 func TestTransferredApexSOAReturnsSerial(t *testing.T) {
 	const zone = "example."
 
-	zd := &ZoneData{ZoneName: zone, Data: core.NewCmap[OwnerData]()}
+	zd := &ZoneData{ZoneName: zone, Data: core.NewNameMap[OwnerData]()}
 	od := OwnerData{Name: zone, RRtypes: NewRRTypeStore()}
 	od.RRtypes.Set(dns.TypeSOA, core.RRset{RRs: []dns.RR{
 		&dns.SOA{

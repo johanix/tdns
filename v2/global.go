@@ -52,7 +52,7 @@ var Globals = GlobalStuff{
 	ApiClients: map[string]*ApiClient{},
 }
 
-var Zones = core.NewCmap[*ZoneData]()
+var Zones = core.NewNameMap[*ZoneData]()
 
 func (gs *GlobalStuff) Validate() error {
 	// Port is uint16, so it's always <= 65535, no need to check

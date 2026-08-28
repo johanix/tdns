@@ -129,7 +129,7 @@ land first, the rest are parallel.
 
 | # | Area | Sites | Contents |
 |---|---|---:|---|
-| 1 | Boundary | ~10 | `core.CanonicalizeName`; canonical keys for `Zones` and `snap.Data`; `GetOwner`/`FindZone`/`SortFunc`. Fixes all four confirmed defects. |
+| 1 | Boundary | ~10 | **DONE.** `core.CanonicalizeName` + `core.NameMap`; canonical keys for `Zones`, `zd.Data`, the snapshot and the working set; `GetOwner`/`FindZone`/`SortFunc`; `zd.ZoneName` folded at construction. Fixes all four confirmed defects. |
 | 2 | Auth query + update | ~35 | `queryresponder`, `updateresponder`, `zone_updater`, `zone_update_verbs`, `defaultqueryhandlers`, `rrset_utils` |
 | 3 | IMR + cache | ~25 | `dnslookup`, `imrengine`, `cache/*` — wire-sourced names, so the most reachable after #1 |
 | 4 | Delegation / childsync / dsync | ~20 | includes the `HasSuffix` label-boundary bugs |
@@ -164,3 +164,35 @@ Recommend the cheap one now and the type as a separate question later.
 #413 Stage 1 also edits `defaultqueryhandlers.go` — the `RefreshCount` guards
 sit a few lines from the `folded` fold at :153. Doing Stage 1 inside PR 2 above,
 rather than separately, avoids a conflict in that file.
+
+
+## Addendum, after PR 1
+
+**The site count barely moved: 149 → 148.** That is the expected result and
+worth stating plainly — PR 1 fixed the *indexes*, not the *comparisons*, and the
+one site it removed is `dnsutils.go:873`'s `HasSuffix` becoming
+`dns.IsSubDomain`.
+
+**But the triage shifts in PRs 2–6's favour.** Owner-map keys and `zd.ZoneName`
+are both canonical now, so every `name == zd.ZoneName` where `name` came out of
+`GetOwnerNames()` or a map key is correct by construction rather than by
+accident. The "latent" class from the sample — ~15 sites — largely converts to
+genuinely safe. What remains unsafe is narrower and easier to describe: names
+that arrive from the wire or from an API request and are compared without going
+through an index first. `dnslookup.go:2651` (a DS owner from an upstream
+response) and `rrset_utils.go:239` (an Additional-section owner) are the shape
+to look for.
+
+**`fold-case` is now inert.** Folding is unconditional, so the option does
+nothing. Still accepted, so existing configs parse; documented as a no-op in
+`enums.go` and the sample template.
+
+**`FindZone` lost its second return value.** It used to report whether the
+match needed folding so callers could rewrite the qname; nothing needs that now
+and both consumers of the flag are gone. 15 call sites updated, 13 of which were
+discarding it already.
+
+**One design note for later PRs.** `dns.CanonicalName` is fine for comparing —
+it is ASCII-only — but must not be used to build a key, for the U+FFFD reason
+above. `core.CanonicalizeName` is the key builder; `core.EqualNames` is the
+comparison. Both live in `v2/core` so the sibling repos can use them.

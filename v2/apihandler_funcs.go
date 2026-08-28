@@ -645,15 +645,12 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "lav":
 			lgApi.Debug("debug lookup-and-validate inquiry")
-			zd, folded := FindZone(dp.Qname)
+			zd := FindZone(dp.Qname)
 			if zd == nil {
 				resp.ErrorMsg = fmt.Sprintf("Did not find a known zone for qname %s",
 					dp.Qname)
 				resp.Error = true
 			} else {
-				if folded {
-					dp.Qname = strings.ToLower(dp.Qname)
-				}
 				// tmp, err := zd.LookupRRset(dp.Qname, dp.Qtype, dp.Verbose)
 				rrset, valid, err := zd.LookupAndValidateRRset(dp.Qname, dp.Qtype, dp.Verbose)
 				if err != nil {

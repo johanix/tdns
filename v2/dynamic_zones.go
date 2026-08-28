@@ -226,7 +226,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			if perr != nil {
 				lg.Error("dynamic primary: config invalid, zone in error state", "zone", zoneName, "template", zconf.Template, "err", perr)
 				zd := &ZoneData{
-					ZoneName:  zoneName,
+					ZoneName:  core.CanonicalizeName(zoneName),
 					ZoneType:  Primary,
 					ZoneStore: MapZone,
 					Zonefile:  zconf.Zonefile,
@@ -234,7 +234,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 					Logger:    log.Default(),
 					Options:   options,
 					Status:    ZoneStatusPending,
-					Data:      core.NewCmap[OwnerData](),
+					Data:      core.NewNameMap[OwnerData](),
 					KeyDB:     conf.Internal.KeyDB,
 				}
 				Zones.Set(zoneName, zd)
@@ -907,7 +907,7 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// Store is always map for dynamic zones — single chokepoint for the map-only
 	// rule (also covers the catalog re-point).
 	zd := &ZoneData{
-		ZoneName:      name,
+		ZoneName:      core.CanonicalizeName(name),
 		ZoneType:      in.Type,
 		ZoneStore:     MapZone,
 		PrimariesConf: primariesConf,
@@ -915,7 +915,7 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		Logger:        log.Default(),
 		Options:       options,
 		Status:        ZoneStatusPending,
-		Data:          core.NewCmap[OwnerData](),
+		Data:          core.NewNameMap[OwnerData](),
 		KeyDB:         conf.Internal.KeyDB,
 		// Set HERE, not only on the ZoneRefresher below. AddDynamicZoneToConfig
 		// persists from the live Zones map, and it runs before the refresh is
@@ -1186,7 +1186,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	suppressedOptions = normSuppressed
 
 	newZd := &ZoneData{
-		ZoneName:       name,
+		ZoneName:       core.CanonicalizeName(name),
 		ZoneType:       oldZd.ZoneType,
 		ZoneStore:      MapZone,
 		PrimariesConf:  primariesConf,
@@ -1198,7 +1198,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		Logger:         log.Default(),
 		Options:        options,
 		Status:         ZoneStatusPending,
-		Data:           core.NewCmap[OwnerData](),
+		Data:           core.NewNameMap[OwnerData](),
 		KeyDB:          conf.Internal.KeyDB,
 
 		OutboundSoaSerial: outboundSoaSerial,

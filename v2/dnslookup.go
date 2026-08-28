@@ -1732,12 +1732,6 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 
 	// Single pass through Additional section: handle glue records and transport signals
 	for _, rr := range r.Extra {
-		if strings.HasSuffix(rr.Header().Name, "p.axfr.net.") {
-			if !imr.Quiet {
-				lgDns.Debug("ParseAdditionalForNSAddrs: processing rr", "rr", rr.String())
-			}
-		}
-
 		owner := rr.Header().Name
 		baseName, isOOTSOwner, _ := parseOwnerName(owner)
 

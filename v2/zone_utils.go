@@ -39,11 +39,10 @@ func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, con
 	// zd.Logger.Printf("zd.Refresh(): refreshing zone %s (%s) force=%v.", zd.ZoneName,
 	// 	ZoneTypeToString[zd.ZoneType], force)
 
-	// if zd.FoldCase {
-	if zd.Options[OptFoldCase] {
-		lg.Debug("folding case for zone", "zone", zd.ZoneName)
-		zd.ZoneName = strings.ToLower(zd.ZoneName)
-	}
+	// Belt and braces: the zone name is canonicalised where the ZoneData is
+	// built, but a zone that reached here by some other route must not serve
+	// with a name its own owner map is not keyed by. See normalizeZoneName.
+	zd.normalizeZoneName()
 
 	switch zd.ZoneType {
 	case Primary:
@@ -928,11 +927,17 @@ func (zd *ZoneData) SetOption(option ZoneOption, value bool) {
 // everything through the *From helpers, so every read in one response comes from
 // the same serial — no intra-response tearing. snap==nil yields nil (the caller
 // SERVFAILs / refuses).
+// getOwnerFrom reads one owner from a pinned snapshot.
+//
+// The key is folded: snapshot keys are canonical (see snapshotMapFromData), and
+// a caller may hold a name in any spelling -- from the wire, from an API
+// request, from a config file. Indexing with the raw name is what returned
+// "no such name" for names the zone does in fact publish.
 func getOwnerFrom(snap *zoneSnapshot, qname string) *OwnerData {
 	if snap == nil {
 		return nil
 	}
-	return snap.Data[qname]
+	return snap.Data[core.CanonicalizeName(qname)]
 }
 
 // getRRsetFrom reads one RRset from a pinned snapshot.
@@ -952,7 +957,7 @@ func nameExistsFrom(snap *zoneSnapshot, qname string) bool {
 	if snap == nil {
 		return false
 	}
-	_, ok := snap.Data[qname]
+	_, ok := snap.Data[core.CanonicalizeName(qname)]
 	return ok
 }
 
@@ -1148,44 +1153,54 @@ func IsIxfr(rrs []dns.RR) bool {
 	return false
 }
 
-// Find the closest enclosing auth zone that has qname below it (qname is either auth data
-// in the zone or located further down in a child zone that we are not auth for).
-// Return zone, case fold used to match
-func FindZone(qname string) (*ZoneData, bool) {
-	var tzone string
+// FindZone returns the closest enclosing zone this server is authoritative for:
+// the zone that holds qname, or the zone above the child zone qname falls in.
+// nil when there is none.
+//
+// Matching is case-insensitive throughout, because Zones is keyed canonically
+// and Get folds what it is given.
+//
+// It did not used to be. The previous implementation walked the qname as
+// written, and only if that found nothing walked a lowercased copy, telling the
+// caller through a second return value which pass had succeeded so it could
+// rewrite the qname to match. That rescued a mixed-case ZONE SUFFIX and nothing
+// else: a query whose suffix matched the stored zone exactly but whose
+// left-hand labels did not -- WWW.example.com. against example.com. -- took the
+// first pass, kept its spelling, and went on to miss the exact-keyed owner
+// lookup. The zone was found and the name inside it was not. See tdns#415.
+// normalizeZoneName folds zd.ZoneName to canonical form.
+//
+// A zone name is an identifier the operator chose in a config file, not data
+// that arrived over the wire, so there is nothing to preserve by keeping its
+// capitalisation: the name a client sees in an answer is echoed from the
+// question section, not from here.
+//
+// Keeping it canonical is what lets the rest of the server index by it. The
+// owner map and the Zones registry are both keyed canonically; a zone declared
+// as Example.COM. whose ZoneName stayed as written would look its own apex up
+// with a key that is not in its own map.
+//
+// This used to be conditional on the fold-case zone option, which defaults off
+// and is set in neither shipped sample config -- so in practice zone names were
+// not folded at all, and a zone declared in mixed case could not be reached.
+func (zd *ZoneData) normalizeZoneName() {
+	if zd == nil {
+		return
+	}
+	if canon := core.CanonicalizeName(zd.ZoneName); canon != zd.ZoneName {
+		lg.Debug("normalizeZoneName: folding zone name", "from", zd.ZoneName, "to", canon)
+		zd.ZoneName = canon
+	}
+}
+
+func FindZone(qname string) *ZoneData {
 	labels := strings.Split(qname, ".")
 	for i := 0; i < len(labels)-1; i++ {
-		tzone = strings.Join(labels[i:], ".")
-		if zd, ok := Zones.Get(tzone); ok {
-			return zd, false
-		}
-	}
-
-	// if no match for exact qname, let's try with a case folded version
-	qname = strings.ToLower(qname)
-	labels = strings.Split(qname, ".")
-
-	for i := 0; i < len(labels)-1; i++ {
-		tzone = strings.Join(labels[i:], ".")
-		if zd, ok := Zones.Get(tzone); ok {
-			return zd, true
+		if zd, ok := Zones.Get(strings.Join(labels[i:], ".")); ok {
+			return zd
 		}
 	}
 	lg.Debug("FindZone: no zone found", "qname", qname)
-	return nil, false
-}
-
-func FindZoneNG(qname string) *ZoneData {
-	i := strings.Index(qname, ".")
-	for {
-		if i == -1 {
-			break // done
-		}
-		if zd, ok := Zones.Get(qname[i:]); ok {
-			return zd
-		}
-		i = strings.Index(qname[i:], ".")
-	}
 	return nil
 }
 
@@ -1953,7 +1968,7 @@ $TTL 86400
 	lg.Debug("CreateAutoZone: template zone data", "data", zonedatastr)
 
 	zd := &ZoneData{
-		ZoneName:  zonename,
+		ZoneName:  core.CanonicalizeName(zonename),
 		ZoneStore: MapZone,
 		Logger:    log.Default(),
 		ZoneType:  Primary,

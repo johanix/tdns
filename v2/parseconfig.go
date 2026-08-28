@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/mitchellh/mapstructure"
@@ -893,7 +894,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zd, exists := Zones.Get(zname)
 		if !exists {
 			zd = &ZoneData{
-				ZoneName:      zname,
+				ZoneName:      core.CanonicalizeName(zname),
 				Logger:        log.Default(),
 				FirstZoneLoad: true,
 			}

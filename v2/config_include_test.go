@@ -245,7 +245,7 @@ func TestTypeMismatchAcrossFilesIsFatal(t *testing.T) {
 // name, no include: anywhere. Neither is served now, and both the zone list and
 // the broken list say so.
 func TestDuplicateZoneIsQuarantined(t *testing.T) {
-	Zones = core.NewCmap[*ZoneData]()
+	Zones = core.NewNameMap[*ZoneData]()
 	conf := &Config{Zones: []ZoneConf{
 		{Name: "dup.example.", Type: "primary", Store: "map", Zonefile: "/nonexistent"},
 		{Name: "dup.example.", Type: "primary", Store: "map", Zonefile: "/nonexistent"},
@@ -283,7 +283,7 @@ func TestDuplicateZoneIsQuarantined(t *testing.T) {
 // The FQDN case: two spellings of one name are one zone to the daemon, so they
 // are a duplicate even though the strings differ.
 func TestDuplicateZoneComparesFqdn(t *testing.T) {
-	Zones = core.NewCmap[*ZoneData]()
+	Zones = core.NewNameMap[*ZoneData]()
 	conf := &Config{Zones: []ZoneConf{
 		{Name: "dup.example", Type: "primary", Store: "map", Zonefile: "/nonexistent"},
 		{Name: "dup.example.", Type: "primary", Store: "map", Zonefile: "/nonexistent"},
@@ -303,7 +303,7 @@ func TestDuplicateZoneComparesFqdn(t *testing.T) {
 // the query's case happened to match -- the same silent last-wins this change
 // exists to end, just spelled differently. Both entries must be quarantined.
 func TestDuplicateZoneComparesCaseInsensitively(t *testing.T) {
-	Zones = core.NewCmap[*ZoneData]()
+	Zones = core.NewNameMap[*ZoneData]()
 	conf := &Config{Zones: []ZoneConf{
 		{Name: "Dup.Example.", Type: "primary", Store: "map", Zonefile: "/nonexistent"},
 		{Name: "dup.example.", Type: "primary", Store: "map", Zonefile: "/nonexistent"},

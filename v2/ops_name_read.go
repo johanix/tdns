@@ -67,16 +67,15 @@ func (zd *ZoneData) ApiZoneGetName(zp ZonePost) (*ZoneNameReport, error) {
 		RRsets: map[string][]string{},
 	}
 
-	// CANONICALISE BEFORE LOOKING UP. The gate above folds case
-	// (dns.IsSubDomain does), but GetOwner indexes a map by the exact key
-	// (getOwnerFrom -> snap.Data[qname]). Passing the name through as written
-	// meant NS1.provider.example. cleared the in-zone check and then missed the
-	// map -- returning a SUCCESSFUL EMPTY REPORT for a name that has records.
-	//
-	// That is the precise failure this command exists to prevent: a client
-	// reading "nothing there" republishes, and on a signed zone that re-signs
-	// and bumps the serial, every pass, for ever.
-	owner, err := zd.GetOwner(dns.CanonicalName(name))
+	// GetOwner folds the name itself now, so this passes it through as the
+	// caller wrote it. It did not always: this call site used to canonicalise
+	// explicitly, because the in-zone gate above folds case (dns.IsSubDomain
+	// does) while the owner lookup did not, so NS1.provider.example. cleared
+	// the gate and then missed the map -- a SUCCESSFUL EMPTY REPORT for a name
+	// that has records. That is the precise failure this command exists to
+	// prevent: a client reading "nothing there" republishes, and on a signed
+	// zone that re-signs and bumps the serial, every pass, for ever.
+	owner, err := zd.GetOwner(name)
 	if err != nil {
 		return nil, err
 	}

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -405,7 +406,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		upstreams := res.Resolved
 
 		zd := &ZoneData{
-			ZoneName:      zoneName,
+			ZoneName:      core.CanonicalizeName(zoneName),
 			ZoneType:      Secondary,
 			ZoneStore:     MapZone, // dynamic zones are map-only (§3)
 			PrimariesConf: primariesConf,

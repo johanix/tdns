@@ -40,7 +40,7 @@ func drainTestZone() *ZoneData {
 		ZoneType:  Secondary,
 		ZoneStore: MapZone,
 		Options:   map[ZoneOption]bool{},
-		Data:      core.NewCmap[OwnerData](),
+		Data:      core.NewNameMap[OwnerData](),
 		Logger:    log.New(io.Discard, "", 0),
 	}
 }
@@ -220,7 +220,7 @@ func TestCancelledRefreshDoesNotStrandZoneStatus(t *testing.T) {
 		ZoneType:  Secondary,
 		Options:   map[ZoneOption]bool{},
 		Upstreams: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
-		Data:      core.NewCmap[OwnerData](),
+		Data:      core.NewNameMap[OwnerData](),
 		Logger:    log.New(io.Discard, "", 0),
 	}
 	zd.SetStatus(ZoneStatusReady)

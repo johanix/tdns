@@ -585,7 +585,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.MultiSigner = &msc
 							zd.DelegationSyncQ = conf.Internal.DelegationSyncQ
 							zd.KeyDB = conf.Internal.KeyDB
-							zd.Data = core.NewCmap[OwnerData]()
+							zd.Data = core.NewNameMap[OwnerData]()
 							zd.mu.Unlock()
 						}
 
@@ -924,7 +924,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					primariesConf := clonePeerConfs(zr.PrimariesConf)
 					upstreams := clonePeerConfs(zr.Primaries)
 					zd := &ZoneData{
-						ZoneName:          zone,
+						ZoneName:          core.CanonicalizeName(zone),
 						ZoneStore:         zr.ZoneStore,
 						Logger:            log.Default(),
 						PrimariesConf:     primariesConf,
@@ -943,7 +943,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						DnssecPolicyName:  zr.DnssecPolicy, // config-base hint; struct bound post-Ready
 						MultiSigner:       &msc,
 						DelegationSyncQ:   conf.Internal.DelegationSyncQ,
-						Data:              core.NewCmap[OwnerData](),
+						Data:              core.NewNameMap[OwnerData](),
 						KeyDB:             conf.Internal.KeyDB,
 						FirstZoneLoad:     true,
 						Status:            ZoneStatusPending, // registered + enqueued, no data yet (B6)
