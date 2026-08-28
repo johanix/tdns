@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -80,7 +81,7 @@ func hashDsyncApiKey(key string) string {
 // canonDsyncApiZone normalises a parent zone name. It is a domain name, so it
 // gets domain-name treatment: trailing dot supplied, case folded.
 func canonDsyncApiZone(zone string) string {
-	return strings.ToLower(dns.Fqdn(strings.TrimSpace(zone)))
+	return core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(zone)))
 }
 
 // canonDsyncApiUser normalises a username: trimmed, case-folded, and given a
@@ -101,8 +102,13 @@ func canonDsyncApiZone(zone string) string {
 // Case is folded for the same reason it is on any domain name, and because two
 // accounts differing only in case is a way to end up with a credential nobody
 // remembers issuing.
+// core.CanonicalizeName, not strings.ToLower. This value identifies WHO a
+// credential belongs to, and strings.ToLower folds by Unicode: it maps U+212A
+// KELVIN SIGN onto "k", so the distinct DNS names "\u212a.example." and
+// "k.example." would canonicalise to one principal and share a credential.
+// RFC 4343 folds US-ASCII A-Z and nothing else.
 func canonDsyncApiUser(user string) string {
-	return strings.ToLower(dns.Fqdn(strings.TrimSpace(user)))
+	return core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(user)))
 }
 
 // usableAsPrincipal reports whether s can serve as a policy principal.
@@ -151,7 +157,7 @@ func (kdb *KeyDB) AddDsyncApiCredential(parentZone, username, principal, comment
 	if !usableAsPrincipal(princ) {
 		return "", fmt.Errorf("principal %q is not a usable domain name; the update policy compares it against owner names", princ)
 	}
-	princ = strings.ToLower(dns.Fqdn(princ))
+	princ = core.CanonicalizeName(dns.Fqdn(princ))
 
 	key, err := GenerateDsyncApiKey()
 	if err != nil {

@@ -132,7 +132,7 @@ land first, the rest are parallel.
 | 1 | Boundary | ~10 | **DONE.** `core.CanonicalizeName` + `core.NameMap`; canonical keys for `Zones`, `zd.Data`, the snapshot and the working set; `GetOwner`/`FindZone`/`SortFunc`; `zd.ZoneName` folded at construction. Fixes all four confirmed defects. |
 | 2 | Auth query + update | ~29 | **DONE.** `queryresponder`, `auth_utils`, `updateresponder`, `zone_updater`, `zone_update_verbs`, `defaultqueryhandlers`, `ops_uri`/`ops_svcb`/`ops_key`, `dnsutils`, `zone_utils` |
 | 3 | IMR + cache | ~24 | **DONE.** `dnslookup`, `imrengine`, `imr_helpers`, `chase`, `apihandler_imr`, `cache/*` — plus the cache's own name-keyed indexes |
-| 4 | Delegation / childsync / dsync | ~20 | includes the `HasSuffix` label-boundary bugs |
+| 4 | Delegation / childsync / dsync | ~20 | **DONE.** `childsync_utils`, `scanner_csync`, `dsync_api_*`, `delegation_coherence`, `delegation_backend_*`, `config_delegationsync`, `ops_delegation_read` |
 | 5 | Keystore / sign / zonemd | ~20 | `sign.go`'s apex tests are latent-severe: a miss signs a delegation NS or skips the apex NS |
 | 6 | CLI + debug | ~23 | cosmetic, but `keystore_cmds.go:1018` `log.Fatalf`s on a case mismatch |
 | 7 | Enforcement | — | see below |
@@ -280,3 +280,40 @@ zone for `example.`), the negative-answer SOA gate (same shape — an SOA for
 `ample.` authorising a denial for `example.`), the SOA-authorises-this-denial
 test in `dnslookup`, the DS-and-RRSIG pair in a referral, and the `_853._udp`
 TLSA owner prefixes.
+
+
+## Addendum, after PR 4
+
+108 → 96.
+
+**Glue for other people's delegations was being deleted.** `CreateChildUpdate`
+removes an NS record and, if that nameserver is in bailiwick, its glue with it.
+The in-bailiwick test was `strings.HasSuffix(ns.Ns, child)`, which is true for
+`ns1.evilchild.example.` against `child.example.` -- so touching one delegation
+deleted A and AAAA belonging to a *different* delegation in the same parent. The
+same test, run on the new records, decides which glue the replace path clears
+first. Both are `dns.IsSubDomain` now. In the other direction it missed
+in-bailiwick glue whose case differed from the child name, leaving the parent
+serving glue for a nameserver that was gone.
+
+**`NSInBailiwick` fixed, as promised in #419.** It is the live twin of the dead
+`InBailiwick` fixed there, and it had the same body.
+
+**A credential principal could be shared by two different names.**
+`canonDsyncApiUser` normalised with `strings.ToLower`, which folds by Unicode:
+U+212A KELVIN SIGN maps onto `k`, so `\u212a.example.` and `k.example.` --
+distinct DNS names -- reduced to one principal. A principal is what a
+self/selfsub policy compares owner names against, so it decides what a
+credential may write. Same for the zone key and the parent-zone lookup.
+
+**Three spellings of one predicate.** The tree now has `BailiwickNS` (correct,
+with its own tests, in `bailiwick_test.go`), `NSInBailiwick` (fixed here) and
+`InBailiwick` (fixed in #419, no callers). They should be one function.
+Consolidating is a separate change and not one this series was asked for, so
+it is noted rather than done.
+
+**One clause removed rather than fixed.** `delegation_backend_direct.go:95` read
+`!dns.IsSubDomain(childZone, ownerName) && ownerName != childZone`. IsSubDomain
+is already true for the name itself, so the second clause could never be
+reached; it was case-sensitive, which would have made it wrong if it ever had
+been.

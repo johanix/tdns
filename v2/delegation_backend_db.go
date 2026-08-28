@@ -9,6 +9,7 @@ package tdns
 import (
 	"fmt"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -151,7 +152,7 @@ func (b *DBDelegationBackend) ListChildren(parentZone string) ([]string, error) 
 // E.g. owner="ns1.whisky.dnslab.", parent="dnslab." → "whisky.dnslab."
 // If owner is already a direct child, returns owner itself.
 func childZoneFromOwner(owner, parentZone string) string {
-	if owner == parentZone {
+	if core.EqualNames(owner, parentZone) {
 		return owner
 	}
 	// Walk labels from the right until we have parentZone + one more label
