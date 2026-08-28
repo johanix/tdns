@@ -1170,7 +1170,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			continue
 		}
 
-		if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
+		if core.EqualNames(ownerName, zd.ZoneName) && rrtype == dns.TypeNS {
 			dss.InSync = false
 			// return dss, nil
 		}
@@ -1181,7 +1181,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			//log.Printf("ZUCDDNG: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 
 			// Is this a change to the NS RRset?
-			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
+			if core.EqualNames(ownerName, zd.ZoneName) && rrtype == dns.TypeNS {
 				dss.InSync = false
 				dss.NsRemoves = append(dss.NsRemoves, rrcopy)
 				ddata.Actions = append(ddata.Actions, rrcopy)
@@ -1224,7 +1224,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 				}
 			}
 			// Is this a KSK DNSKEY removal?
-			if ownerName == zd.ZoneName && rrtype == dns.TypeDNSKEY {
+			if core.EqualNames(ownerName, zd.ZoneName) && rrtype == dns.TypeDNSKEY {
 				if dk, ok := rr.(*dns.DNSKEY); ok {
 					if dk.Flags&dns.SEP != 0 {
 						dss.InSync = false

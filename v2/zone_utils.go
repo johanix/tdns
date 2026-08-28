@@ -1023,7 +1023,12 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 func (zd *ZoneData) IsChildDelegation(qname string) bool {
 	lg.Debug("IsChildDelegation: checking delegation", "qname", qname, "zone", zd.ZoneName)
 	owner, err := zd.GetOwner(qname)
-	if err != nil || owner == nil || qname == zd.ZoneName {
+	// GetOwner folds, so the apex is found; this test has to fold too or the
+	// apex -- which has NS -- is reported as a child cut. UpdateResponder asks
+	// this about the OWNERS inside an update, which come off the wire, so an
+	// apex NS update spelled EXAMPLE.com. was classified as a child update and
+	// judged against allow-child-updates instead of allow-updates.
+	if err != nil || owner == nil || core.EqualNames(qname, zd.ZoneName) {
 		return false
 	}
 	if _, exists := owner.RRtypes.Get(dns.TypeNS); !exists {

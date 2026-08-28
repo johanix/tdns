@@ -235,3 +235,52 @@ don't only read it.
 **Still not converted, deliberately:** `sign.go`'s apex tests. Its operands are
 owner-map keys against `zd.ZoneName`, both canonical since PR 1, so they are
 safe by construction; they belong to PR 5 with the rest of the signer.
+
+
+## Review of #419 (external, 2026-08-28)
+
+`tdns-project/reviews/2026-08-28-tdns-PR419-query-and-update-review.md`.
+Verdict: request changes -- four findings, all inside #419's own surface.
+All four addressed.
+
+**FINDING 1 — `IsChildDelegation`.** Converted. The review is right that this is
+not merely the same hole as `findDelegationFrom`: `UpdateResponder` now folds
+the zone-section qname, so the apex branch is entered correctly, and the damage
+is one level in -- the OWNERS inside that branch are passed to
+`IsChildDelegation`, so an apex NS update spelled `EXAMPLE.` was classified as a
+CHILD update and judged against `allow-child-updates` instead of
+`allow-updates`.
+
+**FINDING 2 — three sites missed in `ZoneUpdateChangesDelegationDataNG`.** A
+real miss, and worth naming the cause: the replacement list for that file was
+assembled by hand from a 17-line enumeration, and three lines were dropped
+between enumerating and patching. The re-sweep after the fix (`grep` for any
+remaining wire-owner-vs-apex `==` in the six files) is what should have run
+before the PR, not after the review.
+
+**FINDING 3 — the glue walk's `childDel != ancestor`.** Converted.
+
+**FINDING 4 — 14 unrelated `docs/` files, ~3000 lines.** `git add -A` swept
+untracked review documents from the working tree into the commit. Removed with
+`git rm --cached`, so they return to being untracked rather than being deleted
+from disk. Net diff against the base is now clean.
+
+`v2/probe_src_test.go` keeps its two-line gofmt change: the file was merged
+unformatted in #410, and un-formatting it again to tidy this diff would leave
+the tree worse than it found it.
+
+**Coverage.** New tests for findings 1 and 2, each verified by reverting the
+fix. The pre-switch apex-NS guard needed a differential test rather than a
+value assertion -- it only has an effect for a DUPLICATE apex NS add, every
+other path setting `InSync` from its own arm, and whether "in sync" is right
+for a duplicate add is a separate question from whether spelling may change it.
+DS shapes added to the query differential, as the review suggested.
+
+FINDING 3 is **not covered by a test**. It sits inside `UpdateResponder`'s
+message-driven classification, which has no unit harness at all; building one
+for a one-line fix is out of proportion to this PR, and worth doing on its own.
+
+Sites the review confirms belong to later stages, not #419: `rrset_utils`
+(outbound `AuthQueryEngine`), `sign.go` (canonical operands since #417),
+`NSInBailiwick` (stage 4, done), `ops_delegation_read` (stage 4, done), and the
+`Conf.Zones[i].Name` pair from #417 FINDING 2, which is still open.
