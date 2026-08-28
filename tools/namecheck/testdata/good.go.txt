@@ -1,0 +1,53 @@
+package fixture
+
+import (
+	"strings"
+
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
+)
+
+// The safe fold, as a key.
+func keyDirect(rrs []dns.RR, out map[string][]dns.RR) {
+	for _, rr := range rrs {
+		out[core.CanonicalizeName(rr.Header().Name)] = nil
+	}
+}
+
+func keyViaLocal(name string, m map[string]bool) bool {
+	k := core.CanonicalizeName(dns.Fqdn(name))
+	return m[k]
+}
+
+func zoneNameKey(name string) string {
+	return core.CanonicalizeName(dns.Fqdn(name))
+}
+
+// Tested through a fold, sliced by length -- the affix cannot survive.
+func stripPrefix(owner string) string {
+	const p = "_dns."
+	if strings.HasPrefix(core.CanonicalizeName(owner), p) {
+		return owner[len(p):]
+	}
+	return owner
+}
+
+func sameZone(qname, zonename string) bool {
+	return core.EqualNames(qname, zonename)
+}
+
+func inZone(qname, zonename string) bool {
+	return dns.IsSubDomain(zonename, qname)
+}
+
+// Folding a NON-name is fine: an algorithm name, a config identifier.
+func algKey(alg string, m map[string]bool) bool {
+	return m[strings.ToUpper(strings.TrimSpace(alg))]
+}
+
+// A block comment hides code from a parser, which is the point of using one.
+/*
+func hidden(qname, zonename string) bool {
+	return strings.EqualFold(qname, zonename)
+}
+*/

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -184,7 +185,7 @@ func unquoteNsdValue(s string) string {
 }
 
 func normalizeImportedTsigKey(name, algo, secret string, seen map[string]bool) (TsigDetails, error) {
-	name = dns.CanonicalName(strings.TrimSpace(name))
+	name = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(name)))
 	algo = strings.TrimSpace(algo)
 	secret = strings.TrimSpace(secret)
 	if err := validateTsigKeySpec(name, algo, secret); err != nil {

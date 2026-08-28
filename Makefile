@@ -1,4 +1,4 @@
-.PHONY: default v1 all v2 clean install bump-johanix-deps
+.PHONY: default v1 all v2 clean install bump-johanix-deps namecheck
 
 default: v2
 
@@ -27,6 +27,19 @@ install:
 	$(MAKE) -C ./cmdv2/ install
 #	$(MAKE) -C ./msa/ install
 #	$(MAKE) -C ./sidecar-cli/ install
+
+# namecheck: the gate that keeps DNS names folded by the DNS rule.
+#
+# Six stages of conversion produced four defects with one shape -- two sides of
+# a pair folded by different functions -- and a grep would have caught none of
+# them, because in every case the call it would flag had already been converted.
+# So this parses. See tools/namecheck and
+# docs/2026-08-28-case-insensitive-names-scope.md.
+#
+# Exit status is 1 on any finding. Run it in CI.
+namecheck:
+	@cd tools/namecheck && go build -o /tmp/tdns-namecheck .
+	@/tmp/tdns-namecheck v2 cmdv2
 
 # bump-johanix-deps: in every go.mod under this repo, refresh every
 # github.com/johanix/* require line to its current proxy 'latest'

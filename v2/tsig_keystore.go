@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -55,14 +56,14 @@ func insertTsigKeystore(tx *Tx, row TsigKeystoreRow) error {
 	if err := validateTsigKeySpec(row.Keyname, row.Algorithm, row.Secret); err != nil {
 		return err
 	}
-	keyname := dns.CanonicalName(row.Keyname)
+	keyname := core.CanonicalizeName(dns.Fqdn(row.Keyname))
 	createdAt := row.CreatedAt
 	if createdAt == "" {
 		createdAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	_, err := tx.Exec(insertTsigKeystoreSql,
 		keyname,
-		dns.CanonicalName(row.Algorithm),
+		core.CanonicalizeName(dns.Fqdn(row.Algorithm)),
 		row.Secret,
 		row.Origin,
 		row.Owner,
@@ -77,7 +78,7 @@ func insertTsigKeystore(tx *Tx, row TsigKeystoreRow) error {
 // when absent.
 func getTsigKeystoreByName(q rowQuerier, keyname string) (TsigKeystoreRow, error) {
 	var row TsigKeystoreRow
-	err := q.QueryRow(getTsigKeystoreByNameSql, dns.CanonicalName(keyname)).Scan(
+	err := q.QueryRow(getTsigKeystoreByNameSql, core.CanonicalizeName(dns.Fqdn(keyname))).Scan(
 		&row.Keyname,
 		&row.Algorithm,
 		&row.Secret,
@@ -125,7 +126,7 @@ func tsigKeystoreRowToInfo(row TsigKeystoreRow) TsigKeyInfo {
 
 func tsigDetailsMatchRow(t TsigDetails, row TsigKeystoreRow) bool {
 	return row.Secret == t.Secret &&
-		dns.CanonicalName(row.Algorithm) == dns.CanonicalName(t.Algorithm)
+		core.CanonicalizeName(dns.Fqdn(row.Algorithm)) == core.CanonicalizeName(dns.Fqdn(t.Algorithm))
 }
 
 func scanTsigKeystoreRow(rows *sql.Rows) (TsigKeystoreRow, error) {
@@ -161,12 +162,12 @@ func listTsigKeystore(q rowsQuerier) ([]TsigKeystoreRow, error) {
 }
 
 func deleteTsigKeystore(tx *Tx, keyname string) error {
-	_, err := tx.Exec(deleteTsigKeystoreSql, dns.CanonicalName(keyname))
+	_, err := tx.Exec(deleteTsigKeystoreSql, core.CanonicalizeName(dns.Fqdn(keyname)))
 	return err
 }
 
 func updateTsigKeystoreOwner(tx *Tx, keyname, owner string) error {
-	_, err := tx.Exec(updateTsigKeystoreOwnerSql, owner, dns.CanonicalName(keyname))
+	_, err := tx.Exec(updateTsigKeystoreOwnerSql, owner, core.CanonicalizeName(dns.Fqdn(keyname)))
 	return err
 }
 
@@ -175,11 +176,11 @@ func overwriteTsigKeystore(tx *Tx, row TsigKeystoreRow) error {
 		return err
 	}
 	_, err := tx.Exec(overwriteTsigKeystoreSql,
-		dns.CanonicalName(row.Algorithm),
+		core.CanonicalizeName(dns.Fqdn(row.Algorithm)),
 		row.Secret,
 		row.Owner,
 		row.Creator,
-		dns.CanonicalName(row.Keyname),
+		core.CanonicalizeName(dns.Fqdn(row.Keyname)),
 	)
 	return err
 }
@@ -187,10 +188,10 @@ func overwriteTsigKeystore(tx *Tx, row TsigKeystoreRow) error {
 func updateTsigKeystoreConfig(tx *Tx, t TsigDetails) error {
 	owner := tsigConfigEffectiveOwner(t)
 	_, err := tx.Exec(updateTsigKeystoreConfigSql,
-		dns.CanonicalName(t.Algorithm),
+		core.CanonicalizeName(dns.Fqdn(t.Algorithm)),
 		t.Secret,
 		owner,
-		dns.CanonicalName(t.Name),
+		core.CanonicalizeName(dns.Fqdn(t.Name)),
 	)
 	return err
 }
@@ -201,7 +202,7 @@ func updateTsigKeystoreConfig(tx *Tx, t TsigDetails) error {
 func (kdb *KeyDB) SyncConfigTsigKeys(entries []TsigDetails) (retErr error) {
 	want := make(map[string]TsigDetails, len(entries))
 	for _, t := range entries {
-		want[dns.CanonicalName(t.Name)] = t
+		want[core.CanonicalizeName(dns.Fqdn(t.Name))] = t
 	}
 
 	tx, err := kdb.Begin("SyncConfigTsigKeys")
@@ -315,7 +316,7 @@ func (delta *TsigCacheDelta) markChanged(name string) {
 	if delta == nil {
 		return
 	}
-	c := dns.CanonicalName(name)
+	c := core.CanonicalizeName(dns.Fqdn(name))
 	for _, existing := range delta.Changed {
 		if existing == c {
 			return
@@ -328,7 +329,7 @@ func (delta *TsigCacheDelta) markDeleted(name string) {
 	if delta == nil {
 		return
 	}
-	c := dns.CanonicalName(name)
+	c := core.CanonicalizeName(dns.Fqdn(name))
 	for _, existing := range delta.Deleted {
 		if existing == c {
 			return

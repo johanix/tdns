@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -272,9 +273,9 @@ func overwriteApproved(name string, kp KeystorePost) bool {
 	if kp.Force {
 		return true
 	}
-	c := dns.CanonicalName(name)
+	c := core.CanonicalizeName(dns.Fqdn(name))
 	for _, n := range kp.TsigOverwrite {
-		if dns.CanonicalName(n) == c {
+		if core.CanonicalizeName(dns.Fqdn(n)) == c {
 			return true
 		}
 	}
@@ -388,14 +389,14 @@ func (kdb *KeyDB) tsigKeyMgmtPurge(conf *Config, tx *Tx, kp KeystorePost, resp *
 	if !kp.Force && len(kp.TsigOverwrite) > 0 {
 		approved := make(map[string]bool, len(kp.TsigOverwrite))
 		for _, n := range kp.TsigOverwrite {
-			approved[dns.CanonicalName(n)] = true
+			approved[core.CanonicalizeName(dns.Fqdn(n))] = true
 		}
 		toDelete = nil
 		for _, row := range candidates {
 			// Canonicalize the candidate side too: approved is keyed by
 			// CanonicalName, so a non-canonical stored keyname would otherwise
 			// silently fail to match and be left undeleted.
-			if approved[dns.CanonicalName(row.Keyname)] {
+			if approved[core.CanonicalizeName(dns.Fqdn(row.Keyname))] {
 				toDelete = append(toDelete, row)
 			}
 		}

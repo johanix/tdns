@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -39,11 +40,11 @@ func (kdb *KeyDB) ReconcileConfigTsigKeys(entries []TsigDetails, opts TsigReconc
 	result = TsigReconcileResult{TsigCacheDelta: &TsigCacheDelta{}}
 	want := make(map[string]TsigDetails, len(entries))
 	for _, t := range entries {
-		want[dns.CanonicalName(t.Name)] = t
+		want[core.CanonicalizeName(dns.Fqdn(t.Name))] = t
 	}
 	overwrite := make(map[string]bool, len(opts.Overwrite))
 	for _, name := range opts.Overwrite {
-		overwrite[dns.CanonicalName(name)] = true
+		overwrite[core.CanonicalizeName(dns.Fqdn(name))] = true
 	}
 
 	tx, err := kdb.Begin("ReconcileConfigTsigKeys")
@@ -69,7 +70,7 @@ func (kdb *KeyDB) ReconcileConfigTsigKeys(entries []TsigDetails, opts TsigReconc
 		if err == sql.ErrNoRows {
 			if err := insertTsigKeystore(tx, TsigKeystoreRow{
 				Keyname:   name, // canonical, matching want[] and the cache delta key
-				Algorithm: dns.CanonicalName(t.Algorithm),
+				Algorithm: core.CanonicalizeName(dns.Fqdn(t.Algorithm)),
 				Secret:    t.Secret,
 				Origin:    "config",
 				Owner:     tsigConfigEffectiveOwner(t),
@@ -100,7 +101,7 @@ func (kdb *KeyDB) ReconcileConfigTsigKeys(entries []TsigDetails, opts TsigReconc
 		}
 		if opts.Force || overwrite[name] {
 			if _, err := tx.Exec(forceTsigKeystoreFromConfigSql,
-				dns.CanonicalName(t.Algorithm),
+				core.CanonicalizeName(dns.Fqdn(t.Algorithm)),
 				t.Secret,
 				wantOwner,
 				name,

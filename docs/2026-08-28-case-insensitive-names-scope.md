@@ -135,7 +135,7 @@ land first, the rest are parallel.
 | 4 | Delegation / childsync / dsync | ~20 | **DONE.** `childsync_utils`, `scanner_csync`, `dsync_api_*`, `delegation_coherence`, `delegation_backend_*`, `config_delegationsync`, `ops_delegation_read` |
 | 5 | Keystore / sign / zonemd | ~20 | **DONE.** `zonemd` canonical ordering, `sign`, `keystore_bulk`, `bind_convert`, `rollover_lock`, plus the two items the series owed |
 | 6 | CLI + debug | ~20 | **DONE.** `cli/*`, `debug/*`, `cmdv2/dog`, plus the `VerifyZonemd` pair carried over from stage 5 |
-| 7 | Enforcement | — | see below |
+| 7 | Enforcement | — | **DONE.** `tools/namecheck`, a parser. Catches all five historical defects; tree passes with an empty allowlist |
 
 ## Enforcement
 
@@ -771,3 +771,63 @@ Pre-existing, none introduced by the series:
 | `nsMap[baseName]` in `ParseAdditionalForNSAddrs` | Per-message set; #421's review said explicitly not to expand into it |
 | `BailiwickNS` / `NSInBailiwick` / `InBailiwick` | Three spellings of one predicate; consolidation is its own change |
 | The `/* */` hole in the site scanner | Stage 7's gate must understand block comments; mine did not |
+
+
+## Addendum, after PR 7 — the gate
+
+`tools/namecheck`, a Go program, `make namecheck`.
+
+**It parses rather than greps, and that is not a stylistic choice.** The four
+defects this series produced all had one shape -- two sides of a pair folded by
+different functions -- and a grep for bad calls would have caught NONE of them,
+because in every case the call it would flag had already been converted. What
+was left was a second, uncoerced half elsewhere. Parsing also makes it immune to
+the `/* */` hole that made my own scan report two commented-out lines as sites.
+
+Three checks:
+
+| Check | What it refuses |
+|---|---|
+| `keyfold` | A map key built by a lossy fold -- as an index, via a local a few statements up, or returned from a helper that manufactures keys. `dns.CanonicalName` rewrites non-UTF-8 octets to U+FFFD; `strings.ToLower` folds U+212A onto `k`. |
+| `namecmp` | `strings.EqualFold` on a domain name, and `strings.HasSuffix` between two of them (blind to label boundaries). |
+| `foldpair` | A value tested through a fold and then acted on unfolded in the same function -- the `_dns.` bug exactly. |
+
+**Validated against the history, not against fixtures alone.** Each of the five
+real defects was reintroduced into the tree and the gate confirmed to report it:
+#417's `zoneNameKey`, #421's prefix strip, #422's DSYNC principal, #423's ZONEMD
+grouping, #424's config-check store side. That check is in the PR description
+and is repeatable.
+
+**The tree passes with an EMPTY allowlist.** The first run found 18 sites the
+six manual stages had missed, all in files no stage owned: the whole TSIG
+keystore (`tsig_keys`, `tsig_keystore`, `tsig_keystore_mgmt`, `tsig_reconcile`,
+`tsig_import`), the scanner's NS sets, `notifyresponder`'s zone check, and
+`core.ExtractDistributionIDFromQNAME`. They are fixed rather than allowlisted: a
+gate that ships with 18 pre-authorised exceptions is a ratchet with no teeth.
+
+`ExtractDistributionIDFromQNAME` was the most interesting of the 18 -- the
+`_dns.` shape a third time. `strings.HasSuffix(qname, zone)` then
+`strings.TrimSuffix(qname, zone)`: case-sensitive, and blind to labels, so
+`evila1b2kdc.example.com.` passed the test for zone `kdc.example.com.` and the
+trim handed back `evila1b2` as a distribution ID from a zone it does not belong
+to.
+
+**Two mistakes made and caught while doing this**, both worth recording because
+they are the same class the series has been about. Replacing
+`dns.CanonicalName(x)` with `core.CanonicalizeName(x)` looks like a rename and
+is not: `dns.CanonicalName` absolutises and `CanonicalizeName` deliberately does
+not, so 38 TSIG folds silently lost their trailing dot and every HMAC algorithm
+stopped resolving. The test suite caught it. The same slip then repeated in the
+NOKEY/BLOCKED sentinel comparison, where `EqualNames(c, NOKEY)` compares a
+folded FQDN against a bare literal and never matches.
+
+An allowlist entry is `path:line: reason` and the reason is mandatory: silencing
+a finding cannot be done without leaving a reason behind.
+
+## Where the series ends
+
+Seven stages, all reviewed. The comparison scan that started at 149 sites is
+not the measure -- much of the work was in indexes, which a comparison scan
+cannot see, and the scan itself over-counted commented-out code. The measure is
+that the gate passes with nothing excused, and that it catches every defect this
+series actually produced.
