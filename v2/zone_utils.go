@@ -132,6 +132,17 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 	copy(upstreams, zd.Upstreams)
 	zd.mu.Unlock()
 
+	// The source to bind on the probes, resolved once for the zone. Read here
+	// rather than in phase 1: it consults the zone and the KeyDB, not conf, so
+	// it does not belong under confMu, and it is the same call ZoneTransferIn
+	// makes for the transfer that follows.
+	//
+	// The probe has to bind it too. Binding on the AXFR alone means a primary
+	// that only permits the published address answers the transfer and refuses
+	// -- or never sees -- the probe, and since every refresh begins with a probe
+	// the zone then never transfers at all. See #409.
+	probeSrcs, probeSrcTier := zd.EffectiveTransferSrcWithSource()
+
 	// Phase 1 -- resolve everything that reads config, under a single read
 	// lock, with NO network I/O. conf is the mutable global and a reload
 	// replaces its contents wholesale; resolving per-upstream inside the probe
@@ -215,6 +226,23 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 			StampTsigForPeer(m, p.keyName, p.tsigAlgo)
 		}
 		c := p.client
+		// Bind the source here, in phase 2, and not in the snapshot above: for
+		// a hostname upstream the pick has to resolve it, and phase 1 does no
+		// network I/O by design -- it holds confMu, and a resolver timeout
+		// there would stall every config reload behind it.
+		if src := bindClientSrc(ctx, c, upstream, probeSrcs); src != nil {
+			lg.Debug("DoTransfer: SOA probe binding source address",
+				"zone", zd.ZoneName, "upstream", upstream, "src", src.String(),
+				"net", c.Net, "from", probeSrcTier)
+		} else if len(probeSrcs) > 0 {
+			// Not an error -- an operator naming only one family must not
+			// thereby break every upstream in the other -- but the probe then
+			// leaves from whatever the route picks, which is exactly what
+			// transfer-src is configured to prevent. Say so rather than
+			// letting it be invisible until an ACL refuses.
+			lg.Warn("DoTransfer: no configured transfer-src matches this upstream's family; probing unbound",
+				"zone", zd.ZoneName, "upstream", upstream, "configured", probeSrcs, "from", probeSrcTier)
+		}
 		r, _, err := c.ExchangeContext(ctx, m, upstream)
 		if err != nil {
 			// A cancelled exchange is not a sick primary: every sibling would

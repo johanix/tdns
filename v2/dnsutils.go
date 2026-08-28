@@ -1277,6 +1277,68 @@ func pickTransferSrc(ctx context.Context, lookup func(context.Context, string) (
 	return nil, ""
 }
 
+// bindClientSrc configures c to send from one of srcs when a source of the
+// upstream's family is configured, and reports the address it bound (nil for
+// "left alone"). It is the SOA probe's counterpart to dialTransferConn.
+//
+// WHY THE PROBE NEEDS THIS AT ALL. transfer-src exists so that the address the
+// primary's ACL sees is the one the operator published. Binding it on the AXFR
+// and not on the probe that precedes every AXFR gets that half right: against a
+// primary that only permits the published address, the transfer would work and
+// the probe does not, so the zone never transfers -- and the error names a
+// source the operator never configured and cannot find in any config file.
+//
+// TWO THINGS DIFFER FROM THE TRANSFER PATH, and both are easy to get wrong.
+//
+// The probe defaults to UDP, so LocalAddr must be a *net.UDPAddr. A *net.TCPAddr
+// there -- the type dialTransferConn correctly uses -- fails the dial with a
+// mismatched address type, which reads as an unreachable primary.
+//
+// The family has to be pinned in c.Net for the same reason dialTransferConn
+// pins the network: binding a v4 source and letting a dual-stack hostname
+// upstream resolve to v6 cannot work. The pinned spelling has to match the
+// transport already selected, hence the switch rather than a bare "udp4".
+//
+// A family with no configured source leaves c untouched and returns nil, so the
+// probe dials unbound -- the same forgiving default pickTransferSrc applies, for
+// the same reason: naming only a v4 source must not break every v6 upstream.
+func bindClientSrc(ctx context.Context, c *dns.Client, upstream string, srcs []string) net.IP {
+	if c == nil || len(srcs) == 0 {
+		return nil
+	}
+	src, _ := pickTransferSrc(ctx, nil, upstream, srcs)
+	if src == nil {
+		return nil
+	}
+
+	fam := "6"
+	if src.To4() != nil {
+		fam = "4"
+	}
+
+	// Preserve the dial timeout the client would otherwise have got from
+	// miekg's own default; setting Dialer replaces that machinery wholesale.
+	timeout := c.Timeout
+	if timeout == 0 {
+		timeout = 2 * time.Second
+	}
+	d := &net.Dialer{Timeout: timeout}
+
+	switch transport := c.Net; {
+	case strings.HasSuffix(transport, "-tls"):
+		c.Net = strings.TrimSuffix(transport, "-tls") + fam + "-tls"
+		d.LocalAddr = &net.TCPAddr{IP: src}
+	case strings.HasPrefix(transport, "tcp"):
+		c.Net = "tcp" + fam
+		d.LocalAddr = &net.TCPAddr{IP: src}
+	default: // "" and "udp" both mean UDP to miekg
+		c.Net = "udp" + fam
+		d.LocalAddr = &net.UDPAddr{IP: src}
+	}
+	c.Dialer = d
+	return src
+}
+
 // dialTransferConn dials upstream with the source address bound, returning a
 // *dns.Conn ready to hand to dns.Transfer. tlsCfg non-nil selects XoT.
 //
