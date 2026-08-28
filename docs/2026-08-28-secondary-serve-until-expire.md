@@ -1,9 +1,10 @@
 # A secondary should serve until SOA expire
 
 **Date:** 2026-08-28
-**Context:** tdns#413. A tdns-auth secondary stops answering as soon as one
-refresh fails, and an API-provisioned secondary answers nothing below its apex
-at all. Both come from one field.
+**Context:** tdns#413. An API-provisioned secondary answers nothing below its
+apex, and the same zone goes entirely dark on the first failed refresh. Both
+come from one field. A config-declared secondary that has completed initial
+load does *not* go dark on a failed refresh — its counter is already 1.
 **Question:** what has to exist before the query path can decide "this zone is
 still authoritative for its current contents", and what does that cost?
 
@@ -11,10 +12,12 @@ still authoritative for its current contents", and what does that cost?
 
 ## 1. The requirement
 
-RFC 1035 §3.3.13 and RFC 2308 §4: a secondary serves the copy it holds until the
-SOA **expire** interval has elapsed since the last *successful* refresh. Refresh
-and retry govern how often it tries; only expire governs when it gives up. A
-primary that is unreachable for ten minutes must not take the zone dark.
+RFC 1035 §3.3.13 and RFC 1034 §4.3.5: a secondary serves the copy it holds
+until the SOA **expire** interval has elapsed since the last *successful*
+refresh. A successful refresh includes an unchanged-serial SOA check — that is
+the proof the primary is alive. Refresh and retry govern how often it tries;
+only expire governs when it gives up. A primary that is unreachable for ten
+minutes must not take the zone dark.
 
 tdns already agrees. `serviceImpactingErrors` (`v2/enums.go:389`) is
 `{ConfigError, AgentError, DnssecError}` and its comment says so outright:
@@ -41,15 +44,19 @@ if zd.HasServiceImpactingError() ||
 if zd.RefreshCount == 0 { → SERVFAIL }
 ```
 
+`v2/updateresponder.go:184` copies the `:103` form, and its comment says it
+mirrors the query handler. Stage 1 that only edits the query path leaves
+UPDATE on the broken proxy.
+
 Both rest on `RefreshCount`, whose declared purpose is exactly that
-(`v2/structs.go:207`):
+(`v2/structs.go:206`):
 
 ```go
 RefreshCount int // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
 ```
 
 **`RefreshCount` is incremented in exactly one place** — `initialLoadZone`,
-`v2/refreshengine.go:152-153`, inside `if updated {`:
+`v2/refreshengine.go:152-154`, inside `if updated {`:
 
 ```go
 if updated {
@@ -62,16 +69,29 @@ are set at most **once**, on initial load, and never again however many
 successful refreshes follow. `LatestRefresh` is additionally **read nowhere** —
 it is write-only today.
 
-Measured, on one host:
+Measured, on one host, **in the process that provisioned the zone**:
 
 | zone kind | `RefreshCount` |
 |---|---|
-| config-declared (loaded via `initialLoadZone`) | `1` |
-| API-provisioned dynamic zone | `0`, permanently |
+| config-declared (loaded via `initialLoadZone`, `updated == true`) | `1` |
+| API-provisioned secondary, this process after `zone add` | `0` |
 
-The dynamic provisioning path does not go through `initialLoadZone`, so its
-zones never leave 0 — verified after a successful AXFR, while serving correct
-signed data, and again after a further NOTIFY-driven refresh.
+It is not "API zones forever". `ProvisionDynamicZone` pre-registers the
+`ZoneData` with `FirstZoneLoad` left false (zero value). The refresh engine
+then takes the "EXISTING ZONE" branch and never calls `initialLoadZone`. The
+matching primary path (`provisionDynamicPrimary`) sets `FirstZoneLoad: true`
+on purpose, with a comment explaining why; the secondary add path does not.
+
+Restart of a persisted API zone is a different path: the zone is not
+pre-registered, so the engine creates it with `FirstZoneLoad: true` and *does*
+call `initialLoadZone`. After a successful transfer, `RefreshCount` becomes 1.
+The live-process measurement is still the bug that answers for the apex and
+nothing inside it.
+
+Do not "fix" this by setting `FirstZoneLoad: true` on the secondary add path
+alone. That would increment the counter for new provisions and hide Symptom A
+without replacing the predicate, and it would not survive the next pre-register
+path.
 
 ### 2.1 Symptom A — sub-apex queries never answer
 
@@ -85,15 +105,19 @@ dig @<secondary> nosuchname.<zone> A     → SERVFAIL     (should be NXDOMAIN)
 dig @<primary>   www.<zone> A            → NXDOMAIN     (control)
 ```
 
-An API-provisioned secondary therefore answers for the zone name and nothing
-inside it. This is not an expire problem at all; it is the same field failing a
-different question.
+An API-provisioned secondary, in the process that added it, therefore answers
+for the zone name and nothing inside it. This is not an expire problem at all;
+it is the same field failing a different question.
 
-### 2.2 Symptom B — the first failed refresh ends service
+`QueryResponder` (`v2/queryresponder.go:823`) already SERVFAILs when
+`publishedSnapshot() == nil`. The `:163` guard is what stops an API zone that
+*has* a snapshot from reaching that code.
+
+### 2.2 Symptom B — the first failed refresh ends service (when the counter is 0)
 
 With `RefreshCount == 0`, the `:103` guard degenerates to
-`if zd.HasError(RefreshError)`. Reproduced on a zone with `expire 604800` whose
-content had transferred minutes earlier:
+`if zd.HasError(RefreshError)`. Reproduced on a zone with `expire 604800`
+whose content had transferred minutes earlier:
 
 ```
 [ERROR/engine] zone refresh failed zone=<zone> error=SOA probe ... unreachable
@@ -101,56 +125,85 @@ content had transferred minutes earlier:
 ;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL
 ```
 
-The zone file was on disk throughout, complete and signed, `Provisioning: ready`.
-It stayed dark after the primary came back, until a NOTIFY arrived — the SOA
-retry timer is the only other trigger.
+A config-declared secondary that completed `initialLoadZone` with
+`updated == true` does **not** do this: `RefreshCount == 1`, so `RefreshError`
+alone does not trip either query guard. Symptom B is the API-provisioned (this
+process) case, and any other path that left the counter at 0.
+
+The zone file was on disk throughout, complete and signed, `Provisioning:
+ready`. It stayed dark after the primary came back, until a NOTIFY arrived.
+That wait is the **clamped SOA refresh interval**, not RETRY: after a failed
+periodic refresh the engine sets `rc.CurRefresh = rc.SOARefresh`
+(`v2/refreshengine.go:1124`). Initial-load failure retries in 30s. Retry
+latency is out of scope (§6); it is named here so it is not mistaken for
+expire.
 
 **Reproducing this needs care.** `zone modify` and a daemon restart both
-re-provision the zone and reset the same state, so neither isolates the bug. The
-clean trigger is a NOTIFY sourced from the primary's own address, which forces a
-refresh attempt with no config change:
+re-provision the zone and reset the same state, so neither isolates the bug.
+The clean trigger is a NOTIFY sourced from the primary's own address, which
+forces a refresh attempt with no config change:
 
 ```
 dig -b <primary-addr> +opcode=notify @<secondary> <zone> SOA
 ```
 
-### 2.3 Why persistence makes B worse
+### 2.3 Persistence does not reload a secondary from disk
 
 `dynamiczones` with `storage: persistent` exists so a provisioned secondary
-survives a restart. The zone data does survive — it is reloaded from the written
-zone file. Every in-memory counter does not. So a restart that coincides with an
-unreachable primary yields a zone that is complete on disk and unservable, which
-is the case persistence was added to prevent.
+survives a restart. The zone *file* is written (inside `if updated {`).
+Secondary `Refresh()` never reads it: the `Primary` branch calls
+`FetchFromFile`; the `Secondary` branch always `DoTransfer` then, if needed,
+`FetchFromUpstream`. `LoadDynamicZoneFiles` sets `Force: true` with a comment
+about loading from disk, and still AXFRs.
+
+A restart that coincides with an unreachable primary is therefore not
+"complete on disk and unservable because `RefreshCount` reset". It is "never
+loaded, `RefreshError`, nothing to serve". Stage 1 does not fix that. A
+sidecar timestamp does not either, until first bind adopts the persisted copy
+when the transfer fails. That load is Stage 2, not a sidecar detail.
 
 ## 3. What "serve until expire" actually requires
 
 Four things, of which only the first is small.
 
 **(a) A real "do we hold data" test.** `RefreshCount` is a proxy, and a broken
-one. The direct question is whether the zone has an apex SOA: `zd.GetSOA()`
-(`v2/zone_utils.go:1035`) already answers it. Replacing both guards' use of
-`RefreshCount` with that fixes Symptom A outright and is a small, isolated
-change.
+one. `zd.GetSOA()` (`v2/zone_utils.go:1035`) is **not** the replacement: for
+`!Ready && Secondary && IncomingSerial == 0` it returns a synthetic SOA so the
+refresh engine can probe. That is the never-transferred case, which must keep
+SERVFAILing.
+
+The question is whether a published snapshot exists:
+`zd.publishedSnapshot() != nil`. `QueryResponder` already uses that. Stage 1
+replaces `RefreshCount` in the query and UPDATE guards with the same test
+(plus the existing `HasServiceImpactingError()`). An equivalent smallest form
+is to drop the `RefreshCount` clauses entirely and let `QueryResponder`
+SERVFAIL the empty zone; the explicit snapshot check is preferred because the
+handler already logs "zone not yet refreshed" and UPDATE never reaches
+`QueryResponder`.
 
 **(b) A trustworthy last-successful-refresh timestamp.** Needed for expire, and
 `LatestRefresh` cannot be used as it stands: same single assignment, same `if
-updated {` gate. It has to be set on every *successful* refresh — including one
-that finds the serial unchanged, which is the common case and precisely the one
-that proves the primary is alive. That means touching the periodic refresh paths
-as well as `initialLoadZone`.
+updated {` gate. Stamp it inside `ZoneData.Refresh` on every `err == nil`
+return, including `(false, nil)` when the serial is unchanged
+(`v2/zone_utils.go:92-98`). Spreading writes across `initialLoadZone` and both
+loops is how `RefreshCount` broke; do not repeat that.
 
-**(c) That timestamp has to survive a restart.** This is the design decision;
-§4.
+**(c) That timestamp has to survive a restart, which first requires the held
+copy to be in memory.** See §4 and Stage 2 step 1.
 
-**(d) The comparison, and what to return after it.** Serve while
-`now < lastSuccessfulRefresh + SOA.Expire`; refuse after. BIND returns SERVFAIL
-for an expired secondary, which is also what the existing guards return, so
-nothing new is needed there.
+**(d) The comparison, and what to return after it.** Secondary only — primaries
+do not expire. Serve while `now <= lastSuccessfulRefresh + time.Duration(expire)
+* time.Second`, using the **served copy's** SOA EXPIRE, not a synthetic
+`GetSOA` and not a later primary. After it, SERVFAIL (BIND/NSD). Keep trying:
+expire must **not** be folded into `HasServiceImpactingError()`, because that
+list skips the refresh ticker. A later successful refresh, including an
+unchanged-serial SOA check, un-expires the zone.
 
 ## 4. The decision: where does the timestamp come from after a restart?
 
-On restart the zone data is reloaded from disk but the process has no idea when
-that data was last confirmed fresh. Four options.
+On restart the process has no idea when the copy was last confirmed fresh —
+and, today, may not even have the copy in memory. Four options for the clock,
+once the copy is loaded.
 
 ### Option 1 — persist it with the zone
 
@@ -171,8 +224,22 @@ sidecar for per-zone runtime state that survives restart, next to the zone file.
 A sidecar is the cleaner shape. It also gives a home to anything else that later
 needs to outlive the process without becoming configuration.
 
-Cost: a new persisted artefact, its write path (every successful refresh), and
-its absence handling.
+**Shape (this is the spec, not a later decision):**
+
+- Path: sibling of the zone file, suffix `.last-refresh`. A zone file
+  `…/example.com.zone` gets `…/example.com.zone.last-refresh`. No zone file
+  means no sidecar (in-memory only; Option 3 on the next start that still has
+  no file). Applies to `storage: persistent` API secondaries *and*
+  config-declared secondaries with `zonefile:`.
+- Content: one line, RFC3339Nano UTC.
+- Write: after `Refresh` returns `err == nil`, atomic create-and-rename. A
+  failed write is logged and does **not** fail the refresh; the copy stays
+  served.
+- Read: at first bind, after the copy is in memory.
+- Clock: `time.Now()` (wall clock). A step can expire or extend; that is
+  accepted.
+
+Cost: a new persisted artefact, its write path, and its absence handling.
 
 ### Option 2 — the zone file's mtime
 
@@ -188,9 +255,11 @@ what expire is about.
 On load with no persisted timestamp, start the expire clock at load time.
 
 Lenient and trivial. It can serve past the true expire by up to one expire
-interval after a restart — the server forgets how much of the week it had
-already used. For a secondary that restarts rarely this is a small deviation; it
-is still a deviation from RFC 2308, and it is silent.
+interval after a restart — the server forgets how much of the interval it had
+already used. For a secondary that restarts rarely this is a small deviation;
+it is still a deviation from RFC 1034 §4.3.5, and it is silent. BIND does
+this: restarting a secondary that has a zone file resets an expired zone and
+serves it.
 
 ### Option 4 — treat unknown as expired
 
@@ -200,37 +269,54 @@ work exists to remove. Rejected.
 
 ### Recommendation
 
-**Option 1 with Option 3 as the fallback.** Persist the timestamp in a runtime
-sidecar; when it is absent — an older deployment, a hand-placed zone file, a
-corrupt sidecar — start the clock at load and log that the zone's expire budget
-is being restarted. That gives correct behaviour in the normal case, a defined
-and visible behaviour in the degraded one, and never the silent dark-zone of
-Option 4.
+**Option 1 with Option 3 as the fallback.** Persist the timestamp in the
+sidecar above; when it is absent — an older deployment, a hand-placed zone
+file, a corrupt sidecar, no zone file — start the clock at load and log that
+the zone's expire budget is being restarted. That gives correct behaviour in
+the normal case, a defined and visible behaviour in the degraded one, and never
+the silent dark-zone of Option 4.
 
 ## 5. Staging
 
 The two symptoms have very different sizes and should not travel together.
 
-**Stage 1 — fix the "have data" test.** Replace `RefreshCount` in both guards
-with an apex-SOA test. Fixes Symptom A completely and Symptom B's worst edge (a
-zone that holds data no longer SERVFAILs merely because a refresh failed). Small,
-self-contained, testable without new persistence.
+**Stage 1 — fix the "have data" test.** In `DefaultQueryHandler` (both
+branches) and `UpdateHandler`: SERVFAIL only on `HasServiceImpactingError()` or
+`publishedSnapshot() == nil`. Not `GetSOA()`, not `RefreshCount`. Fixes
+Symptom A completely and Symptom B's worst edge (a zone that holds data no
+longer SERVFAILs merely because a refresh failed). Small, self-contained,
+testable without new persistence.
 
 Note what Stage 1 alone leaves: a secondary that serves its copy indefinitely,
-because nothing yet enforces expire. That is strictly better than today — today
-it serves for *less* than expire, which is the direction that loses data — but
-it is not correct, and Stage 1 should say so in its own comments rather than
-read as finished.
+because nothing yet enforces expire. That is strictly better than today —
+today it serves for *less* than expire, which is the direction that loses data
+— but it is not correct, and Stage 1 should say so in its own comments rather
+than read as finished. Restart with the primary down is also still broken
+(§2.3).
 
-**Stage 2 — maintain and persist the timestamp, and enforce expire.** (b), (c)
-and (d) together. Larger, and the only part that touches persistence.
+**Stage 2 — held copy across restart, timestamp, expire.** Three steps, one
+PR, in this order, because (2) and (3) are pointless until (1):
+
+1. **First bind of a secondary with no published snapshot: if `zd.Zonefile`
+   exists, `FetchFromFile` before `DoTransfer`.** If the transfer then fails,
+   the file copy remains and is served. If the transfer succeeds, it replaces
+   the file copy as today. Same for config-declared secondaries with
+   `zonefile:` and for `storage: persistent` API secondaries. Do not reload
+   the file over a live snapshot on a later failed refresh — the file may be
+   older than memory.
+2. Stamp last-successful-refresh inside `Refresh` on every `err == nil`,
+   persist the sidecar, Option 3 on absence.
+3. Query and UPDATE guards: a secondary with a snapshot SERVFAILs when
+   `now` is past last-success + served SOA EXPIRE. Ticker and NOTIFY keep
+   trying. A successful refresh un-expires.
 
 ## 6. Out of scope
 
-**Retry latency.** Separately from expire, a zone that enters refresh error
-waits out the SOA retry before trying again — observed staying dark after the
-primary returned, until a NOTIFY. Whether a failed refresh should schedule a
-nearer retry is a real question and a different one.
+**Retry latency.** After a failed periodic refresh the engine waits the
+clamped SOA **refresh** interval, not RETRY. A zone in `RefreshError` can stay
+dark (today) or stale (after Stage 1) until that interval or a NOTIFY. Whether
+a failed refresh should schedule a nearer retry is a real question and a
+different one.
 
 **`RefreshCount` itself.** Once neither guard consults it, it is a counter that
 increments at most once and is reported over the API. Either fix it to count
@@ -239,20 +325,29 @@ meant something.
 
 ## 7. Test plan
 
-For Stage 1, against a provisioned secondary:
+Stage 1, as Go tests (not only `dig`), against an API-shaped zone
+(`FirstZoneLoad == false`, snapshot present, `RefreshCount == 0`):
 
 - sub-apex query for an existing name → the record, not SERVFAIL
 - sub-apex query for an absent name → NXDOMAIN, not SERVFAIL
-- with the primary stopped and a refresh forced by NOTIFY: apex and sub-apex
-  both still answer from the held copy
-- a zone that has never loaded data → still SERVFAIL (the guard's real purpose)
+- `RefreshError` set, primary unreachable: apex and sub-apex still answer
+- never-published zone → SERVFAIL
+- `GetSOA` synthetic case (`!Ready`, secondary, `IncomingSerial == 0`) must
+  **not** count as "have data"
+- UPDATE uses the same predicate as the query path
 
 For Stage 2, additionally:
 
+- first bind, zone file present, transfer fails → file copy is served
+- first bind, zone file present, transfer succeeds → transferred copy is served
+- later failed refresh does not replace a live snapshot from the file
 - successful refresh with an unchanged serial advances the timestamp
+- sidecar write failure is logged and does not fail the refresh
 - restart with a persisted timestamp preserves the remaining expire budget
 - restart with no timestamp starts the clock and logs it
-- past expire, the zone stops answering
+- past expire, queries and UPDATE SERVFAIL; the ticker still attempts refresh
+- a successful refresh after expire un-expires
+- primaries are not subject to the expire guard
 
 The NOTIFY trick in §2.2 is what makes the "primary down" cases testable without
 waiting out a refresh timer; both stages need it.
