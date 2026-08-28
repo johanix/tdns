@@ -730,3 +730,44 @@ compares over U+212A, U+017F and a raw octet, and goes red.
 and `scanner.go`'s NS-set keys. The review adds two more for stage 7 or a later
 touch: `ksk_rollover_cli.go`'s `dns.Fqdn(zc.Name) != want`, where a mixed-case
 `--zone` misses its policy, and `report_cmds.go`'s TSIG algorithm fold.
+
+
+## Re-review of #424 (external, 2026-08-28)
+
+Findings 1-2 accepted. **Approved as stage 6.** That completes review of stages
+1-6; only enforcement is left.
+
+**One coverage gap, named and deliberately not papered over.** The re-review is
+right that `TestConfigCheckNameKeyIsOneFunction` pins the helper identity -- `nk`
+and `zoneKey` are one function, and neither Unicode-folds -- but not that
+`fetchKeystoreTsigNames` actually *calls* `nk`. Reverting that one line would
+stay green. Which is awkward, because the store side is exactly what FINDING 1
+was.
+
+It is not cheaply testable: both fetch functions need a live API client, and a
+test that builds the maps itself would be asserting against its own
+construction rather than the production one. A weak test here would be worse
+than none, because it would read as coverage.
+
+**This is stage 7's requirement, stated concretely.** The four defects of this
+kind -- #421's prefix test vs strip, #423's ordering vs hashing, #424's lookup
+vs store, and the near-miss in #417's `zoneNameKey` vs the registry -- are all
+one shape: **two sides of a pair folded by different functions.** A gate that
+only flags individual bad calls (`strings.EqualFold` on a name, `strings.ToLower`
+on a name) would have caught none of them, because in every case the call it
+would flag had already been converted. The gate has to be able to say "this map
+is written with X and read with Y."
+
+## Still open after stage 6
+
+Pre-existing, none introduced by the series:
+
+| Site | Why it is still open |
+|---|---|
+| `rrset_utils.go` Additional/Authority `Name == qname` | Outbound `AuthQueryEngine`; deferred by every review since #419 |
+| `scanner.go` in-bailiwick NS set keys (`dns.CanonicalName`) | Same U+FFFD shape as #421's TLSA keys |
+| `ksk_rollover_cli.go` `dns.Fqdn(zc.Name) != want` | A mixed-case `--zone` misses its policy |
+| `report_cmds.go` `strings.ToLower(tsig.Algorithm)` | Same class as dog's TSIG algorithm name |
+| `nsMap[baseName]` in `ParseAdditionalForNSAddrs` | Per-message set; #421's review said explicitly not to expand into it |
+| `BailiwickNS` / `NSInBailiwick` / `InBailiwick` | Three spellings of one predicate; consolidation is its own change |
+| The `/* */` hole in the site scanner | Stage 7's gate must understand block comments; mine did not |
