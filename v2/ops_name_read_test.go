@@ -33,6 +33,10 @@ ns2.provider.example.	300	IN	A	192.0.2.99
 www.provider.example.	3600	IN	CNAME	ns1.provider.example.
 `
 
+// nameReadZoneData loads the fixture above as a registered MapZone. Options is
+// reset to an empty map rather than left nil: ApiZoneGetName reaches the owner
+// through the published snapshot, and a zone carrying stray options from an
+// earlier test would change which path it takes.
 func nameReadZoneData(t *testing.T) *ZoneData {
 	t.Helper()
 	zd := testZone(t, "provider.example.", nameReadZone)

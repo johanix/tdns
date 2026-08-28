@@ -62,6 +62,12 @@ read-modify-write that tries to author them.`,
 	c.AddCommand(name)
 }
 
+// runZoneNameGet sends one get-name and prints the report.
+//
+// A missing report with no error is treated as a failure rather than as "no
+// records": an empty name legitimately answers with an empty RRsets map, but
+// the report itself is always present, so its absence means the server said
+// something this client does not understand.
 func runZoneNameGet(role string) {
 	PrepArgs("zonename")
 
@@ -90,6 +96,13 @@ func runZoneNameGet(role string) {
 	printZoneName(cr.Name)
 }
 
+// printZoneName renders a report, types sorted so two runs over unchanged data
+// are diffable.
+//
+// "nothing published" is spelled out rather than shown as an empty list: for
+// this command that is a real answer -- what provisioning a name for the first
+// time returns -- and an operator should not have to tell it apart from a
+// truncated screen.
 func printZoneName(n *tdns.ZoneNameReport) {
 	// The report echoes the name as STORED, which may differ in case from what
 	// was asked for. Print what came back, so the operator sees the zone's own
