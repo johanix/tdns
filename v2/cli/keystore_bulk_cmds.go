@@ -34,6 +34,7 @@ import (
 // commands in keystore_cmds.go already scope their targets this way.
 type bulkFlags struct {
 	dest      string
+	format    string
 	src       string
 	dir       string
 	state     string
@@ -81,6 +82,7 @@ run are left in place, so several exports can populate one directory.`,
 		},
 	}
 	bulkExport.Flags().StringVar(&f.dest, "dest", "", "Directory to write keys and manifest to")
+	bulkExport.Flags().StringVar(&f.format, "format", tdns.KeyFormatPEM, keyFormatHelp)
 	bulkExport.Flags().StringArrayVarP(&f.selExact, exactFlag, exactShorthand, nil, exactHelp)
 	bulkExport.Flags().StringArrayVar(&f.selSubtre, subtreeFlag, nil, subtreeHelp)
 	bulkExport.MarkFlagRequired("dest")
@@ -240,6 +242,14 @@ func classCommand(class string) string {
 // --- export ------------------------------------------------------------
 
 func bulkExportRun(role, class string, f *bulkFlags) {
+	// Before anything is contacted, selected or printed: a typo here would
+	// otherwise surface after the "exporting every key" notice, reading as if
+	// the export had already begun.
+	if err := tdns.ValidateKeyFormat(f.format); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	api, err := GetApiClient(role, true)
 	if err != nil {
 		fmt.Printf("Error creating API client: %v\n", err)
@@ -264,6 +274,7 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 	tr, err := SendKeystoreCmd(api, tdns.KeystorePost{
 		Command:       classCommand(class),
 		SubCommand:    "bulk-export",
+		KeyFormat:     f.format,
 		SelectExact:   f.selExact,
 		SelectSubtree: f.selSubtre,
 	})
