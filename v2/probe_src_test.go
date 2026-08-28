@@ -61,17 +61,26 @@ func TestBindClientSrcTransportAndAddrType(t *testing.T) {
 			if c.Dialer == nil {
 				t.Fatal("Dialer not set; nothing would bind")
 			}
+			// Both the TYPE and the IP. Checking only the type would pass a
+			// zero-valued &net.UDPAddr{}, which binds nothing and is exactly
+			// the mistake this table is meant to catch.
+			var boundIP net.IP
 			switch la := c.Dialer.LocalAddr.(type) {
 			case *net.UDPAddr:
 				if !tc.wantUDP {
 					t.Errorf("LocalAddr is *net.UDPAddr, want *net.TCPAddr for %q", tc.wantNet)
 				}
+				boundIP = la.IP
 			case *net.TCPAddr:
 				if tc.wantUDP {
 					t.Errorf("LocalAddr is *net.TCPAddr, want *net.UDPAddr for %q", tc.wantNet)
 				}
+				boundIP = la.IP
 			default:
-				t.Errorf("LocalAddr has unexpected type %T", la)
+				t.Fatalf("LocalAddr has unexpected type %T", la)
+			}
+			if !boundIP.Equal(net.ParseIP(tc.src)) {
+				t.Errorf("LocalAddr IP = %v, want %s", boundIP, tc.src)
 			}
 			// A Dialer with no timeout would wait out the OS default on an
 			// unreachable primary, which the probe loop is not built for.
@@ -151,5 +160,104 @@ func TestSoaProbeActuallyBindsSource(t *testing.T) {
 	if err := probe([]string{"192.0.2.1"}); err == nil {
 		t.Error("probe bound to an unassignable source succeeded; " +
 			"the source is not being bound at all")
+	}
+}
+
+// The same teeth over IPv6, because that is the half no deployment here would
+// catch: a service advertising only a v4 address exercises the v4 path on every
+// refresh and the v6 path never. Binding ::1 and probing a ::1 listener runs the
+// identical LocalAddr + family-pinning code a real v6 upstream would.
+func TestSoaProbeBindsSourceV6(t *testing.T) {
+	const zone = "probe6.example."
+
+	pc, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback, Port: 0})
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable here: %v", err)
+	}
+	addr := pc.LocalAddr().String()
+
+	mux := dns.NewServeMux()
+	mux.HandleFunc(zone, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = append(m.Answer, &dns.SOA{
+			Hdr:     dns.RR_Header{Name: zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 60},
+			Ns:      "ns." + zone, Mbox: "hostmaster." + zone, Serial: 7,
+			Refresh: 3600, Retry: 600, Expire: 86400, Minttl: 60,
+		})
+		_ = w.WriteMsg(m)
+	})
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, Handler: mux, NotifyStartedFunc: func() { close(started) }}
+	go func() { _ = srv.ActivateAndServe() }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("v6 test DNS server did not start")
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	}()
+
+	probe := func(srcs []string) error {
+		c := &dns.Client{Timeout: 2 * time.Second}
+		bindClientSrc(context.Background(), c, addr, srcs)
+		m := new(dns.Msg)
+		m.SetQuestion(zone, dns.TypeSOA)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_, _, perr := c.ExchangeContext(ctx, m, addr)
+		return perr
+	}
+
+	if err := probe([]string{"::1"}); err != nil {
+		t.Fatalf("probe bound to ::1 failed: %v", err)
+	}
+	if err := probe([]string{"2001:db8::1"}); err == nil {
+		t.Error("probe bound to an unassignable v6 source succeeded; " +
+			"the source is not being bound at all")
+	}
+}
+
+// THE REGRESSION THIS PR IS ACTUALLY ABOUT.
+//
+// Every other test here calls bindClientSrc directly, so deleting the call from
+// DoTransfer would leave them all green -- and "plumbed all the way through,
+// then dropped one line before the call that uses it" is exactly how the
+// previous transfer-src bug survived (see newTransferScratchZone's comment).
+// This one goes through DoTransfer, so removing that call site reddens it.
+func TestDoTransferBindsProbeSource(t *testing.T) {
+	const zone = "probexfr.example."
+	addr, stop := startTestSOAServer(t, zone, 42, dns.RcodeSuccess)
+	defer stop()
+
+	// A source the host has: the probe reaches the primary and reports its
+	// serial, exactly as with no transfer-src at all.
+	zd := &ZoneData{
+		ZoneName:    zone,
+		Upstreams:   []PeerConf{{Addr: addr}},
+		TransferSrc: []string{"127.0.0.1"},
+	}
+	xfr, serial, err := zd.DoTransfer(context.Background(), &Config{})
+	if err != nil {
+		t.Fatalf("DoTransfer with a bindable source: %v", err)
+	}
+	if !xfr || serial != 42 {
+		t.Errorf("got (transfer=%v, serial=%d), want (true, 42)", xfr, serial)
+	}
+
+	// An unassignable source: the probe must fail to dial. If DoTransfer is
+	// not binding at all, the kernel picks a loopback source and this
+	// succeeds -- which is the regression.
+	zd2 := &ZoneData{
+		ZoneName:    zone,
+		Upstreams:   []PeerConf{{Addr: addr}},
+		TransferSrc: []string{"192.0.2.1"},
+	}
+	if _, _, err := zd2.DoTransfer(context.Background(), &Config{}); err == nil {
+		t.Error("DoTransfer succeeded with an unassignable transfer-src; " +
+			"the probe is not binding the source")
 	}
 }
