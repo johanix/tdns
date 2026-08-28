@@ -240,7 +240,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 					if zd.IsChildDelegation(ancestor) {
 						if childDel == "" {
 							childDel = ancestor
-						} else if childDel != ancestor {
+						} else if !core.EqualNames(childDel, ancestor) {
 							isChildUpdate = false
 							break
 						}
