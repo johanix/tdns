@@ -683,7 +683,7 @@ func (imr *Imr) processAddressRecords(rrset *core.RRset, authservers map[string]
 		server.AddAddr(addr)
 		server.SetSrc("answer")
 		server.SetExpire(time.Now().Add(time.Duration(ttl) * time.Second))
-		authservers[nsname] = server
+		authservers[cache.ServerKey(nsname)] = server
 		lgImr.Debug("processAddressRecords: using resolved address", "rrtype", rrType, "nsname", nsname, "addr", addr)
 	}
 }

@@ -294,7 +294,13 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			}
 			var records []zoneRecord
 			for item := range imr.Cache.ZoneMap.IterBuffered() {
-				if zoneFilter != "" && item.Key != zoneFilter {
+				// Through the shared selector, like the transport-stats
+				// handler below it. This used to compare item.Key to the
+				// filter as bytes, which had been merely inconsistent and
+				// became wrong when ZoneMap started folding its keys: a
+				// mixed-case zone argument returned an empty dump. Two copies
+				// of one predicate is how that drift happened; there is one now.
+				if !ZoneMatchesSelector(item.Key, zoneFilter, "") {
 					continue
 				}
 				snap := item.Val.SnapshotAddressBackoffs(now)

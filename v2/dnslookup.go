@@ -558,7 +558,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						if imr.Debug {
 							server.PromoteDebug()
 						}
-						serverMap[name] = server
+						serverMap[cache.ServerKey(name)] = server
 						tmp := glue4Map[name]
 						tmp.RRs = append(tmp.RRs, rr)
 						glue4Map[name] = tmp
@@ -573,7 +573,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						if imr.Debug {
 							server.PromoteDebug()
 						}
-						serverMap[name] = server
+						serverMap[cache.ServerKey(name)] = server
 						tmp := glue6Map[name]
 						tmp.RRs = append(tmp.RRs, rr)
 						glue6Map[name] = tmp
@@ -583,7 +583,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						svcb := rr
 						// Ensure we have a shared AuthServer instance for this NS
 						server := imr.Cache.GetOrCreateAuthServer(name)
-						serverMap[name] = server
+						serverMap[cache.ServerKey(name)] = server
 						for _, kv := range svcb.Value {
 							if kv.Key() == dns.SVCB_ALPN {
 								if alpn, ok := kv.(*dns.SVCBAlpn); ok {
@@ -1123,13 +1123,13 @@ func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, 
 			continue
 		}
 		nsname := dns.Fqdn(ns.Ns)
-		srv, present := serverMap[nsname]
+		srv, present := serverMap[cache.ServerKey(nsname)]
 		if present && len(srv.Addrs) > 0 {
 			continue // already have addresses, nothing to do
 		}
 		if srv == nil {
 			srv = imr.Cache.GetOrCreateAuthServer(nsname)
-			serverMap[nsname] = srv
+			serverMap[cache.ServerKey(nsname)] = srv
 		}
 		before := len(srv.Addrs)
 		for _, atype := range []uint16{dns.TypeA, dns.TypeAAAA} {
@@ -1617,12 +1617,23 @@ func (imr *Imr) CollectNSAddresses(ctx context.Context, rrset *core.RRset, respc
 
 // parseOwnerName extracts the base server name from an owner name, handling both
 // direct nameserver names and OOTS transport signal owners (_dns.{nsname}).
+// oobTransportPrefix is the owner-name prefix an out-of-bailiwick transport
+// signal lives under (draft-ietf-dnsop-oots). Named so the test and the strip
+// cannot drift apart -- they did.
+const oobTransportPrefix = "_dns."
+
 // Returns: baseName, isOOTSOwner, originalOwner
 func parseOwnerName(owner string) (baseName string, isOOTSOwner bool, originalOwner string) {
 	originalOwner = owner
-	if strings.HasPrefix(core.CanonicalizeName(owner), "_dns.") {
+	// Fold to TEST the prefix, then slice the ORIGINAL by the prefix's length.
+	// strings.TrimPrefix would compare bytes again and strip nothing from
+	// _DNS.ns1.example. -- the name would clear the test and then keep its
+	// prefix, so baseName stayed the whole owner and every lookup on it missed.
+	// Slicing preserves the leftover case, which is the point: the base name is
+	// a nameserver name, and we serve back what arrived.
+	if strings.HasPrefix(core.CanonicalizeName(owner), oobTransportPrefix) {
 		isOOTSOwner = true
-		baseName = strings.TrimPrefix(owner, "_dns.")
+		baseName = owner[len(oobTransportPrefix):]
 	} else {
 		baseName = owner
 	}
@@ -1635,7 +1646,7 @@ func (imr *Imr) parseSVCBTransportSignal(rr *dns.SVCB, serverName string, server
 	if rr == nil {
 		return false
 	}
-	server, ok := serverMap[serverName]
+	server, ok := serverMap[cache.ServerKey(serverName)]
 	if !ok {
 		return false
 	}
@@ -1675,7 +1686,7 @@ func (imr *Imr) parseTSYNCTransportSignal(rr *dns.PrivateRR, serverName string, 
 	if !ok || ts == nil || ts.Transports == "" {
 		return false
 	}
-	server, ok := serverMap[serverName]
+	server, ok := serverMap[cache.ServerKey(serverName)]
 	if !ok {
 		return false
 	}
@@ -1771,7 +1782,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			// 2. Second pass equivalent: isOOTSOwner AND baseName in serverMap (server already exists)
 			if isOOTSOwner {
 				_, inNsMap := nsMap[baseName]
-				_, inServerMap := serverMap[baseName]
+				_, inServerMap := serverMap[cache.ServerKey(baseName)]
 				if inNsMap || inServerMap {
 					serverName = baseName
 					shouldProcessTransportSignal = true
@@ -1792,7 +1803,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		}
 
 		// Create server entry if it doesn't exist (for glue records or transport signals with nsMap match)
-		_, exist := serverMap[serverName]
+		_, exist := serverMap[cache.ServerKey(serverName)]
 		justCreated := false
 		if !exist && (isGlueRecord || shouldProcessTransportSignal) {
 			serversrc := ""
@@ -1803,11 +1814,11 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 				serversrc = "referral"
 			}
 			// Use shared AuthServer instance across all zones
-			serverMap[serverName] = imr.Cache.GetOrCreateAuthServer(serverName)
+			serverMap[cache.ServerKey(serverName)] = imr.Cache.GetOrCreateAuthServer(serverName)
 			// Update fields for this specific context
-			serverMap[serverName].SetSrc(serversrc)
+			serverMap[cache.ServerKey(serverName)].SetSrc(serversrc)
 			if imr.Debug {
-				serverMap[serverName].PromoteDebug()
+				serverMap[cache.ServerKey(serverName)].PromoteDebug()
 			}
 			justCreated = true
 		}
@@ -1823,22 +1834,22 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		switch rr := rr.(type) {
 		case *dns.A:
 			addr := rr.A.String()
-			if !slices.Contains(serverMap[serverName].Addrs, addr) {
-				serverMap[serverName].Addrs = append(serverMap[serverName].Addrs, addr)
+			if !slices.Contains(serverMap[cache.ServerKey(serverName)].Addrs, addr) {
+				serverMap[cache.ServerKey(serverName)].Addrs = append(serverMap[cache.ServerKey(serverName)].Addrs, addr)
 			}
 			// set expiry for this server mapping from glue TTL
-			serverMap[serverName].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
+			serverMap[cache.ServerKey(serverName)].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
 			tmp := glue4Map[serverName]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue4Map[serverName] = tmp
 
 		case *dns.AAAA:
 			addr := rr.AAAA.String()
-			if !slices.Contains(serverMap[serverName].Addrs, addr) {
-				serverMap[serverName].Addrs = append(serverMap[serverName].Addrs, addr)
+			if !slices.Contains(serverMap[cache.ServerKey(serverName)].Addrs, addr) {
+				serverMap[cache.ServerKey(serverName)].Addrs = append(serverMap[cache.ServerKey(serverName)].Addrs, addr)
 			}
 			// set expiry for this server mapping from glue TTL
-			serverMap[serverName].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
+			serverMap[cache.ServerKey(serverName)].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
 			tmp := glue6Map[serverName]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue6Map[serverName] = tmp
@@ -2215,7 +2226,7 @@ func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*cache.A
 	if owner == "" || serverMap == nil {
 		return
 	}
-	server, ok := serverMap[owner]
+	server, ok := serverMap[cache.ServerKey(owner)]
 	if !ok {
 		return
 	}
@@ -2245,7 +2256,7 @@ func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*cache.A
 			server.Transports = append(server.Transports, t)
 		}
 	}
-	serverMap[owner] = server
+	serverMap[cache.ServerKey(owner)] = server
 }
 
 // applyAlpnSignalToServer applies 100-weight transports from a comma-separated ALPN list to a specific server pointer
@@ -2358,10 +2369,11 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 		return
 	}
 	owner := dns.Fqdn(qname)
-	if !strings.HasPrefix(core.CanonicalizeName(owner), "_dns.") {
+	if !strings.HasPrefix(core.CanonicalizeName(owner), oobTransportPrefix) {
 		return
 	}
-	base := strings.TrimPrefix(owner, "_dns.")
+	// Sliced, not TrimPrefix'd: see parseOwnerName.
+	base := owner[len(oobTransportPrefix):]
 	if base == "" {
 		return
 	}
@@ -2370,7 +2382,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 		targetMode = cache.ConnModeValidated
 	}
 	for zone, sm := range imr.Cache.ServerMap.Items() {
-		server, ok := sm[base]
+		server, ok := sm[cache.ServerKey(base)]
 		if !ok {
 			continue
 		}
@@ -2803,11 +2815,11 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			haveA := cachedA != nil && cachedA.RRset != nil && len(cachedA.RRset.RRs) > 0
 			haveAAAA := cachedAAAA != nil && cachedAAAA.RRset != nil && len(cachedAAAA.RRset.RRs) > 0
 			if haveA || haveAAAA {
-				srv, present := serverMap[ns.Ns]
+				srv, present := serverMap[cache.ServerKey(ns.Ns)]
 				if !present {
 					srv = imr.Cache.GetOrCreateAuthServer(ns.Ns)
 					srv.SetSrc("referral-oob-cached")
-					serverMap[ns.Ns] = srv
+					serverMap[cache.ServerKey(ns.Ns)] = srv
 				}
 				// AuthServer.Addrs stores BARE IPs (no port). Exchange adds
 				// the port via JoinHostPort when dialing.
@@ -3041,7 +3053,8 @@ func collectInBailiwickNS(serverMap map[string]*cache.AuthServer, zonename strin
 	for name := range serverMap {
 		fq := dns.Fqdn(name)
 		if dns.IsSubDomain(zone, fq) {
-			// Collected canonical: these are used as map keys downstream.
+			// Canonical, matching cache.ServerKey, which is what every
+			// subscript of the per-zone server map goes through.
 			hosts = append(hosts, core.CanonicalizeName(fq))
 		}
 	}
@@ -3057,7 +3070,7 @@ func (imr *Imr) revalidateInBailiwickGlue(ctx context.Context, zonename string, 
 		return
 	}
 	for _, host := range hosts {
-		server := serverMap[host]
+		server := serverMap[cache.ServerKey(host)]
 		imr.revalidateGlueRR(ctx, host, dns.TypeA, server, force)
 		imr.revalidateGlueRR(ctx, host, dns.TypeAAAA, server, force)
 	}

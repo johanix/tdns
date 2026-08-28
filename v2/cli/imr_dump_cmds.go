@@ -473,7 +473,7 @@ var dumpZoneServersCmd = &cobra.Command{
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			server := serverMap[name]
+			server := serverMap[cache.ServerKey(name)]
 			printAuthServerVerbose(name, server)
 		}
 	},

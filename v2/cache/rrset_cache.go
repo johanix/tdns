@@ -192,7 +192,7 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 	if rrcache == nil {
 		return 0, fmt.Errorf("rrcache is nil")
 	}
-	domain = dns.CanonicalName(domain)
+	domain = core.CanonicalizeName(domain)
 	if domain == "" || domain == "." {
 		return 0, fmt.Errorf("invalid domain %q", domain)
 	}
@@ -213,7 +213,7 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 				if !ok {
 					continue
 				}
-				nsHosts[dns.CanonicalName(ns.Ns)] = struct{}{}
+				nsHosts[core.CanonicalizeName(ns.Ns)] = struct{}{}
 			}
 		}
 	}
@@ -279,7 +279,7 @@ func (rrcache *RRsetCacheT) FlushAll() int {
 			if !ok {
 				continue
 			}
-			rootNSHosts[dns.CanonicalName(ns.Ns)] = struct{}{}
+			rootNSHosts[core.CanonicalizeName(ns.Ns)] = struct{}{}
 		}
 	}
 
@@ -338,7 +338,7 @@ func isStructuralRRset(cr *CachedRRset, nsHosts map[string]struct{}) bool {
 		if nsHosts == nil {
 			return false
 		}
-		_, ok := nsHosts[dns.CanonicalName(cr.Name)]
+		_, ok := nsHosts[core.CanonicalizeName(cr.Name)]
 		return ok
 	default:
 		return false
@@ -351,6 +351,21 @@ func isStructuralRRset(cr *CachedRRset, nsHosts map[string]struct{}) bool {
 // dot that a byte-wise suffix test needs to respect a label boundary. It is
 // dns.IsSubDomain now because that says the same thing in one line and without
 // the two canonicalisation allocations, not because the old one was wrong.
+// ServerKey is the key a per-zone server map -- the map[string]*AuthServer
+// held inside RRsetCacheT.ServerMap -- is indexed by.
+//
+// The outer map folds for itself (it is a NameMap). The inner one is a plain
+// map, deliberately: a concurrent map per zone would be the wrong shape for a
+// handful of nameservers. But its keys are nameserver names off the wire, so
+// they need folding too, and by the SAME function on both sides -- an insert
+// under the spelling an upstream happened to use and a lookup under the
+// canonical form are the same miss as any other.
+//
+// Every subscript of that map goes through here.
+func ServerKey(nsname string) string {
+	return core.CanonicalizeName(nsname)
+}
+
 func isSubdomainOf(name, parent string) bool {
 	return dns.IsSubDomain(parent, name)
 }
@@ -470,7 +485,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				tmpauthserver.MergeTransportWeights(weights)
 			}
 		}
-		authservers[server.Name] = tmpauthserver
+		authservers[ServerKey(server.Name)] = tmpauthserver
 	}
 	if rrcache.Debug {
 		fmt.Printf("rrcache: Adding stubs for zone %s to cache\n", zone)
@@ -487,7 +502,7 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 	serverMap := make(map[string]*AuthServer)
 	if ok {
 		for k, v := range serverMapOrig {
-			serverMap[k] = v
+			serverMap[ServerKey(k)] = v
 		}
 	}
 
@@ -524,7 +539,7 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 		}
 
 		// Always assign the shared instance to this zone's map
-		serverMap[name] = sharedServer
+		serverMap[ServerKey(name)] = sharedServer
 	}
 	if rrcache.Debug {
 		fmt.Printf("rrcache: Adding servers for zone %s to cache\n", zone)
@@ -630,14 +645,19 @@ func (rrcache *RRsetCacheT) StoreTLSAForServer(base, owner string, rrset *core.R
 	if rrcache == nil || rrset == nil || len(rrset.RRs) == 0 {
 		return
 	}
-	// Canonicalize (lowercase + fqdn) so mixed-case names key the same bucket;
-	// DNS names are case-insensitive (ASCII, RFC 4343) and dns.Fqdn alone
-	// preserves case, which would split NS1.Example. from ns1.example.
-	base = dns.CanonicalName(strings.TrimSpace(base))
+	// Canonicalize so mixed-case names key the same bucket; DNS names are
+	// case-insensitive (ASCII, RFC 4343) and dns.Fqdn alone preserves case,
+	// which would split NS1.Example. from ns1.example.
+	//
+	// core.CanonicalizeName, not dns.CanonicalName: these are map keys, and
+	// dns.CanonicalName rewrites any octet that is not valid UTF-8 into U+FFFD,
+	// so two distinct names can land on one key. st.recs below is keyed by
+	// owner, so the inner map needs the same function as the outer one.
+	base = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(base)))
 	if base == "." || base == "" {
 		return
 	}
-	owner = dns.CanonicalName(strings.TrimSpace(owner))
+	owner = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(owner)))
 	if owner == "." || owner == "" {
 		return
 	}
@@ -680,8 +700,8 @@ func (rrcache *RRsetCacheT) LookupTLSAForServer(base, owner string) *CachedRRset
 		return nil
 	}
 	// Canonicalize to match StoreTLSAForServer's keying (case-insensitive).
-	base = dns.CanonicalName(strings.TrimSpace(base))
-	owner = dns.CanonicalName(strings.TrimSpace(owner))
+	base = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(base)))
+	owner = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(owner)))
 	st, ok := rrcache.ServerTLSA.Get(base)
 	if !ok || st == nil {
 		return nil
@@ -702,7 +722,7 @@ func (rrcache *RRsetCacheT) SnapshotTLSAForServer(base string) map[string]*Cache
 	if rrcache == nil {
 		return nil
 	}
-	st, ok := rrcache.ServerTLSA.Get(dns.CanonicalName(strings.TrimSpace(base)))
+	st, ok := rrcache.ServerTLSA.Get(core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(base))))
 	if !ok || st == nil {
 		return nil
 	}
