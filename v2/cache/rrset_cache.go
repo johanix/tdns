@@ -271,7 +271,7 @@ func (rrcache *RRsetCacheT) FlushAll() int {
 	rootNSHosts := make(map[string]struct{})
 	for item := range rrcache.RRsets.IterBuffered() {
 		cr := item.Val
-		if dns.CanonicalName(cr.Name) != "." || cr.RRtype != dns.TypeNS || cr.RRset == nil {
+		if core.CanonicalizeName(cr.Name) != "." || cr.RRtype != dns.TypeNS || cr.RRset == nil {
 			continue
 		}
 		for _, rr := range cr.RRset.RRs {
@@ -287,7 +287,12 @@ func (rrcache *RRsetCacheT) FlushAll() int {
 	var keysToRemove []string
 	for item := range rrcache.RRsets.IterBuffered() {
 		cr := item.Val
-		name := dns.CanonicalName(cr.Name)
+		// The SAME function rootNSHosts was built with, a few lines up. Built
+		// with one and read with another is the drift this stage exists to
+		// stop: they agree on every ASCII name and part company on the first
+		// octet that is not valid UTF-8, which is when root glue would be
+		// flushed as though it were ordinary data.
+		name := core.CanonicalizeName(cr.Name)
 		// Keep root NS
 		if name == "." && cr.RRtype == dns.TypeNS {
 			continue
@@ -351,6 +356,10 @@ func isStructuralRRset(cr *CachedRRset, nsHosts map[string]struct{}) bool {
 // dot that a byte-wise suffix test needs to respect a label boundary. It is
 // dns.IsSubDomain now because that says the same thing in one line and without
 // the two canonicalisation allocations, not because the old one was wrong.
+func isSubdomainOf(name, parent string) bool {
+	return dns.IsSubDomain(parent, name)
+}
+
 // ServerKey is the key a per-zone server map -- the map[string]*AuthServer
 // held inside RRsetCacheT.ServerMap -- is indexed by.
 //
@@ -364,10 +373,6 @@ func isStructuralRRset(cr *CachedRRset, nsHosts map[string]struct{}) bool {
 // Every subscript of that map goes through here.
 func ServerKey(nsname string) string {
 	return core.CanonicalizeName(nsname)
-}
-
-func isSubdomainOf(name, parent string) bool {
-	return dns.IsSubDomain(parent, name)
 }
 
 func (rrcache *RRsetCacheT) lookupSOARRset(name string) *core.RRset {

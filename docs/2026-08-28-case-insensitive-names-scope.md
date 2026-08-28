@@ -460,3 +460,33 @@ interchangeable.
 `visitedZones`'s composite key mixes a folded qname with a wire-sourced
 zonename, so a mixed-case repeat referral would miss the loop detector -- not in
 this diff, not requested, and worth picking up.
+
+
+## Re-review of #421 (external, 2026-08-28)
+
+Findings 1-4 accepted; approved as stage 3. Three niggles, two fixed and one
+deliberately not.
+
+**`ServerKey` had stolen `isSubdomainOf`'s godoc.** Fixed. This is the SECOND
+time in the series -- #417 FINDING 3 was the same thing, `normalizeZoneName`
+landing between `FindZone`'s comment and `FindZone`. Both times the cause was
+the same: my patch script inserts a new function before a `func X {` anchor,
+and when a doc comment sits immediately above that anchor the new function is
+spliced into the middle of it. Insert before the COMMENT, not before the `func`.
+
+**`FlushAll` read `rootNSHosts` with `dns.CanonicalName` while building it with
+`CanonicalizeName`.** Fixed. Adjacent to FINDING 4 rather than inside it, but a
+set built with one key function and read with another is precisely the drift
+this stage exists to remove, so it is completing the finding rather than
+expanding it. Covered by a test that caches root glue under a name with a
+non-UTF-8 octet -- the shape the review pointed at -- and watches it survive a
+flush. Reverting the read side flushes it.
+
+**`nsMap[baseName]` in `ParseAdditionalForNSAddrs` is still byte-wise, and is
+deliberately left.** The review is explicit: it is a per-message set of NS
+hostnames built and read inside one function, not the cache index FINDING 2
+named, and expanding a finding after the named map has been converted makes the
+follow-up harder to verify than the fix is worth. The residue is that a
+first-pass OOTS or glue record whose NS is spelled differently *within the same
+referral* can miss; later queries go through `serverMap`, which folds. Recorded
+here so it is a decision rather than an oversight.
