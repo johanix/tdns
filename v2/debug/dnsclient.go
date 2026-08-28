@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -145,8 +146,8 @@ func axfrChurn(ctx context.Context, server, zone, churnSuffix string) (recs []Ch
 				continue
 			}
 			if txt, ok := rr.(*dns.TXT); ok {
-				owner := strings.ToLower(rr.Header().Name)
-				if strings.HasSuffix(owner, strings.ToLower(churnSuffix)) {
+				owner := core.CanonicalizeName(rr.Header().Name)
+				if dns.IsSubDomain(churnSuffix, owner) {
 					recs = append(recs, ChurnRecord{Owner: owner, Rdata: strings.Join(txt.Txt, "")})
 				}
 			}
@@ -212,7 +213,7 @@ func axfrSignedness(ctx context.Context, server, zone string) (SignednessObs, er
 				obs.Serial = v.Serial
 				sawSOA = true
 			case *dns.DNSKEY:
-				if strings.EqualFold(rr.Header().Name, apex) {
+				if core.EqualNames(rr.Header().Name, apex) {
 					obs.HasDNSKEY = true
 				}
 			case *dns.RRSIG:
@@ -267,7 +268,7 @@ func queryApexSignedness(ctx context.Context, server, zone string) (QuerySignedn
 		case *dns.SOA:
 			obs.Serial = v.Serial
 		case *dns.RRSIG:
-			if v.TypeCovered == dns.TypeSOA && strings.EqualFold(rr.Header().Name, apex) {
+			if v.TypeCovered == dns.TypeSOA && core.EqualNames(rr.Header().Name, apex) {
 				obs.HasRRSIG = true
 			}
 		}
@@ -326,7 +327,7 @@ func queryApexRRSIGs(ctx context.Context, server, zone string) ([]RRSIGObs, erro
 			// carries RRSIG(SOA), the DNSKEY query's carries RRSIG(DNSKEY). This
 			// filters out any incidental RRSIG (e.g. an apex NSEC) the server may
 			// bundle.
-			if !ok || sig.TypeCovered != qtype || !strings.EqualFold(rr.Header().Name, apex) {
+			if !ok || sig.TypeCovered != qtype || !core.EqualNames(rr.Header().Name, apex) {
 				continue
 			}
 			out = append(out, RRSIGObs{

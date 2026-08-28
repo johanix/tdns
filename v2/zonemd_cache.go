@@ -10,7 +10,7 @@ import (
 	"hash"
 	"time"
 
-	"github.com/miekg/dns"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // Caching the canonical wire form, so a publish re-encodes what changed rather
@@ -123,7 +123,7 @@ func (zd *ZoneData) zonemdDigestsLocked(scheme uint8, algs []uint8) (map[uint8]s
 		hashers[i] = h
 	}
 
-	apex := dns.CanonicalName(zd.ZoneName)
+	apex := core.CanonicalizeName(zd.ZoneName)
 	data := zd.workingSet
 
 	names := make([]string, 0, len(data))

@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -708,7 +709,7 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 	// Config TSIG key names (for the secondary-zone key check).
 	configTsig := map[string]bool{}
 	for _, k := range cfg.Keys.Tsig {
-		configTsig[lc(dns.Fqdn(k.Name))] = true
+		configTsig[nk(k.Name)] = true
 	}
 	var keystoreTsig map[string]bool
 	keystoreOK := false
@@ -900,7 +901,7 @@ func checkTsigRef(rep *ccReport, g, zname, field, key string, configTsig, keysto
 	if k == "" || strings.EqualFold(k, "NOKEY") || strings.EqualFold(k, "BLOCKED") {
 		return
 	}
-	fk := lc(dns.Fqdn(k))
+	fk := nk(k)
 	if configTsig[fk] {
 		return
 	}
@@ -1034,15 +1035,15 @@ func correlateZones(role string, cfg *tdns.Config, rep *ccReport, g string) {
 	}
 	running := map[string]tdns.ZoneConf{}
 	for name, zc := range resp.Zones {
-		running[lc(dns.Fqdn(name))] = zc
+		running[nk(name)] = zc
 	}
 	configured := map[string]bool{}
 	for _, z := range cfg.Zones {
 		if z.Name == "" {
 			continue
 		}
-		configured[lc(dns.Fqdn(z.Name))] = true
-		rn := lc(dns.Fqdn(z.Name))
+		configured[nk(z.Name)] = true
+		rn := nk(z.Name)
 		if _, ok := running[rn]; !ok {
 			rep.warn(g, "zone-not-running",
 				fmt.Sprintf("zone %s is in the config but not running", z.Name),
@@ -1337,6 +1338,13 @@ func checkPolicyAlgVsActiveKeys(cfg *tdns.Config, v *viper.Viper, rep *ccReport,
 // ---------------------------------------------------------------------------
 
 func lc(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// nk folds a DOMAIN NAME for use as a map key. lc is for config identifiers --
+// template names, policy names, zone types -- where Unicode folding is
+// harmless and ASCII is all that occurs. A domain name needs the DNS rule:
+// US-ASCII A-Z and nothing else, so two names differing only by U+212A do not
+// share a bucket.
+func nk(s string) string { return core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(s))) }
 
 // zoneKey is the comparison key for a zone name: case-folded, then
 // FQDN-normalized, so every spelling of one zone collapses to one key. lc runs

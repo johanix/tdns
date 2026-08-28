@@ -134,7 +134,7 @@ land first, the rest are parallel.
 | 3 | IMR + cache | ~24 | **DONE.** `dnslookup`, `imrengine`, `imr_helpers`, `chase`, `apihandler_imr`, `cache/*` — plus the cache's own name-keyed indexes |
 | 4 | Delegation / childsync / dsync | ~20 | **DONE.** `childsync_utils`, `scanner_csync`, `dsync_api_*`, `delegation_coherence`, `delegation_backend_*`, `config_delegationsync`, `ops_delegation_read` |
 | 5 | Keystore / sign / zonemd | ~20 | **DONE.** `zonemd` canonical ordering, `sign`, `keystore_bulk`, `bind_convert`, `rollover_lock`, plus the two items the series owed |
-| 6 | CLI + debug | ~23 | cosmetic, but `keystore_cmds.go:1018` `log.Fatalf`s on a case mismatch |
+| 6 | CLI + debug | ~20 | **DONE.** `cli/*`, `debug/*`, `cmdv2/dog`, plus the `VerifyZonemd` pair carried over from stage 5 |
 | 7 | Enforcement | — | see below |
 
 ## Enforcement
@@ -646,3 +646,44 @@ The re-review says to move it "when that file is next open". As with the
 enforcement, and neither goes near `zonemd_verify.go`. It is three lines, in the
 sibling of the file this stage exists to make consistent. Recommend taking it
 into stage 6 as a named extra, the way this stage took the two items it owed.
+
+
+## Addendum, after PR 6
+
+85 → 75.
+
+**`VerifyZonemd` now folds like `ZoneDigest`,** carried over from the #423
+re-review at the user's instruction. Both are exported and both decide which
+records sit at the apex -- the digest by excluding them, the verifier by
+selecting them. Folded by two different functions they agreed on every ASCII
+name and parted company on the first non-UTF-8 octet, at which point a zone
+digests one set of records and is verified against another and a correct zone
+reports as broken. Covered end to end: compute with `ZoneDigestHex`, verify with
+`VerifyZonemd`, over three apexes including one carrying a raw octet. Reverting
+either fold reddens it.
+
+**A flaw in my scanning method, present for the whole series.** The grep that
+produced the 149-site list filters `//` line comments and knows nothing about
+`/* */` blocks. Two of the sites I "converted" in this stage
+(`cli/agent_zone_cmds.go`) turned out to be commented-out code -- the whole
+region from line 262 to 424 is a block comment. The only symptom was an
+"imported and not used" error the file plainly contradicted, which took several
+wrong hypotheses to run down.
+
+Audited the entire series for the same mistake. One other instance:
+`childsync_utils.go`'s `xxxComputeBailiwickNS_NG`, converted in #422 and already
+noted by that review as inside a block comment and harmless. Nothing else. The
+agent_zone_cmds edits are reverted; the site counts in this document include
+some commented-out code and should be read as an upper bound.
+
+**Converted here:** the debug tools' apex tests and churn-suffix filter, the
+config check's DNS-name map keys (a new `nk()` beside `lc()`, which stays for
+config identifiers where Unicode folding is harmless), the keystore and
+truststore CLI's zone-vs-key-owner checks, the IMR dump's suffix filter and
+reverse-label sort, `auto_rollover_validate`, and dog's TSIG algorithm name --
+which is a domain name.
+
+**Untested, and named as such:** the CLI and debug conversions are one-line
+`EqualFold`/`!=` replacements in commands with no unit harness. Same call the
+reviews accepted for #419 FINDING 3 and #423 FINDING 2. `VerifyZonemd` is the
+substantive item in this stage and it is covered.
