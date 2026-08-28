@@ -532,9 +532,10 @@ containing either the private or the public SIG(0) key and the name of the zone.
 		Use:   "export",
 		Short: "Export a SIG(0) key pair from the keystore as BIND-style .private/.key files",
 		Long: `Write the SIG(0) key pair for (zone, keyid) to two files in BIND filename
-convention: K<zone>+<alg-num>+<keyid>.private (PKCS#8 PEM) and .key (zone-file
-KEY RR). The resulting pair is directly consumable by commands accepting
---key <basename.private>.`,
+convention: K<zone>+<alg-num>+<keyid>.private and .key (zone-file KEY RR).
+The private half is written as PKCS#8 PEM, or as bind's Private-key-format
+v1.3 with --format bind. The resulting pair is directly consumable by commands
+accepting --key <basename.private>.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename", "keyid")
 			if err := tdns.ValidateKeyFormat(keyExportFormat); err != nil {
@@ -662,8 +663,10 @@ containing either the private or the public SIG(0) key and the name of the zone.
 		Use:   "export",
 		Short: "Export a DNSSEC key pair from the keystore as BIND-style .private/.key files",
 		Long: `Write the DNSSEC key pair for (zone, keyid) to two files in BIND filename
-convention: K<zone>+<alg-num>+<keyid>.private (PKCS#8 PEM) and .key (zone-file
-DNSKEY RR). The resulting pair is directly consumable by 'keystore dnssec import'.`,
+convention: K<zone>+<alg-num>+<keyid>.private and .key (zone-file DNSKEY RR).
+The private half is written as PKCS#8 PEM, or as bind's Private-key-format
+v1.3 with --format bind. The resulting pair is directly consumable by
+'keystore dnssec import'.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename", "keyid")
 			if err := tdns.ValidateKeyFormat(keyExportFormat); err != nil {

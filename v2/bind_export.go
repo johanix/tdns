@@ -24,6 +24,11 @@
 package tdns
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rsa"
 	"fmt"
 	"strings"
 
@@ -74,6 +79,10 @@ func BindPrivateKeyText(keyRR, privPEM string) (string, error) {
 		return "", fmt.Errorf("unusable stored private key: %v", err)
 	}
 
+	if err := checkKeyTypeMatchesAlgorithm(k.Algorithm, priv); err != nil {
+		return "", err
+	}
+
 	out := k.PrivateKeyString(priv)
 	if out == "" {
 		// PrivateKeyString signals every failure the same way, by returning
@@ -89,6 +98,61 @@ func BindPrivateKeyText(keyRR, privPEM string) (string, error) {
 			k.Algorithm, dns.AlgorithmToString[k.Algorithm])
 	}
 	return out, nil
+}
+
+// checkKeyTypeMatchesAlgorithm refuses a private key whose Go type does not
+// match the algorithm the public RR declares.
+//
+// PrivateKeyString takes the Algorithm field from the RR but chooses the key
+// FIELDS from the Go type, and the two are not cross-checked. An ED25519 key
+// carrying an RSASHA256 RR therefore renders as non-empty text labelled
+// RSASHA256 with a single "PrivateKey:" line where bind expects Modulus,
+// PublicExponent and the rest -- and NewPrivateKey reads it back without
+// complaint, because its RSA parser tolerates missing fields. The result is a
+// file that looks like a key, imports like a key, and cannot sign.
+//
+// That mismatch means a corrupt keystore row rather than a normal operation,
+// but an export is exactly where it should surface: loudly, naming both sides,
+// rather than as a plausible file that fails later.
+//
+// Only the algorithms PrivateKeyString handles from explicit type cases are
+// checked here. Everything else is dispatched through the algorithm registry,
+// whose implementations type-assert their own key and return an error, which
+// reaches the empty-string guard above.
+func checkKeyTypeMatchesAlgorithm(alg uint8, priv crypto.PrivateKey) error {
+	mismatch := func(want string) error {
+		return fmt.Errorf("stored private key is %T, but the public RR declares algorithm %d (%s), which needs %s: "+
+			"the keystore row is inconsistent", priv, alg, dns.AlgorithmToString[alg], want)
+	}
+
+	switch alg {
+	case dns.RSAMD5, dns.RSASHA1, dns.RSASHA1NSEC3SHA1, dns.RSASHA256, dns.RSASHA512:
+		if _, ok := priv.(*rsa.PrivateKey); !ok {
+			return mismatch("an RSA key")
+		}
+	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
+		k, ok := priv.(*ecdsa.PrivateKey)
+		if !ok {
+			return mismatch("an ECDSA key")
+		}
+		// The curve matters as much as the type: PrivateKeyString pads the
+		// scalar to a fixed width chosen from the algorithm, so a P-256 key
+		// under ECDSAP384SHA384 would be silently zero-extended.
+		want := elliptic.P256()
+		if alg == dns.ECDSAP384SHA384 {
+			want = elliptic.P384()
+		}
+		if k.Curve != want {
+			return fmt.Errorf("stored private key is on curve %s, but the public RR declares algorithm %d (%s), "+
+				"which needs %s: the keystore row is inconsistent",
+				k.Curve.Params().Name, alg, dns.AlgorithmToString[alg], want.Params().Name)
+		}
+	case dns.ED25519:
+		if _, ok := priv.(ed25519.PrivateKey); !ok {
+			return mismatch("an Ed25519 key")
+		}
+	}
+	return nil
 }
 
 // BindTimingTags renders the keystore's per-key timestamps as bind's timing

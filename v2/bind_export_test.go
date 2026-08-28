@@ -161,14 +161,45 @@ func TestBindExportFailsRatherThanWritingNothing(t *testing.T) {
 	}
 }
 
-// NOTE on the empty-string guard in BindPrivateKeyText: it is not reachable
-// from this package's test binary, and the attempt to reach it is instructive.
-// PrivateKeyString dispatches on the key's Go TYPE before consulting the
-// registry, so an ed25519 key renders happily under any algorithm number. A
-// genuine PQ key cannot be built here either: with no codec registered,
-// PEMToPrivateKey rejects its PKCS#8 before the guard is reached. The guard
-// covers the daemon case where the codec parses but the implementation cannot
-// render -- exercised in production, not here.
+// A private key whose type does not match the algorithm in the public RR must
+// be refused. Without the check, PrivateKeyString takes the Algorithm field
+// from the RR and the key FIELDS from the Go type, producing text labelled
+// RSASHA256 that carries a single ed25519-style "PrivateKey:" line -- which
+// NewPrivateKey then reads back without complaint, because its RSA parser
+// tolerates missing fields. The result imports cleanly and cannot sign.
+func TestBindExportRefusesKeyTypeAlgorithmMismatch(t *testing.T) {
+	_, ed25519PEM, _ := storedKeyPair(t, dns.ED25519, 256)
+	_, rsaPEM, _ := storedKeyPair(t, dns.RSASHA256, 2048)
+	rsaRR, _, _ := storedKeyPair(t, dns.RSASHA256, 2048)
+	ecP256RR, _, _ := storedKeyPair(t, dns.ECDSAP256SHA256, 256)
+	_, ecP384PEM, _ := storedKeyPair(t, dns.ECDSAP384SHA384, 384)
+
+	for _, tc := range []struct{ name, keyRR, pem, want string }{
+		{"ed25519 key under an RSA RR", rsaRR, ed25519PEM, "RSA"},
+		{"RSA key under an ECDSA RR", ecP256RR, rsaPEM, "ECDSA"},
+		{"P-384 key under a P-256 RR", ecP256RR, ecP384PEM, "curve"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := BindPrivateKeyText(tc.keyRR, tc.pem)
+			if err == nil {
+				t.Fatalf("mismatch accepted, returning:\n%s", out)
+			}
+			if out != "" {
+				t.Errorf("returned content alongside an error: %q", out)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error does not explain the mismatch (want mention of %q): %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// NOTE on the empty-string guard in BindPrivateKeyText: with the type check
+// above in front of it, the guard now covers only the registry algorithms --
+// a codec that parses the PKCS#8 but whose implementation cannot render the
+// key. That is not reachable from this package's test binary, where no
+// algorithm implementations are registered at all: such a key fails earlier,
+// in PEMToPrivateKey, for want of a codec for its OID.
 
 // The default format must hand back exactly what the keystore holds, so the
 // existing export/bulk-import round trip is untouched by this change. An empty

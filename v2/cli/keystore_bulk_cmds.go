@@ -82,7 +82,11 @@ run are left in place, so several exports can populate one directory.`,
 		},
 	}
 	bulkExport.Flags().StringVar(&f.dest, "dest", "", "Directory to write keys and manifest to")
-	bulkExport.Flags().StringVar(&f.format, "format", tdns.KeyFormatPEM, keyFormatHelp)
+	// Not for TSIG: a TSIG secret is not a private key and has no bind
+	// private-key file, so the flag would be accepted and then ignored.
+	if class != "tsig" {
+		bulkExport.Flags().StringVar(&f.format, "format", tdns.KeyFormatPEM, keyFormatHelp)
+	}
 	bulkExport.Flags().StringArrayVarP(&f.selExact, exactFlag, exactShorthand, nil, exactHelp)
 	bulkExport.Flags().StringArrayVar(&f.selSubtre, subtreeFlag, nil, subtreeHelp)
 	bulkExport.MarkFlagRequired("dest")
