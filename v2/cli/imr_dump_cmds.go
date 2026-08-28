@@ -301,7 +301,12 @@ With a zone argument: dumps just that zone.`,
 		}
 		var entries []zoneEntry
 		for item := range Conf.Internal.RRsetCache.ZoneMap.IterBuffered() {
-			if filter != "" && item.Key != filter {
+			// ZoneMap yields folded keys since the cache became a NameMap, so
+			// comparing to the filter as typed returned an empty dump for a
+			// mixed-case zone argument. Through the shared selector, like the
+			// API handler and the transport-stats filter: this was the third
+			// copy of one predicate, which is how the other two drifted.
+			if !tdns.ZoneMatchesSelector(item.Key, filter, "") {
 				continue
 			}
 			b := item.Val.SnapshotAddressBackoffs(now)

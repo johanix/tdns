@@ -687,3 +687,46 @@ which is a domain name.
 `EqualFold`/`!=` replacements in commands with no unit harness. Same call the
 reviews accepted for #419 FINDING 3 and #423 FINDING 2. `VerifyZonemd` is the
 substantive item in this stage and it is covered.
+
+
+## Review of #424 (external, 2026-08-28)
+
+`tdns-project/reviews/2026-08-28-tdns-PR424-cli-debug-verifier-review.md`.
+Verdict: request changes -- two findings, both in this PR's own files. Both
+addressed.
+
+**FINDING 1 — I introduced a store/lookup split while adding the helper meant to
+prevent one.** The commit added `nk()` and converted the four places that LOOK
+UP by DNS name, and left two of the maps being looked up still BUILT with
+`lc()`. `checkTsigRef` folds the key with `nk` and reads `configTsig` (now `nk`)
+and `keystoreTsig` (still `lc`). ASCII agrees, so nothing showed; a TSIG name
+carrying U+212A or a raw octet is stored under one key and read under the
+other, and the check reports a key as missing from a keystore that has it.
+
+This is the third time in the series: #421 folded the `_dns.` prefix test and
+not the strip, #423 folded the digest's ordering and not its hashing, and now
+this. The shape is always the same -- convert the read side, leave the write
+side -- and the reason it keeps surviving is that ASCII fixtures cannot see it.
+
+`zoneKey` and `fetchActiveKeyAlgsByZone` moved to `nk` too, so the file has ONE
+key function for DNS names. `lc` stays for config identifiers, which is the
+split the review calls right. `zoneKey`'s comment claimed the daemon stores
+zones under `dns.Fqdn(name)` with case preserved; that stopped being true in
+#417.
+
+**FINDING 2 — the CLI zone-backoff dump was the third copy of the zone-filter
+predicate.** #421 converted the API twin to `ZoneMatchesSelector` precisely so
+the handler and the transport-stats filter could not drift; the CLI dump was
+still comparing a folded `ZoneMap` key to the filter as typed, so a mixed-case
+zone argument returned an empty dump. Now through the same selector.
+
+**Coverage.** `TestConfigCheckNameKeyIsOneFunction` pins that `nk` and
+`zoneKey` are one function and that neither Unicode-folds. Its first draft
+compared them over ASCII spellings only and stayed green with `zoneKey` reverted
+to a second implementation -- the ASCII-fixture trap for the fourth time. It now
+compares over U+212A, U+017F and a raw octet, and goes red.
+
+**Named as still later, unchanged:** `rrset_utils` (outbound `AuthQueryEngine`)
+and `scanner.go`'s NS-set keys. The review adds two more for stage 7 or a later
+touch: `ksk_rollover_cli.go`'s `dns.Fqdn(zc.Name) != want`, where a mixed-case
+`--zone` misses its policy, and `report_cmds.go`'s TSIG algorithm fold.

@@ -1100,7 +1100,7 @@ func fetchKeystoreTsigNames(role string) (map[string]bool, error) {
 		return nil, err
 	}
 	for _, k := range resp.TsigKeys {
-		out[lc(dns.Fqdn(k.Name))] = true
+		out[nk(k.Name)] = true
 	}
 	return out, nil
 }
@@ -1204,7 +1204,7 @@ func fetchActiveKeyAlgsByZone(role string) (map[string]activeKeyAlgs, error) {
 		if !strings.EqualFold(k.State, tdns.DnskeyStateActive) {
 			continue
 		}
-		zone := lc(dns.Fqdn(k.Name))
+		zone := nk(k.Name)
 		a, ok := out[zone]
 		if !ok {
 			a = activeKeyAlgs{ksk: map[string]bool{}, zsk: map[string]bool{}}
@@ -1319,7 +1319,7 @@ func checkPolicyAlgVsActiveKeys(cfg *tdns.Config, v *viper.Viper, rep *ccReport,
 			rep.info(g, z.name, fmt.Sprintf("cannot resolve algorithms for policy %q (not in this config and not loaded by the server) — skipping", z.policy))
 			continue
 		}
-		miss := missingRoleAlgs(want, activeByZone[lc(dns.Fqdn(z.name))])
+		miss := missingRoleAlgs(want, activeByZone[nk(z.name)])
 		if len(miss) == 0 {
 			rep.pass(g, z.name, fmt.Sprintf("active keys satisfy policy %q algorithms", z.policy))
 			continue
@@ -1346,14 +1346,15 @@ func lc(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 // share a bucket.
 func nk(s string) string { return core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(s))) }
 
-// zoneKey is the comparison key for a zone name: case-folded, then
-// FQDN-normalized, so every spelling of one zone collapses to one key. lc runs
-// first because it trims, and trimming after dns.Fqdn would strip the dot it
-// just added.
+// zoneKey is the comparison key for a zone name, and it is nk: one key function
+// for every DNS name in this file, so a name stored under one and looked up
+// under the other cannot happen.
 //
-// This is a COMPARISON key only. Nothing is registered under it: the daemon
-// still stores zones under dns.Fqdn(name) with case preserved.
-func zoneKey(name string) string { return dns.Fqdn(lc(name)) }
+// It used to be dns.Fqdn(lc(name)), and the comment here used to say the daemon
+// stores zones under dns.Fqdn(name) with case preserved. That stopped being
+// true when zd.ZoneName started being folded, and lc folds by Unicode, so it
+// also collapsed two genuinely different zones onto one key.
+func zoneKey(name string) string { return nk(name) }
 
 func absClean(p string) string {
 	if p == "" {
