@@ -81,7 +81,7 @@ func transportWeightsToStrings(m map[core.Transport]uint8) map[string]uint8 {
 func ZoneMatchesSelector(zone, exactZone, suffix string) bool {
 	switch {
 	case exactZone != "":
-		return strings.EqualFold(zone, exactZone)
+		return core.EqualNames(zone, exactZone)
 	case suffix != "":
 		return dns.IsSubDomain(suffix, zone)
 	default:
@@ -210,11 +210,9 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			identity = dns.Fqdn(identity)
 
 			var entries []map[string]interface{}
-			idCanon := strings.ToLower(identity)
 			for item := range imr.Cache.RRsets.IterBuffered() {
 				cr := item.Val
-				name := strings.ToLower(cr.Name)
-				if name != idCanon && !strings.HasSuffix(name, "."+idCanon) {
+				if !dns.IsSubDomain(identity, cr.Name) {
 					continue
 				}
 				entry := map[string]interface{}{

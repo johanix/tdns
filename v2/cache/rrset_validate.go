@@ -551,7 +551,7 @@ func ValidateDNSKEYRRsetSignature(rrset *core.RRset, keyid uint16, signerName st
 		if !ok || sig.TypeCovered != dns.TypeDNSKEY {
 			continue
 		}
-		if sig.KeyTag == keyid && dns.Fqdn(sig.SignerName) == name {
+		if sig.KeyTag == keyid && core.EqualNames(dns.Fqdn(sig.SignerName), name) {
 			sigForKey = sig
 			break
 		}
@@ -753,7 +753,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 
 	// Check for trust anchor DNSKEYs
 	for item := range dkc.Map.IterBuffered() {
-		if item.Val.Name == name && item.Val.TrustAnchor && item.Val.State == ValidationStateSecure {
+		if core.EqualNames(item.Val.Name, name) && item.Val.TrustAnchor && item.Val.State == ValidationStateSecure {
 			taKeys = append(taKeys, &item.Val)
 		}
 	}
@@ -1018,7 +1018,10 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		return ValidationStateIndeterminate, rcode, fmt.Errorf("no SOA found in negative authority for %s", qname)
 	}
 	zoneName := dns.CanonicalName(soarrset.Name)
-	if !strings.HasSuffix(qnameCanon, zoneName) {
+	// The SOA in a negative answer only authorises a denial for names inside
+	// its own zone. A byte suffix would accept an SOA for "ample." as covering
+	// "example." -- a forged denial one label away from the real zone.
+	if !dns.IsSubDomain(zoneName, qnameCanon) {
 		return ValidationStateBogus, rcode, nil // XXX: The zone name does not match the qname
 	}
 	if !hasSignatures {

@@ -131,7 +131,7 @@ land first, the rest are parallel.
 |---|---|---:|---|
 | 1 | Boundary | ~10 | **DONE.** `core.CanonicalizeName` + `core.NameMap`; canonical keys for `Zones`, `zd.Data`, the snapshot and the working set; `GetOwner`/`FindZone`/`SortFunc`; `zd.ZoneName` folded at construction. Fixes all four confirmed defects. |
 | 2 | Auth query + update | ~29 | **DONE.** `queryresponder`, `auth_utils`, `updateresponder`, `zone_updater`, `zone_update_verbs`, `defaultqueryhandlers`, `ops_uri`/`ops_svcb`/`ops_key`, `dnsutils`, `zone_utils` |
-| 3 | IMR + cache | ~25 | `dnslookup`, `imrengine`, `cache/*` — wire-sourced names, so the most reachable after #1 |
+| 3 | IMR + cache | ~24 | **DONE.** `dnslookup`, `imrengine`, `imr_helpers`, `chase`, `apihandler_imr`, `cache/*` — plus the cache's own name-keyed indexes |
 | 4 | Delegation / childsync / dsync | ~20 | includes the `HasSuffix` label-boundary bugs |
 | 5 | Keystore / sign / zonemd | ~20 | `sign.go`'s apex tests are latent-severe: a miss signs a delegation NS or skips the apex NS |
 | 6 | CLI + debug | ~23 | cosmetic, but `keystore_cmds.go:1018` `log.Fatalf`s on a case mismatch |
@@ -235,3 +235,48 @@ don't only read it.
 **Still not converted, deliberately:** `sign.go`'s apex tests. Its operands are
 owner-map keys against `zd.ZoneName`, both canonical since PR 1, so they are
 safe by construction; they belong to PR 5 with the rest of the signer.
+
+
+## Addendum, after PR 3
+
+119 → 108 in the comparison scan, but that number understates it: PR 3's larger
+half was the resolver cache's **indexes**, and a `.Get()` is not a comparison,
+so 76 converted call sites do not appear in the count at all.
+
+**The cache is the auth server's problem again, one layer out.** `ZoneMap`,
+`Servers`, `ServerMap`, `AuthServerMap` and `ServerTLSA` were `ConcurrentMap`s
+keyed by a bare DNS name; `RRsets` and the DNSKEY cache by `"<name>::<n>"`. All
+of them are fed names a resolver does not control: an authoritative server's
+own spelling, and — once 0x20 randomisation is on — a different mixture of case
+on every single query. Keyed by exact bytes, the cache stores the same name
+repeatedly and finds it never. The five bare-name maps are `core.NameMap` now;
+the two composite keys fold the name half where the key is built.
+
+`GetOrCreateAuthServer` is the sharpest of these: it exists to guarantee one
+`AuthServer` instance per nameserver, and keyed by raw bytes it guaranteed one
+per *spelling*, so per-server health, transport capability and TLSA state were
+silently split across duplicates.
+
+**A correction to the PR 2 write-up's method claim.** I recorded "drive it,
+don't only read it" as the lesson, and then wrote a referral test that passed
+before the fix as well as after — within one response the NS owner and the DS
+owner come from the same zone, so they agree, and the comparison between them
+cannot fail. The test only became real once the two owners were spelled
+independently, which is what a parent whose zone file spells them differently
+serves — something tdns itself now does, because #417 preserves the arrived
+spelling instead of folding it. **Passing is not evidence; reverting the fix and
+watching the test fail is.**
+
+**And a claim withdrawn.** `isSubdomainOf` in the cache was already correct: it
+canonicalised both names and added the leading dot a byte-wise suffix test needs
+to respect a label boundary. I had it on the list and changed it to
+`dns.IsSubDomain` before reading the two lines above the comparison. The change
+stands as a simplification — one line, no allocations — but it fixes nothing,
+its comment says so, and its test is characterisation rather than regression.
+
+Real defects fixed here: the closest-known-zone walk (`strings.HasSuffix` with
+no boundary and no folding, so a cached `ample.` could be chosen as the enclosing
+zone for `example.`), the negative-answer SOA gate (same shape — an SOA for
+`ample.` authorising a denial for `example.`), the SOA-authorises-this-denial
+test in `dnslookup`, the DS-and-RRSIG pair in a referral, and the `_853._udp`
+TLSA owner prefixes.

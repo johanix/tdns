@@ -52,6 +52,12 @@ func (nm *NameMap[V]) Has(name string) bool {
 	return nm.m.Has(CanonicalizeName(name))
 }
 
+// SetIfAbsent stores value under name only if the name is not already present,
+// reporting whether it stored.
+func (nm *NameMap[V]) SetIfAbsent(name string, value V) bool {
+	return nm.m.SetIfAbsent(CanonicalizeName(name), value)
+}
+
 // Remove deletes name, if present.
 func (nm *NameMap[V]) Remove(name string) {
 	nm.m.Remove(CanonicalizeName(name))

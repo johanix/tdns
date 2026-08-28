@@ -489,7 +489,11 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						nsMap[rr.Ns] = true
 					case *dns.SOA:
 						// this is a negative response, but is the SOA right?
-						if strings.HasSuffix(qname, rr.Header().Name) {
+						// Inside the SOA's zone, as a DNS name. A byte suffix
+						// accepted an SOA for "ample." as authorising a denial
+						// for "example." and missed the mis-cased owner an
+						// upstream returns under 0x20 randomisation.
+						if dns.IsSubDomain(rr.Header().Name, qname) {
 							// Yes, this SOA may auth a negative response for qname
 							lgDns.Debug("*** AuthDNSQ: found SOA in Auth, it was a neg resp")
 							imr.Cache.Set(qname, qtype, &cache.CachedRRset{
@@ -1616,7 +1620,7 @@ func (imr *Imr) CollectNSAddresses(ctx context.Context, rrset *core.RRset, respc
 // Returns: baseName, isOOTSOwner, originalOwner
 func parseOwnerName(owner string) (baseName string, isOOTSOwner bool, originalOwner string) {
 	originalOwner = owner
-	if strings.HasPrefix(owner, "_dns.") {
+	if strings.HasPrefix(core.CanonicalizeName(owner), "_dns.") {
 		isOOTSOwner = true
 		baseName = strings.TrimPrefix(owner, "_dns.")
 	} else {
@@ -2302,7 +2306,7 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 	targetOwner := dns.Fqdn("_dns." + base)
 	for _, rr := range r.Extra {
 		owner := dns.Fqdn(rr.Header().Name)
-		if !strings.EqualFold(owner, targetOwner) {
+		if !core.EqualNames(owner, targetOwner) {
 			lgDns.Debug("parseTransportForServerFromAdditional: owner != target", "owner", owner, "target", targetOwner)
 			continue
 		}
@@ -2354,7 +2358,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 		return
 	}
 	owner := dns.Fqdn(qname)
-	if !strings.HasPrefix(owner, "_dns.") {
+	if !strings.HasPrefix(core.CanonicalizeName(owner), "_dns.") {
 		return
 	}
 	base := strings.TrimPrefix(owner, "_dns.")
@@ -2580,6 +2584,33 @@ func extractReferral(r *dns.Msg, qname string, qtype uint16) (*core.RRset, strin
 	return &rrset, zonename, nsMap
 }
 
+// collectDSFromAuthority picks the DS RRset for zonename, and its signatures,
+// out of a referral's authority section.
+//
+// The owner names come from another server's response, so their spelling is
+// that server's choice -- and under 0x20 query-name randomisation it is
+// whatever we happened to send. Compared byte-wise, the DS records were
+// dropped and the child looked unsigned; worse, the two comparisons could
+// disagree, keeping the DS RRset while discarding the RRSIGs that prove it.
+//
+// Pulled out of handleReferral so it can be tested without a network.
+func collectDSFromAuthority(authority []dns.RR, zonename string) (dsRRs, dsSigs []dns.RR) {
+	for _, rr := range authority {
+		switch rr.Header().Rrtype {
+		case dns.TypeDS:
+			if core.EqualNames(rr.Header().Name, zonename) {
+				dsRRs = append(dsRRs, rr)
+			}
+		case dns.TypeRRSIG:
+			sig, ok := rr.(*dns.RRSIG)
+			if ok && sig.TypeCovered == dns.TypeDS && core.EqualNames(rr.Header().Name, zonename) {
+				dsSigs = append(dsSigs, rr)
+			}
+		}
+	}
+	return dsRRs, dsSigs
+}
+
 func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, transport core.Transport, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	if Globals.Debug && !imr.Quiet {
 		imr.Cache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
@@ -2637,20 +2668,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		})
 	}
 	// Also collect and cache DS RRset (signed) when present in referral
-	var dsRRs []dns.RR
-	var dsSigs []dns.RR
-	for _, rr := range r.Ns {
-		switch rr.Header().Rrtype {
-		case dns.TypeDS:
-			if rr.Header().Name == zonename {
-				dsRRs = append(dsRRs, rr)
-			}
-		case dns.TypeRRSIG:
-			if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeDS && rr.Header().Name == zonename {
-				dsSigs = append(dsSigs, rr)
-			}
-		}
-	}
+	dsRRs, dsSigs := collectDSFromAuthority(r.Ns, zonename)
 	if len(dsRRs) > 0 {
 		dsRRset := &core.RRset{
 			Name:   zonename,
@@ -2742,9 +2760,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	// revalidated by scheduleReferralNSRevalidation / revalidateInBailiwickGlue).
 	if nsRRset != nil && zonename != "" && len(nsRRset.RRs) > 0 {
 		inBailiwick := func(host, zone string) bool {
-			h := strings.ToLower(dns.Fqdn(host))
-			z := strings.ToLower(dns.Fqdn(zone))
-			return h == z || strings.HasSuffix(h, "."+z)
+			return dns.IsSubDomain(dns.Fqdn(zone), dns.Fqdn(host))
 		}
 
 		var oobRRset core.RRset
@@ -3020,12 +3036,13 @@ func collectInBailiwickNS(serverMap map[string]*cache.AuthServer, zonename strin
 	if len(serverMap) == 0 || zonename == "" {
 		return nil
 	}
-	zone := strings.ToLower(dns.Fqdn(zonename))
+	zone := dns.Fqdn(zonename)
 	var hosts []string
 	for name := range serverMap {
-		fq := strings.ToLower(dns.Fqdn(name))
-		if fq == zone || strings.HasSuffix(fq, "."+zone) {
-			hosts = append(hosts, fq)
+		fq := dns.Fqdn(name)
+		if dns.IsSubDomain(zone, fq) {
+			// Collected canonical: these are used as map keys downstream.
+			hosts = append(hosts, core.CanonicalizeName(fq))
 		}
 	}
 	return hosts
@@ -3169,10 +3186,7 @@ func classifyResponse(qname string, qtype uint16, r *dns.Msg) responseKind {
 		if !hasSOA || soaOwner == "" {
 			return false
 		}
-		// Canonicalise for a simple suffix check.
-		q := dns.Fqdn(strings.ToLower(qname))
-		s := dns.Fqdn(strings.ToLower(soaOwner))
-		return q == s || strings.HasSuffix(q, "."+s) || s == "."
+		return dns.IsSubDomain(dns.Fqdn(soaOwner), dns.Fqdn(qname))
 	}
 
 	switch rcode {

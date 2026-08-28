@@ -29,8 +29,16 @@ func NewDnskeyCache() *DnskeyCacheT {
 	}
 }
 
+// dnskeyKey builds the composite map key. The name half is folded so a zone
+// looked up in one spelling finds the key stored under another -- these names
+// come off the wire, where 0x20 randomisation means the spelling differs every
+// time. The keyid half is digits, which folding does not touch.
+func dnskeyKey(zonename string, keyid uint16) string {
+	return fmt.Sprintf("%s::%d", core.CanonicalizeName(zonename), keyid)
+}
+
 func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
-	lookupKey := fmt.Sprintf("%s::%d", zonename, keyid)
+	lookupKey := dnskeyKey(zonename, keyid)
 	tmp, ok := dkc.Map.Get(lookupKey)
 	if !ok {
 		return nil
@@ -46,7 +54,7 @@ func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 }
 
 func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRset) {
-	lookupKey := fmt.Sprintf("%s::%d", zonename, keyid)
+	lookupKey := dnskeyKey(zonename, keyid)
 	dkc.Map.Set(lookupKey, *cdr)
 }
 
@@ -66,11 +74,11 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 
 	return &RRsetCacheT{
 		RRsets:               core.NewCmap[CachedRRset](),
-		Servers:              core.NewCmap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
-		ServerMap:            core.NewCmap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
-		AuthServerMap:        core.NewCmap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
-		ZoneMap:              core.NewCmap[*Zone](),                  // zone -> *Zone
-		ServerTLSA:           core.NewCmap[*ServerTLSARecords](),     // nsname -> validated TLSA cache
+		Servers:              core.NewNameMap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
+		ServerMap:            core.NewNameMap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
+		AuthServerMap:        core.NewNameMap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
+		ZoneMap:              core.NewNameMap[*Zone](),                  // zone -> *Zone
+		ServerTLSA:           core.NewNameMap[*ServerTLSARecords](),     // nsname -> validated TLSA cache
 		DnskeyCache:          DnskeyCache,
 		Logger:               lg,
 		LineWidth:            130, // default line width for truncating long lines in logging and output
@@ -81,9 +89,14 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	}
 }
 
+// rrsetKey builds the composite map key, folding the name half. See dnskeyKey.
+func rrsetKey(qname string, qtype uint16) string {
+	return fmt.Sprintf("%s::%d", core.CanonicalizeName(qname), qtype)
+}
+
 func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 
-	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
+	lookupKey := rrsetKey(qname, qtype)
 	crrset, ok := rrcache.RRsets.Get(lookupKey)
 	if !ok {
 		return nil
@@ -109,7 +122,7 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 const rrsetCacheMaxEntries = 50000
 
 func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset) {
-	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
+	lookupKey := rrsetKey(qname, qtype)
 	if rrcache.Debug {
 		fmt.Printf("rrcache: Adding key %s (%s) to cache\n", lookupKey, dns.TypeToString[qtype])
 	}
@@ -332,17 +345,14 @@ func isStructuralRRset(cr *CachedRRset, nsHosts map[string]struct{}) bool {
 	}
 }
 
+// isSubdomainOf reports whether name is at or below parent.
+//
+// This was already correct -- it canonicalised both names and added the leading
+// dot that a byte-wise suffix test needs to respect a label boundary. It is
+// dns.IsSubDomain now because that says the same thing in one line and without
+// the two canonicalisation allocations, not because the old one was wrong.
 func isSubdomainOf(name, parent string) bool {
-	name = dns.CanonicalName(name)
-	parent = dns.CanonicalName(parent)
-	if parent == "." {
-		return true
-	}
-	if name == parent {
-		return true
-	}
-	suffix := "." + strings.TrimSuffix(parent, ".") + "."
-	return strings.HasSuffix(name, suffix)
+	return dns.IsSubDomain(parent, name)
 }
 
 func (rrcache *RRsetCacheT) lookupSOARRset(name string) *core.RRset {
@@ -587,8 +597,9 @@ func baseFromTLSAOwner(owner string) string {
 		return ""
 	}
 	prefixes := []string{"_853._udp.", "_853._tcp."}
+	canon := core.CanonicalizeName(owner)
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(owner, prefix) {
+		if strings.HasPrefix(canon, prefix) {
 			return owner[len(prefix):]
 		}
 	}
@@ -925,7 +936,10 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	for item := range rrcache.ServerMap.IterBuffered() {
 		z := item.Key
 		ss := item.Val
-		if strings.HasSuffix(qname, z) && len(z) > len(bestmatch) {
+		// A DNS bailiwick test, not a byte suffix: the old form both missed
+		// mis-cased names and matched across a label boundary, so a cached
+		// "ample." could be picked as the closest known zone for "example.".
+		if dns.IsSubDomain(z, qname) && len(z) > len(bestmatch) {
 			bestmatch = z
 			servers = ss
 		}
@@ -967,6 +981,7 @@ func (rrcache *RRsetCacheT) MarkNSRevalidation(zone string) bool {
 	if rrcache.nsRevalidateInFlight == nil {
 		rrcache.nsRevalidateInFlight = make(map[string]struct{})
 	}
+	zone = core.CanonicalizeName(zone)
 	if _, ok := rrcache.nsRevalidateInFlight[zone]; ok {
 		return false
 	}
@@ -980,7 +995,7 @@ func (rrcache *RRsetCacheT) ClearNSRevalidation(zone string) {
 	if rrcache.nsRevalidateInFlight == nil {
 		return
 	}
-	delete(rrcache.nsRevalidateInFlight, zone)
+	delete(rrcache.nsRevalidateInFlight, core.CanonicalizeName(zone))
 }
 
 func (rrcache *RRsetCacheT) MarkRRsetBogus(qname string, qtype uint16, rrset *core.RRset, dnssecOK bool) (uint16, string) {
