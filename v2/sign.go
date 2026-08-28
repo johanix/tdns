@@ -684,10 +684,10 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 			// restitch, whose output the digest covers. A signature made here
 			// would be over a value that is about to be replaced and never
 			// reaches the wire. See zonemd_publish.go.
-			if managesZonemd && rrt == dns.TypeZONEMD && name == zd.ZoneName {
+			if managesZonemd && rrt == dns.TypeZONEMD && core.EqualNames(name, zd.ZoneName) {
 				continue
 			}
-			if rrt == dns.TypeNS && name != zd.ZoneName {
+			if rrt == dns.TypeNS && !core.EqualNames(name, zd.ZoneName) {
 				continue // delegation NS — not signed
 			}
 			if rrt == dns.TypeA || rrt == dns.TypeAAAA {
@@ -920,10 +920,10 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			// restitch, whose output the digest covers. A signature made here
 			// would be over a value that is about to be replaced and never
 			// reaches the wire. See zonemd_publish.go.
-			if managesZonemd && rrt == dns.TypeZONEMD && name == zd.ZoneName {
+			if managesZonemd && rrt == dns.TypeZONEMD && core.EqualNames(name, zd.ZoneName) {
 				continue
 			}
-			if rrt == dns.TypeNS && name != zd.ZoneName {
+			if rrt == dns.TypeNS && !core.EqualNames(name, zd.ZoneName) {
 				continue // dont' sign delegations
 			}
 			// XXX: What is the best way to identify that an RR is a glue record?

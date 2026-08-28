@@ -569,3 +569,50 @@ the first attempt, because ASCII fixtures make `strings.ToLower` and
 input where the two folders disagree. That is now three stages running where the
 first draft of a test proved nothing; the ASCII happy path is not evidence for
 any claim in this series.
+
+
+## Review of #423 (external, 2026-08-28)
+
+`tdns-project/reviews/2026-08-28-tdns-PR423-signer-keystore-zonemd-review.md`.
+Verdict: request changes -- two findings and a niggle, all inside #423's own
+files. All addressed.
+
+**FINDING 1 — I fixed the ordering folder and left the HASHING folder wrong.**
+The commit moved `canonicalSortKey` and `canonicalOwnerLess` off
+`strings.ToLower`, and `digestBlock`'s owner fold onto `CanonicalizeName`, and
+stopped there. Three sites in the same file still used `dns.CanonicalName`:
+
+- `groupByOwner` -- a MAP KEY. Two owners differing only by a non-UTF-8 octet
+  both fold to U+FFFD and merged into one bucket, digested as one name's
+  records.
+- `ZoneDigest`'s `apex = dns.CanonicalName(apex)`. This is the one that
+  undermined my own comment: I justified `digestBlock`'s `EqualNames` as
+  defending exported callers whose apex might not be canonical -- and those
+  callers went through this line first, folded by a different function. The
+  defence did not hold.
+- `canonicalRRWire`, 27 folds: the owner and every RFC 4034 §6.2 RDATA name.
+  **These are the bytes that go into the hash.** Even a correctly grouped,
+  correctly ordered owner was hashed under U+FFFD.
+
+Fixing the order and not the hash is a half-conversion of exactly the shape
+#421's `_dns.` prefix was -- test folded, strip did not. The function's own
+comment warns against "passing tests and being wrong" about a related shortcut,
+one paragraph above the folder that was wrong.
+
+**FINDING 2 — `bind_convert` still stored the collision key with
+`dns.CanonicalName`,** and the comment above it still described `manifestHasKey`
+as using `EqualFold`, which this PR had just changed. Both fixed, and the
+matching comment in `bind_convert_test.go` too.
+
+**Niggle — four `==`/`!= zd.ZoneName` left in `SignZone`/`ResignZone`,** among
+the ones converted. Correct by construction (owner-map key against a canonical
+`ZoneName`), so not a live miss, but converting the neighbours and leaving these
+is the inconsistency that makes the next reader guess. Converted.
+
+**Coverage.** `groupByOwner` and the end-to-end digest now have the
+`\xfe`/`\xff` test the review asked for; both go red if the key or the wire
+fold is reverted. FINDING 2 has **no covering test** -- the existing
+case-collision test still passes and covers the ASCII behaviour, but the
+difference between the two folders only shows for a BIND key file whose zone
+name carries a non-UTF-8 octet, and building that fixture is out of proportion
+to the change. Said plainly rather than left looking covered.

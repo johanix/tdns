@@ -13,6 +13,7 @@ package tdns
 
 import (
 	"bytes"
+	"net"
 	"strings"
 	"testing"
 
@@ -190,5 +191,70 @@ func TestKeystoreZoneSelectorFoldsOnlyASCII(t *testing.T) {
 	if ksel.Matches(ascii) {
 		t.Errorf("a selector for %q also selects %q: two different zones, and "+
 			"this selector decides which private keys get exported", kelvin, ascii)
+	}
+}
+
+// groupByOwner buckets records by owner before they are sorted and hashed, so
+// its key decides which records the digest treats as one name's. Built with
+// dns.CanonicalName, every octet that is not valid UTF-8 became U+FFFD, so two
+// owners differing only in such an octet merged into one bucket -- and were
+// digested as a single owner's records.
+//
+// This is the shape the TLSA-key test in #421 used, applied to the digest.
+func TestGroupByOwnerKeepsRawOctetsApart(t *testing.T) {
+	mkA := func(owner, addr string) dns.RR {
+		return &dns.A{
+			Hdr: dns.RR_Header{Name: owner, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.ParseIP(addr),
+		}
+	}
+	fe, ff := "ns\xfe1.example.", "ns\xff1.example."
+
+	got := groupByOwner([]dns.RR{mkA(fe, "192.0.2.1"), mkA(ff, "192.0.2.2")})
+	if len(got) != 2 {
+		t.Errorf("groupByOwner put two distinct owners in %d bucket(s): they are "+
+			"digested as one name's records", len(got))
+	}
+
+	// ASCII case still merges, which is the rule it implements.
+	merged := groupByOwner([]dns.RR{
+		mkA("NS1.EXAMPLE.", "192.0.2.1"), mkA("ns1.example.", "192.0.2.2"),
+	})
+	if len(merged) != 1 {
+		t.Errorf("groupByOwner split one name spelled two ways into %d buckets", len(merged))
+	}
+}
+
+// The whole digest, end to end: two names that differ by one octet must not
+// produce the same digest as two copies of one name. Grouping, ordering and the
+// hashed wire form all have to keep them apart, and this PR moved all three
+// onto one folder.
+func TestZoneDigestDistinguishesRawOctets(t *testing.T) {
+	mkA := func(owner, addr string) dns.RR {
+		return &dns.A{
+			Hdr: dns.RR_Header{Name: owner, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.ParseIP(addr),
+		}
+	}
+	soa, err := dns.NewRR("example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200")
+	if err != nil {
+		t.Fatalf("building the SOA: %v", err)
+	}
+
+	distinct := []dns.RR{soa, mkA("ns\xfe1.example.", "192.0.2.1"), mkA("ns\xff1.example.", "192.0.2.2")}
+	sameName := []dns.RR{soa, mkA("ns\xff1.example.", "192.0.2.1"), mkA("ns\xff1.example.", "192.0.2.2")}
+
+	a, err := ZoneDigest("example.", distinct, 1, 1)
+	if err != nil {
+		t.Fatalf("ZoneDigest: %v", err)
+	}
+	b, err := ZoneDigest("example.", sameName, 1, 1)
+	if err != nil {
+		t.Fatalf("ZoneDigest: %v", err)
+	}
+	if bytes.Equal(a, b) {
+		t.Error("a zone with two owners differing by one octet digests the same as " +
+			"a zone where both records sit at one owner: the digest cannot tell " +
+			"the two names apart, and no other implementation would agree with it")
 	}
 }
