@@ -38,18 +38,23 @@ import (
 // inventory.
 func (zd *ZoneData) ApiZoneGetName(zp ZonePost) (*ZoneNameReport, error) {
 	if zd.ZoneStore != MapZone {
-		// Naming the store rather than "unsupported": a SliceZone is a
-		// perfectly good zone, it just cannot answer a question keyed by owner
-		// name, and an operator seeing this needs to know which of the two
-		// they have.
+		// Naming the store rather than "unsupported": an XfrZone is a
+		// perfectly good zone, it just holds no owner index and so cannot
+		// answer a question keyed by owner name. An operator seeing this needs
+		// to know which of the two they have.
 		return nil, fmt.Errorf("zone %s is a %s; get-name needs a map store",
 			zd.ZoneName, ZoneStoreToString[zd.ZoneStore])
 	}
 
-	name := dns.Fqdn(strings.TrimSpace(zp.UpdateName))
-	if name == "." || name == "" {
+	// The empty request has to be caught BEFORE dns.Fqdn, which turns "" into
+	// "." -- the root apex, a legitimate name on a server that hosts it. Doing
+	// this after would make the two indistinguishable and lock a root server
+	// out of reading its own apex.
+	raw := strings.TrimSpace(zp.UpdateName)
+	if raw == "" {
 		return nil, fmt.Errorf("get-name: no name given (set updatename)")
 	}
+	name := dns.Fqdn(raw)
 	if !dns.IsSubDomain(zd.ZoneName, name) {
 		// Answering "nothing" for a name the zone could never hold reads as
 		// "that name has no records", which is a different and wrong answer.
@@ -62,7 +67,16 @@ func (zd *ZoneData) ApiZoneGetName(zp ZonePost) (*ZoneNameReport, error) {
 		RRsets: map[string][]string{},
 	}
 
-	owner, err := zd.GetOwner(name)
+	// CANONICALISE BEFORE LOOKING UP. The gate above folds case
+	// (dns.IsSubDomain does), but GetOwner indexes a map by the exact key
+	// (getOwnerFrom -> snap.Data[qname]). Passing the name through as written
+	// meant NS1.provider.example. cleared the in-zone check and then missed the
+	// map -- returning a SUCCESSFUL EMPTY REPORT for a name that has records.
+	//
+	// That is the precise failure this command exists to prevent: a client
+	// reading "nothing there" republishes, and on a signed zone that re-signs
+	// and bumps the serial, every pass, for ever.
+	owner, err := zd.GetOwner(dns.CanonicalName(name))
 	if err != nil {
 		return nil, err
 	}
@@ -72,9 +86,15 @@ func (zd *ZoneData) ApiZoneGetName(zp ZonePost) (*ZoneNameReport, error) {
 		// client provisioning the name for the first time expects to get.
 		return out, nil
 	}
+	// Echo the STORED owner, not what the caller asked for. A client diffing
+	// successive reports must not see a difference that is only how it happened
+	// to spell the query.
+	if owner.Name != "" {
+		out.Name = owner.Name
+	}
 
 	for _, rrtype := range owner.RRtypes.Keys() {
-		if rrtype == dns.TypeRRSIG || rrtype == dns.TypeNSEC || rrtype == dns.TypeNSEC3 {
+		if isServerManagedRRtype(rrtype) {
 			continue // derived; see the doc comment
 		}
 		rrset, ok := owner.RRtypes.Get(rrtype)
@@ -98,6 +118,31 @@ func (zd *ZoneData) ApiZoneGetName(zp ZonePost) (*ZoneNameReport, error) {
 		out.RRsets[rrTypeName(rrtype)] = strs
 	}
 	return out, nil
+}
+
+// isServerManagedRRtype reports whether an RRset at a name is the server's to
+// author rather than a client's to reconcile.
+//
+// NSEC/NSEC3, NSEC3PARAM and ZONEMD are all maintained from zone policy by the
+// signer. Returning any of them invites the read-modify-write this command is
+// supposed to make unnecessary: a client that reads an apex report and writes
+// it back would be authoring a ZONEMD.
+//
+// NSEC3PARAM and ZONEMD were missed on the first pass and are the reason this
+// is a function rather than an inline condition — both are ordinary RRtype keys
+// at the apex and were being returned.
+//
+// RRSIG is listed for completeness and is currently unreachable: the parser
+// attaches signatures to the RRset they cover (core.RRset.RRSIGs), not as an
+// RRtype of their own, and the loop below reads .RRs. Signatures are therefore
+// excluded structurally rather than by this switch. Keeping the case costs
+// nothing and stops the exclusion from silently depending on that.
+func isServerManagedRRtype(rrtype uint16) bool {
+	switch rrtype {
+	case dns.TypeRRSIG, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeZONEMD:
+		return true
+	}
+	return false
 }
 
 // rrTypeName renders an RR type the way presentation format does, falling back
