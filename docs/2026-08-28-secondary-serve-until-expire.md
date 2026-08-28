@@ -183,10 +183,27 @@ handler already logs "zone not yet refreshed" and UPDATE never reaches
 
 **(b) A trustworthy last-successful-refresh timestamp.** Needed for expire, and
 `LatestRefresh` cannot be used as it stands: same single assignment, same `if
-updated {` gate. Stamp it inside `ZoneData.Refresh` on every `err == nil`
-return, including `(false, nil)` when the serial is unchanged
-(`v2/zone_utils.go:92-98`). Spreading writes across `initialLoadZone` and both
-loops is how `RefreshCount` broke; do not repeat that.
+updated {` gate.
+
+The stamp means **a usable SOA was seen**, not `Refresh` returning `err ==
+nil`. `DoTransfer` (`v2/zone_utils.go:283-286`) returns `(false, 0, nil)` when
+at least one primary answered but none gave a usable SOA — all REFUSED,
+NOERROR with an empty answer, NOERROR whose first RR is not a SOA. `Refresh`
+then does `return false, nil` (`:92-98`), which is the same pair as "serial
+unchanged". Stamping on `err == nil` would let a secondary whose primaries
+have revoked its ACL refresh its own expire clock every cycle and never
+expire.
+
+`(bool, error)` cannot currently tell those two apart. Do not spread writes
+across `initialLoadZone` and the loops — that is how `RefreshCount` broke —
+but do not put the chokepoint on `Refresh`'s error return either.
+
+One helper, `noteSuccessfulRefresh`, writes `LatestRefresh` and the sidecar.
+Call it from `DoTransfer`'s two usable-SOA returns (serial unchanged, and
+serial moved). Not from quiet backoff, not from all-unreachable (that already
+returns an error). A usable SOA is the RFC proof the primary is alive, even
+if the AXFR that follows then fails. First-bind file load with no subsequent
+usable SOA is Option 3, not a stamp.
 
 **(c) That timestamp has to survive a restart, which first requires the held
 copy to be in memory.** See §4 and Stage 2 step 1.
@@ -226,15 +243,24 @@ needs to outlive the process without becoming configuration.
 
 **Shape (this is the spec, not a later decision):**
 
-- Path: sibling of the zone file, suffix `.last-refresh`. A zone file
-  `…/example.com.zone` gets `…/example.com.zone.last-refresh`. No zone file
-  means no sidecar (in-memory only; Option 3 on the next start that still has
-  no file). Applies to `storage: persistent` API secondaries *and*
-  config-declared secondaries with `zonefile:`.
+- Path: sibling of the file persistence actually writes, suffix
+  `.last-refresh`. Derive that file the same way `zoneDataToZoneConf`
+  (`v2/dynamic_zones.go:410-414`) already does: `zd.Zonefile` when it is set
+  (config-declared `zonefile:`), otherwise `GetDynamicZoneFilePath` when
+  `ShouldPersistZone` (`v2/dynamic_zones.go:76`). Do **not** key only on
+  `zd.Zonefile`. API-managed zones never set that field;
+  `WriteDynamicZoneFile` derives `<zonedirectory>/<zone>.zone` and does not
+  write the path back onto the `ZoneData`, so a `Zonefile`-keyed sidecar
+  would write nothing in the process that provisioned the zone (the class
+  this work is about) and only start working after a restart, which falls
+  back to Option 3.
+- A zone with neither a `Zonefile` nor a persistable dynamic path has no
+  sidecar (in-memory only; Option 3 on the next start that still has no
+  file).
 - Content: one line, RFC3339Nano UTC.
-- Write: after `Refresh` returns `err == nil`, atomic create-and-rename. A
-  failed write is logged and does **not** fail the refresh; the copy stays
-  served.
+- Write: from `noteSuccessfulRefresh` (usable SOA, §3b), atomic
+  create-and-rename. A failed write is logged and does **not** fail the
+  refresh; the copy stays served.
 - Read: at first bind, after the copy is in memory.
 - Clock: `time.Now()` (wall clock). A step can expire or extend; that is
   accepted.
@@ -297,18 +323,20 @@ than read as finished. Restart with the primary down is also still broken
 **Stage 2 — held copy across restart, timestamp, expire.** Three steps, one
 PR, in this order, because (2) and (3) are pointless until (1):
 
-1. **First bind of a secondary with no published snapshot: if `zd.Zonefile`
-   exists, `FetchFromFile` before `DoTransfer`.** If the transfer then fails,
-   the file copy remains and is served. If the transfer succeeds, it replaces
-   the file copy as today. Same for config-declared secondaries with
-   `zonefile:` and for `storage: persistent` API secondaries. Do not reload
-   the file over a live snapshot on a later failed refresh — the file may be
-   older than memory.
-2. Stamp last-successful-refresh inside `Refresh` on every `err == nil`,
-   persist the sidecar, Option 3 on absence.
+1. **First bind of a secondary with no published snapshot: if the persisted
+   zone file exists (same path as §4), `FetchFromFile` before `DoTransfer`.**
+   If the transfer then fails, the file copy remains and is served. If the
+   transfer succeeds, it replaces the file copy as today. Same for
+   config-declared secondaries with `zonefile:` and for `storage: persistent`
+   API secondaries. On the restart path `zd.Zonefile` is already set; using
+   the §4 derivation also covers a persistable zone whose field is still
+   empty. Do not reload the file over a live snapshot on a later failed
+   refresh — the file may be older than memory.
+2. `noteSuccessfulRefresh` on usable SOA (§3b), persist the sidecar, Option
+   3 on absence.
 3. Query and UPDATE guards: a secondary with a snapshot SERVFAILs when
    `now` is past last-success + served SOA EXPIRE. Ticker and NOTIFY keep
-   trying. A successful refresh un-expires.
+   trying. A usable SOA after expire un-expires.
 
 ## 6. Out of scope
 
@@ -341,13 +369,54 @@ For Stage 2, additionally:
 - first bind, zone file present, transfer fails → file copy is served
 - first bind, zone file present, transfer succeeds → transferred copy is served
 - later failed refresh does not replace a live snapshot from the file
-- successful refresh with an unchanged serial advances the timestamp
+- usable SOA, serial unchanged, advances the timestamp
+- all primaries REFUSED (quiet backoff, `err == nil`) does **not** advance it
+- API-managed zone with empty `zd.Zonefile` still writes the sidecar next to
+  `GetDynamicZoneFilePath`
 - sidecar write failure is logged and does not fail the refresh
 - restart with a persisted timestamp preserves the remaining expire budget
 - restart with no timestamp starts the clock and logs it
 - past expire, queries and UPDATE SERVFAIL; the ticker still attempts refresh
-- a successful refresh after expire un-expires
+- a usable SOA after expire un-expires
 - primaries are not subject to the expire guard
 
 The NOTIFY trick in §2.2 is what makes the "primary down" cases testable without
 waiting out a refresh timer; both stages need it.
+
+## 8. Size
+
+LOC is first-cut production vs test, the way other briefs in this tree count.
+Harness already exists: `testSnapshotZone`, `fakeRW`, `startTestSOAServer`.
+Expire tests set `LatestRefresh` in the past rather than sleeping or injecting
+a clock.
+
+Extract one predicate (`publishedSnapshot() != nil`, named) and use it at all
+three Stage 1 sites. Testing the helper plus driving `DefaultQueryHandler`
+covers UPDATE if UPDATE calls the same helper; a separate `UpdateResponder`
+trip is cheap insurance, not a second design.
+
+| | item | files | impl | test |
+|---|---|---|---|---|
+| **S1** | Predicate + comments that expire is unenforced | `zone_utils.go` (or next to `HasServiceImpactingError`) | 15 | 40 |
+| **S1** | Both query branches | `defaultqueryhandlers.go` | 20 | 120 |
+| **S1** | UPDATE | `updateresponder.go` | 10 | 40 |
+| | **Stage 1** | | **~45** | **~200** |
+| **S2.1** | First-bind `FetchFromFile` before `DoTransfer` | `zone_utils.go` `Refresh` | 40 | 150 |
+| **S2.2** | `noteSuccessfulRefresh` on usable SOA, not `err == nil`; sidecar via §4 path | `zone_utils.go`, `dynamic_zones.go` | 85 | 170 |
+| **S2.3** | Secondary expire guard on query + UPDATE; ticker unchanged | same three call sites as S1 | 25 | 100 |
+| | **Stage 2** | | **~150** | **~420** |
+| | **Total** | | **~195** | **~620** |
+
+**~195 production, ~620 test, ~815 all in.** Stage 1 is the small PR (~45 / ~200).
+Stage 2 is larger because of tests, not because of production code.
+
+The overrun, if there is one, is S2.1. `FetchFromFile` is a primary-shaped path
+(digest, journal, `firstLoad` skips Ready until `InstallInitialSnapshot`).
+Threading it under a secondary with no snapshot is the one place this brief
+touches behaviour the current tests do not cover. If that fights
+`completeFirstZonePolicyAndLoad`, S2.1 alone can double. S1, S2.2 and S2.3
+should not.
+
+Do not count retiring `RefreshCount` (§6). Do not count switching the ticker
+to SOA RETRY (§6). Expire is not an `ErrorType`, so the ticker keeps trying
+with no extra engine code.
