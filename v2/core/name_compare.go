@@ -28,9 +28,11 @@ package core
 // -- it is ASCII-only too -- but allocates twice per call.
 //
 // NOT a substitute for canonicalising a map key. A lookup keyed by name still
-// needs a canonical key (dns.CanonicalName), because a function cannot be
-// consulted by a hash table; this is for the places that genuinely compare two
-// names. See the discussion in tdns#415.
+// needs a canonical key, because a hash table cannot consult a function; this
+// is for the places that genuinely compare two names. Use CanonicalizeName to
+// build that key -- NOT dns.CanonicalName, which folds case by the same rule
+// but rewrites any octet that is not valid UTF-8 into U+FFFD, so two distinct
+// names can collide on one key. See the discussion in tdns#415.
 //
 // Names are compared exactly as given: no trailing-dot normalisation, no
 // escape processing. "example.com" and "example.com." are different strings and
