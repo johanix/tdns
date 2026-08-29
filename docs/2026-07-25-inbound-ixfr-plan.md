@@ -259,17 +259,29 @@ routing at apply time.
 The delta must be applied onto our *current* content, but the existing refresh
 builds `new_zd` from scratch. v1 bridges cleanly (F2 records the alternative):
 
-1. Materialize the current published snapshot into `new_zd.Data`, **using the
-   existing owner copier** — `cloneOwner` (`v2/zone_mutation.go:~50`), not a
-   third one written here. A fresh `OwnerData` with `cloneRRset`'d RRsets is
-   NOT enough: `OwnerData.NSEC` is a field beside `RRtypes`, not an entry
-   inside it (`v2/structs.go:855`, and `cloneOwner` carries a comment saying
-   rebuilding an owner from its RRtypes alone "would drop the chain entry
-   silently"). An RRtypes-only materialize therefore publishes a signed zone
-   with no denial chain — and §1 does not save it, because the apply
-   SUCCEEDED: there is no error to fall back from, and resolvers see BOGUS.
-   The copy must be deep, for the reason `cloneOwner` already gives: the live
-   snapshot is shared and signing rewrites TTLs in place.
+1. Materialize the current published snapshot into `new_zd.Data`: walk the
+   snapshot, `cloneRRset` **every** RRset into a fresh `RRTypeStore`, and copy
+   `OwnerData.NSEC` the way `cloneOwner` does. Both halves are required and
+   neither existing helper gives you both:
+
+   - **NSEC is not in `RRtypes`.** It is a field beside it (`v2/structs.go:855`),
+     and `cloneOwner` (`v2/zone_mutation.go:37`) carries the comment that says
+     why: rebuilding an owner from its RRtypes alone "would drop the chain entry
+     silently". An RRtypes-only materialize publishes a signed zone with no
+     denial chain, and §1 does not save it — the apply SUCCEEDED, so there is
+     no error to fall back from and resolvers see BOGUS.
+   - **The RRset copy must be deep.** `RRTypeStore.Get` (`v2/rrtypestore.go:19`)
+     returns `core.RRset` by VALUE, so its `RRs` / `RRSIGs` slices still share
+     backing arrays with the published snapshot. `RemoveRR`'s
+     `append(RRs[:i], RRs[i+1:]...)` then shifts elements inside that shared
+     array — an in-place edit of the copy being served right now, which is the
+     Project B invariant `snapshotMapFromData` exists to protect.
+
+   **Do not call `cloneOwner` to do this.** It is the NSEC lesson, not the
+   materialize: it reads and WRITES `zd.workingSet` (so it mutates the live
+   secondary), and its `RRtypes.Set(t, rs)` is exactly the shallow copy above —
+   only `NSEC` goes through `cloneRRset`. Do not share `RRTypeStore` pointers
+   with the snapshot either.
 2. For each `ixfrStep` in order: apply `removed` (delete the exact matching RR
    from its owner/type RRset; drop the RRset when empty — RFC 1995 delete is
    RFC 2136 §2.5.4 delete-exact-RR semantics, reusing `RRset.RemoveRR`), then
@@ -335,8 +347,14 @@ by the case-insensitive-names work in #425.
 
 We send `zd.IncomingSerial` as the "have" serial. On success `IncomingSerial`
 and `CurrentSerial` advance to `S` (the server's serial), identical to the AXFR
-path's post-transfer assignment. The up-to-date case leaves both unchanged and
-triggers the existing `new_zd.IncomingSerial == zd.IncomingSerial` no-op branch.
+path's post-transfer assignment.
+
+The up-to-date case leaves both unchanged, but it does NOT reach the existing
+`shouldDiscardUnchangedTransfer` branch: per §4.2 it never fills `new_zd` at
+all, and is signalled as its own outcome from `ZoneTransferIn`.
+`FetchFromUpstream` turns that outcome into the same observable no-op (restore
+`prevStatus`, return `false, nil`) without a `new_zd` to compare serials
+against. Follow §4.2.
 
 ## 5. Interaction with the merged outbound chain (#328) — and why onward relay is nearly free in the immutable case
 
@@ -384,7 +402,17 @@ signing/staging-apply variant remains a later PR.
   add) → error.
 - **Apply (unit):** materialize a base zone, apply a delta, assert the resulting
   `Data` equals an independently-built expected zone (adds present, deletes
-  gone, RRSIGs routed, RRset dropped when emptied).
+  gone, RRSIGs routed, RRset dropped when emptied). Plus one case per §4.4
+  rule, because each is a bug this brief already made once:
+  - a delta that never mentions NSEC leaves `OwnerData.NSEC` present on every
+    materialized owner (and the source snapshot is unchanged afterwards — the
+    copy was deep);
+  - a step that removes an RR and does not re-sign the RRset is an apply
+    ERROR, not a silently unsigned zone;
+  - a delete of an RRSIG (and of an NSEC) matches and removes it, rather than
+    being read as delete-of-missing and aborting;
+  - after apply, the apex SOA RR in `Data` carries `S`, not the serial the
+    snapshot was materialized at.
 - **End-to-end (loopback), the payoff test:** stand up a tdns primary (which
   now serves outbound IXFR, #328), bump it through a few serials, point a tdns
   secondary at it with IXFR enabled, and assert the secondary converges to
@@ -508,9 +536,8 @@ than after:
 `ea391786`. Every structural claim held; the line numbers are updated in place.
 It did not move the table — but it did cost §4.1, which had to be rewritten: the
 refresh path DOES SOA-probe before `FetchFromUpstream`, and since the
-serve-until-expire work that probe carries the zone's expire clock. See §4.1
-for the choice C2 now has to make explicitly, and the row below for what the
-second option costs.
+serve-until-expire work that probe carries the zone's expire clock. §4.1 is
+now a decision rather than a fork: the probe stays.
 
 **~~The delete-exact-RR semantics are unassessed against the name-comparison
 work.~~** *Retracted 2026-08-29.* This said `RRset.RemoveRR`'s exact matching
