@@ -178,12 +178,21 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		return nil // didn't find any zone for that qname
 	}
 
-	// Refuse UPDATE on a service-impacting error OR before the first
-	// successful refresh: a zone with RefreshCount==0 has no
-	// authoritative data to update yet. Mirrors the same first-load
-	// guard in defaultqueryhandlers.go.
-	if zd.HasServiceImpactingError() || (zd.HasError(RefreshError) && zd.RefreshCount == 0) {
+	// Refuse UPDATE on a service-impacting error, or when the zone holds
+	// no published data to update. Same predicate as the query path in
+	// defaultqueryhandlers.go, deliberately: an UPDATE that the query
+	// path would answer for must not be refused here, and vice versa.
+	// RefreshError alone does not qualify -- a zone with data is still
+	// authoritative for its current contents.
+	if zd.HasServiceImpactingError() {
 		lgHandler.Error("zone in error state", "qname", qname, "errorType", ErrorTypeToString[zd.ErrorType], "errorMsg", zd.ErrorMsg)
+		m.SetRcode(r, dns.RcodeServerFailure)
+		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)
+		w.WriteMsg(m)
+		return nil // didn't find any zone for that qname
+	}
+	if !zd.HasPublishedData() {
+		lgHandler.Error("zone holds no published data", "qname", qname, "zone", zd.ZoneName)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)
 		w.WriteMsg(m)
