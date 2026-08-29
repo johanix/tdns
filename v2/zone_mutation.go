@@ -700,8 +700,29 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		zd.wsSignalSynth = nil
 	}
 	zd.repopulateWorkingSetLocked(dynamicRRs)
-	// A refresh replaces zone data wholesale: new IXFR epoch, no delta.
-	zd.wsIxfrEpochReset = true
+	// A refresh normally replaces zone data wholesale, which is a new IXFR
+	// epoch by definition: nothing links the previous snapshot to this one, so
+	// any delta across the boundary could be wrong for some downstream.
+	//
+	// An inbound IXFR is the exception, and the reason §5 exists. Its content
+	// IS the previous snapshot plus a difference sequence, so the boundary is
+	// exactly the kind of step the chain is made of -- and a cascaded
+	// secondary can go on serving deltas to ITS downstreams across a refresh
+	// instead of forcing them all to AXFR.
+	//
+	// The link is not translated from the inbound format. updateIxfrChainLocked
+	// already diffs the outgoing snapshot against the data about to be
+	// published, so letting it run produces a link computed from what we
+	// actually served and are about to serve. That is stronger than relaying
+	// the primary's sequence verbatim: it cannot ship a delta that disagrees
+	// with our own content, whatever the primary sent.
+	//
+	// Non-signing only, per §5. A signing secondary re-signs on publish, and
+	// while the same diff would in principle capture that too, the interaction
+	// between signing, NSEC chain regeneration and the chain update is not
+	// something this project audited. Deferred to PR-2 deliberately rather
+	// than assumed safe.
+	zd.wsIxfrEpochReset = !(new_zd != nil && new_zd.ixfrDerived && !zd.signsItsOwnContent())
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 
 	// Only advertise the zone as Ready once a snapshot actually exists. If the

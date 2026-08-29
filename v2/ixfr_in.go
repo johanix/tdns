@@ -600,6 +600,10 @@ func (zd *ZoneData) applyIxfrToScratch(newZd *ZoneData, rrs []dns.RR) error {
 	newZd.Data = data
 	newZd.IncomingSerial = target
 	newZd.CurrentSerial = target
+	// This replacement is a delta applied to what we already served, not a
+	// whole zone that arrived. applyRefreshReplacementLocked uses that to keep
+	// the outbound chain contiguous instead of resetting it (§5).
+	newZd.ixfrDerived = true
 	// The journal anchors to the file, not to whatever the serial becomes after
 	// load-time signing, exactly as the AXFR path records it.
 	newZd.fileSerial = target
@@ -647,4 +651,17 @@ func (zd *ZoneData) requestIxfr() bool {
 		return false
 	}
 	return true
+}
+
+// signsItsOwnContent reports whether this zone re-signs what it serves, so its
+// served content is not a faithful mirror of what its primary sent.
+//
+// The distinction matters for onward relay (§5): a mirror can hand its own
+// downstreams the same difference the chain records, while a re-signing
+// secondary's records are its own and the two must not be conflated.
+func (zd *ZoneData) signsItsOwnContent() bool {
+	if zd == nil {
+		return false
+	}
+	return zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]
 }

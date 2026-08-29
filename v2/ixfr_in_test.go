@@ -718,3 +718,125 @@ func TestRequestIxfrDefaultsOn(t *testing.T) {
 		})
 	}
 }
+
+// -------------------------------------------------------- onward relay (§5)
+
+// ixfrPrimedSecondary builds a primary with a chain, pulls it into a secondary
+// via a delta, and returns both plus the primary's shutdown.
+func ixfrPrimedSecondary(t *testing.T, secOpts map[ZoneOption]bool) (*ZoneData, *ZoneData, func()) {
+	t.Helper()
+	pzd, addr, stop := ixfrTestPrimary(t, ixApplyZone)
+	base := pzd.publishedSnapshot().Serial
+
+	Zones.Set("example.", pzd)
+	stageAndPublish(t, pzd, stageAddA(t, pzd, "one.example.", "10.1.0.1"))
+	stageAndPublish(t, pzd, stageAddA(t, pzd, "two.example.", "10.1.0.2"))
+	Zones.Remove("example.")
+
+	zd := ixfrTestSecondary(t, ixApplyZone, addr, secOpts)
+	zd.IncomingSerial = base
+	zd.CurrentSerial = base
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
+		t.Fatalf("FetchFromUpstream: %v", err)
+	}
+	return pzd, zd, stop
+}
+
+// TestIxfrInKeepsTheOutboundChain is §5: a mirroring secondary that applied a
+// delta has NOT started a new IXFR epoch, so its own downstreams can still be
+// served incrementally across the refresh boundary.
+//
+// Before this, every inbound refresh set wsIxfrEpochReset and every cascaded
+// secondary forced all of its downstreams to a full transfer on every change.
+func TestIxfrInKeepsTheOutboundChain(t *testing.T) {
+	authApp(t)
+	_, zd, stop := ixfrPrimedSecondary(t, nil)
+	defer stop()
+
+	chain := chainOf(zd)
+	if len(chain) == 0 {
+		t.Fatal("the secondary reset its outbound IXFR chain after applying a delta; " +
+			"every downstream would be forced to AXFR across each refresh")
+	}
+	last := chain[len(chain)-1]
+	if last.ToSerial != zd.IncomingSerial {
+		t.Errorf("chain ends at serial %d, zone is at %d: the link does not describe "+
+			"the copy being served", last.ToSerial, zd.IncomingSerial)
+	}
+}
+
+// TestIxfrInResetsTheChainForASigningSecondary: §5 scopes relay to the
+// non-signing case. A re-signing secondary's records are its own, and the
+// interaction between signing, NSEC regeneration and the chain update was not
+// audited by this project — so it takes the old wholesale-epoch behaviour.
+func TestIxfrInResetsTheChainForASigningSecondary(t *testing.T) {
+	authApp(t)
+	zd := &ZoneData{
+		ZoneName: "example.", Options: map[ZoneOption]bool{OptInlineSigning: true},
+	}
+	if !zd.signsItsOwnContent() {
+		t.Fatal("a zone with inline-signing should count as signing its own content")
+	}
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	if !zd.signsItsOwnContent() {
+		t.Error("a zone with online-signing should count as signing its own content")
+	}
+	zd.Options = map[ZoneOption]bool{}
+	if zd.signsItsOwnContent() {
+		t.Error("a plain mirror should not count as signing its own content")
+	}
+}
+
+// TestIxfrRelayToADownstream is the three-instance case §6 asks for:
+// primary → secondary → edge, all IXFR-enabled. The edge must pull the change
+// from the secondary AS A DELTA, not as a full zone.
+//
+// This is the whole point of §5. Asserting only that the edge converges would
+// prove nothing, because the AXFR fallback converges identically — so the
+// outcome of the edge's transfer is what is checked.
+func TestIxfrRelayToADownstream(t *testing.T) {
+	authApp(t)
+	_, sec, stopPrimary := ixfrPrimedSecondary(t, nil)
+	defer stopPrimary()
+
+	if len(chainOf(sec)) == 0 {
+		t.Fatal("precondition: the secondary should have kept its chain")
+	}
+	secSerial := sec.IncomingSerial
+
+	// Serve the secondary to a downstream of its own.
+	sec.Ready = true
+	sec.Status = ZoneStatusReady
+	sec.Downstreams = []AclEntry{{Prefix: "127.0.0.0/8", Key: NOKEY}}
+	secAddr, stopSec := serveTestPrimary(t, sec)
+	defer stopSec()
+
+	// An edge sitting at the serial the secondary held before the delta.
+	edge := &ZoneData{
+		ZoneName: "example.", ZoneStore: MapZone, ZoneType: Secondary,
+		Logger:    discardLogger(),
+		Upstreams: []PeerConf{{Addr: secAddr}},
+	}
+	if _, _, err := edge.ReadZoneData(ixApplyZone, true); err != nil {
+		t.Fatalf("edge ReadZoneData: %v", err)
+	}
+	edge.InstallInitialSnapshot()
+	t.Cleanup(edge.stopPublisher)
+	from := chainOf(sec)[0].FromSerial
+
+	outcome, rrs, err := edge.ixfrTransferIn(context.Background(), edge.Upstreams[0], from, &Config{})
+	if err != nil {
+		t.Fatalf("edge ixfrTransferIn: %v", err)
+	}
+	if outcome != ixfrDelta {
+		t.Fatalf("the secondary answered its downstream with %s, want delta: the "+
+			"inbound refresh reset the outbound chain after all", outcome)
+	}
+	steps, perr := parseIxfrDeltas("example.", rrs, from)
+	if perr != nil {
+		t.Fatalf("the delta the secondary relayed does not parse: %v", perr)
+	}
+	if got := ixfrTargetSerial(steps); got != secSerial {
+		t.Errorf("relayed delta ends at serial %d, secondary serves %d", got, secSerial)
+	}
+}
