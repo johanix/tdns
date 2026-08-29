@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -218,5 +219,48 @@ func TestFetchFromUpstream_NoUpstreams(t *testing.T) {
 	zd := &ZoneData{ZoneName: "example.test."}
 	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err == nil {
 		t.Fatal("expected an error when no upstreams are configured")
+	}
+}
+
+// TestDoTransfer_SerialWraparound: SOA serials are mod-2^32 and wrap (RFC
+// 1982), so the first serial a primary publishes after wrapping past
+// MaxUint32 is a small number -- 0 here. Compared with a plain `<=` that
+// reads as older than what we hold, the secondary declines to transfer, and
+// keeps declining: it serves stale data indefinitely, with no error anywhere,
+// until somebody forces a retransfer.
+func TestDoTransfer_SerialWraparound(t *testing.T) {
+	const zone = "wrap.test."
+	for _, tc := range []struct {
+		what         string
+		ourSerial    uint32
+		theirSerial  uint32
+		wantTransfer bool
+	}{
+		{"upstream wrapped past zero", math.MaxUint32, 0, true},
+		{"upstream one ahead, no wrap", 7, 8, true},
+		{"upstream unchanged", 7, 7, false},
+		{"upstream genuinely older", 7, 5, false},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			addr, stop := startTestSOAServer(t, zone, tc.theirSerial, dns.RcodeSuccess)
+			defer stop()
+
+			zd := &ZoneData{
+				ZoneName:       zone,
+				IncomingSerial: tc.ourSerial,
+				Upstreams:      []PeerConf{{Addr: addr}},
+			}
+			xfr, serial, err := zd.DoTransfer(context.Background(), &Config{})
+			if err != nil {
+				t.Fatalf("DoTransfer: %v", err)
+			}
+			if serial != tc.theirSerial {
+				t.Errorf("reported serial %d, want %d", serial, tc.theirSerial)
+			}
+			if xfr != tc.wantTransfer {
+				t.Errorf("transfer = %v, want %v (ours %d, theirs %d)",
+					xfr, tc.wantTransfer, tc.ourSerial, tc.theirSerial)
+			}
+		})
 	}
 }

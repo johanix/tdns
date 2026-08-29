@@ -173,6 +173,17 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			resp.ErrorMsg = err.Error()
 			return &resp, err
 		}
+		// SIG(0) keys carry no timestamps, so a bind rendering of one gets
+		// the key material and no timing tags.
+		for i := range keys {
+			priv, err := PrivateKeyForExport(kp.KeyFormat, keys[i].KeyRR, keys[i].PrivateKey, "", "", "")
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("%s keyid %d: %v", keys[i].Zone, keys[i].Keyid, err)
+				return &resp, nil
+			}
+			keys[i].PrivateKey = priv
+		}
 		resp.BulkSig0Keys = keys
 		resp.Msg = fmt.Sprintf("Exported %d SIG(0) key(s)", len(keys))
 		txSuccess = true
@@ -291,6 +302,12 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			}
 			return &resp, fmt.Errorf("error from row.Scan(): %v", err)
 		}
+		privkeyOut, err := PrivateKeyForExport(kp.KeyFormat, keyrrstr, privatekey, "", "", "")
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("%s keyid %d: %v", zonename, keyid, err)
+			return &resp, nil
+		}
 		mapkey := fmt.Sprintf("%s::%d", zonename, keyid)
 		resp.Sig0keys = map[string]Sig0Key{
 			mapkey: {
@@ -299,7 +316,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 				Keyid:      uint16(keyid),
 				Algorithm:  algorithm,
 				Creator:    creator,
-				PrivateKey: privatekey, // unredacted: export intentionally surfaces it
+				PrivateKey: privkeyOut, // unredacted: export intentionally surfaces it
 				Keystr:     keyrrstr,
 			},
 		}
@@ -541,6 +558,16 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			resp.ErrorMsg = err.Error()
 			return &resp, err
 		}
+		for i := range keys {
+			priv, err := PrivateKeyForExport(kp.KeyFormat, keys[i].KeyRR, keys[i].PrivateKey,
+				keys[i].PublishedAt, keys[i].ActiveAt, keys[i].RetiredAt)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("%s keyid %d: %v", keys[i].Zone, keys[i].Keyid, err)
+				return &resp, nil
+			}
+			keys[i].PrivateKey = priv
+		}
 		resp.BulkDnssecKeys = keys
 		resp.Msg = fmt.Sprintf("Exported %d DNSSEC key(s)", len(keys))
 		txSuccess = true
@@ -641,6 +668,14 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			}
 			return &resp, fmt.Errorf("error from row.Scan(): %v", err)
 		}
+		// The single-key row carries no timestamps, so a bind rendering here
+		// gets the key material and no timing tags; bulk-export has them.
+		privkeyOut, err := PrivateKeyForExport(kp.KeyFormat, keyrrstr, privatekey, "", "", "")
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("%s keyid %d: %v", zonename, keyid, err)
+			return &resp, nil
+		}
 		mapkey := fmt.Sprintf("%s::%d", zonename, keyid)
 		resp.Dnskeys = map[string]DnssecKey{
 			mapkey: {
@@ -650,7 +685,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 				Flags:      uint16(flags),
 				Algorithm:  algorithm,
 				Creator:    creator,
-				PrivateKey: privatekey, // unredacted: export intentionally surfaces it
+				PrivateKey: privkeyOut, // unredacted: export intentionally surfaces it
 				Keystr:     keyrrstr,
 			},
 		}

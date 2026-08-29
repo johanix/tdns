@@ -23,6 +23,9 @@ import (
 // var filename string
 var keyid int
 var NewState, filename, keytype, outdir string
+var keyExportFormat string
+
+const keyFormatHelp = "Private key format to write: pem (PKCS#8, as stored) or bind (Private-key-format v1.3)"
 
 // NewKeystoreCmd returns a fresh "keystore" command tree bound to the
 // given role. The subtree (sig0 + dnssec branches with their children
@@ -530,16 +533,21 @@ containing either the private or the public SIG(0) key and the name of the zone.
 		Use:   "export",
 		Short: "Export a SIG(0) key pair from the keystore as BIND-style .private/.key files",
 		Long: `Write the SIG(0) key pair for (zone, keyid) to two files in BIND filename
-convention: K<zone>+<alg-num>+<keyid>.private (PKCS#8 PEM) and .key (zone-file
-KEY RR). The resulting pair is directly consumable by commands accepting
---key <basename.private>.`,
+convention: K<zone>+<alg-num>+<keyid>.private and .key (zone-file KEY RR).
+The private half is written as PKCS#8 PEM, or as bind's Private-key-format
+v1.3 with --format bind. The resulting pair is directly consumable by commands
+accepting --key <basename.private>.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename", "keyid")
+			if err := tdns.ValidateKeyFormat(keyExportFormat); err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 			sig0KeyMgmt(role, "export")
 		},
 	}
 	export.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone the key belongs to")
 	export.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to export")
+	export.Flags().StringVar(&keyExportFormat, "format", tdns.KeyFormatPEM, keyFormatHelp)
 	export.Flags().StringVarP(&outdir, "outdir", "o", ".", "Directory to write .private and .key files to")
 	export.MarkFlagRequired("zone")
 	export.MarkFlagRequired("keyid")
@@ -656,15 +664,21 @@ containing either the private or the public SIG(0) key and the name of the zone.
 		Use:   "export",
 		Short: "Export a DNSSEC key pair from the keystore as BIND-style .private/.key files",
 		Long: `Write the DNSSEC key pair for (zone, keyid) to two files in BIND filename
-convention: K<zone>+<alg-num>+<keyid>.private (PKCS#8 PEM) and .key (zone-file
-DNSKEY RR). The resulting pair is directly consumable by 'keystore dnssec import'.`,
+convention: K<zone>+<alg-num>+<keyid>.private and .key (zone-file DNSKEY RR).
+The private half is written as PKCS#8 PEM, or as bind's Private-key-format
+v1.3 with --format bind. The resulting pair is directly consumable by
+'keystore dnssec import'.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename", "keyid")
+			if err := tdns.ValidateKeyFormat(keyExportFormat); err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 			dnssecKeyMgmt(role, "export")
 		},
 	}
 	export.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone the key belongs to")
 	export.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to export")
+	export.Flags().StringVar(&keyExportFormat, "format", tdns.KeyFormatPEM, keyFormatHelp)
 	export.Flags().StringVarP(&outdir, "outdir", "o", ".", "Directory to write .private and .key files to")
 	export.MarkFlagRequired("zone")
 	export.MarkFlagRequired("keyid")
@@ -808,6 +822,7 @@ func sig0KeyMgmt(role, cmd string) {
 	data := tdns.KeystorePost{
 		Command:    "sig0-mgmt",
 		SubCommand: cmd,
+		KeyFormat:  keyExportFormat,
 	}
 
 	api, err := GetApiClient(role, true)
@@ -929,8 +944,10 @@ func sig0KeyMgmt(role, cmd string) {
 }
 
 // writeSig0ExportFiles writes a SIG(0) key pair to two BIND-style files
-// in outdir: K<zone>+<alg>+<keyid>.private (PKCS#8 PEM as stored in the
-// keystore) and .key (zone-file KEY RR text). The resulting basename is
+// in outdir: K<zone>+<alg>+<keyid>.private and .key (zone-file KEY RR
+// text). The private half is whatever the daemon rendered for the
+// requested format -- PKCS#8 PEM as stored by default, or bind's
+// Private-key-format under --format bind. The resulting basename is
 // directly consumable by tdns.ReadPrivateKey.
 // writeNewFile writes data to path, failing if path already exists.
 // The O_CREATE|O_EXCL open makes the "don't overwrite" guarantee atomic
@@ -991,6 +1008,7 @@ func dnssecKeyMgmt(role, cmd string) {
 	data := tdns.KeystorePost{
 		Command:    "dnssec-mgmt",
 		SubCommand: cmd,
+		KeyFormat:  keyExportFormat,
 	}
 
 	api, err := GetApiClient(role, true)

@@ -45,6 +45,11 @@ type KeystorePost struct {
 	// Bulk export/import (subcommands "bulk-export" / "bulk-import"). Select*
 	// narrows an export; the Bulk*Keys carry the payload of an import. Force
 	// (above) turns import's create-if-absent into overwrite.
+	// KeyFormat selects how exported private keys are rendered: "pem"
+	// (default, PKCS#8 exactly as stored) or "bind". Rendering happens here,
+	// daemon-side, because only the daemon links the algorithm
+	// implementations -- see bind_export.go.
+	KeyFormat      string          `json:"keyformat,omitempty"`
 	SelectExact    []string        `json:"selectexact,omitempty"`
 	SelectSubtree  []string        `json:"selectsubtree,omitempty"`
 	BulkDnssecKeys []BulkDnssecKey `json:"bulkdnsseckeys,omitempty"`

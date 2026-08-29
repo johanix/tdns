@@ -251,6 +251,30 @@ func (zd *ZoneData) publishedSnapshot() *zoneSnapshot {
 	return zd.snapshot.Load()
 }
 
+// HasPublishedData reports whether the zone holds content it can answer from,
+// i.e. whether a snapshot has been published. This is the "do we have data"
+// test the query and UPDATE paths need.
+//
+// It replaces zd.RefreshCount, which could not answer the question. That
+// counter is incremented in exactly one place -- initialLoadZone, inside its
+// `if updated` -- so a zone provisioned through the API in the process that
+// added it never reached 1 and answered nothing below its own apex, with no
+// error set anywhere (tdns#413).
+//
+// Do NOT substitute GetSOA(). It synthesizes an SOA for
+// !Ready && Secondary && IncomingSerial == 0 so the refresh engine has
+// something to probe with, which is exactly the never-transferred case that
+// must keep SERVFAILing.
+//
+// NOTE: holding data is not the same as being entitled to serve it. RFC 1034
+// section 4.3.5 says a secondary stops answering once SOA EXPIRE has elapsed
+// since its last successful refresh; that is a separate question, asked
+// separately by HasExpired(). Every call site that consults this predicate
+// consults that one too.
+func (zd *ZoneData) HasPublishedData() bool {
+	return zd.publishedSnapshot() != nil
+}
+
 // soaForResponse returns a response-only SOA RRset from the published snapshot.
 func (zd *ZoneData) soaForResponse(apex *OwnerData) core.RRset {
 	return zd.soaForResponseFrom(zd.publishedSnapshot(), apex)
