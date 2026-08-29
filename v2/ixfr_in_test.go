@@ -601,7 +601,11 @@ func TestIxfrInConvergesViaDelta(t *testing.T) {
 	// silently accumulates no chain at all. Unregistered again immediately --
 	// the chain lives in its snapshot and the transfer-out path reads that
 	// directly, while the secondary needs the same name in the map.
+	// Registered only while the chain is built, and removed via cleanup as
+	// well as inline: a t.Fatalf between the two would otherwise leave the
+	// primary in the global map and break whatever test ran next.
 	Zones.Set("example.", pzd)
+	t.Cleanup(func() { Zones.Remove("example.") })
 	stageAndPublish(t, pzd, stageAddA(t, pzd, "one.example.", "10.1.0.1"))
 	stageAndPublish(t, pzd, stageAddA(t, pzd, "two.example.", "10.1.0.2"))
 	Zones.Remove("example.")
@@ -767,12 +771,10 @@ func TestIxfrInKeepsTheOutboundChain(t *testing.T) {
 	}
 }
 
-// TestIxfrInResetsTheChainForASigningSecondary: §5 scopes relay to the
-// non-signing case. A re-signing secondary's records are its own, and the
-// interaction between signing, NSEC regeneration and the chain update was not
-// audited by this project — so it takes the old wholesale-epoch behaviour.
-func TestIxfrInResetsTheChainForASigningSecondary(t *testing.T) {
-	authApp(t)
+// TestSignsItsOwnContent covers the predicate §5 scopes onward relay by. It
+// does NOT cover the chain actually resetting for a signing secondary -- the
+// name it used to carry claimed that and this only tests the predicate.
+func TestSignsItsOwnContent(t *testing.T) {
 	zd := &ZoneData{
 		ZoneName: "example.", Options: map[ZoneOption]bool{OptInlineSigning: true},
 	}
@@ -872,7 +874,10 @@ func startBadIxfrPrimary(t *testing.T, zoneStr string, bad []dns.RR) (string, fu
 	mux := dns.NewServeMux()
 	mux.HandleFunc("example.", func(w dns.ResponseWriter, r *dns.Msg) {
 		if len(r.Question) == 1 && r.Question[0].Qtype == dns.TypeIXFR {
-			ch := make(chan *dns.Envelope)
+			// Buffered: if tr.Out returns without receiving -- which it does
+			// on a write error -- an unbuffered send would strand this
+			// goroutine for the life of the test binary.
+			ch := make(chan *dns.Envelope, 1)
 			tr := new(dns.Transfer)
 			go func() { ch <- &dns.Envelope{RR: bad}; close(ch) }()
 			_ = tr.Out(w, r, ch)
@@ -1114,5 +1119,55 @@ func TestConfigWarningIsNotServiceImpacting(t *testing.T) {
 	if zd.HasServiceImpactingError() {
 		t.Error("ConfigWarning is service-impacting; a zone would stop answering " +
 			"because of a config setting that has no effect")
+	}
+}
+
+// TestApplyIxfrRefusesDuplicateAdds: the plan lists an add that duplicates
+// alongside a delete that matches nothing, and for the same reason -- both mean
+// our base is not the base the delta was computed against. Appending anyway
+// would also be a way for a primary to grow one of our RRsets without bound.
+func TestApplyIxfrRefusesDuplicateAdds(t *testing.T) {
+	zd := ixBase(t, ixApplyZone)
+	data, signed := materializeForIxfr(zd.publishedSnapshot())
+
+	// www.example. already holds 10.0.0.3 in the base zone.
+	steps := []ixfrStep{{from: 7, to: 8, added: []dns.RR{ixA(t, "www.example.", "10.0.0.3")}}}
+	if err := applyIxfrSteps("example.", data, signed, steps); err == nil {
+		t.Error("apply accepted an add of a record already present; the zone would " +
+			"hold the same RR twice")
+	}
+	// The same record at a different value is an ordinary add.
+	data2, signed2 := materializeForIxfr(zd.publishedSnapshot())
+	steps2 := []ixfrStep{{from: 7, to: 8, added: []dns.RR{ixA(t, "www.example.", "10.0.0.99")}}}
+	if err := applyIxfrSteps("example.", data2, signed2, steps2); err != nil {
+		t.Errorf("apply refused a genuine add: %v", err)
+	}
+}
+
+// TestApplyIxfrRefusesStrippedNSECSignature is the denial-chain half of the
+// leftover-unsigned rule. An NSEC left standing without its RRSIG is a name
+// asserting what does not exist with nothing to prove it -- the same failure as
+// an unsigned RRset, on the record that the whole negative-answer path rests on.
+func TestApplyIxfrRefusesStrippedNSECSignature(t *testing.T) {
+	nsec := "example.\t3600\tIN\tNSEC\tns.example. NS SOA RRSIG NSEC"
+	nsig := "example.\t3600\tIN\tRRSIG\tNSEC 13 2 3600 20260101000000 20251201000000 12345 example. AAAA"
+	zd := ixBase(t, ixApplyZone+nsec+"\n"+nsig+"\n")
+
+	data, signed := materializeForIxfr(zd.publishedSnapshot())
+	if !signed[signedKey{owner: "example.", rrtype: dns.TypeNSEC}] {
+		t.Fatal("the NSEC's signature was not recorded; the check below cannot fire")
+	}
+
+	steps := []ixfrStep{{from: 7, to: 8, removed: []dns.RR{mustRR(t, nsig)}}}
+	if err := applyIxfrSteps("example.", data, signed, steps); err == nil {
+		t.Error("apply accepted a delta that strips an NSEC's signature while " +
+			"leaving the NSEC in place")
+	}
+
+	// Removing the NSEC together with its signature is fine.
+	data2, signed2 := materializeForIxfr(zd.publishedSnapshot())
+	steps2 := []ixfrStep{{from: 7, to: 8, removed: []dns.RR{mustRR(t, nsig), mustRR(t, nsec)}}}
+	if err := applyIxfrSteps("example.", data2, signed2, steps2); err != nil {
+		t.Errorf("apply refused removing an NSEC and its signature together: %v", err)
 	}
 }

@@ -790,6 +790,14 @@ func (zd *ZoneData) transferFromUpstream(ctx context.Context, up PeerConf, newZd
 		*newZd = newTransferScratchZone(zd)
 	}
 
+	// Not if the reason the delta path gave up was that we are shutting down.
+	// FetchFromUpstream's loop checks this before each upstream for exactly
+	// this reason; without it here, a cancellation landing mid-IXFR would go
+	// on to start a whole fresh AXFR against the same peer.
+	if cerr := ctx.Err(); cerr != nil {
+		return false, fmt.Errorf("transfer of %s from %s: %w", zd.ZoneName, upstream, cerr)
+	}
+
 	lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", upstream)
 	if _, err := newZd.ZoneTransferIn(ctx, up, zd.IncomingSerial, "axfr", conf); err != nil {
 		return false, err

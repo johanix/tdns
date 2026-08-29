@@ -59,6 +59,15 @@ func publishedDsyncSchemes(rrs []dns.RR) map[core.DsyncScheme]bool {
 	return out
 }
 
+// Every RR added to the DSYNC RRset below goes through core.RRset.Add, which
+// refuses a duplicate, rather than through a plain append.
+//
+// This function is re-run: SetupZoneSync calls it, and the management API
+// exposes it directly. With a plain append, each run added another identical
+// copy of every record it publishes, so a zone accumulated duplicate DSYNC,
+// URI, TXT and SVCB records at its _dsync owner -- observed while testing the
+// DSYNC API scheme. The address-RR paths in this file already guarded; these
+// did not.
 func (zd *ZoneData) PublishDsyncRRs() error {
 	lg.Debug("PublishDsyncRRs", "zone", zd.ZoneName)
 	rrset := core.RRset{
@@ -157,7 +166,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
 					return err
 				}
-				rrset.RRs = append(rrset.RRs, dsyncrr)
+				rrset.Add(dsyncrr)
 				dsync_added = true
 			}
 
@@ -197,7 +206,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
 					return err
 				}
-				rrset.RRs = append(rrset.RRs, dsyncrr)
+				rrset.Add(dsyncrr)
 				dsync_added = true
 			}
 
@@ -242,7 +251,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
 					return err
 				}
-				rrset.RRs = append(rrset.RRs, dsyncrr)
+				rrset.Add(dsyncrr)
 				dsync_added = true
 			}
 
@@ -251,7 +260,8 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				return fmt.Errorf("zone %s: %v", zd.ZoneName, err)
 			}
 			txtRR := dsyncApiTxtRR(target, apiconf, uint32(ttl))
-			rrset.RRs = append(rrset.RRs, uriRR, txtRR)
+			rrset.Add(uriRR)
+			rrset.Add(txtRR)
 			lg.Info("added DSYNC API service description", "zone", zd.ZoneName,
 				"target", target, "uri", uriRR.Target, "dialect", apiconf.Dialect)
 
@@ -304,7 +314,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 					},
 				},
 			}
-			rrset.RRs = append(rrset.RRs, svcbRR)
+			rrset.Add(svcbRR)
 			lg.Debug("added SVCB bootstrap record", "zone", zd.ZoneName, "target", target, "methods", bootstrapMethods)
 		}
 	}

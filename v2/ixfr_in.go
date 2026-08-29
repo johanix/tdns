@@ -237,6 +237,14 @@ func materializeForIxfr(snap *zoneSnapshot) (*core.NameMap[OwnerData], map[signe
 			nod.RRtypes.Set(t, cloneRRset(rs))
 		}
 		nod.NSEC = cloneRRset(src.NSEC)
+		// The denial record is signed like any other RRset, and stripping its
+		// signature while leaving it in place is the same failure -- a name
+		// that still asserts what does not exist, with nothing to prove it.
+		// Recorded under TypeNSEC, which no RRtypes entry can collide with
+		// because SortFunc never puts NSEC there.
+		if len(src.NSEC.RRSIGs) > 0 {
+			signed[signedKey{owner: core.CanonicalizeName(src.Name), rrtype: dns.TypeNSEC}] = true
+		}
 		out.Set(name, nod)
 	}
 	return out, signed
@@ -279,13 +287,15 @@ func applyIxfrSteps(zoneName string, data *core.NameMap[OwnerData], signed map[s
 			}
 		}
 		for _, rr := range st.added {
-			applyIxfrAdd(data, rr)
+			if err := applyIxfrAdd(data, rr); err != nil {
+				return fmt.Errorf("ixfr %s: sequence %d→%d: %w", zoneName, st.from, st.to, err)
+			}
 		}
 		// Per step, not once at the end: a later step may legitimately delete
 		// the last RR of an RRset this step left unsigned, and then there is
 		// nothing to complain about any more. Checking as we go catches the
 		// window the served zone would actually have been published in.
-		if err := checkSignaturesIntact(zoneName, data, signed); err != nil {
+		if err := checkSignaturesIntact(data, signed, touchedByRemovals(st.removed)); err != nil {
 			return fmt.Errorf("ixfr %s: sequence %d→%d: %w", zoneName, st.from, st.to, err)
 		}
 	}
@@ -359,7 +369,25 @@ func applyIxfrRemove(data *core.NameMap[OwnerData], rr dns.RR) error {
 	return nil
 }
 
-func applyIxfrAdd(data *core.NameMap[OwnerData], rr dns.RR) {
+// containsRR reports whether the slice already holds this exact record.
+func containsRR(rrs []dns.RR, rr dns.RR) bool {
+	for _, have := range rrs {
+		if core.IsDuplicate(have, rr) {
+			return true
+		}
+	}
+	return false
+}
+
+// applyIxfrAdd adds one record from a difference sequence's add section.
+//
+// An add that duplicates a record we already hold is a divergence signal, the
+// mirror of a delete that matches nothing: in both cases our base is not the
+// base the delta was computed against. Refusing rather than appending is what
+// the plan asks for, and it is also what keeps this path from being a way to
+// grow an RRset without bound -- a primary that re-sends the same add is then
+// a wasteful AXFR rather than a zone with the same record in it twice.
+func applyIxfrAdd(data *core.NameMap[OwnerData], rr dns.RR) error {
 	owner := rr.Header().Name
 	nod, ok := data.Get(owner)
 	if !ok {
@@ -368,27 +396,40 @@ func applyIxfrAdd(data *core.NameMap[OwnerData], rr dns.RR) {
 
 	switch v := rr.(type) {
 	case *dns.NSEC:
+		if containsRR(nod.NSEC.RRs, rr) {
+			return fmt.Errorf("add of %s: already present", rr.String())
+		}
 		nod.NSEC.Name, nod.NSEC.RRtype, nod.NSEC.Class = owner, dns.TypeNSEC, dns.ClassINET
 		nod.NSEC.RRs = append(nod.NSEC.RRs, rr)
 
 	case *dns.RRSIG:
 		if v.TypeCovered == dns.TypeNSEC {
+			if containsRR(nod.NSEC.RRSIGs, rr) {
+				return fmt.Errorf("add of %s: already present", rr.String())
+			}
 			nod.NSEC.Name, nod.NSEC.RRtype, nod.NSEC.Class = owner, dns.TypeNSEC, dns.ClassINET
 			nod.NSEC.RRSIGs = append(nod.NSEC.RRSIGs, rr)
 			break
 		}
 		rs := nod.RRtypes.GetOnlyRRSet(v.TypeCovered)
+		if containsRR(rs.RRSIGs, rr) {
+			return fmt.Errorf("add of %s: already present", rr.String())
+		}
 		rs.RRSIGs = append(rs.RRSIGs, rr)
 		nod.RRtypes.Set(v.TypeCovered, rs)
 
 	default:
 		rrtype := rr.Header().Rrtype
 		rs := nod.RRtypes.GetOnlyRRSet(rrtype)
+		if containsRR(rs.RRs, rr) {
+			return fmt.Errorf("add of %s: already present", rr.String())
+		}
 		rs.Name, rs.RRtype, rs.Class = owner, rrtype, rr.Header().Class
 		rs.RRs = append(rs.RRs, rr)
 		nod.RRtypes.Set(rrtype, rs)
 	}
 	data.Set(owner, nod)
+	return nil
 }
 
 // checkSignaturesIntact refuses a delta that has left an RRset standing without
@@ -400,11 +441,21 @@ func applyIxfrAdd(data *core.NameMap[OwnerData], rr dns.RR) {
 // validation failures at other people's resolvers. Re-attaching signatures
 // instead would be a second design -- it has to decide what to do when a delta
 // legitimately removes the last one -- and is not this project.
-func checkSignaturesIntact(zoneName string, data *core.NameMap[OwnerData], signed map[signedKey]bool) error {
-	for key := range signed {
+func checkSignaturesIntact(data *core.NameMap[OwnerData], signed map[signedKey]bool, touched []signedKey) error {
+	for _, key := range touched {
+		if !signed[key] {
+			continue // it had no signatures to lose
+		}
 		nod, ok := data.Get(key.owner)
 		if !ok {
 			continue // the whole name went away; nothing is being served unsigned
+		}
+		if key.rrtype == dns.TypeNSEC {
+			if len(nod.NSEC.RRs) > 0 && len(nod.NSEC.RRSIGs) == 0 {
+				return fmt.Errorf("%s NSEC would be served unsigned: it had signatures before this delta and has none after",
+					key.owner)
+			}
+			continue
 		}
 		rs, ok := nod.RRtypes.Get(key.rrtype)
 		if !ok || len(rs.RRs) == 0 {
@@ -416,6 +467,33 @@ func checkSignaturesIntact(zoneName string, data *core.NameMap[OwnerData], signe
 		}
 	}
 	return nil
+}
+
+// touchedByRemovals is the set of RRsets a step's delete section could have
+// stripped signatures from. Only these need re-checking: an RRset nothing was
+// removed from cannot have lost anything.
+//
+// Scoped rather than walking the whole zone's signed set, which on a large
+// signed zone is every RRset in it, once per difference sequence.
+func touchedByRemovals(removed []dns.RR) []signedKey {
+	seen := map[signedKey]bool{}
+	var out []signedKey
+	for _, rr := range removed {
+		key := signedKey{owner: core.CanonicalizeName(rr.Header().Name)}
+		switch v := rr.(type) {
+		case *dns.NSEC:
+			key.rrtype = dns.TypeNSEC
+		case *dns.RRSIG:
+			key.rrtype = v.TypeCovered
+		default:
+			key.rrtype = rr.Header().Rrtype
+		}
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, key)
+		}
+	}
+	return out
 }
 
 // replaceApexSOA puts the serial the difference sequences arrived at into the
@@ -448,6 +526,12 @@ func replaceApexSOA(zoneName string, data *core.NameMap[OwnerData], bookend *dns
 	data.Set(zoneName, nod)
 	return nil
 }
+
+// maxIxfrResponseRRs bounds what an IXFR response may buffer. Generous on
+// purpose: a delta this large is one we would rather have taken as an AXFR
+// anyway, so the cap costs nothing a real deployment wants and denies an
+// upstream the ability to make us allocate without limit.
+const maxIxfrResponseRRs = 1_000_000
 
 // ixfrOutcome is the third thing an inbound transfer can be, alongside "failed"
 // and "here is a zone".
@@ -558,6 +642,17 @@ func collectTransferEnvelopes(ctx context.Context, zoneName, upstream string,
 				return nil, clarifyXfrError(zoneName, upstream, envelope.Error)
 			}
 			out = append(out, envelope.RR...)
+			// Unlike AXFR, this path has to buffer: the difference between a
+			// delta and a whole zone is not knowable until the second record.
+			// So an upstream that never stops sending is an upstream we
+			// accumulate for, which AXFR's streaming never allowed. Cap it,
+			// and treat the cap as an ordinary IXFR failure -- the AXFR
+			// fallback then streams whatever this peer really has, without
+			// holding it all in memory first.
+			if len(out) > maxIxfrResponseRRs {
+				return nil, fmt.Errorf("ixfr %s from %s: response exceeds %d records; treating as unusable",
+					zoneName, upstream, maxIxfrResponseRRs)
+			}
 		}
 	}
 }
