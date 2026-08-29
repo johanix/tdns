@@ -46,12 +46,17 @@ type CachedRRset struct {
 }
 
 type RRsetCacheT struct {
+	// RRsets is keyed by "<name>::<qtype>", so it stays a plain map; the name
+	// half is folded where the key is built (Get/Set/Has/Remove below).
+	// The rest are keyed by a bare DNS name and so are NameMaps, which fold for
+	// themselves -- a resolver takes these names off the wire, where 0x20
+	// randomisation means the same name arrives spelled differently every time.
 	RRsets        *core.ConcurrentMap[string, CachedRRset]
-	Servers       *core.ConcurrentMap[string, []string]
-	ServerMap     *core.ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
-	AuthServerMap *core.ConcurrentMap[string, *AuthServer]            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
-	ZoneMap       *core.ConcurrentMap[string, *Zone]                  // map[zone]*Zone
-	ServerTLSA    *core.ConcurrentMap[string, *ServerTLSARecords]     // nsname -> validated TLSA cache, decoupled from AuthServer instances
+	Servers       *core.NameMap[[]string]
+	ServerMap     *core.NameMap[map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
+	AuthServerMap *core.NameMap[*AuthServer]            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
+	ZoneMap       *core.NameMap[*Zone]                  // map[zone]*Zone
+	ServerTLSA    *core.NameMap[*ServerTLSARecords]     // nsname -> validated TLSA cache, decoupled from AuthServer instances
 	DnskeyCache   *DnskeyCacheT
 	DNSClient     map[core.Transport]core.DNSClienter
 	//Options                map[ImrOption]string

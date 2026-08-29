@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -158,9 +159,9 @@ type minimalZoneEntry struct {
 // zone in raw.Zones. Returns "" if the zone isn't listed or has no
 // policy. Comparison is case-insensitive on the FQDN form.
 func inferPolicyForZone(raw *minimalConfigForValidate, zone string) string {
-	zone = strings.ToLower(strings.TrimSuffix(zone, "."))
+	zone = core.CanonicalizeName(strings.TrimSuffix(zone, "."))
 	for _, z := range raw.Zones {
-		if strings.ToLower(strings.TrimSuffix(z.Name, ".")) == zone {
+		if core.EqualNames(strings.TrimSuffix(z.Name, "."), zone) {
 			return z.DnssecPolicy
 		}
 	}

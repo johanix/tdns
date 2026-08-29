@@ -359,7 +359,7 @@ func (kdb *KeyDB) UpdateKeyState(ctx context.Context, keyName string, keyid uint
 
 	// If the key is unknown, bootstrap it with parent
 	if keystate.KeyState == edns0.KeyStateUnknown {
-		zd, _ := FindZone(keyName)
+		zd := FindZone(keyName)
 		if zd == nil {
 			return fmt.Errorf("could not find zone for %s", keyName)
 		}

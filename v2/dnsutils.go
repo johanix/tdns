@@ -171,7 +171,7 @@ func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint
 	}
 
 	if zd.ZoneStore == MapZone {
-		zd.Data = core.NewCmap[OwnerData]()
+		zd.Data = core.NewNameMap[OwnerData]()
 	}
 	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore], "transport", transportLabel(up))
 
@@ -724,11 +724,17 @@ func (zd *ZoneData) ReadZoneData(zoneData string, force bool) (bool, uint32, err
 // a registered zone: parse into a scratch new_zd, then copy the fields across
 // under the lock.
 func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force bool, filename string) (bool, uint32, error) {
+	// Safe here for the reason the comment above gives: the caller owns this
+	// ZoneData exclusively. Every path that builds a ZoneData already folds the
+	// name, but this is the one gate a zone must pass to acquire any data at
+	// all, and the owner map it is about to fill is keyed canonically -- a zone
+	// arriving with an unfolded name would not find its own apex.
+	zd.normalizeZoneName()
 	zd.Logger.Printf("ParseZoneFromReader: zone: %s", zd.ZoneName)
 
 	switch zd.ZoneStore {
 	case MapZone:
-		zd.Data = core.NewCmap[OwnerData]()
+		zd.Data = core.NewNameMap[OwnerData]()
 	default:
 		return false, 0, fmt.Errorf("ParseZoneFromReader: zone store %d not supported", zd.ZoneStore)
 	}
@@ -844,11 +850,11 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 }
 
 func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
+	// The owner keeps the spelling it arrived with. zd.Data folds the key, so
+	// the name is found however it is later asked for, while OwnerData.Name and
+	// the RR headers still carry what the zone file actually said -- which is
+	// what an outgoing AXFR and a written zone file reproduce.
 	owner := rr.Header().Name
-	// if zd.FoldCase {
-	if zd.Options[OptFoldCase] {
-		owner = strings.ToLower(owner)
-	}
 	rrtype := rr.Header().Rrtype
 
 	//	zd.Logger.Printf("SortFunc: owner=%s rrtype=%s (%d)", owner, dns.TypeToString[rrtype], rrtype)
@@ -870,7 +876,13 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 
 	var tmp core.RRset
 
-	if !strings.HasSuffix(rr.Header().Name, zd.ZoneName) {
+	// In-bailiwick test, not a string suffix test. strings.HasSuffix compares
+	// bytes, so an owner spelling the zone-name part in another case --
+	// www.EXAMPLE.com. in example.com., which is what $ORIGIN EXAMPLE.com. with
+	// relative names produces -- failed this check and was silently discarded,
+	// unreachable afterwards by any spelling. dns.IsSubDomain folds case as DNS
+	// requires and is true for the apex itself.
+	if !dns.IsSubDomain(zd.ZoneName, rr.Header().Name) {
 		zd.Logger.Printf("*** SortFunc: zone %s: RR %s is not in zone. Ignored.", zd.ZoneName, rr.String())
 		return firstSoaSeen
 	}
@@ -1165,8 +1177,18 @@ func RRsetToString(rrset *core.RRset) string {
 	return tmp
 }
 
+// InBailiwick reports whether a nameserver name lies inside zone.
+//
+// dns.IsSubDomain, not strings.HasSuffix: the latter compares bytes, so it is
+// both case-sensitive and blind to label boundaries -- it calls
+// ns.evilexample. in-bailiwick for example.
+//
+// NOTE: this has no callers. NSInBailiwick in scanner_csync.go is the live
+// twin, fixed the same way in the delegation stage of this series, and
+// BailiwickNS is a third spelling of the same predicate. The three should be
+// one function.
 func InBailiwick(zone string, ns *dns.NS) bool {
-	return strings.HasSuffix(ns.Ns, zone)
+	return dns.IsSubDomain(zone, ns.Ns)
 }
 
 // formatZoneParseError extracts the line number from the parse error string

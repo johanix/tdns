@@ -227,7 +227,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) err
 			if !CaseFoldContains(conf.Service.Identities, nsName) || Globals.ServerSVCB == nil {
 				continue
 			}
-			if tz, _ := FindZone(ownerName); tz != nil {
+			if tz := FindZone(ownerName); tz != nil {
 				lgDns.Debug("createTransportSignalSVCB: identity NS zone is co-hosted; will inject its authoritative signal",
 					"zone", zd.ZoneName, "ns", nsName)
 				return nil

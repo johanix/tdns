@@ -167,6 +167,22 @@ check-no-mutators:
 		exit 1; \
 	fi
 
+# Reject DNS names folded by anything but the DNS rule. Companion to
+# check-no-mutators: a parser rather than a grep, because the defects it exists
+# to stop are two sides of a pair folded by different functions, and in every
+# one of those the call a grep would flag had already been converted. See
+# tools/namecheck and docs/2026-08-28-case-insensitive-names-scope.md.
+# Plain `go`, not $(GO): the app Makefiles set GO to a cgo-enabled invocation
+# and the repo root does not set it at all, which is what leaves the shared
+# `test` target above broken when run from the root. namecheck needs neither
+# cgo nor the algorithm environment.
+check-names:
+	@cd $(TDNS_ROOT)/tools/namecheck && go build -o /tmp/tdns-namecheck .
+	@cd $(TDNS_ROOT) && /tmp/tdns-namecheck v2 cmdv2
+
+# Every gate, in one target. Cheap enough to run before every commit.
+check: check-no-mutators check-names
+
 test:
 	$(ALGS_ENV) $(GO) test -v -cover
 

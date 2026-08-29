@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -147,13 +148,18 @@ type VerifyZonemdOpts struct {
 // snapshot flattens to. The apex SOA must be among them: RFC 8976 binds the
 // digest to a serial, and a zone with no SOA is not a zone.
 func VerifyZonemd(apex string, rrs []dns.RR, opts VerifyZonemdOpts) (*ZonemdReport, error) {
-	apex = dns.CanonicalName(apex)
+	// The SAME folder ZoneDigest uses. Both are exported, and both decide which
+	// records sit at the apex: the digest by excluding them, the verifier by
+	// selecting them. Folded by two different functions they agree on every
+	// ASCII name and part company on the first octet that is not valid UTF-8 --
+	// at which point a zone digests one set of records and verifies another.
+	apex = core.CanonicalizeName(apex)
 	report := &ZonemdReport{Zone: apex, Verdict: ZonemdAbsent.String()}
 
 	var soa *dns.SOA
 	var zonemds []*dns.ZONEMD
 	for _, rr := range rrs {
-		if rr == nil || dns.CanonicalName(rr.Header().Name) != apex {
+		if rr == nil || !core.EqualNames(rr.Header().Name, apex) {
 			continue
 		}
 		switch x := rr.(type) {

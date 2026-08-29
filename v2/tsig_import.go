@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-
-	"github.com/miekg/dns"
 )
 
 var (
@@ -184,7 +182,7 @@ func unquoteNsdValue(s string) string {
 }
 
 func normalizeImportedTsigKey(name, algo, secret string, seen map[string]bool) (TsigDetails, error) {
-	name = dns.CanonicalName(strings.TrimSpace(name))
+	name = tsigKeyKey(strings.TrimSpace(name))
 	algo = strings.TrimSpace(algo)
 	secret = strings.TrimSpace(secret)
 	if err := validateTsigKeySpec(name, algo, secret); err != nil {

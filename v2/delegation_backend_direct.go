@@ -92,7 +92,10 @@ func (b *DirectDelegationBackend) GetDelegationData(parentZone, childZone string
 
 	// Walk all owners that are at or below the child zone name
 	for _, ownerName := range ownerNames {
-		if !dns.IsSubDomain(childZone, ownerName) && ownerName != childZone {
+		// dns.IsSubDomain is true for the child name itself, so the separate
+		// equality test this used to carry was dead -- and case-sensitive,
+		// which would have made it wrong had it ever been reachable.
+		if !dns.IsSubDomain(childZone, ownerName) {
 			continue
 		}
 		owner, err := b.zd.GetOwner(ownerName)

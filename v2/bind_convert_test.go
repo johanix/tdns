@@ -439,7 +439,7 @@ func TestConvertBindKeyDirWritesTheKeyAtomically(t *testing.T) {
 
 // The same collision, but with the two owners differing only in CASE. DNS names
 // are case-insensitive, yet the manifest's own matchers disagree about that --
-// UpsertDnssec compares with ==, manifestHasKey uses EqualFold -- so an
+// UpsertDnssec compares with ==, manifestHasKey uses core.EqualNames -- so an
 // unnormalised collision key would let these through to be appended as two
 // entries for what is one zone, and imported as two keystore rows.
 func TestConvertBindKeyDirCollisionIsCaseInsensitive(t *testing.T) {

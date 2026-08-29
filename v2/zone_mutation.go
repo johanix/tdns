@@ -26,9 +26,22 @@ func (zd *ZoneData) ensureWorkingSet() {
 	}
 }
 
+// cloneOwner returns a fresh, mutable copy of one owner in the working set.
+//
+// The working set is keyed canonically, like the snapshot it is built from, so
+// an update naming an owner in a different case than the zone file used reaches
+// the owner that is already there instead of creating a second one beside it.
+// The owner's own Name keeps a spelling that was actually published: an
+// existing owner keeps its own, and a name appearing here for the first time
+// keeps the caller's.
 func (zd *ZoneData) cloneOwner(name string) *OwnerData {
-	src := zd.workingSet[name]
-	nod := &OwnerData{Name: name, RRtypes: NewRRTypeStore()}
+	key := core.CanonicalizeName(name)
+	src := zd.workingSet[key]
+	stored := name
+	if src != nil {
+		stored = src.Name
+	}
+	nod := &OwnerData{Name: stored, RRtypes: NewRRTypeStore()}
 	if src != nil {
 		for _, t := range src.RRtypes.Keys() {
 			rs, _ := src.RRtypes.Get(t)
@@ -45,7 +58,7 @@ func (zd *ZoneData) cloneOwner(name string) *OwnerData {
 		// snapshot that is being served right now.
 		nod.NSEC = cloneRRset(src.NSEC)
 	}
-	zd.workingSet[name] = nod
+	zd.workingSet[key] = nod
 	return nod
 }
 
@@ -61,7 +74,7 @@ func (zd *ZoneData) stageDelete(name string, rrtype uint16) {
 
 func (zd *ZoneData) stageOwnerReplace(name string, od *OwnerData) {
 	zd.ensureWorkingSet()
-	zd.workingSet[name] = od
+	zd.workingSet[core.CanonicalizeName(name)] = od
 }
 
 func (zd *ZoneData) pendingChanges() *PendingChanges {
@@ -156,12 +169,12 @@ func rrsetEqual(a, b core.RRset) bool {
 
 func (zd *ZoneData) stagedOwner(name string) *OwnerData {
 	zd.ensureWorkingSet()
-	return zd.workingSet[name]
+	return zd.workingSet[core.CanonicalizeName(name)]
 }
 
 func (zd *ZoneData) getOrCreateWorkingOwner(name string) *OwnerData {
 	zd.ensureWorkingSet()
-	if od := zd.workingSet[name]; od != nil {
+	if od := zd.workingSet[core.CanonicalizeName(name)]; od != nil {
 		return od
 	}
 	return zd.cloneOwner(name)
@@ -322,12 +335,12 @@ func (zd *ZoneData) stageDeleteLocked(name string, rrtype uint16) {
 
 func (zd *ZoneData) stageOwnerReplaceLocked(name string, od *OwnerData) {
 	zd.ensureWorkingSet()
-	zd.workingSet[name] = od
+	zd.workingSet[core.CanonicalizeName(name)] = od
 }
 
 func (zd *ZoneData) stageOwnerDeleteLocked(name string) {
 	zd.ensureWorkingSet()
-	delete(zd.workingSet, name)
+	delete(zd.workingSet, core.CanonicalizeName(name))
 }
 
 func (zd *ZoneData) publishLocked(gen uint64) {

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -187,7 +188,7 @@ func (c DsyncApiChildConf) CredentialForChild(parent, child string) (DsyncApiCli
 		if s == "" {
 			return ""
 		}
-		return strings.ToLower(dns.Fqdn(s))
+		return core.CanonicalizeName(dns.Fqdn(s))
 	}
 	wantParent, wantChild := norm(parent), norm(child)
 

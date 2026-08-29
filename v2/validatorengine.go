@@ -83,7 +83,7 @@ func ValidatorEngine(ctx context.Context, conf *Config) {
 		lgEngine.Debug("validating RRset", "owner", ownername, "rrtype", rrtype, "count", len(rrset.RRs))
 
 		// Is the RRset in a part of the namespace that we know anything about?
-		zd, _ := FindZone(ownername)
+		zd := FindZone(ownername)
 		if zd == nil {
 			lgEngine.Warn("RRset not in or below a known zone", "owner", ownername, "rrtype", rrtype)
 			continue

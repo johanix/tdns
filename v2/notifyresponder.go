@@ -197,7 +197,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		// to example.com.). NOTIFY(SOA)/NOTIFY(DNSKEY) for an
 		// interior name is not a valid request — refuse it rather
 		// than silently refreshing the containing zone.
-		zd, _ = FindZone(qname)
+		zd = FindZone(qname)
 		if zd == nil {
 			lgHandler.Warn("received NOTIFY for unknown zone, ignoring", "type", dns.TypeToString[ntype], "zone", qname)
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
@@ -206,7 +206,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			writeNotifyReply(dnr, m)
 			return nil
 		}
-		if !strings.EqualFold(dns.Fqdn(zd.ZoneName), dns.Fqdn(qname)) {
+		if !core.EqualNames(dns.Fqdn(zd.ZoneName), dns.Fqdn(qname)) {
 			// FindZone returned a containing zone, not an exact
 			// zone match. Could be a child delegation point or a
 			// plain interior name; either way we don't accept the
@@ -240,7 +240,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			writeNotifyReply(dnr, m)
 			return nil
 		}
-		zd, _ = FindZone(labels[1])
+		zd = FindZone(labels[1])
 		if zd == nil {
 			lgHandler.Warn("parent zone not authoritative, refusing NOTIFY", "type", dns.TypeToString[ntype], "qname", qname)
 			m.SetRcode(dnr.Msg, dns.RcodeNotAuth)

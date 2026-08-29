@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -215,7 +214,12 @@ func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, 
 	// XXX: This logic is ok, but it should be in the caller, not here.
 	for _, nsr := range removes {
 		if ns, ok := nsr.(*dns.NS); ok { // if removing an NS, then also remove any glue
-			if strings.HasSuffix(ns.Ns, child) {
+			// In-bailiwick means inside the child zone as a DNS NAME. A byte
+			// suffix calls ns1.evilchild.example. in-bailiwick for
+			// child.example., so glue for an unrelated delegation was deleted
+			// alongside this one -- and it missed in-bailiwick glue whose case
+			// differed from the child name's.
+			if dns.IsSubDomain(child, ns.Ns) {
 				rrA := new(dns.A)
 				rrA.Hdr = dns.RR_Header{Name: ns.Ns, Rrtype: dns.TypeA, Class: dns.ClassANY, Ttl: 3600}
 				rrAAAA := new(dns.AAAA)
@@ -281,19 +285,19 @@ func CreateChildReplaceUpdateWithDS(parent, child string, newNS, newA, newAAAA, 
 	nsNames := make(map[string]bool)
 	for _, nsrr := range newNS {
 		if ns, ok := nsrr.(*dns.NS); ok {
-			if strings.HasSuffix(ns.Ns, child) {
+			if dns.IsSubDomain(child, ns.Ns) {
 				nsNames[ns.Ns] = true
 			}
 		}
 	}
 	// Also check for any glue records being added (they might be for NS not yet in newNS)
 	for _, arr := range newA {
-		if strings.HasSuffix(arr.Header().Name, child) {
+		if dns.IsSubDomain(child, arr.Header().Name) {
 			nsNames[arr.Header().Name] = true
 		}
 	}
 	for _, aaaarr := range newAAAA {
-		if strings.HasSuffix(aaaarr.Header().Name, child) {
+		if dns.IsSubDomain(child, aaaarr.Header().Name) {
 			nsNames[aaaarr.Header().Name] = true
 		}
 	}
@@ -472,14 +476,14 @@ func xxxComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]
 
 	for _, rr := range oldnsrrset {
 		if ns, ok := rr.(*dns.NS); ok {
-			if strings.HasSuffix(ns.Ns, owner) {
+			if dns.IsSubDomain(owner, ns.Ns) {
 				old_ns_inb = append(old_ns_inb, ns.Ns)
 			}
 		}
 	}
 	for _, rr := range newnsrrset {
 		if ns, ok := rr.(*dns.NS); ok {
-			if strings.HasSuffix(ns.Ns, owner) {
+			if dns.IsSubDomain(owner, ns.Ns) {
 				new_ns_inb = append(new_ns_inb, ns.Ns)
 			}
 		}

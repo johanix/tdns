@@ -191,8 +191,9 @@ func baseFromTLSAOwner(owner string) string {
 		return ""
 	}
 	prefixes := []string{"_853._udp.", "_853._tcp."}
+	canon := core.CanonicalizeName(owner)
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(owner, prefix) {
+		if strings.HasPrefix(canon, prefix) {
 			return owner[len(prefix):]
 		}
 	}

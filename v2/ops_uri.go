@@ -27,7 +27,7 @@ func (zd *ZoneData) PublishUriRR(owner, target, baseurl string, port uint16) err
 	// Ensure owner is FQDN
 	owner = dns.Fqdn(owner)
 
-	if !strings.HasSuffix(owner, zd.ZoneName) {
+	if !dns.IsSubDomain(zd.ZoneName, owner) {
 		return fmt.Errorf("owner must be a subdomain of the zone name")
 	}
 
@@ -82,7 +82,7 @@ func (zd *ZoneData) UnpublishUriRR(owner, target string) error {
 	// Ensure owner is FQDN
 	owner = dns.Fqdn(owner)
 
-	if !strings.HasSuffix(owner, zd.ZoneName) {
+	if !dns.IsSubDomain(zd.ZoneName, owner) {
 		return fmt.Errorf("owner must be a subdomain of the zone name")
 	}
 

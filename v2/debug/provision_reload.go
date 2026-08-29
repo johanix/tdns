@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -55,7 +56,7 @@ func GenerateReloadConfig(st *State, in ReloadProvisionInput) (*ReloadProvision,
 	if in.BaseZone == "" {
 		return nil, fmt.Errorf("--base-zone is required")
 	}
-	base := dns.Fqdn(strings.ToLower(in.BaseZone))
+	base := core.CanonicalizeName(dns.Fqdn(in.BaseZone))
 	if _, ok := dns.IsDomainName(base); !ok {
 		return nil, fmt.Errorf("invalid base zone %q", in.BaseZone)
 	}

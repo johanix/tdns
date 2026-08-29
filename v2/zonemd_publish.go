@@ -558,7 +558,7 @@ func (zd *ZoneData) filterManagedZonemdActions(actions []dns.RR, replay bool) ([
 	for _, rr := range actions {
 		if rr != nil {
 			hdr := rr.Header()
-			if hdr.Rrtype == dns.TypeZONEMD && strings.EqualFold(hdr.Name, zd.ZoneName) {
+			if hdr.Rrtype == dns.TypeZONEMD && core.EqualNames(hdr.Name, zd.ZoneName) {
 				if !replay {
 					return nil, fmt.Errorf("zone %s: the apex ZONEMD RRset is maintained"+
 						" by the server while the publish-zonemd option is set, and cannot"+

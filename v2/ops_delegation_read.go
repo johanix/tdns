@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -57,7 +58,7 @@ func (zd *ZoneData) ApiZoneGetDelegation(zp ZonePost) (*ChildDelegationReport, e
 	if !dns.IsSubDomain(zd.ZoneName, child) {
 		return nil, fmt.Errorf("%s is not below %s", child, zd.ZoneName)
 	}
-	if strings.EqualFold(child, zd.ZoneName) {
+	if core.EqualNames(child, zd.ZoneName) {
 		return nil, fmt.Errorf("%s is the zone apex, not a delegated child", child)
 	}
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -138,7 +139,7 @@ func BuildZoneUpdateActions(zone string, spec ZoneUpdateSpec) ([]dns.RR, error) 
 		// change in the same update down with it. Refuse here, where the error
 		// can name the problem. (delname protects these too, plus the DNSSEC
 		// and signalling RRsets, because it is a wholesale statement.)
-		if strings.EqualFold(owner, zone) && (rrtype == dns.TypeSOA || rrtype == dns.TypeNS) {
+		if core.EqualNames(owner, zone) && (rrtype == dns.TypeSOA || rrtype == dns.TypeNS) {
 			return nil, fmt.Errorf(
 				"refusing to delete the apex %s RRset of %s: the zone cannot be served without it",
 				dns.TypeToString[rrtype], zone)
@@ -182,7 +183,7 @@ func BuildZoneUpdateActions(zone string, spec ZoneUpdateSpec) ([]dns.RR, error) 
 		owner := rrs[0].Header().Name
 		rrtype := rrs[0].Header().Rrtype
 		for _, rr := range rrs[1:] {
-			if !strings.EqualFold(rr.Header().Name, owner) {
+			if !core.EqualNames(rr.Header().Name, owner) {
 				return nil, fmt.Errorf(
 					"replacerrset: all RRs must share one owner; got %q and %q",
 					owner, rr.Header().Name)
@@ -207,7 +208,7 @@ func BuildZoneUpdateActions(zone string, spec ZoneUpdateSpec) ([]dns.RR, error) 
 		// nameservers is exactly what an operator uses this for. The applier
 		// recognises a replacement and permits that delete (see
 		// updateReplacesRRset).
-		if strings.EqualFold(owner, zone) && rrtype == dns.TypeSOA {
+		if core.EqualNames(owner, zone) && rrtype == dns.TypeSOA {
 			return nil, fmt.Errorf(
 				"refusing to replace the apex SOA of %s: the serial is maintained by the server", zone)
 		}

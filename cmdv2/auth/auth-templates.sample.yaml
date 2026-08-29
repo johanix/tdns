@@ -103,7 +103,7 @@
 #                           (key exists but is not published in zone data)
 #
 # DNS BEHAVIOR OPTIONS:
-#   fold-case:               Fold domain name case before comparisons
+#   fold-case:               No-op. Name comparison is case-insensitive always.
 #                           (case-insensitive matching for owner names)
 #
 #   black-lies:              Compact denial of existence: synthesize a minimally

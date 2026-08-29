@@ -181,8 +181,8 @@ func TestSoaProbeBindsSourceV6(t *testing.T) {
 		m := new(dns.Msg)
 		m.SetReply(r)
 		m.Answer = append(m.Answer, &dns.SOA{
-			Hdr:     dns.RR_Header{Name: zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 60},
-			Ns:      "ns." + zone, Mbox: "hostmaster." + zone, Serial: 7,
+			Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 60},
+			Ns:  "ns." + zone, Mbox: "hostmaster." + zone, Serial: 7,
 			Refresh: 3600, Retry: 600, Expire: 86400, Minttl: 60,
 		})
 		_ = w.WriteMsg(m)

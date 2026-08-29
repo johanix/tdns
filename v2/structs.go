@@ -124,7 +124,7 @@ type ZoneData struct {
 	ZoneType   ZoneType
 	ApexLen    int
 	//	RRs            RRArray
-	Data *core.ConcurrentMap[string, OwnerData]
+	Data *core.NameMap[OwnerData]
 	// 20260415 johani: MP    *ZoneMPExtension // Multi-provider state; nil for non-MP zones
 	Ready bool // true if zd.Data has been populated (from file or upstream)
 	// Status is the positive-lifecycle state (pending -> loading -> ready),

@@ -28,7 +28,7 @@ func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 	}
 
 	for _, pkc := range sak.Keys {
-		if !strings.HasSuffix(pkc.KeyRR.Header().Name, zd.ZoneName) {
+		if !dns.IsSubDomain(zd.ZoneName, pkc.KeyRR.Header().Name) {
 			lgHandler.Debug("PublishKeyRRs: SIG(0) key is not a subdomain of zone", "key", pkc.KeyRR.Header().Name, "zone", zd.ZoneName)
 			return fmt.Errorf("PublishKeyRRs: SIG(0) key %q is not a subdomain of zone %q", pkc.KeyRR.Header().Name, zd.ZoneName)
 		}

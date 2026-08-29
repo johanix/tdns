@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -222,7 +223,7 @@ func DsyncApiPostDelegation() func(w http.ResponseWriter, r *http.Request) {
 		// the wrong request, and guessing which one it meant is how the wrong
 		// delegation gets changed.
 		if strings.TrimSpace(req.Child) != "" &&
-			!strings.EqualFold(dns.Fqdn(strings.TrimSpace(req.Child)), child) {
+			!core.EqualNames(dns.Fqdn(strings.TrimSpace(req.Child)), child) {
 			dsyncApiError(w, http.StatusBadRequest,
 				"child in the body (%s) does not match the child in the path (%s)", req.Child, child)
 			return
@@ -382,7 +383,7 @@ func dsyncApiBuildActions(zd *ZoneData, child string, rrsets []DsyncApiRRset) ([
 			return nil, fmt.Errorf("owner %s is not at or below the child %s", owner, child)
 		}
 
-		key := strings.ToLower(owner) + "/" + dns.TypeToString[rrtype]
+		key := core.CanonicalizeName(owner) + "/" + dns.TypeToString[rrtype]
 		if seen[key] {
 			return nil, fmt.Errorf("rrset %s %s appears twice", owner, dns.TypeToString[rrtype])
 		}
@@ -404,7 +405,7 @@ func dsyncApiBuildActions(zd *ZoneData, child string, rrsets []DsyncApiRRset) ([
 				if err != nil {
 					return nil, fmt.Errorf("cannot parse %q: %v", s, err)
 				}
-				if !strings.EqualFold(rr.Header().Name, owner) {
+				if !core.EqualNames(rr.Header().Name, owner) {
 					return nil, fmt.Errorf("record %q is not at the declared owner %s", s, owner)
 				}
 				if rr.Header().Rrtype != rrtype {
