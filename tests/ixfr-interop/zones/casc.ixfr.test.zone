@@ -1,0 +1,60 @@
+$ORIGIN casc.ixfr.test.
+$TTL 3600
+casc.ixfr.test.	3600	IN	SOA	ns-p.ixfr.test. hostmaster.casc.ixfr.test. 1 7200 1800 604800 3600
+casc.ixfr.test.	3600	IN	NS	ns-p.ixfr.test.
+ns-p.ixfr.test.	3600	IN	A	127.0.0.1
+host01.casc.ixfr.test.	3600	IN	A	10.0.0.1
+host02.casc.ixfr.test.	3600	IN	A	10.0.0.2
+host03.casc.ixfr.test.	3600	IN	A	10.0.0.3
+host04.casc.ixfr.test.	3600	IN	A	10.0.0.4
+host04.casc.ixfr.test.	3600	IN	TXT	"filler record 4"
+host05.casc.ixfr.test.	3600	IN	A	10.0.0.5
+host06.casc.ixfr.test.	3600	IN	A	10.0.0.6
+host07.casc.ixfr.test.	3600	IN	A	10.0.0.7
+host08.casc.ixfr.test.	3600	IN	A	10.0.0.8
+host08.casc.ixfr.test.	3600	IN	TXT	"filler record 8"
+host09.casc.ixfr.test.	3600	IN	A	10.0.0.9
+host10.casc.ixfr.test.	3600	IN	A	10.0.0.10
+host11.casc.ixfr.test.	3600	IN	A	10.0.0.11
+host12.casc.ixfr.test.	3600	IN	A	10.0.0.12
+host12.casc.ixfr.test.	3600	IN	TXT	"filler record 12"
+host13.casc.ixfr.test.	3600	IN	A	10.0.0.13
+host14.casc.ixfr.test.	3600	IN	A	10.0.0.14
+host15.casc.ixfr.test.	3600	IN	A	10.0.0.15
+host16.casc.ixfr.test.	3600	IN	A	10.0.0.16
+host16.casc.ixfr.test.	3600	IN	TXT	"filler record 16"
+host17.casc.ixfr.test.	3600	IN	A	10.0.0.17
+host18.casc.ixfr.test.	3600	IN	A	10.0.0.18
+host19.casc.ixfr.test.	3600	IN	A	10.0.0.19
+host20.casc.ixfr.test.	3600	IN	A	10.0.0.20
+host20.casc.ixfr.test.	3600	IN	TXT	"filler record 20"
+host21.casc.ixfr.test.	3600	IN	A	10.0.0.21
+host22.casc.ixfr.test.	3600	IN	A	10.0.0.22
+host23.casc.ixfr.test.	3600	IN	A	10.0.0.23
+host24.casc.ixfr.test.	3600	IN	A	10.0.0.24
+host24.casc.ixfr.test.	3600	IN	TXT	"filler record 24"
+host25.casc.ixfr.test.	3600	IN	A	10.0.0.25
+host26.casc.ixfr.test.	3600	IN	A	10.0.0.26
+host27.casc.ixfr.test.	3600	IN	A	10.0.0.27
+host28.casc.ixfr.test.	3600	IN	A	10.0.0.28
+host28.casc.ixfr.test.	3600	IN	TXT	"filler record 28"
+host29.casc.ixfr.test.	3600	IN	A	10.0.0.29
+host30.casc.ixfr.test.	3600	IN	A	10.0.0.30
+host31.casc.ixfr.test.	3600	IN	A	10.0.0.31
+host32.casc.ixfr.test.	3600	IN	A	10.0.0.32
+host32.casc.ixfr.test.	3600	IN	TXT	"filler record 32"
+host33.casc.ixfr.test.	3600	IN	A	10.0.0.33
+host34.casc.ixfr.test.	3600	IN	A	10.0.0.34
+host35.casc.ixfr.test.	3600	IN	A	10.0.0.35
+host36.casc.ixfr.test.	3600	IN	A	10.0.0.36
+host36.casc.ixfr.test.	3600	IN	TXT	"filler record 36"
+host37.casc.ixfr.test.	3600	IN	A	10.0.0.37
+host38.casc.ixfr.test.	3600	IN	A	10.0.0.38
+host39.casc.ixfr.test.	3600	IN	A	10.0.0.39
+host40.casc.ixfr.test.	3600	IN	A	10.0.0.40
+host40.casc.ixfr.test.	3600	IN	TXT	"filler record 40"
+srv1.casc.ixfr.test.	3600	IN	AAAA	2001:db8::1
+srv2.casc.ixfr.test.	3600	IN	AAAA	2001:db8::2
+srv3.casc.ixfr.test.	3600	IN	AAAA	2001:db8::3
+srv4.casc.ixfr.test.	3600	IN	AAAA	2001:db8::4
+srv5.casc.ixfr.test.	3600	IN	AAAA	2001:db8::5

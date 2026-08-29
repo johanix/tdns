@@ -1,0 +1,10 @@
+# The rig's own CLI config. Without it the CLI falls back to
+# /etc/tdns/tdns-cli.yaml, whose tdns-auth entry points at whatever daemon the
+# operator normally runs -- so `zone update` reaches the wrong server and
+# reports the rig's zones as unknown. --server does not override this for the
+# API transport.
+apiservers:
+   - name:        tdns-auth
+     baseurl:     https://127.0.0.1:8321/api/v1
+     authmethod:  X-API-Key
+     apikey:      ixfr-interop-test-key
