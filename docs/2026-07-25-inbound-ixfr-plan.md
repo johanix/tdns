@@ -316,3 +316,61 @@ signing/staging-apply variant remains a later PR.
   AXFR-only primary (unchanged behavior).
 - up-to-date IXFR is a clean no-op (no swap, no serial change, status restored).
 - AXFR-only zones and the existing AXFR path show zero behavioral change.
+
+## 11. Size
+
+Estimated 2026-08-29 from §4 and §6; no code written. LOC is first-cut
+production vs test, counted the way the other briefs in this tree count.
+
+Calibration: #328 delivered the outbound half in 413 production + 725 test
+lines (`v2/ixfr.go`, `v2/ixfr_test.go`), having built the `IxfrChain`, its trim
+and the serving path from nothing. C2 reuses all of that and adds a parser and
+an apply model, so landing a little above it is the expected shape.
+
+| | item | files | impl | test |
+|---|---|---|---|---|
+| **4.3** | `parseIxfrDeltas` + `ixfrStep`, bookend/contiguity/in-bailiwick validation | new `v2/ixfr_in.go` | 140 | 200 |
+| **4.2** | IXFR branch in `ZoneTransferIn`: collect the flat stream, three-way classify | `dnsutils.go` | 60 | 100 |
+| **4.4** | materialize snapshot → apply del/add with RRSIG routing → existing swap | `v2/ixfr_in.go`, `zone_mutation.go` | 110 | 150 |
+| **4.1** | attempt decision + same-upstream AXFR fallback | `zone_utils.go` | 60 | 150 |
+| **F1** | `request-ixfr` per-zone option + config plumbing, `XfrType` retirement | `structs.go`, `parseconfig.go`, `enums.go` | 70 | 100 |
+| **§5** | onward relay: build an `Ixfr` link from the inbound sequence, append instead of epoch-reset | `ixfr.go`, `zone_mutation.go` | 70 | 250 |
+| | **Total** | | **~510** | **~950** |
+
+**~510 production, ~950 test, ~1460 all in**, as one PR — §8 already says the
+feature is not meaningfully splittable without shipping something half-usable.
+
+Two things widen that band, and both are cheaper to resolve before writing code
+than after:
+
+**§2 needs re-verification.** It was audited against main @ 138c9ce and every
+claim in §4 is expressed as a line-level fact about `FetchFromUpstream`,
+`ZoneTransferIn` and `SortFunc`. Main has moved a long way since. Budget a day
+for the re-audit; it may move the table.
+
+**The delete-exact-RR semantics are unassessed against the name-comparison
+work.** §4.4 leans on `RRset.RemoveRR` matching an exact RR, and the
+case-insensitive-names series (#425) changed name comparison and
+canonicalization underneath it. If exact-match behaviour shifted, a delete
+stops matching, every delta aborts, and the AXFR fallback makes that invisible:
+the invariant in §1 means nothing is corrupted, but the feature would quietly
+do nothing while every test that drives it end-to-end still converges. Check
+this first — it is the one failure mode this project's self-healing design
+hides rather than surfaces.
+
+The largest and least certain single number is the §5 onward-relay test: three
+tdns instances (primary → non-signing secondary → edge), asserting that the
+edge pulls a *delta* rather than an AXFR and converges byte-identically, plus
+the chain-reset boundary. It is the most elaborate fixture in this plan.
+
+Do not count the signing-secondary staging-apply relay (§9). Do not count any
+outbound change (§9).
+
+**Sequencing.** [[secondary-serve-until-expire]]
+`2026-08-28-secondary-serve-until-expire.md` (~175 production /
+~630 test) should land first, and its §5 records why: this project sends
+`zd.IncomingSerial` as the "have" serial, that field is set from the zone file's
+SOA by `ParseZoneFromReader`, and until a restarted secondary loads its
+persisted copy the serial is 0 — so the first transfer after every restart is a
+full AXFR no matter how good the delta path is. That brief's Stage 2.1 is what
+gives this one a base to ask from.
