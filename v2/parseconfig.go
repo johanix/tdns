@@ -892,6 +892,37 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zname := dns.Fqdn(zconf.Name)
 		zconf.Name = zname
 
+		// A zone name that is not already canonical is served correctly -- the
+		// registry, the owner map and every index fold it -- but it is worth
+		// saying out loud, ONCE, because two things keyed by the name outside
+		// those indexes do not follow it:
+		//
+		//   - the keystore tables (OutgoingSerials, ZoneSigningState, the
+		//     rollover state tables, ZonePolicyOverride) hold rows written
+		//     under whatever spelling an OLDER tdns used, and an older tdns
+		//     folded the zone name only when the fold-case option was set,
+		//     which defaulted off. Rows written under "Example.COM." are not
+		//     found by a lookup for "example.com.", and the outgoing-serial
+		//     read treats "no row" as "nothing served yet" rather than as an
+		//     error -- so the zone can republish BELOW a serial a secondary
+		//     already holds and that secondary serves stale data indefinitely,
+		//     with nothing logged.
+		//
+		//   - the zone file path is derived from the folded name, so a file
+		//     written by an older tdns under the config spelling is orphaned
+		//     on a case-sensitive filesystem.
+		//
+		// Renaming the zone to its canonical spelling in the config makes this
+		// go away. Warn rather than refuse: the zone works, and refusing to
+		// start over a cosmetic difference would be worse than the problem.
+		if canon := core.CanonicalizeName(zname); canon != zname {
+			lgConfig.Warn("zone name is not canonical; keystore rows and zone files "+
+				"written by an older tdns under the configured spelling will not be "+
+				"found, and an unfound outgoing serial is silently treated as "+
+				"'nothing served yet'",
+				"configured", zname, "served_as", canon)
+		}
+
 		// Get-or-create the registry entry up front so SetError calls
 		// during validation attach to the actual zone object, not a
 		// throwaway stack value. On reload, clear any prior error so a

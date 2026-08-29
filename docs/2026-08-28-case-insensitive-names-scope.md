@@ -921,3 +921,35 @@ comparing the BRANCH against its remote:
     git rev-parse <branch>  vs  git rev-parse origin/<branch>
 
 which is what finally found it, one turn later, only because the user asked.
+
+
+## Pre-merge audit (2026-08-29)
+
+`tdns-project/reviews/2026-08-29-tdns-case-insensitive-names-pre-merge-review.md`.
+Adversarial pass over the whole stack, looking for silent regressions.
+
+**Output for an ordinary zone is byte-identical to `main`** -- owner set, stored
+spellings, RRtype sets, canonical order, ZONEMD digest -- and the RFC 8976
+published vectors still pass. The exposure is confined to data that is
+mixed-case or carries non-UTF-8 octets, which was broken before the stack.
+
+**One silent regression, now mitigated in this commit.** `zd.ZoneName` was folded
+only under the `fold-case` option before (default off); it is folded always now.
+Keystore rows written by an older tdns under a mixed-case zone name are
+therefore not found -- and `LoadOutgoingSerial` treats "no row" as "nothing
+served yet" rather than as an error, so such a zone can republish BELOW a serial
+a secondary already holds, and that secondary serves stale data indefinitely with
+nothing logged. The zone file path moves for the same reason.
+
+`ParseZones` now warns once per non-canonical configured zone name, naming both
+spellings and the consequence. Warn rather than refuse: the zone works, and
+refusing to start over a cosmetic difference would be worse than the problem.
+The test asserts it fires for `Example.COM.` AND stays silent for an ordinary
+name -- a warning that fires on healthy configs is one operators learn to ignore.
+
+The remaining audit findings are deferred by agreement, and the deferred-item
+table in the review carries them with verified line numbers. Two are worth
+filing rather than leaving in a document, because the gate cannot see either and
+"when someone next touches it" has no owner: `rrset_utils.go` (wire-sourced
+Additional/Authority names compared as bytes) and `cli/ksk_rollover_cli.go` (a
+mixed-case `--zone` silently misses its policy).
