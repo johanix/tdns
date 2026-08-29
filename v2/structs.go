@@ -198,13 +198,20 @@ type ZoneData struct {
 	// Errors and kept in sync by SetError / ClearError. Existing call
 	// sites that read those single-error fields continue to work; new
 	// code can iterate ErrorList() for the full set.
-	Errors        map[ErrorType]ZoneError
-	Error         bool      // derived: len(Errors) > 0
-	ErrorType     ErrorType // derived: highest-priority error type, see errorTypeReportOrder
-	ErrorMsg      string    // derived: msg of the type reported in ErrorType
-	LatestError   time.Time // time of latest error
-	RefreshCount  int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	LatestRefresh time.Time // time of latest successful refresh
+	Errors      map[ErrorType]ZoneError
+	Error       bool      // derived: len(Errors) > 0
+	ErrorType   ErrorType // derived: highest-priority error type, see errorTypeReportOrder
+	ErrorMsg    string    // derived: msg of the type reported in ErrorType
+	LatestError time.Time // time of latest error
+	// RefreshCount is NOT a have-data test, whatever its name suggests: it is
+	// incremented only by initialLoadZone, so it reaches 1 at most once and
+	// stays there however many refreshes follow -- and never leaves 0 at all
+	// for a zone provisioned through the API in this process. The query and
+	// UPDATE paths use zd.HasPublishedData() instead. Fix this to count
+	// refreshes or retire it; see §6 of
+	// docs/2026-08-28-secondary-serve-until-expire.md.
+	RefreshCount  int       // times initialLoadZone loaded the zone (0 or 1), reported over the API
+	LatestRefresh time.Time // set beside RefreshCount and read nowhere; Stage 2 gives it a meaning
 	SourceCatalog string    // if auto-configured, which catalog zone created this zone
 	// ParentDSTTLObserved is the most recent TTL observed on the parent's
 	// DS RRset (seconds). Refreshed by every successful QueryParentAgentDS
