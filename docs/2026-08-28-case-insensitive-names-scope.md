@@ -953,3 +953,30 @@ filing rather than leaving in a document, because the gate cannot see either and
 "when someone next touches it" has no owner: `rrset_utils.go` (wire-sourced
 Additional/Authority names compared as bytes) and `cli/ksk_rollover_cli.go` (a
 mixed-case `--zone` silently misses its policy).
+
+
+## Upgrade note and the gate in normal testing (2026-08-29)
+
+`docs/2026-08-29-case-insensitive-names-upgrade-note.md` covers the three things
+that change for an operator, in the style of the existing
+breaking-changes guide: the mixed-case zone name (silent, warned about now), the
+one-time re-sign for a zone file with mis-cased owners, and mixed-case queries
+starting to resolve. It records what was measured -- the byte-identical
+fingerprint and the RFC 8976 vectors -- and what was not.
+
+**The gate is wired into normal testing.** `make namecheck` alone was a gate
+nobody would run. It is now `check-names` in `utils/Makefile.common`, beside the
+existing `check-no-mutators`, with a `check` target running both and a
+`check-all` at the repo root running every live module's unit tests and then the
+gates.
+
+Deliberately NOT called `test`: `Makefile.common` already defines `test` as the
+per-app `go test -v -cover` that the application directories use, and redefining
+it at the root would override the shared one and warn on every invocation. That
+shared target is also broken when run from the root -- `$(GO)` is set by the app
+Makefiles and not at the root, which is why it executed the shell's `test`
+builtin. `check-names` uses plain `go` for that reason; namecheck needs neither
+cgo nor the algorithm environment.
+
+`make check-all` was confirmed to FAIL when a fold is reverted, not merely to
+report: exit 2, with the finding printed.
