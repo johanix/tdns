@@ -147,19 +147,16 @@ func drainRemainder(ch <-chan *dns.Envelope, grace time.Duration) bool {
 	}
 }
 
-// ZoneTransferIn pulls the zone from the upstream primary described by up:
-// AXFR/IXFR over Do53, or over TLS (XoT, RFC 9103) when up.Transport is dot.
-// TSIG (up.Key) and TLS are independent layers and may be combined.
-//
-// ctx bounds the transfer. An AXFR of a large zone is the longest-running
-// network operation in the daemon, so a shutdown landing mid-stream should stop
-// it rather than let it run to completion against an engine that is going away.
 // openTransferStream performs the setup every inbound transfer needs -- XoT TLS
 // config, TSIG signing, the bound source address -- and starts the stream.
 //
 // Extracted so the AXFR and IXFR paths cannot drift apart on any of it. All
 // three are invisible from the outside until something refuses us, and then the
 // only evidence is in the far end's log.
+//
+// ctx bounds the transfer. An AXFR of a large zone is the longest-running
+// network operation in the daemon, so a shutdown landing mid-stream should stop
+// it rather than let it run to completion against an engine that is going away.
 func (zd *ZoneData) openTransferStream(ctx context.Context, up PeerConf, msg *dns.Msg, conf *Config) (<-chan *dns.Envelope, *dns.Transfer, error) {
 	upstream := up.Addr
 	transfer := new(dns.Transfer)
@@ -220,6 +217,14 @@ func (zd *ZoneData) openTransferStream(ctx context.Context, up PeerConf, msg *dn
 	return answerChan, transfer, nil
 }
 
+// ZoneTransferIn pulls a whole zone from the upstream primary described by up:
+// AXFR over Do53, or over TLS (XoT, RFC 9103) when up.Transport is dot. TSIG
+// (up.Key) and TLS are independent layers and may be combined.
+//
+// This is the full-zone path, and the only one that streams straight into
+// zd.Data. An incremental transfer goes through ixfrTransferIn instead, which
+// has to buffer: whether a reply is a difference sequence or a whole zone is
+// not knowable until the second record.
 func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint32, ttype string, conf *Config) (uint32, error) {
 	upstream := up.Addr
 	if upstream == "" {

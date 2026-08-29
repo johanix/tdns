@@ -738,12 +738,6 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 	return incomingSerial == currentSerial && !force
 }
 
-// FetchFromUpstream pulls the zone from one of its configured primaries.
-// Returns whether the zone was updated.
-//
-// force means the operator explicitly asked for a retransfer, so the zone is
-// re-fetched and re-applied even when upstream's serial has not moved. See the
-// unchanged-serial check below for why that matters.
 // transferFromUpstream is one upstream's worth of transfer: a delta when the
 // zone is eligible for one, a full AXFR otherwise -- and a full AXFR against
 // the SAME upstream on any IXFR failure, before the caller moves on to the
@@ -803,6 +797,14 @@ func (zd *ZoneData) transferFromUpstream(ctx context.Context, up PeerConf, newZd
 	return false, nil
 }
 
+// FetchFromUpstream pulls the zone from one of its configured primaries.
+// Returns whether the zone was updated.
+//
+// force means the operator explicitly asked for a retransfer, so the zone is
+// re-fetched and re-applied even when upstream's serial has not moved. See the
+// unchanged-serial check below for why that matters -- and note that force also
+// takes the delta path out of play entirely, since an IXFR from our own serial
+// would answer with a single SOA rather than the zone the operator asked for.
 func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {

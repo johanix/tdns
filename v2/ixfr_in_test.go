@@ -981,3 +981,78 @@ healed.example.	3600	IN	A	10.7.7.7
 		})
 	}
 }
+
+// TestIxfrInAgainstAnAxfrOnlyPrimary is the compatibility case: a primary that
+// has never heard of IXFR and REFUSES the qtype outright, rather than
+// answering it with a full zone.
+//
+// Distinct from TestIxfrInFallsBackToFullZone, which covers a primary that
+// answers the IXFR (with everything). Here the request itself is rejected, so
+// the recovery is the transport-level fallback rather than the classification
+// one -- and since request-ixfr is ON by default, every secondary in an
+// existing deployment meets this on its first refresh after an upgrade.
+func TestIxfrInAgainstAnAxfrOnlyPrimary(t *testing.T) {
+	authApp(t)
+	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+www.example.	3600	IN	A	10.0.0.3
+old.example.	3600	IN	A	10.5.5.5
+`
+	pzd := &ZoneData{
+		ZoneName: "example.", ZoneStore: MapZone, ZoneType: Primary,
+		Logger: discardLogger(), Ready: true, Status: ZoneStatusReady,
+		Downstreams: []AclEntry{{Prefix: "127.0.0.0/8", Key: NOKEY}},
+	}
+	if _, _, err := pzd.ReadZoneData(newer, true); err != nil {
+		t.Fatalf("ReadZoneData: %v", err)
+	}
+	pzd.InstallInitialSnapshot()
+	t.Cleanup(pzd.stopPublisher)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+	mux := dns.NewServeMux()
+	mux.HandleFunc("example.", func(w dns.ResponseWriter, r *dns.Msg) {
+		if len(r.Question) == 1 && r.Question[0].Qtype == dns.TypeIXFR {
+			m := new(dns.Msg)
+			m.SetRcode(r, dns.RcodeNotImplemented)
+			_ = w.WriteMsg(m)
+			return
+		}
+		_, _ = pzd.ZoneTransferOut(srvCtx, w, r, nil)
+	})
+	started := make(chan struct{})
+	srv := &dns.Server{Listener: ln, Handler: mux, MsgAcceptFunc: MsgAcceptFunc,
+		NotifyStartedFunc: func() { close(started) }}
+	go func() { _ = srv.ActivateAndServe() }()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("axfr-only primary did not start")
+	}
+	defer func() {
+		srvCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	}()
+
+	zd := ixfrTestSecondary(t, ixApplyZone, ln.Addr().String(), nil)
+	if !zd.requestIxfr() {
+		t.Fatal("precondition: request-ixfr should be on by default")
+	}
+
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
+		t.Fatalf("FetchFromUpstream against an AXFR-only primary: %v", err)
+	}
+	if zd.IncomingSerial != 20 {
+		t.Errorf("serial %d, want 20: the AXFR fallback did not run", zd.IncomingSerial)
+	}
+	if owner, _ := zd.GetOwner("old.example."); owner == nil {
+		t.Error("the zone did not converge against an AXFR-only primary")
+	}
+}
