@@ -186,5 +186,264 @@ func countIxfrRRs(steps []ixfrStep) (removed, added int) {
 	return removed, added
 }
 
-// rrsetHasSignatures reports whether an RRset carries any RRSIG.
-func rrsetHasSignatures(rs core.RRset) bool { return len(rs.RRSIGs) > 0 }
+// signedKey identifies an RRset that carried signatures in the copy we started
+// from, so applyIxfrSteps can tell "this delta legitimately removed the last
+// RR" from "this delta silently stripped the signatures off an RRset that is
+// still there".
+type signedKey struct {
+	owner  string
+	rrtype uint16
+}
+
+// materializeForIxfr copies the published snapshot into a fresh owner map that
+// the delta can be applied to, and reports which RRsets were signed.
+//
+// The copy is deep, and it must be. RRTypeStore.Get returns core.RRset by
+// VALUE, so a store-to-store copy leaves the RRs/RRSIGs slices sharing backing
+// arrays with the snapshot that is being served right now -- and removing an RR
+// shifts elements inside that shared array. That is the Project B invariant
+// snapshotMapFromData exists to protect: a published snapshot is immutable
+// while it is published.
+//
+// OwnerData.NSEC is carried too. It is a field beside RRtypes rather than an
+// entry inside it, so an RRtypes-only copy drops the denial chain -- and
+// nothing would notice, because the apply would SUCCEED and there would be no
+// error to fall back from. The zone would simply be served unsigned-for-denial
+// and resolvers would call it bogus.
+//
+// Deliberately NOT cloneOwner: that reads and writes zd.workingSet, so calling
+// it here would mutate the live secondary, and its own RRtypes copy is the
+// shallow one described above.
+func materializeForIxfr(snap *zoneSnapshot) (*core.NameMap[OwnerData], map[signedKey]bool) {
+	out := core.NewNameMap[OwnerData]()
+	signed := map[signedKey]bool{}
+	if snap == nil {
+		return out, signed
+	}
+	for name, src := range snap.Data {
+		if src == nil {
+			continue
+		}
+		nod := OwnerData{Name: src.Name, RRtypes: NewRRTypeStore()}
+		for _, t := range src.RRtypes.Keys() {
+			rs, ok := src.RRtypes.Get(t)
+			if !ok {
+				continue
+			}
+			if len(rs.RRSIGs) > 0 {
+				signed[signedKey{owner: core.CanonicalizeName(src.Name), rrtype: t}] = true
+			}
+			nod.RRtypes.Set(t, cloneRRset(rs))
+		}
+		nod.NSEC = cloneRRset(src.NSEC)
+		out.Set(name, nod)
+	}
+	return out, signed
+}
+
+// removeExact removes one RR from a slice by canonical-duplicate match,
+// reporting whether it was found.
+//
+// Written here rather than reusing core.RRset.RemoveRR for two reasons, both of
+// which would be silent: RemoveRR searches only the .RRs slice, so an RRSIG or
+// NSEC delete would never match and would be read as divergence; and on a hit
+// it clears the whole .RRSIGs list, which would strip an RRset's signatures as
+// a side effect of removing one of its records.
+func removeExact(rrs []dns.RR, victim dns.RR) ([]dns.RR, bool) {
+	for i, rr := range rrs {
+		if core.IsDuplicate(rr, victim) {
+			return append(rrs[:i:i], rrs[i+1:]...), true
+		}
+	}
+	return rrs, false
+}
+
+// applyIxfrSteps applies parsed difference sequences to a materialized copy.
+//
+// Routing mirrors SortFunc exactly, on the delete side as well as the add side:
+// NSEC lands in OwnerData.NSEC, an RRSIG follows the type it covers (NSEC's
+// signatures into OwnerData.NSEC.RRSIGs), and everything else into
+// RRtypes[type]. Getting the delete side wrong does not corrupt anything -- it
+// reads as "delete of a record we do not have" -- but it would abort every
+// signed-zone IXFR to AXFR, which is the feature quietly doing nothing for the
+// zones it matters most for.
+//
+// Any delete that does not match is a divergence signal: our base is not the
+// base the delta was computed against. Abort, and let the caller re-pull.
+func applyIxfrSteps(zoneName string, data *core.NameMap[OwnerData], signed map[signedKey]bool, steps []ixfrStep) error {
+	for _, st := range steps {
+		for _, rr := range st.removed {
+			if err := applyIxfrRemove(data, rr); err != nil {
+				return fmt.Errorf("ixfr %s: sequence %d→%d: %w", zoneName, st.from, st.to, err)
+			}
+		}
+		for _, rr := range st.added {
+			applyIxfrAdd(data, rr)
+		}
+		// Per step, not once at the end: a later step may legitimately delete
+		// the last RR of an RRset this step left unsigned, and then there is
+		// nothing to complain about any more. Checking as we go catches the
+		// window the served zone would actually have been published in.
+		if err := checkSignaturesIntact(zoneName, data, signed); err != nil {
+			return fmt.Errorf("ixfr %s: sequence %d→%d: %w", zoneName, st.from, st.to, err)
+		}
+	}
+	return nil
+}
+
+func applyIxfrRemove(data *core.NameMap[OwnerData], rr dns.RR) error {
+	owner := rr.Header().Name
+	nod, ok := data.Get(owner)
+	if !ok {
+		return fmt.Errorf("delete of %s: no such owner name in the copy we hold", rr.String())
+	}
+
+	switch v := rr.(type) {
+	case *dns.NSEC:
+		out, found := removeExact(nod.NSEC.RRs, rr)
+		if !found {
+			return fmt.Errorf("delete of %s: not present", rr.String())
+		}
+		nod.NSEC.RRs = out
+
+	case *dns.RRSIG:
+		if v.TypeCovered == dns.TypeNSEC {
+			out, found := removeExact(nod.NSEC.RRSIGs, rr)
+			if !found {
+				return fmt.Errorf("delete of %s: not present", rr.String())
+			}
+			nod.NSEC.RRSIGs = out
+			break
+		}
+		rs, ok := nod.RRtypes.Get(v.TypeCovered)
+		if !ok {
+			return fmt.Errorf("delete of %s: no %s RRset to remove a signature from",
+				rr.String(), dns.TypeToString[v.TypeCovered])
+		}
+		out, found := removeExact(rs.RRSIGs, rr)
+		if !found {
+			return fmt.Errorf("delete of %s: not present", rr.String())
+		}
+		rs.RRSIGs = out
+		nod.RRtypes.Set(v.TypeCovered, rs)
+
+	default:
+		rrtype := rr.Header().Rrtype
+		rs, ok := nod.RRtypes.Get(rrtype)
+		if !ok {
+			return fmt.Errorf("delete of %s: no %s RRset at that name",
+				rr.String(), dns.TypeToString[rrtype])
+		}
+		out, found := removeExact(rs.RRs, rr)
+		if !found {
+			return fmt.Errorf("delete of %s: not present", rr.String())
+		}
+		rs.RRs = out
+		if len(rs.RRs) == 0 {
+			// The RRset is gone, and so are the signatures over it. Dropping
+			// the type is what keeps a name from lingering with nothing but
+			// its own signatures.
+			nod.RRtypes.Delete(rrtype)
+		} else {
+			nod.RRtypes.Set(rrtype, rs)
+		}
+	}
+
+	// An owner with no RRsets and no denial record has stopped existing.
+	if nod.RRtypes.Count() == 0 && len(nod.NSEC.RRs) == 0 {
+		data.Remove(owner)
+		return nil
+	}
+	data.Set(owner, nod)
+	return nil
+}
+
+func applyIxfrAdd(data *core.NameMap[OwnerData], rr dns.RR) {
+	owner := rr.Header().Name
+	nod, ok := data.Get(owner)
+	if !ok {
+		nod = OwnerData{Name: owner, RRtypes: NewRRTypeStore()}
+	}
+
+	switch v := rr.(type) {
+	case *dns.NSEC:
+		nod.NSEC.Name, nod.NSEC.RRtype, nod.NSEC.Class = owner, dns.TypeNSEC, dns.ClassINET
+		nod.NSEC.RRs = append(nod.NSEC.RRs, rr)
+
+	case *dns.RRSIG:
+		if v.TypeCovered == dns.TypeNSEC {
+			nod.NSEC.Name, nod.NSEC.RRtype, nod.NSEC.Class = owner, dns.TypeNSEC, dns.ClassINET
+			nod.NSEC.RRSIGs = append(nod.NSEC.RRSIGs, rr)
+			break
+		}
+		rs := nod.RRtypes.GetOnlyRRSet(v.TypeCovered)
+		rs.RRSIGs = append(rs.RRSIGs, rr)
+		nod.RRtypes.Set(v.TypeCovered, rs)
+
+	default:
+		rrtype := rr.Header().Rrtype
+		rs := nod.RRtypes.GetOnlyRRSet(rrtype)
+		rs.Name, rs.RRtype, rs.Class = owner, rrtype, rr.Header().Class
+		rs.RRs = append(rs.RRs, rr)
+		nod.RRtypes.Set(rrtype, rs)
+	}
+	data.Set(owner, nod)
+}
+
+// checkSignaturesIntact refuses a delta that has left an RRset standing without
+// the signatures it had.
+//
+// This is §1's rule applied to the one failure the invariant does NOT surface.
+// A delete that does not match aborts to AXFR and self-heals loudly; an RRset
+// silently stripped of its RRSIGs aborts nothing, publishes, and shows up as
+// validation failures at other people's resolvers. Re-attaching signatures
+// instead would be a second design -- it has to decide what to do when a delta
+// legitimately removes the last one -- and is not this project.
+func checkSignaturesIntact(zoneName string, data *core.NameMap[OwnerData], signed map[signedKey]bool) error {
+	for key := range signed {
+		nod, ok := data.Get(key.owner)
+		if !ok {
+			continue // the whole name went away; nothing is being served unsigned
+		}
+		rs, ok := nod.RRtypes.Get(key.rrtype)
+		if !ok || len(rs.RRs) == 0 {
+			continue // the RRset went away with its signatures
+		}
+		if len(rs.RRSIGs) == 0 {
+			return fmt.Errorf("%s %s would be served unsigned: it had signatures before this delta and has none after",
+				key.owner, dns.TypeToString[key.rrtype])
+		}
+	}
+	return nil
+}
+
+// replaceApexSOA puts the serial the difference sequences arrived at into the
+// zone's own apex SOA record.
+//
+// Not optional, and easy to miss: the parser treats section-boundary SOAs as
+// delimiters (correctly, per RFC 1995), so nothing has touched the SOA RR
+// sitting in the materialized copy -- it still carries the serial the snapshot
+// was taken at. applyRefreshReplacementLocked publishes from this map, so
+// without this the zone is served with the OLD SOA while CurrentSerial says the
+// new one, which trips the serial-mirror drift check on the next publish and
+// hands downstreams a SOA that disagrees with the IXFR brackets we are about to
+// append to the outbound chain.
+func replaceApexSOA(zoneName string, data *core.NameMap[OwnerData], bookend *dns.SOA) error {
+	nod, ok := data.Get(zoneName)
+	if !ok {
+		return fmt.Errorf("ixfr %s: no apex in the copy after applying the delta", zoneName)
+	}
+	rs, ok := nod.RRtypes.Get(dns.TypeSOA)
+	if !ok || len(rs.RRs) == 0 {
+		return fmt.Errorf("ixfr %s: no apex SOA in the copy after applying the delta", zoneName)
+	}
+	soa := dns.Copy(bookend).(*dns.SOA)
+	// Keep the owner spelling and TTL the zone already uses: the delta's
+	// bookend is the primary's spelling of the apex, and only its RDATA is
+	// being adopted here.
+	soa.Hdr = *rs.RRs[0].Header()
+	rs.RRs = []dns.RR{soa}
+	nod.RRtypes.Set(dns.TypeSOA, rs)
+	data.Set(zoneName, nod)
+	return nil
+}
