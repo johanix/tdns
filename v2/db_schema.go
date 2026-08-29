@@ -278,6 +278,20 @@ UNIQUE (keyname)
 		updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`,
 
+	// One row per zone: when a primary was last seen alive, and which copy
+	// that was about. Read at first bind to restore the zone's SOA EXPIRE
+	// budget across a restart; see zone_refresh_state.go for why this is not
+	// a column on ZoneFileState.
+	//
+	// A new table needs no dbMigrateSchema entry -- dbSetupTables runs
+	// CREATE TABLE IF NOT EXISTS over this map at every startup, so an
+	// existing database picks it up on the first run of the new binary.
+	"ZoneRefreshState": `CREATE TABLE IF NOT EXISTS 'ZoneRefreshState' (
+		zone           VARCHAR(255) NOT NULL PRIMARY KEY,
+		last_confirmed TEXT NOT NULL,
+		serial         INTEGER NOT NULL
+	)`,
+
 	"ZoneDelta": `CREATE TABLE IF NOT EXISTS 'ZoneDelta' (
 		id         INTEGER PRIMARY KEY,
 		zone       VARCHAR(255) NOT NULL,

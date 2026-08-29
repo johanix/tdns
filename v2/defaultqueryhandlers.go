@@ -111,10 +111,23 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		// SERVFAIL when there is nothing to answer from. RefreshError
 		// alone does not qualify: a zone that holds data is still
 		// authoritative for its current contents even when the last
-		// refresh failed. See HasPublishedData -- expire is not
-		// enforced yet, so this errs permissive.
+		// refresh failed -- until SOA EXPIRE, which the next guard
+		// enforces.
 		if !zd.HasPublishedData() {
 			lgHandler.Warn("zone holds no published data", "qname", qname, "zone", zd.ZoneName)
+			m := new(dns.Msg)
+			m.SetRcode(r, dns.RcodeServerFailure)
+			w.WriteMsg(m)
+			return nil
+		}
+
+		// Past SOA EXPIRE: we still hold the copy, but RFC 1034 §4.3.5 says
+		// we are no longer entitled to answer from it. The refresh ticker
+		// keeps trying -- expire is not a service-impacting error -- so the
+		// next usable SOA un-expires the zone on its own.
+		if zd.HasExpired() {
+			lgHandler.Warn("zone has passed SOA EXPIRE since its last confirmed refresh",
+				"qname", qname, "zone", zd.ZoneName, "lastRefresh", zd.lastRefresh())
 			m := new(dns.Msg)
 			m.SetRcode(r, dns.RcodeServerFailure)
 			w.WriteMsg(m)
@@ -175,6 +188,16 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	// API-provisioned zone -- unconditionally, with no error present.
 	if !zd.HasPublishedData() {
 		lgHandler.Warn("zone holds no published data", "qname", qname, "zone", zd.ZoneName)
+		m := new(dns.Msg)
+		m.SetRcode(r, dns.RcodeServerFailure)
+		w.WriteMsg(m)
+		return nil
+	}
+
+	// Same expire guard as the Zones.Get path above.
+	if zd.HasExpired() {
+		lgHandler.Warn("zone has passed SOA EXPIRE since its last confirmed refresh",
+			"qname", qname, "zone", zd.ZoneName, "lastRefresh", zd.lastRefresh())
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		w.WriteMsg(m)

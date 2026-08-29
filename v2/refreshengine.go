@@ -96,6 +96,42 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 
 	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, zr.Force, conf)
 	if err != nil {
+		// A failed refresh no longer implies an empty zone. A secondary that
+		// adopted its persisted copy at first bind (adoptPersistedCopyAtFirstBind)
+		// holds data even though the transfer failed -- and FirstZoneLoad is
+		// already spent, so returning here without finishing the first bind
+		// hands the zone to the EXISTING ZONE branch on the next tick and it
+		// never gets policy-bound, replayed or drained for the life of the
+		// process. It would serve, which is the point of Stage 2, but as a
+		// zone that never finished loading.
+		//
+		// Completed here rather than at the call sites because all three of
+		// them reach this one return. The caller still gets the error: the
+		// refresh DID fail, the ticker must retry, and RefreshError must be
+		// recorded.
+		if zd.publishedSnapshot() != nil {
+			if cerr := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); cerr != nil {
+				lgEngine.Error("policy sync after adopting a persisted copy failed",
+					"zone", zone, "error", cerr)
+				zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", cerr)
+				zd.LatestError = time.Now()
+			}
+			// And install the real refresh interval, for the same reason. The
+			// success path below does this; a zone that adopted a copy has an
+			// SOA to read it from, and first-load is already spent, so nothing
+			// will come back for it later. Without this the caller's
+			// "no counter yet" fallback pins the zone at a 300s probe for the
+			// life of the process instead of its own SOA REFRESH.
+			if refresh, ferr := FindSoaRefresh(zd); ferr != nil {
+				lgEngine.Warn("FindSoaRefresh failed for an adopted copy", "zone", zone, "error", ferr)
+			} else {
+				refreshCounters.Set(zone, &RefreshCounter{
+					Name:       zone,
+					SOARefresh: refresh,
+					CurRefresh: refresh,
+				})
+			}
+		}
 		return false, err
 	}
 
@@ -150,7 +186,13 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	// preserved; order moved post-Ready for PR-2).
 
 	if updated {
-		zd.LatestRefresh = time.Now()
+		// LatestRefresh is NOT set here. It means "a usable SOA was last seen
+		// at", which is a fact about the primary, and noteSuccessfulRefresh
+		// owns it -- it is the only writer that also persists the value, so
+		// stamping it here would leave memory and database disagreeing and
+		// the disagreement would survive a restart as a silently restarted
+		// expire budget. `updated` is about our own copy changing, which is
+		// not the same question.
 		zd.RefreshCount++
 		// Successful refresh clears RefreshError specifically — other
 		// error categories (rollover policy, parent DSYNC blockers,

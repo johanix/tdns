@@ -30,6 +30,85 @@ var ErrZoneNotReady = errors.New("zone data is not yet ready")
 // secondary. ctx bounds the whole operation -- primary resolution, the SOA
 // probe, and the transfer itself -- so a shutdown or a cancelled request stops
 // in-flight work instead of running to completion against a dead engine.
+// persistedZoneFilePath is where this zone's copy lives on disk, or "" when it
+// has none. The derivation is the one zoneDataToZoneConf already uses, and it
+// must stay that way: an API-managed zone never sets zd.Zonefile itself --
+// WriteDynamicZoneFile derives <zonedirectory>/<zone>.zone internally and does
+// not write the path back -- so keying only on the field would miss precisely
+// the zones that are persisted through the API.
+func (zd *ZoneData) persistedZoneFilePath(conf *Config) string {
+	if zd == nil {
+		return ""
+	}
+	if zd.Zonefile != "" {
+		return zd.Zonefile
+	}
+	if conf != nil && conf.ShouldPersistZone(zd) {
+		return GetDynamicZoneFilePath(zd.ZoneName, conf.DynamicZones.ZoneDirectory)
+	}
+	return ""
+}
+
+// adoptPersistedCopyAtFirstBind loads a secondary's persisted zone file before
+// its first transfer is attempted.
+//
+// Only at first bind. Once a snapshot is published the file is not consulted
+// again: a later failed refresh must not roll the zone back to disk, because
+// the file can be older than what is in memory.
+//
+// Deliberately silent about its outcome. The file copy is a floor, not a
+// result: whatever happens next -- transfer succeeds and replaces it, serial
+// is unchanged and it stands, primary is unreachable and it keeps the zone
+// answering -- is what Refresh reports. Reporting "updated" for a copy that
+// came off our own disk would make the refresh engine write it straight back
+// out again.
+//
+// The expire clock is NOT started here. Adopting a file is not evidence that
+// the primary is alive; only a usable SOA is (see noteSuccessfulRefresh). A
+// zone that loads from disk and never reaches its primary again is Option 3
+// in the brief: it holds a copy whose confirmation timestamp comes from the
+// database, or from load time when there is none.
+func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, debug bool, dynamicRRs []*core.RRset, conf *Config) {
+	if zd == nil || zd.publishedSnapshot() != nil {
+		return
+	}
+	fname := zd.persistedZoneFilePath(conf)
+	if fname == "" {
+		return
+	}
+	if _, err := os.Stat(fname); err != nil {
+		// No copy yet: a zone added through the API in this process has not
+		// written one, and a config-declared secondary may never have
+		// transferred. Nothing to adopt, and not an error.
+		lg.Debug("no persisted copy to adopt at first bind", "zone", zd.ZoneName, "file", fname)
+		return
+	}
+
+	// FetchFromFile takes no path argument -- it reads zd.Zonefile directly.
+	// Deriving the path without assigning it would stat "" on exactly the
+	// zones this exists for.
+	if zd.Zonefile == "" {
+		zd.Zonefile = fname
+	}
+
+	if _, err := zd.FetchFromFile(ctx, verbose, debug, false, dynamicRRs); err != nil {
+		// Not fatal, and not this function's business to report: the transfer
+		// below is still the zone's primary route to data, and it may well
+		// succeed. A zone that can neither load nor transfer surfaces through
+		// the transfer's own error.
+		lg.Warn("could not adopt persisted zone copy at first bind, continuing to transfer",
+			"zone", zd.ZoneName, "file", fname, "err", err)
+		return
+	}
+	lg.Info("adopted persisted zone copy at first bind",
+		"zone", zd.ZoneName, "file", fname, "serial", zd.IncomingSerial)
+
+	// The copy is in memory, so its serial is known and the recorded
+	// confirmation can be matched against it. Only on this path: a copy that
+	// arrives by transfer is stamped fresh by DoTransfer instead.
+	zd.restoreRefreshStateAtFirstBind()
+}
+
 func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, conf *Config) (bool, error) {
 	var updated bool
 
@@ -55,6 +134,14 @@ func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, con
 		return updated, err
 
 	case Secondary:
+		// Before any network work: if this is the zone's first bind and a
+		// persisted copy exists on disk, adopt it. A restart that coincides
+		// with an unreachable primary then serves the copy it already has
+		// instead of nothing at all -- which is the whole point of
+		// `storage: persistent` for a secondary, and did not happen before,
+		// because this branch only ever transferred.
+		zd.adoptPersistedCopyAtFirstBind(ctx, verbose, debug, dynamicRRs, conf)
+
 		// D1: re-resolve hostname primaries each refresh, so a transient
 		// resolution failure self-heals and a changed primary address is
 		// followed. Literal-IP primaries pass through unchanged (no lookup). If
@@ -85,6 +172,15 @@ func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, con
 				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
 			}
+			// Re-stamp, now that IncomingSerial names the copy we actually
+			// hold. DoTransfer stamped the serial we held at probe time, which
+			// is the right answer if the transfer then fails -- we keep that
+			// copy and the primary was alive. Once the transfer succeeds it is
+			// the wrong answer: the row would describe a copy that no longer
+			// exists, and the identity check at the next first bind would
+			// discard a perfectly good confirmation and restart the whole
+			// expire budget from load time.
+			zd.noteSuccessfulRefresh(zd.IncomingSerial)
 			return updated, nil // zone updated, no error
 		}
 
@@ -264,9 +360,25 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 			}
 			if soa, ok := r.Answer[0].(*dns.SOA); ok {
 				lg.Info("DoTransfer: serial check", "zone", zd.ZoneName, "upstream", upstream, "notify_serial", soa.Serial, "incoming_serial", zd.IncomingSerial, "current_serial", zd.CurrentSerial)
-				if soa.Serial <= zd.IncomingSerial {
+				// A usable SOA, from either arm: this is the RFC's
+				// proof the primary is alive, and the only thing that
+				// advances the expire clock. The serial-unchanged arm
+				// matters most -- it is the case that confirms without
+				// transferring anything, and the one a nil-error test
+				// cannot tell apart from all-primaries-REFUSED.
+				//
+				// serialNewer, not `>`: SOA serials are mod-2^32 and
+				// wrap (RFC 1982). A plain comparison reads the first
+				// serial after a wrap as OLDER than the one we hold, so
+				// the secondary stops transferring and serves stale data
+				// until someone forces a retransfer. Every other serial
+				// comparison in the tree already goes through this
+				// helper; this one did not.
+				if !serialNewer(soa.Serial, zd.IncomingSerial) {
+					zd.noteSuccessfulRefresh(zd.IncomingSerial)
 					return false, soa.Serial, nil
 				}
+				zd.noteSuccessfulRefresh(zd.IncomingSerial)
 				return true, soa.Serial, nil
 			}
 			// NOERROR but the first answer is not a SOA — try the next sibling.

@@ -198,6 +198,15 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		w.WriteMsg(m)
 		return nil // didn't find any zone for that qname
 	}
+	// And the same expire guard as the query path: a zone we may no longer
+	// answer for is not one we may accept updates to either.
+	if zd.HasExpired() {
+		lgHandler.Error("zone has passed SOA EXPIRE since its last confirmed refresh",
+			"qname", qname, "zone", zd.ZoneName, "lastRefresh", zd.lastRefresh())
+		m.SetRcode(r, dns.RcodeServerFailure)
+		w.WriteMsg(m)
+		return nil
+	}
 
 	// dump.P(zd.Options)
 	// dump.P(zd.UpdatePolicy)

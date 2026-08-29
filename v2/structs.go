@@ -211,8 +211,12 @@ type ZoneData struct {
 	// refreshes or retire it; see §6 of
 	// docs/2026-08-28-secondary-serve-until-expire.md.
 	RefreshCount  int       // times initialLoadZone loaded the zone (0 or 1), reported over the API
-	LatestRefresh time.Time // set beside RefreshCount and read nowhere; Stage 2 gives it a meaning
-	SourceCatalog string    // if auto-configured, which catalog zone created this zone
+	LatestRefresh time.Time // when a usable SOA was last seen; what SOA EXPIRE is measured from
+	// expireClampLoggedSerial is the serial the EXPIRE-clamp warning was last
+	// emitted for, so a primary publishing a nonsensical EXPIRE is reported
+	// once per copy rather than once per query. See effectiveExpire.
+	expireClampLoggedSerial uint32
+	SourceCatalog           string // if auto-configured, which catalog zone created this zone
 	// ParentDSTTLObserved is the most recent TTL observed on the parent's
 	// DS RRset (seconds). Refreshed by every successful QueryParentAgentDS
 	// call. Zero means "not yet observed" — the E10 cache-flush invariant

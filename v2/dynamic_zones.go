@@ -1026,6 +1026,21 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 			lg.Warn("RemoveDynamicZone: failed to remove zone file", "zone", name, "path", zoneFilePath, "error", err)
 		}
 	}
+	// Drop the zone's refresh confirmation. Not housekeeping: a stamp that
+	// outlives its zone is inherited by the next zone created under the same
+	// name, and an already-past-expire one would take that zone dark from its
+	// first bind -- worse than the no-stamp case, which starts a fresh budget.
+	//
+	// Scoped to this table on purpose. ZoneFileState and ZoneDelta rows also
+	// outlive their zones today; that is pre-existing, harmless (the digest
+	// verdict rejects a stale row rather than replaying its journal onto an
+	// unrelated base), and sweeping them is its own change.
+	if conf.Internal.KeyDB != nil {
+		if err := conf.Internal.KeyDB.DeleteZoneRefreshState(name); err != nil {
+			lg.Warn("RemoveDynamicZone: failed to remove refresh state", "zone", name, "error", err)
+		}
+	}
+
 	// Also the zone's actual file when it differs (a template-expanded
 	// primary's file lives at the template's pattern path, not under
 	// zonedirectory:). An API-managed zone is disposable by construction.
