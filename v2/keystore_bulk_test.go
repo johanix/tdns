@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -398,13 +397,14 @@ func TestBulkImportTsigYamlIsTruth(t *testing.T) {
 	inConfig := func(names ...string) TsigBulkPolicy {
 		set := map[string]bool{}
 		for _, n := range names {
-			set[core.CanonicalizeName(dns.Fqdn(n))] = true
+			set[tsigKeyKey(n)] = true
 		}
-		// The same key function the production writer uses. A helper that keys
-		// its fake set one way against a store keyed another is the store/lookup
-		// split under test, reproduced in the test.
+		// tsigKeyKey, not a copy of its body: a helper that keys its fake set
+		// one way against a store keyed another is the store/lookup split under
+		// test, reproduced in the test -- and an inline copy is exactly what
+		// naming the function was meant to stop.
 		return TsigBulkPolicy{StillInConfig: func(name string) bool {
-			return set[core.CanonicalizeName(dns.Fqdn(name))]
+			return set[tsigKeyKey(name)]
 		}}
 	}
 

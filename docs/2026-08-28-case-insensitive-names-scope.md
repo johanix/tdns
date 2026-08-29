@@ -891,3 +891,33 @@ the thing testable and visible at once.
 
 **The gate is not wired into CI.** This repo has no in-tree CI config; the
 Makefile target says to run it. Until someone adds it, the gate is opt-in.
+
+
+## Re-review of #425 (external, 2026-08-29)
+
+Findings 1-2 accepted. **Approved as stage 7.** All seven stages are reviewed
+and approved.
+
+The one niggle is closed: the `StillInConfig` helper in `keystore_bulk_test.go`
+still inlined `core.CanonicalizeName(dns.Fqdn(n))` rather than calling
+`tsigKeyKey`, and a purge comment in `tsig_keystore_mgmt.go` still named
+`CanonicalName`. An inline copy of the body is the drift the named function
+exists to prevent, so leaving one in the test that guards it was the wrong place
+to leave it.
+
+**A process failure worth recording.** The follow-up commit `adc2e0c9` was
+reported as pushed and was not. The working tree had been left on a DETACHED
+HEAD at `origin/feature/case-insensitive-names-gate` -- the remote-tracking ref,
+not the branch -- so the commit landed off-branch and
+`git push origin feature/case-insensitive-names-gate` pushed the branch, which
+had not moved, and said nothing. I read the commit id back with
+`git rev-parse HEAD`, which reported the detached commit, and treated a silent
+no-op push as success.
+
+`git rev-parse HEAD` is not evidence that a branch advanced, and a quiet push is
+not evidence that anything was sent. The check that would have caught it is
+comparing the BRANCH against its remote:
+
+    git rev-parse <branch>  vs  git rev-parse origin/<branch>
+
+which is what finally found it, one turn later, only because the user asked.

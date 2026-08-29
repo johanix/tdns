@@ -391,7 +391,7 @@ func (kdb *KeyDB) tsigKeyMgmtPurge(conf *Config, tx *Tx, kp KeystorePost, resp *
 		toDelete = nil
 		for _, row := range candidates {
 			// Canonicalize the candidate side too: approved is keyed by
-			// CanonicalName, so a non-canonical stored keyname would otherwise
+			// tsigKeyKey, so a non-canonical stored keyname would otherwise
 			// silently fail to match and be left undeleted.
 			if approved[tsigKeyKey(row.Keyname)] {
 				toDelete = append(toDelete, row)
