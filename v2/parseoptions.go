@@ -196,15 +196,35 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			// activateUpdatePolicy, which runs after this switch and needs
 			// the flags to have survived it.
 			OptOnConflictDBWins,
-			OptOnConflictZonefileWins,
-			// IXFR-in enablement. No condition of its own: it is meaningful
-			// only on a secondary, but harmless elsewhere -- nothing outside
-			// Refresh's Secondary branch consults it. Default ON is expressed
-			// by requestIxfr() rather than by materialising a flag here, so
-			// the persisted as-configured set keeps saying what the operator
-			// actually wrote.
-			OptRequestIxfr,
-			OptNoRequestIxfr:
+			OptOnConflictZonefileWins:
+			options[opt] = true
+			cleanoptions = append(cleanoptions, opt)
+
+		case OptRequestIxfr, OptNoRequestIxfr:
+			// IXFR-in enablement, and meaningful only on a secondary: nothing
+			// outside Refresh's Secondary branch consults it. On a primary the
+			// option is inert, which is exactly why it has to be reported --
+			// an operator who writes it there has made a config mistake that
+			// otherwise produces no symptom at all, and will go on believing
+			// the setting does something.
+			//
+			// ConfigWarning, not ConfigError: the zone is entirely fine and
+			// keeps serving. ConfigError is in serviceImpactingErrors, so
+			// using it here would take a healthy zone dark over a setting that
+			// does nothing.
+			if zconf.Type == "primary" {
+				errorMsg := fmt.Sprintf("Zone %s: %s is only meaningful on a secondary; ignored on a primary",
+					zname, ZoneOptionToString[opt])
+				lg.Error("option ignored: not a secondary", "zone", zname,
+					"option", ZoneOptionToString[opt], "type", zconf.Type)
+				if zd != nil {
+					zd.SetError(ConfigWarning, "%s", errorMsg)
+				}
+				continue
+			}
+			// Default ON is expressed by requestIxfr() rather than by
+			// materialising a flag here, so the persisted as-configured set
+			// keeps saying what the operator actually wrote.
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
 

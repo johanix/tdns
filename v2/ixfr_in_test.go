@@ -1056,3 +1056,63 @@ old.example.	3600	IN	A	10.5.5.5
 		t.Error("the zone did not converge against an AXFR-only primary")
 	}
 }
+
+// --------------------------------------------------- option parsing (F1)
+
+// TestRequestIxfrOptionsAreSecondaryOnly: the option decides whether a zone
+// asks its PRIMARY for a delta, so on a primary it is inert -- and an inert
+// option produces no symptom at all, which is exactly why the config mistake
+// has to be reported rather than silently accepted.
+func TestRequestIxfrOptionsAreSecondaryOnly(t *testing.T) {
+	for _, opt := range []string{"request-ixfr", "no-request-ixfr"} {
+		t.Run(opt+" on a secondary is accepted", func(t *testing.T) {
+			zd := &ZoneData{ZoneName: "example."}
+			zconf := &ZoneConf{Name: "example.", Type: "secondary", OptionsStrs: []string{opt}}
+			options := parseZoneOptions(&Config{}, "example.", zconf, zd)
+
+			if !options[StringToZoneOption[opt]] {
+				t.Errorf("%s was not enabled on a secondary: %v", opt, options)
+			}
+			for _, e := range zd.ErrorList() {
+				t.Errorf("unexpected %s error on a valid option: %q", ErrorTypeToString[e.Type], e.Msg)
+			}
+		})
+
+		t.Run(opt+" on a primary warns and is dropped", func(t *testing.T) {
+			zd := &ZoneData{ZoneName: "example."}
+			zconf := &ZoneConf{Name: "example.", Type: "primary", OptionsStrs: []string{opt}}
+			options := parseZoneOptions(&Config{}, "example.", zconf, zd)
+
+			if options[StringToZoneOption[opt]] {
+				t.Errorf("%s was accepted on a primary, where it does nothing", opt)
+			}
+			var warned bool
+			for _, e := range zd.ErrorList() {
+				switch e.Type {
+				case ConfigWarning:
+					warned = true
+				case ConfigError:
+					t.Errorf("an inert option raised a ConfigError, which is "+
+						"service-impacting: a healthy zone would go dark over a "+
+						"setting that does nothing. msg=%q", e.Msg)
+				}
+			}
+			if !warned {
+				t.Errorf("%s on a primary was dropped silently; the operator gets "+
+					"no signal that their config does nothing", opt)
+			}
+		})
+	}
+}
+
+// TestConfigWarningIsNotServiceImpacting pins the property the choice above
+// depends on. If ConfigWarning is ever added to serviceImpactingErrors, the
+// warning above becomes an outage.
+func TestConfigWarningIsNotServiceImpacting(t *testing.T) {
+	zd := &ZoneData{ZoneName: "example."}
+	zd.SetError(ConfigWarning, "an inert option")
+	if zd.HasServiceImpactingError() {
+		t.Error("ConfigWarning is service-impacting; a zone would stop answering " +
+			"because of a config setting that has no effect")
+	}
+}
