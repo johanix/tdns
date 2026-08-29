@@ -13,7 +13,9 @@ package tdns
 
 import (
 	"context"
+	"net"
 	"testing"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -838,5 +840,144 @@ func TestIxfrRelayToADownstream(t *testing.T) {
 	}
 	if got := ixfrTargetSerial(steps); got != secSerial {
 		t.Errorf("relayed delta ends at serial %d, secondary serves %d", got, secSerial)
+	}
+}
+
+// ------------------------------------------------- self-healing (§1)
+
+// startBadIxfrPrimary answers IXFR with a deliberately broken difference
+// stream and AXFR with the real zone, so a test can watch the fallback work.
+//
+// A real tdns primary cannot be made to send a bad delta, which is the point:
+// the invariant in §1 is about surviving primaries that are wrong, and the only
+// way to test it is to be one.
+func startBadIxfrPrimary(t *testing.T, zoneStr string, bad []dns.RR) (string, func()) {
+	t.Helper()
+	pzd := &ZoneData{
+		ZoneName: "example.", ZoneStore: MapZone, ZoneType: Primary,
+		Logger: discardLogger(), Ready: true, Status: ZoneStatusReady,
+		Downstreams: []AclEntry{{Prefix: "127.0.0.0/8", Key: NOKEY}},
+	}
+	if _, _, err := pzd.ReadZoneData(zoneStr, true); err != nil {
+		t.Fatalf("ReadZoneData: %v", err)
+	}
+	pzd.InstallInitialSnapshot()
+	t.Cleanup(pzd.stopPublisher)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+	mux := dns.NewServeMux()
+	mux.HandleFunc("example.", func(w dns.ResponseWriter, r *dns.Msg) {
+		if len(r.Question) == 1 && r.Question[0].Qtype == dns.TypeIXFR {
+			ch := make(chan *dns.Envelope)
+			tr := new(dns.Transfer)
+			go func() { ch <- &dns.Envelope{RR: bad}; close(ch) }()
+			_ = tr.Out(w, r, ch)
+			// Close explicitly once the body is out. A real primary ends the
+			// stream with a record the client can recognise as the end; a
+			// stream this broken has none, so without an EOF the client waits
+			// out its read timeout before giving up. The fallback works either
+			// way -- this just keeps the test measuring the parse refusal
+			// rather than two seconds of miekg's default timeout.
+			w.Close()
+			return
+		}
+		_, _ = pzd.ZoneTransferOut(srvCtx, w, r, nil)
+	})
+	started := make(chan struct{})
+	srv := &dns.Server{Listener: ln, Handler: mux, MsgAcceptFunc: MsgAcceptFunc,
+		NotifyStartedFunc: func() { close(started) }}
+	go func() { _ = srv.ActivateAndServe() }()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("bad-ixfr primary did not start")
+	}
+	return ln.Addr().String(), func() {
+		srvCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	}
+}
+
+// TestIxfrInSelfHealsOnABadDelta is §1's invariant, which is the reason the
+// whole delta path is allowed to be as intricate as it is: any doubt costs a
+// wasteful full transfer and never a corrupt local zone.
+func TestIxfrInSelfHealsOnABadDelta(t *testing.T) {
+	authApp(t)
+	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+www.example.	3600	IN	A	10.0.0.3
+healed.example.	3600	IN	A	10.7.7.7
+`
+	for _, tc := range []struct {
+		what string
+		bad  func(t *testing.T) []dns.RR
+	}{
+		{
+			what: "non-contiguous difference sequences",
+			bad: func(t *testing.T) []dns.RR {
+				return []dns.RR{
+					ixSOA(t, 20),
+					ixSOA(t, 7), ixA(t, "a.example.", "10.0.0.1"),
+					ixSOA(t, 12), ixA(t, "b.example.", "10.0.0.2"), // gap
+					ixSOA(t, 20),
+				}
+			},
+		},
+		{
+			what: "deletes a record we do not hold",
+			bad: func(t *testing.T) []dns.RR {
+				return []dns.RR{
+					ixSOA(t, 20),
+					ixSOA(t, 7), ixA(t, "nowhere.example.", "192.0.2.99"),
+					ixSOA(t, 20), ixA(t, "b.example.", "10.0.0.2"),
+					ixSOA(t, 20),
+				}
+			},
+		},
+		{
+			what: "adds an out-of-bailiwick name",
+			bad: func(t *testing.T) []dns.RR {
+				return []dns.RR{
+					ixSOA(t, 20),
+					ixSOA(t, 7), ixA(t, "www.example.", "10.0.0.3"),
+					ixSOA(t, 20), ixA(t, "evil.test.", "10.0.0.2"),
+					ixSOA(t, 20),
+				}
+			},
+		},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			addr, stop := startBadIxfrPrimary(t, newer, tc.bad(t))
+			defer stop()
+
+			zd := ixfrTestSecondary(t, ixApplyZone, addr, nil)
+			zd.IncomingSerial = 7
+			zd.CurrentSerial = 7
+
+			if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
+				t.Fatalf("FetchFromUpstream: %v", err)
+			}
+			// Converged through the AXFR fallback, on the SAME upstream.
+			if zd.IncomingSerial != 20 {
+				t.Errorf("serial %d, want 20 from the AXFR fallback", zd.IncomingSerial)
+			}
+			if owner, _ := zd.GetOwner("healed.example."); owner == nil {
+				t.Error("the zone did not converge: the bad delta was not recovered from")
+			}
+			// And nothing from the bad delta leaked in.
+			if owner, _ := zd.GetOwner("evil.test."); owner != nil {
+				t.Error("an out-of-bailiwick name from the refused delta is in the zone")
+			}
+			if owner, _ := zd.GetOwner("b.example."); owner != nil {
+				t.Error("a record from the refused delta is in the zone")
+			}
+		})
 	}
 }

@@ -857,7 +857,6 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 		zd.fileDigest = digest
 	}
 
-	zd.XfrType = "axfr"
 	// Return true only if serial changed (indicates actual update)
 	// If force=true but serial unchanged, return false (validated but no update)
 	// This prevents unnecessary zone file writes on config reload when zone hasn't changed

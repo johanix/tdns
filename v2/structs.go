@@ -133,8 +133,7 @@ type ZoneData struct {
 	// FirstZoneLoad without rewriting their consumers.
 	Status ZoneStatus
 
-	XfrType string // axfr | ixfr
-	Logger  *log.Logger
+	Logger *log.Logger
 	// ZoneFile           string // TODO: Remove this
 	IncomingSerial uint32 // SOA serial that we got from upstream
 	CurrentSerial  uint32 // SOA serial after local bumping

@@ -685,7 +685,6 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		}
 	}
 	zd.ApexLen = new_zd.ApexLen
-	zd.XfrType = new_zd.XfrType
 	zd.ZoneStore = new_zd.ZoneStore
 	zd.ZoneType = new_zd.ZoneType
 
