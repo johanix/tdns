@@ -210,8 +210,24 @@ usable SOA is Option 3, not a stamp.
 **(c) That timestamp has to survive a restart, which first requires the held
 copy to be in memory.** See §4 and Stage 2 step 1.
 
-**(d) The comparison, and what to return after it.** Secondary only — primaries
-do not expire. Serve while `now <= lastSuccessfulRefresh + time.Duration(expire)
+**(d) The comparison, and what to return after it.** Secondary zones in
+`tdns-auth` only. Primaries do not expire, and the expire guard is a statement
+about authoritative service, which is the only thing `tdns-auth` is doing with
+these zones — the same scoping [[secondary-zones-immutable]]
+(`2026-07-25-secondary-zones-immutable.md` §1.1) treats as load-bearing, and
+for the same reason. Fold the app-type test into the predicate rather than
+repeating it at each call site.
+
+That the guards do not agree about app type today is worth knowing before
+touching them. `DefaultQueryHandler` refuses ordinary queries for
+`AppTypeAgent` at `v2/defaultqueryhandlers.go:140`, which is *after* the
+`Zones.Get` branch returns and *before* the `FindZone` branch's guard — so the
+`:163` guard is unreachable for an agent while the `:106` one is reached by
+every app type. Stage 1 does not care (its predicate is strictly more
+permissive than what it replaces, in every app). Stage 2.3 does, which is why
+the scope is stated here rather than discovered there.
+
+Serve while `now <= lastSuccessfulRefresh + time.Duration(expire)
 * time.Second`, using the **served copy's** SOA EXPIRE, not a synthetic
 `GetSOA` and not a later primary. After it, SERVFAIL (BIND/NSD). Keep trying:
 expire must **not** be folded into `HasServiceImpactingError()`, because that
@@ -297,8 +313,12 @@ CREATE TABLE IF NOT EXISTS 'ZoneRefreshState' (
 )
 ```
 
-- Added through the existing column/table migration list (`v2/db.go:205-225`),
-  the same way `ZoneFileState.digest_variant` was.
+- Registered in `DefaultTables` (`v2/db_schema.go:11`), which `dbSetupTables`
+  (`v2/db.go:105-111`) runs `CREATE TABLE IF NOT EXISTS` over at every startup,
+  so an existing database picks the table up on the first run of the new
+  binary. It does **not** go in the `dbMigrateSchema` list (`v2/db.go:198`):
+  that exists for `ALTER TABLE ADD COLUMN` on tables that already ship, which
+  is what `ZoneFileState.digest_variant` needed and a new table does not.
 - Written by `noteSuccessfulRefresh` (usable SOA, §3b), which also sets
   `LatestRefresh` in memory. When the confirmation is part of a transfer, the
   write joins that transaction rather than standing alone.
@@ -533,6 +553,8 @@ For Stage 2, additionally:
 - served SOA EXPIRE of 0, and one below `refresh + retry`, clamp to
   `refresh + retry` and log rather than expiring the zone on a schedule
 - primaries are not subject to the expire guard
+- a non-`tdns-auth` app holding a secondary zone is not subject to it either
+- the new table appears on a pre-existing database with no migration entry
 
 The NOTIFY trick in §2.2 is what makes the "primary down" cases testable without
 waiting out a refresh timer; both stages need it.
