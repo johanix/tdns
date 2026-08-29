@@ -328,6 +328,10 @@ CREATE TABLE IF NOT EXISTS 'ZoneRefreshState' (
   of it.
 - Read once at first bind, after the copy is in memory.
 - Deleted with the zone.
+- Clock: `time.Now()` (wall clock), stored UTC. A step can expire a zone early
+  or extend it; that is accepted rather than designed around. No injected
+  clock: the expire tests set `LatestRefresh` in the past instead of sleeping
+  (§8).
 
 ### Trusting the stamp
 
@@ -446,11 +450,27 @@ PR, in this order, because (2) and (3) are pointless until (1):
    file copy as today. Do not reload the file over a live snapshot on a later
    failed refresh — the file may be older than memory.
 
-   This is the step that makes the secondary load path look like the primary's:
-   file, then journal. `replayZoneDeltasOnLoad` (`v2/refreshengine.go:277`) and
-   the `CompareZoneFileState` verdict it runs first are already there; a
-   secondary reaching this path should use them rather than grow a parallel
-   load.
+   **Assign the derived path onto `zd.Zonefile` before calling
+   `FetchFromFile`.** That function takes no path argument — it reads the field
+   directly (`os.Stat(zd.Zonefile)`, `ReadZoneFile(ctx, zd.Zonefile, true)`,
+   `recordZoneFileStat`) — so a derivation that is not written back is not
+   visible to it. Deriving without assigning would stat `""` on exactly the
+   zones this brief is about: an API-managed secondary in the process that
+   added it, where nothing sets the field (§4, and the same reason the stamp is
+   not keyed on it). Config-declared `zonefile:` and the restart path already
+   have it set, so the assignment is a no-op there.
+
+   The rest of the machinery is favourable: `FetchFromFile` already computes
+   `updated := force || zd.publishedSnapshot() == nil`
+   (`v2/zone_utils.go:494`), so a zone with no snapshot adopts the file without
+   forcing. The remaining fight, if there is one, is `FirstZoneLoad` /
+   `completeFirstZonePolicyAndLoad` / Ready — the overrun §8 prices.
+
+   This is also the step that makes the secondary load path look like the
+   primary's: file, then journal. `replayZoneDeltasOnLoad`
+   (`v2/refreshengine.go:289`, called from `:277`) and the
+   `CompareZoneFileState` verdict it runs first are already there; a secondary
+   reaching this path should use them rather than grow a parallel load.
 2. `noteSuccessfulRefresh` on usable SOA (§3b): set `LatestRefresh` in memory
    and upsert `ZoneRefreshState`; Option 3 when the row is absent or the
    identity check rejects it. Delete the row with the zone.
@@ -578,7 +598,7 @@ trip is cheap insurance, not a second design.
 | **S1** | UPDATE | `updateresponder.go` | 10 | 40 |
 | | **Stage 1** | | **~45** | **~200** |
 | **S2.1** | First-bind `FetchFromFile` before `DoTransfer` | `zone_utils.go` `Refresh` | 40 | 150 |
-| **S2.2** | `noteSuccessfulRefresh` on usable SOA, not `err == nil`; `ZoneRefreshState` upsert + migration + delete-with-zone | `zone_utils.go`, `db_schema.go`, `db.go`, `dynamic_zones.go` | 55 | 150 |
+| **S2.2** | `noteSuccessfulRefresh` on usable SOA, not `err == nil`; `ZoneRefreshState` in `DefaultTables` (no `dbMigrateSchema` entry — §4), upsert + read + delete-with-zone | `zone_utils.go`, `db_schema.go`, `dynamic_zones.go` | 55 | 150 |
 | **S2.3** | Secondary expire guard on query + UPDATE, with the EXPIRE clamp; ticker unchanged | same three call sites as S1 | 35 | 130 |
 | | **Stage 2** | | **~130** | **~430** |
 | | **Total** | | **~175** | **~630** |
