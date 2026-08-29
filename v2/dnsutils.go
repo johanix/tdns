@@ -154,6 +154,72 @@ func drainRemainder(ch <-chan *dns.Envelope, grace time.Duration) bool {
 // ctx bounds the transfer. An AXFR of a large zone is the longest-running
 // network operation in the daemon, so a shutdown landing mid-stream should stop
 // it rather than let it run to completion against an engine that is going away.
+// openTransferStream performs the setup every inbound transfer needs -- XoT TLS
+// config, TSIG signing, the bound source address -- and starts the stream.
+//
+// Extracted so the AXFR and IXFR paths cannot drift apart on any of it. All
+// three are invisible from the outside until something refuses us, and then the
+// only evidence is in the far end's log.
+func (zd *ZoneData) openTransferStream(ctx context.Context, up PeerConf, msg *dns.Msg, conf *Config) (<-chan *dns.Envelope, *dns.Transfer, error) {
+	upstream := up.Addr
+	transfer := new(dns.Transfer)
+	// XoT: a DoT peer gets a verifying TLS config (pin/dane/pkix) and the
+	// fork's Transfer.In dials tcp-tls with it. nil => plain TCP (Do53).
+	tlsCfg, terr := conf.ClientTLSConfigForPeer(up)
+	if terr != nil {
+		return nil, nil, fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)
+	}
+	transfer.TLS = tlsCfg
+	// Sign the AXFR/IXFR request under this upstream's key (NOKEY => unsigned).
+	// The provider also verifies the TSIG on the inbound envelopes.
+	provider, serr := SignForPeer(msg, up.Key, conf)
+	if serr != nil {
+		return nil, nil, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
+	}
+	transfer.TsigProvider = provider
+
+	// Bind the local (source) address when the zone or the server names one.
+	// This is what the upstream's allow-transfer/provide-xfr ACL sees; without
+	// it the kernel picks a source from the outgoing interface, which on a
+	// multi-homed server is generally not the address we advertise as our
+	// identity -- so an ACL naming that address refuses us.
+	//
+	// dns.Transfer.In only dials when Conn is nil, and the library documents
+	// pre-dialling for exactly this purpose, so no fork change is needed.
+	//
+	// Logged either way. Whether a source was bound is invisible from the
+	// outside until an upstream ACL refuses the transfer, and then the only
+	// evidence is in the far end's log -- which is where an afternoon goes.
+	src, tier := zd.EffectiveTransferSrcWithSource()
+	if len(src) > 0 {
+		conn, derr := dialTransferConn(ctx, upstream, tlsCfg, src, transfer.DialTimeout)
+		if derr != nil {
+			return nil, nil, fmt.Errorf("ZoneTransferIn %s: dial %s: %w", zd.ZoneName, upstream, derr)
+		}
+		// nil means no configured source matched this upstream's family; leave
+		// Conn unset so In() dials normally rather than relying on a typed-nil
+		// pointer comparing equal to nil.
+		if conn != nil {
+			transfer.Conn = conn
+			lgDns.Info("ZoneTransferIn: bound source address", "zone", zd.ZoneName,
+				"upstream", upstream, "src", conn.LocalAddr().String(), "from", tier)
+		} else {
+			lgDns.Warn("ZoneTransferIn: no configured transfer-src matches this upstream's family; dialling unbound",
+				"zone", zd.ZoneName, "upstream", upstream, "configured", src, "from", tier)
+		}
+	} else {
+		lgDns.Debug("ZoneTransferIn: no transfer-src configured; dialling unbound",
+			"zone", zd.ZoneName, "upstream", upstream)
+	}
+
+	answerChan, err := transfer.In(msg, upstream)
+	if err != nil {
+		zd.Logger.Printf("Error from transfer.In: %v\n", err)
+		return nil, nil, clarifyXfrError(zd.ZoneName, upstream, err)
+	}
+	return answerChan, transfer, nil
+}
+
 func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint32, ttype string, conf *Config) (uint32, error) {
 	upstream := up.Addr
 	if upstream == "" {
@@ -175,60 +241,9 @@ func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint
 	}
 	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore], "transport", transportLabel(up))
 
-	transfer := new(dns.Transfer)
-	// XoT: a DoT peer gets a verifying TLS config (pin/dane/pkix) and the
-	// fork's Transfer.In dials tcp-tls with it. nil => plain TCP (Do53).
-	tlsCfg, terr := conf.ClientTLSConfigForPeer(up)
-	if terr != nil {
-		return 0, fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)
-	}
-	transfer.TLS = tlsCfg
-	// Sign the AXFR/IXFR request under this upstream's key (NOKEY => unsigned).
-	// The provider also verifies the TSIG on the inbound envelopes.
-	provider, serr := SignForPeer(msg, up.Key, conf)
-	if serr != nil {
-		return 0, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
-	}
-	transfer.TsigProvider = provider
-
-	// Bind the local (source) address when the zone or the server names one.
-	// This is what the upstream's allow-transfer/provide-xfr ACL sees; without
-	// it the kernel picks a source from the outgoing interface, which on a
-	// multi-homed server is generally not the address we advertise as our
-	// identity -- so an ACL naming that address refuses us.
-	//
-	// dns.Transfer.In only dials when Conn is nil, and the library documents
-	// pre-dialling for exactly this purpose, so no fork change is needed.
-	//
-	// Logged either way. Whether a source was bound is invisible from the
-	// outside until an upstream ACL refuses the transfer, and then the only
-	// evidence is in the far end's log -- which is where an afternoon goes.
-	src, tier := zd.EffectiveTransferSrcWithSource()
-	if len(src) > 0 {
-		conn, derr := dialTransferConn(ctx, upstream, tlsCfg, src, transfer.DialTimeout)
-		if derr != nil {
-			return 0, fmt.Errorf("ZoneTransferIn %s: dial %s: %w", zd.ZoneName, upstream, derr)
-		}
-		// nil means no configured source matched this upstream's family; leave
-		// Conn unset so In() dials normally rather than relying on a typed-nil
-		// pointer comparing equal to nil.
-		if conn != nil {
-			transfer.Conn = conn
-			lgDns.Info("ZoneTransferIn: bound source address", "zone", zd.ZoneName,
-				"upstream", upstream, "src", conn.LocalAddr().String(), "from", tier)
-		} else {
-			lgDns.Warn("ZoneTransferIn: no configured transfer-src matches this upstream's family; dialling unbound",
-				"zone", zd.ZoneName, "upstream", upstream, "configured", src, "from", tier)
-		}
-	} else {
-		lgDns.Debug("ZoneTransferIn: no transfer-src configured; dialling unbound",
-			"zone", zd.ZoneName, "upstream", upstream)
-	}
-
-	answerChan, err := transfer.In(msg, upstream)
+	answerChan, transfer, err := zd.openTransferStream(ctx, up, msg, conf)
 	if err != nil {
-		zd.Logger.Printf("Error from transfer.In: %v\n", err)
-		return 0, clarifyXfrError(zd.ZoneName, upstream, err)
+		return 0, err
 	}
 
 	// count was previously computed and discarded; log it rather than drop it.

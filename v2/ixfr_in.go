@@ -15,6 +15,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -446,4 +447,204 @@ func replaceApexSOA(zoneName string, data *core.NameMap[OwnerData], bookend *dns
 	nod.RRtypes.Set(dns.TypeSOA, rs)
 	data.Set(zoneName, nod)
 	return nil
+}
+
+// ixfrOutcome is the third thing an inbound transfer can be, alongside "failed"
+// and "here is a zone".
+//
+// ZoneTransferIn cannot express it: it wipes zd.Data and returns
+// (serial, error), so every non-error return means a zone body arrived and the
+// caller decides whether to swap it. An up-to-date IXFR is neither an error nor
+// a zone, and signalling it as a sentinel error would be worse than useless --
+// FetchFromUpstream reads any error as "try the next primary" and would walk
+// the whole list over a perfectly good answer.
+type ixfrOutcome int
+
+const (
+	// ixfrUpToDate: the primary answered with a single SOA (RFC 1995 §2), so
+	// our serial is current. Rare by construction -- the SOA probe already
+	// filtered unchanged serials out, and `force` never asks for a delta -- so
+	// this means the serial moved back, or changed between probe and request.
+	ixfrUpToDate ixfrOutcome = iota
+	// ixfrDelta: difference sequences, to be parsed and applied.
+	ixfrDelta
+	// ixfrFullZone: the primary answered our IXFR with an entire zone, which
+	// RFC 1995 §4 explicitly allows. Apply it exactly as an AXFR.
+	ixfrFullZone
+)
+
+func (o ixfrOutcome) String() string {
+	switch o {
+	case ixfrUpToDate:
+		return "up-to-date"
+	case ixfrDelta:
+		return "delta"
+	case ixfrFullZone:
+		return "full-zone"
+	}
+	return "unknown"
+}
+
+// ixfrTransferIn sends an IXFR for the serial we hold and collects the reply as
+// a flat RR slice, then classifies it.
+//
+// Collects rather than streams, and deliberately does NOT touch zd.Data: the
+// difference between a delta and a full zone is not knowable until the second
+// RR has been seen, and feeding a difference stream through SortFunc would
+// silently corrupt the zone -- deleted records appended as additions, bracket
+// SOAs dropped. The buffering is IXFR-only; AXFR keeps streaming.
+func (zd *ZoneData) ixfrTransferIn(ctx context.Context, up PeerConf, serial uint32, conf *Config) (ixfrOutcome, []dns.RR, error) {
+	msg := new(dns.Msg)
+	// Root MNAME/RNAME: SetIxfr("", "") packs zero bytes for the empty names,
+	// which the primary reads as malformed SOA rdata and FORMERRs. The primary
+	// only looks at the serial anyway.
+	msg.SetIxfr(zd.ZoneName, serial, ".", ".")
+
+	answerChan, transfer, err := zd.openTransferStream(ctx, up, msg, conf)
+	if err != nil {
+		return ixfrUpToDate, nil, err
+	}
+
+	rrs, err := collectTransferEnvelopes(ctx, zd.ZoneName, up.Addr, answerChan, func() { _ = transfer.Close() })
+	if err != nil {
+		return ixfrUpToDate, nil, err
+	}
+	if len(rrs) == 0 {
+		return ixfrUpToDate, nil, fmt.Errorf("ixfr %s from %s: empty response", zd.ZoneName, up.Addr)
+	}
+
+	// Classification, in the order the shapes can be told apart.
+	if len(rrs) == 1 {
+		if _, ok := rrs[0].(*dns.SOA); ok {
+			return ixfrUpToDate, rrs, nil
+		}
+		return ixfrUpToDate, nil, fmt.Errorf("ixfr %s from %s: single non-SOA record in response",
+			zd.ZoneName, up.Addr)
+	}
+	if IsIxfr(rrs) {
+		return ixfrDelta, rrs, nil
+	}
+	return ixfrFullZone, rrs, nil
+}
+
+// collectTransferEnvelopes drains a transfer stream into a flat RR slice.
+//
+// Mirrors drainTransferEnvelopes' cancellation contract exactly, and for the
+// same reason: dns.Transfer's reader sends on an UNBUFFERED channel, so simply
+// stopping receiving parks it forever and leaks the goroutine and its socket.
+// Close the connection first, then drain until the reader has sent its final
+// envelope and closed.
+func collectTransferEnvelopes(ctx context.Context, zoneName, upstream string,
+	answerChan <-chan *dns.Envelope, abort func()) ([]dns.RR, error) {
+
+	var out []dns.RR
+	for {
+		select {
+		case <-ctx.Done():
+			if abort != nil {
+				abort()
+			}
+			if !drainRemainder(answerChan, transferDrainGrace) {
+				lg.Warn("ixfr: transfer reader did not exit after cancellation; goroutine may be retained",
+					"zone", zoneName, "upstream", upstream, "grace", transferDrainGrace)
+			}
+			return nil, fmt.Errorf("ixfr %s from %s: %w", zoneName, upstream, ctx.Err())
+
+		case envelope, ok := <-answerChan:
+			if !ok {
+				return out, nil
+			}
+			if envelope.Error != nil {
+				return nil, clarifyXfrError(zoneName, upstream, envelope.Error)
+			}
+			out = append(out, envelope.RR...)
+		}
+	}
+}
+
+// applyIxfrToScratch turns a collected difference stream into a ready-to-swap
+// scratch zone, or refuses.
+//
+// Every refusal here is the caller's cue to re-pull a full zone from the SAME
+// upstream: the primary answered, we simply could not use what it said.
+func (zd *ZoneData) applyIxfrToScratch(newZd *ZoneData, rrs []dns.RR) error {
+	snap := zd.publishedSnapshot()
+	if snap == nil {
+		// The attempt predicate checks this, so reaching here means the
+		// snapshot went away mid-refresh. Not an error worth a stack trace --
+		// just fall back.
+		return fmt.Errorf("ixfr %s: no published snapshot to apply a delta onto", zd.ZoneName)
+	}
+
+	steps, err := parseIxfrDeltas(zd.ZoneName, rrs, zd.IncomingSerial)
+	if err != nil {
+		return err
+	}
+
+	data, signed := materializeForIxfr(snap)
+	if err := applyIxfrSteps(zd.ZoneName, data, signed, steps); err != nil {
+		return err
+	}
+
+	target := ixfrTargetSerial(steps)
+	bookend, ok := rrs[len(rrs)-1].(*dns.SOA)
+	if !ok {
+		// parseIxfrDeltas already required this; belt and braces before we
+		// dereference it.
+		return fmt.Errorf("ixfr %s: stream does not end with an SOA", zd.ZoneName)
+	}
+	if err := replaceApexSOA(zd.ZoneName, data, bookend); err != nil {
+		return err
+	}
+
+	newZd.Data = data
+	newZd.IncomingSerial = target
+	newZd.CurrentSerial = target
+	// The journal anchors to the file, not to whatever the serial becomes after
+	// load-time signing, exactly as the AXFR path records it.
+	newZd.fileSerial = target
+
+	removed, added := countIxfrRRs(steps)
+	lg.Info("ixfr: delta applied", "zone", zd.ZoneName, "from", steps[0].from,
+		"to", target, "sequences", len(steps), "removed", removed, "added", added)
+	return nil
+}
+
+// adoptFullZoneRRs applies an RFC 1995 §4 full-zone answer to an IXFR request,
+// which is an ordinary AXFR body and goes through the ordinary AXFR routing.
+func (zd *ZoneData) adoptFullZoneRRs(newZd *ZoneData, rrs []dns.RR) error {
+	newZd.Data = core.NewNameMap[OwnerData]()
+	firstSoaSeen := false
+	for _, rr := range rrs {
+		firstSoaSeen = newZd.SortFunc(rr, firstSoaSeen)
+	}
+	soa, err := newZd.transferredApexSOA("(ixfr full-zone answer)")
+	if err != nil {
+		return err
+	}
+	newZd.IncomingSerial = soa.Serial
+	newZd.CurrentSerial = soa.Serial
+	newZd.fileSerial = soa.Serial
+	lg.Info("ixfr: primary answered with a full zone", "zone", zd.ZoneName,
+		"serial", soa.Serial, "rrs", len(rrs))
+	return nil
+}
+
+// requestIxfr reports whether this zone may ask for an incremental transfer.
+//
+// Default ON (F1). The default lives here rather than being materialised into
+// zd.Options by the parser on purpose: asConfiguredOptions re-serializes the
+// option set into the persisted zone config, so materialising would write
+// `request-ixfr` into the config of every zone that never asked for it, and the
+// operator's file would grow a setting they did not choose.
+func (zd *ZoneData) requestIxfr() bool {
+	if zd == nil {
+		return false
+	}
+	// Explicit off wins over explicit on: the safe direction is the one that
+	// only ever asks for a full transfer.
+	if zd.Options[OptNoRequestIxfr] {
+		return false
+	}
+	return true
 }

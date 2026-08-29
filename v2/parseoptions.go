@@ -196,7 +196,15 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			// activateUpdatePolicy, which runs after this switch and needs
 			// the flags to have survived it.
 			OptOnConflictDBWins,
-			OptOnConflictZonefileWins:
+			OptOnConflictZonefileWins,
+			// IXFR-in enablement. No condition of its own: it is meaningful
+			// only on a secondary, but harmless elsewhere -- nothing outside
+			// Refresh's Secondary branch consults it. Default ON is expressed
+			// by requestIxfr() rather than by materialising a flag here, so
+			// the persisted as-configured set keeps saying what the operator
+			// actually wrote.
+			OptRequestIxfr,
+			OptNoRequestIxfr:
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
 

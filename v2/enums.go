@@ -82,6 +82,24 @@ const (
 	// is a secondary verifying what a primary sent, and a secondary does not
 	// publish a digest of its own.
 	OptVerifyZonemd
+	// OptRequestIxfr lets a secondary ask for an incremental transfer instead
+	// of a full one (RFC 1995). Default ON, per F1 of
+	// docs/2026-07-25-inbound-ixfr-plan.md: it is BIND parity, the AXFR
+	// fallback makes it safe, and it is symmetric with the default-on
+	// outbound retention #328 shipped. Off, the transfer path behaves
+	// exactly as it did before C2.
+	//
+	// Appended at the end for the same reason every option above it was:
+	// ZoneOption values are positional, so inserting mid-list renumbers
+	// everything after.
+	OptRequestIxfr
+	// OptNoRequestIxfr is how the default is turned OFF. Options are a list of
+	// enabled names, so absence cannot mean false for a flag whose default is
+	// true -- the same shape as the on-conflict-* pair, and solved the same
+	// way. Both spellings are accepted; no-request-ixfr wins if an operator
+	// writes both, because the safe direction is the one that only ever asks
+	// for a full transfer.
+	OptNoRequestIxfr
 	optZoneOptionTdnsSentinel
 )
 
@@ -120,6 +138,8 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptOnConflictZonefileWins:  "on-conflict-zonefile-wins",
 	OptPublishZonemd:           "publish-zonemd",
 	OptVerifyZonemd:            "verify-zonemd",
+	OptRequestIxfr:             "request-ixfr",
+	OptNoRequestIxfr:           "no-request-ixfr",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -150,6 +170,8 @@ var StringToZoneOption = map[string]ZoneOption{
 	"on-conflict-zonefile-wins":  OptOnConflictZonefileWins,
 	"publish-zonemd":             OptPublishZonemd,
 	"verify-zonemd":              OptVerifyZonemd,
+	"request-ixfr":               OptRequestIxfr,
+	"no-request-ixfr":            OptNoRequestIxfr,
 }
 
 type ImrOption uint8
