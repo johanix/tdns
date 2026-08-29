@@ -286,7 +286,7 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 	// nearest hosted strict ancestor of qname (with the same case-folding as the
 	// main lookup); it can never return qname's own zone. qname is a FQDN here,
 	// so it always has at least the root dot.
-	pzd, _ := FindZone(qname[strings.Index(qname, ".")+1:])
+	pzd := FindZone(qname[strings.Index(qname, ".")+1:])
 	if pzd == nil {
 		// We host nothing above qname (at most qname itself). Nothing to serve
 		// or refer to → REFUSED.
@@ -553,7 +553,7 @@ func (zd *ZoneData) lookupSignalRRsets(snap *zoneSnapshot, name string) []core.R
 	if dns.IsSubDomain(zd.ZoneName, name) {
 		return signalRRsetsFromOwner(getOwnerFrom(snap, name))
 	}
-	if tz, _ := FindZone(name); tz != nil {
+	if tz := FindZone(name); tz != nil {
 		if tz == zd {
 			return signalRRsetsFromOwner(getOwnerFrom(snap, name))
 		}
@@ -687,7 +687,7 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 		visited[tgt] = true
 
 		// Find which zone the target belongs to
-		tgtZone, _ := FindZone(tgt)
+		tgtZone := FindZone(tgt)
 		if tgtZone == nil {
 			// Target is outside our authority - return CNAME only
 			lgHandler.Debug("CNAME target outside our authority", "target", tgt)

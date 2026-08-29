@@ -100,7 +100,7 @@ func (childZD *ZoneData) republishOneFlag(spec signalSpec, nsNames []string) {
 	for _, ns := range nsNames {
 		owner := fmt.Sprintf("%s.%s_signal.%s", spec.prefix, childZD.ZoneName, ns)
 
-		target, _ := FindZone(owner)
+		target := FindZone(owner)
 		if target == nil || target.ZoneType != Primary {
 			lgSignal.Debug("skipping NS: not locally primary for signal name",
 				"zone", childZD.ZoneName, "flag", spec.flag, "ns", ns, "signal", owner)

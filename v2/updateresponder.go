@@ -168,7 +168,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	}
 	// 1. Is qname inside or below a zone that we're auth for?
 	// Let's see if we can find the zone
-	zd, _ := FindZone(qname)
+	zd := FindZone(qname)
 	if zd == nil {
 		lgHandler.Warn("zone not found", "qname", qname)
 		m.SetRcode(r, dns.RcodeRefused)

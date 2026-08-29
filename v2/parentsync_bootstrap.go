@@ -285,7 +285,7 @@ func BootstrapWithParent(zone ZoneName, keyName string, algorithm uint8) error {
 	zd, ok := Zones.Get(keyName)
 	if !ok || zd == nil {
 		lgElect.Debug("BootstrapWithParent: zone not in Zones map, trying FindZone", "keyName", keyName)
-		zd, _ = FindZone(keyName)
+		zd = FindZone(keyName)
 	}
 	if zd == nil {
 		return fmt.Errorf("zone %s not found (available zones: %v)", keyName, Zones.Keys())

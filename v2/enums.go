@@ -29,6 +29,10 @@ const (
 	OptAllowUpdates
 	OptAllowChildUpdates
 	OptAllowEdits // Dynamically et if app=combiner and zone contains a HSYNC RRset
+	// OptFoldCase is INERT. Name folding is unconditional now: every index is
+	// keyed canonically and every name is folded on the way in, so there is no
+	// longer a mode in which it is not done. Still accepted so existing configs
+	// keep parsing; setting it changes nothing.
 	OptFoldCase
 	OptBlackLies
 	OptDontPublishKey

@@ -190,7 +190,7 @@ func cloneSignalSynth(m map[string]*core.RRset) map[string]*core.RRset {
 // direct RRtypes.Set/Data.Set on the live path. A future direct writer to a
 // snapshotted store would silently reintroduce the serial-tearing bug — keep
 // this invariant loud.
-func snapshotMapFromData(data *core.ConcurrentMap[string, OwnerData]) map[string]*OwnerData {
+func snapshotMapFromData(data *core.NameMap[OwnerData]) map[string]*OwnerData {
 	if data == nil || data.IsEmpty() {
 		return map[string]*OwnerData{}
 	}

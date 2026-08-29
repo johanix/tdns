@@ -366,7 +366,7 @@ func TestRestartLoadsAZoneWhoseFileIsUnchanged(t *testing.T) {
 		KeyDB:         kdb,
 		UpdatePolicy:  policyAllowing(dns.TypeA, dns.TypeTXT),
 		FirstZoneLoad: true,
-		Data:          core.NewCmap[OwnerData](),
+		Data:          core.NewNameMap[OwnerData](),
 	}
 	Zones.Set("example.", fresh)
 	t.Cleanup(func() { Zones.Remove("example.") })

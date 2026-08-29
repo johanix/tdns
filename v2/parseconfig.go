@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/mitchellh/mapstructure"
@@ -814,17 +815,22 @@ func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
 }
 
 // zoneNameKey is the key two zone declarations are compared under to decide
-// whether they are the same zone: case-folded and FQDN-normalized. DNS names
-// are case-insensitive (RFC 4343), and tdns accepts a name with or without its
+// whether they are the same zone: canonical and FQDN-normalized. DNS names are
+// case-insensitive (RFC 4343), and tdns accepts a name with or without its
 // trailing dot, so "Example.com" and "example.com." are one zone written twice.
 //
-// It is a COMPARISON key only. Zones stay registered under dns.Fqdn(name) with
-// their case as written, so which names the daemon answers for is unchanged --
-// only whether two declarations are recognised as one. tdns-cli's config check
-// compares under the same rule, so what it reports and what this quarantines
-// are the same set.
+// It is the SAME function the Zones registry keys by, deliberately: two
+// declarations recognised as one zone here must land on one entry there, and
+// two functions that agree today are two functions that can drift.
+//
+// core.CanonicalizeName rather than strings.ToLower, which folds by Unicode:
+// it maps U+212A KELVIN SIGN onto "k", so two distinct zone names would be
+// quarantined as duplicates of each other. RFC 4343 folds US-ASCII A-Z only.
+//
+// tdns-cli's config check compares under the same rule, so what it reports and
+// what this quarantines are the same set.
 func zoneNameKey(name string) string {
-	return strings.ToLower(dns.Fqdn(strings.TrimSpace(name)))
+	return core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(name)))
 }
 
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
@@ -893,7 +899,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zd, exists := Zones.Get(zname)
 		if !exists {
 			zd = &ZoneData{
-				ZoneName:      zname,
+				ZoneName:      core.CanonicalizeName(zname),
 				Logger:        log.Default(),
 				FirstZoneLoad: true,
 			}
