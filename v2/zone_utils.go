@@ -366,7 +366,15 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 				// matters most -- it is the case that confirms without
 				// transferring anything, and the one a nil-error test
 				// cannot tell apart from all-primaries-REFUSED.
-				if soa.Serial <= zd.IncomingSerial {
+				//
+				// serialNewer, not `>`: SOA serials are mod-2^32 and
+				// wrap (RFC 1982). A plain comparison reads the first
+				// serial after a wrap as OLDER than the one we hold, so
+				// the secondary stops transferring and serves stale data
+				// until someone forces a retransfer. Every other serial
+				// comparison in the tree already goes through this
+				// helper; this one did not.
+				if !serialNewer(soa.Serial, zd.IncomingSerial) {
 					zd.noteSuccessfulRefresh(zd.IncomingSerial)
 					return false, soa.Serial, nil
 				}
