@@ -133,7 +133,7 @@ land first, the rest are parallel.
 | 2 | Auth query + update | ~29 | **DONE.** `queryresponder`, `auth_utils`, `updateresponder`, `zone_updater`, `zone_update_verbs`, `defaultqueryhandlers`, `ops_uri`/`ops_svcb`/`ops_key`, `dnsutils`, `zone_utils` |
 | 3 | IMR + cache | ~24 | **DONE.** `dnslookup`, `imrengine`, `imr_helpers`, `chase`, `apihandler_imr`, `cache/*` — plus the cache's own name-keyed indexes |
 | 4 | Delegation / childsync / dsync | ~20 | **DONE.** `childsync_utils`, `scanner_csync`, `dsync_api_*`, `delegation_coherence`, `delegation_backend_*`, `config_delegationsync`, `ops_delegation_read` |
-| 5 | Keystore / sign / zonemd | ~20 | `sign.go`'s apex tests are latent-severe: a miss signs a delegation NS or skips the apex NS |
+| 5 | Keystore / sign / zonemd | ~20 | **DONE.** `zonemd` canonical ordering, `sign`, `keystore_bulk`, `bind_convert`, `rollover_lock`, plus the two items the series owed |
 | 6 | CLI + debug | ~23 | cosmetic, but `keystore_cmds.go:1018` `log.Fatalf`s on a case mismatch |
 | 7 | Enforcement | — | see below |
 
@@ -520,3 +520,129 @@ Also confirmed as correctly out of stage 4, unchanged from the earlier lists:
 keying in-bailiwick NS sets with `dns.CanonicalName` (ASCII agrees; the
 non-UTF-8 shape is the same one #421's TLSA keys had), and consolidating the
 three in-bailiwick predicates.
+
+
+## Addendum, after PR 5
+
+96 → 85.
+
+**The canonical-order folder was `strings.ToLower`.** `canonicalSortKey` and
+`canonicalOwnerLess` implement RFC 4034 §6.1 ordering, and that order is not a
+presentation detail: it IS the NSEC chain, and it is the order records are fed
+to the ZONEMD digest. §6.1 orders names as OCTET strings with US-ASCII A-Z
+folded and nothing else. `strings.ToLower` broke that twice over:
+
+    canonicalSortKey("\u212a.example.")  == canonicalSortKey("k.example.")
+    canonicalSortKey("ns\xff1.example.") -- keyed on ef bf bd, bytes the name does not contain
+
+Two distinct names sharing one position is a chain no validator accepts and a
+digest no other implementation computes. The comment above `canonicalSortKey`
+already said this class of bug is "wrong in a way no test zone would ever show"
+— it was describing the zero-octet case, and the folding had the same property.
+
+**Also converted:** the keystore's bulk selector (it decides which PRIVATE keys
+an export writes out, and under Unicode folding a selector for one zone also
+selected another), the per-zone rollover lock key, the signer's apex and
+delegation-occlusion tests, the BIND keystore's zone matching, and the apex
+ZONEMD exclusion.
+
+**The two items the series owed are in here**, because nothing later was going
+to touch those files:
+
+- `apihandler_zone.go`'s two `Conf.Zones[i].Name == zd.ZoneName` scans -- the
+  regression this series introduced in #417 by folding `zd.ZoneName` while
+  `ZoneConf.Name` keeps the operator's spelling. A zone declared `Example.COM.`
+  could not find its own config entry: list-zones lost its policy name and
+  policy-reset refused, reporting the zone as having no configured policy.
+- The NOTE on `InBailiwick` saying `NSInBailiwick` "still carries the HasSuffix
+  version". #422 fixed it and the sentence became false.
+
+**Not claimed as a fix.** The apex test inside `digestBlock` is `EqualNames`
+now, but `==` was already correct there: every in-tree caller passes a canonical
+apex and `name` is folded a few lines above by the same function. It is defended
+because `ZoneDigest`/`ZoneDigestHex` are exported and an outside caller's apex is
+not covered by that invariant. The comment says so rather than implying a bug.
+
+**Method, again.** Two of the five new tests passed against the unfixed code on
+the first attempt, because ASCII fixtures make `strings.ToLower` and
+`CanonicalizeName` indistinguishable. Both only became tests once they used an
+input where the two folders disagree. That is now three stages running where the
+first draft of a test proved nothing; the ASCII happy path is not evidence for
+any claim in this series.
+
+
+## Review of #423 (external, 2026-08-28)
+
+`tdns-project/reviews/2026-08-28-tdns-PR423-signer-keystore-zonemd-review.md`.
+Verdict: request changes -- two findings and a niggle, all inside #423's own
+files. All addressed.
+
+**FINDING 1 — I fixed the ordering folder and left the HASHING folder wrong.**
+The commit moved `canonicalSortKey` and `canonicalOwnerLess` off
+`strings.ToLower`, and `digestBlock`'s owner fold onto `CanonicalizeName`, and
+stopped there. Three sites in the same file still used `dns.CanonicalName`:
+
+- `groupByOwner` -- a MAP KEY. Two owners differing only by a non-UTF-8 octet
+  both fold to U+FFFD and merged into one bucket, digested as one name's
+  records.
+- `ZoneDigest`'s `apex = dns.CanonicalName(apex)`. This is the one that
+  undermined my own comment: I justified `digestBlock`'s `EqualNames` as
+  defending exported callers whose apex might not be canonical -- and those
+  callers went through this line first, folded by a different function. The
+  defence did not hold.
+- `canonicalRRWire`, 27 folds: the owner and every RFC 4034 §6.2 RDATA name.
+  **These are the bytes that go into the hash.** Even a correctly grouped,
+  correctly ordered owner was hashed under U+FFFD.
+
+Fixing the order and not the hash is a half-conversion of exactly the shape
+#421's `_dns.` prefix was -- test folded, strip did not. The function's own
+comment warns against "passing tests and being wrong" about a related shortcut,
+one paragraph above the folder that was wrong.
+
+**FINDING 2 — `bind_convert` still stored the collision key with
+`dns.CanonicalName`,** and the comment above it still described `manifestHasKey`
+as using `EqualFold`, which this PR had just changed. Both fixed, and the
+matching comment in `bind_convert_test.go` too.
+
+**Niggle — four `==`/`!= zd.ZoneName` left in `SignZone`/`ResignZone`,** among
+the ones converted. Correct by construction (owner-map key against a canonical
+`ZoneName`), so not a live miss, but converting the neighbours and leaving these
+is the inconsistency that makes the next reader guess. Converted.
+
+**Coverage.** `groupByOwner` and the end-to-end digest now have the
+`\xfe`/`\xff` test the review asked for; both go red if the key or the wire
+fold is reverted. FINDING 2 has **no covering test** -- the existing
+case-collision test still passes and covers the ASCII behaviour, but the
+difference between the two folders only shows for a BIND key file whose zone
+name carries a non-UTF-8 octet, and building that fixture is out of proportion
+to the change. Said plainly rather than left looking covered.
+
+
+## Re-review of #423 (external, 2026-08-28)
+
+Findings 1-2 accepted, the `sign.go` niggle accepted, **approved as stage 5.**
+That completes review of stages 1-5.
+
+The re-review doubts one claim in my follow-up: that reverting
+`canonicalRRWire`'s fold reddens `TestZoneDigestDistinguishesRawOctets`, on the
+grounds that A RDATA carries no names and two owners collapsed to U+FFFD could
+still concatenate to the same bytes. Re-checked, and that reasoning is exactly
+why it fails: collapsing both owners on the wire makes the two-owner zone hash
+identically to the one-owner zone, which is the equality the test forbids.
+
+    a zone with two owners differing by one octet digests the same as a zone
+    where both records sit at one owner
+
+**One deferral worth a decision rather than a wait.** `VerifyZonemd`
+(`zonemd_verify.go:150,156`) folds its apex, and the owners it compares against
+it, with `dns.CanonicalName` -- while `ZoneDigest` now folds with
+`CanonicalizeName`. Both are EXPORTED. For an apex carrying a non-UTF-8 octet
+the two disagree about which records sit at the apex, so the digest excludes one
+set and the verifier looks at another. `zonemd_cache.go:126` is the same fold
+but is identity on a canonical `zd.ZoneName`, so it is cosmetic.
+
+The re-review says to move it "when that file is next open". As with the
+`InBailiwick` NOTE, nothing schedules that: stage 6 is CLI and debug, stage 7 is
+enforcement, and neither goes near `zonemd_verify.go`. It is three lines, in the
+sibling of the file this stage exists to make consistent. Recommend taking it
+into stage 6 as a named extra, the way this stage took the two items it owed.

@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -296,10 +297,14 @@ func planBindKeyConversion(dir, base string, manifest *KeystoreManifest, opts Bi
 	// DNS names are case-insensitive but the RR carries whatever case the file
 	// used, and the manifest's two matchers disagree about that:
 	// UpsertDnssec/UpsertSig0 compare with ==, while manifestHasKey uses
-	// EqualFold. So PQ.DNSLAB. and pq.dnslab. are one zone to one and two to
-	// the other -- they would evade the collision check, be appended as two
+	// core.EqualNames. So PQ.DNSLAB. and pq.dnslab. are one zone to one and two
+	// to the other -- they would evade the collision check, be appended as two
 	// manifest entries, and import as two keystore rows for a single zone.
-	owner = dns.CanonicalName(owner)
+	//
+	// Folded by the function EqualNames agrees with. dns.CanonicalName folds
+	// the same US-ASCII letters but rewrites any octet that is not valid UTF-8
+	// into U+FFFD, which is a collision key of its own.
+	owner = core.CanonicalizeName(dns.Fqdn(owner))
 	plan.disp.Zone, plan.disp.Keyid = owner, keyid
 
 	privBytes, err := os.ReadFile(plan.privPath)
@@ -459,14 +464,14 @@ func resolveBindKeyState(dir, base string, flags uint16, opts BindConvertOptions
 func manifestHasKey(m *KeystoreManifest, class, zone string, keyid uint16) bool {
 	if class == "sig0" {
 		for _, k := range m.Sig0 {
-			if strings.EqualFold(k.Zone, zone) && k.Keyid == keyid {
+			if core.EqualNames(k.Zone, zone) && k.Keyid == keyid {
 				return true
 			}
 		}
 		return false
 	}
 	for _, k := range m.Dnssec {
-		if strings.EqualFold(k.Zone, zone) && k.Keyid == keyid {
+		if core.EqualNames(k.Zone, zone) && k.Keyid == keyid {
 			return true
 		}
 	}

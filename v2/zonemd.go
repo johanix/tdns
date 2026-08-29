@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -65,8 +66,11 @@ func zonemdHasher(alg uint8) (hash.Hash, error) {
 // For a bulk sort use canonicalSortKey instead: this allocates on every
 // comparison, which an O(n log n) sort over a large zone feels.
 func canonicalOwnerLess(a, b string) bool {
-	al := dns.SplitDomainName(strings.ToLower(dns.Fqdn(a)))
-	bl := dns.SplitDomainName(strings.ToLower(dns.Fqdn(b)))
+	// core.CanonicalizeName, NOT strings.ToLower. RFC 4034 6.1 orders names as
+	// OCTET strings with US-ASCII A-Z folded and nothing else; strings.ToLower
+	// folds by Unicode, and gets this wrong twice over. See canonicalSortKey.
+	al := dns.SplitDomainName(core.CanonicalizeName(dns.Fqdn(a)))
+	bl := dns.SplitDomainName(core.CanonicalizeName(dns.Fqdn(b)))
 
 	for i, j := len(al)-1, len(bl)-1; i >= 0 && j >= 0; i, j = i-1, j-1 {
 		if c := strings.Compare(al[i], bl[j]); c != 0 {
@@ -99,7 +103,23 @@ func canonicalOwnerLess(a, b string) bool {
 // "example\x00\x00", `a.example.` is "example\x00\x00a\x00\x00", and a prefix
 // sorts before what extends it.
 func canonicalSortKey(name string) []byte {
-	labels := dns.SplitDomainName(strings.ToLower(dns.Fqdn(name)))
+	// core.CanonicalizeName, NOT strings.ToLower. This key IS the canonical
+	// order: it decides the NSEC chain and the order records are fed to the
+	// ZONEMD digest, so getting it wrong produces a chain no validator accepts
+	// and a digest that matches no other implementation. RFC 4034 6.1 folds
+	// US-ASCII A-Z and leaves every other octet alone. strings.ToLower breaks
+	// that in two separate ways:
+	//
+	//   U+212A KELVIN SIGN folds onto "k", so \u212a.example. and k.example. --
+	//   two different names -- produce the SAME key and occupy one position.
+	//
+	//   A byte that is not valid UTF-8 is rewritten to U+FFFD, so ns\xff1. is
+	//   ordered by three bytes it does not contain.
+	//
+	// The comment below is right that this is "wrong in a way no test zone
+	// would ever show"; it was describing the zero-octet case and the folding
+	// had the same property.
+	labels := dns.SplitDomainName(core.CanonicalizeName(dns.Fqdn(name)))
 	// One byte per character plus a two-byte terminator per label, which is
 	// exact for the overwhelmingly common case of no zero octets.
 	key := make([]byte, 0, len(name)+2*len(labels)+2)
@@ -127,62 +147,70 @@ func canonicalSortKey(name string) []byte {
 // all lowercase) while disagreeing with every other implementation on real
 // zones -- passing tests and being wrong.
 //
+// core.CanonicalizeName, not dns.CanonicalName, for the same reason the sort
+// key above uses it: these are the BYTES THAT GO INTO THE HASH. §6.2 folds
+// US-ASCII A-Z and leaves every other octet alone, and dns.CanonicalName
+// rewrites anything that is not valid UTF-8 into U+FFFD -- so a name carrying
+// a raw octet would be hashed as three bytes it does not contain, and the
+// digest would disagree with every other implementation on exactly the zones
+// the paragraph above is about.
+//
 // HINFO is deliberately absent: RFC 4034 §6.2 lists it twice by mistake, and
 // RFC 6840 §5.1 records that it holds no domain names and is not subject to
 // case conversion.
 func canonicalRRWire(rr dns.RR) ([]byte, int, error) {
 	r := dns.Copy(rr)
-	r.Header().Name = dns.CanonicalName(r.Header().Name)
+	r.Header().Name = core.CanonicalizeName(r.Header().Name)
 
 	switch x := r.(type) {
 	case *dns.NS:
-		x.Ns = dns.CanonicalName(x.Ns)
+		x.Ns = core.CanonicalizeName(x.Ns)
 	case *dns.MD:
-		x.Md = dns.CanonicalName(x.Md)
+		x.Md = core.CanonicalizeName(x.Md)
 	case *dns.MF:
-		x.Mf = dns.CanonicalName(x.Mf)
+		x.Mf = core.CanonicalizeName(x.Mf)
 	case *dns.CNAME:
-		x.Target = dns.CanonicalName(x.Target)
+		x.Target = core.CanonicalizeName(x.Target)
 	case *dns.SOA:
-		x.Ns = dns.CanonicalName(x.Ns)
-		x.Mbox = dns.CanonicalName(x.Mbox)
+		x.Ns = core.CanonicalizeName(x.Ns)
+		x.Mbox = core.CanonicalizeName(x.Mbox)
 	case *dns.MB:
-		x.Mb = dns.CanonicalName(x.Mb)
+		x.Mb = core.CanonicalizeName(x.Mb)
 	case *dns.MG:
-		x.Mg = dns.CanonicalName(x.Mg)
+		x.Mg = core.CanonicalizeName(x.Mg)
 	case *dns.MR:
-		x.Mr = dns.CanonicalName(x.Mr)
+		x.Mr = core.CanonicalizeName(x.Mr)
 	case *dns.PTR:
-		x.Ptr = dns.CanonicalName(x.Ptr)
+		x.Ptr = core.CanonicalizeName(x.Ptr)
 	case *dns.MINFO:
-		x.Rmail = dns.CanonicalName(x.Rmail)
-		x.Email = dns.CanonicalName(x.Email)
+		x.Rmail = core.CanonicalizeName(x.Rmail)
+		x.Email = core.CanonicalizeName(x.Email)
 	case *dns.MX:
-		x.Mx = dns.CanonicalName(x.Mx)
+		x.Mx = core.CanonicalizeName(x.Mx)
 	case *dns.RP:
-		x.Mbox = dns.CanonicalName(x.Mbox)
-		x.Txt = dns.CanonicalName(x.Txt)
+		x.Mbox = core.CanonicalizeName(x.Mbox)
+		x.Txt = core.CanonicalizeName(x.Txt)
 	case *dns.AFSDB:
-		x.Hostname = dns.CanonicalName(x.Hostname)
+		x.Hostname = core.CanonicalizeName(x.Hostname)
 	case *dns.RT:
-		x.Host = dns.CanonicalName(x.Host)
+		x.Host = core.CanonicalizeName(x.Host)
 	case *dns.SIG:
-		x.SignerName = dns.CanonicalName(x.SignerName)
+		x.SignerName = core.CanonicalizeName(x.SignerName)
 	case *dns.PX:
-		x.Map822 = dns.CanonicalName(x.Map822)
-		x.Mapx400 = dns.CanonicalName(x.Mapx400)
+		x.Map822 = core.CanonicalizeName(x.Map822)
+		x.Mapx400 = core.CanonicalizeName(x.Mapx400)
 	case *dns.NAPTR:
-		x.Replacement = dns.CanonicalName(x.Replacement)
+		x.Replacement = core.CanonicalizeName(x.Replacement)
 	case *dns.KX:
-		x.Exchanger = dns.CanonicalName(x.Exchanger)
+		x.Exchanger = core.CanonicalizeName(x.Exchanger)
 	case *dns.SRV:
-		x.Target = dns.CanonicalName(x.Target)
+		x.Target = core.CanonicalizeName(x.Target)
 	case *dns.DNAME:
-		x.Target = dns.CanonicalName(x.Target)
+		x.Target = core.CanonicalizeName(x.Target)
 	case *dns.RRSIG:
-		x.SignerName = dns.CanonicalName(x.SignerName)
+		x.SignerName = core.CanonicalizeName(x.SignerName)
 	case *dns.NSEC:
-		x.NextDomain = dns.CanonicalName(x.NextDomain)
+		x.NextDomain = core.CanonicalizeName(x.NextDomain)
 	}
 
 	buf := make([]byte, dns.Len(r)+1)
@@ -258,7 +286,7 @@ func digestBlock(apex string, rrs []dns.RR) ([]byte, error) {
 			continue
 		}
 		hdr := rr.Header()
-		name := dns.CanonicalName(hdr.Name)
+		name := core.CanonicalizeName(hdr.Name)
 
 		// Out-of-zone data is excluded (§3.3.1). A loaded zone should not carry
 		// any, but a zone FILE can -- nothing stops an operator writing an
@@ -269,7 +297,15 @@ func digestBlock(apex string, rrs []dns.RR) ([]byte, error) {
 		if !dns.IsSubDomain(apex, name) {
 			continue
 		}
-		if name == apex {
+		// The apex exclusion decides whether the ZONEMD RRset is fed to its own
+		// digest, and a miss digests the record the digest is supposed to be.
+		//
+		// Every caller inside tdns passes a canonical apex, and name is folded
+		// by the same function a few lines up, so == was correct as it stood.
+		// EqualNames because ZoneDigest and ZoneDigestHex are EXPORTED: an
+		// outside caller's apex is not covered by that invariant, and this is
+		// not a place to find out.
+		if core.EqualNames(name, apex) {
 			if hdr.Rrtype == dns.TypeZONEMD {
 				continue
 			}
@@ -354,7 +390,10 @@ func groupByOwner(rrs []dns.RR) map[string][]dns.RR {
 		if rr == nil {
 			continue
 		}
-		name := dns.CanonicalName(rr.Header().Name)
+		// A MAP KEY. dns.CanonicalName sends every non-UTF-8 octet to U+FFFD,
+		// so ns\xfe1. and ns\xff1. -- two owners -- merged into one bucket and
+		// were digested as a single owner's records.
+		name := core.CanonicalizeName(rr.Header().Name)
 		out[name] = append(out[name], rr)
 	}
 	return out
@@ -402,7 +441,9 @@ func ZoneDigest(apex string, rrs []dns.RR, scheme, alg uint8) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	apex = dns.CanonicalName(apex)
+	// Folded by the function digestBlock compares against, or the apex-ZONEMD
+	// exclusion in there is comparing two different foldings of the same name.
+	apex = core.CanonicalizeName(apex)
 
 	byOwner := groupByOwner(rrs)
 	names := make([]string, 0, len(byOwner))

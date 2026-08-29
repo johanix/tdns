@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -478,7 +479,12 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 		// confMu (read lock).
 		confMu.RLock()
 		for i := range Conf.Zones {
-			if dns.Fqdn(Conf.Zones[i].Name) == zname {
+			// ZoneConf.Name keeps the case the operator wrote in the config;
+			// zname is the folded registry key. Comparing them as bytes stopped
+			// working the moment zd.ZoneName started being folded (#417), so a
+			// zone declared Example.COM. could no longer find its own config
+			// entry and lost its policy name here.
+			if core.EqualNames(dns.Fqdn(Conf.Zones[i].Name), zname) {
 				configPolicy = Conf.Zones[i].DnssecPolicy
 				break
 			}
@@ -835,7 +841,11 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	var configName string
 	confMu.RLock()
 	for i := range Conf.Zones {
-		if dns.Fqdn(Conf.Zones[i].Name) == zd.ZoneName {
+		// Same pair as in the list-zones handler above: config-case name
+		// against the folded zone name. A miss here is not cosmetic -- it is
+		// the difference between resetting to the configured policy and
+		// refusing because the zone appears to have none.
+		if core.EqualNames(dns.Fqdn(Conf.Zones[i].Name), zd.ZoneName) {
 			configName = strings.TrimSpace(Conf.Zones[i].DnssecPolicy)
 			break
 		}

@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -117,7 +118,7 @@ func NewKeySelector(exact, subtree []string) (KeySelector, error) {
 			if trimmed == "" {
 				return nil, fmt.Errorf("empty %s selector: to select everything, pass no selector at all", what)
 			}
-			out = append(out, dns.Fqdn(strings.ToLower(trimmed)))
+			out = append(out, core.CanonicalizeName(dns.Fqdn(trimmed)))
 		}
 		return out, nil
 	}
@@ -143,7 +144,9 @@ func (s KeySelector) Matches(name string) bool {
 	if s.Empty() {
 		return true
 	}
-	name = dns.Fqdn(strings.ToLower(name))
+	// Folded by the same function the selector entries were built with above:
+	// these are compared as strings below, so the two sides have to agree.
+	name = core.CanonicalizeName(dns.Fqdn(name))
 	for _, e := range s.Exact {
 		if name == e {
 			return true
@@ -928,7 +931,7 @@ func validateDnssecKeyRR(k BulkDnssecKey) (string, error) {
 	if !isDnskey {
 		return "", fmt.Errorf("expected a DNSKEY RR, got %s", dns.TypeToString[rr.Header().Rrtype])
 	}
-	if !strings.EqualFold(dnskey.Header().Name, dns.Fqdn(k.Zone)) {
+	if !core.EqualNames(dnskey.Header().Name, dns.Fqdn(k.Zone)) {
 		return "", fmt.Errorf("DNSKEY owner %q does not match zone %q", dnskey.Header().Name, dns.Fqdn(k.Zone))
 	}
 	if dnskey.Flags != k.Flags {
@@ -977,7 +980,7 @@ func validateSig0KeyRR(k BulkSig0Key) (string, error) {
 	if !isKey {
 		return "", fmt.Errorf("expected a KEY RR, got %s", dns.TypeToString[rr.Header().Rrtype])
 	}
-	if !strings.EqualFold(key.Header().Name, dns.Fqdn(k.Zone)) {
+	if !core.EqualNames(key.Header().Name, dns.Fqdn(k.Zone)) {
 		return "", fmt.Errorf("KEY owner %q does not match zone %q", key.Header().Name, dns.Fqdn(k.Zone))
 	}
 	if tag := key.KeyTag(); tag != k.Keyid {
