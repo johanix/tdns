@@ -547,7 +547,10 @@ func parseTsigFlag(s string) (name, algo, secret string, err error) {
 		algo = dns.HmacSHA256
 	case 3:
 		name, secret = parts[1], parts[2]
-		algo = dns.Fqdn(strings.ToLower(parts[0]))
+		// A TSIG algorithm identifier is a DOMAIN NAME (hmac-sha256., ...), so
+		// it folds by the DNS rule like any other: US-ASCII A-Z and nothing
+		// else.
+		algo = core.CanonicalizeName(dns.Fqdn(parts[0]))
 	default:
 		return "", "", "", fmt.Errorf("-y must be [algorithm:]name:secret")
 	}

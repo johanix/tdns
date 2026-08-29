@@ -9,11 +9,11 @@ import (
 	"io"
 	"net"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -335,7 +335,7 @@ func tcpQueryOnce(target, zone string, timeout time.Duration) bool {
 	}
 	apex := dns.Fqdn(zone)
 	for _, rr := range r.Answer {
-		if soa, ok := rr.(*dns.SOA); ok && strings.EqualFold(soa.Hdr.Name, apex) {
+		if soa, ok := rr.(*dns.SOA); ok && core.EqualNames(soa.Hdr.Name, apex) {
 			return true
 		}
 	}
@@ -361,7 +361,7 @@ func validSOAResponse(wire []byte, apex string) bool {
 		return false
 	}
 	for _, rr := range m.Answer {
-		if soa, ok := rr.(*dns.SOA); ok && strings.EqualFold(soa.Hdr.Name, apex) {
+		if soa, ok := rr.(*dns.SOA); ok && core.EqualNames(soa.Hdr.Name, apex) {
 			return true
 		}
 	}

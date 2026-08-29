@@ -60,7 +60,7 @@ var dumpSuffixCmd = &cobra.Command{
 		// Collect and sort items by owner name (reverse label order)
 		items := []core.Tuple[string, cache.CachedRRset]{}
 		for item := range Conf.Internal.RRsetCache.RRsets.IterBuffered() {
-			if suffix == "" || strings.HasSuffix(item.Val.Name, suffix) {
+			if suffix == "" || dns.IsSubDomain(suffix, item.Val.Name) {
 				items = append(items, item)
 			}
 		}
@@ -301,7 +301,12 @@ With a zone argument: dumps just that zone.`,
 		}
 		var entries []zoneEntry
 		for item := range Conf.Internal.RRsetCache.ZoneMap.IterBuffered() {
-			if filter != "" && item.Key != filter {
+			// ZoneMap yields folded keys since the cache became a NameMap, so
+			// comparing to the filter as typed returned an empty dump for a
+			// mixed-case zone argument. Through the shared selector, like the
+			// API handler and the transport-stats filter: this was the third
+			// copy of one predicate, which is how the other two drifted.
+			if !tdns.ZoneMatchesSelector(item.Key, filter, "") {
 				continue
 			}
 			b := item.Val.SnapshotAddressBackoffs(now)
@@ -958,7 +963,7 @@ func PrintCacheItem(item core.Tuple[string, cache.CachedRRset], suffix string) {
 		return
 	}
 
-	if !strings.HasSuffix(item.Val.Name, suffix) {
+	if !dns.IsSubDomain(suffix, item.Val.Name) {
 		// fmt.Printf("skipping item with name %q\n", item.Val.Name)
 		return
 	}
@@ -1022,8 +1027,11 @@ func PrintCacheItem(item core.Tuple[string, cache.CachedRRset], suffix string) {
 // lessByReverseLabels compares two FQDNs by labels from right to left.
 // Returns true if a < b in that ordering.
 func lessByReverseLabels(a, b string) bool {
-	an := dns.Fqdn(strings.ToLower(strings.TrimSpace(a)))
-	bn := dns.Fqdn(strings.ToLower(strings.TrimSpace(b)))
+	// Canonical order is octet order with US-ASCII A-Z folded (RFC 4034 6.1);
+	// strings.ToLower folds by Unicode and rewrites non-UTF-8 octets, so two
+	// distinct names could sort as one.
+	an := core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(a)))
+	bn := core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(b)))
 	// Fast path equal
 	if an == bn {
 		return false

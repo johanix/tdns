@@ -134,7 +134,7 @@ land first, the rest are parallel.
 | 3 | IMR + cache | ~24 | **DONE.** `dnslookup`, `imrengine`, `imr_helpers`, `chase`, `apihandler_imr`, `cache/*` — plus the cache's own name-keyed indexes |
 | 4 | Delegation / childsync / dsync | ~20 | **DONE.** `childsync_utils`, `scanner_csync`, `dsync_api_*`, `delegation_coherence`, `delegation_backend_*`, `config_delegationsync`, `ops_delegation_read` |
 | 5 | Keystore / sign / zonemd | ~20 | **DONE.** `zonemd` canonical ordering, `sign`, `keystore_bulk`, `bind_convert`, `rollover_lock`, plus the two items the series owed |
-| 6 | CLI + debug | ~23 | cosmetic, but `keystore_cmds.go:1018` `log.Fatalf`s on a case mismatch |
+| 6 | CLI + debug | ~20 | **DONE.** `cli/*`, `debug/*`, `cmdv2/dog`, plus the `VerifyZonemd` pair carried over from stage 5 |
 | 7 | Enforcement | — | see below |
 
 ## Enforcement
@@ -646,3 +646,128 @@ The re-review says to move it "when that file is next open". As with the
 enforcement, and neither goes near `zonemd_verify.go`. It is three lines, in the
 sibling of the file this stage exists to make consistent. Recommend taking it
 into stage 6 as a named extra, the way this stage took the two items it owed.
+
+
+## Addendum, after PR 6
+
+85 → 75.
+
+**`VerifyZonemd` now folds like `ZoneDigest`,** carried over from the #423
+re-review at the user's instruction. Both are exported and both decide which
+records sit at the apex -- the digest by excluding them, the verifier by
+selecting them. Folded by two different functions they agreed on every ASCII
+name and parted company on the first non-UTF-8 octet, at which point a zone
+digests one set of records and is verified against another and a correct zone
+reports as broken. Covered end to end: compute with `ZoneDigestHex`, verify with
+`VerifyZonemd`, over three apexes including one carrying a raw octet. Reverting
+either fold reddens it.
+
+**A flaw in my scanning method, present for the whole series.** The grep that
+produced the 149-site list filters `//` line comments and knows nothing about
+`/* */` blocks. Two of the sites I "converted" in this stage
+(`cli/agent_zone_cmds.go`) turned out to be commented-out code -- the whole
+region from line 262 to 424 is a block comment. The only symptom was an
+"imported and not used" error the file plainly contradicted, which took several
+wrong hypotheses to run down.
+
+Audited the entire series for the same mistake. One other instance:
+`childsync_utils.go`'s `xxxComputeBailiwickNS_NG`, converted in #422 and already
+noted by that review as inside a block comment and harmless. Nothing else. The
+agent_zone_cmds edits are reverted; the site counts in this document include
+some commented-out code and should be read as an upper bound.
+
+**Converted here:** the debug tools' apex tests and churn-suffix filter, the
+config check's DNS-name map keys (a new `nk()` beside `lc()`, which stays for
+config identifiers where Unicode folding is harmless), the keystore and
+truststore CLI's zone-vs-key-owner checks, the IMR dump's suffix filter and
+reverse-label sort, `auto_rollover_validate`, and dog's TSIG algorithm name --
+which is a domain name.
+
+**Untested, and named as such:** the CLI and debug conversions are one-line
+`EqualFold`/`!=` replacements in commands with no unit harness. Same call the
+reviews accepted for #419 FINDING 3 and #423 FINDING 2. `VerifyZonemd` is the
+substantive item in this stage and it is covered.
+
+
+## Review of #424 (external, 2026-08-28)
+
+`tdns-project/reviews/2026-08-28-tdns-PR424-cli-debug-verifier-review.md`.
+Verdict: request changes -- two findings, both in this PR's own files. Both
+addressed.
+
+**FINDING 1 — I introduced a store/lookup split while adding the helper meant to
+prevent one.** The commit added `nk()` and converted the four places that LOOK
+UP by DNS name, and left two of the maps being looked up still BUILT with
+`lc()`. `checkTsigRef` folds the key with `nk` and reads `configTsig` (now `nk`)
+and `keystoreTsig` (still `lc`). ASCII agrees, so nothing showed; a TSIG name
+carrying U+212A or a raw octet is stored under one key and read under the
+other, and the check reports a key as missing from a keystore that has it.
+
+This is the third time in the series: #421 folded the `_dns.` prefix test and
+not the strip, #423 folded the digest's ordering and not its hashing, and now
+this. The shape is always the same -- convert the read side, leave the write
+side -- and the reason it keeps surviving is that ASCII fixtures cannot see it.
+
+`zoneKey` and `fetchActiveKeyAlgsByZone` moved to `nk` too, so the file has ONE
+key function for DNS names. `lc` stays for config identifiers, which is the
+split the review calls right. `zoneKey`'s comment claimed the daemon stores
+zones under `dns.Fqdn(name)` with case preserved; that stopped being true in
+#417.
+
+**FINDING 2 — the CLI zone-backoff dump was the third copy of the zone-filter
+predicate.** #421 converted the API twin to `ZoneMatchesSelector` precisely so
+the handler and the transport-stats filter could not drift; the CLI dump was
+still comparing a folded `ZoneMap` key to the filter as typed, so a mixed-case
+zone argument returned an empty dump. Now through the same selector.
+
+**Coverage.** `TestConfigCheckNameKeyIsOneFunction` pins that `nk` and
+`zoneKey` are one function and that neither Unicode-folds. Its first draft
+compared them over ASCII spellings only and stayed green with `zoneKey` reverted
+to a second implementation -- the ASCII-fixture trap for the fourth time. It now
+compares over U+212A, U+017F and a raw octet, and goes red.
+
+**Named as still later, unchanged:** `rrset_utils` (outbound `AuthQueryEngine`)
+and `scanner.go`'s NS-set keys. The review adds two more for stage 7 or a later
+touch: `ksk_rollover_cli.go`'s `dns.Fqdn(zc.Name) != want`, where a mixed-case
+`--zone` misses its policy, and `report_cmds.go`'s TSIG algorithm fold.
+
+
+## Re-review of #424 (external, 2026-08-28)
+
+Findings 1-2 accepted. **Approved as stage 6.** That completes review of stages
+1-6; only enforcement is left.
+
+**One coverage gap, named and deliberately not papered over.** The re-review is
+right that `TestConfigCheckNameKeyIsOneFunction` pins the helper identity -- `nk`
+and `zoneKey` are one function, and neither Unicode-folds -- but not that
+`fetchKeystoreTsigNames` actually *calls* `nk`. Reverting that one line would
+stay green. Which is awkward, because the store side is exactly what FINDING 1
+was.
+
+It is not cheaply testable: both fetch functions need a live API client, and a
+test that builds the maps itself would be asserting against its own
+construction rather than the production one. A weak test here would be worse
+than none, because it would read as coverage.
+
+**This is stage 7's requirement, stated concretely.** The four defects of this
+kind -- #421's prefix test vs strip, #423's ordering vs hashing, #424's lookup
+vs store, and the near-miss in #417's `zoneNameKey` vs the registry -- are all
+one shape: **two sides of a pair folded by different functions.** A gate that
+only flags individual bad calls (`strings.EqualFold` on a name, `strings.ToLower`
+on a name) would have caught none of them, because in every case the call it
+would flag had already been converted. The gate has to be able to say "this map
+is written with X and read with Y."
+
+## Still open after stage 6
+
+Pre-existing, none introduced by the series:
+
+| Site | Why it is still open |
+|---|---|
+| `rrset_utils.go` Additional/Authority `Name == qname` | Outbound `AuthQueryEngine`; deferred by every review since #419 |
+| `scanner.go` in-bailiwick NS set keys (`dns.CanonicalName`) | Same U+FFFD shape as #421's TLSA keys |
+| `ksk_rollover_cli.go` `dns.Fqdn(zc.Name) != want` | A mixed-case `--zone` misses its policy |
+| `report_cmds.go` `strings.ToLower(tsig.Algorithm)` | Same class as dog's TSIG algorithm name |
+| `nsMap[baseName]` in `ParseAdditionalForNSAddrs` | Per-message set; #421's review said explicitly not to expand into it |
+| `BailiwickNS` / `NSInBailiwick` / `InBailiwick` | Three spellings of one predicate; consolidation is its own change |
+| The `/* */` hole in the site scanner | Stage 7's gate must understand block comments; mine did not |

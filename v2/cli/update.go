@@ -13,6 +13,7 @@ import (
 
 	"github.com/gookit/goutil/dump"
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
@@ -427,7 +428,7 @@ cmdloop:
 					fmt.Printf("Error parsing RR: %v\n", err)
 					continue
 				}
-				if rr.Header().Name != owner {
+				if !core.EqualNames(rr.Header().Name, owner) {
 					fmt.Printf("Warning: record owner %q differs from RRset owner %q\n",
 						rr.Header().Name, owner)
 				}

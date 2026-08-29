@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
@@ -829,7 +830,7 @@ func sig0KeyMgmt(role, cmd string) {
 		fmt.Printf("KeyRR: %s\n", pkc.KeyRR.String())
 
 		if pkc.KeyType == dns.TypeKEY {
-			if pkc.KeyRR.Header().Name != tdns.Globals.Zonename {
+			if !core.EqualNames(pkc.KeyRR.Header().Name, tdns.Globals.Zonename) {
 				log.Fatalf("Error: name of zone (%s) and name of key (%s) do not match",
 					pkc.KeyRR.Header().Name, tdns.Globals.Zonename)
 			}
@@ -1015,7 +1016,7 @@ func dnssecKeyMgmt(role, cmd string) {
 		fmt.Printf("DNSKEY RR: %s\n", pkc.DnskeyRR.String())
 
 		if pkc.KeyType == dns.TypeDNSKEY {
-			if pkc.DnskeyRR.Header().Name != tdns.Globals.Zonename {
+			if !core.EqualNames(pkc.DnskeyRR.Header().Name, tdns.Globals.Zonename) {
 				log.Fatalf("Error: name of zone (%s) and name of key (%s) do not match",
 					tdns.Globals.Zonename, pkc.DnskeyRR.Header().Name)
 			}
@@ -1266,7 +1267,7 @@ func dnssecGenDS(role string) {
 			continue
 		}
 		keyZone := dns.Fqdn(parts[0])
-		if keyZone != zone {
+		if !core.EqualNames(keyZone, zone) {
 			continue
 		}
 
