@@ -1177,8 +1177,17 @@ func RRsetToString(rrset *core.RRset) string {
 	return tmp
 }
 
+// InBailiwick reports whether a nameserver name lies inside zone.
+//
+// dns.IsSubDomain, not strings.HasSuffix: the latter compares bytes, so it is
+// both case-sensitive and blind to label boundaries -- it calls
+// ns.evilexample. in-bailiwick for example.
+//
+// NOTE: this has no callers. NSInBailiwick in scanner_csync.go is the live twin
+// and still carries the HasSuffix version; it is fixed with the rest of the
+// scanner rather than here.
 func InBailiwick(zone string, ns *dns.NS) bool {
-	return strings.HasSuffix(ns.Ns, zone)
+	return dns.IsSubDomain(zone, ns.Ns)
 }
 
 // formatZoneParseError extracts the line number from the parse error string

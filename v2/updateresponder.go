@@ -11,6 +11,7 @@ import (
 	"time"
 
 	// "github.com/gookit/goutil/dump"
+	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -204,7 +205,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 	lgHandler.Debug("setting update type", "zone", zd.ZoneName, "qname", qname)
 	// 1. Is qname the apex of this zone?
-	if qname == zd.ZoneName {
+	if core.EqualNames(qname, zd.ZoneName) {
 		// Per RFC 2136 the QNAME is the zone being updated. Check whether all RRs in the
 		// update section target a single existing child delegation (at or below the delegation
 		// point). If so, this is a child delegation sync, not a zone update.
@@ -222,7 +223,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 				}
 				if childDel == "" {
 					childDel = ownerName
-				} else if childDel != ownerName {
+				} else if !core.EqualNames(childDel, ownerName) {
 					isChildUpdate = false
 					break
 				}
@@ -233,13 +234,13 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 				labels := dns.SplitDomainName(ownerName)
 				for i := 1; i < len(labels); i++ {
 					ancestor := dns.Fqdn(strings.Join(labels[i:], "."))
-					if ancestor == zd.ZoneName {
+					if core.EqualNames(ancestor, zd.ZoneName) {
 						break
 					}
 					if zd.IsChildDelegation(ancestor) {
 						if childDel == "" {
 							childDel = ancestor
-						} else if childDel != ancestor {
+						} else if !core.EqualNames(childDel, ancestor) {
 							isChildUpdate = false
 							break
 						}
@@ -765,14 +766,21 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 
 	switch zd.UpdatePolicy.Child.Type {
 	case "selfsub":
-		if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
+		// AUTHORISATION CHECK -- dns.IsSubDomain, not strings.HasSuffix.
+		// HasSuffix is true for evilchild.example. against child.example.,
+		// because it compares bytes and knows nothing about label boundaries:
+		// a signer authorised for one name could update names under a
+		// DIFFERENT name that merely ends with it. It is also case-sensitive,
+		// which denied legitimate updates. IsSubDomain gets both right, and is
+		// true for the signer name itself, which selfsub has always allowed.
+		if !dns.IsSubDomain(us.SignerName, rr.Header().Name) {
 			us.Approved = false
 			lgHandler.Warn("trust update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
 			return false, false, nil
 		}
 
 	case "self":
-		if rr.Header().Name != us.SignerName {
+		if !core.EqualNames(rr.Header().Name, us.SignerName) {
 			us.Approved = false
 			lgHandler.Warn("trust update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
 			return false, false, nil

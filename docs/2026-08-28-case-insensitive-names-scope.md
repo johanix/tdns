@@ -130,7 +130,7 @@ land first, the rest are parallel.
 | # | Area | Sites | Contents |
 |---|---|---:|---|
 | 1 | Boundary | ~10 | **DONE.** `core.CanonicalizeName` + `core.NameMap`; canonical keys for `Zones`, `zd.Data`, the snapshot and the working set; `GetOwner`/`FindZone`/`SortFunc`; `zd.ZoneName` folded at construction. Fixes all four confirmed defects. |
-| 2 | Auth query + update | ~35 | `queryresponder`, `updateresponder`, `zone_updater`, `zone_update_verbs`, `defaultqueryhandlers`, `rrset_utils` |
+| 2 | Auth query + update | ~29 | **DONE.** `queryresponder`, `auth_utils`, `updateresponder`, `zone_updater`, `zone_update_verbs`, `defaultqueryhandlers`, `ops_uri`/`ops_svcb`/`ops_key`, `dnsutils`, `zone_utils` |
 | 3 | IMR + cache | ~25 | `dnslookup`, `imrengine`, `cache/*` — wire-sourced names, so the most reachable after #1 |
 | 4 | Delegation / childsync / dsync | ~20 | includes the `HasSuffix` label-boundary bugs |
 | 5 | Keystore / sign / zonemd | ~20 | `sign.go`'s apex tests are latent-severe: a miss signs a delegation NS or skips the apex NS |
@@ -198,6 +198,45 @@ above. `core.CanonicalizeName` is the key builder; `core.EqualNames` is the
 comparison. Both live in `v2/core` so the sibling repos can use them.
 
 
+## Addendum, after PR 2
+
+148 → 119 sites. Two defects found that the static scan had classed as ordinary
+`==`/`HasSuffix` sites, both of which turned out to be worse than the label
+suggested.
+
+**The server referred queries to itself.** `findDelegationFrom`
+(`auth_utils.go:26`) walks up from the qname looking for a child delegation and
+stops at `child == zd.ZoneName`. Compared byte-wise, so a query spelling the
+zone-name part in any other case never recognised the apex, picked up the
+**apex NS RRset as though it were a child delegation**, and answered a referral
+to itself instead of the data. `WWW.EXAMPLE.` in `example.` did it;
+`WWW.example.` did not, which is why it had never been noticed.
+
+PR 1 made this reachable. Before it, a fully mis-cased qname failed the
+`Zones.Get` fast path, went through `FindZone`'s fold, and was rewritten to
+lowercase before it got here. PR 1 removed that rewrite because the lookups fold
+themselves — correct, but it let the raw spelling travel further into the query
+path than it used to. The scan had this site; the severity only appeared when
+the whole path was driven end to end.
+
+**`selfsub` was not bounded by label.** The child update policy asked
+`strings.HasSuffix(rr.Header().Name, us.SignerName)`. That is true for
+`evilchild.example.` against `child.example.` — a signer authorised for one name
+could write records under a different name that merely ends with it. Now
+`dns.IsSubDomain`. Confirmed by restoring the old check and watching the test
+approve `evilchild.example.`, `xchild.example.` and `notchild.example.`
+
+**Method note.** The end-to-end differential test — ask the same question in
+four spellings, require identical responses — found both. Neither would have
+come out of reading the 149-site list, and the second is not a
+case-sensitivity bug at all. Worth repeating for the IMR path in PR 3: drive it,
+don't only read it.
+
+**Still not converted, deliberately:** `sign.go`'s apex tests. Its operands are
+owner-map keys against `zd.ZoneName`, both canonical since PR 1, so they are
+safe by construction; they belong to PR 5 with the rest of the signer.
+
+
 ## Review of #417 (external, 2026-08-28)
 
 `docs/2026-08-28-pr417-case-insensitive-names-review.md`, on `main`. Verdict:
@@ -243,3 +282,51 @@ lives -- it was advice to do the exact unsafe thing this stage exists to stop.
 query, so the self-referral could not have gone red under "revert the fix and
 watch the test fail". That check verifies a fix is load-bearing; it says nothing
 about consequences elsewhere. Only driving the path does.
+
+## Review of #419 (external, 2026-08-28)
+
+`tdns-project/reviews/2026-08-28-tdns-PR419-query-and-update-review.md`.
+Verdict: request changes -- four findings, all inside #419's own surface.
+All four addressed.
+
+**FINDING 1 — `IsChildDelegation`.** Converted. The review is right that this is
+not merely the same hole as `findDelegationFrom`: `UpdateResponder` now folds
+the zone-section qname, so the apex branch is entered correctly, and the damage
+is one level in -- the OWNERS inside that branch are passed to
+`IsChildDelegation`, so an apex NS update spelled `EXAMPLE.` was classified as a
+CHILD update and judged against `allow-child-updates` instead of
+`allow-updates`.
+
+**FINDING 2 — three sites missed in `ZoneUpdateChangesDelegationDataNG`.** A
+real miss, and worth naming the cause: the replacement list for that file was
+assembled by hand from a 17-line enumeration, and three lines were dropped
+between enumerating and patching. The re-sweep after the fix (`grep` for any
+remaining wire-owner-vs-apex `==` in the six files) is what should have run
+before the PR, not after the review.
+
+**FINDING 3 — the glue walk's `childDel != ancestor`.** Converted.
+
+**FINDING 4 — 14 unrelated `docs/` files, ~3000 lines.** `git add -A` swept
+untracked review documents from the working tree into the commit. Removed with
+`git rm --cached`, so they return to being untracked rather than being deleted
+from disk. Net diff against the base is now clean.
+
+`v2/probe_src_test.go` keeps its two-line gofmt change: the file was merged
+unformatted in #410, and un-formatting it again to tidy this diff would leave
+the tree worse than it found it.
+
+**Coverage.** New tests for findings 1 and 2, each verified by reverting the
+fix. The pre-switch apex-NS guard needed a differential test rather than a
+value assertion -- it only has an effect for a DUPLICATE apex NS add, every
+other path setting `InSync` from its own arm, and whether "in sync" is right
+for a duplicate add is a separate question from whether spelling may change it.
+DS shapes added to the query differential, as the review suggested.
+
+FINDING 3 is **not covered by a test**. It sits inside `UpdateResponder`'s
+message-driven classification, which has no unit harness at all; building one
+for a one-line fix is out of proportion to this PR, and worth doing on its own.
+
+Sites the review confirms belong to later stages, not #419: `rrset_utils`
+(outbound `AuthQueryEngine`), `sign.go` (canonical operands since #417),
+`NSInBailiwick` (stage 4, done), `ops_delegation_read` (stage 4, done), and the
+`Conf.Zones[i].Name` pair from #417 FINDING 2, which is still open.

@@ -23,7 +23,12 @@ func (zd *ZoneData) findDelegationFrom(snap *zoneSnapshot, qname string, dnssec_
 	labels := strings.Split(qname, ".")
 	for i := 0; i < len(labels)-1; i++ {
 		child = strings.Join(labels[i:], ".")
-		if child == zd.ZoneName {
+		// Stop at our own apex. Compared as a NAME: a byte comparison here made
+		// the walk fail to recognise the apex whenever the query spelled the
+		// zone-name part in another case, so the apex NS RRset was picked up as
+		// though it were a child delegation and the server answered its own
+		// data with a REFERRAL TO ITSELF. WWW.EXAMPLE. in example. did it.
+		if core.EqualNames(child, zd.ZoneName) {
 			break // no point in checking above current zone name
 		}
 		if nameExistsFrom(snap, child) {

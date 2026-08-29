@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -897,7 +896,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 				lg.Warn("ApplyZoneUpdateToZoneData: DELNAME for unknown owner", "owner", ownerName)
 				continue
 			}
-			isApex := strings.EqualFold(ownerName, zd.ZoneName)
+			isApex := core.EqualNames(ownerName, zd.ZoneName)
 			var deleted, denied, retained int
 			for _, t := range owner.RRtypes.Keys() {
 				if isApex && apexRetainedOnDelname(t) {
@@ -1029,7 +1028,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 			// SOA has no such exception: tdns owns the serial, and the
 			// builder refuses replacerrset for it outright so the failure is
 			// loud and at the client rather than silent here.
-			if strings.EqualFold(ownerName, zd.ZoneName) &&
+			if core.EqualNames(ownerName, zd.ZoneName) &&
 				(rrtype == dns.TypeSOA || rrtype == dns.TypeNS) {
 				if rrtype == dns.TypeNS &&
 					updateReplacesRRset(ur.Actions[actionIdx+1:], ownerName, rrtype) {
@@ -1134,7 +1133,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 	for _, rr := range ur.Actions {
 		if rr.Header().Rrtype == dns.TypeNS {
 			actions = append(actions, rr)
-			if rr.Header().Name == zd.ZoneName {
+			if core.EqualNames(rr.Header().Name, zd.ZoneName) {
 				new_bns = append(new_bns, rr.Header().Name)
 			}
 		}
@@ -1171,7 +1170,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			continue
 		}
 
-		if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
+		if core.EqualNames(ownerName, zd.ZoneName) && rrtype == dns.TypeNS {
 			dss.InSync = false
 			// return dss, nil
 		}
@@ -1182,7 +1181,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			//log.Printf("ZUCDDNG: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 
 			// Is this a change to the NS RRset?
-			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
+			if core.EqualNames(ownerName, zd.ZoneName) && rrtype == dns.TypeNS {
 				dss.InSync = false
 				dss.NsRemoves = append(dss.NsRemoves, rrcopy)
 				ddata.Actions = append(ddata.Actions, rrcopy)
@@ -1212,7 +1211,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			}
 			// Is this a change to glue for a nameserver?
 			for _, nsname := range ddata.BailiwickNS {
-				if nsname == ownerName {
+				if core.EqualNames(nsname, ownerName) {
 					if rrtype == dns.TypeA {
 						dss.InSync = false
 						dss.ARemoves = append(dss.ARemoves, rrcopy)
@@ -1225,7 +1224,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 				}
 			}
 			// Is this a KSK DNSKEY removal?
-			if ownerName == zd.ZoneName && rrtype == dns.TypeDNSKEY {
+			if core.EqualNames(ownerName, zd.ZoneName) && rrtype == dns.TypeDNSKEY {
 				if dk, ok := rr.(*dns.DNSKEY); ok {
 					if dk.Flags&dns.SEP != 0 {
 						dss.InSync = false
@@ -1240,7 +1239,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			//log.Printf("ZUCDDNG: Remove RRset: %s", rr.String())
 			switch rrtype {
 			case dns.TypeNS:
-				if ownerName == zd.ZoneName {
+				if core.EqualNames(ownerName, zd.ZoneName) {
 					// A standalone delete of the apex NS RRset is refused by
 					// the applier and correctly ignored here.
 					//
@@ -1280,7 +1279,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 
 			case dns.TypeA:
 				for _, nsname := range bns {
-					if nsname == ownerName {
+					if core.EqualNames(nsname, ownerName) {
 						dss.InSync = false
 						dss.ARemoves = append(dss.ARemoves, rrcopy)
 						ddata.Actions = append(ddata.Actions, rrcopy)
@@ -1289,7 +1288,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 
 			case dns.TypeAAAA:
 				for _, nsname := range bns {
-					if nsname == ownerName {
+					if core.EqualNames(nsname, ownerName) {
 						dss.InSync = false
 						dss.AAAARemoves = append(dss.AAAARemoves, rrcopy)
 						ddata.Actions = append(ddata.Actions, rrcopy)
@@ -1297,7 +1296,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 				}
 
 			case dns.TypeDNSKEY:
-				if ownerName == zd.ZoneName {
+				if core.EqualNames(ownerName, zd.ZoneName) {
 					// Removing entire DNSKEY RRset — record all KSK removals
 					dss.InSync = false
 					apex, apexErr := zd.GetOwner(zd.ZoneName)
@@ -1327,7 +1326,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 		dup := false
 		switch rrtype {
 		case dns.TypeNS:
-			if ownerName == zd.ZoneName {
+			if core.EqualNames(ownerName, zd.ZoneName) {
 				for _, rr := range ddata.CurrentNS.RRs {
 					if dns.IsDuplicate(rr, rrcopy) {
 						// log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
@@ -1363,7 +1362,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 						}
 						// It is also possible that glue for the new NS is present later in the update.
 						for _, action := range actions {
-							if action.Header().Name == nsrr.Ns {
+							if core.EqualNames(action.Header().Name, nsrr.Ns) {
 								if action.Header().Rrtype == dns.TypeA {
 									// log.Printf("ZUCDDNG: adding glue for new NS %s from later in the update: %s", nsrr.Ns, action.String())
 									dss.AAdds = append(dss.AAdds, action)
@@ -1428,7 +1427,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			}
 
 		case dns.TypeDNSKEY:
-			if ownerName == zd.ZoneName {
+			if core.EqualNames(ownerName, zd.ZoneName) {
 				if dk, ok := rr.(*dns.DNSKEY); ok {
 					if dk.Flags&dns.SEP != 0 {
 						dss.InSync = false
@@ -1700,7 +1699,7 @@ func updateReplacesRRset(actions []dns.RR, owner string, rrtype uint16) bool {
 		if rr.Header().Class != dns.ClassINET {
 			continue
 		}
-		if rr.Header().Rrtype == rrtype && strings.EqualFold(rr.Header().Name, owner) {
+		if rr.Header().Rrtype == rrtype && core.EqualNames(rr.Header().Name, owner) {
 			return true
 		}
 	}
@@ -1719,14 +1718,14 @@ func apexNSReplacementRecords(actions []dns.RR, zone string) []dns.RR {
 		if rr.Header().Class != dns.ClassANY || rr.Header().Rrtype != dns.TypeNS {
 			continue
 		}
-		if !strings.EqualFold(rr.Header().Name, zone) {
+		if !core.EqualNames(rr.Header().Name, zone) {
 			continue
 		}
 		var newNS []dns.RR
 		for _, later := range actions[i+1:] {
 			if later.Header().Class == dns.ClassINET &&
 				later.Header().Rrtype == dns.TypeNS &&
-				strings.EqualFold(later.Header().Name, zone) {
+				core.EqualNames(later.Header().Name, zone) {
 				newNS = append(newNS, later)
 			}
 		}
