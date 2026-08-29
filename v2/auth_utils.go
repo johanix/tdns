@@ -36,7 +36,6 @@ func (zd *ZoneData) findDelegationFrom(snap *zoneSnapshot, qname string, dnssec_
 			if childrrs == nil {
 				continue
 			}
-			zd.Logger.Printf("FindDelegation for qname='%s': there are RRs for '%s'", qname, child)
 			if childns, ok := childrrs.RRtypes.Get(dns.TypeNS); ok {
 				childds := childrrs.RRtypes.GetOnlyRRSet(dns.TypeDS)
 				cdd := ChildDelegationData{
@@ -44,13 +43,11 @@ func (zd *ZoneData) findDelegationFrom(snap *zoneSnapshot, qname string, dnssec_
 					NS_rrset:  &childns,
 					DS_rrset:  &childds,
 				}
-				zd.Logger.Printf("FindDelegation: cdd=%v", cdd)
 				v4glue, v6glue, v4glue_rrsigs, v6glue_rrsigs := zd.findGlueSimpleFrom(snap, childns, dnssec_ok)
 				cdd.A_glue = v4glue
 				cdd.AAAA_glue = v6glue
 				cdd.A_glue_rrsigs = v4glue_rrsigs
 				cdd.AAAA_glue_rrsigs = v6glue_rrsigs
-				zd.Logger.Printf("FindDelegation: v4glue=%v, v6glue=%v", v4glue, v6glue)
 				return &cdd
 			}
 		}
@@ -147,11 +144,9 @@ func (zd *ZoneData) findGlueSimpleFrom(snap *zoneSnapshot, nsrrs core.RRset, dns
 	}
 	var v4glue, v6glue, v4glue_rrsigs, v6glue_rrsigs []dns.RR
 	var nsname string
-	zone := nsrrs.RRs[0].Header().Name
 	for _, rr := range nsrrs.RRs {
 		if nsrr, ok := rr.(*dns.NS); ok {
 			nsname = nsrr.Ns
-			zd.Logger.Printf("FindGlue: zone '%s' has a nameserver '%s'", zone, nsname)
 			// nsnidx, exist := zd.OwnerIndex[nsname]
 			if !nameExistsFrom(snap, nsname) {
 				continue // nameserver is out of bailiwick
