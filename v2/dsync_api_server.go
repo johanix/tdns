@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -235,7 +236,7 @@ func dsyncApiCredentialFrom(r *http.Request) *DsyncApiCredential {
 // The nearest hosted ancestor wins. One listener can front many parents, and
 // the child name is what says which.
 func dsyncApiParentZone(child string) (*ZoneData, error) {
-	child = strings.ToLower(dns.Fqdn(strings.TrimSpace(child)))
+	child = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(child)))
 
 	labels := dns.SplitDomainName(child)
 	// i starts at 1: labels[0:] would be the child itself.

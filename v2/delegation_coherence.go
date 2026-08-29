@@ -6,9 +6,9 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -162,10 +162,10 @@ func childrenWithDSChanges(parent string, actions []dns.RR) []string {
 			continue
 		}
 		name := dns.Fqdn(h.Name)
-		if !dns.IsSubDomain(parent, name) || strings.EqualFold(name, parent) {
+		if !dns.IsSubDomain(parent, name) || core.EqualNames(name, parent) {
 			continue
 		}
-		key := strings.ToLower(name)
+		key := core.CanonicalizeName(name)
 		if seen[key] {
 			continue
 		}

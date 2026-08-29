@@ -12,8 +12,15 @@ import (
 	"github.com/miekg/dns"
 )
 
+// NSInBailiwick reports whether a nameserver name lies inside zone, and so
+// needs glue.
+//
+// dns.IsSubDomain, not strings.HasSuffix: the latter compares bytes, so it is
+// case-sensitive and blind to label boundaries -- it called ns.evilexample. in
+// bailiwick for example., which on the CSYNC path meant looking for glue that
+// does not exist and treating a sibling's nameserver as ours.
 func NSInBailiwick(zone string, ns *dns.NS) bool {
-	return strings.HasSuffix(ns.Ns, zone)
+	return dns.IsSubDomain(zone, ns.Ns)
 }
 
 func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*ChildDelegationData, error) {
