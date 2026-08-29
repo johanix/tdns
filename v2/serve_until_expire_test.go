@@ -244,14 +244,23 @@ func TestUpdateSharesTheQueryPredicate(t *testing.T) {
 		registerZones(t, zd)
 		zd.SetError(RefreshError, "SOA probe failed")
 
-		// What the update does afterwards is the update path's business
-		// (policy, TSIG/SIG(0), the update queue). The Stage 1 assertion
-		// is only that it got past the have-data guard, whose refusal is
-		// SERVFAIL + EDEZoneNotFound.
+		// Asserted positively, on where the request ENDED UP rather than
+		// on where it did not: this zone sets no allow-updates option, so
+		// reaching the update-policy check answers REFUSED +
+		// EDEZoneUpdatesNotAllowed, and getting that answer is proof the
+		// have-data guard (SERVFAIL + EDEZoneNotFound) was passed. A
+		// negative "not SERVFAIL+EDEZoneNotFound" would also accept a
+		// SERVFAIL carrying some other EDE.
+		//
+		// The policy layer's particular answer is incidental to Stage 1.
+		// If it changes, update the expectation -- the claim being made
+		// here is only that the request got past the guard.
 		got := update(t, "example.")
-		if got.Rcode == dns.RcodeServerFailure && hasEDE(got, edns0.EDEZoneNotFound) {
-			t.Error("UPDATE refused by the have-data guard on a zone that holds a " +
-				"published copy; the query path answers for this zone")
+		if got.Rcode != dns.RcodeRefused || !hasEDE(got, edns0.EDEZoneUpdatesNotAllowed) {
+			t.Errorf("rcode %s (EDEZoneUpdatesNotAllowed=%v), want REFUSED from the "+
+				"update-policy check; a zone holding a published copy must reach it, "+
+				"and the query path answers for this zone",
+				dns.RcodeToString[got.Rcode], hasEDE(got, edns0.EDEZoneUpdatesNotAllowed))
 		}
 	})
 }

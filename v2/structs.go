@@ -497,7 +497,7 @@ type ZoneConf struct {
 	Error         bool      // zone is broken and cannot be used
 	ErrorType     ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
 	ErrorMsg      string    // reason for the error (if known)
-	RefreshCount  int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	RefreshCount  int       // times initialLoadZone loaded the zone (0 or 1); NOT a have-data test, see ZoneData.RefreshCount
 	SourceCatalog string    // if auto-configured, which catalog zone created this zone
 	// ApiManaged marks a zone created/managed via the dynamic-zones API (zone
 	// add/delete/modify). Persisted so OptApiManagedZone can be re-derived on
