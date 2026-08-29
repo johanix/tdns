@@ -8,9 +8,11 @@ default ON; F2: materialize+swap for v1). **Re-audited 2026-08-29 against main
 §4.1 is rewritten — the refresh path does SOA-probe before
 `FetchFromUpstream`, which the earlier text denied, and since
 `2026-08-28-secondary-serve-until-expire.md` Stage 2 that probe carries the
-zone's SOA EXPIRE clock. Implementing the old
-§4.1 literally would have taken stable zones dark against healthy primaries.
-Ready to implement once §4.1's choice is made.
+zone's SOA EXPIRE clock. Implementing the old §4.1 literally would have taken
+stable zones dark against healthy primaries. **Decided 2026-08-29: the probe
+stays** (§4.1), `force` uses AXFR (§4.1), and a step that leaves an RRset
+unsigned aborts to AXFR (§4.4). With those recorded and §4.4's apply-model gaps
+closed, this is ready to implement.
 Onward-relay of inbound deltas to further downstreams is now **in scope for the
 non-signing case** — the serial-mirror fix in [[secondary-zones-immutable]]
 collapses the inbound/outbound serial spaces, making an inbound delta a verbatim
@@ -112,16 +114,28 @@ did not, and are updated. One design paragraph did not survive at all — see
 Per upstream attempt, choose the transfer type:
 
 ```
-useIxfr := zd.requestIxfr()            // F1: per-zone option, default per fork
+useIxfr := zd.requestIxfr()            // F1: per-zone option, default ON
           && zd.IncomingSerial != 0    // have a serial to ask from
           && zd.publishedSnapshot() != nil  // have a baseline to apply onto
+          && !force                    // a forced retransfer means AXFR; see below
 ```
 
-`--via axfr` behavior is the current code path, unchanged. When `useIxfr`, take
-the new path in §4.2–4.4; on ANY failure there, fall back to a plain AXFR
+With `request-ixfr` off the current code path runs unchanged. When `useIxfr`,
+take the new path in §4.2–4.4; on ANY failure there, fall back to a plain AXFR
 attempt against the *same* upstream before advancing to the next upstream
 (fallback is not a per-upstream failure — the upstream answered, we just
 couldn't use the delta).
+
+**`force` means AXFR. DECIDED 2026-08-29.** `Refresh` calls `FetchFromUpstream`
+when `do_transfer || force`, and `shouldDiscardUnchangedTransfer`
+(`v2/zone_utils.go:739`) exempts `force` from the unchanged-serial discard —
+that is how a wedged downstream gets the current serial re-fetched. An IXFR
+asking from our own serial is, by RFC 1995, answered with a single SOA: the
+up-to-date reply. Treating that as §4.2's no-op ignores the forced retransfer,
+and feeding it through the AXFR apply (`SortFunc` into an emptied `Data`, then
+swap) publishes a zone consisting of one SOA. Neither is acceptable, and the
+question does not arise if `force` never asks for a delta — a forced retransfer
+wants the whole zone, which is what AXFR is.
 
 **The refresh path DOES SOA-probe before `FetchFromUpstream`, and the probe now
 carries the zone's expire clock.** The earlier version of this paragraph said
@@ -144,23 +158,32 @@ and answering. That is the exact failure the expire work exists to prevent,
 reintroduced from the other side, and no test in the suite would catch it --
 nothing waits out an expire interval.
 
-So C2 has a choice, and it must make it explicitly:
+**DECIDED 2026-08-29: the probe stays.** `DoTransfer` runs exactly as today and
+decides whether to transfer; C2 changes only what the transfer itself is. Four
+consequences, all of which shrink this project:
 
-- **Keep the probe** (smallest change). `DoTransfer` runs as today and decides
-  whether to transfer; C2 changes only what the transfer itself is. The IXFR
-  request then re-asks a question already answered, which is one wasted round
-  trip per changed zone and no correctness cost.
-- **Fold the probe into the IXFR request** (what the original paragraph wanted).
-  Then the up-to-date reply -- a single SOA from the primary -- IS a usable SOA
-  and **must** call `noteSuccessfulRefresh`, as must the delta path once the
-  stream is accepted. Nothing else in the expire design needs to change: the
-  stamp is about the primary being alive, not about how we asked.
+- **`Refresh`'s control flow does not change.** C2 edits `FetchFromUpstream`
+  and `ZoneTransferIn`. It does not touch the `do_transfer || force` decision,
+  and it must not remove or bypass `DoTransfer` for `request-ixfr` zones.
+- **C2 does no expire wiring at all.** The confirmations stay where #430 put
+  them. §11's "~20 / ~120 if the probe is folded" does not apply.
+- **The IXFR up-to-date reply is not the steady-state path.** An unchanged
+  serial never reaches `FetchFromUpstream`, so a quiet zone re-confirms through
+  the probe and never sends an IXFR at all. §4.2's single-SOA row is reachable
+  only when the serial moved back, or changed between probe and request
+  (multi-primary, or a primary rolled back) — a race, not the common case. Do
+  not add a stamp there "for safety": it would mask a future fold, which is
+  precisely the regression this section exists to prevent.
+- **Cost is one redundant round trip per *changed* zone.** The probe answers
+  "has the serial moved", the IXFR then re-asks it implicitly. Only zones that
+  actually changed pay it.
 
-Either is defensible. What is not defensible is dropping the probe and leaving
-the stamp behind, which is what implementing the previous text literally would
-have done. Whichever is chosen, the acceptance sketch (§10) needs a case for it:
-a zone whose serial never moves must still re-confirm, and must still be
-answering after more than one SOA EXPIRE has passed.
+Folding the probe into the IXFR request stays available as a later
+optimisation. It is a control-flow change to the function #430 just finished,
+not an IXFR feature, and it must arrive with the expire tests attached — the
+up-to-date reply and the delta path would both have to call
+`noteSuccessfulRefresh`. Anyone attempting it should read §10's
+serial-never-moves case first.
 
 ### 4.2 Client-side classification
 
@@ -170,7 +193,7 @@ classifies (this buffering is IXFR-only; AXFR keeps streaming):
 
 | Observed | Meaning | Action |
 |---|---|---|
-| exactly 1 RR, an SOA | up-to-date (server serial ≤ ours) | no-op refresh |
+| exactly 1 RR, an SOA | up-to-date (server serial ≤ ours) | no-op refresh — see below, this is a race, not the steady state |
 | `!IsIxfr(rrs)` (SOA, then non-SOA … SOA) | server fell back to a full zone (RFC 1995 §4) | apply as AXFR: run the collected RRs through `SortFunc` into `new_zd.Data`, then the normal swap |
 | `IsIxfr(rrs)` (SOA, SOA, …) | real delta | parse §4.3, apply §4.4 |
 
@@ -178,6 +201,26 @@ The full-zone case means a non-tdns (or unwilling) primary answered our IXFR
 with an AXFR — fully RFC-compliant and requiring zero delta logic: it reuses the
 existing apply verbatim. This is the most important fallback and the cheapest to
 get right.
+
+**The up-to-date row is rare by construction** (§4.1): the probe already
+filtered out unchanged serials, and `force` never asks for a delta. It is
+reachable only when the serial moved back or changed between probe and request.
+It is NOT how a quiet zone re-confirms, and must not stamp.
+
+**`ZoneTransferIn` needs a third outcome, and its current contract has no room
+for one.** Today it wipes `zd.Data` (`v2/dnsutils.go:173-175`), drains through
+`SortFunc`, and returns `(serial, error)` — so every non-error return means "a
+zone body was received, decide whether to swap it". The IXFR branch must not
+share that drain, and up-to-date must not look like an empty zone.
+
+Specify: the IXFR path collects `[]dns.RR` without touching `zd.Data`, and
+returns an outcome distinct from both error and zone-received. `FetchFromUpstream`
+turns up-to-date into the existing no-op (restore `prevStatus`, return
+`false, nil`); delta and full-zone fill `new_zd` and continue into the common
+tail (`gateIncomingZonemd`, swap, and the post-transfer `noteSuccessfulRefresh`
+in `Refresh`). Do not signal up-to-date with a sentinel error — the upstream
+loop reads any error as "try the next primary" and would walk the whole list
+over a perfectly good answer.
 
 ### 4.3 Difference-sequence parser
 
@@ -216,16 +259,45 @@ routing at apply time.
 The delta must be applied onto our *current* content, but the existing refresh
 builds `new_zd` from scratch. v1 bridges cleanly (F2 records the alternative):
 
-1. Materialize the current published snapshot into `new_zd.Data`: for every
-   owner, a fresh `OwnerData` with `cloneRRset`'d RRsets (so applying deltas
-   never mutates the live, shared, immutable snapshot stores).
+1. Materialize the current published snapshot into `new_zd.Data`, **using the
+   existing owner copier** — `cloneOwner` (`v2/zone_mutation.go:~50`), not a
+   third one written here. A fresh `OwnerData` with `cloneRRset`'d RRsets is
+   NOT enough: `OwnerData.NSEC` is a field beside `RRtypes`, not an entry
+   inside it (`v2/structs.go:855`, and `cloneOwner` carries a comment saying
+   rebuilding an owner from its RRtypes alone "would drop the chain entry
+   silently"). An RRtypes-only materialize therefore publishes a signed zone
+   with no denial chain — and §1 does not save it, because the apply
+   SUCCEEDED: there is no error to fall back from, and resolvers see BOGUS.
+   The copy must be deep, for the reason `cloneOwner` already gives: the live
+   snapshot is shared and signing rewrites TTLs in place.
 2. For each `ixfrStep` in order: apply `removed` (delete the exact matching RR
    from its owner/type RRset; drop the RRset when empty — RFC 1995 delete is
    RFC 2136 §2.5.4 delete-exact-RR semantics, reusing `RRset.RemoveRR`), then
    apply `added` (append the RR, routing RRSIGs to `.RRSIGs`). Advance the
    running serial to `step.to`.
-3. Set `new_zd.IncomingSerial = new_zd.CurrentSerial = S`, then hand `new_zd` to
-   the **same** `applyRefreshReplacementLocked` the AXFR path uses. Snapshot
+
+   **Deletes must be routed exactly as `SortFunc` routes adds.** `RemoveRR`
+   (`v2/core/rrset_utils.go:256`) searches `rrset.RRs` and nothing else, while
+   RRSIGs live in `.RRSIGs` and the denial record in `OwnerData.NSEC`. Handing
+   it an RRSIG or NSEC delete finds nothing, which step 2's own rule classifies
+   as "delete of a non-existent RR" — so every signed-zone IXFR would abort to
+   AXFR and the feature would quietly do nothing for exactly the zones it
+   matters most for. Route by `TypeCovered` for RRSIG and to `OwnerData.NSEC`
+   (and its `.RRSIGs`) for NSEC, on the delete side as well as the add side.
+3. **Replace the apex SOA RR in `new_zd.Data` with the trailing bookend
+   `SOA(S)`** (routing its RRSIGs the way `SortFunc` would), then set
+   `new_zd.IncomingSerial = new_zd.CurrentSerial = S`, then hand `new_zd` to
+   the **same** `applyRefreshReplacementLocked` the AXFR path uses.
+
+   The replacement is not optional and is easy to miss: §4.3 treats
+   section-boundary SOAs as delimiters rather than as members of a del/add
+   section, which is correct for RFC 1995 — and leaves the SOA RR sitting in
+   `Data` at whatever serial the snapshot was materialized with. The publish
+   builds its snapshot from `Data`, so without this the zone is served with the
+   OLD SOA while `CurrentSerial` says `S`. The serial-mirror drift check
+   (`v2/zone_mutation.go:597`) fires on exactly that mismatch, and any
+   downstream would be handed a SOA that disagrees with the IXFR brackets we
+   are about to append to the outbound chain (§5). Snapshot
    correctness, re-signing (for signing secondaries), persistence, and the
    Ready flip all come for free and identically to AXFR.
 
@@ -245,9 +317,15 @@ hole in its DNSSEC coverage.
 Worth calling out separately because §1's invariant HIDES it. A wrong delete
 aborts to AXFR and self-heals loudly; silently dropping signatures aborts
 nothing, so the failure surfaces as validation failures at resolvers rather
-than as a fallback in our own logs. Decide during implementation whether the
-apply path re-attaches signatures itself or refuses a sequence that would leave
-an RRset unsigned.
+than as a fallback in our own logs.
+
+**DECIDED 2026-08-29: leftover-unsigned aborts.** After each step, an RRset
+that still has RRs and now has no RRSIGs, where the copy materialized in step 1
+had them, is an apply failure → AXFR fallback. That is §1's rule applied
+unchanged: any doubt costs a wasteful full transfer and never a wrong local
+zone. Re-attaching signatures from the add section instead would be a second
+design — it has to decide what to do when the delta legitimately removes the
+last signature — and it is not this project.
 
 The matching itself is fine: `RemoveRR` compares through `core.IsDuplicate` →
 `dns.IsDuplicate`, which is canonical and case-insensitive, and was unaffected
@@ -392,13 +470,13 @@ signing/staging-apply variant remains a later PR.
 - up-to-date IXFR is a clean no-op (no swap, no serial change, status restored).
 - AXFR-only zones and the existing AXFR path show zero behavioral change.
 - **A zone whose serial never moves keeps re-confirming.** Point a secondary at
-  a primary that answers up-to-date every cycle, and it must still be answering
-  after more than one SOA EXPIRE has elapsed — i.e. each up-to-date cycle
-  advanced `LatestRefresh`. This is the case §4.1 can break silently: if the
-  SOA probe is folded into the IXFR request and the up-to-date reply does not
-  stamp, the zone goes dark against a primary that is healthy and answering.
-  Not covered by convergence testing, because nothing converges — the serial
-  never moves.
+  a primary whose serial never changes; it must still be answering after more
+  than one SOA EXPIRE has elapsed. With the probe kept (§4.1) this is already
+  #430's behaviour and #430's coverage, so C2 owns it only as a regression
+  guard: enabling `request-ixfr` must not change it. It is listed here because
+  it is the case that would break silently if the probe were ever folded into
+  the IXFR request, and because convergence testing cannot see it — nothing
+  converges, the serial never moves.
 
 ## 11. Size
 
@@ -447,12 +525,10 @@ RRset's whole RRSIG list on any successful removal. That is the failure mode
 heals loudly, whereas dropped signatures abort nothing and surface as
 validation failures at resolvers.
 
-**If §4.1's probe is folded into the IXFR request, add the expire wiring.**
-Stamping `noteSuccessfulRefresh` on the up-to-date and delta paths is a handful
-of production lines; the tests are not. Proving that a zone whose serial never
-moves still re-confirms, and still answers after more than one SOA EXPIRE has
-passed, needs a fixture the suite does not have. Budget ~20 production / ~120
-test on top of the table. Keeping the probe costs nothing here.
+**~~If §4.1's probe is folded, add the expire wiring.~~** *Moot: §4.1 decided
+2026-08-29 to keep the probe*, so C2 does no expire wiring at all and the table
+stands as written. The estimate carried ~20 production / ~120 test for the
+folded variant; that belongs to whoever attempts the fold later, not here.
 
 The largest and least certain single number is the §5 onward-relay test: three
 tdns instances (primary → non-signing secondary → edge), asserting that the
