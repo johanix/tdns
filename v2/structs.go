@@ -216,12 +216,7 @@ type ZoneData struct {
 	// emitted for, so a primary publishing a nonsensical EXPIRE is reported
 	// once per copy rather than once per query. See effectiveExpire.
 	expireClampLoggedSerial uint32
-	// lastFileVerdict is what CompareZoneFileDigest said about the file the
-	// most recent FetchFromFile parsed: is this the file whose identity we
-	// recorded? Used when restoring a persisted refresh confirmation, which
-	// must not be trusted for a file that was replaced underneath it.
-	lastFileVerdict ZoneFileVerdict
-	SourceCatalog   string // if auto-configured, which catalog zone created this zone
+	SourceCatalog           string // if auto-configured, which catalog zone created this zone
 	// ParentDSTTLObserved is the most recent TTL observed on the parent's
 	// DS RRset (seconds). Refreshed by every successful QueryParentAgentDS
 	// call. Zero means "not yet observed" — the E10 cache-flush invariant

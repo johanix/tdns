@@ -268,13 +268,9 @@ func (zd *ZoneData) publishedSnapshot() *zoneSnapshot {
 //
 // NOTE: holding data is not the same as being entitled to serve it. RFC 1034
 // section 4.3.5 says a secondary stops answering once SOA EXPIRE has elapsed
-// since its last successful refresh, and nothing enforces that yet -- a
-// secondary whose primary never returns will serve its copy indefinitely.
-// That is Stage 2 of docs/2026-08-28-secondary-serve-until-expire.md: adopt
-// the persisted copy at first bind, persist a confirmation timestamp, then
-// compare against it here. Until that lands this predicate is deliberately
-// too permissive, which is the safe direction; what it replaces was too
-// strict in the unsafe one.
+// since its last successful refresh; that is a separate question, asked
+// separately by HasExpired(). Every call site that consults this predicate
+// consults that one too.
 func (zd *ZoneData) HasPublishedData() bool {
 	return zd.publishedSnapshot() != nil
 }

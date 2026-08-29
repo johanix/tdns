@@ -111,8 +111,8 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		// SERVFAIL when there is nothing to answer from. RefreshError
 		// alone does not qualify: a zone that holds data is still
 		// authoritative for its current contents even when the last
-		// refresh failed. See HasPublishedData -- expire is not
-		// enforced yet, so this errs permissive.
+		// refresh failed -- until SOA EXPIRE, which the next guard
+		// enforces.
 		if !zd.HasPublishedData() {
 			lgHandler.Warn("zone holds no published data", "qname", qname, "zone", zd.ZoneName)
 			m := new(dns.Msg)

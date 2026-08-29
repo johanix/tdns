@@ -172,6 +172,15 @@ func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, con
 				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
 			}
+			// Re-stamp, now that IncomingSerial names the copy we actually
+			// hold. DoTransfer stamped the serial we held at probe time, which
+			// is the right answer if the transfer then fails -- we keep that
+			// copy and the primary was alive. Once the transfer succeeds it is
+			// the wrong answer: the row would describe a copy that no longer
+			// exists, and the identity check at the next first bind would
+			// discard a perfectly good confirmation and restart the whole
+			// expire budget from load time.
+			zd.noteSuccessfulRefresh(zd.IncomingSerial)
 			return updated, nil // zone updated, no error
 		}
 
@@ -580,14 +589,6 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 			verdict = ZoneFileUnknown
 		}
 	}
-
-	// Keep the verdict: restoreRefreshStateAtFirstBind needs to know whether
-	// the file just adopted is the one whose identity was recorded, and this
-	// is where that question is already answered. Recomputing it there would
-	// mean re-parsing the file.
-	zd.mu.Lock()
-	zd.lastFileVerdict = verdict
-	zd.mu.Unlock()
 
 	// A load that has published nothing must adopt the file whatever the
 	// verdict says. "Unchanged" means the file is what the ZONE ALREADY HAS,

@@ -140,6 +140,7 @@ func (zd *ZoneData) noteSuccessfulRefresh(serial uint32) {
 		return
 	}
 	now := time.Now()
+	serial = zd.servedSerial(serial)
 
 	zd.mu.Lock()
 	zd.LatestRefresh = now
@@ -167,6 +168,23 @@ func (zd *ZoneData) noteSuccessfulRefresh(serial uint32) {
 // that was used before -- and an expire budget measured against the wrong copy
 // is worse than none, because it can be arbitrarily far in the past.
 //
+// The serial, and not also the recorded ZONEMD identity, though the brief asks
+// for both. The identity would catch the one case a serial cannot -- a file
+// regenerated or restored reusing the serial it had -- but it is not maintained
+// on this path: WriteZone records the file it writes, and
+// WriteDynamicZoneFile, which is what the refresh engine calls for a
+// persistable dynamic zone, does not. So the record a restarted secondary
+// finds describes some earlier read of the file, not the copy the engine last
+// wrote, and consulting it would report ZoneFileChanged on essentially every
+// restart that followed a content-changing transfer -- discarding a
+// confirmation we genuinely have, which is the case this whole feature exists
+// to preserve. Wrong in the permissive direction, but wrong every time.
+//
+// Making WriteDynamicZoneFile record identity the way WriteZone does is the
+// fix that would let the digest back in. It also changes what the journal
+// reconciliation decides on the next load, so it is its own change with its
+// own analysis, not a line to add here.
+//
 // Anything short of a match falls back to Option 3: start the clock now, and
 // say so. That can serve past the true expire by up to one expire interval,
 // which is a real deviation from RFC 1034 §4.3.5 and the reason it is logged
@@ -188,10 +206,7 @@ func (zd *ZoneData) restoreRefreshStateAtFirstBind() {
 		fallback("no database")
 		return
 	}
-	zd.mu.Lock()
-	verdict := zd.lastFileVerdict
-	zd.mu.Unlock()
-
+	loaded := zd.servedSerial(zd.IncomingSerial)
 	st, ok, err := zd.KeyDB.GetZoneRefreshState(zd.ZoneName)
 	switch {
 	case err != nil:
@@ -200,16 +215,8 @@ func (zd *ZoneData) restoreRefreshStateAtFirstBind() {
 	case !ok:
 		fallback("no record")
 		return
-	case verdict == ZoneFileChanged:
-		// The file is not the one whose identity was recorded, so the
-		// confirmation is about content we no longer hold. The serial cannot
-		// see this on its own: a zone file can be regenerated, or restored
-		// from a backup, reusing the serial it had. That is precisely what
-		// the recorded digest exists to catch.
-		fallback("the zone file changed since its identity was recorded")
-		return
-	case st.Serial != zd.IncomingSerial:
-		fallback(fmt.Sprintf("recorded for serial %d, loaded copy is serial %d", st.Serial, zd.IncomingSerial))
+	case st.Serial != loaded:
+		fallback(fmt.Sprintf("recorded for serial %d, loaded copy is serial %d", st.Serial, loaded))
 		return
 	}
 
@@ -218,6 +225,22 @@ func (zd *ZoneData) restoreRefreshStateAtFirstBind() {
 	zd.mu.Unlock()
 	lg.Info("restored refresh confirmation for the loaded copy",
 		"zone", zd.ZoneName, "serial", st.Serial, "lastConfirmed", st.LastConfirmed.UTC().Format(time.RFC3339))
+}
+
+// servedSerial is the serial of the copy we serve, which is the serial that
+// lands in the zone file when it is persisted -- and therefore the serial the
+// next process reads back when it adopts that file.
+//
+// Not IncomingSerial. For a mirroring (non-signing) secondary the two are the
+// same by construction, but a secondary that re-signs carries its own outbound
+// serial, and matching the upstream's serial against a file that holds the
+// outbound one would discard every confirmation it ever recorded. The stamp
+// and the check both go through here so they compare like with like.
+func (zd *ZoneData) servedSerial(fallback uint32) uint32 {
+	if snap := zd.publishedSnapshot(); snap != nil && snap.SOA != nil {
+		return snap.SOA.Serial
+	}
+	return fallback
 }
 
 // effectiveExpire is the SOA EXPIRE this zone is actually held to, which is not

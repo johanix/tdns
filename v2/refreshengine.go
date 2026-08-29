@@ -116,6 +116,21 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 				zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", cerr)
 				zd.LatestError = time.Now()
 			}
+			// And install the real refresh interval, for the same reason. The
+			// success path below does this; a zone that adopted a copy has an
+			// SOA to read it from, and first-load is already spent, so nothing
+			// will come back for it later. Without this the caller's
+			// "no counter yet" fallback pins the zone at a 300s probe for the
+			// life of the process instead of its own SOA REFRESH.
+			if refresh, ferr := FindSoaRefresh(zd); ferr != nil {
+				lgEngine.Warn("FindSoaRefresh failed for an adopted copy", "zone", zone, "error", ferr)
+			} else {
+				refreshCounters.Set(zone, &RefreshCounter{
+					Name:       zone,
+					SOARefresh: refresh,
+					CurRefresh: refresh,
+				})
+			}
 		}
 		return false, err
 	}

@@ -10,8 +10,11 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +33,14 @@ www.example.	3600	IN	A	10.0.0.3
 // derivation) requires.
 func persistentConf(t *testing.T, kdb *KeyDB) (*Config, string) {
 	t.Helper()
+	// tdns-auth, because that is the only app type the expire guard applies to
+	// -- and because the app type also decides whether publishing bumps the
+	// serial. zoneMayOriginateContent is true for every app type other than
+	// tdns-auth, so a fixture left on the zero value would publish its
+	// secondary with a bumped outbound serial, which a mirroring secondary
+	// must never do. The stamp is matched against the serial in the file, so
+	// getting that wrong makes every restore look like a mismatch.
+	authApp(t)
 	dir := t.TempDir()
 	conf := &Config{}
 	conf.DynamicZones.ZoneDirectory = dir
@@ -524,21 +535,29 @@ www.example.	3600	IN	A	10.0.0.3
 	}
 }
 
-// TestRestoreRejectsAStampForAReplacedFile: the serial cannot see a zone file
-// that was regenerated, or restored from a backup, reusing the serial it had.
-// That is what the recorded content digest is for, and the confirmation must
-// not be trusted across it.
-func TestRestoreRejectsAStampForAReplacedFile(t *testing.T) {
+// TestRestoreIgnoresTheRecordedFileIdentity documents a deliberate gap rather
+// than a behaviour worth having.
+//
+// The brief wants the confirmation checked against the recorded ZONEMD identity
+// as well as the serial, to catch a file regenerated or restored reusing its
+// serial. That check is not made, because the identity is not maintained on
+// this path: WriteDynamicZoneFile, which is what the refresh engine calls for a
+// persistable dynamic zone, does not record what it writes. Consulting a stale
+// record would reject a good confirmation on every restart after a
+// content-changing transfer.
+//
+// So: a stale, mismatched file identity does NOT stop the stamp being restored,
+// and this test exists to fail loudly if WriteDynamicZoneFile ever starts
+// recording -- at which point the digest check should come back.
+func TestRestoreIgnoresTheRecordedFileIdentity(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	conf, dir := persistentConf(t, kdb)
 	hourAgo := time.Now().Add(-time.Hour).UTC().Truncate(time.Millisecond)
 
-	// A stamp that matches the serial we are about to load...
 	if err := kdb.SetZoneRefreshState("example.", 7, hourAgo); err != nil {
 		t.Fatalf("seed stamp: %v", err)
 	}
-	// ...but a recorded file identity that does not match the file's content,
-	// which is what a regenerated or restored file looks like.
+	// A recorded identity that does not describe the file on disk.
 	if err := kdb.SetZoneFileState("example.", 7, "00000000000000000000000000000000"); err != nil {
 		t.Fatalf("seed file state: %v", err)
 	}
@@ -547,14 +566,13 @@ func TestRestoreRejectsAStampForAReplacedFile(t *testing.T) {
 	_, _ = zd.Refresh(context.Background(), false, false, false, conf)
 
 	if zd.publishedSnapshot() == nil {
-		t.Fatal("precondition: the copy should still be adopted; only the stamp is in doubt")
+		t.Fatal("precondition: the copy should be adopted")
 	}
-	if zd.LatestRefresh.Equal(hourAgo) {
-		t.Error("a confirmation recorded against different file content was applied; " +
-			"the serial matched, which is exactly the case the digest exists to catch")
-	}
-	if zd.LatestRefresh.IsZero() {
-		t.Error("no fallback clock started")
+	if !zd.LatestRefresh.Equal(hourAgo) {
+		t.Errorf("LatestRefresh = %v, want the recorded %v. If this now fails "+
+			"because the identity was consulted, WriteDynamicZoneFile has "+
+			"presumably started recording -- restore the digest check in "+
+			"restoreRefreshStateAtFirstBind.", zd.LatestRefresh, hourAgo)
 	}
 }
 
@@ -615,9 +633,245 @@ func TestFirstBindCompletesEvenWhenTheTransferFails(t *testing.T) {
 	if zd.FirstZoneLoad {
 		t.Error("FirstZoneLoad still set after the copy was adopted")
 	}
-	// The completion step ran: OnFirstLoad is drained rather than retained.
-	if hasPendingOnFirstLoad(zd) {
-		t.Error("first-bind completion did not run for the adopted copy; the zone " +
-			"would serve without ever being policy-bound or drained")
+
+	// Ready is the discriminator, and it has to be: FirstZoneLoad is cleared
+	// by the adoption itself, and hasPendingOnFirstLoad is vacuously false for
+	// a fixture that registered no callbacks -- neither would notice the
+	// completion being skipped. InstallInitialSnapshot, the first thing
+	// completeFirstZonePolicyAndLoad does, is what flips Ready on an
+	// already-published zone, so this fails if the call goes away.
+	if !zd.Ready {
+		t.Error("zone is not Ready: the first-bind completion did not run for the " +
+			"adopted copy, so it would serve without ever being policy-bound, " +
+			"replayed or drained -- for the life of the process")
+	}
+	if got := zd.GetStatus(); got != ZoneStatusReady {
+		t.Errorf("status %v, want ZoneStatusReady", got)
+	}
+
+	// And the ticker got the zone's own refresh interval rather than the
+	// caller's 300s "no counter yet" fallback.
+	if refresh, err := FindSoaRefresh(zd); err != nil {
+		t.Errorf("FindSoaRefresh on the adopted copy: %v", err)
+	} else if refresh == 0 {
+		t.Error("no SOA refresh derivable from the adopted copy")
+	}
+}
+
+// startTestPrimary serves one zone as a real primary would: SOA over UDP,
+// which is what DoTransfer's probe uses, and AXFR over TCP, which is what
+// ZoneTransferIn uses -- both on the same address, which is the reason this
+// exists. The two harnesses already in the tree do one or the other, so
+// nothing could previously drive a secondary through probe-then-transfer.
+//
+// The served ZoneData is deliberately NOT registered in the global Zones map:
+// the secondary under test carries the same name, and registering both would
+// have one shadow the other.
+func startTestPrimary(t *testing.T, zoneStr string) (string, func()) {
+	t.Helper()
+	pzd := &ZoneData{
+		ZoneName:  "example.",
+		ZoneStore: MapZone,
+		ZoneType:  Primary,
+		Logger:    discardLogger(),
+		Ready:     true,
+		Status:    ZoneStatusReady,
+		// Without a downstream ACL every transfer-out is REFUSED, which is
+		// the correct default and not what this fixture is testing.
+		Downstreams: []AclEntry{{Prefix: "127.0.0.0/8", Key: NOKEY}},
+	}
+	if _, _, err := pzd.ReadZoneData(zoneStr, true); err != nil {
+		t.Fatalf("primary ReadZoneData: %v", err)
+	}
+	pzd.InstallInitialSnapshot()
+	t.Cleanup(pzd.stopPublisher)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		ln.Close()
+		t.Fatalf("listen udp on the tcp port: %v", err)
+	}
+
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+	mux := dns.NewServeMux()
+	mux.HandleFunc("example.", func(w dns.ResponseWriter, r *dns.Msg) {
+		if len(r.Question) == 1 {
+			switch r.Question[0].Qtype {
+			case dns.TypeAXFR, dns.TypeIXFR:
+				_, _ = pzd.ZoneTransferOut(srvCtx, w, r, nil)
+				return
+			}
+		}
+		m := new(dns.Msg)
+		m.SetReply(r)
+		if soa, err := pzd.GetSOA(); err == nil && soa != nil {
+			m.Answer = append(m.Answer, soa)
+		}
+		_ = w.WriteMsg(m)
+	})
+
+	var started sync.WaitGroup
+	started.Add(2)
+	tcpSrv := &dns.Server{Listener: ln, Handler: mux, MsgAcceptFunc: MsgAcceptFunc,
+		NotifyStartedFunc: started.Done}
+	udpSrv := &dns.Server{PacketConn: pc, Handler: mux, NotifyStartedFunc: started.Done}
+	go func() { _ = tcpSrv.ActivateAndServe() }()
+	go func() { _ = udpSrv.ActivateAndServe() }()
+
+	done := make(chan struct{})
+	go func() { started.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("test primary did not start")
+	}
+
+	return ln.Addr().String(), func() {
+		srvCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = tcpSrv.ShutdownContext(ctx)
+		_ = udpSrv.ShutdownContext(ctx)
+	}
+}
+
+// TestFirstBindTransferReplacesTheAdoptedCopy is the §7 case the first cut of
+// this PR could not reach, and it carries the regression test for the stamp
+// serial with it.
+//
+// The zone adopts serial 7 off disk, then transfers serial 8. Two things must
+// be true afterwards, and the second is the one that was wrong: the zone must
+// serve the transferred copy, and the persisted confirmation must describe
+// THAT copy. DoTransfer stamps the serial held at probe time -- correct when
+// the transfer then fails -- so without re-stamping after FetchFromUpstream
+// the row says 7 while the zone says 8, and the identity check at the next
+// first bind throws away a confirmation we genuinely have.
+func TestFirstBindTransferReplacesTheAdoptedCopy(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	conf, dir := persistentConf(t, kdb)
+
+	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 8 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+www.example.	3600	IN	A	10.0.0.3
+fresh.example.	3600	IN	A	10.0.0.8
+`
+	addr, stop := startTestPrimary(t, newer)
+	defer stop()
+
+	// A confirmation for the copy on disk, from an hour ago.
+	hourAgo := time.Now().Add(-time.Hour).UTC().Truncate(time.Millisecond)
+	if err := kdb.SetZoneRefreshState("example.", 7, hourAgo); err != nil {
+		t.Fatalf("seed stamp: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "example.zone"), []byte(s2Zone), 0644); err != nil {
+		t.Fatalf("write zone file: %v", err)
+	}
+	zd := &ZoneData{
+		ZoneName: "example.", ZoneStore: MapZone, ZoneType: Secondary,
+		Logger: discardLogger(), KeyDB: kdb,
+		Options:   map[ZoneOption]bool{OptApiManagedZone: true},
+		Upstreams: []PeerConf{{Addr: addr}},
+	}
+	// Registered because publishWorkingSetLocked drops a publish for a zone
+	// that is not live in the Zones map. The primary fixture is deliberately
+	// NOT registered, so there is no collision on the shared name.
+	registerZones(t, zd)
+	t.Cleanup(zd.stopPublisher)
+
+	if _, err := zd.Refresh(context.Background(), false, false, false, conf); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	// The transferred copy is what is served, so adoption did not get in the
+	// way of the transfer that follows it.
+	if zd.IncomingSerial != 8 {
+		t.Errorf("IncomingSerial = %d, want 8 from the transfer", zd.IncomingSerial)
+	}
+	if owner, _ := zd.GetOwner("fresh.example."); owner == nil {
+		t.Error("the transferred copy is not being served; the adopted file copy " +
+			"should have been replaced")
+	}
+
+	// And the stamp describes the copy we now hold.
+	st, ok, err := kdb.GetZoneRefreshState("example.")
+	if err != nil || !ok {
+		t.Fatalf("no confirmation persisted: ok=%v err=%v", ok, err)
+	}
+	if st.Serial != 8 {
+		t.Errorf("stamp serial = %d, want 8: it describes the copy that was "+
+			"transferred, not the one held when the SOA was probed. At the next "+
+			"first bind the identity check would discard this confirmation and "+
+			"restart a full expire budget from load time.", st.Serial)
+	}
+	if !st.LastConfirmed.After(hourAgo) {
+		t.Errorf("LastConfirmed = %v, want a fresh stamp, not the seeded %v",
+			st.LastConfirmed, hourAgo)
+	}
+}
+
+// TestRestartAfterATransferPreservesTheBudget is the §7 line "restart with a
+// persisted timestamp preserves the remaining expire budget", exercised across
+// the case that used to lose it: the last confirmation came with a transfer
+// rather than an unchanged serial.
+func TestRestartAfterATransferPreservesTheBudget(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	conf, dir := persistentConf(t, kdb)
+
+	// Process 1: transfer serial 8, then write the copy to disk as the
+	// refresh engine would.
+	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 8 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+www.example.	3600	IN	A	10.0.0.3
+`
+	addr, stop := startTestPrimary(t, newer)
+	if err := os.WriteFile(filepath.Join(dir, "example.zone"), []byte(s2Zone), 0644); err != nil {
+		t.Fatalf("write zone file: %v", err)
+	}
+	first := &ZoneData{
+		ZoneName: "example.", ZoneStore: MapZone, ZoneType: Secondary,
+		Logger: discardLogger(), KeyDB: kdb,
+		Options:   map[ZoneOption]bool{OptApiManagedZone: true},
+		Upstreams: []PeerConf{{Addr: addr}},
+	}
+	Zones.Set("example.", first)
+	t.Cleanup(func() { Zones.Remove("example.") })
+	if _, err := first.Refresh(context.Background(), false, false, false, conf); err != nil {
+		t.Fatalf("first Refresh: %v", err)
+	}
+	if _, err := first.WriteDynamicZoneFile(dir); err != nil {
+		t.Fatalf("persist the transferred copy: %v", err)
+	}
+	confirmed := first.LatestRefresh
+	first.stopPublisher()
+	stop()
+
+	// Process 2: same database and directory, primary now unreachable.
+	second := &ZoneData{
+		ZoneName: "example.", ZoneStore: MapZone, ZoneType: Secondary,
+		Logger: discardLogger(), KeyDB: kdb,
+		Options:   map[ZoneOption]bool{OptApiManagedZone: true},
+		Upstreams: []PeerConf{{Addr: "127.0.0.1:1"}},
+	}
+	Zones.Set("example.", second) // the restarted process's ZoneData
+	t.Cleanup(second.stopPublisher)
+	_, _ = second.Refresh(context.Background(), false, false, false, conf)
+
+	if second.publishedSnapshot() == nil {
+		t.Fatal("the persisted copy was not adopted")
+	}
+	if !second.LatestRefresh.Equal(confirmed) {
+		t.Errorf("LatestRefresh = %v, want the confirmation carried over from "+
+			"before the restart (%v). Losing it restarts the whole expire "+
+			"budget, so a zone six days into a seven-day EXPIRE serves another "+
+			"seven.", second.LatestRefresh, confirmed)
 	}
 }
