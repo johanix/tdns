@@ -135,7 +135,7 @@ land first, the rest are parallel.
 | 4 | Delegation / childsync / dsync | ~20 | **DONE.** `childsync_utils`, `scanner_csync`, `dsync_api_*`, `delegation_coherence`, `delegation_backend_*`, `config_delegationsync`, `ops_delegation_read` |
 | 5 | Keystore / sign / zonemd | ~20 | **DONE.** `zonemd` canonical ordering, `sign`, `keystore_bulk`, `bind_convert`, `rollover_lock`, plus the two items the series owed |
 | 6 | CLI + debug | ~20 | **DONE.** `cli/*`, `debug/*`, `cmdv2/dog`, plus the `VerifyZonemd` pair carried over from stage 5 |
-| 7 | Enforcement | — | see below |
+| 7 | Enforcement | — | **DONE.** `tools/namecheck`, a parser. Catches all five historical defects; tree passes with an empty allowlist |
 
 ## Enforcement
 
@@ -771,3 +771,212 @@ Pre-existing, none introduced by the series:
 | `nsMap[baseName]` in `ParseAdditionalForNSAddrs` | Per-message set; #421's review said explicitly not to expand into it |
 | `BailiwickNS` / `NSInBailiwick` / `InBailiwick` | Three spellings of one predicate; consolidation is its own change |
 | The `/* */` hole in the site scanner | Stage 7's gate must understand block comments; mine did not |
+
+
+## Addendum, after PR 7 — the gate
+
+`tools/namecheck`, a Go program, `make namecheck`.
+
+**It parses rather than greps, and that is not a stylistic choice.** The four
+defects this series produced all had one shape -- two sides of a pair folded by
+different functions -- and a grep for bad calls would have caught NONE of them,
+because in every case the call it would flag had already been converted. What
+was left was a second, uncoerced half elsewhere. Parsing also makes it immune to
+the `/* */` hole that made my own scan report two commented-out lines as sites.
+
+Three checks:
+
+| Check | What it refuses |
+|---|---|
+| `keyfold` | A map key built by a lossy fold -- as an index, via a local a few statements up, or returned from a helper that manufactures keys. `dns.CanonicalName` rewrites non-UTF-8 octets to U+FFFD; `strings.ToLower` folds U+212A onto `k`. |
+| `namecmp` | `strings.EqualFold` on a domain name, and `strings.HasSuffix` between two of them (blind to label boundaries). |
+| `foldpair` | A value tested through a fold and then acted on unfolded in the same function -- the `_dns.` bug exactly. |
+
+**Validated against the history, not against fixtures alone.** Each of the five
+real defects was reintroduced into the tree and the gate confirmed to report it:
+#417's `zoneNameKey`, #421's prefix strip, #422's DSYNC principal, #423's ZONEMD
+grouping, #424's config-check store side. That check is in the PR description
+and is repeatable.
+
+**The tree passes with an EMPTY allowlist.** The first run found 18 sites the
+six manual stages had missed, all in files no stage owned: the whole TSIG
+keystore (`tsig_keys`, `tsig_keystore`, `tsig_keystore_mgmt`, `tsig_reconcile`,
+`tsig_import`), the scanner's NS sets, `notifyresponder`'s zone check, and
+`core.ExtractDistributionIDFromQNAME`. They are fixed rather than allowlisted: a
+gate that ships with 18 pre-authorised exceptions is a ratchet with no teeth.
+
+`ExtractDistributionIDFromQNAME` was the most interesting of the 18 -- the
+`_dns.` shape a third time. `strings.HasSuffix(qname, zone)` then
+`strings.TrimSuffix(qname, zone)`: case-sensitive, and blind to labels, so
+`evila1b2kdc.example.com.` passed the test for zone `kdc.example.com.` and the
+trim handed back `evila1b2` as a distribution ID from a zone it does not belong
+to.
+
+**Two mistakes made and caught while doing this**, both worth recording because
+they are the same class the series has been about. Replacing
+`dns.CanonicalName(x)` with `core.CanonicalizeName(x)` looks like a rename and
+is not: `dns.CanonicalName` absolutises and `CanonicalizeName` deliberately does
+not, so 38 TSIG folds silently lost their trailing dot and every HMAC algorithm
+stopped resolving. The test suite caught it. The same slip then repeated in the
+NOKEY/BLOCKED sentinel comparison, where `EqualNames(c, NOKEY)` compares a
+folded FQDN against a bare literal and never matches.
+
+An allowlist entry is `path:line: reason` and the reason is mandatory: silencing
+a finding cannot be done without leaving a reason behind.
+
+## Where the series ends
+
+Seven stages, all reviewed. The comparison scan that started at 149 sites is
+not the measure -- much of the work was in indexes, which a comparison scan
+cannot see, and the scan itself over-counted commented-out code. The measure is
+that the gate passes with nothing excused, and that it catches every defect this
+series actually produced.
+
+
+## Review of #425 (external, 2026-08-28)
+
+Verdict: request changes -- two findings, both in files this PR owns. Both
+addressed.
+
+**FINDING 1 — I converted the TSIG map writers and left a SQL one that claimed
+parity with them.** `keystore_bulk.go` still wrote name and algorithm with
+`dns.CanonicalName`, above a comment saying it did it "exactly as
+insertTsigKeystore/updateTsigKeystore do" -- true when written, false the moment
+this commit moved those two.
+
+The sharp part is the review's: **the gate could not see it.** A SQL bind is not
+a map key. An empty allowlist was not evidence that site was fine, and I had
+presented it as though it were.
+
+Fixed by extracting `tsigKeyKey`, a NAMED function every TSIG writer and reader
+now calls -- 41 sites. That turns an inline expression which could not be tested
+and could not be seen into one the gate's return-check does see and a unit test
+can call. Two writers that must agree should call one function, so that "do they
+still agree?" has an answer.
+
+**FINDING 2 — `ExtractDistributionIDFromQNAME` had no test.** Now covered in
+both directions: `evila1b2kdc.example.com.` against zone `kdc.example.com.` is
+an error, `a1b2.KDC.example.com.` still yields `a1b2`, and the ID keeps its own
+case. Reverting either the `IsSubDomain` test or the slice-by-length extraction
+reddens it.
+
+**A mistake worth recording.** The script that rewrote the 41 sites to
+`tsigKeyKey` also rewrote the body of `tsigKeyKey` itself, leaving
+`return tsigKeyKey(s)` -- infinite recursion, caught by the compiler through an
+"imported and not used" error rather than by anything I did. A mechanical
+rewrite that includes its own definition in its input is a trap worth naming.
+
+## What the gate does not see
+
+The review enumerates the blind spots, and they belong here rather than in a PR
+description:
+
+| Blind spot | Consequence |
+|---|---|
+| SQL binds | FINDING 1 above; fixed by naming the function instead |
+| `NameMap.Set(fold(x))` -- a method call, not an index | A wrapper could be fed a lossy fold |
+| Struct composite keys, e.g. `sets[key{fold(n), rrtype}]` | The fold is inside a literal, not the whole key |
+| `r.Header().Name = fold(...)` | Reverting #423's hashing leftover stays green |
+| Two SAFE wrappers disagreeing (`CanonicalizeName` with vs without `Fqdn`) | Exactly the trailing-dot slip made twice in this stage |
+| Byte-wise `==` / `!=` on names | `rrset_utils`, `ksk_rollover_cli` remain open |
+| `switch strings.ToLower(alg)` | Not a key, not a comparison the checks model |
+| `foldpair` when the fold is assigned to a local first | A one-hop dataflow gap |
+
+`keyfold` is weaker than the "written with X, read with Y" correlator the #424
+addendum asked for -- it catches lossy-vs-safe, not safe-vs-safe. It was
+sufficient for all five historical defects, and the two it could not have seen
+(the SQL bind, the trailing-dot pair) are both now behind named functions
+instead. Naming a function is the cheap general answer to a blind spot: it makes
+the thing testable and visible at once.
+
+**The gate is not wired into CI.** This repo has no in-tree CI config; the
+Makefile target says to run it. Until someone adds it, the gate is opt-in.
+
+
+## Re-review of #425 (external, 2026-08-29)
+
+Findings 1-2 accepted. **Approved as stage 7.** All seven stages are reviewed
+and approved.
+
+The one niggle is closed: the `StillInConfig` helper in `keystore_bulk_test.go`
+still inlined `core.CanonicalizeName(dns.Fqdn(n))` rather than calling
+`tsigKeyKey`, and a purge comment in `tsig_keystore_mgmt.go` still named
+`CanonicalName`. An inline copy of the body is the drift the named function
+exists to prevent, so leaving one in the test that guards it was the wrong place
+to leave it.
+
+**A process failure worth recording.** The follow-up commit `adc2e0c9` was
+reported as pushed and was not. The working tree had been left on a DETACHED
+HEAD at `origin/feature/case-insensitive-names-gate` -- the remote-tracking ref,
+not the branch -- so the commit landed off-branch and
+`git push origin feature/case-insensitive-names-gate` pushed the branch, which
+had not moved, and said nothing. I read the commit id back with
+`git rev-parse HEAD`, which reported the detached commit, and treated a silent
+no-op push as success.
+
+`git rev-parse HEAD` is not evidence that a branch advanced, and a quiet push is
+not evidence that anything was sent. The check that would have caught it is
+comparing the BRANCH against its remote:
+
+    git rev-parse <branch>  vs  git rev-parse origin/<branch>
+
+which is what finally found it, one turn later, only because the user asked.
+
+
+## Pre-merge audit (2026-08-29)
+
+`tdns-project/reviews/2026-08-29-tdns-case-insensitive-names-pre-merge-review.md`.
+Adversarial pass over the whole stack, looking for silent regressions.
+
+**Output for an ordinary zone is byte-identical to `main`** -- owner set, stored
+spellings, RRtype sets, canonical order, ZONEMD digest -- and the RFC 8976
+published vectors still pass. The exposure is confined to data that is
+mixed-case or carries non-UTF-8 octets, which was broken before the stack.
+
+**One silent regression, now mitigated in this commit.** `zd.ZoneName` was folded
+only under the `fold-case` option before (default off); it is folded always now.
+Keystore rows written by an older tdns under a mixed-case zone name are
+therefore not found -- and `LoadOutgoingSerial` treats "no row" as "nothing
+served yet" rather than as an error, so such a zone can republish BELOW a serial
+a secondary already holds, and that secondary serves stale data indefinitely with
+nothing logged. The zone file path moves for the same reason.
+
+`ParseZones` now warns once per non-canonical configured zone name, naming both
+spellings and the consequence. Warn rather than refuse: the zone works, and
+refusing to start over a cosmetic difference would be worse than the problem.
+The test asserts it fires for `Example.COM.` AND stays silent for an ordinary
+name -- a warning that fires on healthy configs is one operators learn to ignore.
+
+The remaining audit findings are deferred by agreement, and the deferred-item
+table in the review carries them with verified line numbers. Two are worth
+filing rather than leaving in a document, because the gate cannot see either and
+"when someone next touches it" has no owner: `rrset_utils.go` (wire-sourced
+Additional/Authority names compared as bytes) and `cli/ksk_rollover_cli.go` (a
+mixed-case `--zone` silently misses its policy).
+
+
+## Upgrade note and the gate in normal testing (2026-08-29)
+
+`docs/2026-08-29-case-insensitive-names-upgrade-note.md` covers the three things
+that change for an operator, in the style of the existing
+breaking-changes guide: the mixed-case zone name (silent, warned about now), the
+one-time re-sign for a zone file with mis-cased owners, and mixed-case queries
+starting to resolve. It records what was measured -- the byte-identical
+fingerprint and the RFC 8976 vectors -- and what was not.
+
+**The gate is wired into normal testing.** `make namecheck` alone was a gate
+nobody would run. It is now `check-names` in `utils/Makefile.common`, beside the
+existing `check-no-mutators`, with a `check` target running both and a
+`check-all` at the repo root running every live module's unit tests and then the
+gates.
+
+Deliberately NOT called `test`: `Makefile.common` already defines `test` as the
+per-app `go test -v -cover` that the application directories use, and redefining
+it at the root would override the shared one and warn on every invocation. That
+shared target is also broken when run from the root -- `$(GO)` is set by the app
+Makefiles and not at the root, which is why it executed the shell's `test`
+builtin. `check-names` uses plain `go` for that reason; namecheck needs neither
+cgo nor the algorithm environment.
+
+`make check-all` was confirmed to FAIL when a fold is reverted, not merely to
+report: exit 2, with the finding printed.

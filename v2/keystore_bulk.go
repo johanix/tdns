@@ -118,7 +118,7 @@ func NewKeySelector(exact, subtree []string) (KeySelector, error) {
 			if trimmed == "" {
 				return nil, fmt.Errorf("empty %s selector: to select everything, pass no selector at all", what)
 			}
-			out = append(out, core.CanonicalizeName(dns.Fqdn(trimmed)))
+			out = append(out, tsigKeyKey(trimmed))
 		}
 		return out, nil
 	}
@@ -146,7 +146,7 @@ func (s KeySelector) Matches(name string) bool {
 	}
 	// Folded by the same function the selector entries were built with above:
 	// these are compared as strings below, so the two sides have to agree.
-	name = core.CanonicalizeName(dns.Fqdn(name))
+	name = tsigKeyKey(name)
 	for _, e := range s.Exact {
 		if name == e {
 			return true
@@ -623,8 +623,19 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool, policy 
 
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
-		// Canonicalised on write, exactly as insertTsigKeystore/updateTsigKeystore
-		// do it. Bulk import used to store both columns verbatim, which made it
+		// Canonicalised on write with tsigKeyKey(...), which
+		// is what insertTsigKeystore and updateTsigKeystore use. Naming the
+		// function rather than saying "the same way they do it": that sentence
+		// was true when it was written, stopped being true the moment those two
+		// moved off dns.CanonicalName, and nothing would have said so -- this is
+		// a SQL bind, not a map key, so the namecheck gate cannot see it.
+		//
+		// The difference is not cosmetic. dns.CanonicalName rewrites every octet
+		// that is not valid UTF-8 into U+FFFD, so bulk would store a name under
+		// a mangled key while every other writer stores it under its own bytes,
+		// and a later lookup through the converted path would miss.
+		//
+		// Bulk import used to store both columns verbatim, which made it
 		// the one writer in the tree producing non-canonical rows: an undotted
 		// "hmac-sha256" (or a differently-cased key name) landed beside the
 		// dotted, lowercased rows every other path writes. Nothing then MATCHED
@@ -632,8 +643,8 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool, policy 
 		// spurious "algorithm" conflict against a row that named the same
 		// algorithm, and under --force rewrote the row into the non-canonical
 		// form.
-		name := dns.CanonicalName(k.Keyname)
-		algo := dns.CanonicalName(k.Algorithm)
+		name := tsigKeyKey(k.Keyname)
+		algo := tsigKeyKey(k.Algorithm)
 		// Full validation, not just the two emptiness checks this used to do:
 		// bulk import was the only way into the keystore that skipped
 		// validateTsigKeySpec, so an unsupported algorithm or a secret that is
@@ -711,7 +722,7 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool, policy 
 				// difference. Pre-existing rows written by the old verbatim path
 				// can hold either spelling, so this also stops them showing up as
 				// permanent phantom conflicts on every re-import.
-				field{"algorithm", dns.CanonicalName(curAlg), algo},
+				field{"algorithm", tsigKeyKey(curAlg), algo},
 				field{"secret", curSecret, k.Secret},
 				field{"origin", curOrigin, origin},
 				field{"owner", curOwner.String, k.Owner},

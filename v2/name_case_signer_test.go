@@ -258,3 +258,36 @@ func TestZoneDigestDistinguishesRawOctets(t *testing.T) {
 			"the two names apart, and no other implementation would agree with it")
 	}
 }
+
+// Every TSIG writer and reader keys by tsigKeyKey. The bulk importer used to
+// canonicalise inline with dns.CanonicalName while the insert path used
+// core.CanonicalizeName, and a comment above the bulk one claimed they matched
+// -- true when written, false the moment the other moved, and invisible: a SQL
+// bind is not a map key, so the namecheck gate cannot see it either.
+//
+// One named function is the fix; this is the test that it stays one.
+func TestTsigKeyKeyFoldsByTheDNSRule(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"xfr.dnslab.", "xfr.dnslab."},
+		{"XFR.DNSLAB.", "xfr.dnslab."},
+		{"Xfr.DnsLab", "xfr.dnslab."},   // absolutised, which dns.Fqdn supplies
+		{"hmac-sha256", "hmac-sha256."}, // algorithms are names too
+		{"HMAC-SHA256.", "hmac-sha256."},
+	} {
+		if got := tsigKeyKey(tc.in); got != tc.want {
+			t.Errorf("tsigKeyKey(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	// The trailing dot is the half a "rename" to core.CanonicalizeName drops,
+	// which is how 38 folds silently stopped resolving during this stage.
+	if tsigKeyKey("hmac-sha256") != "hmac-sha256." {
+		t.Error("tsigKeyKey no longer absolutises; every HMAC algorithm stops resolving")
+	}
+
+	// And the half dns.CanonicalName drops: two names differing only by an
+	// octet that is not valid UTF-8 must stay two keys.
+	if tsigKeyKey("ns\xfe1.example.") == tsigKeyKey("ns\xff1.example.") {
+		t.Error("tsigKeyKey collapses two distinct key names onto one row")
+	}
+}

@@ -10,6 +10,8 @@ package core
 import (
 	"fmt"
 	"strings"
+
+	"github.com/miekg/dns"
 )
 
 // BuildNotifyQNAME constructs a NOTIFY QNAME from a distribution ID and zone.
@@ -80,18 +82,25 @@ func ExtractDistributionIDFromQNAME(qname, zone string) (string, error) {
 		zoneFQDN += "."
 	}
 
-	// Check if QNAME ends with zone
-	if !strings.HasSuffix(qnameFQDN, zoneFQDN) {
-		return "", fmt.Errorf("QNAME %s does not end with zone %s", qnameFQDN, zoneFQDN)
+	// Inside the zone, as a DNS name. strings.HasSuffix got this wrong twice:
+	// it is case-sensitive, so a1b2.KDC.example.com. was rejected outright; and
+	// it knows nothing about label boundaries, so evila1b2kdc.example.com. --
+	// a name in a DIFFERENT zone -- passed, and the trim below then handed back
+	// "evila1b2" as though it were a distribution ID from this one.
+	if !dns.IsSubDomain(zoneFQDN, qnameFQDN) {
+		return "", fmt.Errorf("QNAME %s is not inside zone %s", qnameFQDN, zoneFQDN)
 	}
 
 	// Check if QNAME equals zone (no distribution ID)
-	if qnameFQDN == zoneFQDN {
+	if EqualNames(qnameFQDN, zoneFQDN) {
 		return "", fmt.Errorf("QNAME equals zone (no distribution ID present)")
 	}
 
-	// Extract distribution ID (everything before the zone)
-	distributionID := strings.TrimSuffix(qnameFQDN, zoneFQDN)
+	// Extract distribution ID (everything before the zone). Sliced by length,
+	// not trimmed: TrimSuffix compares bytes, so it would strip nothing from a
+	// qname whose zone part is spelled in another case than the zone -- exactly
+	// what the fold above just accepted.
+	distributionID := qnameFQDN[:len(qnameFQDN)-len(zoneFQDN)]
 	distributionID = strings.TrimSuffix(distributionID, ".") // Remove trailing dot
 
 	return distributionID, nil

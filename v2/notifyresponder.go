@@ -206,7 +206,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			writeNotifyReply(dnr, m)
 			return nil
 		}
-		if !strings.EqualFold(dns.Fqdn(zd.ZoneName), dns.Fqdn(qname)) {
+		if !core.EqualNames(dns.Fqdn(zd.ZoneName), dns.Fqdn(qname)) {
 			// FindZone returned a containing zone, not an exact
 			// zone match. Could be a child delegation point or a
 			// plain interior name; either way we don't accept the
