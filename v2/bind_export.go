@@ -193,6 +193,15 @@ func BindTimingTags(publishedAt, activeAt, retiredAt string) (string, error) {
 // format means PEM, so a caller that has not been taught about formats keeps
 // its existing behaviour.
 func PrivateKeyForExport(format, keyRR, privPEM, publishedAt, activeAt, retiredAt string) (string, error) {
+	// Validated HERE, not only in the CLI. cobra rejects a typo before the
+	// request is sent, but the management API takes whatever it is given, and
+	// an unrecognised value used to fall through to the PEM branch: a POST
+	// with keyformat "Bind" wrote PKCS#8 into a K<name>+<alg>+<tag>.private
+	// that still looked like a bind key directory. That is the bug this
+	// feature exists to close, on the path that does not go through cobra.
+	if err := ValidateKeyFormat(format); err != nil {
+		return "", err
+	}
 	if format != KeyFormatBind {
 		return privPEM, nil
 	}
@@ -205,4 +214,121 @@ func PrivateKeyForExport(format, keyRR, privPEM, publishedAt, activeAt, retiredA
 		return "", err
 	}
 	return body + times, nil
+}
+
+// BindKeyStateText renders one keystore key state as a bind9 `.state` file.
+//
+// This is the inverse of BindStateToDnssecState, and it is a projection into a
+// larger space rather than a reconstruction: bind tracks four INDEPENDENT
+// records (DNSKEY, ZRRSIG, KRRSIG, DS), each moving hidden -> rumoured ->
+// omnipresent and out through unretentive, while tdns has one ordered state per
+// key. There is no way to recover the four from the one.
+//
+// So the property this aims at is not "the bind state the key once had" -- that
+// information never reached the keystore -- but that the round trip through
+// tdns is stable: a key exported in state X and read back by bulk-convert must
+// land in state X again. Each case below is therefore chosen so that
+// BindStateToDnssecState maps it back to the state it came from, and the tests
+// assert exactly that for every state.
+//
+// One state does not survive: STANDBY has no bind representation, because
+// BindStateToDnssecState never produces it -- bind's four records cannot say
+// "published, ready, waiting to be promoted". A standby key is written as
+// published, which is what it looks like in the zone, and comes back as
+// published. That is a real narrowing and is called out here rather than
+// hidden, since it is the one case where export/import is not identity.
+func BindKeyStateText(state string, isKSK bool, publishedAt, activeAt, retiredAt string) (string, error) {
+	// dnskey/signing/ds are the three records the forward mapping reads;
+	// goal is recorded for bind's benefit and ignored on the way back.
+	var dnskey, signing, ds, goal string
+
+	switch state {
+	case DnskeyStateCreated:
+		dnskey, signing, ds, goal = "hidden", "hidden", "hidden", "hidden"
+	case DnskeyStatePublished, DnskeyStateStandby:
+		// Not omnipresent on the signing record: that is what separates
+		// published from active in the forward mapping.
+		dnskey, signing, ds, goal = "rumoured", "hidden", "hidden", "omnipresent"
+	case DnskeyStateDsPublished:
+		if !isKSK {
+			return "", fmt.Errorf("state %q is only meaningful for a KSK", state)
+		}
+		// DS present but the key not yet signing: the forward mapping checks
+		// the signing record first, so it must not be omnipresent here.
+		dnskey, signing, ds, goal = "omnipresent", "rumoured", "omnipresent", "omnipresent"
+	case DnskeyStateActive:
+		dnskey, signing, goal = "omnipresent", "omnipresent", "omnipresent"
+		if isKSK {
+			ds = "omnipresent"
+		} else {
+			ds = "hidden"
+		}
+	case DnskeyStateRetired:
+		// Any unretentive record means "being withdrawn" to the forward
+		// mapping, and it is checked before everything else.
+		dnskey, signing, ds, goal = "unretentive", "unretentive", "hidden", "hidden"
+	case DnskeyStateRemoved:
+		// Identical tags to created; the timestamps below are what tell the
+		// two apart on the way back, so a removed key must carry one.
+		dnskey, signing, ds, goal = "hidden", "hidden", "hidden", "hidden"
+	default:
+		return "", fmt.Errorf("unknown key state %q", state)
+	}
+
+	var b strings.Builder
+	b.WriteString("; This is the state of a key managed by tdns.\n")
+	if isKSK {
+		b.WriteString("KSK: yes\nZSK: no\n")
+	} else {
+		b.WriteString("KSK: no\nZSK: yes\n")
+	}
+	b.WriteString("DNSKEYState: " + dnskey + "\n")
+	if isKSK {
+		b.WriteString("KRRSIGState: " + signing + "\nZRRSIGState: hidden\n")
+	} else {
+		b.WriteString("ZRRSIGState: " + signing + "\nKRRSIGState: hidden\n")
+	}
+	b.WriteString("DSState: " + ds + "\n")
+	b.WriteString("GoalState: " + goal + "\n")
+
+	// Timestamps, gated by the state. A key carries only the milestones it has
+	// actually passed: writing Retired on a created key does not merely add
+	// noise, it changes the answer, because the forward mapping reads a
+	// timestamp on a hidden DNSKEY as "this key was withdrawn" and hands back
+	// removed. The keystore can hold a stale value in a column the current
+	// state has not reached, so the gate is on the state, not on emptiness.
+	reached := map[string]int{
+		DnskeyStateCreated: 0, DnskeyStatePublished: 1, DnskeyStateStandby: 1,
+		DnskeyStateDsPublished: 1, DnskeyStateActive: 2,
+		DnskeyStateRetired: 3, DnskeyStateRemoved: 3,
+	}[state]
+
+	for i, tag := range []struct{ name, value string }{
+		{"Published", publishedAt},
+		{"Active", activeAt},
+		{"Retired", retiredAt},
+	} {
+		if i >= reached {
+			continue
+		}
+		if strings.TrimSpace(tag.value) == "" {
+			continue
+		}
+		bt, err := RFC3339ToBindTime(tag.value)
+		if err != nil {
+			return "", fmt.Errorf("%s: %v", tag.name, err)
+		}
+		b.WriteString(tag.name + ": " + bt + "\n")
+	}
+	if state == DnskeyStateRemoved && strings.TrimSpace(retiredAt) == "" {
+		// removed and created carry identical record tags; only a timestamp
+		// separates them on the way back. With none recorded, this key would
+		// read as created -- a withdrawn key returning as one about to be
+		// published. Refuse rather than invent a date: an epoch here would
+		// read as a real event in 1970, which is the mistake
+		// BindTimeToRFC3339 exists to avoid on the way in.
+		return "", fmt.Errorf("key state %q has no retired timestamp, so it cannot be "+
+			"distinguished from %q in a bind state file", state, DnskeyStateCreated)
+	}
+	return b.String(), nil
 }

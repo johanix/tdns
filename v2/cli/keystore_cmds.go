@@ -943,8 +943,10 @@ func sig0KeyMgmt(role, cmd string) {
 }
 
 // writeSig0ExportFiles writes a SIG(0) key pair to two BIND-style files
-// in outdir: K<zone>+<alg>+<keyid>.private (PKCS#8 PEM as stored in the
-// keystore) and .key (zone-file KEY RR text). The resulting basename is
+// in outdir: K<zone>+<alg>+<keyid>.private and .key (zone-file KEY RR
+// text). The private half is whatever the daemon rendered for the
+// requested format -- PKCS#8 PEM as stored by default, or bind's
+// Private-key-format under --format bind. The resulting basename is
 // directly consumable by tdns.ReadPrivateKey.
 // writeNewFile writes data to path, failing if path already exists.
 // The O_CREATE|O_EXCL open makes the "don't overwrite" guarantee atomic

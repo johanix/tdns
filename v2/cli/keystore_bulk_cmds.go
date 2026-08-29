@@ -338,6 +338,23 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
 			}
+			// A bind export without a .state file is only half a round trip:
+			// bulk-convert reads the state from there, and with none present
+			// it refuses the key or falls back to --state. The text is pure
+			// state and timestamps, so the CLI can render it -- unlike the
+			// private key, which needs the algorithm registry.
+			if f.format == tdns.KeyFormatBind {
+				st, err := tdns.BindKeyStateText(k.State, k.Flags&0x0001 != 0,
+					k.PublishedAt, k.ActiveAt, k.RetiredAt)
+				if err != nil {
+					fmt.Printf("Error: %s keyid %d: %v\n", k.Zone, k.Keyid, err)
+					os.Exit(1)
+				}
+				if err := writeOrVerifyFile(filepath.Join(f.dest, base+".state"), st, 0600); err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
+			}
 			manifest.UpsertDnssec(tdns.ManifestEntryForDnssec(k, base))
 			written++
 		}

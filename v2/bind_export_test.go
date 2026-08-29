@@ -226,6 +226,25 @@ func TestPrivateKeyForExportPEMIsVerbatim(t *testing.T) {
 	}
 }
 
+// An unknown format must be an error at the renderer, not just at the CLI.
+// cobra rejects a typo before the request leaves, but the management API takes
+// what it is given, and an unrecognised value falling through to the PEM
+// branch writes PKCS#8 into a file named and shaped like a bind key -- the
+// exact confusion this feature exists to remove.
+func TestPrivateKeyForExportRejectsUnknownFormat(t *testing.T) {
+	keyRR, privPEM, _ := storedKeyPair(t, dns.ED25519, 256)
+
+	for _, format := range []string{"bind9", "Bind", "BIND", "pkcs8"} {
+		out, err := PrivateKeyForExport(format, keyRR, privPEM, "", "", "")
+		if err == nil {
+			t.Errorf("format %q accepted, returned %d bytes", format, len(out))
+		}
+		if out != "" {
+			t.Errorf("format %q returned content alongside an error", format)
+		}
+	}
+}
+
 func TestValidateKeyFormat(t *testing.T) {
 	for _, ok := range []string{KeyFormatPEM, KeyFormatBind, ""} {
 		if err := ValidateKeyFormat(ok); err != nil {
@@ -234,5 +253,76 @@ func TestValidateKeyFormat(t *testing.T) {
 	}
 	if err := ValidateKeyFormat("bind9"); err == nil {
 		t.Error("a typo in the format was accepted; it would surface as a half-written export")
+	}
+}
+
+// The property that makes the state file worth writing: a key exported in
+// state X must come back as state X when bulk-convert reads it. The bind state
+// this produces is a representative, not a reconstruction -- what has to hold
+// is that the forward mapping agrees with it.
+func TestBindKeyStateRoundTripsThroughTdns(t *testing.T) {
+	const (
+		pub = "2026-01-02T03:04:05Z"
+		act = "2026-02-03T04:05:06Z"
+		ret = "2026-03-04T05:06:07Z"
+	)
+	for _, tc := range []struct {
+		state string
+		isKSK bool
+		want  string // differs from state only where bind cannot express it
+	}{
+		{DnskeyStateCreated, false, DnskeyStateCreated},
+		{DnskeyStateCreated, true, DnskeyStateCreated},
+		{DnskeyStatePublished, false, DnskeyStatePublished},
+		{DnskeyStatePublished, true, DnskeyStatePublished},
+		{DnskeyStateDsPublished, true, DnskeyStateDsPublished},
+		{DnskeyStateActive, false, DnskeyStateActive},
+		{DnskeyStateActive, true, DnskeyStateActive},
+		{DnskeyStateRetired, false, DnskeyStateRetired},
+		{DnskeyStateRetired, true, DnskeyStateRetired},
+		{DnskeyStateRemoved, false, DnskeyStateRemoved},
+		{DnskeyStateRemoved, true, DnskeyStateRemoved},
+		// bind has no way to say "published, ready, waiting to be promoted",
+		// so standby narrows to published. Asserted so the narrowing is a
+		// decision on record rather than a surprise in the field.
+		{DnskeyStateStandby, false, DnskeyStatePublished},
+		{DnskeyStateStandby, true, DnskeyStatePublished},
+	} {
+		role := "ZSK"
+		if tc.isKSK {
+			role = "KSK"
+		}
+		t.Run(tc.state+"/"+role, func(t *testing.T) {
+			text, err := BindKeyStateText(tc.state, tc.isKSK, pub, act, ret)
+			if err != nil {
+				t.Fatalf("BindKeyStateText: %v", err)
+			}
+			st, err := ParseBindKeyState([]byte(text))
+			if err != nil {
+				t.Fatalf("ParseBindKeyState on our own output: %v\n%s", err, text)
+			}
+			got, err := BindStateToDnssecState(st, tc.isKSK)
+			if err != nil {
+				t.Fatalf("BindStateToDnssecState: %v\n%s", err, text)
+			}
+			if got != tc.want {
+				t.Errorf("state %q (%s) came back as %q, want %q\n%s",
+					tc.state, role, got, tc.want, text)
+			}
+		})
+	}
+}
+
+func TestBindKeyStateTextRejectsWhatItCannotExpress(t *testing.T) {
+	// removed with no timestamp is indistinguishable from created.
+	if _, err := BindKeyStateText(DnskeyStateRemoved, false, "", "", ""); err == nil {
+		t.Error("removed without a retired timestamp was accepted; it reads back as created")
+	}
+	// ds-published is a KSK notion.
+	if _, err := BindKeyStateText(DnskeyStateDsPublished, false, "", "", ""); err == nil {
+		t.Error("ds-published accepted for a ZSK")
+	}
+	if _, err := BindKeyStateText("no-such-state", false, "", "", ""); err == nil {
+		t.Error("an unknown state was accepted")
 	}
 }
