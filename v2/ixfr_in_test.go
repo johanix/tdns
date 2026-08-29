@@ -12,6 +12,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -529,5 +530,191 @@ func TestApplyIxfrRemovesEmptiedOwners(t *testing.T) {
 	}
 	if _, ok := data.Get("www.example."); ok {
 		t.Error("www.example. still exists after both its RRsets were removed")
+	}
+}
+
+// ------------------------------------------------------ end to end, over TCP
+
+// ixfrTestPrimary builds a primary that serves this zone and returns both it
+// and its address, so a test can bump it to build an outbound IXFR chain.
+func ixfrTestPrimary(t *testing.T, zoneStr string) (*ZoneData, string, func()) {
+	t.Helper()
+	pzd := &ZoneData{
+		ZoneName:    "example.",
+		ZoneStore:   MapZone,
+		ZoneType:    Primary,
+		Logger:      discardLogger(),
+		Ready:       true,
+		Status:      ZoneStatusReady,
+		Downstreams: []AclEntry{{Prefix: "127.0.0.0/8", Key: NOKEY}},
+	}
+	if _, _, err := pzd.ReadZoneData(zoneStr, true); err != nil {
+		t.Fatalf("primary ReadZoneData: %v", err)
+	}
+	pzd.InstallInitialSnapshot()
+	t.Cleanup(pzd.stopPublisher)
+	addr, stop := serveTestPrimary(t, pzd)
+	return pzd, addr, stop
+}
+
+// ixfrTestSecondary is a secondary holding the given zone, pointed at addr,
+// with IXFR-in enabled. Registered so publishes are not dropped by the
+// liveness guard; the primary is deliberately not registered, since both
+// carry the same name.
+func ixfrTestSecondary(t *testing.T, zoneStr, addr string, opts map[ZoneOption]bool) *ZoneData {
+	t.Helper()
+	if opts == nil {
+		opts = map[ZoneOption]bool{}
+	}
+	zd := &ZoneData{
+		ZoneName:  "example.",
+		ZoneStore: MapZone,
+		ZoneType:  Secondary,
+		Logger:    discardLogger(),
+		Options:   opts,
+		Upstreams: []PeerConf{{Addr: addr}},
+	}
+	if _, _, err := zd.ReadZoneData(zoneStr, true); err != nil {
+		t.Fatalf("secondary ReadZoneData: %v", err)
+	}
+	zd.InstallInitialSnapshot()
+	registerZones(t, zd)
+	t.Cleanup(zd.stopPublisher)
+	return zd
+}
+
+// TestIxfrInConvergesViaDelta is the payoff test: a tdns secondary pulls a
+// real difference stream from a tdns primary (#328's outbound side) and ends
+// up with the primary's content.
+func TestIxfrInConvergesViaDelta(t *testing.T) {
+	authApp(t)
+	pzd, addr, stop := ixfrTestPrimary(t, ixApplyZone)
+	defer stop()
+
+	base := pzd.publishedSnapshot().Serial
+
+	// Two publishes, so the primary has a contiguous chain to serve from.
+	// Registered while they happen: publishWorkingSetLocked drops a publish
+	// for a zone that is not live in the Zones map, so an unregistered primary
+	// silently accumulates no chain at all. Unregistered again immediately --
+	// the chain lives in its snapshot and the transfer-out path reads that
+	// directly, while the secondary needs the same name in the map.
+	Zones.Set("example.", pzd)
+	stageAndPublish(t, pzd, stageAddA(t, pzd, "one.example.", "10.1.0.1"))
+	stageAndPublish(t, pzd, stageAddA(t, pzd, "two.example.", "10.1.0.2"))
+	Zones.Remove("example.")
+	if len(chainOf(pzd)) < 2 {
+		t.Fatalf("precondition: primary chain has %d links, want at least 2", len(chainOf(pzd)))
+	}
+
+	zd := ixfrTestSecondary(t, ixApplyZone, addr, nil)
+	zd.IncomingSerial = base
+	zd.CurrentSerial = base
+
+	// Convergence alone would not prove a delta was used -- the full-zone
+	// fallback converges too, and identically. Ask the transfer directly what
+	// the primary sent before letting the refresh path apply it.
+	outcome, rrs, err := zd.ixfrTransferIn(context.Background(), zd.Upstreams[0], base, &Config{})
+	if err != nil {
+		t.Fatalf("ixfrTransferIn: %v", err)
+	}
+	if outcome != ixfrDelta {
+		t.Fatalf("primary answered %s, want delta; this test would pass on the "+
+			"full-zone fallback and prove nothing about the delta path", outcome)
+	}
+	if steps, perr := parseIxfrDeltas("example.", rrs, base); perr != nil {
+		t.Fatalf("the delta the primary sent does not parse: %v", perr)
+	} else if len(steps) < 2 {
+		t.Errorf("%d difference sequences, want the 2 the primary has links for", len(steps))
+	}
+
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
+		t.Fatalf("FetchFromUpstream: %v", err)
+	}
+
+	if got, want := zd.IncomingSerial, pzd.publishedSnapshot().Serial; got != want {
+		t.Errorf("secondary serial %d, want the primary's %d", got, want)
+	}
+	for _, name := range []string{"one.example.", "two.example."} {
+		owner, _ := zd.GetOwner(name)
+		if owner == nil {
+			t.Errorf("%s missing: the delta was not applied", name)
+		}
+	}
+	// The names the delta never mentioned are still there.
+	if owner, _ := zd.GetOwner("www.example."); owner == nil {
+		t.Error("www.example. was lost; a delta must not replace the whole zone")
+	}
+}
+
+// TestIxfrInFallsBackToFullZone: a primary with no chain to serve from answers
+// the IXFR with an entire zone, which RFC 1995 §4 allows. No delta logic
+// involved, and the most important fallback to get right.
+func TestIxfrInFallsBackToFullZone(t *testing.T) {
+	authApp(t)
+	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+www.example.	3600	IN	A	10.0.0.3
+fresh.example.	3600	IN	A	10.9.9.9
+`
+	_, addr, stop := ixfrTestPrimary(t, newer)
+	defer stop()
+
+	zd := ixfrTestSecondary(t, ixApplyZone, addr, nil)
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
+		t.Fatalf("FetchFromUpstream: %v", err)
+	}
+	if zd.IncomingSerial != 20 {
+		t.Errorf("secondary serial %d, want 20", zd.IncomingSerial)
+	}
+	if owner, _ := zd.GetOwner("fresh.example."); owner == nil {
+		t.Error("the full-zone answer was not adopted")
+	}
+}
+
+// TestIxfrInDisabledUsesAxfr: with no-request-ixfr the transfer path behaves
+// exactly as it did before C2.
+func TestIxfrInDisabledUsesAxfr(t *testing.T) {
+	authApp(t)
+	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+www.example.	3600	IN	A	10.0.0.3
+`
+	_, addr, stop := ixfrTestPrimary(t, newer)
+	defer stop()
+
+	zd := ixfrTestSecondary(t, ixApplyZone, addr, map[ZoneOption]bool{OptNoRequestIxfr: true})
+	if zd.requestIxfr() {
+		t.Fatal("no-request-ixfr did not turn the option off")
+	}
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
+		t.Fatalf("FetchFromUpstream: %v", err)
+	}
+	if zd.IncomingSerial != 20 {
+		t.Errorf("secondary serial %d, want 20", zd.IncomingSerial)
+	}
+}
+
+// TestRequestIxfrDefaultsOn: absence means enabled, and the explicit spellings
+// both work, with off winning over on.
+func TestRequestIxfrDefaultsOn(t *testing.T) {
+	for _, tc := range []struct {
+		what string
+		opts map[ZoneOption]bool
+		want bool
+	}{
+		{"absent", nil, true},
+		{"explicitly on", map[ZoneOption]bool{OptRequestIxfr: true}, true},
+		{"explicitly off", map[ZoneOption]bool{OptNoRequestIxfr: true}, false},
+		{"both: off wins", map[ZoneOption]bool{OptRequestIxfr: true, OptNoRequestIxfr: true}, false},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			zd := &ZoneData{ZoneName: "example.", Options: tc.opts}
+			if got := zd.requestIxfr(); got != tc.want {
+				t.Errorf("requestIxfr() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

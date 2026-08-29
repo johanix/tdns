@@ -686,6 +686,14 @@ func startTestPrimary(t *testing.T, zoneStr string) (string, func()) {
 	pzd.InstallInitialSnapshot()
 	t.Cleanup(pzd.stopPublisher)
 
+	return serveTestPrimary(t, pzd)
+}
+
+// serveTestPrimary is the listener half, split out so a test that needs to
+// mutate the primary (to build an outbound IXFR chain, say) can build the
+// ZoneData itself and then serve it.
+func serveTestPrimary(t *testing.T, pzd *ZoneData) (string, func()) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen tcp: %v", err)
