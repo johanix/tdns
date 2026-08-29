@@ -127,10 +127,13 @@ func (kdb *KeyDB) DeleteZoneRefreshState(zone string) error {
 // primaries have revoked its ACL refresh its own expire clock every cycle and
 // never expire, which is the exact failure expire exists to prevent.
 //
-// So this is called from DoTransfer's two usable-SOA returns and nowhere else:
-// not from quiet backoff, not from all-unreachable (which returns an error
-// anyway), and not from the file adoption at first bind, which is evidence
-// about our disk and not about the primary.
+// Called from DoTransfer's two usable-SOA returns, and once more from Refresh
+// after a successful FetchFromUpstream -- the probe stamps the serial we held
+// when we asked, which is right if the transfer then fails, and the second call
+// corrects it to the copy we ended up with. Not from quiet backoff, not from
+// all-unreachable (which returns an error anyway), and not from the file
+// adoption at first bind, which is evidence about our own disk rather than
+// about the primary.
 //
 // An unchanged serial is a confirmation. That is the whole point: it is the
 // RFC's proof the primary is alive, and it writes no zone file and no journal,
@@ -227,6 +230,22 @@ func (zd *ZoneData) restoreRefreshStateAtFirstBind() {
 		"zone", zd.ZoneName, "serial", st.Serial, "lastConfirmed", st.LastConfirmed.UTC().Format(time.RFC3339))
 }
 
+// lastRefresh reads the confirmation timestamp under the lock that guards it.
+//
+// Every writer takes zd.mu; the readers on the query and UPDATE paths run on
+// handler goroutines while the refresh engine is writing on its own, so reading
+// the field directly is a data race even when the value is only being logged.
+// -race does not catch it because nothing in the suite drives a refresh and a
+// query at the same instant, which production does constantly.
+func (zd *ZoneData) lastRefresh() time.Time {
+	if zd == nil {
+		return time.Time{}
+	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.LatestRefresh
+}
+
 // servedSerial is the serial of the copy we serve, which is the serial that
 // lands in the zone file when it is persisted -- and therefore the serial the
 // next process reads back when it adopts that file.
@@ -257,7 +276,12 @@ func (zd *ZoneData) servedSerial(fallback uint32) uint32 {
 // otherwise fine should not stop answering over it.
 func (zd *ZoneData) effectiveExpire(soa *dns.SOA) time.Duration {
 	published := time.Duration(soa.Expire) * time.Second
-	floor := time.Duration(soa.Refresh+soa.Retry) * time.Second
+	// Summed in a wider type on purpose. Both fields are uint32, and a primary
+	// publishing two large values would wrap the sum into a tiny floor -- which
+	// this function would then apply as the zone's expire interval, taking a
+	// zone dark on a schedule derived from an overflow. Two maxed uint32s are
+	// ~8.6e9 seconds, which still fits a time.Duration.
+	floor := time.Duration(uint64(soa.Refresh)+uint64(soa.Retry)) * time.Second
 	if published >= floor && published > 0 {
 		return published
 	}
@@ -313,5 +337,14 @@ func (zd *ZoneData) HasExpired() bool {
 		return false
 	}
 
-	return time.Now().After(last.Add(zd.effectiveExpire(snap.SOA)))
+	// An SOA carrying expire=0 AND refresh=retry=0 yields no interval at all.
+	// Treating that as "expired" would take the zone dark immediately on a
+	// garbage SOA -- the one outcome this whole guard exists to make
+	// deliberate. Nothing derivable means nothing to enforce.
+	expire := zd.effectiveExpire(snap.SOA)
+	if expire <= 0 {
+		return false
+	}
+
+	return time.Now().After(last.Add(expire))
 }

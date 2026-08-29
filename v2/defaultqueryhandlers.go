@@ -127,7 +127,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		// next usable SOA un-expires the zone on its own.
 		if zd.HasExpired() {
 			lgHandler.Warn("zone has passed SOA EXPIRE since its last confirmed refresh",
-				"qname", qname, "zone", zd.ZoneName, "lastRefresh", zd.LatestRefresh)
+				"qname", qname, "zone", zd.ZoneName, "lastRefresh", zd.lastRefresh())
 			m := new(dns.Msg)
 			m.SetRcode(r, dns.RcodeServerFailure)
 			w.WriteMsg(m)
@@ -197,7 +197,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	// Same expire guard as the Zones.Get path above.
 	if zd.HasExpired() {
 		lgHandler.Warn("zone has passed SOA EXPIRE since its last confirmed refresh",
-			"qname", qname, "zone", zd.ZoneName, "lastRefresh", zd.LatestRefresh)
+			"qname", qname, "zone", zd.ZoneName, "lastRefresh", zd.lastRefresh())
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		w.WriteMsg(m)

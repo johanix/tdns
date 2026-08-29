@@ -875,3 +875,49 @@ www.example.	3600	IN	A	10.0.0.3
 			"seven.", second.LatestRefresh, confirmed)
 	}
 }
+
+// TestUnderivableExpireDoesNotTakeTheZoneDark covers two ways the clamp can be
+// handed nonsense by a primary, both of which used to end in an expire interval
+// of nearly nothing -- the exact outcome this guard exists to make deliberate.
+//
+// A zone whose SOA carries no usable interval at all is not expired: there is
+// nothing to measure against, and inventing a deadline from a broken SOA takes
+// the zone dark on somebody else's typo.
+func TestUnderivableExpireDoesNotTakeTheZoneDark(t *testing.T) {
+	authApp(t)
+	for _, tc := range []struct {
+		what                   string
+		refresh, retry, expire uint32
+		lastRefreshAgo         time.Duration
+		wantExpired            bool
+	}{
+		{
+			what:    "all zero: nothing to derive an interval from",
+			refresh: 0, retry: 0, expire: 0,
+			lastRefreshAgo: 30 * 24 * time.Hour,
+			wantExpired:    false,
+		},
+		{
+			// refresh+retry overflows uint32 and used to wrap to ~8s, so a
+			// zone confirmed a minute ago was already "expired".
+			what:    "refresh+retry overflows uint32",
+			refresh: 4294967290, retry: 10, expire: 0,
+			lastRefreshAgo: time.Minute,
+			wantExpired:    false,
+		},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			zone := fmt.Sprintf(`example.	3600	IN	SOA	ns.example. hostmaster.example. 7 %d %d %d 7200
+example.	3600	IN	NS	ns.example.
+www.example.	3600	IN	A	10.0.0.3
+`, tc.refresh, tc.retry, tc.expire)
+			zd := testSnapshotZone(t, "example.", zone)
+			zd.ZoneType = Secondary
+			zd.LatestRefresh = time.Now().Add(-tc.lastRefreshAgo)
+
+			if got := zd.HasExpired(); got != tc.wantExpired {
+				t.Errorf("HasExpired() = %v, want %v", got, tc.wantExpired)
+			}
+		})
+	}
+}
