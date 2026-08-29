@@ -81,7 +81,7 @@ func transportWeightsToStrings(m map[core.Transport]uint8) map[string]uint8 {
 func ZoneMatchesSelector(zone, exactZone, suffix string) bool {
 	switch {
 	case exactZone != "":
-		return strings.EqualFold(zone, exactZone)
+		return core.EqualNames(zone, exactZone)
 	case suffix != "":
 		return dns.IsSubDomain(suffix, zone)
 	default:
@@ -210,11 +210,9 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			identity = dns.Fqdn(identity)
 
 			var entries []map[string]interface{}
-			idCanon := strings.ToLower(identity)
 			for item := range imr.Cache.RRsets.IterBuffered() {
 				cr := item.Val
-				name := strings.ToLower(cr.Name)
-				if name != idCanon && !strings.HasSuffix(name, "."+idCanon) {
+				if !dns.IsSubDomain(identity, cr.Name) {
 					continue
 				}
 				entry := map[string]interface{}{
@@ -296,7 +294,13 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			}
 			var records []zoneRecord
 			for item := range imr.Cache.ZoneMap.IterBuffered() {
-				if zoneFilter != "" && item.Key != zoneFilter {
+				// Through the shared selector, like the transport-stats
+				// handler below it. This used to compare item.Key to the
+				// filter as bytes, which had been merely inconsistent and
+				// became wrong when ZoneMap started folding its keys: a
+				// mixed-case zone argument returned an empty dump. Two copies
+				// of one predicate is how that drift happened; there is one now.
+				if !ZoneMatchesSelector(item.Key, zoneFilter, "") {
 					continue
 				}
 				snap := item.Val.SnapshotAddressBackoffs(now)

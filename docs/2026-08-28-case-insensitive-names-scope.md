@@ -131,7 +131,7 @@ land first, the rest are parallel.
 |---|---|---:|---|
 | 1 | Boundary | ~10 | **DONE.** `core.CanonicalizeName` + `core.NameMap`; canonical keys for `Zones`, `zd.Data`, the snapshot and the working set; `GetOwner`/`FindZone`/`SortFunc`; `zd.ZoneName` folded at construction. Fixes all four confirmed defects. |
 | 2 | Auth query + update | ~29 | **DONE.** `queryresponder`, `auth_utils`, `updateresponder`, `zone_updater`, `zone_update_verbs`, `defaultqueryhandlers`, `ops_uri`/`ops_svcb`/`ops_key`, `dnsutils`, `zone_utils` |
-| 3 | IMR + cache | ~25 | `dnslookup`, `imrengine`, `cache/*` — wire-sourced names, so the most reachable after #1 |
+| 3 | IMR + cache | ~24 | **DONE.** `dnslookup`, `imrengine`, `imr_helpers`, `chase`, `apihandler_imr`, `cache/*` — plus the cache's own name-keyed indexes |
 | 4 | Delegation / childsync / dsync | ~20 | includes the `HasSuffix` label-boundary bugs |
 | 5 | Keystore / sign / zonemd | ~20 | `sign.go`'s apex tests are latent-severe: a miss signs a delegation NS or skips the apex NS |
 | 6 | CLI + debug | ~23 | cosmetic, but `keystore_cmds.go:1018` `log.Fatalf`s on a case mismatch |
@@ -237,6 +237,50 @@ owner-map keys against `zd.ZoneName`, both canonical since PR 1, so they are
 safe by construction; they belong to PR 5 with the rest of the signer.
 
 
+## Addendum, after PR 3
+
+119 → 108 in the comparison scan, but that number understates it: PR 3's larger
+half was the resolver cache's **indexes**, and a `.Get()` is not a comparison,
+so 76 converted call sites do not appear in the count at all.
+
+**The cache is the auth server's problem again, one layer out.** `ZoneMap`,
+`Servers`, `ServerMap`, `AuthServerMap` and `ServerTLSA` were `ConcurrentMap`s
+keyed by a bare DNS name; `RRsets` and the DNSKEY cache by `"<name>::<n>"`. All
+of them are fed names a resolver does not control: an authoritative server's
+own spelling, and — once 0x20 randomisation is on — a different mixture of case
+on every single query. Keyed by exact bytes, the cache stores the same name
+repeatedly and finds it never. The five bare-name maps are `core.NameMap` now;
+the two composite keys fold the name half where the key is built.
+
+`GetOrCreateAuthServer` is the sharpest of these: it exists to guarantee one
+`AuthServer` instance per nameserver, and keyed by raw bytes it guaranteed one
+per *spelling*, so per-server health, transport capability and TLSA state were
+silently split across duplicates.
+
+**A correction to the PR 2 write-up's method claim.** I recorded "drive it,
+don't only read it" as the lesson, and then wrote a referral test that passed
+before the fix as well as after — within one response the NS owner and the DS
+owner come from the same zone, so they agree, and the comparison between them
+cannot fail. The test only became real once the two owners were spelled
+independently, which is what a parent whose zone file spells them differently
+serves — something tdns itself now does, because #417 preserves the arrived
+spelling instead of folding it. **Passing is not evidence; reverting the fix and
+watching the test fail is.**
+
+**And a claim withdrawn.** `isSubdomainOf` in the cache was already correct: it
+canonicalised both names and added the leading dot a byte-wise suffix test needs
+to respect a label boundary. I had it on the list and changed it to
+`dns.IsSubDomain` before reading the two lines above the comparison. The change
+stands as a simplification — one line, no allocations — but it fixes nothing,
+its comment says so, and its test is characterisation rather than regression.
+
+Real defects fixed here: the closest-known-zone walk (`strings.HasSuffix` with
+no boundary and no folding, so a cached `ample.` could be chosen as the enclosing
+zone for `example.`), the negative-answer SOA gate (same shape — an SOA for
+`ample.` authorising a denial for `example.`), the SOA-authorises-this-denial
+test in `dnslookup`, the DS-and-RRSIG pair in a referral, and the `_853._udp`
+TLSA owner prefixes.
+
 ## Review of #417 (external, 2026-08-28)
 
 `docs/2026-08-28-pr417-case-insensitive-names-review.md`, on `main`. Verdict:
@@ -330,3 +374,82 @@ Sites the review confirms belong to later stages, not #419: `rrset_utils`
 (outbound `AuthQueryEngine`), `sign.go` (canonical operands since #417),
 `NSInBailiwick` (stage 4, done), `ops_delegation_read` (stage 4, done), and the
 `Conf.Zones[i].Name` pair from #417 FINDING 2, which is still open.
+
+
+## Review of #421 (external, 2026-08-28)
+
+`tdns-project/reviews/2026-08-28-tdns-PR421-imr-and-cache-review.md`.
+Verdict: request changes -- four findings, all inside #421's own surface.
+All four addressed. Two of them were breakage this PR introduced.
+
+**FINDING 1 — the `_dns.` prefix test folded and the strip did not.** I changed
+`strings.HasPrefix(owner, "_dns.")` to fold the name and left the
+`strings.TrimPrefix(owner, "_dns.")` beside it comparing bytes, so
+`_DNS.ns1.example.` cleared the test and then kept its prefix: `baseName` stayed
+the whole owner and the transport signal was dropped. `baseFromTLSAOwner`, in
+the same commit, already had the right pattern -- fold to test, slice the
+original by `len(prefix)` so the base name keeps the case it arrived with. The
+prefix is a named constant now, so the test and the strip cannot drift again.
+
+**FINDING 2 — `ServerMap` folded the zone and not the nameserver.** The type is
+`NameMap[map[string]*AuthServer]`: the outer key folds, the inner one was still
+the bytes an upstream sent. Worse, this PR *introduced* a miss --
+`collectInBailiwickNS` now returns canonical names with a comment saying they
+are used as map keys downstream, and they were being looked up in a map keyed by
+wire spelling. Every subscript of that inner map (31 of them) goes through a
+shared `cache.ServerKey` now. Not a second `NameMap`: a concurrent map per zone
+would be the wrong shape for a handful of nameservers, as the review says.
+
+`GetOrCreateAuthServer` stopping the identity split is not the same as the
+per-zone map finding the server. Both were needed.
+
+**FINDING 3 — the zone-backoff dump compared a now-canonical key to a raw
+filter.** Also breakage from this PR: before `ZoneMap` became a `NameMap`, a
+filter matching the stored spelling worked. Fixed by routing it through
+`ZoneMatchesSelector`, which the sibling handler already used -- two copies of
+one predicate is how the drift happened, so there is one now.
+
+**FINDING 4 — `dns.CanonicalName` still building keys in `FlushDomain` and the
+TLSA store.** Converted. Worth noting how nearly this went untested: the first
+version of the test used ASCII fixtures, where `dns.CanonicalName` and
+`CanonicalizeName` agree exactly, so reverting the fix stayed green. It only
+became a real test once it stored two nameservers differing by a single
+non-UTF-8 octet -- which is the entire reason the two functions are not
+interchangeable.
+
+**Left for later, as the review confirms:** `rrset_utils` (outbound
+`AuthQueryEngine`), `sign.go` (canonical operands since #417), and the
+`Conf.Zones[i].Name` pair from #417 FINDING 2, still open. The review also notes
+`visitedZones`'s composite key mixes a folded qname with a wire-sourced
+zonename, so a mixed-case repeat referral would miss the loop detector -- not in
+this diff, not requested, and worth picking up.
+
+
+## Re-review of #421 (external, 2026-08-28)
+
+Findings 1-4 accepted; approved as stage 3. Three niggles, two fixed and one
+deliberately not.
+
+**`ServerKey` had stolen `isSubdomainOf`'s godoc.** Fixed. This is the SECOND
+time in the series -- #417 FINDING 3 was the same thing, `normalizeZoneName`
+landing between `FindZone`'s comment and `FindZone`. Both times the cause was
+the same: my patch script inserts a new function before a `func X {` anchor,
+and when a doc comment sits immediately above that anchor the new function is
+spliced into the middle of it. Insert before the COMMENT, not before the `func`.
+
+**`FlushAll` read `rootNSHosts` with `dns.CanonicalName` while building it with
+`CanonicalizeName`.** Fixed. Adjacent to FINDING 4 rather than inside it, but a
+set built with one key function and read with another is precisely the drift
+this stage exists to remove, so it is completing the finding rather than
+expanding it. Covered by a test that caches root glue under a name with a
+non-UTF-8 octet -- the shape the review pointed at -- and watches it survive a
+flush. Reverting the read side flushes it.
+
+**`nsMap[baseName]` in `ParseAdditionalForNSAddrs` is still byte-wise, and is
+deliberately left.** The review is explicit: it is a per-message set of NS
+hostnames built and read inside one function, not the cache index FINDING 2
+named, and expanding a finding after the named map has been converted makes the
+follow-up harder to verify than the fix is worth. The residue is that a
+first-pass OOTS or glue record whose NS is spelled differently *within the same
+referral* can miss; later queries go through `serverMap`, which folds. Recorded
+here so it is a decision rather than an oversight.

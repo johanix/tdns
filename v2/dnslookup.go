@@ -489,7 +489,11 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						nsMap[rr.Ns] = true
 					case *dns.SOA:
 						// this is a negative response, but is the SOA right?
-						if strings.HasSuffix(qname, rr.Header().Name) {
+						// Inside the SOA's zone, as a DNS name. A byte suffix
+						// accepted an SOA for "ample." as authorising a denial
+						// for "example." and missed the mis-cased owner an
+						// upstream returns under 0x20 randomisation.
+						if dns.IsSubDomain(rr.Header().Name, qname) {
 							// Yes, this SOA may auth a negative response for qname
 							lgDns.Debug("*** AuthDNSQ: found SOA in Auth, it was a neg resp")
 							imr.Cache.Set(qname, qtype, &cache.CachedRRset{
@@ -554,7 +558,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						if imr.Debug {
 							server.PromoteDebug()
 						}
-						serverMap[name] = server
+						serverMap[cache.ServerKey(name)] = server
 						tmp := glue4Map[name]
 						tmp.RRs = append(tmp.RRs, rr)
 						glue4Map[name] = tmp
@@ -569,7 +573,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						if imr.Debug {
 							server.PromoteDebug()
 						}
-						serverMap[name] = server
+						serverMap[cache.ServerKey(name)] = server
 						tmp := glue6Map[name]
 						tmp.RRs = append(tmp.RRs, rr)
 						glue6Map[name] = tmp
@@ -579,7 +583,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						svcb := rr
 						// Ensure we have a shared AuthServer instance for this NS
 						server := imr.Cache.GetOrCreateAuthServer(name)
-						serverMap[name] = server
+						serverMap[cache.ServerKey(name)] = server
 						for _, kv := range svcb.Value {
 							if kv.Key() == dns.SVCB_ALPN {
 								if alpn, ok := kv.(*dns.SVCBAlpn); ok {
@@ -1119,13 +1123,13 @@ func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, 
 			continue
 		}
 		nsname := dns.Fqdn(ns.Ns)
-		srv, present := serverMap[nsname]
+		srv, present := serverMap[cache.ServerKey(nsname)]
 		if present && len(srv.Addrs) > 0 {
 			continue // already have addresses, nothing to do
 		}
 		if srv == nil {
 			srv = imr.Cache.GetOrCreateAuthServer(nsname)
-			serverMap[nsname] = srv
+			serverMap[cache.ServerKey(nsname)] = srv
 		}
 		before := len(srv.Addrs)
 		for _, atype := range []uint16{dns.TypeA, dns.TypeAAAA} {
@@ -1613,12 +1617,23 @@ func (imr *Imr) CollectNSAddresses(ctx context.Context, rrset *core.RRset, respc
 
 // parseOwnerName extracts the base server name from an owner name, handling both
 // direct nameserver names and OOTS transport signal owners (_dns.{nsname}).
+// oobTransportPrefix is the owner-name prefix an out-of-bailiwick transport
+// signal lives under (draft-ietf-dnsop-oots). Named so the test and the strip
+// cannot drift apart -- they did.
+const oobTransportPrefix = "_dns."
+
 // Returns: baseName, isOOTSOwner, originalOwner
 func parseOwnerName(owner string) (baseName string, isOOTSOwner bool, originalOwner string) {
 	originalOwner = owner
-	if strings.HasPrefix(owner, "_dns.") {
+	// Fold to TEST the prefix, then slice the ORIGINAL by the prefix's length.
+	// strings.TrimPrefix would compare bytes again and strip nothing from
+	// _DNS.ns1.example. -- the name would clear the test and then keep its
+	// prefix, so baseName stayed the whole owner and every lookup on it missed.
+	// Slicing preserves the leftover case, which is the point: the base name is
+	// a nameserver name, and we serve back what arrived.
+	if strings.HasPrefix(core.CanonicalizeName(owner), oobTransportPrefix) {
 		isOOTSOwner = true
-		baseName = strings.TrimPrefix(owner, "_dns.")
+		baseName = owner[len(oobTransportPrefix):]
 	} else {
 		baseName = owner
 	}
@@ -1631,7 +1646,7 @@ func (imr *Imr) parseSVCBTransportSignal(rr *dns.SVCB, serverName string, server
 	if rr == nil {
 		return false
 	}
-	server, ok := serverMap[serverName]
+	server, ok := serverMap[cache.ServerKey(serverName)]
 	if !ok {
 		return false
 	}
@@ -1671,7 +1686,7 @@ func (imr *Imr) parseTSYNCTransportSignal(rr *dns.PrivateRR, serverName string, 
 	if !ok || ts == nil || ts.Transports == "" {
 		return false
 	}
-	server, ok := serverMap[serverName]
+	server, ok := serverMap[cache.ServerKey(serverName)]
 	if !ok {
 		return false
 	}
@@ -1767,7 +1782,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			// 2. Second pass equivalent: isOOTSOwner AND baseName in serverMap (server already exists)
 			if isOOTSOwner {
 				_, inNsMap := nsMap[baseName]
-				_, inServerMap := serverMap[baseName]
+				_, inServerMap := serverMap[cache.ServerKey(baseName)]
 				if inNsMap || inServerMap {
 					serverName = baseName
 					shouldProcessTransportSignal = true
@@ -1788,7 +1803,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		}
 
 		// Create server entry if it doesn't exist (for glue records or transport signals with nsMap match)
-		_, exist := serverMap[serverName]
+		_, exist := serverMap[cache.ServerKey(serverName)]
 		justCreated := false
 		if !exist && (isGlueRecord || shouldProcessTransportSignal) {
 			serversrc := ""
@@ -1799,11 +1814,11 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 				serversrc = "referral"
 			}
 			// Use shared AuthServer instance across all zones
-			serverMap[serverName] = imr.Cache.GetOrCreateAuthServer(serverName)
+			serverMap[cache.ServerKey(serverName)] = imr.Cache.GetOrCreateAuthServer(serverName)
 			// Update fields for this specific context
-			serverMap[serverName].SetSrc(serversrc)
+			serverMap[cache.ServerKey(serverName)].SetSrc(serversrc)
 			if imr.Debug {
-				serverMap[serverName].PromoteDebug()
+				serverMap[cache.ServerKey(serverName)].PromoteDebug()
 			}
 			justCreated = true
 		}
@@ -1819,22 +1834,22 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		switch rr := rr.(type) {
 		case *dns.A:
 			addr := rr.A.String()
-			if !slices.Contains(serverMap[serverName].Addrs, addr) {
-				serverMap[serverName].Addrs = append(serverMap[serverName].Addrs, addr)
+			if !slices.Contains(serverMap[cache.ServerKey(serverName)].Addrs, addr) {
+				serverMap[cache.ServerKey(serverName)].Addrs = append(serverMap[cache.ServerKey(serverName)].Addrs, addr)
 			}
 			// set expiry for this server mapping from glue TTL
-			serverMap[serverName].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
+			serverMap[cache.ServerKey(serverName)].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
 			tmp := glue4Map[serverName]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue4Map[serverName] = tmp
 
 		case *dns.AAAA:
 			addr := rr.AAAA.String()
-			if !slices.Contains(serverMap[serverName].Addrs, addr) {
-				serverMap[serverName].Addrs = append(serverMap[serverName].Addrs, addr)
+			if !slices.Contains(serverMap[cache.ServerKey(serverName)].Addrs, addr) {
+				serverMap[cache.ServerKey(serverName)].Addrs = append(serverMap[cache.ServerKey(serverName)].Addrs, addr)
 			}
 			// set expiry for this server mapping from glue TTL
-			serverMap[serverName].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
+			serverMap[cache.ServerKey(serverName)].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
 			tmp := glue6Map[serverName]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue6Map[serverName] = tmp
@@ -2211,7 +2226,7 @@ func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*cache.A
 	if owner == "" || serverMap == nil {
 		return
 	}
-	server, ok := serverMap[owner]
+	server, ok := serverMap[cache.ServerKey(owner)]
 	if !ok {
 		return
 	}
@@ -2241,7 +2256,7 @@ func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*cache.A
 			server.Transports = append(server.Transports, t)
 		}
 	}
-	serverMap[owner] = server
+	serverMap[cache.ServerKey(owner)] = server
 }
 
 // applyAlpnSignalToServer applies 100-weight transports from a comma-separated ALPN list to a specific server pointer
@@ -2302,7 +2317,7 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 	targetOwner := dns.Fqdn("_dns." + base)
 	for _, rr := range r.Extra {
 		owner := dns.Fqdn(rr.Header().Name)
-		if !strings.EqualFold(owner, targetOwner) {
+		if !core.EqualNames(owner, targetOwner) {
 			lgDns.Debug("parseTransportForServerFromAdditional: owner != target", "owner", owner, "target", targetOwner)
 			continue
 		}
@@ -2354,10 +2369,11 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 		return
 	}
 	owner := dns.Fqdn(qname)
-	if !strings.HasPrefix(owner, "_dns.") {
+	if !strings.HasPrefix(core.CanonicalizeName(owner), oobTransportPrefix) {
 		return
 	}
-	base := strings.TrimPrefix(owner, "_dns.")
+	// Sliced, not TrimPrefix'd: see parseOwnerName.
+	base := owner[len(oobTransportPrefix):]
 	if base == "" {
 		return
 	}
@@ -2366,7 +2382,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 		targetMode = cache.ConnModeValidated
 	}
 	for zone, sm := range imr.Cache.ServerMap.Items() {
-		server, ok := sm[base]
+		server, ok := sm[cache.ServerKey(base)]
 		if !ok {
 			continue
 		}
@@ -2580,6 +2596,33 @@ func extractReferral(r *dns.Msg, qname string, qtype uint16) (*core.RRset, strin
 	return &rrset, zonename, nsMap
 }
 
+// collectDSFromAuthority picks the DS RRset for zonename, and its signatures,
+// out of a referral's authority section.
+//
+// The owner names come from another server's response, so their spelling is
+// that server's choice -- and under 0x20 query-name randomisation it is
+// whatever we happened to send. Compared byte-wise, the DS records were
+// dropped and the child looked unsigned; worse, the two comparisons could
+// disagree, keeping the DS RRset while discarding the RRSIGs that prove it.
+//
+// Pulled out of handleReferral so it can be tested without a network.
+func collectDSFromAuthority(authority []dns.RR, zonename string) (dsRRs, dsSigs []dns.RR) {
+	for _, rr := range authority {
+		switch rr.Header().Rrtype {
+		case dns.TypeDS:
+			if core.EqualNames(rr.Header().Name, zonename) {
+				dsRRs = append(dsRRs, rr)
+			}
+		case dns.TypeRRSIG:
+			sig, ok := rr.(*dns.RRSIG)
+			if ok && sig.TypeCovered == dns.TypeDS && core.EqualNames(rr.Header().Name, zonename) {
+				dsSigs = append(dsSigs, rr)
+			}
+		}
+	}
+	return dsRRs, dsSigs
+}
+
 func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, transport core.Transport, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	if Globals.Debug && !imr.Quiet {
 		imr.Cache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
@@ -2637,20 +2680,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		})
 	}
 	// Also collect and cache DS RRset (signed) when present in referral
-	var dsRRs []dns.RR
-	var dsSigs []dns.RR
-	for _, rr := range r.Ns {
-		switch rr.Header().Rrtype {
-		case dns.TypeDS:
-			if rr.Header().Name == zonename {
-				dsRRs = append(dsRRs, rr)
-			}
-		case dns.TypeRRSIG:
-			if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeDS && rr.Header().Name == zonename {
-				dsSigs = append(dsSigs, rr)
-			}
-		}
-	}
+	dsRRs, dsSigs := collectDSFromAuthority(r.Ns, zonename)
 	if len(dsRRs) > 0 {
 		dsRRset := &core.RRset{
 			Name:   zonename,
@@ -2742,9 +2772,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	// revalidated by scheduleReferralNSRevalidation / revalidateInBailiwickGlue).
 	if nsRRset != nil && zonename != "" && len(nsRRset.RRs) > 0 {
 		inBailiwick := func(host, zone string) bool {
-			h := strings.ToLower(dns.Fqdn(host))
-			z := strings.ToLower(dns.Fqdn(zone))
-			return h == z || strings.HasSuffix(h, "."+z)
+			return dns.IsSubDomain(dns.Fqdn(zone), dns.Fqdn(host))
 		}
 
 		var oobRRset core.RRset
@@ -2787,11 +2815,11 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			haveA := cachedA != nil && cachedA.RRset != nil && len(cachedA.RRset.RRs) > 0
 			haveAAAA := cachedAAAA != nil && cachedAAAA.RRset != nil && len(cachedAAAA.RRset.RRs) > 0
 			if haveA || haveAAAA {
-				srv, present := serverMap[ns.Ns]
+				srv, present := serverMap[cache.ServerKey(ns.Ns)]
 				if !present {
 					srv = imr.Cache.GetOrCreateAuthServer(ns.Ns)
 					srv.SetSrc("referral-oob-cached")
-					serverMap[ns.Ns] = srv
+					serverMap[cache.ServerKey(ns.Ns)] = srv
 				}
 				// AuthServer.Addrs stores BARE IPs (no port). Exchange adds
 				// the port via JoinHostPort when dialing.
@@ -3020,12 +3048,14 @@ func collectInBailiwickNS(serverMap map[string]*cache.AuthServer, zonename strin
 	if len(serverMap) == 0 || zonename == "" {
 		return nil
 	}
-	zone := strings.ToLower(dns.Fqdn(zonename))
+	zone := dns.Fqdn(zonename)
 	var hosts []string
 	for name := range serverMap {
-		fq := strings.ToLower(dns.Fqdn(name))
-		if fq == zone || strings.HasSuffix(fq, "."+zone) {
-			hosts = append(hosts, fq)
+		fq := dns.Fqdn(name)
+		if dns.IsSubDomain(zone, fq) {
+			// Canonical, matching cache.ServerKey, which is what every
+			// subscript of the per-zone server map goes through.
+			hosts = append(hosts, core.CanonicalizeName(fq))
 		}
 	}
 	return hosts
@@ -3040,7 +3070,7 @@ func (imr *Imr) revalidateInBailiwickGlue(ctx context.Context, zonename string, 
 		return
 	}
 	for _, host := range hosts {
-		server := serverMap[host]
+		server := serverMap[cache.ServerKey(host)]
 		imr.revalidateGlueRR(ctx, host, dns.TypeA, server, force)
 		imr.revalidateGlueRR(ctx, host, dns.TypeAAAA, server, force)
 	}
@@ -3169,10 +3199,7 @@ func classifyResponse(qname string, qtype uint16, r *dns.Msg) responseKind {
 		if !hasSOA || soaOwner == "" {
 			return false
 		}
-		// Canonicalise for a simple suffix check.
-		q := dns.Fqdn(strings.ToLower(qname))
-		s := dns.Fqdn(strings.ToLower(soaOwner))
-		return q == s || strings.HasSuffix(q, "."+s) || s == "."
+		return dns.IsSubDomain(dns.Fqdn(soaOwner), dns.Fqdn(qname))
 	}
 
 	switch rcode {

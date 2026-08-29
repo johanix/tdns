@@ -683,7 +683,7 @@ func (imr *Imr) processAddressRecords(rrset *core.RRset, authservers map[string]
 		server.AddAddr(addr)
 		server.SetSrc("answer")
 		server.SetExpire(time.Now().Add(time.Duration(ttl) * time.Second))
-		authservers[nsname] = server
+		authservers[cache.ServerKey(nsname)] = server
 		lgImr.Debug("processAddressRecords: using resolved address", "rrtype", rrType, "nsname", nsname, "addr", addr)
 	}
 }
@@ -1617,7 +1617,7 @@ func (imr *Imr) validateDNSKEYRRsetUsingDirectTA(anchorName string, rrset *core.
 	name := dns.Fqdn(anchorName)
 	dkc := imr.DnskeyCache
 	for item := range dkc.Map.IterBuffered() {
-		if item.Val.Name == name && item.Val.TrustAnchor && item.Val.State == cache.ValidationStateSecure {
+		if core.EqualNames(item.Val.Name, name) && item.Val.TrustAnchor && item.Val.State == cache.ValidationStateSecure {
 			valid, _ := cache.ValidateDNSKEYRRsetSignature(rrset, item.Val.Keyid, name, &item.Val.Dnskey, verbose)
 			if valid {
 				lgImr.Debug("DNSKEY RRset validated using direct DNSKEY trust anchor", "zone", anchorName, "keytag", item.Val.Keyid)
@@ -1935,7 +1935,7 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 		case dns.OpcodeQuery:
 			lgImr.Debug("lookup request", "qname", qname, "qtype", dns.TypeToString[qtype], "RD", msgoptions.RD, "DO", msgoptions.DO, "from", w.RemoteAddr())
 
-			qname = strings.ToLower(qname)
+			qname = core.CanonicalizeName(qname)
 			if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
 				DotServerQnameResponse(qname, w, r)
 				return
@@ -1965,7 +1965,7 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 func DotServerQnameResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeRefused)
-	qname = strings.ToLower(qname)
+	qname = core.CanonicalizeName(qname)
 	// if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
 	lgImr.Debug("query for .server CH TLD", "qname", qname)
 	switch qname {
