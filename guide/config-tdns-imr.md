@@ -148,11 +148,20 @@ Per upstream:
 | `insecure` | `false` | `dot`/`doh`/`doq` only: disable certificate verification (self-signed lab certificates) |
 
 Per zone, `trust-ad: true` accepts the upstream's AD bit instead of validating
-forwarded answers locally. The default (false) runs forwarded answers through
-the resolver's own DNSSEC validation, against its own trust anchors, exactly
-like iteratively resolved answers — the chain queries (DNSKEY, DS) are
-forwarded to the same upstream. Only set `trust-ad` toward a trusted,
-validating upstream over an authenticated transport.
+forwarded answers locally, for positive and negative answers alike. Because a
+spoofed AD bit would be cached as secure and re-served with AD=1, `trust-ad`
+**requires every upstream of the zone to be encrypted and verified**
+(`dot`/`doh`/`doq`, without `insecure`) — the daemon refuses to start
+otherwise. Use it toward a trusted, validating upstream.
+
+The default (false) runs forwarded answers through the resolver's own DNSSEC
+validation, against its own trust anchors, exactly like iteratively resolved
+answers. Forwarded queries then carry CD=1, so a validating upstream hands
+over the data (and RRSIGs) even when *its* validator would reject it — the
+local verdict is independent of the upstream's. The chain queries (DNSKEY,
+DS, per zone level up to a trust anchor) are forwarded to the same upstream;
+they are issued on first contact with a zone and the validated keys are
+cached, so the burst is per zone per TTL, not per query.
 
 Like stubs, forward zones are read at startup only; there is no reload path.
 

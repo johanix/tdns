@@ -93,8 +93,10 @@ imrengine:
    #   trust-ad:  accept the upstream's AD bit instead of validating answers
    #              locally (default false: forwarded answers are DNSSEC
    #              validated against our own trust anchors, like everything
-   #              else). Only sensible toward a trusted validating upstream
-   #              over an authenticated transport.
+   #              else). Because a spoofed AD bit would be cached as secure,
+   #              trust-ad REQUIRES every upstream of the zone to be
+   #              encrypted and verified (dot/doh/doq, without insecure);
+   #              the daemon refuses to start otherwise.
    #
    # forward:
    #    - zone:  foo.bar.
@@ -109,9 +111,11 @@ imrengine:
    #           port:      5355
    #           transport: tcp
    #    - zone:  .                     # forward everything else
-   #      trust-ad: true
-   #      upstreams:
-   #         - addr:      192.0.2.53   # do53, port 53
+   #      trust-ad: true               # ...trusting this upstream's validation,
+   #      upstreams:                   #    hence dot + verified certificate
+   #         - addr:      192.0.2.53
+   #           transport: dot
+   #           tls-server-name: dns.example.net
 
    # Optional IMR debug log, separate from log.file below.
    # logging:

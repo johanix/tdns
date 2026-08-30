@@ -483,8 +483,10 @@ type ImrStubConf struct {
 type ImrForwardConf struct {
 	Zone string `yaml:"zone" mapstructure:"zone" validate:"required"`
 	// TrustAD: accept the upstream's AD bit instead of validating the
-	// answer locally. Only sensible toward a trusted, validating upstream
-	// over an authenticated transport.
+	// answer locally. For a trusted, validating upstream — and because a
+	// spoofed AD bit would be cached as Secure, it REQUIRES every upstream
+	// of the zone to be encrypted and verified (dot/doh/doq without
+	// insecure); the daemon refuses to start otherwise.
 	TrustAD   bool              `yaml:"trust-ad" mapstructure:"trust-ad"`
 	Upstreams []ImrUpstreamConf `yaml:"upstreams" mapstructure:"upstreams" validate:"required"`
 }

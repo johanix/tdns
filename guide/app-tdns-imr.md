@@ -76,12 +76,22 @@ Details of forwarding behaviour:
   operator who confined a zone to an upstream does not want its queries
   leaking to the delegation tree when the upstream is down.
 - **DNSSEC**: forwarded answers go through the resolver's own validation
-  against its own trust anchors, exactly like iterated answers; the chain
-  queries (DNSKEY, DS) are themselves forwarded to the same upstream, so this
-  works even when the upstream is the only reachable resolver. AD is set only
-  on local validation. Per-zone `trust-ad: true` instead adopts the
-  upstream's AD bit — only sensible toward a trusted, validating upstream
-  over an authenticated transport.
+  against its own trust anchors, exactly like iterated answers. Forwarded
+  queries carry CD=1 so the upstream hands over data (and RRSIGs) its own
+  validator would suppress — the local verdict stays independent. The chain
+  is fetched lazily, bottom-up: validating an answer triggers a DNSKEY query
+  for the signer zone, validating that DNSKEY triggers a DS query, and so on
+  up to a trust anchor — each of these forwarded to the same upstream, so
+  validation works even when the upstream is the only reachable resolver.
+  There is no way in plain DNS to request the whole chain in one round trip
+  (RFC 7901's CHAIN option exists but is essentially undeployed), so first
+  contact with a zone costs a short burst of chain queries — typically
+  answered from the upstream's cache in one round trip each — and the
+  validated keys are cached here, so the burst is per zone per TTL, not per
+  query. AD is set only on local validation. Per-zone `trust-ad: true`
+  instead adopts the upstream's AD bit, for positives and negatives alike;
+  because that bit would otherwise be spoofable, `trust-ad` requires every
+  upstream of the zone to be encrypted and verified, enforced at startup.
 - **Transports**: each upstream has its own transport (`do53`, `tcp`, `dot`,
   `doh`, `doq`) and port. Encrypted upstreams verify the server certificate
   by default (`tls-server-name`, or the upstream IP in a SAN), with

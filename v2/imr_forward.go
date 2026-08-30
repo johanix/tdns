@@ -41,8 +41,17 @@ type ForwardUpstream struct {
 	Addr      string // bare IP literal
 	Port      string
 	Transport core.Transport
+	Insecure  bool   // certificate verification disabled (encrypted transports only)
 	Label     string // "addr:port/transport", for logs and hooks
 	Client    core.DNSClienter
+}
+
+// authenticated reports whether this upstream's channel authenticates the
+// server: an encrypted transport with certificate verification enabled.
+// This is what trust-ad requires — an AD bit accepted over anything less is
+// an attacker-settable "cache this as Secure" instruction.
+func (up *ForwardUpstream) authenticated() bool {
+	return core.IsEncryptedTransport(up.Transport) && !up.Insecure
 }
 
 // ForwardZone is the runtime form of an ImrForwardConf entry.
@@ -118,6 +127,7 @@ func buildForwardUpstream(zone string, u ImrUpstreamConf) (*ForwardUpstream, err
 		Addr:      u.Addr,
 		Port:      port,
 		Transport: transport,
+		Insecure:  u.Insecure,
 		Label:     fmt.Sprintf("%s/%s", net.JoinHostPort(u.Addr, port), core.TransportToString[transport]),
 		Client:    core.NewDNSClient(transport, port, tlsConfig),
 	}, nil
@@ -156,6 +166,13 @@ func BuildImrForwards(conf []ImrForwardConf) ([]*ForwardZone, error) {
 			up, err := buildForwardUpstream(zone, u)
 			if err != nil {
 				return nil, err
+			}
+			// trust-ad caches the upstream's AD bit as ValidationStateSecure,
+			// which the responder re-serves as AD=1. Over an unauthenticated
+			// channel that bit is attacker-settable, so refuse the combination
+			// outright rather than silently skipping the plaintext upstream.
+			if fc.TrustAD && !up.authenticated() {
+				return nil, fmt.Errorf("forward zone %s: trust-ad requires every upstream to be encrypted and verified (dot/doh/doq without insecure); upstream %s is not", zone, up.Label)
 			}
 			fz.Upstreams = append(fz.Upstreams, up)
 		}
@@ -215,6 +232,15 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype) // SetQuestion sets RD=1
 	m.SetEdns0(4096, true)
+	// Local validation must be independent of the upstream's validator: with
+	// CD=0 a validating upstream SERVFAILs data *it* considers bogus, so we
+	// would never see the RRSIGs, never apply our own trust anchors, and
+	// could not tell a validation failure from a dead upstream. CD=1 hands
+	// us the data to judge ourselves. With trust-ad the roles reverse — the
+	// upstream's validation is the product — so CD stays 0 there.
+	if !fz.TrustAD {
+		m.CheckingDisabled = true
+	}
 
 	var lastErr error
 	attempts := 0
@@ -280,6 +306,9 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		switch classifyResponse(qname, qtype, r) {
 		case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
 			if cctx, rcode, handled := imr.handleNegative(qname, qtype, r, up.Transport); handled {
+				if fz.TrustAD {
+					imr.applyTrustADToNegative(qname, qtype, r.MsgHdr.AuthenticatedData)
+				}
 				return nil, rcode, cctx, up.Transport, nil
 			}
 			lastErr = fmt.Errorf("negative response from upstream %s lacked a usable SOA", up.Label)
@@ -295,6 +324,23 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 	return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
 		fmt.Errorf("forward zone %s: no usable response for '%s %s' from any of its %d upstreams (attempts=%d, last error: %v)",
 			fz.Zone, qname, dns.TypeToString[qtype], len(fz.Upstreams), attempts, lastErr)
+}
+
+// applyTrustADToNegative maps the upstream's AD bit onto the negative entry
+// handleNegative just cached, the same way acceptForwardedAnswer does for
+// positives: AD=1 -> Secure, else Insecure. handleNegative's own local
+// validation of the denial is overridden — under trust-ad the upstream's
+// verdict IS the product, for negatives no less than for positives.
+func (imr *Imr) applyTrustADToNegative(qname string, qtype uint16, ad bool) {
+	crrset := imr.Cache.Get(qname, qtype)
+	if crrset == nil {
+		return
+	}
+	crrset.State = cache.ValidationStateInsecure
+	if ad {
+		crrset.State = cache.ValidationStateSecure
+	}
+	imr.Cache.Set(qname, qtype, crrset)
 }
 
 // acceptForwardedAnswer implements trust-ad: the upstream's answer is taken

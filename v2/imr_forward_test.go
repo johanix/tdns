@@ -5,11 +5,21 @@ package tdns
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/binary"
+	"io"
 	"log"
+	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +28,7 @@ import (
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
+	"github.com/quic-go/quic-go"
 )
 
 // The forward form documented in cmdv2/imr/tdns-imr.sample.yaml must decode,
@@ -35,10 +46,15 @@ forward:
      trust-ad: true
      upstreams:
         - addr:      192.0.2.2
+          transport: dot
+          tls-server-name: resolver.company.com
+   - zone: lab.example.
+     upstreams:
+        - addr:      192.0.2.4
           transport: tcp
         - addr:      2001:db8::53
-          insecure:  true
           transport: dot
+          insecure:  true
    - zone: .
      upstreams:
         - addr: 192.0.2.3
@@ -49,8 +65,8 @@ forward:
 	if err := yaml.Unmarshal([]byte(documented), &conf); err != nil {
 		t.Fatalf("the documented forward form does not decode: %v", err)
 	}
-	if len(conf.Forward) != 3 {
-		t.Fatalf("want 3 forward zones, got %d", len(conf.Forward))
+	if len(conf.Forward) != 4 {
+		t.Fatalf("want 4 forward zones, got %d", len(conf.Forward))
 	}
 	f0 := conf.Forward[0]
 	if f0.Zone != "foo.bar." || f0.TrustAD {
@@ -61,8 +77,12 @@ forward:
 		t.Errorf("forward[0].upstreams[0] = %+v", f0.Upstreams[0])
 	}
 	f1 := conf.Forward[1]
-	if !f1.TrustAD || len(f1.Upstreams) != 2 || !f1.Upstreams[1].Insecure {
+	if !f1.TrustAD || len(f1.Upstreams) != 1 || f1.Upstreams[0].TLSServerName != "resolver.company.com" {
 		t.Errorf("forward[1] = %+v", f1)
+	}
+	f2 := conf.Forward[2]
+	if f2.TrustAD || len(f2.Upstreams) != 2 || !f2.Upstreams[1].Insecure {
+		t.Errorf("forward[2] = %+v", f2)
 	}
 }
 
@@ -104,6 +124,16 @@ func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 		}
 	}
 
+	// trust-ad demands an authenticated channel and must be accepted on one.
+	if _, err := BuildImrForwards([]ImrForwardConf{
+		{Zone: "ok.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{
+			{Addr: "192.0.2.1", Transport: "dot", TLSServerName: "dns.example.com"},
+			{Addr: "192.0.2.2", Transport: "doq"},
+		}},
+	}); err != nil {
+		t.Errorf("trust-ad with verified encrypted upstreams rejected: %v", err)
+	}
+
 	bad := []struct {
 		name string
 		conf []ImrForwardConf
@@ -117,6 +147,15 @@ func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 		}},
 		{"no upstreams", []ImrForwardConf{{Zone: "foo.bar."}}},
 		{"no zone", []ImrForwardConf{{Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}},
+		// A spoofable AD bit must not be a Secure-cache oracle: trust-ad
+		// over plaintext or unverified TLS is refused at build time.
+		{"trust-ad on do53", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}},
+		{"trust-ad on tcp", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "tcp"}}}}},
+		{"trust-ad with insecure dot", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "dot", Insecure: true}}}}},
+		{"trust-ad with one plaintext upstream", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{
+			{Addr: "192.0.2.1", Transport: "dot"},
+			{Addr: "192.0.2.2"},
+		}}}},
 	}
 	for _, b := range bad {
 		if _, err := BuildImrForwards(b.conf); err == nil {
@@ -164,7 +203,10 @@ func TestForwardZoneFor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildImrForwards: %v", err)
 	}
-	imr := &Imr{Forwards: forwards, stubZones: []string{"internal.example.", "deep.sub.foo.bar."}}
+	// foo.bar. is deliberately BOTH a stub and a forward zone: equal
+	// specificity means the forward wins — a stub overrides only when it is
+	// strictly more specific.
+	imr := &Imr{Forwards: forwards, stubZones: []string{"internal.example.", "deep.sub.foo.bar.", "foo.bar."}}
 
 	cases := []struct {
 		qname string
@@ -172,11 +214,11 @@ func TestForwardZoneFor(t *testing.T) {
 	}{
 		{"www.example.com.", "."},          // root forward catches everything...
 		{"WWW.Foo.Bar.", "foo.bar."},       // ...unless something more specific matches (case-insensitively)
+		{"foo.bar.", "foo.bar."},           // same-zone stub + forward: forward wins
 		{"x.sub.foo.bar.", "sub.foo.bar."}, // longest forward match wins
 		{"host.internal.example.", ""},     // stub more specific than "." wins
 		{"a.deep.sub.foo.bar.", ""},        // stub more specific than sub.foo.bar. wins
 		{"internal.example.", ""},          // the stub apex itself
-		{"foo.bar.", "foo.bar."},           // the forward apex itself
 	}
 	for _, c := range cases {
 		fz := imr.forwardZoneFor(c.qname)
@@ -195,66 +237,301 @@ func TestForwardZoneFor(t *testing.T) {
 	}
 }
 
-// startTestUpstream starts a UDP resolver double on 127.0.0.1 that answers
-// like a recursive: it REFUSES queries without RD, answers www.fwd.example. A
-// with an A record (AD=1), nx.fwd.example. with NXDOMAIN+SOA, and everything
-// else with NODATA+SOA.
-func startTestUpstream(t *testing.T) (string, uint16, func()) {
+// ----- upstream resolver double, shared by the Do53/DoT/DoH/DoQ servers -----
+
+type upstreamQuery struct {
+	Qname string
+	Qtype uint16
+	RD    bool
+	CD    bool
+}
+
+type upstreamLog struct {
+	mu      sync.Mutex
+	queries []upstreamQuery
+}
+
+func (l *upstreamLog) add(q upstreamQuery) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.queries = append(l.queries, q)
+}
+
+func (l *upstreamLog) find(qname string, qtype uint16) []upstreamQuery {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []upstreamQuery
+	for _, q := range l.queries {
+		if q.Qname == qname && q.Qtype == qtype {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// upstreamAnswer is the behaviour of the resolver double: a validating
+// recursive that serves fwd.example. and a fake root. It REFUSES queries
+// without RD, answers www.fwd.example. A with AD=1 and
+// unsigned.fwd.example. A with AD=0, NXDOMAINs nx.fwd.example. (AD=1),
+// answers ". NS" (so root priming works through a forward), and answers
+// everything else NODATA+SOA (AD=1 under fwd.example.).
+func upstreamAnswer(logr *upstreamLog, r *dns.Msg) *dns.Msg {
+	q := r.Question[0]
+	logr.add(upstreamQuery{Qname: q.Name, Qtype: q.Qtype, RD: r.RecursionDesired, CD: r.CheckingDisabled})
+
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.RecursionAvailable = true
+	if !r.RecursionDesired {
+		// A forwarded query MUST carry RD; this is what separates
+		// forwarding from iteration in these tests.
+		m.Rcode = dns.RcodeRefused
+		return m
+	}
+
+	fwdSOA := &dns.SOA{
+		Hdr: dns.RR_Header{Name: "fwd.example.", Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 60},
+		Ns:  "ns.fwd.example.", Mbox: "hostmaster.fwd.example.",
+		Serial: 1, Refresh: 3600, Retry: 600, Expire: 86400, Minttl: 60,
+	}
+	rootSOA := &dns.SOA{
+		Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 60},
+		Ns:  "ns.fake-root.", Mbox: "hostmaster.fake-root.",
+		Serial: 1, Refresh: 3600, Retry: 600, Expire: 86400, Minttl: 60,
+	}
+
+	switch {
+	case q.Name == "www.fwd.example." && q.Qtype == dns.TypeA:
+		m.AuthenticatedData = true
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.IPv4(192, 0, 2, 77),
+		})
+	case q.Name == "unsigned.fwd.example." && q.Qtype == dns.TypeA:
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.IPv4(192, 0, 2, 78),
+		})
+	case q.Name == "nx.fwd.example.":
+		m.AuthenticatedData = true
+		m.Rcode = dns.RcodeNameError
+		m.Ns = append(m.Ns, fwdSOA)
+	case q.Name == "." && q.Qtype == dns.TypeNS:
+		m.Answer = append(m.Answer, &dns.NS{
+			Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 300},
+			Ns:  "ns.fake-root.",
+		})
+	default:
+		if dns.IsSubDomain("fwd.example.", q.Name) {
+			m.AuthenticatedData = true
+			m.Ns = append(m.Ns, fwdSOA)
+		} else {
+			m.Ns = append(m.Ns, rootSOA)
+		}
+	}
+	return m
+}
+
+func upstreamDNSHandler(logr *upstreamLog) dns.HandlerFunc {
+	return func(w dns.ResponseWriter, r *dns.Msg) {
+		_ = w.WriteMsg(upstreamAnswer(logr, r))
+	}
+}
+
+func splitHostPort(t *testing.T, hostport string) (string, uint16) {
+	t.Helper()
+	host, portStr, err := net.SplitHostPort(hostport)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", hostport, err)
+	}
+	port, _ := strconv.Atoi(portStr)
+	return host, uint16(port)
+}
+
+// startTestUpstream starts the double on 127.0.0.1 UDP.
+func startTestUpstream(t *testing.T) (string, uint16, *upstreamLog, func()) {
 	t.Helper()
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	host, portStr, _ := net.SplitHostPort(pc.LocalAddr().String())
-	port, _ := strconv.Atoi(portStr)
+	host, port := splitHostPort(t, pc.LocalAddr().String())
 
-	soa := &dns.SOA{
-		Hdr: dns.RR_Header{Name: "fwd.example.", Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 60},
-		Ns:  "ns.fwd.example.", Mbox: "hostmaster.fwd.example.",
-		Serial: 1, Refresh: 3600, Retry: 600, Expire: 86400, Minttl: 60,
-	}
-
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
-		m := new(dns.Msg)
-		m.SetReply(r)
-		m.RecursionAvailable = true
-		if !r.RecursionDesired {
-			// A forwarded query MUST carry RD; this is what separates
-			// forwarding from iteration in this test.
-			m.Rcode = dns.RcodeRefused
-			_ = w.WriteMsg(m)
-			return
-		}
-		q := r.Question[0]
-		switch {
-		case q.Name == "www.fwd.example." && q.Qtype == dns.TypeA:
-			m.AuthenticatedData = true
-			m.Answer = append(m.Answer, &dns.A{
-				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
-				A:   net.IPv4(192, 0, 2, 77),
-			})
-		case q.Name == "nx.fwd.example.":
-			m.Rcode = dns.RcodeNameError
-			m.Ns = append(m.Ns, soa)
-		default:
-			m.Ns = append(m.Ns, soa)
-		}
-		_ = w.WriteMsg(m)
-	})
-
+	logr := &upstreamLog{}
 	started := make(chan struct{})
-	srv := &dns.Server{PacketConn: pc, Handler: mux, NotifyStartedFunc: func() { close(started) }}
+	srv := &dns.Server{PacketConn: pc, Handler: upstreamDNSHandler(logr), NotifyStartedFunc: func() { close(started) }}
 	go func() { _ = srv.ActivateAndServe() }()
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
 		t.Fatal("test upstream did not start")
 	}
-	return host, uint16(port), func() {
+	return host, port, logr, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = srv.ShutdownContext(ctx)
+	}
+}
+
+// newUpstreamTestCert makes a self-signed certificate for
+// "dns.test.example" and 127.0.0.1, and a pool trusting it.
+func newUpstreamTestCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "dns.test.example"},
+		DNSNames:              []string{"dns.test.example"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse certificate: %v", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(leaf)
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, pool
+}
+
+// trustUpstreamCert points every encrypted upstream client of fz at the test
+// pool, keeping certificate verification ON — this is the test's stand-in
+// for the host trust store, not a verification bypass.
+func trustUpstreamCert(t *testing.T, fz *ForwardZone, pool *x509.CertPool) {
+	t.Helper()
+	for _, up := range fz.Upstreams {
+		if c, ok := up.Client.(*core.DNSClient); ok && c.TLSConfig != nil {
+			c.TLSConfig.RootCAs = pool
+		}
+	}
+}
+
+// startTestUpstreamDoT starts the double behind a TLS listener.
+func startTestUpstreamDoT(t *testing.T, cert tls.Certificate) (string, uint16, *upstreamLog, func()) {
+	t.Helper()
+	l, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatalf("tls listen: %v", err)
+	}
+	host, port := splitHostPort(t, l.Addr().String())
+
+	logr := &upstreamLog{}
+	srv := &dns.Server{Listener: l, Handler: upstreamDNSHandler(logr)}
+	go func() { _ = srv.ActivateAndServe() }()
+	return host, port, logr, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	}
+}
+
+// startTestUpstreamDoH starts the double behind an HTTPS /dns-query endpoint.
+func startTestUpstreamDoH(t *testing.T, cert tls.Certificate) (string, uint16, *upstreamLog, func()) {
+	t.Helper()
+	l, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatalf("tls listen: %v", err)
+	}
+	host, port := splitHostPort(t, l.Addr().String())
+
+	logr := &upstreamLog{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/dns-query", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 65535))
+		if err != nil {
+			http.Error(w, "read", http.StatusBadRequest)
+			return
+		}
+		q := new(dns.Msg)
+		if err := q.Unpack(body); err != nil {
+			http.Error(w, "unpack", http.StatusBadRequest)
+			return
+		}
+		packed, err := upstreamAnswer(logr, q).Pack()
+		if err != nil {
+			http.Error(w, "pack", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(packed)
+	})
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(l) }()
+	return host, port, logr, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}
+}
+
+// startTestUpstreamDoQ starts the double behind a DoQ (RFC 9250) listener.
+func startTestUpstreamDoQ(t *testing.T, cert tls.Certificate) (string, uint16, *upstreamLog, func()) {
+	t.Helper()
+	l, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		NextProtos:   []string{"doq"},
+		MinVersion:   tls.VersionTLS13,
+	}, nil)
+	if err != nil {
+		t.Fatalf("quic listen: %v", err)
+	}
+	host, port := splitHostPort(t, l.Addr().String())
+
+	logr := &upstreamLog{}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for {
+			conn, err := l.Accept(ctx)
+			if err != nil {
+				return
+			}
+			go func() {
+				for {
+					stream, err := conn.AcceptStream(ctx)
+					if err != nil {
+						return
+					}
+					go func() {
+						defer stream.Close()
+						var lenBuf [2]byte
+						if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
+							return
+						}
+						buf := make([]byte, binary.BigEndian.Uint16(lenBuf[:]))
+						if _, err := io.ReadFull(stream, buf); err != nil {
+							return
+						}
+						q := new(dns.Msg)
+						if err := q.Unpack(buf); err != nil {
+							return
+						}
+						packed, err := upstreamAnswer(logr, q).Pack()
+						if err != nil {
+							return
+						}
+						binary.BigEndian.PutUint16(lenBuf[:], uint16(len(packed)))
+						_, _ = stream.Write(lenBuf[:])
+						_, _ = stream.Write(packed)
+					}()
+				}
+			}()
+		}
+	}()
+	return host, port, logr, func() {
+		cancel()
+		_ = l.Close()
 	}
 }
 
@@ -272,18 +549,23 @@ func newForwardTestImr(t *testing.T, conf []ImrForwardConf) *Imr {
 	}
 }
 
-// End to end over Do53 on a non-standard port: the query must reach the
-// upstream with RD=1, the answer must be cached, the upstream's AD bit must
-// map to the validation state (trust-ad), and negatives must cache as
-// negatives. Also proves the per-upstream port plumbing, since the upstream
-// listens on an ephemeral port.
+// ----- end-to-end tests -----
+
+// trust-ad over DoT with real certificate verification: the query must reach
+// the upstream with RD=1 and CD=0, the upstream's AD bit must map onto the
+// cache validation state for positives AND negatives, and AD=0 must map to
+// Insecure. Also the DoT wire e2e.
 func TestForwardQueryTrustAD(t *testing.T) {
-	addr, port, stop := startTestUpstream(t)
+	cert, pool := newUpstreamTestCert(t)
+	addr, port, logr, stop := startTestUpstreamDoT(t, cert)
 	defer stop()
 
 	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
+		{Zone: "fwd.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{
+			{Addr: addr, Port: port, Transport: "dot", TLSServerName: "dns.test.example"},
+		}},
 	})
+	trustUpstreamCert(t, imr.Forwards[0], pool)
 	ctx := context.Background()
 
 	// Positive answer, via the real entry point so the forward hook in
@@ -291,26 +573,39 @@ func TestForwardQueryTrustAD(t *testing.T) {
 	// directly. The empty serverMap must be irrelevant.
 	rrset, rcode, cctx, transport, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
 	if err != nil {
-		t.Fatalf("forwarded query: %v", err)
+		t.Fatalf("forwarded query over DoT: %v", err)
 	}
 	if rcode != dns.RcodeSuccess || cctx != cache.ContextAnswer || len(rrset.RRs) != 1 {
 		t.Fatalf("rcode=%d context=%s rrs=%v", rcode, cache.CacheContextToString[cctx], rrset)
 	}
-	if transport != core.TransportDo53 {
+	if transport != core.TransportDoT {
 		t.Errorf("transport = %s", core.TransportToString[transport])
 	}
 	if a, ok := rrset.RRs[0].(*dns.A); !ok || a.A.String() != "192.0.2.77" {
 		t.Errorf("answer = %v", rrset.RRs[0])
 	}
-	crrset := imr.Cache.Get("www.fwd.example.", dns.TypeA)
-	if crrset == nil || crrset.Context != cache.ContextAnswer {
-		t.Fatalf("answer not cached: %+v", crrset)
+	seen := logr.find("www.fwd.example.", dns.TypeA)
+	if len(seen) == 0 {
+		t.Fatal("upstream never saw the query")
 	}
-	if crrset.State != cache.ValidationStateSecure {
-		t.Errorf("trust-ad with upstream AD=1: state = %s, want secure", cache.ValidationStateToString[crrset.State])
+	if !seen[0].RD || seen[0].CD {
+		t.Errorf("trust-ad query on the wire: RD=%v CD=%v, want RD=true CD=false", seen[0].RD, seen[0].CD)
+	}
+	crrset := imr.Cache.Get("www.fwd.example.", dns.TypeA)
+	if crrset == nil || crrset.State != cache.ValidationStateSecure {
+		t.Fatalf("trust-ad with upstream AD=1: cached = %+v, want state secure", crrset)
 	}
 
-	// NXDOMAIN caches as a negative.
+	// AD=0 from the upstream must map to Insecure, never borrow Secure.
+	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "unsigned.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false); err != nil {
+		t.Fatalf("AD=0 query: %v", err)
+	}
+	if crrset := imr.Cache.Get("unsigned.fwd.example.", dns.TypeA); crrset == nil || crrset.State != cache.ValidationStateInsecure {
+		t.Errorf("trust-ad with upstream AD=0: cached = %+v, want state insecure", crrset)
+	}
+
+	// Negatives: the upstream authenticated the denial (AD=1), so the
+	// cached negative must be Secure too — trust-ad is not positives-only.
 	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "nx.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
 	if err != nil {
 		t.Fatalf("forwarded NXDOMAIN query: %v", err)
@@ -318,8 +613,10 @@ func TestForwardQueryTrustAD(t *testing.T) {
 	if rrset != nil || rcode != dns.RcodeNameError || cctx != cache.ContextNXDOMAIN {
 		t.Fatalf("NXDOMAIN: rrset=%v rcode=%d context=%s", rrset, rcode, cache.CacheContextToString[cctx])
 	}
+	if crrset := imr.Cache.Get("nx.fwd.example.", dns.TypeA); crrset == nil || crrset.State != cache.ValidationStateSecure {
+		t.Errorf("trust-ad NXDOMAIN with upstream AD=1: cached = %+v, want state secure", crrset)
+	}
 
-	// NODATA caches as a negative.
 	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, false)
 	if err != nil {
 		t.Fatalf("forwarded NODATA query: %v", err)
@@ -327,19 +624,119 @@ func TestForwardQueryTrustAD(t *testing.T) {
 	if rrset != nil || rcode != dns.RcodeSuccess || cctx != cache.ContextNoErrNoAns {
 		t.Fatalf("NODATA: rrset=%v rcode=%d context=%s", rrset, rcode, cache.CacheContextToString[cctx])
 	}
+	if crrset := imr.Cache.Get("www.fwd.example.", dns.TypeMX); crrset == nil || crrset.State != cache.ValidationStateSecure {
+		t.Errorf("trust-ad NODATA with upstream AD=1: cached = %+v, want state secure", crrset)
+	}
+}
+
+// Without trust-ad, a forwarded answer goes through the normal local
+// validation path: the query must carry CD=1 on the wire (local validation
+// must see data the upstream's validator would filter), and neither the
+// positive nor the negative cache entry may borrow the upstream's AD bit.
+func TestForwardQueryValidatesLocally(t *testing.T) {
+	addr, port, logr, stop := startTestUpstream(t)
+	defer stop()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
+	})
+	ctx := context.Background()
+
+	rrset, rcode, cctx, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	if err != nil {
+		t.Fatalf("forwarded query: %v", err)
+	}
+	if rcode != dns.RcodeSuccess || cctx != cache.ContextAnswer || rrset == nil || len(rrset.RRs) != 1 {
+		t.Fatalf("rcode=%d context=%s rrset=%v", rcode, cache.CacheContextToString[cctx], rrset)
+	}
+	seen := logr.find("www.fwd.example.", dns.TypeA)
+	if len(seen) == 0 {
+		t.Fatal("upstream never saw the query")
+	}
+	if !seen[0].RD || !seen[0].CD {
+		t.Errorf("local-validation query on the wire: RD=%v CD=%v, want RD=true CD=true", seen[0].RD, seen[0].CD)
+	}
+	crrset := imr.Cache.Get("www.fwd.example.", dns.TypeA)
+	if crrset == nil {
+		t.Fatal("answer not cached")
+	}
+	if crrset.State == cache.ValidationStateSecure {
+		t.Error("unsigned forwarded answer cached as secure: the upstream AD bit leaked through without trust-ad")
+	}
+
+	// The upstream marks its NODATA AD=1 too; without trust-ad that must
+	// not become a Secure negative.
+	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, false); err != nil {
+		t.Fatalf("forwarded NODATA query: %v", err)
+	}
+	if crrset := imr.Cache.Get("www.fwd.example.", dns.TypeMX); crrset != nil && crrset.State == cache.ValidationStateSecure {
+		t.Error("negative cached as secure from the upstream AD bit without trust-ad")
+	}
+}
+
+// Forwarding over DoH: the wire is HTTPS POST /dns-query with certificate
+// verification against the upstream's IP SAN.
+func TestForwardQueryDoH(t *testing.T) {
+	cert, pool := newUpstreamTestCert(t)
+	addr, port, logr, stop := startTestUpstreamDoH(t, cert)
+	defer stop()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: addr, Port: port, Transport: "doh"},
+		}},
+	})
+	trustUpstreamCert(t, imr.Forwards[0], pool)
+
+	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	if err != nil {
+		t.Fatalf("forwarded query over DoH: %v", err)
+	}
+	if rcode != dns.RcodeSuccess || rrset == nil || len(rrset.RRs) != 1 || transport != core.TransportDoH {
+		t.Fatalf("DoH: rcode=%d transport=%s rrset=%v", rcode, core.TransportToString[transport], rrset)
+	}
+	if len(logr.find("www.fwd.example.", dns.TypeA)) == 0 {
+		t.Fatal("DoH upstream never saw the query")
+	}
+}
+
+// Forwarding over DoQ (RFC 9250): TLS 1.3, ALPN "doq", certificate verified
+// against the configured tls-server-name.
+func TestForwardQueryDoQ(t *testing.T) {
+	cert, pool := newUpstreamTestCert(t)
+	addr, port, logr, stop := startTestUpstreamDoQ(t, cert)
+	defer stop()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: addr, Port: port, Transport: "doq", TLSServerName: "dns.test.example"},
+		}},
+	})
+	trustUpstreamCert(t, imr.Forwards[0], pool)
+
+	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	if err != nil {
+		t.Fatalf("forwarded query over DoQ: %v", err)
+	}
+	if rcode != dns.RcodeSuccess || rrset == nil || len(rrset.RRs) != 1 || transport != core.TransportDoQ {
+		t.Fatalf("DoQ: rcode=%d transport=%s rrset=%v", rcode, core.TransportToString[transport], rrset)
+	}
+	if len(logr.find("www.fwd.example.", dns.TypeA)) == 0 {
+		t.Fatal("DoQ upstream never saw the query")
+	}
 }
 
 // A dead first upstream must not take the query down: the second upstream
 // answers. And when every upstream is dead, the query must fail with an error
 // naming the forward zone (forward-only, no fallback to iteration).
 func TestForwardQueryFailover(t *testing.T) {
-	addr, port, stop := startTestUpstream(t)
+	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
 
 	// 192.0.2.9 is TEST-NET: nothing answers. Use a sub-second timeout so
 	// the failover test doesn't sit out the full 5s default.
 	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.9", Port: 1},
 			{Addr: addr, Port: port},
 		}},
@@ -375,30 +772,29 @@ func TestForwardQueryFailover(t *testing.T) {
 	}
 }
 
-// Without trust-ad, a forwarded answer goes through the normal local
-// validation path. The upstream serves an unsigned answer and NODATA for the
-// validator's chain queries, so the outcome must be a cached, NON-secure
-// answer — never a borrowed AD bit.
-func TestForwardQueryValidatesLocally(t *testing.T) {
-	addr, port, stop := startTestUpstream(t)
+// With a "zone: ." forward, root priming must work through the upstream:
+// PrimeWithHints ends with a fetcher query for ". NS", and in a forward-all
+// deployment the delegation tree may be unreachable. The double is the only
+// server that answers, so a primed cache proves the priming query forwarded.
+func TestForwardRootPrimesThroughUpstream(t *testing.T) {
+	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 
 	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
+		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
 	})
 
-	rrset, rcode, cctx, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
-	if err != nil {
-		t.Fatalf("forwarded query: %v", err)
+	if err := imr.Cache.PrimeWithHints(context.Background(), "", imr.IterativeDNSQueryFetcher()); err != nil {
+		t.Fatalf("PrimeWithHints through the forward: %v", err)
 	}
-	if rcode != dns.RcodeSuccess || cctx != cache.ContextAnswer || rrset == nil || len(rrset.RRs) != 1 {
-		t.Fatalf("rcode=%d context=%s rrset=%v", rcode, cache.CacheContextToString[cctx], rrset)
+	if !imr.Cache.IsPrimed() {
+		t.Fatal("cache not primed")
 	}
-	crrset := imr.Cache.Get("www.fwd.example.", dns.TypeA)
-	if crrset == nil {
-		t.Fatal("answer not cached")
+	seen := logr.find(".", dns.TypeNS)
+	if len(seen) == 0 {
+		t.Fatal("the priming '. NS' query never reached the upstream")
 	}
-	if crrset.State == cache.ValidationStateSecure {
-		t.Error("unsigned forwarded answer cached as secure: the upstream AD bit leaked through without trust-ad")
+	if !seen[0].RD {
+		t.Error("priming query was not recursive (RD=0)")
 	}
 }

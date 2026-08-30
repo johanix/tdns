@@ -24,7 +24,7 @@ treats the response as final.
 
 | Question | Decision |
 |---|---|
-| DNSSEC | Validate forwarded answers locally by default, same machinery as iterative answers. Per-zone `trust-ad: true` opts into accepting the upstream's AD bit instead (AD=1 → cache state Secure, else Insecure) — for trusted validating upstreams over authenticated transport. |
+| DNSSEC | Validate forwarded answers locally by default, same machinery as iterative answers. Forwarded queries carry CD=1 in this mode, so a validating upstream returns data (and RRSIGs) its own validator would suppress and the local verdict stays independent; the DNSKEY/DS chain is fetched lazily bottom-up through the forwarder and cached per zone. Per-zone `trust-ad: true` opts into accepting the upstream's AD bit instead (AD=1 → cache state Secure, else Insecure; queries then carry CD=0), for positives and negatives alike — and because a spoofed AD bit would be cached as Secure, trust-ad requires every upstream of the zone to be encrypted and verified (dot/doh/doq without `insecure`), enforced at config build. |
 | Upstream failure | Forward-only. All upstreams failed → SERVFAIL. No fallback to iteration (predictable, and doesn't leak queries an operator confined to the upstream). |
 | Upstream TLS | Verified by default. Per-upstream `tls-server-name` (SNI + certificate check; unset means the addr IP must be in a SAN), `insecure: true` as explicit opt-out for self-signed lab certs. Note the *iterative* path's shared clients still use `InsecureSkipVerify` — forward upstreams get their own clients and do not inherit that. |
 | Config shape | Structured, mirroring `stubs:` — see `guide/config-tdns-imr.md` and the sample YAML. |
@@ -86,3 +86,18 @@ SERVFAIL, and no-AD-leak without trust-ad.
 - Upstream selection is ordered failover only — no RTT-based preference and
   no per-upstream backoff. With few upstreams this is fine; revisit if
   someone configures many.
+- A cancelled context is checked between upstream attempts, not inside one:
+  `DNSClient.Exchange` has no context (deliberate, documented in
+  `core/dnsclient.go`), so a hung upstream holds the query for the client
+  timeout (5s default) before failover moves on. Belongs to a later
+  context-aware client pass, together with the iterative path.
+- Under `trust-ad`, a CNAME-only answer (upstream returns the CNAME without
+  the target RRset) is cached as-is and not chased. Validating recursives
+  return the full chain, so this is theoretical; the local-validation
+  default chases via `handleAnswer` as usual. If it ever matters, reuse the
+  chase and overwrite the state from AD rather than growing a second
+  packing path.
+
+The 2026-08-30 external review (findings 1–3: CD bit, trust-ad channel
+enforcement, trust-ad negatives) is addressed in the implementation; its
+findings 4–5 are the two deferrals above.
