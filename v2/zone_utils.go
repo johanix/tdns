@@ -860,14 +860,6 @@ func (zd *ZoneData) transferFromUpstream(ctx context.Context, up PeerConf, newZd
 	return false, nil
 }
 
-// FetchFromUpstream pulls the zone from one of its configured primaries.
-// Returns whether the zone was updated.
-//
-// force means the operator explicitly asked for a retransfer, so the zone is
-// re-fetched and re-applied even when upstream's serial has not moved. See the
-// unchanged-serial check below for why that matters -- and note that force also
-// takes the delta path out of play entirely, since an IXFR from our own serial
-// would answer with a single SOA rather than the zone the operator asked for.
 // gateZonemdUnlessAlreadyGated runs the inbound ZONEMD gate on a zone about to
 // be adopted, unless it has been gated already.
 //
@@ -881,6 +873,15 @@ func (zd *ZoneData) gateZonemdUnlessAlreadyGated(ctx context.Context, newZd *Zon
 	return zd.gateIncomingZonemd(ctx, newZd, "upstream")
 }
 
+// FetchFromUpstream pulls the zone from one of its configured primaries.
+// Returns whether the zone was updated.
+//
+// force means the operator explicitly asked for a retransfer, so the zone is
+// re-fetched and re-applied even when upstream's serial has not moved. See the
+// unchanged-serial check below for why that matters -- and note that force also
+// takes the delta path out of play entirely (shouldRequestIxfr), since an IXFR
+// from our own serial would answer with a single SOA rather than the zone the
+// operator asked for.
 func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {

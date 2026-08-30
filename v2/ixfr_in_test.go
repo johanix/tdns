@@ -1274,11 +1274,13 @@ signed.example.	3600	IN	A	10.4.4.4
 	if zd.IncomingSerial != 20 {
 		t.Errorf("serial %d, want 20 -- the AXFR did not run", zd.IncomingSerial)
 	}
-	// No delta was even attempted.
-	if zd.ixfrDerived {
-		t.Error("a signing secondary applied a delta; its baseline is its own " +
-			"signatures, not the primary's")
-	}
+	// Deliberately no assertion on zd.ixfrDerived: that flag lives on the
+	// transfer SCRATCH zone and is read by applyRefreshReplacementLocked for
+	// the epoch decision. It is never copied onto the live zone, so checking
+	// it here could not fail. What pins this behaviour is
+	// TestShouldRequestIxfr's inline-signing case, which fails when the clause
+	// is removed; this test is the end-to-end companion showing the AXFR
+	// actually delivers the zone.
 }
 
 // TestShouldRequestIxfr asserts the attempt decision directly, clause by
@@ -1378,5 +1380,67 @@ capped.example.	3600	IN	A	10.6.6.6
 	}
 	if owner, _ := zd.GetOwner("capped.example."); owner == nil {
 		t.Error("the zone did not converge after the response cap fired")
+	}
+}
+
+// TestZonemdMissAfterApplyFallsBackToAxfr is the wiring the first review
+// asked for, and the failure it prevents is the nastiest in this PR: not a
+// wrong zone, but a zone that stops moving for good.
+//
+// A delta applies cleanly and leaves a digest that no longer describes the
+// zone. Gated only at the caller -- after the upstream loop has closed -- that
+// fails the whole refresh; the next probe still sees the new serial, asks for
+// the same delta, and is refused again, for ever. The full transfer sitting one
+// fallback away carries a consistent zone.
+//
+// The base here carries a deliberately wrong ZONEMD, so any zone built by
+// applying a delta to it still carries it and cannot verify. The primary's
+// AXFR body has no ZONEMD at all, which is not a failure (ZonemdAbsent), so the
+// fallback converges.
+func TestZonemdMissAfterApplyFallsBackToAxfr(t *testing.T) {
+	authApp(t)
+	// Scheme 1, algorithm 1 (SHA-384): a digest the verifier CAN check and
+	// which is wrong. Algorithm 241 would be private-use, which reads as
+	// unsupported rather than invalid -- and an unverifiable digest is adopted,
+	// so the gate would never fire.
+	wrongZonemd := "example.\t3600\tIN\tZONEMD\t7 1 1 DEADBEEF96FA17DEB540CDC4B2D4D5956D432F7DD92DCFB73F445F1B4F3A709D6CCC69BB87293A9BB3B63A4F0D4E3D55"
+	base := ixApplyZone + wrongZonemd + "\n"
+
+	axfrBody := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+www.example.	3600	IN	A	10.0.0.3
+healed.example.	3600	IN	A	10.8.8.8
+`
+	// A delta that applies cleanly: adds one record, touches nothing else --
+	// and so leaves the wrong ZONEMD in place.
+	delta := []dns.RR{
+		ixSOA(t, 20),
+		ixSOA(t, 7),
+		ixSOA(t, 20), ixA(t, "added.example.", "10.0.0.7"),
+		ixSOA(t, 20),
+	}
+	addr, stop := startBadIxfrPrimary(t, axfrBody, delta)
+	defer stop()
+
+	zd := ixfrTestSecondary(t, base, addr, map[ZoneOption]bool{OptVerifyZonemd: true})
+	zd.IncomingSerial = 7
+	zd.CurrentSerial = 7
+
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
+		t.Fatalf("FetchFromUpstream: %v", err)
+	}
+
+	// The AXFR ran and its zone was adopted.
+	if zd.IncomingSerial != 20 {
+		t.Errorf("serial %d, want 20: the refresh failed instead of falling back, "+
+			"which is the state the zone never leaves", zd.IncomingSerial)
+	}
+	if owner, _ := zd.GetOwner("healed.example."); owner == nil {
+		t.Error("the AXFR body was not adopted after the delta failed verification")
+	}
+	// And the delta's own record is not in the zone: it was refused, not merged.
+	if owner, _ := zd.GetOwner("added.example."); owner != nil {
+		t.Error("a record from the refused delta is being served")
 	}
 }
