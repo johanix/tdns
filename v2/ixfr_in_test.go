@@ -1083,6 +1083,51 @@ func TestRequestIxfrOptionsAreSecondaryOnly(t *testing.T) {
 			}
 		})
 
+		t.Run(opt+" on a signing secondary warns and is dropped", func(t *testing.T) {
+			// Inert for a different reason than on a primary: the zone re-signs
+			// what it receives, so a delta computed against the primary's copy
+			// cannot apply. shouldRequestIxfr already refuses to ask; this is
+			// so the operator finds out from the config rather than from a
+			// packet capture.
+			zd := &ZoneData{ZoneName: "example."}
+			// A DnssecPolicy, because inline-signing without one raises a
+			// ConfigError of its own and this test asserts there is none.
+			zconf := &ZoneConf{Name: "example.", Type: "secondary",
+				DnssecPolicy: "default",
+				OptionsStrs:  []string{"inline-signing", opt}}
+			options := parseZoneOptions(&Config{}, "example.", zconf, zd)
+
+			if options[StringToZoneOption[opt]] {
+				t.Errorf("%s was accepted on a signing secondary, where it does nothing", opt)
+			}
+			var warned bool
+			for _, e := range zd.ErrorList() {
+				switch e.Type {
+				case ConfigWarning:
+					warned = true
+				case ConfigError:
+					t.Errorf("an inert option raised a service-impacting ConfigError: %q", e.Msg)
+				}
+			}
+			if !warned {
+				t.Errorf("%s on a signing secondary was dropped silently", opt)
+			}
+		})
+
+		t.Run(opt+" order in the config does not change the verdict", func(t *testing.T) {
+			// The signing pre-scan exists for this: written before the signing
+			// option, the request-ixfr case would otherwise be judged before
+			// anything knew the zone signs.
+			zd := &ZoneData{ZoneName: "example."}
+			zconf := &ZoneConf{Name: "example.", Type: "secondary",
+				DnssecPolicy: "default",
+				OptionsStrs:  []string{opt, "inline-signing"}}
+			options := parseZoneOptions(&Config{}, "example.", zconf, zd)
+			if options[StringToZoneOption[opt]] {
+				t.Errorf("%s was accepted when written before inline-signing", opt)
+			}
+		})
+
 		t.Run(opt+" on a primary warns and is dropped", func(t *testing.T) {
 			zd := &ZoneData{ZoneName: "example."}
 			zconf := &ZoneConf{Name: "example.", Type: "primary", OptionsStrs: []string{opt}}
