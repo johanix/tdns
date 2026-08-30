@@ -162,6 +162,16 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 		}
 	}
 
+	// PRE-SCAN: signing, for the same reason -- request-ixfr's verdict below
+	// depends on it, and YAML option order must not decide the answer.
+	signsOwnContent := false
+	for _, option := range zconf.OptionsStrs {
+		switch strings.ToLower(strings.TrimSpace(option)) {
+		case "inline-signing", "online-signing":
+			signsOwnContent = true
+		}
+	}
+
 	for _, option := range zconf.OptionsStrs {
 		option = strings.ToLower(strings.TrimSpace(option))
 		if option == "" {
@@ -217,6 +227,28 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 					zname, ZoneOptionToString[opt])
 				lg.Error("option ignored: not a secondary", "zone", zname,
 					"option", ZoneOptionToString[opt], "type", zconf.Type)
+				if zd != nil {
+					zd.SetError(ConfigWarning, "%s", errorMsg)
+				}
+				continue
+			}
+			// A signing secondary never asks for a delta either
+			// (shouldRequestIxfr): its baseline is its OWN signatures, so a
+			// difference sequence computed against the primary's copy names
+			// records it does not hold. Reported for the same reason the
+			// primary case is -- an option that does nothing produces no
+			// symptom, so silence leaves the operator believing it works.
+			//
+			// Worth distinguishing from the primary case when reading the
+			// message: here the option is inert only while the zone signs.
+			// Turn signing off and it takes effect, which is why the text
+			// names the reason rather than the role.
+			if signsOwnContent {
+				errorMsg := fmt.Sprintf("Zone %s: %s is ignored while the zone signs its own content; "+
+					"a delta computed against the primary's copy cannot apply to locally re-signed data",
+					zname, ZoneOptionToString[opt])
+				lg.Error("option ignored: zone signs its own content", "zone", zname,
+					"option", ZoneOptionToString[opt])
 				if zd != nil {
 					zd.SetError(ConfigWarning, "%s", errorMsg)
 				}
