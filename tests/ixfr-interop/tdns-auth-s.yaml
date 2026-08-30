@@ -1,0 +1,68 @@
+# Secondary for a/ (from tdns), b/ (from BIND) and casc/ (from tdns, and
+# re-served to a BIND edge).
+#
+# Deliberately a faithful mirror: no signing options, and publish-zonemd OFF
+# so the primary's ZONEMD is transferred verbatim rather than recomputed here.
+# That is what makes comparing ZONEMD a test of the TRANSFER rather than of our
+# own digest arithmetic.
+#
+# request-ixfr is not written anywhere: it is ON by default, which is also the
+# state every existing deployment will be in after an upgrade.
+service:
+   name:       IXFR-SECONDARY
+   verbose:    true
+   debug:      false
+
+log:
+   file:       /var/tmp/ixfrinterop/log/tdns-auth-s.log
+   level:      debug
+
+db:
+   file:       /var/tmp/ixfrinterop/tdns-auth-s/auth.db
+
+dnsengine:
+   addresses:  [ 127.0.0.1:5322 ]
+   transports: [ do53 ]
+
+apiserver:
+   addresses:  [ 127.0.0.1:8322 ]
+   apikey:     ixfr-interop-test-key
+   certfile:   /var/tmp/ixfrinterop/certs/localhost.crt
+   keyfile:    /var/tmp/ixfrinterop/certs/localhost.key
+
+imrengine:
+   active:     false
+
+zones:
+   - name:      a.ixfr.test.
+     type:      secondary
+     store:     map
+     primaries:
+        - addr: "127.0.0.1:5321"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   - name:      b.ixfr.test.
+     type:      secondary
+     store:     map
+     primaries:
+        - addr: "127.0.0.1:5323"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   - name:      casc.ixfr.test.
+     type:      secondary
+     store:     map
+     primaries:
+        - addr: "127.0.0.1:5321"
+          key:  NOKEY
+     notify:
+        - addr: "127.0.0.1:5323"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY

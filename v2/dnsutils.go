@@ -147,47 +147,31 @@ func drainRemainder(ch <-chan *dns.Envelope, grace time.Duration) bool {
 	}
 }
 
-// ZoneTransferIn pulls the zone from the upstream primary described by up:
-// AXFR/IXFR over Do53, or over TLS (XoT, RFC 9103) when up.Transport is dot.
-// TSIG (up.Key) and TLS are independent layers and may be combined.
+// openTransferStream performs the setup every inbound transfer needs -- XoT TLS
+// config, TSIG signing, the bound source address -- and starts the stream.
+//
+// Extracted so the AXFR and IXFR paths cannot drift apart on any of it. All
+// three are invisible from the outside until something refuses us, and then the
+// only evidence is in the far end's log.
 //
 // ctx bounds the transfer. An AXFR of a large zone is the longest-running
 // network operation in the daemon, so a shutdown landing mid-stream should stop
 // it rather than let it run to completion against an engine that is going away.
-func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint32, ttype string, conf *Config) (uint32, error) {
+func (zd *ZoneData) openTransferStream(ctx context.Context, up PeerConf, msg *dns.Msg, conf *Config) (<-chan *dns.Envelope, *dns.Transfer, error) {
 	upstream := up.Addr
-	if upstream == "" {
-		Fatal("ZoneTransfer: upstream not set")
-	}
-
-	msg := new(dns.Msg)
-	if ttype == "ixfr" {
-		// NB: SetIxfr("", "") packs ZERO bytes for the empty MNAME/RNAME
-		// (malformed SOA rdata → the primary FORMERRs the request). Root
-		// names pack correctly; the primary only reads the serial anyway.
-		msg.SetIxfr(zd.ZoneName, serial, ".", ".")
-	} else {
-		msg.SetAxfr(zd.ZoneName)
-	}
-
-	if zd.ZoneStore == MapZone {
-		zd.Data = core.NewNameMap[OwnerData]()
-	}
-	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore], "transport", transportLabel(up))
-
 	transfer := new(dns.Transfer)
 	// XoT: a DoT peer gets a verifying TLS config (pin/dane/pkix) and the
 	// fork's Transfer.In dials tcp-tls with it. nil => plain TCP (Do53).
 	tlsCfg, terr := conf.ClientTLSConfigForPeer(up)
 	if terr != nil {
-		return 0, fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)
+		return nil, nil, fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)
 	}
 	transfer.TLS = tlsCfg
 	// Sign the AXFR/IXFR request under this upstream's key (NOKEY => unsigned).
 	// The provider also verifies the TSIG on the inbound envelopes.
 	provider, serr := SignForPeer(msg, up.Key, conf)
 	if serr != nil {
-		return 0, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
+		return nil, nil, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
 	}
 	transfer.TsigProvider = provider
 
@@ -207,7 +191,7 @@ func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint
 	if len(src) > 0 {
 		conn, derr := dialTransferConn(ctx, upstream, tlsCfg, src, transfer.DialTimeout)
 		if derr != nil {
-			return 0, fmt.Errorf("ZoneTransferIn %s: dial %s: %w", zd.ZoneName, upstream, derr)
+			return nil, nil, fmt.Errorf("ZoneTransferIn %s: dial %s: %w", zd.ZoneName, upstream, derr)
 		}
 		// nil means no configured source matched this upstream's family; leave
 		// Conn unset so In() dials normally rather than relying on a typed-nil
@@ -228,7 +212,48 @@ func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		zd.Logger.Printf("Error from transfer.In: %v\n", err)
-		return 0, clarifyXfrError(zd.ZoneName, upstream, err)
+		return nil, nil, clarifyXfrError(zd.ZoneName, upstream, err)
+	}
+	return answerChan, transfer, nil
+}
+
+// ZoneTransferIn pulls a whole zone from the upstream primary described by up:
+// AXFR over Do53, or over TLS (XoT, RFC 9103) when up.Transport is dot. TSIG
+// (up.Key) and TLS are independent layers and may be combined.
+//
+// This is the full-zone path, and the only one that streams straight into
+// zd.Data. An incremental transfer goes through ixfrTransferIn instead, which
+// has to buffer: whether a reply is a difference sequence or a whole zone is
+// not knowable until the second record.
+func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint32, ttype string, conf *Config) (uint32, error) {
+	upstream := up.Addr
+	if upstream == "" {
+		Fatal("ZoneTransfer: upstream not set")
+	}
+
+	// Refused rather than served. This function drains through SortFunc, which
+	// records only the first SOA and appends everything else -- feed it a
+	// difference stream and the deletes are applied as ADDITIONS and the
+	// bracket SOAs vanish, which is silent corruption of the zone we serve.
+	// ixfrTransferIn exists precisely because that cannot be done here, and
+	// leaving a working-looking branch behind would mean the next caller to
+	// pass "ixfr" gets the corruption rather than an error.
+	if ttype == "ixfr" {
+		return 0, fmt.Errorf("ZoneTransferIn %s: incremental transfer must go through ixfrTransferIn, "+
+			"which parses difference sequences; this path would apply deletes as additions", zd.ZoneName)
+	}
+
+	msg := new(dns.Msg)
+	msg.SetAxfr(zd.ZoneName)
+
+	if zd.ZoneStore == MapZone {
+		zd.Data = core.NewNameMap[OwnerData]()
+	}
+	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore], "transport", transportLabel(up))
+
+	answerChan, transfer, err := zd.openTransferStream(ctx, up, msg, conf)
+	if err != nil {
+		return 0, err
 	}
 
 	// count was previously computed and discarded; log it rather than drop it.
@@ -842,7 +867,6 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 		zd.fileDigest = digest
 	}
 
-	zd.XfrType = "axfr"
 	// Return true only if serial changed (indicates actual update)
 	// If force=true but serial unchanged, return false (validated but no update)
 	// This prevents unnecessary zone file writes on config reload when zone hasn't changed

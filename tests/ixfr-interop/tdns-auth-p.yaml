@@ -1,0 +1,70 @@
+# Primary for a/, c/ and casc/. Updated only through the management API:
+# a file reload would go through applyRefreshReplacementLocked, which resets
+# the outbound IXFR chain by design, so a rig that churned the zone file would
+# quietly test nothing but AXFR.
+service:
+   name:       IXFR-PRIMARY
+   verbose:    true
+   debug:      false
+
+log:
+   file:       /var/tmp/ixfrinterop/log/tdns-auth-p.log
+   level:      debug
+
+db:
+   file:       /var/tmp/ixfrinterop/tdns-auth-p/auth.db
+
+dnsengine:
+   addresses:  [ 127.0.0.1:5321 ]
+   transports: [ do53 ]
+
+apiserver:
+   addresses:  [ 127.0.0.1:8321 ]
+   apikey:     ixfr-interop-test-key
+   certfile:   /var/tmp/ixfrinterop/certs/localhost.crt
+   keyfile:    /var/tmp/ixfrinterop/certs/localhost.key
+
+imrengine:
+   active:     false
+
+zones:
+   # Scenario (a): tdns primary -> tdns secondary.
+   - name:      a.ixfr.test.
+     type:      primary
+     zonefile:  /var/tmp/ixfrinterop/zones/a.ixfr.test.zone
+     store:     map
+     options:   [ allow-api-updates, publish-zonemd ]
+     notify:
+        - addr: "127.0.0.1:5322"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   # Scenario (c): tdns primary -> BIND secondary.
+   - name:      c.ixfr.test.
+     type:      primary
+     zonefile:  /var/tmp/ixfrinterop/zones/c.ixfr.test.zone
+     store:     map
+     options:   [ allow-api-updates, publish-zonemd ]
+     notify:
+        - addr: "127.0.0.1:5323"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   # Cascade: tdns primary -> tdns secondary -> BIND edge. The middle hop is
+   # what §5 changed, and the edge is a foreign consumer of a delta this
+   # implementation relayed rather than originated.
+   - name:      casc.ixfr.test.
+     type:      primary
+     zonefile:  /var/tmp/ixfrinterop/zones/casc.ixfr.test.zone
+     store:     map
+     options:   [ allow-api-updates, publish-zonemd ]
+     notify:
+        - addr: "127.0.0.1:5322"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY

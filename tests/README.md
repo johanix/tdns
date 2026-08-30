@@ -9,6 +9,7 @@ files, the zones they serve, a `setup.sh` that seeds a work tree, and a
 |---|---|
 | `xot-interop/` | RFC 9103 XFR-over-TLS against NSD, BIND9 and Knot, in both transfer roles, over PKIX and SPKI-pin authentication |
 | `zonemd/` | RFC 8976 ZONEMD as a gate on inbound transfer, against Knot: valid, wrong, absent and uncheckable digests |
+| `ixfr-interop/` | RFC 1995 incremental transfer against BIND9, in both roles and in cascade: a long update series must leave every server in the chain holding an identical zone, reached incrementally |
 
 ## Relative to cmdv2/debug/
 

@@ -133,8 +133,7 @@ type ZoneData struct {
 	// FirstZoneLoad without rewriting their consumers.
 	Status ZoneStatus
 
-	XfrType string // axfr | ixfr
-	Logger  *log.Logger
+	Logger *log.Logger
 	// ZoneFile           string // TODO: Remove this
 	IncomingSerial uint32 // SOA serial that we got from upstream
 	CurrentSerial  uint32 // SOA serial after local bumping
@@ -241,6 +240,14 @@ type ZoneData struct {
 	publishCadence time.Duration
 	publishQueued  bool
 	publishUrgent  bool
+	// ixfrDerived marks a transfer scratch zone whose contents were produced by
+	// applying an inbound difference sequence to the copy we already served,
+	// rather than by receiving a whole zone. Set on the scratch zone by the
+	// IXFR apply and read once, by applyRefreshReplacementLocked, to decide
+	// whether the replacement really is a new IXFR epoch. See §5 of
+	// docs/2026-07-25-inbound-ixfr-plan.md.
+	ixfrDerived bool
+
 	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale
 	// zone replacement): updateIxfrChainLocked clears the delta history
 	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked.
