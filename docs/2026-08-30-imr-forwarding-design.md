@@ -1,0 +1,88 @@
+# IMR: forwarding queries to upstream recursive resolvers
+
+**Date:** 2026-08-30
+**Status:** IMPLEMENTED (branch `feature/imr-forwarding`)
+
+## 1. What and why
+
+The IMR could resolve iteratively (from the root or from a stub zone's
+authoritative servers) but had no way to hand a query to an upstream
+**recursive** resolver and accept the final answer — the classic forwarder
+configuration, where a resolver behaves like a stub resolver toward its
+upstream. This adds it:
+
+- forward all queries (`zone: .`) or selectively per zone,
+- per-upstream transport (`do53`/`tcp`/`dot`/`doh`/`doq`) and port,
+- multiple upstreams per zone, tried in order, first usable response wins.
+
+Forwarding differs from the existing `stubs:` in exactly one semantic:
+a stub pre-seeds the server map with authoritative servers and the resolver
+still **iterates** (RD=0, referrals followed); a forward zone sends RD=1 and
+treats the response as final.
+
+## 2. Decisions
+
+| Question | Decision |
+|---|---|
+| DNSSEC | Validate forwarded answers locally by default, same machinery as iterative answers. Per-zone `trust-ad: true` opts into accepting the upstream's AD bit instead (AD=1 → cache state Secure, else Insecure) — for trusted validating upstreams over authenticated transport. |
+| Upstream failure | Forward-only. All upstreams failed → SERVFAIL. No fallback to iteration (predictable, and doesn't leak queries an operator confined to the upstream). |
+| Upstream TLS | Verified by default. Per-upstream `tls-server-name` (SNI + certificate check; unset means the addr IP must be in a SAN), `insecure: true` as explicit opt-out for self-signed lab certs. Note the *iterative* path's shared clients still use `InsecureSkipVerify` — forward upstreams get their own clients and do not inherit that. |
+| Config shape | Structured, mirroring `stubs:` — see `guide/config-tdns-imr.md` and the sample YAML. |
+| Precedence | Most specific configured forward zone wins; a **more** specific configured stub wins over it. Cache-learned zone cuts never override a configured forward (the decision reads only configured entries, deliberately not `ServerMap`). |
+| Reload | None, same as stubs: the forward table is built once in `InitImrEngine` and read-only afterwards. |
+
+## 3. Where it sits
+
+The forward decision lives at the top of
+`IterativeDNSQueryWithLoopDetection` (`v2/dnslookup.go`), after the cache
+check, replacing the whole iterative walk when a forward zone matches. That
+single hook point covers every consumer of the iterative path: `ImrResponder`,
+`ImrQuery`, the CNAME chase, NS-address resolution, and — critically — the
+validator's `RRsetFetcher`, so the DNSKEY/DS chain queries needed to validate
+a forwarded answer are themselves forwarded. It also runs *before* root
+priming's fetcher queries: `InitImrEngine` installs the forward table before
+`PrimeWithHints`, so a `zone: .` deployment primes through the upstream.
+
+New code is in `v2/imr_forward.go`:
+
+- `ImrForwardConf` / `ImrUpstreamConf` (config, in `v2/config.go`) →
+  `BuildImrForwards` → `[]*ForwardZone` on the `Imr` struct, sorted
+  most-specific first.
+- Each `ForwardUpstream` owns a dedicated `core.DNSClient` carrying its
+  transport, port and TLS settings. This sidesteps the shared
+  `RRsetCacheT.DNSClient` registry, whose one-port-per-transport design
+  cannot express a non-standard upstream port — and keeps forward upstreams
+  out of the `AuthServer` backoff machinery entirely (the class of bug in
+  `2026-08-11-imr-stub-resolution-broken.md` cannot reach them).
+- `forwardZoneFor(qname)` — the match/precedence decision.
+- `forwardQuery` — upstream loop; responses are processed by the *existing*
+  `handleAnswer` (local validation, caching, CNAME chase) and
+  `handleNegative` (negative caching), so forwarded data obeys the same
+  cache/validation rules as iterative data. `trust-ad` answers instead go
+  through `acceptForwardedAnswer`, which takes the answer (CNAME chain
+  included) as-is and maps AD onto the cache validation state.
+- The PR flag (encrypted-transport-only) is honored: unencrypted upstreams
+  are skipped, and a forward zone with no encrypted upstream returns the
+  same "PR flag requires encrypted transport" error the responder already
+  turns into an EDE.
+
+## 4. Tests
+
+`v2/imr_forward_test.go`: config decode (hyphenated keys), builder defaults
+and rejections, match/precedence table, and live end-to-end tests against a
+UDP upstream double on an ephemeral port (which by construction proves the
+per-upstream port plumbing): RD=1 enforced by the double, positive/NXDOMAIN/
+NODATA caching, trust-ad AD mapping, upstream failover, all-upstreams-dead
+SERVFAIL, and no-AD-leak without trust-ad.
+
+## 5. Known limitations / follow-ups
+
+- Upstream `addr` must be an IP literal; hostname upstreams would need
+  bootstrap resolution.
+- DoH path is fixed at `/dns-query`.
+- No runtime visibility yet (`imr-show` does not list forward zones, no
+  per-upstream stats) and no reload; both fit naturally into a later
+  `imrengine:` reload/observability pass together with stubs.
+- Upstream selection is ordered failover only — no RTT-based preference and
+  no per-upstream backoff. With few upstreams this is fine; revisit if
+  someone configures many.

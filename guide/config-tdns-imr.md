@@ -86,16 +86,75 @@ are set; the options control whether the resolver goes looking for them.
 
 ## Stub zones
 
-Answer a zone from named servers instead of iterating from the root.
+Resolve a zone by asking named **authoritative** servers directly instead of
+iterating from the root. The resolver still iterates (RD=0) and follows
+referrals below the stub.
+
+`servers:` is a list of objects, not a list of addresses; `addrs:` holds bare
+IP literals (no port), and `alpn:` is optional (defaults to `do53`).
 
 ```yaml
 imrengine:
    stubs:
-      - zone:     internal.example.
-        servers:  [ 192.0.2.53, 2001:db8::53 ]
+      - zone:  internal.example.
+        servers:
+           - name:   ns1.internal.example.
+             addrs:  [ 192.0.2.53, 2001:db8::53 ]
+             alpn:   [ do53 ]
 ```
 
 Both `zone` and `servers` are required in each entry.
+
+## Forward zones
+
+Send queries for names at or below `zone:` as **recursive** queries (RD=1) to
+one or more upstream resolvers, in configured order — the first usable
+response wins. `zone: .` forwards everything. Forwarding is forward-only: when
+every upstream of the matching zone fails, the query fails with SERVFAIL;
+there is no fallback to iteration.
+
+```yaml
+imrengine:
+   forward:
+      - zone:  foo.bar.
+        upstreams:
+           - addr:      192.0.2.1
+             port:      8853
+             transport: doq
+             tls-server-name: dns.example.net
+      - zone:  company.com.
+        upstreams:
+           - addr:      9.8.7.6
+             port:      5355
+             transport: tcp
+      - zone:  .                    # forward everything else
+        upstreams:
+           - addr: 192.0.2.53       # do53, port 53
+```
+
+Selection: the most specific matching forward zone wins, and a **more**
+specific stub zone wins over a forward zone (so a lab stub can punch a hole
+in a `zone: .` forward). Zone cuts learned from referrals never override a
+configured forward.
+
+Per upstream:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `addr` | — | **required**. Bare IP literal (no hostname, no port) |
+| `port` | per transport | `do53`/`tcp` 53, `dot`/`doq` 853, `doh` 443 |
+| `transport` | `do53` | `do53` (UDP with TCP fallback), `tcp`, `dot`, `doh`, `doq` |
+| `tls-server-name` | — | `dot`/`doh`/`doq` only: name the upstream's certificate is verified against (and sent as SNI). Unset: the certificate must carry the `addr` IP in a SAN |
+| `insecure` | `false` | `dot`/`doh`/`doq` only: disable certificate verification (self-signed lab certificates) |
+
+Per zone, `trust-ad: true` accepts the upstream's AD bit instead of validating
+forwarded answers locally. The default (false) runs forwarded answers through
+the resolver's own DNSSEC validation, against its own trust anchors, exactly
+like iteratively resolved answers — the chain queries (DNSKEY, DS) are
+forwarded to the same upstream. Only set `trust-ad` toward a trusted,
+validating upstream over an authenticated transport.
+
+Like stubs, forward zones are read at startup only; there is no reload path.
 
 ## Debug logging
 

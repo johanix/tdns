@@ -55,6 +55,16 @@ type Imr struct {
 	// see W9.
 	TransportSignalDiscovery *cache.DiscoveryTracker
 	TLSADiscovery            *cache.DiscoveryTracker
+	// Forwards holds the configured forward zones, most-specific first
+	// (see imr_forward.go). Built once at init and read-only afterwards;
+	// there is no reload path, same as for stubs.
+	Forwards []*ForwardZone
+	// stubZones lists the CONFIGURED stub zones (canonical FQDNs), so the
+	// forward decision can let a more-specific stub win over a forward
+	// zone. Deliberately not derived from the cache's ServerMap, which
+	// also accumulates zone cuts learned from referrals — those must not
+	// override a configured forward.
+	stubZones []string
 	// dnssecPolicyMu guards largeAlgs and dnskeyTransport: both are read on
 	// the query path (isLargeAlgorithm / dnskeyPolicy) and swapped by
 	// RefreshDnssecPolicy on config reload.
@@ -221,6 +231,26 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 					core.TransportToString[transport], dns.RcodeToString[rcode], ans)
 			})
 		}
+	}
+
+	// Build the forward table before anything sends a query: PrimeWithHints
+	// resolves the root NS through the iterative path, and with a "zone: ."
+	// forward those priming queries must reach the upstream resolver rather
+	// than the root servers.
+	forwards, err := BuildImrForwards(conf.Imr.Forward)
+	if err != nil {
+		return fmt.Errorf("InitImrEngine: %v", err)
+	}
+	imr.Forwards = forwards
+	for _, stub := range conf.Imr.Stubs {
+		imr.stubZones = append(imr.stubZones, dns.Fqdn(core.CanonicalizeName(stub.Zone)))
+	}
+	for _, fz := range forwards {
+		ups := make([]string, 0, len(fz.Upstreams))
+		for _, up := range fz.Upstreams {
+			ups = append(ups, up.Label)
+		}
+		lgImr.Info("adding forward zone", "zone", fz.Zone, "trust-ad", fz.TrustAD, "upstreams", strings.Join(ups, ", "))
 	}
 
 	if !rrcache.IsPrimed() {
