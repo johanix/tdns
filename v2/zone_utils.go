@@ -738,6 +738,44 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 	return incomingSerial == currentSerial && !force
 }
 
+// shouldRequestIxfr is §4.1's attempt decision.
+//
+// A method rather than an expression inline in FetchFromUpstream because it is
+// the whole of what decides between an incremental and a full transfer, and a
+// test that can only observe the decision through its CONSEQUENCES cannot tell
+// the arms apart: a primary with no delta history answers a full zone either
+// way, so removing a clause here and re-running an end-to-end test changes
+// nothing observable. Asking it directly is the only way those cases have
+// teeth.
+//
+//   - requestIxfr()          the operator has not turned it off (F1)
+//   - IncomingSerial != 0    we have a serial to ask from
+//   - publishedSnapshot()    we have a baseline to apply onto
+//   - !force                 a forced retransfer wants the WHOLE zone. An IXFR
+//     from our own serial answers with a single SOA,
+//     which is either read as a no-op -- defeating the
+//     force, the one remedy for a wedged downstream --
+//     or applied as a zone consisting of one record.
+//   - !signsItsOwnContent()  the same boundary §5 draws for onward relay,
+//     applied to asking rather than relaying. A signing
+//     secondary's baseline is its OWN signatures, so a
+//     delta computed against the primary's copy cannot
+//     fit: the delete section names RRSIGs we do not
+//     hold, or replaces an RRset without re-signing it.
+//     The apply refuses and we AXFR -- correctly, but
+//     only after a round trip that could not have
+//     worked, and default-on means every existing
+//     inline-signing secondary pays it on every refresh
+//     after an upgrade. Deltas onto re-signed data are
+//     the staging variant §5 leaves to PR-2.
+func (zd *ZoneData) shouldRequestIxfr(force bool) bool {
+	return zd.requestIxfr() &&
+		zd.IncomingSerial != 0 &&
+		zd.publishedSnapshot() != nil &&
+		!force &&
+		!zd.signsItsOwnContent()
+}
+
 // transferFromUpstream is one upstream's worth of transfer: a delta when the
 // zone is eligible for one, a full AXFR otherwise -- and a full AXFR against
 // the SAME upstream on any IXFR failure, before the caller moves on to the
@@ -783,6 +821,23 @@ func (zd *ZoneData) transferFromUpstream(ctx context.Context, up PeerConf, newZd
 					"zone", zd.ZoneName, "upstream", upstream, "err", aerr)
 				break
 			}
+			// verify-zonemd, here rather than only at the caller's gate after
+			// the upstream loop has closed. A digest that does not describe
+			// the zone the delta produced is a doubt about the DELTA -- the
+			// content moved and the copy we held carried a digest the delta
+			// did not replace -- and every other such doubt takes the
+			// same-upstream AXFR.
+			//
+			// Left to the outer gate it is unrecoverable rather than
+			// wasteful: the refresh fails, the next probe still sees the new
+			// serial, we ask for the same delta, and it is refused again. The
+			// zone stops moving for good, when the full transfer sitting one
+			// fallback away would have carried a consistent digest.
+			if zerr := zd.gateIncomingZonemd(ctx, newZd, "the IXFR delta"); zerr != nil {
+				lg.Info("ixfr: delta failed ZONEMD verification, falling back to AXFR on the same upstream",
+					"zone", zd.ZoneName, "upstream", upstream, "err", zerr)
+				break
+			}
 			return false, nil
 		}
 		// Fell through: start the AXFR from a clean scratch zone rather than
@@ -813,6 +868,19 @@ func (zd *ZoneData) transferFromUpstream(ctx context.Context, up PeerConf, newZd
 // unchanged-serial check below for why that matters -- and note that force also
 // takes the delta path out of play entirely, since an IXFR from our own serial
 // would answer with a single SOA rather than the zone the operator asked for.
+// gateZonemdUnlessAlreadyGated runs the inbound ZONEMD gate on a zone about to
+// be adopted, unless it has been gated already.
+//
+// A delta-derived zone is gated inside transferFromUpstream, where a refusal
+// can still reach the same-upstream AXFR. Everything else -- a full transfer,
+// or a full-zone answer to an IXFR request -- is gated here.
+func (zd *ZoneData) gateZonemdUnlessAlreadyGated(ctx context.Context, newZd *ZoneData) error {
+	if newZd != nil && newZd.ixfrDerived {
+		return nil
+	}
+	return zd.gateIncomingZonemd(ctx, newZd, "upstream")
+}
+
 func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {
@@ -830,13 +898,7 @@ func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force
 	// us says nothing about a sibling. A fresh new_zd per attempt keeps a failed
 	// transfer from polluting the next try; the live zd.IncomingSerial is only
 	// touched in the hard flip below, after a success.
-	// §4.1: ask for a delta only when all four hold. IncomingSerial != 0 and a
-	// published snapshot are what make a delta applicable at all -- we need a
-	// serial to ask from and a baseline to apply onto. !force is the decision
-	// recorded in the plan: a forced retransfer wants the whole zone, and an
-	// IXFR from our own serial would answer with a single SOA, which is either
-	// ignored (defeating the force) or applied as a zone consisting of one RR.
-	useIxfr := zd.requestIxfr() && zd.IncomingSerial != 0 && zd.publishedSnapshot() != nil && !force
+	useIxfr := zd.shouldRequestIxfr(force)
 
 	var new_zd ZoneData
 	transferred := false
@@ -916,7 +978,10 @@ func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force
 	// case the option exists for: a secondary cannot re-derive a digest it was
 	// not given, so checking the one it WAS given is the only assurance it has
 	// that the zone it is about to serve is the zone its primary published.
-	if err := zd.gateIncomingZonemd(ctx, &new_zd, "upstream"); err != nil {
+	// Skipped for a delta-derived zone: transferFromUpstream already gated it,
+	// where a refusal could still fall back to AXFR. Re-running here would
+	// re-digest the whole zone for the same answer.
+	if err := zd.gateZonemdUnlessAlreadyGated(ctx, &new_zd); err != nil {
 		zd.SetStatus(prevStatus)
 		return false, err
 	}

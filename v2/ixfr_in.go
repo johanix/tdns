@@ -531,7 +531,11 @@ func replaceApexSOA(zoneName string, data *core.NameMap[OwnerData], bookend *dns
 // purpose: a delta this large is one we would rather have taken as an AXFR
 // anyway, so the cap costs nothing a real deployment wants and denies an
 // upstream the ability to make us allocate without limit.
-const maxIxfrResponseRRs = 1_000_000
+//
+// A var rather than a const so a test can lower it: a test that had to send a
+// million records to reach the cap would not be run, and the interesting part
+// is not the number but what happens when it is hit.
+var maxIxfrResponseRRs = 1_000_000
 
 // ixfrOutcome is the third thing an inbound transfer can be, alongside "failed"
 // and "here is a zone".
@@ -650,6 +654,20 @@ func collectTransferEnvelopes(ctx context.Context, zoneName, upstream string,
 			// fallback then streams whatever this peer really has, without
 			// holding it all in memory first.
 			if len(out) > maxIxfrResponseRRs {
+				// Fail the way cancellation does, and for the same reason:
+				// the reader sends on an UNBUFFERED channel, so simply
+				// returning parks it on its next send for the life of the
+				// process -- goroutine and socket both -- while the caller
+				// opens a SECOND connection to the same peer for the AXFR.
+				// A cap written to bound memory would then have leaked
+				// something worse than it saved.
+				if abort != nil {
+					abort()
+				}
+				if !drainRemainder(answerChan, transferDrainGrace) {
+					lg.Warn("ixfr: transfer reader did not exit after the response cap; goroutine may be retained",
+						"zone", zoneName, "upstream", upstream, "grace", transferDrainGrace)
+				}
 				return nil, fmt.Errorf("ixfr %s from %s: response exceeds %d records; treating as unusable",
 					zoneName, upstream, maxIxfrResponseRRs)
 			}

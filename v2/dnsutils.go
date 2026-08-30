@@ -231,15 +231,20 @@ func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint
 		Fatal("ZoneTransfer: upstream not set")
 	}
 
-	msg := new(dns.Msg)
+	// Refused rather than served. This function drains through SortFunc, which
+	// records only the first SOA and appends everything else -- feed it a
+	// difference stream and the deletes are applied as ADDITIONS and the
+	// bracket SOAs vanish, which is silent corruption of the zone we serve.
+	// ixfrTransferIn exists precisely because that cannot be done here, and
+	// leaving a working-looking branch behind would mean the next caller to
+	// pass "ixfr" gets the corruption rather than an error.
 	if ttype == "ixfr" {
-		// NB: SetIxfr("", "") packs ZERO bytes for the empty MNAME/RNAME
-		// (malformed SOA rdata → the primary FORMERRs the request). Root
-		// names pack correctly; the primary only reads the serial anyway.
-		msg.SetIxfr(zd.ZoneName, serial, ".", ".")
-	} else {
-		msg.SetAxfr(zd.ZoneName)
+		return 0, fmt.Errorf("ZoneTransferIn %s: incremental transfer must go through ixfrTransferIn, "+
+			"which parses difference sequences; this path would apply deletes as additions", zd.ZoneName)
 	}
+
+	msg := new(dns.Msg)
+	msg.SetAxfr(zd.ZoneName)
 
 	if zd.ZoneStore == MapZone {
 		zd.Data = core.NewNameMap[OwnerData]()

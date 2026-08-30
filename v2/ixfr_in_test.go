@@ -1171,3 +1171,212 @@ func TestApplyIxfrRefusesStrippedNSECSignature(t *testing.T) {
 		t.Errorf("apply refused removing an NSEC and its signature together: %v", err)
 	}
 }
+
+// ---------------------------------------------- the named failure modes
+
+// TestForcedRetransferUsesAxfr: a forced retransfer of an UNCHANGED serial is
+// how a wedged downstream gets the zone re-fetched. An IXFR from our own
+// serial answers with a single SOA, which is either read as a no-op --
+// defeating the force -- or run through the full-zone apply, publishing a zone
+// consisting of one record. Neither may happen, so force never asks.
+func TestForcedRetransferUsesAxfr(t *testing.T) {
+	authApp(t)
+	pzd, addr, stop := ixfrTestPrimary(t, ixApplyZone)
+	defer stop()
+
+	zd := ixfrTestSecondary(t, ixApplyZone, addr, nil)
+	serial := pzd.publishedSnapshot().Serial
+	zd.IncomingSerial = serial
+	zd.CurrentSerial = serial
+
+	before := len(zd.publishedSnapshot().Data)
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, true, nil, &Config{}); err != nil {
+		t.Fatalf("forced retransfer: %v", err)
+	}
+
+	// The zone is whole, not a lone SOA, and the serial did not move.
+	if got := len(zd.publishedSnapshot().Data); got != before {
+		t.Errorf("zone has %d owners after a forced retransfer, had %d; a single-SOA "+
+			"reply was applied as if it were a zone", got, before)
+	}
+	if zd.IncomingSerial != serial {
+		t.Errorf("serial moved to %d on a forced retransfer of %d", zd.IncomingSerial, serial)
+	}
+	if owner, _ := zd.GetOwner("www.example."); owner == nil {
+		t.Error("the forced retransfer left the zone without its records")
+	}
+}
+
+// TestUpToDateReplyChangesNothing: the single-SOA answer is neither an error
+// nor a zone. It must leave the served copy exactly as it was -- no swap, no
+// serial move -- rather than being run through the full-zone apply.
+func TestUpToDateReplyChangesNothing(t *testing.T) {
+	authApp(t)
+	pzd, addr, stop := ixfrTestPrimary(t, ixApplyZone)
+	defer stop()
+
+	zd := ixfrTestSecondary(t, ixApplyZone, addr, nil)
+	serial := pzd.publishedSnapshot().Serial
+	zd.IncomingSerial = serial
+	zd.CurrentSerial = serial
+
+	// Asking from the serial the primary already has is the up-to-date case.
+	outcome, rrs, err := zd.ixfrTransferIn(context.Background(), zd.Upstreams[0], serial, &Config{})
+	if err != nil {
+		t.Fatalf("ixfrTransferIn: %v", err)
+	}
+	if outcome != ixfrUpToDate {
+		t.Fatalf("outcome %s, want up-to-date", outcome)
+	}
+	if len(rrs) != 1 {
+		t.Errorf("up-to-date reply carried %d records, want the single SOA", len(rrs))
+	}
+
+	before := len(zd.publishedSnapshot().Data)
+	updated, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{})
+	if err != nil {
+		t.Fatalf("FetchFromUpstream: %v", err)
+	}
+	if updated {
+		t.Error("an up-to-date reply reported the zone as updated")
+	}
+	if got := len(zd.publishedSnapshot().Data); got != before {
+		t.Errorf("zone has %d owners after an up-to-date reply, had %d", got, before)
+	}
+	if zd.IncomingSerial != serial {
+		t.Errorf("serial moved to %d on an up-to-date reply", zd.IncomingSerial)
+	}
+}
+
+// TestSigningSecondaryDoesNotAskForDeltas is what the old
+// TestIxfrInResetsTheChainForASigningSecondary name claimed and did not do.
+// A signing secondary's baseline is its own signatures, so a delta computed
+// against the primary's copy cannot apply to it -- asking costs a round trip
+// that could not have worked.
+func TestSigningSecondaryDoesNotAskForDeltas(t *testing.T) {
+	authApp(t)
+	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+www.example.	3600	IN	A	10.0.0.3
+signed.example.	3600	IN	A	10.4.4.4
+`
+	_, addr, stop := ixfrTestPrimary(t, newer)
+	defer stop()
+
+	zd := ixfrTestSecondary(t, ixApplyZone, addr, map[ZoneOption]bool{OptInlineSigning: true})
+	if !zd.signsItsOwnContent() {
+		t.Fatal("precondition: inline-signing should count as signing its own content")
+	}
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
+		t.Fatalf("FetchFromUpstream: %v", err)
+	}
+	if zd.IncomingSerial != 20 {
+		t.Errorf("serial %d, want 20 -- the AXFR did not run", zd.IncomingSerial)
+	}
+	// No delta was even attempted.
+	if zd.ixfrDerived {
+		t.Error("a signing secondary applied a delta; its baseline is its own " +
+			"signatures, not the primary's")
+	}
+}
+
+// TestShouldRequestIxfr asserts the attempt decision directly, clause by
+// clause.
+//
+// The end-to-end tests below cannot do this. A test primary with no delta
+// history answers a full zone whether or not we asked for one, so removing a
+// clause from the predicate leaves every observable outcome identical --
+// verified by mutation: dropping !force and dropping !signsItsOwnContent both
+// left the behavioural tests green.
+func TestShouldRequestIxfr(t *testing.T) {
+	base := func(t *testing.T) *ZoneData {
+		zd := ixBase(t, ixApplyZone)
+		zd.ZoneType = Secondary
+		zd.IncomingSerial = 7
+		zd.Options = map[ZoneOption]bool{}
+		return zd
+	}
+
+	for _, tc := range []struct {
+		what  string
+		setup func(*ZoneData)
+		force bool
+		want  bool
+	}{
+		{"a plain mirror with a baseline asks", nil, false, true},
+		{"turned off by the operator",
+			func(z *ZoneData) { z.Options[OptNoRequestIxfr] = true }, false, false},
+		{"no serial to ask from",
+			func(z *ZoneData) { z.IncomingSerial = 0 }, false, false},
+		{"forced retransfer wants the whole zone", nil, true, false},
+		{"inline-signing: our baseline is our own signatures",
+			func(z *ZoneData) { z.Options[OptInlineSigning] = true }, false, false},
+		{"online-signing likewise",
+			func(z *ZoneData) { z.Options[OptOnlineSigning] = true }, false, false},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			zd := base(t)
+			if tc.setup != nil {
+				tc.setup(zd)
+			}
+			if got := zd.shouldRequestIxfr(tc.force); got != tc.want {
+				t.Errorf("shouldRequestIxfr(force=%v) = %v, want %v", tc.force, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("no baseline to apply onto", func(t *testing.T) {
+		zd := &ZoneData{ZoneName: "example.", ZoneType: Secondary, IncomingSerial: 7}
+		if zd.shouldRequestIxfr(false) {
+			t.Error("asked for a delta with no published snapshot to apply it to")
+		}
+	})
+}
+
+// TestIxfrResponseCapFallsBackToAxfr: unlike AXFR, this path must buffer, so
+// an upstream that keeps sending is one we accumulate for. The cap turns that
+// into an ordinary IXFR failure -- which means it has to abort and drain the
+// stream first, exactly as cancellation does, or the reader parks on its next
+// send while we open a second connection for the AXFR.
+//
+// The leak itself is not asserted here: goroutine counting is shared with every
+// other test in the binary and moves under -race, which is a flake rather than
+// a check. What this does assert is that hitting the cap is survivable and the
+// zone still converges -- and if abort/drain ever deadlocked, this test hangs.
+func TestIxfrResponseCapFallsBackToAxfr(t *testing.T) {
+	authApp(t)
+	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+www.example.	3600	IN	A	10.0.0.3
+capped.example.	3600	IN	A	10.6.6.6
+`
+	// Any well-formed delta will do; the cap fires before it is ever parsed.
+	bad := []dns.RR{
+		ixSOA(t, 20),
+		ixSOA(t, 7), ixA(t, "a.example.", "10.0.0.1"),
+		ixSOA(t, 20), ixA(t, "b.example.", "10.0.0.2"),
+		ixSOA(t, 20),
+	}
+	addr, stop := startBadIxfrPrimary(t, newer, bad)
+	defer stop()
+
+	prev := maxIxfrResponseRRs
+	maxIxfrResponseRRs = 2
+	t.Cleanup(func() { maxIxfrResponseRRs = prev })
+
+	zd := ixfrTestSecondary(t, ixApplyZone, addr, nil)
+	zd.IncomingSerial = 7
+	zd.CurrentSerial = 7
+
+	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
+		t.Fatalf("FetchFromUpstream after a capped IXFR: %v", err)
+	}
+	if zd.IncomingSerial != 20 {
+		t.Errorf("serial %d, want 20 from the AXFR fallback", zd.IncomingSerial)
+	}
+	if owner, _ := zd.GetOwner("capped.example."); owner == nil {
+		t.Error("the zone did not converge after the response cap fired")
+	}
+}
