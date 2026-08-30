@@ -19,10 +19,16 @@ mkdir -p "$RIG"/{zones,log,certs,bind,run} \
 	--name localhost --dns localhost --ip 127.0.0.1 --out-dir "$RIG/certs" >/dev/null
 
 cp "$SRC"/zones/*.zone       "$RIG"/zones/
-cp "$SRC"/tdns-auth-p.yaml   "$RIG"/tdns-auth-p/
-cp "$SRC"/tdns-auth-s.yaml   "$RIG"/tdns-auth-s/
-cp "$SRC"/named.conf         "$RIG"/bind/
-cp "$SRC"/tdns-cli.yaml      "$RIG"/
+
+# The configs are written against the default location, so seeding a rig
+# anywhere else has to rewrite the paths inside them. Without this a custom
+# $RIG half-works: the daemons start, but they read and write the default
+# tree, and run.sh then counts transfers in a log nobody is writing to.
+seed() { sed "s|/var/tmp/ixfrinterop|$RIG|g" "$SRC/$1" > "$RIG/$2/$1"; }
+seed tdns-auth-p.yaml tdns-auth-p
+seed tdns-auth-s.yaml tdns-auth-s
+seed named.conf       bind
+seed tdns-cli.yaml    .
 # BIND rewrites its primary zone on every dynamic update, so it gets its own
 # copy rather than sharing the one tdns serves from.
 cp "$SRC"/zones/b.ixfr.test.zone "$RIG"/bind/
