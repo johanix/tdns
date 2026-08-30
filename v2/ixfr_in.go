@@ -196,13 +196,36 @@ type signedKey struct {
 	rrtype uint16
 }
 
+// ixfrTouchedOwners returns every owner name the difference sequences mention,
+// plus the apex, canonically keyed.
+//
+// This is the set materializeForIxfr deep-copies, so it must be a superset of
+// every name applyIxfrSteps and replaceApexSOA can reach: an owner outside it
+// is shared with the zone we are serving, and a mutator handed one would edit
+// a published snapshot in place. The apex is included unconditionally because
+// the bracket SOAs delimit the sequences rather than appearing inside them, so
+// nothing else would mark the name replaceApexSOA rewrites.
+func ixfrTouchedOwners(zoneName string, steps []ixfrStep) map[string]bool {
+	touched := map[string]bool{core.CanonicalizeName(zoneName): true}
+	for _, st := range steps {
+		for _, rr := range st.removed {
+			touched[core.CanonicalizeName(rr.Header().Name)] = true
+		}
+		for _, rr := range st.added {
+			touched[core.CanonicalizeName(rr.Header().Name)] = true
+		}
+	}
+	return touched
+}
+
 // materializeForIxfr copies the published snapshot into a fresh owner map that
 // the delta can be applied to, and reports which RRsets were signed.
 //
-// The copy is deep, and it must be. RRTypeStore.Get returns core.RRset by
-// VALUE, so a store-to-store copy leaves the RRs/RRSIGs slices sharing backing
-// arrays with the snapshot that is being served right now -- and removing an RR
-// shifts elements inside that shared array. That is the Project B invariant
+// touched names the owners the delta can reach. Those are copied DEEPLY, and
+// they must be. RRTypeStore.Get returns core.RRset by VALUE, so a store-to-
+// store copy leaves the RRs/RRSIGs slices sharing backing arrays with the
+// snapshot that is being served right now -- and removing an RR shifts
+// elements inside that shared array. That is the Project B invariant
 // snapshotMapFromData exists to protect: a published snapshot is immutable
 // while it is published.
 //
@@ -215,7 +238,20 @@ type signedKey struct {
 // Deliberately NOT cloneOwner: that reads and writes zd.workingSet, so calling
 // it here would mutate the live secondary, and its own RRtypes copy is the
 // shallow one described above.
-func materializeForIxfr(snap *zoneSnapshot) (*core.NameMap[OwnerData], map[signedKey]bool) {
+//
+// Every owner OUTSIDE touched is shared with the snapshot instead, store
+// pointer and all. The same reasoning says why that is safe rather than
+// contradictory: the hazard above is a mutation, and no mutator is ever handed
+// a name outside touched. The gain is the point of the exercise -- without it,
+// applying a three-record delta deep-copies every owner in the zone, and
+// computeZoneDelta then re-derives at O(zone) cost the difference the primary
+// just handed us.
+//
+// A nil touched map means "copy everything". Sharing has to be asked for.
+//
+// signed is only ever consulted for owners a removal names, and those are in
+// touched, so recording it for the deep-copied owners alone is complete.
+func materializeForIxfr(snap *zoneSnapshot, touched map[string]bool) (*core.NameMap[OwnerData], map[signedKey]bool) {
 	out := core.NewNameMap[OwnerData]()
 	signed := map[signedKey]bool{}
 	if snap == nil {
@@ -223,6 +259,16 @@ func materializeForIxfr(snap *zoneSnapshot) (*core.NameMap[OwnerData], map[signe
 	}
 	for name, src := range snap.Data {
 		if src == nil {
+			continue
+		}
+		if touched != nil && !touched[name] {
+			// Shared with the published snapshot: the OwnerData struct is
+			// copied by value, but its RRTypeStore pointer and NSEC slices are
+			// carried over verbatim. Nothing will mutate this owner, and
+			// computeZoneDelta recognises the shared storage and skips it.
+			// Snapshot maps are canonically keyed (NameMap.Keys), which is
+			// what makes this bare lookup right.
+			out.Set(name, *src)
 			continue
 		}
 		nod := OwnerData{Name: src.Name, RRtypes: NewRRTypeStore()}
@@ -694,7 +740,7 @@ func (zd *ZoneData) applyIxfrToScratch(newZd *ZoneData, rrs []dns.RR) error {
 		return err
 	}
 
-	data, signed := materializeForIxfr(snap)
+	data, signed := materializeForIxfr(snap, ixfrTouchedOwners(zd.ZoneName, steps))
 	if err := applyIxfrSteps(zd.ZoneName, data, signed, steps); err != nil {
 		return err
 	}

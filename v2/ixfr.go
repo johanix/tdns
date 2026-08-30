@@ -139,10 +139,45 @@ func (zd *ZoneData) updateIxfrChainLocked(old *zoneSnapshot, newSerial uint32, n
 	zd.IxfrChain = chain
 }
 
+// sharesOwnerStorage reports whether two owners carry the same underlying
+// storage, and so cannot differ in content.
+//
+// The pointer check in computeZoneDelta covers the working-set path, where an
+// untouched owner is literally the same *OwnerData (ensureWorkingSet copies the
+// snapshot's pointers, cloneOwner replaces one only when something stages it).
+// The refresh path needs the level below: snapshotMapFromData allocates a fresh
+// *OwnerData per owner, so identity is lost at every publish even for owners
+// nobody touched. What survives is the RRTypeStore pointer and the NSEC slices,
+// carried over by the struct copy.
+//
+// This infers content from storage, which is sound for exactly the reason the
+// pointer check already relies on: sharing is only ever created by copying an
+// owner that nothing will mutate. cloneOwner allocates a new store before
+// staging, and materializeForIxfr deep-copies before applying, so a shared
+// store is a frozen one.
+func sharesOwnerStorage(a, b *OwnerData) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.RRtypes == b.RRtypes &&
+		sameRRSlice(a.NSEC.RRs, b.NSEC.RRs) &&
+		sameRRSlice(a.NSEC.RRSIGs, b.NSEC.RRSIGs)
+}
+
+// sameRRSlice reports whether two slices are the same slice: equal length and,
+// when non-empty, the same backing array.
+func sameRRSlice(a, b []dns.RR) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return len(a) == 0 || &a[0] == &b[0]
+}
+
 // computeZoneDelta returns the RR-level difference between two snapshot owner
 // maps plus an estimated wire size. It leans on the copy-on-write publish
-// discipline: an owner whose *OwnerData pointer is unchanged was not touched
-// by any stager, so only changed owners are content-compared. The apex SOA
+// discipline: an owner that still carries the storage it had before was not
+// touched by any stager, so only changed owners are content-compared (see
+// sharesOwnerStorage for the two levels that check has). The apex SOA
 // RRs are excluded (the IXFR brackets carry the SOA change); apex SOA RRSIGs
 // are included. Output is sorted by owner name then type for determinism.
 func computeZoneDelta(zoneName string, oldData, newData map[string]*OwnerData) (removed, added []core.RRset, est int) {
@@ -153,8 +188,8 @@ func computeZoneDelta(zoneName string, oldData, newData map[string]*OwnerData) (
 	var pairs []ownerPair
 	for name, nod := range newData {
 		ood := oldData[name]
-		if ood == nod {
-			continue // COW: identical pointer == untouched owner
+		if ood == nod || sharesOwnerStorage(ood, nod) {
+			continue // COW: shared storage == untouched owner
 		}
 		pairs = append(pairs, ownerPair{name, ood, nod})
 	}
