@@ -68,12 +68,25 @@ New code is in `v2/imr_forward.go`:
 
 ## 4. Tests
 
-`v2/imr_forward_test.go`: config decode (hyphenated keys), builder defaults
-and rejections, match/precedence table, and live end-to-end tests against a
-UDP upstream double on an ephemeral port (which by construction proves the
-per-upstream port plumbing): RD=1 enforced by the double, positive/NXDOMAIN/
-NODATA caching, trust-ad AD mapping, upstream failover, all-upstreams-dead
-SERVFAIL, and no-AD-leak without trust-ad.
+`v2/imr_forward_test.go`, all against local upstream doubles on ephemeral
+ports (which by construction proves the per-upstream port plumbing). The
+doubles log per-query header flags, and the encrypted ones present a
+self-signed test certificate that the client verifies against an injected
+`RootCAs` pool — verification stays on.
+
+- Config decode (hyphenated keys), builder defaults, and builder rejections —
+  including the four trust-ad-over-unauthenticated-channel cases.
+- Match/precedence table, including same-zone stub + forward (forward wins).
+- Wire flags: RD=1 always; CD=1 when validating locally, CD=0 under
+  trust-ad (both asserted from the double's query log).
+- trust-ad AD mapping over verified DoT: positives, NXDOMAIN and NODATA all
+  cache Secure on AD=1; AD=0 caches Insecure. Without trust-ad, the same
+  AD=1 responses must NOT cache Secure (positive and negative).
+- Transport end-to-end: Do53 (UDP), DoT (name-SAN verification), DoH
+  (IP-SAN verification, HTTPS POST /dns-query), DoQ (TLS 1.3, ALPN doq).
+- Upstream failover, all-upstreams-dead SERVFAIL (forward-only), and root
+  priming through a `zone: .` forward (`PrimeWithHints`' final `. NS` query
+  must reach the upstream with RD=1).
 
 ## 5. Known limitations / follow-ups
 

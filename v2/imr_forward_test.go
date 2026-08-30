@@ -428,8 +428,14 @@ func startTestUpstreamDoT(t *testing.T, cert tls.Certificate) (string, uint16, *
 	host, port := splitHostPort(t, l.Addr().String())
 
 	logr := &upstreamLog{}
-	srv := &dns.Server{Listener: l, Handler: upstreamDNSHandler(logr)}
+	started := make(chan struct{})
+	srv := &dns.Server{Listener: l, Handler: upstreamDNSHandler(logr), NotifyStartedFunc: func() { close(started) }}
 	go func() { _ = srv.ActivateAndServe() }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DoT upstream double did not start")
+	}
 	return host, port, logr, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -438,6 +444,10 @@ func startTestUpstreamDoT(t *testing.T, cert tls.Certificate) (string, uint16, *
 }
 
 // startTestUpstreamDoH starts the double behind an HTTPS /dns-query endpoint.
+// No ready-wait is needed: tls.Listen has already bound and is accepting (the
+// kernel backlog queues connections until Serve picks them up); http.Server
+// offers no NotifyStartedFunc equivalent. The DoQ double is in the same
+// position with quic.ListenAddr.
 func startTestUpstreamDoH(t *testing.T, cert tls.Certificate) (string, uint16, *upstreamLog, func()) {
 	t.Helper()
 	l, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})

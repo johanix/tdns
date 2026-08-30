@@ -73,8 +73,9 @@ func startStubAuthServer(t *testing.T, zone string) (string, string, func()) {
 	})
 
 	started := make(chan struct{})
+	served := make(chan error, 1)
 	srv := &dns.Server{PacketConn: pc, Handler: mux, NotifyStartedFunc: func() { close(started) }}
-	go func() { _ = srv.ActivateAndServe() }()
+	go func() { served <- srv.ActivateAndServe() }()
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
@@ -83,7 +84,14 @@ func startStubAuthServer(t *testing.T, zone string) (string, string, func()) {
 	return host, port, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = srv.ShutdownContext(ctx)
+		if err := srv.ShutdownContext(ctx); err != nil {
+			t.Errorf("stub auth double shutdown: %v", err)
+		}
+		select {
+		case <-served:
+		case <-time.After(2 * time.Second):
+			t.Error("stub auth double serve goroutine did not exit")
+		}
 	}
 }
 
@@ -94,7 +102,10 @@ func TestStubZoneSurvivesRefusedDSQuery(t *testing.T) {
 
 	// Backoffs long enough that a booked lame delegation cannot expire
 	// within the test: if the DS refusal poisons the server, the later
-	// queries MUST fail.
+	// queries MUST fail. The policy is package-level state; restore it so
+	// later tests don't inherit the one-hour values.
+	prevPolicy := cache.GetBackoffPolicy()
+	t.Cleanup(func() { cache.SetBackoffPolicy(prevPolicy) })
 	cache.SetBackoffPolicy(cache.BackoffPolicy{
 		FirstFailure:   15 * time.Second,
 		MaxFailure:     time.Hour,
@@ -134,11 +145,17 @@ func TestStubZoneSurvivesRefusedDSQuery(t *testing.T) {
 
 	// Step 1 — the poisoning query from the original sequence: a DS query
 	// for the stub zone, sent to the stub's own server (as trust-anchor
-	// bootstrap's backfillDS did). The server answers REFUSED. No answer is
-	// expected; what matters is what this refusal must NOT do.
-	rrset, _, _, _, _ := imr.IterativeDNSQuery(ctx, zone, dns.TypeDS, stubMap(), false, false)
+	// bootstrap's backfillDS did). The server answers REFUSED, and that
+	// refusal must reach us as REFUSED — a transport failure here would
+	// make the rest of the test vacuous. The walk error that comes with an
+	// exhausted tuple list is expected; what matters is what the refusal
+	// must NOT do.
+	rrset, rcode, _, _, _ := imr.IterativeDNSQuery(ctx, zone, dns.TypeDS, stubMap(), false, false)
 	if rrset != nil && len(rrset.RRs) > 0 {
 		t.Fatalf("DS query unexpectedly returned data: %v", rrset.RRs)
+	}
+	if rcode != dns.RcodeRefused {
+		t.Fatalf("DS query rcode = %s, want REFUSED from the stub's server", dns.RcodeToString[rcode])
 	}
 
 	// Step 2 — the queries that went dead on foffe: with the refusal booked
