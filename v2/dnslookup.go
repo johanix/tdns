@@ -1269,6 +1269,18 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			lg.Printf("IterativeDNSQuery: forcing re-query of <%s, %s>, bypassing cache", qname, dns.TypeToString[qtype])
 		}
 	}
+
+	// Forwarding: when qname falls under a configured forward zone, hand the
+	// query to that zone's upstream resolver(s) instead of iterating. Placed
+	// after the cache check so cached answers still short-circuit, and inside
+	// this entry point so every internal consumer (responder, ImrQuery, CNAME
+	// chase, NS-address resolution, the validator's fetcher) forwards
+	// consistently. The serverMap argument is deliberately ignored here: a
+	// forward zone outranks whatever zone cut the caller had found.
+	if fz := imr.forwardZoneFor(qname); fz != nil {
+		return imr.forwardQuery(ctx, qname, qtype, fz, force, requireEncrypted)
+	}
+
 	var rrset core.RRset
 	var rcode int
 

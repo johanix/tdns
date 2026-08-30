@@ -29,6 +29,7 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   block, DNSSEC policies including policy templates,
   `split-algorithms` and `large-algorithms`),
   [tdns-imr](config-tdns-imr.md) (trust anchors, stub zones,
+  forward zones with per-upstream transport/port/TLS,
   the `imrengine.tuning.*` knobs) and
   [tdns-agent](config-tdns-agent.md) (placeholder). The tdns-auth
   page also covers ZONEMD (RFC 8976): `publish-zonemd`,

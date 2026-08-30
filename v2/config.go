@@ -321,6 +321,7 @@ type ImrEngineConf struct {
 	KeyFile     string               `yaml:"keyfile" mapstructure:"keyfile"`
 	Transports  []string             `yaml:"transports" mapstructure:"transports" validate:"required"` // "do53", "dot", "doh", "doq"
 	Stubs       []ImrStubConf        `yaml:"stubs"`
+	Forward     []ImrForwardConf     `yaml:"forward" mapstructure:"forward"`
 	OptionsStrs []string             `yaml:"options" mapstructure:"options"`
 	Options     map[ImrOption]string `yaml:"-" mapstructure:"-"`
 	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
@@ -473,6 +474,40 @@ type ImrStubConf struct {
 // 	Addrs []string `validate:"required"`
 // 	Alpn  []string `validate:"required"`
 // }
+
+// ImrForwardConf declares a forward zone: queries for names at or below Zone
+// are sent as recursive queries (RD=1) to the configured upstream resolvers
+// instead of being resolved iteratively. "zone: ." forwards everything.
+// A configured stub zone that is more specific than the matching forward
+// zone takes precedence for names under it.
+type ImrForwardConf struct {
+	Zone string `yaml:"zone" mapstructure:"zone" validate:"required"`
+	// TrustAD: accept the upstream's AD bit instead of validating the
+	// answer locally. For a trusted, validating upstream — and because a
+	// spoofed AD bit would be cached as Secure, it REQUIRES every upstream
+	// of the zone to be encrypted and verified (dot/doh/doq without
+	// insecure); the daemon refuses to start otherwise.
+	TrustAD   bool              `yaml:"trust-ad" mapstructure:"trust-ad"`
+	Upstreams []ImrUpstreamConf `yaml:"upstreams" mapstructure:"upstreams" validate:"required"`
+}
+
+// ImrUpstreamConf is one upstream resolver of a forward zone. Addr is a bare
+// IP literal; Port defaults to the transport's standard port (53/853/443);
+// Transport is one of do53 (UDP with TCP fallback), tcp, dot, doh, doq and
+// defaults to do53.
+type ImrUpstreamConf struct {
+	Addr      string `yaml:"addr" mapstructure:"addr" validate:"required"`
+	Port      uint16 `yaml:"port" mapstructure:"port"`
+	Transport string `yaml:"transport" mapstructure:"transport"`
+	// TLSServerName is the name the upstream's certificate is verified
+	// against (and sent as SNI). Only meaningful for dot/doh/doq; when
+	// empty the certificate must carry the Addr IP in a SAN.
+	TLSServerName string `yaml:"tls-server-name" mapstructure:"tls-server-name"`
+	// Insecure disables certificate verification for this upstream
+	// (lab setups with self-signed certificates). Only meaningful for
+	// dot/doh/doq.
+	Insecure bool `yaml:"insecure" mapstructure:"insecure"`
+}
 
 type ApiServerConf struct {
 	Addresses []string        `validate:"required"` // Must be in addr:port format

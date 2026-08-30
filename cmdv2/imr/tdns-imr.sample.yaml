@@ -55,10 +55,10 @@ imrengine:
 
    # require-dnssec-validation: true
 
-   # Stub / forward zones: answer these from the named servers instead of
-   # iterating from the root.
-   # Stub zones: names resolved by asking a named server directly instead of
-   # iterating from the root.
+   # Stub zones: names resolved by asking a named AUTHORITATIVE server
+   # directly instead of iterating from the root. The resolver still iterates
+   # (RD=0) and follows referrals; for forwarding to a RECURSIVE resolver,
+   # see `forward:` below.
    #
    # `servers:` is a list of OBJECTS, not a list of addresses. A bare list of
    # IPs does not decode into []AuthServer, and the daemon refuses to start.
@@ -70,6 +70,52 @@ imrengine:
    #         - name:   ns1.internal.example.
    #           addrs:  [ 192.0.2.53, 2001:db8::53 ]
    #           alpn:   [ do53 ]
+
+   # Forward zones: send queries for names at or below `zone:` as RECURSIVE
+   # queries (RD=1) to the listed upstream resolvers, in order, first usable
+   # response wins. `zone: .` forwards everything. Forwarding is forward-only:
+   # when every upstream fails the query fails; there is no fallback to
+   # iteration. The most specific forward zone wins, and a MORE specific stub
+   # zone wins over a forward zone.
+   #
+   # Per upstream:
+   #   addr:             REQUIRED, bare IP literal (no hostname, no port)
+   #   port:             optional, defaults to the transport's standard port
+   #                     (do53/tcp 53, dot/doq 853, doh 443)
+   #   transport:        do53 (default; UDP with TCP fallback), tcp, dot, doh, doq
+   #   tls-server-name:  dot/doh/doq only: name to verify the upstream's
+   #                     certificate against (and send as SNI). When unset the
+   #                     certificate must carry the addr IP in a SAN.
+   #   insecure:         dot/doh/doq only: disable certificate verification
+   #                     (lab setups with self-signed certificates)
+   #
+   # Per zone:
+   #   trust-ad:  accept the upstream's AD bit instead of validating answers
+   #              locally (default false: forwarded answers are DNSSEC
+   #              validated against our own trust anchors, like everything
+   #              else). Because a spoofed AD bit would be cached as secure,
+   #              trust-ad REQUIRES every upstream of the zone to be
+   #              encrypted and verified (dot/doh/doq, without insecure);
+   #              the daemon refuses to start otherwise.
+   #
+   # forward:
+   #    - zone:  foo.bar.
+   #      upstreams:
+   #         - addr:      192.0.2.1
+   #           port:      8853
+   #           transport: doq
+   #           tls-server-name: dns.example.net
+   #    - zone:  company.com.
+   #      upstreams:
+   #         - addr:      9.8.7.6
+   #           port:      5355
+   #           transport: tcp
+   #    - zone:  .                     # forward everything else
+   #      trust-ad: true               # ...trusting this upstream's validation,
+   #      upstreams:                   #    hence dot + verified certificate
+   #         - addr:      192.0.2.53
+   #           transport: dot
+   #           tls-server-name: dns.example.net
 
    # Optional IMR debug log, separate from log.file below.
    # logging:

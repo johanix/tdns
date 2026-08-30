@@ -15,6 +15,11 @@ Features:
 
 - supports modern DNS transports (DoT, DoH and DoQ) in addition to Do53 (UDP/TCP).
 
+- besides full iteration, supports **stub zones** (iterate against named
+  authoritative servers) and **forward zones** (hand the query to an upstream
+  recursive resolver, per zone or for everything). See
+  [Resolution modes](#resolution-modes-iteration-stubs-and-forwarding) below.
+
 - consumes transport signals from authoritative nameservers — when an
   SVCB record at `_dns.<ns>` arrives in the Additional section (or via
   active discovery, see `query-for-transport` /
@@ -24,6 +29,86 @@ Features:
   attempt the preferred encrypted transport. TSYNC is supported as an
   alternative carrier. See section 2 of
   [TDNS Special Features](special-features.md) for the full picture.
+
+## Resolution modes: iteration, stubs, and forwarding
+
+For any given query the resolver answers from cache when it can, and otherwise
+resolves in one of three ways.
+
+**Iteration** is the default: walk the delegation tree from the closest known
+zone cut (ultimately the root hints), following referrals, with RD=0 queries
+to authoritative servers.
+
+**A stub zone** (`imrengine.stubs:`) pre-seeds the resolver's knowledge of a
+zone with named authoritative servers, so iteration for names in that zone
+starts there instead of at the root. It is still iteration: RD=0, referrals
+below the stub are followed, and the stub's servers must be authoritative.
+Use it when a zone is not reachable through the public delegation tree — a
+lab parent, a split-horizon internal zone.
+
+**A forward zone** (`imrengine.forward:`) sends the query as a *recursive*
+query (RD=1) to one or more upstream resolvers and treats the response as
+final — for names under the forward zone, tdns-imr behaves like a stub
+resolver toward its upstream. `zone: .` forwards everything. Use it when the
+upstream should do the resolving: a central resolver behind a restrictive
+firewall, a filtering resolver, or an encrypted-transport hop
+(DoT/DoH/DoQ, with certificate verification) to a resolver you trust.
+
+Which mode a query uses is decided per qname:
+
+1. The **most specific** configured forward zone matching the qname wins.
+2. A configured stub zone that is **more** specific than that forward zone
+   overrides it — so a lab stub can punch a hole in a `zone: .` forward.
+3. No forward match: iteration (seeded by any matching stub).
+
+Zone cuts learned from referrals along the way never override a configured
+forward zone.
+
+Details of forwarding behaviour:
+
+- **Upstream selection** is ordered failover: upstreams are tried in
+  configured order and the first usable response wins. A response counts as
+  usable when it is NOERROR or NXDOMAIN and parses as an answer or a
+  well-formed negative; SERVFAIL/REFUSED, timeouts, and referral-shaped
+  responses move on to the next upstream.
+- **Forward-only**: when every upstream of the matching zone has failed, the
+  client gets SERVFAIL. There is deliberately no fallback to iteration — an
+  operator who confined a zone to an upstream does not want its queries
+  leaking to the delegation tree when the upstream is down.
+- **DNSSEC**: forwarded answers go through the resolver's own validation
+  against its own trust anchors, exactly like iterated answers. Forwarded
+  queries carry CD=1 so the upstream hands over data (and RRSIGs) its own
+  validator would suppress — the local verdict stays independent. The chain
+  is fetched lazily, bottom-up: validating an answer triggers a DNSKEY query
+  for the signer zone, validating that DNSKEY triggers a DS query, and so on
+  up to a trust anchor — each of these forwarded to the same upstream, so
+  validation works even when the upstream is the only reachable resolver.
+  There is no way in plain DNS to request the whole chain in one round trip
+  (RFC 7901's CHAIN option exists but is essentially undeployed), so first
+  contact with a zone costs a short burst of chain queries — typically
+  answered from the upstream's cache in one round trip each — and the
+  validated keys are cached here, so the burst is per zone per TTL, not per
+  query. AD is set only on local validation. Per-zone `trust-ad: true`
+  instead adopts the upstream's AD bit, for positives and negatives alike;
+  because that bit would otherwise be spoofable, `trust-ad` requires every
+  upstream of the zone to be encrypted and verified, enforced at startup.
+- **Transports**: each upstream has its own transport (`do53`, `tcp`, `dot`,
+  `doh`, `doq`) and port. Encrypted upstreams verify the server certificate
+  by default (`tls-server-name`, or the upstream IP in a SAN), with
+  `insecure: true` as an explicit per-upstream opt-out for self-signed lab
+  certificates. This is independent of — and stricter than — the transports
+  the resolver's *listeners* offer.
+- **Caching**: forwarded answers and negatives land in the same cache with
+  their TTLs; repeat queries are answered from cache without touching the
+  upstream. The EDNS0 PR flag (privacy required) is honored: unencrypted
+  upstreams are skipped for PR queries, and a forward zone with no encrypted
+  upstream answers SERVFAIL with the corresponding EDE.
+- **Limits**: upstream addresses are IP literals (no hostnames), the DoH path
+  is fixed at `/dns-query`, and the forward table is read at startup only —
+  like stubs, there is no reload.
+
+Configuration reference and examples for both `stubs:` and `forward:` are in
+[tdns-imr configuration](config-tdns-imr.md).
 
 ## Daemon mode and interactive mode
 

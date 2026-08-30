@@ -1,16 +1,51 @@
 # IMR: a configured stub zone is unusable for ordinary resolution
 
 **Date:** 2026-08-11
-**Status:** OPEN. Reproduced on foffe, root cause not found.
-**Severity:** blocks child-side delegation sync against any parent reached via a
-stub — on every DSYNC scheme, not just the new API one.
+**Status:** RESOLVED 2026-08-23 (root cause; see Resolution below). Verified
+2026-08-30 by an end-to-end regression test.
+**Severity:** blocked child-side delegation sync against any parent reached via
+a stub — on every DSYNC scheme, not just the new API one.
 **Contains:** the main problem (§1-5) plus three separate IMR issues found
 alongside it (§6): an accessor aliasing asymmetry, a silent failure mode that
 makes this class of bug hard to diagnose, and a sample config that does not
 load. IMR issues are kept together here rather than filed apart.
 **Found:** while trying to run the child half of the DSYNC API scheme end to end
-(`2026-08-11-dsync-api-scheme.md` §17). Not caused by that work; it sits
+(`2026-08-11-dsync-api-scheme.md` §17). Not caused by that work; it sat
 underneath it.
+
+---
+
+## 0. Resolution
+
+Hypothesis 1 in §5 was the root cause: the trust-anchor bootstrap's DS query
+for the stub zone went to the stub's own (child-authoritative) server, the
+server answered REFUSED — correctly, a DS is parent-side data — and the
+refusal was booked as a lame delegation. That put the stub's only
+(addr, transport) into a one-hour backoff, `prioritizeServers` had nothing
+left to offer, and every later query for the zone ended with zero
+auth-server attempts.
+
+Fixed 2026-08-23:
+
+- `27100698` — a REFUSED/NOTAUTH answer to a DS query no longer records a
+  lame delegation (`refusalIndicatesLameness`).
+- `3a0e9e81` — `backfillDS` queries the parent's servers for the DS, not the
+  zone's own, so the stray query is not sent in the first place.
+
+The side issues in §6 were fixed by `13f29229` (issue B: `ServerMapCopy`
+behind `ServerMap.Get`'s callers on the trust-anchor path; issue C: a
+zero-tuple `prioritizeServers` result now logs a WARN with `explainNoTuples`)
+and, for issue D, by correcting the sample YAML — guarded by
+`v2/imr_stub_config_test.go`. The stale copy of the bare-IP form in
+`guide/config-tdns-imr.md` was rewritten on `feature/imr-forwarding`.
+
+Verified by replaying the full §1 sequence (stub zone → REFUSED DS query →
+ordinary SOA/A queries) through the real query path:
+`TestStubZoneSurvivesRefusedDSQuery` in `v2/imr_stub_resolution_test.go`
+passes on current main-derived trees and, run against the tree at `7fedd5d6`
+(this write-up's commit), fails with exactly the §3 symptom — "no
+auth-server attempts made". The sections below are kept as the record of the
+investigation.
 
 ---
 
