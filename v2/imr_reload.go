@@ -406,6 +406,12 @@ func (conf *Config) applyImrEngineReload() (ImrZoneReloadResult, error) {
 	if err != nil {
 		return res, err
 	}
+	// Committed only now. A block that decodes is not necessarily one that
+	// applies -- ReloadZones refuses trust-ad over a plaintext upstream, among
+	// others -- and committing at decode time left conf.Imr describing zones
+	// the resolver had just rejected.
+	conf.Imr.Stubs = block.Stubs
+	conf.Imr.Forward = block.Forward
 	// Diffed against the block just read from the FILE, not conf.Imr: on the
 	// zone-reload path conf.Imr still holds the boot values for everything
 	// except stubs and forwards, so that comparison would compare the boot

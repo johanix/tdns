@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -467,6 +468,19 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
 
+	// logFailure reports a transport failure unless WE caused it. Cancelling
+	// closes the connection out from under the reads below, so every cancelled
+	// DoQ query used to emit "failed to read response: use of closed network
+	// connection" at error level -- a fault message for a routine shutdown,
+	// and exactly the kind of noise that buries a real one. A deadline still
+	// logs: that is the upstream being slow, not us changing our mind.
+	logFailure := func(format string, args ...any) {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return
+		}
+		log.Printf(format, args...)
+	}
+
 	if debug {
 		fmt.Printf("*** DoQ sending message to %s opcode: %s qname: %s rrtype: %s\n", server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
@@ -474,7 +488,7 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 	// Connect to the QUIC server
 	conn, err := quic.DialAddr(ctx, server, c.TLSConfig, c.QUICConfig)
 	if err != nil {
-		log.Printf("*** DoQ failed to connect to QUIC server: %v", err)
+		logFailure("*** DoQ failed to connect to QUIC server: %v", err)
 		return nil, 0, fmt.Errorf("failed to connect to QUIC server: %v", err)
 	}
 	defer conn.CloseWithError(0, "")
@@ -503,7 +517,7 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 	// Open a new stream
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		log.Printf("*** DoQ failed to open QUIC stream: %v", err)
+		logFailure("*** DoQ failed to open QUIC stream: %v", err)
 		return nil, 0, fmt.Errorf("failed to open QUIC stream: %v", err)
 	}
 	defer stream.Close()
@@ -519,17 +533,17 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 	lenBuf := make([]byte, 2)
 	binary.BigEndian.PutUint16(lenBuf, uint16(len(packed)))
 	if _, err := stream.Write(lenBuf); err != nil {
-		log.Printf("*** DoQ failed to write message length: %v", err)
+		logFailure("*** DoQ failed to write message length: %v", err)
 		return nil, 0, fmt.Errorf("failed to write message length: %v", err)
 	}
 	if _, err := stream.Write(packed); err != nil {
-		log.Printf("*** DoQ failed to write DNS message: %v", err)
+		logFailure("*** DoQ failed to write DNS message: %v", err)
 		return nil, 0, fmt.Errorf("failed to write DNS message: %v", err)
 	}
 
 	// Read the response length
 	if _, err := io.ReadFull(stream, lenBuf); err != nil {
-		log.Printf("*** DoQ failed to read response length: %v", err)
+		logFailure("*** DoQ failed to read response length: %v", err)
 		return nil, 0, fmt.Errorf("failed to read response length: %v", err)
 	}
 	respLen := binary.BigEndian.Uint16(lenBuf)
@@ -541,7 +555,7 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 	respBuf := make([]byte, respLen)
 	n, err := io.ReadFull(stream, respBuf)
 	if err != nil {
-		log.Printf("*** DoQ failed to read response: %v", err)
+		logFailure("*** DoQ failed to read response: %v", err)
 		return nil, 0, fmt.Errorf("failed to read response: %v", err)
 	}
 	if n != int(respLen) {
@@ -555,7 +569,7 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 	// Unpack the response
 	response := new(dns.Msg)
 	if err := response.Unpack(respBuf); err != nil {
-		log.Printf("*** DoQ failed to unpack response: %v", err)
+		logFailure("*** DoQ failed to unpack response: %v", err)
 		// stream.Close()
 		return nil, 0, fmt.Errorf("failed to unpack response: %v", err)
 	}

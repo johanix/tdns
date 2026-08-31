@@ -2085,16 +2085,20 @@ func (conf *Config) reloadZonesFromFile() error {
 // zones and DNSSEC policy only, so a stub or forward edit needed a restart
 // (#436).
 //
-// Only those two fields are replaced IN conf.Imr. Copying the whole block
-// would leave conf.Imr advertising tuning, trust anchors and options that the
-// running resolver is NOT using -- the reload cannot apply them -- and `config
-// status` would then describe a resolver that does not exist.
+// Reads only: conf.Imr is NOT touched here. Decoding cleanly is not the same
+// as being usable -- ReloadZones still refuses, say, trust-ad over a plaintext
+// upstream -- and committing at decode time left conf.Imr describing zones
+// that were then rejected, while the resolver kept running the old ones. The
+// caller commits the two reloadable fields once the apply has succeeded.
 //
-// The whole decoded block is RETURNED, though, and the caller needs it for
-// exactly that reason: imrRestartRequiredKeys diffs it against what the Imr
-// was built from, to name the edited keys a reload cannot apply. Diffing
-// against conf.Imr instead would compare the boot values with themselves on
-// this path and report nothing.
+// The whole decoded block is returned, and the caller needs all of it:
+// imrRestartRequiredKeys diffs it against what the Imr was built from, to name
+// the edited keys a reload cannot apply. Diffing against conf.Imr instead
+// would compare the boot values with themselves on this path and report
+// nothing. Only Stubs and Forward are ever copied into conf.Imr, though --
+// copying tuning or the trust anchors would leave it advertising values the
+// running resolver is not using, and `config status` would describe a
+// resolver that does not exist.
 //
 // Returns a nil block when there is no config file to read (embedded use);
 // the caller then falls back to whatever is in memory.
@@ -2114,9 +2118,8 @@ func (conf *Config) reloadImrEngineFromFile() (*ImrEngineConf, error) {
 	if !present {
 		// No imrengine: block at all. Legitimate — an app whose config
 		// configures no resolver zones — and distinct from a mistyped one,
-		// which the strict decode below catches.
-		conf.Imr.Stubs = nil
-		conf.Imr.Forward = nil
+		// which the strict decode below catches. The empty block clears the
+		// zones when the caller commits it.
 		return &ImrEngineConf{}, nil
 	}
 
@@ -2148,9 +2151,6 @@ func (conf *Config) reloadImrEngineFromFile() (*ImrEngineConf, error) {
 		return nil, fmt.Errorf("error decoding imrengine config: %v", err)
 	}
 
-	// Only the reloadable two are taken into conf.Imr; see the function comment.
-	conf.Imr.Stubs = block.Stubs
-	conf.Imr.Forward = block.Forward
 	return &block, nil
 }
 
