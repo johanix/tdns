@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
@@ -48,27 +49,74 @@ func validateImrDebugAddress(addr string) error {
 // startImrDebugListener binds the debug window (UDP+TCP) with the debug
 // handler. Loopback-ness was enforced at config load; this re-checks anyway
 // because the cost is one call and the failure mode is an open resolver.
-func (imr *Imr) startImrDebugListener(ctx context.Context, addr string, conf *Config) {
+// Sockets are bound HERE, synchronously, so a bind failure is a returned
+// error rather than a log line from a goroutine. The returned channel closes
+// when both serve loops have exited (ctx cancellation shuts the servers down
+// under a five-second watchdog); it exists for lifecycle tests and callers
+// may ignore it.
+func (imr *Imr) startImrDebugListener(ctx context.Context, addr string, conf *Config) (<-chan struct{}, error) {
 	if err := validateImrDebugAddress(addr); err != nil {
 		lgImr.Error("refusing to start the imr debug listener", "err", err)
-		return
+		return nil, err
 	}
 	handler := imr.createImrDebugHandler(ctx, conf)
 	mux := dns.NewServeMux()
 	mux.HandleFunc(".", handler)
-	for _, netproto := range []string{"udp", "tcp"} {
-		server := &dns.Server{Addr: addr, Net: netproto, Handler: mux}
-		go func(s *dns.Server, netproto string) {
-			lgImr.Info("imr debug listener serving", "addr", addr, "net", netproto)
-			if err := s.ListenAndServe(); err != nil {
-				lgImr.Error("imr debug listener failed", "addr", addr, "net", netproto, "err", err)
-			}
-		}(server, netproto)
-		go func(s *dns.Server) {
-			<-ctx.Done()
-			_ = s.Shutdown()
-		}(server)
+
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("imr debug listener: udp bind %s: %v", addr, err)
 	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		_ = pc.Close()
+		return nil, fmt.Errorf("imr debug listener: tcp bind %s: %v", addr, err)
+	}
+	var wg sync.WaitGroup
+	for _, conn := range []struct {
+		pc net.PacketConn
+		l  net.Listener
+	}{{pc: pc}, {l: l}} {
+		started := make(chan struct{})
+		server := &dns.Server{
+			PacketConn:        conn.pc,
+			Listener:          conn.l,
+			Handler:           mux,
+			NotifyStartedFunc: func() { close(started) },
+		}
+		wg.Add(1)
+		go func(s *dns.Server) {
+			defer wg.Done()
+			lgImr.Info("imr debug listener serving", "addr", addr)
+			if err := s.ActivateAndServe(); err != nil {
+				lgImr.Error("imr debug listener failed", "addr", addr, "err", err)
+			}
+		}(server)
+		// The watchdog must not fire ShutdownContext before the server has
+		// marked itself started: a cancellation racing startup would make
+		// the shutdown a "server not started" no-op while the serve loop
+		// then runs forever. Wait for started (bounded, in case the serve
+		// loop died on arrival), then shut down under the five-second bound.
+		go func(ctx context.Context, s *dns.Server, started <-chan struct{}) {
+			<-ctx.Done()
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				return // serve loop never started; nothing to shut down
+			}
+			sdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.ShutdownContext(sdCtx); err != nil {
+				lgImr.Warn("imr debug listener shutdown", "addr", addr, "err", err)
+			}
+		}(ctx, server, started)
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return done, nil
 }
 
 // createImrDebugHandler wraps the normal IMR handler with the two

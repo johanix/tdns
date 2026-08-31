@@ -1401,7 +1401,9 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 	// (#446). tdns-imr itself IS the service and listens on listeners:.
 	if Globals.App.Type != AppTypeImr {
 		if dbg := conf.Listeners.ImrDebugAddress; dbg != "" {
-			imr.startImrDebugListener(ctx, dbg, conf)
+			if _, err := imr.startImrDebugListener(ctx, dbg, conf); err != nil {
+				lgImr.Error("imr debug listener not started", "err", err)
+			}
 		} else if !imr.Quiet {
 			lgImr.Info("embedded resolver: internal only (set listeners.imr-debug-address for a loopback debug window)")
 		}

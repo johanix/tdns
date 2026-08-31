@@ -4,6 +4,8 @@
 package tdns
 
 import (
+	"context"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -168,3 +170,43 @@ type fakeResponseWriter struct {
 }
 
 func (f *fakeResponseWriter) WriteMsg(m *dns.Msg) error { f.msg = m; return nil }
+
+// Lifecycle: the debug listener binds synchronously (a bind failure is an
+// error, not a log line), serves, and exits within the five-second shutdown
+// bound when the root context is cancelled — with the sockets released.
+func TestImrDebugListenerShutdown(t *testing.T) {
+	imr := newForwardTestImr(t, nil)
+	conf := &Config{}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	const addr = "127.0.0.1:5961"
+	done, err := imr.startImrDebugListener(ctx, addr, conf)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Second bind on the same address must fail synchronously: the port is
+	// genuinely held.
+	if _, err := imr.startImrDebugListener(ctx, addr, conf); err == nil {
+		t.Fatal("double bind accepted")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(6 * time.Second):
+		t.Fatal("debug listener did not exit within the shutdown bound")
+	}
+
+	// Sockets released: the address is bindable again.
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		t.Fatalf("udp port not released: %v", err)
+	}
+	pc.Close()
+
+	// And a non-loopback address never binds at all.
+	if _, err := imr.startImrDebugListener(context.Background(), "0.0.0.0:5962", conf); err == nil {
+		t.Fatal("non-loopback debug listener accepted")
+	}
+}
