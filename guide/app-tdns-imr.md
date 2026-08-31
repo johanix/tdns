@@ -218,9 +218,23 @@ through in-process channels.
 **`tdns-cli imr <cache-command>` does not work.** `tdns-cli` registers the same
 command objects under `imr`, but their implementations reach for an in-process
 resolver that `tdns-cli` does not have. `tdns-cli imr query` prints
-*"No active channel to RecursorEngine. Terminating."* The only `tdns-cli imr`
-subcommands that do anything are `imr ping`, `imr daemon ...` and
-`imr dsync-query`.
+*"No active channel to RecursorEngine. Terminating."* The `tdns-cli imr`
+subcommands that do work are the API-based ones: `imr ping`, `imr daemon ...`,
+`imr dsync-query`, `imr config status`, and the `imr forward ...` /
+`imr stub ...` trees below.
+
+**`tdns-cli {imr,auth imr,agent imr} forward|stub ...`** inspect and probe the
+resolver's forward and stub zones over the `/imr` API — against tdns-imr
+directly, or against the resolver embedded in tdns-auth / tdns-agent:
+
+| Command | Effect |
+|---------|--------|
+| `forward list` | The configured forward zones and upstreams (transport, port, TLS settings) |
+| `forward status` | Per-upstream reachability, query/failure counters, last success/error |
+| `forward probe [zone]` | Re-run the startup probe now (recursive `. NS` per upstream) and report per upstream with RTT. **Updates** the live reachability state, so probing confirms a recovery (clearing the DEGRADED error) or surfaces a newly dead upstream. Non-zero exit when any upstream fails |
+| `stub list` | The configured stub zones and their servers (name, addrs, alpn) |
+| `stub status` | Per-server transport counters (attempted/used/failed/truncated) and any active (address, transport) backoffs — the state that silently disabled stubs in the 2026-08-11 outage |
+| `stub probe [zone]` | RD=0 SOA query for the stub zone to every (server, address, advertised transport) tuple; reports rcode, AA bit and RTT. **Strictly report-only**: nothing is recorded, so a probe can never put a stub server into backoff. Non-zero exit when any tuple fails to answer authoritatively |
 
 **`tdns-cli agent imr ...` and `tdns-cli auth imr ...` are the real API-based
 cache commands.** They POST to the `/imr` endpoint of a running **tdns-agent**

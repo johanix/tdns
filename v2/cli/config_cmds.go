@@ -96,24 +96,30 @@ func renderImrStatus(st *tdns.ImrStatus) {
 		fmt.Printf("IMR: stub zones: %s\n", strings.Join(st.StubZones, ", "))
 	}
 	for _, fz := range st.ForwardZones {
-		trust := ""
-		if fz.TrustAD {
-			trust = ", trust-ad"
+		printForwardZoneStatus(fz, "IMR: ")
+	}
+}
+
+// printForwardZoneStatus renders one forward zone's reachability block.
+// Shared by renderImrStatus (config status) and `imr forward status`.
+func printForwardZoneStatus(fz tdns.ImrForwardZoneStatus, prefix string) {
+	trust := ""
+	if fz.TrustAD {
+		trust = ", trust-ad"
+	}
+	fmt.Printf("%sforward zone %s (%d upstream(s)%s):\n", prefix, fz.Zone, len(fz.Upstreams), trust)
+	for _, up := range fz.Upstreams {
+		state := "ok"
+		if up.Unreachable {
+			state = fmt.Sprintf("UNREACHABLE (%s)", up.LastError)
+		} else if up.Queries == 0 {
+			state = "untried"
 		}
-		fmt.Printf("IMR: forward zone %s (%d upstream(s)%s):\n", fz.Zone, len(fz.Upstreams), trust)
-		for _, up := range fz.Upstreams {
-			state := "ok"
-			if up.Unreachable {
-				state = fmt.Sprintf("UNREACHABLE (%s)", up.LastError)
-			} else if up.Queries == 0 {
-				state = "untried"
-			}
-			line := fmt.Sprintf("  %-30s %s, queries %d, failures %d", up.Upstream, state, up.Queries, up.Failures)
-			if !up.LastSuccess.IsZero() {
-				line += ", last success " + up.LastSuccess.Format(tdns.TimeLayout)
-			}
-			fmt.Println(line)
+		line := fmt.Sprintf("  %-30s %s, queries %d, failures %d", up.Upstream, state, up.Queries, up.Failures)
+		if !up.LastSuccess.IsZero() {
+			line += ", last success " + up.LastSuccess.Format(tdns.TimeLayout)
 		}
+		fmt.Println(line)
 	}
 }
 

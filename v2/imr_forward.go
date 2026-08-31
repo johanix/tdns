@@ -411,20 +411,7 @@ func (imr *Imr) ProbeForwardUpstreams() {
 			wg.Add(1)
 			go func(zone string, up *ForwardUpstream) {
 				defer wg.Done()
-				m := new(dns.Msg)
-				m.SetQuestion(".", dns.TypeNS) // RD=1 via SetQuestion
-				m.SetEdns0(4096, true)
-				r, _, err := up.Client.Exchange(m, up.Addr, false)
-				if err == nil && r == nil {
-					err = fmt.Errorf("nil response")
-				}
-				if err != nil {
-					up.recordFailure(err)
-					lgImr.Warn("forward upstream unreachable", "zone", zone, "upstream", up.Label, "err", err)
-					return
-				}
-				up.recordSuccess()
-				lgImr.Debug("forward upstream probe ok", "zone", zone, "upstream", up.Label)
+				_, _ = imr.probeForwardUpstream(zone, up)
 			}(fz.Zone, up)
 		}
 	}

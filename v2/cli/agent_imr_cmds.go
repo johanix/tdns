@@ -267,6 +267,263 @@ func newImrDumpZoneBackoffsCmd(role string) *cobra.Command {
 	}
 }
 
+// decodeImrData re-marshals the generic Data payload of an ImrMgmtResponse
+// into its typed form. The /imr response carries Data as interface{}, so the
+// JSON round-trip is the price of one shared response struct.
+func decodeImrData[T any](amr *tdns.ImrMgmtResponse, out *T) error {
+	b, err := json.Marshal(amr.Data)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, out)
+}
+
+func imrMgmtOrDie(role string, post *tdns.ImrMgmtPost) *tdns.ImrMgmtResponse {
+	amr, err := SendImrMgmtCmd(role, post)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	if amr.Error {
+		fmt.Printf("Error: %s\n", amr.ErrorMsg)
+		os.Exit(1)
+	}
+	return amr
+}
+
+// --- forward zones: list / status / probe ----------------------------------
+
+func newImrForwardCmd(role string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "forward",
+		Short: "Inspect and probe the IMR's forward zones",
+	}
+	c.AddCommand(
+		&cobra.Command{
+			Use:   "list",
+			Short: "List the configured forward zones and their upstreams",
+			Args:  cobra.NoArgs,
+			Run: func(cmd *cobra.Command, args []string) {
+				amr := imrMgmtOrDie(role, &tdns.ImrMgmtPost{Command: "imr-forward-list"})
+				var zones []tdns.ImrForwardZoneInfo
+				if err := decodeImrData(amr, &zones); err != nil {
+					fmt.Printf("Error decoding response: %v\n", err)
+					os.Exit(1)
+				}
+				if len(zones) == 0 {
+					fmt.Println("No forward zones configured")
+					return
+				}
+				for _, fz := range zones {
+					trust := ""
+					if fz.TrustAD {
+						trust = "  (trust-ad)"
+					}
+					fmt.Printf("%s%s\n", fz.Zone, trust)
+					for _, up := range fz.Upstreams {
+						line := "  " + up.Upstream
+						if up.TLSServerName != "" {
+							line += "  tls-server-name=" + up.TLSServerName
+						}
+						if up.Insecure {
+							line += "  INSECURE (no certificate verification)"
+						}
+						fmt.Println(line)
+					}
+				}
+			},
+		},
+		&cobra.Command{
+			Use:   "status",
+			Short: "Show per-upstream reachability, counters and last success/error",
+			Args:  cobra.NoArgs,
+			Run: func(cmd *cobra.Command, args []string) {
+				amr := imrMgmtOrDie(role, &tdns.ImrMgmtPost{Command: "imr-forward-status"})
+				var zones []tdns.ImrForwardZoneStatus
+				if err := decodeImrData(amr, &zones); err != nil {
+					fmt.Printf("Error decoding response: %v\n", err)
+					os.Exit(1)
+				}
+				if len(zones) == 0 {
+					fmt.Println("No forward zones configured")
+					return
+				}
+				for _, fz := range zones {
+					printForwardZoneStatus(fz, "")
+				}
+			},
+		},
+		&cobra.Command{
+			Use:   "probe [zone]",
+			Short: "Probe the forward upstreams now (same probe as at startup) and report per upstream",
+			Long: `Send a recursive '. NS' probe to every upstream of the configured forward
+zones (or of one zone) and report the outcome per upstream. The probe updates
+the live reachability state, so a recovered upstream clears its DEGRADED
+error and a newly dead one raises it.`,
+			Args: cobra.MaximumNArgs(1),
+			Run: func(cmd *cobra.Command, args []string) {
+				post := &tdns.ImrMgmtPost{Command: "imr-forward-probe"}
+				if len(args) == 1 {
+					post.Zone = tdns.ZoneName(dns.Fqdn(args[0]))
+				}
+				amr := imrMgmtOrDie(role, post)
+				var results []tdns.ImrForwardProbeResult
+				if err := decodeImrData(amr, &results); err != nil {
+					fmt.Printf("Error decoding response: %v\n", err)
+					os.Exit(1)
+				}
+				if len(results) == 0 {
+					fmt.Println("No forward upstreams to probe")
+					return
+				}
+				failed := 0
+				for _, res := range results {
+					if res.OK {
+						fmt.Printf("ok      %-20s %-30s rtt %s\n", res.Zone, res.Upstream, res.RTT)
+					} else {
+						failed++
+						fmt.Printf("FAILED  %-20s %-30s rtt %s: %s\n", res.Zone, res.Upstream, res.RTT, res.Error)
+					}
+				}
+				if failed > 0 {
+					fmt.Printf("\n%d of %d upstream(s) unreachable\n", failed, len(results))
+					os.Exit(1)
+				}
+			},
+		},
+	)
+	return c
+}
+
+// --- stub zones: list / status / probe -------------------------------------
+
+func newImrStubCmd(role string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "stub",
+		Short: "Inspect and probe the IMR's stub zones",
+	}
+	c.AddCommand(
+		&cobra.Command{
+			Use:   "list",
+			Short: "List the configured stub zones and their servers",
+			Args:  cobra.NoArgs,
+			Run: func(cmd *cobra.Command, args []string) {
+				amr := imrMgmtOrDie(role, &tdns.ImrMgmtPost{Command: "imr-stub-list"})
+				var zones []tdns.ImrStubZoneInfo
+				if err := decodeImrData(amr, &zones); err != nil {
+					fmt.Printf("Error decoding response: %v\n", err)
+					os.Exit(1)
+				}
+				if len(zones) == 0 {
+					fmt.Println("No stub zones configured")
+					return
+				}
+				for _, sz := range zones {
+					fmt.Println(sz.Zone)
+					for _, server := range sz.Servers {
+						fmt.Printf("  %s  addrs=%s  alpn=%s\n", server.Name,
+							strings.Join(server.Addrs, ","), strings.Join(server.Alpn, ","))
+					}
+				}
+			},
+		},
+		&cobra.Command{
+			Use:   "status",
+			Short: "Show per-server transport counters and active backoffs",
+			Args:  cobra.NoArgs,
+			Run: func(cmd *cobra.Command, args []string) {
+				amr := imrMgmtOrDie(role, &tdns.ImrMgmtPost{Command: "imr-stub-status"})
+				var zones []tdns.ImrStubZoneStatus
+				if err := decodeImrData(amr, &zones); err != nil {
+					fmt.Printf("Error decoding response: %v\n", err)
+					os.Exit(1)
+				}
+				if len(zones) == 0 {
+					fmt.Println("No stub zones configured")
+					return
+				}
+				formatCounters := func(m map[string]uint64) string {
+					if len(m) == 0 {
+						return "none"
+					}
+					keys := make([]string, 0, len(m))
+					for k := range m {
+						keys = append(keys, k)
+					}
+					sort.Strings(keys)
+					parts := make([]string, 0, len(keys))
+					for _, k := range keys {
+						parts = append(parts, fmt.Sprintf("%s:%d", k, m[k]))
+					}
+					return strings.Join(parts, " ")
+				}
+				for _, sz := range zones {
+					fmt.Printf("stub zone %s (%d server(s)):\n", sz.Zone, len(sz.Servers))
+					for _, server := range sz.Servers {
+						fmt.Printf("  %s  addrs=%s  transports=%s\n", server.Name,
+							strings.Join(server.Addrs, ","), strings.Join(server.Transports, ","))
+						fmt.Printf("    attempted=%s used=%s failed=%s truncated=%d\n",
+							formatCounters(server.Attempted), formatCounters(server.Used),
+							formatCounters(server.Failed), server.Truncated)
+						if len(server.Backoffs) == 0 {
+							fmt.Printf("    backoffs: none\n")
+						} else {
+							fmt.Printf("    backoffs (queries to these are currently SUPPRESSED):\n")
+							for _, b := range server.Backoffs {
+								fmt.Printf("      %s\n", b)
+							}
+						}
+					}
+				}
+			},
+		},
+		&cobra.Command{
+			Use:   "probe [zone]",
+			Short: "Probe the stub servers now and report per (server, address, transport)",
+			Long: `Send an RD=0 SOA query for the stub zone to every (server, address,
+advertised transport) tuple and report rcode, AA bit and RTT. Strictly
+report-only: nothing is recorded into the resolver's server state, so a
+probe can never put a stub server into backoff.`,
+			Args: cobra.MaximumNArgs(1),
+			Run: func(cmd *cobra.Command, args []string) {
+				post := &tdns.ImrMgmtPost{Command: "imr-stub-probe"}
+				if len(args) == 1 {
+					post.Zone = tdns.ZoneName(dns.Fqdn(args[0]))
+				}
+				amr := imrMgmtOrDie(role, post)
+				var results []tdns.ImrStubProbeResult
+				if err := decodeImrData(amr, &results); err != nil {
+					fmt.Printf("Error decoding response: %v\n", err)
+					os.Exit(1)
+				}
+				if len(results) == 0 {
+					fmt.Println("No stub servers to probe")
+					return
+				}
+				failed := 0
+				for _, res := range results {
+					where := fmt.Sprintf("%s @ %s/%s", res.Server, res.Addr, res.Transport)
+					switch {
+					case res.Error != "":
+						failed++
+						fmt.Printf("FAILED  %-20s %-45s rtt %s: %s\n", res.Zone, where, res.RTT, res.Error)
+					case !res.OK:
+						failed++
+						fmt.Printf("BAD     %-20s %-45s rtt %s: rcode=%s aa=%v\n", res.Zone, where, res.RTT, res.Rcode, res.AA)
+					default:
+						fmt.Printf("ok      %-20s %-45s rtt %s\n", res.Zone, where, res.RTT)
+					}
+				}
+				if failed > 0 {
+					fmt.Printf("\n%d of %d server tuple(s) not answering authoritatively\n", failed, len(results))
+					os.Exit(1)
+				}
+			},
+		},
+	)
+	return c
+}
+
 func addImrLeafCmds(parent *cobra.Command, role string) {
 	parent.AddCommand(
 		newImrQueryCmd(role),
@@ -275,6 +532,8 @@ func addImrLeafCmds(parent *cobra.Command, role string) {
 		newImrShowCmd(role),
 		newImrDumpTuningCmd(role),
 		newImrDumpZoneBackoffsCmd(role),
+		newImrForwardCmd(role),
+		newImrStubCmd(role),
 	)
 }
 
@@ -284,4 +543,10 @@ func init() {
 
 	AuthCmd.AddCommand(authImrCmd)
 	addImrLeafCmds(authImrCmd, "auth")
+
+	// The standalone tdns-imr daemon serves the same /imr endpoint, so the
+	// forward/stub trees work against it directly (unlike the in-process
+	// cache commands under `tdns-cli imr`, which need an embedded resolver).
+	ImrCmd.AddCommand(newImrForwardCmd("imr"))
+	ImrCmd.AddCommand(newImrStubCmd("imr"))
 }
