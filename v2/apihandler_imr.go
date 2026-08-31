@@ -213,7 +213,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				resp.Data = st.ForwardZones
 				resp.Msg = fmt.Sprintf("%d forward zone(s) configured", len(st.ForwardZones))
 			case "imr-forward-probe":
-				results, err := imr.ProbeForwardUpstreamsReport(zoneFilter)
+				results, err := imr.ProbeForwardUpstreamsReport(r.Context(), zoneFilter)
 				if err != nil {
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
@@ -230,7 +230,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				resp.Data = st
 				resp.Msg = fmt.Sprintf("%d stub zone(s) configured", len(st))
 			case "imr-stub-probe":
-				results, err := imr.ProbeStubServers(zoneFilter)
+				results, err := imr.ProbeStubServers(r.Context(), zoneFilter)
 				if err != nil {
 					resp.Error = true
 					resp.ErrorMsg = err.Error()

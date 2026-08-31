@@ -377,7 +377,7 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 	// Verify the forward upstreams are reachable, concurrently with normal
 	// operation: failures WARN and mark `config status` DEGRADED, they do
 	// not stop the resolver.
-	go imr.ProbeForwardUpstreams()
+	go imr.ProbeForwardUpstreams(ctx)
 
 	for {
 		select {

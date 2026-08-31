@@ -281,11 +281,11 @@ func decodeImrData[T any](amr *tdns.ImrMgmtResponse, out *T) error {
 func imrMgmtOrDie(role string, post *tdns.ImrMgmtPost) *tdns.ImrMgmtResponse {
 	amr, err := SendImrMgmtCmd(role, post)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	if amr.Error {
-		fmt.Printf("Error: %s\n", amr.ErrorMsg)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", amr.ErrorMsg)
 		os.Exit(1)
 	}
 	return amr
@@ -307,7 +307,7 @@ func newImrForwardCmd(role string) *cobra.Command {
 				amr := imrMgmtOrDie(role, &tdns.ImrMgmtPost{Command: "imr-forward-list"})
 				var zones []tdns.ImrForwardZoneInfo
 				if err := decodeImrData(amr, &zones); err != nil {
-					fmt.Printf("Error decoding response: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
 					os.Exit(1)
 				}
 				if len(zones) == 0 {
@@ -341,7 +341,7 @@ func newImrForwardCmd(role string) *cobra.Command {
 				amr := imrMgmtOrDie(role, &tdns.ImrMgmtPost{Command: "imr-forward-status"})
 				var zones []tdns.ImrForwardZoneStatus
 				if err := decodeImrData(amr, &zones); err != nil {
-					fmt.Printf("Error decoding response: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
 					os.Exit(1)
 				}
 				if len(zones) == 0 {
@@ -369,7 +369,7 @@ error and a newly dead one raises it.`,
 				amr := imrMgmtOrDie(role, post)
 				var results []tdns.ImrForwardProbeResult
 				if err := decodeImrData(amr, &results); err != nil {
-					fmt.Printf("Error decoding response: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
 					os.Exit(1)
 				}
 				if len(results) == 0 {
@@ -411,7 +411,7 @@ func newImrStubCmd(role string) *cobra.Command {
 				amr := imrMgmtOrDie(role, &tdns.ImrMgmtPost{Command: "imr-stub-list"})
 				var zones []tdns.ImrStubZoneInfo
 				if err := decodeImrData(amr, &zones); err != nil {
-					fmt.Printf("Error decoding response: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
 					os.Exit(1)
 				}
 				if len(zones) == 0 {
@@ -435,7 +435,7 @@ func newImrStubCmd(role string) *cobra.Command {
 				amr := imrMgmtOrDie(role, &tdns.ImrMgmtPost{Command: "imr-stub-status"})
 				var zones []tdns.ImrStubZoneStatus
 				if err := decodeImrData(amr, &zones); err != nil {
-					fmt.Printf("Error decoding response: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
 					os.Exit(1)
 				}
 				if len(zones) == 0 {
@@ -493,7 +493,7 @@ probe can never put a stub server into backoff.`,
 				amr := imrMgmtOrDie(role, post)
 				var results []tdns.ImrStubProbeResult
 				if err := decodeImrData(amr, &results); err != nil {
-					fmt.Printf("Error decoding response: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Error decoding response: %v\n", err)
 					os.Exit(1)
 				}
 				if len(results) == 0 {

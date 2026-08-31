@@ -65,7 +65,7 @@ func TestProbeForwardUpstreamsReport(t *testing.T) {
 	}
 
 	// Zone-scoped probe touches only that zone's upstreams.
-	results, err := imr.ProbeForwardUpstreamsReport("other.example.")
+	results, err := imr.ProbeForwardUpstreamsReport(context.Background(), "other.example.")
 	if err != nil {
 		t.Fatalf("scoped probe: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestProbeForwardUpstreamsReport(t *testing.T) {
 	}
 
 	// Full probe: one ok, one failed, and the failure is recorded.
-	results, err = imr.ProbeForwardUpstreamsReport("")
+	results, err = imr.ProbeForwardUpstreamsReport(context.Background(), "")
 	if err != nil {
 		t.Fatalf("full probe: %v", err)
 	}
@@ -102,8 +102,61 @@ func TestProbeForwardUpstreamsReport(t *testing.T) {
 		t.Errorf("aggregate error after probe = %+v", errs)
 	}
 
-	if _, err := imr.ProbeForwardUpstreamsReport("nosuch.zone."); err == nil {
+	if _, err := imr.ProbeForwardUpstreamsReport(context.Background(), "nosuch.zone."); err == nil {
 		t.Error("probe of unknown forward zone accepted, want error")
+	}
+}
+
+// A cancelled context stops probes before their exchanges start: nothing
+// reaches the upstream, nothing is recorded as upstream failure, and the
+// call returns promptly instead of waiting out client timeouts.
+func TestProbeCancellation(t *testing.T) {
+	addr, port, logr, stop := startTestUpstream(t)
+	defer stop()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
+	})
+	imr.errorRegistry = NewServerErrorRegistry()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		imr.ProbeForwardUpstreams(ctx)
+		if results, err := imr.ProbeForwardUpstreamsReport(ctx, ""); err != nil {
+			t.Errorf("cancelled report probe errored: %v", err)
+		} else {
+			for _, res := range results {
+				if res.OK {
+					t.Errorf("cancelled probe reported success: %+v", res)
+				}
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled probes did not return promptly")
+	}
+
+	logr.mu.Lock()
+	n := len(logr.queries)
+	logr.mu.Unlock()
+	if n != 0 {
+		t.Errorf("cancelled probe sent %d query(ies) upstream", n)
+	}
+	up := imr.Forwards[0].Upstreams[0]
+	up.mu.Lock()
+	failing, failures := up.failing, up.failures
+	up.mu.Unlock()
+	if failing || failures != 0 {
+		t.Errorf("cancellation recorded as upstream failure: failing=%v failures=%d", failing, failures)
+	}
+	if errs := imr.errorRegistry.List(); len(errs) != 0 {
+		t.Errorf("cancellation raised a server error: %+v", errs)
 	}
 }
 
@@ -147,7 +200,7 @@ func TestStubListStatusProbe(t *testing.T) {
 
 	// probe: live addr answers authoritatively, dead addr fails — and
 	// neither outcome may leave a trace in the server's backoff state.
-	results, err := imr.ProbeStubServers(zone)
+	results, err := imr.ProbeStubServers(context.Background(), zone)
 	if err != nil {
 		t.Fatalf("ProbeStubServers: %v", err)
 	}
@@ -195,7 +248,7 @@ func TestStubListStatusProbe(t *testing.T) {
 		t.Errorf("no attempted counters after a real query: %+v", server)
 	}
 
-	if _, err := imr.ProbeStubServers("nosuch.zone."); err == nil {
+	if _, err := imr.ProbeStubServers(context.Background(), "nosuch.zone."); err == nil {
 		t.Error("probe of unknown stub zone accepted, want error")
 	}
 }

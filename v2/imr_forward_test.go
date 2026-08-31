@@ -844,7 +844,7 @@ func TestProbeForwardUpstreams(t *testing.T) {
 		c.DNSClientTCP.Timeout = c.Timeout
 	}
 
-	imr.ProbeForwardUpstreams()
+	imr.ProbeForwardUpstreams(context.Background())
 
 	st := imr.StatusReport()
 	if len(st.ForwardZones) != 1 || len(st.ForwardZones[0].Upstreams) != 2 {

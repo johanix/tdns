@@ -442,13 +442,15 @@ func (imr *Imr) updateForwardUpstreamError() {
 		fmt.Sprintf("%d forward upstream(s) unreachable: %s", len(failing), strings.Join(failing, "; ")))
 }
 
-// ProbeForwardUpstreams sends one recursive ". NS" probe to every forward
-// upstream, in parallel, and records reachability. Failures are WARNed and
-// aggregated into the Upstream/ImrForward server error (visible in `config
-// status` as DEGRADED) — deliberately not fatal: refusing to start would
-// recreate the boot-order race this probe exists to make visible. A failing
-// upstream clears as soon as any later exchange against it succeeds.
-func (imr *Imr) ProbeForwardUpstreams() {
+// ProbeForwardUpstreams sends one recursive probe (the forward zone's SOA)
+// to every forward upstream, in parallel, and records reachability. Failures
+// are WARNed and aggregated into the Upstream/ImrForward server error
+// (visible in `config status` as DEGRADED) — deliberately not fatal:
+// refusing to start would recreate the boot-order race this probe exists to
+// make visible. A failing upstream clears as soon as any later exchange
+// against it succeeds. ctx cancellation stops probes that have not started
+// their exchange (an in-flight Exchange runs to the client timeout, #435).
+func (imr *Imr) ProbeForwardUpstreams(ctx context.Context) {
 	if len(imr.Forwards) == 0 {
 		return
 	}
@@ -458,7 +460,7 @@ func (imr *Imr) ProbeForwardUpstreams() {
 			wg.Add(1)
 			go func(zone string, up *ForwardUpstream) {
 				defer wg.Done()
-				_, _ = imr.probeForwardUpstream(zone, up)
+				_, _ = imr.probeForwardUpstream(ctx, zone, up)
 			}(fz.Zone, up)
 		}
 	}

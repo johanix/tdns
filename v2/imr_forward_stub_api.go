@@ -16,6 +16,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"sync"
@@ -96,7 +97,15 @@ func (imr *Imr) forwardZonesMatching(zoneFilter string) ([]*ForwardZone, error) 
 // to resolve (a timeout there would DEGRADE a healthy zone-scoped forward).
 // Records into the upstream's reachability state; the caller updates the
 // aggregate error afterwards.
-func (imr *Imr) probeForwardUpstream(zone string, up *ForwardUpstream) (time.Duration, error) {
+//
+// A cancelled ctx skips the exchange and records NOTHING — shutdown is not
+// evidence about the upstream. Cancellation is checked before the exchange
+// only: Exchange itself is not cancellable (#435), so an in-flight probe
+// still runs to the client timeout.
+func (imr *Imr) probeForwardUpstream(ctx context.Context, zone string, up *ForwardUpstream) (time.Duration, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	m := new(dns.Msg)
 	m.SetQuestion(zone, dns.TypeSOA) // RD=1 via SetQuestion
 	m.SetEdns0(4096, true)
@@ -118,8 +127,9 @@ func (imr *Imr) probeForwardUpstream(zone string, up *ForwardUpstream) (time.Dur
 
 // ProbeForwardUpstreamsReport probes the selected forward zones' upstreams
 // (zoneFilter "" = all) in parallel and returns the per-upstream outcome.
-// Same recording semantics as the startup probe.
-func (imr *Imr) ProbeForwardUpstreamsReport(zoneFilter string) ([]ImrForwardProbeResult, error) {
+// Same recording semantics as the startup probe. ctx cancellation stops
+// probes that have not started their exchange yet (see probeForwardUpstream).
+func (imr *Imr) ProbeForwardUpstreamsReport(ctx context.Context, zoneFilter string) ([]ImrForwardProbeResult, error) {
 	zones, err := imr.forwardZonesMatching(zoneFilter)
 	if err != nil {
 		return nil, err
@@ -134,7 +144,7 @@ func (imr *Imr) ProbeForwardUpstreamsReport(zoneFilter string) ([]ImrForwardProb
 			wg.Add(1)
 			go func(zone string, up *ForwardUpstream) {
 				defer wg.Done()
-				rtt, err := imr.probeForwardUpstream(zone, up)
+				rtt, err := imr.probeForwardUpstream(ctx, zone, up)
 				res := ImrForwardProbeResult{
 					Zone:     zone,
 					Upstream: up.Label,
@@ -319,8 +329,10 @@ func (imr *Imr) StubZoneStatus() []ImrStubZoneStatus {
 // ProbeStubServers sends an RD=0 SOA query for the stub zone to every
 // (server, address, advertised transport) tuple of the selected stub zones,
 // in parallel, and reports the outcome. STRICTLY report-only: nothing is
-// recorded into the AuthServer state (see the file comment).
-func (imr *Imr) ProbeStubServers(zoneFilter string) ([]ImrStubProbeResult, error) {
+// recorded into the AuthServer state (see the file comment). ctx
+// cancellation skips tuples whose exchange has not started (in-flight
+// exchanges run to the client timeout, #435).
+func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrStubProbeResult, error) {
 	zones, err := imr.stubZonesMatching(zoneFilter)
 	if err != nil {
 		return nil, err
@@ -345,6 +357,9 @@ func (imr *Imr) ProbeStubServers(zoneFilter string) ([]ImrStubProbeResult, error
 					wg.Add(1)
 					go func(zone, serverName, addr string, transport core.Transport, client core.DNSClienter) {
 						defer wg.Done()
+						if ctx.Err() != nil {
+							return
+						}
 						m := new(dns.Msg)
 						m.SetQuestion(zone, dns.TypeSOA)
 						m.RecursionDesired = false // authoritative probe, not a recursive query
