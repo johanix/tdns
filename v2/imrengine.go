@@ -1363,6 +1363,30 @@ func appendSOAFromMsg(r *dns.Msg, msgoptions *edns0.MsgOptions, m *dns.Msg) {
 	}
 }
 
+// loadImrListenerCert validates and loads the IMR's listener certificate for
+// the encrypted transports. The checks are mutually exclusive and each
+// failure yields ONE accurate reason (the DnsEngine shape from do53.go): an
+// unconfigured pair, an inaccessible file — any stat error, not only
+// non-existence — or a pair that does not parse. The reason string is what
+// gets logged and registered as the Transport/Cert server error.
+func loadImrListenerCert(certFile, keyFile string) (tls.Certificate, string, bool) {
+	var zero tls.Certificate
+	if certFile == "" || keyFile == "" {
+		return zero, "certfile/keyfile not configured", false
+	}
+	if _, err := os.Stat(certFile); err != nil {
+		return zero, fmt.Sprintf("certfile %s not accessible: %v", certFile, err), false
+	}
+	if _, err := os.Stat(keyFile); err != nil {
+		return zero, fmt.Sprintf("keyfile %s not accessible: %v", keyFile, err), false
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return zero, fmt.Sprintf("loading certfile/keyfile: %v", err), false
+	}
+	return cert, "", true
+}
+
 func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error {
 	addresses := conf.Imr.Addresses
 	if len(addresses) == 0 {
@@ -1428,29 +1452,24 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		lgImr.Info("not serving on transport Do53")
 	}
 
-	certFile := viper.GetString("imrengine.certfile")
-	keyFile := viper.GetString("imrengine.keyfile")
-	certKey := true
-
-	if certFile == "" || keyFile == "" {
-		lgImr.Warn("no certificate or key file provided, not starting DoT/DoH/DoQ")
-		certKey = false
+	// Encrypted listeners. Nothing below applies to a do53-only resolver, so
+	// a missing certificate is only a condition worth reporting when dot,
+	// doh or doq is actually configured — and then it IS reported: before
+	// this, a cert/key failure silently dropped all three IMR listeners with
+	// a warning as the only trace (#444), unlike the DnsEngine path which
+	// registers the condition for `config status`.
+	certFile := conf.Imr.CertFile
+	keyFile := conf.Imr.KeyFile
+	if !anyEncryptedTransport(conf.Imr.Transports) {
+		if certFile != "" || keyFile != "" {
+			lgImr.Info("certfile/keyfile configured but no encrypted transport is; not starting DoT/DoH/DoQ")
+		}
+		return nil
 	}
-
-	if _, err := os.Stat(certFile); os.IsNotExist(err) {
-		lgImr.Warn("certificate file does not exist, not starting DoT/DoH/DoQ", "certFile", certFile)
-		certKey = false
-	}
-
-	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-		lgImr.Warn("key file does not exist, not starting DoT/DoH/DoQ", "keyFile", keyFile)
-		certKey = false
-	}
-
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		lgImr.Warn("failed to load certificate, not starting DoT/DoH/DoQ", "err", err)
-		certKey = false
+	cert, certReason, certKey := loadImrListenerCert(certFile, keyFile)
+	if !certKey {
+		lgImr.Warn("not starting the DoT/DoH/DoQ listeners", "reason", certReason)
+		conf.Internal.ServerErrors.SetTransportCertError("imr: " + certReason)
 	}
 
 	if certKey {

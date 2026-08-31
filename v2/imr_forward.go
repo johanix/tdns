@@ -98,6 +98,33 @@ type ForwardZone struct {
 	Labels    int    // dns.CountLabel(Zone), precomputed for specificity checks
 	TrustAD   bool
 	Upstreams []*ForwardUpstream
+
+	// Throttle for the all-upstreams-failed WARN, so a dead upstream under
+	// query load does not turn the log into a firehose while still being
+	// impossible to miss.
+	logMu           sync.Mutex
+	lastServfailLog time.Time
+}
+
+// noteAllUpstreamsFailed WARNs that a query was answered SERVFAIL because
+// every upstream failed — at most once per throttle interval per zone.
+// Before this existed the responder wrote the SERVFAIL without any log line,
+// which is how a forwarding resolver could serve SERVFAIL for everything, for
+// an hour, in silence (#443).
+func (fz *ForwardZone) noteAllUpstreamsFailed(qname string, qtype uint16, attempts int, lastErr error) bool {
+	const throttle = 30 * time.Second
+	fz.logMu.Lock()
+	now := time.Now()
+	if now.Sub(fz.lastServfailLog) < throttle {
+		fz.logMu.Unlock()
+		return false
+	}
+	fz.lastServfailLog = now
+	fz.logMu.Unlock()
+	lgImr.Warn("forward zone: all upstreams failed, answering SERVFAIL (throttled: one line per 30s per zone)",
+		"zone", fz.Zone, "qname", qname, "qtype", dns.TypeToString[qtype],
+		"upstreams", len(fz.Upstreams), "attempts", attempts, "lastErr", lastErr)
+	return true
 }
 
 func (fz *ForwardZone) hasEncryptedUpstream() bool {
@@ -310,12 +337,17 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			lgDns.Debug("forwardQuery: upstream error", "qname", qname, "qtype", dns.TypeToString[qtype],
 				"upstream", up.Label, "err", err)
 			if up.recordFailure(err) {
+				// Reachability transition: this line is the only INFO-level
+				// trace of a mid-life upstream failure, so it must exist —
+				// repeat failures stay at Debug above.
+				lgImr.Warn("forward upstream unreachable", "zone", fz.Zone, "upstream", up.Label, "err", err)
 				imr.updateForwardUpstreamError()
 			}
 			lastErr = err
 			continue
 		}
 		if up.recordSuccess() {
+			lgImr.Info("forward upstream recovered", "zone", fz.Zone, "upstream", up.Label)
 			imr.updateForwardUpstreamError()
 		}
 		for _, hook := range getImrResponseHooks() {
@@ -364,6 +396,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			continue
 		}
 	}
+	fz.noteAllUpstreamsFailed(qname, qtype, attempts, lastErr)
 	return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
 		fmt.Errorf("forward zone %s: no usable response for '%s %s' from any of its %d upstreams (attempts=%d, last error: %v)",
 			fz.Zone, qname, dns.TypeToString[qtype], len(fz.Upstreams), attempts, lastErr)

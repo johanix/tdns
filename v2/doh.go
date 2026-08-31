@@ -90,6 +90,19 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 				TLSConfig: &tls.Config{
 					MinVersion: tls.VersionTLS13,
 				},
+				// DoH clients speak HTTP/2 or HTTP/1.1 keep-alive and hold
+				// their TCP connections open as long as we let them; every
+				// held connection is a file descriptor that never comes
+				// back. Without these bounds an hour of ordinary DoH
+				// traffic can exhaust the process fd limit, at which point
+				// every OUTBOUND dial fails and a forwarding resolver
+				// serves SERVFAIL for everything uncached, silently, until
+				// restarted (#443). IdleTimeout reaps parked connections;
+				// the read/write bounds cap what one slow client can hold.
+				ReadHeaderTimeout: 10 * time.Second,
+				ReadTimeout:       30 * time.Second,
+				WriteTimeout:      30 * time.Second,
+				IdleTimeout:       120 * time.Second,
 			}
 			servers = append(servers, srv)
 			go func(s *http.Server, hp string) {
