@@ -1041,6 +1041,27 @@ func ParseResolvConf() (string, error) {
 	return server, nil
 }
 
+// bracketBareIPv6URL rewrites "<scheme>://<bare-ipv6>[/path]" as
+// "<scheme>://[<bare-ipv6>][/path]" when the authority is an unbracketed IPv6
+// literal, and reports whether it rewrote anything. url.Parse rejects the
+// unbracketed form outright ("invalid port \":5\" after host"), which reads as
+// a complaint about a port the user never typed.
+func bracketBareIPv6URL(arg string) (string, bool) {
+	scheme, rest, found := strings.Cut(arg, "://")
+	if !found {
+		return "", false
+	}
+	host, tail := rest, ""
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		host, tail = rest[:i], rest[i:]
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.To4() != nil { // not an IPv6 literal: nothing to bracket
+		return "", false
+	}
+	return scheme + "://[" + host + "]" + tail, true
+}
+
 // ParseServer parses a server specification like "tls://1.2.3.4:853" or "quic://1.2.3.4"
 // and returns the host, port, and transport. If no scheme is specified, defaults to Do53.
 // If no port is specified, uses the default port for the transport.
@@ -1051,6 +1072,15 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 	// Try to parse as URL if it contains "://"
 	if strings.Contains(serverArg, "://") {
 		u, err = url.Parse(serverArg)
+		if err != nil {
+			// A scheme'd bare IPv6 literal ("dot://2001:db8::5") fails to
+			// parse for the same reason the bare form dialled the wrong
+			// port (#441): the trailing hextet reads as a port. Retry with
+			// the authority bracketed before giving up.
+			if fixed, ok := bracketBareIPv6URL(serverArg); ok {
+				u, err = url.Parse(fixed)
+			}
+		}
 		if err != nil {
 			return nil, fmt.Errorf("Invalid server URL: %v", err)
 		}
@@ -1093,6 +1123,11 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 	// Extract host and port
 	host := u.Host
 	port := ""
+	// bareIP records that u.Host turned out to be an unbracketed IP literal,
+	// so the u.Port() fallback below must not run: url.URL.Port() splits at
+	// the LAST colon, so on "2001:db8::5" it returns "5" and dog would dial
+	// port 5 (#441).
+	bareIP := false
 
 	// Check if host contains a colon (could be IPv6 or host:port)
 	if strings.Contains(host, ":") {
@@ -1116,6 +1151,7 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 			// Valid IP address (IPv4 or IPv6) without port - use as-is
 			// net.ParseIP handles both IPv4 and IPv6 correctly
 			// No need to split, it's just the IP address
+			bareIP = true
 		} else {
 			// Try to split as host:port (for hostnames with ports)
 			var portErr error
@@ -1126,9 +1162,14 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 		}
 	}
 	options["server"] = host
-	if port != "" {
+	switch {
+	case port != "":
 		options["port"] = port
-	} else if u.Port() != "" {
+	case bareIP:
+		// No port was given: leave it unset so the caller applies the
+		// transport's default. Asking u.Port() here is what dialled
+		// @2001:db8::5 on port 5 (#441).
+	case u.Port() != "":
 		options["port"] = u.Port()
 	}
 

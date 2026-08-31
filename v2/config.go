@@ -950,6 +950,12 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	if gerr := conf.checkReloadPolicyGuardrail(confirm); gerr != nil {
 		return "", gerr
 	}
+	// The stub and forward zones as the resolver is actually running them,
+	// captured before ParseConfig overwrites them. An unknown key is only a
+	// WARNING there, so a misspelled `forward:` decodes to nothing; when the
+	// apply below then refuses the new block and keeps the running table,
+	// conf.Imr would otherwise go on describing zones that were rejected.
+	runningStubs, runningForward := conf.Imr.Stubs, conf.Imr.Forward
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
@@ -967,15 +973,29 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	}
 	// Publish the new runtime-config snapshot on a successful reload (still under
 	// confMu); on a parse error keep the last-good snapshot.
+	msg := "Config reloaded."
 	if err == nil {
 		// The IMR is a process singleton that snapshots the DNSSEC knobs at
 		// init; hand it the re-derived values or it serves the stale ones
 		// until restart.
 		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
+		// Same reasoning for the resolver's stub and forward zones (#436). A
+		// rejected forward table is reported but does NOT fail the reload:
+		// everything else has already been applied, and ReloadZones leaves the
+		// running table untouched, so saying so is more useful than pretending
+		// the whole reload failed.
+		if res, ierr := conf.applyImrEngineReload(); ierr != nil {
+			lgConfig.Error("imrengine reload failed; keeping the running stub and forward zones", "err", ierr)
+			// Keep conf.Imr describing what is running, not what was refused.
+			conf.Imr.Stubs, conf.Imr.Forward = runningStubs, runningForward
+			msg += fmt.Sprintf(" IMR zones NOT reloaded: %v", ierr)
+		} else if summary := res.Summary(); summary != "" {
+			msg += " " + summary
+		}
 		conf.publishRuntimeConfig()
 	}
 	Globals.App.ServerConfigTime = time.Now()
-	return "Config reloaded.", err
+	return msg, err
 }
 
 // ReloadTsigConfig re-reads keys.tsig from the config file and reconciles the DB
@@ -1043,6 +1063,19 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
 	}
 
+	// Re-read the resolver's stub and forward zones and hand them to the running
+	// IMR. Here rather than only in the full-config reload because this is the
+	// SIGHUP path: a stub or forward edit used to need a restart, which for a
+	// resolver means discarding the entire cache (#436). A decode error or a
+	// rejected forward table leaves the running zone routing exactly as it is.
+	imrReloadMsg := ""
+	if res, ierr := conf.applyImrEngineReload(); ierr != nil {
+		lgConfig.Error("ReloadZoneConfig: imrengine reload failed, keeping the running stub and forward zones", "err", ierr)
+		imrReloadMsg = fmt.Sprintf(" IMR zones NOT reloaded: %v", ierr)
+	} else if summary := res.Summary(); summary != "" {
+		imrReloadMsg = " " + summary
+	}
+
 	// Re-read the zones: block from the config file(s) so an added/removed zone or
 	// an edited zone→policy mapping (or primaries/ACLs/options/zonefile) is picked
 	// up by this reload, not only policy-definition edits. Previously ParseZones
@@ -1107,5 +1140,5 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 		hook()
 	}
 
-	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v", prezones, zonelist), err
+	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s", prezones, zonelist, imrReloadMsg), err
 }

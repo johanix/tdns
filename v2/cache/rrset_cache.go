@@ -924,7 +924,18 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 	if err != nil {
 		return err
 	}
-	rrset, err := fetcher(ctx, ".", dns.TypeNS, authMap) // force re-query bypassing cache (cancellable via ctx)
+	// A COPY, not the map seedFromHints just published under ".": the fetcher
+	// is IterativeDNSQuery, which writes into the server map it is given
+	// (resolved NS addresses in, expired entries out). Handing it the stored
+	// map would edit the published root delegation in place -- the one thing
+	// the ServerMap invariant forbids, at the one moment every later lookup
+	// depends on. What the fetch legitimately learns still reaches the cache,
+	// through AddServers, which copies before it stores.
+	fetchMap := make(map[string]*AuthServer, len(authMap))
+	for name, server := range authMap {
+		fetchMap[name] = server
+	}
+	rrset, err := fetcher(ctx, ".", dns.TypeNS, fetchMap) // force re-query bypassing cache (cancellable via ctx)
 	if err != nil {
 		return fmt.Errorf("Error priming RRsetCache with root hints: %v", err)
 	}
@@ -955,11 +966,12 @@ func (rrcache *RRsetCacheT) PrimeFromHintsOnly(hintsfile string) error {
 //
 // ServerMap.Get hands out the map STORED in the cache, and IterativeDNSQuery
 // writes into the map it is given (adding servers resolved from glue, pruning
-// expired ones). A caller that forwards the stored map therefore edits the cache
-// in place, from a code path that only meant to read it -- while
+// expired ones). A caller that forwarded the stored map would therefore edit
+// the cache in place, from a code path that only meant to read it -- while
 // FindClosestKnownZone, returning the same data, has always copied for exactly
 // this reason. Two accessors with opposite aliasing rules is a footgun with no
-// upside.
+// upside, so this is the accessor to reach for; see the ServerMap field
+// comment for the invariant both of them uphold (#345).
 //
 // The copy is shallow, like FindClosestKnownZone's: the *AuthServer values are
 // shared, so per-server state (addresses, transports, backoffs) is still common

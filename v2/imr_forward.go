@@ -32,8 +32,9 @@ import (
 //
 // Forwarding is forward-only: when every upstream of the matching zone fails,
 // the query fails (SERVFAIL); there is no fallback to iteration. The forward
-// table is built once at init and is read-only afterwards (no reload path,
-// same as stubs).
+// table is immutable once published; a config reload builds a whole new one
+// and swaps it (imr_reload.go), so a query in flight keeps the table it
+// started with.
 
 // ForwardUpstream is one upstream resolver of a ForwardZone, with its own
 // DNS client carrying the upstream's transport, port and TLS settings.
@@ -43,9 +44,14 @@ type ForwardUpstream struct {
 	Addr      string // bare IP literal
 	Port      string
 	Transport core.Transport
-	Insecure  bool   // certificate verification disabled (encrypted transports only)
-	Label     string // "addr:port/transport", for logs and hooks
-	Client    core.DNSClienter
+	Insecure  bool // certificate verification disabled (encrypted transports only)
+	// TLSServerName is the name the certificate is verified against (empty:
+	// the dialed IP must be in a SAN). Kept alongside the client that was
+	// built from it so the config identity of an upstream can be compared
+	// without reaching into the client's TLS config.
+	TLSServerName string
+	Label         string // "addr:port/transport", for logs and hooks
+	Client        core.DNSClienter
 
 	// Reachability state, fed by the startup probe and by live queries.
 	// "Reachable" means a DNS response arrived, whatever its rcode; only
@@ -73,12 +79,14 @@ func (up *ForwardUpstream) recordSuccess() bool {
 }
 
 // recordFailure takes the failed exchange's START time and discards the
-// failure entirely when a later exchange has already succeeded: Exchange is
-// not cancellable, so a probe (or slow query) begun against a down upstream
-// runs to its timeout even if the upstream came up — and a client query
-// succeeded — in the meantime. Recording that stale observation would
-// re-mark a healthy upstream failing and set a DEGRADED that lies until the
-// next live query, which teaches operators to ignore the flag.
+// failure entirely when a later exchange has already succeeded: a probe (or
+// slow query) begun against a down upstream runs to its timeout even if the
+// upstream came up — and a client query succeeded — in the meantime.
+// Recording that stale observation would re-mark a healthy upstream failing
+// and set a DEGRADED that lies until the next live query, which teaches
+// operators to ignore the flag. (Cancellation shortens that window but does
+// not close it: an upstream that accepts and stalls still runs to its
+// deadline unless someone cancels the ctx.)
 func (up *ForwardUpstream) recordFailure(start time.Time, err error) bool {
 	up.mu.Lock()
 	defer up.mu.Unlock()
@@ -202,12 +210,13 @@ func buildForwardUpstream(zone string, u ImrUpstreamConf) (*ForwardUpstream, err
 	}
 
 	return &ForwardUpstream{
-		Addr:      u.Addr,
-		Port:      port,
-		Transport: transport,
-		Insecure:  u.Insecure,
-		Label:     fmt.Sprintf("%s/%s", net.JoinHostPort(u.Addr, port), core.TransportToString[transport]),
-		Client:    core.NewDNSClient(transport, port, tlsConfig),
+		Addr:          u.Addr,
+		Port:          port,
+		Transport:     transport,
+		Insecure:      u.Insecure,
+		TLSServerName: u.TLSServerName,
+		Label:         fmt.Sprintf("%s/%s", net.JoinHostPort(u.Addr, port), core.TransportToString[transport]),
+		Client:        core.NewDNSClient(transport, port, tlsConfig),
 	}, nil
 }
 
@@ -267,12 +276,16 @@ func BuildImrForwards(conf []ImrForwardConf) ([]*ForwardZone, error) {
 // forward zone wins; a configured stub zone that is MORE specific than that
 // forward zone wins over it (its names are reachable by direct iteration).
 func (imr *Imr) forwardZoneFor(qname string) *ForwardZone {
-	if len(imr.Forwards) == 0 {
+	// One snapshot for the whole decision: a reload swapping the table
+	// mid-way must not let a stub from the new table veto a forward from
+	// the old one.
+	table := imr.zoneTable()
+	if len(table.forwards) == 0 {
 		return nil
 	}
 	q := dns.Fqdn(core.CanonicalizeName(qname))
 	var best *ForwardZone
-	for _, fz := range imr.Forwards { // sorted most-specific first
+	for _, fz := range table.forwards { // sorted most-specific first
 		if dns.IsSubDomain(fz.Zone, q) {
 			best = fz
 			break
@@ -281,7 +294,7 @@ func (imr *Imr) forwardZoneFor(qname string) *ForwardZone {
 	if best == nil {
 		return nil
 	}
-	for _, sz := range imr.stubZones {
+	for _, sz := range table.stubs {
 		if dns.CountLabel(sz) > best.Labels && dns.IsSubDomain(sz, q) {
 			return nil
 		}
@@ -343,9 +356,22 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 				qname, dns.TypeToString[qtype], fz.Zone, up.Label)
 		}
 		start := time.Now()
-		r, _, err := up.Client.Exchange(m, up.Addr, Globals.Debug && !imr.Quiet)
+		// Cancellable (#435): with a plain Exchange, ordered failover could
+		// only move on between upstreams, so a hung first upstream cost the
+		// full client timeout before the second was even tried.
+		r, _, err := core.ExchangeCtx(ctx, up.Client, m, up.Addr, Globals.Debug && !imr.Quiet)
 		if err == nil && r == nil {
 			err = fmt.Errorf("nil response from upstream %s", up.Label)
+		}
+		if cerr := ctx.Err(); cerr != nil && err != nil {
+			// Abandoned, not failed. The ctx.Done() check at the top of the
+			// loop stops us between upstreams; this one is needed because a
+			// cancel now reaches the exchange itself, and recording it would
+			// mark a healthy upstream unreachable — and set a DEGRADED that
+			// outlives the shutdown that caused it. Same guard, same reason,
+			// as probeForwardUpstream and tryServer.
+			return nil, 0, cache.ContextFailure, up.Transport,
+				fmt.Errorf("forward zone %s: %w (attempts=%d, last error: %v)", fz.Zone, cerr, attempts, lastErr)
 		}
 		if err != nil {
 			lgDns.Debug("forwardQuery: upstream error", "qname", qname, "qtype", dns.TypeToString[qtype],
@@ -428,7 +454,7 @@ func (imr *Imr) updateForwardUpstreamError() {
 	imr.fwdErrMu.Lock()
 	defer imr.fwdErrMu.Unlock()
 	var failing []string
-	for _, fz := range imr.Forwards {
+	for _, fz := range imr.ForwardZones() {
 		for _, up := range fz.Upstreams {
 			up.mu.Lock()
 			if up.failing {
@@ -451,14 +477,15 @@ func (imr *Imr) updateForwardUpstreamError() {
 // (visible in `config status` as DEGRADED) — deliberately not fatal:
 // refusing to start would recreate the boot-order race this probe exists to
 // make visible. A failing upstream clears as soon as any later exchange
-// against it succeeds. ctx cancellation stops probes that have not started
-// their exchange (an in-flight Exchange runs to the client timeout, #435).
+// against it succeeds. A cancelled ctx abandons the probes, in-flight ones
+// included.
 func (imr *Imr) ProbeForwardUpstreams(ctx context.Context) {
-	if len(imr.Forwards) == 0 {
+	forwards := imr.ForwardZones()
+	if len(forwards) == 0 {
 		return
 	}
 	var wg sync.WaitGroup
-	for _, fz := range imr.Forwards {
+	for _, fz := range forwards {
 		for _, up := range fz.Upstreams {
 			wg.Add(1)
 			go func(zone string, up *ForwardUpstream) {

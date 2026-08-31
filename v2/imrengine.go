@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/viper"
@@ -55,16 +56,21 @@ type Imr struct {
 	// see W9.
 	TransportSignalDiscovery *cache.DiscoveryTracker
 	TLSADiscovery            *cache.DiscoveryTracker
-	// Forwards holds the configured forward zones, most-specific first
-	// (see imr_forward.go). Built once at init and read-only afterwards;
-	// there is no reload path, same as for stubs.
-	Forwards []*ForwardZone
-	// stubZones lists the CONFIGURED stub zones (canonical FQDNs), so the
-	// forward decision can let a more-specific stub win over a forward
-	// zone. Deliberately not derived from the cache's ServerMap, which
-	// also accumulates zone cuts learned from referrals — those must not
-	// override a configured forward.
-	stubZones []string
+	// zones holds the configured forward table and stub zones as one
+	// immutable snapshot; ReloadZones swaps the pointer (#436). Read it
+	// through ForwardZones()/StubZones(), never by reaching in: a query
+	// must see one consistent table for its whole walk, and the reload
+	// path relies on nothing else holding a mutable reference.
+	zones atomic.Pointer[imrZoneTable]
+	// reloadMu serializes ReloadZones with itself: the diff against the
+	// running table and the cache-side stub work must not interleave with
+	// another reload doing the same.
+	reloadMu sync.Mutex
+	// bootConf is the imrengine: config this Imr was BUILT from. Kept so a
+	// reload can report which edited keys are not reloadable and need a
+	// restart; deliberately never updated, since the running resolver keeps
+	// running on these values until it is restarted.
+	bootConf ImrEngineConf
 	// PrimedVia and PrimedAt record how and when the cache was primed
 	// ("hints+fetch", or "hints-only" when the root is forwarded), for the
 	// config-status report.
@@ -256,11 +262,13 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	if err != nil {
 		return fmt.Errorf("InitImrEngine: %v", err)
 	}
-	imr.Forwards = forwards
+	stubZones, stubFP, _ := canonicalStubs(conf.Imr.Stubs)
+	// Published before priming: PrimeWithHints resolves through the
+	// iterative path, and forwardZoneFor below has to see the table.
+	// stubFP is filled in as the stubs are actually applied, further down.
+	imr.setZoneTable(forwards, stubZones, map[string]string{})
+	imr.bootConf = conf.Imr
 	imr.errorRegistry = conf.Internal.ServerErrors
-	for _, stub := range conf.Imr.Stubs {
-		imr.stubZones = append(imr.stubZones, dns.Fqdn(core.CanonicalizeName(stub.Zone)))
-	}
 	for _, fz := range forwards {
 		ups := make([]string, 0, len(fz.Upstreams))
 		for _, up := range fz.Upstreams {
@@ -292,15 +300,27 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		}
 		imr.PrimedAt = time.Now()
 		if len(conf.Imr.Stubs) > 0 {
+			applied := make(map[string]string, len(conf.Imr.Stubs))
 			for _, stub := range conf.Imr.Stubs {
+				zone := dns.Fqdn(core.CanonicalizeName(stub.Zone))
+				if _, ok := stubFP[zone]; !ok {
+					continue // rejected by canonicalStubs, which said why
+				}
 				stubservers := []string{}
 				for i := range stub.Servers {
 					server := &stub.Servers[i]
 					stubservers = append(stubservers, server.Name+" ("+strings.Join(server.Addrs, ", ")+")")
 				}
-				lgImr.Info("adding stub", "zone", stub.Zone, "servers", strings.Join(stubservers, ", "))
-				imr.Cache.AddStub(stub.Zone, stub.Servers)
+				lgImr.Info("adding stub", "zone", zone, "servers", strings.Join(stubservers, ", "))
+				if err := imr.Cache.AddStub(zone, stub.Servers); err != nil {
+					lgImr.Error("failed to add stub zone", "zone", zone, "err", err)
+					continue
+				}
+				applied[zone] = stubFP[zone]
 			}
+			// Record what was actually applied, so the first reload can tell
+			// an untouched stub from an edited one.
+			imr.setZoneTable(forwards, stubZones, applied)
 		}
 	}
 

@@ -2079,6 +2079,81 @@ func (conf *Config) reloadZonesFromFile() error {
 	return nil
 }
 
+// reloadImrEngineFromFile re-reads the config file(s) and decodes just the
+// RELOADABLE half of the imrengine: block -- stubs and forward zones -- into
+// conf.Imr. Used by the zone-reload path (SIGHUP), which otherwise re-reads
+// zones and DNSSEC policy only, so a stub or forward edit needed a restart
+// (#436).
+//
+// Only those two fields are replaced IN conf.Imr. Copying the whole block
+// would leave conf.Imr advertising tuning, trust anchors and options that the
+// running resolver is NOT using -- the reload cannot apply them -- and `config
+// status` would then describe a resolver that does not exist.
+//
+// The whole decoded block is RETURNED, though, and the caller needs it for
+// exactly that reason: imrRestartRequiredKeys diffs it against what the Imr
+// was built from, to name the edited keys a reload cannot apply. Diffing
+// against conf.Imr instead would compare the boot values with themselves on
+// this path and report nothing.
+//
+// Returns a nil block when there is no config file to read (embedded use);
+// the caller then falls back to whatever is in memory.
+func (conf *Config) reloadImrEngineFromFile() (*ImrEngineConf, error) {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		// No config file (e.g. embedded use): keep the in-memory zones.
+		return nil, nil
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
+	if err != nil {
+		return nil, fmt.Errorf("error processing config: %v", err)
+	}
+
+	raw, present := configMap["imrengine"]
+	if !present {
+		// No imrengine: block at all. Legitimate — an app whose config
+		// configures no resolver zones — and distinct from a mistyped one,
+		// which the strict decode below catches.
+		conf.Imr.Stubs = nil
+		conf.Imr.Forward = nil
+		return &ImrEngineConf{}, nil
+	}
+
+	// Decode the block into the REAL ImrEngineConf, with ErrorUnused, rather
+	// than into a two-field partial. A partial ignores every key it does not
+	// name, so a typo -- `forwrd:` for `forward:` -- would decode to an empty
+	// list and this function would then hand ReloadZones an empty table: a
+	// misspelling would silently DELETE every forward zone on the next
+	// SIGHUP. Decoding the whole block means an unknown key anywhere in it
+	// fails the reload instead, and the running zones are kept.
+	//
+	// Same hooks as the full parse (decodeConfigMap), or `query-budget: 8s`
+	// -- valid in the config the daemon booted from -- would fail here.
+	var block ImrEngineConf
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName:     "yaml",
+		Result:      &block,
+		ZeroFields:  true,
+		ErrorUnused: true,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+		),
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return nil, fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(raw); err != nil {
+		return nil, fmt.Errorf("error decoding imrengine config: %v", err)
+	}
+
+	// Only the reloadable two are taken into conf.Imr; see the function comment.
+	conf.Imr.Stubs = block.Stubs
+	conf.Imr.Forward = block.Forward
+	return &block, nil
+}
+
 // reloadTsigKeysFromFile re-reads the config file and decodes just the keys:
 // block into conf.Keys. Used by reload-tsig without a full config reload.
 func (conf *Config) reloadTsigKeysFromFile() error {

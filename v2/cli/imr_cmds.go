@@ -230,7 +230,7 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 		}
 		if len(args) == 1 {
 			zone := dns.Fqdn(args[0])
-			serverMap, ok := Conf.Internal.RRsetCache.ServerMap.Get(zone)
+			serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(zone)
 			if !ok {
 				fmt.Printf("No auth servers recorded for zone %q\n", zone)
 				return
@@ -248,7 +248,10 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 		fmt.Printf("Auth server transport counters for all zones\n")
 		for item := range Conf.Internal.RRsetCache.ServerMap.IterBuffered() {
 			zone := item.Key
-			serverMap := item.Val
+			serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(zone)
+			if !ok {
+				continue // removed between the iteration and the copy
+			}
 			fmt.Printf("\nZone: %s\n", zone)
 			for name, server := range serverMap {
 				fmt.Printf("  Server: %s\n", name)

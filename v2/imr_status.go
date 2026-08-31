@@ -21,6 +21,12 @@ type ImrStatus struct {
 
 	StubZones    []string               `json:"stub_zones,omitempty"`
 	ForwardZones []ImrForwardZoneStatus `json:"forward_zones,omitempty"`
+	// ZonesLoadedAt is when the stub/forward table in this report was
+	// published — startup, or the last reload that APPLIED a table,
+	// whether or not it changed anything. It answers "did my reload reach
+	// this daemon", not "when did routing last change"; the diff in the
+	// reload reply answers the latter.
+	ZonesLoadedAt time.Time `json:"zones_loaded_at,omitzero"`
 }
 
 type ImrForwardZoneStatus struct {
@@ -49,15 +55,17 @@ func (imr *Imr) StatusReport() *ImrStatus {
 	if imr == nil {
 		return nil
 	}
+	table := imr.zoneTable()
 	st := &ImrStatus{
-		PrimedVia: imr.PrimedVia,
-		PrimedAt:  imr.PrimedAt,
-		StubZones: append([]string(nil), imr.stubZones...),
+		PrimedVia:     imr.PrimedVia,
+		PrimedAt:      imr.PrimedAt,
+		StubZones:     append([]string(nil), table.stubs...),
+		ZonesLoadedAt: table.loadedAt,
 	}
 	if imr.Cache != nil {
 		st.Primed = imr.Cache.IsPrimed()
 	}
-	for _, fz := range imr.Forwards {
+	for _, fz := range table.forwards {
 		fzs := ImrForwardZoneStatus{Zone: fz.Zone, TrustAD: fz.TrustAD}
 		for _, up := range fz.Upstreams {
 			up.mu.Lock()

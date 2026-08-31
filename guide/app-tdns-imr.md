@@ -118,9 +118,13 @@ Details of forwarding behaviour:
   process's open-descriptor count against its limit (and goroutine count),
   with a warning above 80% — the tdns#443 wedge was fd exhaustion starving
   outbound dials, and this makes that class of leak visible while it grows.
-- **Limits**: upstream addresses are IP literals (no hostnames), the DoH path
-  is fixed at `/dns-query`, and the forward table is read at startup only —
-  like stubs, there is no reload.
+- **Reload**: `config reload`, `config reload-zones` and SIGHUP re-read the
+  `stubs:` and `forward:` blocks and apply them without a restart; untouched
+  zones keep their live counters and backoffs, and an invalid forward table is
+  refused whole rather than half-applied. The rest of `imrengine:` still needs
+  a restart, and a reload says which edited keys those were.
+- **Limits**: upstream addresses are IP literals (no hostnames) and the DoH
+  path is fixed at `/dns-query`.
 
 Configuration reference and examples for both `stubs:` and `forward:` are in
 [tdns-imr configuration](config-tdns-imr.md).
