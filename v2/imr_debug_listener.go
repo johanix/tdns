@@ -102,7 +102,16 @@ func (imr *Imr) startImrDebugListener(ctx context.Context, addr string, conf *Co
 			select {
 			case <-started:
 			case <-time.After(2 * time.Second):
-				return // serve loop never started; nothing to shut down
+				// The serve loop never started, so there is no server to
+				// shut down — but the bound sockets are ours to release,
+				// or they leak until process exit.
+				if conn.pc != nil {
+					_ = conn.pc.Close()
+				}
+				if conn.l != nil {
+					_ = conn.l.Close()
+				}
+				return
 			}
 			sdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

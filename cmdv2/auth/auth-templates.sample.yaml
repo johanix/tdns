@@ -298,7 +298,7 @@ templates:
    # API-instantiable dynamic-primary template (see DYNAMIC-ZONE BLESSING
    # above): `tdns-cli auth zone add -z <zone> --type primary --template
    # api-primary` mints a primary with this exact configuration — a
-   # bootstrapped apex (SOA/NS/glue from dnsengine.addresses), updatable via
+   # bootstrapped apex (SOA/NS/glue from listeners.addresses), updatable via
    # DNS UPDATE per the update policy below, persisted across restarts.
    - name:            api-primary
      dynamiczones:    true                    # operator blessing (gate 2)

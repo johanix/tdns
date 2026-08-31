@@ -36,6 +36,9 @@ func TestRejectMovedConfigKeys(t *testing.T) {
 		{"imrengine.certfile rejected", map[string]interface{}{
 			"imrengine": map[string]interface{}{"certfile": "/x"},
 		}, "imrengine.certfile moved to listeners.certfile"},
+		{"imrengine.ports rejected", map[string]interface{}{
+			"imrengine": map[string]interface{}{"ports": map[string]interface{}{"dot": []int{8853}}},
+		}, "imrengine.ports moved to listeners.ports"},
 	}
 	for _, c := range cases {
 		err := rejectMovedConfigKeys(c.m)

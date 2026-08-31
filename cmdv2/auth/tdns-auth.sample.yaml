@@ -184,12 +184,12 @@ delegationsync:
       schemes:  [ notify, update ]
       notify:
          types:      [ CDS, CSYNC ]
-         port:       5354                      # MUST be a port the dnsengine listens on
+         port:       5354                      # MUST be a port the listeners: block listens on
          target:     notifications.{ZONENAME}  # {ZONENAME} expanded at run-time
          addresses:  [ 127.0.0.1, '::1' ]      # no port and no '[]' around v6 here
       update:
          types:      [ ANY ]
-         port:       5354                      # MUST be a port the dnsengine listens on
+         port:       5354                      # MUST be a port the listeners: block listens on
          target:     updates.{ZONENAME}
          addresses:  [ 127.0.0.1, '::1' ]
          keygen:
