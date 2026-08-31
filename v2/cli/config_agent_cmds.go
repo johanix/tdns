@@ -64,26 +64,18 @@ func checkAgentInertConfig(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 	}
 }
 
-// checkAgentImrEngine sanity-checks imrengine:. The agent starts an in-process
-// IMR, but ValidateConfig only enforces imrengine for AppTypeImr — so for the
-// agent this block is entirely unvalidated and a bad one fails at engine start.
+// checkAgentImrEngine sanity-checks imrengine:. The agent starts an
+// in-process IMR that is INTERNAL by design (#446): it binds no service
+// listeners, and its only window is the loopback-only
+// listeners.imr-debug-address.
 func checkAgentImrEngine(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 	const g = "Agent-specific"
 
-	if v.Get("imrengine") == nil {
-		rep.info(g, "imrengine", "no imrengine: block; the agent runs with IMR defaults")
-		return
-	}
 	// Tri-state: nil or true means active, matching the daemon
 	// (imrActive := conf.Imr.Active == nil || *conf.Imr.Active).
 	if !(cfg.Imr.Active == nil || *cfg.Imr.Active) {
 		rep.info(g, "imrengine", "imrengine.active is false; the in-process resolver is disabled")
 		return
-	}
-	if len(cfg.Imr.Addresses) == 0 {
-		rep.warn(g, "imrengine",
-			"imrengine is active but has no addresses: — the resolver listener will not be started",
-			"set imrengine.addresses (e.g. [ 127.0.0.1:5453, '[::1]:5453' ]) or set active: false")
 	}
 	if rh := v.GetString("imrengine.root-hints"); rh != "" {
 		if _, err := os.Stat(rh); err != nil {
@@ -93,9 +85,12 @@ func checkAgentImrEngine(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 			return
 		}
 	}
-	if len(cfg.Imr.Addresses) > 0 {
+	if dbg := cfg.Listeners.ImrDebugAddress; dbg != "" {
 		rep.pass(g, "imrengine",
-			fmt.Sprintf("in-process resolver active on %d address(es)", len(cfg.Imr.Addresses)))
+			fmt.Sprintf("in-process resolver active; debug window on %s", dbg))
+	} else {
+		rep.info(g, "imrengine",
+			"in-process resolver active, internal only (listeners.imr-debug-address opens a loopback debug window)")
 	}
 }
 
@@ -241,7 +236,7 @@ const agentMweConfigTemplate = `# Minimal Working Example — tdns-{{ROLE}}
 service:
    name:  TDNS-AGENT
 
-dnsengine:
+listeners:
    # Listen on IPv4 and IPv6 localhost. Port {{DNSPORT}} is used so the server
    # runs unprivileged; use 53 for a real deployment (needs root/capabilities).
    addresses:   [ 127.0.0.1:{{DNSPORT}}, '[::1]:{{DNSPORT}}' ]
@@ -250,8 +245,15 @@ dnsengine:
    transports:  [ do53 ]
    # For encrypted transports, add them here and the cert/key are already set:
    #   transports: [ do53, dot, doh, doq ]
+   #   ports:
+   #      dot: [ "853" ]
+   #      doh: [ "443" ]
+   #      doq: [ "853" ]
    certfile:  {{CERT}}
    keyfile:   {{KEY}}
+   # The agent's in-process resolver is INTERNAL and binds no service
+   # listeners; uncomment for a loopback debug window into its cache:
+   #   imr-debug-address: 127.0.0.1:5959
 
 apiserver:
    addresses:  [ 127.0.0.1:{{APIPORT}} ]
@@ -272,10 +274,10 @@ log:
 
 # The agent runs an in-process iterative resolver, used e.g. to look up peer
 # records. Disable it with active: false if the host has a resolver already.
+# It is internal by design and has NO listener keys here — see
+# listeners.imr-debug-address above for the loopback debug window.
 imrengine:
    active:      true
-   addresses:   [ 127.0.0.1:5453, '[::1]:5453' ]
-   transports:  [ do53 ]
    # In a lab without a complete DNSSEC chain, relax validation:
    #   require-dnssec-validation: false
 

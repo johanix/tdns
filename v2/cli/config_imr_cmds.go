@@ -183,19 +183,19 @@ func runImrConfigCheck(explicitPath string, offline bool) {
 
 func checkImrEngine(cfg *tdns.Config, rep *ccReport) {
 	const g = "IMR engine"
-	if len(cfg.Imr.Addresses) == 0 {
-		rep.fail(g, "addresses", "imrengine.addresses is empty — the resolver would not listen on any address",
+	if len(cfg.Listeners.Addresses) == 0 {
+		rep.fail(g, "addresses", "listeners.addresses is empty — the resolver would not listen on any address",
 			"add at least one addr:port, e.g. [ 127.0.0.1:53, '[::1]:53' ]")
 	} else {
-		rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.Imr.Addresses))
+		rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.Listeners.Addresses))
 	}
 
 	validT := map[string]bool{"do53": true, "dot": true, "doh": true, "doq": true}
-	if len(cfg.Imr.Transports) == 0 {
-		rep.fail(g, "transports", "imrengine.transports is empty", "list at least one of do53, dot, doh, doq")
+	if len(cfg.Listeners.Transports) == 0 {
+		rep.fail(g, "transports", "listeners.transports is empty", "list at least one of do53, dot, doh, doq")
 	}
 	needCert := false
-	for _, t := range cfg.Imr.Transports {
+	for _, t := range cfg.Listeners.Transports {
 		lt := lc(t)
 		if !validT[lt] {
 			rep.fail(g, "transports", fmt.Sprintf("unknown transport %q", t), "valid transports are do53, dot, doh, doq")
@@ -206,12 +206,12 @@ func checkImrEngine(cfg *tdns.Config, rep *ccReport) {
 		}
 	}
 	if needCert {
-		if cfg.Imr.CertFile == "" || cfg.Imr.KeyFile == "" {
-			rep.warn(g, "cert", "dot/doh/doq configured but imrengine.certfile/keyfile not set — those listeners will be skipped",
-				"set imrengine.certfile and imrengine.keyfile, or remove the encrypted transports")
+		if cfg.Listeners.CertFile == "" || cfg.Listeners.KeyFile == "" {
+			rep.warn(g, "cert", "dot/doh/doq configured but listeners.certfile/keyfile not set — those listeners will be skipped",
+				"set listeners.certfile and listeners.keyfile, or remove the encrypted transports")
 		} else {
-			checkFileExists(rep, g, "certfile", cfg.Imr.CertFile)
-			checkFileExists(rep, g, "keyfile", cfg.Imr.KeyFile)
+			checkFileExists(rep, g, "certfile", cfg.Listeners.CertFile)
+			checkFileExists(rep, g, "keyfile", cfg.Listeners.KeyFile)
 		}
 	}
 	if cfg.Imr.RootHints != "" {
@@ -406,7 +406,7 @@ const imrMweConfigTemplate = `# Minimal Working Example — tdns-imr
 # self-signed cert. Validate it any time with:
 #   tdns-cli imr config check --serverconfig <this file>
 
-imrengine:
+listeners:
    # Listen on IPv4 and IPv6 localhost. Port {{DNSPORT}} is used so the resolver
    # runs unprivileged; use 53 for a real deployment (needs root/capabilities).
    addresses:   [ 127.0.0.1:{{DNSPORT}}, '[::1]:{{DNSPORT}}' ]
@@ -414,9 +414,14 @@ imrengine:
    transports:  [ do53 ]
    # For encrypted transports the cert/key below are ready to use:
    #   transports: [ do53, dot, doh, doq ]
+   #   ports:
+   #      dot: [ "853" ]
+   #      doh: [ "443" ]
+   #      doq: [ "853" ]
    # certfile:  {{CERT}}
    # keyfile:   {{KEY}}
 
+imrengine:
    # DNSSEC validation is DISABLED in this MWE so the resolver answers out of
    # the box without a root trust anchor. To make it a validating resolver,
    # supply a root anchor and flip this to true:

@@ -10,6 +10,7 @@ import (
 	"net"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,9 +47,15 @@ func (s SensitiveString) String() string {
 }
 
 type Config struct {
-	Service      ServiceConf
-	DnsEngine    DnsEngineConf
-	Imr          ImrEngineConf `yaml:"imrengine" mapstructure:"imrengine"`
+	Service ServiceConf
+	// Listeners is the shared listening configuration (addresses, ports,
+	// certs) for whatever DNS services this app serves — one schema for
+	// every app, passed into the shared transport engines as a struct
+	// (#446). AuthEngine carries the authoritative-serving BEHAVIOR that
+	// used to share the old dnsengine: block with the listener keys.
+	Listeners    ListenersConf  `yaml:"listeners" mapstructure:"listeners"`
+	AuthEngine   AuthEngineConf `yaml:"authengine" mapstructure:"authengine"`
+	Imr          ImrEngineConf  `yaml:"imrengine" mapstructure:"imrengine"`
 	ApiServer    ApiServerConf
 	MultiSigner  map[string]MultiSignerConf `yaml:"multisigner"`
 	Catalog      *CatalogConf               `yaml:"catalog" mapstructure:"catalog"`
@@ -210,18 +217,64 @@ type TransportConf struct {
 	Signal string `yaml:"signal"`
 }
 
-type DnsEngineConf struct {
-	Addresses   []string              `yaml:"addresses" validate:"required"`
-	CertFile    string                `yaml:"certfile,omitempty"`
-	KeyFile     string                `yaml:"keyfile,omitempty"`
-	Transports  []string              `yaml:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"` // "do53", "dot", "doh", "doq"
-	OptionsStrs []string              `yaml:"options" mapstructure:"options"`
-	Options     map[AuthOption]string `yaml:"-" mapstructure:"-"`
+// ListenersConf is the listening side of an app's DNS service: addresses,
+// per-transport ports, and the server certificate. ONE schema for every app
+// (tdns-auth, tdns-agent, tdns-imr, ...) — each app has its own config file,
+// so the block needs no per-app name — passed into the shared transport
+// engines as a struct, never read back out of viper (#444/#446).
+type ListenersConf struct {
+	Addresses []string `yaml:"addresses" mapstructure:"addresses" validate:"required"`
+	CertFile  string   `yaml:"certfile,omitempty" mapstructure:"certfile"`
+	KeyFile   string   `yaml:"keyfile,omitempty" mapstructure:"keyfile"`
+	// Transports the LISTENERS offer (unrelated to what outbound queries
+	// use). do53 rides the addresses above; dot/doh/doq additionally need
+	// certfile+keyfile and take their ports from ports: below.
+	Transports []string          `yaml:"transports" mapstructure:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"`
+	Ports      ListenerPortsConf `yaml:"ports" mapstructure:"ports"`
 	// NOTE: there is deliberately NO listener-level client-cert policy here.
 	// Transfer authentication is per-zone (downstream-auth: + peers
 	// tls-identity, enforced at transfer time); dropping non-TLS traffic is
 	// transports:. The auth DoT listener always REQUESTS (never requires) a
 	// client certificate. See docs/2026-07-21-peers-xfr-auth-design.md D6.
+
+	// ImrDebugAddress opens a loopback-only DNS window straight into the
+	// EMBEDDED resolver of an app whose imr is otherwise internal
+	// (tdns-auth, tdns-agent): `dog @<addr> name type +norec` peeks at the
+	// cache without triggering outbound queries, ANY+norec enumerates an
+	// owner's cached RRsets, and RD=1 drives the internal resolver by
+	// hand. MUST be loopback (127/8 or ::1) — anything else is a hard
+	// config error, because the failure mode is an open resolver hiding
+	// inside an auth server. Ignored by tdns-imr, whose resolver listens
+	// on the addresses above.
+	ImrDebugAddress string `yaml:"imr-debug-address,omitempty" mapstructure:"imr-debug-address"`
+}
+
+// ListenerPortsConf is the per-encrypted-transport port lists. Real,
+// validated struct fields: the old dnsengine.ports.* was a phantom key the
+// structs never knew, read straight out of viper by whatever engine started
+// — including tdns-imr's (#444).
+type ListenerPortsConf struct {
+	DoT []uint16 `yaml:"dot" mapstructure:"dot"`
+	DoH []uint16 `yaml:"doh" mapstructure:"doh"`
+	DoQ []uint16 `yaml:"doq" mapstructure:"doq"`
+}
+
+// Strings renders a port list for the transport engines (net.JoinHostPort
+// wants strings; the config wants ports to BE numbers).
+func portStrings(ports []uint16) []string {
+	out := make([]string, 0, len(ports))
+	for _, p := range ports {
+		out = append(out, strconv.Itoa(int(p)))
+	}
+	return out
+}
+
+// AuthEngineConf is the authoritative-serving BEHAVIOR of tdns-auth and
+// tdns-agent — what used to share the old dnsengine: block with the listener
+// keys that now live in listeners: (#446).
+type AuthEngineConf struct {
+	OptionsStrs []string              `yaml:"options" mapstructure:"options"`
+	Options     map[AuthOption]string `yaml:"-" mapstructure:"-"`
 	// OutboundSoaSerial controls the SOA serial advertised on outbound zone
 	// transfers and NOTIFYs. One of:
 	//   keep     — outbound = inbound serial (default; current behavior).
@@ -275,7 +328,7 @@ type DnsEngineConf struct {
 // ZoneConf, and ExpandTemplate gap-fills its transfer-src onto every primary
 // expanded from it, so a bad value there reaches real zones.
 func ValidateAllTransferSrc(conf *Config) error {
-	if err := ValidateTransferSrc("dnsengine.transfer-src", conf.DnsEngine.TransferSrc); err != nil {
+	if err := ValidateTransferSrc("authengine.transfer-src", conf.AuthEngine.TransferSrc); err != nil {
 		return err
 	}
 	for _, z := range conf.Zones {
@@ -313,13 +366,14 @@ func ValidateTransferSrc(where string, srcs []string) error {
 	return nil
 }
 
+// ImrEngineConf is RESOLVER behavior only. The listener keys (addresses,
+// transports, certfile/keyfile) moved to the shared listeners: block (#446):
+// tdns-imr's service listens there, and an embedded imr (tdns-auth,
+// tdns-agent) is internal by design — its only listener is the loopback
+// listeners.imr-debug-address window.
 type ImrEngineConf struct {
 	Active      *bool                `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
 	RootHints   string               `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
-	Addresses   []string             `yaml:"addresses" mapstructure:"addresses" validate:"required"`
-	CertFile    string               `yaml:"certfile" mapstructure:"certfile"`
-	KeyFile     string               `yaml:"keyfile" mapstructure:"keyfile"`
-	Transports  []string             `yaml:"transports" mapstructure:"transports" validate:"required"` // "do53", "dot", "doh", "doq"
 	Stubs       []ImrStubConf        `yaml:"stubs"`
 	Forward     []ImrForwardConf     `yaml:"forward" mapstructure:"forward"`
 	OptionsStrs []string             `yaml:"options" mapstructure:"options"`

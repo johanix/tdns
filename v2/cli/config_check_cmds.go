@@ -351,7 +351,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 			"structural checks below may be incomplete; often caused by legacy bare-string primaries:/downstreams:")
 	}
 
-	checkDnsEngine(&cfg, rep)
+	checkListeners(&cfg, rep)
 	checkApiServer(&cfg, cfgPath, rep)
 	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
@@ -471,17 +471,17 @@ func checkLogSection(v *viper.Viper, cfgPath string, rep *ccReport) {
 
 // checkRequiredFields runs the exported required-field validator for the given
 // app type (which selects the sections tdns.ValidateConfig checks: auth →
-// service/db/apiserver/dnsengine + log; imr → imrengine + log).
+// service/db/apiserver/listeners/authengine + log; imr → listeners/imrengine + log).
 func checkRequiredFields(v *viper.Viper, cfgPath string, rep *ccReport, appType tdns.AppType) {
 	saved := tdns.Globals.App.Type
 	tdns.Globals.App.Type = appType
 	defer func() { tdns.Globals.App.Type = saved }()
 
-	suggestion := "add the missing required keys (service.name, dnsengine.addresses/transports, apiserver.*, db.file, log.file)"
+	suggestion := "add the missing required keys (service.name, listeners.addresses/transports, apiserver.*, db.file, log.file)"
 	passMsg := "all required sections/keys present; apiserver cert/key pair valid"
 	if appType == tdns.AppTypeImr {
-		suggestion = "add the missing required keys (imrengine.addresses, imrengine.transports, log.file)"
-		passMsg = "required sections present (imrengine.addresses/transports, log.file)"
+		suggestion = "add the missing required keys (listeners.addresses, listeners.transports, log.file)"
+		passMsg = "required sections present (listeners.addresses/transports, log.file)"
 	}
 
 	if err := tdns.ValidateConfig(v, cfgPath); err != nil {
@@ -495,22 +495,22 @@ func checkRequiredFields(v *viper.Viper, cfgPath string, rep *ccReport, appType 
 	rep.pass("Required fields", "required", passMsg)
 }
 
-func checkDnsEngine(cfg *tdns.Config, rep *ccReport) {
-	const g = "DNS engine"
-	if len(cfg.DnsEngine.Addresses) == 0 {
-		rep.fail(g, "addresses", "dnsengine.addresses is empty — the server would not listen on any address",
+func checkListeners(cfg *tdns.Config, rep *ccReport) {
+	const g = "Listeners"
+	if len(cfg.Listeners.Addresses) == 0 {
+		rep.fail(g, "addresses", "listeners.addresses is empty — the server would not listen on any address",
 			"add at least one addr:port, e.g. [ 127.0.0.1:53, '[::1]:53' ]")
 	} else {
-		rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.DnsEngine.Addresses))
+		rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.Listeners.Addresses))
 	}
 
 	validT := map[string]bool{"do53": true, "dot": true, "doh": true, "doq": true}
-	if len(cfg.DnsEngine.Transports) == 0 {
-		rep.fail(g, "transports", "dnsengine.transports is empty",
+	if len(cfg.Listeners.Transports) == 0 {
+		rep.fail(g, "transports", "listeners.transports is empty",
 			"list at least one of do53, dot, doh, doq")
 	}
 	needCert := false
-	for _, t := range cfg.DnsEngine.Transports {
+	for _, t := range cfg.Listeners.Transports {
 		lt := strings.ToLower(strings.TrimSpace(t))
 		if !validT[lt] {
 			rep.fail(g, "transports", fmt.Sprintf("unknown transport %q", t),
@@ -522,12 +522,12 @@ func checkDnsEngine(cfg *tdns.Config, rep *ccReport) {
 		}
 	}
 	if needCert {
-		if cfg.DnsEngine.CertFile == "" || cfg.DnsEngine.KeyFile == "" {
-			rep.warn(g, "cert", "dot/doh/doq configured but dnsengine.certfile/keyfile not set — those listeners will be skipped",
-				"set dnsengine.certfile and dnsengine.keyfile, or remove the encrypted transports")
+		if cfg.Listeners.CertFile == "" || cfg.Listeners.KeyFile == "" {
+			rep.warn(g, "cert", "dot/doh/doq configured but listeners.certfile/keyfile not set — those listeners will be skipped",
+				"set listeners.certfile and listeners.keyfile, or remove the encrypted transports")
 		} else {
-			checkFileExists(rep, g, "certfile", cfg.DnsEngine.CertFile)
-			checkFileExists(rep, g, "keyfile", cfg.DnsEngine.KeyFile)
+			checkFileExists(rep, g, "certfile", cfg.Listeners.CertFile)
+			checkFileExists(rep, g, "keyfile", cfg.Listeners.KeyFile)
 		}
 	}
 }
@@ -1009,9 +1009,9 @@ func correlateRunningConfig(role string, cfg *tdns.Config, cfgPath, daemonDBPath
 }
 
 func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, rep *ccReport, g string) {
-	if !sameStringSet(cfg.DnsEngine.Addresses, resp.DnsEngine.Addresses) {
-		rep.warn(g, "dnsengine-addresses",
-			fmt.Sprintf("config dnsengine.addresses %v differ from running %v", cfg.DnsEngine.Addresses, resp.DnsEngine.Addresses),
+	if !sameStringSet(cfg.Listeners.Addresses, resp.Listeners.Addresses) {
+		rep.warn(g, "listeners-addresses",
+			fmt.Sprintf("config listeners.addresses %v differ from running %v", cfg.Listeners.Addresses, resp.Listeners.Addresses),
 			"a `config reload` does not re-open DNS listeners; restart to change listen addresses")
 	}
 	if resp.ApiServer.ApiKey.Value() != "" && cfg.ApiServer.ApiKey.Value() != "" &&

@@ -49,8 +49,8 @@ const (
 // mergeAllowlist is the whole of what an opted-in include may combine.
 // Everything else replaces, opted in or not.
 //
-// Deliberately absent: dnsengine.addresses, apiserver.addresses,
-// dnsengine.transports. Concatenating those would silently make a server
+// Deliberately absent: listeners.addresses, apiserver.addresses,
+// listeners.transports. Concatenating those would silently make a server
 // listen on more addresses than the file in front of you says -- the same
 // class of failure as widening an ACL, and worse than the clobber this is
 // fixing, because a clobber is at least visible in what the server runs.

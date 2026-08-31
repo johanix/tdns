@@ -2260,8 +2260,8 @@ $TTL 86400
 // Extract the addresses we listen on from the dnsengine configuration. Exclude localhost and non-standard ports.
 func (conf *Config) FindDnsEngineAddrs() ([]string, error) {
 	addrs := []string{}
-	lg.Debug("FindDnsEngineAddrs: dnsengine addresses", "addresses", conf.DnsEngine.Addresses)
-	for _, ns := range conf.DnsEngine.Addresses {
+	lg.Debug("FindDnsEngineAddrs: dnsengine addresses", "addresses", conf.Listeners.Addresses)
+	for _, ns := range conf.Listeners.Addresses {
 		addr, port, err := net.SplitHostPort(ns)
 		if err != nil {
 			// return nil, fmt.Errorf("FindDnsEngineAddrs: failed to split host and port from address '%s': %v", ns, err)

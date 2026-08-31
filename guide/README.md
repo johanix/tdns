@@ -25,7 +25,7 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   zone quarantining), then per-application pages:
   [tdns-auth](config-tdns-auth.md) (TSIG keys, the
   `allow-notify:` / `downstreams:` ACLs, zone declarations
-  and options, the zone template system, the `dnsengine:`
+  and options, the zone template system, the `listeners:`/`authengine:`
   block, DNSSEC policies including policy templates,
   `split-algorithms` and `large-algorithms`),
   [tdns-imr](config-tdns-imr.md) (trust anchors, stub zones,

@@ -6,7 +6,7 @@ log:
    level:      debug
 db:
    file:       /var/tmp/zonemd/tdns-auth/auth.db
-dnsengine:
+listeners:
    addresses:  [ 127.0.0.1:5311 ]
    transports: [ do53 ]
 apiserver:

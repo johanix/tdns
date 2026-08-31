@@ -63,7 +63,7 @@ XoT rides the same DoT listener as encrypted queries. Add `dot` to
 `transports:` and give the engine a server certificate:
 
 ```yaml
-dnsengine:
+listeners:
    addresses:   [ 198.51.100.53:53, '[2001:db8::53]:53' ]
    transports:  [ do53, dot ]        # do53 is always on; dot adds the XoT listener
    ports:
@@ -145,7 +145,7 @@ zones:
           # tls-name: ns1.example.net           # SNI + required SAN; defaults to addr's host
 ```
 
-The secondary presents its own `dnsengine` cert as the client certificate, so
+The secondary presents its own `listeners:` cert as the client certificate, so
 the same `certfile`/`keyfile` that run its DoT listener also authenticate it
 outbound.
 
@@ -336,7 +336,7 @@ zone's `downstream-auth:` policy — see
   same as requiring one.
 - **`certfile` must present a full chain if issued via intermediates.** Certs
   from the tdns CA have no intermediates by design; an external-CA leaf must be
-  concatenated leaf-first into `dnsengine.certfile` or secondaries fail chain
+  concatenated leaf-first into `listeners.certfile` or secondaries fail chain
   building.
 - **DANE needs `imrengine.active: true`** and a signed TLSA at
   `_<port>._tcp.<name>`; the other two modes work with the resolver off.

@@ -479,7 +479,8 @@ type ConfigPost struct {
 type ConfigResponse struct {
 	AppName              string
 	Time                 time.Time
-	DnsEngine            DnsEngineConf
+	Listeners            ListenersConf
+	AuthEngine           AuthEngineConf
 	ApiServer            ApiServerConf
 	Identities           []string
 	DBFile               string

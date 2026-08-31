@@ -10,11 +10,11 @@ log:
 db:
    file:       /var/tmp/xotinterop/tdns-auth/auth.db
 
-dnsengine:
+listeners:
    addresses:  [ 127.0.0.1:5301 ]
    transports: [ do53, dot ]
    ports:
-      dot:     [ "5401" ]
+      dot:     [ 5401 ]
    certfile:   /var/tmp/xotinterop/certs/ns-tdnsauth.xot.test.crt
    keyfile:    /var/tmp/xotinterop/certs/ns-tdnsauth.xot.test.key
 

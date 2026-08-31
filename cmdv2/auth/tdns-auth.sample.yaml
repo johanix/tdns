@@ -47,12 +47,15 @@ service:
       type:    svcb               # svcb | tsync | none; default is none
       signal:  "doq:20,dot:10"    # comma-sep list of doq,dot,doh,do53 with traffic share
 
-dnsengine:
+# The listeners: block is the SAME schema in every tdns app (#446): where
+# this daemon's DNS service listens. Authoritative-serving BEHAVIOR lives
+# in authengine: below.
+listeners:
    addresses:    [ 127.0.0.1:5354, '[::1]:5354' ]
    transports:   [ doq, dot, doh ]
    # Ports per encrypted transport. Defaults: doq 853, dot 853, doh 443.
-   # NOTE: dnsengine.ports.do53 is NOT read. Do53 always listens on the ports
-   # embedded in dnsengine.addresses above.
+   # NOTE: there is no listeners.ports.do53. Do53 always listens on the ports
+   # embedded in listeners.addresses above.
    ports:
       doq:   [ 853 ]
       dot:   [ 853 ]
@@ -64,6 +67,11 @@ dnsengine:
    # NOTE: transfer authentication is PER ZONE (zone/template downstream-auth:
    # plus the peers' TLS fields tls-name/ca-file/pins/dane), enforced at transfer
    # time — there is no listener-level client-cert policy. See guide/xot.md.
+   # The embedded resolver (imrengine: below) is INTERNAL and binds no
+   # service listeners; uncomment for a loopback debug window into its cache:
+   # imr-debug-address: 127.0.0.1:5959
+
+authengine:
    # outbound-soa-serial controls the SOA serial advertised to secondaries:
    #   keep      — outbound = inbound serial (default; current behavior)
    #   unixtime  — outbound = time.Now().Unix() at zone load

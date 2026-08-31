@@ -11,7 +11,7 @@ log:
    level:      debug
 db:
    file:       /var/tmp/zonemd/tdns-agent/agent.db
-dnsengine:
+listeners:
    addresses:  [ 127.0.0.1:5312 ]
    transports: [ do53 ]
 apiserver:

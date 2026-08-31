@@ -273,7 +273,7 @@ func (conf *Config) synthesizeBootstrapZonefile(zone, path string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create zone file directory %s: %v", dir, err)
 	}
-	content := strings.Join(bootstrapApexRecords(zone, conf.DnsEngine.Addresses), "\n") + "\n"
+	content := strings.Join(bootstrapApexRecords(zone, conf.Listeners.Addresses), "\n") + "\n"
 
 	tempFile, err := os.CreateTemp(dir, fmt.Sprintf(".%s.bootstrap.tmp", filepath.Base(path)))
 	if err != nil {

@@ -38,7 +38,7 @@ var certInitCmd = &cobra.Command{
 	Short: "One-shot local provisioning: CA (if absent) + server cert for the local tdns-auth",
 	Long: `Reads the local tdns-auth config, creates a private CA if one does not
 exist yet, and issues a server certificate written to the exact
-dnsengine.certfile/keyfile paths the config already names — no config
+listeners.certfile/keyfile paths the config already names — no config
 editing needed, just restart the daemon. SANs are derived from the
 config's listen addresses plus this host's name (and loopback). The leaf
 carries both serverAuth and clientAuth EKU so the same daemon can also
@@ -74,10 +74,10 @@ func runCertInit() {
 		}
 	}
 
-	certFile := v.GetString("dnsengine.certfile")
-	keyFile := v.GetString("dnsengine.keyfile")
+	certFile := v.GetString("listeners.certfile")
+	keyFile := v.GetString("listeners.keyfile")
 	if certFile == "" || keyFile == "" {
-		cliFatalf("cert init: %s does not set dnsengine.certfile/keyfile — set both (they are where the new cert/key will be written), then re-run", cfgPath)
+		cliFatalf("cert init: %s does not set listeners.certfile/keyfile — set both (they are where the new cert/key will be written), then re-run", cfgPath)
 	}
 
 	// Nothing to do is not a failure.
@@ -145,7 +145,7 @@ func runCertInit() {
 	if leafName == "" {
 		leafName = hostname
 	}
-	dnsSANs, ipSANs := initSANs(leafName, hostname, v.GetStringSlice("dnsengine.addresses"))
+	dnsSANs, ipSANs := initSANs(leafName, hostname, v.GetStringSlice("listeners.addresses"))
 
 	// CA: reuse when present, mint when absent, refuse a half-present pair.
 	caDir := certInitCADir
@@ -262,14 +262,14 @@ func initSANs(leafName, hostname string, addresses []string) ([]string, []net.IP
 	return dnsSANs, ips
 }
 
-// initDotPort returns the DoT port the config implies: dnsengine.ports.dot
+// initDotPort returns the DoT port the config implies: listeners.ports.dot
 // when set, else 853.
 func initDotPort(v *viper.Viper) string {
-	if ports := v.GetStringSlice("dnsengine.ports.dot"); len(ports) > 0 {
-		return ports[0]
-	}
-	if ports := v.GetIntSlice("dnsengine.ports.dot"); len(ports) > 0 {
+	if ports := v.GetIntSlice("listeners.ports.dot"); len(ports) > 0 && ports[0] > 0 {
 		return strconv.Itoa(ports[0])
+	}
+	if ports := v.GetStringSlice("listeners.ports.dot"); len(ports) > 0 {
+		return ports[0]
 	}
 	return "853"
 }

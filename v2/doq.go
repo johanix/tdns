@@ -15,10 +15,9 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
-	"github.com/spf13/viper"
 )
 
-func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tls.Certificate,
+func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs, ports []string, cert *tls.Certificate,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
 
 	tlsConfig := &tls.Config{
@@ -27,7 +26,7 @@ func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tl
 	}
 	tlsConfig.Certificates = []tls.Certificate{*cert}
 
-	ports := viper.GetStringSlice("dnsengine.ports.doq")
+	// ports comes from the caller's listeners: block (#444/#446).
 	if len(ports) == 0 {
 		ports = []string{"853"}
 	}

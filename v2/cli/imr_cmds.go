@@ -331,10 +331,10 @@ var imrShowConfigCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("IMR configuration summary:")
 
-		if len(Conf.Imr.Addresses) == 0 {
+		if len(Conf.Listeners.Addresses) == 0 {
 			fmt.Println("  Listening addresses: (none configured)")
 		} else {
-			fmt.Printf("  Listening addresses: %s\n", strings.Join(Conf.Imr.Addresses, ", "))
+			fmt.Printf("  Listening addresses: %s\n", strings.Join(Conf.Listeners.Addresses, ", "))
 		}
 
 		primed := false

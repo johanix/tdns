@@ -73,7 +73,7 @@ Notes:
   "UPDATE proxy" below). The agent never authors anything else in the zone.
 - The UPDATE form is REPLACE by default (delete the RRset, re-add the
   current members — idempotent and self-correcting). To use delta instead,
-  set the `parent-update: delta` auth option under `dnsengine.options`.
+  set the `parent-update: delta` auth option under `authengine.options`.
 
 
 ## What triggers a NOTIFY

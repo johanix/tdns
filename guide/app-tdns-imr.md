@@ -137,7 +137,7 @@ $ tdns-imr --cli                 # interactive mode
 ```
 
 Interactive mode is **not** a lightweight client. Startup is identical in both
-modes: the resolver binds `imrengine.addresses`, starts the validator and the
+modes: the resolver binds `listeners.addresses`, starts the validator and the
 HTTP management API, and begins answering queries. `--cli` merely layers a shell
 on top of that running resolver, so every command below inspects and manipulates
 the live in-process cache.

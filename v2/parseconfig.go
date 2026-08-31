@@ -91,10 +91,42 @@ func decodeConfigFile(cfgfile string, conf *Config) (mapstructure.Metadata, []st
 	return md, includedFiles, aliasConflicts, nil
 }
 
+// rejectMovedConfigKeys refuses the pre-#446 config schema outright, with
+// the key-for-key migration in the error. Hard error by design — no
+// fallbacks, no aliases: a stale config fails loudly at load (daemon and
+// `config check` alike, since every decode path runs through
+// decodeConfigMap), never half-works. See
+// docs/2026-08-31-config-schema-listeners-design.md.
+func rejectMovedConfigKeys(configMap map[string]interface{}) error {
+	var errs []string
+	if _, ok := configMap["dnsengine"]; ok {
+		errs = append(errs,
+			"the dnsengine: block is gone: its listener keys (addresses, transports, certfile, keyfile, ports) moved to listeners:, its behavior keys (options, outbound-soa-serial, transfer-src) to authengine:")
+	}
+	if imrRaw, ok := configMap["imrengine"]; ok {
+		if imrMap, ok := imrRaw.(map[string]interface{}); ok {
+			for _, key := range []string{"addresses", "transports", "certfile", "keyfile"} {
+				if _, ok := imrMap[key]; ok {
+					errs = append(errs, fmt.Sprintf(
+						"imrengine.%s moved to listeners.%s (tdns-imr listens via listeners:; the embedded imr of tdns-auth/tdns-agent is internal and listens only via listeners.imr-debug-address)",
+						key, key))
+				}
+			}
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("config uses pre-#446 schema keys:\n  - %s", strings.Join(errs, "\n  - "))
+}
+
 // decodeConfigMap is the decode half alone, for callers that already hold a
 // settings map. Same strictness, same hooks, same tag: a divergence here is a
 // checker that disagrees with the daemon.
 func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstructure.Metadata) error {
+	if err := rejectMovedConfigKeys(configMap); err != nil {
+		return err
+	}
 	decoderConfig := &mapstructure.DecoderConfig{
 		TagName: "yaml",
 		Result:  conf,
@@ -537,7 +569,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if conf.Internal.ServerErrors == nil {
 		conf.Internal.ServerErrors = NewServerErrorRegistry()
 	}
-	conf.validateDnsEngineCerts()
+	conf.validateListenerCerts()
 
 	// dynamiczones: value validation (e.g. an unknown zone type in
 	// dynamic.allowed) is a hard config error — the decoder accepts any
@@ -551,6 +583,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// any string, and a bad entry here fails silently at transfer time rather
 	// than loudly at load.
 	if err := ValidateAllTransferSrc(conf); err != nil {
+		return err
+	}
+
+	// listeners.imr-debug-address: loopback or refuse to load (#446) — a
+	// non-loopback debug window is an open resolver inside an auth server.
+	if err := validateImrDebugAddress(conf.Listeners.ImrDebugAddress); err != nil {
 		return err
 	}
 
@@ -687,12 +725,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 			// a reloaded option (e.g. minimal-responses) takes effect without a
 			// restart. The KeyDB is built once at startup and reused across
 			// reloads, but the query responder reads them — without this, reload
-			// updated only conf.DnsEngine.Options (the presentation) while the
+			// updated only conf.AuthEngine.Options (the presentation) while the
 			// responder kept the stale startup map. SetOptions swaps the map
 			// atomically, so the per-query lock-free readers are race-free.
-			conf.Internal.KeyDB.SetOptions(conf.DnsEngine.Options)
-			conf.Internal.KeyDB.SetTransferSrc(conf.DnsEngine.TransferSrc)
-			if err := applyOutboundSoaSerial(conf.Internal.KeyDB, conf.DnsEngine.OutboundSoaSerial); err != nil {
+			conf.Internal.KeyDB.SetOptions(conf.AuthEngine.Options)
+			conf.Internal.KeyDB.SetTransferSrc(conf.AuthEngine.TransferSrc)
+			if err := applyOutboundSoaSerial(conf.Internal.KeyDB, conf.AuthEngine.OutboundSoaSerial); err != nil {
 				return err
 			}
 		}
@@ -705,7 +743,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	if Globals.App.Type == AppTypeAuth && len(conf.Service.Identities) > 0 {
 		var transports []string
-		for _, t := range conf.DnsEngine.Transports {
+		for _, t := range conf.Listeners.Transports {
 			t = strings.ToLower(t)
 			switch t {
 			case "do53", "dot", "doh", "doq":
@@ -774,14 +812,14 @@ func (conf *Config) InitializeKeyDB() error {
 			return fmt.Errorf("ParseConfig: failed to create TDNS DB file %s: %v", dbFile, err)
 		}
 	}
-	kdb, err := NewKeyDB(dbFile, false, conf.DnsEngine.Options)
+	kdb, err := NewKeyDB(dbFile, false, conf.AuthEngine.Options)
 	if err != nil {
 		return fmt.Errorf("error from NewKeyDB: %v", err)
 	}
 	conf.Internal.KeyDB = kdb
 
-	kdb.SetTransferSrc(conf.DnsEngine.TransferSrc)
-	if err := applyOutboundSoaSerial(kdb, conf.DnsEngine.OutboundSoaSerial); err != nil {
+	kdb.SetTransferSrc(conf.AuthEngine.TransferSrc)
+	if err := applyOutboundSoaSerial(kdb, conf.AuthEngine.OutboundSoaSerial); err != nil {
 		return err
 	}
 
@@ -1600,7 +1638,7 @@ func serialSuppressionCandidate(appType AppType, ztype ZoneType, opts map[ZoneOp
 }
 
 func warnGlobalOutboundSerialSuppressed(conf *Config, suppressed []string) {
-	mode := strings.TrimSpace(strings.ToLower(conf.DnsEngine.OutboundSoaSerial))
+	mode := strings.TrimSpace(strings.ToLower(conf.AuthEngine.OutboundSoaSerial))
 	if mode != OutboundSoaSerialPersist && mode != OutboundSoaSerialUnixtime {
 		return
 	}

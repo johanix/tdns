@@ -265,9 +265,9 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 
 	if showVerboseStatus && tdns.Globals.Verbose {
 		fmt.Printf("Status for %s:\n", resp.AppName)
-		if len(resp.DnsEngine.Addresses) > 0 {
-			fmt.Printf("DnsEngine: listening on %v\n", resp.DnsEngine.Addresses)
-			fmt.Printf("DnsEngine: configured transports: %v\n", resp.DnsEngine.Transports)
+		if len(resp.Listeners.Addresses) > 0 {
+			fmt.Printf("DnsEngine: listening on %v\n", resp.Listeners.Addresses)
+			fmt.Printf("DnsEngine: configured transports: %v\n", resp.Listeners.Transports)
 		} else {
 			fmt.Printf("DnsEngine: not listening on any addresses\n")
 		}
@@ -279,9 +279,9 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 		}
 		renderImrStatus(resp.Imr)
 		renderProcStatus(resp.Proc)
-		if len(resp.DnsEngine.Options) > 0 {
+		if len(resp.AuthEngine.Options) > 0 {
 			fmt.Printf("DnsEngine: auth options:\n")
-			for opt, val := range resp.DnsEngine.Options {
+			for opt, val := range resp.AuthEngine.Options {
 				optName, ok := tdns.AuthOptionToString[opt]
 				if !ok {
 					optName = fmt.Sprintf("unknown option %d", opt)
@@ -292,9 +292,9 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 					fmt.Printf("  %s: (enabled)\n", optName)
 				}
 			}
-		} else if len(resp.DnsEngine.OptionsStrs) > 0 {
+		} else if len(resp.AuthEngine.OptionsStrs) > 0 {
 			fmt.Printf("DnsEngine: auth options:\n")
-			for _, optStr := range resp.DnsEngine.OptionsStrs {
+			for _, optStr := range resp.AuthEngine.OptionsStrs {
 				fmt.Printf("  %s\n", optStr)
 			}
 		} else {
