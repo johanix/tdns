@@ -26,6 +26,12 @@ stop() {
 
 start() {
 	[ -f "$RIG/tdns-auth-p/tdns-auth-p.yaml" ] || { echo "not seeded -- run setup.sh" >&2; exit 1; }
+	# Truncate the logs a run is scored from. The daemons append, so without
+	# this `verify` sums this run together with every previous one and its
+	# thresholds can be met by two half-runs rather than by one whole one.
+	: > "$RIG/log/tdns-auth-p.log"
+	: > "$RIG/log/tdns-auth-s.log"
+	: > "$RIG/log/named.log"
 	(cd "$TDNS/cmdv2/auth" && nohup ./tdns-auth --config "$RIG/tdns-auth-p/tdns-auth-p.yaml" \
 		< /dev/null > "$RIG/log/tdns-auth-p.stdout" 2>&1 &)
 	sleep 4

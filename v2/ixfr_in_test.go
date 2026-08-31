@@ -13,7 +13,10 @@ package tdns
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +24,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func ixSOA(t *testing.T, serial uint32) dns.RR {
+func ixSOA(t testing.TB, serial uint32) dns.RR {
 	t.Helper()
 	return &dns.SOA{
 		Hdr:     dns.RR_Header{Name: "example.", Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 3600},
@@ -32,7 +35,7 @@ func ixSOA(t *testing.T, serial uint32) dns.RR {
 	}
 }
 
-func ixA(t *testing.T, name, addr string) dns.RR {
+func ixA(t testing.TB, name, addr string) dns.RR {
 	t.Helper()
 	rr, err := dns.NewRR(name + "\t3600\tIN\tA\t" + addr)
 	if err != nil {
@@ -296,7 +299,7 @@ www.example.	3600	IN	AAAA	2001:db8::3
 
 // ixBase builds a published snapshot to materialize from, without registering
 // the zone globally.
-func ixBase(t *testing.T, zoneStr string) *ZoneData {
+func ixBase(t testing.TB, zoneStr string) *ZoneData {
 	t.Helper()
 	zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: discardLogger()}
 	if _, _, err := zd.ReadZoneData(zoneStr, true); err != nil {
@@ -340,7 +343,7 @@ func TestMaterializeForIxfrIsADeepCopy(t *testing.T) {
 	zd := ixBase(t, ixApplyZone)
 	snap := zd.publishedSnapshot()
 
-	data, _ := materializeForIxfr(snap)
+	data, _ := materializeForIxfr(snap, nil)
 
 	live := snap.Data["www.example."].RRtypes.GetOnlyRRSet(dns.TypeA).RRs
 	if len(live) != 1 {
@@ -384,7 +387,7 @@ func TestMaterializeForIxfrCarriesNSEC(t *testing.T) {
 		t.Fatal("precondition: the base snapshot should carry an apex NSEC")
 	}
 
-	data, _ := materializeForIxfr(snap)
+	data, _ := materializeForIxfr(snap, nil)
 	nod, ok := data.Get("example.")
 	if !ok {
 		t.Fatal("no apex in the materialized copy")
@@ -402,7 +405,7 @@ func TestApplyIxfrRoutesSignatureAndNSECDeletes(t *testing.T) {
 	sig := "www.example.\t3600\tIN\tRRSIG\tA 13 2 3600 20260101000000 20251201000000 12345 example. AAAA"
 	nsec := "example.\t3600\tIN\tNSEC\tns.example. NS SOA RRSIG NSEC"
 	zd := ixBase(t, ixApplyZone+sig+"\n"+nsec+"\n")
-	data, _ := materializeForIxfr(zd.publishedSnapshot())
+	data, _ := materializeForIxfr(zd.publishedSnapshot(), nil)
 
 	sigRR, err := dns.NewRR(sig)
 	if err != nil {
@@ -427,7 +430,7 @@ func TestApplyIxfrRoutesSignatureAndNSECDeletes(t *testing.T) {
 func TestApplyIxfrRefusesUnsignedLeftovers(t *testing.T) {
 	sig := "www.example.\t3600\tIN\tRRSIG\tA 13 2 3600 20260101000000 20251201000000 12345 example. AAAA"
 	zd := ixBase(t, ixApplyZone+sig+"\n")
-	data, signed := materializeForIxfr(zd.publishedSnapshot())
+	data, signed := materializeForIxfr(zd.publishedSnapshot(), nil)
 	if len(signed) == 0 {
 		t.Fatal("precondition: the base should have at least one signed RRset")
 	}
@@ -445,7 +448,7 @@ func TestApplyIxfrRefusesUnsignedLeftovers(t *testing.T) {
 	}
 
 	// The same removal is fine when the RRset goes with it.
-	data2, signed2 := materializeForIxfr(zd.publishedSnapshot())
+	data2, signed2 := materializeForIxfr(zd.publishedSnapshot(), nil)
 	steps2 := []ixfrStep{{from: 7, to: 8, removed: []dns.RR{
 		sigRR, ixA(t, "www.example.", "10.0.0.3"),
 	}}}
@@ -458,7 +461,7 @@ func TestApplyIxfrRefusesUnsignedLeftovers(t *testing.T) {
 // base is not the base the delta was computed against.
 func TestApplyIxfrAbortsOnUnmatchedDelete(t *testing.T) {
 	zd := ixBase(t, ixApplyZone)
-	data, signed := materializeForIxfr(zd.publishedSnapshot())
+	data, signed := materializeForIxfr(zd.publishedSnapshot(), nil)
 	steps := []ixfrStep{{from: 7, to: 8, removed: []dns.RR{
 		ixA(t, "www.example.", "192.0.2.99"), // never in the zone
 	}}}
@@ -471,7 +474,7 @@ func TestApplyIxfrAbortsOnUnmatchedDelete(t *testing.T) {
 // independently-built expectation, including the apex SOA replacement.
 func TestApplyIxfrEndToEnd(t *testing.T) {
 	zd := ixBase(t, ixApplyZone)
-	data, signed := materializeForIxfr(zd.publishedSnapshot())
+	data, signed := materializeForIxfr(zd.publishedSnapshot(), nil)
 
 	rrs := []dns.RR{
 		ixSOA(t, 9),
@@ -522,7 +525,7 @@ func TestApplyIxfrEndToEnd(t *testing.T) {
 // existing, rather than lingering with only its signatures.
 func TestApplyIxfrRemovesEmptiedOwners(t *testing.T) {
 	zd := ixBase(t, ixApplyZone)
-	data, signed := materializeForIxfr(zd.publishedSnapshot())
+	data, signed := materializeForIxfr(zd.publishedSnapshot(), nil)
 	steps := []ixfrStep{{from: 7, to: 8, removed: []dns.RR{
 		ixA(t, "www.example.", "10.0.0.3"),
 		mustRR(t, "www.example.\t3600\tIN\tAAAA\t2001:db8::3"),
@@ -1083,6 +1086,51 @@ func TestRequestIxfrOptionsAreSecondaryOnly(t *testing.T) {
 			}
 		})
 
+		t.Run(opt+" on a signing secondary warns and is dropped", func(t *testing.T) {
+			// Inert for a different reason than on a primary: the zone re-signs
+			// what it receives, so a delta computed against the primary's copy
+			// cannot apply. shouldRequestIxfr already refuses to ask; this is
+			// so the operator finds out from the config rather than from a
+			// packet capture.
+			zd := &ZoneData{ZoneName: "example."}
+			// A DnssecPolicy, because inline-signing without one raises a
+			// ConfigError of its own and this test asserts there is none.
+			zconf := &ZoneConf{Name: "example.", Type: "secondary",
+				DnssecPolicy: "default",
+				OptionsStrs:  []string{"inline-signing", opt}}
+			options := parseZoneOptions(&Config{}, "example.", zconf, zd)
+
+			if options[StringToZoneOption[opt]] {
+				t.Errorf("%s was accepted on a signing secondary, where it does nothing", opt)
+			}
+			var warned bool
+			for _, e := range zd.ErrorList() {
+				switch e.Type {
+				case ConfigWarning:
+					warned = true
+				case ConfigError:
+					t.Errorf("an inert option raised a service-impacting ConfigError: %q", e.Msg)
+				}
+			}
+			if !warned {
+				t.Errorf("%s on a signing secondary was dropped silently", opt)
+			}
+		})
+
+		t.Run(opt+" order in the config does not change the verdict", func(t *testing.T) {
+			// The signing pre-scan exists for this: written before the signing
+			// option, the request-ixfr case would otherwise be judged before
+			// anything knew the zone signs.
+			zd := &ZoneData{ZoneName: "example."}
+			zconf := &ZoneConf{Name: "example.", Type: "secondary",
+				DnssecPolicy: "default",
+				OptionsStrs:  []string{opt, "inline-signing"}}
+			options := parseZoneOptions(&Config{}, "example.", zconf, zd)
+			if options[StringToZoneOption[opt]] {
+				t.Errorf("%s was accepted when written before inline-signing", opt)
+			}
+		})
+
 		t.Run(opt+" on a primary warns and is dropped", func(t *testing.T) {
 			zd := &ZoneData{ZoneName: "example."}
 			zconf := &ZoneConf{Name: "example.", Type: "primary", OptionsStrs: []string{opt}}
@@ -1128,7 +1176,7 @@ func TestConfigWarningIsNotServiceImpacting(t *testing.T) {
 // would also be a way for a primary to grow one of our RRsets without bound.
 func TestApplyIxfrRefusesDuplicateAdds(t *testing.T) {
 	zd := ixBase(t, ixApplyZone)
-	data, signed := materializeForIxfr(zd.publishedSnapshot())
+	data, signed := materializeForIxfr(zd.publishedSnapshot(), nil)
 
 	// www.example. already holds 10.0.0.3 in the base zone.
 	steps := []ixfrStep{{from: 7, to: 8, added: []dns.RR{ixA(t, "www.example.", "10.0.0.3")}}}
@@ -1137,7 +1185,7 @@ func TestApplyIxfrRefusesDuplicateAdds(t *testing.T) {
 			"hold the same RR twice")
 	}
 	// The same record at a different value is an ordinary add.
-	data2, signed2 := materializeForIxfr(zd.publishedSnapshot())
+	data2, signed2 := materializeForIxfr(zd.publishedSnapshot(), nil)
 	steps2 := []ixfrStep{{from: 7, to: 8, added: []dns.RR{ixA(t, "www.example.", "10.0.0.99")}}}
 	if err := applyIxfrSteps("example.", data2, signed2, steps2); err != nil {
 		t.Errorf("apply refused a genuine add: %v", err)
@@ -1153,7 +1201,7 @@ func TestApplyIxfrRefusesStrippedNSECSignature(t *testing.T) {
 	nsig := "example.\t3600\tIN\tRRSIG\tNSEC 13 2 3600 20260101000000 20251201000000 12345 example. AAAA"
 	zd := ixBase(t, ixApplyZone+nsec+"\n"+nsig+"\n")
 
-	data, signed := materializeForIxfr(zd.publishedSnapshot())
+	data, signed := materializeForIxfr(zd.publishedSnapshot(), nil)
 	if !signed[signedKey{owner: "example.", rrtype: dns.TypeNSEC}] {
 		t.Fatal("the NSEC's signature was not recorded; the check below cannot fire")
 	}
@@ -1165,7 +1213,7 @@ func TestApplyIxfrRefusesStrippedNSECSignature(t *testing.T) {
 	}
 
 	// Removing the NSEC together with its signature is fine.
-	data2, signed2 := materializeForIxfr(zd.publishedSnapshot())
+	data2, signed2 := materializeForIxfr(zd.publishedSnapshot(), nil)
 	steps2 := []ixfrStep{{from: 7, to: 8, removed: []dns.RR{mustRR(t, nsig), mustRR(t, nsec)}}}
 	if err := applyIxfrSteps("example.", data2, signed2, steps2); err != nil {
 		t.Errorf("apply refused removing an NSEC and its signature together: %v", err)
@@ -1442,5 +1490,220 @@ healed.example.	3600	IN	A	10.8.8.8
 	// And the delta's own record is not in the zone: it was refused, not merged.
 	if owner, _ := zd.GetOwner("added.example."); owner != nil {
 		t.Error("a record from the refused delta is being served")
+	}
+}
+
+// ---------------------------------------------- copy-on-write materialize
+
+// ixCowSteps is one ordinary delta: change www's A, leave every other owner
+// alone. The interesting property is which owners it does NOT mention.
+func ixCowSteps(t testing.TB) []ixfrStep {
+	t.Helper()
+	return []ixfrStep{{
+		from:    7,
+		to:      8,
+		removed: []dns.RR{ixA(t, "www.example.", "10.0.0.3")},
+		added:   []dns.RR{ixA(t, "www.example.", "10.0.0.9")},
+	}}
+}
+
+// TestMaterializeSharesUntouchedOwners is the test the interop rig cannot be:
+// the rig compares served zones after each publish, and an owner aliased into
+// the live snapshot corrupts the PREVIOUS snapshot while the newly published
+// map stays correct. That is a reader-visible fault a byte comparison after the
+// fact does not see.
+//
+// Two halves, and both have to hold or the change is either useless or unsafe:
+// an untouched owner must actually be shared (otherwise nothing was optimised
+// and every other test here passes vacuously), and a touched owner must be
+// isolated all the way down to the RR pointers.
+func TestMaterializeSharesUntouchedOwners(t *testing.T) {
+	zd := ixBase(t, ixApplyZone)
+	snap := zd.publishedSnapshot()
+	steps := ixCowSteps(t)
+
+	data, _ := materializeForIxfr(snap, ixfrTouchedOwners("example.", steps))
+
+	// Untouched: same store, so computeZoneDelta will skip it.
+	quiet, ok := data.Get("ns.example.")
+	if !ok {
+		t.Fatal("ns.example. vanished from the materialized copy")
+	}
+	if quiet.RRtypes != snap.Data["ns.example."].RRtypes {
+		t.Error("an owner the delta never mentions was deep-copied; the whole " +
+			"point is that it is shared, and computeZoneDelta will now " +
+			"content-compare every owner in the zone")
+	}
+
+	// Touched: a new store, and new RRs inside it.
+	hit, ok := data.Get("www.example.")
+	if !ok {
+		t.Fatal("www.example. vanished from the materialized copy")
+	}
+	if hit.RRtypes == snap.Data["www.example."].RRtypes {
+		t.Fatal("an owner the delta mutates shares its store with the published " +
+			"snapshot; applying the delta would edit the zone being served")
+	}
+	live, _ := snap.Data["www.example."].RRtypes.Get(dns.TypeA)
+	copied, _ := hit.RRtypes.Get(dns.TypeA)
+	if len(live.RRs) == 0 || len(copied.RRs) == 0 {
+		t.Fatal("no A RRset to compare")
+	}
+	if live.RRs[0] == copied.RRs[0] {
+		t.Error("the copy shares RR pointers with the published snapshot; " +
+			"signing or a TTL clamp would rewrite a record being served")
+	}
+}
+
+// TestApplyDoesNotDisturbThePublishedSnapshot applies the delta for real and
+// then asks the snapshot what it holds. This is the fault the sharing could
+// introduce, stated as an outcome rather than as pointer identity.
+func TestApplyDoesNotDisturbThePublishedSnapshot(t *testing.T) {
+	zd := ixBase(t, ixApplyZone)
+	snap := zd.publishedSnapshot()
+	steps := ixCowSteps(t)
+
+	// Sorted per owner: RRtypes.Keys() is not order-stable, and a reordering
+	// is not a change. Any real edit still shows up as a different multiset.
+	snapRRs := func() map[string][]string {
+		out := map[string][]string{}
+		for name, od := range snap.Data {
+			for _, ty := range od.RRtypes.Keys() {
+				rs, _ := od.RRtypes.Get(ty)
+				for _, rr := range rs.RRs {
+					out[name] = append(out[name], rr.String())
+				}
+			}
+			for _, rr := range od.NSEC.RRs {
+				out[name] = append(out[name], rr.String())
+			}
+			sort.Strings(out[name])
+		}
+		return out
+	}
+	before := snapRRs()
+
+	data, signed := materializeForIxfr(snap, ixfrTouchedOwners("example.", steps))
+	if err := applyIxfrSteps("example.", data, signed, steps); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if err := replaceApexSOA("example.", data, ixSOA(t, 8).(*dns.SOA)); err != nil {
+		t.Fatalf("replaceApexSOA: %v", err)
+	}
+
+	for name, now := range snapRRs() {
+		was := before[name]
+		if len(now) != len(was) {
+			t.Fatalf("%s: published snapshot changed under the apply: %d RRs before, %d after",
+				name, len(was), len(now))
+		}
+		for i := range now {
+			if now[i] != was[i] {
+				t.Errorf("%s: published snapshot changed under the apply:\n before: %s\n  after: %s",
+					name, was[i], now[i])
+			}
+		}
+	}
+
+	// And the copy did get the change.
+	got := ixOwnerRRs(t, data, "www.example.", dns.TypeA)
+	if len(got) != 1 || got[0].(*dns.A).A.String() != "10.0.0.9" {
+		t.Errorf("the delta was not applied to the copy: %v", got)
+	}
+}
+
+// TestIxfrTouchedOwnersIncludesTheApex: replaceApexSOA rewrites the apex on
+// every delta, but the bracket SOAs delimit the sequences instead of appearing
+// inside them, so nothing in removed/added names the apex on a delta that only
+// changes a leaf. Dropping the unconditional apex entry would share the one
+// owner that is always mutated.
+func TestIxfrTouchedOwnersIncludesTheApex(t *testing.T) {
+	steps := ixCowSteps(t)
+	for _, st := range steps {
+		for _, rr := range append(append([]dns.RR{}, st.removed...), st.added...) {
+			if core.CanonicalizeName(rr.Header().Name) == "example." {
+				t.Fatal("precondition: this delta must not mention the apex, " +
+					"or it cannot show that the apex is added unconditionally")
+			}
+		}
+	}
+	if !ixfrTouchedOwners("example.", steps)["example."] {
+		t.Error("the apex is not in the touched set; replaceApexSOA would rewrite " +
+			"an owner shared with the published snapshot")
+	}
+}
+
+// TestDeltaThroughSharedOwnersMatchesTheApply is the payoff, and the risk the
+// storage check introduces: an owner wrongly judged unchanged is silently
+// dropped from the outbound link, and a downstream applying that link ends up
+// with content we do not have. Take the real materialize-and-apply result
+// through computeZoneDelta and require exactly the records the delta carried.
+func TestDeltaThroughSharedOwnersMatchesTheApply(t *testing.T) {
+	zd := ixBase(t, ixApplyZone)
+	snap := zd.publishedSnapshot()
+	steps := ixCowSteps(t)
+
+	data, signed := materializeForIxfr(snap, ixfrTouchedOwners("example.", steps))
+	if err := applyIxfrSteps("example.", data, signed, steps); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if err := replaceApexSOA("example.", data, ixSOA(t, 8).(*dns.SOA)); err != nil {
+		t.Fatalf("replaceApexSOA: %v", err)
+	}
+
+	removed, added, _ := computeZoneDelta("example.", snap.Data, snapshotMapFromData(data))
+
+	flat := func(sets []core.RRset) []string {
+		var out []string
+		for _, rs := range sets {
+			for _, rr := range rs.RRs {
+				out = append(out, rr.String())
+			}
+		}
+		return out
+	}
+	gotRem, gotAdd := flat(removed), flat(added)
+	if len(gotRem) != 1 || gotRem[0] != steps[0].removed[0].String() {
+		t.Errorf("delta removed %v; the applied change removed %s",
+			gotRem, steps[0].removed[0].String())
+	}
+	if len(gotAdd) != 1 || gotAdd[0] != steps[0].added[0].String() {
+		t.Errorf("delta added %v; the applied change added %s",
+			gotAdd, steps[0].added[0].String())
+	}
+}
+
+// BenchmarkIxfrDeltaApply measures the whole inbound step -- materialize,
+// apply, and derive the outbound link -- for a three-record delta, against the
+// full-copy behaviour it replaces. The shape being fixed is that both halves
+// used to be O(zone): every owner deep-copied, then every owner content-
+// compared, to reproduce a difference the primary had already sent us.
+func BenchmarkIxfrDeltaApply(b *testing.B) {
+	for _, n := range []int{1000, 10000, 50000} {
+		var sb strings.Builder
+		sb.WriteString(ixApplyZone)
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&sb, "n%d.example.\t3600\tIN\tA\t10.1.%d.%d\n", i, (i/256)%256, i%256)
+		}
+		zd := ixBase(b, sb.String())
+		snap := zd.publishedSnapshot()
+		steps := ixCowSteps(b)
+		touched := ixfrTouchedOwners("example.", steps)
+
+		run := func(b *testing.B, sel map[string]bool) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				data, signed := materializeForIxfr(snap, sel)
+				if err := applyIxfrSteps("example.", data, signed, steps); err != nil {
+					b.Fatal(err)
+				}
+				if err := replaceApexSOA("example.", data, ixSOA(b, 8).(*dns.SOA)); err != nil {
+					b.Fatal(err)
+				}
+				computeZoneDelta("example.", snap.Data, snapshotMapFromData(data))
+			}
+		}
+		b.Run(fmt.Sprintf("shared/%d", n), func(b *testing.B) { run(b, touched) })
+		b.Run(fmt.Sprintf("fullcopy/%d", n), func(b *testing.B) { run(b, nil) })
 	}
 }
