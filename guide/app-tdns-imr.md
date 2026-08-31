@@ -114,7 +114,10 @@ Details of forwarding behaviour:
   status` for the resolver embedded in those daemons. A failed IMR init
   (priming failure in iterative mode) also registers an `Upstream/ImrPriming`
   error, so a daemon running without its DNS listeners is visible as DEGRADED
-  rather than silently answering nothing.
+  rather than silently answering nothing. `config status` also reports the
+  process's open-descriptor count against its limit (and goroutine count),
+  with a warning above 80% — the tdns#443 wedge was fd exhaustion starving
+  outbound dials, and this makes that class of leak visible while it grows.
 - **Limits**: upstream addresses are IP literals (no hostnames), the DoH path
   is fixed at `/dns-query`, and the forward table is read at startup only —
   like stubs, there is no reload.

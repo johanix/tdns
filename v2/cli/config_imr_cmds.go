@@ -73,6 +73,7 @@ reachability (fed by the startup probe and live queries).`,
 				return
 			}
 			renderImrStatus(resp.Imr)
+			renderProcStatus(resp.Proc)
 		},
 	}
 }
