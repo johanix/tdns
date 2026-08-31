@@ -83,7 +83,10 @@ func renderProcStatus(ps *tdns.ProcStatus) {
 		return
 	}
 	if ps.FDMethod == "unavailable" {
-		fmt.Printf("Process: fd count unavailable on this platform, goroutines %d\n", ps.Goroutines)
+		// Two causes share this state: an unsupported platform, and — on
+		// linux/darwin — descriptor exhaustion, where counting needs the
+		// one fd that no longer exists. Post-wedge, this line IS the signal.
+		fmt.Printf("Process: fd count unavailable (unsupported platform, or descriptors exhausted — see tdns#443), goroutines %d\n", ps.Goroutines)
 		return
 	}
 	kind := "open fds"
@@ -96,7 +99,9 @@ func renderProcStatus(ps *tdns.ProcStatus) {
 	}
 	line += fmt.Sprintf(", goroutines %d", ps.Goroutines)
 	fmt.Println(line)
-	if ps.FDLimit > 0 && uint64(ps.OpenFDs) >= ps.FDLimit*8/10 {
+	// Divide before multiplying and require a sane finite limit: an
+	// RLIM_INFINITY soft limit would overflow FDLimit*8/10 and misfire.
+	if ps.FDLimit > 0 && ps.FDLimit < 1<<40 && uint64(ps.OpenFDs) >= ps.FDLimit/10*8 {
 		fmt.Printf("WARNING: file descriptors at %d of %d — a leak here starves outbound queries (see tdns#443)\n",
 			ps.OpenFDs, ps.FDLimit)
 	}

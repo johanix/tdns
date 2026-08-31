@@ -50,7 +50,8 @@ func newImrConfigStatusCmd() *cobra.Command {
 		Long: `Query the running tdns-imr daemon's /config status endpoint and report:
 overall health (active server errors), whether the resolver cache is primed
 and how, and the configured stub and forward zones with per-upstream
-reachability (fed by the startup probe and live queries).`,
+reachability (fed by the startup probe and live queries), plus the
+process's descriptor and goroutine counts (tdns#443).`,
 		Run: func(cmd *cobra.Command, args []string) {
 			resp, err := fetchImrStatus()
 			if err != nil {
@@ -68,12 +69,15 @@ reachability (fed by the startup probe and live queries).`,
 					fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
 				}
 			}
+			// Proc renders BEFORE the nil-Imr return: a daemon whose IMR
+			// init failed (the Upstream/ImrPriming husk) is precisely a
+			// moment to look at process resources, not to hide them.
+			renderProcStatus(resp.Proc)
 			if resp.Imr == nil {
 				fmt.Println("IMR: no resolver state reported (engine not running)")
 				return
 			}
 			renderImrStatus(resp.Imr)
-			renderProcStatus(resp.Proc)
 		},
 	}
 }

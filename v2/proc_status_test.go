@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"os"
+	"runtime"
 	"testing"
 )
 
@@ -17,7 +18,7 @@ func TestCollectProcStatus(t *testing.T) {
 		t.Error("RLIMIT_NOFILE not reported")
 	}
 	if ps.FDMethod == "unavailable" {
-		t.Skipf("no fd counting on %s", os.Getenv("GOOS"))
+		t.Skipf("no fd counting on %s", runtime.GOOS)
 	}
 	if ps.OpenFDs <= 0 {
 		t.Fatalf("open fds = %d (method %s), want > 0", ps.OpenFDs, ps.FDMethod)
