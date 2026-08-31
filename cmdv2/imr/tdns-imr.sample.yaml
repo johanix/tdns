@@ -1,23 +1,20 @@
 # Sample configuration for tdns-imr, the iterative/recursive resolver.
 #
 # The three things tdns-imr will not start without:
-#   imrengine.addresses    (validated: required)
-#   imrengine.transports   (validated: required)
+#   listeners.addresses    (validated: required)
+#   listeners.transports   (validated: required)
 #   log.file               (validated: required, and read before anything else)
 #   apiserver.apikey       (not validated, but the API router refuses to start
 #                           without it, and that aborts startup)
 #
 # Everything else below is optional and shown with its default.
 #
-# NOTE the block is named `imrengine:`, not `imr:`. The only `imr.`-prefixed
-# key is `imr.localconfig` (see the bottom of this file).
+# Resolver BEHAVIOR lives under `imrengine:` (not `imr:` — the only
+# `imr.`-prefixed key is `imr.localconfig`, see the bottom of this file).
+# WHERE the resolver listens lives under `listeners:`, the same schema as
+# every tdns app (#446).
 
-imrengine:
-   active:              true   # Set to false to disable IMR. Defaults to true if not specified.
-
-   # Optional: path to a root hints file. If empty, uses compiled-in hints.
-   root-hints:          "/etc/tdns/root.hints"
-
+listeners:
    # REQUIRED. Addresses (with port) the resolver listens on for DNS queries.
    addresses:           [ 127.0.0.1:53, '[::1]:53' ]
 
@@ -27,8 +24,18 @@ imrengine:
    transports:          [ do53 ]
 
    # Ports for the encrypted transports default to dot 853, doh 443, doq 853.
+   # ports:
+   #    dot: [ 853 ]
+   #    doh: [ 443 ]
+   #    doq: [ 853 ]
    # certfile:            /etc/tdns/certs/imr.crt
    # keyfile:             /etc/tdns/certs/imr.key
+
+imrengine:
+   active:              true   # Set to false to disable IMR. Defaults to true if not specified.
+
+   # Optional: path to a root hints file. If empty, uses compiled-in hints.
+   root-hints:          "/etc/tdns/root.hints"
 
    # IMR Options (all are boolean flags, no values needed):
    # - query-for-transport: Query for transport signals opportunistically when observed

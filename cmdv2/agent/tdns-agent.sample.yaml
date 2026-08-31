@@ -25,13 +25,17 @@ service:
    # minrefresh:		60      # seconds, floor for SOA Refresh
    # maxrefresh:		1800    # seconds, ceiling for SOA Refresh
 
-dnsengine:
+# Same listeners: schema as every tdns app (#446). The agent's embedded
+# resolver is internal and binds NO service listeners; imr-debug-address
+# opens a loopback-only window into its cache.
+listeners:
    addresses:		[ 127.0.0.1:5357, '[::1]:5357']
    transports:		[ doq, dot, do53 ]
    # The encrypted transports (dot/doq/doh) need their own cert/key; without
    # them those listeners are silently skipped and only do53 comes up.
    certfile:		/etc/tdns/certs/localhost.crt
    keyfile:		/etc/tdns/certs/localhost.key
+   # imr-debug-address:	127.0.0.1:5959
    # Zone file path comes from zone's zonefile: when set (no filedir/filetmpl needed)
 
 apiserver:
@@ -92,12 +96,12 @@ delegationsync:
       schemes:		[ notify, update ]
       notify:
          types:		[ CDS, CSYNC ]
-         port:		5354				# MUST be a port the dnsengine listens on
+         port:		5354				# MUST be a port the listeners: block listens on
          target:	notifications.{ZONENAME}	# {ZONENAME} will be expanded at run-time
          addresses:	[ 127.0.0.1, '::1' ]		# There must be no port and also no '[]' around v6 addresses here
       update:
          types:		[ ANY ]
-         port:		5354				# MUST be a port the dnsengine listens on
+         port:		5354				# MUST be a port the listeners: block listens on
          target:	updates.{ZONENAME}
          addresses:	[ 127.0.0.1, '::1' ]
          keygen:
@@ -173,11 +177,11 @@ dnssec:
 db:
    file:		/var/tmp/tdns-agent.db
 
+# Resolver BEHAVIOR only — the embedded resolver has no listener keys
+# (see listeners.imr-debug-address above).
 imrengine:
    active:		true
    root-hints:		/etc/tdns/root.hints
-   addresses:		[ 127.0.0.1:5453, '[::1]:5453' ]
-   transports:		[ do53 ]
    # IMR query debug logging: logs internal agent queries, cache hits/misses,
    # outbound iterative queries, and auth server responses to a separate file.
    # Enable before starting the agent to diagnose UNKNOWN/KNOWN peer state issues.

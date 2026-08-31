@@ -248,7 +248,7 @@ func TestProvisionDynamicPrimary_EnqueueFailureMarksError(t *testing.T) {
 func TestProvisionDynamicPrimary_EndToEnd(t *testing.T) {
 	resetZonesForTest()
 	conf, ch := newTestConfigForCores(t)
-	conf.DnsEngine.Addresses = []string{"127.0.0.1:5354", "[2001:db8::1]:5354"}
+	conf.Listeners.Addresses = []string{"127.0.0.1:5354", "[2001:db8::1]:5354"}
 	dir := t.TempDir()
 	withTestTemplates(t, map[string]ZoneConf{"dyn-test": dynPrimaryTestTemplate(dir)})
 

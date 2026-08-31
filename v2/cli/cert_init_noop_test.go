@@ -84,7 +84,7 @@ func TestNoOpReturnsBeforeProvisioningACA(t *testing.T) {
 	}
 
 	cfg := filepath.Join(dir, "tdns-auth.yaml")
-	cfgBody := "dnsengine:\n   certfile: " + certFile + "\n   keyfile: " + keyFile + "\n"
+	cfgBody := "listeners:\n   certfile: " + certFile + "\n   keyfile: " + keyFile + "\n"
 	if err := os.WriteFile(cfg, []byte(cfgBody), 0o644); err != nil {
 		t.Fatal(err)
 	}

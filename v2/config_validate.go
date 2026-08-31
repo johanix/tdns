@@ -147,19 +147,26 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 
+	// Same loopback rule the daemon applies to the imr debug window.
+	if err := validateImrDebugAddress(config.Listeners.ImrDebugAddress); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
+
 	var configsections = make(map[string]interface{}, 5)
 
 	configsections["log"] = config.Log
 	switch Globals.App.Type {
 	case AppTypeImr:
 		configsections["imrengine"] = config.Imr
+		configsections["listeners"] = config.Listeners
 	case AppTypeReporter:
 		configsections["apiserver"] = config.ApiServer
 	case AppTypeAuth, AppTypeAgent:
 		configsections["service"] = config.Service
 		configsections["db"] = config.Db
 		configsections["apiserver"] = config.ApiServer
-		configsections["dnsengine"] = config.DnsEngine
+		configsections["listeners"] = config.Listeners
+		configsections["authengine"] = config.AuthEngine
 		// Validate catalog configuration if present
 		if config.Catalog != nil && (config.Catalog.ConfigGroups != nil || config.Catalog.MetaGroups != nil || config.Catalog.Policy.Zones.Add != "" || config.Catalog.Policy.Zones.Remove != "") {
 			configsections["catalog"] = config.Catalog
@@ -168,7 +175,8 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		configsections["service"] = config.Service
 		configsections["db"] = config.Db
 		configsections["apiserver"] = config.ApiServer
-		configsections["dnsengine"] = config.DnsEngine
+		configsections["listeners"] = config.Listeners
+		configsections["authengine"] = config.AuthEngine
 		// Validate catalog configuration if present
 		if config.Catalog != nil && (config.Catalog.ConfigGroups != nil || config.Catalog.MetaGroups != nil || config.Catalog.Policy.Zones.Add != "" || config.Catalog.Policy.Zones.Remove != "") {
 			configsections["catalog"] = config.Catalog

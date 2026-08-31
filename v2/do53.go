@@ -19,7 +19,6 @@ import (
 	"github.com/johanix/tdns/v2/notifyerrors"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 func CaseFoldContains(slice []string, str string) bool {
@@ -32,14 +31,12 @@ func CaseFoldContains(slice []string, str string) bool {
 }
 
 func DnsEngine(ctx context.Context, conf *Config) error {
-	lgDns.Info("DnsEngine: starting", "addresses", conf.DnsEngine.Addresses)
+	lgDns.Info("DnsEngine: starting", "addresses", conf.Listeners.Addresses)
 	lgDns.Debug("DnsEngine: channel status",
 		"DnsQueryQ_nil", conf.Internal.DnsQueryQ == nil,
 		"DnsNotifyQ_nil", conf.Internal.DnsNotifyQ == nil,
 		"DnsUpdateQ_nil", conf.Internal.DnsUpdateQ == nil)
 
-	// verbose := viper.GetBool("dnsengine.verbose")
-	// debug := viper.GetBool("dnsengine.debug")
 	authDNSHandler := createAuthDnsHandler(ctx, conf)
 
 	// Create a local ServeMux for DnsEngine to avoid conflicts with other engines
@@ -51,8 +48,8 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	// udpTruncate sits inside TsigSigningHandler so TSIG MACs the truncated wire.
 	dnsMux.HandleFunc(".", TsigSigningHandler(udpTruncate(authDNSHandler)))
 
-	addresses := conf.DnsEngine.Addresses
-	if !CaseFoldContains(conf.DnsEngine.Transports, "do53") {
+	addresses := conf.Listeners.Addresses
+	if !CaseFoldContains(conf.Listeners.Transports, "do53") {
 		lgDns.Warn("DnsEngine: Do53 transport (UDP/TCP) NOT specified but mandatory, still configuring", "addresses", addresses)
 	}
 	lgDns.Info("DnsEngine: UDP/TCP addresses configured", "addresses", addresses)
@@ -113,8 +110,8 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 		}
 	}()
 
-	certFile := viper.GetString("dnsengine.certfile")
-	keyFile := viper.GetString("dnsengine.keyfile")
+	certFile := conf.Listeners.CertFile
+	keyFile := conf.Listeners.KeyFile
 	certKey := true
 	certReason := ""
 
@@ -224,22 +221,22 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 		}
 		addresses = tmp
 
-		if CaseFoldContains(conf.DnsEngine.Transports, "dot") {
-			err := DnsDoTEngine(ctx, conf, addresses, &cert, authDNSHandler, true)
+		if CaseFoldContains(conf.Listeners.Transports, "dot") {
+			err := DnsDoTEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoT), &cert, authDNSHandler, true)
 			if err != nil {
 				lgDns.Error("Failed to setup the DoT server", "err", err)
 			}
 		}
 
-		if CaseFoldContains(conf.DnsEngine.Transports, "doh") {
-			err := DnsDoHEngine(ctx, conf, addresses, certFile, keyFile, authDNSHandler)
+		if CaseFoldContains(conf.Listeners.Transports, "doh") {
+			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), certFile, keyFile, authDNSHandler)
 			if err != nil {
 				lgDns.Error("Failed to setup the DoH server", "err", err)
 			}
 		}
 
-		if CaseFoldContains(conf.DnsEngine.Transports, "doq") {
-			err := DnsDoQEngine(ctx, conf, addresses, &cert, authDNSHandler)
+		if CaseFoldContains(conf.Listeners.Transports, "doq") {
+			err := DnsDoQEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoQ), &cert, authDNSHandler)
 			if err != nil {
 				lgDns.Error("Failed to setup the DoQ server", "err", err)
 			}
@@ -248,7 +245,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	// Transport/Cert: encrypted transports are configured but the cert/key
 	// could not be loaded, so those listeners did not start (owned here,
 	// boot-scoped — clears on a fresh start with a working cert).
-	if !certKey && anyEncryptedTransport(conf.DnsEngine.Transports) {
+	if !certKey && anyEncryptedTransport(conf.Listeners.Transports) {
 		conf.Internal.ServerErrors.SetTransportCertError(certReason)
 	}
 	return nil

@@ -17,10 +17,9 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
-func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile, keyFile string,
+func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, certFile, keyFile string,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
 
 	lgDns.Info("DnsEngine: DoH addresses", "addrs", dohaddrs)
@@ -86,7 +85,7 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 		}
 	})
 
-	ports := viper.GetStringSlice("dnsengine.ports.doh")
+	// ports comes from the caller's listeners: block (#444/#446).
 	if len(ports) == 0 {
 		ports = []string{"443"}
 	}

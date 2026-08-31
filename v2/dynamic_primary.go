@@ -244,7 +244,7 @@ func bootstrapApexRecords(zone string, listenAddrs []string) []string {
 			continue
 		}
 		if addr.IsUnspecified() {
-			lg.Warn("bootstrap apex: skipping wildcard listener (list concrete addresses in dnsengine.addresses to have them in synthesized apexes)", "zone", zone, "address", la)
+			lg.Warn("bootstrap apex: skipping wildcard listener (list concrete addresses in listeners.addresses to have them in synthesized apexes)", "zone", zone, "address", la)
 			continue
 		}
 		key := addr.String()
@@ -273,7 +273,7 @@ func (conf *Config) synthesizeBootstrapZonefile(zone, path string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create zone file directory %s: %v", dir, err)
 	}
-	content := strings.Join(bootstrapApexRecords(zone, conf.DnsEngine.Addresses), "\n") + "\n"
+	content := strings.Join(bootstrapApexRecords(zone, conf.Listeners.Addresses), "\n") + "\n"
 
 	tempFile, err := os.CreateTemp(dir, fmt.Sprintf(".%s.bootstrap.tmp", filepath.Base(path)))
 	if err != nil {

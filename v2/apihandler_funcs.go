@@ -444,7 +444,8 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "status":
 			lgApi.Debug("config status inquiry")
-			resp.DnsEngine = conf.DnsEngine
+			resp.Listeners = conf.Listeners
+			resp.AuthEngine = conf.AuthEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Identities = conf.Service.Identities
 			resp.DBFile = conf.Db.File

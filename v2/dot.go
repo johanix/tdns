@@ -13,7 +13,6 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // DnsDoTEngine starts the DoT listeners. requestClientCert is true for the
@@ -21,7 +20,7 @@ import (
 // per-zone downstream-auth check at transfer time can see one when the
 // downstream has it; cert-less clients are unaffected. The IMR's DoT front
 // end passes false and never requests certificates.
-func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tls.Certificate,
+func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs, ports []string, cert *tls.Certificate,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg), requestClientCert bool) error {
 
 	if cert == nil {
@@ -48,7 +47,8 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 		ourDNSHandler(w, r)
 	}
 
-	ports := viper.GetStringSlice("dnsengine.ports.dot")
+	// ports comes from the caller's listeners: block — the engine is shared
+	// between apps and must not reach into any app's config (#444/#446).
 	if len(ports) == 0 {
 		ports = []string{"853"}
 	}

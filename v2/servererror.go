@@ -190,7 +190,7 @@ func (r *ServerErrorRegistry) SetTransportPortError(hostport string, cause error
 	r.errs[k] = e
 }
 
-// Owned by parseconfig. Set when a configured dnsengine cert/key file is
+// Owned by parseconfig. Set when a configured listeners: cert/key file is
 // absent/unreadable at (re)load; cleared by the same revalidation when the
 // files are present (clear-then-reassert).
 func (r *ServerErrorRegistry) SetConfigCertMissing(msg string) {
@@ -232,13 +232,13 @@ func anyEncryptedTransport(transports []string) bool {
 		CaseFoldContains(transports, "doq")
 }
 
-// validateDnsEngineCerts is parseconfig's owned check for Config/CertMissing:
+// validateListenerCerts is parseconfig's owned check for Config/CertMissing:
 // if any encrypted transport is configured, certfile and keyfile must exist
 // and be readable. Clear-then-reassert, so it self-corrects on every reload.
-func (conf *Config) validateDnsEngineCerts() {
+func (conf *Config) validateListenerCerts() {
 	reg := conf.Internal.ServerErrors
 	reg.ClearConfigCertMissing()
-	de := conf.DnsEngine
+	de := conf.Listeners
 	if !anyEncryptedTransport(de.Transports) {
 		return
 	}

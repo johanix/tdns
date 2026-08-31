@@ -298,7 +298,7 @@ type ZonePost struct {
 	TsigSecret string
 	TsigAlgo   string
 	// TransferSrc is the per-zone source address for this zone's OUTBOUND
-	// transfers. Optional: unset inherits dnsengine.transfer-src, and unset
+	// transfers. Optional: unset inherits authengine.transfer-src, and unset
 	// there means the kernel chooses, which is the pre-existing behaviour.
 	//
 	// It has to be settable here rather than only in the config file, because
@@ -479,7 +479,8 @@ type ConfigPost struct {
 type ConfigResponse struct {
 	AppName              string
 	Time                 time.Time
-	DnsEngine            DnsEngineConf
+	Listeners            ListenersConf
+	AuthEngine           AuthEngineConf
 	ApiServer            ApiServerConf
 	Identities           []string
 	DBFile               string

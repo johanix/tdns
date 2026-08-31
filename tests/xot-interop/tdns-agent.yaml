@@ -10,11 +10,11 @@ log:
 db:
    file:       /var/tmp/xotinterop/tdns-agent/agent.db
 
-dnsengine:
+listeners:
    addresses:  [ 127.0.0.1:5302 ]
    transports: [ do53, dot ]
    ports:
-      dot:     [ "5402" ]
+      dot:     [ 5402 ]
    certfile:   /var/tmp/xotinterop/certs/ns-tdnsagent.xot.test.crt
    keyfile:    /var/tmp/xotinterop/certs/ns-tdnsagent.xot.test.key
 

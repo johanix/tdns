@@ -200,7 +200,7 @@ const mweConfigTemplate = `# Minimal Working Example — tdns-{{ROLE}}
 service:
    name:  TDNS-AUTH
 
-dnsengine:
+listeners:
    # Listen on IPv4 and IPv6 localhost. Port {{DNSPORT}} is used so the server
    # runs unprivileged; use 53 for a real deployment (needs root/capabilities).
    addresses:   [ 127.0.0.1:{{DNSPORT}}, '[::1]:{{DNSPORT}}' ]
@@ -209,6 +209,10 @@ dnsengine:
    transports:  [ do53 ]
    # For encrypted transports, add them here and the cert/key are already set:
    #   transports: [ do53, dot, doh, doq ]
+   #   ports:
+   #      dot: [ 853 ]
+   #      doh: [ 443 ]
+   #      doq: [ 853 ]
    certfile:  {{CERT}}
    keyfile:   {{KEY}}
 
@@ -264,7 +268,7 @@ zones:
      template:  unsigned-primary
      downstreams:
         - { prefix: "127.0.0.0/8", key: NOKEY }
-        - { prefix: "::1",         key: NOKEY }
+        - { prefix: "::1/128",     key: NOKEY }
 
    # Signed primary (template: signed-primary -> online-signing + dnssecpolicy).
    - name:      signed.example.
@@ -272,7 +276,7 @@ zones:
      template:  signed-primary
      downstreams:
         - { prefix: "127.0.0.0/8", key: NOKEY }
-        - { prefix: "::1",         key: NOKEY }
+        - { prefix: "::1/128",     key: NOKEY }
 
    # Example SECONDARY zone (template: basic-secondary). Uncomment and point
    # upstreams: at your real primary to enable. A template may instead carry a

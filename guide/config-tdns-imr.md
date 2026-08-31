@@ -6,22 +6,24 @@ mode versus the interactive shell — see [tdns-imr](app-tdns-imr.md).
 Read [Configuration Guide](configuration.md) first for the conventions common to
 every TDNS application.
 
-## The block is named `imrengine:`
+## Two blocks: `listeners:` and `imrengine:`
 
-Almost all of the resolver's configuration lives under a top-level block called
-**`imrengine:`**, not `imr:`. The only `imr.`-prefixed key is
-`imr.localconfig`, described at the end of this page.
+WHERE the resolver listens lives under `listeners:` — the same schema as in
+every tdns app (#446). Resolver BEHAVIOR lives under **`imrengine:`**, not
+`imr:` (the only `imr.`-prefixed key is `imr.localconfig`, described at the
+end of this page). The pre-#446 keys `imrengine.addresses/transports/
+certfile/keyfile` are hard startup errors naming their new homes.
 
 ## Minimal working example
 
-Three keys are validated as required (`imrengine.addresses`,
-`imrengine.transports`, `log.file`), and one more is required in practice:
+Three keys are validated as required (`listeners.addresses`,
+`listeners.transports`, `log.file`), and one more is required in practice:
 `apiserver.apikey`. The API router refuses to build without an API key, and
 that error aborts startup — even though the resolver would otherwise not need
 the API at all.
 
 ```yaml
-imrengine:
+listeners:
    addresses:   [ 127.0.0.1:53, '[::1]:53' ]   # required
    transports:  [ do53 ]                       # required
 
@@ -71,12 +73,13 @@ interactive shell.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `addresses` | — | **required**. `addr:port` sockets to listen on |
-| `transports` | — | **required**. Any of `do53`, `dot`, `doh`, `doq` |
-| `certfile` / `keyfile` | — | required for `dot`/`doh`/`doq` |
-| `active` | `true` | set `false` to disable the resolver entirely |
-| `root-hints` | compiled-in | path to a root hints file |
-| `require-dnssec-validation` | `true` | — |
+| `listeners.addresses` | — | **required**. `addr:port` sockets to listen on |
+| `listeners.transports` | — | **required**. Any of `do53`, `dot`, `doh`, `doq` |
+| `listeners.certfile` / `keyfile` | — | required for `dot`/`doh`/`doq` |
+| `listeners.ports.{dot,doh,doq}` | 853/443/853 | per-transport listen ports (numbers) |
+| `imrengine.active` | `true` | set `false` to disable the resolver entirely |
+| `imrengine.root-hints` | compiled-in | path to a root hints file |
+| `imrengine.require-dnssec-validation` | `true` | — |
 
 `imrengine.options:` accepts `query-for-transport`,
 `always-query-for-transport`, `query-for-transport-tlsa` and
@@ -262,12 +265,12 @@ though the overlay is read later.
 ```yaml
 # tdns-imr.yaml                  # tdns-imr-local.yaml
 imrengine:                       imrengine:
-   addresses: [ 127.0.0.1:53 ]      addresses: [ 127.0.0.1:5353 ]   # IGNORED
-   transports: [ do53 ]             active: false                   # APPLIED
+   root-hints: /etc/tdns/rh         root-hints: /tmp/other-hints    # IGNORED
+                                    active: false                   # APPLIED
 ```
 
-The overlay's `addresses` is discarded, because the main file sets that key. Its
-`active` is honoured, because the main file does not — so this resolver ends up
+The overlay's `root-hints` is discarded, because the main file sets that key.
+Its `active` is honoured, because the main file does not — so this resolver ends up
 disabled, having never listened on either address.
 
 This holds for every key: `root-hints` and `trust-anchor-ds` are both picked up from the overlay when the main file omits them, and both

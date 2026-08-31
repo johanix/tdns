@@ -1478,7 +1478,7 @@ func FindZone(qname string) *ZoneData {
 //
 //  1. the per-zone setting (zones: <z>: outbound-soa-serial, possibly
 //     inherited from the zone's template via ExpandTemplate's gap-fill);
-//  2. the server-global dnsengine.outbound-soa-serial (resolved onto the
+//  2. the server-global authengine.outbound-soa-serial (resolved onto the
 //     KeyDB at parse time by applyOutboundSoaSerial);
 //  3. OutboundSoaSerialKeep, the documented default.
 //
@@ -1489,7 +1489,7 @@ func FindZone(qname string) *ZoneData {
 // act on it"; the callers pair it with the origination predicate.
 // EffectiveTransferSrc returns the source addresses to bind when dialling this
 // zone's upstreams, resolving the per-zone value over the server-global
-// dnsengine.transfer-src. Empty means "let the kernel choose", which is the
+// authengine.transfer-src. Empty means "let the kernel choose", which is the
 // behaviour every zone had before this existed.
 func (zd *ZoneData) EffectiveTransferSrc() []string {
 	srcs, _ := zd.EffectiveTransferSrcWithSource()
@@ -1509,7 +1509,7 @@ func (zd *ZoneData) EffectiveTransferSrcWithSource() (srcs []string, source stri
 	}
 	if zd.KeyDB != nil {
 		if srcs := zd.KeyDB.TransferSrcList(); len(srcs) > 0 {
-			return srcs, "global" // dnsengine.transfer-src
+			return srcs, "global" // authengine.transfer-src
 		}
 	}
 	return nil, "default"
@@ -1531,7 +1531,7 @@ func (zd *ZoneData) EffectiveOutboundSoaSerialWithSource() (mode, source string)
 	}
 	if zd.KeyDB != nil {
 		if mode := zd.KeyDB.OutboundSoaSerialMode(); mode != "" {
-			return mode, "global" // dnsengine.outbound-soa-serial
+			return mode, "global" // authengine.outbound-soa-serial
 		}
 	}
 	return OutboundSoaSerialKeep, "default"
@@ -2257,11 +2257,11 @@ $TTL 86400
 	return zd, nil
 }
 
-// Extract the addresses we listen on from the dnsengine configuration. Exclude localhost and non-standard ports.
+// Extract the addresses we listen on from the listeners configuration. Exclude localhost and non-standard ports.
 func (conf *Config) FindDnsEngineAddrs() ([]string, error) {
 	addrs := []string{}
-	lg.Debug("FindDnsEngineAddrs: dnsengine addresses", "addresses", conf.DnsEngine.Addresses)
-	for _, ns := range conf.DnsEngine.Addresses {
+	lg.Debug("FindDnsEngineAddrs: listener addresses", "addresses", conf.Listeners.Addresses)
+	for _, ns := range conf.Listeners.Addresses {
 		addr, port, err := net.SplitHostPort(ns)
 		if err != nil {
 			// return nil, fmt.Errorf("FindDnsEngineAddrs: failed to split host and port from address '%s': %v", ns, err)

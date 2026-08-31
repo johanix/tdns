@@ -19,7 +19,7 @@ For the command-line tools, see the generated [CLI reference](../reference/cli/)
 - [tdns-auth configuration](config-tdns-auth.md)
   -- Minimal working example, TSIG keys, the `allow-notify:` and
   `downstreams:` ACLs, zone declarations (every zone option, and the
-  template system), the `dnsengine:` block, and DNSSEC policies
+  template system), the `listeners:` and `authengine:` blocks, and DNSSEC policies
   (policy templates, `split-algorithms`, `large-algorithms`).
 
 - [tdns-imr configuration](config-tdns-imr.md)
@@ -95,8 +95,8 @@ Merging applies **only to these paths**, and only for an include that asked:
 | `dnssec.split-algorithms` | merged by KSK, the ZSK lists combined as sets |
 
 Everything else replaces, whether or not the include asked to merge. That is
-deliberate rather than an oversight: `dnsengine.addresses`, `apiserver.addresses`
-and `dnsengine.transports` are lists too, and combining those would silently make
+deliberate rather than an oversight: `listeners.addresses`, `apiserver.addresses`
+and `listeners.transports` are lists too, and combining those would silently make
 the server listen on more addresses than the file in front of you names — the
 same shape of mistake as widening an ACL, and harder to notice.
 

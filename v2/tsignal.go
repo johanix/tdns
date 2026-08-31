@@ -259,7 +259,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) err
 
 		aRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeA)
 		aaaaRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
-		if !matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aRRset) && !matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aaaaRRset) {
+		if !matchesConfiguredAddrs(conf.Listeners.Addresses, &aRRset) && !matchesConfiguredAddrs(conf.Listeners.Addresses, &aaaaRRset) {
 			lgDns.Debug("createTransportSignalSVCB: NS addresses do not match configured; skipping",
 				"zone", zd.ZoneName, "ns", nsName)
 			continue
@@ -347,7 +347,7 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys) er
 
 		aRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeA)
 		aaaaRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
-		if !(matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aRRset) || matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aaaaRRset)) {
+		if !(matchesConfiguredAddrs(conf.Listeners.Addresses, &aRRset) || matchesConfiguredAddrs(conf.Listeners.Addresses, &aaaaRRset)) {
 			continue
 		}
 		var ipv4s, ipv6s []string

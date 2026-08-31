@@ -1394,7 +1394,23 @@ func loadImrListenerCert(certFile, keyFile string) (tls.Certificate, string, boo
 }
 
 func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error {
-	addresses := conf.Imr.Addresses
+	// An EMBEDDED resolver (tdns-auth, tdns-agent, anything that is not
+	// tdns-imr) is internal by design and binds NO service listeners — the
+	// listeners: block belongs to the app's own DNS service (DnsEngine).
+	// Its only window is the loopback-only listeners.imr-debug-address
+	// (#446). tdns-imr itself IS the service and listens on listeners:.
+	if Globals.App.Type != AppTypeImr {
+		if dbg := conf.Listeners.ImrDebugAddress; dbg != "" {
+			if _, err := imr.startImrDebugListener(ctx, dbg, conf); err != nil {
+				lgImr.Error("imr debug listener not started", "err", err)
+			}
+		} else if !imr.Quiet {
+			lgImr.Info("embedded resolver: internal only (set listeners.imr-debug-address for a loopback debug window)")
+		}
+		return nil
+	}
+
+	addresses := conf.Listeners.Addresses
 	if len(addresses) == 0 {
 		if !imr.Quiet {
 			lgImr.Info("no addresses provided, will only be an internal recursive resolver")
@@ -1408,7 +1424,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 	imrMux := dns.NewServeMux()
 	imrMux.HandleFunc(".", ImrHandler)
 
-	if CaseFoldContains(conf.Imr.Transports, "do53") {
+	if CaseFoldContains(conf.Listeners.Transports, "do53") {
 		lgImr.Info("starting Do53 listeners", "addresses", addresses)
 		servers := make([]*dns.Server, 0, len(addresses)*2)
 
@@ -1464,9 +1480,9 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 	// this, a cert/key failure silently dropped all three IMR listeners with
 	// a warning as the only trace (#444), unlike the DnsEngine path which
 	// registers the condition for `config status`.
-	certFile := conf.Imr.CertFile
-	keyFile := conf.Imr.KeyFile
-	if !anyEncryptedTransport(conf.Imr.Transports) {
+	certFile := conf.Listeners.CertFile
+	keyFile := conf.Listeners.KeyFile
+	if !anyEncryptedTransport(conf.Listeners.Transports) {
 		if certFile != "" || keyFile != "" {
 			lgImr.Info("certfile/keyfile configured but no encrypted transport is; not starting DoT/DoH/DoQ")
 		}
@@ -1492,8 +1508,8 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		}
 		addresses = tmp
 
-		if CaseFoldContains(conf.Imr.Transports, "dot") {
-			err := DnsDoTEngine(ctx, conf, addresses, &cert, ImrHandler, false)
+		if CaseFoldContains(conf.Listeners.Transports, "dot") {
+			err := DnsDoTEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoT), &cert, ImrHandler, false)
 			if err != nil {
 				lgImr.Error("failed to setup DoT server", "err", err)
 			}
@@ -1501,8 +1517,8 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 			lgImr.Info("not serving on transport DoT")
 		}
 
-		if CaseFoldContains(conf.Imr.Transports, "doh") {
-			err := DnsDoHEngine(ctx, conf, addresses, certFile, keyFile, ImrHandler)
+		if CaseFoldContains(conf.Listeners.Transports, "doh") {
+			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), certFile, keyFile, ImrHandler)
 			if err != nil {
 				lgImr.Error("failed to setup DoH server", "err", err)
 			}
@@ -1510,8 +1526,8 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 			lgImr.Info("not serving on transport DoH")
 		}
 
-		if CaseFoldContains(conf.Imr.Transports, "doq") {
-			err := DnsDoQEngine(ctx, conf, addresses, &cert, ImrHandler)
+		if CaseFoldContains(conf.Listeners.Transports, "doq") {
+			err := DnsDoQEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoQ), &cert, ImrHandler)
 			if err != nil {
 				lgImr.Error("failed to setup DoQ server", "err", err)
 			}

@@ -14,7 +14,7 @@ log:
 db:
    file:       /var/tmp/ixfrinterop/tdns-auth-p/auth.db
 
-dnsengine:
+listeners:
    addresses:  [ 127.0.0.1:5321 ]
    transports: [ do53 ]
 

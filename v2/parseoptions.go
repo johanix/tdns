@@ -73,14 +73,14 @@ func (conf *Config) parseImrOptions() {
 }
 
 func (conf *Config) ParseAuthOptions() {
-	raw := conf.DnsEngine.OptionsStrs
+	raw := conf.AuthEngine.OptionsStrs
 	clean := make(map[AuthOption]string)
 
 	// Apply defaults for options that have them, even when no options are configured
 	clean[AuthOptParentUpdate] = UpdateModeDelta
 
 	if len(raw) == 0 {
-		conf.DnsEngine.Options = clean
+		conf.AuthEngine.Options = clean
 		return
 	}
 
@@ -135,7 +135,7 @@ func (conf *Config) ParseAuthOptions() {
 		}
 	}
 
-	conf.DnsEngine.Options = clean
+	conf.AuthEngine.Options = clean
 }
 
 // parseZoneOptions validates and applies zone-specific option strings, updating zconf.Options and returning a map of enabled ZoneOption flags.

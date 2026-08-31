@@ -2,7 +2,8 @@
 
 `tdns-auth` is the TDNS authoritative nameserver. This page starts from the
 smallest config that runs and then covers, in turn: TSIG keys, the two address
-ACLs, zone declarations and the template system, the `dnsengine:` block, and
+ACLs, zone declarations and the template system, the `listeners:` and
+`authengine:` blocks, and
 DNSSEC policies.
 
 Read [Configuration Guide](configuration.md) first for the conventions that
@@ -14,13 +15,13 @@ apply to every TDNS application (config file location, `include:`, the
 - [ACL configuration](#acl-configuration)
 - [Zone declarations](#zone-declarations)
 - [Zone templates](#zone-templates)
-- [The dnsengine block](#the-dnsengine-block)
+- [The listeners and authengine blocks](#the-listeners-and-authengine-blocks)
 - [DNSSEC policies](#dnssec-policies)
 
 ## Minimal working example
 
 `tdns-auth` validates five sections at startup and refuses to run if any
-required key in them is missing: `service`, `dnsengine`, `apiserver`, `db` and
+required key in them is missing: `service`, `listeners`, `apiserver`, `db` and
 `log`. The following is the whole config for a server that listens on one IPv4
 and one IPv6 address and serves a single zone as primary.
 
@@ -28,7 +29,7 @@ and one IPv6 address and serves a single zone as primary.
 service:
    name:  TDNS-AUTH               # required
 
-dnsengine:
+listeners:
    addresses:   [ 127.0.0.1:5354, '[::1]:5354' ]   # required
    transports:  [ do53 ]                           # required
 
@@ -67,7 +68,7 @@ likewise required — there is no way to run tdns-auth without its management AP
 being configured, though you may point it at loopback.
 
 **`transports: [ do53 ]` needs no certificate, but `dot`, `doh` and `doq` all
-need `dnsengine.certfile`/`keyfile`.** If those are missing, the encrypted
+need `listeners.certfile`/`keyfile`.** If those are missing, the encrypted
 listeners are quietly skipped while Do53 keeps working.
 
 **Without `downstreams:` no one can transfer the zone.** An empty or absent
@@ -320,10 +321,10 @@ produce disallowed mechanisms (dead entry), and `tls-dane` without the IMR
 each log a warning.
 
 There is deliberately **no listener-level client-certificate policy** in
-`dnsengine:`. The auth DoT listener always *requests* (never requires) a
+`listeners:`. The auth DoT listener always *requests* (never requires) a
 client certificate, so a secondary that has one presents it and everyone
 else is unaffected; verification happens per zone as above. To refuse
-non-TLS traffic entirely, restrict `dnsengine.transports:`.
+non-TLS traffic entirely, restrict `listeners.transports:`.
 
 Provisioning the certificates — including the one-shot `tdns-cli cert
 init` and upgrading existing self-signed certs — is covered in
@@ -657,10 +658,15 @@ supplies only what the zone left unset. Four rules qualify that.
 `name:` and `template:` are never copied from a template. A template may itself
 set `template:` to inherit from another; cycles are detected and rejected.
 
-## The dnsengine block
+## The listeners and authengine blocks
+
+What used to be one `dnsengine:` block is two since #446: `listeners:` is
+WHERE the server's DNS service listens (the same schema in every tdns app),
+and `authengine:` is the authoritative-serving BEHAVIOR. The old keys are
+hard startup errors carrying this key-for-key mapping.
 
 ```yaml
-dnsengine:
+listeners:
    addresses:   [ 127.0.0.1:5354, '[::1]:5354' ]
    transports:  [ do53, dot, doh, doq ]
    ports:
@@ -669,6 +675,11 @@ dnsengine:
       doq:   [ 853 ]
    certfile:  /etc/tdns/certs/server.crt
    keyfile:   /etc/tdns/certs/server.key
+   # The embedded resolver is internal; a loopback-only debug window into
+   # its cache (dog @127.0.0.1:5959 name type +norec, ANY for all RRsets):
+   # imr-debug-address: 127.0.0.1:5959
+
+authengine:
    outbound-soa-serial:  keep
    options:
       - minimal-responses
@@ -676,16 +687,17 @@ dnsengine:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `addresses` | — | **required**. Do53 listen sockets, each `addr:port`. The host part is reused for the encrypted transports |
-| `transports` | — | **required**. Any of `do53`, `dot`, `doh`, `doq`. `do53` is added even if omitted |
-| `certfile` / `keyfile` | — | required for `dot`/`doh`/`doq`; if absent those listeners do not start |
-| `ports.dot` | `853` | listen ports for DoT |
-| `ports.doh` | `443` | listen ports for DoH |
-| `ports.doq` | `853` | listen ports for DoQ (only 853 is truly supported) |
-| `outbound-soa-serial` | `keep` | `keep`, `unixtime` or `persist` |
-| `options` | — | server-wide options, below |
+| `listeners.addresses` | — | **required**. Do53 listen sockets, each `addr:port`. The host part is reused for the encrypted transports |
+| `listeners.transports` | — | **required**. Any of `do53`, `dot`, `doh`, `doq`. `do53` is added even if omitted |
+| `listeners.certfile` / `keyfile` | — | required for `dot`/`doh`/`doq`; if absent those listeners do not start |
+| `listeners.ports.dot` | `853` | listen ports for DoT (numbers, not strings) |
+| `listeners.ports.doh` | `443` | listen ports for DoH |
+| `listeners.ports.doq` | `853` | listen ports for DoQ (only 853 is truly supported) |
+| `listeners.imr-debug-address` | — | loopback-only DNS window into the embedded resolver's cache; non-loopback is a hard error |
+| `authengine.outbound-soa-serial` | `keep` | `keep`, `unixtime` or `persist` |
+| `authengine.options` | — | server-wide options, below |
 
-`ports.do53` is **not read**. Do53 always listens on the ports embedded in
+`ports.do53` does not exist. Do53 always listens on the ports embedded in
 `addresses`.
 
 `outbound-soa-serial` controls the SOA serial advertised to secondaries.

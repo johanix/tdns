@@ -22,7 +22,7 @@ every secondary instead of per-server pins), or mutual TLS.
 | `/etc/tdns/ca/<name>.crt` | the CA certificate (public) | distribute freely — this **is** the `ca-file` |
 | `/etc/tdns/ca/<name>.key` | the CA signing key (mode 0600) | guard it; no tdns daemon ever reads it |
 | `/etc/tdns/ca/issued.log` | append-only audit trail | one line per issuance; nothing reads it programmatically |
-| `/etc/tdns/certs/` | where daemons' certs/keys live | the existing convention (`dnsengine.certfile`/`keyfile`) |
+| `/etc/tdns/certs/` | where daemons' certs/keys live | the existing convention (`listeners.certfile`/`keyfile`) |
 
 Key files are always written mode 0600 and never overwritten without
 `--force`. The CA is hard-coded to only ever sign end-entity certificates
@@ -36,8 +36,8 @@ tdns-cli cert init [--serverconfig /etc/tdns/tdns-auth.yaml]
 
 `cert init` creates the CA if it does not exist yet (and reuses it on every
 later run), issues a server certificate whose SANs are derived from the
-config's `dnsengine.addresses` plus this host's name and loopback, writes
-cert and key to the **exact `dnsengine.certfile`/`keyfile` paths the config
+config's `listeners.addresses` plus this host's name and loopback, writes
+cert and key to the **exact `listeners.certfile`/`keyfile` paths the config
 already names** (no config editing needed), drops a copy of the CA cert
 next to them, and prints ready-to-paste secondary configuration for all
 three XoT auth modes. Restart `tdns-auth` and you are serving CA-signed
@@ -153,7 +153,7 @@ made:
 - **External CA** (corporate PKI, etc.) → the ca-file is that CA's root
   certificate (concatenate roots if there are several). If the server's
   cert was issued via an intermediate, the *server* must present the
-  intermediate: concatenate leaf-first into `dnsengine.certfile`
+  intermediate: concatenate leaf-first into `listeners.certfile`
   (see [XoT operations](../docs/2026-07-21-xot-operations.md)). Certs from
   the tdns CA never need this — there are no intermediates by design.
 
