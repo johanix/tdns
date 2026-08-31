@@ -82,10 +82,13 @@ func (up *ForwardUpstream) recordSuccess() bool {
 func (up *ForwardUpstream) recordFailure(start time.Time, err error) bool {
 	up.mu.Lock()
 	defer up.mu.Unlock()
+	// A superseded failure was still an exchange attempt: count it in
+	// queries, but leave failures and the failing flag to the fresher
+	// success it lost against.
+	up.queries++
 	if up.lastSuccess.After(start) {
 		return false
 	}
-	up.queries++
 	up.failures++
 	up.lastErrMsg = err.Error()
 	up.lastErrTime = time.Now()

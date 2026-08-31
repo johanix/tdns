@@ -84,6 +84,9 @@ func TestRecordFailureSuperseded(t *testing.T) {
 	if up.failing || up.failures != 0 {
 		t.Errorf("superseded failure recorded: failing=%v failures=%d", up.failing, up.failures)
 	}
+	if up.queries != 2 {
+		t.Errorf("superseded failure not counted as an attempt: queries=%d, want 2", up.queries)
+	}
 	// A failure that started after the success records normally.
 	if !up.recordFailure(time.Now(), fmt.Errorf("real timeout")) {
 		t.Error("current failure did not report the ok->failing transition")

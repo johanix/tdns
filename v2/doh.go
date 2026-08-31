@@ -32,7 +32,17 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 		var err error
 		msg := new(dns.Msg)
 		if r.Method == http.MethodPost {
+			// ReadHeaderTimeout covers only the headers and IdleTimeout only
+			// parked connections: without a deadline here, a client sending
+			// its (at most 65535-byte) body one byte at a time holds the
+			// handler and its HTTP/2 stream open indefinitely. Ten seconds
+			// is generous for 64KB from any legitimate client. The error is
+			// ignored deliberately: a transport that does not support
+			// per-request deadlines just keeps the pre-deadline behaviour.
+			rc := http.NewResponseController(w)
+			_ = rc.SetReadDeadline(time.Now().Add(10 * time.Second))
 			dnsQuery, err = io.ReadAll(io.LimitReader(r.Body, 65535))
+			_ = rc.SetReadDeadline(time.Time{})
 			if err != nil {
 				http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 				return
