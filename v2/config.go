@@ -950,6 +950,12 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	if gerr := conf.checkReloadPolicyGuardrail(confirm); gerr != nil {
 		return "", gerr
 	}
+	// The stub and forward zones as the resolver is actually running them,
+	// captured before ParseConfig overwrites them. An unknown key is only a
+	// WARNING there, so a misspelled `forward:` decodes to nothing; when the
+	// apply below then refuses the new block and keeps the running table,
+	// conf.Imr would otherwise go on describing zones that were rejected.
+	runningStubs, runningForward := conf.Imr.Stubs, conf.Imr.Forward
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
@@ -980,6 +986,8 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 		// the whole reload failed.
 		if res, ierr := conf.applyImrEngineReload(); ierr != nil {
 			lgConfig.Error("imrengine reload failed; keeping the running stub and forward zones", "err", ierr)
+			// Keep conf.Imr describing what is running, not what was refused.
+			conf.Imr.Stubs, conf.Imr.Forward = runningStubs, runningForward
 			msg += fmt.Sprintf(" IMR zones NOT reloaded: %v", ierr)
 		} else if summary := res.Summary(); summary != "" {
 			msg += " " + summary
