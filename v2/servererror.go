@@ -25,8 +25,9 @@ type ErrorCategory uint8
 const (
 	ErrCatTransport ErrorCategory = iota + 1 // a listener/transport is not serving
 	ErrCatConfig                             // a configured input is missing/invalid
-	ErrCatUpstream                           // a server this daemon depends on is not answering
 	ErrCatOther                              // catch-all until a category is defined
+	// New categories are APPENDED so existing wire values stay stable.
+	ErrCatUpstream // a server this daemon depends on is not answering
 )
 
 var errCategoryName = map[ErrorCategory]string{

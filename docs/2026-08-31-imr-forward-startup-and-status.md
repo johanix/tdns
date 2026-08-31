@@ -27,7 +27,7 @@ equally invisible.
 | Question | Decision |
 |---|---|
 | Priming under a root forward | Skip the live `. NS` fetch: `PrimeFromHintsOnly` seeds the hints offline and marks the cache primed. Queries resolve lazily. Iterative mode keeps the live fetch (`PrimeWithHints`), unchanged. |
-| Upstream verification | Probe every forward upstream once at startup (recursive `. NS`, in parallel, after the listeners start). Failures WARN and register a server error — deliberately **not** fatal: hard-failing would recreate the boot-order race the probe exists to make visible. |
+| Upstream verification | Probe every forward upstream once at startup (a recursive SOA query for the forward zone itself — not `. NS`, which a zone-scoped upstream may refuse to resolve — in parallel, after the listeners start). Failures WARN and register a server error — deliberately **not** fatal: hard-failing would recreate the boot-order race the probe exists to make visible. |
 | Error surfacing | New `ErrCatUpstream` category in the server-error registry: `ImrForward` (aggregate of currently-unreachable forward upstreams, recomputed on every reachability transition — probe or live query — cleared when none is failing) and `ImrPriming` (IMR init failed; the daemon is running without DNS listeners). Both mark `config status` DEGRADED. |
 | Reachability semantics | "Reachable" = a DNS response arrived, whatever its rcode; only transport-level failures (error / nil response) count. |
 | Status surface | `ConfigResponse.Imr` (`ImrStatus`): primed + how + when, stub zones, forward zones with per-upstream transport, reachability, query/failure counters, last success/error. Populated from `Globals.ImrEngine` wherever a resolver runs — tdns-imr and the embedded resolver in tdns-auth/tdns-agent alike. New `tdns-cli imr config status` command; `auth`/`agent config status -v` render the same block. |
@@ -76,3 +76,9 @@ status, upstream reachable, zero failures.
   decision.
 - Reload for stubs/forwards remains open in #436; per-upstream backoff and
   RTT preference remain #438.
+- Trust-anchor initialization still runs before the listeners start, and its
+  chain fetches go through the (uncancellable) Exchange: a VALIDATING
+  forward-all resolver whose upstream is down at boot binds its DNS ports
+  only after those fetches time out (~5s per dead upstream). Not fatal, not
+  the husk — but the remaining "won't listen until the upstream times out"
+  stall. Fold into a later pass together with #435.

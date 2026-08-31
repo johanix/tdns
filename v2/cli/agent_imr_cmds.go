@@ -356,8 +356,8 @@ func newImrForwardCmd(role string) *cobra.Command {
 		&cobra.Command{
 			Use:   "probe [zone]",
 			Short: "Probe the forward upstreams now (same probe as at startup) and report per upstream",
-			Long: `Send a recursive '. NS' probe to every upstream of the configured forward
-zones (or of one zone) and report the outcome per upstream. The probe updates
+			Long: `Send a recursive SOA query for the forward zone to every one of its
+upstreams (or one zone's) and report the outcome per upstream. The probe updates
 the live reachability state, so a recovered upstream clears its DEGRADED
 error and a newly dead one raises it.`,
 			Args: cobra.MaximumNArgs(1),

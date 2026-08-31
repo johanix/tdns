@@ -878,7 +878,7 @@ func TestProbeForwardUpstreams(t *testing.T) {
 	imr.Forwards[0].Upstreams[0], imr.Forwards[0].Upstreams[1] =
 		imr.Forwards[0].Upstreams[1], imr.Forwards[0].Upstreams[0]
 	live := imr.Forwards[0].Upstreams[0]
-	live.recordFailure(fmt.Errorf("synthetic"))
+	live.recordFailure(time.Now(), fmt.Errorf("synthetic"))
 	imr.Forwards[0].Upstreams = imr.Forwards[0].Upstreams[:1] // drop the dead one
 	imr.updateForwardUpstreamError()
 

@@ -169,7 +169,9 @@ Startup behaviour: when a forward zone covers the root, the live `. NS`
 priming fetch is skipped — the hints are seeded offline and the cache is
 marked primed, so a forward-all resolver starts (and serves) even when its
 upstream is down at boot. Instead, every forward upstream is probed once at
-startup with a recursive `. NS` query, in parallel with normal operation: an
+startup with a recursive SOA query for the forward zone itself (an upstream
+serving only that zone may legitimately refuse to resolve anything else), in
+parallel with normal operation: an
 unreachable upstream is WARNed in the log and aggregated into an
 `Upstream/ImrForward` server error, which marks `config status` as DEGRADED
 and names the upstream. The error clears as soon as any exchange against the

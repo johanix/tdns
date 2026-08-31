@@ -90,12 +90,15 @@ func (imr *Imr) forwardZonesMatching(zoneFilter string) ([]*ForwardZone, error) 
 	return nil, fmt.Errorf("no forward zone %q is configured", zf)
 }
 
-// probeForwardUpstream is one startup/on-demand probe: a recursive ". NS"
-// through the upstream's own client. Records into the upstream's
-// reachability state; the caller updates the aggregate error afterwards.
+// probeForwardUpstream is one startup/on-demand probe: a recursive SOA query
+// for the FORWARD ZONE itself, through the upstream's own client — not
+// ". NS", which an upstream serving only that zone may legitimately refuse
+// to resolve (a timeout there would DEGRADE a healthy zone-scoped forward).
+// Records into the upstream's reachability state; the caller updates the
+// aggregate error afterwards.
 func (imr *Imr) probeForwardUpstream(zone string, up *ForwardUpstream) (time.Duration, error) {
 	m := new(dns.Msg)
-	m.SetQuestion(".", dns.TypeNS) // RD=1 via SetQuestion
+	m.SetQuestion(zone, dns.TypeSOA) // RD=1 via SetQuestion
 	m.SetEdns0(4096, true)
 	start := time.Now()
 	r, _, err := up.Client.Exchange(m, up.Addr, false)
@@ -104,7 +107,7 @@ func (imr *Imr) probeForwardUpstream(zone string, up *ForwardUpstream) (time.Dur
 		err = fmt.Errorf("nil response")
 	}
 	if err != nil {
-		up.recordFailure(err)
+		up.recordFailure(start, err)
 		lgImr.Warn("forward upstream unreachable", "zone", zone, "upstream", up.Label, "err", err)
 		return rtt, err
 	}

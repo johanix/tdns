@@ -74,6 +74,12 @@ type Imr struct {
 	// (conf.Internal.ServerErrors), set at init. The IMR owns the
 	// Upstream/ImrPriming and Upstream/ImrForward entries. Nil-safe.
 	errorRegistry *ServerErrorRegistry
+	// fwdErrMu serializes updateForwardUpstreamError's scan of the
+	// per-upstream failing flags with its registry write: without it, two
+	// concurrent recomputes (a live query racing an on-demand probe) can
+	// interleave scan and Set/Clear and leave the aggregate describing the
+	// older of the two states.
+	fwdErrMu sync.Mutex
 	// dnssecPolicyMu guards largeAlgs and dnskeyTransport: both are read on
 	// the query path (isLargeAlgorithm / dnskeyPolicy) and swapped by
 	// RefreshDnssecPolicy on config reload.

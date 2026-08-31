@@ -97,11 +97,14 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 				// traffic can exhaust the process fd limit, at which point
 				// every OUTBOUND dial fails and a forwarding resolver
 				// serves SERVFAIL for everything uncached, silently, until
-				// restarted (#443). IdleTimeout reaps parked connections;
-				// the read/write bounds cap what one slow client can hold.
+				// restarted (#443). IdleTimeout reaps parked connections
+				// and ReadHeaderTimeout bounds half-open handshakes.
+				// Deliberately NO ReadTimeout/WriteTimeout: on HTTP/2 those
+				// have historically acted as connection lifetimes rather
+				// than per-request caps, which would force well-behaved
+				// long-lived DoH clients to reconnect on a timer — and this
+				// server is shared with the tdns-auth DoH listener.
 				ReadHeaderTimeout: 10 * time.Second,
-				ReadTimeout:       30 * time.Second,
-				WriteTimeout:      30 * time.Second,
 				IdleTimeout:       120 * time.Second,
 			}
 			servers = append(servers, srv)

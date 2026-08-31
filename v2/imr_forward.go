@@ -72,9 +72,19 @@ func (up *ForwardUpstream) recordSuccess() bool {
 	return was
 }
 
-func (up *ForwardUpstream) recordFailure(err error) bool {
+// recordFailure takes the failed exchange's START time and discards the
+// failure entirely when a later exchange has already succeeded: Exchange is
+// not cancellable, so a probe (or slow query) begun against a down upstream
+// runs to its timeout even if the upstream came up — and a client query
+// succeeded — in the meantime. Recording that stale observation would
+// re-mark a healthy upstream failing and set a DEGRADED that lies until the
+// next live query, which teaches operators to ignore the flag.
+func (up *ForwardUpstream) recordFailure(start time.Time, err error) bool {
 	up.mu.Lock()
 	defer up.mu.Unlock()
+	if up.lastSuccess.After(start) {
+		return false
+	}
 	up.queries++
 	up.failures++
 	up.lastErrMsg = err.Error()
@@ -329,6 +339,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			imr.Cache.Logger.Printf("forwardQuery: forwarding <%s, %s> (zone %s) to upstream %s",
 				qname, dns.TypeToString[qtype], fz.Zone, up.Label)
 		}
+		start := time.Now()
 		r, _, err := up.Client.Exchange(m, up.Addr, Globals.Debug && !imr.Quiet)
 		if err == nil && r == nil {
 			err = fmt.Errorf("nil response from upstream %s", up.Label)
@@ -336,7 +347,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		if err != nil {
 			lgDns.Debug("forwardQuery: upstream error", "qname", qname, "qtype", dns.TypeToString[qtype],
 				"upstream", up.Label, "err", err)
-			if up.recordFailure(err) {
+			if up.recordFailure(start, err) {
 				// Reachability transition: this line is the only INFO-level
 				// trace of a mid-life upstream failure, so it must exist —
 				// repeat failures stay at Debug above.
@@ -410,6 +421,9 @@ func (imr *Imr) updateForwardUpstreamError() {
 	if imr.errorRegistry == nil {
 		return
 	}
+	// Serialize scan + registry write; see fwdErrMu.
+	imr.fwdErrMu.Lock()
+	defer imr.fwdErrMu.Unlock()
 	var failing []string
 	for _, fz := range imr.Forwards {
 		for _, up := range fz.Upstreams {
