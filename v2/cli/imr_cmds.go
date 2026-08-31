@@ -230,7 +230,7 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 		}
 		if len(args) == 1 {
 			zone := dns.Fqdn(args[0])
-			serverMap, ok := Conf.Internal.RRsetCache.ServerMap.Get(zone)
+			serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(zone)
 			if !ok {
 				fmt.Printf("No auth servers recorded for zone %q\n", zone)
 				return

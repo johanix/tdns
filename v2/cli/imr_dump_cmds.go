@@ -467,7 +467,10 @@ var dumpZoneServersCmd = &cobra.Command{
 			fmt.Println("RecursorCache is nil")
 			return
 		}
-		serverMap, ok := Conf.Internal.RRsetCache.ServerMap.Get(zone)
+		// Copy, not the stored map: this dump runs in-process with the
+		// resolver, and ranging over a map the cache owns is one refactor
+		// away from being a concurrent map read/write (#345).
+		serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(zone)
 		if !ok || len(serverMap) == 0 {
 			fmt.Printf("No auth servers known for zone %s\n", zone)
 			return

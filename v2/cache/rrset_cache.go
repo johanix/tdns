@@ -955,11 +955,12 @@ func (rrcache *RRsetCacheT) PrimeFromHintsOnly(hintsfile string) error {
 //
 // ServerMap.Get hands out the map STORED in the cache, and IterativeDNSQuery
 // writes into the map it is given (adding servers resolved from glue, pruning
-// expired ones). A caller that forwards the stored map therefore edits the cache
-// in place, from a code path that only meant to read it -- while
+// expired ones). A caller that forwarded the stored map would therefore edit
+// the cache in place, from a code path that only meant to read it -- while
 // FindClosestKnownZone, returning the same data, has always copied for exactly
 // this reason. Two accessors with opposite aliasing rules is a footgun with no
-// upside.
+// upside, so this is the accessor to reach for; see the ServerMap field
+// comment for the invariant both of them uphold (#345).
 //
 // The copy is shallow, like FindClosestKnownZone's: the *AuthServer values are
 // shared, so per-server state (addresses, transports, backoffs) is still common
