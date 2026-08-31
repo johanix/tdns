@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -119,6 +120,16 @@ func TestProbeCancellation(t *testing.T) {
 	})
 	imr.errorRegistry = NewServerErrorRegistry()
 
+	// A stub zone pointed at the same double, so the cancelled stub probe
+	// is exercised against a server that WOULD answer.
+	imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, fmt.Sprintf("%d", port), nil)
+	if err := imr.Cache.AddStub("stub.example.", []cache.AuthServer{
+		{Name: "ns.stub.example.", Addrs: []string{addr}, Alpn: []string{"do53"}},
+	}); err != nil {
+		t.Fatalf("AddStub: %v", err)
+	}
+	imr.stubZones = []string{"stub.example."}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -134,6 +145,11 @@ func TestProbeCancellation(t *testing.T) {
 					t.Errorf("cancelled probe reported success: %+v", res)
 				}
 			}
+		}
+		if results, err := imr.ProbeStubServers(ctx, ""); err != nil {
+			t.Errorf("cancelled stub probe errored: %v", err)
+		} else if len(results) != 0 {
+			t.Errorf("cancelled stub probe produced results: %+v", results)
 		}
 	}()
 	select {
