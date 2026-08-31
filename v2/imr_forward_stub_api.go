@@ -96,9 +96,10 @@ func (imr *Imr) forwardZonesMatching(zoneFilter string) ([]*ForwardZone, error) 
 // aggregate error afterwards.
 //
 // A cancelled ctx skips the exchange and records NOTHING — shutdown is not
-// evidence about the upstream. Cancellation is checked before the exchange
-// only: Exchange itself is not cancellable (#435), so an in-flight probe
-// still runs to the client timeout.
+// evidence about the upstream. A cancel DURING the exchange interrupts it
+// (#435) and is likewise not recorded: the ctx.Err() check below runs before
+// recordFailure, so an abandoned probe cannot mark a healthy upstream
+// unreachable.
 func (imr *Imr) probeForwardUpstream(ctx context.Context, zone string, up *ForwardUpstream) (time.Duration, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -107,12 +108,17 @@ func (imr *Imr) probeForwardUpstream(ctx context.Context, zone string, up *Forwa
 	m.SetQuestion(zone, dns.TypeSOA) // RD=1 via SetQuestion
 	m.SetEdns0(4096, true)
 	start := time.Now()
-	r, _, err := up.Client.Exchange(m, up.Addr, false)
+	r, _, err := core.ExchangeCtx(ctx, up.Client, m, up.Addr, false)
 	rtt := time.Since(start)
 	if err == nil && r == nil {
 		err = fmt.Errorf("nil response")
 	}
 	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			// Abandoned, not failed: report the cancellation and record
+			// nothing.
+			return rtt, cerr
+		}
 		up.recordFailure(start, err)
 		lgImr.Warn("forward upstream unreachable", "zone", zone, "upstream", up.Label, "err", err)
 		return rtt, err
@@ -327,9 +333,9 @@ func (imr *Imr) StubZoneStatus() []ImrStubZoneStatus {
 // ProbeStubServers sends an RD=0 SOA query for the stub zone to every
 // (server, address, advertised transport) tuple of the selected stub zones,
 // in parallel, and reports the outcome. STRICTLY report-only: nothing is
-// recorded into the AuthServer state (see the file comment). ctx
-// cancellation skips tuples whose exchange has not started (in-flight
-// exchanges run to the client timeout, #435).
+// recorded into the AuthServer state (see the file comment). A cancelled ctx
+// skips tuples whose exchange has not started and interrupts those already
+// on the wire (#435).
 func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrStubProbeResult, error) {
 	zones, err := imr.stubZonesMatching(zoneFilter)
 	if err != nil {
@@ -363,7 +369,7 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 						m.RecursionDesired = false // authoritative probe, not a recursive query
 						m.SetEdns0(4096, true)
 						start := time.Now()
-						r, _, err := client.Exchange(m, addr, false)
+						r, _, err := core.ExchangeCtx(ctx, client, m, addr, false)
 						rtt := time.Since(start)
 						res := ImrStubProbeResult{
 							Zone:      zone,

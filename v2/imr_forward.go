@@ -79,12 +79,14 @@ func (up *ForwardUpstream) recordSuccess() bool {
 }
 
 // recordFailure takes the failed exchange's START time and discards the
-// failure entirely when a later exchange has already succeeded: Exchange is
-// not cancellable, so a probe (or slow query) begun against a down upstream
-// runs to its timeout even if the upstream came up — and a client query
-// succeeded — in the meantime. Recording that stale observation would
-// re-mark a healthy upstream failing and set a DEGRADED that lies until the
-// next live query, which teaches operators to ignore the flag.
+// failure entirely when a later exchange has already succeeded: a probe (or
+// slow query) begun against a down upstream runs to its timeout even if the
+// upstream came up — and a client query succeeded — in the meantime.
+// Recording that stale observation would re-mark a healthy upstream failing
+// and set a DEGRADED that lies until the next live query, which teaches
+// operators to ignore the flag. (Cancellation shortens that window but does
+// not close it: an upstream that accepts and stalls still runs to its
+// deadline unless someone cancels the ctx.)
 func (up *ForwardUpstream) recordFailure(start time.Time, err error) bool {
 	up.mu.Lock()
 	defer up.mu.Unlock()
@@ -354,7 +356,10 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 				qname, dns.TypeToString[qtype], fz.Zone, up.Label)
 		}
 		start := time.Now()
-		r, _, err := up.Client.Exchange(m, up.Addr, Globals.Debug && !imr.Quiet)
+		// Cancellable (#435): with a plain Exchange, ordered failover could
+		// only move on between upstreams, so a hung first upstream cost the
+		// full client timeout before the second was even tried.
+		r, _, err := core.ExchangeCtx(ctx, up.Client, m, up.Addr, Globals.Debug && !imr.Quiet)
 		if err == nil && r == nil {
 			err = fmt.Errorf("nil response from upstream %s", up.Label)
 		}
@@ -462,8 +467,8 @@ func (imr *Imr) updateForwardUpstreamError() {
 // (visible in `config status` as DEGRADED) — deliberately not fatal:
 // refusing to start would recreate the boot-order race this probe exists to
 // make visible. A failing upstream clears as soon as any later exchange
-// against it succeeds. ctx cancellation stops probes that have not started
-// their exchange (an in-flight Exchange runs to the client timeout, #435).
+// against it succeeds. A cancelled ctx abandons the probes, in-flight ones
+// included.
 func (imr *Imr) ProbeForwardUpstreams(ctx context.Context) {
 	forwards := imr.ForwardZones()
 	if len(forwards) == 0 {
