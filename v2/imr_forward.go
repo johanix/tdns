@@ -363,6 +363,16 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		if err == nil && r == nil {
 			err = fmt.Errorf("nil response from upstream %s", up.Label)
 		}
+		if cerr := ctx.Err(); cerr != nil && err != nil {
+			// Abandoned, not failed. The ctx.Done() check at the top of the
+			// loop stops us between upstreams; this one is needed because a
+			// cancel now reaches the exchange itself, and recording it would
+			// mark a healthy upstream unreachable — and set a DEGRADED that
+			// outlives the shutdown that caused it. Same guard, same reason,
+			// as probeForwardUpstream and tryServer.
+			return nil, 0, cache.ContextFailure, up.Transport,
+				fmt.Errorf("forward zone %s: %w (attempts=%d, last error: %v)", fz.Zone, cerr, attempts, lastErr)
+		}
 		if err != nil {
 			lgDns.Debug("forwardQuery: upstream error", "qname", qname, "qtype", dns.TypeToString[qtype],
 				"upstream", up.Label, "err", err)

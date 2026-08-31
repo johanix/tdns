@@ -2102,27 +2102,47 @@ func (conf *Config) reloadImrEngineFromFile() error {
 		return fmt.Errorf("error processing config: %v", err)
 	}
 
-	var partial struct {
-		Imr struct {
-			Stubs   []ImrStubConf    `yaml:"stubs"`
-			Forward []ImrForwardConf `yaml:"forward"`
-		} `yaml:"imrengine"`
+	raw, present := configMap["imrengine"]
+	if !present {
+		// No imrengine: block at all. Legitimate — an app whose config
+		// configures no resolver zones — and distinct from a mistyped one,
+		// which the strict decode below catches.
+		conf.Imr.Stubs = nil
+		conf.Imr.Forward = nil
+		return nil
 	}
+
+	// Decode the block into the REAL ImrEngineConf, with ErrorUnused, rather
+	// than into a two-field partial. A partial ignores every key it does not
+	// name, so a typo -- `forwrd:` for `forward:` -- would decode to an empty
+	// list and this function would then hand ReloadZones an empty table: a
+	// misspelling would silently DELETE every forward zone on the next
+	// SIGHUP. Decoding the whole block means an unknown key anywhere in it
+	// fails the reload instead, and the running zones are kept.
+	//
+	// Same hooks as the full parse (decodeConfigMap), or `query-budget: 8s`
+	// -- valid in the config the daemon booted from -- would fail here.
+	var block ImrEngineConf
 	decoderConfig := &mapstructure.DecoderConfig{
-		TagName:    "yaml",
-		Result:     &partial,
-		ZeroFields: true,
+		TagName:     "yaml",
+		Result:      &block,
+		ZeroFields:  true,
+		ErrorUnused: true,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+		),
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
 	if err != nil {
 		return fmt.Errorf("error creating decoder: %v", err)
 	}
-	if err := decoder.Decode(configMap); err != nil {
+	if err := decoder.Decode(raw); err != nil {
 		return fmt.Errorf("error decoding imrengine config: %v", err)
 	}
 
-	conf.Imr.Stubs = partial.Imr.Stubs
-	conf.Imr.Forward = partial.Imr.Forward
+	// Only the reloadable two are taken; see the function comment.
+	conf.Imr.Stubs = block.Stubs
+	conf.Imr.Forward = block.Forward
 	return nil
 }
 

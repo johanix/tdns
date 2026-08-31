@@ -248,7 +248,10 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 		fmt.Printf("Auth server transport counters for all zones\n")
 		for item := range Conf.Internal.RRsetCache.ServerMap.IterBuffered() {
 			zone := item.Key
-			serverMap := item.Val
+			serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(zone)
+			if !ok {
+				continue // removed between the iteration and the copy
+			}
 			fmt.Printf("\nZone: %s\n", zone)
 			for name, server := range serverMap {
 				fmt.Printf("  Server: %s\n", name)

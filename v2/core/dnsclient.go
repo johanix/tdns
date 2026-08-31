@@ -459,15 +459,11 @@ func (c *DNSClient) exchangeDoH(ctx context.Context, msg *dns.Msg, server string
 }
 
 // exchangeDoQ handles DNS over QUIC. The dial and stream-open honour ctx
-// directly; the stream reads below do not, so a cancel closes the QUIC
-// connection out from under them -- the same trick exchangeCancellable plays
-// on a TCP socket, and the only thing that interrupts a read already in
-// progress.
+// directly; the stream reads below do not, so a cancel -- or the timeout --
+// closes the QUIC connection out from under them, the same trick
+// exchangeCancellable plays on a TCP socket and the only thing that
+// interrupts a read already in progress.
 func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error) {
-	// Watch the CALLER's ctx, not the timeout-derived one below: the derived
-	// ctx is cancelled by this function's own return, and the timeout half is
-	// already enforced by the QUIC config's idle timeout.
-	parentDone := ctx.Done()
 	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
 
@@ -483,17 +479,26 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 	}
 	defer conn.CloseWithError(0, "")
 
-	if parentDone != nil {
-		finished := make(chan struct{})
-		defer close(finished)
-		go func() {
-			select {
-			case <-parentDone:
-				_ = conn.CloseWithError(0, "context cancelled")
-			case <-finished:
-			}
-		}()
-	}
+	// Watch the DERIVED ctx, so this covers the timeout as well as a cancel.
+	// c.Timeout is otherwise not enforced on the read path at all: the reads
+	// below take no deadline, and MaxIdleTimeout cannot save us because
+	// KeepAlivePeriod (c.Timeout/2) keeps eliciting ACKs, so the connection
+	// is never idle and an upstream that opens a stream and never answers
+	// hangs this goroutine for good.
+	//
+	// Ordering matters and is subtle: close(finished) is deferred AFTER
+	// cancel(), so it runs BEFORE it (LIFO) and the watcher exits through
+	// the finished branch on a normal return rather than on our own cancel.
+	// A double CloseWithError would be harmless anyway.
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.CloseWithError(0, "context done")
+		case <-finished:
+		}
+	}()
 
 	// Open a new stream
 	stream, err := conn.OpenStreamSync(ctx)

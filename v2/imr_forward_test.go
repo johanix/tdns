@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -877,11 +878,21 @@ func TestProbeForwardUpstreams(t *testing.T) {
 	// Recovery: a successful exchange against a failing upstream clears the
 	// aggregate. Simulate by marking the live upstream failing, then letting
 	// a real forwarded query (cache bypassed via force) succeed against it.
-	imr.ForwardZones()[0].Upstreams[0], imr.ForwardZones()[0].Upstreams[1] =
-		imr.ForwardZones()[0].Upstreams[1], imr.ForwardZones()[0].Upstreams[0]
-	live := imr.ForwardZones()[0].Upstreams[0]
+	//
+	// Built as a NEW zone and published, rather than edited in place: the
+	// table is immutable once published, and a test that reaches into the
+	// snapshot to reorder it is exactly the pattern ForwardZones() documents
+	// against.
+	published := imr.ForwardZones()[0]
+	live := published.Upstreams[1]
 	live.recordFailure(time.Now(), fmt.Errorf("synthetic"))
-	imr.ForwardZones()[0].Upstreams = imr.ForwardZones()[0].Upstreams[:1] // drop the dead one
+	recovered := &ForwardZone{
+		Zone:      published.Zone,
+		Labels:    published.Labels,
+		TrustAD:   published.TrustAD,
+		Upstreams: []*ForwardUpstream{live}, // the dead one is dropped
+	}
+	imr.setZoneTable([]*ForwardZone{recovered}, nil, nil)
 	imr.updateForwardUpstreamError()
 
 	if _, _, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, true, false); err != nil {
@@ -889,5 +900,177 @@ func TestProbeForwardUpstreams(t *testing.T) {
 	}
 	if errs := imr.errorRegistry.List(); len(errs) != 0 {
 		t.Errorf("registry not cleared after recovery: %+v", errs)
+	}
+}
+
+// startSilentUpstream starts an upstream that receives queries and never
+// answers them: the shape #435 is about.
+func startSilentUpstream(t *testing.T) (string, uint16, func()) {
+	t.Helper()
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	host, port := splitHostPort(t, pc.LocalAddr().String())
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		Handler:           dns.HandlerFunc(func(dns.ResponseWriter, *dns.Msg) { time.Sleep(3 * time.Second) }),
+		NotifyStartedFunc: func() { close(started) },
+	}
+	go func() { _ = srv.ActivateAndServe() }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("silent upstream did not start")
+	}
+	return host, port, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	}
+}
+
+// TestForwardQueryCancelIsNotAnUpstreamFailure: cancelling a forwarded query
+// must return promptly AND leave the upstream's reachability state alone.
+//
+// Both halves matter. Before the exchange was cancellable the query ran to the
+// client timeout; now that it can be interrupted, the error it returns must
+// not be recorded as "this upstream is unreachable", or a shutdown would mark
+// every upstream mid-exchange as failing and set a DEGRADED that outlives the
+// shutdown which caused it.
+func TestForwardQueryCancelIsNotAnUpstreamFailure(t *testing.T) {
+	host, port, stop := startSilentUpstream(t)
+	defer stop()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: host, Port: port}}},
+	})
+	imr.errorRegistry = NewServerErrorRegistry()
+	up := imr.ForwardZones()[0].Upstreams[0]
+	c := up.Client.(*core.DNSClient)
+	c.Timeout = 5 * time.Second
+	c.DNSClientUDP.Timeout = c.Timeout
+	c.DNSClientTCP.Timeout = c.Timeout
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, _, _, _, err := imr.forwardQuery(ctx, "www.fwd.example.", dns.TypeA, imr.ForwardZones()[0], false, false)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("forwardQuery succeeded against a silent upstream")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error does not identify the cancel: %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("cancel took %s to take effect (client timeout is 5s)", elapsed)
+	}
+
+	up.mu.Lock()
+	failures, failing := up.failures, up.failing
+	up.mu.Unlock()
+	if failures != 0 || failing {
+		t.Errorf("abandoned exchange recorded as an upstream failure: failures=%d failing=%v", failures, failing)
+	}
+	if errs := imr.errorRegistry.List(); len(errs) != 0 {
+		t.Errorf("abandoned exchange raised a server error: %+v", errs)
+	}
+}
+
+// startSilentUpstreamDoQ accepts the QUIC connection and the stream, reads the
+// query, and never answers.
+func startSilentUpstreamDoQ(t *testing.T, cert tls.Certificate) (string, uint16, func()) {
+	t.Helper()
+	l, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		NextProtos:   []string{"doq"},
+		MinVersion:   tls.VersionTLS13,
+	}, nil)
+	if err != nil {
+		t.Fatalf("quic listen: %v", err)
+	}
+	host, port := splitHostPort(t, l.Addr().String())
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for {
+			conn, err := l.Accept(ctx)
+			if err != nil {
+				return
+			}
+			go func() {
+				for {
+					stream, err := conn.AcceptStream(ctx)
+					if err != nil {
+						return
+					}
+					// Read the query and go silent, holding the stream open.
+					go func() {
+						var lenBuf [2]byte
+						if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
+							return
+						}
+						_, _ = io.ReadFull(stream, make([]byte, binary.BigEndian.Uint16(lenBuf[:])))
+						<-ctx.Done()
+					}()
+				}
+			}()
+		}
+	}()
+	return host, port, func() {
+		cancel()
+		_ = l.Close()
+	}
+}
+
+// TestExchangeDoQHonoursTimeout: a DoQ upstream that takes the query and never
+// answers must not hang the caller forever.
+//
+// Nothing else bounds it. The stream reads take no deadline, and
+// MaxIdleTimeout cannot help because KeepAlivePeriod (c.Timeout/2) keeps
+// eliciting ACKs, so the connection is never idle. Only closing the connection
+// when the exchange's own context expires ends it — which is why the watcher
+// in exchangeDoQ watches the timeout-derived context, not just the caller's.
+func TestExchangeDoQHonoursTimeout(t *testing.T) {
+	cert, pool := newUpstreamTestCert(t)
+	host, port, stop := startSilentUpstreamDoQ(t, cert)
+	defer stop()
+
+	c := core.NewDNSClient(core.TransportDoQ, fmt.Sprintf("%d", port), nil)
+	c.TLSConfig.RootCAs = pool
+	c.TLSConfig.ServerName = "dns.test.example"
+	c.TLSConfig.InsecureSkipVerify = false
+	c.Timeout = time.Second
+	c.QUICConfig.MaxIdleTimeout = c.Timeout
+	c.QUICConfig.KeepAlivePeriod = c.Timeout / 2
+
+	m := new(dns.Msg)
+	m.SetQuestion("www.fwd.example.", dns.TypeA)
+
+	// In a goroutine with a hard outer bound: before the fix this call does
+	// not return at all, and a plain synchronous call would hang the package
+	// until the test binary's own timeout rather than failing.
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, _, err := c.Exchange(m, host, false)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatalf("silent DoQ upstream produced an answer")
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("DoQ exchange took %s to give up; c.Timeout is 1s", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("DoQ exchange never returned; c.Timeout is 1s")
 	}
 }
