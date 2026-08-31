@@ -452,6 +452,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			// Every daemon that carries an IMR — tdns-imr itself or the
 			// embedded resolver in tdns-auth/tdns-agent — reports its state.
 			resp.Imr = Globals.ImrEngine.StatusReport()
+			resp.Proc = CollectProcStatus()
 			health := "Configuration is ok"
 			if len(resp.ServerErrors) > 0 {
 				health = fmt.Sprintf("DEGRADED: %d active error(s)", len(resp.ServerErrors))

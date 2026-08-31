@@ -74,6 +74,39 @@ overwrite all conflicts, or --interactive to prompt per conflict.`,
 	return c
 }
 
+// renderProcStatus prints the process-resource block of a config-status
+// response, with a loud line when descriptors are close to the limit — the
+// #443 wedge (fd exhaustion starving outbound dials) grows visibly here
+// before it bites. No-op when the daemon reported no block.
+func renderProcStatus(ps *tdns.ProcStatus) {
+	if ps == nil {
+		return
+	}
+	if ps.FDMethod == "unavailable" {
+		// Two causes share this state: an unsupported platform, and — on
+		// linux/darwin — descriptor exhaustion, where counting needs the
+		// one fd that no longer exists. Post-wedge, this line IS the signal.
+		fmt.Printf("Process: fd count unavailable (unsupported platform, or descriptors exhausted — see tdns#443), goroutines %d\n", ps.Goroutines)
+		return
+	}
+	kind := "open fds"
+	if ps.FDMethod == "maxfd" {
+		kind = "highest fd"
+	}
+	line := fmt.Sprintf("Process: %s %d", kind, ps.OpenFDs)
+	if ps.FDLimit > 0 {
+		line += fmt.Sprintf(" (limit %d)", ps.FDLimit)
+	}
+	line += fmt.Sprintf(", goroutines %d", ps.Goroutines)
+	fmt.Println(line)
+	// Divide before multiplying and require a sane finite limit: an
+	// RLIM_INFINITY soft limit would overflow FDLimit*8/10 and misfire.
+	if ps.FDLimit > 0 && ps.FDLimit < 1<<40 && uint64(ps.OpenFDs) >= ps.FDLimit/10*8 {
+		fmt.Printf("WARNING: file descriptors at %d of %d — a leak here starves outbound queries (see tdns#443)\n",
+			ps.OpenFDs, ps.FDLimit)
+	}
+}
+
 // renderImrStatus prints the IMR block of a config-status response: priming
 // state, stub zones, and forward zones with per-upstream reachability. No-op
 // when the daemon reported no IMR block.
@@ -245,6 +278,7 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 			}
 		}
 		renderImrStatus(resp.Imr)
+		renderProcStatus(resp.Proc)
 		if len(resp.DnsEngine.Options) > 0 {
 			fmt.Printf("DnsEngine: auth options:\n")
 			for opt, val := range resp.DnsEngine.Options {

@@ -492,6 +492,7 @@ type ConfigResponse struct {
 	GuardrailBlocked     bool                  `json:"guardrailblocked,omitempty"` // reload refused by the DNSSEC policy-change guardrail
 	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`   // per-zone would-strand findings (with GuardrailBlocked)
 	Imr                  *ImrStatus            `json:"imr,omitempty"`              // IMR priming + stub/forward state, when this daemon carries one
+	Proc                 *ProcStatus           `json:"proc,omitempty"`             // process resources (open fds, goroutines), for leak visibility (#443)
 }
 
 // ReloadGuardrailZone is one signed zone a config reload would strand: its bound
