@@ -374,9 +374,18 @@ func carryForwardUpstreams(old, new []*ForwardZone) {
 
 // --- config-side plumbing --------------------------------------------------
 
-// applyImrEngineReload hands the currently parsed imrengine: stub and forward
-// zones to the running resolver and reports the diff, including which edited
-// keys are NOT reloadable.
+// applyImrEngineReload hands the configured imrengine: stub and forward zones
+// to the running resolver and reports the diff, including which edited keys
+// are NOT reloadable.
+//
+// It re-reads and strictly validates the imrengine: block itself rather than
+// trusting what the caller left in conf.Imr, so that BOTH reload paths get
+// the same gate. That is load-bearing on the full-config path: ParseConfig
+// reports an unknown key as a WARNING, so a misspelled `forwrd:` decodes to
+// an empty list, and applying that would delete every forward zone the
+// resolver is running on -- the very wipe reloadImrEngineFromFile refuses on
+// the SIGHUP path. Same reasoning for a mistyped `stubs:`, which would drop
+// the stub zones and, with them, their veto over a `zone: .` forward.
 //
 // Nil-safe on every axis: an app with no resolver (or one that never got
 // past InitImrEngine) reloads nothing and reports nothing.
@@ -385,11 +394,23 @@ func (conf *Config) applyImrEngineReload() (ImrZoneReloadResult, error) {
 	if imr == nil {
 		return ImrZoneReloadResult{}, nil
 	}
-	res, err := imr.ReloadZones(conf.Imr.Stubs, conf.Imr.Forward)
+	block, err := conf.reloadImrEngineFromFile()
+	if err != nil {
+		return ImrZoneReloadResult{}, err
+	}
+	if block == nil {
+		// No config file to re-read (embedded use): take what is in memory.
+		block = &conf.Imr
+	}
+	res, err := imr.ReloadZones(block.Stubs, block.Forward)
 	if err != nil {
 		return res, err
 	}
-	res.RestartRequired = imrRestartRequiredKeys(imr.bootConf, conf.Imr)
+	// Diffed against the block just read from the FILE, not conf.Imr: on the
+	// zone-reload path conf.Imr still holds the boot values for everything
+	// except stubs and forwards, so that comparison would compare the boot
+	// config with itself and never report anything.
+	res.RestartRequired = imrRestartRequiredKeys(imr.bootConf, *block)
 	if len(res.RestartRequired) > 0 {
 		lgImr.Warn("imrengine keys changed but are not reloadable; the resolver keeps running on the values it started with",
 			"keys", strings.Join(res.RestartRequired, ", "))
@@ -426,6 +447,8 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 	check("trust-anchor-dnskey", boot.TrustAnchorDNSKEY == current.TrustAnchorDNSKEY)
 	check("trust-anchor-file", boot.TrustAnchorFile == current.TrustAnchorFile)
 	check("require-dnssec-validation", bothNil(boot.RequireDnssecValidation, current.RequireDnssecValidation))
+	check("verbose", boot.Verbose == current.Verbose)
+	check("debug", boot.Debug == current.Debug)
 	check("logging", boot.Logging == current.Logging)
 	check("tuning", imrTuningEqual(boot.Tuning, current.Tuning))
 	return keys

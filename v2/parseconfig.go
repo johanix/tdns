@@ -2085,21 +2085,29 @@ func (conf *Config) reloadZonesFromFile() error {
 // zones and DNSSEC policy only, so a stub or forward edit needed a restart
 // (#436).
 //
-// Only those two fields are replaced. Copying the whole block would leave
-// conf.Imr advertising tuning, trust anchors and options that the running
-// resolver is NOT using -- the reload cannot apply them -- and `config
-// status` would then describe a resolver that does not exist. The mismatch is
-// reported instead, by imrRestartRequiredKeys.
-func (conf *Config) reloadImrEngineFromFile() error {
+// Only those two fields are replaced IN conf.Imr. Copying the whole block
+// would leave conf.Imr advertising tuning, trust anchors and options that the
+// running resolver is NOT using -- the reload cannot apply them -- and `config
+// status` would then describe a resolver that does not exist.
+//
+// The whole decoded block is RETURNED, though, and the caller needs it for
+// exactly that reason: imrRestartRequiredKeys diffs it against what the Imr
+// was built from, to name the edited keys a reload cannot apply. Diffing
+// against conf.Imr instead would compare the boot values with themselves on
+// this path and report nothing.
+//
+// Returns a nil block when there is no config file to read (embedded use);
+// the caller then falls back to whatever is in memory.
+func (conf *Config) reloadImrEngineFromFile() (*ImrEngineConf, error) {
 	cfgfile := conf.Internal.CfgFile
 	if cfgfile == "" {
 		// No config file (e.g. embedded use): keep the in-memory zones.
-		return nil
+		return nil, nil
 	}
 
 	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
 	if err != nil {
-		return fmt.Errorf("error processing config: %v", err)
+		return nil, fmt.Errorf("error processing config: %v", err)
 	}
 
 	raw, present := configMap["imrengine"]
@@ -2109,7 +2117,7 @@ func (conf *Config) reloadImrEngineFromFile() error {
 		// which the strict decode below catches.
 		conf.Imr.Stubs = nil
 		conf.Imr.Forward = nil
-		return nil
+		return &ImrEngineConf{}, nil
 	}
 
 	// Decode the block into the REAL ImrEngineConf, with ErrorUnused, rather
@@ -2134,16 +2142,16 @@ func (conf *Config) reloadImrEngineFromFile() error {
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
 	if err != nil {
-		return fmt.Errorf("error creating decoder: %v", err)
+		return nil, fmt.Errorf("error creating decoder: %v", err)
 	}
 	if err := decoder.Decode(raw); err != nil {
-		return fmt.Errorf("error decoding imrengine config: %v", err)
+		return nil, fmt.Errorf("error decoding imrengine config: %v", err)
 	}
 
-	// Only the reloadable two are taken; see the function comment.
+	// Only the reloadable two are taken into conf.Imr; see the function comment.
 	conf.Imr.Stubs = block.Stubs
 	conf.Imr.Forward = block.Forward
-	return nil
+	return &block, nil
 }
 
 // reloadTsigKeysFromFile re-reads the config file and decodes just the keys:

@@ -108,15 +108,21 @@ var dumpAuthServersCmd = &cobra.Command{
 
 		// Get all keys from the concurrent map
 		for item := range Conf.Internal.RRsetCache.ServerMap.IterBuffered() {
+			// Copy, like the sibling dumps: ranging over the map the cache
+			// owns is the footgun #345 is about, even where it is read-only.
+			serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(item.Key)
+			if !ok {
+				continue // removed between the iteration and the copy
+			}
 			fmt.Printf("\nZone: %s\n", item.Key)
 			lines := []string{"Server | Source | Addresses | Transports | Connection"}
 			var names []string
-			for name := range item.Val {
+			for name := range serverMap {
 				names = append(names, name)
 			}
 			sort.Strings(names)
 			for _, name := range names {
-				server := item.Val[name]
+				server := serverMap[name]
 				addrs := formatList(server.Addrs)
 				src := server.Src
 				if src == "" {

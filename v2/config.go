@@ -1061,10 +1061,7 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 	// resolver means discarding the entire cache (#436). A decode error or a
 	// rejected forward table leaves the running zone routing exactly as it is.
 	imrReloadMsg := ""
-	if err := conf.reloadImrEngineFromFile(); err != nil {
-		lgConfig.Error("ReloadZoneConfig: failed to re-read imrengine config, keeping the running stub and forward zones", "err", err)
-		imrReloadMsg = fmt.Sprintf(" IMR zones NOT reloaded: %v", err)
-	} else if res, ierr := conf.applyImrEngineReload(); ierr != nil {
+	if res, ierr := conf.applyImrEngineReload(); ierr != nil {
 		lgConfig.Error("ReloadZoneConfig: imrengine reload failed, keeping the running stub and forward zones", "err", ierr)
 		imrReloadMsg = fmt.Sprintf(" IMR zones NOT reloaded: %v", ierr)
 	} else if summary := res.Summary(); summary != "" {

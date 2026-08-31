@@ -924,7 +924,18 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 	if err != nil {
 		return err
 	}
-	rrset, err := fetcher(ctx, ".", dns.TypeNS, authMap) // force re-query bypassing cache (cancellable via ctx)
+	// A COPY, not the map seedFromHints just published under ".": the fetcher
+	// is IterativeDNSQuery, which writes into the server map it is given
+	// (resolved NS addresses in, expired entries out). Handing it the stored
+	// map would edit the published root delegation in place -- the one thing
+	// the ServerMap invariant forbids, at the one moment every later lookup
+	// depends on. What the fetch legitimately learns still reaches the cache,
+	// through AddServers, which copies before it stores.
+	fetchMap := make(map[string]*AuthServer, len(authMap))
+	for name, server := range authMap {
+		fetchMap[name] = server
+	}
+	rrset, err := fetcher(ctx, ".", dns.TypeNS, fetchMap) // force re-query bypassing cache (cancellable via ctx)
 	if err != nil {
 		return fmt.Errorf("Error priming RRsetCache with root hints: %v", err)
 	}

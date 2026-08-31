@@ -22,7 +22,10 @@ type ImrStatus struct {
 	StubZones    []string               `json:"stub_zones,omitempty"`
 	ForwardZones []ImrForwardZoneStatus `json:"forward_zones,omitempty"`
 	// ZonesLoadedAt is when the stub/forward table in this report was
-	// published — startup, or the last reload that changed it.
+	// published — startup, or the last reload that APPLIED a table,
+	// whether or not it changed anything. It answers "did my reload reach
+	// this daemon", not "when did routing last change"; the diff in the
+	// reload reply answers the latter.
 	ZonesLoadedAt time.Time `json:"zones_loaded_at,omitzero"`
 }
 
