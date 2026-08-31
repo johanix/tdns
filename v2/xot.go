@@ -192,7 +192,7 @@ func (conf *Config) ClientTLSConfigForPeer(peer PeerConf) (*tls.Config, error) {
 	// Present OUR OWN certificate when the server requests one (the primary's
 	// listener always RequestClientCert): this is how a secondary satisfies
 	// the primary's per-zone downstream-auth tls-* mechanisms. The daemon's
-	// dnsengine cert/key (loaded at DnsEngine start into Internal.CertData/
+	// listeners: cert/key (loaded at DnsEngine start into Internal.CertData/
 	// KeyData; cert init issues it with both server and client EKU) doubles
 	// as the client identity. Absent cert material (e.g. dog's synthetic
 	// Config, or a Do53-only daemon) simply presents nothing — servers that
@@ -294,7 +294,7 @@ func (conf *Config) verifyPeerCertDANE(cs tls.ConnectionState, name, port string
 // authorizeTransfer, v2/downstream_auth.go). The IMR's DoT front end
 // passes false and never requests certificates. There is deliberately no
 // listener-level client-cert POLICY: dropping non-TLS traffic is
-// dnsengine.transports, and transfer authentication is per-zone
+// listeners.transports, and transfer authentication is per-zone
 // downstream-auth (docs/2026-07-21-peers-xfr-auth-design.md D6).
 func ServerTLSConfigForDoT(conf *Config, cert *tls.Certificate, requestClientCert bool) (*tls.Config, error) {
 	tlsCfg := &tls.Config{

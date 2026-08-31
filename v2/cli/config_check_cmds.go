@@ -975,7 +975,7 @@ func correlateRunningConfig(role string, cfg *tdns.Config, cfgPath, daemonDBPath
 			"a reload does not move the DB; restart is needed to switch db.file")
 	}
 
-	// /config status: running dnsengine + apiserver.
+	// /config status: running listeners/authengine + apiserver.
 	if api, err := GetApiClient(role, false); err != nil {
 		rep.warn(g, "status", fmt.Sprintf("could not reach the daemon for status: %v — status drift not correlated", err), "")
 	} else if resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"}); err != nil {

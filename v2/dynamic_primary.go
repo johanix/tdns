@@ -244,7 +244,7 @@ func bootstrapApexRecords(zone string, listenAddrs []string) []string {
 			continue
 		}
 		if addr.IsUnspecified() {
-			lg.Warn("bootstrap apex: skipping wildcard listener (list concrete addresses in dnsengine.addresses to have them in synthesized apexes)", "zone", zone, "address", la)
+			lg.Warn("bootstrap apex: skipping wildcard listener (list concrete addresses in listeners.addresses to have them in synthesized apexes)", "zone", zone, "address", la)
 			continue
 		}
 		key := addr.String()

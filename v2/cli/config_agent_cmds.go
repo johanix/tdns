@@ -7,7 +7,7 @@
  * The bulk of `config check` is shared with auth (config_check_cmds.go): the
  * agent uses the same Config struct, the same required-field validation
  * (ValidateConfig treats AppTypeAgent exactly like AppTypeAuth), the same
- * dnsengine/apiserver/zone/TSIG machinery, and the same mgmt-API endpoints
+ * listeners/authengine/apiserver/zone/TSIG machinery, and the same mgmt-API endpoints
  * minus GET /config/paths. What lives here is only what genuinely differs:
  * config this binary silently ignores, and options the agent rejects.
  */

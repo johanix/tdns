@@ -829,7 +829,7 @@ func (conf *Config) InitializeKeyDB() error {
 // applyOutboundSoaSerial resolves the configured outbound-soa-serial mode
 // onto the KeyDB and ensures the persist-mode table exists. Called from
 // InitializeKeyDB on first start AND from the reload path in ParseConfig
-// so a config edit that flips dnsengine.outbound-soa-serial takes effect
+// so a config edit that flips authengine.outbound-soa-serial takes effect
 // without a full restart.
 func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
 	// Default to "keep" when unset. Validation (oneof=keep|unixtime|persist)

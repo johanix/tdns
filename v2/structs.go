@@ -139,13 +139,13 @@ type ZoneData struct {
 	CurrentSerial  uint32 // SOA serial after local bumping
 	// OutboundSoaSerial is the PER-ZONE outbound serial mode (keep | unixtime
 	// | persist), sourced from the zone's config (possibly via its template).
-	// Empty means "inherit the server-global dnsengine.outbound-soa-serial".
+	// Empty means "inherit the server-global authengine.outbound-soa-serial".
 	// Never read directly — call zd.EffectiveOutboundSoaSerial(), which
 	// resolves the zone/global tiers.
 	OutboundSoaSerial string
 	// TransferSrc is the per-zone source address for OUTBOUND transfers, i.e.
 	// what the upstream's allow-transfer ACL sees. Never read directly — call
-	// zd.EffectiveTransferSrc(), which falls back to dnsengine.transfer-src.
+	// zd.EffectiveTransferSrc(), which falls back to authengine.transfer-src.
 	TransferSrc []string
 	// TransferSrcTier records which tier TransferSrc was resolved FROM, and is
 	// set only when TransferSrc was populated by resolution rather than by
@@ -438,7 +438,7 @@ type ZoneConf struct {
 	DelegationBackend string `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
 	DnssecPolicy      string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
 	// OutboundSoaSerial is the per-zone override of the server-global
-	// dnsengine.outbound-soa-serial. Empty (the default) inherits the global.
+	// authengine.outbound-soa-serial. Empty (the default) inherits the global.
 	// Set it on a TEMPLATE to give a whole class of zones a serial policy —
 	// that is the intended granularity; a zone that sets it explicitly wins
 	// over its template (ExpandTemplate gap-fills only unset fields, and a
@@ -446,7 +446,7 @@ type ZoneConf struct {
 	// "persist").
 	OutboundSoaSerial string `yaml:"outbound-soa-serial,omitempty" mapstructure:"outbound-soa-serial" validate:"omitempty,oneof=keep unixtime persist"`
 	// TransferSrc is the per-zone override of the server-global
-	// dnsengine.transfer-src: the local address to bind when dialling this
+	// authengine.transfer-src: the local address to bind when dialling this
 	// zone's upstreams, which is what the primary's allow-transfer ACL sees.
 	// Empty (the default) inherits the global. Set it on a TEMPLATE to give a
 	// whole class of zones one source address -- the same granularity argument
@@ -1228,7 +1228,7 @@ type KeyDB struct {
 	// OutboundSoaSerialMode()/SetOutboundSoaSerial(), never directly.
 	outboundSoaSerial atomic.Pointer[string]
 	// transferSrc is the server-global source address list for outbound zone
-	// transfers (dnsengine.transfer-src). Per-zone ZoneData.TransferSrc wins;
+	// transfers (authengine.transfer-src). Per-zone ZoneData.TransferSrc wins;
 	// see zd.EffectiveTransferSrc(). Same reload-vs-read exposure as the two
 	// above; access via TransferSrcList()/SetTransferSrc().
 	transferSrc atomic.Pointer[[]string]
