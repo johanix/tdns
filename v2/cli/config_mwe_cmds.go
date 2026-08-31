@@ -268,7 +268,7 @@ zones:
      template:  unsigned-primary
      downstreams:
         - { prefix: "127.0.0.0/8", key: NOKEY }
-        - { prefix: "::1",         key: NOKEY }
+        - { prefix: "::1/128",     key: NOKEY }
 
    # Signed primary (template: signed-primary -> online-signing + dnssecpolicy).
    - name:      signed.example.
@@ -276,7 +276,7 @@ zones:
      template:  signed-primary
      downstreams:
         - { prefix: "127.0.0.0/8", key: NOKEY }
-        - { prefix: "::1",         key: NOKEY }
+        - { prefix: "::1/128",     key: NOKEY }
 
    # Example SECONDARY zone (template: basic-secondary). Uncomment and point
    # upstreams: at your real primary to enable. A template may instead carry a
