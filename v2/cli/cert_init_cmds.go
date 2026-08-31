@@ -61,17 +61,12 @@ func runCertInit() {
 	if err := v.ReadInConfig(); err != nil {
 		cliFatalf("cert init: reading server config %s: %v", cfgPath, err)
 	}
-	// Single-level include: merge, same as the daemon loader.
-	for _, inc := range v.GetStringSlice("include") {
-		if !filepath.IsAbs(inc) {
-			inc = filepath.Join(filepath.Dir(cfgPath), inc)
-		}
-		if _, err := os.Stat(inc); err == nil {
-			v.SetConfigFile(inc)
-			if err := v.MergeInConfig(); err != nil {
-				cliFatalf("cert init: merging include %s: %v", inc, err)
-			}
-		}
+	// Single-level include: merge, through the same expander tdns-cli uses.
+	// This one reads a SERVER config, which is where the {file, merge} form
+	// actually turns up -- and where reading the list as plain strings left
+	// `cert init` unable to load a config the daemon loads fine (#452).
+	if err := tdns.MergeViperIncludes(v, cfgPath); err != nil {
+		cliFatalf("cert init: %v", err)
 	}
 
 	certFile := v.GetString("listeners.certfile")
