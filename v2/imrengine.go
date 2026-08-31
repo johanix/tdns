@@ -65,6 +65,15 @@ type Imr struct {
 	// also accumulates zone cuts learned from referrals — those must not
 	// override a configured forward.
 	stubZones []string
+	// PrimedVia and PrimedAt record how and when the cache was primed
+	// ("hints+fetch", or "hints-only" when the root is forwarded), for the
+	// config-status report.
+	PrimedVia string
+	PrimedAt  time.Time
+	// errorRegistry is the daemon-wide ServerErrorRegistry
+	// (conf.Internal.ServerErrors), set at init. The IMR owns the
+	// Upstream/ImrPriming and Upstream/ImrForward entries. Nil-safe.
+	errorRegistry *ServerErrorRegistry
 	// dnssecPolicyMu guards largeAlgs and dnskeyTransport: both are read on
 	// the query path (isLargeAlgorithm / dnskeyPolicy) and swapped by
 	// RefreshDnssecPolicy on config reload.
@@ -242,6 +251,7 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		return fmt.Errorf("InitImrEngine: %v", err)
 	}
 	imr.Forwards = forwards
+	imr.errorRegistry = conf.Internal.ServerErrors
 	for _, stub := range conf.Imr.Stubs {
 		imr.stubZones = append(imr.stubZones, dns.Fqdn(core.CanonicalizeName(stub.Zone)))
 	}
@@ -254,10 +264,27 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	}
 
 	if !rrcache.IsPrimed() {
-		err := rrcache.PrimeWithHints(ctx, conf.Imr.RootHints, imr.IterativeDNSQueryFetcher())
-		if err != nil {
-			return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
+		if imr.forwardZoneFor(".") != nil {
+			// The root is covered by a forward zone: the hint-seeded root
+			// server map is never consulted (the forward outranks it), so
+			// the live ". NS" priming fetch would add nothing but a
+			// startup-time network dependency on the upstream — a resolver
+			// whose upstream was briefly down at boot stayed a husk until
+			// restarted. Seed the hints offline and let queries (and the
+			// upstream probe) take it from there.
+			lgImr.Info("root is covered by a forward zone: seeding hints only, skipping the live priming fetch")
+			if err := rrcache.PrimeFromHintsOnly(conf.Imr.RootHints); err != nil {
+				return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
+			}
+			imr.PrimedVia = "hints-only (root forwarded)"
+		} else {
+			err := rrcache.PrimeWithHints(ctx, conf.Imr.RootHints, imr.IterativeDNSQueryFetcher())
+			if err != nil {
+				return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
+			}
+			imr.PrimedVia = "hints+fetch"
 		}
+		imr.PrimedAt = time.Now()
 		if len(conf.Imr.Stubs) > 0 {
 			for _, stub := range conf.Imr.Stubs {
 				stubservers := []string{}
@@ -322,6 +349,12 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 	// dereference below would panic.
 	if conf.Internal.ImrEngine == nil {
 		if err := conf.InitImrEngine(ctx, quiet); err != nil {
+			// The engine supervisor only LOGS this error while the daemon
+			// keeps running — with no DNS listeners. Register the condition
+			// so `config status` shows DEGRADED instead of a healthy-looking
+			// process that answers nothing.
+			conf.Internal.ServerErrors.SetImrPrimingError(
+				fmt.Sprintf("IMR did not start (no DNS listeners): %v", err))
 			return fmt.Errorf("ImrEngine: InitImrEngine failed: %w", err)
 		}
 	}
@@ -334,6 +367,11 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 
 	// Start the ImrEngine (i.e. the recursive nameserver responding to queries with RD bit set)
 	go imr.StartImrEngineListeners(ctx, conf)
+
+	// Verify the forward upstreams are reachable, concurrently with normal
+	// operation: failures WARN and mark `config status` DEGRADED, they do
+	// not stop the resolver.
+	go imr.ProbeForwardUpstreams()
 
 	for {
 		select {

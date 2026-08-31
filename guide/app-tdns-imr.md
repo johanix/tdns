@@ -103,6 +103,18 @@ Details of forwarding behaviour:
   upstream. The EDNS0 PR flag (privacy required) is honored: unencrypted
   upstreams are skipped for PR queries, and a forward zone with no encrypted
   upstream answers SERVFAIL with the corresponding EDE.
+- **Startup and observability**: a forward zone covering the root skips the
+  live `. NS` priming fetch (the hints are seeded offline), so a forward-all
+  resolver starts and serves even when its upstream is down at boot. Every
+  forward upstream is probed once at startup; an unreachable one is WARNed
+  and marks `config status` DEGRADED with an `Upstream/ImrForward` error
+  naming it, clearing on the first successful exchange. `tdns-cli imr config
+  status` reports priming state, stub zones, and per-upstream reachability —
+  and the same IMR block appears in `auth config status` / `agent config
+  status` for the resolver embedded in those daemons. A failed IMR init
+  (priming failure in iterative mode) also registers an `Upstream/ImrPriming`
+  error, so a daemon running without its DNS listeners is visible as DEGRADED
+  rather than silently answering nothing.
 - **Limits**: upstream addresses are IP literals (no hostnames), the DoH path
   is fixed at `/dns-query`, and the forward table is read at startup only —
   like stubs, there is no reload.

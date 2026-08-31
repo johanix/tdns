@@ -491,6 +491,7 @@ type ConfigResponse struct {
 	ServerErrors         []ServerError         `json:"servererrors,omitempty"`     // active server-wide error conditions
 	GuardrailBlocked     bool                  `json:"guardrailblocked,omitempty"` // reload refused by the DNSSEC policy-change guardrail
 	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`   // per-zone would-strand findings (with GuardrailBlocked)
+	Imr                  *ImrStatus            `json:"imr,omitempty"`              // IMR priming + stub/forward state, when this daemon carries one
 }
 
 // ReloadGuardrailZone is one signed zone a config reload would strand: its bound

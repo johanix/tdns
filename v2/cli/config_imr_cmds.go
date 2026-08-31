@@ -26,8 +26,8 @@ import (
 )
 
 // NewImrConfigCmd builds the `imr config` command group. tdns-imr has no
-// zone/tsig/keystore state, so this group carries just check and mwe (unlike
-// auth's config group, which also has reload*/status).
+// zone/tsig/keystore state, so this group carries check, mwe and status
+// (unlike auth's config group, which also has reload*).
 func NewImrConfigCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "config",
@@ -35,7 +35,46 @@ func NewImrConfigCmd() *cobra.Command {
 	}
 	c.AddCommand(newImrConfigCheckCmd())
 	c.AddCommand(newImrConfigMweCmd())
+	c.AddCommand(newImrConfigStatusCmd())
 	return c
+}
+
+// ---------------------------------------------------------------------------
+// imr config status
+// ---------------------------------------------------------------------------
+
+func newImrConfigStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Report the running tdns-imr daemon's status, including priming and forward upstreams",
+		Long: `Query the running tdns-imr daemon's /config status endpoint and report:
+overall health (active server errors), whether the resolver cache is primed
+and how, and the configured stub and forward zones with per-upstream
+reachability (fed by the startup probe and live queries).`,
+		Run: func(cmd *cobra.Command, args []string) {
+			resp, err := fetchImrStatus()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			if resp.Error {
+				fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
+				os.Exit(1)
+			}
+			fmt.Println(resp.Msg)
+			if len(resp.ServerErrors) > 0 {
+				fmt.Printf("Active errors:\n")
+				for _, e := range resp.ServerErrors {
+					fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
+				}
+			}
+			if resp.Imr == nil {
+				fmt.Println("IMR: no resolver state reported (engine not running)")
+				return
+			}
+			renderImrStatus(resp.Imr)
+		},
+	}
 }
 
 func init() {
