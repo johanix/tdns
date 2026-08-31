@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -490,6 +491,26 @@ func startTestUpstreamDoH(t *testing.T, cert tls.Certificate) (string, uint16, *
 	}
 }
 
+// waitFixtureGoroutines joins a fixture's goroutines after its cleanup has
+// cancelled and closed everything, and fails the test rather than leaving them
+// running into whatever comes next. Cancelling is not the same as having
+// stopped: the accept loops and the stream handlers each notice on their own
+// schedule, and a fixture that returns before they do leaks its goroutines
+// into the following test.
+func waitFixtureGoroutines(t *testing.T, name string, wg *sync.WaitGroup) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Errorf("%s: goroutines still running 3s after shutdown", name)
+	}
+}
+
 // startTestUpstreamDoQ starts the double behind a DoQ (RFC 9250) listener.
 func startTestUpstreamDoQ(t *testing.T, cert tls.Certificate) (string, uint16, *upstreamLog, func()) {
 	t.Helper()
@@ -505,19 +526,26 @@ func startTestUpstreamDoQ(t *testing.T, cert tls.Certificate) (string, uint16, *
 
 	logr := &upstreamLog{}
 	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			conn, err := l.Accept(ctx)
 			if err != nil {
 				return
 			}
+			wg.Add(1)
 			go func() {
+				defer wg.Done()
 				for {
 					stream, err := conn.AcceptStream(ctx)
 					if err != nil {
 						return
 					}
+					wg.Add(1)
 					go func() {
+						defer wg.Done()
 						defer stream.Close()
 						var lenBuf [2]byte
 						if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
@@ -546,6 +574,7 @@ func startTestUpstreamDoQ(t *testing.T, cert tls.Certificate) (string, uint16, *
 	return host, port, logr, func() {
 		cancel()
 		_ = l.Close()
+		waitFixtureGoroutines(t, "DoQ upstream", &wg)
 	}
 }
 
@@ -998,20 +1027,27 @@ func startSilentUpstreamDoQ(t *testing.T, cert tls.Certificate) (string, uint16,
 	}
 	host, port := splitHostPort(t, l.Addr().String())
 	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			conn, err := l.Accept(ctx)
 			if err != nil {
 				return
 			}
+			wg.Add(1)
 			go func() {
+				defer wg.Done()
 				for {
 					stream, err := conn.AcceptStream(ctx)
 					if err != nil {
 						return
 					}
 					// Read the query and go silent, holding the stream open.
+					wg.Add(1)
 					go func() {
+						defer wg.Done()
 						var lenBuf [2]byte
 						if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
 							return
@@ -1026,6 +1062,7 @@ func startSilentUpstreamDoQ(t *testing.T, cert tls.Certificate) (string, uint16,
 	return host, port, func() {
 		cancel()
 		_ = l.Close()
+		waitFixtureGoroutines(t, "silent DoQ upstream", &wg)
 	}
 }
 
@@ -1072,5 +1109,60 @@ func TestExchangeDoQHonoursTimeout(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatalf("DoQ exchange never returned; c.Timeout is 1s")
+	}
+}
+
+// TestExchangeDoQCancelIsNotLoggedAsFailure: cancelling a DoQ query must not
+// look like the upstream failed.
+//
+// Cancelling closes the QUIC connection out from under the stream reads, so
+// every cancelled DoQ query used to emit "DoQ failed to read response: use of
+// closed network connection" at error level -- a fault report for a routine
+// shutdown, and the kind of noise that buries a real one. A DEADLINE is a
+// different thing (the upstream really is not answering) and still logs, which
+// the second half of this test pins so the fix cannot go too far.
+func TestExchangeDoQCancelIsNotLoggedAsFailure(t *testing.T) {
+	cert, pool := newUpstreamTestCert(t)
+	host, port, stop := startSilentUpstreamDoQ(t, cert)
+	defer stop()
+
+	newClient := func() *core.DNSClient {
+		c := core.NewDNSClient(core.TransportDoQ, fmt.Sprintf("%d", port), nil)
+		c.TLSConfig.RootCAs = pool
+		c.TLSConfig.ServerName = "dns.test.example"
+		c.TLSConfig.InsecureSkipVerify = false
+		c.Timeout = time.Second
+		c.QUICConfig.MaxIdleTimeout = c.Timeout
+		c.QUICConfig.KeepAlivePeriod = c.Timeout / 2
+		return c
+	}
+	m := new(dns.Msg)
+	m.SetQuestion("www.fwd.example.", dns.TypeA)
+
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	// Cancelled: silent.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+	if _, _, err := newClient().ExchangeContext(ctx, m, host, false); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "DoQ failed") {
+		t.Errorf("a cancelled DoQ query logged a transport failure:\n%s", got)
+	}
+
+	// Timed out: still logged, because that is the upstream's doing.
+	buf.Reset()
+	if _, _, err := newClient().Exchange(m, host, false); err == nil {
+		t.Fatal("silent DoQ upstream produced an answer")
+	}
+	if got := buf.String(); !strings.Contains(got, "DoQ failed") {
+		t.Errorf("a timed-out DoQ query logged nothing; the suppression is too broad:\n%s", got)
 	}
 }
