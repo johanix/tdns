@@ -210,9 +210,9 @@ listeners:
    # For encrypted transports, add them here and the cert/key are already set:
    #   transports: [ do53, dot, doh, doq ]
    #   ports:
-   #      dot: [ "853" ]
-   #      doh: [ "443" ]
-   #      doq: [ "853" ]
+   #      dot: [ 853 ]
+   #      doh: [ 443 ]
+   #      doq: [ 853 ]
    certfile:  {{CERT}}
    keyfile:   {{KEY}}
 

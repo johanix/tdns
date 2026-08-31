@@ -1,8 +1,8 @@
 # Sample configuration for tdns-imr, the iterative/recursive resolver.
 #
 # The three things tdns-imr will not start without:
-#   imrengine.addresses    (validated: required)
-#   imrengine.transports   (validated: required)
+#   listeners.addresses    (validated: required)
+#   listeners.transports   (validated: required)
 #   log.file               (validated: required, and read before anything else)
 #   apiserver.apikey       (not validated, but the API router refuses to start
 #                           without it, and that aborts startup)
@@ -25,9 +25,9 @@ listeners:
 
    # Ports for the encrypted transports default to dot 853, doh 443, doq 853.
    # ports:
-   #    dot: [ "853" ]
-   #    doh: [ "443" ]
-   #    doq: [ "853" ]
+   #    dot: [ 853 ]
+   #    doh: [ 443 ]
+   #    doq: [ 853 ]
    # certfile:            /etc/tdns/certs/imr.crt
    # keyfile:             /etc/tdns/certs/imr.key
 

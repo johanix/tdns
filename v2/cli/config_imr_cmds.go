@@ -415,9 +415,9 @@ listeners:
    # For encrypted transports the cert/key below are ready to use:
    #   transports: [ do53, dot, doh, doq ]
    #   ports:
-   #      dot: [ "853" ]
-   #      doh: [ "443" ]
-   #      doq: [ "853" ]
+   #      dot: [ 853 ]
+   #      doh: [ 443 ]
+   #      doq: [ 853 ]
    # certfile:  {{CERT}}
    # keyfile:   {{KEY}}
 

@@ -140,13 +140,13 @@ func TestAllowlistedNestedKeyIsStillReachable(t *testing.T) {
 // The allowlist binds even an include that asked to merge. Concatenating
 // listen addresses would silently widen what the server answers on.
 func TestListenAddressesNeverConcatenate(t *testing.T) {
-	dst := yml(t, "dnsengine:\n  addresses: [ 127.0.0.1:53 ]\n")
-	src := yml(t, "dnsengine:\n  addresses: [ 192.0.2.1:53 ]\n")
+	dst := yml(t, "listeners:\n  addresses: [ 127.0.0.1:53 ]\n")
+	src := yml(t, "listeners:\n  addresses: [ 192.0.2.1:53 ]\n")
 	merge(t, dst, src, true)
 
-	addrs := dst["dnsengine"].(map[string]interface{})["addresses"].([]interface{})
+	addrs := dst["listeners"].(map[string]interface{})["addresses"].([]interface{})
 	if len(addrs) != 1 || addrs[0] != "192.0.2.1:53" {
-		t.Fatalf("dnsengine.addresses must replace even when opted in, got %v", addrs)
+		t.Fatalf("listeners.addresses must replace even when opted in, got %v", addrs)
 	}
 }
 

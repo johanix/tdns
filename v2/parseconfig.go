@@ -105,7 +105,7 @@ func rejectMovedConfigKeys(configMap map[string]interface{}) error {
 	}
 	if imrRaw, ok := configMap["imrengine"]; ok {
 		if imrMap, ok := imrRaw.(map[string]interface{}); ok {
-			for _, key := range []string{"addresses", "transports", "certfile", "keyfile"} {
+			for _, key := range []string{"addresses", "transports", "certfile", "keyfile", "ports"} {
 				if _, ok := imrMap[key]; ok {
 					errs = append(errs, fmt.Sprintf(
 						"imrengine.%s moved to listeners.%s (tdns-imr listens via listeners:; the embedded imr of tdns-auth/tdns-agent is internal and listens only via listeners.imr-debug-address)",
