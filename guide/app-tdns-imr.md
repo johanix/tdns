@@ -103,6 +103,18 @@ Details of forwarding behaviour:
   upstream. The EDNS0 PR flag (privacy required) is honored: unencrypted
   upstreams are skipped for PR queries, and a forward zone with no encrypted
   upstream answers SERVFAIL with the corresponding EDE.
+- **Startup and observability**: a forward zone covering the root skips the
+  live `. NS` priming fetch (the hints are seeded offline), so a forward-all
+  resolver starts and serves even when its upstream is down at boot. Every
+  forward upstream is probed once at startup; an unreachable one is WARNed
+  and marks `config status` DEGRADED with an `Upstream/ImrForward` error
+  naming it, clearing on the first successful exchange. `tdns-cli imr config
+  status` reports priming state, stub zones, and per-upstream reachability —
+  and the same IMR block appears in `auth config status` / `agent config
+  status` for the resolver embedded in those daemons. A failed IMR init
+  (priming failure in iterative mode) also registers an `Upstream/ImrPriming`
+  error, so a daemon running without its DNS listeners is visible as DEGRADED
+  rather than silently answering nothing.
 - **Limits**: upstream addresses are IP literals (no hostnames), the DoH path
   is fixed at `/dns-query`, and the forward table is read at startup only —
   like stubs, there is no reload.
@@ -206,9 +218,23 @@ through in-process channels.
 **`tdns-cli imr <cache-command>` does not work.** `tdns-cli` registers the same
 command objects under `imr`, but their implementations reach for an in-process
 resolver that `tdns-cli` does not have. `tdns-cli imr query` prints
-*"No active channel to RecursorEngine. Terminating."* The only `tdns-cli imr`
-subcommands that do anything are `imr ping`, `imr daemon ...` and
-`imr dsync-query`.
+*"No active channel to RecursorEngine. Terminating."* The `tdns-cli imr`
+subcommands that do work are the API-based ones: `imr ping`, `imr daemon ...`,
+`imr dsync-query`, `imr config status`, and the `imr forward ...` /
+`imr stub ...` trees below.
+
+**`tdns-cli {imr,auth imr,agent imr} forward|stub ...`** inspect and probe the
+resolver's forward and stub zones over the `/imr` API — against tdns-imr
+directly, or against the resolver embedded in tdns-auth / tdns-agent:
+
+| Command | Effect |
+|---------|--------|
+| `forward list` | The configured forward zones and upstreams (transport, port, TLS settings) |
+| `forward status` | Per-upstream reachability, query/failure counters, last success/error |
+| `forward probe [zone]` | Re-run the startup probe now (a recursive SOA query for the forward zone, per upstream) and report per upstream with RTT. **Updates** the live reachability state, so probing confirms a recovery (clearing the DEGRADED error) or surfaces a newly dead upstream. Non-zero exit when any upstream fails |
+| `stub list` | The configured stub zones and their servers (name, addrs, alpn) |
+| `stub status` | Per-server transport counters (attempted/used/failed/truncated) and any active (address, transport) backoffs — the state that silently disabled stubs in the 2026-08-11 outage |
+| `stub probe [zone]` | RD=0 SOA query for the stub zone to every (server, address, advertised transport) tuple; reports rcode, AA bit and RTT. **Strictly report-only**: nothing is recorded, so a probe can never put a stub server into backoff. Non-zero exit when any tuple fails to answer authoritatively |
 
 **`tdns-cli agent imr ...` and `tdns-cli auth imr ...` are the real API-based
 cache commands.** They POST to the `/imr` endpoint of a running **tdns-agent**

@@ -74,6 +74,55 @@ overwrite all conflicts, or --interactive to prompt per conflict.`,
 	return c
 }
 
+// renderImrStatus prints the IMR block of a config-status response: priming
+// state, stub zones, and forward zones with per-upstream reachability. No-op
+// when the daemon reported no IMR block.
+func renderImrStatus(st *tdns.ImrStatus) {
+	if st == nil {
+		return
+	}
+	primed := "not primed"
+	if st.Primed {
+		primed = "primed"
+		if st.PrimedVia != "" {
+			primed += " via " + st.PrimedVia
+		}
+		if !st.PrimedAt.IsZero() {
+			primed += " at " + st.PrimedAt.Format(tdns.TimeLayout)
+		}
+	}
+	fmt.Printf("IMR: %s\n", primed)
+	if len(st.StubZones) > 0 {
+		fmt.Printf("IMR: stub zones: %s\n", strings.Join(st.StubZones, ", "))
+	}
+	for _, fz := range st.ForwardZones {
+		printForwardZoneStatus(fz, "IMR: ")
+	}
+}
+
+// printForwardZoneStatus renders one forward zone's reachability block.
+// Shared by renderImrStatus (config status) and `imr forward status`.
+func printForwardZoneStatus(fz tdns.ImrForwardZoneStatus, prefix string) {
+	trust := ""
+	if fz.TrustAD {
+		trust = ", trust-ad"
+	}
+	fmt.Printf("%sforward zone %s (%d upstream(s)%s):\n", prefix, fz.Zone, len(fz.Upstreams), trust)
+	for _, up := range fz.Upstreams {
+		state := "ok"
+		if up.Unreachable {
+			state = fmt.Sprintf("UNREACHABLE (%s)", up.LastError)
+		} else if up.Queries == 0 {
+			state = "untried"
+		}
+		line := fmt.Sprintf("  %-30s %s, queries %d, failures %d", up.Upstream, state, up.Queries, up.Failures)
+		if !up.LastSuccess.IsZero() {
+			line += ", last success " + up.LastSuccess.Format(tdns.TimeLayout)
+		}
+		fmt.Println(line)
+	}
+}
+
 func runReloadTsigCmd(role string, force, interactive bool) {
 	if tsigForceInteractiveConflict(force, interactive) {
 		fmt.Println("Error: --force and --interactive are mutually exclusive")
@@ -195,6 +244,7 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 				fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
 			}
 		}
+		renderImrStatus(resp.Imr)
 		if len(resp.DnsEngine.Options) > 0 {
 			fmt.Printf("DnsEngine: auth options:\n")
 			for opt, val := range resp.DnsEngine.Options {

@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -74,7 +75,7 @@ var imrStatsTransportStatsCmd = &cobra.Command{
 		if len(args) == 1 {
 			f.zone = dns.Fqdn(args[0])
 		}
-		runTransportStats(f)
+		runTransportStats(cmd.Context(), f)
 	},
 }
 
@@ -90,7 +91,7 @@ var imrStatsTransportStatsSuffixCmd = &cobra.Command{
 		if len(args) == 1 {
 			f.suffix = dns.Fqdn(args[0])
 		}
-		runTransportStats(f)
+		runTransportStats(cmd.Context(), f)
 	},
 }
 
@@ -100,12 +101,12 @@ var imrStatsTransportStatsSuffixCmd = &cobra.Command{
 // client to talk to itself — and doing so previously KILLED the REPL:
 // SendImrMgmtCmd found no self-client and the error path called
 // log.Fatalf/os.Exit, terminating the process (a #297 regression).
-func runTransportStats(f transportStatsFilter) {
+func runTransportStats(ctx context.Context, f transportStatsFilter) {
 	if Conf.Internal.RRsetCache != nil {
 		renderTransportStatsLocal(f)
 		return
 	}
-	renderTransportStatsRemote(f)
+	renderTransportStatsRemote(ctx, f)
 }
 
 // renderTransportStatsLocal renders per-server transport-usage stats straight
@@ -155,8 +156,8 @@ func renderTransportStatsLocal(f transportStatsFilter) {
 // formatter as the local/interactive path, so the two cannot drift. Used only
 // by the standalone tdns-cli binary (no in-process cache); log.Fatalf/os.Exit
 // on error is acceptable here because that is a short-lived one-shot process.
-func renderTransportStatsRemote(f transportStatsFilter) {
-	amr, err := SendImrMgmtCmd("imr", &tdns.ImrMgmtPost{
+func renderTransportStatsRemote(ctx context.Context, f transportStatsFilter) {
+	amr, err := SendImrMgmtCmd(ctx, "imr", &tdns.ImrMgmtPost{
 		Command: "imr-transport-stats",
 		Data:    f.data(),
 	})

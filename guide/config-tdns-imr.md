@@ -165,6 +165,21 @@ cached, so the burst is per zone per TTL, not per query.
 
 Like stubs, forward zones are read at startup only; there is no reload path.
 
+Startup behaviour: when a forward zone covers the root, the live `. NS`
+priming fetch is skipped — the hints are seeded offline and the cache is
+marked primed, so a forward-all resolver starts (and serves) even when its
+upstream is down at boot. Instead, every forward upstream is probed once at
+startup with a recursive SOA query for the forward zone itself (an upstream
+serving only that zone may legitimately refuse to resolve anything else), in
+parallel with normal operation: an
+unreachable upstream is WARNed in the log and aggregated into an
+`Upstream/ImrForward` server error, which marks `config status` as DEGRADED
+and names the upstream. The error clears as soon as any exchange against the
+upstream succeeds. Inspect the resolver's state — priming, stub zones, and
+per-upstream reachability — with `tdns-cli imr config status` (the same block
+appears in `auth config status` / `agent config status` for the embedded
+resolver those daemons carry).
+
 ## Debug logging
 
 Separate from `log.file`, and off by default.

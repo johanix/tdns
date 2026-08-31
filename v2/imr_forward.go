@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
@@ -44,6 +46,55 @@ type ForwardUpstream struct {
 	Insecure  bool   // certificate verification disabled (encrypted transports only)
 	Label     string // "addr:port/transport", for logs and hooks
 	Client    core.DNSClienter
+
+	// Reachability state, fed by the startup probe and by live queries.
+	// "Reachable" means a DNS response arrived, whatever its rcode; only
+	// transport-level failures (error / nil response) count as failures.
+	mu          sync.Mutex
+	queries     uint64 // exchange attempts (probe included)
+	failures    uint64 // transport-level failures
+	lastSuccess time.Time
+	lastErrMsg  string
+	lastErrTime time.Time
+	failing     bool // last exchange was a transport-level failure
+}
+
+// recordSuccess and recordFailure update the upstream's reachability state
+// and report whether it TRANSITIONED, so the caller knows to recompute the
+// aggregate Upstream/ImrForward server error.
+func (up *ForwardUpstream) recordSuccess() bool {
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	up.queries++
+	up.lastSuccess = time.Now()
+	was := up.failing
+	up.failing = false
+	return was
+}
+
+// recordFailure takes the failed exchange's START time and discards the
+// failure entirely when a later exchange has already succeeded: Exchange is
+// not cancellable, so a probe (or slow query) begun against a down upstream
+// runs to its timeout even if the upstream came up — and a client query
+// succeeded — in the meantime. Recording that stale observation would
+// re-mark a healthy upstream failing and set a DEGRADED that lies until the
+// next live query, which teaches operators to ignore the flag.
+func (up *ForwardUpstream) recordFailure(start time.Time, err error) bool {
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	// A superseded failure was still an exchange attempt: count it in
+	// queries, but leave failures and the failing flag to the fresher
+	// success it lost against.
+	up.queries++
+	if up.lastSuccess.After(start) {
+		return false
+	}
+	up.failures++
+	up.lastErrMsg = err.Error()
+	up.lastErrTime = time.Now()
+	was := up.failing
+	up.failing = true
+	return !was
 }
 
 // authenticated reports whether this upstream's channel authenticates the
@@ -60,6 +111,33 @@ type ForwardZone struct {
 	Labels    int    // dns.CountLabel(Zone), precomputed for specificity checks
 	TrustAD   bool
 	Upstreams []*ForwardUpstream
+
+	// Throttle for the all-upstreams-failed WARN, so a dead upstream under
+	// query load does not turn the log into a firehose while still being
+	// impossible to miss.
+	logMu           sync.Mutex
+	lastServfailLog time.Time
+}
+
+// noteAllUpstreamsFailed WARNs that a query was answered SERVFAIL because
+// every upstream failed — at most once per throttle interval per zone.
+// Before this existed the responder wrote the SERVFAIL without any log line,
+// which is how a forwarding resolver could serve SERVFAIL for everything, for
+// an hour, in silence (#443).
+func (fz *ForwardZone) noteAllUpstreamsFailed(qname string, qtype uint16, attempts int, lastErr error) bool {
+	const throttle = 30 * time.Second
+	fz.logMu.Lock()
+	now := time.Now()
+	if now.Sub(fz.lastServfailLog) < throttle {
+		fz.logMu.Unlock()
+		return false
+	}
+	fz.lastServfailLog = now
+	fz.logMu.Unlock()
+	lgImr.Warn("forward zone: all upstreams failed, answering SERVFAIL (throttled: one line per 30s per zone)",
+		"zone", fz.Zone, "qname", qname, "qtype", dns.TypeToString[qtype],
+		"upstreams", len(fz.Upstreams), "attempts", attempts, "lastErr", lastErr)
+	return true
 }
 
 func (fz *ForwardZone) hasEncryptedUpstream() bool {
@@ -264,16 +342,27 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			imr.Cache.Logger.Printf("forwardQuery: forwarding <%s, %s> (zone %s) to upstream %s",
 				qname, dns.TypeToString[qtype], fz.Zone, up.Label)
 		}
+		start := time.Now()
 		r, _, err := up.Client.Exchange(m, up.Addr, Globals.Debug && !imr.Quiet)
+		if err == nil && r == nil {
+			err = fmt.Errorf("nil response from upstream %s", up.Label)
+		}
 		if err != nil {
 			lgDns.Debug("forwardQuery: upstream error", "qname", qname, "qtype", dns.TypeToString[qtype],
 				"upstream", up.Label, "err", err)
+			if up.recordFailure(start, err) {
+				// Reachability transition: this line is the only INFO-level
+				// trace of a mid-life upstream failure, so it must exist —
+				// repeat failures stay at Debug above.
+				lgImr.Warn("forward upstream unreachable", "zone", fz.Zone, "upstream", up.Label, "err", err)
+				imr.updateForwardUpstreamError()
+			}
 			lastErr = err
 			continue
 		}
-		if r == nil {
-			lastErr = fmt.Errorf("nil response from upstream %s", up.Label)
-			continue
+		if up.recordSuccess() {
+			lgImr.Info("forward upstream recovered", "zone", fz.Zone, "upstream", up.Label)
+			imr.updateForwardUpstreamError()
 		}
 		for _, hook := range getImrResponseHooks() {
 			hook(ctx, qname, qtype, up.Label, up.Addr, up.Transport, r, r.MsgHdr.Rcode)
@@ -321,9 +410,65 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			continue
 		}
 	}
+	fz.noteAllUpstreamsFailed(qname, qtype, attempts, lastErr)
 	return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
 		fmt.Errorf("forward zone %s: no usable response for '%s %s' from any of its %d upstreams (attempts=%d, last error: %v)",
 			fz.Zone, qname, dns.TypeToString[qtype], len(fz.Upstreams), attempts, lastErr)
+}
+
+// updateForwardUpstreamError recomputes the aggregate Upstream/ImrForward
+// server error from the per-upstream failing flags: set with the full list of
+// failing upstreams while any is failing, cleared when none is. Called on
+// reachability transitions and after the startup probe.
+func (imr *Imr) updateForwardUpstreamError() {
+	if imr.errorRegistry == nil {
+		return
+	}
+	// Serialize scan + registry write; see fwdErrMu.
+	imr.fwdErrMu.Lock()
+	defer imr.fwdErrMu.Unlock()
+	var failing []string
+	for _, fz := range imr.Forwards {
+		for _, up := range fz.Upstreams {
+			up.mu.Lock()
+			if up.failing {
+				failing = append(failing, fmt.Sprintf("%s (zone %s: %s)", up.Label, fz.Zone, up.lastErrMsg))
+			}
+			up.mu.Unlock()
+		}
+	}
+	if len(failing) == 0 {
+		imr.errorRegistry.ClearImrForwardUpstreamError()
+		return
+	}
+	imr.errorRegistry.SetImrForwardUpstreamError(
+		fmt.Sprintf("%d forward upstream(s) unreachable: %s", len(failing), strings.Join(failing, "; ")))
+}
+
+// ProbeForwardUpstreams sends one recursive probe (the forward zone's SOA)
+// to every forward upstream, in parallel, and records reachability. Failures
+// are WARNed and aggregated into the Upstream/ImrForward server error
+// (visible in `config status` as DEGRADED) — deliberately not fatal:
+// refusing to start would recreate the boot-order race this probe exists to
+// make visible. A failing upstream clears as soon as any later exchange
+// against it succeeds. ctx cancellation stops probes that have not started
+// their exchange (an in-flight Exchange runs to the client timeout, #435).
+func (imr *Imr) ProbeForwardUpstreams(ctx context.Context) {
+	if len(imr.Forwards) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, fz := range imr.Forwards {
+		for _, up := range fz.Upstreams {
+			wg.Add(1)
+			go func(zone string, up *ForwardUpstream) {
+				defer wg.Done()
+				_, _ = imr.probeForwardUpstream(ctx, zone, up)
+			}(fz.Zone, up)
+		}
+	}
+	wg.Wait()
+	imr.updateForwardUpstreamError()
 }
 
 // applyTrustADToNegative maps the upstream's AD bit onto the negative entry

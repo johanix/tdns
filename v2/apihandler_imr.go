@@ -194,6 +194,52 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			removed := imr.Cache.FlushAll()
 			resp.Msg = fmt.Sprintf("IMR cache reset: flushed %d entries (root NS and glue preserved)", removed)
 
+		case "imr-forward-list", "imr-forward-status", "imr-forward-probe",
+			"imr-stub-list", "imr-stub-status", "imr-stub-probe":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			zoneFilter := string(amp.Zone)
+			switch amp.Command {
+			case "imr-forward-list":
+				list := imr.ForwardZoneList()
+				resp.Data = list
+				resp.Msg = fmt.Sprintf("%d forward zone(s) configured", len(list))
+			case "imr-forward-status":
+				st := imr.StatusReport()
+				resp.Data = st.ForwardZones
+				resp.Msg = fmt.Sprintf("%d forward zone(s) configured", len(st.ForwardZones))
+			case "imr-forward-probe":
+				results, err := imr.ProbeForwardUpstreamsReport(r.Context(), zoneFilter)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+					return
+				}
+				resp.Data = results
+				resp.Msg = fmt.Sprintf("probed %d forward upstream(s)", len(results))
+			case "imr-stub-list":
+				list := imr.StubZoneList()
+				resp.Data = list
+				resp.Msg = fmt.Sprintf("%d stub zone(s) configured", len(list))
+			case "imr-stub-status":
+				st := imr.StubZoneStatus()
+				resp.Data = st
+				resp.Msg = fmt.Sprintf("%d stub zone(s) configured", len(st))
+			case "imr-stub-probe":
+				results, err := imr.ProbeStubServers(r.Context(), zoneFilter)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+					return
+				}
+				resp.Data = results
+				resp.Msg = fmt.Sprintf("probed %d stub server tuple(s)", len(results))
+			}
+
 		case "imr-show":
 			imr := Globals.ImrEngine
 			if imr == nil || imr.Cache == nil {

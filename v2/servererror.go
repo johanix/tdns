@@ -26,11 +26,14 @@ const (
 	ErrCatTransport ErrorCategory = iota + 1 // a listener/transport is not serving
 	ErrCatConfig                             // a configured input is missing/invalid
 	ErrCatOther                              // catch-all until a category is defined
+	// New categories are APPENDED so existing wire values stay stable.
+	ErrCatUpstream // a server this daemon depends on is not answering
 )
 
 var errCategoryName = map[ErrorCategory]string{
 	ErrCatTransport: "Transport",
 	ErrCatConfig:    "Config",
+	ErrCatUpstream:  "Upstream",
 	ErrCatOther:     "Other",
 }
 
@@ -47,12 +50,16 @@ const (
 	ErrSubCert        ErrorSubtype = iota + 1 // Transport: cert/key could not be loaded
 	ErrSubPort                                // Transport: a listener socket failed to bind
 	ErrSubCertMissing                         // Config: a configured cert/key file is absent
+	ErrSubImrPriming                          // Upstream: IMR init/root priming failed; the resolver is not serving
+	ErrSubImrForward                          // Upstream: one or more IMR forward upstreams are unreachable
 )
 
 var errSubtypeName = map[ErrorSubtype]string{
 	ErrSubCert:        "Cert",
 	ErrSubPort:        "Port",
 	ErrSubCertMissing: "CertMissing",
+	ErrSubImrPriming:  "ImrPriming",
+	ErrSubImrForward:  "ImrForward",
 }
 
 func (s ErrorSubtype) String() string {
@@ -191,6 +198,29 @@ func (r *ServerErrorRegistry) SetConfigCertMissing(msg string) {
 }
 func (r *ServerErrorRegistry) ClearConfigCertMissing() {
 	r.clear(ErrCatConfig, ErrSubCertMissing)
+}
+
+// Owned by ImrEngine (v2/imrengine.go). Set when InitImrEngine fails (root
+// priming could not complete), which leaves the daemon running WITHOUT its
+// DNS listeners: without this entry the only trace is one log line while the
+// process looks alive. Cleared implicitly by restart (boot-scoped, the init
+// path does not retry).
+func (r *ServerErrorRegistry) SetImrPrimingError(msg string) {
+	r.set(ErrCatUpstream, ErrSubImrPriming, msg)
+}
+func (r *ServerErrorRegistry) ClearImrPrimingError() {
+	r.clear(ErrCatUpstream, ErrSubImrPriming)
+}
+
+// Owned by the IMR forwarding path (v2/imr_forward.go). The aggregate list of
+// currently-failing forward upstreams, recomputed on every reachability
+// transition (startup probe or live query): set with the full message while
+// any upstream is failing, cleared when none is. Clear-then-reassert.
+func (r *ServerErrorRegistry) SetImrForwardUpstreamError(msg string) {
+	r.set(ErrCatUpstream, ErrSubImrForward, msg)
+}
+func (r *ServerErrorRegistry) ClearImrForwardUpstreamError() {
+	r.clear(ErrCatUpstream, ErrSubImrForward)
 }
 
 // --- config-time cert validation (parseconfig, Config/CertMissing owner) ---

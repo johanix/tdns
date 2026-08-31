@@ -751,7 +751,11 @@ func (rrcache *RRsetCacheT) IsPrimed() bool {
 	return rrcache.Primed
 }
 
-func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string, fetcher RRsetFetcher) error {
+// seedFromHints parses the root hints (file or compiled-in) and seeds the
+// cache: the ". NS" hint RRset, per-server glue, and the root ServerMap
+// entry. Offline — no queries are sent. Returns the root server map for the
+// caller's optional priming fetch.
+func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthServer, error) {
 	var data []byte
 	var err error
 	var source string
@@ -766,14 +770,14 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 	} else {
 		// Verify root hints file exists
 		if _, err := os.Stat(hintsfile); err != nil {
-			return fmt.Errorf("Root hints file %s not found: %v", hintsfile, err)
+			return nil, fmt.Errorf("Root hints file %s not found: %v", hintsfile, err)
 		}
 
 		log.Printf("PrimeWithHints: reading root hints from file %s", hintsfile)
 		// Read and parse root hints file
 		data, err = os.ReadFile(hintsfile)
 		if err != nil {
-			return fmt.Errorf("Error reading root hints file %s: %v", hintsfile, err)
+			return nil, fmt.Errorf("Error reading root hints file %s: %v", hintsfile, err)
 		}
 		source = hintsfile
 	}
@@ -822,7 +826,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 	}
 
 	if err := zp.Err(); err != nil {
-		return fmt.Errorf("Error parsing root hints from %s: %v", source, err)
+		return nil, fmt.Errorf("Error parsing root hints from %s: %v", source, err)
 	}
 
 	// Store NS records for root
@@ -844,7 +848,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 			},
 		})
 	} else {
-		return fmt.Errorf("No NS records found in root hints from %s", source)
+		return nil, fmt.Errorf("No NS records found in root hints from %s", source)
 	}
 
 	// Store root zone data
@@ -904,20 +908,45 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 	rrcache.ServerMap.Set(".", authMap)
 	rrcache.Servers.Set(".", servers)
 
+	if rrcache.Debug {
+		log.Printf("*** RRsetCache: seeded root hints from %s: %v", source, rootns)
+	}
+	return authMap, nil
+}
+
+// PrimeWithHints seeds the cache from the root hints and then upgrades the
+// hint data with a live ". NS" query through the supplied fetcher. The fetch
+// failing fails priming: an iterative resolver that cannot reach any root
+// server has nothing to iterate from. A resolver whose root is forwarded
+// should use PrimeFromHintsOnly instead.
+func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string, fetcher RRsetFetcher) error {
+	authMap, err := rrcache.seedFromHints(hintsfile)
+	if err != nil {
+		return err
+	}
 	rrset, err := fetcher(ctx, ".", dns.TypeNS, authMap) // force re-query bypassing cache (cancellable via ctx)
 	if err != nil {
 		return fmt.Errorf("Error priming RRsetCache with root hints: %v", err)
 	}
 	if rrset == nil {
-		return fmt.Errorf("No NS records found in root hints from %s", source)
-	}
-
-	if rrcache.Debug {
-		log.Printf("*** RRsetCache: primed with these roots: %v", rootns)
+		return fmt.Errorf("priming '. NS' query returned no data")
 	}
 
 	rrcache.Primed = true
 
+	return nil
+}
+
+// PrimeFromHintsOnly seeds the cache from the root hints and marks it primed
+// WITHOUT the live ". NS" upgrade fetch. For a resolver whose root is covered
+// by a forward zone: the hint-seeded root server map is never consulted (the
+// forward outranks it in every lookup), so a live fetch would add nothing but
+// a startup-time network dependency on the upstream.
+func (rrcache *RRsetCacheT) PrimeFromHintsOnly(hintsfile string) error {
+	if _, err := rrcache.seedFromHints(hintsfile); err != nil {
+		return err
+	}
+	rrcache.Primed = true
 	return nil
 }
 

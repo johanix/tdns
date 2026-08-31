@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log"
 	"math/big"
@@ -19,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -782,11 +784,12 @@ func TestForwardQueryFailover(t *testing.T) {
 	}
 }
 
-// With a "zone: ." forward, root priming must work through the upstream:
-// PrimeWithHints ends with a fetcher query for ". NS", and in a forward-all
-// deployment the delegation tree may be unreachable. The double is the only
-// server that answers, so a primed cache proves the priming query forwarded.
-func TestForwardRootPrimesThroughUpstream(t *testing.T) {
+// With a "zone: ." forward, priming must not depend on the network at all:
+// PrimeFromHintsOnly seeds the hints and marks the cache primed without the
+// live ". NS" fetch, so a forward-all resolver starts (and serves) even when
+// its upstream is down at boot. The upstream double must see NO query during
+// priming, and ordinary queries must forward afterwards.
+func TestForwardRootPrimingSkipsFetch(t *testing.T) {
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 
@@ -794,17 +797,95 @@ func TestForwardRootPrimesThroughUpstream(t *testing.T) {
 		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
 	})
 
-	if err := imr.Cache.PrimeWithHints(context.Background(), "", imr.IterativeDNSQueryFetcher()); err != nil {
-		t.Fatalf("PrimeWithHints through the forward: %v", err)
+	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
+		t.Fatalf("PrimeFromHintsOnly: %v", err)
 	}
 	if !imr.Cache.IsPrimed() {
 		t.Fatal("cache not primed")
 	}
-	seen := logr.find(".", dns.TypeNS)
-	if len(seen) == 0 {
-		t.Fatal("the priming '. NS' query never reached the upstream")
+	if seen := logr.find(".", dns.TypeNS); len(seen) != 0 {
+		t.Fatalf("hints-only priming sent a query to the upstream: %+v", seen)
 	}
-	if !seen[0].RD {
-		t.Error("priming query was not recursive (RD=0)")
+	// The hint-seeded root server map exists (FindClosestKnownZone stays
+	// well-behaved) even though forwarding will outrank it.
+	bestmatch, servers, err := imr.Cache.FindClosestKnownZone("www.example.com.")
+	if err != nil || bestmatch != "." || len(servers) == 0 {
+		t.Fatalf("root serverMap not seeded: match=%q servers=%d err=%v", bestmatch, len(servers), err)
+	}
+
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, servers, false, false)
+	if err != nil {
+		t.Fatalf("forwarded query after hints-only priming: %v", err)
+	}
+	if rcode != dns.RcodeSuccess || rrset == nil || len(rrset.RRs) != 1 {
+		t.Fatalf("rcode=%d rrset=%v", rcode, rrset)
+	}
+}
+
+// The startup probe: a dead upstream is WARNed and aggregated into the
+// Upstream/ImrForward server error (config status DEGRADED), a live one is
+// recorded reachable — and the resolver keeps serving either way. A later
+// successful exchange against a failing upstream clears the error.
+func TestProbeForwardUpstreams(t *testing.T) {
+	addr, port, _, stop := startTestUpstream(t)
+	defer stop()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: "192.0.2.9", Port: 1},
+			{Addr: addr, Port: port},
+		}},
+	})
+	imr.errorRegistry = NewServerErrorRegistry()
+	for _, up := range imr.Forwards[0].Upstreams {
+		c := up.Client.(*core.DNSClient)
+		c.Timeout = 500 * time.Millisecond
+		c.DNSClientUDP.Timeout = c.Timeout
+		c.DNSClientTCP.Timeout = c.Timeout
+	}
+
+	imr.ProbeForwardUpstreams(context.Background())
+
+	st := imr.StatusReport()
+	if len(st.ForwardZones) != 1 || len(st.ForwardZones[0].Upstreams) != 2 {
+		t.Fatalf("status report shape: %+v", st)
+	}
+	deadUp, liveUp := st.ForwardZones[0].Upstreams[0], st.ForwardZones[0].Upstreams[1]
+	if !deadUp.Unreachable || deadUp.Failures == 0 || deadUp.LastError == "" {
+		t.Errorf("dead upstream not reported unreachable: %+v", deadUp)
+	}
+	if liveUp.Unreachable || liveUp.Queries == 0 || liveUp.LastSuccess.IsZero() {
+		t.Errorf("live upstream not reported reachable: %+v", liveUp)
+	}
+
+	errs := imr.errorRegistry.List()
+	if len(errs) != 1 || errs[0].Subtype != ErrSubImrForward {
+		t.Fatalf("registry after probe = %+v, want one Upstream/ImrForward entry", errs)
+	}
+	if !strings.Contains(errs[0].Message, "192.0.2.9") {
+		t.Errorf("aggregate error does not name the dead upstream: %s", errs[0].Message)
+	}
+
+	// The resolver still serves through the live upstream despite the error.
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	if err != nil || rcode != dns.RcodeSuccess || rrset == nil {
+		t.Fatalf("query while DEGRADED: rcode=%d rrset=%v err=%v", rcode, rrset, err)
+	}
+
+	// Recovery: a successful exchange against a failing upstream clears the
+	// aggregate. Simulate by marking the live upstream failing, then letting
+	// a real forwarded query (cache bypassed via force) succeed against it.
+	imr.Forwards[0].Upstreams[0], imr.Forwards[0].Upstreams[1] =
+		imr.Forwards[0].Upstreams[1], imr.Forwards[0].Upstreams[0]
+	live := imr.Forwards[0].Upstreams[0]
+	live.recordFailure(time.Now(), fmt.Errorf("synthetic"))
+	imr.Forwards[0].Upstreams = imr.Forwards[0].Upstreams[:1] // drop the dead one
+	imr.updateForwardUpstreamError()
+
+	if _, _, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, true, false); err != nil {
+		t.Fatalf("recovery query: %v", err)
+	}
+	if errs := imr.errorRegistry.List(); len(errs) != 0 {
+		t.Errorf("registry not cleared after recovery: %+v", errs)
 	}
 }
