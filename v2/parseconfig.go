@@ -2079,6 +2079,53 @@ func (conf *Config) reloadZonesFromFile() error {
 	return nil
 }
 
+// reloadImrEngineFromFile re-reads the config file(s) and decodes just the
+// RELOADABLE half of the imrengine: block -- stubs and forward zones -- into
+// conf.Imr. Used by the zone-reload path (SIGHUP), which otherwise re-reads
+// zones and DNSSEC policy only, so a stub or forward edit needed a restart
+// (#436).
+//
+// Only those two fields are replaced. Copying the whole block would leave
+// conf.Imr advertising tuning, trust anchors and options that the running
+// resolver is NOT using -- the reload cannot apply them -- and `config
+// status` would then describe a resolver that does not exist. The mismatch is
+// reported instead, by imrRestartRequiredKeys.
+func (conf *Config) reloadImrEngineFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		// No config file (e.g. embedded use): keep the in-memory zones.
+		return nil
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	var partial struct {
+		Imr struct {
+			Stubs   []ImrStubConf    `yaml:"stubs"`
+			Forward []ImrForwardConf `yaml:"forward"`
+		} `yaml:"imrengine"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName:    "yaml",
+		Result:     &partial,
+		ZeroFields: true,
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding imrengine config: %v", err)
+	}
+
+	conf.Imr.Stubs = partial.Imr.Stubs
+	conf.Imr.Forward = partial.Imr.Forward
+	return nil
+}
+
 // reloadTsigKeysFromFile re-reads the config file and decodes just the keys:
 // block into conf.Keys. Used by reload-tsig without a full config reload.
 func (conf *Config) reloadTsigKeysFromFile() error {

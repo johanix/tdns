@@ -56,7 +56,7 @@ func TestProbeForwardUpstreamsReport(t *testing.T) {
 		{Zone: "other.example.", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
 	})
 	imr.errorRegistry = NewServerErrorRegistry()
-	for _, fz := range imr.Forwards {
+	for _, fz := range imr.ForwardZones() {
 		for _, up := range fz.Upstreams {
 			c := up.Client.(*core.DNSClient)
 			c.Timeout = 500 * time.Millisecond
@@ -128,7 +128,7 @@ func TestProbeCancellation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddStub: %v", err)
 	}
-	imr.stubZones = []string{"stub.example."}
+	imr.setZoneTable(imr.ForwardZones(), []string{"stub.example."}, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -164,7 +164,7 @@ func TestProbeCancellation(t *testing.T) {
 	if n != 0 {
 		t.Errorf("cancelled probe sent %d query(ies) upstream", n)
 	}
-	up := imr.Forwards[0].Upstreams[0]
+	up := imr.ForwardZones()[0].Upstreams[0]
 	up.mu.Lock()
 	failing, failures := up.failing, up.failures
 	up.mu.Unlock()
@@ -198,12 +198,12 @@ func TestStubListStatusProbe(t *testing.T) {
 		t.Fatalf("AddStub: %v", err)
 	}
 	imr := &Imr{
-		Cache:     c,
-		Quiet:     true,
-		stubZones: []string{zone},
+		Cache: c,
+		Quiet: true,
 		FamilyTracker: cache.NewFamilyTracker(
 			10*time.Minute, 10*time.Minute, 30*time.Second, 5),
 	}
+	imr.setZoneTable(nil, []string{zone}, nil)
 
 	// list: config view.
 	list := imr.StubZoneList()

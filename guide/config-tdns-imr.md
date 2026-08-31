@@ -166,7 +166,20 @@ DS, per zone level up to a trust anchor) are forwarded to the same upstream;
 they are issued on first contact with a zone and the validated keys are
 cached, so the burst is per zone per TTL, not per query.
 
-Like stubs, forward zones are read at startup only; there is no reload path.
+Stub and forward zones are reloadable: `tdns-cli config reload`, `tdns-cli
+config reload-zones` and SIGHUP all re-read the `imrengine:` `stubs:` and
+`forward:` blocks and apply them to the running resolver, and the reply names
+what changed (`IMR zones: forward + internal.example.; stub - old.example.`).
+A zone whose configuration is untouched keeps its live state — per-upstream
+reachability counters, per-server transport counters and address backoffs —
+so reloading one zone does not clear a DEGRADED that is still true, and the
+cache is never discarded. A forward table that fails validation is refused
+whole: the running one is left exactly as it was and the reply says so.
+
+The rest of `imrengine:` is not reloadable — trust anchors, tuning, options,
+root hints and logging are consumed once at startup. Editing one of those and
+reloading reports it (`restart required for imrengine.tuning`) rather than
+silently ignoring it.
 
 Startup behaviour: when a forward zone covers the root, the live `. NS`
 priming fetch is skipped — the hints are seeded offline and the cache is

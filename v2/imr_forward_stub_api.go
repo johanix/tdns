@@ -58,16 +58,12 @@ func (imr *Imr) ForwardZoneList() []ImrForwardZoneInfo {
 		return nil
 	}
 	var out []ImrForwardZoneInfo
-	for _, fz := range imr.Forwards {
+	for _, fz := range imr.ForwardZones() {
 		info := ImrForwardZoneInfo{Zone: fz.Zone, TrustAD: fz.TrustAD}
 		for _, up := range fz.Upstreams {
-			tlsName := ""
-			if c, ok := up.Client.(*core.DNSClient); ok && c.TLSConfig != nil {
-				tlsName = c.TLSConfig.ServerName
-			}
 			info.Upstreams = append(info.Upstreams, ImrForwardUpstreamInfo{
 				Upstream:      up.Label,
-				TLSServerName: tlsName,
+				TLSServerName: up.TLSServerName,
 				Insecure:      up.Insecure,
 			})
 		}
@@ -79,11 +75,12 @@ func (imr *Imr) ForwardZoneList() []ImrForwardZoneInfo {
 // forwardZonesMatching returns the forward zones selected by zoneFilter
 // ("" = all), or an error naming the filter when nothing matches.
 func (imr *Imr) forwardZonesMatching(zoneFilter string) ([]*ForwardZone, error) {
+	forwards := imr.ForwardZones()
 	if zoneFilter == "" {
-		return imr.Forwards, nil
+		return forwards, nil
 	}
 	zf := dns.Fqdn(core.CanonicalizeName(zoneFilter))
-	for _, fz := range imr.Forwards {
+	for _, fz := range forwards {
 		if fz.Zone == zf {
 			return []*ForwardZone{fz}, nil
 		}
@@ -225,11 +222,12 @@ type ImrStubProbeResult struct {
 // stubZonesMatching returns the configured stub zones selected by zoneFilter
 // ("" = all), or an error naming the filter when nothing matches.
 func (imr *Imr) stubZonesMatching(zoneFilter string) ([]string, error) {
+	stubs := imr.StubZones()
 	if zoneFilter == "" {
-		return imr.stubZones, nil
+		return stubs, nil
 	}
 	zf := dns.Fqdn(core.CanonicalizeName(zoneFilter))
-	for _, sz := range imr.stubZones {
+	for _, sz := range stubs {
 		if sz == zf {
 			return []string{sz}, nil
 		}
@@ -265,7 +263,7 @@ func (imr *Imr) StubZoneList() []ImrStubZoneInfo {
 		return nil
 	}
 	var out []ImrStubZoneInfo
-	for _, zone := range imr.stubZones {
+	for _, zone := range imr.StubZones() {
 		info := ImrStubZoneInfo{Zone: zone}
 		for _, server := range imr.stubServers(zone) {
 			info.Servers = append(info.Servers, ImrStubServerInfo{
@@ -287,7 +285,7 @@ func (imr *Imr) StubZoneStatus() []ImrStubZoneStatus {
 	}
 	now := time.Now()
 	var out []ImrStubZoneStatus
-	for _, zone := range imr.stubZones {
+	for _, zone := range imr.StubZones() {
 		zs := ImrStubZoneStatus{Zone: zone}
 		for _, server := range imr.stubServers(zone) {
 			ts := server.SnapshotTransportStats()

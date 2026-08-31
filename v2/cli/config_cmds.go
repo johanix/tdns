@@ -125,6 +125,9 @@ func renderImrStatus(st *tdns.ImrStatus) {
 		}
 	}
 	fmt.Printf("IMR: %s\n", primed)
+	if !st.ZonesLoadedAt.IsZero() {
+		fmt.Printf("IMR: stub/forward zones loaded at %s\n", st.ZonesLoadedAt.Format(tdns.TimeLayout))
+	}
 	if len(st.StubZones) > 0 {
 		fmt.Printf("IMR: stub zones: %s\n", strings.Join(st.StubZones, ", "))
 	}

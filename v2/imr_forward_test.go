@@ -208,7 +208,8 @@ func TestForwardZoneFor(t *testing.T) {
 	// foo.bar. is deliberately BOTH a stub and a forward zone: equal
 	// specificity means the forward wins — a stub overrides only when it is
 	// strictly more specific.
-	imr := &Imr{Forwards: forwards, stubZones: []string{"internal.example.", "deep.sub.foo.bar.", "foo.bar."}}
+	imr := &Imr{}
+	imr.setZoneTable(forwards, []string{"internal.example.", "deep.sub.foo.bar.", "foo.bar."}, nil)
 
 	cases := []struct {
 		qname string
@@ -554,11 +555,12 @@ func newForwardTestImr(t *testing.T, conf []ImrForwardConf) *Imr {
 		t.Fatalf("BuildImrForwards: %v", err)
 	}
 	lg := log.New(os.Stderr, "test", log.LstdFlags)
-	return &Imr{
-		Cache:    cache.NewRRsetCache(lg, false, false),
-		Quiet:    true,
-		Forwards: forwards,
+	imr := &Imr{
+		Cache: cache.NewRRsetCache(lg, false, false),
+		Quiet: true,
 	}
+	imr.setZoneTable(forwards, nil, nil)
+	return imr
 }
 
 // ----- end-to-end tests -----
@@ -577,7 +579,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 			{Addr: addr, Port: port, Transport: "dot", TLSServerName: "dns.test.example"},
 		}},
 	})
-	trustUpstreamCert(t, imr.Forwards[0], pool)
+	trustUpstreamCert(t, imr.ForwardZones()[0], pool)
 	ctx := context.Background()
 
 	// Positive answer, via the real entry point so the forward hook in
@@ -698,7 +700,7 @@ func TestForwardQueryDoH(t *testing.T) {
 			{Addr: addr, Port: port, Transport: "doh"},
 		}},
 	})
-	trustUpstreamCert(t, imr.Forwards[0], pool)
+	trustUpstreamCert(t, imr.ForwardZones()[0], pool)
 
 	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
 	if err != nil {
@@ -724,7 +726,7 @@ func TestForwardQueryDoQ(t *testing.T) {
 			{Addr: addr, Port: port, Transport: "doq", TLSServerName: "dns.test.example"},
 		}},
 	})
-	trustUpstreamCert(t, imr.Forwards[0], pool)
+	trustUpstreamCert(t, imr.ForwardZones()[0], pool)
 
 	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
 	if err != nil {
@@ -753,7 +755,7 @@ func TestForwardQueryFailover(t *testing.T) {
 			{Addr: addr, Port: port},
 		}},
 	})
-	for _, up := range imr.Forwards[0].Upstreams {
+	for _, up := range imr.ForwardZones()[0].Upstreams {
 		c := up.Client.(*core.DNSClient)
 		c.Timeout = 500 * time.Millisecond
 		c.DNSClientUDP.Timeout = c.Timeout
@@ -771,7 +773,7 @@ func TestForwardQueryFailover(t *testing.T) {
 	dead := newForwardTestImr(t, []ImrForwardConf{
 		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.9", Port: 1}}},
 	})
-	c := dead.Forwards[0].Upstreams[0].Client.(*core.DNSClient)
+	c := dead.ForwardZones()[0].Upstreams[0].Client.(*core.DNSClient)
 	c.Timeout = 500 * time.Millisecond
 	c.DNSClientUDP.Timeout = c.Timeout
 	c.DNSClientTCP.Timeout = c.Timeout
@@ -837,7 +839,7 @@ func TestProbeForwardUpstreams(t *testing.T) {
 		}},
 	})
 	imr.errorRegistry = NewServerErrorRegistry()
-	for _, up := range imr.Forwards[0].Upstreams {
+	for _, up := range imr.ForwardZones()[0].Upstreams {
 		c := up.Client.(*core.DNSClient)
 		c.Timeout = 500 * time.Millisecond
 		c.DNSClientUDP.Timeout = c.Timeout
@@ -875,11 +877,11 @@ func TestProbeForwardUpstreams(t *testing.T) {
 	// Recovery: a successful exchange against a failing upstream clears the
 	// aggregate. Simulate by marking the live upstream failing, then letting
 	// a real forwarded query (cache bypassed via force) succeed against it.
-	imr.Forwards[0].Upstreams[0], imr.Forwards[0].Upstreams[1] =
-		imr.Forwards[0].Upstreams[1], imr.Forwards[0].Upstreams[0]
-	live := imr.Forwards[0].Upstreams[0]
+	imr.ForwardZones()[0].Upstreams[0], imr.ForwardZones()[0].Upstreams[1] =
+		imr.ForwardZones()[0].Upstreams[1], imr.ForwardZones()[0].Upstreams[0]
+	live := imr.ForwardZones()[0].Upstreams[0]
 	live.recordFailure(time.Now(), fmt.Errorf("synthetic"))
-	imr.Forwards[0].Upstreams = imr.Forwards[0].Upstreams[:1] // drop the dead one
+	imr.ForwardZones()[0].Upstreams = imr.ForwardZones()[0].Upstreams[:1] // drop the dead one
 	imr.updateForwardUpstreamError()
 
 	if _, _, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, true, false); err != nil {
