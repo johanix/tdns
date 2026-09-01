@@ -561,6 +561,17 @@ type ImrUpstreamConf struct {
 	// (lab setups with self-signed certificates). Only meaningful for
 	// dot/doh/doq.
 	Insecure bool `yaml:"insecure" mapstructure:"insecure"`
+	// CAFile is the trust anchor this upstream's certificate is verified
+	// against, replacing the host's system trust store for this upstream
+	// only. Only meaningful for dot/doh/doq.
+	//
+	// Unset is not "no verification" -- it leaves tls.Config.RootCAs nil,
+	// which is the system store. That remains the right answer when the
+	// upstream has a publicly-issued certificate; ca-file is for the case
+	// the system store cannot cover, a private CA, without making the whole
+	// machine trust it. Same spelling as PeerConf.CAFile, deliberately:
+	// this is the same question asked of a different kind of peer.
+	CAFile string `yaml:"ca-file" mapstructure:"ca-file"`
 }
 
 type ApiServerConf struct {

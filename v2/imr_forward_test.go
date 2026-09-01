@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -1164,5 +1165,71 @@ func TestExchangeDoQCancelIsNotLoggedAsFailure(t *testing.T) {
 	}
 	if got := buf.String(); !strings.Contains(got, "DoQ failed") {
 		t.Errorf("a timed-out DoQ query logged nothing; the suppression is too broad:\n%s", got)
+	}
+}
+
+// TestBuildImrForwardsCAFile covers the ca-file trust anchor on a forward
+// upstream: it is parsed at build time, it lands in RootCAs, and the two
+// configurations that cannot mean anything are refused.
+//
+// The positive case asserts RootCAs is non-nil rather than comparing pools.
+// x509.CertPool has no comparison worth making, and the property under test is
+// "this upstream stopped using the system store", which nil/non-nil says
+// exactly. That the pool contains the right anchor is loadCAPool's contract and
+// is covered where that is tested.
+func TestBuildImrForwardsCAFile(t *testing.T) {
+	dir := t.TempDir()
+
+	ca, err := CreateCA(CAOptions{Name: "test-ca", Alg: CertAlgEd25519})
+	if err != nil {
+		t.Fatalf("CreateCA: %v", err)
+	}
+	caFile := filepath.Join(dir, "test-ca.crt")
+	if err := os.WriteFile(caFile, ca.CertPEM, 0o644); err != nil {
+		t.Fatalf("write ca-file: %v", err)
+	}
+	notPEM := filepath.Join(dir, "garbage.crt")
+	if err := os.WriteFile(notPEM, []byte("this is not a certificate\n"), 0o644); err != nil {
+		t.Fatalf("write garbage: %v", err)
+	}
+
+	forwards, err := BuildImrForwards([]ImrForwardConf{
+		{Zone: ".", Upstreams: []ImrUpstreamConf{
+			{Addr: "192.0.2.1", Transport: "dot", TLSServerName: "dns.example.", CAFile: caFile},
+			{Addr: "192.0.2.2", Transport: "dot", TLSServerName: "dns.example."},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildImrForwards with ca-file: %v", err)
+	}
+	withCA := forwards[0].Upstreams[0].Client.(*core.DNSClient)
+	if withCA.TLSConfig == nil || withCA.TLSConfig.RootCAs == nil {
+		t.Errorf("ca-file upstream: RootCAs is nil, want the configured anchor")
+	}
+	// The companion upstream is the control: no ca-file must still mean the
+	// system store, which is what makes ca-file a per-upstream choice rather
+	// than a global one.
+	withoutCA := forwards[0].Upstreams[1].Client.(*core.DNSClient)
+	if withoutCA.TLSConfig == nil || withoutCA.TLSConfig.RootCAs != nil {
+		t.Errorf("upstream without ca-file: RootCAs = %v, want nil (system store)", withoutCA.TLSConfig.RootCAs)
+	}
+
+	bad := []struct {
+		name string
+		conf []ImrForwardConf
+	}{
+		{"ca-file on do53", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{
+			{Addr: "192.0.2.1", CAFile: caFile}}}}},
+		{"ca-file with insecure", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{
+			{Addr: "192.0.2.1", Transport: "dot", CAFile: caFile, Insecure: true}}}}},
+		{"ca-file that does not exist", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{
+			{Addr: "192.0.2.1", Transport: "dot", CAFile: filepath.Join(dir, "absent.crt")}}}}},
+		{"ca-file with no certificate in it", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{
+			{Addr: "192.0.2.1", Transport: "dot", CAFile: notPEM}}}}},
+	}
+	for _, b := range bad {
+		if _, err := BuildImrForwards(b.conf); err == nil {
+			t.Errorf("%s: accepted, want an error", b.name)
+		}
 	}
 }
