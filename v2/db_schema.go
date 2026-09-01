@@ -338,9 +338,15 @@ UNIQUE (keyname)
 	)`,
 
 	// Certificate credentials for the DSYNC API scheme. A separate table
-	// because there is no column-migration machinery, and because a
-	// certificate credential has neither a key hash nor a username: the
-	// identity is a pin or a DNS name, keyed with the mechanism.
+	// rather than added columns on DsyncApiCredential -- not because columns
+	// cannot be added (dbMigrateSchema does exactly that, see the
+	// ZonePolicyOverride note above), but because that table's constraints are
+	// what make it correct for a BEARER credential: keyhash NOT NULL and
+	// UNIQUE (parentzone, username). A certificate credential has neither a key
+	// hash nor a username -- its identity is a pin or a DNS name and its
+	// natural key is (parentzone, authmech, identity) -- so reusing the table
+	// would mean relaxing NOT NULL, which SQLite cannot do in place, and
+	// carrying a uniqueness constraint that does not describe the new rows.
 	//
 	// identity is canonicalised (core.CanonicalizeName) for tls-pkix and
 	// stored verbatim for tls-pin (standard-encoding base64 SPKI SHA-256).

@@ -1,6 +1,10 @@
 # DSYNC API client certificates: implementation plan
 
 **Status:** implemented. Base was `main` @ `404e03b3`.
+**Revision 3**: D4 and §2 no longer claim there is no column-migration
+machinery — there is (`dbMigrateSchema`, `v2/db.go:197`), and the separate table
+rests on the constraint mismatch alone. Caught by
+`reviews/2026-09-01-tdns-PR467-dsync-api-client-cert-auth-review.md`, finding 3.
 **Revision 2**, incorporating `reviews/2026-09-01-dsync-api-client-cert-auth-plan-review.md`.
 Changes from rev 1: `tls-dane` deferred (§7); identity resolution for `tls-pkix`
 specified (D2); D8 restored, having been lost to a bad edit in rev 1; the
@@ -48,16 +52,21 @@ stating because most of them are one careless line away from being violated.
   `CertificateRequest`. (Rev 1 said the request was always sent and harmless
   because conforming clients ignore it. True, but it is still an observable
   handshake change that some stacks log, and there is no reason to take it.)
+  **Changing `client-auth` after start needs a restart.** Reload updates the
+  middleware from the live block; the running listener's `TLSConfig` does not
+  follow. A mismatch is warned at reload.
 - **Verification happens at use, not at handshake.** This is the house pattern,
   stated at the head of `v2/downstream_auth.go`: the listener "merely REQUESTS a
   client certificate and verifies nothing", and enforcement happens later, per
   matched entry. Same here.
 - **Basic auth decides whenever an `Authorization` header is present** —
   including when it is wrong, and including when it is not Basic at all. See D5.
-- **No schema migration.** `v2/db_schema.go` creates tables with
-  `CREATE TABLE IF NOT EXISTS` and has no column-migration machinery, so an
-  added column would silently not exist on any established database. New table
-  only. See D4.
+- **No schema change to the bearer table.** `DsyncApiCredential` is not
+  widened to carry certificate credentials; they get their own table. Not for
+  want of migration machinery — `dbMigrateSchema` (`v2/db.go:197`) adds columns
+  to established databases and is the normal way to do that here — but because
+  the constraints that make the bearer table correct are wrong for a certificate
+  credential. See D4.
 - **`allow-insecure` semantics are untouched.** See §7.
 
 ## 3. Design decisions
@@ -102,8 +111,14 @@ row differently, and only `tls-pin` is a pure function of the leaf:
                   row, ok  := lookup(zone, "tls-pkix", identity)
                   if !ok { continue }
                   if verifyClientCertPKIX(leaf, presented, caFile, identity) == nil {
-                      return row          -- first VERIFIED hit wins
+                      if !row.Usable() { continue }   -- disabled/expired is not a hit
+                      return row                      -- first VERIFIED usable hit wins
                   }
+
+A missing, disabled, or expired row is not a hit: the walk continues to the
+next SAN, then the next configured mechanism. Disabling a pin while a pkix row
+for the same certificate is live must not lock the child out. A real lookup
+error still aborts.
 
 `leaf.Subject.CommonName` is never consulted. `pki.go:170-171` sets `CommonName`
 and `DNSNames` as separate fields, and Go's `VerifyHostname` matches on SANs
@@ -166,10 +181,21 @@ warning, matching `validateDownstreamAuth` (`:291`).
         UNIQUE (parentzone, authmech, identity)
     )`
 
-A separate table rather than nullable columns on `DsyncApiCredential`, for the
-reason in §2: no migration machinery exists. It is also honest — `keyhash NOT
-NULL` and `UNIQUE (parentzone, username)` describe a bearer credential, and a
-certificate credential has neither a key hash nor a username.
+A separate table rather than nullable columns on `DsyncApiCredential`.
+
+Not because columns cannot be added: `dbMigrateSchema` (`v2/db.go:197`) applies
+idempotent `ALTER TABLE … ADD COLUMN` migrations at startup, and `db_schema.go`
+already documents that path for `ZonePolicyOverride`. (Rev 2 of this plan claimed
+no such machinery existed. It was wrong, and the claim reached a code comment
+before the PR #467 review caught it.)
+
+The reason is that the bearer table's constraints are the wrong shape here.
+`keyhash NOT NULL` and `UNIQUE (parentzone, username)` are what make that table
+correct for a bearer credential; a certificate credential has neither a key hash
+nor a username, and its natural key is `(parentzone, authmech, identity)`. Reusing
+the table would mean relaxing `NOT NULL` — which SQLite cannot do in place, so it
+is a table rebuild, not a migration — and carrying a uniqueness constraint that
+does not describe the new rows.
 
 `identity` is canonicalised with `core.CanonicalizeName` for `tls-pkix`, for
 exactly the reason spelled out at `dsync_api_credentials.go:105-109` —

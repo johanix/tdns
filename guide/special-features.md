@@ -473,7 +473,10 @@ tdns-cli auth dsync-api cert-credential add \
 
 `credential list` and `cert-credential list` show both kinds. The child
 configures a nested `tls:` block instead of `username`/`key`. The parent
-opts in with `delegationsync.parent.api.client-auth`.
+opts in with `delegationsync.parent.api.client-auth`. Enabling or
+disabling that block changes the TLS handshake and needs a process
+restart; a config reload updates the middleware but not the
+`CertificateRequest`.
 
 `add` generates the key, prints it **once**, and stores only
 a hash. There is no way to read it back; if it is lost,

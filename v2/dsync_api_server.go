@@ -10,12 +10,35 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
+
+var (
+	// dsyncApiListenerUp is true while StartDsyncApiListener is blocked in
+	// its serve loop. TLSConfig is fixed at that point; a reload that
+	// changes client-auth cannot rebuild the handshake.
+	dsyncApiListenerUp atomic.Bool
+	// dsyncApiListenerHandshakeRequestsCert is what the running listener
+	// was built with, not the live config.
+	dsyncApiListenerHandshakeRequestsCert atomic.Bool
+)
+
+func warnDsyncApiClientAuthReload(configured bool) {
+	if !dsyncApiClientAuthReloadMismatch(configured) {
+		return
+	}
+	lgConfig.Warn("delegationsync.parent.api.client-auth changed but the DSYNC API listener does not rebuild on reload; restart for the new handshake to take effect",
+		"configured", configured, "listener_requests_client_cert", dsyncApiListenerHandshakeRequestsCert.Load())
+}
+
+func dsyncApiClientAuthReloadMismatch(configured bool) bool {
+	return dsyncApiListenerUp.Load() && configured != dsyncApiListenerHandshakeRequestsCert.Load()
+}
 
 var lgDsyncApi = Logger("dsync-api")
 
@@ -94,8 +117,9 @@ func (conf *Config) StartDsyncApiListener(ctx context.Context, router *mux.Route
 	}
 
 	servers := make([]*http.Server, 0, len(api.Listen))
+	requestCert := api.ClientAuth.Enabled()
 	var tlsConfig *tls.Config
-	if api.ClientAuth.Enabled() {
+	if requestCert {
 		// Request, never require: a bearer client that presents no certificate
 		// must still complete the handshake. Installed only when client-auth
 		// is configured, so an unconfigured listener does not send a
@@ -105,6 +129,9 @@ func (conf *Config) StartDsyncApiListener(ctx context.Context, router *mux.Route
 			MinVersion: tls.VersionTLS12,
 		}
 	}
+	dsyncApiListenerHandshakeRequestsCert.Store(requestCert)
+	dsyncApiListenerUp.Store(true)
+	defer dsyncApiListenerUp.Store(false)
 	for _, addr := range api.Listen {
 		srv := &http.Server{
 			Addr:              addr,
@@ -180,6 +207,12 @@ type dsyncApiPrincipalKey struct{}
 
 // dsyncApiAuthMiddleware authenticates the request.
 //
+// The parent zone has to be resolved before the credential can be looked up --
+// credentials are scoped to one parent -- so the order is: find the zone,
+// then authenticate, then (in the handler) authorize. Zone existence is
+// therefore visible to an unauthenticated caller, which is fine: it is visible
+// in the DNS too.
+//
 // An Authorization header, whatever it contains, selects the Basic path and
 // that path decides: a non-Basic header is a 401, not a fallthrough to a
 // client certificate. The certificate path runs only when the header is
@@ -200,7 +233,7 @@ func dsyncApiAuthMiddleware(kdb *KeyDB) mux.MiddlewareFunc {
 			}
 
 			var cred *DsyncApiCredential
-			if r.Header.Get("Authorization") != "" {
+			if len(r.Header.Values("Authorization")) > 0 {
 				user, key, ok := r.BasicAuth()
 				if !ok {
 					w.Header().Set("WWW-Authenticate",
@@ -210,6 +243,9 @@ func dsyncApiAuthMiddleware(kdb *KeyDB) mux.MiddlewareFunc {
 				}
 				cred, err = kdb.VerifyDsyncApiCredential(zd.ZoneName, user, key)
 				if err != nil {
+					// Logged with the username, answered without one. The store
+					// returns the same error for unknown/wrong/disabled/expired,
+					// and that must not leak into the response.
 					lgDsyncApi.Warn("DSYNC API authentication failed",
 						"zone", zd.ZoneName, "child", child, "user", user, "from", r.RemoteAddr)
 					dsyncApiError(w, http.StatusUnauthorized, "")

@@ -71,13 +71,14 @@ func validDsyncApiCertMech(mech string) bool {
 }
 
 // validDsyncApiSPKIPin reports whether s is the house pin format: 44 characters
-// of standard-encoding base64 of a SHA-256 digest. Hex, URL-safe, and unpadded
-// spellings are refused — pinMatches compares the base64 string, not the bytes.
+// of canonical standard-encoding base64 of a SHA-256 digest. Hex, URL-safe,
+// unpadded, and non-canonical padding-bit spellings are refused — pinMatches
+// compares the base64 string, not the bytes.
 func validDsyncApiSPKIPin(s string) bool {
 	if len(s) != 44 {
 		return false
 	}
-	b, err := base64.StdEncoding.DecodeString(s)
+	b, err := base64.StdEncoding.Strict().DecodeString(s)
 	return err == nil && len(b) == sha256.Size
 }
 

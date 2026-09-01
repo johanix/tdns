@@ -51,7 +51,9 @@ func authenticateDsyncApiClientCertMech(kdb *KeyDB, zone, mech string, leaf *x50
 			lgDsyncApi.Warn("DSYNC API certificate credential refused",
 				"zone", zone, "mech", mech, "identity", row.Identity,
 				"disabled", row.Disabled, "expired", row.Expired(time.Now()))
-			return nil, fmt.Errorf("authentication failed")
+			// Not a hit: try the next mechanism. A disabled pin must not
+			// lock out a live pkix row for the same certificate.
+			return nil, nil
 		}
 		cred := row.asDsyncApiCredential()
 		return &cred, nil
@@ -75,7 +77,7 @@ func authenticateDsyncApiClientCertMech(kdb *KeyDB, zone, mech string, leaf *x50
 				lgDsyncApi.Warn("DSYNC API certificate credential refused",
 					"zone", zone, "mech", mech, "identity", row.Identity,
 					"disabled", row.Disabled, "expired", row.Expired(time.Now()))
-				return nil, fmt.Errorf("authentication failed")
+				continue
 			}
 			cred := row.asDsyncApiCredential()
 			return &cred, nil

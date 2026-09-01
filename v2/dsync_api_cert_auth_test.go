@@ -282,6 +282,25 @@ func TestDsyncApiCertAuth_Additivity(t *testing.T) {
 			t.Errorf("401 body %q, want empty", body)
 		}
 	})
+
+	t.Run("empty Authorization header plus valid cert is 401", func(t *testing.T) {
+		setDsyncApiClientAuth(t, &DsyncApiClientAuthConf{
+			Mechanisms: []string{DsyncApiAuthTLSPin},
+			CAFile:     caFile,
+		})
+		srv := dsyncApiCertAuthServer(t, kdb, true)
+		client := dsyncApiAuthClient(t, srv, &clientCert)
+		resp := dsyncApiGet(t, client, srv, "child1.example.", func(r *http.Request) {
+			r.Header.Set("Authorization", "")
+		})
+		body := readAuthBody(t, resp)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("status %d body %q, want 401", resp.StatusCode, body)
+		}
+		if body != "" {
+			t.Errorf("401 body %q, want empty", body)
+		}
+	})
 }
 
 func TestDsyncApiCertAuth_PinAndPkix(t *testing.T) {
@@ -415,6 +434,34 @@ func TestDsyncApiCertAuth_IdentityResolution(t *testing.T) {
 			t.Fatalf("failed chain authenticated: status %d body %q", resp.StatusCode, body)
 		}
 	})
+
+	t.Run("disabled tls-pin does not block a live tls-pkix row", func(t *testing.T) {
+		setDsyncApiClientAuth(t, &DsyncApiClientAuthConf{
+			Mechanisms: []string{DsyncApiAuthTLSPin, DsyncApiAuthTLSPkix},
+			CAFile:     caFile,
+		})
+		kdb := newTestKeyDB(t)
+		cert, leaf := mintTestClientLeaf(t, ca, caKey, []string{"child1.example"}, "cn")
+		if err := kdb.AddDsyncApiCertCredential("example.", DsyncApiAuthTLSPin, SPKISHA256(leaf), "child1.example.", "", time.Time{}); err != nil {
+			t.Fatalf("add pin: %v", err)
+		}
+		if _, err := kdb.SetDsyncApiCertCredentialDisabled("example.", DsyncApiAuthTLSPin, SPKISHA256(leaf), true); err != nil {
+			t.Fatalf("disable pin: %v", err)
+		}
+		if err := kdb.AddDsyncApiCertCredential("example.", DsyncApiAuthTLSPkix, "child1.example.", "child1.example.", "", time.Time{}); err != nil {
+			t.Fatalf("add pkix: %v", err)
+		}
+		srv := dsyncApiCertAuthServer(t, kdb, true)
+		client := dsyncApiAuthClient(t, srv, &cert)
+		resp := dsyncApiGet(t, client, srv, "child1.example.", nil)
+		body := readAuthBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("disabled pin blocked pkix: status %d body %q", resp.StatusCode, body)
+		}
+		if body != DsyncApiAuthTLSPkix+" child1.example." {
+			t.Errorf("body = %q, want tls-pkix", body)
+		}
+	})
 }
 
 func TestDsyncApiCertAuth_DisabledExpiredIndistinguishable(t *testing.T) {
@@ -519,16 +566,34 @@ func TestDsyncApiListenerClientAuthHandshake(t *testing.T) {
 		return false, last
 	}
 
+	// startListener runs StartDsyncApiListener and waits for it to return after
+	// the subtest, matching TestDsyncApiListenerBlocksUntilShutdown. Cancel is
+	// enough; the stop channel is only there because the signature requires it.
+	startListener := func(t *testing.T, conf *Config, router *mux.Router) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		stop := make(chan struct{})
+		done := make(chan error, 1)
+		go func() { done <- conf.StartDsyncApiListener(ctx, router, stop) }()
+		t.Cleanup(func() {
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("listener: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Error("StartDsyncApiListener did not return")
+			}
+		})
+	}
+
 	t.Run("7 client-auth unset sends no CertificateRequest", func(t *testing.T) {
 		conf, router, ok := dsyncApiTestListener(t)
 		if !ok {
 			t.Skip("no test certificate available")
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		stop := make(chan struct{})
-		defer close(stop)
-		go func() { _ = conf.StartDsyncApiListener(ctx, router, stop) }()
+		startListener(t, conf, router)
 
 		addr := conf.DelegationSync.Parent.Api.Listen[0]
 		requested, err := handshake(t, addr, rootsFromConf(t, conf))
@@ -550,11 +615,7 @@ func TestDsyncApiListenerClientAuthHandshake(t *testing.T) {
 		}
 		SetDelegationSyncConfig(conf.DelegationSync)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		stop := make(chan struct{})
-		defer close(stop)
-		go func() { _ = conf.StartDsyncApiListener(ctx, router, stop) }()
+		startListener(t, conf, router)
 
 		addr := conf.DelegationSync.Parent.Api.Listen[0]
 		requested, err := handshake(t, addr, rootsFromConf(t, conf))
@@ -565,4 +626,35 @@ func TestDsyncApiListenerClientAuthHandshake(t *testing.T) {
 			t.Fatal("configured listener did not send a CertificateRequest")
 		}
 	})
+}
+
+func TestDsyncApiClientAuthReloadWarnsWhenHandshakeDisagrees(t *testing.T) {
+	prevUp := dsyncApiListenerUp.Load()
+	prevReq := dsyncApiListenerHandshakeRequestsCert.Load()
+	t.Cleanup(func() {
+		dsyncApiListenerUp.Store(prevUp)
+		dsyncApiListenerHandshakeRequestsCert.Store(prevReq)
+	})
+
+	dsyncApiListenerUp.Store(false)
+	dsyncApiListenerHandshakeRequestsCert.Store(false)
+	if dsyncApiClientAuthReloadMismatch(true) {
+		t.Fatal("no running listener is not a mismatch")
+	}
+
+	dsyncApiListenerUp.Store(true)
+	if !dsyncApiClientAuthReloadMismatch(true) {
+		t.Fatal("enabling client-auth against a certless listener must be a mismatch")
+	}
+	if dsyncApiClientAuthReloadMismatch(false) {
+		t.Fatal("config matching the certless listener is not a mismatch")
+	}
+
+	dsyncApiListenerHandshakeRequestsCert.Store(true)
+	if !dsyncApiClientAuthReloadMismatch(false) {
+		t.Fatal("disabling client-auth against a requesting listener must be a mismatch")
+	}
+	if dsyncApiClientAuthReloadMismatch(true) {
+		t.Fatal("config matching the requesting listener is not a mismatch")
+	}
 }

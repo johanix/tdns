@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,31 @@ func TestDsyncApiCertCredentialPinFormatRefused(t *testing.T) {
 	err = kdb.AddDsyncApiCertCredential("example.", "tls-pin", "short", "child1.example.", "", time.Time{})
 	if err == nil {
 		t.Fatal("a short pin was accepted")
+	}
+
+	_, parsed := newTestTLSCert(t, []string{"child1.example"}, nil)
+	pin := SPKISHA256(parsed)
+	if !validDsyncApiSPKIPin(pin) {
+		t.Fatalf("house pin %q rejected", pin)
+	}
+	// 32-byte digest → last data character has two unused bits, which canonical
+	// encoding leaves zero. Bumping the alphabet index by one still decodes to
+	// the same 32 bytes, but Strict() refuses it, and pinMatches would never
+	// match SPKISHA256's canonical spelling.
+	const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	idx := strings.IndexByte(alpha, pin[42])
+	if idx < 0 || idx+1 >= len(alpha) {
+		t.Fatalf("cannot bump last data char %q of %q", pin[42], pin)
+	}
+	nonCanon := pin[:42] + string(alpha[idx+1]) + "="
+	if _, err := base64.StdEncoding.DecodeString(nonCanon); err != nil {
+		t.Fatalf("non-canonical %q must still decode: %v", nonCanon, err)
+	}
+	if validDsyncApiSPKIPin(nonCanon) {
+		t.Fatal("non-canonical trailing bits were accepted")
+	}
+	if err := kdb.AddDsyncApiCertCredential("example.", "tls-pin", nonCanon, "child1.example.", "", time.Time{}); err == nil {
+		t.Fatal("a non-canonical pin was stored")
 	}
 }
 

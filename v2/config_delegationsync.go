@@ -313,6 +313,10 @@ type DsyncApiSchemeConf struct {
 	// ClientAuth is the optional client-certificate path on this listener.
 	// Absent (nil) means the feature is off: no CertificateRequest, and the
 	// middleware never looks at a presented certificate.
+	//
+	// The handshake is fixed when the listener starts. Reload updates the
+	// middleware from the live block, but does not send (or stop sending) a
+	// CertificateRequest; a change here needs a restart.
 	ClientAuth *DsyncApiClientAuthConf `yaml:"client-auth" mapstructure:"client-auth"`
 }
 
