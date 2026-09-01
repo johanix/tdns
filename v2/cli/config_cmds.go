@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/johanix/tdns/v2"
 	"github.com/spf13/cobra"
@@ -125,6 +126,19 @@ func renderImrStatus(st *tdns.ImrStatus) {
 		}
 	}
 	fmt.Printf("IMR: %s\n", primed)
+
+	// The line that matters when a resolver has stopped resolving. "primed at
+	// <boot>" is about the past; this is about whether an iteration can still
+	// be started at all.
+	if st.RootNSPresent {
+		left := time.Until(st.RootNSExpires).Round(time.Second)
+		fmt.Printf("IMR: root NS: %d server(s), expires %s (in %s)\n",
+			st.RootNSCount, st.RootNSExpires.Format(tdns.TimeLayout), left)
+	} else {
+		fmt.Printf("IMR: root NS: ABSENT -- iteration cannot start;" +
+			" every uncached name will SERVFAIL\n")
+	}
+
 	if !st.ZonesLoadedAt.IsZero() {
 		fmt.Printf("IMR: stub/forward zones loaded at %s\n", st.ZonesLoadedAt.Format(tdns.TimeLayout))
 	}
