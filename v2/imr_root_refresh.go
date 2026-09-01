@@ -8,6 +8,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/johanix/tdns/v2/cache"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -82,7 +84,7 @@ func (imr *Imr) RefreshRoot(ctx context.Context, hintsfile string) {
 
 		default:
 			// Inside the lead window: refresh from the roots we still have.
-			if imr.refreshRootFromLiveRoots(ctx) {
+			if imr.refreshRootFromLiveRoots(ctx, imr.rootNSQuery) {
 				wait = 0 // re-read the new expiry on the next pass
 			} else {
 				wait = rootRefreshRetry
@@ -101,13 +103,46 @@ func (imr *Imr) RefreshRoot(ctx context.Context, hintsfile string) {
 	}
 }
 
+// rootNSQuery issues the actual ". NS" query for a refresh.
+//
+// force=true, and that is the entire point. IterativeDNSQueryFetcher passes
+// force=false, and IterativeDNSQuery with force=false returns a cached
+// ContextAnswer without touching the network:
+//
+//	if !force {
+//	    crrset := imr.Cache.Get(qname, qtype)
+//	    switch crrset.Context {
+//	    case cache.ContextAnswer, ...:  return crrset.RRset, ...
+//
+// The refresher runs only while the current RRset is still VALID -- that is
+// what the 60s lead is for -- so with force=false it read back the very entry
+// it was trying to replace, saw the expiry had not moved, treated that as
+// failure, and retried until the RRset expired. Recover-after-expiry, which is
+// the opposite of what this file exists to do.
+//
+// Priming survives that trap only by accident: seedFromHints stores
+// ContextHint, which is NOT in the short-circuit above and falls through to a
+// real query. PrimeWithHints' own comment says "force re-query bypassing
+// cache" -- the fetcher it calls does not pass force. This is where copying
+// that fetcher went wrong.
+func (imr *Imr) rootNSQuery(ctx context.Context, servers map[string]*cache.AuthServer) (*core.RRset, error) {
+	rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, ".", dns.TypeNS, servers, true, false)
+	return rrset, err
+}
+
 // refreshRootFromLiveRoots re-queries ". NS" using the root servers already in
 // the cache. Reports whether the cache now holds a root NS RRset that is
 // further from expiry than the one we started with.
-func (imr *Imr) refreshRootFromLiveRoots(ctx context.Context) bool {
+//
+// query is a parameter so a test can assert that a refresh actually QUERIES.
+// Pinning the constants and the status line, as the first version did, cannot
+// see a refresher that never leaves the cache.
+func (imr *Imr) refreshRootFromLiveRoots(ctx context.Context,
+	query func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error)) bool {
+
 	before := imr.Cache.Get(".", dns.TypeNS)
 
-	// A COPY. The fetcher writes into the server map it is handed -- resolved
+	// A COPY. The query writes into the server map it is handed -- resolved
 	// addresses in, expired entries out -- and the map stored under "." is the
 	// published root delegation every other lookup depends on. PrimeWithHints
 	// makes the same copy for the same reason.
@@ -117,7 +152,7 @@ func (imr *Imr) refreshRootFromLiveRoots(ctx context.Context) bool {
 		return false
 	}
 
-	rrset, err := imr.IterativeDNSQueryFetcher()(ctx, ".", dns.TypeNS, servers)
+	rrset, err := query(ctx, servers)
 	if err != nil || rrset == nil {
 		lgImr.Warn("RefreshRoot: refreshing the root NS failed; will retry while"+
 			" the current RRset is still valid", "err", err)
