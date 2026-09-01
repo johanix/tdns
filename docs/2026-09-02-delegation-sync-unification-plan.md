@@ -111,13 +111,29 @@ Three defects follow:
    is therefore not a rename; it is deciding to keep two internal axes and
    define a total mapping onto the four wire tokens.
 
-3. **Two verification engines with separate retry configs.**
-   `TriggerChildKeyVerification` (`v2/truststore_verify.go:185`) reads the typed
-   `key-verification.*`; `KeyBootstrapper`/`VerifyKey` (`v2/keybootstrapper.go`)
-   still reads raw `viper.GetInt("verifyengine.attempts")` at `:88,158` and
-   `verifyengine.retry_interval` at `:141` — the last viper readers in this area,
-   contradicting the "single typed reader, no viper" contract that
-   `DelegationSyncConf` documents for itself (`v2/config_delegationsync.go:16-36`).
+3. **One live verification engine and one dead one — and half the vocabulary is inert.**
+   Established 2026-09-02 by tracing reachability, and it is more clear-cut than
+   "two engines that should merge":
+
+   - **Live:** `TriggerChildKeyVerification` (`v2/truststore_verify.go:185`) →
+     `VerifyChildKey` (`:85`), which implements **both** configured mechanisms
+     itself: `at-apex` via `LookupChildKeyAtApex`, and `at-ns` via
+     `LookupChildKeyAtSignal` (RFC 9615 `_signal` names). Typed config, DNSSEC-aware.
+   - **Dead:** `KeyBootstrapper`/`VerifyKey` (`v2/keybootstrapper.go:25,198`) is a
+     *different* mechanism — query every nameserver directly, require the KEY
+     identical on all of them, no DNSSEC — and it is **unreachable**. Nothing
+     outside `keybootstrapper.go` ever constructs a `KeyBootstrapperRequest`; the
+     three sends at `:204,246,248` are internal re-queues from `VerifyKey`, which
+     runs only from the engine loop at `:41,103`, which only runs on a request that
+     never arrives. The engine starts (`v2/main_initfuncs.go:305`), blocks on an
+     empty channel, and its `viper.GetInt("verifyengine.*")` reads at `:88,141,158`
+     never execute.
+   - **Inert vocabulary:** of the four `updatepolicy.child.keybootstrap` values,
+     only `manual` and `strict-manual` are read anywhere — `manual|strict-manual`
+     at `v2/keystate.go:267` (choose KeyState 10 vs 9) and `strict-manual` at
+     `v2/updateresponder.go:582,762` (prohibit unvalidated upload).
+     **`dnssec-validated` and `consistent-lookup` are read nowhere.**
+     `consistent-lookup`'s only plausible implementation was the dead engine.
 
 Plus a documentation defect: `cmdv2/auth/tdns-auth.sample.yaml:275-281` tells
 operators the real knobs are `keystate.require_manual_bootstrap` and
@@ -168,11 +184,13 @@ delegationsync:
             # Whether an untrusted signer may upload a KEY at all -- i.e.
             # whether the self-signed bootstrap UPDATE is admitted. This is the
             # entry condition to the ceremony, which is why it belongs here and
-            # not in updatepolicy (§4.3). Was `updatepolicy.child.keyupload`.
-            allow-unvalidated-upload: true
+            # not in updatepolicy (§4.2). Was `updatepolicy.child.keyupload`.
+            # false matches today's behaviour: the old field had to be set to
+            # the literal "unvalidated" to permit it, so absent meant refuse.
+            allow-unvalidated-upload: false
             retry:
-               max-attempts: 3
-               interval:     60s
+               max-attempts: 5      # today's defaults, from
+               interval:     10s    # keyVerificationRetrySettings()
 
       permissive:
          bootstrap:
@@ -277,13 +295,18 @@ the other would split a single `if` across two config blocks and leave exactly
 the confusion this move exists to remove.
 
 **`strict-manual` disappears as a value.** The old `keybootstrap` enum
-(`manual | dnssec-validated | consistent-lookup | strict-manual`) bundled three
+(`manual | dnssec-validated | consistent-lookup | strict-manual`) bundled
 orthogonal questions into one list, which is why `strict-manual` had to exist as
 a separate value at all — it was "manual, and also refuse unvalidated upload".
-On the three axes above it is just `mechanisms: []` + `manual: true` +
-`allow-unvalidated-upload: false`, which is the `locked-down` policy in §4. The
-other three values map as `manual` → `manual: true`; `dnssec-validated` →
-`require-dnssec: true`; `consistent-lookup` → `mechanisms: [at-ns]`.
+On the axes above it is just `mechanisms: []` + `manual: true` +
+`allow-unvalidated-upload: false`, which is the `locked-down` policy in §4.
+
+**Only two of the four values have behaviour to preserve.** `manual` →
+`manual: true`; `strict-manual` → as above. **`dnssec-validated` and
+`consistent-lookup` are read nowhere in the tree** (§3 defect 3) and carry no
+behaviour to migrate — they are deleted, not mapped. `require-dnssec: true` is
+already the live default in `VerifyChildKey`, so the setting `dnssec-validated`
+appeared to request is what everyone already gets.
 
 ### 4.3 Removed keys
 
@@ -363,14 +386,27 @@ refactor.
   unpublish removes what publish added.
 - **Est.** ~150-250 LOC.
 
-### U-5. One verification engine config
-- **Change:** migrate `keybootstrapper.go` off viper onto the typed policy
-  (`verifyengine.attempts` / `retry_interval` → `policy.bootstrap.retry.*`),
-  removing the last viper readers in this block. Decide whether the two engines
-  merge or keep two engines on one config — see §7.
+### U-5. Delete the dead verification engine
+Scope changed 2026-09-02 from "merge two engines" to "delete the unreachable
+one" — see §3 defect 3. This is pure deletion, not a migration.
+- **Change:** remove the `KeyBootstrapper` engine loop, `VerifyKey`,
+  `KeyBootstrapperRequest`/`KeyBootstrapperQ` (`v2/db.go:367`,
+  `v2/structs.go:1215`), the `kbCmd*` constants, the startup registration
+  (`v2/main_initfuncs.go:305`), and with them the last `viper.GetInt("verifyengine.*")`
+  reads in this area. Nothing sends to the queue, so nothing loses a capability
+  that is currently working.
+- **Verify before deleting:** re-confirm no external `KeyBootstrapperRequest`
+  construction exists at the time the work is done, in case something has been
+  wired up since this survey.
+- **Not ported:** the all-nameservers-agree mechanism the dead engine implemented.
+  It is a weaker, non-standard cousin of the live `at-ns` (RFC 9615 `_signal`)
+  and has never been reachable, so nobody depends on it. If it is wanted later it
+  should be added as a third value of `mechanisms` inside `VerifyChildKey`, where
+  it inherits the shared retry/DNSSEC handling — not resurrected as a parallel
+  engine. See §7 decision 2.
 - **Acceptance:** no viper read remains under `delegationsync`/`verifyengine`;
-  one retry config governs both.
-- **Est.** ~200-350 LOC.
+  one engine; build/vet/test green.
+- **Est.** ~150-250 LOC, almost entirely removed.
 
 ### U-6. Sample config and docs
 - **Change:** rewrite the `delegationsync:` block per §4; delete the stale
@@ -378,7 +414,7 @@ refactor.
   `delegationpolicy:` in the templates sample.
 - **Est.** ~100-150 LOC.
 
-**Total: ~1230-2060 LOC**, a large fraction of it deletion.
+**Total: ~1180-1960 LOC**, a large fraction of it deletion.
 
 ---
 
@@ -404,17 +440,44 @@ pattern repeats.
 
 ---
 
-## 7. Decisions to confirm before coding
+## 7. Decisions
 
-1. **Named policies vs inline+templates** (§4). Named is proposed; inline needs no
-   new machinery. This is the one structural choice in the plan.
-2. **Do the two verification engines merge, or share one config?** (U-5). Merging is
-   cleaner but larger; sharing config is the minimum that removes the contradiction.
-3. **`manual` as an independent flag vs a mechanism** (§4). Proposed as a separate
-   boolean, since a policy may sensibly allow automatic *and* manual; folding it
-   into `mechanisms` would make that inexpressible.
-4. **Default policy name and contents** — proposed `default` with
-   `[at-apex, at-ns] + require-dnssec: true`, i.e. strict by default.
+**Settled 2026-09-02.**
+
+1. **`keybootstrap` and `keyupload` both move into the delegation policy.**
+   Rationale and the resulting authn/authz boundary: §4.2.
+
+2. **The dead verification engine is deleted, not merged.** The reachability
+   trace in §3 defect 3 turned this from a design question into a cleanup:
+   there is one live engine, and it already implements both configured
+   mechanisms. The all-nameservers-agree mechanism is dropped rather than
+   ported; if wanted, it returns as a third `mechanisms` value inside
+   `VerifyChildKey`, never as a second engine. U-5.
+
+3. **`manual` stays an independent flag, not a `mechanisms` value.** It is not a
+   lookup mechanism — it means "no automatic verification; an operator installs
+   trust" — and a policy may sensibly permit automatic *and* manual, which
+   folding it into the list would make inexpressible. Its only live effect today
+   is selecting KeyState 10 over 9 (`v2/keystate.go:267`).
+
+4. **The default policy reproduces today's effective behaviour exactly**, so
+   that adopting named policies is not also a silent behaviour change. Today's
+   defaults, from the live code: `mechanisms` empty → `[at-apex, at-ns]`
+   (`v2/truststore_verify.go:87-89`); `require-dnssec` absent → `true`
+   (`:216-219`); `max-attempts` → 5 and `retry-interval` → 10s
+   (`keyVerificationRetrySettings`, `:166-176`); `keyupload` absent → refuse
+   unvalidated upload; `keybootstrap` absent → automatic, not manual
+   (`zoneRequiresManualBootstrap` returns false for an unset list). The
+   `default` policy in §4 is written to those values.
+
+### Still open
+
+5. **Named policies vs inline+templates** (§4) — the one structural choice left.
+   Named is proposed: bootstrap policy is security policy, and a small set of
+   named, reviewable policies audits better than per-zone hand-rolling, while
+   still reaching zones through templates. Inline needs no new machinery but
+   scatters the policy across the zone list. Everything else in this plan is
+   independent of the answer.
 
 ---
 
