@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
@@ -267,7 +268,7 @@ mx.example.	3600	IN	MX	10 Mail.Example.
 		ZoneStore: MapZone,
 		Logger:    log.New(os.Stderr, "", 0),
 	}
-	if _, _, rerr := reread.ReadZoneFile(path, true); rerr != nil {
+	if _, _, rerr := reread.ReadZoneFile(context.Background(), path, true); rerr != nil {
 		t.Fatalf("ReadZoneFile: %v", rerr)
 	}
 	back, err := reread.zoneDigestOfWorkingData()
@@ -278,5 +279,65 @@ mx.example.	3600	IN	MX	10 Mail.Example.
 	if published != back {
 		t.Fatalf("a write/read round trip changed the digest:\n  published %s\n  re-read   %s\n"+
 			"every load after a write-out would report the file as CHANGED", published, back)
+	}
+}
+
+// A row written by a tdns whose digest computation differs from this one is
+// not comparable. Reading the difference as "the file changed" would, on the
+// first restart after an upgrade that touches the digest, accuse every signed
+// zone in a fleet of having been edited -- and send the reconciliation off to
+// merge journals over files nobody touched.
+func TestForeignDigestVariantReadsAsUnknownNotChanged(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	const zone = "variant.example."
+
+	if err := kdb.SetZoneFileState(zone, 7, "deadbeef"); err != nil {
+		t.Fatalf("SetZoneFileState: %v", err)
+	}
+	// Same digest, current variant: unchanged.
+	verdict, _, err := kdb.CompareZoneFileDigest(zone, "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict != ZoneFileUnchanged {
+		t.Fatalf("a matching digest reported %s", verdict)
+	}
+	// A different digest, current variant: changed -- the detector still works.
+	verdict, _, err = kdb.CompareZoneFileDigest(zone, "cafebabe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict != ZoneFileChanged {
+		t.Fatalf("a differing digest reported %s", verdict)
+	}
+
+	// Now age the row to a foreign variant, as an upgrade would find it.
+	if _, err := kdb.DB.Exec(
+		`UPDATE ZoneFileState SET digest_variant=? WHERE zone=?`,
+		zoneFileDigestVariant-1, zone); err != nil {
+		t.Fatalf("aging the row: %v", err)
+	}
+	verdict, prev, err := kdb.CompareZoneFileDigest(zone, "cafebabe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict != ZoneFileUnknown {
+		t.Errorf("a row from an older digest computation reported %s;"+
+			" an upgrade would accuse every signed zone of having been edited", verdict)
+	}
+	if prev == nil {
+		t.Error("the stale row was not returned for diagnostics")
+	}
+
+	// ...and a fresh write re-baselines it.
+	if err := kdb.SetZoneFileState(zone, 8, "cafebabe"); err != nil {
+		t.Fatalf("re-baselining: %v", err)
+	}
+	verdict, _, err = kdb.CompareZoneFileDigest(zone, "cafebabe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict != ZoneFileUnchanged {
+		t.Errorf("the re-baselined row reported %s", verdict)
 	}
 }

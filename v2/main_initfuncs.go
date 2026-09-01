@@ -197,6 +197,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	conf.Internal.APIStopCh = make(chan struct{}) // Used for shutdown coordination
 	conf.Internal.BumpZoneCh = make(chan BumperData, 10)
 	conf.Internal.DelegationSyncQ = make(chan DelegationSyncRequest, 10)
+	conf.Internal.ImrReady = NewImrReadiness()
 	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, max(10, len(conf.Zones)))
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
 	conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
@@ -276,6 +277,16 @@ func (conf *Config) StartScanner(ctx context.Context, apirouter *mux.Router) err
 // StartAuth starts subsystems for tdns-auth
 func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error {
 	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
+	// The DSYNC API listener, if the parent offers that scheme. Its own
+	// socket and its own auth, deliberately not a subtree of the management
+	// API above: a registrant is not an operator, and the surest way for its
+	// credential not to reach operator endpoints is for those endpoints not
+	// to be on the socket it connects to. Returns nil when unconfigured, so
+	// a deployment that has not opted in gets no listener rather than one
+	// that refuses everything.
+	StartEngine(&Globals.App, "DsyncApiListener", func() error {
+		return conf.StartDsyncApiListener(ctx, conf.SetupDsyncApiRouter(ctx), conf.Internal.APIStopCh)
+	})
 	StartEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
 	// In tdns-auth, IMR is active by default unless explicitly set to false
 	imrActive := conf.Imr.Active == nil || *conf.Imr.Active

@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -336,7 +337,7 @@ func runZoneUpdateViaDdns(zone string, spec tdns.ZoneUpdateSpec) {
 		fmt.Printf("  %s\n", line)
 	}
 
-	rcode, _, err := tdns.SendUpdate(m, zone, []string{server})
+	rcode, _, err := tdns.SendUpdate(context.Background(), m, zone, []string{server})
 	if err != nil {
 		fmt.Printf("Error sending update: %v\n", err)
 		os.Exit(1)

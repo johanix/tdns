@@ -17,10 +17,9 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
-func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile, keyFile string,
+func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, certFile, keyFile string,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
 
 	lgDns.Info("DnsEngine: DoH addresses", "addrs", dohaddrs)
@@ -32,7 +31,17 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 		var err error
 		msg := new(dns.Msg)
 		if r.Method == http.MethodPost {
+			// ReadHeaderTimeout covers only the headers and IdleTimeout only
+			// parked connections: without a deadline here, a client sending
+			// its (at most 65535-byte) body one byte at a time holds the
+			// handler and its HTTP/2 stream open indefinitely. Ten seconds
+			// is generous for 64KB from any legitimate client. The error is
+			// ignored deliberately: a transport that does not support
+			// per-request deadlines just keeps the pre-deadline behaviour.
+			rc := http.NewResponseController(w)
+			_ = rc.SetReadDeadline(time.Now().Add(10 * time.Second))
 			dnsQuery, err = io.ReadAll(io.LimitReader(r.Body, 65535))
+			_ = rc.SetReadDeadline(time.Time{})
 			if err != nil {
 				http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 				return
@@ -76,7 +85,7 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 		}
 	})
 
-	ports := viper.GetStringSlice("dnsengine.ports.doh")
+	// ports comes from the caller's listeners: block (#444/#446).
 	if len(ports) == 0 {
 		ports = []string{"443"}
 	}
@@ -90,6 +99,22 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 				TLSConfig: &tls.Config{
 					MinVersion: tls.VersionTLS13,
 				},
+				// DoH clients speak HTTP/2 or HTTP/1.1 keep-alive and hold
+				// their TCP connections open as long as we let them; every
+				// held connection is a file descriptor that never comes
+				// back. Without these bounds an hour of ordinary DoH
+				// traffic can exhaust the process fd limit, at which point
+				// every OUTBOUND dial fails and a forwarding resolver
+				// serves SERVFAIL for everything uncached, silently, until
+				// restarted (#443). IdleTimeout reaps parked connections
+				// and ReadHeaderTimeout bounds half-open handshakes.
+				// Deliberately NO ReadTimeout/WriteTimeout: on HTTP/2 those
+				// have historically acted as connection lifetimes rather
+				// than per-request caps, which would force well-behaved
+				// long-lived DoH clients to reconnect on a timer — and this
+				// server is shared with the tdns-auth DoH listener.
+				ReadHeaderTimeout: 10 * time.Second,
+				IdleTimeout:       120 * time.Second,
 			}
 			servers = append(servers, srv)
 			go func(s *http.Server, hp string) {

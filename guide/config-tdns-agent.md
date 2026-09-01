@@ -5,7 +5,7 @@
 
 `tdns-agent` is the single-provider agent for delegation synchronization. It
 shares most of its configuration surface with `tdns-auth` — the same `service:`,
-`dnsengine:`, `apiserver:`, `db:` and `log:` blocks, validated the same way — so
+`listeners:`, `apiserver:`, `db:` and `log:` blocks, validated the same way — so
 [tdns-auth configuration](config-tdns-auth.md) is the right starting point
 today.
 

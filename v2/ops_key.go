@@ -11,7 +11,6 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
@@ -29,7 +28,7 @@ func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 	}
 
 	for _, pkc := range sak.Keys {
-		if !strings.HasSuffix(pkc.KeyRR.Header().Name, zd.ZoneName) {
+		if !dns.IsSubDomain(zd.ZoneName, pkc.KeyRR.Header().Name) {
 			lgHandler.Debug("PublishKeyRRs: SIG(0) key is not a subdomain of zone", "key", pkc.KeyRR.Header().Name, "zone", zd.ZoneName)
 			return fmt.Errorf("PublishKeyRRs: SIG(0) key %q is not a subdomain of zone %q", pkc.KeyRR.Header().Name, zd.ZoneName)
 		}
@@ -106,7 +105,7 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 	}
 	if len(sak.Keys) == 0 {
 		// Ok, no active key found, try to generate a new one
-		algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
+		algstr := DelegationSyncConfig().Child.Update.Keygen.Algorithm
 		alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 		if alg == 0 {
 			return fmt.Errorf("unknown keygen algorithm: %q", algstr)
@@ -240,7 +239,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (
 	}
 
 	// 4. Send the message to the parent
-	rcode, ur, err := SendUpdateContext(ctx, msg, zd.Parent, dsyncTarget.Addresses)
+	rcode, ur, err := SendUpdate(ctx, msg, zd.Parent, dsyncTarget.Addresses)
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to send update message: %v", zd.ZoneName, err), ur, err
 	}
@@ -376,7 +375,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	}
 
 	// 4. Send the ADD message to the parent
-	rcode, ur, err := SendUpdateContext(ctx, m, zd.Parent, dsyncTarget.Addresses)
+	rcode, ur, err := SendUpdate(ctx, m, zd.Parent, dsyncTarget.Addresses)
 	if err != nil {
 		return "", 0, 0, ur, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to send update message: %v", zd.ZoneName, err)
 	}
@@ -417,7 +416,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	}
 
 	// 7. Send the REMOVE message to the parent
-	rcode, ur, err = SendUpdateContext(ctx, m, zd.Parent, dsyncTarget.Addresses)
+	rcode, ur, err = SendUpdate(ctx, m, zd.Parent, dsyncTarget.Addresses)
 	if err != nil {
 		return "", oldkeyid, newkeyid, ur, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to send update message: %v",
 			zd.ZoneName, err)

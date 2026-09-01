@@ -1,0 +1,70 @@
+service:
+   name:       XOT-AUTH
+   verbose:    true
+   debug:      false
+
+log:
+   file:       /var/tmp/xotinterop/log/tdns-auth.log
+   level:      debug
+
+db:
+   file:       /var/tmp/xotinterop/tdns-auth/auth.db
+
+listeners:
+   addresses:  [ 127.0.0.1:5301 ]
+   transports: [ do53, dot ]
+   ports:
+      dot:     [ 5401 ]
+   certfile:   /var/tmp/xotinterop/certs/ns-tdnsauth.xot.test.crt
+   keyfile:    /var/tmp/xotinterop/certs/ns-tdnsauth.xot.test.key
+
+apiserver:
+   addresses:  [ 127.0.0.1:8301 ]
+   apikey:     xot-interop-test-key
+   certfile:   /var/tmp/xotinterop/certs/ns-tdnsauth.xot.test.crt
+   keyfile:    /var/tmp/xotinterop/certs/ns-tdnsauth.xot.test.key
+
+imrengine:
+   active:     false
+
+zones:
+   - name:      a.xot.test.
+     type:      primary
+     zonefile:  /var/tmp/xotinterop/zones/a.xot.test.zone
+     store:     map
+     notify:
+        - addr: "127.0.0.1:5303"
+          key:  NOKEY
+        - addr: "127.0.0.1:5304"
+          key:  NOKEY
+        - addr: "127.0.0.1:5305"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+        - prefix: "::1/128"
+          key:    NOKEY
+
+   - name:      neg1.xot.test.
+     type:      primary
+     zonefile:  /var/tmp/xotinterop/zones/neg1.xot.test.zone
+     store:     map
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   - name:      neg2.xot.test.
+     type:      primary
+     zonefile:  /var/tmp/xotinterop/zones/neg2.xot.test.zone
+     store:     map
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   - name:      neg3.xot.test.
+     type:      primary
+     zonefile:  /var/tmp/xotinterop/zones/neg3.xot.test.zone
+     store:     map
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY

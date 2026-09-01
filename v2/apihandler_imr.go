@@ -81,7 +81,7 @@ func transportWeightsToStrings(m map[core.Transport]uint8) map[string]uint8 {
 func ZoneMatchesSelector(zone, exactZone, suffix string) bool {
 	switch {
 	case exactZone != "":
-		return strings.EqualFold(zone, exactZone)
+		return core.EqualNames(zone, exactZone)
 	case suffix != "":
 		return dns.IsSubDomain(suffix, zone)
 	default:
@@ -176,13 +176,31 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			qname = dns.Fqdn(qname)
-			removed, err := imr.Cache.FlushDomain(qname, false)
+
+			// keep_structural was not expressible here, so "flush common"
+			// -- which exists to preserve the structural records -- reached
+			// this handler and silently behaved as "flush all". Absent it
+			// still means false, which is the previous behaviour and what the
+			// role-scoped "imr flush" asks for.
+			keepStructural, _ := amp.Data["keep_structural"].(bool)
+
+			removed, err := imr.Cache.FlushDomain(qname, keepStructural)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("flush failed: %v", err)
 				return
 			}
-			resp.Msg = fmt.Sprintf("Flushed %d cache entries at and below %s", removed, qname)
+			// The wording is load-bearing, not decoration: a CLI that asked to
+			// keep structural records reads it back to confirm the daemon
+			// understood. An older daemon flushes everything and says so,
+			// which is how the client can tell instead of silently getting
+			// more than it asked for.
+			if keepStructural {
+				resp.Msg = fmt.Sprintf("Flushed %d non-structural cache entries at and below %s",
+					removed, qname)
+			} else {
+				resp.Msg = fmt.Sprintf("Flushed %d cache entries at and below %s", removed, qname)
+			}
 
 		case "imr-reset":
 			imr := Globals.ImrEngine
@@ -193,6 +211,52 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			}
 			removed := imr.Cache.FlushAll()
 			resp.Msg = fmt.Sprintf("IMR cache reset: flushed %d entries (root NS and glue preserved)", removed)
+
+		case "imr-forward-list", "imr-forward-status", "imr-forward-probe",
+			"imr-stub-list", "imr-stub-status", "imr-stub-probe":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			zoneFilter := string(amp.Zone)
+			switch amp.Command {
+			case "imr-forward-list":
+				list := imr.ForwardZoneList()
+				resp.Data = list
+				resp.Msg = fmt.Sprintf("%d forward zone(s) configured", len(list))
+			case "imr-forward-status":
+				st := imr.StatusReport()
+				resp.Data = st.ForwardZones
+				resp.Msg = fmt.Sprintf("%d forward zone(s) configured", len(st.ForwardZones))
+			case "imr-forward-probe":
+				results, err := imr.ProbeForwardUpstreamsReport(r.Context(), zoneFilter)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+					return
+				}
+				resp.Data = results
+				resp.Msg = fmt.Sprintf("probed %d forward upstream(s)", len(results))
+			case "imr-stub-list":
+				list := imr.StubZoneList()
+				resp.Data = list
+				resp.Msg = fmt.Sprintf("%d stub zone(s) configured", len(list))
+			case "imr-stub-status":
+				st := imr.StubZoneStatus()
+				resp.Data = st
+				resp.Msg = fmt.Sprintf("%d stub zone(s) configured", len(st))
+			case "imr-stub-probe":
+				results, err := imr.ProbeStubServers(r.Context(), zoneFilter)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+					return
+				}
+				resp.Data = results
+				resp.Msg = fmt.Sprintf("probed %d stub server tuple(s)", len(results))
+			}
 
 		case "imr-show":
 			imr := Globals.ImrEngine
@@ -210,11 +274,9 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			identity = dns.Fqdn(identity)
 
 			var entries []map[string]interface{}
-			idCanon := strings.ToLower(identity)
 			for item := range imr.Cache.RRsets.IterBuffered() {
 				cr := item.Val
-				name := strings.ToLower(cr.Name)
-				if name != idCanon && !strings.HasSuffix(name, "."+idCanon) {
+				if !dns.IsSubDomain(identity, cr.Name) {
 					continue
 				}
 				entry := map[string]interface{}{
@@ -296,7 +358,13 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			}
 			var records []zoneRecord
 			for item := range imr.Cache.ZoneMap.IterBuffered() {
-				if zoneFilter != "" && item.Key != zoneFilter {
+				// Through the shared selector, like the transport-stats
+				// handler below it. This used to compare item.Key to the
+				// filter as bytes, which had been merely inconsistent and
+				// became wrong when ZoneMap started folding its keys: a
+				// mixed-case zone argument returned an empty dump. Two copies
+				// of one predicate is how that drift happened; there is one now.
+				if !ZoneMatchesSelector(item.Key, zoneFilter, "") {
 					continue
 				}
 				snap := item.Val.SnapshotAddressBackoffs(now)

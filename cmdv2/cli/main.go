@@ -21,10 +21,32 @@ import (
 // no CIRCL, no liboqs, pure-Go build. Run tdns-genalgs --algrepo=<dir>
 // before building; the generated file is a build artifact (gitignored).
 
-func main() {
+// initGlobals identifies this binary to the tdns library.
+//
+// A function rather than four lines inside main so the invariant can be
+// tested: main itself is unreachable from a test, and "the app type is set"
+// is exactly the sort of thing that is true until someone adds a field.
+func initGlobals() {
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Date = appDate
+
+	// App.Type as well, and this one is load-bearing.
+	//
+	// Left unset it is the zero value, which is no AppType at all --
+	// AppTypeAuth starts at iota+1 -- so every check keyed on AppTypeCli took
+	// the wrong branch. One of them is not cosmetic: parseZones skips zone
+	// refresh for the non-zone-serving app types, and an unset type falls to
+	// the default, which terminates with "refresh channel is not configured".
+	//
+	// Which is why eleven commands across three files assign this themselves,
+	// the same line copied each time a new command needed it and did not work
+	// without it. Setting it once, here, is what those eleven work around.
+	tdns.Globals.App.Type = tdns.AppTypeCli
+}
+
+func main() {
+	initGlobals()
 
 	// Create root context with signal handling
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

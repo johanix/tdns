@@ -379,7 +379,7 @@ func verifyLeafSig(rrs []dns.RR, sigs []*dns.RRSIG, keys []*dns.DNSKEY, zone str
 			if sig.KeyTag != key.KeyTag() {
 				continue
 			}
-			if dns.Fqdn(sig.SignerName) != dns.Fqdn(zone) {
+			if !core.EqualNames(dns.Fqdn(sig.SignerName), dns.Fqdn(zone)) {
 				continue
 			}
 			if err := sig.Verify(key, rrs); err != nil {

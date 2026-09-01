@@ -34,6 +34,7 @@ import (
 // commands in keystore_cmds.go already scope their targets this way.
 type bulkFlags struct {
 	dest      string
+	format    string
 	src       string
 	dir       string
 	state     string
@@ -81,6 +82,11 @@ run are left in place, so several exports can populate one directory.`,
 		},
 	}
 	bulkExport.Flags().StringVar(&f.dest, "dest", "", "Directory to write keys and manifest to")
+	// Not for TSIG: a TSIG secret is not a private key and has no bind
+	// private-key file, so the flag would be accepted and then ignored.
+	if class != "tsig" {
+		bulkExport.Flags().StringVar(&f.format, "format", tdns.KeyFormatPEM, keyFormatHelp)
+	}
 	bulkExport.Flags().StringArrayVarP(&f.selExact, exactFlag, exactShorthand, nil, exactHelp)
 	bulkExport.Flags().StringArrayVar(&f.selSubtre, subtreeFlag, nil, subtreeHelp)
 	bulkExport.MarkFlagRequired("dest")
@@ -240,6 +246,14 @@ func classCommand(class string) string {
 // --- export ------------------------------------------------------------
 
 func bulkExportRun(role, class string, f *bulkFlags) {
+	// Before anything is contacted, selected or printed: a typo here would
+	// otherwise surface after the "exporting every key" notice, reading as if
+	// the export had already begun.
+	if err := tdns.ValidateKeyFormat(f.format); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	api, err := GetApiClient(role, true)
 	if err != nil {
 		fmt.Printf("Error creating API client: %v\n", err)
@@ -264,6 +278,7 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 	tr, err := SendKeystoreCmd(api, tdns.KeystorePost{
 		Command:       classCommand(class),
 		SubCommand:    "bulk-export",
+		KeyFormat:     f.format,
 		SelectExact:   f.selExact,
 		SelectSubtree: f.selSubtre,
 	})
@@ -322,6 +337,23 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 			if err := writeKeyPair(f.dest, base, k.PrivateKey, k.KeyRR); err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
+			}
+			// A bind export without a .state file is only half a round trip:
+			// bulk-convert reads the state from there, and with none present
+			// it refuses the key or falls back to --state. The text is pure
+			// state and timestamps, so the CLI can render it -- unlike the
+			// private key, which needs the algorithm registry.
+			if f.format == tdns.KeyFormatBind {
+				st, err := tdns.BindKeyStateText(k.State, k.Flags&0x0001 != 0,
+					k.PublishedAt, k.ActiveAt, k.RetiredAt)
+				if err != nil {
+					fmt.Printf("Error: %s keyid %d: %v\n", k.Zone, k.Keyid, err)
+					os.Exit(1)
+				}
+				if err := writeOrVerifyFile(filepath.Join(f.dest, base+".state"), st, 0600); err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
 			}
 			manifest.UpsertDnssec(tdns.ManifestEntryForDnssec(k, base))
 			written++

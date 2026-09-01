@@ -124,7 +124,7 @@ type ZoneData struct {
 	ZoneType   ZoneType
 	ApexLen    int
 	//	RRs            RRArray
-	Data *core.ConcurrentMap[string, OwnerData]
+	Data *core.NameMap[OwnerData]
 	// 20260415 johani: MP    *ZoneMPExtension // Multi-provider state; nil for non-MP zones
 	Ready bool // true if zd.Data has been populated (from file or upstream)
 	// Status is the positive-lifecycle state (pending -> loading -> ready),
@@ -133,20 +133,19 @@ type ZoneData struct {
 	// FirstZoneLoad without rewriting their consumers.
 	Status ZoneStatus
 
-	XfrType string // axfr | ixfr
-	Logger  *log.Logger
+	Logger *log.Logger
 	// ZoneFile           string // TODO: Remove this
 	IncomingSerial uint32 // SOA serial that we got from upstream
 	CurrentSerial  uint32 // SOA serial after local bumping
 	// OutboundSoaSerial is the PER-ZONE outbound serial mode (keep | unixtime
 	// | persist), sourced from the zone's config (possibly via its template).
-	// Empty means "inherit the server-global dnsengine.outbound_soa_serial".
+	// Empty means "inherit the server-global authengine.outbound-soa-serial".
 	// Never read directly — call zd.EffectiveOutboundSoaSerial(), which
 	// resolves the zone/global tiers.
 	OutboundSoaSerial string
 	// TransferSrc is the per-zone source address for OUTBOUND transfers, i.e.
 	// what the upstream's allow-transfer ACL sees. Never read directly — call
-	// zd.EffectiveTransferSrc(), which falls back to dnsengine.transfer_src.
+	// zd.EffectiveTransferSrc(), which falls back to authengine.transfer-src.
 	TransferSrc []string
 	// TransferSrcTier records which tier TransferSrc was resolved FROM, and is
 	// set only when TransferSrc was populated by resolution rather than by
@@ -198,14 +197,25 @@ type ZoneData struct {
 	// Errors and kept in sync by SetError / ClearError. Existing call
 	// sites that read those single-error fields continue to work; new
 	// code can iterate ErrorList() for the full set.
-	Errors        map[ErrorType]ZoneError
-	Error         bool      // derived: len(Errors) > 0
-	ErrorType     ErrorType // derived: highest-priority error type, see errorTypeReportOrder
-	ErrorMsg      string    // derived: msg of the type reported in ErrorType
-	LatestError   time.Time // time of latest error
-	RefreshCount  int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	LatestRefresh time.Time // time of latest successful refresh
-	SourceCatalog string    // if auto-configured, which catalog zone created this zone
+	Errors      map[ErrorType]ZoneError
+	Error       bool      // derived: len(Errors) > 0
+	ErrorType   ErrorType // derived: highest-priority error type, see errorTypeReportOrder
+	ErrorMsg    string    // derived: msg of the type reported in ErrorType
+	LatestError time.Time // time of latest error
+	// RefreshCount is NOT a have-data test, whatever its name suggests: it is
+	// incremented only by initialLoadZone, so it reaches 1 at most once and
+	// stays there however many refreshes follow -- and never leaves 0 at all
+	// for a zone provisioned through the API in this process. The query and
+	// UPDATE paths use zd.HasPublishedData() instead. Fix this to count
+	// refreshes or retire it; see §6 of
+	// docs/2026-08-28-secondary-serve-until-expire.md.
+	RefreshCount  int       // times initialLoadZone loaded the zone (0 or 1), reported over the API
+	LatestRefresh time.Time // when a usable SOA was last seen; what SOA EXPIRE is measured from
+	// expireClampLoggedSerial is the serial the EXPIRE-clamp warning was last
+	// emitted for, so a primary publishing a nonsensical EXPIRE is reported
+	// once per copy rather than once per query. See effectiveExpire.
+	expireClampLoggedSerial uint32
+	SourceCatalog           string // if auto-configured, which catalog zone created this zone
 	// ParentDSTTLObserved is the most recent TTL observed on the parent's
 	// DS RRset (seconds). Refreshed by every successful QueryParentAgentDS
 	// call. Zero means "not yet observed" — the E10 cache-flush invariant
@@ -230,6 +240,14 @@ type ZoneData struct {
 	publishCadence time.Duration
 	publishQueued  bool
 	publishUrgent  bool
+	// ixfrDerived marks a transfer scratch zone whose contents were produced by
+	// applying an inbound difference sequence to the copy we already served,
+	// rather than by receiving a whole zone. Set on the scratch zone by the
+	// IXFR apply and read once, by applyRefreshReplacementLocked, to decide
+	// whether the replacement really is a new IXFR epoch. See §5 of
+	// docs/2026-07-25-inbound-ixfr-plan.md.
+	ixfrDerived bool
+
 	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale
 	// zone replacement): updateIxfrChainLocked clears the delta history
 	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked.
@@ -286,11 +304,52 @@ type ZoneData struct {
 	// disabled (IXFR queries are answered with full transfers). From zone
 	// config ixfr-chain-max-bytes; written at parse time under zd.mu.
 	ixfrChainMaxBytes int
-	lastPublish       time.Time
-	publishWake       chan struct{}
-	publisherOnce     sync.Once
-	publishStop       chan struct{}
-	publishStopOnce   sync.Once
+	// zonemdAlgs and zonemdScheme are the resolved RFC 8976 parameters for
+	// this zone's published ZONEMD, from the zone config's `zonemd` block.
+	// Meaningful only when OptPublishZonemd is set. Written at parse time
+	// under zd.mu, like ixfrChainMaxBytes above.
+	zonemdAlgs   []uint8
+	zonemdScheme uint8
+	// zonemdOnVerifyFailure is the resolved ZonemdConf.OnVerifyFailure,
+	// meaningful only when OptVerifyZonemd is set. Written at parse time under
+	// zd.mu, like the two fields above.
+	zonemdOnVerifyFailure string
+	// zonemdWireCacheMaxBytes bounds the canonical-wire cache the publish path
+	// keeps so it re-renders only what changed. 0/unset =>
+	// DefaultZonemdWireCacheBytes; negative => caching disabled. Same sentinel
+	// convention as ixfrChainMaxBytes above, deliberately.
+	zonemdWireCacheMaxBytes int
+	// zonemdCache holds one rendered block per owner name, tagged with the
+	// *OwnerData it came from -- pointer identity is the validity check. Read
+	// and written ONLY by the publish path under zd.mu; see zonemd_cache.go.
+	zonemdCache      map[string]zonemdCacheEntry
+	zonemdCacheStats ZonemdCacheStats
+	// zonemdManaged records that the apex ZONEMD RRset now in this zone was
+	// put there by us rather than by the operator. It is what makes turning
+	// the option OFF remove our record while leaving a hand-authored one
+	// alone. In memory only: after a restart with the option off, a ZONEMD in
+	// the zone file is indistinguishable from operator data and is treated as
+	// such. Guarded by zd.mu.
+	zonemdManaged bool
+	// zonemdDigests caches the digests computed by the last publish, keyed by
+	// RFC 8976 hash algorithm, and zonemdDigestSerial is the serial they
+	// describe.
+	//
+	// The point is the SHA-384 entry: ZoneDigest excludes the apex ZONEMD and
+	// its RRSIG, so the value published in the ZONEMD RR is bit-for-bit the
+	// value ZoneFileState wants, and a zone write can record its file identity
+	// without digesting the whole zone a second time. Guarded by zd.mu.
+	zonemdDigests      map[uint8]string
+	zonemdDigestSerial uint32
+	// zonemdLastErr is the last reason this zone could not publish a ZONEMD,
+	// empty when it can. Held only so the failure is logged on transition
+	// rather than on every publish. Guarded by zd.mu.
+	zonemdLastErr   string
+	lastPublish     time.Time
+	publishWake     chan struct{}
+	publisherOnce   sync.Once
+	publishStop     chan struct{}
+	publishStopOnce sync.Once
 	// RemoteDNSKEYs holds DNSKEY RRs from other signers (multi-signer mode 4).
 	// These are DNSKEYs found in the incoming zone that do not match keys in our
 	// local keystore. They are preserved across resignings and merged into the
@@ -379,15 +438,15 @@ type ZoneConf struct {
 	DelegationBackend string `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
 	DnssecPolicy      string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
 	// OutboundSoaSerial is the per-zone override of the server-global
-	// dnsengine.outbound_soa_serial. Empty (the default) inherits the global.
+	// authengine.outbound-soa-serial. Empty (the default) inherits the global.
 	// Set it on a TEMPLATE to give a whole class of zones a serial policy —
 	// that is the intended granularity; a zone that sets it explicitly wins
 	// over its template (ExpandTemplate gap-fills only unset fields, and a
 	// non-empty string counts as set, so an explicit "keep" beats a template
 	// "persist").
-	OutboundSoaSerial string `yaml:"outbound_soa_serial,omitempty" mapstructure:"outbound_soa_serial" validate:"omitempty,oneof=keep unixtime persist"`
+	OutboundSoaSerial string `yaml:"outbound-soa-serial,omitempty" mapstructure:"outbound-soa-serial" validate:"omitempty,oneof=keep unixtime persist"`
 	// TransferSrc is the per-zone override of the server-global
-	// dnsengine.transfer_src: the local address to bind when dialling this
+	// authengine.transfer-src: the local address to bind when dialling this
 	// zone's upstreams, which is what the primary's allow-transfer ACL sees.
 	// Empty (the default) inherits the global. Set it on a TEMPLATE to give a
 	// whole class of zones one source address -- the same granularity argument
@@ -449,7 +508,7 @@ type ZoneConf struct {
 	Error         bool      // zone is broken and cannot be used
 	ErrorType     ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
 	ErrorMsg      string    // reason for the error (if known)
-	RefreshCount  int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	RefreshCount  int       // times initialLoadZone loaded the zone (0 or 1); NOT a have-data test, see ZoneData.RefreshCount
 	SourceCatalog string    // if auto-configured, which catalog zone created this zone
 	// ApiManaged marks a zone created/managed via the dynamic-zones API (zone
 	// add/delete/modify). Persisted so OptApiManagedZone can be re-derived on
@@ -466,7 +525,65 @@ type ZoneConf struct {
 	// ("pending"|"loading"|"ready"|"error") populated by the list handlers from
 	// ZoneStatus + the error registry. Not config; not serialized to YAML.
 	Provisioning string `yaml:"-" mapstructure:"-"`
+	// Zonemd parameterises the `publish-zonemd` option. Separate from the
+	// option because Options is a map[ZoneOption]bool by construction and
+	// cannot carry a value; separate from the DNSSEC policy because ZONEMD is
+	// not DNSSEC — an unsigned zone may publish one, and binding the
+	// parameters to a policy would make it need one first.
+	Zonemd ZonemdConf `yaml:"zonemd" mapstructure:"zonemd"`
 }
+
+// ZonemdConf is the per-zone ZONEMD parameter block:
+//
+//	zones:
+//	  example.com:
+//	    options: [ publish-zonemd ]
+//	    zonemd:
+//	      algorithms: [ 1 ]   # 1 = SHA-384 (default), 2 = SHA-512
+//	      scheme: 1           # SIMPLE; the only scheme RFC 8976 defines
+//
+// Both fields are optional; an empty block means SIMPLE/SHA-384. Ignored
+// entirely unless the zone carries the publish-zonemd option, so a leftover
+// block on a zone whose option was removed is inert rather than an error.
+type ZonemdConf struct {
+	// Algorithms are the RFC 8976 hash algorithm codepoints to publish, one
+	// apex ZONEMD RR each. Empty => [1] (SHA-384), the mandatory-to-implement
+	// algorithm and the one every published ZONEMD in the wild uses.
+	Algorithms []uint8 `yaml:"algorithms" mapstructure:"algorithms"`
+	// Scheme is the RFC 8976 collation scheme. 0 (unset) => 1 (SIMPLE). Only
+	// SIMPLE is defined, so this exists to reject a config that asks for
+	// something else rather than to offer a choice.
+	Scheme uint8 `yaml:"scheme" mapstructure:"scheme"`
+	// WireCacheMaxBytes bounds the canonical-wire cache that lets a publish
+	// re-render only the owners it changed. 0/unset =>
+	// DefaultZonemdWireCacheBytes (64 MiB); negative => caching disabled.
+	//
+	// The budget matters because the saving and the cost both scale with zone
+	// size: the zones that gain most from the cache are the ones that can least
+	// afford it, and on a PQ-signed zone an RRSIG's RDATA is kilobytes rather
+	// than a hundred bytes. A byte budget is self-selecting -- a small zone
+	// never reaches it -- and degrades in proportion rather than at a cliff.
+	//
+	// PER ZONE. A server with many large zones multiplies it; this does not
+	// bound the host's memory across a fleet.
+	WireCacheMaxBytes int `yaml:"wire-cache-max-bytes" mapstructure:"wire-cache-max-bytes"`
+	// OnVerifyFailure decides what a failed `verify-zonemd` check does:
+	// "refuse" (the default) declines the zone and keeps serving what the
+	// server already had, "warn" adopts it and logs.
+	//
+	// Refuse is the default because the point of asking for verification is to
+	// find out that a zone is not what its publisher says it is, and adopting
+	// it anyway answers the question without acting on it. Warn exists for the
+	// rollout, where the first thing an operator needs to know is whether
+	// their own primaries would have passed.
+	OnVerifyFailure string `yaml:"on-verify-failure" mapstructure:"on-verify-failure"`
+}
+
+// ZONEMD verification failure modes (ZonemdConf.OnVerifyFailure).
+const (
+	ZonemdOnFailureRefuse = "refuse"
+	ZonemdOnFailureWarn   = "warn"
+)
 
 // DnssecPolicyView is a display-only projection of the DnssecPolicy bound to a
 // zone, carried in ZoneConf.PolicyDetail and populated only by the `zone desc`
@@ -599,7 +716,7 @@ type DnssecPolicyRolloverConf struct {
 // DnssecPolicyTtlsConf is the YAML `ttls:` subtree under a DNSSEC policy.
 type DnssecPolicyTtlsConf struct {
 	DNSKEY    string `yaml:"dnskey" mapstructure:"dnskey"`
-	MaxServed string `yaml:"max_served" mapstructure:"max_served"`
+	MaxServed string `yaml:"max-served" mapstructure:"max-served"`
 	// ParentDS is an optional override for the parent's DS RRset TTL when
 	// the engine cannot observe it (parent unreachable at zone init,
 	// testbed determinism, registries that gate DS queries). Used by the
@@ -802,9 +919,14 @@ type DelegationSyncStatus struct {
 	DNSKEYRemoves []dns.RR `json:"-"`
 	DSAdds        []dns.RR `json:"-"`
 	DSRemoves     []dns.RR `json:"-"`
-	Error         bool
-	ErrorMsg      string
-	UpdateResult  UpdateResult // Experimental
+	// NewDSKnown reports whether NewDS is an answer. An empty NewDS means
+	// "withdraw the DS" when this is set and "no opinion about DS" when it is
+	// not; the two are opposite instructions that look identical as a nil
+	// slice, so the flag travels with the field and must be read first.
+	NewDSKnown   bool `json:"-"`
+	Error        bool
+	ErrorMsg     string
+	UpdateResult UpdateResult // Experimental
 	// Complete new delegation data for replace mode
 	NewNS   []dns.RR `json:"-"`
 	NewA    []dns.RR `json:"-"`
@@ -1106,7 +1228,7 @@ type KeyDB struct {
 	// OutboundSoaSerialMode()/SetOutboundSoaSerial(), never directly.
 	outboundSoaSerial atomic.Pointer[string]
 	// transferSrc is the server-global source address list for outbound zone
-	// transfers (dnsengine.transfer_src). Per-zone ZoneData.TransferSrc wins;
+	// transfers (authengine.transfer-src). Per-zone ZoneData.TransferSrc wins;
 	// see zd.EffectiveTransferSrc(). Same reload-vs-read exposure as the two
 	// above; access via TransferSrcList()/SetTransferSrc().
 	transferSrc atomic.Pointer[[]string]

@@ -27,7 +27,7 @@ func newMapZone(name string, ztype ZoneType, owners map[string][]dns.RR) *ZoneDa
 		ZoneType:  ztype,
 		ZoneStore: MapZone,
 		Ready:     true,
-		Data:      core.NewCmap[OwnerData](),
+		Data:      core.NewNameMap[OwnerData](),
 		Options:   map[ZoneOption]bool{},
 	}
 	for oname, rrs := range owners {

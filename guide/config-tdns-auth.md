@@ -2,7 +2,8 @@
 
 `tdns-auth` is the TDNS authoritative nameserver. This page starts from the
 smallest config that runs and then covers, in turn: TSIG keys, the two address
-ACLs, zone declarations and the template system, the `dnsengine:` block, and
+ACLs, zone declarations and the template system, the `listeners:` and
+`authengine:` blocks, and
 DNSSEC policies.
 
 Read [Configuration Guide](configuration.md) first for the conventions that
@@ -14,13 +15,13 @@ apply to every TDNS application (config file location, `include:`, the
 - [ACL configuration](#acl-configuration)
 - [Zone declarations](#zone-declarations)
 - [Zone templates](#zone-templates)
-- [The dnsengine block](#the-dnsengine-block)
+- [The listeners and authengine blocks](#the-listeners-and-authengine-blocks)
 - [DNSSEC policies](#dnssec-policies)
 
 ## Minimal working example
 
 `tdns-auth` validates five sections at startup and refuses to run if any
-required key in them is missing: `service`, `dnsengine`, `apiserver`, `db` and
+required key in them is missing: `service`, `listeners`, `apiserver`, `db` and
 `log`. The following is the whole config for a server that listens on one IPv4
 and one IPv6 address and serves a single zone as primary.
 
@@ -28,7 +29,7 @@ and one IPv6 address and serves a single zone as primary.
 service:
    name:  TDNS-AUTH               # required
 
-dnsengine:
+listeners:
    addresses:   [ 127.0.0.1:5354, '[::1]:5354' ]   # required
    transports:  [ do53 ]                           # required
 
@@ -67,7 +68,7 @@ likewise required — there is no way to run tdns-auth without its management AP
 being configured, though you may point it at loopback.
 
 **`transports: [ do53 ]` needs no certificate, but `dot`, `doh` and `doq` all
-need `dnsengine.certfile`/`keyfile`.** If those are missing, the encrypted
+need `listeners.certfile`/`keyfile`.** If those are missing, the encrypted
 listeners are quietly skipped while Do53 keeps working.
 
 **Without `downstreams:` no one can transfer the zone.** An empty or absent
@@ -78,6 +79,11 @@ refuse its own secondaries until you say otherwise. See
 
 Zones are usually kept in a separate file and pulled in with `include:`; see
 [`auth-zones.sample.yaml`](../cmdv2/auth/auth-zones.sample.yaml).
+
+If zones come from *more than one* file — a hand-written set plus a generated
+one, say — note that an ordinary include **replaces** the `zones:` list rather
+than adding to it. Use `- {file: ..., merge: true}` to combine them; see
+[Includes](configuration.md#conventions-common-to-all-tdns-applications).
 
 ## TSIG configuration
 
@@ -315,10 +321,10 @@ produce disallowed mechanisms (dead entry), and `tls-dane` without the IMR
 each log a warning.
 
 There is deliberately **no listener-level client-certificate policy** in
-`dnsengine:`. The auth DoT listener always *requests* (never requires) a
+`listeners:`. The auth DoT listener always *requests* (never requires) a
 client certificate, so a secondary that has one presents it and everyone
 else is unaffected; verification happens per zone as above. To refuse
-non-TLS traffic entirely, restrict `dnsengine.transports:`.
+non-TLS traffic entirely, restrict `listeners.transports:`.
 
 Provisioning the certificates — including the one-shot `tdns-cli cert
 init` and upgrading existing self-signed certs — is covered in
@@ -403,6 +409,187 @@ not sign.
 | `fold-case` | Case-insensitive owner-name matching |
 | `black-lies` | Compact denial of existence: synthesize a minimally covering NSEC rather than serving precomputed NSEC records |
 | `add-transport-signal` | Synthesize SVCB transport-signal RRs into the Additional section |
+| `publish-zonemd` | Maintain the apex ZONEMD RRset (RFC 8976). See below |
+| `verify-zonemd` | Check a zone's apex ZONEMD before adopting it, on every load and inbound transfer. See below |
+
+### `publish-zonemd`
+
+The server computes the zone's message digest inside every publish, over the
+snapshot that publish is about to install, and signs it with the rest of the
+zone. `ZONEMD.Serial` therefore always equals the SOA serial being served, and
+the digest always describes the zone the recipient just received -- over AXFR,
+over IXFR, or from the zone file.
+
+It works on unsigned zones too; it is not part of the DNSSEC policy.
+
+Parameters go in a per-zone `zonemd:` block, which is only read when the option
+is set:
+
+```yaml
+zones:
+   - name:      example.com.
+     zonefile:  /etc/tdns/zones/example.com.zone
+     type:      primary
+     options:   [ publish-zonemd ]
+     zonemd:
+        algorithms: [ 1 ]   # 1 = SHA-384 (default), 2 = SHA-512
+        scheme:     1       # SIMPLE; the only scheme RFC 8976 defines
+```
+
+An empty block, or none, means SIMPLE/SHA-384 -- the mandatory-to-implement
+algorithm and the one every published ZONEMD in the wild uses. Listing several
+algorithms publishes one ZONEMD RR per algorithm. A block the server cannot
+make sense of drops the OPTION rather than the zone: the zone keeps serving,
+without a digest, and says so in `tdns-cli auth zone list`.
+
+While the option is set the apex ZONEMD belongs to the server. A DNS UPDATE or
+API update that tries to write it is refused, and `update delete <apex>` retains
+it the way it retains SOA and NS.
+
+**Cost, and the wire cache.** The digest is a single hash over every record in
+the zone, and RFC 8976 offers no way to update one incrementally, so every
+publish is O(zone). Two things bring that down.
+
+`publish-cadence` coalesces a burst of updates into one publish, so the cost is
+per-publish and not per-update; a large zone under continuous dynamic update
+wants it raised.
+
+And the server keeps each owner name's records in their canonical wire form, so
+a publish re-renders only the names it changed. Rendering is the expensive half
+of a digest — measured at 17x on a 10,000-record zone where one name changed —
+and it is what `wire-cache-max-bytes` bounds:
+
+```yaml
+     zonemd:
+        wire-cache-max-bytes: 67108864   # 0/unset = 64 MiB, negative = off
+```
+
+Same convention as `ixfr-chain-max-bytes`: **0 or unset takes the default,
+negative disables caching entirely.**
+
+The budget exists because the saving and the memory cost both scale with zone
+size, so the zones that gain most are the ones that can least afford it — and
+on a PQ-signed zone an RRSIG's RDATA is kilobytes rather than a hundred bytes.
+A byte budget is self-selecting: an ordinary zone never reaches it and gets the
+whole benefit, while a zone larger than the budget caches what fits and
+re-renders the remainder, so the saving degrades in proportion rather than
+disappearing.
+
+**This is a PER-ZONE figure and does not bound the host's memory.** A server
+with many large zones multiplies it; size the number accordingly, or set it
+per-zone on the few zones that are large.
+
+`tdns-cli auth zone zonemd status` reports both halves of the trade — what the
+cache holds, what a full cache would need, and how long the last digest took —
+so it can be tuned from measurements:
+
+```
+   wire cache:     41.2 MiB of 64.0 MiB budget, 812004 of 812004 owners
+   last digest:    186ms, 812001 of 812004 owners reused
+```
+
+The cache is used by the publish path only. `zone zonemd verify` and the
+`verify-zonemd` check below always rebuild from the records: a verification
+that read cached bytes would be verifying the cache rather than the zone.
+
+**Turning it off.** Removing the option removes the record: the next publish
+takes the server's ZONEMD out and restitches the apex NSEC bitmap. Do it while
+the server is running -- a config reload is enough. After a restart the server
+can no longer tell its own ZONEMD from one you wrote by hand, so it leaves
+whatever the zone file holds alone, and you would have to delete the record
+from the file yourself.
+
+A ZONEMD you wrote into the zone file of a zone that does not carry the option
+is your record throughout: the server never rewrites or removes it.
+
+**Secondaries.** `publish-zonemd` originates content, so `tdns-auth` strips it
+from a secondary that mirrors an upstream zone, with the usual "secondary zone
+may not originate content" message. An inline-signing secondary keeps it: it
+re-signs what it receives, so any digest from upstream is already invalid for
+what it serves.
+
+### `verify-zonemd`
+
+Check the apex ZONEMD before adopting a zone -- on every load from the zone
+file and every inbound transfer. The check runs on the zone that has just
+arrived and not yet been published, which is the last moment at which the
+answer can still change what the server does.
+
+The case it exists for is a secondary. A secondary cannot re-derive a digest it
+was not given, so checking the one it *was* given is the only assurance it has
+that what it is about to serve is what its primary published. It is not
+stripped on a mirroring secondary, unlike `publish-zonemd`: verifying what you
+received is not originating anything.
+
+```yaml
+zones:
+   - name:      example.com.
+     type:      secondary
+     options:   [ verify-zonemd ]
+     zonemd:
+        on-verify-failure: refuse   # refuse (default) | warn
+```
+
+**What counts as a failure.** Only a digest that this build can check and that
+does not describe the zone. Specifically:
+
+| Zone state | Result |
+|------------|--------|
+| No apex ZONEMD | Adopted. The option says "check the digest if there is one" |
+| Digest verifies | Adopted |
+| Digest does not verify | Refused (or adopted with a loud log, under `warn`) |
+| ZONEMD names a different serial than the SOA | Refused: RFC 8976 binds the digest to a serial |
+| Scheme or hash algorithm not implemented here | Adopted, with a warning. Reserved and unknown codepoints are how a publisher says "not for you"; refusing would make every future algorithm an outage |
+| Two ZONEMD RRs with the same scheme and algorithm | Refused: the pair is what names which digest was checked |
+
+A refusal is not final. The server keeps serving what it already had, the
+refresh engine records a `refresh` error, and the next refresh tries again --
+so a primary that fixes its digest is picked up without intervention.
+
+`on-verify-failure: warn` adopts the zone and logs at ERROR. It is for the
+rollout, where the first thing to find out is whether your own primaries would
+have passed.
+
+**What it attests, and when.** The check runs at the moment a zone is adopted,
+on the content that arrived. For a secondary that mirrors an upstream, that is
+the whole story: the zone it serves is the zone it verified.
+
+On a **primary** it is not a continuous attestation of what is being served.
+Anything that changes the zone after adoption — a replayed delta journal, a
+DDNS or API update, transport-signal synthesis — changes content the check
+never saw. That is not a gap in the check; it is what those features do. A
+primary with `publish-zonemd` recomputes its own digest on the next publish
+anyway, which is the attestation that matters there; `verify-zonemd` on a
+primary tells you only that the FILE it loaded was internally consistent.
+
+### Checking a ZONEMD by hand
+
+```bash
+tdns-cli auth zone zonemd status -z example.com.
+```
+
+reports what the zone publishes and how it is configured, without recomputing
+anything.
+
+```bash
+tdns-cli auth zone zonemd verify -z example.com.
+```
+
+digests the zone as served and compares, the way a recipient would. It exits
+non-zero when the digest does not verify, so it works in a check script. Add
+`--ignore-serial` to digest against the serial each ZONEMD *names* rather than
+the SOA's -- a diagnostic for a zone digested before its serial moved, not a
+laxer check.
+
+To check somebody else's zone, `dog` verifies what it transfers:
+
+```bash
+dog @ns.example.com AXFR example.com. +tcp +zonemd
+```
+
+which also exits non-zero on a zone that fails. `+zonemd` needs an AXFR: an
+IXFR returns a difference rather than a zone, and `dog` refuses instead of
+digesting one.
 
 **Multi-provider and catalog**
 
@@ -471,10 +658,15 @@ supplies only what the zone left unset. Four rules qualify that.
 `name:` and `template:` are never copied from a template. A template may itself
 set `template:` to inherit from another; cycles are detected and rejected.
 
-## The dnsengine block
+## The listeners and authengine blocks
+
+What used to be one `dnsengine:` block is two since #446: `listeners:` is
+WHERE the server's DNS service listens (the same schema in every tdns app),
+and `authengine:` is the authoritative-serving BEHAVIOR. The old keys are
+hard startup errors carrying this key-for-key mapping.
 
 ```yaml
-dnsengine:
+listeners:
    addresses:   [ 127.0.0.1:5354, '[::1]:5354' ]
    transports:  [ do53, dot, doh, doq ]
    ports:
@@ -483,26 +675,32 @@ dnsengine:
       doq:   [ 853 ]
    certfile:  /etc/tdns/certs/server.crt
    keyfile:   /etc/tdns/certs/server.key
-   outbound_soa_serial:  keep
+   # The embedded resolver is internal; a loopback-only debug window into
+   # its cache (dog @127.0.0.1:5959 name type +norec, ANY for all RRsets):
+   # imr-debug-address: 127.0.0.1:5959
+
+authengine:
+   outbound-soa-serial:  keep
    options:
       - minimal-responses
 ```
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `addresses` | — | **required**. Do53 listen sockets, each `addr:port`. The host part is reused for the encrypted transports |
-| `transports` | — | **required**. Any of `do53`, `dot`, `doh`, `doq`. `do53` is added even if omitted |
-| `certfile` / `keyfile` | — | required for `dot`/`doh`/`doq`; if absent those listeners do not start |
-| `ports.dot` | `853` | listen ports for DoT |
-| `ports.doh` | `443` | listen ports for DoH |
-| `ports.doq` | `853` | listen ports for DoQ (only 853 is truly supported) |
-| `outbound_soa_serial` | `keep` | `keep`, `unixtime` or `persist` |
-| `options` | — | server-wide options, below |
+| `listeners.addresses` | — | **required**. Do53 listen sockets, each `addr:port`. The host part is reused for the encrypted transports |
+| `listeners.transports` | — | **required**. Any of `do53`, `dot`, `doh`, `doq`. `do53` is added even if omitted |
+| `listeners.certfile` / `keyfile` | — | required for `dot`/`doh`/`doq`; if absent those listeners do not start |
+| `listeners.ports.dot` | `853` | listen ports for DoT (numbers, not strings) |
+| `listeners.ports.doh` | `443` | listen ports for DoH |
+| `listeners.ports.doq` | `853` | listen ports for DoQ (only 853 is truly supported) |
+| `listeners.imr-debug-address` | — | loopback-only DNS window into the embedded resolver's cache; non-loopback is a hard error |
+| `authengine.outbound-soa-serial` | `keep` | `keep`, `unixtime` or `persist` |
+| `authengine.options` | — | server-wide options, below |
 
-`ports.do53` is **not read**. Do53 always listens on the ports embedded in
+`ports.do53` does not exist. Do53 always listens on the ports embedded in
 `addresses`.
 
-`outbound_soa_serial` controls the SOA serial advertised to secondaries.
+`outbound-soa-serial` controls the SOA serial advertised to secondaries.
 `keep` sends the inbound serial unchanged. `unixtime` uses the load time.
 `persist` remembers the last serial in the database, so a restart with no zone
 change does not regress the serial and does not provoke a needless AXFR — the
@@ -520,7 +718,7 @@ Two `options:` values are recognized:
 ## DNSSEC policies
 
 All DNSSEC configuration lives under one top-level `dnssec:` block with six
-sub-keys: `completeness`, `large_algorithms`, `split_algorithms`, `templates`,
+sub-keys: `completeness`, `large-algorithms`, `split-algorithms`, `templates`,
 `policies` and `kasp`.
 
 A zone selects one policy by name with `dnssecpolicy: <name>`. If the config
@@ -552,7 +750,7 @@ dnssec:
             parent-agent:  127.0.0.1:5354 # required when method != none
          ttls:
             dnskey:      2h
-            # max_served: 5m
+            # max-served: 5m
          clamping:
             enabled:  true
             margin:   1h           # REQUIRED when enabled
@@ -609,7 +807,7 @@ from it.
 Templates are not usable policies. A zone cannot reference one, and an unknown
 template name quarantines just that policy.
 
-### split_algorithms
+### split-algorithms
 
 A policy whose KSK and ZSK algorithms differ is **rejected at config load**
 unless that exact pair is allowlisted. This fails closed, so an accidental
@@ -617,7 +815,7 @@ mismatch is caught rather than silently deployed.
 
 ```yaml
 dnssec:
-   split_algorithms:
+   split-algorithms:
       RSASHA512: [ ED25519, ECDSAP256SHA256 ]
 ```
 
@@ -626,13 +824,13 @@ that KSK may pair with. Policies using the same algorithm for both roles always
 work and need no entry. An algorithm name this binary does not know is skipped
 with a warning — which means the pair it would have permitted stays forbidden.
 
-### large_algorithms
+### large-algorithms
 
 Algorithms whose DNSKEY and RRSIG payloads are large for UDP.
 
 ```yaml
 dnssec:
-   large_algorithms: [ RSASHA512, MLDSA87, FALCON1024 ]
+   large-algorithms: [ RSASHA512, MLDSA87, FALCON1024 ]
 ```
 
 Listing an algorithm here makes the internal resolver fetch a child zone's
@@ -666,10 +864,10 @@ key signing through the drain window. An unknown value is a hard config error.
 
 | Key | Default |
 |-----|---------|
-| `propagation_delay` | `1h` |
-| `check_interval` | `1m` |
-| `standby_zsk_count` | `1` |
-| `standby_ksk_count` | `0` |
+| `propagation-delay` | `1h` |
+| `check-interval` | `1m` |
+| `standby-zsk-count` | `1` |
+| `standby-ksk-count` | `0` |
 
 For the rollover machinery these policies drive, see
 [Automatic DNSSEC Rollovers](key-rollover.md) and

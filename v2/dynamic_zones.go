@@ -226,7 +226,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			if perr != nil {
 				lg.Error("dynamic primary: config invalid, zone in error state", "zone", zoneName, "template", zconf.Template, "err", perr)
 				zd := &ZoneData{
-					ZoneName:  zoneName,
+					ZoneName:  core.CanonicalizeName(zoneName),
 					ZoneType:  Primary,
 					ZoneStore: MapZone,
 					Zonefile:  zconf.Zonefile,
@@ -234,7 +234,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 					Logger:    log.Default(),
 					Options:   options,
 					Status:    ZoneStatusPending,
-					Data:      core.NewCmap[OwnerData](),
+					Data:      core.NewNameMap[OwnerData](),
 					KeyDB:     conf.Internal.KeyDB,
 				}
 				Zones.Set(zoneName, zd)
@@ -646,9 +646,18 @@ func (conf *Config) RemoveDynamicZoneFromConfig(zoneName string) error {
 // zones are loaded at startup by LoadDynamicZoneFiles (which re-derives the
 // ApiManaged/SourceCatalog markers and, for template primaries, re-expands the
 // template); including the file additionally routes them through ParseZones,
-// which loses the markers (the zones degrade to looking static) — and the
-// include merge OVERRIDES list-valued keys, so a dynamic file carrying zones:
-// clobbers the zones: of any other config file. Returns true if included.
+// which loses the markers, and the zones degrade to looking static. Returns
+// true if included.
+//
+// The warning used to carry a second reason: that the include merge overrode
+// list-valued keys, so a dynamic file carrying zones: clobbered the zones: of
+// every other config file. That is no longer the whole story — an include can
+// now ask to merge instead — but it does not make the situation better. A
+// bare include still replaces, which is the old clobber; and one that asks to
+// merge keeps both sets while still stripping the dynamic zones of their
+// markers, which trades a loud failure for a quiet one. Either way the answer
+// is the same: do not include this file.
+//
 // (Historical note: this check used to warn in the opposite direction, from
 // before LoadDynamicZoneFiles owned the boot path.)
 func (conf *Config) CheckDynamicConfigFileIncluded(includedFiles []string) bool {
@@ -662,7 +671,7 @@ func (conf *Config) CheckDynamicConfigFileIncluded(includedFiles []string) bool 
 	for _, includedFile := range includedFiles {
 		includedFileAbs := filepath.Clean(includedFile)
 		if configFileAbs == includedFileAbs {
-			lg.Warn("dynamiczones.configfile is listed in include:; remove it — dynamic zones load at startup on their own, and the include path both drops their API-managed/catalog markers and overrides any zones: list from other config files", "path", conf.DynamicZones.ConfigFile)
+			lg.Warn("dynamiczones.configfile is listed in include:; remove it — dynamic zones load at startup on their own, and routing them through the include path drops their API-managed/catalog markers so they degrade to looking static. Merging the include does not help: it keeps both zone sets and still strips the markers", "path", conf.DynamicZones.ConfigFile)
 			return true
 		}
 	}
@@ -689,7 +698,7 @@ type DynamicZoneInput struct {
 	TsigSecret string
 	TsigAlgo   string
 	// TransferSrc is the per-zone outbound-transfer source address. Optional;
-	// empty inherits dnsengine.transfer_src. On modify, nil means "leave as is"
+	// empty inherits authengine.transfer-src. On modify, nil means "leave as is"
 	// and a non-nil empty slice means "clear" -- the two are distinguishable
 	// because the caller built this struct, so the distinction is honest here
 	// in a way a JSON round-trip alone would not be.
@@ -898,7 +907,7 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// Store is always map for dynamic zones — single chokepoint for the map-only
 	// rule (also covers the catalog re-point).
 	zd := &ZoneData{
-		ZoneName:      name,
+		ZoneName:      core.CanonicalizeName(name),
 		ZoneType:      in.Type,
 		ZoneStore:     MapZone,
 		PrimariesConf: primariesConf,
@@ -906,7 +915,7 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		Logger:        log.Default(),
 		Options:       options,
 		Status:        ZoneStatusPending,
-		Data:          core.NewCmap[OwnerData](),
+		Data:          core.NewNameMap[OwnerData](),
 		KeyDB:         conf.Internal.KeyDB,
 		// Set HERE, not only on the ZoneRefresher below. AddDynamicZoneToConfig
 		// persists from the live Zones map, and it runs before the refresh is
@@ -1017,6 +1026,21 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 			lg.Warn("RemoveDynamicZone: failed to remove zone file", "zone", name, "path", zoneFilePath, "error", err)
 		}
 	}
+	// Drop the zone's refresh confirmation. Not housekeeping: a stamp that
+	// outlives its zone is inherited by the next zone created under the same
+	// name, and an already-past-expire one would take that zone dark from its
+	// first bind -- worse than the no-stamp case, which starts a fresh budget.
+	//
+	// Scoped to this table on purpose. ZoneFileState and ZoneDelta rows also
+	// outlive their zones today; that is pre-existing, harmless (the digest
+	// verdict rejects a stale row rather than replaying its journal onto an
+	// unrelated base), and sweeping them is its own change.
+	if conf.Internal.KeyDB != nil {
+		if err := conf.Internal.KeyDB.DeleteZoneRefreshState(name); err != nil {
+			lg.Warn("RemoveDynamicZone: failed to remove refresh state", "zone", name, "error", err)
+		}
+	}
+
 	// Also the zone's actual file when it differs (a template-expanded
 	// primary's file lives at the template's pattern path, not under
 	// zonedirectory:). An API-managed zone is disposable by construction.
@@ -1040,7 +1064,7 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 //
 // nil means the caller said nothing: keep what the zone has. A non-nil slice
 // REPLACES, including a non-nil empty one, which clears the per-zone value so
-// the zone falls back to dnsengine.transfer_src. Collapsing those two into
+// the zone falls back to authengine.transfer-src. Collapsing those two into
 // "empty means unchanged" would make a per-zone setting impossible to remove
 // without deleting and re-adding the zone -- which for a secondary means
 // dropping and re-pulling it.
@@ -1177,7 +1201,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	suppressedOptions = normSuppressed
 
 	newZd := &ZoneData{
-		ZoneName:       name,
+		ZoneName:       core.CanonicalizeName(name),
 		ZoneType:       oldZd.ZoneType,
 		ZoneStore:      MapZone,
 		PrimariesConf:  primariesConf,
@@ -1189,7 +1213,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		Logger:         log.Default(),
 		Options:        options,
 		Status:         ZoneStatusPending,
-		Data:           core.NewCmap[OwnerData](),
+		Data:           core.NewNameMap[OwnerData](),
 		KeyDB:          conf.Internal.KeyDB,
 
 		OutboundSoaSerial: outboundSoaSerial,

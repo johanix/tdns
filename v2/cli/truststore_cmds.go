@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
@@ -155,7 +156,7 @@ func sig0TrustMgmt(role, subcommand string) {
 				fmt.Printf("Error: keyfile %s is not a KEY RR\n", childSig0Src)
 				os.Exit(1)
 			}
-			if keyrr.Header().Name != tdns.Globals.Zonename {
+			if !core.EqualNames(keyrr.Header().Name, tdns.Globals.Zonename) {
 				fmt.Printf("Error: key %s does not match zone name %s\n", keyrr.Header().Name, tdns.Globals.Zonename)
 				os.Exit(1)
 			}

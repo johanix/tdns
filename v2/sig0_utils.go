@@ -84,9 +84,9 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 		return fmt.Errorf("error: Keyfile not specified, signing update not possible")
 	}
 
-	rcode, _, err := SendUpdate(smsg, Globals.ParentZone, dsynctarget.Addresses)
+	rcode, _, err := SendUpdate(ctx, smsg, Globals.ParentZone, dsynctarget.Addresses)
 	if err != nil {
-		return fmt.Errorf("error from SendUpdate(%v): %v", dsynctarget, err)
+		return fmt.Errorf("error from SendUpdate(ctx, %v): %v", dsynctarget, err)
 	}
 	// SendUpdate reports a parent REJECTION through the rcode with a nil error
 	// (only a transport failure is an error), so the rcode must be checked
@@ -194,7 +194,7 @@ func GenerateKeyMaterial(owner string, rrtype uint16, alg uint8, keytype string)
 		pkc.PrivateKey = privkeyPEM
 
 	case "external":
-		keygenprog := viper.GetString("delegationsync.child.update.keygen.generator")
+		keygenprog := DelegationSyncConfig().Child.Update.Keygen.Generator
 		if keygenprog == "" {
 			return nil, fmt.Errorf("error: key generator program not specified (keygenprog=%s, modekey=%s)", keygenprog, modekey)
 		}

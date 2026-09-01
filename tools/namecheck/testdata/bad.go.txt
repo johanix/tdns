@@ -1,0 +1,44 @@
+package fixture
+
+import (
+	"strings"
+
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
+)
+
+// keyfold: a map key built by a lossy fold, directly.
+func keyDirect(rrs []dns.RR, out map[string][]dns.RR) {
+	for _, rr := range rrs {
+		out[dns.CanonicalName(rr.Header().Name)] = nil
+	}
+}
+
+// keyfold: folded into a local, then used as a key two statements later.
+func keyViaLocal(name string, m map[string]bool) bool {
+	k := dns.CanonicalName(name)
+	return m[k]
+}
+
+// keyfold: a helper that RETURNS a key. No map in sight.
+func zoneNameKey(name string) string {
+	return strings.ToLower(dns.Fqdn(name))
+}
+
+// foldpair: tested through a fold, trimmed unfolded.
+func stripPrefix(owner string) string {
+	if strings.HasPrefix(core.CanonicalizeName(owner), "_dns.") {
+		return strings.TrimPrefix(owner, "_dns.")
+	}
+	return owner
+}
+
+// namecmp: Unicode folding on a domain name.
+func sameZone(qname, zonename string) bool {
+	return strings.EqualFold(qname, zonename)
+}
+
+// namecmp: a byte suffix as a bailiwick test.
+func inZone(qname, zonename string) bool {
+	return strings.HasSuffix(qname, zonename)
+}

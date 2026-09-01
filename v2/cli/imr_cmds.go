@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strconv"
@@ -230,7 +231,7 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 		}
 		if len(args) == 1 {
 			zone := dns.Fqdn(args[0])
-			serverMap, ok := Conf.Internal.RRsetCache.ServerMap.Get(zone)
+			serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(zone)
 			if !ok {
 				fmt.Printf("No auth servers recorded for zone %q\n", zone)
 				return
@@ -248,7 +249,10 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 		fmt.Printf("Auth server transport counters for all zones\n")
 		for item := range Conf.Internal.RRsetCache.ServerMap.IterBuffered() {
 			zone := item.Key
-			serverMap := item.Val
+			serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(zone)
+			if !ok {
+				continue // removed between the iteration and the copy
+			}
 			fmt.Printf("\nZone: %s\n", zone)
 			for name, server := range serverMap {
 				fmt.Printf("  Server: %s\n", name)
@@ -293,6 +297,29 @@ var imrFlushAllCmd = &cobra.Command{
 
 func newFlushRunner(keepStructural bool) func(cmd *cobra.Command, args []string) {
 	return func(cmd *cobra.Command, args []string) {
+		// ONE COMMAND, TWO PROCESSES.
+		//
+		// ImrFlushCmd is registered into tdns-imr (cmdv2/imr/shared_cmds.go)
+		// and into tdns-cli (ImrCmd below) -- the same *cobra.Command value in
+		// two binaries. Under "tdns-imr --cli" the shell runs inside the
+		// daemon, so Conf.Internal.RRsetCache IS the live cache and flushing
+		// it in-process is exactly right. In tdns-cli it is a different
+		// process: the cache is nil and always will be, so the in-process path
+		// could only ever print "RRset cache is not initialized" -- which is
+		// what it did.
+		//
+		// So dispatch rather than replace. Both conditions, deliberately: the
+		// app type says which binary this is, and the nil check says we are
+		// not holding a cache we could flush directly. Anything else falls
+		// through to the in-process path, which is the behaviour that works
+		// today. The daemon must never be sent down the API branch -- it would
+		// be a TLS loopback call to itself, needing client config and an
+		// apikey a daemon has no reason to carry, to reach a cache it already
+		// holds a pointer to.
+		if flushViaApiWanted() {
+			flushViaApi(cmd, args, keepStructural)
+			return
+		}
 		if Conf.Internal.RRsetCache == nil {
 			fmt.Println("RRset cache is not initialized")
 			return
@@ -331,10 +358,10 @@ var imrShowConfigCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("IMR configuration summary:")
 
-		if len(Conf.Imr.Addresses) == 0 {
+		if len(Conf.Listeners.Addresses) == 0 {
 			fmt.Println("  Listening addresses: (none configured)")
 		} else {
-			fmt.Printf("  Listening addresses: %s\n", strings.Join(Conf.Imr.Addresses, ", "))
+			fmt.Printf("  Listening addresses: %s\n", strings.Join(Conf.Listeners.Addresses, ", "))
 		}
 
 		primed := false
@@ -469,6 +496,78 @@ func renderSignalFromWeights(weights map[core.Transport]uint8) string {
 		return "do53=100"
 	}
 	return strings.Join(parts, ",")
+}
+
+// flushViaApi flushes the cache of a SEPARATE tdns-imr daemon, for the case
+// where this process has no cache of its own to flush.
+//
+// The role is "imr", the same one the forward and stub trees already use
+// against the standalone daemon.
+
+// flushViaApiWanted reports whether this process has to ask a DAEMON to flush
+// rather than flushing a cache of its own.
+//
+// Both conditions, deliberately. The app type says which binary this is; the
+// nil check says we are not holding a cache we could flush directly. Anything
+// else falls through to the in-process path, which is the behaviour that works
+// today -- so an unset app type, or a daemon that has not built its cache yet,
+// stays where it was rather than being routed somewhere new.
+func flushViaApiWanted() bool {
+	return tdns.Globals.App.Type == tdns.AppTypeCli && Conf.Internal.RRsetCache == nil
+}
+
+func flushViaApi(cmd *cobra.Command, args []string, keepStructural bool) {
+	if len(args) == 0 {
+		fmt.Println("Error: domain name is required")
+		cmd.Help()
+		return
+	}
+	domain := dns.Fqdn(args[0])
+	if strings.TrimSuffix(domain, ".") == "" {
+		fmt.Println("Refusing to flush the root zone")
+		return
+	}
+	if _, ok := dns.IsDomainName(strings.TrimSuffix(domain, ".")); !ok {
+		fmt.Printf("Not a valid domain name: %q\n", args[0])
+		return
+	}
+
+	if err := SendImrFlush(cmd.Context(), "imr", domain, keepStructural); err != nil {
+		fmt.Printf("%v\n", err)
+	}
+}
+
+// SendImrFlush asks one daemon to flush, and checks that it did what was asked.
+//
+// Shared by every API-backed flush -- the top-level "tdns-cli imr flush" and
+// the role-scoped "tdns-cli auth|agent imr flush" -- because the old-daemon
+// detection below must not exist in one path and be forgotten in the other.
+func SendImrFlush(ctx context.Context, role, qname string, keepStructural bool) error {
+	amr, err := SendImrMgmtCmd(ctx, role, &tdns.ImrMgmtPost{
+		Command: "imr-flush",
+		Data: map[string]interface{}{
+			"qname":           qname,
+			"keep_structural": keepStructural,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("Request failed: %v", err)
+	}
+	if amr.Error {
+		return fmt.Errorf("Error: %s", amr.ErrorMsg)
+	}
+	fmt.Println(amr.Msg)
+
+	// A daemon that predates keep_structural ignores the key and flushes
+	// everything. It cannot report an error for a field it never read, so the
+	// only evidence is what it says it did -- and getting MORE flushed than
+	// was asked for must not pass silently.
+	if keepStructural && !strings.Contains(amr.Msg, "non-structural") {
+		fmt.Println("WARNING: the daemon did not report a non-structural flush." +
+			" It is likely older than keep_structural and flushed the" +
+			" structural records too.")
+	}
+	return nil
 }
 
 var ImrSetCmd = &cobra.Command{

@@ -36,7 +36,7 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 			break
 		}
 		lgElect.Info("ParentSyncAfterKeyPublication: waiting for IMR engine", "zone", zone, "attempt", i+1)
-		if !sleepOrDone(ctx, 2*time.Second) {
+		if !waitOrDone(ctx, 2*time.Second) {
 			lgElect.Info("ParentSyncAfterKeyPublication: shutting down while waiting for the IMR engine",
 				"zone", zone)
 			return
@@ -282,7 +282,7 @@ func BootstrapWithParent(ctx context.Context, zone ZoneName, keyName string, alg
 	zd, ok := Zones.Get(keyName)
 	if !ok || zd == nil {
 		lgElect.Debug("BootstrapWithParent: zone not in Zones map, trying FindZone", "keyName", keyName)
-		zd, _ = FindZone(keyName)
+		zd = FindZone(keyName)
 	}
 	if zd == nil {
 		return fmt.Errorf("zone %s not found (available zones: %v)", keyName, Zones.Keys())

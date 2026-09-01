@@ -2,7 +2,6 @@ package tdns
 
 import (
 	"fmt"
-	"sort"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -27,9 +26,22 @@ func (zd *ZoneData) ensureWorkingSet() {
 	}
 }
 
+// cloneOwner returns a fresh, mutable copy of one owner in the working set.
+//
+// The working set is keyed canonically, like the snapshot it is built from, so
+// an update naming an owner in a different case than the zone file used reaches
+// the owner that is already there instead of creating a second one beside it.
+// The owner's own Name keeps a spelling that was actually published: an
+// existing owner keeps its own, and a name appearing here for the first time
+// keeps the caller's.
 func (zd *ZoneData) cloneOwner(name string) *OwnerData {
-	src := zd.workingSet[name]
-	nod := &OwnerData{Name: name, RRtypes: NewRRTypeStore()}
+	key := core.CanonicalizeName(name)
+	src := zd.workingSet[key]
+	stored := name
+	if src != nil {
+		stored = src.Name
+	}
+	nod := &OwnerData{Name: stored, RRtypes: NewRRTypeStore()}
 	if src != nil {
 		for _, t := range src.RRtypes.Keys() {
 			rs, _ := src.RRtypes.Get(t)
@@ -46,7 +58,7 @@ func (zd *ZoneData) cloneOwner(name string) *OwnerData {
 		// snapshot that is being served right now.
 		nod.NSEC = cloneRRset(src.NSEC)
 	}
-	zd.workingSet[name] = nod
+	zd.workingSet[key] = nod
 	return nod
 }
 
@@ -62,7 +74,7 @@ func (zd *ZoneData) stageDelete(name string, rrtype uint16) {
 
 func (zd *ZoneData) stageOwnerReplace(name string, od *OwnerData) {
 	zd.ensureWorkingSet()
-	zd.workingSet[name] = od
+	zd.workingSet[core.CanonicalizeName(name)] = od
 }
 
 func (zd *ZoneData) pendingChanges() *PendingChanges {
@@ -157,12 +169,12 @@ func rrsetEqual(a, b core.RRset) bool {
 
 func (zd *ZoneData) stagedOwner(name string) *OwnerData {
 	zd.ensureWorkingSet()
-	return zd.workingSet[name]
+	return zd.workingSet[core.CanonicalizeName(name)]
 }
 
 func (zd *ZoneData) getOrCreateWorkingOwner(name string) *OwnerData {
 	zd.ensureWorkingSet()
-	if od := zd.workingSet[name]; od != nil {
+	if od := zd.workingSet[core.CanonicalizeName(name)]; od != nil {
 		return od
 	}
 	return zd.cloneOwner(name)
@@ -183,10 +195,19 @@ func (zd *ZoneData) workingOwnerNamesLocked() []string {
 	// will accept and which no query against the signer will reveal, because
 	// denial is answered by compact denial rather than from the chain.
 	//
-	// The two differ whenever a label boundary falls inside a shared prefix:
-	// "ns.example." sorts after "alpha.example." canonically but before
-	// "clean.example." as a plain string.
-	sort.Slice(names, func(i, j int) bool { return canonicalOwnerLess(names[i], names[j]) })
+	// The two differ whenever a name is a SUFFIX of another rather than a
+	// prefix, which for a zone is every name in it against the apex: a
+	// lexicographic sort of `clean.example.` with `alpha` and `ns` beneath it
+	// puts the apex in the middle.
+	//
+	// Sorted on precomputed keys rather than by comparing names pairwise.
+	// canonicalOwnerLess allocates six times per comparison and this sort runs
+	// on every publish of every signed zone, so the cost is O(n log n)
+	// allocations where O(n) will do. canonicalSortKey's byte order IS
+	// canonical order, so the result is identical.
+	//
+	// Shared with the digest, which needs the same order over the same names.
+	canonicalOwnerOrder(names)
 	return names
 }
 
@@ -314,12 +335,12 @@ func (zd *ZoneData) stageDeleteLocked(name string, rrtype uint16) {
 
 func (zd *ZoneData) stageOwnerReplaceLocked(name string, od *OwnerData) {
 	zd.ensureWorkingSet()
-	zd.workingSet[name] = od
+	zd.workingSet[core.CanonicalizeName(name)] = od
 }
 
 func (zd *ZoneData) stageOwnerDeleteLocked(name string) {
 	zd.ensureWorkingSet()
-	delete(zd.workingSet, name)
+	delete(zd.workingSet, core.CanonicalizeName(name))
 }
 
 func (zd *ZoneData) publishLocked(gen uint64) {
@@ -402,6 +423,12 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 
 	zd.resignWorkingSetSOAIfSigned()
 
+	// Whether the apex carries a ZONEMD is settled BEFORE the restitch, so the
+	// apex NSEC bitmap describes the record set this snapshot will hold. The
+	// digest itself cannot be computed yet: it covers the NSEC records the
+	// restitch is about to write. See zonemd_publish.go.
+	zd.ensureZonemdPresenceLocked()
+
 	// The chain must describe the snapshot about to be published, so it is
 	// repaired HERE -- before the delta is computed and before the swap, so
 	// that secondaries receive the change together with the data that caused
@@ -409,6 +436,19 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// window in which the served chain contradicts the served zone.
 	if err := zd.restitchNsecLocked(); err != nil {
 		zd.refuseUnrepairableChainLocked(prevSerial, err)
+		return
+	}
+
+	// And now the digest, over a working set that is finally complete. This is
+	// the LAST step that may change zone content: everything below only reads
+	// the working set. Writing the ZONEMD RDATA and its RRSIG here cannot
+	// invalidate what was just computed, because ZoneDigest excludes both.
+	//
+	// A zone that cannot produce a digest is published WITHOUT one. The one
+	// case that refuses the publish is a chain left claiming a ZONEMD the zone
+	// no longer carries -- the same defect the restitch above refuses, reached
+	// from the other side.
+	if !zd.updateZonemdLocked(serial, prevSerial) {
 		return
 	}
 
@@ -465,7 +505,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 			// authored and offer .rejected artefacts full of them. It also
 			// reinstates the ghosts the property model removes, by putting
 			// NSEC back into an owner's RRtypes on replay.
-			removed, added = withoutDerivedRecords(removed), withoutDerivedRecords(added)
+			removed, added = zd.withoutDerivedRecords(removed), zd.withoutDerivedRecords(added)
 			if len(removed) > 0 || len(added) > 0 {
 				// What this delta chains FROM.
 				//
@@ -645,7 +685,6 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		}
 	}
 	zd.ApexLen = new_zd.ApexLen
-	zd.XfrType = new_zd.XfrType
 	zd.ZoneStore = new_zd.ZoneStore
 	zd.ZoneType = new_zd.ZoneType
 
@@ -660,8 +699,29 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		zd.wsSignalSynth = nil
 	}
 	zd.repopulateWorkingSetLocked(dynamicRRs)
-	// A refresh replaces zone data wholesale: new IXFR epoch, no delta.
-	zd.wsIxfrEpochReset = true
+	// A refresh normally replaces zone data wholesale, which is a new IXFR
+	// epoch by definition: nothing links the previous snapshot to this one, so
+	// any delta across the boundary could be wrong for some downstream.
+	//
+	// An inbound IXFR is the exception, and the reason §5 exists. Its content
+	// IS the previous snapshot plus a difference sequence, so the boundary is
+	// exactly the kind of step the chain is made of -- and a cascaded
+	// secondary can go on serving deltas to ITS downstreams across a refresh
+	// instead of forcing them all to AXFR.
+	//
+	// The link is not translated from the inbound format. updateIxfrChainLocked
+	// already diffs the outgoing snapshot against the data about to be
+	// published, so letting it run produces a link computed from what we
+	// actually served and are about to serve. That is stronger than relaying
+	// the primary's sequence verbatim: it cannot ship a delta that disagrees
+	// with our own content, whatever the primary sent.
+	//
+	// Non-signing only, per §5. A signing secondary re-signs on publish, and
+	// while the same diff would in principle capture that too, the interaction
+	// between signing, NSEC chain regeneration and the chain update is not
+	// something this project audited. Deferred to PR-2 deliberately rather
+	// than assumed safe.
+	zd.wsIxfrEpochReset = !(new_zd != nil && new_zd.ixfrDerived && !zd.signsItsOwnContent())
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 
 	// Only advertise the zone as Ready once a snapshot actually exists. If the

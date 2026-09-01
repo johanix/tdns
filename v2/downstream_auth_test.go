@@ -9,6 +9,7 @@
 package tdns
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -296,7 +297,7 @@ func TestDownstreamAuth_SecondaryPresentsClientCert(t *testing.T) {
 	peer := PeerConf{Addr: srv.addr, Key: NOKEY, Transport: TransportDoT,
 		TLSAuth: TLSAuthPin, Pins: []string{serverPin}}
 	sec := newTestSecondary(t, peer)
-	serial, err := sec.ZoneTransferIn(peer, 0, "axfr", conf)
+	serial, err := sec.ZoneTransferIn(context.Background(), peer, 0, "axfr", conf)
 	if err != nil {
 		t.Fatalf("secondary pull with client cert failed: %v", err)
 	}
@@ -307,7 +308,7 @@ func TestDownstreamAuth_SecondaryPresentsClientCert(t *testing.T) {
 	// Without the client identity the same pull must be refused.
 	confNoID := &Config{}
 	sec2 := newTestSecondary(t, peer)
-	if _, err := sec2.ZoneTransferIn(peer, 0, "axfr", confNoID); err == nil {
+	if _, err := sec2.ZoneTransferIn(context.Background(), peer, 0, "axfr", confNoID); err == nil {
 		t.Fatal("pull without a client cert must be refused under [tls-pkix]")
 	}
 }

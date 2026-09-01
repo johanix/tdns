@@ -1,0 +1,60 @@
+$ORIGIN a.ixfr.test.
+$TTL 3600
+a.ixfr.test.	3600	IN	SOA	ns-p.ixfr.test. hostmaster.a.ixfr.test. 1 7200 1800 604800 3600
+a.ixfr.test.	3600	IN	NS	ns-p.ixfr.test.
+ns-p.ixfr.test.	3600	IN	A	127.0.0.1
+host01.a.ixfr.test.	3600	IN	A	10.0.0.1
+host02.a.ixfr.test.	3600	IN	A	10.0.0.2
+host03.a.ixfr.test.	3600	IN	A	10.0.0.3
+host04.a.ixfr.test.	3600	IN	A	10.0.0.4
+host04.a.ixfr.test.	3600	IN	TXT	"filler record 4"
+host05.a.ixfr.test.	3600	IN	A	10.0.0.5
+host06.a.ixfr.test.	3600	IN	A	10.0.0.6
+host07.a.ixfr.test.	3600	IN	A	10.0.0.7
+host08.a.ixfr.test.	3600	IN	A	10.0.0.8
+host08.a.ixfr.test.	3600	IN	TXT	"filler record 8"
+host09.a.ixfr.test.	3600	IN	A	10.0.0.9
+host10.a.ixfr.test.	3600	IN	A	10.0.0.10
+host11.a.ixfr.test.	3600	IN	A	10.0.0.11
+host12.a.ixfr.test.	3600	IN	A	10.0.0.12
+host12.a.ixfr.test.	3600	IN	TXT	"filler record 12"
+host13.a.ixfr.test.	3600	IN	A	10.0.0.13
+host14.a.ixfr.test.	3600	IN	A	10.0.0.14
+host15.a.ixfr.test.	3600	IN	A	10.0.0.15
+host16.a.ixfr.test.	3600	IN	A	10.0.0.16
+host16.a.ixfr.test.	3600	IN	TXT	"filler record 16"
+host17.a.ixfr.test.	3600	IN	A	10.0.0.17
+host18.a.ixfr.test.	3600	IN	A	10.0.0.18
+host19.a.ixfr.test.	3600	IN	A	10.0.0.19
+host20.a.ixfr.test.	3600	IN	A	10.0.0.20
+host20.a.ixfr.test.	3600	IN	TXT	"filler record 20"
+host21.a.ixfr.test.	3600	IN	A	10.0.0.21
+host22.a.ixfr.test.	3600	IN	A	10.0.0.22
+host23.a.ixfr.test.	3600	IN	A	10.0.0.23
+host24.a.ixfr.test.	3600	IN	A	10.0.0.24
+host24.a.ixfr.test.	3600	IN	TXT	"filler record 24"
+host25.a.ixfr.test.	3600	IN	A	10.0.0.25
+host26.a.ixfr.test.	3600	IN	A	10.0.0.26
+host27.a.ixfr.test.	3600	IN	A	10.0.0.27
+host28.a.ixfr.test.	3600	IN	A	10.0.0.28
+host28.a.ixfr.test.	3600	IN	TXT	"filler record 28"
+host29.a.ixfr.test.	3600	IN	A	10.0.0.29
+host30.a.ixfr.test.	3600	IN	A	10.0.0.30
+host31.a.ixfr.test.	3600	IN	A	10.0.0.31
+host32.a.ixfr.test.	3600	IN	A	10.0.0.32
+host32.a.ixfr.test.	3600	IN	TXT	"filler record 32"
+host33.a.ixfr.test.	3600	IN	A	10.0.0.33
+host34.a.ixfr.test.	3600	IN	A	10.0.0.34
+host35.a.ixfr.test.	3600	IN	A	10.0.0.35
+host36.a.ixfr.test.	3600	IN	A	10.0.0.36
+host36.a.ixfr.test.	3600	IN	TXT	"filler record 36"
+host37.a.ixfr.test.	3600	IN	A	10.0.0.37
+host38.a.ixfr.test.	3600	IN	A	10.0.0.38
+host39.a.ixfr.test.	3600	IN	A	10.0.0.39
+host40.a.ixfr.test.	3600	IN	A	10.0.0.40
+host40.a.ixfr.test.	3600	IN	TXT	"filler record 40"
+srv1.a.ixfr.test.	3600	IN	AAAA	2001:db8::1
+srv2.a.ixfr.test.	3600	IN	AAAA	2001:db8::2
+srv3.a.ixfr.test.	3600	IN	AAAA	2001:db8::3
+srv4.a.ixfr.test.	3600	IN	AAAA	2001:db8::4
+srv5.a.ixfr.test.	3600	IN	AAAA	2001:db8::5

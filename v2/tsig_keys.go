@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -37,7 +38,7 @@ func (s *TsigKeyStore) Get(name string) (TsigDetails, bool) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	d, ok := s.keys[dns.CanonicalName(name)]
+	d, ok := s.keys[tsigKeyKey(name)]
 	return d, ok
 }
 
@@ -57,7 +58,7 @@ func (s *TsigKeyStore) Add(d TsigDetails) {
 	if s.keys == nil {
 		s.keys = make(map[string]TsigDetails)
 	}
-	s.keys[dns.CanonicalName(d.Name)] = d // canonical (lowercase FQDN) key, matches the wire name
+	s.keys[tsigKeyKey(d.Name)] = d // canonical (lowercase FQDN) key, matches the wire name
 }
 
 // Delete removes a key by name. Used to roll back an inline key that was staged
@@ -68,7 +69,7 @@ func (s *TsigKeyStore) Delete(name string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.keys, dns.CanonicalName(name))
+	delete(s.keys, tsigKeyKey(name))
 }
 
 // Names returns the set of defined key names (used to re-point the catalog
@@ -95,7 +96,7 @@ func (s *TsigKeyStore) ReplaceAll(keys []TsigDetails) {
 	defer s.mu.Unlock()
 	s.keys = make(map[string]TsigDetails, len(keys))
 	for _, d := range keys {
-		s.keys[dns.CanonicalName(d.Name)] = d
+		s.keys[tsigKeyKey(d.Name)] = d
 	}
 }
 
@@ -222,9 +223,9 @@ func (conf *Config) tsigKeyDeclaredInConfig(name string) bool {
 	if conf == nil {
 		return false
 	}
-	want := dns.CanonicalName(name)
+	want := tsigKeyKey(name)
 	for _, t := range conf.Keys.Tsig {
-		if dns.CanonicalName(t.Name) == want {
+		if tsigKeyKey(t.Name) == want {
 			return true
 		}
 	}
@@ -232,15 +233,19 @@ func (conf *Config) tsigKeyDeclaredInConfig(name string) bool {
 }
 
 func tsigNameIsReserved(name string) bool {
-	c := dns.CanonicalName(name)
-	return strings.EqualFold(c, dns.CanonicalName(NOKEY)) || strings.EqualFold(c, dns.CanonicalName(BLOCKED))
+	// dns.Fqdn on BOTH sides. The sentinels are written bare ("NOKEY"), name
+	// arrives however the caller spelled it, and EqualNames compares names as
+	// given -- it deliberately does not absolutise, so comparing a folded FQDN
+	// against a bare literal never matches.
+	c := tsigKeyKey(name)
+	return core.EqualNames(c, dns.Fqdn(NOKEY)) || core.EqualNames(c, dns.Fqdn(BLOCKED))
 }
 
 // tsigKeyAcceptable is tsigKeyDefined extended with an optional staged (not yet
 // committed) inline key name, so a dynamic add/modify can validate primaries that
 // reference an inline key before that key is committed to the live store.
 func (conf *Config) tsigKeyAcceptable(name string, staged *TsigDetails) bool {
-	if staged != nil && dns.CanonicalName(name) == dns.CanonicalName(staged.Name) {
+	if staged != nil && tsigKeyKey(name) == tsigKeyKey(staged.Name) {
 		return true
 	}
 	return conf.tsigKeyDefined(name)
@@ -249,7 +254,7 @@ func (conf *Config) tsigKeyAcceptable(name string, staged *TsigDetails) bool {
 // knownTsigAlgo reports whether algo names a supported HMAC TSIG algorithm
 // (canonical compare, so "hmac-sha256" and "hmac-sha256." both match).
 func knownTsigAlgo(algo string) bool {
-	switch dns.CanonicalName(algo) {
+	switch tsigKeyKey(algo) {
 	case dns.HmacSHA1, dns.HmacSHA224, dns.HmacSHA256, dns.HmacSHA384, dns.HmacSHA512:
 		return true
 	}
@@ -262,7 +267,7 @@ func GenerateTsigSecret(algorithm string) (string, error) {
 		return "", fmt.Errorf("tsig algorithm %q is not a supported HMAC algorithm", algorithm)
 	}
 	var n int
-	switch dns.CanonicalName(algorithm) {
+	switch tsigKeyKey(algorithm) {
 	case dns.HmacSHA1:
 		n = 20
 	case dns.HmacSHA224:

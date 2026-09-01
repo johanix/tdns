@@ -30,14 +30,14 @@ func ClampedDuration(configured, R, margin time.Duration) time.Duration {
 //   - K-step rollover clamp (K, Margin, TRoll): active near a scheduled
 //     rollover; ceiling = K * Margin.
 //   - Steady-state TTL ceiling (MaxServedTTL): always-on cap from policy
-//     ttls.max_served; ceiling = MaxServedTTL.
+//     ttls.max-served; ceiling = MaxServedTTL.
 //
 // SignRRset takes the minimum of (UnclampedTTL, K*Margin if K>0,
 // MaxServedTTL if >0) and writes that to every RR header TTL before
 // generating the RRSIG.
 //
 // nil means no clamp at all (zone has clamping.enabled: false AND no
-// max_served set AND no rollover scheduled).
+// max-served set AND no rollover scheduled).
 type ClampParams struct {
 	K            int
 	Margin       time.Duration
@@ -165,7 +165,7 @@ func currentClampK(pol *DnssecPolicy, tRoll, now time.Time) int {
 }
 
 // ClampParamsForZone builds a *ClampParams for the zone at `now`, or nil
-// if no clamp is active (neither rollover K-step nor steady-state max_served).
+// if no clamp is active (neither rollover K-step nor steady-state max-served).
 // Called by SignZone before each sign pass on a clamping zone.
 func ClampParamsForZone(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Time) (*ClampParams, error) {
 	if pol == nil {
@@ -299,7 +299,7 @@ func ClampMetrics() (steps, clamped, unclamped, violations uint64) {
 //	min(UnclampedTTL, K*margin if K>0, MaxServedTTL if >0)
 //
 // The K*margin source is the rollover-time K-step clamp; the MaxServedTTL
-// source is the steady-state policy ttls.max_served ceiling. Either, both,
+// source is the steady-state policy ttls.max-served ceiling. Either, both,
 // or neither may be in effect.
 func applyClampToRRset(rrset *core.RRset, clamp *ClampParams) {
 	if clamp == nil || len(rrset.RRs) == 0 {

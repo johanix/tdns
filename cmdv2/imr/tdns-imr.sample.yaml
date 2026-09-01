@@ -1,23 +1,20 @@
 # Sample configuration for tdns-imr, the iterative/recursive resolver.
 #
 # The three things tdns-imr will not start without:
-#   imrengine.addresses    (validated: required)
-#   imrengine.transports   (validated: required)
+#   listeners.addresses    (validated: required)
+#   listeners.transports   (validated: required)
 #   log.file               (validated: required, and read before anything else)
 #   apiserver.apikey       (not validated, but the API router refuses to start
 #                           without it, and that aborts startup)
 #
 # Everything else below is optional and shown with its default.
 #
-# NOTE the block is named `imrengine:`, not `imr:`. The only `imr.`-prefixed
-# key is `imr.localconfig` (see the bottom of this file).
+# Resolver BEHAVIOR lives under `imrengine:` (not `imr:` — the only
+# `imr.`-prefixed key is `imr.localconfig`, see the bottom of this file).
+# WHERE the resolver listens lives under `listeners:`, the same schema as
+# every tdns app (#446).
 
-imrengine:
-   active:              true   # Set to false to disable IMR. Defaults to true if not specified.
-
-   # Optional: path to a root hints file. If empty, uses compiled-in hints.
-   root-hints:          "/etc/tdns/root.hints"
-
+listeners:
    # REQUIRED. Addresses (with port) the resolver listens on for DNS queries.
    addresses:           [ 127.0.0.1:53, '[::1]:53' ]
 
@@ -27,8 +24,18 @@ imrengine:
    transports:          [ do53 ]
 
    # Ports for the encrypted transports default to dot 853, doh 443, doq 853.
+   # ports:
+   #    dot: [ 853 ]
+   #    doh: [ 443 ]
+   #    doq: [ 853 ]
    # certfile:            /etc/tdns/certs/imr.crt
    # keyfile:             /etc/tdns/certs/imr.key
+
+imrengine:
+   active:              true   # Set to false to disable IMR. Defaults to true if not specified.
+
+   # Optional: path to a root hints file. If empty, uses compiled-in hints.
+   root-hints:          "/etc/tdns/root.hints"
 
    # IMR Options (all are boolean flags, no values needed):
    # - query-for-transport: Query for transport signals opportunistically when observed
@@ -46,21 +53,76 @@ imrengine:
    # IMPORTANT: if none is set, the tdns-imr DAEMON seeds no trust anchor at
    # all and cannot establish a chain of trust. (The compiled-in root anchor is
    # wired into `dog`, not into this daemon.) Validation is on by default —
-   # require_dnssec_validation defaults to true — so an unconfigured daemon
+   # require-dnssec-validation defaults to true — so an unconfigured daemon
    # validates against an empty anchor set.
    #
-   # trust_anchor_ds:      ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
-   # trust_anchor_dnskey:  ". IN DNSKEY 257 3 8 AwEAAaz/tAm8y..."
+   # trust-anchor-ds:      ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+   # trust-anchor-dnskey:  ". IN DNSKEY 257 3 8 AwEAAaz/tAm8y..."
    # trust-anchor-file:    /etc/tdns/root.key    # unbound-style, one DS/DNSKEY per line
-   #                                             # (note: hyphens, unlike the two above)
 
-   # require_dnssec_validation: true
+   # require-dnssec-validation: true
 
-   # Stub / forward zones: answer these from the named servers instead of
-   # iterating from the root.
+   # Stub zones: names resolved by asking a named AUTHORITATIVE server
+   # directly instead of iterating from the root. The resolver still iterates
+   # (RD=0) and follows referrals; for forwarding to a RECURSIVE resolver,
+   # see `forward:` below.
+   #
+   # `servers:` is a list of OBJECTS, not a list of addresses. A bare list of
+   # IPs does not decode into []AuthServer, and the daemon refuses to start.
+   # `addrs:` holds BARE IP literals -- no port, no host:port.
+   # `alpn:` is optional and defaults to do53.
    # stubs:
-   #    - zone:     internal.example.
-   #      servers:  [ 192.0.2.53, 2001:db8::53 ]
+   #    - zone:  internal.example.
+   #      servers:
+   #         - name:   ns1.internal.example.
+   #           addrs:  [ 192.0.2.53, 2001:db8::53 ]
+   #           alpn:   [ do53 ]
+
+   # Forward zones: send queries for names at or below `zone:` as RECURSIVE
+   # queries (RD=1) to the listed upstream resolvers, in order, first usable
+   # response wins. `zone: .` forwards everything. Forwarding is forward-only:
+   # when every upstream fails the query fails; there is no fallback to
+   # iteration. The most specific forward zone wins, and a MORE specific stub
+   # zone wins over a forward zone.
+   #
+   # Per upstream:
+   #   addr:             REQUIRED, bare IP literal (no hostname, no port)
+   #   port:             optional, defaults to the transport's standard port
+   #                     (do53/tcp 53, dot/doq 853, doh 443)
+   #   transport:        do53 (default; UDP with TCP fallback), tcp, dot, doh, doq
+   #   tls-server-name:  dot/doh/doq only: name to verify the upstream's
+   #                     certificate against (and send as SNI). When unset the
+   #                     certificate must carry the addr IP in a SAN.
+   #   insecure:         dot/doh/doq only: disable certificate verification
+   #                     (lab setups with self-signed certificates)
+   #
+   # Per zone:
+   #   trust-ad:  accept the upstream's AD bit instead of validating answers
+   #              locally (default false: forwarded answers are DNSSEC
+   #              validated against our own trust anchors, like everything
+   #              else). Because a spoofed AD bit would be cached as secure,
+   #              trust-ad REQUIRES every upstream of the zone to be
+   #              encrypted and verified (dot/doh/doq, without insecure);
+   #              the daemon refuses to start otherwise.
+   #
+   # forward:
+   #    - zone:  foo.bar.
+   #      upstreams:
+   #         - addr:      192.0.2.1
+   #           port:      8853
+   #           transport: doq
+   #           tls-server-name: dns.example.net
+   #    - zone:  company.com.
+   #      upstreams:
+   #         - addr:      9.8.7.6
+   #           port:      5355
+   #           transport: tcp
+   #    - zone:  .                     # forward everything else
+   #      trust-ad: true               # ...trusting this upstream's validation,
+   #      upstreams:                   #    hence dot + verified certificate
+   #         - addr:      192.0.2.53
+   #           transport: dot
+   #           tls-server-name: dns.example.net
 
    # Optional IMR debug log, separate from log.file below.
    # logging:
@@ -72,22 +134,22 @@ imrengine:
    # (interactive mode) or `tdns-cli agent imr dump-tuning`.
    # tuning:
    #    backoff:
-   #       first_failure:     15s    # first backoff after a server failure
-   #       max_failure:       1h     # ceiling (raised to first_failure if set lower)
+   #       first-failure:     15s    # first backoff after a server failure
+   #       max-failure:       1h     # ceiling (raised to first-failure if set lower)
    #       multiplier:        3.0    # exponential growth factor
-   #       jitter_fraction:   0.25   # must be in [0,1); else reset to default
-   #       routing_failure:   1h     # backoff after an unreachable-network error
-   #       lame_delegation:   1h     # backoff after a lame delegation
-   #    address_family:
-   #       window_duration:   10m    # observation window for per-family failures
-   #       failure_threshold: 5      # distinct failures before a family is suspect
-   #       suspect_duration:  10m    # how long a family stays suspect
-   #       probe_interval:    30s    # how often a suspect family is re-probed
+   #       jitter-fraction:   0.25   # must be in [0,1); else reset to default
+   #       routing-failure:   1h     # backoff after an unreachable-network error
+   #       lame-delegation:   1h     # backoff after a lame delegation
+   #    address-family:
+   #       window-duration:   10m    # observation window for per-family failures
+   #       failure-threshold: 5      # distinct failures before a family is suspect
+   #       suspect-duration:  10m    # how long a family stays suspect
+   #       probe-interval:    30s    # how often a suspect family is re-probed
    #    discovery:
-   #       retry_after_failure: 30s  # transport-signal discovery retry
-   #       max_failures:        3    # give up discovery after this many
-   #    query_budget:            8s  # total wall-clock budget for one query
-   #    upgrade_indirect_cache_hits: true   # left unset in code; treated as true
+   #       retry-after-failure: 30s  # transport-signal discovery retry
+   #       max-failures:        3    # give up discovery after this many
+   #    query-budget:            8s  # total wall-clock budget for one query
+   #    upgrade-indirect-cache-hits: true   # left unset in code; treated as true
 
 # DNSSEC algorithms whose DNSKEY/RRSIG payloads are large for UDP. When a
 # referral DS RRset uses one, the IMR fetches the child zone's DNSKEY over TCP
@@ -97,7 +159,7 @@ imrengine:
 # "MLDSA*" covers MLDSA44/65/87. An entry that matches no known algorithm is a
 # hard config error. Inspect counters: tdns-cli imr stats large-ksk
 #
-# dnskey_query_transport selects how the IMR picks a transport for DNSKEY
+# dnskey-query-transport selects how the IMR picks a transport for DNSKEY
 # queries. DNSKEY queries are ~0.1% of traffic and exempt from a server's
 # probabilistic transport-weight distribution, so the chosen transport
 # bypasses those weights (it still honors the server's advertised
@@ -105,16 +167,16 @@ imrengine:
 #    force_udp        - disable this feature; follow normal probabilistic
 #                       transport selection even for large-KSK zones.
 #    use_ds_signal    - (default) bypass to the best transport only when the
-#                       parent DS uses a large_algorithms algorithm.
+#                       parent DS uses a large-algorithms algorithm.
 #    try_encrypted    - bypass for ALL DNSKEY queries; prefer encrypted,
 #                       fall back to TCP, never UDP. Avoids having to keep
-#                       large_algorithms current as PQ algorithms proliferate.
+#                       large-algorithms current as PQ algorithms proliferate.
 #    force_encrypted  - bypass for ALL DNSKEY queries; encrypted only, fail
 #                       the query if the server advertises no encrypted
 #                       transport.
 dnssec:
-   large_algorithms: [ MLDSA*, SLHDSA*, FALCON*, CROSS* ]
-   dnskey_query_transport: use_ds_signal
+   large-algorithms: [ MLDSA*, SLHDSA*, FALCON*, CROSS* ]
+   dnskey-query-transport: use_ds_signal
 
 # The HTTP management API. apikey is effectively required: SetupSimpleAPIRouter
 # returns an error when it is empty, and that aborts tdns-imr startup.

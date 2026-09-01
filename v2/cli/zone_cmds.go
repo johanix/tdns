@@ -313,6 +313,13 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	// "zone update": it inspects and manages what is stored about the zone,
 	// which is not a way of changing the zone's content.
 	AttachZoneJournalCmds(c, role)
+	// Likewise for ZONEMD: it inspects and verifies what the zone asserts
+	// about itself, rather than changing the zone.
+	AttachZoneZonemdCmds(c, role)
+	// The read half of "zone update": what the parent holds for a child.
+	AttachZoneDelegationCmds(c, role)
+	// ...and for an ordinary name in the zone.
+	AttachZoneNameCmds(c, role)
 	for _, e := range extras {
 		c.AddCommand(e)
 	}

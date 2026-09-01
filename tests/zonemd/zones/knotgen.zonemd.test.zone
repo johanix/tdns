@@ -1,0 +1,10 @@
+;; Zone dump (Knot DNS 3.5.2)
+knotgen.zonemd.test.	120	SOA	ns3.zonemd.test. hostmaster.zonemd.test. 2026082502 3600 600 604800 120
+knotgen.zonemd.test.	120	NS	ns3.zonemd.test.
+knotgen.zonemd.test.	120	ZONEMD	2026082502 1 1 6AD3EA8AC38846EEE1D30C6C78631E9A9DC99607E0C0C4E146BD411D097D51EF565F39DE6D727A15D6622BE5EDFF077F
+mail.knotgen.zonemd.test.	120	MX	10 mx.knotgen.zonemd.test.
+mx.knotgen.zonemd.test.	120	A	192.0.2.11
+txt.knotgen.zonemd.test.	120	TXT	"round-1"
+www.knotgen.zonemd.test.	120	A	192.0.2.10
+;; Written 7 records
+;; Time 2026-08-25 21:54:43 CEST

@@ -2,7 +2,7 @@ service:
    name:        TDNS-IXFR-RIG
    identities:  [ ixfrrig.local. ]
 
-dnsengine:
+listeners:
    addresses:   [ 127.0.0.1:5400 ]
    transports:  [ do53 ]
 

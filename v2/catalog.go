@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -379,17 +380,17 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		// RULE 4: Auto-configure zone using config group
 		lg.Info("CATALOG: auto-configuring zone", "zone", zoneName, "group", member.MetaGroup, "upstream", configGroupConfig.Upstream, "store", "map")
 
-		// The group's tsig_key (if any) names a key in the keys: store; put that
+		// The group's tsig-key (if any) names a key in the keys: store; put that
 		// name on the primary so the SOA probe / AXFR is signed with it (the
 		// secret is resolved by name at transfer time, SignForPeer). Validate
 		// against the keys: store, not the retired Globals.TsigKeys.
 		primaryKey := NOKEY
 		if configGroupConfig.TsigKey != "" {
 			if !conf.tsigKeyDefined(configGroupConfig.TsigKey) {
-				// Fail closed: a configured-but-undefined tsig_key must not silently
+				// Fail closed: a configured-but-undefined tsig-key must not silently
 				// downgrade to unsigned transfers. Skip the member until the key is
 				// defined (mirrors the static primary-key validation in ParseZones).
-				lg.Error("CATALOG: tsig_key not defined (add via keys.tsig or keystore tsig), skipping zone (fail closed, not unsigned)", "key", configGroupConfig.TsigKey, "zone", zoneName, "group", member.MetaGroup)
+				lg.Error("CATALOG: tsig-key not defined (add via keys.tsig or keystore tsig), skipping zone (fail closed, not unsigned)", "key", configGroupConfig.TsigKey, "zone", zoneName, "group", member.MetaGroup)
 				skippedCount++
 				continue
 			}
@@ -405,7 +406,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		upstreams := res.Resolved
 
 		zd := &ZoneData{
-			ZoneName:      zoneName,
+			ZoneName:      core.CanonicalizeName(zoneName),
 			ZoneType:      Secondary,
 			ZoneStore:     MapZone, // dynamic zones are map-only (§3)
 			PrimariesConf: primariesConf,

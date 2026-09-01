@@ -31,11 +31,19 @@ import (
 // than in a bulk listing.
 //
 // ctx is the caller's context (the HTTP request's, from the zone API handler)
-// and is honoured per probe via ExchangeContext. That matters because the
-// probes are sequential: with the library's 2s default timeout, a zone with
-// several unreachable primaries would otherwise pin the handler for
-// len(Upstreams) x 2s regardless of the request deadline. On cancellation the
-// remaining primaries are reported as such rather than silently omitted.
+// and is checked BETWEEN probes, which is what bounds this: the probes are
+// sequential, so with the library's 2s default timeout a zone with several
+// unreachable primaries would otherwise pin the handler for
+// len(Upstreams) x 2s. On cancellation the remaining primaries are reported as
+// such rather than silently omitted.
+//
+// A probe already on the wire is a different matter, and this comment used to
+// overstate it by saying ctx was "honoured per probe via ExchangeContext". A
+// DEADLINE on ctx is honoured that way, since ExchangeWithConnContext tightens
+// the socket deadlines from ctx.Deadline(). Plain cancellation is not:
+// ExchangeContext never watches ctx.Done(), and this client sets no Timeout, so
+// a cancelled request still waits out the current probe's 2s before the loop
+// notices. The worst case is therefore one probe, not len(Upstreams).
 func (zd *ZoneData) ProbeUpstreamSerials(ctx context.Context, conf *Config) []UpstreamSerial {
 	if zd == nil {
 		return nil

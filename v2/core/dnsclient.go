@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -69,21 +70,90 @@ func IsEncryptedTransport(t Transport) bool {
 // DNSClienter abstracts a single network exchange so callers can be tested
 // with a fake. The concrete *DNSClient implements it.
 //
-// Note on Exchange not taking a context.Context: CodeRabbit suggested
-// adding one so callers can cancel mid-exchange. Deliberately not done.
-// Exchange is a single network round-trip bounded by c.Timeout
-// (default 5s), and DoQ's internal context is already derived from
-// that timeout. Cancellation at the layer above — tryServer checks
-// ctx.Done() before the call, and the W2 query budget on
-// IterativeDNSQuery bounds the wider walk — is enough in practice
-// and avoids threading ctx through ~50 call sites for negligible
-// benefit. If a use case ever appears where mid-Exchange
-// cancellation matters (very long DoH bodies?), an ExchangeContext
-// variant can be added without breaking this interface.
+// The two methods here take no context.Context, and the interface keeps it
+// that way so every existing implementation (including out-of-tree ones)
+// still satisfies it. Cancellation lives in the optional ContextExchanger
+// half below, which *DNSClient does implement; callers holding a ctx should
+// go through ExchangeCtx / ExchangeCtxWithResult rather than calling
+// Exchange directly, so a client that can be interrupted is interrupted and
+// one that cannot still runs.
 type DNSClienter interface {
 	Exchange(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error)
 	ExchangeWithResult(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error)
 	TransportKind() Transport
+}
+
+// ContextExchanger is the context-aware half of DNSClienter: an exchange that
+// a cancelled ctx interrupts MID-FLIGHT, not merely between attempts. Without
+// it a hung server holds a query for the full client timeout (5s default),
+// which is what bounded how fast the forwarding path's ordered failover could
+// move on, and what delayed shutdown and query-budget enforcement on the
+// iterative path (#435).
+//
+// Kept separate from DNSClienter deliberately: adding a method to that
+// interface would break every implementation that does not have one, and a
+// fake with no sockets has nothing to interrupt.
+type ContextExchanger interface {
+	ExchangeContextWithResult(ctx context.Context, msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error)
+}
+
+// ExchangeCtxWithResult runs one exchange under ctx: cancellable when the
+// client implements ContextExchanger, and otherwise the plain call preceded
+// by a ctx check (a cancel is then still observed between attempts, which is
+// where it was observed before this existed).
+func ExchangeCtxWithResult(ctx context.Context, c DNSClienter, msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error) {
+	if cc, ok := c.(ContextExchanger); ok {
+		return cc.ExchangeContextWithResult(ctx, msg, server, debug)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, ExchangeResult{WireTransport: c.TransportKind()}, err
+	}
+	return c.ExchangeWithResult(msg, server, debug)
+}
+
+// ExchangeCtx is ExchangeCtxWithResult without the wire-transport detail.
+func ExchangeCtx(ctx context.Context, c DNSClienter, msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error) {
+	r, rtt, _, err := ExchangeCtxWithResult(ctx, c, msg, server, debug)
+	return r, rtt, err
+}
+
+// exchangeCancellable performs one dns.Client exchange that a cancelled ctx
+// actually interrupts.
+//
+// client.ExchangeContext is not enough on its own, which is easy to miss: it
+// passes the context to the dial and then uses only ctx.Deadline() to tighten
+// the socket deadlines. It never watches ctx.Done(). A context that is
+// cancellable but carries no deadline -- which is what a shutdown context is
+// -- therefore leaves a read in progress running to the client's own timeout.
+// Closing the connection is what actually stops it. (Same shape, and the same
+// reasoning, as exchangeCancellable in v2/childsync_utils.go.)
+//
+// A context with no Done channel (context.Background, i.e. every caller of
+// the plain Exchange) skips the watcher goroutine entirely, so the
+// non-cancellable path costs exactly what it did before.
+func exchangeCancellable(ctx context.Context, client *dns.Client, msg *dns.Msg, addr string) (*dns.Msg, time.Duration, error) {
+	conn, err := client.DialContext(ctx, addr)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer conn.Close()
+
+	if done := ctx.Done(); done != nil {
+		finished := make(chan struct{})
+		defer close(finished)
+		go func() {
+			select {
+			case <-done:
+				// Unblocks a read that has already begun; the exchange
+				// returns an error on a closed connection, which the caller
+				// reads as abandoned via its own ctx.Err() check.
+				conn.Close()
+			case <-finished:
+			}
+		}()
+	}
+
+	return client.ExchangeWithConnContext(ctx, msg, conn)
 }
 
 // DNSClient represents a DNS client that supports multiple transport protocols
@@ -226,6 +296,43 @@ func (c *DNSClient) Exchange(msg *dns.Msg, server string, debug bool) (*dns.Msg,
 // wire transport used and whether a TC=1 truncation drove a UDP->TCP upgrade.
 // The (msg, rtt, err) return values are identical to Exchange's.
 func (c *DNSClient) ExchangeWithResult(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error) {
+	return c.exchange(context.Background(), msg, server, debug)
+}
+
+// ExchangeContext is Exchange bounded by ctx as well as by c.Timeout: a
+// cancel interrupts a request already on the wire.
+func (c *DNSClient) ExchangeContext(ctx context.Context, msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error) {
+	r, rtt, _, err := c.exchange(ctx, msg, server, debug)
+	return r, rtt, err
+}
+
+// ExchangeContextWithResult satisfies ContextExchanger: ExchangeWithResult
+// bounded by ctx. This is the one real implementation; the four exported
+// exchange methods differ only in whether they carry a ctx and whether they
+// hand back the ExchangeResult.
+func (c *DNSClient) ExchangeContextWithResult(ctx context.Context, msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error) {
+	return c.exchange(ctx, msg, server, debug)
+}
+
+// exchange is the single implementation behind the four exported exchange
+// methods. It reports a cancellation AS a cancellation: interrupting a read
+// means closing the socket, so the transport error is "use of closed network
+// connection", which callers would otherwise read as "this server is broken"
+// and book a backoff against — punishing a server for our own shutdown.
+func (c *DNSClient) exchange(ctx context.Context, msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error) {
+	r, rtt, res, err := c.exchangeInner(ctx, msg, server, debug)
+	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			err = fmt.Errorf("%w: exchange with %s abandoned: %v", cerr, server, err)
+		}
+	}
+	return r, rtt, res, err
+}
+
+func (c *DNSClient) exchangeInner(ctx context.Context, msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, ExchangeResult{WireTransport: c.Transport}, err
+	}
 	if debug {
 		fmt.Printf("*** Exchange: sending %s message to %s:%s opcode: %s qname: %s rrtype: %s\n",
 			TransportToString[c.Transport], server, c.Port,
@@ -243,13 +350,13 @@ func (c *DNSClient) ExchangeWithResult(msg *dns.Msg, server string, debug bool) 
 		}
 		addr := net.JoinHostPort(server, c.Port)
 		if c.ForceTCP {
-			r, rtt, err := c.DNSClientTCP.Exchange(msg, addr)
+			r, rtt, err := exchangeCancellable(ctx, c.DNSClientTCP, msg, addr)
 			return r, rtt, ExchangeResult{WireTransport: TransportDo53TCP}, err
 		}
-		r, rtt, err := c.DNSClientUDP.Exchange(msg, addr)
+		r, rtt, err := exchangeCancellable(ctx, c.DNSClientUDP, msg, addr)
 		if err == nil && r != nil && r.Truncated && !c.DisableFallback && c.DNSClientTCP != nil {
 			log.Printf("Do53: UDP response from %s truncated (TC=1); retrying over TCP", addr)
-			tr, trtt, terr := c.DNSClientTCP.Exchange(msg, addr)
+			tr, trtt, terr := exchangeCancellable(ctx, c.DNSClientTCP, msg, addr)
 			return tr, trtt, ExchangeResult{WireTransport: TransportDo53TCP, Truncated: true}, terr
 		}
 		// Timeout / transient-error fallback: a single dropped UDP packet
@@ -261,7 +368,7 @@ func (c *DNSClient) ExchangeWithResult(msg *dns.Msg, server string, debug bool) 
 			if debug {
 				log.Printf("Do53: UDP transient error from %s (%v); retrying over TCP", addr, err)
 			}
-			tr, trtt, terr := c.DNSClientTCP.Exchange(msg, addr)
+			tr, trtt, terr := exchangeCancellable(ctx, c.DNSClientTCP, msg, addr)
 			if terr == nil {
 				return tr, trtt, ExchangeResult{WireTransport: TransportDo53TCP}, nil
 			}
@@ -271,13 +378,13 @@ func (c *DNSClient) ExchangeWithResult(msg *dns.Msg, server string, debug bool) 
 		}
 		return r, rtt, ExchangeResult{WireTransport: TransportDo53}, err
 	case TransportDoT:
-		r, rtt, err := c.DNSClientTLS.Exchange(msg, net.JoinHostPort(server, c.Port))
+		r, rtt, err := exchangeCancellable(ctx, c.DNSClientTLS, msg, net.JoinHostPort(server, c.Port))
 		return r, rtt, ExchangeResult{WireTransport: TransportDoT}, err
 	case TransportDoH:
-		r, rtt, err := c.exchangeDoH(msg, server, debug)
+		r, rtt, err := c.exchangeDoH(ctx, msg, server, debug)
 		return r, rtt, ExchangeResult{WireTransport: TransportDoH}, err
 	case TransportDoQ:
-		r, rtt, err := c.exchangeDoQ(msg, net.JoinHostPort(server, c.Port), debug)
+		r, rtt, err := c.exchangeDoQ(ctx, msg, net.JoinHostPort(server, c.Port), debug)
 		return r, rtt, ExchangeResult{WireTransport: TransportDoQ}, err
 	default:
 		return nil, 0, ExchangeResult{WireTransport: c.Transport}, fmt.Errorf("unsupported transport protocol: %d", c.Transport)
@@ -292,8 +399,11 @@ func (c *DNSClient) ExchangeWithResult(msg *dns.Msg, server string, debug bool) 
 //	return c.DNSClient.Exchange(msg, net.JoinHostPort(server, "853"))
 // }
 
-// exchangeDoH handles DNS over HTTPS
-func (c *DNSClient) exchangeDoH(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error) {
+// exchangeDoH handles DNS over HTTPS. ctx bounds the whole request-response,
+// including reading the body: net/http cancels an in-flight request when the
+// request context is done, so this transport needs no connection-closing
+// watcher of its own.
+func (c *DNSClient) exchangeDoH(ctx context.Context, msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error) {
 	packed, err := msg.Pack()
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to pack DNS message: %v", err)
@@ -315,7 +425,7 @@ func (c *DNSClient) exchangeDoH(msg *dns.Msg, server string, debug bool) (*dns.M
 		fmt.Printf("*** DoH sending HTTPS POST to %s opcode: %s qname: %s rrtype: %s\n", url, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(packed))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(packed))
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to create HTTP request: %v", err)
 	}
@@ -349,10 +459,27 @@ func (c *DNSClient) exchangeDoH(msg *dns.Msg, server string, debug bool) (*dns.M
 	return response, 0, nil
 }
 
-// exchangeDoQ handles DNS over QUIC
-func (c *DNSClient) exchangeDoQ(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
+// exchangeDoQ handles DNS over QUIC. The dial and stream-open honour ctx
+// directly; the stream reads below do not, so a cancel -- or the timeout --
+// closes the QUIC connection out from under them, the same trick
+// exchangeCancellable plays on a TCP socket and the only thing that
+// interrupts a read already in progress.
+func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
+
+	// logFailure reports a transport failure unless WE caused it. Cancelling
+	// closes the connection out from under the reads below, so every cancelled
+	// DoQ query used to emit "failed to read response: use of closed network
+	// connection" at error level -- a fault message for a routine shutdown,
+	// and exactly the kind of noise that buries a real one. A deadline still
+	// logs: that is the upstream being slow, not us changing our mind.
+	logFailure := func(format string, args ...any) {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return
+		}
+		log.Printf(format, args...)
+	}
 
 	if debug {
 		fmt.Printf("*** DoQ sending message to %s opcode: %s qname: %s rrtype: %s\n", server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
@@ -361,15 +488,36 @@ func (c *DNSClient) exchangeDoQ(msg *dns.Msg, server string, debug bool) (*dns.M
 	// Connect to the QUIC server
 	conn, err := quic.DialAddr(ctx, server, c.TLSConfig, c.QUICConfig)
 	if err != nil {
-		log.Printf("*** DoQ failed to connect to QUIC server: %v", err)
+		logFailure("*** DoQ failed to connect to QUIC server: %v", err)
 		return nil, 0, fmt.Errorf("failed to connect to QUIC server: %v", err)
 	}
 	defer conn.CloseWithError(0, "")
 
+	// Watch the DERIVED ctx, so this covers the timeout as well as a cancel.
+	// c.Timeout is otherwise not enforced on the read path at all: the reads
+	// below take no deadline, and MaxIdleTimeout cannot save us because
+	// KeepAlivePeriod (c.Timeout/2) keeps eliciting ACKs, so the connection
+	// is never idle and an upstream that opens a stream and never answers
+	// hangs this goroutine for good.
+	//
+	// Ordering matters and is subtle: close(finished) is deferred AFTER
+	// cancel(), so it runs BEFORE it (LIFO) and the watcher exits through
+	// the finished branch on a normal return rather than on our own cancel.
+	// A double CloseWithError would be harmless anyway.
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.CloseWithError(0, "context done")
+		case <-finished:
+		}
+	}()
+
 	// Open a new stream
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		log.Printf("*** DoQ failed to open QUIC stream: %v", err)
+		logFailure("*** DoQ failed to open QUIC stream: %v", err)
 		return nil, 0, fmt.Errorf("failed to open QUIC stream: %v", err)
 	}
 	defer stream.Close()
@@ -385,17 +533,17 @@ func (c *DNSClient) exchangeDoQ(msg *dns.Msg, server string, debug bool) (*dns.M
 	lenBuf := make([]byte, 2)
 	binary.BigEndian.PutUint16(lenBuf, uint16(len(packed)))
 	if _, err := stream.Write(lenBuf); err != nil {
-		log.Printf("*** DoQ failed to write message length: %v", err)
+		logFailure("*** DoQ failed to write message length: %v", err)
 		return nil, 0, fmt.Errorf("failed to write message length: %v", err)
 	}
 	if _, err := stream.Write(packed); err != nil {
-		log.Printf("*** DoQ failed to write DNS message: %v", err)
+		logFailure("*** DoQ failed to write DNS message: %v", err)
 		return nil, 0, fmt.Errorf("failed to write DNS message: %v", err)
 	}
 
 	// Read the response length
 	if _, err := io.ReadFull(stream, lenBuf); err != nil {
-		log.Printf("*** DoQ failed to read response length: %v", err)
+		logFailure("*** DoQ failed to read response length: %v", err)
 		return nil, 0, fmt.Errorf("failed to read response length: %v", err)
 	}
 	respLen := binary.BigEndian.Uint16(lenBuf)
@@ -407,7 +555,7 @@ func (c *DNSClient) exchangeDoQ(msg *dns.Msg, server string, debug bool) (*dns.M
 	respBuf := make([]byte, respLen)
 	n, err := io.ReadFull(stream, respBuf)
 	if err != nil {
-		log.Printf("*** DoQ failed to read response: %v", err)
+		logFailure("*** DoQ failed to read response: %v", err)
 		return nil, 0, fmt.Errorf("failed to read response: %v", err)
 	}
 	if n != int(respLen) {
@@ -421,7 +569,7 @@ func (c *DNSClient) exchangeDoQ(msg *dns.Msg, server string, debug bool) (*dns.M
 	// Unpack the response
 	response := new(dns.Msg)
 	if err := response.Unpack(respBuf); err != nil {
-		log.Printf("*** DoQ failed to unpack response: %v", err)
+		logFailure("*** DoQ failed to unpack response: %v", err)
 		// stream.Close()
 		return nil, 0, fmt.Errorf("failed to unpack response: %v", err)
 	}

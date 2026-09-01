@@ -259,13 +259,37 @@ UNIQUE (keyname)
 	// wrote it: SOA serial plus a ZONEMD digest of its contents. One row per
 	// zone -- this is a "what does the file look like now" record, not a
 	// history -- so the zone is the primary key and writes are upserts.
+	//
+	// digest_variant identifies WHICH computation produced the digest. The
+	// value is private to tdns and has nothing to do with the RFC's scheme or
+	// algorithm registries: it exists because a fix to the digest code changes
+	// every stored digest, and a row written by the previous version has to
+	// read as "no basis for comparison" rather than as "this file has been
+	// edited" -- which, across a fleet of signed zones, is the difference
+	// between a silent re-baseline and every zone reporting tampering at once.
+	// See zoneFileDigestVariant.
 	"ZoneFileState": `CREATE TABLE IF NOT EXISTS 'ZoneFileState' (
-		zone       VARCHAR(255) NOT NULL PRIMARY KEY,
-		serial     INTEGER NOT NULL,
-		digest     VARCHAR(128) NOT NULL,
-		scheme     INTEGER NOT NULL,
-		algorithm  INTEGER NOT NULL,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		zone           VARCHAR(255) NOT NULL PRIMARY KEY,
+		serial         INTEGER NOT NULL,
+		digest         VARCHAR(128) NOT NULL,
+		scheme         INTEGER NOT NULL,
+		algorithm      INTEGER NOT NULL,
+		digest_variant INTEGER NOT NULL DEFAULT 0,
+		updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`,
+
+	// One row per zone: when a primary was last seen alive, and which copy
+	// that was about. Read at first bind to restore the zone's SOA EXPIRE
+	// budget across a restart; see zone_refresh_state.go for why this is not
+	// a column on ZoneFileState.
+	//
+	// A new table needs no dbMigrateSchema entry -- dbSetupTables runs
+	// CREATE TABLE IF NOT EXISTS over this map at every startup, so an
+	// existing database picks it up on the first run of the new binary.
+	"ZoneRefreshState": `CREATE TABLE IF NOT EXISTS 'ZoneRefreshState' (
+		zone           VARCHAR(255) NOT NULL PRIMARY KEY,
+		last_confirmed TEXT NOT NULL,
+		serial         INTEGER NOT NULL
 	)`,
 
 	"ZoneDelta": `CREATE TABLE IF NOT EXISTS 'ZoneDelta' (
@@ -277,6 +301,40 @@ UNIQUE (keyname)
 		action     VARCHAR(8) NOT NULL,
 		rr         TEXT NOT NULL,
 		UNIQUE (zone, toserial, seq)
+	)`,
+
+	// Credentials for the DSYNC API scheme
+	// (docs/2026-08-11-dsync-api-scheme.md §10). One row per <parent zone,
+	// username> pair, which is the tuple HTTP Basic authenticates.
+	//
+	// principal is the DNS name the update policy is evaluated against --
+	// what the SIG(0) signer name is on the DDNS path. It defaults to the
+	// username, and exists separately so the username can be a human-readable
+	// account name where an operator prefers that.
+	//
+	// keyhash is SHA-256 of the key, hex. Not a slow KDF, and that is only
+	// safe because AddDsyncApiCredential generates the key itself with 256
+	// bits of entropy: a slow KDF exists to make low-entropy secrets
+	// expensive to guess, and a secret that cannot be guessed does not need
+	// one. If tdns ever accepts an operator-chosen key here, this must become
+	// argon2id in the same commit.
+	//
+	// expires is a Unix time; 0 means never. disabled is a kill switch that
+	// keeps the row for the audit trail.
+	//
+	// UNIQUE columns are VARCHAR rather than TEXT (house rule at the head of
+	// this file).
+	"DsyncApiCredential": `CREATE TABLE IF NOT EXISTS 'DsyncApiCredential' (
+		id         INTEGER PRIMARY KEY,
+		parentzone VARCHAR(255) NOT NULL,
+		username   VARCHAR(255) NOT NULL,
+		principal  VARCHAR(255) NOT NULL,
+		keyhash    VARCHAR(64) NOT NULL,
+		created    INTEGER NOT NULL,
+		expires    INTEGER NOT NULL DEFAULT 0,
+		disabled   INTEGER NOT NULL DEFAULT 0,
+		comment    TEXT,
+		UNIQUE (parentzone, username)
 	)`,
 }
 

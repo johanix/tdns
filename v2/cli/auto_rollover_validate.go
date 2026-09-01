@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -158,9 +159,9 @@ type minimalZoneEntry struct {
 // zone in raw.Zones. Returns "" if the zone isn't listed or has no
 // policy. Comparison is case-insensitive on the FQDN form.
 func inferPolicyForZone(raw *minimalConfigForValidate, zone string) string {
-	zone = strings.ToLower(strings.TrimSuffix(zone, "."))
+	zone = core.CanonicalizeName(strings.TrimSuffix(zone, "."))
 	for _, z := range raw.Zones {
-		if strings.ToLower(strings.TrimSuffix(z.Name, ".")) == zone {
+		if core.EqualNames(strings.TrimSuffix(z.Name, "."), zone) {
 			return z.DnssecPolicy
 		}
 	}
@@ -220,7 +221,7 @@ func renderValidateReport(cfgPath, zone, policyName string, pol *tdns.DnssecPoli
 		(time.Duration(pol.SigValidity.DNSKEY) * time.Second).String(),
 		(time.Duration(pol.SigValidity.DS) * time.Second).String())
 	fmt.Printf("Clamping: enabled=%t margin=%s\n", pol.Clamping.Enabled, pol.Clamping.Margin)
-	fmt.Printf("TTLs:    dnskey=%ss max_served=%ss parent-ds(override)=%ss child-ds(fallback)=%ss\n",
+	fmt.Printf("TTLs:    dnskey=%ss max-served=%ss parent-ds(override)=%ss child-ds(fallback)=%ss\n",
 		fmt.Sprintf("%d", pol.TTLS.DNSKEY),
 		fmt.Sprintf("%d", pol.TTLS.MaxServed),
 		fmt.Sprintf("%d", pol.TTLS.ParentDS),

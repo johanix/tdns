@@ -174,7 +174,7 @@ and for chain validation, never for sequencing.
 round leaves the RRset empty.
 
 **Empty deltas are not persisted.** Serial-only advances
-(`outbound_soa_serial: unixtime`) publish with no content change.
+(`outbound-soa-serial: unixtime`) publish with no content change.
 
 **RRSIGs are not persisted.** `computeZoneDelta` carries signature changes in
 `RRset.RRSIGs`; only `RRs` is stored. A stored RRSIG has a fixed validity

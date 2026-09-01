@@ -73,14 +73,14 @@ func (conf *Config) parseImrOptions() {
 }
 
 func (conf *Config) ParseAuthOptions() {
-	raw := conf.DnsEngine.OptionsStrs
+	raw := conf.AuthEngine.OptionsStrs
 	clean := make(map[AuthOption]string)
 
 	// Apply defaults for options that have them, even when no options are configured
 	clean[AuthOptParentUpdate] = UpdateModeDelta
 
 	if len(raw) == 0 {
-		conf.DnsEngine.Options = clean
+		conf.AuthEngine.Options = clean
 		return
 	}
 
@@ -135,7 +135,7 @@ func (conf *Config) ParseAuthOptions() {
 		}
 	}
 
-	conf.DnsEngine.Options = clean
+	conf.AuthEngine.Options = clean
 }
 
 // parseZoneOptions validates and applies zone-specific option strings, updating zconf.Options and returning a map of enabled ZoneOption flags.
@@ -159,6 +159,16 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			isCatalogZone = true
 			options[OptCatalogZone] = true
 			break
+		}
+	}
+
+	// PRE-SCAN: signing, for the same reason -- request-ixfr's verdict below
+	// depends on it, and YAML option order must not decide the answer.
+	signsOwnContent := false
+	for _, option := range zconf.OptionsStrs {
+		switch strings.ToLower(strings.TrimSpace(option)) {
+		case "inline-signing", "online-signing":
+			signsOwnContent = true
 		}
 	}
 
@@ -200,6 +210,56 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
 
+		case OptRequestIxfr, OptNoRequestIxfr:
+			// IXFR-in enablement, and meaningful only on a secondary: nothing
+			// outside Refresh's Secondary branch consults it. On a primary the
+			// option is inert, which is exactly why it has to be reported --
+			// an operator who writes it there has made a config mistake that
+			// otherwise produces no symptom at all, and will go on believing
+			// the setting does something.
+			//
+			// ConfigWarning, not ConfigError: the zone is entirely fine and
+			// keeps serving. ConfigError is in serviceImpactingErrors, so
+			// using it here would take a healthy zone dark over a setting that
+			// does nothing.
+			if zconf.Type == "primary" {
+				errorMsg := fmt.Sprintf("Zone %s: %s is only meaningful on a secondary; ignored on a primary",
+					zname, ZoneOptionToString[opt])
+				lg.Error("option ignored: not a secondary", "zone", zname,
+					"option", ZoneOptionToString[opt], "type", zconf.Type)
+				if zd != nil {
+					zd.SetError(ConfigWarning, "%s", errorMsg)
+				}
+				continue
+			}
+			// A signing secondary never asks for a delta either
+			// (shouldRequestIxfr): its baseline is its OWN signatures, so a
+			// difference sequence computed against the primary's copy names
+			// records it does not hold. Reported for the same reason the
+			// primary case is -- an option that does nothing produces no
+			// symptom, so silence leaves the operator believing it works.
+			//
+			// Worth distinguishing from the primary case when reading the
+			// message: here the option is inert only while the zone signs.
+			// Turn signing off and it takes effect, which is why the text
+			// names the reason rather than the role.
+			if signsOwnContent {
+				errorMsg := fmt.Sprintf("Zone %s: %s is ignored while the zone signs its own content; "+
+					"a delta computed against the primary's copy cannot apply to locally re-signed data",
+					zname, ZoneOptionToString[opt])
+				lg.Error("option ignored: zone signs its own content", "zone", zname,
+					"option", ZoneOptionToString[opt])
+				if zd != nil {
+					zd.SetError(ConfigWarning, "%s", errorMsg)
+				}
+				continue
+			}
+			// Default ON is expressed by requestIxfr() rather than by
+			// materialising a flag here, so the persisted as-configured set
+			// keeps saying what the operator actually wrote.
+			options[opt] = true
+			cleanoptions = append(cleanoptions, opt)
+
 		case OptOnlineSigning, OptInlineSigning:
 			if Globals.App.Type == AppTypeAgent {
 				lg.Error("option ignored: agent does not allow signing", "zone", zname, "option", ZoneOptionToString[opt])
@@ -215,6 +275,26 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 				lg.Error("option ignored: DNSSEC policy not set", "zone", zname, "option", ZoneOptionToString[opt])
 			}
 
+		case OptPublishZonemd, OptVerifyZonemd:
+			// The `zonemd` block is only consulted for a zone that asks for
+			// one, so a leftover block under a zone whose option was removed
+			// is inert rather than an error.
+			//
+			// A bad block rejects the OPTION, not the zone: an unpublishable
+			// digest is a degraded zone, not an unusable one, and taking a
+			// zone off the air over a mistyped hash algorithm would be the
+			// larger failure. The ConfigError is how the operator finds out.
+			if _, err := resolveZonemdConf(zconf.Zonemd); err != nil {
+				lg.Error("option ignored: invalid zonemd configuration",
+					"zone", zname, "option", ZoneOptionToString[opt], "err", err)
+				if zd != nil {
+					zd.SetError(ConfigError, "zonemd: %v", err)
+				}
+				continue
+			}
+			options[opt] = true
+			cleanoptions = append(cleanoptions, opt)
+
 		case OptMultiProvider:
 			if !invokeOptionValidator(opt, conf, zname, zd, options) {
 				continue
@@ -227,39 +307,39 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			// Catalog zone requires valid catalog configuration
 			// Note: options[OptCatalogZone] was already set in pre-scan above
 
-			// Check for group_prefixes (required if config_groups exist)
+			// Check for group-prefixes (required if config-groups exist)
 			if conf.Catalog != nil && len(conf.Catalog.ConfigGroups) > 0 && (conf.Catalog.GroupPrefixes.Config == "" || conf.Catalog.GroupPrefixes.Signing == "") {
-				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.group_prefixes is missing. Please ensure your config has:\n"+
+				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.group-prefixes is missing. Please ensure your config has:\n"+
 					"catalog:\n"+
-					"  group_prefixes:\n"+
+					"  group-prefixes:\n"+
 					"    config: \"config\"\n"+
 					"    signing: \"sign\"\n"+
-					"  config_groups:\n"+
+					"  config-groups:\n"+
 					"    example:\n"+
 					"      upstream: \"primary-server:port\"\n"+
 					"      store: map\n", zname)
-				lg.Error("catalog zone missing group_prefixes config", "zone", zname, "detail", errorMsg)
+				lg.Error("catalog zone missing group-prefixes config", "zone", zname, "detail", errorMsg)
 				if zd != nil {
 					zd.SetError(ConfigError, "%s", errorMsg)
 				}
 				continue
 			}
 
-			// Check for config_groups (or legacy meta_groups)
+			// Check for config-groups (or legacy meta-groups)
 			if conf.Catalog == nil || (conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil) {
-				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.config_groups is missing or incorrectly structured. Please ensure your config has:\n"+
+				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.config-groups is missing or incorrectly structured. Please ensure your config has:\n"+
 					"catalog:\n"+
-					"  group_prefixes:\n"+
+					"  group-prefixes:\n"+
 					"    config: \"config\"\n"+
 					"    signing: \"sign\"\n"+
-					"  config_groups:\n"+
+					"  config-groups:\n"+
 					"    example:\n"+
 					"      upstream: \"primary-server:port\"\n"+
 					"      store: map\n"+
 					"dynamiczones:\n"+
-					"  catalog_members:\n"+
+					"  catalog-members:\n"+
 					"    add: auto\n", zname)
-				lg.Error("catalog zone missing config_groups", "zone", zname, "detail", errorMsg)
+				lg.Error("catalog zone missing config-groups", "zone", zname, "detail", errorMsg)
 				if zd != nil {
 					zd.SetError(ConfigError, "%s", errorMsg)
 				}

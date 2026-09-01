@@ -45,6 +45,11 @@ type KeystorePost struct {
 	// Bulk export/import (subcommands "bulk-export" / "bulk-import"). Select*
 	// narrows an export; the Bulk*Keys carry the payload of an import. Force
 	// (above) turns import's create-if-absent into overwrite.
+	// KeyFormat selects how exported private keys are rendered: "pem"
+	// (default, PKCS#8 exactly as stored) or "bind". Rendering happens here,
+	// daemon-side, because only the daemon links the algorithm
+	// implementations -- see bind_export.go.
+	KeyFormat      string          `json:"keyformat,omitempty"`
 	SelectExact    []string        `json:"selectexact,omitempty"`
 	SelectSubtree  []string        `json:"selectsubtree,omitempty"`
 	BulkDnssecKeys []BulkDnssecKey `json:"bulkdnsseckeys,omitempty"`
@@ -240,10 +245,13 @@ type ZonePost struct {
 	Command    string
 	SubCommand string
 	Zone       string
-	Policy     string // target DNSSEC policy name for the "policy-set" command
-	Force      bool
-	Wait       bool
-	Timeout    string
+	// ChildZone names the delegated child whose delegation data
+	// "get-delegation" reads out of the parent named by Zone.
+	ChildZone string `json:"childzone,omitempty"`
+	Policy    string // target DNSSEC policy name for the "policy-set" command
+	Force     bool
+	Wait      bool
+	Timeout   string
 	// Dynamic-zones management (add/modify). No Store field — dynamic zones are
 	// map-only. Primaries carries the structured {addr, key} list; each key is a
 	// keys.tsig name, an inline TsigName (below), or NOKEY. Options are ZoneOption
@@ -261,6 +269,10 @@ type ZonePost struct {
 	// UpdateRrtype address an RRset or a name for delrrset/delname. See
 	// BuildZoneUpdateActions, which both this channel and the DDNS channel
 	// translate through.
+	// IgnoreSerial is the "zone zonemd verify" escape hatch: digest against
+	// the serial each ZONEMD names rather than the one the SOA carries. A
+	// diagnostic, not a laxer check -- see VerifyZonemdOpts.
+	IgnoreSerial bool
 	UpdateVerb   string
 	UpdateRRs    []string
 	UpdateName   string
@@ -286,7 +298,7 @@ type ZonePost struct {
 	TsigSecret string
 	TsigAlgo   string
 	// TransferSrc is the per-zone source address for this zone's OUTBOUND
-	// transfers. Optional: unset inherits dnsengine.transfer_src, and unset
+	// transfers. Optional: unset inherits authengine.transfer-src, and unset
 	// there means the kernel chooses, which is the pre-existing behaviour.
 	//
 	// It has to be settable here rather than only in the config file, because
@@ -322,6 +334,89 @@ type ZoneResponse struct {
 	// reading it out of Msg: when it is empty, Instructions above is the only
 	// remaining copy and the client must not let it go unprinted.
 	Artefact string `json:"artefact,omitempty"`
+	// Zonemd carries the report for "zone zonemd status|verify".
+	Zonemd *ZonemdStatus `json:"zonemd,omitempty"`
+	// Delegation carries the report for "zone delegation get".
+	Delegation *ChildDelegationReport `json:"delegation,omitempty"`
+	// Name carries the report for "get-name".
+	Name *ZoneNameReport `json:"name,omitempty"`
+}
+
+// ZoneNameReport is what a zone publishes at one owner name.
+//
+// Keyed by RR type in presentation format, for the same reasons
+// ChildDelegationReport is: dns.RR is an interface and does not survive a JSON
+// round trip, and every consumer either prints these or re-parses them with
+// dns.NewRR.
+//
+// Flatter than ChildDelegationReport, which spans several owner names because a
+// delegation does -- the child's own NS and DS plus glue at whatever names
+// those NS records point to. This one is asked about a single name and answers
+// about that name only.
+//
+// An empty RRsets is the answer "this zone publishes nothing there", not an
+// error: it is what a client provisioning a name for the first time gets, and
+// it has to be distinguishable from a failed read.
+type ZoneNameReport struct {
+	Zone string `json:"zone"`
+	Name string `json:"name"`
+	// RRsets maps RR type -> records, e.g.
+	//   "A" -> ["ns1.provider.example. 300 IN A 192.0.2.48"]
+	// RRSIG, NSEC and NSEC3 are never present: they are the signer's, and
+	// returning them would invite a read-modify-write that tries to author
+	// them.
+	RRsets map[string][]string `json:"rrsets,omitempty"`
+}
+
+// ChildDelegationReport is what a parent currently holds for one delegated child.
+//
+// Grouped by owner name and RR type, in presentation format, because that is
+// the shape the question has: "what does the parent publish for this child",
+// where the answer spans the child name itself (NS, DS) and the glue at
+// whatever names those NS records point to.
+//
+// Presentation strings rather than dns.RR: dns.RR is an interface and does not
+// survive a JSON round trip, and every consumer of this either prints it or
+// re-parses it with dns.NewRR.
+type ChildDelegationReport struct {
+	Parent string
+	Child  string
+	// RRsets maps owner name -> RR type -> records, e.g.
+	//   "alpha.example." -> "NS" -> ["alpha.example. 120 IN NS ns.alpha.example."]
+	RRsets map[string]map[string][]string `json:"rrsets,omitempty"`
+	// Backend names the delegation backend that answered, so a client can tell
+	// "the zone holds nothing for this child" from "this server records
+	// delegations somewhere other than the zone you are looking at".
+	Backend string `json:"backend,omitempty"`
+}
+
+// ZonemdStatus is the API view of a zone's ZONEMD: what it publishes, whether
+// it is configured to maintain one, and -- for `verify` -- whether a
+// recomputation reproduces it.
+//
+// Status and verify share a type because they answer the same question at
+// different cost. Status reads the published RRset and reports it; verify pays
+// for the digest and reports whether it agrees. An operator asking "is my
+// ZONEMD right?" should not have to know which command computes.
+type ZonemdStatus struct {
+	Zone string `json:"zone"`
+	// Publishing and Verifying report the zone's options, so an empty report
+	// can be told apart from a zone that was never asked to publish one.
+	Publishing bool `json:"publishing"`
+	Verifying  bool `json:"verifying"`
+	// Algorithms and Scheme are the configured parameters, meaningful when
+	// Publishing.
+	Algorithms []uint8 `json:"algorithms,omitempty"`
+	Scheme     uint8   `json:"scheme,omitempty"`
+	// OnVerifyFailure is the configured failure mode, meaningful when Verifying.
+	OnVerifyFailure string `json:"on_verify_failure,omitempty"`
+	// Report is present for `verify`, and for `status` carries the published
+	// records without a recomputation (every Computed field empty).
+	Report *ZonemdReport `json:"report,omitempty"`
+	// Cache is what the last publish's digest cost and what it is holding, so
+	// the memory/CPU trade behind wire-cache-max-bytes is tuned from
+	// measurements rather than guesses. Nil when the zone has not digested yet.
+	Cache *ZonemdCacheStats `json:"cache,omitempty"`
 }
 type ZoneDsyncPost struct {
 	Command   string // status | bootstrap | ...
@@ -346,6 +441,34 @@ type ZoneDsyncResponse struct {
 	ErrorMsg     string
 	UpdateResult UpdateResult
 }
+
+// DsyncApiCredentialPost manages credentials for the DSYNC API scheme
+// (docs/2026-08-11-dsync-api-scheme.md §10). This travels on the MANAGEMENT
+// API -- an operator surface -- and is not the DSYNC API itself, which is a
+// separate listener with separate auth.
+type DsyncApiCredentialPost struct {
+	Command   string // add | list | delete | disable | enable
+	Zone      string // the parent zone the credential is scoped to
+	Username  string
+	Principal string // empty means "same as username"
+	Comment   string
+	ExpiresAt int64 // Unix time; 0 means never
+}
+
+type DsyncApiCredentialResponse struct {
+	AppName     string
+	Time        time.Time
+	Status      string
+	Zone        string
+	Credentials []DsyncApiCredential
+	// Key is the plaintext key, returned by "add" and by nothing else. It is
+	// not stored and cannot be retrieved again.
+	Key      string
+	Msg      string
+	Error    bool
+	ErrorMsg string
+}
+
 type ConfigPost struct {
 	Command       string   // status | reload | reload-zones | reload-tsig | ...
 	Force         bool     // reload-tsig: overwrite secret conflicts
@@ -356,7 +479,8 @@ type ConfigPost struct {
 type ConfigResponse struct {
 	AppName              string
 	Time                 time.Time
-	DnsEngine            DnsEngineConf
+	Listeners            ListenersConf
+	AuthEngine           AuthEngineConf
 	ApiServer            ApiServerConf
 	Identities           []string
 	DBFile               string
@@ -368,6 +492,8 @@ type ConfigResponse struct {
 	ServerErrors         []ServerError         `json:"servererrors,omitempty"`     // active server-wide error conditions
 	GuardrailBlocked     bool                  `json:"guardrailblocked,omitempty"` // reload refused by the DNSSEC policy-change guardrail
 	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`   // per-zone would-strand findings (with GuardrailBlocked)
+	Imr                  *ImrStatus            `json:"imr,omitempty"`              // IMR priming + stub/forward state, when this daemon carries one
+	Proc                 *ProcStatus           `json:"proc,omitempty"`             // process resources (open fds, goroutines), for leak visibility (#443)
 }
 
 // ReloadGuardrailZone is one signed zone a config reload would strand: its bound

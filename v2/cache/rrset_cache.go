@@ -29,8 +29,16 @@ func NewDnskeyCache() *DnskeyCacheT {
 	}
 }
 
+// dnskeyKey builds the composite map key. The name half is folded so a zone
+// looked up in one spelling finds the key stored under another -- these names
+// come off the wire, where 0x20 randomisation means the spelling differs every
+// time. The keyid half is digits, which folding does not touch.
+func dnskeyKey(zonename string, keyid uint16) string {
+	return fmt.Sprintf("%s::%d", core.CanonicalizeName(zonename), keyid)
+}
+
 func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
-	lookupKey := fmt.Sprintf("%s::%d", zonename, keyid)
+	lookupKey := dnskeyKey(zonename, keyid)
 	tmp, ok := dkc.Map.Get(lookupKey)
 	if !ok {
 		return nil
@@ -46,7 +54,7 @@ func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 }
 
 func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRset) {
-	lookupKey := fmt.Sprintf("%s::%d", zonename, keyid)
+	lookupKey := dnskeyKey(zonename, keyid)
 	dkc.Map.Set(lookupKey, *cdr)
 }
 
@@ -66,11 +74,11 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 
 	return &RRsetCacheT{
 		RRsets:               core.NewCmap[CachedRRset](),
-		Servers:              core.NewCmap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
-		ServerMap:            core.NewCmap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
-		AuthServerMap:        core.NewCmap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
-		ZoneMap:              core.NewCmap[*Zone](),                  // zone -> *Zone
-		ServerTLSA:           core.NewCmap[*ServerTLSARecords](),     // nsname -> validated TLSA cache
+		Servers:              core.NewNameMap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
+		ServerMap:            core.NewNameMap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
+		AuthServerMap:        core.NewNameMap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
+		ZoneMap:              core.NewNameMap[*Zone](),                  // zone -> *Zone
+		ServerTLSA:           core.NewNameMap[*ServerTLSARecords](),     // nsname -> validated TLSA cache
 		DnskeyCache:          DnskeyCache,
 		Logger:               lg,
 		LineWidth:            130, // default line width for truncating long lines in logging and output
@@ -81,9 +89,14 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	}
 }
 
+// rrsetKey builds the composite map key, folding the name half. See dnskeyKey.
+func rrsetKey(qname string, qtype uint16) string {
+	return fmt.Sprintf("%s::%d", core.CanonicalizeName(qname), qtype)
+}
+
 func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 
-	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
+	lookupKey := rrsetKey(qname, qtype)
 	crrset, ok := rrcache.RRsets.Get(lookupKey)
 	if !ok {
 		return nil
@@ -109,7 +122,7 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 const rrsetCacheMaxEntries = 50000
 
 func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset) {
-	lookupKey := fmt.Sprintf("%s::%d", qname, qtype)
+	lookupKey := rrsetKey(qname, qtype)
 	if rrcache.Debug {
 		fmt.Printf("rrcache: Adding key %s (%s) to cache\n", lookupKey, dns.TypeToString[qtype])
 	}
@@ -179,7 +192,7 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 	if rrcache == nil {
 		return 0, fmt.Errorf("rrcache is nil")
 	}
-	domain = dns.CanonicalName(domain)
+	domain = core.CanonicalizeName(domain)
 	if domain == "" || domain == "." {
 		return 0, fmt.Errorf("invalid domain %q", domain)
 	}
@@ -200,7 +213,7 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 				if !ok {
 					continue
 				}
-				nsHosts[dns.CanonicalName(ns.Ns)] = struct{}{}
+				nsHosts[core.CanonicalizeName(ns.Ns)] = struct{}{}
 			}
 		}
 	}
@@ -258,7 +271,7 @@ func (rrcache *RRsetCacheT) FlushAll() int {
 	rootNSHosts := make(map[string]struct{})
 	for item := range rrcache.RRsets.IterBuffered() {
 		cr := item.Val
-		if dns.CanonicalName(cr.Name) != "." || cr.RRtype != dns.TypeNS || cr.RRset == nil {
+		if core.CanonicalizeName(cr.Name) != "." || cr.RRtype != dns.TypeNS || cr.RRset == nil {
 			continue
 		}
 		for _, rr := range cr.RRset.RRs {
@@ -266,7 +279,7 @@ func (rrcache *RRsetCacheT) FlushAll() int {
 			if !ok {
 				continue
 			}
-			rootNSHosts[dns.CanonicalName(ns.Ns)] = struct{}{}
+			rootNSHosts[core.CanonicalizeName(ns.Ns)] = struct{}{}
 		}
 	}
 
@@ -274,7 +287,12 @@ func (rrcache *RRsetCacheT) FlushAll() int {
 	var keysToRemove []string
 	for item := range rrcache.RRsets.IterBuffered() {
 		cr := item.Val
-		name := dns.CanonicalName(cr.Name)
+		// The SAME function rootNSHosts was built with, a few lines up. Built
+		// with one and read with another is the drift this stage exists to
+		// stop: they agree on every ASCII name and part company on the first
+		// octet that is not valid UTF-8, which is when root glue would be
+		// flushed as though it were ordinary data.
+		name := core.CanonicalizeName(cr.Name)
 		// Keep root NS
 		if name == "." && cr.RRtype == dns.TypeNS {
 			continue
@@ -325,24 +343,36 @@ func isStructuralRRset(cr *CachedRRset, nsHosts map[string]struct{}) bool {
 		if nsHosts == nil {
 			return false
 		}
-		_, ok := nsHosts[dns.CanonicalName(cr.Name)]
+		_, ok := nsHosts[core.CanonicalizeName(cr.Name)]
 		return ok
 	default:
 		return false
 	}
 }
 
+// isSubdomainOf reports whether name is at or below parent.
+//
+// This was already correct -- it canonicalised both names and added the leading
+// dot that a byte-wise suffix test needs to respect a label boundary. It is
+// dns.IsSubDomain now because that says the same thing in one line and without
+// the two canonicalisation allocations, not because the old one was wrong.
 func isSubdomainOf(name, parent string) bool {
-	name = dns.CanonicalName(name)
-	parent = dns.CanonicalName(parent)
-	if parent == "." {
-		return true
-	}
-	if name == parent {
-		return true
-	}
-	suffix := "." + strings.TrimSuffix(parent, ".") + "."
-	return strings.HasSuffix(name, suffix)
+	return dns.IsSubDomain(parent, name)
+}
+
+// ServerKey is the key a per-zone server map -- the map[string]*AuthServer
+// held inside RRsetCacheT.ServerMap -- is indexed by.
+//
+// The outer map folds for itself (it is a NameMap). The inner one is a plain
+// map, deliberately: a concurrent map per zone would be the wrong shape for a
+// handful of nameservers. But its keys are nameserver names off the wire, so
+// they need folding too, and by the SAME function on both sides -- an insert
+// under the spelling an upstream happened to use and a lookup under the
+// canonical form are the same miss as any other.
+//
+// Every subscript of that map goes through here.
+func ServerKey(nsname string) string {
+	return core.CanonicalizeName(nsname)
 }
 
 func (rrcache *RRsetCacheT) lookupSOARRset(name string) *core.RRset {
@@ -460,7 +490,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				tmpauthserver.MergeTransportWeights(weights)
 			}
 		}
-		authservers[server.Name] = tmpauthserver
+		authservers[ServerKey(server.Name)] = tmpauthserver
 	}
 	if rrcache.Debug {
 		fmt.Printf("rrcache: Adding stubs for zone %s to cache\n", zone)
@@ -477,7 +507,7 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 	serverMap := make(map[string]*AuthServer)
 	if ok {
 		for k, v := range serverMapOrig {
-			serverMap[k] = v
+			serverMap[ServerKey(k)] = v
 		}
 	}
 
@@ -514,7 +544,7 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 		}
 
 		// Always assign the shared instance to this zone's map
-		serverMap[name] = sharedServer
+		serverMap[ServerKey(name)] = sharedServer
 	}
 	if rrcache.Debug {
 		fmt.Printf("rrcache: Adding servers for zone %s to cache\n", zone)
@@ -587,8 +617,9 @@ func baseFromTLSAOwner(owner string) string {
 		return ""
 	}
 	prefixes := []string{"_853._udp.", "_853._tcp."}
+	canon := core.CanonicalizeName(owner)
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(owner, prefix) {
+		if strings.HasPrefix(canon, prefix) {
 			return owner[len(prefix):]
 		}
 	}
@@ -619,14 +650,19 @@ func (rrcache *RRsetCacheT) StoreTLSAForServer(base, owner string, rrset *core.R
 	if rrcache == nil || rrset == nil || len(rrset.RRs) == 0 {
 		return
 	}
-	// Canonicalize (lowercase + fqdn) so mixed-case names key the same bucket;
-	// DNS names are case-insensitive (ASCII, RFC 4343) and dns.Fqdn alone
-	// preserves case, which would split NS1.Example. from ns1.example.
-	base = dns.CanonicalName(strings.TrimSpace(base))
+	// Canonicalize so mixed-case names key the same bucket; DNS names are
+	// case-insensitive (ASCII, RFC 4343) and dns.Fqdn alone preserves case,
+	// which would split NS1.Example. from ns1.example.
+	//
+	// core.CanonicalizeName, not dns.CanonicalName: these are map keys, and
+	// dns.CanonicalName rewrites any octet that is not valid UTF-8 into U+FFFD,
+	// so two distinct names can land on one key. st.recs below is keyed by
+	// owner, so the inner map needs the same function as the outer one.
+	base = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(base)))
 	if base == "." || base == "" {
 		return
 	}
-	owner = dns.CanonicalName(strings.TrimSpace(owner))
+	owner = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(owner)))
 	if owner == "." || owner == "" {
 		return
 	}
@@ -669,8 +705,8 @@ func (rrcache *RRsetCacheT) LookupTLSAForServer(base, owner string) *CachedRRset
 		return nil
 	}
 	// Canonicalize to match StoreTLSAForServer's keying (case-insensitive).
-	base = dns.CanonicalName(strings.TrimSpace(base))
-	owner = dns.CanonicalName(strings.TrimSpace(owner))
+	base = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(base)))
+	owner = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(owner)))
 	st, ok := rrcache.ServerTLSA.Get(base)
 	if !ok || st == nil {
 		return nil
@@ -691,7 +727,7 @@ func (rrcache *RRsetCacheT) SnapshotTLSAForServer(base string) map[string]*Cache
 	if rrcache == nil {
 		return nil
 	}
-	st, ok := rrcache.ServerTLSA.Get(dns.CanonicalName(strings.TrimSpace(base)))
+	st, ok := rrcache.ServerTLSA.Get(core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(base))))
 	if !ok || st == nil {
 		return nil
 	}
@@ -715,7 +751,11 @@ func (rrcache *RRsetCacheT) IsPrimed() bool {
 	return rrcache.Primed
 }
 
-func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string, fetcher RRsetFetcher) error {
+// seedFromHints parses the root hints (file or compiled-in) and seeds the
+// cache: the ". NS" hint RRset, per-server glue, and the root ServerMap
+// entry. Offline — no queries are sent. Returns the root server map for the
+// caller's optional priming fetch.
+func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthServer, error) {
 	var data []byte
 	var err error
 	var source string
@@ -730,14 +770,14 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 	} else {
 		// Verify root hints file exists
 		if _, err := os.Stat(hintsfile); err != nil {
-			return fmt.Errorf("Root hints file %s not found: %v", hintsfile, err)
+			return nil, fmt.Errorf("Root hints file %s not found: %v", hintsfile, err)
 		}
 
 		log.Printf("PrimeWithHints: reading root hints from file %s", hintsfile)
 		// Read and parse root hints file
 		data, err = os.ReadFile(hintsfile)
 		if err != nil {
-			return fmt.Errorf("Error reading root hints file %s: %v", hintsfile, err)
+			return nil, fmt.Errorf("Error reading root hints file %s: %v", hintsfile, err)
 		}
 		source = hintsfile
 	}
@@ -786,7 +826,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 	}
 
 	if err := zp.Err(); err != nil {
-		return fmt.Errorf("Error parsing root hints from %s: %v", source, err)
+		return nil, fmt.Errorf("Error parsing root hints from %s: %v", source, err)
 	}
 
 	// Store NS records for root
@@ -808,7 +848,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 			},
 		})
 	} else {
-		return fmt.Errorf("No NS records found in root hints from %s", source)
+		return nil, fmt.Errorf("No NS records found in root hints from %s", source)
 	}
 
 	// Store root zone data
@@ -868,21 +908,86 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 	rrcache.ServerMap.Set(".", authMap)
 	rrcache.Servers.Set(".", servers)
 
-	rrset, err := fetcher(ctx, ".", dns.TypeNS, authMap) // force re-query bypassing cache (cancellable via ctx)
+	if rrcache.Debug {
+		log.Printf("*** RRsetCache: seeded root hints from %s: %v", source, rootns)
+	}
+	return authMap, nil
+}
+
+// PrimeWithHints seeds the cache from the root hints and then upgrades the
+// hint data with a live ". NS" query through the supplied fetcher. The fetch
+// failing fails priming: an iterative resolver that cannot reach any root
+// server has nothing to iterate from. A resolver whose root is forwarded
+// should use PrimeFromHintsOnly instead.
+func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string, fetcher RRsetFetcher) error {
+	authMap, err := rrcache.seedFromHints(hintsfile)
+	if err != nil {
+		return err
+	}
+	// A COPY, not the map seedFromHints just published under ".": the fetcher
+	// is IterativeDNSQuery, which writes into the server map it is given
+	// (resolved NS addresses in, expired entries out). Handing it the stored
+	// map would edit the published root delegation in place -- the one thing
+	// the ServerMap invariant forbids, at the one moment every later lookup
+	// depends on. What the fetch legitimately learns still reaches the cache,
+	// through AddServers, which copies before it stores.
+	fetchMap := make(map[string]*AuthServer, len(authMap))
+	for name, server := range authMap {
+		fetchMap[name] = server
+	}
+	rrset, err := fetcher(ctx, ".", dns.TypeNS, fetchMap) // force re-query bypassing cache (cancellable via ctx)
 	if err != nil {
 		return fmt.Errorf("Error priming RRsetCache with root hints: %v", err)
 	}
 	if rrset == nil {
-		return fmt.Errorf("No NS records found in root hints from %s", source)
-	}
-
-	if rrcache.Debug {
-		log.Printf("*** RRsetCache: primed with these roots: %v", rootns)
+		return fmt.Errorf("priming '. NS' query returned no data")
 	}
 
 	rrcache.Primed = true
 
 	return nil
+}
+
+// PrimeFromHintsOnly seeds the cache from the root hints and marks it primed
+// WITHOUT the live ". NS" upgrade fetch. For a resolver whose root is covered
+// by a forward zone: the hint-seeded root server map is never consulted (the
+// forward outranks it in every lookup), so a live fetch would add nothing but
+// a startup-time network dependency on the upstream.
+func (rrcache *RRsetCacheT) PrimeFromHintsOnly(hintsfile string) error {
+	if _, err := rrcache.seedFromHints(hintsfile); err != nil {
+		return err
+	}
+	rrcache.Primed = true
+	return nil
+}
+
+// ServerMapCopy returns a shallow copy of a zone's server map, for callers that
+// pass it on to a query.
+//
+// ServerMap.Get hands out the map STORED in the cache, and IterativeDNSQuery
+// writes into the map it is given (adding servers resolved from glue, pruning
+// expired ones). A caller that forwarded the stored map would therefore edit
+// the cache in place, from a code path that only meant to read it -- while
+// FindClosestKnownZone, returning the same data, has always copied for exactly
+// this reason. Two accessors with opposite aliasing rules is a footgun with no
+// upside, so this is the accessor to reach for; see the ServerMap field
+// comment for the invariant both of them uphold (#345).
+//
+// The copy is shallow, like FindClosestKnownZone's: the *AuthServer values are
+// shared, so per-server state (addresses, transports, backoffs) is still common
+// to all holders. That is deliberate -- backoff learned on one query should
+// inform the next -- and it is only the map itself that must not be edited
+// underneath the cache.
+func (rrcache *RRsetCacheT) ServerMapCopy(zone string) (map[string]*AuthServer, bool) {
+	stored, ok := rrcache.ServerMap.Get(zone)
+	if !ok {
+		return nil, false
+	}
+	cp := make(map[string]*AuthServer, len(stored))
+	for k, v := range stored {
+		cp[k] = v
+	}
+	return cp, true
 }
 
 func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[string]*AuthServer, error) {
@@ -897,7 +1002,10 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	for item := range rrcache.ServerMap.IterBuffered() {
 		z := item.Key
 		ss := item.Val
-		if strings.HasSuffix(qname, z) && len(z) > len(bestmatch) {
+		// A DNS bailiwick test, not a byte suffix: the old form both missed
+		// mis-cased names and matched across a label boundary, so a cached
+		// "ample." could be picked as the closest known zone for "example.".
+		if dns.IsSubDomain(z, qname) && len(z) > len(bestmatch) {
 			bestmatch = z
 			servers = ss
 		}
@@ -939,6 +1047,7 @@ func (rrcache *RRsetCacheT) MarkNSRevalidation(zone string) bool {
 	if rrcache.nsRevalidateInFlight == nil {
 		rrcache.nsRevalidateInFlight = make(map[string]struct{})
 	}
+	zone = core.CanonicalizeName(zone)
 	if _, ok := rrcache.nsRevalidateInFlight[zone]; ok {
 		return false
 	}
@@ -952,7 +1061,7 @@ func (rrcache *RRsetCacheT) ClearNSRevalidation(zone string) {
 	if rrcache.nsRevalidateInFlight == nil {
 		return
 	}
-	delete(rrcache.nsRevalidateInFlight, zone)
+	delete(rrcache.nsRevalidateInFlight, core.CanonicalizeName(zone))
 }
 
 func (rrcache *RRsetCacheT) MarkRRsetBogus(qname string, qtype uint16, rrset *core.RRset, dnssecOK bool) (uint16, string) {

@@ -618,6 +618,7 @@ same applier as a typed statement.
 | `all RRs must share one owner`/`one type` | `replacerrset` given a mixed set |
 | `requires at least one RR` | `replacerrset` with none — use `delrrset` |
 | `outside the zone` | an owner name not in bailiwick |
+| `the apex ZONEMD RRset is maintained by the server` | the zone has `publish-zonemd`, which recomputes the digest on every publish; an update to it would be overwritten in the same breath. Turn the option off to author the record yourself |
 | `on-conflict-db-wins and on-conflict-zonefile-wins are mutually exclusive` | both named on one zone; they are a contradiction, not a preference order (§6) |
 | `refusing to merge, because the records that would lose could not be saved` | the `.rejected` artefact could not be written, so the merge was abandoned rather than resolved silently (§6) |
 

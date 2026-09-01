@@ -138,7 +138,7 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 func (zd *ZoneData) SendUpdateWithRetry(ctx context.Context, msg *dns.Msg, parent string, addrs []string) (int, UpdateResult, error) {
 	return sendUpdateWithRetry(ctx, delegationSyncMaxRetries, delegationSyncInitialDelay,
 		func() (int, UpdateResult, error) {
-			return SendUpdateContext(ctx, msg, parent, addrs)
+			return SendUpdate(ctx, msg, parent, addrs)
 		},
 		func() error {
 			// Re-bootstrap re-uploads the child's existing active SIG(0) key
@@ -151,21 +151,4 @@ func (zd *ZoneData) SendUpdateWithRetry(ctx context.Context, msg *dns.Msg, paren
 			_, _, berr := zd.BootstrapSig0KeyWithParent(ctx, 0)
 			return berr
 		})
-}
-
-// sleepOrDone waits for d, or returns false as soon as ctx is done. Used by the
-// retry loops that would otherwise sleep through a shutdown.
-func sleepOrDone(ctx context.Context, d time.Duration) bool {
-	if ctx == nil {
-		time.Sleep(d)
-		return true
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
 }

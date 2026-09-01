@@ -236,18 +236,26 @@ ns1.upd.example.	3600 IN A 192.0.2.1
 	}
 }
 
-// U-c: startup reconcile with no imr (no DSYNC discovery possible) reports
-// update-unsupported and does not attempt any parent compare or send. This
-// exercises the not-ready early-return branch without the network.
+// U-c: startup reconcile with no imr (no DSYNC discovery possible) reports why
+// and does not attempt any parent compare or send. This exercises the
+// nothing-usable early return without the network.
+//
+// The message changed when the reconcile stopped being UPDATE-only: it used to
+// say "not ready", the UPDATE state machine's word for it, and now reports the
+// plan summary — which names the actual obstacle rather than one scheme's view
+// of it. The behaviour asserted is the same: no error, nothing attempted.
 func TestProxyStartupReconcileNotReady(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
-	msg, err := zd.ProxyStartupReconcile(context.Background(), kdb, nil)
+	msg, err := zd.ProxyStartupReconcile(context.Background(), kdb, nil, nil)
 	if err != nil {
 		t.Fatalf("ProxyStartupReconcile (nil imr): unexpected error: %v", err)
 	}
-	if !strings.Contains(msg, "not ready") {
-		t.Fatalf("expected a not-ready message, got %q", msg)
+	if !strings.Contains(msg, "no usable scheme") {
+		t.Fatalf("expected a nothing-usable message, got %q", msg)
+	}
+	if !strings.Contains(msg, "IMR") {
+		t.Fatalf("message does not name the obstacle (no IMR): %q", msg)
 	}
 }
 

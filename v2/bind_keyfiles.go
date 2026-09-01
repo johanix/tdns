@@ -155,6 +155,22 @@ func BindTimeToRFC3339(s string) (string, error) {
 	return t.UTC().Format(time.RFC3339), nil
 }
 
+// RFC3339ToBindTime is the inverse of BindTimeToRFC3339: it renders one
+// keystore *_at value the way bind writes timestamps. An empty input stays
+// empty, for the same reason it does on the way in -- "not recorded" is a
+// distinct fact from any particular time, and must survive the round trip as
+// itself.
+func RFC3339ToBindTime(s string) (string, error) {
+	if strings.TrimSpace(s) == "" {
+		return "", nil
+	}
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(s))
+	if err != nil {
+		return "", fmt.Errorf("unparsable timestamp %q: %v", s, err)
+	}
+	return t.UTC().Format(bindTimeLayout), nil
+}
+
 // BindStateToDnssecState maps bind's KASP key states onto tdns's single linear
 // DNSSEC key state.
 //

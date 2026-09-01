@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -350,10 +351,11 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 			"structural checks below may be incomplete; often caused by legacy bare-string primaries:/downstreams:")
 	}
 
-	checkDnsEngine(&cfg, rep)
+	checkListeners(&cfg, rep)
 	checkApiServer(&cfg, cfgPath, rep)
 	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
+	checkDuplicateTemplates(&cfg, rep)
 	checkPeers(&cfg, rep)
 	checkApiServerCorrelation(role, &cfg, rep)
 
@@ -399,33 +401,41 @@ func finishCheckconf(rep *ccReport) {
 // Config loading (mirrors cmdv2/cli/root.go initConfig include handling)
 // ---------------------------------------------------------------------------
 
-// loadConfigViper reads path into a fresh viper instance and merges any
-// top-level include: files (single level, non-recursive), exactly as the
-// daemon/CLI loaders do. A missing include is reported as a WARN, not fatal.
-func loadConfigViper(path string, rep *ccReport) (*viper.Viper, error) {
-	v := viper.New()
-	v.SetConfigFile(path)
-	if err := v.ReadInConfig(); err != nil {
+// loadConfigViper returns the merged config view that every check below reads,
+// produced by THE DAEMON'S OWN LOADER and then handed to viper.
+//
+// It used to resolve include: itself, with viper's MergeInConfig. That was not
+// the same algorithm: viper deep-merges maps, while the daemon's
+// processConfigFile replaces a nested map wholesale. The two therefore
+// disagreed, and the disagreement was the wrong way round -- check saw MORE
+// than the daemon would:
+//
+//	dnssec.policies    daemon = [beta]    config check = [alpha beta]
+//
+// So a zone referencing a policy that lives only in the main config passed
+// `config check` and then failed at startup, because the daemon never loaded
+// it. The whole point of this command is to answer "would the daemon start",
+// and it was answering about a config the daemon never sees.
+//
+// LoadRawConfigMap IS that loader, so parity is not something to maintain by
+// hand -- there is now one implementation. Two behaviours change as a result,
+// both of them alignments:
+//
+//   - Nested includes are visible. Viper's loop was single-level;
+//     processConfigFile recurses.
+//   - A missing include fails the load instead of warning and carrying on.
+//     ValidateConfig already refused such a config later, so the WARN was the
+//     misleading half, not the useful one.
+//
+// rep is unused now and kept for signature stability across the call sites.
+func loadConfigViper(path string, _ *ccReport) (*viper.Viper, error) {
+	raw, _, err := tdns.LoadRawConfigMap(path)
+	if err != nil {
 		return nil, err
 	}
-	for _, inc := range v.GetStringSlice("include") {
-		incPath := inc
-		if !filepath.IsAbs(incPath) {
-			incPath = filepath.Join(filepath.Dir(path), incPath)
-		}
-		if _, err := os.Stat(incPath); err != nil {
-			if os.IsNotExist(err) {
-				rep.warn("Config file", "include",
-					fmt.Sprintf("included file not found: %s", incPath),
-					"create the file or remove it from the include: list")
-				continue
-			}
-			return nil, fmt.Errorf("stat include %s: %w", incPath, err)
-		}
-		v.SetConfigFile(incPath)
-		if err := v.MergeInConfig(); err != nil {
-			return nil, fmt.Errorf("merge include %s: %w", incPath, err)
-		}
+	v := viper.New()
+	if err := v.MergeConfigMap(raw); err != nil {
+		return nil, fmt.Errorf("building the merged config view for %s: %w", path, err)
 	}
 	return v, nil
 }
@@ -461,17 +471,17 @@ func checkLogSection(v *viper.Viper, cfgPath string, rep *ccReport) {
 
 // checkRequiredFields runs the exported required-field validator for the given
 // app type (which selects the sections tdns.ValidateConfig checks: auth →
-// service/db/apiserver/dnsengine + log; imr → imrengine + log).
+// service/db/apiserver/listeners/authengine + log; imr → listeners/imrengine + log).
 func checkRequiredFields(v *viper.Viper, cfgPath string, rep *ccReport, appType tdns.AppType) {
 	saved := tdns.Globals.App.Type
 	tdns.Globals.App.Type = appType
 	defer func() { tdns.Globals.App.Type = saved }()
 
-	suggestion := "add the missing required keys (service.name, dnsengine.addresses/transports, apiserver.*, db.file, log.file)"
+	suggestion := "add the missing required keys (service.name, listeners.addresses/transports, apiserver.*, db.file, log.file)"
 	passMsg := "all required sections/keys present; apiserver cert/key pair valid"
 	if appType == tdns.AppTypeImr {
-		suggestion = "add the missing required keys (imrengine.addresses, imrengine.transports, log.file)"
-		passMsg = "required sections present (imrengine.addresses/transports, log.file)"
+		suggestion = "add the missing required keys (listeners.addresses, listeners.transports, log.file)"
+		passMsg = "required sections present (listeners.addresses/transports, log.file)"
 	}
 
 	if err := tdns.ValidateConfig(v, cfgPath); err != nil {
@@ -485,22 +495,22 @@ func checkRequiredFields(v *viper.Viper, cfgPath string, rep *ccReport, appType 
 	rep.pass("Required fields", "required", passMsg)
 }
 
-func checkDnsEngine(cfg *tdns.Config, rep *ccReport) {
-	const g = "DNS engine"
-	if len(cfg.DnsEngine.Addresses) == 0 {
-		rep.fail(g, "addresses", "dnsengine.addresses is empty — the server would not listen on any address",
+func checkListeners(cfg *tdns.Config, rep *ccReport) {
+	const g = "Listeners"
+	if len(cfg.Listeners.Addresses) == 0 {
+		rep.fail(g, "addresses", "listeners.addresses is empty — the server would not listen on any address",
 			"add at least one addr:port, e.g. [ 127.0.0.1:53, '[::1]:53' ]")
 	} else {
-		rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.DnsEngine.Addresses))
+		rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.Listeners.Addresses))
 	}
 
 	validT := map[string]bool{"do53": true, "dot": true, "doh": true, "doq": true}
-	if len(cfg.DnsEngine.Transports) == 0 {
-		rep.fail(g, "transports", "dnsengine.transports is empty",
+	if len(cfg.Listeners.Transports) == 0 {
+		rep.fail(g, "transports", "listeners.transports is empty",
 			"list at least one of do53, dot, doh, doq")
 	}
 	needCert := false
-	for _, t := range cfg.DnsEngine.Transports {
+	for _, t := range cfg.Listeners.Transports {
 		lt := strings.ToLower(strings.TrimSpace(t))
 		if !validT[lt] {
 			rep.fail(g, "transports", fmt.Sprintf("unknown transport %q", t),
@@ -512,12 +522,12 @@ func checkDnsEngine(cfg *tdns.Config, rep *ccReport) {
 		}
 	}
 	if needCert {
-		if cfg.DnsEngine.CertFile == "" || cfg.DnsEngine.KeyFile == "" {
-			rep.warn(g, "cert", "dot/doh/doq configured but dnsengine.certfile/keyfile not set — those listeners will be skipped",
-				"set dnsengine.certfile and dnsengine.keyfile, or remove the encrypted transports")
+		if cfg.Listeners.CertFile == "" || cfg.Listeners.KeyFile == "" {
+			rep.warn(g, "cert", "dot/doh/doq configured but listeners.certfile/keyfile not set — those listeners will be skipped",
+				"set listeners.certfile and listeners.keyfile, or remove the encrypted transports")
 		} else {
-			checkFileExists(rep, g, "certfile", cfg.DnsEngine.CertFile)
-			checkFileExists(rep, g, "keyfile", cfg.DnsEngine.KeyFile)
+			checkFileExists(rep, g, "certfile", cfg.Listeners.CertFile)
+			checkFileExists(rep, g, "keyfile", cfg.Listeners.KeyFile)
 		}
 	}
 }
@@ -603,7 +613,7 @@ func checkDnssecPolicies(v *viper.Viper, rep *ccReport, online bool, role string
 				continue
 			}
 			rep.fail(g, "policy", ln,
-				"fix the policy (algorithm/lifetime/mode), or allowlist a differing KSK/ZSK pair in dnssec.split_algorithms")
+				"fix the policy (algorithm/lifetime/mode), or allowlist a differing KSK/ZSK pair in dnssec.split-algorithms")
 		}
 		return
 	}
@@ -699,7 +709,7 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 	// Config TSIG key names (for the secondary-zone key check).
 	configTsig := map[string]bool{}
 	for _, k := range cfg.Keys.Tsig {
-		configTsig[lc(dns.Fqdn(k.Name))] = true
+		configTsig[nk(k.Name)] = true
 	}
 	var keystoreTsig map[string]bool
 	keystoreOK := false
@@ -715,7 +725,13 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 		}
 	}
 
-	seen := map[string]bool{}
+	// Zone names compare case-folded AND FQDN-normalized, because a collision
+	// under either spelling is a collision to the daemon: ParseZones opens with
+	// dns.Fqdn(zconf.Name), so "example.com" and "example.com." are one zone to
+	// it, and DNS names are case-insensitive by definition (RFC 4343), so
+	// "Example.com." is that same zone a third time. Comparing raw strings here
+	// would miss exactly the collisions the daemon then has to resolve.
+	seen := map[string]int{}
 	for i := range cfg.Zones {
 		z := cfg.Zones[i]
 		zname := z.Name
@@ -728,15 +744,18 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 			rep.fail(g, zlabel, "zone has no name", "every zone needs a name")
 			continue
 		}
-		// A missing trailing dot is NOT flagged: tdns accepts zone names both
-		// with and without it, and the daemon canonicalizes to FQDN internally
-		// (correlateZones already compares dns.Fqdn-normalized names), so a
-		// non-FQDN name is not a defect.
-		if seen[lc(zname)] {
-			rep.fail(g, zname, "duplicate zone declaration", "remove the duplicate entry")
+		// A missing trailing dot is NOT flagged on its own: tdns accepts zone
+		// names both with and without it, and the daemon canonicalizes to FQDN
+		// internally (correlateZones already compares dns.Fqdn-normalized names),
+		// so a non-FQDN name is not by itself a defect. It only matters when it
+		// makes two entries the same zone, which zoneKey below catches.
+		if first, dup := seen[zoneKey(zname)]; dup {
+			rep.fail(g, zname,
+				fmt.Sprintf("duplicate zone declaration (entries %d and %d)", first+1, i+1),
+				"remove the duplicate entry; a zone defined twice is served under NEITHER definition")
 			continue
 		}
-		seen[lc(zname)] = true
+		seen[zoneKey(zname)] = i
 
 		// Resolve the effective zone (apply template gap-fill for the fields we check).
 		eff := effectiveZone(z, templateNames)
@@ -882,7 +901,7 @@ func checkTsigRef(rep *ccReport, g, zname, field, key string, configTsig, keysto
 	if k == "" || strings.EqualFold(k, "NOKEY") || strings.EqualFold(k, "BLOCKED") {
 		return
 	}
-	fk := lc(dns.Fqdn(k))
+	fk := nk(k)
 	if configTsig[fk] {
 		return
 	}
@@ -956,7 +975,7 @@ func correlateRunningConfig(role string, cfg *tdns.Config, cfgPath, daemonDBPath
 			"a reload does not move the DB; restart is needed to switch db.file")
 	}
 
-	// /config status: running dnsengine + apiserver.
+	// /config status: running listeners/authengine + apiserver.
 	if api, err := GetApiClient(role, false); err != nil {
 		rep.warn(g, "status", fmt.Sprintf("could not reach the daemon for status: %v — status drift not correlated", err), "")
 	} else if resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"}); err != nil {
@@ -990,9 +1009,9 @@ func correlateRunningConfig(role string, cfg *tdns.Config, cfgPath, daemonDBPath
 }
 
 func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, rep *ccReport, g string) {
-	if !sameStringSet(cfg.DnsEngine.Addresses, resp.DnsEngine.Addresses) {
-		rep.warn(g, "dnsengine-addresses",
-			fmt.Sprintf("config dnsengine.addresses %v differ from running %v", cfg.DnsEngine.Addresses, resp.DnsEngine.Addresses),
+	if !sameStringSet(cfg.Listeners.Addresses, resp.Listeners.Addresses) {
+		rep.warn(g, "listeners-addresses",
+			fmt.Sprintf("config listeners.addresses %v differ from running %v", cfg.Listeners.Addresses, resp.Listeners.Addresses),
 			"a `config reload` does not re-open DNS listeners; restart to change listen addresses")
 	}
 	if resp.ApiServer.ApiKey.Value() != "" && cfg.ApiServer.ApiKey.Value() != "" &&
@@ -1016,15 +1035,15 @@ func correlateZones(role string, cfg *tdns.Config, rep *ccReport, g string) {
 	}
 	running := map[string]tdns.ZoneConf{}
 	for name, zc := range resp.Zones {
-		running[lc(dns.Fqdn(name))] = zc
+		running[nk(name)] = zc
 	}
 	configured := map[string]bool{}
 	for _, z := range cfg.Zones {
 		if z.Name == "" {
 			continue
 		}
-		configured[lc(dns.Fqdn(z.Name))] = true
-		rn := lc(dns.Fqdn(z.Name))
+		configured[nk(z.Name)] = true
+		rn := nk(z.Name)
 		if _, ok := running[rn]; !ok {
 			rep.warn(g, "zone-not-running",
 				fmt.Sprintf("zone %s is in the config but not running", z.Name),
@@ -1081,7 +1100,7 @@ func fetchKeystoreTsigNames(role string) (map[string]bool, error) {
 		return nil, err
 	}
 	for _, k := range resp.TsigKeys {
-		out[lc(dns.Fqdn(k.Name))] = true
+		out[nk(k.Name)] = true
 	}
 	return out, nil
 }
@@ -1185,7 +1204,7 @@ func fetchActiveKeyAlgsByZone(role string) (map[string]activeKeyAlgs, error) {
 		if !strings.EqualFold(k.State, tdns.DnskeyStateActive) {
 			continue
 		}
-		zone := lc(dns.Fqdn(k.Name))
+		zone := nk(k.Name)
 		a, ok := out[zone]
 		if !ok {
 			a = activeKeyAlgs{ksk: map[string]bool{}, zsk: map[string]bool{}}
@@ -1300,7 +1319,7 @@ func checkPolicyAlgVsActiveKeys(cfg *tdns.Config, v *viper.Viper, rep *ccReport,
 			rep.info(g, z.name, fmt.Sprintf("cannot resolve algorithms for policy %q (not in this config and not loaded by the server) — skipping", z.policy))
 			continue
 		}
-		miss := missingRoleAlgs(want, activeByZone[lc(dns.Fqdn(z.name))])
+		miss := missingRoleAlgs(want, activeByZone[nk(z.name)])
 		if len(miss) == 0 {
 			rep.pass(g, z.name, fmt.Sprintf("active keys satisfy policy %q algorithms", z.policy))
 			continue
@@ -1319,6 +1338,23 @@ func checkPolicyAlgVsActiveKeys(cfg *tdns.Config, v *viper.Viper, rep *ccReport,
 // ---------------------------------------------------------------------------
 
 func lc(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// nk folds a DOMAIN NAME for use as a map key. lc is for config identifiers --
+// template names, policy names, zone types -- where Unicode folding is
+// harmless and ASCII is all that occurs. A domain name needs the DNS rule:
+// US-ASCII A-Z and nothing else, so two names differing only by U+212A do not
+// share a bucket.
+func nk(s string) string { return core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(s))) }
+
+// zoneKey is the comparison key for a zone name, and it is nk: one key function
+// for every DNS name in this file, so a name stored under one and looked up
+// under the other cannot happen.
+//
+// It used to be dns.Fqdn(lc(name)), and the comment here used to say the daemon
+// stores zones under dns.Fqdn(name) with case preserved. That stopped being
+// true when zd.ZoneName started being folded, and lc folds by Unicode, so it
+// also collapsed two genuinely different zones onto one key.
+func zoneKey(name string) string { return nk(name) }
 
 func absClean(p string) string {
 	if p == "" {
@@ -1541,4 +1577,66 @@ func extraLines(s string) []string {
 		}
 	}
 	return out
+}
+
+// checkDuplicateTemplates reports a template name defined twice.
+//
+// Zones are NOT checked here: checkZones already reports duplicate zone
+// declarations, and it compares with zoneKey, so it catches every spelling.
+// Reporting them a second time here would print two FAIL lines for one defect.
+//
+// Templates get their own check because checkZones only ever consults the
+// template map, which has already collapsed the duplicate by the time it looks.
+// The daemon refuses the whole config on this (buildTemplateMap returns an
+// error), so a FAIL naming the template is still worth printing: it runs
+// before the restart that would otherwise just fail.
+//
+// DNSSEC policies need no check. `policies` is a YAML mapping, and yaml.v3
+// rejects duplicate keys outright, so two policies of one name never survive
+// parsing to reach any code here.
+func checkDuplicateTemplates(cfg *tdns.Config, rep *ccReport) {
+	// Keyed by EXACT name, because that is how the daemon keys them:
+	// buildTemplateMap does Templates[tmpl.Name], and every lookup
+	// (Templates[zconf.Template]) matches the same way. Folding case here made
+	// config check stricter than the daemon -- `Foo` and `foo` are two distinct
+	// templates that both load, so failing them said "the daemon refuses to
+	// start on this" about a config the daemon starts on quite happily.
+	//
+	// Zone names fold (lc + FQDN, see zoneKey) because they are DNS names and
+	// RFC 4343 makes two spellings one zone. A template name is a map key, not
+	// a DNS name, and no such rule applies.
+	seen := map[string]int{}
+	folded := map[string]int{}
+	dups := 0
+	for i := range cfg.Templates {
+		name := cfg.Templates[i].Name
+		if name == "" {
+			continue // an unnamed template is a different complaint, made elsewhere
+		}
+		if first, dup := seen[name]; dup {
+			dups++
+			rep.fail("Zones", "duplicate template",
+				fmt.Sprintf("template %q is defined twice (entries %d and %d)", name, first+1, i+1),
+				"remove one definition; the daemon refuses to start on this")
+			continue
+		}
+		seen[name] = i
+
+		// Still worth saying, just not as a refusal: two templates differing
+		// only in case load as two, so a zone naming one of them silently gets
+		// whichever it spelled -- which is the bug if one of the two is a typo.
+		if first, near := folded[lc(name)]; near {
+			rep.warn("Zones", "template name case",
+				fmt.Sprintf("templates %q and %q differ only in case (entries %d and %d)",
+					cfg.Templates[first].Name, name, first+1, i+1),
+				"the daemon keys templates by exact name, so both load as distinct templates; if one is a typo, zones naming it get that one silently")
+		} else {
+			folded[lc(name)] = i
+		}
+	}
+
+	if dups == 0 {
+		rep.pass("Zones", "duplicate template",
+			fmt.Sprintf("no duplicate names among %d template(s)", len(cfg.Templates)))
+	}
 }

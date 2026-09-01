@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -64,6 +65,28 @@ type RefreshCounter struct {
 	Zonefile       string
 }
 
+// noteRefreshFailure records a failed refresh, EXCEPT when the failure is the
+// context being cancelled.
+//
+// A cancelled refresh is a shutdown, not a sick zone: flagging it RefreshError
+// leaves a perfectly healthy zone marked failed. That is invisible at process
+// death, and wrong the moment ctx is used to bound a single refresh rather than
+// the process. Reports whether it was a real failure, so callers can keep their
+// existing control flow.
+//
+// One helper rather than an errors.Is at each of the five call sites: they all
+// want the same rule, and the next one added should get it for free.
+func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
+	if errors.Is(err, context.Canceled) {
+		lgEngine.Info("zone refresh cancelled", "zone", zone)
+		return false
+	}
+	lgEngine.Error(msg, "zone", zone, "error", err)
+	zd.SetError(RefreshError, "refresh error: %v", err)
+	zd.LatestError = time.Now()
+	return true
+}
+
 // initialLoadZone handles the first load of a zone: refresh, counter setup,
 // post-init hooks, OnFirstLoad callbacks, and downstream notification.
 // Called for both newly-created zones and pre-registered zone stubs.
@@ -71,8 +94,44 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	refreshCounters *core.ConcurrentMap[string, *RefreshCounter],
 	tryPostpass func(string)) (bool, error) {
 
-	updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
+	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, zr.Force, conf)
 	if err != nil {
+		// A failed refresh no longer implies an empty zone. A secondary that
+		// adopted its persisted copy at first bind (adoptPersistedCopyAtFirstBind)
+		// holds data even though the transfer failed -- and FirstZoneLoad is
+		// already spent, so returning here without finishing the first bind
+		// hands the zone to the EXISTING ZONE branch on the next tick and it
+		// never gets policy-bound, replayed or drained for the life of the
+		// process. It would serve, which is the point of Stage 2, but as a
+		// zone that never finished loading.
+		//
+		// Completed here rather than at the call sites because all three of
+		// them reach this one return. The caller still gets the error: the
+		// refresh DID fail, the ticker must retry, and RefreshError must be
+		// recorded.
+		if zd.publishedSnapshot() != nil {
+			if cerr := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); cerr != nil {
+				lgEngine.Error("policy sync after adopting a persisted copy failed",
+					"zone", zone, "error", cerr)
+				zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", cerr)
+				zd.LatestError = time.Now()
+			}
+			// And install the real refresh interval, for the same reason. The
+			// success path below does this; a zone that adopted a copy has an
+			// SOA to read it from, and first-load is already spent, so nothing
+			// will come back for it later. Without this the caller's
+			// "no counter yet" fallback pins the zone at a 300s probe for the
+			// life of the process instead of its own SOA REFRESH.
+			if refresh, ferr := FindSoaRefresh(zd); ferr != nil {
+				lgEngine.Warn("FindSoaRefresh failed for an adopted copy", "zone", zone, "error", ferr)
+			} else {
+				refreshCounters.Set(zone, &RefreshCounter{
+					Name:       zone,
+					SOARefresh: refresh,
+					CurRefresh: refresh,
+				})
+			}
+		}
 		return false, err
 	}
 
@@ -127,13 +186,19 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	// preserved; order moved post-Ready for PR-2).
 
 	if updated {
-		zd.LatestRefresh = time.Now()
+		// LatestRefresh is NOT set here. It means "a usable SOA was last seen
+		// at", which is a fact about the primary, and noteSuccessfulRefresh
+		// owns it -- it is the only writer that also persists the value, so
+		// stamping it here would leave memory and database disagreeing and
+		// the disagreement would survive a restart as a silently restarted
+		// expire budget. `updated` is about our own copy changing, which is
+		// not the same question.
 		zd.RefreshCount++
 		// Successful refresh clears RefreshError specifically — other
 		// error categories (rollover policy, parent DSYNC blockers,
 		// config errors) are independent and must survive.
 		zd.ClearError(RefreshError)
-		// Apply outbound_soa_serial mode for the serial we'll advertise
+		// Apply outbound-soa-serial mode for the serial we'll advertise
 		// to secondaries.
 		// MUST-NOT-MODIFY: neither outbound mode may rewrite the serial of a
 		// tdns-auth secondary that did not originate this content. Clear any
@@ -149,7 +214,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 			switch zd.EffectiveOutboundSoaSerial() {
 			case OutboundSoaSerialUnixtime:
 				zd.CurrentSerial = uint32(time.Now().Unix())
-				lgEngine.Info("zone loaded; outbound_soa_serial=unixtime",
+				lgEngine.Info("zone loaded; outbound-soa-serial=unixtime",
 					"zone", zone, "serial", zd.CurrentSerial)
 				serialChanged = true
 			case OutboundSoaSerialPersist:
@@ -159,7 +224,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 				// honour — moving zd.CurrentSerial backwards would break
 				// secondaries.
 				if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
-					lgEngine.Info("zone loaded; outbound_soa_serial=persist (restored saved serial)",
+					lgEngine.Info("zone loaded; outbound-soa-serial=persist (restored saved serial)",
 						"zone", zone, "incoming", zd.CurrentSerial, "persisted", saved)
 					zd.CurrentSerial = saved
 					serialChanged = true
@@ -562,15 +627,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.MultiSigner = &msc
 							zd.DelegationSyncQ = conf.Internal.DelegationSyncQ
 							zd.KeyDB = conf.Internal.KeyDB
-							zd.Data = core.NewCmap[OwnerData]()
+							zd.Data = core.NewNameMap[OwnerData]()
 							zd.mu.Unlock()
 						}
 
 						if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
 							tryPostpass); err != nil {
-							lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
-							zd.SetError(RefreshError, "refresh error: %v", err)
-							zd.LatestError = time.Now()
+							noteRefreshFailure(zd, zone, err, "zone refresh failed")
 
 							// Set a refresh counter so the ticker can retry.
 							if _, exists := refreshCounters.Get(zone); !exists {
@@ -769,17 +832,15 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							})
 						}
 						// XXX: Should do refresh in parallel
-						go func(zd *ZoneData, zone string, force bool, conf *Config, zr ZoneRefresher) {
+						go func(ctx context.Context, zd *ZoneData, zone string, force bool, conf *Config, zr ZoneRefresher) {
 							// Snapshot the generation at dispatch. The pre-persist
 							// guard below drops the persist if the zone was deleted
 							// or replaced mid-refresh (generation bumped), closing
 							// the resurrection race (B5b).
 							gen := zd.generation.Load()
-							updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, force, conf)
+							updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, force, conf)
 							if err != nil {
-								lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
-								zd.SetError(RefreshError, "refresh error: %v", err)
-								zd.LatestError = time.Now()
+								noteRefreshFailure(zd, zone, err, "zone refresh failed")
 								// If caller requested error reporting, send the error
 								if zr.Wait && zr.Response != nil {
 									zr.Response <- RefresherResponse{
@@ -890,7 +951,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 									Msg: fmt.Sprintf("zone %s: reloaded (updated=%v)", zone, updated),
 								}
 							}
-						}(zd, zone, zr.Force, conf, zr)
+						}(ctx, zd, zone, zr.Force, conf, zr)
 					}
 				} else {
 					// DYNAMIC ZONE: not from config (catalog member, API-created).
@@ -905,7 +966,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					primariesConf := clonePeerConfs(zr.PrimariesConf)
 					upstreams := clonePeerConfs(zr.Primaries)
 					zd := &ZoneData{
-						ZoneName:          zone,
+						ZoneName:          core.CanonicalizeName(zone),
 						ZoneStore:         zr.ZoneStore,
 						Logger:            log.Default(),
 						PrimariesConf:     primariesConf,
@@ -924,7 +985,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						DnssecPolicyName:  zr.DnssecPolicy, // config-base hint; struct bound post-Ready
 						MultiSigner:       &msc,
 						DelegationSyncQ:   conf.Internal.DelegationSyncQ,
-						Data:              core.NewCmap[OwnerData](),
+						Data:              core.NewNameMap[OwnerData](),
 						KeyDB:             conf.Internal.KeyDB,
 						FirstZoneLoad:     true,
 						Status:            ZoneStatusPending, // registered + enqueued, no data yet (B6)
@@ -998,9 +1059,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
 						tryPostpass); err != nil {
-						lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
-						zd.SetError(RefreshError, "refresh error: %v", err)
-						zd.LatestError = time.Now()
+						noteRefreshFailure(zd, zone, err, "zone refresh failed")
 						continue
 					}
 
@@ -1074,9 +1133,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						zd.ClearError(RefreshError)
 						if _, err := initialLoadZone(ctx, zd, zone, ZoneRefresher{Name: zone, Force: true}, conf,
 							refreshCounters, tryPostpass); err != nil {
-							lgEngine.Error("initial load retry failed", "zone", zone, "error", err)
-							zd.SetError(RefreshError, "refresh error: %v", err)
-							zd.LatestError = time.Now()
+							noteRefreshFailure(zd, zone, err, "initial load retry failed")
 						} else {
 							if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); err != nil {
 								lgEngine.Error("initial load retry: policy sync failed", "zone", zone, "error", err)
@@ -1105,17 +1162,15 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						continue
 					}
 
-					updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, false, conf)
+					updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, false, conf)
 					rc.CurRefresh = rc.SOARefresh
 					if err != nil {
-						lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
-						zd.SetError(RefreshError, "refresh error: %v", err)
-						zd.LatestError = time.Now()
+						noteRefreshFailure(zd, zone, err, "zone refresh failed")
 					} else if updated {
 						// Successful refresh clears RefreshError. Other categories
 						// (rollover-policy, parent-DSYNC, config) survive.
 						zd.ClearError(RefreshError)
-						// Apply outbound_soa_serial mode after upstream refresh —
+						// Apply outbound-soa-serial mode after upstream refresh —
 						// but never for a mirroring secondary (MUST-NOT-MODIFY;
 						// applyRefreshReplacementLocked already set the serial
 						// to upstream's and nothing may move it off that).
@@ -1137,7 +1192,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							switch zd.EffectiveOutboundSoaSerial() {
 							case OutboundSoaSerialUnixtime:
 								zd.CurrentSerial = uint32(time.Now().Unix())
-								lgEngine.Info("zone updated from upstream; outbound_soa_serial=unixtime",
+								lgEngine.Info("zone updated from upstream; outbound-soa-serial=unixtime",
 									"zone", zone, "serial", zd.CurrentSerial)
 								serialChanged = true
 							case OutboundSoaSerialPersist:

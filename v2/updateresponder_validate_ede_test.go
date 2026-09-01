@@ -1,9 +1,7 @@
 package tdns
 
 import (
-	"log"
 	"net"
-	"os"
 	"testing"
 
 	edns0 "github.com/johanix/tdns/v2/edns0"
@@ -45,12 +43,17 @@ func (c *captureWriter) Hijack()                     {}
 func TestUpdateResponderRelaysValidationRcodeAndEDE(t *testing.T) {
 	const zone = "parent.example."
 
-	Zones.Set(zone, &ZoneData{
-		ZoneName: zone,
-		Options:  map[ZoneOption]bool{OptAllowUpdates: true},
-		Logger:   log.New(os.Stderr, "", 0),
-	})
-	t.Cleanup(func() { Zones.Remove(zone) })
+	// The zone must hold a PUBLISHED snapshot, not just exist in the Zones map.
+	// UpdateResponder refuses with SERVFAIL + EDEZoneNotFound before it ever
+	// reaches ValidateUpdate when !zd.HasPublishedData() -- the same predicate
+	// the query path uses. A bare &ZoneData{} passes the Zones.Get but not that
+	// gate, so it would exercise the refusal instead of the relay this test is
+	// about.
+	zd := testSnapshotZone(t, zone, `parent.example.	3600	IN	SOA	ns.parent.example. hostmaster.parent.example. 1 7200 1800 604800 7200
+parent.example.	3600	IN	NS	ns.parent.example.
+ns.parent.example.	3600	IN	A	192.0.2.53
+`)
+	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true}
 
 	// An UPDATE with no SIG(0) and, deliberately, no EDNS0 OPT: that is the
 	// len(r.Extra) == 0 branch in ValidateUpdate.

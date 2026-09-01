@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gookit/goutil/dump"
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
@@ -426,7 +428,7 @@ cmdloop:
 					fmt.Printf("Error parsing RR: %v\n", err)
 					continue
 				}
-				if rr.Header().Name != owner {
+				if !core.EqualNames(rr.Header().Name, owner) {
 					fmt.Printf("Warning: record owner %q differs from RRset owner %q\n",
 						rr.Header().Name, owner)
 				}
@@ -511,7 +513,7 @@ cmdloop:
 
 			fmt.Printf("Sending update to %s\n", server)
 			dump.P(msg)
-			rcode, ur, err := tdns.SendUpdate(msg, zone, []string{server})
+			rcode, ur, err := tdns.SendUpdate(context.Background(), msg, zone, []string{server})
 			if err != nil {
 				fmt.Printf("Error sending update: %v\n", err)
 				continue

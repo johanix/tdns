@@ -25,12 +25,17 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   zone quarantining), then per-application pages:
   [tdns-auth](config-tdns-auth.md) (TSIG keys, the
   `allow-notify:` / `downstreams:` ACLs, zone declarations
-  and options, the zone template system, the `dnsengine:`
+  and options, the zone template system, the `listeners:`/`authengine:`
   block, DNSSEC policies including policy templates,
-  `split_algorithms` and `large_algorithms`),
+  `split-algorithms` and `large-algorithms`),
   [tdns-imr](config-tdns-imr.md) (trust anchors, stub zones,
+  forward zones with per-upstream transport/port/TLS,
   the `imrengine.tuning.*` knobs) and
-  [tdns-agent](config-tdns-agent.md) (placeholder).
+  [tdns-agent](config-tdns-agent.md) (placeholder). The tdns-auth
+  page also covers ZONEMD (RFC 8976): `publish-zonemd`,
+  `verify-zonemd`, the `zonemd:` parameter block including
+  `wire-cache-max-bytes`, and checking a digest by hand with
+  `zone zonemd status|verify` or `dog +zonemd`.
 
 - [Changing Zone Content: DDNS and the Management API](zone-updates.md)
   -- The two channels that change a running primary zone

@@ -2,39 +2,50 @@ package edns0
 
 import "testing"
 
-// TestLocalOptionCodesAreUnique guards against two tdns-local EDNS(0) options
-// claiming the same option code. They are all carried as dns.EDNS0_LOCAL and
-// dispatched purely on Code, so a collision means one option is silently parsed
-// as the other — EDNS0_PROVIDERSYNC_OPTION_CODE and EDNS0_KEYSTATE_OPTION_CODE
-// both held 65002, so a ProviderSync option would have been read as a KeyState
-// option. Nothing in the compiler catches that; this test does.
+// Two local options sharing a code are indistinguishable on the wire: a
+// receiver reads whichever one it happens to look for and parses the other's
+// payload as though it were its own. That is what happened to KEYSTATE and
+// PROVIDERSYNC, both at 65002, because PROVIDERSYNC was declared in its own
+// file where nothing adding to the central table could see it.
 //
-// Add every new tdns-local option code here as well as in edns0_defs.go.
+// This is the test that makes keeping them in one block worth doing. A new
+// option copy-pasted onto an existing code fails here rather than on the wire.
 func TestLocalOptionCodesAreUnique(t *testing.T) {
-	codes := map[string]uint16{
-		"EDNS0_OOTS_OPTION_CODE":          EDNS0_OOTS_OPTION_CODE,
-		"EDNS0_KEYSTATE_OPTION_CODE":      EDNS0_KEYSTATE_OPTION_CODE,
-		"EDNS0_REPORT_OPTION_CODE":        EDNS0_REPORT_OPTION_CODE,
-		"EDNS0_CHUNK_OPTION_CODE":         EDNS0_CHUNK_OPTION_CODE,
-		"EDNS0_CHUNK_QUERY_ENDPOINT_CODE": EDNS0_CHUNK_QUERY_ENDPOINT_CODE,
-		"EDNS0_PROVIDERSYNC_OPTION_CODE":  EDNS0_PROVIDERSYNC_OPTION_CODE,
-	}
+	codes := map[uint16]string{}
 
-	seen := make(map[uint16]string, len(codes))
-	for name, code := range codes {
-		if other, dup := seen[code]; dup {
-			t.Errorf("option code %d claimed by both %s and %s — one of them must move to a free code point",
-				code, other, name)
+	for name, code := range map[string]uint16{
+		"OOTS":                 EDNS0_OOTS_OPTION_CODE,
+		"KEYSTATE":             EDNS0_KEYSTATE_OPTION_CODE,
+		"REPORT":               EDNS0_REPORT_OPTION_CODE,
+		"CHUNK":                EDNS0_CHUNK_OPTION_CODE,
+		"CHUNK_QUERY_ENDPOINT": EDNS0_CHUNK_QUERY_ENDPOINT_CODE,
+		"PROVIDERSYNC":         EDNS0_PROVIDERSYNC_OPTION_CODE,
+	} {
+		if prev, taken := codes[code]; taken {
+			t.Errorf("option code %d is used by both %s and %s;"+
+				" on the wire they are the same option", code, prev, name)
 			continue
 		}
-		seen[code] = name
+		codes[code] = name
 	}
+}
 
-	// The local range is the private-use space; a code outside it would collide
-	// with an IANA assignment instead.
-	for name, code := range codes {
-		if code < 65001 || code > 65534 {
-			t.Errorf("%s = %d is outside the tdns-local private-use range 65001-65534", name, code)
+// The codes must also sit in the private-use range. A local option outside it
+// is squatting on space IANA may allocate to someone else, which breaks
+// differently and later: the option keeps working until somebody else's
+// software starts sending the same code for another purpose.
+func TestLocalOptionCodesAreInPrivateUseRange(t *testing.T) {
+	for name, code := range map[string]uint16{
+		"OOTS":                 EDNS0_OOTS_OPTION_CODE,
+		"KEYSTATE":             EDNS0_KEYSTATE_OPTION_CODE,
+		"REPORT":               EDNS0_REPORT_OPTION_CODE,
+		"CHUNK":                EDNS0_CHUNK_OPTION_CODE,
+		"CHUNK_QUERY_ENDPOINT": EDNS0_CHUNK_QUERY_ENDPOINT_CODE,
+		"PROVIDERSYNC":         EDNS0_PROVIDERSYNC_OPTION_CODE,
+	} {
+		if code < localOptionCodeFirst || code > localOptionCodeLast {
+			t.Errorf("%s uses code %d, outside the local/private-use range %d-%d",
+				name, code, localOptionCodeFirst, localOptionCodeLast)
 		}
 	}
 }

@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -19,7 +18,7 @@ func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyV
 		return fmt.Errorf("invalid domain name: %q (must be a FQDN)", name)
 	}
 
-	if !strings.HasSuffix(name, zd.ZoneName) {
+	if !dns.IsSubDomain(zd.ZoneName, name) {
 		return fmt.Errorf("PublishSvcbRR: name %q is not a subdomain of %q", name, zd.ZoneName)
 	}
 

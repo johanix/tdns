@@ -44,7 +44,7 @@ step; each builds, passes `go test -race ./...`, and is `go vet`-clean):
 | 4 AXFR/IXFR sign | `f58c205` | `ZoneTransferIn` |
 | 6 outbound NOTIFY sign | `7890be5` | `SendNotify`; threads `conf` (tdns-mp deferred-break) |
 | **5+7 inbound verify** | `d68acff` | NOTIFY(SOA) `allow-notify` + AXFR `downstreams`; one provider on the auth `dns.Server` does verify + RFC 8945 response signing. **Combined** because they share all wiring. |
-| 8 catalog wiring | `1a92b0d` | `tsig_key` → `primaries[].key`; false "applied" log deleted |
+| 8 catalog wiring | `1a92b0d` | `tsig-key` → `primaries[].key`; false "applied" log deleted |
 | 9 API/CLI + lifecycle | `5c9f771` | inline `tsig_name/secret/algo` on `zone add`/`modify`, upsert + **persist** to the dynamic config file's `keys:` block (survives restart) |
 
 **Operator-visible behaviour change (hard cutover, step 7):** an empty
@@ -500,8 +500,8 @@ branches exist; the "Future: other dynamic zone types" comment at dynamic_zones.
 work. After B5:
 
 ```go
-// OptCatalogZone     → catalog_zones.{allowed, storage}
-// OptAutomaticZone   → catalog_members.{allowed, storage}
+// OptCatalogZone     → catalog-zones.{allowed, storage}
+// OptAutomaticZone   → catalog-members.{allowed, storage}
 // OptApiManagedZone  → dynamic.{allowed, storage}   // NEW
 ```
 
@@ -568,7 +568,7 @@ The canonical write/read matrix (one table the implementer fills and the tests a
 |---|---|---|---|
 | `SourceCatalog` (string) | yes @315 | sets `OptAutomaticZone` (NEW) | persist gate, static-reload spare |
 | `ApiManaged` (bool, NEW) | NEW, beside @315 | sets `OptApiManagedZone` (NEW) | `ShouldPersistZone` (dynamic branch), delete/modify guard |
-| `OptAutomaticZone` | no (internal) | from `SourceCatalog` | `ShouldPersistZone` (catalog_members branch), refreshengine persist, config.go spare (widened to `ShouldPersistZone`) |
+| `OptAutomaticZone` | no (internal) | from `SourceCatalog` | `ShouldPersistZone` (catalog-members branch), refreshengine persist, config.go spare (widened to `ShouldPersistZone`) |
 | `OptApiManagedZone` | no (internal) | from `ApiManaged` | `ShouldPersistZone` (dynamic branch), delete/modify guard, refreshengine persist, config.go spare (widened to `ShouldPersistZone`) |
 | `Primary{Addr,Key}` | yes (struct) | direct | transfer, TSIG lookup |
 | `notify` `[]PeerConf` | yes (Improvement 2) | direct | NOTIFY sign, inbound AXFR ACL |
@@ -855,10 +855,10 @@ path — out of scope for auth.
    model — `downstreams: 0.0.0.0/0 transfer-key` (anyone with the key) and `downstreams: 1.2.3.4
    NOKEY` (this host, no TSIG) both fall out of the ip-spec + key fields.
 
-8. **Wire catalog path** — catalog.go:399-404: map the group's `tsig_key` onto the provisioned
+8. **Wire catalog path** — catalog.go:399-404: map the group's `tsig-key` onto the provisioned
    zone's `primaries[].key` name (the `keys:` store holds the secret); **delete the false "applied
    TSIG key" log** (catalog.go:403) now (a one-line correctness fix, independent of the rest).
-   Re-point the existing `tsig_key` config-check from the (now-unused-on-auth) `Globals.TsigKeys` to
+   Re-point the existing `tsig-key` config-check from the (now-unused-on-auth) `Globals.TsigKeys` to
    the parsed `keys.tsig[]` name-set, or it always-fails.
 
 9. **API/CLI + key lifecycle.** `zone add`/`modify` carry `{tsig_name, tsig_secret, tsig_algo}` →
@@ -1168,8 +1168,8 @@ syntax it depends on, so it cannot ship first regardless of how loud-and-testabl
   verify; thread `zd.KeyDB`)
 - v2/queryresponder.go (AXFR path: `ZoneTransferOut` already has `w.RemoteAddr()`; reduce via
   `peerIP` for the `downstreams:` match/verify — no new param)
-- v2/catalog.go (map group `tsig_key` → `primaries[].key` name; delete the false "applied TSIG key"
-  log; re-point the `tsig_key` check at `keys.tsig[]`)
+- v2/catalog.go (map group `tsig-key` → `primaries[].key` name; delete the false "applied TSIG key"
+  log; re-point the `tsig-key` check at `keys.tsig[]`)
 - v2/refreshengine.go (assign `AllowNotify`/`Downstreams` onto `ZoneData`)
 - v2/global.go / v2/tsig_utils.go (stop using `Globals.TsigKeys` on the auth replication path)
 
@@ -1219,7 +1219,7 @@ syntax it depends on, so it cannot ship first regardless of how loud-and-testabl
 - **Address model (revised 2026-06-28):** **send** to the configured full `addr:port` (never assume
   `:53`); **match ACLs on IP only** (`peerIP` = port stripped) via ip-spec (IP/CIDR/mask/range).
   **Secrets are keyed by name, not `(peerIP, name)`** — the old per-peer keystore tuple is dropped.
-- **Catalog `tsig_key` → `primaries[].key`:** map the group key-name onto the provisioned zone's
+- **Catalog `tsig-key` → `primaries[].key`:** map the group key-name onto the provisioned zone's
   primary key (name-referenced in `keys:`); delete the false "applied TSIG key" log now.
 - **`keys:` load ordering (decided 2026-06-25, simplified 2026-06-28):** DB-load → `keys:` bind
   (upsert by **name**) → zone parse. Config binds last, so on a **name** collision config wins on
@@ -1241,7 +1241,7 @@ syntax it depends on, so it cannot ship first regardless of how loud-and-testabl
   map-only tightening is then a deliberate breaking change to announce, not a silent one).
 - **IXFR:** production refresh still hardcodes `"axfr"` (`FetchFromUpstream`, zone_utils.go:234); when
   IXFR is wired, A5 signing applies to IXFR via the same helper.
-- **`tsig_key` yaml tag (decide in A9):** `ConfigGroupConfig.TsigKey` uses a snake_case `tsig_key`
+- **`tsig-key` yaml tag (decide in A9):** `ConfigGroupConfig.TsigKey` uses a snake_case `tsig-key`
   tag (config.go:395), contrary to the project's lowercase-no-underscore YAML convention. A9 is
   already touching this field's handling — either fix the tag to `tsigkey` in the same pass (a
   config-breaking rename, consistent with the hard cutover) or explicitly note it's being left. Don't

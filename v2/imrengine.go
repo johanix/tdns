@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/viper"
@@ -55,6 +56,36 @@ type Imr struct {
 	// see W9.
 	TransportSignalDiscovery *cache.DiscoveryTracker
 	TLSADiscovery            *cache.DiscoveryTracker
+	// zones holds the configured forward table and stub zones as one
+	// immutable snapshot; ReloadZones swaps the pointer (#436). Read it
+	// through ForwardZones()/StubZones(), never by reaching in: a query
+	// must see one consistent table for its whole walk, and the reload
+	// path relies on nothing else holding a mutable reference.
+	zones atomic.Pointer[imrZoneTable]
+	// reloadMu serializes ReloadZones with itself: the diff against the
+	// running table and the cache-side stub work must not interleave with
+	// another reload doing the same.
+	reloadMu sync.Mutex
+	// bootConf is the imrengine: config this Imr was BUILT from. Kept so a
+	// reload can report which edited keys are not reloadable and need a
+	// restart; deliberately never updated, since the running resolver keeps
+	// running on these values until it is restarted.
+	bootConf ImrEngineConf
+	// PrimedVia and PrimedAt record how and when the cache was primed
+	// ("hints+fetch", or "hints-only" when the root is forwarded), for the
+	// config-status report.
+	PrimedVia string
+	PrimedAt  time.Time
+	// errorRegistry is the daemon-wide ServerErrorRegistry
+	// (conf.Internal.ServerErrors), set at init. The IMR owns the
+	// Upstream/ImrPriming and Upstream/ImrForward entries. Nil-safe.
+	errorRegistry *ServerErrorRegistry
+	// fwdErrMu serializes updateForwardUpstreamError's scan of the
+	// per-upstream failing flags with its registry write: without it, two
+	// concurrent recomputes (a live query racing an on-demand probe) can
+	// interleave scan and Set/Clear and leave the aggregate describing the
+	// older of the two states.
+	fwdErrMu sync.Mutex
 	// dnssecPolicyMu guards largeAlgs and dnskeyTransport: both are read on
 	// the query path (isLargeAlgorithm / dnskeyPolicy) and swapped by
 	// RefreshDnssecPolicy on config reload.
@@ -223,28 +254,94 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		}
 	}
 
-	if !rrcache.IsPrimed() {
-		err := rrcache.PrimeWithHints(ctx, conf.Imr.RootHints, imr.IterativeDNSQueryFetcher())
-		if err != nil {
-			return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
+	// Build the forward table before anything sends a query: PrimeWithHints
+	// resolves the root NS through the iterative path, and with a "zone: ."
+	// forward those priming queries must reach the upstream resolver rather
+	// than the root servers.
+	forwards, err := BuildImrForwards(conf.Imr.Forward)
+	if err != nil {
+		return fmt.Errorf("InitImrEngine: %v", err)
+	}
+	stubZones, stubFP, _ := canonicalStubs(conf.Imr.Stubs)
+	// Published before priming: PrimeWithHints resolves through the
+	// iterative path, and forwardZoneFor below has to see the table.
+	// stubFP is filled in as the stubs are actually applied, further down.
+	imr.setZoneTable(forwards, stubZones, map[string]string{})
+	imr.bootConf = conf.Imr
+	imr.errorRegistry = conf.Internal.ServerErrors
+	for _, fz := range forwards {
+		ups := make([]string, 0, len(fz.Upstreams))
+		for _, up := range fz.Upstreams {
+			ups = append(ups, up.Label)
 		}
+		lgImr.Info("adding forward zone", "zone", fz.Zone, "trust-ad", fz.TrustAD, "upstreams", strings.Join(ups, ", "))
+	}
+
+	if !rrcache.IsPrimed() {
+		if imr.forwardZoneFor(".") != nil {
+			// The root is covered by a forward zone: the hint-seeded root
+			// server map is never consulted (the forward outranks it), so
+			// the live ". NS" priming fetch would add nothing but a
+			// startup-time network dependency on the upstream — a resolver
+			// whose upstream was briefly down at boot stayed a husk until
+			// restarted. Seed the hints offline and let queries (and the
+			// upstream probe) take it from there.
+			lgImr.Info("root is covered by a forward zone: seeding hints only, skipping the live priming fetch")
+			if err := rrcache.PrimeFromHintsOnly(conf.Imr.RootHints); err != nil {
+				return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
+			}
+			imr.PrimedVia = "hints-only (root forwarded)"
+		} else {
+			err := rrcache.PrimeWithHints(ctx, conf.Imr.RootHints, imr.IterativeDNSQueryFetcher())
+			if err != nil {
+				return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
+			}
+			imr.PrimedVia = "hints+fetch"
+		}
+		imr.PrimedAt = time.Now()
 		if len(conf.Imr.Stubs) > 0 {
+			applied := make(map[string]string, len(conf.Imr.Stubs))
 			for _, stub := range conf.Imr.Stubs {
+				zone := dns.Fqdn(core.CanonicalizeName(stub.Zone))
+				if _, ok := stubFP[zone]; !ok {
+					continue // rejected by canonicalStubs, which said why
+				}
 				stubservers := []string{}
 				for i := range stub.Servers {
 					server := &stub.Servers[i]
 					stubservers = append(stubservers, server.Name+" ("+strings.Join(server.Addrs, ", ")+")")
 				}
-				lgImr.Info("adding stub", "zone", stub.Zone, "servers", strings.Join(stubservers, ", "))
-				imr.Cache.AddStub(stub.Zone, stub.Servers)
+				lgImr.Info("adding stub", "zone", zone, "servers", strings.Join(stubservers, ", "))
+				if err := imr.Cache.AddStub(zone, stub.Servers); err != nil {
+					lgImr.Error("failed to add stub zone", "zone", zone, "err", err)
+					continue
+				}
+				applied[zone] = stubFP[zone]
 			}
+			// Record what was actually applied, so the first reload can tell
+			// an untouched stub from an edited one.
+			imr.setZoneTable(forwards, stubZones, applied)
 		}
 	}
 
-	conf.Internal.ImrEngine = imr
-	Globals.ImrEngine = imr
+	conf.publishImr(imr)
 	lgImr.Info("InitImrEngine: IMR initialized and available")
 	return nil
+}
+
+// publishImr stores the finished Imr and announces it, in that order.
+//
+// One function rather than three statements at the call site, because the order
+// is the entire safety property and it is invisible: the stores must happen
+// BEFORE the close, so that a goroutine which has received from ImrReady is
+// guaranteed by the memory model to see a fully constructed Imr rather than a
+// pointer it may or may not observe. Written inline, the announce is one stray
+// edit away from moving above the stores, or from being dropped altogether --
+// and neither mistake shows up in a test that builds an ImrReadiness directly.
+func (conf *Config) publishImr(imr *Imr) {
+	conf.Internal.ImrEngine = imr
+	Globals.ImrEngine = imr
+	conf.Internal.ImrReady.Publish()
 }
 
 func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
@@ -278,6 +375,12 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 	// dereference below would panic.
 	if conf.Internal.ImrEngine == nil {
 		if err := conf.InitImrEngine(ctx, quiet); err != nil {
+			// The engine supervisor only LOGS this error while the daemon
+			// keeps running — with no DNS listeners. Register the condition
+			// so `config status` shows DEGRADED instead of a healthy-looking
+			// process that answers nothing.
+			conf.Internal.ServerErrors.SetImrPrimingError(
+				fmt.Sprintf("IMR did not start (no DNS listeners): %v", err))
 			return fmt.Errorf("ImrEngine: InitImrEngine failed: %w", err)
 		}
 	}
@@ -290,6 +393,16 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 
 	// Start the ImrEngine (i.e. the recursive nameserver responding to queries with RD bit set)
 	go imr.StartImrEngineListeners(ctx, conf)
+
+	// Verify the forward upstreams are reachable, concurrently with normal
+	// operation: failures WARN and mark `config status` DEGRADED, they do
+	// not stop the resolver.
+	go imr.ProbeForwardUpstreams(ctx)
+
+	// Keep the root NS alive. Priming above runs once; without this, the root
+	// NS expires on its TTL and cannot be re-fetched, because fetching ". NS"
+	// needs a root server address. See imr_root_refresh.go.
+	go imr.RefreshRoot(ctx, conf.Imr.RootHints)
 
 	for {
 		select {
@@ -669,7 +782,7 @@ func (imr *Imr) processAddressRecords(rrset *core.RRset, authservers map[string]
 		server.AddAddr(addr)
 		server.SetSrc("answer")
 		server.SetExpire(time.Now().Add(time.Duration(ttl) * time.Second))
-		authservers[nsname] = server
+		authservers[cache.ServerKey(nsname)] = server
 		lgImr.Debug("processAddressRecords: using resolved address", "rrtype", rrType, "nsname", nsname, "addr", addr)
 	}
 }
@@ -1281,8 +1394,48 @@ func appendSOAFromMsg(r *dns.Msg, msgoptions *edns0.MsgOptions, m *dns.Msg) {
 	}
 }
 
+// loadImrListenerCert validates and loads the IMR's listener certificate for
+// the encrypted transports. The checks are mutually exclusive and each
+// failure yields ONE accurate reason (the DnsEngine shape from do53.go): an
+// unconfigured pair, an inaccessible file — any stat error, not only
+// non-existence — or a pair that does not parse. The reason string is what
+// gets logged and registered as the Transport/Cert server error.
+func loadImrListenerCert(certFile, keyFile string) (tls.Certificate, string, bool) {
+	var zero tls.Certificate
+	if certFile == "" || keyFile == "" {
+		return zero, "certfile/keyfile not configured", false
+	}
+	if _, err := os.Stat(certFile); err != nil {
+		return zero, fmt.Sprintf("certfile %s not accessible: %v", certFile, err), false
+	}
+	if _, err := os.Stat(keyFile); err != nil {
+		return zero, fmt.Sprintf("keyfile %s not accessible: %v", keyFile, err), false
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return zero, fmt.Sprintf("loading certfile/keyfile: %v", err), false
+	}
+	return cert, "", true
+}
+
 func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error {
-	addresses := conf.Imr.Addresses
+	// An EMBEDDED resolver (tdns-auth, tdns-agent, anything that is not
+	// tdns-imr) is internal by design and binds NO service listeners — the
+	// listeners: block belongs to the app's own DNS service (DnsEngine).
+	// Its only window is the loopback-only listeners.imr-debug-address
+	// (#446). tdns-imr itself IS the service and listens on listeners:.
+	if Globals.App.Type != AppTypeImr {
+		if dbg := conf.Listeners.ImrDebugAddress; dbg != "" {
+			if _, err := imr.startImrDebugListener(ctx, dbg, conf); err != nil {
+				lgImr.Error("imr debug listener not started", "err", err)
+			}
+		} else if !imr.Quiet {
+			lgImr.Info("embedded resolver: internal only (set listeners.imr-debug-address for a loopback debug window)")
+		}
+		return nil
+	}
+
+	addresses := conf.Listeners.Addresses
 	if len(addresses) == 0 {
 		if !imr.Quiet {
 			lgImr.Info("no addresses provided, will only be an internal recursive resolver")
@@ -1296,7 +1449,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 	imrMux := dns.NewServeMux()
 	imrMux.HandleFunc(".", ImrHandler)
 
-	if CaseFoldContains(conf.Imr.Transports, "do53") {
+	if CaseFoldContains(conf.Listeners.Transports, "do53") {
 		lgImr.Info("starting Do53 listeners", "addresses", addresses)
 		servers := make([]*dns.Server, 0, len(addresses)*2)
 
@@ -1346,29 +1499,24 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		lgImr.Info("not serving on transport Do53")
 	}
 
-	certFile := viper.GetString("imrengine.certfile")
-	keyFile := viper.GetString("imrengine.keyfile")
-	certKey := true
-
-	if certFile == "" || keyFile == "" {
-		lgImr.Warn("no certificate or key file provided, not starting DoT/DoH/DoQ")
-		certKey = false
+	// Encrypted listeners. Nothing below applies to a do53-only resolver, so
+	// a missing certificate is only a condition worth reporting when dot,
+	// doh or doq is actually configured — and then it IS reported: before
+	// this, a cert/key failure silently dropped all three IMR listeners with
+	// a warning as the only trace (#444), unlike the DnsEngine path which
+	// registers the condition for `config status`.
+	certFile := conf.Listeners.CertFile
+	keyFile := conf.Listeners.KeyFile
+	if !anyEncryptedTransport(conf.Listeners.Transports) {
+		if certFile != "" || keyFile != "" {
+			lgImr.Info("certfile/keyfile configured but no encrypted transport is; not starting DoT/DoH/DoQ")
+		}
+		return nil
 	}
-
-	if _, err := os.Stat(certFile); os.IsNotExist(err) {
-		lgImr.Warn("certificate file does not exist, not starting DoT/DoH/DoQ", "certFile", certFile)
-		certKey = false
-	}
-
-	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-		lgImr.Warn("key file does not exist, not starting DoT/DoH/DoQ", "keyFile", keyFile)
-		certKey = false
-	}
-
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		lgImr.Warn("failed to load certificate, not starting DoT/DoH/DoQ", "err", err)
-		certKey = false
+	cert, certReason, certKey := loadImrListenerCert(certFile, keyFile)
+	if !certKey {
+		lgImr.Warn("not starting the DoT/DoH/DoQ listeners", "reason", certReason)
+		conf.Internal.ServerErrors.SetTransportCertError("imr: " + certReason)
 	}
 
 	if certKey {
@@ -1385,8 +1533,8 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		}
 		addresses = tmp
 
-		if CaseFoldContains(conf.Imr.Transports, "dot") {
-			err := DnsDoTEngine(ctx, conf, addresses, &cert, ImrHandler, false)
+		if CaseFoldContains(conf.Listeners.Transports, "dot") {
+			err := DnsDoTEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoT), &cert, ImrHandler, false)
 			if err != nil {
 				lgImr.Error("failed to setup DoT server", "err", err)
 			}
@@ -1394,8 +1542,8 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 			lgImr.Info("not serving on transport DoT")
 		}
 
-		if CaseFoldContains(conf.Imr.Transports, "doh") {
-			err := DnsDoHEngine(ctx, conf, addresses, certFile, keyFile, ImrHandler)
+		if CaseFoldContains(conf.Listeners.Transports, "doh") {
+			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), certFile, keyFile, ImrHandler)
 			if err != nil {
 				lgImr.Error("failed to setup DoH server", "err", err)
 			}
@@ -1403,8 +1551,8 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 			lgImr.Info("not serving on transport DoH")
 		}
 
-		if CaseFoldContains(conf.Imr.Transports, "doq") {
-			err := DnsDoQEngine(ctx, conf, addresses, &cert, ImrHandler)
+		if CaseFoldContains(conf.Listeners.Transports, "doq") {
+			err := DnsDoQEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoQ), &cert, ImrHandler)
 			if err != nil {
 				lgImr.Error("failed to setup DoQ server", "err", err)
 			}
@@ -1429,11 +1577,11 @@ func (imr *Imr) parseTrustAnchorsFromConfig(conf *Config) (map[string][]*dns.DS,
 	if taDNSKEY != "" {
 		rr, err := dns.NewRR(taDNSKEY)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to parse trust_anchor_dnskey: %v", err)
+			return nil, nil, fmt.Errorf("failed to parse trust-anchor-dnskey: %v", err)
 		}
 		dk, ok := rr.(*dns.DNSKEY)
 		if !ok {
-			return nil, nil, fmt.Errorf("trust_anchor_dnskey is not a DNSKEY RR: %T", rr)
+			return nil, nil, fmt.Errorf("trust-anchor-dnskey is not a DNSKEY RR: %T", rr)
 		}
 		name := dns.Fqdn(dk.Hdr.Name)
 		dnskeysByName[name] = append(dnskeysByName[name], dk)
@@ -1443,11 +1591,11 @@ func (imr *Imr) parseTrustAnchorsFromConfig(conf *Config) (map[string][]*dns.DS,
 	if taDS != "" {
 		rr, err := dns.NewRR(taDS)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to parse trust_anchor_ds: %v", err)
+			return nil, nil, fmt.Errorf("failed to parse trust-anchor-ds: %v", err)
 		}
 		ds, ok := rr.(*dns.DS)
 		if !ok {
-			return nil, nil, fmt.Errorf("trust_anchor_ds is not a DS RR: %T", rr)
+			return nil, nil, fmt.Errorf("trust-anchor-ds is not a DS RR: %T", rr)
 		}
 		name := dns.Fqdn(ds.Hdr.Name)
 		dsByName[name] = append(dsByName[name], ds)
@@ -1603,7 +1751,7 @@ func (imr *Imr) validateDNSKEYRRsetUsingDirectTA(anchorName string, rrset *core.
 	name := dns.Fqdn(anchorName)
 	dkc := imr.DnskeyCache
 	for item := range dkc.Map.IterBuffered() {
-		if item.Val.Name == name && item.Val.TrustAnchor && item.Val.State == cache.ValidationStateSecure {
+		if core.EqualNames(item.Val.Name, name) && item.Val.TrustAnchor && item.Val.State == cache.ValidationStateSecure {
 			valid, _ := cache.ValidateDNSKEYRRsetSignature(rrset, item.Val.Keyid, name, &item.Val.Dnskey, verbose)
 			if valid {
 				lgImr.Debug("DNSKEY RRset validated using direct DNSKEY trust anchor", "zone", anchorName, "keytag", item.Val.Keyid)
@@ -1787,10 +1935,10 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 	}
 
 	// Fetch the DNSKEY RRset for the anchor, using current known servers
-	serverMap, ok := imr.Cache.ServerMap.Get(anchorName)
+	serverMap, ok := imr.Cache.ServerMapCopy(anchorName)
 	if !ok || len(serverMap) == 0 {
 		// fallback to root servers if we do not have a server mapping for this name yet
-		serverMap, ok = imr.Cache.ServerMap.Get(".")
+		serverMap, ok = imr.Cache.ServerMapCopy(".")
 		if !ok || len(serverMap) == 0 {
 			return fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
 		}
@@ -1921,7 +2069,7 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 		case dns.OpcodeQuery:
 			lgImr.Debug("lookup request", "qname", qname, "qtype", dns.TypeToString[qtype], "RD", msgoptions.RD, "DO", msgoptions.DO, "from", w.RemoteAddr())
 
-			qname = strings.ToLower(qname)
+			qname = core.CanonicalizeName(qname)
 			if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
 				DotServerQnameResponse(qname, w, r)
 				return
@@ -1951,7 +2099,7 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 func DotServerQnameResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeRefused)
-	qname = strings.ToLower(qname)
+	qname = core.CanonicalizeName(qname)
 	// if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
 	lgImr.Debug("query for .server CH TLD", "qname", qname)
 	switch qname {

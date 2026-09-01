@@ -48,6 +48,13 @@ var originationOptions = []ZoneOption{
 	OptAddTransportSignal,
 	OptDelSyncParent,
 	OptOnlineSigning,
+	// publish-zonemd writes a locally computed record into the zone. On a
+	// secondary that mirrors upstream content that record is ours, not
+	// upstream's, and publishing it means the zone this server serves is no
+	// longer the zone it received. An inline-signing secondary is exempt for
+	// the usual reason -- it re-signs what it receives and therefore already
+	// originates, and any ZONEMD from upstream is invalid for what it serves.
+	OptPublishZonemd,
 }
 
 // normalizeOptionsForRole strips origination settings a zone may not act on,
@@ -118,11 +125,11 @@ func normalizeOptionsForRole(appType AppType, ztype ZoneType, opts map[ZoneOptio
 	b.WriteString("secondary zone may not originate content; ignoring ")
 	switch {
 	case len(stripped) > 0 && serialStripped:
-		fmt.Fprintf(&b, "option(s) %s and outbound_soa_serial=%s", strings.Join(stripped, ", "), serialMode)
+		fmt.Fprintf(&b, "option(s) %s and outbound-soa-serial=%s", strings.Join(stripped, ", "), serialMode)
 	case len(stripped) > 0:
 		fmt.Fprintf(&b, "option(s) %s", strings.Join(stripped, ", "))
 	default:
-		fmt.Fprintf(&b, "outbound_soa_serial=%s", serialMode)
+		fmt.Fprintf(&b, "outbound-soa-serial=%s", serialMode)
 	}
 	// The likeliest operator intent behind online-signing on a secondary is the
 	// sanctioned signing-secondary setup, which is a different option.

@@ -17,7 +17,6 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 var lg = Logger("zones")
@@ -27,7 +26,90 @@ var lg = Logger("zones")
 // handle initial-load gracefully can check with errors.Is.
 var ErrZoneNotReady = errors.New("zone data is not yet ready")
 
-func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, error) {
+// Refresh reloads the zone: from its file for a primary, from an upstream for a
+// secondary. ctx bounds the whole operation -- primary resolution, the SOA
+// probe, and the transfer itself -- so a shutdown or a cancelled request stops
+// in-flight work instead of running to completion against a dead engine.
+// persistedZoneFilePath is where this zone's copy lives on disk, or "" when it
+// has none. The derivation is the one zoneDataToZoneConf already uses, and it
+// must stay that way: an API-managed zone never sets zd.Zonefile itself --
+// WriteDynamicZoneFile derives <zonedirectory>/<zone>.zone internally and does
+// not write the path back -- so keying only on the field would miss precisely
+// the zones that are persisted through the API.
+func (zd *ZoneData) persistedZoneFilePath(conf *Config) string {
+	if zd == nil {
+		return ""
+	}
+	if zd.Zonefile != "" {
+		return zd.Zonefile
+	}
+	if conf != nil && conf.ShouldPersistZone(zd) {
+		return GetDynamicZoneFilePath(zd.ZoneName, conf.DynamicZones.ZoneDirectory)
+	}
+	return ""
+}
+
+// adoptPersistedCopyAtFirstBind loads a secondary's persisted zone file before
+// its first transfer is attempted.
+//
+// Only at first bind. Once a snapshot is published the file is not consulted
+// again: a later failed refresh must not roll the zone back to disk, because
+// the file can be older than what is in memory.
+//
+// Deliberately silent about its outcome. The file copy is a floor, not a
+// result: whatever happens next -- transfer succeeds and replaces it, serial
+// is unchanged and it stands, primary is unreachable and it keeps the zone
+// answering -- is what Refresh reports. Reporting "updated" for a copy that
+// came off our own disk would make the refresh engine write it straight back
+// out again.
+//
+// The expire clock is NOT started here. Adopting a file is not evidence that
+// the primary is alive; only a usable SOA is (see noteSuccessfulRefresh). A
+// zone that loads from disk and never reaches its primary again is Option 3
+// in the brief: it holds a copy whose confirmation timestamp comes from the
+// database, or from load time when there is none.
+func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, debug bool, dynamicRRs []*core.RRset, conf *Config) {
+	if zd == nil || zd.publishedSnapshot() != nil {
+		return
+	}
+	fname := zd.persistedZoneFilePath(conf)
+	if fname == "" {
+		return
+	}
+	if _, err := os.Stat(fname); err != nil {
+		// No copy yet: a zone added through the API in this process has not
+		// written one, and a config-declared secondary may never have
+		// transferred. Nothing to adopt, and not an error.
+		lg.Debug("no persisted copy to adopt at first bind", "zone", zd.ZoneName, "file", fname)
+		return
+	}
+
+	// FetchFromFile takes no path argument -- it reads zd.Zonefile directly.
+	// Deriving the path without assigning it would stat "" on exactly the
+	// zones this exists for.
+	if zd.Zonefile == "" {
+		zd.Zonefile = fname
+	}
+
+	if _, err := zd.FetchFromFile(ctx, verbose, debug, false, dynamicRRs); err != nil {
+		// Not fatal, and not this function's business to report: the transfer
+		// below is still the zone's primary route to data, and it may well
+		// succeed. A zone that can neither load nor transfer surfaces through
+		// the transfer's own error.
+		lg.Warn("could not adopt persisted zone copy at first bind, continuing to transfer",
+			"zone", zd.ZoneName, "file", fname, "err", err)
+		return
+	}
+	lg.Info("adopted persisted zone copy at first bind",
+		"zone", zd.ZoneName, "file", fname, "serial", zd.IncomingSerial)
+
+	// The copy is in memory, so its serial is known and the recorded
+	// confirmation can be matched against it. Only on this path: a copy that
+	// arrives by transfer is stamped fresh by DoTransfer instead.
+	zd.restoreRefreshStateAtFirstBind()
+}
+
+func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, conf *Config) (bool, error) {
 	var updated bool
 
 	// Collect dynamic RRs before refresh (they will be lost during refresh)
@@ -36,23 +118,30 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 	// zd.Logger.Printf("zd.Refresh(): refreshing zone %s (%s) force=%v.", zd.ZoneName,
 	// 	ZoneTypeToString[zd.ZoneType], force)
 
-	// if zd.FoldCase {
-	if zd.Options[OptFoldCase] {
-		lg.Debug("folding case for zone", "zone", zd.ZoneName)
-		zd.ZoneName = strings.ToLower(zd.ZoneName)
-	}
+	// Belt and braces: the zone name is canonicalised where the ZoneData is
+	// built, but a zone that reached here by some other route must not serve
+	// with a name its own owner map is not keyed by. See normalizeZoneName.
+	zd.normalizeZoneName()
 
 	switch zd.ZoneType {
 	case Primary:
 		// zd.Logger.Printf("zd.Refresh(): Should reload zone %s from file %s", zd.ZoneName, zd.ZoneFile)
 
-		updated, err := zd.FetchFromFile(verbose, debug, force, dynamicRRs)
+		updated, err := zd.FetchFromFile(ctx, verbose, debug, force, dynamicRRs)
 		if err != nil {
 			return false, err
 		}
 		return updated, err
 
 	case Secondary:
+		// Before any network work: if this is the zone's first bind and a
+		// persisted copy exists on disk, adopt it. A restart that coincides
+		// with an unreachable primary then serves the copy it already has
+		// instead of nothing at all -- which is the whole point of
+		// `storage: persistent` for a secondary, and did not happen before,
+		// because this branch only ever transferred.
+		zd.adoptPersistedCopyAtFirstBind(ctx, verbose, debug, dynamicRRs, conf)
+
 		// D1: re-resolve hostname primaries each refresh, so a transient
 		// resolution failure self-heals and a changed primary address is
 		// followed. Literal-IP primaries pass through unchanged (no lookup). If
@@ -61,13 +150,13 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 		// surfaces a refresh error and we retry next cycle — never a permanent
 		// quarantine.
 		if len(zd.PrimariesConf) > 0 {
-			if res := resolvePrimaries(context.Background(), conf.Internal.ImrEngine, zd.PrimariesConf); len(res.Resolved) > 0 {
+			if res := resolvePrimaries(ctx, conf.Internal.ImrEngine, zd.PrimariesConf); len(res.Resolved) > 0 {
 				zd.Upstreams = res.Resolved
 			} else {
 				lg.Warn("zone refresh: no primary resolved this cycle, will retry next refresh", "zone", zd.ZoneName, "unresolved", res.Unresolved)
 			}
 		}
-		do_transfer, upstream_serial, err := zd.DoTransfer(conf)
+		do_transfer, upstream_serial, err := zd.DoTransfer(ctx, conf)
 		if err != nil {
 			return false, err
 		}
@@ -78,11 +167,20 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 			} else if force {
 				lg.Debug("forced retransfer regardless of SOA serial", "zone", zd.ZoneName)
 			}
-			updated, err = zd.FetchFromUpstream(verbose, debug, force, dynamicRRs, conf)
+			updated, err = zd.FetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf)
 			if err != nil {
 				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
 			}
+			// Re-stamp, now that IncomingSerial names the copy we actually
+			// hold. DoTransfer stamped the serial we held at probe time, which
+			// is the right answer if the transfer then fails -- we keep that
+			// copy and the primary was alive. Once the transfer succeeds it is
+			// the wrong answer: the row would describe a copy that no longer
+			// exists, and the identity check at the next first bind would
+			// discard a perfectly good confirmation and restart the whole
+			// expire budget from load time.
+			zd.noteSuccessfulRefresh(zd.IncomingSerial)
 			return updated, nil // zone updated, no error
 		}
 
@@ -113,7 +211,7 @@ func firstUpstreamAddr(upstreams []PeerConf) string {
 // A usable NOERROR+SOA from any primary is honoured (transfer decided on
 // serial). If every primary answered but none gave a usable SOA, we back off
 // quietly (no transfer, no error); only all-unreachable is a hard error.
-func (zd *ZoneData) DoTransfer(conf *Config) (bool, uint32, error) {
+func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32, error) {
 	if zd == nil {
 		panic("DoTransfer: zd == nil")
 	}
@@ -122,39 +220,132 @@ func (zd *ZoneData) DoTransfer(conf *Config) (bool, uint32, error) {
 		return false, 0, fmt.Errorf("DoTransfer: zone %s has no upstreams configured", zd.ZoneName)
 	}
 
-	sawResponse := false
-	var lastErr error
-	for _, up := range zd.Upstreams {
-		upstream := up.Addr
-		if _, _, err := net.SplitHostPort(upstream); err != nil {
+	// zd.Upstreams is mutated in place under zd.mu by the refresh engine, so
+	// range over a copy rather than the live slice.
+	zd.mu.Lock()
+	upstreams := make([]PeerConf, len(zd.Upstreams))
+	copy(upstreams, zd.Upstreams)
+	zd.mu.Unlock()
+
+	// The source to bind on the probes, resolved once for the zone. Read here
+	// rather than in phase 1: it consults the zone and the KeyDB, not conf, so
+	// it does not belong under confMu, and it is the same call ZoneTransferIn
+	// makes for the transfer that follows.
+	//
+	// The probe has to bind it too. Binding on the AXFR alone means a primary
+	// that only permits the published address answers the transfer and refuses
+	// -- or never sees -- the probe, and since every refresh begins with a probe
+	// the zone then never transfers at all. See #409.
+	probeSrcs, probeSrcTier := zd.EffectiveTransferSrcWithSource()
+
+	// Phase 1 -- resolve everything that reads config, under a single read
+	// lock, with NO network I/O. conf is the mutable global and a reload
+	// replaces its contents wholesale; resolving per-upstream inside the probe
+	// loop below would let a reload landing midway hand later primaries
+	// TLS/TSIG material from a different config generation than earlier ones.
+	// Snapshot once, then probe. (Same shape as ProbeUpstreamSerials; this is
+	// the live path that motivated it.)
+	//
+	// The lock is NOT held across the exchanges: a probe blocks until the peer
+	// answers or times out, and holding confMu for that would stall every
+	// config reload behind an unreachable primary.
+	type probePlan struct {
+		up       PeerConf
+		upstream string
+		client   *dns.Client
+		keyName  string
+		tsigAlgo string
+		err      error // config-resolution failure; this upstream is skipped
+	}
+	plans := make([]probePlan, 0, len(upstreams))
+
+	confMu.RLock()
+	for _, up := range upstreams {
+		p := probePlan{up: up, upstream: up.Addr}
+		if _, _, err := net.SplitHostPort(p.upstream); err != nil {
 			// If error, assume no port was specified
-			upstream = net.JoinHostPort(upstream, defaultPortForPeer(up))
-			lg.Debug("DoTransfer: no port specified for upstream, using transport default", "zone", zd.ZoneName, "upstream", upstream)
+			p.upstream = net.JoinHostPort(p.upstream, defaultPortForPeer(up))
+			lg.Debug("DoTransfer: no port specified for upstream, using transport default", "zone", zd.ZoneName, "upstream", p.upstream)
 		}
-		// Fresh message per attempt: TSIG signing adds an RR with a per-attempt
-		// timestamp and this upstream's key.
-		m := new(dns.Msg)
-		m.SetQuestion(zd.ZoneName, dns.TypeSOA)
-		c := new(dns.Client)
+		p.client = new(dns.Client)
 		// XoT peer: probe the SOA over the same verified-TLS channel the
 		// transfer itself will use (same pin/dane/pkix gate).
 		if tlsCfg, terr := conf.ClientTLSConfigForPeer(up); terr != nil {
-			lg.Error("DoTransfer: TLS setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", terr)
-			lastErr = terr
+			p.err = terr
+			plans = append(plans, p)
 			continue
 		} else if tlsCfg != nil {
-			c.Net = "tcp-tls"
-			c.TLSConfig = tlsCfg
+			p.client.Net = "tcp-tls"
+			p.client.TLSConfig = tlsCfg
 		}
-		provider, serr := SignForPeer(m, up.Key, conf)
+		provider, algo, serr := TsigMaterialForPeer(up.Key, conf)
 		if serr != nil {
-			lg.Error("DoTransfer: TSIG sign setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", serr)
-			lastErr = serr
+			p.err = serr
+			plans = append(plans, p)
 			continue
 		}
-		c.TsigProvider = provider // nil for NOKEY => plain exchange (no MAC)
-		r, _, err := c.Exchange(m, upstream)
+		p.client.TsigProvider = provider // nil for NOKEY => plain exchange (no MAC)
+		if provider != nil {
+			p.keyName, p.tsigAlgo = up.Key, algo
+		}
+		plans = append(plans, p)
+	}
+	confMu.RUnlock()
+
+	// Phase 2 -- network only. Nothing here reads shared config.
+	sawResponse := false
+	var lastErr error
+	for i := range plans {
+		p := &plans[i]
+		up, upstream := p.up, p.upstream
+
+		if p.err != nil {
+			lg.Error("DoTransfer: peer config setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", p.err)
+			lastErr = p.err
+			continue
+		}
+		// Nobody is waiting for this result any more; stop walking upstreams.
+		if cerr := ctx.Err(); cerr != nil {
+			return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
+		}
+
+		// Fresh message per attempt: TSIG signing adds an RR with a per-attempt
+		// timestamp and this upstream's key. Stamped here, not during the
+		// snapshot above: the probes are sequential and each can block until it
+		// times out, so a timestamp taken in phase 1 could be outside the fudge
+		// window by the time a later message is sent, and the peer would answer
+		// BADTIME.
+		m := new(dns.Msg)
+		m.SetQuestion(zd.ZoneName, dns.TypeSOA)
+		if p.keyName != "" {
+			StampTsigForPeer(m, p.keyName, p.tsigAlgo)
+		}
+		c := p.client
+		// Bind the source here, in phase 2, and not in the snapshot above: for
+		// a hostname upstream the pick has to resolve it, and phase 1 does no
+		// network I/O by design -- it holds confMu, and a resolver timeout
+		// there would stall every config reload behind it.
+		if src := bindClientSrc(ctx, c, upstream, probeSrcs); src != nil {
+			lg.Debug("DoTransfer: SOA probe binding source address",
+				"zone", zd.ZoneName, "upstream", upstream, "src", src.String(),
+				"net", c.Net, "from", probeSrcTier)
+		} else if len(probeSrcs) > 0 {
+			// Not an error -- an operator naming only one family must not
+			// thereby break every upstream in the other -- but the probe then
+			// leaves from whatever the route picks, which is exactly what
+			// transfer-src is configured to prevent. Say so rather than
+			// letting it be invisible until an ACL refuses.
+			lg.Warn("DoTransfer: no configured transfer-src matches this upstream's family; probing unbound",
+				"zone", zd.ZoneName, "upstream", upstream, "configured", probeSrcs, "from", probeSrcTier)
+		}
+		r, _, err := c.ExchangeContext(ctx, m, upstream)
 		if err != nil {
+			// A cancelled exchange is not a sick primary: every sibling would
+			// fail the same way. Return it as cancellation rather than letting
+			// the loop treat it as "try the next one".
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, err)
+			}
 			// Transport failure (or a TSIG response-verify failure) — try the next sibling.
 			lg.Warn("DoTransfer: SOA probe failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
@@ -169,9 +360,25 @@ func (zd *ZoneData) DoTransfer(conf *Config) (bool, uint32, error) {
 			}
 			if soa, ok := r.Answer[0].(*dns.SOA); ok {
 				lg.Info("DoTransfer: serial check", "zone", zd.ZoneName, "upstream", upstream, "notify_serial", soa.Serial, "incoming_serial", zd.IncomingSerial, "current_serial", zd.CurrentSerial)
-				if soa.Serial <= zd.IncomingSerial {
+				// A usable SOA, from either arm: this is the RFC's
+				// proof the primary is alive, and the only thing that
+				// advances the expire clock. The serial-unchanged arm
+				// matters most -- it is the case that confirms without
+				// transferring anything, and the one a nil-error test
+				// cannot tell apart from all-primaries-REFUSED.
+				//
+				// serialNewer, not `>`: SOA serials are mod-2^32 and
+				// wrap (RFC 1982). A plain comparison reads the first
+				// serial after a wrap as OLDER than the one we hold, so
+				// the secondary stops transferring and serves stale data
+				// until someone forces a retransfer. Every other serial
+				// comparison in the tree already goes through this
+				// helper; this one did not.
+				if !serialNewer(soa.Serial, zd.IncomingSerial) {
+					zd.noteSuccessfulRefresh(zd.IncomingSerial)
 					return false, soa.Serial, nil
 				}
+				zd.noteSuccessfulRefresh(zd.IncomingSerial)
 				return true, soa.Serial, nil
 			}
 			// NOERROR but the first answer is not a SOA — try the next sibling.
@@ -217,7 +424,6 @@ func newTransferScratchZone(zd *ZoneData) ZoneData {
 		ZoneName:        zd.ZoneName,
 		ZoneType:        zd.ZoneType,
 		ZoneStore:       zd.ZoneStore,
-		XfrType:         zd.XfrType,
 		IncomingSerial:  zd.IncomingSerial,
 		CurrentSerial:   zd.CurrentSerial,
 		Logger:          zd.Logger,
@@ -302,7 +508,7 @@ func (zd *ZoneData) forgetZoneFileStat() {
 }
 
 // Return updated, error
-func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
+func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
 
 	// The cheap question first, and BEFORE the read: has anything touched the
 	// file since we last looked? Taken before rather than after so that a file
@@ -324,6 +530,13 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Zonefile)
 	// Capture prior status so an error or no-op (unchanged) file read of an
 	// already-ready zone is restored to it, not left stuck in `loading`.
+	// Parsing a large zone file is not instant, and neither is the publish +
+	// callback work below. A cancelled refresh must not go on to apply data to
+	// a daemon that is shutting down.
+	if cerr := ctx.Err(); cerr != nil {
+		return false, fmt.Errorf("FetchFromFile %s: %w", zd.ZoneName, cerr)
+	}
+
 	prevStatus := zd.GetStatus()
 	zd.SetStatus(ZoneStatusLoading)
 
@@ -331,7 +544,6 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		ZoneName:       zd.ZoneName,
 		ZoneStore:      zd.ZoneStore,
 		ZoneType:       zd.ZoneType,
-		XfrType:        zd.XfrType,
 		IncomingSerial: zd.IncomingSerial,
 		CurrentSerial:  zd.CurrentSerial,
 		Logger:         zd.Logger,
@@ -354,7 +566,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	// while `zone reload` reported success. --force did not help either -- it
 	// parsed the file to validate it and then reported "not updated", so the
 	// parse was thrown away.
-	serialMoved, _, err := new_zd.ReadZoneFile(zd.Zonefile, true)
+	serialMoved, _, err := new_zd.ReadZoneFile(ctx, zd.Zonefile, true)
 	if err != nil {
 		lg.Error("ReadZoneFile failed", "zone", zd.ZoneName, "err", err)
 		zd.SetStatus(prevStatus)
@@ -411,13 +623,54 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		return false, nil // new zone not loaded, but not returning any error
 	}
 
+	// verify-zonemd, on the zone about to be adopted and not yet on the zone
+	// being served. This is the last point at which a refusal still means
+	// anything. See gateIncomingZonemd.
+	if err := zd.gateIncomingZonemd(ctx, &new_zd, "the zone file"); err != nil {
+		zd.SetStatus(prevStatus)
+		// Drop the cached stat, for the same reason the failed-adoption path
+		// below does: this file was considered and declined, so the next
+		// refresh has to look at it again rather than skip it as untouched.
+		// Without this a primary that fixes its digest is never picked up.
+		zd.forgetZoneFileStat()
+		return false, err
+	}
+
 	new_zd.Ready = true
+
+	// Re-check before the hard flip: parsing the file may have taken a while,
+	// and publishing a replacement (plus running the refresh callbacks) after
+	// the engine has been cancelled applies data to a daemon on its way out.
+	// Checked here rather than only up front so a long parse cannot slip
+	// through the earlier gate.
+	if cerr := ctx.Err(); cerr != nil {
+		// Same reasoning as the gate after the callbacks below: the stat was
+		// recorded by the read above, and we are not adopting the file, so
+		// leaving it behind would make the next refresh skip a change that was
+		// never applied. Narrower window than that gate, identical consequence.
+		zd.forgetZoneFileStat()
+		zd.SetStatus(prevStatus)
+		return false, fmt.Errorf("FetchFromFile %s: %w", zd.ZoneName, cerr)
+	}
 
 	// Pre-refresh callbacks: analysis of old vs new zone data + modification of new_zd.
 	// MP roles (agent, combiner, signer) register callbacks to detect HSYNC/DNSKEY/delegation
 	// changes, add combiner contributions, populate MP data, etc. — all before the hard flip.
 	for _, cb := range zd.OnZonePreRefresh {
 		cb(zd, &new_zd)
+	}
+
+	// Last gate before the hard flip, after the callbacks have run. See the
+	// matching comment on the upstream path.
+	if cerr := ctx.Err(); cerr != nil {
+		// Drop the cached stat recorded by the read above. We parsed the file
+		// but are NOT adopting it, so leaving the stat behind would make the
+		// next refresh see an unchanged file and skip it -- the zone would
+		// silently never pick up this edit. Same reason the persist-failure
+		// path below forgets it.
+		zd.forgetZoneFileStat()
+		zd.SetStatus(prevStatus)
+		return false, fmt.Errorf("FetchFromFile %s: %w", zd.ZoneName, cerr)
 	}
 
 	// Publish replacement: working set from refreshed data + dynamic RRs.
@@ -469,7 +722,6 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	return true, nil
 }
 
-// Return updated, err
 // shouldDiscardUnchangedTransfer reports whether a completed transfer should be
 // thrown away because it carries the serial we already have.
 //
@@ -486,10 +738,151 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 	return incomingSerial == currentSerial && !force
 }
 
+// shouldRequestIxfr is §4.1's attempt decision.
+//
+// A method rather than an expression inline in FetchFromUpstream because it is
+// the whole of what decides between an incremental and a full transfer, and a
+// test that can only observe the decision through its CONSEQUENCES cannot tell
+// the arms apart: a primary with no delta history answers a full zone either
+// way, so removing a clause here and re-running an end-to-end test changes
+// nothing observable. Asking it directly is the only way those cases have
+// teeth.
+//
+//   - requestIxfr()          the operator has not turned it off (F1)
+//   - IncomingSerial != 0    we have a serial to ask from
+//   - publishedSnapshot()    we have a baseline to apply onto
+//   - !force                 a forced retransfer wants the WHOLE zone. An IXFR
+//     from our own serial answers with a single SOA,
+//     which is either read as a no-op -- defeating the
+//     force, the one remedy for a wedged downstream --
+//     or applied as a zone consisting of one record.
+//   - !signsItsOwnContent()  the same boundary §5 draws for onward relay,
+//     applied to asking rather than relaying. A signing
+//     secondary's baseline is its OWN signatures, so a
+//     delta computed against the primary's copy cannot
+//     fit: the delete section names RRSIGs we do not
+//     hold, or replaces an RRset without re-signing it.
+//     The apply refuses and we AXFR -- correctly, but
+//     only after a round trip that could not have
+//     worked, and default-on means every existing
+//     inline-signing secondary pays it on every refresh
+//     after an upgrade. Deltas onto re-signed data are
+//     the staging variant §5 leaves to PR-2.
+func (zd *ZoneData) shouldRequestIxfr(force bool) bool {
+	return zd.requestIxfr() &&
+		zd.IncomingSerial != 0 &&
+		zd.publishedSnapshot() != nil &&
+		!force &&
+		!zd.signsItsOwnContent()
+}
+
+// transferFromUpstream is one upstream's worth of transfer: a delta when the
+// zone is eligible for one, a full AXFR otherwise -- and a full AXFR against
+// the SAME upstream on any IXFR failure, before the caller moves on to the
+// next primary.
+//
+// That fallback is the point. The upstream answered; we simply could not use
+// what it said, which is a fact about us and the delta rather than about the
+// primary. Advancing to the next primary would punish a server that did
+// nothing wrong and, on a single-primary zone, turn a recoverable delta
+// problem into a failed refresh.
+//
+// Reports upToDate when the primary answered "your serial is current": neither
+// an error nor a zone body, and the one outcome ZoneTransferIn's (serial,
+// error) signature cannot express.
+func (zd *ZoneData) transferFromUpstream(ctx context.Context, up PeerConf, newZd *ZoneData, useIxfr bool, conf *Config) (bool, error) {
+	upstream := up.Addr
+
+	if useIxfr {
+		outcome, rrs, err := zd.ixfrTransferIn(ctx, up, zd.IncomingSerial, conf)
+		switch {
+		case err != nil:
+			lg.Info("ixfr: transfer failed, falling back to AXFR on the same upstream",
+				"zone", zd.ZoneName, "upstream", upstream, "err", err)
+
+		case outcome == ixfrUpToDate:
+			return true, nil
+
+		case outcome == ixfrFullZone:
+			if aerr := zd.adoptFullZoneRRs(newZd, rrs); aerr != nil {
+				lg.Info("ixfr: full-zone answer unusable, falling back to AXFR on the same upstream",
+					"zone", zd.ZoneName, "upstream", upstream, "err", aerr)
+				break
+			}
+			return false, nil
+
+		case outcome == ixfrDelta:
+			if aerr := zd.applyIxfrToScratch(newZd, rrs); aerr != nil {
+				// Every refusal in the parse or the apply lands here, which is
+				// the self-healing §1 promises: the worst case of a bug in the
+				// delta path is this wasteful full transfer, never a corrupt
+				// local zone.
+				lg.Info("ixfr: delta unusable, falling back to AXFR on the same upstream",
+					"zone", zd.ZoneName, "upstream", upstream, "err", aerr)
+				break
+			}
+			// verify-zonemd, here rather than only at the caller's gate after
+			// the upstream loop has closed. A digest that does not describe
+			// the zone the delta produced is a doubt about the DELTA -- the
+			// content moved and the copy we held carried a digest the delta
+			// did not replace -- and every other such doubt takes the
+			// same-upstream AXFR.
+			//
+			// Left to the outer gate it is unrecoverable rather than
+			// wasteful: the refresh fails, the next probe still sees the new
+			// serial, we ask for the same delta, and it is refused again. The
+			// zone stops moving for good, when the full transfer sitting one
+			// fallback away would have carried a consistent digest.
+			if zerr := zd.gateIncomingZonemd(ctx, newZd, "the IXFR delta"); zerr != nil {
+				lg.Info("ixfr: delta failed ZONEMD verification, falling back to AXFR on the same upstream",
+					"zone", zd.ZoneName, "upstream", upstream, "err", zerr)
+				break
+			}
+			return false, nil
+		}
+		// Fell through: start the AXFR from a clean scratch zone rather than
+		// whatever a half-applied delta left behind.
+		*newZd = newTransferScratchZone(zd)
+	}
+
+	// Not if the reason the delta path gave up was that we are shutting down.
+	// FetchFromUpstream's loop checks this before each upstream for exactly
+	// this reason; without it here, a cancellation landing mid-IXFR would go
+	// on to start a whole fresh AXFR against the same peer.
+	if cerr := ctx.Err(); cerr != nil {
+		return false, fmt.Errorf("transfer of %s from %s: %w", zd.ZoneName, upstream, cerr)
+	}
+
+	lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", upstream)
+	if _, err := newZd.ZoneTransferIn(ctx, up, zd.IncomingSerial, "axfr", conf); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+// gateZonemdUnlessAlreadyGated runs the inbound ZONEMD gate on a zone about to
+// be adopted, unless it has been gated already.
+//
+// A delta-derived zone is gated inside transferFromUpstream, where a refusal
+// can still reach the same-upstream AXFR. Everything else -- a full transfer,
+// or a full-zone answer to an IXFR request -- is gated here.
+func (zd *ZoneData) gateZonemdUnlessAlreadyGated(ctx context.Context, newZd *ZoneData) error {
+	if newZd != nil && newZd.ixfrDerived {
+		return nil
+	}
+	return zd.gateIncomingZonemd(ctx, newZd, "upstream")
+}
+
+// FetchFromUpstream pulls the zone from one of its configured primaries.
+// Returns whether the zone was updated.
+//
 // force means the operator explicitly asked for a retransfer, so the zone is
 // re-fetched and re-applied even when upstream's serial has not moved. See the
-// unchanged-serial check below for why that matters.
-func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
+// unchanged-serial check below for why that matters -- and note that force also
+// takes the delta path out of play entirely (shouldRequestIxfr), since an IXFR
+// from our own serial would answer with a single SOA rather than the zone the
+// operator asked for.
+func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {
 		return false, fmt.Errorf("FetchFromUpstream: zone %s has no upstreams configured", zd.ZoneName)
@@ -506,17 +899,50 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*
 	// us says nothing about a sibling. A fresh new_zd per attempt keeps a failed
 	// transfer from polluting the next try; the live zd.IncomingSerial is only
 	// touched in the hard flip below, after a success.
+	useIxfr := zd.shouldRequestIxfr(force)
+
 	var new_zd ZoneData
 	transferred := false
 	var lastErr error
-	for _, up := range zd.Upstreams {
+	// zd.Upstreams is mutated in place under zd.mu by the refresh engine, so
+	// walk a copy rather than the live slice -- the same race DoTransfer and
+	// ProbeUpstreamSerials already copy to avoid.
+	zd.mu.Lock()
+	upstreams := make([]PeerConf, len(zd.Upstreams))
+	copy(upstreams, zd.Upstreams)
+	zd.mu.Unlock()
+	for _, up := range upstreams {
+		// Stop the fallback walk once the caller has given up. Without this, a
+		// shutdown that cancels mid-transfer would go on to start a FRESH AXFR
+		// attempt against every remaining upstream -- each one dialling, each
+		// one immediately cancelled -- which is the opposite of what
+		// cancellation is for.
+		if cerr := ctx.Err(); cerr != nil {
+			// Restore the prior status: a cancelled refresh has not changed
+			// anything, and leaving the zone in `loading` would misreport a
+			// perfectly good zone for as long as the process lives.
+			zd.SetStatus(prevStatus)
+			return false, fmt.Errorf("AXFR of %s: %w", zd.ZoneName, cerr)
+		}
 		upstream := up.Addr
-		lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", upstream)
 		new_zd = newTransferScratchZone(zd)
-		if _, err := new_zd.ZoneTransferIn(up, zd.IncomingSerial, "axfr", conf); err != nil {
-			lg.Warn("FetchFromUpstream: AXFR from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
+		upToDate, err := zd.transferFromUpstream(ctx, up, &new_zd, useIxfr, conf)
+		if err != nil {
+			lg.Warn("FetchFromUpstream: transfer from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
 			continue
+		}
+		if upToDate {
+			// The primary says our serial is current, so there is no zone body
+			// to adopt. Rare by construction: the SOA probe already filtered
+			// unchanged serials out and `force` never asks for a delta, so
+			// this means the serial moved between probe and request. Same
+			// observable result as an unchanged-serial transfer -- no swap,
+			// prior status restored -- reached without one.
+			lg.Debug("FetchFromUpstream: upstream reports we are up to date",
+				"zone", zd.ZoneName, "upstream", upstream, "serial", zd.IncomingSerial)
+			zd.SetStatus(prevStatus)
+			return false, nil
 		}
 		transferred = true
 		break
@@ -549,11 +975,33 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*
 			"zone", zd.ZoneName, "serial", zd.IncomingSerial)
 	}
 
+	// verify-zonemd, on what upstream just sent and before it is adopted. The
+	// case the option exists for: a secondary cannot re-derive a digest it was
+	// not given, so checking the one it WAS given is the only assurance it has
+	// that the zone it is about to serve is the zone its primary published.
+	// Skipped for a delta-derived zone: transferFromUpstream already gated it,
+	// where a refusal could still fall back to AXFR. Re-running here would
+	// re-digest the whole zone for the same answer.
+	if err := zd.gateZonemdUnlessAlreadyGated(ctx, &new_zd); err != nil {
+		zd.SetStatus(prevStatus)
+		return false, err
+	}
+
 	new_zd.Ready = true
 
 	// Pre-refresh callbacks: analysis of old vs new zone data + modification of new_zd.
 	for _, cb := range zd.OnZonePreRefresh {
 		cb(zd, &new_zd)
+	}
+
+	// Last gate before the hard flip. The transfer and the pre-refresh
+	// callbacks both take real time -- an AXFR of a large zone, then MP roles
+	// doing HSYNC/DNSKEY analysis -- so cancellation can land after the earlier
+	// checks passed. Publishing replacement data into a daemon that is shutting
+	// down is exactly what the caller asked us not to do.
+	if cerr := ctx.Err(); cerr != nil {
+		zd.SetStatus(prevStatus)
+		return false, fmt.Errorf("FetchFromUpstream %s: %w", zd.ZoneName, cerr)
 	}
 
 	// Publish replacement: working set from transferred data + dynamic RRs.
@@ -744,11 +1192,16 @@ func (zd *ZoneData) SetOption(option ZoneOption, value bool) {
 // everything through the *From helpers, so every read in one response comes from
 // the same serial — no intra-response tearing. snap==nil yields nil (the caller
 // SERVFAILs / refuses).
+//
+// The key is folded: snapshot keys are canonical (see snapshotMapFromData), and
+// a caller may hold a name in any spelling -- from the wire, from an API
+// request, from a config file. Indexing with the raw name is what returned
+// "no such name" for names the zone does in fact publish.
 func getOwnerFrom(snap *zoneSnapshot, qname string) *OwnerData {
 	if snap == nil {
 		return nil
 	}
-	return snap.Data[qname]
+	return snap.Data[core.CanonicalizeName(qname)]
 }
 
 // getRRsetFrom reads one RRset from a pinned snapshot.
@@ -768,7 +1221,7 @@ func nameExistsFrom(snap *zoneSnapshot, qname string) bool {
 	if snap == nil {
 		return false
 	}
-	_, ok := snap.Data[qname]
+	_, ok := snap.Data[core.CanonicalizeName(qname)]
 	return ok
 }
 
@@ -834,7 +1287,12 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 func (zd *ZoneData) IsChildDelegation(qname string) bool {
 	lg.Debug("IsChildDelegation: checking delegation", "qname", qname, "zone", zd.ZoneName)
 	owner, err := zd.GetOwner(qname)
-	if err != nil || owner == nil || qname == zd.ZoneName {
+	// GetOwner folds, so the apex is found; this test has to fold too or the
+	// apex -- which has NS -- is reported as a child cut. UpdateResponder asks
+	// this about the OWNERS inside an update, which come off the wire, so an
+	// apex NS update spelled EXAMPLE.com. was classified as a child update and
+	// judged against allow-child-updates instead of allow-updates.
+	if err != nil || owner == nil || core.EqualNames(qname, zd.ZoneName) {
 		return false
 	}
 	if _, exists := owner.RRtypes.Get(dns.TypeNS); !exists {
@@ -964,53 +1422,63 @@ func IsIxfr(rrs []dns.RR) bool {
 	return false
 }
 
-// Find the closest enclosing auth zone that has qname below it (qname is either auth data
-// in the zone or located further down in a child zone that we are not auth for).
-// Return zone, case fold used to match
-func FindZone(qname string) (*ZoneData, bool) {
-	var tzone string
+// normalizeZoneName folds zd.ZoneName to canonical form.
+//
+// A zone name is an identifier the operator chose in a config file, not data
+// that arrived over the wire, so there is nothing to preserve by keeping its
+// capitalisation: the name a client sees in an answer is echoed from the
+// question section, not from here.
+//
+// Keeping it canonical is what lets the rest of the server index by it. The
+// owner map and the Zones registry are both keyed canonically; a zone declared
+// as Example.COM. whose ZoneName stayed as written would look its own apex up
+// with a key that is not in its own map.
+//
+// This used to be conditional on the fold-case zone option, which defaults off
+// and is set in neither shipped sample config -- so in practice zone names were
+// not folded at all, and a zone declared in mixed case could not be reached.
+func (zd *ZoneData) normalizeZoneName() {
+	if zd == nil {
+		return
+	}
+	if canon := core.CanonicalizeName(zd.ZoneName); canon != zd.ZoneName {
+		lg.Debug("normalizeZoneName: folding zone name", "from", zd.ZoneName, "to", canon)
+		zd.ZoneName = canon
+	}
+}
+
+// FindZone returns the closest enclosing zone this server is authoritative for:
+// the zone that holds qname, or the zone above the child zone qname falls in.
+// nil when there is none.
+//
+// Matching is case-insensitive throughout, because Zones is keyed canonically
+// and Get folds what it is given.
+//
+// It did not used to be. The previous implementation walked the qname as
+// written, and only if that found nothing walked a lowercased copy, telling the
+// caller through a second return value which pass had succeeded so it could
+// rewrite the qname to match. That rescued a mixed-case ZONE SUFFIX and nothing
+// else: a query whose suffix matched the stored zone exactly but whose
+// left-hand labels did not -- WWW.example.com. against example.com. -- took the
+// first pass, kept its spelling, and went on to miss the exact-keyed owner
+// lookup. The zone was found and the name inside it was not. See tdns#415.
+func FindZone(qname string) *ZoneData {
 	labels := strings.Split(qname, ".")
 	for i := 0; i < len(labels)-1; i++ {
-		tzone = strings.Join(labels[i:], ".")
-		if zd, ok := Zones.Get(tzone); ok {
-			return zd, false
-		}
-	}
-
-	// if no match for exact qname, let's try with a case folded version
-	qname = strings.ToLower(qname)
-	labels = strings.Split(qname, ".")
-
-	for i := 0; i < len(labels)-1; i++ {
-		tzone = strings.Join(labels[i:], ".")
-		if zd, ok := Zones.Get(tzone); ok {
-			return zd, true
+		if zd, ok := Zones.Get(strings.Join(labels[i:], ".")); ok {
+			return zd
 		}
 	}
 	lg.Debug("FindZone: no zone found", "qname", qname)
-	return nil, false
-}
-
-func FindZoneNG(qname string) *ZoneData {
-	i := strings.Index(qname, ".")
-	for {
-		if i == -1 {
-			break // done
-		}
-		if zd, ok := Zones.Get(qname[i:]); ok {
-			return zd
-		}
-		i = strings.Index(qname[i:], ".")
-	}
 	return nil
 }
 
 // EffectiveOutboundSoaSerial resolves the outbound serial mode actually in
 // force for this zone, newest tier first:
 //
-//  1. the per-zone setting (zones: <z>: outbound_soa_serial, possibly
+//  1. the per-zone setting (zones: <z>: outbound-soa-serial, possibly
 //     inherited from the zone's template via ExpandTemplate's gap-fill);
-//  2. the server-global dnsengine.outbound_soa_serial (resolved onto the
+//  2. the server-global authengine.outbound-soa-serial (resolved onto the
 //     KeyDB at parse time by applyOutboundSoaSerial);
 //  3. OutboundSoaSerialKeep, the documented default.
 //
@@ -1021,7 +1489,7 @@ func FindZoneNG(qname string) *ZoneData {
 // act on it"; the callers pair it with the origination predicate.
 // EffectiveTransferSrc returns the source addresses to bind when dialling this
 // zone's upstreams, resolving the per-zone value over the server-global
-// dnsengine.transfer_src. Empty means "let the kernel choose", which is the
+// authengine.transfer-src. Empty means "let the kernel choose", which is the
 // behaviour every zone had before this existed.
 func (zd *ZoneData) EffectiveTransferSrc() []string {
 	srcs, _ := zd.EffectiveTransferSrcWithSource()
@@ -1041,7 +1509,7 @@ func (zd *ZoneData) EffectiveTransferSrcWithSource() (srcs []string, source stri
 	}
 	if zd.KeyDB != nil {
 		if srcs := zd.KeyDB.TransferSrcList(); len(srcs) > 0 {
-			return srcs, "global" // dnsengine.transfer_src
+			return srcs, "global" // authengine.transfer-src
 		}
 	}
 	return nil, "default"
@@ -1063,14 +1531,14 @@ func (zd *ZoneData) EffectiveOutboundSoaSerialWithSource() (mode, source string)
 	}
 	if zd.KeyDB != nil {
 		if mode := zd.KeyDB.OutboundSoaSerialMode(); mode != "" {
-			return mode, "global" // dnsengine.outbound_soa_serial
+			return mode, "global" // authengine.outbound-soa-serial
 		}
 	}
 	return OutboundSoaSerialKeep, "default"
 }
 
 // nextOutboundSerial returns the next SOA serial that should be advertised
-// to downstreams given zd.CurrentSerial and the effective outbound_soa_serial
+// to downstreams given zd.CurrentSerial and the effective outbound-soa-serial
 // mode (per-zone, else server-global):
 //   - "" / "keep" / "persist": prev + 1 (legacy behaviour; "persist" only
 //     differs in that the resulting serial is also written to OutgoingSerials)
@@ -1092,7 +1560,7 @@ func nextOutboundSerial(zd *ZoneData) uint32 {
 }
 
 // BumpSerialOnly advances the SOA serial per the configured
-// outbound_soa_serial mode and rewrites the apex SOA RR (and its
+// outbound-soa-serial mode and rewrites the apex SOA RR (and its
 // RRSIG, when the zone is signed). Does not notify downstreams.
 // Use when the caller will handle notification separately or when
 // notification is not appropriate (e.g. inside a NOTIFY handler
@@ -1177,34 +1645,41 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		// For the moment we receive both updates and notifies on the same address as the rest of
 		// the DNS service. Doesn't have to be that way, but for now it is.
 
-		owner, err := zd.GetOwner("_dsync." + zd.ZoneName)
-		if err != nil {
-			lg.Error("SetupZoneSync: error getting _dsync owner", "zone", zd.ZoneName, "err", err)
+		// The _dsync owner is no longer read here: PublishDsyncRRs looks it up
+		// itself, and reading it here only ever served the all-or-nothing guard
+		// removed below.
+
+		// PublishDsyncRRs is called unconditionally, and decides per scheme
+		// what is missing.
+		//
+		// This used to skip the call entirely when any DSYNC record existed,
+		// on the reasoning that an existing RRset is the operator's and should
+		// not be rewritten. That reasoning is right and the guard was in the
+		// wrong place: it is now inside PublishDsyncRRs, per scheme, so adding
+		// a scheme to a zone that already publishes DSYNC actually publishes
+		// it. With the guard here, that case did nothing at all -- no record,
+		// no error, no warning -- and the documented remedy was to unpublish
+		// the whole RRset and republish, which discards the operator's own
+		// records.
+		lg.Debug("SetupZoneSync: reconciling the DSYNC RRset", "zone", zd.ZoneName)
+		if err := zd.PublishDsyncRRs(); err != nil {
+			lg.Error("PublishDsyncRRs failed", "zone", zd.ZoneName, "err", err)
 			return err
-		}
-
-		var dsync_rrset core.RRset
-		var exist bool
-		if owner != nil {
-			dsync_rrset, exist = owner.RRtypes.Get(core.TypeDSYNC)
-		}
-
-		if exist && len(dsync_rrset.RRs) > 0 {
-			// If there is a DSYNC RRset, we assume that it is correct and will not modify
-			lg.Debug("SetupZoneSync: DSYNC RRset exists, will not modify", "zone", zd.ZoneName)
-		} else {
-			lg.Debug("SetupZoneSync: no DSYNC RRset in zone, will add", "zone", zd.ZoneName)
-			err := zd.PublishDsyncRRs()
-			if err != nil {
-				lg.Error("PublishDsyncRRs failed", "zone", zd.ZoneName, "err", err)
-				return err
-			}
 		}
 
 		// Figure out if there is a DSYNC RR with scheme UPDATE; if so, we need to ensure that
 		// we generate a SIG(0) key pair for the target and publish the public key in the zone.
-		updateTarget := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.update.target"), "{ZONENAME}", zd.ZoneName, 1))
-		if _, ok := dns.IsDomainName(updateTarget); !ok {
+		//
+		// An unset target means this parent does not offer the UPDATE scheme
+		// — which used to be unusual and is now ordinary, since a parent may
+		// offer only API. Without the guard the empty template expands to ".",
+		// which is a syntactically valid domain name, and the zone would get a
+		// SIG(0) keypair generated for the root.
+		updateTargetTpl := DelegationSyncConfig().Parent.Update.Target
+		updateTarget := dns.Fqdn(strings.Replace(updateTargetTpl, "{ZONENAME}", zd.ZoneName, 1))
+		if updateTargetTpl == "" {
+			lg.Debug("SetupZoneSync: no DSYNC update target configured, skipping SIG(0) key prep", "zone", zd.ZoneName)
+		} else if _, ok := dns.IsDomainName(updateTarget); !ok {
 			lg.Error("SetupZoneSync: invalid DSYNC update target", "zone", zd.ZoneName, "target", updateTarget)
 		} else {
 			lg.Debug("SetupZoneSync: DSYNC update target", "zone", zd.ZoneName, "target", updateTarget)
@@ -1223,7 +1698,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	if zd.Options[OptDelSyncChild] &&
 		((Globals.App.Type == AppTypeAuth && !zd.Options[OptMultiProvider]) ||
 			(Globals.App.Type == AppTypeAgent && zd.Options[OptMultiProvider])) {
-		schemes := viper.GetStringSlice("delegationsync.child.schemes")
+		schemes := DelegationSyncConfig().Child.Schemes
 		if len(schemes) == 0 {
 			lg.Error("SetupZoneSync: zone has delegation-sync-child enabled but delegationsync.child.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)
 			zd.SetError(ConfigError, "delegation-sync-child enabled but delegationsync.child.schemes is not configured")
@@ -1358,7 +1833,7 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 		} else if sak != nil && len(sak.Keys) > 0 {
 			var keyRRs []dns.RR
 			for _, pkc := range sak.Keys {
-				if strings.HasSuffix(pkc.KeyRR.Header().Name, zd.ZoneName) {
+				if dns.IsSubDomain(zd.ZoneName, pkc.KeyRR.Header().Name) {
 					keyRRs = append(keyRRs, &pkc.KeyRR)
 				}
 			}
@@ -1762,7 +2237,7 @@ $TTL 86400
 	lg.Debug("CreateAutoZone: template zone data", "data", zonedatastr)
 
 	zd := &ZoneData{
-		ZoneName:  zonename,
+		ZoneName:  core.CanonicalizeName(zonename),
 		ZoneStore: MapZone,
 		Logger:    log.Default(),
 		ZoneType:  Primary,
@@ -1782,11 +2257,11 @@ $TTL 86400
 	return zd, nil
 }
 
-// Extract the addresses we listen on from the dnsengine configuration. Exclude localhost and non-standard ports.
+// Extract the addresses we listen on from the listeners configuration. Exclude localhost and non-standard ports.
 func (conf *Config) FindDnsEngineAddrs() ([]string, error) {
 	addrs := []string{}
-	lg.Debug("FindDnsEngineAddrs: dnsengine addresses", "addresses", conf.DnsEngine.Addresses)
-	for _, ns := range conf.DnsEngine.Addresses {
+	lg.Debug("FindDnsEngineAddrs: listener addresses", "addresses", conf.Listeners.Addresses)
+	for _, ns := range conf.Listeners.Addresses {
 		addr, port, err := net.SplitHostPort(ns)
 		if err != nil {
 			// return nil, fmt.Errorf("FindDnsEngineAddrs: failed to split host and port from address '%s': %v", ns, err)

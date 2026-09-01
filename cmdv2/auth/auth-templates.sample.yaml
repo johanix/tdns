@@ -103,7 +103,7 @@
 #                           (key exists but is not published in zone data)
 #
 # DNS BEHAVIOR OPTIONS:
-#   fold-case:               Fold domain name case before comparisons
+#   fold-case:               No-op. Name comparison is case-insensitive always.
 #                           (case-insensitive matching for owner names)
 #
 #   black-lies:              Compact denial of existence: synthesize a minimally
@@ -112,6 +112,41 @@
 #
 #   add-transport-signal:    Automatically synthesize SVCB RRs
 #                           (adds transport signals to Additional section)
+#
+# ZONEMD OPTIONS (RFC 8976):
+#   publish-zonemd:          Maintain the apex ZONEMD RRset. The digest is
+#                           computed and signed inside every publish, so
+#                           ZONEMD.Serial always equals the SOA serial being
+#                           served. Works on unsigned zones too; it is not part
+#                           of the DNSSEC policy. While it is set, the apex
+#                           ZONEMD belongs to the server: an UPDATE or API
+#                           write to it is refused.
+#                           STRIPPED on a tdns-auth secondary that mirrors an
+#                           upstream zone (it would be originating content);
+#                           kept on an inline-signing secondary, which
+#                           re-signs and therefore originates already.
+#
+#   verify-zonemd:          Check the apex ZONEMD before adopting a zone, on
+#                           every load from file and every inbound transfer.
+#                           This is the secondary-side option: a secondary
+#                           cannot re-derive a digest it was not given.
+#                           NOT stripped on a mirroring secondary.
+#
+#   Both are parameterised by a per-zone `zonemd:` block, which is read only
+#   when one of the options is set:
+#
+#       zonemd:
+#          algorithms:           [ 1 ]     # 1 = SHA-384 (default), 2 = SHA-512
+#          scheme:               1         # SIMPLE; the only scheme defined
+#          on-verify-failure:    refuse    # refuse (default) | warn
+#          wire-cache-max-bytes: 67108864  # 0/unset = 64 MiB, negative = off
+#
+#   wire-cache-max-bytes bounds the canonical-wire cache that lets a publish
+#   re-render only the owner names it changed. Same sentinels as
+#   ixfr-chain-max-bytes. It is a PER-ZONE figure: a server with many large
+#   zones multiplies it, so it does not bound the host's memory on its own.
+#   `tdns-cli auth zone zonemd status` reports what the cache holds and what
+#   the last digest cost, so it can be sized from measurements.
 #
 # MULTI-PROVIDER OPTIONS:
 #   multi-provider:          Zone is served by several providers (RFC 8901).
@@ -263,7 +298,7 @@ templates:
    # API-instantiable dynamic-primary template (see DYNAMIC-ZONE BLESSING
    # above): `tdns-cli auth zone add -z <zone> --type primary --template
    # api-primary` mints a primary with this exact configuration — a
-   # bootstrapped apex (SOA/NS/glue from dnsengine.addresses), updatable via
+   # bootstrapped apex (SOA/NS/glue from listeners.addresses), updatable via
    # DNS UPDATE per the update policy below, persisted across restarts.
    - name:            api-primary
      dynamiczones:    true                    # operator blessing (gate 2)

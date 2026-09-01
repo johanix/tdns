@@ -60,7 +60,7 @@ var dumpSuffixCmd = &cobra.Command{
 		// Collect and sort items by owner name (reverse label order)
 		items := []core.Tuple[string, cache.CachedRRset]{}
 		for item := range Conf.Internal.RRsetCache.RRsets.IterBuffered() {
-			if suffix == "" || strings.HasSuffix(item.Val.Name, suffix) {
+			if suffix == "" || dns.IsSubDomain(suffix, item.Val.Name) {
 				items = append(items, item)
 			}
 		}
@@ -108,15 +108,21 @@ var dumpAuthServersCmd = &cobra.Command{
 
 		// Get all keys from the concurrent map
 		for item := range Conf.Internal.RRsetCache.ServerMap.IterBuffered() {
+			// Copy, like the sibling dumps: ranging over the map the cache
+			// owns is the footgun #345 is about, even where it is read-only.
+			serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(item.Key)
+			if !ok {
+				continue // removed between the iteration and the copy
+			}
 			fmt.Printf("\nZone: %s\n", item.Key)
 			lines := []string{"Server | Source | Addresses | Transports | Connection"}
 			var names []string
-			for name := range item.Val {
+			for name := range serverMap {
 				names = append(names, name)
 			}
 			sort.Strings(names)
 			for _, name := range names {
-				server := item.Val[name]
+				server := serverMap[name]
 				addrs := formatList(server.Addrs)
 				src := server.Src
 				if src == "" {
@@ -301,7 +307,12 @@ With a zone argument: dumps just that zone.`,
 		}
 		var entries []zoneEntry
 		for item := range Conf.Internal.RRsetCache.ZoneMap.IterBuffered() {
-			if filter != "" && item.Key != filter {
+			// ZoneMap yields folded keys since the cache became a NameMap, so
+			// comparing to the filter as typed returned an empty dump for a
+			// mixed-case zone argument. Through the shared selector, like the
+			// API handler and the transport-stats filter: this was the third
+			// copy of one predicate, which is how the other two drifted.
+			if !tdns.ZoneMatchesSelector(item.Key, filter, "") {
 				continue
 			}
 			b := item.Val.SnapshotAddressBackoffs(now)
@@ -359,22 +370,22 @@ var dumpTuningCmd = &cobra.Command{
 		p := cache.GetBackoffPolicy()
 		t := Conf.Imr.Tuning
 		fmt.Println("Backoff policy (effective):")
-		fmt.Printf("  first_failure   : %s\n", p.FirstFailure)
-		fmt.Printf("  max_failure     : %s\n", p.MaxFailure)
+		fmt.Printf("  first-failure   : %s\n", p.FirstFailure)
+		fmt.Printf("  max-failure     : %s\n", p.MaxFailure)
 		fmt.Printf("  multiplier      : %.2f\n", p.Multiplier)
-		fmt.Printf("  jitter_fraction : %.2f\n", p.JitterFraction)
-		fmt.Printf("  routing_failure : %s\n", p.RoutingFailure)
-		fmt.Printf("  lame_delegation : %s\n", p.LameDelegation)
+		fmt.Printf("  jitter-fraction : %.2f\n", p.JitterFraction)
+		fmt.Printf("  routing-failure : %s\n", p.RoutingFailure)
+		fmt.Printf("  lame-delegation : %s\n", p.LameDelegation)
 		fmt.Println()
 		fmt.Println("Address-family tracker:")
-		fmt.Printf("  window_duration   : %s\n", t.AddressFamily.WindowDuration)
-		fmt.Printf("  failure_threshold : %d\n", t.AddressFamily.FailureThreshold)
-		fmt.Printf("  suspect_duration  : %s\n", t.AddressFamily.SuspectDuration)
-		fmt.Printf("  probe_interval    : %s\n", t.AddressFamily.ProbeInterval)
+		fmt.Printf("  window-duration   : %s\n", t.AddressFamily.WindowDuration)
+		fmt.Printf("  failure-threshold : %d\n", t.AddressFamily.FailureThreshold)
+		fmt.Printf("  suspect-duration  : %s\n", t.AddressFamily.SuspectDuration)
+		fmt.Printf("  probe-interval    : %s\n", t.AddressFamily.ProbeInterval)
 		fmt.Println()
 		fmt.Println("Discovery state machine:")
-		fmt.Printf("  retry_after_failure : %s\n", t.Discovery.RetryAfterFailure)
-		fmt.Printf("  max_failures        : %d\n", t.Discovery.MaxFailures)
+		fmt.Printf("  retry-after-failure : %s\n", t.Discovery.RetryAfterFailure)
+		fmt.Printf("  max-failures        : %d\n", t.Discovery.MaxFailures)
 		fmt.Println()
 		fmt.Printf("Per-query budget   : %s\n", t.QueryBudget)
 		upgradeStr := "true (legacy default)"
@@ -462,7 +473,10 @@ var dumpZoneServersCmd = &cobra.Command{
 			fmt.Println("RecursorCache is nil")
 			return
 		}
-		serverMap, ok := Conf.Internal.RRsetCache.ServerMap.Get(zone)
+		// Copy, not the stored map: this dump runs in-process with the
+		// resolver, and ranging over a map the cache owns is one refactor
+		// away from being a concurrent map read/write (#345).
+		serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(zone)
 		if !ok || len(serverMap) == 0 {
 			fmt.Printf("No auth servers known for zone %s\n", zone)
 			return
@@ -473,7 +487,7 @@ var dumpZoneServersCmd = &cobra.Command{
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			server := serverMap[name]
+			server := serverMap[cache.ServerKey(name)]
 			printAuthServerVerbose(name, server)
 		}
 	},
@@ -958,7 +972,7 @@ func PrintCacheItem(item core.Tuple[string, cache.CachedRRset], suffix string) {
 		return
 	}
 
-	if !strings.HasSuffix(item.Val.Name, suffix) {
+	if !dns.IsSubDomain(suffix, item.Val.Name) {
 		// fmt.Printf("skipping item with name %q\n", item.Val.Name)
 		return
 	}
@@ -1022,8 +1036,11 @@ func PrintCacheItem(item core.Tuple[string, cache.CachedRRset], suffix string) {
 // lessByReverseLabels compares two FQDNs by labels from right to left.
 // Returns true if a < b in that ordering.
 func lessByReverseLabels(a, b string) bool {
-	an := dns.Fqdn(strings.ToLower(strings.TrimSpace(a)))
-	bn := dns.Fqdn(strings.ToLower(strings.TrimSpace(b)))
+	// Canonical order is octet order with US-ASCII A-Z folded (RFC 4034 6.1);
+	// strings.ToLower folds by Unicode and rewrites non-UTF-8 octets, so two
+	// distinct names could sort as one.
+	an := core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(a)))
+	bn := core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(b)))
 	// Fast path equal
 	if an == bn {
 		return false

@@ -49,13 +49,13 @@ func TestLegacyDynamicAllowedHook_BoolIsConfigError(t *testing.T) {
 
 	// The hook must not touch the catalog blocks' bool allowed:.
 	dzc, err = decode(map[string]interface{}{
-		"catalog_zones": map[string]interface{}{"allowed": true},
+		"catalog-zones": map[string]interface{}{"allowed": true},
 	})
 	if err != nil {
-		t.Fatalf("catalog_zones bool allowed: must still decode: %v", err)
+		t.Fatalf("catalog-zones bool allowed: must still decode: %v", err)
 	}
 	if !dzc.CatalogZones.Allowed {
-		t.Error("catalog_zones.allowed lost its value")
+		t.Error("catalog-zones.allowed lost its value")
 	}
 }
 

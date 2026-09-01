@@ -83,7 +83,7 @@ type ZoneMergeResult struct {
 func rrKey(rr dns.RR) string {
 	c := dns.Copy(rr)
 	c.Header().Ttl = 0
-	if wire, err := canonicalRRWire(c); err == nil {
+	if wire, _, err := canonicalRRWire(c); err == nil {
 		return string(wire)
 	}
 	// Packing failed, which for a record we just parsed means something exotic.
@@ -250,6 +250,17 @@ func writeRejectedArtefactInstructions(zonefile string, zone string, serial uint
 	// never overwrite an artefact holding something else, because the operator
 	// may be part-way through replaying it and the losing records exist nowhere
 	// else.
+	//
+	// Whatever occupies the path has to be a regular file first. os.ReadFile on
+	// a DIRECTORY succeeds on some systems (NetBSD returns raw dirent bytes)
+	// and fails on others, so without this check the same directory either
+	// diverted the artefact to a sibling name or fell through to the rename --
+	// platform-dependent behaviour for an operator mistake that should simply
+	// be reported.
+	if fi, serr := os.Stat(path); serr == nil && !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("cannot write the rejected-records artefact for zone %s:"+
+			" %s exists and is not a regular file", zone, path)
+	}
 	if existing, rerr := os.ReadFile(path); rerr == nil {
 		if bytes.Equal(existing, buf.Bytes()) {
 			return path, nil
@@ -405,7 +416,7 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 	// (3) Lift the serial BEFORE applying, so the publish the apply performs
 	// lands above everything already served rather than needing a second bump
 	// afterwards (which secondaries would see as two changes, and which the
-	// configured outbound_soa_serial mode would have to be fought over twice).
+	// configured outbound-soa-serial mode would have to be fought over twice).
 	//
 	// LoadOutgoingSerial is the durable record of what secondaries have been
 	// handed. Without this floor the merged zone can publish BELOW a serial one

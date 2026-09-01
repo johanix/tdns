@@ -1,0 +1,11 @@
+$TTL 120
+b-nsd.xot.test.	120	IN	SOA	ns-nsd.xot.test. hostmaster.xot.test. (
+				2026082501	; serial
+				3600		; refresh
+				600		; retry
+				604800		; expire
+				120 )		; minimum
+b-nsd.xot.test.	120	IN	NS	ns-nsd.xot.test.
+b-nsd.xot.test.	120	IN	NS	ns-tdnsagent.xot.test.
+www.b-nsd.xot.test.	120	IN	A	192.0.2.2
+marker.b-nsd.xot.test.	120	IN	TXT	"nsd-round-1"

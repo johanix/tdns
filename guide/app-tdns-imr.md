@@ -15,6 +15,11 @@ Features:
 
 - supports modern DNS transports (DoT, DoH and DoQ) in addition to Do53 (UDP/TCP).
 
+- besides full iteration, supports **stub zones** (iterate against named
+  authoritative servers) and **forward zones** (hand the query to an upstream
+  recursive resolver, per zone or for everything). See
+  [Resolution modes](#resolution-modes-iteration-stubs-and-forwarding) below.
+
 - consumes transport signals from authoritative nameservers — when an
   SVCB record at `_dns.<ns>` arrives in the Additional section (or via
   active discovery, see `query-for-transport` /
@@ -24,6 +29,105 @@ Features:
   attempt the preferred encrypted transport. TSYNC is supported as an
   alternative carrier. See section 2 of
   [TDNS Special Features](special-features.md) for the full picture.
+
+## Resolution modes: iteration, stubs, and forwarding
+
+For any given query the resolver answers from cache when it can, and otherwise
+resolves in one of three ways.
+
+**Iteration** is the default: walk the delegation tree from the closest known
+zone cut (ultimately the root hints), following referrals, with RD=0 queries
+to authoritative servers.
+
+**A stub zone** (`imrengine.stubs:`) pre-seeds the resolver's knowledge of a
+zone with named authoritative servers, so iteration for names in that zone
+starts there instead of at the root. It is still iteration: RD=0, referrals
+below the stub are followed, and the stub's servers must be authoritative.
+Use it when a zone is not reachable through the public delegation tree — a
+lab parent, a split-horizon internal zone.
+
+**A forward zone** (`imrengine.forward:`) sends the query as a *recursive*
+query (RD=1) to one or more upstream resolvers and treats the response as
+final — for names under the forward zone, tdns-imr behaves like a stub
+resolver toward its upstream. `zone: .` forwards everything. Use it when the
+upstream should do the resolving: a central resolver behind a restrictive
+firewall, a filtering resolver, or an encrypted-transport hop
+(DoT/DoH/DoQ, with certificate verification) to a resolver you trust.
+
+Which mode a query uses is decided per qname:
+
+1. The **most specific** configured forward zone matching the qname wins.
+2. A configured stub zone that is **more** specific than that forward zone
+   overrides it — so a lab stub can punch a hole in a `zone: .` forward.
+3. No forward match: iteration (seeded by any matching stub).
+
+Zone cuts learned from referrals along the way never override a configured
+forward zone.
+
+Details of forwarding behaviour:
+
+- **Upstream selection** is ordered failover: upstreams are tried in
+  configured order and the first usable response wins. A response counts as
+  usable when it is NOERROR or NXDOMAIN and parses as an answer or a
+  well-formed negative; SERVFAIL/REFUSED, timeouts, and referral-shaped
+  responses move on to the next upstream.
+- **Forward-only**: when every upstream of the matching zone has failed, the
+  client gets SERVFAIL. There is deliberately no fallback to iteration — an
+  operator who confined a zone to an upstream does not want its queries
+  leaking to the delegation tree when the upstream is down.
+- **DNSSEC**: forwarded answers go through the resolver's own validation
+  against its own trust anchors, exactly like iterated answers. Forwarded
+  queries carry CD=1 so the upstream hands over data (and RRSIGs) its own
+  validator would suppress — the local verdict stays independent. The chain
+  is fetched lazily, bottom-up: validating an answer triggers a DNSKEY query
+  for the signer zone, validating that DNSKEY triggers a DS query, and so on
+  up to a trust anchor — each of these forwarded to the same upstream, so
+  validation works even when the upstream is the only reachable resolver.
+  There is no way in plain DNS to request the whole chain in one round trip
+  (RFC 7901's CHAIN option exists but is essentially undeployed), so first
+  contact with a zone costs a short burst of chain queries — typically
+  answered from the upstream's cache in one round trip each — and the
+  validated keys are cached here, so the burst is per zone per TTL, not per
+  query. AD is set only on local validation. Per-zone `trust-ad: true`
+  instead adopts the upstream's AD bit, for positives and negatives alike;
+  because that bit would otherwise be spoofable, `trust-ad` requires every
+  upstream of the zone to be encrypted and verified, enforced at startup.
+- **Transports**: each upstream has its own transport (`do53`, `tcp`, `dot`,
+  `doh`, `doq`) and port. Encrypted upstreams verify the server certificate
+  by default (`tls-server-name`, or the upstream IP in a SAN), with
+  `insecure: true` as an explicit per-upstream opt-out for self-signed lab
+  certificates. This is independent of — and stricter than — the transports
+  the resolver's *listeners* offer.
+- **Caching**: forwarded answers and negatives land in the same cache with
+  their TTLs; repeat queries are answered from cache without touching the
+  upstream. The EDNS0 PR flag (privacy required) is honored: unencrypted
+  upstreams are skipped for PR queries, and a forward zone with no encrypted
+  upstream answers SERVFAIL with the corresponding EDE.
+- **Startup and observability**: a forward zone covering the root skips the
+  live `. NS` priming fetch (the hints are seeded offline), so a forward-all
+  resolver starts and serves even when its upstream is down at boot. Every
+  forward upstream is probed once at startup; an unreachable one is WARNed
+  and marks `config status` DEGRADED with an `Upstream/ImrForward` error
+  naming it, clearing on the first successful exchange. `tdns-cli imr config
+  status` reports priming state, stub zones, and per-upstream reachability —
+  and the same IMR block appears in `auth config status` / `agent config
+  status` for the resolver embedded in those daemons. A failed IMR init
+  (priming failure in iterative mode) also registers an `Upstream/ImrPriming`
+  error, so a daemon running without its DNS listeners is visible as DEGRADED
+  rather than silently answering nothing. `config status` also reports the
+  process's open-descriptor count against its limit (and goroutine count),
+  with a warning above 80% — the tdns#443 wedge was fd exhaustion starving
+  outbound dials, and this makes that class of leak visible while it grows.
+- **Reload**: `config reload`, `config reload-zones` and SIGHUP re-read the
+  `stubs:` and `forward:` blocks and apply them without a restart; untouched
+  zones keep their live counters and backoffs, and an invalid forward table is
+  refused whole rather than half-applied. The rest of `imrengine:` still needs
+  a restart, and a reload says which edited keys those were.
+- **Limits**: upstream addresses are IP literals (no hostnames) and the DoH
+  path is fixed at `/dns-query`.
+
+Configuration reference and examples for both `stubs:` and `forward:` are in
+[tdns-imr configuration](config-tdns-imr.md).
 
 ## Daemon mode and interactive mode
 
@@ -37,7 +141,7 @@ $ tdns-imr --cli                 # interactive mode
 ```
 
 Interactive mode is **not** a lightweight client. Startup is identical in both
-modes: the resolver binds `imrengine.addresses`, starts the validator and the
+modes: the resolver binds `listeners.addresses`, starts the validator and the
 HTTP management API, and begins answering queries. `--cli` merely layers a shell
 on top of that running resolver, so every command below inspects and manipulates
 the live in-process cache.
@@ -121,9 +225,23 @@ through in-process channels.
 **`tdns-cli imr <cache-command>` does not work.** `tdns-cli` registers the same
 command objects under `imr`, but their implementations reach for an in-process
 resolver that `tdns-cli` does not have. `tdns-cli imr query` prints
-*"No active channel to RecursorEngine. Terminating."* The only `tdns-cli imr`
-subcommands that do anything are `imr ping`, `imr daemon ...` and
-`imr dsync-query`.
+*"No active channel to RecursorEngine. Terminating."* The `tdns-cli imr`
+subcommands that do work are the API-based ones: `imr ping`, `imr daemon ...`,
+`imr dsync-query`, `imr config status`, and the `imr forward ...` /
+`imr stub ...` trees below.
+
+**`tdns-cli {imr,auth imr,agent imr} forward|stub ...`** inspect and probe the
+resolver's forward and stub zones over the `/imr` API — against tdns-imr
+directly, or against the resolver embedded in tdns-auth / tdns-agent:
+
+| Command | Effect |
+|---------|--------|
+| `forward list` | The configured forward zones and upstreams (transport, port, TLS settings) |
+| `forward status` | Per-upstream reachability, query/failure counters, last success/error |
+| `forward probe [zone]` | Re-run the startup probe now (a recursive SOA query for the forward zone, per upstream) and report per upstream with RTT. **Updates** the live reachability state, so probing confirms a recovery (clearing the DEGRADED error) or surfaces a newly dead upstream. Non-zero exit when any upstream fails |
+| `stub list` | The configured stub zones and their servers (name, addrs, alpn) |
+| `stub status` | Per-server transport counters (attempted/used/failed/truncated) and any active (address, transport) backoffs — the state that silently disabled stubs in the 2026-08-11 outage |
+| `stub probe [zone]` | RD=0 SOA query for the stub zone to every (server, address, advertised transport) tuple; reports rcode, AA bit and RTT. **Strictly report-only**: nothing is recorded, so a probe can never put a stub server into backoff. Non-zero exit when any tuple fails to answer authoritatively |
 
 **`tdns-cli agent imr ...` and `tdns-cli auth imr ...` are the real API-based
 cache commands.** They POST to the `/imr` endpoint of a running **tdns-agent**

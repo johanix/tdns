@@ -29,6 +29,10 @@ const (
 	OptAllowUpdates
 	OptAllowChildUpdates
 	OptAllowEdits // Dynamically et if app=combiner and zone contains a HSYNC RRset
+	// OptFoldCase is INERT. Name folding is unconditional now: every index is
+	// keyed canonically and every name is folded on the way in, so there is no
+	// longer a mode in which it is not done. Still accepted so existing configs
+	// keep parsing; setting it changes nothing.
 	OptFoldCase
 	OptBlackLies
 	OptDontPublishKey
@@ -63,6 +67,39 @@ const (
 	// values are positional, so inserting mid-list renumbers everything after.
 	OptOnConflictDBWins
 	OptOnConflictZonefileWins
+	// OptPublishZonemd makes the server maintain the zone's apex ZONEMD
+	// RRset (RFC 8976): computed inside every publish, over the snapshot
+	// that publish is about to install, and signed with it. Off, the apex
+	// ZONEMD is ordinary operator data and the server never touches it.
+	//
+	// Appended at the end for the same reason the two options above were:
+	// ZoneOption values are positional, so inserting mid-list renumbers
+	// everything after.
+	OptPublishZonemd
+	// OptVerifyZonemd makes the server check a zone's apex ZONEMD before
+	// adopting it -- on every load from file and every inbound transfer. The
+	// companion to publish-zonemd and independent of it: the interesting case
+	// is a secondary verifying what a primary sent, and a secondary does not
+	// publish a digest of its own.
+	OptVerifyZonemd
+	// OptRequestIxfr lets a secondary ask for an incremental transfer instead
+	// of a full one (RFC 1995). Default ON, per F1 of
+	// docs/2026-07-25-inbound-ixfr-plan.md: it is BIND parity, the AXFR
+	// fallback makes it safe, and it is symmetric with the default-on
+	// outbound retention #328 shipped. Off, the transfer path behaves
+	// exactly as it did before C2.
+	//
+	// Appended at the end for the same reason every option above it was:
+	// ZoneOption values are positional, so inserting mid-list renumbers
+	// everything after.
+	OptRequestIxfr
+	// OptNoRequestIxfr is how the default is turned OFF. Options are a list of
+	// enabled names, so absence cannot mean false for a flag whose default is
+	// true -- the same shape as the on-conflict-* pair, and solved the same
+	// way. Both spellings are accepted; no-request-ixfr wins if an operator
+	// writes both, because the safe direction is the one that only ever asks
+	// for a full transfer.
+	OptNoRequestIxfr
 	optZoneOptionTdnsSentinel
 )
 
@@ -99,6 +136,10 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptAllowApiUpdates:         "allow-api-updates",
 	OptOnConflictDBWins:        "on-conflict-db-wins",
 	OptOnConflictZonefileWins:  "on-conflict-zonefile-wins",
+	OptPublishZonemd:           "publish-zonemd",
+	OptVerifyZonemd:            "verify-zonemd",
+	OptRequestIxfr:             "request-ixfr",
+	OptNoRequestIxfr:           "no-request-ixfr",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -127,6 +168,10 @@ var StringToZoneOption = map[string]ZoneOption{
 	"allow-api-updates":          OptAllowApiUpdates,
 	"on-conflict-db-wins":        OptOnConflictDBWins,
 	"on-conflict-zonefile-wins":  OptOnConflictZonefileWins,
+	"publish-zonemd":             OptPublishZonemd,
+	"verify-zonemd":              OptVerifyZonemd,
+	"request-ixfr":               OptRequestIxfr,
+	"no-request-ixfr":            OptNoRequestIxfr,
 }
 
 type ImrOption uint8
@@ -175,7 +220,7 @@ var StringToAuthOption = map[string]AuthOption{
 	"minimal-responses": AuthOptMinimalResponses,
 }
 
-// outbound_soa_serial mode values for DnsEngine.OutboundSoaSerial.
+// outbound-soa-serial mode values for DnsEngine.OutboundSoaSerial.
 const (
 	OutboundSoaSerialKeep     = "keep"     // outbound = inbound serial (default)
 	OutboundSoaSerialUnixtime = "unixtime" // outbound = time.Now().Unix()

@@ -444,11 +444,16 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "status":
 			lgApi.Debug("config status inquiry")
-			resp.DnsEngine = conf.DnsEngine
+			resp.Listeners = conf.Listeners
+			resp.AuthEngine = conf.AuthEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Identities = conf.Service.Identities
 			resp.DBFile = conf.Db.File
 			resp.ServerErrors = conf.Internal.ServerErrors.List()
+			// Every daemon that carries an IMR — tdns-imr itself or the
+			// embedded resolver in tdns-auth/tdns-agent — reports its state.
+			resp.Imr = Globals.ImrEngine.StatusReport()
+			resp.Proc = CollectProcStatus()
 			health := "Configuration is ok"
 			if len(resp.ServerErrors) > 0 {
 				health = fmt.Sprintf("DEGRADED: %d active error(s)", len(resp.ServerErrors))
@@ -645,15 +650,12 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "lav":
 			lgApi.Debug("debug lookup-and-validate inquiry")
-			zd, folded := FindZone(dp.Qname)
+			zd := FindZone(dp.Qname)
 			if zd == nil {
 				resp.ErrorMsg = fmt.Sprintf("Did not find a known zone for qname %s",
 					dp.Qname)
 				resp.Error = true
 			} else {
-				if folded {
-					dp.Qname = strings.ToLower(dp.Qname)
-				}
 				// tmp, err := zd.LookupRRset(dp.Qname, dp.Qtype, dp.Verbose)
 				rrset, valid, err := zd.LookupAndValidateRRset(dp.Qname, dp.Qtype, dp.Verbose)
 				if err != nil {

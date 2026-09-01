@@ -204,7 +204,7 @@ documents the wrong formula:
 
 Function signature `(conf, kdb, now, propagationDelay)` at line 891
 still has no `DNSKEY_TTL` parameter. `propagationDelay` is sourced
-from `kasp.propagation_delay` only at `key_state_worker.go:30-40`
+from `kasp.propagation-delay` only at `key_state_worker.go:30-40`
 (unchanged). The `− DNSKEY_TTL` term is still missing.
 
 For the testbed (`child_prop = 1m`, `DNSKEY_TTL = 5m`,
@@ -215,7 +215,7 @@ carry stale caches across `T_roll_n` and reject `RRSIG_n`.
 
 ---
 
-## E13 — effective `DNSKEY_TTL = min(ttls.dnskey, ttls.max_served)`
+## E13 — effective `DNSKEY_TTL = min(ttls.dnskey, ttls.max-served)`
 
 **Verdict:** DIVERGES (computed for the served wire TTL via the clamp
 pipeline, but not consumed by E12).
@@ -226,7 +226,7 @@ it during `SignRRset`. `effectiveMarginForZone` reads
 `max_observed_ttl` afterwards. But the served TTL never reaches
 `TransitionRolloverKskDsPublishedToStandby`, which still receives only
 `propagationDelay`. No callers compute `min(ttls.dnskey,
-ttls.max_served)` for the rollover-engine path.
+ttls.max-served)` for the rollover-engine path.
 
 ---
 

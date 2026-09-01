@@ -26,8 +26,8 @@ import (
 )
 
 // NewImrConfigCmd builds the `imr config` command group. tdns-imr has no
-// zone/tsig/keystore state, so this group carries just check and mwe (unlike
-// auth's config group, which also has reload*/status).
+// zone/tsig/keystore state, so this group carries check, mwe and status
+// (unlike auth's config group, which also has reload*).
 func NewImrConfigCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "config",
@@ -35,7 +35,51 @@ func NewImrConfigCmd() *cobra.Command {
 	}
 	c.AddCommand(newImrConfigCheckCmd())
 	c.AddCommand(newImrConfigMweCmd())
+	c.AddCommand(newImrConfigStatusCmd())
 	return c
+}
+
+// ---------------------------------------------------------------------------
+// imr config status
+// ---------------------------------------------------------------------------
+
+func newImrConfigStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Report the running tdns-imr daemon's status, including priming and forward upstreams",
+		Long: `Query the running tdns-imr daemon's /config status endpoint and report:
+overall health (active server errors), whether the resolver cache is primed
+and how, and the configured stub and forward zones with per-upstream
+reachability (fed by the startup probe and live queries), plus the
+process's descriptor and goroutine counts (tdns#443).`,
+		Run: func(cmd *cobra.Command, args []string) {
+			resp, err := fetchImrStatus()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			if resp.Error {
+				fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
+				os.Exit(1)
+			}
+			fmt.Println(resp.Msg)
+			if len(resp.ServerErrors) > 0 {
+				fmt.Printf("Active errors:\n")
+				for _, e := range resp.ServerErrors {
+					fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
+				}
+			}
+			// Proc renders BEFORE the nil-Imr return: a daemon whose IMR
+			// init failed (the Upstream/ImrPriming husk) is precisely a
+			// moment to look at process resources, not to hide them.
+			renderProcStatus(resp.Proc)
+			if resp.Imr == nil {
+				fmt.Println("IMR: no resolver state reported (engine not running)")
+				return
+			}
+			renderImrStatus(resp.Imr)
+		},
+	}
 }
 
 func init() {
@@ -139,19 +183,19 @@ func runImrConfigCheck(explicitPath string, offline bool) {
 
 func checkImrEngine(cfg *tdns.Config, rep *ccReport) {
 	const g = "IMR engine"
-	if len(cfg.Imr.Addresses) == 0 {
-		rep.fail(g, "addresses", "imrengine.addresses is empty — the resolver would not listen on any address",
+	if len(cfg.Listeners.Addresses) == 0 {
+		rep.fail(g, "addresses", "listeners.addresses is empty — the resolver would not listen on any address",
 			"add at least one addr:port, e.g. [ 127.0.0.1:53, '[::1]:53' ]")
 	} else {
-		rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.Imr.Addresses))
+		rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.Listeners.Addresses))
 	}
 
 	validT := map[string]bool{"do53": true, "dot": true, "doh": true, "doq": true}
-	if len(cfg.Imr.Transports) == 0 {
-		rep.fail(g, "transports", "imrengine.transports is empty", "list at least one of do53, dot, doh, doq")
+	if len(cfg.Listeners.Transports) == 0 {
+		rep.fail(g, "transports", "listeners.transports is empty", "list at least one of do53, dot, doh, doq")
 	}
 	needCert := false
-	for _, t := range cfg.Imr.Transports {
+	for _, t := range cfg.Listeners.Transports {
 		lt := lc(t)
 		if !validT[lt] {
 			rep.fail(g, "transports", fmt.Sprintf("unknown transport %q", t), "valid transports are do53, dot, doh, doq")
@@ -162,12 +206,12 @@ func checkImrEngine(cfg *tdns.Config, rep *ccReport) {
 		}
 	}
 	if needCert {
-		if cfg.Imr.CertFile == "" || cfg.Imr.KeyFile == "" {
-			rep.warn(g, "cert", "dot/doh/doq configured but imrengine.certfile/keyfile not set — those listeners will be skipped",
-				"set imrengine.certfile and imrengine.keyfile, or remove the encrypted transports")
+		if cfg.Listeners.CertFile == "" || cfg.Listeners.KeyFile == "" {
+			rep.warn(g, "cert", "dot/doh/doq configured but listeners.certfile/keyfile not set — those listeners will be skipped",
+				"set listeners.certfile and listeners.keyfile, or remove the encrypted transports")
 		} else {
-			checkFileExists(rep, g, "certfile", cfg.Imr.CertFile)
-			checkFileExists(rep, g, "keyfile", cfg.Imr.KeyFile)
+			checkFileExists(rep, g, "certfile", cfg.Listeners.CertFile)
+			checkFileExists(rep, g, "keyfile", cfg.Listeners.KeyFile)
 		}
 	}
 	if cfg.Imr.RootHints != "" {
@@ -191,11 +235,11 @@ func checkImrTrustAnchors(cfg *tdns.Config, rep *ccReport) {
 	case hasAnchor:
 		rep.pass(g, "anchor", "a DNSSEC trust anchor is configured")
 	case !requireValidation:
-		rep.info(g, "anchor", "no trust anchor, but require_dnssec_validation is false (lab mode) — validation disabled")
+		rep.info(g, "anchor", "no trust anchor, but require-dnssec-validation is false (lab mode) — validation disabled")
 	default:
 		rep.fail(g, "anchor",
 			"no trust anchor configured and DNSSEC validation is on (the default) — the resolver validates against an empty anchor set and everything is BOGUS",
-			"set imrengine.trust-anchor-file (or trust_anchor_ds), or set imrengine.require_dnssec_validation: false for lab use")
+			"set imrengine.trust-anchor-file (or trust-anchor-ds), or set imrengine.require-dnssec-validation: false for lab use")
 	}
 }
 
@@ -362,7 +406,7 @@ const imrMweConfigTemplate = `# Minimal Working Example — tdns-imr
 # self-signed cert. Validate it any time with:
 #   tdns-cli imr config check --serverconfig <this file>
 
-imrengine:
+listeners:
    # Listen on IPv4 and IPv6 localhost. Port {{DNSPORT}} is used so the resolver
    # runs unprivileged; use 53 for a real deployment (needs root/capabilities).
    addresses:   [ 127.0.0.1:{{DNSPORT}}, '[::1]:{{DNSPORT}}' ]
@@ -370,17 +414,22 @@ imrengine:
    transports:  [ do53 ]
    # For encrypted transports the cert/key below are ready to use:
    #   transports: [ do53, dot, doh, doq ]
+   #   ports:
+   #      dot: [ 853 ]
+   #      doh: [ 443 ]
+   #      doq: [ 853 ]
    # certfile:  {{CERT}}
    # keyfile:   {{KEY}}
 
+imrengine:
    # DNSSEC validation is DISABLED in this MWE so the resolver answers out of
    # the box without a root trust anchor. To make it a validating resolver,
    # supply a root anchor and flip this to true:
    #   trust-anchor-file:          /etc/tdns/root.key
-   #   require_dnssec_validation:  true
+   #   require-dnssec-validation:  true
    # or paste the current root DS inline:
-   #   trust_anchor_ds: ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
-   require_dnssec_validation:  false
+   #   trust-anchor-ds: ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+   require-dnssec-validation:  false
 
 apiserver:
    addresses:  [ 127.0.0.1:{{APIPORT}} ]

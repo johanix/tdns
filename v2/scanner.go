@@ -967,16 +967,16 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 			// Build sets for comparison
 			newNSSet := make(map[string]bool)
 			for _, ns := range newInBailiwickNS {
-				newNSSet[dns.CanonicalName(ns)] = true
+				newNSSet[core.CanonicalizeName(dns.Fqdn(ns))] = true
 			}
 			oldNSSet := make(map[string]bool)
 			for _, ns := range oldInBailiwickNS {
-				oldNSSet[dns.CanonicalName(ns)] = true
+				oldNSSet[core.CanonicalizeName(dns.Fqdn(ns))] = true
 			}
 
 			// For each new in-bailiwick NS: query glue from child
 			for _, nsName := range newInBailiwickNS {
-				nsCanon := dns.CanonicalName(nsName)
+				nsCanon := core.CanonicalizeName(dns.Fqdn(nsName))
 
 				glueRRset, glueInSync, err := scanner.queryAllNSAndCompare(ctx, nsName, t, nsRRset, scanner.ImrEngine, scanLog)
 				if err != nil {
@@ -1022,7 +1022,7 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 
 			// NS only in old set — all its glue are removes
 			for _, nsName := range oldInBailiwickNS {
-				nsCanon := dns.CanonicalName(nsName)
+				nsCanon := core.CanonicalizeName(dns.Fqdn(nsName))
 				if newNSSet[nsCanon] {
 					continue // Already handled above
 				}

@@ -97,14 +97,14 @@ func TestParseDnssecPolicyConfSplitGate(t *testing.T) {
 	dp.ZSK.Lifetime = "forever"
 	// No allowlist -> mixed pair rejected by the split-algorithm gate.
 	_, err := parseDnssecPolicyConfImpl("mixed", &dp, true, nil)
-	if err == nil || !strings.Contains(err.Error(), "split_algorithms") {
+	if err == nil || !strings.Contains(err.Error(), "split-algorithms") {
 		t.Fatalf("parse must reject mixed pair via the split gate, got %v", err)
 	}
 	// With the pair allowlisted, the gate passes (any later error is from
 	// downstream policy validation, not the split gate).
 	allowed := buildSplitAlgorithmSet(map[string][]string{"RSASHA512": {"ED25519"}})
 	_, err = parseDnssecPolicyConfImpl("mixed", &dp, true, allowed)
-	if err != nil && strings.Contains(err.Error(), "split_algorithms") {
+	if err != nil && strings.Contains(err.Error(), "split-algorithms") {
 		t.Fatalf("allowlisted pair must pass the split gate, got %v", err)
 	}
 }
@@ -262,7 +262,7 @@ func TestIsLargeAlgorithmConfig(t *testing.T) {
 }
 
 func TestBuildLargeAlgorithmSetUnknown(t *testing.T) {
-	// Unknown name is a hard error (unlike split_algorithms, which skips).
+	// Unknown name is a hard error (unlike split-algorithms, which skips).
 	if _, err := buildLargeAlgorithmSet([]string{"NOSUCHALG"}); err == nil {
 		t.Fatal("unknown algorithm name must be a hard error")
 	}

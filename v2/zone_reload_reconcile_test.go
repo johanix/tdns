@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -37,7 +38,7 @@ func reloadZone(t *testing.T, kdb *KeyDB, zoneText string) *ZoneData {
 		KeyDB:        kdb,
 		UpdatePolicy: policyAllowing(dns.TypeA, dns.TypeTXT),
 	}
-	if _, _, err := zd.ReadZoneFile(path, true); err != nil {
+	if _, _, err := zd.ReadZoneFile(context.Background(), path, true); err != nil {
 		t.Fatalf("ReadZoneFile: %v", err)
 	}
 	zd.Ready = true
@@ -105,7 +106,7 @@ www.example.	3600	IN	A	192.0.2.1
 operator.example.	3600	IN	A	10.9.9.9
 `)
 
-	if _, err := zd.Refresh(false, false, false, &Config{}); err != nil {
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
 
@@ -140,7 +141,7 @@ journal.example.	3600	IN	A	10.1.1.1
 operator.example.	3600	IN	A	10.9.9.9
 `)
 
-	if _, err := zd.Refresh(false, false, false, &Config{}); err != nil {
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
 	if !hasARRset(t, zd, "operator.example.") {
@@ -175,7 +176,7 @@ func TestReloadOfAnUnchangedFileIsANoOp(t *testing.T) {
 	before := zd.CurrentSerial
 	zd.mu.Unlock()
 
-	updated, err := zd.Refresh(false, false, false, &Config{})
+	updated, err := zd.Refresh(context.Background(), false, false, false, &Config{})
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -209,7 +210,7 @@ example.       3600 IN NS  ns.example.
 example. 3600 IN SOA ns.example. hostmaster.example. 100 7200 1800 604800 7200
 `)
 
-	updated, err := zd.Refresh(false, false, false, &Config{})
+	updated, err := zd.Refresh(context.Background(), false, false, false, &Config{})
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -251,7 +252,7 @@ www.example.	3600	IN	A	192.0.2.1
 operator.example.	3600	IN	A	10.9.9.9
 `)
 
-	if _, err := zd.Refresh(false, false, false, &Config{}); err != nil {
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
 
@@ -293,7 +294,7 @@ func TestForcedReloadOfAnUnchangedFileReapplies(t *testing.T) {
 	before := zd.CurrentSerial
 	zd.mu.Unlock()
 
-	updated, err := zd.Refresh(false, false, true, &Config{})
+	updated, err := zd.Refresh(context.Background(), false, false, true, &Config{})
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -365,13 +366,13 @@ func TestRestartLoadsAZoneWhoseFileIsUnchanged(t *testing.T) {
 		KeyDB:         kdb,
 		UpdatePolicy:  policyAllowing(dns.TypeA, dns.TypeTXT),
 		FirstZoneLoad: true,
-		Data:          core.NewCmap[OwnerData](),
+		Data:          core.NewNameMap[OwnerData](),
 	}
 	Zones.Set("example.", fresh)
 	t.Cleanup(func() { Zones.Remove("example.") })
 	t.Cleanup(fresh.stopPublisher)
 
-	updated, err := fresh.Refresh(false, false, false, &Config{})
+	updated, err := fresh.Refresh(context.Background(), false, false, false, &Config{})
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -441,7 +442,7 @@ www.example.	3600	IN	A	192.0.2.99
 operator.example.	3600	IN	A	10.9.9.9
 `)
 
-	updated, err := zd.Refresh(false, false, false, &Config{})
+	updated, err := zd.Refresh(context.Background(), false, false, false, &Config{})
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -498,7 +499,7 @@ func TestReloadWithNoRecordedIdentityFallsBackToTheSerial(t *testing.T) {
 example.	3600	IN	NS	ns.example.
 www.example.	3600	IN	A	192.0.2.99
 `)
-	updated, err := zd.Refresh(false, false, false, &Config{})
+	updated, err := zd.Refresh(context.Background(), false, false, false, &Config{})
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -512,7 +513,7 @@ www.example.	3600	IN	A	192.0.2.99
 example.	3600	IN	NS	ns.example.
 www.example.	3600	IN	A	192.0.2.99
 `)
-	if _, err := zd.Refresh(false, false, false, &Config{}); err != nil {
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
 	if _, have, err := kdb.GetZoneFileState("example."); err != nil {
@@ -525,7 +526,7 @@ www.example.	3600	IN	A	192.0.2.99
 // refreshOnce runs a refresh and fails the test on error.
 func refreshOnce(t *testing.T, zd *ZoneData) bool {
 	t.Helper()
-	updated, err := zd.Refresh(false, false, false, &Config{})
+	updated, err := zd.Refresh(context.Background(), false, false, false, &Config{})
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -602,7 +603,7 @@ func TestForcedRefreshIgnoresTheStatGate(t *testing.T) {
 		t.Fatalf("Chtimes: %v", err)
 	}
 
-	updated, err := zd.Refresh(false, false, true, &Config{})
+	updated, err := zd.Refresh(context.Background(), false, false, true, &Config{})
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -767,7 +768,7 @@ www.example.	3600	IN	A	192.0.2.1
 broken.example.	3600	IN	A	10.16.0.1
 `)
 
-	updated, err := zd.Refresh(false, false, false, &Config{})
+	updated, err := zd.Refresh(context.Background(), false, false, false, &Config{})
 	if err == nil {
 		t.Fatal("the replacement did not fail, so this test proves nothing")
 	}

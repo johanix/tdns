@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/johanix/tdns/v2"
 	"github.com/spf13/cobra"
@@ -72,6 +73,104 @@ overwrite all conflicts, or --interactive to prompt per conflict.`,
 	c.AddCommand(newConfigCheckCmd(role))
 	c.AddCommand(newConfigMweCmd(role))
 	return c
+}
+
+// renderProcStatus prints the process-resource block of a config-status
+// response, with a loud line when descriptors are close to the limit — the
+// #443 wedge (fd exhaustion starving outbound dials) grows visibly here
+// before it bites. No-op when the daemon reported no block.
+func renderProcStatus(ps *tdns.ProcStatus) {
+	if ps == nil {
+		return
+	}
+	if ps.FDMethod == "unavailable" {
+		// Two causes share this state: an unsupported platform, and — on
+		// linux/darwin — descriptor exhaustion, where counting needs the
+		// one fd that no longer exists. Post-wedge, this line IS the signal.
+		fmt.Printf("Process: fd count unavailable (unsupported platform, or descriptors exhausted — see tdns#443), goroutines %d\n", ps.Goroutines)
+		return
+	}
+	kind := "open fds"
+	if ps.FDMethod == "maxfd" {
+		kind = "highest fd"
+	}
+	line := fmt.Sprintf("Process: %s %d", kind, ps.OpenFDs)
+	if ps.FDLimit > 0 {
+		line += fmt.Sprintf(" (limit %d)", ps.FDLimit)
+	}
+	line += fmt.Sprintf(", goroutines %d", ps.Goroutines)
+	fmt.Println(line)
+	// Divide before multiplying and require a sane finite limit: an
+	// RLIM_INFINITY soft limit would overflow FDLimit*8/10 and misfire.
+	if ps.FDLimit > 0 && ps.FDLimit < 1<<40 && uint64(ps.OpenFDs) >= ps.FDLimit/10*8 {
+		fmt.Printf("WARNING: file descriptors at %d of %d — a leak here starves outbound queries (see tdns#443)\n",
+			ps.OpenFDs, ps.FDLimit)
+	}
+}
+
+// renderImrStatus prints the IMR block of a config-status response: priming
+// state, stub zones, and forward zones with per-upstream reachability. No-op
+// when the daemon reported no IMR block.
+func renderImrStatus(st *tdns.ImrStatus) {
+	if st == nil {
+		return
+	}
+	primed := "not primed"
+	if st.Primed {
+		primed = "primed"
+		if st.PrimedVia != "" {
+			primed += " via " + st.PrimedVia
+		}
+		if !st.PrimedAt.IsZero() {
+			primed += " at " + st.PrimedAt.Format(tdns.TimeLayout)
+		}
+	}
+	fmt.Printf("IMR: %s\n", primed)
+
+	// The line that matters when a resolver has stopped resolving. "primed at
+	// <boot>" is about the past; this is about whether an iteration can still
+	// be started at all.
+	if st.RootNSPresent {
+		left := time.Until(st.RootNSExpires).Round(time.Second)
+		fmt.Printf("IMR: root NS: %d server(s), expires %s (in %s)\n",
+			st.RootNSCount, st.RootNSExpires.Format(tdns.TimeLayout), left)
+	} else {
+		fmt.Printf("IMR: root NS: ABSENT -- iteration cannot start;" +
+			" every uncached name will SERVFAIL\n")
+	}
+
+	if !st.ZonesLoadedAt.IsZero() {
+		fmt.Printf("IMR: stub/forward zones loaded at %s\n", st.ZonesLoadedAt.Format(tdns.TimeLayout))
+	}
+	if len(st.StubZones) > 0 {
+		fmt.Printf("IMR: stub zones: %s\n", strings.Join(st.StubZones, ", "))
+	}
+	for _, fz := range st.ForwardZones {
+		printForwardZoneStatus(fz, "IMR: ")
+	}
+}
+
+// printForwardZoneStatus renders one forward zone's reachability block.
+// Shared by renderImrStatus (config status) and `imr forward status`.
+func printForwardZoneStatus(fz tdns.ImrForwardZoneStatus, prefix string) {
+	trust := ""
+	if fz.TrustAD {
+		trust = ", trust-ad"
+	}
+	fmt.Printf("%sforward zone %s (%d upstream(s)%s):\n", prefix, fz.Zone, len(fz.Upstreams), trust)
+	for _, up := range fz.Upstreams {
+		state := "ok"
+		if up.Unreachable {
+			state = fmt.Sprintf("UNREACHABLE (%s)", up.LastError)
+		} else if up.Queries == 0 {
+			state = "untried"
+		}
+		line := fmt.Sprintf("  %-30s %s, queries %d, failures %d", up.Upstream, state, up.Queries, up.Failures)
+		if !up.LastSuccess.IsZero() {
+			line += ", last success " + up.LastSuccess.Format(tdns.TimeLayout)
+		}
+		fmt.Println(line)
+	}
 }
 
 func runReloadTsigCmd(role string, force, interactive bool) {
@@ -183,11 +282,11 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 
 	if showVerboseStatus && tdns.Globals.Verbose {
 		fmt.Printf("Status for %s:\n", resp.AppName)
-		if len(resp.DnsEngine.Addresses) > 0 {
-			fmt.Printf("DnsEngine: listening on %v\n", resp.DnsEngine.Addresses)
-			fmt.Printf("DnsEngine: configured transports: %v\n", resp.DnsEngine.Transports)
+		if len(resp.Listeners.Addresses) > 0 {
+			fmt.Printf("Listeners: listening on %v\n", resp.Listeners.Addresses)
+			fmt.Printf("Listeners: configured transports: %v\n", resp.Listeners.Transports)
 		} else {
-			fmt.Printf("DnsEngine: not listening on any addresses\n")
+			fmt.Printf("Listeners: not listening on any addresses\n")
 		}
 		if len(resp.ServerErrors) > 0 {
 			fmt.Printf("Active errors:\n")
@@ -195,9 +294,11 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 				fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
 			}
 		}
-		if len(resp.DnsEngine.Options) > 0 {
-			fmt.Printf("DnsEngine: auth options:\n")
-			for opt, val := range resp.DnsEngine.Options {
+		renderImrStatus(resp.Imr)
+		renderProcStatus(resp.Proc)
+		if len(resp.AuthEngine.Options) > 0 {
+			fmt.Printf("AuthEngine: options:\n")
+			for opt, val := range resp.AuthEngine.Options {
 				optName, ok := tdns.AuthOptionToString[opt]
 				if !ok {
 					optName = fmt.Sprintf("unknown option %d", opt)
@@ -208,13 +309,13 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 					fmt.Printf("  %s: (enabled)\n", optName)
 				}
 			}
-		} else if len(resp.DnsEngine.OptionsStrs) > 0 {
-			fmt.Printf("DnsEngine: auth options:\n")
-			for _, optStr := range resp.DnsEngine.OptionsStrs {
+		} else if len(resp.AuthEngine.OptionsStrs) > 0 {
+			fmt.Printf("AuthEngine: options:\n")
+			for _, optStr := range resp.AuthEngine.OptionsStrs {
 				fmt.Printf("  %s\n", optStr)
 			}
 		} else {
-			fmt.Printf("DnsEngine: no auth options configured\n")
+			fmt.Printf("AuthEngine: no auth options configured\n")
 		}
 		if resp.DBFile != "" {
 			fmt.Printf("DB: %s\n", resp.DBFile)

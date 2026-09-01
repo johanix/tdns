@@ -244,7 +244,7 @@ func bootstrapApexRecords(zone string, listenAddrs []string) []string {
 			continue
 		}
 		if addr.IsUnspecified() {
-			lg.Warn("bootstrap apex: skipping wildcard listener (list concrete addresses in dnsengine.addresses to have them in synthesized apexes)", "zone", zone, "address", la)
+			lg.Warn("bootstrap apex: skipping wildcard listener (list concrete addresses in listeners.addresses to have them in synthesized apexes)", "zone", zone, "address", la)
 			continue
 		}
 		key := addr.String()
@@ -273,7 +273,7 @@ func (conf *Config) synthesizeBootstrapZonefile(zone, path string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create zone file directory %s: %v", dir, err)
 	}
-	content := strings.Join(bootstrapApexRecords(zone, conf.DnsEngine.Addresses), "\n") + "\n"
+	content := strings.Join(bootstrapApexRecords(zone, conf.Listeners.Addresses), "\n") + "\n"
 
 	tempFile, err := os.CreateTemp(dir, fmt.Sprintf(".%s.bootstrap.tmp", filepath.Base(path)))
 	if err != nil {
@@ -380,13 +380,13 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	// engine's config merge, so everything must be carried here.
 	msc := ConfLive().MultiSigner[spec.Zconf.MultiSigner]
 	zd := &ZoneData{
-		ZoneName: name,
+		ZoneName: core.CanonicalizeName(name),
 		ZoneType: Primary,
 		// Set directly, like every other field here: this ZoneData is
 		// pre-registered with ZoneType already Primary, and the RefreshEngine
 		// merge block that would otherwise copy it off the ZoneRefresher is
 		// gated on `zd.ZoneType == 0`. Relying on the zr path alone would
-		// silently drop a template's outbound_soa_serial and leave the zone on
+		// silently drop a template's outbound-soa-serial and leave the zone on
 		// the server-global default.
 		OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,
 		TransferSrc:       spec.Zconf.TransferSrc,
@@ -404,7 +404,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		MultiSigner:       &msc,
 		DelegationSyncQ:   conf.Internal.DelegationSyncQ,
 		Status:            ZoneStatusPending,
-		Data:              core.NewCmap[OwnerData](),
+		Data:              core.NewNameMap[OwnerData](),
 		KeyDB:             conf.Internal.KeyDB,
 		FirstZoneLoad:     true,
 		publishCadence:    spec.PublishCadence,
@@ -472,7 +472,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		DnssecPolicy:   spec.Zconf.DnssecPolicy,
 		Force:          true, // load from file regardless of serial
 
-		// Template-expanded: a template carrying outbound_soa_serial gives
+		// Template-expanded: a template carrying outbound-soa-serial gives
 		// every zone stamped from it that serial policy (the intended
 		// granularity — see the per-zone config model in the design doc).
 		OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,

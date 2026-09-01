@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -82,7 +83,7 @@ func TestSendUpdateReportsRejectionRcode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			addr := startRcodeResponder(t, tc.answer)
 
-			rcode, ur, err := SendUpdate(testUpdateMsg(t), "child.parent.example.", []string{addr})
+			rcode, ur, err := SendUpdate(context.Background(), testUpdateMsg(t), "child.parent.example.", []string{addr})
 			if err != nil {
 				t.Fatalf("SendUpdate returned an error for a responding target: %v "+
 					"(a rejection RCODE is not a transport failure)", err)
@@ -115,7 +116,7 @@ func TestSendUpdateUnreachableIsTransportError(t *testing.T) {
 	dead := ln.Addr().String()
 	ln.Close()
 
-	rcode, _, err := SendUpdate(testUpdateMsg(t), "child.parent.example.", []string{dead})
+	rcode, _, err := SendUpdate(context.Background(), testUpdateMsg(t), "child.parent.example.", []string{dead})
 	if err == nil {
 		t.Fatal("SendUpdate returned nil error for an unreachable target; a transport failure must be an error")
 	}
@@ -137,7 +138,7 @@ func TestSendUpdatePrefersRespondingTarget(t *testing.T) {
 
 	live := startRcodeResponder(t, dns.RcodeBadKey)
 
-	rcode, _, err := SendUpdate(testUpdateMsg(t), "child.parent.example.", []string{dead, live})
+	rcode, _, err := SendUpdate(context.Background(), testUpdateMsg(t), "child.parent.example.", []string{dead, live})
 	if err != nil {
 		t.Fatalf("SendUpdate: %v", err)
 	}
@@ -153,7 +154,7 @@ func TestSendUpdateSucceedsPastRejectingTarget(t *testing.T) {
 	rejecting := startRcodeResponder(t, dns.RcodeRefused)
 	accepting := startRcodeResponder(t, dns.RcodeSuccess)
 
-	rcode, _, err := SendUpdate(testUpdateMsg(t), "child.parent.example.", []string{rejecting, accepting})
+	rcode, _, err := SendUpdate(context.Background(), testUpdateMsg(t), "child.parent.example.", []string{rejecting, accepting})
 	if err != nil {
 		t.Fatalf("SendUpdate: %v", err)
 	}

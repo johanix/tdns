@@ -102,7 +102,7 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 			log.Printf("ValidateRRset: FindClosestKnownZone(%q) returned %d servers", signer, len(servers))
 		}
 		if len(servers) == 0 {
-			if sm, ok := rrcache.ServerMap.Get("."); ok {
+			if sm, ok := rrcache.ServerMapCopy("."); ok {
 				servers = sm
 			}
 		}
@@ -551,7 +551,7 @@ func ValidateDNSKEYRRsetSignature(rrset *core.RRset, keyid uint16, signerName st
 		if !ok || sig.TypeCovered != dns.TypeDNSKEY {
 			continue
 		}
-		if sig.KeyTag == keyid && dns.Fqdn(sig.SignerName) == name {
+		if sig.KeyTag == keyid && core.EqualNames(dns.Fqdn(sig.SignerName), name) {
 			sigForKey = sig
 			break
 		}
@@ -753,7 +753,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 
 	// Check for trust anchor DNSKEYs
 	for item := range dkc.Map.IterBuffered() {
-		if item.Val.Name == name && item.Val.TrustAnchor && item.Val.State == ValidationStateSecure {
+		if core.EqualNames(item.Val.Name, name) && item.Val.TrustAnchor && item.Val.State == ValidationStateSecure {
 			taKeys = append(taKeys, &item.Val)
 		}
 	}
@@ -899,19 +899,37 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 // recurse into ValidateDNSKEYs(parent) → backfillDS(parent) → … strictly
 // UP the tree, ending at the root / a configured trust anchor. It never
 // re-enters for `name` itself, so there is no unbounded recursion.
+// parentOf returns the parent zone name of a domain name. The root is its own
+// parent; callers must not ask for the root's DS.
+func parentOf(name string) string {
+	labels := dns.SplitDomainName(name)
+	if len(labels) <= 1 {
+		return "."
+	}
+	return dns.Fqdn(strings.Join(labels[1:], "."))
+}
+
 func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher RRsetFetcher) *CachedRRset {
 	if fetcher == nil || name == "." {
 		return nil
 	}
-	_, servers, err := rrcache.FindClosestKnownZone(name)
+	// A DS lives in the PARENT zone, so it must be fetched from the parent's
+	// servers. Asking FindClosestKnownZone(name) returns the servers for `name`
+	// itself, which are authoritative for the child and not for the DS -- they
+	// answer REFUSED, entirely correctly. That refusal was then booked as a
+	// lame delegation, putting the (addr, transport) into a zone backoff, after
+	// which prioritizeServers had nothing left to offer and every subsequent
+	// query for the zone failed without a single auth-server attempt.
+	parent := parentOf(name)
+	_, servers, err := rrcache.FindClosestKnownZone(parent)
 	if err != nil {
 		if rrcache.Verbose {
-			log.Printf("backfillDS: FindClosestKnownZone(%q) failed: %v", name, err)
+			log.Printf("backfillDS: FindClosestKnownZone(%q) failed: %v", parent, err)
 		}
 		return nil
 	}
 	if len(servers) == 0 {
-		if sm, ok := rrcache.ServerMap.Get("."); ok {
+		if sm, ok := rrcache.ServerMapCopy("."); ok {
 			servers = sm
 		}
 	}
@@ -1000,7 +1018,10 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		return ValidationStateIndeterminate, rcode, fmt.Errorf("no SOA found in negative authority for %s", qname)
 	}
 	zoneName := dns.CanonicalName(soarrset.Name)
-	if !strings.HasSuffix(qnameCanon, zoneName) {
+	// The SOA in a negative answer only authorises a denial for names inside
+	// its own zone. A byte suffix would accept an SOA for "ample." as covering
+	// "example." -- a forged denial one label away from the real zone.
+	if !dns.IsSubDomain(zoneName, qnameCanon) {
 		return ValidationStateBogus, rcode, nil // XXX: The zone name does not match the qname
 	}
 	if !hasSignatures {

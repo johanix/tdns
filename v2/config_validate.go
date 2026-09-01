@@ -26,29 +26,108 @@ func NewCustomValidator() (*CustomValidator, error) {
 	return &CustomValidator{v}, nil
 }
 
+// validateZonePeersAndAcls checks the per-zone peer lists and ACLs the daemon
+// parses at zone load, so a shape error surfaces here instead of quarantining
+// the zone after startup.
+//
+// This is the gap that let `notify:` and `downstreams:` be confused for one
+// another. They take different shapes -- notify:/primaries: are {addr, key},
+// downstreams:/allow-notify: are {prefix, key} -- and mapstructure silently
+// ignores a key the target struct does not have. So writing
+//
+//	downstreams:
+//	   - addr: "192.0.2.1:53"
+//
+// decodes to an AclEntry with an EMPTY prefix, validates clean, and then fails
+// at zone load with `acl entry "": bad ip-spec ""`. The zone is quarantined and
+// answers nothing, while `config check` reported no problems at all.
+//
+// ValidateACL is the daemon's own function, so the two cannot disagree about
+// what a valid entry is. Key names are accepted unconditionally here: a key may
+// legitimately live in the keystore database rather than in keys.tsig, and the
+// checker reads a file.
+func validateZonePeersAndAcls(config *Config) error {
+	anyKey := func(string) bool { return true }
+
+	check := func(kind, name string, zc *ZoneConf) error {
+		for _, acl := range []struct {
+			field string
+			list  []AclEntry
+		}{
+			{"downstreams", zc.Downstreams},
+			{"allow-notify", zc.AllowNotify},
+		} {
+			if err := ValidateACL(acl.list, anyKey); err != nil {
+				return fmt.Errorf("%s %q: %s: %v (this list takes { prefix: <ip-spec>, key: ... };"+
+					" { addr: ... } belongs in notify:/primaries:)", kind, name, acl.field, err)
+			}
+		}
+		for _, peers := range []struct {
+			field string
+			list  []PeerConf
+		}{
+			{"notify", zc.Notify},
+			{"primaries", zc.Primaries},
+		} {
+			for i, p := range peers.list {
+				// A reference entry carries ids instead of an address, and a
+				// legacy bare string is quarantined per-zone rather than here.
+				if len(p.PeersRef) > 0 || p.Legacy != "" {
+					continue
+				}
+				if strings.TrimSpace(p.Addr) == "" {
+					return fmt.Errorf("%s %q: %s entry %d has no addr: (this list takes"+
+						" { addr: <host:port>, key: ... }; { prefix: ... } belongs in"+
+						" downstreams:/allow-notify:)", kind, name, peers.field, i+1)
+				}
+			}
+		}
+		return nil
+	}
+
+	for i := range config.Zones {
+		if err := check("zone", config.Zones[i].Name, &config.Zones[i]); err != nil {
+			return err
+		}
+	}
+	for i := range config.Templates {
+		if err := check("template", config.Templates[i].Name, &config.Templates[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	var config Config
 
-	// Mirror the main loader's decode hook (parseconfig.go) so a legacy
-	// bare-string primary:/notify: entry becomes a PeerConf legacy marker
-	// (quarantined per-zone) instead of failing this validation decode and
-	// aborting startup. Composed with viper's defaults so duration/slice
-	// fields still decode.
-	decodeHook := viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
-		mapstructure.StringToTimeDurationHookFunc(),
-		mapstructure.StringToSliceHookFunc(","),
-		stringToPeerConfHook(),
-		stringToAclEntryHook(),
-		legacyDynamicAllowedHook(),
-	))
-	if v == nil {
-		if err := viper.Unmarshal(&config, decodeHook); err != nil {
-			return fmt.Errorf("ValidateConfig: Unmarshal error: %v", err)
+	// Decode through the DAEMON's pipeline, not viper's.
+	//
+	// This function answers exactly one question -- "would the daemon start on
+	// this file?" -- so it has to decode the file the way the daemon does.
+	// viper.Unmarshal does not: it sets WeaklyTypedInput and adds
+	// StringToSlice/StringToTimeDuration hooks that ParseConfig's decoder has
+	// no equivalent of. A file writing `schemes: notify` where the struct wants
+	// a slice, or `port: "5354"` where it wants a uint16, therefore passed
+	// validation and then failed at startup -- the worst direction for a
+	// checker to be wrong in, because it hands the operator a green light.
+	//
+	// Using the file path also picks up the daemon's include processing and
+	// transfer-alias normalisation, which viper knows nothing about.
+	if cfgfile != "" {
+		if _, _, _, err := decodeConfigFile(cfgfile, &config); err != nil {
+			return fmt.Errorf("ValidateConfig: %v", err)
+		}
+	} else if v != nil {
+		// No file to re-read (an in-memory viper). Decode its settings through
+		// the same strict decoder, so the strictness is identical even though
+		// the include/alias front end cannot run.
+		var md mapstructure.Metadata
+		if err := decodeConfigMap(v.AllSettings(), &config, &md); err != nil {
+			return fmt.Errorf("ValidateConfig: %v", err)
 		}
 	} else {
-		if err := v.Unmarshal(&config, decodeHook); err != nil {
-			return fmt.Errorf("ValidateConfig: Unmarshal error: %v", err)
-		}
+		return fmt.Errorf("ValidateConfig: neither a config file nor a viper instance to validate")
 	}
 
 	// Same dynamiczones: value validation the daemon loader applies
@@ -63,19 +142,31 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 
+	// Per-zone peer lists and ACLs, via the daemon's own ValidateACL.
+	if err := validateZonePeersAndAcls(&config); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
+
+	// Same loopback rule the daemon applies to the imr debug window.
+	if err := validateImrDebugAddress(config.Listeners.ImrDebugAddress); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
+
 	var configsections = make(map[string]interface{}, 5)
 
 	configsections["log"] = config.Log
 	switch Globals.App.Type {
 	case AppTypeImr:
 		configsections["imrengine"] = config.Imr
+		configsections["listeners"] = config.Listeners
 	case AppTypeReporter:
 		configsections["apiserver"] = config.ApiServer
 	case AppTypeAuth, AppTypeAgent:
 		configsections["service"] = config.Service
 		configsections["db"] = config.Db
 		configsections["apiserver"] = config.ApiServer
-		configsections["dnsengine"] = config.DnsEngine
+		configsections["listeners"] = config.Listeners
+		configsections["authengine"] = config.AuthEngine
 		// Validate catalog configuration if present
 		if config.Catalog != nil && (config.Catalog.ConfigGroups != nil || config.Catalog.MetaGroups != nil || config.Catalog.Policy.Zones.Add != "" || config.Catalog.Policy.Zones.Remove != "") {
 			configsections["catalog"] = config.Catalog
@@ -84,7 +175,8 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		configsections["service"] = config.Service
 		configsections["db"] = config.Db
 		configsections["apiserver"] = config.ApiServer
-		configsections["dnsengine"] = config.DnsEngine
+		configsections["listeners"] = config.Listeners
+		configsections["authengine"] = config.AuthEngine
 		// Validate catalog configuration if present
 		if config.Catalog != nil && (config.Catalog.ConfigGroups != nil || config.Catalog.MetaGroups != nil || config.Catalog.Policy.Zones.Add != "" || config.Catalog.Policy.Zones.Remove != "") {
 			configsections["catalog"] = config.Catalog

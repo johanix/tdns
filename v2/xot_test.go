@@ -592,7 +592,7 @@ func TestXoT_DANEModeEndToEnd(t *testing.T) {
 
 // TestXoT_DANEFailsClosedOnUnvalidated: an unvalidated TLSA is refused when
 // validation is required (the default), and accepted only in explicit lab mode
-// (require_dnssec_validation: false).
+// (require-dnssec-validation: false).
 func TestXoT_DANEFailsClosedOnUnvalidated(t *testing.T) {
 	zd := loadTestTransferZone(t, basicZone)
 	cert, leaf := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
@@ -610,7 +610,7 @@ func TestXoT_DANEFailsClosedOnUnvalidated(t *testing.T) {
 	}
 
 	// Lab mode: insecure state is accepted (with a warning), matching the
-	// imrengine.require_dnssec_validation escape hatch semantics.
+	// imrengine.require-dnssec-validation escape hatch semantics.
 	confLab := daneTestConf(t, leaf, port, cache.ValidationStateInsecure, false)
 	if _, err := xotTransfer(t, confLab, peer, srv, zd.ZoneName); err != nil {
 		t.Fatalf("lab-mode transfer failed: %v", err)
@@ -703,7 +703,7 @@ func TestXoT_ZoneTransferInOverDoT(t *testing.T) {
 	pinPeer := PeerConf{Addr: srv.addr, Key: "tkey", Transport: TransportDoT,
 		TLSAuth: TLSAuthPin, Pins: []string{SPKISHA256(leaf)}}
 	sec := newTestSecondary(t, pinPeer)
-	serial, err := sec.ZoneTransferIn(pinPeer, 0, "axfr", conf)
+	serial, err := sec.ZoneTransferIn(context.Background(), pinPeer, 0, "axfr", conf)
 	if err != nil {
 		t.Fatalf("XoT pull (pin+tsig) failed: %v", err)
 	}
@@ -718,7 +718,7 @@ func TestXoT_ZoneTransferInOverDoT(t *testing.T) {
 	badPeer := pinPeer
 	badPeer.Pins = []string{base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))}
 	secBad := newTestSecondary(t, badPeer)
-	if _, err := secBad.ZoneTransferIn(badPeer, 0, "axfr", conf); err == nil {
+	if _, err := secBad.ZoneTransferIn(context.Background(), badPeer, 0, "axfr", conf); err == nil {
 		t.Fatal("XoT pull with wrong pin must fail")
 	}
 
@@ -728,7 +728,7 @@ func TestXoT_ZoneTransferInOverDoT(t *testing.T) {
 	daneConf := testXfrConf(t)
 	daneConf.Internal.ImrEngine = daneTestConf(t, leaf, serverPort(t, srv), cache.ValidationStateSecure, true).Internal.ImrEngine
 	secDane := newTestSecondary(t, danePeer)
-	if _, err := secDane.ZoneTransferIn(danePeer, 0, "axfr", daneConf); err != nil {
+	if _, err := secDane.ZoneTransferIn(context.Background(), danePeer, 0, "axfr", daneConf); err != nil {
 		t.Fatalf("XoT pull (dane+tsig) failed: %v", err)
 	}
 }
@@ -747,7 +747,7 @@ func TestXoT_DoTransferSOAProbeOverDoT(t *testing.T) {
 	pinPeer := PeerConf{Addr: srv.addr, Key: "tkey", Transport: TransportDoT,
 		TLSAuth: TLSAuthPin, Pins: []string{SPKISHA256(leaf)}}
 	sec := newTestSecondary(t, pinPeer)
-	should, serial, err := sec.DoTransfer(conf)
+	should, serial, err := sec.DoTransfer(context.Background(), conf)
 	if err != nil {
 		t.Fatalf("SOA probe over DoT failed: %v", err)
 	}
@@ -759,7 +759,7 @@ func TestXoT_DoTransferSOAProbeOverDoT(t *testing.T) {
 	badPeer := pinPeer
 	badPeer.Pins = []string{base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))}
 	secBad := newTestSecondary(t, badPeer)
-	if _, _, err := secBad.DoTransfer(conf); err == nil {
+	if _, _, err := secBad.DoTransfer(context.Background(), conf); err == nil {
 		t.Fatal("SOA probe with wrong pin must fail")
 	}
 }

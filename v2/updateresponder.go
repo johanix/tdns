@@ -11,6 +11,7 @@ import (
 	"time"
 
 	// "github.com/gookit/goutil/dump"
+	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -168,7 +169,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	}
 	// 1. Is qname inside or below a zone that we're auth for?
 	// Let's see if we can find the zone
-	zd, _ := FindZone(qname)
+	zd := FindZone(qname)
 	if zd == nil {
 		lgHandler.Warn("zone not found", "qname", qname)
 		m.SetRcode(r, dns.RcodeRefused)
@@ -177,16 +178,34 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		return nil // didn't find any zone for that qname
 	}
 
-	// Refuse UPDATE on a service-impacting error OR before the first
-	// successful refresh: a zone with RefreshCount==0 has no
-	// authoritative data to update yet. Mirrors the same first-load
-	// guard in defaultqueryhandlers.go.
-	if zd.HasServiceImpactingError() || (zd.HasError(RefreshError) && zd.RefreshCount == 0) {
+	// Refuse UPDATE on a service-impacting error, or when the zone holds
+	// no published data to update. Same predicate as the query path in
+	// defaultqueryhandlers.go, deliberately: an UPDATE that the query
+	// path would answer for must not be refused here, and vice versa.
+	// RefreshError alone does not qualify -- a zone with data is still
+	// authoritative for its current contents.
+	if zd.HasServiceImpactingError() {
 		lgHandler.Error("zone in error state", "qname", qname, "errorType", ErrorTypeToString[zd.ErrorType], "errorMsg", zd.ErrorMsg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)
 		w.WriteMsg(m)
 		return nil // didn't find any zone for that qname
+	}
+	if !zd.HasPublishedData() {
+		lgHandler.Error("zone holds no published data", "qname", qname, "zone", zd.ZoneName)
+		m.SetRcode(r, dns.RcodeServerFailure)
+		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)
+		w.WriteMsg(m)
+		return nil // didn't find any zone for that qname
+	}
+	// And the same expire guard as the query path: a zone we may no longer
+	// answer for is not one we may accept updates to either.
+	if zd.HasExpired() {
+		lgHandler.Error("zone has passed SOA EXPIRE since its last confirmed refresh",
+			"qname", qname, "zone", zd.ZoneName, "lastRefresh", zd.lastRefresh())
+		m.SetRcode(r, dns.RcodeServerFailure)
+		w.WriteMsg(m)
+		return nil
 	}
 
 	// dump.P(zd.Options)
@@ -204,7 +223,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 	lgHandler.Debug("setting update type", "zone", zd.ZoneName, "qname", qname)
 	// 1. Is qname the apex of this zone?
-	if qname == zd.ZoneName {
+	if core.EqualNames(qname, zd.ZoneName) {
 		// Per RFC 2136 the QNAME is the zone being updated. Check whether all RRs in the
 		// update section target a single existing child delegation (at or below the delegation
 		// point). If so, this is a child delegation sync, not a zone update.
@@ -222,7 +241,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 				}
 				if childDel == "" {
 					childDel = ownerName
-				} else if childDel != ownerName {
+				} else if !core.EqualNames(childDel, ownerName) {
 					isChildUpdate = false
 					break
 				}
@@ -233,13 +252,13 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 				labels := dns.SplitDomainName(ownerName)
 				for i := 1; i < len(labels); i++ {
 					ancestor := dns.Fqdn(strings.Join(labels[i:], "."))
-					if ancestor == zd.ZoneName {
+					if core.EqualNames(ancestor, zd.ZoneName) {
 						break
 					}
 					if zd.IsChildDelegation(ancestor) {
 						if childDel == "" {
 							childDel = ancestor
-						} else if childDel != ancestor {
+						} else if !core.EqualNames(childDel, ancestor) {
 							isChildUpdate = false
 							break
 						}
@@ -589,48 +608,41 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 			return false, false, nil
 		}
 
-		if !zd.UpdatePolicy.Child.RRtypes[rrtype] {
+		// The policy itself, shared with ApproveAuthUpdate and with the
+		// DSYNC API handler. Called here rather than after the loop so the
+		// interleaving with the SIG(0) checks above is unchanged: an update
+		// whose first record fails policy and whose second fails validation
+		// still reports the policy failure.
+		if ok, ede := evalUpdatePolicyRR(zd.UpdatePolicy.Child, us.SignerName, rr, "update"); !ok {
 			us.Approved = false
-			us.RejectionEDE = edns0.EDEZoneUpdateRRtypeNotAllowed
-			lgHandler.Warn("update rejected: unapproved RR type", "rrtype", dns.TypeToString[rr.Header().Rrtype])
+			us.RejectionEDE = ede
 			return false, false, nil
-		}
-
-		switch zd.UpdatePolicy.Child.Type {
-		case "selfsub":
-			if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
-				us.Approved = false
-				us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
-				lgHandler.Warn("update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
-				return false, false, nil
-			}
-
-		case "self":
-			if rr.Header().Name != us.SignerName {
-				us.Approved = false
-				us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
-				lgHandler.Warn("update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
-				return false, false, nil
-			}
-		default:
-			us.Approved = false
-			us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
-			lgHandler.Warn("unknown policy type", "policyType", zd.UpdatePolicy.Child.Type)
-			return false, false, nil
-		}
-
-		switch rrclass {
-		case dns.ClassNONE:
-			lgHandler.Debug("remove RR", "rr", rr.String())
-		case dns.ClassANY:
-			lgHandler.Debug("remove RRset", "rr", rr.String())
-		default:
-			lgHandler.Debug("add RR", "rr", rr.String())
 		}
 	}
 	us.Approved = true
 	lgHandler.Info("child update approved")
 	updateZone := !unvalidatedKeyUpload
+
+	// Coherence: the policy above decided whether this child MAY change these
+	// RRtypes. Whether the delegation that results still works is a separate
+	// question, and the parent answers it on every channel -- the DSYNC API
+	// handler applies the same check.
+	//
+	// A refusal here is permanent, so it must not answer SERVFAIL. Returning an
+	// error alone did: applyValidationFailure reads us.ValidationRcode, which
+	// is still NOERROR because the signature validated perfectly well, and its
+	// fail-closed branch substitutes SERVFAIL. A child's rollover engine
+	// categorises that as a transport softfail and retries a hard no for as
+	// long as it is configured to, which is why the rcode is set explicitly
+	// alongside an EDE that names the reason.
+	if cerr := zd.CheckDelegationCoherenceForUpdate(r.Ns,
+		imrDnskeyFetcher(Conf.Internal.ImrEngine)); cerr != nil {
+		lgHandler.Warn("child update refused as incoherent",
+			"zone", zd.ZoneName, "err", cerr)
+		us.ValidationRcode = dns.RcodeRefused
+		us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
+		return false, false, cerr
+	}
 
 	return true, updateZone, nil
 }
@@ -670,50 +682,10 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 
 		lgHandler.Debug("ApproveAuthUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
 
-		if !zd.UpdatePolicy.Zone.RRtypes[rrtype] {
+		if ok, ede := evalUpdatePolicyRR(zd.UpdatePolicy.Zone, us.SignerName, rr, "auth update"); !ok {
 			us.Approved = false
-			us.RejectionEDE = edns0.EDEZoneUpdateRRtypeNotAllowed
-			lgHandler.Warn("auth update rejected: unapproved RR type", "rrtype", dns.TypeToString[rr.Header().Rrtype])
+			us.RejectionEDE = ede
 			return false, false, nil
-		}
-
-		switch zd.UpdatePolicy.Zone.Type {
-		case "selfsub":
-			if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
-				us.Approved = false
-				us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
-				lgHandler.Warn("auth update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
-				return false, false, nil
-			}
-
-		case "self":
-			if rr.Header().Name != us.SignerName {
-				us.Approved = false
-				us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
-				lgHandler.Warn("auth update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
-				return false, false, nil
-			}
-
-		case "none":
-			us.Approved = false
-			us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
-			lgHandler.Warn("auth update rejected: policy type none disallows all updates")
-			return false, false, nil
-
-		default:
-			us.Approved = false
-			us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
-			lgHandler.Warn("unknown policy type", "policyType", zd.UpdatePolicy.Zone.Type)
-			return false, false, nil
-		}
-
-		switch rrclass {
-		case dns.ClassNONE:
-			lgHandler.Debug("remove RR", "rr", rr.String())
-		case dns.ClassANY:
-			lgHandler.Debug("remove RRset", "rr", rr.String())
-		default:
-			lgHandler.Debug("add RR", "rr", rr.String())
 		}
 	}
 	us.Approved = true
@@ -822,14 +794,21 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 
 	switch zd.UpdatePolicy.Child.Type {
 	case "selfsub":
-		if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
+		// AUTHORISATION CHECK -- dns.IsSubDomain, not strings.HasSuffix.
+		// HasSuffix is true for evilchild.example. against child.example.,
+		// because it compares bytes and knows nothing about label boundaries:
+		// a signer authorised for one name could update names under a
+		// DIFFERENT name that merely ends with it. It is also case-sensitive,
+		// which denied legitimate updates. IsSubDomain gets both right, and is
+		// true for the signer name itself, which selfsub has always allowed.
+		if !dns.IsSubDomain(us.SignerName, rr.Header().Name) {
 			us.Approved = false
 			lgHandler.Warn("trust update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
 			return false, false, nil
 		}
 
 	case "self":
-		if rr.Header().Name != us.SignerName {
+		if !core.EqualNames(rr.Header().Name, us.SignerName) {
 			us.Approved = false
 			lgHandler.Warn("trust update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
 			return false, false, nil

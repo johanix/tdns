@@ -1,0 +1,11 @@
+$TTL 120
+b-bind.xot.test.	120	IN	SOA	ns-bind.xot.test. hostmaster.xot.test. (
+				2026082501	; serial
+				3600		; refresh
+				600		; retry
+				604800		; expire
+				120 )		; minimum
+b-bind.xot.test.	120	IN	NS	ns-bind.xot.test.
+b-bind.xot.test.	120	IN	NS	ns-tdnsagent.xot.test.
+www.b-bind.xot.test.	120	IN	A	192.0.2.2
+marker.b-bind.xot.test.	120	IN	TXT	"bind-round-1"

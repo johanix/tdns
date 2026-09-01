@@ -25,7 +25,7 @@ func LargeAlgDSMetrics() uint64 {
 	return n
 }
 
-// buildLargeAlgorithmSet resolves the dnssec.large_algorithms entries into the
+// buildLargeAlgorithmSet resolves the dnssec.large-algorithms entries into the
 // derived codepoint lookup. Each entry is either an exact algorithm name
 // (e.g. "MLDSA44") or a name prefix with a trailing "*" (e.g. "MLDSA*") that
 // matches every known algorithm sharing that prefix — convenient for whole
@@ -34,7 +34,7 @@ func LargeAlgDSMetrics() uint64 {
 // metadata registry (see resolveLargeAlgorithms), so a name the IMR recognizes
 // but cannot itself sign with still counts — an IMR must recognize large
 // algorithms in the DS records of zones it does not host. Unlike
-// split_algorithms (pure allowlist data), this list actively drives the IMR's
+// split-algorithms (pure allowlist data), this list actively drives the IMR's
 // transport decision, so an entry that matches nothing is a hard config error,
 // not a silent skip.
 func buildLargeAlgorithmSet(names []string) (map[uint8]bool, error) {
@@ -42,7 +42,7 @@ func buildLargeAlgorithmSet(names []string) (map[uint8]bool, error) {
 }
 
 // largeAlgorithmCatalog is the name->codepoint universe that
-// dnssec.large_algorithms resolves against: every DNSSEC-capable algorithm the
+// dnssec.large-algorithms resolves against: every DNSSEC-capable algorithm the
 // binary knows of, whether it carries a real implementation or only metadata.
 // Metadata-only entries are intentionally included so a config naming an
 // algorithm (or family) this binary cannot itself sign with is still honored
@@ -59,7 +59,7 @@ func largeAlgorithmCatalog() map[string]uint8 {
 	return cat
 }
 
-// resolveLargeAlgorithms resolves dnssec.large_algorithms entries against the
+// resolveLargeAlgorithms resolves dnssec.large-algorithms entries against the
 // given name->codepoint catalog. An entry ending in "*" is a name prefix
 // (matching every catalog name that starts with the text before the "*"); any
 // other entry is an exact name. Matching is case-insensitive. Every entry must
@@ -86,13 +86,13 @@ func resolveLargeAlgorithms(names []string, catalog map[string]uint8) (map[uint8
 				}
 			}
 			if matched == 0 {
-				return nil, fmt.Errorf("dnssec.large_algorithms: prefix %q matches no known DNSSEC algorithm (check spelling)", raw)
+				return nil, fmt.Errorf("dnssec.large-algorithms: prefix %q matches no known DNSSEC algorithm (check spelling)", raw)
 			}
 			continue
 		}
 		num, ok := catalog[entry]
 		if !ok {
-			return nil, fmt.Errorf("dnssec.large_algorithms: unknown algorithm %q (not in the algorithm metadata registry)", raw)
+			return nil, fmt.Errorf("dnssec.large-algorithms: unknown algorithm %q (not in the algorithm metadata registry)", raw)
 		}
 		m[num] = true
 	}
@@ -110,7 +110,7 @@ const (
 	DNSKEYTransportForceEncrypted DNSKEYTransportPolicy = "force_encrypted"
 )
 
-// parseDNSKEYTransportPolicy validates the configured dnskey_query_transport
+// parseDNSKEYTransportPolicy validates the configured dnskey-query-transport
 // value. An empty value defaults to use_ds_signal (the backward-compatible
 // DS-driven behavior).
 func parseDNSKEYTransportPolicy(s string) (DNSKEYTransportPolicy, error) {
@@ -126,11 +126,11 @@ func parseDNSKEYTransportPolicy(s string) (DNSKEYTransportPolicy, error) {
 	case string(DNSKEYTransportForceEncrypted):
 		return DNSKEYTransportForceEncrypted, nil
 	default:
-		return "", fmt.Errorf("unknown dnssec.dnskey_query_transport %q (valid: force_udp, use_ds_signal, try_encrypted, force_encrypted)", s)
+		return "", fmt.Errorf("unknown dnssec.dnskey-query-transport %q (valid: force_udp, use_ds_signal, try_encrypted, force_encrypted)", s)
 	}
 }
 
-// IsLargeAlgorithm reports whether alg is listed in dnssec.large_algorithms.
+// IsLargeAlgorithm reports whether alg is listed in dnssec.large-algorithms.
 func (conf *Config) IsLargeAlgorithm(alg uint8) bool {
 	if conf == nil || conf.Internal.LargeAlgorithms == nil {
 		return false
@@ -138,7 +138,7 @@ func (conf *Config) IsLargeAlgorithm(alg uint8) bool {
 	return conf.Internal.LargeAlgorithms[alg]
 }
 
-// buildSplitAlgorithmSet converts the dnssec.split_algorithms config
+// buildSplitAlgorithmSet converts the dnssec.split-algorithms config
 // (kskAlgName -> []zskAlgName) into the derived lookup kskAlg -> set of
 // permitted zskAlgs. Unknown algorithm names are skipped with a warning so
 // a typo gates rather than silently permits. Returns nil if no pairs are
@@ -151,7 +151,7 @@ func buildSplitAlgorithmSet(in map[string][]string) map[uint8]map[uint8]bool {
 	for kskName, zskNames := range in {
 		kskAlg := dns.StringToAlgorithm[strings.ToUpper(strings.TrimSpace(kskName))]
 		if kskAlg == 0 {
-			lgConfig.Warn("dnssec.split_algorithms: unknown KSK algorithm, ignored", "algorithm", kskName)
+			lgConfig.Warn("dnssec.split-algorithms: unknown KSK algorithm, ignored", "algorithm", kskName)
 			continue
 		}
 		set := out[kskAlg]
@@ -162,7 +162,7 @@ func buildSplitAlgorithmSet(in map[string][]string) map[uint8]map[uint8]bool {
 		for _, zskName := range zskNames {
 			zskAlg := dns.StringToAlgorithm[strings.ToUpper(strings.TrimSpace(zskName))]
 			if zskAlg == 0 {
-				lgConfig.Warn("dnssec.split_algorithms: unknown ZSK algorithm, ignored", "ksk", kskName, "zsk", zskName)
+				lgConfig.Warn("dnssec.split-algorithms: unknown ZSK algorithm, ignored", "ksk", kskName, "zsk", zskName)
 				continue
 			}
 			set[zskAlg] = true
@@ -201,7 +201,7 @@ func validateSplitAlgorithm(policyName string, kskAlg, zskAlg uint8, allowed map
 	if allowed[kskAlg][zskAlg] {
 		return nil
 	}
-	return fmt.Errorf("policy %q: KSK algorithm %s may not pair with ZSK algorithm %s; not listed in dnssec.split_algorithms", policyName, kskName, zskName)
+	return fmt.Errorf("policy %q: KSK algorithm %s may not pair with ZSK algorithm %s; not listed in dnssec.split-algorithms", policyName, kskName, zskName)
 }
 
 // validateRoleCapabilities rejects a policy that assigns an algorithm to

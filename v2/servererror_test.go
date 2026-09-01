@@ -110,17 +110,17 @@ func TestServerErrors_ValidateDnsEngineCerts(t *testing.T) {
 	conf.Internal.ServerErrors = NewServerErrorRegistry()
 
 	// No encrypted transports: no cert error even with empty cert paths.
-	conf.DnsEngine.Transports = []string{"do53"}
-	conf.validateDnsEngineCerts()
+	conf.Listeners.Transports = []string{"do53"}
+	conf.validateListenerCerts()
 	if conf.Internal.ServerErrors.HasAny() {
 		t.Fatal("do53-only must not produce a CertMissing error")
 	}
 
 	// Encrypted transport + missing files: Config/CertMissing set.
-	conf.DnsEngine.Transports = []string{"do53", "dot"}
-	conf.DnsEngine.CertFile = "/nonexistent/x.crt"
-	conf.DnsEngine.KeyFile = "/nonexistent/x.key"
-	conf.validateDnsEngineCerts()
+	conf.Listeners.Transports = []string{"do53", "dot"}
+	conf.Listeners.CertFile = "/nonexistent/x.crt"
+	conf.Listeners.KeyFile = "/nonexistent/x.key"
+	conf.validateListenerCerts()
 	list := conf.Internal.ServerErrors.List()
 	if len(list) != 1 || list[0].Category != ErrCatConfig || list[0].Subtype != ErrSubCertMissing {
 		t.Fatalf("expected Config/CertMissing, got %v", list)
@@ -129,9 +129,9 @@ func TestServerErrors_ValidateDnsEngineCerts(t *testing.T) {
 	// Files now present + clear-then-reassert on the next validate: cleared.
 	crt, _ := os.CreateTemp(t.TempDir(), "x*.crt")
 	key, _ := os.CreateTemp(t.TempDir(), "x*.key")
-	conf.DnsEngine.CertFile = crt.Name()
-	conf.DnsEngine.KeyFile = key.Name()
-	conf.validateDnsEngineCerts()
+	conf.Listeners.CertFile = crt.Name()
+	conf.Listeners.KeyFile = key.Name()
+	conf.validateListenerCerts()
 	if conf.Internal.ServerErrors.HasAny() {
 		t.Fatalf("CertMissing must clear once files exist: %v", conf.Internal.ServerErrors.List())
 	}

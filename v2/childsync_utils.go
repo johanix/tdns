@@ -7,13 +7,11 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
-	"strings"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // This is only called from the CLI command "tdns-cli ddns sync" and uses a SIG(0) key from the
@@ -37,15 +35,63 @@ type TargetUpdateStatus struct {
 	EDEMessage string
 }
 
-// Note: the target.Addresses must already be in addr:port format.
-// func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error) {
-// func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, UpdateResult) {
+// exchangeCancellable performs a DNS exchange that a cancelled context actually
+// interrupts.
+//
+// client.ExchangeContext is not enough on its own, which is easy to miss: it
+// passes the context to the dial and then uses only ctx.Deadline() to tighten
+// the socket deadlines. It never watches ctx.Done(). A context that is
+// cancellable but carries no deadline -- which is what a shutdown context is --
+// therefore leaves a read in progress running to the client's own timeout,
+// 2 seconds by default in this fork. Cancelling looked like it worked because
+// the call did return; it returned on the timeout.
+//
+// Closing the connection is what actually stops it. The watcher goroutine exits
+// on either branch, so nothing is left behind when the exchange completes
+// normally, and the read error that a close produces is turned into the
+// abandoned error by the ctx.Err() check at the call site.
+func exchangeCancellable(ctx context.Context, client *dns.Client, msg *dns.Msg, dst string) (*dns.Msg, time.Duration, error) {
+	conn, err := client.DialContext(ctx, dst)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer conn.Close()
+
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-ctx.Done():
+			// Unblocks a read that has already begun; the exchange returns an
+			// error on a closed connection, which the caller reads as abandoned.
+			conn.Close()
+		case <-finished:
+		}
+	}()
+
+	return client.ExchangeWithConnContext(ctx, msg, conn)
+}
+
+// SendUpdate sends a DNS UPDATE to the first address that answers.
+// Note: the addrs must already be in addr:port format.
+//
+// ctx bounds the whole attempt, not just the dial. The exchange goes through
+// exchangeCancellable, which is what makes that true: ExchangeContext alone
+// would not, since it never watches ctx.Done() and a cancellable-but-deadlineless
+// context would leave a read running to the client's own timeout. A cancelled
+// root context therefore abandons a request already on the wire, rather than
+// the sync plan being able to stop between candidates but not during one --
+// which is the half of a shutdown that actually takes time.
+//
+// A cancel is reported as such, wrapping context.Canceled, and never as a
+// transport failure. The difference matters to walkSyncPlan: a failed transport
+// means try the next one, an abandoned one means stop and say so.
 //
 // Return contract: the error reports a TRANSPORT-level failure — no address
 // produced a DNS response at all (i/o timeout, no route to host, connection
-// refused). A response carrying a rejection RCODE is a successful exchange, so
-// it is reported through the returned rcode with a NIL error; the caller decides
-// what the rejection means.
+// refused) — or an abandoned exchange. A response carrying a rejection RCODE is
+// a successful exchange, so it is reported through the returned rcode with a NIL
+// error; the caller decides what the rejection means.
 //
 // This matters because the whole delegation-sync RCODE policy of
 // draft-ietf-dnsop-delegation-mgmt-via-ddns-02 (BADKEY -> re-bootstrap, REFUSED
@@ -55,17 +101,10 @@ type TargetUpdateStatus struct {
 // unreachable: every BADKEY and REFUSED arrived as a transport error carrying
 // rcode 0. ksk_rollover_ds_push.go already documented this contract and
 // mis-categorised every parent rejection as SoftfailTransport because of it.
-// SendUpdate sends without a deadline of its own. Callers that have a context
-// -- anything on a path that must stop when the process does -- should use
-// SendUpdateContext instead.
-func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
-	return SendUpdateContext(context.Background(), msg, zonename, addrs)
-}
-
-// SendUpdateContext is SendUpdate bound to a context: the exchange with each
-// address is abandoned when ctx is done, so a shutdown does not have to wait
-// for a parent that has stopped answering.
-func SendUpdateContext(ctx context.Context, msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
+//
+// Every caller must therefore check the rcode as well as the error; a nil error
+// alone does NOT mean the parent applied the update.
+func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
 	if zonename == "." {
 		lgDns.Error("SendUpdate: zone name not specified")
 		return 0, UpdateResult{}, fmt.Errorf("zone name not specified")
@@ -111,8 +150,27 @@ func SendUpdateContext(ctx context.Context, msg *dns.Msg, zonename string, addrs
 
 		lgDns.Debug("sending update message", "msg", msg.String())
 
-		res, _, err := client.ExchangeContext(ctx, msg, dst)
+		if cerr := ctx.Err(); cerr != nil {
+			return 0, UpdateResult{}, fmt.Errorf("UPDATE to %s abandoned: %w", zonename, cerr)
+		}
+		res, _, err := exchangeCancellable(ctx, client, msg, dst)
 		if err != nil {
+			// A cancel DURING the exchange arrives here as an ordinary error,
+			// and must not be filed as one. Falling through would record a
+			// fabricated per-target failure and, with a single address -- the
+			// usual DSYNC target -- end the loop and return "all target
+			// addresses responded with errors or were unreachable". walkSyncPlan
+			// then reports that every available scheme failed, which is exactly
+			// the diagnosis the plan's own comments say a shutdown must not
+			// produce: the remaining transports were never tried, they were
+			// abandoned.
+			//
+			// The pre-loop check above only catches a cancel BETWEEN addresses.
+			// This is the one the exchange was made context-aware for.
+			if cerr := ctx.Err(); cerr != nil {
+				return 0, ur, fmt.Errorf("UPDATE to %s abandoned mid-exchange with %s: %w",
+					zonename, dst, cerr)
+			}
 			lgDns.Warn("error from dns.Exchange, trying next address", "dst", dst, "err", err)
 			ur.TargetStatus[dst] = TargetUpdateStatus{
 				Error:      true,
@@ -193,7 +251,12 @@ func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, 
 	// XXX: This logic is ok, but it should be in the caller, not here.
 	for _, nsr := range removes {
 		if ns, ok := nsr.(*dns.NS); ok { // if removing an NS, then also remove any glue
-			if strings.HasSuffix(ns.Ns, child) {
+			// In-bailiwick means inside the child zone as a DNS NAME. A byte
+			// suffix calls ns1.evilchild.example. in-bailiwick for
+			// child.example., so glue for an unrelated delegation was deleted
+			// alongside this one -- and it missed in-bailiwick glue whose case
+			// differed from the child name's.
+			if dns.IsSubDomain(child, ns.Ns) {
 				rrA := new(dns.A)
 				rrA.Hdr = dns.RR_Header{Name: ns.Ns, Rrtype: dns.TypeA, Class: dns.ClassANY, Ttl: 3600}
 				rrAAAA := new(dns.AAAA)
@@ -214,7 +277,31 @@ func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, 
 // It removes all existing NS records for the child and deletes A/AAAA glue for any in-bailiwick nameservers
 // discovered among the provided new NS, A, and AAAA records, then inserts the new NS and glue RRs.
 // Returns an error if parent or child is empty or equal to ".".
+// CreateChildReplaceUpdate builds a replace-mode update that says nothing about
+// DS unless newDS is non-empty.
+//
+// That rule is right for callers whose newDS is only populated in some cases:
+// an empty slice there means "this caller has no DS opinion", and deleting the
+// parent's DS RRset on the strength of it would remove a DS on the basis of a
+// field nobody filled in. Callers that can tell the difference should use
+// CreateChildReplaceUpdateWithDS and say so explicitly.
 func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS []dns.RR) (*dns.Msg, error) {
+	return CreateChildReplaceUpdateWithDS(parent, child, newNS, newA, newAAAA, newDS, len(newDS) > 0)
+}
+
+// CreateChildReplaceUpdateWithDS is CreateChildReplaceUpdate with the DS
+// question answered explicitly.
+//
+// dsKnown says whether newDS is an answer. When it is, an empty newDS deletes
+// the parent's DS RRset and adds nothing back -- the correct outcome for a zone
+// that is no longer signed, where leaving the DS makes every validating
+// resolver declare the whole child bogus. When it is not, the DS RRset is left
+// untouched no matter what newDS holds.
+//
+// The distinction cannot be recovered from the slice. An empty DS set is the
+// same nil either way, and which of the two it means depends on who filled it
+// in, so the answer is a parameter rather than an inference.
+func CreateChildReplaceUpdateWithDS(parent, child string, newNS, newA, newAAAA, newDS []dns.RR, dsKnown bool) (*dns.Msg, error) {
 	if parent == "." || parent == "" {
 		return nil, fmt.Errorf("parent zone name not specified. Terminating")
 	}
@@ -235,19 +322,19 @@ func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS 
 	nsNames := make(map[string]bool)
 	for _, nsrr := range newNS {
 		if ns, ok := nsrr.(*dns.NS); ok {
-			if strings.HasSuffix(ns.Ns, child) {
+			if dns.IsSubDomain(child, ns.Ns) {
 				nsNames[ns.Ns] = true
 			}
 		}
 	}
 	// Also check for any glue records being added (they might be for NS not yet in newNS)
 	for _, arr := range newA {
-		if strings.HasSuffix(arr.Header().Name, child) {
+		if dns.IsSubDomain(child, arr.Header().Name) {
 			nsNames[arr.Header().Name] = true
 		}
 	}
 	for _, aaaarr := range newAAAA {
-		if strings.HasSuffix(aaaarr.Header().Name, child) {
+		if dns.IsSubDomain(child, aaaarr.Header().Name) {
 			nsNames[aaaarr.Header().Name] = true
 		}
 	}
@@ -261,8 +348,11 @@ func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS 
 		m.RemoveRRset([]dns.RR{rrA, rrAAAA})
 	}
 
-	// Remove all existing DS records for the child zone (if we have new DS)
-	if len(newDS) > 0 {
+	// Remove all existing DS records for the child zone, but only when the
+	// caller has actually answered the DS question. See the doc comments above:
+	// an empty newDS from a caller that cannot tell "unsigned" from "no
+	// opinion" must not delete anything.
+	if dsKnown {
 		rrDS := new(dns.DS)
 		rrDS.Hdr = dns.RR_Header{Name: child, Rrtype: dns.TypeDS, Class: dns.ClassANY, Ttl: 3600}
 		m.RemoveRRset([]dns.RR{rrDS})
@@ -275,8 +365,13 @@ func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS 
 	m.Insert(newA)
 	m.Insert(newAAAA)
 
-	// Add all new DS records
-	m.Insert(newDS)
+	// Add all new DS records -- under the same gate as the removal above. A
+	// caller with no DS opinion must produce a message that says nothing about
+	// DS at all; inserting while declining to remove would leave the parent
+	// holding both the old records and the new ones.
+	if dsKnown {
+		m.Insert(newDS)
+	}
 
 	m.SetEdns0(1232, true) // Enable EDNS0 for EDE support in responses
 
@@ -384,7 +479,16 @@ func BailiwickNS(zonename string, nsrrs []dns.RR) ([]string, error) {
 	var ns_inbailiwick []string
 	for _, rr := range nsrrs {
 		if ns, ok := rr.(*dns.NS); ok {
-			if strings.HasSuffix(ns.Ns, zonename) {
+			// Compared on LABEL boundaries: a bare strings.HasSuffix accepts
+			// "ns.notexample.com." as in-bailiwick for "example.com.", because
+			// the suffix matches across a label boundary. That name is in a
+			// different zone entirely, so treating it as in-bailiwick means
+			// looking for glue where none can exist.
+			//
+			// dns.IsSubDomain compares whole labels, and is case-insensitive as
+			// DNS requires -- the old comparison also missed "NS.EXAMPLE.COM."
+			// for the same zone.
+			if dns.IsSubDomain(dns.Fqdn(zonename), dns.Fqdn(ns.Ns)) {
 				ns_inbailiwick = append(ns_inbailiwick, ns.Ns)
 			}
 		}
@@ -409,14 +513,14 @@ func xxxComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]
 
 	for _, rr := range oldnsrrset {
 		if ns, ok := rr.(*dns.NS); ok {
-			if strings.HasSuffix(ns.Ns, owner) {
+			if dns.IsSubDomain(owner, ns.Ns) {
 				old_ns_inb = append(old_ns_inb, ns.Ns)
 			}
 		}
 	}
 	for _, rr := range newnsrrset {
 		if ns, ok := rr.(*dns.NS); ok {
-			if strings.HasSuffix(ns.Ns, owner) {
+			if dns.IsSubDomain(owner, ns.Ns) {
 				new_ns_inb = append(new_ns_inb, ns.Ns)
 			}
 		}
@@ -425,94 +529,3 @@ func xxxComputeBailiwickNS_NG(newnsrrset, oldnsrrset []dns.RR, owner string) ([]
 	return new_ns_inb, old_ns_inb
 }
 */
-
-// Find the best scheme (from the POV of the child) to sync the deletation with the parent
-func (zd *ZoneData) BestSyncScheme(ctx context.Context, imr *Imr) (string, *DsyncTarget, error) {
-	var active_drr *core.DSYNC
-	var active_scheme string
-	var dsynctarget DsyncTarget
-
-	lgDns.Info("BestSyncScheme", "zone", zd.ZoneName)
-
-	// dsync_rrs, parent, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
-	dsync_res, err := imr.DsyncDiscovery(ctx, zd.ZoneName, Globals.Verbose)
-	if err != nil {
-		lgDns.Error("BestSyncScheme: error from DsyncDiscovery", "zone", zd.ZoneName, "err", err)
-		return "", nil, err
-	}
-	if len(dsync_res.Rdata) == 0 {
-		lgDns.Warn("BestSyncScheme: no DSYNC RRs found, synching not possible", "zone", zd.ZoneName, "parent", dsync_res.Parent)
-		return "", nil, fmt.Errorf("no DSYNC RRs for %s found in parent %s", zd.ZoneName, dsync_res.Parent)
-	}
-	schemes := viper.GetStringSlice("delegationsync.child.schemes")
-	if len(schemes) == 0 {
-		lgDns.Error("BestSyncScheme: no synchronization schemes configured", "zone", zd.ZoneName)
-		return "", nil, fmt.Errorf("no synchronizations schemes configured for child %s", zd.ZoneName)
-	}
-
-schemeLoop:
-	for _, scheme := range schemes {
-		scheme = strings.ToLower(scheme)
-
-		switch scheme {
-		case "update":
-			lgDns.Debug("BestSyncScheme: checking UPDATE alternative")
-			for _, drr := range dsync_res.Rdata {
-				if drr.Scheme == core.SchemeUpdate {
-					active_drr = drr
-					break
-				}
-			}
-			if active_drr != nil {
-				lgDns.Debug("BestSyncScheme: found working UPDATE config")
-				active_scheme = "UPDATE"
-				break schemeLoop
-			}
-
-		case "notify":
-			lgDns.Debug("BestSyncScheme: checking NOTIFY alternative")
-			for _, drr := range dsync_res.Rdata {
-				if drr.Scheme == core.SchemeNotify && (drr.Type == dns.TypeCSYNC || drr.Type == dns.TypeANY) {
-					active_drr = drr
-					break
-				}
-			}
-			if active_drr != nil {
-				active_scheme = "NOTIFY"
-				break schemeLoop
-			}
-
-		default:
-			lgDns.Error("BestSyncScheme: unknown child scheme", "zone", zd.ZoneName, "scheme", scheme)
-			return "", nil, fmt.Errorf("zone %s: error: unknown child scheme: %s", zd.ZoneName, scheme)
-		}
-	}
-
-	if active_drr == nil {
-		lgDns.Error("BestSyncScheme: no working DSYNC scheme alternative found", "zone", zd.ZoneName)
-		return "", nil, fmt.Errorf("zone %s: error: no working DSYNC scheme alternative found", zd.ZoneName)
-	}
-
-	lgDns.Debug("BestSyncScheme: DSYNC alternatives", "zone", zd.ZoneName, "parent", dsync_res.Parent)
-	for _, drr := range dsync_res.Rdata {
-		lgDns.Debug("BestSyncScheme: DSYNC RR", "qname", dsync_res.Qname, "rdata", drr.String())
-	}
-
-	tmp, err := net.LookupHost(active_drr.Target)
-	if err != nil {
-		return "", nil, fmt.Errorf("error: %v", err)
-	}
-	for _, addr := range tmp {
-		dsynctarget.Addresses = append(dsynctarget.Addresses, net.JoinHostPort(addr, fmt.Sprintf("%d", active_drr.Port)))
-	}
-
-	if Globals.Verbose {
-		fmt.Printf("%s has the IP addresses: %v\n", active_drr.Target, dsynctarget.Addresses)
-	}
-	dsynctarget.Port = active_drr.Port
-	dsynctarget.Name = active_drr.Target
-	dsynctarget.RR = active_drr
-
-	lgDns.Debug("BestSyncScheme: best DSYNC alternative", "rdata", active_drr.String())
-	return active_scheme, &dsynctarget, nil
-}

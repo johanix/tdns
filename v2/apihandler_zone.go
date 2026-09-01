@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -108,6 +109,58 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = err.Error()
 			}
 
+		// The read half of "update" for ordinary names in the zone, as
+		// get-delegation below is for a delegated child: a client that
+		// provisions records here has to be able to tell "already correct"
+		// from "not there yet". Without it, it either republishes on every
+		// pass -- which on a signed zone re-signs and bumps the serial forever
+		// -- or keeps a private copy of what it believes it wrote, which
+		// drifts the moment anyone edits the zone by hand.
+		//
+		// Not in originationAPICommands: it changes nothing, and a secondary
+		// being asked what it holds at a name is a fair question.
+		case "get-name":
+			nr, err := zd.ApiZoneGetName(zp)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Name = nr
+				resp.Msg = fmt.Sprintf("%s: %d RRset(s) at %s",
+					zd.ZoneName, len(nr.RRsets), nr.Name)
+			}
+
+		// The read half of "update" for a delegated child. Without it a client
+		// can write a delegation and then has no way to confirm what the
+		// server actually holds except by querying the public DNS -- a
+		// different channel, with different authentication and caching, and
+		// blind to anything accepted but not yet published.
+		//
+		// That matters most for a client that keeps delegation data in its own
+		// store and has to reconcile it against the server. Read-after-write
+		// over ONE authenticated channel is what makes such a reconciliation
+		// trustworthy; inferring server state from the public view is not the
+		// same thing.
+		case "get-delegation":
+			dd, err := zd.ApiZoneGetDelegation(zp)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			} else {
+				resp.Delegation = dd
+				// The two response shapes count different things: a listing
+				// counts child zones, a per-child report counts the owner
+				// names its records sit at. One message for both named a
+				// child that is not there and called children owner names.
+				if dd.Child == "" {
+					resp.Msg = fmt.Sprintf("%s: %d child zone(s) with delegation data",
+						zd.ZoneName, len(dd.RRsets))
+				} else {
+					resp.Msg = fmt.Sprintf("%s: %d owner name(s) of delegation data for %s",
+						zd.ZoneName, len(dd.RRsets), dd.Child)
+				}
+			}
+
 		// The delta journal's operator surface. Not in
 		// originationAPICommands: none of these change zone content, they
 		// change what is stored about it, and a secondary that somehow
@@ -170,6 +223,21 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			}
+
+		case "zonemd":
+			// status and verify are one command with a subcommand, not two
+			// commands, because they answer the same question -- the only
+			// difference is whether the server pays to recompute the digest.
+			verify := zp.SubCommand == "verify"
+			st, err := zd.ZonemdStatusReport(verify, VerifyZonemdOpts{
+				IgnoreSerial: zp.IgnoreSerial,
+			})
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				break
+			}
+			resp.Zonemd = st
 
 		case "show-nsec-chain":
 			resp.Names, err = zd.ShowNsecChain()
@@ -411,7 +479,12 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 		// confMu (read lock).
 		confMu.RLock()
 		for i := range Conf.Zones {
-			if dns.Fqdn(Conf.Zones[i].Name) == zname {
+			// ZoneConf.Name keeps the case the operator wrote in the config;
+			// zname is the folded registry key. Comparing them as bytes stopped
+			// working the moment zd.ZoneName started being folded (#417), so a
+			// zone declared Example.COM. could no longer find its own config
+			// entry and lost its policy name here.
+			if core.EqualNames(dns.Fqdn(Conf.Zones[i].Name), zname) {
 				configPolicy = Conf.Zones[i].DnssecPolicy
 				break
 			}
@@ -768,7 +841,11 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	var configName string
 	confMu.RLock()
 	for i := range Conf.Zones {
-		if dns.Fqdn(Conf.Zones[i].Name) == zd.ZoneName {
+		// Same pair as in the list-zones handler above: config-case name
+		// against the folded zone name. A miss here is not cosmetic -- it is
+		// the difference between resetting to the configured policy and
+		// refusing because the zone appears to have none.
+		if core.EqualNames(dns.Fqdn(Conf.Zones[i].Name), zd.ZoneName) {
 			configName = strings.TrimSpace(Conf.Zones[i].DnssecPolicy)
 			break
 		}

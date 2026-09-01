@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -56,7 +57,14 @@ func bootstrapCeremony(ns []dns.RR) (addKey *dns.KEY, hasDelAnyKey bool, ok bool
 	if addKey == nil {
 		return nil, false, false // must add exactly one KEY
 	}
-	if hasDelAnyKey && !strings.EqualFold(delName, addKey.Header().Name) {
+	// core.EqualNames, not strings.EqualFold. This comparison is what confines
+	// the DEL half to the name the ADD half is uploading a key for, and a DEL
+	// that clears the wrong owner's KEY RRset is exactly what the deferred-delete
+	// rule exists to prevent. strings.EqualFold applies Unicode simple
+	// case-folding, so it calls "K.example." (U+212A KELVIN SIGN) the same name
+	// as "k.example."; RFC 4343 folds US-ASCII A-Z only. See core.EqualNames and
+	// tdns#415.
+	if hasDelAnyKey && !core.EqualNames(delName, addKey.Header().Name) {
 		return nil, false, false // the DEL must target the same owner as the ADD
 	}
 	return addKey, hasDelAnyKey, true

@@ -227,9 +227,9 @@ defaulted validity.
 
 **Config-load check** — uses *policy-derived* TTLs:
  - `dnskey` → `configuredServedDnskeyTTL` (`ksk_rollover_validation.go:192`,
-   = min(`ttls.dnskey`, `ttls.max_served`)).
+   = min(`ttls.dnskey`, `ttls.max-served`)).
  - `ds` → `ttls.ds` (the new fallback child-DS TTL).
- - `default` → `ttls.max_served`.
+ - `default` → `ttls.max-served`.
  - **Skip rule (critical, avoids the silent trap):** if a value's
    governing TTL is *unset* (0 / no ceiling), **skip that value's
    config-time band check** — do **not** treat `servedTTL = 0` as a real

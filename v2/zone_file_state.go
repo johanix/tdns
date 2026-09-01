@@ -38,6 +38,7 @@ type ZoneFileIdentity struct {
 	Digest    string // lowercase hex
 	Scheme    uint8
 	Algorithm uint8
+	Variant   int
 	UpdatedAt string
 }
 
@@ -45,6 +46,24 @@ type ZoneFileIdentity struct {
 // SHA-384 is ZONEMD's mandatory-to-implement algorithm and the one every
 // published ZONEMD in the wild uses.
 const zoneFileStateAlg = ZonemdAlgSHA384
+
+// zoneFileDigestVariant identifies the computation that produced a stored
+// digest. It is private to tdns and unrelated to the RFC 8976 registries.
+//
+// Bump it whenever a change to ZoneDigest changes the value it returns for
+// unchanged content. Every row carrying an older variant then reads as
+// ZoneFileUnknown and re-baselines on the next write, instead of every signed
+// zone in a fleet reporting its file as edited on the first restart after an
+// upgrade -- which is the failure this whole detector exists to avoid, arrived
+// at from the other direction.
+//
+//	0  the original digest, which broke the tie between two RRsets sharing an
+//	   owner and a type on the whole wire record and therefore on the TTL. In a
+//	   signed zone that misorders the RRSIG over the NSEC (TTL from the SOA
+//	   minimum) against the RRSIGs over everything else.
+//	1  ties broken on canonical RDATA, per RFC 4034 §6.3. Verified against
+//	   dnspython's independent implementation.
+const zoneFileDigestVariant = 1
 
 // SetZoneFileState records what the zone file now holds.
 func (kdb *KeyDB) SetZoneFileState(zone string, serial uint32, digest string) error {
@@ -57,9 +76,9 @@ func (kdb *KeyDB) SetZoneFileState(zone string, serial uint32, digest string) er
 	defer kdb.mu.Unlock()
 
 	_, err := kdb.DB.Exec(`
-INSERT OR REPLACE INTO ZoneFileState (zone, serial, digest, scheme, algorithm, updated_at)
-VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-		zone, serial, digest, ZonemdSchemeSimple, zoneFileStateAlg)
+INSERT OR REPLACE INTO ZoneFileState (zone, serial, digest, scheme, algorithm, digest_variant, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		zone, serial, digest, ZonemdSchemeSimple, zoneFileStateAlg, zoneFileDigestVariant)
 	if err != nil {
 		return fmt.Errorf("SetZoneFileState: zone %s: %v", zone, err)
 	}
@@ -85,8 +104,8 @@ func (kdb *KeyDB) GetZoneFileState(zone string) (*ZoneFileIdentity, bool, error)
 	var id ZoneFileIdentity
 	id.Zone = zone
 	err := kdb.DB.QueryRow(
-		`SELECT serial, digest, scheme, algorithm, updated_at FROM ZoneFileState WHERE zone=?`,
-		zone).Scan(&id.Serial, &id.Digest, &id.Scheme, &id.Algorithm, &id.UpdatedAt)
+		`SELECT serial, digest, scheme, algorithm, digest_variant, updated_at FROM ZoneFileState WHERE zone=?`,
+		zone).Scan(&id.Serial, &id.Digest, &id.Scheme, &id.Algorithm, &id.Variant, &id.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, false, nil
 	}
@@ -165,7 +184,19 @@ func (zd *ZoneData) ZoneDigestOfPublished() (string, error) {
 	if zd == nil {
 		return "", fmt.Errorf("no zone")
 	}
-	rrs := zoneRRsFromSnapshot(zd.publishedSnapshot())
+	snap := zd.publishedSnapshot()
+	if snap == nil {
+		return "", fmt.Errorf("zone %s: nothing published to digest", zd.ZoneName)
+	}
+	// A zone that publishes a ZONEMD has already computed this exact value for
+	// this exact serial. ZoneDigest excludes the apex ZONEMD and the RRSIG
+	// covering it, so the published digest and the file-identity digest are one
+	// computation over one set of records -- recomputing would return the
+	// identical string at the cost of digesting the whole zone again.
+	if d, ok := zd.cachedZonemdDigest(snap.Serial, ZonemdSchemeSimple, zoneFileStateAlg); ok {
+		return d, nil
+	}
+	rrs := zoneRRsFromSnapshot(snap)
 	if len(rrs) == 0 {
 		return "", fmt.Errorf("zone %s: nothing published to digest", zd.ZoneName)
 	}
@@ -236,6 +267,18 @@ func (kdb *KeyDB) CompareZoneFileDigest(zone, digest string) (ZoneFileVerdict, *
 	}
 	if !have {
 		return ZoneFileUnknown, nil, nil
+	}
+	if prev.Variant != zoneFileDigestVariant {
+		// Written by a version of tdns whose digest computation differs from
+		// this one. The two values are not comparable, and reporting a
+		// difference between them as "the file changed" would be a false
+		// accusation against every zone at once. Re-baselines on the next
+		// write.
+		lg.Info("the recorded zone-file digest was produced by a different"+
+			" computation and cannot be compared; re-establishing the baseline",
+			"zone", zone, "recorded_variant", prev.Variant,
+			"current_variant", zoneFileDigestVariant)
+		return ZoneFileUnknown, prev, nil
 	}
 	if digest == "" {
 		// Nothing to compare against on our side either -- a zone that reached

@@ -3,6 +3,8 @@ package tdns
 import (
 	"strings"
 	"sync"
+
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // Per-zone mutex registry that serializes the rollover tick against API
@@ -39,7 +41,11 @@ var (
 // the same mutex. Today every caller passes dns.Fqdn(...) output and
 // hits the same form, but defense in depth is cheap.
 func AcquireRolloverLock(zone string) *sync.Mutex {
-	key := strings.ToLower(strings.TrimSpace(zone))
+	// A lock key derived from a zone name. strings.ToLower folds by Unicode, so
+	// two distinct zones differing only by U+212A would have shared one
+	// rollover lock -- and a lock shared when it should not be is the direction
+	// that lets two rollovers run as one.
+	key := core.CanonicalizeName(strings.TrimSpace(zone))
 	key = strings.TrimSuffix(key, ".")
 	rolloverLocksMu.Lock()
 	defer rolloverLocksMu.Unlock()

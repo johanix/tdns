@@ -10,6 +10,7 @@ import (
 	"net"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,9 +47,15 @@ func (s SensitiveString) String() string {
 }
 
 type Config struct {
-	Service      ServiceConf
-	DnsEngine    DnsEngineConf
-	Imr          ImrEngineConf `yaml:"imrengine" mapstructure:"imrengine"`
+	Service ServiceConf
+	// Listeners is the shared listening configuration (addresses, ports,
+	// certs) for whatever DNS services this app serves — one schema for
+	// every app, passed into the shared transport engines as a struct
+	// (#446). AuthEngine carries the authoritative-serving BEHAVIOR that
+	// used to share the old dnsengine: block with the listener keys.
+	Listeners    ListenersConf  `yaml:"listeners" mapstructure:"listeners"`
+	AuthEngine   AuthEngineConf `yaml:"authengine" mapstructure:"authengine"`
+	Imr          ImrEngineConf  `yaml:"imrengine" mapstructure:"imrengine"`
 	ApiServer    ApiServerConf
 	MultiSigner  map[string]MultiSignerConf `yaml:"multisigner"`
 	Catalog      *CatalogConf               `yaml:"catalog" mapstructure:"catalog"`
@@ -59,6 +66,11 @@ type Config struct {
 	// server, referenced from upstreams:/notify:/downstreams:/allow-notify:
 	// as `- peers: [ id, ... ]` entries (docs/2026-07-21-peers-xfr-auth-design.md).
 	Peers map[string]PeerDef `yaml:"peers" mapstructure:"peers"`
+	// DelegationSync is the delegationsync: block. Partial by design — see
+	// the type comment in config_delegationsync.go. No validate tags and not
+	// registered in ValidateConfig's configsections, so a config without the
+	// block is exactly as valid as it was before this field existed.
+	DelegationSync DelegationSyncConf `yaml:"delegationsync" mapstructure:"delegationsync"`
 	// Journal is the journal: block -- deployment-wide settings for the delta
 	// journal (Phase 2 persistence).
 	Journal    JournalConf  `yaml:"journal" mapstructure:"journal"`
@@ -85,7 +97,7 @@ type DnssecConf struct {
 	//                       to TCP, never UDP.
 	//   "force_encrypted" - bypass for all DNSKEY; encrypted only, fail the
 	//                       query if the server advertises no encrypted transport.
-	DNSKEYTransport string `yaml:"dnskey_query_transport" mapstructure:"dnskey_query_transport"`
+	DNSKEYTransport string `yaml:"dnskey-query-transport" mapstructure:"dnskey-query-transport"`
 
 	// LargeAlgorithms lists the DNSSEC algorithms whose DNSKEY/RRSIG sizes are
 	// large for UDP. The IMR may query child DNSKEY over TCP when a parent DS
@@ -98,14 +110,14 @@ type DnssecConf struct {
 	// case-insensitive and resolves against the algorithm metadata registry, so
 	// a name or family this binary recognizes but cannot itself sign with still
 	// counts; an entry that matches no known algorithm is a hard config error.
-	LargeAlgorithms []string `yaml:"large_algorithms" mapstructure:"large_algorithms"`
+	LargeAlgorithms []string `yaml:"large-algorithms" mapstructure:"large-algorithms"`
 
 	// SplitAlgorithms gates which KSK/ZSK algorithm pairs a policy may use.
 	// Keyed by KSK algorithm name; the value lists ZSK algorithm names that
 	// algorithm's KSK is permitted to pair with. A policy whose KSK and ZSK
 	// algorithms differ is rejected at parse time unless the pair appears
 	// here. Same-algorithm policies are always allowed and need no entry.
-	SplitAlgorithms map[string][]string `yaml:"split_algorithms" mapstructure:"split_algorithms"`
+	SplitAlgorithms map[string][]string `yaml:"split-algorithms" mapstructure:"split-algorithms"`
 
 	// Templates are named, partial DNSSEC policies. A policy may set
 	// `template: <name>` to inherit (deep-merge) the gaps in its own definition
@@ -149,32 +161,32 @@ const (
 //
 //	dnssec:
 //	    kasp:
-//	        propagation_delay: 1h
-//	        standby_zsk_count: 1
-//	        standby_ksk_count: 0
-//	        check_interval: 1m
+//	        propagation-delay: 1h
+//	        standby-zsk-count: 1
+//	        standby-ksk-count: 0
+//	        check-interval: 1m
 type KaspConf struct {
 	// PropagationDelay is how long to wait for DNSKEY RRsets to propagate
 	// through all caches before allowing state transitions.
 	// Used for published→standby and retired→removed transitions.
 	// Accepts Go duration strings: "1h", "3600s", "90m".
 	// Default: "1h".
-	PropagationDelay string `yaml:"propagation_delay" mapstructure:"propagation_delay"`
+	PropagationDelay string `yaml:"propagation-delay" mapstructure:"propagation-delay"`
 
 	// StandbyZskCount is the number of standby ZSKs to maintain per zone.
 	// When the count drops below this, the KeyStateWorker generates new ZSKs.
 	// Default: 1. A value of 0 (or omitted) means use the default.
-	StandbyZskCount int `yaml:"standby_zsk_count" mapstructure:"standby_zsk_count"`
+	StandbyZskCount int `yaml:"standby-zsk-count" mapstructure:"standby-zsk-count"`
 
 	// StandbyKskCount is the number of standby KSKs to maintain per zone.
 	// When the count drops below this, the KeyStateWorker generates new KSKs.
 	// Default: 0 (no standby KSKs). Set to 1+ to enable standby KSK maintenance.
-	StandbyKskCount int `yaml:"standby_ksk_count" mapstructure:"standby_ksk_count"`
+	StandbyKskCount int `yaml:"standby-ksk-count" mapstructure:"standby-ksk-count"`
 
 	// CheckInterval is how often the KeyStateWorker runs its checks.
 	// Accepts Go duration strings: "1m", "60s", "5m".
 	// Default: "1m".
-	CheckInterval string `yaml:"check_interval" mapstructure:"check_interval"`
+	CheckInterval string `yaml:"check-interval" mapstructure:"check-interval"`
 }
 
 type AppDetails struct {
@@ -205,18 +217,64 @@ type TransportConf struct {
 	Signal string `yaml:"signal"`
 }
 
-type DnsEngineConf struct {
-	Addresses   []string              `yaml:"addresses" validate:"required"`
-	CertFile    string                `yaml:"certfile,omitempty"`
-	KeyFile     string                `yaml:"keyfile,omitempty"`
-	Transports  []string              `yaml:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"` // "do53", "dot", "doh", "doq"
-	OptionsStrs []string              `yaml:"options" mapstructure:"options"`
-	Options     map[AuthOption]string `yaml:"-" mapstructure:"-"`
+// ListenersConf is the listening side of an app's DNS service: addresses,
+// per-transport ports, and the server certificate. ONE schema for every app
+// (tdns-auth, tdns-agent, tdns-imr, ...) — each app has its own config file,
+// so the block needs no per-app name — passed into the shared transport
+// engines as a struct, never read back out of viper (#444/#446).
+type ListenersConf struct {
+	Addresses []string `yaml:"addresses" mapstructure:"addresses" validate:"required"`
+	CertFile  string   `yaml:"certfile,omitempty" mapstructure:"certfile"`
+	KeyFile   string   `yaml:"keyfile,omitempty" mapstructure:"keyfile"`
+	// Transports the LISTENERS offer (unrelated to what outbound queries
+	// use). do53 rides the addresses above; dot/doh/doq additionally need
+	// certfile+keyfile and take their ports from ports: below.
+	Transports []string          `yaml:"transports" mapstructure:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"`
+	Ports      ListenerPortsConf `yaml:"ports" mapstructure:"ports"`
 	// NOTE: there is deliberately NO listener-level client-cert policy here.
 	// Transfer authentication is per-zone (downstream-auth: + peers
 	// tls-identity, enforced at transfer time); dropping non-TLS traffic is
 	// transports:. The auth DoT listener always REQUESTS (never requires) a
 	// client certificate. See docs/2026-07-21-peers-xfr-auth-design.md D6.
+
+	// ImrDebugAddress opens a loopback-only DNS window straight into the
+	// EMBEDDED resolver of an app whose imr is otherwise internal
+	// (tdns-auth, tdns-agent): `dog @<addr> name type +norec` peeks at the
+	// cache without triggering outbound queries, ANY+norec enumerates an
+	// owner's cached RRsets, and RD=1 drives the internal resolver by
+	// hand. MUST be loopback (127/8 or ::1) — anything else is a hard
+	// config error, because the failure mode is an open resolver hiding
+	// inside an auth server. Ignored by tdns-imr, whose resolver listens
+	// on the addresses above.
+	ImrDebugAddress string `yaml:"imr-debug-address,omitempty" mapstructure:"imr-debug-address"`
+}
+
+// ListenerPortsConf is the per-encrypted-transport port lists. Real,
+// validated struct fields: the old dnsengine.ports.* was a phantom key the
+// structs never knew, read straight out of viper by whatever engine started
+// — including tdns-imr's (#444).
+type ListenerPortsConf struct {
+	DoT []uint16 `yaml:"dot" mapstructure:"dot"`
+	DoH []uint16 `yaml:"doh" mapstructure:"doh"`
+	DoQ []uint16 `yaml:"doq" mapstructure:"doq"`
+}
+
+// Strings renders a port list for the transport engines (net.JoinHostPort
+// wants strings; the config wants ports to BE numbers).
+func portStrings(ports []uint16) []string {
+	out := make([]string, 0, len(ports))
+	for _, p := range ports {
+		out = append(out, strconv.Itoa(int(p)))
+	}
+	return out
+}
+
+// AuthEngineConf is the authoritative-serving BEHAVIOR of tdns-auth and
+// tdns-agent — what used to share the old dnsengine: block with the listener
+// keys that now live in listeners: (#446).
+type AuthEngineConf struct {
+	OptionsStrs []string              `yaml:"options" mapstructure:"options"`
+	Options     map[AuthOption]string `yaml:"-" mapstructure:"-"`
 	// OutboundSoaSerial controls the SOA serial advertised on outbound zone
 	// transfers and NOTIFYs. One of:
 	//   keep     — outbound = inbound serial (default; current behavior).
@@ -226,7 +284,7 @@ type DnsEngineConf struct {
 	//              new value back. On clean restart with no zone change,
 	//              the serial stays put — secondaries don't see a regression
 	//              and don't trigger an unnecessary AXFR.
-	OutboundSoaSerial string `yaml:"outbound_soa_serial,omitempty" mapstructure:"outbound_soa_serial" validate:"omitempty,oneof=keep unixtime persist"`
+	OutboundSoaSerial string `yaml:"outbound-soa-serial,omitempty" mapstructure:"outbound-soa-serial" validate:"omitempty,oneof=keep unixtime persist"`
 
 	// TransferSrc is the server-global source address for OUTBOUND zone
 	// transfers -- the local address we bind before dialling an upstream, i.e.
@@ -243,7 +301,7 @@ type DnsEngineConf struct {
 	// upstream is used, and an upstream with no matching entry is dialled
 	// unbound rather than failed. Per-zone ZoneConf.TransferSrc overrides this;
 	// empty there inherits.
-	TransferSrc []string `yaml:"transfer_src,omitempty" mapstructure:"transfer_src"`
+	TransferSrc []string `yaml:"transfer-src,omitempty" mapstructure:"transfer-src"`
 }
 
 // ValidateTransferSrc checks a transfer-src list. Every entry must be a bare IP
@@ -270,7 +328,7 @@ type DnsEngineConf struct {
 // ZoneConf, and ExpandTemplate gap-fills its transfer-src onto every primary
 // expanded from it, so a bad value there reaches real zones.
 func ValidateAllTransferSrc(conf *Config) error {
-	if err := ValidateTransferSrc("dnsengine.transfer_src", conf.DnsEngine.TransferSrc); err != nil {
+	if err := ValidateTransferSrc("authengine.transfer-src", conf.AuthEngine.TransferSrc); err != nil {
 		return err
 	}
 	for _, z := range conf.Zones {
@@ -308,22 +366,31 @@ func ValidateTransferSrc(where string, srcs []string) error {
 	return nil
 }
 
+// ImrEngineConf is RESOLVER behavior only. The listener keys (addresses,
+// transports, certfile/keyfile) moved to the shared listeners: block (#446):
+// tdns-imr's service listens there, and an embedded imr (tdns-auth,
+// tdns-agent) is internal by design — its only listener is the loopback
+// listeners.imr-debug-address window.
 type ImrEngineConf struct {
 	Active      *bool                `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
 	RootHints   string               `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
-	Addresses   []string             `yaml:"addresses" mapstructure:"addresses" validate:"required"`
-	CertFile    string               `yaml:"certfile" mapstructure:"certfile"`
-	KeyFile     string               `yaml:"keyfile" mapstructure:"keyfile"`
-	Transports  []string             `yaml:"transports" mapstructure:"transports" validate:"required"` // "do53", "dot", "doh", "doq"
 	Stubs       []ImrStubConf        `yaml:"stubs"`
+	Forward     []ImrForwardConf     `yaml:"forward" mapstructure:"forward"`
 	OptionsStrs []string             `yaml:"options" mapstructure:"options"`
 	Options     map[ImrOption]string `yaml:"-" mapstructure:"-"`
 	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
 	// full RR text (zonefile format). DS is preferred as it is more convenient.
-	TrustAnchorDS     string `yaml:"trust_anchor_ds"`
-	TrustAnchorDNSKEY string `yaml:"trust_anchor_dnskey"`
+	// Both tags are load bearing, because Config is decoded by two different
+	// tag conventions: the daemon's decodeConfigMap sets TagName "yaml"
+	// (parseconfig.go), while viper.Unmarshal -- used by config check and the
+	// CLI roots -- keys off mapstructure and falls back to the field name.
+	// With a yaml tag only, as these three had, the daemon read the key and
+	// config check did not: checkImrTrustAnchors saw "" and reported "no
+	// trust anchor configured" for a resolver that in fact had one.
+	TrustAnchorDS     string `yaml:"trust-anchor-ds" mapstructure:"trust-anchor-ds"`
+	TrustAnchorDNSKEY string `yaml:"trust-anchor-dnskey" mapstructure:"trust-anchor-dnskey"`
 	// Unbound-style file with one RR per line (DNSKEY and/or DS). Absolute path.
-	TrustAnchorFile string `yaml:"trust-anchor-file"`
+	TrustAnchorFile string `yaml:"trust-anchor-file" mapstructure:"trust-anchor-file"`
 	Verbose         bool
 	Debug           bool
 	Logging         ImrLoggingConf `yaml:"logging" mapstructure:"logging"`
@@ -331,7 +398,7 @@ type ImrEngineConf struct {
 	// records must have a secure DNSSEC validation state. Set to false to allow
 	// indeterminate/insecure records during lab/development when the full DNSSEC
 	// chain is not yet established.
-	RequireDnssecValidation *bool `yaml:"require_dnssec_validation" mapstructure:"require_dnssec_validation"`
+	RequireDnssecValidation *bool `yaml:"require-dnssec-validation" mapstructure:"require-dnssec-validation"`
 	// Tuning holds runtime-tunable behaviour knobs (backoff, RTT,
 	// address-family tracking, discovery state, etc.). All fields
 	// are optional in YAML; LoadImrTuningDefaults fills zero values.
@@ -344,45 +411,45 @@ type ImrEngineConf struct {
 // callers can just embed an empty ImrTuningConf and have it work.
 type ImrTuningConf struct {
 	Backoff       BackoffConf       `yaml:"backoff" mapstructure:"backoff"`
-	AddressFamily AddressFamilyConf `yaml:"address_family" mapstructure:"address_family"`
+	AddressFamily AddressFamilyConf `yaml:"address-family" mapstructure:"address-family"`
 	Discovery     DiscoveryConf     `yaml:"discovery" mapstructure:"discovery"`
-	QueryBudget   time.Duration     `yaml:"query_budget" mapstructure:"query_budget"`
+	QueryBudget   time.Duration     `yaml:"query-budget" mapstructure:"query-budget"`
 	// UpgradeIndirectCacheHits controls whether cache hits with an
 	// indirect context (Glue, Referral, Hint) trigger a fresh query
 	// to "upgrade" the data quality. nil = legacy behaviour (true).
 	// tdns-mp overrides this to false in its default config to cut
 	// gossip-driven query volume.
-	UpgradeIndirectCacheHits *bool `yaml:"upgrade_indirect_cache_hits" mapstructure:"upgrade_indirect_cache_hits"`
+	UpgradeIndirectCacheHits *bool `yaml:"upgrade-indirect-cache-hits" mapstructure:"upgrade-indirect-cache-hits"`
 }
 
 // BackoffConf tunes per-(address, transport) backoff behaviour
 // after a failed query. Replaces the hardcoded 2 min / 1 h constants
 // that lived in cache/authserver.go.
 type BackoffConf struct {
-	FirstFailure   time.Duration `yaml:"first_failure" mapstructure:"first_failure"`
-	MaxFailure     time.Duration `yaml:"max_failure" mapstructure:"max_failure"`
+	FirstFailure   time.Duration `yaml:"first-failure" mapstructure:"first-failure"`
+	MaxFailure     time.Duration `yaml:"max-failure" mapstructure:"max-failure"`
 	Multiplier     float64       `yaml:"multiplier" mapstructure:"multiplier"`
-	JitterFraction float64       `yaml:"jitter_fraction" mapstructure:"jitter_fraction"`
-	RoutingFailure time.Duration `yaml:"routing_failure" mapstructure:"routing_failure"`
-	LameDelegation time.Duration `yaml:"lame_delegation" mapstructure:"lame_delegation"`
+	JitterFraction float64       `yaml:"jitter-fraction" mapstructure:"jitter-fraction"`
+	RoutingFailure time.Duration `yaml:"routing-failure" mapstructure:"routing-failure"`
+	LameDelegation time.Duration `yaml:"lame-delegation" mapstructure:"lame-delegation"`
 }
 
 // AddressFamilyConf tunes per-process IPv4/IPv6 reachability
 // tracking (deprioritise a family after N distinct failures in a
 // sliding window, probe periodically to detect recovery).
 type AddressFamilyConf struct {
-	WindowDuration   time.Duration `yaml:"window_duration" mapstructure:"window_duration"`
-	FailureThreshold int           `yaml:"failure_threshold" mapstructure:"failure_threshold"`
-	SuspectDuration  time.Duration `yaml:"suspect_duration" mapstructure:"suspect_duration"`
-	ProbeInterval    time.Duration `yaml:"probe_interval" mapstructure:"probe_interval"`
+	WindowDuration   time.Duration `yaml:"window-duration" mapstructure:"window-duration"`
+	FailureThreshold int           `yaml:"failure-threshold" mapstructure:"failure-threshold"`
+	SuspectDuration  time.Duration `yaml:"suspect-duration" mapstructure:"suspect-duration"`
+	ProbeInterval    time.Duration `yaml:"probe-interval" mapstructure:"probe-interval"`
 }
 
 // DiscoveryConf tunes the discovery state machine used for
 // transport-signal (SVCB / TSYNC) and TLSA lookups, replacing
 // the fire-and-forget goroutine pattern.
 type DiscoveryConf struct {
-	RetryAfterFailure time.Duration `yaml:"retry_after_failure" mapstructure:"retry_after_failure"`
-	MaxFailures       int           `yaml:"max_failures" mapstructure:"max_failures"`
+	RetryAfterFailure time.Duration `yaml:"retry-after-failure" mapstructure:"retry-after-failure"`
+	MaxFailures       int           `yaml:"max-failures" mapstructure:"max-failures"`
 }
 
 // LoadImrTuningDefaults fills missing or invalid fields with sensible
@@ -461,6 +528,51 @@ type ImrStubConf struct {
 // 	Addrs []string `validate:"required"`
 // 	Alpn  []string `validate:"required"`
 // }
+
+// ImrForwardConf declares a forward zone: queries for names at or below Zone
+// are sent as recursive queries (RD=1) to the configured upstream resolvers
+// instead of being resolved iteratively. "zone: ." forwards everything.
+// A configured stub zone that is more specific than the matching forward
+// zone takes precedence for names under it.
+type ImrForwardConf struct {
+	Zone string `yaml:"zone" mapstructure:"zone" validate:"required"`
+	// TrustAD: accept the upstream's AD bit instead of validating the
+	// answer locally. For a trusted, validating upstream — and because a
+	// spoofed AD bit would be cached as Secure, it REQUIRES every upstream
+	// of the zone to be encrypted and verified (dot/doh/doq without
+	// insecure); the daemon refuses to start otherwise.
+	TrustAD   bool              `yaml:"trust-ad" mapstructure:"trust-ad"`
+	Upstreams []ImrUpstreamConf `yaml:"upstreams" mapstructure:"upstreams" validate:"required"`
+}
+
+// ImrUpstreamConf is one upstream resolver of a forward zone. Addr is a bare
+// IP literal; Port defaults to the transport's standard port (53/853/443);
+// Transport is one of do53 (UDP with TCP fallback), tcp, dot, doh, doq and
+// defaults to do53.
+type ImrUpstreamConf struct {
+	Addr      string `yaml:"addr" mapstructure:"addr" validate:"required"`
+	Port      uint16 `yaml:"port" mapstructure:"port"`
+	Transport string `yaml:"transport" mapstructure:"transport"`
+	// TLSServerName is the name the upstream's certificate is verified
+	// against (and sent as SNI). Only meaningful for dot/doh/doq; when
+	// empty the certificate must carry the Addr IP in a SAN.
+	TLSServerName string `yaml:"tls-server-name" mapstructure:"tls-server-name"`
+	// Insecure disables certificate verification for this upstream
+	// (lab setups with self-signed certificates). Only meaningful for
+	// dot/doh/doq.
+	Insecure bool `yaml:"insecure" mapstructure:"insecure"`
+	// CAFile is the trust anchor this upstream's certificate is verified
+	// against, replacing the host's system trust store for this upstream
+	// only. Only meaningful for dot/doh/doq.
+	//
+	// Unset is not "no verification" -- it leaves tls.Config.RootCAs nil,
+	// which is the system store. That remains the right answer when the
+	// upstream has a publicly-issued certificate; ca-file is for the case
+	// the system store cannot cover, a private CA, without making the whole
+	// machine trust it. Same spelling as PeerConf.CAFile, deliberately:
+	// this is the same question asked of a different kind of peer.
+	CAFile string `yaml:"ca-file" mapstructure:"ca-file"`
+}
 
 type ApiServerConf struct {
 	Addresses []string        `validate:"required"` // Must be in addr:port format
@@ -578,11 +690,11 @@ func (k KeystorePreloadConf) Dirs() map[string]string {
 
 // CatalogConf defines configuration for catalog zone support (RFC 9432)
 type CatalogConf struct {
-	GroupPrefixes GroupPrefixesConf             `yaml:"group_prefixes" mapstructure:"group_prefixes"`
+	GroupPrefixes GroupPrefixesConf             `yaml:"group-prefixes" mapstructure:"group-prefixes"`
 	Policy        CatalogPolicy                 `yaml:"policy" mapstructure:"policy"` // Deprecated, kept for backward compatibility
-	ConfigGroups  map[string]*ConfigGroupConfig `yaml:"config_groups" mapstructure:"config_groups"`
-	MetaGroups    map[string]*ConfigGroupConfig `yaml:"meta_groups" mapstructure:"meta_groups"` // Deprecated, kept for backward compatibility
-	SigningGroups map[string]*SigningGroupInfo  `yaml:"signing_groups" mapstructure:"signing_groups"`
+	ConfigGroups  map[string]*ConfigGroupConfig `yaml:"config-groups" mapstructure:"config-groups"`
+	MetaGroups    map[string]*ConfigGroupConfig `yaml:"meta-groups" mapstructure:"meta-groups"` // Deprecated, kept for backward compatibility
+	SigningGroups map[string]*SigningGroupInfo  `yaml:"signing-groups" mapstructure:"signing-groups"`
 }
 
 // CatalogPolicy defines policy for how catalog zones are processed
@@ -604,7 +716,7 @@ type GroupPrefixesConf struct {
 type ConfigGroupConfig struct {
 	Name     string   `yaml:"-" mapstructure:"-"` // Populated from map key
 	Upstream string   `yaml:"upstream" mapstructure:"upstream"`
-	TsigKey  string   `yaml:"tsig_key" mapstructure:"tsig_key"`
+	TsigKey  string   `yaml:"tsig-key" mapstructure:"tsig-key"`
 	Store    string   `yaml:"store" mapstructure:"store"`
 	Options  []string `yaml:"options" mapstructure:"options"`
 }
@@ -621,8 +733,8 @@ type SigningGroupInfo struct {
 type DynamicZonesConf struct {
 	ConfigFile     string                   `yaml:"configfile" mapstructure:"configfile"`           // Absolute path to dynamic config file
 	ZoneDirectory  string                   `yaml:"zonedirectory" mapstructure:"zonedirectory"`     // Absolute path to zone file directory
-	CatalogZones   DynamicZoneTypeConf      `yaml:"catalog_zones" mapstructure:"catalog_zones"`     // Configuration for catalog zones
-	CatalogMembers DynamicCatalogMemberConf `yaml:"catalog_members" mapstructure:"catalog_members"` // Configuration for catalog member zones
+	CatalogZones   DynamicZoneTypeConf      `yaml:"catalog-zones" mapstructure:"catalog-zones"`     // Configuration for catalog zones
+	CatalogMembers DynamicCatalogMemberConf `yaml:"catalog-members" mapstructure:"catalog-members"` // Configuration for catalog member zones
 	Dynamic        DynamicApiZoneConf       `yaml:"dynamic" mapstructure:"dynamic"`                 // Configuration for direct API-created zones
 }
 
@@ -716,8 +828,12 @@ type InternalDnsConf struct {
 	ResignQ             chan *ZoneData     // the names of zones that should be kept re-signed should be sent into this channel
 	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 	ImrEngine           *Imr
-	Scanner             *Scanner      // Scanner instance for async job tracking
-	TsigKeyStore        *TsigKeyStore // name->secret store for replication TSIG (Improvement 2)
+	// ImrReady is closed once ImrEngine has been stored, giving other engines
+	// a synchronised way to learn it is usable. Read ImrEngine only after
+	// receiving from it -- see ImrReadiness.
+	ImrReady     *ImrReadiness
+	Scanner      *Scanner      // Scanner instance for async job tracking
+	TsigKeyStore *TsigKeyStore // name->secret store for replication TSIG (Improvement 2)
 }
 
 // InternalConf holds DNS-internal state (channels, engine references).
@@ -788,22 +904,22 @@ type InternalConf struct {
 // extraction.
 const defaultKaspPropagationDelay = time.Hour
 
-// validateKaspPropagationDelay rejects invalid kasp.propagation_delay at config load.
+// validateKaspPropagationDelay rejects invalid kasp.propagation-delay at config load.
 func validateKaspPropagationDelay(s string) error {
 	if s == "" {
 		return nil
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		return fmt.Errorf("kasp.propagation_delay: invalid duration %q: %w", s, err)
+		return fmt.Errorf("kasp.propagation-delay: invalid duration %q: %w", s, err)
 	}
 	if d <= 0 {
-		return fmt.Errorf("kasp.propagation_delay: must be positive, got %s", d)
+		return fmt.Errorf("kasp.propagation-delay: must be positive, got %s", d)
 	}
 	return nil
 }
 
-// KaspPropagationDelay returns the configured kasp.propagation_delay, or 1h.
+// KaspPropagationDelay returns the configured kasp.propagation-delay, or 1h.
 func (conf *Config) KaspPropagationDelay() time.Duration {
 	if conf == nil || conf.Dnssec.Kasp.PropagationDelay == "" {
 		return defaultKaspPropagationDelay
@@ -811,10 +927,10 @@ func (conf *Config) KaspPropagationDelay() time.Duration {
 	d, err := time.ParseDuration(conf.Dnssec.Kasp.PropagationDelay)
 	if err != nil || d <= 0 {
 		if err != nil {
-			lgConfig.Warn("invalid kasp.propagation_delay, using default",
+			lgConfig.Warn("invalid kasp.propagation-delay, using default",
 				"value", conf.Dnssec.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay, "err", err)
 		} else {
-			lgConfig.Warn("kasp.propagation_delay must be positive, using default",
+			lgConfig.Warn("kasp.propagation-delay must be positive, using default",
 				"value", conf.Dnssec.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay)
 		}
 		return defaultKaspPropagationDelay
@@ -845,6 +961,12 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	if gerr := conf.checkReloadPolicyGuardrail(confirm); gerr != nil {
 		return "", gerr
 	}
+	// The stub and forward zones as the resolver is actually running them,
+	// captured before ParseConfig overwrites them. An unknown key is only a
+	// WARNING there, so a misspelled `forward:` decodes to nothing; when the
+	// apply below then refuses the new block and keeps the running table,
+	// conf.Imr would otherwise go on describing zones that were rejected.
+	runningStubs, runningForward := conf.Imr.Stubs, conf.Imr.Forward
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
@@ -862,15 +984,29 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	}
 	// Publish the new runtime-config snapshot on a successful reload (still under
 	// confMu); on a parse error keep the last-good snapshot.
+	msg := "Config reloaded."
 	if err == nil {
 		// The IMR is a process singleton that snapshots the DNSSEC knobs at
 		// init; hand it the re-derived values or it serves the stale ones
 		// until restart.
 		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
+		// Same reasoning for the resolver's stub and forward zones (#436). A
+		// rejected forward table is reported but does NOT fail the reload:
+		// everything else has already been applied, and ReloadZones leaves the
+		// running table untouched, so saying so is more useful than pretending
+		// the whole reload failed.
+		if res, ierr := conf.applyImrEngineReload(); ierr != nil {
+			lgConfig.Error("imrengine reload failed; keeping the running stub and forward zones", "err", ierr)
+			// Keep conf.Imr describing what is running, not what was refused.
+			conf.Imr.Stubs, conf.Imr.Forward = runningStubs, runningForward
+			msg += fmt.Sprintf(" IMR zones NOT reloaded: %v", ierr)
+		} else if summary := res.Summary(); summary != "" {
+			msg += " " + summary
+		}
 		conf.publishRuntimeConfig()
 	}
 	Globals.App.ServerConfigTime = time.Now()
-	return "Config reloaded.", err
+	return msg, err
 }
 
 // ReloadTsigConfig re-reads keys.tsig from the config file and reconciles the DB
@@ -938,6 +1074,19 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
 	}
 
+	// Re-read the resolver's stub and forward zones and hand them to the running
+	// IMR. Here rather than only in the full-config reload because this is the
+	// SIGHUP path: a stub or forward edit used to need a restart, which for a
+	// resolver means discarding the entire cache (#436). A decode error or a
+	// rejected forward table leaves the running zone routing exactly as it is.
+	imrReloadMsg := ""
+	if res, ierr := conf.applyImrEngineReload(); ierr != nil {
+		lgConfig.Error("ReloadZoneConfig: imrengine reload failed, keeping the running stub and forward zones", "err", ierr)
+		imrReloadMsg = fmt.Sprintf(" IMR zones NOT reloaded: %v", ierr)
+	} else if summary := res.Summary(); summary != "" {
+		imrReloadMsg = " " + summary
+	}
+
 	// Re-read the zones: block from the config file(s) so an added/removed zone or
 	// an edited zone→policy mapping (or primaries/ACLs/options/zonefile) is picked
 	// up by this reload, not only policy-definition edits. Previously ParseZones
@@ -1002,5 +1151,5 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 		hook()
 	}
 
-	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v", prezones, zonelist), err
+	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s", prezones, zonelist, imrReloadMsg), err
 }

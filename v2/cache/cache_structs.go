@@ -46,12 +46,32 @@ type CachedRRset struct {
 }
 
 type RRsetCacheT struct {
-	RRsets        *core.ConcurrentMap[string, CachedRRset]
-	Servers       *core.ConcurrentMap[string, []string]
-	ServerMap     *core.ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
-	AuthServerMap *core.ConcurrentMap[string, *AuthServer]            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
-	ZoneMap       *core.ConcurrentMap[string, *Zone]                  // map[zone]*Zone
-	ServerTLSA    *core.ConcurrentMap[string, *ServerTLSARecords]     // nsname -> validated TLSA cache, decoupled from AuthServer instances
+	// RRsets is keyed by "<name>::<qtype>", so it stays a plain map; the name
+	// half is folded where the key is built (Get/Set/Has/Remove below).
+	// The rest are keyed by a bare DNS name and so are NameMaps, which fold for
+	// themselves -- a resolver takes these names off the wire, where 0x20
+	// randomisation means the same name arrives spelled differently every time.
+	RRsets  *core.ConcurrentMap[string, CachedRRset]
+	Servers *core.NameMap[[]string]
+	// ServerMap is map[zone]map[nsname]*AuthServer.
+	//
+	// INVARIANT: the inner map stored under a zone is IMMUTABLE once
+	// published. Changing a zone's servers means building a new map (or
+	// copying the stored one) and Set-ing it — never writing into the map a
+	// Get handed back. AddStub and AddServers are the two writers, and both
+	// do exactly that.
+	//
+	// The invariant exists because IterativeDNSQuery writes into the server
+	// map it is given (adding servers resolved from glue, pruning expired
+	// ones). So a map that reaches a query MUST be a copy: use
+	// ServerMapCopy, or FindClosestKnownZone, both of which copy for this
+	// reason. A bare ServerMap.Get is for read-only inspection that stays
+	// local (a status dump, a membership test) and must not escape into a
+	// query — that asymmetry between the accessors, undocumented, is #345.
+	ServerMap     *core.NameMap[map[string]*AuthServer]
+	AuthServerMap *core.NameMap[*AuthServer]        // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
+	ZoneMap       *core.NameMap[*Zone]              // map[zone]*Zone
+	ServerTLSA    *core.NameMap[*ServerTLSARecords] // nsname -> validated TLSA cache, decoupled from AuthServer instances
 	DnskeyCache   *DnskeyCacheT
 	DNSClient     map[core.Transport]core.DNSClienter
 	//Options                map[ImrOption]string

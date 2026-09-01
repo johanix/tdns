@@ -21,13 +21,13 @@ func TestEffectiveServedDnskeyTTLPolicyOnly(t *testing.T) {
 		wantOK  bool
 	}{
 		{
-			name:    "DNSKEY set, max_served unset -> use DNSKEY",
+			name:    "DNSKEY set, max-served unset -> use DNSKEY",
 			dnskey:  300,
 			wantTTL: 300 * time.Second,
 			wantOK:  true,
 		},
 		{
-			name:    "max_served set, DNSKEY unset -> use max_served",
+			name:    "max-served set, DNSKEY unset -> use max-served",
 			maxSrv:  600,
 			wantTTL: 600 * time.Second,
 			wantOK:  true,
@@ -40,7 +40,7 @@ func TestEffectiveServedDnskeyTTLPolicyOnly(t *testing.T) {
 			wantOK:  true,
 		},
 		{
-			name:    "both set, max_served smaller -> min wins (max_served)",
+			name:    "both set, max-served smaller -> min wins (max-served)",
 			dnskey:  900,
 			maxSrv:  600,
 			wantTTL: 600 * time.Second,

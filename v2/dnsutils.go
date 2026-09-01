@@ -55,43 +55,123 @@ func clarifyXfrError(zone, upstream string, err error) error {
 	return err
 }
 
-// ZoneTransferIn pulls the zone from the upstream primary described by up:
-// AXFR/IXFR over Do53, or over TLS (XoT, RFC 9103) when up.Transport is dot.
-// TSIG (up.Key) and TLS are independent layers and may be combined.
-func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, conf *Config) (uint32, error) {
+// drainTransferEnvelopes consumes the AXFR/IXFR envelope stream, feeding each
+// RR to the zone's sort function, and stops early if ctx is cancelled.
+//
+// Extracted from ZoneTransferIn so the cancellation behaviour is reachable from
+// a test: driving it through ZoneTransferIn means dialling a real upstream, and
+// a test that cannot reach the loop cannot prove anything about it.
+//
+// On cancellation it does NOT simply walk away. abort() closes the transfer
+// connection, then the remaining envelopes are drained until the library's
+// reader closes the channel. That sequence is required, not tidiness:
+// dns.Transfer.inAxfr sends on an UNBUFFERED channel, so a receiver that stops
+// receiving parks it forever on its next send, its deferred t.Close()/close(c)
+// never run, and the goroutine AND socket are retained for the life of the
+// process. Closing the connection makes the reader's next ReadMsg fail, which
+// puts it one send away from returning.
+//
+// (dns.Transfer.In has no context-aware variant and adding one to the
+// johanix/dns fork was rejected -- every fork line is re-applied on every
+// upstream sync -- which is why cancellation is handled here rather than in the
+// library.)
+func (zd *ZoneData) drainTransferEnvelopes(ctx context.Context, answerChan <-chan *dns.Envelope,
+	upstream string, firstSoaSeen bool, abort func()) (int, error) {
+
+	count := 0
+	for {
+		select {
+		case <-ctx.Done():
+			// Abandoning the stream here is NOT enough, and getting this wrong
+			// is worse than not cancelling at all. dns.Transfer's reader
+			// goroutine sends on an UNBUFFERED channel (xfr.go inAxfr:
+			// `c <- &Envelope{...}`), so if we simply stop receiving it parks
+			// forever on its next send. Its deferred t.Close()/close(c) never
+			// run, and the goroutine AND its socket leak for the life of the
+			// process -- once per cancelled transfer.
+			//
+			// So: close the connection first, which makes the reader's next
+			// ReadMsg fail immediately, then keep receiving until it has sent
+			// that final error envelope and closed the channel. Bounded, because
+			// after the close the reader is at most one send from returning.
+			if abort != nil {
+				abort()
+			}
+			drained := drainRemainder(answerChan, transferDrainGrace)
+			if !drained {
+				// Should not happen: the reader is one send from exiting once
+				// the connection is closed. Say so rather than leak silently.
+				lg.Warn("ZoneTransferIn: transfer reader did not exit after cancellation; goroutine may be retained",
+					"zone", zd.ZoneName, "upstream", upstream, "grace", transferDrainGrace)
+			}
+			return count, fmt.Errorf("ZoneTransferIn %s from %s: %w", zd.ZoneName, upstream, ctx.Err())
+
+		case envelope, ok := <-answerChan:
+			if !ok {
+				return count, nil // channel closed: the transfer finished normally
+			}
+			if envelope.Error != nil {
+				zd.Logger.Printf("ZoneTransfer: zone %s error: %v", zd.ZoneName, envelope.Error)
+				return count, clarifyXfrError(zd.ZoneName, upstream, envelope.Error)
+			}
+			for _, rr := range envelope.RR {
+				count++
+				firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
+			}
+		}
+	}
+}
+
+// transferDrainGrace bounds how long a cancelled transfer waits for the
+// library's reader goroutine to notice the closed connection and exit. It is
+// short on purpose: the reader is at most one channel send away from returning
+// once the socket is closed, so anything longer would be waiting on a bug.
+const transferDrainGrace = 5 * time.Second
+
+// drainRemainder consumes and discards whatever the reader still sends, until
+// it closes the channel or the grace period expires. Reports whether the
+// channel actually closed (i.e. the reader goroutine finished).
+func drainRemainder(ch <-chan *dns.Envelope, grace time.Duration) bool {
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return true
+			}
+			// discard; we are on the way out
+		case <-timer.C:
+			return false
+		}
+	}
+}
+
+// openTransferStream performs the setup every inbound transfer needs -- XoT TLS
+// config, TSIG signing, the bound source address -- and starts the stream.
+//
+// Extracted so the AXFR and IXFR paths cannot drift apart on any of it. All
+// three are invisible from the outside until something refuses us, and then the
+// only evidence is in the far end's log.
+//
+// ctx bounds the transfer. An AXFR of a large zone is the longest-running
+// network operation in the daemon, so a shutdown landing mid-stream should stop
+// it rather than let it run to completion against an engine that is going away.
+func (zd *ZoneData) openTransferStream(ctx context.Context, up PeerConf, msg *dns.Msg, conf *Config) (<-chan *dns.Envelope, *dns.Transfer, error) {
 	upstream := up.Addr
-	if upstream == "" {
-		Fatal("ZoneTransfer: upstream not set")
-	}
-
-	msg := new(dns.Msg)
-	if ttype == "ixfr" {
-		// NB: SetIxfr("", "") packs ZERO bytes for the empty MNAME/RNAME
-		// (malformed SOA rdata → the primary FORMERRs the request). Root
-		// names pack correctly; the primary only reads the serial anyway.
-		msg.SetIxfr(zd.ZoneName, serial, ".", ".")
-	} else {
-		msg.SetAxfr(zd.ZoneName)
-	}
-
-	if zd.ZoneStore == MapZone {
-		zd.Data = core.NewCmap[OwnerData]()
-	}
-	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore], "transport", transportLabel(up))
-
 	transfer := new(dns.Transfer)
 	// XoT: a DoT peer gets a verifying TLS config (pin/dane/pkix) and the
 	// fork's Transfer.In dials tcp-tls with it. nil => plain TCP (Do53).
 	tlsCfg, terr := conf.ClientTLSConfigForPeer(up)
 	if terr != nil {
-		return 0, fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)
+		return nil, nil, fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)
 	}
 	transfer.TLS = tlsCfg
 	// Sign the AXFR/IXFR request under this upstream's key (NOKEY => unsigned).
 	// The provider also verifies the TSIG on the inbound envelopes.
 	provider, serr := SignForPeer(msg, up.Key, conf)
 	if serr != nil {
-		return 0, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
+		return nil, nil, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
 	}
 	transfer.TsigProvider = provider
 
@@ -109,9 +189,9 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 	// evidence is in the far end's log -- which is where an afternoon goes.
 	src, tier := zd.EffectiveTransferSrcWithSource()
 	if len(src) > 0 {
-		conn, derr := dialTransferConn(upstream, tlsCfg, src, transfer.DialTimeout)
+		conn, derr := dialTransferConn(ctx, upstream, tlsCfg, src, transfer.DialTimeout)
 		if derr != nil {
-			return 0, fmt.Errorf("ZoneTransferIn %s: dial %s: %w", zd.ZoneName, upstream, derr)
+			return nil, nil, fmt.Errorf("ZoneTransferIn %s: dial %s: %w", zd.ZoneName, upstream, derr)
 		}
 		// nil means no configured source matched this upstream's family; leave
 		// Conn unset so In() dials normally rather than relying on a typed-nil
@@ -132,26 +212,74 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		zd.Logger.Printf("Error from transfer.In: %v\n", err)
-		return 0, clarifyXfrError(zd.ZoneName, upstream, err)
+		return nil, nil, clarifyXfrError(zd.ZoneName, upstream, err)
+	}
+	return answerChan, transfer, nil
+}
+
+// ZoneTransferIn pulls a whole zone from the upstream primary described by up:
+// AXFR over Do53, or over TLS (XoT, RFC 9103) when up.Transport is dot. TSIG
+// (up.Key) and TLS are independent layers and may be combined.
+//
+// This is the full-zone path, and the only one that streams straight into
+// zd.Data. An incremental transfer goes through ixfrTransferIn instead, which
+// has to buffer: whether a reply is a difference sequence or a whole zone is
+// not knowable until the second record.
+func (zd *ZoneData) ZoneTransferIn(ctx context.Context, up PeerConf, serial uint32, ttype string, conf *Config) (uint32, error) {
+	upstream := up.Addr
+	if upstream == "" {
+		Fatal("ZoneTransfer: upstream not set")
 	}
 
-	count := 0
-	firstSoaSeen := false
-	for envelope := range answerChan {
-		if envelope.Error != nil {
-			zd.Logger.Printf("ZoneTransfer: zone %s error: %v", zd.ZoneName, envelope.Error)
-			return 0, clarifyXfrError(zd.ZoneName, upstream, envelope.Error)
-		}
-
-		for _, rr := range envelope.RR {
-			count++
-			firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
-		}
+	// Refused rather than served. This function drains through SortFunc, which
+	// records only the first SOA and appends everything else -- feed it a
+	// difference stream and the deletes are applied as ADDITIONS and the
+	// bracket SOAs vanish, which is silent corruption of the zone we serve.
+	// ixfrTransferIn exists precisely because that cannot be done here, and
+	// leaving a working-looking branch behind would mean the next caller to
+	// pass "ixfr" gets the corruption rather than an error.
+	if ttype == "ixfr" {
+		return 0, fmt.Errorf("ZoneTransferIn %s: incremental transfer must go through ixfrTransferIn, "+
+			"which parses difference sequences; this path would apply deletes as additions", zd.ZoneName)
 	}
 
-	// apex, _ := zd.Data[zd.ZoneName]
-	apex, _ := zd.Data.Get(zd.ZoneName)
-	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
+	msg := new(dns.Msg)
+	msg.SetAxfr(zd.ZoneName)
+
+	if zd.ZoneStore == MapZone {
+		zd.Data = core.NewNameMap[OwnerData]()
+	}
+	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore], "transport", transportLabel(up))
+
+	answerChan, transfer, err := zd.openTransferStream(ctx, up, msg, conf)
+	if err != nil {
+		return 0, err
+	}
+
+	// count was previously computed and discarded; log it rather than drop it.
+	count, err := zd.drainTransferEnvelopes(ctx, answerChan, upstream, false, func() { _ = transfer.Close() })
+	if err != nil {
+		return 0, err
+	}
+	lg.Debug("ZoneTransferIn: stream drained", "zone", zd.ZoneName, "upstream", upstream, "rrs", count)
+
+	// A completed transfer always carries the apex SOA -- for AXFR the closing
+	// SOA is what ends the stream, and dns.Transfer.In reports a stream that
+	// ends without it as an error, handled above. So reaching this point
+	// without one means the peer sent something that is not this zone.
+	//
+	// This used to take the lookup result unchecked and index the SOA RRset
+	// directly. Both steps panic on the way through: a miss leaves RRtypes nil,
+	// and an apex without an SOA leaves the RRset empty. That is a panic on the
+	// success path of every zone transfer, reachable only through a peer that
+	// is already misbehaving -- which is precisely when a nameserver must stay
+	// up. An error discards the data, which is what a transfer that did not
+	// deliver a zone deserves.
+	soa, serr := zd.transferredApexSOA(upstream)
+	if serr != nil {
+		return 0, serr
+	}
+
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
 	// The journal anchors to the FILE, not to whatever the serial becomes
@@ -159,11 +287,33 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 	zd.fileSerial = soa.Serial
 
 	zd.Logger.Printf("*** Zone %s transferred from upstream %s. No errors.", zd.ZoneName, upstream)
-	if zd.Data.IsEmpty() {
-		return 0, nil
-	}
 
 	return soa.Serial, nil
+}
+
+// transferredApexSOA returns the apex SOA of a just-received zone, or an error
+// if the peer did not deliver one.
+func (zd *ZoneData) transferredApexSOA(upstream string) (*dns.SOA, error) {
+	apex, ok := zd.Data.Get(zd.ZoneName)
+	if !ok {
+		return nil, fmt.Errorf("ZoneTransferIn %s: transfer from %s delivered no apex",
+			zd.ZoneName, upstream)
+	}
+	if apex.RRtypes == nil {
+		return nil, fmt.Errorf("ZoneTransferIn %s: apex from %s carries no RRsets",
+			zd.ZoneName, upstream)
+	}
+	soaRRs := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs
+	if len(soaRRs) == 0 {
+		return nil, fmt.Errorf("ZoneTransferIn %s: transfer from %s delivered an apex with no SOA",
+			zd.ZoneName, upstream)
+	}
+	soa, ok := soaRRs[0].(*dns.SOA)
+	if !ok {
+		return nil, fmt.Errorf("ZoneTransferIn %s: apex SOA RRset from %s holds a %T",
+			zd.ZoneName, upstream, soaRRs[0])
+	}
+	return soa, nil
 }
 
 // batchState holds the state for zone transfer batching
@@ -552,19 +702,39 @@ func (zd *ZoneData) refuseTransfer(w dns.ResponseWriter, r *dns.Msg) (int, error
 	return 0, nil
 }
 
-func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, error) {
-	zd.Logger.Printf("ReadZoneData: zone: %s", zd.ZoneName)
+func (zd *ZoneData) ReadZoneFile(ctx context.Context, filename string, force bool) (bool, uint32, error) {
+	zd.Logger.Printf("ReadZoneFile: zone: %s", zd.ZoneName)
 
 	f, err := os.Open(filename)
 	if err != nil {
 		return false, 0, fmt.Errorf("ReadZoneFile: Error: failed to read %s: %v", filename, err)
 	}
-	return zd.ParseZoneFromReader(bufio.NewReader(f), force, filename)
+	// The handle was never closed, on any path. It leaked on success too --
+	// every zone load, for as long as it took the finalizer to notice -- so a
+	// server reloading zones often could accumulate descriptors it was not
+	// using. Cancellation makes the same leak easier to reach, since a parse
+	// now returns before EOF, but it did not introduce it.
+	//
+	// Safe as a defer: ParseZoneFromReader consumes the reader within the call
+	// and does not retain it past return.
+	defer f.Close()
+
+	return zd.ParseZoneFromReader(ctx, bufio.NewReader(f), force, filename)
 }
 
+// ReadZoneData parses a zone from a string already in memory.
+//
+// Deliberately not context-aware, and deliberately not a TODO. The cancellation
+// check inside ParseZoneFromReader exists for the file path, where parsing is
+// the long uninterruptible stretch of a refresh that a shutdown may need to
+// abandon. Here the caller already holds the entire zone: there is no I/O to
+// abort, and threading a context to reach this call would mean adding one to
+// CreateAutoZone and to a dozen test helpers for no cancellation anyone can
+// observe. If a caller ever parses a string large enough for that to be wrong,
+// give this function a ctx then.
 func (zd *ZoneData) ReadZoneData(zoneData string, force bool) (bool, uint32, error) {
 	zd.Logger.Printf("ReadZoneData: zone: %s", zd.ZoneName)
-	return zd.ParseZoneFromReader(strings.NewReader(zoneData), force, "")
+	return zd.ParseZoneFromReader(context.Background(), strings.NewReader(zoneData), force, "")
 }
 
 // The receiver must be a ZoneData the caller owns exclusively. This writes the
@@ -578,12 +748,18 @@ func (zd *ZoneData) ReadZoneData(zoneData string, force bool) (bool, uint32, err
 // invariant belongs to the caller instead. FetchFromFile shows the pattern for
 // a registered zone: parse into a scratch new_zd, then copy the fields across
 // under the lock.
-func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string) (bool, uint32, error) {
+func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force bool, filename string) (bool, uint32, error) {
+	// Safe here for the reason the comment above gives: the caller owns this
+	// ZoneData exclusively. Every path that builds a ZoneData already folds the
+	// name, but this is the one gate a zone must pass to acquire any data at
+	// all, and the owner map it is about to fill is keyed canonically -- a zone
+	// arriving with an unfolded name would not find its own apex.
+	zd.normalizeZoneName()
 	zd.Logger.Printf("ParseZoneFromReader: zone: %s", zd.ZoneName)
 
 	switch zd.ZoneStore {
 	case MapZone:
-		zd.Data = core.NewCmap[OwnerData]()
+		zd.Data = core.NewNameMap[OwnerData]()
 	default:
 		return false, 0, fmt.Errorf("ParseZoneFromReader: zone store %d not supported", zd.ZoneStore)
 	}
@@ -595,7 +771,23 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 	checkedForUnchanged := false
 	serialChanged := false // Track whether serial actually changed
 
+	// Parsing a large zone file is the longest uninterruptible stretch on the
+	// load path, so it is where a cancelled refresh would otherwise sit until
+	// the file ran out. Checked every parseCancelCheckInterval records rather
+	// than every record: ctx.Err() is cheap but not free, and a zone big enough
+	// for the wait to matter is big enough that a few thousand records of
+	// latency is not what anyone is waiting on.
+	const parseCancelCheckInterval = 2048
+	parsed := 0
+
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+		parsed++
+		if parsed%parseCancelCheckInterval == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return false, 0, fmt.Errorf("zone %s: parsing %s abandoned after %d records: %w",
+					zd.ZoneName, filename, parsed, cerr)
+			}
+		}
 		if Globals.Debug {
 			//  zd.Logger.Printf("ReadZoneData: parsed RR: %s", rr.String())
 		}
@@ -675,7 +867,6 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 		zd.fileDigest = digest
 	}
 
-	zd.XfrType = "axfr"
 	// Return true only if serial changed (indicates actual update)
 	// If force=true but serial unchanged, return false (validated but no update)
 	// This prevents unnecessary zone file writes on config reload when zone hasn't changed
@@ -683,11 +874,11 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 }
 
 func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
+	// The owner keeps the spelling it arrived with. zd.Data folds the key, so
+	// the name is found however it is later asked for, while OwnerData.Name and
+	// the RR headers still carry what the zone file actually said -- which is
+	// what an outgoing AXFR and a written zone file reproduce.
 	owner := rr.Header().Name
-	// if zd.FoldCase {
-	if zd.Options[OptFoldCase] {
-		owner = strings.ToLower(owner)
-	}
 	rrtype := rr.Header().Rrtype
 
 	//	zd.Logger.Printf("SortFunc: owner=%s rrtype=%s (%d)", owner, dns.TypeToString[rrtype], rrtype)
@@ -709,7 +900,13 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 
 	var tmp core.RRset
 
-	if !strings.HasSuffix(rr.Header().Name, zd.ZoneName) {
+	// In-bailiwick test, not a string suffix test. strings.HasSuffix compares
+	// bytes, so an owner spelling the zone-name part in another case --
+	// www.EXAMPLE.com. in example.com., which is what $ORIGIN EXAMPLE.com. with
+	// relative names produces -- failed this check and was silently discarded,
+	// unreachable afterwards by any spelling. dns.IsSubDomain folds case as DNS
+	// requires and is true for the apex itself.
+	if !dns.IsSubDomain(zd.ZoneName, rr.Header().Name) {
 		zd.Logger.Printf("*** SortFunc: zone %s: RR %s is not in zone. Ignored.", zd.ZoneName, rr.String())
 		return firstSoaSeen
 	}
@@ -1004,8 +1201,18 @@ func RRsetToString(rrset *core.RRset) string {
 	return tmp
 }
 
+// InBailiwick reports whether a nameserver name lies inside zone.
+//
+// dns.IsSubDomain, not strings.HasSuffix: the latter compares bytes, so it is
+// both case-sensitive and blind to label boundaries -- it calls
+// ns.evilexample. in-bailiwick for example.
+//
+// NOTE: this has no callers. NSInBailiwick in scanner_csync.go is the live
+// twin, fixed the same way in the delegation stage of this series, and
+// BailiwickNS is a third spelling of the same predicate. The three should be
+// one function.
 func InBailiwick(zone string, ns *dns.NS) bool {
-	return strings.HasSuffix(ns.Ns, zone)
+	return dns.IsSubDomain(zone, ns.Ns)
 }
 
 // formatZoneParseError extracts the line number from the parse error string
@@ -1116,6 +1323,68 @@ func pickTransferSrc(ctx context.Context, lookup func(context.Context, string) (
 	return nil, ""
 }
 
+// bindClientSrc configures c to send from one of srcs when a source of the
+// upstream's family is configured, and reports the address it bound (nil for
+// "left alone"). It is the SOA probe's counterpart to dialTransferConn.
+//
+// WHY THE PROBE NEEDS THIS AT ALL. transfer-src exists so that the address the
+// primary's ACL sees is the one the operator published. Binding it on the AXFR
+// and not on the probe that precedes every AXFR gets that half right: against a
+// primary that only permits the published address, the transfer would work and
+// the probe does not, so the zone never transfers -- and the error names a
+// source the operator never configured and cannot find in any config file.
+//
+// TWO THINGS DIFFER FROM THE TRANSFER PATH, and both are easy to get wrong.
+//
+// The probe defaults to UDP, so LocalAddr must be a *net.UDPAddr. A *net.TCPAddr
+// there -- the type dialTransferConn correctly uses -- fails the dial with a
+// mismatched address type, which reads as an unreachable primary.
+//
+// The family has to be pinned in c.Net for the same reason dialTransferConn
+// pins the network: binding a v4 source and letting a dual-stack hostname
+// upstream resolve to v6 cannot work. The pinned spelling has to match the
+// transport already selected, hence the switch rather than a bare "udp4".
+//
+// A family with no configured source leaves c untouched and returns nil, so the
+// probe dials unbound -- the same forgiving default pickTransferSrc applies, for
+// the same reason: naming only a v4 source must not break every v6 upstream.
+func bindClientSrc(ctx context.Context, c *dns.Client, upstream string, srcs []string) net.IP {
+	if c == nil || len(srcs) == 0 {
+		return nil
+	}
+	src, _ := pickTransferSrc(ctx, nil, upstream, srcs)
+	if src == nil {
+		return nil
+	}
+
+	fam := "6"
+	if src.To4() != nil {
+		fam = "4"
+	}
+
+	// Preserve the dial timeout the client would otherwise have got from
+	// miekg's own default; setting Dialer replaces that machinery wholesale.
+	timeout := c.Timeout
+	if timeout == 0 {
+		timeout = 2 * time.Second
+	}
+	d := &net.Dialer{Timeout: timeout}
+
+	switch transport := c.Net; {
+	case strings.HasSuffix(transport, "-tls"):
+		c.Net = strings.TrimSuffix(transport, "-tls") + fam + "-tls"
+		d.LocalAddr = &net.TCPAddr{IP: src}
+	case strings.HasPrefix(transport, "tcp"):
+		c.Net = "tcp" + fam
+		d.LocalAddr = &net.TCPAddr{IP: src}
+	default: // "" and "udp" both mean UDP to miekg
+		c.Net = "udp" + fam
+		d.LocalAddr = &net.UDPAddr{IP: src}
+	}
+	c.Dialer = d
+	return src
+}
+
 // dialTransferConn dials upstream with the source address bound, returning a
 // *dns.Conn ready to hand to dns.Transfer. tlsCfg non-nil selects XoT.
 //
@@ -1124,11 +1393,22 @@ func pickTransferSrc(ctx context.Context, lookup func(context.Context, string) (
 // reverse) is a guaranteed failure, and for a dual-stack hostname upstream that
 // is not a hypothetical. The hostname is still what gets dialled, so SNI and
 // certificate verification on the XoT path are unchanged.
-func dialTransferConn(upstream string, tlsCfg *tls.Config, srcs []string, timeout time.Duration) (*dns.Conn, error) {
+func dialTransferConn(parent context.Context, upstream string, tlsCfg *tls.Config, srcs []string, timeout time.Duration) (*dns.Conn, error) {
 	if timeout == 0 {
 		timeout = 2 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	if parent == nil {
+		parent = context.Background()
+	}
+	// Derive from the caller's context, so a shutdown landing in a bound-source
+	// dial returns immediately instead of waiting out the full dial timeout.
+	//
+	// The ctx has to reach the CONNECT, not just the lookup: for an IP-literal
+	// upstream -- the common case -- pickTransferSrc does no resolution at all,
+	// so passing ctx only there would leave the 2s dial uncancellable while the
+	// comment claimed otherwise. Hence DialContext, and tls.Dialer rather than
+	// tls.DialWithDialer so the handshake runs under the same ctx too.
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	src, network := pickTransferSrc(ctx, nil, upstream, srcs)
@@ -1138,13 +1418,14 @@ func dialTransferConn(upstream string, tlsCfg *tls.Config, srcs []string, timeou
 	d := &net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{IP: src}}
 
 	if tlsCfg != nil {
-		c, err := tls.DialWithDialer(d, network, upstream, tlsCfg)
+		td := &tls.Dialer{NetDialer: d, Config: tlsCfg}
+		c, err := td.DialContext(ctx, network, upstream)
 		if err != nil {
 			return nil, err
 		}
 		return &dns.Conn{Conn: c}, nil
 	}
-	c, err := d.Dial(network, upstream)
+	c, err := d.DialContext(ctx, network, upstream)
 	if err != nil {
 		return nil, err
 	}

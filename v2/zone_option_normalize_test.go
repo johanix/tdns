@@ -113,7 +113,7 @@ func TestNormalizeStripsExplicitSerialMode(t *testing.T) {
 		if serial != "" {
 			t.Errorf("%s: serial mode = %q, want cleared", mode, serial)
 		}
-		if !strings.Contains(msg, "outbound_soa_serial") {
+		if !strings.Contains(msg, "outbound-soa-serial") {
 			t.Errorf("%s: message does not mention the serial mode: %q", mode, msg)
 		}
 	}

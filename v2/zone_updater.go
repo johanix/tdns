@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -219,6 +218,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 			switch ur.Cmd {
 			case "DEFERRED-UPDATE":
 				lg.Error("ZoneUpdater: received deferred update on wrong queue", "description", ur.Description)
+				ur.respond(false, fmt.Errorf("deferred update sent to the wrong queue"))
 				continue
 
 			case "CHILD-UPDATE":
@@ -241,20 +241,34 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				backend := zd.DelegationBackend
 				zd.mu.Unlock()
 
+				// Every exit from here answers ur.Resp. A caller that is
+				// waiting for the change to be durable before it says so --
+				// the RFC 2136 responder, and the DSYNC API handler -- has no
+				// other way to find out, and silence costs it a full
+				// UpdateApplyTimeout before it gives up and reports failure
+				// for an update that may well have succeeded.
 				if !allowChildUpdates {
 					lg.Warn("ZoneUpdater: zone does not allow child updates, dropping CHILD-UPDATE", "zone", ur.ZoneName)
+					ur.respond(false, fmt.Errorf("zone %s does not allow child updates", ur.ZoneName))
 					continue
 				}
 				if backend == nil {
 					lg.Error("ZoneUpdater: zone allows child updates but has no DelegationBackend, dropping CHILD-UPDATE (invariant violation)", "zone", ur.ZoneName)
+					ur.respond(false, fmt.Errorf("zone %s has no delegation backend", ur.ZoneName))
 					continue
 				}
 				if err := backend.ApplyChildUpdate(ur.ZoneName, ur); err != nil {
 					lg.Error("ZoneUpdater: DelegationBackend.ApplyChildUpdate failed",
 						"backend", backend.Name(), "error", err)
+					ur.respond(false, err)
 				} else {
 					lg.Info("ZoneUpdater: CHILD-UPDATE applied",
 						"zone", ur.ZoneName, "backend", backend.Name())
+					// ApplyChildUpdate is durable by the time it returns: the
+					// direct backend has written the zone file, the db backend
+					// has written the row. So this is the same promise the
+					// ZONE-UPDATE path makes.
+					ur.respond(true, nil)
 					// OptDirty is managed by the backend: 'direct' sets
 					// then clears it via WriteZone after persisting; DB-
 					// and zonefile-backends don't touch in-memory zone
@@ -393,6 +407,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				tx, err := kdb.Begin("UpdaterEngine")
 				if err != nil {
 					lg.Error("kdb.Begin failed", "error", err)
+					ur.respond(false, fmt.Errorf("truststore update not started: %v", err))
+					continue
 				}
 				type pendingVerification struct {
 					childZone string
@@ -411,12 +427,20 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				// marker written for a key that then failed to store would
 				// outlive the failure and could complete a cleanup for a key
 				// this update never actually added.
-				ceremonyKey, ceremonyDeferred := (*dns.KEY)(nil), false
-				keyStoreFailed := false
-				if addKey, hasDel, ok := bootstrapCeremony(ur.Actions); ok && hasDel && !ur.Trusted {
-					ceremonyKey, ceremonyDeferred = addKey, true
-				}
+				//
+				// ceremonyHasDel and ceremonyDeferred are deliberately separate.
+				// The first says "this class-ANY KEY record is the ceremony's own
+				// DEL half", which is what licenses skipping it below; the second
+				// says "and the new key is not yet trusted, so the cleanup has to
+				// wait for validation". A ceremony that arrives already trusted
+				// still has its DEL skipped -- as it did before this path learned
+				// to reject class ANY -- but registers no deferred cleanup.
+				ceremonyKey, hasDelAnyKey, isCeremony := bootstrapCeremony(ur.Actions)
+				ceremonyHasDel := isCeremony && hasDelAnyKey
+				ceremonyDeferred := ceremonyHasDel && !ur.Trusted
 
+				var applyErr error
+			trustLoop:
 				for _, rr := range ur.Actions {
 					var subcommand string
 					switch rr.Header().Class {
@@ -425,60 +449,101 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					case dns.ClassNONE:
 						subcommand = "delete"
 					case dns.ClassANY:
-						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: class ANY (delete RRset) not supported, ignoring")
-						continue
-					default:
-						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: unknown class, ignoring", "rr", rr.String())
-						continue
-					}
-
-					if keyrr, ok := rr.(*dns.KEY); ok {
-						tppost := TruststorePost{
-							SubCommand: subcommand,
-							Src:        "child-update",
-							Keyname:    keyrr.Header().Name,
-							Keyid:      int(keyrr.KeyTag()),
-							KeyRR:      rr.String(),
-							Validated:  ur.Validated,
-							Trusted:    ur.Trusted,
-						}
-
-						_, err := kdb.Sig0TrustMgmt(tx, tppost)
-						if err != nil {
-							// The key did not land. Everything downstream of
-							// here -- async verification, and completing a
-							// bootstrap DEL-ANY-KEY -- acts on a key that is in
-							// the store, so neither may be scheduled for one
-							// that is not.
-							lg.Error("kdb.Sig0TrustMgmt failed", "error", err,
-								"keyname", keyrr.Header().Name, "keyid", keyrr.KeyTag())
-							keyStoreFailed = true
+						// The ONE class-ANY record this path accepts is the
+						// "DEL <child> ANY KEY" half of the self-signed bootstrap
+						// ceremony (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
+						// §"Bootstrapping the Child's Key"). It is deferred, not
+						// ignored: the registration below completes it once the
+						// newly added key has been independently validated, which
+						// is the rule that stops a bogus self-signed UPDATE from
+						// evicting the currently trusted key.
+						//
+						// Everything else class-ANY is a wholesale RRset delete
+						// this path does not implement, and must fail the whole
+						// update rather than be dropped -- silently dropping it is
+						// how a truststore change that never landed got answered
+						// NOERROR.
+						if ceremonyHasDel && rr.Header().Rrtype == dns.TypeKEY {
 							continue
 						}
-
-						// Queue untrusted child-update adds for async verification.
-						if subcommand == "add" && !ur.Trusted {
-							toVerify = append(toVerify, pendingVerification{
-								childZone: keyrr.Header().Name,
-								keyid:     uint16(keyrr.KeyTag()),
-								keyRR:     rr.String(),
-							})
-						}
-					} else {
-						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: not a KEY RR", "rr", rr.String())
+						applyErr = fmt.Errorf("class ANY (delete RRset) is not supported for a truststore update")
+						break trustLoop
+					default:
+						applyErr = fmt.Errorf("unknown class %s in truststore update", dns.ClassToString[rr.Header().Class])
+						break trustLoop
 					}
+
+					keyrr, ok := rr.(*dns.KEY)
+					if !ok {
+						applyErr = fmt.Errorf("truststore update is not a KEY RR")
+						break trustLoop
+					}
+					tppost := TruststorePost{
+						SubCommand: subcommand,
+						Src:        "child-update",
+						Keyname:    keyrr.Header().Name,
+						Keyid:      int(keyrr.KeyTag()),
+						KeyRR:      rr.String(),
+						Validated:  ur.Validated,
+						Trusted:    ur.Trusted,
+					}
+
+					// Sig0TrustMgmt reports storage failures two ways: a
+					// returned error (canonicalisation, begin), and resp.Error
+					// with a nil error (the SQL Exec paths). Both are a failed
+					// update; checking only err is how a KEY upload that did
+					// not land used to be answered NOERROR.
+					resp, err := kdb.Sig0TrustMgmt(tx, tppost)
+					if err != nil {
+						applyErr = err
+						break trustLoop
+					}
+					if resp != nil && resp.Error {
+						applyErr = fmt.Errorf("truststore update failed: %s", resp.ErrorMsg)
+						break trustLoop
+					}
+
+					if subcommand == "add" && !ur.Trusted {
+						toVerify = append(toVerify, pendingVerification{
+							childZone: keyrr.Header().Name,
+							keyid:     uint16(keyrr.KeyTag()),
+							keyRR:     rr.String(),
+						})
+					}
+				}
+				if applyErr != nil {
+					lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE failed", "error", applyErr)
+					if rerr := tx.Rollback(); rerr != nil {
+						lg.Error("tx.Rollback failed", "error", rerr)
+					}
+					ur.respond(false, applyErr)
+					continue
+				}
+				if len(ur.Actions) == 0 {
+					if rerr := tx.Rollback(); rerr != nil {
+						lg.Error("tx.Rollback failed", "error", rerr)
+					}
+					ur.respond(false, fmt.Errorf("truststore update contained no records"))
+					continue
 				}
 				err = tx.Commit()
 				if err != nil {
 					lg.Error("tx.Commit failed", "error", err)
+					ur.respond(false, fmt.Errorf("truststore update not committed: %v", err))
+					continue
 				}
+				ur.respond(true, nil)
 				logUpdateActions("TRUSTSTORE-UPDATE", ur.Actions)
 
 				// The deferred half of a bootstrap DEL-ANY-KEY: the new key is
 				// stored, so once it is validated and promoted to trusted the
-				// child's superseded keys may be removed. Registered only now,
-				// because the key had to actually land first.
-				if ceremonyDeferred && err == nil && !keyStoreFailed {
+				// child's superseded keys may be removed. Registered only here,
+				// after the commit: every earlier exit rolls the transaction back
+				// and continues, so reaching this line IS the proof that the key
+				// landed. (The branch's own keyStoreFailed flag is gone with the
+				// partial-commit behaviour it guarded against -- a store failure
+				// now aborts and rolls back the whole truststore update.)
+				if ceremonyDeferred {
 					registerPendingKeyReplacement(ceremonyKey.Header().Name, ceremonyKey.KeyTag())
 					lg.Info("ZoneUpdater: deferring DEL-ANY-KEY from self-signed bootstrap until new key is trusted",
 						"child", ceremonyKey.Header().Name, "keyid", ceremonyKey.KeyTag())
@@ -492,6 +557,10 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				}
 			default:
 				lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)
+				// Including this one: a caller waiting on a command the
+				// updater does not implement should be told so, not left to
+				// time out.
+				ur.respond(false, fmt.Errorf("unknown update command %q", ur.Cmd))
 			}
 			lg.Info("ZoneUpdater: update request completed", "type", ur.Cmd)
 		}
@@ -802,6 +871,15 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 		}
 	}
 
+	// Refuse (or, on replay, drop) any attempt to write the apex ZONEMD of a
+	// zone that maintains its own. Done BEFORE the lock and before anything is
+	// staged, so the update is rejected whole rather than half-applied.
+	filteredActions, zerr := zd.filterManagedZonemdActions(ur.Actions, ur.Replay)
+	if zerr != nil {
+		return false, zerr
+	}
+	ur.Actions = filteredActions
+
 	zd.mu.Lock()
 	defer func() {
 		if updated {
@@ -873,10 +951,19 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 				lg.Warn("ApplyZoneUpdateToZoneData: DELNAME for unknown owner", "owner", ownerName)
 				continue
 			}
-			isApex := strings.EqualFold(ownerName, zd.ZoneName)
+			isApex := core.EqualNames(ownerName, zd.ZoneName)
 			var deleted, denied, retained int
 			for _, t := range owner.RRtypes.Keys() {
 				if isApex && apexRetainedOnDelname(t) {
+					retained++
+					continue
+				}
+				// The apex ZONEMD is retained for the same reason SOA and NS
+				// are: while publish-zonemd is on it is the server's record,
+				// and the next publish would recreate it anyway. Deleting it
+				// here would make DELNAME report a deletion that does not
+				// survive the breath after it.
+				if isApex && t == dns.TypeZONEMD && zd.zoneManagesZonemd() {
 					retained++
 					continue
 				}
@@ -996,7 +1083,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 			// SOA has no such exception: tdns owns the serial, and the
 			// builder refuses replacerrset for it outright so the failure is
 			// loud and at the client rather than silent here.
-			if strings.EqualFold(ownerName, zd.ZoneName) &&
+			if core.EqualNames(ownerName, zd.ZoneName) &&
 				(rrtype == dns.TypeSOA || rrtype == dns.TypeNS) {
 				if rrtype == dns.TypeNS &&
 					updateReplacesRRset(ur.Actions[actionIdx+1:], ownerName, rrtype) {
@@ -1101,7 +1188,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 	for _, rr := range ur.Actions {
 		if rr.Header().Rrtype == dns.TypeNS {
 			actions = append(actions, rr)
-			if rr.Header().Name == zd.ZoneName {
+			if core.EqualNames(rr.Header().Name, zd.ZoneName) {
 				new_bns = append(new_bns, rr.Header().Name)
 			}
 		}
@@ -1138,7 +1225,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			continue
 		}
 
-		if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
+		if core.EqualNames(ownerName, zd.ZoneName) && rrtype == dns.TypeNS {
 			dss.InSync = false
 			// return dss, nil
 		}
@@ -1149,7 +1236,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			//log.Printf("ZUCDDNG: Remove RR: %s %s %s", ownerName, rrtypestr, rrcopy.String())
 
 			// Is this a change to the NS RRset?
-			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
+			if core.EqualNames(ownerName, zd.ZoneName) && rrtype == dns.TypeNS {
 				dss.InSync = false
 				dss.NsRemoves = append(dss.NsRemoves, rrcopy)
 				ddata.Actions = append(ddata.Actions, rrcopy)
@@ -1179,7 +1266,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			}
 			// Is this a change to glue for a nameserver?
 			for _, nsname := range ddata.BailiwickNS {
-				if nsname == ownerName {
+				if core.EqualNames(nsname, ownerName) {
 					if rrtype == dns.TypeA {
 						dss.InSync = false
 						dss.ARemoves = append(dss.ARemoves, rrcopy)
@@ -1192,7 +1279,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 				}
 			}
 			// Is this a KSK DNSKEY removal?
-			if ownerName == zd.ZoneName && rrtype == dns.TypeDNSKEY {
+			if core.EqualNames(ownerName, zd.ZoneName) && rrtype == dns.TypeDNSKEY {
 				if dk, ok := rr.(*dns.DNSKEY); ok {
 					if dk.Flags&dns.SEP != 0 {
 						dss.InSync = false
@@ -1207,7 +1294,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			//log.Printf("ZUCDDNG: Remove RRset: %s", rr.String())
 			switch rrtype {
 			case dns.TypeNS:
-				if ownerName == zd.ZoneName {
+				if core.EqualNames(ownerName, zd.ZoneName) {
 					// A standalone delete of the apex NS RRset is refused by
 					// the applier and correctly ignored here.
 					//
@@ -1247,7 +1334,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 
 			case dns.TypeA:
 				for _, nsname := range bns {
-					if nsname == ownerName {
+					if core.EqualNames(nsname, ownerName) {
 						dss.InSync = false
 						dss.ARemoves = append(dss.ARemoves, rrcopy)
 						ddata.Actions = append(ddata.Actions, rrcopy)
@@ -1256,7 +1343,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 
 			case dns.TypeAAAA:
 				for _, nsname := range bns {
-					if nsname == ownerName {
+					if core.EqualNames(nsname, ownerName) {
 						dss.InSync = false
 						dss.AAAARemoves = append(dss.AAAARemoves, rrcopy)
 						ddata.Actions = append(ddata.Actions, rrcopy)
@@ -1264,7 +1351,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 				}
 
 			case dns.TypeDNSKEY:
-				if ownerName == zd.ZoneName {
+				if core.EqualNames(ownerName, zd.ZoneName) {
 					// Removing entire DNSKEY RRset — record all KSK removals
 					dss.InSync = false
 					apex, apexErr := zd.GetOwner(zd.ZoneName)
@@ -1294,7 +1381,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 		dup := false
 		switch rrtype {
 		case dns.TypeNS:
-			if ownerName == zd.ZoneName {
+			if core.EqualNames(ownerName, zd.ZoneName) {
 				for _, rr := range ddata.CurrentNS.RRs {
 					if dns.IsDuplicate(rr, rrcopy) {
 						// log.Printf("ZUCDDNG: NOT adding duplicate %s record with RR=%s", rrtypestr, rrcopy.String())
@@ -1330,7 +1417,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 						}
 						// It is also possible that glue for the new NS is present later in the update.
 						for _, action := range actions {
-							if action.Header().Name == nsrr.Ns {
+							if core.EqualNames(action.Header().Name, nsrr.Ns) {
 								if action.Header().Rrtype == dns.TypeA {
 									// log.Printf("ZUCDDNG: adding glue for new NS %s from later in the update: %s", nsrr.Ns, action.String())
 									dss.AAdds = append(dss.AAdds, action)
@@ -1395,7 +1482,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			}
 
 		case dns.TypeDNSKEY:
-			if ownerName == zd.ZoneName {
+			if core.EqualNames(ownerName, zd.ZoneName) {
 				if dk, ok := rr.(*dns.DNSKEY); ok {
 					if dk.Flags&dns.SEP != 0 {
 						dss.InSync = false
@@ -1583,44 +1670,62 @@ func computeNewGlue(dss *DelegationSyncStatus, zoneName string, ddata *Delegatio
 // by deriving DS records from the current KSK DNSKEYs in the zone.
 func computeNewDS(dss *DelegationSyncStatus, zd *ZoneData) {
 	if len(dss.DNSKEYAdds) == 0 && len(dss.DNSKEYRemoves) == 0 {
+		// The update said nothing about DNSKEYs, so it says nothing about DS.
+		// NewDSKnown stays false and replace mode leaves the parent's DS alone,
+		// which is the whole reason the flag exists: an NS-only edit must not
+		// be read as "this child has no DS".
 		return
 	}
 
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil || apex == nil {
+	// Not while the rollover engine owns the DS.
+	//
+	// The keystore intent below deliberately excludes `created` keys, because
+	// outside a rollover a key that has had no DS placed should not have one
+	// published on its behalf. During a rollover that exclusion is exactly
+	// wrong: the engine has already sent the DS for a key that is still
+	// `created`, so an authoritative set computed here omits it and replace
+	// mode deletes it.
+	//
+	// AnalyseZoneDelegation defers to the engine for the same reason. This is
+	// the other way in: an ordinary UPDATE that happens to touch a DNSKEY,
+	// arriving while a DS-work phase is in flight.
+	if zd.rolloverOwnsDS() {
 		return
 	}
 
-	// Build the effective post-update DNSKEY set:
-	// start from current, remove DNSKEYRemoves, add DNSKEYAdds.
-	effective := make(map[uint16]*dns.DNSKEY)
-	for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
-		if dk, ok := rr.(*dns.DNSKEY); ok {
-			if dk.Flags&dns.SEP != 0 {
-				effective[dk.KeyTag()] = dk
-			}
-		}
+	// The DS set comes from the keystore, not from the DNSKEY RRset this update
+	// happens to produce.
+	//
+	// Deriving it here from published keys was wrong twice over. It hashed only
+	// SEP-flagged keys, and the SEP bit is advisory -- a zone signed with a
+	// flags-256 CSK produced an empty set, which now reads as "withdraw the DS"
+	// and would make a perfectly good child bogus. And it could not see a
+	// rollover: a key whose DS is at the parent but whose DNSKEY is not
+	// published yet is absent from any set derived from the zone, so the update
+	// path would hand replace mode a set missing it.
+	//
+	// DSIntentForZone answers the question the parent actually needs answered,
+	// from the state machine that owns it, and says whether it has an answer at
+	// all.
+	intent, err := DSIntentForZone(zd.KeyDB, zd.ZoneName, dns.SHA256)
+	if err != nil {
+		lg.Warn("computeNewDS: could not determine the DS intent; leaving the parent DS alone",
+			"zone", zd.ZoneName, "err", err)
+		return
 	}
-	for _, rr := range dss.DNSKEYRemoves {
-		if dk, ok := rr.(*dns.DNSKEY); ok {
-			delete(effective, dk.KeyTag())
-		}
-	}
-	for _, rr := range dss.DNSKEYAdds {
-		if dk, ok := rr.(*dns.DNSKEY); ok {
-			if dk.Flags&dns.SEP != 0 {
-				effective[dk.KeyTag()] = dk
-			}
-		}
+	if !intent.Known {
+		// No keystore KSKs: tdns does not manage this zone's keys, so its DS is
+		// not ours to restate. Not the same as "the zone has no DS".
+		lg.Debug("computeNewDS: no keystore KSKs for this zone; leaving the parent DS alone",
+			"zone", zd.ZoneName)
+		return
 	}
 
-	var newDS []dns.RR
-	for _, dk := range effective {
-		if ds := dk.ToDS(dns.SHA256); ds != nil {
-			newDS = append(newDS, ds)
-		}
-	}
-	dss.NewDS = newDS
+	// Authoritative, empty included: a zone whose keys tdns holds and none of
+	// which warrant a DS has been un-signed, and the parent should stop
+	// publishing one.
+	dss.NewDS = intent.Set
+	dss.NewDSKnown = true
 }
 
 // updateReplacesRRset reports whether actions contain at least one record to
@@ -1649,7 +1754,7 @@ func updateReplacesRRset(actions []dns.RR, owner string, rrtype uint16) bool {
 		if rr.Header().Class != dns.ClassINET {
 			continue
 		}
-		if rr.Header().Rrtype == rrtype && strings.EqualFold(rr.Header().Name, owner) {
+		if rr.Header().Rrtype == rrtype && core.EqualNames(rr.Header().Name, owner) {
 			return true
 		}
 	}
@@ -1668,14 +1773,14 @@ func apexNSReplacementRecords(actions []dns.RR, zone string) []dns.RR {
 		if rr.Header().Class != dns.ClassANY || rr.Header().Rrtype != dns.TypeNS {
 			continue
 		}
-		if !strings.EqualFold(rr.Header().Name, zone) {
+		if !core.EqualNames(rr.Header().Name, zone) {
 			continue
 		}
 		var newNS []dns.RR
 		for _, later := range actions[i+1:] {
 			if later.Header().Class == dns.ClassINET &&
 				later.Header().Rrtype == dns.TypeNS &&
-				strings.EqualFold(later.Header().Name, zone) {
+				core.EqualNames(later.Header().Name, zone) {
 				newNS = append(newNS, later)
 			}
 		}
