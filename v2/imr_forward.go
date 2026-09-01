@@ -198,15 +198,33 @@ func buildForwardUpstream(zone string, u ImrUpstreamConf) (*ForwardUpstream, err
 			ServerName: u.TLSServerName, // empty: crypto/tls verifies against the dialed IP's SANs
 		}
 		if u.Insecure {
+			// Refused rather than resolved: "verify against this anchor" and
+			// "verify nothing" cannot both be meant, and silently honouring
+			// either one is the worst outcome -- a config that names a CA file
+			// and does not use it reads as verified and is not.
+			if u.CAFile != "" {
+				return nil, fmt.Errorf("forward zone %s: upstream %s: ca-file and insecure are mutually exclusive (ca-file names a trust anchor; insecure skips verification entirely)", zone, u.Addr)
+			}
 			tlsConfig.InsecureSkipVerify = true
+		}
+		if u.CAFile != "" {
+			// Parsed now rather than at dial time so a missing or unparseable
+			// anchor is a config error, not a resolution failure hours later.
+			// loadCAPool memoizes by mtime, so pointing several upstreams at
+			// one anchor reads it once.
+			pool, err := loadCAPool(u.CAFile)
+			if err != nil {
+				return nil, fmt.Errorf("forward zone %s: upstream %s: %v", zone, u.Addr, err)
+			}
+			tlsConfig.RootCAs = pool
 		}
 		if transport == core.TransportDoQ {
 			// NewDNSClient only fills these when handed a nil config.
 			tlsConfig.NextProtos = []string{"doq"}
 			tlsConfig.MinVersion = tls.VersionTLS13
 		}
-	} else if u.TLSServerName != "" || u.Insecure {
-		return nil, fmt.Errorf("forward zone %s: upstream %s: tls-server-name/insecure are only meaningful for dot, doh or doq", zone, u.Addr)
+	} else if u.TLSServerName != "" || u.Insecure || u.CAFile != "" {
+		return nil, fmt.Errorf("forward zone %s: upstream %s: tls-server-name/insecure/ca-file are only meaningful for dot, doh or doq", zone, u.Addr)
 	}
 
 	return &ForwardUpstream{
