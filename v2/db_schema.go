@@ -336,6 +336,26 @@ UNIQUE (keyname)
 		comment    TEXT,
 		UNIQUE (parentzone, username)
 	)`,
+
+	// Certificate credentials for the DSYNC API scheme. A separate table
+	// because there is no column-migration machinery, and because a
+	// certificate credential has neither a key hash nor a username: the
+	// identity is a pin or a DNS name, keyed with the mechanism.
+	//
+	// identity is canonicalised (core.CanonicalizeName) for tls-pkix and
+	// stored verbatim for tls-pin (standard-encoding base64 SPKI SHA-256).
+	"DsyncApiCertCredential": `CREATE TABLE IF NOT EXISTS 'DsyncApiCertCredential' (
+		id         INTEGER PRIMARY KEY,
+		parentzone VARCHAR(255) NOT NULL,
+		authmech   VARCHAR(16)  NOT NULL,
+		identity   VARCHAR(255) NOT NULL,
+		principal  VARCHAR(255) NOT NULL,
+		created    INTEGER NOT NULL,
+		expires    INTEGER NOT NULL DEFAULT 0,
+		disabled   INTEGER NOT NULL DEFAULT 0,
+		comment    TEXT,
+		UNIQUE (parentzone, authmech, identity)
+	)`,
 }
 
 // Note that there is no DNSSEC TrustStore, because whatever DNSSEC keys we have

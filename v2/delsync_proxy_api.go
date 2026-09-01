@@ -104,9 +104,9 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 				" more than one zone under %s): %w",
 			zd.ZoneName, parent, zd.ZoneName, parent, ErrProxyApiNoCredential)
 	}
-	if cred.Username == "" || cred.Key == "" {
+	if !cred.Usable() {
 		return "", fmt.Errorf(
-			"zone %s: the DSYNC API credential for parent %s is missing a username or key: %w",
+			"zone %s: the DSYNC API credential for parent %s is missing a username/key or a tls cert/key: %w",
 			zd.ZoneName, parent, ErrProxyApiNoCredential)
 	}
 

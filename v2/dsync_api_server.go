@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"strings"
@@ -93,6 +94,17 @@ func (conf *Config) StartDsyncApiListener(ctx context.Context, router *mux.Route
 	}
 
 	servers := make([]*http.Server, 0, len(api.Listen))
+	var tlsConfig *tls.Config
+	if api.ClientAuth.Enabled() {
+		// Request, never require: a bearer client that presents no certificate
+		// must still complete the handshake. Installed only when client-auth
+		// is configured, so an unconfigured listener does not send a
+		// CertificateRequest at all.
+		tlsConfig = &tls.Config{
+			ClientAuth: tls.RequestClientCert,
+			MinVersion: tls.VersionTLS12,
+		}
+	}
 	for _, addr := range api.Listen {
 		srv := &http.Server{
 			Addr:              addr,
@@ -100,6 +112,7 @@ func (conf *Config) StartDsyncApiListener(ctx context.Context, router *mux.Route
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       DsyncApiRequestTimeout,
 			WriteTimeout:      DsyncApiRequestTimeout,
+			TLSConfig:         tlsConfig,
 		}
 		servers = append(servers, srv)
 
@@ -165,13 +178,12 @@ func (conf *Config) StartDsyncApiListener(ctx context.Context, router *mux.Route
 // credential from the middleware to the handler.
 type dsyncApiPrincipalKey struct{}
 
-// dsyncApiAuthMiddleware authenticates HTTP Basic against the credential store.
+// dsyncApiAuthMiddleware authenticates the request.
 //
-// The parent zone has to be resolved before the credential can be looked up --
-// credentials are scoped to one parent -- so the order is: find the zone,
-// then authenticate, then (in the handler) authorize. Zone existence is
-// therefore visible to an unauthenticated caller, which is fine: it is visible
-// in the DNS too.
+// An Authorization header, whatever it contains, selects the Basic path and
+// that path decides: a non-Basic header is a 401, not a fallthrough to a
+// client certificate. The certificate path runs only when the header is
+// absent and client-auth is configured.
 func dsyncApiAuthMiddleware(kdb *KeyDB) mux.MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -187,30 +199,42 @@ func dsyncApiAuthMiddleware(kdb *KeyDB) mux.MiddlewareFunc {
 				return
 			}
 
-			user, key, ok := r.BasicAuth()
-			if !ok {
-				// The challenge names the realm as the parent zone, which is
-				// the scope the credential actually has.
+			var cred *DsyncApiCredential
+			if r.Header.Get("Authorization") != "" {
+				user, key, ok := r.BasicAuth()
+				if !ok {
+					w.Header().Set("WWW-Authenticate",
+						fmt.Sprintf("Basic realm=%q, charset=\"UTF-8\"", zd.ZoneName))
+					dsyncApiError(w, http.StatusUnauthorized, "")
+					return
+				}
+				cred, err = kdb.VerifyDsyncApiCredential(zd.ZoneName, user, key)
+				if err != nil {
+					lgDsyncApi.Warn("DSYNC API authentication failed",
+						"zone", zd.ZoneName, "child", child, "user", user, "from", r.RemoteAddr)
+					dsyncApiError(w, http.StatusUnauthorized, "")
+					return
+				}
+			} else if clientAuth := DelegationSyncConfig().Parent.Api.ClientAuth; clientAuth.Enabled() {
+				cred, err = authenticateDsyncApiClientCert(kdb, zd.ZoneName, r, clientAuth)
+				if err != nil {
+					lgDsyncApi.Warn("DSYNC API certificate authentication failed",
+						"zone", zd.ZoneName, "child", child, "from", r.RemoteAddr)
+					w.Header().Set("WWW-Authenticate",
+						fmt.Sprintf("Basic realm=%q, charset=\"UTF-8\"", zd.ZoneName))
+					dsyncApiError(w, http.StatusUnauthorized, "")
+					return
+				}
+			} else {
 				w.Header().Set("WWW-Authenticate",
 					fmt.Sprintf("Basic realm=%q, charset=\"UTF-8\"", zd.ZoneName))
 				dsyncApiError(w, http.StatusUnauthorized, "")
 				return
 			}
 
-			cred, err := kdb.VerifyDsyncApiCredential(zd.ZoneName, user, key)
-			if err != nil {
-				// Logged with the username, answered without one. The store
-				// returns the same error for unknown/wrong/disabled/expired,
-				// and that must not leak into the response.
-				lgDsyncApi.Warn("DSYNC API authentication failed",
-					"zone", zd.ZoneName, "child", child, "user", user, "from", r.RemoteAddr)
-				dsyncApiError(w, http.StatusUnauthorized, "")
-				return
-			}
-
 			lgDsyncApi.Debug("DSYNC API request authenticated",
 				"zone", zd.ZoneName, "child", child, "user", cred.Username,
-				"principal", cred.Principal, "from", r.RemoteAddr)
+				"principal", cred.Principal, "auth", cred.AuthMethod, "from", r.RemoteAddr)
 
 			ctx := context.WithValue(r.Context(), dsyncApiPrincipalKey{}, cred)
 			next.ServeHTTP(w, r.WithContext(ctx))

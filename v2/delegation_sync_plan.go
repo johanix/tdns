@@ -336,7 +336,7 @@ func (zd *ZoneData) planConsiderApi(res DsyncResult, plan *ParentSyncPlan) {
 	// is settled here rather than after a round trip: there is nothing to wait
 	// for and nothing to retry.
 	cred, ok := DelegationSyncConfig().Child.Api.CredentialForChild(zd.Parent, zd.ZoneName)
-	if !ok || cred.Username == "" || cred.Key == "" {
+	if !ok || !cred.Usable() {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{"API",
 			fmt.Sprintf("no usable credential for parent %s (delegationsync.child.api.credentials)", zd.Parent)})
 		return

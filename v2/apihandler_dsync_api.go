@@ -82,7 +82,7 @@ func (kdb *KeyDB) APIdsyncApiCredential() func(w http.ResponseWriter, r *http.Re
 			lgApi.Info("DSYNC API credential created", "zone", cp.Zone, "user", cp.Username)
 
 		case "list":
-			creds, err := kdb.ListDsyncApiCredentials(cp.Zone)
+			creds, err := kdb.ListDsyncApiAllCredentials(cp.Zone)
 			if err != nil {
 				fail("%v", err)
 				return

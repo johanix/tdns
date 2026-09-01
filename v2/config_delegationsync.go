@@ -159,6 +159,55 @@ type DsyncApiChildCredentialConf struct {
 
 	Username string          `yaml:"username" mapstructure:"username"`
 	Key      SensitiveString `yaml:"key" mapstructure:"key"`
+
+	// TLS is the client-certificate alternative to Username/Key. A pointer so
+	// that "the operator wrote no tls block" and "the operator wrote an empty
+	// one" are distinguishable -- the second is a config error worth naming,
+	// the first is every config written before this existed.
+	TLS *DsyncApiChildTLSConf `yaml:"tls" mapstructure:"tls"`
+}
+
+// DsyncApiChildTLSConf is one client keypair. Both paths, no secrets: the
+// private key stays in its file and is never read into the config.
+type DsyncApiChildTLSConf struct {
+	CertFile string `yaml:"cert" mapstructure:"cert"`
+	KeyFile  string `yaml:"key" mapstructure:"key"`
+}
+
+// Validate rejects a half-written block early, where the error can name the
+// field, rather than at first use where it surfaces as a TLS handshake failure
+// against the parent.
+func (t *DsyncApiChildTLSConf) Validate() error {
+	if t == nil {
+		return nil
+	}
+	if strings.TrimSpace(t.CertFile) == "" || strings.TrimSpace(t.KeyFile) == "" {
+		return fmt.Errorf("delegationsync.child.api.credentials[].tls needs both cert and key")
+	}
+	return nil
+}
+
+// Validate rejects a credential entry that cannot authenticate: both a bearer
+// pair and a tls block (ambiguous; the Authorization header would win and the
+// certificate would be ignored), or a tls block that is only half written.
+func (cc DsyncApiChildCredentialConf) Validate() error {
+	if err := cc.TLS.Validate(); err != nil {
+		return err
+	}
+	if cc.TLS != nil && (strings.TrimSpace(cc.Username) != "" || cc.Key.Value() != "") {
+		return fmt.Errorf("delegationsync.child.api.credentials[] cannot carry both a bearer credential and a tls block")
+	}
+	return nil
+}
+
+// ValidateCredentials checks every child credential entry.
+func (c DsyncApiChildConf) ValidateCredentials() error {
+	for i, cc := range c.Credentials {
+		if err := cc.Validate(); err != nil {
+			return fmt.Errorf("delegationsync.child.api.credentials[%d]: %v", i, err)
+		}
+	}
+	return nil
 }
 
 // CredentialFor returns the credential for a parent zone, matching as FQDNs so
@@ -193,11 +242,16 @@ func (c DsyncApiChildConf) CredentialForChild(parent, child string) (DsyncApiCli
 	wantParent, wantChild := norm(parent), norm(child)
 
 	build := func(cc DsyncApiChildCredentialConf) DsyncApiClientCredential {
-		return DsyncApiClientCredential{
+		out := DsyncApiClientCredential{
 			Parent:   wantParent,
 			Username: strings.TrimSpace(cc.Username),
 			Key:      cc.Key.Value(),
 		}
+		if cc.TLS != nil {
+			out.CertFile = strings.TrimSpace(cc.TLS.CertFile)
+			out.KeyFile = strings.TrimSpace(cc.TLS.KeyFile)
+		}
+		return out
 	}
 
 	var generic *DsyncApiChildCredentialConf
@@ -255,6 +309,60 @@ type DsyncApiSchemeConf struct {
 	Listen   []string `yaml:"listen" mapstructure:"listen"`
 	CertFile string   `yaml:"cert" mapstructure:"cert"`
 	KeyFile  string   `yaml:"key" mapstructure:"key"`
+
+	// ClientAuth is the optional client-certificate path on this listener.
+	// Absent (nil) means the feature is off: no CertificateRequest, and the
+	// middleware never looks at a presented certificate.
+	ClientAuth *DsyncApiClientAuthConf `yaml:"client-auth" mapstructure:"client-auth"`
+}
+
+// DsyncApiClientAuthConf is the parent-side client-certificate configuration.
+// Mechanisms are tried in list order; tls-pin before tls-pkix is the sensible
+// order (exact lookup, no chain building).
+type DsyncApiClientAuthConf struct {
+	Mechanisms []string `yaml:"mechanisms" mapstructure:"mechanisms"`
+	CAFile     string   `yaml:"ca-file" mapstructure:"ca-file"`
+}
+
+// Enabled reports whether the listener should request client certificates.
+func (c *DsyncApiClientAuthConf) Enabled() bool {
+	return c != nil && len(c.Mechanisms) > 0
+}
+
+// Validate normalises mechanism names and refuses unknown ones. tls-pkix
+// without ca-file is unsatisfiable and is warned at load, not refused, matching
+// crossCheckDownstreamAuth.
+func (c *DsyncApiClientAuthConf) Validate() error {
+	if c == nil {
+		return nil
+	}
+	if len(c.Mechanisms) == 0 {
+		return fmt.Errorf("delegationsync.parent.api.client-auth has no mechanisms")
+	}
+	var hasPkix bool
+	for i, m := range c.Mechanisms {
+		m = strings.ToLower(strings.TrimSpace(m))
+		c.Mechanisms[i] = m
+		if !validDsyncApiCertMech(m) {
+			return fmt.Errorf("unknown DSYNC API client-auth mechanism %q (supported: tls-pin, tls-pkix)", m)
+		}
+		if m == DsyncApiAuthTLSPkix {
+			hasPkix = true
+		}
+	}
+	if hasPkix && strings.TrimSpace(c.CAFile) == "" {
+		lgConfig.Warn("delegationsync.parent.api.client-auth lists tls-pkix but ca-file is empty; tls-pkix will be unsatisfiable")
+	}
+	return nil
+}
+
+// Validate checks the delegationsync block beyond what DsyncApiSchemeConf.Validate
+// already does for publication: client-auth mechanisms and child credential shape.
+func (dsc DelegationSyncConf) Validate() error {
+	if err := dsc.Parent.Api.ClientAuth.Validate(); err != nil {
+		return err
+	}
+	return dsc.Child.Api.ValidateCredentials()
 }
 
 // DsyncApiDialectV1 is the dialect identifier published in the TXT record at
