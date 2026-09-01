@@ -1,6 +1,6 @@
 # Implementation plan — unify the delegation-sync child paths and config
 
-**Status:** ready for review. Design proposal + sliced work items; no code written yet.
+**Status:** design settled (all §7 decisions made 2026-09-02); sliced into work items; no code written yet.
 **Base:** branch off `main`. Work in the **`v2/` tree only**.
 **Relationship to other plans:** this is a prerequisite refactor for the remaining Phase 2
 items of `2026-07-16-ddns-delegation-keystate-draft-alignment-plan.md` (D-6, D-7, D-3b).
@@ -145,17 +145,17 @@ D-6's needed field has to go.
 
 ---
 
-## 4. Proposed config
+## 4. Config
 
 Two established patterns exist in this codebase for per-zone variation: a
 **named policy referenced by name** (`dnssecpolicy: <name>` → `dnssec.policies.*`)
 and an **inline per-zone struct gap-filled by zone templates** (today's
-`updatepolicy:`). This proposal uses the named-policy pattern for the parent
-side, because bootstrap policy is security policy: a small set of named,
-reviewable policies is easier to audit than per-zone hand-rolled ones, and it
-decouples the policy from the zone list while still working through templates
-(a template can set the reference). The inline+templates alternative is viable
-and needs no new machinery — noted in §7 as the decision to confirm.
+`updatepolicy:`).
+
+**Decided 2026-09-02: named policies**, for the parent side. Bootstrap policy is
+security policy: a small set of named, reviewable policies audits better than
+per-zone hand-rolled ones, and it decouples the policy from the zone list while
+still reaching zones through templates (a template can set the reference).
 
 Per the project's no-backwards-compatibility rule, this is a clean config break:
 no aliasing of the old key names, no dual-format parsing.
@@ -368,9 +368,27 @@ refactor.
   `updatepolicy.child.keyupload` into it and delete all three (§4.2).
 - **Note:** the two `updatepolicy` fields are read in one conditional
   (`v2/updateresponder.go:580-587`, mirrored `:760-767`), so they move together
-  and that conditional collapses onto the three orthogonal policy axes. The
+  and that conditional collapses onto the orthogonal policy axes. The
   `strict-manual` enum value ceases to exist — it becomes `mechanisms: []` +
   `manual: true` + `allow-unvalidated-upload: false`.
+- **Pattern to follow, and the one place not to follow it.** Key the policies as
+  `delegationsync.policies.<name>`, parallel to `dnssec.policies.<name>`, and
+  reuse `resolveZonePolicyRef` (`v2/parseconfig.go:1221`) for the reference
+  lookup. But **fail like `updatepolicy`, not like `dnssecpolicy`**: an
+  unresolvable `dnssecpolicy` *degrades* (zone served unsigned, error recorded on
+  the zone, `parseconfig.go:1219-1230`), whereas `activateUpdatePolicy` returns a
+  hard error and quarantines the zone. Delegation policy governs how strictly a
+  child's key is verified, so silently substituting a default for a name the
+  operator got wrong is the wrong failure mode. Quarantine. This is worth stating
+  because "named policy" invites copying `dnssecpolicy` wholesale, and its
+  failure model is the one that does not transfer.
+- **No policy templates.** `dnssec` has `policies` *and* `templates` (partial
+  policies to inherit from) because a DNSSEC policy is large. A delegation policy
+  is five fields; template inheritance would be machinery for nothing. Do not add
+  it by analogy.
+- **Migration is small:** only `manual` and `strict-manual` have behaviour to
+  carry over (§3 defect 3), so a zone setting either needs a policy naming it and
+  every other `keybootstrap`/`keyupload` setting simply disappears.
 - **Acceptance:** two zones on one parent with different policies bootstrap
   differently; config naming an unknown policy fails at parse (fail closed); each
   old `keybootstrap` value's behaviour is reproduced by its §4.2 mapping, pinned
@@ -470,14 +488,14 @@ pattern repeats.
    (`zoneRequiresManualBootstrap` returns false for an unset list). The
    `default` policy in §4 is written to those values.
 
-### Still open
+5. **Named policies, not inline+templates** (§4). Bootstrap policy is security
+   policy: a small set of named, reviewable policies audits better than per-zone
+   hand-rolling, while still reaching zones through templates. Keyed
+   `delegationsync.policies.<name>`, parallel to `dnssec.policies.<name>`, with
+   the failure-model caveat in U-3 — quarantine on an unresolvable reference, as
+   `updatepolicy` does, not degrade as `dnssecpolicy` does.
 
-5. **Named policies vs inline+templates** (§4) — the one structural choice left.
-   Named is proposed: bootstrap policy is security policy, and a small set of
-   named, reviewable policies audits better than per-zone hand-rolling, while
-   still reaching zones through templates. Inline needs no new machinery but
-   scatters the policy across the zone list. Everything else in this plan is
-   independent of the answer.
+**All decisions settled. No blockers to starting U-0.**
 
 ---
 
