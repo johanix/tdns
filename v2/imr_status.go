@@ -19,6 +19,14 @@ type ImrStatus struct {
 	PrimedVia string    `json:"primed_via,omitempty"` // "hints+fetch" or "hints-only (root forwarded)"
 	PrimedAt  time.Time `json:"primed_at,omitzero"`
 
+	// RootNS* describe what the cache holds for ". NS" RIGHT NOW. Primed
+	// above says only that priming once happened, which stayed true for
+	// nearly three hours while the resolver could not resolve anything it
+	// had not already cached.
+	RootNSPresent bool      `json:"root_ns_present"`
+	RootNSExpires time.Time `json:"root_ns_expires,omitzero"`
+	RootNSCount   int       `json:"root_ns_count,omitempty"`
+
 	StubZones    []string               `json:"stub_zones,omitempty"`
 	ForwardZones []ImrForwardZoneStatus `json:"forward_zones,omitempty"`
 	// ZonesLoadedAt is when the stub/forward table in this report was
@@ -65,6 +73,7 @@ func (imr *Imr) StatusReport() *ImrStatus {
 	if imr.Cache != nil {
 		st.Primed = imr.Cache.IsPrimed()
 	}
+	st.RootNSPresent, st.RootNSExpires, st.RootNSCount = imr.RootNSStatus()
 	for _, fz := range table.forwards {
 		fzs := ImrForwardZoneStatus{Zone: fz.Zone, TrustAD: fz.TrustAD}
 		for _, up := range fz.Upstreams {

@@ -399,6 +399,11 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 	// not stop the resolver.
 	go imr.ProbeForwardUpstreams(ctx)
 
+	// Keep the root NS alive. Priming above runs once; without this, the root
+	// NS expires on its TTL and cannot be re-fetched, because fetching ". NS"
+	// needs a root server address. See imr_root_refresh.go.
+	go imr.RefreshRoot(ctx, conf.Imr.RootHints)
+
 	for {
 		select {
 		case <-ctx.Done():
