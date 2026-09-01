@@ -176,13 +176,31 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			qname = dns.Fqdn(qname)
-			removed, err := imr.Cache.FlushDomain(qname, false)
+
+			// keep_structural was not expressible here, so "flush common"
+			// -- which exists to preserve the structural records -- reached
+			// this handler and silently behaved as "flush all". Absent it
+			// still means false, which is the previous behaviour and what the
+			// role-scoped "imr flush" asks for.
+			keepStructural, _ := amp.Data["keep_structural"].(bool)
+
+			removed, err := imr.Cache.FlushDomain(qname, keepStructural)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("flush failed: %v", err)
 				return
 			}
-			resp.Msg = fmt.Sprintf("Flushed %d cache entries at and below %s", removed, qname)
+			// The wording is load-bearing, not decoration: a CLI that asked to
+			// keep structural records reads it back to confirm the daemon
+			// understood. An older daemon flushes everything and says so,
+			// which is how the client can tell instead of silently getting
+			// more than it asked for.
+			if keepStructural {
+				resp.Msg = fmt.Sprintf("Flushed %d non-structural cache entries at and below %s",
+					removed, qname)
+			} else {
+				resp.Msg = fmt.Sprintf("Flushed %d cache entries at and below %s", removed, qname)
+			}
 
 		case "imr-reset":
 			imr := Globals.ImrEngine

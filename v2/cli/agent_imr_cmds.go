@@ -82,26 +82,28 @@ func newImrQueryCmd(role string) *cobra.Command {
 }
 
 func newImrFlushCmd(role string) *cobra.Command {
-	return &cobra.Command{
+	var keepStructural bool
+	c := &cobra.Command{
 		Use:   "flush <qname>",
 		Short: "Flush IMR cache entries at and below qname",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			qname := dns.Fqdn(args[0])
-			amr, err := SendImrMgmtCmd(cmd.Context(), role, &tdns.ImrMgmtPost{
-				Command: "imr-flush",
-				Data:    map[string]interface{}{"qname": qname},
-			})
-			if err != nil {
-				log.Fatalf("Request failed: %v", err)
-			}
-			if amr.Error {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", amr.ErrorMsg)
+			if err := SendImrFlush(cmd.Context(), role, dns.Fqdn(args[0]), keepStructural); err != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", err)
 				os.Exit(1)
 			}
-			fmt.Println(amr.Msg)
 		},
 	}
+	// A FLAG, not "flush common" / "flush all" subcommands as the top-level
+	// tree has. Those two are the tdns-imr shell's interface and predate this;
+	// turning "flush" into a parent here would break every existing
+	// "tdns-cli auth imr flush <qname>". Same capability, no flag day.
+	//
+	// Default false, which is what this command has always sent -- absent
+	// keep_structural means a full flush on the daemon side too.
+	c.Flags().BoolVar(&keepStructural, "keep-structural", false,
+		"keep structural records (NS, glue); flush only the rest")
+	return c
 }
 
 func newImrResetCmd(role string) *cobra.Command {
