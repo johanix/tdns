@@ -165,6 +165,11 @@ delegationsync:
             # Whether an operator may install trust out of band. Independent of
             # the above: a policy may allow both automatic and manual.
             manual:          false
+            # Whether an untrusted signer may upload a KEY at all -- i.e.
+            # whether the self-signed bootstrap UPDATE is admitted. This is the
+            # entry condition to the ceremony, which is why it belongs here and
+            # not in updatepolicy (§4.3). Was `updatepolicy.child.keyupload`.
+            allow-unvalidated-upload: true
             retry:
                max-attempts: 3
                interval:     60s
@@ -174,12 +179,14 @@ delegationsync:
             mechanisms:      [ at-apex, at-ns ]
             require-dnssec:  false          # advertises "unsigned"
             manual:          true
+            allow-unvalidated-upload: true
             retry: { max-attempts: 5, interval: 30s }
 
       locked-down:
          bootstrap:
             mechanisms:      [ ]            # nothing automatic
             manual:          true           # advertises "manual" only
+            allow-unvalidated-upload: false # the old `strict-manual`
 
    # ---- PARENT SIDE: transport and publication only -------------------------
    # No policy lives here any more. In particular there is no
@@ -249,12 +256,45 @@ the single source of what a parent claims:
 A parent therefore cannot advertise what it will not do, and a zone with a
 stricter policy than its siblings advertises accordingly.
 
-### 4.2 Removed keys
+### 4.2 The boundary between `updatepolicy` and `delegationpolicy`
+
+**Decided 2026-09-02: `keybootstrap` and `keyupload` both move into the
+delegation policy.** The line between the two blocks is authentication versus
+authorization:
+
+- **`delegationpolicy`** — how a child's SIG(0) key becomes *trusted*. Do I
+  believe this signer is who it claims to be?
+- **`updatepolicy`** — given that I believe them, what are they allowed to
+  change: `type` (selfsub|self|sub|none), `rrtypes`, `ttl`.
+
+A new setting belongs wherever it falls on that line.
+
+`keyupload` moves because it is not merely adjacent to `keybootstrap` — the two
+are read in the *same conditional* (`v2/updateresponder.go:580-587`, mirrored at
+`:760-767`): `keyupload: unvalidated` is honoured only if `keybootstrap` is not
+`strict-manual`. One decision expressed across two fields, so moving one without
+the other would split a single `if` across two config blocks and leave exactly
+the confusion this move exists to remove.
+
+**`strict-manual` disappears as a value.** The old `keybootstrap` enum
+(`manual | dnssec-validated | consistent-lookup | strict-manual`) bundled three
+orthogonal questions into one list, which is why `strict-manual` had to exist as
+a separate value at all — it was "manual, and also refuse unvalidated upload".
+On the three axes above it is just `mechanisms: []` + `manual: true` +
+`allow-unvalidated-upload: false`, which is the `locked-down` policy in §4. The
+other three values map as `manual` → `manual: true`; `dnssec-validated` →
+`require-dnssec: true`; `consistent-lookup` → `mechanisms: [at-ns]`.
+
+### 4.3 Removed keys
 
 `delegationsync.parent.bootstrap.methods`; `delegationsync.parent.update.key-verification.*`
 (folded into the named policy); `updatepolicy.child.keybootstrap`;
-`verifyengine.attempts`; `verifyengine.retry_interval`; and the stale sample-config
-note naming `keystate.require_manual_bootstrap` / `keystate.allow_auto_bootstrap`.
+`updatepolicy.child.keyupload`; `verifyengine.attempts`; `verifyengine.retry_interval`;
+and the stale sample-config note naming `keystate.require_manual_bootstrap` /
+`keystate.allow_auto_bootstrap`.
+
+`updatepolicy.child` retains `type`, `rrtypes` and `ttl` — the authorization
+scope, per §4.2.
 
 ---
 
@@ -301,9 +341,17 @@ refactor.
 ### U-3. Named parent-side delegation policies
 - **Change:** add `delegationsync.policies.*` and the per-zone `delegationpolicy:`
   reference; bind it on the zone the way `dnssecpolicy` binds. Move
-  `key-verification.*` and `updatepolicy.child.keybootstrap` into it and delete both.
+  `key-verification.*`, `updatepolicy.child.keybootstrap` and
+  `updatepolicy.child.keyupload` into it and delete all three (§4.2).
+- **Note:** the two `updatepolicy` fields are read in one conditional
+  (`v2/updateresponder.go:580-587`, mirrored `:760-767`), so they move together
+  and that conditional collapses onto the three orthogonal policy axes. The
+  `strict-manual` enum value ceases to exist — it becomes `mechanisms: []` +
+  `manual: true` + `allow-unvalidated-upload: false`.
 - **Acceptance:** two zones on one parent with different policies bootstrap
-  differently; config naming an unknown policy fails at parse (fail closed).
+  differently; config naming an unknown policy fails at parse (fail closed); each
+  old `keybootstrap` value's behaviour is reproduced by its §4.2 mapping, pinned
+  by tests written against the *current* code before the move.
 - **Est.** ~300-500 LOC.
 
 ### U-4. Derive the SVCB advertisement from policy
