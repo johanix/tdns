@@ -56,17 +56,25 @@ func runCertInit() {
 	if cfgPath == "" {
 		cfgPath = tdns.DefaultAuthCfgFile
 	}
-	v := viper.New()
-	v.SetConfigFile(cfgPath)
-	if err := v.ReadInConfig(); err != nil {
+	// Read the SERVER config with the DAEMON's parser, not viper's.
+	//
+	// This is the one place in tdns-cli that reads a tdns-auth config rather
+	// than the CLI's own, so it gets what the daemon gets: both include forms,
+	// nested includes, and merge: concatenating the allowlisted lists. Reading
+	// it through viper meant a config the daemon loads fine could not be read
+	// here at all (#452), and fixing only the include SYNTAX would have left
+	// the semantics diverging in the same file the daemon is about to load.
+	//
+	// viper still does the lookups below -- MergeConfigMap makes it a query
+	// interface over the already-parsed map. Same shape as `config check`
+	// (loadConfigViper), for the same reason.
+	raw, _, err := tdns.LoadRawConfigMap(cfgPath)
+	if err != nil {
 		cliFatalf("cert init: reading server config %s: %v", cfgPath, err)
 	}
-	// Single-level include: merge, through the same expander tdns-cli uses.
-	// This one reads a SERVER config, which is where the {file, merge} form
-	// actually turns up -- and where reading the list as plain strings left
-	// `cert init` unable to load a config the daemon loads fine (#452).
-	if err := tdns.MergeViperIncludes(v, cfgPath); err != nil {
-		cliFatalf("cert init: %v", err)
+	v := viper.New()
+	if err := v.MergeConfigMap(raw); err != nil {
+		cliFatalf("cert init: building the config view for %s: %v", cfgPath, err)
 	}
 
 	certFile := v.GetString("listeners.certfile")

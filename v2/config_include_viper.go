@@ -29,13 +29,20 @@ import (
 // config (#452). The daemon has parsed both forms since merging existed;
 // sharing its parser is what stops the two drifting apart again.
 //
-// What is NOT reproduced here is merge: true itself. viper deep-merges maps
-// and REPLACES lists, while the daemon concatenates the allowlisted lists
-// (zones:, templates:, dnssec.policies) for an include that asked for it. So a
-// config whose zones are split across two merge: true includes reads
-// differently through viper than through the daemon. That is tolerable --
-// these callers want scalars and maps out of their own config, not a zone set
-// -- and it is announced under --verbose rather than left to be discovered.
+// SCOPE: the tools' OWN configs. Anything reading a SERVER config should call
+// LoadRawConfigMap instead and query the result -- that is the daemon's whole
+// parser rather than its include-entry syntax, and it is what `config check`
+// (loadConfigViper) and `cert init` do. The remaining callers read a small
+// CLI-shaped config of their own, where viper IS the mechanism.
+//
+// That distinction is why what follows is acceptable rather than a hole.
+// merge: true itself is not reproduced: viper deep-merges maps and REPLACES
+// lists, while the daemon concatenates the allowlisted lists (zones:,
+// templates:, dnssec.policies) for an include that asked for it. A config
+// whose zones are split across two merge: true includes therefore reads
+// differently here than in the daemon -- which no longer reaches any config
+// that HAS a zone set, and is announced under --verbose regardless. Nested
+// includes are likewise not followed, where the daemon recurses.
 //
 // A missing include is skipped rather than fatal: it is an optional overlay
 // (a not-yet-installed algorithms.yaml is the case that shaped this), which is
