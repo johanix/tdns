@@ -27,6 +27,15 @@ func TestDsyncOwnerNameRoot(t *testing.T) {
 	}
 }
 
+func TestDsyncPerChildLookupNameRoot(t *testing.T) {
+	if got := dsyncPerChildLookupName("example", "."); got != "example._dsync.root." {
+		t.Fatalf("tld under root = %q", got)
+	}
+	if got := dsyncPerChildLookupName("child", "example."); got != "child._dsync.example." {
+		t.Fatalf("child under example = %q", got)
+	}
+}
+
 func TestBootstrapSVCBReconcile(t *testing.T) {
 	target := "updates.example."
 	desired := "at-apex,at-ns"

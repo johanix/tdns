@@ -348,6 +348,10 @@ func dsyncOwnerName(zonename string) string {
 	return dns.Fqdn("_dsync." + dsyncOwnerLabel(zonename))
 }
 
+func dsyncPerChildLookupName(childLabel, parent string) string {
+	return dns.Fqdn(childLabel + "._dsync." + dsyncOwnerLabel(parent))
+}
+
 func expandDsyncTemplate(tpl, zonename string) string {
 	if tpl == "" {
 		return ""

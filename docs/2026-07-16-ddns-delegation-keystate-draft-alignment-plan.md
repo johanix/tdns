@@ -17,7 +17,8 @@ vocabulary item and shrank D-6 / D-7.** Dead KeyBootstrapper engine gone; one
 `delegationsync.policies.*` vocabulary; parent SVCB advertisement now
 reconciles independently of DSYNC synthesize; receiver-KEY publication uses
 `DsyncUpdateTargetName` (root-zone `{ZONENAME}` expansion). Child
-`update.bootstrap.methods` is parsed (unread until D-6).
+`update.bootstrap.methods` is parsed and consumed at bootstrap (SVCB
+intersection; absent SVCB falls back to the configured list).
 
 | Phase | Item | State | Est. remaining LOC (impl+tests) |
 |---|---|---|---|
@@ -29,13 +30,13 @@ reconciles independently of DSYNC synthesize; receiver-KEY publication uses
 | 1 | K-4 code 7 (KEY_REFUSED) | **DORMANT** — waits on a SIG(0) accepted-algorithm policy (report+enforce, not just report) | ~150-300 |
 | 2 | D-2b UPDATE retry, D-4 bootstrap ceremony | **DONE** (PR #312) | — |
 | 2 | **D-7** mutual auth (moved ahead of D-6 — see note above) | **PARTIAL** — receiver-KEY publication done; child-side verification missing | ~320-580 |
-| 2 | **D-6** SVCB bootstrap consumption | **NOT STARTED** | ~80-180 |
+| 2 | **D-6** SVCB bootstrap consumption | **PARTIAL** — intersection+selection live; at-ns still sends the KEY UPDATE ceremony rather than publishing `_signal` | ~40-80 |
 | 2 | D-3b CDS/CSYNC acceptance (NS/glue half) | **PARTIAL** — DS/RFC7344 half landed independently via #386; RFC7477 NS/glue half still scanner-only | ~400-700 |
 | 3 | IANA alignment | **DEFERRED** by design | — |
 | — | Cross-cutting vocabulary (4 settings, 2 config-reading engines) | **DONE** (PR #471) | — |
 
-**Core Phase 2 remainder (D-7 + D-6 + D-3b): ~800-1460 LOC.
-Everything not yet done (adds D-8's 2 EDE codes ~15-30, K-4 code 8 ~100-200, K-4 code 7 ~150-300): ~1065-1990 LOC.**
+**Core Phase 2 remainder (D-7 + D-6 + D-3b): ~760-1360 LOC.
+Everything not yet done (adds D-8's 2 EDE codes ~15-30, K-4 code 8 ~100-200, K-4 code 7 ~150-300): ~1025-1890 LOC.**
 See "Remaining-work sizing" after the Phase 2 section for the calibration basis and per-item reasoning.
 
 **Ordering note:** K-4's code 8 was blocked on Phase 2. It reports
@@ -157,12 +158,12 @@ active code path, not a future-feature gap like D-6.
 - **Est. size (i, the required part):** ~250-430 LOC impl+tests — acquire/cache/validate the receiver KEY + wire `sig0Verify` into the two remaining call sites + reject-on-failure branches + tests. The third consumer and the root-zone target bug are gone.
 - **Est. size (iii, optional/SHOULD):** ~80-150 LOC — mostly reuses `keyStateResponseWriter`'s existing signing pattern applied to the generic UPDATE responder.
 
-### D-6. Child consumes the SVCB `bootstrap` SvcParamKey — **NOT STARTED**
+### D-6. Child consumes the SVCB `bootstrap` SvcParamKey — **PARTIAL**
 - **Draft (ddns-02 §"SvcParamKey bootstrap", §"Publishing Supported Bootstrap Methods"):** parent publishes an SVCB at the DSYNC {target} with `bootstrap="at-apex,at-ns,unsigned,manual"` (subset); the child SHOULD prefer the strongest method the parent advertises that it can satisfy.
-- **Current (reassessed 2026-09-02 after PR #471):** parent **emits and reconciles** the SVCB from the bound `delegationpolicy` (`PublishDsyncRRs` / `bootstrapSVCBReconcile`), including when the DSYNC RRset is already published — D-6 can consume a real advertisement rather than a first-publish-only record. `UnpublishDsyncRRs` already deletes SVCB+KEY at the UPDATE target. Child `update.bootstrap.methods` is parsed onto `CompiledChildMethods` (omit → `[at-apex, at-ns]`; empty list stays empty). Intersection and selection are still missing. The proxy path now runs the self-signed SIG(0) ceremony (`proxyEnsureParentBootstrap`); remaining D-6 question is whether the proxy also intersects advertised methods.
-- **Change:** child looks up the SVCB at the DSYNC {target} (reuse `imr.ImrQuery`), parses the `bootstrap` value, intersects with `CompiledChildMethods`, and selects the strongest supported method (prefer signed `at-apex`/`at-ns` over `unsigned` over `manual`). Fall back to config when the SVCB is absent.
-- **Acceptance:** with a parent SVCB `bootstrap="unsigned,manual"`, the child selects accordingly rather than attempting `at-apex`.
-- **Est. size:** ~80-180 LOC impl+tests for the auth-child path (SVCB lookup+parse+intersect+select, unit tests for method selection + one acceptance-style integration test). Add ~50-80 LOC if the proxy path also needs to consult the advertised methods.
+- **Current (reassessed 2026-09-02 after T4):** parent **emits and reconciles** the SVCB from the bound `delegationpolicy`. Child looks up that SVCB at the DSYNC UPDATE target, intersects with `CompiledChildMethods`, and selects the strongest overlap (`at-apex` > `at-ns` > `unsigned` > `manual`). Empty intersection refuses. Absent SVCB falls back to the child's configured list. Proxy drops `at-ns` from the willing set. `manual` does not send the KEY UPDATE. `at-apex` / `at-ns` / `unsigned` still share the existing self-signed KEY UPDATE ceremony — the child does not yet publish RFC 9615 `_signal` when `at-ns` wins.
+- **Change remaining:** when the selected method is `at-ns`, publish (auth) or require (proxy: cannot) the KEY at `_sig0key.<child>._signal.<ns>` rather than only sending the apex KEY UPDATE.
+- **Acceptance (met):** with a parent SVCB `bootstrap="unsigned,manual"` and child default `[at-apex, at-ns]`, bootstrap refuses rather than attempting `at-apex`.
+- **Est. size remaining:** ~40-80 LOC if `_signal` publication is taken on.
 
 ### D-3b. CDS/CSYNC acceptance semantics on the UPDATE path — **PARTIAL** (was NOT STARTED; DS half landed independently), **remaining half deferred to its own PR** (decided 2026-08-22)
 
@@ -224,8 +225,8 @@ estimate being smaller than D-4's full 318 despite being a similarly-scoped
 wire format and deferred-delete bookkeeping from nothing, D-7(i) does not.
 
 **Totals:**
-- **Core Phase 2 remainder (D-7 + D-6 + D-3b): ~800-1460 LOC**
-- **Everything not yet done (adds D-8's 2 EDE codes ~15-30, K-4 code 8 ~100-200, K-4 code 7 ~150-300): ~1065-1990 LOC**
+- **Core Phase 2 remainder (D-7 + D-6 + D-3b): ~760-1360 LOC**
+- **Everything not yet done (adds D-8's 2 EDE codes ~15-30, K-4 code 8 ~100-200, K-4 code 7 ~150-300): ~1025-1890 LOC**
 
 These are order-of-magnitude ranges for planning, not commitments — treat them
 the same way the plan treats line-anchors: useful for sizing the work now,

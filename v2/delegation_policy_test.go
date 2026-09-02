@@ -157,6 +157,34 @@ func TestParentDelegationPolicyUnknownUsesCompiledDefault(t *testing.T) {
 	}
 }
 
+func TestRebindLiveDelegationPoliciesOnSetConfig(t *testing.T) {
+	if err := SetDelegationSyncConfig(DelegationSyncConf{
+		Policies: map[string]DelegationPolicyConf{
+			"default": {Bootstrap: DelegationBootstrapConf{Mechanisms: []string{"at-apex"}}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
+
+	p, _ := lookupDelegationPolicy("default")
+	zd := &ZoneData{ZoneName: "rebind-t1.example.", DelegationPolicy: &p}
+	Zones.Set(zd.ZoneName, zd)
+	t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
+
+	if err := SetDelegationSyncConfig(DelegationSyncConf{
+		Policies: map[string]DelegationPolicyConf{
+			"default": {Bootstrap: DelegationBootstrapConf{Mechanisms: []string{"at-ns"}}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := zd.boundDelegationPolicy()
+	if len(got.Mechanisms) != 1 || got.Mechanisms[0] != "at-ns" {
+		t.Fatalf("stale snapshot after SetDelegationSyncConfig: %+v", got)
+	}
+}
+
 func zoneName(zd *ZoneData) string {
 	if zd == nil {
 		return "<nil>"

@@ -17,18 +17,8 @@ func (zd *ZoneData) SendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 	if target == nil || len(target.Addresses) == 0 {
 		return "", 0, UpdateResult{}, fmt.Errorf("SendDelegationUpdate: no usable UPDATE target for %s", zd.ZoneName)
 	}
-	if zd.Parent == "" || zd.Parent == "." {
-		if Globals.ImrEngine == nil {
-			return "", 0, UpdateResult{}, fmt.Errorf("SendDelegationUpdate: parent zone for %s is unknown", zd.ZoneName)
-		}
-		p, perr := Globals.ImrEngine.ParentZone(zd.ZoneName)
-		if perr != nil {
-			return "", 0, UpdateResult{}, fmt.Errorf("SendDelegationUpdate: ParentZone(%s): %w", zd.ZoneName, perr)
-		}
-		zd.Parent = p
-	}
-	if zd.Parent == "" {
-		return "", 0, UpdateResult{}, fmt.Errorf("SendDelegationUpdate: parent zone for %s is unknown", zd.ZoneName)
+	if err := zd.resolveParentZone(); err != nil {
+		return "", 0, UpdateResult{}, fmt.Errorf("SendDelegationUpdate: %w", err)
 	}
 
 	m, err := buildDelegationUpdate(zd.Parent, zd.ZoneName, syncstate, mode)
@@ -109,5 +99,26 @@ func (zd *ZoneData) bootstrapSig0Key(ctx context.Context, alg uint8, apex apexKE
 	if err := apex.EnsureApexKEY(); err != nil {
 		return "", UpdateResult{}, err
 	}
-	return zd.BootstrapSig0KeyWithParent(ctx, alg)
+	_, proxy := apex.(proxyApexKEY)
+	return zd.bootstrapSig0KeyWithParent(ctx, alg, childBootstrapMethods(proxy))
+}
+
+// resolveParentZone fills zd.Parent when it is unset or the old "." sentinel.
+// After IMR resolution, "." is a real parent (the root) and is left in place.
+func (zd *ZoneData) resolveParentZone() error {
+	if zd.Parent != "" && zd.Parent != "." {
+		return nil
+	}
+	if Globals.ImrEngine == nil {
+		return fmt.Errorf("parent zone for %s is unknown", zd.ZoneName)
+	}
+	p, err := Globals.ImrEngine.ParentZone(zd.ZoneName)
+	if err != nil {
+		return fmt.Errorf("ParentZone(%s): %w", zd.ZoneName, err)
+	}
+	zd.Parent = p
+	if zd.Parent == "" {
+		return fmt.Errorf("parent zone for %s is unknown", zd.ZoneName)
+	}
+	return nil
 }

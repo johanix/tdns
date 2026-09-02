@@ -17,7 +17,7 @@ import (
 // This block was read with viper.GetString/GetStringSlice from a dozen call
 // sites. It is now modelled in full and this struct is the ONLY reader: parent
 // bootstrap policy lives in named delegationsync.policies.*, and child
-// update.bootstrap.methods is parsed here (unread until D-6). No viper read of
+// update.bootstrap.methods is parsed here and consumed at bootstrap. No viper read of
 // the delegationsync block remains, with one deliberate exception: the child
 // keygen MODE is still read from viper in sig0_utils.go and is intentionally
 // NOT modelled here -- the sample config says "`algorithm` and `generator` are
@@ -63,8 +63,8 @@ type DelegationSyncChildConf struct {
 }
 
 // DsyncChildUpdateConf is the child side of the UPDATE scheme: keygen, plus
-// bootstrap.methods (parsed here, intersected with the parent advertisement
-// in D-6). The DSYNC keys themselves are the parent's to publish.
+// bootstrap.methods (intersected with the parent SVCB advertisement at
+// bootstrap time). The DSYNC keys themselves are the parent's to publish.
 type DsyncChildUpdateConf struct {
 	Keygen    DsyncKeygenConf `yaml:"keygen" mapstructure:"keygen"`
 	Bootstrap struct {
@@ -324,6 +324,7 @@ func SetDelegationSyncConfig(dsc DelegationSyncConf) error {
 	dsc.CompiledPolicies = compiled
 	dsc.CompiledChildMethods = methods
 	delegationSyncConf.Store(&dsc)
+	rebindLiveDelegationPolicies()
 	return nil
 }
 

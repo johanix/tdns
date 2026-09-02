@@ -156,6 +156,28 @@ func (zd *ZoneData) boundDelegationPolicy() DelegationPolicy {
 	return compiledDefaultDelegationPolicy()
 }
 
+// rebindLiveDelegationPolicies copies the freshly compiled policy of the same
+// name onto every serving zone. bindDelegationPolicy stores a snapshot, so a
+// config reload that only swaps CompiledPolicies would otherwise leave
+// verification, upload gates, and SVCB advertisement on the old copy until
+// ParseZones ran.
+func rebindLiveDelegationPolicies() {
+	for _, zd := range Zones.Items() {
+		if zd == nil || zd.DelegationPolicy == nil {
+			continue
+		}
+		name := zd.DelegationPolicy.Name
+		p, ok := lookupDelegationPolicy(name)
+		if !ok {
+			lgConfig.Warn("delegationpolicy gone after reload; keeping previous snapshot",
+				"zone", zd.ZoneName, "policy", name)
+			continue
+		}
+		cp := p
+		zd.DelegationPolicy = &cp
+	}
+}
+
 func parentDelegationPolicy(childZone string) DelegationPolicy {
 	parent := FindParentZone(childZone)
 	if parent == nil {

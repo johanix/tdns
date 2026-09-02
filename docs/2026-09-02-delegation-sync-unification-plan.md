@@ -545,8 +545,7 @@ those same DNSKEYs.
   disappear; `manual` does **not** — see the shipped-template hazard in §4.3,
   which those templates do set.
 - **Child field:** U-3 adds and *parses* `child.update.bootstrap.methods`;
-  **D-6 does the intersecting**. Parsed-and-unread through U-3/U-6 is fine and
-  silent.
+  bootstrap intersects that list with the parent SVCB advertisement (T4).
 - **Acceptance:** two zones on one parent with different policies bootstrap
   differently; config naming an unknown policy fails at parse (fail closed); each
   old `keybootstrap` value's behaviour is reproduced by its §4.2 mapping, pinned

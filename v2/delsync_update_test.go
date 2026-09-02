@@ -31,6 +31,26 @@ func TestSendDelegationUpdatePreconditions(t *testing.T) {
 	}
 }
 
+func TestResolveParentZoneDotSentinel(t *testing.T) {
+	prev := Globals.ImrEngine
+	Globals.ImrEngine = nil
+	t.Cleanup(func() { Globals.ImrEngine = prev })
+
+	zd := &ZoneData{ZoneName: "example.", Parent: "example."}
+	if err := zd.resolveParentZone(); err != nil {
+		t.Fatalf("known parent: %v", err)
+	}
+
+	zd.Parent = "."
+	if err := zd.resolveParentZone(); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("dot sentinel with no IMR: %v", err)
+	}
+	zd.Parent = ""
+	if err := zd.resolveParentZone(); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("empty parent with no IMR: %v", err)
+	}
+}
+
 func TestBuildDelegationUpdateMode(t *testing.T) {
 	ns, err := dns.NewRR("child.example. 3600 IN NS ns.child.example.")
 	if err != nil {
