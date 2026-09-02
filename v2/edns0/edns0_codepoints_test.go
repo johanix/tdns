@@ -20,6 +20,7 @@ func TestLocalOptionCodesAreUnique(t *testing.T) {
 		"CHUNK":                EDNS0_CHUNK_OPTION_CODE,
 		"CHUNK_QUERY_ENDPOINT": EDNS0_CHUNK_QUERY_ENDPOINT_CODE,
 		"PROVIDERSYNC":         EDNS0_PROVIDERSYNC_OPTION_CODE,
+		"PRIVACY":              EDNS0_PRIVACY_OPTION_CODE,
 	} {
 		if prev, taken := codes[code]; taken {
 			t.Errorf("option code %d is used by both %s and %s;"+
@@ -42,6 +43,7 @@ func TestLocalOptionCodesAreInPrivateUseRange(t *testing.T) {
 		"CHUNK":                EDNS0_CHUNK_OPTION_CODE,
 		"CHUNK_QUERY_ENDPOINT": EDNS0_CHUNK_QUERY_ENDPOINT_CODE,
 		"PROVIDERSYNC":         EDNS0_PROVIDERSYNC_OPTION_CODE,
+		"PRIVACY":              EDNS0_PRIVACY_OPTION_CODE,
 	} {
 		if code < localOptionCodeFirst || code > localOptionCodeLast {
 			t.Errorf("%s uses code %d, outside the local/private-use range %d-%d",

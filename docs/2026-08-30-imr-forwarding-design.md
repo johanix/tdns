@@ -61,10 +61,11 @@ New code is in `v2/imr_forward.go`:
   cache/validation rules as iterative data. `trust-ad` answers instead go
   through `acceptForwardedAnswer`, which takes the answer (CNAME chain
   included) as-is and maps AD onto the cache validation state.
-- The PR flag (encrypted-transport-only) is honored: unencrypted upstreams
-  are skipped, and a forward zone with no encrypted upstream returns the
-  same "PR flag requires encrypted transport" error the responder already
-  turns into an EDE.
+- The PRIVACY option is honored: under strict privacy unencrypted upstreams
+  are skipped, and a forward zone with no encrypted upstream returns the same
+  `ErrPrivacyUnavailable` the responder already turns into an EDE. Under
+  opportunistic privacy the encrypted upstreams are tried first and the
+  cleartext ones remain as fallback.
 
 ## 4. Tests
 

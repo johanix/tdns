@@ -68,7 +68,7 @@ var rootCmd = &cobra.Command{
 		+OOTS=opt_in|opt_out: Set the OOTS (transport signaling) EDNS(0)option
 		+ER=agent.domain: Add EDNS(0) Error Reporting option with agent domain (RFC9567)
 		+DELEG: Set the DELEG bit in queries
-		+PRIVACY or +PR: Set the PR (Privacy Requested) bit in queries (requires encrypted transport)
+		+PRIVACY or +PR[=strict|opportunistic|none]: Add the PRIVACY EDNS(0) option. Bare +PR means strict (the resolver must use an encrypted transport or fail); opportunistic asks it to prefer one but accepts cleartext
 		+MULTI: Present RRs in multi-line format
 		+SHORT: Only print the RDATA of the Answer RRset (dig-compatible; same as --short)
 		+SIGCHASE or +SC: Walk and verify the DNSSEC chain for the qname/qtype, emitting a per-link verdict tree. Server must be a recursive resolver. Trust anchors come from --trust-anchor, the IMR config, or the compiled-in root KSKs.
@@ -160,9 +160,11 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// Warn if PR flag is set but transport is unencrypted
+		// Warn if strict privacy was requested over an unencrypted hop to the
+		// resolver itself. Opportunistic gets no warning: accepting cleartext
+		// is precisely what it asked for.
 		// TODO: Once resolver supports encrypted transports, change this to hard fail
-		if options["pr_bit"] == "true" {
+		if level, ok := privacyLevel(options); ok && level == edns0.PrivacyStrict {
 			transportStr := options["transport"]
 			transport, err := core.StringToTransport(transportStr)
 			if err != nil {
@@ -171,9 +173,9 @@ var rootCmd = &cobra.Command{
 			}
 			if !core.IsEncryptedTransport(transport) {
 				// Hard fail (commented out until resolver supports encrypted transports):
-				// fmt.Printf("Error: PR (Privacy Requested) flag requires encrypted transport, but %s is unencrypted\n", transportStr)
+				// fmt.Printf("Error: strict privacy requires an encrypted transport, but %s is unencrypted\n", transportStr)
 				// os.Exit(1)
-				fmt.Fprintf(os.Stderr, "Warning: PR (Privacy Requested) flag is set but transport %s is unencrypted. This is unsafe and leaks information.\n", transportStr)
+				fmt.Fprintf(os.Stderr, "Warning: strict privacy requested but transport %s is unencrypted. This is unsafe and leaks information.\n", transportStr)
 			}
 		}
 
@@ -317,9 +319,11 @@ var rootCmd = &cobra.Command{
 					// Set DE bit (bit 13) - Delegation Extension
 					opt.Hdr.Ttl |= 1 << 13
 				}
-				if options["pr_bit"] == "true" {
-					// Set PR bit (bit 12) - Privacy Requested
-					opt.Hdr.Ttl |= 1 << 12
+				if level, ok := privacyLevel(options); ok {
+					if err := edns0.AddPrivacyOption(opt, uint8(level)); err != nil {
+						fmt.Printf("Error from AddPrivacyOption: %v", err)
+						os.Exit(1)
+					}
 				}
 				if _, ok := options["oots"]; ok {
 					// -03: zero-length OOTS option; presence is opt-in.
@@ -414,14 +418,15 @@ var rootCmd = &cobra.Command{
 					options["transport"] = transport
 				}
 
-				// Warn if PR flag is set but transport is unencrypted
+				// Warn if strict privacy was requested but the chosen
+				// transport is unencrypted.
 				// TODO: Once resolver supports encrypted transports, change this to hard fail
-				if options["pr_bit"] == "true" {
+				if level, ok := privacyLevel(options); ok && level == edns0.PrivacyStrict {
 					if !core.IsEncryptedTransport(t) {
 						// Hard fail (commented out until resolver supports encrypted transports):
-						// fmt.Printf("Error: PR (Privacy Requested) flag requires encrypted transport, but %s is unencrypted\n", options["transport"])
+						// fmt.Printf("Error: strict privacy requires an encrypted transport, but %s is unencrypted\n", options["transport"])
 						// os.Exit(1)
-						fmt.Fprintf(os.Stderr, "Warning: PR (Privacy Requested) flag is set but transport %s is unencrypted. This is unsafe and leaks information.\n", options["transport"])
+						fmt.Fprintf(os.Stderr, "Warning: strict privacy requested but transport %s is unencrypted. This is unsafe and leaks information.\n", options["transport"])
 					}
 				}
 
@@ -455,13 +460,14 @@ var rootCmd = &cobra.Command{
 				client := core.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
 				res, _, err := client.Exchange(m, server, false) // FIXME: duration is always zero
 				if err == nil && res != nil && res.Truncated && t == core.TransportDo53 && !forceTCP {
-					// Warn if PR flag is set and we're falling back to unencrypted TCP
+					// Warn if strict privacy was requested and we are falling
+					// back to unencrypted TCP.
 					// TODO: Once resolver supports encrypted transports, change this to hard fail
-					if options["pr_bit"] == "true" {
+					if level, ok := privacyLevel(options); ok && level == edns0.PrivacyStrict {
 						// Hard fail (commented out until resolver supports encrypted transports):
-						// fmt.Printf("Error: PR (Privacy Requested) flag requires encrypted transport, but response was truncated and fallback to Do53-TCP is unencrypted\n")
+						// fmt.Printf("Error: strict privacy requires an encrypted transport, but response was truncated and fallback to Do53-TCP is unencrypted\n")
 						// os.Exit(1)
-						fmt.Fprintf(os.Stderr, "Warning: PR (Privacy Requested) flag is set but response was truncated, falling back to unencrypted Do53-TCP. This is unsafe and leaks information.\n")
+						fmt.Fprintf(os.Stderr, "Warning: strict privacy requested but response was truncated, falling back to unencrypted Do53-TCP. This is unsafe and leaks information.\n")
 					}
 					fmt.Println(";; Truncated UDP response received; retrying over TCP")
 					tcpOpts := []core.DNSClientOption{core.WithForceTCP()}
@@ -787,6 +793,21 @@ func showServerPin(options map[string]string) {
 	}
 }
 
+// privacyLevel returns the PRIVACY level +PR put in the options map, and
+// whether the option was asked for at all. An unparseable value cannot occur:
+// ProcessOptions only ever writes back what edns0.ParsePrivacyLevel accepted.
+func privacyLevel(options map[string]string) (edns0.PrivacyLevel, bool) {
+	raw, ok := options["privacy"]
+	if !ok {
+		return edns0.PrivacyNone, false
+	}
+	level, err := edns0.ParsePrivacyLevel(raw)
+	if err != nil {
+		return edns0.PrivacyNone, false
+	}
+	return level, true
+}
+
 // ProcessOptions interprets one +option argument. ucarg is the uppercased
 // form (used for matching); arg is the original argument, needed whenever the
 // option value is case-sensitive (base64 pins, file paths).
@@ -860,9 +881,6 @@ func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]st
 		return options, nil
 	case "+DELEG", "+DE":
 		options["de_bit"] = "true"
-		return options, nil
-	case "+PRIVACY", "+PR":
-		options["pr_bit"] = "true"
 		return options, nil
 	case "+MULTI":
 		options["multi"] = "true"
@@ -973,6 +991,25 @@ func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]st
 				}
 			}
 			options["oots"] = "opt_in"
+			return options, nil
+		}
+
+		// +PR / +PRIVACY: the PRIVACY EDNS(0) option, one octet.
+		//
+		// Bare +PR is strict, which is what the PR flag bit this option
+		// replaced always meant -- an existing "+PR" on a command line keeps
+		// doing what it did. Anything softer has to be asked for by name.
+		if ucargUpper == "+PR" || ucargUpper == "+PRIVACY" ||
+			strings.HasPrefix(ucargUpper, "+PR=") || strings.HasPrefix(ucargUpper, "+PRIVACY=") {
+			level := edns0.PrivacyStrict
+			if idx := strings.Index(ucarg, "="); idx >= 0 {
+				parsed, err := edns0.ParsePrivacyLevel(ucarg[idx+1:])
+				if err != nil {
+					return nil, fmt.Errorf("Error: %v", err)
+				}
+				level = parsed
+			}
+			options["privacy"] = strconv.Itoa(int(level))
 			return options, nil
 		}
 

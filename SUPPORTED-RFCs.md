@@ -263,6 +263,8 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
   - OTS (Option Code 65001) - Transport Signaling
   - KeyState (Option Code 65002) - SIG(0) key state communication
   - Report (Option Code 65003) - Error reporting
+  - PRIVACY (Option Code 65007) - transport privacy request (query) and
+    status (response), one octet
   - ER (Option Code 18) - Error Reporting (RFC 9567)
 
 ---

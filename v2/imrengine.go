@@ -6,6 +6,7 @@ package tdns
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -684,7 +685,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		case len(authservers) == 0:
 			// Use helper function to resolve NS addresses
 			done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
-				rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, false) // PR not required for resolveNSAddresses
+				rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
 				if err != nil {
 					lgImr.Error("IterativeDNSQuery failed", "err", err)
 					// return false, nil // Continue trying
@@ -734,7 +735,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 
 		lgImr.Debug("ImrQuery: sending query to auth servers", "qname", qname, "qtype", dns.TypeToString[qtype], "count", len(authservers))
 
-		rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, false) // PR not required for resolveNSAddresses
+		rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
 		// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 		if err != nil {
 			resp.Error = true
@@ -861,15 +862,76 @@ func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname 
 	return false, nil
 }
 
+// setPrivacyStatus tells a client that asked for privacy what it actually got:
+// the answer came over an encrypted transport, over cleartext, or out of the
+// cache (in which case the resolver asserts nothing about the transport the
+// data originally arrived over -- see edns0.PrivacyCached).
+//
+// The status is only attached when the query carried the PRIVACY option, at
+// any level. A client that never asked gets an unchanged response; there is no
+// point spending bytes telling it about a mechanism it does not implement.
+//
+// The OPT is created with the query's DO bit rather than a hardcoded false:
+// the response OPT must mirror DO (RFC 3225 §3), and the flag-bit code this
+// replaced quietly cleared it whenever it was the thing that built the OPT.
+func setPrivacyStatus(m *dns.Msg, msgoptions *edns0.MsgOptions, status edns0.PrivacyStatus) {
+	if m == nil || msgoptions == nil || !msgoptions.HasPrivacy {
+		return
+	}
+	if m.IsEdns0() == nil {
+		m.SetEdns0(dns.DefaultMsgSize, msgoptions.DO)
+	}
+	if err := edns0.AddPrivacyStatusToMessage(m, status); err != nil {
+		lgImr.Error("failed to attach PRIVACY option to response", "err", err, "status", status.String())
+	}
+}
+
+// attachPrivacyUnavailableEDE turns a strict-privacy dead end into the
+// response the client asked for: SERVFAIL carrying EDE
+// EDEPrivacyRequestedUnavailable, naming the zone whose servers offered no
+// encrypted transport.
+//
+// Shared by both paths that can hit that dead end -- the direct query and the
+// one that first has to resolve NS addresses. Without it the second path
+// answered a bare SERVFAIL, indistinguishable from any other failure, for a
+// client that had explicitly asked to be told why.
+// privacyStatusFor maps the transport an answer actually arrived over onto the
+// response-direction PRIVACY status.
+func privacyStatusFor(transport core.Transport) edns0.PrivacyStatus {
+	if core.IsEncryptedTransport(transport) {
+		return edns0.PrivacyEncrypted
+	}
+	return edns0.PrivacyCleartext
+}
+
+func attachPrivacyUnavailableEDE(m, r *dns.Msg, zone string, msgoptions *edns0.MsgOptions) {
+	m.SetRcode(r, dns.RcodeServerFailure)
+	// An EDE has nowhere to live in a response to a query that carried no OPT.
+	if r.IsEdns0() == nil {
+		return
+	}
+	// Wording covers both ways to reach this: no encrypted transport was
+	// available at all, and every encrypted transport that was available
+	// failed. "Only unencrypted transport available" was true of the first and
+	// a lie about the second -- DoT was tried, it just never answered.
+	edeText := "Strict privacy requested but no answer was obtainable over an encrypted transport"
+	if zone != "" {
+		edeText += fmt.Sprintf(" for zone %s", zone)
+	}
+	edns0.AttachEDEToResponseWithText(m, edns0.EDEPrivacyRequestedUnavailable, edeText, msgoptions.DO)
+}
+
 func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions) {
 	m := new(dns.Msg)
 	m.RecursionAvailable = true
 
 	crrset := imr.Cache.Get(qname, qtype)
 	if crrset != nil {
-		// PR flag enforcement: if PR is set, skip cached data that came over unencrypted transport
-		if msgoptions.PR && !core.IsEncryptedTransport(crrset.Transport) {
-			lgImr.Debug("ImrResponder: PR flag set but cached data came over unencrypted transport, skipping cache", "qname", qname, "qtype", dns.TypeToString[qtype], "transport", core.TransportToString[crrset.Transport])
+		// Strict privacy: cached data that arrived over an unencrypted
+		// transport cannot be served, so drop the hit and re-query. An
+		// opportunistic client accepted cleartext and keeps the cache hit.
+		if msgoptions.Privacy == edns0.PrivacyStrict && !core.IsEncryptedTransport(crrset.Transport) {
+			lgImr.Debug("ImrResponder: strict privacy requested but cached data came over unencrypted transport, skipping cache", "qname", qname, "qtype", dns.TypeToString[qtype], "transport", core.TransportToString[crrset.Transport])
 			crrset = nil // Force query over encrypted transport
 		}
 	}
@@ -890,11 +952,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			m.Answer = append(m.Answer, crrset.RRset.RRSIGs...)
 		}
 		m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
-		if core.IsEncryptedTransport(crrset.Transport) {
-			if err := edns0.SetPRFlagInMessage(m); err != nil {
-				lgImr.Error("ImrResponder: failed to set PR flag in response", "err", err)
-			}
-		}
+		setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 		w.WriteMsg(m)
 		return
 	}
@@ -917,11 +975,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			m.Answer = append(m.Answer, crrset.RRset.RRSIGs...)
 		}
 		m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
-		if core.IsEncryptedTransport(crrset.Transport) {
-			if err := edns0.SetPRFlagInMessage(m); err != nil {
-				lgImr.Error("ImrResponder: failed to set PR flag in response", "err", err)
-			}
-		}
+		setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 		w.WriteMsg(m)
 		return
 	}
@@ -938,12 +992,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			//	m.AuthenticatedData = true
 			// }
 			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
-			// Set PR flag in response if Answer came over encrypted transport
-			if core.IsEncryptedTransport(crrset.Transport) {
-				if err := edns0.SetPRFlagInMessage(m); err != nil {
-					lgImr.Error("ImrResponder: failed to set PR flag in response", "err", err)
-				}
-			}
+			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 			w.WriteMsg(m)
 			return
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextNoErrNoAns &&
@@ -958,12 +1007,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			//	m.AuthenticatedData = true
 			// }
 			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
-			// Set PR flag in response if Answer came over encrypted transport
-			if core.IsEncryptedTransport(crrset.Transport) {
-				if err := edns0.SetPRFlagInMessage(m); err != nil {
-					lgImr.Error("ImrResponder: failed to set PR flag in response", "err", err)
-				}
-			}
+			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 			w.WriteMsg(m)
 			return
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextAnswer &&
@@ -996,12 +1040,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			//	m.AuthenticatedData = true
 			// }
 			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
-			// Set PR flag in response if Answer came over encrypted transport
-			if core.IsEncryptedTransport(crrset.Transport) {
-				if err := edns0.SetPRFlagInMessage(m); err != nil {
-					lgImr.Error("ImrResponder: failed to set PR flag in response", "err", err)
-				}
-			}
+			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 			w.WriteMsg(m)
 			return
 		}
@@ -1034,10 +1073,20 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				// Use helper function to resolve NS addresses
 				// Note: The callback is called after processing each A/AAAA response.
 				// We try the query for each address we discover, similar to the original code.
+				// A strict-privacy dead end hit inside the callback is
+				// remembered rather than returned: a later address may still
+				// produce an answer, and only if none does is this the reason
+				// the query failed. Losing it made the responder answer a bare
+				// SERVFAIL here while the direct path below answered with the
+				// EDE, for the same failure.
+				var privacyErr error
 				done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
 					// Try querying with the current set of authservers
-					rrset, rcode, context, transport, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, msgoptions.PR)
+					rrset, rcode, context, transport, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, msgoptions.Privacy)
 					if err != nil {
+						if errors.Is(err, ErrPrivacyUnavailable) {
+							privacyErr = err
+						}
 						lgImr.Error("IterativeDNSQuery failed", "err", err)
 						return false, nil // Continue trying with next address
 					}
@@ -1051,7 +1100,11 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 					return false, nil // Continue trying with next address
 				})
 				if err != nil {
-					m.SetRcode(r, dns.RcodeServerFailure)
+					if errors.Is(err, ErrPrivacyUnavailable) {
+						attachPrivacyUnavailableEDE(m, r, bestmatch, msgoptions)
+					} else {
+						m.SetRcode(r, dns.RcodeServerFailure)
+					}
 					w.WriteMsg(m)
 					return
 				}
@@ -1060,29 +1113,24 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				}
 				// If we get here, we tried all responses without finding a usable address
 				lgImr.Warn("ImrResponder: failed to resolve query using any nameserver address", "qname", qname, "qtype", dns.TypeToString[qtype])
-				m.SetRcode(r, dns.RcodeServerFailure)
+				if privacyErr != nil {
+					attachPrivacyUnavailableEDE(m, r, bestmatch, msgoptions)
+				} else {
+					m.SetRcode(r, dns.RcodeServerFailure)
+				}
 				w.WriteMsg(m)
 				return
 			}
 
 			lgImr.Debug("ImrResponder: sending query to authservers", "qname", qname, "qtype", dns.TypeToString[qtype], "count", len(authservers), "zone", bestmatch)
-			rrset, rcode, context, transport, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, msgoptions.PR)
+			rrset, rcode, context, transport, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, msgoptions.Privacy)
 			// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 			if err != nil {
-				// If PR flag is set and we can't get encrypted transport, return SERVFAIL+EDE
-				if msgoptions.PR && strings.Contains(err.Error(), "PR flag requires encrypted transport") {
-					m.SetRcode(r, dns.RcodeServerFailure)
-					// Attach EDE only if query had EDNS0
-					if r.IsEdns0() != nil {
-						// Include zone name in EDE text for better diagnostics
-						var edeText string
-						if bestmatch != "" {
-							edeText = fmt.Sprintf("Privacy requested but only unencrypted transport available for zone %s", bestmatch)
-						} else {
-							edeText = "Privacy requested but only unencrypted transport available"
-						}
-						edns0.AttachEDEToResponseWithText(m, edns0.EDEPrivacyRequestedUnavailable, edeText, msgoptions.DO)
-					}
+				// Strict privacy was requested and no encrypted transport was
+				// available: SERVFAIL + EDE, rather than quietly leaking the
+				// query in cleartext.
+				if errors.Is(err, ErrPrivacyUnavailable) {
+					attachPrivacyUnavailableEDE(m, r, bestmatch, msgoptions)
 					w.WriteMsg(m)
 					return
 				}
@@ -1121,12 +1169,24 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		if msgoptions.DO {
 			m.Answer = append(m.Answer, rrset.RRSIGs...)
 		}
-		// Set PR flag in response if Answer came over encrypted transport
-		if core.IsEncryptedTransport(transport) {
-			if err := edns0.SetPRFlagInMessage(m); err != nil {
-				lgImr.Error("failed to set PR flag in response", "err", err)
-			}
-		}
+		// The PRIVACY status is attached on the paths that actually SERVE this
+		// answer, below, not here. Validation runs between the two, and a
+		// failure turns m into a SERVFAIL whose Answer is cleared -- but the
+		// OPT lives in Extra and survives that, so a status attached up here
+		// rode out on a response carrying no answer at all. SERVFAIL is
+		// status-less by design: there is no served data whose privacy could
+		// be reported, and the EDE is the signal.
+		//
+		// What is reported is the transport the answer actually arrived over.
+		// One imprecision: IterativeDNSQuery reports the recorded transport
+		// for data it served from its own cache (a CNAME hop, say), so such an
+		// answer is reported as encrypted/cleartext rather than as
+		// PrivacyCached. Under strict privacy that is still accurate -- cached
+		// data that arrived over cleartext is not served at all -- and
+		// reporting the recorded transport is never a claim of MORE privacy
+		// than the data got. Only ImrResponder's own cache short-circuits,
+		// above, can say "from cache" without qualification.
+		//
 		// Set AD if this RRset is ValidationStateSecure (from cache or on-the-fly)
 		vstate := cache.ValidationStateNone
 		var err error
@@ -1150,10 +1210,12 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		}
 		if vstate == cache.ValidationStateSecure && shouldValidate {
 			m.AuthenticatedData = true
+			setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 			w.WriteMsg(m)
 			return true, nil
 		}
 		if !shouldValidate {
+			setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 			w.WriteMsg(m)
 			return true, nil
 		}
@@ -1182,10 +1244,20 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		w.WriteMsg(m)
 		return true, nil
 	}
+	// A negative answer was fetched over a transport just as a positive one
+	// was, so it carries the same status. Omitting it here was a hole a client
+	// could not read as anything but "the resolver ignored my request": the
+	// cached-negative paths in ImrResponder do attach PrivacyCached, and the
+	// migration note tells a strict client to treat a missing status as a
+	// resolver that did not honor the option.
+	//
+	// The SERVFAIL paths above stay status-less on purpose -- there the EDE is
+	// the signal, and there is no transport whose privacy could be reported.
 	switch context {
 	case cache.ContextNXDOMAIN:
 		m.SetRcode(r, dns.RcodeNameError)
 		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r)
+		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil
 	case cache.ContextReferral:
@@ -1194,6 +1266,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 	case cache.ContextNoErrNoAns:
 		m.SetRcode(r, dns.RcodeSuccess)
 		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r)
+		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil
 	}
@@ -1885,7 +1958,7 @@ func (imr *Imr) updateDNSKEYCacheFromRRset(anchorName string, rrset *core.RRset,
 // validateNSRRsetForAnchor validates the NS RRset for a trust anchor zone.
 func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string, serverMap map[string]*cache.AuthServer) {
 	// Fetch and validate the NS RRset for the anchor zone (non-fatal - continue even if it fails)
-	nsRRset, _, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, true, false) // PR not required for trust anchor initialization
+	nsRRset, _, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
 	if err != nil {
 		lgImr.Warn("failed to fetch NS RRset for trust anchor zone", "zone", anchorName, "err", err)
 		return
@@ -1955,7 +2028,7 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 			return fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
 		}
 	}
-	rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeDNSKEY, serverMap, true, false) // PR not required for trust anchor initialization
+	rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeDNSKEY, serverMap, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
 	if err != nil {
 		return fmt.Errorf("failed to fetch %s DNSKEY: %v", anchorName, err)
 	}
