@@ -92,7 +92,7 @@ forward:
 }
 
 func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
-	forwards, err := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
 		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.3"}}},
 		{Zone: "Foo.Bar", Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "doq"},
@@ -102,8 +102,8 @@ func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 		}},
 		{Zone: "bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.2", Transport: "dot", Port: 8853}}},
 	})
-	if err != nil {
-		t.Fatalf("BuildImrForwards: %v", err)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
 	}
 	// Most-specific first: foo.bar. (2 labels), bar. (1), . (0).
 	if forwards[0].Zone != "foo.bar." || forwards[1].Zone != "bar." || forwards[2].Zone != "." {
@@ -130,55 +130,93 @@ func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 	}
 
 	// trust-ad demands an authenticated channel and must be accepted on one.
-	if _, err := BuildImrForwards([]ImrForwardConf{
+	if _, d := BuildImrForwards([]ImrForwardConf{
 		{Zone: "ok.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot", TLSServerName: "dns.example.com"},
 			{Addr: "192.0.2.2", Transport: "doq"},
 		}},
-	}); err != nil {
-		t.Errorf("trust-ad with verified encrypted upstreams rejected: %v", err)
+	}); len(d) != 0 {
+		t.Errorf("trust-ad with verified encrypted upstreams rejected: %v", d)
 	}
 
+	// Every one of these used to abort the whole build, and with it the
+	// daemon (#475). Each must now produce a diag AND leave the table in the
+	// stated shape: a zone that cannot be named (or is a duplicate of one
+	// already configured) is DROPPED, everything else is QUARANTINED so that
+	// names under the zone SERVFAIL instead of falling back to iteration.
 	bad := []struct {
 		name string
 		conf []ImrForwardConf
+		// wantZones is the number of zones that reach the table.
+		wantZones int
+		// wantQuarantined is how many of them are quarantined.
+		wantQuarantined int
+		// wantUpQuarantined counts quarantined upstreams across the table.
+		wantUpQuarantined int
 	}{
-		{"hostname addr", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "dns.example.com"}}}}},
-		{"unknown transport", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "smtp"}}}}},
-		{"tls options on do53", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", TLSServerName: "x.example."}}}}},
+		{"hostname addr", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "dns.example.com"}}}}, 1, 1, 1},
+		{"unknown transport", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "smtp"}}}}, 1, 1, 1},
+		{"tls options on do53", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", TLSServerName: "x.example."}}}}, 1, 1, 1},
+		// The duplicate is dropped and the FIRST definition stands, serving.
 		{"duplicate zone", []ImrForwardConf{
 			{Zone: "foo.bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}},
 			{Zone: "Foo.bar", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.2"}}},
-		}},
-		{"no upstreams", []ImrForwardConf{{Zone: "foo.bar."}}},
-		{"no zone", []ImrForwardConf{{Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}},
+		}, 1, 0, 0},
+		// Kept, not dropped: dropping it would hand the zone to iteration.
+		{"no upstreams", []ImrForwardConf{{Zone: "foo.bar."}}, 1, 1, 0},
+		{"no zone", []ImrForwardConf{{Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}, 0, 0, 0},
 		// A spoofable AD bit must not be a Secure-cache oracle: trust-ad
-		// over plaintext or unverified TLS is refused at build time.
-		{"trust-ad on do53", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}},
-		{"trust-ad on tcp", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "tcp"}}}}},
-		{"trust-ad with insecure dot", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "dot", Insecure: true}}}}},
+		// over plaintext or unverified TLS is quarantined at build time.
+		{"trust-ad on do53", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}, 1, 1, 1},
+		{"trust-ad on tcp", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "tcp"}}}}, 1, 1, 1},
+		{"trust-ad with insecure dot", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "dot", Insecure: true}}}}, 1, 1, 1},
+		// The one case that keeps serving: the dot upstream authenticates,
+		// so only the plaintext one is quarantined and the zone survives
+		// with reduced redundancy.
 		{"trust-ad with one plaintext upstream", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot"},
 			{Addr: "192.0.2.2"},
-		}}}},
+		}}}, 1, 0, 1},
 	}
 	for _, b := range bad {
-		if _, err := BuildImrForwards(b.conf); err == nil {
-			t.Errorf("%s: config accepted, want error", b.name)
+		forwards, diags := BuildImrForwards(b.conf)
+		if len(diags) == 0 {
+			t.Errorf("%s: config accepted silently, want a diag", b.name)
+		}
+		if len(forwards) != b.wantZones {
+			t.Errorf("%s: %d zone(s) in the table, want %d", b.name, len(forwards), b.wantZones)
+			continue
+		}
+		gotZQ, gotUQ := 0, 0
+		for _, fz := range forwards {
+			if fz.isQuarantined() {
+				gotZQ++
+			}
+			for _, up := range fz.Upstreams {
+				if up.isQuarantined() {
+					gotUQ++
+				}
+			}
+		}
+		if gotZQ != b.wantQuarantined {
+			t.Errorf("%s: %d quarantined zone(s), want %d", b.name, gotZQ, b.wantQuarantined)
+		}
+		if gotUQ != b.wantUpQuarantined {
+			t.Errorf("%s: %d quarantined upstream(s), want %d", b.name, gotUQ, b.wantUpQuarantined)
 		}
 	}
 }
 
 // The TLS settings of an encrypted upstream must reach the DNS client.
 func TestForwardUpstreamTLSConfig(t *testing.T) {
-	forwards, err := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
 		{Zone: "a.example.", Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "doq", TLSServerName: "dns.example.com"},
 			{Addr: "192.0.2.2", Transport: "dot", Insecure: true},
 		}},
 	})
-	if err != nil {
-		t.Fatalf("BuildImrForwards: %v", err)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
 	}
 	doq := forwards[0].Upstreams[0].Client.(*core.DNSClient)
 	if doq.TLSConfig.ServerName != "dns.example.com" {
@@ -200,13 +238,13 @@ func TestForwardUpstreamTLSConfig(t *testing.T) {
 }
 
 func TestForwardZoneFor(t *testing.T) {
-	forwards, err := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
 		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}},
 		{Zone: "sub.foo.bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.2"}}},
 		{Zone: "foo.bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.3"}}},
 	})
-	if err != nil {
-		t.Fatalf("BuildImrForwards: %v", err)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
 	}
 	// foo.bar. is deliberately BOTH a stub and a forward zone: equal
 	// specificity means the forward wins — a stub overrides only when it is
@@ -581,9 +619,9 @@ func startTestUpstreamDoQ(t *testing.T, cert tls.Certificate) (string, uint16, *
 
 func newForwardTestImr(t *testing.T, conf []ImrForwardConf) *Imr {
 	t.Helper()
-	forwards, err := BuildImrForwards(conf)
-	if err != nil {
-		t.Fatalf("BuildImrForwards: %v", err)
+	forwards, diags := BuildImrForwards(conf)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
 	}
 	lg := log.New(os.Stderr, "test", log.LstdFlags)
 	imr := &Imr{
@@ -1193,14 +1231,14 @@ func TestBuildImrForwardsCAFile(t *testing.T) {
 		t.Fatalf("write garbage: %v", err)
 	}
 
-	forwards, err := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
 		{Zone: ".", Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot", TLSServerName: "dns.example.", CAFile: caFile},
 			{Addr: "192.0.2.2", Transport: "dot", TLSServerName: "dns.example."},
 		}},
 	})
-	if err != nil {
-		t.Fatalf("BuildImrForwards with ca-file: %v", err)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards with ca-file: unexpected diags: %v", diags)
 	}
 	withCA := forwards[0].Upstreams[0].Client.(*core.DNSClient)
 	if withCA.TLSConfig == nil || withCA.TLSConfig.RootCAs == nil {
@@ -1228,8 +1266,15 @@ func TestBuildImrForwardsCAFile(t *testing.T) {
 			{Addr: "192.0.2.1", Transport: "dot", CAFile: notPEM}}}}},
 	}
 	for _, b := range bad {
-		if _, err := BuildImrForwards(b.conf); err == nil {
-			t.Errorf("%s: accepted, want an error", b.name)
+		forwards, diags := BuildImrForwards(b.conf)
+		if len(diags) == 0 {
+			t.Errorf("%s: accepted silently, want a diag", b.name)
+		}
+		// The zone stays in the table with its only upstream quarantined,
+		// so names under it SERVFAIL rather than reaching an unverified
+		// upstream or falling back to iteration.
+		if len(forwards) != 1 || !forwards[0].isQuarantined() {
+			t.Errorf("%s: want 1 quarantined zone, got %d zone(s)", b.name, len(forwards))
 		}
 	}
 }

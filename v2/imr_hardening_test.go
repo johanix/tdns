@@ -22,17 +22,17 @@ import (
 // per interval per zone, however hot the query load.
 func TestForwardServfailLogThrottle(t *testing.T) {
 	fz := &ForwardZone{Zone: "fwd.example."}
-	if !fz.noteAllUpstreamsFailed("www.fwd.example.", dns.TypeA, 1, fmt.Errorf("timeout")) {
+	if !fz.noteAllUpstreamsFailed("www.fwd.example.", dns.TypeA, 1, 1, fmt.Errorf("timeout")) {
 		t.Error("first SERVFAIL not logged")
 	}
 	for i := 0; i < 5; i++ {
-		if fz.noteAllUpstreamsFailed("www.fwd.example.", dns.TypeA, 1, fmt.Errorf("timeout")) {
+		if fz.noteAllUpstreamsFailed("www.fwd.example.", dns.TypeA, 1, 1, fmt.Errorf("timeout")) {
 			t.Fatal("throttle did not suppress an immediate repeat")
 		}
 	}
 	// A different zone throttles independently.
 	fz2 := &ForwardZone{Zone: "other.example."}
-	if !fz2.noteAllUpstreamsFailed("x.other.example.", dns.TypeA, 1, fmt.Errorf("timeout")) {
+	if !fz2.noteAllUpstreamsFailed("x.other.example.", dns.TypeA, 1, 1, fmt.Errorf("timeout")) {
 		t.Error("second zone's first SERVFAIL suppressed by the first zone's throttle")
 	}
 }

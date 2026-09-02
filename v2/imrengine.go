@@ -258,9 +258,17 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	// resolves the root NS through the iterative path, and with a "zone: ."
 	// forward those priming queries must reach the upstream resolver rather
 	// than the root servers.
-	forwards, err := BuildImrForwards(conf.Imr.Forward)
-	if err != nil {
-		return fmt.Errorf("InitImrEngine: %v", err)
+	// Diags are reported, not fatal (#475): one misconfigured forward zone
+	// used to stop the resolver entirely, even though every other forward
+	// zone and the iterative path would have worked. The offending upstream
+	// or zone is quarantined instead and the daemon starts.
+	forwards, fwdDiags := BuildImrForwards(conf.Imr.Forward)
+	for _, d := range fwdDiags {
+		if d.Dropped {
+			lgImr.Error("forward config entry dropped", "problem", d.String())
+			continue
+		}
+		lgImr.Error("forward config quarantined", "problem", d.String())
 	}
 	stubZones, stubFP, _ := canonicalStubs(conf.Imr.Stubs)
 	// Published before priming: PrimeWithHints resolves through the
@@ -269,10 +277,17 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	imr.setZoneTable(forwards, stubZones, map[string]string{})
 	imr.bootConf = conf.Imr
 	imr.errorRegistry = conf.Internal.ServerErrors
+	// After errorRegistry is set, or the aggregate has nowhere to go.
+	imr.updateForwardQuarantineError()
 	for _, fz := range forwards {
 		ups := make([]string, 0, len(fz.Upstreams))
 		for _, up := range fz.Upstreams {
 			ups = append(ups, up.Label)
+		}
+		if q, why := fz.quarantineState(); q {
+			lgImr.Error("adding forward zone QUARANTINED: names under it will SERVFAIL",
+				"zone", fz.Zone, "reason", why)
+			continue
 		}
 		lgImr.Info("adding forward zone", "zone", fz.Zone, "trust-ad", fz.TrustAD, "upstreams", strings.Join(ups, ", "))
 	}
