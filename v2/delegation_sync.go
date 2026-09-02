@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -223,6 +224,14 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 	// EnsureApexKEY (PublishKeyRRs via Sig0KeyPreparation) then the ceremony.
 	// The proxy path uses a no-op ensurer: the operator publishes the KEY.
 	msg, ur, err := zd.bootstrapSig0Key(ctx, alg, authApexKEY{zd: zd, kdb: kdb, alg: alg})
+	if errors.Is(err, errBootstrapManual) {
+		// The parent's bootstrap is manual by design; this is the state
+		// MANUAL-BOOTSTRAP-REQUIRED exists for, and it recurs on every load
+		// until the operator acts. Not an error.
+		lgDns.Info("DelegationSyncSetup: parent requires manual SIG(0) bootstrap; the apex KEY is published, waiting for the operator",
+			"zone", zd.ZoneName, "msg", msg)
+		return nil
+	}
 	if err != nil {
 		lgDns.Error("DelegationSyncSetup: error from BootstrapSig0KeyWithParent", "zone", zd.ZoneName, "err", err)
 		for _, tes := range ur.TargetStatus {

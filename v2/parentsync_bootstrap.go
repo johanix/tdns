@@ -102,6 +102,13 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 				"zone", zone, "keyid", keyid)
 			UpdateParentState(kdb, keyName, keyid, keyState)
 			if err := BootstrapWithParent(ctx, zone, keyName, algorithm); err != nil {
+				if errors.Is(err, errBootstrapManual) {
+					// MANUAL-BOOTSTRAP-REQUIRED from the child's side: nothing
+					// automatic will change this; the operator has to act.
+					lgElect.Info("ParentSyncAfterKeyPublication: parent requires manual SIG(0) bootstrap; waiting for the operator",
+						"zone", zone, "keyid", keyid)
+					return true, nil // done, not a failure
+				}
 				if errors.Is(err, errBootstrapAdvertisementLookup) {
 					// The parent's SVCB advertisement could not be looked up.
 					// Not a verdict on the method set, so not terminal: retry
@@ -125,6 +132,27 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 				"zone", zone, "keyid", keyid, "attempt", attempt)
 			UpdateParentState(kdb, keyName, keyid, keyState)
 			return false, nil // retry
+
+		case edns0.KeyStateBootstrapManualRequired:
+			// keystate-03 code 10: the parent knows the key but will only
+			// trust it after a manual step. Terminal for this poll, and not
+			// a failure: the operator has to act. Same treatment as the
+			// child-side selection of the manual method above.
+			lgElect.Info("ParentSyncAfterKeyPublication: parent requires manual bootstrap for our key; waiting for the operator",
+				"zone", zone, "keyid", keyid, "detail", ks.ExtraText)
+			UpdateParentState(kdb, keyName, keyid, keyState)
+			return true, nil // done
+
+		case edns0.KeyStateValidationFail:
+			// keystate-03 code 8: the parent tried to verify the key and gave
+			// up. Waiting will not resolve it and re-sending the same key
+			// would fail the same way; the EXTRA-TEXT says what the parent
+			// could not find. Terminal and an error.
+			lgElect.Error("ParentSyncAfterKeyPublication: parent reports our key's validation FAILED;"+
+				" it will not become trusted by waiting. Fix the KEY's publication (at-apex / at-ns, DNSSEC if the parent requires it) and re-bootstrap",
+				"zone", zone, "keyid", keyid, "detail", ks.ExtraText)
+			UpdateParentState(kdb, keyName, keyid, keyState)
+			return true, fmt.Errorf("parent reports KEY_VALIDATION_FAILED for keyid %d: %s", keyid, ks.ExtraText)
 
 		case edns0.KeyStateTemporaryFailure:
 			// keystate-03: the receiver understood the inquiry but is

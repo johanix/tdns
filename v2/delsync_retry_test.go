@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -270,4 +271,20 @@ func TestSendUpdateWithRetryDefersReBootstrapOnAdvertisementLookupFailure(t *tes
 			t.Errorf("reboots = %d, want 3 (one deferred attempt per retry)", reboots)
 		}
 	})
+}
+
+// A re-bootstrap that reports the parent requires MANUAL bootstrap is
+// terminal on the first attempt: retrying cannot help, and the error says
+// what the operator has to do.
+func TestSendUpdateWithRetryManualBootstrapIsTerminal(t *testing.T) {
+	sends, reboots := 0, 0
+	_, _, err := sendUpdateWithRetry(context.Background(), 5, time.Millisecond,
+		func() (int, UpdateResult, error) { sends++; return dns.RcodeBadKey, UpdateResult{}, nil },
+		func() error { reboots++; return fmt.Errorf("BootstrapSig0KeyWithParent: %w", errBootstrapManual) })
+	if !errors.Is(err, errBootstrapManual) {
+		t.Fatalf("err = %v, want errBootstrapManual", err)
+	}
+	if sends != 1 || reboots != 1 {
+		t.Errorf("sends=%d reboots=%d, want 1 and 1", sends, reboots)
+	}
 }

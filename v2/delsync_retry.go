@@ -121,6 +121,12 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 			}
 			lgDns.Warn("sendUpdateWithRetry: BADKEY, re-bootstrapping SIG(0) key once")
 			if berr := reBootstrap(); berr != nil {
+				if errors.Is(berr, errBootstrapManual) {
+					// Terminal, and the reason is actionable: the UPDATE
+					// cannot proceed until the operator completes the
+					// parent's manual bootstrap.
+					return true, fmt.Errorf("delegation UPDATE got BADKEY and the parent requires manual SIG(0) bootstrap; complete it and retry: %w", berr)
+				}
 				if errors.Is(berr, errBootstrapAdvertisementLookup) {
 					// The re-bootstrap never got as far as choosing a method:
 					// the parent's advertisement could not be looked up. Leave

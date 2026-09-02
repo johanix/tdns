@@ -151,6 +151,13 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 	return nil
 }
 
+// errBootstrapManual: the selected SIG(0) bootstrap method is manual, so no
+// automatic ceremony was (or could be) sent. The draft's
+// MANUAL-BOOTSTRAP-REQUIRED state seen from the child's side; callers with a
+// per-load or retry loop treat it as "waiting for the operator", not as an
+// error to retry or to log as such.
+var errBootstrapManual = errors.New("manual SIG(0) bootstrap required by the parent")
+
 func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (string, UpdateResult, error) {
 	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods())
 }
@@ -229,8 +236,11 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 	lgHandler.Info("BootstrapSig0KeyWithParent: selected bootstrap method",
 		"zone", zd.ZoneName, "method", method, "advertised", advertised, "willing", willing)
 	if method == "manual" {
-		msg := fmt.Sprintf("BootstrapSig0KeyWithParent(%q): bootstrap method is manual; not sending KEY UPDATE", zd.ZoneName)
-		return msg, UpdateResult{}, fmt.Errorf("bootstrap method is manual")
+		// Not a failure: the parent said so (its SVCB advertisement, or the
+		// child's own list), and the operator has to do the rest. Callers
+		// that run on every zone load log this at Info, not Error.
+		msg := fmt.Sprintf("BootstrapSig0KeyWithParent(%q): parent requires manual SIG(0) bootstrap; not sending KEY UPDATE", zd.ZoneName)
+		return msg, UpdateResult{}, fmt.Errorf("%w for %s", errBootstrapManual, zd.ZoneName)
 	}
 	if method == "at-ns" {
 		// The parent will look for this KEY at _sig0key.<child>._signal.<ns>
