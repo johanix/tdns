@@ -94,8 +94,22 @@ func tamperKeyState(t *testing.T, wire []byte, newState uint8) (*dns.Msg, []byte
 	return r, out
 }
 
+func fetchState(keys []dns.RR, state cache.ValidationState, err error) receiverKeyFetcher {
+	return func(context.Context, string) ([]dns.RR, cache.ValidationState, error) { return keys, state, err }
+}
+
+// fetchKeys: validated means DNSSEC-secure; not validated means an unsigned
+// (insecure) answer, which is the waivable kind.
 func fetchKeys(keys []dns.RR, validated bool, err error) receiverKeyFetcher {
-	return func(context.Context, string) ([]dns.RR, bool, error) { return keys, validated, err }
+	state := cache.ValidationStateInsecure
+	if validated {
+		state = cache.ValidationStateSecure
+	}
+	return fetchState(keys, state, err)
+}
+
+func dsyncTarget(validated bool) *DsyncTarget {
+	return &DsyncTarget{Name: d7Receiver, Validated: validated}
 }
 
 func noTrust(string, uint16) (*dns.KEY, bool) { return nil, false }
@@ -211,7 +225,7 @@ func TestVerifyKeyStateResponse(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			auth, err := verifyKeyStateResponse(context.Background(), c.wire, c.r, d7Receiver, c.dsyncOK,
+			auth, err := verifyKeyStateResponse(context.Background(), c.wire, c.r, dsyncTarget(c.dsyncOK),
 				noTrust, c.fetch, c.allowInsecure)
 			if c.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
@@ -250,7 +264,7 @@ func TestVerifyKeyStateResponseManualTrust(t *testing.T) {
 	ctx := context.Background()
 
 	// Nothing in the truststore: cannot authenticate.
-	if _, err := verifyKeyStateResponse(ctx, wire, signed, d7Receiver, false, trust, lookupFails, false); err == nil {
+	if _, err := verifyKeyStateResponse(ctx, wire, signed, dsyncTarget(false), trust, lookupFails, false); err == nil {
 		t.Fatal("expected rejection with an empty truststore")
 	}
 
@@ -261,7 +275,7 @@ func TestVerifyKeyStateResponseManualTrust(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("truststore add: %v", err)
 	}
-	if _, err := verifyKeyStateResponse(ctx, wire, signed, d7Receiver, false, trust, lookupFails, false); err == nil {
+	if _, err := verifyKeyStateResponse(ctx, wire, signed, dsyncTarget(false), trust, lookupFails, false); err == nil {
 		t.Fatal("expected rejection while the receiver key is untrusted")
 	}
 
@@ -272,7 +286,7 @@ func TestVerifyKeyStateResponseManualTrust(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("truststore trust: %v", err)
 	}
-	auth, err := verifyKeyStateResponse(ctx, wire, signed, d7Receiver, false, trust, lookupFails, false)
+	auth, err := verifyKeyStateResponse(ctx, wire, signed, dsyncTarget(false), trust, lookupFails, false)
 	if err != nil {
 		t.Fatalf("manually trusted receiver key: %v", err)
 	}
@@ -282,7 +296,7 @@ func TestVerifyKeyStateResponseManualTrust(t *testing.T) {
 
 	// A trusted key does not make a forged signature acceptable.
 	tampered, tamperedWire := tamperKeyState(t, wire, edns0.KeyStateUnknown)
-	if _, err := verifyKeyStateResponse(ctx, tamperedWire, tampered, d7Receiver, false, trust, lookupFails, true); err == nil ||
+	if _, err := verifyKeyStateResponse(ctx, tamperedWire, tampered, dsyncTarget(false), trust, lookupFails, true); err == nil ||
 		!strings.Contains(err.Error(), "does not verify") {
 		t.Fatalf("tampered response against trusted key: err = %v", err)
 	}
@@ -302,15 +316,68 @@ func TestVerifyKeyStateResponseVerifierErrors(t *testing.T) {
 	t.Cleanup(func() { sig0Verify = orig })
 
 	sig0Verify = func(*dns.SIG, *dns.KEY, []byte) error { return dns.ErrSig }
-	if _, err := verifyKeyStateResponse(context.Background(), wire, signed, d7Receiver, true, noTrust, published, true); err == nil ||
+	if _, err := verifyKeyStateResponse(context.Background(), wire, signed, dsyncTarget(true), noTrust, published, true); err == nil ||
 		!strings.Contains(err.Error(), "does not verify") {
 		t.Fatalf("ErrSig under allow-insecure: err = %v, want rejection", err)
 	}
 
 	sig0Verify = func(*dns.SIG, *dns.KEY, []byte) error { return dns.ErrTime }
-	if _, err := verifyKeyStateResponse(context.Background(), wire, signed, d7Receiver, true, noTrust, published, true); err == nil ||
+	if _, err := verifyKeyStateResponse(context.Background(), wire, signed, dsyncTarget(true), noTrust, published, true); err == nil ||
 		!strings.Contains(err.Error(), "validity window") {
 		t.Fatalf("ErrTime: err = %v, want a validity-window message", err)
+	}
+}
+
+// A bogus DNSSEC verdict -- a chain of trust that exists and FAILED, on the
+// receiver KEY or on the DSYNC that named the receiver -- is an attack signal,
+// not an unsigned zone, and allow-insecure does not waive it. A manually
+// trusted key is pinned and still authenticates whatever DNSSEC said about the
+// DSYNC (T3).
+func TestVerifyKeyStateResponseBogusIsNeverWaived(t *testing.T) {
+	parentKdb := newTestKeyDB(t)
+	sak, receiverKey := genSig0Key(t, parentKdb, d7Receiver)
+	inquiry := newKeyStateInquiryMsg(d7Child, d7KeyID)
+	signed, wire := keyStateReply(t, inquiry, &edns0.KeyStateOption{KeyID: d7KeyID, KeyState: edns0.KeyStateTrusted}, d7Receiver, sak)
+	ctx := context.Background()
+
+	bogusKey := fetchState([]dns.RR{receiverKey}, cache.ValidationStateBogus, nil)
+	if _, err := verifyKeyStateResponse(ctx, wire, signed, dsyncTarget(true), noTrust, bogusKey, true); err == nil ||
+		!strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("bogus receiver KEY under allow-insecure: err = %v, want refusal", err)
+	}
+
+	bogusTarget := &DsyncTarget{Name: d7Receiver, Bogus: true}
+	if _, err := verifyKeyStateResponse(ctx, wire, signed, bogusTarget, noTrust, fetchKeys([]dns.RR{receiverKey}, true, nil), true); err == nil ||
+		!strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("bogus DSYNC under allow-insecure: err = %v, want refusal", err)
+	}
+
+	// Insecure (an unsigned zone) is the waivable kind, and stays so.
+	if auth, err := verifyKeyStateResponse(ctx, wire, signed, dsyncTarget(false), noTrust, fetchKeys([]dns.RR{receiverKey}, false, nil), true); err != nil || auth {
+		t.Fatalf("insecure under allow-insecure: auth=%v err=%v, want accepted unauthenticated", auth, err)
+	}
+
+	// The bogus-DSYNC refusal comes before the unsigned waiver: an UNSIGNED
+	// reply from a bogus target is refused under allow-insecure too (the
+	// re-review's R1).
+	unsigned, unsignedWire := keyStateReply(t, inquiry, &edns0.KeyStateOption{KeyID: d7KeyID, KeyState: edns0.KeyStateUnknown}, "", nil)
+	if _, err := verifyKeyStateResponse(ctx, unsignedWire, unsigned, bogusTarget, noTrust, fetchKeys([]dns.RR{receiverKey}, true, nil), true); err == nil ||
+		!strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("unsigned reply from a bogus DSYNC target under allow-insecure: err = %v, want refusal", err)
+	}
+
+	// A pinned key does not care what DNSSEC said about the DSYNC.
+	childKdb := newTestKeyDB(t)
+	for _, sub := range []string{"add", "trust"} {
+		if _, err := childKdb.Sig0TrustMgmt(nil, TruststorePost{
+			Command: "child-sig0-mgmt", SubCommand: sub, Src: "file",
+			Keyname: d7Receiver, Keyid: int(receiverKey.KeyTag()), KeyRR: receiverKey.String(),
+		}); err != nil {
+			t.Fatalf("truststore %s: %v", sub, err)
+		}
+	}
+	if auth, err := verifyKeyStateResponse(ctx, wire, signed, bogusTarget, childKdb.receiverKeyTrust(), bogusKey, false); err != nil || !auth {
+		t.Fatalf("manually trusted key with a bogus DSYNC: auth=%v err=%v, want authenticated", auth, err)
 	}
 }
 
@@ -330,12 +397,12 @@ func TestImrReceiverKeyFetcherSecureCacheHit(t *testing.T) {
 		State:   cache.ValidationStateSecure,
 	})
 
-	keys, validated, err := imrReceiverKeyFetcher(imr)(context.Background(), d7Receiver)
+	keys, state, err := imrReceiverKeyFetcher(imr)(context.Background(), d7Receiver)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
-	if len(keys) != 1 || !validated {
-		t.Fatalf("keys=%d validated=%v, want 1 key, validated", len(keys), validated)
+	if len(keys) != 1 || state != cache.ValidationStateSecure {
+		t.Fatalf("keys=%d state=%v, want 1 key, secure", len(keys), state)
 	}
 	if _, _, err := imrReceiverKeyFetcher(nil)(context.Background(), d7Receiver); err == nil {
 		t.Fatal("nil IMR must be an error, not an empty answer")
@@ -346,6 +413,36 @@ func TestImrReceiverKeyFetcherSecureCacheHit(t *testing.T) {
 // ED25519 public key.
 func validChildKeyRRBase64() string {
 	return "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+}
+
+// startKeyStateResponder runs an in-process TCP responder with the given
+// handler and returns its address. Shutdown is registered on t.
+func startKeyStateResponder(t *testing.T, handler dns.HandlerFunc) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	srv := &dns.Server{Listener: ln, Net: "tcp", Handler: handler}
+	started := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(started) }
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() { _ = srv.Shutdown(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("srv.Shutdown() timed out")
+		}
+		ln.Close()
+	})
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("responder did not start")
+	}
+	return ln.Addr().String()
 }
 
 // TestQueryKeyStateRoundTripTCP drives the child's inquiry against a real
@@ -363,54 +460,28 @@ func TestQueryKeyStateRoundTripTCP(t *testing.T) {
 
 	var unsignedMode atomic.Bool
 	var served atomic.Int32
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen tcp: %v", err)
-	}
-	defer ln.Close()
-	srv := &dns.Server{
-		Listener: ln,
-		Net:      "tcp",
-		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-			served.Add(1)
-			m := new(dns.Msg)
-			m.SetReply(r)
-			ks := &edns0.KeyStateOption{KeyID: keyid, KeyState: edns0.KeyStateTrusted, ExtraText: "Key state: Trusted"}
-			if unsignedMode.Load() {
-				edns0.AttachKeyStateToResponse(m, ks)
-				_ = w.WriteMsg(m)
-				return
-			}
-			ksw := &keyStateResponseWriter{ResponseWriter: w, keyStateResponse: ks, sig0Signer: d7Receiver, sig0Keys: sak}
-			_ = ksw.WriteMsg(m)
-		}),
-	}
-	started := make(chan struct{})
-	srv.NotifyStartedFunc = func() { close(started) }
-	go func() { _ = srv.ActivateAndServe() }()
-	defer func() {
-		done := make(chan struct{})
-		go func() { _ = srv.Shutdown(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("srv.Shutdown() timed out")
+	addr := startKeyStateResponder(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		served.Add(1)
+		m := new(dns.Msg)
+		m.SetReply(r)
+		ks := &edns0.KeyStateOption{KeyID: keyid, KeyState: edns0.KeyStateTrusted, ExtraText: "Key state: Trusted"}
+		if unsignedMode.Load() {
+			edns0.AttachKeyStateToResponse(m, ks)
+			_ = w.WriteMsg(m)
+			return
 		}
-	}()
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("responder did not start")
-	}
+		ksw := &keyStateResponseWriter{ResponseWriter: w, keyStateResponse: ks, sig0Signer: d7Receiver, sig0Keys: sak}
+		_ = ksw.WriteMsg(m)
+	})
 
 	ctx := context.Background()
 	trust := childKdb.receiverKeyTrust()
 	published := fetchKeys([]dns.RR{receiverKey}, true, nil)
-	target := func(validated bool) *DsyncTarget {
-		return &DsyncTarget{Name: d7Receiver, Addresses: []string{ln.Addr().String()}, Validated: validated}
+	target := func(validated bool, addrs ...string) *DsyncTarget {
+		return &DsyncTarget{Name: d7Receiver, Addresses: addrs, Validated: validated}
 	}
 
-	ks, auth, err := queryKeyState(ctx, childKdb, d7Child, keyid, target(true), trust, published, false)
+	ks, auth, err := queryKeyState(ctx, childKdb, d7Child, keyid, target(true, addr), trust, published, false)
 	if err != nil {
 		t.Fatalf("signed round trip: %v", err)
 	}
@@ -421,28 +492,59 @@ func TestQueryKeyStateRoundTripTCP(t *testing.T) {
 		t.Fatal("the TCP responder was never reached")
 	}
 
-	if _, _, err := queryKeyState(ctx, childKdb, d7Child, keyid, target(false), trust, published, false); err == nil ||
+	if _, _, err := queryKeyState(ctx, childKdb, d7Child, keyid, target(false, addr), trust, published, false); err == nil ||
 		!strings.Contains(err.Error(), "DSYNC DNSSEC-validated: false") {
 		t.Fatalf("unvalidated DSYNC: err = %v", err)
 	}
 
 	unsignedMode.Store(true)
-	if _, _, err := queryKeyState(ctx, childKdb, d7Child, keyid, target(true), trust, published, false); err == nil ||
+	if _, _, err := queryKeyState(ctx, childKdb, d7Child, keyid, target(true, addr), trust, published, false); err == nil ||
 		!strings.Contains(err.Error(), "not SIG(0)-signed") {
 		t.Fatalf("unsigned reply, strict: err = %v", err)
 	}
-	ks, auth, err = queryKeyState(ctx, childKdb, d7Child, keyid, target(true), trust, published, true)
+	ks, auth, err = queryKeyState(ctx, childKdb, d7Child, keyid, target(true, addr), trust, published, true)
 	if err != nil {
 		t.Fatalf("unsigned reply, allow-insecure: %v", err)
 	}
 	if auth || ks.KeyState != edns0.KeyStateTrusted {
 		t.Fatalf("unsigned reply, allow-insecure: auth=%v ks=%+v, want unauthenticated Trusted", auth, ks)
 	}
+	unsignedMode.Store(false)
 
 	// No responder: a transport error, not a verification error.
-	dead := &DsyncTarget{Name: d7Receiver, Addresses: []string{"127.0.0.1:1"}, Validated: true}
-	if _, _, err := queryKeyState(ctx, childKdb, d7Child, keyid, dead, trust, published, false); err == nil ||
+	if _, _, err := queryKeyState(ctx, childKdb, d7Child, keyid, target(true, "127.0.0.1:1"), trust, published, false); err == nil ||
 		!strings.Contains(err.Error(), "exchange failed") {
 		t.Fatalf("dead target: err = %v", err)
+	}
+
+	// T4: a poisoned address answers first with a forgery (here: a reply
+	// signed by some other key, claiming to be the receiver). The child moves
+	// on to the next address and finds the genuine receiver. Only when every
+	// address fails does the verification error surface.
+	forgerKdb := newTestKeyDB(t)
+	forgerSak, _ := genSig0Key(t, forgerKdb, "evil.example.")
+	forger := startKeyStateResponder(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		ks := &edns0.KeyStateOption{KeyID: keyid, KeyState: edns0.KeyStateUnknown, ExtraText: "forged: re-bootstrap!"}
+		ksw := &keyStateResponseWriter{ResponseWriter: w, keyStateResponse: ks, sig0Signer: d7Receiver, sig0Keys: forgerSak}
+		_ = ksw.WriteMsg(m)
+	})
+	ks, auth, err = queryKeyState(ctx, childKdb, d7Child, keyid, target(true, forger, addr), trust, published, false)
+	if err != nil {
+		t.Fatalf("forger first, genuine second: %v", err)
+	}
+	if !auth || ks.KeyState != edns0.KeyStateTrusted {
+		t.Fatalf("forger first, genuine second: auth=%v ks=%+v, want the genuine answer", auth, ks)
+	}
+	if _, _, err := queryKeyState(ctx, childKdb, d7Child, keyid, target(true, forger), trust, published, false); err == nil ||
+		!strings.Contains(err.Error(), "no KEY with keyid") {
+		t.Fatalf("forger only, strict: err = %v, want the verification failure", err)
+	}
+	// Under allow-insecure an unknown signing key is, by design, accepted as
+	// unauthenticated (the operator waived exactly that); the forgery is then
+	// visible only in the log. This is why the knob is a lab convenience.
+	if ks, auth, err := queryKeyState(ctx, childKdb, d7Child, keyid, target(true, forger), trust, published, true); err != nil || auth || ks.KeyState != edns0.KeyStateUnknown {
+		t.Fatalf("forger only, allow-insecure: ks=%+v auth=%v err=%v, want the forgery accepted unauthenticated", ks, auth, err)
 	}
 }

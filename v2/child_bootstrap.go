@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/johanix/tdns/v2/cache"
 	"github.com/miekg/dns"
 )
 
@@ -149,6 +150,13 @@ func advertisedBootstrapMethods(ctx context.Context, imr *Imr, target *DsyncTarg
 	}
 	data, count := publishedBootstrapSVCBData(rrs)
 	if count == 0 {
+		return nil, false, nil
+	}
+	// A bogus verdict, on the SVCB or on the DSYNC that named the target, is
+	// a failed chain of trust: ignored whatever allow-insecure says.
+	if target.Bogus || resp.ValidationState == cache.ValidationStateBogus {
+		lgHandler.Warn("ignoring SVCB bootstrap advertisement: DNSSEC validation FAILED (bogus), which no setting waives; falling back to the configured bootstrap methods",
+			"target", target.Name, "advertised", data, "dsyncBogus", target.Bogus, "svcbBogus", resp.ValidationState == cache.ValidationStateBogus)
 		return nil, false, nil
 	}
 	if !bootstrapAdvertisementUsable(target.Validated, resp.Validated, allowInsecure) {
