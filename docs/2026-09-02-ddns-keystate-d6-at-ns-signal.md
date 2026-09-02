@@ -81,11 +81,42 @@ So the change reuses that publisher rather than adding a second one.
   been worse than the bug, given the callers' retry structure, so the callers
   were taught to retry it instead.
 
+## After the external review (same day)
+
+- **Publication is confirmed, not enqueued (T1).** `publishSignalRRs` was
+  fire-and-forget: it put a ZONE-UPDATE on the queue and returned, and the
+  bootstrap counted that as "published" and sent the ceremony at once. The
+  parent's first verification attempt is immediate and the IMR caches a
+  negative answer for its TTL, so an early miss could burn the parent's whole
+  verification budget. With a context, `publishAtSignalNames` now attaches
+  `UpdateRequest.Resp` and waits for the updater's verdict, the same promise
+  the DSYNC API handler makes its clients; only an applied update counts, and
+  a refused apply or a timed-out wait makes the `at-ns` bootstrap fail rather
+  than send a ceremony the parent cannot verify. The transfer-driven
+  republish (a post-refresh hook) keeps fire-and-forget with a nil context.
+  A fruitless publish or refresh is now logged at Warn (T4).
+- **The zone-load setup retries a failed advertisement lookup (T2).** The
+  retry for `errBootstrapAdvertisementLookup` was wired into the KeyState
+  poller and the BADKEY arm; the path that runs at zone load,
+  `DELEGATION-SYNC-SETUP` in the delegation syncher, logged the error and
+  dropped it, leaving the zone loaded and never bootstrapped until a reload.
+  It now re-enqueues the setup with the delegation-sync backoff (5, 10, 20,
+  40 s) and an attempt count on the request, off the syncher goroutine, and
+  gives up after the same five attempts the poller allows.
+- **Known limitation, `at-ns` satisfiability is a snapshot (T3).** Whether a
+  signal name is publishable is judged when the ceremony runs. If the
+  nameserver's zone is loaded as a local primary *after* the child's setup,
+  `at-ns` is dropped for that run; a reload or `tdns-cli ... bootstrap`
+  recovers. Load nameserver zones first, and know this for the
+  `at-ns`-only integration run.
+
 ## Not done
 
 - Nothing has run on a live testbed. Plan §8's integration items still
   cover this: an `at-ns`-only parent against a tdns-auth child whose NS is
   in-bailiwick is the scenario to run first.
+- Re-offering `at-ns` when a nameserver zone appears after the child's setup
+  (T3 above).
 - `unpublish` of signal KEYs when delegation sync is turned off for a zone.
   `UnpublishKeyRRs` (apex) has no callers today either; both belong to
   whatever eventually owns "stop syncing this zone".

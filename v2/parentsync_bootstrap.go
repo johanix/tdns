@@ -59,18 +59,25 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 	// reports our key as unknown.
 	bootstrapped := false
 	syncErr := retryWithBackoff(ctx, delegationSyncMaxRetries, delegationSyncInitialDelay, func(attempt int) (bool, error) {
-		ks, _, err := QueryParentKeyState(ctx, kdb, imr, keyName, keyid)
+		ks, authenticated, err := QueryParentKeyState(ctx, kdb, imr, keyName, keyid)
 		if err != nil {
 			lgElect.Warn("ParentSyncAfterKeyPublication: KeyState inquiry failed",
 				"zone", zone, "attempt", attempt, "err", err)
 			return false, err // retry
 		}
 		keyState := ks.KeyState
+		// authenticated=false here means allow-insecure let an unauthenticated
+		// answer through; every transition below says so, so a bootstrap or a
+		// "trusted" verdict driven by such an answer is traceable in the log.
+		if !authenticated {
+			lgElect.Warn("ParentSyncAfterKeyPublication: acting on an UNAUTHENTICATED KeyState answer (allow-insecure)",
+				"zone", zone, "keyid", keyid, "state", keyState, "statename", edns0.KeyStateToString(keyState))
+		}
 
 		switch keyState {
 		case edns0.KeyStateTrusted:
 			lgElect.Info("ParentSyncAfterKeyPublication: parent trusts our key",
-				"zone", zone, "keyid", keyid)
+				"zone", zone, "keyid", keyid, "authenticated", authenticated)
 			UpdateParentState(kdb, keyName, keyid, keyState)
 
 			// Post-bootstrap: verify delegation data is in sync with parent.
@@ -99,7 +106,7 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 				return false, nil // retry
 			}
 			lgElect.Info("ParentSyncAfterKeyPublication: parent does not know our key, bootstrapping",
-				"zone", zone, "keyid", keyid)
+				"zone", zone, "keyid", keyid, "authenticated", authenticated)
 			UpdateParentState(kdb, keyName, keyid, keyState)
 			if err := BootstrapWithParent(ctx, zone, keyName, algorithm); err != nil {
 				if errors.Is(err, errBootstrapManual) {

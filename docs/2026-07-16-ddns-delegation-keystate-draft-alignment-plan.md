@@ -187,19 +187,19 @@ but failing signature is always rejected. A reply that merely cannot be
 authenticated is rejected unless `delegationsync.child.update.allow-insecure`
 is set (then acted on with a Warn). The same switch gates the SVCB bootstrap
 advertisement, which is otherwise treated as absent when unvalidated (the
-#471 review's carry-over 6). **Behaviour change:** an unsigned parent with no
-manually trusted receiver key gets no automatic bootstrap by default. tdns-mp
-still carries its own unverified copy of the inquiry and should adopt the
-exported function when it bumps.
+#471 review's carry-over 6). A bogus DNSSEC verdict, on the receiver KEY,
+the DSYNC or the SVCB, is never waived. **Behaviour change, scoped
+precisely:** the KeyState poller (`ParentSyncAfterKeyPublication`) refuses an
+unauthenticated reply by default, so under an unsigned parent with no manually
+trusted receiver key it does not reach the bootstrap it would otherwise
+trigger. That poller has no caller in this repo today — only tdns-mp calls
+it, against its June pin — and the tdns-auth child path
+(`DelegationSyncSetup`) never inquires at all, so it still sends its KEY
+UPDATE regardless. tdns-mp should adopt the exported function when it bumps.
 
-**Moved ahead of D-6 (2026-09-01):** highest-value of the three remaining
-Phase 2 items, and the doc's ordering never reflected that. The KeyState
-inquiry (`QueryParentKeyState`/`QueryParentKeyStateDetailed`,
-`v2/parentsync_bootstrap.go:169,219`) travels over plain UDP (`dns.Client{}`,
-no `Net` set) with no source authentication beyond wire format. Without this
-item, a network attacker capable of UDP spoofing can inject a forged KeyState
-response today and the child cannot detect it — this is a live exposure on an
-active code path, not a future-feature gap like D-6.
+**Moved ahead of D-6 (2026-09-01)** as the highest-value of the three
+remaining Phase 2 items: before it, the KeyState inquiry went over plain UDP
+and the child took the reply at face value. (Closed 2026-09-02, above.)
 
 - **Draft (ddns-02 §§"Mutual Authentication", "Bootstrapping the UPDATE Receiver's Key Into the Child", "Publishing the UPDATE Receiver's Key"):** the UPDATE Receiver maintains its own SIG(0) key, publishes it as a KEY record at the DSYNC {target}, and signs its responses; the child acquires+validates that KEY (DNSSEC or manual) and MUST verify signed responses (esp. KeyState inquiry responses).
 - **Current (PARTIAL — reassessed 2026-09-02 after PR #471):**
@@ -224,7 +224,7 @@ signal names a bootstrap populated. A failed SVCB lookup is
 `errBootstrapAdvertisementLookup`, retried by both the KeyState poller and the
 BADKEY re-bootstrap arm rather than treated as an absent advertisement.
 - **Draft (ddns-02 §"SvcParamKey bootstrap", §"Publishing Supported Bootstrap Methods"):** parent publishes an SVCB at the DSYNC {target} with `bootstrap="at-apex,at-ns,unsigned,manual"` (subset); the child SHOULD prefer the strongest method the parent advertises that it can satisfy.
-- **Current (reassessed 2026-09-02 after T4 defects):** parent **emits and reconciles** the SVCB from the bound `delegationpolicy`. Child looks up that SVCB at the DSYNC UPDATE target, intersects with `CompiledChildMethods`, and selects the strongest overlap (`at-apex` > `at-ns` > `unsigned` > `manual`). Empty intersection refuses. Absent SVCB falls back to the child's configured list. Omit-default is `[at-apex]` until `_signal` publication exists; `at-ns` remains valid to opt into. Proxy still drops `at-ns` even when opted in. `manual` does not send the KEY UPDATE. BADKEY recovery uses the same willing list as the first ceremony (`zd.Options[OptDelSyncProxy]`).
+- **Current (reassessed 2026-09-02 after T4 defects):** parent **emits and reconciles** the SVCB from the bound `delegationpolicy`. Child looks up that SVCB at the DSYNC UPDATE target, intersects with `CompiledChildMethods`, and selects the strongest overlap (`at-apex` > `at-ns` > `unsigned` > `manual`). Empty intersection refuses. Absent SVCB falls back to the child's configured list. Omit-default is `[at-apex, at-ns]` since `_signal` publication landed (2026-09-02); `at-ns` is offered only where this server is primary for a signal name. Proxy still drops `at-ns` even when opted in. `manual` does not send the KEY UPDATE. BADKEY recovery uses the same willing list as the first ceremony (`zd.Options[OptDelSyncProxy]`).
 - **Change (done 2026-09-02):** when the selected method is `at-ns`, the auth child publishes the KEY at `_sig0key.<child>._signal.<ns>` before sending the ceremony; a proxy cannot and never offers `at-ns`.
 - **Acceptance (met):** with a parent SVCB `bootstrap="unsigned,manual"` and the child default, bootstrap refuses rather than attempting `at-apex`; `at-ns` selected → `_signal` name published (`TestPublishSig0KeyAtSignalNames`).
 

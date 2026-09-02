@@ -1092,6 +1092,10 @@ type DelegationSyncRequest struct {
 	NewDnskeys   *core.RRset
 	MsignerGroup *core.RRset
 	Response     chan DelegationSyncStatus // used for API-based requests
+	// Attempt counts re-enqueues of a DELEGATION-SYNC-SETUP whose SIG(0)
+	// bootstrap was deferred because the parent's SVCB advertisement could not
+	// be looked up (errBootstrapAdvertisementLookup). Zero on the first try.
+	Attempt int
 	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
 	// set the proxy NOTIFY action keys on (delegation-sync-proxy).
 	ProxyAnalysis *ProxyDelegationAnalysis
