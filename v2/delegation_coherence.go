@@ -51,26 +51,33 @@ type dnskeyFetcher func(child string) (keys []dns.RR, validated bool, err error)
 // keeps the coherence check, and the lookup it needs, off updates that cannot
 // affect the chain of trust.
 func dsAfterActions(child string, currentDS, actions []dns.RR) (result []dns.RR, touched bool) {
-	child = dns.Fqdn(child)
-	result = append(result, currentDS...)
+	return rrsetAfterActions(child, dns.TypeDS, currentDS, actions)
+}
+
+// rrsetAfterActions applies the records of an RFC 2136 update that address
+// (owner, rrtype) to current, and reports the result and whether the update
+// mentioned that RRset at all. Shared by the DS coherence check above and the
+// NS/glue one (delegation_csync_update.go); the semantics are RFC 2136 §2.5:
+// class ANY deletes the RRset (or, with type ANY, every RRset at the name),
+// class NONE deletes one record, anything else adds one.
+func rrsetAfterActions(owner string, rrtype uint16, current, actions []dns.RR) (result []dns.RR, touched bool) {
+	owner = dns.Fqdn(owner)
+	result = append(result, current...)
 
 	for _, rr := range actions {
 		h := rr.Header()
-		if !dns.IsSubDomain(child, h.Name) || !dns.IsSubDomain(h.Name, child) {
-			continue // not at the child's apex
+		if !core.EqualNames(dns.Fqdn(h.Name), owner) {
+			continue
 		}
 
 		switch h.Class {
 		case dns.ClassANY:
-			// Delete an entire RRset. TypeANY deletes every RRset at the name,
-			// which includes the DS.
-			if h.Rrtype == dns.TypeDS || h.Rrtype == dns.TypeANY {
+			if h.Rrtype == rrtype || h.Rrtype == dns.TypeANY {
 				result = nil
 				touched = true
 			}
 		case dns.ClassNONE:
-			// Delete one record.
-			if h.Rrtype != dns.TypeDS {
+			if h.Rrtype != rrtype {
 				continue
 			}
 			touched = true
@@ -83,8 +90,7 @@ func dsAfterActions(child string, currentDS, actions []dns.RR) (result []dns.RR,
 			}
 			result = kept
 		default:
-			// Add.
-			if h.Rrtype != dns.TypeDS {
+			if h.Rrtype != rrtype {
 				continue
 			}
 			touched = true

@@ -31,7 +31,7 @@ intersection; absent SVCB falls back to the configured list).
 | 2 | D-2b UPDATE retry, D-4 bootstrap ceremony | **DONE** (PR #312) | — |
 | 2 | **D-7** mutual auth (moved ahead of D-6 — see note above) | **PARTIAL** — receiver-KEY publication done; child-side verification missing | ~320-580 |
 | 2 | **D-6** SVCB bootstrap consumption | **PARTIAL** — intersection+selection live; at-ns still sends the KEY UPDATE ceremony rather than publishing `_signal` | ~40-80 |
-| 2 | D-3b CDS/CSYNC acceptance (NS/glue half) | **PARTIAL** — DS half via #386; NS/glue rules **extracted** 2026-09-02 (`delegation_csync.go`, scanner still the only caller); wiring into `ApproveChildUpdate` is the remaining PR | ~200-350 |
+| 2 | D-3b CDS/CSYNC acceptance (NS/glue half) | **DONE** (2026-09-02) — DS half via #386; NS/glue rules extracted (`delegation_csync.go`) and wired into `ApproveChildUpdate` and the DSYNC API (`delegation_csync_update.go`) | — |
 | 3 | IANA alignment | **DEFERRED** by design | — |
 | — | Cross-cutting vocabulary (4 settings, 2 config-reading engines) | **DONE** (PR #471) | — |
 
@@ -172,8 +172,21 @@ active code path, not a future-feature gap like D-6.
 `computeCsyncDelta` and friends in `v2/delegation_csync.go`, network and
 stored-delegation access injected, scanner still the only caller, behaviour
 byte-identical. The dead pre-NOTIFY path (`CheckCSYNC`, `CsyncAnalyze*`) is
-deleted. Notes and the shape of step 2 in
-`docs/2026-09-02-ddns-keystate-d3b-csync-extraction.md`.
+deleted. Notes in `docs/2026-09-02-ddns-keystate-d3b-csync-extraction.md`.
+
+**Step 2 done 2026-09-02** on `feature/ddns-keystate-d3b-csync-wire`
+(stacked on step 1): `CheckDelegationNSCoherence` /
+`CheckDelegationNSCoherenceForUpdate` (`v2/delegation_csync_update.go`)
+apply the rules to an asserted change, scoped to what the update touches,
+asking the parent's current nameservers for the child through the scanner's
+fetcher; wired into `ApproveChildUpdate` and the DSYNC API handler after the
+DS check, same refusal shape. `dsAfterActions` generalised to
+`rrsetAfterActions`. Notes and the decisions (scoping, whom to ask, the
+deferred EDE) in `docs/2026-09-02-ddns-keystate-d3b-update-wiring.md`. The
+DS-duplication question stays open and separate. **D-3b is closed.** (The
+LOC totals in this document are maintained on the D-7/D-6/K-4 stack, not
+here, to avoid a merge conflict; they read ~80-150 for D-7(iii) once
+everything is in.)
 
 - **Reassessed 2026-09-01, post-merge:** `parent-checks-delegation-coherence` (#386, merged to `main` independently of this plan) already implemented the **DS/RFC7344/8078 half** — `v2/delegation_coherence.go:209-297` `CheckDelegationCoherence`, a free function with an injected `dnskeyFetcher`, wired into the UPDATE path at `v2/updateresponder.go:638-645` (`ApproveChildUpdate`, refuses with `REFUSED`+EDE) and the DSYNC-API path at `v2/dsync_api_delegation.go:262`. This is good news (D-3b's DS half is done) and a complication: it was written as a **fresh implementation**, not by extracting the scanner's logic as this plan prescribes, so there are now two independent implementations of the DS acceptance rule — this one, and the scanner's `ProcessCDSNotify` (`v2/scanner.go:1114-1288`). **Remaining scope is the RFC 7477 NS/glue half only** (plus, optionally, reconciling the DS duplication — see below).
 - **Why its own PR:** "reuse the scanner's check functions" understates this,
