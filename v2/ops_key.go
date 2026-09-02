@@ -152,7 +152,7 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 }
 
 func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (string, UpdateResult, error) {
-	return zd.bootstrapSig0KeyWithParent(ctx, alg, childBootstrapMethods(false))
+	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods())
 }
 
 func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, willing []string) (string, UpdateResult, error) {

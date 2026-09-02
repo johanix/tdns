@@ -365,6 +365,10 @@ func DsyncUpdateTargetName(zonename string) string {
 	return expandDsyncTemplate(DelegationSyncConfig().Parent.Update.Target, zonename)
 }
 
+func dsyncUpdateTargetIsZoneApex(zone, target string) bool {
+	return target != "" && dns.CanonicalName(dns.Fqdn(target)) == dns.CanonicalName(dns.Fqdn(zone))
+}
+
 func newBootstrapSVCB(target, data string, ttl uint32) *dns.SVCB {
 	return &dns.SVCB{
 		Hdr:      dns.RR_Header{Name: target, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: ttl},
@@ -431,6 +435,10 @@ func (zd *ZoneData) bootstrapSVCBActions(ttl uint32) []dns.RR {
 	if target == "" {
 		return nil
 	}
+	if dsyncUpdateTargetIsZoneApex(zd.ZoneName, target) {
+		lgDns.Warn("refusing bootstrap SVCB reconcile at zone apex", "zone", zd.ZoneName, "target", target)
+		return nil
+	}
 	var existing []dns.RR
 	if owner, err := zd.GetOwner(target); err == nil && owner != nil {
 		if rrset, ok := owner.RRtypes.Get(dns.TypeSVCB); ok {
@@ -472,7 +480,7 @@ func (zd *ZoneData) UnpublishDsyncRRs() error {
 		actions = append(actions, anti_uri, anti_txt)
 	}
 
-	if updateTarget := DsyncUpdateTargetName(zd.ZoneName); updateTarget != "" {
+	if updateTarget := DsyncUpdateTargetName(zd.ZoneName); updateTarget != "" && !dsyncUpdateTargetIsZoneApex(zd.ZoneName, updateTarget) {
 		antiSVCB := &dns.SVCB{
 			Hdr: dns.RR_Header{Name: updateTarget, Rrtype: dns.TypeSVCB, Class: dns.ClassANY},
 		}

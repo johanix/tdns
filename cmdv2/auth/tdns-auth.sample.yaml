@@ -196,7 +196,7 @@ delegationsync:
       # automatic lookup still happens (at-apex, at-ns), but the parent will not
       # trust the key until an operator confirms. Do not use `locked-down` for
       # parent templates: that advertises nothing automatic and would refuse a
-      # child's default methods `[at-apex, at-ns]` at intersection.
+      # child's default methods `[at-apex]` at intersection.
       manual:
          bootstrap:
             mechanisms:      [ at-apex, at-ns ]
@@ -302,12 +302,13 @@ delegationsync:
             # Methods this child will accept a parent using. Intersected with
             # the parent's advertised SVCB bootstrap set at run time; strongest
             # overlap wins (at-apex > at-ns > unsigned > manual). Omit defaults
-            # to [at-apex, at-ns]. An empty list refuses every method. `unsigned`
+            # to [at-apex]; `at-ns` is valid but the child cannot yet publish
+            # RFC 9615 `_signal`. An empty list refuses every method. `unsigned`
             # and `manual` must be opted into. A parent template bound to the
             # `manual` policy advertises `at-apex,at-ns,manual`; intersection
-            # with this default is `at-apex,at-ns`. Absent SVCB falls back to
+            # with this default is `at-apex`. Absent SVCB falls back to
             # this list.
-            methods: [ at-apex, at-ns ]
+            methods: [ at-apex ]
 
 scanner:
    interval:  30                        # seconds between periodic scan runs

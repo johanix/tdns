@@ -180,3 +180,21 @@ ns.b.example. 3600 IN A 192.0.2.2
 		t.Fatalf("locked-down SVCB = %q", gotB)
 	}
 }
+
+func TestBootstrapSVCBActionsSkipsZoneApex(t *testing.T) {
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
+	if err := SetDelegationSyncConfig(DelegationSyncConf{
+		Parent: DelegationSyncParentConf{
+			Schemes: []string{"update"},
+			Update: DsyncUpdateSchemeConf{
+				DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "{ZONENAME}"},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	zd := &ZoneData{ZoneName: "example."}
+	if got := zd.bootstrapSVCBActions(7200); got != nil {
+		t.Fatalf("apex target must not emit SVCB actions, got %d", len(got))
+	}
+}

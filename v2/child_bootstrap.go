@@ -13,7 +13,7 @@ var childBootstrapPreference = []string{"at-apex", "at-ns", "unsigned", "manual"
 func childBootstrapMethods(proxy bool) []string {
 	methods := DelegationSyncConfig().CompiledChildMethods
 	if methods == nil {
-		methods = []string{"at-apex", "at-ns"}
+		methods = []string{"at-apex"}
 	}
 	if !proxy {
 		return methods
@@ -25,6 +25,10 @@ func childBootstrapMethods(proxy bool) []string {
 		}
 	}
 	return out
+}
+
+func (zd *ZoneData) zoneChildBootstrapMethods() []string {
+	return childBootstrapMethods(zd != nil && zd.Options[OptDelSyncProxy])
 }
 
 func intersectBootstrapMethods(advertised, willing []string) []string {

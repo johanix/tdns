@@ -103,3 +103,30 @@ func TestUnpublishDsyncRemovesBootstrapSVCBAndReceiverKEY(t *testing.T) {
 		t.Fatal("unpublish deleted the apex KEY; that is the parent's own SIG(0) identity")
 	}
 }
+
+func TestUnpublishDsyncSkipsApexSVCBAndKEY(t *testing.T) {
+	t.Cleanup(func() { SetDelegationSyncConfig(DelegationSyncConf{}) })
+	SetDelegationSyncConfig(DelegationSyncConf{
+		Parent: DelegationSyncParentConf{
+			Update: DsyncUpdateSchemeConf{
+				DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "{ZONENAME}"},
+			},
+		},
+	})
+	q := make(chan UpdateRequest, 1)
+	zd := &ZoneData{
+		ZoneName: "example.",
+		KeyDB:    &KeyDB{UpdateQ: q},
+	}
+	if err := zd.UnpublishDsyncRRs(); err != nil {
+		t.Fatal(err)
+	}
+	ur := <-q
+	for _, rr := range ur.Actions {
+		h := rr.Header()
+		if h.Name == "example." && h.Class == dns.ClassANY &&
+			(h.Rrtype == dns.TypeSVCB || h.Rrtype == dns.TypeKEY) {
+			t.Fatalf("unpublish ClassANY %s at apex", dns.TypeToString[h.Rrtype])
+		}
+	}
+}

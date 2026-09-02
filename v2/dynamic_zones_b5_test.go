@@ -41,6 +41,20 @@ func TestZoneDataToZoneConf_WritesApiManaged(t *testing.T) {
 	}
 }
 
+func TestZoneDataToZoneConf_PersistsDelegationPolicyName(t *testing.T) {
+	p := DelegationPolicy{Name: "manual"}
+	zd := &ZoneData{
+		ZoneName:         "dyn.example.",
+		ZoneType:         Secondary,
+		Options:          map[ZoneOption]bool{},
+		DelegationPolicy: &p,
+	}
+	zc := zoneDataToZoneConf(zd, "/tmp")
+	if zc.DelegationPolicy != "manual" {
+		t.Fatalf("DelegationPolicy = %q, want manual", zc.DelegationPolicy)
+	}
+}
+
 // TestZoneDataToZoneConf_PersistsAsWrittenPrimaries verifies P5: persistence
 // writes the as-written PrimariesConf (hostnames + per-entry keys), NOT the
 // resolved Upstreams and NOT a hardcoded NOKEY. Persisting the hostname (rather

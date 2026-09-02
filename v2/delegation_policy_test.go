@@ -102,7 +102,7 @@ func TestCompileChildBootstrapMethods(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, []string{"at-apex", "at-ns"}) {
+	if !reflect.DeepEqual(got, []string{"at-apex"}) {
 		t.Fatalf("omit defaulted to %v", got)
 	}
 	empty, err := compileChildBootstrapMethods([]string{})

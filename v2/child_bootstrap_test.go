@@ -95,3 +95,21 @@ func TestChildBootstrapMethodsProxyDropsAtNs(t *testing.T) {
 		t.Fatalf("proxy: %v", got)
 	}
 }
+
+func TestZoneChildBootstrapMethodsUsesProxyOption(t *testing.T) {
+	var dsc DelegationSyncConf
+	dsc.Child.Update.Bootstrap.Methods = []string{"at-apex", "at-ns"}
+	if err := SetDelegationSyncConfig(dsc); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
+
+	auth := &ZoneData{Options: map[ZoneOption]bool{OptDelSyncChild: true}}
+	if got := auth.zoneChildBootstrapMethods(); !reflect.DeepEqual(got, []string{"at-apex", "at-ns"}) {
+		t.Fatalf("auth zone: %v", got)
+	}
+	proxy := &ZoneData{Options: map[ZoneOption]bool{OptDelSyncProxy: true}}
+	if got := proxy.zoneChildBootstrapMethods(); !reflect.DeepEqual(got, []string{"at-apex"}) {
+		t.Fatalf("proxy zone: %v", got)
+	}
+}

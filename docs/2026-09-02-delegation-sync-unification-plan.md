@@ -262,10 +262,11 @@ delegationsync:
             # order. Intersected with the parent's advertised set; the first
             # surviving preference wins. Empty intersection => refuse and log,
             # never silently degrade.
-            # Default when absent: [ at-apex, at-ns ] — `unsigned` must be
-            # opted into, because this decides how strongly the parent will
-            # have checked the key that authorises everything else.
-            methods: [ at-apex, at-ns ]
+            # Default when absent: [ at-apex ] — `at-ns` is valid to opt into
+            # but the child cannot yet publish RFC 9615 `_signal`. `unsigned`
+            # must be opted into, because this decides how strongly the parent
+            # will have checked the key that authorises everything else.
+            methods: [ at-apex ]
       # api.credentials stay per-parent — they are per-parent secrets.
 ```
 

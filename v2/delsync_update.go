@@ -99,8 +99,7 @@ func (zd *ZoneData) bootstrapSig0Key(ctx context.Context, alg uint8, apex apexKE
 	if err := apex.EnsureApexKEY(); err != nil {
 		return "", UpdateResult{}, err
 	}
-	_, proxy := apex.(proxyApexKEY)
-	return zd.bootstrapSig0KeyWithParent(ctx, alg, childBootstrapMethods(proxy))
+	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods())
 }
 
 // resolveParentZone fills zd.Parent when it is unset or the old "." sentinel.

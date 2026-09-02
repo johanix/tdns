@@ -140,7 +140,7 @@ delegationsync:
             generator:	/opt/local/bin/dnssec-keygen
             algorithm:	ED25519
          bootstrap:
-            methods: [ at-apex, at-ns ]
+            methods: [ at-apex ]
 
 dnssec:
    large-algorithms: [ RSASHA512 ]   # by name; stand-in for large KSK
