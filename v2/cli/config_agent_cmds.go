@@ -321,11 +321,15 @@ delegationsync:
             # SIG(0) bootstrap methods this child will let a parent use,
             # intersected with the parent's advertised set at run time; the
             # strongest survivor wins. An empty intersection refuses rather
-            # than silently downgrading. at-ns is not offered by default
-            # because the child cannot yet publish the RFC 9615 _signal
-            # records it requires — and a proxy could not publish them in any
-            # case, since they live in the NAMESERVER's zone.
-            methods: [ at-apex ]
+            # than silently downgrading.
+            #
+            # at-ns is listed but is dropped automatically for every zone this
+            # agent proxies for: it needs the child's KEY published at
+            # _sig0key.<child>._signal.<ns>, and those names live in the
+            # NAMESERVER's zone, which a secondary does not control. Listing it
+            # costs such a zone nothing and keeps this file usable if the agent
+            # later serves a zone that can signal.
+            methods: [ at-apex, at-ns ]
 
 # Zone templates. Both are SECONDARY templates — see the note at the top.
 # The commented-out zone below uses the first one.

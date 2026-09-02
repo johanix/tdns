@@ -329,10 +329,10 @@ delegationsync:
          keygen:
             algorithm: ED25519
          bootstrap:
-            methods: [ at-apex ]
+            methods: [ at-apex, at-ns ]
 ```
 
-Three rules matter more than the list itself:
+Four rules matter more than the list itself:
 
 - **An empty intersection refuses.** It never silently
   degrades to a weaker method. A parent advertising only
@@ -340,19 +340,29 @@ Three rules matter more than the list itself:
   default child, which is the opt-in working as intended:
   this decision is what authorises everything the child
   later signs.
-- **An absent advertisement falls back to this list.** A
+- **An absent advertisement falls back to this list**, so a
   parent that publishes no bootstrap SVCB — every non-TDNS
   parent — is bootstrapped exactly as before. A *failed*
-  SVCB lookup is currently treated the same way.
-- **`methods:` omitted means `[ at-apex ]`**, not the full
-  set. `at-ns` must be opted into, and today it is not yet
-  satisfiable: the child does not publish the RFC 9615
-  `_sig0key.<child>._signal.<ns>` records that method
-  requires. An agent proxying for a primary
+  lookup is not the same thing and does not fall back: it
+  is an error, and the bootstrap is retried rather than
+  proceeding on a guess.
+- **An advertisement that cannot be authenticated is
+  ignored**, and the configured list is used instead. The
+  SVCB and the DSYNC record that named its target must both
+  be DNSSEC-validated; `delegationsync.child.update.allow-insecure`
+  waives that for a lab, but nothing waives a **bogus**
+  verdict — a failed chain of trust is never treated as an
+  unsigned one.
+- **`methods:` omitted means `[ at-apex, at-ns ]`**, and
+  `at-ns` is then filtered out per zone when this server
+  cannot satisfy it. It needs the child's KEY at
+  `_sig0key.<child>._signal.<ns>`, which is possible only
+  when the server is primary for a zone one of those signal
+  names falls in. An agent proxying for a primary
   ([1.6](#16-agent-proxying-for-a-dsync-unaware-primary))
-  drops `at-ns` from its willing set in any case — those
-  names live in the *nameserver's* zone, which a secondary
-  does not control.
+  never qualifies — those names live in the *nameserver's*
+  zone, which a secondary does not control — so a proxy
+  drops `at-ns` on every path, BADKEY recovery included.
 
 The parent-side half of the same negotiation — how a zone's
 policy decides what it advertises — is

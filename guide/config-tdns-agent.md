@@ -1,7 +1,8 @@
 # tdns-agent configuration
 
-> **Placeholder.** This page is not yet written. The agent's proxy
-> configurations in particular still need documenting.
+> **Partial.** Only the `delegationsync:` block is documented here in full.
+> Everything else the agent shares with `tdns-auth`, and is covered there; the
+> gaps specific to this page are listed at the end.
 
 `tdns-agent` is the single-provider agent for delegation synchronization. It
 shares most of its configuration surface with `tdns-auth` — the same `service:`,
@@ -46,15 +47,22 @@ delegationsync:
          keygen:
             algorithm: ED25519
          bootstrap:
-            methods: [ at-apex ]
+            methods: [ at-apex, at-ns ]
+         # allow-insecure: true   # lab only; see below
 ```
 
 | Key | Meaning |
 |-----|---------|
 | `child.schemes` | which transports to try: `notify`, `update`, `api`. **Empty means nothing is ever forwarded** |
 | `child.update.keygen.algorithm` | algorithm for the SIG(0) keypair the agent signs UPDATEs with |
-| `child.update.bootstrap.methods` | SIG(0) bootstrap methods this agent will let a parent use; intersected with the parent's advertisement |
+| `child.update.bootstrap.methods` | SIG(0) bootstrap methods this agent will let a parent use; intersected with the parent's advertisement. Omitted means `[ at-apex, at-ns ]` |
+| `child.update.allow-insecure` | act on parent-derived input that cannot be authenticated (an unsigned KeyState response, an unvalidated SVCB advertisement). **Lab only.** Never waives a *bogus* DNSSEC verdict |
 | `child.api.*` | credentials for the HTTPS API scheme, one per parent |
+
+`at-ns` is in the omitted default but is filtered out for every zone this agent
+proxies for: it needs the child's KEY at `_sig0key.<child>._signal.<ns>`, and
+those names live in the nameserver's zone. Listing it therefore costs a proxy
+zone nothing.
 
 **`child.schemes` governs the proxy too, and this is the trap.** A zone with
 `delegation-sync-proxy` sends to the parent *as the child*, so it walks the same

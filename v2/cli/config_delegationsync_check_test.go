@@ -11,9 +11,11 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/johanix/tdns/v2"
 	"github.com/spf13/viper"
@@ -24,22 +26,39 @@ import (
 // structs must arrive POPULATED through that path.
 //
 // They carry both `yaml:` and `mapstructure:` tags -- the daemon's decoder runs
-// with TagName "yaml", viper's runs with the default "mapstructure" -- so this
-// works only as long as the second tag is kept on every field. If someone drops
-// a mapstructure tag, the check silently reports "schemes is empty" against a
-// config that sets them, which is worse than the viper read it replaced. Hence
-// a test that reads real YAML rather than setting struct fields directly.
+// with TagName "yaml", viper's runs with the default "mapstructure". If a
+// mapstructure tag goes missing the check silently reports "schemes is empty"
+// against a config that sets them, which is worse than the viper read it
+// replaced. Hence a test that reads real YAML rather than setting struct
+// fields directly.
+//
+// Which tags actually carry, established by dropping each one and re-running:
+// only the HYPHENATED keys. mapstructure falls back to case-insensitive field
+// NAME matching, so `mechanisms`, `manual` and `interval` decode into
+// Mechanisms/Manual/Interval with no tag at all -- dropping those is harmless.
+// `require-dnssec`, `max-attempts` and `allow-unvalidated-upload` have no such
+// fallback, and this test fails if any of the three loses its tag. Do not
+// "strengthen" it to chase the other three: there is nothing there to catch.
 func TestConfigCheckDecodesDelegationSyncTyped(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tdns.yaml")
+	// EVERY value here is deliberately the OPPOSITE of what
+	// compileDelegationPolicy fills in from DefaultDelegationPolicy(). That is
+	// the whole point: compile gap-fills zero values, so a field asserted
+	// against its own default proves nothing -- a dropped mapstructure tag
+	// leaves the field zero, compile substitutes the default, and the
+	// assertion passes on a decode that never happened. require-dnssec is
+	// false (default true), manual true (false), the retry pair 3/7s (5/10s),
+	// and default's mechanisms are at-ns alone (at-apex + at-ns).
 	body := `
 delegationsync:
    policies:
       default:
          bootstrap:
-            mechanisms:      [ at-apex, at-ns ]
-            require-dnssec:  true
-            allow-unvalidated-upload: false
+            mechanisms:      [ at-ns ]
+            require-dnssec:  false
+            manual:          true
+            allow-unvalidated-upload: true
             retry:
                max-attempts: 3
                interval:     7s
@@ -78,21 +97,63 @@ delegationsync:
 	if got := cfg.DelegationSync.Child.Update.Bootstrap.Methods; len(got) != 1 || got[0] != "at-apex" {
 		t.Fatalf("child bootstrap methods decoded as %v", got)
 	}
-	if len(cfg.DelegationSync.Policies) != 2 {
-		t.Fatalf("policies decoded as %+v", cfg.DelegationSync.Policies)
+
+	// An explicitly empty list must survive as a NON-NIL empty slice: compile
+	// only overrides Mechanisms when the decoded value is non-nil, so if YAML
+	// `[ ]` arrived as nil, locked-down would silently compile to
+	// [at-apex, at-ns] and advertise them -- the advertisement lying about the
+	// policy, which is the defect §4.1 exists to close.
+	if m := cfg.DelegationSync.Policies["locked-down"].Bootstrap.Mechanisms; m == nil {
+		t.Fatal("locked-down mechanisms decoded as nil; an explicit empty list must stay empty")
 	}
 
-	// And the server's own compiler accepts what viper produced, including the
-	// duration and the pointer-bool.
 	compiled, methods, err := tdns.CompileDelegationSyncPolicies(cfg.DelegationSync)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if !tdns.DelegationPolicyResolves(compiled, "locked-down") {
-		t.Fatal("locked-down did not survive the decode+compile round trip")
-	}
 	if len(methods) != 1 || methods[0] != "at-apex" {
 		t.Fatalf("compiled child methods = %v", methods)
+	}
+
+	def, ok := compiled["default"]
+	if !ok {
+		t.Fatal("default policy missing after compile")
+	}
+	if def.RequireDnssec {
+		t.Error("require-dnssec: false did not survive; the pointer-bool tag is not carrying")
+	}
+	if !def.Manual {
+		t.Error("manual: true did not survive")
+	}
+	if !def.AllowUnvalidatedUpload {
+		t.Error("allow-unvalidated-upload: true did not survive")
+	}
+	if def.RetryMaxAttempts != 3 {
+		t.Errorf("retry max-attempts = %d, want 3", def.RetryMaxAttempts)
+	}
+	if def.RetryInterval != 7*time.Second {
+		t.Errorf("retry interval = %s, want 7s; the duration hook or its tag is not carrying", def.RetryInterval)
+	}
+	if !reflect.DeepEqual(def.Mechanisms, []string{"at-ns"}) {
+		t.Errorf("default mechanisms = %v, want [at-ns]", def.Mechanisms)
+	}
+
+	locked, ok := compiled["locked-down"]
+	if !ok {
+		t.Fatal("locked-down policy missing after compile")
+	}
+	if len(locked.Mechanisms) != 0 {
+		t.Errorf("locked-down mechanisms = %v, want empty", locked.Mechanisms)
+	}
+	if !locked.Manual {
+		t.Error("locked-down manual: true did not survive")
+	}
+	// The observable consequence of the two lines above.
+	if got := locked.BootstrapSVCBMethods(); len(got) != 1 || got[0] != "manual" {
+		t.Errorf("locked-down advertises %v, want [manual]", got)
+	}
+	if !tdns.DelegationPolicyResolves(compiled, "locked-down") {
+		t.Fatal("locked-down did not survive the decode+compile round trip")
 	}
 }
 
