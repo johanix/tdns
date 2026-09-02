@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -120,6 +121,14 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 			}
 			lgDns.Warn("sendUpdateWithRetry: BADKEY, re-bootstrapping SIG(0) key once")
 			if berr := reBootstrap(); berr != nil {
+				if errors.Is(berr, errBootstrapAdvertisementLookup) {
+					// The re-bootstrap never got as far as choosing a method:
+					// the parent's advertisement could not be looked up. Leave
+					// the one re-bootstrap unspent and let the next attempt
+					// try again, within the same bound.
+					lgDns.Warn("sendUpdateWithRetry: re-bootstrap deferred, advertisement lookup failed", "attempt", attempt, "err", berr)
+					return false, fmt.Errorf("re-bootstrap after BADKEY deferred: %w", berr)
+				}
 				return true, fmt.Errorf("re-bootstrap after BADKEY failed: %v", berr)
 			}
 			reBootstrapped = true

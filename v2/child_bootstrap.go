@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,12 +12,17 @@ import (
 
 var childBootstrapPreference = []string{"at-apex", "at-ns", "unsigned", "manual"}
 
-func childBootstrapMethods(proxy bool) []string {
-	methods := DelegationSyncConfig().CompiledChildMethods
-	if methods == nil {
-		methods = []string{"at-apex"}
-	}
-	if !proxy {
+// childBootstrapMethods is the child's willing list, filtered to what this
+// zone can actually satisfy. at-ns needs the child's KEY published at
+// _sig0key.<child>._signal.<ns> (draft §"When Child Nameserver Is In A
+// DNSSEC-signed Zone"), which is possible only when canSignal: this server is
+// primary for a zone one of the child's NS signal names falls in. A proxy
+// never can -- _signal lives in the nameserver's zone, which a secondary
+// proxying for a clueless primary does not control -- so proxy implies
+// !canSignal on every path, BADKEY recovery included.
+func childBootstrapMethods(proxy, canSignal bool) []string {
+	methods := configuredChildBootstrapMethods()
+	if !proxy && canSignal {
 		return methods
 	}
 	out := make([]string, 0, len(methods))
@@ -28,8 +34,30 @@ func childBootstrapMethods(proxy bool) []string {
 	return out
 }
 
+// configuredChildBootstrapMethods is the operator's list, or the omit-default
+// (compileChildBootstrapMethods) when no delegationsync block has been
+// installed at all.
+func configuredChildBootstrapMethods() []string {
+	if methods := DelegationSyncConfig().CompiledChildMethods; methods != nil {
+		return methods
+	}
+	return []string{"at-apex", "at-ns"}
+}
+
 func (zd *ZoneData) zoneChildBootstrapMethods() []string {
-	return childBootstrapMethods(zd != nil && zd.Options[OptDelSyncProxy])
+	proxy := zd != nil && zd.Options[OptDelSyncProxy]
+	canSignal := !proxy && zd != nil && zd.canPublishSig0KeyAtSignal()
+	methods := childBootstrapMethods(proxy, canSignal)
+	if zd != nil && !proxy && !canSignal {
+		for _, m := range configuredChildBootstrapMethods() {
+			if m == "at-ns" {
+				lgHandler.Info("at-ns dropped from the SIG(0) bootstrap willing list: no NS of the zone has its _sig0key._signal name in a zone this server is primary for",
+					"zone", zd.ZoneName, "willing", methods)
+				break
+			}
+		}
+	}
+	return methods
 }
 
 func intersectBootstrapMethods(advertised, willing []string) []string {
@@ -96,50 +124,69 @@ func selectChildBootstrapMethod(advertised []string, advertisedPresent bool, wil
 
 // advertisedBootstrapMethods returns the parent's SVCB bootstrap advertisement
 // at the DSYNC UPDATE target. present=false means there is no advertisement
-// the child may act on: none is published, the lookup failed, or the
-// advertisement is unauthenticated -- the DSYNC lookup that named the target
-// or the SVCB lookup itself did not DNSSEC-validate -- and allow-insecure is
-// off. An unauthenticated advertisement is ignored, not honoured, so a forged
+// the child may act on: none is published, or the advertisement is
+// unauthenticated -- the DSYNC lookup that named the target or the SVCB
+// lookup itself did not DNSSEC-validate -- and allow-insecure is off. An
+// unauthenticated advertisement is ignored, not honoured, so a forged
 // SVCB can neither talk the child out of bootstrapping (an empty or
 // manual-only set refuses) nor into a method it did not choose; the caller
 // then falls back to the child's own configured list, exactly as for a parent
 // that publishes no advertisement.
-func advertisedBootstrapMethods(ctx context.Context, imr *Imr, target *DsyncTarget, allowInsecure bool) ([]string, bool) {
+//
+// The third result separates "the parent publishes no advertisement" from
+// "the lookup failed": the former falls back to the child's list, the latter
+// is errBootstrapAdvertisementLookup, which the bootstrap callers treat as
+// retryable rather than proceeding as if the parent had said nothing. A
+// transient resolver failure must not turn a manual-only parent's refusal
+// into an automatic KEY UPDATE attempt.
+func advertisedBootstrapMethods(ctx context.Context, imr *Imr, target *DsyncTarget, allowInsecure bool) ([]string, bool, error) {
 	if imr == nil || target == nil || target.Name == "" {
-		return nil, false
+		return nil, false, nil
 	}
 	resp, err := imr.ImrQuery(ctx, dns.Fqdn(target.Name), dns.TypeSVCB, dns.ClassINET, nil)
-	if err != nil || (resp != nil && resp.Error) {
-		// Treated as "no advertisement" for now; logged so a resolver
-		// failure is not mistaken for a parent that publishes none.
-		msg := ""
-		if resp != nil {
-			msg = resp.ErrorMsg
-		}
-		lgHandler.Warn("SVCB bootstrap advertisement lookup failed; proceeding as if none were published",
-			"target", target.Name, "err", err, "imr", msg)
-		return nil, false
+	rrs, lerr := classifyAdvertisementLookup(target.Name, resp, err)
+	if lerr != nil {
+		return nil, false, lerr
 	}
-	if resp == nil || resp.RRset == nil {
-		return nil, false
-	}
-	data, count := publishedBootstrapSVCBData(resp.RRset.RRs)
+	data, count := publishedBootstrapSVCBData(rrs)
 	if count == 0 {
-		return nil, false
+		return nil, false, nil
 	}
 	// A bogus verdict, on the SVCB or on the DSYNC that named the target, is
 	// a failed chain of trust: ignored whatever allow-insecure says.
 	if target.Bogus || resp.ValidationState == cache.ValidationStateBogus {
 		lgHandler.Warn("ignoring SVCB bootstrap advertisement: DNSSEC validation FAILED (bogus), which no setting waives; falling back to the configured bootstrap methods",
 			"target", target.Name, "advertised", data, "dsyncBogus", target.Bogus, "svcbBogus", resp.ValidationState == cache.ValidationStateBogus)
-		return nil, false
+		return nil, false, nil
 	}
 	if !bootstrapAdvertisementUsable(target.Validated, resp.Validated, allowInsecure) {
 		lgHandler.Warn("ignoring unauthenticated SVCB bootstrap advertisement; falling back to the configured bootstrap methods (set "+allowInsecureKnob+" to act on it)",
 			"target", target.Name, "advertised", data, "dsyncValidated", target.Validated, "svcbValidated", resp.Validated)
-		return nil, false
+		return nil, false, nil
 	}
-	return splitBootstrapMethods(data), true
+	return splitBootstrapMethods(data), true, nil
+}
+
+// errBootstrapAdvertisementLookup marks a failed (not merely empty) SVCB
+// bootstrap advertisement lookup. Callers with a retry loop retry on it.
+var errBootstrapAdvertisementLookup = errors.New("SVCB bootstrap advertisement lookup failed")
+
+// classifyAdvertisementLookup sorts an IMR answer into "here is what is
+// published" (rrs, possibly empty: the IMR reports NXDOMAIN and NODATA as a
+// non-error response with no RRset) and "the lookup failed" (a transport or
+// resolver error, or resp.Error, which the IMR sets only for those).
+func classifyAdvertisementLookup(target string, resp *ImrResponse, err error) ([]dns.RR, error) {
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("%w for %s: %v", errBootstrapAdvertisementLookup, target, err)
+	case resp == nil:
+		return nil, fmt.Errorf("%w for %s: no response", errBootstrapAdvertisementLookup, target)
+	case resp.Error:
+		return nil, fmt.Errorf("%w for %s: %s", errBootstrapAdvertisementLookup, target, resp.ErrorMsg)
+	case resp.RRset == nil:
+		return nil, nil
+	}
+	return resp.RRset.RRs, nil
 }
 
 // bootstrapAdvertisementUsable is the authentication gate on the SVCB bootstrap

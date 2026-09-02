@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -93,10 +94,13 @@ func TestChildBootstrapMethodsProxyDropsAtNs(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
 
-	if got := childBootstrapMethods(false); !reflect.DeepEqual(got, []string{"at-apex", "at-ns", "unsigned"}) {
-		t.Fatalf("auth: %v", got)
+	if got := childBootstrapMethods(false, true); !reflect.DeepEqual(got, []string{"at-apex", "at-ns", "unsigned"}) {
+		t.Fatalf("auth with a signal target: %v", got)
 	}
-	if got := childBootstrapMethods(true); !reflect.DeepEqual(got, []string{"at-apex", "unsigned"}) {
+	if got := childBootstrapMethods(false, false); !reflect.DeepEqual(got, []string{"at-apex", "unsigned"}) {
+		t.Fatalf("auth without a signal target: %v", got)
+	}
+	if got := childBootstrapMethods(true, true); !reflect.DeepEqual(got, []string{"at-apex", "unsigned"}) {
 		t.Fatalf("proxy: %v", got)
 	}
 }
@@ -109,13 +113,84 @@ func TestZoneChildBootstrapMethodsUsesProxyOption(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
 
-	auth := &ZoneData{Options: map[ZoneOption]bool{OptDelSyncChild: true}}
+	// signalTarget gives the zone an in-bailiwick NS (ns.<zone>), so the
+	// zone itself -- primary here -- owns the _signal name: at-ns is satisfiable.
+	auth, _ := signalTarget("auth.example.", nil)
+	auth.Options[OptDelSyncChild] = true
+	proxy, _ := signalTarget("proxy.example.", nil)
+	proxy.Options[OptDelSyncProxy] = true
+	registerZones(t, auth, proxy)
+
 	if got := auth.zoneChildBootstrapMethods(); !reflect.DeepEqual(got, []string{"at-apex", "at-ns"}) {
 		t.Fatalf("auth zone: %v", got)
 	}
-	proxy := &ZoneData{Options: map[ZoneOption]bool{OptDelSyncProxy: true}}
+	// A proxy never offers at-ns, even when the signal name would be local.
 	if got := proxy.zoneChildBootstrapMethods(); !reflect.DeepEqual(got, []string{"at-apex"}) {
 		t.Fatalf("proxy zone: %v", got)
+	}
+}
+
+// at-ns is in the omit-default, but a zone only offers it when this server
+// can publish the KEY at one of its NS signal names (D-6).
+func TestZoneChildBootstrapMethodsRequiresSignalTarget(t *testing.T) {
+	if err := SetDelegationSyncConfig(DelegationSyncConf{}); err != nil { // omit -> default list
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
+
+	local, _ := signalTarget("local.example.", nil)
+	local.Options[OptDelSyncChild] = true
+	away := newMapZone("away.example.", Primary, map[string][]dns.RR{
+		"away.example.": {
+			mustRR(t, "away.example. 3600 IN SOA ns.elsewhere.net. h.away.example. 1 3600 600 604800 300"),
+			mustRR(t, "away.example. 3600 IN NS ns.elsewhere.net."),
+		},
+	})
+	away.Options[OptDelSyncChild] = true
+	registerZones(t, local, away)
+
+	if got := local.zoneChildBootstrapMethods(); !reflect.DeepEqual(got, []string{"at-apex", "at-ns"}) {
+		t.Fatalf("local signal target: %v", got)
+	}
+	if got := away.zoneChildBootstrapMethods(); !reflect.DeepEqual(got, []string{"at-apex"}) {
+		t.Fatalf("no local signal target: %v (at-ns must be dropped)", got)
+	}
+}
+
+// classifyAdvertisementLookup: a failed lookup is errBootstrapAdvertisementLookup
+// (retryable), an empty answer -- the IMR's NXDOMAIN/NODATA shape -- is "nothing
+// published", which is the case for most parents today and must not fail.
+func TestClassifyAdvertisementLookup(t *testing.T) {
+	svcb := newBootstrapSVCB("updates.example.", "at-apex", 300)
+	cases := []struct {
+		name    string
+		resp    *ImrResponse
+		err     error
+		wantRRs int
+		wantErr bool
+	}{
+		{"transport error", nil, errors.New("timeout"), 0, true},
+		{"nil response", nil, nil, 0, true},
+		{"resolver failure", &ImrResponse{Error: true, ErrorMsg: "failed to resolve"}, nil, 0, true},
+		{"NXDOMAIN or NODATA is absent, not failed", &ImrResponse{Msg: "NXDOMAIN (negative response type 3)"}, nil, 0, false},
+		{"published", &ImrResponse{RRset: &core.RRset{RRs: []dns.RR{svcb}}}, nil, 1, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rrs, err := classifyAdvertisementLookup("updates.example.", c.resp, c.err)
+			if c.wantErr {
+				if !errors.Is(err, errBootstrapAdvertisementLookup) {
+					t.Fatalf("err = %v, want errBootstrapAdvertisementLookup", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(rrs) != c.wantRRs {
+				t.Fatalf("rrs = %d, want %d", len(rrs), c.wantRRs)
+			}
+		})
 	}
 }
 
@@ -154,18 +229,18 @@ func TestAdvertisedBootstrapMethodsRequiresAuthentication(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	got, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, false)
-	if !present || !reflect.DeepEqual(got, []string{"at-apex", "manual"}) {
-		t.Fatalf("validated: got %v present=%v", got, present)
+	got, present, err := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, false)
+	if err != nil || !present || !reflect.DeepEqual(got, []string{"at-apex", "manual"}) {
+		t.Fatalf("validated: got %v present=%v err=%v", got, present, err)
 	}
-	if _, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: false}, false); present {
-		t.Fatal("unvalidated DSYNC: advertisement must be ignored")
+	if _, present, err := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: false}, false); present || err != nil {
+		t.Fatalf("unvalidated DSYNC: advertisement must be ignored, not failed (present=%v err=%v)", present, err)
 	}
-	got, present = advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: false}, true)
-	if !present || !reflect.DeepEqual(got, []string{"at-apex", "manual"}) {
-		t.Fatalf("unvalidated DSYNC under allow-insecure: got %v present=%v", got, present)
+	got, present, err = advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: false}, true)
+	if err != nil || !present || !reflect.DeepEqual(got, []string{"at-apex", "manual"}) {
+		t.Fatalf("unvalidated DSYNC under allow-insecure: got %v present=%v err=%v", got, present, err)
 	}
-	if _, present := advertisedBootstrapMethods(ctx, imr, nil, true); present {
+	if _, present, err := advertisedBootstrapMethods(ctx, imr, nil, true); present || err != nil {
 		t.Fatal("nil target must be absent")
 	}
 
@@ -179,12 +254,12 @@ func TestAdvertisedBootstrapMethodsRequiresAuthentication(t *testing.T) {
 		Context: cache.ContextAnswer,
 		State:   cache.ValidationStateInsecure,
 	})
-	if _, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, false); present {
-		t.Fatal("unvalidated SVCB, strict: advertisement must be ignored")
+	if _, present, err := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, false); present || err != nil {
+		t.Fatalf("unvalidated SVCB, strict: advertisement must be ignored, not failed (present=%v err=%v)", present, err)
 	}
-	got, present = advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, true)
-	if !present || !reflect.DeepEqual(got, []string{"unsigned", "manual"}) {
-		t.Fatalf("unvalidated SVCB under allow-insecure: got %v present=%v", got, present)
+	got, present, err = advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, true)
+	if err != nil || !present || !reflect.DeepEqual(got, []string{"unsigned", "manual"}) {
+		t.Fatalf("unvalidated SVCB under allow-insecure: got %v present=%v err=%v", got, present, err)
 	}
 
 	// Bogus -- a chain that exists and failed -- is never honoured, not
@@ -195,8 +270,8 @@ func TestAdvertisedBootstrapMethodsRequiresAuthentication(t *testing.T) {
 		Context: cache.ContextAnswer,
 		State:   cache.ValidationStateBogus,
 	})
-	if _, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, true); present {
-		t.Fatal("bogus SVCB under allow-insecure: advertisement must be ignored")
+	if _, present, err := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, true); present || err != nil {
+		t.Fatalf("bogus SVCB under allow-insecure: advertisement must be ignored, not failed (present=%v err=%v)", present, err)
 	}
 	imr.Cache.Set(target, dns.TypeSVCB, &cache.CachedRRset{
 		Name: target, RRtype: dns.TypeSVCB,
@@ -204,7 +279,7 @@ func TestAdvertisedBootstrapMethodsRequiresAuthentication(t *testing.T) {
 		Context: cache.ContextAnswer,
 		State:   cache.ValidationStateSecure,
 	})
-	if _, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: false, Bogus: true}, true); present {
-		t.Fatal("bogus DSYNC under allow-insecure: advertisement must be ignored")
+	if _, present, err := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: false, Bogus: true}, true); present || err != nil {
+		t.Fatalf("bogus DSYNC under allow-insecure: advertisement must be ignored, not failed (present=%v err=%v)", present, err)
 	}
 }

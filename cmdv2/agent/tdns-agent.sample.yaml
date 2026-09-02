@@ -140,7 +140,9 @@ delegationsync:
             generator:	/opt/local/bin/dnssec-keygen
             algorithm:	ED25519
          bootstrap:
-            methods: [ at-apex ]
+            # A proxy can never satisfy at-ns (the _signal name lives in the
+            # nameserver's zone), so it is dropped from this list at run time.
+            methods: [ at-apex, at-ns ]
          # Act on KeyState responses and SVCB bootstrap advertisements that
          # cannot be authenticated (receiver KEY neither DNSSEC-validated nor
          # manually trusted). Default false rejects them. A BOGUS DNSSEC

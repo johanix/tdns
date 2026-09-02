@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -108,6 +109,15 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 				"zone", zone, "keyid", keyid, "authenticated", authenticated)
 			UpdateParentState(kdb, keyName, keyid, keyState)
 			if err := BootstrapWithParent(ctx, zone, keyName, algorithm); err != nil {
+				if errors.Is(err, errBootstrapAdvertisementLookup) {
+					// The parent's SVCB advertisement could not be looked up.
+					// Not a verdict on the method set, so not terminal: retry
+					// with the same backoff rather than either giving up or
+					// guessing.
+					lgElect.Warn("ParentSyncAfterKeyPublication: bootstrap deferred, advertisement lookup failed",
+						"zone", zone, "attempt", attempt, "err", err)
+					return false, err // retry
+				}
 				lgElect.Error("ParentSyncAfterKeyPublication: bootstrap failed",
 					"zone", zone, "err", err)
 				return true, err // done (terminal error)
@@ -215,7 +225,7 @@ func BootstrapWithParent(ctx context.Context, zone ZoneName, keyName string, alg
 
 	msg, ur, err := zd.BootstrapSig0KeyWithParent(ctx, algorithm)
 	if err != nil {
-		return fmt.Errorf("BootstrapSig0KeyWithParent: %s: %v", msg, err)
+		return fmt.Errorf("BootstrapSig0KeyWithParent: %s: %w", msg, err)
 	}
 
 	lgElect.Info("BootstrapWithParent: success", "zone", zone, "result", msg, "updateResult", ur)

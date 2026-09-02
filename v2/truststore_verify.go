@@ -52,8 +52,9 @@ func LookupChildKeyAtSignal(ctx context.Context, childZone string, imr *Imr) ([]
 			continue
 		}
 
-		// _sig0key.<childzone>._signal.<ns>.
-		signalName := fmt.Sprintf("_sig0key.%s_signal.%s", dns.Fqdn(childZone), dns.Fqdn(nsRR.Ns))
+		// _sig0key.<childzone>._signal.<ns>. -- the same spelling the child
+		// side publishes (signal_republish.go).
+		signalName := signalOwnerName(signalPrefixSig0Key, childZone, nsRR.Ns)
 		lgSigner.Debug("LookupChildKeyAtSignal: querying", "name", signalName)
 
 		keyResp, err := imr.ImrQuery(ctx, signalName, dns.TypeKEY, dns.ClassINET, nil)

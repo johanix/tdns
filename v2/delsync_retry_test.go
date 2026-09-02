@@ -222,3 +222,52 @@ func TestRetryWithBackoffHonoursCancellation(t *testing.T) {
 		t.Errorf("took %v — the backoff slept through the cancellation", elapsed)
 	}
 }
+
+// A re-bootstrap that fails only because the parent's SVCB bootstrap
+// advertisement could not be looked up (carry-over 9) is deferred, not spent:
+// the next attempt may re-bootstrap again, and the one-re-bootstrap bound
+// applies once a re-bootstrap actually runs.
+func TestSendUpdateWithRetryDefersReBootstrapOnAdvertisementLookupFailure(t *testing.T) {
+	fast := time.Millisecond
+
+	t.Run("transient lookup failure, then success", func(t *testing.T) {
+		sends, reboots := 0, 0
+		rcode, _, err := sendUpdateWithRetry(context.Background(), 5, fast,
+			func() (int, UpdateResult, error) {
+				sends++
+				if sends <= 2 {
+					return dns.RcodeBadKey, UpdateResult{}, nil
+				}
+				return dns.RcodeSuccess, UpdateResult{}, nil
+			},
+			func() error {
+				reboots++
+				if reboots == 1 {
+					return fmt.Errorf("BootstrapSig0KeyWithParent: %w", errBootstrapAdvertisementLookup)
+				}
+				return nil
+			})
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		if rcode != dns.RcodeSuccess {
+			t.Errorf("rcode = %d, want NOERROR", rcode)
+		}
+		if reboots != 2 || sends != 3 {
+			t.Errorf("reboots=%d sends=%d, want 2 and 3", reboots, sends)
+		}
+	})
+
+	t.Run("persistent lookup failure exhausts the budget", func(t *testing.T) {
+		reboots := 0
+		_, _, err := sendUpdateWithRetry(context.Background(), 3, fast,
+			func() (int, UpdateResult, error) { return dns.RcodeBadKey, UpdateResult{}, nil },
+			func() error { reboots++; return errBootstrapAdvertisementLookup })
+		if err == nil {
+			t.Fatal("expected an error after exhausting retries")
+		}
+		if reboots != 3 {
+			t.Errorf("reboots = %d, want 3 (one deferred attempt per retry)", reboots)
+		}
+	})
+}
