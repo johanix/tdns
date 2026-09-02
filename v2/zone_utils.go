@@ -1473,6 +1473,23 @@ func FindZone(qname string) *ZoneData {
 	return nil
 }
 
+// FindParentZone is FindZone starting one label in, so a server that
+// also serves the child does not resolve the child as its own parent.
+func FindParentZone(qname string) *ZoneData {
+	labels := strings.Split(qname, ".")
+	for i := 1; i < len(labels); i++ {
+		name := strings.Join(labels[i:], ".")
+		if name == "" {
+			name = "."
+		}
+		if zd, ok := Zones.Get(name); ok {
+			return zd
+		}
+	}
+	lg.Debug("FindParentZone: no parent zone found", "qname", qname)
+	return nil
+}
+
 // EffectiveOutboundSoaSerial resolves the outbound serial mode actually in
 // force for this zone, newest tier first:
 //
@@ -1675,9 +1692,8 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		// offer only API. Without the guard the empty template expands to ".",
 		// which is a syntactically valid domain name, and the zone would get a
 		// SIG(0) keypair generated for the root.
-		updateTargetTpl := DelegationSyncConfig().Parent.Update.Target
-		updateTarget := dns.Fqdn(strings.Replace(updateTargetTpl, "{ZONENAME}", zd.ZoneName, 1))
-		if updateTargetTpl == "" {
+		updateTarget := DsyncUpdateTargetName(zd.ZoneName)
+		if updateTarget == "" {
 			lg.Debug("SetupZoneSync: no DSYNC update target configured, skipping SIG(0) key prep", "zone", zd.ZoneName)
 		} else if _, ok := dns.IsDomainName(updateTarget); !ok {
 			lg.Error("SetupZoneSync: invalid DSYNC update target", "zone", zd.ZoneName, "target", updateTarget)

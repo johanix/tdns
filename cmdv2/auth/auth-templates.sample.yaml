@@ -190,6 +190,7 @@ templates:
      options:
         - delegation-sync-parent  # Provide delegation sync for children
      dnssecpolicy:    default
+     delegationpolicy: manual
 
    # Primary zone with online signing
    - name:            signed-primary
@@ -199,6 +200,7 @@ templates:
         - delegation-sync-parent
         - online-signing         # Sign on-the-fly
      dnssecpolicy:    default
+     delegationpolicy: manual
 
    # Primary zone allowing dynamic updates
    - name:            dynamic-primary
@@ -209,6 +211,7 @@ templates:
         - delegation-sync-parent
         - online-signing
      dnssecpolicy:    default
+     delegationpolicy: manual
 
    # Basic secondary zone template
    - name:            basic-secondary
@@ -264,6 +267,7 @@ templates:
         - delegation-sync-parent
         - online-signing
      dnssecpolicy:    fastroll           # Use fast-rolling policy
+     delegationpolicy: manual
 
    # Stealth primary (serves, but upstream fetches from it)
    - name:            stealth-primary
@@ -283,6 +287,7 @@ templates:
         - delegation-sync-parent
         - online-signing
      dnssecpolicy:    default
+     delegationpolicy: manual
 
    # Zonefile-pattern template: a zone that sets no zonefile: of its own gets
    # /etc/tdns/zones/<zonename>zone — note the trailing dot in the zone name

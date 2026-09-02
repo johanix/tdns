@@ -220,16 +220,9 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 		return err
 	}
 
-	err = zd.Sig0KeyPreparation(zd.ZoneName, alg, kdb)
-	if err != nil {
-		lgDns.Error("DelegationSyncSetup: error from Sig0KeyPreparation", "zone", zd.ZoneName, "err", err)
-		return err
-	}
-
-	// 4. There is a KEY RRset, we have tried to sign it if possible. But has it been uploaded to the parent?
-	// XXX: This is a bit of a hack, but we need to bootstrap the parent with the child's SIG(0) key. In the future
-	// we should keep state of whether successful key bootstrapping has been done or not in the keystore.
-	msg, ur, err := zd.BootstrapSig0KeyWithParent(ctx, alg)
+	// EnsureApexKEY (PublishKeyRRs via Sig0KeyPreparation) then the ceremony.
+	// The proxy path uses a no-op ensurer: the operator publishes the KEY.
+	msg, ur, err := zd.bootstrapSig0Key(ctx, alg, authApexKEY{zd: zd, kdb: kdb, alg: alg})
 	if err != nil {
 		lgDns.Error("DelegationSyncSetup: error from BootstrapSig0KeyWithParent", "zone", zd.ZoneName, "err", err)
 		for _, tes := range ur.TargetStatus {
@@ -457,107 +450,11 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 func (zd *ZoneData) SyncZoneDelegationViaUpdate(ctx context.Context, kdb *KeyDB, syncstate DelegationSyncStatus,
 	dsynctarget *DsyncTarget) (string, uint8, UpdateResult, error) {
 
-	// dump.P(syncstate)
-
-	// Check the parent-update option to determine whether to use replace or delta mode
-	updateMode := UpdateModeDelta // default
+	updateMode := UpdateModeDelta
 	if mode, exists := kdb.AuthOption(AuthOptParentUpdate); exists {
 		updateMode = mode
 	}
-
-	var m *dns.Msg
-	var err error
-
-	if updateMode == UpdateModeReplace {
-		// Replace mode: DEL the whole RRset, then ADD the current authoritative
-		// members (NewNS / NewA / NewAAAA / NewDS, populated by the delegation
-		// analysis). Idempotent and self-correcting — it does not depend on the
-		// parent's current state. The historical "replace mode is broken" guard
-		// here was a workaround for an upstream miekg/dns bug fixed in the tdns
-		// fork (the KSK rollover engine's BuildChildWholeDSUpdate already relies
-		// on the fix in production).
-		lgDns.Info("SyncZoneDelegationViaUpdate: using replace mode", "zone", zd.ZoneName)
-		m, err = CreateChildReplaceUpdateWithDS(zd.Parent, zd.ZoneName,
-			syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA,
-			syncstate.NewDS, syncstate.NewDSKnown)
-		if err != nil {
-			return "", 0, UpdateResult{}, err
-		}
-	} else {
-		// Delta mode: use adds and removes (existing behavior)
-		lgDns.Info("SyncZoneDelegationViaUpdate: using delta mode", "zone", zd.ZoneName)
-		// Ensure that we don't count any changes twice.
-		syncstate.Adds = []dns.RR{}
-		syncstate.Removes = []dns.RR{}
-
-		// If UPDATE:
-		// 2. Create DNS UPDATE msg
-		// var adds, removes []dns.RR
-		syncstate.Adds = append(syncstate.Adds, syncstate.NsAdds...)
-		syncstate.Adds = append(syncstate.Adds, syncstate.AAdds...)
-		syncstate.Adds = append(syncstate.Adds, syncstate.AAAAAdds...)
-		syncstate.Adds = append(syncstate.Adds, syncstate.DSAdds...)
-		syncstate.Removes = append(syncstate.Removes, syncstate.NsRemoves...)
-		syncstate.Removes = append(syncstate.Removes, syncstate.ARemoves...)
-		syncstate.Removes = append(syncstate.Removes, syncstate.AAAARemoves...)
-		syncstate.Removes = append(syncstate.Removes, syncstate.DSRemoves...)
-
-		// dump.P(syncstate)
-		m, err = CreateChildUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)
-		if err != nil {
-			return "", 0, UpdateResult{}, err
-		}
-	}
-
-	// 3. Fetch the SIG(0) key from the keystore
-	lgDns.Debug("SyncZoneDelegationViaUpdate: fetching the private key", "zone", zd.ZoneName)
-	sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
-	if err != nil {
-		lgDns.Error("SyncZoneDelegationViaUpdate: error from GetSig0Keys", "zone", zd.ZoneName, "state", Sig0StateActive, "err", err)
-		return "", 0, UpdateResult{}, err
-	}
-	if len(sak.Keys) == 0 {
-		lgDns.Error("SyncZoneDelegationViaUpdate: no active SIG(0) key found", "zone", zd.ZoneName)
-		return "", 0, UpdateResult{}, fmt.Errorf("no active SIG(0) key found for zone %s", zd.ZoneName)
-	}
-
-	// 4. Sign the msg
-	lgDns.Debug("SyncZoneDelegationViaUpdate: signing the DNS UPDATE", "zone", zd.ZoneName)
-	smsg, err := SignMsg(*m, zd.ZoneName, sak)
-	if err != nil {
-		lgDns.Error("SyncZoneDelegationViaUpdate: error from SignMsg", "zone", zd.ZoneName, "err", err)
-		return "", 0, UpdateResult{}, err
-	}
-	if smsg == nil {
-		lgDns.Error("SyncZoneDelegationViaUpdate: SignMsg returned nil", "zone", zd.ZoneName, "err", err)
-		return "", 0, UpdateResult{}, err
-	}
-
-	// 5. Send the msg
-	lgDns.Info("SyncZoneDelegationViaUpdate: sending the signed update",
-		"target", dsynctarget.Name, "addresses", dsynctarget.Addresses, "port", dsynctarget.Port)
-
-	// SendUpdateWithRetry, not the bare SendUpdate: this is the delegation-DATA
-	// send path, the one draft-ietf-dnsop-delegation-mgmt-via-ddns-02
-	// §"No response to a DNS UPDATE" gives the retry/backoff schedule for, and
-	// the one whose BADKEY answer means "re-bootstrap the SIG(0) key" (D-2b).
-	// It is bounded and ctx-aware, so walkSyncPlan can still abandon it and move
-	// on to the next candidate transport.
-	rcode, ur, err := zd.SendUpdateWithRetry(ctx, smsg, zd.Parent, dsynctarget.Addresses)
-	if err != nil {
-		lgDns.Error("error from SendUpdateWithRetry", "zone", zd.Parent, "err", err)
-		return "", 0, ur, err
-	}
-	msg := fmt.Sprintf("SendUpdate(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
-	lgDns.Info("SyncZoneDelegationViaUpdate: update sent", "zone", zd.Parent, "rcode", dns.RcodeToString[rcode])
-	for _, tes := range ur.TargetStatus {
-		lgDns.Debug("SyncZoneDelegationViaUpdate: TargetUpdateStatus", "status", tes)
-	}
-
-	// 6. Check the response
-	// 7. Return result to CLI
-
-	return msg, uint8(rcode), ur, err
+	return zd.SendDelegationUpdate(ctx, kdb, syncstate, dsynctarget, updateMode)
 }
 
 func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyRequest, syncstate DelegationSyncStatus,

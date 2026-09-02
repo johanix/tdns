@@ -1,10 +1,10 @@
 # Implementation plan — unify the delegation-sync child paths and config
 
-**Status:** design settled and reviewed. Two external passes folded in 2026-09-02
+**Status:** implemented on `feature/delegation-sync-unification` (U-0 through
+U-6). Design settled and reviewed 2026-09-02
 (`reviews/2026-09-02-delegation-sync-unification-plan-review.md`, *request changes* —
-both holds closed; `…-rereview.md`, *approve after one sentence in U-0* — that
-sentence is now written). **Ready to implement, starting at U-0.** No code yet.
-**Base:** branch off `main`. Work in the **`v2/` tree only**.
+both holds closed; `…-rereview.md`; `…-rereview-2.md`, *approve*).
+**Base:** `main` (PR #312). Work in the **`v2/` tree only**.
 **Relationship to other plans:** this is a prerequisite refactor for the remaining Phase 2
 items of `2026-07-16-ddns-delegation-keystate-draft-alignment-plan.md` (D-6, D-7, D-3b).
 Doing those first means implementing each of them twice — see §6.
@@ -262,10 +262,11 @@ delegationsync:
             # order. Intersected with the parent's advertised set; the first
             # surviving preference wins. Empty intersection => refuse and log,
             # never silently degrade.
-            # Default when absent: [ at-apex, at-ns ] — `unsigned` must be
-            # opted into, because this decides how strongly the parent will
-            # have checked the key that authorises everything else.
-            methods: [ at-apex, at-ns ]
+            # Default when absent: [ at-apex ] — `at-ns` is valid to opt into
+            # but the child cannot yet publish RFC 9615 `_signal`. `unsigned`
+            # must be opted into, because this decides how strongly the parent
+            # will have checked the key that authorises everything else.
+            methods: [ at-apex ]
       # api.credentials stay per-parent — they are per-parent secrets.
 ```
 
@@ -545,8 +546,7 @@ those same DNSKEYs.
   disappear; `manual` does **not** — see the shipped-template hazard in §4.3,
   which those templates do set.
 - **Child field:** U-3 adds and *parses* `child.update.bootstrap.methods`;
-  **D-6 does the intersecting**. Parsed-and-unread through U-3/U-6 is fine and
-  silent.
+  bootstrap intersects that list with the parent SVCB advertisement (T4).
 - **Acceptance:** two zones on one parent with different policies bootstrap
   differently; config naming an unknown policy fails at parse (fail closed); each
   old `keybootstrap` value's behaviour is reproduced by its §4.2 mapping, pinned

@@ -105,7 +105,7 @@ func exchangeCancellable(ctx context.Context, client *dns.Client, msg *dns.Msg, 
 // Every caller must therefore check the rcode as well as the error; a nil error
 // alone does NOT mean the parent applied the update.
 func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
-	if zonename == "." {
+	if zonename == "" {
 		lgDns.Error("SendUpdate: zone name not specified")
 		return 0, UpdateResult{}, fmt.Errorf("zone name not specified")
 	}
@@ -208,6 +208,7 @@ func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []stri
 			continue
 		} else {
 			lgDns.Debug("got rcode NOERROR", "response", res.String())
+			ur.Rcode = res.Rcode
 			return res.Rcode, ur, nil
 		}
 	}
@@ -218,6 +219,7 @@ func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []stri
 	if gotResponse {
 		lgDns.Warn("all target addresses rejected the update", "zone", zonename,
 			"addresses", addrs, "rcode", dns.RcodeToString[lastRcode])
+		ur.Rcode = lastRcode
 		return lastRcode, ur, nil
 	}
 
@@ -230,12 +232,12 @@ func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []stri
 // CreateChildUpdate constructs a DNS UPDATE message for the given parent zone that applies the provided additions and removals for a child delegation.
 //
 // If any removed RR is an NS whose target name is within the child zone, the function also removes A and AAAA glue RRsets for that NS name.
-// It validates that parent and child are non-empty and not ".", returning an error when validation fails.
+// It validates that parent is non-empty and that child is non-empty and not ".".
 // When Globals.Debug is set, the resulting message is printed.
 //
 // It returns the constructed DNS UPDATE message, or an error if validation fails.
 func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error) {
-	if parent == "." || parent == "" {
+	if parent == "" {
 		return nil, fmt.Errorf("parent zone name not specified. Terminating")
 	}
 	if child == "." || child == "" {
@@ -302,7 +304,7 @@ func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS 
 // same nil either way, and which of the two it means depends on who filled it
 // in, so the answer is a parameter rather than an inference.
 func CreateChildReplaceUpdateWithDS(parent, child string, newNS, newA, newAAAA, newDS []dns.RR, dsKnown bool) (*dns.Msg, error) {
-	if parent == "." || parent == "" {
+	if parent == "" {
 		return nil, fmt.Errorf("parent zone name not specified. Terminating")
 	}
 	if child == "." || child == "" {

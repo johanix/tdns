@@ -28,7 +28,7 @@ import (
 // REFUSED + EDENotifyDsyncSchemeNotAdvertised on the first attempt
 // instead of a generic parent-publish-failure after attempt-timeout.
 func (zd *ZoneData) advertisesDsyncNotify(qtype uint16) bool {
-	owner, err := zd.GetOwner("_dsync." + zd.ZoneName)
+	owner, err := zd.GetOwner(dsyncOwnerName(zd.ZoneName))
 	if err != nil || owner == nil {
 		return false
 	}

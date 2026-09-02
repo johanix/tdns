@@ -29,10 +29,11 @@ import (
 // zone config against its template: everything the add path (and the boot
 // re-expansion in LoadDynamicZoneFiles) needs to build the zone.
 type dynamicPrimarySpec struct {
-	Zconf          ZoneConf            // fully expanded + validated config
-	Options        map[ZoneOption]bool // parsed zone options (policy-adjusted)
-	Policy         UpdatePolicy        // activated update policy
-	PublishCadence time.Duration       // parsed publish-cadence (0 = default)
+	Zconf            ZoneConf            // fully expanded + validated config
+	Options          map[ZoneOption]bool // parsed zone options (policy-adjusted)
+	Policy           UpdatePolicy        // activated update policy
+	DelegationPolicy *DelegationPolicy   // bound named policy; omit → default
+	PublishCadence   time.Duration       // parsed publish-cadence (0 = default)
 }
 
 // dynamicPrimaryDisallowedOptions are template options that name machinery a
@@ -199,6 +200,10 @@ func (conf *Config) prepareDynamicPrimary(zconf ZoneConf, staged *TsigDetails, f
 	if err != nil {
 		return nil, err
 	}
+	dpol, err := bindDelegationPolicy(&expanded)
+	if err != nil {
+		return nil, err
+	}
 	// v1: no child-update policies on dynamic primaries. The delegation
 	// backend is wired in ParseZones only, so an API-added (or dynamically
 	// re-loaded) zone would carry the option with a nil backend — the exact
@@ -208,10 +213,11 @@ func (conf *Config) prepareDynamicPrimary(zconf ZoneConf, staged *TsigDetails, f
 	}
 
 	return &dynamicPrimarySpec{
-		Zconf:          expanded,
-		Options:        options,
-		Policy:         policy,
-		PublishCadence: publishCadence,
+		Zconf:            expanded,
+		Options:          options,
+		Policy:           policy,
+		DelegationPolicy: dpol,
+		PublishCadence:   publishCadence,
 	}, nil
 }
 
@@ -400,6 +406,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		Logger:            log.Default(),
 		Options:           options,
 		UpdatePolicy:      spec.Policy,
+		DelegationPolicy:  spec.DelegationPolicy,
 		DnssecPolicyName:  spec.Zconf.DnssecPolicy, // config-base name; struct bound post-Ready
 		MultiSigner:       &msc,
 		DelegationSyncQ:   conf.Internal.DelegationSyncQ,
@@ -457,20 +464,21 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	}
 
 	zr := ZoneRefresher{
-		Name:           name,
-		ZoneType:       Primary,
-		ZoneStore:      MapZone,
-		Zonefile:       spec.Zconf.Zonefile,
-		Template:       in.Template,
-		PublishCadence: spec.PublishCadence,
-		Notify:         zd.Notify,
-		AllowNotify:    spec.Zconf.AllowNotify,
-		Downstreams:    spec.Zconf.Downstreams,
-		DownstreamAuth: spec.Zconf.DownstreamAuth,
-		Options:        options,
-		UpdatePolicy:   spec.Policy,
-		DnssecPolicy:   spec.Zconf.DnssecPolicy,
-		Force:          true, // load from file regardless of serial
+		Name:             name,
+		ZoneType:         Primary,
+		ZoneStore:        MapZone,
+		Zonefile:         spec.Zconf.Zonefile,
+		Template:         in.Template,
+		PublishCadence:   spec.PublishCadence,
+		Notify:           zd.Notify,
+		AllowNotify:      spec.Zconf.AllowNotify,
+		Downstreams:      spec.Zconf.Downstreams,
+		DownstreamAuth:   spec.Zconf.DownstreamAuth,
+		Options:          options,
+		UpdatePolicy:     spec.Policy,
+		DelegationPolicy: spec.DelegationPolicy,
+		DnssecPolicy:     spec.Zconf.DnssecPolicy,
+		Force:            true, // load from file regardless of serial
 
 		// Template-expanded: a template carrying outbound-soa-serial gives
 		// every zone stamped from it that serial policy (the intended

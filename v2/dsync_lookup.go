@@ -103,7 +103,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 	labels := dns.SplitDomainName(child)
 	prefix := labels[0]
 	parent_guess := dns.Fqdn(strings.Join(labels[1:], "."))
-	name := prefix + "._dsync." + parent_guess
+	name := dsyncPerChildLookupName(prefix, parent_guess)
 
 	lgDns.Debug("looking up DSYNC", "name", name)
 	resp, err := imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
@@ -125,11 +125,16 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 
 	// Step 2: Under the inferred parent
 	if parent != "" && parent != parent_guess {
-		prefix, ok := strings.CutSuffix(child, "."+parent)
+		var ok bool
+		if dns.Fqdn(parent) == "." {
+			prefix, ok = strings.CutSuffix(child, ".")
+		} else {
+			prefix, ok = strings.CutSuffix(child, "."+parent)
+		}
 		if !ok {
 			return dr, fmt.Errorf("misidentified parent for %s: %v", child, parent)
 		}
-		name = prefix + "._dsync." + parent
+		name = dsyncPerChildLookupName(prefix, parent)
 		lgDns.Debug("looking up DSYNC", "name", name)
 		resp, err = imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
 		if err != nil {
@@ -150,7 +155,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 	if parent == "" {
 		parent = parent_guess
 	}
-	name = "_dsync." + parent
+	name = dsyncOwnerName(parent)
 
 	lgDns.Debug("looking up DSYNC", "name", name)
 	resp, err = imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)

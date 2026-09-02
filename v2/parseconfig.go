@@ -372,6 +372,18 @@ var deprecatedConfigKeys = append([]deprecatedConfigKey{
 		advice: "zone key is `dnssecpolicy:` (one word, no hyphen); `dnssec-policy:` is ignored, leaving the zone unsigned"},
 	{match: ".multi_signer",
 		advice: "zone key is `multisigner:` (one word, no underscore); `multi_signer:` is ignored"},
+	{match: ".keybootstrap",
+		advice: "`keybootstrap:` moved to `delegationpolicy:` naming a `delegationsync.policies.*` entry (`manual: true` for the old `manual` token)"},
+	{match: "keybootstrap", exact: true,
+		advice: "top-level `keybootstrap:` is gone; use `delegationsync.policies.*` and per-zone `delegationpolicy:`"},
+	{match: ".keyupload",
+		advice: "`keyupload:` moved to `delegationsync.policies.*.bootstrap.allow-unvalidated-upload`"},
+	{match: ".key-verification",
+		advice: "`key-verification:` moved to `delegationsync.policies.*.bootstrap` (mechanisms, require-dnssec, retry)"},
+	{match: ".parent.bootstrap",
+		advice: "`delegationsync.parent.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
+	{match: ".parent.bootstrap.methods",
+		advice: "`delegationsync.parent.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
 }, underscoreSpellingMigrations()...)
 
 // snakeCaseConfigKeys lists every config key that was spelled with underscores
@@ -708,7 +720,9 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// anything that could publish: on reload this must be swapped in before a
 	// zone re-reads it, and on first start it must be present before
 	// SetupZoneSync runs further down.
-	SetDelegationSyncConfig(conf.DelegationSync)
+	if err := SetDelegationSyncConfig(conf.DelegationSync); err != nil {
+		return fmt.Errorf("delegationsync config: %w", err)
+	}
 	if reload {
 		warnDsyncApiClientAuthReload(conf.DelegationSync.Parent.Api.ClientAuth.Enabled())
 	}
@@ -1286,6 +1300,15 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 
+		dpol, derr := bindDelegationPolicy(zconf)
+		if derr != nil {
+			lgConfig.Error("zone delegation policy invalid, zone in error state", "zone", zname, "err", derr)
+			zd.SetError(ConfigError, "%s", derr)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+		zd.DelegationPolicy = dpol
+
 		// Record it ON THE ZONE, not just in the log. The zone is otherwise
 		// perfectly healthy -- it loads, serves, and simply refuses every child
 		// update -- so a log line at startup is the only trace, and by the time
@@ -1568,21 +1591,22 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
-				Name:           zname,
-				Force:          true,     // force refresh, ignoring SOA serial, when reloading from file
-				ZoneType:       zonetype, // primary | secondary
-				PrimariesConf:  clonePeerConfs(zconf.Primaries),
-				Primaries:      resolvedPrimaries,
-				ZoneStore:      zonestore,
-				Notify:         zconf.Notify,
-				AllowNotify:    zconf.AllowNotify,
-				Downstreams:    zconf.Downstreams,
-				DownstreamAuth: zconf.DownstreamAuth,
-				ConfigUpdate:   true, // config-bearing: lets reload clear removed ACLs
-				Zonefile:       zconf.Zonefile,
-				Options:        options,
-				UpdatePolicy:   policy,
-				DnssecPolicy:   zconf.DnssecPolicy,
+				Name:             zname,
+				Force:            true,     // force refresh, ignoring SOA serial, when reloading from file
+				ZoneType:         zonetype, // primary | secondary
+				PrimariesConf:    clonePeerConfs(zconf.Primaries),
+				Primaries:        resolvedPrimaries,
+				ZoneStore:        zonestore,
+				Notify:           zconf.Notify,
+				AllowNotify:      zconf.AllowNotify,
+				Downstreams:      zconf.Downstreams,
+				DownstreamAuth:   zconf.DownstreamAuth,
+				ConfigUpdate:     true, // config-bearing: lets reload clear removed ACLs
+				Zonefile:         zconf.Zonefile,
+				Options:          options,
+				UpdatePolicy:     policy,
+				DelegationPolicy: dpol,
+				DnssecPolicy:     zconf.DnssecPolicy,
 				// Always carried (empty == inherit the global), so a config
 				// edit that REMOVES a per-zone mode actually reverts the zone
 				// to the global on reload instead of keeping the stale value.
@@ -1780,11 +1804,9 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 	}
 	return UpdatePolicy{
 		Child: UpdatePolicyDetail{
-			Type:         zconf.UpdatePolicy.Child.Type,
-			RRtypes:      childrrtypes,
-			KeyBootstrap: zconf.UpdatePolicy.Child.KeyBootstrap,
-			KeyUpload:    zconf.UpdatePolicy.Child.KeyUpload,
-			TTL:          childTTL,
+			Type:    zconf.UpdatePolicy.Child.Type,
+			RRtypes: childrrtypes,
+			TTL:     childTTL,
 		},
 		Zone: UpdatePolicyDetail{
 			Type:    zconf.UpdatePolicy.Zone.Type,
@@ -1830,6 +1852,9 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	if appMode != AppTypeAgent && zconf.DnssecPolicy == "" && tmpl.DnssecPolicy != "" {
 		zconf.DnssecPolicy = tmpl.DnssecPolicy
 	}
+	if zconf.DelegationPolicy == "" && tmpl.DelegationPolicy != "" {
+		zconf.DelegationPolicy = tmpl.DelegationPolicy
+	}
 
 	// Zonemd: merged FIELD BY FIELD, not copied whole. Under the shallow rule
 	// below a struct field is taken from the template only when the zone's is
@@ -1856,7 +1881,7 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	// A template config never sets runtime/display fields, so IsZero skips them.
 	bespoke := map[string]bool{
 		"Name": true, "Template": true, // never copied from a template
-		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, // handled above
+		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, "DelegationPolicy": true, // handled above
 		"Zonemd": true, // handled above (per-field merge, not whole-block copy)
 		// DynamicZones is a property of the TEMPLATE (API-instantiable), not
 		// of the zones stamped out from it — never copied.
@@ -2033,6 +2058,51 @@ func (conf *Config) reloadDnssecFromFile() error {
 
 	conf.Dnssec = partial.Dnssec
 	return conf.parseDnssecConfig()
+}
+
+// reloadDelegationSyncFromFile re-reads the config file, decodes just the
+// delegationsync: block, and installs it via SetDelegationSyncConfig so a
+// SIGHUP picks up policy edits before ParseZones binds them. A decode or
+// compile error leaves the previous policies in place.
+func (conf *Config) reloadDelegationSyncFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		return SetDelegationSyncConfig(conf.DelegationSync)
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	var partial struct {
+		DelegationSync DelegationSyncConf `yaml:"delegationsync"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName: "yaml",
+		Result:  &partial,
+		// Only the duration hook is needed: this block has no PeerConf/ACL
+		// fields. `partial` is zero-valued each call so ZeroFields is
+		// irrelevant. Metadata is omitted: unused/deprecated keys (a stale
+		// `parent.bootstrap:` among them) are reported on a full ParseConfig,
+		// not on this SIGHUP path.
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+		),
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding delegationsync config: %v", err)
+	}
+
+	if err := SetDelegationSyncConfig(partial.DelegationSync); err != nil {
+		return err
+	}
+	conf.DelegationSync = partial.DelegationSync
+	return nil
 }
 
 // reloadZonesFromFile re-reads the config file(s), decodes just the zones: block,

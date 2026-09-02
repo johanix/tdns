@@ -248,21 +248,22 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				specOptions[OptApiManagedZone] = true
 			}
 			zr := ZoneRefresher{
-				Name:           zoneName,
-				Force:          true, // load from file on startup
-				ZoneType:       Primary,
-				ZoneStore:      MapZone,
-				Zonefile:       spec.Zconf.Zonefile,
-				Template:       zconf.Template,
-				PublishCadence: spec.PublishCadence,
-				Notify:         spec.Zconf.Notify,
-				AllowNotify:    spec.Zconf.AllowNotify,
-				Downstreams:    spec.Zconf.Downstreams,
-				DownstreamAuth: spec.Zconf.DownstreamAuth,
-				ConfigUpdate:   true, // config-bearing (persisted dynamic zone)
-				Options:        specOptions,
-				UpdatePolicy:   spec.Policy,
-				DnssecPolicy:   spec.Zconf.DnssecPolicy,
+				Name:             zoneName,
+				Force:            true, // load from file on startup
+				ZoneType:         Primary,
+				ZoneStore:        MapZone,
+				Zonefile:         spec.Zconf.Zonefile,
+				Template:         zconf.Template,
+				PublishCadence:   spec.PublishCadence,
+				Notify:           spec.Zconf.Notify,
+				AllowNotify:      spec.Zconf.AllowNotify,
+				Downstreams:      spec.Zconf.Downstreams,
+				DownstreamAuth:   spec.Zconf.DownstreamAuth,
+				ConfigUpdate:     true, // config-bearing (persisted dynamic zone)
+				Options:          specOptions,
+				UpdatePolicy:     spec.Policy,
+				DelegationPolicy: spec.DelegationPolicy,
+				DnssecPolicy:     spec.Zconf.DnssecPolicy,
 
 				OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,
 				TransferSrc:       spec.Zconf.TransferSrc,
@@ -327,21 +328,29 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			continue
 		}
 
+		dpol, derr := bindDelegationPolicy(&zconf)
+		if derr != nil {
+			lg.Error("dynamic zone: unknown delegationpolicy, skipping zone", "zone", zoneName, "err", derr)
+			skippedCount++
+			continue
+		}
+
 		// Create ZoneRefresher and enqueue to RefreshEngine (same as ParseZones does)
 		zr := ZoneRefresher{
-			Name:           zoneName,
-			Force:          true, // Force refresh on startup to load from disk
-			ZoneType:       zoneType,
-			PrimariesConf:  clonePeerConfs(zconf.Primaries),
-			Primaries:      res.Resolved,
-			ZoneStore:      zoneStore,
-			Notify:         zconf.Notify,
-			AllowNotify:    zconf.AllowNotify,
-			Downstreams:    zconf.Downstreams,
-			DownstreamAuth: zconf.DownstreamAuth,
-			ConfigUpdate:   true, // config-bearing (persisted dynamic zone)
-			Zonefile:       zconf.Zonefile,
-			Options:        options,
+			Name:             zoneName,
+			Force:            true, // Force refresh on startup to load from disk
+			ZoneType:         zoneType,
+			PrimariesConf:    clonePeerConfs(zconf.Primaries),
+			Primaries:        res.Resolved,
+			ZoneStore:        zoneStore,
+			Notify:           zconf.Notify,
+			AllowNotify:      zconf.AllowNotify,
+			Downstreams:      zconf.Downstreams,
+			DownstreamAuth:   zconf.DownstreamAuth,
+			ConfigUpdate:     true, // config-bearing (persisted dynamic zone)
+			Zonefile:         zconf.Zonefile,
+			Options:          options,
+			DelegationPolicy: dpol,
 
 			OutboundSoaSerial: zconf.OutboundSoaSerial,
 			TransferSrc:       zconf.TransferSrc,
@@ -464,6 +473,9 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		ApiManaged:        zd.Options[OptApiManagedZone],
 		// Note: We don't serialize Frozen, Dirty, Error, ErrorType, ErrorMsg, RefreshCount
 		// as these are runtime state, not configuration
+	}
+	if zd.DelegationPolicy != nil {
+		zconf.DelegationPolicy = zd.DelegationPolicy.Name
 	}
 
 	return zconf

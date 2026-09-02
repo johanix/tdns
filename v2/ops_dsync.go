@@ -85,7 +85,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	//
 	// So: whatever is already published stays exactly as it is, and only
 	// schemes with no DSYNC record of their own are synthesized.
-	owner, err := zd.GetOwner("_dsync." + zd.ZoneName)
+	owner, err := zd.GetOwner(dsyncOwnerName(zd.ZoneName))
 	if err != nil {
 		return fmt.Errorf("PublishDsyncRRs: error fetching _dsync owner for zone %s: %v", zd.ZoneName, err)
 	}
@@ -141,11 +141,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		}
 		switch s := strings.ToUpper(scheme); s {
 		case "NOTIFY":
-			replacer := zd.ZoneName
-			if replacer == "." {
-				replacer = "root"
-			}
-			target := dns.Fqdn(strings.Replace(dsc.Notify.Target, "{ZONENAME}", replacer, 1))
+			target := expandDsyncTemplate(dsc.Notify.Target, zd.ZoneName)
 			if _, ok := dns.IsDomainName(target); !ok {
 				return fmt.Errorf("zone %s: invalid DSYNC notify target: %s", zd.ZoneName, target)
 			}
@@ -160,7 +156,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				return fmt.Errorf("zone %s: no notify types found, config broken", zd.ZoneName)
 			}
 			for _, t := range notifyTypes {
-				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", replacer, ttl, t, s, port, target)
+				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", dsyncOwnerName(zd.ZoneName), ttl, t, s, port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
@@ -181,11 +177,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 			}
 
 		case "UPDATE":
-			replacer := zd.ZoneName
-			if replacer == "." {
-				replacer = "root"
-			}
-			target := dns.Fqdn(strings.Replace(dsc.Update.Target, "{ZONENAME}", replacer, 1))
+			target := expandDsyncTemplate(dsc.Update.Target, zd.ZoneName)
 			if _, ok := dns.IsDomainName(target); !ok {
 				return fmt.Errorf("zone %s: invalid DSYNC update target: %s", zd.ZoneName, target)
 			}
@@ -200,7 +192,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				return fmt.Errorf("zone %s: no update types found, config broken", zd.ZoneName)
 			}
 			for _, t := range updateTypes {
-				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", replacer, ttl, t, s, port, target)
+				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", dsyncOwnerName(zd.ZoneName), ttl, t, s, port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
@@ -235,17 +227,13 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				return fmt.Errorf("zone %s: %v", zd.ZoneName, err)
 			}
 
-			replacer := zd.ZoneName
-			if replacer == "." {
-				replacer = "root"
-			}
-			target := dns.Fqdn(strings.Replace(apiconf.Target, "{ZONENAME}", replacer, 1))
+			target := expandDsyncTemplate(apiconf.Target, zd.ZoneName)
 			if _, ok := dns.IsDomainName(target); !ok {
 				return fmt.Errorf("zone %s: invalid DSYNC api target: %s", zd.ZoneName, target)
 			}
 
 			for _, t := range apiconf.Types {
-				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", replacer, ttl, t, s, apiconf.Port, target)
+				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", dsyncOwnerName(zd.ZoneName), ttl, t, s, apiconf.Port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
@@ -279,51 +267,30 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		}
 	}
 
+	svcbActions := zd.bootstrapSVCBActions(uint32(ttl))
+
 	if !dsync_added {
-		// Every configured scheme is already published: nothing to do, and not
-		// an error. Only a zone that ends up with no DSYNC records at all has
-		// a broken configuration worth reporting.
-		if alreadyPublished > 0 {
-			lg.Debug("every configured DSYNC scheme is already published, nothing to do",
+		// Every configured scheme is already published. SVCB still has to
+		// be reconciled independently: a policy edit must update the
+		// advertisement even when the DSYNC RRset did not change.
+		if alreadyPublished == 0 && len(svcbActions) == 0 {
+			return fmt.Errorf("no DSYNC RRs added for zone %s", zd.ZoneName)
+		}
+		if alreadyPublished > 0 && len(svcbActions) == 0 {
+			lg.Debug("every configured DSYNC scheme is already published and bootstrap SVCB matches, nothing to do",
 				"zone", zd.ZoneName, "records", alreadyPublished)
 			return nil
 		}
-		return fmt.Errorf("no DSYNC RRs added for zone %s", zd.ZoneName)
+		rrset.RRs = nil
 	}
 
-	// Publish SVCB bootstrap capability record at the DSYNC UPDATE target.
-	// This advertises which bootstrap methods the parent supports, per
-	// draft-ietf-dnsop-delegation-mgmt-via-ddns-01, section "SvcParamKey bootstrap".
-	bootstrapMethods := dsc.Bootstrap.Methods
-	if bootstrapMethods != "" {
-		updateTarget := dsc.Update.Target
-		if updateTarget != "" {
-			replacer := zd.ZoneName
-			if replacer == "." {
-				replacer = "root"
-			}
-			target := dns.Fqdn(strings.Replace(updateTarget, "{ZONENAME}", replacer, 1))
-			svcbRR := &dns.SVCB{
-				Hdr:      dns.RR_Header{Name: target, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: uint32(ttl)},
-				Priority: 0,
-				Target:   ".",
-				Value: []dns.SVCBKeyValue{
-					&dns.SVCBLocal{
-						KeyCode: dns.SVCBKey(SvcbBootstrapKey),
-						Data:    []byte(bootstrapMethods),
-					},
-				},
-			}
-			rrset.Add(svcbRR)
-			lg.Debug("added SVCB bootstrap record", "zone", zd.ZoneName, "target", target, "methods", bootstrapMethods)
-		}
-	}
+	actions := append(append([]dns.RR{}, rrset.RRs...), svcbActions...)
 
 	ur := UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
 		Description:    fmt.Sprintf("Publish DSYNC RRs for zone %s", zd.ZoneName),
-		Actions:        rrset.RRs,
+		Actions:        actions,
 		InternalUpdate: true,
 	}
 
@@ -370,18 +337,115 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	return nil
 }
 
-// DsyncUpdateTargetName computes the DSYNC UPDATE target name for a parent zone
-// from the global config. Returns empty string if not configured.
-func DsyncUpdateTargetName(zonename string) string {
-	tpl := DelegationSyncConfig().Parent.Update.Target
+func dsyncOwnerLabel(zonename string) string {
+	if zonename == "." {
+		return "root"
+	}
+	return zonename
+}
+
+func dsyncOwnerName(zonename string) string {
+	return dns.Fqdn("_dsync." + dsyncOwnerLabel(zonename))
+}
+
+func dsyncPerChildLookupName(childLabel, parent string) string {
+	return dns.Fqdn(childLabel + "._dsync." + dsyncOwnerLabel(parent))
+}
+
+func expandDsyncTemplate(tpl, zonename string) string {
 	if tpl == "" {
 		return ""
 	}
-	replacer := zonename
-	if replacer == "." {
-		replacer = "root"
+	return dns.Fqdn(strings.Replace(tpl, "{ZONENAME}", dsyncOwnerLabel(zonename), 1))
+}
+
+// DsyncUpdateTargetName computes the DSYNC UPDATE target name for a parent zone
+// from the global config. Returns empty string if not configured.
+func DsyncUpdateTargetName(zonename string) string {
+	return expandDsyncTemplate(DelegationSyncConfig().Parent.Update.Target, zonename)
+}
+
+func dsyncUpdateTargetIsZoneApex(zone, target string) bool {
+	return target != "" && dns.CanonicalName(dns.Fqdn(target)) == dns.CanonicalName(dns.Fqdn(zone))
+}
+
+func newBootstrapSVCB(target, data string, ttl uint32) *dns.SVCB {
+	return &dns.SVCB{
+		Hdr:      dns.RR_Header{Name: target, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: ttl},
+		Priority: 0,
+		Target:   ".",
+		Value: []dns.SVCBKeyValue{
+			&dns.SVCBLocal{
+				KeyCode: dns.SVCBKey(SvcbBootstrapKey),
+				Data:    []byte(data),
+			},
+		},
 	}
-	return dns.Fqdn(strings.Replace(tpl, "{ZONENAME}", replacer, 1))
+}
+
+func publishedBootstrapSVCBData(rrs []dns.RR) (data string, count int) {
+	for _, rr := range rrs {
+		svcb, ok := rr.(*dns.SVCB)
+		if !ok {
+			continue
+		}
+		count++
+		for _, kv := range svcb.Value {
+			loc, ok := kv.(*dns.SVCBLocal)
+			if !ok || loc.KeyCode != dns.SVCBKey(SvcbBootstrapKey) {
+				continue
+			}
+			data = string(loc.Data)
+		}
+	}
+	return data, count
+}
+
+func bootstrapSVCBReconcile(target, desired string, existing []dns.RR, ttl uint32) []dns.RR {
+	if target == "" {
+		return nil
+	}
+	current, count := publishedBootstrapSVCBData(existing)
+	if count == 1 && current == desired {
+		return nil
+	}
+	if count == 0 && desired == "" {
+		return nil
+	}
+	var out []dns.RR
+	if count > 0 {
+		out = append(out, &dns.SVCB{
+			Hdr: dns.RR_Header{Name: target, Rrtype: dns.TypeSVCB, Class: dns.ClassANY},
+		})
+	}
+	if desired != "" {
+		out = append(out, newBootstrapSVCB(target, desired, ttl))
+	}
+	return out
+}
+
+func (zd *ZoneData) bootstrapSVCBActions(ttl uint32) []dns.RR {
+	// Only reconcile SVCB while this parent still offers UPDATE. Removing
+	// "update" from parent.schemes does not withdraw a previously published
+	// bootstrap SVCB; UnpublishDsyncRRs is the operator action that drops it.
+	if !dsyncSchemeConfigured(DelegationSyncConfig().Parent.Schemes, "update") {
+		return nil
+	}
+	target := DsyncUpdateTargetName(zd.ZoneName)
+	if target == "" {
+		return nil
+	}
+	if dsyncUpdateTargetIsZoneApex(zd.ZoneName, target) {
+		lgDns.Warn("refusing bootstrap SVCB reconcile at zone apex", "zone", zd.ZoneName, "target", target)
+		return nil
+	}
+	var existing []dns.RR
+	if owner, err := zd.GetOwner(target); err == nil && owner != nil {
+		if rrset, ok := owner.RRtypes.Get(dns.TypeSVCB); ok {
+			existing = rrset.RRs
+		}
+	}
+	return bootstrapSVCBReconcile(target, zd.boundDelegationPolicy().bootstrapSVCBData(), existing, ttl)
 }
 
 func (zd *ZoneData) UnpublishDsyncRRs() error {
@@ -392,7 +456,7 @@ func (zd *ZoneData) UnpublishDsyncRRs() error {
 	// (see core/rr_dsync.go). The previous form omitted the leading type field
 	// and quoted the scheme, so dns.NewRR failed on every zone and unpublish
 	// could never do anything at all.
-	dsync_str := fmt.Sprintf("_dsync.%s 0 IN DSYNC CDS NOTIFY 53 .", zd.ZoneName)
+	dsync_str := fmt.Sprintf("%s 0 IN DSYNC CDS NOTIFY 53 .", dsyncOwnerName(zd.ZoneName))
 
 	anti_dsync, err := dns.NewRR(dsync_str)
 	if err != nil {
@@ -414,6 +478,16 @@ func (zd *ZoneData) UnpublishDsyncRRs() error {
 			Hdr: dns.RR_Header{Name: apiTarget, Rrtype: dns.TypeTXT, Class: dns.ClassANY},
 		}
 		actions = append(actions, anti_uri, anti_txt)
+	}
+
+	if updateTarget := DsyncUpdateTargetName(zd.ZoneName); updateTarget != "" && !dsyncUpdateTargetIsZoneApex(zd.ZoneName, updateTarget) {
+		antiSVCB := &dns.SVCB{
+			Hdr: dns.RR_Header{Name: updateTarget, Rrtype: dns.TypeSVCB, Class: dns.ClassANY},
+		}
+		antiKEY := &dns.KEY{DNSKEY: dns.DNSKEY{
+			Hdr: dns.RR_Header{Name: updateTarget, Rrtype: dns.TypeKEY, Class: dns.ClassANY},
+		}}
+		actions = append(actions, antiSVCB, antiKEY)
 	}
 
 	select {

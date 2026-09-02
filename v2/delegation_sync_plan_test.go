@@ -229,7 +229,7 @@ func TestSyncWithParentReportsRatherThanFailsWhenNothingIsUsable(t *testing.T) {
 		{"NOTIFY", "zone is unsigned"}}}
 
 	msg, err := zd.SyncWithParent(context.Background(), nil, nil, nil, plan,
-		&ProxyDelegationAnalysis{NsOrGlueChanged: true})
+		&ProxyDelegationAnalysis{NsOrGlueChanged: true}, nil)
 	if err != nil {
 		t.Fatalf("unusable plan returned an error: %v", err)
 	}

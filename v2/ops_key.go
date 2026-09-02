@@ -152,16 +152,12 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 }
 
 func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (string, UpdateResult, error) {
-	var err error
-	// 1. Get the parent zone
-	if zd.Parent == "" {
-		if Globals.ImrEngine == nil {
-			return "", UpdateResult{}, fmt.Errorf("BootstrapSig0KeyWithParent(%q): IMR engine not yet initialized", zd.ZoneName)
-		}
-		zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
-		if err != nil {
-			return "", UpdateResult{}, err
-		}
+	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods())
+}
+
+func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, willing []string) (string, UpdateResult, error) {
+	if err := zd.resolveParentZone(); err != nil {
+		return "", UpdateResult{}, fmt.Errorf("BootstrapSig0KeyWithParent(%q): %w", zd.ZoneName, err)
 	}
 
 	sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
@@ -218,7 +214,18 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (
 	}
 
 	lgHandler.Info("BootstrapSig0KeyWithParent: DSYNC target found", "zone", zd.ZoneName, "target", dsyncTarget.RR)
-	// dump.P(dsyncTarget)
+
+	advertised, present := advertisedBootstrapMethods(ctx, Globals.ImrEngine, dsyncTarget.Name)
+	method, merr := selectChildBootstrapMethod(advertised, present, willing)
+	if merr != nil {
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): %v", zd.ZoneName, merr), UpdateResult{}, merr
+	}
+	lgHandler.Info("BootstrapSig0KeyWithParent: selected bootstrap method",
+		"zone", zd.ZoneName, "method", method, "advertised", advertised, "willing", willing)
+	if method == "manual" {
+		msg := fmt.Sprintf("BootstrapSig0KeyWithParent(%q): bootstrap method is manual; not sending KEY UPDATE", zd.ZoneName)
+		return msg, UpdateResult{}, fmt.Errorf("bootstrap method is manual")
+	}
 
 	// 3. Create the self-signed bootstrap ceremony "DEL <child> ANY KEY" +
 	// "ADD <child> KEY" (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
@@ -293,11 +300,8 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	var kpresp *KeystoreResponse
 
 	// 1. Get the parent zone
-	if zd.Parent == "" {
-		zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
-		if err != nil {
-			return "", 0, 0, UpdateResult{}, err
-		}
+	if err := zd.resolveParentZone(); err != nil {
+		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q): %w", zd.ZoneName, err)
 	}
 
 	// 2. Get the parent DSYNC RRset

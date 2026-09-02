@@ -80,12 +80,14 @@ func LookupChildKeyAtSignal(ctx context.Context, childZone string, imr *Imr) ([]
 }
 
 // VerifyChildKey checks whether a child's KEY (identified by keyRR string) can
-// be found via the configured verification mechanisms (at-apex, at-ns). Returns
-// true if any mechanism succeeds (key found + optionally DNSSEC-validated).
-func VerifyChildKey(ctx context.Context, childZone string, keyRR string, imr *Imr) (verified bool, dnssecValidated bool) {
-	mechanisms := DelegationSyncConfig().Parent.Update.KeyVerification.Mechanisms
+// be found via the policy's verification mechanisms (at-apex, at-ns). The
+// policy is the caller's: TriggerChildKeyVerification resolves it once from
+// the receiving parent zone and passes it here rather than looking it up
+// again from the child name.
+func VerifyChildKey(ctx context.Context, childZone string, keyRR string, imr *Imr, pol DelegationPolicy) (verified bool, dnssecValidated bool) {
+	mechanisms := pol.Mechanisms
 	if len(mechanisms) == 0 {
-		mechanisms = []string{"at-apex", "at-ns"}
+		return false, false
 	}
 
 	// Try each mechanism in order. Stop as soon as we have a DNSSEC-validated
@@ -159,33 +161,30 @@ func waitOrDone(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// keyVerificationRetrySettings resolves the retry budget, substituting defaults
-// for anything non-positive. Zero means "unset"; a NEGATIVE max-attempts used to
-// skip the loop entirely and abandon verification silently, and a negative
-// interval turned the backoff into a busy loop.
-func keyVerificationRetrySettings(kv DsyncKeyVerificationConf) (int, time.Duration) {
-	maxAttempts := kv.MaxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = 5
-	}
-	retryInterval := kv.RetryInterval
-	if retryInterval <= 0 {
-		retryInterval = 10 * time.Second
-	}
-	return maxAttempts, retryInterval
-}
-
 // TriggerChildKeyVerification starts an async verification of a child KEY
-// that was just stored in the TrustStore. It uses the KeyBootstrapper's
-// retry pattern: verify via DNS lookup, retry with backoff, then trust.
-// ctx is the engine's lifetime context. The verification retries with
+// that was just stored in the TrustStore: DNS lookup, retry with backoff, then
+// trust. ctx is the engine's lifetime context. The verification retries with
 // exponential backoff and can therefore be sleeping for a long time when the
 // process is asked to stop; without it the goroutine ignores shutdown and the
 // deferred key cleanup it performs runs against a database that is closing.
-func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone string, keyid uint16, keyRR string) {
+func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, parentZone string, keyid uint16, keyRR string) {
+	var pol DelegationPolicy
+	if parentZone != "" {
+		if pzd, ok := Zones.Get(parentZone); ok {
+			pol = pzd.boundDelegationPolicy()
+		} else {
+			pol = compiledDefaultDelegationPolicy()
+		}
+	} else {
+		pol = parentDelegationPolicy(childZone)
+	}
+	if len(pol.Mechanisms) == 0 {
+		lgSigner.Info("TriggerChildKeyVerification: policy has empty mechanisms; not verifying",
+			"zone", childZone, "keyid", keyid, "policy", pol.Name)
+		return
+	}
 	go func() {
-		maxAttempts, retryInterval := keyVerificationRetrySettings(
-			DelegationSyncConfig().Parent.Update.KeyVerification)
+		maxAttempts, retryInterval := pol.RetryMaxAttempts, pol.RetryInterval
 
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			imr := Globals.ImrEngine
@@ -206,17 +205,10 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone str
 			lgSigner.Info("verifying child key via DNS",
 				"zone", childZone, "keyid", keyid, "attempt", attempt, "max", maxAttempts)
 
-			verified, dnssecValidated := VerifyChildKey(ctx, childZone, keyRR, imr)
+			verified, dnssecValidated := VerifyChildKey(ctx, childZone, keyRR, imr, pol)
 
-			// Default true; only an explicit false turns it off. The pointer
-			// preserves the distinction the viper reader made with its
-			// nil-check: absent and false are different answers here, and
-			// collapsing them would silently downgrade key verification on
-			// every config that does not mention the key.
-			requireDnssec := true
-			if rd := DelegationSyncConfig().Parent.Update.KeyVerification.RequireDnssec; rd != nil {
-				requireDnssec = *rd
-			}
+			// Compiled policy: absent require-dnssec became true at compile.
+			requireDnssec := pol.RequireDnssec
 
 			accepted := verified && (!requireDnssec || dnssecValidated)
 

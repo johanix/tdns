@@ -90,6 +90,27 @@ delegationsync:
    # Elections require ALL configured peers to participate — if any peer is
    # unreachable, the election fails and parent-facing operations freeze.
    leader-election-ttl:	60m
+   policies:
+      default:
+         bootstrap:
+            mechanisms:      [ at-apex, at-ns ]
+            require-dnssec:  true
+            manual:          false
+            allow-unvalidated-upload: false
+            retry:
+               max-attempts: 5
+               interval:     10s
+      manual:
+         bootstrap:
+            mechanisms:      [ at-apex, at-ns ]
+            require-dnssec:  true
+            manual:          true
+            allow-unvalidated-upload: false
+      locked-down:
+         bootstrap:
+            mechanisms:      [ ]
+            manual:          true
+            allow-unvalidated-upload: false
    parent:
       # in parent zones, we support these schemes, and will publish DSYNC RRs
       # if allowed to:
@@ -118,12 +139,8 @@ delegationsync:
             mode:	external # internal | external
             generator:	/opt/local/bin/dnssec-keygen
             algorithm:	ED25519
-
-keybootstrap:
-   consistent-lookup:
-      iterations:	3
-      interval:		60	# seconds between lookups
-      nameservers:	all	# one | all
+         bootstrap:
+            methods: [ at-apex ]
 
 dnssec:
    large-algorithms: [ RSASHA512 ]   # by name; stand-in for large KSK

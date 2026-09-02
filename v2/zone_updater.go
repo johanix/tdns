@@ -411,9 +411,10 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					continue
 				}
 				type pendingVerification struct {
-					childZone string
-					keyid     uint16
-					keyRR     string
+					childZone  string
+					parentZone string
+					keyid      uint16
+					keyRR      string
 				}
 				var toVerify []pendingVerification
 
@@ -505,9 +506,10 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 
 					if subcommand == "add" && !ur.Trusted {
 						toVerify = append(toVerify, pendingVerification{
-							childZone: keyrr.Header().Name,
-							keyid:     uint16(keyrr.KeyTag()),
-							keyRR:     rr.String(),
+							childZone:  keyrr.Header().Name,
+							parentZone: zd.ZoneName,
+							keyid:      uint16(keyrr.KeyTag()),
+							keyRR:      rr.String(),
 						})
 					}
 				}
@@ -553,7 +555,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				for _, pv := range toVerify {
 					lg.Info("ZoneUpdater: triggering child key verification",
 						"zone", pv.childZone, "keyid", pv.keyid)
-					kdb.TriggerChildKeyVerification(ctx, pv.childZone, pv.keyid, pv.keyRR)
+					kdb.TriggerChildKeyVerification(ctx, pv.childZone, pv.parentZone, pv.keyid, pv.keyRR)
 				}
 			default:
 				lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)

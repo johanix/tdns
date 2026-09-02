@@ -178,6 +178,43 @@ childsync:                 # What to do when we are the child
 #     directory:  /var/lib/tdns/delegations/dnslab
 
 delegationsync:
+   # Named policies, referenced per-zone with `delegationpolicy: <name>`.
+   # Omit binds `default`. A name that does not resolve quarantines the zone.
+   # The SVCB bootstrap advertisement is derived from the bound policy; there
+   # is no `parent.bootstrap.methods`.
+   policies:
+      default:
+         bootstrap:
+            mechanisms:      [ at-apex, at-ns ]
+            require-dnssec:  true
+            manual:          false
+            allow-unvalidated-upload: false
+            retry:
+               max-attempts: 5
+               interval:     10s
+      # Faithful mapping of the old template `keybootstrap: [manual, dnssec-validated, consistent-lookup]`:
+      # automatic lookup still happens (at-apex, at-ns), but the parent will not
+      # trust the key until an operator confirms. Do not use `locked-down` for
+      # parent templates: that advertises nothing automatic and would refuse a
+      # child's default methods `[at-apex]` at intersection.
+      manual:
+         bootstrap:
+            mechanisms:      [ at-apex, at-ns ]
+            require-dnssec:  true
+            manual:          true
+            allow-unvalidated-upload: false
+      permissive:
+         bootstrap:
+            mechanisms:      [ at-apex, at-ns ]
+            require-dnssec:  false          # advertises "unsigned"
+            manual:          true
+            allow-unvalidated-upload: true
+            retry: { max-attempts: 5, interval: 30s }
+      locked-down:
+         bootstrap:
+            mechanisms:      [ ]            # nothing automatic
+            manual:          true           # advertises "manual" only
+            allow-unvalidated-upload: false
    parent:
       # in parent zones, we support these schemes, and will publish DSYNC RRs
       # if allowed to:
@@ -261,6 +298,17 @@ delegationsync:
             # `algorithm` and `generator` are read on the child side; `mode` is not.
             generator:  /opt/local/bin/dnssec-keygen
             algorithm:  ED25519
+         bootstrap:
+            # Methods this child will accept a parent using. Intersected with
+            # the parent's advertised SVCB bootstrap set at run time; strongest
+            # overlap wins (at-apex > at-ns > unsigned > manual). Omit defaults
+            # to [at-apex]; `at-ns` is valid but the child cannot yet publish
+            # RFC 9615 `_signal`. An empty list refuses every method. `unsigned`
+            # and `manual` must be opted into. A parent template bound to the
+            # `manual` policy advertises `at-apex,at-ns,manual`; intersection
+            # with this default is `at-apex`. Absent SVCB falls back to
+            # this list.
+            methods: [ at-apex ]
 
 scanner:
    interval:  30                        # seconds between periodic scan runs
@@ -271,14 +319,6 @@ scanner:
    at-apex:
       checks:    1     # consecutive all-NS checks before accepting (default: 1)
       interval:  300   # seconds between checks (default: 300)
-
-# NOTE: there is no `keybootstrap:` config block. The key-bootstrap knobs the
-# code actually reads are:
-#   keystate.require_manual_bootstrap   (bool)
-#   keystate.allow_auto_bootstrap       (bool)
-#   verifyengine.attempts               (default 3)
-#   verifyengine.retry_interval         (default 60, seconds)
-# Per-zone bootstrap methods are set under a zone's updatepolicy.child.keybootstrap.
 
 # DNSSEC policies. Each policy is referenced from a zone's `dnssecpolicy:`
 # field (one word: no underscore, no hyphen). The rollover, ttls, and clamping

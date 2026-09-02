@@ -234,7 +234,7 @@ func (zd *ZoneData) updateGateBlocked(kdb *KeyDB, role SyncRole) (string, bool) 
 	if role != SyncRoleProxy {
 		return "", false
 	}
-	state, err := zd.proxyUpdateKeyState(kdb)
+	state, err := zd.proxySig0PublicationState(kdb)
 	if err != nil {
 		return fmt.Sprintf("key state: %v", err), true
 	}
@@ -438,7 +438,7 @@ func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncR
 // caller that sees only the last one cannot tell which transport was even
 // expected to work.
 func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest,
-	imr *Imr, plan *ParentSyncPlan, analysis *ProxyDelegationAnalysis) (string, error) {
+	imr *Imr, plan *ParentSyncPlan, analysis *ProxyDelegationAnalysis, updateSync *DelegationSyncStatus) (string, error) {
 
 	if !plan.Usable() {
 		lgDns.Info("delegation-sync-proxy: nothing forwarded", "zone", zd.ZoneName,
@@ -449,7 +449,7 @@ func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan
 	return zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
 		switch cand.Scheme {
 		case "UPDATE":
-			return zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target)
+			return zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target, updateSync)
 		case "API":
 			return zd.ProxyApiParent(ctx, imr, cand.Target, analysis)
 		case "NOTIFY":
