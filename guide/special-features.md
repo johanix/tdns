@@ -461,6 +461,24 @@ tdns-cli auth dsync-api credential disable --zone example. --user child1.example
 tdns-cli auth dsync-api credential delete --zone example. --user child1.example.
 ```
 
+Client-certificate credentials are a second way in, not a replacement.
+Mint the leaf with `tdns-cli cert csr` / `cert sign`, then:
+
+```sh
+tdns-cli auth dsync-api cert-credential add \
+    --zone example. --mech tls-pkix --identity child1.example.
+tdns-cli auth dsync-api cert-credential add \
+    --zone example. --mech tls-pin --cert /path/to/child.crt \
+    --principal child1.example.
+```
+
+`credential list` and `cert-credential list` show both kinds. The child
+configures a nested `tls:` block instead of `username`/`key`. The parent
+opts in with `delegationsync.parent.api.client-auth`. Enabling or
+disabling that block changes the TLS handshake and needs a process
+restart; a config reload updates the middleware but not the
+`CertificateRequest`.
+
 `add` generates the key, prints it **once**, and stores only
 a hash. There is no way to read it back; if it is lost,
 delete the credential and issue another. Prefer `disable`

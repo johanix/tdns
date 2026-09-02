@@ -723,6 +723,9 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if err := SetDelegationSyncConfig(conf.DelegationSync); err != nil {
 		return fmt.Errorf("delegationsync config: %w", err)
 	}
+	if reload {
+		warnDsyncApiClientAuthReload(conf.DelegationSync.Parent.Api.ClientAuth.Enabled())
+	}
 
 	// On first start: build the KeyDB. On reload: keep the existing
 	// KeyDB but re-apply outbound-soa-serial so a config edit takes

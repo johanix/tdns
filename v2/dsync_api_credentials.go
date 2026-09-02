@@ -48,6 +48,9 @@ type DsyncApiCredential struct {
 	Expires    time.Time // zero means never
 	Disabled   bool
 	Comment    string
+	// AuthMethod is "basic", "tls-pin" or "tls-pkix". Logging and the
+	// combined credential list use it; handlers only read Principal.
+	AuthMethod string
 }
 
 // Expired reports whether the credential has passed its expiry.
@@ -229,6 +232,7 @@ func (kdb *KeyDB) ListDsyncApiCredentials(parentZone string) ([]DsyncApiCredenti
 		}
 		c.Disabled = disabled != 0
 		c.Comment = comment.String
+		c.AuthMethod = DsyncApiAuthBasic
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -320,6 +324,7 @@ func (kdb *KeyDB) VerifyDsyncApiCredential(parentZone, username, key string) (*D
 	}
 	c.Disabled = disabled != 0
 	c.Comment = comment.String
+	c.AuthMethod = DsyncApiAuthBasic
 
 	// Checked after the key comparison, not before: a client that guesses a
 	// wrong key for a disabled account must not learn that the account is

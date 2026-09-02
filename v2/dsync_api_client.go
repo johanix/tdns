@@ -238,6 +238,23 @@ type DsyncApiClientCredential struct {
 	Parent   string
 	Username string
 	Key      string
+
+	// Client-certificate paths, empty for a bearer credential. Exactly one of
+	// the two pairs is populated; see Usable.
+	CertFile string
+	KeyFile  string
+}
+
+// Usable reports whether this credential can authenticate at all.
+//
+// Replaces the four open-coded Username == "" || Key == "" checks, which
+// predate certificates and would reject a correctly configured cert-only
+// credential.
+func (c DsyncApiClientCredential) Usable() bool {
+	if c.Username != "" && c.Key != "" {
+		return true
+	}
+	return c.CertFile != "" && c.KeyFile != ""
 }
 
 // DsyncApiPostDelegationRequest sends a declared delegation to a parent.
@@ -277,9 +294,11 @@ func DsyncApiPostDelegationRequest(ctx context.Context, endpoint *DsyncApiEndpoi
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.SetBasicAuth(cred.Username, cred.Key)
+	if cred.Username != "" {
+		req.SetBasicAuth(cred.Username, cred.Key)
+	}
 
-	client, err := dsyncApiHttpClient(caFile)
+	client, err := dsyncApiHttpClient(caFile, cred)
 	if err != nil {
 		return nil, err
 	}
@@ -325,8 +344,16 @@ func DsyncApiPostDelegationRequest(ctx context.Context, endpoint *DsyncApiEndpoi
 //     which turns a redirect into a silent auth failure rather than a leak,
 //     but a same-host redirect still carries the credential -- and a redirect
 //     on this endpoint means something is wrong either way.
-func dsyncApiHttpClient(caFile string) (*http.Client, error) {
+func dsyncApiHttpClient(caFile string, cred DsyncApiClientCredential) (*http.Client, error) {
 	tlsconf := &tls.Config{MinVersion: tls.VersionTLS12}
+
+	if cred.CertFile != "" {
+		cert, err := tls.LoadX509KeyPair(cred.CertFile, cred.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("loading DSYNC API client certificate %q: %v", cred.CertFile, err)
+		}
+		tlsconf.Certificates = []tls.Certificate{cert}
+	}
 
 	// An extra CA on top of the system roots, for the private trust domain
 	// `tdns-cli cert ca` mints. Additive: everything is still verified, just

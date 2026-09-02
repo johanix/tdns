@@ -260,3 +260,74 @@ delegationsync:
 		t.Errorf("api listen = %v", api.Listen)
 	}
 }
+
+func TestDsyncApiClientAuthRoundTripThroughViper(t *testing.T) {
+	const y = `
+delegationsync:
+   parent:
+      api:
+         client-auth:
+            mechanisms: [ tls-pin, tls-pkix ]
+            ca-file: /etc/tdns/clients-ca.crt
+`
+	v := viper.New()
+	v.SetConfigType("yaml")
+	if err := v.ReadConfig(strings.NewReader(y)); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var conf Config
+	if err := v.Unmarshal(&conf); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	ca := conf.DelegationSync.Parent.Api.ClientAuth
+	if ca == nil {
+		t.Fatal("client-auth decoded as nil")
+	}
+	if len(ca.Mechanisms) != 2 || ca.Mechanisms[0] != "tls-pin" || ca.Mechanisms[1] != "tls-pkix" {
+		t.Errorf("mechanisms = %v", ca.Mechanisms)
+	}
+	if ca.CAFile != "/etc/tdns/clients-ca.crt" {
+		t.Errorf("ca-file = %q", ca.CAFile)
+	}
+	if err := ca.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+func TestDsyncApiClientAuthValidate(t *testing.T) {
+	if err := (*DsyncApiClientAuthConf)(nil).Validate(); err != nil {
+		t.Errorf("nil Validate = %v", err)
+	}
+	if err := (&DsyncApiClientAuthConf{}).Validate(); err == nil {
+		t.Error("empty mechanisms must be refused")
+	}
+	if err := (&DsyncApiClientAuthConf{Mechanisms: []string{"tls-dane"}}).Validate(); err == nil {
+		t.Error("tls-dane must be refused")
+	}
+	ca := &DsyncApiClientAuthConf{Mechanisms: []string{"TLS-PIN"}}
+	if err := ca.Validate(); err != nil {
+		t.Errorf("tls-pin Validate = %v", err)
+	}
+	if ca.Mechanisms[0] != DsyncApiAuthTLSPin {
+		t.Errorf("not normalised: %v", ca.Mechanisms)
+	}
+	// tls-pkix without ca-file is a warning, not an error.
+	if err := (&DsyncApiClientAuthConf{Mechanisms: []string{"tls-pkix"}}).Validate(); err != nil {
+		t.Errorf("tls-pkix without ca-file must warn, not fail: %v", err)
+	}
+}
+
+func TestDsyncApiChildCredentialBothKindsRefused(t *testing.T) {
+	cc := DsyncApiChildCredentialConf{
+		Parent:   "example.",
+		Username: "u",
+		Key:      "k",
+		TLS:      &DsyncApiChildTLSConf{CertFile: "c", KeyFile: "k"},
+	}
+	if err := cc.Validate(); err == nil {
+		t.Fatal("bearer + tls must be refused")
+	}
+	if err := (&DsyncApiChildTLSConf{CertFile: "c"}).Validate(); err == nil {
+		t.Fatal("half-written tls block must be refused")
+	}
+}

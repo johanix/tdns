@@ -98,7 +98,7 @@ func pushDSRRsetViaApi(ctx context.Context, deps RolloverEngineDeps, target *Dsy
 
 	childconf := DelegationSyncConfig().Child.Api
 	cred, ok := childconf.CredentialFor(parent)
-	if !ok || cred.Username == "" || cred.Key == "" {
+	if !ok || !cred.Usable() {
 		// A local configuration gap, NOT waiting-for-parent. The parent is
 		// advertising the scheme correctly and would accept the push; what is
 		// missing is a credential, which arrives out of band (§10) and which no

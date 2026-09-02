@@ -107,6 +107,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		// which is a separate socket with separate auth and a policy that
 		// confines every one of them.
 		sr.HandleFunc("/dsync-api/credential", kdb.APIdsyncApiCredential()).Methods("POST")
+		sr.HandleFunc("/dsync-api/cert-credential", kdb.APIdsyncApiCertCredential()).Methods("POST")
 		sr.HandleFunc("/delegation", APIdelegation(conf.Internal.DelegationSyncQ)).Methods("POST")
 	}
 
