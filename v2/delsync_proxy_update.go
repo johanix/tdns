@@ -434,7 +434,12 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
 			zd.ZoneName)
 	}
 
-	rcode, _, uerr := SendUpdate(ctx, smsg, zd.Parent, target.Addresses)
+	// Delegation-DATA send path (the proxy sends the child's delegation change
+	// to the parent), so it gets the draft's retry/backoff + RCODE policy just
+	// like SyncZoneDelegationViaUpdate. SendUpdateWithRetry also turns a parent
+	// rejection back into a non-nil error, which the check below relies on:
+	// bare SendUpdate reports a rejection through the rcode with a NIL error.
+	rcode, _, uerr := zd.SendUpdateWithRetry(ctx, smsg, zd.Parent, target.Addresses)
 	if uerr != nil {
 		return "", fmt.Errorf("ProxyUpdateParent: send UPDATE to %s: %w", zd.Parent, uerr)
 	}

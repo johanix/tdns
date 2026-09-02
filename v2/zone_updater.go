@@ -416,6 +416,29 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					keyRR     string
 				}
 				var toVerify []pendingVerification
+
+				// If this is a self-signed bootstrap ceremony carrying a
+				// DEL-ANY-KEY, defer the DEL: register a pending key-replacement
+				// so that once the newly-added (untrusted) key is validated and
+				// promoted to trusted, the child's other keys are removed. The
+				// DEL itself is not applied now (the class-ANY case below skips
+				// it), so an un-validated bootstrap never evicts a trusted key.
+				// Noted here, REGISTERED after the commit below succeeds. A
+				// marker written for a key that then failed to store would
+				// outlive the failure and could complete a cleanup for a key
+				// this update never actually added.
+				//
+				// ceremonyHasDel and ceremonyDeferred are deliberately separate.
+				// The first says "this class-ANY KEY record is the ceremony's own
+				// DEL half", which is what licenses skipping it below; the second
+				// says "and the new key is not yet trusted, so the cleanup has to
+				// wait for validation". A ceremony that arrives already trusted
+				// still has its DEL skipped -- as it did before this path learned
+				// to reject class ANY -- but registers no deferred cleanup.
+				ceremonyKey, hasDelAnyKey, isCeremony := bootstrapCeremony(ur.Actions)
+				ceremonyHasDel := isCeremony && hasDelAnyKey
+				ceremonyDeferred := ceremonyHasDel && !ur.Trusted
+
 				var applyErr error
 			trustLoop:
 				for _, rr := range ur.Actions {
@@ -426,6 +449,23 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					case dns.ClassNONE:
 						subcommand = "delete"
 					case dns.ClassANY:
+						// The ONE class-ANY record this path accepts is the
+						// "DEL <child> ANY KEY" half of the self-signed bootstrap
+						// ceremony (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
+						// §"Bootstrapping the Child's Key"). It is deferred, not
+						// ignored: the registration below completes it once the
+						// newly added key has been independently validated, which
+						// is the rule that stops a bogus self-signed UPDATE from
+						// evicting the currently trusted key.
+						//
+						// Everything else class-ANY is a wholesale RRset delete
+						// this path does not implement, and must fail the whole
+						// update rather than be dropped -- silently dropping it is
+						// how a truststore change that never landed got answered
+						// NOERROR.
+						if ceremonyHasDel && rr.Header().Rrtype == dns.TypeKEY {
+							continue
+						}
 						applyErr = fmt.Errorf("class ANY (delete RRset) is not supported for a truststore update")
 						break trustLoop
 					default:
@@ -495,6 +535,21 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				ur.respond(true, nil)
 				logUpdateActions("TRUSTSTORE-UPDATE", ur.Actions)
 
+				// The deferred half of a bootstrap DEL-ANY-KEY: the new key is
+				// stored, so once it is validated and promoted to trusted the
+				// child's superseded keys may be removed. Registered only here,
+				// after the commit: every earlier exit rolls the transaction back
+				// and continues, so reaching this line IS the proof that the key
+				// landed. (The branch's own keyStoreFailed flag is gone with the
+				// partial-commit behaviour it guarded against -- a store failure
+				// now aborts and rolls back the whole truststore update.)
+				if ceremonyDeferred {
+					registerPendingKeyReplacement(ceremonyKey.Header().Name, ceremonyKey.KeyTag())
+					lg.Info("ZoneUpdater: deferring DEL-ANY-KEY from self-signed bootstrap until new key is trusted",
+						"child", ceremonyKey.Header().Name, "keyid", ceremonyKey.KeyTag())
+				}
+
+				// Trigger async DNS verification for newly stored untrusted child keys.
 				for _, pv := range toVerify {
 					lg.Info("ZoneUpdater: triggering child key verification",
 						"zone", pv.childZone, "keyid", pv.keyid)

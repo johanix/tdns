@@ -49,3 +49,44 @@ func TestLocalOptionCodesAreInPrivateUseRange(t *testing.T) {
 		}
 	}
 }
+
+// TestEDECodeValues pins the numeric value of the private EDE codes.
+//
+// These go on the wire and are quoted verbatim in the drafts and design docs,
+// so they are part of the interface, not an implementation detail. They are
+// also unusually easy to break: the block is defined as `513 + iota`, so
+// prepending any constant to it renumbers every code silently. That is exactly
+// what happened — a standard RFC 8914 code was added at the head of the block,
+// pushing EDESig0KeyNotKnown from its documented 513 to 514 and dragging the
+// rest of the block with it. Every existing test asserted symbolically, so
+// nothing caught it.
+//
+// If this test fails, do not "fix" it by updating the numbers: check whether a
+// constant was added to the head of the private block in edns0_ede.go.
+func TestEDECodeValues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  uint16
+		want uint16
+	}{
+		// The two codes the delegation-mgmt-via-ddns draft names directly.
+		{"EDESig0KeyNotKnown", EDESig0KeyNotKnown, 513},
+		{"EDESig0KeyKnownButNotTrusted", EDESig0KeyKnownButNotTrusted, 514},
+
+		// Block anchors: these catch a shift introduced anywhere in the middle.
+		{"EDEDelegationSyncNotSupported", EDEDelegationSyncNotSupported, 515},
+		{"EDEZoneFrozen", EDEZoneFrozen, 516},
+		{"EDETsigValidationFailure", EDETsigValidationFailure, 523},
+		{"EDESig0BadTime", EDESig0BadTime, 527},
+		{"EDESig0BadSignature", EDESig0BadSignature, 528},
+		{"EDESig0FormatError", EDESig0FormatError, 529},
+
+		// The standard code must keep its RFC 8914 value and must not be part
+		// of the private sequence.
+		{"EDEDNSSECBogus", EDEDNSSECBogus, 6},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %d, want %d", tc.name, tc.got, tc.want)
+		}
+	}
+}

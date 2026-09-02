@@ -537,9 +537,15 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(ctx context.Context, kdb *KeyDB,
 	lgDns.Info("SyncZoneDelegationViaUpdate: sending the signed update",
 		"target", dsynctarget.Name, "addresses", dsynctarget.Addresses, "port", dsynctarget.Port)
 
-	rcode, ur, err := SendUpdate(ctx, smsg, zd.Parent, dsynctarget.Addresses)
+	// SendUpdateWithRetry, not the bare SendUpdate: this is the delegation-DATA
+	// send path, the one draft-ietf-dnsop-delegation-mgmt-via-ddns-02
+	// §"No response to a DNS UPDATE" gives the retry/backoff schedule for, and
+	// the one whose BADKEY answer means "re-bootstrap the SIG(0) key" (D-2b).
+	// It is bounded and ctx-aware, so walkSyncPlan can still abandon it and move
+	// on to the next candidate transport.
+	rcode, ur, err := zd.SendUpdateWithRetry(ctx, smsg, zd.Parent, dsynctarget.Addresses)
 	if err != nil {
-		lgDns.Error("error from SendUpdate", "zone", zd.Parent, "err", err)
+		lgDns.Error("error from SendUpdateWithRetry", "zone", zd.Parent, "err", err)
 		return "", 0, ur, err
 	}
 	msg := fmt.Sprintf("SendUpdate(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])

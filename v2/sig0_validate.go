@@ -161,20 +161,21 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		sig0key, err = zd.FindSig0KeyViaDNS(signername, keyid)
 		if err == nil && sig0key != nil {
 			lgDns.Info("ValidateUpdate: SIG(0) key found via DNS lookup", "signer", signername, "keyid", keyid)
-			// ok, great that we found the key. but if this is a self-signed key upload then we still need to
-			// signal it as such. so lets check if the update is a KEY RR for the same zone
-			if len(r.Ns) == 1 {
-				if key, ok := r.Ns[0].(*dns.KEY); ok {
-					if key.KeyTag() == keyid && key.Algorithm == sig.RRSIG.Algorithm {
-						lgDns.Info("ValidateUpdate: update is a self-signed KEY upload", "signer", signername, "keyid", keyid)
-						sig0key.Key = *key
-						sig0key.PublishedInDNS = true
-						sig0key.Source = "child-key-upload"
-						us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: sig0key})
-						us.Data = "key"
-						us.Type = "TRUSTSTORE-UPDATE"
-						continue // key found
-					}
+			// ok, great that we found the key. but if this is a self-signed key
+			// upload then we still need to signal it as such. Accept the plain
+			// single-KEY upload and the DEL-ANY-KEY + ADD-KEY bootstrap ceremony
+			// (draft §"Bootstrapping the Child's Key"); the ADD KEY must be the
+			// key that signed this UPDATE.
+			if addKey, _, ok := bootstrapCeremony(r.Ns); ok {
+				if addKey.KeyTag() == keyid && addKey.Algorithm == sig.RRSIG.Algorithm {
+					lgDns.Info("ValidateUpdate: update is a self-signed KEY upload", "signer", signername, "keyid", keyid)
+					sig0key.Key = *addKey
+					sig0key.PublishedInDNS = true
+					sig0key.Source = "child-key-upload"
+					us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: sig0key})
+					us.Data = "key"
+					us.Type = "TRUSTSTORE-UPDATE"
+					continue // key found
 				}
 			}
 
@@ -185,18 +186,13 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			lgDns.Debug("ValidateUpdate: SIG(0) key NOT found via DNS lookup", "signer", signername, "keyid", keyid)
 		}
 
-		// Last chance: Is the key in the update?
-		if len(r.Ns) != 1 {
-			lgDns.Debug("ValidateUpdate: update does not consist of a single SIG(0) key, not a self-signed KEY upload")
-			continue
-		}
-
-		// Extract the RR from the update hoping that it is a KEY record
-		switch tmp := r.Ns[0].(type) {
-		case *dns.KEY:
+		// Last chance: Is the key in the update? Accept the plain single-KEY
+		// upload and the DEL-ANY-KEY + ADD-KEY bootstrap ceremony; the ADD KEY
+		// is the (self-signing) key being uploaded.
+		if addKey, _, ok := bootstrapCeremony(r.Ns); ok {
 			sig0key = &Sig0Key{
 				Name:   signername,
-				Key:    *tmp,
+				Key:    *addKey,
 				Source: "child-key-upload",
 			}
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: sig0key})
@@ -204,10 +200,9 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			us.Type = "TRUSTSTORE-UPDATE"
 			lgDns.Info("ValidateUpdate: update is a self-signed KEY upload", "signer", signername, "keyid", keyid)
 			continue
-		default:
-			lgDns.Debug("ValidateUpdate: update is not a SIG(0) key, not a self-signed KEY upload")
-			continue
 		}
+		lgDns.Debug("ValidateUpdate: update is not a self-signed KEY upload")
+		continue
 	}
 
 	// At this point we have a set of zero or more keys that match the signername and keyid for a

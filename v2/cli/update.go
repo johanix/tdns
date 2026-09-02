@@ -519,7 +519,28 @@ cmdloop:
 				continue
 			}
 			PrintUpdateResult(ur)
-			fmt.Printf("Update sent, rcode: %d (%s)\n", rcode, dns.RcodeToString[rcode])
+			if rcode != dns.RcodeSuccess {
+				// Anything but NOERROR means the parent did not apply the
+				// update. Reporting it as "sent" read as success, so a REFUSED
+				// or BADKEY looked identical to an accepted change.
+				fmt.Printf("Update REJECTED by %s: rcode %d (%s) — the change was NOT applied\n",
+					server, rcode, dns.RcodeToString[rcode])
+				switch rcode {
+				case dns.RcodeBadKey:
+					fmt.Printf("  the signing key is not known to the parent; it may need (re-)bootstrapping\n")
+				case dns.RcodeRefused:
+					fmt.Printf("  the parent refused the update; the key may be known but not trusted\n")
+				}
+				// The composed actions are kept so they can be retried or
+				// edited rather than silently discarded on a failure. The
+				// MESSAGE is not: it is already signed over the old actions, and
+				// leaving it set would make the next `send` skip signing and
+				// transmit the stale message instead of the edited one.
+				msg = nil
+				msgSigned = false
+				continue
+			}
+			fmt.Printf("Update accepted, rcode: %d (%s)\n", rcode, dns.RcodeToString[rcode])
 
 			actions = nil
 			msg = nil

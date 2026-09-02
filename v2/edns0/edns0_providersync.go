@@ -9,7 +9,11 @@ import (
 	"github.com/miekg/dns"
 )
 
-// EDNS0 Provider-Synchronization option constants
+// EDNS0 Provider-Synchronization option constants.
+//
+// The option CODE lives in edns0_defs.go with every other tdns-local option
+// code, so collisions are visible in one place. It used to be declared here as
+// 65002, colliding with EDNS0_KEYSTATE_OPTION_CODE.
 const (
 	// OPERATION field values
 	PROVIDERSYNC_OP_FORBIDDEN = 0
