@@ -442,10 +442,18 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 // It is not about looking in the Keystore, nor looking in the DNS.
 // If key not found *TrustAnchor is nil
 func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, error) {
+	return zd.KeyDB.FindSig0TrustedKey(signer, keyid)
+}
+
+// FindSig0TrustedKey is the KeyDB-level lookup behind ZoneData.FindSig0TrustedKey,
+// for callers that have no zone in hand -- the child verifying a parent's
+// KeyState response looks up the UPDATE Receiver's key here (keystate_verify.go).
+// The record's Trusted flag is returned, not enforced; callers decide.
+func (kdb *KeyDB) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, error) {
 	mapkey := fmt.Sprintf("%s::%d", signer, keyid)
 
 	// 1. Try to fetch the key from the Sig0Store cache
-	if sk, ok := zd.KeyDB.TruststoreSig0Cache.Map.Get(mapkey); ok {
+	if sk, ok := kdb.TruststoreSig0Cache.Map.Get(mapkey); ok {
 		return &sk, nil
 	}
 
@@ -454,7 +462,7 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 	)
 
 	// 2. Try to fetch the key from the Sig0TrustStore database
-	rows, err := zd.KeyDB.Query(fetchsig0trustanchor, signer, keyid)
+	rows, err := kdb.Query(fetchsig0trustanchor, signer, keyid)
 	if err != nil {
 		return nil, err
 	}
@@ -477,12 +485,14 @@ func (zd *ZoneData) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, e
 		}
 		sk := Sig0Key{
 			Name:            signer,
+			Keyid:           keyid,
 			Validated:       validated,
 			DnssecValidated: dnssecvalidated,
 			Trusted:         trusted,
 			Key:             *keyrr,
+			Keystr:          keyrrstr,
 		}
-		zd.KeyDB.TruststoreSig0Cache.Map.Set(mapkey, sk)
+		kdb.TruststoreSig0Cache.Map.Set(mapkey, sk)
 		return &sk, nil
 	}
 

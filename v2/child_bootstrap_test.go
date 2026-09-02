@@ -1,9 +1,14 @@
 package tdns
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
+
+	cache "github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 func TestSelectChildBootstrapMethod(t *testing.T) {
@@ -111,5 +116,95 @@ func TestZoneChildBootstrapMethodsUsesProxyOption(t *testing.T) {
 	proxy := &ZoneData{Options: map[ZoneOption]bool{OptDelSyncProxy: true}}
 	if got := proxy.zoneChildBootstrapMethods(); !reflect.DeepEqual(got, []string{"at-apex"}) {
 		t.Fatalf("proxy zone: %v", got)
+	}
+}
+
+func TestBootstrapAdvertisementUsable(t *testing.T) {
+	cases := []struct {
+		dsync, svcb, insecure, want bool
+	}{
+		{true, true, false, true},
+		{true, false, false, false},
+		{false, true, false, false},
+		{false, false, false, false},
+		{false, false, true, true},
+		{true, false, true, true},
+	}
+	for _, c := range cases {
+		if got := bootstrapAdvertisementUsable(c.dsync, c.svcb, c.insecure); got != c.want {
+			t.Errorf("usable(dsync=%v svcb=%v insecure=%v) = %v, want %v", c.dsync, c.svcb, c.insecure, got, c.want)
+		}
+	}
+}
+
+// The parent's SVCB bootstrap advertisement is parent-derived input the child
+// acts on (D-7 rider): it counts only when both the DSYNC that named the
+// target and the SVCB itself DNSSEC-validated, or under allow-insecure.
+// Otherwise it is treated as absent, so the child falls back to its own list
+// rather than being steered by a forged advertisement.
+func TestAdvertisedBootstrapMethodsRequiresAuthentication(t *testing.T) {
+	const target = "updates.parent.example."
+	imr := newTestImr(t)
+	svcb := newBootstrapSVCB(target, "at-apex,manual", 300)
+	imr.Cache.Set(target, dns.TypeSVCB, &cache.CachedRRset{
+		Name: target, RRtype: dns.TypeSVCB,
+		RRset:   &core.RRset{Name: target, RRtype: dns.TypeSVCB, RRs: []dns.RR{svcb}},
+		Context: cache.ContextAnswer,
+		State:   cache.ValidationStateSecure,
+	})
+	ctx := context.Background()
+
+	got, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, false)
+	if !present || !reflect.DeepEqual(got, []string{"at-apex", "manual"}) {
+		t.Fatalf("validated: got %v present=%v", got, present)
+	}
+	if _, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: false}, false); present {
+		t.Fatal("unvalidated DSYNC: advertisement must be ignored")
+	}
+	got, present = advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: false}, true)
+	if !present || !reflect.DeepEqual(got, []string{"at-apex", "manual"}) {
+		t.Fatalf("unvalidated DSYNC under allow-insecure: got %v present=%v", got, present)
+	}
+	if _, present := advertisedBootstrapMethods(ctx, imr, nil, true); present {
+		t.Fatal("nil target must be absent")
+	}
+
+	// The SVCB itself unvalidated (an unsigned parent zone), DSYNC validated:
+	// ignored in strict mode, honoured under allow-insecure. The validator
+	// answers from the seeded cache entry, so this runs without a network.
+	unsigned := newBootstrapSVCB(target, "unsigned,manual", 300)
+	imr.Cache.Set(target, dns.TypeSVCB, &cache.CachedRRset{
+		Name: target, RRtype: dns.TypeSVCB,
+		RRset:   &core.RRset{Name: target, RRtype: dns.TypeSVCB, RRs: []dns.RR{unsigned}},
+		Context: cache.ContextAnswer,
+		State:   cache.ValidationStateInsecure,
+	})
+	if _, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, false); present {
+		t.Fatal("unvalidated SVCB, strict: advertisement must be ignored")
+	}
+	got, present = advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, true)
+	if !present || !reflect.DeepEqual(got, []string{"unsigned", "manual"}) {
+		t.Fatalf("unvalidated SVCB under allow-insecure: got %v present=%v", got, present)
+	}
+
+	// Bogus -- a chain that exists and failed -- is never honoured, not
+	// even under allow-insecure, whether it is the SVCB or the DSYNC.
+	imr.Cache.Set(target, dns.TypeSVCB, &cache.CachedRRset{
+		Name: target, RRtype: dns.TypeSVCB,
+		RRset:   &core.RRset{Name: target, RRtype: dns.TypeSVCB, RRs: []dns.RR{unsigned}},
+		Context: cache.ContextAnswer,
+		State:   cache.ValidationStateBogus,
+	})
+	if _, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, true); present {
+		t.Fatal("bogus SVCB under allow-insecure: advertisement must be ignored")
+	}
+	imr.Cache.Set(target, dns.TypeSVCB, &cache.CachedRRset{
+		Name: target, RRtype: dns.TypeSVCB,
+		RRset:   &core.RRset{Name: target, RRtype: dns.TypeSVCB, RRs: []dns.RR{svcb}},
+		Context: cache.ContextAnswer,
+		State:   cache.ValidationStateSecure,
+	})
+	if _, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: false, Bogus: true}, true); present {
+		t.Fatal("bogus DSYNC under allow-insecure: advertisement must be ignored")
 	}
 }
