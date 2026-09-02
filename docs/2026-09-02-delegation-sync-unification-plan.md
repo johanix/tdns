@@ -1,8 +1,9 @@
 # Implementation plan — unify the delegation-sync child paths and config
 
-**Status:** design settled (all §7 decisions made 2026-09-02); external review
-folded in 2026-09-02 (`reviews/2026-09-02-delegation-sync-unification-plan-review.md`,
-verdict *request changes* — both holds now closed in-document); no code written yet.
+**Status:** design settled and reviewed. Two external passes folded in 2026-09-02
+(`reviews/2026-09-02-delegation-sync-unification-plan-review.md`, *request changes* —
+both holds closed; `…-rereview.md`, *approve after one sentence in U-0* — that
+sentence is now written). **Ready to implement, starting at U-0.** No code yet.
 **Base:** branch off `main`. Work in the **`v2/` tree only**.
 **Relationship to other plans:** this is a prerequisite refactor for the remaining Phase 2
 items of `2026-07-16-ddns-delegation-keystate-draft-alignment-plan.md` (D-6, D-7, D-3b).
@@ -424,15 +425,51 @@ those same DNSKEYs.
   only from SEP-flagged DNSKEYs, so a zone signed with a single flags-256 CSK
   yields an empty `newDS` while being properly signed. With `dsKnown=true` that
   **deletes a live child's DS** — strictly worse than the stale DS being fixed,
-  and today masked only by `dsKnown=false`. The auth path was already burned by
-  this hole and no longer derives DS from SEP flags (`computeNewDS`,
-  `v2/zone_updater.go:1671-1683`, now using keystore intent). The proxy holds no
-  keys for the zone and so cannot use keystore intent; it needs the served-data
-  equivalent — every apex DNSKEY treated as DS-eligible, not SEP-only.
-  Shipping part 1 alone is a regression; this is not a separate concern but the
-  rest of the same fix.
+  and today masked only by `dsKnown=false`. Shipping part 1 alone is a
+  regression; this is not a separate concern but the rest of the same fix.
+
+  **Corrected again after re-review.** An earlier draft of this bullet said the
+  fix was to treat "every apex DNSKEY as DS-eligible, not SEP-only", and claimed
+  the auth path had stopped using SEP. Both are wrong. `DSIntentForZone` still
+  queries `int(dns.SEP)` (`v2/ds_intent.go:87`) and `TestDSIntentIgnoresNonSEPKeys`
+  pins a flags-256 row contributing **no** DS; what `computeNewDS` actually fixed
+  was gating on whether the update mentioned DNSKEYs at all
+  (`v2/zone_updater.go:1671-1678`), not the SEP question. Hashing every published
+  DNSKEY would mint a DS for every **ZSK** in an ordinary KSK/ZSK child — a worse
+  error than the one it was meant to correct.
+
+  **Use the predicate this tree already has.** `hasDnskeyRRset()`
+  (`v2/delsync_proxy_api.go:202-209`) answers exactly this question on the other
+  proxy transport, and its comment makes the argument verbatim: the SEP bit is
+  advisory, validators ignore it, and reading "no SEP key" as "not signed" is how
+  a working child loses its DS. It returns `true` on a failed lookup, so a
+  transient read cannot withdraw a DS. `proxyApiRRsets` (`:165-191`) and
+  `unmanagedZoneNeedsDSRepair` (`v2/delegation_utils.go:159-171`) already follow
+  the same rule. Do not invent a third DS derivation:
+
+  ```go
+  newNS, newA, newAAAA, newDS := zd.proxyCurrentDelegationRRs()
+  dsKnown := !zd.hasDnskeyRRset() || len(newDS) > 0
+  m, berr = CreateChildReplaceUpdateWithDS(zd.Parent, zd.ZoneName, newNS, newA, newAAAA, newDS, dsKnown)
+  ```
+
+  | served zone | `hasDnskeyRRset` | SEP-derived `newDS` | `dsKnown` | parent DS |
+  |---|---|---|---|---|
+  | unsigned (no DNSKEY RRset) | false | empty | **true** | deleted — fixes #468 |
+  | flags-256 CSK | true | empty | **false** | left alone — no live-DS delete |
+  | SEP KSK (+ any ZSKs) | true | non-empty | **true** | restated from SEP keys only |
+
+  **Known limitation, deliberate:** a proxied zone signed only with flags-256
+  keys never has its DS maintained by the proxy — the middle row declines to have
+  an opinion rather than guessing which key to hash. That is the safe direction.
+  Record it here so it is not later "fixed" by hashing non-SEP keys, which is the
+  ZSK error above.
 - **Acceptance:** a proxied zone that drops its DNSKEYs removes the parent's DS;
-  a proxied zone signed with a flags-256 CSK **retains** it.
+  a flags-256 CSK zone **retains** it; **a KSK+ZSK zone does not grow a DS for the
+  ZSK** (the last one is what stops the wrong heuristic hiding behind the CSK
+  case). `TestProxyApiDSStatementDependsOnTheDnskeyRRsetNotTheSEPBit`
+  (`v2/delsync_proxy_api_test.go:344`) already pins the same three shapes on the
+  API path and is the model to copy.
 - **Est.** ~60-120 LOC.
 
 ### U-1. One UPDATE sender
@@ -478,7 +515,9 @@ those same DNSKEYs.
 
 ### U-3. Named parent-side delegation policies
 - **Change:** add `delegationsync.policies.*` and the per-zone `delegationpolicy:`
-  reference; bind it on the zone the way `dnssecpolicy` binds. Move
+  reference; **bind it per §4.3** — the reference shape is `dnssecpolicy`-like but
+  the omission and failure cases are not, which is what §4.3 exists to stop
+  anyone copying. Move
   `key-verification.*`, `updatepolicy.child.keybootstrap` and
   `updatepolicy.child.keyupload` into it and delete all three (§4.2).
 - **Note:** the two `updatepolicy` fields are read in one conditional
@@ -501,9 +540,13 @@ those same DNSKEYs.
   policies to inherit from) because a DNSSEC policy is large. A delegation policy
   is five fields; template inheritance would be machinery for nothing. Do not add
   it by analogy.
-- **Migration is small:** only `manual` and `strict-manual` have behaviour to
-  carry over (§3 defect 3), so a zone setting either needs a policy naming it and
-  every other `keybootstrap`/`keyupload` setting simply disappears.
+- **Migration:** only `manual` and `strict-manual` have behaviour to carry over
+  (§3 defect 3). The *inert* values (`dnssec-validated`, `consistent-lookup`)
+  disappear; `manual` does **not** — see the shipped-template hazard in §4.3,
+  which those templates do set.
+- **Child field:** U-3 adds and *parses* `child.update.bootstrap.methods`;
+  **D-6 does the intersecting**. Parsed-and-unread through U-3/U-6 is fine and
+  silent.
 - **Acceptance:** two zones on one parent with different policies bootstrap
   differently; config naming an unknown policy fails at parse (fail closed); each
   old `keybootstrap` value's behaviour is reproduced by its §4.2 mapping, pinned
