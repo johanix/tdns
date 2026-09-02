@@ -46,6 +46,14 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 	// Extract CO bit (Compact Ok) - bit 14 (RFC 9824)
 	msgoptions.CO = (opt.Hdr.Ttl & (1 << 14)) != 0
 
+	// PRIVACY option: one octet, 0 = no opinion, 1 = opportunistic, 2 = strict.
+	// Presence is recorded separately from the level, because a response only
+	// carries the privacy status back to a client that asked -- and "asked for
+	// nothing" is still asking. Extracted here rather than in the loop below
+	// because ExtractPrivacyLevel does its own scan: it has to skip a
+	// malformed option to reach a well-formed one behind it.
+	msgoptions.Privacy, msgoptions.HasPrivacy = ExtractPrivacyLevel(opt)
+
 	// Loop once through all EDNS0 options and extract them based on their code
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
@@ -61,14 +69,6 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 						msgoptions.ErAgentDomain = domain
 						msgoptions.HasEROption = true
 					}
-				}
-			case EDNS0_PRIVACY_OPTION_CODE:
-				// One octet: 0 = no opinion, 1 = opportunistic, 2 = strict.
-				// Presence is recorded separately from the level, because a
-				// response only carries the privacy status back to a client
-				// that asked -- and "asked for nothing" is still asking.
-				if len(localOpt.Data) == 1 {
-					msgoptions.Privacy, msgoptions.HasPrivacy = ExtractPrivacyLevel(opt)
 				}
 			case EDNS0_KEYSTATE_OPTION_CODE:
 				// Extract KeyState option

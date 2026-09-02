@@ -152,12 +152,15 @@ func addPrivacyToMessage(msg *dns.Msg, payload uint8) error {
 	return AddPrivacyOption(opt, payload)
 }
 
-// ExtractPrivacyPayload returns the raw payload octet of the PRIVACY option on
-// opt, and whether a well-formed one was present.
+// ExtractPrivacyPayload returns the raw payload octet of the first well-formed
+// PRIVACY option on opt, and whether there was one.
 //
-// A PRIVACY option whose OPTION-LENGTH is not exactly 1 is reported as absent:
-// it is not a signal this implementation can act on, and guessing at the
-// intent of a malformed option is worse than ignoring it.
+// A PRIVACY option whose OPTION-LENGTH is not exactly 1 is skipped: it is not
+// a signal this implementation can act on, and guessing at the intent of a
+// malformed option is worse than ignoring it. Skipping rather than stopping
+// matters when a sender emits more than one: a malformed option ahead of a
+// valid one must not mask it, or a strict request would silently read as no
+// request at all -- privacy failing open, which is the wrong direction.
 func ExtractPrivacyPayload(opt *dns.OPT) (uint8, bool) {
 	if opt == nil {
 		return 0, false
@@ -166,7 +169,7 @@ func ExtractPrivacyPayload(opt *dns.OPT) (uint8, bool) {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
 			if localOpt.Code == EDNS0_PRIVACY_OPTION_CODE {
 				if len(localOpt.Data) != 1 {
-					return 0, false
+					continue
 				}
 				return localOpt.Data[0], true
 			}

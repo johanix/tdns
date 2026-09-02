@@ -482,6 +482,16 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		}
 	}
 	fz.noteAllUpstreamsFailed(qname, qtype, attempts, lastErr)
+	// Under strict privacy the only upstreams tried were the encrypted ones,
+	// so exhausting them IS the privacy failure: a cleartext upstream might
+	// have answered, and the client forbade asking. Wrapping the sentinel is
+	// what lets ImrResponder attach the EDE, and it mirrors what the iterative
+	// path does when its encrypted tuples run out.
+	if privacy == edns0.PrivacyStrict {
+		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
+			fmt.Errorf("%w: forward zone %s had no usable response for '%s %s' from any of its encrypted upstreams (attempts=%d, last error: %v)",
+				ErrPrivacyUnavailable, fz.Zone, qname, dns.TypeToString[qtype], attempts, lastErr)
+	}
 	return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
 		fmt.Errorf("forward zone %s: no usable response for '%s %s' from any of its %d upstreams (attempts=%d, last error: %v)",
 			fz.Zone, qname, dns.TypeToString[qtype], len(fz.Upstreams), attempts, lastErr)

@@ -1331,25 +1331,18 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// rather than letting the walk below run out of tuples and report a
 	// generic dead end. Opportunistic privacy has no such precondition --
 	// falling back to cleartext is exactly what it asked for.
+	//
+	// Availability is asked of candidateTransports rather than computed here,
+	// so the precheck and the tuple selection below cannot disagree. A
+	// hand-rolled scan did disagree in two ways: it read server.Transports
+	// without a nil check, where candidateTransports handles a nil entry (as
+	// prioritizeServers does), and it counted an encrypted transport of
+	// weight 0 or 1 as available, where candidateTransports excludes it.
 	if privacy == edns0.PrivacyStrict {
 		hasEncrypted := false
 		for _, server := range serverMap {
-			for _, t := range server.Transports {
-				if core.IsEncryptedTransport(t) {
-					hasEncrypted = true
-					break
-				}
-			}
-			if !hasEncrypted {
-				// Check transport weights
-				for t := range server.TransportWeights {
-					if core.IsEncryptedTransport(t) && server.TransportWeights[t] > 0 {
-						hasEncrypted = true
-						break
-					}
-				}
-			}
-			if hasEncrypted {
+			if len(candidateTransports(server, qname, edns0.PrivacyStrict)) > 0 {
+				hasEncrypted = true
 				break
 			}
 		}

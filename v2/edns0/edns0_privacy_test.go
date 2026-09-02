@@ -151,3 +151,30 @@ func TestPrivacyStatusRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// A malformed PRIVACY option must not mask a well-formed one behind it. This
+// is the direction that matters: reading a valid strict request as "no
+// request" lets the resolver use cleartext for a client that forbade it, so
+// the scan skips what it cannot parse rather than stopping there.
+func TestPrivacyOptionMalformedDoesNotMaskValid(t *testing.T) {
+	m := queryWithPrivacy(t, []byte{}) // malformed: OPTION-LENGTH 0
+	opt := m.IsEdns0()
+	opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
+		Code: EDNS0_PRIVACY_OPTION_CODE,
+		Data: []byte{uint8(PrivacyStrict)},
+	})
+
+	level, found := ExtractPrivacyLevel(opt)
+	if !found || level != PrivacyStrict {
+		t.Errorf("got %s/%v, want %s present", level, found, PrivacyStrict)
+	}
+
+	msgoptions, err := ExtractFlagsAndEDNS0Options(m)
+	if err != nil {
+		t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
+	}
+	if !msgoptions.HasPrivacy || msgoptions.Privacy != PrivacyStrict {
+		t.Errorf("got HasPrivacy=%v Privacy=%s, want true/%s",
+			msgoptions.HasPrivacy, msgoptions.Privacy, PrivacyStrict)
+	}
+}

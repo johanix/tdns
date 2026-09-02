@@ -874,6 +874,28 @@ func setPrivacyStatus(m *dns.Msg, msgoptions *edns0.MsgOptions, status edns0.Pri
 	}
 }
 
+// attachPrivacyUnavailableEDE turns a strict-privacy dead end into the
+// response the client asked for: SERVFAIL carrying EDE
+// EDEPrivacyRequestedUnavailable, naming the zone whose servers offered no
+// encrypted transport.
+//
+// Shared by both paths that can hit that dead end -- the direct query and the
+// one that first has to resolve NS addresses. Without it the second path
+// answered a bare SERVFAIL, indistinguishable from any other failure, for a
+// client that had explicitly asked to be told why.
+func attachPrivacyUnavailableEDE(m, r *dns.Msg, zone string, msgoptions *edns0.MsgOptions) {
+	m.SetRcode(r, dns.RcodeServerFailure)
+	// An EDE has nowhere to live in a response to a query that carried no OPT.
+	if r.IsEdns0() == nil {
+		return
+	}
+	edeText := "Strict privacy requested but only unencrypted transport available"
+	if zone != "" {
+		edeText += fmt.Sprintf(" for zone %s", zone)
+	}
+	edns0.AttachEDEToResponseWithText(m, edns0.EDEPrivacyRequestedUnavailable, edeText, msgoptions.DO)
+}
+
 func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions) {
 	m := new(dns.Msg)
 	m.RecursionAvailable = true
@@ -1026,10 +1048,20 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				// Use helper function to resolve NS addresses
 				// Note: The callback is called after processing each A/AAAA response.
 				// We try the query for each address we discover, similar to the original code.
+				// A strict-privacy dead end hit inside the callback is
+				// remembered rather than returned: a later address may still
+				// produce an answer, and only if none does is this the reason
+				// the query failed. Losing it made the responder answer a bare
+				// SERVFAIL here while the direct path below answered with the
+				// EDE, for the same failure.
+				var privacyErr error
 				done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
 					// Try querying with the current set of authservers
 					rrset, rcode, context, transport, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, msgoptions.Privacy)
 					if err != nil {
+						if errors.Is(err, ErrPrivacyUnavailable) {
+							privacyErr = err
+						}
 						lgImr.Error("IterativeDNSQuery failed", "err", err)
 						return false, nil // Continue trying with next address
 					}
@@ -1043,7 +1075,11 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 					return false, nil // Continue trying with next address
 				})
 				if err != nil {
-					m.SetRcode(r, dns.RcodeServerFailure)
+					if errors.Is(err, ErrPrivacyUnavailable) {
+						attachPrivacyUnavailableEDE(m, r, bestmatch, msgoptions)
+					} else {
+						m.SetRcode(r, dns.RcodeServerFailure)
+					}
 					w.WriteMsg(m)
 					return
 				}
@@ -1052,7 +1088,11 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				}
 				// If we get here, we tried all responses without finding a usable address
 				lgImr.Warn("ImrResponder: failed to resolve query using any nameserver address", "qname", qname, "qtype", dns.TypeToString[qtype])
-				m.SetRcode(r, dns.RcodeServerFailure)
+				if privacyErr != nil {
+					attachPrivacyUnavailableEDE(m, r, bestmatch, msgoptions)
+				} else {
+					m.SetRcode(r, dns.RcodeServerFailure)
+				}
 				w.WriteMsg(m)
 				return
 			}
@@ -1065,18 +1105,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				// available: SERVFAIL + EDE, rather than quietly leaking the
 				// query in cleartext.
 				if errors.Is(err, ErrPrivacyUnavailable) {
-					m.SetRcode(r, dns.RcodeServerFailure)
-					// Attach EDE only if query had EDNS0
-					if r.IsEdns0() != nil {
-						// Include zone name in EDE text for better diagnostics
-						var edeText string
-						if bestmatch != "" {
-							edeText = fmt.Sprintf("Strict privacy requested but only unencrypted transport available for zone %s", bestmatch)
-						} else {
-							edeText = "Strict privacy requested but only unencrypted transport available"
-						}
-						edns0.AttachEDEToResponseWithText(m, edns0.EDEPrivacyRequestedUnavailable, edeText, msgoptions.DO)
-					}
+					attachPrivacyUnavailableEDE(m, r, bestmatch, msgoptions)
 					w.WriteMsg(m)
 					return
 				}

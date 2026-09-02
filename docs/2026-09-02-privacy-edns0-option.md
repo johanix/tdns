@@ -22,8 +22,11 @@ The privacy signal used to be a flag bit: bit 12 of the OPT header TTL,
 
 Code **65007**, in the private-use range with the other tdns-local
 options (`v2/edns0/edns0_defs.go`). Payload: **exactly one octet**. An
-option whose OPTION-LENGTH is not 1 is treated as absent -- guessing at
-the intent of a malformed signal is worse than ignoring it.
+option whose OPTION-LENGTH is not 1 is skipped -- guessing at the intent
+of a malformed signal is worse than ignoring it. Skipped rather than
+treated as end-of-scan: if a sender emits more than one, a malformed
+option ahead of a valid one must not mask it, or a strict request would
+read as no request at all. Privacy failing open is the wrong direction.
 
 The octet's meaning depends on the direction of travel, because the two
 directions answer different questions. A receiver always knows which
@@ -107,6 +110,26 @@ The responder previously recognised this failure with
 `strings.Contains(err.Error(), "PR flag requires encrypted transport")`,
 which made every error string on that path part of the interface: a
 reworded message would have silently dropped the EDE.
+
+Everything that can reach that dead end wraps the sentinel, and every
+path that can report it attaches the EDE
+(`attachPrivacyUnavailableEDE`):
+
+- the iterative precheck (no server offers an encrypted transport) and
+  the iterative exhaustion path (every encrypted tuple was tried);
+- the forward precheck (no encrypted upstream) and the forward
+  exhaustion path -- under strict privacy the only upstreams tried were
+  the encrypted ones, so exhausting them *is* the privacy failure: a
+  cleartext upstream might have answered and the client forbade asking;
+- the responder's NS-address-resolution branch, which remembers a
+  strict-privacy failure across callback attempts (a later address may
+  still produce an answer) and reports it only if none of them does.
+
+The precheck asks `candidateTransports` whether a server has an
+encrypted transport rather than scanning the server itself, so it cannot
+disagree with the tuple selection that follows it about what "available"
+means -- notably over a nil map entry, or an encrypted transport at
+weight 0 or 1, which OOTS -03 puts below the threshold for use.
 
 ## 4. dog
 

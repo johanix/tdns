@@ -6,10 +6,12 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -595,5 +597,61 @@ func TestCandidateTransports_OpportunisticFallsBackToDo53(t *testing.T) {
 	}
 	if got := candidateTransports(s, "example.", edns0.PrivacyStrict); len(got) != 0 {
 		t.Errorf("strict: got %v, want nothing", got)
+	}
+}
+
+// The strict-privacy precheck in IterativeDNSQuery asks candidateTransports
+// whether a server has an encrypted transport, so these two cases decide what
+// the precheck does. Both used to be got wrong by a hand-rolled scan there: it
+// read server.Transports without a nil check, and it counted a weight-1
+// encrypted transport as available even though candidateTransports excludes it
+// (OOTS -03: MAY attempt only above weight 1).
+func TestCandidateTransportsStrictPrivacyEligibility(t *testing.T) {
+	// A nil entry must not panic, and must offer nothing under strict privacy.
+	if got := candidateTransports(nil, "example.", edns0.PrivacyStrict); len(got) != 0 {
+		t.Errorf("nil server, strict: got %v, want nothing", got)
+	}
+	if got := candidateTransports(nil, "example.", edns0.PrivacyNone); !slices.Equal(got, []core.Transport{core.TransportDo53}) {
+		t.Errorf("nil server, none: got %v, want [Do53]", got)
+	}
+
+	// Weight 1 is below the threshold, so this server offers no usable
+	// encrypted transport at all.
+	s := cache.NewAuthServer("ns.example.")
+	s.SetTransports([]core.Transport{core.TransportDoT})
+	s.SetTransportWeight(core.TransportDoT, 1)
+	if got := candidateTransports(s, "example.", edns0.PrivacyStrict); len(got) != 0 {
+		t.Errorf("weight-1 DoT, strict: got %v, want nothing", got)
+	}
+}
+
+// ... and the precheck must turn that into ErrPrivacyUnavailable, since the
+// responder attaches the privacy EDE on the sentinel and nothing else. Neither
+// server map here can produce a query, so nothing leaves the process.
+func TestIterativeDNSQueryStrictPrivacyPrecheck(t *testing.T) {
+	imr := newTestImr(t)
+
+	weightOne := cache.NewAuthServer("ns.example.")
+	weightOne.SetTransports([]core.Transport{core.TransportDoT})
+	weightOne.SetTransportWeight(core.TransportDoT, 1)
+	weightOne.Addrs = []string{"192.0.2.1"}
+
+	for name, serverMap := range map[string]map[string]*cache.AuthServer{
+		"nil entry":          {"ns1.example.": nil},
+		"weight-1 encrypted": {"ns.example.": weightOne},
+	} {
+		_, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "foo.example.", dns.TypeA, serverMap, true, edns0.PrivacyStrict)
+		if !errors.Is(err, ErrPrivacyUnavailable) {
+			t.Errorf("%s: got err %v, want one wrapping ErrPrivacyUnavailable", name, err)
+		}
+		// Pin that it is the PRECHECK talking, not the exhaustion path at the
+		// end of the walk -- both wrap the sentinel, and only the precheck can
+		// answer without attempting a single query.
+		if err != nil && !strings.Contains(err.Error(), "no servers have encrypted transports available") {
+			t.Errorf("%s: got %v, want the precheck's error", name, err)
+		}
+		if rcode != dns.RcodeServerFailure {
+			t.Errorf("%s: got rcode %s, want SERVFAIL", name, dns.RcodeToString[rcode])
+		}
 	}
 }

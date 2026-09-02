@@ -5,10 +5,13 @@
 package tdns
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
+	"github.com/miekg/dns"
 )
 
 // The forward path has to honor the same three privacy levels as the iterative
@@ -56,7 +59,8 @@ func TestForwardUpstreamsForPrivacy(t *testing.T) {
 
 // Strict privacy on a forward zone with no encrypted upstream must fail with
 // the sentinel the responder matches on, not with a message that happens to
-// contain the right words.
+// contain the right words: ImrResponder attaches the privacy-unavailable EDE
+// on errors.Is and nothing else.
 func TestForwardStrictPrivacyReturnsSentinel(t *testing.T) {
 	fz := &ForwardZone{
 		Zone:      "example.",
@@ -67,5 +71,17 @@ func TestForwardStrictPrivacyReturnsSentinel(t *testing.T) {
 	}
 	if got := forwardUpstreamsForPrivacy(fz, edns0.PrivacyStrict); len(got) != 0 {
 		t.Errorf("strict privacy: got %d upstreams, want none", len(got))
+	}
+
+	// The precheck is the first statement of forwardQuery and returns before
+	// anything on the Imr is touched, so a zero-value Imr is enough to reach
+	// it -- and the query never leaves the process.
+	imr := &Imr{}
+	_, rcode, _, _, err := imr.forwardQuery(context.Background(), "www.example.", dns.TypeA, fz, false, edns0.PrivacyStrict)
+	if !errors.Is(err, ErrPrivacyUnavailable) {
+		t.Errorf("got err %v, want one wrapping ErrPrivacyUnavailable", err)
+	}
+	if rcode != dns.RcodeServerFailure {
+		t.Errorf("got rcode %s, want SERVFAIL", dns.RcodeToString[rcode])
 	}
 }
