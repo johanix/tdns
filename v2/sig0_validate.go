@@ -426,11 +426,37 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// A signature verified with a located key that is nonetheless neither
 	// trusted, DNSSEC-validated, nor a self-signed upload. Per ddns-02
 	// §"Communication in Case of Errors" the key is known but not (or no
-	// longer) trusted, so respond REFUSED carrying EDE KEY-KNOWN-NOT-TRUSTED
-	// — distinct from BADKEY, which means the key is unknown.
+	// longer) trusted, so respond REFUSED carrying one of the three bootstrap-
+	// state EDEs — distinct from BADKEY, which means the key is unknown. The
+	// EDE is chosen for the signer whose signature actually verified.
+	signer := us.Signers[0]
+	for i := range us.Signers {
+		if us.Signers[i].Validated {
+			signer = us.Signers[i]
+			break
+		}
+	}
 	us.ValidationRcode = dns.RcodeRefused
-	us.RejectionEDE = edns0.EDESig0KeyKnownButNotTrusted
-	return fmt.Errorf("update is signed by %s (keyid %d) which is known but not trusted", us.Signers[0].Name, us.Signers[0].KeyId)
+	us.RejectionEDE = knownUntrustedKeyEDE(signer.Sig0Key, zd.boundDelegationPolicy().Manual)
+	return fmt.Errorf("update is signed by %s (keyid %d) which is known but not trusted (%s)",
+		signer.Name, signer.KeyId, edns0.EDECodeToString[us.RejectionEDE])
+}
+
+// knownUntrustedKeyEDE picks the ddns-02 §"Communication in Case of Errors"
+// EDE for an UPDATE signed by a key the receiver knows but does not trust,
+// with the same precedence childKeyState gives the KeyState codes 10/8/9:
+// under a manual policy the actionable state is "manual bootstrap required"
+// whatever automatic verification did; otherwise a recorded verification
+// failure says waiting will not help; otherwise bootstrap is still in
+// progress ("known, but not yet trusted").
+func knownUntrustedKeyEDE(key *Sig0Key, manual bool) uint16 {
+	if manual {
+		return edns0.EDESig0ManualBootstrapRequired
+	}
+	if key != nil && key.ValidationFailed {
+		return edns0.EDESig0KeyValidationFailed
+	}
+	return edns0.EDESig0KeyKnownButNotTrusted
 }
 
 func (zd *ZoneData) FindSig0KeyViaDNS(signer string, keyid uint16) (*Sig0Key, error) {
