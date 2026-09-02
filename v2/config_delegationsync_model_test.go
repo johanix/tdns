@@ -58,6 +58,7 @@ delegationsync:
             generator: /usr/bin/childkeygen
          bootstrap:
             methods: [ at-apex, at-ns ]
+         allow-insecure: true
 `
 	var m map[string]interface{}
 	if err := yaml.Unmarshal([]byte(y), &m); err != nil {
@@ -102,6 +103,12 @@ delegationsync:
 	}
 	if len(ch.Update.Bootstrap.Methods) != 2 {
 		t.Errorf("child bootstrap methods: %v", ch.Update.Bootstrap.Methods)
+	}
+	if !ch.Update.AllowInsecure {
+		t.Error("child update allow-insecure: false (want true; the D-7 knob must decode)")
+	}
+	if c.DelegationSync.Child.Api.AllowInsecure {
+		t.Error("child update allow-insecure leaked into child api allow-insecure")
 	}
 	// Absent require-dnssec must stay nil, not become false.
 	var m2 map[string]interface{}

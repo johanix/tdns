@@ -20,23 +20,50 @@ reconciles independently of DSYNC synthesize; receiver-KEY publication uses
 `update.bootstrap.methods` is parsed and consumed at bootstrap (SVCB
 intersection; absent SVCB falls back to the configured list).
 
+**2026-09-02 — D-7's required part (i) landed** on
+`feature/ddns-keystate-d7-mutual-auth`: the child verifies the UPDATE
+Receiver's SIG(0) on KeyState responses against a receiver KEY that is either
+manually trusted or DNSSEC-validated together with the DSYNC that named it;
+unauthenticated responses (and the SVCB bootstrap advertisement) are rejected
+unless `delegationsync.child.update.allow-insecure` is set; the inquiry moved
+to TCP. Decisions in `docs/2026-09-02-ddns-keystate-d7-mutual-auth.md`.
+Only (iii), signing plain UPDATE responses, remains of D-7.
+
+**2026-09-02 — D-6 closed** on `feature/ddns-keystate-d6-at-ns-signal`
+(stacked on D-7): `at-ns` publishes the child's keystore KEY at
+`_sig0key.<child>._signal.<ns>` through the existing RFC 9615 signal
+publisher (`signal_republish.go`), is offered only where this server is
+primary for a signal name, and is back in the omit-default. A failed SVCB
+lookup is now retried rather than read as "no advertisement". Notes in
+`docs/2026-09-02-ddns-keystate-d6-at-ns-signal.md`.
+
+**2026-09-02 — K-4 code 8 and D-8's two EDEs closed** on
+`feature/ddns-keystate-k4-code8-d8-ede` (stacked on D-6): verification
+exhaustion is recorded on the truststore row (`validation_failed`,
+`validation_error`, migrated in), the KeyState inquiry reports
+KEY_VALIDATION_FAILED(8) with the reason, and a signed UPDATE from such a key
+is REFUSED with EDE KEY-VALIDATION-FAILED; a manual-policy parent answers
+MANUAL-BOOTSTRAP-REQUIRED. The child treats "manual" as waiting for the
+operator (Info), not as an error. Notes in
+`docs/2026-09-02-ddns-keystate-k4-code8-d8-ede.md`. Of K-4 only code 7 remains.
+
 | Phase | Item | State | Est. remaining LOC (impl+tests) |
 |---|---|---|---|
 | 0 | K-1 codepoints, K-2 malformed, K-3 signed response, D-8 rcode/EDE (partial), D-2a TCP | **DONE** (on main) | — |
 | 1 | K-5 QTYPE=KEY | **DONE** (on main) | — |
 | 1 | K-6 KEY-DATA sub-reason | **DECLINED** — optional; KEY-DATA stays 0, documented at the emit site | — |
-| 0 | D-8 two missing private EDE codes | **PARTIAL** — rcode inversion fixed; `KEY-VALIDATION-FAILED`/`MANUAL-BOOTSTRAP-REQUIRED` never added | ~15-30 |
-| 1 | K-4 code 8 (KEY_VALIDATION_FAILED) | **DORMANT → now unblocked** by #312's durable retry/exhaustion state | ~100-200 |
+| 0 | D-8 two missing private EDE codes | **DONE** (2026-09-02) — 541 KEY-VALIDATION-FAILED, 542 MANUAL-BOOTSTRAP-REQUIRED, emitted from `TrustUpdate` | — |
+| 1 | K-4 code 8 (KEY_VALIDATION_FAILED) | **DONE** (2026-09-02) — exhaustion persisted on the truststore row, emitted by `childKeyState` | — |
 | 1 | K-4 code 7 (KEY_REFUSED) | **DORMANT** — waits on a SIG(0) accepted-algorithm policy (report+enforce, not just report) | ~150-300 |
 | 2 | D-2b UPDATE retry, D-4 bootstrap ceremony | **DONE** (PR #312) | — |
-| 2 | **D-7** mutual auth (moved ahead of D-6 — see note above) | **PARTIAL** — receiver-KEY publication done; child-side verification missing | ~320-580 |
-| 2 | **D-6** SVCB bootstrap consumption | **PARTIAL** — intersection+selection live; at-ns still sends the KEY UPDATE ceremony rather than publishing `_signal` | ~40-80 |
+| 2 | **D-7** mutual auth (moved ahead of D-6 — see note above) | **(i)+(ii) DONE** (2026-09-02) — child verifies signed KeyState responses; only (iii) signing plain UPDATE responses (draft SHOULD) remains | ~80-150 (iii only) |
+| 2 | **D-6** SVCB bootstrap consumption | **DONE** (2026-09-02) — intersection+selection, `at-ns` publishes at `_signal` via the shared signal publisher, satisfiability filter, default restored, failed lookup retried | — |
 | 2 | D-3b CDS/CSYNC acceptance (NS/glue half) | **PARTIAL** — DS half via #386; NS/glue rules **extracted** 2026-09-02 (`delegation_csync.go`, scanner still the only caller); wiring into `ApproveChildUpdate` is the remaining PR | ~200-350 |
 | 3 | IANA alignment | **DEFERRED** by design | — |
 | — | Cross-cutting vocabulary (4 settings, 2 config-reading engines) | **DONE** (PR #471) | — |
 
-**Core Phase 2 remainder (D-7 + D-6 + D-3b): ~760-1360 LOC.
-Everything not yet done (adds D-8's 2 EDE codes ~15-30, K-4 code 8 ~100-200, K-4 code 7 ~150-300): ~1025-1890 LOC.**
+**Core Phase 2 remainder (D-7(iii) + D-3b): ~480-850 LOC.
+Everything not yet done (adds K-4 code 7 ~150-300): ~630-1150 LOC.**
 See "Remaining-work sizing" after the Phase 2 section for the calibration basis and per-item reasoning.
 
 **Ordering note:** K-4's code 8 was blocked on Phase 2. It reports
@@ -83,11 +110,19 @@ The two drafts are **coupled**: KeyState is delegation-mgmt's key-state inquiry 
 - **Change:** fail closed — if the receiver cannot SIG(0)-sign a KeyState response, do **not** attach the KeyState option (respond as if unsupported) rather than sending an unsigned key-state signal. Log loudly. (Coordinate with D-7.)
 - **Acceptance:** no code path emits a KeyState option on an unsigned message.
 
-### D-8. UPDATE-receiver rcode/EDE semantics — **PARTIAL** (the inversion is fixed; two of the three new EDE codes were never added)
+### D-8. UPDATE-receiver rcode/EDE semantics — **DONE**
+
+**Closed 2026-09-02** (`docs/2026-09-02-ddns-keystate-k4-code8-d8-ede.md`):
+`EDESig0KeyValidationFailed` (541) and `EDESig0ManualBootstrapRequired` (542)
+appended to the private block; `TrustUpdate` picks among the three
+bootstrap-state EDEs for a known-but-untrusted signer with the same precedence
+`childKeyState` gives KeyState 10/8/9 (`knownUntrustedKeyEDE`). On the child,
+`errBootstrapManual` makes "manual" an Info-level wait rather than an ERROR on
+every load.
 - **Draft (ddns-02 §§"RCODE BADKEY", "Communication in Case of Errors", §IANA EDE):** **unknown key → `BADKEY(17)`** (child falls back to bootstrap). **Key known-but-not-trusted → `REFUSED`** carrying an EDE (`KEY-KNOWN-NOT-TRUSTED`). Three new EDE codes: KEY-KNOWN-NOT-TRUSTED, KEY-VALIDATION-FAILED, MANUAL-BOOTSTRAP-REQUIRED.
 - **Current (WRONG — confirm against the code before changing):** survey found the mapping inverted — unknown key → `BADSIG(16)`+EDE"known-not-trusted"; known-not-trusted → `BADKEY(17)`. See `v2/sig0_validate.go:31,274,288-311` and `v2/updateresponder.go:281-300`.
 - **Change:** unknown/unlocatable signer key → `BADKEY(17)`. Known-but-`!Trusted` key → `REFUSED` + EDE `KEY-KNOWN-NOT-TRUSTED` (existing private `EDESig0KeyKnownButNotTrusted=514`, `v2/edns0/edns0_ede.go:17-68`). Add private EDE codes for `KEY-VALIDATION-FAILED` and `MANUAL-BOOTSTRAP-REQUIRED` (values remain private/experimental until IANA — Phase 3). Keep `SERVFAIL` only for hard validation errors.
-- **Reassessed 2026-09-01, post-merge:** the rcode inversion fix (the actual correctness bug) is confirmed done — `v2/sig0_validate.go:356-357,431-432`. **Not done:** neither `KEY-VALIDATION-FAILED` nor `MANUAL-BOOTSTRAP-REQUIRED` exists anywhere in `v2/edns0/edns0_ede.go` or as a reference elsewhere in `v2/`.
+- **Reassessed 2026-09-01, post-merge:** the rcode inversion fix (the actual correctness bug) is confirmed done — `v2/sig0_validate.go:356-357,431-432`. The two remaining EDE codes were added 2026-09-02 (see above).
 - **Acceptance:** update signed by an unknown key → `BADKEY`; by a known-untrusted key → `REFUSED`+EDE514.
 - **Est. size (the two missing EDE codes only):** ~15-30 LOC — two consts + registry-uniqueness test entries + wiring at the (small number of) emit sites once K-4 codes 7/8 give them somewhere to be emitted from. Trivial in isolation; sequence it after K-4 codes 7/8 rather than before, since there's currently nothing that would emit them.
 
@@ -104,9 +139,9 @@ The two drafts are **coupled**: KeyState is delegation-mgmt's key-state inquiry 
 ### K-4. Emit the full receiver code set (4-10) with a 1:1 state map — **PARTIAL**
 - **Done:** 1, 4, 5, 6, 9, 10 emitted; `childKeyState` maps validated-not-trusted to 10 rather than collapsing it into an error.
 - **Dormant — 7 (KEY_REFUSED):** waits on a SIG(0) accepted-algorithm policy. A report-only algorithm policy is incoherent (it must also refuse the UPDATEs it reports on), so it belongs with the Phase 2 authorization work. **Est. size:** ~150-300 LOC — this is a small policy feature (allow/deny-list config, enforcement at validation time, plus the reporting wire-up), not just a code emit.
-- **Dormant — 8 (KEY_VALIDATION_FAILED):** waits on D-2b/D-4's durable retry/exhaustion state. Until then "failed" cannot be soundly told from "in progress", and 9 is reported instead. **Now unblocked by #312.** **Est. size:** ~100-200 LOC — a persisted "validation failed" state (using the durable state #312 added) plus emit-site wiring and tests; smaller than code 7 since the durable-state groundwork already exists.
+- **Done — 8 (KEY_VALIDATION_FAILED), 2026-09-02:** `runChildKeyVerification` (the engine behind `TriggerChildKeyVerification`, now with an injectable verifier) records exhaustion on the truststore row via the `validation-failed` subcommand; `childKeyState` reports 8 after the manual cases and before 9; the EXTRA-TEXT carries the recorded reason. A verification abandoned by a restart records nothing and stays 9 until the child re-uploads — the honest answer, since nothing was concluded.
 - **Draft (keystate-03 §"KeyStates Set By The UPDATE Receiver"):** codes 4 KEY_TRUSTED, 5 KEY_UNKNOWN, 6 KEY_INVALID, 7 KEY_REFUSED, 8 KEY_VALIDATION_FAILED, 9 KEY_BOOTSTRAP_AUTO, 10 KEY_BOOTSTRAP_MANUAL; plus 1 KEY_TEMPORARY_FAILURE for transient inability.
-- **Current (PARTIAL):** `v2/keystate.go:150-173` `GetKeyStatus` maps trusted→4, validated-not-trusted→9, present-not-validated→**6**, missing→5. **Codes 7 (KEY_REFUSED) and 8 (KEY_VALIDATION_FAILED) are never emitted**; validation-failure collapses into 6.
+- **Current (2026-09-03):** `childKeyState` maps trusted→4, structurally broken→6, validated-not-trusted→10, manual policy→10, recorded validation failure→**8**, otherwise→9; missing→5; transient store error→1. Only 7 (KEY_REFUSED) is still never emitted (dormant, above). On the UPDATE channel `sendUpdateWithRetry` treats REFUSED+541/542 as terminal and REFUSED+514 as a bounded retry.
 - **Change:** give tdns's SIG(0) key states a full 1:1 map: distinguish *validation failed* (→8) from *generic invalid/algorithm-mismatch* (→6); emit `7 (KEY_REFUSED)` when the key/algorithm is rejected by policy; emit `10 (KEY_BOOTSTRAP_MANUAL)` from the manual-bootstrap policy state (not from a sender request); emit `1 (KEY_TEMPORARY_FAILURE)` on transient store errors.
 - **Acceptance:** each internal key state produces its correct -03 code; a truststore key whose validation failed returns 8, not 6.
 
@@ -137,33 +172,61 @@ The two drafts are **coupled**: KeyState is delegation-mgmt's key-state inquiry 
 - **Change:** include the `DEL child ANY KEY` half in the bootstrap/re-bootstrap UPDATE (child side). On the receiver, make the "do not delete a trusted key until the replacement is validated" rule an **explicit** guard in the KEY-RRset delete path, not just an emergent property. Preserve the existing refusal of untrusted deletes.
 - **Acceptance:** a self-signed re-bootstrap UPDATE carrying `DEL ANY KEY`+`ADD KEY` does not evict the currently-trusted key until the new key validates.
 
-### D-7. Mutual authentication — child verifies the receiver's signature/KEY; sign plain UPDATE responses — **PARTIAL**
+### D-7. Mutual authentication — child verifies the receiver's signature/KEY; sign plain UPDATE responses — **(i)+(ii) DONE, (iii) open**
 
-**Moved ahead of D-6 (2026-09-01):** highest-value of the three remaining
-Phase 2 items, and the doc's ordering never reflected that. The KeyState
-inquiry (`QueryParentKeyState`/`QueryParentKeyStateDetailed`,
-`v2/parentsync_bootstrap.go:169,219`) travels over plain UDP (`dns.Client{}`,
-no `Net` set) with no source authentication beyond wire format. Without this
-item, a network attacker capable of UDP spoofing can inject a forged KeyState
-response today and the child cannot detect it — this is a live exposure on an
-active code path, not a future-feature gap like D-6.
+**Implemented 2026-09-02** (`v2/keystate_verify.go`; design and decisions in
+`docs/2026-09-02-ddns-keystate-d7-mutual-auth.md`). `QueryParentKeyState`
+(the dead `…Detailed` twin is gone) sends the inquiry over TCP, keeps the
+reply's wire bytes, and runs `sig0Verify` over them. A reply is authenticated
+when its SIG(0) verifies with a receiver KEY that is (a) in the child's
+truststore and marked trusted (`tdns-cli truststore sig0 add … ; … trust`), or
+(b) published at the DSYNC UPDATE target with **both** the KEY lookup and the
+DSYNC lookup DNSSEC-validated — `DsyncTarget.Validated` now exists for that;
+an unvalidated DSYNC would let a forged target choose the identity. A present
+but failing signature is always rejected. A reply that merely cannot be
+authenticated is rejected unless `delegationsync.child.update.allow-insecure`
+is set (then acted on with a Warn). The same switch gates the SVCB bootstrap
+advertisement, which is otherwise treated as absent when unvalidated (the
+#471 review's carry-over 6). A bogus DNSSEC verdict, on the receiver KEY,
+the DSYNC or the SVCB, is never waived. **Behaviour change, scoped
+precisely:** the KeyState poller (`ParentSyncAfterKeyPublication`) refuses an
+unauthenticated reply by default, so under an unsigned parent with no manually
+trusted receiver key it does not reach the bootstrap it would otherwise
+trigger. That poller has no caller in this repo today — only tdns-mp calls
+it, against its June pin — and the tdns-auth child path
+(`DelegationSyncSetup`) never inquires at all, so it still sends its KEY
+UPDATE regardless. tdns-mp should adopt the exported function when it bumps.
+
+**Moved ahead of D-6 (2026-09-01)** as the highest-value of the three
+remaining Phase 2 items: before it, the KeyState inquiry went over plain UDP
+and the child took the reply at face value. (Closed 2026-09-02, above.)
 
 - **Draft (ddns-02 §§"Mutual Authentication", "Bootstrapping the UPDATE Receiver's Key Into the Child", "Publishing the UPDATE Receiver's Key"):** the UPDATE Receiver maintains its own SIG(0) key, publishes it as a KEY record at the DSYNC {target}, and signs its responses; the child acquires+validates that KEY (DNSSEC or manual) and MUST verify signed responses (esp. KeyState inquiry responses).
 - **Current (PARTIAL — reassessed 2026-09-02 after PR #471):**
 	  - **(ii) DONE:** the receiver's KEY is published at the DSYNC {target} — `SetupZoneSync` now calls `DsyncUpdateTargetName` (the same helper DSYNC publication and the responder use), so a root-zone parent no longer computes a different target for key publication than for DSYNC publication/signing. The DSYNC RRset owner is `dsyncOwnerName` (`_dsync.root.` for the root), used by both publish and unpublish.
-  - **(i) MISSING:** child does not verify the receiver's signature/KEY at the two remaining response-consuming call sites — `v2/parentsync_bootstrap.go` `QueryParentKeyState` and `QueryParentKeyStateDetailed`. Both call `ExtractKeyStateOption` and return the code with no signature check. The third consumer (`KeyBootstrapper` / `UpdateKeyState`) was deleted with the engine in PR #471.
+  - **(i) DONE (2026-09-02):** see the implementation note above. The two call sites are one (`QueryParentKeyState`), and it verifies.
   - **(iii) MISSING:** plain UPDATE responses are unsigned; only `keyStateResponseWriter` (`v2/keystate.go`) signs.
 - **Change:** (i) child acquires+validates the UPDATE Receiver's KEY (from the DSYNC {target}, DNSSEC-validated, else manual) and **verifies the SIG(0) signature** on KeyState inquiry responses — reject/ignore unsigned or invalidly-signed responses. Reuse the existing `sig0Verify` primitive (`v2/sig0_validate.go`) rather than writing a new verifier. (iii) Consider signing plain UPDATE responses (draft SHOULD; the MUST is on inquiry responses).
 - **Acceptance:** a forged (unsigned/wrong-key) KeyState response is rejected by the child; the receiver's KEY is published and DNSSEC-validatable.
 - **Est. size (i, the required part):** ~250-430 LOC impl+tests — acquire/cache/validate the receiver KEY + wire `sig0Verify` into the two remaining call sites + reject-on-failure branches + tests. The third consumer and the root-zone target bug are gone.
 - **Est. size (iii, optional/SHOULD):** ~80-150 LOC — mostly reuses `keyStateResponseWriter`'s existing signing pattern applied to the generic UPDATE responder.
 
-### D-6. Child consumes the SVCB `bootstrap` SvcParamKey — **PARTIAL**
+### D-6. Child consumes the SVCB `bootstrap` SvcParamKey — **DONE**
+
+**Closed 2026-09-02** (`docs/2026-09-02-ddns-keystate-d6-at-ns-signal.md`).
+The `_signal` producer already existed for the transfer-driven HSYNCPARAM
+`pubkey` case (`signal_republish.go`); the bootstrap path now uses the same
+publisher when `at-ns` is selected, sourcing the keystore KEY so it does not
+wait on the asynchronous apex publication. `at-ns` is offered only when at
+least one apex NS has its signal name in a zone this server is primary for
+(never for a proxy), and is back in the omit-default. Rollover refreshes the
+signal names a bootstrap populated. A failed SVCB lookup is
+`errBootstrapAdvertisementLookup`, retried by both the KeyState poller and the
+BADKEY re-bootstrap arm rather than treated as an absent advertisement.
 - **Draft (ddns-02 §"SvcParamKey bootstrap", §"Publishing Supported Bootstrap Methods"):** parent publishes an SVCB at the DSYNC {target} with `bootstrap="at-apex,at-ns,unsigned,manual"` (subset); the child SHOULD prefer the strongest method the parent advertises that it can satisfy.
-- **Current (reassessed 2026-09-02 after T4 defects):** parent **emits and reconciles** the SVCB from the bound `delegationpolicy`. Child looks up that SVCB at the DSYNC UPDATE target, intersects with `CompiledChildMethods`, and selects the strongest overlap (`at-apex` > `at-ns` > `unsigned` > `manual`). Empty intersection refuses. Absent SVCB falls back to the child's configured list. Omit-default is `[at-apex]` until `_signal` publication exists; `at-ns` remains valid to opt into. Proxy still drops `at-ns` even when opted in. `manual` does not send the KEY UPDATE. BADKEY recovery uses the same willing list as the first ceremony (`zd.Options[OptDelSyncProxy]`).
-- **Change remaining:** when the selected method is `at-ns`, publish (auth) or require (proxy: cannot) the KEY at `_sig0key.<child>._signal.<ns>` rather than only sending the apex KEY UPDATE.
-- **Acceptance (met):** with a parent SVCB `bootstrap="unsigned,manual"` and child default `[at-apex]`, bootstrap refuses rather than attempting `at-apex`.
-- **Est. size remaining:** ~40-80 LOC if `_signal` publication is taken on.
+- **Current (reassessed 2026-09-02 after T4 defects):** parent **emits and reconciles** the SVCB from the bound `delegationpolicy`. Child looks up that SVCB at the DSYNC UPDATE target, intersects with `CompiledChildMethods`, and selects the strongest overlap (`at-apex` > `at-ns` > `unsigned` > `manual`). Empty intersection refuses. Absent SVCB falls back to the child's configured list. Omit-default is `[at-apex, at-ns]` since `_signal` publication landed (2026-09-02); `at-ns` is offered only where this server is primary for a signal name. Proxy still drops `at-ns` even when opted in. `manual` does not send the KEY UPDATE. BADKEY recovery uses the same willing list as the first ceremony (`zd.Options[OptDelSyncProxy]`).
+- **Change (done 2026-09-02):** when the selected method is `at-ns`, the auth child publishes the KEY at `_sig0key.<child>._signal.<ns>` before sending the ceremony; a proxy cannot and never offers `at-ns`.
+- **Acceptance (met):** with a parent SVCB `bootstrap="unsigned,manual"` and the child default, bootstrap refuses rather than attempting `at-apex`; `at-ns` selected → `_signal` name published (`TestPublishSig0KeyAtSignalNames`).
 
 ### D-3b. CDS/CSYNC acceptance semantics on the UPDATE path — **PARTIAL** (was NOT STARTED; DS half landed independently), **remaining half deferred to its own PR** (decided 2026-08-22)
 
@@ -232,9 +295,9 @@ estimate being smaller than D-4's full 318 despite being a similarly-scoped
 "add verification to an exchange" job — D-4 also had to invent the ceremony's
 wire format and deferred-delete bookkeeping from nothing, D-7(i) does not.
 
-**Totals:**
-- **Core Phase 2 remainder (D-7 + D-6 + D-3b): ~760-1360 LOC**
-- **Everything not yet done (adds D-8's 2 EDE codes ~15-30, K-4 code 8 ~100-200, K-4 code 7 ~150-300): ~1025-1890 LOC**
+**Totals (re-based 2026-09-02 after D-7(i), D-6, K-4 code 8 and D-8 landed):**
+- **Core Phase 2 remainder (D-7(iii) + D-3b): ~480-850 LOC**
+- **Everything not yet done (adds K-4 code 7 ~150-300): ~630-1150 LOC**
 
 These are order-of-magnitude ranges for planning, not commitments — treat them
 the same way the plan treats line-anchors: useful for sizing the work now,
