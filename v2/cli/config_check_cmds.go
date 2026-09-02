@@ -355,6 +355,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	checkApiServer(&cfg, cfgPath, rep)
 	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
+	checkDelegationSync(&cfg, rep)
 	checkDuplicateTemplates(&cfg, rep)
 	checkPeers(&cfg, rep)
 	checkApiServerCorrelation(role, &cfg, rep)
@@ -682,6 +683,74 @@ func checkPolicyAlgsAgainstServer(tmp string, rep *ccReport, g, role string, nPo
 	}
 	if allOK {
 		rep.pass(g, "policies", fmt.Sprintf("all %d policy(ies) use algorithms the %s server implements and are role-valid", nPols, role))
+	}
+}
+
+// checkDelegationSync validates the delegationsync: block the way the daemon
+// does, and resolves every zone's `delegationpolicy:` reference against it.
+//
+// Both failures are startup-fatal in different ways and neither is visible in
+// the YAML: an unknown mechanism or child method makes ParseConfig REFUSE THE
+// WHOLE CONFIG (SetDelegationSyncConfig returns an error), while a
+// `delegationpolicy:` naming a policy that does not exist QUARANTINES just that
+// zone. Predicting them offline is the whole point of `config check`.
+//
+// The validation itself is the server's — tdns.CompileDelegationSyncPolicies,
+// the same function SetDelegationSyncConfig calls. Nothing about the rules is
+// restated here, so the check cannot drift from the daemon it predicts.
+func checkDelegationSync(cfg *tdns.Config, rep *ccReport) {
+	const g = "Delegation sync"
+
+	compiled, methods, err := tdns.CompileDelegationSyncPolicies(cfg.DelegationSync)
+	if err != nil {
+		rep.fail(g, "delegationsync",
+			fmt.Sprintf("invalid delegationsync config: %v — the daemon refuses to start on this", err),
+			"fix the named token; parent mechanisms are at-apex/at-ns, child methods add unsigned/manual")
+		return
+	}
+
+	named := make([]string, 0, len(compiled))
+	for name := range compiled {
+		named = append(named, name)
+	}
+	sort.Strings(named)
+	rep.pass(g, "policies",
+		fmt.Sprintf("%d delegation policy/policies compile: %s (child bootstrap methods: %s)",
+			len(named), strings.Join(named, ", "), strings.Join(methods, ", ")))
+
+	templates := map[string]tdns.ZoneConf{}
+	for _, t := range cfg.Templates {
+		templates[lc(t.Name)] = t
+	}
+	// Templates are checked too, not just zones: a template naming a policy
+	// that does not exist quarantines every zone stamped from it, and the
+	// zones themselves carry no clue where the name came from.
+	for _, t := range cfg.Templates {
+		if t.DelegationPolicy == "" {
+			continue
+		}
+		if !tdns.DelegationPolicyResolves(compiled, t.DelegationPolicy) {
+			rep.fail(g, "template "+t.Name,
+				fmt.Sprintf("delegationpolicy: %q does not name an entry in delegationsync.policies — every zone using this template is quarantined at startup",
+					t.DelegationPolicy),
+				fmt.Sprintf("define it under delegationsync.policies, or use one of: %s", strings.Join(named, ", ")))
+		}
+	}
+	for i := range cfg.Zones {
+		zname := cfg.Zones[i].Name
+		if zname == "" {
+			continue
+		}
+		eff := effectiveZone(cfg.Zones[i], templates)
+		if eff.DelegationPolicy == "" {
+			continue // omitted binds "default", which always exists
+		}
+		if !tdns.DelegationPolicyResolves(compiled, eff.DelegationPolicy) {
+			rep.fail(g, zname,
+				fmt.Sprintf("delegationpolicy: %q does not name an entry in delegationsync.policies — the zone is quarantined at startup",
+					eff.DelegationPolicy),
+				fmt.Sprintf("define it under delegationsync.policies, or use one of: %s", strings.Join(named, ", ")))
+		}
 	}
 }
 
@@ -1430,6 +1499,13 @@ func effectiveZone(z tdns.ZoneConf, templates map[string]tdns.ZoneConf) tdns.Zon
 	}
 	if eff.DnssecPolicy == "" {
 		eff.DnssecPolicy = t.DnssecPolicy
+	}
+	// Same gap-fill ExpandTemplate does, and for the same reason: a parent
+	// template is where `delegationpolicy:` is normally set, so without this
+	// every templated zone would look unbound here and the reference check
+	// below would silently pass a name that the daemon quarantines.
+	if eff.DelegationPolicy == "" {
+		eff.DelegationPolicy = t.DelegationPolicy
 	}
 	if eff.MultiSigner == "" {
 		eff.MultiSigner = t.MultiSigner
