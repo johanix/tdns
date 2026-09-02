@@ -455,6 +455,18 @@ type DsyncApiCredentialPost struct {
 	ExpiresAt int64 // Unix time; 0 means never
 }
 
+// DsyncApiCertCredentialPost manages certificate credentials for the DSYNC API
+// scheme. Travels on the management API, like DsyncApiCredentialPost.
+type DsyncApiCertCredentialPost struct {
+	Command   string // add | list | delete | disable | enable
+	Zone      string
+	Mech      string // tls-pin | tls-pkix
+	Identity  string // house-format pin, or DNS name
+	Principal string
+	Comment   string
+	ExpiresAt int64
+}
+
 type DsyncApiCredentialResponse struct {
 	AppName     string
 	Time        time.Time

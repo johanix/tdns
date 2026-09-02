@@ -709,6 +709,9 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// zone re-reads it, and on first start it must be present before
 	// SetupZoneSync runs further down.
 	SetDelegationSyncConfig(conf.DelegationSync)
+	if reload {
+		warnDsyncApiClientAuthReload(conf.DelegationSync.Parent.Api.ClientAuth.Enabled())
+	}
 
 	// On first start: build the KeyDB. On reload: keep the existing
 	// KeyDB but re-apply outbound-soa-serial so a config edit takes

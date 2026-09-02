@@ -6,7 +6,9 @@ package cli
 
 import (
 	"bytes"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log"
 	"os"
@@ -24,6 +26,11 @@ var (
 	dsyncApiCredPrincipal string
 	dsyncApiCredComment   string
 	dsyncApiCredExpires   string
+
+	dsyncApiCertMech     string
+	dsyncApiCertIdentity string
+	dsyncApiCertFile     string
+	dsyncApiCertPin      string
 )
 
 // NewDsyncApiCmd builds the "dsync-api" subtree: operator management of the
@@ -79,7 +86,7 @@ Use --principal when the account should have a human-readable name:
 
 	list := &cobra.Command{
 		Use:   "list",
-		Short: "List credentials, for one parent zone or for all",
+		Short: "List credentials, for one parent zone or for all (bearer and certificate)",
 		Args:  cobra.NoArgs,
 		Run:   func(cmd *cobra.Command, args []string) { runDsyncApiCredList(role) },
 	}
@@ -118,7 +125,79 @@ and keeps the record.`,
 	}
 
 	dsyncApi.AddCommand(cred)
+	dsyncApi.AddCommand(newDsyncApiCertCredCmd(role))
 	return dsyncApi
+}
+
+func newDsyncApiCertCredCmd(role string) *cobra.Command {
+	certCred := &cobra.Command{
+		Use:   "cert-credential",
+		Short: "Manage DSYNC API certificate credentials",
+		Long: `Create, list, disable and delete client-certificate credentials for the DSYNC
+API listener. These travel on the management API with the operator key, the
+same socket as "credential".
+
+  tdns-cli auth dsync-api cert-credential add \
+      --zone example. --mech tls-pkix --identity child1.example. \
+      --principal child1.example.
+
+  tdns-cli auth dsync-api cert-credential add \
+      --zone example. --mech tls-pin --cert /path/to/child.crt \
+      --principal child1.example.
+
+"list" shows both bearer and certificate credentials (one table). Bearer rows
+display as mechanism "basic".`,
+	}
+
+	add := &cobra.Command{
+		Use:   "add",
+		Short: "Issue a certificate credential for one identity of one parent zone",
+		Args:  cobra.NoArgs,
+		Run:   func(cmd *cobra.Command, args []string) { runDsyncApiCertCredAdd(role) },
+	}
+	add.Flags().StringVar(&dsyncApiCredPrincipal, "principal", "",
+		"DNS name the update policy is evaluated against (default: the identity, tls-pkix only)")
+	add.Flags().StringVar(&dsyncApiCredComment, "comment", "", "Free-text note stored with the credential")
+	add.Flags().StringVar(&dsyncApiCredExpires, "expires", "",
+		"Expiry as a duration (\"720h\") or RFC3339 timestamp; default: never")
+
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List credentials, for one parent zone or for all (bearer and certificate)",
+		Args:  cobra.NoArgs,
+		Run:   func(cmd *cobra.Command, args []string) { runDsyncApiCredList(role) },
+	}
+
+	del := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete a certificate credential outright",
+		Args:  cobra.NoArgs,
+		Run:   func(cmd *cobra.Command, args []string) { runDsyncApiCertCredSimple(role, "delete") },
+	}
+	disable := &cobra.Command{
+		Use:   "disable",
+		Short: "Stop a certificate credential working, keeping its record",
+		Args:  cobra.NoArgs,
+		Run:   func(cmd *cobra.Command, args []string) { runDsyncApiCertCredSimple(role, "disable") },
+	}
+	enable := &cobra.Command{
+		Use:   "enable",
+		Short: "Re-enable a disabled certificate credential",
+		Args:  cobra.NoArgs,
+		Run:   func(cmd *cobra.Command, args []string) { runDsyncApiCertCredSimple(role, "enable") },
+	}
+
+	for _, sub := range []*cobra.Command{add, list, del, disable, enable} {
+		sub.Flags().StringVarP(&dsyncApiCredZone, "zone", "z", "", "Parent zone the credential is scoped to")
+		certCred.AddCommand(sub)
+	}
+	for _, sub := range []*cobra.Command{add, del, disable, enable} {
+		sub.Flags().StringVar(&dsyncApiCertMech, "mech", "", "tls-pin or tls-pkix (required)")
+		sub.Flags().StringVar(&dsyncApiCertIdentity, "identity", "", "DNS name (tls-pkix) or pin (tls-pin)")
+		sub.Flags().StringVar(&dsyncApiCertFile, "cert", "", "Leaf certificate file; hashed for tls-pin")
+		sub.Flags().StringVar(&dsyncApiCertPin, "pin", "", "Literal 44-character standard-encoding base64 SPKI pin (tls-pin)")
+	}
+	return certCred
 }
 
 // parseCredExpiry accepts a duration from now or an absolute RFC3339 time.
@@ -201,7 +280,7 @@ func runDsyncApiCredList(role string) {
 		return
 	}
 
-	out := []string{"Parent zone|Username|Principal|Status|Expires|Comment"}
+	out := []string{"Parent zone|Mechanism|Identity|Principal|Status|Expires|Comment"}
 	for _, c := range resp.Credentials {
 		status := "active"
 		switch {
@@ -214,8 +293,12 @@ func runDsyncApiCredList(role string) {
 		if !c.Expires.IsZero() {
 			expires = c.Expires.Format(time.RFC3339)
 		}
-		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s",
-			c.ParentZone, c.Username, c.Principal, status, expires, c.Comment))
+		mech := c.AuthMethod
+		if mech == "" {
+			mech = tdns.DsyncApiAuthBasic
+		}
+		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
+			c.ParentZone, mech, c.Username, c.Principal, status, expires, c.Comment))
 	}
 	fmt.Println(columnize.SimpleFormat(out))
 }
@@ -250,6 +333,160 @@ func sendDsyncApiCredCommand(role string, data tdns.DsyncApiCredentialPost) tdns
 	if err != nil {
 		// The role, not resp.AppName: on a transport error the response is the
 		// zero value and would render the app name as empty.
+		fmt.Printf("Error from %s: %v\n", role, err)
+		os.Exit(1)
+	}
+	if tdns.Globals.Verbose {
+		fmt.Printf("Status: %d\n", status)
+	}
+
+	var resp tdns.DsyncApiCredentialResponse
+	if err := json.Unmarshal(buf, &resp); err != nil {
+		fmt.Printf("Error parsing response from %s: %v (json: %q)\n", role, err, string(buf))
+		os.Exit(1)
+	}
+	if resp.Error {
+		fmt.Printf("Error from %s: %s\n", role, resp.ErrorMsg)
+		os.Exit(1)
+	}
+	return resp
+}
+
+func requireCertCredArgs(needIdentity bool) {
+	if strings.TrimSpace(dsyncApiCredZone) == "" {
+		fmt.Println("Error: --zone is required")
+		os.Exit(1)
+	}
+	if strings.TrimSpace(dsyncApiCertMech) == "" {
+		fmt.Println("Error: --mech is required (tls-pin or tls-pkix)")
+		os.Exit(1)
+	}
+	if needIdentity && strings.TrimSpace(dsyncApiCertIdentity) == "" &&
+		strings.TrimSpace(dsyncApiCertFile) == "" && strings.TrimSpace(dsyncApiCertPin) == "" {
+		fmt.Println("Error: --identity (tls-pkix) or --cert/--pin (tls-pin) is required")
+		os.Exit(1)
+	}
+}
+
+func pinFromCertFile(path string) (string, error) {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading --cert %s: %v", path, err)
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return "", fmt.Errorf("--cert %s is not a PEM certificate", path)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("parsing --cert %s: %v", path, err)
+	}
+	return tdns.SPKISHA256(cert), nil
+}
+
+func runDsyncApiCertCredAdd(role string) {
+	requireCertCredArgs(true)
+
+	mech := strings.ToLower(strings.TrimSpace(dsyncApiCertMech))
+	identity := strings.TrimSpace(dsyncApiCertIdentity)
+	certPath := strings.TrimSpace(dsyncApiCertFile)
+	pin := strings.TrimSpace(dsyncApiCertPin)
+
+	switch mech {
+	case tdns.DsyncApiAuthTLSPin:
+		if identity != "" {
+			fmt.Println("Error: --identity is for tls-pkix; use --cert or --pin for tls-pin")
+			os.Exit(1)
+		}
+		if certPath != "" && pin != "" {
+			fmt.Println("Error: use either --cert or --pin, not both")
+			os.Exit(1)
+		}
+		switch {
+		case certPath != "":
+			var err error
+			identity, err = pinFromCertFile(certPath)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+		case pin != "":
+			identity = pin
+		default:
+			fmt.Println("Error: tls-pin requires --cert (preferred) or --pin")
+			os.Exit(1)
+		}
+	case tdns.DsyncApiAuthTLSPkix:
+		if certPath != "" || pin != "" {
+			fmt.Println("Error: --cert/--pin are for tls-pin; use --identity for tls-pkix")
+			os.Exit(1)
+		}
+		if identity == "" {
+			fmt.Println("Error: tls-pkix requires --identity")
+			os.Exit(1)
+		}
+	}
+
+	expires, err := parseCredExpiry(dsyncApiCredExpires)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	resp := sendDsyncApiCertCredCommand(role, tdns.DsyncApiCertCredentialPost{
+		Command:   "add",
+		Zone:      dsyncApiCredZone,
+		Mech:      mech,
+		Identity:  identity,
+		Principal: dsyncApiCredPrincipal,
+		Comment:   dsyncApiCredComment,
+		ExpiresAt: expires,
+	})
+	if resp.Msg != "" {
+		fmt.Printf("%s\n", resp.Msg)
+	}
+}
+
+func runDsyncApiCertCredSimple(role, command string) {
+	requireCertCredArgs(true)
+	mech := strings.ToLower(strings.TrimSpace(dsyncApiCertMech))
+	identity := strings.TrimSpace(dsyncApiCertIdentity)
+	if mech == tdns.DsyncApiAuthTLSPin && identity == "" {
+		if p := strings.TrimSpace(dsyncApiCertPin); p != "" {
+			identity = p
+		} else if c := strings.TrimSpace(dsyncApiCertFile); c != "" {
+			var err error
+			identity, err = pinFromCertFile(c)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	}
+	resp := sendDsyncApiCertCredCommand(role, tdns.DsyncApiCertCredentialPost{
+		Command:  command,
+		Zone:     dsyncApiCredZone,
+		Mech:     mech,
+		Identity: identity,
+	})
+	if resp.Msg != "" {
+		fmt.Printf("%s\n", resp.Msg)
+	}
+}
+
+func sendDsyncApiCertCredCommand(role string, data tdns.DsyncApiCertCredentialPost) tdns.DsyncApiCredentialResponse {
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+
+	bytebuf := new(bytes.Buffer)
+	if err := json.NewEncoder(bytebuf).Encode(data); err != nil {
+		log.Fatalf("Error encoding request: %v", err)
+	}
+
+	status, buf, err := api.Post("/dsync-api/cert-credential", bytebuf.Bytes())
+	if err != nil {
 		fmt.Printf("Error from %s: %v\n", role, err)
 		os.Exit(1)
 	}

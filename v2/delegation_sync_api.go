@@ -48,9 +48,9 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 				" (delegationsync.child.api.credentials); obtain one from the parent operator",
 			zd.ZoneName, parent)
 	}
-	if cred.Username == "" || cred.Key == "" {
+	if !cred.Usable() {
 		return "", dns.RcodeRefused, fmt.Errorf(
-			"zone %s: the DSYNC API credential for parent %s is missing a username or key",
+			"zone %s: the DSYNC API credential for parent %s is missing a username/key or a tls cert/key",
 			zd.ZoneName, parent)
 	}
 
