@@ -207,6 +207,7 @@ type TruststorePost struct {
 	Trusted         bool
 	Src             string // "dns" | "file"
 	KeyRR           string // RR string for key
+	ValidationError string // "validation-failed": why automatic verification gave up
 }
 
 type TruststoreResponse struct {

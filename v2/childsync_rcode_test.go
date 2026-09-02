@@ -3,8 +3,11 @@ package tdns
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -160,5 +163,99 @@ func TestSendUpdateSucceedsPastRejectingTarget(t *testing.T) {
 	}
 	if rcode != dns.RcodeSuccess {
 		t.Errorf("rcode = %d (%s), want NOERROR", rcode, dns.RcodeToString[rcode])
+	}
+}
+
+// startRcodeEDEResponder is startRcodeResponder with an Extended DNS Error
+// attached to every answer, the way the parent's UPDATE responder relays
+// us.RejectionEDE.
+func startRcodeEDEResponder(t *testing.T, answer int, ede uint16) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	srv := &dns.Server{
+		Listener:      ln,
+		Net:           "tcp",
+		MsgAcceptFunc: MsgAcceptFunc,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+			m := new(dns.Msg)
+			m.SetReply(r)
+			m.Rcode = answer
+			edns0.AttachEDEToResponse(m, ede)
+			_ = w.WriteMsg(m)
+		}),
+	}
+	started := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(started) }
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	<-started
+	return ln.Addr().String()
+}
+
+// SendUpdate must hand the caller the rejection's EDE on the top-level
+// UpdateResult, not only on the per-target status: that is what the retry
+// policy reads. Regression guard for the join the first T1 fix missed.
+func TestSendUpdateReportsRejectionEDE(t *testing.T) {
+	addr := startRcodeEDEResponder(t, dns.RcodeRefused, edns0.EDESig0KeyValidationFailed)
+	rcode, ur, err := SendUpdate(context.Background(), testUpdateMsg(t), "child.parent.example.", []string{addr})
+	if err != nil || rcode != dns.RcodeRefused {
+		t.Fatalf("rcode=%d err=%v, want REFUSED and no error", rcode, err)
+	}
+	if !ur.EDEFound || ur.EDECode != edns0.EDESig0KeyValidationFailed || ur.EDESender != addr {
+		t.Fatalf("top-level EDE = found:%v code:%d sender:%q, want found, %d, %s", ur.EDEFound, ur.EDECode, ur.EDESender, edns0.EDESig0KeyValidationFailed, addr)
+	}
+	if ts := ur.TargetStatus[addr]; !ts.EDEFound || ts.EDECode != edns0.EDESig0KeyValidationFailed {
+		t.Fatalf("per-target EDE must agree: %+v", ts)
+	}
+
+	// A rejection reached past an unreachable address still carries its EDE.
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	dead := ln.Addr().String()
+	ln.Close()
+	_, ur, err = SendUpdate(context.Background(), testUpdateMsg(t), "child.parent.example.", []string{dead, addr})
+	if err != nil || !ur.EDEFound || ur.EDECode != edns0.EDESig0KeyValidationFailed {
+		t.Fatalf("after a dead address: err=%v ur.EDE=%v/%d", err, ur.EDEFound, ur.EDECode)
+	}
+}
+
+// The whole join, through the real sender: a parent answering REFUSED with
+// KEY-VALIDATION-FAILED or MANUAL-BOOTSTRAP-REQUIRED stops the retry loop on
+// the first answer; KEY-KNOWN-NOT-TRUSTED keeps the bounded retry.
+func TestSendUpdateWithRetryStopsOnTerminalEDEOverTheWire(t *testing.T) {
+	msg := testUpdateMsg(t)
+	for _, c := range []struct {
+		ede  uint16
+		want string
+	}{
+		{edns0.EDESig0KeyValidationFailed, "validation of our SIG(0) key FAILED"},
+		{edns0.EDESig0ManualBootstrapRequired, "requires manual SIG(0) bootstrap"},
+	} {
+		addr := startRcodeEDEResponder(t, dns.RcodeRefused, c.ede)
+		sends := 0
+		_, _, err := sendUpdateWithRetry(context.Background(), 5, time.Millisecond,
+			func() (int, UpdateResult, error) {
+				sends++
+				return SendUpdate(context.Background(), msg, "child.parent.example.", []string{addr})
+			}, nil)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("EDE %d over the wire: err = %v, want %q", c.ede, err, c.want)
+		}
+		if sends != 1 {
+			t.Errorf("EDE %d over the wire: sends = %d, want 1", c.ede, sends)
+		}
+	}
+
+	addr := startRcodeEDEResponder(t, dns.RcodeRefused, edns0.EDESig0KeyKnownButNotTrusted)
+	sends := 0
+	_, _, err := sendUpdateWithRetry(context.Background(), 3, time.Millisecond,
+		func() (int, UpdateResult, error) {
+			sends++
+			return SendUpdate(context.Background(), msg, "child.parent.example.", []string{addr})
+		}, nil)
+	if err == nil || sends != 3 {
+		t.Fatalf("EDE 514 over the wire: err=%v sends=%d, want bounded retry to exhaustion", err, sends)
 	}
 }

@@ -81,12 +81,27 @@ func TestEDECodeValues(t *testing.T) {
 		{"EDESig0BadSignature", EDESig0BadSignature, 528},
 		{"EDESig0FormatError", EDESig0FormatError, 529},
 
+		// The remaining two draft-named bootstrap-state codes (D-8), appended
+		// at the end of the block on 2026-09-02.
+		{"EDESig0KeyValidationFailed", EDESig0KeyValidationFailed, 541},
+		{"EDESig0ManualBootstrapRequired", EDESig0ManualBootstrapRequired, 542},
+
 		// The standard code must keep its RFC 8914 value and must not be part
 		// of the private sequence.
 		{"EDEDNSSECBogus", EDEDNSSECBogus, 6},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %d, want %d", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// The three ddns-02 bootstrap-state EDEs must all render, since the
+// UPDATE responder puts the string on the wire as EXTRA-TEXT.
+func TestBootstrapStateEDEStrings(t *testing.T) {
+	for _, code := range []uint16{EDESig0KeyKnownButNotTrusted, EDESig0KeyValidationFailed, EDESig0ManualBootstrapRequired} {
+		if s, ok := EDECodeToString[code]; !ok || s == "" {
+			t.Errorf("EDE %d has no string", code)
 		}
 	}
 }

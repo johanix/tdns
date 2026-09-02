@@ -37,13 +37,23 @@ primary for a signal name, and is back in the omit-default. A failed SVCB
 lookup is now retried rather than read as "no advertisement". Notes in
 `docs/2026-09-02-ddns-keystate-d6-at-ns-signal.md`.
 
+**2026-09-02 — K-4 code 8 and D-8's two EDEs closed** on
+`feature/ddns-keystate-k4-code8-d8-ede` (stacked on D-6): verification
+exhaustion is recorded on the truststore row (`validation_failed`,
+`validation_error`, migrated in), the KeyState inquiry reports
+KEY_VALIDATION_FAILED(8) with the reason, and a signed UPDATE from such a key
+is REFUSED with EDE KEY-VALIDATION-FAILED; a manual-policy parent answers
+MANUAL-BOOTSTRAP-REQUIRED. The child treats "manual" as waiting for the
+operator (Info), not as an error. Notes in
+`docs/2026-09-02-ddns-keystate-k4-code8-d8-ede.md`. Of K-4 only code 7 remains.
+
 | Phase | Item | State | Est. remaining LOC (impl+tests) |
 |---|---|---|---|
 | 0 | K-1 codepoints, K-2 malformed, K-3 signed response, D-8 rcode/EDE (partial), D-2a TCP | **DONE** (on main) | — |
 | 1 | K-5 QTYPE=KEY | **DONE** (on main) | — |
 | 1 | K-6 KEY-DATA sub-reason | **DECLINED** — optional; KEY-DATA stays 0, documented at the emit site | — |
-| 0 | D-8 two missing private EDE codes | **PARTIAL** — rcode inversion fixed; `KEY-VALIDATION-FAILED`/`MANUAL-BOOTSTRAP-REQUIRED` never added | ~15-30 |
-| 1 | K-4 code 8 (KEY_VALIDATION_FAILED) | **DORMANT → now unblocked** by #312's durable retry/exhaustion state | ~100-200 |
+| 0 | D-8 two missing private EDE codes | **DONE** (2026-09-02) — 541 KEY-VALIDATION-FAILED, 542 MANUAL-BOOTSTRAP-REQUIRED, emitted from `TrustUpdate` | — |
+| 1 | K-4 code 8 (KEY_VALIDATION_FAILED) | **DONE** (2026-09-02) — exhaustion persisted on the truststore row, emitted by `childKeyState` | — |
 | 1 | K-4 code 7 (KEY_REFUSED) | **DORMANT** — waits on a SIG(0) accepted-algorithm policy (report+enforce, not just report) | ~150-300 |
 | 2 | D-2b UPDATE retry, D-4 bootstrap ceremony | **DONE** (PR #312) | — |
 | 2 | **D-7** mutual auth (moved ahead of D-6 — see note above) | **(i)+(ii) DONE** (2026-09-02) — child verifies signed KeyState responses; only (iii) signing plain UPDATE responses (draft SHOULD) remains | ~80-150 (iii only) |
@@ -53,7 +63,7 @@ lookup is now retried rather than read as "no advertisement". Notes in
 | — | Cross-cutting vocabulary (4 settings, 2 config-reading engines) | **DONE** (PR #471) | — |
 
 **Core Phase 2 remainder (D-7(iii) + D-3b): ~480-850 LOC.
-Everything not yet done (adds D-8's 2 EDE codes ~15-30, K-4 code 8 ~100-200, K-4 code 7 ~150-300): ~745-1380 LOC.**
+Everything not yet done (adds K-4 code 7 ~150-300): ~630-1150 LOC.**
 See "Remaining-work sizing" after the Phase 2 section for the calibration basis and per-item reasoning.
 
 **Ordering note:** K-4's code 8 was blocked on Phase 2. It reports
@@ -100,11 +110,19 @@ The two drafts are **coupled**: KeyState is delegation-mgmt's key-state inquiry 
 - **Change:** fail closed — if the receiver cannot SIG(0)-sign a KeyState response, do **not** attach the KeyState option (respond as if unsupported) rather than sending an unsigned key-state signal. Log loudly. (Coordinate with D-7.)
 - **Acceptance:** no code path emits a KeyState option on an unsigned message.
 
-### D-8. UPDATE-receiver rcode/EDE semantics — **PARTIAL** (the inversion is fixed; two of the three new EDE codes were never added)
+### D-8. UPDATE-receiver rcode/EDE semantics — **DONE**
+
+**Closed 2026-09-02** (`docs/2026-09-02-ddns-keystate-k4-code8-d8-ede.md`):
+`EDESig0KeyValidationFailed` (541) and `EDESig0ManualBootstrapRequired` (542)
+appended to the private block; `TrustUpdate` picks among the three
+bootstrap-state EDEs for a known-but-untrusted signer with the same precedence
+`childKeyState` gives KeyState 10/8/9 (`knownUntrustedKeyEDE`). On the child,
+`errBootstrapManual` makes "manual" an Info-level wait rather than an ERROR on
+every load.
 - **Draft (ddns-02 §§"RCODE BADKEY", "Communication in Case of Errors", §IANA EDE):** **unknown key → `BADKEY(17)`** (child falls back to bootstrap). **Key known-but-not-trusted → `REFUSED`** carrying an EDE (`KEY-KNOWN-NOT-TRUSTED`). Three new EDE codes: KEY-KNOWN-NOT-TRUSTED, KEY-VALIDATION-FAILED, MANUAL-BOOTSTRAP-REQUIRED.
 - **Current (WRONG — confirm against the code before changing):** survey found the mapping inverted — unknown key → `BADSIG(16)`+EDE"known-not-trusted"; known-not-trusted → `BADKEY(17)`. See `v2/sig0_validate.go:31,274,288-311` and `v2/updateresponder.go:281-300`.
 - **Change:** unknown/unlocatable signer key → `BADKEY(17)`. Known-but-`!Trusted` key → `REFUSED` + EDE `KEY-KNOWN-NOT-TRUSTED` (existing private `EDESig0KeyKnownButNotTrusted=514`, `v2/edns0/edns0_ede.go:17-68`). Add private EDE codes for `KEY-VALIDATION-FAILED` and `MANUAL-BOOTSTRAP-REQUIRED` (values remain private/experimental until IANA — Phase 3). Keep `SERVFAIL` only for hard validation errors.
-- **Reassessed 2026-09-01, post-merge:** the rcode inversion fix (the actual correctness bug) is confirmed done — `v2/sig0_validate.go:356-357,431-432`. **Not done:** neither `KEY-VALIDATION-FAILED` nor `MANUAL-BOOTSTRAP-REQUIRED` exists anywhere in `v2/edns0/edns0_ede.go` or as a reference elsewhere in `v2/`.
+- **Reassessed 2026-09-01, post-merge:** the rcode inversion fix (the actual correctness bug) is confirmed done — `v2/sig0_validate.go:356-357,431-432`. The two remaining EDE codes were added 2026-09-02 (see above).
 - **Acceptance:** update signed by an unknown key → `BADKEY`; by a known-untrusted key → `REFUSED`+EDE514.
 - **Est. size (the two missing EDE codes only):** ~15-30 LOC — two consts + registry-uniqueness test entries + wiring at the (small number of) emit sites once K-4 codes 7/8 give them somewhere to be emitted from. Trivial in isolation; sequence it after K-4 codes 7/8 rather than before, since there's currently nothing that would emit them.
 
@@ -121,9 +139,9 @@ The two drafts are **coupled**: KeyState is delegation-mgmt's key-state inquiry 
 ### K-4. Emit the full receiver code set (4-10) with a 1:1 state map — **PARTIAL**
 - **Done:** 1, 4, 5, 6, 9, 10 emitted; `childKeyState` maps validated-not-trusted to 10 rather than collapsing it into an error.
 - **Dormant — 7 (KEY_REFUSED):** waits on a SIG(0) accepted-algorithm policy. A report-only algorithm policy is incoherent (it must also refuse the UPDATEs it reports on), so it belongs with the Phase 2 authorization work. **Est. size:** ~150-300 LOC — this is a small policy feature (allow/deny-list config, enforcement at validation time, plus the reporting wire-up), not just a code emit.
-- **Dormant — 8 (KEY_VALIDATION_FAILED):** waits on D-2b/D-4's durable retry/exhaustion state. Until then "failed" cannot be soundly told from "in progress", and 9 is reported instead. **Now unblocked by #312.** **Est. size:** ~100-200 LOC — a persisted "validation failed" state (using the durable state #312 added) plus emit-site wiring and tests; smaller than code 7 since the durable-state groundwork already exists.
+- **Done — 8 (KEY_VALIDATION_FAILED), 2026-09-02:** `runChildKeyVerification` (the engine behind `TriggerChildKeyVerification`, now with an injectable verifier) records exhaustion on the truststore row via the `validation-failed` subcommand; `childKeyState` reports 8 after the manual cases and before 9; the EXTRA-TEXT carries the recorded reason. A verification abandoned by a restart records nothing and stays 9 until the child re-uploads — the honest answer, since nothing was concluded.
 - **Draft (keystate-03 §"KeyStates Set By The UPDATE Receiver"):** codes 4 KEY_TRUSTED, 5 KEY_UNKNOWN, 6 KEY_INVALID, 7 KEY_REFUSED, 8 KEY_VALIDATION_FAILED, 9 KEY_BOOTSTRAP_AUTO, 10 KEY_BOOTSTRAP_MANUAL; plus 1 KEY_TEMPORARY_FAILURE for transient inability.
-- **Current (PARTIAL):** `v2/keystate.go:150-173` `GetKeyStatus` maps trusted→4, validated-not-trusted→9, present-not-validated→**6**, missing→5. **Codes 7 (KEY_REFUSED) and 8 (KEY_VALIDATION_FAILED) are never emitted**; validation-failure collapses into 6.
+- **Current (2026-09-03):** `childKeyState` maps trusted→4, structurally broken→6, validated-not-trusted→10, manual policy→10, recorded validation failure→**8**, otherwise→9; missing→5; transient store error→1. Only 7 (KEY_REFUSED) is still never emitted (dormant, above). On the UPDATE channel `sendUpdateWithRetry` treats REFUSED+541/542 as terminal and REFUSED+514 as a bounded retry.
 - **Change:** give tdns's SIG(0) key states a full 1:1 map: distinguish *validation failed* (→8) from *generic invalid/algorithm-mismatch* (→6); emit `7 (KEY_REFUSED)` when the key/algorithm is rejected by policy; emit `10 (KEY_BOOTSTRAP_MANUAL)` from the manual-bootstrap policy state (not from a sender request); emit `1 (KEY_TEMPORARY_FAILURE)` on transient store errors.
 - **Acceptance:** each internal key state produces its correct -03 code; a truststore key whose validation failed returns 8, not 6.
 
@@ -269,9 +287,9 @@ estimate being smaller than D-4's full 318 despite being a similarly-scoped
 "add verification to an exchange" job — D-4 also had to invent the ceremony's
 wire format and deferred-delete bookkeeping from nothing, D-7(i) does not.
 
-**Totals (re-based 2026-09-02 after D-7(i) and D-6 landed):**
+**Totals (re-based 2026-09-02 after D-7(i), D-6, K-4 code 8 and D-8 landed):**
 - **Core Phase 2 remainder (D-7(iii) + D-3b): ~480-850 LOC**
-- **Everything not yet done (adds D-8's 2 EDE codes ~15-30, K-4 code 8 ~100-200, K-4 code 7 ~150-300): ~745-1380 LOC**
+- **Everything not yet done (adds K-4 code 7 ~150-300): ~630-1150 LOC**
 
 These are order-of-magnitude ranges for planning, not commitments — treat them
 the same way the plan treats line-anchors: useful for sizing the work now,

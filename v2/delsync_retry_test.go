@@ -2,10 +2,13 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -270,4 +273,60 @@ func TestSendUpdateWithRetryDefersReBootstrapOnAdvertisementLookupFailure(t *tes
 			t.Errorf("reboots = %d, want 3 (one deferred attempt per retry)", reboots)
 		}
 	})
+}
+
+// A re-bootstrap that reports the parent requires MANUAL bootstrap is
+// terminal on the first attempt: retrying cannot help, and the error says
+// what the operator has to do.
+func TestSendUpdateWithRetryManualBootstrapIsTerminal(t *testing.T) {
+	sends, reboots := 0, 0
+	_, _, err := sendUpdateWithRetry(context.Background(), 5, time.Millisecond,
+		func() (int, UpdateResult, error) { sends++; return dns.RcodeBadKey, UpdateResult{}, nil },
+		func() error { reboots++; return fmt.Errorf("BootstrapSig0KeyWithParent: %w", errBootstrapManual) })
+	if !errors.Is(err, errBootstrapManual) {
+		t.Fatalf("err = %v, want errBootstrapManual", err)
+	}
+	if sends != 1 || reboots != 1 {
+		t.Errorf("sends=%d reboots=%d, want 1 and 1", sends, reboots)
+	}
+}
+
+// REFUSED is a bounded retry only while the parent says bootstrap is in
+// progress (EDE 514). KEY-VALIDATION-FAILED (541) and
+// MANUAL-BOOTSTRAP-REQUIRED (542) mean waiting will not help, and stop the
+// loop on the first answer with an error that names the reason.
+func TestSendUpdateWithRetryTerminalBootstrapEDEs(t *testing.T) {
+	fast := time.Millisecond
+	refusedWith := func(code uint16) func() (int, UpdateResult, error) {
+		return func() (int, UpdateResult, error) {
+			return dns.RcodeRefused, UpdateResult{Rcode: dns.RcodeRefused, EDEFound: true, EDECode: code, EDEMessage: edns0.EDECodeToString[code]}, nil
+		}
+	}
+	for _, c := range []struct {
+		code uint16
+		want string
+	}{
+		{edns0.EDESig0KeyValidationFailed, "validation of our SIG(0) key FAILED"},
+		{edns0.EDESig0ManualBootstrapRequired, "requires manual SIG(0) bootstrap"},
+	} {
+		sends := 0
+		send := refusedWith(c.code)
+		_, _, err := sendUpdateWithRetry(context.Background(), 5, fast,
+			func() (int, UpdateResult, error) { sends++; return send() }, nil)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("EDE %d: err = %v, want it to contain %q", c.code, err, c.want)
+		}
+		if sends != 1 {
+			t.Errorf("EDE %d: sends = %d, want 1 (terminal on the first answer)", c.code, sends)
+		}
+	}
+
+	// 514, "known but not yet trusted": bounded retry, as before.
+	sends := 0
+	send := refusedWith(edns0.EDESig0KeyKnownButNotTrusted)
+	_, _, err := sendUpdateWithRetry(context.Background(), 3, fast,
+		func() (int, UpdateResult, error) { sends++; return send() }, nil)
+	if err == nil || sends != 3 {
+		t.Fatalf("EDE 514: err=%v sends=%d, want exhaustion after 3 bounded retries", err, sends)
+	}
 }

@@ -39,13 +39,22 @@ func (kdb *KeyDB) Sig0TrustMgmt(tx *Tx, tp TruststorePost) (*TruststoreResponse,
 		addkeysql = `
 INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
 		getallchildsig0keyssql = `
-SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore`
+SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr, validation_failed, validation_error FROM Sig0TrustStore`
 		getonechildsig0keyssql = `
 SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		childsig0keyupdatetrustsql = `
 UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
+		// An operator's trust decision supersedes a recorded automatic
+		// failure; clear it so the row (and the CLI's Failed column) does not
+		// say trusted AND failed. The emitters already let trusted win.
+		childsig0keytrustsql = `
+UPDATE Sig0TrustStore SET trusted=1, validation_failed=0, validation_error='', validation_failed_at='' WHERE zonename=? AND keyid=?`
+		// A successful verification clears any earlier failure: the key IS
+		// verifiable after all (an operator republished it, say).
 		childsig0keyverifiedsql = `
-UPDATE Sig0TrustStore SET validated=1, dnssecvalidated=?, trusted=1 WHERE zonename=? AND keyid=?`
+UPDATE Sig0TrustStore SET validated=1, dnssecvalidated=?, trusted=1, validation_failed=0, validation_error='', validation_failed_at='' WHERE zonename=? AND keyid=?`
+		childsig0keyfailedsql = `
+UPDATE Sig0TrustStore SET validation_failed=1, validation_error=?, validation_failed_at=? WHERE zonename=? AND keyid=? AND trusted=0`
 		deleteSig0KeySql = `
 DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 	)
@@ -84,24 +93,27 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		}
 		defer rows.Close()
 
-		var keyname, keyrrstr, source string
+		var keyname, keyrrstr, source, validationError string
 		var keyid int
-		var validated, dnssecvalidated, trusted bool
+		var validated, dnssecvalidated, trusted, validationFailed bool
 
 		tmp2 := map[string]Sig0Key{}
 		for rows.Next() {
-			err := rows.Scan(&keyname, &keyid, &validated, &dnssecvalidated, &trusted, &source, &keyrrstr)
+			err := rows.Scan(&keyname, &keyid, &validated, &dnssecvalidated, &trusted, &source, &keyrrstr, &validationFailed, &validationError)
 			if err != nil {
 				return nil, fmt.Errorf("error from rows.Scan(): %v", err)
 			}
 			mapkey := fmt.Sprintf("%s::%d", keyname, keyid)
 			tmp2[mapkey] = Sig0Key{
-				Name:            keyname,
-				Validated:       validated,
-				DnssecValidated: dnssecvalidated,
-				Trusted:         trusted,
-				Source:          source,
-				Keystr:          keyrrstr,
+				Name:             keyname,
+				Keyid:            uint16(keyid),
+				Validated:        validated,
+				DnssecValidated:  dnssecvalidated,
+				Trusted:          trusted,
+				Source:           source,
+				Keystr:           keyrrstr,
+				ValidationFailed: validationFailed,
+				ValidationError:  validationError,
 			}
 		}
 		resp.ChildSig0keys = tmp2
@@ -214,10 +226,9 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 
 	case "trust":
 		// 1. Find key, if not --> error
-		// 2. Set key trusted, if not --> error
+		// 2. Set key trusted (clearing any recorded validation failure), if not --> error
 		// 3. Return all good, now trusted
-		res, err = tx.Exec(childsig0keyupdatetrustsql, true,
-			tp.Keyname, tp.Keyid)
+		res, err = tx.Exec(childsig0keytrustsql, tp.Keyname, tp.Keyid)
 		if err != nil {
 			lgSigner.Error("failed to trust SIG(0) key", "err", err)
 			resp.Error = true
@@ -242,6 +253,27 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			rows, _ := res.RowsAffected()
 			resp.Msg = fmt.Sprintf("Key %s::%d verified and trusted (dnssec=%v), updated %d rows",
 				tp.Keyname, tp.Keyid, tp.DnssecValidated, rows)
+		}
+		// Must also delete from the cache
+		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+
+	case "validation-failed":
+		// The parent's automatic verification of this child key exhausted its
+		// attempts (TriggerChildKeyVerification). Recorded on the row so the
+		// KeyState inquiry reports KEY_VALIDATION_FAILED(8) rather than
+		// "in progress", and the UPDATE-response EDE says KEY-VALIDATION-FAILED
+		// -- across a restart. Never marks a trusted key (the WHERE clause):
+		// an operator's trust decision outranks an automatic failure.
+		res, err = tx.Exec(childsig0keyfailedsql, tp.ValidationError, time.Now().UTC().Format(time.RFC3339),
+			tp.Keyname, tp.Keyid)
+		if err != nil {
+			lgSigner.Error("failed to record SIG(0) key validation failure", "err", err)
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+		} else {
+			rows, _ := res.RowsAffected()
+			resp.Msg = fmt.Sprintf("Key %s::%d: validation failure recorded (%s), updated %d rows",
+				tp.Keyname, tp.Keyid, tp.ValidationError, rows)
 		}
 		// Must also delete from the cache
 		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
@@ -315,7 +347,7 @@ func (kdb *KeyDB) LoadDnskeyTrustAnchors() error {
 func (kdb *KeyDB) LoadSig0ChildKeys() error {
 
 	const (
-		loadsig0sql = "SELECT zonename, keyid, trusted, validated, keyrr FROM Sig0TrustStore"
+		loadsig0sql = "SELECT zonename, keyid, trusted, validated, dnssecvalidated, keyrr, validation_failed, validation_error FROM Sig0TrustStore"
 		addkeysql   = `
 INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, trusted, validated, source, keyrr) VALUES (?, ?, ?, ?, ?, ?)`
 		getonechildsig0keyssql = `
@@ -334,12 +366,12 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 	}
 	defer rows.Close()
 
-	var keyname, keyrrstr string
+	var keyname, keyrrstr, validationError string
 	var keyid int
-	var trusted, validated bool
+	var trusted, validated, dnssecvalidated, validationFailed bool
 
 	for rows.Next() {
-		err := rows.Scan(&keyname, &keyid, &trusted, &validated, &keyrrstr)
+		err := rows.Scan(&keyname, &keyid, &trusted, &validated, &dnssecvalidated, &keyrrstr, &validationFailed, &validationError)
 		if err != nil {
 			return fmt.Errorf("error from rows.Scan(): %v", err)
 		}
@@ -376,10 +408,15 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 
 		mapkey := fmt.Sprintf("%s::%d", keyname, keyrr.KeyTag())
 		kdb.TruststoreSig0Cache.Map.Set(mapkey, Sig0Key{
-			Name:      keyname,
-			Validated: validated,
-			Trusted:   trusted,
-			Key:       *keyrr,
+			Name:             keyname,
+			Keyid:            keyrr.KeyTag(),
+			Validated:        validated,
+			DnssecValidated:  dnssecvalidated,
+			Trusted:          trusted,
+			Key:              *keyrr,
+			Keystr:           keyrrstr,
+			ValidationFailed: validationFailed,
+			ValidationError:  validationError,
 		})
 	}
 
@@ -458,7 +495,7 @@ func (kdb *KeyDB) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, err
 	}
 
 	const (
-		fetchsig0trustanchor = "SELECT validated, dnssecvalidated, trusted, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?"
+		fetchsig0trustanchor = "SELECT validated, dnssecvalidated, trusted, keyrr, validation_failed, validation_error FROM Sig0TrustStore WHERE zonename=? AND keyid=?"
 	)
 
 	// 2. Try to fetch the key from the Sig0TrustStore database
@@ -469,9 +506,9 @@ func (kdb *KeyDB) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, err
 	defer rows.Close()
 
 	if rows.Next() {
-		var validated, dnssecvalidated, trusted bool
-		var keyrrstr string
-		err = rows.Scan(&validated, &dnssecvalidated, &trusted, &keyrrstr)
+		var validated, dnssecvalidated, trusted, validationFailed bool
+		var keyrrstr, validationError string
+		err = rows.Scan(&validated, &dnssecvalidated, &trusted, &keyrrstr, &validationFailed, &validationError)
 		if err != nil {
 			return nil, err
 		}
@@ -484,13 +521,15 @@ func (kdb *KeyDB) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, err
 			return nil, fmt.Errorf("findSig0TrustedKey: error: SIG(0) key %s in KeyDB is not a KEY RR", signer)
 		}
 		sk := Sig0Key{
-			Name:            signer,
-			Keyid:           keyid,
-			Validated:       validated,
-			DnssecValidated: dnssecvalidated,
-			Trusted:         trusted,
-			Key:             *keyrr,
-			Keystr:          keyrrstr,
+			Name:             signer,
+			Keyid:            keyid,
+			Validated:        validated,
+			DnssecValidated:  dnssecvalidated,
+			Trusted:          trusted,
+			Key:              *keyrr,
+			Keystr:           keyrrstr,
+			ValidationFailed: validationFailed,
+			ValidationError:  validationError,
 		}
 		kdb.TruststoreSig0Cache.Map.Set(mapkey, sk)
 		return &sk, nil

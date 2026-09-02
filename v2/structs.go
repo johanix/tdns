@@ -1060,6 +1060,13 @@ type Sig0Key struct {
 	PrivateKey      string //
 	Key             dns.KEY
 	Keystr          string
+	// ValidationFailed: the parent's automatic verification of this child key
+	// ran out of attempts (TriggerChildKeyVerification). Distinct from
+	// !Validated, which also covers "verification in progress". Reported as
+	// KEY_VALIDATION_FAILED(8) / EDE KEY-VALIDATION-FAILED; ValidationError
+	// carries the last reason for the operator and the KeyState EXTRA-TEXT.
+	ValidationFailed bool
+	ValidationError  string
 }
 
 type DnssecKey struct {
