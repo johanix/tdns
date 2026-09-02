@@ -109,17 +109,24 @@ above — it fails with `adoptQuarantineFrom` removed),
 `TestForwardQuarantinedUpstreamIsNotAlsoUnreachable`, and
 `TestForwardQuarantineAggregateClears`.
 
-Two of those tests exist for the #474 merge rather than for this branch:
+Three of those tests exist for the #474 merge rather than for this branch.
 `TestForwardQuarantineExcludedFromPrivacySelection` fails if
-`hasEncryptedUpstream` counts a quarantined encrypted upstream, and
+`hasEncryptedUpstream` counts a quarantined encrypted upstream.
 `TestForwardQueryNeverDialsAQuarantinedUpstream` fails — with a nil-client
-panic — if the dial list is ever sourced from `fz.Upstreams` again. The second
-is the one that matters: #474 adds `forwardUpstreamsForPrivacy`, which builds
-its list from `fz.Upstreams` in all three branches and returns it directly for
-`PrivacyNone`, so a merge that keeps this branch's `hasEncryptedUpstream` and
-takes that selector would pass the first test and still hand a placeholder to
-the exchange. On the merge, `forwardUpstreamsForPrivacy` must start from
-`liveUpstreams()`.
+panic — if the dial list is sourced from `fz.Upstreams` again.
+`TestForwardUpstreamsForPrivacy` carries two quarantined upstreams at the head
+of its fixture, so it fails if any of the three privacy levels stops
+filtering.
+
+That merge has happened (#474 landed first). It was not textual:
+`forwardUpstreamsForPrivacy` arrived building its list from `fz.Upstreams` in
+all three branches and returning it unchanged for `PrivacyNone`, so keeping
+this branch's `liveUpstreams()`-filtered `hasEncryptedUpstream` — which the
+auto-merge did — left the first test green while the query loop dialled
+quarantined upstreams. The resolution was one line: `forwardUpstreamsForPrivacy`
+starts from `liveUpstreams()`. Reverting it reproduces the panic; reverting it
+only for the opportunistic and strict branches trips the third test and not
+the second, which is why all three exist.
 
 The existing `TestBuildImrForwards...` bad-config tables now assert the shape
 of the resulting table (dropped vs quarantined, and how many upstreams) rather

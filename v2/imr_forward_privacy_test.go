@@ -20,9 +20,19 @@ import (
 // one, on the one thing it can choose: which upstreams to send to, in what
 // order.
 func TestForwardUpstreamsForPrivacy(t *testing.T) {
+	// Two quarantined upstreams, one of each kind, and both FIRST in
+	// configured order so an unfiltered selector would put them at the head
+	// of every expected list. Their absence below is what pins that the
+	// liveUpstreams() filter applies at all three privacy levels, not just
+	// the PrivacyNone dial list that
+	// TestForwardQueryNeverDialsAQuarantinedUpstream covers.
 	fz := &ForwardZone{
 		Zone: "example.",
 		Upstreams: []*ForwardUpstream{
+			{Label: "dot-quarantined", Transport: core.TransportDoT,
+				quarantined: true, quarantineWhy: "trust-ad over unverified TLS"},
+			{Label: "cleartext-quarantined", Transport: core.TransportDo53,
+				quarantined: true, quarantineWhy: "unparseable upstream"},
 			{Label: "cleartext-1", Transport: core.TransportDo53},
 			{Label: "dot", Transport: core.TransportDoT},
 			{Label: "cleartext-2", Transport: core.TransportDo53TCP},
@@ -75,9 +85,11 @@ func TestForwardStrictPrivacyReturnsSentinel(t *testing.T) {
 		t.Errorf("strict privacy: got %d upstreams, want none", len(got))
 	}
 
-	// The precheck is the first statement of forwardQuery and returns before
-	// anything on the Imr is touched, so a zero-value Imr is enough to reach
-	// it -- and the query never leaves the process.
+	// forwardQuery checks quarantine first and the strict-privacy precheck
+	// second; this fixture's cleartext upstream is live, so the zone is not
+	// quarantined and the precheck is what fires. Neither check touches the
+	// Imr, so a zero-value one is enough to reach it -- and the query never
+	// leaves the process.
 	imr := &Imr{}
 	_, rcode, _, _, err := imr.forwardQuery(context.Background(), "www.example.", dns.TypeA, fz, false, edns0.PrivacyStrict)
 	if !errors.Is(err, ErrPrivacyUnavailable) {
