@@ -34,13 +34,18 @@ type ImrForwardUpstreamInfo struct {
 	Upstream      string `json:"upstream"` // "addr:port/transport"
 	TLSServerName string `json:"tls_server_name,omitempty"`
 	Insecure      bool   `json:"insecure,omitempty"`
+	// Quarantined: unusable as configured and never dialled (#475).
+	Quarantined      bool   `json:"quarantined,omitempty"`
+	QuarantineReason string `json:"quarantine_reason,omitempty"`
 }
 
 // ImrForwardZoneInfo is the config view of one forward zone (imr-forward-list).
 type ImrForwardZoneInfo struct {
-	Zone      string                   `json:"zone"`
-	TrustAD   bool                     `json:"trust_ad,omitempty"`
-	Upstreams []ImrForwardUpstreamInfo `json:"upstreams"`
+	Zone             string                   `json:"zone"`
+	TrustAD          bool                     `json:"trust_ad,omitempty"`
+	Upstreams        []ImrForwardUpstreamInfo `json:"upstreams"`
+	Quarantined      bool                     `json:"quarantined,omitempty"`
+	QuarantineReason string                   `json:"quarantine_reason,omitempty"`
 }
 
 // ImrForwardProbeResult is one upstream's outcome of imr-forward-probe.
@@ -60,11 +65,15 @@ func (imr *Imr) ForwardZoneList() []ImrForwardZoneInfo {
 	var out []ImrForwardZoneInfo
 	for _, fz := range imr.ForwardZones() {
 		info := ImrForwardZoneInfo{Zone: fz.Zone, TrustAD: fz.TrustAD}
+		info.Quarantined, info.QuarantineReason = fz.quarantineState()
 		for _, up := range fz.Upstreams {
+			q, why := up.quarantineState()
 			info.Upstreams = append(info.Upstreams, ImrForwardUpstreamInfo{
-				Upstream:      up.Label,
-				TLSServerName: up.TLSServerName,
-				Insecure:      up.Insecure,
+				Upstream:         up.Label,
+				TLSServerName:    up.TLSServerName,
+				Insecure:         up.Insecure,
+				Quarantined:      q,
+				QuarantineReason: why,
 			})
 		}
 		out = append(out, info)
@@ -101,6 +110,14 @@ func (imr *Imr) forwardZonesMatching(zoneFilter string) ([]*ForwardZone, error) 
 // recordFailure, so an abandoned probe cannot mark a healthy upstream
 // unreachable.
 func (imr *Imr) probeForwardUpstream(ctx context.Context, zone string, up *ForwardUpstream) (time.Duration, error) {
+	// An upstream that failed to build has no client at all. Note the
+	// converse does NOT hold: a trust-ad quarantine is a fully built upstream
+	// with a live client, so "no Client" is not the definition of
+	// quarantined. Callers filter quarantined upstreams out; this only keeps
+	// a missed placeholder an error rather than a nil deref.
+	if up.Client == nil {
+		return 0, fmt.Errorf("upstream %s is not usable as configured", up.Label)
+	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -144,6 +161,18 @@ func (imr *Imr) ProbeForwardUpstreamsReport(ctx context.Context, zoneFilter stri
 	)
 	for _, fz := range zones {
 		for _, up := range fz.Upstreams {
+			// Reported, not probed, and NOT silently skipped: the operator
+			// asked about every upstream of the zone, and a quarantined one
+			// missing from the output reads as an upstream that is fine.
+			// This check, not the nil-Client backstop below it, is what keeps
+			// a quarantined-but-fully-built upstream from being dialled.
+			if q, why := up.quarantineState(); q {
+				results = append(results, ImrForwardProbeResult{
+					Zone: fz.Zone, Upstream: up.Label, OK: false,
+					RTT: time.Duration(0).String(), Error: "quarantined: " + why,
+				})
+				continue
+			}
 			wg.Add(1)
 			go func(zone string, up *ForwardUpstream) {
 				defer wg.Done()
