@@ -10,6 +10,7 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	"github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -126,7 +127,7 @@ func (imr *Imr) RefreshRoot(ctx context.Context, hintsfile string) {
 // cache" -- the fetcher it calls does not pass force. This is where copying
 // that fetcher went wrong.
 func (imr *Imr) rootNSQuery(ctx context.Context, servers map[string]*cache.AuthServer) (*core.RRset, error) {
-	rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, ".", dns.TypeNS, servers, true, false)
+	rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, ".", dns.TypeNS, servers, true, edns0.PrivacyNone) // privacy is a client signal; root refresh is our own traffic
 	return rrset, err
 }
 

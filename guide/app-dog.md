@@ -56,7 +56,7 @@ Do53-TCP and DoT only).
 | `+CD` | Set the CD (Checking Disabled) bit |
 | `+COMPACT`, `+CO` | Set the CO bit (compact denial of existence) |
 | `+DELEG`, `+DE` | Set the DE (Delegation Extension) EDNS bit |
-| `+PRIVACY`, `+PR` | Set the PR (Privacy Requested) EDNS bit |
+| `+PRIVACY`, `+PR[=strict\|opportunistic\|none]` | Add the PRIVACY EDNS(0) option. Bare `+PR` is strict: the resolver must reach the authoritative servers over an encrypted transport or fail with SERVFAIL + EDE. `opportunistic` asks it to prefer one but accepts cleartext |
 | `+MULTI` | Multi-line RR output |
 | `+WIDTH=N` | Right margin for `+MULTI` |
 | `+SHORT` | Print only the answer RDATA (same as `--short`) |

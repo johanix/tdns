@@ -13,7 +13,8 @@ type MsgOptions struct {
 	CD            bool
 	DO            bool
 	CO            bool            // RFC 9824: Compact Ok bit (bit 14 in OPT header TTL)
-	PR            bool            // Privacy Requested bit (bit 12 in OPT header TTL) - requires encrypted transport
+	Privacy       PrivacyLevel    // PRIVACY option: how much the client wants an encrypted upstream transport
+	HasPrivacy    bool            // True if the PRIVACY option is present (at any level, PrivacyNone included)
 	OotsOptIn     bool            // OOTS EDNS option present (opt-in by presence; -03)
 	HasEROption   bool            // True if ER option is present
 	ErAgentDomain string          // RFC9567: DNS Error Reporting agent domain
@@ -45,9 +46,6 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 	// Extract CO bit (Compact Ok) - bit 14 (RFC 9824)
 	msgoptions.CO = (opt.Hdr.Ttl & (1 << 14)) != 0
 
-	// Extract PR bit (Privacy Requested) - bit 12 (requires encrypted transport)
-	msgoptions.PR = (opt.Hdr.Ttl & (1 << EDNS0_PR_FLAG_BIT)) != 0
-
 	// Loop once through all EDNS0 options and extract them based on their code
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
@@ -63,6 +61,14 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 						msgoptions.ErAgentDomain = domain
 						msgoptions.HasEROption = true
 					}
+				}
+			case EDNS0_PRIVACY_OPTION_CODE:
+				// One octet: 0 = no opinion, 1 = opportunistic, 2 = strict.
+				// Presence is recorded separately from the level, because a
+				// response only carries the privacy status back to a client
+				// that asked -- and "asked for nothing" is still asking.
+				if len(localOpt.Data) == 1 {
+					msgoptions.Privacy, msgoptions.HasPrivacy = ExtractPrivacyLevel(opt)
 				}
 			case EDNS0_KEYSTATE_OPTION_CODE:
 				// Extract KeyState option

@@ -100,9 +100,10 @@ Details of forwarding behaviour:
   the resolver's *listeners* offer.
 - **Caching**: forwarded answers and negatives land in the same cache with
   their TTLs; repeat queries are answered from cache without touching the
-  upstream. The EDNS0 PR flag (privacy required) is honored: unencrypted
-  upstreams are skipped for PR queries, and a forward zone with no encrypted
-  upstream answers SERVFAIL with the corresponding EDE.
+  upstream. The PRIVACY EDNS(0) option is honored: under strict privacy
+  unencrypted upstreams are skipped, and a forward zone with no encrypted
+  upstream answers SERVFAIL with the corresponding EDE; under opportunistic
+  privacy the encrypted upstreams are simply tried first.
 - **Startup and observability**: a forward zone covering the root skips the
   live `. NS` priming fetch (the hints are seeded offline), so a forward-all
   resolver starts and serves even when its upstream is down at boot. Every
