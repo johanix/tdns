@@ -178,9 +178,12 @@ func keyVerificationRetrySettings(kv DsyncKeyVerificationConf) (int, time.Durati
 // TriggerChildKeyVerification starts an async verification of a child KEY
 // that was just stored in the TrustStore. It uses the KeyBootstrapper's
 // retry pattern: verify via DNS lookup, retry with backoff, then trust.
+// ctx is the engine's lifetime context. The verification retries with
+// exponential backoff and can therefore be sleeping for a long time when the
+// process is asked to stop; without it the goroutine ignores shutdown and the
+// deferred key cleanup it performs runs against a database that is closing.
 func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone string, keyid uint16, keyRR string) {
 	go func() {
-
 		maxAttempts, retryInterval := keyVerificationRetrySettings(
 			DelegationSyncConfig().Parent.Update.KeyVerification)
 
@@ -191,6 +194,8 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone str
 					"zone", childZone, "keyid", keyid, "attempt", attempt)
 				if attempt < maxAttempts {
 					if !waitOrDone(ctx, retryInterval) {
+						lgSigner.Info("TriggerChildKeyVerification: shutting down, abandoning verification",
+							"zone", childZone, "keyid", keyid)
 						return
 					}
 					retryInterval *= 2
@@ -247,6 +252,10 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone str
 
 				lgSigner.Info("child key verified and trusted",
 					"zone", childZone, "keyid", keyid, "dnssec", dnssecValidated)
+
+				// The key is now trusted; complete any deferred bootstrap
+				// DEL-ANY-KEY by removing the child's now-superseded keys.
+				kdb.applyPendingKeyReplacement(ctx, childZone, keyid)
 				return
 			}
 
@@ -254,6 +263,8 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone str
 				lgSigner.Info("child key not yet verifiable, will retry",
 					"zone", childZone, "keyid", keyid, "delay", retryInterval)
 				if !waitOrDone(ctx, retryInterval) {
+					lgSigner.Info("TriggerChildKeyVerification: shutting down, abandoning verification",
+						"zone", childZone, "keyid", keyid)
 					return
 				}
 				retryInterval *= 2 // exponential backoff
