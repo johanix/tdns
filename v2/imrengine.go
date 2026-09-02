@@ -1169,16 +1169,24 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		if msgoptions.DO {
 			m.Answer = append(m.Answer, rrset.RRSIGs...)
 		}
-		// The transport the answer actually arrived over. Note the one
-		// imprecision: IterativeDNSQuery reports the recorded transport for
-		// data it served from its own cache (a CNAME hop, say), so such an
+		// The PRIVACY status is attached on the paths that actually SERVE this
+		// answer, below, not here. Validation runs between the two, and a
+		// failure turns m into a SERVFAIL whose Answer is cleared -- but the
+		// OPT lives in Extra and survives that, so a status attached up here
+		// rode out on a response carrying no answer at all. SERVFAIL is
+		// status-less by design: there is no served data whose privacy could
+		// be reported, and the EDE is the signal.
+		//
+		// What is reported is the transport the answer actually arrived over.
+		// One imprecision: IterativeDNSQuery reports the recorded transport
+		// for data it served from its own cache (a CNAME hop, say), so such an
 		// answer is reported as encrypted/cleartext rather than as
-		// PrivacyCached. Under strict privacy that is still accurate --
-		// cached data that arrived over cleartext is not served at all --
-		// and reporting the recorded transport is never a claim of MORE
-		// privacy than the data got. Only ImrResponder's own cache
-		// short-circuits, above, can say "from cache" without qualification.
-		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
+		// PrivacyCached. Under strict privacy that is still accurate -- cached
+		// data that arrived over cleartext is not served at all -- and
+		// reporting the recorded transport is never a claim of MORE privacy
+		// than the data got. Only ImrResponder's own cache short-circuits,
+		// above, can say "from cache" without qualification.
+		//
 		// Set AD if this RRset is ValidationStateSecure (from cache or on-the-fly)
 		vstate := cache.ValidationStateNone
 		var err error
@@ -1202,10 +1210,12 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		}
 		if vstate == cache.ValidationStateSecure && shouldValidate {
 			m.AuthenticatedData = true
+			setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 			w.WriteMsg(m)
 			return true, nil
 		}
 		if !shouldValidate {
+			setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 			w.WriteMsg(m)
 			return true, nil
 		}

@@ -66,9 +66,13 @@ response.
 Every answer carries it: positive, NXDOMAIN and NODATA alike, whether
 served from cache or fetched live. A negative answer was fetched over a
 transport exactly as a positive one was. The SERVFAIL paths are the
-deliberate exception -- privacy-unavailable, DNSSEC-bogus -- where there
-is no transport whose privacy could be reported and the EDE is the
-signal.
+deliberate exception -- privacy-unavailable, DNSSEC-bogus, validation
+indeterminate -- where no answer is served, so there is nothing whose
+privacy could be reported and the EDE is the signal. The status is
+therefore attached on the paths that actually serve the answer, after
+validation, not when the Answer section is first built: validation
+failure clears Answer but not Extra, so a status attached early rode out
+on a SERVFAIL carrying nothing.
 
 One imprecision is known and accepted: `PrivacyCached` is reported for
 answers `ImrResponder` serves from its own cache short-circuits. Deeper

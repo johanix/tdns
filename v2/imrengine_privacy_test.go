@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	cache "github.com/johanix/tdns/v2/cache"
@@ -165,5 +166,108 @@ func TestLiveNegativesStaySilentWhenNotAsked(t *testing.T) {
 	}
 	if _, found := edns0.ExtractPrivacyStatus(w.msg.IsEdns0()); found {
 		t.Error("a client that never asked got a PRIVACY status")
+	}
+}
+
+// A SERVFAIL carries no PRIVACY status: there is no served answer whose
+// privacy could be reported, and the EDE is the signal. The status used to be
+// attached before DNSSEC validation ran, and validation failure clears Answer
+// but not Extra -- so the option rode out on a response that carried nothing.
+//
+// Validation here cannot conclude: the test cache has no root hints and no
+// servers, so the chain walk never starts and no packet is sent. That lands on
+// the indeterminate arm, one of the three SERVFAIL exits below the point where
+// the status used to be attached.
+func TestValidationFailureLeavesNoPrivacyStatus(t *testing.T) {
+	imr := newTestImr(t)
+
+	r := new(dns.Msg)
+	r.SetQuestion("www.example.", dns.TypeA)
+	r.SetEdns0(4096, true) // DO=1, CD=0 -> validation is attempted
+	if err := edns0.AddPrivacyLevelToMessage(r, edns0.PrivacyStrict); err != nil {
+		t.Fatalf("AddPrivacyLevelToMessage: %v", err)
+	}
+	msgoptions, err := edns0.ExtractFlagsAndEDNS0Options(r)
+	if err != nil {
+		t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
+	}
+	if !msgoptions.DO || msgoptions.CD || !msgoptions.HasPrivacy {
+		t.Fatalf("setup: DO=%v CD=%v HasPrivacy=%v", msgoptions.DO, msgoptions.CD, msgoptions.HasPrivacy)
+	}
+
+	rrset := &core.RRset{
+		Name:   "www.example.",
+		RRtype: dns.TypeA,
+		RRs: []dns.RR{&dns.A{
+			Hdr: dns.RR_Header{Name: "www.example.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("192.0.2.1"),
+		}},
+	}
+
+	w := &fakeResponseWriter{}
+	m := new(dns.Msg)
+	// The error return distinguishes "the fetch blew up" from "the verdict was
+	// not secure"; both end in SERVFAIL, and the assertion below is about the
+	// response either way.
+	_, _ = imr.ProcessAuthDNSResponse(context.Background(), "www.example.", dns.TypeA,
+		rrset, dns.RcodeSuccess, cache.ContextAnswer, msgoptions, m, w, r, core.TransportDoT)
+	if w.msg == nil {
+		t.Fatal("nothing was written")
+	}
+	if w.msg.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("got rcode %s, want SERVFAIL: this test only means something on a failed-validation response",
+			dns.RcodeToString[w.msg.Rcode])
+	}
+	if len(w.msg.Answer) != 0 {
+		t.Errorf("SERVFAIL carries %d answer RRs", len(w.msg.Answer))
+	}
+	if status, found := edns0.ExtractPrivacyStatus(w.msg.IsEdns0()); found {
+		t.Errorf("SERVFAIL carries PRIVACY status %s; it reports privacy for an answer that was not served", status)
+	}
+}
+
+// The other side of the same move: an answer that IS served still reports its
+// status. Without validation (DO=0) the answer goes straight out.
+func TestServedAnswerCarriesPrivacyStatus(t *testing.T) {
+	imr := newTestImr(t)
+
+	r := new(dns.Msg)
+	r.SetQuestion("www.example.", dns.TypeA)
+	if err := edns0.AddPrivacyLevelToMessage(r, edns0.PrivacyOpportunistic); err != nil {
+		t.Fatalf("AddPrivacyLevelToMessage: %v", err)
+	}
+	msgoptions, err := edns0.ExtractFlagsAndEDNS0Options(r)
+	if err != nil {
+		t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
+	}
+	if msgoptions.DO {
+		t.Fatal("setup: DO must be off so validation is skipped")
+	}
+
+	rrset := &core.RRset{
+		Name:   "www.example.",
+		RRtype: dns.TypeA,
+		RRs: []dns.RR{&dns.A{
+			Hdr: dns.RR_Header{Name: "www.example.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("192.0.2.1"),
+		}},
+	}
+
+	w := &fakeResponseWriter{}
+	m := new(dns.Msg)
+	done, err := imr.ProcessAuthDNSResponse(context.Background(), "www.example.", dns.TypeA,
+		rrset, dns.RcodeSuccess, cache.ContextAnswer, msgoptions, m, w, r, core.TransportDoT)
+	if err != nil || !done {
+		t.Fatalf("ProcessAuthDNSResponse: done=%v err=%v", done, err)
+	}
+	if w.msg == nil || w.msg.Rcode != dns.RcodeSuccess {
+		t.Fatalf("got %v", w.msg)
+	}
+	got, found := edns0.ExtractPrivacyStatus(w.msg.IsEdns0())
+	if !found {
+		t.Fatal("a served answer carries no PRIVACY status")
+	}
+	if got != edns0.PrivacyEncrypted {
+		t.Errorf("got status %s, want %s", got, edns0.PrivacyEncrypted)
 	}
 }
