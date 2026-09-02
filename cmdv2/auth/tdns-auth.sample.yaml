@@ -310,6 +310,24 @@ delegationsync:
             # this list.
             methods: [ at-apex ]
 
+         # Mutual authentication (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
+         # §"Mutual Authentication"). The parent's UPDATE Receiver SIG(0)-signs
+         # every KeyState response with the KEY it publishes at the DSYNC
+         # UPDATE target. This child acts on a response only if that signature
+         # verifies with a receiver KEY it can authenticate: DNSSEC-validated
+         # (the DSYNC lookup that named the target and the KEY lookup both
+         # validate), or manually trusted in the truststore:
+         #    tdns-cli truststore sig0 add   --child updates.parent.example. --src Kupdates.parent.example.+015+NNNNN.key
+         #    tdns-cli truststore sig0 trust --child updates.parent.example. --keyid NNNNN
+         # A response that cannot be authenticated is rejected, and the
+         # parent's SVCB bootstrap advertisement is ignored unless it validates
+         # too. With an UNSIGNED parent zone and no manual key that means no
+         # automatic bootstrap at all: set this to true to act on
+         # unauthenticated responses and advertisements anyway. A signature
+         # that is present but wrong is rejected regardless of this setting.
+         # Lab convenience; never a production setting.
+         allow-insecure: false
+
 scanner:
    interval:  30                        # seconds between periodic scan runs
    options:   [ no-dnssec-validation ]

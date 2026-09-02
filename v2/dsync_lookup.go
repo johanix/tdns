@@ -21,11 +21,16 @@ type DsyncResult struct {
 	Error  error
 	// Validated reports whether the DSYNC lookup DNSSEC-validated.
 	//
-	// Only the API scheme consults it, and it is not optional there: the
-	// DSYNC record names the target whose URI says where a BEARER credential
-	// gets sent, so an unvalidated chain is an attacker's endpoint. NOTIFY and
-	// UPDATE do not need it -- a misdirected SIG(0)-signed message leaks
-	// nothing -- which is why the field is additive rather than a gate here.
+	// The API scheme consults it, and it is not optional there: the DSYNC
+	// record names the target whose URI says where a BEARER credential gets
+	// sent, so an unvalidated chain is an attacker's endpoint. The UPDATE
+	// scheme consults it for the responses it ACTS ON (keystate_verify.go):
+	// the target is the UPDATE Receiver's identity, whose published KEY the
+	// child trusts to authenticate KeyState responses and whose SVCB
+	// advertisement steers bootstrap, so an unvalidated DSYNC would let a
+	// forged target choose that identity. Sending the UPDATE itself needs no
+	// gate -- a misdirected SIG(0)-signed message leaks nothing -- which is
+	// why the field is additive here rather than an error.
 	Validated bool
 }
 
@@ -310,6 +315,9 @@ type DsyncTarget struct {
 	Port      uint16
 	Addresses []string // in addr:port format
 	RR        *core.DSYNC
+	// Validated: the DSYNC lookup that named this target DNSSEC-validated.
+	// See DsyncResult.Validated for what hangs on it.
+	Validated bool
 }
 
 // dtype = the type of DSYNC RR to look for (dns.TypeCDS, dns.TypeCSYNC, dns.TypeANY, ...)
@@ -377,6 +385,7 @@ func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype u
 	dsynctarget.Port = dsync.Port
 	dsynctarget.Name = dsync.Target
 	dsynctarget.RR = dsync
+	dsynctarget.Validated = dsync_res.Validated
 
 	return &dsynctarget, nil
 }

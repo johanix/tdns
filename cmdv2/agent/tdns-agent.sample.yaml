@@ -141,6 +141,12 @@ delegationsync:
             algorithm:	ED25519
          bootstrap:
             methods: [ at-apex ]
+         # Act on KeyState responses and SVCB bootstrap advertisements that
+         # cannot be authenticated (receiver KEY neither DNSSEC-validated nor
+         # manually trusted). Default false rejects them, which with an
+         # unsigned parent zone means no automatic bootstrap. See the tdns-auth
+         # sample for the full description. Lab convenience only.
+         allow-insecure: false
 
 dnssec:
    large-algorithms: [ RSASHA512 ]   # by name; stand-in for large KSK
