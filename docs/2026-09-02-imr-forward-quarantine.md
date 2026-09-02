@@ -109,6 +109,18 @@ above — it fails with `adoptQuarantineFrom` removed),
 `TestForwardQuarantinedUpstreamIsNotAlsoUnreachable`, and
 `TestForwardQuarantineAggregateClears`.
 
+Two of those tests exist for the #474 merge rather than for this branch:
+`TestForwardQuarantineExcludedFromPrivacySelection` fails if
+`hasEncryptedUpstream` counts a quarantined encrypted upstream, and
+`TestForwardQueryNeverDialsAQuarantinedUpstream` fails — with a nil-client
+panic — if the dial list is ever sourced from `fz.Upstreams` again. The second
+is the one that matters: #474 adds `forwardUpstreamsForPrivacy`, which builds
+its list from `fz.Upstreams` in all three branches and returns it directly for
+`PrivacyNone`, so a merge that keeps this branch's `hasEncryptedUpstream` and
+takes that selector would pass the first test and still hand a placeholder to
+the exchange. On the merge, `forwardUpstreamsForPrivacy` must start from
+`liveUpstreams()`.
+
 The existing `TestBuildImrForwards...` bad-config tables now assert the shape
 of the resulting table (dropped vs quarantined, and how many upstreams) rather
 than only that an error came back.

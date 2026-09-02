@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // The headline of #475: one misconfigured forward zone must not stop the
@@ -295,5 +296,54 @@ func TestPlaceholderUpstreamIsBornQuarantined(t *testing.T) {
 	// upstream do53.
 	if up.Transport != core.TransportDoT {
 		t.Errorf("transport = %v, want dot", up.Transport)
+	}
+}
+
+// R1: pin the DIAL LIST, not just the helpers.
+//
+// TestForwardQuarantineExcludedFromPrivacySelection pins hasEncryptedUpstream
+// and liveUpstreams, but a #474 merge could keep both and still take that
+// branch's forwardUpstreamsForPrivacy / PrivacyNone dial list, which is built
+// from fz.Upstreams. That merge passes the other test and still hands a
+// placeholder's nil Client to the exchange. This test fails on it: the
+// quarantined upstream is FIRST in configured order, so anything that dials
+// fz.Upstreams reaches it before the usable one.
+func TestForwardQueryNeverDialsAQuarantinedUpstream(t *testing.T) {
+	addr, port, logr, stop := startTestUpstream(t)
+	defer stop()
+
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: "not-an-ip.example.com"}, // unbuildable: placeholder, nil Client
+			{Addr: addr, Port: port},        // usable
+		}},
+	})
+	if len(diags) != 1 {
+		t.Fatalf("want one diag for the unbuildable upstream, got %v", diags)
+	}
+	fz := forwards[0]
+	if fz.Upstreams[0].Client != nil {
+		t.Fatal("first upstream is not the nil-client placeholder; test cannot detect a bad dial list")
+	}
+	// Deliberately NOT guarded by a nil-Client check in forwardQuery's loop.
+	// A guard there would turn this into a silent skip and let a merge ship
+	// with quarantined upstreams still in the selection list — where they
+	// would keep distorting PrivacyStrict ordering and the "N usable
+	// upstreams" the SERVFAIL reports, symptom hidden. The contract is that
+	// the dial list comes from liveUpstreams(); breaking it should be loud.
+	// (probeForwardUpstream keeps its guard: separate function, separate
+	// filter, operator-triggered rather than the query hot path.)
+	imr := newReloadTestImr(t)
+	imr.setZoneTable(forwards, nil, nil)
+
+	_, _, _, _, err := imr.forwardQuery(context.Background(), "www.fwd.example.", dns.TypeA, fz, false, false)
+	if err != nil {
+		t.Fatalf("forwardQuery did not fall through to the usable upstream: %v", err)
+	}
+	logr.mu.Lock()
+	n := len(logr.queries)
+	logr.mu.Unlock()
+	if n != 1 {
+		t.Errorf("live upstream saw %d query(ies), want exactly 1", n)
 	}
 }
