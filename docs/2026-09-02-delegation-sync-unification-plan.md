@@ -1,6 +1,8 @@
 # Implementation plan — unify the delegation-sync child paths and config
 
-**Status:** design settled (all §7 decisions made 2026-09-02); sliced into work items; no code written yet.
+**Status:** design settled (all §7 decisions made 2026-09-02); external review
+folded in 2026-09-02 (`reviews/2026-09-02-delegation-sync-unification-plan-review.md`,
+verdict *request changes* — both holds now closed in-document); no code written yet.
 **Base:** branch off `main`. Work in the **`v2/` tree only**.
 **Relationship to other plans:** this is a prerequisite refactor for the remaining Phase 2
 items of `2026-07-16-ddns-delegation-keystate-draft-alignment-plan.md` (D-6, D-7, D-3b).
@@ -66,8 +68,16 @@ call it today.
 child-side operational step — not the draft's parent-side `manual` method. Once
 the KEY is at the apex the parent validates it by `at-apex`/`at-ns`/`unsigned`
 exactly as for any other child, and cannot tell who put it there. The proxy is
-compatible with every bootstrap method. The operator re-enters only for the
-initial publication and for key rollover, both being the same step.
+compatible with `at-apex`, `unsigned` and `manual`. The operator re-enters only
+for the initial publication and for key rollover, both being the same step.
+
+**One caveat on that, added after review:** `at-ns` is the exception. The live
+`at-ns` is RFC 9615 signalling — the KEY is looked up at
+`_sig0key.<child>._signal.<ns>`, which lives in the *nameserver's* zone, not the
+child's. A secondary proxying for a clueless primary generally does not control
+those names, so it cannot make itself verifiable that way. `at-apex` remains
+fully available to it, so this narrows the claim rather than undermining the
+unification.
 
 ---
 
@@ -78,6 +88,14 @@ initial publication and for key rollover, both being the same step.
   `child.keybootstrap` member moves, because it is delegation-bootstrap policy.
 - No IANA codepoint changes (still Phase 3 of the alignment plan).
 - Not implementing D-6/D-7/D-3b here. This plan makes them small; it does not do them.
+- **`scanner.options` / `scanner.at-apex.*` stay exactly where they are**
+  (`cmdv2/auth/tdns-auth.sample.yaml:265-273`). They reuse the words
+  `at-apex`/`at-ns` for RFC 8078 opportunistic onboarding and RFC 9615 CDS
+  signalling — DS bootstrap, not SIG(0) key trust. Same words, different domain.
+  Do not fold them into `delegationpolicy` while "unifying the vocabulary".
+- The root-zone `{ZONENAME}` vs `"root"` expansion bug (`v2/zone_utils.go:1678`
+  vs `v2/ops_dsync.go:377-381`) is a D-7 rider, not unification work — but U-4
+  must not add a third expansion site. See U-4.
 
 ---
 
@@ -164,15 +182,17 @@ no aliasing of the old key names, no dual-format parsing.
 delegationsync:
 
    # ---- PARENT SIDE: named policies, referenced per-zone --------------------
-   # A zone selects one with `delegationpolicy: <name>`, exactly as it selects
-   # a DNSSEC policy with `dnssecpolicy: <name>`. A zone that names none gets
-   # `default`.
+   # A zone selects one with `delegationpolicy: <name>`. The REFERENCE looks
+   # like `dnssecpolicy: <name>`, but the two omission cases differ -- see
+   # §4.3. Omitted binds `default`; a name that does not resolve quarantines.
    policies:
       default:
          bootstrap:
             # WHERE to look for the child's KEY, in try order.
             #   at-apex — the child's apex KEY RRset
-            #   at-ns   — consistent across the child's NS set
+            #   at-ns   — RFC 9615 signalling: _sig0key.<child>._signal.<ns>
+            #             (NOT "all nameservers agree" -- that is the dead
+            #             engine's mechanism, deleted in U-5 and not ported)
             # Empty means no automatic bootstrap at all.
             mechanisms:      [ at-apex, at-ns ]
             # HOW strongly to trust what is found. true: the lookup must be
@@ -271,8 +291,30 @@ the single source of what a parent claims:
 | `manual: true` | `manual` |
 | `mechanisms` empty and `manual: false` | *(no SVCB published)* |
 
+As a function, so an implementer does not re-derive it from the table:
+
+```
+if require-dnssec {
+    emit at-apex / at-ns, per mechanisms      // WHERE is on the wire
+} else if len(mechanisms) > 0 {
+    emit unsigned                             // WHERE is not; that is the draft
+}
+if manual { emit manual }
+if nothing emitted { publish no SVCB }
+```
+
 A parent therefore cannot advertise what it will not do, and a zone with a
 stricter policy than its siblings advertises accordingly.
+
+**Two intersections that must refuse, spelled out because "first surviving
+preference wins" makes them look like oversights:**
+
+- Parent `permissive` (`require-dnssec: false`) advertises `unsigned` + `manual`.
+  The child default `[at-apex, at-ns]` intersects to nothing and **refuses**.
+  That is the opt-in working as intended, not a bug to smooth over — D-6 must not
+  "helpfully" read `unsigned` as satisfying `at-apex`.
+- Parent `locked-down` advertises `manual` only. Same outcome. A child willing to
+  be bootstrapped out of band must list `manual` explicitly.
 
 ### 4.2 The boundary between `updatepolicy` and `delegationpolicy`
 
@@ -308,7 +350,35 @@ behaviour to migrate — they are deleted, not mapped. `require-dnssec: true` is
 already the live default in `VerifyChildKey`, so the setting `dnssec-validated`
 appeared to request is what everyone already gets.
 
-### 4.3 Removed keys
+### 4.3 Binding semantics — where `dnssecpolicy` stops being the model
+
+Copy the **reference + quarantine** shape only. The two omission cases are not
+the same as `dnssecpolicy`'s, and the rest of its machinery is not wanted:
+
+| case | behaviour |
+|---|---|
+| `delegationpolicy:` omitted / empty | bind `default` (automatic, `require-dnssec: true`) |
+| names a policy that does not resolve | **quarantine** the zone (the `updatepolicy` failure model, `activateUpdatePolicy`) |
+
+`dnssecpolicy` omitted means *the zone is not signed* — it only resolves a
+non-empty name (`v2/parseconfig.go:1219`). Leaving delegation verification
+unconfigured is not an acceptable analogue, hence `default`.
+
+Also not copied: `dnssecpolicy`'s DB override (`EffectiveDnssecPolicyName`),
+last-applied persistence, and transactional apply (`v2/zone_policy_apply.go`). A
+CLI override that silently changes how strictly child keys are verified is a new
+product decision, not a freebie of "bind it the same way".
+
+**Migration hazard for U-6:** the shipped templates
+(`cmdv2/auth/auth-templates.yaml:13,28`) set
+`keybootstrap: [ manual, dnssec-validated, consistent-lookup ]`. Only `manual` is
+live there, so those zones report KeyState 10 today. They must come out
+referencing a policy with `manual: true` — **not** fall through to `default`,
+which would silently convert the sample parent to automatic bootstrap. "Every
+other `keybootstrap` setting simply disappears" is true of the inert values, not
+of `manual`.
+
+### 4.4 Removed keys
 
 `delegationsync.parent.bootstrap.methods`; `delegationsync.parent.update.key-verification.*`
 (folded into the named policy); `updatepolicy.child.keybootstrap`;
@@ -330,14 +400,46 @@ dependency; U-1 and U-2 are independent of the config work and can go first.
 Independent of everything below and already filed. Do it first, on its own, so
 the correctness fix is reviewable against today's code rather than buried in a
 refactor.
-- **Change:** `ProxyUpdateParent` calls `CreateChildReplaceUpdateWithDS` with
-  `dsKnown` derived from `zoneLooksSigned(zd)` (`v2/zone_delta_replay.go:299`).
-- **Acceptance:** a proxied zone that drops its DNSKEYs removes the parent's DS.
-- **Est.** ~30-60 LOC.
+
+**Corrected 2026-09-02 after review.** An earlier draft of this item said "derive
+`dsKnown` from `zoneLooksSigned(zd)`". That does not fix the bug:
+`zoneLooksSigned` (`v2/zone_delta_replay.go:299`) is true iff the apex has
+DNSKEYs, so for a zone that has dropped DNSSEC it is **false** — the DS is left
+alone and the stale record survives. It is also all but the same boolean as the
+`len(newDS) > 0` inference it was meant to replace, since `newDS` derives from
+those same DNSKEYs.
+
+- **Change, part 1 — the flag.** This path always has a DS opinion: it has just
+  derived DS from the served zone. A class-ANY delete of a DS RRset the parent
+  does not have is a no-op, so "never had a DS" and "has a stale DS" are one
+  call, not two parameters. Pass `true`:
+
+  ```go
+  newNS, newA, newAAAA, newDS := zd.proxyCurrentDelegationRRs()
+  m, berr = CreateChildReplaceUpdateWithDS(zd.Parent, zd.ZoneName, newNS, newA, newAAAA, newDS, true)
+  ```
+
+- **Change, part 2 — the derivation, which must land in the same PR.**
+  `proxyCurrentDelegationRRs` (`v2/delsync_proxy_update.go:276-277`) derives DS
+  only from SEP-flagged DNSKEYs, so a zone signed with a single flags-256 CSK
+  yields an empty `newDS` while being properly signed. With `dsKnown=true` that
+  **deletes a live child's DS** — strictly worse than the stale DS being fixed,
+  and today masked only by `dsKnown=false`. The auth path was already burned by
+  this hole and no longer derives DS from SEP flags (`computeNewDS`,
+  `v2/zone_updater.go:1671-1683`, now using keystore intent). The proxy holds no
+  keys for the zone and so cannot use keystore intent; it needs the served-data
+  equivalent — every apex DNSKEY treated as DS-eligible, not SEP-only.
+  Shipping part 1 alone is a regression; this is not a separate concern but the
+  rest of the same fix.
+- **Acceptance:** a proxied zone that drops its DNSKEYs removes the parent's DS;
+  a proxied zone signed with a flags-256 CSK **retains** it.
+- **Est.** ~60-120 LOC.
 
 ### U-1. One UPDATE sender
 - **Change:** collapse `SyncZoneDelegationViaUpdate` and `ProxyUpdateParent` into a
-  single sender taking `(ctx, kdb, imr, syncstate DelegationSyncStatus, target *DsyncTarget, mode string)`.
+  single sender taking `(ctx, kdb, syncstate DelegationSyncStatus, target *DsyncTarget, mode string)`.
+  No `imr`: once callers produce the `syncstate`, the sender has no use for it —
+  the proxy needs `imr` only to *build* that state via `AnalyseZoneDelegation`.
   Callers produce the `syncstate`; the role supplies the mode default (child delta,
   proxy replace). The §10.8 gate stays where it already is, in `updateGateBlocked`.
 - **Note:** `ProxyStartupReconcile` already computes an `AnalyseZoneDelegation` and
@@ -354,6 +456,19 @@ refactor.
   implementations: `PublishKeyRRs()` for auth, generate-instruct-wait (§10.8)
   for the proxy. Re-bootstrap on BADKEY then works for both, since it needs
   only the private key the agent already holds.
+- **When the ceremony runs — specify this, not just the interface.**
+  `SendUpdateWithRetry` (`v2/delsync_retry.go:138-153`) already calls
+  `BootstrapSig0KeyWithParent` on BADKEY, for both roles. So "give the proxy the
+  bootstrap path" could be read as "it already has one" — but relying on the
+  BADKEY arm means the first proxied UPDATE is a guaranteed failure plus an
+  alarming log, and against a parent with `allow-unvalidated-upload: false` it
+  never recovers. Required behaviour:
+  1. On the `WAITING` → `READY` transition (the KEY has appeared at the apex),
+     call `BootstrapSig0KeyWithParent` **before** the first delegation UPDATE.
+  2. BADKEY recovery stays in `SendUpdateWithRetry`, already shared. Do not add a
+     second re-bootstrap path.
+  3. The role interface covers only "ensure the KEY RR is at the apex"
+     (`PublishKeyRRs` vs generate-instruct-wait). The ceremony stays role-agnostic.
 - **Rename** `proxyUpdateKeyState()` (`v2/delsync_proxy_update.go:121`) — it is the
   state of the agent's SIG(0) key, unrelated to the draft's KeyState option, and
   in this codebase that collision is a trap.
@@ -399,7 +514,12 @@ refactor.
 - **Change:** implement the §4.1 mapping; `PublishDsyncRRs` uses the zone's bound
   policy. Delete `parent.bootstrap.methods`. Extend `UnpublishDsyncRRs`
   (`v2/ops_dsync.go:387-431`) to remove the bootstrap SVCB and receiver KEY, which
-  it does not do today.
+  it does not do today — **at the DSYNC UPDATE target**, named via
+  `DsyncUpdateTargetName`, the same expansion `PublishDsyncRRs` uses. Not at the
+  apex: the apex KEY is the parent's own SIG(0) identity and deleting it would
+  remove the thing the whole scheme authenticates with. Use the one helper rather
+  than open-coding a third `{ZONENAME}` / `"." → "root"` expansion — there are
+  already two, and they disagree (the D-7 rider at `v2/zone_utils.go:1678`).
 - **Acceptance:** advertisement matches policy for every row of the §4.1 table;
   unpublish removes what publish added.
 - **Est.** ~150-250 LOC.
@@ -414,8 +534,9 @@ one" — see §3 defect 3. This is pure deletion, not a migration.
   reads in this area. Nothing sends to the queue, so nothing loses a capability
   that is currently working.
 - **Verify before deleting:** re-confirm no external `KeyBootstrapperRequest`
-  construction exists at the time the work is done, in case something has been
-  wired up since this survey.
+  construction exists **in `v2/`** at the time the work is done. Note the legacy
+  `tdns/` tree still constructs one (`tdns/keystate.go`); a tree-wide grep will
+  show hits that do not contradict the v2 reachability finding.
 - **Not ported:** the all-nameservers-agree mechanism the dead engine implemented.
   It is a weaker, non-standard cousin of the live `at-ns` (RFC 9615 `_signal`)
   and has never been reachable, so nobody depends on it. If it is wanted later it
@@ -445,12 +566,14 @@ to roughly what their original estimates assumed:
   child block), look up the SVCB at the DSYNC target, intersect, pick" — one
   site, not two. The scope question about the proxy role dissolves: both roles
   read the same field.
-- **D-7** becomes "verify the receiver's signature at one call site." Today the
-  KeyState inquiry is consumed at three (`QueryParentKeyState`,
-  `QueryParentKeyStateDetailed`, `KeyDB.UpdateKeyState`) with no verification at
-  any; done after U-1/U-2 there is one path to harden. Note the inquiry travels
-  over plain UDP (`dns.Client{}` with no `Net`, `v2/parentsync_bootstrap.go:169,219`),
-  so this remains the highest-value remaining item.
+- **D-7** gets smaller, but **not to one call site** — corrected after review.
+  The inquiry is consumed at three places today (`QueryParentKeyState`,
+  `QueryParentKeyStateDetailed`, `KeyDB.UpdateKeyState`), none verifying. U-5
+  deletes the third; U-1/U-2 unify the *UPDATE send* path, which is not the
+  inquiry path, so **two inquiry functions remain**, both still unsigned-UDP
+  (`dns.Client{}` with no `Net`, `v2/parentsync_bootstrap.go:169,219`). Do not
+  discount the D-7 estimate on the strength of U-1. It remains the
+  highest-value remaining item.
 - **D-3b**'s NS/glue acceptance check lands on one UPDATE path rather than two.
 
 Done in the other order, each of the three is implemented twice and the #468
@@ -477,6 +600,24 @@ pattern repeats.
    trust" — and a policy may sensibly permit automatic *and* manual, which
    folding it into the list would make inexpressible. Its only live effect today
    is selecting KeyState 10 over 9 (`v2/keystate.go:267`).
+
+4a. **Empty `mechanisms` means *do not verify*, and must not inherit today's
+   default-fill.** An implementation invariant, not a preference — the two rules
+   otherwise collide. `VerifyChildKey` treats an empty list as
+   `[at-apex, at-ns]` (`v2/truststore_verify.go:87-89`), and
+   `TriggerChildKeyVerification` is **not gated on `keybootstrap`** — every newly
+   stored untrusted child KEY starts it unconditionally
+   (`v2/zone_updater.go:552-556`), which is why a zone with
+   `keybootstrap: [manual]` still auto-verifies today and `manual` only changes
+   the reported KeyState code. If U-3 reuses that empty-list fill, or adds a
+   `WithDefaults()` that supplies `[at-apex, at-ns]`, then `locked-down`
+   auto-verifies while advertising `manual` only — the advertisement lies, which
+   is the very defect §3.1 exists to close. So:
+   - **policy with `mechanisms: []`** — do not look up, do not start
+     `TriggerChildKeyVerification`, do not fill a default list.
+   - **the `default` policy** — carries `[at-apex, at-ns]` *written out
+     explicitly* (as §4 does). That is how today's unset value is reproduced;
+     not by treating empty as unset.
 
 4. **The default policy reproduces today's effective behaviour exactly**, so
    that adopting named policies is not also a silent behaviour change. Today's
@@ -505,7 +646,14 @@ pattern repeats.
   intersection including the empty case (must refuse, not degrade); policy
   binding per zone; unknown policy name fails at parse.
 - **Regression:** both roles' existing sender tests pass against the unified
-  sender unchanged; `dsKnown` behaviour for signed→unsigned on both roles.
+  sender unchanged; `dsKnown` behaviour for signed→unsigned on both roles, **and
+  a flags-256 CSK zone whose DS must be retained** (U-0 part 2).
+- **Invariants from the review holds:** `locked-down` never calls
+  `LookupChildKeyAtApex`/`LookupChildKeyAtSignal` and never starts
+  `TriggerChildKeyVerification`; the default child methods refuse against a
+  parent advertising only `unsigned`, and again against one advertising only
+  `manual`; omitting `delegationpolicy:` binds `default` rather than leaving
+  verification unconfigured.
 - **Integration (parentsync testbed):** two child zones under one parent with
   different policies; proxy zone completes bootstrap after operator publishes the
   KEY at the primary, then re-bootstraps on BADKEY without operator action; SVCB
