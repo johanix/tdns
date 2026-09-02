@@ -29,6 +29,14 @@ unless `delegationsync.child.update.allow-insecure` is set; the inquiry moved
 to TCP. Decisions in `docs/2026-09-02-ddns-keystate-d7-mutual-auth.md`.
 Only (iii), signing plain UPDATE responses, remains of D-7.
 
+**2026-09-02 — D-6 closed** on `feature/ddns-keystate-d6-at-ns-signal`
+(stacked on D-7): `at-ns` publishes the child's keystore KEY at
+`_sig0key.<child>._signal.<ns>` through the existing RFC 9615 signal
+publisher (`signal_republish.go`), is offered only where this server is
+primary for a signal name, and is back in the omit-default. A failed SVCB
+lookup is now retried rather than read as "no advertisement". Notes in
+`docs/2026-09-02-ddns-keystate-d6-at-ns-signal.md`.
+
 | Phase | Item | State | Est. remaining LOC (impl+tests) |
 |---|---|---|---|
 | 0 | K-1 codepoints, K-2 malformed, K-3 signed response, D-8 rcode/EDE (partial), D-2a TCP | **DONE** (on main) | — |
@@ -39,13 +47,13 @@ Only (iii), signing plain UPDATE responses, remains of D-7.
 | 1 | K-4 code 7 (KEY_REFUSED) | **DORMANT** — waits on a SIG(0) accepted-algorithm policy (report+enforce, not just report) | ~150-300 |
 | 2 | D-2b UPDATE retry, D-4 bootstrap ceremony | **DONE** (PR #312) | — |
 | 2 | **D-7** mutual auth (moved ahead of D-6 — see note above) | **(i)+(ii) DONE** (2026-09-02) — child verifies signed KeyState responses; only (iii) signing plain UPDATE responses (draft SHOULD) remains | ~80-150 (iii only) |
-| 2 | **D-6** SVCB bootstrap consumption | **PARTIAL** — intersection+selection live; at-ns still sends the KEY UPDATE ceremony rather than publishing `_signal` | ~40-80 |
+| 2 | **D-6** SVCB bootstrap consumption | **DONE** (2026-09-02) — intersection+selection, `at-ns` publishes at `_signal` via the shared signal publisher, satisfiability filter, default restored, failed lookup retried | — |
 | 2 | D-3b CDS/CSYNC acceptance (NS/glue half) | **PARTIAL** — DS/RFC7344 half landed independently via #386; RFC7477 NS/glue half still scanner-only | ~400-700 |
 | 3 | IANA alignment | **DEFERRED** by design | — |
 | — | Cross-cutting vocabulary (4 settings, 2 config-reading engines) | **DONE** (PR #471) | — |
 
-**Core Phase 2 remainder (D-7(iii) + D-6 + D-3b): ~520-930 LOC.
-Everything not yet done (adds D-8's 2 EDE codes ~15-30, K-4 code 8 ~100-200, K-4 code 7 ~150-300): ~785-1460 LOC.**
+**Core Phase 2 remainder (D-7(iii) + D-3b): ~480-850 LOC.
+Everything not yet done (adds D-8's 2 EDE codes ~15-30, K-4 code 8 ~100-200, K-4 code 7 ~150-300): ~745-1380 LOC.**
 See "Remaining-work sizing" after the Phase 2 section for the calibration basis and per-item reasoning.
 
 **Ordering note:** K-4's code 8 was blocked on Phase 2. It reports
@@ -185,12 +193,22 @@ active code path, not a future-feature gap like D-6.
 - **Est. size (i, the required part):** ~250-430 LOC impl+tests — acquire/cache/validate the receiver KEY + wire `sig0Verify` into the two remaining call sites + reject-on-failure branches + tests. The third consumer and the root-zone target bug are gone.
 - **Est. size (iii, optional/SHOULD):** ~80-150 LOC — mostly reuses `keyStateResponseWriter`'s existing signing pattern applied to the generic UPDATE responder.
 
-### D-6. Child consumes the SVCB `bootstrap` SvcParamKey — **PARTIAL**
+### D-6. Child consumes the SVCB `bootstrap` SvcParamKey — **DONE**
+
+**Closed 2026-09-02** (`docs/2026-09-02-ddns-keystate-d6-at-ns-signal.md`).
+The `_signal` producer already existed for the transfer-driven HSYNCPARAM
+`pubkey` case (`signal_republish.go`); the bootstrap path now uses the same
+publisher when `at-ns` is selected, sourcing the keystore KEY so it does not
+wait on the asynchronous apex publication. `at-ns` is offered only when at
+least one apex NS has its signal name in a zone this server is primary for
+(never for a proxy), and is back in the omit-default. Rollover refreshes the
+signal names a bootstrap populated. A failed SVCB lookup is
+`errBootstrapAdvertisementLookup`, retried by both the KeyState poller and the
+BADKEY re-bootstrap arm rather than treated as an absent advertisement.
 - **Draft (ddns-02 §"SvcParamKey bootstrap", §"Publishing Supported Bootstrap Methods"):** parent publishes an SVCB at the DSYNC {target} with `bootstrap="at-apex,at-ns,unsigned,manual"` (subset); the child SHOULD prefer the strongest method the parent advertises that it can satisfy.
 - **Current (reassessed 2026-09-02 after T4 defects):** parent **emits and reconciles** the SVCB from the bound `delegationpolicy`. Child looks up that SVCB at the DSYNC UPDATE target, intersects with `CompiledChildMethods`, and selects the strongest overlap (`at-apex` > `at-ns` > `unsigned` > `manual`). Empty intersection refuses. Absent SVCB falls back to the child's configured list. Omit-default is `[at-apex]` until `_signal` publication exists; `at-ns` remains valid to opt into. Proxy still drops `at-ns` even when opted in. `manual` does not send the KEY UPDATE. BADKEY recovery uses the same willing list as the first ceremony (`zd.Options[OptDelSyncProxy]`).
-- **Change remaining:** when the selected method is `at-ns`, publish (auth) or require (proxy: cannot) the KEY at `_sig0key.<child>._signal.<ns>` rather than only sending the apex KEY UPDATE.
-- **Acceptance (met):** with a parent SVCB `bootstrap="unsigned,manual"` and child default `[at-apex]`, bootstrap refuses rather than attempting `at-apex`.
-- **Est. size remaining:** ~40-80 LOC if `_signal` publication is taken on.
+- **Change (done 2026-09-02):** when the selected method is `at-ns`, the auth child publishes the KEY at `_sig0key.<child>._signal.<ns>` before sending the ceremony; a proxy cannot and never offers `at-ns`.
+- **Acceptance (met):** with a parent SVCB `bootstrap="unsigned,manual"` and the child default, bootstrap refuses rather than attempting `at-apex`; `at-ns` selected → `_signal` name published (`TestPublishSig0KeyAtSignalNames`).
 
 ### D-3b. CDS/CSYNC acceptance semantics on the UPDATE path — **PARTIAL** (was NOT STARTED; DS half landed independently), **remaining half deferred to its own PR** (decided 2026-08-22)
 
@@ -251,9 +269,9 @@ estimate being smaller than D-4's full 318 despite being a similarly-scoped
 "add verification to an exchange" job — D-4 also had to invent the ceremony's
 wire format and deferred-delete bookkeeping from nothing, D-7(i) does not.
 
-**Totals (re-based 2026-09-02 after D-7(i) landed):**
-- **Core Phase 2 remainder (D-7(iii) + D-6 + D-3b): ~520-930 LOC**
-- **Everything not yet done (adds D-8's 2 EDE codes ~15-30, K-4 code 8 ~100-200, K-4 code 7 ~150-300): ~785-1460 LOC**
+**Totals (re-based 2026-09-02 after D-7(i) and D-6 landed):**
+- **Core Phase 2 remainder (D-7(iii) + D-3b): ~480-850 LOC**
+- **Everything not yet done (adds D-8's 2 EDE codes ~15-30, K-4 code 8 ~100-200, K-4 code 7 ~150-300): ~745-1380 LOC**
 
 These are order-of-magnitude ranges for planning, not commitments — treat them
 the same way the plan treats line-anchors: useful for sizing the work now,

@@ -384,3 +384,133 @@ func TestRepublish_NoHsyncparamIsNoOp(t *testing.T) {
 		t.Fatalf("expected no-op without HSYNCPARAM, got %d updates", len(urs))
 	}
 }
+
+func TestSignalOwnerName(t *testing.T) {
+	if got := signalOwnerName(signalPrefixSig0Key, "child.example.", "ns.provider.example."); got != "_sig0key.child.example._signal.ns.provider.example." {
+		t.Fatalf("sig0key: %q", got)
+	}
+	// Unqualified inputs are qualified rather than producing a broken name.
+	if got := signalOwnerName(signalPrefixDsboot, "child.example", "ns.provider.example"); got != "_dsboot.child.example._signal.ns.provider.example." {
+		t.Fatalf("dsboot: %q", got)
+	}
+}
+
+// D-6: when the child selects at-ns, its keystore KEY is published at
+// _sig0key.<child>._signal.<ns> for every NS whose signal name is in a local
+// primary zone. The source is the keystore key, not the apex RRset, so this
+// works before the asynchronous apex publication has landed.
+func TestPublishSig0KeyAtSignalNames(t *testing.T) {
+	// signalTarget gives child.example. an in-bailiwick NS (ns.child.example.),
+	// whose signal name the zone itself owns; the second NS lives nowhere we serve.
+	child, q := signalTarget("child.example.", map[string][]dns.RR{
+		"child.example.": {mustRR(t, "child.example. 3600 IN NS ns.elsewhere.net.")},
+	})
+	registerZones(t, child)
+
+	key := mustRR(t, "child.example. 3600 IN KEY 256 3 15 dGVzdGtleQ==")
+	if n := child.publishSig0KeyAtSignalNames([]dns.RR{key}); n != 1 {
+		t.Fatalf("satisfied = %d, want 1 (one local signal name, one elsewhere)", n)
+	}
+	urs := drainUpdateQ(q)
+	if len(urs) != 1 {
+		t.Fatalf("expected 1 UpdateRequest, got %d", len(urs))
+	}
+	ur := urs[0]
+	if ur.Cmd != "ZONE-UPDATE" || ur.ZoneName != "child.example." || !ur.InternalUpdate {
+		t.Fatalf("unexpected UpdateRequest: %+v", ur)
+	}
+	owner := "_sig0key.child.example._signal.ns.child.example."
+	var sawDelete, sawAdd bool
+	for _, rr := range ur.Actions {
+		if rr.Header().Name != owner {
+			t.Errorf("action owner = %q, want %q", rr.Header().Name, owner)
+		}
+		switch rr.Header().Class {
+		case dns.ClassANY:
+			sawDelete = true
+		case dns.ClassINET:
+			k, ok := rr.(*dns.KEY)
+			if !ok || k.PublicKey != "dGVzdGtleQ==" {
+				t.Errorf("add action = %s, want the keystore KEY", rr)
+			}
+			sawAdd = true
+		}
+	}
+	if !sawDelete || !sawAdd {
+		t.Errorf("expected delete-RRset + add (delete=%v add=%v)", sawDelete, sawAdd)
+	}
+
+	// Change-gated: publishing the same key again is a no-op but still counts.
+	if n := child.publishSig0KeyAtSignalNames([]dns.RR{key}); n != 1 {
+		t.Fatalf("second publish satisfied = %d, want 1", n)
+	}
+	// (The first update was only enqueued, not applied, in this test, so the
+	// gate cannot see it; assert the queue got a second request rather than
+	// pretending otherwise.)
+	if len(drainUpdateQ(q)) != 1 {
+		t.Fatal("expected the republish to be enqueued again while the first is unapplied")
+	}
+}
+
+// After a SIG(0) rollover the signal names a bootstrap once populated are
+// refreshed with the new key; ones never populated are left alone.
+func TestRefreshSig0KeyAtSignalNamesOnlyExisting(t *testing.T) {
+	owner := "_sig0key.child.example._signal.ns.child.example."
+	child, q := signalTarget("child.example.", map[string][]dns.RR{
+		owner: {mustRR(t, owner+" 3600 IN KEY 256 3 15 b2xk")},
+	})
+	fresh, q2 := signalTarget("fresh.example.", nil)
+	registerZones(t, child, fresh)
+
+	if n := child.refreshSig0KeyAtSignalNames([]dns.RR{mustRR(t, "child.example. 3600 IN KEY 256 3 15 bmV3")}); n != 1 {
+		t.Fatalf("refresh satisfied = %d, want 1", n)
+	}
+	urs := drainUpdateQ(q)
+	if len(urs) != 1 {
+		t.Fatalf("expected 1 UpdateRequest, got %d", len(urs))
+	}
+	var sawNew bool
+	for _, rr := range urs[0].Actions {
+		if k, ok := rr.(*dns.KEY); ok && rr.Header().Class == dns.ClassINET && k.PublicKey == "bmV3" {
+			sawNew = true
+		}
+	}
+	if !sawNew {
+		t.Fatalf("refresh did not add the new key: %v", urs[0].Actions)
+	}
+
+	if n := fresh.refreshSig0KeyAtSignalNames([]dns.RR{mustRR(t, "fresh.example. 3600 IN KEY 256 3 15 bmV3")}); n != 0 {
+		t.Fatalf("refresh of a never-populated zone satisfied %d, want 0", n)
+	}
+	if len(drainUpdateQ(q2)) != 0 {
+		t.Fatal("refresh must not start populating a signal name a bootstrap never used")
+	}
+}
+
+func TestCanPublishSig0KeyAtSignal(t *testing.T) {
+	local, _ := signalTarget("local.example.", nil)
+	away := newMapZone("away.example.", Primary, map[string][]dns.RR{
+		"away.example.": {
+			mustRR(t, "away.example. 3600 IN SOA ns.elsewhere.net. h.away.example. 1 3600 600 604800 300"),
+			mustRR(t, "away.example. 3600 IN NS ns.elsewhere.net."),
+		},
+	})
+	// A secondary cannot be updated, so a signal name in it does not count.
+	sec := newMapZone("sec.example.", Secondary, map[string][]dns.RR{
+		"sec.example.": {
+			mustRR(t, "sec.example. 3600 IN SOA ns.sec.example. h.sec.example. 1 3600 600 604800 300"),
+			mustRR(t, "sec.example. 3600 IN NS ns.sec.example."),
+		},
+	})
+	registerZones(t, local, away, sec)
+
+	if !local.canPublishSig0KeyAtSignal() {
+		t.Fatal("local primary owning the signal name: want true")
+	}
+	if away.canPublishSig0KeyAtSignal() {
+		t.Fatal("NS in a zone not served here: want false")
+	}
+	if sec.canPublishSig0KeyAtSignal() {
+		t.Fatal("signal name in a local secondary: want false")
+	}
+}

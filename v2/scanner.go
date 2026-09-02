@@ -1307,7 +1307,7 @@ func (scanner *Scanner) queryCDSAtSignalingNames(ctx context.Context, childZone 
 		}
 
 		// Build signaling name: _dsboot.<child>._signal.<ns>
-		signalingName := "_dsboot." + childZone + "_signal." + nsName
+		signalingName := signalOwnerName(signalPrefixDsboot, childZone, nsName)
 		scanLog.Printf("queryCDSAtSignalingNames: %s: querying CDS at signaling name %s", childZone, signalingName)
 
 		resp, err := scanner.ImrEngine.ImrQuery(ctx, signalingName, dns.TypeCDS, dns.ClassINET, nil)

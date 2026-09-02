@@ -302,13 +302,16 @@ delegationsync:
             # Methods this child will accept a parent using. Intersected with
             # the parent's advertised SVCB bootstrap set at run time; strongest
             # overlap wins (at-apex > at-ns > unsigned > manual). Omit defaults
-            # to [at-apex]; `at-ns` is valid but the child cannot yet publish
-            # RFC 9615 `_signal`. An empty list refuses every method. `unsigned`
-            # and `manual` must be opted into. A parent template bound to the
-            # `manual` policy advertises `at-apex,at-ns,manual`; intersection
-            # with this default is `at-apex`. Absent SVCB falls back to
-            # this list.
-            methods: [ at-apex ]
+            # to [at-apex, at-ns]. `at-ns` publishes the KEY at
+            # _sig0key.<child>._signal.<ns> and is offered only for a zone
+            # where at least one of its nameservers has that name in a zone
+            # this server is primary for (a proxy never can). An empty list
+            # refuses every method. `unsigned` and `manual` must be opted
+            # into. A parent template bound to the `manual` policy advertises
+            # `at-apex,at-ns,manual`; intersection with this default is
+            # `at-apex`. Absent SVCB falls back to this list; a FAILED SVCB
+            # lookup is retried, not treated as absent.
+            methods: [ at-apex, at-ns ]
 
          # Mutual authentication (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
          # §"Mutual Authentication"). The parent's UPDATE Receiver SIG(0)-signs

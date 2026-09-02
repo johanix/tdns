@@ -49,13 +49,13 @@ type signalSpec struct {
 var signalSpecs = []signalSpec{
 	{
 		flag:    "pubkey",
-		prefix:  "_sig0key",
+		prefix:  signalPrefixSig0Key,
 		rrtypes: []uint16{dns.TypeKEY},
 		active:  (*core.HSYNCPARAM).HasPubkey,
 	},
 	{
 		flag:    "pubcds",
-		prefix:  "_dsboot",
+		prefix:  signalPrefixDsboot,
 		rrtypes: []uint16{dns.TypeCDS, dns.TypeCDNSKEY},
 		active:  (*core.HSYNCPARAM).HasPubcds,
 	},
@@ -96,32 +96,127 @@ func (childZD *ZoneData) republishOneFlag(spec signalSpec, nsNames []string) {
 			"zone", childZD.ZoneName, "flag", spec.flag)
 		return
 	}
+	childZD.publishAtSignalNames(spec.flag, spec.prefix, spec.rrtypes, srcRRs, nsNames, false)
+}
 
+// The signal-name prefixes this file produces and the parent side consumes
+// (LookupChildKeyAtSignal, queryCDSAtSignalingNames).
+const (
+	signalPrefixSig0Key = "_sig0key"
+	signalPrefixDsboot  = "_dsboot"
+)
+
+// signalOwnerName is the one spelling of an RFC 9615 signal name:
+// <prefix>.<child>._signal.<ns>. Producer and consumers share it so they
+// cannot drift.
+func signalOwnerName(prefix, child, ns string) string {
+	return prefix + "." + dns.Fqdn(child) + "_signal." + dns.Fqdn(ns)
+}
+
+// signalPublishTarget is one NS of the child whose signal name this server
+// can publish at: the name falls in a zone served here as primary.
+type signalPublishTarget struct {
+	NS    string
+	Owner string
+	Zone  *ZoneData
+}
+
+// signalPublishTargets lists, for the child's apex NS set, the signal names
+// this server is locally primary for. An NS whose signal name is not in a
+// local primary zone is a non-starter and is skipped; the draft has the
+// nameserver's operator publish it, and that is someone else.
+//
+// This is also the child-side test of whether the at-ns SIG(0) bootstrap
+// method is satisfiable at all (zoneChildBootstrapMethods): a child cannot
+// offer at-ns to a parent unless it can put its KEY somewhere the parent's
+// LookupChildKeyAtSignal will look.
+func (childZD *ZoneData) signalPublishTargets(prefix string, nsNames []string) []signalPublishTarget {
+	var out []signalPublishTarget
 	for _, ns := range nsNames {
-		owner := fmt.Sprintf("%s.%s_signal.%s", spec.prefix, childZD.ZoneName, ns)
-
+		owner := signalOwnerName(prefix, childZD.ZoneName, ns)
 		target := FindZone(owner)
 		if target == nil || target.ZoneType != Primary {
 			lgSignal.Debug("skipping NS: not locally primary for signal name",
-				"zone", childZD.ZoneName, "flag", spec.flag, "ns", ns, "signal", owner)
+				"zone", childZD.ZoneName, "prefix", prefix, "ns", ns, "signal", owner)
 			continue
 		}
+		out = append(out, signalPublishTarget{NS: ns, Owner: owner, Zone: target})
+	}
+	return out
+}
 
-		desired := reownRRs(srcRRs, owner)
-		if signalRRsEqual(target, owner, spec.rrtypes, desired) {
+// publishAtSignalNames publishes srcRRs, re-owned to <prefix>.<child>._signal.<ns>,
+// into the local primary zone owning each of those names, for every NS in
+// nsNames this server can publish for. Change-gated per target: a signal
+// RRset that already matches is left alone. With onlyExisting, targets that
+// hold no RRset of these types yet are skipped -- that is the SIG(0) rollover
+// refresh, which must update the signal names a bootstrap once populated
+// without starting to populate ones it never did.
+//
+// Returns the number of targets whose signal RRset is now (or already was)
+// the desired content. Zero means the child could not be published at any
+// signal name.
+func (childZD *ZoneData) publishAtSignalNames(what, prefix string, rrtypes []uint16, srcRRs []dns.RR, nsNames []string, onlyExisting bool) int {
+	satisfied := 0
+	for _, tgt := range childZD.signalPublishTargets(prefix, nsNames) {
+		if onlyExisting && !signalRRsPresent(tgt.Zone, tgt.Owner, rrtypes) {
+			continue
+		}
+		desired := reownRRs(srcRRs, tgt.Owner)
+		if signalRRsEqual(tgt.Zone, tgt.Owner, rrtypes, desired) {
+			satisfied++
 			continue // already published, change-gated no-op
 		}
-
-		if err := target.publishSignalRRs(owner, spec.rrtypes, desired); err != nil {
+		if err := tgt.Zone.publishSignalRRs(tgt.Owner, rrtypes, desired); err != nil {
 			lgSignal.Error("failed to publish signal RRset",
-				"zone", childZD.ZoneName, "flag", spec.flag, "ns", ns,
-				"signal", owner, "target", target.ZoneName, "err", err)
+				"zone", childZD.ZoneName, "what", what, "ns", tgt.NS,
+				"signal", tgt.Owner, "target", tgt.Zone.ZoneName, "err", err)
 			continue
 		}
-		lgSignal.Info("republished apex RRset at signal name",
-			"zone", childZD.ZoneName, "flag", spec.flag, "ns", ns,
-			"signal", owner, "target", target.ZoneName, "rrs", len(desired))
+		satisfied++
+		lgSignal.Info("published RRset at signal name",
+			"zone", childZD.ZoneName, "what", what, "ns", tgt.NS,
+			"signal", tgt.Owner, "target", tgt.Zone.ZoneName, "rrs", len(desired))
 	}
+	return satisfied
+}
+
+// canPublishSig0KeyAtSignal reports whether at least one of the child's
+// nameservers has its _sig0key signal name in a zone this server is primary
+// for -- the precondition for offering the at-ns bootstrap method.
+func (childZD *ZoneData) canPublishSig0KeyAtSignal() bool {
+	return len(childZD.signalPublishTargets(signalPrefixSig0Key, childZD.apexNSNames())) > 0
+}
+
+// publishSig0KeyAtSignalNames is the at-ns half of the child's SIG(0)
+// bootstrap (draft-ietf-dnsop-delegation-mgmt-via-ddns-02 §"When Child
+// Nameserver Is In A DNSSEC-signed Zone"): put the KEY the child is about to
+// bootstrap at _sig0key.<child>._signal.<ns> for every NS this server can
+// publish for, before the self-signed UPDATE goes to the parent, so the
+// parent's at-ns verification finds it. The source is the keystore KEY, not
+// the apex RRset: the apex publication is itself an asynchronous zone update
+// and may not have landed yet. Returns the number of signal names satisfied.
+func (childZD *ZoneData) publishSig0KeyAtSignalNames(keys []dns.RR) int {
+	return childZD.publishAtSignalNames("at-ns bootstrap", signalPrefixSig0Key, []uint16{dns.TypeKEY}, keys, childZD.apexNSNames(), false)
+}
+
+// refreshSig0KeyAtSignalNames re-publishes keys at every _sig0key signal name
+// a previous bootstrap populated, after a SIG(0) key rollover, so a parent
+// re-verifying via at-ns does not find the retired key. Signal names never
+// populated are left alone.
+func (childZD *ZoneData) refreshSig0KeyAtSignalNames(keys []dns.RR) int {
+	return childZD.publishAtSignalNames("SIG(0) rollover", signalPrefixSig0Key, []uint16{dns.TypeKEY}, keys, childZD.apexNSNames(), true)
+}
+
+// signalRRsPresent reports whether the target zone holds any RRset of the
+// given types at owner.
+func signalRRsPresent(target *ZoneData, owner string, rrtypes []uint16) bool {
+	for _, rrtype := range rrtypes {
+		if rrset, err := target.GetRRset(owner, rrtype); err == nil && rrset != nil && len(rrset.RRs) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // publishSignalRRs replaces the signal-name RRsets in the (primary) target

@@ -215,8 +215,13 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 
 	lgHandler.Info("BootstrapSig0KeyWithParent: DSYNC target found", "zone", zd.ZoneName, "target", dsyncTarget.RR)
 
-	advertised, present := advertisedBootstrapMethods(ctx, Globals.ImrEngine, dsyncTarget,
+	advertised, present, aerr := advertisedBootstrapMethods(ctx, Globals.ImrEngine, dsyncTarget,
 		DelegationSyncConfig().Child.Update.AllowInsecure)
+	if aerr != nil {
+		// Retryable, not "no advertisement": see advertisedBootstrapMethods.
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): %v", zd.ZoneName, aerr), UpdateResult{},
+			fmt.Errorf("BootstrapSig0KeyWithParent(%q): %w", zd.ZoneName, aerr)
+	}
 	method, merr := selectChildBootstrapMethod(advertised, present, willing)
 	if merr != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): %v", zd.ZoneName, merr), UpdateResult{}, merr
@@ -226,6 +231,16 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 	if method == "manual" {
 		msg := fmt.Sprintf("BootstrapSig0KeyWithParent(%q): bootstrap method is manual; not sending KEY UPDATE", zd.ZoneName)
 		return msg, UpdateResult{}, fmt.Errorf("bootstrap method is manual")
+	}
+	if method == "at-ns" {
+		// The parent will look for this KEY at _sig0key.<child>._signal.<ns>
+		// (LookupChildKeyAtSignal), so it has to be there before the ceremony
+		// arrives. The willing list only offers at-ns when at least one signal
+		// name is publishable here, so zero means the zone changed under us.
+		if n := zd.publishSig0KeyAtSignalNames([]dns.RR{&pkc.KeyRR}); n == 0 {
+			msg := fmt.Sprintf("BootstrapSig0KeyWithParent(%q): at-ns selected but the KEY could not be published at any _signal name", zd.ZoneName)
+			return msg, UpdateResult{}, fmt.Errorf("at-ns bootstrap: no _sig0key._signal name for %s is in a zone this server is primary for", zd.ZoneName)
+		}
 	}
 
 	// 3. Create the self-signed bootstrap ceremony "DEL <child> ANY KEY" +
@@ -500,6 +515,12 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 		zd.Logger.Print(msg)
 		return "", oldkeyid, newkeyid, ur, errors.New(msg)
 	}
+	// And wherever an at-ns bootstrap put the old one.
+	var newKeyRRs []dns.RR
+	for _, k := range newSak.Keys {
+		newKeyRRs = append(newKeyRRs, &k.KeyRR)
+	}
+	zd.refreshSig0KeyAtSignalNames(newKeyRRs)
 	//	} // end of phase 3
 
 	return fmt.Sprintf("RolloverSig0KeyWithParent(%q) successfully rolled from SIG(0) key %d to SIG(0) key %d",

@@ -142,8 +142,9 @@ response has no zone in hand); the `ZoneData` method is a one-line wrapper.
   bumps, it should delete the copy and call `tdns.QueryParentKeyState`, which
   now also returns whether the answer was authenticated — worth showing in
   `displayKeyStateInquiry`.
-- **Carry-over 9** (a failed SVCB lookup collapses into "absent") is
-  unchanged; it is D-6's, and the gate added here sits after that collapse.
+- **Carry-over 9** (a failed SVCB lookup collapses into "absent") was left
+  to D-6, and closed there the same day
+  (`docs/2026-09-02-ddns-keystate-d6-at-ns-signal.md`).
 - **`LookupDSYNCTarget`'s `Validated` propagation** is one assignment and is
   not unit-tested (the function is network-bound end to end). Covered by the
   plan §8 integration items, which remain unrun.
