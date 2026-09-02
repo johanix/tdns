@@ -5,7 +5,11 @@
 package tdns
 
 import (
+	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -395,6 +399,35 @@ func TestSignalOwnerName(t *testing.T) {
 	}
 }
 
+// ackUpdates drains q in the background, recording each request and answering
+// its Resp (if any) with the given result, until the test ends. It does not
+// apply anything to the zone, so the change gate does not see its "applies".
+func ackUpdates(t *testing.T, q chan UpdateRequest, res ZoneUpdateResult) *[]UpdateRequest {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []UpdateRequest
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case ur := <-q:
+				mu.Lock()
+				seen = append(seen, ur)
+				mu.Unlock()
+				if ur.Resp != nil {
+					ur.Resp <- res
+				}
+			}
+		}
+	}()
+	// Callers read after the publish returned, which happens after the ack,
+	// so the slice is complete by then; the mutex covers the append.
+	return &seen
+}
+
 // D-6: when the child selects at-ns, its keystore KEY is published at
 // _sig0key.<child>._signal.<ns> for every NS whose signal name is in a local
 // primary zone. The source is the keystore key, not the apex RRset, so this
@@ -406,18 +439,19 @@ func TestPublishSig0KeyAtSignalNames(t *testing.T) {
 		"child.example.": {mustRR(t, "child.example. 3600 IN NS ns.elsewhere.net.")},
 	})
 	registerZones(t, child)
+	seen := ackUpdates(t, q, ZoneUpdateResult{Applied: true})
 
 	key := mustRR(t, "child.example. 3600 IN KEY 256 3 15 dGVzdGtleQ==")
-	if n := child.publishSig0KeyAtSignalNames([]dns.RR{key}); n != 1 {
+	if n := child.publishSig0KeyAtSignalNames(context.Background(), []dns.RR{key}); n != 1 {
 		t.Fatalf("satisfied = %d, want 1 (one local signal name, one elsewhere)", n)
 	}
-	urs := drainUpdateQ(q)
+	urs := *seen
 	if len(urs) != 1 {
 		t.Fatalf("expected 1 UpdateRequest, got %d", len(urs))
 	}
 	ur := urs[0]
-	if ur.Cmd != "ZONE-UPDATE" || ur.ZoneName != "child.example." || !ur.InternalUpdate {
-		t.Fatalf("unexpected UpdateRequest: %+v", ur)
+	if ur.Cmd != "ZONE-UPDATE" || ur.ZoneName != "child.example." || !ur.InternalUpdate || ur.Resp == nil {
+		t.Fatalf("unexpected UpdateRequest (a confirmed publish carries Resp): %+v", ur)
 	}
 	owner := "_sig0key.child.example._signal.ns.child.example."
 	var sawDelete, sawAdd bool
@@ -440,16 +474,57 @@ func TestPublishSig0KeyAtSignalNames(t *testing.T) {
 		t.Errorf("expected delete-RRset + add (delete=%v add=%v)", sawDelete, sawAdd)
 	}
 
-	// Change-gated: publishing the same key again is a no-op but still counts.
-	if n := child.publishSig0KeyAtSignalNames([]dns.RR{key}); n != 1 {
+	// The fake updater acknowledged without applying anything to the zone,
+	// so the change gate (which reads zone data) still sees no KEY and a
+	// second publish enqueues again. The gate itself is exercised by
+	// TestRepublish_ChangeGateNoOpWhenAlreadyPublished, whose zone is seeded
+	// with the record.
+	if n := child.publishSig0KeyAtSignalNames(context.Background(), []dns.RR{key}); n != 1 {
 		t.Fatalf("second publish satisfied = %d, want 1", n)
 	}
-	// (The first update was only enqueued, not applied, in this test, so the
-	// gate cannot see it; assert the queue got a second request rather than
-	// pretending otherwise.)
-	if len(drainUpdateQ(q)) != 1 {
-		t.Fatal("expected the republish to be enqueued again while the first is unapplied")
+	if len(*seen) != 2 {
+		t.Fatalf("expected a second request against an unapplied zone, got %d", len(*seen))
 	}
+}
+
+// A confirmed publish counts only an APPLIED update: a refused apply, or an
+// updater that never answers, is "not published" -- the at-ns bootstrap then
+// errors instead of sending a ceremony the parent cannot verify.
+func TestPublishSig0KeyAtSignalNamesRequiresApply(t *testing.T) {
+	key := mustRR(t, "child.example. 3600 IN KEY 256 3 15 dGVzdGtleQ==")
+
+	t.Run("refused apply", func(t *testing.T) {
+		child, q := signalTarget("child.example.", nil)
+		registerZones(t, child)
+		ackUpdates(t, q, ZoneUpdateResult{Err: errors.New("zone updater says no")})
+		if n := child.publishSig0KeyAtSignalNames(context.Background(), []dns.RR{key}); n != 0 {
+			t.Fatalf("satisfied = %d, want 0 for a refused apply", n)
+		}
+	})
+
+	t.Run("updater never answers", func(t *testing.T) {
+		prev := signalPublishApplyTimeout
+		signalPublishApplyTimeout = 50 * time.Millisecond
+		t.Cleanup(func() { signalPublishApplyTimeout = prev })
+		child, q := signalTarget("child.example.", nil)
+		registerZones(t, child)
+		go func() { <-q }() // take the request, never respond
+		if n := child.publishSig0KeyAtSignalNames(context.Background(), []dns.RR{key}); n != 0 {
+			t.Fatalf("satisfied = %d, want 0 on apply timeout", n)
+		}
+	})
+
+	t.Run("nil ctx only enqueues", func(t *testing.T) {
+		child, q := signalTarget("child.example.", nil)
+		registerZones(t, child)
+		if n := child.publishAtSignalNames(nil, "test", signalPrefixSig0Key, []uint16{dns.TypeKEY}, []dns.RR{key}, child.apexNSNames(), false); n != 1 {
+			t.Fatalf("fire-and-forget satisfied = %d, want 1", n)
+		}
+		urs := drainUpdateQ(q)
+		if len(urs) != 1 || urs[0].Resp != nil {
+			t.Fatalf("fire-and-forget must enqueue exactly one request without Resp: %+v", urs)
+		}
+	})
 }
 
 // After a SIG(0) rollover the signal names a bootstrap once populated are
@@ -461,11 +536,12 @@ func TestRefreshSig0KeyAtSignalNamesOnlyExisting(t *testing.T) {
 	})
 	fresh, q2 := signalTarget("fresh.example.", nil)
 	registerZones(t, child, fresh)
+	seen := ackUpdates(t, q, ZoneUpdateResult{Applied: true})
 
-	if n := child.refreshSig0KeyAtSignalNames([]dns.RR{mustRR(t, "child.example. 3600 IN KEY 256 3 15 bmV3")}); n != 1 {
+	if n := child.refreshSig0KeyAtSignalNames(context.Background(), []dns.RR{mustRR(t, "child.example. 3600 IN KEY 256 3 15 bmV3")}); n != 1 {
 		t.Fatalf("refresh satisfied = %d, want 1", n)
 	}
-	urs := drainUpdateQ(q)
+	urs := *seen
 	if len(urs) != 1 {
 		t.Fatalf("expected 1 UpdateRequest, got %d", len(urs))
 	}
@@ -479,7 +555,7 @@ func TestRefreshSig0KeyAtSignalNamesOnlyExisting(t *testing.T) {
 		t.Fatalf("refresh did not add the new key: %v", urs[0].Actions)
 	}
 
-	if n := fresh.refreshSig0KeyAtSignalNames([]dns.RR{mustRR(t, "fresh.example. 3600 IN KEY 256 3 15 bmV3")}); n != 0 {
+	if n := fresh.refreshSig0KeyAtSignalNames(context.Background(), []dns.RR{mustRR(t, "fresh.example. 3600 IN KEY 256 3 15 bmV3")}); n != 0 {
 		t.Fatalf("refresh of a never-populated zone satisfied %d, want 0", n)
 	}
 	if len(drainUpdateQ(q2)) != 0 {
