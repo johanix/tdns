@@ -138,7 +138,11 @@ Details of forwarding behaviour:
   zones keep their live counters and backoffs, and an invalid forward table is
   refused whole rather than half-applied — deliberately unlike startup, which
   quarantines and serves what is left. The asymmetry is the point: a reload
-  has a good running configuration to preserve, and startup has none. The rest of `imrengine:` still needs
+  has a good running configuration to preserve, and startup has none. One
+  consequence to know: a daemon running with something quarantined is running
+  a config a reload would refuse, so an unrelated edit cannot be reloaded
+  until the quarantined upstream or zone is fixed or removed too. Repair
+  first, then extend — or restart, which quarantines and starts. The rest of `imrengine:` still needs
   a restart, and a reload says which edited keys those were.
 - **Limits**: upstream addresses are IP literals (no hostnames) and the DoH
   path is fixed at `/dns-query`.

@@ -254,6 +254,12 @@ func (fz *ForwardZone) isQuarantined() bool {
 // encrypted transport at all. Quarantined upstreams do not count: they are
 // never dialled, so promising the PRIVACY guarantee on the strength of one
 // would be a lie the query path could not keep.
+//
+// The liveUpstreams() call is load-bearing, not a tidy-up. Anything that
+// selects or counts upstreams for the privacy path must go through it; a
+// version that ranges fz.Upstreams directly both mis-answers this question
+// and can hand a placeholder's nil Client to the query loop.
+// TestForwardQuarantineExcludedFromPrivacySelection fails if it is lost.
 func (fz *ForwardZone) hasEncryptedUpstream() bool {
 	for _, up := range fz.liveUpstreams() {
 		if core.IsEncryptedTransport(up.Transport) {
@@ -437,8 +443,7 @@ func BuildImrForwards(conf []ImrForwardConf) ([]*ForwardZone, []ForwardDiag) {
 		for _, u := range fc.Upstreams {
 			up, err := buildForwardUpstream(zone, u)
 			if err != nil {
-				up = placeholderUpstream(u)
-				up.quarantine(err.Error())
+				up = placeholderUpstream(u, err.Error())
 				diags = append(diags, ForwardDiag{Zone: zone, Upstream: up.Label, Msg: err.Error()})
 				fz.Upstreams = append(fz.Upstreams, up)
 				continue
@@ -466,9 +471,11 @@ func BuildImrForwards(conf []ImrForwardConf) ([]*ForwardZone, []ForwardDiag) {
 // built at all. It exists so `imr forward list` and `imr forward status` can
 // still show the operator which configured upstream is broken and why —
 // without it, a zone whose only upstream is unparseable would render as a
-// zone with no upstreams. It carries no Client and is created quarantined,
-// so liveUpstreams never hands it to anything that dials.
-func placeholderUpstream(u ImrUpstreamConf) *ForwardUpstream {
+// zone with no upstreams. It carries no Client, so it is created ALREADY
+// quarantined rather than left for the caller to mark: liveUpstreams is what
+// keeps it away from anything that dials, and an unquarantined placeholder
+// would be a nil client on the query path.
+func placeholderUpstream(u ImrUpstreamConf, reason string) *ForwardUpstream {
 	addr := u.Addr
 	if addr == "" {
 		addr = "<unset>"
@@ -484,7 +491,10 @@ func placeholderUpstream(u ImrUpstreamConf) *ForwardUpstream {
 			transport = t
 		}
 	}
-	return &ForwardUpstream{Addr: u.Addr, Transport: transport, Label: label}
+	return &ForwardUpstream{
+		Addr: u.Addr, Transport: transport, Label: label,
+		quarantined: true, quarantineWhy: reason,
+	}
 }
 
 // forwardZoneFor returns the forward zone responsible for qname, or nil when

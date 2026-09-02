@@ -110,9 +110,11 @@ func (imr *Imr) forwardZonesMatching(zoneFilter string) ([]*ForwardZone, error) 
 // recordFailure, so an abandoned probe cannot mark a healthy upstream
 // unreachable.
 func (imr *Imr) probeForwardUpstream(ctx context.Context, zone string, up *ForwardUpstream) (time.Duration, error) {
-	// A quarantined upstream has no client to dial with (an upstream that
-	// failed to build has none at all). Callers filter these out; this is the
-	// backstop that keeps a missed one an error rather than a nil deref.
+	// An upstream that failed to build has no client at all. Note the
+	// converse does NOT hold: a trust-ad quarantine is a fully built upstream
+	// with a live client, so "no Client" is not the definition of
+	// quarantined. Callers filter quarantined upstreams out; this only keeps
+	// a missed placeholder an error rather than a nil deref.
 	if up.Client == nil {
 		return 0, fmt.Errorf("upstream %s is not usable as configured", up.Label)
 	}
@@ -162,7 +164,8 @@ func (imr *Imr) ProbeForwardUpstreamsReport(ctx context.Context, zoneFilter stri
 			// Reported, not probed, and NOT silently skipped: the operator
 			// asked about every upstream of the zone, and a quarantined one
 			// missing from the output reads as an upstream that is fine.
-			// (It also has no client to dial with.)
+			// This check, not the nil-Client backstop below it, is what keeps
+			// a quarantined-but-fully-built upstream from being dialled.
 			if q, why := up.quarantineState(); q {
 				results = append(results, ImrForwardProbeResult{
 					Zone: fz.Zone, Upstream: up.Label, OK: false,

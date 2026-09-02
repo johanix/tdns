@@ -42,6 +42,17 @@ config that would quarantine anything, changing nothing at all; startup has
 no such state and serves what is left. Any build diagnostic maps to a
 whole-config refusal on the reload path.
 
+The consequence, stated so it is not discovered: **a leftover quarantine
+blocks unrelated reloads.** A daemon that started with `mix.example.` serving
+on DoT and its plaintext sibling quarantined is running a config that
+`ReloadZones` would refuse. Adding a third, healthy zone by reload therefore
+fails until the quarantined upstream is fixed or removed as well — repair
+first, then extend, or restart, which accepts both. That is what
+"rejects any config that would quarantine anything" costs. It is chosen over
+the softer "the same quarantines may stay" rule because that rule needs a
+definition of *same* that survives a config rewrite, and the conservative
+version is one sentence an operator can hold in their head.
+
 **Quarantine is a config verdict, reachability is a traffic verdict.** They
 are disjoint and clear differently: `failing` clears on the next successful
 exchange, quarantine only when the table is swapped. A quarantined upstream

@@ -244,3 +244,56 @@ func TestForwardProbeReportsQuarantinedWithoutDialling(t *testing.T) {
 		t.Errorf("quarantined upstream not reported as such: %+v", results[0])
 	}
 }
+
+// The PRIVACY path must not count a quarantined upstream as available. This
+// is the guard for the #474 merge: that branch rewrites hasEncryptedUpstream
+// and adds forwardUpstreamsForPrivacy, both of which range fz.Upstreams
+// directly. Whichever lands second, the selection has to go through
+// liveUpstreams() — otherwise the resolver promises encryption on the
+// strength of an upstream it will never dial, and a placeholder's nil Client
+// can reach the query loop.
+func TestForwardQuarantineExcludedFromPrivacySelection(t *testing.T) {
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
+		// The only ENCRYPTED upstream is unbuildable; the plaintext one is
+		// fine. A zone like this can serve, but never privately.
+		{Zone: "half.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: "not-an-ip.example.com", Transport: "dot"},
+			{Addr: "192.0.2.2"},
+		}},
+	})
+	if len(diags) != 1 {
+		t.Fatalf("want one diag for the unbuildable dot upstream, got %v", diags)
+	}
+	fz := forwards[0]
+	if fz.isQuarantined() {
+		t.Fatal("zone quarantined although the plaintext upstream is usable")
+	}
+	if fz.hasEncryptedUpstream() {
+		t.Error("hasEncryptedUpstream true on the strength of a quarantined upstream: " +
+			"a PRIVACY query would be accepted and then fail")
+	}
+	// And nothing selectable carries a nil client into the query loop.
+	for _, up := range fz.liveUpstreams() {
+		if up.Client == nil {
+			t.Errorf("liveUpstreams returned %s with a nil client", up.Label)
+		}
+	}
+}
+
+// placeholderUpstream is quarantined at construction, not by its caller:
+// an unquarantined placeholder is a nil client on the query path.
+func TestPlaceholderUpstreamIsBornQuarantined(t *testing.T) {
+	up := placeholderUpstream(ImrUpstreamConf{Addr: "nope.example.com", Transport: "dot"}, "unbuildable")
+	q, why := up.quarantineState()
+	if !q || why != "unbuildable" {
+		t.Errorf("placeholder not quarantined at construction: q=%v why=%q", q, why)
+	}
+	if up.Client != nil {
+		t.Error("placeholder carries a client")
+	}
+	// The transport survives so `forward status` does not call a broken dot
+	// upstream do53.
+	if up.Transport != core.TransportDoT {
+		t.Errorf("transport = %v, want dot", up.Transport)
+	}
+}
