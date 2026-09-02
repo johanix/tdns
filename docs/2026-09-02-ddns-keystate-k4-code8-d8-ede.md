@@ -89,6 +89,16 @@ child's retry policy. It now reads `UpdateResult.EDECode`: 514
 the first answer, with an error that names the reason and the action. That
 is how the "waiting will not help" verdict reaches the tdns-auth child.
 
+The first version of this fix did not work, and the re-review caught it:
+`SendUpdate` recorded the EDE only on the per-target status and never on the
+top-level `UpdateResult` the retry arm reads, so on the live path the arm
+never saw an EDE and REFUSED was still retried five times. The test had
+injected the top-level fields and so tested the arm, not the join.
+`SendUpdate` now copies the rejection's EDE onto the result it returns (and
+the accepting answer's, if any), and the test drives the whole join through
+the real sender against an in-process responder answering REFUSED with each
+of the three EDEs.
+
 Two more small things from the same review: a cancel that lands inside the
 *last* verification attempt is now treated as a shutdown and records nothing
 (the backoff branch already did); and the truststore `trust` subcommand
