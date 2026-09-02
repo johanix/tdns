@@ -1233,3 +1233,111 @@ func TestBuildImrForwardsCAFile(t *testing.T) {
 		}
 	}
 }
+
+// startBlackholeUpstream is a UDP socket that accepts packets and never
+// answers. Not the same thing as an unreachable address: that one refuses, or
+// gets an ICMP back, and fails in milliseconds. A blackhole makes the caller
+// wait out its whole timeout, which is the failure mode #470 is about -- a
+// firewall that DROPs rather than REJECTs.
+func startBlackholeUpstream(t *testing.T) (string, uint16, func()) {
+	t.Helper()
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	host, port := splitHostPort(t, pc.LocalAddr().String())
+	return host, port, func() { _ = pc.Close() }
+}
+
+// A blackholed first upstream must not cost the second its chance (#470).
+//
+// The pre-fix behaviour: all upstreams shared the caller's deadline, the
+// blackhole consumed it, and the second upstream was either never reached or
+// reached with microseconds left. Measured in a lab before the fix: a first
+// upstream that REFUSED failed over in 0s, while one that DROPPED produced
+// SERVFAIL at 8s with a healthy second upstream configured.
+func TestForwardBlackholedUpstreamDoesNotStarveTheNext(t *testing.T) {
+	good, goodPort, _, stopGood := startTestUpstream(t)
+	defer stopGood()
+	bh, bhPort, stopBH := startBlackholeUpstream(t)
+	defer stopBH()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: bh, Port: bhPort},
+			{Addr: good, Port: goodPort},
+		}},
+	})
+
+	// A deadline is what makes this bite: without one the old code still got
+	// to the second upstream eventually, just slowly.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA,
+		map[string]*cache.AuthServer{}, false, false)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("blackholed first upstream starved the second: %v (after %v)", err, elapsed)
+	}
+	if rcode != dns.RcodeSuccess || rrset == nil || len(rrset.RRs) != 1 {
+		t.Fatalf("rcode=%d rrset=%v", rcode, rrset)
+	}
+	// The blackhole gets half the budget, so the answer must arrive well
+	// inside the caller's deadline rather than at the edge of it.
+	if elapsed > 2500*time.Millisecond {
+		t.Errorf("answer took %v; the first upstream should have been capped at half the budget", elapsed)
+	}
+}
+
+// An upstream that never got a usable slice of the budget is not an upstream
+// that failed, and must not be recorded as one: doing so marks healthy
+// infrastructure unreachable and drags config status to DEGRADED because some
+// EARLIER upstream was slow (#470).
+func TestForwardStarvedUpstreamIsNotRecordedAsFailed(t *testing.T) {
+	bh, bhPort, stopBH := startBlackholeUpstream(t)
+	defer stopBH()
+	good, goodPort, _, stopGood := startTestUpstream(t)
+	defer stopGood()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: bh, Port: bhPort},
+			{Addr: good, Port: goodPort},
+		}},
+	})
+
+	// Pin the blackhole's own client timeout just under the budget, so it
+	// fails at 850ms and leaves a sliver rather than consuming everything.
+	// That sliver is the point: it is too small to answer in, but not zero,
+	// so the pre-fix code ATTEMPTED the healthy upstream with it, watched the
+	// dial time out, and recorded a working upstream as unreachable.
+	for _, up := range imr.ForwardZones()[0].Upstreams {
+		if up.Addr != bh {
+			continue
+		}
+		c := up.Client.(*core.DNSClient)
+		c.Timeout = 850 * time.Millisecond
+		c.DNSClientUDP.Timeout = c.Timeout
+		c.DNSClientTCP.Timeout = c.Timeout
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
+	defer cancel()
+	_, _, _, _, _ = imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA,
+		map[string]*cache.AuthServer{}, false, false)
+
+	for _, up := range imr.ForwardZones()[0].Upstreams {
+		if up.Addr != good {
+			continue
+		}
+		up.mu.Lock()
+		failing, failures := up.failing, up.failures
+		up.mu.Unlock()
+		if failing || failures > 0 {
+			t.Errorf("the healthy upstream was recorded as failed (failing=%v failures=%d) after "+
+				"being starved of budget by a blackholed upstream ahead of it", failing, failures)
+		}
+	}
+}

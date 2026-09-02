@@ -77,6 +77,11 @@ func IsEncryptedTransport(t Transport) bool {
 // go through ExchangeCtx / ExchangeCtxWithResult rather than calling
 // Exchange directly, so a client that can be interrupted is interrupted and
 // one that cannot still runs.
+// DefaultClientTimeout bounds one exchange. Exported because the forwarding
+// path divides it into per-upstream slices (#470): as two separate literals
+// the budget and the thing it is a budget for could drift apart silently.
+const DefaultClientTimeout = 5 * time.Second
+
 type DNSClienter interface {
 	Exchange(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error)
 	ExchangeWithResult(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error)
@@ -228,7 +233,7 @@ func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config, opts 
 		Transport: transport,
 		Port:      port,
 		TLSConfig: tlsConfig,
-		Timeout:   5 * time.Second,
+		Timeout:   DefaultClientTimeout,
 	}
 
 	// Initialize transport-specific configurations

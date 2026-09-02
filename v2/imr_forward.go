@@ -158,6 +158,29 @@ func (fz *ForwardZone) hasEncryptedUpstream() bool {
 }
 
 // forwardTransportDefaults maps a transport to its standard port.
+// Time budget for one forward query, divided among the zone's upstreams (#470).
+//
+// Every upstream used to share a single deadline, so a blackholed first
+// upstream — one that drops rather than refuses — consumed the whole of it and
+// the second was never really tried. Measured before the fix: a first upstream
+// that refused was failed over in 0s; one that dropped SERVFAILed at 8s with a
+// healthy second upstream configured.
+const (
+	// forwardMinAttempt is the least time in which an attempt could
+	// plausibly succeed. A TLS 1.3 handshake plus a query is comfortably
+	// 300-400ms on a slow link, and DoH over HTTP/2 more, so a slice below
+	// this cannot produce an answer for the transports that most need the
+	// fallback. An upstream whose slice would be smaller is NOT attempted,
+	// which is a different thing from being attempted and failing — see
+	// the starved handling in forwardQuery.
+	forwardMinAttempt = 500 * time.Millisecond
+
+	// forwardDefaultBudget is what gets divided when the caller's context
+	// carries no deadline. It is the client timeout, so a single upstream
+	// behaves exactly as it did before this split existed.
+	forwardDefaultBudget = core.DefaultClientTimeout
+)
+
 var forwardTransportDefaults = map[core.Transport]string{
 	core.TransportDo53:    "53",
 	core.TransportDo53TCP: "53",
@@ -351,12 +374,32 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		m.CheckingDisabled = true
 	}
 
-	var lastErr error
-	attempts := 0
+	// Eligible upstreams are resolved BEFORE the loop because the time budget
+	// is divided among them: the split needs to know how many there are, and
+	// the requireEncrypted skip changes that count.
+	eligible := make([]*ForwardUpstream, 0, len(fz.Upstreams))
 	for _, up := range fz.Upstreams {
 		if requireEncrypted && !core.IsEncryptedTransport(up.Transport) {
 			continue
 		}
+		eligible = append(eligible, up)
+	}
+
+	// The budget is whichever is tighter: what the caller still allows, or the
+	// client timeout. Taking only the latter would let a query outlive the
+	// deadline its caller set.
+	budget := forwardDefaultBudget
+	if dl, ok := ctx.Deadline(); ok {
+		if r := time.Until(dl); r < budget {
+			budget = r
+		}
+	}
+	overallDeadline := time.Now().Add(budget)
+
+	var lastErr error
+	attempts := 0
+	starved := 0
+	for i, up := range eligible {
 		select {
 		case <-ctx.Done():
 			return nil, 0, cache.ContextFailure, core.TransportDo53,
@@ -373,13 +416,52 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			imr.Cache.Logger.Printf("forwardQuery: forwarding <%s, %s> (zone %s) to upstream %s",
 				qname, dns.TypeToString[qtype], fz.Zone, up.Label)
 		}
+		// Front-loaded halving of what is LEFT, not of the original budget:
+		// an upstream that refuses in 5ms donates its unused time to whoever
+		// follows, which is what keeps the already-working fast-failure case
+		// fast. The last upstream takes the whole remainder rather than its
+		// geometric share — the alternative leaves budget unspent on a query
+		// that is about to fail anyway.
+		remaining := time.Until(overallDeadline)
+		slice := remaining / 2
+		if i == len(eligible)-1 {
+			slice = remaining
+		}
+		if slice < forwardMinAttempt {
+			// Not attempted. Deliberately not a failure: recording it would
+			// mark a healthy upstream unreachable because an earlier one was
+			// slow, which is exactly the DEGRADED-on-healthy-infrastructure
+			// half of #470.
+			starved++
+			lastErr = fmt.Errorf("upstream %s not attempted: %v left, below the %v an attempt needs",
+				up.Label, remaining.Round(time.Millisecond), forwardMinAttempt)
+			lgDns.Debug("forwardQuery: upstream starved", "qname", qname, "upstream", up.Label,
+				"remaining", remaining, "floor", forwardMinAttempt)
+			continue
+		}
+
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, slice)
 		start := time.Now()
 		// Cancellable (#435): with a plain Exchange, ordered failover could
 		// only move on between upstreams, so a hung first upstream cost the
-		// full client timeout before the second was even tried.
-		r, _, err := core.ExchangeCtx(ctx, up.Client, m, up.Addr, Globals.Debug && !imr.Quiet)
+		// full client timeout before the second was even tried. The bounded
+		// attemptCtx is what makes that cancellation happen on schedule
+		// rather than only when the caller gives up (#470).
+		r, _, err := core.ExchangeCtx(attemptCtx, up.Client, m, up.Addr, Globals.Debug && !imr.Quiet)
+		// Truncated by its own slice, with the caller still waiting: the
+		// upstream ran out of TIME, it did not fail.
+		truncated := attemptCtx.Err() != nil && ctx.Err() == nil
+		cancelAttempt()
 		if err == nil && r == nil {
 			err = fmt.Errorf("nil response from upstream %s", up.Label)
+		}
+		if err != nil && truncated {
+			starved++
+			lastErr = fmt.Errorf("upstream %s did not answer within its %v of the budget",
+				up.Label, slice.Round(time.Millisecond))
+			lgDns.Debug("forwardQuery: upstream slice expired", "qname", qname,
+				"upstream", up.Label, "slice", slice)
+			continue
 		}
 		if cerr := ctx.Err(); cerr != nil && err != nil {
 			// Abandoned, not failed. The ctx.Done() check at the top of the
@@ -455,9 +537,17 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		}
 	}
 	fz.noteAllUpstreamsFailed(qname, qtype, attempts, lastErr)
+	// starved is reported separately from attempts because the two call for
+	// different action: attempts that failed say something about the
+	// upstreams, whereas starved ones say the budget was too small to try
+	// them -- usually because an earlier upstream is blackholing.
+	starvedNote := ""
+	if starved > 0 {
+		starvedNote = fmt.Sprintf(", starved=%d", starved)
+	}
 	return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
-		fmt.Errorf("forward zone %s: no usable response for '%s %s' from any of its %d upstreams (attempts=%d, last error: %v)",
-			fz.Zone, qname, dns.TypeToString[qtype], len(fz.Upstreams), attempts, lastErr)
+		fmt.Errorf("forward zone %s: no usable response for '%s %s' from any of its %d upstreams (attempts=%d%s, last error: %v)",
+			fz.Zone, qname, dns.TypeToString[qtype], len(fz.Upstreams), attempts, starvedNote, lastErr)
 }
 
 // updateForwardUpstreamError recomputes the aggregate Upstream/ImrForward
