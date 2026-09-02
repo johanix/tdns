@@ -43,6 +43,9 @@ dnssecvalidated	  INTEGER DEFAULT 0,
 source		      TEXT,
 keyrr		      TEXT,
 comment		      TEXT,
+validation_failed INTEGER NOT NULL DEFAULT 0,
+validation_error  TEXT NOT NULL DEFAULT '',
+validation_failed_at TEXT NOT NULL DEFAULT '',
 UNIQUE (zonename, keyid)
 )`,
 

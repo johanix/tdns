@@ -275,6 +275,14 @@ func dbMigrateSchema(db *sql.DB) {
 		{"ZonePolicyOverride", "applied_policy", "ALTER TABLE ZonePolicyOverride ADD COLUMN applied_policy TEXT"},
 		{"ZonePolicyOverride", "applied_source", "ALTER TABLE ZonePolicyOverride ADD COLUMN applied_source TEXT"},
 		{"ZonePolicyOverride", "applied_at", "ALTER TABLE ZonePolicyOverride ADD COLUMN applied_at TEXT"},
+		// K-4 code 8 (KEY_VALIDATION_FAILED): the parent's automatic
+		// verification of a child SIG(0) key exhausted its attempts. Persisted
+		// so the KeyState inquiry and the UPDATE-response EDE can tell "failed"
+		// from "in progress" across a restart. A re-upload of the key replaces
+		// the row and so clears it; a successful verification clears it too.
+		{"Sig0TrustStore", "validation_failed", "ALTER TABLE Sig0TrustStore ADD COLUMN validation_failed INTEGER NOT NULL DEFAULT 0"},
+		{"Sig0TrustStore", "validation_error", "ALTER TABLE Sig0TrustStore ADD COLUMN validation_error TEXT NOT NULL DEFAULT ''"},
+		{"Sig0TrustStore", "validation_failed_at", "ALTER TABLE Sig0TrustStore ADD COLUMN validation_failed_at TEXT NOT NULL DEFAULT ''"},
 	}
 
 	for _, m := range migrations {

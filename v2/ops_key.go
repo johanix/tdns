@@ -151,6 +151,13 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 	return nil
 }
 
+// errBootstrapManual: the selected SIG(0) bootstrap method is manual, so no
+// automatic ceremony was (or could be) sent. The draft's
+// MANUAL-BOOTSTRAP-REQUIRED state seen from the child's side; callers with a
+// per-load or retry loop treat it as "waiting for the operator", not as an
+// error to retry or to log as such.
+var errBootstrapManual = errors.New("manual SIG(0) bootstrap required by the parent")
+
 func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (string, UpdateResult, error) {
 	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods())
 }
@@ -215,7 +222,13 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 
 	lgHandler.Info("BootstrapSig0KeyWithParent: DSYNC target found", "zone", zd.ZoneName, "target", dsyncTarget.RR)
 
-	advertised, present := advertisedBootstrapMethods(ctx, Globals.ImrEngine, dsyncTarget.Name)
+	advertised, present, aerr := advertisedBootstrapMethods(ctx, Globals.ImrEngine, dsyncTarget,
+		DelegationSyncConfig().Child.Update.AllowInsecure)
+	if aerr != nil {
+		// Retryable, not "no advertisement": see advertisedBootstrapMethods.
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): %v", zd.ZoneName, aerr), UpdateResult{},
+			fmt.Errorf("BootstrapSig0KeyWithParent(%q): %w", zd.ZoneName, aerr)
+	}
 	method, merr := selectChildBootstrapMethod(advertised, present, willing)
 	if merr != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): %v", zd.ZoneName, merr), UpdateResult{}, merr
@@ -223,8 +236,23 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 	lgHandler.Info("BootstrapSig0KeyWithParent: selected bootstrap method",
 		"zone", zd.ZoneName, "method", method, "advertised", advertised, "willing", willing)
 	if method == "manual" {
-		msg := fmt.Sprintf("BootstrapSig0KeyWithParent(%q): bootstrap method is manual; not sending KEY UPDATE", zd.ZoneName)
-		return msg, UpdateResult{}, fmt.Errorf("bootstrap method is manual")
+		// Not a failure: the parent said so (its SVCB advertisement, or the
+		// child's own list), and the operator has to do the rest. Callers
+		// that run on every zone load log this at Info, not Error.
+		msg := fmt.Sprintf("BootstrapSig0KeyWithParent(%q): parent requires manual SIG(0) bootstrap; not sending KEY UPDATE", zd.ZoneName)
+		return msg, UpdateResult{}, fmt.Errorf("%w for %s", errBootstrapManual, zd.ZoneName)
+	}
+	if method == "at-ns" {
+		// The parent will look for this KEY at _sig0key.<child>._signal.<ns>
+		// (LookupChildKeyAtSignal) the moment the ceremony arrives, so it has
+		// to be APPLIED, not merely queued, before the ceremony is sent; the
+		// publish waits for the updater's verdict. The willing list only
+		// offers at-ns when at least one signal name is publishable here, so
+		// zero means the zone changed under us or the apply failed.
+		if n := zd.publishSig0KeyAtSignalNames(ctx, []dns.RR{&pkc.KeyRR}); n == 0 {
+			msg := fmt.Sprintf("BootstrapSig0KeyWithParent(%q): at-ns selected but the KEY could not be published at any _signal name", zd.ZoneName)
+			return msg, UpdateResult{}, fmt.Errorf("at-ns bootstrap: no _sig0key._signal name for %s is in a zone this server is primary for", zd.ZoneName)
+		}
 	}
 
 	// 3. Create the self-signed bootstrap ceremony "DEL <child> ANY KEY" +
@@ -499,6 +527,12 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 		zd.Logger.Print(msg)
 		return "", oldkeyid, newkeyid, ur, errors.New(msg)
 	}
+	// And wherever an at-ns bootstrap put the old one.
+	var newKeyRRs []dns.RR
+	for _, k := range newSak.Keys {
+		newKeyRRs = append(newKeyRRs, &k.KeyRR)
+	}
+	zd.refreshSig0KeyAtSignalNames(ctx, newKeyRRs)
 	//	} // end of phase 3
 
 	return fmt.Sprintf("RolloverSig0KeyWithParent(%q) successfully rolled from SIG(0) key %d to SIG(0) key %d",

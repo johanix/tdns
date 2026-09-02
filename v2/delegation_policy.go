@@ -114,9 +114,11 @@ func compileDelegationPolicy(name string, conf DelegationPolicyConf) (Delegation
 
 func compileChildBootstrapMethods(methods []string) ([]string, error) {
 	if methods == nil {
-		// at-ns is valid to opt into, but the child cannot yet publish
-		// RFC 9615 _signal, so the omit-default is at-apex only.
-		return []string{"at-apex"}, nil
+		// Both secure automatic methods. at-ns is filtered back out per zone
+		// when this server cannot publish the child's KEY at any of its NS
+		// signal names (childBootstrapMethods), so listing it here costs a
+		// zone that cannot use it nothing.
+		return []string{"at-apex", "at-ns"}, nil
 	}
 	if err := validateConfigTokens(methods, validChildMethods, "child.update.bootstrap.methods"); err != nil {
 		return nil, err
