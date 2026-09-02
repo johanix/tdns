@@ -18,6 +18,15 @@ func TestExpandDsyncTemplateRoot(t *testing.T) {
 	}
 }
 
+func TestDsyncOwnerNameRoot(t *testing.T) {
+	if got := dsyncOwnerName("."); got != "_dsync.root." {
+		t.Fatalf("root owner = %q", got)
+	}
+	if got := dsyncOwnerName("example."); got != "_dsync.example." {
+		t.Fatalf("zone owner = %q", got)
+	}
+}
+
 func TestBootstrapSVCBReconcile(t *testing.T) {
 	target := "updates.example."
 	desired := "at-apex,at-ns"

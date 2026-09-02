@@ -15,12 +15,9 @@ import (
 //
 // This test pins the parse, not the values.
 func TestUnpublishDsyncPlaceholderParses(t *testing.T) {
-	// Not the root zone: "_dsync." + "." is "_dsync..", which is not a legal
-	// owner name. PublishDsyncRRs builds the name the same way, so a root zone
-	// acting as a delegation-sync parent is broken on both sides -- a separate,
-	// pre-existing limitation, not what this test is about.
-	for _, zone := range []string{"example.", "child.example.", "sub.child.example."} {
-		dsyncStr := fmt.Sprintf("_dsync.%s 0 IN DSYNC CDS NOTIFY 53 .", zone)
+	for _, zone := range []string{".", "example.", "child.example.", "sub.child.example."} {
+		owner := dsyncOwnerName(zone)
+		dsyncStr := fmt.Sprintf("%s 0 IN DSYNC CDS NOTIFY 53 .", owner)
 		rr, err := dns.NewRR(dsyncStr)
 		if err != nil {
 			t.Fatalf("zone %s: the delete placeholder does not parse: %v (%q)",
@@ -29,10 +26,9 @@ func TestUnpublishDsyncPlaceholderParses(t *testing.T) {
 		if rr == nil {
 			t.Fatalf("zone %s: parsed to nil", zone)
 		}
-		if got := rr.Header().Name; got != "_dsync."+zone {
-			t.Errorf("owner = %q, want %q", got, "_dsync."+zone)
+		if got := rr.Header().Name; got != owner {
+			t.Errorf("owner = %q, want %q", got, owner)
 		}
-		// The delete works by class, so that is what must survive.
 		rr.Header().Class = dns.ClassANY
 		if rr.Header().Class != dns.ClassANY {
 			t.Error("class did not take")

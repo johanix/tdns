@@ -29,8 +29,10 @@ func TestClassifyUnusedConfigKeys(t *testing.T) {
 		// deprecated — U-3 removed keybootstrap / keyupload / key-verification
 		"updatepolicy.child.keybootstrap",
 		"keybootstrap",
-		"delegationsync.parent.update.keyupload",
+		"updatepolicy.child.keyupload",
 		"delegationsync.parent.update.key-verification",
+		"delegationsync.parent.bootstrap",
+		"delegationsync.parent.bootstrap.methods",
 		// genuine typos — not deprecated, should land in unknown
 		"servce", // misspelled "service"
 		"dnsengine.adresses",
@@ -55,8 +57,10 @@ func TestClassifyUnusedConfigKeys(t *testing.T) {
 		"zones[0].multi_signer",
 		"updatepolicy.child.keybootstrap",
 		"keybootstrap",
-		"delegationsync.parent.update.keyupload",
+		"updatepolicy.child.keyupload",
 		"delegationsync.parent.update.key-verification",
+		"delegationsync.parent.bootstrap",
+		"delegationsync.parent.bootstrap.methods",
 	} {
 		if !gotDep[want] {
 			t.Errorf("expected %q classified as deprecated, was not", want)

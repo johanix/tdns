@@ -380,6 +380,10 @@ var deprecatedConfigKeys = append([]deprecatedConfigKey{
 		advice: "`keyupload:` moved to `delegationsync.policies.*.bootstrap.allow-unvalidated-upload`"},
 	{match: ".key-verification",
 		advice: "`key-verification:` moved to `delegationsync.policies.*.bootstrap` (mechanisms, require-dnssec, retry)"},
+	{match: ".parent.bootstrap",
+		advice: "`delegationsync.parent.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
+	{match: ".parent.bootstrap.methods",
+		advice: "`delegationsync.parent.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
 }, underscoreSpellingMigrations()...)
 
 // snakeCaseConfigKeys lists every config key that was spelled with underscores
@@ -2074,6 +2078,11 @@ func (conf *Config) reloadDelegationSyncFromFile() error {
 	decoderConfig := &mapstructure.DecoderConfig{
 		TagName: "yaml",
 		Result:  &partial,
+		// Only the duration hook is needed: this block has no PeerConf/ACL
+		// fields. `partial` is zero-valued each call so ZeroFields is
+		// irrelevant. Metadata is omitted: unused/deprecated keys (a stale
+		// `parent.bootstrap:` among them) are reported on a full ParseConfig,
+		// not on this SIGHUP path.
 		DecodeHook: mapstructure.ComposeDecodeHookFunc(
 			mapstructure.StringToTimeDurationHookFunc(),
 		),

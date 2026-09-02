@@ -80,10 +80,12 @@ func LookupChildKeyAtSignal(ctx context.Context, childZone string, imr *Imr) ([]
 }
 
 // VerifyChildKey checks whether a child's KEY (identified by keyRR string) can
-// be found via the configured verification mechanisms (at-apex, at-ns). Returns
-// true if any mechanism succeeds (key found + optionally DNSSEC-validated).
-func VerifyChildKey(ctx context.Context, childZone string, keyRR string, imr *Imr) (verified bool, dnssecValidated bool) {
-	mechanisms := parentDelegationPolicy(childZone).Mechanisms
+// be found via the policy's verification mechanisms (at-apex, at-ns). The
+// policy is the caller's: TriggerChildKeyVerification resolves it once from
+// the receiving parent zone and passes it here rather than looking it up
+// again from the child name.
+func VerifyChildKey(ctx context.Context, childZone string, keyRR string, imr *Imr, pol DelegationPolicy) (verified bool, dnssecValidated bool) {
+	mechanisms := pol.Mechanisms
 	if len(mechanisms) == 0 {
 		return false, false
 	}
@@ -203,7 +205,7 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, pa
 			lgSigner.Info("verifying child key via DNS",
 				"zone", childZone, "keyid", keyid, "attempt", attempt, "max", maxAttempts)
 
-			verified, dnssecValidated := VerifyChildKey(ctx, childZone, keyRR, imr)
+			verified, dnssecValidated := VerifyChildKey(ctx, childZone, keyRR, imr, pol)
 
 			// Compiled policy: absent require-dnssec became true at compile.
 			requireDnssec := pol.RequireDnssec

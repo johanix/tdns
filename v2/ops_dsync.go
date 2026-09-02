@@ -85,7 +85,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	//
 	// So: whatever is already published stays exactly as it is, and only
 	// schemes with no DSYNC record of their own are synthesized.
-	owner, err := zd.GetOwner("_dsync." + zd.ZoneName)
+	owner, err := zd.GetOwner(dsyncOwnerName(zd.ZoneName))
 	if err != nil {
 		return fmt.Errorf("PublishDsyncRRs: error fetching _dsync owner for zone %s: %v", zd.ZoneName, err)
 	}
@@ -156,7 +156,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				return fmt.Errorf("zone %s: no notify types found, config broken", zd.ZoneName)
 			}
 			for _, t := range notifyTypes {
-				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", dsyncOwnerLabel(zd.ZoneName), ttl, t, s, port, target)
+				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", dsyncOwnerName(zd.ZoneName), ttl, t, s, port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
@@ -192,7 +192,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				return fmt.Errorf("zone %s: no update types found, config broken", zd.ZoneName)
 			}
 			for _, t := range updateTypes {
-				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", dsyncOwnerLabel(zd.ZoneName), ttl, t, s, port, target)
+				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", dsyncOwnerName(zd.ZoneName), ttl, t, s, port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
@@ -233,7 +233,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 			}
 
 			for _, t := range apiconf.Types {
-				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", dsyncOwnerLabel(zd.ZoneName), ttl, t, s, apiconf.Port, target)
+				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", dsyncOwnerName(zd.ZoneName), ttl, t, s, apiconf.Port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
@@ -344,6 +344,10 @@ func dsyncOwnerLabel(zonename string) string {
 	return zonename
 }
 
+func dsyncOwnerName(zonename string) string {
+	return dns.Fqdn("_dsync." + dsyncOwnerLabel(zonename))
+}
+
 func expandDsyncTemplate(tpl, zonename string) string {
 	if tpl == "" {
 		return ""
@@ -413,6 +417,9 @@ func bootstrapSVCBReconcile(target, desired string, existing []dns.RR, ttl uint3
 }
 
 func (zd *ZoneData) bootstrapSVCBActions(ttl uint32) []dns.RR {
+	// Only reconcile SVCB while this parent still offers UPDATE. Removing
+	// "update" from parent.schemes does not withdraw a previously published
+	// bootstrap SVCB; UnpublishDsyncRRs is the operator action that drops it.
 	if !dsyncSchemeConfigured(DelegationSyncConfig().Parent.Schemes, "update") {
 		return nil
 	}
@@ -437,7 +444,7 @@ func (zd *ZoneData) UnpublishDsyncRRs() error {
 	// (see core/rr_dsync.go). The previous form omitted the leading type field
 	// and quoted the scheme, so dns.NewRR failed on every zone and unpublish
 	// could never do anything at all.
-	dsync_str := fmt.Sprintf("_dsync.%s 0 IN DSYNC CDS NOTIFY 53 .", zd.ZoneName)
+	dsync_str := fmt.Sprintf("%s 0 IN DSYNC CDS NOTIFY 53 .", dsyncOwnerName(zd.ZoneName))
 
 	anti_dsync, err := dns.NewRR(dsync_str)
 	if err != nil {
