@@ -357,6 +357,15 @@ func TestVerifyKeyStateResponseBogusIsNeverWaived(t *testing.T) {
 		t.Fatalf("insecure under allow-insecure: auth=%v err=%v, want accepted unauthenticated", auth, err)
 	}
 
+	// The bogus-DSYNC refusal comes before the unsigned waiver: an UNSIGNED
+	// reply from a bogus target is refused under allow-insecure too (the
+	// re-review's R1).
+	unsigned, unsignedWire := keyStateReply(t, inquiry, &edns0.KeyStateOption{KeyID: d7KeyID, KeyState: edns0.KeyStateUnknown}, "", nil)
+	if _, err := verifyKeyStateResponse(ctx, unsignedWire, unsigned, bogusTarget, noTrust, fetchKeys([]dns.RR{receiverKey}, true, nil), true); err == nil ||
+		!strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("unsigned reply from a bogus DSYNC target under allow-insecure: err = %v, want refusal", err)
+	}
+
 	// A pinned key does not care what DNSSEC said about the DSYNC.
 	childKdb := newTestKeyDB(t)
 	for _, sub := range []string{"add", "trust"} {
@@ -406,12 +415,6 @@ func validChildKeyRRBase64() string {
 	return "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 }
 
-// TestQueryKeyStateRoundTripTCP drives the child's inquiry against a real
-// in-process responder that signs with the real parent-side writer
-// (keyStateResponseWriter). This is what proves the wire-bytes handling: the
-// SIG(0) the server computed over its own packed reply verifies against the
-// bytes the child read off the TCP socket. It also proves the inquiry uses
-// TCP -- the responder listens on nothing else.
 // startKeyStateResponder runs an in-process TCP responder with the given
 // handler and returns its address. Shutdown is registered on t.
 func startKeyStateResponder(t *testing.T, handler dns.HandlerFunc) string {

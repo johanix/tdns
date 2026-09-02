@@ -170,6 +170,38 @@ func verifyKeyStateResponse(ctx context.Context, wire []byte, r *dns.Msg, target
 	receiver := dns.Fqdn(target.Name)
 
 	sig := keyStateSig0(r)
+	if sig != nil {
+		if !core.EqualNames(sig.SignerName, receiver) {
+			return false, fmt.Errorf("KeyState response signed by %q, but the UPDATE Receiver is %q", sig.SignerName, receiver)
+		}
+
+		// 1. A manually trusted receiver key authenticates on its own: the
+		// operator bound this exact (name, keyid) to the parent out of band,
+		// so how the target name was discovered -- and what DNSSEC said about
+		// that discovery -- no longer matters.
+		if trust != nil {
+			if key, ok := trust(receiver, sig.KeyTag); ok {
+				if err := sig0Verify(sig, key, wire); err != nil {
+					return false, receiverSigFailure(receiver, sig, err)
+				}
+				lgDns.Debug("KeyState response authenticated by manually trusted receiver key",
+					"receiver", receiver, "keyid", sig.KeyTag)
+				return true, nil
+			}
+		}
+	}
+
+	// Nothing is pinned from here on, so the DSYNC that named the receiver is
+	// load-bearing. A bogus verdict on it is a chain of trust that exists and
+	// failed -- what an attacker substituting the DSYNC looks like -- and it
+	// is refused before any waiver, signed reply or not: the unsigned branch
+	// below is the one thing allow-insecure grants, and it does not extend to
+	// this.
+	if target.Bogus {
+		return false, fmt.Errorf("the DSYNC lookup that named the UPDATE Receiver %s failed DNSSEC validation (bogus); refusing regardless of %s",
+			receiver, allowInsecureKnob)
+	}
+
 	if sig == nil {
 		if allowInsecure {
 			lgDns.Warn("KeyState response is not SIG(0)-signed; acting on it because "+allowInsecureKnob+" is set",
@@ -180,32 +212,9 @@ func verifyKeyStateResponse(ctx context.Context, wire []byte, r *dns.Msg, target
 			receiver, allowInsecureKnob)
 	}
 
-	if !core.EqualNames(sig.SignerName, receiver) {
-		return false, fmt.Errorf("KeyState response signed by %q, but the UPDATE Receiver is %q", sig.SignerName, receiver)
-	}
-
-	// 1. A manually trusted receiver key authenticates on its own: the
-	// operator bound this exact (name, keyid) to the parent out of band, so
-	// how the target name was discovered no longer matters.
-	if trust != nil {
-		if key, ok := trust(receiver, sig.KeyTag); ok {
-			if err := sig0Verify(sig, key, wire); err != nil {
-				return false, receiverSigFailure(receiver, sig, err)
-			}
-			lgDns.Debug("KeyState response authenticated by manually trusted receiver key",
-				"receiver", receiver, "keyid", sig.KeyTag)
-			return true, nil
-		}
-	}
-
-	// 2. The KEY the receiver publishes at its own name. A bogus verdict --
-	// on the KEY, or on the DSYNC that named the receiver -- is a chain of
-	// trust that exists and failed. That is what an attacker substituting
-	// either record looks like, and no lab knob waives it.
-	if target.Bogus {
-		return false, fmt.Errorf("the DSYNC lookup that named the UPDATE Receiver %s failed DNSSEC validation (bogus); refusing regardless of %s",
-			receiver, allowInsecureKnob)
-	}
+	// 2. The KEY the receiver publishes at its own name. A bogus verdict on
+	// it is the same failed chain of trust as a bogus DSYNC above, and no lab
+	// knob waives it either.
 	var key *dns.KEY
 	keyValidated := false
 	if fetch != nil {

@@ -648,6 +648,10 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			if !imr.upgradeIndirectCacheHits() && crrset.RRset != nil && crrset.RRset.RRtype == qtype {
 				lgImr.Debug("ImrQuery: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 				resp.RRset = crrset.RRset
+				// Every path that yields an RRset reports its verdict; here it is
+				// whatever the cache holds for the indirect data (usually none).
+				resp.ValidationState = crrset.State
+				resp.Validated = crrset.State == cache.ValidationStateSecure
 				return &resp, nil
 			}
 			lgImr.Debug("ImrQuery: cache hit but indirect context, issuing direct query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
