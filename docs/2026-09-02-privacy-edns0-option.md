@@ -63,6 +63,13 @@ The status is attached **only when the query carried the PRIVACY
 option**, at any level. A client that never asked gets an unchanged
 response.
 
+Every answer carries it: positive, NXDOMAIN and NODATA alike, whether
+served from cache or fetched live. A negative answer was fetched over a
+transport exactly as a positive one was. The SERVFAIL paths are the
+deliberate exception -- privacy-unavailable, DNSSEC-bogus -- where there
+is no transport whose privacy could be reported and the EDE is the
+signal.
+
 One imprecision is known and accepted: `PrivacyCached` is reported for
 answers `ImrResponder` serves from its own cache short-circuits. Deeper
 inside the walk, `IterativeDNSQuery` returns the *recorded* transport
@@ -103,6 +110,21 @@ root refresh -- always passes `PrivacyNone`. Privacy is a client signal
 about a client's query; it is not a property of the resolver's
 housekeeping.
 
+### Strict privacy suppresses the DNSKEY transport bypass
+
+`dnskeyTransportBypass` returns false under `PrivacyStrict`, whatever
+`dnssec.dnskey-query-transport` says. The bypass resolves a transport
+through `preferredDNSKEYTransport`, which reads `server.Transports`
+alone and falls back to `Do53TCP`; `candidateTransports` also accepts an
+encrypted transport known only from `TransportWeights`. On a server
+where those two maps disagree, a strict DNSKEY query could pass the
+precheck on the strength of a weighted DoT and then go out in cleartext.
+
+Suppressing the bypass costs nothing. Strict privacy already restricts
+the query to DoT/DoQ/DoH, every one of them a stream transport -- which
+is the UDP-truncation escape the bypass exists to reach. Opportunistic
+and none are unaffected.
+
 ### The strict-privacy failure is a sentinel
 
 `ErrPrivacyUnavailable` (`v2/dnslookup.go`), matched with `errors.Is`.
@@ -124,6 +146,13 @@ path that can report it attaches the EDE
 - the responder's NS-address-resolution branch, which remembers a
   strict-privacy failure across callback attempts (a later address may
   still produce an answer) and reports it only if none of them does.
+
+The EDE extra-text says "no answer was obtainable over an encrypted
+transport", which is true of both dead ends. It used to say "only
+unencrypted transport available" -- true of the precheck, a lie about
+exhaustion, where DoT was tried and simply never answered. The codepoint
+is right in both cases: the client forbade the fallback that might have
+worked.
 
 The precheck asks `candidateTransports` whether a server has an
 encrypted transport rather than scanning the server itself, so it cannot

@@ -13,6 +13,7 @@ import (
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -135,8 +136,16 @@ func (imr *Imr) dnskeyPolicy() DNSKEYTransportPolicy {
 //   - force_udp:       never bypass.
 //   - use_ds_signal:   bypass only when the cached parent DS uses a large alg.
 //   - try/force_encrypted: always bypass.
-func (imr *Imr) dnskeyTransportBypass(qname string, qtype uint16) bool {
-	if imr == nil || qtype != dns.TypeDNSKEY {
+//
+// Strict privacy suppresses the bypass entirely. preferredDNSKEYTransport
+// resolves against server.Transports alone and falls back to Do53TCP, so on a
+// server whose encrypted transport is known only from TransportWeights the
+// bypass would rewrite an encrypted tuple onto cleartext -- precisely what the
+// client forbade. Nothing is lost by suppressing it: under strict privacy
+// candidateTransports already yields only DoT/DoQ/DoH, every one of them a
+// stream transport, which is the truncation escape the bypass exists to get.
+func (imr *Imr) dnskeyTransportBypass(qname string, qtype uint16, privacy edns0.PrivacyLevel) bool {
+	if imr == nil || qtype != dns.TypeDNSKEY || privacy == edns0.PrivacyStrict {
 		return false
 	}
 	switch imr.dnskeyPolicy() {

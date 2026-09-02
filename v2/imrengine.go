@@ -883,13 +883,26 @@ func setPrivacyStatus(m *dns.Msg, msgoptions *edns0.MsgOptions, status edns0.Pri
 // one that first has to resolve NS addresses. Without it the second path
 // answered a bare SERVFAIL, indistinguishable from any other failure, for a
 // client that had explicitly asked to be told why.
+// privacyStatusFor maps the transport an answer actually arrived over onto the
+// response-direction PRIVACY status.
+func privacyStatusFor(transport core.Transport) edns0.PrivacyStatus {
+	if core.IsEncryptedTransport(transport) {
+		return edns0.PrivacyEncrypted
+	}
+	return edns0.PrivacyCleartext
+}
+
 func attachPrivacyUnavailableEDE(m, r *dns.Msg, zone string, msgoptions *edns0.MsgOptions) {
 	m.SetRcode(r, dns.RcodeServerFailure)
 	// An EDE has nowhere to live in a response to a query that carried no OPT.
 	if r.IsEdns0() == nil {
 		return
 	}
-	edeText := "Strict privacy requested but only unencrypted transport available"
+	// Wording covers both ways to reach this: no encrypted transport was
+	// available at all, and every encrypted transport that was available
+	// failed. "Only unencrypted transport available" was true of the first and
+	// a lie about the second -- DoT was tried, it just never answered.
+	edeText := "Strict privacy requested but no answer was obtainable over an encrypted transport"
 	if zone != "" {
 		edeText += fmt.Sprintf(" for zone %s", zone)
 	}
@@ -1153,11 +1166,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		// and reporting the recorded transport is never a claim of MORE
 		// privacy than the data got. Only ImrResponder's own cache
 		// short-circuits, above, can say "from cache" without qualification.
-		if core.IsEncryptedTransport(transport) {
-			setPrivacyStatus(m, msgoptions, edns0.PrivacyEncrypted)
-		} else {
-			setPrivacyStatus(m, msgoptions, edns0.PrivacyCleartext)
-		}
+		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		// Set AD if this RRset is ValidationStateSecure (from cache or on-the-fly)
 		vstate := cache.ValidationStateNone
 		var err error
@@ -1213,10 +1222,20 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		w.WriteMsg(m)
 		return true, nil
 	}
+	// A negative answer was fetched over a transport just as a positive one
+	// was, so it carries the same status. Omitting it here was a hole a client
+	// could not read as anything but "the resolver ignored my request": the
+	// cached-negative paths in ImrResponder do attach PrivacyCached, and the
+	// migration note tells a strict client to treat a missing status as a
+	// resolver that did not honor the option.
+	//
+	// The SERVFAIL paths above stay status-less on purpose -- there the EDE is
+	// the signal, and there is no transport whose privacy could be reported.
 	switch context {
 	case cache.ContextNXDOMAIN:
 		m.SetRcode(r, dns.RcodeNameError)
 		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r)
+		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil
 	case cache.ContextReferral:
@@ -1225,6 +1244,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 	case cache.ContextNoErrNoAns:
 		m.SetRcode(r, dns.RcodeSuccess)
 		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r)
+		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil
 	}

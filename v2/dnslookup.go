@@ -1321,7 +1321,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		return nil, 0, cache.ContextFailure, core.TransportDo53, err
 	}
 
-	dnskeyBypass := imr.dnskeyTransportBypass(qname, qtype)
+	dnskeyBypass := imr.dnskeyTransportBypass(qname, qtype, privacy)
 	if qtype == dns.TypeDNSKEY {
 		imr.noteDNSKEYLookup(dnskeyBypass)
 	}
