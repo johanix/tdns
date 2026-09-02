@@ -2,9 +2,11 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -100,7 +102,24 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 		case dns.RcodeSuccess:
 			return true, nil
 		case dns.RcodeRefused:
-			lgDns.Warn("sendUpdateWithRetry: parent REFUSED, bounded retry", "attempt", attempt)
+			// ddns-02 §"Communication in Case of Errors": a REFUSED for a known
+			// key carries one of three bootstrap-state EDEs, and they mean
+			// different things to a retry loop. KEY-KNOWN-NOT-TRUSTED (514):
+			// bootstrap is in progress, waiting may help, bounded retry.
+			// KEY-VALIDATION-FAILED (541) and MANUAL-BOOTSTRAP-REQUIRED (542):
+			// waiting will not help, terminal, and the reason is actionable.
+			// Without this the child saw only "REFUSED" five times over.
+			if ur.EDEFound {
+				switch ur.EDECode {
+				case edns0.EDESig0KeyValidationFailed:
+					return true, fmt.Errorf("parent REFUSED the delegation UPDATE: the parent's validation of our SIG(0) key FAILED (EDE %d: %s); fix the KEY's publication and re-bootstrap",
+						ur.EDECode, ur.EDEMessage)
+				case edns0.EDESig0ManualBootstrapRequired:
+					return true, fmt.Errorf("parent REFUSED the delegation UPDATE: the parent requires manual SIG(0) bootstrap (EDE %d: %s); complete it and retry",
+						ur.EDECode, ur.EDEMessage)
+				}
+			}
+			lgDns.Warn("sendUpdateWithRetry: parent REFUSED, bounded retry", "attempt", attempt, "ede", ur.EDECode, "edeMsg", ur.EDEMessage)
 			return false, fmt.Errorf("parent REFUSED the delegation UPDATE")
 		case dns.RcodeServerFailure:
 			// Transient by definition: the parent failed to process a request
@@ -120,6 +139,20 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 			}
 			lgDns.Warn("sendUpdateWithRetry: BADKEY, re-bootstrapping SIG(0) key once")
 			if berr := reBootstrap(); berr != nil {
+				if errors.Is(berr, errBootstrapManual) {
+					// Terminal, and the reason is actionable: the UPDATE
+					// cannot proceed until the operator completes the
+					// parent's manual bootstrap.
+					return true, fmt.Errorf("delegation UPDATE got BADKEY and the parent requires manual SIG(0) bootstrap; complete it and retry: %w", berr)
+				}
+				if errors.Is(berr, errBootstrapAdvertisementLookup) {
+					// The re-bootstrap never got as far as choosing a method:
+					// the parent's advertisement could not be looked up. Leave
+					// the one re-bootstrap unspent and let the next attempt
+					// try again, within the same bound.
+					lgDns.Warn("sendUpdateWithRetry: re-bootstrap deferred, advertisement lookup failed", "attempt", attempt, "err", berr)
+					return false, fmt.Errorf("re-bootstrap after BADKEY deferred: %w", berr)
+				}
 				return true, fmt.Errorf("re-bootstrap after BADKEY failed: %v", berr)
 			}
 			reBootstrapped = true

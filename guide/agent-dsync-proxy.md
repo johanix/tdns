@@ -139,8 +139,18 @@ it once at the primary.
    the apex KEY — so the bootstrap works even with multiple providers.)
 3. Add those two records to the zone at the primary. They transfer in to the
    agent on the next refresh.
-4. Once the agent sees its KEY at the apex, `proxy-key` reports READY and the
-   agent starts proxying UPDATEs.
+4. Once the agent sees its KEY at the apex, `proxy-key` reports READY. On that
+   transition the agent runs the self-signed SIG(0) ceremony with the parent —
+   once per zone, before the first proxied UPDATE — and then starts proxying.
+
+**READY means "the agent can sign", not "the parent trusts it".** The ceremony
+is a separate step and can be refused: the parent may require manual bootstrap,
+or its advertised bootstrap methods may not intersect the agent's
+`delegationsync.child.update.bootstrap.methods` (a proxy drops `at-ns` from that
+set, since RFC 9615 `_signal` names live in the nameserver's zone). Either way
+the UPDATE scheme is skipped and the log says which; NOTIFY may still apply.
+Once the parent does trust the key, a later `BADKEY` re-runs the ceremony
+automatically, with no operator action.
 
 `proxy-key` reports one of four states: `update-unsupported` (parent
 advertises no UPDATE — use NOTIFY), `waiting` (publish the printed records),

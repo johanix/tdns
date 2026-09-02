@@ -6,15 +6,18 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -25,7 +28,7 @@ func TestCandidateTransports_SinglePreferred_Encrypted(t *testing.T) {
 	s.SetTransports([]core.Transport{core.TransportDoT})
 	s.SetTransportWeight(core.TransportDoT, 100)
 
-	got := candidateTransports(s, "example.", true /*requireEncrypted*/)
+	got := candidateTransports(s, "example.", edns0.PrivacyStrict)
 	want := []core.Transport{core.TransportDoT}
 	if !slices.Equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -33,14 +36,14 @@ func TestCandidateTransports_SinglePreferred_Encrypted(t *testing.T) {
 }
 
 // TestCandidateTransports_Do53UltimateFallback: with only DoT:30, do53_share=70
-// so both compete in the share pool; Do53 must still appear when not
-// requireEncrypted.
+// so both compete in the share pool; Do53 must still appear at privacy level
+// none.
 func TestCandidateTransports_Do53UltimateFallback(t *testing.T) {
 	s := cache.NewAuthServer("ns.example.")
 	s.SetTransports([]core.Transport{core.TransportDoT})
 	s.SetTransportWeight(core.TransportDoT, 30)
 
-	got := candidateTransports(s, "example.", false)
+	got := candidateTransports(s, "example.", edns0.PrivacyNone)
 	if !slices.Contains(got, core.TransportDo53) {
 		t.Errorf("expected Do53 in share pool/fallback, got %v", got)
 	}
@@ -57,7 +60,7 @@ func TestCandidateTransports_Do53ZeroStillFallback(t *testing.T) {
 	s.SetTransportWeight(core.TransportDoQ, 100)
 	s.SetTransportWeight(core.TransportDo53, 0)
 
-	got := candidateTransports(s, "example.", false)
+	got := candidateTransports(s, "example.", edns0.PrivacyNone)
 	if len(got) != 2 || got[0] != core.TransportDoQ || got[1] != core.TransportDo53 {
 		t.Errorf("got %v, want [DoQ, Do53]", got)
 	}
@@ -71,7 +74,7 @@ func TestCandidateTransports_WeightOneExcluded(t *testing.T) {
 	s.SetTransportWeight(core.TransportDoT, 1)
 	s.SetTransportWeight(core.TransportDoQ, 20)
 
-	got := candidateTransports(s, "example.", false)
+	got := candidateTransports(s, "example.", edns0.PrivacyNone)
 	if slices.Contains(got, core.TransportDoT) {
 		t.Errorf("weight 1 must be excluded from share pool, got %v", got)
 	}
@@ -98,7 +101,7 @@ func TestCandidateTransports_SharePoolIncludesDo53(t *testing.T) {
 		t.Fatal("applyTransportMapToServer failed")
 	}
 
-	got := candidateTransports(s, "example.", false)
+	got := candidateTransports(s, "example.", edns0.PrivacyNone)
 	if !slices.Contains(got, core.TransportDo53) ||
 		!slices.Contains(got, core.TransportDoQ) ||
 		!slices.Contains(got, core.TransportDoT) {
@@ -106,18 +109,18 @@ func TestCandidateTransports_SharePoolIncludesDo53(t *testing.T) {
 	}
 }
 
-// TestCandidateTransports_EncryptedFiltersDo53: requireEncrypted excludes
-// Do53 even when it would otherwise be in the candidates.
+// TestCandidateTransports_EncryptedFiltersDo53: strict privacy excludes Do53
+// even when it would otherwise be in the candidates.
 func TestCandidateTransports_EncryptedFiltersDo53(t *testing.T) {
 	s := cache.NewAuthServer("ns.example.")
 	s.SetTransports([]core.Transport{core.TransportDoT, core.TransportDo53})
 	s.SetTransportWeight(core.TransportDoT, 50)
 	s.SetTransportWeight(core.TransportDo53, 50)
 
-	got := candidateTransports(s, "example.", true)
+	got := candidateTransports(s, "example.", edns0.PrivacyStrict)
 	for _, tr := range got {
 		if !core.IsEncryptedTransport(tr) {
-			t.Errorf("requireEncrypted=true but got unencrypted transport %v in %v", tr, got)
+			t.Errorf("strict privacy but got unencrypted transport %v in %v", tr, got)
 		}
 	}
 	if !slices.Contains(got, core.TransportDoT) {
@@ -125,14 +128,14 @@ func TestCandidateTransports_EncryptedFiltersDo53(t *testing.T) {
 	}
 }
 
-// TestCandidateTransports_NoEncryptedReturnsNil: requireEncrypted=true on a
-// server with no encrypted transports returns nil.
+// TestCandidateTransports_NoEncryptedReturnsNil: strict privacy on a server
+// with no encrypted transports returns nil.
 func TestCandidateTransports_NoEncryptedReturnsNil(t *testing.T) {
 	s := cache.NewAuthServer("ns.example.")
 	s.SetTransports([]core.Transport{core.TransportDo53})
 	s.SetTransportWeight(core.TransportDo53, 100)
 
-	got := candidateTransports(s, "example.", true)
+	got := candidateTransports(s, "example.", edns0.PrivacyStrict)
 	if len(got) != 0 {
 		t.Errorf("expected nil/empty, got %v", got)
 	}
@@ -148,9 +151,9 @@ func TestCandidateTransports_DeterministicHashFirst(t *testing.T) {
 	s.SetTransportWeight(core.TransportDoT, 50)
 	s.SetTransportWeight(core.TransportDoH, 50)
 
-	first := candidateTransports(s, "alpha.example.", false)
+	first := candidateTransports(s, "alpha.example.", edns0.PrivacyNone)
 	for i := 0; i < 5; i++ {
-		again := candidateTransports(s, "alpha.example.", false)
+		again := candidateTransports(s, "alpha.example.", edns0.PrivacyNone)
 		if !slices.Equal(first, again) {
 			t.Fatalf("non-deterministic: first=%v again=%v", first, again)
 		}
@@ -183,7 +186,7 @@ func TestCandidateTransports_ShareDistribution(t *testing.T) {
 	counts := map[core.Transport]int{}
 	for i := 0; i < n; i++ {
 		qname := fmt.Sprintf("q%d.example.", i)
-		got := candidateTransports(s, qname, false)
+		got := candidateTransports(s, qname, edns0.PrivacyNone)
 		if len(got) == 0 {
 			t.Fatalf("empty candidates for %s", qname)
 		}
@@ -220,14 +223,14 @@ func TestPrioritizeServers_PerTransportBackoffFiltering(t *testing.T) {
 
 	// Baseline: both (addr, DoT) and (addr, Do53) should be in the list.
 	serverMap := map[string]*cache.AuthServer{ns: s}
-	_, _, tuples := imr.prioritizeServers("foo.example.", serverMap, false)
+	_, _, tuples := imr.prioritizeServers("foo.example.", serverMap, edns0.PrivacyNone)
 	if len(tuples) != 2 {
 		t.Fatalf("baseline: expected 2 tuples (DoT + Do53 fallback), got %d (%+v)", len(tuples), tuples)
 	}
 
 	// Poison (addr, DoT). (addr, Do53) must remain.
 	s.RecordAddressFailure(addr, core.TransportDoT, fmt.Errorf("dot handshake"))
-	_, _, tuples = imr.prioritizeServers("foo.example.", serverMap, false)
+	_, _, tuples = imr.prioritizeServers("foo.example.", serverMap, edns0.PrivacyNone)
 	if len(tuples) != 1 {
 		t.Fatalf("after DoT failure: expected 1 tuple (Do53 only), got %d (%+v)", len(tuples), tuples)
 	}
@@ -236,7 +239,7 @@ func TestPrioritizeServers_PerTransportBackoffFiltering(t *testing.T) {
 	}
 }
 
-// TestPrioritizeServers_RequireEncryptedFilters: with requireEncrypted, no
+// TestPrioritizeServers_RequireEncryptedFilters: under strict privacy, no
 // Do53 tuple should be emitted.
 func TestPrioritizeServers_RequireEncryptedFilters(t *testing.T) {
 	imr := newTestImr(t)
@@ -250,10 +253,10 @@ func TestPrioritizeServers_RequireEncryptedFilters(t *testing.T) {
 	s.SetTransportWeight(core.TransportDo53, 50)
 
 	serverMap := map[string]*cache.AuthServer{ns: s}
-	_, _, tuples := imr.prioritizeServers("foo.example.", serverMap, true)
+	_, _, tuples := imr.prioritizeServers("foo.example.", serverMap, edns0.PrivacyStrict)
 	for _, tup := range tuples {
 		if tup.Transport == core.TransportDo53 {
-			t.Errorf("requireEncrypted=true but Do53 tuple emitted: %+v", tup)
+			t.Errorf("strict privacy but Do53 tuple emitted: %+v", tup)
 		}
 	}
 	if len(tuples) == 0 {
@@ -283,7 +286,7 @@ func TestPrioritizeServers_RTTSortAcrossServers(t *testing.T) {
 		"fast.example.": fast,
 		"slow.example.": slow,
 	}
-	_, _, tuples := imr.prioritizeServers("q.example.", serverMap, false)
+	_, _, tuples := imr.prioritizeServers("q.example.", serverMap, edns0.PrivacyNone)
 	if len(tuples) < 2 {
 		t.Fatalf("expected at least 2 tuples, got %d", len(tuples))
 	}
@@ -313,7 +316,7 @@ func TestPrioritizeServers_OotsRankBeatsRTT(t *testing.T) {
 	var qname string
 	for i := 0; i < 5000; i++ {
 		q := fmt.Sprintf("q%d.example.", i)
-		cands := candidateTransports(s, q, false)
+		cands := candidateTransports(s, q, edns0.PrivacyNone)
 		if len(cands) > 0 && cands[0] == core.TransportDo53 {
 			qname = q
 			break
@@ -328,7 +331,7 @@ func TestPrioritizeServers_OotsRankBeatsRTT(t *testing.T) {
 	s.RecordRTT(addr, core.TransportDo53, 500*time.Millisecond)
 
 	serverMap := map[string]*cache.AuthServer{ns: s}
-	_, _, tuples := imr.prioritizeServers(qname, serverMap, false)
+	_, _, tuples := imr.prioritizeServers(qname, serverMap, edns0.PrivacyNone)
 	if len(tuples) < 2 {
 		t.Fatalf("expected Do53+DoT tuples, got %d (%+v)", len(tuples), tuples)
 	}
@@ -365,7 +368,7 @@ func TestPrioritizeServers_UnprobedSentinelOrdering(t *testing.T) {
 		"slow.example.": slow,
 		"new.example.":  unprobed,
 	}
-	_, _, tuples := imr.prioritizeServers("q.example.", serverMap, false)
+	_, _, tuples := imr.prioritizeServers("q.example.", serverMap, edns0.PrivacyNone)
 	if len(tuples) != 3 {
 		t.Fatalf("expected 3 tuples, got %d (%+v)", len(tuples), tuples)
 	}
@@ -399,7 +402,7 @@ func TestPrioritizeServers_SuspectFamilyDeprioritized(t *testing.T) {
 	s.SetTransportWeight(core.TransportDo53, 100)
 	serverMap := map[string]*cache.AuthServer{ns: s}
 
-	_, _, tuples := imr.prioritizeServers("q.example.", serverMap, false)
+	_, _, tuples := imr.prioritizeServers("q.example.", serverMap, edns0.PrivacyNone)
 	if len(tuples) < 1 {
 		t.Fatal("expected at least the v4 tuple")
 	}
@@ -408,7 +411,7 @@ func TestPrioritizeServers_SuspectFamilyDeprioritized(t *testing.T) {
 	}
 	// First prioritizeServers call may have included one v6 probe at back.
 	// A second call with no time elapsed must NOT include another v6 probe.
-	_, _, tuples2 := imr.prioritizeServers("q.example.", serverMap, false)
+	_, _, tuples2 := imr.prioritizeServers("q.example.", serverMap, edns0.PrivacyNone)
 	for _, tup := range tuples2 {
 		if cache.FamilyOf(tup.Addr) == cache.FamilyV6 {
 			t.Errorf("second call within ProbeInterval should not include any v6 tuple, got %+v", tup)
@@ -563,4 +566,92 @@ func newTestImr(t *testing.T) *Imr {
 		5,              // failure threshold
 	)
 	return &Imr{Cache: c, FamilyTracker: ft}
+}
+
+// Opportunistic privacy is a preference, not a filter: the encrypted
+// transports are tried first, and Do53 stays available as the last resort the
+// client said it would accept. Contrast PrivacyNone, where the OOTS shares put
+// Do53 in the draw on equal terms (do53_share=70 here).
+func TestCandidateTransports_OpportunisticPrefersEncrypted(t *testing.T) {
+	s := cache.NewAuthServer("ns.example.")
+	s.SetTransports([]core.Transport{core.TransportDoT, core.TransportDo53})
+	s.SetTransportWeight(core.TransportDoT, 30)
+	s.SetTransportWeight(core.TransportDo53, 70)
+
+	got := candidateTransports(s, "example.", edns0.PrivacyOpportunistic)
+	if len(got) != 2 || got[0] != core.TransportDoT || got[1] != core.TransportDo53 {
+		t.Errorf("got %v, want [DoT, Do53]", got)
+	}
+}
+
+// A server advertising no encrypted transport is a dead end under strict
+// privacy, but perfectly usable under opportunistic privacy -- that is the
+// whole difference between the two levels.
+func TestCandidateTransports_OpportunisticFallsBackToDo53(t *testing.T) {
+	s := cache.NewAuthServer("ns.example.")
+	s.SetTransports([]core.Transport{core.TransportDo53})
+	s.SetTransportWeight(core.TransportDo53, 100)
+
+	if got := candidateTransports(s, "example.", edns0.PrivacyOpportunistic); !slices.Equal(got, []core.Transport{core.TransportDo53}) {
+		t.Errorf("opportunistic: got %v, want [Do53]", got)
+	}
+	if got := candidateTransports(s, "example.", edns0.PrivacyStrict); len(got) != 0 {
+		t.Errorf("strict: got %v, want nothing", got)
+	}
+}
+
+// The strict-privacy precheck in IterativeDNSQuery asks candidateTransports
+// whether a server has an encrypted transport, so these two cases decide what
+// the precheck does. Both used to be got wrong by a hand-rolled scan there: it
+// read server.Transports without a nil check, and it counted a weight-1
+// encrypted transport as available even though candidateTransports excludes it
+// (OOTS -03: MAY attempt only above weight 1).
+func TestCandidateTransportsStrictPrivacyEligibility(t *testing.T) {
+	// A nil entry must not panic, and must offer nothing under strict privacy.
+	if got := candidateTransports(nil, "example.", edns0.PrivacyStrict); len(got) != 0 {
+		t.Errorf("nil server, strict: got %v, want nothing", got)
+	}
+	if got := candidateTransports(nil, "example.", edns0.PrivacyNone); !slices.Equal(got, []core.Transport{core.TransportDo53}) {
+		t.Errorf("nil server, none: got %v, want [Do53]", got)
+	}
+
+	// Weight 1 is below the threshold, so this server offers no usable
+	// encrypted transport at all.
+	s := cache.NewAuthServer("ns.example.")
+	s.SetTransports([]core.Transport{core.TransportDoT})
+	s.SetTransportWeight(core.TransportDoT, 1)
+	if got := candidateTransports(s, "example.", edns0.PrivacyStrict); len(got) != 0 {
+		t.Errorf("weight-1 DoT, strict: got %v, want nothing", got)
+	}
+}
+
+// ... and the precheck must turn that into ErrPrivacyUnavailable, since the
+// responder attaches the privacy EDE on the sentinel and nothing else. Neither
+// server map here can produce a query, so nothing leaves the process.
+func TestIterativeDNSQueryStrictPrivacyPrecheck(t *testing.T) {
+	imr := newTestImr(t)
+
+	weightOne := cache.NewAuthServer("ns.example.")
+	weightOne.SetTransports([]core.Transport{core.TransportDoT})
+	weightOne.SetTransportWeight(core.TransportDoT, 1)
+	weightOne.Addrs = []string{"192.0.2.1"}
+
+	for name, serverMap := range map[string]map[string]*cache.AuthServer{
+		"nil entry":          {"ns1.example.": nil},
+		"weight-1 encrypted": {"ns.example.": weightOne},
+	} {
+		_, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "foo.example.", dns.TypeA, serverMap, true, edns0.PrivacyStrict)
+		if !errors.Is(err, ErrPrivacyUnavailable) {
+			t.Errorf("%s: got err %v, want one wrapping ErrPrivacyUnavailable", name, err)
+		}
+		// Pin that it is the PRECHECK talking, not the exhaustion path at the
+		// end of the walk -- both wrap the sentinel, and only the precheck can
+		// answer without attempting a single query.
+		if err != nil && !strings.Contains(err.Error(), "no servers have encrypted transports available") {
+			t.Errorf("%s: got %v, want the precheck's error", name, err)
+		}
+		if rcode != dns.RcodeServerFailure {
+			t.Errorf("%s: got rcode %s, want SERVFAIL", name, dns.RcodeToString[rcode])
+		}
+	}
 }

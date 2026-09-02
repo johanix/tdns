@@ -20,9 +20,9 @@ func validChildKeyRR(t *testing.T) string {
 }
 
 // TestChildKeyStateMap asserts K-4: the internal truststore state → keystate-03
-// KEY-STATE code map. Codes 7 and 8 are dormant Phase 2 stubs and are not
-// exercised here. Note that validated and trusted are independent (technical
-// vs policy), so validated=1,trusted=0 is a first-class state → 10.
+// KEY-STATE code map. Code 7 is a dormant Phase 2 stub and is not exercised
+// here. Note that validated and trusted are independent (technical vs
+// policy), so validated=1,trusted=0 is a first-class state → 10.
 func TestChildKeyStateMap(t *testing.T) {
 	valid := validChildKeyRR(t)
 
@@ -65,6 +65,21 @@ func TestChildKeyStateMap(t *testing.T) {
 			key:      &Sig0Key{Keystr: valid, Validated: false, Trusted: false},
 			manual:   false,
 			wantCode: edns0.KeyStateBootstrapAutoOngoing,
+		},
+		{
+			// Automatic verification ran out of attempts and recorded it:
+			// waiting will not help, so 8 rather than 9.
+			name:     "validation failed -> KEY_VALIDATION_FAILED(8)",
+			key:      &Sig0Key{Keystr: valid, ValidationFailed: true, ValidationError: "5 attempts via [at-apex]: not found"},
+			wantCode: edns0.KeyStateValidationFail,
+		},
+		{
+			// Under a manual policy the actionable state is "manual", whatever
+			// the automatic attempt did.
+			name:     "validation failed + manual policy -> KEY_BOOTSTRAP_MANUAL(10)",
+			key:      &Sig0Key{Keystr: valid, ValidationFailed: true},
+			manual:   true,
+			wantCode: edns0.KeyStateBootstrapManualRequired,
 		},
 	}
 

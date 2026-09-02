@@ -122,15 +122,21 @@ func sig0TrustMgmt(role, subcommand string) {
 	if subcommand == "list" {
 		var out, tmplist []string
 		if tdns.Globals.ShowHeaders {
-			out = append(out, "Signer|KeyID|Validated|Trusted|Source|Record")
+			out = append(out, "Signer|KeyID|Validated|Trusted|Failed|Source|Record")
 		}
 		if len(tr.ChildSig0keys) > 0 {
 			// fmt.Printf("Known child SIG(0) keys:\n")
 			for k, v := range tr.ChildSig0keys {
 				tmp := strings.Split(k, "::")
 				keyid, _ := strconv.Atoi(tmp[1])
-				tmplist = append(tmplist, fmt.Sprintf("%s|%d|%v|%v|%s|%.55s...\n",
-					tmp[0], keyid, v.Validated, v.Trusted, v.Source, v.Keystr))
+				failed := "-"
+				if v.ValidationFailed {
+					// The parent's automatic verification gave up; the reason
+					// is what the child operator needs.
+					failed = "FAILED: " + v.ValidationError
+				}
+				tmplist = append(tmplist, fmt.Sprintf("%s|%d|%v|%v|%s|%s|%.55s...\n",
+					tmp[0], keyid, v.Validated, v.Trusted, failed, v.Source, v.Keystr))
 			}
 			sort.Strings(tmplist)
 			out = append(out, tmplist...)

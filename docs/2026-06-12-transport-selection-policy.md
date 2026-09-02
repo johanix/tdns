@@ -21,8 +21,10 @@ outgoing query":
    is draft-johani-dnsop-dnssec-alg-split Part 3.
 
 2. **Privacy.** An end user (stub) may want the IMR's upstream queries
-   carried over an encrypted transport (DoT/DoQ). Today this is the PR
-   (Privacy Requested) EDNS(0) flag, bit 12.
+   carried over an encrypted transport (DoT/DoQ). Today this is the
+   PRIVACY EDNS(0) option, one octet: 1 = opportunistic (prefer
+   encrypted, accept cleartext), 2 = strict (encrypted or fail). It
+   replaced the PR flag bit 12, which could only ever say "strict".
 
 3. **Server-advertised capability.** Auth servers signal which
    transports they support (and at what weights) via SVCB/TSYNC. The IMR
@@ -30,9 +32,11 @@ outgoing query":
 
 The current code expresses these with two separate, blunt mechanisms:
 
-- `requireEncrypted bool` — threaded through the whole resolution path,
-  sourced from the PR flag. All-or-nothing: "encrypted only, or
-  SERVFAIL".
+- `edns0.PrivacyLevel` — threaded through the whole resolution path,
+  sourced from the PRIVACY option. Three values, but only along the
+  encryption axis: none, prefer-encrypted-with-cleartext-fallback, and
+  "encrypted only, or SERVFAIL". (Until the option landed this was a
+  `requireEncrypted bool`, all-or-nothing.)
 - `dnskeyTransport` enum (added 2026-06-12) — DNSKEY-specific, four
   values, bypasses probabilistic selection.
 
@@ -154,9 +158,8 @@ config): the old key is removed, not dual-parsed.
 ## 4. Composition with the per-query end-user signal
 
 The config policy is the IMR's disposition **in the absence of** an
-explicit per-query signal. A present signal (today: PR flag; tomorrow:
-an EDNS(0) option) can only **raise the bar for that query, never lower
-it**. The IMR issues queries on behalf of the end user; ignoring a
+explicit per-query signal. A present signal (the PRIVACY EDNS(0)
+option) can only **raise the bar for that query, never lower it**. The IMR issues queries on behalf of the end user; ignoring a
 signalled requirement makes no sense, but a stub also cannot ask the IMR
 to be *less* careful than its configured floor.
 
@@ -202,19 +205,24 @@ composes against the resolved target.
 - Config `default: encrypted_or_fail`, query with **no** signal → stays
   `encrypted_or_fail` (config floor; signal absence cannot lower it).
 
-### Today's signal mapping (PR flag)
+### Today's signal mapping (PRIVACY option)
 
-The PR flag is a single bit: present means "encrypted required, no
-cleartext fallback". So today:
+The PRIVACY option carries one octet, so it maps straight onto the
+encryption axis:
 
-- `PR == true` → signal contributes **encryption=require**.
-- `PR == false` → no signal contribution.
+- `privacy == 2` (strict) → signal contributes **encryption=require**.
+- `privacy == 1` (opportunistic) → signal contributes
+  **encryption=prefer**.
+- `privacy == 0` / option absent → no signal contribution.
 
-This reproduces current behavior exactly (PR → `encrypted_or_fail`).
-When the richer EDNS(0) option lands (able to express
-prefer-with-fallback, choose UDP vs TCP floor, etc.), only the
-"decode signal → axis contributions" step changes; the composition and
-resolution machinery is untouched.
+Strict reproduces what the PR flag bit did (→ `encrypted_or_fail`);
+opportunistic is what the bit could not express, and today resolves to
+`encrypted_or_udp` — encrypted transports first, Do53 as the fallback
+the client said it would accept.
+
+The option leaves room to grow: a future value can name a UDP-vs-TCP
+floor, and only the "decode signal → axis contributions" step changes.
+The composition and resolution machinery is untouched.
 
 ---
 

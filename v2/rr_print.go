@@ -597,16 +597,27 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 				// Bit 13 is DE (Delegation Extension)
 				flags = append(flags, "de")
 			}
-			if (rr.Hdr.Ttl & (1 << 12)) != 0 {
-				// Bit 12 is PR (Privacy Requested)
-				flags = append(flags, "pr")
-			}
 			flagsStr := ""
 			if len(flags) > 0 {
 				flagsStr = " " + strings.Join(flags, " ")
 			}
 			fmt.Printf(";; EDNS: version: %d, flags:%s; udp: %d\n", rr.Version(), flagsStr, rr.UDPSize())
 			for _, option := range rr.Option {
+				// The PRIVACY option's payload is a single octet whose
+				// meaning depends on direction. What lands here is a
+				// response, so print the status vocabulary (what the
+				// resolver did), not the level vocabulary (what a client
+				// asked for). The generic dns.EDNS0_LOCAL.String() would
+				// print it as an opaque hex byte.
+				if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok && localOpt.Code == edns0.EDNS0_PRIVACY_OPTION_CODE {
+					if len(localOpt.Data) == 1 {
+						status := edns0.PrivacyStatus(localOpt.Data[0])
+						fmt.Printf(";; EDNS: option: PRIVACY: %d (%s)\n", uint8(status), status)
+					} else {
+						fmt.Printf(";; EDNS: option: PRIVACY: malformed (%d octets, want 1)\n", len(localOpt.Data))
+					}
+					continue
+				}
 				// Format EDE options specially to avoid duplicate text from miekg/dns library
 				if ede, ok := option.(*dns.EDNS0_EDE); ok {
 					edeText := ede.ExtraText

@@ -136,12 +136,19 @@ func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []stri
 	useTCP := true
 	client := &dns.Client{Net: "tcp"}
 
-	// The last rejection RCODE actually received from a responding address.
-	// Tracked across the loop so that a non-NOERROR answer is still reported to
-	// the caller after the remaining addresses have been tried: "try the next
-	// address" must not cost us the rejection reason.
+	// The last rejection RCODE actually received from a responding address,
+	// and the EDE that came with it. Tracked across the loop so that a
+	// non-NOERROR answer is still reported to the caller after the remaining
+	// addresses have been tried: "try the next address" must not cost us the
+	// rejection reason -- neither the RCODE nor the EDE. The retry policy
+	// (sendUpdateWithRetry) reads the EDE off the top-level UpdateResult to
+	// tell a REFUSED that will resolve itself (KEY-KNOWN-NOT-TRUSTED) from one
+	// that will not (KEY-VALIDATION-FAILED, MANUAL-BOOTSTRAP-REQUIRED).
 	var lastRcode int
 	var gotResponse bool
+	var lastEDEFound bool
+	var lastEDECode uint16
+	var lastEDEMessage, lastEDESender string
 
 	for _, dst := range addrs {
 		lgDns.Debug("sending DNS UPDATE", "zone", zonename, "dst", dst,
@@ -201,6 +208,7 @@ func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []stri
 		}
 
 		lastRcode, gotResponse = res.Rcode, true
+		lastEDEFound, lastEDECode, lastEDEMessage, lastEDESender = edeFound, edeCode, edeMessage, edeSender
 
 		if res.Rcode != dns.RcodeSuccess {
 			lgDns.Debug("got bad rcode", "rcode", dns.RcodeToString[res.Rcode], "response", res.String())
@@ -209,17 +217,20 @@ func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []stri
 		} else {
 			lgDns.Debug("got rcode NOERROR", "response", res.String())
 			ur.Rcode = res.Rcode
+			ur.EDEFound, ur.EDECode, ur.EDEMessage, ur.EDESender = edeFound, edeCode, edeMessage, edeSender
 			return res.Rcode, ur, nil
 		}
 	}
 
 	// At least one address answered, but none with NOERROR. That is a parent
-	// REJECTION, not a transport failure: hand the caller the rcode (and a nil
-	// error) so it can apply the draft's per-RCODE policy.
+	// REJECTION, not a transport failure: hand the caller the rcode and the
+	// EDE that came with it (and a nil error) so it can apply the draft's
+	// per-RCODE, per-EDE policy.
 	if gotResponse {
 		lgDns.Warn("all target addresses rejected the update", "zone", zonename,
-			"addresses", addrs, "rcode", dns.RcodeToString[lastRcode])
+			"addresses", addrs, "rcode", dns.RcodeToString[lastRcode], "ede", lastEDECode, "edeMsg", lastEDEMessage)
 		ur.Rcode = lastRcode
+		ur.EDEFound, ur.EDECode, ur.EDEMessage, ur.EDESender = lastEDEFound, lastEDECode, lastEDEMessage, lastEDESender
 		return lastRcode, ur, nil
 	}
 

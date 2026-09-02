@@ -244,6 +244,63 @@ dnssec:
             dnskey:   30d
             ds:       14d
 
+# Delegation sync, PARENT side. Defined but not yet switched on: no zone below
+# carries the delegation-sync-parent option, so nothing is published. Policies
+# are inert until a zone binds one, which makes this safe to ship and gives you
+# something to reference when you do enable it.
+#
+# To turn a zone into a delegation-sync parent: add delegation-sync-parent to
+# its options: and (optionally) delegationpolicy: <name> to pick a policy.
+# Omitting delegationpolicy: binds "default"; naming a policy that does not
+# exist QUARANTINES the zone, so config check verifies the reference.
+delegationsync:
+   policies:
+      # How a child's SIG(0) key becomes trusted. Two orthogonal axes:
+      # mechanisms = WHERE to look for the key, require-dnssec = HOW strongly
+      # to trust what is found. manual: is a separate flag, not a mechanism.
+      default:
+         bootstrap:
+            mechanisms:      [ at-apex, at-ns ]
+            require-dnssec:  true
+            manual:          false
+            allow-unvalidated-upload: false
+            retry:
+               max-attempts: 5
+               interval:     10s
+      # Automatic lookup still happens, but an operator confirms before the
+      # key is trusted. This is what the shipped parent zone templates use.
+      manual:
+         bootstrap:
+            mechanisms:      [ at-apex, at-ns ]
+            require-dnssec:  true
+            manual:          true
+            allow-unvalidated-upload: false
+      # Nothing automatic at all: advertises "manual" only. A child running
+      # the default methods will refuse to bootstrap against this.
+      locked-down:
+         bootstrap:
+            mechanisms:      [ ]
+            manual:          true
+            allow-unvalidated-upload: false
+   parent:
+      # Which DSYNC schemes this parent advertises at _dsync.<zone>. There is
+      # deliberately no bootstrap.methods: here — the SVCB advertisement is
+      # DERIVED from each zone's bound policy, so a parent cannot advertise
+      # something it will not do.
+      schemes: [ notify, update ]
+      notify:
+         types:     [ CDS, CSYNC ]
+         target:    notifications.{ZONENAME}
+         port:      {{DNSPORT}}
+         addresses: [ 127.0.0.1, '::1' ]
+      update:
+         types:     [ ANY ]
+         target:    updates.{ZONENAME}
+         port:      {{DNSPORT}}
+         addresses: [ 127.0.0.1, '::1' ]
+         keygen:
+            algorithm: ED25519
+
 # Zone templates. The two primaries below use two DIFFERENT templates; the
 # commented-out secondary uses a third.
 templates:

@@ -15,6 +15,7 @@ import (
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -267,6 +268,41 @@ func (fz *ForwardZone) hasEncryptedUpstream() bool {
 		}
 	}
 	return false
+}
+
+// forwardUpstreamsForPrivacy returns the upstreams to try, in order, for a
+// query carrying the given PRIVACY level:
+//
+//   - PrivacyNone: the configured order, untouched. The operator's ordering is
+//     a failover preference and nothing has asked us to override it.
+//   - PrivacyOpportunistic: encrypted upstreams first, then the cleartext
+//     ones, each group keeping its configured relative order. Preference, not
+//     exclusion -- the client said cleartext is acceptable when there is
+//     nothing better.
+//   - PrivacyStrict: encrypted upstreams only.
+//
+// Starts from liveUpstreams(), not fz.Upstreams: a quarantined upstream is
+// never dialled, so including one here would both distort the strict/
+// opportunistic ordering and hand a placeholder's nil Client to the exchange.
+// TestForwardQueryNeverDialsAQuarantinedUpstream fails if this reverts.
+func forwardUpstreamsForPrivacy(fz *ForwardZone, privacy edns0.PrivacyLevel) []*ForwardUpstream {
+	live := fz.liveUpstreams()
+	if privacy == edns0.PrivacyNone {
+		return live
+	}
+	encrypted := make([]*ForwardUpstream, 0, len(live))
+	var cleartext []*ForwardUpstream
+	for _, up := range live {
+		if core.IsEncryptedTransport(up.Transport) {
+			encrypted = append(encrypted, up)
+			continue
+		}
+		cleartext = append(cleartext, up)
+	}
+	if privacy == edns0.PrivacyStrict {
+		return encrypted
+	}
+	return append(encrypted, cleartext...)
 }
 
 // forwardTransportDefaults maps a transport to its standard port.
@@ -537,7 +573,7 @@ func (imr *Imr) forwardZoneFor(qname string) *ForwardZone {
 // handleAnswer (validate locally, cache, chase CNAMEs) unless the zone has
 // trust-ad set, and handleNegative for NXDOMAIN/NODATA. A referral-shaped
 // response from a recursive upstream is nonsense and counts as a failure.
-func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz *ForwardZone, force bool, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
+func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz *ForwardZone, force bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	// A quarantined zone has no usable upstream, so there is nothing to try:
 	// SERVFAIL without an exchange. Deliberately NOT a fallback to iteration
 	// — forwarding is forward-only, and for a "zone: ." forward silently
@@ -548,12 +584,12 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			fmt.Errorf("forward zone %s is quarantined: %s", fz.Zone, why)
 	}
 
-	// Mirror the iterative path's PR-flag precheck. The error string is
-	// load-bearing: ImrResponder matches on "PR flag requires encrypted
-	// transport" to attach the EDE.
-	if requireEncrypted && !fz.hasEncryptedUpstream() {
+	// Mirror the iterative path's strict-privacy precheck. ImrResponder
+	// recognises the failure through errors.Is(ErrPrivacyUnavailable) and
+	// attaches the EDE.
+	if privacy == edns0.PrivacyStrict && !fz.hasEncryptedUpstream() {
 		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
-			fmt.Errorf("PR flag requires encrypted transport but no upstream of forward zone %s is encrypted", fz.Zone)
+			fmt.Errorf("%w: no upstream of forward zone %s is encrypted", ErrPrivacyUnavailable, fz.Zone)
 	}
 
 	m := new(dns.Msg)
@@ -571,11 +607,12 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 
 	var lastErr error
 	attempts := 0
-	live := fz.liveUpstreams()
+	// The selection is what this query may use: quarantined upstreams are
+	// already gone (forwardUpstreamsForPrivacy starts from liveUpstreams),
+	// and the privacy level has ordered or filtered what remains. len(live)
+	// is therefore what the SERVFAIL below should count.
+	live := forwardUpstreamsForPrivacy(fz, privacy)
 	for _, up := range live {
-		if requireEncrypted && !core.IsEncryptedTransport(up.Transport) {
-			continue
-		}
 		select {
 		case <-ctx.Done():
 			return nil, 0, cache.ContextFailure, core.TransportDo53,
@@ -647,7 +684,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 				}
 				return rrset, rcode, cctx, xport, nil
 			}
-			rrset, rcode, cctx, xport, err, done := imr.handleAnswer(ctx, qname, qtype, r, force, up.Transport, requireEncrypted)
+			rrset, rcode, cctx, xport, err, done := imr.handleAnswer(ctx, qname, qtype, r, force, up.Transport, privacy)
 			if err != nil || done {
 				return rrset, rcode, cctx, xport, err
 			}
@@ -674,6 +711,16 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		}
 	}
 	fz.noteAllUpstreamsFailed(qname, qtype, len(live), attempts, lastErr)
+	// Under strict privacy the only upstreams tried were the encrypted ones,
+	// so exhausting them IS the privacy failure: a cleartext upstream might
+	// have answered, and the client forbade asking. Wrapping the sentinel is
+	// what lets ImrResponder attach the EDE, and it mirrors what the iterative
+	// path does when its encrypted tuples run out.
+	if privacy == edns0.PrivacyStrict {
+		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
+			fmt.Errorf("%w: forward zone %s had no usable response for '%s %s' from any of its encrypted upstreams (attempts=%d, last error: %v)",
+				ErrPrivacyUnavailable, fz.Zone, qname, dns.TypeToString[qtype], attempts, lastErr)
+	}
 	return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
 		fmt.Errorf("forward zone %s: no usable response for '%s %s' from any of its %d usable upstreams (attempts=%d, last error: %v)",
 			fz.Zone, qname, dns.TypeToString[qtype], len(live), attempts, lastErr)

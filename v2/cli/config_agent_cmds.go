@@ -34,7 +34,7 @@ import (
 func checkAgentSpecifics(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 	checkAgentInertConfig(cfg, v, rep)
 	checkAgentImrEngine(cfg, v, rep)
-	checkAgentZoneOptions(cfg, v, rep)
+	checkAgentZoneOptions(cfg, rep)
 }
 
 // checkAgentInertConfig flags config blocks that a standalone tdns-agent parses
@@ -97,14 +97,20 @@ func checkAgentImrEngine(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 // checkAgentZoneOptions checks the two zone options whose validity depends on
 // the app being an agent. Both put the zone in ConfigError state at startup
 // when misapplied, so both are predictable statically.
-func checkAgentZoneOptions(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
+func checkAgentZoneOptions(cfg *tdns.Config, rep *ccReport) {
 	const g = "Agent-specific"
 
 	templates := map[string]tdns.ZoneConf{}
 	for _, t := range cfg.Templates {
 		templates[lc(t.Name)] = t
 	}
-	childSchemes := v.GetStringSlice("delegationsync.child.schemes")
+	// The typed block, never viper. config_delegationsync.go states the rule
+	// and TestNoViperReadsOfTheDelegationsyncBlock enforces it in both
+	// packages: viper splits keys on "." and returns the zero value with no
+	// sign anything went wrong, so a viper read here would report "schemes is
+	// empty" against a config that sets them perfectly well -- a check that
+	// fails the operator's correct config is worse than no check.
+	childSchemes := cfg.DelegationSync.Child.Schemes
 
 	for i := range cfg.Zones {
 		eff := effectiveZone(cfg.Zones[i], templates)
@@ -123,6 +129,18 @@ func checkAgentZoneOptions(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 				fmt.Sprintf("delegation-sync-proxy requires a secondary zone (this zone is %q) — it will be quarantined at startup",
 					eff.Type),
 				"set type: secondary, or drop the delegation-sync-proxy option")
+		}
+
+		// The proxy sends to the parent as the child, so it walks the same
+		// plan as a delegation-sync child and reads the same setting:
+		// BuildParentSyncPlan returns SkippedScheme{"all"} for BOTH roles when
+		// delegationsync.child.schemes is empty. The zone is not quarantined —
+		// it loads, serves, and silently forwards nothing, which is why this
+		// is worth predicting rather than leaving to a log line.
+		if opts["delegation-sync-proxy"] && len(childSchemes) == 0 {
+			rep.fail(g, zname,
+				"delegation-sync-proxy is enabled but delegationsync.child.schemes is empty — every transport is skipped and nothing is ever forwarded",
+				"set delegationsync.child.schemes (e.g. [ notify, update ])")
 		}
 
 		// On an agent, delegation-sync-child only engages when the zone also
@@ -280,6 +298,38 @@ imrengine:
    active:      true
    # In a lab without a complete DNSSEC chain, relax validation:
    #   require-dnssec-validation: false
+
+# Delegation sync, CHILD side. The agent is never a delegation-sync parent, so
+# there is no policies:/parent: here — those live on the tdns-auth parent (see
+# its MWE, and guide/special-features.md).
+#
+# This block is what makes the proxy-secondary template below actually work:
+# the proxy sends to the parent AS the child, so it walks the same plan a
+# delegation-sync child does and reads the same setting. With child.schemes
+# empty, every transport is skipped and the zone forwards nothing — it still
+# loads and serves, so the symptom is silence, not an error.
+delegationsync:
+   child:
+      # Transports to try toward the parent, in the operator's preference
+      # order. The parent must advertise the scheme in its DSYNC RRset for it
+      # to be used.
+      schemes: [ notify, update ]
+      update:
+         keygen:
+            algorithm: ED25519
+         bootstrap:
+            # SIG(0) bootstrap methods this child will let a parent use,
+            # intersected with the parent's advertised set at run time; the
+            # strongest survivor wins. An empty intersection refuses rather
+            # than silently downgrading.
+            #
+            # at-ns is listed but is dropped automatically for every zone this
+            # agent proxies for: it needs the child's KEY published at
+            # _sig0key.<child>._signal.<ns>, and those names live in the
+            # NAMESERVER's zone, which a secondary does not control. Listing it
+            # costs such a zone nothing and keeps this file usable if the agent
+            # later serves a zone that can signal.
+            methods: [ at-apex, at-ns ]
 
 # Zone templates. Both are SECONDARY templates — see the note at the top.
 # The commented-out zone below uses the first one.

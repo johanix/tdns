@@ -13,6 +13,7 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	"github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -197,7 +198,7 @@ func TestForceFalseIsSatisfiedFromCache(t *testing.T) {
 
 	// No servers at all: if this reached the network it could not succeed.
 	rrset, _, cctx, _, err := imr.IterativeDNSQuery(context.Background(), ".",
-		dns.TypeNS, map[string]*cache.AuthServer{}, false, false)
+		dns.TypeNS, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil || rrset == nil {
 		t.Fatalf("force=false did not return the cached answer: rrset=%v err=%v", rrset, err)
 	}

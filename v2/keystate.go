@@ -151,16 +151,21 @@ func (kdb *KeyDB) GetKeyStatus(zonename string, keyID uint16) (*edns0.KeyStateOp
 
 	state := childKeyState(&key, zoneRequiresManualBootstrap(zonename))
 	lgSigner.Debug("determined key state", "zone", zonename, "keyid", keyID,
-		"validated", key.Validated, "trusted", key.Trusted, "state", state)
+		"validated", key.Validated, "trusted", key.Trusted, "failed", key.ValidationFailed, "state", state)
 
 	// KEY-DATA is left 0 for every key-state report. keystate-03 requires
 	// KEY-DATA=0 except for codes 6/7, which MAY carry a receiver-defined
 	// sub-reason; tdns does not emit sub-reasons, keeping human detail in
-	// EXTRA-TEXT instead.
+	// EXTRA-TEXT instead. For 8 the EXTRA-TEXT carries the recorded reason,
+	// which is what the child operator needs to fix.
+	extra := fmt.Sprintf("Key state: %s", edns0.KeyStateToString(state))
+	if state == edns0.KeyStateValidationFail && key.ValidationError != "" {
+		extra += ": " + key.ValidationError
+	}
 	return &edns0.KeyStateOption{
 		KeyID:     keyID,
 		KeyState:  state,
-		ExtraText: fmt.Sprintf("Key state: %s", edns0.KeyStateToString(state)),
+		ExtraText: extra,
 	}, nil
 }
 
@@ -217,16 +222,20 @@ func childKeyState(key *Sig0Key, manualBootstrap bool) uint8 {
 		return edns0.KeyStateBootstrapManualRequired
 	}
 
-	// 8 KEY_VALIDATION_FAILED (dormant): validated=0, trusted=0, and automatic
-	// bootstrap validation has been attempted and exhausted.
-	// TODO(phase2): emit 8 from the real retry/exhaustion state machine that
-	// D-2b/D-4 build. Today the only failure source (TriggerChildKeyVerification
-	// exhaustion) persists nothing and runs in an in-memory goroutine lost on
-	// restart, so "failed" cannot be soundly distinguished from "in progress" —
-	// we report 9 (in progress) below instead.
+	// 8 KEY_VALIDATION_FAILED: validated=0, trusted=0, and automatic
+	// verification has been attempted and exhausted -- recorded on the
+	// truststore row by runChildKeyVerification, so it survives a restart and
+	// is distinguishable from "in progress". Waiting will not resolve it; a
+	// re-upload (which replaces the row) starts over. Reported after the
+	// manual cases above on purpose: under a manual policy "manual bootstrap
+	// required" is the actionable state whatever the automatic attempt did.
+	if key.ValidationFailed {
+		return edns0.KeyStateValidationFail
+	}
 
 	// 9 KEY_BOOTSTRAP_AUTO: known and structurally valid, not yet validated;
-	// automatic bootstrap is in progress.
+	// automatic bootstrap is in progress. A verification abandoned by a
+	// restart also lands here until the child re-uploads.
 	return edns0.KeyStateBootstrapAutoOngoing
 }
 

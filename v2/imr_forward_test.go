@@ -32,6 +32,7 @@ import (
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 )
@@ -654,7 +655,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 	// Positive answer, via the real entry point so the forward hook in
 	// IterativeDNSQueryWithLoopDetection is exercised, not forwardQuery
 	// directly. The empty serverMap must be irrelevant.
-	rrset, rcode, cctx, transport, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, cctx, transport, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query over DoT: %v", err)
 	}
@@ -680,7 +681,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 	}
 
 	// AD=0 from the upstream must map to Insecure, never borrow Secure.
-	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "unsigned.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false); err != nil {
+	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "unsigned.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone); err != nil {
 		t.Fatalf("AD=0 query: %v", err)
 	}
 	if crrset := imr.Cache.Get("unsigned.fwd.example.", dns.TypeA); crrset == nil || crrset.State != cache.ValidationStateInsecure {
@@ -689,7 +690,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 
 	// Negatives: the upstream authenticated the denial (AD=1), so the
 	// cached negative must be Secure too — trust-ad is not positives-only.
-	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "nx.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "nx.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded NXDOMAIN query: %v", err)
 	}
@@ -700,7 +701,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 		t.Errorf("trust-ad NXDOMAIN with upstream AD=1: cached = %+v, want state secure", crrset)
 	}
 
-	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded NODATA query: %v", err)
 	}
@@ -725,7 +726,7 @@ func TestForwardQueryValidatesLocally(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	rrset, rcode, cctx, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, cctx, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query: %v", err)
 	}
@@ -749,7 +750,7 @@ func TestForwardQueryValidatesLocally(t *testing.T) {
 
 	// The upstream marks its NODATA AD=1 too; without trust-ad that must
 	// not become a Secure negative.
-	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, false); err != nil {
+	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone); err != nil {
 		t.Fatalf("forwarded NODATA query: %v", err)
 	}
 	if crrset := imr.Cache.Get("www.fwd.example.", dns.TypeMX); crrset != nil && crrset.State == cache.ValidationStateSecure {
@@ -771,7 +772,7 @@ func TestForwardQueryDoH(t *testing.T) {
 	})
 	trustUpstreamCert(t, imr.ForwardZones()[0], pool)
 
-	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query over DoH: %v", err)
 	}
@@ -797,7 +798,7 @@ func TestForwardQueryDoQ(t *testing.T) {
 	})
 	trustUpstreamCert(t, imr.ForwardZones()[0], pool)
 
-	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query over DoQ: %v", err)
 	}
@@ -831,7 +832,7 @@ func TestForwardQueryFailover(t *testing.T) {
 		c.DNSClientTCP.Timeout = c.Timeout
 	}
 
-	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("failover query: %v", err)
 	}
@@ -846,7 +847,7 @@ func TestForwardQueryFailover(t *testing.T) {
 	c.Timeout = 500 * time.Millisecond
 	c.DNSClientUDP.Timeout = c.Timeout
 	c.DNSClientTCP.Timeout = c.Timeout
-	_, rcode, cctx, _, err := dead.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	_, rcode, cctx, _, err := dead.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err == nil {
 		t.Fatal("all upstreams dead: want an error, got none")
 	}
@@ -884,7 +885,7 @@ func TestForwardRootPrimingSkipsFetch(t *testing.T) {
 		t.Fatalf("root serverMap not seeded: match=%q servers=%d err=%v", bestmatch, len(servers), err)
 	}
 
-	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, servers, false, false)
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, servers, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query after hints-only priming: %v", err)
 	}
@@ -938,7 +939,7 @@ func TestProbeForwardUpstreams(t *testing.T) {
 	}
 
 	// The resolver still serves through the live upstream despite the error.
-	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil || rcode != dns.RcodeSuccess || rrset == nil {
 		t.Fatalf("query while DEGRADED: rcode=%d rrset=%v err=%v", rcode, rrset, err)
 	}
@@ -963,7 +964,7 @@ func TestProbeForwardUpstreams(t *testing.T) {
 	imr.setZoneTable([]*ForwardZone{recovered}, nil, nil)
 	imr.updateForwardUpstreamError()
 
-	if _, _, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, true, false); err != nil {
+	if _, _, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, true, edns0.PrivacyNone); err != nil {
 		t.Fatalf("recovery query: %v", err)
 	}
 	if errs := imr.errorRegistry.List(); len(errs) != 0 {
@@ -1028,7 +1029,7 @@ func TestForwardQueryCancelIsNotAnUpstreamFailure(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, _, _, _, err := imr.forwardQuery(ctx, "www.fwd.example.", dns.TypeA, imr.ForwardZones()[0], false, false)
+	_, _, _, _, err := imr.forwardQuery(ctx, "www.fwd.example.", dns.TypeA, imr.ForwardZones()[0], false, edns0.PrivacyNone)
 	elapsed := time.Since(start)
 
 	if err == nil {

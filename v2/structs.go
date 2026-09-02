@@ -1060,6 +1060,13 @@ type Sig0Key struct {
 	PrivateKey      string //
 	Key             dns.KEY
 	Keystr          string
+	// ValidationFailed: the parent's automatic verification of this child key
+	// ran out of attempts (TriggerChildKeyVerification). Distinct from
+	// !Validated, which also covers "verification in progress". Reported as
+	// KEY_VALIDATION_FAILED(8) / EDE KEY-VALIDATION-FAILED; ValidationError
+	// carries the last reason for the operator and the KeyState EXTRA-TEXT.
+	ValidationFailed bool
+	ValidationError  string
 }
 
 type DnssecKey struct {
@@ -1085,6 +1092,10 @@ type DelegationSyncRequest struct {
 	NewDnskeys   *core.RRset
 	MsignerGroup *core.RRset
 	Response     chan DelegationSyncStatus // used for API-based requests
+	// Attempt counts re-enqueues of a DELEGATION-SYNC-SETUP whose SIG(0)
+	// bootstrap was deferred because the parent's SVCB advertisement could not
+	// be looked up (errBootstrapAdvertisementLookup). Zero on the first try.
+	Attempt int
 	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
 	// set the proxy NOTIFY action keys on (delegation-sync-proxy).
 	ProxyAnalysis *ProxyDelegationAnalysis

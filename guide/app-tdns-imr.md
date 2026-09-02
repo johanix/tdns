@@ -101,9 +101,12 @@ Details of forwarding behaviour:
   the resolver's *listeners* offer.
 - **Caching**: forwarded answers and negatives land in the same cache with
   their TTLs; repeat queries are answered from cache without touching the
-  upstream. The EDNS0 PR flag (privacy required) is honored: unencrypted
-  upstreams are skipped for PR queries, and a forward zone with no encrypted
-  upstream answers SERVFAIL with the corresponding EDE.
+  upstream. The PRIVACY EDNS(0) option is honored: under strict privacy
+  unencrypted upstreams are skipped, and a forward zone with no encrypted
+  upstream answers SERVFAIL with the corresponding EDE; under opportunistic
+  privacy the encrypted upstreams are simply tried first. Quarantined
+  upstreams count for neither: they are not dialled, so they cannot satisfy a
+  privacy requirement.
 - **Quarantine**: a misconfigured forward upstream does not stop the daemon.
   It is *quarantined* — kept in the table, reported, and never dialled — and
   the zone keeps answering on its remaining upstreams with reduced

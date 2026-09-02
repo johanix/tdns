@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	core "github.com/johanix/tdns/v2/core"
+	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -89,7 +90,7 @@ func TestForwardQuarantinedZoneServfailsWithoutDialling(t *testing.T) {
 	if fz.Upstreams[0].Client != nil {
 		t.Fatal("placeholder upstream has a client; this test cannot prove no dial")
 	}
-	_, rcode, _, _, err := imr.forwardQuery(context.Background(), "www.bad.example.", 1, fz, false, false)
+	_, rcode, _, _, err := imr.forwardQuery(context.Background(), "www.bad.example.", 1, fz, false, edns0.PrivacyNone)
 	if rcode != 2 { // dns.RcodeServerFailure
 		t.Errorf("rcode = %d, want SERVFAIL", rcode)
 	}
@@ -336,7 +337,7 @@ func TestForwardQueryNeverDialsAQuarantinedUpstream(t *testing.T) {
 	imr := newReloadTestImr(t)
 	imr.setZoneTable(forwards, nil, nil)
 
-	_, _, _, _, err := imr.forwardQuery(context.Background(), "www.fwd.example.", dns.TypeA, fz, false, false)
+	_, _, _, _, err := imr.forwardQuery(context.Background(), "www.fwd.example.", dns.TypeA, fz, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwardQuery did not fall through to the usable upstream: %v", err)
 	}
