@@ -294,15 +294,10 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	// Publish SVCB bootstrap capability record at the DSYNC UPDATE target.
 	// This advertises which bootstrap methods the parent supports, per
 	// draft-ietf-dnsop-delegation-mgmt-via-ddns-01, section "SvcParamKey bootstrap".
-	bootstrapMethods := dsc.Bootstrap.Methods
+	bootstrapMethods := zd.boundDelegationPolicy().bootstrapSVCBData()
 	if bootstrapMethods != "" {
-		updateTarget := dsc.Update.Target
-		if updateTarget != "" {
-			replacer := zd.ZoneName
-			if replacer == "." {
-				replacer = "root"
-			}
-			target := dns.Fqdn(strings.Replace(updateTarget, "{ZONENAME}", replacer, 1))
+		target := DsyncUpdateTargetName(zd.ZoneName)
+		if target != "" {
 			svcbRR := &dns.SVCB{
 				Hdr:      dns.RR_Header{Name: target, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: uint32(ttl)},
 				Priority: 0,
@@ -414,6 +409,16 @@ func (zd *ZoneData) UnpublishDsyncRRs() error {
 			Hdr: dns.RR_Header{Name: apiTarget, Rrtype: dns.TypeTXT, Class: dns.ClassANY},
 		}
 		actions = append(actions, anti_uri, anti_txt)
+	}
+
+	if updateTarget := DsyncUpdateTargetName(zd.ZoneName); updateTarget != "" {
+		antiSVCB := &dns.SVCB{
+			Hdr: dns.RR_Header{Name: updateTarget, Rrtype: dns.TypeSVCB, Class: dns.ClassANY},
+		}
+		antiKEY := &dns.KEY{
+			Hdr: dns.RR_Header{Name: updateTarget, Rrtype: dns.TypeKEY, Class: dns.ClassANY},
+		}
+		actions = append(actions, antiSVCB, antiKEY)
 	}
 
 	select {

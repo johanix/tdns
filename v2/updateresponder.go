@@ -552,7 +552,7 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		// 2. Single RR in Update section, which is a KEY
 		// 3. Class is not NONE or ANY (i.e. not a removal, but an add)
 		// 4. Name of key must be == existing delegation
-		lgHandler.Debug("ApproveChildUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "keyBootstrap", zd.UpdatePolicy.Child.KeyBootstrap, "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
+		lgHandler.Debug("ApproveChildUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "delegationpolicy", zd.boundDelegationPolicy().Name, "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
 
 		if !us.ValidatedByTrustedKey {
 			// If the update is not trusted (i.e. validated against a trusted key) it should be
@@ -577,19 +577,10 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 			}
 
 			// This is the special case that we allow for unvalidated key uploads.
-			if zd.UpdatePolicy.Child.KeyUpload == "unvalidated" { // exactly one SIG(0) key
-				for _, bootstrap := range zd.UpdatePolicy.Child.KeyBootstrap {
-					if bootstrap == "strict-manual" {
-						us.Approved = false
-						lgHandler.Warn("keybootstrap=strict-manual prohibits unvalidated KEY upload")
-						return false, false, nil
-					}
-				}
-				// XXX: I think we should require that this KEY upload is self-signed.
+			if zoneAllowsUnvalidatedUpload(zd) {
 				lgHandler.Info("child update approved: unvalidated KEY upload")
 				unvalidatedKeyUpload = true
 			}
-		}
 
 		// Past the unvalidated key upload; from here update MUST be validated
 		if (us.ValidationRcode != dns.RcodeSuccess || !us.Validated) && !unvalidatedKeyUpload {
@@ -733,7 +724,7 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	// 2. Single RR in Update section, which is a KEY
 	// 3. Class is not NONE or ANY (i.e. not a removal, but an add)
 	// 4. Name of key must be == existing delegation
-	lgHandler.Debug("ApproveTrustUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "keyBootstrap", zd.UpdatePolicy.Child.KeyBootstrap, "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
+		lgHandler.Debug("ApproveTrustUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "delegationpolicy", zd.boundDelegationPolicy().Name, "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
 
 	if !us.ValidatedByTrustedKey {
 		// If the update is not trusted (i.e. validated against a trusted key) it should be
@@ -757,15 +748,7 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		//		}
 
 		// This is the special case that we allow for unvalidated key uploads.
-		if zd.UpdatePolicy.Child.KeyUpload == "unvalidated" { // exactly one SIG(0) key
-			for _, bootstrap := range zd.UpdatePolicy.Child.KeyBootstrap {
-				if bootstrap == "strict-manual" {
-					us.Approved = false
-					lgHandler.Warn("keybootstrap=strict-manual prohibits unvalidated KEY upload")
-					return false, false, nil
-				}
-			}
-			// XXX: I think we should require that this KEY upload is self-signed.
+		if zoneAllowsUnvalidatedUpload(zd) {
 			lgHandler.Info("trust update approved: unvalidated KEY upload")
 			unvalidatedKeyUpload = true
 			us.Approved = true

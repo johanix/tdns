@@ -83,9 +83,9 @@ func LookupChildKeyAtSignal(ctx context.Context, childZone string, imr *Imr) ([]
 // be found via the configured verification mechanisms (at-apex, at-ns). Returns
 // true if any mechanism succeeds (key found + optionally DNSSEC-validated).
 func VerifyChildKey(ctx context.Context, childZone string, keyRR string, imr *Imr) (verified bool, dnssecValidated bool) {
-	mechanisms := DelegationSyncConfig().Parent.Update.KeyVerification.Mechanisms
+	mechanisms := parentDelegationPolicy(childZone).Mechanisms
 	if len(mechanisms) == 0 {
-		mechanisms = []string{"at-apex", "at-ns"}
+		return false, false
 	}
 
 	// Try each mechanism in order. Stop as soon as we have a DNSSEC-validated
@@ -183,9 +183,14 @@ func keyVerificationRetrySettings(kv DsyncKeyVerificationConf) (int, time.Durati
 // process is asked to stop; without it the goroutine ignores shutdown and the
 // deferred key cleanup it performs runs against a database that is closing.
 func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone string, keyid uint16, keyRR string) {
+	pol := parentDelegationPolicy(childZone)
+	if len(pol.Mechanisms) == 0 {
+		lgSigner.Info("TriggerChildKeyVerification: policy has empty mechanisms; not verifying",
+			"zone", childZone, "keyid", keyid, "policy", pol.Name)
+		return
+	}
 	go func() {
-		maxAttempts, retryInterval := keyVerificationRetrySettings(
-			DelegationSyncConfig().Parent.Update.KeyVerification)
+		maxAttempts, retryInterval := pol.RetryMaxAttempts, pol.RetryInterval
 
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			imr := Globals.ImrEngine
@@ -213,10 +218,7 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone str
 			// nil-check: absent and false are different answers here, and
 			// collapsing them would silently downgrade key verification on
 			// every config that does not mention the key.
-			requireDnssec := true
-			if rd := DelegationSyncConfig().Parent.Update.KeyVerification.RequireDnssec; rd != nil {
-				requireDnssec = *rd
-			}
+			requireDnssec := pol.RequireDnssec
 
 			accepted := verified && (!requireDnssec || dnssecValidated)
 

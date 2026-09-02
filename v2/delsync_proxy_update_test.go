@@ -281,3 +281,65 @@ func TestProxyKeyStatus(t *testing.T) {
 		t.Fatalf("expected update-unsupported message, got %q", msg)
 	}
 }
+
+func countReplaceDSOps(m *dns.Msg) (del, add int) {
+	for _, rr := range m.Ns {
+		if rr.Header().Rrtype != dns.TypeDS {
+			continue
+		}
+		if rr.Header().Class == dns.ClassANY {
+			del++
+			continue
+		}
+		add++
+	}
+	return del, add
+}
+
+// The one DS statement a proxy REPLACE UPDATE may make. Same three shapes as
+// TestProxyApiDSStatementDependsOnTheDnskeyRRsetNotTheSEPBit: absence of the
+// DNSKEY RRset withdraws parent DS (#468); a flags-256 CSK leaves it; SEP keys
+// are restated and a ZSK is not hashed.
+func TestProxyReplaceDSStatementDependsOnTheDnskeyRRsetNotTheSEPBit(t *testing.T) {
+	parent := "example."
+	cskZone := proxyApiBaseZone() +
+		"api.example.	3600 IN DNSKEY 256 3 15 l02Woi0iS8Aa25FQkUd9RMzZHJpBoRQwAQEX1SxZJA4=\n"
+	kskZskZone := proxyApiSignedZone() +
+		"api.example.	3600 IN DNSKEY 256 3 15 0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=\n"
+
+	tests := []struct {
+		name             string
+		zone             string
+		wantKnown        bool
+		wantNewDS        int
+		wantDel, wantAdd int
+	}{
+		{"no DNSKEY RRset: withdraw parent DS", proxyApiBaseZone(), true, 0, 1, 0},
+		{"flags-256 CSK: leave parent DS", cskZone, false, 0, 0, 0},
+		{"SEP KSK: restate DS", proxyApiSignedZone(), true, 1, 1, 1},
+		{"KSK+ZSK: no DS for the ZSK", kskZskZone, true, 1, 1, 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := testZone(t, proxyApiZone, tc.zone)
+			zd.Parent = parent
+			dss := zd.proxyReplaceSyncState()
+			if dss.NewDSKnown != tc.wantKnown {
+				t.Errorf("NewDSKnown=%v, want %v", dss.NewDSKnown, tc.wantKnown)
+			}
+			if len(dss.NewDS) != tc.wantNewDS {
+				t.Errorf("len(NewDS)=%d, want %d", len(dss.NewDS), tc.wantNewDS)
+			}
+			m, err := CreateChildReplaceUpdateWithDS(parent, proxyApiZone,
+				dss.NewNS, dss.NewA, dss.NewAAAA, dss.NewDS, dss.NewDSKnown)
+			if err != nil {
+				t.Fatalf("build UPDATE: %v", err)
+			}
+			del, add := countReplaceDSOps(m)
+			if del != tc.wantDel || add != tc.wantAdd {
+				t.Errorf("DS del/add=%d/%d, want %d/%d", del, add, tc.wantDel, tc.wantAdd)
+			}
+		})
+	}
+}

@@ -259,16 +259,7 @@ func childKeyStructurallyValid(key *Sig0Key) bool {
 // choose between KEY_BOOTSTRAP_MANUAL(10) and KEY_BOOTSTRAP_AUTO(9) for a
 // not-yet-validated key; an unknown parent zone defaults to automatic.
 func zoneRequiresManualBootstrap(childName string) bool {
-	parent := FindZone(childName)
-	if parent == nil {
-		return false
-	}
-	for _, m := range parent.UpdatePolicy.Child.KeyBootstrap {
-		if m == "manual" || m == "strict-manual" {
-			return true
-		}
-	}
-	return false
+	return parentDelegationPolicy(childName).Manual
 }
 
 // newKeyStateInquiryMsg builds the child's KeyState inquiry: a QTYPE=KEY query

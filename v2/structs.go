@@ -186,11 +186,17 @@ type ZoneData struct {
 	// config. Use asConfiguredOptions(). nil when nothing was suppressed.
 	SuppressedOptions map[ZoneOption]bool
 	UpdatePolicy      UpdatePolicy
+	DelegationPolicy  *DelegationPolicy
 	DnssecPolicy      *DnssecPolicy
 	DnssecPolicyName  string // name of currently-applied policy; used to detect config-reload-driven changes
 	MultiSigner       *MultiSignerConf
 	KeyDB             *KeyDB
-	AppType           AppType
+	// proxySig0ParentBootstrapped is set after the proxy has run the
+	// self-signed SIG(0) ceremony for the KEY currently at the apex.
+	// Cleared when the KEY leaves the apex so a later WAITING→READY
+	// transition runs the ceremony again.
+	proxySig0ParentBootstrapped bool
+	AppType                     AppType
 	// Errors holds all active error conditions on this zone. Use SetError /
 	// ClearError to mutate; HasError / ErrorList to inspect.
 	// The fields below (Error, ErrorType, ErrorMsg) are derived from
@@ -437,6 +443,7 @@ type ZoneConf struct {
 	UpdatePolicy      UpdatePolicyConf
 	DelegationBackend string `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
 	DnssecPolicy      string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
+	DelegationPolicy  string `yaml:"delegationpolicy" mapstructure:"delegationpolicy"`
 	// OutboundSoaSerial is the per-zone override of the server-global
 	// authengine.outbound-soa-serial. Empty (the default) inherits the global.
 	// Set it on a TEMPLATE to give a whole class of zones a serial policy —
@@ -1004,6 +1011,7 @@ type ZoneRefresher struct {
 	Options        map[ZoneOption]bool
 	Edns0Options   *edns0.MsgOptions
 	UpdatePolicy   UpdatePolicy
+	DelegationPolicy *DelegationPolicy
 	DnssecPolicy   string
 	// OutboundSoaSerial carries the per-zone outbound serial mode to the
 	// RefreshEngine (copied to zd.OutboundSoaSerial on merge). Empty means

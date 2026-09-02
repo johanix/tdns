@@ -35,8 +35,10 @@ import (
 // authoritative and returns a zero value; add the fields and move the readers
 // in the same change.
 type DelegationSyncConf struct {
-	Parent DelegationSyncParentConf `yaml:"parent" mapstructure:"parent"`
-	Child  DelegationSyncChildConf  `yaml:"child" mapstructure:"child"`
+	Parent            DelegationSyncParentConf      `yaml:"parent" mapstructure:"parent"`
+	Child             DelegationSyncChildConf       `yaml:"child" mapstructure:"child"`
+	Policies          map[string]DelegationPolicyConf `yaml:"policies" mapstructure:"policies"`
+	CompiledPolicies  map[string]DelegationPolicy     `yaml:"-" mapstructure:"-"`
 }
 
 type DelegationSyncParentConf struct {
@@ -50,10 +52,6 @@ type DelegationSyncParentConf struct {
 	// Parent.Update.Target and friends reading exactly as before.
 	Update DsyncUpdateSchemeConf `yaml:"update" mapstructure:"update"`
 	Api    DsyncApiSchemeConf    `yaml:"api" mapstructure:"api"`
-
-	Bootstrap struct {
-		Methods string `yaml:"methods" mapstructure:"methods"`
-	} `yaml:"bootstrap" mapstructure:"bootstrap"`
 }
 
 type DelegationSyncChildConf struct {
@@ -66,7 +64,10 @@ type DelegationSyncChildConf struct {
 // DsyncChildUpdateConf is the child side of the UPDATE scheme. Only keygen
 // today; the DSYNC keys themselves are the parent's to publish.
 type DsyncChildUpdateConf struct {
-	Keygen DsyncKeygenConf `yaml:"keygen" mapstructure:"keygen"`
+	Keygen    DsyncKeygenConf `yaml:"keygen" mapstructure:"keygen"`
+	Bootstrap struct {
+		Methods []string `yaml:"methods" mapstructure:"methods"`
+	} `yaml:"bootstrap" mapstructure:"bootstrap"`
 }
 
 // DsyncUpdateSchemeConf is the parent's UPDATE scheme: the DSYNC record keys,
@@ -80,8 +81,7 @@ type DsyncUpdateSchemeConf struct {
 	// uses the conventional tag name.
 	DsyncDnsSchemeConf `yaml:",squash" mapstructure:",squash"`
 
-	KeyVerification DsyncKeyVerificationConf `yaml:"key-verification" mapstructure:"key-verification"`
-	Keygen          DsyncKeygenConf          `yaml:"keygen" mapstructure:"keygen"`
+	Keygen DsyncKeygenConf `yaml:"keygen" mapstructure:"keygen"`
 }
 
 // DsyncKeygenConf: how a SIG(0) keypair is produced for delegation sync.
@@ -326,6 +326,7 @@ var delegationSyncConf atomic.Pointer[DelegationSyncConf]
 // SetDelegationSyncConfig installs the freshly-parsed block. Called from
 // ParseConfig on both first start and reload.
 func SetDelegationSyncConfig(dsc DelegationSyncConf) {
+	dsc.CompiledPolicies = compileDelegationPolicies(dsc.Policies)
 	delegationSyncConf.Store(&dsc)
 }
 

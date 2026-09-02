@@ -1283,6 +1283,15 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 
+		dpol, derr := bindDelegationPolicy(zconf)
+		if derr != nil {
+			lgConfig.Error("zone delegation policy invalid, zone in error state", "zone", zname, "err", derr)
+			zd.SetError(ConfigError, "%s", derr)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+		zd.DelegationPolicy = dpol
+
 		// Record it ON THE ZONE, not just in the log. The zone is otherwise
 		// perfectly healthy -- it loads, serves, and simply refuses every child
 		// update -- so a log line at startup is the only trace, and by the time
@@ -1579,6 +1588,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Zonefile:       zconf.Zonefile,
 				Options:        options,
 				UpdatePolicy:   policy,
+				DelegationPolicy: dpol,
 				DnssecPolicy:   zconf.DnssecPolicy,
 				// Always carried (empty == inherit the global), so a config
 				// edit that REMOVES a per-zone mode actually reverts the zone
@@ -1777,11 +1787,9 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 	}
 	return UpdatePolicy{
 		Child: UpdatePolicyDetail{
-			Type:         zconf.UpdatePolicy.Child.Type,
-			RRtypes:      childrrtypes,
-			KeyBootstrap: zconf.UpdatePolicy.Child.KeyBootstrap,
-			KeyUpload:    zconf.UpdatePolicy.Child.KeyUpload,
-			TTL:          childTTL,
+			Type:    zconf.UpdatePolicy.Child.Type,
+			RRtypes: childrrtypes,
+			TTL:     childTTL,
 		},
 		Zone: UpdatePolicyDetail{
 			Type:    zconf.UpdatePolicy.Zone.Type,
@@ -1827,6 +1835,9 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	if appMode != AppTypeAgent && zconf.DnssecPolicy == "" && tmpl.DnssecPolicy != "" {
 		zconf.DnssecPolicy = tmpl.DnssecPolicy
 	}
+	if zconf.DelegationPolicy == "" && tmpl.DelegationPolicy != "" {
+		zconf.DelegationPolicy = tmpl.DelegationPolicy
+	}
 
 	// Zonemd: merged FIELD BY FIELD, not copied whole. Under the shallow rule
 	// below a struct field is taken from the template only when the zone's is
@@ -1853,7 +1864,7 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	// A template config never sets runtime/display fields, so IsZero skips them.
 	bespoke := map[string]bool{
 		"Name": true, "Template": true, // never copied from a template
-		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, // handled above
+		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, "DelegationPolicy": true, // handled above
 		"Zonemd": true, // handled above (per-field merge, not whole-block copy)
 		// DynamicZones is a property of the TEMPLATE (API-instantiable), not
 		// of the zones stamped out from it — never copied.

@@ -103,10 +103,10 @@ func (zd *ZoneData) ProxyUpdatePreconditionCheck(ctx context.Context, kdb *KeyDB
 		zd.clearProxyUpdateWarning()
 		return ProxyUpdateUnsupported, nil
 	}
-	return zd.proxyUpdateKeyState(kdb)
+	return zd.proxySig0PublicationState(kdb)
 }
 
-// proxyUpdateKeyState is the §10.8 state machine from step 2 onwards: the
+// proxySig0PublicationState is the §10.8 state machine from step 2 onwards: the
 // caller has already established that the parent advertises a DSYNC UPDATE
 // receiver, and this decides whether the agent can actually sign for the child.
 //
@@ -118,7 +118,7 @@ func (zd *ZoneData) ProxyUpdatePreconditionCheck(ctx context.Context, kdb *KeyDB
 //
 // Side-effecting in the WAITING state only: it generates a SIG(0) keypair if
 // the keystore has none, so the operator instruction can be produced.
-func (zd *ZoneData) proxyUpdateKeyState(kdb *KeyDB) (ProxyUpdateState, error) {
+func (zd *ZoneData) proxySig0PublicationState(kdb *KeyDB) (ProxyUpdateState, error) {
 	// Step 2: inspect the apex KEY RRset.
 	apexKeys := zd.proxyApexKEYs()
 	if len(apexKeys) > 0 {
@@ -127,12 +127,15 @@ func (zd *ZoneData) proxyUpdateKeyState(kdb *KeyDB) (ProxyUpdateState, error) {
 			lgDns.Info("proxy update precondition: ready (KEY at apex, private key held)", "zone", zd.ZoneName)
 			return ProxyUpdateReady, nil
 		}
+		zd.proxySig0ParentBootstrapped = false
 		// Foreign KEY: do not mint a competing key; degrade, don't fail.
 		msg := "DSYNC UPDATE proxy not operable: a foreign KEY occupies the apex (no matching private key); NOTIFY proxy may still apply"
 		zd.SetError(DelegationSyncWarning, "%s", msg)
 		lgDns.Warn("proxy update precondition: foreign KEY at apex", "zone", zd.ZoneName)
 		return ProxyUpdateForeignKey, nil
 	}
+
+	zd.proxySig0ParentBootstrapped = false
 
 	// No KEY at the apex: ensure we have a keypair, then instruct the operator.
 	if err := zd.proxyEnsureSig0Key(kdb); err != nil {
@@ -283,6 +286,25 @@ func (zd *ZoneData) proxyCurrentDelegationRRs() (newNS, newA, newAAAA, newDS []d
 	return newNS, newA, newAAAA, newDS
 }
 
+// proxyReplaceSyncState is the replace-mode payload from the served zone.
+//
+// NewDSKnown follows hasDnskeyRRset, the same predicate the API path uses:
+// no DNSKEY RRset at all is an empty-DS delete (#468); a flags-256 CSK
+// (DNSKEYs present, none SEP) leaves the parent DS alone; SEP keys are
+// restated and ZSKs are not hashed.
+func (zd *ZoneData) proxyReplaceSyncState() DelegationSyncStatus {
+	newNS, newA, newAAAA, newDS := zd.proxyCurrentDelegationRRs()
+	return DelegationSyncStatus{
+		ZoneName:   zd.ZoneName,
+		Parent:     zd.Parent,
+		NewNS:      newNS,
+		NewA:       newA,
+		NewAAAA:    newAAAA,
+		NewDS:      newDS,
+		NewDSKnown: !zd.hasDnskeyRRset() || len(newDS) > 0,
+	}
+}
+
 // ProxyStartupReconcile runs once when a delegation-sync-proxy zone first
 // loads: a one-time parent-vs-child reconcile that catches delegation drift
 // accumulated while the agent was down, WITHOUT re-sending on every restart
@@ -323,7 +345,7 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 
 	lgDns.Info("delegation-sync-proxy: startup reconcile — parent out of sync",
 		"zone", zd.ZoneName, "plan", plan.Summary())
-	msg, serr := zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis)
+	msg, serr := zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis, &dss)
 	if serr != nil {
 		return "", fmt.Errorf("ProxyStartupReconcile: %w", serr)
 	}
@@ -344,7 +366,7 @@ func (zd *ZoneData) ProxyDelegationSync(ctx context.Context, kdb *KeyDB, notifyq
 	if err != nil {
 		return "", fmt.Errorf("ProxyDelegationSync: %w", err)
 	}
-	return zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis)
+	return zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis, nil)
 }
 
 // proxyUpdateMode returns the parent-update form for the proxy: the operator's
@@ -372,78 +394,52 @@ func proxyUpdateMode(kdb *KeyDB) string {
 // its gate, so it never sends an UPDATE the parent would REFUSE — the check
 // simply happens earlier, and once.
 func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
-	target *DsyncTarget) (string, error) {
+	target *DsyncTarget, precomputed *DelegationSyncStatus) (string, error) {
 
-	if target == nil || len(target.Addresses) == 0 {
-		return "", fmt.Errorf("ProxyUpdateParent: no usable UPDATE target for %s", zd.ZoneName)
-	}
-	if zd.Parent == "" || zd.Parent == "." {
-		return "", fmt.Errorf("ProxyUpdateParent: parent zone for %s is unknown", zd.ZoneName)
-	}
-
-	// Build the UPDATE in the configured form (replace by default, delta if the
-	// operator chose it). Replace reads the current authoritative records from
-	// the served zone; delta needs the parent-vs-child diff (AnalyseZoneDelegation).
-	var m *dns.Msg
-	var berr error
 	mode := proxyUpdateMode(kdb)
+	var dss DelegationSyncStatus
 	if mode == UpdateModeDelta {
-		dss, aerr := zd.AnalyseZoneDelegation(imr)
-		if aerr != nil {
-			return "", fmt.Errorf("ProxyUpdateParent: analyse delegation (delta): %w", aerr)
+		if precomputed != nil {
+			dss = *precomputed
+		} else {
+			var aerr error
+			dss, aerr = zd.AnalyseZoneDelegation(imr)
+			if aerr != nil {
+				return "", fmt.Errorf("ProxyUpdateParent: analyse delegation (delta): %w", aerr)
+			}
 		}
 		if dss.InSync {
 			return "delta: parent already in sync; nothing sent", nil
 		}
-		var adds, removes []dns.RR
-		adds = append(adds, dss.NsAdds...)
-		adds = append(adds, dss.AAdds...)
-		adds = append(adds, dss.AAAAAdds...)
-		adds = append(adds, dss.DSAdds...)
-		removes = append(removes, dss.NsRemoves...)
-		removes = append(removes, dss.ARemoves...)
-		removes = append(removes, dss.AAAARemoves...)
-		removes = append(removes, dss.DSRemoves...)
-		m, berr = CreateChildUpdate(zd.Parent, zd.ZoneName, adds, removes)
 	} else {
-		newNS, newA, newAAAA, newDS := zd.proxyCurrentDelegationRRs()
-		m, berr = CreateChildReplaceUpdate(zd.Parent, zd.ZoneName, newNS, newA, newAAAA, newDS)
-	}
-	if berr != nil {
-		return "", fmt.Errorf("ProxyUpdateParent: build %s UPDATE: %w", mode, berr)
+		dss = zd.proxyReplaceSyncState()
 	}
 
-	// Sign as the child with the agent's SIG(0) key.
-	// A keystore failure and an absent key are different problems: collapsing
-	// them reported "no active SIG(0) key" for a broken keystore, sending the
-	// operator to look at key publication instead of at the database.
-	sak, kerr := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
-	if kerr != nil {
-		return "", fmt.Errorf("ProxyUpdateParent: keystore lookup for %s: %w", zd.ZoneName, kerr)
-	}
-	if sak == nil || len(sak.Keys) == 0 {
-		return "", fmt.Errorf("ProxyUpdateParent: no active SIG(0) key for %s", zd.ZoneName)
-	}
-	smsg, serr := SignMsg(*m, zd.ZoneName, sak)
-	if serr != nil {
-		return "", fmt.Errorf("ProxyUpdateParent: sign UPDATE for %s: %w", zd.ZoneName, serr)
-	}
-	if smsg == nil {
-		// %w on a nil error rendered as "%!w(<nil>)", which says nothing.
-		return "", fmt.Errorf("ProxyUpdateParent: signing UPDATE for %s produced no message and no error",
-			zd.ZoneName)
+	if err := zd.proxyEnsureParentBootstrap(ctx); err != nil {
+		return "", fmt.Errorf("ProxyUpdateParent: bootstrap SIG(0) key with parent: %w", err)
 	}
 
-	// Delegation-DATA send path (the proxy sends the child's delegation change
-	// to the parent), so it gets the draft's retry/backoff + RCODE policy just
-	// like SyncZoneDelegationViaUpdate. SendUpdateWithRetry also turns a parent
-	// rejection back into a non-nil error, which the check below relies on:
-	// bare SendUpdate reports a rejection through the rcode with a NIL error.
-	rcode, _, uerr := zd.SendUpdateWithRetry(ctx, smsg, zd.Parent, target.Addresses)
+	_, rcode, _, uerr := zd.SendDelegationUpdate(ctx, kdb, dss, target, mode)
 	if uerr != nil {
 		return "", fmt.Errorf("ProxyUpdateParent: send UPDATE to %s: %w", zd.Parent, uerr)
 	}
-	msg := fmt.Sprintf("proxied %s UPDATE to parent %s (rcode %s)", mode, zd.Parent, dns.RcodeToString[rcode])
+	msg := fmt.Sprintf("proxied %s UPDATE to parent %s (rcode %s)", mode, zd.Parent, dns.RcodeToString[int(rcode)])
 	lgDns.Info("delegation-sync-proxy: "+msg, "zone", zd.ZoneName, "mode", mode)
 	return msg, nil
+}
+
+// proxyEnsureParentBootstrap runs the self-signed SIG(0) ceremony once the
+// KEY is at the apex (WAITING → READY), before the first proxied UPDATE.
+// BADKEY recovery stays in SendUpdateWithRetry; this is the first-time path
+// so the first UPDATE is not a guaranteed failure.
+func (zd *ZoneData) proxyEnsureParentBootstrap(ctx context.Context) error {
+	if zd.proxySig0ParentBootstrapped {
+		return nil
+	}
+	_, _, err := zd.bootstrapSig0Key(ctx, 0, proxyApexKEY{})
+	if err != nil {
+		return err
+	}
+	zd.proxySig0ParentBootstrapped = true
+	return nil
 }
