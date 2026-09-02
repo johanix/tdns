@@ -161,19 +161,19 @@ but failing signature is always rejected. A reply that merely cannot be
 authenticated is rejected unless `delegationsync.child.update.allow-insecure`
 is set (then acted on with a Warn). The same switch gates the SVCB bootstrap
 advertisement, which is otherwise treated as absent when unvalidated (the
-#471 review's carry-over 6). **Behaviour change:** an unsigned parent with no
-manually trusted receiver key gets no automatic bootstrap by default. tdns-mp
-still carries its own unverified copy of the inquiry and should adopt the
-exported function when it bumps.
+#471 review's carry-over 6). A bogus DNSSEC verdict, on the receiver KEY,
+the DSYNC or the SVCB, is never waived. **Behaviour change, scoped
+precisely:** the KeyState poller (`ParentSyncAfterKeyPublication`) refuses an
+unauthenticated reply by default, so under an unsigned parent with no manually
+trusted receiver key it does not reach the bootstrap it would otherwise
+trigger. That poller has no caller in this repo today — only tdns-mp calls
+it, against its June pin — and the tdns-auth child path
+(`DelegationSyncSetup`) never inquires at all, so it still sends its KEY
+UPDATE regardless. tdns-mp should adopt the exported function when it bumps.
 
-**Moved ahead of D-6 (2026-09-01):** highest-value of the three remaining
-Phase 2 items, and the doc's ordering never reflected that. The KeyState
-inquiry (`QueryParentKeyState`/`QueryParentKeyStateDetailed`,
-`v2/parentsync_bootstrap.go:169,219`) travels over plain UDP (`dns.Client{}`,
-no `Net` set) with no source authentication beyond wire format. Without this
-item, a network attacker capable of UDP spoofing can inject a forged KeyState
-response today and the child cannot detect it — this is a live exposure on an
-active code path, not a future-feature gap like D-6.
+**Moved ahead of D-6 (2026-09-01)** as the highest-value of the three
+remaining Phase 2 items: before it, the KeyState inquiry went over plain UDP
+and the child took the reply at face value. (Closed 2026-09-02, above.)
 
 - **Draft (ddns-02 §§"Mutual Authentication", "Bootstrapping the UPDATE Receiver's Key Into the Child", "Publishing the UPDATE Receiver's Key"):** the UPDATE Receiver maintains its own SIG(0) key, publishes it as a KEY record at the DSYNC {target}, and signs its responses; the child acquires+validates that KEY (DNSSEC or manual) and MUST verify signed responses (esp. KeyState inquiry responses).
 - **Current (PARTIAL — reassessed 2026-09-02 after PR #471):**

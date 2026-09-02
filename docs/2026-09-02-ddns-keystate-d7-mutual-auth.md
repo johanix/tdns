@@ -89,13 +89,52 @@ Two things it does **not** do, deliberately:
   responses and the SVCB bootstrap advertisement (below). Same reasoning as
   the API scheme's `child.api.allow-insecure`, and the same word.
 
-**Behaviour change, worth a line in the PR body and a heads-up to the lab:**
-a child under an **unsigned** parent zone with no manually trusted receiver
-key now gets **no automatic bootstrap at all** by default. The poll fails
-closed with an error naming the knob, and since the bootstrap UPDATE is
-triggered by a KEY_UNKNOWN reply, none is sent. Set `allow-insecure: true`
-(lab) or add the receiver key to the truststore (production). No backwards
-compatibility, per project rule; the plan's acceptance criterion is fail-closed.
+**Behaviour change, scoped precisely (corrected after the external review's
+T1):** the verification runs wherever a KeyState *inquiry* is made, and in
+this repo that is one place, the poller `ParentSyncAfterKeyPublication`.
+Under an **unsigned** parent zone with no manually trusted receiver key that
+poller now refuses the reply by default, with an error naming the knob, and
+since its bootstrap UPDATE is triggered by a KEY_UNKNOWN reply, it sends
+none. Two things that statement does *not* cover:
+
+- The poller has **no caller in this repo**. Only tdns-mp calls it, against
+  its June `tdns/v2` pin and with the old signature, so until tdns-mp bumps
+  nothing running from this repo makes the inquiry.
+- The tdns-auth child path (`DelegationSyncSetup` → `bootstrapSig0Key`)
+  **never inquires**. It looks up DSYNC, selects a method and sends the KEY
+  UPDATE. D-7 verification does not run there, so an unsigned parent still
+  gets an automatic KEY UPDATE from tdns-auth, knob or no knob. The UPDATE
+  *response* is unsigned until D-7(iii).
+
+**The `allow-insecure` composition (the review's T2).** An unauthenticated
+SVCB advertisement is treated as absent, so the child falls back to its
+configured method list rather than letting a forged advertisement talk it
+out of bootstrapping. The cost is that a legitimate *unsigned* parent cannot
+steer either: with the default child list, an unsigned parent advertising
+`unsigned,manual` gets an `at-apex` KEY UPDATE in strict mode (the parent's
+unsigned policy accepts exactly that), while `allow-insecure: true` honours
+the advertisement, finds an empty intersection and **refuses**. So an
+unsigned-parent lab that turns the knob on must also opt into `unsigned` in
+`child.update.bootstrap.methods`, or turning the knob on makes the auth
+child stricter. The sample YAML says so next to the knob. The alternative,
+treating an unauthenticated advertisement as present-but-unusable and
+refusing, would make a forged advertisement a denial of bootstrap; kept the
+fallback.
+
+**Bogus is not insecure (the review's T3).** The IMR now exposes its DNSSEC
+verdict (`ImrResponse.ValidationState`) rather than only a Secure boolean,
+and `DsyncTarget` carries `Bogus`. A **bogus** verdict on the receiver KEY,
+on the DSYNC that named the receiver, or on the SVCB advertisement is a chain
+of trust that exists and failed: refused regardless of `allow-insecure`. Only
+*insecure* (an unsigned zone) is waivable. A manually trusted key is pinned
+and still authenticates whatever DNSSEC said about the DSYNC.
+
+**Next address on a failed verification (the review's T4).** `queryKeyState`
+no longer stops at the first address that answers: a response that fails
+verification is logged and the next address of the target is tried, so a
+single poisoned address is a non-event rather than a per-attempt denial.
+Only when every address fails does the verification error surface, and a
+wrong signature is never made acceptable by the retry.
 
 ### Transport
 

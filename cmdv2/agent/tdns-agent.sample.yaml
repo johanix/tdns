@@ -143,9 +143,11 @@ delegationsync:
             methods: [ at-apex ]
          # Act on KeyState responses and SVCB bootstrap advertisements that
          # cannot be authenticated (receiver KEY neither DNSSEC-validated nor
-         # manually trusted). Default false rejects them, which with an
-         # unsigned parent zone means no automatic bootstrap. See the tdns-auth
-         # sample for the full description. Lab convenience only.
+         # manually trusted). Default false rejects them. A BOGUS DNSSEC
+         # verdict is rejected regardless. Unsigned-parent test setups need
+         # `unsigned` in `methods` above as well, or the honoured advertisement
+         # refuses the bootstrap. See the tdns-auth sample for the full
+         # description. Lab convenience only.
          allow-insecure: false
 
 dnssec:

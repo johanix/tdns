@@ -168,4 +168,43 @@ func TestAdvertisedBootstrapMethodsRequiresAuthentication(t *testing.T) {
 	if _, present := advertisedBootstrapMethods(ctx, imr, nil, true); present {
 		t.Fatal("nil target must be absent")
 	}
+
+	// The SVCB itself unvalidated (an unsigned parent zone), DSYNC validated:
+	// ignored in strict mode, honoured under allow-insecure. The validator
+	// answers from the seeded cache entry, so this runs without a network.
+	unsigned := newBootstrapSVCB(target, "unsigned,manual", 300)
+	imr.Cache.Set(target, dns.TypeSVCB, &cache.CachedRRset{
+		Name: target, RRtype: dns.TypeSVCB,
+		RRset:   &core.RRset{Name: target, RRtype: dns.TypeSVCB, RRs: []dns.RR{unsigned}},
+		Context: cache.ContextAnswer,
+		State:   cache.ValidationStateInsecure,
+	})
+	if _, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, false); present {
+		t.Fatal("unvalidated SVCB, strict: advertisement must be ignored")
+	}
+	got, present = advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, true)
+	if !present || !reflect.DeepEqual(got, []string{"unsigned", "manual"}) {
+		t.Fatalf("unvalidated SVCB under allow-insecure: got %v present=%v", got, present)
+	}
+
+	// Bogus -- a chain that exists and failed -- is never honoured, not
+	// even under allow-insecure, whether it is the SVCB or the DSYNC.
+	imr.Cache.Set(target, dns.TypeSVCB, &cache.CachedRRset{
+		Name: target, RRtype: dns.TypeSVCB,
+		RRset:   &core.RRset{Name: target, RRtype: dns.TypeSVCB, RRs: []dns.RR{unsigned}},
+		Context: cache.ContextAnswer,
+		State:   cache.ValidationStateBogus,
+	})
+	if _, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: true}, true); present {
+		t.Fatal("bogus SVCB under allow-insecure: advertisement must be ignored")
+	}
+	imr.Cache.Set(target, dns.TypeSVCB, &cache.CachedRRset{
+		Name: target, RRtype: dns.TypeSVCB,
+		RRset:   &core.RRset{Name: target, RRtype: dns.TypeSVCB, RRs: []dns.RR{svcb}},
+		Context: cache.ContextAnswer,
+		State:   cache.ValidationStateSecure,
+	})
+	if _, present := advertisedBootstrapMethods(ctx, imr, &DsyncTarget{Name: target, Validated: false, Bogus: true}, true); present {
+		t.Fatal("bogus DSYNC under allow-insecure: advertisement must be ignored")
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -41,42 +42,46 @@ import (
 //     (perfectly validly signed) zone's KEY the child ends up trusting.
 //
 // A response whose signature is present but FAILS -- wrong bytes, wrong
-// signer name, outside its validity window -- is rejected unconditionally. A
+// signer name, outside its validity window -- is rejected unconditionally. So
+// is one whose receiver KEY, or whose DSYNC target, came back DNSSEC-BOGUS: a
+// chain that exists and fails is an attack signal, not an unsigned zone. A
 // response that merely CANNOT be authenticated (unsigned, or signed with a key
-// the child has no authenticated copy of) is rejected by default and accepted,
-// with a warning, only under delegationsync.child.update.allow-insecure, which
-// is the draft's "subject to local policy" escape for unsigned parent zones.
+// the child has no authenticated copy of, or an unsigned parent zone) is
+// rejected by default and accepted, with a warning, only under
+// delegationsync.child.update.allow-insecure, which is the draft's "subject
+// to local policy" escape for unsigned parent zones -- and only for those.
 
 // receiverKeyFetcher returns the KEY RRset published at the UPDATE Receiver's
-// name (the DSYNC UPDATE target) and whether the answer DNSSEC-validated.
+// name (the DSYNC UPDATE target) and the DNSSEC verdict on that answer: Secure
+// authenticates, Bogus refuses, anything else is "cannot authenticate".
 // Injected so the verification logic can be tested without an IMR; the
 // production fetcher is imrReceiverKeyFetcher.
-type receiverKeyFetcher func(ctx context.Context, name string) (keys []dns.RR, validated bool, err error)
+type receiverKeyFetcher func(ctx context.Context, name string) (keys []dns.RR, state cache.ValidationState, err error)
 
 // imrReceiverKeyFetcher looks the receiver KEY up through the IMR engine. The
 // IMR caches the RRset with its validation state, so repeated inquiries do not
 // re-query; a receiver key rollover becomes visible when the cached RRset
 // expires.
 func imrReceiverKeyFetcher(imr *Imr) receiverKeyFetcher {
-	return func(ctx context.Context, name string) ([]dns.RR, bool, error) {
+	return func(ctx context.Context, name string) ([]dns.RR, cache.ValidationState, error) {
 		if imr == nil {
-			return nil, false, errors.New("no IMR engine available")
+			return nil, 0, errors.New("no IMR engine available")
 		}
 		resp, err := imr.ImrQuery(ctx, dns.Fqdn(name), dns.TypeKEY, dns.ClassINET, nil)
 		if err != nil {
-			return nil, false, fmt.Errorf("IMR query for %s KEY failed: %v", name, err)
+			return nil, 0, fmt.Errorf("IMR query for %s KEY failed: %v", name, err)
 		}
 		if resp == nil || resp.Error {
 			msg := "nil response"
 			if resp != nil {
 				msg = resp.ErrorMsg
 			}
-			return nil, false, fmt.Errorf("IMR query for %s KEY returned error: %s", name, msg)
+			return nil, 0, fmt.Errorf("IMR query for %s KEY returned error: %s", name, msg)
 		}
 		if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
-			return nil, false, fmt.Errorf("no KEY RRset published at %s", name)
+			return nil, 0, fmt.Errorf("no KEY RRset published at %s", name)
 		}
-		return resp.RRset.RRs, resp.Validated, nil
+		return resp.RRset.RRs, resp.ValidationState, nil
 	}
 }
 
@@ -147,19 +152,22 @@ const allowInsecureKnob = "delegationsync.child.update.allow-insecure"
 
 // verifyKeyStateResponse authenticates a KeyState response. wire is the
 // response exactly as received (SIG(0) verification runs over the bytes the
-// signer hashed, not over a re-pack), r its unpacked form, receiver the DSYNC
-// UPDATE target name the inquiry was sent to, and targetValidated whether the
-// DSYNC lookup that produced that name DNSSEC-validated.
+// signer hashed, not over a re-pack), r its unpacked form, and target the
+// DSYNC UPDATE target the inquiry was sent to: its Name is the receiver
+// identity, its Validated / Bogus what the DSYNC lookup said about DNSSEC.
 //
 // It returns authenticated=true only when the signature verified with a
 // trusted receiver key (see the file comment). With allowInsecure a response
 // that cannot be authenticated is accepted (authenticated=false, err=nil) and
-// logged; a response whose signature is present but wrong is rejected
-// regardless of policy.
-func verifyKeyStateResponse(ctx context.Context, wire []byte, r *dns.Msg, receiver string, targetValidated bool,
+// logged; a response whose signature is present but wrong, or whose chain of
+// trust is bogus, is rejected regardless of policy.
+func verifyKeyStateResponse(ctx context.Context, wire []byte, r *dns.Msg, target *DsyncTarget,
 	trust receiverKeyTrust, fetch receiverKeyFetcher, allowInsecure bool) (bool, error) {
 
-	receiver = dns.Fqdn(receiver)
+	if target == nil {
+		return false, errors.New("KeyState response: no DSYNC target to verify against")
+	}
+	receiver := dns.Fqdn(target.Name)
 
 	sig := keyStateSig0(r)
 	if sig == nil {
@@ -190,16 +198,27 @@ func verifyKeyStateResponse(ctx context.Context, wire []byte, r *dns.Msg, receiv
 		}
 	}
 
-	// 2. The KEY the receiver publishes at its own name.
+	// 2. The KEY the receiver publishes at its own name. A bogus verdict --
+	// on the KEY, or on the DSYNC that named the receiver -- is a chain of
+	// trust that exists and failed. That is what an attacker substituting
+	// either record looks like, and no lab knob waives it.
+	if target.Bogus {
+		return false, fmt.Errorf("the DSYNC lookup that named the UPDATE Receiver %s failed DNSSEC validation (bogus); refusing regardless of %s",
+			receiver, allowInsecureKnob)
+	}
 	var key *dns.KEY
 	keyValidated := false
 	if fetch != nil {
-		keys, validated, err := fetch(ctx, receiver)
-		if err != nil {
+		keys, state, err := fetch(ctx, receiver)
+		switch {
+		case err != nil:
 			lgDns.Debug("KeyState response: receiver KEY lookup failed", "receiver", receiver, "err", err)
-		} else {
+		case state == cache.ValidationStateBogus:
+			return false, fmt.Errorf("the KEY RRset at the UPDATE Receiver %s failed DNSSEC validation (bogus); refusing regardless of %s",
+				receiver, allowInsecureKnob)
+		default:
 			key = matchingReceiverKey(keys, receiver, sig)
-			keyValidated = validated
+			keyValidated = state == cache.ValidationStateSecure
 		}
 	}
 	if key == nil {
@@ -216,7 +235,7 @@ func verifyKeyStateResponse(ctx context.Context, wire []byte, r *dns.Msg, receiv
 		return false, receiverSigFailure(receiver, sig, err)
 	}
 
-	if keyValidated && targetValidated {
+	if keyValidated && target.Validated {
 		lgDns.Debug("KeyState response authenticated by DNSSEC-validated receiver key",
 			"receiver", receiver, "keyid", sig.KeyTag)
 		return true, nil
@@ -224,11 +243,11 @@ func verifyKeyStateResponse(ctx context.Context, wire []byte, r *dns.Msg, receiv
 
 	if allowInsecure {
 		lgDns.Warn("KeyState response signature verified, but the receiver key is not authenticated; acting on it because "+allowInsecureKnob+" is set",
-			"receiver", receiver, "keyid", sig.KeyTag, "dsyncValidated", targetValidated, "keyValidated", keyValidated)
+			"receiver", receiver, "keyid", sig.KeyTag, "dsyncValidated", target.Validated, "keyValidated", keyValidated)
 		return false, nil
 	}
 	return false, fmt.Errorf("KeyState response from %s verified against a receiver KEY that is not authenticated (DSYNC DNSSEC-validated: %v, KEY DNSSEC-validated: %v, keyid %d not trusted in the truststore); set %s to act on unauthenticated responses",
-		receiver, targetValidated, keyValidated, sig.KeyTag, allowInsecureKnob)
+		receiver, target.Validated, keyValidated, sig.KeyTag, allowInsecureKnob)
 }
 
 // exchangeRawCancellable is exchangeCancellable (childsync_utils.go) for a
@@ -316,32 +335,43 @@ func queryKeyState(ctx context.Context, kdb *KeyDB, keyName string, keyid uint16
 		return nil, false, fmt.Errorf("failed to sign KeyState inquiry: %v", err)
 	}
 
+	// Every address of the target is a candidate, and a response that FAILS
+	// verification does not end the search: the address that answered may be
+	// the one an attacker poisoned, and the genuine receiver may be behind
+	// the next. What it can never do is make a wrong signature acceptable.
+	// Authenticate before interpreting anything, the rcode included: a forged
+	// rejection is as much a disruption as a forged key state.
 	client := &dns.Client{Net: "tcp", Timeout: 5 * time.Second}
 	var r *dns.Msg
-	var wire []byte
-	var lastErr error
+	var authenticated bool
+	var transportErr, verifyErr error
 	for _, dst := range target.Addresses {
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, false, fmt.Errorf("KeyState inquiry for %s abandoned: %w", keyName, cerr)
 		}
-		r, wire, lastErr = exchangeRawCancellable(ctx, client, signedMsg, dst)
-		if lastErr == nil {
-			break
+		resp, respWire, err := exchangeRawCancellable(ctx, client, signedMsg, dst)
+		if err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, false, fmt.Errorf("KeyState inquiry for %s abandoned mid-exchange with %s: %w", keyName, dst, cerr)
+			}
+			lgDns.Warn("KeyState inquiry: exchange failed, trying next address", "zone", keyName, "dst", dst, "err", err)
+			transportErr = err
+			continue
 		}
-		if cerr := ctx.Err(); cerr != nil {
-			return nil, false, fmt.Errorf("KeyState inquiry for %s abandoned mid-exchange with %s: %w", keyName, dst, cerr)
+		auth, verr := verifyKeyStateResponse(ctx, respWire, resp, target, trust, fetch, allowInsecure)
+		if verr != nil {
+			lgDns.Warn("KeyState inquiry: response failed verification, trying next address", "zone", keyName, "dst", dst, "err", verr)
+			verifyErr = verr
+			continue
 		}
-		lgDns.Warn("KeyState inquiry: exchange failed, trying next address", "zone", keyName, "dst", dst, "err", lastErr)
+		r, authenticated = resp, auth
+		break
 	}
 	if r == nil {
-		return nil, false, fmt.Errorf("KeyState inquiry for %s: DNS exchange failed: %v", keyName, lastErr)
-	}
-
-	// Authenticate before interpreting anything, the rcode included: a forged
-	// rejection is as much a disruption as a forged key state.
-	authenticated, err := verifyKeyStateResponse(ctx, wire, r, target.Name, target.Validated, trust, fetch, allowInsecure)
-	if err != nil {
-		return nil, false, err
+		if verifyErr != nil {
+			return nil, false, verifyErr
+		}
+		return nil, false, fmt.Errorf("KeyState inquiry for %s: DNS exchange failed: %v", keyName, transportErr)
 	}
 
 	if r.Rcode != dns.RcodeSuccess {

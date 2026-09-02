@@ -130,10 +130,16 @@ type ImrRequest struct {
 
 type ImrResponse struct {
 	RRset     *core.RRset
-	Validated bool
-	Error     bool
-	ErrorMsg  string
-	Msg       string
+	Validated bool // ValidationState == cache.ValidationStateSecure
+	// ValidationState is the DNSSEC verdict behind Validated. Its zero value
+	// means validation was not attempted (no answer, or an error before it
+	// ran). Consumers that must tell an UNSIGNED zone apart from a FAILED
+	// signature -- the delegation-sync child deciding what "allow-insecure"
+	// may waive -- read this; Bogus is an attack signal, Insecure is not.
+	ValidationState cache.ValidationState
+	Error           bool
+	ErrorMsg        string
+	Msg             string
 }
 
 // The ImrEngine is a simple caching DNS recursor. It is not a fully fledged, all singing,
@@ -596,6 +602,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			lgImr.Debug("ImrQuery: DNSSEC validation failed", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
 			return
 		}
+		resp.ValidationState = vstate
 		if vstate == cache.ValidationStateSecure {
 			resp.Validated = true
 			lgImr.Debug("ImrQuery: DNSSEC validated", "qname", qname, "qtype", dns.TypeToString[qtype])
@@ -626,6 +633,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			// These are direct answers or negative responses - safe to use
 			lgImr.Debug("ImrQuery: cache hit", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 			resp.RRset = crrset.RRset
+			resp.ValidationState = crrset.State
 			if crrset.State == cache.ValidationStateSecure {
 				resp.Validated = true
 			} else {

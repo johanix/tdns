@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/johanix/tdns/v2/cache"
 	"github.com/miekg/dns"
 )
 
@@ -108,11 +109,29 @@ func advertisedBootstrapMethods(ctx context.Context, imr *Imr, target *DsyncTarg
 		return nil, false
 	}
 	resp, err := imr.ImrQuery(ctx, dns.Fqdn(target.Name), dns.TypeSVCB, dns.ClassINET, nil)
-	if err != nil || resp == nil || resp.Error || resp.RRset == nil {
+	if err != nil || (resp != nil && resp.Error) {
+		// Treated as "no advertisement" for now; logged so a resolver
+		// failure is not mistaken for a parent that publishes none.
+		msg := ""
+		if resp != nil {
+			msg = resp.ErrorMsg
+		}
+		lgHandler.Warn("SVCB bootstrap advertisement lookup failed; proceeding as if none were published",
+			"target", target.Name, "err", err, "imr", msg)
+		return nil, false
+	}
+	if resp == nil || resp.RRset == nil {
 		return nil, false
 	}
 	data, count := publishedBootstrapSVCBData(resp.RRset.RRs)
 	if count == 0 {
+		return nil, false
+	}
+	// A bogus verdict, on the SVCB or on the DSYNC that named the target, is
+	// a failed chain of trust: ignored whatever allow-insecure says.
+	if target.Bogus || resp.ValidationState == cache.ValidationStateBogus {
+		lgHandler.Warn("ignoring SVCB bootstrap advertisement: DNSSEC validation FAILED (bogus), which no setting waives; falling back to the configured bootstrap methods",
+			"target", target.Name, "advertised", data, "dsyncBogus", target.Bogus, "svcbBogus", resp.ValidationState == cache.ValidationStateBogus)
 		return nil, false
 	}
 	if !bootstrapAdvertisementUsable(target.Validated, resp.Validated, allowInsecure) {
