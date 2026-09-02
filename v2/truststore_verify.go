@@ -278,6 +278,17 @@ func (kdb *KeyDB) runChildKeyVerification(ctx context.Context, childZone string,
 		}
 	}
 
+	// A cancel that landed inside the last attempt is a shutdown, not a
+	// verdict on the key: the loop fell out with a "context canceled" reason,
+	// and recording that as a validation failure would tell the child that
+	// waiting will not help when nothing was concluded. Same rule as the
+	// backoff branch above.
+	if ctx.Err() != nil {
+		lgSigner.Info("TriggerChildKeyVerification: shutting down during the last attempt, not recording a verdict",
+			"zone", childZone, "keyid", keyid)
+		return false
+	}
+
 	why := fmt.Sprintf("%d attempts via %v: %v", maxAttempts, pol.Mechanisms, lastReason)
 	lgSigner.Warn("child key verification exhausted all attempts; recording validation failure",
 		"zone", childZone, "keyid", keyid, "reason", why)

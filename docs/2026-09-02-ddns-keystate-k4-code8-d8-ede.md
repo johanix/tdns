@@ -74,6 +74,26 @@ The management API's `bootstrap-sig0-key` still returns the error: an
 operator explicitly asked for an automatic bootstrap that cannot happen, and
 the message says why.
 
+### Which child actually hears "waiting will not help" (review T1)
+
+KeyState 8 reaches the KeyState **poller** only, and that poller has no
+in-repo caller (tdns-mp calls it, against its June pin). The tdns-auth child
+never inquires: after its ceremony the parent stores the key and verifies
+asynchronously, and the child learns the outcome on its **next delegation
+UPDATE**, which the parent answers REFUSED with EDE 541. Until this
+follow-up, `sendUpdateWithRetry` treated every REFUSED as a bounded retry and
+never read the EDE, so 541 and 542 were on the wire and invisible to the
+child's retry policy. It now reads `UpdateResult.EDECode`: 514
+(KEY-KNOWN-NOT-TRUSTED, bootstrap in progress) stays a bounded retry; 541
+(KEY-VALIDATION-FAILED) and 542 (MANUAL-BOOTSTRAP-REQUIRED) are terminal on
+the first answer, with an error that names the reason and the action. That
+is how the "waiting will not help" verdict reaches the tdns-auth child.
+
+Two more small things from the same review: a cancel that lands inside the
+*last* verification attempt is now treated as a shutdown and records nothing
+(the backoff branch already did); and the truststore `trust` subcommand
+clears the failure columns, so a row never reads trusted AND failed.
+
 ## Decisions worth recording
 
 - **A restart mid-verification records nothing.** The row stays "in
@@ -85,8 +105,8 @@ the message says why.
 - **A trusted key is never marked failed** (`WHERE trusted=0`). The only
   way a trusted key reaches the engine is a manual `trust` racing an
   in-flight verification; the operator wins.
-- **Manual outranks failed** on both channels, so the child is told the
-  thing it can act on.
+- **Manual outranks failed** on both channels, so whichever channel reaches
+  the child says the thing it can act on.
 
 ## Tests
 

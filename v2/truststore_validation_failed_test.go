@@ -221,6 +221,63 @@ func TestRunChildKeyVerificationRecordsExhaustion(t *testing.T) {
 	}
 }
 
+// A cancel that lands INSIDE the last attempt is a shutdown too, not an
+// exhaustion: nothing is recorded (review T2).
+func TestRunChildKeyVerificationCancelledOnLastAttemptRecordsNothing(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	keyid, _ := addVfChildKey(t, kdb, false)
+	pol := DelegationPolicy{Name: "t", Mechanisms: []string{"at-apex"}, RetryMaxAttempts: 2, RetryInterval: time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	ok := kdb.runChildKeyVerification(ctx, vfChild, keyid, pol,
+		func(context.Context) (bool, bool, error) {
+			calls++
+			if calls == pol.RetryMaxAttempts {
+				cancel() // shutdown arrives during the final lookup
+				return false, false, context.Canceled
+			}
+			return false, false, errors.New("not yet")
+		})
+	if ok || calls != 2 {
+		t.Fatalf("ok=%v calls=%d, want false and 2", ok, calls)
+	}
+	if sk := lookupChildKey(t, kdb, keyid); sk.ValidationFailed {
+		t.Fatalf("a cancel during the last attempt must not record a failure: %+v", sk)
+	}
+	if ks, _ := kdb.GetKeyStatus(vfChild, keyid); ks.KeyState != edns0.KeyStateBootstrapAutoOngoing {
+		t.Fatalf("KeyState after cancel = %d, want 9", ks.KeyState)
+	}
+}
+
+// An operator's trust decision clears a recorded failure (review T3): the row
+// must not say trusted AND failed.
+func TestTrustClearsValidationFailure(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	keyid, _ := addVfChildKey(t, kdb, false)
+	recordFailure(t, kdb, keyid, "gave up")
+	if sk := lookupChildKey(t, kdb, keyid); !sk.ValidationFailed {
+		t.Fatal("precondition: failure recorded")
+	}
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "trust", Keyname: vfChild, Keyid: int(keyid),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sk := lookupChildKey(t, kdb, keyid)
+	if !sk.Trusted || sk.ValidationFailed || sk.ValidationError != "" {
+		t.Fatalf("after trust: %+v, want trusted with the failure cleared", sk)
+	}
+	// untrust leaves the (now clear) failure columns alone
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "untrust", Keyname: vfChild, Keyid: int(keyid),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if sk := lookupChildKey(t, kdb, keyid); sk.Trusted || sk.ValidationFailed {
+		t.Fatalf("after untrust: %+v", sk)
+	}
+}
+
 // A shutdown mid-way is not a verdict: nothing is recorded and the row stays
 // "in progress" (9) for a re-upload to restart.
 func TestRunChildKeyVerificationCancelledRecordsNothing(t *testing.T) {

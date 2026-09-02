@@ -44,6 +44,11 @@ SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr, vali
 SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		childsig0keyupdatetrustsql = `
 UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
+		// An operator's trust decision supersedes a recorded automatic
+		// failure; clear it so the row (and the CLI's Failed column) does not
+		// say trusted AND failed. The emitters already let trusted win.
+		childsig0keytrustsql = `
+UPDATE Sig0TrustStore SET trusted=1, validation_failed=0, validation_error='', validation_failed_at='' WHERE zonename=? AND keyid=?`
 		// A successful verification clears any earlier failure: the key IS
 		// verifiable after all (an operator republished it, say).
 		childsig0keyverifiedsql = `
@@ -221,10 +226,9 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 
 	case "trust":
 		// 1. Find key, if not --> error
-		// 2. Set key trusted, if not --> error
+		// 2. Set key trusted (clearing any recorded validation failure), if not --> error
 		// 3. Return all good, now trusted
-		res, err = tx.Exec(childsig0keyupdatetrustsql, true,
-			tp.Keyname, tp.Keyid)
+		res, err = tx.Exec(childsig0keytrustsql, tp.Keyname, tp.Keyid)
 		if err != nil {
 			lgSigner.Error("failed to trust SIG(0) key", "err", err)
 			resp.Error = true

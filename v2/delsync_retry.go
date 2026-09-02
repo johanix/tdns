@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -101,7 +102,24 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 		case dns.RcodeSuccess:
 			return true, nil
 		case dns.RcodeRefused:
-			lgDns.Warn("sendUpdateWithRetry: parent REFUSED, bounded retry", "attempt", attempt)
+			// ddns-02 §"Communication in Case of Errors": a REFUSED for a known
+			// key carries one of three bootstrap-state EDEs, and they mean
+			// different things to a retry loop. KEY-KNOWN-NOT-TRUSTED (514):
+			// bootstrap is in progress, waiting may help, bounded retry.
+			// KEY-VALIDATION-FAILED (541) and MANUAL-BOOTSTRAP-REQUIRED (542):
+			// waiting will not help, terminal, and the reason is actionable.
+			// Without this the child saw only "REFUSED" five times over.
+			if ur.EDEFound {
+				switch ur.EDECode {
+				case edns0.EDESig0KeyValidationFailed:
+					return true, fmt.Errorf("parent REFUSED the delegation UPDATE: the parent's validation of our SIG(0) key FAILED (EDE %d: %s); fix the KEY's publication and re-bootstrap",
+						ur.EDECode, ur.EDEMessage)
+				case edns0.EDESig0ManualBootstrapRequired:
+					return true, fmt.Errorf("parent REFUSED the delegation UPDATE: the parent requires manual SIG(0) bootstrap (EDE %d: %s); complete it and retry",
+						ur.EDECode, ur.EDEMessage)
+				}
+			}
+			lgDns.Warn("sendUpdateWithRetry: parent REFUSED, bounded retry", "attempt", attempt, "ede", ur.EDECode, "edeMsg", ur.EDEMessage)
 			return false, fmt.Errorf("parent REFUSED the delegation UPDATE")
 		case dns.RcodeServerFailure:
 			// Transient by definition: the parent failed to process a request
