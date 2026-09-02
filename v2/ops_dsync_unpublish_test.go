@@ -56,3 +56,54 @@ func TestUnpublishDsyncPlaceholderHasAllRdataFields(t *testing.T) {
 			" guards anything")
 	}
 }
+
+// Unpublish must remove the bootstrap SVCB and the receiver KEY at the DSYNC
+// UPDATE target — the same owner PublishDsyncRRs uses — not the apex KEY.
+func TestUnpublishDsyncRemovesBootstrapSVCBAndReceiverKEY(t *testing.T) {
+	t.Cleanup(func() { SetDelegationSyncConfig(DelegationSyncConf{}) })
+	SetDelegationSyncConfig(DelegationSyncConf{
+		Parent: DelegationSyncParentConf{
+			Update: DsyncUpdateSchemeConf{
+				DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "updates.{ZONENAME}"},
+			},
+		},
+	})
+	q := make(chan UpdateRequest, 1)
+	zd := &ZoneData{
+		ZoneName: "example.",
+		KeyDB:    &KeyDB{UpdateQ: q},
+	}
+	if err := zd.UnpublishDsyncRRs(); err != nil {
+		t.Fatal(err)
+	}
+	ur := <-q
+	target := DsyncUpdateTargetName("example.")
+	if target != "updates.example." {
+		t.Fatalf("DsyncUpdateTargetName = %q", target)
+	}
+	var sawSVCB, sawKEY, sawApexKEY bool
+	for _, rr := range ur.Actions {
+		h := rr.Header()
+		if h.Name == "example." && h.Rrtype == dns.TypeKEY {
+			sawApexKEY = true
+		}
+		if h.Name != target {
+			continue
+		}
+		if h.Class != dns.ClassANY {
+			t.Errorf("%s at %s: class %d, want ANY", dns.TypeToString[h.Rrtype], target, h.Class)
+		}
+		switch h.Rrtype {
+		case dns.TypeSVCB:
+			sawSVCB = true
+		case dns.TypeKEY:
+			sawKEY = true
+		}
+	}
+	if !sawSVCB || !sawKEY {
+		t.Fatalf("unpublish missing SVCB or KEY at %s", target)
+	}
+	if sawApexKEY {
+		t.Fatal("unpublish deleted the apex KEY; that is the parent's own SIG(0) identity")
+	}
+}

@@ -630,11 +630,9 @@ type TemplateConf struct {
 
 type UpdatePolicyConf struct {
 	Child struct {
-		Type         string // selfsub | self | sub | none
-		RRtypes      []string
-		KeyBootstrap []string // manual | dnssec-validated | consistent-lookup
-		KeyUpload    string
-		TTL          uint32 `yaml:"ttl"`
+		Type    string // selfsub | self | sub | none
+		RRtypes []string
+		TTL     uint32 `yaml:"ttl"`
 	}
 	Zone struct {
 		Type    string // "selfsub" | "self" | "sub" | ...
@@ -650,11 +648,9 @@ type UpdatePolicy struct {
 }
 
 type UpdatePolicyDetail struct {
-	Type         string // "selfsub" | "self"
-	RRtypes      map[uint16]bool
-	KeyBootstrap []string
-	KeyUpload    string
-	TTL          uint32
+	Type    string // "selfsub" | "self"
+	RRtypes map[uint16]bool
+	TTL     uint32
 }
 
 // DnssecPolicyRolloverConf is the YAML `rollover:` subtree (KSK automated rollover; Phase 1+).
@@ -1007,12 +1003,12 @@ type ZoneRefresher struct {
 	// PublishCadence, when non-zero, sets the zone's minimum snapshot publish
 	// interval (zd.publishCadence). Carried parsed so the RefreshEngine does
 	// not re-parse; zero means "leave the zone's default".
-	PublishCadence time.Duration
-	Options        map[ZoneOption]bool
-	Edns0Options   *edns0.MsgOptions
-	UpdatePolicy   UpdatePolicy
+	PublishCadence   time.Duration
+	Options          map[ZoneOption]bool
+	Edns0Options     *edns0.MsgOptions
+	UpdatePolicy     UpdatePolicy
 	DelegationPolicy *DelegationPolicy
-	DnssecPolicy   string
+	DnssecPolicy     string
 	// OutboundSoaSerial carries the per-zone outbound serial mode to the
 	// RefreshEngine (copied to zd.OutboundSoaSerial on merge). Empty means
 	// "inherit the server-global setting" and is a valid, self-consistent
@@ -1220,7 +1216,6 @@ type KeyDB struct {
 	TruststoreSig0Cache *Sig0StoreT // was *Sig0StoreT
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
-	KeyBootstrapperQ    chan KeyBootstrapperRequest
 	// options holds the parsed DnsEngine auth options. It is read on the hot
 	// query path (QueryResponder, per request) and replaced wholesale on config
 	// reload, so it is stored behind an atomic.Pointer for lock-free reads and a
@@ -1318,30 +1313,6 @@ type RRsetString struct {
 	RRtype uint16   `json:"rrtype"`
 	RRs    []string `json:"rrs"`
 	RRSIGs []string `json:"rrsigs,omitempty"`
-}
-
-type VerificationInfo struct {
-	KeyName        string
-	Key            string
-	ZoneName       string
-	AttemptsLeft   int
-	NextCheckTime  time.Time
-	ZoneData       *ZoneData
-	Keyid          uint16
-	FailedAttempts int
-}
-
-type KeyBootstrapperRequest struct {
-	Cmd          string
-	KeyName      string
-	ZoneName     string
-	ZoneData     *ZoneData
-	Key          string
-	Verified     bool
-	Keyid        uint16
-	Algorithm    uint8
-	Imr          *Imr
-	ResponseChan chan *VerificationInfo
 }
 
 type KeyConf struct {

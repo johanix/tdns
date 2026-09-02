@@ -22,11 +22,13 @@ Two differences are worth knowing now:
 
 ## Still to document
 
-- The `delegationsync:` block: `parent.schemes`, `parent.notify.*`,
-  `parent.update.*` (including `{ZONENAME}` target substitution and the
-  key-verification knobs), `child.schemes`, `child.update.keygen.*`.
+- The `delegationsync:` block: named `policies.*`,
+  `parent.schemes`, `parent.notify.*`, `parent.update.*`
+  (including `{ZONENAME}` target substitution),
+  `child.schemes`, `child.update.keygen.*`,
+  `child.update.bootstrap.methods`. Per-zone
+  `delegationpolicy:` selects a named policy.
 - The proxy configurations: which combinations of NOTIFY and signed DNS UPDATE
   are supported toward the parent, and how the agent chooses between them.
 - `apiserver.agent` and `apiserver.combiner` sub-blocks for multi-app
   deployments.
-- The `keystate.*` and `verifyengine.*` key-bootstrap knobs.

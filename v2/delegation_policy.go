@@ -85,8 +85,13 @@ func lookupDelegationPolicy(name string) (DelegationPolicy, bool) {
 	if name == "" {
 		name = "default"
 	}
-	p, ok := DelegationSyncConfig().CompiledPolicies[name]
-	return p, ok
+	if p, ok := DelegationSyncConfig().CompiledPolicies[name]; ok {
+		return p, true
+	}
+	if name == "default" {
+		return DefaultDelegationPolicy(), true
+	}
+	return DelegationPolicy{}, false
 }
 
 func bindDelegationPolicy(zconf *ZoneConf) (*DelegationPolicy, error) {

@@ -548,7 +548,7 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		rrclass := rr.Header().Class
 
 		// Requirement for unvalidated key upload:
-		// 1. Policy has keyupload=unvalidated"
+		// 1. Bound delegationpolicy has allow-unvalidated-upload: true
 		// 2. Single RR in Update section, which is a KEY
 		// 3. Class is not NONE or ANY (i.e. not a removal, but an add)
 		// 4. Name of key must be == existing delegation
@@ -581,6 +581,7 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 				lgHandler.Info("child update approved: unvalidated KEY upload")
 				unvalidatedKeyUpload = true
 			}
+		}
 
 		// Past the unvalidated key upload; from here update MUST be validated
 		if (us.ValidationRcode != dns.RcodeSuccess || !us.Validated) && !unvalidatedKeyUpload {
@@ -720,11 +721,11 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	rrclass := rr.Header().Class
 
 	// Requirement for unvalidated key upload:
-	// 1. Policy has keyupload=unvalidated"
+	// 1. Bound delegationpolicy has allow-unvalidated-upload: true
 	// 2. Single RR in Update section, which is a KEY
 	// 3. Class is not NONE or ANY (i.e. not a removal, but an add)
 	// 4. Name of key must be == existing delegation
-		lgHandler.Debug("ApproveTrustUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "delegationpolicy", zd.boundDelegationPolicy().Name, "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
+	lgHandler.Debug("ApproveTrustUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "delegationpolicy", zd.boundDelegationPolicy().Name, "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
 
 	if !us.ValidatedByTrustedKey {
 		// If the update is not trusted (i.e. validated against a trusted key) it should be

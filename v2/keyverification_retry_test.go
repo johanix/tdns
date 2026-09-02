@@ -12,28 +12,28 @@ import (
 // The retry budget applies defaults to anything non-positive. Zero means
 // "unset", but a NEGATIVE max-attempts used to skip the retry loop entirely and
 // abandon key verification without saying so, and a negative interval turned the
-// exponential backoff into a busy loop. Neither value could reach the code
-// before, because the setting was read through viper and viper is never
-// populated here — modelling the block is what makes them possible.
-func TestKeyVerificationRetrySettingsRejectsNonPositive(t *testing.T) {
-	neg := -1
+// exponential backoff into a busy loop. compileDelegationPolicy keeps the
+// DefaultDelegationPolicy values unless the overlay is strictly positive.
+func TestCompileDelegationPolicyRetryRejectsNonPositive(t *testing.T) {
 	cases := []struct {
 		name         string
-		in           DsyncKeyVerificationConf
+		in           DelegationRetryConf
 		wantAttempts int
 		wantInterval time.Duration
 	}{
-		{"unset", DsyncKeyVerificationConf{}, 5, 10 * time.Second},
-		{"negative attempts", DsyncKeyVerificationConf{MaxAttempts: neg}, 5, 10 * time.Second},
-		{"negative interval", DsyncKeyVerificationConf{RetryInterval: -time.Second}, 5, 10 * time.Second},
-		{"both negative", DsyncKeyVerificationConf{MaxAttempts: neg, RetryInterval: -time.Second}, 5, 10 * time.Second},
-		{"configured", DsyncKeyVerificationConf{MaxAttempts: 3, RetryInterval: 2 * time.Second}, 3, 2 * time.Second},
+		{"unset", DelegationRetryConf{}, 5, 10 * time.Second},
+		{"negative attempts", DelegationRetryConf{MaxAttempts: -1}, 5, 10 * time.Second},
+		{"negative interval", DelegationRetryConf{Interval: -time.Second}, 5, 10 * time.Second},
+		{"both negative", DelegationRetryConf{MaxAttempts: -1, Interval: -time.Second}, 5, 10 * time.Second},
+		{"configured", DelegationRetryConf{MaxAttempts: 3, Interval: 2 * time.Second}, 3, 2 * time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a, i := keyVerificationRetrySettings(tc.in)
-			if a != tc.wantAttempts || i != tc.wantInterval {
-				t.Errorf("got (%d, %v), want (%d, %v)", a, i, tc.wantAttempts, tc.wantInterval)
+			p := compileDelegationPolicy("x", DelegationPolicyConf{
+				Bootstrap: DelegationBootstrapConf{Retry: tc.in},
+			})
+			if p.RetryMaxAttempts != tc.wantAttempts || p.RetryInterval != tc.wantInterval {
+				t.Errorf("got (%d, %v), want (%d, %v)", p.RetryMaxAttempts, p.RetryInterval, tc.wantAttempts, tc.wantInterval)
 			}
 		})
 	}
@@ -133,4 +133,30 @@ func TestTriggerChildKeyVerificationExitsOnCancellation(t *testing.T) {
 	t.Fatalf("the verification goroutine was still running 5s after a cancelled"+
 		" context (goroutines %d -> %d); it is sleeping through shutdown instead"+
 		" of selecting on ctx.Done()", before, runtime.NumGoroutine())
+}
+
+// locked-down (empty mechanisms) must not start verification lookups at all.
+func TestTriggerChildKeyVerificationLockedDownDoesNotStart(t *testing.T) {
+	parent := &ZoneData{
+		ZoneName: "example.",
+		DelegationPolicy: &DelegationPolicy{
+			Name:       "locked-down",
+			Mechanisms: []string{},
+			Manual:     true,
+		},
+	}
+	Zones.Set("example.", parent)
+	t.Cleanup(func() { Zones.Remove("example.") })
+
+	time.Sleep(50 * time.Millisecond)
+	before := runtime.NumGoroutine()
+
+	kdb := &KeyDB{}
+	kdb.TriggerChildKeyVerification(context.Background(), "child.example.", 1,
+		"child.example. 3600 IN KEY 256 3 15 x")
+
+	time.Sleep(50 * time.Millisecond)
+	if got := runtime.NumGoroutine(); got > before {
+		t.Fatalf("locked-down started a verification goroutine (goroutines %d -> %d)", before, got)
+	}
 }

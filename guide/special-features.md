@@ -85,6 +85,13 @@ the necessary DSYNC RRs at the well-known owner name
 
 ```yaml
 delegationsync:
+   policies:
+      default:
+         bootstrap:
+            mechanisms:     [ at-apex, at-ns ]
+            require-dnssec: true
+            manual:         false
+            allow-unvalidated-upload: false
    parent:
       schemes: [ notify, update ]      # and/or `api`, see 1.7
       notify:
@@ -99,24 +106,19 @@ delegationsync:
          addresses: [ 127.0.0.1, "::1" ]
          keygen:
             algorithm: ED25519
-         key-verification:
-            mechanisms:      [ truststore, dnssec ]
-            max-attempts:    5
-            retry-interval:  30s
-            require-dnssec:  false
-      bootstrap:
-         methods: at-apex,unsigned,manual
 ```
 
-The publication code (`PublishDsyncRRs`, in
+A zone selects a policy with `delegationpolicy: <name>` (omit binds
+`default`; an unknown name quarantines the zone). The publication
+code (`PublishDsyncRRs`, in
 [tdns/v2/ops_dsync.go](../v2/ops_dsync.go)) creates one
 DSYNC RR per scheme, accompanied by A/AAAA glue for the
 target FQDNs. For the UPDATE target it additionally
 publishes an SVCB record carrying a SIG(0) **bootstrap**
-SvcParam (key 65282) that tells children which SIG(0)
-key-bootstrap methods the parent accepts -- typically
-`at-apex` (RFC 9615-style apex publication), `unsigned`
-(opportunistic trust-on-first-use), or `manual`. Publication
+SvcParam (key 65282) **derived from the bound policy** —
+`at-apex` / `at-ns` when `require-dnssec` is true,
+`unsigned` when mechanisms are set but `require-dnssec` is
+false, and `manual` when that flag is set. Publication
 happens via the OnFirstLoad callback, so the records appear
 on initial zone load without operator action beyond enabling
 the zone option.
@@ -137,20 +139,19 @@ SIG(0) verification runs ahead of the responder; if the
 signature is missing, invalid, or signed by an unknown key,
 the UPDATE is rejected before any policy is evaluated.
 
-Trust evaluation is controlled by the
-`update.key-verification` block:
+Trust evaluation is controlled by the zone's bound
+`delegationpolicy`:
 
-- `mechanisms` -- which sources are consulted to decide
-  whether the signing key is trusted. `truststore` looks
-  for a locally accepted KEY; other mechanisms include
-  DNSSEC-validated KEY lookup at the child apex
-  (RFC 9615 "at-apex" bootstrap).
-- `max-attempts` / `retry-interval` -- how aggressively the
-  receiver retries DNS lookups when the signing key is not
-  yet known. This lets a fresh child key (just published)
-  succeed without a manual import.
-- `require-dnssec` -- if true, the child zone's signing key
-  must be reachable through a validating DNSSEC chain.
+- `bootstrap.mechanisms` -- where to look for the child's KEY
+  (`at-apex` at the child apex; `at-ns` at the RFC 9615
+  `_signal` name). Empty means do not verify automatically.
+- `bootstrap.retry` -- how aggressively the receiver retries
+  DNS lookups when the signing key is not yet known.
+- `bootstrap.require-dnssec` -- if true, the looked-up KEY
+  must be DNSSEC-validated.
+- `bootstrap.manual` / `bootstrap.allow-unvalidated-upload`
+  -- whether an operator may install trust out of band, and
+  whether an untrusted signer may upload a KEY at all.
 
 A verified UPDATE for a delegated child zone becomes a
 `CHILD-UPDATE` request (zone_updater.go) that is handed to

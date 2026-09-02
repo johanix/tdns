@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -16,14 +15,14 @@ import (
 // The delegationsync: block, typed.
 //
 // This block was read with viper.GetString/GetStringSlice from a dozen call
-// sites. It is now modelled in full and this struct is the ONLY reader: the
-// keygen and key-verification subtrees under parent.update and child.update
-// are here too. No viper read of the delegationsync block remains, with one
-// deliberate exception: the child keygen MODE is still read from viper in
-// sig0_utils.go and is intentionally NOT modelled here -- the sample config
-// says "`algorithm` and `generator` are read on the child side; `mode` is
-// not", and modelling it would turn a setting that has never had any effect
-// into a live one.
+// sites. It is now modelled in full and this struct is the ONLY reader: parent
+// bootstrap policy lives in named delegationsync.policies.*, and child
+// update.bootstrap.methods is parsed here (unread until D-6). No viper read of
+// the delegationsync block remains, with one deliberate exception: the child
+// keygen MODE is still read from viper in sig0_utils.go and is intentionally
+// NOT modelled here -- the sample config says "`algorithm` and `generator` are
+// read on the child side; `mode` is not", and modelling it would turn a setting
+// that has never had any effect into a live one.
 //
 // Why it was unwound: viper splits keys on ".". Any config shape with a dotted
 // key silently arrives empty, the setting reads back as its zero value, and
@@ -35,10 +34,10 @@ import (
 // authoritative and returns a zero value; add the fields and move the readers
 // in the same change.
 type DelegationSyncConf struct {
-	Parent            DelegationSyncParentConf      `yaml:"parent" mapstructure:"parent"`
-	Child             DelegationSyncChildConf       `yaml:"child" mapstructure:"child"`
-	Policies          map[string]DelegationPolicyConf `yaml:"policies" mapstructure:"policies"`
-	CompiledPolicies  map[string]DelegationPolicy     `yaml:"-" mapstructure:"-"`
+	Parent           DelegationSyncParentConf        `yaml:"parent" mapstructure:"parent"`
+	Child            DelegationSyncChildConf         `yaml:"child" mapstructure:"child"`
+	Policies         map[string]DelegationPolicyConf `yaml:"policies" mapstructure:"policies"`
+	CompiledPolicies map[string]DelegationPolicy     `yaml:"-" mapstructure:"-"`
 }
 
 type DelegationSyncParentConf struct {
@@ -46,10 +45,11 @@ type DelegationSyncParentConf struct {
 	// records for: notify, update, api.
 	Schemes []string           `yaml:"schemes" mapstructure:"schemes"`
 	Notify  DsyncDnsSchemeConf `yaml:"notify" mapstructure:"notify"`
-	// Update is the UPDATE scheme's DSYNC keys plus the two subtrees that hang
-	// off the same YAML node -- key-verification and keygen -- which is why it
-	// is not a plain DsyncDnsSchemeConf like Notify. Embedding keeps
-	// Parent.Update.Target and friends reading exactly as before.
+	// Update is the UPDATE scheme's DSYNC keys plus the keygen subtree that
+	// hangs off the same YAML node, which is why it is not a plain
+	// DsyncDnsSchemeConf like Notify. Embedding keeps Parent.Update.Target and
+	// friends reading exactly as before. Bootstrap policy is not here: it lives
+	// in named delegationsync.policies.* and is referenced per-zone.
 	Update DsyncUpdateSchemeConf `yaml:"update" mapstructure:"update"`
 	Api    DsyncApiSchemeConf    `yaml:"api" mapstructure:"api"`
 }
@@ -61,8 +61,9 @@ type DelegationSyncChildConf struct {
 	Update  DsyncChildUpdateConf `yaml:"update" mapstructure:"update"`
 }
 
-// DsyncChildUpdateConf is the child side of the UPDATE scheme. Only keygen
-// today; the DSYNC keys themselves are the parent's to publish.
+// DsyncChildUpdateConf is the child side of the UPDATE scheme: keygen, plus
+// bootstrap.methods (parsed here, intersected with the parent advertisement
+// in D-6). The DSYNC keys themselves are the parent's to publish.
 type DsyncChildUpdateConf struct {
 	Keygen    DsyncKeygenConf `yaml:"keygen" mapstructure:"keygen"`
 	Bootstrap struct {
@@ -70,9 +71,9 @@ type DsyncChildUpdateConf struct {
 	} `yaml:"bootstrap" mapstructure:"bootstrap"`
 }
 
-// DsyncUpdateSchemeConf is the parent's UPDATE scheme: the DSYNC record keys,
-// plus how an uploaded SIG(0) key is verified before it is trusted, plus the
-// keygen settings.
+// DsyncUpdateSchemeConf is the parent's UPDATE scheme: the DSYNC record keys
+// plus the keygen settings. How an uploaded SIG(0) key is verified is the
+// zone's bound delegationpolicy, not a sibling of this block.
 type DsyncUpdateSchemeConf struct {
 	// Squash, spelled in the YAML tag because the decoder runs with
 	// TagName: "yaml" -- so mapstructure reads THIS tag, and `yaml:",inline"`
@@ -88,22 +89,6 @@ type DsyncUpdateSchemeConf struct {
 type DsyncKeygenConf struct {
 	Algorithm string `yaml:"algorithm" mapstructure:"algorithm"`
 	Generator string `yaml:"generator" mapstructure:"generator"`
-}
-
-// DsyncKeyVerificationConf: how a child's uploaded SIG(0) key is checked before
-// the parent trusts it.
-type DsyncKeyVerificationConf struct {
-	// Mechanisms to try, in order.
-	Mechanisms []string `yaml:"mechanisms" mapstructure:"mechanisms"`
-	// MaxAttempts and RetryInterval bound the retry loop. RetryInterval is a
-	// duration written as the config documents it ("5s"), which decodes because
-	// the shared decoder carries StringToTimeDurationHookFunc.
-	MaxAttempts   int           `yaml:"max-attempts" mapstructure:"max-attempts"`
-	RetryInterval time.Duration `yaml:"retry-interval" mapstructure:"retry-interval"`
-	// RequireDnssec is a POINTER because the reader it replaces distinguished
-	// "absent" from "false": viper.Get(...) != nil guarded the GetBool. Absent
-	// keeps whatever default the caller set; false is an explicit opt-out.
-	RequireDnssec *bool `yaml:"require-dnssec" mapstructure:"require-dnssec"`
 }
 
 // DsyncApiChildConf is what a child needs to use the API scheme against its

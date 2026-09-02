@@ -159,26 +159,9 @@ func waitOrDone(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// keyVerificationRetrySettings resolves the retry budget, substituting defaults
-// for anything non-positive. Zero means "unset"; a NEGATIVE max-attempts used to
-// skip the loop entirely and abandon verification silently, and a negative
-// interval turned the backoff into a busy loop.
-func keyVerificationRetrySettings(kv DsyncKeyVerificationConf) (int, time.Duration) {
-	maxAttempts := kv.MaxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = 5
-	}
-	retryInterval := kv.RetryInterval
-	if retryInterval <= 0 {
-		retryInterval = 10 * time.Second
-	}
-	return maxAttempts, retryInterval
-}
-
 // TriggerChildKeyVerification starts an async verification of a child KEY
-// that was just stored in the TrustStore. It uses the KeyBootstrapper's
-// retry pattern: verify via DNS lookup, retry with backoff, then trust.
-// ctx is the engine's lifetime context. The verification retries with
+// that was just stored in the TrustStore: DNS lookup, retry with backoff, then
+// trust. ctx is the engine's lifetime context. The verification retries with
 // exponential backoff and can therefore be sleeping for a long time when the
 // process is asked to stop; without it the goroutine ignores shutdown and the
 // deferred key cleanup it performs runs against a database that is closing.
@@ -213,11 +196,7 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone str
 
 			verified, dnssecValidated := VerifyChildKey(ctx, childZone, keyRR, imr)
 
-			// Default true; only an explicit false turns it off. The pointer
-			// preserves the distinction the viper reader made with its
-			// nil-check: absent and false are different answers here, and
-			// collapsing them would silently downgrade key verification on
-			// every config that does not mention the key.
+			// Compiled policy: absent require-dnssec became true at compile.
 			requireDnssec := pol.RequireDnssec
 
 			accepted := verified && (!requireDnssec || dnssecValidated)

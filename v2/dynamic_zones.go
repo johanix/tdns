@@ -248,21 +248,22 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				specOptions[OptApiManagedZone] = true
 			}
 			zr := ZoneRefresher{
-				Name:           zoneName,
-				Force:          true, // load from file on startup
-				ZoneType:       Primary,
-				ZoneStore:      MapZone,
-				Zonefile:       spec.Zconf.Zonefile,
-				Template:       zconf.Template,
-				PublishCadence: spec.PublishCadence,
-				Notify:         spec.Zconf.Notify,
-				AllowNotify:    spec.Zconf.AllowNotify,
-				Downstreams:    spec.Zconf.Downstreams,
-				DownstreamAuth: spec.Zconf.DownstreamAuth,
-				ConfigUpdate:   true, // config-bearing (persisted dynamic zone)
-				Options:        specOptions,
-				UpdatePolicy:   spec.Policy,
-				DnssecPolicy:   spec.Zconf.DnssecPolicy,
+				Name:             zoneName,
+				Force:            true, // load from file on startup
+				ZoneType:         Primary,
+				ZoneStore:        MapZone,
+				Zonefile:         spec.Zconf.Zonefile,
+				Template:         zconf.Template,
+				PublishCadence:   spec.PublishCadence,
+				Notify:           spec.Zconf.Notify,
+				AllowNotify:      spec.Zconf.AllowNotify,
+				Downstreams:      spec.Zconf.Downstreams,
+				DownstreamAuth:   spec.Zconf.DownstreamAuth,
+				ConfigUpdate:     true, // config-bearing (persisted dynamic zone)
+				Options:          specOptions,
+				UpdatePolicy:     spec.Policy,
+				DelegationPolicy: spec.DelegationPolicy,
+				DnssecPolicy:     spec.Zconf.DnssecPolicy,
 
 				OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,
 				TransferSrc:       spec.Zconf.TransferSrc,

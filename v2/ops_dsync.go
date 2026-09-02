@@ -415,9 +415,9 @@ func (zd *ZoneData) UnpublishDsyncRRs() error {
 		antiSVCB := &dns.SVCB{
 			Hdr: dns.RR_Header{Name: updateTarget, Rrtype: dns.TypeSVCB, Class: dns.ClassANY},
 		}
-		antiKEY := &dns.KEY{
+		antiKEY := &dns.KEY{DNSKEY: dns.DNSKEY{
 			Hdr: dns.RR_Header{Name: updateTarget, Rrtype: dns.TypeKEY, Class: dns.ClassANY},
-		}
+		}}
 		actions = append(actions, antiSVCB, antiKEY)
 	}
 

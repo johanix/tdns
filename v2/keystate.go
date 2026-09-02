@@ -255,8 +255,8 @@ func childKeyStructurallyValid(key *Sig0Key) bool {
 
 // zoneRequiresManualBootstrap reports whether the parent zone delegating to
 // childName requires MANUAL SIG(0) bootstrap (no automatic DNS-based
-// validation), per its UpdatePolicy.Child.KeyBootstrap. It is consulted only to
-// choose between KEY_BOOTSTRAP_MANUAL(10) and KEY_BOOTSTRAP_AUTO(9) for a
+// validation), per its bound delegationpolicy.manual flag. It is consulted only
+// to choose between KEY_BOOTSTRAP_MANUAL(10) and KEY_BOOTSTRAP_AUTO(9) for a
 // not-yet-validated key; an unknown parent zone defaults to automatic.
 func zoneRequiresManualBootstrap(childName string) bool {
 	return parentDelegationPolicy(childName).Manual

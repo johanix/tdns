@@ -1,10 +1,10 @@
 # Implementation plan — unify the delegation-sync child paths and config
 
-**Status:** design settled and reviewed. Two external passes folded in 2026-09-02
+**Status:** implemented on `feature/delegation-sync-unification` (U-0 through
+U-6). Design settled and reviewed 2026-09-02
 (`reviews/2026-09-02-delegation-sync-unification-plan-review.md`, *request changes* —
-both holds closed; `…-rereview.md`, *approve after one sentence in U-0* — that
-sentence is now written). **Ready to implement, starting at U-0.** No code yet.
-**Base:** branch off `main`. Work in the **`v2/` tree only**.
+both holds closed; `…-rereview.md`; `…-rereview-2.md`, *approve*).
+**Base:** `main` (PR #312). Work in the **`v2/` tree only**.
 **Relationship to other plans:** this is a prerequisite refactor for the remaining Phase 2
 items of `2026-07-16-ddns-delegation-keystate-draft-alignment-plan.md` (D-6, D-7, D-3b).
 Doing those first means implementing each of them twice — see §6.

@@ -364,7 +364,6 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 		KeystoreSig0Cache:   make(map[string]*Sig0ActiveKeys),
 		TruststoreSig0Cache: NewSig0StoreT(),
 		UpdateQ:             make(chan UpdateRequest),
-		KeyBootstrapperQ:    make(chan KeyBootstrapperRequest, 10),
 	}
 	kdb.SetOptions(options)
 	return kdb, nil
