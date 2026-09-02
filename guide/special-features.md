@@ -294,8 +294,8 @@ OnFirstLoad). This:
 
 - Calls `DelegationSyncSetup` to ensure the child has an
   active SIG(0) keypair, and arranges for the public KEY
-  to be published according to the parent's advertised
-  bootstrap methods.
+  to be published according to the bootstrap method
+  negotiated with the parent (below).
 - Subscribes the zone to the engine that watches for
   changes in delegation-relevant RRsets (NS, glue, DNSKEY
   → DS) and dispatches them via `DelegationSyncher`.
@@ -309,6 +309,64 @@ or several -- driven by what the parent advertises and by
 per-policy preference.
 The same dispatch logic is reused by the auto-rollover
 engine; see section 5 for the full picture.
+
+#### Choosing a SIG(0) bootstrap method
+
+Before the child can send a signed UPDATE, the parent has
+to come to trust its SIG(0) key. Which route is used is
+**negotiated, not configured on one side**: the parent
+advertises what it will accept in the bootstrap SVCB
+([1.1](#11-parent-publishing-dsync)), the child declares
+what it is willing to rely on, and the strongest survivor
+of the intersection wins — `at-apex` > `at-ns` >
+`unsigned` > `manual`.
+
+```yaml
+delegationsync:
+   child:
+      schemes: [ notify, update ]
+      update:
+         keygen:
+            algorithm: ED25519
+         bootstrap:
+            methods: [ at-apex, at-ns ]
+```
+
+Four rules matter more than the list itself:
+
+- **An empty intersection refuses.** It never silently
+  degrades to a weaker method. A parent advertising only
+  `unsigned` or only `manual` is therefore refused by the
+  default child, which is the opt-in working as intended:
+  this decision is what authorises everything the child
+  later signs.
+- **An absent advertisement falls back to this list**, so a
+  parent that publishes no bootstrap SVCB — every non-TDNS
+  parent — is bootstrapped exactly as before. A *failed*
+  lookup is not the same thing and does not fall back: it
+  is an error, and the bootstrap is retried rather than
+  proceeding on a guess.
+- **An advertisement that cannot be authenticated is
+  ignored**, and the configured list is used instead. The
+  SVCB and the DSYNC record that named its target must both
+  be DNSSEC-validated; `delegationsync.child.update.allow-insecure`
+  waives that for a lab, but nothing waives a **bogus**
+  verdict — a failed chain of trust is never treated as an
+  unsigned one.
+- **`methods:` omitted means `[ at-apex, at-ns ]`**, and
+  `at-ns` is then filtered out per zone when this server
+  cannot satisfy it. It needs the child's KEY at
+  `_sig0key.<child>._signal.<ns>`, which is possible only
+  when the server is primary for a zone one of those signal
+  names falls in. An agent proxying for a primary
+  ([1.6](#16-agent-proxying-for-a-dsync-unaware-primary))
+  never qualifies — those names live in the *nameserver's*
+  zone, which a secondary does not control — so a proxy
+  drops `at-ns` on every path, BADKEY recovery included.
+
+The parent-side half of the same negotiation — how a zone's
+policy decides what it advertises — is
+[1.1](#11-parent-publishing-dsync).
 
 
 ### 1.6 Agent: proxying for a DSYNC-unaware primary

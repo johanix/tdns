@@ -126,10 +126,51 @@ func compileChildBootstrapMethods(methods []string) ([]string, error) {
 	return methods, nil
 }
 
-func lookupDelegationPolicy(name string) (DelegationPolicy, bool) {
-	if name == "" {
-		name = "default"
+// CompileDelegationSyncPolicies validates and compiles a delegationsync block's
+// named policies and its child bootstrap-method list WITHOUT installing
+// anything. It returns the compiled policy set (always carrying "default") and
+// the resolved child methods.
+//
+// Exported for one reason: `tdns-cli config check` has to predict, offline,
+// whether the daemon will accept this config. Reimplementing the rules there
+// would put a second copy of them one edit away from disagreeing with the
+// server — the exact drift the single-typed-reader contract on this block
+// exists to prevent. SetDelegationSyncConfig is the installing caller; the CLI
+// is the read-only one.
+func CompileDelegationSyncPolicies(dsc DelegationSyncConf) (map[string]DelegationPolicy, []string, error) {
+	compiled, err := compileDelegationPolicies(dsc.Policies)
+	if err != nil {
+		return nil, nil, err
 	}
+	methods, err := compileChildBootstrapMethods(dsc.Child.Update.Bootstrap.Methods)
+	if err != nil {
+		return nil, nil, err
+	}
+	return compiled, methods, nil
+}
+
+// DelegationPolicyResolves reports whether a zone's `delegationpolicy:` value
+// binds in the given compiled set. Empty means "omitted", which binds
+// "default"; anything else must name a policy or the daemon quarantines the
+// zone (plan §4.3). Callers pass the map from CompileDelegationSyncPolicies so
+// the empty-means-default rule has one home.
+func DelegationPolicyResolves(compiled map[string]DelegationPolicy, name string) bool {
+	_, ok := compiled[delegationPolicyName(name)]
+	return ok
+}
+
+// delegationPolicyName normalises a zone's `delegationpolicy:` value: omitted
+// binds "default". The one home for that rule -- both the runtime lookup and
+// the offline config-check resolution go through it.
+func delegationPolicyName(name string) string {
+	if name == "" {
+		return "default"
+	}
+	return name
+}
+
+func lookupDelegationPolicy(name string) (DelegationPolicy, bool) {
+	name = delegationPolicyName(name)
 	if p, ok := DelegationSyncConfig().CompiledPolicies[name]; ok {
 		return p, true
 	}

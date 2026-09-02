@@ -440,11 +440,7 @@ var delegationSyncConf atomic.Pointer[DelegationSyncConf]
 // ParseConfig on both first start and reload. On error the previous block
 // stays installed.
 func SetDelegationSyncConfig(dsc DelegationSyncConf) error {
-	compiled, err := compileDelegationPolicies(dsc.Policies)
-	if err != nil {
-		return err
-	}
-	methods, err := compileChildBootstrapMethods(dsc.Child.Update.Bootstrap.Methods)
+	compiled, methods, err := CompileDelegationSyncPolicies(dsc)
 	if err != nil {
 		return err
 	}

@@ -110,11 +110,22 @@ func TestCheckAgentZoneOptions(t *testing.T) {
 		{
 			name:       "proxy on secondary is fine",
 			zone:       tdns.ZoneConf{Name: "ok.example.", Type: "secondary", OptionsStrs: []string{"delegation-sync-proxy"}},
+			schemes:    []string{"notify", "update"},
 			wantNoFind: true,
 		},
 		{
 			name:      "proxy on primary is quarantined",
 			zone:      tdns.ZoneConf{Name: "bad.example.", Type: "primary", OptionsStrs: []string{"delegation-sync-proxy"}},
+			schemes:   []string{"notify", "update"},
+			wantLevel: ccFAIL,
+		},
+		{
+			// The proxy walks the same plan as a child and reads the same
+			// setting: with no child.schemes every transport is skipped and
+			// the zone forwards nothing, silently.
+			name:      "proxy without child schemes forwards nothing",
+			zone:      tdns.ZoneConf{Name: "noschemes-proxy.example.", Type: "secondary", OptionsStrs: []string{"delegation-sync-proxy"}},
+			schemes:   nil,
 			wantLevel: ccFAIL,
 		},
 		{
@@ -147,13 +158,10 @@ func TestCheckAgentZoneOptions(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			v := viper.New()
-			if tc.schemes != nil {
-				v.Set("delegationsync.child.schemes", tc.schemes)
-			}
 			cfg := &tdns.Config{Zones: []tdns.ZoneConf{tc.zone}}
+			cfg.DelegationSync.Child.Schemes = tc.schemes
 			rep := newCCReport()
-			checkAgentZoneOptions(cfg, v, rep)
+			checkAgentZoneOptions(cfg, rep)
 
 			got := levelsFor(rep, "Agent-specific", tc.zone.Name)
 			if tc.wantNoFind {
@@ -173,7 +181,7 @@ func TestCheckAgentZoneOptions(t *testing.T) {
 func TestCheckAgentZoneOptions_SkipsUnnamedZone(t *testing.T) {
 	cfg := &tdns.Config{Zones: []tdns.ZoneConf{{Type: "primary", OptionsStrs: []string{"delegation-sync-proxy"}}}}
 	rep := newCCReport()
-	checkAgentZoneOptions(cfg, viper.New(), rep)
+	checkAgentZoneOptions(cfg, rep)
 	if fails, warns := rep.counts(); fails != 0 || warns != 0 {
 		t.Fatalf("unnamed zone should be skipped, got %d FAIL / %d WARN", fails, warns)
 	}

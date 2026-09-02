@@ -351,14 +351,29 @@ A zone is one entry in the top-level `zones:` list.
 | `downstreams` | list of `{prefix, key}` | provide-xfr ACL |
 | `options` | list of strings | see below |
 | `dnssecpolicy` | string | names an entry in `dnssec.policies:`; `none` == unset |
+| `delegationpolicy` | string | names an entry in `delegationsync.policies:`; omitted binds `default` |
 | `multisigner` | string | names an entry in `multisigner:` |
 | `updatepolicy` | block | DNS UPDATE authorization |
 | `delegationbackend` | string | required if the zone accepts child updates |
 
-Note the spellings: **`dnssecpolicy`** and **`multisigner`**, each one word.
-`dnssec_policy`, `dnssec-policy` and `multi_signer` are not config keys; they
-decode to nothing and leave the zone without a policy, which then makes
-`online-signing` fail validation.
+Note the spellings: **`dnssecpolicy`**, **`delegationpolicy`** and
+**`multisigner`**, each one word. `dnssec_policy`, `dnssec-policy` and
+`multi_signer` are not config keys; they decode to nothing and leave the zone
+without a policy, which then makes `online-signing` fail validation.
+
+The two policy references look alike and fail differently, deliberately:
+
+- an unusable **`dnssecpolicy`** *degrades* — the zone is served unsigned, with
+  the error recorded on the zone;
+- an unresolvable **`delegationpolicy`** ***quarantines*** the zone. It governs
+  how strictly a child's SIG(0) key is verified before the parent trusts it, so
+  substituting a default for a name the operator got wrong is the wrong failure
+  mode. **Omitting** it is not an error: that binds the `default` policy.
+
+`tdns-cli auth config check` resolves both references offline, including through
+a template, and names the template rather than only the zones it poisoned. See
+[Delegation sync](special-features.md#1-automatic-delegation-synchronization) for what a
+delegation policy contains.
 
 ### store
 
