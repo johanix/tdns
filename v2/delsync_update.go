@@ -18,28 +18,20 @@ func (zd *ZoneData) SendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 		return "", 0, UpdateResult{}, fmt.Errorf("SendDelegationUpdate: no usable UPDATE target for %s", zd.ZoneName)
 	}
 	if zd.Parent == "" || zd.Parent == "." {
+		if Globals.ImrEngine == nil {
+			return "", 0, UpdateResult{}, fmt.Errorf("SendDelegationUpdate: parent zone for %s is unknown", zd.ZoneName)
+		}
+		p, perr := Globals.ImrEngine.ParentZone(zd.ZoneName)
+		if perr != nil {
+			return "", 0, UpdateResult{}, fmt.Errorf("SendDelegationUpdate: ParentZone(%s): %w", zd.ZoneName, perr)
+		}
+		zd.Parent = p
+	}
+	if zd.Parent == "" {
 		return "", 0, UpdateResult{}, fmt.Errorf("SendDelegationUpdate: parent zone for %s is unknown", zd.ZoneName)
 	}
 
-	var m *dns.Msg
-	var err error
-	if mode == UpdateModeReplace {
-		lgDns.Info("SendDelegationUpdate: using replace mode", "zone", zd.ZoneName)
-		m, err = CreateChildReplaceUpdateWithDS(zd.Parent, zd.ZoneName,
-			syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA,
-			syncstate.NewDS, syncstate.NewDSKnown)
-	} else {
-		lgDns.Info("SendDelegationUpdate: using delta mode", "zone", zd.ZoneName)
-		adds := append([]dns.RR{}, syncstate.NsAdds...)
-		adds = append(adds, syncstate.AAdds...)
-		adds = append(adds, syncstate.AAAAAdds...)
-		adds = append(adds, syncstate.DSAdds...)
-		removes := append([]dns.RR{}, syncstate.NsRemoves...)
-		removes = append(removes, syncstate.ARemoves...)
-		removes = append(removes, syncstate.AAAARemoves...)
-		removes = append(removes, syncstate.DSRemoves...)
-		m, err = CreateChildUpdate(zd.Parent, zd.ZoneName, adds, removes)
-	}
+	m, err := buildDelegationUpdate(zd.Parent, zd.ZoneName, syncstate, mode)
 	if err != nil {
 		return "", 0, UpdateResult{}, err
 	}
@@ -70,6 +62,25 @@ func (zd *ZoneData) SendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 	lgDns.Info("SendDelegationUpdate: update sent",
 		"zone", zd.ZoneName, "parent", zd.Parent, "mode", mode, "rcode", dns.RcodeToString[rcode])
 	return msg, uint8(rcode), ur, nil
+}
+
+func buildDelegationUpdate(parent, child string, syncstate DelegationSyncStatus, mode string) (*dns.Msg, error) {
+	if mode == UpdateModeReplace {
+		lgDns.Info("SendDelegationUpdate: using replace mode", "zone", child)
+		return CreateChildReplaceUpdateWithDS(parent, child,
+			syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA,
+			syncstate.NewDS, syncstate.NewDSKnown)
+	}
+	lgDns.Info("SendDelegationUpdate: using delta mode", "zone", child)
+	adds := append([]dns.RR{}, syncstate.NsAdds...)
+	adds = append(adds, syncstate.AAdds...)
+	adds = append(adds, syncstate.AAAAAdds...)
+	adds = append(adds, syncstate.DSAdds...)
+	removes := append([]dns.RR{}, syncstate.NsRemoves...)
+	removes = append(removes, syncstate.ARemoves...)
+	removes = append(removes, syncstate.AAAARemoves...)
+	removes = append(removes, syncstate.DSRemoves...)
+	return CreateChildUpdate(parent, child, adds, removes)
 }
 
 // apexKEYEnsurer is the one role-dependent step of SIG(0) bootstrap: the KEY

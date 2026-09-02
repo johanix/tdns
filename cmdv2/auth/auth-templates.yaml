@@ -5,7 +5,7 @@ templates:
      notify:          [ 127.0.0.1:5399 ]
      options:         [ delegation-sync-parent, allow-updates, allow-child-updates, multisigner ]
      dnssecpolicy:    default
-     delegationpolicy: locked-down
+     delegationpolicy: manual
      multisigner:     none
      updatepolicy:
         child:
@@ -21,7 +21,7 @@ templates:
      notify:          [ 127.0.0.1:5399 ]
      options:         [ delegation-sync-parent, allow-child-updates, multisigner ]
      dnssecpolicy:    none
-     delegationpolicy: locked-down
+     delegationpolicy: manual
      updatepolicy:
         child:
            type:      selfsub

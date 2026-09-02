@@ -7,12 +7,15 @@ import (
 )
 
 func TestCompileDelegationPolicyEmptyMechanismsStayEmpty(t *testing.T) {
-	p := compileDelegationPolicy("locked-down", DelegationPolicyConf{
+	p, err := compileDelegationPolicy("locked-down", DelegationPolicyConf{
 		Bootstrap: DelegationBootstrapConf{
 			Mechanisms: []string{},
 			Manual:     true,
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(p.Mechanisms) != 0 {
 		t.Fatalf("empty mechanisms filled to %v; locked-down must not inherit [at-apex, at-ns]", p.Mechanisms)
 	}
@@ -66,7 +69,7 @@ func TestBindDelegationPolicyOmittedGetsDefault(t *testing.T) {
 
 func TestCompileDelegationPolicyRetryAndRequireDnssec(t *testing.T) {
 	f := false
-	p := compileDelegationPolicy("permissive", DelegationPolicyConf{
+	p, err := compileDelegationPolicy("permissive", DelegationPolicyConf{
 		Bootstrap: DelegationBootstrapConf{
 			Mechanisms:             []string{"at-apex"},
 			RequireDnssec:          &f,
@@ -74,10 +77,89 @@ func TestCompileDelegationPolicyRetryAndRequireDnssec(t *testing.T) {
 			Retry:                  DelegationRetryConf{MaxAttempts: 3, Interval: 30 * time.Second},
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if p.RequireDnssec {
 		t.Fatal("explicit false require-dnssec became true")
 	}
 	if p.RetryMaxAttempts != 3 || p.RetryInterval != 30*time.Second {
 		t.Fatalf("retry = %d/%s", p.RetryMaxAttempts, p.RetryInterval)
 	}
+}
+
+func TestCompileDelegationPolicyUnknownMechanismFails(t *testing.T) {
+	_, err := compileDelegationPolicy("typo", DelegationPolicyConf{
+		Bootstrap: DelegationBootstrapConf{Mechanisms: []string{"at-apx"}},
+	})
+	if err == nil {
+		t.Fatal("unknown mechanism must fail closed")
+	}
+}
+
+func TestCompileChildBootstrapMethods(t *testing.T) {
+	got, err := compileChildBootstrapMethods(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"at-apex", "at-ns"}) {
+		t.Fatalf("omit defaulted to %v", got)
+	}
+	empty, err := compileChildBootstrapMethods([]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("empty list filled to %v", empty)
+	}
+	if _, err := compileChildBootstrapMethods([]string{"at-apex", "nope"}); err == nil {
+		t.Fatal("unknown child method must fail closed")
+	}
+}
+
+func TestFindParentZoneSkipsTheChild(t *testing.T) {
+	child := &ZoneData{ZoneName: "child.example."}
+	parent := &ZoneData{
+		ZoneName: "example.",
+		DelegationPolicy: &DelegationPolicy{
+			Name:       "manual",
+			Mechanisms: []string{"at-apex"},
+			Manual:     true,
+		},
+	}
+	registerZones(t, child, parent)
+
+	if got := FindZone("child.example."); got != child {
+		t.Fatalf("FindZone returned %v, want the child", zoneName(got))
+	}
+	if got := FindParentZone("child.example."); got != parent {
+		t.Fatalf("FindParentZone returned %v, want the parent", zoneName(got))
+	}
+	pol := parentDelegationPolicy("child.example.")
+	if pol.Name != "manual" {
+		t.Fatalf("parentDelegationPolicy used %q, want the parent's manual policy", pol.Name)
+	}
+}
+
+func TestParentDelegationPolicyUnknownUsesCompiledDefault(t *testing.T) {
+	if err := SetDelegationSyncConfig(DelegationSyncConf{
+		Policies: map[string]DelegationPolicyConf{
+			"default": {Bootstrap: DelegationBootstrapConf{Mechanisms: []string{"at-ns"}}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
+
+	pol := parentDelegationPolicy("orphan.example.")
+	if pol.Name != "default" || !reflect.DeepEqual(pol.Mechanisms, []string{"at-ns"}) {
+		t.Fatalf("unknown parent must use compiled default, got %+v", pol)
+	}
+}
+
+func zoneName(zd *ZoneData) string {
+	if zd == nil {
+		return "<nil>"
+	}
+	return zd.ZoneName
 }

@@ -165,8 +165,17 @@ func waitOrDone(ctx context.Context, d time.Duration) bool {
 // exponential backoff and can therefore be sleeping for a long time when the
 // process is asked to stop; without it the goroutine ignores shutdown and the
 // deferred key cleanup it performs runs against a database that is closing.
-func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone string, keyid uint16, keyRR string) {
-	pol := parentDelegationPolicy(childZone)
+func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, parentZone string, keyid uint16, keyRR string) {
+	var pol DelegationPolicy
+	if parentZone != "" {
+		if pzd, ok := Zones.Get(parentZone); ok {
+			pol = pzd.boundDelegationPolicy()
+		} else {
+			pol = compiledDefaultDelegationPolicy()
+		}
+	} else {
+		pol = parentDelegationPolicy(childZone)
+	}
 	if len(pol.Mechanisms) == 0 {
 		lgSigner.Info("TriggerChildKeyVerification: policy has empty mechanisms; not verifying",
 			"zone", childZone, "keyid", keyid, "policy", pol.Name)

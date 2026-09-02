@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -50,21 +51,51 @@ func DefaultDelegationPolicy() DelegationPolicy {
 	}
 }
 
-func compileDelegationPolicies(raw map[string]DelegationPolicyConf) map[string]DelegationPolicy {
+var (
+	validParentMechanisms = map[string]bool{"at-apex": true, "at-ns": true}
+	validChildMethods     = map[string]bool{"at-apex": true, "at-ns": true, "unsigned": true, "manual": true}
+)
+
+func validateConfigTokens(tokens []string, allowed map[string]bool, what string) error {
+	var bad []string
+	for _, t := range tokens {
+		if !allowed[t] {
+			bad = append(bad, t)
+		}
+	}
+	if len(bad) > 0 {
+		var names []string
+		for n := range allowed {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		return fmt.Errorf("unknown %s %q (allowed: %s)", what, bad, strings.Join(names, ", "))
+	}
+	return nil
+}
+
+func compileDelegationPolicies(raw map[string]DelegationPolicyConf) (map[string]DelegationPolicy, error) {
 	out := make(map[string]DelegationPolicy, len(raw)+1)
 	for name, conf := range raw {
-		out[name] = compileDelegationPolicy(name, conf)
+		p, err := compileDelegationPolicy(name, conf)
+		if err != nil {
+			return nil, err
+		}
+		out[name] = p
 	}
 	if _, ok := out["default"]; !ok {
 		out["default"] = DefaultDelegationPolicy()
 	}
-	return out
+	return out, nil
 }
 
-func compileDelegationPolicy(name string, conf DelegationPolicyConf) DelegationPolicy {
+func compileDelegationPolicy(name string, conf DelegationPolicyConf) (DelegationPolicy, error) {
 	p := DefaultDelegationPolicy()
 	p.Name = name
 	if conf.Bootstrap.Mechanisms != nil {
+		if err := validateConfigTokens(conf.Bootstrap.Mechanisms, validParentMechanisms, "bootstrap mechanism"); err != nil {
+			return DelegationPolicy{}, fmt.Errorf("delegationpolicy %q: %w", name, err)
+		}
 		p.Mechanisms = conf.Bootstrap.Mechanisms
 	}
 	if conf.Bootstrap.RequireDnssec != nil {
@@ -78,7 +109,17 @@ func compileDelegationPolicy(name string, conf DelegationPolicyConf) DelegationP
 	if conf.Bootstrap.Retry.Interval > 0 {
 		p.RetryInterval = conf.Bootstrap.Retry.Interval
 	}
-	return p
+	return p, nil
+}
+
+func compileChildBootstrapMethods(methods []string) ([]string, error) {
+	if methods == nil {
+		return []string{"at-apex", "at-ns"}, nil
+	}
+	if err := validateConfigTokens(methods, validChildMethods, "child.update.bootstrap.methods"); err != nil {
+		return nil, err
+	}
+	return methods, nil
 }
 
 func lookupDelegationPolicy(name string) (DelegationPolicy, bool) {
@@ -103,17 +144,22 @@ func bindDelegationPolicy(zconf *ZoneConf) (*DelegationPolicy, error) {
 	return &p, nil
 }
 
+func compiledDefaultDelegationPolicy() DelegationPolicy {
+	p, _ := lookupDelegationPolicy("default")
+	return p
+}
+
 func (zd *ZoneData) boundDelegationPolicy() DelegationPolicy {
 	if zd != nil && zd.DelegationPolicy != nil {
 		return *zd.DelegationPolicy
 	}
-	return DefaultDelegationPolicy()
+	return compiledDefaultDelegationPolicy()
 }
 
 func parentDelegationPolicy(childZone string) DelegationPolicy {
-	parent := FindZone(childZone)
+	parent := FindParentZone(childZone)
 	if parent == nil {
-		return DefaultDelegationPolicy()
+		return compiledDefaultDelegationPolicy()
 	}
 	return parent.boundDelegationPolicy()
 }

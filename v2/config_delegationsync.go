@@ -34,10 +34,11 @@ import (
 // authoritative and returns a zero value; add the fields and move the readers
 // in the same change.
 type DelegationSyncConf struct {
-	Parent           DelegationSyncParentConf        `yaml:"parent" mapstructure:"parent"`
-	Child            DelegationSyncChildConf         `yaml:"child" mapstructure:"child"`
-	Policies         map[string]DelegationPolicyConf `yaml:"policies" mapstructure:"policies"`
-	CompiledPolicies map[string]DelegationPolicy     `yaml:"-" mapstructure:"-"`
+	Parent               DelegationSyncParentConf        `yaml:"parent" mapstructure:"parent"`
+	Child                DelegationSyncChildConf         `yaml:"child" mapstructure:"child"`
+	Policies             map[string]DelegationPolicyConf `yaml:"policies" mapstructure:"policies"`
+	CompiledPolicies     map[string]DelegationPolicy     `yaml:"-" mapstructure:"-"`
+	CompiledChildMethods []string                        `yaml:"-" mapstructure:"-"`
 }
 
 type DelegationSyncParentConf struct {
@@ -309,10 +310,21 @@ func (c DsyncApiSchemeConf) Validate() error {
 var delegationSyncConf atomic.Pointer[DelegationSyncConf]
 
 // SetDelegationSyncConfig installs the freshly-parsed block. Called from
-// ParseConfig on both first start and reload.
-func SetDelegationSyncConfig(dsc DelegationSyncConf) {
-	dsc.CompiledPolicies = compileDelegationPolicies(dsc.Policies)
+// ParseConfig on both first start and reload. On error the previous block
+// stays installed.
+func SetDelegationSyncConfig(dsc DelegationSyncConf) error {
+	compiled, err := compileDelegationPolicies(dsc.Policies)
+	if err != nil {
+		return err
+	}
+	methods, err := compileChildBootstrapMethods(dsc.Child.Update.Bootstrap.Methods)
+	if err != nil {
+		return err
+	}
+	dsc.CompiledPolicies = compiled
+	dsc.CompiledChildMethods = methods
 	delegationSyncConf.Store(&dsc)
+	return nil
 }
 
 // DelegationSyncConfig returns the current block. Never nil: a daemon that has

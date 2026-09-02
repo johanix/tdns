@@ -372,6 +372,14 @@ var deprecatedConfigKeys = append([]deprecatedConfigKey{
 		advice: "zone key is `dnssecpolicy:` (one word, no hyphen); `dnssec-policy:` is ignored, leaving the zone unsigned"},
 	{match: ".multi_signer",
 		advice: "zone key is `multisigner:` (one word, no underscore); `multi_signer:` is ignored"},
+	{match: ".keybootstrap",
+		advice: "`keybootstrap:` moved to `delegationpolicy:` naming a `delegationsync.policies.*` entry (`manual: true` for the old `manual` token)"},
+	{match: "keybootstrap", exact: true,
+		advice: "top-level `keybootstrap:` is gone; use `delegationsync.policies.*` and per-zone `delegationpolicy:`"},
+	{match: ".keyupload",
+		advice: "`keyupload:` moved to `delegationsync.policies.*.bootstrap.allow-unvalidated-upload`"},
+	{match: ".key-verification",
+		advice: "`key-verification:` moved to `delegationsync.policies.*.bootstrap` (mechanisms, require-dnssec, retry)"},
 }, underscoreSpellingMigrations()...)
 
 // snakeCaseConfigKeys lists every config key that was spelled with underscores
@@ -708,7 +716,9 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// anything that could publish: on reload this must be swapped in before a
 	// zone re-reads it, and on first start it must be present before
 	// SetupZoneSync runs further down.
-	SetDelegationSyncConfig(conf.DelegationSync)
+	if err := SetDelegationSyncConfig(conf.DelegationSync); err != nil {
+		return fmt.Errorf("delegationsync config: %w", err)
+	}
 
 	// On first start: build the KeyDB. On reload: keep the existing
 	// KeyDB but re-apply outbound-soa-serial so a config edit takes
@@ -1574,22 +1584,22 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
-				Name:           zname,
-				Force:          true,     // force refresh, ignoring SOA serial, when reloading from file
-				ZoneType:       zonetype, // primary | secondary
-				PrimariesConf:  clonePeerConfs(zconf.Primaries),
-				Primaries:      resolvedPrimaries,
-				ZoneStore:      zonestore,
-				Notify:         zconf.Notify,
-				AllowNotify:    zconf.AllowNotify,
-				Downstreams:    zconf.Downstreams,
-				DownstreamAuth: zconf.DownstreamAuth,
-				ConfigUpdate:   true, // config-bearing: lets reload clear removed ACLs
-				Zonefile:       zconf.Zonefile,
-				Options:        options,
-				UpdatePolicy:   policy,
+				Name:             zname,
+				Force:            true,     // force refresh, ignoring SOA serial, when reloading from file
+				ZoneType:         zonetype, // primary | secondary
+				PrimariesConf:    clonePeerConfs(zconf.Primaries),
+				Primaries:        resolvedPrimaries,
+				ZoneStore:        zonestore,
+				Notify:           zconf.Notify,
+				AllowNotify:      zconf.AllowNotify,
+				Downstreams:      zconf.Downstreams,
+				DownstreamAuth:   zconf.DownstreamAuth,
+				ConfigUpdate:     true, // config-bearing: lets reload clear removed ACLs
+				Zonefile:         zconf.Zonefile,
+				Options:          options,
+				UpdatePolicy:     policy,
 				DelegationPolicy: dpol,
-				DnssecPolicy:   zconf.DnssecPolicy,
+				DnssecPolicy:     zconf.DnssecPolicy,
 				// Always carried (empty == inherit the global), so a config
 				// edit that REMOVES a per-zone mode actually reverts the zone
 				// to the global on reload instead of keeping the stale value.
@@ -2041,6 +2051,46 @@ func (conf *Config) reloadDnssecFromFile() error {
 
 	conf.Dnssec = partial.Dnssec
 	return conf.parseDnssecConfig()
+}
+
+// reloadDelegationSyncFromFile re-reads the config file, decodes just the
+// delegationsync: block, and installs it via SetDelegationSyncConfig so a
+// SIGHUP picks up policy edits before ParseZones binds them. A decode or
+// compile error leaves the previous policies in place.
+func (conf *Config) reloadDelegationSyncFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		return SetDelegationSyncConfig(conf.DelegationSync)
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	var partial struct {
+		DelegationSync DelegationSyncConf `yaml:"delegationsync"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName: "yaml",
+		Result:  &partial,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+		),
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding delegationsync config: %v", err)
+	}
+
+	if err := SetDelegationSyncConfig(partial.DelegationSync); err != nil {
+		return err
+	}
+	conf.DelegationSync = partial.DelegationSync
+	return nil
 }
 
 // reloadZonesFromFile re-reads the config file(s), decodes just the zones: block,

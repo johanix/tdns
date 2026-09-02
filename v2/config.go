@@ -1074,6 +1074,10 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
 	}
 
+	if err := conf.reloadDelegationSyncFromFile(); err != nil {
+		lgConfig.Error("ReloadZoneConfig: failed to re-parse delegationsync config, keeping previous policies", "err", err)
+	}
+
 	// Re-read the resolver's stub and forward zones and hand them to the running
 	// IMR. Here rather than only in the full-config reload because this is the
 	// SIGHUP path: a stub or forward edit used to need a restart, which for a

@@ -29,9 +29,12 @@ func TestCompileDelegationPolicyRetryRejectsNonPositive(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p := compileDelegationPolicy("x", DelegationPolicyConf{
+			p, err := compileDelegationPolicy("x", DelegationPolicyConf{
 				Bootstrap: DelegationBootstrapConf{Retry: tc.in},
 			})
+			if err != nil {
+				t.Fatal(err)
+			}
 			if p.RetryMaxAttempts != tc.wantAttempts || p.RetryInterval != tc.wantInterval {
 				t.Errorf("got (%d, %v), want (%d, %v)", p.RetryMaxAttempts, p.RetryInterval, tc.wantAttempts, tc.wantInterval)
 			}
@@ -120,7 +123,7 @@ func TestTriggerChildKeyVerificationExitsOnCancellation(t *testing.T) {
 	before := runtime.NumGoroutine()
 
 	kdb := &KeyDB{}
-	kdb.TriggerChildKeyVerification(ctx, "child.example.", 12345,
+	kdb.TriggerChildKeyVerification(ctx, "child.example.", "", 12345,
 		"child.example. 3600 IN KEY 256 3 15 x")
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -152,7 +155,7 @@ func TestTriggerChildKeyVerificationLockedDownDoesNotStart(t *testing.T) {
 	before := runtime.NumGoroutine()
 
 	kdb := &KeyDB{}
-	kdb.TriggerChildKeyVerification(context.Background(), "child.example.", 1,
+	kdb.TriggerChildKeyVerification(context.Background(), "child.example.", "example.", 1,
 		"child.example. 3600 IN KEY 256 3 15 x")
 
 	time.Sleep(50 * time.Millisecond)

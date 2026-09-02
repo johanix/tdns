@@ -97,11 +97,7 @@ func DsyncApiTargetName(zonename string) string {
 		return ""
 	}
 	tpl := dsc.Api.WithDefaults().Target
-	replacer := zonename
-	if replacer == "." {
-		replacer = "root"
-	}
-	return dns.Fqdn(strings.Replace(tpl, "{ZONENAME}", replacer, 1))
+	return expandDsyncTemplate(tpl, zonename)
 }
 
 func dsyncSchemeConfigured(schemes []string, want string) bool {

@@ -191,10 +191,10 @@ type ZoneData struct {
 	DnssecPolicyName  string // name of currently-applied policy; used to detect config-reload-driven changes
 	MultiSigner       *MultiSignerConf
 	KeyDB             *KeyDB
-	// proxySig0ParentBootstrapped is set after the proxy has run the
-	// self-signed SIG(0) ceremony for the KEY currently at the apex.
-	// Cleared when the KEY leaves the apex so a later WAITING→READY
-	// transition runs the ceremony again.
+	// proxySig0ParentBootstrapped is set after the parent accepted the
+	// self-signed SIG(0) ceremony (rcode NOERROR) for the KEY currently
+	// at the apex. Cleared when the KEY leaves the apex so a later
+	// WAITING→READY transition runs the ceremony again.
 	proxySig0ParentBootstrapped bool
 	AppType                     AppType
 	// Errors holds all active error conditions on this zone. Use SetError /

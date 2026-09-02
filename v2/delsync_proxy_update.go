@@ -436,10 +436,24 @@ func (zd *ZoneData) proxyEnsureParentBootstrap(ctx context.Context) error {
 	if zd.proxySig0ParentBootstrapped {
 		return nil
 	}
-	_, _, err := zd.bootstrapSig0Key(ctx, 0, proxyApexKEY{})
+	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Child.Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
+		return fmt.Errorf("keygen algorithm: %w", err)
+	}
+	_, ur, err := zd.bootstrapSig0Key(ctx, alg, proxyApexKEY{})
+	if err := parentBootstrapResult(ur, err); err != nil {
 		return err
 	}
 	zd.proxySig0ParentBootstrapped = true
+	return nil
+}
+
+func parentBootstrapResult(ur UpdateResult, err error) error {
+	if err != nil {
+		return err
+	}
+	if ur.Rcode != dns.RcodeSuccess {
+		return fmt.Errorf("bootstrap SIG(0) key with parent: rcode %s", dns.RcodeToString[ur.Rcode])
+	}
 	return nil
 }

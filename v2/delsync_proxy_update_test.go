@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -341,5 +342,36 @@ func TestProxyReplaceDSStatementDependsOnTheDnskeyRRsetNotTheSEPBit(t *testing.T
 				t.Errorf("DS del/add=%d/%d, want %d/%d", del, add, tc.wantDel, tc.wantAdd)
 			}
 		})
+	}
+}
+
+func TestParentBootstrapResultRequiresNOERROR(t *testing.T) {
+	if err := parentBootstrapResult(UpdateResult{Rcode: dns.RcodeRefused}, nil); err == nil {
+		t.Fatal("REFUSED must not count as a successful ceremony")
+	}
+	if err := parentBootstrapResult(UpdateResult{Rcode: dns.RcodeSuccess}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := parentBootstrapResult(UpdateResult{}, fmt.Errorf("transport")); err == nil {
+		t.Fatal("transport error must propagate")
+	}
+}
+
+func TestProxyEnsureParentBootstrapOnce(t *testing.T) {
+	zd := &ZoneData{ZoneName: proxyUpdZone, proxySig0ParentBootstrapped: true}
+	if err := zd.proxyEnsureParentBootstrap(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProxySig0PublicationStateClearsBootstrappedFlag(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
+	zd.proxySig0ParentBootstrapped = true
+	if _, err := zd.proxySig0PublicationState(kdb); err != nil {
+		t.Fatal(err)
+	}
+	if zd.proxySig0ParentBootstrapped {
+		t.Fatal("flag must clear when the KEY leaves the apex")
 	}
 }
