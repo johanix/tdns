@@ -385,16 +385,6 @@ type ZoneData struct {
 	// Set/consumed only on the OnZonePreRefresh/PostRefresh path for zones with
 	// OptDelSyncProxy; protected by zd.mu.
 	ProxyRefreshAnalysis *ProxyDelegationAnalysis
-
-	// Idempotency guards for the OnZone*Refresh registrations in ParseZones.
-	// ParseZones reuses this ZoneData across config reloads, so a hook keyed on
-	// FirstZoneLoad is never registered on a zone that only becomes eligible on
-	// a later reload (a primary that is reconfigured to secondary), while a hook
-	// re-appended on every reload accumulates duplicate callbacks. These record
-	// "already registered" so registration can be both once-only and
-	// reload-aware. Written only from ParseZones, under confMu.
-	proxyDelegationHooksRegistered bool
-	signalRepublishHookRegistered  bool
 }
 
 // Lock and Unlock expose the mutex for code that moves to

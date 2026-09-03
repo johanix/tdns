@@ -3,6 +3,7 @@ package tdns
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -130,66 +131,75 @@ func TestDynamicPrimaryRefusesUseHsyncparam(t *testing.T) {
 	}
 }
 
-// The republish hook is registered once, but on a zone that BECOMES a secondary
-// — the reload gap CodeRabbit found (#489 review, finding on parseconfig.go).
-// ParseZones reuses the ZoneData, so a hook keyed on FirstZoneLoad is never
-// registered on a zone reconfigured from primary to secondary (FirstZoneLoad is
-// already false by then), and a hook re-appended every reload accumulates
-// duplicates. registerSignalRepublishHookOnce must do neither.
-func TestRegisterSignalRepublishHookOnce(t *testing.T) {
-	// A zone that starts as a primary registers nothing on that pass (ParseZones
-	// only calls the helper for secondaries), then is reconfigured to secondary.
-	zdp := &ZoneData{ZoneName: "customer.example."}
+// Both refresh hooks are registered once, at first load, for EVERY zone, and
+// self-gate at run time (#489 review: the reload registration gap, and the
+// data race it would take to fix it any other way). This is what lets a zone
+// reconfigured from primary to secondary on reload still act -- the hook is
+// already there from first load -- without ever mutating the OnZone*Refresh
+// slices after the zone is live.
+func TestRefreshHooksRegisterAtFirstLoad(t *testing.T) {
+	zdp := &ZoneData{ZoneName: "z.example."}
 
-	// Primary pass: ParseZones would not call the helper at all. Nothing set.
-	if got := len(zdp.OnZonePostRefresh); got != 0 {
-		t.Fatalf("pre-registration hook count = %d, want 0", got)
-	}
+	zdp.registerSignalRepublishHook()
+	zdp.registerProxyDelegationHooks(make(chan DelegationSyncRequest, 1))
 
-	// Becomes secondary — first registration.
-	zdp.registerSignalRepublishHookOnce()
-	if got := len(zdp.OnZonePostRefresh); got != 1 {
-		t.Fatalf("after first registration: hook count = %d, want 1 "+
-			"(a primary→secondary reload must register the hook)", got)
+	// One signal post-refresh hook + one proxy pre/post pair.
+	if pre := len(zdp.OnZonePreRefresh); pre != 1 {
+		t.Fatalf("OnZonePreRefresh = %d, want 1 (proxy)", pre)
 	}
-	if !zdp.signalRepublishHookRegistered {
-		t.Fatal("guard not set after registration")
-	}
-
-	// Every subsequent reload calls the helper again; it must not duplicate.
-	for i := 0; i < 5; i++ {
-		zdp.registerSignalRepublishHookOnce()
-	}
-	if got := len(zdp.OnZonePostRefresh); got != 1 {
-		t.Fatalf("after repeated reloads: hook count = %d, want 1 (no duplicates)", got)
+	if post := len(zdp.OnZonePostRefresh); post != 2 {
+		t.Fatalf("OnZonePostRefresh = %d, want 2 (signal + proxy)", post)
 	}
 }
 
-// The proxy hooks share the same reload-aware registration. A zone that gains
-// delegation-sync-proxy on a later reload must get both hooks; repeated reloads
-// must not stack them.
-func TestRegisterProxyDelegationHooksOnce(t *testing.T) {
-	zdp := &ZoneData{ZoneName: "child.example."}
-	q := make(chan DelegationSyncRequest, 1)
-
-	zdp.registerProxyDelegationHooksOnce(q)
-	if pre, post := len(zdp.OnZonePreRefresh), len(zdp.OnZonePostRefresh); pre != 1 || post != 1 {
-		t.Fatalf("after first registration: pre=%d post=%d, want 1 and 1", pre, post)
+// The proxy's registered pre-refresh closure gates on OptDelSyncProxy. The
+// closure is the live wiring registered on every zone; ProxyDelegationPreRefresh
+// itself is the pure diff (exercised directly by the delsync_proxy_p2 tests).
+// Without the option the closure must not run the diff, so registering it
+// everywhere costs a non-proxy zone nothing; with the option, the CSYNC change
+// is detected. Driven through the registered slice, which is the real gate.
+func TestProxyRefreshClosureGatesOnOption(t *testing.T) {
+	makeZones := func() (*ZoneData, *ZoneData) {
+		old := newMapZone("child.example.", Secondary, map[string][]dns.RR{
+			"child.example.": {mustRR(t, "child.example. 3600 IN CSYNC 1 3 A NS AAAA")},
+		})
+		next := newMapZone("child.example.", Secondary, map[string][]dns.RR{
+			"child.example.": {mustRR(t, "child.example. 3600 IN CSYNC 2 3 A NS AAAA")},
+		})
+		return old, next
 	}
 
-	for i := 0; i < 5; i++ {
-		zdp.registerProxyDelegationHooksOnce(q)
+	// Register the hooks as ParseZones would, then invoke the pre-refresh
+	// closure directly.
+	zdp := &ZoneData{ZoneName: "reg.example."}
+	zdp.registerProxyDelegationHooks(make(chan DelegationSyncRequest, 1))
+	if len(zdp.OnZonePreRefresh) != 1 {
+		t.Fatalf("expected 1 pre-refresh closure, got %d", len(zdp.OnZonePreRefresh))
 	}
-	if pre, post := len(zdp.OnZonePreRefresh), len(zdp.OnZonePostRefresh); pre != 1 || post != 1 {
-		t.Fatalf("after repeated reloads: pre=%d post=%d, want 1 and 1 (no duplicates)", pre, post)
+	preClosure := zdp.OnZonePreRefresh[0]
+
+	// Option off: the closure must not run the diff.
+	off, offNew := makeZones()
+	preClosure(off, offNew)
+	if off.ProxyRefreshAnalysis != nil {
+		t.Fatal("proxy closure ran the diff without delegation-sync-proxy set")
+	}
+
+	// Option on: the CSYNC change is detected.
+	on, onNew := makeZones()
+	on.SetOption(OptDelSyncProxy, true)
+	preClosure(on, onNew)
+	if on.ProxyRefreshAnalysis == nil || !on.ProxyRefreshAnalysis.CsyncChanged {
+		t.Fatalf("proxy closure missed the CSYNC change with the option set: %+v", on.ProxyRefreshAnalysis)
 	}
 }
 
 // The option read in RepublishAtSignalNames is synchronized against a concurrent
-// reload replacing zd.Options (CodeRabbit #489 review, data-race finding). Run
-// under `go test -race`: an unsynchronized map read here races SetOption's write
-// and fails the race detector. The hook is a no-op on this bare zone (no apex),
-// so this exercises only the guarded read.
+// reload replacing zd.Options (#489 review, data-race finding). Run under
+// `go test -race`: an unsynchronized map read here races SetOption's write and
+// fails the race detector. The hook is a no-op on this bare zone (no apex), so
+// this exercises only the guarded read. Both loops are bounded and the wait is
+// capped, so the test cannot hang if the goroutine wedges.
 func TestRepublishAtSignalNamesOptionReadIsSynchronized(t *testing.T) {
 	zd := newMapZone("z.example.", Secondary, map[string][]dns.RR{
 		"z.example.": {mustRR(t, "z.example. 3600 IN NS ns.z.example.")},
@@ -207,5 +217,9 @@ func TestRepublishAtSignalNamesOptionReadIsSynchronized(t *testing.T) {
 		// same lock (SetOption).
 		zd.SetOption(OptUseHsyncparam, i%2 == 0)
 	}
-	<-done
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("republish goroutine did not finish; possible deadlock in the option read")
+	}
 }
