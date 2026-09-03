@@ -24,6 +24,14 @@
 // is a non-starter and is skipped. The consumer is change-gated: it diffs
 // the desired content against what is already published at the signal name
 // in the target zone, so a re-transfer of unchanged data is a no-op.
+//
+// The transfer-driven republish is OPT-IN, per zone, via the secondary-only
+// use-hsyncparam option: it writes records into a zone this server is
+// authoritative for on the strength of a THIRD PARTY's signaling, so the
+// operator of that zone has to say yes. The child-side publishes in this file
+// (publishSig0KeyAtSignalNames, refreshSig0KeyAtSignalNames) and the
+// satisfiability probe canPublishSig0KeyAtSignal are NOT gated -- there the
+// zone being published for is our own and selecting at-ns is the intent.
 
 package tdns
 
@@ -64,12 +72,20 @@ var signalSpecs = []signalSpec{
 }
 
 // RepublishAtSignalNames is the OnZonePostRefresh callback registered on
-// every tdns-auth secondary. After a transfer of childZD's customer zone it
-// republishes the apex bootstrap RRsets under the RFC 9615 signal names if
-// the apex HSYNCPARAM asks for it. It is always-on but acts only when the
-// transferred zone actually carries the relevant flag and this server is
-// locally primary for a parent of the signal name.
+// every secondary. After a transfer of childZD's customer zone it republishes
+// the apex bootstrap RRsets under the RFC 9615 signal names if the zone is
+// configured to act on HSYNCPARAM and the apex HSYNCPARAM asks for it.
+//
+// The use-hsyncparam check is here rather than at registration time on
+// purpose: the hook is registered once, on first load (registering per reload
+// would accumulate duplicate callbacks), while zd.Options is replaced
+// wholesale on every config reload. Reading the option when the hook RUNS is
+// what makes it take effect on `config reload` instead of only on restart.
 func (childZD *ZoneData) RepublishAtSignalNames() {
+	if !childZD.Options[OptUseHsyncparam] {
+		return
+	}
+
 	hp := childZD.apexHsyncparam()
 	if hp == nil {
 		return

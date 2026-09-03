@@ -8,9 +8,11 @@ authoritative and recursive DNS service.
 1. [**Automatic Delegation Synchronization**](#1-automatic-delegation-synchronization)
    -- Keeping parent zone delegation data in sync with child
    zone changes: the NOTIFY and UPDATE schemes, delegation
-   backends, the agent-as-proxy path, and the
+   backends, the agent-as-proxy path, the
    [DSYNC API scheme](#17-the-dsync-api-scheme-https-for-children-that-cannot-sign)
-   for children that cannot sign a DNS message.
+   for children that cannot sign a DNS message, and
+   [publishing a customer's bootstrap records](#18-secondary-publishing-a-customers-bootstrap-records-at-the-_signal-names)
+   at the RFC 9615 `_signal` names.
 2. [**DNS Transport Signaling**](#2-dns-transport-signaling)
    -- Enabling resolvers to discover and use encrypted
    transports (DoT, DoQ, DoH) when communicating with
@@ -689,6 +691,75 @@ disables one while believing the other still holds has none.
 It does not disable certificate validation. It is a lab
 convenience and never a production setting.
 
+### 1.8 Secondary: publishing a customer's bootstrap records at the `_signal` names
+
+Everything above is about a child getting its delegation data
+to its parent. This section is the other end of the same
+problem: how a child that cannot yet be validated gets its
+*first* trust anchor -- or its first SIG(0) key -- to a
+parent that has no reason to believe it.
+
+RFC 9615 answers that with a name in a zone the parent
+already trusts. The child's bootstrap records are published
+not in the child's zone but in the zone of each of the
+child's **nameservers**, at
+`_dsboot.<child>._signal.<ns>` -- so a parent can fetch them
+over the child's own delegation and validate them under the
+nameserver's keys, not the child's.
+`draft-ietf-dnsop-delegation-mgmt-via-ddns` reuses the shape
+for the SIG(0) bootstrap, at `_sig0key.<child>._signal.<ns>`.
+
+Someone has to actually put the records there, and it is not
+the child -- it is whoever operates the nameserver. tdns-auth
+does that job on a **secondary** with the
+`use-hsyncparam` option:
+
+```yaml
+zones:
+   - name:      customer.example.
+     type:      secondary
+     primaries: [ { addr: 192.0.2.1:53, key: NOKEY } ]
+     options:   [ use-hsyncparam ]
+```
+
+The instruction comes from the customer, in the HSYNCPARAM
+record at their zone's apex
+(`draft-leon-dnsop-signaling-zone-owner-intent`, §3). Two of
+its keys are flags addressed to every provider serving the
+zone: `pubkey` asks for the apex SIG(0) `KEY` at the
+`_sig0key` name, `pubcds` for the apex `CDS`/`CDNSKEY` at the
+`_dsboot` name. After each transfer, for each flag present,
+the server re-owns the matching apex RRset to the signal name
+under every apex NS of the customer zone and publishes it
+into whichever zone **this server holds as primary**. An NS
+served by somebody else is skipped. The write is
+change-gated, so an unchanged re-transfer does nothing.
+
+The alternative these flags replace is scanning: without an
+explicit signal a provider would have to trawl its customer
+zones for CDS-shaped content and guess that publication was
+intended (RFC 9615 §3.1). The flag makes the intent the zone
+owner's, stated once, in a record designed to carry it.
+
+Why an option, given the customer already asked? Because
+honouring the request writes records into a zone *you* are
+authoritative for. That is the nameserver operator's
+decision, so it is off by default. It changes nothing about
+parsing or serving HSYNCPARAM, which is unconditional, and it
+is unrelated to `multi-provider`: the role model those
+records carry -- `servers`, `signers`, `auditors`, delegated
+NS management -- belongs to
+[tdns-mp](../../tdns-mp/guide/README.md), and tdns-auth reads
+just these two flags. Configuration details are in
+[config-tdns-auth.md](config-tdns-auth.md#use-hsyncparam).
+
+The child side of the same mechanism needs no option: when a
+tdns-auth child's own bootstrap ceremony selects the `at-ns`
+method, publishing its KEY at the `_signal` name *is* the
+intent, and the method is offered in the first place only
+when at least one of the zone's nameservers is served here as
+primary.
+
 
 ## 2. DNS Transport Signaling
 
@@ -866,10 +937,14 @@ discover peer agents and compute provider groups.
 
 ### HSYNCPARAM (type 65286)
 
-Zone-wide multi-provider policy record. Carries key=value
-pairs controlling NS management, parent sync, signer
-authorization, etc. Defined and parsed in tdns; used by
-[tdns-mp](../../tdns-mp/guide/README.md).
+Zone-wide policy record for signaling zone-owner intent to
+DNS providers. Carries key=value pairs controlling NS
+management, parent sync, signer authorization, and
+publication of bootstrap records. Defined and parsed in
+tdns. The role and NS-management keys are used by
+[tdns-mp](../../tdns-mp/guide/README.md); the `pubkey` and
+`pubcds` flags are acted on by tdns-auth itself, on a
+secondary with `use-hsyncparam` (§1.8).
 
 ### JWK
 

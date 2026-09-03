@@ -1547,15 +1547,23 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// outside the FirstZoneLoad guard, so config-reload picks up
 		// changes to the 'delegationbackend' key.
 
-		// Republish-at-signal-names consumer (RFC 9615 at-NS bootstrap):
-		// every tdns-auth SECONDARY watches incoming transfers for an apex
-		// HSYNCPARAM pubkey/pubcds flag and republishes the customer's apex
-		// KEY / CDS(+CDNSKEY) under the _sig0key/_dsboot signal names owned
-		// by each NS, into whichever local primary zone the signal name
-		// falls in. Always-on, no option gate (see signal_republish.go).
-		// Registered only on first load (the OnZonePostRefresh slice would
-		// otherwise accumulate duplicate callbacks across reloads).
-		if Globals.App.Type == AppTypeAuth && zonetype == Secondary && zdp.FirstZoneLoad {
+		// Republish-at-signal-names consumer (RFC 9615 at-NS bootstrap): a
+		// SECONDARY carrying the use-hsyncparam option watches incoming
+		// transfers for an apex HSYNCPARAM pubkey/pubcds flag and republishes
+		// the customer's apex KEY / CDS(+CDNSKEY) under the _sig0key/_dsboot
+		// signal names owned by each NS, into whichever local primary zone the
+		// signal name falls in (see signal_republish.go).
+		//
+		// No app-type condition: the option is the operator's explicit intent,
+		// and any app type that can be secondary for a customer zone and
+		// primary for a nameserver's zone can do this job.
+		//
+		// The option itself is checked inside RepublishAtSignalNames, not here.
+		// Registration happens only on first load -- the OnZonePostRefresh
+		// slice would otherwise accumulate duplicate callbacks across reloads
+		// -- so gating registration would make use-hsyncparam a restart-only
+		// setting; zd.Options is replaced on reload, so the hook reads it live.
+		if zonetype == Secondary && zdp.FirstZoneLoad {
 			zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh, func(zd *ZoneData) {
 				zd.RepublishAtSignalNames()
 			})

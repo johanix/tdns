@@ -427,6 +427,12 @@ not sign.
 | `publish-zonemd` | Maintain the apex ZONEMD RRset (RFC 8976). See below |
 | `verify-zonemd` | Check a zone's apex ZONEMD before adopting it, on every load and inbound transfer. See below |
 
+**Zone-owner signaling**
+
+| Option | Effect |
+|--------|--------|
+| `use-hsyncparam` | Act on a transferred zone's apex HSYNCPARAM record: republish its bootstrap records at the RFC 9615 `_signal` names. **Secondary only.** See below |
+
 ### `publish-zonemd`
 
 The server computes the zone's message digest inside every publish, over the
@@ -605,6 +611,65 @@ dog @ns.example.com AXFR example.com. +tcp +zonemd
 which also exits non-zero on a zone that fails. `+zonemd` needs an AXFR: an
 IXFR returns a difference rather than a zone, and `dog` refuses instead of
 digesting one.
+
+### `use-hsyncparam`
+
+A zone owner signals what they want their DNS providers to do with the HSYNC and
+HSYNCPARAM records at their zone's apex
+(`draft-leon-dnsop-signaling-zone-owner-intent`). HSYNCPARAM is one record per
+zone carrying zone-wide policy as SVCB-shaped key/value pairs; two of its keys
+are flags addressed at every provider serving the zone:
+
+| Flag | Asks each provider to publish | At |
+|------|-------------------------------|-----|
+| `pubkey` | the zone's apex SIG(0) `KEY` | `_sig0key.<zone>._signal.<ns>` |
+| `pubcds` | the zone's apex `CDS` and `CDNSKEY` | `_dsboot.<zone>._signal.<ns>` |
+
+The point is *where* the record goes: not into the customer's zone, but into
+**the nameserver's own zone**, owned by whoever operates that nameserver. A
+parent or validator can then find the child's bootstrap data via the child's
+nameservers and DNSSEC-validate it under those nameservers' keys, which is what
+makes RFC 9615 bootstrapping and the SIG(0) bootstrap of
+`draft-ietf-dnsop-delegation-mgmt-via-ddns` work for a child that cannot sign
+yet. Without these flags a provider would have to *scan* customer zones for
+conventional content to guess the same intent.
+
+`use-hsyncparam` is your consent to play that role:
+
+```yaml
+zones:
+   - name:      customer.example.
+     type:      secondary
+     primaries: [ { addr: 192.0.2.1:53, key: NOKEY } ]
+     options:   [ use-hsyncparam ]
+```
+
+After each transfer of `customer.example.`, the server reads the apex
+HSYNCPARAM. For each flag present it takes the matching apex RRset, re-owns it
+to the signal name under each of the zone's apex NS names, and finds the local
+zone that owns that name. **It publishes only into a zone this server holds as
+primary** -- an NS whose zone is somebody else's, or which is not served here at
+all, is skipped and logged at debug. The update is change-gated: a re-transfer
+of unchanged data writes nothing.
+
+**It is a secondary-only option**, because the whole mechanism is driven by an
+inbound transfer of a zone somebody else owns. On a primary it is dropped with a
+warning and the zone keeps serving; a primary provisioned from a template
+refuses outright.
+
+**Why an option at all**, when the flag is already the zone owner's explicit
+request? Because acting on it writes records into a zone *you* are authoritative
+for, on the strength of a third party's signaling. That is the operator's call,
+not the customer's, so it is off by default. Turning it on does not make the
+HSYNCPARAM visible or parseable -- the record is always parsed and always
+served; the option only authorizes the publication.
+
+Removing the option stops future republishes but does not withdraw records
+already published at the signal names.
+
+This is separate from `multi-provider`. The full HSYNC role model -- `servers`,
+`signers`, `auditors`, delegated NS management, agent-to-agent synchronization
+-- lives in `tdns-mp`; `tdns-auth` reads exactly these two flags.
 
 **Multi-provider and catalog**
 
