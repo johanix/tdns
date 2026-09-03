@@ -443,6 +443,50 @@ type ZoneDsyncResponse struct {
 	UpdateResult UpdateResult
 }
 
+// ZoneParentSyncPost is the request type for /zone/parentsync (child-side operations).
+type ZoneParentSyncPost struct {
+	Command   string // status | bootstrap | roll-key | inquire | delta | sync
+	Zone      string
+	Algorithm uint8
+	Action    string // for roll-key
+	OldKeyID  uint16
+	NewKeyID  uint16
+	Scheme    string // for bootstrap: "update" | "notify" | "api"
+}
+
+type ZoneParentSyncResponse struct {
+	AppName       string
+	Time          time.Time
+	Status        string
+	Zone          string
+	Functions     map[string]string
+	Todo          []string
+	Msg           string
+	OldKeyID      uint16
+	NewKeyID      uint16
+	Error         bool
+	ErrorMsg      string
+	UpdateResult  UpdateResult
+	KeyID         uint16
+	KeyState      uint8
+	StateName     string
+	Authenticated bool
+}
+
+// ZoneChildSyncPost is the request type for /zone/childsync (parent-side operations).
+type ZoneChildSyncPost struct {
+	Command string // publish | unpublish
+	Zone    string
+}
+
+type ZoneChildSyncResponse struct {
+	AppName  string
+	Time     time.Time
+	Msg      string
+	Error    bool
+	ErrorMsg string
+}
+
 // DsyncApiCredentialPost manages credentials for the DSYNC API scheme
 // (docs/2026-08-11-dsync-api-scheme.md §10). This travels on the MANAGEMENT
 // API -- an operator surface -- and is not the DSYNC API itself, which is a

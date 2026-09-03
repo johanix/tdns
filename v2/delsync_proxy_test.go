@@ -12,17 +12,28 @@ import (
 // with a config error).
 
 func TestDelSyncProxyOptionMapping(t *testing.T) {
-	const name = "delegation-sync-proxy"
+	// New canonical name.
+	const canonical = "parentsync-proxy"
 
-	opt, ok := StringToZoneOption[name]
+	opt, ok := StringToZoneOption[canonical]
 	if !ok {
-		t.Fatalf("StringToZoneOption has no entry for %q", name)
+		t.Fatalf("StringToZoneOption has no entry for %q", canonical)
 	}
 	if opt != OptDelSyncProxy {
-		t.Fatalf("StringToZoneOption[%q] = %d, want OptDelSyncProxy (%d)", name, opt, OptDelSyncProxy)
+		t.Fatalf("StringToZoneOption[%q] = %d, want OptDelSyncProxy (%d)", canonical, opt, OptDelSyncProxy)
 	}
-	if got := ZoneOptionToString[OptDelSyncProxy]; got != name {
-		t.Fatalf("ZoneOptionToString[OptDelSyncProxy] = %q, want %q", got, name)
+	if got := ZoneOptionToString[OptDelSyncProxy]; got != canonical {
+		t.Fatalf("ZoneOptionToString[OptDelSyncProxy] = %q, want %q", got, canonical)
+	}
+
+	// Deprecated alias must still resolve.
+	const deprecated = "delegation-sync-proxy"
+	optAlias, ok := StringToZoneOption[deprecated]
+	if !ok {
+		t.Fatalf("StringToZoneOption has no entry for deprecated alias %q", deprecated)
+	}
+	if optAlias != OptDelSyncProxy {
+		t.Fatalf("StringToZoneOption[%q] (deprecated alias) = %d, want OptDelSyncProxy (%d)", deprecated, optAlias, OptDelSyncProxy)
 	}
 }
 
@@ -30,21 +41,39 @@ func TestDelSyncProxyOptionMapping(t *testing.T) {
 // not reject it as unknown. A zone with the option set should come back with
 // options[OptDelSyncProxy] == true and no ConfigError recorded for it.
 func TestParseZoneOptionsAcceptsDelSyncProxy(t *testing.T) {
+	// New canonical name.
 	zd := &ZoneData{ZoneName: "child.example."}
 	zconf := &ZoneConf{
 		Name:        "child.example.",
 		Type:        "secondary",
-		OptionsStrs: []string{"delegation-sync-proxy"},
+		OptionsStrs: []string{"parentsync-proxy"},
 	}
 
 	options := parseZoneOptions(nil, "child.example.", zconf, zd)
 
 	if !options[OptDelSyncProxy] {
-		t.Fatalf("parseZoneOptions did not enable OptDelSyncProxy; got %v", options)
+		t.Fatalf("parseZoneOptions did not enable OptDelSyncProxy with canonical name; got %v", options)
 	}
 	for _, e := range zd.ErrorList() {
 		if e.Type == ConfigError {
 			t.Fatalf("unexpected ConfigError after parsing a valid option: %q", e.Msg)
+		}
+	}
+
+	// Deprecated alias: still accepted (no ConfigError), but a warning is expected.
+	zdAlias := &ZoneData{ZoneName: "child2.example."}
+	zconfAlias := &ZoneConf{
+		Name:        "child2.example.",
+		Type:        "secondary",
+		OptionsStrs: []string{"delegation-sync-proxy"},
+	}
+	optionsAlias := parseZoneOptions(nil, "child2.example.", zconfAlias, zdAlias)
+	if !optionsAlias[OptDelSyncProxy] {
+		t.Fatalf("parseZoneOptions did not enable OptDelSyncProxy with deprecated alias; got %v", optionsAlias)
+	}
+	for _, e := range zdAlias.ErrorList() {
+		if e.Type == ConfigError {
+			t.Fatalf("unexpected ConfigError after parsing deprecated alias: %q", e.Msg)
 		}
 	}
 }

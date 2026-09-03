@@ -11,7 +11,6 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // Note that there are two types of determining whether delegation synchronization is needed:
@@ -258,83 +257,6 @@ func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, 
 	}
 
 	return nil
-}
-
-// Only used from CLI (tdns-cli ddns sync)
-// Returns unsynched bool, adds, removes []dns.RR, error
-
-// XXX: This requires lots of recursive queries and does not take advantage of the zonedata struct
-//      in tdns-auth most likely having cached most of this information. Since the only reason for
-//      the tdns-cli tool is to interact with tdns-auth, it really should leverage from that rather
-//      than just do everything in the CLI.
-
-func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, []dns.RR, []dns.RR, error) {
-
-	var differ bool
-	var adds, removes []dns.RR
-
-	if viper.GetBool("childsync.update-ns") {
-		var err error
-		differ, adds, removes, err = ComputeRRDiff(childpri, parpri,
-			Globals.Zonename, dns.TypeNS)
-		if err != nil {
-			return false, nil, nil, fmt.Errorf("computing NS diff: %w", err)
-		}
-	} else {
-		fmt.Printf("*** Note: configured NOT to update NS RRset.\n")
-	}
-
-	child_ns_inb, parent_ns_inb, err := ComputeBailiwickNS(childpri, parpri,
-		Globals.Zonename)
-	if err != nil {
-		return false, nil, nil, fmt.Errorf("computing bailiwick NS: %w", err)
-	}
-	for _, ns := range child_ns_inb {
-		fmt.Printf("Child in-bailiwick NS: %s\n", ns)
-	}
-	for _, ns := range parent_ns_inb {
-		fmt.Printf("Parent in-bailiwick NS: %s\n", ns)
-	}
-
-	for _, ns := range child_ns_inb {
-		if viper.GetBool("childsync.update-a") {
-			fmt.Printf("Comparing A glue for child NS %s:\n", ns)
-			gluediff, a_glue_adds, a_glue_removes, err := ComputeRRDiff(childpri,
-				parpri, ns, dns.TypeA)
-			if err != nil {
-				return false, nil, nil, fmt.Errorf("computing A glue diff for %s: %w", ns, err)
-			}
-			if gluediff {
-				differ = true
-				removes = append(removes, a_glue_removes...)
-				adds = append(adds, a_glue_adds...)
-			}
-		} else {
-			fmt.Printf("*** Note: configured NOT to update A glue.\n")
-		}
-
-		if viper.GetBool("childsync.update-aaaa") {
-			fmt.Printf("Comparing AAAA glue for child NS %s:\n", ns)
-			gluediff, aaaa_glue_adds, aaaa_glue_removes, err := ComputeRRDiff(childpri,
-				parpri, ns, dns.TypeAAAA)
-			if err != nil {
-				return false, nil, nil, fmt.Errorf("computing AAAA glue diff for %s: %w", ns, err)
-			}
-			if gluediff {
-				differ = true
-				removes = append(removes, aaaa_glue_removes...)
-				adds = append(adds, aaaa_glue_adds...)
-			}
-		} else {
-			fmt.Printf("*** Note: configured NOT to update AAAA glue.\n")
-		}
-	}
-
-	if !differ {
-		fmt.Printf("Parent delegation data is in sync with child. No update needed.\n")
-		return false, []dns.RR{}, []dns.RR{}, nil
-	}
-	return true, adds, removes, nil
 }
 
 // XXX: This is similar to ChildDelegationDataUnsynched, but instead of querying the

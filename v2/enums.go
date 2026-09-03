@@ -110,8 +110,8 @@ const (
 const _ uint = uint(TdnsZoneOptionMax) - uint(optZoneOptionTdnsSentinel-1)
 
 var ZoneOptionToString = map[ZoneOption]string{
-	OptDelSyncParent:     "delegation-sync-parent",
-	OptDelSyncChild:      "delegation-sync-child",
+	OptDelSyncParent:     "childsync",
+	OptDelSyncChild:      "parentsync",
 	OptAllowUpdates:      "allow-updates",
 	OptAllowChildUpdates: "allow-child-updates",
 	OptAllowEdits:        "allow-edits", // Dynamically et if app=combiner and zone contains a HSYNC RRset
@@ -132,7 +132,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptCatalogMemberAutoCreate: "catalog-member-auto-create",
 	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
 	OptMultiSigner:             "multi-signer",
-	OptDelSyncProxy:            "delegation-sync-proxy",
+	OptDelSyncProxy:            "parentsync-proxy",
 	OptAllowApiUpdates:         "allow-api-updates",
 	OptOnConflictDBWins:        "on-conflict-db-wins",
 	OptOnConflictZonefileWins:  "on-conflict-zonefile-wins",
@@ -143,8 +143,10 @@ var ZoneOptionToString = map[ZoneOption]string{
 }
 
 var StringToZoneOption = map[string]ZoneOption{
-	"delegation-sync-parent":     OptDelSyncParent,
-	"delegation-sync-child":      OptDelSyncChild,
+	"childsync":                  OptDelSyncParent,
+	"parentsync":                 OptDelSyncChild,
+	"delegation-sync-parent":     OptDelSyncParent, // deprecated alias
+	"delegation-sync-child":      OptDelSyncChild,  // deprecated alias
 	"allow-updates":              OptAllowUpdates,
 	"allow-child-updates":        OptAllowChildUpdates,
 	"allow-edits":                OptAllowEdits,
@@ -164,7 +166,8 @@ var StringToZoneOption = map[string]ZoneOption{
 	"catalog-member-auto-create": OptCatalogMemberAutoCreate,
 	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
 	"multi-signer":               OptMultiSigner,
-	"delegation-sync-proxy":      OptDelSyncProxy,
+	"parentsync-proxy":           OptDelSyncProxy,
+	"delegation-sync-proxy":      OptDelSyncProxy, // deprecated alias
 	"allow-api-updates":          OptAllowApiUpdates,
 	"on-conflict-db-wins":        OptOnConflictDBWins,
 	"on-conflict-zonefile-wins":  OptOnConflictZonefileWins,
@@ -172,6 +175,16 @@ var StringToZoneOption = map[string]ZoneOption{
 	"verify-zonemd":              OptVerifyZonemd,
 	"request-ixfr":               OptRequestIxfr,
 	"no-request-ixfr":            OptNoRequestIxfr,
+}
+
+// deprecatedZoneOptionNames maps old option spellings to the canonical name
+// ZoneOptionToString now renders. Parse still accepts the old names (they
+// sit in StringToZoneOption); the parser logs a deprecation warning and
+// names the replacement. Removal of the aliases is a later change.
+var deprecatedZoneOptionNames = map[string]string{
+	"delegation-sync-child":  "parentsync",
+	"delegation-sync-parent": "childsync",
+	"delegation-sync-proxy":  "parentsync-proxy",
 }
 
 type ImrOption uint8

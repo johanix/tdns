@@ -4,8 +4,6 @@
 package cli
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -203,31 +201,66 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 	return c
 }
 
+// parentSideCommands are dsync commands that operate on the parent (childsync) side.
+var parentSideCommands = map[string]bool{
+	"publish-dsync-rrset":   true,
+	"unpublish-dsync-rrset": true,
+}
+
+// SendDsyncCommand is a hidden-alias helper: child-side commands post to
+// /zone/parentsync; parent-side commands post to /zone/childsync.
 func SendDsyncCommand(api *tdns.ApiClient, data tdns.ZoneDsyncPost) (tdns.ZoneDsyncResponse, error) {
-	var cr tdns.ZoneDsyncResponse
-	bytebuf := new(bytes.Buffer)
-	json.NewEncoder(bytebuf).Encode(data)
-
-	status, buf, err := api.Post("/zone/dsync", bytebuf.Bytes())
-	if err != nil {
-		log.Println("Error from Api Post:", err)
-		return cr, fmt.Errorf("error from api post: %v", err)
-	}
-	// Only print status if it's not 200 (success) - useful for debugging errors
-	if status != 200 && tdns.Globals.Verbose {
-		fmt.Printf("Status: %d\n", status)
-	}
-
-	err = json.Unmarshal(buf, &cr)
-	if err != nil {
-		return cr, fmt.Errorf("error from unmarshal: %v", err)
-	}
-
-	if cr.Error {
-		return cr, fmt.Errorf("error from server: %s", cr.ErrorMsg)
+	if parentSideCommands[data.Command] {
+		// Map to childsync
+		csReq := tdns.ZoneChildSyncPost{
+			Command: map[string]string{
+				"publish-dsync-rrset":   "publish",
+				"unpublish-dsync-rrset": "unpublish",
+			}[data.Command],
+			Zone: data.Zone,
+		}
+		csResp, err := SendChildSyncCommand(api, csReq)
+		return tdns.ZoneDsyncResponse{
+			AppName:  csResp.AppName,
+			Time:     csResp.Time,
+			Msg:      csResp.Msg,
+			Error:    csResp.Error,
+			ErrorMsg: csResp.ErrorMsg,
+		}, err
 	}
 
-	return cr, nil
+	// Child-side: map to parentsync
+	psCmd := data.Command
+	switch psCmd {
+	case "bootstrap-sig0-key":
+		psCmd = "bootstrap"
+	case "roll-sig0-key":
+		psCmd = "roll-key"
+	}
+	psReq := tdns.ZoneParentSyncPost{
+		Command:   psCmd,
+		Zone:      data.Zone,
+		Algorithm: data.Algorithm,
+		Action:    data.Action,
+		OldKeyID:  data.OldKeyID,
+		NewKeyID:  data.NewKeyID,
+		Scheme:    "update",
+	}
+	psResp, err := SendParentSyncCommand(api, psReq)
+	return tdns.ZoneDsyncResponse{
+		AppName:      psResp.AppName,
+		Time:         psResp.Time,
+		Status:       psResp.Status,
+		Zone:         psResp.Zone,
+		Functions:    psResp.Functions,
+		Todo:         psResp.Todo,
+		Msg:          psResp.Msg,
+		OldKeyID:     psResp.OldKeyID,
+		NewKeyID:     psResp.NewKeyID,
+		Error:        psResp.Error,
+		ErrorMsg:     psResp.ErrorMsg,
+		UpdateResult: psResp.UpdateResult,
+	}, err
 }
 
 func PrintUpdateResult(ur tdns.UpdateResult) {

@@ -70,9 +70,9 @@ var originationAPICommands = map[string]bool{
 	"policy-set":    true,
 	"change-policy": true,
 	"policy-reset":  true,
-	// /zone/dsync — publishes the _dsync DSYNC RRset into the zone
-	"publish-dsync-rrset":   true,
-	"unpublish-dsync-rrset": true,
+	// /zone/childsync — publishes the _dsync DSYNC RRset into the zone
+	"publish":   true,
+	"unpublish": true,
 }
 
 // zoneOriginationRefusal returns the operator-facing refusal message for an

@@ -39,8 +39,9 @@ func SendAgentMgmtCmd(req *tdns.AgentMgmtPost) (*tdns.AgentMgmtResponse, error) 
 }
 
 var agentParentSyncCmd = &cobra.Command{
-	Use:   "parentsync",
-	Short: "Parent delegation sync commands",
+	Use:    "parentsync",
+	Short:  "Parent delegation sync commands",
+	Hidden: true,
 }
 
 var agentParentSyncStatusCmd = &cobra.Command{
@@ -50,24 +51,23 @@ var agentParentSyncStatusCmd = &cobra.Command{
 		PrepArgs(cmd, "zonename")
 		zone := cmd.Flag("zone").Value.String()
 
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
-			Command: "parentsync-status",
-			Zone:    tdns.ZoneName(zone),
+		api, err := GetApiClient("agent", true)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		resp, err := SendParentSyncCommand(api, tdns.ZoneParentSyncPost{
+			Command: "status",
+			Zone:    zone,
 		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
-		if amr.Error {
-			log.Fatalf("Error from agent: %s", amr.ErrorMsg)
+		if resp.Error {
+			log.Fatalf("Error from server: %s", resp.ErrorMsg)
 		}
-
-		dataMap, ok := amr.Data.(map[string]interface{})
-		if !ok {
-			fmt.Printf("Parent Sync Status for %s: no data available\n", zone)
-			return
+		if resp.Msg != "" {
+			fmt.Printf("%s\n", resp.Msg)
 		}
-
-		displayParentSyncStatus(zone, dataMap)
 	},
 }
 
@@ -78,18 +78,22 @@ var agentParentSyncBootstrapCmd = &cobra.Command{
 		PrepArgs(cmd, "zonename")
 		zone := cmd.Flag("zone").Value.String()
 
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
-			Command: "parentsync-bootstrap",
-			Zone:    tdns.ZoneName(zone),
+		api, err := GetApiClient("agent", true)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		resp, err := SendParentSyncCommand(api, tdns.ZoneParentSyncPost{
+			Command: "bootstrap",
+			Zone:    zone,
+			Scheme:  "update",
 		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
-		if amr.Error {
-			log.Fatalf("Error from agent: %s", amr.ErrorMsg)
+		if resp.Error {
+			log.Fatalf("Error from server: %s", resp.ErrorMsg)
 		}
-
-		fmt.Printf("%s\n", amr.Msg)
+		fmt.Printf("%s\n", resp.Msg)
 	},
 }
 
@@ -105,24 +109,28 @@ var agentParentSyncInquireUpdateCmd = &cobra.Command{
 		PrepArgs(cmd, "zonename")
 		zone := cmd.Flag("zone").Value.String()
 
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
-			Command: "parentsync-inquire",
-			Zone:    tdns.ZoneName(zone),
+		api, err := GetApiClient("agent", true)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		resp, err := SendParentSyncCommand(api, tdns.ZoneParentSyncPost{
+			Command: "inquire",
+			Zone:    zone,
 		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
-		if amr.Error {
-			log.Fatalf("Error from agent: %s", amr.ErrorMsg)
+		if resp.Error {
+			log.Fatalf("Error from server: %s", resp.ErrorMsg)
 		}
 
-		dataMap, ok := amr.Data.(map[string]interface{})
-		if !ok {
-			fmt.Printf("%s\n", amr.Msg)
-			return
+		d := map[string]interface{}{
+			"zone":       zone,
+			"keyid":      float64(resp.KeyID),
+			"state_name": resp.StateName,
+			"state":      float64(resp.KeyState),
 		}
-
-		displayKeyStateInquiry(dataMap)
+		displayKeyStateInquiry(d)
 	},
 }
 

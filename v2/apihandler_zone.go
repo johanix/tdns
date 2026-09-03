@@ -12,6 +12,7 @@ import (
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -965,6 +966,242 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	}
 
 	return policyResetReport(zd.ZoneName, configName, pol.Mode, kskChanged, zskChanged, newrrsigs), nil
+}
+
+func APIzoneParentSync(ctx context.Context, app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		decoder := json.NewDecoder(r.Body)
+		var req ZoneParentSyncPost
+		if err := decoder.Decode(&req); err != nil {
+			lgApi.Warn("error decoding request", "handler", "zoneParentSync", "err", err)
+			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		lgApi.Debug("received /zone/parentsync request", "cmd", req.Command, "from", r.RemoteAddr)
+
+		resp := ZoneParentSyncResponse{
+			AppName:   app.Name,
+			Time:      time.Now(),
+			Functions: map[string]string{},
+		}
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(resp); err != nil {
+				lgApi.Error("json encode failed", "handler", "zoneParentSync", "err", err)
+			}
+		}()
+
+		zd, exist := Zones.Get(req.Zone)
+		if !exist {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Zone %q is unknown", req.Zone)
+			return
+		}
+
+		// Gate: zone must have exactly one of parentsync or parentsync-proxy.
+		hasParentSync := zd.Options[OptDelSyncChild]
+		hasProxy := zd.Options[OptDelSyncProxy]
+		if !hasParentSync && !hasProxy {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Zone %q does not have parentsync or parentsync-proxy option", zd.ZoneName)
+			return
+		}
+		if hasParentSync && hasProxy {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Zone %q has both parentsync and parentsync-proxy set (mutually exclusive)", zd.ZoneName)
+			return
+		}
+
+		var err error
+		if zd.Parent == "" {
+			if Globals.ImrEngine == nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Zone %q: ImrEngine not active. Cannot determine parent zone", zd.ZoneName)
+				return
+			}
+			zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+		}
+
+		apex, err := zd.GetOwner(zd.ZoneName)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return
+		}
+
+		switch req.Command {
+		case "status":
+			keyrrset, err := zd.GetRRset(zd.ZoneName, dns.TypeKEY)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			resp.Msg = fmt.Sprintf("Zone %s: current delegation sync status", req.Zone)
+			if keyrrset != nil && len(keyrrset.RRs) > 0 {
+				resp.Functions["SIG(0) key publication"] = "done"
+			} else if zd.ZoneType == Secondary {
+				if zd.Options[OptDelSyncChild] {
+					resp.Functions["SIG(0) key publication"] = "not done; KEY record must be added to zone at primary server"
+					resp.Todo = append(resp.Todo, fmt.Sprintf("Add this KEY record to the %s zone at primary server:\n%s", zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs[0].String()))
+				} else {
+					resp.Functions["SIG(0) key publication"] = "disabled by policy (parentsync=false)"
+				}
+			} else if zd.ZoneType == Primary {
+				if zd.Options[OptAllowUpdates] {
+					resp.Functions["SIG(0) key publication"] = "failed"
+				} else {
+					resp.Functions["SIG(0) key publication"] = "disabled by policy (allow-updates=false)"
+				}
+			}
+			resp.Functions["Latest delegation sync transaction"] = "successful"
+			resp.Functions["Time of latest delegation sync"] = "2024-05-01 12:00:00"
+			resp.Functions["Current delegation status"] = fmt.Sprintf("parent %q is in sync with %q (the child)", zd.Parent, zd.ZoneName)
+
+		case "bootstrap":
+			switch req.Scheme {
+			case "update":
+				resp.Msg, resp.UpdateResult, err = zd.BootstrapSig0KeyWithParent(ctx, req.Algorithm)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+					return
+				}
+			case "notify":
+				resp.Msg = fmt.Sprintf("Zone %s: bootstrap via NOTIFY scheme: publish CDS/CSYNC RRsets and wait for the parent to pick them up", zd.ZoneName)
+			case "api":
+				resp.Msg = fmt.Sprintf("Zone %s: bootstrap via API scheme: use the parent's DSYNC API to submit the delegation data directly", zd.ZoneName)
+			default:
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("unknown bootstrap scheme %q (valid: update, notify, api)", req.Scheme)
+			}
+
+		case "roll-key":
+			switch req.Action {
+			case "complete":
+				resp.Msg = fmt.Sprintf("Zone %s: requesting rollover of the active SIG(0) key with parent", zd.ZoneName)
+			case "add":
+				resp.Msg = fmt.Sprintf("Zone %s: requesting rollover of the active SIG(0) key with parent: ADDING NEW KEY", zd.ZoneName)
+			case "remove":
+				resp.Msg = fmt.Sprintf("Zone %s: requesting rollover of the active SIG(0) key with parent: REMOVING OLD KEY", zd.ZoneName)
+			case "update-local":
+				resp.Msg = fmt.Sprintf("Zone %s: requesting rollover of the active SIG(0) key with parent: UPDATING LOCAL KEYSTORE", zd.ZoneName)
+			}
+			resp.Msg, resp.OldKeyID, resp.NewKeyID, resp.UpdateResult, err = zd.RolloverSig0KeyWithParent(ctx, req.Algorithm, req.Action)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+
+		case "inquire":
+			sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+			if err != nil || sak == nil || len(sak.Keys) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Zone %q: no active SIG(0) key found", zd.ZoneName)
+				return
+			}
+			key := sak.Keys[0]
+			keyid := key.KeyId
+			ks, authenticated, err := QueryParentKeyState(ctx, kdb, Globals.ImrEngine, zd.ZoneName, keyid)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("KeyState inquiry failed: %v", err)
+				return
+			}
+			resp.KeyID = keyid
+			resp.KeyState = ks.KeyState
+			resp.StateName = edns0.KeyStateToString(ks.KeyState)
+			resp.Authenticated = authenticated
+			resp.Msg = fmt.Sprintf("Zone %s: KeyID=%d state=%s (code %d) authenticated=%v",
+				zd.ZoneName, keyid, resp.StateName, resp.KeyState, authenticated)
+
+		default:
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("unknown parentsync command: %s", req.Command)
+		}
+	}
+}
+
+func APIzoneChildSync(app *AppDetails) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		decoder := json.NewDecoder(r.Body)
+		var req ZoneChildSyncPost
+		if err := decoder.Decode(&req); err != nil {
+			lgApi.Warn("error decoding request", "handler", "zoneChildSync", "err", err)
+			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		lgApi.Debug("received /zone/childsync request", "cmd", req.Command, "from", r.RemoteAddr)
+
+		resp := ZoneChildSyncResponse{
+			AppName: app.Name,
+			Time:    time.Now(),
+		}
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(resp); err != nil {
+				lgApi.Error("json encode failed", "handler", "zoneChildSync", "err", err)
+			}
+		}()
+
+		zd, exist := Zones.Get(req.Zone)
+		if !exist {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Zone %q is unknown", req.Zone)
+			return
+		}
+
+		// Gate: zone must have childsync option.
+		if !zd.Options[OptDelSyncParent] {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Zone %q does not have the childsync option", zd.ZoneName)
+			return
+		}
+
+		// Origination gate: publish/unpublish write into the zone.
+		if originationAPICommands[req.Command] {
+			if msg := zoneOriginationRefusal(zd, req.Command); msg != "" {
+				resp.Error = true
+				resp.ErrorMsg = msg
+				return
+			}
+		}
+
+		var err error
+		switch req.Command {
+		case "publish":
+			resp.Msg = fmt.Sprintf("Zone %s: publishing DSYNC RRset", zd.ZoneName)
+			err = zd.PublishDsyncRRs()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+
+		case "unpublish":
+			resp.Msg = fmt.Sprintf("Zone %s: unpublishing DSYNC RRset", zd.ZoneName)
+			err = zd.UnpublishDsyncRRs()
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+
+		default:
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("unknown childsync command: %s", req.Command)
+		}
+	}
 }
 
 func APIzoneDsync(ctx context.Context, app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
