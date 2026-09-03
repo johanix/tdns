@@ -1,7 +1,7 @@
 # DSYNC API: client certificates as an alternative to username + key
 
-**Status:** open question, no work planned. Recorded so the reasoning is not
-re-derived later.
+**Status:** implemented. See
+`docs/2026-09-01-dsync-api-client-cert-auth-implementation-plan.md`.
 
 ## How it works today
 

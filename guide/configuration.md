@@ -145,7 +145,7 @@ under `dnssec:` as `dnssec.policies:` (restructure 2026-06-16) key=dnssecpolicie
 Both lines are worth grepping for after any config change.
 
 **Some blocks are read outside the struct decoder.** A handful of top-level
-blocks (`delegationsync:`, `childsync:`, `scanner:`, `server:`,
+blocks (`delegationsync:`, `scanner:`, `server:`,
 `resignerengine:`, `common:`) are read key-by-key rather than decoded into the
 `Config` struct. They work, but because the struct decoder does not recognize
 them they also appear in that "unknown config keys" warning at startup. That is

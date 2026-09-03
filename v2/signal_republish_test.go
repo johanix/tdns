@@ -5,7 +5,11 @@
 package tdns
 
 import (
+	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -44,6 +48,16 @@ func newMapZone(name string, ztype ZoneType, owners map[string][]dns.RR) *ZoneDa
 	// Publish the initial snapshot so post-cutover readers (GetOwner, etc.) see
 	// the data, mirroring what the refresh engine does for real zones.
 	zd.InstallInitialSnapshot()
+	return zd
+}
+
+// newOptedInChild builds a secondary customer zone whose operator has enabled
+// use-hsyncparam -- the transfer-driven republish does nothing without it, so
+// every republish test needs it. The tests that exercise the option gate
+// itself construct their zone with newMapZone and set (or omit) it in view.
+func newOptedInChild(name string, owners map[string][]dns.RR) *ZoneData {
+	zd := newMapZone(name, Secondary, owners)
+	zd.Options[OptUseHsyncparam] = true
 	return zd
 }
 
@@ -188,7 +202,7 @@ func signalTarget(name string, owners map[string][]dns.RR) (*ZoneData, chan Upda
 }
 
 func TestRepublishPubkey_PublishesToLocalPrimary(t *testing.T) {
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey"),
 			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
@@ -233,7 +247,7 @@ func TestRepublishPubkey_PublishesToLocalPrimary(t *testing.T) {
 }
 
 func TestRepublishPubcds_PublishesCDSAndCDNSKEY(t *testing.T) {
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN HSYNCPARAM pubcds"),
 			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
@@ -276,7 +290,7 @@ func TestRepublishPubcds_PublishesCDSAndCDNSKEY(t *testing.T) {
 }
 
 func TestRepublish_SkipsNonPrimaryTarget(t *testing.T) {
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey"),
 			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
@@ -296,7 +310,7 @@ func TestRepublish_SkipsNonPrimaryTarget(t *testing.T) {
 }
 
 func TestRepublish_SkipsNSWithNoLocalZone(t *testing.T) {
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey"),
 			mustRR(t, "example. 3600 IN NS ns.elsewhere.net."),
@@ -311,7 +325,7 @@ func TestRepublish_SkipsNSWithNoLocalZone(t *testing.T) {
 
 func TestRepublish_ChangeGateNoOpWhenAlreadyPublished(t *testing.T) {
 	owner := "_sig0key.example._signal.ns.foobar.com."
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey"),
 			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
@@ -333,7 +347,7 @@ func TestRepublish_ChangeGateNoOpWhenAlreadyPublished(t *testing.T) {
 
 func TestRepublish_FlagsGatedIndependently(t *testing.T) {
 	pubkeyOwner := "_sig0key.example._signal.ns.foobar.com."
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey pubcds"),
 			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
@@ -369,7 +383,7 @@ func TestRepublish_FlagsGatedIndependently(t *testing.T) {
 }
 
 func TestRepublish_NoHsyncparamIsNoOp(t *testing.T) {
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
 			mustRR(t, "example. 3600 IN KEY 256 3 15 dGVzdA=="),
@@ -382,5 +396,242 @@ func TestRepublish_NoHsyncparamIsNoOp(t *testing.T) {
 
 	if urs := drainUpdateQ(q); len(urs) != 0 {
 		t.Fatalf("expected no-op without HSYNCPARAM, got %d updates", len(urs))
+	}
+}
+
+// The option gate. Everything the republish needs is present -- pubkey flag,
+// an apex KEY, an NS whose signal name falls in a local primary zone -- and
+// the ONLY thing missing is the operator's use-hsyncparam. Nothing may be
+// written: publishing into our own primary zone on the strength of a customer
+// zone's signaling is exactly what the option authorizes.
+func TestRepublish_WithoutUseHsyncparamIsNoOp(t *testing.T) {
+	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+		"example.": {
+			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey pubcds"),
+			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
+			mustRR(t, "example. 3600 IN KEY 256 3 15 dGVzdGtleQ=="),
+			mustRR(t, "example. 3600 IN CDS 12345 15 2 0102"),
+		},
+	})
+	if child.Options[OptUseHsyncparam] {
+		t.Fatal("newMapZone must not enable use-hsyncparam; the gate would not be under test")
+	}
+	target, q := signalTarget("foobar.com.", nil)
+	registerZones(t, child, target)
+
+	child.RepublishAtSignalNames()
+
+	if urs := drainUpdateQ(q); len(urs) != 0 {
+		t.Fatalf("republished without use-hsyncparam: %d updates", len(urs))
+	}
+
+	// And the same zone with the option on does publish -- so the no-op above
+	// is the gate, not a broken fixture.
+	child.Options[OptUseHsyncparam] = true
+	child.RepublishAtSignalNames()
+	if urs := drainUpdateQ(q); len(urs) != 2 {
+		t.Fatalf("expected 2 updates (pubkey + pubcds) once opted in, got %d", len(urs))
+	}
+}
+
+func TestSignalOwnerName(t *testing.T) {
+	if got := signalOwnerName(signalPrefixSig0Key, "child.example.", "ns.provider.example."); got != "_sig0key.child.example._signal.ns.provider.example." {
+		t.Fatalf("sig0key: %q", got)
+	}
+	// Unqualified inputs are qualified rather than producing a broken name.
+	if got := signalOwnerName(signalPrefixDsboot, "child.example", "ns.provider.example"); got != "_dsboot.child.example._signal.ns.provider.example." {
+		t.Fatalf("dsboot: %q", got)
+	}
+}
+
+// ackUpdates drains q in the background, recording each request and answering
+// its Resp (if any) with the given result, until the test ends. It does not
+// apply anything to the zone, so the change gate does not see its "applies".
+func ackUpdates(t *testing.T, q chan UpdateRequest, res ZoneUpdateResult) *[]UpdateRequest {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []UpdateRequest
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case ur := <-q:
+				mu.Lock()
+				seen = append(seen, ur)
+				mu.Unlock()
+				if ur.Resp != nil {
+					ur.Resp <- res
+				}
+			}
+		}
+	}()
+	// Callers read after the publish returned, which happens after the ack,
+	// so the slice is complete by then; the mutex covers the append.
+	return &seen
+}
+
+// D-6: when the child selects at-ns, its keystore KEY is published at
+// _sig0key.<child>._signal.<ns> for every NS whose signal name is in a local
+// primary zone. The source is the keystore key, not the apex RRset, so this
+// works before the asynchronous apex publication has landed.
+func TestPublishSig0KeyAtSignalNames(t *testing.T) {
+	// signalTarget gives child.example. an in-bailiwick NS (ns.child.example.),
+	// whose signal name the zone itself owns; the second NS lives nowhere we serve.
+	child, q := signalTarget("child.example.", map[string][]dns.RR{
+		"child.example.": {mustRR(t, "child.example. 3600 IN NS ns.elsewhere.net.")},
+	})
+	registerZones(t, child)
+	seen := ackUpdates(t, q, ZoneUpdateResult{Applied: true})
+
+	key := mustRR(t, "child.example. 3600 IN KEY 256 3 15 dGVzdGtleQ==")
+	if n := child.publishSig0KeyAtSignalNames(context.Background(), []dns.RR{key}); n != 1 {
+		t.Fatalf("satisfied = %d, want 1 (one local signal name, one elsewhere)", n)
+	}
+	urs := *seen
+	if len(urs) != 1 {
+		t.Fatalf("expected 1 UpdateRequest, got %d", len(urs))
+	}
+	ur := urs[0]
+	if ur.Cmd != "ZONE-UPDATE" || ur.ZoneName != "child.example." || !ur.InternalUpdate || ur.Resp == nil {
+		t.Fatalf("unexpected UpdateRequest (a confirmed publish carries Resp): %+v", ur)
+	}
+	owner := "_sig0key.child.example._signal.ns.child.example."
+	var sawDelete, sawAdd bool
+	for _, rr := range ur.Actions {
+		if rr.Header().Name != owner {
+			t.Errorf("action owner = %q, want %q", rr.Header().Name, owner)
+		}
+		switch rr.Header().Class {
+		case dns.ClassANY:
+			sawDelete = true
+		case dns.ClassINET:
+			k, ok := rr.(*dns.KEY)
+			if !ok || k.PublicKey != "dGVzdGtleQ==" {
+				t.Errorf("add action = %s, want the keystore KEY", rr)
+			}
+			sawAdd = true
+		}
+	}
+	if !sawDelete || !sawAdd {
+		t.Errorf("expected delete-RRset + add (delete=%v add=%v)", sawDelete, sawAdd)
+	}
+
+	// The fake updater acknowledged without applying anything to the zone,
+	// so the change gate (which reads zone data) still sees no KEY and a
+	// second publish enqueues again. The gate itself is exercised by
+	// TestRepublish_ChangeGateNoOpWhenAlreadyPublished, whose zone is seeded
+	// with the record.
+	if n := child.publishSig0KeyAtSignalNames(context.Background(), []dns.RR{key}); n != 1 {
+		t.Fatalf("second publish satisfied = %d, want 1", n)
+	}
+	if len(*seen) != 2 {
+		t.Fatalf("expected a second request against an unapplied zone, got %d", len(*seen))
+	}
+}
+
+// A confirmed publish counts only an APPLIED update: a refused apply, or an
+// updater that never answers, is "not published" -- the at-ns bootstrap then
+// errors instead of sending a ceremony the parent cannot verify.
+func TestPublishSig0KeyAtSignalNamesRequiresApply(t *testing.T) {
+	key := mustRR(t, "child.example. 3600 IN KEY 256 3 15 dGVzdGtleQ==")
+
+	t.Run("refused apply", func(t *testing.T) {
+		child, q := signalTarget("child.example.", nil)
+		registerZones(t, child)
+		ackUpdates(t, q, ZoneUpdateResult{Err: errors.New("zone updater says no")})
+		if n := child.publishSig0KeyAtSignalNames(context.Background(), []dns.RR{key}); n != 0 {
+			t.Fatalf("satisfied = %d, want 0 for a refused apply", n)
+		}
+	})
+
+	t.Run("updater never answers", func(t *testing.T) {
+		prev := signalPublishApplyTimeout
+		signalPublishApplyTimeout = 50 * time.Millisecond
+		t.Cleanup(func() { signalPublishApplyTimeout = prev })
+		child, q := signalTarget("child.example.", nil)
+		registerZones(t, child)
+		go func() { <-q }() // take the request, never respond
+		if n := child.publishSig0KeyAtSignalNames(context.Background(), []dns.RR{key}); n != 0 {
+			t.Fatalf("satisfied = %d, want 0 on apply timeout", n)
+		}
+	})
+
+	t.Run("nil ctx only enqueues", func(t *testing.T) {
+		child, q := signalTarget("child.example.", nil)
+		registerZones(t, child)
+		if n := child.publishAtSignalNames(nil, "test", signalPrefixSig0Key, []uint16{dns.TypeKEY}, []dns.RR{key}, child.apexNSNames(), false); n != 1 {
+			t.Fatalf("fire-and-forget satisfied = %d, want 1", n)
+		}
+		urs := drainUpdateQ(q)
+		if len(urs) != 1 || urs[0].Resp != nil {
+			t.Fatalf("fire-and-forget must enqueue exactly one request without Resp: %+v", urs)
+		}
+	})
+}
+
+// After a SIG(0) rollover the signal names a bootstrap once populated are
+// refreshed with the new key; ones never populated are left alone.
+func TestRefreshSig0KeyAtSignalNamesOnlyExisting(t *testing.T) {
+	owner := "_sig0key.child.example._signal.ns.child.example."
+	child, q := signalTarget("child.example.", map[string][]dns.RR{
+		owner: {mustRR(t, owner+" 3600 IN KEY 256 3 15 b2xk")},
+	})
+	fresh, q2 := signalTarget("fresh.example.", nil)
+	registerZones(t, child, fresh)
+	seen := ackUpdates(t, q, ZoneUpdateResult{Applied: true})
+
+	if n := child.refreshSig0KeyAtSignalNames(context.Background(), []dns.RR{mustRR(t, "child.example. 3600 IN KEY 256 3 15 bmV3")}); n != 1 {
+		t.Fatalf("refresh satisfied = %d, want 1", n)
+	}
+	urs := *seen
+	if len(urs) != 1 {
+		t.Fatalf("expected 1 UpdateRequest, got %d", len(urs))
+	}
+	var sawNew bool
+	for _, rr := range urs[0].Actions {
+		if k, ok := rr.(*dns.KEY); ok && rr.Header().Class == dns.ClassINET && k.PublicKey == "bmV3" {
+			sawNew = true
+		}
+	}
+	if !sawNew {
+		t.Fatalf("refresh did not add the new key: %v", urs[0].Actions)
+	}
+
+	if n := fresh.refreshSig0KeyAtSignalNames(context.Background(), []dns.RR{mustRR(t, "fresh.example. 3600 IN KEY 256 3 15 bmV3")}); n != 0 {
+		t.Fatalf("refresh of a never-populated zone satisfied %d, want 0", n)
+	}
+	if len(drainUpdateQ(q2)) != 0 {
+		t.Fatal("refresh must not start populating a signal name a bootstrap never used")
+	}
+}
+
+func TestCanPublishSig0KeyAtSignal(t *testing.T) {
+	local, _ := signalTarget("local.example.", nil)
+	away := newMapZone("away.example.", Primary, map[string][]dns.RR{
+		"away.example.": {
+			mustRR(t, "away.example. 3600 IN SOA ns.elsewhere.net. h.away.example. 1 3600 600 604800 300"),
+			mustRR(t, "away.example. 3600 IN NS ns.elsewhere.net."),
+		},
+	})
+	// A secondary cannot be updated, so a signal name in it does not count.
+	sec := newMapZone("sec.example.", Secondary, map[string][]dns.RR{
+		"sec.example.": {
+			mustRR(t, "sec.example. 3600 IN SOA ns.sec.example. h.sec.example. 1 3600 600 604800 300"),
+			mustRR(t, "sec.example. 3600 IN NS ns.sec.example."),
+		},
+	})
+	registerZones(t, local, away, sec)
+
+	if !local.canPublishSig0KeyAtSignal() {
+		t.Fatal("local primary owning the signal name: want true")
+	}
+	if away.canPublishSig0KeyAtSignal() {
+		t.Fatal("NS in a zone not served here: want false")
+	}
+	if sec.canPublishSig0KeyAtSignal() {
+		t.Fatal("signal name in a local secondary: want false")
 	}
 }

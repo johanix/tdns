@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -16,14 +15,14 @@ import (
 // The delegationsync: block, typed.
 //
 // This block was read with viper.GetString/GetStringSlice from a dozen call
-// sites. It is now modelled in full and this struct is the ONLY reader: the
-// keygen and key-verification subtrees under parent.update and child.update
-// are here too. No viper read of the delegationsync block remains, with one
-// deliberate exception: the child keygen MODE is still read from viper in
-// sig0_utils.go and is intentionally NOT modelled here -- the sample config
-// says "`algorithm` and `generator` are read on the child side; `mode` is
-// not", and modelling it would turn a setting that has never had any effect
-// into a live one.
+// sites. It is now modelled in full and this struct is the ONLY reader: parent
+// bootstrap policy lives in named delegationsync.policies.*, and child
+// update.bootstrap.methods is parsed here and consumed at bootstrap. No viper read of
+// the delegationsync block remains, with one deliberate exception: the child
+// keygen MODE is still read from viper in sig0_utils.go and is intentionally
+// NOT modelled here -- the sample config says "`algorithm` and `generator` are
+// read on the child side; `mode` is not", and modelling it would turn a setting
+// that has never had any effect into a live one.
 //
 // Why it was unwound: viper splits keys on ".". Any config shape with a dotted
 // key silently arrives empty, the setting reads back as its zero value, and
@@ -35,8 +34,11 @@ import (
 // authoritative and returns a zero value; add the fields and move the readers
 // in the same change.
 type DelegationSyncConf struct {
-	Parent DelegationSyncParentConf `yaml:"parent" mapstructure:"parent"`
-	Child  DelegationSyncChildConf  `yaml:"child" mapstructure:"child"`
+	Parent               DelegationSyncParentConf        `yaml:"parent" mapstructure:"parent"`
+	Child                DelegationSyncChildConf         `yaml:"child" mapstructure:"child"`
+	Policies             map[string]DelegationPolicyConf `yaml:"policies" mapstructure:"policies"`
+	CompiledPolicies     map[string]DelegationPolicy     `yaml:"-" mapstructure:"-"`
+	CompiledChildMethods []string                        `yaml:"-" mapstructure:"-"`
 }
 
 type DelegationSyncParentConf struct {
@@ -44,16 +46,13 @@ type DelegationSyncParentConf struct {
 	// records for: notify, update, api.
 	Schemes []string           `yaml:"schemes" mapstructure:"schemes"`
 	Notify  DsyncDnsSchemeConf `yaml:"notify" mapstructure:"notify"`
-	// Update is the UPDATE scheme's DSYNC keys plus the two subtrees that hang
-	// off the same YAML node -- key-verification and keygen -- which is why it
-	// is not a plain DsyncDnsSchemeConf like Notify. Embedding keeps
-	// Parent.Update.Target and friends reading exactly as before.
+	// Update is the UPDATE scheme's DSYNC keys plus the keygen subtree that
+	// hangs off the same YAML node, which is why it is not a plain
+	// DsyncDnsSchemeConf like Notify. Embedding keeps Parent.Update.Target and
+	// friends reading exactly as before. Bootstrap policy is not here: it lives
+	// in named delegationsync.policies.* and is referenced per-zone.
 	Update DsyncUpdateSchemeConf `yaml:"update" mapstructure:"update"`
 	Api    DsyncApiSchemeConf    `yaml:"api" mapstructure:"api"`
-
-	Bootstrap struct {
-		Methods string `yaml:"methods" mapstructure:"methods"`
-	} `yaml:"bootstrap" mapstructure:"bootstrap"`
 }
 
 type DelegationSyncChildConf struct {
@@ -63,15 +62,34 @@ type DelegationSyncChildConf struct {
 	Update  DsyncChildUpdateConf `yaml:"update" mapstructure:"update"`
 }
 
-// DsyncChildUpdateConf is the child side of the UPDATE scheme. Only keygen
-// today; the DSYNC keys themselves are the parent's to publish.
+// DsyncChildUpdateConf is the child side of the UPDATE scheme: keygen, plus
+// bootstrap.methods (intersected with the parent SVCB advertisement at
+// bootstrap time). The DSYNC keys themselves are the parent's to publish.
 type DsyncChildUpdateConf struct {
-	Keygen DsyncKeygenConf `yaml:"keygen" mapstructure:"keygen"`
+	Keygen    DsyncKeygenConf `yaml:"keygen" mapstructure:"keygen"`
+	Bootstrap struct {
+		Methods []string `yaml:"methods" mapstructure:"methods"`
+	} `yaml:"bootstrap" mapstructure:"bootstrap"`
+
+	// AllowInsecure permits acting on parent-derived input that cannot be
+	// authenticated: a KeyState response that is unsigned or signed with a
+	// receiver KEY that is neither DNSSEC-validated (together with the DSYNC
+	// lookup that named it) nor manually trusted in the truststore, and an
+	// SVCB bootstrap advertisement discovered without DNSSEC validation. It
+	// is the draft's "subject to local policy" escape for an unsigned parent
+	// zone with no manually bootstrapped receiver key (ddns-02 §"Authenticating
+	// Responses"), and mirrors DsyncApiChildConf.AllowInsecure: one switch,
+	// because the two inputs are the same protection seen from two sides.
+	//
+	// It does NOT make a wrong signature acceptable: a response whose SIG(0)
+	// is present but fails to verify is rejected regardless. A lab
+	// convenience. Never a production setting.
+	AllowInsecure bool `yaml:"allow-insecure" mapstructure:"allow-insecure"`
 }
 
-// DsyncUpdateSchemeConf is the parent's UPDATE scheme: the DSYNC record keys,
-// plus how an uploaded SIG(0) key is verified before it is trusted, plus the
-// keygen settings.
+// DsyncUpdateSchemeConf is the parent's UPDATE scheme: the DSYNC record keys
+// plus the keygen settings. How an uploaded SIG(0) key is verified is the
+// zone's bound delegationpolicy, not a sibling of this block.
 type DsyncUpdateSchemeConf struct {
 	// Squash, spelled in the YAML tag because the decoder runs with
 	// TagName: "yaml" -- so mapstructure reads THIS tag, and `yaml:",inline"`
@@ -80,30 +98,13 @@ type DsyncUpdateSchemeConf struct {
 	// uses the conventional tag name.
 	DsyncDnsSchemeConf `yaml:",squash" mapstructure:",squash"`
 
-	KeyVerification DsyncKeyVerificationConf `yaml:"key-verification" mapstructure:"key-verification"`
-	Keygen          DsyncKeygenConf          `yaml:"keygen" mapstructure:"keygen"`
+	Keygen DsyncKeygenConf `yaml:"keygen" mapstructure:"keygen"`
 }
 
 // DsyncKeygenConf: how a SIG(0) keypair is produced for delegation sync.
 type DsyncKeygenConf struct {
 	Algorithm string `yaml:"algorithm" mapstructure:"algorithm"`
 	Generator string `yaml:"generator" mapstructure:"generator"`
-}
-
-// DsyncKeyVerificationConf: how a child's uploaded SIG(0) key is checked before
-// the parent trusts it.
-type DsyncKeyVerificationConf struct {
-	// Mechanisms to try, in order.
-	Mechanisms []string `yaml:"mechanisms" mapstructure:"mechanisms"`
-	// MaxAttempts and RetryInterval bound the retry loop. RetryInterval is a
-	// duration written as the config documents it ("5s"), which decodes because
-	// the shared decoder carries StringToTimeDurationHookFunc.
-	MaxAttempts   int           `yaml:"max-attempts" mapstructure:"max-attempts"`
-	RetryInterval time.Duration `yaml:"retry-interval" mapstructure:"retry-interval"`
-	// RequireDnssec is a POINTER because the reader it replaces distinguished
-	// "absent" from "false": viper.Get(...) != nil guarded the GetBool. Absent
-	// keeps whatever default the caller set; false is an explicit opt-out.
-	RequireDnssec *bool `yaml:"require-dnssec" mapstructure:"require-dnssec"`
 }
 
 // DsyncApiChildConf is what a child needs to use the API scheme against its
@@ -159,6 +160,55 @@ type DsyncApiChildCredentialConf struct {
 
 	Username string          `yaml:"username" mapstructure:"username"`
 	Key      SensitiveString `yaml:"key" mapstructure:"key"`
+
+	// TLS is the client-certificate alternative to Username/Key. A pointer so
+	// that "the operator wrote no tls block" and "the operator wrote an empty
+	// one" are distinguishable -- the second is a config error worth naming,
+	// the first is every config written before this existed.
+	TLS *DsyncApiChildTLSConf `yaml:"tls" mapstructure:"tls"`
+}
+
+// DsyncApiChildTLSConf is one client keypair. Both paths, no secrets: the
+// private key stays in its file and is never read into the config.
+type DsyncApiChildTLSConf struct {
+	CertFile string `yaml:"cert" mapstructure:"cert"`
+	KeyFile  string `yaml:"key" mapstructure:"key"`
+}
+
+// Validate rejects a half-written block early, where the error can name the
+// field, rather than at first use where it surfaces as a TLS handshake failure
+// against the parent.
+func (t *DsyncApiChildTLSConf) Validate() error {
+	if t == nil {
+		return nil
+	}
+	if strings.TrimSpace(t.CertFile) == "" || strings.TrimSpace(t.KeyFile) == "" {
+		return fmt.Errorf("delegationsync.child.api.credentials[].tls needs both cert and key")
+	}
+	return nil
+}
+
+// Validate rejects a credential entry that cannot authenticate: both a bearer
+// pair and a tls block (ambiguous; the Authorization header would win and the
+// certificate would be ignored), or a tls block that is only half written.
+func (cc DsyncApiChildCredentialConf) Validate() error {
+	if err := cc.TLS.Validate(); err != nil {
+		return err
+	}
+	if cc.TLS != nil && (strings.TrimSpace(cc.Username) != "" || cc.Key.Value() != "") {
+		return fmt.Errorf("delegationsync.child.api.credentials[] cannot carry both a bearer credential and a tls block")
+	}
+	return nil
+}
+
+// ValidateCredentials checks every child credential entry.
+func (c DsyncApiChildConf) ValidateCredentials() error {
+	for i, cc := range c.Credentials {
+		if err := cc.Validate(); err != nil {
+			return fmt.Errorf("delegationsync.child.api.credentials[%d]: %v", i, err)
+		}
+	}
+	return nil
 }
 
 // CredentialFor returns the credential for a parent zone, matching as FQDNs so
@@ -193,11 +243,16 @@ func (c DsyncApiChildConf) CredentialForChild(parent, child string) (DsyncApiCli
 	wantParent, wantChild := norm(parent), norm(child)
 
 	build := func(cc DsyncApiChildCredentialConf) DsyncApiClientCredential {
-		return DsyncApiClientCredential{
+		out := DsyncApiClientCredential{
 			Parent:   wantParent,
 			Username: strings.TrimSpace(cc.Username),
 			Key:      cc.Key.Value(),
 		}
+		if cc.TLS != nil {
+			out.CertFile = strings.TrimSpace(cc.TLS.CertFile)
+			out.KeyFile = strings.TrimSpace(cc.TLS.KeyFile)
+		}
+		return out
 	}
 
 	var generic *DsyncApiChildCredentialConf
@@ -255,6 +310,64 @@ type DsyncApiSchemeConf struct {
 	Listen   []string `yaml:"listen" mapstructure:"listen"`
 	CertFile string   `yaml:"cert" mapstructure:"cert"`
 	KeyFile  string   `yaml:"key" mapstructure:"key"`
+
+	// ClientAuth is the optional client-certificate path on this listener.
+	// Absent (nil) means the feature is off: no CertificateRequest, and the
+	// middleware never looks at a presented certificate.
+	//
+	// The handshake is fixed when the listener starts. Reload updates the
+	// middleware from the live block, but does not send (or stop sending) a
+	// CertificateRequest; a change here needs a restart.
+	ClientAuth *DsyncApiClientAuthConf `yaml:"client-auth" mapstructure:"client-auth"`
+}
+
+// DsyncApiClientAuthConf is the parent-side client-certificate configuration.
+// Mechanisms are tried in list order; tls-pin before tls-pkix is the sensible
+// order (exact lookup, no chain building).
+type DsyncApiClientAuthConf struct {
+	Mechanisms []string `yaml:"mechanisms" mapstructure:"mechanisms"`
+	CAFile     string   `yaml:"ca-file" mapstructure:"ca-file"`
+}
+
+// Enabled reports whether the listener should request client certificates.
+func (c *DsyncApiClientAuthConf) Enabled() bool {
+	return c != nil && len(c.Mechanisms) > 0
+}
+
+// Validate normalises mechanism names and refuses unknown ones. tls-pkix
+// without ca-file is unsatisfiable and is warned at load, not refused, matching
+// crossCheckDownstreamAuth.
+func (c *DsyncApiClientAuthConf) Validate() error {
+	if c == nil {
+		return nil
+	}
+	if len(c.Mechanisms) == 0 {
+		return fmt.Errorf("delegationsync.parent.api.client-auth has no mechanisms")
+	}
+	var hasPkix bool
+	for i, m := range c.Mechanisms {
+		m = strings.ToLower(strings.TrimSpace(m))
+		c.Mechanisms[i] = m
+		if !validDsyncApiCertMech(m) {
+			return fmt.Errorf("unknown DSYNC API client-auth mechanism %q (supported: tls-pin, tls-pkix)", m)
+		}
+		if m == DsyncApiAuthTLSPkix {
+			hasPkix = true
+		}
+	}
+	if hasPkix && strings.TrimSpace(c.CAFile) == "" {
+		lgConfig.Warn("delegationsync.parent.api.client-auth lists tls-pkix but ca-file is empty; tls-pkix will be unsatisfiable")
+	}
+	return nil
+}
+
+// Validate checks the delegationsync block beyond what DsyncApiSchemeConf.Validate
+// already does for publication: client-auth mechanisms and child credential shape.
+func (dsc DelegationSyncConf) Validate() error {
+	if err := dsc.Parent.Api.ClientAuth.Validate(); err != nil {
+		return err
+	}
+	return dsc.Child.Api.ValidateCredentials()
 }
 
 // DsyncApiDialectV1 is the dialect identifier published in the TXT record at
@@ -324,9 +437,18 @@ func (c DsyncApiSchemeConf) Validate() error {
 var delegationSyncConf atomic.Pointer[DelegationSyncConf]
 
 // SetDelegationSyncConfig installs the freshly-parsed block. Called from
-// ParseConfig on both first start and reload.
-func SetDelegationSyncConfig(dsc DelegationSyncConf) {
+// ParseConfig on both first start and reload. On error the previous block
+// stays installed.
+func SetDelegationSyncConfig(dsc DelegationSyncConf) error {
+	compiled, methods, err := CompileDelegationSyncPolicies(dsc)
+	if err != nil {
+		return err
+	}
+	dsc.CompiledPolicies = compiled
+	dsc.CompiledChildMethods = methods
 	delegationSyncConf.Store(&dsc)
+	rebindLiveDelegationPolicies()
+	return nil
 }
 
 // DelegationSyncConfig returns the current block. Never nil: a daemon that has

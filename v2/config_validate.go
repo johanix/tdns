@@ -152,6 +152,10 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 
+	if err := config.DelegationSync.Validate(); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
+
 	var configsections = make(map[string]interface{}, 5)
 
 	configsections["log"] = config.Log

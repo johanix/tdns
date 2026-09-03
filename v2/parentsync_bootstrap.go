@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,7 +26,7 @@ import (
 //  4. KeyStateUnknown → bootstrap
 //  5. KeyStateBootstrapAutoOngoing → poll
 //  6. Query failure → retry with backoff
-func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string, keyid uint16, algorithm uint8) {
+func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone ZoneName, keyName string, keyid uint16, algorithm uint8) {
 	kdb := conf.Internal.KeyDB
 
 	// Wait for IMR to become available (it starts asynchronously).
@@ -36,7 +37,11 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 			break
 		}
 		lgElect.Info("ParentSyncAfterKeyPublication: waiting for IMR engine", "zone", zone, "attempt", i+1)
-		time.Sleep(2 * time.Second)
+		if !waitOrDone(ctx, 2*time.Second) {
+			lgElect.Info("ParentSyncAfterKeyPublication: shutting down while waiting for the IMR engine",
+				"zone", zone)
+			return
+		}
 	}
 	if imr == nil {
 		lgElect.Error("ParentSyncAfterKeyPublication: IMR engine not available after waiting", "zone", zone)
@@ -49,26 +54,30 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 		return
 	}
 
-	// Retry KeyState inquiry with backoff: 5s, 10s, 20s, 40s, then give up.
-	maxRetries := 5
-	delay := 5 * time.Second
+	// Poll the parent's KeyState with the shared delegation-sync backoff
+	// (5s, 10s, 20s, 40s, then give up), re-bootstrapping once if the parent
+	// reports our key as unknown.
 	bootstrapped := false
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-
-		keyState, err := QueryParentKeyState(kdb, imr, keyName, keyid)
+	syncErr := retryWithBackoff(ctx, delegationSyncMaxRetries, delegationSyncInitialDelay, func(attempt int) (bool, error) {
+		ks, authenticated, err := QueryParentKeyState(ctx, kdb, imr, keyName, keyid)
 		if err != nil {
 			lgElect.Warn("ParentSyncAfterKeyPublication: KeyState inquiry failed",
 				"zone", zone, "attempt", attempt, "err", err)
-			time.Sleep(delay)
-			delay *= 2
-			continue
+			return false, err // retry
+		}
+		keyState := ks.KeyState
+		// authenticated=false here means allow-insecure let an unauthenticated
+		// answer through; every transition below says so, so a bootstrap or a
+		// "trusted" verdict driven by such an answer is traceable in the log.
+		if !authenticated {
+			lgElect.Warn("ParentSyncAfterKeyPublication: acting on an UNAUTHENTICATED KeyState answer (allow-insecure)",
+				"zone", zone, "keyid", keyid, "state", keyState, "statename", edns0.KeyStateToString(keyState))
 		}
 
 		switch keyState {
 		case edns0.KeyStateTrusted:
 			lgElect.Info("ParentSyncAfterKeyPublication: parent trusts our key",
-				"zone", zone, "keyid", keyid)
+				"zone", zone, "keyid", keyid, "authenticated", authenticated)
 			UpdateParentState(kdb, keyName, keyid, keyState)
 
 			// Post-bootstrap: verify delegation data is in sync with parent.
@@ -87,40 +96,70 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 					lgElect.Warn("ParentSyncAfterKeyPublication: zone not found, skipping delegation verification", "zone", zone)
 				}
 			}
-			return
+			return true, nil // done
 
 		case edns0.KeyStateUnknown:
 			if bootstrapped {
 				// Already sent bootstrap, parent hasn't processed it yet — keep polling
 				lgElect.Info("ParentSyncAfterKeyPublication: parent still unknown after bootstrap, polling",
 					"zone", zone, "keyid", keyid, "attempt", attempt)
-				time.Sleep(delay)
-				delay *= 2
-				continue
+				return false, nil // retry
 			}
 			lgElect.Info("ParentSyncAfterKeyPublication: parent does not know our key, bootstrapping",
-				"zone", zone, "keyid", keyid)
+				"zone", zone, "keyid", keyid, "authenticated", authenticated)
 			UpdateParentState(kdb, keyName, keyid, keyState)
-			err := BootstrapWithParent(zone, keyName, algorithm)
-			if err != nil {
+			if err := BootstrapWithParent(ctx, zone, keyName, algorithm); err != nil {
+				if errors.Is(err, errBootstrapManual) {
+					// MANUAL-BOOTSTRAP-REQUIRED from the child's side: nothing
+					// automatic will change this; the operator has to act.
+					lgElect.Info("ParentSyncAfterKeyPublication: parent requires manual SIG(0) bootstrap; waiting for the operator",
+						"zone", zone, "keyid", keyid)
+					return true, nil // done, not a failure
+				}
+				if errors.Is(err, errBootstrapAdvertisementLookup) {
+					// The parent's SVCB advertisement could not be looked up.
+					// Not a verdict on the method set, so not terminal: retry
+					// with the same backoff rather than either giving up or
+					// guessing.
+					lgElect.Warn("ParentSyncAfterKeyPublication: bootstrap deferred, advertisement lookup failed",
+						"zone", zone, "attempt", attempt, "err", err)
+					return false, err // retry
+				}
 				lgElect.Error("ParentSyncAfterKeyPublication: bootstrap failed",
 					"zone", zone, "err", err)
-				return
+				return true, err // done (terminal error)
 			}
 			lgElect.Info("ParentSyncAfterKeyPublication: bootstrap UPDATE sent to parent, will poll for trust",
 				"zone", zone, "keyid", keyid)
 			bootstrapped = true
-			time.Sleep(delay)
-			delay *= 2
-			continue
+			return false, nil // retry
 
 		case edns0.KeyStateBootstrapAutoOngoing:
 			lgElect.Info("ParentSyncAfterKeyPublication: parent is verifying key, will poll",
 				"zone", zone, "keyid", keyid, "attempt", attempt)
 			UpdateParentState(kdb, keyName, keyid, keyState)
-			time.Sleep(delay)
-			delay *= 2
-			continue
+			return false, nil // retry
+
+		case edns0.KeyStateBootstrapManualRequired:
+			// keystate-03 code 10: the parent knows the key but will only
+			// trust it after a manual step. Terminal for this poll, and not
+			// a failure: the operator has to act. Same treatment as the
+			// child-side selection of the manual method above.
+			lgElect.Info("ParentSyncAfterKeyPublication: parent requires manual bootstrap for our key; waiting for the operator",
+				"zone", zone, "keyid", keyid, "detail", ks.ExtraText)
+			UpdateParentState(kdb, keyName, keyid, keyState)
+			return true, nil // done
+
+		case edns0.KeyStateValidationFail:
+			// keystate-03 code 8: the parent tried to verify the key and gave
+			// up. Waiting will not resolve it and re-sending the same key
+			// would fail the same way; the EXTRA-TEXT says what the parent
+			// could not find. Terminal and an error.
+			lgElect.Error("ParentSyncAfterKeyPublication: parent reports our key's validation FAILED;"+
+				" it will not become trusted by waiting. Fix the KEY's publication (at-apex / at-ns, DNSSEC if the parent requires it) and re-bootstrap",
+				"zone", zone, "keyid", keyid, "detail", ks.ExtraText)
+			UpdateParentState(kdb, keyName, keyid, keyState)
+			return true, fmt.Errorf("parent reports KEY_VALIDATION_FAILED for keyid %d: %s", keyid, ks.ExtraText)
 
 		case edns0.KeyStateTemporaryFailure:
 			// keystate-03: the receiver understood the inquiry but is
@@ -130,122 +169,43 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 			lgElect.Info("ParentSyncAfterKeyPublication: parent reports a temporary failure, will retry",
 				"zone", zone, "keyid", keyid, "attempt", attempt)
 			UpdateParentState(kdb, keyName, keyid, keyState)
-			time.Sleep(delay)
-			delay *= 2
-			continue
+			return false, nil // retry
 
 		default:
-			lgElect.Info("ParentSyncAfterKeyPublication: parent returned unexpected state",
-				"zone", zone, "keyid", keyid, "state", keyState)
+			// Terminal, and a failure: the child's key is not trusted and no
+			// further attempt will change that. Reported at Info it looked like
+			// a successful outcome in the logs, and the caller's "gave up"
+			// branch never fired because the error was nil.
+			lgElect.Error("ParentSyncAfterKeyPublication: parent returned an unexpected key state;"+
+				" the child's key is NOT trusted and bootstrap will not complete",
+				"zone", zone, "keyid", keyid, "state", keyState,
+				"statename", edns0.KeyStateToString(keyState))
 			UpdateParentState(kdb, keyName, keyid, keyState)
-			return
+			return true, fmt.Errorf("parent returned unexpected key state %d (%s)",
+				keyState, edns0.KeyStateToString(keyState))
 		}
+	})
+	if syncErr != nil {
+		lgElect.Warn("ParentSyncAfterKeyPublication: gave up (exhausted retries or terminal error)",
+			"zone", zone, "keyid", keyid, "err", syncErr)
 	}
-
-	lgElect.Warn("ParentSyncAfterKeyPublication: exhausted retries",
-		"zone", zone, "keyid", keyid)
 }
 
-// QueryParentKeyState sends a KeyState EDNS(0) inquiry to the parent and
-// returns the parent's reported state for the key.
-func QueryParentKeyState(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (uint8, error) {
-	ctx := context.Background()
-
+// QueryParentKeyState sends a SIG(0)-signed KeyState EDNS(0) inquiry for
+// (keyName, keyid) to the parent's UPDATE Receiver, found via DSYNC discovery,
+// and returns the KeyState option from the response plus whether that response
+// was authenticated (see keystate_verify.go). A response that cannot be
+// authenticated is an error unless delegationsync.child.update.allow-insecure
+// is set, in which case it is returned with authenticated=false; a response
+// whose signature is present but wrong is always an error.
+func QueryParentKeyState(ctx context.Context, kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (*edns0.KeyStateOption, bool, error) {
 	dsyncTarget, err := imr.LookupDSYNCTarget(ctx, keyName, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
-		return 0, fmt.Errorf("DSYNC lookup failed: %v", err)
+		return nil, false, fmt.Errorf("DSYNC lookup failed: %v", err)
 	}
-
-	m := newKeyStateInquiryMsg(keyName, keyid)
-
-	sak, err := kdb.GetSig0Keys(keyName, Sig0StateActive)
-	if err != nil || len(sak.Keys) == 0 {
-		return 0, fmt.Errorf("no active SIG(0) key for %s", keyName)
-	}
-
-	signedMsg, err := SignMsg(*m, keyName, sak)
-	if err != nil {
-		return 0, fmt.Errorf("failed to sign KeyState inquiry: %v", err)
-	}
-
-	c := new(dns.Client)
-	c.Timeout = 5 * time.Second
-
-	if len(dsyncTarget.Addresses) == 0 {
-		return 0, fmt.Errorf("DSYNC target has no addresses for %s", keyName)
-	}
-
-	r, _, err := c.Exchange(signedMsg, dsyncTarget.Addresses[0])
-	if err != nil {
-		return 0, fmt.Errorf("DNS exchange failed: %v", err)
-	}
-
-	if r.Rcode != dns.RcodeSuccess {
-		return 0, fmt.Errorf("DNS request failed with rcode %s", dns.RcodeToString[r.Rcode])
-	}
-
-	opt := r.IsEdns0()
-	if opt == nil {
-		return 0, fmt.Errorf("no EDNS(0) OPT RR in response")
-	}
-
-	keystate, found := edns0.ExtractKeyStateOption(opt)
-	if !found {
-		return 0, fmt.Errorf("KeyState option missing in response")
-	}
-
-	return keystate.KeyState, nil
-}
-
-// QueryParentKeyStateDetailed is like QueryParentKeyState but also returns the
-// ExtraText from the KeyState response, for display purposes.
-func QueryParentKeyStateDetailed(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (uint8, string, error) {
-	ctx := context.Background()
-
-	dsyncTarget, err := imr.LookupDSYNCTarget(ctx, keyName, dns.TypeANY, core.SchemeUpdate)
-	if err != nil {
-		return 0, "", fmt.Errorf("DSYNC lookup failed: %v", err)
-	}
-
-	m := newKeyStateInquiryMsg(keyName, keyid)
-
-	sak, err := kdb.GetSig0Keys(keyName, Sig0StateActive)
-	if err != nil || len(sak.Keys) == 0 {
-		return 0, "", fmt.Errorf("no active SIG(0) key for %s", keyName)
-	}
-
-	signedMsg, err := SignMsg(*m, keyName, sak)
-	if err != nil {
-		return 0, "", fmt.Errorf("failed to sign KeyState inquiry: %v", err)
-	}
-
-	c := new(dns.Client)
-	c.Timeout = 5 * time.Second
-
-	if len(dsyncTarget.Addresses) == 0 {
-		return 0, "", fmt.Errorf("DSYNC target has no addresses for %s", keyName)
-	}
-
-	r, _, err := c.Exchange(signedMsg, dsyncTarget.Addresses[0])
-	if err != nil {
-		return 0, "", fmt.Errorf("DNS exchange failed: %v", err)
-	}
-
-	if r.Rcode != dns.RcodeSuccess {
-		return 0, "", fmt.Errorf("DNS request failed with rcode %s", dns.RcodeToString[r.Rcode])
-	}
-
-	opt := r.IsEdns0()
-	if opt == nil {
-		return 0, "", fmt.Errorf("no EDNS(0) OPT RR in response")
-	}
-
-	keystate, found := edns0.ExtractKeyStateOption(opt)
-	if !found {
-		return 0, "", fmt.Errorf("KeyState option missing in response")
-	}
-
-	return keystate.KeyState, keystate.ExtraText, nil
+	allowInsecure := DelegationSyncConfig().Child.Update.AllowInsecure
+	return queryKeyState(ctx, kdb, keyName, keyid, dsyncTarget,
+		kdb.receiverKeyTrust(), imrReceiverKeyFetcher(imr), allowInsecure)
 }
 
 // UpdateParentState persists the parent's KeyState response in the local keystore.
@@ -278,7 +238,7 @@ func UpdateParentState(kdb *KeyDB, keyName string, keyid uint16, parentState uin
 
 // BootstrapWithParent sends a self-signed UPDATE to the parent to bootstrap
 // trust for the child's SIG(0) key.
-func BootstrapWithParent(zone ZoneName, keyName string, algorithm uint8) error {
+func BootstrapWithParent(ctx context.Context, zone ZoneName, keyName string, algorithm uint8) error {
 	lgElect.Info("BootstrapWithParent: starting", "zone", zone, "keyName", keyName, "algorithm", algorithm)
 
 	// Try Zones map first, then FindZone (label-walking).
@@ -291,10 +251,9 @@ func BootstrapWithParent(zone ZoneName, keyName string, algorithm uint8) error {
 		return fmt.Errorf("zone %s not found (available zones: %v)", keyName, Zones.Keys())
 	}
 
-	ctx := context.Background()
 	msg, ur, err := zd.BootstrapSig0KeyWithParent(ctx, algorithm)
 	if err != nil {
-		return fmt.Errorf("BootstrapSig0KeyWithParent: %s: %v", msg, err)
+		return fmt.Errorf("BootstrapSig0KeyWithParent: %s: %w", msg, err)
 	}
 
 	lgElect.Info("BootstrapWithParent: success", "zone", zone, "result", msg, "updateResult", ur)

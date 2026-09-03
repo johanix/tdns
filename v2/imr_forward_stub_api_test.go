@@ -14,6 +14,7 @@ import (
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -252,7 +253,7 @@ func TestStubListStatusProbe(t *testing.T) {
 	if !ok {
 		t.Fatal("no serverMap for stub zone")
 	}
-	if _, _, _, _, err := imr.IterativeDNSQuery(context.Background(), zone, dns.TypeSOA, sm, false, false); err != nil {
+	if _, _, _, _, err := imr.IterativeDNSQuery(context.Background(), zone, dns.TypeSOA, sm, false, edns0.PrivacyNone); err != nil {
 		t.Fatalf("query through stub: %v", err)
 	}
 	server = imr.StubZoneStatus()[0].Servers[0]

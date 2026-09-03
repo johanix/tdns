@@ -78,24 +78,18 @@ func (imr *Imr) ParentZone(z string) (string, error) {
 }
 
 func (zd *ZoneData) FetchParentData(imr *Imr) error {
-	var err error
-
-	if zd.Parent == "" {
-		// SetupIMR()
-		zd.Logger.Printf("Identifying name of parent zone for %s", zd.ZoneName)
-		zd.Parent, err = imr.ParentZone(zd.ZoneName)
-		if err != nil {
-			return err
-		}
+	parent, err := zd.ResolveParentVia(imr)
+	if err != nil {
+		return err
 	}
 
 	if len(zd.ParentNS) == 0 {
-		zd.Logger.Printf("Fetching NS RRset for %s", zd.Parent)
+		zd.Logger.Printf("Fetching NS RRset for %s", parent)
 		// m := new(dns.Msg)
 		//m.SetQuestion(zd.Parent, dns.TypeNS)
 
 		ctx := context.Background()
-		resp, err := imr.ImrQuery(ctx, zd.Parent, dns.TypeNS, dns.ClassINET, nil)
+		resp, err := imr.ImrQuery(ctx, parent, dns.TypeNS, dns.ClassINET, nil)
 		if err != nil {
 			return err
 		}
@@ -109,7 +103,7 @@ func (zd *ZoneData) FetchParentData(imr *Imr) error {
 	}
 
 	if len(zd.ParentServers) == 0 {
-		zd.Logger.Printf("Identifying all IP addresses for parent zone %s nameservers", zd.Parent)
+		zd.Logger.Printf("Identifying all IP addresses for parent zone %s nameservers", parent)
 		ctx := context.Background()
 		for _, ns := range zd.ParentNS {
 			for _, rrtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
@@ -137,6 +131,6 @@ func (zd *ZoneData) FetchParentData(imr *Imr) error {
 		}
 	}
 
-	zd.Logger.Printf("FetchParentData for parent %s: all done", zd.Parent)
+	zd.Logger.Printf("FetchParentData for parent %s: all done", parent)
 	return nil
 }

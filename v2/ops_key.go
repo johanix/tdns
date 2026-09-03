@@ -151,17 +151,20 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 	return nil
 }
 
+// errBootstrapManual: the selected SIG(0) bootstrap method is manual, so no
+// automatic ceremony was (or could be) sent. The draft's
+// MANUAL-BOOTSTRAP-REQUIRED state seen from the child's side; callers with a
+// per-load or retry loop treat it as "waiting for the operator", not as an
+// error to retry or to log as such.
+var errBootstrapManual = errors.New("manual SIG(0) bootstrap required by the parent")
+
 func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (string, UpdateResult, error) {
-	var err error
-	// 1. Get the parent zone
-	if zd.Parent == "" {
-		if Globals.ImrEngine == nil {
-			return "", UpdateResult{}, fmt.Errorf("BootstrapSig0KeyWithParent(%q): IMR engine not yet initialized", zd.ZoneName)
-		}
-		zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
-		if err != nil {
-			return "", UpdateResult{}, err
-		}
+	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods())
+}
+
+func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, willing []string) (string, UpdateResult, error) {
+	if err := zd.resolveParentZone(); err != nil {
+		return "", UpdateResult{}, fmt.Errorf("BootstrapSig0KeyWithParent(%q): %w", zd.ZoneName, err)
 	}
 
 	sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
@@ -218,15 +221,52 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (
 	}
 
 	lgHandler.Info("BootstrapSig0KeyWithParent: DSYNC target found", "zone", zd.ZoneName, "target", dsyncTarget.RR)
-	// dump.P(dsyncTarget)
 
-	// 3. Create the DNS UPDATE message
-	// adds := []dns.RR{&sak.Keys[0].KeyRR}
-	adds := []dns.RR{&pkc.KeyRR}
-	msg, err := CreateUpdate(zd.Parent, adds, []dns.RR{})
-	if err != nil {
-		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to create update message: %v", zd.ZoneName, err), UpdateResult{}, err
+	advertised, present, aerr := advertisedBootstrapMethods(ctx, Globals.ImrEngine, dsyncTarget,
+		DelegationSyncConfig().Child.Update.AllowInsecure)
+	if aerr != nil {
+		// Retryable, not "no advertisement": see advertisedBootstrapMethods.
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): %v", zd.ZoneName, aerr), UpdateResult{},
+			fmt.Errorf("BootstrapSig0KeyWithParent(%q): %w", zd.ZoneName, aerr)
 	}
+	method, merr := selectChildBootstrapMethod(advertised, present, willing)
+	if merr != nil {
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): %v", zd.ZoneName, merr), UpdateResult{}, merr
+	}
+	lgHandler.Info("BootstrapSig0KeyWithParent: selected bootstrap method",
+		"zone", zd.ZoneName, "method", method, "advertised", advertised, "willing", willing)
+	if method == "manual" {
+		// Not a failure: the parent said so (its SVCB advertisement, or the
+		// child's own list), and the operator has to do the rest. Callers
+		// that run on every zone load log this at Info, not Error.
+		msg := fmt.Sprintf("BootstrapSig0KeyWithParent(%q): parent requires manual SIG(0) bootstrap; not sending KEY UPDATE", zd.ZoneName)
+		return msg, UpdateResult{}, fmt.Errorf("%w for %s", errBootstrapManual, zd.ZoneName)
+	}
+	if method == "at-ns" {
+		// The parent will look for this KEY at _sig0key.<child>._signal.<ns>
+		// (LookupChildKeyAtSignal) the moment the ceremony arrives, so it has
+		// to be APPLIED, not merely queued, before the ceremony is sent; the
+		// publish waits for the updater's verdict. The willing list only
+		// offers at-ns when at least one signal name is publishable here, so
+		// zero means the zone changed under us or the apply failed.
+		if n := zd.publishSig0KeyAtSignalNames(ctx, []dns.RR{&pkc.KeyRR}); n == 0 {
+			msg := fmt.Sprintf("BootstrapSig0KeyWithParent(%q): at-ns selected but the KEY could not be published at any _signal name", zd.ZoneName)
+			return msg, UpdateResult{}, fmt.Errorf("at-ns bootstrap: no _sig0key._signal name for %s is in a zone this server is primary for", zd.ZoneName)
+		}
+	}
+
+	// 3. Create the self-signed bootstrap ceremony "DEL <child> ANY KEY" +
+	// "ADD <child> KEY" (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
+	// §"Bootstrapping the Child's Key"). The DEL removes any previously
+	// published keys for this child; the parent UPDATE Receiver MUST defer it
+	// until this new key is validated, so it never evicts an already-trusted
+	// key on an un-validated bootstrap. RemoveRRset builds the class-ANY RRset
+	// delete (CreateUpdate's Remove would emit class-NONE per-RR deletes).
+	msg := new(dns.Msg)
+	msg.SetUpdate(zd.GetParent())
+	msg.RemoveRRset([]dns.RR{&pkc.KeyRR}) // DEL <child> ANY KEY
+	msg.Insert([]dns.RR{&pkc.KeyRR})      // ADD <child> KEY
+	msg.SetEdns0(1232, true)              // OPT RR so the parent can return EDE
 
 	msg, err = SignMsg(*msg, zd.ZoneName, sak)
 	if err != nil {
@@ -234,7 +274,7 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (
 	}
 
 	// 4. Send the message to the parent
-	rcode, ur, err := SendUpdate(ctx, msg, zd.Parent, dsyncTarget.Addresses)
+	rcode, ur, err := SendUpdate(ctx, msg, zd.GetParent(), dsyncTarget.Addresses)
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to send update message: %v", zd.ZoneName, err), ur, err
 	}
@@ -288,11 +328,8 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	var kpresp *KeystoreResponse
 
 	// 1. Get the parent zone
-	if zd.Parent == "" {
-		zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
-		if err != nil {
-			return "", 0, 0, UpdateResult{}, err
-		}
+	if err := zd.resolveParentZone(); err != nil {
+		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q): %w", zd.ZoneName, err)
 	}
 
 	// 2. Get the parent DSYNC RRset
@@ -356,7 +393,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 
 	// 3. Create the DNS UPDATE message
 	adds := []dns.RR{&pkc.KeyRR}
-	m, err := CreateUpdate(zd.Parent, adds, []dns.RR{})
+	m, err := CreateUpdate(zd.GetParent(), adds, []dns.RR{})
 	if err != nil {
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to create update message: %v", zd.ZoneName, err)
 	}
@@ -370,7 +407,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	}
 
 	// 4. Send the ADD message to the parent
-	rcode, ur, err := SendUpdate(ctx, m, zd.Parent, dsyncTarget.Addresses)
+	rcode, ur, err := SendUpdate(ctx, m, zd.GetParent(), dsyncTarget.Addresses)
 	if err != nil {
 		return "", 0, 0, ur, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to send update message: %v", zd.ZoneName, err)
 	}
@@ -396,7 +433,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	//	if action == "complete" || action == "remove" {
 	// 6. Request deletion of the old active key from the parent, signed by the new active key.
 	removes := []dns.RR{&sak.Keys[0].KeyRR}
-	m, err = CreateUpdate(zd.Parent, []dns.RR{}, removes)
+	m, err = CreateUpdate(zd.GetParent(), []dns.RR{}, removes)
 	if err != nil {
 		return fmt.Sprintf("RolloverSig0KeyWithParent(%q) failed to create update message: %v",
 			zd.ZoneName, err), oldkeyid, newkeyid, ur, err
@@ -411,7 +448,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	}
 
 	// 7. Send the REMOVE message to the parent
-	rcode, ur, err = SendUpdate(ctx, m, zd.Parent, dsyncTarget.Addresses)
+	rcode, ur, err = SendUpdate(ctx, m, zd.GetParent(), dsyncTarget.Addresses)
 	if err != nil {
 		return "", oldkeyid, newkeyid, ur, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to send update message: %v",
 			zd.ZoneName, err)
@@ -490,6 +527,12 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 		zd.Logger.Print(msg)
 		return "", oldkeyid, newkeyid, ur, errors.New(msg)
 	}
+	// And wherever an at-ns bootstrap put the old one.
+	var newKeyRRs []dns.RR
+	for _, k := range newSak.Keys {
+		newKeyRRs = append(newKeyRRs, &k.KeyRR)
+	}
+	zd.refreshSig0KeyAtSignalNames(ctx, newKeyRRs)
 	//	} // end of phase 3
 
 	return fmt.Sprintf("RolloverSig0KeyWithParent(%q) successfully rolled from SIG(0) key %d to SIG(0) key %d",

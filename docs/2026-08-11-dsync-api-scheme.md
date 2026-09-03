@@ -126,12 +126,23 @@ made.
 
 ## 5. Authentication
 
-**HTTP Basic over TLS, with a `<username, key>` tuple.** Not the management
-API's single shared `X-API-Key`.
+**HTTP Basic over TLS, with a `<username, key>` tuple, or a client
+certificate.** Not the management API's single shared `X-API-Key`.
 
 The reason is authorization, not authentication strength: a shared key names
 nobody, and a policy that cannot name the principal cannot be granular. The
-username is the principal. That is the whole point of the tuple.
+username is the principal on the Basic path. A client certificate proves an
+identity; a stored row maps that identity to the same kind of principal. Either
+way, `updatepolicy.child` sees one DNS name.
+
+Client certificates are additive. A deployment that authenticates with
+`<username, key>` today keeps working with no config change. The listener
+requests a client certificate only when `delegationsync.parent.api.client-auth`
+is set, and never requires one. An `Authorization` header, including a wrong
+one or a non-Basic one, selects the Basic path; the certificate path runs only
+when that header is absent.
+
+See `docs/2026-09-01-dsync-api-client-cert-auth-implementation-plan.md`.
 
 ### 5.1 Requirements
 
@@ -406,8 +417,35 @@ CLI:
 
 ```
 tdns-cli auth dsync-api credential add    --zone example. --user child1.example.
-tdns-cli auth dsync-api credential list   --zone example.
-tdns-cli auth dsync-api credential revoke --zone example. --user child1.example.
+tdns-cli auth dsync-api credential list   [--zone example.]
+tdns-cli auth dsync-api credential disable --zone example. --user child1.example.
+tdns-cli auth dsync-api credential delete --zone example. --user child1.example.
+
+tdns-cli auth dsync-api cert-credential add \
+    --zone example. --mech tls-pkix --identity child1.example.
+tdns-cli auth dsync-api cert-credential add \
+    --zone example. --mech tls-pin --cert /path/to/child.crt \
+    --principal child1.example.
+tdns-cli auth dsync-api cert-credential list   [--zone example.]
+```
+
+`credential list` and `cert-credential list` show both kinds, with a mechanism
+column (`basic`, `tls-pin`, `tls-pkix`). Certificate credentials live in a
+separate table (`DsyncApiCertCredential`) keyed on `(parentzone, authmech,
+identity)` and are provisioned on this same management API.
+
+A child that authenticates with a certificate configures a nested `tls:` block
+instead of `username`/`key`:
+
+```yaml
+delegationsync:
+  child:
+    api:
+      credentials:
+        - parent: example.
+          tls:
+            cert: /path/to/child.crt
+            key:  /path/to/child.key
 ```
 
 ---

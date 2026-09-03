@@ -9,11 +9,21 @@ import (
 	"github.com/miekg/dns"
 )
 
+// Standard EDE codes (RFC 8914).
+//
+// These MUST stay in their own const block. They were previously declared at
+// the head of the private-code block below, where each additional standard code
+// consumed one iota step and silently shifted EVERY private code up by one:
+// EDESig0KeyNotKnown, documented and specified as 513, was actually compiled as
+// 514, and the whole block after it drifted with it. Adding a standard code
+// here can no longer renumber the private codes. See TestEDECodeValues.
 const (
-	// Standard EDE codes (RFC 8914)
 	EDEDNSSECBogus uint16 = 6 // RFC 8914: DNSSEC Bogus
+)
 
-	// Private EDE codes (above 512)
+// Private EDE codes (above 512). The first entry pins the base; the rest follow
+// by iota, so this block MUST begin at iota == 0 — do not prepend entries.
+const (
 	EDESig0KeyNotKnown uint16 = 513 + iota
 	EDESig0KeyKnownButNotTrusted
 	EDEDelegationSyncNotSupported
@@ -76,6 +86,15 @@ const (
 	// a retry is pointless for the first and correct for the second.
 	EDEZoneUpdateNotApplied   // authorized, but the change could not be applied or made durable
 	EDEZoneUpdateApplyTimeout // authorized, but the server stopped waiting for the apply to finish
+
+	// The other two bootstrap states of draft-ietf-dnsop-delegation-mgmt-via-
+	// ddns-02 §"Communication in Case of Errors" (D-8), alongside
+	// EDESig0KeyKnownButNotTrusted above. All three ride on RCODE REFUSED for
+	// an UPDATE signed by a key the receiver knows but does not trust; they
+	// mirror KeyState codes 9, 8 and 10 respectively. Private codepoints until
+	// IANA assigns (plan Phase 3).
+	EDESig0KeyValidationFailed     // "SIG(0) key is known, but validation failed": waiting will not help
+	EDESig0ManualBootstrapRequired // "Automatic bootstrap of SIG(0) keys not supported; manual bootstrap required"
 )
 
 // NOTE for anyone adding codes above: append at the END of the const block.
@@ -117,6 +136,9 @@ var EDECodeToString = map[uint16]string{
 
 	EDEZoneUpdateNotApplied:   "update was authorized but could not be applied or made durable",
 	EDEZoneUpdateApplyTimeout: "timed out waiting for the update to be applied; it may or may not have taken effect",
+
+	EDESig0KeyValidationFailed:     "SIG(0) key known, but validation failed; re-bootstrap after fixing the key's publication",
+	EDESig0ManualBootstrapRequired: "Automatic bootstrap of SIG(0) keys not supported; manual bootstrap required",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response

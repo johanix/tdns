@@ -340,6 +340,104 @@ delegationsync:
 	}
 }
 
+func TestDsyncApiChildTLSCredentialRoundTripThroughViper(t *testing.T) {
+	const y = `
+delegationsync:
+   child:
+      api:
+         credentials:
+            - parent: example.
+              tls:
+                 cert: /etc/tdns/child.crt
+                 key:  /etc/tdns/child.key
+`
+	v := viper.New()
+	v.SetConfigType("yaml")
+	if err := v.ReadConfig(strings.NewReader(y)); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var conf Config
+	if err := v.Unmarshal(&conf); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	cred, ok := conf.DelegationSync.Child.Api.CredentialFor("example.")
+	if !ok {
+		t.Fatal("tls credential not found")
+	}
+	if cred.Username != "" || cred.Key != "" {
+		t.Errorf("bearer fields populated: %+v", cred)
+	}
+	if cred.CertFile != "/etc/tdns/child.crt" || cred.KeyFile != "/etc/tdns/child.key" {
+		t.Errorf("tls paths = cert %q key %q", cred.CertFile, cred.KeyFile)
+	}
+	if !cred.Usable() {
+		t.Error("tls-only credential must be Usable")
+	}
+}
+
+func TestDsyncApiClientCredentialUsable(t *testing.T) {
+	if (DsyncApiClientCredential{Username: "u", Key: "k"}).Usable() != true {
+		t.Error("bearer pair must be usable")
+	}
+	if (DsyncApiClientCredential{CertFile: "c", KeyFile: "k"}).Usable() != true {
+		t.Error("cert pair must be usable")
+	}
+	if (DsyncApiClientCredential{Username: "u"}).Usable() {
+		t.Error("username without key must not be usable")
+	}
+	if (DsyncApiClientCredential{CertFile: "c"}).Usable() {
+		t.Error("cert without key must not be usable")
+	}
+	if (DsyncApiClientCredential{}).Usable() {
+		t.Error("empty credential must not be usable")
+	}
+}
+
+func TestDsyncApiPostDelegationRequestCertOnlyOmitsBasicAuth(t *testing.T) {
+	var sawAuth string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(DsyncApiDelegation{Child: "child1.example."})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.pem")
+	if err := writeCertPEM(caPath, srv.Certificate().Raw); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	leaf, _ := newTestTLSCert(t, []string{"child1.example"}, nil)
+	certPath := filepath.Join(dir, "client.pem")
+	keyPath := filepath.Join(dir, "client.key")
+	if err := writeCertPEM(certPath, leaf.Certificate[0]); err != nil {
+		t.Fatalf("write client cert: %v", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(leaf.PrivateKey)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	keyOut, err := os.Create(keyPath)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	if err := pem.Encode(keyOut, &pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	keyOut.Close()
+
+	ep := &DsyncApiEndpoint{Url: srv.URL + "/dsync/v1", Dialect: DsyncApiDialectV1}
+	cred := DsyncApiClientCredential{CertFile: certPath, KeyFile: keyPath}
+	if _, err := DsyncApiPostDelegationRequest(context.Background(), ep, cred, "child1.example.",
+		[]DsyncApiRRset{{Owner: "child1.example.", Type: "NS", RRs: []string{"child1.example. 60 IN NS ns1.child1.example."}}},
+		false, caPath); err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	if sawAuth != "" {
+		t.Errorf("Authorization = %q, want empty on a cert-only credential", sawAuth)
+	}
+}
+
 // TestDsyncApiRRsetsIncludesAAAAGlue covers the IPv6 half of
 // DsyncApiRRsetsFromSyncStatus. It loops over both A and AAAA and groups glue
 // per owner; the A path was tested and the AAAA path was not, so a regression

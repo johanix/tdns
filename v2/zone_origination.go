@@ -49,7 +49,7 @@ func zoneMayOriginateContent(zd *ZoneData) bool {
 	return zd.ZoneType == Primary || zd.Options[OptInlineSigning]
 }
 
-// originationAPICommands are the /zone and /zone/dsync API commands that make
+// originationAPICommands are the /zone and /zone/childsync API commands that make
 // the server ORIGINATE content: they either write into the zone or advance its
 // serial. Refused on a zone that may not originate (Fix C).
 //
@@ -70,9 +70,9 @@ var originationAPICommands = map[string]bool{
 	"policy-set":    true,
 	"change-policy": true,
 	"policy-reset":  true,
-	// /zone/dsync — publishes the _dsync DSYNC RRset into the zone
-	"publish-dsync-rrset":   true,
-	"unpublish-dsync-rrset": true,
+	// /zone/childsync — publishes the _dsync DSYNC RRset into the zone
+	"publish":   true,
+	"unpublish": true,
 }
 
 // zoneOriginationRefusal returns the operator-facing refusal message for an

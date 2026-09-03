@@ -169,9 +169,15 @@ type ZoneData struct {
 	// from (zone add --template). Persisted in the dynamic config entry so a
 	// restart re-expands it; the update policy is deliberately NOT persisted —
 	// it re-derives from the template at boot (one source of truth).
-	Template          string
-	DelegationSyncQ   chan DelegationSyncRequest
-	Parent            string   // name of parentzone (if filled in)
+	Template        string
+	DelegationSyncQ chan DelegationSyncRequest
+	// parent is the zone's parent name, resolved lazily on first use and
+	// cached. UNEXPORTED ON PURPOSE: parentMu owns it, and going through
+	// ResolveParent/GetParent/SetParent is what makes that ownership
+	// enforceable rather than a comment. Seven code paths used to open-code
+	// the same read-check/lookup/write, none of them synchronised.
+	parent            string
+	parentMu          sync.Mutex
 	ParentNS          []string // names of parent nameservers
 	ParentServers     []string // addresses of parent nameservers
 	Children          map[string]*ChildDelegationData
@@ -186,11 +192,17 @@ type ZoneData struct {
 	// config. Use asConfiguredOptions(). nil when nothing was suppressed.
 	SuppressedOptions map[ZoneOption]bool
 	UpdatePolicy      UpdatePolicy
+	DelegationPolicy  *DelegationPolicy
 	DnssecPolicy      *DnssecPolicy
 	DnssecPolicyName  string // name of currently-applied policy; used to detect config-reload-driven changes
 	MultiSigner       *MultiSignerConf
 	KeyDB             *KeyDB
-	AppType           AppType
+	// proxySig0ParentBootstrapped is set after the parent accepted the
+	// self-signed SIG(0) ceremony (rcode NOERROR) for the KEY currently
+	// at the apex. Cleared when the KEY leaves the apex so a later
+	// WAITING→READY transition runs the ceremony again.
+	proxySig0ParentBootstrapped bool
+	AppType                     AppType
 	// Errors holds all active error conditions on this zone. Use SetError /
 	// ClearError to mutate; HasError / ErrorList to inspect.
 	// The fields below (Error, ErrorType, ErrorMsg) are derived from
@@ -437,6 +449,7 @@ type ZoneConf struct {
 	UpdatePolicy      UpdatePolicyConf
 	DelegationBackend string `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
 	DnssecPolicy      string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
+	DelegationPolicy  string `yaml:"delegationpolicy" mapstructure:"delegationpolicy"`
 	// OutboundSoaSerial is the per-zone override of the server-global
 	// authengine.outbound-soa-serial. Empty (the default) inherits the global.
 	// Set it on a TEMPLATE to give a whole class of zones a serial policy —
@@ -623,11 +636,9 @@ type TemplateConf struct {
 
 type UpdatePolicyConf struct {
 	Child struct {
-		Type         string // selfsub | self | sub | none
-		RRtypes      []string
-		KeyBootstrap []string // manual | dnssec-validated | consistent-lookup
-		KeyUpload    string
-		TTL          uint32 `yaml:"ttl"`
+		Type    string // selfsub | self | sub | none
+		RRtypes []string
+		TTL     uint32 `yaml:"ttl"`
 	}
 	Zone struct {
 		Type    string // "selfsub" | "self" | "sub" | ...
@@ -643,11 +654,9 @@ type UpdatePolicy struct {
 }
 
 type UpdatePolicyDetail struct {
-	Type         string // "selfsub" | "self"
-	RRtypes      map[uint16]bool
-	KeyBootstrap []string
-	KeyUpload    string
-	TTL          uint32
+	Type    string // "selfsub" | "self"
+	RRtypes map[uint16]bool
+	TTL     uint32
 }
 
 // DnssecPolicyRolloverConf is the YAML `rollover:` subtree (KSK automated rollover; Phase 1+).
@@ -1000,11 +1009,12 @@ type ZoneRefresher struct {
 	// PublishCadence, when non-zero, sets the zone's minimum snapshot publish
 	// interval (zd.publishCadence). Carried parsed so the RefreshEngine does
 	// not re-parse; zero means "leave the zone's default".
-	PublishCadence time.Duration
-	Options        map[ZoneOption]bool
-	Edns0Options   *edns0.MsgOptions
-	UpdatePolicy   UpdatePolicy
-	DnssecPolicy   string
+	PublishCadence   time.Duration
+	Options          map[ZoneOption]bool
+	Edns0Options     *edns0.MsgOptions
+	UpdatePolicy     UpdatePolicy
+	DelegationPolicy *DelegationPolicy
+	DnssecPolicy     string
 	// OutboundSoaSerial carries the per-zone outbound serial mode to the
 	// RefreshEngine (copied to zd.OutboundSoaSerial on merge). Empty means
 	// "inherit the server-global setting" and is a valid, self-consistent
@@ -1056,6 +1066,13 @@ type Sig0Key struct {
 	PrivateKey      string //
 	Key             dns.KEY
 	Keystr          string
+	// ValidationFailed: the parent's automatic verification of this child key
+	// ran out of attempts (TriggerChildKeyVerification). Distinct from
+	// !Validated, which also covers "verification in progress". Reported as
+	// KEY_VALIDATION_FAILED(8) / EDE KEY-VALIDATION-FAILED; ValidationError
+	// carries the last reason for the operator and the KeyState EXTRA-TEXT.
+	ValidationFailed bool
+	ValidationError  string
 }
 
 type DnssecKey struct {
@@ -1081,6 +1098,10 @@ type DelegationSyncRequest struct {
 	NewDnskeys   *core.RRset
 	MsignerGroup *core.RRset
 	Response     chan DelegationSyncStatus // used for API-based requests
+	// Attempt counts re-enqueues of a DELEGATION-SYNC-SETUP whose SIG(0)
+	// bootstrap was deferred because the parent's SVCB advertisement could not
+	// be looked up (errBootstrapAdvertisementLookup). Zero on the first try.
+	Attempt int
 	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
 	// set the proxy NOTIFY action keys on (delegation-sync-proxy).
 	ProxyAnalysis *ProxyDelegationAnalysis
@@ -1212,7 +1233,6 @@ type KeyDB struct {
 	TruststoreSig0Cache *Sig0StoreT // was *Sig0StoreT
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
-	KeyBootstrapperQ    chan KeyBootstrapperRequest
 	// options holds the parsed DnsEngine auth options. It is read on the hot
 	// query path (QueryResponder, per request) and replaced wholesale on config
 	// reload, so it is stored behind an atomic.Pointer for lock-free reads and a
@@ -1310,30 +1330,6 @@ type RRsetString struct {
 	RRtype uint16   `json:"rrtype"`
 	RRs    []string `json:"rrs"`
 	RRSIGs []string `json:"rrsigs,omitempty"`
-}
-
-type VerificationInfo struct {
-	KeyName        string
-	Key            string
-	ZoneName       string
-	AttemptsLeft   int
-	NextCheckTime  time.Time
-	ZoneData       *ZoneData
-	Keyid          uint16
-	FailedAttempts int
-}
-
-type KeyBootstrapperRequest struct {
-	Cmd          string
-	KeyName      string
-	ZoneName     string
-	ZoneData     *ZoneData
-	Key          string
-	Verified     bool
-	Keyid        uint16
-	Algorithm    uint8
-	Imr          *Imr
-	ResponseChan chan *VerificationInfo
 }
 
 type KeyConf struct {

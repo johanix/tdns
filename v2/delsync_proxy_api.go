@@ -82,14 +82,10 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 	// on the normal path this is already set. Kept for a direct caller that did
 	// not build a plan: the credential is keyed on the parent, so an unresolved
 	// one would silently look up the wrong thing.
-	if zd.Parent == "" || zd.Parent == "." {
-		p, perr := imr.ParentZone(zd.ZoneName)
-		if perr != nil {
-			return "", fmt.Errorf("ProxyApiParent: ParentZone(%s): %w", zd.ZoneName, perr)
-		}
-		zd.Parent = p
+	parent, perr := zd.ResolveParentVia(imr)
+	if perr != nil {
+		return "", fmt.Errorf("ProxyApiParent: %w", perr)
 	}
-	parent := zd.Parent
 
 	childconf := DelegationSyncConfig().Child.Api
 	// Keyed on (parent, child): one agent can be secondary for several child
@@ -104,9 +100,9 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 				" more than one zone under %s): %w",
 			zd.ZoneName, parent, zd.ZoneName, parent, ErrProxyApiNoCredential)
 	}
-	if cred.Username == "" || cred.Key == "" {
+	if !cred.Usable() {
 		return "", fmt.Errorf(
-			"zone %s: the DSYNC API credential for parent %s is missing a username or key: %w",
+			"zone %s: the DSYNC API credential for parent %s is missing a username/key or a tls cert/key: %w",
 			zd.ZoneName, parent, ErrProxyApiNoCredential)
 	}
 
@@ -174,7 +170,7 @@ func (zd *ZoneData) proxyApiRRsets() []DsyncApiRRset {
 
 	rrsets := DsyncApiRRsetsFromSyncStatus(zd.ZoneName, DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
-		Parent:   zd.Parent,
+		Parent:   zd.GetParent(),
 		NewNS:    newNS,
 		NewA:     newA,
 		NewAAAA:  newAAAA,

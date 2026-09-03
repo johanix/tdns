@@ -43,6 +43,9 @@ dnssecvalidated	  INTEGER DEFAULT 0,
 source		      TEXT,
 keyrr		      TEXT,
 comment		      TEXT,
+validation_failed INTEGER NOT NULL DEFAULT 0,
+validation_error  TEXT NOT NULL DEFAULT '',
+validation_failed_at TEXT NOT NULL DEFAULT '',
 UNIQUE (zonename, keyid)
 )`,
 
@@ -335,6 +338,32 @@ UNIQUE (keyname)
 		disabled   INTEGER NOT NULL DEFAULT 0,
 		comment    TEXT,
 		UNIQUE (parentzone, username)
+	)`,
+
+	// Certificate credentials for the DSYNC API scheme. A separate table
+	// rather than added columns on DsyncApiCredential -- not because columns
+	// cannot be added (dbMigrateSchema does exactly that, see the
+	// ZonePolicyOverride note above), but because that table's constraints are
+	// what make it correct for a BEARER credential: keyhash NOT NULL and
+	// UNIQUE (parentzone, username). A certificate credential has neither a key
+	// hash nor a username -- its identity is a pin or a DNS name and its
+	// natural key is (parentzone, authmech, identity) -- so reusing the table
+	// would mean relaxing NOT NULL, which SQLite cannot do in place, and
+	// carrying a uniqueness constraint that does not describe the new rows.
+	//
+	// identity is canonicalised (core.CanonicalizeName) for tls-pkix and
+	// stored verbatim for tls-pin (standard-encoding base64 SPKI SHA-256).
+	"DsyncApiCertCredential": `CREATE TABLE IF NOT EXISTS 'DsyncApiCertCredential' (
+		id         INTEGER PRIMARY KEY,
+		parentzone VARCHAR(255) NOT NULL,
+		authmech   VARCHAR(16)  NOT NULL,
+		identity   VARCHAR(255) NOT NULL,
+		principal  VARCHAR(255) NOT NULL,
+		created    INTEGER NOT NULL,
+		expires    INTEGER NOT NULL DEFAULT 0,
+		disabled   INTEGER NOT NULL DEFAULT 0,
+		comment    TEXT,
+		UNIQUE (parentzone, authmech, identity)
 	)`,
 }
 

@@ -619,6 +619,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								zd.applyOptionNormalization(zr.ZoneType, zr.Options, zr.OutboundSoaSerial)
 							zd.TransferSrc = zr.TransferSrc
 							zd.UpdatePolicy = zr.UpdatePolicy
+							if zr.DelegationPolicy != nil {
+								zd.DelegationPolicy = zr.DelegationPolicy
+							}
 							// Record the config-base policy name only (no struct bind).
 							// syncZoneDnssecPolicyFromConfig binds post-Ready; this
 							// name survives a failed first load so ticker retry can
@@ -769,6 +772,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// UpdatePolicy is a struct, so we check if any fields are set
 						if zr.UpdatePolicy.Child.Type != "" || zr.UpdatePolicy.Zone.Type != "" || zr.UpdatePolicy.Validate {
 							zd.UpdatePolicy = zr.UpdatePolicy
+						}
+						if zr.DelegationPolicy != nil {
+							zd.DelegationPolicy = zr.DelegationPolicy
 						}
 						// Update ZoneType only if provided (non-zero value)
 						if zr.ZoneType != 0 {
@@ -982,6 +988,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						OutboundSoaSerial: zr.OutboundSoaSerial,
 						TransferSrc:       zr.TransferSrc,
 						UpdatePolicy:      zr.UpdatePolicy,
+						DelegationPolicy:  zr.DelegationPolicy,
 						DnssecPolicyName:  zr.DnssecPolicy, // config-base hint; struct bound post-Ready
 						MultiSigner:       &msc,
 						DelegationSyncQ:   conf.Internal.DelegationSyncQ,

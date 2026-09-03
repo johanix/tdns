@@ -157,10 +157,22 @@ func printForwardZoneStatus(fz tdns.ImrForwardZoneStatus, prefix string) {
 	if fz.TrustAD {
 		trust = ", trust-ad"
 	}
-	fmt.Printf("%sforward zone %s (%d upstream(s)%s):\n", prefix, fz.Zone, len(fz.Upstreams), trust)
+	// A quarantined zone is not serving; say so on the header line rather
+	// than leaving the reader to infer it from every upstream being marked.
+	if fz.Quarantined {
+		fmt.Printf("%sforward zone %s (%d upstream(s)%s): QUARANTINED, names under it SERVFAIL: %s\n",
+			prefix, fz.Zone, len(fz.Upstreams), trust, fz.QuarantineReason)
+	} else {
+		fmt.Printf("%sforward zone %s (%d upstream(s)%s):\n", prefix, fz.Zone, len(fz.Upstreams), trust)
+	}
 	for _, up := range fz.Upstreams {
 		state := "ok"
-		if up.Unreachable {
+		if up.Quarantined {
+			// Checked before Unreachable: a quarantined upstream is never
+			// dialled, so any reachability verdict on it is from before the
+			// config that quarantined it.
+			state = fmt.Sprintf("QUARANTINED (%s)", up.QuarantineReason)
+		} else if up.Unreachable {
 			state = fmt.Sprintf("UNREACHABLE (%s)", up.LastError)
 		} else if up.Queries == 0 {
 			state = "untried"

@@ -99,7 +99,8 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	if Globals.App.Type == AppTypeAuth || Globals.App.Type == AppTypeAgent {
 		sr.HandleFunc("/keystore", kdb.APIkeystore(conf)).Methods("POST")
 		sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
-		sr.HandleFunc("/zone/dsync", APIzoneDsync(ctx, &Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+		sr.HandleFunc("/zone/parentsync", APIzoneParentSync(ctx, &Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
+		sr.HandleFunc("/zone/childsync", APIzoneChildSync(ctx, &Globals.App)).Methods("POST")
 		// Provisioning for the DSYNC API scheme. Deliberately on the
 		// management API, behind the operator key: issuing a registrant
 		// credential is an operator act. The credentials issued here
@@ -107,6 +108,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		// which is a separate socket with separate auth and a policy that
 		// confines every one of them.
 		sr.HandleFunc("/dsync-api/credential", kdb.APIdsyncApiCredential()).Methods("POST")
+		sr.HandleFunc("/dsync-api/cert-credential", kdb.APIdsyncApiCertCredential()).Methods("POST")
 		sr.HandleFunc("/delegation", APIdelegation(conf.Internal.DelegationSyncQ)).Methods("POST")
 	}
 

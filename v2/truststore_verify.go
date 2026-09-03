@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -52,8 +53,9 @@ func LookupChildKeyAtSignal(ctx context.Context, childZone string, imr *Imr) ([]
 			continue
 		}
 
-		// _sig0key.<childzone>._signal.<ns>.
-		signalName := fmt.Sprintf("_sig0key.%s_signal.%s", dns.Fqdn(childZone), dns.Fqdn(nsRR.Ns))
+		// _sig0key.<childzone>._signal.<ns>. -- the same spelling the child
+		// side publishes (signal_republish.go).
+		signalName := signalOwnerName(signalPrefixSig0Key, childZone, nsRR.Ns)
 		lgSigner.Debug("LookupChildKeyAtSignal: querying", "name", signalName)
 
 		keyResp, err := imr.ImrQuery(ctx, signalName, dns.TypeKEY, dns.ClassINET, nil)
@@ -80,12 +82,14 @@ func LookupChildKeyAtSignal(ctx context.Context, childZone string, imr *Imr) ([]
 }
 
 // VerifyChildKey checks whether a child's KEY (identified by keyRR string) can
-// be found via the configured verification mechanisms (at-apex, at-ns). Returns
-// true if any mechanism succeeds (key found + optionally DNSSEC-validated).
-func VerifyChildKey(ctx context.Context, childZone string, keyRR string, imr *Imr) (verified bool, dnssecValidated bool) {
-	mechanisms := DelegationSyncConfig().Parent.Update.KeyVerification.Mechanisms
+// be found via the policy's verification mechanisms (at-apex, at-ns). The
+// policy is the caller's: TriggerChildKeyVerification resolves it once from
+// the receiving parent zone and passes it here rather than looking it up
+// again from the child name.
+func VerifyChildKey(ctx context.Context, childZone string, keyRR string, imr *Imr, pol DelegationPolicy) (verified bool, dnssecValidated bool) {
+	mechanisms := pol.Mechanisms
 	if len(mechanisms) == 0 {
-		mechanisms = []string{"at-apex", "at-ns"}
+		return false, false
 	}
 
 	// Try each mechanism in order. Stop as soon as we have a DNSSEC-validated
@@ -159,108 +163,144 @@ func waitOrDone(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// keyVerificationRetrySettings resolves the retry budget, substituting defaults
-// for anything non-positive. Zero means "unset"; a NEGATIVE max-attempts used to
-// skip the loop entirely and abandon verification silently, and a negative
-// interval turned the backoff into a busy loop.
-func keyVerificationRetrySettings(kv DsyncKeyVerificationConf) (int, time.Duration) {
-	maxAttempts := kv.MaxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = 5
+// TriggerChildKeyVerification starts an async verification of a child KEY
+// that was just stored in the TrustStore: DNS lookup, retry with backoff, then
+// trust. ctx is the engine's lifetime context. The verification retries with
+// exponential backoff and can therefore be sleeping for a long time when the
+// process is asked to stop; without it the goroutine ignores shutdown and the
+// deferred key cleanup it performs runs against a database that is closing.
+func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, parentZone string, keyid uint16, keyRR string) {
+	var pol DelegationPolicy
+	if parentZone != "" {
+		if pzd, ok := Zones.Get(parentZone); ok {
+			pol = pzd.boundDelegationPolicy()
+		} else {
+			pol = compiledDefaultDelegationPolicy()
+		}
+	} else {
+		pol = parentDelegationPolicy(childZone)
 	}
-	retryInterval := kv.RetryInterval
-	if retryInterval <= 0 {
-		retryInterval = 10 * time.Second
+	if len(pol.Mechanisms) == 0 {
+		lgSigner.Info("TriggerChildKeyVerification: policy has empty mechanisms; not verifying",
+			"zone", childZone, "keyid", keyid, "policy", pol.Name)
+		return
 	}
-	return maxAttempts, retryInterval
+	go kdb.runChildKeyVerification(ctx, childZone, keyid, pol, imrChildKeyVerifier(childZone, keyRR, pol))
 }
 
-// TriggerChildKeyVerification starts an async verification of a child KEY
-// that was just stored in the TrustStore. It uses the KeyBootstrapper's
-// retry pattern: verify via DNS lookup, retry with backoff, then trust.
-func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone string, keyid uint16, keyRR string) {
-	go func() {
+// childKeyVerifier makes one verification attempt. accepted means the key may
+// be promoted to trusted now; otherwise reason says why not (it becomes the
+// persisted ValidationError if every attempt ends this way). Injected so the
+// retry/exhaustion engine can be tested without an IMR; the production
+// verifier is imrChildKeyVerifier.
+type childKeyVerifier func(ctx context.Context) (accepted, dnssecValidated bool, reason error)
 
-		maxAttempts, retryInterval := keyVerificationRetrySettings(
-			DelegationSyncConfig().Parent.Update.KeyVerification)
+func imrChildKeyVerifier(childZone, keyRR string, pol DelegationPolicy) childKeyVerifier {
+	return func(ctx context.Context) (bool, bool, error) {
+		imr := Globals.ImrEngine
+		if imr == nil {
+			return false, false, errors.New("IMR engine not yet available")
+		}
+		verified, dnssecValidated := VerifyChildKey(ctx, childZone, keyRR, imr, pol)
+		if !verified {
+			return false, false, fmt.Errorf("KEY not found via %v", pol.Mechanisms)
+		}
+		// Compiled policy: absent require-dnssec became true at compile.
+		if pol.RequireDnssec && !dnssecValidated {
+			return false, false, errors.New("KEY found but not DNSSEC-validated, and require-dnssec is set")
+		}
+		return true, dnssecValidated, nil
+	}
+}
 
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			imr := Globals.ImrEngine
-			if imr == nil {
-				lgSigner.Warn("TriggerChildKeyVerification: IMR engine not yet available, will retry",
-					"zone", childZone, "keyid", keyid, "attempt", attempt)
-				if attempt < maxAttempts {
-					if !waitOrDone(ctx, retryInterval) {
-						return
-					}
-					retryInterval *= 2
-				}
-				continue
+// runChildKeyVerification is the retry/exhaustion engine behind
+// TriggerChildKeyVerification. On acceptance it promotes the key to trusted
+// (the "verify" truststore subcommand, which also clears any earlier failure)
+// and completes a deferred bootstrap DEL-ANY-KEY. On exhaustion it RECORDS the
+// failure on the truststore row (K-4 code 8): from then on the KeyState
+// inquiry reports KEY_VALIDATION_FAILED rather than "in progress", and a
+// signed UPDATE is refused with EDE KEY-VALIDATION-FAILED -- the child is told
+// that waiting will not help. A shutdown mid-way records nothing; the row
+// stays "in progress" and a re-upload starts over.
+func (kdb *KeyDB) runChildKeyVerification(ctx context.Context, childZone string, keyid uint16, pol DelegationPolicy, verify childKeyVerifier) bool {
+	maxAttempts, retryInterval := pol.RetryMaxAttempts, pol.RetryInterval
+	var lastReason error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		lgSigner.Info("verifying child key via DNS",
+			"zone", childZone, "keyid", keyid, "attempt", attempt, "max", maxAttempts)
+
+		accepted, dnssecValidated, reason := verify(ctx)
+		if accepted {
+			// Update TrustStore: mark as validated + trusted.
+			tx, err := kdb.Begin("VerifyChildKey")
+			if err != nil {
+				lgSigner.Error("TriggerChildKeyVerification: failed to begin tx", "err", err)
+				return false
 			}
 
-			lgSigner.Info("verifying child key via DNS",
-				"zone", childZone, "keyid", keyid, "attempt", attempt, "max", maxAttempts)
-
-			verified, dnssecValidated := VerifyChildKey(ctx, childZone, keyRR, imr)
-
-			// Default true; only an explicit false turns it off. The pointer
-			// preserves the distinction the viper reader made with its
-			// nil-check: absent and false are different answers here, and
-			// collapsing them would silently downgrade key verification on
-			// every config that does not mention the key.
-			requireDnssec := true
-			if rd := DelegationSyncConfig().Parent.Update.KeyVerification.RequireDnssec; rd != nil {
-				requireDnssec = *rd
+			tppost := TruststorePost{
+				SubCommand:      "verify",
+				Keyname:         childZone,
+				Keyid:           int(keyid),
+				DnssecValidated: dnssecValidated,
+			}
+			_, err = kdb.Sig0TrustMgmt(tx, tppost)
+			if err != nil {
+				lgSigner.Error("TriggerChildKeyVerification: failed to update TrustStore", "err", err)
+				tx.Rollback()
+				return false
+			}
+			if err := tx.Commit(); err != nil {
+				lgSigner.Error("TriggerChildKeyVerification: failed to commit", "err", err)
+				return false
 			}
 
-			accepted := verified && (!requireDnssec || dnssecValidated)
+			lgSigner.Info("child key verified and trusted",
+				"zone", childZone, "keyid", keyid, "dnssec", dnssecValidated)
 
-			if verified && !accepted {
-				lgSigner.Info("child key found but not DNSSEC-validated, require-dnssec is true, will retry",
-					"zone", childZone, "keyid", keyid, "attempt", attempt)
-			}
-
-			if accepted {
-				// Update TrustStore: mark as validated + trusted.
-				tx, err := kdb.Begin("VerifyChildKey")
-				if err != nil {
-					lgSigner.Error("TriggerChildKeyVerification: failed to begin tx", "err", err)
-					return
-				}
-
-				tppost := TruststorePost{
-					SubCommand:      "verify",
-					Keyname:         childZone,
-					Keyid:           int(keyid),
-					DnssecValidated: dnssecValidated,
-				}
-				_, err = kdb.Sig0TrustMgmt(tx, tppost)
-				if err != nil {
-					lgSigner.Error("TriggerChildKeyVerification: failed to update TrustStore", "err", err)
-					tx.Rollback()
-					return
-				}
-				if err := tx.Commit(); err != nil {
-					lgSigner.Error("TriggerChildKeyVerification: failed to commit", "err", err)
-					return
-				}
-
-				lgSigner.Info("child key verified and trusted",
-					"zone", childZone, "keyid", keyid, "dnssec", dnssecValidated)
-				return
-			}
-
-			if attempt < maxAttempts {
-				lgSigner.Info("child key not yet verifiable, will retry",
-					"zone", childZone, "keyid", keyid, "delay", retryInterval)
-				if !waitOrDone(ctx, retryInterval) {
-					return
-				}
-				retryInterval *= 2 // exponential backoff
-			}
+			// The key is now trusted; complete any deferred bootstrap
+			// DEL-ANY-KEY by removing the child's now-superseded keys.
+			kdb.applyPendingKeyReplacement(ctx, childZone, keyid)
+			return true
 		}
 
-		lgSigner.Warn("child key verification exhausted all attempts",
+		lastReason = reason
+		if attempt < maxAttempts {
+			lgSigner.Info("child key not yet verifiable, will retry",
+				"zone", childZone, "keyid", keyid, "reason", reason, "delay", retryInterval)
+			if !waitOrDone(ctx, retryInterval) {
+				lgSigner.Info("TriggerChildKeyVerification: shutting down, abandoning verification",
+					"zone", childZone, "keyid", keyid)
+				return false
+			}
+			retryInterval *= 2 // exponential backoff
+		}
+	}
+
+	// A cancel that landed inside the last attempt is a shutdown, not a
+	// verdict on the key: the loop fell out with a "context canceled" reason,
+	// and recording that as a validation failure would tell the child that
+	// waiting will not help when nothing was concluded. Same rule as the
+	// backoff branch above.
+	if ctx.Err() != nil {
+		lgSigner.Info("TriggerChildKeyVerification: shutting down during the last attempt, not recording a verdict",
 			"zone", childZone, "keyid", keyid)
-	}()
+		return false
+	}
+
+	why := fmt.Sprintf("%d attempts via %v: %v", maxAttempts, pol.Mechanisms, lastReason)
+	lgSigner.Warn("child key verification exhausted all attempts; recording validation failure",
+		"zone", childZone, "keyid", keyid, "reason", why)
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command:         "child-sig0-mgmt",
+		SubCommand:      "validation-failed",
+		Keyname:         childZone,
+		Keyid:           int(keyid),
+		ValidationError: why,
+	}); err != nil {
+		lgSigner.Error("TriggerChildKeyVerification: failed to record validation failure",
+			"zone", childZone, "keyid", keyid, "err", err)
+	}
+	return false
 }

@@ -36,6 +36,8 @@
 #   dnssecpolicy:    DNSSEC policy name (from the dnssec.policies: section).
 #                    NOTE: one word, no underscore and no hyphen. "none" means
 #                    the same as leaving it unset.
+#   delegationpolicy: Named delegationsync.policies.* entry. Omit binds
+#                    `default`. A name that does not resolve quarantines the zone.
 #   multisigner:     Multi-signer configuration name (from multisigner: section).
 #                    NOTE: one word, no underscore.
 #
@@ -106,7 +108,7 @@ zones:
         - prefix: "192.0.2.2/32"
           key:    NOKEY
      options:
-        - delegation-sync-parent   # Provide delegation sync for children
+        - childsync   # Provide delegation sync for children
         - online-signing           # Sign responses on-the-fly
      dnssecpolicy:    default      # online-signing REQUIRES a dnssecpolicy
 
@@ -128,7 +130,7 @@ zones:
         - prefix: "203.0.113.2/32"
           key:    NOKEY
      options:
-        - delegation-sync-child    # Push DS/NS updates to parent
+        - parentsync    # Push DS/NS updates to parent
 
    # ===========================================================================
    # EXAMPLE 2b: SECONDARY zone pulling over XoT (XFR-over-TLS, RFC 9103)
@@ -338,4 +340,4 @@ zones:
    - name:            dynamic.example.
      zonefile:        /etc/tdns/zones/dynamic.example.zone
      template:        dynamic-primary
-     # Inherits allow-updates, delegation-sync-parent, online-signing from template
+     # Inherits allow-updates, childsync, online-signing from template

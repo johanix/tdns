@@ -372,6 +372,18 @@ var deprecatedConfigKeys = append([]deprecatedConfigKey{
 		advice: "zone key is `dnssecpolicy:` (one word, no hyphen); `dnssec-policy:` is ignored, leaving the zone unsigned"},
 	{match: ".multi_signer",
 		advice: "zone key is `multisigner:` (one word, no underscore); `multi_signer:` is ignored"},
+	{match: ".keybootstrap",
+		advice: "`keybootstrap:` moved to `delegationpolicy:` naming a `delegationsync.policies.*` entry (`manual: true` for the old `manual` token)"},
+	{match: "keybootstrap", exact: true,
+		advice: "top-level `keybootstrap:` is gone; use `delegationsync.policies.*` and per-zone `delegationpolicy:`"},
+	{match: ".keyupload",
+		advice: "`keyupload:` moved to `delegationsync.policies.*.bootstrap.allow-unvalidated-upload`"},
+	{match: ".key-verification",
+		advice: "`key-verification:` moved to `delegationsync.policies.*.bootstrap` (mechanisms, require-dnssec, retry)"},
+	{match: ".parent.bootstrap",
+		advice: "`delegationsync.parent.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
+	{match: ".parent.bootstrap.methods",
+		advice: "`delegationsync.parent.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
 }, underscoreSpellingMigrations()...)
 
 // snakeCaseConfigKeys lists every config key that was spelled with underscores
@@ -708,7 +720,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// anything that could publish: on reload this must be swapped in before a
 	// zone re-reads it, and on first start it must be present before
 	// SetupZoneSync runs further down.
-	SetDelegationSyncConfig(conf.DelegationSync)
+	if err := SetDelegationSyncConfig(conf.DelegationSync); err != nil {
+		return fmt.Errorf("delegationsync config: %w", err)
+	}
+	if reload {
+		warnDsyncApiClientAuthReload(conf.DelegationSync.Parent.Api.ClientAuth.Enabled())
+	}
 
 	// On first start: build the KeyDB. On reload: keep the existing
 	// KeyDB but re-apply outbound-soa-serial so a config edit takes
@@ -1283,6 +1300,15 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 
+		dpol, derr := bindDelegationPolicy(zconf)
+		if derr != nil {
+			lgConfig.Error("zone delegation policy invalid, zone in error state", "zone", zname, "err", derr)
+			zd.SetError(ConfigError, "%s", derr)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+		zd.DelegationPolicy = dpol
+
 		// Record it ON THE ZONE, not just in the log. The zone is otherwise
 		// perfectly healthy -- it loads, serves, and simply refuses every child
 		// update -- so a log line at startup is the only trace, and by the time
@@ -1493,46 +1519,47 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			}
 		}
 
-		// delegation-sync-proxy: register the post-transfer change-detection
-		// hook so an agent secondary forwards NOTIFY(CDS/CSYNC) to the parent
-		// when a relevant RRset changes in an incoming transfer. The hook is an
-		// OnZonePreRefresh callback (it needs both old and new zone data to
-		// diff) that records what changed in zd.ProxyRefreshAnalysis; the
-		// matching OnZonePostRefresh callback acts on it (P-3). Mirrors the
-		// tdns-mp MPPreRefresh/PostRefresh pattern (tdns-mp/v2/config.go), for
-		// the non-MP agent path.
-		// Register only on first load: on reload zdp is the existing registry
-		// entry and its OnZone*Refresh slices already carry these hooks, so
-		// appending again would accumulate duplicates (same convention as the
-		// OnFirstLoad-guarded setupSync block above).
-		if options[OptDelSyncProxy] && zdp.FirstZoneLoad {
-			delegationSyncQ := conf.Internal.DelegationSyncQ
-			zdp.OnZonePreRefresh = append(zdp.OnZonePreRefresh,
-				func(zd, new_zd *ZoneData) {
-					zd.ProxyDelegationPreRefresh(new_zd)
-				})
-			zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh,
-				func(zd *ZoneData) {
-					zd.ProxyDelegationPostRefresh(delegationSyncQ)
-				})
+		// delegation-sync-proxy and use-hsyncparam both register OnZone*Refresh
+		// hooks whose eligibility can change on a config reload: a zone can be
+		// reconfigured from primary to secondary, and either option can be added
+		// later. ParseZones reuses the ZoneData, so keying registration on the
+		// option or the zone type would miss a zone that only becomes eligible
+		// after its first load (FirstZoneLoad is already false by then), while
+		// re-appending on every reload would both duplicate the callbacks AND
+		// mutate the OnZone*Refresh slices while a concurrent refresh ranges
+		// them -- a data race.
+		//
+		// Both hooks resolve this the same way: register unconditionally, once,
+		// at first load, for EVERY zone, and self-gate at run time. The slices
+		// are then frozen before the zone is live (registration happens under
+		// FirstZoneLoad, before engines start), so the refresh engine ranges
+		// them without a lock; and the callbacks read their option live on each
+		// run, so a reload turning an option on or off -- or flipping the zone
+		// to secondary -- takes effect without a restart.
+		//
+		// delegation-sync-proxy: an agent secondary forwards NOTIFY(CDS/CSYNC)
+		// to the parent when a relevant RRset changes in an incoming transfer.
+		// The OnZonePreRefresh callback diffs old vs new and records the result
+		// in zd.ProxyRefreshAnalysis; the OnZonePostRefresh callback acts on it
+		// (P-3). Mirrors the tdns-mp MPPreRefresh/PostRefresh pattern for the
+		// non-MP agent path. Both self-gate on OptDelSyncProxy.
+		if zdp.FirstZoneLoad {
+			zdp.registerProxyDelegationHooks(conf.Internal.DelegationSyncQ)
 		}
 
 		// Note: DelegationBackend wiring is done synchronously above,
 		// outside the FirstZoneLoad guard, so config-reload picks up
 		// changes to the 'delegationbackend' key.
 
-		// Republish-at-signal-names consumer (RFC 9615 at-NS bootstrap):
-		// every tdns-auth SECONDARY watches incoming transfers for an apex
-		// HSYNCPARAM pubkey/pubcds flag and republishes the customer's apex
-		// KEY / CDS(+CDNSKEY) under the _sig0key/_dsboot signal names owned
-		// by each NS, into whichever local primary zone the signal name
-		// falls in. Always-on, no option gate (see signal_republish.go).
-		// Registered only on first load (the OnZonePostRefresh slice would
-		// otherwise accumulate duplicate callbacks across reloads).
-		if Globals.App.Type == AppTypeAuth && zonetype == Secondary && zdp.FirstZoneLoad {
-			zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh, func(zd *ZoneData) {
-				zd.RepublishAtSignalNames()
-			})
+		// Republish-at-signal-names consumer (RFC 9615 at-NS bootstrap): a
+		// secondary carrying the use-hsyncparam option watches incoming
+		// transfers for an apex HSYNCPARAM pubkey/pubcds flag and republishes
+		// the customer's apex KEY / CDS(+CDNSKEY) under the _sig0key/_dsboot
+		// signal names owned by each NS, into whichever local primary zone the
+		// signal name falls in (see signal_republish.go). RepublishAtSignalNames
+		// self-gates on OptUseHsyncparam, which only a secondary can hold.
+		if zdp.FirstZoneLoad {
+			zdp.registerSignalRepublishHook()
 		}
 
 		// Leader election OnFirstLoad is registered in StartAgent() (not here)
@@ -1565,21 +1592,22 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
-				Name:           zname,
-				Force:          true,     // force refresh, ignoring SOA serial, when reloading from file
-				ZoneType:       zonetype, // primary | secondary
-				PrimariesConf:  clonePeerConfs(zconf.Primaries),
-				Primaries:      resolvedPrimaries,
-				ZoneStore:      zonestore,
-				Notify:         zconf.Notify,
-				AllowNotify:    zconf.AllowNotify,
-				Downstreams:    zconf.Downstreams,
-				DownstreamAuth: zconf.DownstreamAuth,
-				ConfigUpdate:   true, // config-bearing: lets reload clear removed ACLs
-				Zonefile:       zconf.Zonefile,
-				Options:        options,
-				UpdatePolicy:   policy,
-				DnssecPolicy:   zconf.DnssecPolicy,
+				Name:             zname,
+				Force:            true,     // force refresh, ignoring SOA serial, when reloading from file
+				ZoneType:         zonetype, // primary | secondary
+				PrimariesConf:    clonePeerConfs(zconf.Primaries),
+				Primaries:        resolvedPrimaries,
+				ZoneStore:        zonestore,
+				Notify:           zconf.Notify,
+				AllowNotify:      zconf.AllowNotify,
+				Downstreams:      zconf.Downstreams,
+				DownstreamAuth:   zconf.DownstreamAuth,
+				ConfigUpdate:     true, // config-bearing: lets reload clear removed ACLs
+				Zonefile:         zconf.Zonefile,
+				Options:          options,
+				UpdatePolicy:     policy,
+				DelegationPolicy: dpol,
+				DnssecPolicy:     zconf.DnssecPolicy,
 				// Always carried (empty == inherit the global), so a config
 				// edit that REMOVES a per-zone mode actually reverts the zone
 				// to the global on reload instead of keeping the stale value.
@@ -1777,11 +1805,9 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 	}
 	return UpdatePolicy{
 		Child: UpdatePolicyDetail{
-			Type:         zconf.UpdatePolicy.Child.Type,
-			RRtypes:      childrrtypes,
-			KeyBootstrap: zconf.UpdatePolicy.Child.KeyBootstrap,
-			KeyUpload:    zconf.UpdatePolicy.Child.KeyUpload,
-			TTL:          childTTL,
+			Type:    zconf.UpdatePolicy.Child.Type,
+			RRtypes: childrrtypes,
+			TTL:     childTTL,
 		},
 		Zone: UpdatePolicyDetail{
 			Type:    zconf.UpdatePolicy.Zone.Type,
@@ -1827,6 +1853,9 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	if appMode != AppTypeAgent && zconf.DnssecPolicy == "" && tmpl.DnssecPolicy != "" {
 		zconf.DnssecPolicy = tmpl.DnssecPolicy
 	}
+	if zconf.DelegationPolicy == "" && tmpl.DelegationPolicy != "" {
+		zconf.DelegationPolicy = tmpl.DelegationPolicy
+	}
 
 	// Zonemd: merged FIELD BY FIELD, not copied whole. Under the shallow rule
 	// below a struct field is taken from the template only when the zone's is
@@ -1853,7 +1882,7 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	// A template config never sets runtime/display fields, so IsZero skips them.
 	bespoke := map[string]bool{
 		"Name": true, "Template": true, // never copied from a template
-		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, // handled above
+		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, "DelegationPolicy": true, // handled above
 		"Zonemd": true, // handled above (per-field merge, not whole-block copy)
 		// DynamicZones is a property of the TEMPLATE (API-instantiable), not
 		// of the zones stamped out from it — never copied.
@@ -2030,6 +2059,51 @@ func (conf *Config) reloadDnssecFromFile() error {
 
 	conf.Dnssec = partial.Dnssec
 	return conf.parseDnssecConfig()
+}
+
+// reloadDelegationSyncFromFile re-reads the config file, decodes just the
+// delegationsync: block, and installs it via SetDelegationSyncConfig so a
+// SIGHUP picks up policy edits before ParseZones binds them. A decode or
+// compile error leaves the previous policies in place.
+func (conf *Config) reloadDelegationSyncFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		return SetDelegationSyncConfig(conf.DelegationSync)
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	var partial struct {
+		DelegationSync DelegationSyncConf `yaml:"delegationsync"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName: "yaml",
+		Result:  &partial,
+		// Only the duration hook is needed: this block has no PeerConf/ACL
+		// fields. `partial` is zero-valued each call so ZeroFields is
+		// irrelevant. Metadata is omitted: unused/deprecated keys (a stale
+		// `parent.bootstrap:` among them) are reported on a full ParseConfig,
+		// not on this SIGHUP path.
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+		),
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding delegationsync config: %v", err)
+	}
+
+	if err := SetDelegationSyncConfig(partial.DelegationSync); err != nil {
+		return err
+	}
+	conf.DelegationSync = partial.DelegationSync
+	return nil
 }
 
 // reloadZonesFromFile re-reads the config file(s), decodes just the zones: block,

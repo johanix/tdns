@@ -20,7 +20,8 @@ const (
 	EDNS0_REPORT_OPTION_CODE        = 65003
 	EDNS0_CHUNK_OPTION_CODE         = 65004 // CHUNK EDNS(0) option for payload
 	EDNS0_CHUNK_QUERY_ENDPOINT_CODE = 65005 // CHUNK query endpoint: where receiver should send CHUNK query (host:port)
-	EDNS0_PROVIDERSYNC_OPTION_CODE  = 65006 // provider synchronisation; IANA TBD
+	EDNS0_PROVIDERSYNC_OPTION_CODE  = 65006 // provider synchronisation; IANA TBD (moved off 65002, which KEYSTATE holds)
+	EDNS0_PRIVACY_OPTION_CODE       = 65007 // privacy request/status, one octet; replaces the former PR flag bit
 
 	// localOptionCodeFirst / localOptionCodeLast bound the private-use range
 	// these are drawn from (RFC 6891 §9). Anything outside it is squatting on

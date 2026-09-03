@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -15,12 +16,9 @@ import (
 //
 // This test pins the parse, not the values.
 func TestUnpublishDsyncPlaceholderParses(t *testing.T) {
-	// Not the root zone: "_dsync." + "." is "_dsync..", which is not a legal
-	// owner name. PublishDsyncRRs builds the name the same way, so a root zone
-	// acting as a delegation-sync parent is broken on both sides -- a separate,
-	// pre-existing limitation, not what this test is about.
-	for _, zone := range []string{"example.", "child.example.", "sub.child.example."} {
-		dsyncStr := fmt.Sprintf("_dsync.%s 0 IN DSYNC CDS NOTIFY 53 .", zone)
+	for _, zone := range []string{".", "example.", "child.example.", "sub.child.example."} {
+		owner := dsyncOwnerName(zone)
+		dsyncStr := fmt.Sprintf("%s 0 IN DSYNC CDS NOTIFY 53 .", owner)
 		rr, err := dns.NewRR(dsyncStr)
 		if err != nil {
 			t.Fatalf("zone %s: the delete placeholder does not parse: %v (%q)",
@@ -29,10 +27,9 @@ func TestUnpublishDsyncPlaceholderParses(t *testing.T) {
 		if rr == nil {
 			t.Fatalf("zone %s: parsed to nil", zone)
 		}
-		if got := rr.Header().Name; got != "_dsync."+zone {
-			t.Errorf("owner = %q, want %q", got, "_dsync."+zone)
+		if got := rr.Header().Name; got != owner {
+			t.Errorf("owner = %q, want %q", got, owner)
 		}
-		// The delete works by class, so that is what must survive.
 		rr.Header().Class = dns.ClassANY
 		if rr.Header().Class != dns.ClassANY {
 			t.Error("class did not take")
@@ -54,5 +51,83 @@ func TestUnpublishDsyncPlaceholderHasAllRdataFields(t *testing.T) {
 	if _, err := dns.NewRR(`_dsync.example. 0 IN DSYNC "NOTIFY" 53 1.2.3.4`); err == nil {
 		t.Error("the old three-field placeholder parsed; this test no longer" +
 			" guards anything")
+	}
+}
+
+// Unpublish must remove the bootstrap SVCB and the receiver KEY at the DSYNC
+// UPDATE target — the same owner PublishDsyncRRs uses — not the apex KEY.
+func TestUnpublishDsyncRemovesBootstrapSVCBAndReceiverKEY(t *testing.T) {
+	t.Cleanup(func() { SetDelegationSyncConfig(DelegationSyncConf{}) })
+	SetDelegationSyncConfig(DelegationSyncConf{
+		Parent: DelegationSyncParentConf{
+			Update: DsyncUpdateSchemeConf{
+				DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "updates.{ZONENAME}"},
+			},
+		},
+	})
+	q := make(chan UpdateRequest, 1)
+	zd := &ZoneData{
+		ZoneName: "example.",
+		KeyDB:    &KeyDB{UpdateQ: q},
+	}
+	if err := zd.UnpublishDsyncRRs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ur := <-q
+	target := DsyncUpdateTargetName("example.")
+	if target != "updates.example." {
+		t.Fatalf("DsyncUpdateTargetName = %q", target)
+	}
+	var sawSVCB, sawKEY, sawApexKEY bool
+	for _, rr := range ur.Actions {
+		h := rr.Header()
+		if h.Name == "example." && h.Rrtype == dns.TypeKEY {
+			sawApexKEY = true
+		}
+		if h.Name != target {
+			continue
+		}
+		if h.Class != dns.ClassANY {
+			t.Errorf("%s at %s: class %d, want ANY", dns.TypeToString[h.Rrtype], target, h.Class)
+		}
+		switch h.Rrtype {
+		case dns.TypeSVCB:
+			sawSVCB = true
+		case dns.TypeKEY:
+			sawKEY = true
+		}
+	}
+	if !sawSVCB || !sawKEY {
+		t.Fatalf("unpublish missing SVCB or KEY at %s", target)
+	}
+	if sawApexKEY {
+		t.Fatal("unpublish deleted the apex KEY; that is the parent's own SIG(0) identity")
+	}
+}
+
+func TestUnpublishDsyncSkipsApexSVCBAndKEY(t *testing.T) {
+	t.Cleanup(func() { SetDelegationSyncConfig(DelegationSyncConf{}) })
+	SetDelegationSyncConfig(DelegationSyncConf{
+		Parent: DelegationSyncParentConf{
+			Update: DsyncUpdateSchemeConf{
+				DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "{ZONENAME}"},
+			},
+		},
+	})
+	q := make(chan UpdateRequest, 1)
+	zd := &ZoneData{
+		ZoneName: "example.",
+		KeyDB:    &KeyDB{UpdateQ: q},
+	}
+	if err := zd.UnpublishDsyncRRs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ur := <-q
+	for _, rr := range ur.Actions {
+		h := rr.Header()
+		if h.Name == "example." && h.Class == dns.ClassANY &&
+			(h.Rrtype == dns.TypeSVCB || h.Rrtype == dns.TypeKEY) {
+			t.Fatalf("unpublish ClassANY %s at apex", dns.TypeToString[h.Rrtype])
+		}
 	}
 }

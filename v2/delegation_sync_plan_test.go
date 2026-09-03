@@ -126,7 +126,7 @@ func TestPlanRecordsNotAdvertisedSeparately(t *testing.T) {
 // credential arrives out of band and no amount of retrying produces one.
 func TestPlanApiGateOnCredential(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
-	zd.Parent = "example."
+	zd.SetParent("example.")
 	// Validated: the DSYNC lookup DNSSEC-validated, so the credential gate
 	// below is what is actually being exercised. The validation gate itself has
 	// its own test.
@@ -168,7 +168,7 @@ func TestPlanApiGateOnCredential(t *testing.T) {
 // zones under one parent gets the right one in the plan too.
 func TestPlanApiGateUsesTheChildSpecificCredential(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
-	zd.Parent = "example."
+	zd.SetParent("example.")
 	// Validated, or this test proves nothing: the DNSSEC gate runs BEFORE the
 	// credential gate, so an unvalidated result is skipped for that reason and
 	// the credential lookup never happens. The assertion below -- no candidate
@@ -229,7 +229,7 @@ func TestSyncWithParentReportsRatherThanFailsWhenNothingIsUsable(t *testing.T) {
 		{"NOTIFY", "zone is unsigned"}}}
 
 	msg, err := zd.SyncWithParent(context.Background(), nil, nil, nil, plan,
-		&ProxyDelegationAnalysis{NsOrGlueChanged: true})
+		&ProxyDelegationAnalysis{NsOrGlueChanged: true}, nil)
 	if err != nil {
 		t.Fatalf("unusable plan returned an error: %v", err)
 	}
@@ -510,7 +510,7 @@ func TestWalkSyncPlanCancelledMidwayReportsWhatWasTried(t *testing.T) {
 // DSYNC names an attacker-controlled zone whose own records validate fine.
 func TestPlanApiRequiresAValidatedDsyncLookup(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
-	zd.Parent = "example."
+	zd.SetParent("example.")
 	setChildApiCredentials(t, DsyncApiChildCredentialConf{
 		Parent: "example.", Username: "u", Key: "k"})
 

@@ -16,11 +16,30 @@ import (
 // It also pins two things that are easy to break by accident: the embedded
 // DsyncDnsSchemeConf must squash (mapstructure runs with TagName "yaml", so the
 // squash keyword has to be in the YAML tag -- `yaml:",inline"` decodes to
-// nothing at all), and an absent require-dnssec must stay nil rather than
-// becoming false, since the reader treats absent as "default true".
+// nothing at all), and an absent require-dnssec on a named policy must stay nil
+// rather than becoming false, since compile treats absent as "default true".
 func TestDelegationSyncFullModel(t *testing.T) {
 	const y = `
 delegationsync:
+   policies:
+      default:
+         bootstrap:
+            mechanisms: [ at-apex, at-ns ]
+            require-dnssec: true
+            retry:
+               max-attempts: 7
+               interval: 5s
+      permissive:
+         bootstrap:
+            mechanisms: [ at-apex, at-ns ]
+            require-dnssec: false
+            manual: true
+            allow-unvalidated-upload: true
+      locked-down:
+         bootstrap:
+            mechanisms: []
+            manual: true
+            allow-unvalidated-upload: false
    parent:
       schemes: [ notify, update ]
       update:
@@ -31,17 +50,15 @@ delegationsync:
          keygen:
             algorithm: ED25519
             generator: /usr/bin/keygen
-         key-verification:
-            mechanisms: [ dnssec, tlsa ]
-            max-attempts: 7
-            retry-interval: 5s
-            require-dnssec: false
    child:
       schemes: [ update, notify ]
       update:
          keygen:
             algorithm: ED25519
             generator: /usr/bin/childkeygen
+         bootstrap:
+            methods: [ at-apex, at-ns ]
+         allow-insecure: true
 `
 	var m map[string]interface{}
 	if err := yaml.Unmarshal([]byte(y), &m); err != nil {
@@ -62,25 +79,45 @@ delegationsync:
 	if p.Update.Keygen.Algorithm != "ED25519" || p.Update.Keygen.Generator != "/usr/bin/keygen" {
 		t.Errorf("parent keygen: %+v", p.Update.Keygen)
 	}
-	kv := p.Update.KeyVerification
-	if len(kv.Mechanisms) != 2 || kv.MaxAttempts != 7 || kv.RetryInterval.String() != "5s" {
-		t.Errorf("key-verification: %+v", kv)
+	def := c.DelegationSync.Policies["default"]
+	if len(def.Bootstrap.Mechanisms) != 2 || def.Bootstrap.Retry.MaxAttempts != 7 || def.Bootstrap.Retry.Interval.String() != "5s" {
+		t.Errorf("default policy: %+v", def.Bootstrap)
 	}
-	if kv.RequireDnssec == nil || *kv.RequireDnssec {
-		t.Errorf("require-dnssec: %v (want explicit false)", kv.RequireDnssec)
+	if def.Bootstrap.RequireDnssec == nil || !*def.Bootstrap.RequireDnssec {
+		t.Errorf("default require-dnssec: %v (want explicit true)", def.Bootstrap.RequireDnssec)
+	}
+	perm := c.DelegationSync.Policies["permissive"]
+	if perm.Bootstrap.RequireDnssec == nil || *perm.Bootstrap.RequireDnssec {
+		t.Errorf("permissive require-dnssec: %v (want explicit false)", perm.Bootstrap.RequireDnssec)
+	}
+	if !perm.Bootstrap.Manual || !perm.Bootstrap.AllowUnvalidatedUpload {
+		t.Errorf("permissive flags: %+v", perm.Bootstrap)
+	}
+	locked := c.DelegationSync.Policies["locked-down"]
+	if locked.Bootstrap.Mechanisms == nil || len(locked.Bootstrap.Mechanisms) != 0 {
+		t.Errorf("locked-down mechanisms: %v (want empty, not nil-or-filled)", locked.Bootstrap.Mechanisms)
 	}
 	ch := c.DelegationSync.Child
 	if ch.Update.Keygen.Generator != "/usr/bin/childkeygen" {
 		t.Errorf("child keygen: %+v", ch.Update.Keygen)
 	}
+	if len(ch.Update.Bootstrap.Methods) != 2 {
+		t.Errorf("child bootstrap methods: %v", ch.Update.Bootstrap.Methods)
+	}
+	if !ch.Update.AllowInsecure {
+		t.Error("child update allow-insecure: false (want true; the D-7 knob must decode)")
+	}
+	if c.DelegationSync.Child.Api.AllowInsecure {
+		t.Error("child update allow-insecure leaked into child api allow-insecure")
+	}
 	// Absent require-dnssec must stay nil, not become false.
 	var m2 map[string]interface{}
-	_ = yaml.Unmarshal([]byte("delegationsync:\n   parent:\n      update:\n         target: x\n"), &m2)
+	_ = yaml.Unmarshal([]byte("delegationsync:\n   policies:\n      custom:\n         bootstrap:\n            mechanisms: [ at-apex ]\n"), &m2)
 	var c2 Config
 	if err := decodeConfigMap(m2, &c2, nil); err != nil {
 		t.Fatalf("decode 2: %v", err)
 	}
-	if c2.DelegationSync.Parent.Update.KeyVerification.RequireDnssec != nil {
+	if c2.DelegationSync.Policies["custom"].Bootstrap.RequireDnssec != nil {
 		t.Error("an absent require-dnssec decoded as non-nil; absent and false must differ")
 	}
 }

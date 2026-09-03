@@ -35,7 +35,6 @@ type TargetUpdateStatus struct {
 	EDEMessage string
 }
 
-// Note: the target.Addresses must already be in addr:port format.
 // exchangeCancellable performs a DNS exchange that a cancelled context actually
 // interrupts.
 //
@@ -74,6 +73,7 @@ func exchangeCancellable(ctx context.Context, client *dns.Client, msg *dns.Msg, 
 }
 
 // SendUpdate sends a DNS UPDATE to the first address that answers.
+// Note: the addrs must already be in addr:port format.
 //
 // ctx bounds the whole attempt, not just the dial. The exchange goes through
 // exchangeCancellable, which is what makes that true: ExchangeContext alone
@@ -86,8 +86,26 @@ func exchangeCancellable(ctx context.Context, client *dns.Client, msg *dns.Msg, 
 // A cancel is reported as such, wrapping context.Canceled, and never as a
 // transport failure. The difference matters to walkSyncPlan: a failed transport
 // means try the next one, an abandoned one means stop and say so.
+//
+// Return contract: the error reports a TRANSPORT-level failure — no address
+// produced a DNS response at all (i/o timeout, no route to host, connection
+// refused) — or an abandoned exchange. A response carrying a rejection RCODE is
+// a successful exchange, so it is reported through the returned rcode with a NIL
+// error; the caller decides what the rejection means.
+//
+// This matters because the whole delegation-sync RCODE policy of
+// draft-ietf-dnsop-delegation-mgmt-via-ddns-02 (BADKEY -> re-bootstrap, REFUSED
+// -> bounded retry; see sendUpdateWithRetry) keys on the rcode. An earlier
+// version returned the rcode ONLY on the NOERROR path and folded every rejection
+// into "all target addresses responded with errors", which made those branches
+// unreachable: every BADKEY and REFUSED arrived as a transport error carrying
+// rcode 0. ksk_rollover_ds_push.go already documented this contract and
+// mis-categorised every parent rejection as SoftfailTransport because of it.
+//
+// Every caller must therefore check the rcode as well as the error; a nil error
+// alone does NOT mean the parent applied the update.
 func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
-	if zonename == "." {
+	if zonename == "" {
 		lgDns.Error("SendUpdate: zone name not specified")
 		return 0, UpdateResult{}, fmt.Errorf("zone name not specified")
 	}
@@ -117,6 +135,20 @@ func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []stri
 	// UPDATEs regardless of size, not only the large ones.
 	useTCP := true
 	client := &dns.Client{Net: "tcp"}
+
+	// The last rejection RCODE actually received from a responding address,
+	// and the EDE that came with it. Tracked across the loop so that a
+	// non-NOERROR answer is still reported to the caller after the remaining
+	// addresses have been tried: "try the next address" must not cost us the
+	// rejection reason -- neither the RCODE nor the EDE. The retry policy
+	// (sendUpdateWithRetry) reads the EDE off the top-level UpdateResult to
+	// tell a REFUSED that will resolve itself (KEY-KNOWN-NOT-TRUSTED) from one
+	// that will not (KEY-VALIDATION-FAILED, MANUAL-BOOTSTRAP-REQUIRED).
+	var lastRcode int
+	var gotResponse bool
+	var lastEDEFound bool
+	var lastEDECode uint16
+	var lastEDEMessage, lastEDESender string
 
 	for _, dst := range addrs {
 		lgDns.Debug("sending DNS UPDATE", "zone", zonename, "dst", dst,
@@ -175,17 +207,35 @@ func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []stri
 			Sender:     edeSender,
 		}
 
+		lastRcode, gotResponse = res.Rcode, true
+		lastEDEFound, lastEDECode, lastEDEMessage, lastEDESender = edeFound, edeCode, edeMessage, edeSender
+
 		if res.Rcode != dns.RcodeSuccess {
 			lgDns.Debug("got bad rcode", "rcode", dns.RcodeToString[res.Rcode], "response", res.String())
 			lgDns.Warn("error rcode from target, trying next address", "dst", dst, "rcode", dns.RcodeToString[res.Rcode])
 			continue
 		} else {
 			lgDns.Debug("got rcode NOERROR", "response", res.String())
+			ur.Rcode = res.Rcode
+			ur.EDEFound, ur.EDECode, ur.EDEMessage, ur.EDESender = edeFound, edeCode, edeMessage, edeSender
 			return res.Rcode, ur, nil
 		}
 	}
 
-	return 0, ur, fmt.Errorf("all target addresses %v responded with errors or were unreachable", addrs)
+	// At least one address answered, but none with NOERROR. That is a parent
+	// REJECTION, not a transport failure: hand the caller the rcode and the
+	// EDE that came with it (and a nil error) so it can apply the draft's
+	// per-RCODE, per-EDE policy.
+	if gotResponse {
+		lgDns.Warn("all target addresses rejected the update", "zone", zonename,
+			"addresses", addrs, "rcode", dns.RcodeToString[lastRcode], "ede", lastEDECode, "edeMsg", lastEDEMessage)
+		ur.Rcode = lastRcode
+		ur.EDEFound, ur.EDECode, ur.EDEMessage, ur.EDESender = lastEDEFound, lastEDECode, lastEDEMessage, lastEDESender
+		return lastRcode, ur, nil
+	}
+
+	// No address produced a DNS response at all — a genuine transport failure.
+	return 0, ur, fmt.Errorf("all target addresses %v were unreachable", addrs)
 }
 
 // Parent is the zone to apply the update to.
@@ -193,12 +243,12 @@ func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []stri
 // CreateChildUpdate constructs a DNS UPDATE message for the given parent zone that applies the provided additions and removals for a child delegation.
 //
 // If any removed RR is an NS whose target name is within the child zone, the function also removes A and AAAA glue RRsets for that NS name.
-// It validates that parent and child are non-empty and not ".", returning an error when validation fails.
+// It validates that parent is non-empty and that child is non-empty and not ".".
 // When Globals.Debug is set, the resulting message is printed.
 //
 // It returns the constructed DNS UPDATE message, or an error if validation fails.
 func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, error) {
-	if parent == "." || parent == "" {
+	if parent == "" {
 		return nil, fmt.Errorf("parent zone name not specified. Terminating")
 	}
 	if child == "." || child == "" {
@@ -265,7 +315,7 @@ func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS 
 // same nil either way, and which of the two it means depends on who filled it
 // in, so the answer is a parameter rather than an inference.
 func CreateChildReplaceUpdateWithDS(parent, child string, newNS, newA, newAAAA, newDS []dns.RR, dsKnown bool) (*dns.Msg, error) {
-	if parent == "." || parent == "" {
+	if parent == "" {
 		return nil, fmt.Errorf("parent zone name not specified. Terminating")
 	}
 	if child == "." || child == "" {

@@ -18,7 +18,7 @@ func TestOriginationAPICommandSet(t *testing.T) {
 	gated := []string{
 		"bump", "sign-zone", "resign-zone",
 		"policy-set", "change-policy", "policy-reset",
-		"publish-dsync-rrset", "unpublish-dsync-rrset",
+		"publish", "unpublish",
 	}
 	for _, cmd := range gated {
 		if !originationAPICommands[cmd] {
@@ -31,7 +31,7 @@ func TestOriginationAPICommandSet(t *testing.T) {
 		"list-zones",      // read-only
 		"show-nsec-chain", // read-only
 		"reload",          // re-pull from upstream: the opposite of originating
-		"status",          // read-only (dsync handler)
+		"status",          // read-only (parentsync handler)
 		"freeze", "thaw",  // gated, but at their own cases (ordering matters)
 	}
 	for _, cmd := range ungated {

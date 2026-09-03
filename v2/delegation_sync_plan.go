@@ -152,14 +152,11 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 		return plan, nil
 	}
 
-	if zd.Parent == "" || zd.Parent == "." {
-		p, err := imr.ParentZone(zd.ZoneName)
-		if err != nil {
-			return nil, fmt.Errorf("BuildParentSyncPlan: ParentZone(%s): %w", zd.ZoneName, err)
-		}
-		zd.Parent = p
+	parent, err := zd.ResolveParentVia(imr)
+	if err != nil {
+		return nil, fmt.Errorf("BuildParentSyncPlan: %w", err)
 	}
-	plan.Parent = zd.Parent
+	plan.Parent = parent
 
 	// THE single discovery. Everything below reads this result.
 	dsyncRes, err := imr.DsyncDiscovery(ctx, zd.ZoneName, Globals.Verbose)
@@ -234,7 +231,7 @@ func (zd *ZoneData) updateGateBlocked(kdb *KeyDB, role SyncRole) (string, bool) 
 	if role != SyncRoleProxy {
 		return "", false
 	}
-	state, err := zd.proxyUpdateKeyState(kdb)
+	state, err := zd.proxySig0PublicationState(kdb)
 	if err != nil {
 		return fmt.Sprintf("key state: %v", err), true
 	}
@@ -335,10 +332,10 @@ func (zd *ZoneData) planConsiderApi(res DsyncResult, plan *ParentSyncPlan) {
 	// The credential arrives out of band by definition (§10), so its absence
 	// is settled here rather than after a round trip: there is nothing to wait
 	// for and nothing to retry.
-	cred, ok := DelegationSyncConfig().Child.Api.CredentialForChild(zd.Parent, zd.ZoneName)
-	if !ok || cred.Username == "" || cred.Key == "" {
+	cred, ok := DelegationSyncConfig().Child.Api.CredentialForChild(zd.GetParent(), zd.ZoneName)
+	if !ok || !cred.Usable() {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{"API",
-			fmt.Sprintf("no usable credential for parent %s (delegationsync.child.api.credentials)", zd.Parent)})
+			fmt.Sprintf("no usable credential for parent %s (delegationsync.child.api.credentials)", zd.GetParent())})
 		return
 	}
 	// No address resolution for API (§16.7): the DSYNC target is a service
@@ -438,7 +435,7 @@ func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncR
 // caller that sees only the last one cannot tell which transport was even
 // expected to work.
 func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest,
-	imr *Imr, plan *ParentSyncPlan, analysis *ProxyDelegationAnalysis) (string, error) {
+	imr *Imr, plan *ParentSyncPlan, analysis *ProxyDelegationAnalysis, updateSync *DelegationSyncStatus) (string, error) {
 
 	if !plan.Usable() {
 		lgDns.Info("delegation-sync-proxy: nothing forwarded", "zone", zd.ZoneName,
@@ -449,7 +446,7 @@ func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan
 	return zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
 		switch cand.Scheme {
 		case "UPDATE":
-			return zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target)
+			return zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target, updateSync)
 		case "API":
 			return zd.ProxyApiParent(ctx, imr, cand.Target, analysis)
 		case "NOTIFY":

@@ -32,6 +32,7 @@ import (
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 )
@@ -92,7 +93,7 @@ forward:
 }
 
 func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
-	forwards, err := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
 		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.3"}}},
 		{Zone: "Foo.Bar", Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "doq"},
@@ -102,8 +103,8 @@ func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 		}},
 		{Zone: "bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.2", Transport: "dot", Port: 8853}}},
 	})
-	if err != nil {
-		t.Fatalf("BuildImrForwards: %v", err)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
 	}
 	// Most-specific first: foo.bar. (2 labels), bar. (1), . (0).
 	if forwards[0].Zone != "foo.bar." || forwards[1].Zone != "bar." || forwards[2].Zone != "." {
@@ -130,55 +131,93 @@ func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 	}
 
 	// trust-ad demands an authenticated channel and must be accepted on one.
-	if _, err := BuildImrForwards([]ImrForwardConf{
+	if _, d := BuildImrForwards([]ImrForwardConf{
 		{Zone: "ok.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot", TLSServerName: "dns.example.com"},
 			{Addr: "192.0.2.2", Transport: "doq"},
 		}},
-	}); err != nil {
-		t.Errorf("trust-ad with verified encrypted upstreams rejected: %v", err)
+	}); len(d) != 0 {
+		t.Errorf("trust-ad with verified encrypted upstreams rejected: %v", d)
 	}
 
+	// Every one of these used to abort the whole build, and with it the
+	// daemon (#475). Each must now produce a diag AND leave the table in the
+	// stated shape: a zone that cannot be named (or is a duplicate of one
+	// already configured) is DROPPED, everything else is QUARANTINED so that
+	// names under the zone SERVFAIL instead of falling back to iteration.
 	bad := []struct {
 		name string
 		conf []ImrForwardConf
+		// wantZones is the number of zones that reach the table.
+		wantZones int
+		// wantQuarantined is how many of them are quarantined.
+		wantQuarantined int
+		// wantUpQuarantined counts quarantined upstreams across the table.
+		wantUpQuarantined int
 	}{
-		{"hostname addr", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "dns.example.com"}}}}},
-		{"unknown transport", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "smtp"}}}}},
-		{"tls options on do53", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", TLSServerName: "x.example."}}}}},
+		{"hostname addr", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "dns.example.com"}}}}, 1, 1, 1},
+		{"unknown transport", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "smtp"}}}}, 1, 1, 1},
+		{"tls options on do53", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", TLSServerName: "x.example."}}}}, 1, 1, 1},
+		// The duplicate is dropped and the FIRST definition stands, serving.
 		{"duplicate zone", []ImrForwardConf{
 			{Zone: "foo.bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}},
 			{Zone: "Foo.bar", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.2"}}},
-		}},
-		{"no upstreams", []ImrForwardConf{{Zone: "foo.bar."}}},
-		{"no zone", []ImrForwardConf{{Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}},
+		}, 1, 0, 0},
+		// Kept, not dropped: dropping it would hand the zone to iteration.
+		{"no upstreams", []ImrForwardConf{{Zone: "foo.bar."}}, 1, 1, 0},
+		{"no zone", []ImrForwardConf{{Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}, 0, 0, 0},
 		// A spoofable AD bit must not be a Secure-cache oracle: trust-ad
-		// over plaintext or unverified TLS is refused at build time.
-		{"trust-ad on do53", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}},
-		{"trust-ad on tcp", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "tcp"}}}}},
-		{"trust-ad with insecure dot", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "dot", Insecure: true}}}}},
+		// over plaintext or unverified TLS is quarantined at build time.
+		{"trust-ad on do53", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}, 1, 1, 1},
+		{"trust-ad on tcp", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "tcp"}}}}, 1, 1, 1},
+		{"trust-ad with insecure dot", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "dot", Insecure: true}}}}, 1, 1, 1},
+		// The one case that keeps serving: the dot upstream authenticates,
+		// so only the plaintext one is quarantined and the zone survives
+		// with reduced redundancy.
 		{"trust-ad with one plaintext upstream", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot"},
 			{Addr: "192.0.2.2"},
-		}}}},
+		}}}, 1, 0, 1},
 	}
 	for _, b := range bad {
-		if _, err := BuildImrForwards(b.conf); err == nil {
-			t.Errorf("%s: config accepted, want error", b.name)
+		forwards, diags := BuildImrForwards(b.conf)
+		if len(diags) == 0 {
+			t.Errorf("%s: config accepted silently, want a diag", b.name)
+		}
+		if len(forwards) != b.wantZones {
+			t.Errorf("%s: %d zone(s) in the table, want %d", b.name, len(forwards), b.wantZones)
+			continue
+		}
+		gotZQ, gotUQ := 0, 0
+		for _, fz := range forwards {
+			if fz.isQuarantined() {
+				gotZQ++
+			}
+			for _, up := range fz.Upstreams {
+				if up.isQuarantined() {
+					gotUQ++
+				}
+			}
+		}
+		if gotZQ != b.wantQuarantined {
+			t.Errorf("%s: %d quarantined zone(s), want %d", b.name, gotZQ, b.wantQuarantined)
+		}
+		if gotUQ != b.wantUpQuarantined {
+			t.Errorf("%s: %d quarantined upstream(s), want %d", b.name, gotUQ, b.wantUpQuarantined)
 		}
 	}
 }
 
 // The TLS settings of an encrypted upstream must reach the DNS client.
 func TestForwardUpstreamTLSConfig(t *testing.T) {
-	forwards, err := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
 		{Zone: "a.example.", Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "doq", TLSServerName: "dns.example.com"},
 			{Addr: "192.0.2.2", Transport: "dot", Insecure: true},
 		}},
 	})
-	if err != nil {
-		t.Fatalf("BuildImrForwards: %v", err)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
 	}
 	doq := forwards[0].Upstreams[0].Client.(*core.DNSClient)
 	if doq.TLSConfig.ServerName != "dns.example.com" {
@@ -200,13 +239,13 @@ func TestForwardUpstreamTLSConfig(t *testing.T) {
 }
 
 func TestForwardZoneFor(t *testing.T) {
-	forwards, err := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
 		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}},
 		{Zone: "sub.foo.bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.2"}}},
 		{Zone: "foo.bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.3"}}},
 	})
-	if err != nil {
-		t.Fatalf("BuildImrForwards: %v", err)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
 	}
 	// foo.bar. is deliberately BOTH a stub and a forward zone: equal
 	// specificity means the forward wins — a stub overrides only when it is
@@ -581,9 +620,9 @@ func startTestUpstreamDoQ(t *testing.T, cert tls.Certificate) (string, uint16, *
 
 func newForwardTestImr(t *testing.T, conf []ImrForwardConf) *Imr {
 	t.Helper()
-	forwards, err := BuildImrForwards(conf)
-	if err != nil {
-		t.Fatalf("BuildImrForwards: %v", err)
+	forwards, diags := BuildImrForwards(conf)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
 	}
 	lg := log.New(os.Stderr, "test", log.LstdFlags)
 	imr := &Imr{
@@ -616,7 +655,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 	// Positive answer, via the real entry point so the forward hook in
 	// IterativeDNSQueryWithLoopDetection is exercised, not forwardQuery
 	// directly. The empty serverMap must be irrelevant.
-	rrset, rcode, cctx, transport, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, cctx, transport, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query over DoT: %v", err)
 	}
@@ -642,7 +681,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 	}
 
 	// AD=0 from the upstream must map to Insecure, never borrow Secure.
-	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "unsigned.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false); err != nil {
+	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "unsigned.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone); err != nil {
 		t.Fatalf("AD=0 query: %v", err)
 	}
 	if crrset := imr.Cache.Get("unsigned.fwd.example.", dns.TypeA); crrset == nil || crrset.State != cache.ValidationStateInsecure {
@@ -651,7 +690,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 
 	// Negatives: the upstream authenticated the denial (AD=1), so the
 	// cached negative must be Secure too — trust-ad is not positives-only.
-	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "nx.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "nx.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded NXDOMAIN query: %v", err)
 	}
@@ -662,7 +701,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 		t.Errorf("trust-ad NXDOMAIN with upstream AD=1: cached = %+v, want state secure", crrset)
 	}
 
-	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded NODATA query: %v", err)
 	}
@@ -687,7 +726,7 @@ func TestForwardQueryValidatesLocally(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	rrset, rcode, cctx, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, cctx, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query: %v", err)
 	}
@@ -711,7 +750,7 @@ func TestForwardQueryValidatesLocally(t *testing.T) {
 
 	// The upstream marks its NODATA AD=1 too; without trust-ad that must
 	// not become a Secure negative.
-	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, false); err != nil {
+	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone); err != nil {
 		t.Fatalf("forwarded NODATA query: %v", err)
 	}
 	if crrset := imr.Cache.Get("www.fwd.example.", dns.TypeMX); crrset != nil && crrset.State == cache.ValidationStateSecure {
@@ -733,7 +772,7 @@ func TestForwardQueryDoH(t *testing.T) {
 	})
 	trustUpstreamCert(t, imr.ForwardZones()[0], pool)
 
-	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query over DoH: %v", err)
 	}
@@ -759,7 +798,7 @@ func TestForwardQueryDoQ(t *testing.T) {
 	})
 	trustUpstreamCert(t, imr.ForwardZones()[0], pool)
 
-	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query over DoQ: %v", err)
 	}
@@ -793,7 +832,7 @@ func TestForwardQueryFailover(t *testing.T) {
 		c.DNSClientTCP.Timeout = c.Timeout
 	}
 
-	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("failover query: %v", err)
 	}
@@ -808,7 +847,7 @@ func TestForwardQueryFailover(t *testing.T) {
 	c.Timeout = 500 * time.Millisecond
 	c.DNSClientUDP.Timeout = c.Timeout
 	c.DNSClientTCP.Timeout = c.Timeout
-	_, rcode, cctx, _, err := dead.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	_, rcode, cctx, _, err := dead.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err == nil {
 		t.Fatal("all upstreams dead: want an error, got none")
 	}
@@ -846,7 +885,7 @@ func TestForwardRootPrimingSkipsFetch(t *testing.T) {
 		t.Fatalf("root serverMap not seeded: match=%q servers=%d err=%v", bestmatch, len(servers), err)
 	}
 
-	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, servers, false, false)
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, servers, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query after hints-only priming: %v", err)
 	}
@@ -900,7 +939,7 @@ func TestProbeForwardUpstreams(t *testing.T) {
 	}
 
 	// The resolver still serves through the live upstream despite the error.
-	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil || rcode != dns.RcodeSuccess || rrset == nil {
 		t.Fatalf("query while DEGRADED: rcode=%d rrset=%v err=%v", rcode, rrset, err)
 	}
@@ -925,7 +964,7 @@ func TestProbeForwardUpstreams(t *testing.T) {
 	imr.setZoneTable([]*ForwardZone{recovered}, nil, nil)
 	imr.updateForwardUpstreamError()
 
-	if _, _, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, true, false); err != nil {
+	if _, _, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, true, edns0.PrivacyNone); err != nil {
 		t.Fatalf("recovery query: %v", err)
 	}
 	if errs := imr.errorRegistry.List(); len(errs) != 0 {
@@ -990,7 +1029,7 @@ func TestForwardQueryCancelIsNotAnUpstreamFailure(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, _, _, _, err := imr.forwardQuery(ctx, "www.fwd.example.", dns.TypeA, imr.ForwardZones()[0], false, false)
+	_, _, _, _, err := imr.forwardQuery(ctx, "www.fwd.example.", dns.TypeA, imr.ForwardZones()[0], false, edns0.PrivacyNone)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -1193,14 +1232,14 @@ func TestBuildImrForwardsCAFile(t *testing.T) {
 		t.Fatalf("write garbage: %v", err)
 	}
 
-	forwards, err := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
 		{Zone: ".", Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot", TLSServerName: "dns.example.", CAFile: caFile},
 			{Addr: "192.0.2.2", Transport: "dot", TLSServerName: "dns.example."},
 		}},
 	})
-	if err != nil {
-		t.Fatalf("BuildImrForwards with ca-file: %v", err)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards with ca-file: unexpected diags: %v", diags)
 	}
 	withCA := forwards[0].Upstreams[0].Client.(*core.DNSClient)
 	if withCA.TLSConfig == nil || withCA.TLSConfig.RootCAs == nil {
@@ -1228,8 +1267,15 @@ func TestBuildImrForwardsCAFile(t *testing.T) {
 			{Addr: "192.0.2.1", Transport: "dot", CAFile: notPEM}}}}},
 	}
 	for _, b := range bad {
-		if _, err := BuildImrForwards(b.conf); err == nil {
-			t.Errorf("%s: accepted, want an error", b.name)
+		forwards, diags := BuildImrForwards(b.conf)
+		if len(diags) == 0 {
+			t.Errorf("%s: accepted silently, want a diag", b.name)
+		}
+		// The zone stays in the table with its only upstream quarantined,
+		// so names under it SERVFAIL rather than reaching an unverified
+		// upstream or falling back to iteration.
+		if len(forwards) != 1 || !forwards[0].isQuarantined() {
+			t.Errorf("%s: want 1 quarantined zone, got %d zone(s)", b.name, len(forwards))
 		}
 	}
 }
@@ -1276,7 +1322,7 @@ func TestForwardBlackholedUpstreamDoesNotStarveTheNext(t *testing.T) {
 
 	start := time.Now()
 	rrset, rcode, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA,
-		map[string]*cache.AuthServer{}, false, false)
+		map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("blackholed first upstream starved the second: %v (after %v)", err, elapsed)
@@ -1326,7 +1372,7 @@ func TestForwardStarvedUpstreamIsNotRecordedAsFailed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
 	defer cancel()
 	_, _, _, _, _ = imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA,
-		map[string]*cache.AuthServer{}, false, false)
+		map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 
 	for _, up := range imr.ForwardZones()[0].Upstreams {
 		if up.Addr != good {

@@ -12,17 +12,28 @@ import (
 // with a config error).
 
 func TestDelSyncProxyOptionMapping(t *testing.T) {
-	const name = "delegation-sync-proxy"
+	// New canonical name.
+	const canonical = "parentsync-proxy"
 
-	opt, ok := StringToZoneOption[name]
+	opt, ok := StringToZoneOption[canonical]
 	if !ok {
-		t.Fatalf("StringToZoneOption has no entry for %q", name)
+		t.Fatalf("StringToZoneOption has no entry for %q", canonical)
 	}
 	if opt != OptDelSyncProxy {
-		t.Fatalf("StringToZoneOption[%q] = %d, want OptDelSyncProxy (%d)", name, opt, OptDelSyncProxy)
+		t.Fatalf("StringToZoneOption[%q] = %d, want OptDelSyncProxy (%d)", canonical, opt, OptDelSyncProxy)
 	}
-	if got := ZoneOptionToString[OptDelSyncProxy]; got != name {
-		t.Fatalf("ZoneOptionToString[OptDelSyncProxy] = %q, want %q", got, name)
+	if got := ZoneOptionToString[OptDelSyncProxy]; got != canonical {
+		t.Fatalf("ZoneOptionToString[OptDelSyncProxy] = %q, want %q", got, canonical)
+	}
+
+	// Deprecated alias must still resolve.
+	const deprecated = "delegation-sync-proxy"
+	optAlias, ok := StringToZoneOption[deprecated]
+	if !ok {
+		t.Fatalf("StringToZoneOption has no entry for deprecated alias %q", deprecated)
+	}
+	if optAlias != OptDelSyncProxy {
+		t.Fatalf("StringToZoneOption[%q] (deprecated alias) = %d, want OptDelSyncProxy (%d)", deprecated, optAlias, OptDelSyncProxy)
 	}
 }
 
@@ -30,21 +41,39 @@ func TestDelSyncProxyOptionMapping(t *testing.T) {
 // not reject it as unknown. A zone with the option set should come back with
 // options[OptDelSyncProxy] == true and no ConfigError recorded for it.
 func TestParseZoneOptionsAcceptsDelSyncProxy(t *testing.T) {
+	// New canonical name.
 	zd := &ZoneData{ZoneName: "child.example."}
 	zconf := &ZoneConf{
 		Name:        "child.example.",
 		Type:        "secondary",
-		OptionsStrs: []string{"delegation-sync-proxy"},
+		OptionsStrs: []string{"parentsync-proxy"},
 	}
 
 	options := parseZoneOptions(nil, "child.example.", zconf, zd)
 
 	if !options[OptDelSyncProxy] {
-		t.Fatalf("parseZoneOptions did not enable OptDelSyncProxy; got %v", options)
+		t.Fatalf("parseZoneOptions did not enable OptDelSyncProxy with canonical name; got %v", options)
 	}
 	for _, e := range zd.ErrorList() {
 		if e.Type == ConfigError {
 			t.Fatalf("unexpected ConfigError after parsing a valid option: %q", e.Msg)
+		}
+	}
+
+	// Deprecated alias: still accepted (no ConfigError), but a warning is expected.
+	zdAlias := &ZoneData{ZoneName: "child2.example."}
+	zconfAlias := &ZoneConf{
+		Name:        "child2.example.",
+		Type:        "secondary",
+		OptionsStrs: []string{"delegation-sync-proxy"},
+	}
+	optionsAlias := parseZoneOptions(nil, "child2.example.", zconfAlias, zdAlias)
+	if !optionsAlias[OptDelSyncProxy] {
+		t.Fatalf("parseZoneOptions did not enable OptDelSyncProxy with deprecated alias; got %v", optionsAlias)
+	}
+	for _, e := range zdAlias.ErrorList() {
+		if e.Type == ConfigError {
+			t.Fatalf("unexpected ConfigError after parsing deprecated alias: %q", e.Msg)
 		}
 	}
 }
@@ -90,5 +119,54 @@ func TestSetupZoneSyncProxyGateReachable(t *testing.T) {
 	}
 	if err := zdOK.SetupZoneSync(nil); err != nil {
 		t.Fatalf("agent secondary proxy zone must be accepted, got: %v", err)
+	}
+}
+
+// parentsync and parentsync-proxy are mutually exclusive: one server syncing
+// to the parent AS the child and the same server syncing on BEHALF of a
+// DSYNC-unaware primary are two different roles, and a zone claiming both has
+// no defined behaviour. parseZoneOptions records a ConfigError so the zone is
+// quarantined rather than picking one silently (#493).
+func TestParseZoneOptionsRefusesParentSyncPlusProxy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []string
+	}{
+		{"canonical names", []string{"parentsync", "parentsync-proxy"}},
+		{"deprecated spellings", []string{"delegation-sync-child", "delegation-sync-proxy"}},
+		{"one of each", []string{"parentsync", "delegation-sync-proxy"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := &ZoneData{ZoneName: "child.example."}
+			zconf := &ZoneConf{Name: "child.example.", Type: "secondary", OptionsStrs: tc.opts}
+
+			parseZoneOptions(nil, "child.example.", zconf, zd)
+
+			var found bool
+			for _, e := range zd.ErrorList() {
+				if e.Type == ConfigError {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("no ConfigError for %v; the zone would serve with both roles set", tc.opts)
+			}
+		})
+	}
+}
+
+// Each option on its own is fine -- the check must not fire on one of them.
+func TestParseZoneOptionsAllowsEitherParentSyncOptionAlone(t *testing.T) {
+	for _, opt := range []string{"parentsync", "parentsync-proxy"} {
+		t.Run(opt, func(t *testing.T) {
+			zd := &ZoneData{ZoneName: "child.example."}
+			zconf := &ZoneConf{Name: "child.example.", Type: "secondary", OptionsStrs: []string{opt}}
+			parseZoneOptions(nil, "child.example.", zconf, zd)
+			for _, e := range zd.ErrorList() {
+				if e.Type == ConfigError {
+					t.Errorf("unexpected ConfigError for %q alone: %s", opt, e.Msg)
+				}
+			}
+		})
 	}
 }

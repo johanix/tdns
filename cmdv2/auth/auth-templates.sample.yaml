@@ -64,19 +64,25 @@
 # ==============================================================================
 #
 # DELEGATION SYNCHRONIZATION OPTIONS:
-#   delegation-sync-parent:  Provide delegation sync service towards child zones
+#   childsync:  Provide delegation sync service towards child zones
 #                           (parent zone listens for child DS/NS/A/AAAA updates)
 #
-#   delegation-sync-child:   Attempt delegation sync with parent zone
+#   parentsync:   Attempt delegation sync with parent zone
 #                           (child zone pushes DS/NS/A/AAAA updates to parent)
 #
-#   delegation-sync-proxy:   Agent secondary proxies CDS/CSYNC NOTIFYs upstream
+#   parentsync-proxy:   Agent secondary proxies CDS/CSYNC NOTIFYs upstream
 #                           on behalf of a DSYNC-unaware primary
 #                           (see guide/agent-dsync-proxy.md)
 #
 # ZONE MODIFICATION OPTIONS:
 #   allow-updates:           Allow zone modifications via DNS UPDATE
 #                           (general updates to any RRset in the zone)
+#
+#   allow-api-updates:       Allow zone modifications via the management API
+#                           (tdns-cli auth zone update ...). A SEPARATE gate
+#                           from allow-updates, which covers DNS UPDATE only:
+#                           opening one channel never opens the other. A frozen
+#                           zone refuses both.
 #
 #   allow-child-updates:     Allow updates to child delegation data via DNS UPDATE
 #                           (only child NS, DS, A, AAAA records).
@@ -86,6 +92,30 @@
 #
 #   allow-edits:             Allow zone apex RRsets to be dynamically modified
 #                           (NS, DNSKEY, CDS, CSYNC at zone apex)
+#
+# CONFLICT RESOLUTION OPTIONS:
+#   These decide who wins when the zone file has been replaced behind the
+#   server and its content contests a record the delta journal changed. The
+#   two are MUTUALLY EXCLUSIVE: naming both is a hard config error. Exactly one
+#   is always in force, because the parser materialises db-wins when neither is
+#   given -- so `tdns-cli auth zone list` reports the policy the zone actually
+#   runs under rather than a blank the operator has to interpret.
+#
+#   on-conflict-db-wins:     The journal's version of a contested record is
+#                           served, and the zone file's losing records are
+#                           written to the .rejected artefact. This is the
+#                           DEFAULT. On a primary that also has
+#                           allow-child-updates, it requires
+#                           delegationbackend: direct -- a db or zonefile
+#                           backend hands approved child updates to whatever
+#                           generates the zone file, whose output db-wins has
+#                           already declared it will overrule, and the
+#                           combination is refused at startup.
+#
+#   on-conflict-zonefile-wins:   The zone file's version is served, and the
+#                                journal's losing instructions go to the
+#                                artefact instead. This is the setting for a
+#                                zone whose file is generated elsewhere.
 #
 # DNSSEC OPTIONS:
 #   online-signing:          Sign zone on-the-fly as needed
@@ -148,6 +178,53 @@
 #   `tdns-cli auth zone zonemd status` reports what the cache holds and what
 #   the last digest cost, so it can be sized from measurements.
 #
+# ZONE TRANSFER OPTIONS (SECONDARY ONLY):
+#   request-ixfr:            Ask an upstream for an incremental transfer
+#                           (IXFR, RFC 1995) rather than a full one, and apply
+#                           the delta onto the zone already held. DEFAULT ON,
+#                           so naming it turns nothing on -- it is how an
+#                           operator states the intent explicitly. Any IXFR
+#                           failure falls back to a full AXFR against the SAME
+#                           upstream within the same refresh, so an enabled
+#                           zone is never left worse off than a disabled one.
+#                           A full AXFR is also what a zone gets when there is
+#                           no delta to ask for: a forced retransfer, and any
+#                           refresh with no baseline to apply a delta onto (no
+#                           incoming serial yet, or nothing currently served).
+#
+#   no-request-ixfr:         Turn that default OFF: always ask for a full AXFR.
+#                           Options are a list of enabled names, so absence
+#                           cannot express "false" for a flag whose default is
+#                           true; hence a second name rather than a value. If
+#                           both are given, no-request-ixfr wins, because the
+#                           safe direction is the one that only ever asks for a
+#                           full transfer.
+#
+#   Both are IGNORED on a PRIMARY, where nothing consults them, and on a
+#   secondary that signs its own content (online-signing or inline-signing),
+#   whose baseline is its OWN signatures -- a delta computed against the
+#   primary's copy names records such a zone does not hold. Either case is
+#   reported as a ConfigWarning: the option does nothing, but the zone is fine
+#   and keeps serving.
+#
+# ZONE-OWNER SIGNALING OPTIONS:
+#   use-hsyncparam:          Act on the zone owner's HSYNCPARAM record in a
+#                           transferred zone. Its pubkey / pubcds flags ask
+#                           each of the zone's DNS providers to republish the
+#                           zone's apex SIG(0) KEY / CDS+CDNSKEY at the RFC
+#                           9615 signal names -- _sig0key.<zone>._signal.<ns>
+#                           and _dsboot.<zone>._signal.<ns> -- in the
+#                           NAMESERVER's zone, not the customer's. Publishes
+#                           only into zones this server holds as primary, and
+#                           is change-gated.
+#                           SECONDARY ONLY: on a primary it is dropped with a
+#                           warning (the zone keeps serving), and a
+#                           template-provisioned primary refuses it outright.
+#                           Off by default: honouring a customer's flag writes
+#                           records into a zone YOU are authoritative for, so
+#                           it is the operator's decision. It does not affect
+#                           parsing or serving HSYNCPARAM, which is always on.
+#
 # MULTI-PROVIDER OPTIONS:
 #   multi-provider:          Zone is served by several providers (RFC 8901).
 #                           Changes signing and rollover behaviour; the
@@ -188,17 +265,19 @@ templates:
      type:            primary
      store:           map
      options:
-        - delegation-sync-parent  # Provide delegation sync for children
+        - childsync  # Provide delegation sync for children
      dnssecpolicy:    default
+     delegationpolicy: manual
 
    # Primary zone with online signing
    - name:            signed-primary
      type:            primary
      store:           map
      options:
-        - delegation-sync-parent
+        - childsync
         - online-signing         # Sign on-the-fly
      dnssecpolicy:    default
+     delegationpolicy: manual
 
    # Primary zone allowing dynamic updates
    - name:            dynamic-primary
@@ -206,9 +285,10 @@ templates:
      store:           map
      options:
         - allow-updates          # Allow DNS UPDATE
-        - delegation-sync-parent
+        - childsync
         - online-signing
      dnssecpolicy:    default
+     delegationpolicy: manual
 
    # Basic secondary zone template
    - name:            basic-secondary
@@ -221,7 +301,7 @@ templates:
      type:            secondary
      store:           map
      options:
-        - delegation-sync-child  # Push updates to parent
+        - parentsync  # Push updates to parent
 
    # Hidden primary (doesn't notify, used with API)
    - name:            hidden-primary
@@ -261,9 +341,10 @@ templates:
      type:            primary
      store:           map
      options:
-        - delegation-sync-parent
+        - childsync
         - online-signing
      dnssecpolicy:    fastroll           # Use fast-rolling policy
+     delegationpolicy: manual
 
    # Stealth primary (serves, but upstream fetches from it)
    - name:            stealth-primary
@@ -280,9 +361,10 @@ templates:
         - prefix: "192.0.2.2/32"
           key:    NOKEY
      options:
-        - delegation-sync-parent
+        - childsync
         - online-signing
      dnssecpolicy:    default
+     delegationpolicy: manual
 
    # Zonefile-pattern template: a zone that sets no zonefile: of its own gets
    # /etc/tdns/zones/<zonename>zone — note the trailing dot in the zone name
