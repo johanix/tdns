@@ -35,7 +35,8 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   page also covers ZONEMD (RFC 8976): `publish-zonemd`,
   `verify-zonemd`, the `zonemd:` parameter block including
   `wire-cache-max-bytes`, and checking a digest by hand with
-  `zone zonemd status|verify` or `dog +zonemd`.
+  `zone zonemd status|verify` or `dog +zonemd`, and the
+  secondary-only `use-hsyncparam`.
 
 - [Changing Zone Content: DDNS and the Management API](zone-updates.md)
   -- The two channels that change a running primary zone
@@ -65,10 +66,12 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   -- Delegation sync (parent side, child side, and the
   agent-as-proxy path for DSYNC-unaware primaries, including
   the DSYNC scheme dispatch, the NOTIFY scanner, and the
-  pluggable delegation backends), DNS transport signaling,
-  experimental record types, and post-quantum algorithm
-  support (ML-DSA / SLH-DSA / Falcon / MAYO / SNOVA for both
-  SIG(0) and DNSSEC).
+  pluggable delegation backends), publishing a customer
+  zone's bootstrap records at the RFC 9615 `_signal` names
+  on the strength of its HSYNCPARAM (`use-hsyncparam`),
+  DNS transport signaling, experimental record types, and
+  post-quantum algorithm support (ML-DSA / SLH-DSA / Falcon /
+  MAYO / SNOVA for both SIG(0) and DNSSEC).
 
 - [Certificate Provisioning: the tdns Minimal CA](cert-provisioning.md)
   -- Operator how-to for `tdns-cli cert`: the one-shot

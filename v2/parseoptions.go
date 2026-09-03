@@ -264,6 +264,32 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
 
+		case OptUseHsyncparam:
+			// Authorization to act on a customer zone's HSYNCPARAM pubkey /
+			// pubcds flags by republishing its apex KEY / CDS at the RFC 9615
+			// _signal names (signal_republish.go). Meaningful only on a
+			// secondary: the whole mechanism is driven by an incoming
+			// transfer of a zone somebody else owns, and a primary has no
+			// such transfer to react to.
+			//
+			// ConfigWarning, not ConfigError, for the same reason as the
+			// request-ixfr pair above: the option is inert here, the zone is
+			// entirely fine and keeps serving, and ConfigError is in
+			// serviceImpactingErrors -- using it would take a healthy zone
+			// dark over a setting that merely does nothing.
+			if zconf.Type == "primary" {
+				errorMsg := fmt.Sprintf("Zone %s: %s is only meaningful on a secondary; ignored on a primary",
+					zname, ZoneOptionToString[opt])
+				lg.Error("option ignored: not a secondary", "zone", zname,
+					"option", ZoneOptionToString[opt], "type", zconf.Type)
+				if zd != nil {
+					zd.SetError(ConfigWarning, "%s", errorMsg)
+				}
+				continue
+			}
+			options[opt] = true
+			cleanoptions = append(cleanoptions, opt)
+
 		case OptOnlineSigning, OptInlineSigning:
 			if Globals.App.Type == AppTypeAgent {
 				lg.Error("option ignored: agent does not allow signing", "zone", zname, "option", ZoneOptionToString[opt])

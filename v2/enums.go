@@ -100,6 +100,21 @@ const (
 	// writes both, because the safe direction is the one that only ever asks
 	// for a full transfer.
 	OptNoRequestIxfr
+	// OptUseHsyncparam lets a SECONDARY act on the zone owner's HSYNCPARAM
+	// signaling (draft-leon-dnsop-signaling-zone-owner-intent): the pubkey and
+	// pubcds flags ask each of the zone's DNS providers to republish the
+	// child's SIG(0) KEY / CDS at the RFC 9615 _signal names owned by the
+	// child's nameservers, in the nameserver's own zone (signal_republish.go).
+	//
+	// Named for acting, not for noticing: the record is parsed and served
+	// regardless, and this option is the operator's authorization to publish
+	// records into a zone on the strength of a third party's signaling. Off,
+	// the HSYNCPARAM is inert data like any other RRset.
+	//
+	// Appended at the end for the same reason every option above it was:
+	// ZoneOption values are positional, so inserting mid-list renumbers
+	// everything after.
+	OptUseHsyncparam
 	optZoneOptionTdnsSentinel
 )
 
@@ -140,6 +155,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptVerifyZonemd:            "verify-zonemd",
 	OptRequestIxfr:             "request-ixfr",
 	OptNoRequestIxfr:           "no-request-ixfr",
+	OptUseHsyncparam:           "use-hsyncparam",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -175,6 +191,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"verify-zonemd":              OptVerifyZonemd,
 	"request-ixfr":               OptRequestIxfr,
 	"no-request-ixfr":            OptNoRequestIxfr,
+	"use-hsyncparam":             OptUseHsyncparam,
 }
 
 // deprecatedZoneOptionNames maps old option spellings to the canonical name
