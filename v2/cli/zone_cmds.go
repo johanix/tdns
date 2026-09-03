@@ -33,6 +33,35 @@ func peerConfAddrsString(peers []tdns.PeerConf) string {
 // NewZoneCmd returns a fresh "zone" command tree bound to the given
 // role. Additional subcommands may be attached via extras — used by
 // tdns-mp to inject signer-specific mplist under the signer's tree.
+// NewZoneProxyKeyCmd returns a FRESH "proxy-key" command bound to one role.
+//
+// A constructor rather than a shared package-level command: one *cobra.Command
+// attached to two parents reports the wrong command path under one of them, so
+// every attachment point needs its own instance.
+//
+// Exported because the agent's zone subtree is built by hand in
+// agent_zone_cmds.go and has to attach this too. delegation-sync-proxy is valid
+// ONLY on a tdns-agent secondary, so the agent is the role the command exists
+// for -- and it was reachable only through "auth", while the operator guide
+// tells the reader to run it against the agent.
+func NewZoneProxyKeyCmd(role string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "proxy-key",
+		Short: "Show the delegation-sync-proxy UPDATE state and the KEY to publish at the primary",
+		Long: `For a zone with the delegation-sync-proxy option (a tdns-agent acting as a
+secondary for a DSYNC-unaware primary), report whether the agent can proxy
+DNS UPDATEs to the parent, and — when waiting — print the exact records to
+add at the primary apex (the agent's KEY RR and an HSYNCPARAM pubkey flag).
+States: update-unsupported / ready / foreign-key / waiting-for-key.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneProxyKey(role)
+		},
+	}
+	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to report proxy-key state for")
+	c.MarkFlagRequired("zone")
+	return c
+}
+
 func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "zone",
@@ -183,20 +212,7 @@ would roll, whether the parent DS would break) and changes nothing; add
 	policyReset.Flags().BoolVar(&policyResetConfirm, "confirm", false, "Apply the reset; without it the command is a dry-run that only previews what would happen")
 	policyReset.MarkFlagRequired("zone")
 
-	proxyKey := &cobra.Command{
-		Use:   "proxy-key",
-		Short: "Show the delegation-sync-proxy UPDATE state and the KEY to publish at the primary",
-		Long: `For a zone with the delegation-sync-proxy option (a tdns-agent acting as a
-secondary for a DSYNC-unaware primary), report whether the agent can proxy
-DNS UPDATEs to the parent, and — when waiting — print the exact records to
-add at the primary apex (the agent's KEY RR and an HSYNCPARAM pubkey flag).
-States: update-unsupported / ready / foreign-key / waiting-for-key.`,
-		Run: func(cmd *cobra.Command, args []string) {
-			RunZoneProxyKey(role)
-		},
-	}
-	proxyKey.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to report proxy-key state for")
-	proxyKey.MarkFlagRequired("zone")
+	proxyKey := NewZoneProxyKeyCmd(role)
 
 	nsec := &cobra.Command{
 		Use:   "nsec",

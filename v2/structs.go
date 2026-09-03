@@ -1363,7 +1363,17 @@ type AgentMgmtPost struct {
 	Upstream   AgentId
 	Downstream AgentId
 	Data       map[string]interface{} `json:"data,omitempty"` // Generic data field for custom parameters
-	Response   chan *AgentMgmtResponse
+	// NOT on the wire. AgentMgmtPost is both an in-process message and the
+	// mgmt API request body, and encoding/json refuses a chan field outright
+	// -- nil or not -- so without this tag EVERY POST of this struct failed
+	// before it left the CLI:
+	//
+	//   api.RequestNG: Error from json.NewEncoder: json: unsupported type:
+	//   chan *tdns.AgentMgmtResponse
+	//
+	// which took out the whole "parentsync" subtree. Nothing sets this field
+	// today; it is kept for the in-process direction rather than removed.
+	Response chan *AgentMgmtResponse `json:"-"`
 }
 
 type AgentMgmtResponse struct {
