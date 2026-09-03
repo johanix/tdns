@@ -9,6 +9,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/johanix/tdns/v2"
@@ -107,47 +108,64 @@ func TestCheckAgentZoneOptions(t *testing.T) {
 		wantLevel  ccLevel
 		wantNoFind bool
 	}{
+		// New canonical names.
 		{
 			name:       "proxy on secondary is fine",
-			zone:       tdns.ZoneConf{Name: "ok.example.", Type: "secondary", OptionsStrs: []string{"delegation-sync-proxy"}},
+			zone:       tdns.ZoneConf{Name: "ok.example.", Type: "secondary", OptionsStrs: []string{"parentsync-proxy"}},
 			schemes:    []string{"notify", "update"},
 			wantNoFind: true,
 		},
 		{
 			name:      "proxy on primary is quarantined",
-			zone:      tdns.ZoneConf{Name: "bad.example.", Type: "primary", OptionsStrs: []string{"delegation-sync-proxy"}},
+			zone:      tdns.ZoneConf{Name: "bad.example.", Type: "primary", OptionsStrs: []string{"parentsync-proxy"}},
 			schemes:   []string{"notify", "update"},
 			wantLevel: ccFAIL,
 		},
 		{
-			// The proxy walks the same plan as a child and reads the same
-			// setting: with no child.schemes every transport is skipped and
-			// the zone forwards nothing, silently.
 			name:      "proxy without child schemes forwards nothing",
-			zone:      tdns.ZoneConf{Name: "noschemes-proxy.example.", Type: "secondary", OptionsStrs: []string{"delegation-sync-proxy"}},
+			zone:      tdns.ZoneConf{Name: "noschemes-proxy.example.", Type: "secondary", OptionsStrs: []string{"parentsync-proxy"}},
 			schemes:   nil,
 			wantLevel: ccFAIL,
 		},
 		{
-			// On the agent the delegation-sync-child setup block only runs when
+			// On the agent the parentsync setup block only runs when
 			// the zone also carries multi-provider; without it the option is
 			// silently inert, which is a warning rather than a failure.
 			name:      "child without multi-provider is inert",
-			zone:      tdns.ZoneConf{Name: "inert.example.", Type: "secondary", OptionsStrs: []string{"delegation-sync-child"}},
+			zone:      tdns.ZoneConf{Name: "inert.example.", Type: "secondary", OptionsStrs: []string{"parentsync"}},
 			schemes:   []string{"notify"},
 			wantLevel: ccWARN,
 		},
 		{
 			name:      "child with multi-provider but no schemes is quarantined",
-			zone:      tdns.ZoneConf{Name: "noschemes.example.", Type: "secondary", OptionsStrs: []string{"delegation-sync-child", "multi-provider"}},
+			zone:      tdns.ZoneConf{Name: "noschemes.example.", Type: "secondary", OptionsStrs: []string{"parentsync", "multi-provider"}},
 			schemes:   nil,
 			wantLevel: ccFAIL,
 		},
 		{
 			name:       "child with multi-provider and schemes is fine",
-			zone:       tdns.ZoneConf{Name: "good.example.", Type: "secondary", OptionsStrs: []string{"delegation-sync-child", "multi-provider"}},
+			zone:       tdns.ZoneConf{Name: "good.example.", Type: "secondary", OptionsStrs: []string{"parentsync", "multi-provider"}},
 			schemes:    []string{"notify", "update"},
 			wantNoFind: true,
+		},
+		// Deprecated alias coverage — old spellings must still trigger the same findings.
+		{
+			name:       "deprecated alias proxy on secondary is fine",
+			zone:       tdns.ZoneConf{Name: "ok-alias.example.", Type: "secondary", OptionsStrs: []string{"delegation-sync-proxy"}},
+			schemes:    []string{"notify", "update"},
+			wantNoFind: true,
+		},
+		{
+			name:      "deprecated alias proxy on primary is quarantined",
+			zone:      tdns.ZoneConf{Name: "bad-alias.example.", Type: "primary", OptionsStrs: []string{"delegation-sync-proxy"}},
+			schemes:   []string{"notify", "update"},
+			wantLevel: ccFAIL,
+		},
+		{
+			name:      "deprecated alias child without multi-provider is inert",
+			zone:      tdns.ZoneConf{Name: "inert-alias.example.", Type: "secondary", OptionsStrs: []string{"delegation-sync-child"}},
+			schemes:   []string{"notify"},
+			wantLevel: ccWARN,
 		},
 		{
 			name:       "unrelated options are ignored",
@@ -179,7 +197,7 @@ func TestCheckAgentZoneOptions(t *testing.T) {
 
 // A zone with no name must not produce a phantom finding.
 func TestCheckAgentZoneOptions_SkipsUnnamedZone(t *testing.T) {
-	cfg := &tdns.Config{Zones: []tdns.ZoneConf{{Type: "primary", OptionsStrs: []string{"delegation-sync-proxy"}}}}
+	cfg := &tdns.Config{Zones: []tdns.ZoneConf{{Type: "primary", OptionsStrs: []string{"parentsync-proxy"}}}}
 	rep := newCCReport()
 	checkAgentZoneOptions(cfg, rep)
 	if fails, warns := rep.counts(); fails != 0 || warns != 0 {
@@ -255,4 +273,41 @@ func TestCheckLogSection(t *testing.T) {
 			t.Fatalf("missing log: is the required-field check's job, got %d/%d", fails, warns)
 		}
 	})
+}
+
+// config check must predict every quarantine parseZoneOptions will impose --
+// that is the whole point of it. parentsync + parentsync-proxy is one, and it
+// is checked role-independently (checkZones), because parseZoneOptions runs
+// for tdns-auth too (#493).
+func TestCheckZonesFlagsParentSyncPlusProxy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []string
+		want bool
+	}{
+		{"both canonical", []string{"parentsync", "parentsync-proxy"}, true},
+		{"both deprecated", []string{"delegation-sync-child", "delegation-sync-proxy"}, true},
+		{"mixed spellings", []string{"delegation-sync-child", "parentsync-proxy"}, true},
+		{"parentsync alone", []string{"parentsync"}, false},
+		{"proxy alone", []string{"parentsync-proxy"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &tdns.Config{}
+			cfg.Zones = []tdns.ZoneConf{{
+				Name: "child.example.", Type: "secondary", OptionsStrs: tc.opts,
+			}}
+			rep := newCCReport()
+			checkZones(cfg, rep, false, "auth")
+
+			var got bool
+			for _, f := range rep.byGroup["Zones"] {
+				if f.level == ccFAIL && strings.Contains(f.msg, "mutually exclusive") {
+					got = true
+				}
+			}
+			if got != tc.want {
+				t.Errorf("mutual-exclusion finding = %v, want %v (options %v)", got, tc.want, tc.opts)
+			}
+		})
+	}
 }

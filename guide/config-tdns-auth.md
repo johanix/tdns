@@ -392,9 +392,14 @@ state with `unknown config option: "..."`.
 
 | Option | Effect |
 |--------|--------|
-| `delegation-sync-parent` | Provide delegation sync toward child zones (accept child DS/NS/A/AAAA updates) |
-| `delegation-sync-child` | Push this zone's DS/NS/A/AAAA changes to its parent |
-| `delegation-sync-proxy` | Agent secondary proxies CDS/CSYNC NOTIFYs upstream for a DSYNC-unaware primary |
+| `childsync` | Provide delegation sync toward child zones (accept child DS/NS/A/AAAA updates) |
+| `parentsync` | Push this zone's DS/NS/A/AAAA changes to its parent |
+| `parentsync-proxy` | Agent secondary proxies CDS/CSYNC NOTIFYs upstream for a DSYNC-unaware primary |
+
+The previous spellings (`delegation-sync-parent`, `delegation-sync-child`,
+`delegation-sync-proxy`) still parse as aliases of those three and log a
+deprecation warning. Display (`zone list`, config output) uses only the new
+names. `parentsync` and `parentsync-proxy` may not both be set on one zone.
 
 **Zone modification**
 
@@ -741,7 +746,7 @@ templates:
    - name:          signed-primary
      type:          primary
      store:         map
-     options:       [ delegation-sync-parent, online-signing ]
+     options:       [ childsync, online-signing ]
      dnssecpolicy:  default
      downstreams:
         - prefix: "192.0.2.0/24"

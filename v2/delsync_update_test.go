@@ -9,7 +9,8 @@ import (
 )
 
 func TestSendDelegationUpdatePreconditions(t *testing.T) {
-	zd := &ZoneData{ZoneName: "child.example.", Parent: "example."}
+	zd := &ZoneData{ZoneName: "child.example."}
+	zd.SetParent("example.")
 	kdb := newTestKeyDB(t)
 
 	_, _, _, err := zd.SendDelegationUpdate(context.Background(), kdb, DelegationSyncStatus{}, nil, UpdateModeDelta)
@@ -23,7 +24,7 @@ func TestSendDelegationUpdatePreconditions(t *testing.T) {
 		t.Fatalf("no SIG(0) key: %v", err)
 	}
 
-	zd.Parent = ""
+	zd.SetParent("")
 	_, _, _, err = zd.SendDelegationUpdate(context.Background(), kdb, DelegationSyncStatus{},
 		&DsyncTarget{Addresses: []string{"192.0.2.1"}}, UpdateModeDelta)
 	if err == nil || !strings.Contains(err.Error(), "unknown") {
@@ -36,16 +37,17 @@ func TestResolveParentZoneDotSentinel(t *testing.T) {
 	Globals.ImrEngine = nil
 	t.Cleanup(func() { Globals.ImrEngine = prev })
 
-	zd := &ZoneData{ZoneName: "example.", Parent: "example."}
+	zd := &ZoneData{ZoneName: "example."}
+	zd.SetParent("example.")
 	if err := zd.resolveParentZone(); err != nil {
 		t.Fatalf("known parent: %v", err)
 	}
 
-	zd.Parent = "."
+	zd.SetParent(".")
 	if err := zd.resolveParentZone(); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("dot sentinel with no IMR: %v", err)
 	}
-	zd.Parent = ""
+	zd.SetParent("")
 	if err := zd.resolveParentZone(); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("empty parent with no IMR: %v", err)
 	}

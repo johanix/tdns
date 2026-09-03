@@ -79,7 +79,7 @@ parent zone can advertise both at once:
 ### 1.1 Parent: publishing DSYNC
 
 A parent zone advertises its delegation-sync capabilities
-by adding the zone option `delegation-sync-parent` (zone
+by adding the zone option `childsync` (zone
 option `OptDelSyncParent`). When set, tdns-auth synthesises
 the necessary DSYNC RRs at the well-known owner name
 `_dsync.<zonename>` based on the global
@@ -227,8 +227,7 @@ named backend reference:
 zones:
    example.com.:
       type:                primary
-      delegation-sync-parent: true
-      allow-child-updates:   true
+      options:             [ childsync, allow-child-updates ]
       delegationbackend:     files-dnslab
 ```
 
@@ -290,7 +289,7 @@ tdns-cli auth delegation show   --zone example.com. --child sub.example.com.
 
 ### 1.5 Child: pushing changes
 
-On the child side, a zone with `delegation-sync-child`
+On the child side, a zone with `parentsync`
 enabled runs through `SetupZoneSync` (also wired via
 OnFirstLoad). This:
 
@@ -382,7 +381,7 @@ primary *can* publish a CDS/CDNSKEY (RFC 7344) or CSYNC
 for a child to signal "please sync me."
 
 tdns-agent bridges that gap. Configure it as a **secondary**
-for the zone with the `delegation-sync-proxy` option. On
+for the zone with the `parentsync-proxy` option. On
 every incoming AXFR/IXFR the agent diffs the new zone
 against the one it was serving and, when a
 delegation-relevant RRset changed, forwards the matching
@@ -410,13 +409,13 @@ re-NOTIFYd on subsequent refreshes.
 
 The three delegation-sync roles, side by side:
 
-- `delegation-sync-parent` -- I am the parent: publish a
+- `childsync` -- I am the parent: publish a
   DSYNC RRset and receive UPDATE / NOTIFY from children
   (sections 1.1-1.4).
-- `delegation-sync-child` -- I am the child and author my
+- `parentsync` -- I am the child and author my
   own zone: detect my delegation changes and push them up
   (section 1.5).
-- `delegation-sync-proxy` -- I am a secondary for a
+- `parentsync-proxy` -- I am a secondary for a
   DSYNC-unaware primary: forward the primary's CDS/CSYNC
   signals up on its behalf (this section).
 
@@ -563,7 +562,7 @@ applied unchanged:
 ```yaml
 zones:
    - name:    example.
-     options: [ delegation-sync-parent, allow-child-updates ]
+     options: [ childsync, allow-child-updates ]
      delegationbackend: direct
      updatepolicy:
         child:

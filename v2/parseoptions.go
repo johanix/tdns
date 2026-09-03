@@ -187,6 +187,10 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			}
 			continue
 		}
+		// Deprecation warning for old option spellings.
+		if canonical, deprecated := deprecatedZoneOptionNames[option]; deprecated {
+			lg.Warn("deprecated zone option spelling; please use the new name", "zone", zname, "old", option, "new", canonical)
+		}
 
 		switch opt {
 		case OptDelSyncParent,
@@ -412,6 +416,15 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			continue
 		}
 	}
+	// Mutual exclusion: parentsync and parentsync-proxy cannot both be set.
+	if options[OptDelSyncChild] && options[OptDelSyncProxy] {
+		msg := fmt.Sprintf("parentsync and parentsync-proxy are mutually exclusive on zone %s; zone will be quarantined", zname)
+		lg.Error("mutually exclusive options", "zone", zname, "option1", "parentsync", "option2", "parentsync-proxy")
+		if zd != nil {
+			zd.SetError(ConfigError, "%s", msg)
+		}
+	}
+
 	zconf.Options = cleanoptions
 	return options
 }

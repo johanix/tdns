@@ -119,6 +119,13 @@ func TestEveryConfigurableZoneOptionIsDocumentedInTheSample(t *testing.T) {
 		if internalOnlyZoneOptions[name] {
 			continue
 		}
+		// Deprecated spellings still parse (deprecatedZoneOptionNames, v2/enums.go)
+		// so operators' existing configs keep loading, but the sample must NOT
+		// name them: it is the list operators choose from, and re-advertising a
+		// spelling we are retiring is how it never gets retired.
+		if _, deprecated := deprecatedZoneOptionNames[name]; deprecated {
+			continue
+		}
 		t.Run(name, func(t *testing.T) {
 			// Whole-name match. A plain substring search would let
 			// "no-request-ixfr" alone satisfy "request-ixfr" -- documenting

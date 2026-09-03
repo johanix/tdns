@@ -157,14 +157,6 @@ server:
    version:   tdns-server {version}
    hostname:  there-is-no-place-like-127.0.0.1
 
-childsync:                 # What to do when we are the child
-   # NOTE: only update-ns, update-a and update-aaaa are read from this block.
-   # Child scheme selection is configured under delegationsync.child.schemes
-   # below; childsync.schemes / sync-on-boot / syncwithparent are NOT read.
-   update-ns:       true
-   update-a:        true
-   update-aaaa:     true
-
 # Named delegation backends for parent zones that receive child UPDATEs.
 # Predefined: "db" and "direct" (no config needed).
 #
@@ -619,13 +611,13 @@ catalog:
                                        # - map:   Default, general-purpose (recommended)
                                        # - xfr:   Zone transfer only (AXFR, NO normal queries)
          options:   []                 # Optional zone options to apply to member zones
-                                       # Example: ["delegation-sync-child"]
+                                       # Example: ["parentsync"]
 
       edge:                         # Group name (matches "configedge" in catalog zone)
          upstream:  "192.0.2.1:5353"
          tsig-key:  ""
          store:     map                # Default storage (recommended)
-         options:   []                 # e.g. ["delegation-sync-child"]
+         options:   []                 # e.g. ["parentsync"]
 
    # Signing groups (documentation/informational only, not used for auto-configuration).
    # These groups can be used to indicate which signing infrastructure is

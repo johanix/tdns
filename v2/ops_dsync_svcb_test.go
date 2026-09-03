@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -99,7 +100,7 @@ _dsync.example. 7200 IN DSYNC ANY UPDATE 53 updates.example.
 	p := DefaultDelegationPolicy()
 	zd.DelegationPolicy = &p
 
-	if err := zd.PublishDsyncRRs(); err != nil {
+	if err := zd.PublishDsyncRRs(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	ur := <-q
@@ -143,7 +144,7 @@ func TestPublishDsyncRRsPolicyControlsSVCB(t *testing.T) {
 		zd := testZone(t, name, zone)
 		zd.KeyDB = &KeyDB{UpdateQ: q}
 		zd.DelegationPolicy = &pol
-		if err := zd.PublishDsyncRRs(); err != nil {
+		if err := zd.PublishDsyncRRs(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		ur := <-q

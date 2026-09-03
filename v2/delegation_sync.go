@@ -95,12 +95,9 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
 
 				zd := ds.ZoneData
-				if zd.Parent == "" || zd.Parent == "." {
-					zd.Parent, err = imr().ParentZone(zd.ZoneName)
-					if err != nil {
-						lgDns.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", err)
-						continue
-					}
+				if _, err = zd.ResolveParentVia(imr()); err != nil {
+					lgDns.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", err)
+					continue
 				}
 
 				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, ds.SyncStatus, imr())
@@ -390,10 +387,10 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 
 	if syncstate.InSync {
 		return fmt.Sprintf("Zone \"%s\" delegation data in parent \"%s\" is in sync. No action needed.",
-			syncstate.ZoneName, zd.Parent), 0, UpdateResult{}, nil
+			syncstate.ZoneName, zd.GetParent()), 0, UpdateResult{}, nil
 	} else {
 		lgDns.Info("zone delegation data in parent is NOT in sync, sync action needed",
-			"zone", syncstate.ZoneName, "parent", zd.Parent)
+			"zone", syncstate.ZoneName, "parent", zd.GetParent())
 	}
 
 	// var zd *tdns.ZoneData

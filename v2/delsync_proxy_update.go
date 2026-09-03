@@ -296,7 +296,7 @@ func (zd *ZoneData) proxyReplaceSyncState() DelegationSyncStatus {
 	newNS, newA, newAAAA, newDS := zd.proxyCurrentDelegationRRs()
 	return DelegationSyncStatus{
 		ZoneName:   zd.ZoneName,
-		Parent:     zd.Parent,
+		Parent:     zd.GetParent(),
 		NewNS:      newNS,
 		NewA:       newA,
 		NewAAAA:    newAAAA,
@@ -421,9 +421,9 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
 
 	_, rcode, _, uerr := zd.SendDelegationUpdate(ctx, kdb, dss, target, mode)
 	if uerr != nil {
-		return "", fmt.Errorf("ProxyUpdateParent: send UPDATE to %s: %w", zd.Parent, uerr)
+		return "", fmt.Errorf("ProxyUpdateParent: send UPDATE to %s: %w", zd.GetParent(), uerr)
 	}
-	msg := fmt.Sprintf("proxied %s UPDATE to parent %s (rcode %s)", mode, zd.Parent, dns.RcodeToString[int(rcode)])
+	msg := fmt.Sprintf("proxied %s UPDATE to parent %s (rcode %s)", mode, zd.GetParent(), dns.RcodeToString[int(rcode)])
 	lgDns.Info("delegation-sync-proxy: "+msg, "zone", zd.ZoneName, "mode", mode)
 	return msg, nil
 }
