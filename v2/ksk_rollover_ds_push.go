@@ -551,7 +551,7 @@ func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps, target *
 		return out, fmt.Errorf("pushDSRRsetViaUpdate: no usable UPDATE target for zone %s", zd.ZoneName)
 	}
 	child := dns.Fqdn(zd.ZoneName)
-	parent := dns.Fqdn(zd.Parent)
+	parent := dns.Fqdn(zd.GetParent())
 	if parent == "" || parent == "." {
 		var err error
 		parent, err = imr.ParentZone(child)

@@ -63,7 +63,7 @@ func pushDSRRsetViaApi(ctx context.Context, deps RolloverEngineDeps, target *Dsy
 	}
 
 	child := dns.Fqdn(zd.ZoneName)
-	parent := dns.Fqdn(zd.Parent)
+	parent := dns.Fqdn(zd.GetParent())
 	if parent == "" || parent == "." {
 		p, err := imr.ParentZone(child)
 		if err != nil {

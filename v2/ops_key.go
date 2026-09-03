@@ -263,7 +263,7 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 	// key on an un-validated bootstrap. RemoveRRset builds the class-ANY RRset
 	// delete (CreateUpdate's Remove would emit class-NONE per-RR deletes).
 	msg := new(dns.Msg)
-	msg.SetUpdate(zd.Parent)
+	msg.SetUpdate(zd.GetParent())
 	msg.RemoveRRset([]dns.RR{&pkc.KeyRR}) // DEL <child> ANY KEY
 	msg.Insert([]dns.RR{&pkc.KeyRR})      // ADD <child> KEY
 	msg.SetEdns0(1232, true)              // OPT RR so the parent can return EDE
@@ -274,7 +274,7 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 	}
 
 	// 4. Send the message to the parent
-	rcode, ur, err := SendUpdate(ctx, msg, zd.Parent, dsyncTarget.Addresses)
+	rcode, ur, err := SendUpdate(ctx, msg, zd.GetParent(), dsyncTarget.Addresses)
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to send update message: %v", zd.ZoneName, err), ur, err
 	}
@@ -393,7 +393,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 
 	// 3. Create the DNS UPDATE message
 	adds := []dns.RR{&pkc.KeyRR}
-	m, err := CreateUpdate(zd.Parent, adds, []dns.RR{})
+	m, err := CreateUpdate(zd.GetParent(), adds, []dns.RR{})
 	if err != nil {
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to create update message: %v", zd.ZoneName, err)
 	}
@@ -407,7 +407,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	}
 
 	// 4. Send the ADD message to the parent
-	rcode, ur, err := SendUpdate(ctx, m, zd.Parent, dsyncTarget.Addresses)
+	rcode, ur, err := SendUpdate(ctx, m, zd.GetParent(), dsyncTarget.Addresses)
 	if err != nil {
 		return "", 0, 0, ur, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to send update message: %v", zd.ZoneName, err)
 	}
@@ -433,7 +433,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	//	if action == "complete" || action == "remove" {
 	// 6. Request deletion of the old active key from the parent, signed by the new active key.
 	removes := []dns.RR{&sak.Keys[0].KeyRR}
-	m, err = CreateUpdate(zd.Parent, []dns.RR{}, removes)
+	m, err = CreateUpdate(zd.GetParent(), []dns.RR{}, removes)
 	if err != nil {
 		return fmt.Sprintf("RolloverSig0KeyWithParent(%q) failed to create update message: %v",
 			zd.ZoneName, err), oldkeyid, newkeyid, ur, err
@@ -448,7 +448,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	}
 
 	// 7. Send the REMOVE message to the parent
-	rcode, ur, err = SendUpdate(ctx, m, zd.Parent, dsyncTarget.Addresses)
+	rcode, ur, err = SendUpdate(ctx, m, zd.GetParent(), dsyncTarget.Addresses)
 	if err != nil {
 		return "", oldkeyid, newkeyid, ur, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to send update message: %v",
 			zd.ZoneName, err)

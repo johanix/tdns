@@ -1026,26 +1026,11 @@ func APIzoneParentSync(ctx context.Context, app *AppDetails, refreshq chan ZoneR
 		}
 
 		var err error
-		if zd.Parent == "" {
-			if Globals.ImrEngine == nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Zone %q: ImrEngine not active. Cannot determine parent zone", zd.ZoneName)
-				return
-			}
-			// Resolve without holding zd.mu (ParentZone is a network lookup),
-			// then assign under the lock so concurrent status requests do not
-			// race the string write.
-			parent, perr := Globals.ImrEngine.ParentZone(zd.ZoneName)
-			if perr != nil {
-				resp.Error = true
-				resp.ErrorMsg = perr.Error()
-				return
-			}
-			zd.mu.Lock()
-			if zd.Parent == "" {
-				zd.Parent = parent
-			}
-			zd.mu.Unlock()
+		parent, err := zd.ResolveParent()
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Zone %q: %v", zd.ZoneName, err)
+			return
 		}
 
 		switch req.Command {
@@ -1076,7 +1061,7 @@ func APIzoneParentSync(ctx context.Context, app *AppDetails, refreshq chan ZoneR
 			}
 			resp.Functions["Latest delegation sync transaction"] = "successful"
 			resp.Functions["Time of latest delegation sync"] = "2024-05-01 12:00:00"
-			resp.Functions["Current delegation status"] = fmt.Sprintf("parent %q is in sync with %q (the child)", zd.Parent, zd.ZoneName)
+			resp.Functions["Current delegation status"] = fmt.Sprintf("parent %q is in sync with %q (the child)", parent, zd.ZoneName)
 
 		case "bootstrap":
 			switch req.Scheme {
@@ -1146,7 +1131,7 @@ func APIzoneParentSync(ctx context.Context, app *AppDetails, refreshq chan ZoneR
 	}
 }
 
-func APIzoneChildSync(app *AppDetails) func(w http.ResponseWriter, r *http.Request) {
+func APIzoneChildSync(ctx context.Context, app *AppDetails) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var req ZoneChildSyncPost
@@ -1197,7 +1182,7 @@ func APIzoneChildSync(app *AppDetails) func(w http.ResponseWriter, r *http.Reque
 		switch req.Command {
 		case "publish":
 			resp.Msg = fmt.Sprintf("Zone %s: publishing DSYNC RRset", zd.ZoneName)
-			err = zd.PublishDsyncRRs()
+			err = zd.PublishDsyncRRs(ctx)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -1206,7 +1191,7 @@ func APIzoneChildSync(app *AppDetails) func(w http.ResponseWriter, r *http.Reque
 
 		case "unpublish":
 			resp.Msg = fmt.Sprintf("Zone %s: unpublishing DSYNC RRset", zd.ZoneName)
-			err = zd.UnpublishDsyncRRs()
+			err = zd.UnpublishDsyncRRs(ctx)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

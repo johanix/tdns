@@ -27,7 +27,7 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 		return "", dns.RcodeServerFailure, fmt.Errorf("zone %s: no DSYNC API target", zd.ZoneName)
 	}
 
-	parent := zd.Parent
+	parent := zd.GetParent()
 	if parent == "" {
 		return "", dns.RcodeServerFailure, fmt.Errorf("zone %s: parent zone unknown", zd.ZoneName)
 	}

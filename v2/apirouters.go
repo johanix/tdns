@@ -100,7 +100,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		sr.HandleFunc("/keystore", kdb.APIkeystore(conf)).Methods("POST")
 		sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 		sr.HandleFunc("/zone/parentsync", APIzoneParentSync(ctx, &Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
-		sr.HandleFunc("/zone/childsync", APIzoneChildSync(&Globals.App)).Methods("POST")
+		sr.HandleFunc("/zone/childsync", APIzoneChildSync(ctx, &Globals.App)).Methods("POST")
 		// Provisioning for the DSYNC API scheme. Deliberately on the
 		// management API, behind the operator key: issuing a registrant
 		// credential is an operator act. The credentials issued here

@@ -169,9 +169,15 @@ type ZoneData struct {
 	// from (zone add --template). Persisted in the dynamic config entry so a
 	// restart re-expands it; the update policy is deliberately NOT persisted —
 	// it re-derives from the template at boot (one source of truth).
-	Template          string
-	DelegationSyncQ   chan DelegationSyncRequest
-	Parent            string   // name of parentzone (if filled in)
+	Template        string
+	DelegationSyncQ chan DelegationSyncRequest
+	// parent is the zone's parent name, resolved lazily on first use and
+	// cached. UNEXPORTED ON PURPOSE: parentMu owns it, and going through
+	// ResolveParent/GetParent/SetParent is what makes that ownership
+	// enforceable rather than a comment. Seven code paths used to open-code
+	// the same read-check/lookup/write, none of them synchronised.
+	parent            string
+	parentMu          sync.Mutex
 	ParentNS          []string // names of parent nameservers
 	ParentServers     []string // addresses of parent nameservers
 	Children          map[string]*ChildDelegationData

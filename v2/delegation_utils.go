@@ -35,7 +35,7 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 		return resp, err
 	}
 
-	resp.Parent = zd.Parent
+	resp.Parent = zd.GetParent()
 
 	var p_nsrrs []dns.RR
 	var pserver string // outside loop to preserve for later re-use

@@ -237,8 +237,8 @@ func (zd *ZoneData) ProxyNotifyParent(ctx context.Context, notifyq chan NotifyRe
 
 	sent := zd.emitProxyNotifies(ctx, notifyq, analysis, dsynctarget.Addresses)
 	lgDns.Info("delegation-sync-proxy: forwarded NOTIFY(s) to parent",
-		"zone", zd.ZoneName, "parent", zd.Parent, "sent", sent, "target", dsynctarget.Addresses)
-	return fmt.Sprintf("forwarded NOTIFY(%v) to parent %s", sent, zd.Parent), nil
+		"zone", zd.ZoneName, "parent", zd.GetParent(), "sent", sent, "target", dsynctarget.Addresses)
+	return fmt.Sprintf("forwarded NOTIFY(%v) to parent %s", sent, zd.GetParent()), nil
 }
 
 // emitProxyNotifies sends the NOTIFY(s) the act-mapping (D4) calls for to the
