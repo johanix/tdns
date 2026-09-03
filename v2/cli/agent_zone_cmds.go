@@ -432,6 +432,10 @@ func init() {
 	AgentZoneCmd.AddCommand(agentZoneListCmd, agentZoneReloadCmd, agentZoneWriteCmd)
 	AgentZoneCmd.AddCommand(agentZoneUpdateCmd, agentZoneReadFakeCmd)
 	AgentZoneCmd.AddCommand(agentZoneDsyncCmd)
+	// delegation-sync-proxy is valid ONLY on a tdns-agent secondary, so this is
+	// the role the command exists for -- yet it was reachable only through
+	// "auth", while the operator guide tells the reader to run it here.
+	AgentZoneCmd.AddCommand(NewZoneProxyKeyCmd("agent"))
 
 	// New addrr/delrr commands
 	// 20260415 johani: AgentZoneCmd.AddCommand(agentZoneAddRRCmd, agentZoneDelRRCmd)
