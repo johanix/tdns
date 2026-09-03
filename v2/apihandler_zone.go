@@ -1021,19 +1021,20 @@ func APIzoneParentSync(ctx context.Context, app *AppDetails, refreshq chan ZoneR
 				resp.ErrorMsg = fmt.Sprintf("Zone %q: ImrEngine not active. Cannot determine parent zone", zd.ZoneName)
 				return
 			}
-			zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
-			if err != nil {
+			// Resolve without holding zd.mu (ParentZone is a network lookup),
+			// then assign under the lock so concurrent status requests do not
+			// race the string write.
+			parent, perr := Globals.ImrEngine.ParentZone(zd.ZoneName)
+			if perr != nil {
 				resp.Error = true
-				resp.ErrorMsg = err.Error()
+				resp.ErrorMsg = perr.Error()
 				return
 			}
-		}
-
-		apex, err := zd.GetOwner(zd.ZoneName)
-		if err != nil {
-			resp.Error = true
-			resp.ErrorMsg = err.Error()
-			return
+			zd.mu.Lock()
+			if zd.Parent == "" {
+				zd.Parent = parent
+			}
+			zd.mu.Unlock()
 		}
 
 		switch req.Command {
@@ -1050,7 +1051,8 @@ func APIzoneParentSync(ctx context.Context, app *AppDetails, refreshq chan ZoneR
 			} else if zd.ZoneType == Secondary {
 				if zd.Options[OptDelSyncChild] {
 					resp.Functions["SIG(0) key publication"] = "not done; KEY record must be added to zone at primary server"
-					resp.Todo = append(resp.Todo, fmt.Sprintf("Add this KEY record to the %s zone at primary server:\n%s", zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs[0].String()))
+					// No apex KEY to quote: GetRRset already reported none.
+					resp.Todo = append(resp.Todo, fmt.Sprintf("Add the zone's SIG(0) KEY record to %s at the primary server", zd.ZoneName))
 				} else {
 					resp.Functions["SIG(0) key publication"] = "disabled by policy (parentsync=false)"
 				}

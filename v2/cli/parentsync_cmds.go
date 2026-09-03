@@ -65,9 +65,7 @@ var agentParentSyncStatusCmd = &cobra.Command{
 		if resp.Error {
 			log.Fatalf("Error from server: %s", resp.ErrorMsg)
 		}
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
+		printParentSyncStatus(resp)
 	},
 }
 

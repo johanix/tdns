@@ -45,24 +45,7 @@ func newZoneParentSyncCmd(role string) *cobra.Command {
 				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
 				os.Exit(1)
 			}
-			if resp.Msg != "" {
-				fmt.Printf("%s\n", resp.Msg)
-			}
-			out := []string{}
-			for key, s := range resp.Functions {
-				out = append(out, fmt.Sprintf("%s|%s", key, s))
-			}
-			sort.Strings(out)
-			if tdns.Globals.ShowHeaders {
-				out = append([]string{"Function|Status"}, out...)
-			}
-			fmt.Printf("%s\n", columnize.SimpleFormat(out))
-			if len(resp.Todo) > 0 {
-				fmt.Printf("\nTODO:\n")
-				for _, todo := range resp.Todo {
-					fmt.Printf("--> %s\n", todo)
-				}
-			}
+			printParentSyncStatus(resp)
 		},
 	}
 
@@ -240,6 +223,30 @@ func newZoneParentSyncCmd(role string) *cobra.Command {
 
 	c.AddCommand(status, bootstrap, rollKey, inquire, delta, sync)
 	return c
+}
+
+// printParentSyncStatus renders the Msg, Functions, and Todo from a
+// /zone/parentsync status response. Shared by the canonical command and the
+// hidden agent parentsync alias.
+func printParentSyncStatus(resp tdns.ZoneParentSyncResponse) {
+	if resp.Msg != "" {
+		fmt.Printf("%s\n", resp.Msg)
+	}
+	out := []string{}
+	for key, s := range resp.Functions {
+		out = append(out, fmt.Sprintf("%s|%s", key, s))
+	}
+	sort.Strings(out)
+	if tdns.Globals.ShowHeaders {
+		out = append([]string{"Function|Status"}, out...)
+	}
+	fmt.Printf("%s\n", columnize.SimpleFormat(out))
+	if len(resp.Todo) > 0 {
+		fmt.Printf("\nTODO:\n")
+		for _, todo := range resp.Todo {
+			fmt.Printf("--> %s\n", todo)
+		}
+	}
 }
 
 // SendParentSyncCommand POSTs a ZoneParentSyncPost to /zone/parentsync.
