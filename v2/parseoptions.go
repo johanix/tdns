@@ -187,6 +187,10 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			}
 			continue
 		}
+		// Deprecation warning for old option spellings.
+		if canonical, deprecated := deprecatedZoneOptionNames[option]; deprecated {
+			lg.Warn("deprecated zone option spelling; please use the new name", "zone", zname, "old", option, "new", canonical)
+		}
 
 		switch opt {
 		case OptDelSyncParent,
@@ -257,6 +261,32 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			// Default ON is expressed by requestIxfr() rather than by
 			// materialising a flag here, so the persisted as-configured set
 			// keeps saying what the operator actually wrote.
+			options[opt] = true
+			cleanoptions = append(cleanoptions, opt)
+
+		case OptUseHsyncparam:
+			// Authorization to act on a customer zone's HSYNCPARAM pubkey /
+			// pubcds flags by republishing its apex KEY / CDS at the RFC 9615
+			// _signal names (signal_republish.go). Meaningful only on a
+			// secondary: the whole mechanism is driven by an incoming
+			// transfer of a zone somebody else owns, and a primary has no
+			// such transfer to react to.
+			//
+			// ConfigWarning, not ConfigError, for the same reason as the
+			// request-ixfr pair above: the option is inert here, the zone is
+			// entirely fine and keeps serving, and ConfigError is in
+			// serviceImpactingErrors -- using it would take a healthy zone
+			// dark over a setting that merely does nothing.
+			if zconf.Type == "primary" {
+				errorMsg := fmt.Sprintf("Zone %s: %s is only meaningful on a secondary; ignored on a primary",
+					zname, ZoneOptionToString[opt])
+				lg.Error("option ignored: not a secondary", "zone", zname,
+					"option", ZoneOptionToString[opt], "type", zconf.Type)
+				if zd != nil {
+					zd.SetError(ConfigWarning, "%s", errorMsg)
+				}
+				continue
+			}
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
 
@@ -386,6 +416,15 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			continue
 		}
 	}
+	// Mutual exclusion: parentsync and parentsync-proxy cannot both be set.
+	if options[OptDelSyncChild] && options[OptDelSyncProxy] {
+		msg := fmt.Sprintf("parentsync and parentsync-proxy are mutually exclusive on zone %s; zone will be quarantined", zname)
+		lg.Error("mutually exclusive options", "zone", zname, "option1", "parentsync", "option2", "parentsync-proxy")
+		if zd != nil {
+			zd.SetError(ConfigError, "%s", msg)
+		}
+	}
+
 	zconf.Options = cleanoptions
 	return options
 }

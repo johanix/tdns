@@ -100,6 +100,21 @@ const (
 	// writes both, because the safe direction is the one that only ever asks
 	// for a full transfer.
 	OptNoRequestIxfr
+	// OptUseHsyncparam lets a SECONDARY act on the zone owner's HSYNCPARAM
+	// signaling (draft-leon-dnsop-signaling-zone-owner-intent): the pubkey and
+	// pubcds flags ask each of the zone's DNS providers to republish the
+	// child's SIG(0) KEY / CDS at the RFC 9615 _signal names owned by the
+	// child's nameservers, in the nameserver's own zone (signal_republish.go).
+	//
+	// Named for acting, not for noticing: the record is parsed and served
+	// regardless, and this option is the operator's authorization to publish
+	// records into a zone on the strength of a third party's signaling. Off,
+	// the HSYNCPARAM is inert data like any other RRset.
+	//
+	// Appended at the end for the same reason every option above it was:
+	// ZoneOption values are positional, so inserting mid-list renumbers
+	// everything after.
+	OptUseHsyncparam
 	optZoneOptionTdnsSentinel
 )
 
@@ -110,8 +125,8 @@ const (
 const _ uint = uint(TdnsZoneOptionMax) - uint(optZoneOptionTdnsSentinel-1)
 
 var ZoneOptionToString = map[ZoneOption]string{
-	OptDelSyncParent:     "delegation-sync-parent",
-	OptDelSyncChild:      "delegation-sync-child",
+	OptDelSyncParent:     "childsync",
+	OptDelSyncChild:      "parentsync",
 	OptAllowUpdates:      "allow-updates",
 	OptAllowChildUpdates: "allow-child-updates",
 	OptAllowEdits:        "allow-edits", // Dynamically et if app=combiner and zone contains a HSYNC RRset
@@ -132,7 +147,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptCatalogMemberAutoCreate: "catalog-member-auto-create",
 	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
 	OptMultiSigner:             "multi-signer",
-	OptDelSyncProxy:            "delegation-sync-proxy",
+	OptDelSyncProxy:            "parentsync-proxy",
 	OptAllowApiUpdates:         "allow-api-updates",
 	OptOnConflictDBWins:        "on-conflict-db-wins",
 	OptOnConflictZonefileWins:  "on-conflict-zonefile-wins",
@@ -140,11 +155,14 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptVerifyZonemd:            "verify-zonemd",
 	OptRequestIxfr:             "request-ixfr",
 	OptNoRequestIxfr:           "no-request-ixfr",
+	OptUseHsyncparam:           "use-hsyncparam",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
-	"delegation-sync-parent":     OptDelSyncParent,
-	"delegation-sync-child":      OptDelSyncChild,
+	"childsync":                  OptDelSyncParent,
+	"parentsync":                 OptDelSyncChild,
+	"delegation-sync-parent":     OptDelSyncParent, // deprecated alias
+	"delegation-sync-child":      OptDelSyncChild,  // deprecated alias
 	"allow-updates":              OptAllowUpdates,
 	"allow-child-updates":        OptAllowChildUpdates,
 	"allow-edits":                OptAllowEdits,
@@ -164,7 +182,8 @@ var StringToZoneOption = map[string]ZoneOption{
 	"catalog-member-auto-create": OptCatalogMemberAutoCreate,
 	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
 	"multi-signer":               OptMultiSigner,
-	"delegation-sync-proxy":      OptDelSyncProxy,
+	"parentsync-proxy":           OptDelSyncProxy,
+	"delegation-sync-proxy":      OptDelSyncProxy, // deprecated alias
 	"allow-api-updates":          OptAllowApiUpdates,
 	"on-conflict-db-wins":        OptOnConflictDBWins,
 	"on-conflict-zonefile-wins":  OptOnConflictZonefileWins,
@@ -172,6 +191,17 @@ var StringToZoneOption = map[string]ZoneOption{
 	"verify-zonemd":              OptVerifyZonemd,
 	"request-ixfr":               OptRequestIxfr,
 	"no-request-ixfr":            OptNoRequestIxfr,
+	"use-hsyncparam":             OptUseHsyncparam,
+}
+
+// deprecatedZoneOptionNames maps old option spellings to the canonical name
+// ZoneOptionToString now renders. Parse still accepts the old names (they
+// sit in StringToZoneOption); the parser logs a deprecation warning and
+// names the replacement. Removal of the aliases is a later change.
+var deprecatedZoneOptionNames = map[string]string{
+	"delegation-sync-child":  "parentsync",
+	"delegation-sync-parent": "childsync",
+	"delegation-sync-proxy":  "parentsync-proxy",
 }
 
 type ImrOption uint8

@@ -49,11 +49,55 @@ func (a *ProxyDelegationAnalysis) anyChange() bool {
 func (a *ProxyDelegationAnalysis) wantCDSNotify() bool   { return a.CdsChanged || a.DnskeyChanged }
 func (a *ProxyDelegationAnalysis) wantCSYNCNotify() bool { return a.CsyncChanged || a.NsOrGlueChanged }
 
+// registerProxyDelegationHooks appends the delegation-sync-proxy pre/post-refresh
+// callbacks to zdp. ParseZones calls it once, at the zone's first load, for
+// EVERY zone regardless of type or option -- so a zone that gains
+// OptDelSyncProxy on a later reload (including one reconfigured from primary to
+// secondary, whose reused ZoneData has FirstZoneLoad false by then) already
+// carries the hooks. First-load-only registration is deliberate, for the same
+// reason as registerSignalRepublishHook: it keeps the OnZone*Refresh slices
+// frozen once the zone is live, so the refresh engine can range them without a
+// lock.
+//
+// The option is checked HERE, in the closures, not inside
+// ProxyDelegationPreRefresh/PostRefresh: those are the diff/act primitives (and
+// the unit tests exercise them directly), while these closures are the live
+// wiring that decides whether to invoke them for this zone on this refresh.
+// Reading Options[OptDelSyncProxy] under zd.mu is what makes enabling the option
+// on reload take effect without a restart -- a config reload replaces zd.Options
+// wholesale under zd.mu, and the closures run with no lock held, so the read is
+// race-free and cannot deadlock.
+func (zdp *ZoneData) registerProxyDelegationHooks(delsyncq chan DelegationSyncRequest) {
+	zdp.OnZonePreRefresh = append(zdp.OnZonePreRefresh,
+		func(zd, new_zd *ZoneData) {
+			if !zd.proxyDelegationEnabled() {
+				return
+			}
+			zd.ProxyDelegationPreRefresh(new_zd)
+		})
+	zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh,
+		func(zd *ZoneData) {
+			if !zd.proxyDelegationEnabled() {
+				return
+			}
+			zd.ProxyDelegationPostRefresh(delsyncq)
+		})
+}
+
+// proxyDelegationEnabled reports whether OptDelSyncProxy is set, reading under
+// zd.mu because a config reload replaces zd.Options wholesale under that lock.
+func (zd *ZoneData) proxyDelegationEnabled() bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.Options[OptDelSyncProxy]
+}
+
 // ProxyDelegationPreRefresh runs BEFORE the hard flip on a delegation-sync-proxy
 // zone. It diffs the incoming zone (new_zd) against the currently-served zone
 // (zd) for the four delegation-relevant dimensions and records the result in
 // zd.ProxyRefreshAnalysis for the PostRefresh hook. It must NOT act here (the
-// new data is not yet served).
+// new data is not yet served). The registered closure gates the call on
+// OptDelSyncProxy; this method itself always runs the diff.
 func (zd *ZoneData) ProxyDelegationPreRefresh(new_zd *ZoneData) {
 	analysis := &ProxyDelegationAnalysis{}
 
@@ -193,8 +237,8 @@ func (zd *ZoneData) ProxyNotifyParent(ctx context.Context, notifyq chan NotifyRe
 
 	sent := zd.emitProxyNotifies(ctx, notifyq, analysis, dsynctarget.Addresses)
 	lgDns.Info("delegation-sync-proxy: forwarded NOTIFY(s) to parent",
-		"zone", zd.ZoneName, "parent", zd.Parent, "sent", sent, "target", dsynctarget.Addresses)
-	return fmt.Sprintf("forwarded NOTIFY(%v) to parent %s", sent, zd.Parent), nil
+		"zone", zd.ZoneName, "parent", zd.GetParent(), "sent", sent, "target", dsynctarget.Addresses)
+	return fmt.Sprintf("forwarded NOTIFY(%v) to parent %s", sent, zd.GetParent()), nil
 }
 
 // emitProxyNotifies sends the NOTIFY(s) the act-mapping (D4) calls for to the

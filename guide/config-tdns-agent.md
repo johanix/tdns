@@ -17,7 +17,7 @@ Two differences are worth knowing now:
   is not inherited by agent zones.
 
 - **The agent can proxy delegation sync** on behalf of a DSYNC-unaware primary
-  (BIND, Knot, NSD) with the `delegation-sync-proxy` zone option. That path is
+  (BIND, Knot, NSD) with the `parentsync-proxy` zone option. That path is
   already documented, as an operator how-to, in
   [Agent as a DSYNC proxy](agent-dsync-proxy.md).
 
@@ -65,7 +65,7 @@ those names live in the nameserver's zone. Listing it therefore costs a proxy
 zone nothing.
 
 **`child.schemes` governs the proxy too, and this is the trap.** A zone with
-`delegation-sync-proxy` sends to the parent *as the child*, so it walks the same
+`parentsync-proxy` sends to the parent *as the child*, so it walks the same
 plan a delegation-sync child does and reads the same setting. With `schemes:`
 empty, every transport is skipped — and the zone is not quarantined. It loads,
 serves, and forwards nothing, so the only symptom is silence.

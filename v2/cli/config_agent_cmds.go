@@ -122,39 +122,43 @@ func checkAgentZoneOptions(cfg *tdns.Config, rep *ccReport) {
 		for _, o := range eff.OptionsStrs {
 			opts[lc(o)] = true
 		}
+		// Resolved through StringToZoneOption so the deprecated spellings are
+		// covered without repeating them here; see zoneOptionsEnabled.
+		enabled := zoneOptionsEnabled(eff.OptionsStrs)
+		hasProxy := enabled[tdns.OptDelSyncProxy]
+		hasChild := enabled[tdns.OptDelSyncChild]
 
-		// delegation-sync-proxy is valid ONLY on an agent secondary.
-		if opts["delegation-sync-proxy"] && lc(eff.Type) != "secondary" {
+		if hasProxy && lc(eff.Type) != "secondary" {
 			rep.fail(g, zname,
-				fmt.Sprintf("delegation-sync-proxy requires a secondary zone (this zone is %q) — it will be quarantined at startup",
+				fmt.Sprintf("parentsync-proxy requires a secondary zone (this zone is %q) — it will be quarantined at startup",
 					eff.Type),
-				"set type: secondary, or drop the delegation-sync-proxy option")
+				"set type: secondary, or drop the parentsync-proxy option")
 		}
 
 		// The proxy sends to the parent as the child, so it walks the same
-		// plan as a delegation-sync child and reads the same setting:
+		// plan as a parentsync child and reads the same setting:
 		// BuildParentSyncPlan returns SkippedScheme{"all"} for BOTH roles when
 		// delegationsync.child.schemes is empty. The zone is not quarantined —
 		// it loads, serves, and silently forwards nothing, which is why this
 		// is worth predicting rather than leaving to a log line.
-		if opts["delegation-sync-proxy"] && len(childSchemes) == 0 {
+		if hasProxy && len(childSchemes) == 0 {
 			rep.fail(g, zname,
-				"delegation-sync-proxy is enabled but delegationsync.child.schemes is empty — every transport is skipped and nothing is ever forwarded",
+				"parentsync-proxy is enabled but delegationsync.child.schemes is empty — every transport is skipped and nothing is ever forwarded",
 				"set delegationsync.child.schemes (e.g. [ notify, update ])")
 		}
 
-		// On an agent, delegation-sync-child only engages when the zone also
+		// On an agent, parentsync only engages when the zone also
 		// carries multi-provider; otherwise the setup block is skipped and the
 		// option is silently inert.
-		if opts["delegation-sync-child"] {
+		if hasChild {
 			switch {
 			case !opts["multi-provider"]:
 				rep.warn(g, zname,
-					"delegation-sync-child without multi-provider is inert on tdns-agent — child delegation sync will not run",
-					"add the multi-provider option, or host the zone on tdns-auth where delegation-sync-child works standalone")
+					"parentsync without multi-provider is inert on tdns-agent — child delegation sync will not run",
+					"add the multi-provider option, or host the zone on tdns-auth where parentsync works standalone")
 			case len(childSchemes) == 0:
 				rep.fail(g, zname,
-					"delegation-sync-child is enabled but delegationsync.child.schemes is empty — the zone will be quarantined",
+					"parentsync is enabled but delegationsync.child.schemes is empty — the zone will be quarantined",
 					"set delegationsync.child.schemes (e.g. [ notify, update ])")
 			}
 		}
@@ -341,10 +345,10 @@ templates:
    - name:   proxy-secondary
      type:   secondary
      store:  map
-     # delegation-sync-proxy: act on behalf of a DSYNC-unaware primary
+     # parentsync-proxy: act on behalf of a DSYNC-unaware primary
      # (BIND/Knot) by watching transfers for CDS/CSYNC changes. Valid only
      # on an agent secondary.
-     options: [ delegation-sync-proxy ]
+     options: [ parentsync-proxy ]
 
 # No zones are configured, so this agent starts clean. To serve a zone, point
 # primaries: at your real primary and uncomment. A template may instead carry

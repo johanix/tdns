@@ -863,6 +863,17 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 			}
 		}
 
+		// parentsync and parentsync-proxy are mutually exclusive: a zone with
+		// both gets a ConfigError from parseZoneOptions and is quarantined at
+		// startup. Checked here rather than in checkAgentZoneOptions because
+		// parseZoneOptions runs for every app type, so tdns-auth quarantines
+		// such a zone too.
+		if enabled := zoneOptionsEnabled(eff.OptionsStrs); enabled[tdns.OptDelSyncChild] && enabled[tdns.OptDelSyncProxy] {
+			rep.fail(g, zname,
+				"parentsync and parentsync-proxy are mutually exclusive — the zone will be quarantined at startup",
+				"keep parentsync (this server syncs to the parent as the child) or parentsync-proxy (it syncs on behalf of a DSYNC-unaware primary), not both")
+		}
+
 		switch lc(eff.Type) {
 		case "primary":
 			// tdns-agent refuses primary zones outright (parseconfig.go): the
@@ -1467,6 +1478,22 @@ func parseZonefile(path, origin string) error {
 		return fmt.Errorf("no SOA record found")
 	}
 	return nil
+}
+
+// zoneOptionsEnabled resolves a zone's configured option strings to the
+// canonical ZoneOption values parseZoneOptions will set. Going through
+// StringToZoneOption means a deprecated spelling resolves to the same option
+// as its replacement, so a check written against the enum needs no alias list
+// of its own -- and cannot drift from the one in v2/enums.go when the next
+// option is renamed.
+func zoneOptionsEnabled(opts []string) map[tdns.ZoneOption]bool {
+	out := map[tdns.ZoneOption]bool{}
+	for _, o := range opts {
+		if opt, ok := tdns.StringToZoneOption[lc(o)]; ok {
+			out[opt] = true
+		}
+	}
+	return out
 }
 
 func hasSigningOption(opts []string) bool {

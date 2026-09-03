@@ -324,7 +324,9 @@ would roll, whether the parent DS would break) and changes nothing; add
 	c.AddCommand(list, desc, dnssecCmd, reload, bump, write, sync, freeze, thaw, proxyKey, add, del, modify, listDynamic)
 	// Role-independent extras attached to every zone tree. Each is built
 	// fresh so the command pointer is unique per NewZoneCmd invocation.
-	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), newZoneDsyncCmd(role))
+	dsyncCmd := newZoneDsyncCmd(role)
+	dsyncCmd.Hidden = true
+	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), dsyncCmd, newZoneParentSyncCmd(role), newZoneChildSyncCmd(role))
 	// The delta journal's operator surface. Under "zone", not under
 	// "zone update": it inspects and manages what is stored about the zone,
 	// which is not a way of changing the zone's content.

@@ -1679,7 +1679,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		// the whole RRset and republish, which discards the operator's own
 		// records.
 		lg.Debug("SetupZoneSync: reconciling the DSYNC RRset", "zone", zd.ZoneName)
-		if err := zd.PublishDsyncRRs(); err != nil {
+		if err := zd.PublishDsyncRRs(context.Background()); err != nil {
 			lg.Error("PublishDsyncRRs failed", "zone", zd.ZoneName, "err", err)
 			return err
 		}

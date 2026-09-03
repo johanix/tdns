@@ -51,6 +51,16 @@ func newMapZone(name string, ztype ZoneType, owners map[string][]dns.RR) *ZoneDa
 	return zd
 }
 
+// newOptedInChild builds a secondary customer zone whose operator has enabled
+// use-hsyncparam -- the transfer-driven republish does nothing without it, so
+// every republish test needs it. The tests that exercise the option gate
+// itself construct their zone with newMapZone and set (or omit) it in view.
+func newOptedInChild(name string, owners map[string][]dns.RR) *ZoneData {
+	zd := newMapZone(name, Secondary, owners)
+	zd.Options[OptUseHsyncparam] = true
+	return zd
+}
+
 // registerZones puts the zones in the global registry for FindZone and removes
 // them on cleanup so tests don't leak into each other.
 func registerZones(t *testing.T, zds ...*ZoneData) {
@@ -192,7 +202,7 @@ func signalTarget(name string, owners map[string][]dns.RR) (*ZoneData, chan Upda
 }
 
 func TestRepublishPubkey_PublishesToLocalPrimary(t *testing.T) {
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey"),
 			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
@@ -237,7 +247,7 @@ func TestRepublishPubkey_PublishesToLocalPrimary(t *testing.T) {
 }
 
 func TestRepublishPubcds_PublishesCDSAndCDNSKEY(t *testing.T) {
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN HSYNCPARAM pubcds"),
 			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
@@ -280,7 +290,7 @@ func TestRepublishPubcds_PublishesCDSAndCDNSKEY(t *testing.T) {
 }
 
 func TestRepublish_SkipsNonPrimaryTarget(t *testing.T) {
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey"),
 			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
@@ -300,7 +310,7 @@ func TestRepublish_SkipsNonPrimaryTarget(t *testing.T) {
 }
 
 func TestRepublish_SkipsNSWithNoLocalZone(t *testing.T) {
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey"),
 			mustRR(t, "example. 3600 IN NS ns.elsewhere.net."),
@@ -315,7 +325,7 @@ func TestRepublish_SkipsNSWithNoLocalZone(t *testing.T) {
 
 func TestRepublish_ChangeGateNoOpWhenAlreadyPublished(t *testing.T) {
 	owner := "_sig0key.example._signal.ns.foobar.com."
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey"),
 			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
@@ -337,7 +347,7 @@ func TestRepublish_ChangeGateNoOpWhenAlreadyPublished(t *testing.T) {
 
 func TestRepublish_FlagsGatedIndependently(t *testing.T) {
 	pubkeyOwner := "_sig0key.example._signal.ns.foobar.com."
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey pubcds"),
 			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
@@ -373,7 +383,7 @@ func TestRepublish_FlagsGatedIndependently(t *testing.T) {
 }
 
 func TestRepublish_NoHsyncparamIsNoOp(t *testing.T) {
-	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+	child := newOptedInChild("example.", map[string][]dns.RR{
 		"example.": {
 			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
 			mustRR(t, "example. 3600 IN KEY 256 3 15 dGVzdA=="),
@@ -386,6 +396,41 @@ func TestRepublish_NoHsyncparamIsNoOp(t *testing.T) {
 
 	if urs := drainUpdateQ(q); len(urs) != 0 {
 		t.Fatalf("expected no-op without HSYNCPARAM, got %d updates", len(urs))
+	}
+}
+
+// The option gate. Everything the republish needs is present -- pubkey flag,
+// an apex KEY, an NS whose signal name falls in a local primary zone -- and
+// the ONLY thing missing is the operator's use-hsyncparam. Nothing may be
+// written: publishing into our own primary zone on the strength of a customer
+// zone's signaling is exactly what the option authorizes.
+func TestRepublish_WithoutUseHsyncparamIsNoOp(t *testing.T) {
+	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+		"example.": {
+			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey pubcds"),
+			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
+			mustRR(t, "example. 3600 IN KEY 256 3 15 dGVzdGtleQ=="),
+			mustRR(t, "example. 3600 IN CDS 12345 15 2 0102"),
+		},
+	})
+	if child.Options[OptUseHsyncparam] {
+		t.Fatal("newMapZone must not enable use-hsyncparam; the gate would not be under test")
+	}
+	target, q := signalTarget("foobar.com.", nil)
+	registerZones(t, child, target)
+
+	child.RepublishAtSignalNames()
+
+	if urs := drainUpdateQ(q); len(urs) != 0 {
+		t.Fatalf("republished without use-hsyncparam: %d updates", len(urs))
+	}
+
+	// And the same zone with the option on does publish -- so the no-op above
+	// is the gate, not a broken fixture.
+	child.Options[OptUseHsyncparam] = true
+	child.RepublishAtSignalNames()
+	if urs := drainUpdateQ(q); len(urs) != 2 {
+		t.Fatalf("expected 2 updates (pubkey + pubcds) once opted in, got %d", len(urs))
 	}
 }
 
