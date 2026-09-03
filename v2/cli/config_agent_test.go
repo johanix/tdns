@@ -9,6 +9,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/johanix/tdns/v2"
@@ -272,4 +273,41 @@ func TestCheckLogSection(t *testing.T) {
 			t.Fatalf("missing log: is the required-field check's job, got %d/%d", fails, warns)
 		}
 	})
+}
+
+// config check must predict every quarantine parseZoneOptions will impose --
+// that is the whole point of it. parentsync + parentsync-proxy is one, and it
+// is checked role-independently (checkZones), because parseZoneOptions runs
+// for tdns-auth too (#493).
+func TestCheckZonesFlagsParentSyncPlusProxy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []string
+		want bool
+	}{
+		{"both canonical", []string{"parentsync", "parentsync-proxy"}, true},
+		{"both deprecated", []string{"delegation-sync-child", "delegation-sync-proxy"}, true},
+		{"mixed spellings", []string{"delegation-sync-child", "parentsync-proxy"}, true},
+		{"parentsync alone", []string{"parentsync"}, false},
+		{"proxy alone", []string{"parentsync-proxy"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &tdns.Config{}
+			cfg.Zones = []tdns.ZoneConf{{
+				Name: "child.example.", Type: "secondary", OptionsStrs: tc.opts,
+			}}
+			rep := newCCReport()
+			checkZones(cfg, rep, false, "auth")
+
+			var got bool
+			for _, f := range rep.byGroup["Zones"] {
+				if f.level == ccFAIL && strings.Contains(f.msg, "mutually exclusive") {
+					got = true
+				}
+			}
+			if got != tc.want {
+				t.Errorf("mutual-exclusion finding = %v, want %v (options %v)", got, tc.want, tc.opts)
+			}
+		})
+	}
 }

@@ -445,7 +445,10 @@ type ZoneDsyncResponse struct {
 
 // ZoneParentSyncPost is the request type for /zone/parentsync (child-side operations).
 type ZoneParentSyncPost struct {
-	Command   string // status | bootstrap | roll-key | inquire | delta | sync
+	// delta and sync are NOT here: the CLI's `parentsync delta` and
+	// `parentsync sync` go to /delegation via SendDelegationCmd, and this
+	// handler rejects anything outside the list below.
+	Command   string // status | bootstrap | roll-key | inquire
 	Zone      string
 	Algorithm uint8
 	Action    string // for roll-key
@@ -457,7 +460,6 @@ type ZoneParentSyncPost struct {
 type ZoneParentSyncResponse struct {
 	AppName       string
 	Time          time.Time
-	Status        string
 	Zone          string
 	Functions     map[string]string
 	Todo          []string

@@ -121,3 +121,52 @@ func TestSetupZoneSyncProxyGateReachable(t *testing.T) {
 		t.Fatalf("agent secondary proxy zone must be accepted, got: %v", err)
 	}
 }
+
+// parentsync and parentsync-proxy are mutually exclusive: one server syncing
+// to the parent AS the child and the same server syncing on BEHALF of a
+// DSYNC-unaware primary are two different roles, and a zone claiming both has
+// no defined behaviour. parseZoneOptions records a ConfigError so the zone is
+// quarantined rather than picking one silently (#493).
+func TestParseZoneOptionsRefusesParentSyncPlusProxy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []string
+	}{
+		{"canonical names", []string{"parentsync", "parentsync-proxy"}},
+		{"deprecated spellings", []string{"delegation-sync-child", "delegation-sync-proxy"}},
+		{"one of each", []string{"parentsync", "delegation-sync-proxy"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := &ZoneData{ZoneName: "child.example."}
+			zconf := &ZoneConf{Name: "child.example.", Type: "secondary", OptionsStrs: tc.opts}
+
+			parseZoneOptions(nil, "child.example.", zconf, zd)
+
+			var found bool
+			for _, e := range zd.ErrorList() {
+				if e.Type == ConfigError {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("no ConfigError for %v; the zone would serve with both roles set", tc.opts)
+			}
+		})
+	}
+}
+
+// Each option on its own is fine -- the check must not fire on one of them.
+func TestParseZoneOptionsAllowsEitherParentSyncOptionAlone(t *testing.T) {
+	for _, opt := range []string{"parentsync", "parentsync-proxy"} {
+		t.Run(opt, func(t *testing.T) {
+			zd := &ZoneData{ZoneName: "child.example."}
+			zconf := &ZoneConf{Name: "child.example.", Type: "secondary", OptionsStrs: []string{opt}}
+			parseZoneOptions(nil, "child.example.", zconf, zd)
+			for _, e := range zd.ErrorList() {
+				if e.Type == ConfigError {
+					t.Errorf("unexpected ConfigError for %q alone: %s", opt, e.Msg)
+				}
+			}
+		})
+	}
+}

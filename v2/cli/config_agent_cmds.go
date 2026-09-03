@@ -122,11 +122,11 @@ func checkAgentZoneOptions(cfg *tdns.Config, rep *ccReport) {
 		for _, o := range eff.OptionsStrs {
 			opts[lc(o)] = true
 		}
-
-		// parentsync-proxy is valid ONLY on an agent secondary.
-		// Accept both new name and deprecated alias.
-		hasProxy := opts["parentsync-proxy"] || opts["delegation-sync-proxy"]
-		hasChild := opts["parentsync"] || opts["delegation-sync-child"]
+		// Resolved through StringToZoneOption so the deprecated spellings are
+		// covered without repeating them here; see zoneOptionsEnabled.
+		enabled := zoneOptionsEnabled(eff.OptionsStrs)
+		hasProxy := enabled[tdns.OptDelSyncProxy]
+		hasChild := enabled[tdns.OptDelSyncChild]
 
 		if hasProxy && lc(eff.Type) != "secondary" {
 			rep.fail(g, zname,

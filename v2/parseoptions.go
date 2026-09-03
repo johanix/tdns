@@ -189,7 +189,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 		}
 		// Deprecation warning for old option spellings.
 		if canonical, deprecated := deprecatedZoneOptionNames[option]; deprecated {
-			lgConfig.Warn("deprecated zone option spelling; please use the new name", "zone", zname, "old", option, "new", canonical)
+			lg.Warn("deprecated zone option spelling; please use the new name", "zone", zname, "old", option, "new", canonical)
 		}
 
 		switch opt {

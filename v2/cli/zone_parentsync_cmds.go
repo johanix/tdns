@@ -78,8 +78,10 @@ func newZoneParentSyncCmd(role string) *cobra.Command {
 			}
 		},
 	}
-	bootstrap.Flags().StringVar(&bootstrapScheme, "scheme", "", "Bootstrap scheme: update | notify | api (required)")
-	bootstrap.MarkFlagRequired("scheme")
+	// Only "update" is implemented; it negotiates the actual method with the
+	// parent from the advertised and willing lists. Defaulted rather than
+	// required, so the working case needs no flag at all.
+	bootstrap.Flags().StringVar(&bootstrapScheme, "scheme", "update", "Bootstrap scheme (only \"update\" is implemented)")
 
 	rollKey := &cobra.Command{
 		Use:   "roll-key",
@@ -268,8 +270,9 @@ func SendParentSyncCommand(api *tdns.ApiClient, data tdns.ZoneParentSyncPost) (t
 	if err != nil {
 		return cr, fmt.Errorf("error from unmarshal: %v", err)
 	}
-	if cr.Error {
-		return cr, fmt.Errorf("error from server: %s", cr.ErrorMsg)
-	}
+	// cr.Error is NOT turned into a Go error: the callers render it
+	// themselves ("Error from server: ..."), and wrapping it here made that
+	// branch unreachable and doubled the prefix on the path that did run.
+	// A non-nil error from this function means the exchange failed.
 	return cr, nil
 }

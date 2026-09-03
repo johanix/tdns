@@ -49,7 +49,7 @@ func zoneMayOriginateContent(zd *ZoneData) bool {
 	return zd.ZoneType == Primary || zd.Options[OptInlineSigning]
 }
 
-// originationAPICommands are the /zone and /zone/dsync API commands that make
+// originationAPICommands are the /zone and /zone/childsync API commands that make
 // the server ORIGINATE content: they either write into the zone or advance its
 // serial. Refused on a zone that may not originate (Fix C).
 //

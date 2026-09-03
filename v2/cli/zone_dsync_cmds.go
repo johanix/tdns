@@ -201,6 +201,23 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 	return c
 }
 
+// dsyncAliasCommand translates an old `zone dsync` command name to the name
+// the new endpoint uses. Names that did not change map to themselves.
+// TestDsyncAliasMapsEveryOldCommand pins every command newZoneDsyncCmd sends.
+func dsyncAliasCommand(old string) string {
+	switch old {
+	case "publish-dsync-rrset":
+		return "publish"
+	case "unpublish-dsync-rrset":
+		return "unpublish"
+	case "bootstrap-sig0-key":
+		return "bootstrap"
+	case "roll-sig0-key":
+		return "roll-key"
+	}
+	return old
+}
+
 // parentSideCommands are dsync commands that operate on the parent (childsync) side.
 var parentSideCommands = map[string]bool{
 	"publish-dsync-rrset":   true,
@@ -213,11 +230,8 @@ func SendDsyncCommand(api *tdns.ApiClient, data tdns.ZoneDsyncPost) (tdns.ZoneDs
 	if parentSideCommands[data.Command] {
 		// Map to childsync
 		csReq := tdns.ZoneChildSyncPost{
-			Command: map[string]string{
-				"publish-dsync-rrset":   "publish",
-				"unpublish-dsync-rrset": "unpublish",
-			}[data.Command],
-			Zone: data.Zone,
+			Command: dsyncAliasCommand(data.Command),
+			Zone:    data.Zone,
 		}
 		csResp, err := SendChildSyncCommand(api, csReq)
 		return tdns.ZoneDsyncResponse{
@@ -230,15 +244,8 @@ func SendDsyncCommand(api *tdns.ApiClient, data tdns.ZoneDsyncPost) (tdns.ZoneDs
 	}
 
 	// Child-side: map to parentsync
-	psCmd := data.Command
-	switch psCmd {
-	case "bootstrap-sig0-key":
-		psCmd = "bootstrap"
-	case "roll-sig0-key":
-		psCmd = "roll-key"
-	}
 	psReq := tdns.ZoneParentSyncPost{
-		Command:   psCmd,
+		Command:   dsyncAliasCommand(data.Command),
 		Zone:      data.Zone,
 		Algorithm: data.Algorithm,
 		Action:    data.Action,
@@ -250,7 +257,6 @@ func SendDsyncCommand(api *tdns.ApiClient, data tdns.ZoneDsyncPost) (tdns.ZoneDs
 	return tdns.ZoneDsyncResponse{
 		AppName:      psResp.AppName,
 		Time:         psResp.Time,
-		Status:       psResp.Status,
 		Zone:         psResp.Zone,
 		Functions:    psResp.Functions,
 		Todo:         psResp.Todo,

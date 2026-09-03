@@ -99,8 +99,9 @@ func SendChildSyncCommand(api *tdns.ApiClient, data tdns.ZoneChildSyncPost) (tdn
 	if err != nil {
 		return cr, fmt.Errorf("error from unmarshal: %v", err)
 	}
-	if cr.Error {
-		return cr, fmt.Errorf("error from server: %s", cr.ErrorMsg)
-	}
+	// cr.Error is NOT turned into a Go error: the callers render it
+	// themselves ("Error from server: ..."), and wrapping it here made that
+	// branch unreachable and doubled the prefix on the path that did run.
+	// A non-nil error from this function means the exchange failed.
 	return cr, nil
 }
