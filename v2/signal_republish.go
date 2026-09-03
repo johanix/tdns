@@ -24,6 +24,14 @@
 // is a non-starter and is skipped. The consumer is change-gated: it diffs
 // the desired content against what is already published at the signal name
 // in the target zone, so a re-transfer of unchanged data is a no-op.
+//
+// The transfer-driven republish is OPT-IN, per zone, via the secondary-only
+// use-hsyncparam option: it writes records into a zone this server is
+// authoritative for on the strength of a THIRD PARTY's signaling, so the
+// operator of that zone has to say yes. The child-side publishes in this file
+// (publishSig0KeyAtSignalNames, refreshSig0KeyAtSignalNames) and the
+// satisfiability probe canPublishSig0KeyAtSignal are NOT gated -- there the
+// zone being published for is our own and selecting at-ns is the intent.
 
 package tdns
 
@@ -63,13 +71,50 @@ var signalSpecs = []signalSpec{
 	},
 }
 
-// RepublishAtSignalNames is the OnZonePostRefresh callback registered on
-// every tdns-auth secondary. After a transfer of childZD's customer zone it
-// republishes the apex bootstrap RRsets under the RFC 9615 signal names if
-// the apex HSYNCPARAM asks for it. It is always-on but acts only when the
-// transferred zone actually carries the relevant flag and this server is
-// locally primary for a parent of the signal name.
+// registerSignalRepublishHook appends RepublishAtSignalNames to zdp's
+// post-refresh callbacks. ParseZones calls it once, at the zone's first load,
+// for EVERY zone regardless of type -- not only secondaries -- so a zone
+// reconfigured from primary to secondary on a later reload (its ZoneData is
+// reused, and FirstZoneLoad is false by then) already carries the hook. The
+// callback self-gates on Options[OptUseHsyncparam] and only a secondary can
+// hold that option (parseZoneOptions drops it on a primary), so registering it
+// everywhere costs a primary nothing but a guarded no-op.
+//
+// First-load-only registration is deliberate: it keeps zdp.OnZonePostRefresh
+// frozen once the zone is live, so the refresh engine can range it without a
+// lock. Registering on later reloads instead would mutate the slice under a
+// concurrent refresh -- a data race the type-independent first-load
+// registration here avoids by construction.
+func (zdp *ZoneData) registerSignalRepublishHook() {
+	zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh, func(zd *ZoneData) {
+		zd.RepublishAtSignalNames()
+	})
+}
+
+// RepublishAtSignalNames is the OnZonePostRefresh callback registered on every
+// zone. After a transfer of childZD's customer zone it republishes the apex
+// bootstrap RRsets under the RFC 9615 signal names if the zone is configured to
+// act on HSYNCPARAM and the apex HSYNCPARAM asks for it.
+//
+// The use-hsyncparam check is here rather than at registration time on purpose:
+// the hook is registered once, at first load (see registerSignalRepublishHook),
+// while zd.Options is replaced wholesale on every config reload. Reading the
+// option when the hook RUNS is what makes both enabling and disabling it take
+// effect on `config reload` instead of only on restart.
 func (childZD *ZoneData) RepublishAtSignalNames() {
+	// Read the option under the lock: ParseZones replaces zd.Options wholesale
+	// on a config reload (under zd.mu), and this callback runs from the
+	// post-refresh path with no lock held, so an unsynchronized map read here
+	// races the reload. zd.mu is the lock that field is mutated under elsewhere
+	// (SetOption), and this callback holds none of its own, so taking it is
+	// race-free and cannot deadlock.
+	childZD.mu.Lock()
+	enabled := childZD.Options[OptUseHsyncparam]
+	childZD.mu.Unlock()
+	if !enabled {
+		return
+	}
+
 	hp := childZD.apexHsyncparam()
 	if hp == nil {
 		return

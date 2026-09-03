@@ -207,6 +207,24 @@
 #   reported as a ConfigWarning: the option does nothing, but the zone is fine
 #   and keeps serving.
 #
+# ZONE-OWNER SIGNALING OPTIONS:
+#   use-hsyncparam:          Act on the zone owner's HSYNCPARAM record in a
+#                           transferred zone. Its pubkey / pubcds flags ask
+#                           each of the zone's DNS providers to republish the
+#                           zone's apex SIG(0) KEY / CDS+CDNSKEY at the RFC
+#                           9615 signal names -- _sig0key.<zone>._signal.<ns>
+#                           and _dsboot.<zone>._signal.<ns> -- in the
+#                           NAMESERVER's zone, not the customer's. Publishes
+#                           only into zones this server holds as primary, and
+#                           is change-gated.
+#                           SECONDARY ONLY: on a primary it is dropped with a
+#                           warning (the zone keeps serving), and a
+#                           template-provisioned primary refuses it outright.
+#                           Off by default: honouring a customer's flag writes
+#                           records into a zone YOU are authoritative for, so
+#                           it is the operator's decision. It does not affect
+#                           parsing or serving HSYNCPARAM, which is always on.
+#
 # MULTI-PROVIDER OPTIONS:
 #   multi-provider:          Zone is served by several providers (RFC 8901).
 #                           Changes signing and rollover behaviour; the

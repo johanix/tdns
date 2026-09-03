@@ -38,12 +38,17 @@ type dynamicPrimarySpec struct {
 
 // dynamicPrimaryDisallowedOptions are template options that name machinery a
 // dynamic primary must not participate in (v1): catalogs have their own
-// provisioning paths and multi-provider zones their own signing model.
+// provisioning paths, multi-provider zones their own signing model, and
+// use-hsyncparam is secondary-only.
 var dynamicPrimaryDisallowedOptions = map[ZoneOption]bool{
 	OptCatalogZone:             true,
 	OptCatalogMemberAutoCreate: true,
 	OptCatalogMemberAutoDelete: true,
 	OptMultiProvider:           true,
+	// Secondary-only: the HSYNCPARAM republisher reacts to an inbound
+	// transfer of somebody else's zone, which a primary never receives. The
+	// shared parser only warns; a blessed template must refuse loudly.
+	OptUseHsyncparam: true,
 }
 
 // lookupZoneTemplate copies a template out of the global Templates map under
