@@ -5,11 +5,16 @@ feature set:
 
 0. Load zones from text files on disk.
 
-1. Inbound and outbound NOTIFY support. Inbound and outbound
-   AXFR support, optionally TSIG-authenticated. No support for
-   IXFR yet. A secondary zone may be configured with multiple
-   primaries, and inbound NOTIFY and outbound AXFR are governed
-   by NSD-style access-control lists (see feature 16 below).
+1. Inbound and outbound NOTIFY support. Inbound and outbound AXFR
+   and IXFR (RFC 1995) support, optionally TSIG-authenticated.
+   Outbound, deltas are served from a per-zone chain retained across
+   publishes and bounded by `ixfr-chain-max-bytes`; inbound, a
+   secondary asks for a delta by default (the `request-ixfr` zone
+   option). Neither direction is a correctness dependency: any doubt
+   about the delta degrades to a full transfer. A secondary zone may
+   be configured with multiple primaries, and inbound NOTIFY and
+   outbound transfers are governed by NSD-style access-control lists
+   (see feature 16 below).
 
 2. Respond correctly to non-DNSSEC queries.
 
@@ -104,7 +109,7 @@ In addition, TDNS-AUTH has a couple of extra features:
 
 16. NSD-style access control for zone transfers and NOTIFY.
     `allow-notify:` (who may NOTIFY a secondary) and
-    `downstreams:` (who may AXFR from a primary) are lists of
+    `downstreams:` (who may transfer from a primary) are lists of
     entries, each an address prefix plus an optional TSIG key
     name (or the `NOKEY` / `BLOCKED` sentinels). An empty
     `downstreams:` denies all outbound transfers -- a deliberate
