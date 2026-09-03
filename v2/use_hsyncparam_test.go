@@ -100,8 +100,30 @@ func TestParseZoneOptionsWarnsOnUseHsyncparamOnPrimary(t *testing.T) {
 // A dynamic (template-provisioned) primary must REFUSE the option rather than
 // warn: that path exists so a blessed template cannot silently lose an option,
 // and a secondary-only option in a primary template is a template bug.
-func TestDynamicPrimaryDisallowsUseHsyncparam(t *testing.T) {
-	if !dynamicPrimaryDisallowedOptions[OptUseHsyncparam] {
-		t.Fatal("use-hsyncparam must be in dynamicPrimaryDisallowedOptions")
+//
+// Driven through prepareDynamicPrimary rather than by asserting map membership.
+// The map is only the arm; the refusal is what an operator meets, and only the
+// real producer proves the option is consulted before the zone is minted.
+func TestDynamicPrimaryRefusesUseHsyncparam(t *testing.T) {
+	resetZonesForTest()
+	conf, _ := newTestConfigForCores(t)
+	tmpl := dynPrimaryTestTemplate(t.TempDir())
+	tmpl.OptionsStrs = []string{"use-hsyncparam"}
+	withTestTemplates(t, map[string]ZoneConf{"hp": tmpl})
+
+	_, err := conf.prepareDynamicPrimary(ZoneConf{Name: "a.example", Template: "hp"}, nil, true)
+	if err == nil {
+		t.Fatal("a template carrying use-hsyncparam produced a dynamic primary")
+	}
+	if !strings.Contains(err.Error(), "use-hsyncparam") || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("refusal does not name the option and the reason: %v", err)
+	}
+
+	// The same template without the option must still work, so the failure
+	// above is the option and not a broken fixture.
+	ok := dynPrimaryTestTemplate(t.TempDir())
+	withTestTemplates(t, map[string]ZoneConf{"plain": ok})
+	if _, err := conf.prepareDynamicPrimary(ZoneConf{Name: "b.example", Template: "plain"}, nil, true); err != nil {
+		t.Fatalf("template without the option was refused too: %v", err)
 	}
 }

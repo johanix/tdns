@@ -47,15 +47,19 @@ Note the wording: **"each Provider"**. `pubkey` is not addressed to a
 particular Label. That is what lets tdns act on it without any of tdns-mp's
 identity machinery (§2).
 
-### Out of scope, but worth recording
+### Found while scoping this, fixed separately
 
-`v2/core/rr_hsyncparam.go` assigns key numbers `nsmgmt=0, parentsync=1,
-servers=2, signers=3, pubkey=4, pubcds=5, suffix=6, auditors=7`. The draft
-assigns `servers=0, signers=1, auditors=2, nsmgmt=3, parentsync=4, suffix=5,
-pubkey=6, pubcds=7`. Every current consumer (tdns and tdns-mp) shares the same
-`core`, so nothing misbehaves today, but the wire codepoints do not match the
-draft and would not interoperate with a second implementation. Separate change,
-not part of this one.
+`v2/core/rr_hsyncparam.go` assigned the key numbers in the opposite order from
+the draft's registry -- `nsmgmt=0, parentsync=1, servers=2, signers=3` where the
+draft puts the roles first. Every consumer (tdns and tdns-mp) shares the same
+`core`, so nothing misbehaved between them, but the records tdns put on the wire
+were not the records the draft describes.
+
+Fixed in `fix/hsyncparam-draft-codepoints` (PR #490), which lands **before**
+this branch: the flags this feature acts on, `pubkey` and `pubcds`, are wire
+numbers, so turning `use-hsyncparam` on across a mixed pre/post-#490 fleet would
+look like a dead option -- the RR fails to unpack rather than reporting
+anything. See `docs/2026-09-03-hsyncparam-codepoints-upgrade-note.md`.
 
 ## 2. How tdns-mp does it, and which part tdns needs
 
@@ -192,8 +196,6 @@ Verified with `go build ./...` and `go test ./...` from `v2/`, `v2/cli/` and
 - Nothing has run on a testbed. The scenario to run is a tdns-auth secondary
   for a customer zone carrying `HSYNCPARAM pubkey`, which is also primary for
   the zone holding that customer's NS name.
-- `core/rr_hsyncparam.go`'s key numbers do not match the draft's (§1). Separate
-  change.
 - Removing the option stops future republishes but does not withdraw records
   already published at the signal names -- the same `unpublish` gap D-6 left
   open.
