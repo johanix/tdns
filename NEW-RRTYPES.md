@@ -40,18 +40,25 @@ Format:
 owner TTL CLASS HSYNCPARAM key1="val1" key2="val2" ...
 ```
 
-Known keys:
+Known keys, with the key numbers
+draft-leon-dnsop-signaling-zone-owner-intent assigns them:
 
-  nsmgmt="owner|agent"          - who manages the NS RRset
-  parentsync="owner|agent"      - who handles parent synchronisation
-                                  (the mechanism is announced by the
-                                  parent via DSYNC)
-  servers="label1,label2,..."   - data-contributing provider labels
-  signers="label1,label2,..."   - signer labels
-  pubkey                        - flag: providers publish SIG(0) KEY
-  pubcds                        - flag: providers publish CDS/CDNSKEY
-  suffix="label"                - DNS label for provider NS+glue
-  auditors="label1,label2,..."  - observer-only auditor labels
+  0  servers="label1,label2,..."   - providers designated to serve the zone
+  1  signers="label1,label2,..."   - providers designated to sign the zone
+  2  auditors="label1,label2,..."  - observer-only auditor labels
+  3  nsmgmt="owner|agent"          - who manages the NS RRset
+  4  parentsync="owner|agent"      - who handles parent synchronisation
+                                     (the mechanism is announced by the
+                                     parent via DSYNC)
+  5  suffix="label"                - DNS label for provider NS+glue
+  6  pubkey                        - flag: publish the zone's SIG(0) KEY at
+                                     _sig0key.<zone>._signal.<ns>
+  7  pubcds                        - flag: publish the zone's CDS/CDNSKEY at
+                                     _dsboot.<zone>._signal.<ns>
+
+0-32767 is the IANA-registered range and 32768-65534 is Private Use; an
+unregistered number is preserved on read-back, never acted on, and written
+as keyN in presentation format. 65535 is reserved.
 
 Example:
 
@@ -61,6 +68,9 @@ example.com. 3600 IN HSYNCPARAM nsmgmt="agent" servers="alpha,echo" signers="alp
 
 Wire format: each key=value pair is encoded as 2 bytes key code + 2 bytes
 value length + value data, sorted by key code. Same layout as SVCB/HTTPS.
+The key numbers are wire format, so they must match the draft exactly; the
+presentation order above is the draft's registry order and is not the order
+the keys appear in the RDATA.
 
 ## CHUNK
 
