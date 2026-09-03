@@ -177,6 +177,22 @@ MACHINE_ARCH=$(uname -p)
 PKGTOOLS_VERSION=20091115
 EOF
 
+# A build host is not an archive. These packages are tens of megabytes each and
+# get rebuilt many times a day while the tree is under active development, so
+# keeping every previous version fills the disk -- which it has done, more than
+# once, on the host that builds them. Prune this package's older versions before
+# writing the new one.
+#
+# Scoped deliberately: the glob is anchored on the exact PKGBASE and requires a
+# DIGIT after the dash, so a sibling package that shares a prefix, or any
+# non-versioned file, is left alone. PKGBASE is checked non-empty above, so the
+# pattern cannot degenerate into "-*.tgz" and take the directory with it.
+for _old in "${PKGBASE}"-[0-9]*.tgz; do
+	[ -e "$_old" ] || continue	# no match: the shell left the glob literal
+	echo "mkpkg.sh: removing previous ${_old}"
+	rm -f "$_old"
+done
+
 "$PKG_CREATE" -F gzip \
 	-B "$META/BUILD_INFO" \
 	-c "$META/COMMENT" \
