@@ -74,11 +74,21 @@ func TestInitImrEngineHintsOnlyDispatch(t *testing.T) {
 // A failure whose exchange STARTED before a later success must be discarded:
 // an uncancellable probe racing a recovery must not re-mark a healthy
 // upstream failing (stale DEGRADED).
+//
+// The offsets on the two start times are load-bearing, not decoration. The
+// discard test is `lastSuccess.After(start)` -- strictly after -- so this test
+// has to establish a real ordering between the two instants, and consecutive
+// time.Now() calls do not: taken back to back around recordSuccess they came
+// back EQUAL in roughly 8% of runs on macOS, which recorded the "superseded"
+// failure and cascaded through all four assertions. Ordering the instants
+// explicitly is the fix; racing the clock was the bug. The tie itself is
+// pinned by TestRecordFailureSameInstantIsNotSuperseded below, so neither the
+// offsets nor the comparison can be "simplified" away without a test saying so.
 func TestRecordFailureSuperseded(t *testing.T) {
 	up := &ForwardUpstream{Label: "192.0.2.1:53/do53"}
-	start := time.Now()
+	startedBefore := time.Now().Add(-time.Millisecond)
 	up.recordSuccess()
-	if up.recordFailure(start, fmt.Errorf("stale timeout")) {
+	if up.recordFailure(startedBefore, fmt.Errorf("stale timeout")) {
 		t.Error("superseded failure reported a transition")
 	}
 	if up.failing || up.failures != 0 {
@@ -88,11 +98,37 @@ func TestRecordFailureSuperseded(t *testing.T) {
 		t.Errorf("superseded failure not counted as an attempt: queries=%d, want 2", up.queries)
 	}
 	// A failure that started after the success records normally.
-	if !up.recordFailure(time.Now(), fmt.Errorf("real timeout")) {
+	startedAfter := time.Now().Add(time.Millisecond)
+	if !up.recordFailure(startedAfter, fmt.Errorf("real timeout")) {
 		t.Error("current failure did not report the ok->failing transition")
 	}
 	if !up.failing || up.failures != 1 {
 		t.Errorf("current failure not recorded: failing=%v failures=%d", up.failing, up.failures)
+	}
+}
+
+// The tie-break the discard rests on, pinned: a success recorded at EXACTLY
+// the failing exchange's start instant does not supersede it. That is what
+// recordFailure's own comment describes -- a success "in the meantime" is one
+// that happened after the exchange began, and a simultaneous one did not.
+//
+// Worth its own test because the ambiguity is what made the test above flaky,
+// and because loosening the comparison to `!start.After(lastSuccess)` would
+// widen the discard window and make a genuinely failing upstream harder to
+// mark. That is a call to make deliberately, not to arrive at by tidying.
+func TestRecordFailureSameInstantIsNotSuperseded(t *testing.T) {
+	up := &ForwardUpstream{Label: "192.0.2.1:53/do53"}
+	// Assigned directly rather than via recordSuccess: the exact tie is the
+	// point, and two calls to time.Now() cannot be relied on to produce it.
+	// Single-goroutine test, so the mutex recordSuccess would take is moot.
+	instant := time.Now()
+	up.lastSuccess = instant
+
+	if !up.recordFailure(instant, fmt.Errorf("simultaneous")) {
+		t.Error("a failure starting at the success instant should record, and report the ok->failing transition")
+	}
+	if !up.failing || up.failures != 1 {
+		t.Errorf("simultaneous failure not recorded: failing=%v failures=%d", up.failing, up.failures)
 	}
 }
 
