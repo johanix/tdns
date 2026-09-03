@@ -55,13 +55,25 @@ func TestHsyncparamKeyNumbersMatchTheDraft(t *testing.T) {
 	}
 }
 
-// The wire encoding, byte for byte, with the key numbers visible. A renumbering
-// that slipped past the table above would still have to get past this.
+// The wire encoding, byte for byte, with the key numbers as literal bytes.
+//
+// This is the pin that matters. The table in
+// TestHsyncparamKeyNumbersMatchTheDraft compares a constant against a literal
+// in the same file, so an edit that changed both would still pass it. Here the
+// numbers appear as RDATA bytes produced by Pack, and every one of the eight
+// registered keys is present, so no renumbering can survive.
 func TestHsyncparamWireEncoding(t *testing.T) {
+	// Deliberately supplied in an order that is neither the draft's registry
+	// order nor the wire order, to show Pack imposes the canonical one.
 	rr := &HSYNCPARAM{Value: []HSYNCPARAMKeyValue{
-		&HSYNCPARAMNSmgmt{Value: HsyncNSmgmtAGENT},
-		&HSYNCPARAMServers{Servers: []string{"fox", "hare"}},
 		NewHsyncparamPubkeyFlag(),
+		&HSYNCPARAMNSmgmt{Value: HsyncNSmgmtAGENT},
+		&HSYNCPARAMSuffix{Label: "ns"},
+		&HSYNCPARAMServers{Servers: []string{"fox", "hare"}},
+		&HSYNCPARAMFlag{code: HSYNCPARAM_PUBCDS},
+		&HSYNCPARAMAuditors{Auditors: []string{"aud"}},
+		&HSYNCPARAMParentSync{Value: HsyncParentSyncAgent},
+		&HSYNCPARAMSigners{Signers: []string{"fox"}},
 	}}
 
 	buf := make([]byte, 256)
@@ -71,32 +83,47 @@ func TestHsyncparamWireEncoding(t *testing.T) {
 	}
 
 	want := []byte{
-		0, 0, 0, 8, 'f', 'o', 'x', ',', 'h', 'a', 'r', 'e', // key 0 servers, len 8
-		0, 3, 0, 1, HsyncNSmgmtAGENT, //                       key 3 nsmgmt,  len 1
-		0, 6, 0, 0, //                                         key 6 pubkey,  len 0 (flag)
+		0, 0, 0, 8, 'f', 'o', 'x', ',', 'h', 'a', 'r', 'e', // 0 servers
+		0, 1, 0, 3, 'f', 'o', 'x', //                          1 signers
+		0, 2, 0, 3, 'a', 'u', 'd', //                          2 auditors
+		0, 3, 0, 1, HsyncNSmgmtAGENT, //                       3 nsmgmt
+		0, 4, 0, 1, HsyncParentSyncAgent, //                   4 parentsync
+		0, 5, 0, 2, 'n', 's', //                               5 suffix
+		0, 6, 0, 0, //                                         6 pubkey  (flag)
+		0, 7, 0, 0, //                                         7 pubcds  (flag)
 	}
 	if got := buf[:n]; string(got) != string(want) {
 		t.Fatalf("wire bytes\n got %v\nwant %v", got, want)
 	}
 
-	// Pack sorts by key number regardless of the order the values were
-	// supplied in (nsmgmt was first above, servers is first on the wire), and
-	// Unpack requires that order -- so the encoding is canonical.
+	// Pack sorted by key number despite the scrambled input above, and Unpack
+	// requires that order -- so the encoding is canonical, and every key came
+	// back as itself rather than as its neighbour.
 	var back HSYNCPARAM
 	if _, err := back.Unpack(buf[:n]); err != nil {
 		t.Fatalf("Unpack: %v", err)
 	}
-	if got := back.GetNSmgmt(); got != HsyncNSmgmtAGENT {
-		t.Errorf("nsmgmt survived as %d, want %d", got, HsyncNSmgmtAGENT)
-	}
 	if got := strings.Join(back.GetServers(), ","); got != "fox,hare" {
 		t.Errorf("servers survived as %q, want \"fox,hare\"", got)
 	}
-	if !back.HasPubkey() {
-		t.Error("pubkey flag did not survive the round trip")
+	if got := strings.Join(back.GetSigners(), ","); got != "fox" {
+		t.Errorf("signers survived as %q, want \"fox\"", got)
 	}
-	if back.HasPubcds() {
-		t.Error("pubcds appeared out of nowhere -- key numbers are off by one somewhere")
+	if got := strings.Join(back.GetAuditors(), ","); got != "aud" {
+		t.Errorf("auditors survived as %q, want \"aud\"", got)
+	}
+	if got := back.GetNSmgmt(); got != HsyncNSmgmtAGENT {
+		t.Errorf("nsmgmt survived as %d, want %d", got, HsyncNSmgmtAGENT)
+	}
+	if got := back.GetParentSync(); got != HsyncParentSyncAgent {
+		t.Errorf("parentsync survived as %d, want %d", got, HsyncParentSyncAgent)
+	}
+	if got := back.GetSuffix(); got != "ns" {
+		t.Errorf("suffix survived as %q, want \"ns\"", got)
+	}
+	if !back.HasPubkey() || !back.HasPubcds() {
+		t.Errorf("flags survived as pubkey=%v pubcds=%v, want both true",
+			back.HasPubkey(), back.HasPubcds())
 	}
 }
 
