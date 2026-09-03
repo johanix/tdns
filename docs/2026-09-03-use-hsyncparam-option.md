@@ -154,15 +154,48 @@ secondary. That was the whole delta, and it is what §5 changes.
 - `v2/dynamic_primary.go` -- `OptUseHsyncparam` added to
   `dynamicPrimaryDisallowedOptions`.
 - `v2/signal_republish.go` -- `RepublishAtSignalNames` returns immediately
-  unless `zd.Options[OptUseHsyncparam]`. The check is at RUN time, not
-  registration time: the hook is registered once on first load (registering per
-  reload would accumulate duplicate callbacks) while `zd.Options` is replaced
-  wholesale on reload, so reading the option when the hook runs is what makes
-  `config reload` take effect instead of requiring a restart. File header
-  updated -- it claimed the consumer was always-on.
-- `v2/parseconfig.go` -- registration condition is now `zonetype == Secondary
-  && zdp.FirstZoneLoad`; the `AppTypeAuth` clause is gone and the comment
-  explains why the option is not checked there.
+  unless `zd.Options[OptUseHsyncparam]`, read under `zd.mu` (see the race note
+  below). The check is at RUN time, not registration time: the hook is
+  registered once while `zd.Options` is replaced wholesale on reload, so reading
+  the option when the hook runs is what makes `config reload` take effect --
+  both enabling and disabling -- instead of requiring a restart. File header
+  updated; it claimed the consumer was always-on. Registration lives in the new
+  `registerSignalRepublishHookOnce` helper here rather than inline in ParseZones.
+- `v2/parseconfig.go` -- registers the hook for every `Secondary`, via
+  `registerSignalRepublishHookOnce`; the `AppTypeAuth` clause is gone and the
+  comment explains why the option is not checked there.
+
+### After the external review
+
+Two Major findings from the adversarial review, both real, both fixed here
+rather than deferred:
+
+- **Reload registration gap.** Registration was gated on `zdp.FirstZoneLoad`,
+  but ParseZones reuses the `ZoneData`, so a zone reconfigured from primary to
+  secondary on `config reload` (supported at `refreshengine.go`) never got the
+  hook -- `FirstZoneLoad` is already false by then. The two OnZone*Refresh
+  registrations (this one and `delegation-sync-proxy`, which had the identical
+  gate and the identical bug) now use per-hook idempotency guards on `ZoneData`
+  -- `signalRepublishHookRegistered`, `proxyDelegationHooksRegistered` -- so
+  registration is once-only *and* fires the first time the zone becomes
+  eligible, on any reload. Both are extracted into `registerSignalRepublishHookOnce`
+  / `registerProxyDelegationHooksOnce`. As a side effect this also makes
+  `delegation-sync-proxy` enable-able on reload, which it was not before.
+  (Removing that option on reload still does not stop the proxy until a restart:
+  its callbacks do not self-gate, so registration is its gate -- unchanged, and
+  a separate concern from this finding. `use-hsyncparam` does self-gate, so it
+  is honoured in both directions.)
+- **Unsynchronized option read.** The callback read `zd.Options` with no lock
+  while a reload replaces the map under `zd.mu` -- a data race. The read is now
+  under `zd.mu` (the lock `SetOption` already uses), race-free and
+  deadlock-free since the callback holds no other lock.
+
+Tests added for both: `TestRegisterSignalRepublishHookOnce` and
+`TestRegisterProxyDelegationHooksOnce` (a primary->secondary registration
+registers exactly one hook/pair; repeated reloads do not duplicate;
+mutation-checked by removing the guard) and
+`TestRepublishAtSignalNamesOptionReadIsSynchronized` (passes under `-race`,
+mutation-checked by dropping the lock).
 - `v2/signal_republish_test.go` -- a `newOptedInChild` helper enables the
   option for the seven existing republish tests, and
   `TestRepublish_WithoutUseHsyncparamIsNoOp` is the gate: everything the

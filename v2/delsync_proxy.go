@@ -49,6 +49,36 @@ func (a *ProxyDelegationAnalysis) anyChange() bool {
 func (a *ProxyDelegationAnalysis) wantCDSNotify() bool   { return a.CdsChanged || a.DnskeyChanged }
 func (a *ProxyDelegationAnalysis) wantCSYNCNotify() bool { return a.CsyncChanged || a.NsOrGlueChanged }
 
+// registerProxyDelegationHooksOnce appends the delegation-sync-proxy
+// pre/post-refresh callbacks to zdp, at most once across the lifetime of the
+// reused ZoneData. ParseZones calls it for every zone that currently carries
+// OptDelSyncProxy; a zone that gains the option on a later reload -- including
+// one reconfigured from primary to secondary -- reaches it for the first time
+// then and gets both hooks, while a zone that already had them does not get a
+// second pair.
+//
+// Unlike the signal-republish hook, the callbacks do not self-gate on the
+// option, so this guard is also the gate: removing OptDelSyncProxy on reload
+// does not stop the proxy until a restart. That is unchanged from before the
+// registration was made reload-aware; a run-time self-gate is a separate change.
+//
+// Caller runs inside ParseZones (under confMu), which is where the guard field
+// is written; the field is read by nothing else.
+func (zdp *ZoneData) registerProxyDelegationHooksOnce(delsyncq chan DelegationSyncRequest) {
+	if zdp.proxyDelegationHooksRegistered {
+		return
+	}
+	zdp.proxyDelegationHooksRegistered = true
+	zdp.OnZonePreRefresh = append(zdp.OnZonePreRefresh,
+		func(zd, new_zd *ZoneData) {
+			zd.ProxyDelegationPreRefresh(new_zd)
+		})
+	zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh,
+		func(zd *ZoneData) {
+			zd.ProxyDelegationPostRefresh(delsyncq)
+		})
+}
+
 // ProxyDelegationPreRefresh runs BEFORE the hard flip on a delegation-sync-proxy
 // zone. It diffs the incoming zone (new_zd) against the currently-served zone
 // (zd) for the four delegation-relevant dimensions and records the result in

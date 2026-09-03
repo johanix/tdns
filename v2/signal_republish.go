@@ -71,18 +71,48 @@ var signalSpecs = []signalSpec{
 	},
 }
 
+// registerSignalRepublishHookOnce appends RepublishAtSignalNames to zdp's
+// post-refresh callbacks, at most once across the lifetime of the reused
+// ZoneData. ParseZones calls it for every secondary; a zone reconfigured from
+// primary to secondary on a later reload reaches it for the first time then and
+// gets the hook, while a zone that was already secondary does not get a second
+// copy. The option is deliberately not a condition here -- the callback
+// self-gates on Options[OptUseHsyncparam] at run time -- so enabling and
+// disabling use-hsyncparam both take effect on `config reload`.
+//
+// Caller runs inside ParseZones (under confMu), which is where the guard field
+// is written; the field is read by nothing else.
+func (zdp *ZoneData) registerSignalRepublishHookOnce() {
+	if zdp.signalRepublishHookRegistered {
+		return
+	}
+	zdp.signalRepublishHookRegistered = true
+	zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh, func(zd *ZoneData) {
+		zd.RepublishAtSignalNames()
+	})
+}
+
 // RepublishAtSignalNames is the OnZonePostRefresh callback registered on
 // every secondary. After a transfer of childZD's customer zone it republishes
 // the apex bootstrap RRsets under the RFC 9615 signal names if the zone is
 // configured to act on HSYNCPARAM and the apex HSYNCPARAM asks for it.
 //
 // The use-hsyncparam check is here rather than at registration time on
-// purpose: the hook is registered once, on first load (registering per reload
-// would accumulate duplicate callbacks), while zd.Options is replaced
-// wholesale on every config reload. Reading the option when the hook RUNS is
-// what makes it take effect on `config reload` instead of only on restart.
+// purpose: the hook is registered once (registering per reload would accumulate
+// duplicate callbacks), while zd.Options is replaced wholesale on every config
+// reload. Reading the option when the hook RUNS is what makes it take effect on
+// `config reload` instead of only on restart.
 func (childZD *ZoneData) RepublishAtSignalNames() {
-	if !childZD.Options[OptUseHsyncparam] {
+	// Read the option under the lock: ParseZones replaces zd.Options wholesale
+	// on a config reload (under zd.mu), and this callback runs from the
+	// post-refresh path with no lock held, so an unsynchronized map read here
+	// races the reload. zd.mu is the lock that field is mutated under elsewhere
+	// (SetOption), and this callback holds none of its own, so taking it is
+	// race-free and cannot deadlock.
+	childZD.mu.Lock()
+	enabled := childZD.Options[OptUseHsyncparam]
+	childZD.mu.Unlock()
+	if !enabled {
 		return
 	}
 

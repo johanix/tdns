@@ -1527,20 +1527,15 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// matching OnZonePostRefresh callback acts on it (P-3). Mirrors the
 		// tdns-mp MPPreRefresh/PostRefresh pattern (tdns-mp/v2/config.go), for
 		// the non-MP agent path.
-		// Register only on first load: on reload zdp is the existing registry
-		// entry and its OnZone*Refresh slices already carry these hooks, so
-		// appending again would accumulate duplicates (same convention as the
-		// OnFirstLoad-guarded setupSync block above).
-		if options[OptDelSyncProxy] && zdp.FirstZoneLoad {
-			delegationSyncQ := conf.Internal.DelegationSyncQ
-			zdp.OnZonePreRefresh = append(zdp.OnZonePreRefresh,
-				func(zd, new_zd *ZoneData) {
-					zd.ProxyDelegationPreRefresh(new_zd)
-				})
-			zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh,
-				func(zd *ZoneData) {
-					zd.ProxyDelegationPostRefresh(delegationSyncQ)
-				})
+		//
+		// Registered once, but reload-aware (registerProxyDelegationHooksOnce):
+		// zdp is the reused registry entry, so re-appending would duplicate the
+		// callbacks, while a FirstZoneLoad guard would miss a zone that only
+		// gains OptDelSyncProxy on a later reload (including one reconfigured
+		// from primary to secondary). See that helper for why removing the
+		// option on reload does not stop the proxy until a restart.
+		if options[OptDelSyncProxy] {
+			zdp.registerProxyDelegationHooksOnce(conf.Internal.DelegationSyncQ)
 		}
 
 		// Note: DelegationBackend wiring is done synchronously above,
@@ -1558,15 +1553,18 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// and any app type that can be secondary for a customer zone and
 		// primary for a nameserver's zone can do this job.
 		//
-		// The option itself is checked inside RepublishAtSignalNames, not here.
-		// Registration happens only on first load -- the OnZonePostRefresh
-		// slice would otherwise accumulate duplicate callbacks across reloads
-		// -- so gating registration would make use-hsyncparam a restart-only
-		// setting; zd.Options is replaced on reload, so the hook reads it live.
-		if zonetype == Secondary && zdp.FirstZoneLoad {
-			zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh, func(zd *ZoneData) {
-				zd.RepublishAtSignalNames()
-			})
+		// The option is NOT a registration condition -- RepublishAtSignalNames
+		// self-gates on Options[OptUseHsyncparam] at run time, so the hook is
+		// registered on every secondary and reads the option live, which is what
+		// makes enabling and disabling it both take effect on `config reload`.
+		//
+		// Registration is once-only but reload-aware (registerSignalRepublishHookOnce):
+		// zdp is reused, so re-appending on every reload would duplicate the
+		// callback, while a FirstZoneLoad guard would miss a zone reconfigured
+		// from primary to secondary (its previous primary incarnation registered
+		// nothing, and FirstZoneLoad is already false).
+		if zonetype == Secondary {
+			zdp.registerSignalRepublishHookOnce()
 		}
 
 		// Leader election OnFirstLoad is registered in StartAgent() (not here)
