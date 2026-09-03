@@ -30,7 +30,7 @@ The primary stays exactly as it is.
 ## Requirements
 
 - The PARENT publishes a DSYNC RRset (e.g. tdns-auth with
-  `delegation-sync-parent`). The proxy uses whichever scheme it advertises:
+  `childsync`). The proxy uses whichever scheme it advertises:
   NOTIFY (for CDS/CSYNC) and/or UPDATE. When both are advertised, UPDATE is
   preferred (it lands the change in one round-trip and works for unsigned
   zones).
@@ -44,7 +44,7 @@ The primary stays exactly as it is.
 ## Configuration
 
 On the tdns-agent, configure the zone as a normal secondary and add the
-`delegation-sync-proxy` option:
+`parentsync-proxy` option:
 
 ```yaml
 zones:
@@ -55,17 +55,17 @@ zones:
            key:  NOKEY              # no TSIG; trust this primary by address
       store: map
       options:
-         - delegation-sync-proxy
+         - parentsync-proxy
 ```
 
 Notes:
 
-- `delegation-sync-proxy` is valid ONLY on a tdns-agent secondary zone. On
+- `parentsync-proxy` is valid ONLY on a tdns-agent secondary zone. On
   any other app type, or on a primary zone, it is rejected with a config
   error (so a misconfiguration is loud, not silent).
-- It is independent of `delegation-sync-child`. Use `delegation-sync-proxy`
+- It is independent of `parentsync`. Use `parentsync-proxy`
   when the agent forwards on behalf of a clueless primary; use
-  `delegation-sync-child` when the agent/auth IS the child syncing its own
+  `parentsync` when the agent/auth IS the child syncing its own
   delegation.
 - For the NOTIFY scheme no SIG(0) key is needed (a NOTIFY is a contentless
   "come re-scan me" signal). The UPDATE scheme DOES need a SIG(0) key — the
@@ -124,7 +124,7 @@ it once at the primary.
 
 **Bootstrap, step by step:**
 
-1. Enable `delegation-sync-proxy` on the zone (above) and start/reload the
+1. Enable `parentsync-proxy` on the zone (above) and start/reload the
    agent. If the parent advertises UPDATE and no KEY is published yet, the
    agent generates a SIG(0) keypair and records a warning on the zone.
 2. Ask the agent what to publish:
@@ -176,7 +176,7 @@ delegation drifted while the agent was down, it sends one UPDATE to fix it
 
 - Change the CDS (or CSYNC, or NS/glue) at the primary, let the agent
   transfer the zone, and watch the agent log for either
-  `delegation-sync-proxy: forwarded NOTIFY(...) to parent` (NOTIFY scheme)
+  `parentsync-proxy: forwarded NOTIFY(...) to parent` (NOTIFY scheme)
   or `proxied ... UPDATE to parent ... (rcode NOERROR)` (UPDATE scheme).
 - For the NOTIFY scheme on a tdns-auth parent, the incoming NOTIFY routes to
   the scanner (`CheckCDS` / `ProcessCSYNCNotify`), which queries the child

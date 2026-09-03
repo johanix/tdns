@@ -64,13 +64,13 @@
 # ==============================================================================
 #
 # DELEGATION SYNCHRONIZATION OPTIONS:
-#   delegation-sync-parent:  Provide delegation sync service towards child zones
+#   childsync:  Provide delegation sync service towards child zones
 #                           (parent zone listens for child DS/NS/A/AAAA updates)
 #
-#   delegation-sync-child:   Attempt delegation sync with parent zone
+#   parentsync:   Attempt delegation sync with parent zone
 #                           (child zone pushes DS/NS/A/AAAA updates to parent)
 #
-#   delegation-sync-proxy:   Agent secondary proxies CDS/CSYNC NOTIFYs upstream
+#   parentsync-proxy:   Agent secondary proxies CDS/CSYNC NOTIFYs upstream
 #                           on behalf of a DSYNC-unaware primary
 #                           (see guide/agent-dsync-proxy.md)
 #
@@ -247,7 +247,7 @@ templates:
      type:            primary
      store:           map
      options:
-        - delegation-sync-parent  # Provide delegation sync for children
+        - childsync  # Provide delegation sync for children
      dnssecpolicy:    default
      delegationpolicy: manual
 
@@ -256,7 +256,7 @@ templates:
      type:            primary
      store:           map
      options:
-        - delegation-sync-parent
+        - childsync
         - online-signing         # Sign on-the-fly
      dnssecpolicy:    default
      delegationpolicy: manual
@@ -267,7 +267,7 @@ templates:
      store:           map
      options:
         - allow-updates          # Allow DNS UPDATE
-        - delegation-sync-parent
+        - childsync
         - online-signing
      dnssecpolicy:    default
      delegationpolicy: manual
@@ -283,7 +283,7 @@ templates:
      type:            secondary
      store:           map
      options:
-        - delegation-sync-child  # Push updates to parent
+        - parentsync  # Push updates to parent
 
    # Hidden primary (doesn't notify, used with API)
    - name:            hidden-primary
@@ -323,7 +323,7 @@ templates:
      type:            primary
      store:           map
      options:
-        - delegation-sync-parent
+        - childsync
         - online-signing
      dnssecpolicy:    fastroll           # Use fast-rolling policy
      delegationpolicy: manual
@@ -343,7 +343,7 @@ templates:
         - prefix: "192.0.2.2/32"
           key:    NOKEY
      options:
-        - delegation-sync-parent
+        - childsync
         - online-signing
      dnssecpolicy:    default
      delegationpolicy: manual
