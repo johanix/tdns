@@ -1,6 +1,8 @@
 package tdns
 
 import (
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -85,6 +87,47 @@ func TestConflictOptionsSurviveParsing(t *testing.T) {
 				if e.Type == ConfigError {
 					t.Fatalf("setting %q put the zone in a config error state: %q", tc.name, e.Msg)
 				}
+			}
+		})
+	}
+}
+
+// The templates sample carries a block headed "COMPLETE LIST OF ZONE OPTIONS",
+// and it is read as one: auth-zones.sample.yaml sends the reader there for the
+// complete list, and the guide's option tables are derived from the same block.
+// Nothing kept the claim true, and it stopped being true: allow-api-updates,
+// the on-conflict-* pair and request-ixfr/no-request-ixfr were all added to
+// enums.go and parseZoneOptions without ever reaching the list, so an operator
+// reading it would conclude they do not exist.
+//
+// Assert the list rather than each option, the same way the switch test above
+// does: every name a config file may actually set must appear somewhere in the
+// sample.
+func TestEveryConfigurableZoneOptionIsDocumentedInTheSample(t *testing.T) {
+	const sample = "../cmdv2/auth/auth-templates.sample.yaml"
+	data, err := os.ReadFile(sample)
+	if err != nil {
+		t.Fatalf("checked-in sample not found (%v)", err)
+	}
+	text := string(data)
+
+	for name := range StringToZoneOption {
+		// internalOnlyZoneOptions (sample_config_test.go) is the set no config
+		// file may set. The sample does name them, in its INTERNAL / READ-ONLY
+		// section, but they are not part of the list an operator chooses from,
+		// so they are not what this test is about.
+		if internalOnlyZoneOptions[name] {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			// Whole-name match. A plain substring search would let
+			// "no-request-ixfr" alone satisfy "request-ixfr" -- documenting
+			// only the off switch and calling the pair covered.
+			re := regexp.MustCompile(`(^|[^a-z0-9-])` + regexp.QuoteMeta(name) + `([^a-z0-9-]|$)`)
+			if !re.MatchString(text) {
+				t.Errorf("zone option %q is settable in a config file but is not named in %s,"+
+					" whose COMPLETE LIST OF ZONE OPTIONS is where operators (and"+
+					" guide/config-tdns-auth.md) look for it", name, sample)
 			}
 		})
 	}

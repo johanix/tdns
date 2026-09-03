@@ -401,8 +401,28 @@ state with `unknown config option: "..."`.
 | Option | Effect |
 |--------|--------|
 | `allow-updates` | Accept authenticated DNS UPDATE for any RRset |
+| `allow-api-updates` | Accept zone changes over the management API (`tdns-cli auth zone update`). A separate gate from `allow-updates`, which covers DNS UPDATE only: opening one channel never opens the other |
 | `allow-child-updates` | Accept DNS UPDATE of child delegation data only. Forced off when the child update-policy type is `none` or unset; the zone must also set `delegationbackend:` |
 | `allow-edits` | Allow apex RRsets (NS, DNSKEY, CDS, CSYNC) to be modified dynamically |
+
+A frozen zone refuses both update channels, whatever these options say.
+
+**Conflict resolution**
+
+| Option | Effect |
+|--------|--------|
+| `on-conflict-db-wins` | A record the delta journal changed beats the zone file's version of it; the file's losing records go to the `.rejected` artefact. The default |
+| `on-conflict-zonefile-wins` | The zone file's version is served and the journal's losing instructions go to the artefact instead |
+
+These decide who wins when the zone file has been replaced behind the server
+and its content contests a record the journal changed. Naming **both is a
+config error**, not a preference order; naming neither means
+`on-conflict-db-wins`, which the parser materialises onto the zone so
+`zone status` reports the policy in force rather than a blank. A primary that
+accepts child updates is refused at startup if it combines
+`on-conflict-db-wins` with a `delegationbackend:` other than `direct` — the two
+settings describe the same deployment from opposite directions. See
+[zone-updates.md](zone-updates.md) for the merge itself.
 
 **DNSSEC**
 
@@ -605,6 +625,31 @@ dog @ns.example.com AXFR example.com. +tcp +zonemd
 which also exits non-zero on a zone that fails. `+zonemd` needs an AXFR: an
 IXFR returns a difference rather than a zone, and `dog` refuses instead of
 digesting one.
+
+**Zone transfer (secondary zones only)**
+
+| Option | Effect |
+|--------|--------|
+| `request-ixfr` | Ask an upstream for an incremental transfer (IXFR, RFC 1995) rather than a full one, and apply the delta onto the zone already held. **On by default**, so naming it turns nothing on |
+| `no-request-ixfr` | Turn that default off: always ask for a full AXFR |
+
+An option list holds enabled names, so absence cannot express "false" for a
+default-on flag — hence a second name rather than a value. If both appear,
+`no-request-ixfr` wins, because the safe direction is the one that only ever
+asks for a full transfer. Any IXFR failure — a refused request, an unusable
+delta, a step that would leave an RRset unsigned — falls back to a full AXFR
+against the *same* upstream within the same refresh, so an enabled zone is
+never left worse off than a disabled one. A full AXFR is also what a zone gets
+when there is no delta to ask for in the first place: a forced retransfer, and
+any refresh with no baseline to apply a delta onto (no incoming serial yet, or
+nothing currently served).
+
+Both are **ignored** on a primary, where nothing consults them, and on a
+secondary that signs its own content (`online-signing` or `inline-signing`),
+whose baseline is its own signatures — a delta computed against the primary's
+copy names records such a zone does not hold. Either case is reported as a
+config *warning*: the option does nothing, but the zone is healthy and keeps
+serving.
 
 **Multi-provider and catalog**
 
