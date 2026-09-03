@@ -78,6 +78,12 @@
 #   allow-updates:           Allow zone modifications via DNS UPDATE
 #                           (general updates to any RRset in the zone)
 #
+#   allow-api-updates:       Allow zone modifications via the management API
+#                           (tdns-cli auth zone update ...). A SEPARATE gate
+#                           from allow-updates, which covers DNS UPDATE only:
+#                           opening one channel never opens the other. A frozen
+#                           zone refuses both.
+#
 #   allow-child-updates:     Allow updates to child delegation data via DNS UPDATE
 #                           (only child NS, DS, A, AAAA records).
 #                           Forced off if the child update policy type is
@@ -86,6 +92,30 @@
 #
 #   allow-edits:             Allow zone apex RRsets to be dynamically modified
 #                           (NS, DNSKEY, CDS, CSYNC at zone apex)
+#
+# CONFLICT RESOLUTION OPTIONS:
+#   These decide who wins when the zone file has been replaced behind the
+#   server and its content contests a record the delta journal changed. The
+#   two are MUTUALLY EXCLUSIVE: naming both is a hard config error. Exactly one
+#   is always in force, because the parser materialises db-wins when neither is
+#   given -- so `tdns-cli auth zone list` reports the policy the zone actually
+#   runs under rather than a blank the operator has to interpret.
+#
+#   on-conflict-db-wins:     The journal's version of a contested record is
+#                           served, and the zone file's losing records are
+#                           written to the .rejected artefact. This is the
+#                           DEFAULT. On a primary that also has
+#                           allow-child-updates, it requires
+#                           delegationbackend: direct -- a db or zonefile
+#                           backend hands approved child updates to whatever
+#                           generates the zone file, whose output db-wins has
+#                           already declared it will overrule, and the
+#                           combination is refused at startup.
+#
+#   on-conflict-zonefile-wins:   The zone file's version is served, and the
+#                                journal's losing instructions go to the
+#                                artefact instead. This is the setting for a
+#                                zone whose file is generated elsewhere.
 #
 # DNSSEC OPTIONS:
 #   online-signing:          Sign zone on-the-fly as needed
@@ -147,6 +177,35 @@
 #   zones multiplies it, so it does not bound the host's memory on its own.
 #   `tdns-cli auth zone zonemd status` reports what the cache holds and what
 #   the last digest cost, so it can be sized from measurements.
+#
+# ZONE TRANSFER OPTIONS (SECONDARY ONLY):
+#   request-ixfr:            Ask an upstream for an incremental transfer
+#                           (IXFR, RFC 1995) rather than a full one, and apply
+#                           the delta onto the zone already held. DEFAULT ON,
+#                           so naming it turns nothing on -- it is how an
+#                           operator states the intent explicitly. Any IXFR
+#                           failure falls back to a full AXFR against the SAME
+#                           upstream within the same refresh, so an enabled
+#                           zone is never left worse off than a disabled one.
+#                           A full AXFR is also what a zone gets when there is
+#                           no delta to ask for: a forced retransfer, and any
+#                           refresh with no baseline to apply a delta onto (no
+#                           incoming serial yet, or nothing currently served).
+#
+#   no-request-ixfr:         Turn that default OFF: always ask for a full AXFR.
+#                           Options are a list of enabled names, so absence
+#                           cannot express "false" for a flag whose default is
+#                           true; hence a second name rather than a value. If
+#                           both are given, no-request-ixfr wins, because the
+#                           safe direction is the one that only ever asks for a
+#                           full transfer.
+#
+#   Both are IGNORED on a PRIMARY, where nothing consults them, and on a
+#   secondary that signs its own content (online-signing or inline-signing),
+#   whose baseline is its OWN signatures -- a delta computed against the
+#   primary's copy names records such a zone does not hold. Either case is
+#   reported as a ConfigWarning: the option does nothing, but the zone is fine
+#   and keeps serving.
 #
 # MULTI-PROVIDER OPTIONS:
 #   multi-provider:          Zone is served by several providers (RFC 8901).
