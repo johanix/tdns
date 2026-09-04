@@ -67,6 +67,11 @@ func IsEncryptedTransport(t Transport) bool {
 	return t == TransportDoT || t == TransportDoH || t == TransportDoQ
 }
 
+// DefaultClientTimeout bounds one exchange. Exported because the forwarding
+// path divides it into per-upstream slices (#470): as two separate literals
+// the budget and the thing it is a budget for could drift apart silently.
+const DefaultClientTimeout = 5 * time.Second
+
 // DNSClienter abstracts a single network exchange so callers can be tested
 // with a fake. The concrete *DNSClient implements it.
 //
@@ -228,7 +233,7 @@ func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config, opts 
 		Transport: transport,
 		Port:      port,
 		TLSConfig: tlsConfig,
-		Timeout:   5 * time.Second,
+		Timeout:   DefaultClientTimeout,
 	}
 
 	// Initialize transport-specific configurations
