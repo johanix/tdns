@@ -1337,12 +1337,12 @@ func TestForwardBlackholedUpstreamDoesNotStarveTheNext(t *testing.T) {
 	}
 }
 
-// An upstream that never got a usable slice of the budget is not an upstream
-// that failed, and must not be recorded as one: doing so marks healthy
-// infrastructure unreachable and drags config status to DEGRADED because some
-// #470's second half: neither way of losing budget may mark an upstream
-// unreachable. There are two such ways and this covers both, because they take
-// different code paths and only one of them was ever exercised.
+// #470's second half: an upstream that never got a usable slice of the budget
+// is not an upstream that failed, and recording it as one marks healthy
+// infrastructure unreachable and drags config status to DEGRADED.
+//
+// There are two ways to lose budget, they take different code paths, and only
+// one of them was ever exercised -- so this covers both.
 //
 // Three upstreams and a 1.2s budget put each on its own path:
 //
@@ -1429,6 +1429,60 @@ func TestForwardStarvedUpstreamIsNotRecordedAsFailed(t *testing.T) {
 	if failing || failures > 0 {
 		t.Errorf("the blackhole was recorded as failed (failing=%v failures=%d) after ONE attempt cut "+
 			"short by its slice; a single truncated attempt is not evidence", failing, failures)
+	}
+}
+
+// The run recordSliceTimeout counts is CONSECUTIVE, so anything else the
+// upstream does breaks it (#498 re-review, C2).
+//
+// A success obviously does. A transport-level failure is the less obvious
+// half: a refused connection says the upstream is REACHABLE and declining,
+// which is not the "never answers" a run is evidence of, so letting it count
+// toward one would put a true-sounding "3 times running" on a sequence that
+// was nothing of the kind. Nothing is lost by resetting -- recordFailure has
+// already marked the upstream failing, on stronger evidence than a run.
+//
+// Driven through the methods rather than through a query, because the point is
+// the state machine and a network rig cannot schedule these sequences.
+func TestSliceTimeoutRunIsBrokenByAnyOtherOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		interrupt func(up *ForwardUpstream, start time.Time)
+	}{
+		{"success", func(up *ForwardUpstream, _ time.Time) {
+			up.recordSuccess()
+		}},
+		{"transport failure", func(up *ForwardUpstream, start time.Time) {
+			up.recordFailure(start, fmt.Errorf("connection refused"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			up := &ForwardUpstream{Label: "127.0.0.1:53/do53"}
+
+			// One short of a verdict.
+			start := time.Now()
+			for i := 1; i < forwardSliceTimeoutsBeforeFailing; i++ {
+				if up.recordSliceTimeout(start) {
+					t.Fatalf("reported a transition after %d slice timeouts; the run needs %d",
+						i, forwardSliceTimeoutsBeforeFailing)
+				}
+			}
+
+			tc.interrupt(up, start)
+
+			// The count starts over rather than finishing the old run, so this
+			// timeout is the first of a new one and decides nothing.
+			if up.recordSliceTimeout(time.Now()) {
+				t.Errorf("a %s did not break the run: the next slice timeout completed it and "+
+					"reported a transition", tc.name)
+			}
+			up.mu.Lock()
+			got := up.sliceTimeouts
+			up.mu.Unlock()
+			if got != 1 {
+				t.Errorf("sliceTimeouts=%d after a %s followed by one timeout, want 1", got, tc.name)
+			}
+		})
 	}
 }
 

@@ -63,11 +63,15 @@ type ForwardUpstream struct {
 	lastSuccess time.Time
 	lastErrMsg  string
 	lastErrTime time.Time
-	failing     bool // last exchange was a transport-level failure
+	// failing means "this upstream is not usable right now", set either by a
+	// transport-level failure (immediately) or by a run of slice timeouts
+	// (recordSliceTimeout). Reported, not selected on.
+	failing bool
 	// sliceTimeouts counts CONSECUTIVE attempts that ran out of their slice
-	// of the query budget rather than failing (#470), reset by any success.
-	// Separate from failures because one of them is not evidence and several
-	// are; see recordSliceTimeout.
+	// of the query budget rather than failing (#470). Any other outcome --
+	// a success or a transport-level failure -- resets it. Separate from
+	// failures because one of them is not evidence and several are; see
+	// recordSliceTimeout.
 	sliceTimeouts uint64
 
 	// Quarantine is a CONFIG verdict, not a reachability one: the upstream
@@ -151,6 +155,14 @@ func (up *ForwardUpstream) recordFailure(start time.Time, err error) bool {
 		return false
 	}
 	up.failures++
+	// A transport-level failure ends any run of slice timeouts, for the same
+	// reason a success does: the run is a claim about CONSECUTIVE attempts
+	// that answered nothing, and this attempt is a different observation. A
+	// refused connection in particular says the upstream is reachable and
+	// declining, which is not what "never answers" describes -- and nothing is
+	// lost by resetting, because the line below has already marked it failing
+	// on the stronger evidence.
+	up.sliceTimeouts = 0
 	up.lastErrMsg = err.Error()
 	up.lastErrTime = time.Now()
 	was := up.failing
@@ -172,7 +184,9 @@ func (up *ForwardUpstream) recordFailure(start time.Time, err error) bool {
 // One timeout is genuinely not evidence: an attempt gets at least
 // forwardMinAttempt, which is a floor rather than a guarantee, and a slow DoH
 // upstream on a bad path can exceed it and still be working. A run of them
-// with no answer in between is a different claim, and it is the true one.
+// with NOTHING ELSE in between -- no answer, and no transport failure either,
+// both of which reset the count -- is a different claim, and it is the true
+// one.
 //
 // Same staleness guard as recordFailure, for the same reason: an observation
 // that a later success has already contradicted must not re-mark the upstream.
