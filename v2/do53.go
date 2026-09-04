@@ -54,40 +54,84 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	}
 	lgDns.Info("DnsEngine: UDP/TCP addresses configured", "addresses", addresses)
 	var servers []*dns.Server
-	for _, addr := range addresses {
-		for _, transport := range []string{"udp", "tcp"} {
-			srv := &dns.Server{
-				Addr:          addr,
-				Net:           transport,
-				Handler:       dnsMux,        // Use local mux instead of global handler
-				MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
-				// Keystore-backed TSIG provider: verifies inbound TSIG on
-				// replication traffic (NOTIFY, AXFR/IXFR) and signs responses
-				// to signed requests (RFC 8945). tdns UPDATEs are SIG(0)-signed
-				// (a SIG RR, not a TSIG RR), so this never touches them.
-				TsigProvider: conf.tsigProvider(),
-			}
-			// Must bump the buffer size of incoming UDP msgs, as updates
-			// may be much larger then queries
-			srv.UDPSize = dns.DefaultMsgSize // 4096
-			servers = append(servers, srv)
 
-			go func(s *dns.Server, addr, transport string) {
-				lgDns.Debug("DnsEngine: attempting to bind", "addr", addr, "transport", transport)
-				// Announce we're attempting to listen. This does not mean we're listening yet.
-				lgDns.Info("DnsEngine: launching server", "addr", addr, "transport", transport)
-				if err := s.ListenAndServe(); err != nil {
-					// ListenAndServe only returns on error or shutdown.
-					lgDns.Error("DnsEngine: server failed to start or stopped unexpectedly", "addr", addr, "transport", transport, "err", err)
-					if ctx.Err() == nil { // a real bind/serve failure, not shutdown
-						conf.Internal.ServerErrors.SetTransportPortError(addr+"/"+transport, err)
-					}
-				} else {
-					// This case is basically never reached unless shutdown is very clean.
-					lgDns.Debug("DnsEngine: server exited normally", "addr", addr, "transport", transport)
-				}
-			}(srv, addr, transport)
+	// How many UDP sockets to open per listen address.
+	//
+	// miekg/dns serves each socket from a single goroutine: serveUDP() does one
+	// ReadUDP() at a time and only hands the *handling* off to new goroutines.
+	// Reception is therefore serialised per socket, and that socket becomes the
+	// ceiling long before the CPU does -- the kernel drops arriving datagrams
+	// into the socket buffer while cores sit idle.
+	//
+	// Several sockets in one kernel load-balance group give the kernel that
+	// many receive queues to spread arriving datagrams over, each with its own
+	// buffer and wakeup, and each sender pinned to one reader. Which socket
+	// option provides this differs per platform; see reuseport.go.
+	//
+	// Platforms without such an option serve from a single socket regardless
+	// of this setting: listenUDPSockets falls back and reports why. There, use
+	// several listen addresses instead, which gives one socket each.
+	udpSockets := conf.Listeners.UDPSockets
+	if udpSockets < 1 {
+		udpSockets = 1
+	}
+
+	for _, addr := range addresses {
+		// ---- TCP: one server per address.
+		tcpSrv := &dns.Server{
+			Addr:          addr,
+			Net:           "tcp",
+			Handler:       dnsMux,
+			MsgAcceptFunc: MsgAcceptFunc,
+			TsigProvider:  conf.tsigProvider(),
 		}
+		tcpSrv.UDPSize = dns.DefaultMsgSize
+		servers = append(servers, tcpSrv)
+		go func(s *dns.Server, addr string) {
+			lgDns.Info("DnsEngine: launching server", "addr", addr, "transport", "tcp")
+			if err := s.ListenAndServe(); err != nil {
+				lgDns.Error("DnsEngine: server failed to start or stopped unexpectedly", "addr", addr, "transport", "tcp", "err", err)
+				if ctx.Err() == nil {
+					conf.Internal.ServerErrors.SetTransportPortError(addr+"/tcp", err)
+				}
+			}
+		}(tcpSrv, addr)
+
+		// ---- UDP: one or more sockets, load-balanced by the kernel where
+		// the platform supports it.
+		lst, err := listenUDPSockets(addr, udpSockets)
+		if err != nil {
+			lgDns.Error("DnsEngine: failed to bind UDP socket", "addr", addr, "err", err)
+			if ctx.Err() == nil {
+				conf.Internal.ServerErrors.SetTransportPortError(addr+"/udp", err)
+			}
+			continue
+		}
+		if lst.Degraded != nil {
+			lgDns.Warn("DnsEngine: serving UDP from fewer sockets than configured",
+				"addr", addr, "requested", udpSockets, "opened", len(lst.Conns),
+				"reason", lst.Degraded)
+		}
+		for i, pc := range lst.Conns {
+			srv := &dns.Server{
+				PacketConn:    pc,
+				Handler:       dnsMux,
+				MsgAcceptFunc: MsgAcceptFunc,
+				TsigProvider:  conf.tsigProvider(),
+			}
+			srv.UDPSize = dns.DefaultMsgSize
+			servers = append(servers, srv)
+			go func(s *dns.Server, addr string, idx int) {
+				if err := s.ActivateAndServe(); err != nil {
+					if ctx.Err() == nil {
+						lgDns.Error("DnsEngine: udp socket stopped unexpectedly", "addr", addr, "socket", idx, "err", err)
+						conf.Internal.ServerErrors.SetTransportPortError(addr+"/udp", err)
+					}
+				}
+			}(srv, addr, i)
+		}
+		lgDns.Info("DnsEngine: launching server", "addr", addr, "transport", "udp",
+			"sockets", len(lst.Conns), "kernel-balanced", lst.Balanced)
 	}
 
 	// Graceful shutdown on context cancellation

@@ -205,11 +205,12 @@ type LogConf struct {
 }
 
 type ServiceConf struct {
-	Name       string `validate:"required"`
-	Debug      *bool
-	Verbose    *bool
-	Identities []string      // this is a strawman attempt at deciding on what name to publish the ALPN
-	Transport  TransportConf `yaml:"transport"`
+	Name         string `validate:"required"`
+	Debug        *bool
+	Verbose      *bool
+	PprofAddress string        `yaml:"pprof-address" mapstructure:"pprof-address"`
+	Identities   []string      // this is a strawman attempt at deciding on what name to publish the ALPN
+	Transport    TransportConf `yaml:"transport"`
 }
 
 type TransportConf struct {
@@ -226,6 +227,13 @@ type ListenersConf struct {
 	Addresses []string `yaml:"addresses" mapstructure:"addresses" validate:"required"`
 	CertFile  string   `yaml:"certfile,omitempty" mapstructure:"certfile"`
 	KeyFile   string   `yaml:"keyfile,omitempty" mapstructure:"keyfile"`
+	// UDPSockets is how many UDP sockets to open per do53 address. More than
+	// one is only useful where the kernel will distribute across them --
+	// SO_REUSEPORT_LB on FreeBSD/NetBSD, SO_REUSEPORT on Linux -- and where
+	// it will not, listenUDPSockets falls back to a single socket and reports
+	// why rather than failing. 0 or 1 is the behaviour this had before the
+	// option existed.
+	UDPSockets int `yaml:"udp-sockets" mapstructure:"udp-sockets"`
 	// Transports the LISTENERS offer (unrelated to what outbound queries
 	// use). do53 rides the addresses above; dot/doh/doq additionally need
 	// certfile+keyfile and take their ports from ports: below.

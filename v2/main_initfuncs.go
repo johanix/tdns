@@ -163,6 +163,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if Globals.App.Type != AppTypeCli || Globals.Verbose {
 		fmt.Printf("TDNS %s version %s starting.\n", Globals.App.Name, Globals.App.Version)
 	}
+	conf.startPprof()
 	// Initialize QueryHandlers map for registration API
 	conf.Internal.QueryHandlers = make(map[uint16][]QueryHandlerFunc)
 	// Copy any handlers registered before MainInit (from global storage)
