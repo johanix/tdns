@@ -64,6 +64,31 @@ asserted change rather than a scanned one. The DS-duplication question
 (`CheckDelegationCoherence` vs `ProcessCDSNotify`) is deliberately untouched
 here and is not part of step 2 either.
 
+**`computeCsyncDelta` is NOT the UPDATE entry point, and step 2 must not wire
+it as one.** The two have different shapes, and the difference is the whole
+reason step 2 needs its own driver:
+
+| | input | question | output |
+|---|---|---|---|
+| `computeCsyncDelta` (scanner) | a CSYNC record | what has the child changed? | a delta to apply |
+| step 2's acceptance | a set of asserted actions | may the result stand? | accept / refuse |
+
+One DERIVES a change from what the child publishes; the other VALIDATES a
+change somebody has asserted. Calling the delta API from the UPDATE path would
+mean asking the child what it wants and then applying that, which is not what
+an UPDATE is.
+
+What step 2 SHOULD reuse, and what this extraction exists to make reusable:
+`childRRsetFetcher` (ctx plus the agreement requirement across the child's
+nameservers), `csyncTypes`, `inBailiwickNSNames` and `canonicalNameSet`. The
+acceptance rule itself is then expressed once more, against those shared
+primitives, in step 2's own function.
+
+That leaves the RFC 7477 rule stated in two drivers, which is worth naming
+rather than discovering later: if the rule changes, both have to change, and
+the UPDATE path silently becomes a bypass if only one does. The mitigation is
+that everything below the rule is shared, and that both sites should say so.
+
 ## Tests
 
 `delegation_csync_test.go`, all with a map-backed fetcher: flags and the

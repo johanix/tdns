@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -124,11 +125,23 @@ type csyncDelta struct {
 //     a nameserver no longer in the NS set has its stored glue removed.
 //   - anything else in the bitmap is ignored.
 //
-// currentNS is the NS RRset the parent publishes for the child now; when the
-// child's NS could not be determined (never, given the NS rules above, but
-// kept) the glue pass falls back to it.
+// currentNS is the NS RRset the parent publishes for the child now. The glue
+// pass falls back to it when the child's NS could not be determined, which the
+// only current caller never produces: csyncTypes always puts NS in the list
+// and first, so by the time a glue pass runs the NS pass has either populated
+// the set or returned terminally. The fallback is kept because that invariant
+// belongs to csyncTypes, not to this function -- a caller that assembles its
+// own type list (step 2 will) does not inherit it.
 func computeCsyncDelta(ctx context.Context, childZone string, types []uint16, currentNS []dns.RR,
 	currentGlue currentGlueLookup, fetch childRRsetFetcher, lg *log.Logger, verbose, debug bool) (csyncDelta, error) {
+
+	// The scanner always passes a logger, but this is a free function now and
+	// the next caller is a different subsystem. Defaulting costs one line and
+	// turns "forgot the logger" from a panic in the middle of a delegation
+	// decision into silence.
+	if lg == nil {
+		lg = log.New(io.Discard, "", 0)
+	}
 
 	var d csyncDelta
 	var newNSRRs []dns.RR // populated by the NS pass, used by the glue passes
