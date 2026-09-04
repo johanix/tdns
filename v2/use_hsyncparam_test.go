@@ -140,7 +140,7 @@ func TestDynamicPrimaryRefusesUseHsyncparam(t *testing.T) {
 func TestRefreshHooksRegisterAtFirstLoad(t *testing.T) {
 	zdp := &ZoneData{ZoneName: "z.example."}
 
-	zdp.registerSignalRepublishHook()
+	zdp.registerSignalReconcileHook()
 	zdp.registerProxyDelegationHooks(make(chan DelegationSyncRequest, 1))
 
 	// One signal post-refresh hook + one proxy pre/post pair.

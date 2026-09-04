@@ -55,7 +55,7 @@ func (a *ProxyDelegationAnalysis) wantCSYNCNotify() bool { return a.CsyncChanged
 // OptDelSyncProxy on a later reload (including one reconfigured from primary to
 // secondary, whose reused ZoneData has FirstZoneLoad false by then) already
 // carries the hooks. First-load-only registration is deliberate, for the same
-// reason as registerSignalRepublishHook: it keeps the OnZone*Refresh slices
+// reason as registerSignalReconcileHook: it keeps the OnZone*Refresh slices
 // frozen once the zone is live, so the refresh engine can range them without a
 // lock.
 //

@@ -314,6 +314,10 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	// RefreshEngine is now running and draining RefreshZoneCh, so persisted
 	// dynamic zones can be loaded with a blocking enqueue (no drop).
 	conf.loadDynamicZonesIfConfigured(ctx)
+	// And now every zone this server serves is in the registry, so a zone
+	// MISSING from it is one that was removed -- which is what the signal-name
+	// orphan sweep needs to be true before it may delete anything.
+	conf.ReconcileSignalPublicationsAtStartup()
 
 	return nil
 }
@@ -348,6 +352,10 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	// RefreshEngine is now running and draining RefreshZoneCh, so persisted
 	// dynamic zones can be loaded with a blocking enqueue (no drop).
 	conf.loadDynamicZonesIfConfigured(ctx)
+	// And now every zone this server serves is in the registry, so a zone
+	// MISSING from it is one that was removed -- which is what the signal-name
+	// orphan sweep needs to be true before it may delete anything.
+	conf.ReconcileSignalPublicationsAtStartup()
 
 	return nil
 }

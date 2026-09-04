@@ -188,8 +188,14 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
     UPDATE, so the parent's verification finds it. The publication is confirmed
     (waited on to actually apply), not merely enqueued, and `at-ns` is offered
     only when at least one of the zone's nameservers is served here as primary.
-- **Not implemented**: withdrawing records already published at a signaling
-  name when the option is removed or delegation sync is turned off for a zone.
+- **Withdrawal**: a published record is deleted again when nothing justifies it
+  any more -- the `use-hsyncparam` option removed, the flag dropped from the
+  child's HSYNCPARAM, the nameserver dropped from the child's apex NS RRset, the
+  child zone removed from this server, or `parentsync` turned off for a zone
+  whose `at-ns` bootstrap published a KEY. Only records tdns itself published are
+  ever deleted: publication is recorded in the keystore, and that record is the
+  authority for the delete, so a signal name an operator maintains by hand in the
+  same zone is left alone.
 
 ---
 

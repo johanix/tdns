@@ -1016,6 +1016,15 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 		return "", fmt.Errorf("zone %s is not API-managed and cannot be deleted here", name)
 	}
 
+	// Withdraw anything published at an RFC 9615 signal name on this zone's
+	// behalf (WithdrawSignalPublicationsForZone). Before Zones.Remove, not
+	// because the ledger needs the zone -- it is keyed by name -- but because
+	// the zone can be its own TARGET: an at-ns bootstrap for an in-bailiwick
+	// nameserver puts the _sig0key inside this very zone, and the withdrawal
+	// resolves the target through the registry. After the removal there would
+	// be no target to write to.
+	WithdrawSignalPublicationsForZone(conf.Internal.KeyDB, name)
+
 	stopZonePublisher(name)
 	Zones.Remove(name)
 	// Bump generation AFTER removing from the map so any refresh goroutine that

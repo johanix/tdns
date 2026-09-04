@@ -1112,6 +1112,13 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 		return "", fmt.Errorf("ReloadZoneConfig: %w", err)
 	}
 
+	// Zones this reload is dropping. Collected here and acted on AFTER confMu is
+	// released: the signal-name withdrawal below enqueues onto KeyDB.UpdateQ
+	// with a blocking send, and applying a zone update reaches JournalActive(),
+	// which takes confMu.RLock -- so a full queue under the write lock would
+	// deadlock the daemon rather than slow it down.
+	var removedZones []string
+
 	for _, zname := range prezones {
 		if slices.Contains(zonelist, zname) || slices.Contains(brokenlist, zname) {
 			continue
@@ -1132,6 +1139,7 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 			continue
 		}
 		lgConfig.Info("ReloadZoneConfig: zone no longer in config, removing from zone list", "zone", zname)
+		removedZones = append(removedZones, zname)
 		stopZonePublisher(zname)
 		Zones.Remove(zname)
 		// Bump generation so any in-flight refresh on the captured pointer fails
@@ -1153,6 +1161,15 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 
 	if hook != nil {
 		hook()
+	}
+
+	// Withdraw anything this server published at an RFC 9615 signal name on
+	// behalf of a zone this reload dropped. Done here rather than left to the
+	// target zone's own reconciler because the dropped zone will never refresh
+	// again: nothing would notice until the TARGET's next refresh, which for a
+	// file-backed primary can be hours away. Off confMu -- see removedZones.
+	for _, zname := range removedZones {
+		WithdrawSignalPublicationsForZone(conf.Internal.KeyDB, zname)
 	}
 
 	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s", prezones, zonelist, imrReloadMsg), err

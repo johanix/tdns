@@ -1556,10 +1556,21 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// transfers for an apex HSYNCPARAM pubkey/pubcds flag and republishes
 		// the customer's apex KEY / CDS(+CDNSKEY) under the _sig0key/_dsboot
 		// signal names owned by each NS, into whichever local primary zone the
-		// signal name falls in (see signal_republish.go). RepublishAtSignalNames
-		// self-gates on OptUseHsyncparam, which only a secondary can hold.
+		// signal name falls in (see signal_republish.go).
+		//
+		// The same callback also WITHDRAWS records at signal names this server
+		// published and nothing justifies any more (signal_withdraw.go). That
+		// is the other reason registration is type-independent: the withdrawal
+		// half acts on parentsync (OptDelSyncChild) too, for a zone whose own at-ns
+		// bootstrap published a _sig0key -- and that zone is one this server is
+		// PRIMARY for. So a primary is not merely a guarded no-op here.
+		//
+		// Both halves read the current options when the hook runs, so a reload
+		// takes effect without a restart -- and, because nothing compares
+		// before against after, an edit made while the daemon was stopped is
+		// settled on first load exactly like one made live.
 		if zdp.FirstZoneLoad {
-			zdp.registerSignalRepublishHook()
+			zdp.registerSignalReconcileHook()
 		}
 
 		// Leader election OnFirstLoad is registered in StartAgent() (not here)

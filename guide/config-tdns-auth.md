@@ -714,8 +714,18 @@ not the customer's, so it is off by default. Turning it on does not make the
 HSYNCPARAM visible or parseable -- the record is always parsed and always
 served; the option only authorizes the publication.
 
-Removing the option stops future republishes but does not withdraw records
-already published at the signal names.
+Removing the option also **withdraws** what it published: after the next
+refresh of the zone, every signal record this server put there on that zone's
+behalf is deleted again. So are the records for a `pubkey`/`pubcds` flag the
+customer drops from its HSYNCPARAM, for a nameserver it drops from its apex NS
+RRset, and for the zone itself if you remove it from this server.
+
+Only records **this server published** are ever deleted. tdns keeps a ledger of
+what it wrote at which signal name, and that ledger -- not the content at the
+name -- is what authorizes a delete, so a signal record you maintain by hand in
+the same zone is never touched. The corollary is that the ledger lives in the
+keystore: a rebuilt keystore has forgotten the publications made under the old
+one, and those records stay where they are.
 
 This is separate from `multi-provider`. The full HSYNC role model -- `servers`,
 `signers`, `auditors`, delegated NS management, agent-to-agent synchronization
