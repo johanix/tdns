@@ -161,7 +161,11 @@ func TestEveryZonesSetRegistersHooksOrSaysWhyNot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
-	const lookback = 12
+	// Budgeted in CODE lines, not raw lines: the registration and the
+	// Zones.Set it guards are routinely separated by a comment explaining
+	// one or the other, and a raw-line window would false-fail on a long one
+	// while a generous window would stop meaning "adjacent".
+	const codeLookback = 8
 
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
@@ -176,13 +180,24 @@ func TestEveryZonesSetRegistersHooksOrSaysWhyNot(t *testing.T) {
 			if !strings.Contains(line, "Zones.Set(") {
 				continue
 			}
-			from := i - lookback
-			if from < 0 {
-				from = 0
+			satisfied, code := false, 0
+			for j := i - 1; j >= 0 && code < codeLookback; j-- {
+				trimmed := strings.TrimSpace(lines[j])
+				if strings.Contains(lines[j], "registerStandardRefreshHooks") ||
+					strings.Contains(lines[j], "no-refresh-hooks:") {
+					satisfied = true
+					break
+				}
+				// Never look past the top of the enclosing function.
+				if strings.HasPrefix(lines[j], "func ") {
+					break
+				}
+				if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+					continue // comments and blanks are free
+				}
+				code++
 			}
-			window := strings.Join(lines[from:i+1], "\n")
-			if strings.Contains(window, "registerStandardRefreshHooks") ||
-				strings.Contains(window, "no-refresh-hooks:") {
+			if satisfied {
 				continue
 			}
 			t.Errorf("%s:%d publishes a zone without registering the standard refresh hooks.\n"+

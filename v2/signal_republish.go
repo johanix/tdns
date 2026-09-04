@@ -97,10 +97,11 @@ func (zdp *ZoneData) registerSignalRepublishHook() {
 // act on HSYNCPARAM and the apex HSYNCPARAM asks for it.
 //
 // The use-hsyncparam check is here rather than at registration time on purpose:
-// the hook is registered once, at first load (see registerSignalRepublishHook),
-// while zd.Options is replaced wholesale on every config reload. Reading the
-// option when the hook RUNS is what makes both enabling and disabling it take
-// effect on `config reload` instead of only on restart.
+// the hook is registered once, when the ZoneData is CONSTRUCTED (see
+// registerStandardRefreshHooks), while zd.Options is replaced wholesale on
+// every config reload. Reading the option when the hook RUNS is what makes both
+// enabling and disabling it take effect on `config reload` instead of only on
+// restart.
 func (childZD *ZoneData) RepublishAtSignalNames() {
 	// Read the option under the lock: ParseZones replaces zd.Options wholesale
 	// on a config reload (under zd.mu), and this callback runs from the
