@@ -233,7 +233,7 @@ BADKEY re-bootstrap arm rather than treated as an absent advertisement.
 **Step 1 done 2026-09-02** on `feature/ddns-keystate-d3b-csync-extract`
 (off `main`, not stacked): `ProcessCSYNCNotify`'s RFC 7477 rules are
 `computeCsyncDelta` and friends in `v2/delegation_csync.go`, network and
-stored-delegation access injected, scanner still the only caller, behaviour
+stored-delegation access injected, scanner the only caller AT THAT POINT, behaviour
 byte-identical. The dead pre-NOTIFY path (`CheckCSYNC`, `CsyncAnalyze*`) is
 deleted. Notes in `docs/2026-09-02-ddns-keystate-d3b-csync-extraction.md`.
 

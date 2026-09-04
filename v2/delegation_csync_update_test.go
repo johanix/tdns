@@ -355,6 +355,34 @@ func TestDelegationsTouchedFindsNameWideAnyAtGlueOwner(t *testing.T) {
 	})
 }
 
+// R1: the end-to-end pin for the must-fix. The discovery test above proves the
+// child is FOUND; this proves finding it leads to a REFUSAL. Without both, a
+// break in the verification path would leave the M1 regression test still
+// passing while the hole was open again.
+//
+// The update deletes every RRset at an in-bailiwick nameserver while leaving
+// the child's NS RRset naming it, and the child still serves its addresses --
+// so the parent would be left publishing a delegation to a nameserver with no
+// glue.
+func TestForUpdateRefusesNameWideDeleteOfGlueUnderAKeptNS(t *testing.T) {
+	zd := cuParentZone(t)
+	var asked []dns.RR
+
+	err := zd.CheckDelegationNSCoherenceForUpdate(context.Background(),
+		[]dns.RR{anyRR(t, "ns1.child.example.")},
+		askerFor(servedChild(t), &asked))
+
+	if err == nil {
+		t.Fatal("a name-wide delete that strips a kept nameserver's glue must be refused")
+	}
+	if !strings.Contains(err.Error(), "ns1.child.example.") {
+		t.Errorf("the refusal should name the nameserver whose glue would go: %v", err)
+	}
+	if len(asked) == 0 {
+		t.Error("the child should have been queried; the check cannot conclude without it")
+	}
+}
+
 // S1: mentioning the NS RRset is not changing it. A duplicate add or a delete
 // of something that was not there leaves the parent exactly where it was, so
 // it must not depend on the child being reachable and in agreement -- and must
@@ -389,6 +417,18 @@ func TestCheckDelegationNSCoherenceNoOpNSChangeSkipsTheChild(t *testing.T) {
 		currentNS, glue,
 		[]dns.RR{addRR(t, "child.example. 3600 IN NS ns1.child.example.")}, nil); err != nil {
 		t.Fatalf("a no-op NS change must not be refused for lack of a scanner: %v", err)
+	}
+
+	// The other shape of no-op: deleting an NS record that was never there.
+	// Same code path, and the one an operator is likelier to send by accident.
+	asked = false
+	if err := CheckDelegationNSCoherence(context.Background(), "child.example.",
+		currentNS, glue,
+		[]dns.RR{delRR(t, "child.example. 3600 IN NS ns9.absent.example.")}, fetch); err != nil {
+		t.Fatalf("deleting an NS that was not there changes nothing: %v", err)
+	}
+	if asked {
+		t.Error("the child was queried for a delete of a record the parent never published")
 	}
 }
 

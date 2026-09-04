@@ -5,7 +5,8 @@
 NS/glue acceptance rules extracted in step 1
 (`docs/2026-09-02-ddns-keystate-d3b-csync-extraction.md`) into the UPDATE
 path, alongside the DS check from #386. Branch
-`feature/ddns-keystate-d3b-csync-wire`, stacked on the extraction branch
+`feature/ddns-keystate-d3b-csync-wire`. Written stacked on the extraction
+branch (#477); that has since merged, so the base is `main`.
 (#477). This closes D-3b.
 
 ## The rule, and its scoping
@@ -38,9 +39,12 @@ which is the DS check's discipline:
 
 Refusal is REFUSED with the same EDE the DS check uses. A dedicated
 "delegation incoherent" EDE would be better for both; it is not added here
-because the private EDE block is iota-numbered and #476 has already
-appended two codes on its branch, so a third from an unstacked branch would
-collide on merge. Add it, and switch both checks to it, once the stack has
+because the private EDE block was iota-numbered and #476 had two codes
+in flight on its own branch, so a third from an unstacked branch would have
+collided on merge. #476 is on `main` now, so the collision is historical and
+appending after its codes is safe -- the deferral stands only because a
+dedicated code is a separate, visible protocol change, not because it is
+blocked. Add it, and switch both checks to it, once
 merged.
 
 ## Whom the parent asks
