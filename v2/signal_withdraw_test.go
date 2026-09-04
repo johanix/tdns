@@ -5,6 +5,8 @@
 package tdns
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -476,6 +478,87 @@ func TestWithdraw_UnknownSourceIsLeftAlone(t *testing.T) {
 		t.Fatalf("a publication with an unknown source was acted on: %+v", urs)
 	}
 	assertLedgerRow(t, f.kdb, "foobar.com.", sigOwnerFoo)
+}
+
+// A zone that is CONFIGURED but not yet CONSTRUCTED must not be swept as an
+// orphan. LoadDynamicZoneFiles registers dynamic primaries itself but only
+// enqueues dynamic secondaries and catalog members, whose ZoneData the refresh
+// engine builds when it drains the channel -- so at the moment the sweep is
+// armed, a dynamic SECONDARY (the zone shape use-hsyncparam is for) can be
+// absent from the registry while being entirely wanted. Registry-absence alone
+// would withdraw its records and the next refresh would publish them straight
+// back.
+func TestWithdraw_ConfiguredButUnbuiltZoneIsNotAnOrphan(t *testing.T) {
+	f := pubkeyFixture(t)
+	Zones.Remove("example.") // enqueued, not yet constructed
+	armOrphanSweep(t)
+
+	withConfiguredZones(t, map[string]bool{"example.": true})
+	f.target.ReconcileSignalPublications()
+
+	if urs := drainUpdateQ(f.q); len(urs) != 0 {
+		t.Fatalf("a configured-but-unbuilt zone was swept as an orphan: %+v", urs)
+	}
+	assertLedgerRow(t, f.kdb, "foobar.com.", sigOwnerFoo)
+
+	// The same zone, once it is in no configuration either, IS an orphan --
+	// otherwise this test would pass against a sweep that never withdraws.
+	withConfiguredZones(t, map[string]bool{})
+	f.target.ReconcileSignalPublications()
+	assertWithdrawn(t, f, sigOwnerFoo, dns.TypeKEY)
+}
+
+// captureConfiguredZoneNames is the sweep's safety interlock, so its failure
+// mode matters as much as its success: an unreadable dynamic config must leave
+// the set unset (and the caller disarmed), never produce a partial set that
+// would make the sweep confidently wrong about the zones it could not read.
+func TestCaptureConfiguredZoneNames(t *testing.T) {
+	t.Run("static zones, and a missing dynamic file is not a failure", func(t *testing.T) {
+		signalConfiguredZones.Store(nil)
+		t.Cleanup(func() { signalConfiguredZones.Store(nil) })
+		conf := &Config{Zones: []ZoneConf{{Name: "example."}, {Name: "other.example"}}}
+		conf.DynamicZones.ConfigFile = filepath.Join(t.TempDir(), "absent.yaml")
+
+		if !conf.captureConfiguredZoneNames() {
+			t.Fatal("a dynamic config file that does not exist yet is the normal first-run state, not a failure")
+		}
+		if !zoneIsConfigured("example.") {
+			t.Error("static zone not captured")
+		}
+		// Names are captured as FQDNs, the spelling the ledger stores.
+		if !zoneIsConfigured("other.example.") {
+			t.Error("static zone name not qualified to an FQDN before capture")
+		}
+		if zoneIsConfigured("unrelated.") {
+			t.Error("a zone nobody configured is reported as configured")
+		}
+	})
+
+	t.Run("unreadable dynamic file disarms rather than under-reporting", func(t *testing.T) {
+		signalConfiguredZones.Store(nil)
+		t.Cleanup(func() { signalConfiguredZones.Store(nil) })
+		bad := filepath.Join(t.TempDir(), "broken.yaml")
+		if err := os.WriteFile(bad, []byte("zones: [this is not: valid: yaml\n"), 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		conf := &Config{Zones: []ZoneConf{{Name: "example."}}}
+		conf.DynamicZones.ConfigFile = bad
+
+		if conf.captureConfiguredZoneNames() {
+			t.Fatal("an unreadable dynamic config must report failure so the caller leaves the sweep disarmed")
+		}
+		if signalConfiguredZones.Load() != nil {
+			t.Error("a partial set was published; the sweep would treat unread zones as orphans")
+		}
+	})
+}
+
+// withConfiguredZones installs the configured-zone set for one test.
+func withConfiguredZones(t *testing.T, names map[string]bool) {
+	t.Helper()
+	prev := signalConfiguredZones.Load()
+	signalConfiguredZones.Store(&names)
+	t.Cleanup(func() { signalConfiguredZones.Store(prev) })
 }
 
 // armOrphanSweep turns on the target-side role for the duration of a test.

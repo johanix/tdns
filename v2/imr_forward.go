@@ -63,7 +63,16 @@ type ForwardUpstream struct {
 	lastSuccess time.Time
 	lastErrMsg  string
 	lastErrTime time.Time
-	failing     bool // last exchange was a transport-level failure
+	// failing means "this upstream is not usable right now", set either by a
+	// transport-level failure (immediately) or by a run of slice timeouts
+	// (recordSliceTimeout). Reported, not selected on.
+	failing bool
+	// sliceTimeouts counts CONSECUTIVE attempts that ran out of their slice
+	// of the query budget rather than failing (#470). Any other outcome --
+	// a success or a transport-level failure -- resets it. Separate from
+	// failures because one of them is not evidence and several are; see
+	// recordSliceTimeout.
+	sliceTimeouts uint64
 
 	// Quarantine is a CONFIG verdict, not a reachability one: the upstream
 	// is unusable as configured, so it is never dialled and can never become
@@ -118,6 +127,9 @@ func (up *ForwardUpstream) recordSuccess() bool {
 	defer up.mu.Unlock()
 	up.queries++
 	up.lastSuccess = time.Now()
+	// An answer ends any run of slice timeouts: what the run is evidence of
+	// is an upstream that never answers, and this one just did.
+	up.sliceTimeouts = 0
 	was := up.failing
 	up.failing = false
 	return was
@@ -143,7 +155,57 @@ func (up *ForwardUpstream) recordFailure(start time.Time, err error) bool {
 		return false
 	}
 	up.failures++
+	// A transport-level failure ends any run of slice timeouts, for the same
+	// reason a success does: the run is a claim about CONSECUTIVE attempts
+	// that answered nothing, and this attempt is a different observation. A
+	// refused connection in particular says the upstream is reachable and
+	// declining, which is not what "never answers" describes -- and nothing is
+	// lost by resetting, because the line below has already marked it failing
+	// on the stronger evidence.
+	up.sliceTimeouts = 0
 	up.lastErrMsg = err.Error()
+	up.lastErrTime = time.Now()
+	was := up.failing
+	up.failing = true
+	return !was
+}
+
+// recordSliceTimeout records an attempt that used up its whole slice of the
+// query budget without answering, and reports whether the upstream TRANSITIONED
+// to failing -- which takes forwardSliceTimeoutsBeforeFailing of them in a row.
+//
+// This exists because a blackholed upstream is otherwise the one failure mode
+// `config status` never reports. It is dialled, it consumes its slice, and the
+// query path deliberately does NOT call recordFailure for it (that suppression
+// is #470's second half: an attempt cut short must not mark a healthy upstream
+// unreachable). The consequence, left alone, is that the upstream doing the
+// damage stays green while every query pays half its budget to it.
+//
+// One timeout is genuinely not evidence: an attempt gets at least
+// forwardMinAttempt, which is a floor rather than a guarantee, and a slow DoH
+// upstream on a bad path can exceed it and still be working. A run of them
+// with NOTHING ELSE in between -- no answer, and no transport failure either,
+// both of which reset the count -- is a different claim, and it is the true
+// one.
+//
+// Same staleness guard as recordFailure, for the same reason: an observation
+// that a later success has already contradicted must not re-mark the upstream.
+func (up *ForwardUpstream) recordSliceTimeout(start time.Time) bool {
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	up.queries++
+	if up.lastSuccess.After(start) {
+		return false
+	}
+	up.sliceTimeouts++
+	if up.sliceTimeouts < forwardSliceTimeoutsBeforeFailing {
+		return false
+	}
+	// Deliberately not counted in failures: nothing here observed a transport
+	// failure. lastErrMsg carries what actually happened, because "failing"
+	// with no error text is the kind of status line nobody can act on.
+	up.lastErrMsg = fmt.Sprintf("no answer within its slice of the query budget, %d times running",
+		up.sliceTimeouts)
 	up.lastErrTime = time.Now()
 	was := up.failing
 	up.failing = true
@@ -306,6 +368,34 @@ func forwardUpstreamsForPrivacy(fz *ForwardZone, privacy edns0.PrivacyLevel) []*
 }
 
 // forwardTransportDefaults maps a transport to its standard port.
+// Time budget for one forward query, divided among the zone's upstreams (#470).
+//
+// Every upstream used to share a single deadline, so a blackholed first
+// upstream — one that drops rather than refuses — consumed the whole of it and
+// the second was never really tried. Measured before the fix: a first upstream
+// that refused was failed over in 0s; one that dropped SERVFAILed at 8s with a
+// healthy second upstream configured.
+const (
+	// forwardMinAttempt is the least time in which an attempt could
+	// plausibly succeed. A TLS 1.3 handshake plus a query is comfortably
+	// 300-400ms on a slow link, and DoH over HTTP/2 more, so a slice below
+	// this cannot produce an answer for the transports that most need the
+	// fallback. An upstream whose slice would be smaller is NOT attempted,
+	// which is a different thing from being attempted and failing — see
+	// the starved handling in forwardQuery.
+	forwardMinAttempt = 500 * time.Millisecond
+
+	// forwardSliceTimeoutsBeforeFailing is how many slice timeouts in a row
+	// it takes to call an upstream unreachable. See recordSliceTimeout for
+	// why one is not enough and three is.
+	forwardSliceTimeoutsBeforeFailing = 3
+
+	// forwardDefaultBudget is what gets divided when the caller's context
+	// carries no deadline. It is the client timeout, so a single upstream
+	// behaves exactly as it did before this split existed.
+	forwardDefaultBudget = core.DefaultClientTimeout
+)
+
 var forwardTransportDefaults = map[core.Transport]string{
 	core.TransportDo53:    "53",
 	core.TransportDo53TCP: "53",
@@ -605,20 +695,66 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		m.CheckingDisabled = true
 	}
 
-	var lastErr error
-	attempts := 0
 	// The selection is what this query may use: quarantined upstreams are
 	// already gone (forwardUpstreamsForPrivacy starts from liveUpstreams),
 	// and the privacy level has ordered or filtered what remains. len(live)
-	// is therefore what the SERVFAIL below should count.
+	// is therefore what the SERVFAIL below should count -- and what the time
+	// budget is divided among, which is why it is resolved before the loop.
 	live := forwardUpstreamsForPrivacy(fz, privacy)
-	for _, up := range live {
+
+	// The budget is whichever is tighter: what the caller still allows, or the
+	// client timeout. Taking only the latter would let a query outlive the
+	// deadline its caller set.
+	budget := forwardDefaultBudget
+	if dl, ok := ctx.Deadline(); ok {
+		if r := time.Until(dl); r < budget {
+			budget = r
+		}
+	}
+	overallDeadline := time.Now().Add(budget)
+
+	var lastErr error
+	attempts := 0
+	starved := 0
+	for i, up := range live {
 		select {
 		case <-ctx.Done():
 			return nil, 0, cache.ContextFailure, core.TransportDo53,
 				fmt.Errorf("forward zone %s: %v (attempts=%d, last error: %v)", fz.Zone, ctx.Err(), attempts, lastErr)
 		default:
 		}
+		// Front-loaded halving of what is LEFT, not of the original budget:
+		// an upstream that refuses in 5ms donates its unused time to whoever
+		// follows, which is what keeps the already-working fast-failure case
+		// fast. The last upstream takes the whole remainder rather than its
+		// geometric share — the alternative leaves budget unspent on a query
+		// that is about to fail anyway.
+		remaining := time.Until(overallDeadline)
+		slice := remaining / 2
+		if i == len(live)-1 {
+			slice = remaining
+		}
+		if slice < forwardMinAttempt {
+			// Not attempted. Deliberately not a failure: recording it would
+			// mark a healthy upstream unreachable because an earlier one was
+			// slow, which is exactly the DEGRADED-on-healthy-infrastructure
+			// half of #470.
+			//
+			// Decided BEFORE the outbound hooks and before attempts++, because
+			// neither is true of an upstream that is never dialled: the hook
+			// contract is "called before the IMR sends a query" and its error
+			// return skips a server, so firing it here would show an observer
+			// — and let it veto — a query that does not happen; and the
+			// SERVFAIL below distinguishes starved from attempts precisely so
+			// an operator can tell "tried and failed" from "never got a turn".
+			starved++
+			lastErr = fmt.Errorf("upstream %s not attempted: %v left, below the %v an attempt needs",
+				up.Label, remaining.Round(time.Millisecond), forwardMinAttempt)
+			lgDns.Debug("forwardQuery: upstream starved", "qname", qname, "upstream", up.Label,
+				"remaining", remaining, "floor", forwardMinAttempt)
+			continue
+		}
+
 		for _, hook := range getImrOutboundQueryHooks() {
 			if err := hook(ctx, qname, qtype, up.Label, up.Addr, up.Transport); err != nil {
 				return nil, 0, cache.ContextFailure, up.Transport, err
@@ -629,13 +765,38 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			imr.Cache.Logger.Printf("forwardQuery: forwarding <%s, %s> (zone %s) to upstream %s",
 				qname, dns.TypeToString[qtype], fz.Zone, up.Label)
 		}
+
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, slice)
 		start := time.Now()
 		// Cancellable (#435): with a plain Exchange, ordered failover could
 		// only move on between upstreams, so a hung first upstream cost the
-		// full client timeout before the second was even tried.
-		r, _, err := core.ExchangeCtx(ctx, up.Client, m, up.Addr, Globals.Debug && !imr.Quiet)
+		// full client timeout before the second was even tried. The bounded
+		// attemptCtx is what makes that cancellation happen on schedule
+		// rather than only when the caller gives up (#470).
+		r, _, err := core.ExchangeCtx(attemptCtx, up.Client, m, up.Addr, Globals.Debug && !imr.Quiet)
+		// Truncated by its own slice, with the caller still waiting: the
+		// upstream ran out of TIME, it did not fail.
+		truncated := attemptCtx.Err() != nil && ctx.Err() == nil
+		cancelAttempt()
 		if err == nil && r == nil {
 			err = fmt.Errorf("nil response from upstream %s", up.Label)
+		}
+		if err != nil && truncated {
+			starved++
+			lastErr = fmt.Errorf("upstream %s did not answer within its %v of the budget",
+				up.Label, slice.Round(time.Millisecond))
+			lgDns.Debug("forwardQuery: upstream slice expired", "qname", qname,
+				"upstream", up.Label, "slice", slice)
+			// Not recordFailure -- the attempt was cut short, and one of those
+			// says nothing. A RUN of them says the upstream never answers, and
+			// this is where that run is counted.
+			if up.recordSliceTimeout(start) {
+				lgImr.Warn("forward upstream unreachable", "zone", fz.Zone, "upstream", up.Label,
+					"reason", "no answer within its slice of the query budget",
+					"times", forwardSliceTimeoutsBeforeFailing)
+				imr.updateForwardUpstreamError()
+			}
+			continue
 		}
 		if cerr := ctx.Err(); cerr != nil && err != nil {
 			// Abandoned, not failed. The ctx.Done() check at the top of the
@@ -711,6 +872,14 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		}
 	}
 	fz.noteAllUpstreamsFailed(qname, qtype, len(live), attempts, lastErr)
+	// starved is reported separately from attempts because the two call for
+	// different action: attempts that failed say something about the
+	// upstreams, whereas starved ones say the budget was too small to try
+	// them -- usually because an earlier upstream is blackholing.
+	starvedNote := ""
+	if starved > 0 {
+		starvedNote = fmt.Sprintf(", starved=%d", starved)
+	}
 	// Under strict privacy the only upstreams tried were the encrypted ones,
 	// so exhausting them IS the privacy failure: a cleartext upstream might
 	// have answered, and the client forbade asking. Wrapping the sentinel is
@@ -718,12 +887,12 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 	// path does when its encrypted tuples run out.
 	if privacy == edns0.PrivacyStrict {
 		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
-			fmt.Errorf("%w: forward zone %s had no usable response for '%s %s' from any of its encrypted upstreams (attempts=%d, last error: %v)",
-				ErrPrivacyUnavailable, fz.Zone, qname, dns.TypeToString[qtype], attempts, lastErr)
+			fmt.Errorf("%w: forward zone %s had no usable response for '%s %s' from any of its encrypted upstreams (attempts=%d%s, last error: %v)",
+				ErrPrivacyUnavailable, fz.Zone, qname, dns.TypeToString[qtype], attempts, starvedNote, lastErr)
 	}
 	return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
-		fmt.Errorf("forward zone %s: no usable response for '%s %s' from any of its %d usable upstreams (attempts=%d, last error: %v)",
-			fz.Zone, qname, dns.TypeToString[qtype], len(live), attempts, lastErr)
+		fmt.Errorf("forward zone %s: no usable response for '%s %s' from any of its %d usable upstreams (attempts=%d%s, last error: %v)",
+			fz.Zone, qname, dns.TypeToString[qtype], len(live), attempts, starvedNote, lastErr)
 }
 
 // updateForwardUpstreamError recomputes the aggregate Upstream/ImrForward

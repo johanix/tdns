@@ -83,23 +83,17 @@ var signalSpecs = []signalSpec{
 // post-refresh callbacks. Named for what it registers: the callback both
 // publishes (RepublishAtSignalNames) and withdraws (signal_withdraw.go).
 //
-// ParseZones calls it once, at the zone's first load, for EVERY zone regardless
-// of type -- not only secondaries -- so a zone reconfigured from primary to
-// secondary on a later reload (its ZoneData is reused, and FirstZoneLoad is
-// false by then) already carries the hook.
+// Not called directly: registerStandardRefreshHooks (v2/zone_hooks.go) is the
+// single entry point, and every path that CONSTRUCTS a live ZoneData calls it
+// before publishing the zone. See that function for the ordering contract and
+// why registration is unconditional and once-per-ZoneData.
 //
-// Type-independence is not merely defensive here. The publish half self-gates
-// on Options[OptUseHsyncparam], which only a secondary can hold
-// (parseZoneOptions drops it on a primary); the WITHDRAWAL half
-// (signal_withdraw.go) also acts on OptDelSyncChild, for a zone whose own
-// at-ns bootstrap published a _sig0key -- and that zone is one this server is
-// primary for. So a primary registers this hook to do work, not to no-op.
-//
-// First-load-only registration is deliberate: it keeps zdp.OnZonePostRefresh
-// frozen once the zone is live, so the refresh engine can range it without a
-// lock. Registering on later reloads instead would mutate the slice under a
-// concurrent refresh -- a data race the type-independent first-load
-// registration here avoids by construction.
+// Registered for EVERY zone regardless of type, and here that is not merely
+// harmless. The publish half self-gates on Options[OptUseHsyncparam], which
+// only a secondary can hold (parseZoneOptions drops it on a primary) -- but the
+// WITHDRAWAL half also acts on parentsync (OptDelSyncChild), for a zone whose
+// own at-ns bootstrap published a _sig0key, and that zone is one this server is
+// PRIMARY for. A primary registers this hook to do work, not to no-op.
 func (zdp *ZoneData) registerSignalReconcileHook() {
 	zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh, func(zd *ZoneData) {
 		zd.ReconcileSignalPublications()
@@ -113,12 +107,12 @@ func (zdp *ZoneData) registerSignalReconcileHook() {
 // apex HSYNCPARAM asks for it.
 //
 // The use-hsyncparam check is here rather than at registration time on purpose:
-// the hook is registered once, at first load (see registerSignalReconcileHook),
-// while zd.Options is replaced wholesale on every config reload. Reading the
-// option when the hook RUNS is what makes both enabling and disabling it take
-// effect on `config reload` instead of only on restart -- and it is what lets
-// the withdrawal half treat an option removed while the daemon was stopped
-// exactly like one removed while it was running.
+// the hook is registered once, when the ZoneData is CONSTRUCTED (see
+// registerStandardRefreshHooks), while zd.Options is replaced wholesale on
+// every config reload. Reading the option when the hook RUNS is what makes both
+// enabling and disabling it take effect on `config reload` instead of only on
+// restart -- and it is what lets the withdrawal half treat an option removed
+// while the daemon was stopped exactly like one removed while it was running.
 func (childZD *ZoneData) RepublishAtSignalNames() {
 	// signalOptions reads this under zd.mu, together with the option the
 	// withdrawal half needs; see there for why the read is locked.

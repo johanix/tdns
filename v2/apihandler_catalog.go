@@ -161,7 +161,7 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 	zd.mu.Unlock()
 
-	// Register the zone
+	// no-refresh-hooks: republishes the zone CreateAutoZone already registered.
 	Zones.Set(catalogZoneName, zd)
 
 	// Write zone file if persistence is enabled

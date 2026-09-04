@@ -237,6 +237,9 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 					Data:      core.NewNameMap[OwnerData](),
 					KeyDB:     conf.Internal.KeyDB,
 				}
+				// no-refresh-hooks: an error-state shell registered only to
+				// carry the ConfigError. It never refreshes, so a hook would
+				// have nothing to run on.
 				Zones.Set(zoneName, zd)
 				zd.SetError(ConfigError, "dynamic primary: %v", perr)
 				skippedCount++
@@ -952,6 +955,11 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	if cerr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, cerr)
 	}
+	// Before Zones.Set, while the zone is still private to this goroutine:
+	// an API-created zone is entitled to the same hooks as a configured one
+	// (#500).
+	zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+
 	Zones.Set(name, zd)
 	if err := conf.AddDynamicZoneToConfig(zd); err != nil {
 		zd.stopPublisher()
@@ -1251,6 +1259,12 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		lg.Warn("zone option normalization", "zone", name, "detail", normMsg)
 		newZd.SetError(ConfigWarning, "%s", normMsg)
 	}
+	// The replacement carries its predecessor's config across field by field
+	// but starts with EMPTY OnZone*Refresh slices, so without this a modify
+	// silently strips the hooks from a zone that had them -- and modify is
+	// what a reconciling caller runs routinely (#500).
+	newZd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+
 	Zones.Set(name, newZd)
 
 	// (4) Overwrite the persisted entry. AddDynamicZoneToConfig rewrites the
@@ -1263,6 +1277,8 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		// deletes via the keystore, which refuses a referenced key, and newZd
 		// (live until this Set) may reference the newly-staged key — otherwise
 		// the key is left orphaned. Mirrors the add path's ordering.
+		// no-refresh-hooks: rollback republishes the PREVIOUS ZoneData, which
+		// already carries its hooks.
 		Zones.Set(name, oldZd)
 		rollbackKey()
 		return "", fmt.Errorf("zone %s failed to persist; rolled back the in-memory modification: %w", name, err)

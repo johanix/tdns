@@ -1062,6 +1062,14 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					}
 					zd.mu.Unlock()
 
+					// Same entitlement as a config-defined zone: this branch
+					// builds the ZoneData for everything ParseZones did not
+					// pre-register -- catalog members and the dynamic zones
+					// LoadDynamicZoneFiles enqueues at boot -- so it owes them
+					// the standard hooks too (#500). Before Zones.Set, while
+					// the zone is still private to this goroutine.
+					zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+
 					Zones.Set(zone, zd)
 
 					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,

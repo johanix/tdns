@@ -989,6 +989,21 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Logger:        log.Default(),
 				FirstZoneLoad: true,
 			}
+			// Before Zones.Set, while the zone is still private to this
+			// goroutine -- the contract registerStandardRefreshHooks states
+			// and the other three creation paths already keep. This zone is
+			// published here and then populated in place over the rest of the
+			// loop, so registering further down would append to a slice a
+			// concurrent refresh could already be ranging.
+			//
+			// Keying it on creation rather than on zdp.FirstZoneLoad also
+			// makes "exactly once per ZoneData" true by construction.
+			// FirstZoneLoad is cleared only by a SUCCESSFUL first load
+			// (zone_mutation.go), so a zone whose first load failed still
+			// carries it, and a FirstZoneLoad-guarded registration appended a
+			// SECOND copy of every hook on the next reload -- the duplicate
+			// this registration is documented as avoiding.
+			zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
 			Zones.Set(zname, zd)
 		}
 
@@ -1519,59 +1534,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			}
 		}
 
-		// delegation-sync-proxy and use-hsyncparam both register OnZone*Refresh
-		// hooks whose eligibility can change on a config reload: a zone can be
-		// reconfigured from primary to secondary, and either option can be added
-		// later. ParseZones reuses the ZoneData, so keying registration on the
-		// option or the zone type would miss a zone that only becomes eligible
-		// after its first load (FirstZoneLoad is already false by then), while
-		// re-appending on every reload would both duplicate the callbacks AND
-		// mutate the OnZone*Refresh slices while a concurrent refresh ranges
-		// them -- a data race.
+		// The standard per-zone refresh hooks are attached where this zone was
+		// CREATED, above, before it was published -- not here. See
+		// registerStandardRefreshHooks (v2/zone_hooks.go).
 		//
-		// Both hooks resolve this the same way: register unconditionally, once,
-		// at first load, for EVERY zone, and self-gate at run time. The slices
-		// are then frozen before the zone is live (registration happens under
-		// FirstZoneLoad, before engines start), so the refresh engine ranges
-		// them without a lock; and the callbacks read their option live on each
-		// run, so a reload turning an option on or off -- or flipping the zone
-		// to secondary -- takes effect without a restart.
-		//
-		// delegation-sync-proxy: an agent secondary forwards NOTIFY(CDS/CSYNC)
-		// to the parent when a relevant RRset changes in an incoming transfer.
-		// The OnZonePreRefresh callback diffs old vs new and records the result
-		// in zd.ProxyRefreshAnalysis; the OnZonePostRefresh callback acts on it
-		// (P-3). Mirrors the tdns-mp MPPreRefresh/PostRefresh pattern for the
-		// non-MP agent path. Both self-gate on OptDelSyncProxy.
-		if zdp.FirstZoneLoad {
-			zdp.registerProxyDelegationHooks(conf.Internal.DelegationSyncQ)
-		}
-
 		// Note: DelegationBackend wiring is done synchronously above,
 		// outside the FirstZoneLoad guard, so config-reload picks up
 		// changes to the 'delegationbackend' key.
-
-		// Republish-at-signal-names consumer (RFC 9615 at-NS bootstrap): a
-		// secondary carrying the use-hsyncparam option watches incoming
-		// transfers for an apex HSYNCPARAM pubkey/pubcds flag and republishes
-		// the customer's apex KEY / CDS(+CDNSKEY) under the _sig0key/_dsboot
-		// signal names owned by each NS, into whichever local primary zone the
-		// signal name falls in (see signal_republish.go).
-		//
-		// The same callback also WITHDRAWS records at signal names this server
-		// published and nothing justifies any more (signal_withdraw.go). That
-		// is the other reason registration is type-independent: the withdrawal
-		// half acts on parentsync (OptDelSyncChild) too, for a zone whose own at-ns
-		// bootstrap published a _sig0key -- and that zone is one this server is
-		// PRIMARY for. So a primary is not merely a guarded no-op here.
-		//
-		// Both halves read the current options when the hook runs, so a reload
-		// takes effect without a restart -- and, because nothing compares
-		// before against after, an edit made while the daemon was stopped is
-		// settled on first load exactly like one made live.
-		if zdp.FirstZoneLoad {
-			zdp.registerSignalReconcileHook()
-		}
 
 		// Leader election OnFirstLoad is registered in StartAgent() (not here)
 		// because LeaderElectionManager doesn't exist until StartAgent runs.

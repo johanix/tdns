@@ -2268,6 +2268,11 @@ $TTL 86400
 	}
 
 	zd.InstallInitialSnapshot()
+	// no-refresh-hooks: a catalog PRIMARY, and this is a *KeyDB method with no
+	// Config in scope to take the delegation-sync queue from. Both hooks gate
+	// on options a primary cannot hold (use-hsyncparam is dropped on a primary,
+	// delegation-sync-proxy is agent-secondary), so they would be permanent
+	// no-ops. Revisit if a hook ever applies to a primary.
 	Zones.Set(zonename, zd)
 
 	return zd, nil

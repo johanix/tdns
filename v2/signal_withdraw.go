@@ -27,6 +27,8 @@ package tdns
 
 import (
 	"sync/atomic"
+
+	"github.com/miekg/dns"
 )
 
 // ReconcileSignalPublications is the OnZonePostRefresh callback registered on
@@ -195,13 +197,34 @@ func (zd *ZoneData) signalOptions() (useHsyncparam, delSyncChild bool) {
 	return zd.Options[OptUseHsyncparam], zd.Options[OptDelSyncChild]
 }
 
-// signalOrphanSweepArmed gates the target-side role below. Before startup has
-// registered the persisted dynamic zones, a customer zone missing from the
-// registry means "not loaded yet", not "removed" -- and withdrawing on that
-// reading would delete the records of every dynamic zone on the box. Armed by
-// ReconcileSignalPublicationsAtStartup, which runs after
-// loadDynamicZonesIfConfigured.
+// signalOrphanSweepArmed gates the target-side role below, and
+// signalConfiguredZones is what makes that gate sound.
+//
+// "Missing from the registry" is not the same as "removed". A zone can be
+// absent because it has not been CONSTRUCTED yet: LoadDynamicZoneFiles
+// registers dynamic primaries itself but only ENQUEUES dynamic secondaries and
+// catalog members, whose ZoneData the RefreshEngine builds when it drains the
+// channel (see registerStandardRefreshHooks, #500/#501). So arming after
+// loadDynamicZonesIfConfigured is not enough on its own -- a dynamic SECONDARY,
+// which is exactly the zone shape use-hsyncparam is for, can still be missing
+// at that moment, and sweeping on registry-absence alone would withdraw its
+// records and then watch the next refresh publish them straight back.
+//
+// signalConfiguredZones is therefore captured at startup from CONFIGURATION
+// rather than liveness: every zone named in the static config or the dynamic
+// config file. A row whose zone appears there is never an orphan, however
+// absent it currently is. A zone genuinely removed while the daemon was stopped
+// is in neither, which is the case the sweep exists for.
 var signalOrphanSweepArmed atomic.Bool
+
+var signalConfiguredZones atomic.Pointer[map[string]bool]
+
+// zoneIsConfigured reports whether some configuration names this zone, even if
+// no ZoneData has been built for it yet.
+func zoneIsConfigured(zone string) bool {
+	m := signalConfiguredZones.Load()
+	return m != nil && (*m)[zone]
+}
 
 // withdrawOrphanSignalPublications is the zone acting as the TARGET: it
 // withdraws records published into it for a zone this server no longer serves
@@ -230,12 +253,19 @@ func (zd *ZoneData) withdrawOrphanSignalPublications() {
 	withdrawOrphanRows(rows)
 }
 
-// withdrawOrphanRows withdraws the rows whose published-for zone is no longer
-// in the registry. A zone that IS in the registry is left to its own
-// reconciler, which knows about its options and its content and this does not.
+// withdrawOrphanRows withdraws the rows whose published-for zone this server
+// neither serves nor is configured for. A zone that IS in the registry is left
+// to its own reconciler, which knows about its options and its content and this
+// does not; a zone that is merely CONFIGURED is left alone because it has not
+// been built yet, not because nobody wants it (see signalConfiguredZones).
 func withdrawOrphanRows(rows []SignalPublication) {
 	for _, p := range rows {
 		if _, live := Zones.Get(p.Zone); live {
+			continue
+		}
+		if zoneIsConfigured(p.Zone) {
+			lgSignal.Debug("not an orphan: the zone is configured but not constructed yet",
+				"zone", p.Zone, "signal", p.Owner, "target", p.Target)
 			continue
 		}
 		withdrawSignalPublication(p, "the zone it was published for is no longer served here")
@@ -268,9 +298,19 @@ func WithdrawSignalPublicationsForZone(kdb *KeyDB, zone string) {
 // target not yet loaded is not readable now; its own post-refresh catches it,
 // and that runs after this has armed.
 //
-// Must be called after loadDynamicZonesIfConfigured, which is what puts the
-// persisted dynamic zones in the registry.
+// Call it after loadDynamicZonesIfConfigured. That is not what makes the sweep
+// safe -- signalConfiguredZones is -- but it is where the persisted dynamic
+// zones have at least been enqueued, so the registry is as complete as it gets
+// without waiting on the refresh engine.
 func (conf *Config) ReconcileSignalPublicationsAtStartup() {
+	// Arm only if the configured set is trustworthy. Without it "absent from
+	// the registry" means "orphan", which during startup is false for every
+	// zone the refresh engine has not built yet -- so an unreadable dynamic
+	// config must leave the sweep OFF, not run it against an empty set.
+	if !conf.captureConfiguredZoneNames() {
+		lgSignal.Warn("signal-name orphan sweep stays disarmed: the configured zone set could not be established")
+		return
+	}
 	signalOrphanSweepArmed.Store(true)
 
 	kdb := conf.Internal.KeyDB
@@ -364,4 +404,40 @@ func signalRRtypesForPrefix(prefix string) []uint16 {
 		}
 	}
 	return nil
+}
+
+// captureConfiguredZoneNames records every zone name some configuration names,
+// so the orphan sweep can tell "removed" from "not built yet". Static zones
+// come from the parsed config; dynamic ones are re-read from the dynamic config
+// file, because the registry is exactly what cannot be trusted here.
+//
+// On any doubt it protects rather than exposes: a dynamic config file that
+// cannot be read leaves the sweep disarmed entirely, since a partial set would
+// make the sweep confidently wrong about the zones it failed to read.
+// Returns false when the set could not be established, which must leave the
+// sweep disarmed.
+func (conf *Config) captureConfiguredZoneNames() bool {
+	names := map[string]bool{}
+	for i := range conf.Zones {
+		names[dns.Fqdn(conf.Zones[i].Name)] = true
+	}
+
+	if conf.DynamicZones.ConfigFile != "" {
+		cf, err := conf.loadDynamicConfigFile()
+		if err != nil {
+			lgSignal.Error("cannot read the dynamic zone config; leaving the signal-name orphan sweep disarmed",
+				"file", conf.DynamicZones.ConfigFile, "err", err)
+			signalConfiguredZones.Store(nil)
+			return false
+		}
+		if cf != nil {
+			for _, zconf := range cf.Zones {
+				names[dns.Fqdn(zconf.Name)] = true
+			}
+		}
+	}
+
+	lgSignal.Debug("captured the configured zone set for the signal-name orphan sweep", "zones", len(names))
+	signalConfiguredZones.Store(&names)
+	return true
 }

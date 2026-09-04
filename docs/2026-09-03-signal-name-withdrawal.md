@@ -132,9 +132,22 @@ same property #489 relies on.
 The reconciler runs in two roles, both from the same callback:
 
 - **as the published-for zone** (`zone` column): cases 1, 2, 3a and 4.
-- **as the target zone** (`target` column): rows whose published-for zone is no
-  longer in the registry at all -- case 3b, including a removal made while the
-  daemon was stopped, and covering the zone-removal paths not hooked below.
+- **as the target zone** (`target` column): rows whose published-for zone this
+  server neither serves nor is configured for -- case 3b, including a removal
+  made while the daemon was stopped, and covering the zone-removal paths not
+  hooked below.
+
+  "Not in the registry" is deliberately not the test. A zone can be absent
+  because it has not been CONSTRUCTED yet: `LoadDynamicZoneFiles` registers
+  dynamic primaries itself but only ENQUEUES dynamic secondaries and catalog
+  members, whose `ZoneData` the RefreshEngine builds when it drains the channel
+  (#500/#501). A dynamic secondary is exactly the zone shape `use-hsyncparam`
+  is for, so sweeping on registry-absence alone would withdraw its records at
+  startup and watch the next refresh publish them back. The sweep therefore
+  consults a set captured from CONFIGURATION -- every zone named in the static
+  config or the dynamic config file -- and a zone named there is never an
+  orphan, however absent it currently is. A zone genuinely removed while the
+  daemon was stopped is in neither.
 
 Plus two prompt paths, so a live removal does not wait for the target's next
 refresh: `ReloadZoneConfig`'s "zone no longer in config" sweep and
@@ -269,17 +282,23 @@ boot.
   half; `publishAtSignalNames` records a row for every publication it makes;
   `RepublishAtSignalNames` keeps its name and its job (the publish half) and is
   now called by the reconciler.
-- `v2/parseconfig.go`, `v2/signal_republish.go` --
-  `registerSignalRepublishHook` (from `main`) now registers the reconciler
-  rather than the publish half alone, with the comment corrected per §3.
+- `v2/zone_hooks.go`, `v2/signal_republish.go` -- `main`'s
+  `registerStandardRefreshHooks` (#501) now attaches the reconciler rather than
+  the publish half alone, and the hook is renamed
+  `registerSignalReconcileHook` for what it registers. Both files' comments
+  said registering on a primary "costs nothing but a guarded no-op"; with
+  withdrawal in the callback that is false -- a primary carrying `parentsync`
+  does real work there -- so the claim is corrected in both places.
 - `v2/config.go`, `v2/dynamic_zones.go` -- withdraw everything for a zone being
   removed from the running server; on the reload path, after `confMu` is
   released (§4.5).
 - `v2/main_initfuncs.go` -- arm the orphan role and run the one-shot sweep at
-  the end of `StartAuth` / `StartAgent`, after `loadDynamicZonesIfConfigured`
-  has registered the persisted dynamic zones. Before that point a dynamic
-  customer zone is absent from the registry for reasons that have nothing to do
-  with it having been removed.
+  the end of `StartAuth` / `StartAgent`, after `loadDynamicZonesIfConfigured`.
+  The timing is not what makes it safe (§3): the configured-zone set is, and
+  the sweep stays DISARMED if that set cannot be established -- an unreadable
+  dynamic config yields no set rather than a partial one, because a partial set
+  would make the sweep confidently wrong about exactly the zones it failed to
+  read.
 - `v2/signal_withdraw_test.go`, `v2/db_signal_publication_test.go` -- see §6.
   (`v2/signal_republish_test.go` changes by one line, for the new `source`
   parameter.)

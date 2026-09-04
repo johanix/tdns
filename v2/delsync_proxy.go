@@ -50,14 +50,16 @@ func (a *ProxyDelegationAnalysis) wantCDSNotify() bool   { return a.CdsChanged |
 func (a *ProxyDelegationAnalysis) wantCSYNCNotify() bool { return a.CsyncChanged || a.NsOrGlueChanged }
 
 // registerProxyDelegationHooks appends the delegation-sync-proxy pre/post-refresh
-// callbacks to zdp. ParseZones calls it once, at the zone's first load, for
-// EVERY zone regardless of type or option -- so a zone that gains
-// OptDelSyncProxy on a later reload (including one reconfigured from primary to
-// secondary, whose reused ZoneData has FirstZoneLoad false by then) already
-// carries the hooks. First-load-only registration is deliberate, for the same
-// reason as registerSignalReconcileHook: it keeps the OnZone*Refresh slices
-// frozen once the zone is live, so the refresh engine can range them without a
-// lock.
+// callbacks to zdp.
+//
+// Not called directly: registerStandardRefreshHooks (v2/zone_hooks.go) is the
+// single entry point, and every path that CONSTRUCTS a live ZoneData calls it
+// before publishing the zone. See that function for the ordering contract and
+// why registration is unconditional and once-per-ZoneData.
+//
+// Registered for EVERY zone regardless of type or option -- so a zone that
+// gains OptDelSyncProxy on a later reload (including one reconfigured from
+// primary to secondary) already carries the hooks.
 //
 // The option is checked HERE, in the closures, not inside
 // ProxyDelegationPreRefresh/PostRefresh: those are the diff/act primitives (and
