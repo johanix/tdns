@@ -499,6 +499,7 @@ func (zd *ZoneData) setErrorLocked(errtype ErrorType, errmsg string, args ...int
 		zd.Errors[errtype] = ZoneError{Type: errtype, Msg: fmt.Sprintf(errmsg, args...)}
 	}
 	zd.recomputeDerivedErrorFieldsLocked()
+	// no-refresh-hooks: republishes an existing ZoneData.
 	Zones.Set(zd.ZoneName, zd)
 }
 
@@ -522,6 +523,7 @@ func (zd *ZoneData) clearErrorLocked(errtype ErrorType) {
 		}
 	}
 	zd.recomputeDerivedErrorFieldsLocked()
+	// no-refresh-hooks: republishes an existing ZoneData.
 	Zones.Set(zd.ZoneName, zd)
 }
 
@@ -538,6 +540,7 @@ func (zd *ZoneData) SetStatus(s ZoneStatus) {
 	defer zd.mu.Unlock()
 	zd.Status = s
 	if cur, live := Zones.Get(zd.ZoneName); live && cur == zd {
+		// no-refresh-hooks: republishes an existing ZoneData.
 		Zones.Set(zd.ZoneName, zd)
 	}
 }

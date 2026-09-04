@@ -338,6 +338,7 @@ func recordParentDSTTLObservation(zone string, pol *DnssecPolicy, rrs []dns.RR) 
 		lgRollover.Info("rollover: parent DS TTL observed",
 			"zone", zone, "ttl", ttl)
 		zd.ParentDSTTLObserved = ttl
+		// no-refresh-hooks: republishes an existing ZoneData after a field update.
 		Zones.Set(zone, zd)
 	}
 	EvaluateRolloverPolicyInvariants(zd, pol)
