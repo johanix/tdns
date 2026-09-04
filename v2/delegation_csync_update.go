@@ -129,7 +129,20 @@ func (zd *ZoneData) delegationsTouched(actions []dns.RR) (children, orphans []st
 
 	for _, rr := range actions {
 		h := rr.Header()
-		if h.Rrtype != dns.TypeA && h.Rrtype != dns.TypeAAAA {
+		// Address records, and a name-wide delete, which takes the addresses
+		// with it.
+		//
+		// The ANY case is easy to miss and expensive to miss. "CLASS=ANY
+		// TYPE=ANY at ns1.child.example." is not an NS action, and it is not
+		// ANY at a delegation cut (the loop above catches that), and it is not
+		// typed A/AAAA -- so without this it matches nothing, no child is
+		// discovered, and the whole NS/glue check is SKIPPED for an update
+		// that strips every address off an in-bailiwick nameserver while
+		// leaving the NS in place. That is the exact state the glue rules
+		// exist to refuse.
+		glueTouch := h.Rrtype == dns.TypeA || h.Rrtype == dns.TypeAAAA ||
+			(h.Class == dns.ClassANY && h.Rrtype == dns.TypeANY)
+		if !glueTouch {
 			continue
 		}
 		name := dns.Fqdn(h.Name)
@@ -200,6 +213,23 @@ func CheckDelegationNSCoherence(ctx context.Context, child string, currentNS []d
 	if !nsTouched && len(glueTouched) == 0 {
 		return nil
 	}
+
+	// Mentioning the NS RRset is not changing it. A duplicate NS add, or a
+	// delete of something that was not there, leaves the parent's delegation
+	// exactly where it was -- and making that depend on the child being
+	// reachable and in agreement would add a failure mode to a request that
+	// changes nothing. Same reasoning, and the same helper, as the DS half in
+	// CheckDelegationCoherence.
+	//
+	// The gate has to be here rather than only at the query below: further
+	// down, a nil fetcher is a refusal, so a no-op NS edit on a server with no
+	// scanner would be refused for being unverifiable when there is nothing to
+	// verify.
+	nsChanged := nsTouched && !sameRRsetContent(currentNS, resultingNS)
+	if !nsChanged && len(glueTouched) == 0 {
+		return nil
+	}
+
 	if len(resultingNS) == 0 {
 		return fmt.Errorf("the update would leave %s with no NS records; an empty NS RRset is rejected (RFC 7477 §3.2.1)", child)
 	}
@@ -247,7 +277,7 @@ func CheckDelegationNSCoherence(ctx context.Context, child string, currentNS []d
 	}
 
 	// The NS set must be what the child serves, as agreed by its nameservers.
-	if nsTouched {
+	if nsChanged {
 		served, inSync, err := fetch(ctx, child, dns.TypeNS)
 		if err != nil {
 			return fmt.Errorf("cannot verify the NS RRset for %s: %w", child, err)

@@ -89,3 +89,29 @@ nameserver must not leave glue; untouched drifted glue is not re-verified
 while touched glue is; a new delegation asks the nameservers it names; the
 touched-set derivation; the generalised apply helper. The DS coherence
 tests still pass over `rrsetAfterActions`.
+
+## Stricter than the scanner, deliberately
+
+Two places where the asserted check does NOT do what `computeCsyncDelta` does,
+so that "the same tests a CSYNC scanner would run" is not over-read:
+
+- **A glue fetch that fails, or on which the child's nameservers disagree,
+  REFUSES the update.** The scanner skips that nameserver and carries on, which
+  is right for a scan: it is an observation, and a partial one beats none. An
+  UPDATE is a request to *change* the delegation, and accepting a change we
+  could not verify is how the parent ends up publishing something the child
+  does not serve.
+- **Glue re-verification is owner-scoped, not per type.** Touching AAAA at a
+  nameserver re-verifies its A as well. An in-bailiwick nameserver's addresses
+  are one unit, and a nameserver whose A has drifted from what the child serves
+  is a broken delegation whether or not this update touched the A. The cost is
+  real: an operator adding an AAAA can be blocked by a pre-existing A drift they
+  did not cause. Failing closed is the safer direction, and refusing to grow a
+  delegation that is already incoherent is the point of the rule. Pinned by
+  `TestCheckDelegationNSCoherenceGlueCheckIsOwnerScoped` so it reads as a choice
+  rather than an accident.
+
+A third, from the same principle: **a no-op NS edit is not checked at all** --
+a duplicate add or a delete of something absent leaves the parent where it was,
+so it neither queries the child nor is refused for lack of a scanner. That
+mirrors the DS half's `sameRRsetContent` skip.

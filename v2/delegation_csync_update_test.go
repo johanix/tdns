@@ -3,9 +3,11 @@ package tdns
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -68,6 +70,12 @@ func delRR(t *testing.T, s string) dns.RR {
 
 func delRRset(name string, rrtype uint16) dns.RR {
 	return &dns.ANY{Hdr: dns.RR_Header{Name: name, Rrtype: rrtype, Class: dns.ClassANY}}
+}
+
+// anyRR is RFC 2136 DELNAME: CLASS=ANY TYPE=ANY, every RRset at the name.
+func anyRR(t *testing.T, name string) dns.RR {
+	t.Helper()
+	return delRRset(name, dns.TypeANY)
 }
 
 func expectRefusal(t *testing.T, err error, want string) {
@@ -301,6 +309,137 @@ func TestDelegationsTouched(t *testing.T) {
 	}
 	if len(orphans) != 1 || orphans[0] != "ns.nowhere.example." {
 		t.Fatalf("orphans = %v", orphans)
+	}
+}
+
+// M1 regression. A name-wide "CLASS=ANY TYPE=ANY" at an in-bailiwick
+// nameserver hostname strips every address off it while the NS RRset stays --
+// exactly the delegation the glue rules exist to refuse. It used to be
+// invisible to discovery: not an NS action, not ANY at a delegation cut, not
+// typed A/AAAA, so no child was returned and the check never ran.
+//
+// DNS UPDATE can send this. DSYNC's typed delrrset happens not to, which is
+// why it survived the first round of tests.
+func TestDelegationsTouchedFindsNameWideAnyAtGlueOwner(t *testing.T) {
+	zd := cuParentZone(t)
+
+	t.Run("name-wide delete at a glue owner reaches its child", func(t *testing.T) {
+		children, orphans := zd.delegationsTouched([]dns.RR{
+			anyRR(t, "ns1.child.example."),
+		})
+		if len(children) != 1 || children[0] != "child.example." {
+			t.Fatalf("children = %v, want [child.example.] -- the check is skipped without this", children)
+		}
+		if len(orphans) != 0 {
+			t.Errorf("orphans = %v, want none", orphans)
+		}
+	})
+
+	t.Run("still found alongside an NS action for the same child", func(t *testing.T) {
+		children, _ := zd.delegationsTouched([]dns.RR{
+			addRR(t, "child.example. 3600 IN NS ns1.child.example."),
+			anyRR(t, "ns1.child.example."),
+		})
+		if len(children) != 1 || children[0] != "child.example." {
+			t.Fatalf("children = %v, want [child.example.] exactly once", children)
+		}
+	})
+
+	t.Run("name-wide delete under no delegation is not an orphan", func(t *testing.T) {
+		children, orphans := zd.delegationsTouched([]dns.RR{
+			anyRR(t, "www.example."),
+		})
+		if len(children) != 0 || len(orphans) != 0 {
+			t.Fatalf("children = %v, orphans = %v; a delete of a non-delegation name is neither", children, orphans)
+		}
+	})
+}
+
+// S1: mentioning the NS RRset is not changing it. A duplicate add or a delete
+// of something that was not there leaves the parent exactly where it was, so
+// it must not depend on the child being reachable and in agreement -- and must
+// not be refused for being unverifiable when there is nothing to verify.
+func TestCheckDelegationNSCoherenceNoOpNSChangeSkipsTheChild(t *testing.T) {
+	currentNS := rrs(t, "child.example. 3600 IN NS ns1.child.example.")
+	glue := func(owner string, qtype uint16) ([]dns.RR, bool) {
+		if core.EqualNames(owner, "ns1.child.example.") && qtype == dns.TypeA {
+			return rrs(t, "ns1.child.example. 3600 IN A 192.0.2.1"), true
+		}
+		return nil, false
+	}
+	asked := false
+	fetch := func(ctx context.Context, zone string, rrtype uint16) ([]dns.RR, bool, error) {
+		asked = true
+		return nil, false, fmt.Errorf("child is unreachable")
+	}
+
+	// A re-send of the NS record the parent already publishes.
+	err := CheckDelegationNSCoherence(context.Background(), "child.example.",
+		currentNS, glue,
+		[]dns.RR{addRR(t, "child.example. 3600 IN NS ns1.child.example.")}, fetch)
+	if err != nil {
+		t.Fatalf("a no-op NS change must be accepted without asking the child: %v", err)
+	}
+	if asked {
+		t.Error("the child was queried for an update that changes nothing")
+	}
+
+	// And with no fetcher at all: nothing to verify, so nothing to refuse.
+	if err := CheckDelegationNSCoherence(context.Background(), "child.example.",
+		currentNS, glue,
+		[]dns.RR{addRR(t, "child.example. 3600 IN NS ns1.child.example.")}, nil); err != nil {
+		t.Fatalf("a no-op NS change must not be refused for lack of a scanner: %v", err)
+	}
+}
+
+// S2: glue re-verification is OWNER-scoped, not per-type -- touching AAAA at a
+// nameserver re-verifies its A as well. That is deliberate: an in-bailiwick
+// nameserver's addresses are one unit, and a nameserver whose A has drifted
+// from what the child serves is a broken delegation whether or not this
+// particular update touched the A. Failing closed there is the safer
+// direction, and refusing to grow a delegation that is already incoherent is
+// the point of the rule.
+//
+// The cost is real and worth stating: an operator adding an AAAA can be
+// blocked by a pre-existing A drift they did not cause. This test pins the
+// choice so a later reader sees it was made rather than fallen into.
+func TestCheckDelegationNSCoherenceGlueCheckIsOwnerScoped(t *testing.T) {
+	currentNS := rrs(t, "child.example. 3600 IN NS ns1.child.example.")
+	glue := func(owner string, qtype uint16) ([]dns.RR, bool) {
+		if !core.EqualNames(owner, "ns1.child.example.") {
+			return nil, false
+		}
+		switch qtype {
+		case dns.TypeA:
+			return rrs(t, "ns1.child.example. 3600 IN A 192.0.2.1"), true
+		case dns.TypeAAAA:
+			return rrs(t, "ns1.child.example. 3600 IN AAAA 2001:db8::1"), true
+		}
+		return nil, false
+	}
+	// The child serves a DIFFERENT A than the parent publishes, and agrees
+	// with the parent on the resulting AAAA.
+	fetch := func(ctx context.Context, zone string, rrtype uint16) ([]dns.RR, bool, error) {
+		switch {
+		case core.EqualNames(zone, "child.example.") && rrtype == dns.TypeNS:
+			return rrs(t, "child.example. 3600 IN NS ns1.child.example."), true, nil
+		case core.EqualNames(zone, "ns1.child.example.") && rrtype == dns.TypeA:
+			return rrs(t, "ns1.child.example. 3600 IN A 198.51.100.9"), true, nil // drifted
+		case core.EqualNames(zone, "ns1.child.example.") && rrtype == dns.TypeAAAA:
+			return rrs(t, "ns1.child.example. 3600 IN AAAA 2001:db8::2"), true, nil
+		}
+		return nil, true, nil
+	}
+
+	// Touch AAAA only. Owner-scoped checking reaches the drifted A and refuses.
+	err := CheckDelegationNSCoherence(context.Background(), "child.example.",
+		currentNS, glue,
+		[]dns.RR{addRR(t, "ns1.child.example. 3600 IN AAAA 2001:db8::2")}, fetch)
+	if err == nil {
+		t.Fatal("expected a refusal: the nameserver's A has drifted from what the child serves")
+	}
+	if !strings.Contains(err.Error(), "ns1.child.example.") {
+		t.Errorf("the refusal should name the nameserver: %v", err)
 	}
 }
 

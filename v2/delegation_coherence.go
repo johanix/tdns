@@ -124,8 +124,11 @@ func sameRecord(a, b dns.RR) bool {
 	return dns.IsDuplicate(na, nb)
 }
 
-// sameDSSet reports whether two DS RRsets hold the same records, order aside.
-func sameDSSet(a, b []dns.RR) bool {
+// sameRRsetContent reports whether two RRsets hold the same records, order
+// aside. Nothing in it is DS-specific (sameRecord zeroes the TTL and compares
+// wire content), and the NS half of the acceptance rules needs the same test,
+// so it is named for what it does.
+func sameRRsetContent(a, b []dns.RR) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -223,7 +226,7 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 	// or a re-send of the DS already published, leaves the parent exactly where
 	// it was -- and making that depend on the child being reachable would add a
 	// failure mode to a request that changes nothing.
-	if sameDSSet(currentDS, resulting) {
+	if sameRRsetContent(currentDS, resulting) {
 		return nil
 	}
 	if len(resulting) == 0 {
