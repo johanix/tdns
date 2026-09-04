@@ -1279,3 +1279,354 @@ func TestBuildImrForwardsCAFile(t *testing.T) {
 		}
 	}
 }
+
+// startBlackholeUpstream is a UDP socket that accepts packets and never
+// answers. Not the same thing as an unreachable address: that one refuses, or
+// gets an ICMP back, and fails in milliseconds. A blackhole makes the caller
+// wait out its whole timeout, which is the failure mode #470 is about -- a
+// firewall that DROPs rather than REJECTs.
+func startBlackholeUpstream(t *testing.T) (string, uint16, func()) {
+	t.Helper()
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	host, port := splitHostPort(t, pc.LocalAddr().String())
+	return host, port, func() { _ = pc.Close() }
+}
+
+// A blackholed first upstream must not cost the second its chance (#470).
+//
+// The pre-fix behaviour: all upstreams shared the caller's deadline, the
+// blackhole consumed it, and the second upstream was either never reached or
+// reached with microseconds left. Measured in a lab before the fix: a first
+// upstream that REFUSED failed over in 0s, while one that DROPPED produced
+// SERVFAIL at 8s with a healthy second upstream configured.
+func TestForwardBlackholedUpstreamDoesNotStarveTheNext(t *testing.T) {
+	good, goodPort, _, stopGood := startTestUpstream(t)
+	defer stopGood()
+	bh, bhPort, stopBH := startBlackholeUpstream(t)
+	defer stopBH()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: bh, Port: bhPort},
+			{Addr: good, Port: goodPort},
+		}},
+	})
+
+	// A deadline is what makes this bite: without one the old code still got
+	// to the second upstream eventually, just slowly.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA,
+		map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("blackholed first upstream starved the second: %v (after %v)", err, elapsed)
+	}
+	if rcode != dns.RcodeSuccess || rrset == nil || len(rrset.RRs) != 1 {
+		t.Fatalf("rcode=%d rrset=%v", rcode, rrset)
+	}
+	// The blackhole gets half the budget, so the answer must arrive well
+	// inside the caller's deadline rather than at the edge of it.
+	if elapsed > 2500*time.Millisecond {
+		t.Errorf("answer took %v; the first upstream should have been capped at half the budget", elapsed)
+	}
+}
+
+// #470's second half: an upstream that never got a usable slice of the budget
+// is not an upstream that failed, and recording it as one marks healthy
+// infrastructure unreachable and drags config status to DEGRADED.
+//
+// There are two ways to lose budget, they take different code paths, and only
+// one of them was ever exercised -- so this covers both.
+//
+// Three upstreams and a 1.2s budget put each on its own path:
+//
+//	up0 blackhole  slice = 600ms   dialled, uses all of it -> slice timeout
+//	up1 healthy    slice = 300ms   below the 500ms floor   -> never dialled
+//	up2 healthy    slice = ~600ms  last, takes the remainder -> answers
+//
+// up1 is the floor skip: its queries counter must not move at all. up0 is the
+// mid-flight case: it WAS dialled and it did time out, and one of those is not
+// evidence of anything -- an attempt gets at least forwardMinAttempt, which is
+// a floor rather than a promise. Both must come out not-failing.
+//
+// The arithmetic is what makes the paths distinct, so it is asserted rather
+// than assumed: an earlier version of this test used a 900ms budget, which put
+// the blackhole's first slice at 450ms -- under the floor. It never dialled,
+// the mid-flight path was never taken, and the test passed in 0.00s while
+// claiming to cover it.
+func TestForwardStarvedUpstreamIsNotRecordedAsFailed(t *testing.T) {
+	bh, bhPort, stopBH := startBlackholeUpstream(t)
+	defer stopBH()
+	starved, starvedPort, _, stopStarved := startTestUpstream(t)
+	defer stopStarved()
+	answering, answeringPort, _, stopAnswering := startTestUpstream(t)
+	defer stopAnswering()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: bh, Port: bhPort},
+			{Addr: starved, Port: starvedPort},
+			{Addr: answering, Port: answeringPort},
+		}},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA,
+		map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
+	elapsed := time.Since(start)
+	if err != nil || rcode != dns.RcodeSuccess || rrset == nil {
+		t.Fatalf("the last upstream should have answered: rcode=%s err=%v (after %v)",
+			dns.RcodeToString[rcode], err, elapsed)
+	}
+
+	// Keyed by PORT, not by Addr: all three listeners are on 127.0.0.1, so an
+	// Addr comparison matches every one of them and silently reports whichever
+	// happened to be last.
+	byPort := map[string]*ForwardUpstream{}
+	for _, up := range imr.ForwardZones()[0].Upstreams {
+		byPort[up.Port] = up
+	}
+
+	// The floor skip. queries==0 is the assertion that matters: it is the
+	// difference between "not recorded as failed" and "never dialled", and
+	// only the second proves the budget check ran before the exchange.
+	up := byPort[fmt.Sprint(starvedPort)]
+	up.mu.Lock()
+	q, failing, failures := up.queries, up.failing, up.failures
+	up.mu.Unlock()
+	if q != 0 {
+		t.Errorf("the starved upstream was dialled (queries=%d); its %v slice was below the %v floor "+
+			"and it should not have been", q, 300*time.Millisecond, forwardMinAttempt)
+	}
+	if failing || failures > 0 {
+		t.Errorf("the starved upstream was recorded as failed (failing=%v failures=%d) after being "+
+			"skipped for want of budget", failing, failures)
+	}
+
+	// The mid-flight case: dialled, cut off by its own slice, and NOT failing
+	// on one occurrence. sliceTimeouts==1 is what proves the attempt happened
+	// and was classified as a timeout rather than a failure.
+	up = byPort[fmt.Sprint(bhPort)]
+	up.mu.Lock()
+	q, failing, failures, timeouts := up.queries, up.failing, up.failures, up.sliceTimeouts
+	up.mu.Unlock()
+	if q == 0 {
+		t.Fatalf("the blackhole was never dialled, so the mid-flight slice-expiry path this test "+
+			"exists to cover was not taken (budget too small for a %v first slice?)", forwardMinAttempt)
+	}
+	if timeouts != 1 {
+		t.Errorf("blackhole sliceTimeouts=%d, want 1: it was dialled and answered nothing, which is "+
+			"a slice timeout", timeouts)
+	}
+	if failing || failures > 0 {
+		t.Errorf("the blackhole was recorded as failed (failing=%v failures=%d) after ONE attempt cut "+
+			"short by its slice; a single truncated attempt is not evidence", failing, failures)
+	}
+}
+
+// The run recordSliceTimeout counts is CONSECUTIVE, so anything else the
+// upstream does breaks it (#498 re-review, C2).
+//
+// A success obviously does. A transport-level failure is the less obvious
+// half: a refused connection says the upstream is REACHABLE and declining,
+// which is not the "never answers" a run is evidence of, so letting it count
+// toward one would put a true-sounding "3 times running" on a sequence that
+// was nothing of the kind. Nothing is lost by resetting -- recordFailure has
+// already marked the upstream failing, on stronger evidence than a run.
+//
+// Driven through the methods rather than through a query, because the point is
+// the state machine and a network rig cannot schedule these sequences.
+func TestSliceTimeoutRunIsBrokenByAnyOtherOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		interrupt func(up *ForwardUpstream, start time.Time)
+	}{
+		{"success", func(up *ForwardUpstream, _ time.Time) {
+			up.recordSuccess()
+		}},
+		{"transport failure", func(up *ForwardUpstream, start time.Time) {
+			up.recordFailure(start, fmt.Errorf("connection refused"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			up := &ForwardUpstream{Label: "127.0.0.1:53/do53"}
+
+			// One short of a verdict.
+			start := time.Now()
+			for i := 1; i < forwardSliceTimeoutsBeforeFailing; i++ {
+				if up.recordSliceTimeout(start) {
+					t.Fatalf("reported a transition after %d slice timeouts; the run needs %d",
+						i, forwardSliceTimeoutsBeforeFailing)
+				}
+			}
+
+			tc.interrupt(up, start)
+
+			// The count starts over rather than finishing the old run, so this
+			// timeout is the first of a new one and decides nothing.
+			if up.recordSliceTimeout(time.Now()) {
+				t.Errorf("a %s did not break the run: the next slice timeout completed it and "+
+					"reported a transition", tc.name)
+			}
+			up.mu.Lock()
+			got := up.sliceTimeouts
+			up.mu.Unlock()
+			if got != 1 {
+				t.Errorf("sliceTimeouts=%d after a %s followed by one timeout, want 1", got, tc.name)
+			}
+		})
+	}
+}
+
+// An upstream that is never dialled must not reach the outbound-query hooks
+// either (#498 review, S1 -- one line earlier than the finding).
+//
+// The contract is "called before the IMR sends an iterative query to an
+// authoritative server", and a non-nil return SKIPS that server. Both halves
+// are wrong for an upstream the budget check is about to skip: an observer
+// would record a query that never happens, and a policy hook would be asked to
+// veto one. Out-of-tree hooks make this worse than a counting error, which is
+// why the budget check now runs before the hooks rather than after them.
+func TestForwardStarvedUpstreamDoesNotFireOutboundHook(t *testing.T) {
+	bh, bhPort, stopBH := startBlackholeUpstream(t)
+	defer stopBH()
+	starved, starvedPort, _, stopStarved := startTestUpstream(t)
+	defer stopStarved()
+	answering, answeringPort, _, stopAnswering := startTestUpstream(t)
+	defer stopAnswering()
+
+	// The hook registry is a package global with no unregister, so restore it
+	// rather than leaking a hook into every later test in the package.
+	globalImrOutboundQueryHooksMutex.Lock()
+	saved := globalImrOutboundQueryHooks
+	globalImrOutboundQueryHooksMutex.Unlock()
+	t.Cleanup(func() {
+		globalImrOutboundQueryHooksMutex.Lock()
+		globalImrOutboundQueryHooks = saved
+		globalImrOutboundQueryHooksMutex.Unlock()
+	})
+
+	var mu sync.Mutex
+	var asked []string
+	if err := RegisterImrOutboundQueryHook(func(_ context.Context, _ string, _ uint16,
+		serverName, _ string, _ core.Transport) error {
+		mu.Lock()
+		asked = append(asked, serverName)
+		mu.Unlock()
+		return nil
+	}); err != nil {
+		t.Fatalf("registering the hook: %v", err)
+	}
+
+	// Same shape as the test above: up0 dialled, up1 below the floor, up2 last.
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: bh, Port: bhPort},
+			{Addr: starved, Port: starvedPort},
+			{Addr: answering, Port: answeringPort},
+		}},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	if _, rcode, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA,
+		map[string]*cache.AuthServer{}, false, edns0.PrivacyNone); err != nil || rcode != dns.RcodeSuccess {
+		t.Fatalf("the last upstream should have answered: rcode=%s err=%v", dns.RcodeToString[rcode], err)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), asked...)
+	mu.Unlock()
+
+	seen := func(port uint16) bool {
+		for _, label := range got {
+			if strings.Contains(label, fmt.Sprint(port)) {
+				return true
+			}
+		}
+		return false
+	}
+	if seen(starvedPort) {
+		t.Errorf("the outbound hook was fired for an upstream that was never dialled: %v", got)
+	}
+	if !seen(bhPort) || !seen(answeringPort) {
+		t.Errorf("the outbound hook was not fired for the two upstreams that WERE dialled: %v", got)
+	}
+}
+
+// ...and the other side of that judgement (#498 review, C1): an upstream that
+// times out its slice EVERY time is a blackhole, and must eventually say so.
+//
+// Without this it is the one failure mode config status never reports. The
+// query path deliberately skips recordFailure for a truncated attempt, so the
+// upstream doing the damage stays green while every query hands it half the
+// budget. The run is what distinguishes it from a slow upstream having a bad
+// minute, and forwardSliceTimeoutsBeforeFailing is how long a run has to be.
+func TestForwardRepeatedSliceTimeoutsMarkTheUpstreamFailing(t *testing.T) {
+	bh, bhPort, stopBH := startBlackholeUpstream(t)
+	defer stopBH()
+	answering, answeringPort, _, stopAnswering := startTestUpstream(t)
+	defer stopAnswering()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: bh, Port: bhPort},
+			{Addr: answering, Port: answeringPort},
+		}},
+	})
+
+	// By port: both listeners are on 127.0.0.1, so Addr does not tell them
+	// apart.
+	var bhUp, goodUp *ForwardUpstream
+	for _, up := range imr.ForwardZones()[0].Upstreams {
+		if up.Port == fmt.Sprint(bhPort) {
+			bhUp = up
+		} else {
+			goodUp = up
+		}
+	}
+	if bhUp == nil || goodUp == nil {
+		t.Fatalf("test rig: could not tell the two upstreams apart by port")
+	}
+
+	for i := 1; i <= forwardSliceTimeoutsBeforeFailing; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+		_, rcode, _, _, err := imr.IterativeDNSQuery(ctx, fmt.Sprintf("q%d.fwd.example.", i), dns.TypeA,
+			map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
+		cancel()
+		if err != nil || rcode != dns.RcodeSuccess {
+			t.Fatalf("query %d: the healthy upstream should still have answered: rcode=%s err=%v",
+				i, dns.RcodeToString[rcode], err)
+		}
+
+		bhUp.mu.Lock()
+		timeouts, failing := bhUp.sliceTimeouts, bhUp.failing
+		bhUp.mu.Unlock()
+		if timeouts != uint64(i) {
+			t.Fatalf("query %d: blackhole sliceTimeouts=%d, want %d", i, timeouts, i)
+		}
+		want := i >= forwardSliceTimeoutsBeforeFailing
+		if failing != want {
+			t.Errorf("query %d: blackhole failing=%v, want %v (it flips on the %dth timeout in a row, "+
+				"not before)", i, failing, want, forwardSliceTimeoutsBeforeFailing)
+		}
+	}
+
+	// The upstream that has been answering all along is untouched: the run
+	// belongs to the blackhole, and a success resets any run of its own.
+	goodUp.mu.Lock()
+	failing, timeouts := goodUp.failing, goodUp.sliceTimeouts
+	goodUp.mu.Unlock()
+	if failing || timeouts != 0 {
+		t.Errorf("the answering upstream was marked failing=%v sliceTimeouts=%d by its neighbour's run",
+			failing, timeouts)
+	}
+}
