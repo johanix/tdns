@@ -807,21 +807,19 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	}
 
 	// 4. Validate flags — RFC 7477: reject if unknown flags set
-	if csyncrr.Flags & ^uint16(0x03) != 0 {
+	immediate, usesoamin, err := csyncFlags(csyncrr)
+	if err != nil {
 		scanLog.Printf("ProcessCSYNCNotify: %s: unknown CSYNC flags set (0x%04x), aborting", childZone, csyncrr.Flags)
 		response.Error = true
-		response.ErrorMsg = fmt.Sprintf("unknown CSYNC flags: 0x%04x", csyncrr.Flags)
+		response.ErrorMsg = err.Error()
 		responseCh <- response
 		return
 	}
 
-	immediate := (csyncrr.Flags & 0x01) == 1
-	usesoamin := (csyncrr.Flags & 0x02) == 2
-
 	if !immediate {
 		scanLog.Printf("ProcessCSYNCNotify: %s: CSYNC does not have immediate flag set, only immediate updates are supported", childZone)
 		response.Error = true
-		response.ErrorMsg = "CSYNC immediate flag not set, only immediate updates supported"
+		response.ErrorMsg = errCsyncNotImmediate.Error()
 		responseCh <- response
 		return
 	}
@@ -835,7 +833,7 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	}
 
 	// 6. soaminimum check
-	if usesoamin && csyncrr.Serial > startSerial {
+	if csyncSuppressedBySoaMinimum(usesoamin, csyncrr, startSerial) {
 		scanLog.Printf("ProcessCSYNCNotify: %s: CSYNC serial %d > SOA serial %d, skipping", childZone, csyncrr.Serial, startSerial)
 		response.DataChanged = false
 		responseCh <- response
@@ -868,15 +866,11 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 		}
 	}
 
-	// 7. Process each type in bitmap (NS first) — RFC 7477 step 3
-	// Ensure NS comes first in processing order
-	csynctypes := []uint16{dns.TypeNS}
-	for _, t := range csyncrr.TypeBitMap {
-		if t == dns.TypeNS {
-			continue
-		}
-		csynctypes = append(csynctypes, t)
-	}
+	// 7. Process each type in bitmap (NS first) — RFC 7477 step 3.
+	// The rules live in delegation_csync.go (computeCsyncDelta), fed by
+	// queryAllNSAndCompare for what the child serves and by the delegation
+	// backend for what the parent holds.
+	csynctypes := csyncTypes(csyncrr)
 	scanLog.Printf("ProcessCSYNCNotify: %s: CSYNC bitmap types: %v, immediate=%v, usesoamin=%v", childZone, csynctypes, immediate, usesoamin)
 
 	// Extract current NS from delegation data
@@ -888,159 +882,39 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 			}
 		}
 	}
-
-	var newNSRRs []dns.RR // Populated after NS processing, used for glue
-	var nsAdds, nsRemoves []dns.RR
-	var glueAdds, glueRemoves []dns.RR
-	dataChanged := false
-
-	for _, t := range csynctypes {
-		switch t {
-		case dns.TypeNS:
-			// Query NS from all child NS
-			childNSRRset, nsInSync, err := scanner.queryAllNSAndCompare(ctx, childZone, dns.TypeNS, nsRRset, scanner.ImrEngine, scanLog)
-			if err != nil {
-				scanLog.Printf("ProcessCSYNCNotify: %s: error querying NS: %v", childZone, err)
-				response.Error = true
-				response.ErrorMsg = fmt.Sprintf("error querying NS: %v", err)
-				responseCh <- response
-				return
-			}
-			if !nsInSync {
-				scanLog.Printf("ProcessCSYNCNotify: %s: child NS not in sync for NS RRset, aborting", childZone)
-				response.Error = true
-				response.ErrorMsg = "child nameservers not in sync for NS"
-				responseCh <- response
-				return
-			}
-			if childNSRRset == nil || len(childNSRRset.RRs) == 0 {
-				scanLog.Printf("ProcessCSYNCNotify: %s: empty NS RRset from child, rejecting per RFC 7477", childZone)
-				response.Error = true
-				response.ErrorMsg = "empty NS RRset from child, rejected"
-				responseCh <- response
-				return
-			}
-
-			newNSRRs = childNSRRset.RRs
-
-			// Diff NS
-			changed, adds, removes := core.RRsetDiffer(childZone, newNSRRs, currentNSRRs, dns.TypeNS, scanLog, scanner.Verbose, scanner.Debug)
-			if changed {
-				nsAdds = adds
-				nsRemoves = removes
-				dataChanged = true
-				scanLog.Printf("ProcessCSYNCNotify: %s: NS changed: %d adds, %d removes", childZone, len(adds), len(removes))
-			} else {
-				scanLog.Printf("ProcessCSYNCNotify: %s: NS unchanged", childZone)
-			}
-
-		case dns.TypeA, dns.TypeAAAA:
-			// Process glue for in-bailiwick NS
-			typeStr := dns.TypeToString[t]
-
-			// Determine which NS names are in-bailiwick in the NEW NS set
-			// (if NS wasn't in bitmap, use current NS)
-			effectiveNS := newNSRRs
-			if len(effectiveNS) == 0 {
-				effectiveNS = currentNSRRs
-			}
-
-			var newInBailiwickNS []string
-			for _, rr := range effectiveNS {
-				if ns, ok := rr.(*dns.NS); ok {
-					if NSInBailiwick(childZone, ns) {
-						newInBailiwickNS = append(newInBailiwickNS, ns.Ns)
-					}
-				}
-			}
-
-			// Old in-bailiwick NS (from current delegation)
-			var oldInBailiwickNS []string
-			for _, rr := range currentNSRRs {
-				if ns, ok := rr.(*dns.NS); ok {
-					if NSInBailiwick(childZone, ns) {
-						oldInBailiwickNS = append(oldInBailiwickNS, ns.Ns)
-					}
-				}
-			}
-
-			// Build sets for comparison
-			newNSSet := make(map[string]bool)
-			for _, ns := range newInBailiwickNS {
-				newNSSet[core.CanonicalizeName(dns.Fqdn(ns))] = true
-			}
-			oldNSSet := make(map[string]bool)
-			for _, ns := range oldInBailiwickNS {
-				oldNSSet[core.CanonicalizeName(dns.Fqdn(ns))] = true
-			}
-
-			// For each new in-bailiwick NS: query glue from child
-			for _, nsName := range newInBailiwickNS {
-				nsCanon := core.CanonicalizeName(dns.Fqdn(nsName))
-
-				glueRRset, glueInSync, err := scanner.queryAllNSAndCompare(ctx, nsName, t, nsRRset, scanner.ImrEngine, scanLog)
-				if err != nil {
-					scanLog.Printf("ProcessCSYNCNotify: %s: error querying %s for %s: %v", childZone, typeStr, nsName, err)
-					continue
-				}
-				if !glueInSync {
-					scanLog.Printf("ProcessCSYNCNotify: %s: child NS not in sync for %s %s, skipping", childZone, nsName, typeStr)
-					continue
-				}
-
-				var newGlueRRs []dns.RR
-				if glueRRset != nil {
-					newGlueRRs = glueRRset.RRs
-				}
-
-				if oldNSSet[nsCanon] {
-					// NS exists in both old and new — diff glue per-owner
-					var currentGlue []dns.RR
-					if delegationData != nil {
-						if ownerData, ok := delegationData[nsName]; ok {
-							if glueRRs, ok := ownerData[t]; ok {
-								currentGlue = glueRRs
-							}
-						}
-					}
-					changed, adds, removes := core.RRsetDiffer(nsName, newGlueRRs, currentGlue, t, scanLog, scanner.Verbose, scanner.Debug)
-					if changed {
-						glueAdds = append(glueAdds, adds...)
-						glueRemoves = append(glueRemoves, removes...)
-						dataChanged = true
-						scanLog.Printf("ProcessCSYNCNotify: %s: %s glue for %s changed: %d adds, %d removes", childZone, typeStr, nsName, len(adds), len(removes))
-					}
-				} else {
-					// NS only in new set — all glue are adds
-					if len(newGlueRRs) > 0 {
-						glueAdds = append(glueAdds, newGlueRRs...)
-						dataChanged = true
-						scanLog.Printf("ProcessCSYNCNotify: %s: new NS %s, adding %d %s glue records", childZone, nsName, len(newGlueRRs), typeStr)
-					}
-				}
-			}
-
-			// NS only in old set — all its glue are removes
-			for _, nsName := range oldInBailiwickNS {
-				nsCanon := core.CanonicalizeName(dns.Fqdn(nsName))
-				if newNSSet[nsCanon] {
-					continue // Already handled above
-				}
-				if delegationData != nil {
-					if ownerData, ok := delegationData[nsName]; ok {
-						if glueRRs, ok := ownerData[t]; ok {
-							glueRemoves = append(glueRemoves, glueRRs...)
-							dataChanged = true
-							scanLog.Printf("ProcessCSYNCNotify: %s: removed NS %s, removing %d %s glue records", childZone, nsName, len(glueRRs), typeStr)
-						}
-					}
-				}
-			}
-
-		default:
-			scanLog.Printf("ProcessCSYNCNotify: %s: unknown RR type %s in CSYNC bitmap, skipping", childZone, dns.TypeToString[t])
+	currentGlue := func(owner string, t uint16) ([]dns.RR, bool) {
+		if delegationData == nil {
+			return nil, false
 		}
+		ownerData, ok := delegationData[owner]
+		if !ok {
+			return nil, false
+		}
+		glue, ok := ownerData[t]
+		return glue, ok
 	}
+	fetch := func(ctx context.Context, name string, qtype uint16) ([]dns.RR, bool, error) {
+		rrset, inSync, err := scanner.queryAllNSAndCompare(ctx, name, qtype, nsRRset, scanner.ImrEngine, scanLog)
+		if err != nil {
+			return nil, false, err
+		}
+		if rrset == nil {
+			return nil, inSync, nil
+		}
+		return rrset.RRs, inSync, nil
+	}
+
+	delta, err := computeCsyncDelta(ctx, childZone, csynctypes, currentNSRRs, currentGlue, fetch,
+		scanLog, scanner.Verbose, scanner.Debug)
+	if err != nil {
+		response.Error = true
+		response.ErrorMsg = err.Error()
+		responseCh <- response
+		return
+	}
+	nsAdds, nsRemoves := delta.NSAdds, delta.NSRemoves
+	glueAdds, glueRemoves := delta.GlueAdds, delta.GlueRemoves
+	dataChanged := delta.Changed
 
 	// 8. Query SOA again (end serial) — RFC 7477 step 4
 	endSOARRset, _, err := scanner.queryAllNSAndCompare(ctx, childZone, dns.TypeSOA, nsRRset, scanner.ImrEngine, scanLog)
