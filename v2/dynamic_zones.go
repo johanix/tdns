@@ -1024,6 +1024,15 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 		return "", fmt.Errorf("zone %s is not API-managed and cannot be deleted here", name)
 	}
 
+	// Withdraw anything published at an RFC 9615 signal name on this zone's
+	// behalf (WithdrawSignalPublicationsForZone). Before Zones.Remove, not
+	// because the ledger needs the zone -- it is keyed by name -- but because
+	// the zone can be its own TARGET: an at-ns bootstrap for an in-bailiwick
+	// nameserver puts the _sig0key inside this very zone, and the withdrawal
+	// resolves the target through the registry. After the removal there would
+	// be no target to write to.
+	WithdrawSignalPublicationsForZone(conf.Internal.KeyDB, name)
+
 	stopZonePublisher(name)
 	Zones.Remove(name)
 	// Bump generation AFTER removing from the map so any refresh goroutine that
@@ -1039,6 +1048,16 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 	if err := conf.RemoveDynamicZoneFromConfig(name); err != nil {
 		return "", fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w", name, err)
 	}
+	// The zone has now left the dynamic config file, so the signal-name orphan
+	// sweep must stop counting it as configured -- otherwise a withdrawal that
+	// deferred above (target zone not loaded) would never be finished by the
+	// sweep. Read the static names under confMu; the rebuild itself reads the
+	// dynamic config file and takes no config lock.
+	confMu.RLock()
+	staticZoneNames := conf.staticZoneNames()
+	confMu.RUnlock()
+	conf.refreshConfiguredZoneNames(staticZoneNames)
+
 	// Best-effort remove the persisted zone file.
 	if conf.DynamicZones.ZoneDirectory != "" {
 		zoneFilePath := filepath.Join(conf.DynamicZones.ZoneDirectory, name+"zone")

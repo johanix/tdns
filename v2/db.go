@@ -374,6 +374,9 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 		UpdateQ:             make(chan UpdateRequest),
 	}
 	kdb.SetOptions(options)
+	// Prime the empty-ledger fast path the signal-name reconciler consults on
+	// every zone refresh (db_signal_publication.go).
+	kdb.RefreshSignalLedgerEmpty()
 	return kdb, nil
 }
 

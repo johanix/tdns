@@ -36,11 +36,18 @@ package tdns
 //     and the OnZonePostRefresh callback acts on it (P-3). Mirrors the tdns-mp
 //     MPPreRefresh/PostRefresh pattern for the non-MP agent path. Both
 //     self-gate on OptDelSyncProxy.
+//
 //   - use-hsyncparam: a secondary watches incoming transfers for an apex
 //     HSYNCPARAM pubkey/pubcds flag and republishes the customer's apex KEY /
 //     CDS(+CDNSKEY) under the _sig0key/_dsboot signal names owned by each NS,
 //     into whichever local primary zone the signal name falls in (see
 //     signal_republish.go). Self-gates on OptUseHsyncparam.
+//
+//     The same callback WITHDRAWS what it published once nothing justifies it
+//     (signal_withdraw.go), and that half self-gates on parentsync
+//     (OptDelSyncChild) as well -- for a zone whose own at-ns bootstrap
+//     published a _sig0key, which is a zone this server is PRIMARY for. So
+//     "every zone regardless of type" is load-bearing here, not defensive.
 //
 // Both were registered only from ParseZones, which meant a zone created over
 // the API or reloaded from the dynamic config file carried neither: the option
@@ -57,5 +64,5 @@ package tdns
 // construction rather than by argument.
 func (zdp *ZoneData) registerStandardRefreshHooks(delsyncq chan DelegationSyncRequest) {
 	zdp.registerProxyDelegationHooks(delsyncq)
-	zdp.registerSignalRepublishHook()
+	zdp.registerSignalReconcileHook()
 }

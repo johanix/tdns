@@ -229,6 +229,7 @@ Verified with `go build ./...` and `go test ./...` from `v2/`, `v2/cli/` and
 - Nothing has run on a testbed. The scenario to run is a tdns-auth secondary
   for a customer zone carrying `HSYNCPARAM pubkey`, which is also primary for
   the zone holding that customer's NS name.
-- Removing the option stops future republishes but does not withdraw records
-  already published at the signal names -- the same `unpublish` gap D-6 left
-  open.
+- ~~Removing the option stops future republishes but does not withdraw records
+  already published at the signal names.~~ Closed by
+  `docs/2026-09-03-signal-name-withdrawal.md`, which handles this and the other
+  three shapes of the same gap.

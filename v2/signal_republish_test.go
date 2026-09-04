@@ -562,7 +562,7 @@ func TestPublishSig0KeyAtSignalNamesRequiresApply(t *testing.T) {
 	t.Run("nil ctx only enqueues", func(t *testing.T) {
 		child, q := signalTarget("child.example.", nil)
 		registerZones(t, child)
-		if n := child.publishAtSignalNames(nil, "test", signalPrefixSig0Key, []uint16{dns.TypeKEY}, []dns.RR{key}, child.apexNSNames(), false); n != 1 {
+		if n := child.publishAtSignalNames(nil, "test", signalSourceAtNs, signalPrefixSig0Key, []uint16{dns.TypeKEY}, []dns.RR{key}, child.apexNSNames(), false); n != 1 {
 			t.Fatalf("fire-and-forget satisfied = %d, want 1", n)
 		}
 		urs := drainUpdateQ(q)
