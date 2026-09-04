@@ -46,6 +46,15 @@ package tdns
 // the API or reloaded from the dynamic config file carried neither: the option
 // was accepted, stored, persisted and displayed, and the code that reads it was
 // never attached (#500).
+//
+// Call it where the ZoneData is CONSTRUCTED, not at some later point in the
+// same function. ParseZones publishes its zone early and then populates it in
+// place, so registering further down would have appended to a slice a
+// concurrent refresh could already be ranging -- and, because it keyed on
+// FirstZoneLoad (cleared only by a SUCCESSFUL first load), would have appended
+// a second copy of every hook on the reload after a failed one. Registering at
+// construction makes "exactly once, before anyone can see it" true by
+// construction rather than by argument.
 func (zdp *ZoneData) registerStandardRefreshHooks(delsyncq chan DelegationSyncRequest) {
 	zdp.registerProxyDelegationHooks(delsyncq)
 	zdp.registerSignalRepublishHook()

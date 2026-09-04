@@ -989,6 +989,21 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Logger:        log.Default(),
 				FirstZoneLoad: true,
 			}
+			// Before Zones.Set, while the zone is still private to this
+			// goroutine -- the contract registerStandardRefreshHooks states
+			// and the other three creation paths already keep. This zone is
+			// published here and then populated in place over the rest of the
+			// loop, so registering further down would append to a slice a
+			// concurrent refresh could already be ranging.
+			//
+			// Keying it on creation rather than on zdp.FirstZoneLoad also
+			// makes "exactly once per ZoneData" true by construction.
+			// FirstZoneLoad is cleared only by a SUCCESSFUL first load
+			// (zone_mutation.go), so a zone whose first load failed still
+			// carries it, and a FirstZoneLoad-guarded registration appended a
+			// SECOND copy of every hook on the next reload -- the duplicate
+			// this registration is documented as avoiding.
+			zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
 			Zones.Set(zname, zd)
 		}
 
@@ -1519,18 +1534,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			}
 		}
 
-		// The standard per-zone refresh hooks. See
-		// registerStandardRefreshHooks (v2/zone_hooks.go) for why they are
-		// registered unconditionally, once, at first load, and self-gate at
-		// run time -- and for why every OTHER path that builds a live
-		// ZoneData has to call it too (#500).
+		// The standard per-zone refresh hooks are attached where this zone was
+		// CREATED, above, before it was published -- not here. See
+		// registerStandardRefreshHooks (v2/zone_hooks.go).
 		//
 		// Note: DelegationBackend wiring is done synchronously above,
 		// outside the FirstZoneLoad guard, so config-reload picks up
 		// changes to the 'delegationbackend' key.
-		if zdp.FirstZoneLoad {
-			zdp.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
-		}
 
 		// Leader election OnFirstLoad is registered in StartAgent() (not here)
 		// because LeaderElectionManager doesn't exist until StartAgent runs.

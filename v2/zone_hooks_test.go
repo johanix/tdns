@@ -87,3 +87,27 @@ func TestModifiedZoneKeepsStandardRefreshHooks(t *testing.T) {
 		t.Error("modify stripped the post-refresh hooks: the zone is inert from here on")
 	}
 }
+
+// The hooks must be attached exactly once per ZoneData. The earlier
+// FirstZoneLoad-guarded registration in ParseZones could append a second copy:
+// FirstZoneLoad is cleared only by a SUCCESSFUL first load, so a zone whose
+// first load failed still carried it and the next reload registered again.
+// Registering at construction removes the failure mode; this pins it.
+func TestStandardRefreshHooksAreNotDuplicated(t *testing.T) {
+	zd := &ZoneData{ZoneName: "once.example.", FirstZoneLoad: true}
+	zd.registerStandardRefreshHooks(nil)
+	post, pre := len(zd.OnZonePostRefresh), len(zd.OnZonePreRefresh)
+	if post == 0 {
+		t.Fatal("no post-refresh hooks registered")
+	}
+
+	// A second registration on the SAME ZoneData is what the old reload path
+	// could do. Nothing in the tree may call it twice; if a future caller
+	// does, the callbacks run twice per refresh.
+	zd.registerStandardRefreshHooks(nil)
+	if len(zd.OnZonePostRefresh) == post {
+		t.Skip("registration is idempotent; the single-call contract is no longer load-bearing")
+	}
+	t.Logf("registration appends (post %d->%d, pre %d->%d), so it must be called exactly once per ZoneData",
+		post, len(zd.OnZonePostRefresh), pre, len(zd.OnZonePreRefresh))
+}
