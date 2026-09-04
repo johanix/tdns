@@ -6,14 +6,24 @@
 
 package tdns
 
-// NetBSD keeps the two options separate: plain SO_REUSEPORT retains its old
-// semantics (all unicast traffic goes to one socket of the group), and
-// SO_REUSEPORT_LB is the load-balancing variant, numerically compatible with
-// FreeBSD's. It is UDP-only, so TCP listeners stay single-socket.
+// NetBSD does NOT ship SO_REUSEPORT_LB. Stock kernels define only plain
+// SO_REUSEPORT, which keeps its old semantics -- every unicast datagram goes
+// to one socket of the group, measured on NetBSD 10.1 -- so it distributes
+// nothing and is useless for this.
 //
-// The option is new enough that golang.org/x/sys/unix does not define it for
-// netbsd yet. On a kernel without it, setsockopt fails with ENOPROTOOPT and
-// listenUDPSockets falls back to a single plain socket.
+// The constant is kept, and lbSupported stays true, because the option DOES
+// exist on a kernel carrying the out-of-tree patch that adds it, using
+// FreeBSD's numbering. Detection is therefore at RUN time, not build time: the
+// setsockopt is attempted, and on a kernel without the patch it fails with
+// ENOPROTOOPT, listenUDPSockets falls back to one plain socket, and the
+// Degraded reason says so. That costs one socket and one failed setsockopt per
+// listen address at startup.
+//
+// Building this as a nolb platform instead would be wrong in the direction
+// that matters: it would refuse to use the option on the kernels that have it,
+// which is the only reason it is here. On stock NetBSD, prefer several listen
+// addresses over udp-sockets -- that gives one socket each, with no reliance
+// on the kernel distributing.
 const (
 	soReusePortLB = 0x00010000
 	lbSupported   = true

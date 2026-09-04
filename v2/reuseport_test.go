@@ -104,3 +104,37 @@ func TestCloseIfCancelled(t *testing.T) {
 		}
 	})
 }
+
+// The path every developer machine and every stock NetBSD kernel actually
+// runs: more than one socket asked for, no load-balancing option available.
+// It must serve -- one socket, not an error -- and say why it could not give
+// what was asked for, because that log line is the only signal an operator
+// gets that udp-sockets did nothing.
+//
+// Skipped where the platform DOES load-balance, since there the same call
+// legitimately returns a group.
+func TestListenUDPSocketsDegradesWithoutKernelSupport(t *testing.T) {
+	if lbSupported {
+		t.Skipf("platform has %s; the degraded path is not reachable here", lbOptName)
+	}
+
+	lst, err := listenUDPSockets(context.Background(), "127.0.0.1:0", 4)
+	if err != nil {
+		t.Fatalf("asking for more sockets than the kernel can distribute must not fail: %v", err)
+	}
+	defer func() {
+		for _, pc := range lst.Conns {
+			pc.Close()
+		}
+	}()
+
+	if len(lst.Conns) != 1 {
+		t.Errorf("want exactly 1 socket without kernel support, got %d", len(lst.Conns))
+	}
+	if lst.Balanced {
+		t.Error("Balanced must be false: nothing is distributing across these sockets")
+	}
+	if lst.Degraded == nil {
+		t.Fatal("Degraded must carry the reason; without it udp-sockets silently does nothing")
+	}
+}

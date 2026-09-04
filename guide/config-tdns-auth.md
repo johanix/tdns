@@ -833,12 +833,36 @@ authengine:
 | `listeners.ports.dot` | `853` | listen ports for DoT (numbers, not strings) |
 | `listeners.ports.doh` | `443` | listen ports for DoH |
 | `listeners.ports.doq` | `853` | listen ports for DoQ (only 853 is truly supported) |
+| `listeners.udp-sockets` | `1` | how many UDP sockets to open per Do53 address, so the kernel can spread datagrams across that many readers. Only useful where the kernel load-balances (below); elsewhere it falls back to one socket and logs why |
 | `listeners.imr-debug-address` | — | loopback-only DNS window into the embedded resolver's cache; non-loopback is a hard error |
 | `authengine.outbound-soa-serial` | `keep` | `keep`, `unixtime` or `persist` |
 | `authengine.options` | — | server-wide options, below |
 
 `ports.do53` does not exist. Do53 always listens on the ports embedded in
 `addresses`.
+
+**`udp-sockets` depends on the kernel, and the server tells you which you got.**
+Several sockets only help where the kernel hands each arriving datagram to one
+member of the group:
+
+| Platform | Distributes? | Mechanism |
+|----------|--------------|-----------|
+| Linux | yes | `SO_REUSEPORT` |
+| FreeBSD | yes | `SO_REUSEPORT_LB` |
+| NetBSD | only with the out-of-tree patch that adds `SO_REUSEPORT_LB` | detected at run time |
+| macOS, OpenBSD, others | no | one socket receives everything |
+
+Where it will not distribute, the server serves from a single socket and logs
+the reason rather than failing — so the setting is safe to leave in a config
+shared across platforms. On those platforms, **use several listen addresses
+instead**: that gives one socket each and needs nothing from the kernel.
+
+The profiler used to measure any of this is `service.pprof-address`, which is
+unset by default and **must bind to loopback** — a non-loopback value is a
+config error and the daemon will not start. pprof is unauthenticated and serves
+goroutine stacks, heap contents and the command line, so on a nameserver it is
+a route to private keys and TSIG secrets. Use `127.0.0.1:6060`, and forward a
+port over ssh to profile a remote host.
 
 `outbound-soa-serial` controls the SOA serial advertised to secondaries.
 `keep` sends the inbound serial unchanged. `unixtime` uses the load time.
