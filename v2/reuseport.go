@@ -36,14 +36,30 @@ type udpListeners struct {
 // ListenConfig.Control: that callback runs after socket(2) and before bind(2),
 // exactly the window required. Setting it afterwards is accepted but does
 // nothing.
-func listenUDPSockets(addr string, n int) (udpListeners, error) {
+// ctx is the engine's: every bind here goes through it, so a daemon cancelled
+// mid-startup stops opening sockets instead of finishing the group and handing
+// back listeners nobody will serve from.
+func listenUDPSockets(ctx context.Context, addr string, n int) (udpListeners, error) {
+	// Checked explicitly, not just handed to ListenPacket. ListenConfig uses
+	// the context for name resolution and dial deadlines; binding a literal
+	// address never consults it, so passing ctx alone would look like
+	// cancellation support without being any. The bind calls below still take
+	// ctx -- an address that needs resolving does honour it -- but this is what
+	// makes a cancelled startup stop.
+	if err := ctx.Err(); err != nil {
+		return udpListeners{}, err
+	}
 	if n < 1 {
 		n = 1
 	}
 	if n == 1 || !lbSupported {
-		pc, err := net.ListenPacket("udp", addr)
+		var plain net.ListenConfig
+		pc, err := plain.ListenPacket(ctx, "udp", addr)
 		if err != nil {
 			return udpListeners{}, err
+		}
+		if cerr := closeIfCancelled(ctx, []net.PacketConn{pc}); cerr != nil {
+			return udpListeners{}, cerr
 		}
 		res := udpListeners{Conns: []net.PacketConn{pc}}
 		if n > 1 {
@@ -68,7 +84,16 @@ func listenUDPSockets(addr string, n int) (udpListeners, error) {
 	var conns []net.PacketConn
 	var firstErr error
 	for i := 0; i < n; i++ {
-		pc, err := lc.ListenPacket(context.Background(), "udp", addr)
+		// Cancellation is not a degraded group -- it is "stop". Close what has
+		// been opened and say so, rather than falling through to the
+		// single-socket recovery below and serving from a daemon on its way out.
+		if err := ctx.Err(); err != nil {
+			for _, pc := range conns {
+				pc.Close()
+			}
+			return udpListeners{}, err
+		}
+		pc, err := lc.ListenPacket(ctx, "udp", addr)
 		if err != nil {
 			firstErr = err
 			break
@@ -85,7 +110,16 @@ func listenUDPSockets(addr string, n int) (udpListeners, error) {
 		for _, pc := range conns {
 			pc.Close()
 		}
-		pc, perr := net.ListenPacket("udp", addr)
+		if cerr := ctx.Err(); cerr != nil {
+			return udpListeners{}, cerr
+		}
+		var plain net.ListenConfig
+		pc, perr := plain.ListenPacket(ctx, "udp", addr)
+		if perr == nil {
+			if cerr := closeIfCancelled(ctx, []net.PacketConn{pc}); cerr != nil {
+				return udpListeners{}, cerr
+			}
+		}
 		if perr != nil {
 			if firstErr != nil {
 				return udpListeners{}, fmt.Errorf("%s unavailable (%v), and plain bind also failed: %w",
@@ -97,6 +131,10 @@ func listenUDPSockets(addr string, n int) (udpListeners, error) {
 			Conns:    []net.PacketConn{pc},
 			Degraded: reuseportUnavailable(firstErr),
 		}, nil
+	}
+
+	if cerr := closeIfCancelled(ctx, conns); cerr != nil {
+		return udpListeners{}, cerr
 	}
 
 	res := udpListeners{Conns: conns, Balanced: true}
@@ -119,4 +157,23 @@ func reuseportUnavailable(err error) error {
 	default:
 		return err
 	}
+}
+
+// closeIfCancelled reports cancellation that happened while sockets were being
+// opened, closing them on the way out.
+//
+// The check has to come AFTER a successful bind as well as before one: a bind
+// takes a moment, and a context cancelled during it still returns a usable
+// socket. Handing that back means serving from a daemon that has been told to
+// stop, and leaking the socket for as long as the process lingers. Returns nil
+// and keeps the sockets when the context is still live.
+func closeIfCancelled(ctx context.Context, conns []net.PacketConn) error {
+	err := ctx.Err()
+	if err == nil {
+		return nil
+	}
+	for _, pc := range conns {
+		pc.Close()
+	}
+	return err
 }

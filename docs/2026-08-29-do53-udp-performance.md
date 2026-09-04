@@ -180,12 +180,19 @@ serveUDPPacket -> serveDNS -> ServeMux -> HandlerFunc -> TsigSigningHandler
 so essentially every query pays for a stack copy. NSD, BIND and Knot all use
 long-lived workers, whose stacks are grown once.
 
-Profiling is available via `service.pprof-address` (unset by default; bind it
-to loopback):
+Profiling is available via `service.pprof-address`, unset by default:
 
 ```
 go tool pprof -seconds 30 http://127.0.0.1:6060/debug/pprof/profile
 ```
+
+**Loopback only, and refused otherwise.** A non-loopback value -- including the
+`:6060` from every pprof tutorial, which listens on *every* interface -- is a
+config error and the daemon will not start. pprof has no authentication in
+front of it and serves goroutine stacks, heap contents and the command line, so
+on a nameserver it is a route to private keys and TSIG secrets. Use
+`127.0.0.1:6060` or `[::1]:6060`, and forward a port over ssh if you need to
+profile a remote host.
 
 ## Negative results
 

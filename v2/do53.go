@@ -77,6 +77,15 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	}
 
 	for _, addr := range addresses {
+		// Cancelled between addresses: stop, rather than launching listeners
+		// for the rest of the list. Checked at the TOP because TCP starts
+		// before UDP below, so a check further down would still have launched
+		// a TCP server for this address on the way past.
+		if ctx.Err() != nil {
+			lgDns.Debug("DnsEngine: shutting down, not binding further addresses", "remaining_from", addr)
+			break
+		}
+
 		// ---- TCP: one server per address.
 		tcpSrv := &dns.Server{
 			Addr:          addr,
@@ -99,12 +108,19 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 
 		// ---- UDP: one or more sockets, load-balanced by the kernel where
 		// the platform supports it.
-		lst, err := listenUDPSockets(addr, udpSockets)
+		lst, err := listenUDPSockets(ctx, addr, udpSockets)
 		if err != nil {
-			lgDns.Error("DnsEngine: failed to bind UDP socket", "addr", addr, "err", err)
-			if ctx.Err() == nil {
-				conf.Internal.ServerErrors.SetTransportPortError(addr+"/udp", err)
+			// Cancellation is not a bind failure: it is the daemon going down
+			// while we were opening sockets. Reporting it as a transport error
+			// would put a lie in the server-error table on the way out, and
+			// carrying on to the next address would start listeners nobody
+			// will serve from.
+			if ctx.Err() != nil {
+				lgDns.Debug("DnsEngine: UDP bind cancelled by shutdown", "addr", addr)
+				break
 			}
+			lgDns.Error("DnsEngine: failed to bind UDP socket", "addr", addr, "err", err)
+			conf.Internal.ServerErrors.SetTransportPortError(addr+"/udp", err)
 			continue
 		}
 		if lst.Degraded != nil {
