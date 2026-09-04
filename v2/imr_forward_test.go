@@ -32,6 +32,7 @@ import (
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 )
@@ -92,7 +93,7 @@ forward:
 }
 
 func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
-	forwards, err := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
 		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.3"}}},
 		{Zone: "Foo.Bar", Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "doq"},
@@ -102,8 +103,8 @@ func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 		}},
 		{Zone: "bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.2", Transport: "dot", Port: 8853}}},
 	})
-	if err != nil {
-		t.Fatalf("BuildImrForwards: %v", err)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
 	}
 	// Most-specific first: foo.bar. (2 labels), bar. (1), . (0).
 	if forwards[0].Zone != "foo.bar." || forwards[1].Zone != "bar." || forwards[2].Zone != "." {
@@ -130,55 +131,93 @@ func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 	}
 
 	// trust-ad demands an authenticated channel and must be accepted on one.
-	if _, err := BuildImrForwards([]ImrForwardConf{
+	if _, d := BuildImrForwards([]ImrForwardConf{
 		{Zone: "ok.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot", TLSServerName: "dns.example.com"},
 			{Addr: "192.0.2.2", Transport: "doq"},
 		}},
-	}); err != nil {
-		t.Errorf("trust-ad with verified encrypted upstreams rejected: %v", err)
+	}); len(d) != 0 {
+		t.Errorf("trust-ad with verified encrypted upstreams rejected: %v", d)
 	}
 
+	// Every one of these used to abort the whole build, and with it the
+	// daemon (#475). Each must now produce a diag AND leave the table in the
+	// stated shape: a zone that cannot be named (or is a duplicate of one
+	// already configured) is DROPPED, everything else is QUARANTINED so that
+	// names under the zone SERVFAIL instead of falling back to iteration.
 	bad := []struct {
 		name string
 		conf []ImrForwardConf
+		// wantZones is the number of zones that reach the table.
+		wantZones int
+		// wantQuarantined is how many of them are quarantined.
+		wantQuarantined int
+		// wantUpQuarantined counts quarantined upstreams across the table.
+		wantUpQuarantined int
 	}{
-		{"hostname addr", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "dns.example.com"}}}}},
-		{"unknown transport", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "smtp"}}}}},
-		{"tls options on do53", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", TLSServerName: "x.example."}}}}},
+		{"hostname addr", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "dns.example.com"}}}}, 1, 1, 1},
+		{"unknown transport", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "smtp"}}}}, 1, 1, 1},
+		{"tls options on do53", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", TLSServerName: "x.example."}}}}, 1, 1, 1},
+		// The duplicate is dropped and the FIRST definition stands, serving.
 		{"duplicate zone", []ImrForwardConf{
 			{Zone: "foo.bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}},
 			{Zone: "Foo.bar", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.2"}}},
-		}},
-		{"no upstreams", []ImrForwardConf{{Zone: "foo.bar."}}},
-		{"no zone", []ImrForwardConf{{Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}},
+		}, 1, 0, 0},
+		// Kept, not dropped: dropping it would hand the zone to iteration.
+		{"no upstreams", []ImrForwardConf{{Zone: "foo.bar."}}, 1, 1, 0},
+		{"no zone", []ImrForwardConf{{Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}, 0, 0, 0},
 		// A spoofable AD bit must not be a Secure-cache oracle: trust-ad
-		// over plaintext or unverified TLS is refused at build time.
-		{"trust-ad on do53", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}},
-		{"trust-ad on tcp", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "tcp"}}}}},
-		{"trust-ad with insecure dot", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "dot", Insecure: true}}}}},
+		// over plaintext or unverified TLS is quarantined at build time.
+		{"trust-ad on do53", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}, 1, 1, 1},
+		{"trust-ad on tcp", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "tcp"}}}}, 1, 1, 1},
+		{"trust-ad with insecure dot", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "dot", Insecure: true}}}}, 1, 1, 1},
+		// The one case that keeps serving: the dot upstream authenticates,
+		// so only the plaintext one is quarantined and the zone survives
+		// with reduced redundancy.
 		{"trust-ad with one plaintext upstream", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot"},
 			{Addr: "192.0.2.2"},
-		}}}},
+		}}}, 1, 0, 1},
 	}
 	for _, b := range bad {
-		if _, err := BuildImrForwards(b.conf); err == nil {
-			t.Errorf("%s: config accepted, want error", b.name)
+		forwards, diags := BuildImrForwards(b.conf)
+		if len(diags) == 0 {
+			t.Errorf("%s: config accepted silently, want a diag", b.name)
+		}
+		if len(forwards) != b.wantZones {
+			t.Errorf("%s: %d zone(s) in the table, want %d", b.name, len(forwards), b.wantZones)
+			continue
+		}
+		gotZQ, gotUQ := 0, 0
+		for _, fz := range forwards {
+			if fz.isQuarantined() {
+				gotZQ++
+			}
+			for _, up := range fz.Upstreams {
+				if up.isQuarantined() {
+					gotUQ++
+				}
+			}
+		}
+		if gotZQ != b.wantQuarantined {
+			t.Errorf("%s: %d quarantined zone(s), want %d", b.name, gotZQ, b.wantQuarantined)
+		}
+		if gotUQ != b.wantUpQuarantined {
+			t.Errorf("%s: %d quarantined upstream(s), want %d", b.name, gotUQ, b.wantUpQuarantined)
 		}
 	}
 }
 
 // The TLS settings of an encrypted upstream must reach the DNS client.
 func TestForwardUpstreamTLSConfig(t *testing.T) {
-	forwards, err := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
 		{Zone: "a.example.", Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "doq", TLSServerName: "dns.example.com"},
 			{Addr: "192.0.2.2", Transport: "dot", Insecure: true},
 		}},
 	})
-	if err != nil {
-		t.Fatalf("BuildImrForwards: %v", err)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
 	}
 	doq := forwards[0].Upstreams[0].Client.(*core.DNSClient)
 	if doq.TLSConfig.ServerName != "dns.example.com" {
@@ -200,13 +239,13 @@ func TestForwardUpstreamTLSConfig(t *testing.T) {
 }
 
 func TestForwardZoneFor(t *testing.T) {
-	forwards, err := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
 		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}},
 		{Zone: "sub.foo.bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.2"}}},
 		{Zone: "foo.bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.3"}}},
 	})
-	if err != nil {
-		t.Fatalf("BuildImrForwards: %v", err)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
 	}
 	// foo.bar. is deliberately BOTH a stub and a forward zone: equal
 	// specificity means the forward wins — a stub overrides only when it is
@@ -581,9 +620,9 @@ func startTestUpstreamDoQ(t *testing.T, cert tls.Certificate) (string, uint16, *
 
 func newForwardTestImr(t *testing.T, conf []ImrForwardConf) *Imr {
 	t.Helper()
-	forwards, err := BuildImrForwards(conf)
-	if err != nil {
-		t.Fatalf("BuildImrForwards: %v", err)
+	forwards, diags := BuildImrForwards(conf)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
 	}
 	lg := log.New(os.Stderr, "test", log.LstdFlags)
 	imr := &Imr{
@@ -616,7 +655,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 	// Positive answer, via the real entry point so the forward hook in
 	// IterativeDNSQueryWithLoopDetection is exercised, not forwardQuery
 	// directly. The empty serverMap must be irrelevant.
-	rrset, rcode, cctx, transport, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, cctx, transport, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query over DoT: %v", err)
 	}
@@ -642,7 +681,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 	}
 
 	// AD=0 from the upstream must map to Insecure, never borrow Secure.
-	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "unsigned.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false); err != nil {
+	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "unsigned.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone); err != nil {
 		t.Fatalf("AD=0 query: %v", err)
 	}
 	if crrset := imr.Cache.Get("unsigned.fwd.example.", dns.TypeA); crrset == nil || crrset.State != cache.ValidationStateInsecure {
@@ -651,7 +690,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 
 	// Negatives: the upstream authenticated the denial (AD=1), so the
 	// cached negative must be Secure too — trust-ad is not positives-only.
-	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "nx.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "nx.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded NXDOMAIN query: %v", err)
 	}
@@ -662,7 +701,7 @@ func TestForwardQueryTrustAD(t *testing.T) {
 		t.Errorf("trust-ad NXDOMAIN with upstream AD=1: cached = %+v, want state secure", crrset)
 	}
 
-	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, cctx, _, err = imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded NODATA query: %v", err)
 	}
@@ -687,7 +726,7 @@ func TestForwardQueryValidatesLocally(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	rrset, rcode, cctx, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, cctx, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query: %v", err)
 	}
@@ -711,7 +750,7 @@ func TestForwardQueryValidatesLocally(t *testing.T) {
 
 	// The upstream marks its NODATA AD=1 too; without trust-ad that must
 	// not become a Secure negative.
-	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, false); err != nil {
+	if _, _, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeMX, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone); err != nil {
 		t.Fatalf("forwarded NODATA query: %v", err)
 	}
 	if crrset := imr.Cache.Get("www.fwd.example.", dns.TypeMX); crrset != nil && crrset.State == cache.ValidationStateSecure {
@@ -733,7 +772,7 @@ func TestForwardQueryDoH(t *testing.T) {
 	})
 	trustUpstreamCert(t, imr.ForwardZones()[0], pool)
 
-	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query over DoH: %v", err)
 	}
@@ -759,7 +798,7 @@ func TestForwardQueryDoQ(t *testing.T) {
 	})
 	trustUpstreamCert(t, imr.ForwardZones()[0], pool)
 
-	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, _, transport, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query over DoQ: %v", err)
 	}
@@ -793,7 +832,7 @@ func TestForwardQueryFailover(t *testing.T) {
 		c.DNSClientTCP.Timeout = c.Timeout
 	}
 
-	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("failover query: %v", err)
 	}
@@ -808,7 +847,7 @@ func TestForwardQueryFailover(t *testing.T) {
 	c.Timeout = 500 * time.Millisecond
 	c.DNSClientUDP.Timeout = c.Timeout
 	c.DNSClientTCP.Timeout = c.Timeout
-	_, rcode, cctx, _, err := dead.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	_, rcode, cctx, _, err := dead.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err == nil {
 		t.Fatal("all upstreams dead: want an error, got none")
 	}
@@ -846,7 +885,7 @@ func TestForwardRootPrimingSkipsFetch(t *testing.T) {
 		t.Fatalf("root serverMap not seeded: match=%q servers=%d err=%v", bestmatch, len(servers), err)
 	}
 
-	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, servers, false, false)
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, servers, false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("forwarded query after hints-only priming: %v", err)
 	}
@@ -900,7 +939,7 @@ func TestProbeForwardUpstreams(t *testing.T) {
 	}
 
 	// The resolver still serves through the live upstream despite the error.
-	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, false)
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
 	if err != nil || rcode != dns.RcodeSuccess || rrset == nil {
 		t.Fatalf("query while DEGRADED: rcode=%d rrset=%v err=%v", rcode, rrset, err)
 	}
@@ -925,7 +964,7 @@ func TestProbeForwardUpstreams(t *testing.T) {
 	imr.setZoneTable([]*ForwardZone{recovered}, nil, nil)
 	imr.updateForwardUpstreamError()
 
-	if _, _, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, true, false); err != nil {
+	if _, _, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, true, edns0.PrivacyNone); err != nil {
 		t.Fatalf("recovery query: %v", err)
 	}
 	if errs := imr.errorRegistry.List(); len(errs) != 0 {
@@ -990,7 +1029,7 @@ func TestForwardQueryCancelIsNotAnUpstreamFailure(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, _, _, _, err := imr.forwardQuery(ctx, "www.fwd.example.", dns.TypeA, imr.ForwardZones()[0], false, false)
+	_, _, _, _, err := imr.forwardQuery(ctx, "www.fwd.example.", dns.TypeA, imr.ForwardZones()[0], false, edns0.PrivacyNone)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -1193,14 +1232,14 @@ func TestBuildImrForwardsCAFile(t *testing.T) {
 		t.Fatalf("write garbage: %v", err)
 	}
 
-	forwards, err := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildImrForwards([]ImrForwardConf{
 		{Zone: ".", Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot", TLSServerName: "dns.example.", CAFile: caFile},
 			{Addr: "192.0.2.2", Transport: "dot", TLSServerName: "dns.example."},
 		}},
 	})
-	if err != nil {
-		t.Fatalf("BuildImrForwards with ca-file: %v", err)
+	if len(diags) != 0 {
+		t.Fatalf("BuildImrForwards with ca-file: unexpected diags: %v", diags)
 	}
 	withCA := forwards[0].Upstreams[0].Client.(*core.DNSClient)
 	if withCA.TLSConfig == nil || withCA.TLSConfig.RootCAs == nil {
@@ -1228,8 +1267,366 @@ func TestBuildImrForwardsCAFile(t *testing.T) {
 			{Addr: "192.0.2.1", Transport: "dot", CAFile: notPEM}}}}},
 	}
 	for _, b := range bad {
-		if _, err := BuildImrForwards(b.conf); err == nil {
-			t.Errorf("%s: accepted, want an error", b.name)
+		forwards, diags := BuildImrForwards(b.conf)
+		if len(diags) == 0 {
+			t.Errorf("%s: accepted silently, want a diag", b.name)
 		}
+		// The zone stays in the table with its only upstream quarantined,
+		// so names under it SERVFAIL rather than reaching an unverified
+		// upstream or falling back to iteration.
+		if len(forwards) != 1 || !forwards[0].isQuarantined() {
+			t.Errorf("%s: want 1 quarantined zone, got %d zone(s)", b.name, len(forwards))
+		}
+	}
+}
+
+// startBlackholeUpstream is a UDP socket that accepts packets and never
+// answers. Not the same thing as an unreachable address: that one refuses, or
+// gets an ICMP back, and fails in milliseconds. A blackhole makes the caller
+// wait out its whole timeout, which is the failure mode #470 is about -- a
+// firewall that DROPs rather than REJECTs.
+func startBlackholeUpstream(t *testing.T) (string, uint16, func()) {
+	t.Helper()
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	host, port := splitHostPort(t, pc.LocalAddr().String())
+	return host, port, func() { _ = pc.Close() }
+}
+
+// A blackholed first upstream must not cost the second its chance (#470).
+//
+// The pre-fix behaviour: all upstreams shared the caller's deadline, the
+// blackhole consumed it, and the second upstream was either never reached or
+// reached with microseconds left. Measured in a lab before the fix: a first
+// upstream that REFUSED failed over in 0s, while one that DROPPED produced
+// SERVFAIL at 8s with a healthy second upstream configured.
+func TestForwardBlackholedUpstreamDoesNotStarveTheNext(t *testing.T) {
+	good, goodPort, _, stopGood := startTestUpstream(t)
+	defer stopGood()
+	bh, bhPort, stopBH := startBlackholeUpstream(t)
+	defer stopBH()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: bh, Port: bhPort},
+			{Addr: good, Port: goodPort},
+		}},
+	})
+
+	// A deadline is what makes this bite: without one the old code still got
+	// to the second upstream eventually, just slowly.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA,
+		map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("blackholed first upstream starved the second: %v (after %v)", err, elapsed)
+	}
+	if rcode != dns.RcodeSuccess || rrset == nil || len(rrset.RRs) != 1 {
+		t.Fatalf("rcode=%d rrset=%v", rcode, rrset)
+	}
+	// The blackhole gets half the budget, so the answer must arrive well
+	// inside the caller's deadline rather than at the edge of it.
+	if elapsed > 2500*time.Millisecond {
+		t.Errorf("answer took %v; the first upstream should have been capped at half the budget", elapsed)
+	}
+}
+
+// #470's second half: an upstream that never got a usable slice of the budget
+// is not an upstream that failed, and recording it as one marks healthy
+// infrastructure unreachable and drags config status to DEGRADED.
+//
+// There are two ways to lose budget, they take different code paths, and only
+// one of them was ever exercised -- so this covers both.
+//
+// Three upstreams and a 1.2s budget put each on its own path:
+//
+//	up0 blackhole  slice = 600ms   dialled, uses all of it -> slice timeout
+//	up1 healthy    slice = 300ms   below the 500ms floor   -> never dialled
+//	up2 healthy    slice = ~600ms  last, takes the remainder -> answers
+//
+// up1 is the floor skip: its queries counter must not move at all. up0 is the
+// mid-flight case: it WAS dialled and it did time out, and one of those is not
+// evidence of anything -- an attempt gets at least forwardMinAttempt, which is
+// a floor rather than a promise. Both must come out not-failing.
+//
+// The arithmetic is what makes the paths distinct, so it is asserted rather
+// than assumed: an earlier version of this test used a 900ms budget, which put
+// the blackhole's first slice at 450ms -- under the floor. It never dialled,
+// the mid-flight path was never taken, and the test passed in 0.00s while
+// claiming to cover it.
+func TestForwardStarvedUpstreamIsNotRecordedAsFailed(t *testing.T) {
+	bh, bhPort, stopBH := startBlackholeUpstream(t)
+	defer stopBH()
+	starved, starvedPort, _, stopStarved := startTestUpstream(t)
+	defer stopStarved()
+	answering, answeringPort, _, stopAnswering := startTestUpstream(t)
+	defer stopAnswering()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: bh, Port: bhPort},
+			{Addr: starved, Port: starvedPort},
+			{Addr: answering, Port: answeringPort},
+		}},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	rrset, rcode, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA,
+		map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
+	elapsed := time.Since(start)
+	if err != nil || rcode != dns.RcodeSuccess || rrset == nil {
+		t.Fatalf("the last upstream should have answered: rcode=%s err=%v (after %v)",
+			dns.RcodeToString[rcode], err, elapsed)
+	}
+
+	// Keyed by PORT, not by Addr: all three listeners are on 127.0.0.1, so an
+	// Addr comparison matches every one of them and silently reports whichever
+	// happened to be last.
+	byPort := map[string]*ForwardUpstream{}
+	for _, up := range imr.ForwardZones()[0].Upstreams {
+		byPort[up.Port] = up
+	}
+
+	// The floor skip. queries==0 is the assertion that matters: it is the
+	// difference between "not recorded as failed" and "never dialled", and
+	// only the second proves the budget check ran before the exchange.
+	up := byPort[fmt.Sprint(starvedPort)]
+	up.mu.Lock()
+	q, failing, failures := up.queries, up.failing, up.failures
+	up.mu.Unlock()
+	if q != 0 {
+		t.Errorf("the starved upstream was dialled (queries=%d); its %v slice was below the %v floor "+
+			"and it should not have been", q, 300*time.Millisecond, forwardMinAttempt)
+	}
+	if failing || failures > 0 {
+		t.Errorf("the starved upstream was recorded as failed (failing=%v failures=%d) after being "+
+			"skipped for want of budget", failing, failures)
+	}
+
+	// The mid-flight case: dialled, cut off by its own slice, and NOT failing
+	// on one occurrence. sliceTimeouts==1 is what proves the attempt happened
+	// and was classified as a timeout rather than a failure.
+	up = byPort[fmt.Sprint(bhPort)]
+	up.mu.Lock()
+	q, failing, failures, timeouts := up.queries, up.failing, up.failures, up.sliceTimeouts
+	up.mu.Unlock()
+	if q == 0 {
+		t.Fatalf("the blackhole was never dialled, so the mid-flight slice-expiry path this test "+
+			"exists to cover was not taken (budget too small for a %v first slice?)", forwardMinAttempt)
+	}
+	if timeouts != 1 {
+		t.Errorf("blackhole sliceTimeouts=%d, want 1: it was dialled and answered nothing, which is "+
+			"a slice timeout", timeouts)
+	}
+	if failing || failures > 0 {
+		t.Errorf("the blackhole was recorded as failed (failing=%v failures=%d) after ONE attempt cut "+
+			"short by its slice; a single truncated attempt is not evidence", failing, failures)
+	}
+}
+
+// The run recordSliceTimeout counts is CONSECUTIVE, so anything else the
+// upstream does breaks it (#498 re-review, C2).
+//
+// A success obviously does. A transport-level failure is the less obvious
+// half: a refused connection says the upstream is REACHABLE and declining,
+// which is not the "never answers" a run is evidence of, so letting it count
+// toward one would put a true-sounding "3 times running" on a sequence that
+// was nothing of the kind. Nothing is lost by resetting -- recordFailure has
+// already marked the upstream failing, on stronger evidence than a run.
+//
+// Driven through the methods rather than through a query, because the point is
+// the state machine and a network rig cannot schedule these sequences.
+func TestSliceTimeoutRunIsBrokenByAnyOtherOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		interrupt func(up *ForwardUpstream, start time.Time)
+	}{
+		{"success", func(up *ForwardUpstream, _ time.Time) {
+			up.recordSuccess()
+		}},
+		{"transport failure", func(up *ForwardUpstream, start time.Time) {
+			up.recordFailure(start, fmt.Errorf("connection refused"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			up := &ForwardUpstream{Label: "127.0.0.1:53/do53"}
+
+			// One short of a verdict.
+			start := time.Now()
+			for i := 1; i < forwardSliceTimeoutsBeforeFailing; i++ {
+				if up.recordSliceTimeout(start) {
+					t.Fatalf("reported a transition after %d slice timeouts; the run needs %d",
+						i, forwardSliceTimeoutsBeforeFailing)
+				}
+			}
+
+			tc.interrupt(up, start)
+
+			// The count starts over rather than finishing the old run, so this
+			// timeout is the first of a new one and decides nothing.
+			if up.recordSliceTimeout(time.Now()) {
+				t.Errorf("a %s did not break the run: the next slice timeout completed it and "+
+					"reported a transition", tc.name)
+			}
+			up.mu.Lock()
+			got := up.sliceTimeouts
+			up.mu.Unlock()
+			if got != 1 {
+				t.Errorf("sliceTimeouts=%d after a %s followed by one timeout, want 1", got, tc.name)
+			}
+		})
+	}
+}
+
+// An upstream that is never dialled must not reach the outbound-query hooks
+// either (#498 review, S1 -- one line earlier than the finding).
+//
+// The contract is "called before the IMR sends an iterative query to an
+// authoritative server", and a non-nil return SKIPS that server. Both halves
+// are wrong for an upstream the budget check is about to skip: an observer
+// would record a query that never happens, and a policy hook would be asked to
+// veto one. Out-of-tree hooks make this worse than a counting error, which is
+// why the budget check now runs before the hooks rather than after them.
+func TestForwardStarvedUpstreamDoesNotFireOutboundHook(t *testing.T) {
+	bh, bhPort, stopBH := startBlackholeUpstream(t)
+	defer stopBH()
+	starved, starvedPort, _, stopStarved := startTestUpstream(t)
+	defer stopStarved()
+	answering, answeringPort, _, stopAnswering := startTestUpstream(t)
+	defer stopAnswering()
+
+	// The hook registry is a package global with no unregister, so restore it
+	// rather than leaking a hook into every later test in the package.
+	globalImrOutboundQueryHooksMutex.Lock()
+	saved := globalImrOutboundQueryHooks
+	globalImrOutboundQueryHooksMutex.Unlock()
+	t.Cleanup(func() {
+		globalImrOutboundQueryHooksMutex.Lock()
+		globalImrOutboundQueryHooks = saved
+		globalImrOutboundQueryHooksMutex.Unlock()
+	})
+
+	var mu sync.Mutex
+	var asked []string
+	if err := RegisterImrOutboundQueryHook(func(_ context.Context, _ string, _ uint16,
+		serverName, _ string, _ core.Transport) error {
+		mu.Lock()
+		asked = append(asked, serverName)
+		mu.Unlock()
+		return nil
+	}); err != nil {
+		t.Fatalf("registering the hook: %v", err)
+	}
+
+	// Same shape as the test above: up0 dialled, up1 below the floor, up2 last.
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: bh, Port: bhPort},
+			{Addr: starved, Port: starvedPort},
+			{Addr: answering, Port: answeringPort},
+		}},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	if _, rcode, _, _, err := imr.IterativeDNSQuery(ctx, "www.fwd.example.", dns.TypeA,
+		map[string]*cache.AuthServer{}, false, edns0.PrivacyNone); err != nil || rcode != dns.RcodeSuccess {
+		t.Fatalf("the last upstream should have answered: rcode=%s err=%v", dns.RcodeToString[rcode], err)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), asked...)
+	mu.Unlock()
+
+	seen := func(port uint16) bool {
+		for _, label := range got {
+			if strings.Contains(label, fmt.Sprint(port)) {
+				return true
+			}
+		}
+		return false
+	}
+	if seen(starvedPort) {
+		t.Errorf("the outbound hook was fired for an upstream that was never dialled: %v", got)
+	}
+	if !seen(bhPort) || !seen(answeringPort) {
+		t.Errorf("the outbound hook was not fired for the two upstreams that WERE dialled: %v", got)
+	}
+}
+
+// ...and the other side of that judgement (#498 review, C1): an upstream that
+// times out its slice EVERY time is a blackhole, and must eventually say so.
+//
+// Without this it is the one failure mode config status never reports. The
+// query path deliberately skips recordFailure for a truncated attempt, so the
+// upstream doing the damage stays green while every query hands it half the
+// budget. The run is what distinguishes it from a slow upstream having a bad
+// minute, and forwardSliceTimeoutsBeforeFailing is how long a run has to be.
+func TestForwardRepeatedSliceTimeoutsMarkTheUpstreamFailing(t *testing.T) {
+	bh, bhPort, stopBH := startBlackholeUpstream(t)
+	defer stopBH()
+	answering, answeringPort, _, stopAnswering := startTestUpstream(t)
+	defer stopAnswering()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			{Addr: bh, Port: bhPort},
+			{Addr: answering, Port: answeringPort},
+		}},
+	})
+
+	// By port: both listeners are on 127.0.0.1, so Addr does not tell them
+	// apart.
+	var bhUp, goodUp *ForwardUpstream
+	for _, up := range imr.ForwardZones()[0].Upstreams {
+		if up.Port == fmt.Sprint(bhPort) {
+			bhUp = up
+		} else {
+			goodUp = up
+		}
+	}
+	if bhUp == nil || goodUp == nil {
+		t.Fatalf("test rig: could not tell the two upstreams apart by port")
+	}
+
+	for i := 1; i <= forwardSliceTimeoutsBeforeFailing; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+		_, rcode, _, _, err := imr.IterativeDNSQuery(ctx, fmt.Sprintf("q%d.fwd.example.", i), dns.TypeA,
+			map[string]*cache.AuthServer{}, false, edns0.PrivacyNone)
+		cancel()
+		if err != nil || rcode != dns.RcodeSuccess {
+			t.Fatalf("query %d: the healthy upstream should still have answered: rcode=%s err=%v",
+				i, dns.RcodeToString[rcode], err)
+		}
+
+		bhUp.mu.Lock()
+		timeouts, failing := bhUp.sliceTimeouts, bhUp.failing
+		bhUp.mu.Unlock()
+		if timeouts != uint64(i) {
+			t.Fatalf("query %d: blackhole sliceTimeouts=%d, want %d", i, timeouts, i)
+		}
+		want := i >= forwardSliceTimeoutsBeforeFailing
+		if failing != want {
+			t.Errorf("query %d: blackhole failing=%v, want %v (it flips on the %dth timeout in a row, "+
+				"not before)", i, failing, want, forwardSliceTimeoutsBeforeFailing)
+		}
+	}
+
+	// The upstream that has been answering all along is untouched: the run
+	// belongs to the blackhole, and a success resets any run of its own.
+	goodUp.mu.Lock()
+	failing, timeouts := goodUp.failing, goodUp.sliceTimeouts
+	goodUp.mu.Unlock()
+	if failing || timeouts != 0 {
+		t.Errorf("the answering upstream was marked failing=%v sliceTimeouts=%d by its neighbour's run",
+			failing, timeouts)
 	}
 }

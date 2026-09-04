@@ -169,9 +169,15 @@ type ZoneData struct {
 	// from (zone add --template). Persisted in the dynamic config entry so a
 	// restart re-expands it; the update policy is deliberately NOT persisted —
 	// it re-derives from the template at boot (one source of truth).
-	Template          string
-	DelegationSyncQ   chan DelegationSyncRequest
-	Parent            string   // name of parentzone (if filled in)
+	Template        string
+	DelegationSyncQ chan DelegationSyncRequest
+	// parent is the zone's parent name, resolved lazily on first use and
+	// cached. UNEXPORTED ON PURPOSE: parentMu owns it, and going through
+	// ResolveParent/GetParent/SetParent is what makes that ownership
+	// enforceable rather than a comment. Seven code paths used to open-code
+	// the same read-check/lookup/write, none of them synchronised.
+	parent            string
+	parentMu          sync.Mutex
 	ParentNS          []string // names of parent nameservers
 	ParentServers     []string // addresses of parent nameservers
 	Children          map[string]*ChildDelegationData
@@ -1060,6 +1066,13 @@ type Sig0Key struct {
 	PrivateKey      string //
 	Key             dns.KEY
 	Keystr          string
+	// ValidationFailed: the parent's automatic verification of this child key
+	// ran out of attempts (TriggerChildKeyVerification). Distinct from
+	// !Validated, which also covers "verification in progress". Reported as
+	// KEY_VALIDATION_FAILED(8) / EDE KEY-VALIDATION-FAILED; ValidationError
+	// carries the last reason for the operator and the KeyState EXTRA-TEXT.
+	ValidationFailed bool
+	ValidationError  string
 }
 
 type DnssecKey struct {
@@ -1085,6 +1098,10 @@ type DelegationSyncRequest struct {
 	NewDnskeys   *core.RRset
 	MsignerGroup *core.RRset
 	Response     chan DelegationSyncStatus // used for API-based requests
+	// Attempt counts re-enqueues of a DELEGATION-SYNC-SETUP whose SIG(0)
+	// bootstrap was deferred because the parent's SVCB advertisement could not
+	// be looked up (errBootstrapAdvertisementLookup). Zero on the first try.
+	Attempt int
 	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
 	// set the proxy NOTIFY action keys on (delegation-sync-proxy).
 	ProxyAnalysis *ProxyDelegationAnalysis
@@ -1346,7 +1363,17 @@ type AgentMgmtPost struct {
 	Upstream   AgentId
 	Downstream AgentId
 	Data       map[string]interface{} `json:"data,omitempty"` // Generic data field for custom parameters
-	Response   chan *AgentMgmtResponse
+	// NOT on the wire. AgentMgmtPost is both an in-process message and the
+	// mgmt API request body, and encoding/json refuses a chan field outright
+	// -- nil or not -- so without this tag EVERY POST of this struct failed
+	// before it left the CLI:
+	//
+	//   api.RequestNG: Error from json.NewEncoder: json: unsupported type:
+	//   chan *tdns.AgentMgmtResponse
+	//
+	// which took out the whole "parentsync" subtree. Nothing sets this field
+	// today; it is kept for the in-process direction rather than removed.
+	Response chan *AgentMgmtResponse `json:"-"`
 }
 
 type AgentMgmtResponse struct {

@@ -92,24 +92,10 @@ func initConfig() {
 		log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
 	}
 
-	for _, inc := range viper.GetStringSlice("include") {
-		incPath := inc
-		if !filepath.IsAbs(incPath) {
-			incPath = filepath.Join(filepath.Dir(cfgFileUsed), incPath)
-		}
-		if _, err := os.Stat(incPath); err != nil {
-			if os.IsNotExist(err) {
-				if tdns.Globals.Verbose {
-					fmt.Fprintln(os.Stderr, "Skipping missing included config:", incPath)
-				}
-				continue
-			}
-			log.Fatalf("Error stat(%s): %v", incPath, err)
-		}
-		viper.SetConfigFile(incPath)
-		if err := viper.MergeInConfig(); err != nil {
-			log.Fatalf("Could not merge included config %s: Error: %v", incPath, err)
-		}
+	// Shared with tdns-cli and the daemon loader; accepts both the
+	// bare-string and the {file, merge} include forms (#452).
+	if err := tdns.MergeViperIncludes(viper.GetViper(), cfgFileUsed); err != nil {
+		log.Fatalf("Error in config %s: %v", cfgFileUsed, err)
 	}
 
 	if lc := viper.GetString("cli.localconfig"); lc != "" {

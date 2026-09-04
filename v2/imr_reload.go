@@ -149,8 +149,13 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 		return res, nil
 	}
 
-	newForwards, err := BuildImrForwards(fwdconf)
-	if err != nil {
+	// The reload path still refuses whole, which is the deliberate asymmetry
+	// with startup (#475): here there IS a good running state to preserve, so
+	// a config that would quarantine anything changes nothing at all. At
+	// startup there is no such state, so the same input quarantines and the
+	// daemon serves what is left.
+	newForwards, diags := BuildImrForwards(fwdconf)
+	if err := forwardDiagsError(diags); err != nil {
 		return res, fmt.Errorf("imrengine.forward: %v", err)
 	}
 	newStubs, newFP, newServers := canonicalStubs(stubconf)
@@ -193,6 +198,11 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 	}
 
 	imr.setZoneTable(newForwards, newStubs, appliedFP)
+	// After the swap: the aggregates describe the table that is now live.
+	// Quarantine cannot survive a reload that refuses whole, but a reload
+	// that succeeds can still clear one that startup set.
+	imr.updateForwardQuarantineError()
+	imr.updateForwardUpstreamError()
 
 	// Removals AFTER the swap, so no query can route to a stub zone whose
 	// servers have already been dropped. Dropping the ServerMap entry is not
@@ -366,6 +376,12 @@ func carryForwardUpstreams(old, new []*ForwardZone) {
 		}
 		for i, up := range fz.Upstreams {
 			if prev, ok := byKey[up.key()]; ok {
+				// Reachability carries; the config verdict does not.
+				// upstreamKey has no TrustAD in it, so an upstream
+				// quarantined because its zone had trust-ad keeps the same
+				// key after `trust-ad:` is removed — carrying prev untouched
+				// would carry a quarantine the new config no longer earns.
+				prev.adoptQuarantineFrom(up)
 				fz.Upstreams[i] = prev
 			}
 		}

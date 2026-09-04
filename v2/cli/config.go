@@ -16,18 +16,49 @@ type Config struct {
 	Zones   []string `validate:"required"`
 }
 
-func ValidateConfig(v *viper.Viper, cfgfile string) error {
+// unmarshalCLIConfig decodes tdns-cli's own config, and says something useful
+// when what it was handed is a SERVER config instead.
+//
+// That mistake is easy to make -- both files are called tdns-*.yaml and both
+// have a zones: key -- and it used to surface as
+//
+//	ValidateConfig: Unmarshal error: 9 error(s) decoding:
+//	  * 'Zones[0]' expected type 'string', got unconvertible type 'map[string]interface {}'
+//
+// which names a Go type and a struct field, and leaves the operator to work
+// out that --config takes tdns-cli's config, not the server's. The shapes are
+// distinguishable: the CLI's zones: is a list of NAMES, a server's is a list
+// of objects, so the wrong file can be recognised and named as such.
+func unmarshalCLIConfig(v *viper.Viper, cfgfile string) Config {
 	var config Config
-
 	if v == nil {
-		if err := viper.Unmarshal(&config); err != nil {
-			log.Fatalf("ValidateConfig: Unmarshal error: %v", err)
-		}
-	} else {
-		if err := v.Unmarshal(&config); err != nil {
-			log.Fatalf("ValidateConfig: unmarshal error: %v", err)
-		}
+		v = viper.GetViper()
 	}
+	if err := v.Unmarshal(&config); err != nil {
+		if looksLikeServerConfig(v) {
+			log.Fatalf("Config %q looks like a tdns SERVER config: its zones: entries are objects, while tdns-cli's are names.\n"+
+				"--config is tdns-cli's own config. Pass a server config as the argument to `config check`, or via --serverconfig.\n"+
+				"(underlying error: %v)", cfgfile, err)
+		}
+		log.Fatalf("ValidateConfig: Unmarshal error: %v", err)
+	}
+	return config
+}
+
+// looksLikeServerConfig reports whether the config has a top-level zones:
+// list whose entries are objects — the shape a server config has and a CLI
+// config cannot.
+func looksLikeServerConfig(v *viper.Viper) bool {
+	list, ok := v.Get("zones").([]interface{})
+	if !ok || len(list) == 0 {
+		return false
+	}
+	_, isMap := list[0].(map[string]interface{})
+	return isMap
+}
+
+func ValidateConfig(v *viper.Viper, cfgfile string) error {
+	config := unmarshalCLIConfig(v, cfgfile)
 
 	var configsections = make(map[string]interface{}, 5)
 
@@ -38,17 +69,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 }
 
 func ValidateZoneConfig(v *viper.Viper, cfgfile string) error {
-	var config Config
-
-	if v == nil {
-		if err := viper.Unmarshal(&config); err != nil {
-			log.Fatalf("ValidateConfig: Unmarshal error: %v", err)
-		}
-	} else {
-		if err := v.Unmarshal(&config); err != nil {
-			log.Fatalf("ValidateConfig: unmarshal error: %v", err)
-		}
-	}
+	config := unmarshalCLIConfig(v, cfgfile)
 
 	var configsections = make(map[string]interface{}, 5)
 

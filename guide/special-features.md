@@ -8,9 +8,11 @@ authoritative and recursive DNS service.
 1. [**Automatic Delegation Synchronization**](#1-automatic-delegation-synchronization)
    -- Keeping parent zone delegation data in sync with child
    zone changes: the NOTIFY and UPDATE schemes, delegation
-   backends, the agent-as-proxy path, and the
+   backends, the agent-as-proxy path, the
    [DSYNC API scheme](#17-the-dsync-api-scheme-https-for-children-that-cannot-sign)
-   for children that cannot sign a DNS message.
+   for children that cannot sign a DNS message, and
+   [publishing a customer's bootstrap records](#18-secondary-publishing-a-customers-bootstrap-records-at-the-_signal-names)
+   at the RFC 9615 `_signal` names.
 2. [**DNS Transport Signaling**](#2-dns-transport-signaling)
    -- Enabling resolvers to discover and use encrypted
    transports (DoT, DoQ, DoH) when communicating with
@@ -77,7 +79,7 @@ parent zone can advertise both at once:
 ### 1.1 Parent: publishing DSYNC
 
 A parent zone advertises its delegation-sync capabilities
-by adding the zone option `delegation-sync-parent` (zone
+by adding the zone option `childsync` (zone
 option `OptDelSyncParent`). When set, tdns-auth synthesises
 the necessary DSYNC RRs at the well-known owner name
 `_dsync.<zonename>` based on the global
@@ -225,8 +227,7 @@ named backend reference:
 zones:
    example.com.:
       type:                primary
-      delegation-sync-parent: true
-      allow-child-updates:   true
+      options:             [ childsync, allow-child-updates ]
       delegationbackend:     files-dnslab
 ```
 
@@ -288,14 +289,14 @@ tdns-cli auth delegation show   --zone example.com. --child sub.example.com.
 
 ### 1.5 Child: pushing changes
 
-On the child side, a zone with `delegation-sync-child`
+On the child side, a zone with `parentsync`
 enabled runs through `SetupZoneSync` (also wired via
 OnFirstLoad). This:
 
 - Calls `DelegationSyncSetup` to ensure the child has an
   active SIG(0) keypair, and arranges for the public KEY
-  to be published according to the parent's advertised
-  bootstrap methods.
+  to be published according to the bootstrap method
+  negotiated with the parent (below).
 - Subscribes the zone to the engine that watches for
   changes in delegation-relevant RRsets (NS, glue, DNSKEY
   → DS) and dispatches them via `DelegationSyncher`.
@@ -310,6 +311,64 @@ per-policy preference.
 The same dispatch logic is reused by the auto-rollover
 engine; see section 5 for the full picture.
 
+#### Choosing a SIG(0) bootstrap method
+
+Before the child can send a signed UPDATE, the parent has
+to come to trust its SIG(0) key. Which route is used is
+**negotiated, not configured on one side**: the parent
+advertises what it will accept in the bootstrap SVCB
+([1.1](#11-parent-publishing-dsync)), the child declares
+what it is willing to rely on, and the strongest survivor
+of the intersection wins — `at-apex` > `at-ns` >
+`unsigned` > `manual`.
+
+```yaml
+delegationsync:
+   child:
+      schemes: [ notify, update ]
+      update:
+         keygen:
+            algorithm: ED25519
+         bootstrap:
+            methods: [ at-apex, at-ns ]
+```
+
+Four rules matter more than the list itself:
+
+- **An empty intersection refuses.** It never silently
+  degrades to a weaker method. A parent advertising only
+  `unsigned` or only `manual` is therefore refused by the
+  default child, which is the opt-in working as intended:
+  this decision is what authorises everything the child
+  later signs.
+- **An absent advertisement falls back to this list**, so a
+  parent that publishes no bootstrap SVCB — every non-TDNS
+  parent — is bootstrapped exactly as before. A *failed*
+  lookup is not the same thing and does not fall back: it
+  is an error, and the bootstrap is retried rather than
+  proceeding on a guess.
+- **An advertisement that cannot be authenticated is
+  ignored**, and the configured list is used instead. The
+  SVCB and the DSYNC record that named its target must both
+  be DNSSEC-validated; `delegationsync.child.update.allow-insecure`
+  waives that for a lab, but nothing waives a **bogus**
+  verdict — a failed chain of trust is never treated as an
+  unsigned one.
+- **`methods:` omitted means `[ at-apex, at-ns ]`**, and
+  `at-ns` is then filtered out per zone when this server
+  cannot satisfy it. It needs the child's KEY at
+  `_sig0key.<child>._signal.<ns>`, which is possible only
+  when the server is primary for a zone one of those signal
+  names falls in. An agent proxying for a primary
+  ([1.6](#16-agent-proxying-for-a-dsync-unaware-primary))
+  never qualifies — those names live in the *nameserver's*
+  zone, which a secondary does not control — so a proxy
+  drops `at-ns` on every path, BADKEY recovery included.
+
+The parent-side half of the same negotiation — how a zone's
+policy decides what it advertises — is
+[1.1](#11-parent-publishing-dsync).
+
 
 ### 1.6 Agent: proxying for a DSYNC-unaware primary
 
@@ -322,7 +381,7 @@ primary *can* publish a CDS/CDNSKEY (RFC 7344) or CSYNC
 for a child to signal "please sync me."
 
 tdns-agent bridges that gap. Configure it as a **secondary**
-for the zone with the `delegation-sync-proxy` option. On
+for the zone with the `parentsync-proxy` option. On
 every incoming AXFR/IXFR the agent diffs the new zone
 against the one it was serving and, when a
 delegation-relevant RRset changed, forwards the matching
@@ -350,13 +409,13 @@ re-NOTIFYd on subsequent refreshes.
 
 The three delegation-sync roles, side by side:
 
-- `delegation-sync-parent` -- I am the parent: publish a
+- `childsync` -- I am the parent: publish a
   DSYNC RRset and receive UPDATE / NOTIFY from children
   (sections 1.1-1.4).
-- `delegation-sync-child` -- I am the child and author my
+- `parentsync` -- I am the child and author my
   own zone: detect my delegation changes and push them up
   (section 1.5).
-- `delegation-sync-proxy` -- I am a secondary for a
+- `parentsync-proxy` -- I am a secondary for a
   DSYNC-unaware primary: forward the primary's CDS/CSYNC
   signals up on its behalf (this section).
 
@@ -503,7 +562,7 @@ applied unchanged:
 ```yaml
 zones:
    - name:    example.
-     options: [ delegation-sync-parent, allow-child-updates ]
+     options: [ childsync, allow-child-updates ]
      delegationbackend: direct
      updatepolicy:
         child:
@@ -630,6 +689,75 @@ the same protection seen from two sides and an operator who
 disables one while believing the other still holds has none.
 It does not disable certificate validation. It is a lab
 convenience and never a production setting.
+
+### 1.8 Secondary: publishing a customer's bootstrap records at the `_signal` names
+
+Everything above is about a child getting its delegation data
+to its parent. This section is the other end of the same
+problem: how a child that cannot yet be validated gets its
+*first* trust anchor -- or its first SIG(0) key -- to a
+parent that has no reason to believe it.
+
+RFC 9615 answers that with a name in a zone the parent
+already trusts. The child's bootstrap records are published
+not in the child's zone but in the zone of each of the
+child's **nameservers**, at
+`_dsboot.<child>._signal.<ns>` -- so a parent can fetch them
+over the child's own delegation and validate them under the
+nameserver's keys, not the child's.
+`draft-ietf-dnsop-delegation-mgmt-via-ddns` reuses the shape
+for the SIG(0) bootstrap, at `_sig0key.<child>._signal.<ns>`.
+
+Someone has to actually put the records there, and it is not
+the child -- it is whoever operates the nameserver. tdns-auth
+does that job on a **secondary** with the
+`use-hsyncparam` option:
+
+```yaml
+zones:
+   - name:      customer.example.
+     type:      secondary
+     primaries: [ { addr: 192.0.2.1:53, key: NOKEY } ]
+     options:   [ use-hsyncparam ]
+```
+
+The instruction comes from the customer, in the HSYNCPARAM
+record at their zone's apex
+(`draft-leon-dnsop-signaling-zone-owner-intent`, §3). Two of
+its keys are flags addressed to every provider serving the
+zone: `pubkey` asks for the apex SIG(0) `KEY` at the
+`_sig0key` name, `pubcds` for the apex `CDS`/`CDNSKEY` at the
+`_dsboot` name. After each transfer, for each flag present,
+the server re-owns the matching apex RRset to the signal name
+under every apex NS of the customer zone and publishes it
+into whichever zone **this server holds as primary**. An NS
+served by somebody else is skipped. The write is
+change-gated, so an unchanged re-transfer does nothing.
+
+The alternative these flags replace is scanning: without an
+explicit signal a provider would have to trawl its customer
+zones for CDS-shaped content and guess that publication was
+intended (RFC 9615 §3.1). The flag makes the intent the zone
+owner's, stated once, in a record designed to carry it.
+
+Why an option, given the customer already asked? Because
+honouring the request writes records into a zone *you* are
+authoritative for. That is the nameserver operator's
+decision, so it is off by default. It changes nothing about
+parsing or serving HSYNCPARAM, which is unconditional, and it
+is unrelated to `multi-provider`: the role model those
+records carry -- `servers`, `signers`, `auditors`, delegated
+NS management -- belongs to
+[tdns-mp](../../tdns-mp/guide/README.md), and tdns-auth reads
+just these two flags. Configuration details are in
+[config-tdns-auth.md](config-tdns-auth.md#use-hsyncparam).
+
+The child side of the same mechanism needs no option: when a
+tdns-auth child's own bootstrap ceremony selects the `at-ns`
+method, publishing its KEY at the `_signal` name *is* the
+intent, and the method is offered in the first place only
+when at least one of the zone's nameservers is served here as
+primary.
 
 
 ## 2. DNS Transport Signaling
@@ -808,10 +936,14 @@ discover peer agents and compute provider groups.
 
 ### HSYNCPARAM (type 65286)
 
-Zone-wide multi-provider policy record. Carries key=value
-pairs controlling NS management, parent sync, signer
-authorization, etc. Defined and parsed in tdns; used by
-[tdns-mp](../../tdns-mp/guide/README.md).
+Zone-wide policy record for signaling zone-owner intent to
+DNS providers. Carries key=value pairs controlling NS
+management, parent sync, signer authorization, and
+publication of bootstrap records. Defined and parsed in
+tdns. The role and NS-management keys are used by
+[tdns-mp](../../tdns-mp/guide/README.md); the `pubkey` and
+`pubcds` flags are acted on by tdns-auth itself, on a
+secondary with `use-hsyncparam` (§1.8).
 
 ### JWK
 

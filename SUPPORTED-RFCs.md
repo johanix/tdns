@@ -144,6 +144,61 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 
 ---
 
+## DNSSEC Bootstrapping
+
+### RFC 9615 - Automatic DNSSEC Bootstrapping Using Authenticated Signals from the Zone's Operator
+**Status**: ✅ Supported (both sides)
+**Implementation**: `tdns/v2/signal_republish.go` (producer), `tdns/v2/scanner.go` and `tdns/v2/truststore_verify.go` (consumers)
+**Notes**:
+- **The signaling names**: a child's bootstrap records are published in the
+  zone of each of the child's *nameservers*, under
+  `_dsboot.<child>._signal.<ns>`, so a parent can fetch them over the child's
+  own delegation and DNSSEC-validate them under the nameserver's keys rather
+  than the child's. `signalOwnerName()` is the single spelling of that name,
+  shared by the producer and both consumers so they cannot drift.
+- **Consumer, parent side** (`queryCDSAtSignalingNames`, `tdns/v2/scanner.go`):
+  a scanner configured with the `at-ns` option verifies every NOTIFY(CDS) this
+  way instead of by direct DNSSEC validation. It queries CDS at the signaling
+  name under each *out-of-bailiwick* NS via the IMR, requires each answer to be
+  DNSSEC-validated (unless run with `no-dnssec-validation`), requires every NS
+  to agree, and checks the result against a direct query to the child; any
+  failure rejects the NOTIFY. A child whose NS are all in-bailiwick has no
+  signaling name a parent can validate, so that case falls back to the
+  direct/apex path.
+- **Consumer, SIG(0) side** (`LookupChildKeyAtSignal`, `tdns/v2/truststore_verify.go`):
+  the same shape for a child's SIG(0) `KEY` at `_sig0key.<child>._signal.<ns>`,
+  used to verify a child's key before trusting a cross-zone-cut DNS UPDATE.
+  That name belongs to `draft-ietf-dnsop-delegation-mgmt-via-ddns`, which
+  reuses the `_signal` label RFC 9615 registered in the "Underscored and
+  Globally Scoped DNS Node Names" registry (RFC 8552).
+- **Producer** (`tdns/v2/signal_republish.go`): tdns publishes at these names for
+  the zones it serves, in two paths.
+  - A **secondary** with the `use-hsyncparam` zone option republishes a
+    transferred zone's apex `CDS`/`CDNSKEY` (and SIG(0) `KEY`) at the signaling
+    names owned by that zone's nameservers, into whichever zone this server
+    holds as primary. The instruction comes from the zone owner, via the
+    `pubcds` and `pubkey` flags of the apex HSYNCPARAM record
+    (`draft-leon-dnsop-signaling-zone-owner-intent`) -- which is how tdns avoids
+    RFC 9615 §3.1's alternative of *scanning* customer zones for
+    bootstrap-shaped content and inferring intent. Publication is change-gated
+    and skips any nameserver whose zone is not served here as primary. See
+    [guide/special-features.md](guide/special-features.md#18-secondary-publishing-a-customers-bootstrap-records-at-the-_signal-names).
+  - A **child** whose own SIG(0) bootstrap ceremony selects the `at-ns` method
+    publishes its KEY at the signaling name before sending the self-signed
+    UPDATE, so the parent's verification finds it. The publication is confirmed
+    (waited on to actually apply), not merely enqueued, and `at-ns` is offered
+    only when at least one of the zone's nameservers is served here as primary.
+- **Withdrawal**: a published record is deleted again when nothing justifies it
+  any more -- the `use-hsyncparam` option removed, the flag dropped from the
+  child's HSYNCPARAM, the nameserver dropped from the child's apex NS RRset, the
+  child zone removed from this server, or `parentsync` turned off for a zone
+  whose `at-ns` bootstrap published a KEY. Only records tdns itself published are
+  ever deleted: publication is recorded in the keystore, and that record is the
+  authority for the delete, so a signal name an operator maintains by hand in the
+  same zone is left alone.
+
+---
+
 ## Zone Management
 
 ### RFC 8976 - Message Digest for DNS Zones (ZONEMD)
@@ -263,6 +318,8 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
   - OTS (Option Code 65001) - Transport Signaling
   - KeyState (Option Code 65002) - SIG(0) key state communication
   - Report (Option Code 65003) - Error reporting
+  - PRIVACY (Option Code 65007) - transport privacy request (query) and
+    status (response), one octet
   - ER (Option Code 18) - Error Reporting (RFC 9567)
 
 ---

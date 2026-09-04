@@ -224,54 +224,9 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	lgHandler.Debug("setting update type", "zone", zd.ZoneName, "qname", qname)
 	// 1. Is qname the apex of this zone?
 	if core.EqualNames(qname, zd.ZoneName) {
-		// Per RFC 2136 the QNAME is the zone being updated. Check whether all RRs in the
-		// update section target a single existing child delegation (at or below the delegation
-		// point). If so, this is a child delegation sync, not a zone update.
-		childDel := ""
-		isChildUpdate := len(r.Ns) > 0
-		for _, rr := range r.Ns {
-			ownerName := rr.Header().Name
-			rrtype := rr.Header().Rrtype
-
-			if rrtype == dns.TypeNS || rrtype == dns.TypeDS {
-				// NS and DS must be at a child delegation point
-				if !zd.IsChildDelegation(ownerName) {
-					isChildUpdate = false
-					break
-				}
-				if childDel == "" {
-					childDel = ownerName
-				} else if !core.EqualNames(childDel, ownerName) {
-					isChildUpdate = false
-					break
-				}
-			} else {
-				// Glue (A, AAAA, etc.) must be below an existing child delegation.
-				// Walk up the labels to find the delegation point.
-				found := false
-				labels := dns.SplitDomainName(ownerName)
-				for i := 1; i < len(labels); i++ {
-					ancestor := dns.Fqdn(strings.Join(labels[i:], "."))
-					if core.EqualNames(ancestor, zd.ZoneName) {
-						break
-					}
-					if zd.IsChildDelegation(ancestor) {
-						if childDel == "" {
-							childDel = ancestor
-						} else if !core.EqualNames(childDel, ancestor) {
-							isChildUpdate = false
-							break
-						}
-						found = true
-						break
-					}
-				}
-				if !found {
-					isChildUpdate = false
-					break
-				}
-			}
-		}
+		// Per RFC 2136 the QNAME is the zone being updated, so the apex here
+		// says nothing about what is being changed. The update section does.
+		isChildUpdate, childDel := zd.classifyDelegationUpdate(r.Ns)
 
 		if isChildUpdate && childDel != "" {
 			lgHandler.Info("update targets child delegation", "child", childDel)
@@ -285,8 +240,17 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 			}
 		} else {
 			dur.Status.Type = "ZONE-UPDATE"
-			zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the apex of this zone",
-				zd.ZoneName, qname)
+			// Name the owner that could not be placed, not the QNAME. The
+			// QNAME is SUPPOSED to be the apex here (RFC 2136: it is the zone
+			// being updated), so reporting that says nothing about why this
+			// was not a child update -- and reads as "the name you tried to
+			// update was the apex", which is usually false.
+			unplaced := qname
+			if len(r.Ns) > 0 {
+				unplaced = r.Ns[0].Header().Name
+			}
+			zd.Logger.Printf("UpdateResponder: zone %s: no child delegation covers owner %s; treating as ZONE-UPDATE",
+				zd.ZoneName, unplaced)
 			if !zd.Options[OptAllowUpdates] {
 				lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname)
 				m.SetRcode(r, dns.RcodeRefused)
@@ -830,4 +794,86 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	lgHandler.Info("trust update approved")
 
 	return true, false, nil
+}
+
+// classifyDelegationUpdate reports whether every RR in an update section
+// targets a single existing child delegation, and which one.
+//
+// Extracted from UpdateResponder so it can be tested directly: the bug this
+// guards against (a KEY at a child's apex classified as a ZONE-UPDATE and
+// refused) survived because the only coverage went through the full responder,
+// where a message, a policy and a ResponseWriter all have to be right before
+// the classification is even reached.
+//
+// Three shapes count as a child update:
+//   - NS or DS AT the delegation point
+//   - anything else AT the delegation point (a child publishing at its own
+//     apex; the SIG(0) bootstrap KEY is the case that matters)
+//   - glue BELOW the delegation point
+//
+// All RRs must land on the SAME child; an update spanning two delegations is
+// not a child update.
+func (zd *ZoneData) classifyDelegationUpdate(rrs []dns.RR) (bool, string) {
+	childDel := ""
+	isChildUpdate := len(rrs) > 0
+	for _, rr := range rrs {
+		ownerName := rr.Header().Name
+		rrtype := rr.Header().Rrtype
+
+		switch {
+		case rrtype == dns.TypeNS || rrtype == dns.TypeDS:
+			// NS and DS must be AT a child delegation point.
+			if !zd.IsChildDelegation(ownerName) {
+				return false, childDel
+			}
+			if childDel == "" {
+				childDel = ownerName
+			} else if !core.EqualNames(childDel, ownerName) {
+				return false, childDel
+			}
+
+		case zd.IsChildDelegation(ownerName):
+			// AT the delegation point, and not NS or DS: a child publishing
+			// something at its own apex. Step 2 in UpdateResponder still
+			// describes this ("it may be a KEY update and hence really a
+			// TRUSTSTORE-UPDATE"), but step 2 is no longer reached for these
+			// messages, because the child now sends the RFC 2136 QNAME (the
+			// zone) rather than its own name.
+			//
+			// Without this case the ancestor walk below starts one label ABOVE
+			// the owner, immediately hits the zone apex, and a child bootstrap
+			// is classified as a ZONE-UPDATE -- refused by updatepolicy.zone,
+			// which is normally "none".
+			if childDel == "" {
+				childDel = ownerName
+			} else if !core.EqualNames(childDel, ownerName) {
+				return false, childDel
+			}
+
+		default:
+			// Glue (A, AAAA, ...) BELOW an existing child delegation. The
+			// owner itself was handled above, so start one label up.
+			found := false
+			labels := dns.SplitDomainName(ownerName)
+			for i := 1; i < len(labels); i++ {
+				ancestor := dns.Fqdn(strings.Join(labels[i:], "."))
+				if core.EqualNames(ancestor, zd.ZoneName) {
+					break
+				}
+				if zd.IsChildDelegation(ancestor) {
+					if childDel == "" {
+						childDel = ancestor
+					} else if !core.EqualNames(childDel, ancestor) {
+						return false, childDel
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false, childDel
+			}
+		}
+	}
+	return isChildUpdate, childDel
 }

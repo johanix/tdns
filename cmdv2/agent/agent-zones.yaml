@@ -19,10 +19,10 @@ templates:
         - { addr: 127.0.0.1:5355, key: NOKEY }
      notify:
         - { addr: 127.0.0.1:5399, key: NOKEY }
-     # delegation-sync-proxy: the agent acts on behalf of a DSYNC-unaware
+     # parentsync-proxy: the agent acts on behalf of a DSYNC-unaware
      # primary (BIND/Knot), watching inbound transfers for CDS/CSYNC changes
      # and forwarding to the parent. Valid only on an agent secondary zone.
-     options:         [ delegation-sync-proxy ]
+     options:         [ parentsync-proxy ]
 
 zones:
    - name:            test.net.

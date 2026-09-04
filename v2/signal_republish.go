@@ -24,11 +24,29 @@
 // is a non-starter and is skipped. The consumer is change-gated: it diffs
 // the desired content against what is already published at the signal name
 // in the target zone, so a re-transfer of unchanged data is a no-op.
+//
+// The transfer-driven republish is OPT-IN, per zone, via the secondary-only
+// use-hsyncparam option: it writes records into a zone this server is
+// authoritative for on the strength of a THIRD PARTY's signaling, so the
+// operator of that zone has to say yes. The child-side publishes in this file
+// (publishSig0KeyAtSignalNames, refreshSig0KeyAtSignalNames) and the
+// satisfiability probe canPublishSig0KeyAtSignal are NOT gated -- there the
+// zone being published for is our own and selecting at-ns is the intent.
+//
+// Every publication is recorded in the SignalPublication ledger
+// (db_signal_publication.go), and WITHDRAWAL reads that ledger and nothing
+// else. The target is an ordinary primary zone of this server's and an
+// operator may have published a signal name there by hand, so "we no longer
+// want this record" is not by itself authority to delete it -- "we put it
+// there" is. ReconcileSignalPublications settles both directions after every
+// refresh; see docs/2026-09-03-signal-name-withdrawal.md.
 
 package tdns
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -49,25 +67,59 @@ type signalSpec struct {
 var signalSpecs = []signalSpec{
 	{
 		flag:    "pubkey",
-		prefix:  "_sig0key",
+		prefix:  signalPrefixSig0Key,
 		rrtypes: []uint16{dns.TypeKEY},
 		active:  (*core.HSYNCPARAM).HasPubkey,
 	},
 	{
 		flag:    "pubcds",
-		prefix:  "_dsboot",
+		prefix:  signalPrefixDsboot,
 		rrtypes: []uint16{dns.TypeCDS, dns.TypeCDNSKEY},
 		active:  (*core.HSYNCPARAM).HasPubcds,
 	},
 }
 
-// RepublishAtSignalNames is the OnZonePostRefresh callback registered on
-// every tdns-auth secondary. After a transfer of childZD's customer zone it
-// republishes the apex bootstrap RRsets under the RFC 9615 signal names if
-// the apex HSYNCPARAM asks for it. It is always-on but acts only when the
-// transferred zone actually carries the relevant flag and this server is
-// locally primary for a parent of the signal name.
+// registerSignalReconcileHook appends ReconcileSignalPublications to zdp's
+// post-refresh callbacks. Named for what it registers: the callback both
+// publishes (RepublishAtSignalNames) and withdraws (signal_withdraw.go).
+//
+// Not called directly: registerStandardRefreshHooks (v2/zone_hooks.go) is the
+// single entry point, and every path that CONSTRUCTS a live ZoneData calls it
+// before publishing the zone. See that function for the ordering contract and
+// why registration is unconditional and once-per-ZoneData.
+//
+// Registered for EVERY zone regardless of type, and here that is not merely
+// harmless. The publish half self-gates on Options[OptUseHsyncparam], which
+// only a secondary can hold (parseZoneOptions drops it on a primary) -- but the
+// WITHDRAWAL half also acts on parentsync (OptDelSyncChild), for a zone whose
+// own at-ns bootstrap published a _sig0key, and that zone is one this server is
+// PRIMARY for. A primary registers this hook to do work, not to no-op.
+func (zdp *ZoneData) registerSignalReconcileHook() {
+	zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh, func(zd *ZoneData) {
+		zd.ReconcileSignalPublications()
+	})
+}
+
+// RepublishAtSignalNames is the publish half of the reconciler
+// (ReconcileSignalPublications, the registered callback). After a transfer of
+// childZD's customer zone it republishes the apex bootstrap RRsets under the
+// RFC 9615 signal names if the zone is configured to act on HSYNCPARAM and the
+// apex HSYNCPARAM asks for it.
+//
+// The use-hsyncparam check is here rather than at registration time on purpose:
+// the hook is registered once, when the ZoneData is CONSTRUCTED (see
+// registerStandardRefreshHooks), while zd.Options is replaced wholesale on
+// every config reload. Reading the option when the hook RUNS is what makes both
+// enabling and disabling it take effect on `config reload` instead of only on
+// restart -- and it is what lets the withdrawal half treat an option removed
+// while the daemon was stopped exactly like one removed while it was running.
 func (childZD *ZoneData) RepublishAtSignalNames() {
+	// signalOptions reads this under zd.mu, together with the option the
+	// withdrawal half needs; see there for why the read is locked.
+	if useHsyncparam, _ := childZD.signalOptions(); !useHsyncparam {
+		return
+	}
+
 	hp := childZD.apexHsyncparam()
 	if hp == nil {
 		return
@@ -96,40 +148,173 @@ func (childZD *ZoneData) republishOneFlag(spec signalSpec, nsNames []string) {
 			"zone", childZD.ZoneName, "flag", spec.flag)
 		return
 	}
+	// Fire-and-forget (nil ctx): this runs inside a post-refresh hook, which
+	// must not block on the zone updater.
+	childZD.publishAtSignalNames(nil, spec.flag, signalSourceHsyncparam, spec.prefix, spec.rrtypes, srcRRs, nsNames, false)
+}
 
+// The signal-name prefixes this file produces and the parent side consumes
+// (LookupChildKeyAtSignal, queryCDSAtSignalingNames).
+const (
+	signalPrefixSig0Key = "_sig0key"
+	signalPrefixDsboot  = "_dsboot"
+)
+
+// signalOwnerName is the one spelling of an RFC 9615 signal name:
+// <prefix>.<child>._signal.<ns>. Producer and consumers share it so they
+// cannot drift.
+func signalOwnerName(prefix, child, ns string) string {
+	return prefix + "." + dns.Fqdn(child) + "_signal." + dns.Fqdn(ns)
+}
+
+// signalPublishTarget is one NS of the child whose signal name this server
+// can publish at: the name falls in a zone served here as primary.
+type signalPublishTarget struct {
+	NS    string
+	Owner string
+	Zone  *ZoneData
+}
+
+// signalPublishTargets lists, for the child's apex NS set, the signal names
+// this server is locally primary for. An NS whose signal name is not in a
+// local primary zone is a non-starter and is skipped; the draft has the
+// nameserver's operator publish it, and that is someone else.
+//
+// This is also the child-side test of whether the at-ns SIG(0) bootstrap
+// method is satisfiable at all (zoneChildBootstrapMethods): a child cannot
+// offer at-ns to a parent unless it can put its KEY somewhere the parent's
+// LookupChildKeyAtSignal will look.
+func (childZD *ZoneData) signalPublishTargets(prefix string, nsNames []string) []signalPublishTarget {
+	var out []signalPublishTarget
 	for _, ns := range nsNames {
-		owner := fmt.Sprintf("%s.%s_signal.%s", spec.prefix, childZD.ZoneName, ns)
-
+		owner := signalOwnerName(prefix, childZD.ZoneName, ns)
 		target := FindZone(owner)
 		if target == nil || target.ZoneType != Primary {
 			lgSignal.Debug("skipping NS: not locally primary for signal name",
-				"zone", childZD.ZoneName, "flag", spec.flag, "ns", ns, "signal", owner)
+				"zone", childZD.ZoneName, "prefix", prefix, "ns", ns, "signal", owner)
 			continue
 		}
+		out = append(out, signalPublishTarget{NS: ns, Owner: owner, Zone: target})
+	}
+	return out
+}
 
-		desired := reownRRs(srcRRs, owner)
-		if signalRRsEqual(target, owner, spec.rrtypes, desired) {
+// publishAtSignalNames publishes srcRRs, re-owned to <prefix>.<child>._signal.<ns>,
+// into the local primary zone owning each of those names, for every NS in
+// nsNames this server can publish for. Change-gated per target: a signal
+// RRset that already matches is left alone. With onlyExisting, targets that
+// hold no RRset of these types yet are skipped -- that is the SIG(0) rollover
+// refresh, which must update the signal names a bootstrap once populated
+// without starting to populate ones it never did.
+//
+// With a non-nil ctx the publication is CONFIRMED: each update is waited on
+// until the zone updater reports it applied (or refused, or the wait ran out),
+// and only an applied update counts. The bootstrap path needs that -- the
+// parent will look for the KEY the moment the ceremony arrives, and an
+// enqueued update is not a published record. With a nil ctx the update is
+// only enqueued, for callers that must not block (the post-refresh hook).
+//
+// source is what goes in the SignalPublication ledger: signalSourceHsyncparam
+// or signalSourceAtNs. A ledger row is written for every target that ends up
+// holding the desired content, INCLUDING one the change gate found already
+// correct -- otherwise a restart against a zone that is already published
+// would leave the publication unrecorded and therefore unwithdrawable.
+//
+// Returns the number of targets whose signal RRset is now (or already was)
+// the desired content. Zero means the child could not be published at any
+// signal name; when there were targets to publish at, that is logged.
+func (childZD *ZoneData) publishAtSignalNames(ctx context.Context, what, source, prefix string, rrtypes []uint16, srcRRs []dns.RR, nsNames []string, onlyExisting bool) int {
+	satisfied, attempted := 0, 0
+	for _, tgt := range childZD.signalPublishTargets(prefix, nsNames) {
+		if onlyExisting && !signalRRsPresent(tgt.Zone, tgt.Owner, rrtypes) {
+			continue
+		}
+		attempted++
+		desired := reownRRs(srcRRs, tgt.Owner)
+		if signalRRsEqual(tgt.Zone, tgt.Owner, rrtypes, desired) {
+			satisfied++
+			childZD.recordSignalPublication(tgt, source, prefix)
 			continue // already published, change-gated no-op
 		}
-
-		if err := target.publishSignalRRs(owner, spec.rrtypes, desired); err != nil {
+		if err := tgt.Zone.publishSignalRRs(ctx, tgt.Owner, rrtypes, desired); err != nil {
 			lgSignal.Error("failed to publish signal RRset",
-				"zone", childZD.ZoneName, "flag", spec.flag, "ns", ns,
-				"signal", owner, "target", target.ZoneName, "err", err)
+				"zone", childZD.ZoneName, "what", what, "ns", tgt.NS,
+				"signal", tgt.Owner, "target", tgt.Zone.ZoneName, "err", err)
 			continue
 		}
-		lgSignal.Info("republished apex RRset at signal name",
-			"zone", childZD.ZoneName, "flag", spec.flag, "ns", ns,
-			"signal", owner, "target", target.ZoneName, "rrs", len(desired))
+		satisfied++
+		childZD.recordSignalPublication(tgt, source, prefix)
+		lgSignal.Info("published RRset at signal name",
+			"zone", childZD.ZoneName, "what", what, "ns", tgt.NS,
+			"signal", tgt.Owner, "target", tgt.Zone.ZoneName, "rrs", len(desired), "confirmed", ctx != nil)
 	}
+	if attempted > 0 && satisfied == 0 {
+		lgSignal.Warn("no signal name could be published for the zone; a parent verifying via at-ns will not find the KEY there",
+			"zone", childZD.ZoneName, "what", what, "prefix", prefix, "targets", attempted)
+	}
+	return satisfied
 }
+
+// canPublishSig0KeyAtSignal reports whether at least one of the child's
+// nameservers has its _sig0key signal name in a zone this server is primary
+// for -- the precondition for offering the at-ns bootstrap method.
+func (childZD *ZoneData) canPublishSig0KeyAtSignal() bool {
+	return len(childZD.signalPublishTargets(signalPrefixSig0Key, childZD.apexNSNames())) > 0
+}
+
+// publishSig0KeyAtSignalNames is the at-ns half of the child's SIG(0)
+// bootstrap (draft-ietf-dnsop-delegation-mgmt-via-ddns-02 §"When Child
+// Nameserver Is In A DNSSEC-signed Zone"): put the KEY the child is about to
+// bootstrap at _sig0key.<child>._signal.<ns> for every NS this server can
+// publish for, before the self-signed UPDATE goes to the parent, so the
+// parent's at-ns verification finds it. The source is the keystore KEY, not
+// the apex RRset: the apex publication is itself an asynchronous zone update
+// and may not have landed yet. Returns the number of signal names satisfied.
+func (childZD *ZoneData) publishSig0KeyAtSignalNames(ctx context.Context, keys []dns.RR) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return childZD.publishAtSignalNames(ctx, "at-ns bootstrap", signalSourceAtNs, signalPrefixSig0Key, []uint16{dns.TypeKEY}, keys, childZD.apexNSNames(), false)
+}
+
+// refreshSig0KeyAtSignalNames re-publishes keys at every _sig0key signal name
+// a previous bootstrap populated, after a SIG(0) key rollover, so a parent
+// re-verifying via at-ns does not find the retired key. Signal names never
+// populated are left alone.
+func (childZD *ZoneData) refreshSig0KeyAtSignalNames(ctx context.Context, keys []dns.RR) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return childZD.publishAtSignalNames(ctx, "SIG(0) rollover", signalSourceAtNs, signalPrefixSig0Key, []uint16{dns.TypeKEY}, keys, childZD.apexNSNames(), true)
+}
+
+// signalRRsPresent reports whether the target zone holds any RRset of the
+// given types at owner.
+func signalRRsPresent(target *ZoneData, owner string, rrtypes []uint16) bool {
+	for _, rrtype := range rrtypes {
+		if rrset, err := target.GetRRset(owner, rrtype); err == nil && rrset != nil && len(rrset.RRs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// signalPublishApplyTimeout bounds the confirmed publish's wait for the zone
+// updater. A variable so tests can shorten it.
+var signalPublishApplyTimeout = UpdateApplyTimeout
 
 // publishSignalRRs replaces the signal-name RRsets in the (primary) target
 // zone with the desired RRs. It enqueues a delete-RRset (ClassANY) per
 // rrtype followed by the adds (ClassINET) so the result is exactly the
 // desired set, re-signed by the normal ZONE-UPDATE path if the target is
 // signed.
-func (target *ZoneData) publishSignalRRs(owner string, rrtypes []uint16, desired []dns.RR) error {
+//
+// With a non-nil ctx it waits for the updater's verdict (UpdateRequest.Resp),
+// the same promise the DSYNC API handler makes its clients: a nil return then
+// means applied and being served, not merely queued. A refused apply, a
+// cancelled ctx, or the apply timeout is an error. With a nil ctx it only
+// enqueues.
+func (target *ZoneData) publishSignalRRs(ctx context.Context, owner string, rrtypes []uint16, desired []dns.RR) error {
 	if target.KeyDB == nil || target.KeyDB.UpdateQ == nil {
 		return fmt.Errorf("target zone %q has no KeyDB.UpdateQ", target.ZoneName)
 	}
@@ -142,13 +327,35 @@ func (target *ZoneData) publishSignalRRs(owner string, rrtypes []uint16, desired
 	}
 	actions = append(actions, desired...)
 
-	target.KeyDB.UpdateQ <- UpdateRequest{
+	ur := UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       target.ZoneName,
 		Actions:        actions,
 		InternalUpdate: true,
 	}
-	return nil
+	if ctx == nil {
+		target.KeyDB.UpdateQ <- ur
+		return nil
+	}
+
+	respch := make(chan ZoneUpdateResult, 1)
+	ur.Resp = respch
+	select {
+	case target.KeyDB.UpdateQ <- ur:
+	case <-ctx.Done():
+		return fmt.Errorf("cancelled while queueing the signal update for %s: %w", owner, ctx.Err())
+	}
+	select {
+	case res := <-respch:
+		if res.Err != nil {
+			return fmt.Errorf("signal update for %s was not applied: %w", owner, res.Err)
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("cancelled while the signal update for %s was being applied: %w", owner, ctx.Err())
+	case <-time.After(signalPublishApplyTimeout):
+		return fmt.Errorf("timed out after %s waiting for the signal update for %s to be applied", signalPublishApplyTimeout, owner)
+	}
 }
 
 // apexRRs returns the apex RRs of the given type, or nil. It reads the apex

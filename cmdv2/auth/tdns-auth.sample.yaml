@@ -157,14 +157,6 @@ server:
    version:   tdns-server {version}
    hostname:  there-is-no-place-like-127.0.0.1
 
-childsync:                 # What to do when we are the child
-   # NOTE: only update-ns, update-a and update-aaaa are read from this block.
-   # Child scheme selection is configured under delegationsync.child.schemes
-   # below; childsync.schemes / sync-on-boot / syncwithparent are NOT read.
-   update-ns:       true
-   update-a:        true
-   update-aaaa:     true
-
 # Named delegation backends for parent zones that receive child UPDATEs.
 # Predefined: "db" and "direct" (no config needed).
 #
@@ -302,13 +294,44 @@ delegationsync:
             # Methods this child will accept a parent using. Intersected with
             # the parent's advertised SVCB bootstrap set at run time; strongest
             # overlap wins (at-apex > at-ns > unsigned > manual). Omit defaults
-            # to [at-apex]; `at-ns` is valid but the child cannot yet publish
-            # RFC 9615 `_signal`. An empty list refuses every method. `unsigned`
-            # and `manual` must be opted into. A parent template bound to the
-            # `manual` policy advertises `at-apex,at-ns,manual`; intersection
-            # with this default is `at-apex`. Absent SVCB falls back to
-            # this list.
-            methods: [ at-apex ]
+            # to [at-apex, at-ns]. `at-ns` publishes the KEY at
+            # _sig0key.<child>._signal.<ns> and is offered only for a zone
+            # where at least one of its nameservers has that name in a zone
+            # this server is primary for (a proxy never can). An empty list
+            # refuses every method. `unsigned` and `manual` must be opted
+            # into. A parent template bound to the `manual` policy advertises
+            # `at-apex,at-ns,manual`; intersection with this default is
+            # `at-apex`. Absent SVCB falls back to this list; a FAILED SVCB
+            # lookup is retried, not treated as absent.
+            methods: [ at-apex, at-ns ]
+
+         # Mutual authentication (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
+         # §"Mutual Authentication"). The parent's UPDATE Receiver SIG(0)-signs
+         # every KeyState response with the KEY it publishes at the DSYNC
+         # UPDATE target. This child acts on a response only if that signature
+         # verifies with a receiver KEY it can authenticate: DNSSEC-validated
+         # (the DSYNC lookup that named the target and the KEY lookup both
+         # validate), or manually trusted in the truststore:
+         #    tdns-cli truststore sig0 add   --child updates.parent.example. --src Kupdates.parent.example.+015+NNNNN.key
+         #    tdns-cli truststore sig0 trust --child updates.parent.example. --keyid NNNNN
+         # A response that cannot be authenticated is rejected, and the
+         # parent's SVCB bootstrap advertisement is ignored (the child falls
+         # back to `methods` above) unless it validates too. Set this to true
+         # to act on unauthenticated responses and advertisements anyway.
+         #
+         # What it does NOT change: a signature that is present but wrong, or a
+         # DNSSEC verdict of BOGUS on the receiver KEY, the DSYNC or the SVCB,
+         # is rejected regardless; and the tdns-auth child's own bootstrap
+         # (zone load) makes no KeyState inquiry, so it sends its KEY UPDATE
+         # either way -- the verification applies to the KeyState poller.
+         #
+         # Unsigned-parent test setups: turning this on also makes the parent's
+         # advertisement count, and an unsigned parent advertises
+         # `unsigned,manual`, which does not intersect the default `methods`
+         # above. Add `unsigned` to `methods` as well, or enabling this refuses
+         # the bootstrap it is meant to allow. Lab convenience; never a
+         # production setting.
+         allow-insecure: false
 
 scanner:
    interval:  30                        # seconds between periodic scan runs
@@ -588,13 +611,13 @@ catalog:
                                        # - map:   Default, general-purpose (recommended)
                                        # - xfr:   Zone transfer only (AXFR, NO normal queries)
          options:   []                 # Optional zone options to apply to member zones
-                                       # Example: ["delegation-sync-child"]
+                                       # Example: ["parentsync"]
 
       edge:                         # Group name (matches "configedge" in catalog zone)
          upstream:  "192.0.2.1:5353"
          tsig-key:  ""
          store:     map                # Default storage (recommended)
-         options:   []                 # e.g. ["delegation-sync-child"]
+         options:   []                 # e.g. ["parentsync"]
 
    # Signing groups (documentation/informational only, not used for auto-configuration).
    # These groups can be used to indicate which signing infrastructure is

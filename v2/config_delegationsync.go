@@ -70,6 +70,21 @@ type DsyncChildUpdateConf struct {
 	Bootstrap struct {
 		Methods []string `yaml:"methods" mapstructure:"methods"`
 	} `yaml:"bootstrap" mapstructure:"bootstrap"`
+
+	// AllowInsecure permits acting on parent-derived input that cannot be
+	// authenticated: a KeyState response that is unsigned or signed with a
+	// receiver KEY that is neither DNSSEC-validated (together with the DSYNC
+	// lookup that named it) nor manually trusted in the truststore, and an
+	// SVCB bootstrap advertisement discovered without DNSSEC validation. It
+	// is the draft's "subject to local policy" escape for an unsigned parent
+	// zone with no manually bootstrapped receiver key (ddns-02 §"Authenticating
+	// Responses"), and mirrors DsyncApiChildConf.AllowInsecure: one switch,
+	// because the two inputs are the same protection seen from two sides.
+	//
+	// It does NOT make a wrong signature acceptable: a response whose SIG(0)
+	// is present but fails to verify is rejected regardless. A lab
+	// convenience. Never a production setting.
+	AllowInsecure bool `yaml:"allow-insecure" mapstructure:"allow-insecure"`
 }
 
 // DsyncUpdateSchemeConf is the parent's UPDATE scheme: the DSYNC record keys
@@ -425,11 +440,7 @@ var delegationSyncConf atomic.Pointer[DelegationSyncConf]
 // ParseConfig on both first start and reload. On error the previous block
 // stays installed.
 func SetDelegationSyncConfig(dsc DelegationSyncConf) error {
-	compiled, err := compileDelegationPolicies(dsc.Policies)
-	if err != nil {
-		return err
-	}
-	methods, err := compileChildBootstrapMethods(dsc.Child.Update.Bootstrap.Methods)
+	compiled, methods, err := CompileDelegationSyncPolicies(dsc)
 	if err != nil {
 		return err
 	}

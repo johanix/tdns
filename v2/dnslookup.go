@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log"
@@ -25,6 +26,18 @@ import (
 )
 
 var lgDns = Logger("dns")
+
+// ErrPrivacyUnavailable is returned when the client asked for strict privacy
+// (PRIVACY option, level 2) and no encrypted transport was available to carry
+// the query. ImrResponder turns it into SERVFAIL + EDE
+// EDEPrivacyRequestedUnavailable.
+//
+// It is a sentinel, matched with errors.Is, precisely so the message text is
+// not load-bearing: the responder used to strings.Contains() on "PR flag
+// requires encrypted transport", which meant every error string on this path
+// was part of the interface and could not be reworded without silently losing
+// the EDE.
+var ErrPrivacyUnavailable = errors.New("strict privacy requested but no encrypted transport available")
 
 // 1. Is the RRset in a zone that we're auth for? If so we claim that the data is valid
 // 2. Is the RRset in a child zone? If so, start by fetching and validating the child DNSKEYs.
@@ -710,9 +723,10 @@ type ServerAddrXportTuple struct {
 //   - Final order: ascending Rank, then ascending RTT within the same
 //     Rank, so a faster fallback cannot leapfrog the share-picked winner.
 //
-// requireEncrypted excludes Do53 tuples; if the server has no
-// encrypted transport available the server contributes no tuples.
-func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.AuthServer, requireEncrypted bool) (string, *cache.Zone, []ServerAddrXportTuple) {
+// privacy is passed through to candidateTransports: PrivacyStrict excludes
+// Do53 tuples, and a server with no encrypted transport then contributes no
+// tuples at all.
+func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) (string, *cache.Zone, []ServerAddrXportTuple) {
 	zoneName, _, _ := imr.Cache.FindClosestKnownZone(qname)
 	var zone *cache.Zone
 	if zoneName != "" {
@@ -724,7 +738,7 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 	var tuples []ServerAddrXportTuple
 	var suspectTuples []ServerAddrXportTuple
 	for nsname, server := range serverMap {
-		transports := candidateTransports(server, qname, requireEncrypted)
+		transports := candidateTransports(server, qname, privacy)
 		if len(transports) == 0 {
 			continue
 		}
@@ -794,7 +808,7 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 	if len(tuples) == 0 && len(suspectTuples) == 0 {
 		lgDns.Warn("prioritizeServers: no usable (server, addr, transport) tuples; the query cannot be sent",
 			"qname", qname, "zone", zoneName, "servers", len(serverMap),
-			"require_encrypted", requireEncrypted, "why", explainNoTuples(serverMap, zone, qname, requireEncrypted))
+			"privacy", privacy.String(), "why", explainNoTuples(serverMap, zone, qname, privacy))
 	}
 
 	sortTuplesByRankThenRTT(tuples)
@@ -843,20 +857,12 @@ func sortTuplesByRankThenRTT(tuples []ServerAddrXportTuple) {
 	copy(tuples, sorted)
 }
 
-// candidateTransports returns the ordered list of transports to try for a
-// query to this (qname, server), honoring OOTS query-load shares (-03 /
-// svcb-oots-00): each encrypted transport with weight > 1 gets that share of
-// the load; do53_share = max(0, 100−Σ encrypted). The deterministic
-// fnv(qname|server) bucket picks the winner from that pool so Do53 usually
-// wins when its share dominates. When not requireEncrypted and do53_share is
-// 0, Do53 is still appended last as a reliability fallback. requireEncrypted
-// excludes Do53 entirely (independent of OOTS).
 // explainNoTuples says, per server, why it contributed no (addr, transport)
 // tuple. Written for the case that produced #344: a server that is present in
 // the map and named in the logs, but yields nothing -- which until now looked
 // identical to having no server at all.
 func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
-	qname string, requireEncrypted bool) string {
+	qname string, privacy edns0.PrivacyLevel) string {
 
 	if len(serverMap) == 0 {
 		return "no servers in the map for this zone"
@@ -867,8 +873,8 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 		case server == nil:
 			reasons = append(reasons, fmt.Sprintf("%s: nil server entry", nsname))
 			continue
-		case len(candidateTransports(server, qname, requireEncrypted)) == 0:
-			reasons = append(reasons, fmt.Sprintf("%s: no usable transport (encryption required, none available)", nsname))
+		case len(candidateTransports(server, qname, privacy)) == 0:
+			reasons = append(reasons, fmt.Sprintf("%s: no usable transport (privacy=%s, no encrypted transport available)", nsname, privacy))
 			continue
 		}
 		addrs := server.GetAddrs()
@@ -879,7 +885,7 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 		}
 		var serverBackoff, zoneBackoff int
 		for _, addr := range addrs {
-			for _, t := range candidateTransports(server, qname, requireEncrypted) {
+			for _, t := range candidateTransports(server, qname, privacy) {
 				if !server.IsAddrXportAvailable(addr, t) {
 					serverBackoff++
 					continue
@@ -965,9 +971,25 @@ func refusalIndicatesLameness(qtype uint16, rcode int) bool {
 	return true
 }
 
-func candidateTransports(server *cache.AuthServer, qname string, requireEncrypted bool) []core.Transport {
+// candidateTransports returns the ordered list of transports to try for a
+// query to this (qname, server), honoring OOTS query-load shares (-03 /
+// svcb-oots-00): each encrypted transport with weight > 1 gets that share of
+// the load; do53_share = max(0, 100−Σ encrypted). The deterministic
+// fnv(qname|server) bucket picks the winner from that pool so Do53 usually
+// wins when its share dominates. With privacy == PrivacyNone and do53_share
+// 0, Do53 is still appended last as a reliability fallback.
+//
+// The client's PRIVACY level changes the pool rather than the selection:
+//
+//   - PrivacyNone: the OOTS shares as described above.
+//   - PrivacyOpportunistic: only encrypted transports enter the weighted
+//     draw, and Do53 is appended last as the fallback the client said it
+//     would accept. That is "prefer encrypted", not "encrypted only".
+//   - PrivacyStrict: encrypted transports only, no Do53 at any position. A
+//     server advertising none contributes no transports at all.
+func candidateTransports(server *cache.AuthServer, qname string, privacy edns0.PrivacyLevel) []core.Transport {
 	if server == nil {
-		if requireEncrypted {
+		if privacy == edns0.PrivacyStrict {
 			return nil
 		}
 		return []core.Transport{core.TransportDo53}
@@ -1005,7 +1027,10 @@ func candidateTransports(server *cache.AuthServer, qname string, requireEncrypte
 	})
 
 	var pool []wt
-	if requireEncrypted {
+	if privacy != edns0.PrivacyNone {
+		// Opportunistic and strict both draw only from the encrypted
+		// transports; they part company over whether Do53 may be appended
+		// after them, below.
 		pool = encrypted
 	} else {
 		do53Share := 100 - encSum
@@ -1019,7 +1044,7 @@ func candidateTransports(server *cache.AuthServer, qname string, requireEncrypte
 	}
 
 	if len(pool) == 0 {
-		if requireEncrypted {
+		if privacy == edns0.PrivacyStrict {
 			return nil
 		}
 		return []core.Transport{core.TransportDo53}
@@ -1066,7 +1091,7 @@ func candidateTransports(server *cache.AuthServer, qname string, requireEncrypte
 		out = append(out, c.t)
 	}
 
-	if !requireEncrypted {
+	if privacy != edns0.PrivacyStrict {
 		hasDo53 := false
 		for _, t := range out {
 			if t == core.TransportDo53 {
@@ -1173,18 +1198,19 @@ func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, 
 
 // force is true if we should force a lookup even if the answer is in the cache
 // visitedZones tracks which zones we've been referred to for this qname to prevent referral loops
-// requireEncrypted is true if PR flag is set and only encrypted transports should be used
+// privacy is the client's PRIVACY EDNS(0) level: none, opportunistic (prefer
+// an encrypted transport, cleartext accepted) or strict (encrypted or fail).
 // Returns: rrset, rcode, context, transport, error
-func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, force bool, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
-	rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, make(map[string]bool), requireEncrypted)
+func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, force bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
+	rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, make(map[string]bool), privacy)
 	return rrset, rcode, cacheCtx, transport, err
 }
 
 // IterativeDNSQueryWithLoopDetection is the internal implementation with loop detection
 // visitedZones tracks which zones we've been referred to for this qname (format: "qname:zone")
-// requireEncrypted is true if PR flag is set and only encrypted transports should be used
+// privacy is the client's PRIVACY EDNS(0) level (see IterativeDNSQuery)
 // Returns: rrset, rcode, context, transport, error
-func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, force bool, visitedZones map[string]bool, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
+func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, force bool, visitedZones map[string]bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	lg := imr.Cache.Logger
 
 	// Apply per-query wall-time budget. context.WithTimeout takes
@@ -1216,10 +1242,14 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			switch crrset.Context {
 			case cache.ContextAnswer, cache.ContextNoErrNoAns, cache.ContextNXDOMAIN:
 				// These are direct answers or negative responses - safe to use
-				// PR flag enforcement: if PR is set, skip cached data that came over unencrypted transport
-				if requireEncrypted && !core.IsEncryptedTransport(crrset.Transport) {
+				// Strict privacy: cached data that arrived over an
+				// unencrypted transport is not usable, so re-query. An
+				// opportunistic client accepted cleartext, so it keeps the
+				// cache hit rather than paying for a re-query it did not ask
+				// for.
+				if privacy == edns0.PrivacyStrict && !core.IsEncryptedTransport(crrset.Transport) {
 					if Globals.Debug {
-						lg.Printf("IterativeDNSQuery: PR flag set but cached data for %s %s came over unencrypted transport (%s), skipping cache", qname, dns.TypeToString[qtype], core.TransportToString[crrset.Transport])
+						lg.Printf("IterativeDNSQuery: strict privacy requested but cached data for %s %s came over unencrypted transport (%s), skipping cache", qname, dns.TypeToString[qtype], core.TransportToString[crrset.Transport])
 					}
 					crrset = nil // Force query over encrypted transport
 				} else {
@@ -1234,8 +1264,8 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				// UpgradeIndirectCacheHits=false toggle, return the
 				// cached data if it matches qtype.
 				if !imr.upgradeIndirectCacheHits() && crrset.RRset != nil && crrset.RRset.RRtype == qtype {
-					if requireEncrypted && !core.IsEncryptedTransport(crrset.Transport) {
-						// PR flag still wins -- need encrypted transport
+					if privacy == edns0.PrivacyStrict && !core.IsEncryptedTransport(crrset.Transport) {
+						// Strict privacy still wins -- need encrypted transport
 						crrset = nil
 					} else {
 						if Globals.Debug {
@@ -1278,7 +1308,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// consistently. The serverMap argument is deliberately ignored here: a
 	// forward zone outranks whatever zone cut the caller had found.
 	if fz := imr.forwardZoneFor(qname); fz != nil {
-		return imr.forwardQuery(ctx, qname, qtype, fz, force, requireEncrypted)
+		return imr.forwardQuery(ctx, qname, qtype, fz, force, privacy)
 	}
 
 	var rrset core.RRset
@@ -1291,40 +1321,37 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		return nil, 0, cache.ContextFailure, core.TransportDo53, err
 	}
 
-	dnskeyBypass := imr.dnskeyTransportBypass(qname, qtype)
+	dnskeyBypass := imr.dnskeyTransportBypass(qname, qtype, privacy)
 	if qtype == dns.TypeDNSKEY {
 		imr.noteDNSKEYLookup(dnskeyBypass)
 	}
 
-	// If PR flag is set, verify at least one server has encrypted transports available
-	if requireEncrypted {
+	// Under strict privacy, verify up front that at least one server has an
+	// encrypted transport available: failing here names the actual reason,
+	// rather than letting the walk below run out of tuples and report a
+	// generic dead end. Opportunistic privacy has no such precondition --
+	// falling back to cleartext is exactly what it asked for.
+	//
+	// Availability is asked of candidateTransports rather than computed here,
+	// so the precheck and the tuple selection below cannot disagree. A
+	// hand-rolled scan did disagree in two ways: it read server.Transports
+	// without a nil check, where candidateTransports handles a nil entry (as
+	// prioritizeServers does), and it counted an encrypted transport of
+	// weight 0 or 1 as available, where candidateTransports excludes it.
+	if privacy == edns0.PrivacyStrict {
 		hasEncrypted := false
 		for _, server := range serverMap {
-			for _, t := range server.Transports {
-				if core.IsEncryptedTransport(t) {
-					hasEncrypted = true
-					break
-				}
-			}
-			if !hasEncrypted {
-				// Check transport weights
-				for t := range server.TransportWeights {
-					if core.IsEncryptedTransport(t) && server.TransportWeights[t] > 0 {
-						hasEncrypted = true
-						break
-					}
-				}
-			}
-			if hasEncrypted {
+			if len(candidateTransports(server, qname, edns0.PrivacyStrict)) > 0 {
+				hasEncrypted = true
 				break
 			}
 		}
 		if !hasEncrypted {
-			return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but no servers have encrypted transports available")
+			return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, fmt.Errorf("%w: no servers have encrypted transports available", ErrPrivacyUnavailable)
 		}
 	}
 
-	// Prioritize (server, addr, transport) tuples. requireEncrypted is
+	// Prioritize (server, addr, transport) tuples. The privacy level is
 	// applied here so tryServer no longer needs to filter.
 	//
 	// Two-attempt outer loop: if the first pass exhausts every tuple
@@ -1353,7 +1380,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// just failed.
 	dnskeyAttempted := map[cache.AddrXport]bool{}
 	for attempt := 0; attempt < 2; attempt++ {
-		zoneName, zone, prioritized = imr.prioritizeServers(qname, serverMap, requireEncrypted)
+		zoneName, zone, prioritized = imr.prioritizeServers(qname, serverMap, privacy)
 		if Globals.Debug {
 			lg.Printf("IterativeDNSQuery: prioritized %d (server,addr,transport) tuples (from %d servers) attempt=%d", len(prioritized), len(serverMap), attempt+1)
 		}
@@ -1471,7 +1498,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				// Parse any transport signal for this specific server even on final answers
 				// Note: server is a shared instance across all zones, so modifications are automatically visible everywhere
 				imr.parseTransportForServerFromAdditional(ctx, server, r)
-				tmprrset, rcode2, ctx2, transport2, err, done := imr.handleAnswer(ctx, qname, qtype, r, force, wireTransport, requireEncrypted)
+				tmprrset, rcode2, ctx2, transport2, err, done := imr.handleAnswer(ctx, qname, qtype, r, force, wireTransport, privacy)
 				if err != nil || done {
 					return tmprrset, rcode2, ctx2, transport2, err
 				}
@@ -1487,7 +1514,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					if len(serverMap) == 0 {
 						return nil, rcode, cache.ContextReferral, wireTransport, nil
 					}
-					rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones, requireEncrypted)
+					rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones, privacy)
 					return rrset, rcode, cacheCtx, transport, err
 				}
 				continue
@@ -1512,7 +1539,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					}
 					continue
 				case responseKindReferral:
-					return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, wireTransport, requireEncrypted)
+					return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, wireTransport, privacy)
 				case responseKindError:
 					lgDns.Debug("IterativeDNSQuery: treating response as error",
 						"qname", qname, "qtype", dns.TypeToString[qtype],
@@ -1554,8 +1581,8 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// Enrich the error with diagnostic info so operators don't see a
 	// bare "no Answers found" / "context deadline exceeded" and have to
 	// dig through the IMR log to find out what happened.
-	if requireEncrypted {
-		base := fmt.Errorf("PR flag requires encrypted transport but no answers found from any server with encrypted transport for '%s %s'", qname, dns.TypeToString[qtype])
+	if privacy == edns0.PrivacyStrict {
+		base := fmt.Errorf("%w: no answers found from any server with encrypted transport for '%s %s'", ErrPrivacyUnavailable, qname, dns.TypeToString[qtype])
 		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, walkErr(zoneName, lastNS, lastAddr, lastTransport, attempts, lastErr, base)
 	}
 	base := fmt.Errorf("IterativeDNSQuery: no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
@@ -2489,7 +2516,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 	}
 }
 
-func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, transport core.Transport, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error, bool) {
+func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, transport core.Transport, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error, bool) {
 	if r == nil {
 		if Globals.Debug {
 			imr.Cache.Logger.Printf("*** handleAnswer: nil response for qname=%s, qtype=%s", qname, dns.TypeToString[qtype])
@@ -2510,7 +2537,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		case dns.TypeCNAME:
 			rrset.RRs = append(rrset.RRs, rr)
 			target := rr.(*dns.CNAME).Target
-			tmprrset, rcode, context, chaseTransport, err := imr.chaseCNAME(ctx, target, qtype, force, requireEncrypted)
+			tmprrset, rcode, context, chaseTransport, err := imr.chaseCNAME(ctx, target, qtype, force, privacy)
 			if err != nil {
 				return nil, rcode, context, transport, err, true
 			}
@@ -2649,7 +2676,7 @@ func collectDSFromAuthority(authority []dns.RR, zonename string) (dsRRs, dsSigs 
 	return dsRRs, dsSigs
 }
 
-func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, transport core.Transport, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
+func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, transport core.Transport, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	if Globals.Debug && !imr.Quiet {
 		imr.Cache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
 	}
@@ -2924,7 +2951,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	// rrcache.Logger.Printf("*** handleReferral: calling revalidateReferralNS for zone %s, serverMap: %+v", zonename, serverMap)
 	imr.scheduleReferralNSRevalidation(ctx, zonename, serverMap)
 	//rrcache.Logger.Printf("*** handleReferral: revalidateReferralNS returned, calling IterativeDNSQuery for zone %s, serverMap: %+v", zonename, serverMap)
-	rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones, requireEncrypted)
+	rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones, privacy)
 	return rrset, rcode, cacheCtx, transport, err
 }
 
@@ -3114,7 +3141,7 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, host string, rrtype uint16
 	hostServerMap := map[string]*cache.AuthServer{
 		server.Name: server,
 	}
-	rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, host, rrtype, hostServerMap, force, false) // PR not required for glue revalidation
+	rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, host, rrtype, hostServerMap, force, edns0.PrivacyNone) // privacy is a client signal; glue revalidation is our own traffic
 	if err != nil || rrset == nil || len(rrset.RRs) == 0 {
 		return
 	}
@@ -3481,7 +3508,7 @@ func nsecCoversName(name string, nsec *dns.NSEC) bool {
 	return strings.Compare(target, owner) >= 0 || strings.Compare(target, next) < 0
 }
 
-func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, force bool, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
+func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, force bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	maxchase := 10
 	cur := target
 	var combinedTransport core.Transport = core.TransportDoQ // Start with encrypted, will downgrade if needed
@@ -3499,7 +3526,7 @@ func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, for
 			return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, err
 		}
 		imr.Cache.Logger.Printf("*** IterativeDNSQuery: best match for target %s is %s", cur, bestmatch)
-		tmprrset, rcode, context, hopTransport, err := imr.IterativeDNSQuery(ctx, cur, qtype, tmpservers, force, requireEncrypted)
+		tmprrset, rcode, context, hopTransport, err := imr.IterativeDNSQuery(ctx, cur, qtype, tmpservers, force, privacy)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from IterativeDNSQuery: %v", err)
 			return nil, rcode, context, core.TransportDo53, err
@@ -3542,7 +3569,7 @@ func (imr *Imr) DefaultDNSKEYFetcher(ctx context.Context, name string) (*core.RR
 	if len(servers) == 0 {
 		return nil, fmt.Errorf("no servers for %s", name)
 	}
-	rr, _, _, _, err := imr.IterativeDNSQuery(ctx, name, dns.TypeDNSKEY, servers, false, false) // PR not required for DNSKEY fetches
+	rr, _, _, _, err := imr.IterativeDNSQuery(ctx, name, dns.TypeDNSKEY, servers, false, edns0.PrivacyNone) // privacy is a client signal; DNSKEY fetches are our own traffic
 	if err != nil || rr == nil || len(rr.RRs) == 0 {
 		return nil, fmt.Errorf("dnskey fetch failed for %s: %v", name, err)
 	}
@@ -3564,7 +3591,7 @@ func (imr *Imr) DefaultRRsetFetcher(ctx context.Context, qname string, qtype uin
 	if len(servers) == 0 {
 		return nil, fmt.Errorf("no servers for %s", qname)
 	}
-	rr, _, _, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, servers, false, false) // PR not required for fetcher
+	rr, _, _, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, servers, false, edns0.PrivacyNone) // privacy is a client signal; the fetcher is our own traffic
 	if err != nil || rr == nil || len(rr.RRs) == 0 {
 		return nil, fmt.Errorf("fetch failed for %s %s: %v", qname, dns.TypeToString[qtype], err)
 	}
@@ -3575,7 +3602,7 @@ func (imr *Imr) DefaultRRsetFetcher(ctx context.Context, qname string, qtype uin
 // It discards the rcode and CacheContext return values, only returning the RRset and error.
 func (imr *Imr) IterativeDNSQueryFetcher() cache.RRsetFetcher {
 	return func(ctx context.Context, qname string, qtype uint16, servers map[string]*cache.AuthServer) (*core.RRset, error) {
-		rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, servers, false, false) // PR not required for RRsetFetcher
+		rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, servers, false, edns0.PrivacyNone) // privacy is a client signal; RRsetFetcher is our own traffic
 		return rrset, err
 	}
 }

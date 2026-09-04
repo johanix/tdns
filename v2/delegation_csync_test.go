@@ -370,3 +370,26 @@ func TestComputeCsyncDeltaIgnoresUnknownTypes(t *testing.T) {
 		t.Fatalf("delta %+v calls %v", d, child.calls)
 	}
 }
+
+// computeCsyncDelta is a free function now, and its next caller is a different
+// subsystem (the UPDATE path, step 2). A nil logger used to be a panic in the
+// middle of a delegation decision; it is silence instead.
+func TestComputeCsyncDeltaToleratesNilLogger(t *testing.T) {
+	fetch := func(ctx context.Context, zone string, rrtype uint16) ([]dns.RR, bool, error) {
+		if rrtype == dns.TypeNS {
+			return []dns.RR{mustRR(t, "child.example. 3600 IN NS ns1.other.net.")}, true, nil
+		}
+		return nil, true, nil
+	}
+	noGlue := func(string, uint16) ([]dns.RR, bool) { return nil, false }
+
+	// Would panic on the first lg.Printf if the default were not installed.
+	d, err := computeCsyncDelta(context.Background(), "child.example.",
+		[]uint16{dns.TypeNS}, nil, noGlue, fetch, nil, true, true)
+	if err != nil {
+		t.Fatalf("nil logger must not fail the computation: %v", err)
+	}
+	if !d.Changed {
+		t.Error("fixture wrong: the delta should report a change")
+	}
+}

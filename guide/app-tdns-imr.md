@@ -91,7 +91,8 @@ Details of forwarding behaviour:
   query. AD is set only on local validation. Per-zone `trust-ad: true`
   instead adopts the upstream's AD bit, for positives and negatives alike;
   because that bit would otherwise be spoofable, `trust-ad` requires every
-  upstream of the zone to be encrypted and verified, enforced at startup.
+  upstream of the zone to be encrypted and verified; one that is not is
+  quarantined (see **Quarantine** below).
 - **Transports**: each upstream has its own transport (`do53`, `tcp`, `dot`,
   `doh`, `doq`) and port. Encrypted upstreams verify the server certificate
   by default (`tls-server-name`, or the upstream IP in a SAN), with
@@ -100,9 +101,26 @@ Details of forwarding behaviour:
   the resolver's *listeners* offer.
 - **Caching**: forwarded answers and negatives land in the same cache with
   their TTLs; repeat queries are answered from cache without touching the
-  upstream. The EDNS0 PR flag (privacy required) is honored: unencrypted
-  upstreams are skipped for PR queries, and a forward zone with no encrypted
-  upstream answers SERVFAIL with the corresponding EDE.
+  upstream. The PRIVACY EDNS(0) option is honored: under strict privacy
+  unencrypted upstreams are skipped, and a forward zone with no encrypted
+  upstream answers SERVFAIL with the corresponding EDE; under opportunistic
+  privacy the encrypted upstreams are simply tried first. Quarantined
+  upstreams count for neither: they are not dialled, so they cannot satisfy a
+  privacy requirement.
+- **Quarantine**: a misconfigured forward upstream does not stop the daemon.
+  It is *quarantined* — kept in the table, reported, and never dialled — and
+  the zone keeps answering on its remaining upstreams with reduced
+  redundancy, marking `config status` DEGRADED with a
+  `Config/ImrForwardUpstream` error naming it. When a zone has no usable
+  upstream left, the zone itself is quarantined: names under it SERVFAIL and
+  `config status` carries a `Config/ImrForwardZone` error. A quarantined zone
+  deliberately does **not** fall back to iteration — forwarding is
+  forward-only, and for a `zone: .` forward silently iterating would change
+  the resolution path for every name. `imr forward list` and `imr forward
+  status` mark the offending upstream and zone. Two config entries cannot be
+  quarantined because they have no namespace to apply to and are dropped
+  instead: an entry with no usable zone name, and a duplicate of a zone
+  already configured (the first definition stands).
 - **Startup and observability**: a forward zone covering the root skips the
   live `. NS` priming fetch (the hints are seeded offline), so a forward-all
   resolver starts and serves even when its upstream is down at boot. Every
@@ -121,7 +139,13 @@ Details of forwarding behaviour:
 - **Reload**: `config reload`, `config reload-zones` and SIGHUP re-read the
   `stubs:` and `forward:` blocks and apply them without a restart; untouched
   zones keep their live counters and backoffs, and an invalid forward table is
-  refused whole rather than half-applied. The rest of `imrengine:` still needs
+  refused whole rather than half-applied — deliberately unlike startup, which
+  quarantines and serves what is left. The asymmetry is the point: a reload
+  has a good running configuration to preserve, and startup has none. One
+  consequence to know: a daemon running with something quarantined is running
+  a config a reload would refuse, so an unrelated edit cannot be reloaded
+  until the quarantined upstream or zone is fixed or removed too. Repair
+  first, then extend — or restart, which quarantines and starts. The rest of `imrengine:` still needs
   a restart, and a reload says which edited keys those were.
 - **Limits**: upstream addresses are IP literals (no hostnames) and the DoH
   path is fixed at `/dns-query`.

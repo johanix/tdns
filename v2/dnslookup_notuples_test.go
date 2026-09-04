@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/cache"
+	"github.com/johanix/tdns/v2/edns0"
 )
 
 // A zero-tuple result means the query is never sent at all. It used to leave no
@@ -51,7 +52,7 @@ func TestExplainNoTuplesNamesTheReason(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := explainNoTuples(tc.serverMap, nil, "www.example.", false)
+			got := explainNoTuples(tc.serverMap, nil, "www.example.", edns0.PrivacyNone)
 			if !strings.Contains(got, tc.want) {
 				t.Errorf("explanation %q does not mention %q", got, tc.want)
 			}
@@ -66,7 +67,7 @@ func TestExplainNoTuplesNamesTheServer(t *testing.T) {
 		"ns1.example.": {Name: "ns1.example."},
 		"ns2.example.": {Name: "ns2.example.", Addrs: []string{"192.0.2.2"}},
 	}
-	got := explainNoTuples(sm, nil, "www.example.", false)
+	got := explainNoTuples(sm, nil, "www.example.", edns0.PrivacyNone)
 	for _, ns := range []string{"ns1.example.", "ns2.example."} {
 		if !strings.Contains(got, ns) {
 			t.Errorf("explanation %q does not name %s", got, ns)
@@ -180,7 +181,7 @@ func TestPrioritizeServersHandlesANilServerEntry(t *testing.T) {
 
 	// Must not panic, and the healthy server must still be usable: one bad map
 	// entry cannot be allowed to take the whole zone down with it.
-	_, _, tuples := imr.prioritizeServers("foo.example.", serverMap, false)
+	_, _, tuples := imr.prioritizeServers("foo.example.", serverMap, edns0.PrivacyNone)
 	if len(tuples) == 0 {
 		t.Fatal("a nil entry suppressed the healthy server alongside it")
 	}
@@ -193,7 +194,7 @@ func TestPrioritizeServersHandlesANilServerEntry(t *testing.T) {
 	// And with ONLY a nil entry, still no panic and no tuples.
 	_, _, tuples = imr.prioritizeServers("foo.example.", map[string]*cache.AuthServer{
 		"ns1.example.": nil,
-	}, false)
+	}, edns0.PrivacyNone)
 	if len(tuples) != 0 {
 		t.Errorf("a nil-only server map produced %d tuples", len(tuples))
 	}

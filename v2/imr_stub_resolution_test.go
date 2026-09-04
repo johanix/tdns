@@ -13,6 +13,7 @@ import (
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -150,7 +151,7 @@ func TestStubZoneSurvivesRefusedDSQuery(t *testing.T) {
 	// make the rest of the test vacuous. The walk error that comes with an
 	// exhausted tuple list is expected; what matters is what the refusal
 	// must NOT do.
-	rrset, rcode, _, _, _ := imr.IterativeDNSQuery(ctx, zone, dns.TypeDS, stubMap(), false, false)
+	rrset, rcode, _, _, _ := imr.IterativeDNSQuery(ctx, zone, dns.TypeDS, stubMap(), false, edns0.PrivacyNone)
 	if rrset != nil && len(rrset.RRs) > 0 {
 		t.Fatalf("DS query unexpectedly returned data: %v", rrset.RRs)
 	}
@@ -161,7 +162,7 @@ func TestStubZoneSurvivesRefusedDSQuery(t *testing.T) {
 	// Step 2 — the queries that went dead on foffe: with the refusal booked
 	// as a lame delegation, these made zero auth-server attempts and
 	// SERVFAILed. They must answer.
-	rrset, rcode, cctx, _, err := imr.IterativeDNSQuery(ctx, zone, dns.TypeSOA, stubMap(), false, false)
+	rrset, rcode, cctx, _, err := imr.IterativeDNSQuery(ctx, zone, dns.TypeSOA, stubMap(), false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("SOA query after refused DS: %v", err)
 	}
@@ -170,7 +171,7 @@ func TestStubZoneSurvivesRefusedDSQuery(t *testing.T) {
 			dns.RcodeToString[rcode], cache.CacheContextToString[cctx], rrset)
 	}
 
-	rrset, rcode, _, _, err = imr.IterativeDNSQuery(ctx, "www."+zone, dns.TypeA, stubMap(), false, false)
+	rrset, rcode, _, _, err = imr.IterativeDNSQuery(ctx, "www."+zone, dns.TypeA, stubMap(), false, edns0.PrivacyNone)
 	if err != nil {
 		t.Fatalf("A query after refused DS: %v", err)
 	}

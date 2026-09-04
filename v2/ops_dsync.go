@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -68,7 +69,7 @@ func publishedDsyncSchemes(rrs []dns.RR) map[core.DsyncScheme]bool {
 // URI, TXT and SVCB records at its _dsync owner -- observed while testing the
 // DSYNC API scheme. The address-RR paths in this file already guarded; these
 // did not.
-func (zd *ZoneData) PublishDsyncRRs() error {
+func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 	lg.Debug("PublishDsyncRRs", "zone", zd.ZoneName)
 	rrset := core.RRset{
 		Name: zd.ZoneName,
@@ -328,8 +329,14 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		}
 	}
 
+	// ctx as well as the timer: UpdateQ is unbuffered, so a stopped updater
+	// leaves this parked for the full timeout, and an operator-invoked publish
+	// should not outlive the request (or hold up shutdown) waiting for a queue
+	// nothing is reading.
 	select {
 	case zd.KeyDB.UpdateQ <- ur:
+	case <-ctx.Done():
+		return fmt.Errorf("PublishDsyncRRs: %w while sending update for zone %s", ctx.Err(), zd.ZoneName)
 	case <-time.After(5 * time.Second):
 		return fmt.Errorf("PublishDsyncRRs: timeout sending update for zone %s", zd.ZoneName)
 	}
@@ -448,7 +455,7 @@ func (zd *ZoneData) bootstrapSVCBActions(ttl uint32) []dns.RR {
 	return bootstrapSVCBReconcile(target, zd.boundDelegationPolicy().bootstrapSVCBData(), existing, ttl)
 }
 
-func (zd *ZoneData) UnpublishDsyncRRs() error {
+func (zd *ZoneData) UnpublishDsyncRRs(ctx context.Context) error {
 	// A placeholder DSYNC record, used only to carry the owner name and type
 	// into a delete. The class is set to ClassANY immediately below, which
 	// removes the entire RRset, so none of the rdata values matter -- but the
@@ -497,6 +504,8 @@ func (zd *ZoneData) UnpublishDsyncRRs() error {
 		Actions:        actions,
 		InternalUpdate: true,
 	}:
+	case <-ctx.Done():
+		return fmt.Errorf("UnpublishDsyncRRs: %w while sending update for zone %s", ctx.Err(), zd.ZoneName)
 	case <-time.After(5 * time.Second):
 		return fmt.Errorf("UnpublishDsyncRRs: timeout sending update for zone %s", zd.ZoneName)
 	}

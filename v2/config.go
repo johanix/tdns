@@ -205,11 +205,12 @@ type LogConf struct {
 }
 
 type ServiceConf struct {
-	Name       string `validate:"required"`
-	Debug      *bool
-	Verbose    *bool
-	Identities []string      // this is a strawman attempt at deciding on what name to publish the ALPN
-	Transport  TransportConf `yaml:"transport"`
+	Name         string `validate:"required"`
+	Debug        *bool
+	Verbose      *bool
+	PprofAddress string        `yaml:"pprof-address" mapstructure:"pprof-address"`
+	Identities   []string      // this is a strawman attempt at deciding on what name to publish the ALPN
+	Transport    TransportConf `yaml:"transport"`
 }
 
 type TransportConf struct {
@@ -226,6 +227,16 @@ type ListenersConf struct {
 	Addresses []string `yaml:"addresses" mapstructure:"addresses" validate:"required"`
 	CertFile  string   `yaml:"certfile,omitempty" mapstructure:"certfile"`
 	KeyFile   string   `yaml:"keyfile,omitempty" mapstructure:"keyfile"`
+	// UDPSockets is how many UDP sockets to open per do53 address. More than
+	// one is only useful where the kernel will distribute across them:
+	// SO_REUSEPORT on Linux, SO_REUSEPORT_LB on FreeBSD, and on NetBSD only
+	// with the out-of-tree patch that adds that option -- stock NetBSD and
+	// macOS have no load-balancing reuseport and receive everything on one
+	// socket. Where the kernel will not distribute, listenUDPSockets falls
+	// back to a single socket and reports why rather than failing; there, use
+	// several listen addresses instead, which gives one socket each. 0 or 1 is
+	// the behaviour this had before the option existed.
+	UDPSockets int `yaml:"udp-sockets" mapstructure:"udp-sockets"`
 	// Transports the LISTENERS offer (unrelated to what outbound queries
 	// use). do53 rides the addresses above; dot/doh/doq additionally need
 	// certfile+keyfile and take their ports from ports: below.
@@ -1112,6 +1123,13 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 		return "", fmt.Errorf("ReloadZoneConfig: %w", err)
 	}
 
+	// Zones this reload is dropping. Collected here and acted on AFTER confMu is
+	// released: the signal-name withdrawal below enqueues onto KeyDB.UpdateQ
+	// with a blocking send, and applying a zone update reaches JournalActive(),
+	// which takes confMu.RLock -- so a full queue under the write lock would
+	// deadlock the daemon rather than slow it down.
+	var removedZones []string
+
 	for _, zname := range prezones {
 		if slices.Contains(zonelist, zname) || slices.Contains(brokenlist, zname) {
 			continue
@@ -1132,6 +1150,7 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 			continue
 		}
 		lgConfig.Info("ReloadZoneConfig: zone no longer in config, removing from zone list", "zone", zname)
+		removedZones = append(removedZones, zname)
 		stopZonePublisher(zname)
 		Zones.Remove(zname)
 		// Bump generation so any in-flight refresh on the captured pointer fails
@@ -1146,6 +1165,12 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 	// reloaded DnssecPolicies (via reloadDnssecFromFile above) are now final.
 	conf.publishRuntimeConfig()
 
+	// Snapshot the configured zone names while conf.Zones is still under the
+	// lock. The set is rebuilt from them below, after the unlock, because
+	// building it reads the dynamic config file and that must not happen under
+	// confMu.
+	staticZoneNames := conf.staticZoneNames()
+
 	// Capture hook reference before releasing lock to avoid deadlock
 	// if the hook re-enters config paths.
 	hook := conf.Internal.PostParseZonesHook
@@ -1153,6 +1178,22 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 
 	if hook != nil {
 		hook()
+	}
+
+	// Tell the signal-name orphan sweep which zones are still configured. A
+	// zone this reload dropped has to leave that set, or it goes on counting as
+	// "configured, just not built yet" and its rows are never swept -- which
+	// matters precisely when the prompt withdrawal below had to defer because
+	// the target zone was not loaded.
+	conf.refreshConfiguredZoneNames(staticZoneNames)
+
+	// Withdraw anything this server published at an RFC 9615 signal name on
+	// behalf of a zone this reload dropped. Done here rather than left to the
+	// target zone's own reconciler because the dropped zone will never refresh
+	// again: nothing would notice until the TARGET's next refresh, which for a
+	// file-backed primary can be hours away. Off confMu -- see removedZones.
+	for _, zname := range removedZones {
+		WithdrawSignalPublicationsForZone(conf.Internal.KeyDB, zname)
 	}
 
 	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s", prezones, zonelist, imrReloadMsg), err

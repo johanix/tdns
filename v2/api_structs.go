@@ -207,6 +207,7 @@ type TruststorePost struct {
 	Trusted         bool
 	Src             string // "dns" | "file"
 	KeyRR           string // RR string for key
+	ValidationError string // "validation-failed": why automatic verification gave up
 }
 
 type TruststoreResponse struct {
@@ -440,6 +441,52 @@ type ZoneDsyncResponse struct {
 	Error        bool
 	ErrorMsg     string
 	UpdateResult UpdateResult
+}
+
+// ZoneParentSyncPost is the request type for /zone/parentsync (child-side operations).
+type ZoneParentSyncPost struct {
+	// delta and sync are NOT here: the CLI's `parentsync delta` and
+	// `parentsync sync` go to /delegation via SendDelegationCmd, and this
+	// handler rejects anything outside the list below.
+	Command   string // status | bootstrap | roll-key | inquire
+	Zone      string
+	Algorithm uint8
+	Action    string // for roll-key
+	OldKeyID  uint16
+	NewKeyID  uint16
+	Scheme    string // for bootstrap: "update" | "notify" | "api"
+}
+
+type ZoneParentSyncResponse struct {
+	AppName       string
+	Time          time.Time
+	Zone          string
+	Functions     map[string]string
+	Todo          []string
+	Msg           string
+	OldKeyID      uint16
+	NewKeyID      uint16
+	Error         bool
+	ErrorMsg      string
+	UpdateResult  UpdateResult
+	KeyID         uint16
+	KeyState      uint8
+	StateName     string
+	Authenticated bool
+}
+
+// ZoneChildSyncPost is the request type for /zone/childsync (parent-side operations).
+type ZoneChildSyncPost struct {
+	Command string // publish | unpublish
+	Zone    string
+}
+
+type ZoneChildSyncResponse struct {
+	AppName  string
+	Time     time.Time
+	Msg      string
+	Error    bool
+	ErrorMsg string
 }
 
 // DsyncApiCredentialPost manages credentials for the DSYNC API scheme

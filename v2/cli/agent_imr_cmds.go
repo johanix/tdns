@@ -317,12 +317,18 @@ func newImrForwardCmd(role string) *cobra.Command {
 					fmt.Println("No forward zones configured")
 					return
 				}
+				quarantined := 0
 				for _, fz := range zones {
 					trust := ""
 					if fz.TrustAD {
 						trust = "  (trust-ad)"
 					}
-					fmt.Printf("%s%s\n", fz.Zone, trust)
+					if fz.Quarantined {
+						quarantined++
+						fmt.Printf("%s%s  QUARANTINED: %s\n", fz.Zone, trust, fz.QuarantineReason)
+					} else {
+						fmt.Printf("%s%s\n", fz.Zone, trust)
+					}
 					for _, up := range fz.Upstreams {
 						line := "  " + up.Upstream
 						if up.TLSServerName != "" {
@@ -331,8 +337,15 @@ func newImrForwardCmd(role string) *cobra.Command {
 						if up.Insecure {
 							line += "  INSECURE (no certificate verification)"
 						}
+						if up.Quarantined {
+							line += "  QUARANTINED: " + up.QuarantineReason
+						}
 						fmt.Println(line)
 					}
+				}
+				if quarantined > 0 {
+					fmt.Printf("\n%d of %d forward zone(s) quarantined; names under them SERVFAIL\n",
+						quarantined, len(zones))
 				}
 			},
 		},

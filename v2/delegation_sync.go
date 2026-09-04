@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -42,6 +43,20 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 			case "DELEGATION-SYNC-SETUP":
 				// This is the initial setup request, when we first load a zone that has the delegation-sync-child option set.
 				err = zd.DelegationSyncSetup(ctx, kdb)
+				if errors.Is(err, errBootstrapAdvertisementLookup) {
+					// The parent's SVCB advertisement could not be looked up:
+					// not a verdict on the method set, so not final. Retry with
+					// the delegation-sync backoff, the way the KeyState poller
+					// and the BADKEY arm do, rather than leaving the zone loaded
+					// and never bootstrapped until the next reload.
+					if ds.Attempt+1 >= delegationSyncMaxRetries {
+						lgDns.Error("DelegationSyncher: SIG(0) bootstrap setup gave up after repeated advertisement lookup failures",
+							"zone", ds.ZoneName, "attempts", ds.Attempt+1, "err", err)
+						continue
+					}
+					_ = deferSetupRetry(ctx, delsyncq, ds)
+					continue
+				}
 				if err != nil {
 					lgDns.Error("DelegationSyncher: error from DelegationSyncSetup, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					continue
@@ -80,12 +95,9 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
 
 				zd := ds.ZoneData
-				if zd.Parent == "" || zd.Parent == "." {
-					zd.Parent, err = imr().ParentZone(zd.ZoneName)
-					if err != nil {
-						lgDns.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", err)
-						continue
-					}
+				if _, err = zd.ResolveParentVia(imr()); err != nil {
+					lgDns.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", err)
+					continue
 				}
 
 				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, ds.SyncStatus, imr())
@@ -223,6 +235,14 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 	// EnsureApexKEY (PublishKeyRRs via Sig0KeyPreparation) then the ceremony.
 	// The proxy path uses a no-op ensurer: the operator publishes the KEY.
 	msg, ur, err := zd.bootstrapSig0Key(ctx, alg, authApexKEY{zd: zd, kdb: kdb, alg: alg})
+	if errors.Is(err, errBootstrapManual) {
+		// The parent's bootstrap is manual by design; this is the state
+		// MANUAL-BOOTSTRAP-REQUIRED exists for, and it recurs on every load
+		// until the operator acts. Not an error.
+		lgDns.Info("DelegationSyncSetup: parent requires manual SIG(0) bootstrap; the apex KEY is published, waiting for the operator",
+			"zone", zd.ZoneName, "msg", msg)
+		return nil
+	}
 	if err != nil {
 		lgDns.Error("DelegationSyncSetup: error from BootstrapSig0KeyWithParent", "zone", zd.ZoneName, "err", err)
 		for _, tes := range ur.TargetStatus {
@@ -367,10 +387,10 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 
 	if syncstate.InSync {
 		return fmt.Sprintf("Zone \"%s\" delegation data in parent \"%s\" is in sync. No action needed.",
-			syncstate.ZoneName, zd.Parent), 0, UpdateResult{}, nil
+			syncstate.ZoneName, zd.GetParent()), 0, UpdateResult{}, nil
 	} else {
 		lgDns.Info("zone delegation data in parent is NOT in sync, sync action needed",
-			"zone", syncstate.ZoneName, "parent", zd.Parent)
+			"zone", syncstate.ZoneName, "parent", zd.GetParent())
 	}
 
 	// var zd *tdns.ZoneData
@@ -577,6 +597,49 @@ func deferForImr(ctx context.Context, delsyncq chan DelegationSyncRequest,
 				}
 				return
 			}
+		}
+	}()
+	return done
+}
+
+// setupRetryDelay is the delegation-sync backoff for a re-enqueued setup:
+// 5s, 10s, 20s, 40s for attempts 0..3, the schedule retryWithBackoff uses.
+func setupRetryDelay(attempt int) time.Duration {
+	d := delegationSyncInitialDelay
+	for i := 0; i < attempt && d < time.Hour; i++ {
+		d *= 2
+	}
+	return d
+}
+
+// deferSetupRetry re-enqueues a DELEGATION-SYNC-SETUP after the backoff for
+// its attempt, with the attempt count advanced. Off the syncher goroutine so a
+// waiting zone does not stall the others; cancelled with ctx. The returned
+// channel closes when the worker exits, for tests.
+func deferSetupRetry(ctx context.Context, delsyncq chan DelegationSyncRequest, ds DelegationSyncRequest) <-chan struct{} {
+	return deferSetupRetryAfter(ctx, delsyncq, ds, setupRetryDelay(ds.Attempt))
+}
+
+// deferSetupRetryAfter is deferSetupRetry with the delay supplied, so a test
+// need not wait out the real schedule.
+func deferSetupRetryAfter(ctx context.Context, delsyncq chan DelegationSyncRequest, ds DelegationSyncRequest, delay time.Duration) <-chan struct{} {
+	lgDns.Warn("DelegationSyncher: SIG(0) bootstrap setup deferred, advertisement lookup failed; will retry",
+		"zone", ds.ZoneName, "attempt", ds.Attempt+1, "of", delegationSyncMaxRetries, "delay", delay)
+	next := ds
+	next.Attempt++
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTimer(delay)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		select {
+		case delsyncq <- next:
+		case <-ctx.Done():
 		}
 	}()
 	return done
