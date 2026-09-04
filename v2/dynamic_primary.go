@@ -459,6 +459,12 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		cleanupFile()
 		return "", fmt.Errorf("zone %s: %w", name, cerr)
 	}
+	// Before Zones.Set, per registerStandardRefreshHooks. Both hooks self-gate
+	// on options a primary cannot hold, so they are no-ops here today -- but
+	// the rule is per creation path, not per zone type, so the next hook does
+	// not have to remember this one.
+	zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+
 	Zones.Set(name, zd)
 	if err := conf.AddDynamicZoneToConfig(zd); err != nil {
 		zd.stopPublisher()

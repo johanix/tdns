@@ -428,6 +428,11 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		// (TSIG for the upstream is now carried by primariesConf[].Key above and
 		// resolved by name from the keys: store at transfer time.)
 
+		// Before Zones.Set, while the zone is private to this goroutine: a
+		// catalog member is a transfer-provisioned zone like any other and is
+		// entitled to the standard hooks (#500).
+		zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+
 		// Add to Zones map
 		Zones.Set(zoneName, zd)
 		lg.Debug("CATALOG: zone added to Zones map", "zone", zoneName)

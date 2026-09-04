@@ -237,6 +237,9 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 					Data:      core.NewNameMap[OwnerData](),
 					KeyDB:     conf.Internal.KeyDB,
 				}
+				// no-refresh-hooks: an error-state shell registered only to
+				// carry the ConfigError. It never refreshes, so a hook would
+				// have nothing to run on.
 				Zones.Set(zoneName, zd)
 				zd.SetError(ConfigError, "dynamic primary: %v", perr)
 				skippedCount++
@@ -1265,6 +1268,8 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		// deletes via the keystore, which refuses a referenced key, and newZd
 		// (live until this Set) may reference the newly-staged key — otherwise
 		// the key is left orphaned. Mirrors the add path's ordering.
+		// no-refresh-hooks: rollback republishes the PREVIOUS ZoneData, which
+		// already carries its hooks.
 		Zones.Set(name, oldZd)
 		rollbackKey()
 		return "", fmt.Errorf("zone %s failed to persist; rolled back the in-memory modification: %w", name, err)

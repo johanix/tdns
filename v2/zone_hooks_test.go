@@ -11,6 +11,9 @@ package tdns
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +42,11 @@ func TestProvisionedZoneGetsStandardRefreshHooks(t *testing.T) {
 	}
 	if len(zd.OnZonePostRefresh) == 0 {
 		t.Error("no post-refresh hooks on a provisioned zone: RepublishAtSignalNames can never run")
+	}
+	// The proxy hook rides the same registration; assert both so a partial
+	// wiring cannot pass.
+	if len(zd.OnZonePreRefresh) == 0 {
+		t.Error("no pre-refresh hooks on a provisioned zone")
 	}
 }
 
@@ -86,28 +94,102 @@ func TestModifiedZoneKeepsStandardRefreshHooks(t *testing.T) {
 	if len(after.OnZonePostRefresh) == 0 {
 		t.Error("modify stripped the post-refresh hooks: the zone is inert from here on")
 	}
+	if len(after.OnZonePreRefresh) == 0 {
+		t.Error("modify stripped the pre-refresh hooks")
+	}
 }
 
-// The hooks must be attached exactly once per ZoneData. The earlier
-// FirstZoneLoad-guarded registration in ParseZones could append a second copy:
-// FirstZoneLoad is cleared only by a SUCCESSFUL first load, so a zone whose
-// first load failed still carried it and the next reload registered again.
-// Registering at construction removes the failure mode; this pins it.
-func TestStandardRefreshHooksAreNotDuplicated(t *testing.T) {
-	zd := &ZoneData{ZoneName: "once.example.", FirstZoneLoad: true}
-	zd.registerStandardRefreshHooks(nil)
-	post, pre := len(zd.OnZonePostRefresh), len(zd.OnZonePreRefresh)
-	if post == 0 {
-		t.Fatal("no post-refresh hooks registered")
+// Exactly once per ZoneData, asserted at a real call site rather than by
+// calling the helper twice by hand. The earlier FirstZoneLoad-guarded
+// registration in ParseZones could append a second copy: FirstZoneLoad is
+// cleared only by a SUCCESSFUL first load, so a zone whose first load failed
+// still carried it and the next reload registered again -- every callback then
+// running twice per refresh.
+func TestStandardRefreshHooksRegisteredExactlyOnce(t *testing.T) {
+	withAppType(t, AppTypeAuth)
+	resetZonesForTest()
+	conf, _ := newTestConfigForCores(t)
+
+	// What one registration yields, measured rather than hard-coded, so the
+	// test does not need updating when a hook is added.
+	ref := &ZoneData{ZoneName: "ref.example."}
+	ref.registerStandardRefreshHooks(nil)
+	wantPost, wantPre := len(ref.OnZonePostRefresh), len(ref.OnZonePreRefresh)
+	if wantPost == 0 || wantPre == 0 {
+		t.Fatalf("setup: one registration gave post=%d pre=%d, want both non-zero", wantPost, wantPre)
 	}
 
-	// A second registration on the SAME ZoneData is what the old reload path
-	// could do. Nothing in the tree may call it twice; if a future caller
-	// does, the callbacks run twice per refresh.
-	zd.registerStandardRefreshHooks(nil)
-	if len(zd.OnZonePostRefresh) == post {
-		t.Skip("registration is idempotent; the single-call contract is no longer load-bearing")
+	in := DynamicZoneInput{
+		Name: "once.example", Type: Secondary,
+		Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
 	}
-	t.Logf("registration appends (post %d->%d, pre %d->%d), so it must be called exactly once per ZoneData",
-		post, len(zd.OnZonePostRefresh), pre, len(zd.OnZonePreRefresh))
+	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// A modify replaces the ZoneData; the replacement must also carry exactly
+	// one set, not the old one's plus a fresh one.
+	if _, err := conf.ModifyDynamicZone(context.Background(), DynamicZoneInput{
+		Name: "once.example", Type: Secondary,
+		Primaries: []PeerConf{{Addr: "192.0.2.9:53", Key: NOKEY}},
+	}); err != nil {
+		t.Fatalf("modify: %v", err)
+	}
+
+	zd, ok := Zones.Get("once.example.")
+	if !ok {
+		t.Fatal("zone gone")
+	}
+	if got := len(zd.OnZonePostRefresh); got != wantPost {
+		t.Errorf("post-refresh hooks = %d, want %d (a duplicate registration runs every callback twice per refresh)", got, wantPost)
+	}
+	if got := len(zd.OnZonePreRefresh); got != wantPre {
+		t.Errorf("pre-refresh hooks = %d, want %d", got, wantPre)
+	}
+}
+
+// Every Zones.Set in the tree either registers the standard hooks first or
+// says why it does not. This is the test that generalizes #500: the bug was
+// never about use-hsyncparam, it was that a creation path can be added without
+// anyone remembering the hooks, and nothing noticed. A source check is the only
+// thing that covers a path that does not exist yet.
+//
+// It also found two sites the reviews missed -- catalog member creation and
+// the dynamic-primary add -- so the exemption markers carry reasons rather
+// than just silencing it.
+func TestEveryZonesSetRegistersHooksOrSaysWhyNot(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	const lookback = 12
+
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
+			if !strings.Contains(line, "Zones.Set(") {
+				continue
+			}
+			from := i - lookback
+			if from < 0 {
+				from = 0
+			}
+			window := strings.Join(lines[from:i+1], "\n")
+			if strings.Contains(window, "registerStandardRefreshHooks") ||
+				strings.Contains(window, "no-refresh-hooks:") {
+				continue
+			}
+			t.Errorf("%s:%d publishes a zone without registering the standard refresh hooks.\n"+
+				"    Call zd.registerStandardRefreshHooks(<delegation-sync queue>) BEFORE this line,\n"+
+				"    or, if this Zones.Set republishes an existing ZoneData or a zone that never\n"+
+				"    refreshes, mark it with a `// no-refresh-hooks: <reason>` comment.\n"+
+				"    %s", f, i+1, strings.TrimSpace(line))
+		}
+	}
 }

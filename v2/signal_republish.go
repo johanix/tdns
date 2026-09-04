@@ -72,19 +72,19 @@ var signalSpecs = []signalSpec{
 }
 
 // registerSignalRepublishHook appends RepublishAtSignalNames to zdp's
-// post-refresh callbacks. ParseZones calls it once, at the zone's first load,
-// for EVERY zone regardless of type -- not only secondaries -- so a zone
-// reconfigured from primary to secondary on a later reload (its ZoneData is
-// reused, and FirstZoneLoad is false by then) already carries the hook. The
-// callback self-gates on Options[OptUseHsyncparam] and only a secondary can
-// hold that option (parseZoneOptions drops it on a primary), so registering it
-// everywhere costs a primary nothing but a guarded no-op.
+// post-refresh callbacks.
 //
-// First-load-only registration is deliberate: it keeps zdp.OnZonePostRefresh
-// frozen once the zone is live, so the refresh engine can range it without a
-// lock. Registering on later reloads instead would mutate the slice under a
-// concurrent refresh -- a data race the type-independent first-load
-// registration here avoids by construction.
+// Not called directly: registerStandardRefreshHooks (v2/zone_hooks.go) is the
+// single entry point, and every path that CONSTRUCTS a live ZoneData calls it
+// before publishing the zone. See that function for the ordering contract and
+// why registration is unconditional and once-per-ZoneData.
+//
+// Registered for EVERY zone regardless of type -- not only secondaries -- so a
+// zone reconfigured from primary to secondary on a later reload already
+// carries the hook. The callback self-gates on Options[OptUseHsyncparam] and
+// only a secondary can hold that option (parseZoneOptions drops it on a
+// primary), so registering it everywhere costs a primary nothing but a guarded
+// no-op.
 func (zdp *ZoneData) registerSignalRepublishHook() {
 	zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh, func(zd *ZoneData) {
 		zd.RepublishAtSignalNames()
