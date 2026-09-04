@@ -21,7 +21,8 @@ func (zd *ZoneData) SendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 		return "", 0, UpdateResult{}, fmt.Errorf("SendDelegationUpdate: %w", err)
 	}
 
-	m, err := buildDelegationUpdate(zd.Parent, zd.ZoneName, syncstate, mode)
+	parent := zd.GetParent()
+	m, err := buildDelegationUpdate(parent, zd.ZoneName, syncstate, mode)
 	if err != nil {
 		return "", 0, UpdateResult{}, err
 	}
@@ -44,13 +45,13 @@ func (zd *ZoneData) SendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 	lgDns.Info("SendDelegationUpdate: sending the signed update",
 		"zone", zd.ZoneName, "target", target.Name, "addresses", target.Addresses, "port", target.Port)
 
-	rcode, ur, err := zd.SendUpdateWithRetry(ctx, smsg, zd.Parent, target.Addresses)
+	rcode, ur, err := zd.SendUpdateWithRetry(ctx, smsg, parent, target.Addresses)
 	if err != nil {
 		return "", 0, ur, err
 	}
-	msg := fmt.Sprintf("SendUpdate(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
+	msg := fmt.Sprintf("SendUpdate(%s) returned rcode %s", parent, dns.RcodeToString[rcode])
 	lgDns.Info("SendDelegationUpdate: update sent",
-		"zone", zd.ZoneName, "parent", zd.Parent, "mode", mode, "rcode", dns.RcodeToString[rcode])
+		"zone", zd.ZoneName, "parent", parent, "mode", mode, "rcode", dns.RcodeToString[rcode])
 	return msg, uint8(rcode), ur, nil
 }
 
@@ -102,22 +103,69 @@ func (zd *ZoneData) bootstrapSig0Key(ctx context.Context, alg uint8, apex apexKE
 	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods())
 }
 
-// resolveParentZone fills zd.Parent when it is unset or the old "." sentinel.
-// After IMR resolution, "." is a real parent (the root) and is left in place.
+// resolveParentZone fills the zone's parent when unset or still the old "."
+// sentinel. Error-only wrapper for callers that read the field afterwards.
 func (zd *ZoneData) resolveParentZone() error {
-	if zd.Parent != "" && zd.Parent != "." {
-		return nil
+	_, err := zd.ResolveParent()
+	return err
+}
+
+// --- zd.parent: one owner, one lazy resolve -------------------------------
+//
+// parentMu, not zd.mu. zd.mu guards zone content, is held across long
+// operations, and is not reentrant -- the whole setErrorLocked/errorListLocked
+// family exists because of that. Folding a lazily-initialised string into it
+// would put every parent read at risk of deadlocking against a path that
+// already holds it. A dedicated mutex for one field is provably free of that,
+// and nothing ever takes zd.mu while holding parentMu.
+
+// GetParent returns the cached parent name, or "" when it has not been
+// resolved yet. Use ResolveParent when a value is required.
+func (zd *ZoneData) GetParent() string {
+	zd.parentMu.Lock()
+	defer zd.parentMu.Unlock()
+	return zd.parent
+}
+
+// SetParent caches a parent name obtained by other means.
+func (zd *ZoneData) SetParent(p string) {
+	zd.parentMu.Lock()
+	defer zd.parentMu.Unlock()
+	zd.parent = p
+}
+
+// ResolveParent returns the zone's parent, resolving and caching it on first
+// use. "." is treated as unset: it is the old sentinel for "not looked up".
+//
+// The IMR lookup runs OUTSIDE parentMu -- it is a network call, and holding a
+// lock across it would serialise every zone behind the slowest parent
+// resolution -- so two callers can race to resolve. That is harmless: they
+// compute the same answer, and the re-check under the lock means the first one
+// to arrive wins and the other adopts it, so all callers observe one value.
+func (zd *ZoneData) ResolveParent() (string, error) {
+	return zd.ResolveParentVia(Globals.ImrEngine)
+}
+
+// ResolveParentVia is ResolveParent against a specific resolver, for the paths
+// that already hold one rather than reaching for Globals.ImrEngine.
+func (zd *ZoneData) ResolveParentVia(imr *Imr) (string, error) {
+	if p := zd.GetParent(); p != "" && p != "." {
+		return p, nil
 	}
-	if Globals.ImrEngine == nil {
-		return fmt.Errorf("parent zone for %s is unknown", zd.ZoneName)
+	if imr == nil {
+		return "", fmt.Errorf("parent zone for %s is unknown: no IMR engine to resolve it", zd.ZoneName)
 	}
-	p, err := Globals.ImrEngine.ParentZone(zd.ZoneName)
+	p, err := imr.ParentZone(zd.ZoneName)
 	if err != nil {
-		return fmt.Errorf("ParentZone(%s): %w", zd.ZoneName, err)
+		return "", fmt.Errorf("ParentZone(%s): %w", zd.ZoneName, err)
 	}
-	zd.Parent = p
-	if zd.Parent == "" {
-		return fmt.Errorf("parent zone for %s is unknown", zd.ZoneName)
+	if p == "" {
+		return "", fmt.Errorf("parent zone for %s is unknown", zd.ZoneName)
 	}
-	return nil
+	zd.parentMu.Lock()
+	defer zd.parentMu.Unlock()
+	if zd.parent == "" || zd.parent == "." {
+		zd.parent = p
+	}
+	return zd.parent, nil
 }

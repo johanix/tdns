@@ -41,20 +41,29 @@ type ImrForwardZoneStatus struct {
 	Zone      string              `json:"zone"`
 	TrustAD   bool                `json:"trust_ad,omitempty"`
 	Upstreams []ImrUpstreamStatus `json:"upstreams"`
+	// Quarantined: no usable upstream is left, so names under the zone
+	// SERVFAIL. Service-impacting, unlike a quarantined upstream on a zone
+	// that still has others.
+	Quarantined      bool   `json:"quarantined,omitempty"`
+	QuarantineReason string `json:"quarantine_reason,omitempty"`
 }
 
 // ImrUpstreamStatus is one forward upstream's reachability state. Unreachable
 // means the LAST exchange was a transport-level failure; a response with any
 // rcode counts as reachable.
 type ImrUpstreamStatus struct {
-	Upstream    string    `json:"upstream"` // "addr:port/transport"
-	Transport   string    `json:"transport"`
-	Unreachable bool      `json:"unreachable,omitempty"`
-	Queries     uint64    `json:"queries"`
-	Failures    uint64    `json:"failures"`
-	LastSuccess time.Time `json:"last_success,omitzero"`
-	LastError   string    `json:"last_error,omitempty"`
-	LastErrTime time.Time `json:"last_error_time,omitzero"`
+	Upstream    string `json:"upstream"` // "addr:port/transport"
+	Transport   string `json:"transport"`
+	Unreachable bool   `json:"unreachable,omitempty"`
+	// Quarantined: unusable as configured, so never dialled. Disjoint from
+	// Unreachable, which is a verdict about exchanges that did happen.
+	Quarantined      bool      `json:"quarantined,omitempty"`
+	QuarantineReason string    `json:"quarantine_reason,omitempty"`
+	Queries          uint64    `json:"queries"`
+	Failures         uint64    `json:"failures"`
+	LastSuccess      time.Time `json:"last_success,omitzero"`
+	LastError        string    `json:"last_error,omitempty"`
+	LastErrTime      time.Time `json:"last_error_time,omitzero"`
 }
 
 // StatusReport assembles the ImrStatus block for the config-status API.
@@ -76,17 +85,20 @@ func (imr *Imr) StatusReport() *ImrStatus {
 	st.RootNSPresent, st.RootNSExpires, st.RootNSCount = imr.RootNSStatus()
 	for _, fz := range table.forwards {
 		fzs := ImrForwardZoneStatus{Zone: fz.Zone, TrustAD: fz.TrustAD}
+		fzs.Quarantined, fzs.QuarantineReason = fz.quarantineState()
 		for _, up := range fz.Upstreams {
 			up.mu.Lock()
 			fzs.Upstreams = append(fzs.Upstreams, ImrUpstreamStatus{
-				Upstream:    up.Label,
-				Transport:   core.TransportToString[up.Transport],
-				Unreachable: up.failing,
-				Queries:     up.queries,
-				Failures:    up.failures,
-				LastSuccess: up.lastSuccess,
-				LastError:   up.lastErrMsg,
-				LastErrTime: up.lastErrTime,
+				Upstream:         up.Label,
+				Transport:        core.TransportToString[up.Transport],
+				Unreachable:      up.failing,
+				Quarantined:      up.quarantined,
+				QuarantineReason: up.quarantineWhy,
+				Queries:          up.queries,
+				Failures:         up.failures,
+				LastSuccess:      up.lastSuccess,
+				LastError:        up.lastErrMsg,
+				LastErrTime:      up.lastErrTime,
 			})
 			up.mu.Unlock()
 		}

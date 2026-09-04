@@ -351,14 +351,29 @@ A zone is one entry in the top-level `zones:` list.
 | `downstreams` | list of `{prefix, key}` | provide-xfr ACL |
 | `options` | list of strings | see below |
 | `dnssecpolicy` | string | names an entry in `dnssec.policies:`; `none` == unset |
+| `delegationpolicy` | string | names an entry in `delegationsync.policies:`; omitted binds `default` |
 | `multisigner` | string | names an entry in `multisigner:` |
 | `updatepolicy` | block | DNS UPDATE authorization |
 | `delegationbackend` | string | required if the zone accepts child updates |
 
-Note the spellings: **`dnssecpolicy`** and **`multisigner`**, each one word.
-`dnssec_policy`, `dnssec-policy` and `multi_signer` are not config keys; they
-decode to nothing and leave the zone without a policy, which then makes
-`online-signing` fail validation.
+Note the spellings: **`dnssecpolicy`**, **`delegationpolicy`** and
+**`multisigner`**, each one word. `dnssec_policy`, `dnssec-policy` and
+`multi_signer` are not config keys; they decode to nothing and leave the zone
+without a policy, which then makes `online-signing` fail validation.
+
+The two policy references look alike and fail differently, deliberately:
+
+- an unusable **`dnssecpolicy`** *degrades* — the zone is served unsigned, with
+  the error recorded on the zone;
+- an unresolvable **`delegationpolicy`** ***quarantines*** the zone. It governs
+  how strictly a child's SIG(0) key is verified before the parent trusts it, so
+  substituting a default for a name the operator got wrong is the wrong failure
+  mode. **Omitting** it is not an error: that binds the `default` policy.
+
+`tdns-cli auth config check` resolves both references offline, including through
+a template, and names the template rather than only the zones it poisoned. See
+[Delegation sync](special-features.md#1-automatic-delegation-synchronization) for what a
+delegation policy contains.
 
 ### store
 
@@ -377,17 +392,42 @@ state with `unknown config option: "..."`.
 
 | Option | Effect |
 |--------|--------|
-| `delegation-sync-parent` | Provide delegation sync toward child zones (accept child DS/NS/A/AAAA updates) |
-| `delegation-sync-child` | Push this zone's DS/NS/A/AAAA changes to its parent |
-| `delegation-sync-proxy` | Agent secondary proxies CDS/CSYNC NOTIFYs upstream for a DSYNC-unaware primary |
+| `childsync` | Provide delegation sync toward child zones (accept child DS/NS/A/AAAA updates) |
+| `parentsync` | Push this zone's DS/NS/A/AAAA changes to its parent |
+| `parentsync-proxy` | Agent secondary proxies CDS/CSYNC NOTIFYs upstream for a DSYNC-unaware primary |
+
+The previous spellings (`delegation-sync-parent`, `delegation-sync-child`,
+`delegation-sync-proxy`) still parse as aliases of those three and log a
+deprecation warning. Display (`zone list`, config output) uses only the new
+names. `parentsync` and `parentsync-proxy` may not both be set on one zone.
 
 **Zone modification**
 
 | Option | Effect |
 |--------|--------|
 | `allow-updates` | Accept authenticated DNS UPDATE for any RRset |
+| `allow-api-updates` | Accept zone changes over the management API (`tdns-cli auth zone update`). A separate gate from `allow-updates`, which covers DNS UPDATE only: opening one channel never opens the other |
 | `allow-child-updates` | Accept DNS UPDATE of child delegation data only. Forced off when the child update-policy type is `none` or unset; the zone must also set `delegationbackend:` |
 | `allow-edits` | Allow apex RRsets (NS, DNSKEY, CDS, CSYNC) to be modified dynamically |
+
+A frozen zone refuses both update channels, whatever these options say.
+
+**Conflict resolution**
+
+| Option | Effect |
+|--------|--------|
+| `on-conflict-db-wins` | A record the delta journal changed beats the zone file's version of it; the file's losing records go to the `.rejected` artefact. The default |
+| `on-conflict-zonefile-wins` | The zone file's version is served and the journal's losing instructions go to the artefact instead |
+
+These decide who wins when the zone file has been replaced behind the server
+and its content contests a record the journal changed. Naming **both is a
+config error**, not a preference order; naming neither means
+`on-conflict-db-wins`, which the parser materialises onto the zone so
+`zone status` reports the policy in force rather than a blank. A primary that
+accepts child updates is refused at startup if it combines
+`on-conflict-db-wins` with a `delegationbackend:` other than `direct` — the two
+settings describe the same deployment from opposite directions. See
+[zone-updates.md](zone-updates.md) for the merge itself.
 
 **DNSSEC**
 
@@ -411,6 +451,12 @@ not sign.
 | `add-transport-signal` | Synthesize SVCB transport-signal RRs into the Additional section |
 | `publish-zonemd` | Maintain the apex ZONEMD RRset (RFC 8976). See below |
 | `verify-zonemd` | Check a zone's apex ZONEMD before adopting it, on every load and inbound transfer. See below |
+
+**Zone-owner signaling**
+
+| Option | Effect |
+|--------|--------|
+| `use-hsyncparam` | Act on a transferred zone's apex HSYNCPARAM record: republish its bootstrap records at the RFC 9615 `_signal` names. **Secondary only.** See below |
 
 ### `publish-zonemd`
 
@@ -591,6 +637,100 @@ which also exits non-zero on a zone that fails. `+zonemd` needs an AXFR: an
 IXFR returns a difference rather than a zone, and `dog` refuses instead of
 digesting one.
 
+**Zone transfer (secondary zones only)**
+
+| Option | Effect |
+|--------|--------|
+| `request-ixfr` | Ask an upstream for an incremental transfer (IXFR, RFC 1995) rather than a full one, and apply the delta onto the zone already held. **On by default**, so naming it turns nothing on |
+| `no-request-ixfr` | Turn that default off: always ask for a full AXFR |
+
+An option list holds enabled names, so absence cannot express "false" for a
+default-on flag — hence a second name rather than a value. If both appear,
+`no-request-ixfr` wins, because the safe direction is the one that only ever
+asks for a full transfer. Any IXFR failure — a refused request, an unusable
+delta, a step that would leave an RRset unsigned — falls back to a full AXFR
+against the *same* upstream within the same refresh, so an enabled zone is
+never left worse off than a disabled one. A full AXFR is also what a zone gets
+when there is no delta to ask for in the first place: a forced retransfer, and
+any refresh with no baseline to apply a delta onto (no incoming serial yet, or
+nothing currently served).
+
+Both are **ignored** on a primary, where nothing consults them, and on a
+secondary that signs its own content (`online-signing` or `inline-signing`),
+whose baseline is its own signatures — a delta computed against the primary's
+copy names records such a zone does not hold. Either case is reported as a
+config *warning*: the option does nothing, but the zone is healthy and keeps
+serving.
+
+### `use-hsyncparam`
+
+A zone owner signals what they want their DNS providers to do with the HSYNC and
+HSYNCPARAM records at their zone's apex
+(`draft-leon-dnsop-signaling-zone-owner-intent`). HSYNCPARAM is one record per
+zone carrying zone-wide policy as SVCB-shaped key/value pairs; two of its keys
+are flags addressed at every provider serving the zone:
+
+| Flag | Asks each provider to publish | At |
+|------|-------------------------------|-----|
+| `pubkey` | the zone's apex SIG(0) `KEY` | `_sig0key.<zone>._signal.<ns>` |
+| `pubcds` | the zone's apex `CDS` and `CDNSKEY` | `_dsboot.<zone>._signal.<ns>` |
+
+The point is *where* the record goes: not into the customer's zone, but into
+**the nameserver's own zone**, owned by whoever operates that nameserver. A
+parent or validator can then find the child's bootstrap data via the child's
+nameservers and DNSSEC-validate it under those nameservers' keys, which is what
+makes RFC 9615 bootstrapping and the SIG(0) bootstrap of
+`draft-ietf-dnsop-delegation-mgmt-via-ddns` work for a child that cannot sign
+yet. Without these flags a provider would have to *scan* customer zones for
+conventional content to guess the same intent.
+
+`use-hsyncparam` is your consent to play that role:
+
+```yaml
+zones:
+   - name:      customer.example.
+     type:      secondary
+     primaries: [ { addr: 192.0.2.1:53, key: NOKEY } ]
+     options:   [ use-hsyncparam ]
+```
+
+After each transfer of `customer.example.`, the server reads the apex
+HSYNCPARAM. For each flag present it takes the matching apex RRset, re-owns it
+to the signal name under each of the zone's apex NS names, and finds the local
+zone that owns that name. **It publishes only into a zone this server holds as
+primary** -- an NS whose zone is somebody else's, or which is not served here at
+all, is skipped and logged at debug. The update is change-gated: a re-transfer
+of unchanged data writes nothing.
+
+**It is a secondary-only option**, because the whole mechanism is driven by an
+inbound transfer of a zone somebody else owns. On a primary it is dropped with a
+warning and the zone keeps serving; a primary provisioned from a template
+refuses outright.
+
+**Why an option at all**, when the flag is already the zone owner's explicit
+request? Because acting on it writes records into a zone *you* are authoritative
+for, on the strength of a third party's signaling. That is the operator's call,
+not the customer's, so it is off by default. Turning it on does not make the
+HSYNCPARAM visible or parseable -- the record is always parsed and always
+served; the option only authorizes the publication.
+
+Removing the option also **withdraws** what it published: after the next
+refresh of the zone, every signal record this server put there on that zone's
+behalf is deleted again. So are the records for a `pubkey`/`pubcds` flag the
+customer drops from its HSYNCPARAM, for a nameserver it drops from its apex NS
+RRset, and for the zone itself if you remove it from this server.
+
+Only records **this server published** are ever deleted. tdns keeps a ledger of
+what it wrote at which signal name, and that ledger -- not the content at the
+name -- is what authorizes a delete, so a signal record you maintain by hand in
+the same zone is never touched. The corollary is that the ledger lives in the
+keystore: a rebuilt keystore has forgotten the publications made under the old
+one, and those records stay where they are.
+
+This is separate from `multi-provider`. The full HSYNC role model -- `servers`,
+`signers`, `auditors`, delegated NS management, agent-to-agent synchronization
+-- lives in `tdns-mp`; `tdns-auth` reads exactly these two flags.
+
 **Multi-provider and catalog**
 
 | Option | Effect |
@@ -616,7 +756,7 @@ templates:
    - name:          signed-primary
      type:          primary
      store:         map
-     options:       [ delegation-sync-parent, online-signing ]
+     options:       [ childsync, online-signing ]
      dnssecpolicy:  default
      downstreams:
         - prefix: "192.0.2.0/24"
@@ -693,12 +833,36 @@ authengine:
 | `listeners.ports.dot` | `853` | listen ports for DoT (numbers, not strings) |
 | `listeners.ports.doh` | `443` | listen ports for DoH |
 | `listeners.ports.doq` | `853` | listen ports for DoQ (only 853 is truly supported) |
+| `listeners.udp-sockets` | `1` | how many UDP sockets to open per Do53 address, so the kernel can spread datagrams across that many readers. Only useful where the kernel load-balances (below); elsewhere it falls back to one socket and logs why |
 | `listeners.imr-debug-address` | — | loopback-only DNS window into the embedded resolver's cache; non-loopback is a hard error |
 | `authengine.outbound-soa-serial` | `keep` | `keep`, `unixtime` or `persist` |
 | `authengine.options` | — | server-wide options, below |
 
 `ports.do53` does not exist. Do53 always listens on the ports embedded in
 `addresses`.
+
+**`udp-sockets` depends on the kernel, and the server tells you which you got.**
+Several sockets only help where the kernel hands each arriving datagram to one
+member of the group:
+
+| Platform | Distributes? | Mechanism |
+|----------|--------------|-----------|
+| Linux | yes | `SO_REUSEPORT` |
+| FreeBSD | yes | `SO_REUSEPORT_LB` |
+| NetBSD | only with the out-of-tree patch that adds `SO_REUSEPORT_LB` | detected at run time |
+| macOS, OpenBSD, others | no | one socket receives everything |
+
+Where it will not distribute, the server serves from a single socket and logs
+the reason rather than failing — so the setting is safe to leave in a config
+shared across platforms. On those platforms, **use several listen addresses
+instead**: that gives one socket each and needs nothing from the kernel.
+
+The profiler used to measure any of this is `service.pprof-address`, which is
+unset by default and **must bind to loopback** — a non-loopback value is a
+config error and the daemon will not start. pprof is unauthenticated and serves
+goroutine stacks, heap contents and the command line, so on a nameserver it is
+a route to private keys and TSIG secrets. Use `127.0.0.1:6060`, and forward a
+port over ssh to profile a remote host.
 
 `outbound-soa-serial` controls the SOA serial advertised to secondaries.
 `keep` sends the inbound serial unchanged. `unixtime` uses the load time.

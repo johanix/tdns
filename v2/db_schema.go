@@ -353,6 +353,44 @@ UNIQUE (keyname)
 	//
 	// identity is canonicalised (core.CanonicalizeName) for tls-pkix and
 	// stored verbatim for tls-pin (standard-encoding base64 SPKI SHA-256).
+	// One row per RFC 9615 signal name this server has PUBLISHED
+	// (signal_republish.go). It exists to answer one question -- "did we put
+	// this record there?" -- because the target is an ordinary primary zone of
+	// this server's and an operator may have published a signal name by hand.
+	// Publication is content-gated against what is already at the name;
+	// DELETION is gated on this table and nothing else. See
+	// docs/2026-09-03-signal-name-withdrawal.md §2.
+	//
+	// One row per signal NAME, not per RRtype: a publication is one signalSpec
+	// applied to one name, and the spec is what says _dsboot means CDS+CDNSKEY.
+	//
+	// zone and ns are derivable from owner by parsing it, and are stored anyway
+	// so the two queries this table exists for -- everything published FOR a
+	// zone, everything published INTO a target -- are column reads.
+	//
+	// source is "hsyncparam" (the transfer-driven republisher) or "at-ns" (the
+	// child's own SIG(0) bootstrap ceremony); withdrawal asks different
+	// questions of the two. They cannot collide in practice -- the republisher
+	// acts on a zone we are secondary for, the ceremony on our own -- so a
+	// re-publish from the other path simply overwrites the column.
+	//
+	// No secondary index: the table holds one row per published signal name,
+	// and UNIQUE (target, owner) already indexes the target-side query.
+	//
+	// UNIQUE columns are VARCHAR rather than TEXT (house rule at the head of
+	// this file).
+	"SignalPublication": `CREATE TABLE IF NOT EXISTS 'SignalPublication' (
+		id           INTEGER PRIMARY KEY,
+		target       VARCHAR(255) NOT NULL,
+		owner        VARCHAR(255) NOT NULL,
+		zone         VARCHAR(255) NOT NULL,
+		ns           VARCHAR(255) NOT NULL,
+		prefix       VARCHAR(16)  NOT NULL,
+		source       VARCHAR(16)  NOT NULL,
+		published_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE (target, owner)
+	)`,
+
 	"DsyncApiCertCredential": `CREATE TABLE IF NOT EXISTS 'DsyncApiCertCredential' (
 		id         INTEGER PRIMARY KEY,
 		parentzone VARCHAR(255) NOT NULL,

@@ -117,9 +117,10 @@ So the change reuses that publisher rather than adding a second one.
   in-bailiwick is the scenario to run first.
 - Re-offering `at-ns` when a nameserver zone appears after the child's setup
   (T3 above).
-- `unpublish` of signal KEYs when delegation sync is turned off for a zone.
-  `UnpublishKeyRRs` (apex) has no callers today either; both belong to
-  whatever eventually owns "stop syncing this zone".
+- ~~`unpublish` of signal KEYs when delegation sync is turned off for a
+  zone.~~ Done, along with the other three shapes of the same gap, in
+  `docs/2026-09-03-signal-name-withdrawal.md`. `UnpublishKeyRRs` (apex) still
+  has no callers.
 
 ## Tests
 

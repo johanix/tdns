@@ -10,6 +10,7 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	"github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -453,14 +454,14 @@ func TestDnskeyTransportBypass(t *testing.T) {
 
 	// use_ds_signal: bypass only when cached DS is large.
 	imr := &Imr{largeAlgs: map[uint8]bool{dns.RSASHA512: true}}
-	if imr.dnskeyTransportBypass(qname, dns.TypeA) {
+	if imr.dnskeyTransportBypass(qname, dns.TypeA, edns0.PrivacyNone) {
 		t.Fatal("non-DNSKEY query must never bypass")
 	}
-	if imr.dnskeyTransportBypass(qname, dns.TypeDNSKEY) {
+	if imr.dnskeyTransportBypass(qname, dns.TypeDNSKEY, edns0.PrivacyNone) {
 		t.Fatal("use_ds_signal with no cached DS must not bypass")
 	}
 	imr.Cache = cacheWithLargeDS(t, qname)
-	if !imr.dnskeyTransportBypass(qname, dns.TypeDNSKEY) {
+	if !imr.dnskeyTransportBypass(qname, dns.TypeDNSKEY, edns0.PrivacyNone) {
 		t.Fatal("use_ds_signal with large cached DS must bypass")
 	}
 
@@ -470,18 +471,55 @@ func TestDnskeyTransportBypass(t *testing.T) {
 		dnskeyTransport: DNSKEYTransportForceUDP,
 		Cache:           cacheWithLargeDS(t, qname),
 	}
-	if imrUDP.dnskeyTransportBypass(qname, dns.TypeDNSKEY) {
+	if imrUDP.dnskeyTransportBypass(qname, dns.TypeDNSKEY, edns0.PrivacyNone) {
 		t.Fatal("force_udp must never bypass")
 	}
 
 	// try_encrypted / force_encrypted: always bypass DNSKEY, DS irrelevant.
 	for _, pol := range []DNSKEYTransportPolicy{DNSKEYTransportTryEncrypted, DNSKEYTransportForceEncrypted} {
 		i := &Imr{dnskeyTransport: pol} // no cache, no large algs
-		if !i.dnskeyTransportBypass(qname, dns.TypeDNSKEY) {
+		if !i.dnskeyTransportBypass(qname, dns.TypeDNSKEY, edns0.PrivacyNone) {
 			t.Fatalf("%s must bypass for DNSKEY regardless of DS", pol)
 		}
-		if i.dnskeyTransportBypass(qname, dns.TypeA) {
+		if i.dnskeyTransportBypass(qname, dns.TypeA, edns0.PrivacyNone) {
 			t.Fatalf("%s must not bypass non-DNSKEY", pol)
+		}
+	}
+}
+
+// Strict privacy suppresses the bypass whatever the policy says.
+//
+// preferredDNSKEYTransport resolves against server.Transports alone and falls
+// back to Do53TCP, so on a server whose encrypted transport is known only from
+// TransportWeights -- which candidateTransports accepts, and which is what let
+// the query past the strict precheck in the first place -- the bypass would
+// put a client's strict DNSKEY query on the wire in cleartext. Nothing is lost
+// by suppressing it: strict privacy already restricts the query to DoT/DoQ/DoH,
+// every one a stream transport, which is what the bypass exists to reach.
+func TestDnskeyTransportBypassSuppressedByStrictPrivacy(t *testing.T) {
+	qname := "example.com."
+
+	for _, pol := range []DNSKEYTransportPolicy{
+		DNSKEYTransportTryEncrypted,
+		DNSKEYTransportForceEncrypted,
+		DNSKEYTransportUseDSSignal,
+	} {
+		i := &Imr{
+			dnskeyTransport: pol,
+			largeAlgs:       map[uint8]bool{dns.RSASHA512: true},
+			Cache:           cacheWithLargeDS(t, qname),
+		}
+		// Sanity: without the privacy signal this policy DOES bypass, so the
+		// assertion below is about privacy and not about the policy.
+		if !i.dnskeyTransportBypass(qname, dns.TypeDNSKEY, edns0.PrivacyNone) {
+			t.Fatalf("setup: %s should bypass with no privacy signal", pol)
+		}
+		if i.dnskeyTransportBypass(qname, dns.TypeDNSKEY, edns0.PrivacyStrict) {
+			t.Errorf("%s bypassed under strict privacy; the preferred transport may be cleartext", pol)
+		}
+		// Opportunistic accepted cleartext, so the bypass still applies.
+		if !i.dnskeyTransportBypass(qname, dns.TypeDNSKEY, edns0.PrivacyOpportunistic) {
+			t.Errorf("%s stopped bypassing under opportunistic privacy", pol)
 		}
 	}
 }

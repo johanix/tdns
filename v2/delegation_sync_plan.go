@@ -152,14 +152,11 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 		return plan, nil
 	}
 
-	if zd.Parent == "" || zd.Parent == "." {
-		p, err := imr.ParentZone(zd.ZoneName)
-		if err != nil {
-			return nil, fmt.Errorf("BuildParentSyncPlan: ParentZone(%s): %w", zd.ZoneName, err)
-		}
-		zd.Parent = p
+	parent, err := zd.ResolveParentVia(imr)
+	if err != nil {
+		return nil, fmt.Errorf("BuildParentSyncPlan: %w", err)
 	}
-	plan.Parent = zd.Parent
+	plan.Parent = parent
 
 	// THE single discovery. Everything below reads this result.
 	dsyncRes, err := imr.DsyncDiscovery(ctx, zd.ZoneName, Globals.Verbose)
@@ -335,10 +332,10 @@ func (zd *ZoneData) planConsiderApi(res DsyncResult, plan *ParentSyncPlan) {
 	// The credential arrives out of band by definition (§10), so its absence
 	// is settled here rather than after a round trip: there is nothing to wait
 	// for and nothing to retry.
-	cred, ok := DelegationSyncConfig().Child.Api.CredentialForChild(zd.Parent, zd.ZoneName)
+	cred, ok := DelegationSyncConfig().Child.Api.CredentialForChild(zd.GetParent(), zd.ZoneName)
 	if !ok || !cred.Usable() {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{"API",
-			fmt.Sprintf("no usable credential for parent %s (delegationsync.child.api.credentials)", zd.Parent)})
+			fmt.Sprintf("no usable credential for parent %s (delegationsync.child.api.credentials)", zd.GetParent())})
 		return
 	}
 	// No address resolution for API (§16.7): the DSYNC target is a service

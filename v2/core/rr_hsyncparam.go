@@ -20,15 +20,20 @@ import (
 // Example:
 //   example.com. 3600 IN HSYNCPARAM nsmgmt="agent" servers="alpha,echo" signers="alpha" auditors="audit"
 //
-// Known keys:
-//   nsmgmt="owner|agent"                  - who manages the NS RRset
-//   parentsync="owner|agent"              - who handles parent synchronisation
-//   servers="label1,label2,..."           - comma-separated list of data-contributing provider labels
-//   signers="label1,label2,..."           - comma-separated list of signer labels
-//   pubkey                                - flag: providers publish SIG(0) KEY in zone
-//   pubcds                                - flag: providers publish CDS/CDNSKEY in zone
-//   suffix="label"                        - DNS label under which providers may add NS+glue
-//   auditors="label1,label2,..."          - comma-separated list of auditor labels
+// Known keys, with the key numbers
+// draft-leon-dnsop-signaling-zone-owner-intent assigns them:
+//   0  servers="label1,label2,..."   - providers designated to serve the zone
+//   1  signers="label1,label2,..."   - providers designated to sign the zone
+//   2  auditors="label1,label2,..."  - entities acting as auditors
+//   3  nsmgmt="owner|agent"          - who manages the NS RRset
+//   4  parentsync="owner|agent"      - who handles parent synchronisation
+//   5  suffix="label"                - DNS label under which providers may add NS+glue
+//   6  pubkey                        - flag: publish the zone's SIG(0) KEY at _sig0key.<zone>._signal.<ns>
+//   7  pubcds                        - flag: publish the zone's CDS/CDNSKEY at _dsboot.<zone>._signal.<ns>
+//
+// An unregistered key number is decoded into an HSYNCPARAMLocal, preserved on
+// read-back, and never acted on, as the draft requires. In presentation format
+// it is written as keyN.
 
 func init() {
 	RegisterHsyncparamRR()
@@ -37,27 +42,38 @@ func init() {
 // HSYNCPARAMKey is the type of keys used in the HSYNCPARAM RR.
 type HSYNCPARAMKey uint16
 
+// The key numbers are the ones draft-leon-dnsop-signaling-zone-owner-intent
+// assigns in its "HSYNCPARAM Keys" registry, in the draft's own order: the
+// roles first (who serves, who signs, who audits), then auxiliary policy. They
+// are WIRE FORMAT -- a receiver decodes the RDATA by them -- so they must match
+// the draft exactly and must not be reordered for readability.
+// TestHsyncparamKeyNumbersMatchTheDraft pins them.
+//
+// 0-32767 is the IANA-registered range, 32768-65534 is Private Use (decoded
+// into HSYNCPARAMLocal and preserved on read-back, never acted on), and 65535
+// is reserved -- hsyncparam_RESERVED doubles as this package's "no such key"
+// sentinel, which is sound precisely because it can never be assigned.
 const (
-	HSYNCPARAM_NSMGMT     HSYNCPARAMKey = 0
-	HSYNCPARAM_PARENTSYNC HSYNCPARAMKey = 1
-	HSYNCPARAM_SERVERS    HSYNCPARAMKey = 2
-	HSYNCPARAM_SIGNERS    HSYNCPARAMKey = 3
-	HSYNCPARAM_PUBKEY     HSYNCPARAMKey = 4
-	HSYNCPARAM_PUBCDS     HSYNCPARAMKey = 5
-	HSYNCPARAM_SUFFIX     HSYNCPARAMKey = 6
-	HSYNCPARAM_AUDITORS   HSYNCPARAMKey = 7
+	HSYNCPARAM_SERVERS    HSYNCPARAMKey = 0
+	HSYNCPARAM_SIGNERS    HSYNCPARAMKey = 1
+	HSYNCPARAM_AUDITORS   HSYNCPARAMKey = 2
+	HSYNCPARAM_NSMGMT     HSYNCPARAMKey = 3
+	HSYNCPARAM_PARENTSYNC HSYNCPARAMKey = 4
+	HSYNCPARAM_SUFFIX     HSYNCPARAMKey = 5
+	HSYNCPARAM_PUBKEY     HSYNCPARAMKey = 6
+	HSYNCPARAM_PUBCDS     HSYNCPARAMKey = 7
 	hsyncparam_RESERVED   HSYNCPARAMKey = 65535
 )
 
 var hsyncparamKeyToStringMap = map[HSYNCPARAMKey]string{
-	HSYNCPARAM_NSMGMT:     "nsmgmt",
-	HSYNCPARAM_PARENTSYNC: "parentsync",
 	HSYNCPARAM_SERVERS:    "servers",
 	HSYNCPARAM_SIGNERS:    "signers",
+	HSYNCPARAM_AUDITORS:   "auditors",
+	HSYNCPARAM_NSMGMT:     "nsmgmt",
+	HSYNCPARAM_PARENTSYNC: "parentsync",
+	HSYNCPARAM_SUFFIX:     "suffix",
 	HSYNCPARAM_PUBKEY:     "pubkey",
 	HSYNCPARAM_PUBCDS:     "pubcds",
-	HSYNCPARAM_SUFFIX:     "suffix",
-	HSYNCPARAM_AUDITORS:   "auditors",
 }
 
 var hsyncparamStringToKeyMap = reverseHSYNCPARAMKeyMap(hsyncparamKeyToStringMap)
@@ -139,22 +155,22 @@ func RegisterHsyncparamRR() error {
 // an HSYNCPARAMLocal for unknown keys, or nil for reserved keys.
 func makeHSYNCPARAMKeyValue(key HSYNCPARAMKey) HSYNCPARAMKeyValue {
 	switch key {
-	case HSYNCPARAM_NSMGMT:
-		return new(HSYNCPARAMNSmgmt)
-	case HSYNCPARAM_PARENTSYNC:
-		return new(HSYNCPARAMParentSync)
 	case HSYNCPARAM_SERVERS:
 		return new(HSYNCPARAMServers)
 	case HSYNCPARAM_SIGNERS:
 		return new(HSYNCPARAMSigners)
+	case HSYNCPARAM_AUDITORS:
+		return new(HSYNCPARAMAuditors)
+	case HSYNCPARAM_NSMGMT:
+		return new(HSYNCPARAMNSmgmt)
+	case HSYNCPARAM_PARENTSYNC:
+		return new(HSYNCPARAMParentSync)
+	case HSYNCPARAM_SUFFIX:
+		return new(HSYNCPARAMSuffix)
 	case HSYNCPARAM_PUBKEY:
 		return &HSYNCPARAMFlag{code: HSYNCPARAM_PUBKEY}
 	case HSYNCPARAM_PUBCDS:
 		return &HSYNCPARAMFlag{code: HSYNCPARAM_PUBCDS}
-	case HSYNCPARAM_SUFFIX:
-		return new(HSYNCPARAMSuffix)
-	case HSYNCPARAM_AUDITORS:
-		return new(HSYNCPARAMAuditors)
 	case hsyncparam_RESERVED:
 		return nil
 	default:

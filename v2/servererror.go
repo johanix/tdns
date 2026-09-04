@@ -52,14 +52,23 @@ const (
 	ErrSubCertMissing                         // Config: a configured cert/key file is absent
 	ErrSubImrPriming                          // Upstream: IMR init/root priming failed; the resolver is not serving
 	ErrSubImrForward                          // Upstream: one or more IMR forward upstreams are unreachable
+	// Config/ImrForwardZone and Config/ImrForwardUpstream are the two halves
+	// of forward-table quarantine (#475): a zone with no usable upstream left
+	// is not serving, a zone that lost some of them is serving with reduced
+	// redundancy. Separate subtypes because `config status` renders one entry
+	// per (Category, Subtype), and these two must not read alike.
+	ErrSubImrForwardZone     // Config: a forward zone is quarantined; names under it SERVFAIL
+	ErrSubImrForwardUpstream // Config: forward upstreams are quarantined; their zones still serve
 )
 
 var errSubtypeName = map[ErrorSubtype]string{
-	ErrSubCert:        "Cert",
-	ErrSubPort:        "Port",
-	ErrSubCertMissing: "CertMissing",
-	ErrSubImrPriming:  "ImrPriming",
-	ErrSubImrForward:  "ImrForward",
+	ErrSubCert:               "Cert",
+	ErrSubPort:               "Port",
+	ErrSubCertMissing:        "CertMissing",
+	ErrSubImrPriming:         "ImrPriming",
+	ErrSubImrForward:         "ImrForward",
+	ErrSubImrForwardZone:     "ImrForwardZone",
+	ErrSubImrForwardUpstream: "ImrForwardUpstream",
 }
 
 func (s ErrorSubtype) String() string {
@@ -221,6 +230,23 @@ func (r *ServerErrorRegistry) SetImrForwardUpstreamError(msg string) {
 }
 func (r *ServerErrorRegistry) ClearImrForwardUpstreamError() {
 	r.clear(ErrCatUpstream, ErrSubImrForward)
+}
+
+// Owned by the IMR forward-table builder (v2/imr_forward.go). Quarantine is a
+// CONFIG verdict, not a reachability one — the upstream was never dialled —
+// hence ErrCatConfig rather than the ErrCatUpstream pair above. Recomputed
+// only when the table is swapped: at startup and on reload.
+func (r *ServerErrorRegistry) SetImrForwardZoneError(msg string) {
+	r.set(ErrCatConfig, ErrSubImrForwardZone, msg)
+}
+func (r *ServerErrorRegistry) ClearImrForwardZoneError() {
+	r.clear(ErrCatConfig, ErrSubImrForwardZone)
+}
+func (r *ServerErrorRegistry) SetImrForwardUpstreamConfigError(msg string) {
+	r.set(ErrCatConfig, ErrSubImrForwardUpstream, msg)
+}
+func (r *ServerErrorRegistry) ClearImrForwardUpstreamConfigError() {
+	r.clear(ErrCatConfig, ErrSubImrForwardUpstream)
 }
 
 // --- config-time cert validation (parseconfig, Config/CertMissing owner) ---

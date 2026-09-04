@@ -3,7 +3,7 @@ templates:
      store:           map
      type:            primary
      notify:          [ 127.0.0.1:5399 ]
-     options:         [ delegation-sync-parent, allow-updates, allow-child-updates, multisigner ]
+     options:         [ childsync, allow-updates, allow-child-updates, multisigner ]
      dnssecpolicy:    default
      delegationpolicy: manual
      multisigner:     none
@@ -19,7 +19,7 @@ templates:
      store:           map
      type:            secondary
      notify:          [ 127.0.0.1:5399 ]
-     options:         [ delegation-sync-parent, allow-child-updates, multisigner ]
+     options:         [ childsync, allow-child-updates, multisigner ]
      dnssecpolicy:    none
      delegationpolicy: manual
      updatepolicy:
@@ -31,7 +31,7 @@ templates:
      store:           map
      type:            primary
      notify:          [ 127.0.0.1:5399 ]
-     options:         [ delegation-sync-child, online-signing, allow-updates, multisigner ]
+     options:         [ parentsync, online-signing, allow-updates, multisigner ]
      dnssecpolicy:    default
      updatepolicy:
         zone:
@@ -42,6 +42,6 @@ templates:
      store:           map
      type:            secondary
      notify:          [ 127.0.0.1:5399 ]
-     options:         [ delegation-sync-child, multisigner ]
+     options:         [ parentsync, multisigner ]
      dnssecpolicy:    default
      multisigner:     mstest

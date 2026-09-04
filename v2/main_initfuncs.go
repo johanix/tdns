@@ -163,6 +163,11 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if Globals.App.Type != AppTypeCli || Globals.Verbose {
 		fmt.Printf("TDNS %s version %s starting.\n", Globals.App.Name, Globals.App.Version)
 	}
+	// Before the engines: a configured-but-unusable profiler is a config error,
+	// not something to discover in the log after startup reported success.
+	if err := conf.startPprof(ctx); err != nil {
+		return err
+	}
 	// Initialize QueryHandlers map for registration API
 	conf.Internal.QueryHandlers = make(map[uint16][]QueryHandlerFunc)
 	// Copy any handlers registered before MainInit (from global storage)
@@ -314,6 +319,13 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	// RefreshEngine is now running and draining RefreshZoneCh, so persisted
 	// dynamic zones can be loaded with a blocking enqueue (no drop).
 	conf.loadDynamicZonesIfConfigured(ctx)
+	// Establish the configured-zone set and arm the signal-name orphan sweep.
+	// Not because the registry is complete here -- it is not; the dynamic
+	// secondaries and catalog members just enqueued are built later by the
+	// refresh engine. That is exactly why the sweep tests CONFIGURATION rather
+	// than registry membership, and why it stays disarmed if the set cannot be
+	// established. See ReconcileSignalPublicationsAtStartup.
+	conf.ReconcileSignalPublicationsAtStartup()
 
 	return nil
 }
@@ -348,6 +360,13 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	// RefreshEngine is now running and draining RefreshZoneCh, so persisted
 	// dynamic zones can be loaded with a blocking enqueue (no drop).
 	conf.loadDynamicZonesIfConfigured(ctx)
+	// Establish the configured-zone set and arm the signal-name orphan sweep.
+	// Not because the registry is complete here -- it is not; the dynamic
+	// secondaries and catalog members just enqueued are built later by the
+	// refresh engine. That is exactly why the sweep tests CONFIGURATION rather
+	// than registry membership, and why it stays disarmed if the set cannot be
+	// established. See ReconcileSignalPublicationsAtStartup.
+	conf.ReconcileSignalPublicationsAtStartup()
 
 	return nil
 }

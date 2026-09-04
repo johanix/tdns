@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -69,7 +70,7 @@ func TestUnpublishDsyncRemovesBootstrapSVCBAndReceiverKEY(t *testing.T) {
 		ZoneName: "example.",
 		KeyDB:    &KeyDB{UpdateQ: q},
 	}
-	if err := zd.UnpublishDsyncRRs(); err != nil {
+	if err := zd.UnpublishDsyncRRs(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	ur := <-q
@@ -118,7 +119,7 @@ func TestUnpublishDsyncSkipsApexSVCBAndKEY(t *testing.T) {
 		ZoneName: "example.",
 		KeyDB:    &KeyDB{UpdateQ: q},
 	}
-	if err := zd.UnpublishDsyncRRs(); err != nil {
+	if err := zd.UnpublishDsyncRRs(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	ur := <-q

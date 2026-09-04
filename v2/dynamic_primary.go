@@ -38,12 +38,17 @@ type dynamicPrimarySpec struct {
 
 // dynamicPrimaryDisallowedOptions are template options that name machinery a
 // dynamic primary must not participate in (v1): catalogs have their own
-// provisioning paths and multi-provider zones their own signing model.
+// provisioning paths, multi-provider zones their own signing model, and
+// use-hsyncparam is secondary-only.
 var dynamicPrimaryDisallowedOptions = map[ZoneOption]bool{
 	OptCatalogZone:             true,
 	OptCatalogMemberAutoCreate: true,
 	OptCatalogMemberAutoDelete: true,
 	OptMultiProvider:           true,
+	// Secondary-only: the HSYNCPARAM republisher reacts to an inbound
+	// transfer of somebody else's zone, which a primary never receives. The
+	// shared parser only warns; a blessed template must refuse loudly.
+	OptUseHsyncparam: true,
 }
 
 // lookupZoneTemplate copies a template out of the global Templates map under
@@ -454,6 +459,12 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		cleanupFile()
 		return "", fmt.Errorf("zone %s: %w", name, cerr)
 	}
+	// Before Zones.Set, per registerStandardRefreshHooks. Both hooks self-gate
+	// on options a primary cannot hold, so they are no-ops here today -- but
+	// the rule is per creation path, not per zone type, so the next hook does
+	// not have to remember this one.
+	zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+
 	Zones.Set(name, zd)
 	if err := conf.AddDynamicZoneToConfig(zd); err != nil {
 		zd.stopPublisher()

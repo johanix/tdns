@@ -239,7 +239,7 @@ func TestProxyApiRRsetsDeclareEmptyDSWhenTheChildIsUnsigned(t *testing.T) {
 // security refusal cannot be mistaken for one.
 func TestProxyApiParentReportsMissingCredentialAsSuch(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
-	zd.Parent = "example."
+	zd.SetParent("example.")
 	target := &DsyncTarget{Name: "dsync-api.example."}
 
 	// No credentials configured at all.
@@ -265,7 +265,7 @@ func TestProxyApiParentReportsMissingCredentialAsSuch(t *testing.T) {
 // one: the operator has to fix the config, and no request should be attempted.
 func TestProxyApiParentTreatsIncompleteCredentialAsMissing(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
-	zd.Parent = "example."
+	zd.SetParent("example.")
 	target := &DsyncTarget{Name: "dsync-api.example."}
 
 	for name, cred := range map[string]DsyncApiChildCredentialConf{
@@ -290,7 +290,7 @@ func TestProxyApiParentTreatsIncompleteCredentialAsMissing(t *testing.T) {
 // (which would send the dispatcher down the fallback path for a bug).
 func TestProxyApiParentRefusesWithoutTargetOrImr(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
-	zd.Parent = "example."
+	zd.SetParent("example.")
 	setChildApiCredentials(t, DsyncApiChildCredentialConf{
 		Parent: "example.", Username: "u", Key: "k"})
 
