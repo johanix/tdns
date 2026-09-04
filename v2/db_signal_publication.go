@@ -16,6 +16,7 @@ package tdns
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 )
 
@@ -53,9 +54,28 @@ type SignalPublication struct {
 // mis-tracked write costs a query, never a missed withdrawal.
 var signalLedgerEmpty atomic.Bool
 
+// signalLedgerMu serializes ledger WRITES with the empty-flag update.
+//
+// Without it the flag can go wrongly true: RefreshSignalLedgerEmpty counts
+// zero, a concurrent RecordSignalPublication inserts a row, and the stale count
+// is then stored as "empty" -- which makes every reconciler take the fast path
+// and skip withdrawal entirely, silently, until something else recomputes it.
+// A wrong "false" only costs a query; a wrong "true" disables the feature with
+// nothing in the log, so this is worth a mutex on a path that writes a handful
+// of rows per refresh at most.
+var signalLedgerMu sync.Mutex
+
 // RefreshSignalLedgerEmpty recomputes the empty-ledger fast path from the
 // table. Called when the KeyDB is opened and after every delete.
 func (kdb *KeyDB) RefreshSignalLedgerEmpty() {
+	signalLedgerMu.Lock()
+	defer signalLedgerMu.Unlock()
+	kdb.refreshSignalLedgerEmptyLocked()
+}
+
+// refreshSignalLedgerEmptyLocked is RefreshSignalLedgerEmpty with the caller
+// already holding signalLedgerMu.
+func (kdb *KeyDB) refreshSignalLedgerEmptyLocked() {
 	if kdb == nil || kdb.DB == nil {
 		return
 	}
@@ -81,6 +101,9 @@ func (kdb *KeyDB) RecordSignalPublication(p SignalPublication) error {
 	if kdb == nil || kdb.DB == nil {
 		return fmt.Errorf("RecordSignalPublication: no database")
 	}
+	// Held across the insert AND the flag update: see signalLedgerMu.
+	signalLedgerMu.Lock()
+	defer signalLedgerMu.Unlock()
 	_, err := kdb.DB.Exec(
 		`INSERT INTO SignalPublication (target, owner, zone, ns, prefix, source, published_at)
 		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -104,11 +127,13 @@ func (kdb *KeyDB) ForgetSignalPublication(target, owner string) error {
 	if kdb == nil || kdb.DB == nil {
 		return fmt.Errorf("ForgetSignalPublication: no database")
 	}
+	signalLedgerMu.Lock()
+	defer signalLedgerMu.Unlock()
 	_, err := kdb.DB.Exec(`DELETE FROM SignalPublication WHERE target = ? AND owner = ?`, target, owner)
 	if err != nil {
 		return fmt.Errorf("ForgetSignalPublication(%s in %s): %w", owner, target, err)
 	}
-	kdb.RefreshSignalLedgerEmpty()
+	kdb.refreshSignalLedgerEmptyLocked()
 	return nil
 }
 

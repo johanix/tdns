@@ -1048,6 +1048,16 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 	if err := conf.RemoveDynamicZoneFromConfig(name); err != nil {
 		return "", fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w", name, err)
 	}
+	// The zone has now left the dynamic config file, so the signal-name orphan
+	// sweep must stop counting it as configured -- otherwise a withdrawal that
+	// deferred above (target zone not loaded) would never be finished by the
+	// sweep. Read the static names under confMu; the rebuild itself reads the
+	// dynamic config file and takes no config lock.
+	confMu.RLock()
+	staticZoneNames := conf.staticZoneNames()
+	confMu.RUnlock()
+	conf.refreshConfiguredZoneNames(staticZoneNames)
+
 	// Best-effort remove the persisted zone file.
 	if conf.DynamicZones.ZoneDirectory != "" {
 		zoneFilePath := filepath.Join(conf.DynamicZones.ZoneDirectory, name+"zone")

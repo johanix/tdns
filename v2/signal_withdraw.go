@@ -26,6 +26,7 @@
 package tdns
 
 import (
+	"fmt"
 	"sync/atomic"
 
 	"github.com/miekg/dns"
@@ -307,7 +308,7 @@ func (conf *Config) ReconcileSignalPublicationsAtStartup() {
 	// the registry" means "orphan", which during startup is false for every
 	// zone the refresh engine has not built yet -- so an unreadable dynamic
 	// config must leave the sweep OFF, not run it against an empty set.
-	if !conf.captureConfiguredZoneNames() {
+	if !conf.captureConfiguredZoneNames(conf.staticZoneNames()) {
 		lgSignal.Warn("signal-name orphan sweep stays disarmed: the configured zone set could not be established")
 		return
 	}
@@ -406,38 +407,81 @@ func signalRRtypesForPrefix(prefix string) []uint16 {
 	return nil
 }
 
-// captureConfiguredZoneNames records every zone name some configuration names,
-// so the orphan sweep can tell "removed" from "not built yet". Static zones
-// come from the parsed config; dynamic ones are re-read from the dynamic config
-// file, because the registry is exactly what cannot be trusted here.
-//
-// On any doubt it protects rather than exposes: a dynamic config file that
-// cannot be read leaves the sweep disarmed entirely, since a partial set would
-// make the sweep confidently wrong about the zones it failed to read.
-// Returns false when the set could not be established, which must leave the
-// sweep disarmed.
-func (conf *Config) captureConfiguredZoneNames() bool {
-	names := map[string]bool{}
+// staticZoneNames snapshots the names of the statically configured zones.
+// Split out so a caller can take it under whatever lock already protects
+// conf.Zones (confMu) and hand the result to the builders below, which do file
+// I/O and must not run under that lock.
+func (conf *Config) staticZoneNames() []string {
+	out := make([]string, 0, len(conf.Zones))
 	for i := range conf.Zones {
-		names[dns.Fqdn(conf.Zones[i].Name)] = true
+		out = append(out, conf.Zones[i].Name)
 	}
+	return out
+}
 
-	if conf.DynamicZones.ConfigFile != "" {
-		cf, err := conf.loadDynamicConfigFile()
-		if err != nil {
-			lgSignal.Error("cannot read the dynamic zone config; leaving the signal-name orphan sweep disarmed",
-				"file", conf.DynamicZones.ConfigFile, "err", err)
-			signalConfiguredZones.Store(nil)
-			return false
-		}
-		if cf != nil {
-			for _, zconf := range cf.Zones {
-				names[dns.Fqdn(zconf.Name)] = true
-			}
+// configuredZoneNames builds the set of every zone name some configuration
+// names: the static names the caller passes in, plus whatever the dynamic
+// config file holds. The registry is deliberately not consulted -- it is
+// exactly what cannot be trusted here (see signalConfiguredZones).
+func (conf *Config) configuredZoneNames(static []string) (map[string]bool, error) {
+	names := make(map[string]bool, len(static))
+	for _, n := range static {
+		names[dns.Fqdn(n)] = true
+	}
+	if conf.DynamicZones.ConfigFile == "" {
+		return names, nil
+	}
+	// A dynamic config file that does not exist yet is the normal first-run
+	// state; loadDynamicConfigFile returns an empty config for it, not an error.
+	cf, err := conf.loadDynamicConfigFile()
+	if err != nil {
+		return nil, fmt.Errorf("dynamic zone config %s: %w", conf.DynamicZones.ConfigFile, err)
+	}
+	if cf != nil {
+		for _, zconf := range cf.Zones {
+			names[dns.Fqdn(zconf.Name)] = true
 		}
 	}
+	return names, nil
+}
 
+// captureConfiguredZoneNames establishes the set for the FIRST time, at
+// startup. Returns false when it could not be established, which must leave the
+// sweep disarmed: without a set, "absent from the registry" means "orphan", and
+// during startup that is false for every zone the refresh engine has not built
+// yet.
+func (conf *Config) captureConfiguredZoneNames(static []string) bool {
+	names, err := conf.configuredZoneNames(static)
+	if err != nil {
+		lgSignal.Error("cannot establish the configured zone set; leaving the signal-name orphan sweep disarmed",
+			"err", err)
+		signalConfiguredZones.Store(nil)
+		return false
+	}
 	lgSignal.Debug("captured the configured zone set for the signal-name orphan sweep", "zones", len(names))
 	signalConfiguredZones.Store(&names)
 	return true
+}
+
+// refreshConfiguredZoneNames updates the set after the configuration CHANGES --
+// a reload, or a dynamic zone removed over the API. Without this the set is
+// whatever startup saw, so a zone dropped from the config still counts as
+// configured and its rows are never swept: a prompt withdrawal that had to
+// defer (target not loaded) would then wait for a restart.
+//
+// The failure policy is the opposite of capture's, deliberately. Capture runs
+// before the sweep is armed, so failing closed means not arming. This runs when
+// the sweep may already be live, and storing nil or a partial set would make
+// every ledger row whose zone is not in the registry look like an orphan --
+// turning a failed file read into a mass withdrawal. A stale set only delays a
+// withdrawal; a cleared one performs the wrong ones.
+func (conf *Config) refreshConfiguredZoneNames(static []string) {
+	names, err := conf.configuredZoneNames(static)
+	if err != nil {
+		lgSignal.Warn("could not refresh the configured zone set; keeping the previous one (orphan sweeps stay conservative)",
+			"err", err)
+		return
+	}
+	lgSignal.Debug("refreshed the configured zone set", "zones", len(names))
+	signalConfiguredZones.Store(&names)
 }

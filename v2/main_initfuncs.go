@@ -314,9 +314,12 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	// RefreshEngine is now running and draining RefreshZoneCh, so persisted
 	// dynamic zones can be loaded with a blocking enqueue (no drop).
 	conf.loadDynamicZonesIfConfigured(ctx)
-	// And now every zone this server serves is in the registry, so a zone
-	// MISSING from it is one that was removed -- which is what the signal-name
-	// orphan sweep needs to be true before it may delete anything.
+	// Establish the configured-zone set and arm the signal-name orphan sweep.
+	// Not because the registry is complete here -- it is not; the dynamic
+	// secondaries and catalog members just enqueued are built later by the
+	// refresh engine. That is exactly why the sweep tests CONFIGURATION rather
+	// than registry membership, and why it stays disarmed if the set cannot be
+	// established. See ReconcileSignalPublicationsAtStartup.
 	conf.ReconcileSignalPublicationsAtStartup()
 
 	return nil
@@ -352,9 +355,12 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	// RefreshEngine is now running and draining RefreshZoneCh, so persisted
 	// dynamic zones can be loaded with a blocking enqueue (no drop).
 	conf.loadDynamicZonesIfConfigured(ctx)
-	// And now every zone this server serves is in the registry, so a zone
-	// MISSING from it is one that was removed -- which is what the signal-name
-	// orphan sweep needs to be true before it may delete anything.
+	// Establish the configured-zone set and arm the signal-name orphan sweep.
+	// Not because the registry is complete here -- it is not; the dynamic
+	// secondaries and catalog members just enqueued are built later by the
+	// refresh engine. That is exactly why the sweep tests CONFIGURATION rather
+	// than registry membership, and why it stays disarmed if the set cannot be
+	// established. See ReconcileSignalPublicationsAtStartup.
 	conf.ReconcileSignalPublicationsAtStartup()
 
 	return nil

@@ -257,8 +257,8 @@ func TestWithdraw_PubcdsWithdrawsBothTypes(t *testing.T) {
 
 // Case 3b: the customer zone is no longer served here at all, so its own
 // reconciler will never run again. The target zone withdraws on its behalf --
-// but only once startup has finished registering zones, because before that a
-// missing zone means "not loaded yet".
+// but only once the sweep is armed, because an unarmed sweep has no configured
+// zone set to tell "removed" apart from "not built yet".
 func TestWithdraw_ZoneNoLongerServed(t *testing.T) {
 	f := pubkeyFixture(t)
 	Zones.Remove("example.")
@@ -519,7 +519,7 @@ func TestCaptureConfiguredZoneNames(t *testing.T) {
 		conf := &Config{Zones: []ZoneConf{{Name: "example."}, {Name: "other.example"}}}
 		conf.DynamicZones.ConfigFile = filepath.Join(t.TempDir(), "absent.yaml")
 
-		if !conf.captureConfiguredZoneNames() {
+		if !conf.captureConfiguredZoneNames(conf.staticZoneNames()) {
 			t.Fatal("a dynamic config file that does not exist yet is the normal first-run state, not a failure")
 		}
 		if !zoneIsConfigured("example.") {
@@ -544,13 +544,75 @@ func TestCaptureConfiguredZoneNames(t *testing.T) {
 		conf := &Config{Zones: []ZoneConf{{Name: "example."}}}
 		conf.DynamicZones.ConfigFile = bad
 
-		if conf.captureConfiguredZoneNames() {
+		if conf.captureConfiguredZoneNames(conf.staticZoneNames()) {
 			t.Fatal("an unreadable dynamic config must report failure so the caller leaves the sweep disarmed")
 		}
 		if signalConfiguredZones.Load() != nil {
 			t.Error("a partial set was published; the sweep would treat unread zones as orphans")
 		}
 	})
+}
+
+// The configured set has to follow configuration CHANGES, not just startup.
+// This is the sequence the re-review flagged: a zone is dropped from the
+// config, the prompt withdrawal has to defer because the target is not loaded,
+// and the orphan sweep is then the only thing left that can finish the job --
+// which it will refuse to do for as long as the set still names the zone.
+func TestRefreshConfiguredZoneNames_DroppedZoneLeavesTheSet(t *testing.T) {
+	conf := &Config{Zones: []ZoneConf{{Name: "example."}, {Name: "keep.example."}}}
+	conf.DynamicZones.ConfigFile = filepath.Join(t.TempDir(), "absent.yaml")
+	signalConfiguredZones.Store(nil)
+	t.Cleanup(func() { signalConfiguredZones.Store(nil) })
+
+	if !conf.captureConfiguredZoneNames(conf.staticZoneNames()) {
+		t.Fatal("capture failed")
+	}
+	if !zoneIsConfigured("example.") {
+		t.Fatal("fixture wrong: example. should start out configured")
+	}
+
+	// The reload drops it.
+	conf.Zones = []ZoneConf{{Name: "keep.example."}}
+	conf.refreshConfiguredZoneNames(conf.staticZoneNames())
+
+	if zoneIsConfigured("example.") {
+		t.Error("a zone dropped from the config still counts as configured; its rows would never be swept")
+	}
+	if !zoneIsConfigured("keep.example.") {
+		t.Error("a zone still in the config was dropped from the set")
+	}
+}
+
+// Refresh's failure policy is the OPPOSITE of capture's, and the asymmetry is
+// the point. Capture runs before the sweep is armed, so failing means not
+// arming. Refresh runs when the sweep may be live, where storing nil would
+// make every row whose zone is not currently in the registry look like an
+// orphan -- turning an unreadable file into a mass withdrawal.
+func TestRefreshConfiguredZoneNames_KeepsThePreviousSetOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	conf := &Config{Zones: []ZoneConf{{Name: "example."}}}
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dyn.yaml")
+	signalConfiguredZones.Store(nil)
+	t.Cleanup(func() { signalConfiguredZones.Store(nil) })
+
+	if !conf.captureConfiguredZoneNames(conf.staticZoneNames()) {
+		t.Fatal("capture failed")
+	}
+
+	// The dynamic config becomes unreadable, and the static set changes too --
+	// so a refresh that silently succeeded would be detectable either way.
+	if err := os.WriteFile(conf.DynamicZones.ConfigFile, []byte("zones: [not: valid: yaml\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	conf.Zones = []ZoneConf{{Name: "other.example."}}
+	conf.refreshConfiguredZoneNames(conf.staticZoneNames())
+
+	if !zoneIsConfigured("example.") {
+		t.Error("the previous set was discarded on a failed refresh; live zones would be swept as orphans")
+	}
+	if zoneIsConfigured("other.example.") {
+		t.Error("a partial set was published from a failed refresh")
+	}
 }
 
 // withConfiguredZones installs the configured-zone set for one test.

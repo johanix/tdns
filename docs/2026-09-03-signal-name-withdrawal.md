@@ -149,6 +149,20 @@ The reconciler runs in two roles, both from the same callback:
   orphan, however absent it currently is. A zone genuinely removed while the
   daemon was stopped is in neither.
 
+  The set is rebuilt whenever the configuration changes: `ReloadZoneConfig` and
+  `RemoveDynamicZone`. Without that it would be whatever startup saw, and a
+  zone dropped from the config would still count as configured -- so a prompt
+  withdrawal that had to defer (§4.3, target not loaded) would never be
+  finished by the sweep either, and the rows would wait for a restart.
+
+  Capture and refresh fail in OPPOSITE directions, and the asymmetry is the
+  point. Capture runs before the sweep is armed, so a failure means not arming.
+  Refresh runs when the sweep may already be live, where storing nothing would
+  make every row whose zone is not currently in the registry look like an
+  orphan -- turning one unreadable file into a mass withdrawal. So a failed
+  refresh keeps the previous set: stale only delays a withdrawal, cleared
+  performs the wrong ones.
+
 Plus two prompt paths, so a live removal does not wait for the target's next
 refresh: `ReloadZoneConfig`'s "zone no longer in config" sweep and
 `RemoveDynamicZone` withdraw everything for the zone they are removing.
@@ -267,7 +281,15 @@ boot.
    one costs the ability to undo a publication. The ledger is bounded by the
    number of signal names ever published, so it can afford to remember.
 
-9. **An "is the ledger empty" flag, not a per-zone cache.** The hook now runs on
+9. **The empty-ledger flag is maintained under a mutex.** A wrong "false"
+   costs one query; a wrong "true" makes every reconciler take the fast path
+   and skip withdrawal entirely, with nothing in the log. Counting and storing
+   without serialising against inserts allows exactly that -- count zero,
+   concurrent insert, store "empty" -- so ledger writes and the flag update
+   share `signalLedgerMu`. It guards a path that writes a handful of rows per
+   refresh at most.
+
+10. **An "is the ledger empty" flag, not a per-zone cache.** The hook now runs on
    every zone rather than every secondary, and the overwhelmingly common
    deployment has published nothing at any signal name. One atomic load makes
    that case free. A deployment that does use the feature has a handful of rows
