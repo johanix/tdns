@@ -58,7 +58,7 @@ operator (Info), not as an error. Notes in
 | 2 | D-2b UPDATE retry, D-4 bootstrap ceremony | **DONE** (PR #312) | — |
 | 2 | **D-7** mutual auth (moved ahead of D-6 — see note above) | **(i)+(ii) DONE** (2026-09-02) — child verifies signed KeyState responses; only (iii) signing plain UPDATE responses (draft SHOULD) remains | ~80-150 (iii only) |
 | 2 | **D-6** SVCB bootstrap consumption | **DONE** (2026-09-02) — intersection+selection, `at-ns` publishes at `_signal` via the shared signal publisher, satisfiability filter, default restored, failed lookup retried | — |
-| 2 | D-3b CDS/CSYNC acceptance (NS/glue half) | **PARTIAL** — DS half via #386; NS/glue rules **extracted** 2026-09-02 (`delegation_csync.go`, scanner still the only caller); wiring into `ApproveChildUpdate` is the remaining PR | ~200-350 |
+| 2 | D-3b CDS/CSYNC acceptance (NS/glue half) | **DONE** (2026-09-02) — DS half via #386; NS/glue rules extracted (`delegation_csync.go`) and wired into `ApproveChildUpdate` and the DSYNC API (`delegation_csync_update.go`) | — |
 | 3 | IANA alignment | **DEFERRED** by design | — |
 | — | Cross-cutting vocabulary (4 settings, 2 config-reading engines) | **DONE** (PR #471) | — |
 
@@ -228,15 +228,28 @@ BADKEY re-bootstrap arm rather than treated as an absent advertisement.
 - **Change (done 2026-09-02):** when the selected method is `at-ns`, the auth child publishes the KEY at `_sig0key.<child>._signal.<ns>` before sending the ceremony; a proxy cannot and never offers `at-ns`.
 - **Acceptance (met):** with a parent SVCB `bootstrap="unsigned,manual"` and the child default, bootstrap refuses rather than attempting `at-apex`; `at-ns` selected → `_signal` name published (`TestPublishSig0KeyAtSignalNames`).
 
-### D-3b. CDS/CSYNC acceptance semantics on the UPDATE path — **PARTIAL** (was NOT STARTED; DS half landed independently), **remaining half deferred to its own PR** (decided 2026-08-22)
+### D-3b. CDS/CSYNC acceptance semantics on the UPDATE path — **DONE** (2026-09-02, in two PRs; DS half had landed independently)
 
 **Step 1 done 2026-09-02** on `feature/ddns-keystate-d3b-csync-extract`
 (off `main`, not stacked): `ProcessCSYNCNotify`'s RFC 7477 rules are
 `computeCsyncDelta` and friends in `v2/delegation_csync.go`, network and
-stored-delegation access injected, scanner still the only caller, behaviour
+stored-delegation access injected, scanner the only caller AT THAT POINT, behaviour
 byte-identical. The dead pre-NOTIFY path (`CheckCSYNC`, `CsyncAnalyze*`) is
-deleted. Notes and the shape of step 2 in
-`docs/2026-09-02-ddns-keystate-d3b-csync-extraction.md`.
+deleted. Notes in `docs/2026-09-02-ddns-keystate-d3b-csync-extraction.md`.
+
+**Step 2 done 2026-09-02** on `feature/ddns-keystate-d3b-csync-wire`
+(stacked on step 1): `CheckDelegationNSCoherence` /
+`CheckDelegationNSCoherenceForUpdate` (`v2/delegation_csync_update.go`)
+apply the rules to an asserted change, scoped to what the update touches,
+asking the parent's current nameservers for the child through the scanner's
+fetcher; wired into `ApproveChildUpdate` and the DSYNC API handler after the
+DS check, same refusal shape. `dsAfterActions` generalised to
+`rrsetAfterActions`. Notes and the decisions (scoping, whom to ask, the
+deferred EDE) in `docs/2026-09-02-ddns-keystate-d3b-update-wiring.md`. The
+DS-duplication question stays open and separate. **D-3b is closed.** (The
+LOC totals in this document are maintained on the D-7/D-6/K-4 stack, not
+here, to avoid a merge conflict; they read ~80-150 for D-7(iii) once
+everything is in.)
 
 - **Reassessed 2026-09-01, post-merge:** `parent-checks-delegation-coherence` (#386, merged to `main` independently of this plan) already implemented the **DS/RFC7344/8078 half** — `v2/delegation_coherence.go:209-297` `CheckDelegationCoherence`, a free function with an injected `dnskeyFetcher`, wired into the UPDATE path at `v2/updateresponder.go:638-645` (`ApproveChildUpdate`, refuses with `REFUSED`+EDE) and the DSYNC-API path at `v2/dsync_api_delegation.go:262`. This is good news (D-3b's DS half is done) and a complication: it was written as a **fresh implementation**, not by extracting the scanner's logic as this plan prescribes, so there are now two independent implementations of the DS acceptance rule — this one, and the scanner's `ProcessCDSNotify` (`v2/scanner.go:1114-1288`). **Remaining scope is the RFC 7477 NS/glue half only** (plus, optionally, reconciling the DS duplication — see below).
 - **Why its own PR:** "reuse the scanner's check functions" understates this,
@@ -255,7 +268,9 @@ deleted. Notes and the shape of step 2 in
 - **Last of the remaining Phase 2 items.** D-7 is exposure; this is
   completeness.
 - **Draft (ddns-02 §"Processing the UPDATE"):** once authenticated, the change is subjected to the **same** acceptance checks a CDS/CSYNC scanner runs — RFC7344/8078 for DS, RFC7477 for NS/glue.
-- **Current (PARTIAL), after step 1:** DS/RFC7344/8078 done via `CheckDelegationCoherence` (see above); the RFC7477 NS/glue rules now live in `v2/delegation_csync.go` (`computeCsyncDelta` and the helpers around it), extracted from `ProcessCSYNCNotify` with network and stored-delegation access injected, and the scanner is still their only caller. They are therefore not yet reused for UPDATEs; the UPDATE path's own gate is otherwise just SIG(0)-trust + name-scope + RR-type policy (`v2/updateresponder.go:592-618`).
+- **Current (DONE), after both steps:** DS/RFC7344/8078 via `CheckDelegationCoherence` (see above); the RFC7477 NS/glue rules extracted into `v2/delegation_csync.go` in step 1, and applied to an UPDATE's asserted result by `CheckDelegationNSCoherence` (`v2/delegation_csync_update.go`) in step 2, wired into `ApproveChildUpdate` and the DSYNC API handler after the DS check with the same REFUSED+EDE / 409 shape.
+
+  The scanner and the UPDATE path have SEPARATE drivers, deliberately: the scanner derives a change from what the child publishes (`computeCsyncDelta`), while the UPDATE path validates a change somebody asserted. They share everything below the rule -- `childRRsetFetcher` and its agreement requirement, `csyncTypes`, `inBailiwickNSNames`, `canonicalNameSet` -- and the residue is that the rule itself is stated twice, so a change to it has to reach both or the UPDATE path silently becomes a bypass.
 
   The `CsyncAnalyzeNS` / `CsyncAnalyzeA` / `CsyncAnalyzeAAAA` helpers this bullet used to name were the **dead pre-NOTIFY path**, not the live rules, and step 1 deleted them along with `CheckCSYNC`, `UpdateCsyncStatus` and `TypeBitMapToString`. The live logic was always inline in `ProcessCSYNCNotify`, which is what got extracted.
 - **Change:** extract the NS/glue acceptance logic into a free function in `CheckDelegationCoherence`'s style and wire it into `ApproveChildUpdate` the same way. Separately decide whether to reconcile the now-duplicated DS logic (`CheckDelegationCoherence` vs. `ProcessCDSNotify`) or accept the duplication — the plan's original two-implementations-is-bad rationale for extraction now argues for reconciling, but that's a larger, riskier refactor than just adding the NS/glue half, so it should be a separate, explicit decision rather than something this item quietly grows to include.

@@ -592,6 +592,24 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 	return baseRRset, allInSync, nil
 }
 
+// childRRsetFetcher adapts queryAllNSAndCompare -- ask every nameserver in
+// nsRRset and require agreement -- to the childRRsetFetcher the RFC 7477 rules
+// take (delegation_csync.go). The CSYNC scan and the UPDATE-path coherence
+// check both use it, so an asserted change is verified exactly the way a
+// scanned one is.
+func (scanner *Scanner) childRRsetFetcher(nsRRset *core.RRset, lg *log.Logger) childRRsetFetcher {
+	return func(ctx context.Context, name string, qtype uint16) ([]dns.RR, bool, error) {
+		rrset, inSync, err := scanner.queryAllNSAndCompare(ctx, name, qtype, nsRRset, scanner.ImrEngine, lg)
+		if err != nil {
+			return nil, false, err
+		}
+		if rrset == nil {
+			return nil, inSync, nil
+		}
+		return rrset.RRs, inSync, nil
+	}
+}
+
 func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType ScanType, options *edns0.MsgOptions, responseCh chan<- ScanTupleResponse) {
 	scanLog := scanner.Log["CDS"]
 	if scanLog == nil {
@@ -893,19 +911,8 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 		glue, ok := ownerData[t]
 		return glue, ok
 	}
-	fetch := func(ctx context.Context, name string, qtype uint16) ([]dns.RR, bool, error) {
-		rrset, inSync, err := scanner.queryAllNSAndCompare(ctx, name, qtype, nsRRset, scanner.ImrEngine, scanLog)
-		if err != nil {
-			return nil, false, err
-		}
-		if rrset == nil {
-			return nil, inSync, nil
-		}
-		return rrset.RRs, inSync, nil
-	}
-
-	delta, err := computeCsyncDelta(ctx, childZone, csynctypes, currentNSRRs, currentGlue, fetch,
-		scanLog, scanner.Verbose, scanner.Debug)
+	delta, err := computeCsyncDelta(ctx, childZone, csynctypes, currentNSRRs, currentGlue,
+		scanner.childRRsetFetcher(nsRRset, scanLog), scanLog, scanner.Verbose, scanner.Debug)
 	if err != nil {
 		response.Error = true
 		response.ErrorMsg = err.Error()

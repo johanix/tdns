@@ -51,26 +51,33 @@ type dnskeyFetcher func(child string) (keys []dns.RR, validated bool, err error)
 // keeps the coherence check, and the lookup it needs, off updates that cannot
 // affect the chain of trust.
 func dsAfterActions(child string, currentDS, actions []dns.RR) (result []dns.RR, touched bool) {
-	child = dns.Fqdn(child)
-	result = append(result, currentDS...)
+	return rrsetAfterActions(child, dns.TypeDS, currentDS, actions)
+}
+
+// rrsetAfterActions applies the records of an RFC 2136 update that address
+// (owner, rrtype) to current, and reports the result and whether the update
+// mentioned that RRset at all. Shared by the DS coherence check above and the
+// NS/glue one (delegation_csync_update.go); the semantics are RFC 2136 §2.5:
+// class ANY deletes the RRset (or, with type ANY, every RRset at the name),
+// class NONE deletes one record, anything else adds one.
+func rrsetAfterActions(owner string, rrtype uint16, current, actions []dns.RR) (result []dns.RR, touched bool) {
+	owner = dns.Fqdn(owner)
+	result = append(result, current...)
 
 	for _, rr := range actions {
 		h := rr.Header()
-		if !dns.IsSubDomain(child, h.Name) || !dns.IsSubDomain(h.Name, child) {
-			continue // not at the child's apex
+		if !core.EqualNames(dns.Fqdn(h.Name), owner) {
+			continue
 		}
 
 		switch h.Class {
 		case dns.ClassANY:
-			// Delete an entire RRset. TypeANY deletes every RRset at the name,
-			// which includes the DS.
-			if h.Rrtype == dns.TypeDS || h.Rrtype == dns.TypeANY {
+			if h.Rrtype == rrtype || h.Rrtype == dns.TypeANY {
 				result = nil
 				touched = true
 			}
 		case dns.ClassNONE:
-			// Delete one record.
-			if h.Rrtype != dns.TypeDS {
+			if h.Rrtype != rrtype {
 				continue
 			}
 			touched = true
@@ -83,8 +90,7 @@ func dsAfterActions(child string, currentDS, actions []dns.RR) (result []dns.RR,
 			}
 			result = kept
 		default:
-			// Add.
-			if h.Rrtype != dns.TypeDS {
+			if h.Rrtype != rrtype {
 				continue
 			}
 			touched = true
@@ -118,8 +124,11 @@ func sameRecord(a, b dns.RR) bool {
 	return dns.IsDuplicate(na, nb)
 }
 
-// sameDSSet reports whether two DS RRsets hold the same records, order aside.
-func sameDSSet(a, b []dns.RR) bool {
+// sameRRsetContent reports whether two RRsets hold the same records, order
+// aside. Nothing in it is DS-specific (sameRecord zeroes the TTL and compares
+// wire content), and the NS half of the acceptance rules needs the same test,
+// so it is named for what it does.
+func sameRRsetContent(a, b []dns.RR) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -217,7 +226,7 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 	// or a re-send of the DS already published, leaves the parent exactly where
 	// it was -- and making that depend on the child being reachable would add a
 	// failure mode to a request that changes nothing.
-	if sameDSSet(currentDS, resulting) {
+	if sameRRsetContent(currentDS, resulting) {
 		return nil
 	}
 	if len(resulting) == 0 {

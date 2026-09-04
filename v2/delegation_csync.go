@@ -21,9 +21,16 @@ import (
 // draft-ietf-dnsop-delegation-mgmt-via-ddns-02 §"Processing the UPDATE"
 // requires a delegation change that arrives by DNS UPDATE to pass the same
 // checks a CSYNC scanner would run, so the rules have to exist somewhere
-// both callers can reach. The scanner is still the only caller; wiring the
-// UPDATE path is the next change, and it is kept separate so this one is
-// reviewable purely against "the scanner behaves identically".
+// both callers can reach.
+//
+// Both now exist, and they are separate drivers on purpose. The scanner
+// DERIVES a change from what the child publishes (computeCsyncDelta, below);
+// the UPDATE path VALIDATES one somebody asserted
+// (CheckDelegationNSCoherence, delegation_csync_update.go). What they share is
+// everything under the rule: childRRsetFetcher and its agreement requirement,
+// csyncTypes, inBailiwickNSNames, canonicalNameSet. What they do not share is
+// the rule's expression, so a change to the RFC 7477 acceptance rule has to
+// reach BOTH -- or the UPDATE path silently stops applying it.
 //
 // Everything that touches the network is injected (childRRsetFetcher), and
 // everything that touches the parent's stored delegation is injected

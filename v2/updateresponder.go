@@ -600,6 +600,20 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		return false, false, cerr
 	}
 
+	// The NS/glue half of the same question (RFC 7477 via the CSYNC rules):
+	// the delegation that results must be the one the child's nameservers
+	// serve. Same refusal shape as the DS check above, for the same reason.
+	ctx, cancel := context.WithTimeout(context.Background(), delegationCheckTimeout)
+	defer cancel()
+	if cerr := zd.CheckDelegationNSCoherenceForUpdate(ctx, r.Ns,
+		Conf.Internal.Scanner.childNameserverAsker(nil)); cerr != nil {
+		lgHandler.Warn("child update refused as incoherent",
+			"zone", zd.ZoneName, "err", cerr)
+		us.ValidationRcode = dns.RcodeRefused
+		us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
+		return false, false, cerr
+	}
+
 	return true, updateZone, nil
 }
 
