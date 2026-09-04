@@ -952,6 +952,11 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	if cerr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, cerr)
 	}
+	// Before Zones.Set, while the zone is still private to this goroutine:
+	// an API-created zone is entitled to the same hooks as a configured one
+	// (#500).
+	zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+
 	Zones.Set(name, zd)
 	if err := conf.AddDynamicZoneToConfig(zd); err != nil {
 		zd.stopPublisher()
@@ -1242,6 +1247,12 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		lg.Warn("zone option normalization", "zone", name, "detail", normMsg)
 		newZd.SetError(ConfigWarning, "%s", normMsg)
 	}
+	// The replacement carries its predecessor's config across field by field
+	// but starts with EMPTY OnZone*Refresh slices, so without this a modify
+	// silently strips the hooks from a zone that had them -- and modify is
+	// what a reconciling caller runs routinely (#500).
+	newZd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+
 	Zones.Set(name, newZd)
 
 	// (4) Overwrite the persisted entry. AddDynamicZoneToConfig rewrites the
