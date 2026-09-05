@@ -195,10 +195,22 @@ what the review caught.
 **An inbound IXFR must not trigger a full-zone sign.** `ixfrTouchedOwners` +
 `materializeForIxfr` (`ixfr_in.go:208`, `:254`) deep-copy only the owners a delta reaches and
 share every other owner with the published snapshot, precisely so that a three-record delta
-does not cost O(zone). That optimisation is already merged on main, and re-signing the whole
-zone on top of it throws it away: a 100k-RRset zone whose upstream changed one record produces
-a two-record delta (the change plus the SOA), and signing 100k RRsets for it is not a cost
-anybody agreed to pay. The publish path has to sign what the delta touched, and nothing else.
+does not cost O(zone). That optimisation is already merged on main, and a full pass throws it away.
+
+**How it throws it away is worth being precise about, because the obvious reading is wrong.**
+The cost is not 100k signatures. `SignRRset` short-circuits on `NeedsResigning` when `force`
+is false, and an IXFR carries its untouched owners over *with the valid RRSIGs they already
+had*, so the crypto for those owners would be skipped. What is not skipped is the walk: the
+pass calls `stageRRsetLocked` for every RRset it visits, signed or not, and that goes through
+`cloneOwner`, which allocates a fresh `OwnerData` and `RRTypeStore` per owner and copies every
+RRset into it. A two-record delta into a 100k-RRset zone would therefore re-materialise the
+whole zone — which is exactly the work `materializeForIxfr` shares owners to avoid.
+
+So the win from scoping is allocation and copying, not signature count. Anyone who later
+measures RRSIGs written, finds the number small, and concludes the full pass was harmless will
+be measuring the wrong thing.
+
+The publish path has to sign what the delta touched, and nothing else.
 
 So the staged scope is a set, not a boolean:
 
@@ -226,6 +238,17 @@ would mark the name `replaceApexSOA` rewrites). Carry it on the transfer scratch
 
 `signWorkingSetLocked` takes the owner filter (nil = all). Everything else about it is
 unchanged.
+
+**This scopes the authored-data pass and nothing else, and an IXFR publish is still not
+O(delta).** Two steps in the same publish remain whole-zone: `restitchNsecLocked` walks every
+working owner (`nsec_restitch.go:105`), and a ZONEMD digest covers the entire zone by
+construction. Both run on every publish today, so neither is a regression introduced here — but
+the scoping must not be described as making an IXFR cheap end to end, because it does not.
+
+Making the restitch incremental is a separate question with its own correctness argument, and
+a harder one: the NSEC chain links neighbours, so a delta changes the chain entries of names it
+never mentions. The touched set is the right scope for signing authored data and is *not*
+obviously the right scope for the chain.
 
 **A risk to check when implementing, not a settled fact:** for an IXFR the working set is
 built from a map whose untouched owners share their `RRTypeStore` with the snapshot being
