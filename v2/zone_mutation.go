@@ -1033,7 +1033,7 @@ func (zd *ZoneData) publishNow(gen uint64) {
 }
 
 // InstallInitialSnapshot builds the first published snapshot from the fully
-// initialized zone data (after OnFirstLoad / SetupZoneSigning) and marks the
+// initialized zone data (after the OnFirstLoad callbacks) and marks the
 // zone genuinely servable. Discharges the Ready=true "lie".
 func (zd *ZoneData) InstallInitialSnapshot() {
 	zd.startPublisher()

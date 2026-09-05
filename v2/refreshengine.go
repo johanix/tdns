@@ -176,8 +176,8 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	// Defer transport signal synthesis until all zones are initialized.
 	tryPostpass(zone)
 
-	// Note: SetupZoneSigning and SetupZoneSync are NOT called here.
-	// OnFirstLoad callbacks (incl. SetupZoneSigning from ParseZones) are
+	// Note: the OnFirstLoad callbacks and SetupZoneSync are NOT run here.
+	// Those callbacks (registration for periodic re-signing, from ParseZones) are
 	// drained by completeFirstZonePolicyAndLoad AFTER InstallInitialSnapshot
 	// and syncZoneDnssecPolicyFromConfig so the served-SOA-RRSIG backfill GATE
 	// and first-sign see a Ready zone with the correct binding (#286 deferral
@@ -242,8 +242,8 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 
 // drainAndRunOnFirstLoad clears zd.OnFirstLoad and runs the callbacks. Called
 // AFTER InstallInitialSnapshot + syncZoneDnssecPolicyFromConfig on first-bind
-// paths so SetupZoneSigning (registered by ParseZones) sees a Ready zone with
-// the correct policy binding. Preserves the #286 one-shot deferral: callbacks
+// paths so the callbacks registered by ParseZones see a Ready zone with the
+// correct policy binding. Preserves the #286 one-shot deferral: callbacks
 // still run once, just post-Ready rather than mid-load.
 func drainAndRunOnFirstLoad(zd *ZoneData) {
 	zd.mu.Lock()
@@ -863,11 +863,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								if updated {
 									lgEngine.Info("zone updated via refresh", "zone", zd.ZoneName)
 
-									// Re-sign zone after refresh (upstream data has no RRSIGs)
-									if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
-										lgEngine.Error("SetupZoneSigning failed after refresh", "zone", zd.ZoneName, "error", err)
-									}
-
 									// Write zone file after successful update.
 									// Skip for primary zones loaded from file — rewriting the source
 									// is pointless unless dynamic changes have been made (OptDirty).
@@ -1003,7 +998,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// until drainAndRunOnFirstLoad, so the success path is
 					// unchanged.
 					//
-					// Dynamic zones historically called SetupZoneSigning inline
+					// Dynamic zones historically signed inline here
 					// (not via OnFirstLoad). Register it on OnFirstLoad so a
 					// sync failure is retryable by the ticker completion path
 					// (hasPendingOnFirstLoad → finishFirstLoadPolicy) the same
@@ -1013,8 +1008,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					if Globals.App.Type != AppTypeAgent {
 						resignQ := conf.Internal.ResignQ
 						zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
-							if err := z.SetupZoneSigning(resignQ); err != nil {
-								lgEngine.Error("SetupZoneSigning failed", "zone", z.ZoneName, "error", err)
+							if err := z.registerForPeriodicResign(resignQ); err != nil {
+								lgEngine.Error("registerForPeriodicResign failed", "zone", z.ZoneName, "error", err)
 							}
 						})
 					} else if len(zd.OnFirstLoad) == 0 {
@@ -1210,10 +1205,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 						}
 
-						// Re-sign zone after refresh (upstream data has no RRSIGs)
-						if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
-							lgEngine.Error("SetupZoneSigning failed after refresh", "zone", zone, "error", err)
-						}
 					}
 					if updated {
 						// Write zone file after successful update.

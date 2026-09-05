@@ -1469,13 +1469,14 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// redundant: the config-bearing forced refresh queued for every zone at
 		// the end of this loop already re-signs off-lock in the RefreshEngine —
 		// triggerResign() when the policy rebinds (see applyReloadedPolicyLocked
-		// in refreshengine.go) and the post-refresh SetupZoneSigning when the
-		// zone data changed. Both run in the refresh path, not under confMu.
+		// in refreshengine.go) and, since C1, the refresh publish itself, which
+		// signs replacement content before the swap. Both run in the refresh
+		// path, not under confMu.
 		if options[OptOnlineSigning] || options[OptInlineSigning] {
 			if zdp.FirstZoneLoad {
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
-						lgConfig.Error("SetupZoneSigning failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
+					if err := zd.registerForPeriodicResign(conf.Internal.ResignQ); err != nil {
+						lgConfig.Error("registerForPeriodicResign failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
 					}
 				})
 			}

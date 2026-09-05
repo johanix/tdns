@@ -2046,12 +2046,25 @@ func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 }
 
-func (zd *ZoneData) SetupZoneSigning(resignq chan<- ResignRequest) error {
+// registerForPeriodicResign puts a zone on the resigner's watchlist, so its
+// signatures are renewed before they age out.
+//
+// It used to be SetupZoneSigning, and it used to SIGN -- a full pass, inline,
+// wherever it was called -- and then enqueue the zone, which the resigner could
+// only read as "force-sign this now". Every updated refresh of a signed zone
+// therefore signed it twice, and published twice, and notified twice.
+//
+// Nothing signs here any more, because by the time this runs something already
+// has. A refresh signs its own content before the swap; a policy apply signs
+// when it binds; a restart signs at the refresh publish because the keys resolve
+// even with the policy still unbound. What was missing was never the signing --
+// it was a zone quietly falling off the renewal list.
+func (zd *ZoneData) registerForPeriodicResign(resignq chan<- ResignRequest) error {
 	if Globals.App.Type == AppTypeAgent {
 		return nil // agents never sign
 	}
 
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.signsItsOwnContent() {
 		return nil // this zone should not be signed (at least not by us)
 	}
 
@@ -2059,26 +2072,14 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- ResignRequest) error {
 		return nil // non-primary zones require inline-signing to be signed
 	}
 
-	kdb := zd.KeyDB
-	newrrsigs, err := zd.SignZone(kdb, false)
-	if err != nil {
-		lg.Error("SignZone failed", "zone", zd.ZoneName, "err", err)
-		return err
-	}
-
-	lg.Info("SetupZoneSigning: zone signed", "zone", zd.ZoneName, "newRRSIGs", newrrsigs)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Registration, not a re-sign request. This used to be a bare *ZoneData,
-	// which the resigner could only read as "force-sign this now" -- so every
-	// zone signed just above was immediately signed again, in full. What it
-	// actually wants is for the zone to be watched for ageing signatures.
 	select {
 	case resignq <- ResignRequest{Zd: zd, Reason: ResignPeriodic}:
 	case <-ctx.Done():
-		lg.Error("SetupZoneSigning: timeout sending zone to resign queue", "zone", zd.ZoneName)
+		lg.Error("registerForPeriodicResign: timeout sending zone to the resign queue",
+			"zone", zd.ZoneName)
 	}
 
 	return nil

@@ -519,9 +519,12 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 	// PR-2 defers DNSSEC policy binding to the post-Ready sync, so a brand-new
 	// zone can reach here mid-first-load with zd.DnssecPolicy still nil. Key
 	// generation below reads zd.DnssecPolicy.KSKAlgorithm / .ZSKAlgorithm — guard
-	// the nil deref (was a SIGSEGV) and return a clear error instead. The zone is
-	// signed later, after syncZoneDnssecPolicyFromConfig binds the policy and
-	// SetupZoneSigning runs post-Ready. Test for a REAL ZSK (Flags 256), not just
+	// the nil deref (was a SIGSEGV) and return ErrDnssecPolicyNotBound instead,
+	// which the publish path reads as "not yet" rather than as a fault: the zone
+	// publishes unsigned and stays not Ready, and the policy apply signs it once
+	// syncZoneDnssecPolicyFromConfig binds. Note this fires only when keys are
+	// MISSING -- a restart has keys and a nil policy, and must sign. Test for a
+	// REAL ZSK (Flags 256), not just
 	// a non-empty dak.ZSKs: a KSK reused as CSK (Flags 257) is counted in dak.ZSKs
 	// but does NOT satisfy the ZSK-generate path below, which would still deref
 	// the nil policy — the incomplete-guard SIGSEGV CodeRabbit caught.

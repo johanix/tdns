@@ -496,6 +496,12 @@ func (zd *ZoneData) registerForPeriodicResign(resignq chan<- ResignRequest) erro
 
 No inline sign, no forced re-sign, no second publish.
 
+Nothing signs there any more because by the time it runs something already has: a refresh
+signs its content before the swap (C1), a policy apply signs when it binds, and a restart signs
+at the refresh publish because the keys resolve even with the policy unbound (§3.3). What the
+call was actually protecting was never the signing — it was a zone quietly falling off the
+renewal list.
+
 ### 3.8 First load and restart, step by step
 
 **First-ever load** — no keys, no policy:
