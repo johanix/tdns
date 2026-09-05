@@ -165,6 +165,11 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 				newrrsigs, err := zd.SignZone(zd.KeyDB, false)
 				if err != nil {
 					lgSigner.Error("failed to re-sign zone", "zone", zd.ZoneName, "err", err)
+					// Nothing was signed, so do not go on to say it was. An
+					// operator watching for "zone re-signed" would read the
+					// success line and miss the failure above it -- on the one
+					// pass whose whole job is to stop signatures ageing out.
+					continue
 				}
 				lgSigner.Info("zone re-signed (periodic)", "zone", zd.ZoneName, "new_rrsigs", newrrsigs)
 			}
