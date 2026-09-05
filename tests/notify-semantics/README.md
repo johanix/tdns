@@ -113,10 +113,11 @@ defect, which makes it the useful one to validate a NOTIFY fix against.
 
 **`relay.test.` does not run yet.** The zone transfers in, but its DNSSEC policy is not bound
 by the time `OnFirstLoad` runs, so `SetupZoneSigning` fails and `ZoneTransferOut` then refuses
-every transfer — "configured to be signed but the SOA has no RRSIG". The policy resolves fine
-at parse. Root cause not isolated; see §9.4. Until it is, the signing profile reports a setup
-error rather than a verdict, which is the correct behaviour: an instrument that cannot observe
-must not report a pass.
+every transfer — "configured to be signed but the SOA has no RRSIG". The cause is
+[#511](https://github.com/johanix/tdns/issues/511): a zone whose first successful load comes
+from a NOTIFY is handed an empty policy name, so the policy never binds. Until that is fixed
+the signing profile reports a setup error rather than a verdict, which is the correct
+behaviour: an instrument that cannot observe must not report a pass.
 
 The expectation for the signing profile once it runs is that it FAILS N1, N2, N3 and N7 — four
 NOTIFYs and three serials for one inbound change — while N4 and N5 pass throughout. That is

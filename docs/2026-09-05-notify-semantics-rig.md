@@ -1,8 +1,9 @@
 # The notify-semantics rig — one inbound change, how many outbound changes? (relay rig)
 
 **Status:** implemented and RUN. R1–R6 on `feature/notify-semantics-rig` (off `main` @ `d833c683`).
-First live results against a real `tdns-auth` in §9.4 — including one defect confirmed and
-one that blocked the signing profile from running at all.
+First live results against a real `tdns-auth` in §9.4: the duplicate-NOTIFY defect confirmed
+on a mirroring secondary, and a second defect that blocked the signing profile entirely —
+filed as [#511](https://github.com/johanix/tdns/issues/511).
 **Base:** `main` @ `d833c683` (read on `fix/csync-publisher-484-506`, which does not touch any
 of this).
 **Scope of the first cut:** the SUT is an **inline-signing secondary that re-serves**. The
@@ -602,7 +603,7 @@ only its failure logs (`downstream NOTIFY failed`). An operator reading the log 
 NOTIFY per change and concludes the semantics are correct. The rig sees two, because it
 counts packets arriving at a listener it owns. Nothing short of that finds this.
 
-#### The signing profile did not get to run
+#### The signing profile did not get to run — [#511](https://github.com/johanix/tdns/issues/511)
 
 `relay.test.` never became transferable, so the rig reported a setup error rather than a
 verdict. From the SUT's own log, in order:
@@ -618,19 +619,21 @@ dnsutils.go:492      ZoneTransferOut: relay.test.: refusing transfer, zone is co
                      signed but the SOA has no RRSIG (unsigned/broken)
 ```
 
-The policy resolves at parse and is recorded on the ZoneData
-(`zd.DnssecPolicyName = zr.DnssecPolicy`, `refreshengine.go:626`), and both first-bind
-completion paths pass that name to `syncZoneDnssecPolicyFromConfig`. The sync nonetheless
-logged nothing and bound nothing, which in that function means `intentPol == nil` — the only
-silent return it has. **Root cause not isolated; this is a report, not a diagnosis.** Two
-theories were checked and eliminated: the policy is present in the parsed config, and
-`publishRuntimeConfig()` runs (`main_initfuncs.go:131`) before `ParseZones`
-(`main_initfuncs.go:235`), so `ConfLive().DnssecPolicies` is populated by the time the load
-completes.
+Root cause, isolated after the run and filed as **#511**: the pre-registered-stub branch
+passes `zr.DnssecPolicy` to `completeFirstZonePolicyAndLoad` (`refreshengine.go:658`), and
+only the `ZoneRefresher` that `ParseZones` builds carries that field. A NOTIFY-driven load
+sends a bare refresher, so the name is empty, `syncZoneDnssecPolicyFromConfig` resolves no
+intent and returns silently as a success, and nothing arms a retry. The durable copy is
+right there on the ZoneData — `zd.DnssecPolicyName`, recorded at `:626` precisely so it
+survives a failed first load — and both ticker completion paths use it.
 
-The consequence is worth stating on its own, because it is severe and it is silent: an
-inline-signing secondary in this state serves queries but **refuses every transfer**, and the
-only sign of it is one INFO line per attempt. It wants its own issue.
+The trigger is exactly the condition this rig creates and the lab hits for real: the primary
+is unreachable at startup, so the initial load fails, and the zone later loads from a NOTIFY.
+Same starting condition as #502, different consequence, and one that outlives it.
+
+The consequence is worth stating on its own, because it is severe and quiet: such a zone
+answers queries but **refuses every transfer**, with one INFO line per attempt as the only
+sign, and `zone list` shows it loaded and Ready.
 
 #### The §2.2 lock hold, hit on the first NOTIFY of the first run
 
