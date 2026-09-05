@@ -1010,8 +1010,20 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 			w.WriteMsg(m)
 			return
-		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextNoErrNoAns &&
-			qtype != dns.TypeSOA:
+		// No qtype exclusion. This case once read `&& qtype != dns.TypeSOA`,
+		// which sent exactly the SOA queries down the fall-through path below:
+		// out of this switch, into a fresh iterative resolution, and back into
+		// the cache from there -- where the negative entry's proof SOA was
+		// handed back as though it were an answer. SOA is also the qtype a
+		// validator uses to locate a zone apex, so the one qtype excluded here
+		// was the one whose wrong answer made a client conclude that an
+		// ordinary name was a zone cut.
+		//
+		// Whether an entry is negative is carried by its Context, which is
+		// tested here. The qtype says nothing about it: a SOA query for a name
+		// that HAS one is cached as ContextAnswer and handled by the case
+		// below.
+		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextNoErrNoAns:
 			m.SetRcode(r, dns.RcodeSuccess)
 			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, msgoptions) && crrset.RRset != nil {
 				appendSOAToMessage(crrset.RRset, msgoptions, m)
