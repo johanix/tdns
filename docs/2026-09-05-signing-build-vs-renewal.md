@@ -1,9 +1,9 @@
 # Splitting `SignZone`: building a signed zone is not the same job as renewing its signatures
 
-**Status:** design, reviewed twice, implementable from here. Nothing implemented yet.
-Review 1 (`reviews/…-build-vs-renewal-review.md`) and review 2 (`…-rereview.md`) are folded in:
-the clone rule and the walk table came from the first, the locked recipe and the restitch
-correction from the second.
+**Status:** design, reviewed three times, approved, implementable from here. Nothing
+implemented yet. The clone rule and the walk table came from review 1, the locked recipe and the
+restitch correction from review 2, and the four implementation contracts at the end of §3.2 from
+review 3.
 **Base:** `main` @ `b4825f50`. `v2/` tree only.
 **Prompted by:** a field report on 2026-09-05 — every signed zone re-signed and republished
 once a minute with no content change: 8 serial bumps in 7½ minutes, 869 NOTIFY lines,
@@ -190,9 +190,28 @@ Stated explicitly because the alternative is attractive and wrong: widening the 
 anything unsigned" would quietly restore the behaviour that made #512 survivable-looking, and
 would hide a build path that failed.
 
-Point 4 of §1 falls out of point 4 here, without touching `publishWorkingSetLocked`. The
-snapshot machinery stays closed, which is the constraint the surrounding design work has
-held to throughout.
+Point 4 of §1 falls out of steps 4 and 5 here — return early when nothing is due, publish only
+when something was signed — without touching `publishWorkingSetLocked`. The snapshot machinery
+stays closed, which is the constraint the surrounding design work has held to throughout.
+
+**Four contracts the implementation has to honour**, each of which is easy to get wrong in a
+way that compiles and passes the happy path:
+
+- **Clone with `cloneRRset` (`zone_snapshot.go:145`), not `cloneOwner`.** `cloneOwner`
+  deep-copies only the `NSEC` property; its `RRtypes` entries are struct copies that still share
+  `RRs` and `RRSIGs` backing arrays with the snapshot (`zone_mutation.go:46–60`). "Clone each
+  collected RRset" is the rule, and simplifying it to a single `cloneOwner` per name puts the
+  corruption in §3.2 straight back.
+- **Pass the step-1 `dak` and clamp into `SignRRset`.** With `dak == nil` it resolves them
+  itself via `EnsureActiveDnssecKeys(..., zdLocked=false)` (`sign.go:124–128`) and deadlocks
+  under our own `zd.mu`. Its comment currently asserts no locked caller reaches it with a nil
+  `dak`; this pass must not be the one that falsifies that. Same contract as `SignZone`
+  (`sign.go:860`) and the restitch comment (`nsec_restitch.go:115–117`).
+- **Stage a renewed NSEC through `stageNsecLocked`**, not `stageRRsetLocked` — the latter would
+  file the record under `RRtypes`, where NSEC does not live.
+- **`ownerTypesChanged` reads `RRtypes` only**, so an NSEC-only renewal does not mark its owner
+  changed and restitch does not run for that name. The 3N figure in §7 is the cost of renewing
+  RRtype entries; renewing an NSEC alone costs one signature.
 
 ### 3.3 The unconditional staging in `SignZone` (§1.3)
 
