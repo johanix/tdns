@@ -63,7 +63,7 @@ func changedChainNames(old *zoneSnapshot, ws map[string]*OwnerData) []string {
 // zoneMaintainsItsOwnChain reports whether this zone's chain is ours to keep
 // correct: we sign it, and we are not answering denial from synthesised
 // records instead.
-func (zd *ZoneData) zoneMaintainsItsOwnChain() bool {
+func (zd *ZoneData) zoneMaintainsItsOwnChain(sm *signingMaterial) bool {
 	if zd == nil || zd.workingSet == nil || zd.KeyDB == nil {
 		return false
 	}
@@ -75,10 +75,14 @@ func (zd *ZoneData) zoneMaintainsItsOwnChain() bool {
 	if !zoneMayOriginateContent(zd) {
 		return false
 	}
-	if zd.DnssecPolicy == nil {
+	// The publish resolved this once; nil means it cannot sign, so it cannot
+	// maintain a chain either. Testing zd.DnssecPolicy here instead skipped the
+	// restitch on every RESTART, where the policy is nil and the keys are not --
+	// leaving a Ready zone with signed answers and no denial chain.
+	if sm == nil {
 		return false
 	}
-	return zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]
+	return zd.signsItsOwnContent()
 }
 
 // restitchNsecLocked repairs the NSEC chain around whatever this publish
@@ -92,8 +96,8 @@ func (zd *ZoneData) zoneMaintainsItsOwnChain() bool {
 //
 // In every case the predecessor is rewritten too, which is why the affected set
 // is the changed names plus their predecessors and never the whole zone.
-func (zd *ZoneData) restitchNsecLocked() error {
-	if !zd.zoneMaintainsItsOwnChain() {
+func (zd *ZoneData) restitchNsecLocked(sm *signingMaterial) error {
+	if !zd.zoneMaintainsItsOwnChain(sm) {
 		return nil
 	}
 
@@ -112,13 +116,11 @@ func (zd *ZoneData) restitchNsecLocked() error {
 		pos[n] = i
 	}
 
-	// Resolved once, under the lock, and passed into SignRRset so it does not
-	// reach EnsureActiveDnssecKeys itself -- that path re-locks zd.mu and
-	// deadlocks. Same reasoning as the SOA re-sign alongside this.
-	dak, err := zd.EnsureActiveDnssecKeys(zd.KeyDB, true)
-	if err != nil {
-		return fmt.Errorf("resolving keys to restitch the NSEC chain: %w", err)
-	}
+	// Pre-resolved by the publish and passed in, so SignRRset does not reach
+	// EnsureActiveDnssecKeys itself -- that path re-locks zd.mu and deadlocks.
+	// Same reasoning as the SOA re-sign alongside this, and now the same
+	// resolution.
+	dak := sm.dak
 
 	affected := map[string]bool{}
 

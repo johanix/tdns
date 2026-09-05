@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -224,29 +225,12 @@ func (zd *ZoneData) requestPublish(urgent bool) {
 }
 
 // publishSync runs publish immediately under zd.mu (serial bump + snapshot swap).
-func (zd *ZoneData) resignWorkingSetSOAIfSigned() {
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
-		return
-	}
-	// Role gate (Fix E). SetupZoneSigning has one — "a non-primary signs only
-	// with inline-signing" — but this path did not, and it runs inside
-	// publishWorkingSetLocked, i.e. on EVERY publish including the refresh
-	// path. Without this, a tdns-auth secondary carrying `online-signing`
-	// re-signs the upstream SOA with locally generated keys (EnsureActiveDnssecKeys
-	// below will mint them if absent) — signatures from a key that is not in the
-	// zone's published DNSKEY RRset, i.e. BOGUS to every validator downstream.
-	// `online-signing` is also normalized off for such a zone; this is the
-	// defence in depth behind that.
-	if !zoneMayOriginateContent(zd) {
-		return
-	}
-	// A new zone's DNSSEC policy is bound post-Ready (PR-2 defers binding so a
-	// restart cannot hide applied≠intent, blocking ①). Until it is bound there is
-	// nothing to re-sign under, and EnsureActiveDnssecKeys below would deref a nil
-	// zd.DnssecPolicy while generating the zone's first keys (SIGSEGV at
-	// sign.go GenerateKeypair). Skip — SetupZoneSigning signs the zone after the
-	// post-Ready sync binds the policy.
-	if zd.DnssecPolicy == nil {
+func (zd *ZoneData) resignWorkingSetSOAIfSigned(sm *signingMaterial) {
+	// sm carries the publish's role and policy gates already: it is nil for a
+	// zone that does not sign, for one that must not originate content, and for
+	// one whose keys cannot be resolved yet. One resolution per publish, made by
+	// publishWorkingSetLocked. See signingMaterial.
+	if sm == nil {
 		return
 	}
 	if zd.workingSet == nil {
@@ -260,17 +244,14 @@ func (zd *ZoneData) resignWorkingSetSOAIfSigned() {
 	if len(rs.RRs) == 0 {
 		return
 	}
-	// This runs UNDER zd.mu (called from publishWorkingSetLocked). Resolve the
-	// active keys here with zdLocked=true and pass the non-nil dak into
-	// SignRRset, so SignRRset does NOT fall into its own EnsureActiveDnssecKeys
-	// call (which would reach PublishDnskeyRRs and re-lock zd.mu → self-deadlock,
-	// the same class as the SignZone/UpdateSigValidityFloor deadlock in 6e090a9).
-	dak, err := zd.EnsureActiveDnssecKeys(zd.KeyDB, true)
-	if err != nil {
-		lg.Error("publish: failed to ensure DNSSEC keys for SOA re-sign", "zone", zd.ZoneName, "err", err)
-		return
-	}
-	if _, err := zd.SignRRset(&rs, zd.ZoneName, dak, true, nil); err != nil {
+	// SignRRset takes the pre-resolved keys so it does not reach its own
+	// EnsureActiveDnssecKeys, which gets to PublishDnskeyRRs and re-locks zd.mu
+	// (the 6e090a9 deadlock class).
+	//
+	// clamp stays nil here, as it always has: the K-step TTL clamp is for the
+	// zone's authored records, and the apex SOA is rewritten on every publish
+	// regardless.
+	if _, err := zd.SignRRset(&rs, zd.ZoneName, sm.dak, true, nil); err != nil {
 		lg.Error("publish: failed to re-sign SOA", "zone", zd.ZoneName, "err", err)
 		return
 	}
@@ -359,7 +340,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		// carry it into a later unrelated publish (which would needlessly
 		// wipe the IXFR history).
 		zd.wsIxfrEpochReset = false
-		zd.wsNeedsFullSign = false
+		zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
 		// Same reasoning for the delta staging: wsPersistDelta says "the
 		// working set about to be published carries a change worth
 		// journalling". A dropped publish leaves it staged, and the NEXT
@@ -379,7 +360,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.publishQueued = false
 		zd.publishUrgent = false
 		zd.wsIxfrEpochReset = false
-		zd.wsNeedsFullSign = false
+		zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
 		// Same reasoning for the delta staging: wsPersistDelta says "the
 		// working set about to be published carries a change worth
 		// journalling". A dropped publish leaves it staged, and the NEXT
@@ -409,7 +390,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.publishQueued = false
 		zd.publishUrgent = false
 		zd.wsIxfrEpochReset = false
-		zd.wsNeedsFullSign = false
+		zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
 		// A refused publish must not leave the delta staged; see above.
 		zd.wsPersistDelta = false
 		zd.wsPersistErr = nil
@@ -424,7 +405,17 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	}
 	zd.setWorkingSetSOASerial(serial)
 
-	zd.resignWorkingSetSOAIfSigned()
+	// One resolution for the whole publish; every signing step below consumes
+	// it. A real failure refuses the publish; "cannot sign yet" is nil and
+	// every step stands down, so a brand-new zone publishes unsigned and stays
+	// not Ready until the policy apply signs it.
+	sm, kerr := zd.resolveSigningMaterialLocked()
+	if kerr != nil {
+		zd.refuseUnsignableWorkingSetLocked(prevSerial, kerr)
+		return
+	}
+
+	zd.resignWorkingSetSOAIfSigned(sm)
 
 	// Authored content, for a working set that arrived unsigned. This is the
 	// same argument the NSEC restitch below makes for the chain, applied to the
@@ -437,30 +428,28 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	//
 	// Refuse rather than publish unsigned: the previous snapshot is still good
 	// and is still being served.
-	if zd.wsNeedsFullSign {
-		if err := zd.signWorkingSetBeforePublishLocked(); err != nil {
-			zd.refuseUnsignableWorkingSetLocked(prevSerial, err)
-			return
-		}
-		// Cleared only on success. Clearing it before the attempt would leave a
-		// refused-but-still-staged working set marked as already signed, and the
-		// next publish would put it on the wire unsigned -- the exact defect
-		// this flag exists to prevent.
-		zd.wsNeedsFullSign = false
+	if err := zd.signStagedScopeLocked(sm); err != nil {
+		zd.refuseUnsignableWorkingSetLocked(prevSerial, err)
+		return
 	}
+	// Cleared only on success. Clearing before the attempt would leave a
+	// refused-but-still-staged working set marked as already signed, and the
+	// next publish would put it on the wire unsigned -- the exact defect the
+	// staged scope exists to prevent.
+	zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
 
 	// Whether the apex carries a ZONEMD is settled BEFORE the restitch, so the
 	// apex NSEC bitmap describes the record set this snapshot will hold. The
 	// digest itself cannot be computed yet: it covers the NSEC records the
 	// restitch is about to write. See zonemd_publish.go.
-	zd.ensureZonemdPresenceLocked()
+	zd.ensureZonemdPresenceLocked(sm)
 
 	// The chain must describe the snapshot about to be published, so it is
 	// repaired HERE -- before the delta is computed and before the swap, so
 	// that secondaries receive the change together with the data that caused
 	// it. Doing it in a later pass would publish a second serial and leave a
 	// window in which the served chain contradicts the served zone.
-	if err := zd.restitchNsecLocked(); err != nil {
+	if err := zd.restitchNsecLocked(sm); err != nil {
 		zd.refuseUnrepairableChainLocked(prevSerial, err)
 		return
 	}
@@ -474,7 +463,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// case that refuses the publish is a chain left claiming a ZONEMD the zone
 	// no longer carries -- the same defect the restitch above refuses, reached
 	// from the other side.
-	if !zd.updateZonemdLocked(serial, prevSerial) {
+	if !zd.updateZonemdLocked(serial, prevSerial, sm) {
 		return
 	}
 
@@ -562,8 +551,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 					zd.publishQueued = false
 					zd.publishUrgent = false
 					zd.wsIxfrEpochReset = false
-					zd.wsNeedsFullSign = false
-					zd.wsNeedsFullSign = false
+					zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
 					lg.Error("publish refused: could not determine the delta chain base",
 						"zone", zd.ZoneName, "error", lerr)
 					return
@@ -590,8 +578,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 					zd.publishQueued = false
 					zd.publishUrgent = false
 					zd.wsIxfrEpochReset = false
-					zd.wsNeedsFullSign = false
-					zd.wsNeedsFullSign = false
+					zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
 					lg.Error("refusing to publish a zone change that could not be persisted;"+
 						" the zone continues to serve its previous content",
 						"zone", zd.ZoneName, "from_serial", oldSnap.Serial,
@@ -626,6 +613,20 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 
 	if loaded := zd.snapshot.Load(); loaded != nil && loaded.Serial != zd.CurrentSerial {
 		lg.Error("publish: serial mirror drift", "zone", zd.ZoneName, "current", zd.CurrentSerial, "snapshot", loaded.Serial)
+	}
+
+	// Becoming servable is decided on the CONTENT half alone. The notify test
+	// below ands that with Ready, which is right for notifying and circular
+	// here: with Ready still false it would answer false for every zone, signed
+	// or not, and nothing would ever be flipped or ever serve.
+	//
+	// This is also the only writer that runs after the policy apply.
+	// applyRefreshReplacementLocked withholds Ready on a first load and
+	// InstallInitialSnapshot runs BEFORE the apply, so without this a zone that
+	// the apply publish signs correctly would stay invisible for good.
+	if !zd.Ready && zd.snapshotContentIsServableLocked(snap) {
+		zd.Ready = true
+		zd.Status = ZoneStatusReady
 	}
 
 	zd.notifyIfServableLocked(snap)
@@ -686,10 +687,21 @@ func (zd *ZoneData) notifyIfServableLocked(snap *zoneSnapshot) {
 // apex SOA. Keeping the predicates identical is the point -- what we notify
 // about and what we will hand over have to be the same set of versions.
 func (zd *ZoneData) snapshotIsServableLocked(snap *zoneSnapshot) bool {
-	if snap == nil || !zd.Ready {
+	return zd.Ready && zd.snapshotContentIsServableLocked(snap)
+}
+
+// snapshotContentIsServableLocked is the CONTENT half of that test: would this
+// snapshot be servable if the zone were Ready? A zone that does not sign its own
+// content always qualifies; one that does must not offer an unsigned apex SOA.
+//
+// Separate from the test above because this one decides whether to SET Ready,
+// and a predicate that reads Ready cannot do that -- it would answer false for
+// every zone forever. Same content rule, no Ready in it.
+func (zd *ZoneData) snapshotContentIsServableLocked(snap *zoneSnapshot) bool {
+	if snap == nil {
 		return false
 	}
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.signsItsOwnContent() {
 		return true
 	}
 	if snap.Apex == nil {
@@ -823,18 +835,137 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// This content came from a file or from an upstream, so whatever RRSIGs it
 	// carries are not ours. A zone that signs its own content must sign it
 	// before it is published, not in a pass afterwards.
-	zd.wsNeedsFullSign = zd.signsItsOwnContent()
+	//
+	// Scoped, not wholesale, when the replacement is an applied IXFR delta:
+	// materializeForIxfr deep-copied exactly the owners the delta reached and
+	// SHARES the rest with the published snapshot, and a full pass would stage
+	// -- and therefore cloneOwner -- every owner it walked, re-materialising the
+	// whole zone for a two-record change. See wsSignOwners.
+	switch {
+	case !zd.signsItsOwnContent():
+		zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
+	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil:
+		zd.wsNeedsFullSign, zd.wsSignOwners = false, new_zd.ixfrTouched
+	default:
+		zd.wsNeedsFullSign, zd.wsSignOwners = true, nil
+	}
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 
 	// Only advertise the zone as Ready once a snapshot actually exists. If the
 	// publish was dropped (zone no longer live / generation guard), leaving
 	// Ready=true with snapshot==nil would let a query dereference a nil apex
 	// (M2). Gate Ready on a real published snapshot.
-	if !firstLoad && zd.snapshot.Load() != nil {
+	if !firstLoad && zd.snapshotContentIsServableLocked(zd.snapshot.Load()) {
 		zd.Ready = true
 		zd.Status = ZoneStatusReady
 	}
 	return nil
+}
+
+// signingMaterial is one publish's signing context: the active keys and the TTL
+// clamp, resolved ONCE at the top of publishWorkingSetLocked and handed to every
+// step that signs.
+//
+// A nil *signingMaterial means "this publish cannot sign" -- either the zone
+// does not sign its own content, or its keys cannot be resolved yet because the
+// policy has not bound. Every signing step stands down on nil rather than
+// deciding for itself.
+//
+// Resolving once is not just tidiness. Three helpers used to test
+// zd.DnssecPolicy == nil independently -- the SOA re-sign, the NSEC restitch and
+// the ZONEMD gate -- and each therefore skipped on a RESTART, where the policy
+// is nil but the keys exist. A zone would then flip Ready with a signed apex SOA
+// and no denial chain at all: signed positive answers, absent negative ones.
+// One resolution, one answer, no way for the steps to disagree.
+//
+// It also fixes the shape problem in zonemdSignableLocked, which runs before the
+// restitch (its answer decides whether the apex NSEC bitmap lists ZONEMD) and so
+// cannot call EnsureActiveDnssecKeys itself -- that is not a predicate, it mints
+// a zone's first keys as a side effect.
+type signingMaterial struct {
+	dak   *DnssecKeys
+	clamp *ClampParams
+}
+
+// resolveSigningMaterialLocked resolves this publish's signing context.
+//
+// (nil, nil) means the publish cannot sign and that is ordinary: the zone does
+// not sign its own content, must not originate it, or is a brand-new zone whose
+// policy has not bound and whose keys therefore cannot be minted yet.
+// (nil, err) means resolution genuinely failed and the publish must be refused.
+//
+// The distinction is ErrDnssecPolicyNotBound, and testing zd.DnssecPolicy == nil
+// instead is the bug this replaces: a restart has a nil policy AND usable keys,
+// so the pointer test skips signing on every process start, and after C5 nothing
+// downstream signs it either.
+func (zd *ZoneData) resolveSigningMaterialLocked() (*signingMaterial, error) {
+	if !zd.signsItsOwnContent() || !zoneMayOriginateContent(zd) {
+		return nil, nil
+	}
+	// No KeyDB, nothing to resolve from. Matches what zonemdSignableLocked has
+	// always said (`DnssecPolicy != nil && KeyDB != nil`) and is load-bearing
+	// rather than defensive: the KeyDB accessors do not guard their receiver all
+	// the way down -- loadDnssecKeysFromDB dereferences it -- so reaching them
+	// with nil is a SIGSEGV in the publish path. The old DnssecPolicy == nil
+	// test happened to shield this; the corrected predicate does not, so the
+	// guard has to be explicit.
+	if zd.KeyDB == nil {
+		return nil, nil
+	}
+	// zdLocked=true: we hold zd.mu, and the resolution must not re-enter it.
+	dak, err := zd.EnsureActiveDnssecKeys(zd.KeyDB, true)
+	switch {
+	case errors.Is(err, ErrDnssecPolicyNotBound):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("resolving signing keys: %w", err)
+	}
+	var clamp *ClampParams
+	if zd.DnssecPolicy != nil {
+		if clamp, err = ClampParamsForZone(zd.KeyDB, zd.ZoneName, zd.DnssecPolicy, time.Now()); err != nil {
+			return nil, fmt.Errorf("resolving the TTL clamp: %w", err)
+		}
+	}
+	return &signingMaterial{dak: dak, clamp: clamp}, nil
+}
+
+// signStagedScopeLocked signs the scope applyRefreshReplacementLocked staged:
+// every authored owner after an AXFR or a file reload, or just the owners an
+// inbound IXFR touched. No staged scope means nothing to do.
+func (zd *ZoneData) signStagedScopeLocked(sm *signingMaterial) error {
+	if sm == nil || (!zd.wsNeedsFullSign && zd.wsSignOwners == nil) {
+		return nil
+	}
+	// force=false: sign what is unsigned, which after a wholesale replacement is
+	// everything, and after an IXFR is what the delta brought.
+	// signNsec=false: restitchNsecLocked regenerates and signs the chain a few
+	// lines below, so signing it here would be thrown away.
+	_, _, err := zd.signWorkingSetLocked(sm.dak, sm.clamp, false, false, zd.wsSignOwners)
+	return err
+}
+
+// refuseUnsignableWorkingSetLocked drops a publish whose content could not be
+// signed, keeping the previous snapshot on the wire.
+//
+// DnssecError, which is service-impacting (enums.go): the zone renders as an
+// ERROR and the query, NOTIFY and UPDATE handlers refuse. That is deliberate. A
+// signed zone whose signing is broken IS broken, and saying so is better than
+// quietly serving an ageing snapshot while the operator believes all is well.
+// The last good version stays published either way -- refusing the swap is what
+// guarantees that -- but the zone does not pretend to be healthy.
+//
+// Note the contrast with refuseUnrepairableChainLocked below, which records a
+// warning for a structurally similar refusal. The severities genuinely differ:
+// an unrepairable chain is a defect in derived data, an unsignable zone means
+// this server can no longer produce the signatures its own configuration says
+// it must.
+func (zd *ZoneData) refuseUnsignableWorkingSetLocked(prevSerial uint32, err error) {
+	zd.CurrentSerial = prevSerial
+	lg.Error("publish: refusing to publish unsigned content for a zone that signs"+
+		" its own; the previous snapshot is still being served and the change"+
+		" remains staged", "zone", zd.ZoneName, "error", err)
+	zd.setErrorLocked(DnssecError,
+		"the refreshed zone could not be signed, so it was not published: %v", err)
 }
 
 // refuseUnrepairableChainLocked abandons a publish whose NSEC chain could not
@@ -851,58 +982,6 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 // The serial is rolled back with it. It was advanced before the repair ran,
 // and leaving it advanced would have publishSync report a serial to its caller
 // that no snapshot carries and no secondary will ever be offered.
-// signWorkingSetBeforePublishLocked resolves this zone's signing material and
-// signs the staged working set. Caller holds zd.mu.
-//
-// The gates are resignWorkingSetSOAIfSigned's, for its reasons: a zone that does
-// not sign, or that must not originate content (a mirroring secondary), or whose
-// policy has not been bound yet has nothing to do here. The policy gate is what
-// keeps first load working -- binding happens post-Ready, so the first publish
-// of a new zone still goes out unsigned and not Ready, and the OnFirstLoad pass
-// signs it once the policy is there.
-func (zd *ZoneData) signWorkingSetBeforePublishLocked() error {
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
-		return nil
-	}
-	if !zoneMayOriginateContent(zd) {
-		return nil
-	}
-	if zd.DnssecPolicy == nil {
-		return nil
-	}
-	// zdLocked=true: we hold zd.mu, and the resolution must not re-enter it.
-	dak, err := zd.EnsureActiveDnssecKeys(zd.KeyDB, true)
-	if err != nil {
-		return fmt.Errorf("resolving signing keys: %w", err)
-	}
-	clamp, err := ClampParamsForZone(zd.KeyDB, zd.ZoneName, zd.DnssecPolicy, time.Now())
-	if err != nil {
-		return fmt.Errorf("resolving the TTL clamp: %w", err)
-	}
-	// force=false: sign what is unsigned, which after a wholesale replacement is
-	// everything. signNsec=false: restitchNsecLocked regenerates and signs the
-	// chain immediately below, so signing it here would be thrown away.
-	_, _, err = zd.signWorkingSetLocked(dak, clamp, false, false)
-	return err
-}
-
-// refuseUnsignableWorkingSetLocked drops a publish whose content could not be
-// signed, keeping the previous snapshot on the wire.
-//
-// DnssecPolicyWarning rather than DnssecError, and the distinction is the whole
-// point: DnssecError is service-impacting (enums.go), so it would make the query
-// and transfer handlers refuse -- taking a zone that is still serving a perfectly
-// good signed snapshot off the air because a NEWER version could not be signed.
-// The NSEC-chain refusal below reaches the same conclusion for the same reason.
-func (zd *ZoneData) refuseUnsignableWorkingSetLocked(prevSerial uint32, err error) {
-	zd.CurrentSerial = prevSerial
-	lg.Error("publish: refusing to publish unsigned content for a zone that signs"+
-		" its own; the previous snapshot is still being served and the change"+
-		" remains staged", "zone", zd.ZoneName, "error", err)
-	zd.setErrorLocked(DnssecPolicyWarning,
-		"the refreshed zone could not be signed, so it was not published: %v", err)
-}
-
 func (zd *ZoneData) refuseUnrepairableChainLocked(prevSerial uint32, err error) {
 	zd.CurrentSerial = prevSerial
 	lg.Error("publish: refusing to publish, because the NSEC chain could not be"+
@@ -973,15 +1052,7 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 		//      Ready — marking a zone with a nil apex/SOA Ready is exactly what
 		//      crashed readers (GetSOA -> nil).
 		if cur := zd.snapshot.Load(); cur != nil && cur.SOA != nil {
-			zd.Ready = true
-			zd.Status = ZoneStatusReady
-			// Becoming servable is itself a snapshot-cutting event, and it is
-			// the only one on this path: the publish that stored this snapshot
-			// ran before Ready and was correctly silent, and a first load whose
-			// policy sync BACKFILLS re-signs nothing and so publishes nothing
-			// more. Without this the zone would serve a new serial that no
-			// downstream is ever told about.
-			zd.notifyIfServableLocked(cur)
+			zd.markReadyIfServableLocked(cur)
 			return
 		}
 		lg.Error("InstallInitialSnapshot: no apex in data and no valid snapshot; zone left not Ready", "zone", zd.ZoneName)
@@ -992,6 +1063,28 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 	zd.IxfrChain = nil
 	snap := zd.buildSnapshotLocked(zd.CurrentSerial, data, nil)
 	zd.snapshot.Store(snap)
+	zd.markReadyIfServableLocked(snap)
+}
+
+// markReadyIfServableLocked flips a zone to Ready on a snapshot that qualifies,
+// and notifies downstreams ONLY if this call is what flipped it.
+//
+// Both halves matter. A signing zone must not become Ready on a snapshot with an
+// unsigned apex SOA -- Ready is what makes queries answerable (GetOwner) and
+// transfers possible, so publishing an unsigned first snapshot is only safe
+// while the flag is false.
+//
+// And the notify has to be conditional, because publishWorkingSetLocked flips
+// Ready too. On a restart the refresh publish signs, flips and notifies before
+// this ever runs; emitting again here would be a second NOTIFY for one serial.
+// The case that still needs it is a first load whose policy sync BACKFILLS:
+// that publish was pre-Ready and silent, the backfill re-signs nothing and
+// publishes nothing, so without this the zone serves a new serial no downstream
+// is told about.
+func (zd *ZoneData) markReadyIfServableLocked(snap *zoneSnapshot) {
+	if zd.Ready || !zd.snapshotContentIsServableLocked(snap) {
+		return
+	}
 	zd.Ready = true
 	zd.Status = ZoneStatusReady
 	zd.notifyIfServableLocked(snap)

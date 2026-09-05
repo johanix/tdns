@@ -160,11 +160,64 @@ func TestPublishRefusesAReplacementItCannotSign(t *testing.T) {
 		t.Fatalf("serial advanced to %d on a refused publish (was %d)",
 			zd.CurrentSerial, before.Serial)
 	}
-	if !zd.HasError(DnssecPolicyWarning) {
-		t.Error("the refusal is invisible: no DnssecPolicyWarning recorded")
+	if !zd.HasError(DnssecError) {
+		t.Error("the refusal is invisible: no DnssecError recorded")
 	}
-	if zd.HasServiceImpactingError() {
-		t.Error("a failed re-sign must not take a zone off the air that is still " +
-			"serving a perfectly good signed snapshot")
+	if !zd.HasServiceImpactingError() {
+		t.Error("a signed zone that can no longer sign must say so: DnssecError is " +
+			"service-impacting, and the alternative is quietly serving an ageing " +
+			"snapshot while the operator believes all is well")
+	}
+}
+
+// An inbound IXFR must sign what its delta touched and nothing else.
+//
+// The assertion that matters is the second one, not the first. A full pass would
+// still produce a correctly signed zone -- SignRRset short-circuits on
+// NeedsResigning, so untouched owners keep the valid RRSIGs they arrived with,
+// and a signature count would look identical. What a full pass destroys is the
+// SHARING: staging an owner goes through cloneOwner, which builds it a fresh
+// RRTypeStore, so every owner the pass walks is re-materialised. For a
+// two-record delta into a large zone that is the whole zone, which is exactly
+// the work materializeForIxfr shares owners to avoid.
+func TestPublishSignsOnlyTheOwnersAnIxfrTouched(t *testing.T) {
+	zd := loadIxfrTestZone(t, basicZone)
+	makeZoneSigning(t, zd)
+
+	// Baseline: a fully signed published snapshot to share owners from.
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	zd.wsNeedsFullSign = true
+	zd.publishWorkingSetLocked(zd.generation.Load(), true)
+	zd.mu.Unlock()
+
+	before := zd.publishedSnapshot()
+	const untouched = "ns.example.test."
+	if before.Data[untouched] == nil {
+		t.Fatalf("test setup: %s is not in the baseline snapshot", untouched)
+	}
+	beforeStore := before.Data[untouched].RRtypes
+
+	// A delta that reaches one name, staged the way applyRefreshReplacementLocked
+	// stages an ixfrDerived replacement.
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	stageArrivedRRset(t, zd)
+	zd.wsSignOwners = map[string]bool{replacedOwner: true, zd.ZoneName: true}
+	zd.publishWorkingSetLocked(zd.generation.Load(), true)
+	zd.mu.Unlock()
+
+	if rrset := publishedARRset(t, zd, replacedOwner); len(rrset.RRSIGs) == 0 {
+		t.Fatal("the owner the delta touched was published unsigned")
+	}
+
+	after := zd.publishedSnapshot()
+	if after.Data[untouched] == nil {
+		t.Fatalf("%s vanished from the snapshot", untouched)
+	}
+	if after.Data[untouched].RRtypes != beforeStore {
+		t.Fatal("an owner the delta never touched was re-materialised: the signing " +
+			"pass staged it, and stageRRsetLocked clones. At zone scale this is the " +
+			"whole point of scoping the pass")
 	}
 }

@@ -502,10 +502,11 @@ changed — and none at all until there is a version a downstream could take.
   the query path reads *other* zones' snapshots directly for signal and parent data
   (`queryresponder.go:560`, `:698`). Both bypass `GetOwner`'s gate. Harmless once C1 and the
   §3.3 gate land, but the `Ready` invariant is relied on in more places than it is enforced.
-- A nil `KeyDB` panics the publish path: `resignWorkingSetSOAIfSigned` →
-  `EnsureActiveDnssecKeys` → `reconcileActiveKeyAlgorithms` → `LoadRolloverZoneRow(nil, …)`
-  (`ksk_rollover_zone_state.go:130`). Unreachable in production, since the engine sets `KeyDB`
-  on every `ZoneData` it builds.
+- A nil `KeyDB` panics several paths below `EnsureActiveDnssecKeys` —
+  `LoadRolloverZoneRow(nil, …)` (`ksk_rollover_zone_state.go:130`), `loadDnssecKeysFromDB`
+  (`signing_keys_snapshot.go:147`). The publish path guards it at the single resolution (§9),
+  and the engine sets `KeyDB` on every `ZoneData` it builds, so this is latent rather than
+  reachable — but it is guarded by callers rather than by the accessors.
 
 ---
 
@@ -560,12 +561,12 @@ Across both documents, on one branch:
 
 | # | commit | doc |
 |---|---|---|
-| 1 | **#502 probe deadline** — bound the SOA probe, name the unreachable upstream ✅ implemented (`fix/refresh-probe-deadline-502`) | engine doc, S0 |
-| 2 | **C1** — sign replacement content before the swap | here, §3.1–3.3 |
-| 3 | **C2** — NOTIFY only about a servable version | here, §3.4 |
-| 4 | **C3** — delete the refresh engine's NOTIFYs | here, §3.5 |
-| 5 | **C4** — `ResignQ` intent; `ResignZone` for key-state changes | here, §3.6 |
-| 6 | **C5** — `SetupZoneSigning` becomes a registration | here, §3.7 |
+| 1 ✅ | **#502 probe deadline** — bound the SOA probe, name the unreachable upstream ✅ implemented (`fix/refresh-probe-deadline-502`) | engine doc, S0 |
+| 2 ✅ | **C1** — sign replacement content before the swap | here, §3.1–3.3 |
+| 3 ✅ | **C2** — NOTIFY only about a servable version | here, §3.4 |
+| 4 ✅ | **C3** — delete the refresh engine's NOTIFYs | here, §3.5 |
+| 5 ✅ | **C4** — `ResignQ` intent; `ResignZone` for key-state changes | here, §3.6 |
+| 6 ✅ | **C5** — `SetupZoneSigning` becomes a registration | here, §3.7 |
 | 7.. | the refresh-engine work | engine doc, S1–S5 |
 
 S0 goes first because the lab is exposed to #502 today and it is small and self-contained. C1
@@ -660,14 +661,14 @@ Sign the staged content before the snapshot is stored, in the same publish — t
 
 **S0** (engine doc) is implemented and reviewed on `fix/refresh-probe-deadline-502`.
 
-**C1 and C2 are implemented on `fix/sign-before-publish`, stacked on that branch, and parked.**
-They were written before this document was reviewed — the ordering was wrong, and is recorded
-here rather than tidied away. Their settled mechanics match §3 and should be kept: the
+**C1 and C2 are implemented on `fix/sign-before-publish`, stacked on that branch, and the
+nine-item punch list below has been applied.** They were written before this document was
+reviewed — the ordering was wrong, and is recorded here rather than tidied away. Their settled mechanics match §3 and should be kept: the
 `signNsec` flag, the staged scope cleared only on success, a nil `dak` refused,
 `EnsureActiveDnssecKeys(..., true)` under the lock, `GenerateNsecChainWithDak` left in
 `SignZone`, and the NOTIFY request built under the lock.
 
-Nine things must change before that branch un-parks:
+Nine things had to change before that branch un-parked, and have (✅):
 
 | # | change | § |
 |---|---|---|
@@ -677,11 +678,32 @@ Nine things must change before that branch un-parks:
 | 4 | `snapshotIsServableLocked` calls `signsItsOwnContent()` rather than inlining the option test | §3.4 |
 | 5 | the skip becomes `errors.Is(err, ErrDnssecPolicyNotBound)` after resolving keys, **and** `publishWorkingSetLocked` sets `Ready` on the content half | §3.3 |
 | 6 | `InstallInitialSnapshot` notifies only when that call flipped `Ready` | §3.4 |
-| 7 | add `ErrDnssecPolicyNotBound` at `sign.go:521` and wrap it there | §3.3 |
-| 8 | restore `refuseUnrepairableChainLocked`'s doc comment, which the C1 patch inserted new functions in front of | — |
-| 9 | resolve the signing material **once** in `publishWorkingSetLocked` and pass it to the SOA re-sign, the C1 pass, the ZONEMD gate and the restitch, replacing the three independent `DnssecPolicy == nil` tests | §3.3 — without it a restart serves signed answers with no denial chain |
+| 7 ✅ | add `ErrDnssecPolicyNotBound` at `sign.go:521` and wrap it there | §3.3 |
+| 8 ✅ | restore `refuseUnrepairableChainLocked`'s doc comment, which the C1 patch inserted new functions in front of | — |
+| 9 ✅ | resolve the signing material **once** in `publishWorkingSetLocked` and pass it to the SOA re-sign, the C1 pass, the ZONEMD gate and the restitch, replacing the three independent `DnssecPolicy == nil` tests | §3.3 — without it a restart serves signed answers with no denial chain |
 
-Two landed tests invert with them: `TestPublishRefusesAReplacementItCannotSign` asserts the
-warning and asserts the zone is *not* service-impacting (both flip with item 2), and
-`TestInstallInitialSnapshotNotifiesOnTheReadyTransition` needs a signing-zone counterpart — it
-is not wrong today, its zone simply does not sign, so the gate is never exercised.
+Three tests changed with them, and one pre-existing test changed its *mechanism*:
+
+- `TestPublishRefusesAReplacementItCannotSign` — both assertions inverted (item 2).
+- `TestPublishDoesNotNotifyBeforeReady` and `…AnUnsignedVersionOfASignedZone` — both premises
+  were retired by items 5 and 3. A publish of a servable snapshot now flips `Ready`, so "before
+  Ready" is no longer a state one leaves you in; and a zone with keys and a nil policy now
+  *signs*, which is the whole point of the corrected predicate. Replaced by
+  `TestPublishStaysInvisibleWhenItCannotSign` and `TestPublishSignsAndBecomesReadyOnARestart`,
+  which are the two cases §3.8 distinguishes.
+- `TestAbandoningTheZonemdRefusesThePublishWhenTheChainCannotBeRepaired` — it forced its
+  failure by closing the keystore, which worked while `restitchNsecLocked` resolved its own
+  keys. Item 9 moved the resolution earlier, so closing the store now fails the publish before
+  the restitch is reached. It injects a key-less `signingMaterial` instead, which puts the
+  failure where the test is aiming.
+
+Added: `TestPublishSignsOnlyTheOwnersAnIxfrTouched` (verified to fail when the scope is
+ignored), `TestInstallInitialSnapshotDoesNotReadyAnUnsignedSigningZone`, and
+`TestPublishTreatsAnUnboundPolicyAsNotYetRatherThanAFault`.
+
+**One thing the punch list did not anticipate.** `resolveSigningMaterialLocked` has to guard a
+nil `KeyDB` explicitly. The KeyDB accessors do not check their receiver all the way down —
+`loadDnssecKeysFromDB` dereferences it — so reaching them with nil is a SIGSEGV in the publish
+path. The retired `DnssecPolicy == nil` test happened to shield that; the corrected predicate
+does not. `zonemdSignableLocked` had always tested `KeyDB != nil` alongside the policy, so the
+guard restores an invariant the tree already held rather than inventing one.

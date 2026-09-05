@@ -203,7 +203,8 @@ func TestRestitchUnderLockNoSelfDeadlock(t *testing.T) {
 		if changed := changedChainNames(zd.snapshot.Load(), zd.workingSet); len(changed) == 0 {
 			panic("test setup: no staged change, so the signing path is never reached")
 		}
-		zd.restitchNsecLocked()
+		sm, _ := zd.resolveSigningMaterialLocked()
+		zd.restitchNsecLocked(sm)
 		close(done)
 	}()
 

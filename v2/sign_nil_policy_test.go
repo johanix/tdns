@@ -34,7 +34,10 @@ nilpol.example.	3600	IN	NS	ns.nilpol.example.
 
 	zd.mu.Lock()
 	zd.ensureWorkingSet()
-	zd.resignWorkingSetSOAIfSigned() // must NOT panic (was a SIGSEGV)
+	// Resolved the way publishWorkingSetLocked resolves it: the SIGSEGV this
+	// pins was in the resolution, so it has to stay inside the locked section.
+	sm, _ := zd.resolveSigningMaterialLocked()
+	zd.resignWorkingSetSOAIfSigned(sm) // must NOT panic (was a SIGSEGV)
 	apex := zd.workingSet[zd.ZoneName]
 	zd.mu.Unlock()
 

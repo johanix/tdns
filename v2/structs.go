@@ -260,21 +260,42 @@ type ZoneData struct {
 	// docs/2026-07-25-inbound-ixfr-plan.md.
 	ixfrDerived bool
 
+	// ixfrTouched is the owner set that delta reached, carried from the IXFR
+	// apply to applyRefreshReplacementLocked so it can stage wsSignOwners.
+	// Set only alongside ixfrDerived.
+	ixfrTouched map[string]bool
+
 	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale
 	// zone replacement): updateIxfrChainLocked clears the delta history
 	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked.
 	wsIxfrEpochReset bool
 	// wsNeedsFullSign marks a working set as carrying WHOLESALE-REPLACEMENT
-	// content that this server has not signed yet -- a transfer, or a file
-	// reload of a zone that signs its own content. publishWorkingSetLocked
-	// signs it before the swap, so no version a validator or a downstream can
-	// see is ever published unsigned.
+	// content that this server has not signed yet -- an AXFR, or a file reload
+	// of a zone that signs its own content. publishWorkingSetLocked signs it
+	// before the swap, so no version a validator or a downstream can see is
+	// ever published unsigned.
 	//
 	// Deliberately NOT set by the incremental paths: ApplyZoneUpdateToZoneData
 	// signs each RRset as it stages it, so a full pass there would walk the
 	// whole zone on every DDNS update to re-confirm signatures that already
 	// exist.
 	wsNeedsFullSign bool
+
+	// wsSignOwners is the same instruction scoped to a set: sign THESE owners
+	// and no others. Staged for an inbound IXFR, where the delta names what
+	// changed and materializeForIxfr has already deep-copied exactly that set
+	// while SHARING every other owner with the published snapshot.
+	//
+	// A full pass on an IXFR would undo that sharing. The cost is not the
+	// signatures -- SignRRset short-circuits on NeedsResigning, and the
+	// untouched owners arrive carrying valid RRSIGs -- it is that the pass
+	// stages every RRset it visits, and stageRRsetLocked goes through
+	// cloneOwner, which allocates a fresh OwnerData and RRTypeStore per owner.
+	// A two-record delta into a 100k-RRset zone would re-materialise the whole
+	// zone, which is the work materializeForIxfr exists to avoid.
+	//
+	// nil, with wsNeedsFullSign false, means there is nothing to sign.
+	wsSignOwners map[string]bool
 	// wsPersistDelta marks the next publish as a real content change whose
 	// delta belongs in the ZoneDelta table (Phase 2). Only the applier sets
 	// it. Every other publish -- refresh, reload, signalSynth-only, and above
