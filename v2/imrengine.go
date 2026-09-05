@@ -1223,6 +1223,14 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		//
 		// Without this a downstream cache re-armed to the full TTL on every
 		// fetch, so nothing this resolver served ever expired.
+		//
+		// Keyed on rrset.Name rather than the qname: after a CNAME chase the
+		// records being served are the target's, cached under the target's
+		// name, and that is the entry whose lifetime they carry. The two
+		// coincide for an ordinary answer, wildcard expansions included --
+		// the owner off the wire IS the qname. A key that misses falls back
+		// to the stored TTLs, which is what this path did for every answer
+		// before.
 		if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil {
 			m.Answer = c.ServeRRs(rrset.RRs, time.Now())
 			if msgoptions.DO {
