@@ -264,6 +264,17 @@ type ZoneData struct {
 	// zone replacement): updateIxfrChainLocked clears the delta history
 	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked.
 	wsIxfrEpochReset bool
+	// wsNeedsFullSign marks a working set as carrying WHOLESALE-REPLACEMENT
+	// content that this server has not signed yet -- a transfer, or a file
+	// reload of a zone that signs its own content. publishWorkingSetLocked
+	// signs it before the swap, so no version a validator or a downstream can
+	// see is ever published unsigned.
+	//
+	// Deliberately NOT set by the incremental paths: ApplyZoneUpdateToZoneData
+	// signs each RRset as it stages it, so a full pass there would walk the
+	// whole zone on every DDNS update to re-confirm signatures that already
+	// exist.
+	wsNeedsFullSign bool
 	// wsPersistDelta marks the next publish as a real content change whose
 	// delta belongs in the ZoneDelta table (Phase 2). Only the applier sets
 	// it. Every other publish -- refresh, reload, signalSynth-only, and above

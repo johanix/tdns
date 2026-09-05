@@ -1,6 +1,6 @@
 # Signing, publishing and NOTIFY — one version, one signing pass, one NOTIFY
 
-**Status:** design, reviewed in conversation 2026-09-05. Not implemented.
+**Status:** design, reviewed in conversation 2026-09-05. C1 implemented; C2–C5 pending.
 **Base:** `main` @ `d833c683`. `v2/` tree only.
 **Issues:** none filed yet. C1 (§3.1) is a correctness defect and deserves one.
 **Companion:** `2026-09-05-refresh-engine-redesign-364-502.md` — the refresh-engine
@@ -168,6 +168,20 @@ Consumed in `publishWorkingSetLocked`, in this slot:
 Authored data first, then the derived records, each still signed by the step that
 generates it. Nothing moves; one step is inserted.
 
+**Implemented** on `fix/sign-before-publish` (stacked on the S0 branch). Three things the
+implementation settled that the design left open:
+
+- **The extracted signer takes a `signNsec` flag.** SignZone wants each owner's NSEC
+  property signed in the same pass; the publish path must *not*, because
+  `restitchNsecLocked` runs immediately afterwards and regenerates and signs the chain
+  itself. Signing it here would be a second full pass over the zone for a result that is
+  about to be replaced.
+- **The flag is cleared only on success.** Clearing `wsNeedsFullSign` before the attempt
+  leaves a refused-but-still-staged working set marked as already signed, and the next
+  publish puts it on the wire unsigned — the exact defect the flag exists to prevent.
+- **`GenerateNsecChainWithDak` stays in `SignZone`**, outside the extraction, for the same
+  reason as the first point.
+
 ### 3.2 C1's hairy corner — the lock and the keys
 
 `SignZone` cannot be called as-is: it takes `zd.mu` itself (`sign.go:871`) and
@@ -194,7 +208,15 @@ discipline; it is not optional and it is the reason this is its own commit.
 
 ### 3.3 C1 — failure semantics
 
-Signing fails → **do not swap**; keep serving the previous snapshot; set `DnssecError`.
+Signing fails → **do not swap**; keep serving the previous snapshot; set
+`DnssecPolicyWarning`.
+
+*Not* `DnssecError`, which is what this section said before it was implemented. `DnssecError`
+is service-impacting (`enums.go:445`), so recording it would make the query and transfer
+handlers refuse — taking a zone that is still serving a perfectly good signed snapshot off
+the air because a *newer* version could not be signed. That is the opposite of "keep serving
+the previous snapshot". The NSEC-chain refusal three lines below in the same function reaches
+the same conclusion and uses the same warning.
 
 `publishWorkingSetLocked` already refuses in three cases (apex-less working set,
 unrepairable NSEC chain, delta-persist failure) and each keeps the previous snapshot, so
@@ -355,8 +377,8 @@ Across both documents, on one branch:
 
 | # | commit | doc |
 |---|---|---|
-| 1 | **#502 deadline stopgap** — bound an initial load, name the unreachable upstream | engine doc, S0 |
-| 2 | **C1** — sign wholesale replacement before the swap | here, §3.1–3.3 |
+| 1 | **#502 deadline stopgap** — bound the SOA probe, name the unreachable upstream ✅ **implemented** (`fix/refresh-probe-deadline-502`) | engine doc, S0 |
+| 2 | **C1** — sign wholesale replacement before the swap ✅ **implemented** (`fix/sign-before-publish`) | here, §3.1–3.3 |
 | 3 | **C2** — NOTIFY only when the version is servable, off the lock | here, §3.4 |
 | 4 | **C3** — delete the refresh engine's NOTIFYs | here, §3.5 |
 | 5 | **C4** — `ResignQ` intent; `ResignZone` for key-state changes | here, §3.6 |

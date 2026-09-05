@@ -839,8 +839,6 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		return 0, err
 	}
 
-	newrrsigs := 0
-
 	// 4D K-step TTL clamp: build ClampParams once per pass so every RRset
 	// signed in this pass observes the same K. nil for non-clamping zones
 	// (or zones with no scheduled rollover, mid-rollover, etc.).
@@ -857,6 +855,64 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		}
 	}
 
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.ensureWorkingSet()
+
+	if !zd.Options[OptBlackLies] {
+		if err = zd.GenerateNsecChainWithDak(dak); err != nil {
+			return 0, err
+		}
+	}
+
+	newrrsigs, maxObservedTTL, err := zd.signWorkingSetLocked(dak, clamp, force, true)
+	if err != nil {
+		return 0, err
+	}
+
+	zd.publishLocked(zd.generation.Load())
+
+	if err := UpsertZoneSigningMaxTTL(kdb, zd.ZoneName, maxObservedTTL); err != nil {
+		lgSigner.Warn("SignZone: persist max_observed_ttl", "zone", zd.ZoneName, "err", err)
+	}
+	if zd.DnssecPolicy != nil {
+		UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), maxObservedTTL, true, Conf.IsLargeAlgorithm, true)
+	}
+
+	return newrrsigs, nil
+}
+
+// signWorkingSetLocked signs the staged working set with the keys and the clamp
+// the CALLER resolved, and stages the result. Returns the number of RRSIGs
+// written and the largest TTL observed after clamping.
+//
+// Two hard requirements on the caller: it MUST hold zd.mu, and dak MUST be
+// non-nil. Neither is decoration. This function deliberately does not lock, does
+// not resolve keys and does not publish, because those are exactly the steps
+// that re-enter zone locking -- EnsureActiveDnssecKeys reaches PublishDnskeyRRs,
+// which takes zd.mu, and Go mutexes are not reentrant. A nil dak would send
+// SignRRset into its own EnsureActiveDnssecKeys call and deadlock against the
+// lock its caller is already holding; this tree has paid for that once already
+// (the SignZone/UpdateSigValidityFloor deadlock in 6e090a9), and
+// resignWorkingSetSOAIfSigned and restitchNsecLocked both pre-resolve for the
+// same reason.
+//
+// Separating it from SignZone is what lets publishWorkingSetLocked sign a
+// wholesale replacement before the swap, from inside the publish path where the
+// lock is already held.
+//
+// signNsec says whether each owner's NSEC property is signed here. SignZone
+// wants that. The publish path does not: restitchNsecLocked runs immediately
+// after and regenerates and signs the chain itself, so doing it here would be a
+// second full pass over the zone for a result that is about to be replaced.
+func (zd *ZoneData) signWorkingSetLocked(dak *DnssecKeys, clamp *ClampParams, force, signNsec bool) (int, uint32, error) {
+	if dak == nil {
+		return 0, 0, fmt.Errorf("signWorkingSetLocked: zone %s: nil DnssecKeys; the caller must resolve them (see the note above)", zd.ZoneName)
+	}
+
+	newrrsigs := 0
+	var maxObservedTTL uint32
+
 	MaybeSignRRset := func(rrset core.RRset, zone string) (core.RRset, bool) {
 		resigned, err := zd.SignRRset(&rrset, zone, dak, force, clamp)
 		if err != nil {
@@ -868,18 +924,8 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		return rrset, resigned
 	}
 
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	zd.ensureWorkingSet()
-
-	if !zd.Options[OptBlackLies] {
-		if err = zd.GenerateNsecChainWithDak(dak); err != nil {
-			return 0, err
-		}
-	}
-
-	if err = zd.publishDnskeyRRsLocked(dak); err != nil {
-		return 0, err
+	if err := zd.publishDnskeyRRsLocked(dak); err != nil {
+		return 0, 0, err
 	}
 
 	names := zd.workingOwnerNamesLocked()
@@ -902,7 +948,6 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 
 	managesZonemd := zd.zoneManagesZonemd()
 
-	var maxObservedTTL uint32
 	for _, name := range names {
 		// log.Printf("SignZone: signing RRsets under name %s", name)
 		owner := zd.stagedOwner(name)
@@ -958,24 +1003,17 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 
 		// The NSEC property, for the same reason as in ResignZone: it is not
 		// an RRtypes entry, so nothing above signs it.
-		if cur := zd.stagedOwner(name); cur != nil && len(cur.NSEC.RRs) > 0 {
-			nsec := cloneRRset(cur.NSEC)
-			nsec.RRSIGs = nil
-			nsec, _ = MaybeSignRRset(nsec, zd.ZoneName)
-			zd.stageNsecLocked(name, nsec)
+		if signNsec {
+			if cur := zd.stagedOwner(name); cur != nil && len(cur.NSEC.RRs) > 0 {
+				nsec := cloneRRset(cur.NSEC)
+				nsec.RRSIGs = nil
+				nsec, _ = MaybeSignRRset(nsec, zd.ZoneName)
+				zd.stageNsecLocked(name, nsec)
+			}
 		}
 	}
 
-	zd.publishLocked(zd.generation.Load())
-
-	if err := UpsertZoneSigningMaxTTL(kdb, zd.ZoneName, maxObservedTTL); err != nil {
-		lgSigner.Warn("SignZone: persist max_observed_ttl", "zone", zd.ZoneName, "err", err)
-	}
-	if zd.DnssecPolicy != nil {
-		UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), maxObservedTTL, true, Conf.IsLargeAlgorithm, true)
-	}
-
-	return newrrsigs, nil
+	return newrrsigs, maxObservedTTL, nil
 }
 
 // chainNamesLocked reduces the owner names to those the NSEC chain covers:
