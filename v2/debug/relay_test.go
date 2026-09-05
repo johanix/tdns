@@ -257,12 +257,16 @@ func mustTestRR(t *testing.T, s string) dns.RR {
 
 // runAgainst wires the rig to a fake SUT and runs it.
 func runAgainst(t *testing.T, react func(*fakeSUT, *peer.Zone), rounds int) (*Report, *RelayResult, *fakeSUT) {
+	return runProfile(t, ProfileSigning, react, rounds)
+}
+
+func runProfile(t *testing.T, profile string, react func(*fakeSUT, *peer.Zone), rounds int) (*Report, *RelayResult, *fakeSUT) {
 	t.Helper()
 	const zone = "relay.test."
 	sut := newFakeSUT(t, zone, react)
 
 	cfg := RelayConfig{
-		Zone: zone, SUT: sut.addr(),
+		Zone: zone, SUT: sut.addr(), Profile: profile,
 		UpstreamListen: "127.0.0.1:0", DownstreamListen: "127.0.0.1:0",
 		Rounds: rounds, Settle: time.Second, RoundTimeout: 20 * time.Second,
 		Seed: 1, Tool: "tdns-debug-test",
@@ -435,5 +439,83 @@ func TestChangeGenChangesAlwaysApply(t *testing.T) {
 		if _, err := h.Apply(g.Next()); err != nil {
 			t.Fatalf("generated change %d did not apply: %v", i, err)
 		}
+	}
+}
+
+// --- the mirroring profile -------------------------------------------------
+
+// mirrorVerbatim is a plain secondary doing the right thing: it publishes what
+// it received, unchanged, upstream's serial included, and announces once.
+func mirrorVerbatim(s *fakeSUT, content *peer.Zone) {
+	s.publish(content.Clone())
+}
+
+// mirrorWithDrift reproduces the historical unconditional ++ that
+// applyRefreshReplacementLocked's MUST-NOT-MODIFY branch exists to prevent:
+// the content is perfect and the serial is one ahead of upstream's.
+func mirrorWithDrift(s *fakeSUT, content *peer.Zone) {
+	z := content.Clone()
+	_ = z.SetSerial(content.Serial() + 1)
+	s.publish(z)
+}
+
+// An unsigned zone through a non-signing tdns-auth: what comes out must be
+// what went in, byte for byte, serial included.
+func TestRelayMirrorPassesAVerbatimSecondary(t *testing.T) {
+	rep, res, _ := runProfile(t, ProfileMirror, mirrorVerbatim, 2)
+
+	for i := 1; i <= len(res.Rounds); i++ {
+		rr := res.Rounds[i-1]
+		v := verdicts(t, res, i)
+		if rr.Notifies != 1 || len(rr.NewSerials) != 1 {
+			t.Fatalf("round %d: %d NOTIFYs and %d serials for one change, want 1 and 1", i, rr.Notifies, len(rr.NewSerials))
+		}
+		for _, inv := range []string{"N1", "N2", "N4", "N5", "N8"} {
+			if got := v[inv]; got.Result != VerdictPass {
+				t.Fatalf("round %d: %s = %s (%s), want pass", i, inv, got.Result, got.Detail)
+			}
+		}
+		// Nothing here signs, so the signing invariants are not applicable --
+		// which is a different statement from "could not decide", and must not
+		// read as either a pass or a failure.
+		for _, inv := range []string{"N3", "N6", "N7"} {
+			if got := v[inv]; got.Result != VerdictNA {
+				t.Fatalf("round %d: %s = %s (%s), want n/a on an unsigned zone", i, inv, got.Result, got.Detail)
+			}
+		}
+	}
+	if len(rep.Violations) != 0 {
+		t.Fatalf("a verbatim mirror produced %d violation(s): %+v", len(rep.Violations), rep.Violations)
+	}
+}
+
+// The serial drift is invisible to every other check, because the CONTENT is
+// right. That is exactly why it needs its own invariant.
+func TestRelayMirrorCatchesSerialDrift(t *testing.T) {
+	rep, res, _ := runProfile(t, ProfileMirror, mirrorWithDrift, 1)
+	v := verdicts(t, res, 1)
+
+	if v["N8"].Result != VerdictFail {
+		t.Fatalf("N8 = %s (%s); a mirror that advances the serial must fail", v["N8"].Result, v["N8"].Detail)
+	}
+	if !strings.Contains(v["N8"].Detail, "must mirror it verbatim") {
+		t.Fatalf("N8 detail does not name the rule: %q", v["N8"].Detail)
+	}
+	for _, inv := range []string{"N1", "N2", "N4", "N5"} {
+		if got := v[inv]; got.Result != VerdictPass {
+			t.Fatalf("%s = %s (%s); the content and the announcement are correct, which is what makes the drift hard to see",
+				inv, got.Result, got.Detail)
+		}
+	}
+	if rep.ExitCode() != ExitViolation {
+		t.Fatalf("exit code = %d, want %d", rep.ExitCode(), ExitViolation)
+	}
+}
+
+// A signing SUT must not be judged by the mirror rules, and vice versa.
+func TestRelayRejectsAnUnknownProfile(t *testing.T) {
+	_, _, err := RunRelay(context.Background(), RelayConfig{Zone: "relay.test.", Profile: "guess"}, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "unknown profile") {
+		t.Fatalf("err = %v, want an unknown-profile refusal", err)
 	}
 }

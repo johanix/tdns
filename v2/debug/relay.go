@@ -40,9 +40,21 @@ type RelayConfig struct {
 	// default; nothing scores it yet.
 	DownstreamDelay time.Duration
 
+	// Profile says what the SUT does with the zone, because the correct answer
+	// differs. A signing secondary originates content and advances the serial
+	// in its own space; a mirroring one originates nothing and must reproduce
+	// what it received, serial included. Guessing from the served zone would
+	// read a signing zone that failed to sign as a healthy mirror.
+	Profile string
+
 	Tool   string
 	TestId string
 }
+
+const (
+	ProfileSigning = "signing" // inline-signing secondary that re-serves
+	ProfileMirror  = "mirror"  // plain secondary: MUST-NOT-MODIFY applies
+)
 
 // Verdict is three-valued on purpose. The rig races the server it measures: a
 // defective intermediate state lasts only as long as a signing pass, and not
@@ -57,11 +69,16 @@ const (
 	VerdictPass         = "pass"
 	VerdictFail         = "fail"
 	VerdictInconclusive = "inconclusive"
+	// VerdictNA is "this invariant does not apply to this profile" -- a
+	// different statement from "could not decide", and reported once for the
+	// run rather than once per round.
+	VerdictNA = "n/a"
 )
 
 func pass() Verdict                      { return Verdict{Result: VerdictPass} }
 func fail(f string, a ...any) Verdict    { return Verdict{VerdictFail, fmt.Sprintf(f, a...)} }
 func unknown(f string, a ...any) Verdict { return Verdict{VerdictInconclusive, fmt.Sprintf(f, a...)} }
+func na(f string, a ...any) Verdict      { return Verdict{VerdictNA, fmt.Sprintf(f, a...)} }
 
 // StateObs is one published state the downstream peer actually inspected.
 type StateObs struct {
@@ -92,6 +109,7 @@ type RoundResult struct {
 // RelayResult is the whole run, and becomes the report's Detail.
 type RelayResult struct {
 	Zone     string        `json:"zone"`
+	Profile  string        `json:"profile"`
 	SUT      string        `json:"sut"`
 	Upstream string        `json:"upstream"`
 	Down     string        `json:"downstream"`
@@ -99,7 +117,7 @@ type RelayResult struct {
 }
 
 // invariants, in report order.
-var relayInvariants = []string{"N1", "N2", "N3", "N4", "N5", "N6", "N7"}
+var relayInvariants = []string{"N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"}
 
 var invariantSummary = map[string]string{
 	"N1": "one inbound change produces exactly one new published serial",
@@ -109,14 +127,16 @@ var invariantSummary = map[string]string{
 	"N5": "the deltas served express exactly the authored change",
 	"N6": "the final state is internally consistent",
 	"N7": "no version is signed twice",
+	"N8": "a mirroring secondary reproduces the upstream serial verbatim",
 }
 
 type relay struct {
-	cfg  RelayConfig
-	up   *peer.Upstream
-	down *peer.Downstream
-	rep  *Report
-	gen  *changeGen
+	cfg     RelayConfig
+	up      *peer.Upstream
+	down    *peer.Downstream
+	rep     *Report
+	gen     *changeGen
+	naNoted map[string]bool // an N/A invariant is explained once, not per round
 }
 
 // NewRelayPeers builds the rig's two peers from cfg and seeds the upstream.
@@ -153,7 +173,7 @@ func NewRelayPeers(cfg RelayConfig) (*peer.Upstream, *peer.Downstream, error) {
 		up.Stop()
 		return nil, nil, err
 	}
-	down.Delay = cfg.DownstreamDelay
+	down.SetDelay(cfg.DownstreamDelay)
 	return up, down, nil
 }
 
@@ -169,6 +189,18 @@ func RunRelay(ctx context.Context, cfg RelayConfig, up *peer.Upstream, down *pee
 	if cfg.RoundTimeout <= 0 {
 		cfg.RoundTimeout = 2 * time.Minute
 	}
+	if cfg.Profile == "" {
+		cfg.Profile = ProfileSigning
+	}
+	// Validated before anything is touched: the profile decides which
+	// invariants apply, so running with an unrecognised one would silently
+	// score the SUT against the wrong rules.
+	if cfg.Profile != ProfileSigning && cfg.Profile != ProfileMirror {
+		return nil, nil, fmt.Errorf("unknown profile %q (want %q or %q)", cfg.Profile, ProfileSigning, ProfileMirror)
+	}
+	if up == nil || down == nil {
+		return nil, nil, fmt.Errorf("RunRelay needs both peers; build them with NewRelayPeers and Start them first")
+	}
 	zone := dns.Fqdn(cfg.Zone)
 
 	rep := NewReport(cfg.Tool, "relay")
@@ -183,13 +215,29 @@ func RunRelay(ctx context.Context, cfg RelayConfig, up *peer.Upstream, down *pee
 	}
 	rep.Stat("section0.checks", int64(section0Checks))
 
-	r := &relay{cfg: cfg, up: up, down: down, rep: rep, gen: newChangeGen(zone, cfg.Seed)}
+	r := &relay{cfg: cfg, up: up, down: down, rep: rep, gen: newChangeGen(zone, cfg.Seed), naNoted: map[string]bool{}}
+	rep.Stat("relay.profile."+cfg.Profile, 1)
 
-	if _, err := querySOASerial(ctx, cfg.SUT, zone); err != nil {
-		return nil, nil, fmt.Errorf("pre-flight: %s does not answer SOA for %s (%w); "+
-			"the SUT must be configured as a secondary of %s with %s as its only notify target "+
-			"-- see `tdns-debug test relay --generate-config`",
-			cfg.SUT, zone, err, up.Addr(), down.Addr())
+	// Pre-flight distinguishes the three states the SUT can be in, because only
+	// two of them are problems. A zone the SUT knows but is not yet SERVING is
+	// the normal state of a fresh SUT: the rig is its only primary, so its
+	// initial load necessarily failed before the rig existed, and driving it out
+	// of that is what prime is for.
+	pf, err := waitForSUT(ctx, cfg.SUT, zone)
+	switch {
+	case err != nil:
+		return nil, nil, fmt.Errorf("pre-flight: cannot reach %s (%w); "+
+			"the SUT must be listening there and configured as a secondary of %s "+
+			"with %s as its only notify target -- see `tdns-debug test relay --generate-config`",
+			cfg.SUT, err, up.Addr(), down.Addr())
+	case pf.Rcode == dns.RcodeRefused || pf.Rcode == dns.RcodeNotAuth:
+		return nil, nil, fmt.Errorf("pre-flight: %s answers %s for %s, so it is not configured for this zone at all; "+
+			"see `tdns-debug test relay --generate-config --zone %s --profile %s`",
+			cfg.SUT, dns.RcodeToString[pf.Rcode], zone, zone, cfg.Profile)
+	case !pf.HasSOA:
+		rep.Skip("pre-flight", fmt.Sprintf(
+			"%s knows %s but is not serving it yet (%s); expected on a fresh SUT, since the rig is its only primary",
+			cfg.SUT, zone, dns.RcodeToString[pf.Rcode]))
 	}
 
 	// Prime: get the SUT onto our version of the zone and the downstream peer
@@ -199,7 +247,7 @@ func RunRelay(ctx context.Context, cfg RelayConfig, up *peer.Upstream, down *pee
 		return nil, nil, fmt.Errorf("priming the SUT: %w", err)
 	}
 
-	res := &RelayResult{Zone: zone, SUT: cfg.SUT, Upstream: up.Addr(), Down: down.Addr()}
+	res := &RelayResult{Zone: zone, Profile: cfg.Profile, SUT: cfg.SUT, Upstream: up.Addr(), Down: down.Addr()}
 	for i := 1; i <= cfg.Rounds; i++ {
 		rr, err := r.round(ctx, i)
 		if err != nil {
@@ -218,18 +266,111 @@ func RunRelay(ctx context.Context, cfg RelayConfig, up *peer.Upstream, down *pee
 }
 
 // prime brings the SUT up to our zone and the downstream peer up to the SUT's.
+//
+// On a fresh SUT the zone is not loaded at all: its initial load failed before
+// the rig existed, and it is sitting in a retry backoff measured in tens of
+// seconds. A NOTIFY drives that retry immediately (RefreshError is not
+// service-impacting, so the NOTIFY responder accepts it), which is why this
+// re-announces rather than waiting the backoff out.
 func (r *relay) prime(ctx context.Context) error {
-	if _, err := r.up.Notify(ctx, r.cfg.SUT); err != nil {
-		return fmt.Errorf("the SUT did not accept a NOTIFY: %w", err)
+	const (
+		attemptWait = 10 * time.Second
+		poll        = 500 * time.Millisecond
+	)
+	deadline := time.Now().Add(r.cfg.RoundTimeout)
+	var lastErr error
+
+	for loaded := false; !loaded; {
+		if _, err := r.up.Notify(ctx, r.cfg.SUT); err != nil {
+			lastErr = fmt.Errorf("the SUT did not accept a NOTIFY: %w", err)
+		}
+		until := time.Now().Add(attemptWait)
+		for time.Now().Before(until) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(poll):
+			}
+			if pf, err := probeSUT(ctx, r.cfg.SUT, r.cfg.Zone); err == nil && pf.HasSOA {
+				loaded = true
+				break
+			} else if err != nil {
+				lastErr = err
+			}
+		}
+		if !loaded && time.Now().After(deadline) {
+			return fmt.Errorf("the SUT never started serving %s from this rig within %s (last: %v); "+
+				"check that its primaries entry for the zone is %s",
+				r.cfg.Zone, r.cfg.RoundTimeout, lastErr, r.up.Addr())
+		}
 	}
+
 	r.waitQuiescent(ctx, 0)
 	if _, err := r.down.Transfer(ctx); err != nil {
-		return fmt.Errorf("could not transfer %s from the SUT: %w", r.cfg.Zone, err)
+		return fmt.Errorf("could not transfer %s from the SUT: %w; "+
+			"check that the zone's downstreams ACL admits %s", r.cfg.Zone, err, r.down.Addr())
 	}
 	if _, serial := r.down.Zone(); serial == 0 {
 		return fmt.Errorf("the SUT served no usable zone for %s", r.cfg.Zone)
 	}
 	return nil
+}
+
+// sutProbe is what the pre-flight SOA query learned.
+type sutProbe struct {
+	Rcode  int
+	Serial uint32
+	HasSOA bool
+}
+
+// waitForSUT retries the pre-flight probe while the SUT is simply not there yet.
+//
+// Starting the rig BEFORE the SUT is a supported -- often necessary -- ordering:
+// the rig is the SUT's only primary, so a SUT started first fails its initial
+// load and then sits in a retry backoff. Refusing to wait would make that
+// ordering impossible and leave only the one that goes through the SUT's
+// backoff. A transport error is retried; any DNS RESPONSE, including REFUSED,
+// is returned at once, because that is an answer about configuration and no
+// amount of waiting changes it.
+func waitForSUT(ctx context.Context, server, zone string) (sutProbe, error) {
+	const budget = 30 * time.Second
+	deadline := time.Now().Add(budget)
+	for {
+		p, err := probeSUT(ctx, server, zone)
+		if err == nil {
+			return p, nil
+		}
+		if time.Now().After(deadline) {
+			return p, fmt.Errorf("%w (retried for %s)", err, budget)
+		}
+		select {
+		case <-ctx.Done():
+			return p, ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// probeSUT asks for the apex SOA and reports what came back, keeping the rcode
+// separate from the answer: "knows the zone but is not serving it" and "is not
+// configured for the zone" are both non-answers and only one is a problem.
+func probeSUT(ctx context.Context, server, zone string) (sutProbe, error) {
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)
+	m.SetEdns0(1232, false)
+	c := &dns.Client{Timeout: 5 * time.Second}
+	resp, _, err := c.ExchangeContext(ctx, m, server)
+	if err != nil {
+		return sutProbe{}, err
+	}
+	p := sutProbe{Rcode: resp.Rcode}
+	for _, rr := range resp.Answer {
+		if soa, ok := rr.(*dns.SOA); ok {
+			p.Serial, p.HasSOA = soa.Serial, true
+			break
+		}
+	}
+	return p, nil
 }
 
 // round authors one change, announces it, waits for quiescence, and evaluates.
@@ -356,6 +497,7 @@ func (r *relay) evaluate(rr *RoundResult, c peer.Change) {
 	rr.Verdicts = map[string]Verdict{}
 	final, finalSerial := r.down.Zone()
 	newStates := len(rr.NewSerials)
+	signing := r.cfg.Profile != ProfileMirror
 
 	// --- N1: one change, one new published serial.
 	switch {
@@ -397,6 +539,8 @@ func (r *relay) evaluate(rr *RoundResult, c peer.Change) {
 
 	// --- N3: every announced state is fully signed.
 	switch {
+	case !signing:
+		rr.Verdicts["N3"] = na("the SUT does not sign this zone, so there is no signing to precede an announcement")
 	case len(rr.States) == 0:
 		rr.Verdicts["N3"] = unknown("no published state was inspected")
 	case len(rr.States) < newStates:
@@ -425,7 +569,13 @@ func (r *relay) evaluate(rr *RoundResult, c peer.Change) {
 	case finalSerial == rr.BaseSerial:
 		rr.Verdicts["N4"] = unknown("the SUT never advanced past serial %d, so there is no new content to compare", rr.BaseSerial)
 	default:
-		if d := peer.CompareContent(cur.Zone, final); d.Equal() {
+		// A mirror must reproduce the signer-owned records too; a signing SUT
+		// must not be held to them.
+		d := peer.CompareContent(cur.Zone, final)
+		if !signing {
+			d = peer.CompareMirrored(cur.Zone, final)
+		}
+		if d.Equal() {
 			rr.Verdicts["N4"] = pass()
 		} else {
 			rr.Verdicts["N4"] = fail("%s", d)
@@ -451,7 +601,9 @@ func (r *relay) evaluate(rr *RoundResult, c peer.Change) {
 	}
 
 	// --- N6: the final state is internally consistent.
-	if final == nil {
+	if !signing {
+		rr.Verdicts["N6"] = na("the SUT does not sign this zone; whether the content it mirrors is signed is upstream's business")
+	} else if final == nil {
 		rr.Verdicts["N6"] = unknown("the downstream peer holds no zone")
 	} else {
 		rep := peer.CheckSigning(final)
@@ -472,7 +624,9 @@ func (r *relay) evaluate(rr *RoundResult, c peer.Change) {
 	// The rig cannot see a signing pass. It can see its fingerprint: two
 	// successive states whose content is identical modulo DNSSEC, but whose
 	// RRSIGs differ, can only be one version signed twice.
-	if len(rr.States) < 2 {
+	if !signing {
+		rr.Verdicts["N7"] = na("the SUT does not sign this zone")
+	} else if len(rr.States) < 2 {
 		rr.Verdicts["N7"] = unknown("fewer than two published states were inspected")
 	} else {
 		var dup []string
@@ -491,6 +645,30 @@ func (r *relay) evaluate(rr *RoundResult, c peer.Change) {
 		} else {
 			rr.Verdicts["N7"] = pass()
 		}
+	}
+
+	// --- N8: a mirroring secondary must not modify the serial.
+	//
+	// MUST-NOT-MODIFY, per applyRefreshReplacementLocked: a secondary that did
+	// not originate this content mirrors the upstream serial verbatim. The
+	// historical unconditional ++ made every such secondary drift by one per
+	// refresh, so two masters downstream of one signer advertised different
+	// serials for identical content and edge nodes always fetched from the
+	// tdns one -- silently collapsing a redundant pair. That is the failure
+	// this invariant watches for, and it is invisible to every other check
+	// here because the CONTENT is right.
+	switch {
+	case signing:
+		rr.Verdicts["N8"] = na("the SUT signs this zone, so it originates content and advances the serial in its own space")
+	case final == nil:
+		rr.Verdicts["N8"] = unknown("the downstream peer holds no zone")
+	case finalSerial == rr.BaseSerial:
+		rr.Verdicts["N8"] = unknown("the SUT never advanced past serial %d", rr.BaseSerial)
+	case finalSerial == cur.Serial:
+		rr.Verdicts["N8"] = pass()
+	default:
+		rr.Verdicts["N8"] = fail("the SUT serves serial %d for upstream serial %d; a secondary that did not originate this content must mirror it verbatim",
+			finalSerial, cur.Serial)
 	}
 }
 
@@ -513,6 +691,12 @@ func (r *relay) score(rr *RoundResult) {
 		case VerdictInconclusive:
 			r.rep.Stat("relay."+inv+".inconclusive", 1)
 			r.rep.Skip(fmt.Sprintf("%s round %d", inv, rr.Round), v.Detail)
+		case VerdictNA:
+			r.rep.Stat("relay."+inv+".na", 1)
+			if !r.naNoted[inv] {
+				r.naNoted[inv] = true
+				r.rep.Skip(inv, v.Detail)
+			}
 		default:
 			r.rep.Stat("relay."+inv+".pass", 1)
 		}
@@ -635,8 +819,8 @@ func (g *changeGen) rr(owner string) dns.RR {
 // RenderRounds prints the per-round table. The verdict columns are the same
 // values the JSON carries; the table is a view of the record, not a summary.
 func RenderRounds(w io.Writer, res *RelayResult) {
-	fmt.Fprintf(w, "\nrelay rounds (zone %s, SUT %s, upstream %s, downstream %s)\n",
-		res.Zone, res.SUT, res.Upstream, res.Down)
+	fmt.Fprintf(w, "\nrelay rounds (zone %s, profile %s, SUT %s, upstream %s, downstream %s)\n",
+		res.Zone, res.Profile, res.SUT, res.Upstream, res.Down)
 	fmt.Fprintf(w, "%-5s %-28s %8s %8s %7s  %s\n", "round", "change", "notifies", "serials", "states", "verdicts")
 	for _, rr := range res.Rounds {
 		var v []string
@@ -646,6 +830,8 @@ func RenderRounds(w io.Writer, res *RelayResult) {
 				v = append(v, inv+":ok")
 			case VerdictFail:
 				v = append(v, inv+":FAIL")
+			case VerdictNA:
+				v = append(v, inv+":-")
 			default:
 				v = append(v, inv+":?")
 			}

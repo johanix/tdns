@@ -98,9 +98,18 @@ func (d ZoneDiff) String() string {
 //
 // a is conventionally the upstream (what the rig authored) and b the zone the
 // SUT serves; the OnlyInA/OnlyInB labels in the report follow that.
-func CompareContent(a, b *Zone) ZoneDiff {
-	ka := contentRRs(a)
-	kb := contentRRs(b)
+func CompareContent(a, b *Zone) ZoneDiff { return compare(a, b, true) }
+
+// CompareMirrored compares everything a MIRRORING secondary must reproduce
+// verbatim, signer-owned records included: it did not originate those either,
+// so none of them are its to change (the MUST-NOT-MODIFY rule in
+// applyRefreshReplacementLocked). The SOA serial is still left out, because a
+// mirror's serial has its own check and one defect should be reported once.
+func CompareMirrored(a, b *Zone) ZoneDiff { return compare(a, b, false) }
+
+func compare(a, b *Zone, stripSigner bool) ZoneDiff {
+	ka := contentRRs(a, stripSigner)
+	kb := contentRRs(b, stripSigner)
 	var d ZoneDiff
 	for k, rr := range ka {
 		if _, ok := kb[k]; !ok {
@@ -118,12 +127,17 @@ func CompareContent(a, b *Zone) ZoneDiff {
 	return d
 }
 
-// contentRRs is the zone reduced to what N4 compares: no signer-owned records,
-// no apex SOA (handled separately, because its serial legitimately differs).
-func contentRRs(z *Zone) map[string]dns.RR {
+// contentRRs is the zone reduced to what a comparison sees. The apex SOA is
+// always excluded, because its serial legitimately differs and it is compared
+// field by field instead. Signer-owned records are excluded only when the SUT
+// signs: there they MUST differ and their difference says nothing.
+func contentRRs(z *Zone, stripSigner bool) map[string]dns.RR {
 	out := make(map[string]dns.RR, len(z.rrs))
 	for k, rr := range z.rrs {
-		if IsDNSSECType(rr.Header().Rrtype) || isApexSOA(rr, z.Origin) {
+		if isApexSOA(rr, z.Origin) {
+			continue
+		}
+		if stripSigner && IsDNSSECType(rr.Header().Rrtype) {
 			continue
 		}
 		out[k] = rr

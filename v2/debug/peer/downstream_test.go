@@ -243,13 +243,14 @@ func TestDownstreamRefusesForeignNotify(t *testing.T) {
 // transfer.
 func TestDownstreamDelayHoldsTheResponse(t *testing.T) {
 	u, d := startPair(t, 8)
-	d.Delay = 300 * time.Millisecond
+	const delay = 300 * time.Millisecond
+	d.SetDelay(delay)
 
 	start := time.Now()
 	if _, err := u.Notify(context.Background(), d.Addr()); err != nil {
 		t.Fatalf("Notify: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed < d.Delay {
-		t.Fatalf("NOTIFY answered in %v, want at least %v", elapsed, d.Delay)
+	if elapsed := time.Since(start); elapsed < delay {
+		t.Fatalf("NOTIFY answered in %v, want at least %v", elapsed, delay)
 	}
 }

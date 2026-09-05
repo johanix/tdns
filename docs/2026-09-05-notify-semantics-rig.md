@@ -1,6 +1,8 @@
 # The notify-semantics rig — one inbound change, how many outbound changes? (relay rig)
 
-**Status:** design agreed; R1–R5 implemented 2026-09-05 on `feature/notify-semantics-rig` (off `main` @ `d833c683`). R6 — the `tdns-debug test relay` command and the `tests/notify-semantics/` seeder — outstanding.
+**Status:** implemented and RUN. R1–R6 on `feature/notify-semantics-rig` (off `main` @ `d833c683`).
+First live results against a real `tdns-auth` in §9.4 — including one defect confirmed and
+one that blocked the signing profile from running at all.
 **Base:** `main` @ `d833c683` (read on `fix/csync-publisher-484-506`, which does not touch any
 of this).
 **Scope of the first cut:** the SUT is an **inline-signing secondary that re-serves**. The
@@ -563,6 +565,86 @@ a pass there would be the bug.
 
 Still to do against a real daemon (R6): run it at a live `tdns-auth` and confirm the same
 numbers come back.
+
+### 9.4 First live run — 2026-09-05, `main` @ `d833c683`
+
+Run through `tests/notify-semantics/`, `ROUNDS=3 SETTLE=6s`, one `tdns-auth` serving both
+profiles' zones.
+
+#### The mirror profile: content perfect, announced twice
+
+```
+round change                       notifies  serials  states  verdicts
+1     add +[r001.mirror.test. 360…        2        1       1  N1:ok N2:FAIL N3:- N4:ok N5:ok N6:- N7:- N8:ok
+2     replace -[r001.mirror.test.…        2        1       1  N1:ok N2:FAIL N3:- N4:ok N5:ok N6:- N7:- N8:ok
+3     replace -[r001.mirror.test.…        2        1       1  N1:ok N2:FAIL N3:- N4:ok N5:ok N6:- N7:- N8:ok
+```
+
+**What is right.** A non-signing secondary reproduces its input exactly. One inbound change
+produces exactly one published version (N1), the content is identical (N4), the deltas
+express the authored change (N5), and — the one this profile exists for — the SOA serial
+served is the upstream serial verbatim (N8). MUST-NOT-MODIFY holds.
+
+**What is wrong.** Every version is announced **twice**, at the same serial, in every round.
+This is the simplest possible configuration: no signing, one publish, one serial. The two
+NOTIFYs are the two sites the companion document names:
+
+- `refreshengine.go:911` → `NotifyQ` → the notifier, which logs
+  `zone refreshed, sending NOTIFY to downstreams`, and
+- `zone_mutation.go:601` → `NotifyDownstreams()` at the end of every publish.
+
+That makes the mirror profile the sharper of the two for the fix's purposes: it isolates the
+duplicate announcement from every signing defect, so C2 and C3 can be validated against it
+without C1 having landed.
+
+**And a reason the rig had to exist.** The publish-path NOTIFY **logs nothing on success** —
+only its failure logs (`downstream NOTIFY failed`). An operator reading the log sees one
+NOTIFY per change and concludes the semantics are correct. The rig sees two, because it
+counts packets arriving at a listener it owns. Nothing short of that finds this.
+
+#### The signing profile did not get to run
+
+`relay.test.` never became transferable, so the rig reported a setup error rather than a
+verdict. From the SUT's own log, in order:
+
+```
+parseconfig.go:1259  DNSSEC policy accepted zone=relay.test. policy=relay
+...
+dnsutils.go:289      *** Zone relay.test. transferred from upstream 127.0.0.1:5361. No errors.
+sign.go:838          failed to ensure active DNSSEC keys zone=relay.test.
+                     err=EnsureActiveDnssecKeys: zone relay.test. has no DNSSEC policy bound yet
+parseconfig.go:1478  SetupZoneSigning failed in OnFirstLoad zone=relay.test.
+dnsutils.go:492      ZoneTransferOut: relay.test.: refusing transfer, zone is configured to be
+                     signed but the SOA has no RRSIG (unsigned/broken)
+```
+
+The policy resolves at parse and is recorded on the ZoneData
+(`zd.DnssecPolicyName = zr.DnssecPolicy`, `refreshengine.go:626`), and both first-bind
+completion paths pass that name to `syncZoneDnssecPolicyFromConfig`. The sync nonetheless
+logged nothing and bound nothing, which in that function means `intentPol == nil` — the only
+silent return it has. **Root cause not isolated; this is a report, not a diagnosis.** Two
+theories were checked and eliminated: the policy is present in the parsed config, and
+`publishRuntimeConfig()` runs (`main_initfuncs.go:131`) before `ParseZones`
+(`main_initfuncs.go:235`), so `ConfLive().DnssecPolicies` is populated by the time the load
+completes.
+
+The consequence is worth stating on its own, because it is severe and it is silent: an
+inline-signing secondary in this state serves queries but **refuses every transfer**, and the
+only sign of it is one INFO line per attempt. It wants its own issue.
+
+#### The §2.2 lock hold, hit on the first NOTIFY of the first run
+
+The rig's downstream peer originally probed the SUT's SOA *before* answering each NOTIFY, as
+§5.3 specified. Live, that probe timed out and the SUT logged
+`downstream NOTIFY failed ... i/o timeout`. The cause is exactly the hazard §2.2 describes:
+`NotifyDownstreams` runs under `zd.mu` and uses `dns.Exchange`, so the zone's lock is held
+until the downstream replies — and a SOA query for that same zone queues behind it. Probing
+before replying cannot work, and costs the SUT a 2s stall per NOTIFY.
+
+The peer now replies first and probes immediately after. The gap between the two timestamps
+is kept, and is a lower bound on how long the SUT held its zone lock to announce.
+
+---
 
 ---
 

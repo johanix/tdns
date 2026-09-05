@@ -226,3 +226,35 @@ func TestStripDNSSECRemovesEverySignerType(t *testing.T) {
 		t.Fatalf("StripDNSSEC left %v, want only the A record", SortedTexts(got))
 	}
 }
+
+// A mirroring secondary did not originate the signer-owned records either, so
+// it must reproduce them too. CompareContent must NOT see that difference and
+// CompareMirrored must.
+func TestCompareMirroredSeesSignerRecordsThatCompareContentIgnores(t *testing.T) {
+	up := signedLike(t, 4711)
+	down := signedLike(t, 4711)
+	down.Remove(mustRR(t, "relay.test. 3600 IN RRSIG SOA 15 2 3600 20260930000000 20260901000000 12345 relay.test. deadbeef=="))
+
+	if d := CompareContent(up, down); !d.Equal() {
+		t.Fatalf("CompareContent objected to a missing RRSIG, which a signing SUT is free to change:\n%s", d)
+	}
+	if d := CompareMirrored(up, down); d.Equal() {
+		t.Fatal("CompareMirrored ignored a dropped RRSIG; a mirror may not change one")
+	}
+}
+
+func TestCompareMirroredIgnoresTheSerialButNotTheRestOfTheSOA(t *testing.T) {
+	up := seedZone(t)
+	down := seedZone(t)
+	if err := down.SetSerial(999); err != nil {
+		t.Fatalf("SetSerial: %v", err)
+	}
+	if d := CompareMirrored(up, down); !d.Equal() {
+		t.Fatalf("CompareMirrored objected to a serial difference, which N8 owns:\n%s", d)
+	}
+	down.Remove(down.SOA())
+	down.Add(mustRR(t, "relay.test. 3600 IN SOA ns2.relay.test. hostmaster.relay.test. 999 7200 1800 604800 3600"))
+	if d := CompareMirrored(up, down); d.Equal() {
+		t.Fatal("CompareMirrored ignored a rewritten MNAME")
+	}
+}

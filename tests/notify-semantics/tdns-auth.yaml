@@ -1,0 +1,93 @@
+# The SUT for the notify-semantics rig: one tdns-auth, two secondary zones,
+# each transferring from the rig and announcing back to it.
+#
+# Two zones because the correct answer differs between them, and the rig's
+# profiles say so:
+#
+#   relay.test.   inline-signing. It originates content and advances the serial
+#                 in its own space. Every published version must be signed, and
+#                 no version may be signed twice.
+#   mirror.test.  no signing options at all. It originates nothing, so what it
+#                 serves must equal what it received -- serial included
+#                 (MUST-NOT-MODIFY). Do NOT add inline-signing here: it would
+#                 put the zone on the may-originate side of
+#                 zoneMayOriginateContent and the profile would be testing
+#                 something else.
+#
+# Separate rig ports per zone so the two profiles do not have to be run
+# sequentially, and so a zone whose rig is not running is simply stale rather
+# than transferring somebody else's data.
+service:
+   name:       NOTIFY-SEMANTICS-SUT
+   verbose:    true
+   debug:      false
+
+log:
+   file:       /var/tmp/notifysem/log/tdns-auth.log
+   level:      debug
+
+db:
+   file:       /var/tmp/notifysem/tdns-auth/auth.db
+
+listeners:
+   addresses:  [ 127.0.0.1:5331 ]
+   transports: [ do53 ]
+
+apiserver:
+   addresses:  [ 127.0.0.1:8331 ]
+   apikey:     notify-semantics-test-key
+   certfile:   /var/tmp/notifysem/certs/localhost.crt
+   keyfile:    /var/tmp/notifysem/certs/localhost.key
+
+imrengine:
+   active:     false
+
+dnssec:
+   policies:
+      relay:
+         algorithm:  ED25519
+         ksk:
+            lifetime:  forever
+         zsk:
+            lifetime:  forever
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:  14d
+            dnskey:   30d
+            ds:       14d
+
+zones:
+   - name:      relay.test.
+     type:      secondary
+     store:     map
+     options:   [ inline-signing ]
+     dnssecpolicy: relay
+     primaries:
+        - addr: "127.0.0.1:5361"
+          key:  NOKEY
+     allow-notify:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+     notify:
+        - addr: "127.0.0.1:5362"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+   - name:      mirror.test.
+     type:      secondary
+     store:     map
+     primaries:
+        - addr: "127.0.0.1:5371"
+          key:  NOKEY
+     allow-notify:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+     notify:
+        - addr: "127.0.0.1:5372"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY

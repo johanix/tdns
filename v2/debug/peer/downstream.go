@@ -69,12 +69,15 @@ type Downstream struct {
 	Origin string
 	SUT    string // addr:port to probe and transfer from
 
-	// Delay is how long to sit on a NOTIFY before answering it. Zero by
+	mu sync.Mutex
+	// delay is how long to sit on a NOTIFY before answering it. Zero by
 	// default. Non-zero provokes the hazard in design §2.2 — NotifyDownstreams
 	// runs under zd.mu, so a slow downstream holds the SUT's zone lock.
-	Delay time.Duration
-
-	mu       sync.Mutex
+	//
+	// Behind SetDelay rather than an exported field: the NOTIFY handler reads
+	// it on a server goroutine, so a plain field assignment after Start is a
+	// data race whether or not the value ever looks wrong.
+	delay    time.Duration
 	notifies []NotifyObs
 	xfers    []DownstreamXfer
 	zone     *Zone
@@ -129,6 +132,13 @@ func (d *Downstream) Stop() {
 
 func (d *Downstream) Addr() string { return d.addr }
 
+// SetDelay sets how long each NOTIFY reply is held. Safe at any time.
+func (d *Downstream) SetDelay(v time.Duration) {
+	d.mu.Lock()
+	d.delay = v
+	d.mu.Unlock()
+}
+
 func (d *Downstream) Notifies() []NotifyObs {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -182,28 +192,49 @@ func (d *Downstream) handle(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	// Probe BEFORE answering: the SUT's next publish may be moments away, and
-	// the earlier the probe the better its chance of describing the state this
-	// NOTIFY was about.
-	probeAt := time.Now()
-	serial, err := d.probeSerial()
-
+	// Record the NOTIFY, then ANSWER it, and only then probe.
+	//
+	// Probing first is the obvious design and it deadlocks. tdns sends its
+	// outbound NOTIFY from inside publishWorkingSetLocked -- under zd.mu, with
+	// dns.Exchange -- so the zone's lock is held until we reply, and a SOA
+	// query for that same zone queues behind it. A probe issued before the
+	// reply can therefore never be answered: it times out, and the SUT eats a
+	// 2s stall per NOTIFY for nothing. Observed live on the first NOTIFY of
+	// the first run.
+	//
+	// So the probe follows the reply, and the gap between At and ProbeAt is
+	// itself the observable: it is a lower bound on how long the SUT held its
+	// zone lock to announce.
+	at := time.Now()
 	d.mu.Lock()
-	obs := NotifyObs{
-		Seq: len(d.notifies) + 1, At: probeAt, From: w.RemoteAddr().String(),
-		Rcode: dns.RcodeSuccess, ProbeAt: probeAt, ProbeSerial: serial,
+	seq := len(d.notifies) + 1
+	d.notifies = append(d.notifies, NotifyObs{
+		Seq: seq, At: at, From: w.RemoteAddr().String(), Rcode: dns.RcodeSuccess,
+	})
+	delay := d.delay
+	d.mu.Unlock()
+
+	if delay > 0 {
+		time.Sleep(delay)
 	}
+	_ = w.WriteMsg(m)
+
+	serial, err := d.probeSerial()
+	d.mu.Lock()
+	obs := &d.notifies[seq-1]
+	obs.ProbeAt = time.Now()
+	obs.ProbeSerial = serial
 	if err != nil {
 		obs.ProbeErr = err.Error()
-	}
-	// A serial that went BACKWARDS between two probes makes both unusable.
-	for i := range d.notifies {
-		if d.notifies[i].ProbeErr == "" && err == nil && d.notifies[i].ProbeSerial > serial {
-			d.notifies[i].Raced = true
+	} else {
+		// A serial that went BACKWARDS between two probes makes both unusable.
+		for i := range d.notifies {
+			if i != seq-1 && d.notifies[i].ProbeErr == "" && !d.notifies[i].ProbeAt.IsZero() &&
+				d.notifies[i].ProbeSerial > serial {
+				d.notifies[i].Raced = true
+			}
 		}
 	}
-	d.notifies = append(d.notifies, obs)
-	seq := obs.Seq
 	d.mu.Unlock()
 
 	select {
@@ -213,11 +244,6 @@ func (d *Downstream) handle(w dns.ResponseWriter, r *dns.Msg) {
 		d.dropped++
 		d.mu.Unlock()
 	}
-
-	if d.Delay > 0 {
-		time.Sleep(d.Delay)
-	}
-	_ = w.WriteMsg(m)
 }
 
 func (d *Downstream) probeSerial() (uint32, error) {
