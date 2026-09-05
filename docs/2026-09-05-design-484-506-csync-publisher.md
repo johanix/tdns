@@ -3,7 +3,7 @@
 Both bugs live in one 55-line file, `v2/ops_csync.go`, and both are in
 `PublishCsyncRR`. They must ship together: fixing #484 alone makes things worse.
 
-Not committed. Written 2026-09-05.
+Written 2026-09-05. Implemented on branch fix/csync-publisher-484-506 (PR #510).
 
 ## The two bugs
 

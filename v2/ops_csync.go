@@ -11,9 +11,7 @@ import (
 )
 
 // csyncPublishedTypes is the CSYNC type bitmap the child publishes: the types
-// a parent is asked to copy from the child. One definition, because publish
-// and unpublish have to name the same RRset and drifting apart would leave a
-// delete that does not match what was published.
+// a parent is asked to copy from the child.
 var csyncPublishedTypes = []uint16{dns.TypeA, dns.TypeNS, dns.TypeAAAA}
 
 // csyncDeleteRR returns the class-ANY record that removes the whole CSYNC
@@ -27,8 +25,12 @@ var csyncPublishedTypes = []uint16{dns.TypeA, dns.TypeNS, dns.TypeAAAA}
 // to choose -- it acts on "the CSYNC record", and the newest is
 // indistinguishable from the stale ones without comparing serials, which it
 // does not do.
+//
+// The record carries no RDATA: RFC 2136 section 2.5.2 requires RDLENGTH zero
+// for a delete-RRset, and the zone updater keys such a delete on owner and
+// type alone, so a bitmap here would be both wrong and unused.
 func csyncDeleteRR(zone string) dns.RR {
-	anti := &dns.CSYNC{TypeBitMap: csyncPublishedTypes}
+	anti := &dns.CSYNC{}
 	anti.Hdr = dns.RR_Header{
 		Name:   zone,
 		Rrtype: dns.TypeCSYNC,
