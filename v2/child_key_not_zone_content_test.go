@@ -285,3 +285,72 @@ func TestUntrustedBootstrapCeremonyWithoutAllowanceIsRefused(t *testing.T) {
 		t.Fatal("a refused key upload asked for the parent zone to be written")
 	}
 }
+
+// childKeyParentWithSibling is childKeyParent plus a second delegation, and a
+// zone policy that would accept KEY as the parent's own data -- the shape a
+// parent has when it publishes its own apex KEY. That policy knows nothing
+// about zone cuts, which is what makes the ZONE-UPDATE route dangerous for
+// child key material.
+func childKeyParentWithSibling(t *testing.T) *ZoneData {
+	t.Helper()
+	zd := testSnapshotZone(t, "parent.example.", childKeyParentZone+
+		"other.parent.example.	3600	IN	NS	ns1.other.parent.example.\n")
+	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true, OptAllowChildUpdates: true}
+	zd.UpdatePolicy = UpdatePolicy{
+		Zone:  UpdatePolicyDetail{Type: "selfsub", RRtypes: map[uint16]bool{dns.TypeKEY: true, dns.TypeDS: true, dns.TypeA: true}, TTL: 120},
+		Child: UpdatePolicyDetail{Type: "selfsub", RRtypes: map[uint16]bool{dns.TypeNS: true, dns.TypeDS: true, dns.TypeKEY: true}, TTL: 120},
+	}
+	return zd
+}
+
+// Key material that names no single child is refused outright. It is neither a
+// truststore update (the applier authorises per child) nor a delegation update
+// (classifyDelegationUpdate refuses a message spanning two delegations), so
+// without a rule of its own it fell through to ZONE-UPDATE -- past
+// ApproveChildUpdate and past ZoneUpdater's CHILD-UPDATE guard, to be judged
+// by updatepolicy.zone, which has no notion of a zone cut.
+func TestKeysForTwoChildrenAreRefused(t *testing.T) {
+	zd := childKeyParentWithSibling(t)
+
+	dur, got := classify(t, zd,
+		mustRR(t, childKeyRR),
+		mustRR(t, "other.parent.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE="))
+
+	if dur.Status.Type == "ZONE-UPDATE" {
+		t.Fatal("KEY material for two children was routed to ZONE-UPDATE, where updatepolicy.zone could publish it into the parent zone")
+	}
+	if got.Rcode != dns.RcodeRefused {
+		t.Errorf("rcode = %s, want REFUSED", dns.RcodeToString[got.Rcode])
+	}
+}
+
+// The same rule catches one child's key beside another child's delegation
+// records, which spans two children in the other direction.
+func TestChildKeyBesideAnotherChildsDelegationIsRefused(t *testing.T) {
+	zd := childKeyParentWithSibling(t)
+
+	dur, got := classify(t, zd,
+		mustRR(t, "child.parent.example. 3600 IN DS 1 15 2 0000"),
+		mustRR(t, "other.parent.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE="))
+
+	if dur.Status.Type == "ZONE-UPDATE" {
+		t.Fatal("child key material alongside another child's DS was routed to ZONE-UPDATE")
+	}
+	if got.Rcode != dns.RcodeRefused {
+		t.Errorf("rcode = %s, want REFUSED", dns.RcodeToString[got.Rcode])
+	}
+}
+
+// The refusal is confined to KEYs at a zone cut. The parent's own apex KEY --
+// the reason updatepolicy.zone lists KEY in the first place -- is untouched
+// and still reaches the ordinary auth-data path.
+func TestApexKeyStillReachesTheZoneUpdatePath(t *testing.T) {
+	zd := childKeyParentWithSibling(t)
+
+	dur, _ := classify(t, zd,
+		mustRR(t, "parent.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE="))
+
+	if dur.Status.Type != "ZONE-UPDATE" {
+		t.Fatalf("the parent's own apex KEY classified as %q, want ZONE-UPDATE", dur.Status.Type)
+	}
+}

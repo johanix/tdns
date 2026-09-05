@@ -233,6 +233,19 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		dur.Status.Type = "TRUSTSTORE-UPDATE"
 		// Deliberately not gated on allow-child-updates: a truststore update
 		// writes no zone content at all. ApproveTrustUpdate is its gate.
+	} else if keyRR := zd.childKeyRR(r.Ns); keyRR != nil {
+		// Key material for a child that step 0 could not accept as a clean
+		// truststore update: keys for two children, or a key beside another
+		// child's delegation records. Refused HERE, because the classifiers
+		// below would both decline it and drop it into ZONE-UPDATE, where
+		// updatepolicy.zone -- which has no notion of zone cuts -- would be
+		// the only thing standing between a child's KEY and the parent zone.
+		lgHandler.Warn("update rejected: child key material that does not identify a single child",
+			"zone", zd.ZoneName, "owner", keyRR.Header().Name, "updateRRs", len(r.Ns))
+		m.SetRcode(r, dns.RcodeRefused)
+		edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdateRRtypeNotAllowed)
+		w.WriteMsg(m)
+		return nil
 	} else if core.EqualNames(qname, zd.ZoneName) {
 		// Per RFC 2136 the QNAME is the zone being updated, so the apex here
 		// says nothing about what is being changed. The update section does.
@@ -887,6 +900,29 @@ func (zd *ZoneData) classifyTruststoreUpdate(rrs []dns.RR) (string, bool) {
 		return "", false
 	}
 	return owner, true
+}
+
+// childKeyRR returns the first KEY record in an update section whose owner is
+// one of this zone's child delegations, or nil.
+//
+// classifyTruststoreUpdate answers the clean case: KEY records for ONE child,
+// which are that child's key material. This answers the leftovers, and they
+// have to be refused rather than left to fall through. A message carrying KEY
+// records for TWO children, or one child's KEY beside another child's DS, is
+// not a truststore update (the applier authorises per child) and not a
+// delegation update either (classifyDelegationUpdate refuses a message
+// spanning two delegations) -- so it would land on ZONE-UPDATE, be judged
+// against updatepolicy.zone, and, if that policy permits the signer and the
+// KEY type, be written into the parent zone at a delegation point. Which is
+// the very thing the rest of this change exists to prevent, reached by a
+// different road.
+func (zd *ZoneData) childKeyRR(rrs []dns.RR) dns.RR {
+	for _, rr := range rrs {
+		if rr.Header().Rrtype == dns.TypeKEY && zd.IsChildDelegation(rr.Header().Name) {
+			return rr
+		}
+	}
+	return nil
 }
 
 // classifyDelegationUpdate reports whether every RR in an update section
