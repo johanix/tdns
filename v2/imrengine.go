@@ -940,6 +940,29 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	m := new(dns.Msg)
 	m.RecursionAvailable = true
 
+	// A response to an EDNS query carries an OPT (RFC 6891 §6.1.1). Attached
+	// HERE, once, at the only point every exit from this function shares:
+	// there are more than a dozen w.WriteMsg(m) below, on cache hits, on
+	// negative answers, on SERVFAIL, and each would otherwise have to
+	// remember.
+	//
+	// They did not. imr answered DO-bit queries with ADDITIONAL: 0 and no OPT
+	// at all, and got one only where something else happened to build it --
+	// an EDE, a PRIVACY status, a KeyState -- which is why the DNSKEY probe
+	// carried an OPT and the DS, NS and SOA probes beside it did not. A client
+	// that asked with EDNS and is answered without it has been told the server
+	// does not speak EDNS, so a strict resolver downgrades to plain DNS,
+	// drops the DO bit, and stops validating.
+	//
+	// EnsureResponseOPT is a no-op when the query carried no OPT (a plain-DNS
+	// query gets a plain-DNS reply) and when m already has one, so the later
+	// EDE and PRIVACY paths keep working unchanged: they find this OPT and
+	// append their options to it rather than building a second.
+	//
+	// The authoritative responder has called this since it was written; only
+	// the recursive one never did.
+	edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
+
 	crrset := imr.Cache.Get(qname, qtype)
 	if crrset != nil {
 		// Strict privacy: cached data that arrived over an unencrypted
@@ -2221,6 +2244,7 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 		case dns.OpcodeNotify, dns.OpcodeUpdate:
 			m := new(dns.Msg)
 			m.SetRcode(r, dns.RcodeRefused)
+			edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
 			w.WriteMsg(m)
 			return
 
@@ -2230,6 +2254,23 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 			qname = core.CanonicalizeName(qname)
 			if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
 				DotServerQnameResponse(qname, w, r)
+				return
+			}
+			// Any other CHAOS query is refused rather than resolved.
+			// ImrResponder takes a qname and a qtype and no qclass at all, so
+			// a CHAOS query that reaches it is resolved in class IN and
+			// answered with IN data under a CHAOS question -- which is what
+			// `dig version.bind txt chaos` was being answered with when it
+			// reported a malformed message.
+			//
+			// CHAOS is server-local metadata; there is nothing to recurse for.
+			// The names this server does answer are handled above.
+			if r.Question[0].Qclass == dns.ClassCHAOS {
+				lgImr.Debug("refusing CHAOS query for a name this server does not serve", "qname", qname, "qtype", dns.TypeToString[qtype])
+				m := new(dns.Msg)
+				m.SetRcode(r, dns.RcodeRefused)
+				edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
+				w.WriteMsg(m)
 				return
 			}
 
@@ -2257,6 +2298,7 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 func DotServerQnameResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeRefused)
+	edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
 	qname = core.CanonicalizeName(qname)
 	// if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
 	lgImr.Debug("query for .server CH TLD", "qname", qname)
