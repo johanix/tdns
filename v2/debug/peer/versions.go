@@ -252,6 +252,39 @@ func (h *History) Apply(c Change) (*Version, error) {
 	return &h.versions[len(h.versions)-1], nil
 }
 
+// AppendZone appends a whole state as the next version, deriving the delta
+// from the current one. The counterpart to Apply, which derives the state from
+// an edit: a signing server publishes states, not diffs, so a caller modelling
+// one has a state in hand and no change to describe.
+//
+// The serial comes from z's own SOA and must be newer than the current one --
+// a version that did not advance the serial is not a version anything
+// downstream can fetch.
+func (h *History) AppendZone(z *Zone) (*Version, error) {
+	cur := h.Current()
+	if cur == nil {
+		return nil, fmt.Errorf("history for %s is empty; Seed first", h.Origin)
+	}
+	if z.SOA() == nil {
+		return nil, fmt.Errorf("version for %s has no apex SOA", h.Origin)
+	}
+	if z.Serial() == cur.Serial {
+		return nil, fmt.Errorf("version for %s does not advance the serial past %d", h.Origin, cur.Serial)
+	}
+	next := z.Clone()
+	v := Version{
+		Serial: next.Serial(),
+		Zone:   next,
+		Delta:  Diff(cur.Zone, next),
+		Change: Change{Label: "published"},
+	}
+	h.versions = append(h.versions, v)
+	if len(h.versions) > h.Cap {
+		h.versions = h.versions[len(h.versions)-h.Cap:]
+	}
+	return &h.versions[len(h.versions)-1], nil
+}
+
 // DeltasSince returns the deltas carrying a client at `serial` up to current.
 // ok is false when the serial is unknown or has aged out of the cap, which is
 // the caller's signal to answer AXFR instead. A client already at the current

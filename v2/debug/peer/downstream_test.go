@@ -187,10 +187,10 @@ func TestDownstreamRecoversViaFallback(t *testing.T) {
 	}
 }
 
-// Two NOTIFYs whose probes cannot both describe a distinct later state must be
-// flagged, not merged. This is the honesty requirement in design §5.3: the
-// packet count stays exact and only the attribution is marked uncertain.
-func TestDownstreamFlagsRacedProbes(t *testing.T) {
+// Two NOTIFYs at one serial are the direct evidence of a version announced
+// twice, so they are recorded as such and NOT written off as a race. The
+// packet count stays exact either way -- it is a packet count.
+func TestDownstreamRecordsRepeatedAnnouncements(t *testing.T) {
 	u, d := startPair(t, 8)
 	if _, err := d.Transfer(context.Background()); err != nil {
 		t.Fatalf("baseline: %v", err)
@@ -213,8 +213,8 @@ func TestDownstreamFlagsRacedProbes(t *testing.T) {
 	if len(obs) != 2 {
 		t.Fatalf("got %d NOTIFYs, want 2 — the packet count must stay exact", len(obs))
 	}
-	if !obs[0].Raced {
-		t.Fatal("two NOTIFYs at one serial did not flag the first as raced")
+	if obs[0].Raced || obs[1].Raced {
+		t.Fatal("two NOTIFYs at one serial were written off as a race; that is the evidence, not an excuse")
 	}
 	if obs[0].ProbeSerial != obs[1].ProbeSerial {
 		t.Fatalf("probes disagree (%d vs %d) though only one change was made",

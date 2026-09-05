@@ -1,6 +1,6 @@
 # The notify-semantics rig — one inbound change, how many outbound changes? (relay rig)
 
-**Status:** design agreed; R1–R4 (the `v2/debug/peer` library) implemented 2026-09-05, R5–R6 outstanding. Not on a branch yet — the working tree is on `fix/csync-publisher-484-506`, which is unrelated.
+**Status:** design agreed; R1–R5 implemented 2026-09-05 on `feature/notify-semantics-rig` (off `main` @ `d833c683`). R6 — the `tdns-debug test relay` command and the `tests/notify-semantics/` seeder — outstanding.
 **Base:** `main` @ `d833c683` (read on `fix/csync-publisher-484-506`, which does not touch any
 of this).
 **Scope of the first cut:** the SUT is an **inline-signing secondary that re-serves**. The
@@ -153,43 +153,63 @@ argument.
 
 ## 3. The oracle
 
-The rig needs a definition of correct that a checker can evaluate. These are proposed, not
-established — settling them is half the point of writing this down.
+**Settled, not proposed.** The companion document
+[2026-09-05-signing-publish-notify-correctness.md](2026-09-05-signing-publish-notify-correctness.md)
+§1 fixes the rules (agreed 2026-09-05):
 
-**N1 — one published state per inbound change.** For one upstream change, the SUT publishes
-exactly one new zone state. Downstreams see the serial advance exactly once.
+1. **NOTIFY is sent only as the final step of cutting a new snapshot** — including first
+   load. **Never two NOTIFYs for the same SOA serial.**
+2. **A given version of a zone is signed exactly once.**
+3. **NOTIFY does not belong in the refresh-engine path at all**, other than at the
+   snapshot-cutting end of it.
+4. **`force` is a tool for special circumstances, not for steady state.**
 
-**N2 — one NOTIFY per published state.** Each published state produces exactly one NOTIFY per
-configured downstream target. Not zero (a downstream that missed it waits a full REFRESH), not
-two.
+Rules 3 and 4 are statements about which code calls what, and are not observable from
+outside the server; the in-process tests in that document's §7 are the right instrument for
+them. What this rig measures is their consequences, plus the two content questions that only
+a second implementation on the far side of the wire can ask.
 
-**N3 — never announce a state that is not final.** A NOTIFY implies the announced state is
-servable and correct. For a signing zone that means signed: no NOTIFY may precede the signing
-of the content it announces. (This is the invariant #1 in §2.3 violates.)
+| # | invariant | from |
+|---|---|---|
+| **N1** | one inbound change produces exactly one new published serial | rule 1, first half |
+| **N2** | exactly one NOTIFY per published serial | rule 1, second half |
+| **N3** | every announced state is fully signed | C2's gate, strengthened — see below |
+| **N4** | content equality with upstream, modulo DNSSEC and the SOA serial | (c) |
+| **N5** | the deltas served express exactly the authored change | (c), sharpened |
+| **N6** | the final state is internally consistent (RRSIG coverage, closed NSEC chain) | makes N3's "signed" mean something |
+| **N7** | no version is signed twice | rule 2 |
 
-**N4 — content equality modulo DNSSEC.** With RRSIG, NSEC, NSEC3, NSEC3PARAM, DNSKEY, CDS,
-CDNSKEY and ZONEMD removed, and the apex SOA compared on every field except SERIAL, the zone
-the SUT serves is byte-identical to the zone the upstream serves. This is (c), stated as an
-equality over the whole zone rather than over the change, so that an error which compounds
-across a series is caught at the end of the series.
+**N3 is deliberately stronger than the fix's own gate.** C2 gates NOTIFY on
+`Ready && (unsigned zone || apex SOA has an RRSIG)`, mirroring `ZoneTransferOut`'s admission
+test. That gate does not catch the defect in the companion doc's §2.1, where the apex SOA
+*is* signed while every transferred RRset is not — C1 is what fixes that. So the rig asserts
+the property the fix must actually deliver: an announced state carries an RRSIG on every
+RRset that needs one. It is the live analogue of that document's "every snapshot ever stored
+has RRSIGs on its authored RRsets".
 
-**N5 — the delta expresses the change.** The IXFR the SUT hands a downstream, with DNSSEC
-records removed, contains exactly the RRs the rig added and removed upstream — no more. This
-is (c) stated over the change rather than the zone, and it is the sharper of the two: N4 passes
-if the SUT reaches the right state by AXFR-ing everything, N5 does not.
+**N7 is measurable from outside**, which is not obvious. The rig cannot see a signing pass.
+It can see the fingerprint: two states whose content is identical modulo DNSSEC but whose
+RRSIGs differ can only be the same version signed twice. That is exactly the redundant
+forced re-sign in §2.3 #3, and it is the one defect of the four that leaves evidence a
+downstream can read.
 
-**N6 — the signed state is self-consistent.** Every non-DNSSEC RRset in the served zone has an
-RRSIG by a DNSKEY published in that same zone state, and the NSEC chain is closed (every owner
-in the chain reachable, `next` fields forming one cycle). Cheap for the rig, because it holds
-the whole zone anyway, and it is what makes N3's "servable and correct" mean something.
+### 3.1 Three-valued, because a miss is not a pass
 
-**Where N1 and N2 might reasonably be relaxed:** if the SUT deliberately coalesces — publish
-cadence, `PublishCadence` — then several *upstream* changes may legitimately collapse into one
-published state. That is a violation of neither invariant as stated (they are per-change in one
-direction only: one change may not become many states). The rig's quiescent-round mode (§5.4)
-keeps the two apart by making one change at a time and waiting.
+The rig races the server it measures. A defective intermediate state exists for the duration
+of a signing pass; the downstream peer transfers when it is told to, and may well arrive
+after that state was superseded. **Not observing a violation is not evidence of correctness.**
 
----
+So each invariant returns PASS, FAIL, or INCONCLUSIVE, and a round in which the observations
+cannot decide is reported as a skip with its reason rather than counted as clean. The
+conditions that make a round inconclusive:
+
+- a NOTIFY whose SOA probe is flagged `Raced` (§5.3) — its serial attribution is unsafe, so
+  N2 cannot be decided from it;
+- a transfer the downstream queue could not accept, so a published state went unobserved;
+- fewer states observed than serials advanced — the same thing seen from the other side.
+
+A run whose N3 verdict is INCONCLUSIVE in every round has proved nothing about N3 and says
+so. Raising `--rounds` is the remedy: the defect is a state, not a race, so it reproduces.
 
 ## 4. Where the rig lives, and why
 
@@ -350,24 +370,25 @@ A human reads the table; the checker reads the same fields. There is no third re
 
 ## 6. The verdict
 
-| invariant | how it is decided |
-|---|---|
-| N1 | `distinct_serials == 1` |
-| N2 | `notifies == distinct_serials` |
-| N3 | `unsigned_states == 0` — for each distinct serial the downstream transferred, did the zone at that serial carry a complete RRSIG set? |
-| N4 | canonical compare of upstream version *n* and the SUT's final state, both stripped of DNSSEC types, SOA compared without SERIAL |
-| N5 | the union of the round's IXFR deltas, DNSSEC-stripped, equals the round's change spec |
-| N6 | every non-DNSSEC RRset has an RRSIG by a published DNSKEY; NSEC chain closed |
+| invariant | how it is decided | inconclusive when |
+|---|---|---|
+| N1 | `distinct_serials == 1` | a state went unobserved (dropped transfer) |
+| N2 | `notifies == distinct_serials` — the NOTIFY count is exact, the state count a lower bound, so more announcements than states means one was announced twice however the probes landed | a transfer was dropped, or the SUT's serial went backwards between probes |
+| N3 | every observed announced state is `CheckSigning(...).FullySigned()` | fewer states observed than serials advanced |
+| N4 | `CompareContent(upstream version, downstream final state)` | the round's final transfer failed |
+| N5 | `CompareDelta(change, round's deltas)` | any transfer in the round was an AXFR fallback — a fallback carries no deltas to compare |
+| N6 | `CheckSigning(downstream final state)` | the zone uses NSEC3 or black lies (chain only; coverage still decided) |
+| N7 | no two observed states with equal content and differing RRSIGs | fewer than two states observed |
 
 **Section 0 first, as in `tests/ixfr-interop`.** Before any round runs, the rig proves its own
-comparators discriminate: it compares two deliberately different zones and requires N4 to fail,
-compares a delta against the wrong change spec and requires N5 to fail, and strips one RRSIG
-and requires N6 to fail. A comparator that cannot report a difference makes every PASS below it
-worthless, and this rig's whole value is in its PASSes and counts.
+comparators discriminate: it compares two deliberately different zones and requires N4 to
+fail, compares a delta against the wrong change spec and requires N5 to fail, and strips one
+RRSIG and requires N6 to fail. A comparator that cannot report a difference makes every PASS
+above it worthless, and this rig's whole value is in its PASSes and its counts.
 
-Exit codes follow the framework: `0` clean, `1` violations, `2` setup error.
-
----
+Exit codes follow the framework: `0` clean, `1` violations, `2` setup error. An
+all-inconclusive run exits `0` — it found nothing wrong — but its report says so on the skip
+lines, which is why those are always printed.
 
 ## 7. What the rig assumes of the SUT
 
@@ -444,11 +465,11 @@ Six commits, each separately reviewable and revertable. **R1–R4 are implemente
 | R2 | upstream peer: SOA/AXFR/IXFR server + NOTIFY sender | `peer/upstream.go`, `peer/ixfr.go`, `peer/listen.go` | **done** | 499 / 414 |
 | R3 | downstream peer: NOTIFY listener + SOA probe + transfer client | `peer/downstream.go` | **done** | 364 / 255 |
 | R4 | DNSSEC checks: strip, RRSIG coverage, NSEC chain closure | `peer/dnssec.go` | **done** | 316 / 242 |
-| R5 | the `relay` family: rounds, quiescence, correlation, verdict, Section 0 | `v2/debug/relay.go` | todo | ~380 / ~260 |
+| R5 | the `relay` family: rounds, quiescence, correlation, verdict, Section 0 | `v2/debug/relay.go`, `v2/debug/relay_section0.go` | **done** | 801 / 439 |
 | R6 | `tdns-debug test relay` command + `tests/notify-semantics/` seeder | `cmdv2/debug/cmds.go`, `tests/notify-semantics/*` | todo | ~120 / — |
 
-**Landed so far: 1735 production lines, 1389 test lines** in `v2/debug/peer`. 41 tests,
-`go vet` and `staticcheck` clean, race-clean.
+**Landed so far: ~2570 production lines, ~1830 test lines.** `go vet` and `staticcheck` clean,
+race-clean, stable across repeat runs.
 
 The unit tests matter more than usual here: a rig whose comparators are wrong reports
 confident nonsense, so every comparator in R1–R4 lands with a test that proves it **fails**
@@ -482,6 +503,28 @@ SUT rather than to the instrument.
 - **The downstream peer transfers once per NOTIFY** rather than coalescing as a real secondary
   would. Coalescing is correct behaviour and wrong instrumentation: an intermediate published
   state that no transfer observed is a state the rig cannot report on.
+- **`NewRelayPeers` is split from `RunRelay`.** The caller builds and starts the peers, then
+  hands them in. That is what lets the family be tested against a controlled stand-in for the
+  SUT on ephemeral ports, with no port guessed in advance — see §9.3.
+- **`Report` gained a `Detail any` field.** One JSON document per run beats a report plus a
+  second file the reader has to correlate by hand. The churn family is unaffected.
+- **`Raced` marks a backwards serial only.** Two NOTIFYs probing the SAME serial is ambiguous
+  on its own — one version announced twice, or a probe that overshot to the next — and the
+  count of states the downstream actually transferred settles it. Treating it as a race would
+  have turned the evidence into an excuse for saying nothing, which is how N2 first came out
+  inconclusive on a case it should fail.
+
+### 9.2 A trap worth recording
+
+An NSEC type bitmap must be in ascending numeric type order. A bitmap listed alphabetically
+**parses** without complaint and then fails to **pack**: `dns.Transfer.Out` returns an error,
+the server writes nothing, and the client sees only a read timeout with no indication of what
+was wrong. It cost an afternoon in the R5 fixtures.
+
+Two consequences, both kept: the fixture sorts by type code with a comment saying why, and
+the upstream peer now records the error from `Transfer.Out` on the transfer observation
+(`XferObs.Err`) instead of discarding it. A transfer that put nothing on the wire must not
+read as one that succeeded.
 
 ### 9.2 What R4 does and does not check
 
@@ -493,10 +536,33 @@ implementations tdns-debug deliberately does not link. This is enough for N3, be
 failure being hunted (a state announced before it was signed) is a presence failure. NSEC3 and
 black-lies zones report the chain check as SKIPPED, never as a pass.
 
-**Verification of the whole thing, once R5 lands:** run it against `main`, expect §2.3's
-four-and-three. Then plant a deliberate regression — comment out the `resignq <- zd` handoff in
-`SetupZoneSigning` — and confirm the count drops to three-and-two. A rig that cannot see a
-change it was built to see is not yet finished.
+### 9.3 Verification — the rig is held to both answers
+
+The plan said to verify against a running `main` and then plant a regression. R5 does that in
+CI instead, and more sharply, by running the family against a **controlled stand-in for the
+SUT** with two behaviours (`relay_test.go`):
+
+- `publishCorrectly` — one version, signed, one NOTIFY, as the settled rules require.
+- `publishAsTdnsDoesToday` — the §2.3 chain: an unsigned state announced first, then a signed
+  one, then the same content re-signed, then a fourth NOTIFY for a serial already announced.
+  The pauses between them stand in for a signing pass.
+
+Observed:
+
+```
+round change                       notifies  serials  states  verdicts
+1     add +[r001.relay.test. 3600…        1        1       1  N1:ok N2:ok N3:ok N4:ok N5:ok N6:ok N7:?
+1     add +[r001.relay.test. 3600…        4        3       3  N1:FAIL N2:FAIL N3:FAIL N4:ok N5:ok N6:ok N7:FAIL
+```
+
+Four NOTIFYs and three serials for one inbound change, exactly as §2.3 derives. **N4 and N5
+pass in both rows**, and that is the finding: the content is carried correctly either way, so
+nothing short of counting can tell the two servers apart. N7 is inconclusive on the correct
+server because one observed state gives no pair to compare — the honest answer, and claiming
+a pass there would be the bug.
+
+Still to do against a real daemon (R6): run it at a live `tdns-auth` and confirm the same
+numbers come back.
 
 ---
 

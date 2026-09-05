@@ -27,9 +27,15 @@ type NotifyObs struct {
 	ProbeAt     time.Time
 	ProbeSerial uint32
 	ProbeErr    string
-	// Raced is set when a LATER NOTIFY's probe came back with a serial no
-	// higher than this one's — the two probes cannot both be describing the
-	// state their own NOTIFY announced.
+	// Raced is set when a LATER NOTIFY's probe came back with a serial STRICTLY
+	// LOWER than this one's: the serial went backwards between two probes, so
+	// neither can be trusted to describe the state its own NOTIFY announced.
+	//
+	// Two NOTIFYs probing the SAME serial is deliberately NOT flagged. It is
+	// ambiguous on its own -- either one version announced twice, or a probe
+	// that overshot and saw the next version -- and the count of states the
+	// peer actually transferred settles it. Flagging it here would turn the
+	// evidence into an excuse for saying nothing.
 	Raced bool
 }
 
@@ -43,7 +49,13 @@ type DownstreamXfer struct {
 	Serial        uint32
 	Deltas        []Delta
 	Zone          *Zone // whole-zone answers only; Zone() holds the running state
-	Err           string
+	// State is the zone as this peer held it AFTER applying the transfer: the
+	// content the SUT was serving at Serial. Kept per transfer, not only as
+	// the running state, because N3 and N7 are about the SEQUENCE of published
+	// states -- an intermediate one that is only ever overwritten is exactly
+	// the state worth reporting on.
+	State *Zone
+	Err   string
 }
 
 // Downstream is the rig's own secondary: it accepts the SUT's NOTIFYs, probes
@@ -184,11 +196,9 @@ func (d *Downstream) handle(w dns.ResponseWriter, r *dns.Msg) {
 	if err != nil {
 		obs.ProbeErr = err.Error()
 	}
-	// A probe that came back no higher than an earlier one cannot be
-	// describing a distinct later state; flag the earlier one rather than
-	// silently merging them.
+	// A serial that went BACKWARDS between two probes makes both unusable.
 	for i := range d.notifies {
-		if d.notifies[i].ProbeErr == "" && err == nil && d.notifies[i].ProbeSerial >= serial {
+		if d.notifies[i].ProbeErr == "" && err == nil && d.notifies[i].ProbeSerial > serial {
 			d.notifies[i].Raced = true
 		}
 	}
@@ -320,6 +330,9 @@ func (d *Downstream) transfer(ctx context.Context, triggeredBy int) (DownstreamX
 		d.serial = res.Serial
 	case KindUpToDate:
 		// Nothing changed; keep what we hold.
+	}
+	if d.zone != nil {
+		x.State = d.zone.Clone()
 	}
 	d.mu.Unlock()
 

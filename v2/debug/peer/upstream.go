@@ -29,6 +29,10 @@ type XferObs struct {
 	Outcome      string // axfr | ixfr | uptodate | fallback | refused
 	Sequences    int    // difference sequences in an IXFR answer
 	CurSerial    uint32
+	// Err is set when the response could not be written. A transfer that
+	// produced nothing on the wire must not read as a transfer that succeeded:
+	// the client sees only a timeout, and the reason lives here.
+	Err string
 }
 
 // NotifySendObs is one NOTIFY the upstream peer sent to the SUT.
@@ -40,16 +44,30 @@ type NotifySendObs struct {
 	Err    string
 }
 
+// NotifyRecvObs is a NOTIFY somebody sent TO this peer. A primary should never
+// receive one; answering it as though the question were an ordinary SOA query
+// would let a SUT that misdirects its NOTIFYs at its own primary look entirely
+// healthy, so they are recorded instead.
+type NotifyRecvObs struct {
+	At   time.Time
+	From string
+}
+
 // Upstream is the rig's own primary: authoritative for the test zone, holding
 // the version history the rig authored, answering SOA/AXFR/IXFR, and sending
 // NOTIFY to the SUT on demand.
 type Upstream struct {
 	Origin string
 
+	// OnNotify, when set, is called (on its own goroutine) for each inbound
+	// NOTIFY for this peer's zone, before the reply is written.
+	OnNotify func(from string)
+
 	mu       sync.Mutex
 	hist     *History
 	xfrs     []XferObs
 	notifies []NotifySendObs
+	inbound  []NotifyRecvObs
 
 	addr   string
 	udp    *dns.Server
@@ -120,6 +138,22 @@ func (u *Upstream) NotifiesSent() []NotifySendObs {
 	return append([]NotifySendObs(nil), u.notifies...)
 }
 
+// NotifiesReceived returns the NOTIFYs sent to this peer. Non-empty means a
+// NOTIFY went to a primary.
+func (u *Upstream) NotifiesReceived() []NotifyRecvObs {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]NotifyRecvObs(nil), u.inbound...)
+}
+
+// Publish installs a whole new version, deriving the delta from the current
+// one. Apply is for an edit; this is for a state already in hand.
+func (u *Upstream) Publish(z *Zone) (*Version, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.hist.AppendZone(z)
+}
+
 // Notify sends one NOTIFY(SOA) to the SUT and records the response. The
 // message carries no SOA in the answer section — that is what miekg's
 // SetNotify builds and what tdns itself sends, and the rig deliberately
@@ -161,6 +195,20 @@ func (u *Upstream) handle(w dns.ResponseWriter, r *dns.Msg) {
 	q := r.Question[0]
 	if !equalName(q.Name, u.Origin) {
 		u.refuse(w, r, dns.RcodeRefused)
+		return
+	}
+	if r.Opcode == dns.OpcodeNotify {
+		u.mu.Lock()
+		u.inbound = append(u.inbound, NotifyRecvObs{At: time.Now(), From: w.RemoteAddr().String()})
+		hook := u.OnNotify
+		u.mu.Unlock()
+		if hook != nil {
+			go hook(w.RemoteAddr().String())
+		}
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Authoritative = true
+		_ = w.WriteMsg(m)
 		return
 	}
 	switch q.Qtype {
@@ -305,7 +353,13 @@ func (u *Upstream) writeTransfer(w dns.ResponseWriter, r *dns.Msg, rrs []dns.RR)
 	}
 	close(ch)
 	tr := new(dns.Transfer)
-	_ = tr.Out(w, r, ch)
+	if err := tr.Out(w, r, ch); err != nil {
+		u.mu.Lock()
+		if n := len(u.xfrs); n > 0 {
+			u.xfrs[n-1].Err = err.Error()
+		}
+		u.mu.Unlock()
+	}
 }
 
 // clientSerialFromIXFR reads the serial the client says it holds, from the SOA
