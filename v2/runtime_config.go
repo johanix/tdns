@@ -29,6 +29,8 @@ type RuntimeConfig struct {
 	// returned them; readers keep their existing gate/clamp logic.
 	MaxRefresh       int  // service.maxrefresh
 	MinRefresh       int  // service.minrefresh
+	ProbeTimeout     int  // service.probetimeout (seconds)
+	TransferTimeout  int  // service.transfertimeout (seconds)
 	ResignerInterval int  // resignerengine.interval
 	PeriodicResign   bool // service.resign
 	ServiceDebug     bool // service.debug
@@ -63,6 +65,8 @@ func (conf *Config) buildRuntimeConfig() *RuntimeConfig {
 		MultiSigner:      ms,
 		MaxRefresh:       viper.GetInt("service.maxrefresh"),
 		MinRefresh:       viper.GetInt("service.minrefresh"),
+		ProbeTimeout:     viper.GetInt("service.probetimeout"),
+		TransferTimeout:  viper.GetInt("service.transfertimeout"),
 		ResignerInterval: viper.GetInt("resignerengine.interval"),
 		PeriodicResign:   viper.GetBool("service.resign"),
 		ServiceDebug:     viper.GetBool("service.debug"),

@@ -201,6 +201,39 @@ func firstUpstreamAddr(upstreams []PeerConf) string {
 	return upstreams[0].Addr
 }
 
+// Compile-time bounds for the two refresh deadlines, applied when
+// service.probetimeout / service.transfertimeout are not configured.
+//
+// They are far apart, and the distance is the point (#502). The two bound
+// different populations: a primary that is unreachable dies in the SOA probe
+// and NEVER reaches a transfer, while a transfer only starts once a primary has
+// just answered. So a single generous bound would make every dead upstream cost
+// the budget that exists for a legitimate slow AXFR of a large zone -- which,
+// at first load, is spent on the refresh engine's own goroutine with every
+// other zone waiting behind it. That was the 2026-09-04 outage.
+const (
+	defaultProbeTimeout    = 5 * time.Second
+	defaultTransferTimeout = 300 * time.Second
+)
+
+// probeTimeout bounds ONE SOA probe against ONE upstream. Signed-int read with
+// a positive gate, as the refresh clamps do: a negative value in the config
+// falls back to the default rather than wrapping.
+func probeTimeout() time.Duration {
+	if cfg := ConfLive().ProbeTimeout; cfg > 0 {
+		return time.Duration(cfg) * time.Second
+	}
+	return defaultProbeTimeout
+}
+
+// transferTimeout bounds ONE inbound zone transfer from ONE upstream.
+func transferTimeout() time.Duration {
+	if cfg := ConfLive().TransferTimeout; cfg > 0 {
+		return time.Duration(cfg) * time.Second
+	}
+	return defaultTransferTimeout
+}
+
 // Return shouldTransfer, new upstream serial, error
 //
 // The SOA probe iterates zd.Upstreams, advancing to the next address whenever
@@ -268,6 +301,13 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 			lg.Debug("DoTransfer: no port specified for upstream, using transport default", "zone", zd.ZoneName, "upstream", p.upstream)
 		}
 		p.client = new(dns.Client)
+		// miekg tightens the socket deadlines to the EARLIER of the client's own
+		// Timeout and the context's, and with Timeout unset that is its 2s
+		// default -- so a configured probe budget LARGER than 2s would be
+		// silently inert, and service.probetimeout would look like it did
+		// nothing. Set it here; the per-attempt context in phase 2 still bounds
+		// the dial and is what carries cancellation.
+		p.client.Timeout = probeTimeout()
 		// XoT peer: probe the SOA over the same verified-TLS channel the
 		// transfer itself will use (same pin/dane/pkix gate).
 		if tlsCfg, terr := conf.ClientTLSConfigForPeer(up); terr != nil {
@@ -295,13 +335,17 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 	// Phase 2 -- network only. Nothing here reads shared config.
 	sawResponse := false
 	var lastErr error
+	// The addresses actually probed. An operator reading the zone's
+	// RefreshError needs to know WHICH primaries were tried, not just how
+	// many (#502).
+	var tried []string
 	for i := range plans {
 		p := &plans[i]
 		up, upstream := p.up, p.upstream
 
 		if p.err != nil {
 			lg.Error("DoTransfer: peer config setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", p.err)
-			lastErr = p.err
+			lastErr = fmt.Errorf("%s: %w", upstream, p.err)
 			continue
 		}
 		// Nobody is waiting for this result any more; stop walking upstreams.
@@ -338,17 +382,40 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 			lg.Warn("DoTransfer: no configured transfer-src matches this upstream's family; probing unbound",
 				"zone", zd.ZoneName, "upstream", upstream, "configured", probeSrcs, "from", probeSrcTier)
 		}
-		r, _, err := c.ExchangeContext(ctx, m, upstream)
+		// Bound THIS attempt, not the walk. miekg's default is 2s per exchange,
+		// which is tight for a slow-but-alive primary; this makes the budget
+		// explicit and configurable without letting it grow into the transfer
+		// budget. See the note on defaultProbeTimeout.
+		probeCtx, cancelProbe := context.WithTimeout(ctx, probeTimeout())
+		// exchangeCancellable, not ExchangeContext: the latter hands the context
+		// to the dial and then only tightens the socket deadlines with it -- it
+		// never watches ctx.Done() -- so a read already in flight runs to the
+		// probe budget no matter what the caller does. That was tolerable while
+		// the budget was miekg's 2s default; making it configurable (and 5s by
+		// default, so a slow-but-alive primary is not cut off) would otherwise
+		// have made every shutdown wait out an in-flight probe. This closes the
+		// connection on cancellation instead, and it honours c.Dialer, so the
+		// transfer-src binding below and the XoT client survive it (#409).
+		r, _, err := exchangeCancellable(probeCtx, c, m, upstream)
+		cancelProbe()
+		tried = append(tried, upstream)
 		if err != nil {
 			// A cancelled exchange is not a sick primary: every sibling would
-			// fail the same way. Return it as cancellation rather than letting
-			// the loop treat it as "try the next one".
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, err)
+			// fail the same way. Ask the PARENT context rather than the error --
+			// the per-attempt deadline above also surfaces as DeadlineExceeded,
+			// and THAT one means "this upstream did not answer in time, try the
+			// next", which is the whole point of bounding the attempt instead of
+			// the walk. Testing errors.Is(err, DeadlineExceeded) here would
+			// abandon every remaining sibling the moment one primary went quiet.
+			if cerr := ctx.Err(); cerr != nil {
+				return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
 			}
 			// Transport failure (or a TSIG response-verify failure) — try the next sibling.
 			lg.Warn("DoTransfer: SOA probe failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", err)
-			lastErr = err
+			// Wrapped with the address: this error becomes the zone's
+			// RefreshError, and "i/o timeout" on its own tells an operator
+			// nothing about WHICH primary is unreachable (#502).
+			lastErr = fmt.Errorf("%s: %w", upstream, err)
 			continue
 		}
 		sawResponse = true
@@ -397,8 +464,10 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		return false, 0, nil
 	}
 	// No primary was even reachable.
-	lg.Error("DoTransfer: SOA probe failed on all upstreams (unreachable)", "zone", zd.ZoneName, "count", len(zd.Upstreams), "err", lastErr)
-	return false, 0, fmt.Errorf("SOA probe of %s failed: all %d upstream(s) unreachable: %w", zd.ZoneName, len(zd.Upstreams), lastErr)
+	lg.Error("DoTransfer: SOA probe failed on all upstreams (unreachable)", "zone", zd.ZoneName,
+		"count", len(zd.Upstreams), "upstreams", strings.Join(tried, ", "), "err", lastErr)
+	return false, 0, fmt.Errorf("SOA probe of %s failed: no response from any of %d upstream(s) [%s]: %w",
+		zd.ZoneName, len(zd.Upstreams), strings.Join(tried, ", "), lastErr)
 }
 
 // newTransferScratchZone builds the throwaway ZoneData an inbound AXFR is
@@ -926,7 +995,21 @@ func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force
 		}
 		upstream := up.Addr
 		new_zd = newTransferScratchZone(zd)
-		upToDate, err := zd.transferFromUpstream(ctx, up, &new_zd, useIxfr, conf)
+		// Bound THIS transfer. Separate from the probe budget and much larger:
+		// reaching here means this primary answered the SOA probe, so what is
+		// bounded is a slow or dribbling transfer, not an unreachable host.
+		// miekg's Transfer bounds each ENVELOPE read, not the stream, so without
+		// this a primary sending one envelope every 1.9s transfers forever.
+		//
+		// Per attempt rather than per walk, so a large zone still gets its full
+		// budget from a sibling after the first primary stalls mid-stream. The
+		// walk-level cost is therefore transfertimeout x upstreams -- paid by a
+		// pool worker once the worker pool lands, and on the engine goroutine
+		// only during first load, where the probe bound has already excluded the
+		// unreachable hosts that made this urgent.
+		xfrCtx, cancelXfr := context.WithTimeout(ctx, transferTimeout())
+		upToDate, err := zd.transferFromUpstream(xfrCtx, up, &new_zd, useIxfr, conf)
+		cancelXfr()
 		if err != nil {
 			lg.Warn("FetchFromUpstream: transfer from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
