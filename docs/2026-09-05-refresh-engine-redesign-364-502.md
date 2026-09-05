@@ -1,7 +1,8 @@
 # Refresh engine redesign — bounded concurrency and per-refresh deadlines (#364, #502)
 
-**Status:** **frozen — implement from here.** **S0–S3 are implemented**, with the companion's C1–C5
-landed between S0 and S1. S4 and S5 remain (§4).
+**Status:** **frozen — implement from here.** **S0–S5 are implemented**, with the companion's C1–C5
+landed between S0 and S1. Both documents are fully implemented; what remains is the lab
+verification in §9.
 Convergence assessed 2026-09-05 (`reviews/2026-09-05-tdns-signing-and-refresh-convergence.md`):
 no disagreement between the two documents. Re-open only to change a decision in §5 or the
 order in the companion's §6.
@@ -574,8 +575,8 @@ with the signing and NOTIFY tails still in it will write code that C3 and C5 the
 | S1 | `refresh: one post-refresh body` ✅ **implemented** | Extract `runZoneRefresh` (§3.2) from the two drifted copies, including the `RefreshError`-clearing fix (§1.3 row 1) and the `Wait` response. §1.3 is the review checklist. | ~245 |
 | S2 | `refresh: retry a failed refresh on SOA RETRY` ✅ **implemented** | §3.6 — `FindSoaRetry` with the primary case, `RefreshCounter.SOARetry`, the adopted-copy fill, the failure path. | ~90 |
 | S3 | `refresh: bounded worker pool` ✅ **implemented** | §3.3 + §3.4 + §3.5 + §3.8: pool, transfer gate, `inflight`, `Wait` answers, drain protocol, dispatch-time `gen`. Fixes #502 properly. | ~275 |
-| S4 | `refresh: jitter the first counter` | §3.10. | ~30 |
-| S5 | `refresh: walk the counters without copying them` | `Items()` → `IterCb`. | ~10 |
+| S4 | `refresh: jitter the first counter` ✅ **implemented** | §3.10. | ~30 |
+| S5 | `refresh: walk the counters without copying them` ✅ **implemented** | `Items()` → `IterCb`, plus deferred orphan removal — see §3.11. | ~25 |
 
 `initialLoadZone` needed no wiring of its own: with both bounds inside `DoTransfer` and
 `FetchFromUpstream`, every caller inherits them, and the address now travels in the error
@@ -713,6 +714,13 @@ test figures are the softest number and should be read as a floor.
   non-question at scale, and the natural follow-up.
 - **The due-time heap / timing wheel** (#364 stage 2 proper). 11.55 ms/s at 100k zones is
   irrelevant at lab scale; S5 takes the cheap half.
+
+**S5 was not the one-liner this document called it.** `IterCb` holds each shard's read lock
+while the callback runs, and the ticker removes the counters of zones that no longer exist —
+`Remove` takes the same shard's write lock, so removing from inside the walk deadlocks the
+engine on the first orphaned counter. Orphans are collected during the walk and removed after
+it. The `continue`s in the loop body become `return`s, which is the other thing a mechanical
+`Items()` → `IterCb` substitution gets wrong.
 - **Moving first load into the pool** (§3.11) — which would let §3.1 drop its exception.
 - **Coalescing dynamic-config rewrites** (R8).
 - **Parallelising the Notifier** (`v2/notifier.go:45`). It is a single goroutine whose

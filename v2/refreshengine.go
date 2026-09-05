@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
+	"sync"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -158,7 +160,14 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		Name:       zone,
 		SOARefresh: refresh,
 		SOARetry:   retry,
-		CurRefresh: refresh,
+		// Jittered, once, here. Zones that share a SOA REFRESH -- the normal
+		// case for template-provisioned zones -- otherwise all come due on the
+		// same tick forever, and every refresh cycle arrives as a herd.
+		//
+		// At load and not at every reset: re-jittering each cycle makes the
+		// effective interval drift and bug reports irreproducible. After a
+		// successful refresh the counter goes back to the zone's real interval.
+		CurRefresh: jitteredFirstRefresh(refresh),
 	})
 
 	// Check if this is a catalog zone and parse it
@@ -1044,9 +1053,16 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			}
 
 		case <-ticker.C:
-			// log.Printf("RefEng: ticker. refCounters: %v", refreshCounters)
-			for zone, rc := range refreshCounters.Items() {
-				// log.Printf("RefEng: ticker for %s: curref: %d", zone, v.CurRefresh)
+			// IterCb rather than Items(): Items() copies the whole map every
+			// second, and at any real zone count that is a copy per tick for
+			// the sake of a handful of due zones.
+			//
+			// It holds each shard's read lock while the callback runs, so a
+			// counter that has to GO is collected here and removed after the
+			// walk -- Remove takes the same shard's write lock, and calling it
+			// from inside would deadlock the engine on the first orphan.
+			var orphaned []string
+			refreshCounters.IterCb(func(zone string, rc *RefreshCounter) {
 				rc.CurRefresh--
 				if rc.CurRefresh <= 0 {
 					lgEngine.Debug("refreshing zone due to refresh counter", "zone", zone)
@@ -1057,12 +1073,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// after its counter was created. Drop the orphaned counter
 						// so we never dereference a missing entry on the next tick.
 						lgEngine.Debug("ticker: zone gone, dropping stale refresh counter", "zone", zone)
-						refreshCounters.Remove(zone)
-						continue
+						orphaned = append(orphaned, zone)
+						return
 					}
 					if zd.HasServiceImpactingError() {
 						lgEngine.Warn("zone in error state, not refreshing", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
-						continue
+						return
 					}
 
 					// If zone never completed initial load, retry via initialLoadZone
@@ -1081,11 +1097,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 								zd.LatestError = time.Now()
 								rc.CurRefresh = 30 // retry sooner
-								continue
+								return
 							}
 						}
 						rc.CurRefresh = rc.SOARefresh
-						continue
+						return
 					}
 
 					// Data loaded + Ready, but first-load policy sync/drain did
@@ -1097,10 +1113,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 							zd.LatestError = time.Now()
 							rc.CurRefresh = 30
-							continue
+							return
 						}
 						rc.CurRefresh = rc.SOARefresh
-						continue
+						return
 					}
 
 					// Dispatched, not run: this goroutine has three other
@@ -1115,6 +1131,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						gen:  zd.generation.Load(),
 					})
 				}
+			})
+			for _, zone := range orphaned {
+				refreshCounters.Remove(zone)
 			}
 
 		case out := <-pool.Done():
@@ -1177,6 +1196,32 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			}
 		}
 	}
+}
+
+// refreshJitter is the engine's source of scheduling jitter, replaceable so the
+// jitter test is deterministic rather than flaky. Guarded because rand.Rand is
+// not safe for concurrent use, and cheap enough not to care.
+var (
+	refreshJitterMu sync.Mutex
+	refreshJitter   = rand.New(rand.NewSource(time.Now().UnixNano()))
+)
+
+// jitteredFirstRefresh spreads a zone's FIRST refresh over [1, refresh].
+//
+// Only the first: this is what stops zones that share a SOA REFRESH coming due
+// together, and applying it on every reset instead would make each zone's
+// effective interval drift downward and make timing bugs irreproducible.
+//
+// Never applied to a zone that has not loaded yet. Those retry on a short
+// fallback because they are waiting for a first successful transfer, and pushing
+// one out by up to a full refresh interval is the opposite of what it needs.
+func jitteredFirstRefresh(refresh uint32) uint32 {
+	if refresh <= 1 {
+		return refresh
+	}
+	refreshJitterMu.Lock()
+	defer refreshJitterMu.Unlock()
+	return 1 + uint32(refreshJitter.Int63n(int64(refresh)))
 }
 
 // refreshCounterRetry is a counter's retry interval, falling back to its refresh
