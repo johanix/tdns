@@ -1,6 +1,10 @@
 # Signing, publishing and NOTIFY — one version, one signing pass, one NOTIFY
 
-**Status:** design, settled. Implement from §3; the punch list against the parked branch is §9.
+**Status:** **frozen — implement from here.** §3 is the specification, §9 is the patch list
+against the parked branch. Convergence assessed 2026-09-05
+(`reviews/2026-09-05-tdns-signing-and-refresh-convergence.md`): the shape has not moved since
+review 1, and further review of the shape is how churn continues. Re-open this only if the
+punch list cannot be applied as written, or to change a rule in §1 or the order in §6.
 **Base:** `main` @ `d833c683`, re-verified against `2a211c4a`. `v2/` tree only.
 **Reviews:** `reviews/2026-09-05-tdns-signing-publish-notify-correctness-{review,rereview,rereview-2}.md`
 — all three *approve with should-fix*; every finding is folded into §3. §0 records what each
@@ -30,6 +34,11 @@ recovers it once C5 removes `SetupZoneSigning`. Nothing flips `Ready` after the 
 publish, so gating the existing flips would leave a correctly signed zone permanently
 invisible; `publishWorkingSetLocked` becomes the writer. The owner filter belongs in
 `signWorkingSetLocked`'s signature from the start.
+
+**Convergence assessment.** No change of shape; one leftover of the same root cause found in
+the tree and added as §9 item 9 — the SOA re-sign, the NSEC restitch and the ZONEMD gate carry
+the same retired `DnssecPolicy == nil` test that C1 stopped using. Both documents marked
+frozen.
 
 **Review 3.** The `Ready` flip cannot reuse the NOTIFY predicate, which tests `Ready` first
 and is therefore circular — every zone would stay not Ready, silently. Split into a content
@@ -324,6 +333,12 @@ case err != nil:
 there is nothing to match on. Add the sentinel and wrap it there. Without it, a KeyDB failure
 on first load is mistaken for a deferred policy bind and published unsigned.
 
+**Do not add "and the zone has an NSEC chain" as a third `Ready` predicate.** It looks like
+the belt-and-braces answer to the paragraph above and it deadlocks a restart: the policy
+sync's Branch 1 rebinds without re-signing, so nothing would ever build the chain the gate is
+waiting for, and the zone would stay not Ready forever. Resolve the keys once and let the
+restitch run; that is what produces the chain.
+
 Option B — mint or bind keys before the first refresh publish so C1 can sign it — is rejected
 rather than left open: it reopens the PR-2 "no bind before Ready" decision, which exists so a
 restart cannot hide applied≠intent.
@@ -349,8 +364,36 @@ would ever be flipped and nothing would ever serve. Silent, and total.
 | may this snapshot become `Ready`? | **content half only** — `!signsItsOwnContent()`, or the apex SOA carries an RRSIG |
 | may we NOTIFY about it? | `Ready` **and** the content half, evaluated *after* the flip |
 
-`publishWorkingSetLocked` therefore runs: store the snapshot → set `Ready` if the content half
-holds → notify (§3.4). A first-ever unsigned load stays not Ready and silent; a policy apply,
+**One key resolution per publish, consumed by every step that needs it.** The nil-policy
+predicate is not only C1's: `resignWorkingSetSOAIfSigned` (`zone_mutation.go:249`),
+`zoneMaintainsItsOwnChain` (`nsec_restitch.go:78`) and `zonemdSignableLocked`
+(`zonemd_publish.go:109`) each test `zd.DnssecPolicy == nil` independently, and each therefore
+skips on a restart for the same wrong reason. Left alone, a restart of an inline-signing
+secondary would sign its authored data (C1 resolves keys), flip `Ready` because the apex SOA
+now has an RRSIG, and serve **with no denial chain at all**, because the restitch skipped.
+Signed positive answers, absent negative ones — the C1 defect again, at process start.
+
+Applying "resolve keys, don't inspect the pointer" to each of them separately is the wrong
+shape, and `zonemdSignableLocked`'s own comment says why: *"EnsureActiveDnssecKeys is not a
+predicate — it mints a zone's first keys as a side effect"*, and that gate runs before the
+restitch, where its answer decides whether the apex NSEC bitmap lists ZONEMD.
+
+So `publishWorkingSetLocked` resolves once, at the top, and hands the result down:
+
+```
+  resolve dak + clamp once (§3.3), or ErrDnssecPolicyNotBound -> skip all four
+  resignWorkingSetSOAIfSigned(dak, clamp)
+  sign the staged scope     (dak, clamp)
+  ensureZonemdPresenceLocked(signable = dak != nil)
+  restitchNsecLocked        (dak, clamp)
+  updateZonemdLocked        (dak, clamp)
+```
+
+One resolution, one predicate, no side effect in a predicate position, and no way for the four
+steps to disagree about whether this publish can sign.
+
+`publishWorkingSetLocked` therefore runs: resolve → the four signing steps → persist and
+chain → store the snapshot → set `Ready` if the content half holds → notify (§3.4). A first-ever unsigned load stays not Ready and silent; a policy apply,
 and a restart with keys, flip and notify in the same publish.
 
 ### 3.4 C2 — NOTIFY only about a version a downstream can take
@@ -624,7 +667,7 @@ here rather than tidied away. Their settled mechanics match §3 and should be ke
 `EnsureActiveDnssecKeys(..., true)` under the lock, `GenerateNsecChainWithDak` left in
 `SignZone`, and the NOTIFY request built under the lock.
 
-Eight things must change before that branch un-parks:
+Nine things must change before that branch un-parks:
 
 | # | change | § |
 |---|---|---|
@@ -636,6 +679,7 @@ Eight things must change before that branch un-parks:
 | 6 | `InstallInitialSnapshot` notifies only when that call flipped `Ready` | §3.4 |
 | 7 | add `ErrDnssecPolicyNotBound` at `sign.go:521` and wrap it there | §3.3 |
 | 8 | restore `refuseUnrepairableChainLocked`'s doc comment, which the C1 patch inserted new functions in front of | — |
+| 9 | resolve the signing material **once** in `publishWorkingSetLocked` and pass it to the SOA re-sign, the C1 pass, the ZONEMD gate and the restitch, replacing the three independent `DnssecPolicy == nil` tests | §3.3 — without it a restart serves signed answers with no denial chain |
 
 Two landed tests invert with them: `TestPublishRefusesAReplacementItCannotSign` asserts the
 warning and asserts the zone is *not* service-impacting (both flip with item 2), and

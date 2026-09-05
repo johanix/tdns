@@ -1,7 +1,10 @@
 # Refresh engine redesign — bounded concurrency and per-refresh deadlines (#364, #502)
 
-**Status:** design, settled. **S0 is implemented** on `fix/refresh-probe-deadline-502`;
-S1–S5 are pending and land after the companion's C1–C5 (§4).
+**Status:** **frozen — implement from here.** **S0 is implemented** on
+`fix/refresh-probe-deadline-502`; S1–S5 are pending and land after the companion's C1–C5 (§4).
+Convergence assessed 2026-09-05 (`reviews/2026-09-05-tdns-signing-and-refresh-convergence.md`):
+no disagreement between the two documents. Re-open only to change a decision in §5 or the
+order in the companion's §6.
 Reviewed 2026-09-05 — `reviews/2026-09-05-tdns-refresh-engine-redesign-364-502-review.md`
 (*approve with should-fix*) and `…-rereview.md` (**approve**). S1–S8 and C1–C6 of the first
 review and N1–N4 of the re-review are folded in below; the resolution of S3 differs from its
