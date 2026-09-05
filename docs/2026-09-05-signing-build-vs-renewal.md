@@ -1,6 +1,9 @@
 # Splitting `SignZone`: building a signed zone is not the same job as renewing its signatures
 
-**Status:** design, for review. Nothing implemented.
+**Status:** design, reviewed twice, implementable from here. Nothing implemented yet.
+Review 1 (`reviews/…-build-vs-renewal-review.md`) and review 2 (`…-rereview.md`) are folded in:
+the clone rule and the walk table came from the first, the locked recipe and the restitch
+correction from the second.
 **Base:** `main` @ `b4825f50`. `v2/` tree only.
 **Prompted by:** a field report on 2026-09-05 — every signed zone re-signed and republished
 once a minute with no content change: 8 serial bumps in 7½ minutes, 869 NOTIFY lines,
@@ -69,7 +72,7 @@ off, so for most deployments this pass never ran.
 
 ## 2. Why they are one problem
 
-`SignZone` has four callers and only one of them wants what the periodic pass gets:
+`SignZone` has five callers and only one of them wants what the periodic pass gets:
 
 | caller | force | what it needs |
 |---|---|---|
@@ -79,9 +82,11 @@ off, so for most deployments this pass never ran.
 | `resigner.go:65` — `resignNow`, after a key-state change | true | replace, on the key-state path |
 | `resigner.go:108` — the ticker | false | **renew ageing signatures** |
 
-Four are *build* or *replace* calls. They genuinely need a chain constructed and a DNSKEY RRset
-assembled, because they run when there may not be a correct one. The fourth is maintenance on
-a zone that is already correct, and it inherits all of the build behaviour.
+The first four are *build* or *replace* calls. They genuinely need a chain constructed and a
+DNSKEY RRset assembled, because they run when there may not be a correct one. (`resignNow` is
+the key-state path; moving it onto `ResignZone` is the companion's C4, not this change.) The
+**fifth**, the ticker, is maintenance on a zone that is already correct — and it inherits every
+bit of the build behaviour.
 
 `SignZone` conflates "produce the signed form of this zone" with "renew signatures that are
 ageing out". Each of the four mechanisms above is that conflation showing through. Split the
@@ -125,20 +130,29 @@ The ticker's operation, and only the ticker's.
 func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error)
 ```
 
-Shape:
+Shape. **Steps 2–6 are one locked section**: the walk happens inside `zd.mu`, not before it.
 
-1. Resolve keys and clamp, as `SignZone` does.
-2. **Decide from the published snapshot**, not from a working set: walk the snapshot's RRsets
-   and collect those with an RRSIG that `NeedsResigning` says is due. Reading rather than
-   staging is what keeps a no-op pass a genuine no-op.
-3. If the set is empty — the 999-in-1000 case — return `0, nil` **without touching the
-   working set at all**. Not even `ensureWorkingSet`: leaving a working set staged behind
+1. Resolve `dak` and the clamp, unlocked, as `SignZone` does.
+2. Take `zd.mu`.
+3. **Decide from the current published snapshot**, not from a working set: walk the
+   snapshot's RRsets and collect those with an RRSIG that `NeedsResigning` says is due, per
+   the table below. Reading rather than staging is what keeps a no-op pass a genuine no-op.
+4. If the set is empty — the 999-in-1000 case — unlock and return `0, nil` **without touching
+   the working set at all**. Not even `ensureWorkingSet`: leaving a working set staged behind
    would hand the next publish something to publish.
-4. Otherwise take `zd.mu`, `ensureWorkingSet`, **clone each RRset before signing it**, sign
-   the clones, stage exactly those, and publish. A publish here is correct and wanted: new
+5. Otherwise `ensureWorkingSet`, **clone each collected RRset**, `SignRRset` on the clones
+   only, stage exactly those, and publish. A publish here is correct and wanted: new
    signatures should reach downstreams, and the serial bump is how they learn.
+6. Unlock.
 
-**The clone in step 4 is not hygiene, it is the difference between correct and corrupting.**
+Walking unlocked and taking `zd.mu` only once something turns out to be due is the race R2
+exists to prevent: a concurrent publish can replace the snapshot between the collect and the
+clone, and what was collected is then a decision about a zone version that is no longer
+published. The price of doing it properly is that an empty pass holds the lock for a read-only
+walk. That is what a genuine no-op staying a no-op costs — and it is the cost §4 exists to
+stop paying once a minute.
+
+**The clone in step 5 is not hygiene, it is the difference between correct and corrupting.**
 
 `ensureWorkingSet` is a *shallow* copy: `workingSet[k] = snap.Data[k]`, the same `*OwnerData`,
 so the same `*RRTypeStore`, so RRsets whose `RRs` and `RRSIGs` slices share backing arrays
@@ -176,7 +190,7 @@ Stated explicitly because the alternative is attractive and wrong: widening the 
 anything unsigned" would quietly restore the behaviour that made #512 survivable-looking, and
 would hide a build path that failed.
 
-Point 4 of §1 falls out of point 3 here, without touching `publishWorkingSetLocked`. The
+Point 4 of §1 falls out of point 4 here, without touching `publishWorkingSetLocked`. The
 snapshot machinery stays closed, which is the constraint the surrounding design work has
 held to throughout.
 
@@ -278,10 +292,25 @@ fourth reachable, since today `newrrsigs` is never zero.
 - **A renewal pass does not repair a damaged NSEC chain** — the honest form of R1, asserting
   the new division of responsibility rather than the old accident.
 - **`SignZone` still builds**: on a zone with no chain and no DNSKEY RRset it produces both.
-- **A signature renewal does not rebuild the NSEC chain.** A renewal publish still runs
-  `restitchNsecLocked` and `updateZonemdLocked`; an RRSIG-only change leaves every NSEC bitmap
-  identical, so the restitch must be a no-op. Worth pinning, or the chain gets rebuilt on
-  every renewal "because publish always does" and §3.2's saving is given back at the publish.
+- **A signature renewal does not change the shape of the NSEC chain.** Assert that every
+  NSEC bitmap and every `next` name is identical afterwards — **not** that `restitchNsecLocked`
+  was skipped, which is what the tree actually does. `changedChainNames` compares owners with
+  `ownerTypesChanged` → `rrsetEqual`, and `rrsetEqual` compares RRSIG **bytes**
+  (`zone_mutation.go:153–168`), so staging a fresh signature marks that owner changed. Restitch
+  therefore runs, and rewrites and re-signs the NSEC for each renewed name *and its
+  predecessor* (`nsec_restitch.go:188–208`, with `force=true`).
+
+  So a renewal of N RRsets costs up to 3N signatures, not N. That is bounded — restitch's
+  affected set is computed before it stages anything, and NSEC lives in `OwnerData.NSEC` rather
+  than `RRtypes`, so the NSECs it stages do not mark further owners changed — and it is not
+  wrong: those NSEC signatures are the same age as the ones being renewed and would come due
+  at about the same time. It is only surprising, which is why the test asserts the invariant
+  that matters (the chain's shape) rather than one that does not hold.
+
+  The alternative — teaching `changedChainNames` that an RRSIG-only difference is not a chain
+  change — is a real improvement and deliberately **not** part of this change: it alters what
+  every publish path considers changed, which is a much wider blast radius than the renewal
+  pass. Worth its own change, after §3.
 - **The schedule**: a zone signed with a 14-day validity and a 900 s TTL reports a
   `nextResignDue` consistent with `expiry − (ttl + propagation + margin)`, and removing the
   RRset that held the minimum raises it rather than leaving it stale.
@@ -292,4 +321,5 @@ fourth reachable, since today `newrrsigs` is never zero.
 as its own change — once a no-op pass is genuinely a no-op, the schedule is a pure
 optimisation and can be judged on its own merits rather than as a fix.
 
-§3.3 can go with either, or on its own; it is two lines and independent of the split.
+§3.3 goes on its own, and not before the clamp ordering is settled (§3.3, R7). It is
+independent of the split — but, as §3.3 now says, it is not the small change it looks like.
