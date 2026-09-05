@@ -1,7 +1,7 @@
 # Refresh engine redesign — bounded concurrency and per-refresh deadlines (#364, #502)
 
-**Status:** **frozen — implement from here.** **S0 and S1 are implemented**; the companion's
-C1–C5 have landed between them, so S2–S5 are what remain (§4).
+**Status:** **frozen — implement from here.** **S0, S1 and S2 are implemented**, with the companion's
+C1–C5 landed between S0 and S1. S3–S5 remain (§4).
 Convergence assessed 2026-09-05 (`reviews/2026-09-05-tdns-signing-and-refresh-convergence.md`):
 no disagreement between the two documents. Re-open only to change a decision in §5 or the
 order in the companion's §6.
@@ -567,7 +567,7 @@ with the signing and NOTIFY tails still in it will write code that C3 and C5 the
 |---|---|---|---|
 | S0 | `refresh: bound the SOA probe and name the upstream` | §3.7 — the **probe** bound inside `DoTransfer`, the transfer bound around the transfer, and a `RefreshError` carrying the address tried. The #502 stopgap. **Ships first, before the companion's C1.** ✅ **implemented** on `fix/refresh-probe-deadline-502` | 113 |
 | S1 | `refresh: one post-refresh body` ✅ **implemented** | Extract `runZoneRefresh` (§3.2) from the two drifted copies, including the `RefreshError`-clearing fix (§1.3 row 1) and the `Wait` response. §1.3 is the review checklist. | ~245 |
-| S2 | `refresh: retry a failed refresh on SOA RETRY` | §3.6 — `FindSoaRetry` with the primary case, `RefreshCounter.SOARetry`, the adopted-copy fill, the failure path. | ~90 |
+| S2 | `refresh: retry a failed refresh on SOA RETRY` ✅ **implemented** | §3.6 — `FindSoaRetry` with the primary case, `RefreshCounter.SOARetry`, the adopted-copy fill, the failure path. | ~90 |
 | S3 | `refresh: bounded worker pool` | §3.3 + §3.4 + §3.5 + §3.8: pool, transfer gate, `inflight`, `Wait` answers, drain protocol, dispatch-time `gen`. Fixes #502 properly. | ~275 |
 | S4 | `refresh: jitter the first counter` | §3.10. | ~30 |
 | S5 | `refresh: walk the counters without copying them` | `Items()` → `IterCb`. | ~10 |

@@ -56,8 +56,14 @@ func runTransportSignalPostpass(conf *Config) {
 }
 
 type RefreshCounter struct {
-	Name           string
-	SOARefresh     uint32
+	Name       string
+	SOARefresh uint32
+	// SOARetry is what a FAILED refresh waits before trying again -- the
+	// zone's own SOA RETRY, which is what RFC 1034 says a secondary uses and
+	// what the engine never consulted. A failure used to reschedule at the full
+	// SOA REFRESH, so a zone whose primary was briefly unreachable waited an
+	// hour to find out it had come back.
+	SOARetry       uint32
 	CurRefresh     uint32
 	IncomingSerial uint32
 	Zonefile       string
@@ -123,9 +129,16 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 			if refresh, ferr := FindSoaRefresh(zd); ferr != nil {
 				lgEngine.Warn("FindSoaRefresh failed for an adopted copy", "zone", zone, "error", ferr)
 			} else {
+				// SOARetry too, and this path especially: it runs after a FAILED
+				// first transfer that nevertheless adopted a persisted copy, so
+				// the very next thing this zone does is retry. Without it, the
+				// zones that most need a retry interval are the ones left on the
+				// fallback.
+				retry, _ := FindSoaRetry(zd)
 				refreshCounters.Set(zone, &RefreshCounter{
 					Name:       zone,
 					SOARefresh: refresh,
+					SOARetry:   retry,
 					CurRefresh: refresh,
 				})
 			}
@@ -137,9 +150,14 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	if err != nil {
 		lgEngine.Error("FindSoaRefresh failed", "zone", zone, "error", err)
 	}
+	retry, rerr := FindSoaRetry(zd)
+	if rerr != nil {
+		lgEngine.Error("FindSoaRetry failed", "zone", zone, "error", rerr)
+	}
 	refreshCounters.Set(zone, &RefreshCounter{
 		Name:       zone,
 		SOARefresh: refresh,
+		SOARetry:   retry,
 		CurRefresh: refresh,
 	})
 
@@ -640,6 +658,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								refreshCounters.Set(zone, &RefreshCounter{
 									Name:       zone,
 									SOARefresh: 300, // 5 min fallback
+									SOARetry:   300, // no SOA to read a real RETRY from
 									CurRefresh: 30,  // retry sooner on initial failure
 								})
 							}
@@ -660,6 +679,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								refreshCounters.Set(zone, &RefreshCounter{
 									Name:       zone,
 									SOARefresh: 300,
+									SOARetry:   300,
 									CurRefresh: 30,
 								})
 							}
@@ -824,12 +844,17 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							// Update existing refreshCounter with new config values
 							rc.Zonefile = zr.Zonefile
 							rc.SOARefresh = refresh
+							if retry, rerr := FindSoaRetry(zd); rerr == nil {
+								rc.SOARetry = retry
+							}
 							rc.CurRefresh = refresh // immediate refresh handled by goroutine below
 						} else {
 							// Create new refreshCounter
+							retry, _ := FindSoaRetry(zd)
 							refreshCounters.Set(zone, &RefreshCounter{
 								Name:       zone,
 								SOARefresh: refresh,
+								SOARetry:   retry,
 								CurRefresh: refresh, // immediate refresh handled by goroutine below
 								Zonefile:   zr.Zonefile,
 							})
@@ -988,6 +1013,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							refreshCounters.Set(zone, &RefreshCounter{
 								Name:       zone,
 								SOARefresh: 300,
+								SOARetry:   300,
 								CurRefresh: 30,
 							})
 						}
@@ -1073,12 +1099,21 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// Same body as the operator path above, and the same
 					// dispatch-time generation. Still inline on the engine
 					// goroutine: the worker pool that moves it off is S3.
-					_, _ = runZoneRefresh(ctx, refreshJob{
+					_, rerr := runZoneRefresh(ctx, refreshJob{
 						zd:   zd,
 						zone: zone,
 						gen:  zd.generation.Load(),
 					}, conf)
-					rc.CurRefresh = rc.SOARefresh
+					// A failure waits the zone's RETRY, not its REFRESH. The
+					// engine never read RETRY at all, so a zone whose primary was
+					// briefly unreachable waited a full refresh interval to
+					// discover it had come back -- and the reset happened before
+					// the error was even looked at.
+					if rerr != nil {
+						rc.CurRefresh = refreshCounterRetry(rc)
+					} else {
+						rc.CurRefresh = rc.SOARefresh
+					}
 				}
 			}
 
@@ -1130,6 +1165,17 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	}
 }
 
+// refreshCounterRetry is a counter's retry interval, falling back to its refresh
+// interval when there is no retry value -- a counter created before this field
+// existed, or one whose zone had no readable SOA. Falling back to REFRESH keeps
+// the old behaviour rather than retrying immediately in a tight loop.
+func refreshCounterRetry(rc *RefreshCounter) uint32 {
+	if rc.SOARetry > 0 {
+		return rc.SOARetry
+	}
+	return rc.SOARefresh
+}
+
 // Compile-time bounds applied when service.minrefresh / service.maxrefresh
 // are not configured. They protect against pathological SOA Refresh values
 // (e.g. a 1-second refresh from a misconfigured upstream, or a 30-day SOA
@@ -1138,6 +1184,47 @@ const (
 	defaultMinRefresh uint32 = 60       // 1 minute
 	defaultMaxRefresh uint32 = 8 * 3600 // 8 hours
 )
+
+// FindSoaRetry returns how long to wait before retrying a FAILED refresh.
+//
+// Not FindSoaRefresh with one field swapped. The primary case is the reason:
+// FindSoaRefresh returns a flat 86400 for a Primary before it looks at the SOA
+// at all, because a primary re-stats a file rather than probing a peer -- and
+// the SOA's RETRY field describes a secondary's behaviour toward its primary,
+// so it is meaningless for a zone's own file. Same flat value here, for the same
+// reason.
+//
+// Clamped like REFRESH: a pathological RETRY should not be able to spin the
+// engine, and after the worker pool lands it should not be able to pin a worker
+// either (a dead zone costs probe-timeout / retry-interval of one).
+func FindSoaRetry(zd *ZoneData) (uint32, error) {
+	var retry uint32
+	soa, _ := zd.GetSOA()
+	if soa != nil {
+		retry = soa.Retry
+	}
+
+	if zd.ZoneType == Primary {
+		return 86400, nil
+	}
+
+	maxrefresh := defaultMaxRefresh
+	if cfg := ConfLive().MaxRefresh; cfg > 0 {
+		maxrefresh = uint32(cfg)
+	}
+	if maxrefresh < retry {
+		retry = maxrefresh
+	}
+
+	minrefresh := defaultMinRefresh
+	if cfg := ConfLive().MinRefresh; cfg > 0 {
+		minrefresh = uint32(cfg)
+	}
+	if minrefresh > retry {
+		retry = minrefresh
+	}
+	return retry, nil
+}
 
 func FindSoaRefresh(zd *ZoneData) (uint32, error) {
 	var refresh uint32
