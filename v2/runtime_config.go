@@ -32,7 +32,6 @@ type RuntimeConfig struct {
 	ProbeTimeout     int  // service.probetimeout (seconds)
 	TransferTimeout  int  // service.transfertimeout (seconds)
 	ResignerInterval int  // resignerengine.interval
-	PeriodicResign   bool // service.resign
 	ServiceDebug     bool // service.debug
 }
 
@@ -68,7 +67,6 @@ func (conf *Config) buildRuntimeConfig() *RuntimeConfig {
 		ProbeTimeout:     viper.GetInt("service.probetimeout"),
 		TransferTimeout:  viper.GetInt("service.transfertimeout"),
 		ResignerInterval: viper.GetInt("resignerengine.interval"),
-		PeriodicResign:   viper.GetBool("service.resign"),
 		ServiceDebug:     viper.GetBool("service.debug"),
 	}
 }
