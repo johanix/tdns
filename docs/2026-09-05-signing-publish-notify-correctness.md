@@ -455,9 +455,14 @@ type ResignRequest struct {
 
 | reason | what the resigner does |
 |---|---|
-| key state changed (rollover, key removal) | `ResignZone` — replacement, which is what the case needs |
-| periodic validity maintenance | `SignZone(force=false)` on the ticker, unchanged |
+| `ResignKeyStateChanged` (rollover, key removal) | `ResignZone` — replacement, which is what the case needs |
+| `ResignPeriodic` | watchlist registration only; the ticker's `SignZone(force=false)` decides when a pass is due |
 | data changed | **nothing** — never enqueued; C1 signed it at publish |
+
+A third reason, `ResignPolicyApplied`, was sketched and **not implemented**: no producer needs
+it. The policy apply signs directly through `applyZonePolicyTransactional` →
+`SignZone(kdb, true)` rather than going through the queue, so the constant would have had no
+sender.
 
 The channel type change makes a missed producer a compile error. The producer to convert is
 `triggerResign` (rollovers, `key_state_worker`, the API), which already drops on a full queue
@@ -467,6 +472,15 @@ a key-state change, ageing signatures are not one.
 
 `force` then survives only where it belongs — a policy binding change, via
 `applyZonePolicyTransactional` → `SignZone(kdb, true)` (`zone_policy_apply.go:215`).
+
+**The tool swap is now pinned by test, not by argument.** `TestResignZoneRemovesSignaturesByARetiredKey`
+rolls a ZSK out and asserts no signature by the retired key survives;
+`TestForcedSignZoneLeavesSignaturesByARetiredKey` runs the same scenario through
+`SignZone(force=true)` and asserts the stale signature **does** survive. The second test is the
+one that matters: it demonstrates the additive contract rather than restating it, so "force is
+stronger, surely it is safer" cannot quietly come back. It skips with an explanation rather
+than failing if that contract ever changes, since at that point the resigner's choice should be
+revisited rather than the test patched.
 
 ### 3.7 C5 — `SetupZoneSigning` becomes a registration
 

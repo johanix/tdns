@@ -217,7 +217,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	conf.Internal.DnsNotifyQ = make(chan DnsNotifyRequest, 100)
 	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
 	// Only used by tdns-auth
-	conf.Internal.ResignQ = make(chan *ZoneData, 10)
+	conf.Internal.ResignQ = make(chan ResignRequest, 10)
 	// Create KeyDB channels if KeyDB exists
 	if conf.Internal.KeyDB != nil {
 		kdb := conf.Internal.KeyDB

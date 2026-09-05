@@ -2046,7 +2046,7 @@ func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 }
 
-func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
+func (zd *ZoneData) SetupZoneSigning(resignq chan<- ResignRequest) error {
 	if Globals.App.Type == AppTypeAgent {
 		return nil // agents never sign
 	}
@@ -2071,8 +2071,12 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
+	// Registration, not a re-sign request. This used to be a bare *ZoneData,
+	// which the resigner could only read as "force-sign this now" -- so every
+	// zone signed just above was immediately signed again, in full. What it
+	// actually wants is for the zone to be watched for ageing signatures.
 	select {
-	case resignq <- zd:
+	case resignq <- ResignRequest{Zd: zd, Reason: ResignPeriodic}:
 	case <-ctx.Done():
 		lg.Error("SetupZoneSigning: timeout sending zone to resign queue", "zone", zd.ZoneName)
 	}
