@@ -222,8 +222,18 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// isdel := false
 
 	lgHandler.Debug("setting update type", "zone", zd.ZoneName, "qname", qname)
-	// 1. Is qname the apex of this zone?
-	if core.EqualNames(qname, zd.ZoneName) {
+
+	// 0. Is this key material for a child rather than delegation data? That is
+	// decided by what the update section CONTAINS, so it is asked before the
+	// QNAME-shaped questions below: the bootstrap ceremony arrives with the
+	// RFC 2136 QNAME (the parent zone) while a bare KEY upload arrives with
+	// the child's own name, and the two are the same request.
+	if child, ok := zd.classifyTruststoreUpdate(r.Ns); ok {
+		lgHandler.Info("update carries child key material", "child", child)
+		dur.Status.Type = "TRUSTSTORE-UPDATE"
+		// Deliberately not gated on allow-child-updates: a truststore update
+		// writes no zone content at all. ApproveTrustUpdate is its gate.
+	} else if core.EqualNames(qname, zd.ZoneName) {
 		// Per RFC 2136 the QNAME is the zone being updated, so the apex here
 		// says nothing about what is being changed. The update section does.
 		isChildUpdate, childDel := zd.classifyDelegationUpdate(r.Ns)
@@ -259,29 +269,20 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 				return nil
 			}
 		}
-		// 2. Is qname a zone cut for a child zone? If so, we classify this as a CHILD-UPDATE
-		// even though it may be a KEY update and hence really a TRUSTSTORE-UPDATE. But we don't know that until
-		// we have validated the contents of update.
+		// 2. Is qname a zone cut for a child zone? Then this is delegation
+		// data for that child. The KEY case that used to be split out here is
+		// gone: step 0 above answers it for every message shape, rather than
+		// only for an update section holding exactly one record.
 	} else if zd.IsChildDelegation(qname) {
 		zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the name of an existing child zone",
 			zd.ZoneName, qname)
-		// There are two cases here: update of child delegation data or update of a KEY RR.
-		switch {
-		case len(r.Ns) == 1 && r.Ns[0].Header().Rrtype == dns.TypeKEY:
-			dur.Status.Type = "TRUSTSTORE-UPDATE"
-			// XXX: Do we want a separate option for child trust updates? Or is it sufficient with an
-			// update policy that allows KEY updates (or not?)
-			// For now we just allow it here and catch it in ApproveUpdate()
-
-		default:
-			dur.Status.Type = "CHILD-UPDATE"
-			if !zd.Options[OptAllowChildUpdates] {
-				lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "qname", qname)
-				m.SetRcode(r, dns.RcodeRefused)
-				edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
-				w.WriteMsg(m)
-				return nil
-			}
+		dur.Status.Type = "CHILD-UPDATE"
+		if !zd.Options[OptAllowChildUpdates] {
+			lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "qname", qname)
+			m.SetRcode(r, dns.RcodeRefused)
+			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
+			w.WriteMsg(m)
+			return nil
 		}
 
 		// 3. Does qname exist in auth zone?
@@ -504,6 +505,30 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	}
 	lgHandler.Info("analysing child update", "validated", un == "", "policyType", zd.UpdatePolicy.Child.Type, "allowedRRtypes", zd.UpdatePolicy.Child.RRtypes)
 
+	// A CHILD-UPDATE carries delegation data. Key material is a truststore
+	// matter, and step 0 of UpdateResponder classified every KEY-only update
+	// as one -- so a KEY arriving HERE is in a message that MIXES the two.
+	// Those go to different stores, and one wire rcode cannot honestly report
+	// "the delegation half landed, the key half did not", so the message is
+	// refused whole and the child is told which record made it unacceptable.
+	//
+	// Before this, a mixed message published the child's KEY into the parent
+	// zone along with its NS and DS.
+	for _, rr := range r.Ns {
+		if rr.Header().Rrtype == dns.TypeKEY {
+			us.Approved = false
+			us.RejectionEDE = edns0.EDEZoneUpdateRRtypeNotAllowed
+			lgHandler.Warn("child update rejected: KEY records must be sent on their own, not mixed with delegation data",
+				"zone", zd.ZoneName, "owner", rr.Header().Name)
+			return false, false, nil
+		}
+	}
+
+	// With key material refused above, the unvalidated-KEY-upload allowance
+	// below is reached only to be declined: an untrusted signer asking to
+	// change delegation data is refused on the first record. The allowance
+	// itself now lives in ApproveTrustUpdate, which is where a KEY upload is
+	// classified to.
 	unvalidatedKeyUpload := false
 	for i := 0; i <= len(r.Ns)-1; i++ {
 		rr := r.Ns[i]
@@ -794,6 +819,74 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	lgHandler.Info("trust update approved")
 
 	return true, false, nil
+}
+
+// firstKeyRR returns the first KEY record in an update section, or nil. The
+// record rather than a bool, so the caller can name the owner it refused.
+func firstKeyRR(rrs []dns.RR) dns.RR {
+	for _, rr := range rrs {
+		if rr.Header().Rrtype == dns.TypeKEY {
+			return rr
+		}
+	}
+	return nil
+}
+
+// classifyTruststoreUpdate reports whether an update section is key material
+// for one child rather than delegation data, and for which child.
+//
+// A KEY at a child's name is never parent zone content. The name is below a
+// zone cut, so the parent cannot serve the record; publishing it anyway puts
+// KEY into the NSEC/NSEC3 type bitmap of a delegation the parent does not
+// control, and hands the parent's signer an RRset at a cut to sign. The record
+// belongs in the truststore, which is what the child is asking for by sending
+// it: this is the SIG(0) bootstrap of
+// draft-ietf-dnsop-delegation-mgmt-via-ddns-02 §"Bootstrapping the Child's
+// Key".
+//
+// THE REGRESSION. ValidateUpdate also recognises a self-signed KEY upload and
+// rewrites us.Type to TRUSTSTORE-UPDATE -- but only on the paths where the
+// signing key was NOT already in the truststore. So the first bootstrap was
+// routed to the truststore and every re-send of the identical ceremony was
+// classified as a delegation update and published into the parent zone, where
+// it stayed. Deciding it here, from what the message contains rather than from
+// where its key happened to be found, gives the same answer on the first send
+// and on the hundredth.
+//
+// The shapes this covers are the ADD-KEY upload, the DEL-ANY-KEY + ADD-KEY
+// ceremony, and the removal of a key the child no longer uses -- all classes,
+// because "which store does this belong in" does not depend on whether the
+// record is being added or removed. What the truststore then accepts is
+// ApproveTrustUpdate's decision, not this one.
+func (zd *ZoneData) classifyTruststoreUpdate(rrs []dns.RR) (string, bool) {
+	if len(rrs) == 0 {
+		return "", false
+	}
+	owner := ""
+	for _, rr := range rrs {
+		if rr.Header().Rrtype != dns.TypeKEY {
+			return "", false
+		}
+		name := rr.Header().Name
+		if owner == "" {
+			owner = name
+			continue
+		}
+		if !core.EqualNames(owner, name) {
+			// Key material for two children in one message. The truststore
+			// applier authorises per child, exactly as classifyDelegationUpdate
+			// does for delegations, so this is not split -- it is not a
+			// truststore update, and the delegation classifier will refuse it
+			// in turn.
+			return "", false
+		}
+	}
+	if !zd.IsChildDelegation(owner) {
+		// A KEY anywhere else in the zone -- at the apex above all -- is the
+		// zone's own data, judged by updatepolicy.zone like any other RRset.
+		return "", false
+	}
+	return owner, true
 }
 
 // classifyDelegationUpdate reports whether every RR in an update section
