@@ -962,10 +962,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 		crrset.RRset != nil && crrset.RRset.RRtype == qtype {
 		lgImr.Debug("ImrResponder: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 		m.SetRcode(r, dns.RcodeSuccess)
-		m.Answer = crrset.RRset.RRs
-		if msgoptions.DO {
-			m.Answer = append(m.Answer, crrset.RRset.RRSIGs...)
-		}
+		m.Answer = crrset.ServeAnswer(time.Now(), msgoptions.DO)
 		m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
 		setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 		w.WriteMsg(m)
@@ -985,10 +982,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	if crrset != nil && qtype == dns.TypeDS && crrset.Context == cache.ContextReferral &&
 		crrset.RRset != nil && crrset.RRset.RRtype == dns.TypeDS && len(crrset.RRset.RRs) > 0 {
 		m.SetRcode(r, dns.RcodeSuccess)
-		m.Answer = crrset.RRset.RRs
-		if msgoptions.DO {
-			m.Answer = append(m.Answer, crrset.RRset.RRSIGs...)
-		}
+		m.Answer = crrset.ServeAnswer(time.Now(), msgoptions.DO)
 		m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
 		setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 		w.WriteMsg(m)
@@ -998,9 +992,13 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 		switch {
 		case crrset.Rcode == uint8(dns.RcodeNameError) && crrset.Context == cache.ContextNXDOMAIN:
 			m.SetRcode(r, dns.RcodeNameError)
+			negStart := len(m.Ns)
 			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, msgoptions) && crrset.RRset != nil {
 				appendSOAToMessage(crrset.RRset, msgoptions, m)
 			}
+			// Served straight from the entry, so the proof carries the
+			// entry's remaining lifetime like any other cached record.
+			applyRemainingTTL(m.Ns, negStart, crrset.RemainingTTL(time.Now()))
 			// if dnssec_ok && len(crrset.NegAuthority) > 0 && imr.Cache.ValidateNegativeResponse(ctx, qname, qtype, crrset.NegAuthority, imr.IterativeDNSQueryFetcher()) {
 			//	m.AuthenticatedData = true
 			// } else if crrset.Validated {
@@ -1025,9 +1023,13 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 		// below.
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextNoErrNoAns:
 			m.SetRcode(r, dns.RcodeSuccess)
+			negStart := len(m.Ns)
 			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, msgoptions) && crrset.RRset != nil {
 				appendSOAToMessage(crrset.RRset, msgoptions, m)
 			}
+			// Served straight from the entry, so the proof carries the
+			// entry's remaining lifetime like any other cached record.
+			applyRemainingTTL(m.Ns, negStart, crrset.RemainingTTL(time.Now()))
 			// if dnssec_ok && len(crrset.NegAuthority) > 0 && imr.Cache.ValidateNegativeResponse(ctx, qname, qtype, crrset.NegAuthority, imr.IterativeDNSQueryFetcher()) {
 			//	m.AuthenticatedData = true
 			// } else if crrset.Validated {
@@ -1059,13 +1061,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				return
 			}
 			m.SetRcode(r, dns.RcodeSuccess)
-			m.Answer = crrset.RRset.RRs
-			if msgoptions.DO {
-				m.Answer = append(m.Answer, crrset.RRset.RRSIGs...)
-			}
-			// if crrset.Validated {
-			//	m.AuthenticatedData = true
-			// }
+			m.Answer = crrset.ServeAnswer(time.Now(), msgoptions.DO)
 			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
 			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 			w.WriteMsg(m)
@@ -1192,9 +1188,28 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 	m.SetRcode(r, rcode)
 	if rrset != nil {
 		lgImr.Debug("ProcessAuthDNSResponse: received response from IterativeDNSQuery", "count", len(rrset.RRs))
-		m.Answer = rrset.RRs
-		if msgoptions.DO {
-			m.Answer = append(m.Answer, rrset.RRSIGs...)
+		// The TTL on the wire is what is LEFT of the entry's lifetime.
+		//
+		// This RRset may have come off the wire moments ago or out of the
+		// cache consult inside IterativeDNSQuery, and there is no flag here
+		// that says which -- so ask the cache, which knows either way. Fresh
+		// data was cached before it was returned, so its entry is seconds old
+		// and the remaining lifetime is the full TTL; cached data gets what
+		// actually remains. A miss (evicted underneath us) falls back to the
+		// records as they are.
+		//
+		// Without this a downstream cache re-armed to the full TTL on every
+		// fetch, so nothing this resolver served ever expired.
+		if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil {
+			m.Answer = c.ServeRRs(rrset.RRs, time.Now())
+			if msgoptions.DO {
+				m.Answer = append(m.Answer, c.ServeRRs(rrset.RRSIGs, time.Now())...)
+			}
+		} else {
+			m.Answer = rrset.RRs
+			if msgoptions.DO {
+				m.Answer = append(m.Answer, rrset.RRSIGs...)
+			}
 		}
 		// The PRIVACY status is attached on the paths that actually SERVE this
 		// answer, below, not here. Validation runs between the two, and a
@@ -1391,6 +1406,21 @@ func buildNegAuthorityFromMsg(src *dns.Msg) []*core.RRset {
 	return out
 }
 
+// applyRemainingTTL rewrites the TTL of the records a serve helper just
+// appended to a message section, from index start onward.
+//
+// appendSOAToMessage and appendNegAuthorityToMessage both dns.Copy what they
+// append, so this edits the message and never the cache. A negative proof is
+// cached data like any other: served with its original TTL on every hit, it
+// re-arms a downstream cache's negative entry forever.
+func applyRemainingTTL(sect []dns.RR, start int, ttl uint32) {
+	for i := start; i < len(sect); i++ {
+		if sect[i] != nil {
+			sect[i].Header().Ttl = ttl
+		}
+	}
+}
+
 func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype uint16, msgoptions *edns0.MsgOptions, resp *dns.Msg, src *dns.Msg) bool {
 	if resp == nil {
 		return false
@@ -1399,7 +1429,9 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 
 	if msgoptions.CD {
 		if cached != nil && cached.RRset != nil {
+			start := len(resp.Ns)
 			appendSOAToMessage(cached.RRset, msgoptions, resp)
+			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(time.Now()))
 			return true
 		}
 		appendSOAFromMsg(src, msgoptions, resp)
@@ -1408,7 +1440,9 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 
 	if !msgoptions.DO {
 		if cached != nil && cached.RRset != nil {
+			start := len(resp.Ns)
 			appendSOAToMessage(cached.RRset, msgoptions, resp)
+			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(time.Now()))
 			if cached.State == cache.ValidationStateSecure {
 				resp.AuthenticatedData = true
 			}
@@ -1423,7 +1457,9 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 	var neg []*core.RRset
 	if cached != nil && len(cached.NegAuthority) > 0 {
 		neg = cached.NegAuthority
+		start := len(resp.Ns)
 		if appendNegAuthorityToMessage(resp, neg, msgoptions) {
+			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(time.Now()))
 			if cached.State == cache.ValidationStateSecure && msgoptions.DO {
 				resp.AuthenticatedData = true
 			}
@@ -1432,7 +1468,9 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 		}
 	}
 	if cached != nil && cached.RRset != nil {
+		start := len(resp.Ns)
 		appendSOAToMessage(cached.RRset, msgoptions, resp)
+		applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(time.Now()))
 		if cached.State == cache.ValidationStateSecure {
 			resp.AuthenticatedData = true
 		}
