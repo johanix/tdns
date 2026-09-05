@@ -7,6 +7,10 @@ once a minute with no content change: 8 serial bumps in 7½ minutes, 869 NOTIFY 
 `new_rrsigs=51` for one zone every 60 s.
 **Related:** #515 removed the `service.resign` gate that had kept the periodic pass dormant.
 That change was right; this is the cleanup it exposed.
+**Cross-reference:** `2026-09-05-signing-publish-notify-correctness.md` §3.6 (C4) currently
+says *"the periodic ticker keeps calling `SignZone(force=false)`"*. That sentence describes
+this defect. When §3 here lands, C4 is updated to name `RenewZoneSignatures`. `ResignZone`
+remains the key-state tool, and the ticker is **not** routed through `ResignQ`.
 
 ---
 
@@ -71,10 +75,11 @@ off, so for most deployments this pass never ran.
 |---|---|---|
 | `apihandler_zone.go:185` — operator "sign zone" | operator's | build / repair |
 | `zone_policy_apply.go:216` — policy apply | true | build under a new policy |
-| the sign-at-policy-bind step | false | first build |
+| `zone_utils.go:2006` — `SetupZoneSigning` | false | first build |
+| `resigner.go:65` — `resignNow`, after a key-state change | true | replace, on the key-state path |
 | `resigner.go:108` — the ticker | false | **renew ageing signatures** |
 
-Three are *build* calls. They genuinely need a chain constructed and a DNSKEY RRset
+Four are *build* or *replace* calls. They genuinely need a chain constructed and a DNSKEY RRset
 assembled, because they run when there may not be a correct one. The fourth is maintenance on
 a zone that is already correct, and it inherits all of the build behaviour.
 
@@ -129,9 +134,47 @@ Shape:
 3. If the set is empty — the 999-in-1000 case — return `0, nil` **without touching the
    working set at all**. Not even `ensureWorkingSet`: leaving a working set staged behind
    would hand the next publish something to publish.
-4. Otherwise take `zd.mu`, `ensureWorkingSet`, sign exactly those RRsets, stage exactly those,
-   and publish. A publish here is correct and wanted: new signatures should reach downstreams,
-   and the serial bump is how they learn.
+4. Otherwise take `zd.mu`, `ensureWorkingSet`, **clone each RRset before signing it**, sign
+   the clones, stage exactly those, and publish. A publish here is correct and wanted: new
+   signatures should reach downstreams, and the serial bump is how they learn.
+
+**The clone in step 4 is not hygiene, it is the difference between correct and corrupting.**
+
+`ensureWorkingSet` is a *shallow* copy: `workingSet[k] = snap.Data[k]`, the same `*OwnerData`,
+so the same `*RRTypeStore`, so RRsets whose `RRs` and `RRSIGs` slices share backing arrays
+with the snapshot being served right now. And `SignRRset` mutates in place — `applyClampToRRset`
+rewrites `Header().Ttl` before any decision about signing is taken, and the deferred rollback
+that undoes it fires **only on the error path**: `signOK = true` is set on every successful
+return, including one where nothing needed re-signing.
+
+Today that is harmless *by accident*. `GenerateNsecChainWithDak` has already `cloneOwner`'d
+every chain name before the walk begins, so the mutation lands on clones. **The step this
+design removes is the step that currently makes the walk safe.** A renewal pass that skips the
+rebuild and calls `SignRRset` on a working-set RRset writes through to the published snapshot —
+TTLs on a zone that is being served, with no rollback.
+
+So, as a rule rather than a step: collect names from the snapshot under `zd.mu`, clone before
+`SignRRset`, stage only clones. **Never call `SignRRset` on an RRset that shares storage with
+the published snapshot.** `cloneOwner`'s own comment records the same hazard for the same
+reason.
+
+R2 below — decide and sign under one lock — is necessary and not sufficient; this is the other
+half.
+
+**What the snapshot walk visits, precisely:**
+
+| owner / type | rule |
+|---|---|
+| `OwnerData.NSEC` | **visit.** It is not an `RRtypes` entry, so a walk of `RRtypes` alone misses it — and ageing NSEC signatures are exactly this pass's job. Renew the signature; do **not** regenerate the record. |
+| apex SOA | **skip.** The publish bumps the serial and `resignWorkingSetSOAIfSigned` re-signs it afterwards. Signing it here signs the old serial and throws the work away. |
+| apex ZONEMD, where the zone manages it | **skip.** The publish recomputes the digest and signs it. Same reason `SignZone` skips it. |
+| delegation NS, and glue A/AAAA under a delegation | **skip.** Not authoritative here; same rules `SignZone` already applies. |
+
+**An RRset with no RRSIG at all is not collected.** Renewal renews; it does not repair. A
+missing signature is `SignZone`'s job, reached through the API, a policy apply, or a reload.
+Stated explicitly because the alternative is attractive and wrong: widening the walk to "sign
+anything unsigned" would quietly restore the behaviour that made #512 survivable-looking, and
+would hide a build path that failed.
 
 Point 4 of §1 falls out of point 3 here, without touching `publishWorkingSetLocked`. The
 snapshot machinery stays closed, which is the constraint the surrounding design work has
@@ -143,8 +186,19 @@ Independent of the split, and worth fixing on its own: the walk should stage onl
 `MaybeSignRRset` reports that it re-signed. A build pass that finds most of a zone already
 correctly signed should not clone every owner either.
 
-This is a two-line change and it makes `SignZone` cheaper for the three build callers as
-well.
+**It is not the two-line change it looks like**, and it should not land as one.
+`applyClampToRRset` runs *before* the signing decision and is not rolled back on the
+no-op path (`signOK = true` regardless of `resigned`). So skipping `stageRRsetLocked` leaves an
+RRset whose TTLs were rewritten but which was never staged — the mutation applied and the
+record not carried forward, on storage that may be shared.
+
+Two ways to settle it, and it needs settling before the change is made rather than after:
+apply the clamp only when the RRset is actually going to be signed, or treat a clamp rewrite
+as a change in its own right and stage it. This is independent of §3.2 and can wait; §3.2 is
+the storm.
+
+Note that §3.2's clone rule makes this harmless *for the renewal pass* — a clone that is not
+staged takes its mutated TTLs with it into the bin. The hazard is `SignZone`'s own walk.
 
 ## 4. Scheduling: waking only when something is due
 
@@ -199,10 +253,20 @@ fourth reachable, since today `newrrsigs` is never zero.
 | # | risk | mitigation |
 |---|---|---|
 | R1 | The renewal pass stops rebuilding the chain, and something else was silently relying on that rebuild to repair it | That reliance is the bug this exposes rather than a reason to keep the rebuild. `restitchNsecLocked` owns the chain; if it can leave one wrong, fix it there. A test that a zone whose chain is damaged out-of-band is NOT repaired by a renewal pass pins the new contract honestly. |
-| R2 | Deciding from the snapshot, then signing the working set, races a concurrent change | Decide and sign under one `zd.mu` acquisition, or re-check under the lock before staging. The decision is cheap; correctness beats the lock-free read. |
+| R2 | Deciding from the snapshot, then signing the working set, races a concurrent change | Decide and sign under one `zd.mu` acquisition. Necessary but **not sufficient** on its own — see R6. |
+| R6 | The renewal pass signs an RRset that shares storage with the published snapshot | **The one to get right.** `ensureWorkingSet` is shallow and `SignRRset` rewrites TTLs in place without rolling them back on the success path. Today the chain rebuild clones everything first; removing it removes that protection. Clone before `SignRRset`, stage only clones, never sign snapshot-shared storage (§3.2). |
+| R7 | §3.3's conditional staging lands without settling the clamp | An unstaged RRset has still had its TTLs rewritten. Settle the clamp ordering first (§3.3); do not ship it as hygiene. |
 | R3 | The schedule is wrong and signatures expire | §4's coarse safety tick. The schedule must only ever make renewal *earlier* than the fallback. |
 | R4 | Zones whose signatures were already written before this lands have no `nextResignDue` | Zero means unknown means fall back to the tick, which is exactly today's behaviour. |
 | R5 | `SignZone`'s conditional staging (§3.3) skips a stage that something depended on | The `resigned` bool already exists and is discarded; a staged-but-unchanged RRset is by definition identical to what is published. |
+
+### 4.1 Details settled on review
+
+- **`nextResignDue` is in-memory only.** A restart leaves it unknown, which means the coarse
+  tick, which is today's behaviour. Persisting it buys nothing and adds a value that can be
+  wrong across a version change.
+- **Use `ResignerInterval` as the look-ahead**, the same value `NeedsResigning` uses, so a
+  scheduled wake can never land *after* the threshold it is aiming at.
 
 ## 7. Testing
 
@@ -214,6 +278,10 @@ fourth reachable, since today `newrrsigs` is never zero.
 - **A renewal pass does not repair a damaged NSEC chain** — the honest form of R1, asserting
   the new division of responsibility rather than the old accident.
 - **`SignZone` still builds**: on a zone with no chain and no DNSKEY RRset it produces both.
+- **A signature renewal does not rebuild the NSEC chain.** A renewal publish still runs
+  `restitchNsecLocked` and `updateZonemdLocked`; an RRSIG-only change leaves every NSEC bitmap
+  identical, so the restitch must be a no-op. Worth pinning, or the chain gets rebuilt on
+  every renewal "because publish always does" and §3.2's saving is given back at the publish.
 - **The schedule**: a zone signed with a 14-day validity and a 900 s TTL reports a
   `nextResignDue` consistent with `expiry − (ttl + propagation + margin)`, and removing the
   RRset that held the minimum raises it rather than leaving it stale.
