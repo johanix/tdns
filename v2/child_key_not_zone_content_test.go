@@ -211,3 +211,77 @@ func TestFirstKeyRRFindsKeyMaterial(t *testing.T) {
 		t.Errorf("firstKeyRR returned %q, want the KEY owner", got.Header().Name)
 	}
 }
+
+// THE OTHER BUG, guarded from the other side. A self-signed KEY upload from a
+// child the parent does not yet trust must be ACCEPTED -- refusing it is how
+// the parent used to make SIG(0) bootstrap impossible. Routing key material to
+// ApproveTrustUpdate must not narrow that door.
+//
+// It widens it, in fact: ApproveChildUpdate still refuses an untrusted upload
+// of more than one record ("only a single KEY record allowed from untrusted
+// key"), which is the two-record bootstrap ceremony the child actually sends.
+// ApproveTrustUpdate has no such restriction, so the ceremony is approved on
+// its own merits rather than depending on ValidateUpdate having failed to find
+// the key first.
+func TestUntrustedBootstrapCeremonyIsApproved(t *testing.T) {
+	zd := childKeyParent(t)
+	zd.DelegationPolicy = &DelegationPolicy{Name: "test", AllowUnvalidatedUpload: true}
+
+	key := mustRR(t, childKeyRR)
+	del := dns.Copy(key)
+	del.Header().Class = dns.ClassANY
+	del.Header().Ttl = 0
+
+	r := new(dns.Msg)
+	r.SetUpdate(zd.ZoneName)
+	r.Ns = []dns.RR{del, key}
+
+	// Nothing is trusted yet, and the signature is self-signed: the state a
+	// first-ever bootstrap arrives in.
+	us := &UpdateStatus{
+		Type:            "TRUSTSTORE-UPDATE",
+		SignerName:      "child.parent.example.",
+		ValidationRcode: dns.RcodeSuccess,
+	}
+
+	approved, updateZone, err := zd.ApproveTrustUpdate(zd.ZoneName, us, r)
+	if err != nil {
+		t.Fatalf("ApproveTrustUpdate returned an error: %v", err)
+	}
+	if !approved {
+		t.Fatal("a self-signed bootstrap ceremony was refused; the child cannot bootstrap a SIG(0) key at all")
+	}
+	if updateZone {
+		t.Fatal("an approved key upload asked for the parent zone to be written")
+	}
+}
+
+// And with the allowance switched off it is refused rather than published --
+// the acceptance gate and the publication gate are separate, and closing the
+// first must not open the second.
+func TestUntrustedBootstrapCeremonyWithoutAllowanceIsRefused(t *testing.T) {
+	zd := childKeyParent(t)
+	zd.DelegationPolicy = &DelegationPolicy{Name: "test", AllowUnvalidatedUpload: false}
+
+	key := mustRR(t, childKeyRR)
+	del := dns.Copy(key)
+	del.Header().Class = dns.ClassANY
+	del.Header().Ttl = 0
+
+	r := new(dns.Msg)
+	r.SetUpdate(zd.ZoneName)
+	r.Ns = []dns.RR{del, key}
+
+	us := &UpdateStatus{Type: "TRUSTSTORE-UPDATE", SignerName: "child.parent.example.", ValidationRcode: dns.RcodeSuccess}
+
+	approved, updateZone, err := zd.ApproveTrustUpdate(zd.ZoneName, us, r)
+	if err != nil {
+		t.Fatalf("ApproveTrustUpdate returned an error: %v", err)
+	}
+	if approved {
+		t.Fatal("an untrusted key upload was approved with allow-unvalidated-upload off")
+	}
+	if updateZone {
+		t.Fatal("a refused key upload asked for the parent zone to be written")
+	}
+}
