@@ -231,6 +231,34 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				// in-memory zone state behind the scanner's back.
 				lg.Debug("ZoneUpdater: CHILD-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
 				lg.Debug("ZoneUpdater: CHILD-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
+
+				// Key material is not delegation data, enforced at the write
+				// rather than only at the wire. The responder classifies a
+				// KEY-only update as a TRUSTSTORE-UPDATE and refuses one that
+				// mixes KEY with delegation records, so nothing should reach
+				// here carrying a KEY -- but this is the one point EVERY
+				// delegation backend passes through, and each of them got it
+				// wrong in its own way: the direct backend published the KEY
+				// into the parent zone at the delegation point, and the db
+				// backend stored it in ChildDelegationData to be served from
+				// there. A per-backend rule would have to be written, and kept
+				// right, three times.
+				//
+				// The only type filter downstream is
+				// updatepolicy.child.rrtypes, which is the WRONG instrument:
+				// it has to contain KEY for a child to be allowed to upload
+				// one at all, so allowing the bootstrap necessarily allowed
+				// the publication.
+				//
+				// Logged as an invariant violation, like the origination gate
+				// above: reaching it means a path bypassed the classifier.
+				if keyRR := firstKeyRR(ur.Actions); keyRR != nil {
+					lg.Error("ZoneUpdater: refusing to write child key material as zone content (invariant violation)",
+						"zone", ur.ZoneName, "owner", keyRR.Header().Name, "cmd", ur.Cmd)
+					ur.respond(false, fmt.Errorf(
+						"KEY records belong in the truststore, not in the delegation data of zone %s", ur.ZoneName))
+					continue
+				}
 				// Snapshot the two fields parseconfig.go mutates under
 				// zd.mu during config reload (Options + DelegationBackend).
 				// Reading them independently without the lock would let a
