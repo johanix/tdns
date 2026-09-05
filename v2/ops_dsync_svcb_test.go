@@ -37,6 +37,66 @@ func TestDsyncPerChildLookupNameRoot(t *testing.T) {
 	}
 }
 
+// The bootstrap SVCB carries a SvcParam, so it MUST be in ServiceMode.
+//
+// In AliasMode (SvcPriority 0) this record would say two wrong things at once:
+// a TargetName of "." means the service does not exist (RFC 9460 §2.5.1), and
+// recipients MUST ignore any SvcParams present (§2.4.2) -- so the bootstrap
+// signal the record exists to carry is both contradicted and discarded. In
+// ServiceMode a "." target denotes the owner name itself (§2.5.2).
+//
+// The operational half is sharper than the semantic one: BIND 9.18 refuses an
+// AliasMode SVCB carrying SvcParams outright, and reports it as "extra input
+// data" against the whole message -- so one such record makes a zone
+// untransferable for those clients, with nothing in the error naming the
+// record. Observed against a live 9.18.24.
+//
+// draft-ietf-dnsop-delegation-mgmt-via-ddns shows "SVCB 0 ." in its example;
+// this deliberately differs, and the draft is being corrected.
+func TestBootstrapSVCBIsServiceMode(t *testing.T) {
+	svcb := newBootstrapSVCB("updates.example.", "at-apex,manual", 300)
+
+	if svcb.Priority == 0 {
+		t.Fatal("bootstrap SVCB is in AliasMode (SvcPriority 0) while carrying a SvcParam; " +
+			"conforming recipients must ignore the param and BIND 9.18 refuses the record")
+	}
+	if svcb.Target != "." {
+		t.Fatalf("Target = %q, want \".\" (the owner name, per RFC 9460 §2.5.2)", svcb.Target)
+	}
+
+	var found bool
+	for _, kv := range svcb.Value {
+		if loc, ok := kv.(*dns.SVCBLocal); ok && loc.KeyCode == dns.SVCBKey(SvcbBootstrapKey) {
+			found = true
+			if string(loc.Data) != "at-apex,manual" {
+				t.Fatalf("bootstrap value = %q", loc.Data)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no bootstrap SvcParam in %s", svcb)
+	}
+
+	// And the whole point: every rdata byte is accounted for by the parse, so
+	// a strict receiver has nothing left over to complain about.
+	msg := new(dns.Msg)
+	msg.Answer = []dns.RR{svcb}
+	wire, err := msg.Pack()
+	if err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	rr, off, err := dns.UnpackRR(wire, 12)
+	if err != nil {
+		t.Fatalf("UnpackRR: %v", err)
+	}
+	if off != len(wire) {
+		t.Fatalf("unpack consumed %d of %d bytes; %d left over", off, len(wire), len(wire)-off)
+	}
+	if _, ok := rr.(*dns.SVCB); !ok {
+		t.Fatalf("round-tripped to %T", rr)
+	}
+}
+
 func TestBootstrapSVCBReconcile(t *testing.T) {
 	target := "updates.example."
 	desired := "at-apex,at-ns"

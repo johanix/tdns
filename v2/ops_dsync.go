@@ -378,8 +378,21 @@ func dsyncUpdateTargetIsZoneApex(zone, target string) bool {
 
 func newBootstrapSVCB(target, data string, ttl uint32) *dns.SVCB {
 	return &dns.SVCB{
-		Hdr:      dns.RR_Header{Name: target, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: ttl},
-		Priority: 0,
+		Hdr: dns.RR_Header{Name: target, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: ttl},
+		// ServiceMode -- SvcPriority non-zero -- and NOT the "SVCB 0 ." the
+		// draft's example shows. In AliasMode a TargetName of "." says the
+		// service does not exist (RFC 9460 §2.5.1), and recipients MUST ignore
+		// any SvcParams that are present (§2.4.2). Published that way, this
+		// record announces the opposite of what it is for and carries a
+		// bootstrap signal every conforming recipient is required to discard.
+		// In ServiceMode a TargetName of "." denotes the owner name itself
+		// (§2.5.2), which is the intended meaning.
+		//
+		// It is also the difference between parseable and not. BIND 9.18
+		// refuses an AliasMode SVCB carrying SvcParams outright -- "extra input
+		// data" -- so a zone publishing one fails AXFR for those clients, and
+		// the failure names the whole message rather than the record.
+		Priority: 1,
 		Target:   ".",
 		Value: []dns.SVCBKeyValue{
 			&dns.SVCBLocal{
