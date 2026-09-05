@@ -6,6 +6,8 @@ package tdns
 import (
 	"context"
 	"time"
+
+	"github.com/spf13/viper"
 )
 
 // ResignReason says WHY a zone was handed to the resigner.
@@ -61,29 +63,34 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
 
-	// service.resign controls only the *periodic* re-sign ticker that
-	// keeps RRSIG validity fresh. Explicit one-shot resign requests
-	// arriving on zoneresignch (from triggerResign, e.g. after an
-	// AtomicRollover or other key-state change) are always honored,
-	// regardless of this setting — otherwise rollovers can leave
-	// the DNSKEY RRset signed by a key that's no longer active.
-	periodic := ConfLive().PeriodicResign
-	if !periodic {
-		lgSigner.Info("ResignerEngine: periodic mode OFF; explicit triggerResign requests still honored")
-	} else {
-		lgSigner.Info("ResignerEngine starting", "interval_sec", interval)
+	// The periodic pass is unconditional. It used to be gated on
+	// service.resign, and there is no deployment that wants signatures to
+	// expire without being renewed: a zone that should not be re-signed by this
+	// server says so per zone, by not carrying online-signing or
+	// inline-signing, and the ticker loop below already skips those. The global
+	// switch could therefore only ever disable something wanted, silently, for
+	// every zone at once.
+	//
+	// b59f85a4 removed the same switch from the OTHER half of this engine, for
+	// the same reason found the hard way: with service.resign unset the engine
+	// drained triggerResign requests and dropped them, so a rollover left the
+	// DNSKEY RRset signed by a retired key. This is the rest of that fix.
+	lgSigner.Info("ResignerEngine starting", "interval_sec", interval)
+
+	// A config that has stopped meaning what it says is its own trap, so an
+	// explicit setting is called out rather than ignored in silence.
+	if viper.IsSet("service.resign") && !viper.GetBool("service.resign") {
+		lgSigner.Warn("service.resign: false is no longer honoured; expiring signatures" +
+			" are always renewed. Remove the setting from the config.")
 	}
 
 	ZonesToKeepSigned := make(map[string]*ZoneData)
 
-	// resignNow performs an immediate force re-sign of zd. Used when
-	// triggerResign fires (key-state change, etc.) — we can't wait for
-	// the periodic ticker because (a) ticker may be disabled, and
-	// (b) even if enabled, NeedsResigning short-circuits when validity
-	// is healthy, which is exactly the case after a rollover when the
-	// existing RRSIGs are perfectly valid but signed by the wrong key.
 	// replaceSignatures brings the served RRSIG set into line with the zone's
-	// currently-active keys, immediately.
+	// currently-active keys, immediately. It cannot wait for the periodic
+	// ticker, because NeedsResigning short-circuits while validity is healthy --
+	// which is exactly the case after a rollover, where the existing RRSIGs are
+	// perfectly valid and merely made by the wrong key.
 	//
 	// ResignZone, not SignZone(force=true), and the difference is the point.
 	// SignZone is ADDITIVE: it writes signatures by the active keys and leaves
@@ -139,19 +146,14 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 					"zone", zd.ZoneName, "reason", uint8(req.Reason))
 			}
 
-			// Either way the zone joins the watchlist for the periodic
-			// re-sign ticker (only effective when periodic mode is on).
-			if periodic {
-				if _, exist := ZonesToKeepSigned[zd.ZoneName]; !exist {
-					lgSigner.Info("adding zone to re-sign list", "zone", zd.ZoneName)
-				}
-				ZonesToKeepSigned[zd.ZoneName] = zd
+			// Keep the zone on the watchlist for the periodic re-sign ticker,
+			// which since #515 always runs.
+			if _, exist := ZonesToKeepSigned[zd.ZoneName]; !exist {
+				lgSigner.Info("adding zone to re-sign list", "zone", zd.ZoneName)
 			}
+			ZonesToKeepSigned[zd.ZoneName] = zd
 
 		case <-ticker.C:
-			if !periodic {
-				continue
-			}
 			for _, zd := range ZonesToKeepSigned {
 				// Skip zones where signing has been disabled since
 				// they were added to the list. MP zones can toggle
