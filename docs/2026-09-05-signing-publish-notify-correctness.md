@@ -310,7 +310,11 @@ and it broke a lab zone. Signing under a nil policy is not harmless: `sigValidit
 returns 0, `sigLifetime` silently substitutes **five minutes**, and a first load signed the
 whole zone into signatures that expired six minutes later — every RRset except the SOA, which
 escaped only because `resignWorkingSetSOAIfSigned` re-signs it on every publish. Nothing
-renewed them: Branch 1 rebinds without re-signing, and the periodic ticker is off by default.
+renewed them: Branch 1 rebinds without re-signing, and the periodic ticker was still gated on
+`service.resign` at the time. #515 has since removed that gate, and the pass behind it is now
+`RenewZoneSignatures` (`2026-09-05-signing-build-vs-renewal.md`) — which would not have renewed
+them either, because it renews signatures and does not re-sign under a policy that has since
+bound.
 
 The concern behind that revision was real and still holds — a restart must not be silently
 skipped — so the restart is **deferred, not skipped**: it signs the moment the policy binds,
@@ -486,7 +490,7 @@ type ResignRequest struct {
 | reason | what the resigner does |
 |---|---|
 | `ResignKeyStateChanged` (rollover, key removal) | `ResignZone` — replacement, which is what the case needs |
-| `ResignPeriodic` | watchlist registration only; the ticker's `SignZone(force=false)` decides when a pass is due |
+| `ResignPeriodic` | watchlist registration only; the ticker's `RenewZoneSignatures` decides when a pass is due |
 | data changed | **nothing** — never enqueued; C1 signed it at publish |
 
 A third reason, `ResignPolicyApplied`, was sketched and **not implemented**: no producer needs
@@ -496,9 +500,16 @@ sender.
 
 The channel type change makes a missed producer a compile error. The producer to convert is
 `triggerResign` (rollovers, `key_state_worker`, the API), which already drops on a full queue
-and keeps that behaviour, plus `SetupZoneSigning`'s enqueue (§3.7). The periodic ticker keeps
-calling `SignZone(force=false)` and is **not** routed through `ResignZone`: replacement is for
-a key-state change, ageing signatures are not one.
+and keeps that behaviour, plus `SetupZoneSigning`'s enqueue (§3.7). The periodic ticker calls
+`RenewZoneSignatures` and is **not** routed through `ResignZone`: replacement is for a key-state
+change, ageing signatures are not one.
+
+An earlier revision of this section said the ticker keeps calling `SignZone(force=false)`. That
+sentence described a defect rather than a design: `SignZone` is a *build*, so the ticker rebuilt
+the NSEC chain and the DNSKEY RRset unsigned before checking anything, restaged everything and
+published unconditionally — once a minute, on every signed zone, whether or not anything had
+changed. `2026-09-05-signing-build-vs-renewal.md` splits the two jobs, and the ticker now runs
+the renewal half.
 
 `force` then survives only where it belongs — a policy binding change, via
 `applyZonePolicyTransactional` → `SignZone(kdb, true)` (`zone_policy_apply.go:215`).
