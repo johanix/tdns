@@ -435,6 +435,15 @@ behaviour goes deliberately: the async tail notifies on `updated || force`, comm
 typically means config reload-zones, so we want to notify even if unchanged"*. Under rule 1
 that is a NOTIFY for an unchanged serial.
 
+That removal is covered **by construction rather than by a test**: after C3 the refresh engine
+emits nothing — no `NotifyQ` send, no inline exchange — and `NotifyDownstreams` no longer
+exists. It still *maintains* `zd.Notify` from config, which is its job (`refreshengine.go:603`,
+`:706`, `:962`) and reads it once for a debug log (`:811`); what it no longer does is act on
+it. Driving a forced-but-unchanged refresh through `RefreshEngine` to count sends
+would need the whole engine harness — channels, config, a live zone registry — for an
+assertion the absent code already makes. The positive half (one NOTIFY per changed serial) is
+tested at the publish level, which is now the only emitter.
+
 ### 3.6 C4 — give `ResignQ` a verb, and use the right tool
 
 ```go

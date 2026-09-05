@@ -1450,32 +1450,6 @@ func (zd *ZoneData) PrintOwners() {
 	}
 }
 
-func (zd *ZoneData) NotifyDownstreams() error {
-	// zd.Logger.Printf("NotifyDownstreams: Zone %s has downstreams: %v", zd.ZoneName, zd.Downstreams)
-	if zd == nil {
-		lg.Error("NotifyDownstreams: zonedata is nil")
-		return fmt.Errorf("zonedata is nil")
-	}
-	for _, d := range zd.Notify {
-
-		// log.Printf("%s: Notifying downstream server %s about new SOA serial", zd.ZoneName, d.Addr)
-
-		m := new(dns.Msg)
-		m.SetNotify(zd.ZoneName)
-		r, err := dns.Exchange(m, d.Addr)
-		if err != nil {
-			// well, we tried
-			lg.Error("downstream NOTIFY failed", "downstream", d.Addr, "zone", zd.ZoneName, "err", err)
-			continue
-		}
-		if r.Opcode != dns.OpcodeNotify {
-			// well, we tried
-			lg.Error("unexpected opcode from downstream on NOTIFY", "downstream", d.Addr, "zone", zd.ZoneName, "opcode", dns.OpcodeToString[r.Opcode])
-		}
-	}
-	return nil
-}
-
 func WildcardReplace(rrs []dns.RR, qname, origqname string) []dns.RR {
 	res := []dns.RR{}
 	for _, rr := range rrs {

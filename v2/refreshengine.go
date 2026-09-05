@@ -10,8 +10,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/miekg/dns"
-
 	core "github.com/johanix/tdns/v2/core"
 )
 
@@ -237,7 +235,6 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 				zd.mu.Unlock()
 			}
 		}
-		zd.NotifyDownstreams()
 	}
 
 	return updated, nil
@@ -904,21 +901,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 									}
 								}
 
-								// Send NOTIFY to downstreams after successful refresh (updated OR forced)
-								// Force typically means "config reload-zones", so we want to notify even if unchanged
-								if updated || force {
-									if len(zd.Notify) > 0 {
-										lgEngine.Info("zone refreshed, sending NOTIFY to downstreams", "zone", zd.ZoneName, "updated", updated, "forced", force, "downstreams", len(zd.Notify))
-										conf.Internal.NotifyQ <- NotifyRequest{
-											ZoneName: zd.ZoneName,
-											ZoneData: zd,
-											RRtype:   dns.TypeSOA,
-											Targets:  peerAddrs(zd.Notify),
-											Urgent:   false,
-										}
-									}
-								}
-
 								// Parse catalog zones after EVERY successful refresh (updated or not)
 								// This ensures membership is populated even if zone file hasn't changed
 								if zd.Options[OptCatalogZone] {
@@ -1234,8 +1216,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 					}
 					if updated {
-						zd.NotifyDownstreams()
-
 						// Write zone file after successful update.
 						// Skip for primary zones loaded from file — rewriting the source
 						// is pointless unless dynamic changes have been made (OptDirty).

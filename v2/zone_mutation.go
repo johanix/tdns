@@ -642,10 +642,10 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 // acting on that notification is refused on status.
 //
 // The hand-off is a NON-BLOCKING send to the Notifier, replacing the inline
-// NotifyDownstreams loop that used to run here. That loop ran under zd.mu, at
-// dns.Exchange's 2s per unreachable downstream, with no way to interrupt it --
-// NotifyDownstreams uses dns.Exchange, not ExchangeContext, so no deadline or
-// cancellation reaches it. A publish therefore held the zone's own lock across
+// NotifyDownstreams loop that used to run here (deleted with the refresh
+// engine's own notify calls). That loop ran under zd.mu, at dns.Exchange's 2s
+// per unreachable downstream, with no way to interrupt it: it used dns.Exchange
+// rather than ExchangeContext, so no deadline or cancellation reached it. A publish therefore held the zone's own lock across
 // network I/O to every downstream, blocking every reader of that zone for as
 // long as it took.
 //
