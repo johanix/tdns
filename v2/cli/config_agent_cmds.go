@@ -53,7 +53,7 @@ func checkAgentInertConfig(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 			"remove it, or run tdns-mpagent (tdns-mp) if you need the multi-provider role")
 	}
 
-	// The agent never signs: SetupZoneSigning returns early for AppTypeAgent
+	// The agent never signs: the signing paths return early for AppTypeAgent
 	// and no ResignerEngine/KeyStateWorker is started. A dnssec: block is still
 	// parsed (and a malformed one is startup-fatal), so this is INFO, not WARN:
 	// the policies are validated above, they just never sign anything.

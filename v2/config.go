@@ -836,7 +836,7 @@ type InternalDnsConf struct {
 	DelegationSyncQ     chan DelegationSyncRequest
 	NotifyQ             chan NotifyRequest
 	AuthQueryQ          chan AuthQueryRequest
-	ResignQ             chan *ZoneData     // the names of zones that should be kept re-signed should be sent into this channel
+	ResignQ             chan ResignRequest // zones needing a re-sign, and why (see ResignReason)
 	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 	ImrEngine           *Imr
 	// ImrReady is closed once ImrEngine has been stored, giving other engines

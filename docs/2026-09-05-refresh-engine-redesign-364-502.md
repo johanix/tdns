@@ -1,12 +1,15 @@
 # Refresh engine redesign — bounded concurrency and per-refresh deadlines (#364, #502)
 
-**Status:** design. Not implemented.
+**Status:** **frozen — implement from here.** **S0–S5 are implemented**, with the companion's C1–C5
+landed between S0 and S1. Both documents are fully implemented; what remains is the lab
+verification in §9.
+Convergence assessed 2026-09-05 (`reviews/2026-09-05-tdns-signing-and-refresh-convergence.md`):
+no disagreement between the two documents. Re-open only to change a decision in §5 or the
+order in the companion's §6.
 Reviewed 2026-09-05 — `reviews/2026-09-05-tdns-refresh-engine-redesign-364-502-review.md`
 (*approve with should-fix*) and `…-rereview.md` (**approve**). S1–S8 and C1–C6 of the first
 review and N1–N4 of the re-review are folded in below; the resolution of S3 differs from its
 recommendation, is argued in §3.3, and was accepted on re-review as D7.
-**Ready to implement.** Start with S0 — and keep R4's probe-vs-transfer assertion in the
-same commit as the bound.
 **Base:** `main` @ `2a211c4a` (S0 implemented on `fix/refresh-probe-deadline-502`; the
 design was written against `d833c683` and re-verified at this base). Work in the **`v2/` tree only** (`tdns/refreshengine.go` is
 the legacy tree; the live engine starts at `v2/main_initfuncs.go:304` and `:344`).
@@ -18,11 +21,13 @@ upstream never finishes provisioning and blocks every zone behind it).
 signing, publishing and NOTIFY; this one owns concurrency and deadlines. The engine's
 three NOTIFY call sites and its two `SetupZoneSigning` calls are **deleted there**, not
 here — see §3.2. **The commit order spans both documents and lives in the companion's §6**;
-this doc's §4 covers only its own commits and assumes the companion's C1–C5 have landed.
+this doc's §4 covers only its own commits and assumes the companion's C1–C5 have landed. The
+branch state for both documents is the companion's §9.
 
-**Supersedes** `docs/2026-09-04-design-364-refresh-engine.md` and the #502 section of
-`docs/2026-09-04-shortlist-designs.md` — both written 2026-09-04 for review on the 5th, and
-both now replaced by this document and its companion. They should be deleted or marked
+**Supersedes** `2026-09-04-design-364-refresh-engine.md` and the #502 section of
+`2026-09-04-shortlist-designs.md` — written 2026-09-04 for review on the 5th, and now replaced
+by this document and its companion. Both are uncommitted working files in another checkout
+rather than files in this branch, so a reader here will not find them. They should be deleted or marked
 superseded rather than left alongside; someone reading the 09-04 pair alone would implement
 a single-envelope timeout (§3.7, R4) and a `broken=[...]` acceptance criterion (§2).
 
@@ -308,9 +313,14 @@ should be. `Refresh` remains callable from tests and from first load with `nil`.
 **The drain protocol** (review S5). Three requirements, all necessary together:
 
 - `done` is buffered to `width`, **and** the worker's outcome send is
-  `select { case p.done <- out: case <-ctx.Done(): }`. Either alone leaves a hole: an
-  unbuffered `done` plus an engine that has stopped selecting on it wedges every worker on
-  send, and `Shutdown` never returns.
+  `select { case p.done <- out: case <-ctx.Done(): }`, **and `Shutdown` drains `done` while
+  it waits**. The third was missing from this section and the implementation deadlocked
+  without it: closing `jobs` ends each worker's range, but a worker that has just finished a
+  refresh still has an outcome to hand back, the buffer absorbs only `width` of those, and
+  the ctx-guarded send helps only if the context was cancelled — true of one of the engine's
+  three exits and not of the other two (`zonerefch` or `bumpch` closing). On those, every
+  worker past the buffer blocks forever on a hand-off nobody wants and the daemon hangs on
+  shutdown. A test pins it.
 - `Shutdown` closes `jobs` so each worker's `range` exits after its current job, then
   `wg.Wait()`s.
 - The engine calls `Shutdown` before it returns, so no file write outlives the engine.
@@ -562,11 +572,11 @@ with the signing and NOTIFY tails still in it will write code that C3 and C5 the
 | # | commit | what | LOC (§7) |
 |---|---|---|---|
 | S0 | `refresh: bound the SOA probe and name the upstream` | §3.7 — the **probe** bound inside `DoTransfer`, the transfer bound around the transfer, and a `RefreshError` carrying the address tried. The #502 stopgap. **Ships first, before the companion's C1.** ✅ **implemented** on `fix/refresh-probe-deadline-502` | 113 |
-| S1 | `refresh: one post-refresh body` | Extract `runZoneRefresh` (§3.2) from the two drifted copies, including the `RefreshError`-clearing fix (§1.3 row 1) and the `Wait` response. §1.3 is the review checklist. | ~245 |
-| S2 | `refresh: retry a failed refresh on SOA RETRY` | §3.6 — `FindSoaRetry` with the primary case, `RefreshCounter.SOARetry`, the adopted-copy fill, the failure path. | ~90 |
-| S3 | `refresh: bounded worker pool` | §3.3 + §3.4 + §3.5 + §3.8: pool, transfer gate, `inflight`, `Wait` answers, drain protocol, dispatch-time `gen`. Fixes #502 properly. | ~275 |
-| S4 | `refresh: jitter the first counter` | §3.10. | ~30 |
-| S5 | `refresh: walk the counters without copying them` | `Items()` → `IterCb`. | ~10 |
+| S1 | `refresh: one post-refresh body` ✅ **implemented** | Extract `runZoneRefresh` (§3.2) from the two drifted copies, including the `RefreshError`-clearing fix (§1.3 row 1) and the `Wait` response. §1.3 is the review checklist. | ~245 |
+| S2 | `refresh: retry a failed refresh on SOA RETRY` ✅ **implemented** | §3.6 — `FindSoaRetry` with the primary case, `RefreshCounter.SOARetry`, the adopted-copy fill, the failure path. | ~90 |
+| S3 | `refresh: bounded worker pool` ✅ **implemented** | §3.3 + §3.4 + §3.5 + §3.8: pool, transfer gate, `inflight`, `Wait` answers, drain protocol, dispatch-time `gen`. Fixes #502 properly. | ~275 |
+| S4 | `refresh: jitter the first counter` ✅ **implemented** | §3.10. | ~30 |
+| S5 | `refresh: walk the counters without copying them` ✅ **implemented** | `Items()` → `IterCb`, plus deferred orphan removal — see §3.11. | ~25 |
 
 `initialLoadZone` needed no wiring of its own: with both bounds inside `DoTransfer` and
 `FetchFromUpstream`, every caller inherits them, and the address now travels in the error
@@ -704,9 +714,20 @@ test figures are the softest number and should be read as a floor.
   non-question at scale, and the natural follow-up.
 - **The due-time heap / timing wheel** (#364 stage 2 proper). 11.55 ms/s at 100k zones is
   irrelevant at lab scale; S5 takes the cheap half.
+
+**S5 was not the one-liner this document called it.** `IterCb` holds each shard's read lock
+while the callback runs, and the ticker removes the counters of zones that no longer exist —
+`Remove` takes the same shard's write lock, so removing from inside the walk deadlocks the
+engine on the first orphaned counter. Orphans are collected during the walk and removed after
+it. The `continue`s in the loop body become `return`s, which is the other thing a mechanical
+`Items()` → `IterCb` substitution gets wrong.
 - **Moving first load into the pool** (§3.11) — which would let §3.1 drop its exception.
 - **Coalescing dynamic-config rewrites** (R8).
-- **Parallelising the Notifier** (`v2/notifier.go:45`) — see the companion doc.
+- **Parallelising the Notifier** (`v2/notifier.go:45`). It is a single goroutine whose
+  `SendNotify` walks targets serially at roughly 2 s per unreachable one, so it is the
+  throughput ceiling on NOTIFY however many publishes feed it. The companion's C2 protects
+  *producers* from that (a non-blocking send that drops on a full queue); making the consumer
+  itself concurrent is a separate change with its own ordering questions.
 - **IXFR.** Untouched.
 
 Do not close #502 when this lands without re-running it against the lab: the provisioning

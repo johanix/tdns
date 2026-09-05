@@ -740,7 +740,8 @@ func (zd *ZoneData) applyIxfrToScratch(newZd *ZoneData, rrs []dns.RR) error {
 		return err
 	}
 
-	data, signed := materializeForIxfr(snap, ixfrTouchedOwners(zd.ZoneName, steps))
+	touched := ixfrTouchedOwners(zd.ZoneName, steps)
+	data, signed := materializeForIxfr(snap, touched)
 	if err := applyIxfrSteps(zd.ZoneName, data, signed, steps); err != nil {
 		return err
 	}
@@ -763,6 +764,9 @@ func (zd *ZoneData) applyIxfrToScratch(newZd *ZoneData, rrs []dns.RR) error {
 	// whole zone that arrived. applyRefreshReplacementLocked uses that to keep
 	// the outbound chain contiguous instead of resetting it (§5).
 	newZd.ixfrDerived = true
+	// The same set the materialisation used, so the publish can sign exactly
+	// what the delta reached instead of walking the zone. See wsSignOwners.
+	newZd.ixfrTouched = touched
 	// The journal anchors to the file, not to whatever the serial becomes after
 	// load-time signing, exactly as the AXFR path records it.
 	newZd.fileSerial = target

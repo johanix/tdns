@@ -373,7 +373,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 
 	// Signed-zone policy-algorithm vs active-key dry-run (predicts a
 	// would-break-on-reload algorithm change). Handles the offline info-skip
-	// itself. Skipped for the agent, which never signs (SetupZoneSigning
+	// itself. Skipped for the agent, which never signs (the signing paths
 	// returns early for AppTypeAgent), so no policy can break a reload there.
 	if role != "agent" {
 		checkPolicyAlgVsActiveKeys(&cfg, v, rep, online, role)

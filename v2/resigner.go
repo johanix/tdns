@@ -10,8 +10,45 @@ import (
 	"github.com/spf13/viper"
 )
 
-// func ResignerEngine(zoneresignch chan ZoneRefresher, stopch chan struct{}) {
-func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
+// ResignReason says WHY a zone was handed to the resigner.
+//
+// The queue used to carry a bare *ZoneData, so "this zone's data changed" and
+// "this zone's key state changed" arrived indistinguishable -- and the resigner
+// applied a FORCED re-sign to both. Forced is right for exactly one of them, and
+// wrong as a steady-state tool: it re-signs RRsets whose signatures are valid,
+// which after a refresh means re-signing everything the refresh just signed.
+type ResignReason uint8
+
+const (
+	// ResignKeyStateChanged: a key became active, inactive or retired, or was
+	// removed. The served RRSIG set has to match the new active set now, and
+	// that means REPLACING signatures rather than adding to them.
+	ResignKeyStateChanged ResignReason = iota + 1
+
+	// ResignPeriodic: keep this zone on the watchlist that renews ageing
+	// signatures. No immediate pass -- the ticker decides when one is due.
+	ResignPeriodic
+)
+
+func (r ResignReason) String() string {
+	switch r {
+	case ResignKeyStateChanged:
+		return "key-state-changed"
+	case ResignPeriodic:
+		return "periodic"
+	}
+	return "unknown"
+}
+
+// ResignRequest is what the ResignQ carries. Changing the channel's element type
+// rather than adding a parallel channel is deliberate: every producer becomes a
+// compile error until it says what it means, so none can be missed.
+type ResignRequest struct {
+	Zd     *ZoneData
+	Reason ResignReason
+}
+
+func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 
 	//	var zoneresignch = conf.Internal.ResignZoneCh
 
@@ -49,25 +86,33 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 
 	ZonesToKeepSigned := make(map[string]*ZoneData)
 
-	// resignNow performs an immediate force re-sign of zd. Used when
-	// triggerResign fires (key-state change, etc.) — we can't wait for the
-	// periodic ticker, because NeedsResigning short-circuits when validity is
-	// healthy, which is exactly the case after a rollover when the existing
-	// RRSIGs are perfectly valid but signed by the wrong key.
-	resignNow := func(zd *ZoneData) {
+	// replaceSignatures brings the served RRSIG set into line with the zone's
+	// currently-active keys, immediately. It cannot wait for the periodic
+	// ticker, because NeedsResigning short-circuits while validity is healthy --
+	// which is exactly the case after a rollover, where the existing RRSIGs are
+	// perfectly valid and merely made by the wrong key.
+	//
+	// ResignZone, not SignZone(force=true), and the difference is the point.
+	// SignZone is ADDITIVE: it writes signatures by the active keys and leaves
+	// RRSIGs by no-longer-active ones in place -- SignRRset says so itself, and
+	// says that replacing them belongs to ResignZone. So the forced pass this
+	// replaces added the right signatures and left the wrong ones on the wire,
+	// which is not what a key-state change needs. ResignZone strips and re-signs
+	// per RRset, on a local copy, so readers never see an unsigned intermediate.
+	replaceSignatures := func(zd *ZoneData) {
 		if zd == nil {
 			return
 		}
-		if !zd.Options[OptInlineSigning] && !zd.Options[OptOnlineSigning] {
+		if !zd.signsItsOwnContent() {
 			return
 		}
-		lgSigner.Debug("triggerResign: forcing zone re-sign", "zone", zd.ZoneName)
-		newrrsigs, err := zd.SignZone(zd.KeyDB, true) // force=true
+		lgSigner.Debug("resigner: replacing signatures after a key-state change", "zone", zd.ZoneName)
+		newrrsigs, err := zd.ResignZone(zd.KeyDB)
 		if err != nil {
-			lgSigner.Error("triggerResign: zone re-sign failed", "zone", zd.ZoneName, "err", err)
+			lgSigner.Error("resigner: replacing signatures failed", "zone", zd.ZoneName, "err", err)
 			return
 		}
-		lgSigner.Info("triggerResign: zone re-signed", "zone", zd.ZoneName, "new_rrsigs", newrrsigs)
+		lgSigner.Info("resigner: signatures replaced", "zone", zd.ZoneName, "new_rrsigs", newrrsigs)
 	}
 
 	for {
@@ -75,22 +120,34 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 		case <-ctx.Done():
 			lgSigner.Info("ResignerEngine terminating")
 			return
-		case zd, ok := <-zoneresignch:
+		case req, ok := <-zoneresignch:
 			if !ok {
 				return
 			}
 
+			zd := req.Zd
 			if zd == nil {
 				lgSigner.Warn("ResignerEngine: nil zone data received, cannot resign")
 				continue
 			}
 
-			// Always force-resign right now — that's the whole point
-			// of the channel: an explicit "this zone needs new RRSIGs"
-			// signal that should not wait for the next ticker.
-			resignNow(zd)
+			// What to do now depends on why the zone was sent. A key-state
+			// change cannot wait for the ticker: the zone is serving signatures
+			// by keys that are no longer active. A periodic registration is the
+			// opposite -- it asks to be watched, and the ticker decides when
+			// anything is due.
+			switch req.Reason {
+			case ResignKeyStateChanged:
+				replaceSignatures(zd)
+			case ResignPeriodic:
+				// Registration only; the watchlist add below is the whole effect.
+			default:
+				lgSigner.Warn("ResignerEngine: unknown resign reason, registering only",
+					"zone", zd.ZoneName, "reason", uint8(req.Reason))
+			}
 
-			// Keep the zone on the watchlist for the periodic re-sign ticker.
+			// Keep the zone on the watchlist for the periodic re-sign ticker,
+			// which since #515 always runs.
 			if _, exist := ZonesToKeepSigned[zd.ZoneName]; !exist {
 				lgSigner.Info("adding zone to re-sign list", "zone", zd.ZoneName)
 			}

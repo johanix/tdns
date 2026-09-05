@@ -401,7 +401,10 @@ func countKeysForMaintain(keys []DnssecKeyWithTimestamps, expectedFlags uint16, 
 	return count
 }
 
-// triggerResign sends a zone to the ResignQ to trigger a re-sign after key state changes.
+// triggerResign asks the resigner to bring a zone's signatures into line with
+// its active keys after a key-state change. Every caller is one -- rollovers,
+// the key-state worker, the keystore API -- so the reason is fixed here rather
+// than passed in.
 func triggerResign(conf *Config, zoneName string) {
 	if conf.Internal.ResignQ == nil {
 		return
@@ -414,7 +417,7 @@ func triggerResign(conf *Config, zoneName string) {
 	}
 
 	select {
-	case conf.Internal.ResignQ <- zd:
+	case conf.Internal.ResignQ <- ResignRequest{Zd: zd, Reason: ResignKeyStateChanged}:
 		lgSigner.Debug("KeyStateWorker: triggered re-sign", "zone", zoneName)
 	default:
 		lgSigner.Warn("KeyStateWorker: ResignQ full, re-sign will happen on next cycle", "zone", zoneName)

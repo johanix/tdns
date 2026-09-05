@@ -126,7 +126,8 @@ resign.example.	3600	IN	NS	ns.resign.example.
 		zd.mu.Lock() // the publishWorkingSetLocked context: zd.mu held across the re-sign
 		defer zd.mu.Unlock()
 		zd.ensureWorkingSet()
-		zd.resignWorkingSetSOAIfSigned()
+		sm, _ := zd.resolveSigningMaterialLocked()
+		zd.resignWorkingSetSOAIfSigned(sm)
 		close(done)
 	}()
 

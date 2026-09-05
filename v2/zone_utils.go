@@ -110,6 +110,13 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 }
 
 func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, conf *Config) (bool, error) {
+	return zd.refresh(ctx, verbose, debug, force, conf, nil)
+}
+
+// refresh is Refresh with the pool's transfer gate threaded in. A nil gate is
+// ungated; see transferGate for why the cap sits around the transfer rather
+// than around this call.
+func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, conf *Config, gate *transferGate) (bool, error) {
 	var updated bool
 
 	// Collect dynamic RRs before refresh (they will be lost during refresh)
@@ -167,7 +174,7 @@ func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, con
 			} else if force {
 				lg.Debug("forced retransfer regardless of SOA serial", "zone", zd.ZoneName)
 			}
-			updated, err = zd.FetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf)
+			updated, err = zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, gate)
 			if err != nil {
 				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
@@ -957,6 +964,11 @@ func (zd *ZoneData) gateZonemdUnlessAlreadyGated(ctx context.Context, newZd *Zon
 // from our own serial would answer with a single SOA rather than the zone the
 // operator asked for.
 func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
+	return zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, nil)
+}
+
+// fetchFromUpstream is FetchFromUpstream with the pool's transfer gate.
+func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config, gate *transferGate) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {
 		return false, fmt.Errorf("FetchFromUpstream: zone %s has no upstreams configured", zd.ZoneName)
@@ -1012,9 +1024,19 @@ func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force
 		// pool worker once the worker pool lands, and on the engine goroutine
 		// only during first load, where the probe bound has already excluded the
 		// unreachable hosts that made this urgent.
+		// The transfer, and only the transfer, is what the pool's gate bounds:
+		// the probe above is one query, this is bandwidth, parse CPU and roughly
+		// twice the zone in memory. Acquired here rather than by the caller
+		// because Refresh does probe and transfer in one call, so a caller-side
+		// acquire would hold a transfer slot through every probe.
+		if gerr := gate.acquire(ctx); gerr != nil {
+			zd.SetStatus(prevStatus)
+			return false, fmt.Errorf("AXFR of %s: %w", zd.ZoneName, gerr)
+		}
 		xfrCtx, cancelXfr := context.WithTimeout(ctx, transferTimeout())
 		upToDate, err := zd.transferFromUpstream(xfrCtx, up, &new_zd, useIxfr, conf)
 		cancelXfr()
+		gate.release()
 		if err != nil {
 			lg.Warn("FetchFromUpstream: transfer from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
@@ -1453,32 +1475,6 @@ func (zd *ZoneData) PrintOwners() {
 	for _, key := range names {
 		fmt.Printf("%s\n", key)
 	}
-}
-
-func (zd *ZoneData) NotifyDownstreams() error {
-	// zd.Logger.Printf("NotifyDownstreams: Zone %s has downstreams: %v", zd.ZoneName, zd.Downstreams)
-	if zd == nil {
-		lg.Error("NotifyDownstreams: zonedata is nil")
-		return fmt.Errorf("zonedata is nil")
-	}
-	for _, d := range zd.Notify {
-
-		// log.Printf("%s: Notifying downstream server %s about new SOA serial", zd.ZoneName, d.Addr)
-
-		m := new(dns.Msg)
-		m.SetNotify(zd.ZoneName)
-		r, err := dns.Exchange(m, d.Addr)
-		if err != nil {
-			// well, we tried
-			lg.Error("downstream NOTIFY failed", "downstream", d.Addr, "zone", zd.ZoneName, "err", err)
-			continue
-		}
-		if r.Opcode != dns.OpcodeNotify {
-			// well, we tried
-			lg.Error("unexpected opcode from downstream on NOTIFY", "downstream", d.Addr, "zone", zd.ZoneName, "opcode", dns.OpcodeToString[r.Opcode])
-		}
-	}
-	return nil
 }
 
 func WildcardReplace(rrs []dns.RR, qname, origqname string) []dns.RR {
@@ -2077,12 +2073,25 @@ func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 }
 
-func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
+// registerForPeriodicResign puts a zone on the resigner's watchlist, so its
+// signatures are renewed before they age out.
+//
+// It used to be SetupZoneSigning, and it used to SIGN -- a full pass, inline,
+// wherever it was called -- and then enqueue the zone, which the resigner could
+// only read as "force-sign this now". Every updated refresh of a signed zone
+// therefore signed it twice, and published twice, and notified twice.
+//
+// Nothing signs here any more, because by the time this runs something already
+// has. A refresh signs its own content before the swap; a policy apply signs
+// when it binds; a restart signs at the refresh publish because the keys resolve
+// even with the policy still unbound. What was missing was never the signing --
+// it was a zone quietly falling off the renewal list.
+func (zd *ZoneData) registerForPeriodicResign(resignq chan<- ResignRequest) error {
 	if Globals.App.Type == AppTypeAgent {
 		return nil // agents never sign
 	}
 
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.signsItsOwnContent() {
 		return nil // this zone should not be signed (at least not by us)
 	}
 
@@ -2090,22 +2099,14 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 		return nil // non-primary zones require inline-signing to be signed
 	}
 
-	kdb := zd.KeyDB
-	newrrsigs, err := zd.SignZone(kdb, false)
-	if err != nil {
-		lg.Error("SignZone failed", "zone", zd.ZoneName, "err", err)
-		return err
-	}
-
-	lg.Info("SetupZoneSigning: zone signed", "zone", zd.ZoneName, "newRRSIGs", newrrsigs)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	select {
-	case resignq <- zd:
+	case resignq <- ResignRequest{Zd: zd, Reason: ResignPeriodic}:
 	case <-ctx.Done():
-		lg.Error("SetupZoneSigning: timeout sending zone to resign queue", "zone", zd.ZoneName)
+		lg.Error("registerForPeriodicResign: timeout sending zone to the resign queue",
+			"zone", zd.ZoneName)
 	}
 
 	return nil

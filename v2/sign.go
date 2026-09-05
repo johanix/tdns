@@ -6,6 +6,7 @@ package tdns
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -134,6 +135,18 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 
 	if dak == nil || len(dak.KSKs) == 0 || len(dak.ZSKs) == 0 {
 		return false, fmt.Errorf("SignRRset: no active DNSSEC keys available")
+	}
+
+	// A zero signature validity -- no policy bound, or a bound policy that does
+	// not set one for this type -- is silently turned into FIVE MINUTES by
+	// sigLifetime, and nothing on the normal path renews those. It is legal and
+	// almost never intended, so say so rather than let a zone go bogus a few
+	// minutes after it loads.
+	if sigValiditySeconds(zd.DnssecPolicy, rrset.RRs[0].Header().Rrtype) == 0 {
+		lgSigner.Warn("signing with no signature validity: these RRSIGs will last five minutes",
+			"zone", zd.ZoneName, "name", name,
+			"rrtype", dns.TypeToString[rrset.RRs[0].Header().Rrtype],
+			"policy_bound", zd.DnssecPolicy != nil)
 	}
 
 	if len(rrset.RRs) == 0 {
@@ -404,6 +417,20 @@ func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (b
 // self-deadlock (Go mutexes are not reentrant). The only zd.mu-holding caller is
 // resignWorkingSetSOAIfSigned (via the publish path); every other caller resolves
 // keys before taking zd.mu and passes false.
+// ErrDnssecPolicyNotBound reports that a zone's active keys cannot be resolved
+// because its DNSSEC policy has not been bound yet, and there are no keys to
+// fall back on. Binding happens post-Ready, so this is the ordinary state of a
+// brand-new zone's first publishes -- NOT a fault.
+//
+// It exists to be matched. The publish path has to tell this apart from a real
+// failure (an unreachable KeyDB, say): the first means "publish unsigned, stay
+// not Ready, the policy apply will sign", the second means "refuse the publish
+// and keep serving the last good snapshot". Testing err != nil cannot
+// distinguish them, and testing zd.DnssecPolicy == nil is worse -- a restart
+// has a nil policy AND usable keys, so that test skips signing on every
+// process start. See docs/2026-09-05-signing-publish-notify-correctness.md §3.3.
+var ErrDnssecPolicyNotBound = errors.New("no DNSSEC policy bound yet; cannot generate active keys")
+
 func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKeys, error) {
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s does not allow signing (neither online-signing nor inline-signing)", zd.ZoneName)
@@ -504,9 +531,12 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 	// PR-2 defers DNSSEC policy binding to the post-Ready sync, so a brand-new
 	// zone can reach here mid-first-load with zd.DnssecPolicy still nil. Key
 	// generation below reads zd.DnssecPolicy.KSKAlgorithm / .ZSKAlgorithm — guard
-	// the nil deref (was a SIGSEGV) and return a clear error instead. The zone is
-	// signed later, after syncZoneDnssecPolicyFromConfig binds the policy and
-	// SetupZoneSigning runs post-Ready. Test for a REAL ZSK (Flags 256), not just
+	// the nil deref (was a SIGSEGV) and return ErrDnssecPolicyNotBound instead,
+	// which the publish path reads as "not yet" rather than as a fault: the zone
+	// publishes unsigned and stays not Ready, and the policy apply signs it once
+	// syncZoneDnssecPolicyFromConfig binds. Note this fires only when keys are
+	// MISSING -- a restart has keys and a nil policy, and must sign. Test for a
+	// REAL ZSK (Flags 256), not just
 	// a non-empty dak.ZSKs: a KSK reused as CSK (Flags 257) is counted in dak.ZSKs
 	// but does NOT satisfy the ZSK-generate path below, which would still deref
 	// the nil policy — the incomplete-guard SIGSEGV CodeRabbit caught.
@@ -518,7 +548,7 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		}
 	}
 	if (len(dak.KSKs) == 0 || !hasRealZSK) && zd.DnssecPolicy == nil {
-		return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s has no DNSSEC policy bound yet; cannot generate active keys", zd.ZoneName)
+		return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s: %w", zd.ZoneName, ErrDnssecPolicyNotBound)
 	}
 
 	// Generate KSK if still missing
@@ -652,7 +682,6 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 	}
 
 	names := zd.workingOwnerNamesLocked()
-
 	var delegations []string
 	for _, name := range names {
 		if core.EqualNames(name, zd.ZoneName) {
@@ -839,8 +868,6 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		return 0, err
 	}
 
-	newrrsigs := 0
-
 	// 4D K-step TTL clamp: build ClampParams once per pass so every RRset
 	// signed in this pass observes the same K. nil for non-clamping zones
 	// (or zones with no scheduled rollover, mid-rollover, etc.).
@@ -857,6 +884,64 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		}
 	}
 
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.ensureWorkingSet()
+
+	if !zd.Options[OptBlackLies] {
+		if err = zd.GenerateNsecChainWithDak(dak); err != nil {
+			return 0, err
+		}
+	}
+
+	newrrsigs, maxObservedTTL, err := zd.signWorkingSetLocked(dak, clamp, force, true, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	zd.publishLocked(zd.generation.Load())
+
+	if err := UpsertZoneSigningMaxTTL(kdb, zd.ZoneName, maxObservedTTL); err != nil {
+		lgSigner.Warn("SignZone: persist max_observed_ttl", "zone", zd.ZoneName, "err", err)
+	}
+	if zd.DnssecPolicy != nil {
+		UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), maxObservedTTL, true, Conf.IsLargeAlgorithm, true)
+	}
+
+	return newrrsigs, nil
+}
+
+// signWorkingSetLocked signs the staged working set with the keys and the clamp
+// the CALLER resolved, and stages the result. Returns the number of RRSIGs
+// written and the largest TTL observed after clamping.
+//
+// Two hard requirements on the caller: it MUST hold zd.mu, and dak MUST be
+// non-nil. Neither is decoration. This function deliberately does not lock, does
+// not resolve keys and does not publish, because those are exactly the steps
+// that re-enter zone locking -- EnsureActiveDnssecKeys reaches PublishDnskeyRRs,
+// which takes zd.mu, and Go mutexes are not reentrant. A nil dak would send
+// SignRRset into its own EnsureActiveDnssecKeys call and deadlock against the
+// lock its caller is already holding; this tree has paid for that once already
+// (the SignZone/UpdateSigValidityFloor deadlock in 6e090a9), and
+// resignWorkingSetSOAIfSigned and restitchNsecLocked both pre-resolve for the
+// same reason.
+//
+// Separating it from SignZone is what lets publishWorkingSetLocked sign a
+// wholesale replacement before the swap, from inside the publish path where the
+// lock is already held.
+//
+// signNsec says whether each owner's NSEC property is signed here. SignZone
+// wants that. The publish path does not: restitchNsecLocked runs immediately
+// after and regenerates and signs the chain itself, so doing it here would be a
+// second full pass over the zone for a result that is about to be replaced.
+func (zd *ZoneData) signWorkingSetLocked(dak *DnssecKeys, clamp *ClampParams, force, signNsec bool, owners map[string]bool) (int, uint32, error) {
+	if dak == nil {
+		return 0, 0, fmt.Errorf("signWorkingSetLocked: zone %s: nil DnssecKeys; the caller must resolve them (see the note above)", zd.ZoneName)
+	}
+
+	newrrsigs := 0
+	var maxObservedTTL uint32
+
 	MaybeSignRRset := func(rrset core.RRset, zone string) (core.RRset, bool) {
 		resigned, err := zd.SignRRset(&rrset, zone, dak, force, clamp)
 		if err != nil {
@@ -868,21 +953,18 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		return rrset, resigned
 	}
 
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	zd.ensureWorkingSet()
-
-	if !zd.Options[OptBlackLies] {
-		if err = zd.GenerateNsecChainWithDak(dak); err != nil {
-			return 0, err
-		}
-	}
-
-	if err = zd.publishDnskeyRRsLocked(dak); err != nil {
-		return 0, err
+	if err := zd.publishDnskeyRRsLocked(dak); err != nil {
+		return 0, 0, err
 	}
 
 	names := zd.workingOwnerNamesLocked()
+	// owners == nil signs every name; otherwise only the named set (an inbound
+	// IXFR passes the owners its delta reached). The delegation survey below
+	// still walks EVERY name: whether a name is glue depends on delegations
+	// anywhere in the zone, not only on the ones we were asked to sign.
+	inScope := func(name string) bool {
+		return owners == nil || owners[core.CanonicalizeName(name)]
+	}
 
 	var delegations []string
 	for _, name := range names {
@@ -902,9 +984,10 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 
 	managesZonemd := zd.zoneManagesZonemd()
 
-	var maxObservedTTL uint32
 	for _, name := range names {
-		// log.Printf("SignZone: signing RRsets under name %s", name)
+		if !inScope(name) {
+			continue
+		}
 		owner := zd.stagedOwner(name)
 		if owner == nil {
 			continue
@@ -958,24 +1041,17 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 
 		// The NSEC property, for the same reason as in ResignZone: it is not
 		// an RRtypes entry, so nothing above signs it.
-		if cur := zd.stagedOwner(name); cur != nil && len(cur.NSEC.RRs) > 0 {
-			nsec := cloneRRset(cur.NSEC)
-			nsec.RRSIGs = nil
-			nsec, _ = MaybeSignRRset(nsec, zd.ZoneName)
-			zd.stageNsecLocked(name, nsec)
+		if signNsec {
+			if cur := zd.stagedOwner(name); cur != nil && len(cur.NSEC.RRs) > 0 {
+				nsec := cloneRRset(cur.NSEC)
+				nsec.RRSIGs = nil
+				nsec, _ = MaybeSignRRset(nsec, zd.ZoneName)
+				zd.stageNsecLocked(name, nsec)
+			}
 		}
 	}
 
-	zd.publishLocked(zd.generation.Load())
-
-	if err := UpsertZoneSigningMaxTTL(kdb, zd.ZoneName, maxObservedTTL); err != nil {
-		lgSigner.Warn("SignZone: persist max_observed_ttl", "zone", zd.ZoneName, "err", err)
-	}
-	if zd.DnssecPolicy != nil {
-		UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), maxObservedTTL, true, Conf.IsLargeAlgorithm, true)
-	}
-
-	return newrrsigs, nil
+	return newrrsigs, maxObservedTTL, nil
 }
 
 // chainNamesLocked reduces the owner names to those the NSEC chain covers:
