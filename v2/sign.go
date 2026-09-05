@@ -241,19 +241,7 @@ func NeedsResigning(rrsig *dns.RRSIG, servedTTL uint32) bool {
 	expirationTime := time.Unix(int64(rrsig.Expiration), 0)
 	remaining := time.Until(expirationTime)
 
-	// resignerengine.interval comes from the immutable RuntimeConfig snapshot
-	// (ConfLive), not the non-thread-safe global viper — this runs in the signing
-	// hot path concurrent with config reload. A zero value clamps to the 60s
-	// floor below.
-	scanInterval := time.Duration(ConfLive().ResignerInterval) * time.Second
-	if scanInterval < 60*time.Second {
-		scanInterval = 60 * time.Second
-	}
-	if scanInterval > 3600*time.Second {
-		scanInterval = 3600 * time.Second
-	}
-
-	threshold := time.Duration(servedTTL)*time.Second + Conf.KaspPropagationDelay() + scanInterval
+	threshold := time.Duration(servedTTL)*time.Second + Conf.KaspPropagationDelay() + resignScanInterval()
 	if remaining < threshold {
 		lgSigner.Info("RRSIG needs resigning, remaining validity below served TTL headroom",
 			"name", rrsig.Header().Name,

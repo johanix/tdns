@@ -236,6 +236,15 @@ type ZoneData struct {
 
 	// Zone snapshot publish path (Project B).
 	snapshot atomic.Pointer[zoneSnapshot]
+	// nextResign caches when this zone's earliest-expiring signature crosses
+	// the renewal threshold, so the resigner can sleep until then instead of
+	// walking every zone every minute to find out that nothing is due. Written
+	// by RenewZoneSignatures, read without zd.mu by the resigner. Nil means
+	// unknown, which means the coarse tick -- so a restart, or any path that
+	// signs without updating it, degrades to today's behaviour rather than to a
+	// missed renewal. In memory only: persisting it would add a value that can
+	// be wrong across a version change, to buy nothing a first pass does not.
+	nextResign atomic.Pointer[resignSchedule]
 	// signingKeys is the per-zone copy-on-write active DNSSEC key set (G3).
 	// Lock-free reads via SigningKeys() / ActiveDnssecKeys(); writers republish
 	// post-commit via republishSigningKeys. Separate from the zone-data snapshot.

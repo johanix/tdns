@@ -76,20 +76,31 @@ func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
 		return 0, nil
 	}
 
-	// Staged-but-unpublished changes are another writer's pending version of
-	// this zone. Renewing from the snapshot and staging the result on top would
-	// silently revert what they staged; renewing from their working set would
-	// publish it early. Neither is this pass's call to make, and it does not
-	// have to be: NeedsResigning fires a served TTL plus a propagation delay
-	// plus a scan interval ahead of expiry, so the next pass will find the same
-	// signatures due against a zone that has settled.
-	if zd.workingSet != nil {
-		lgSigner.Debug("RenewZoneSignatures: a publish is pending, deferring to the next pass",
-			"zone", zd.ZoneName)
-		return 0, nil
+	// Renewal is decided against the version that will be served NEXT: a staged
+	// working set when a writer has left one, the published snapshot otherwise.
+	//
+	// Deciding from the snapshot while a change is staged, and then staging the
+	// result, would silently revert that change -- stageRRsetLocked would put a
+	// re-signed copy of the published version over the pending one. Declining to
+	// run at all while a working set exists is worse: a zone update that is
+	// rejected still leaves one behind (ensureWorkingSet runs before the
+	// `updated` check in ApplyZoneUpdateToZoneData), and on a zone that is not
+	// updated again there would be no next publish to clear it. Renewal would
+	// stop for good, and the signatures would expire.
+	pending := zd.workingSet != nil
+	source := snap.Data
+	if pending {
+		source = zd.workingSet
 	}
 
-	due := zd.collectAgeingSignaturesLocked(snap)
+	due, nextDue := zd.collectAgeingSignaturesLocked(source)
+	if pending {
+		// The estimate describes a version that is not published, so it is not
+		// something the resigner may sleep on.
+		zd.setResignSchedule(time.Time{}, 0)
+	} else {
+		zd.setResignSchedule(nextDue, snap.Serial)
+	}
 	if len(due) == 0 {
 		return 0, nil
 	}
@@ -142,24 +153,40 @@ func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
 	// new serial and repairs the chain around what changed.
 	zd.publishLocked(zd.generation.Load())
 
+	// The signatures just written moved the zone's next renewal. Recomputed
+	// wholesale from what is now published rather than lowered incrementally:
+	// an RRset that held the minimum can have been replaced or removed, and an
+	// estimate that only ever decreases would leave a wake scheduled for a
+	// signature that no longer exists. Early is harmless; late is not.
+	if newSnap := zd.snapshot.Load(); newSnap != nil {
+		_, nextDue := zd.collectAgeingSignaturesLocked(newSnap.Data)
+		zd.setResignSchedule(nextDue, newSnap.Serial)
+	}
+
 	return len(signed), nil
 }
 
-// collectAgeingSignaturesLocked walks the published snapshot and returns the
+// collectAgeingSignaturesLocked walks one version of the zone and returns the
 // RRsets whose signatures have aged into the renewal window.
 //
-// Read-only. The RRsets it returns share storage with the snapshot -- the
-// RRset struct is copied by value but its RRs and RRSIGs slices are not -- so
-// every one of them MUST be cloned before it is signed.
-func (zd *ZoneData) collectAgeingSignaturesLocked(snap *zoneSnapshot) []renewalTarget {
-	if snap == nil {
-		return nil
+// Read-only. The RRsets it returns share storage with the published snapshot --
+// the RRset struct is copied by value but its RRs and RRSIGs slices are not, and
+// a working set is a shallow copy of the snapshot -- so every one of them MUST
+// be cloned before it is signed.
+// It also returns when the zone's earliest-crossing signature next enters that
+// window, over every RRset it considered -- due or not. That is the value the
+// resigner sleeps on, and it is computed here because this walk already visits
+// exactly the right set: the RRsets this pass is responsible for, and no others.
+// A zero time means the zone has no signature to schedule against.
+func (zd *ZoneData) collectAgeingSignaturesLocked(source map[string]*OwnerData) ([]renewalTarget, time.Time) {
+	if source == nil {
+		return nil, time.Time{}
 	}
 
 	// The delegations first, because the glue test below needs the complete set
 	// and the walk reaches each owner once.
 	var delegations []string
-	for name, owner := range snap.Data {
+	for name, owner := range source {
 		if owner == nil || core.EqualNames(name, zd.ZoneName) {
 			continue
 		}
@@ -171,7 +198,19 @@ func (zd *ZoneData) collectAgeingSignaturesLocked(snap *zoneSnapshot) []renewalT
 	managesZonemd := zd.zoneManagesZonemd()
 
 	var due []renewalTarget
-	for name, owner := range snap.Data {
+	var nextDue time.Time
+	note := func(rrset core.RRset) bool {
+		at, ok := renewalDueAt(rrset)
+		if !ok {
+			return false
+		}
+		if nextDue.IsZero() || at.Before(nextDue) {
+			nextDue = at
+		}
+		return time.Now().After(at)
+	}
+
+	for name, owner := range source {
 		if owner == nil {
 			continue
 		}
@@ -200,7 +239,7 @@ func (zd *ZoneData) collectAgeingSignaturesLocked(snap *zoneSnapshot) []renewalT
 				continue
 			}
 			rrset := owner.RRtypes.GetOnlyRRSet(rrt)
-			if !rrsetNeedsRenewal(rrset) {
+			if !note(rrset) {
 				continue
 			}
 			due = append(due, renewalTarget{name: name, rrtype: rrt, rrset: rrset})
@@ -211,37 +250,105 @@ func (zd *ZoneData) collectAgeingSignaturesLocked(snap *zoneSnapshot) []renewalT
 		// The record itself is not regenerated: restitchNsecLocked owns the
 		// chain's shape, and a maintenance pass that rebuilt it would hide a
 		// defect there.
-		if rrsetNeedsRenewal(owner.NSEC) {
+		if note(owner.NSEC) {
 			due = append(due, renewalTarget{
 				name: name, rrtype: dns.TypeNSEC, rrset: owner.NSEC, isNsec: true,
 			})
 		}
 	}
-	return due
+	return due, nextDue
 }
 
-// rrsetNeedsRenewal reports whether any signature on rrset has aged into the
-// renewal window NeedsResigning defines.
+// resignScanInterval is the resigner's own cadence, clamped, and the look-ahead
+// NeedsResigning builds into its threshold.
 //
-// An RRset carrying NO signature is not due. Renewal renews; it does not repair.
-// A missing signature means a build path failed, and healing it here would hide
-// that -- repair is SignZone, reached through the API, a policy apply or a
-// reload.
-func rrsetNeedsRenewal(rrset core.RRset) bool {
-	if len(rrset.RRs) == 0 || len(rrset.RRSIGs) == 0 {
-		return false
+// Shared between the check and the schedule on purpose: a wake computed from a
+// different look-ahead than the check it is aiming at could land after it.
+//
+// resignerengine.interval comes from the immutable RuntimeConfig snapshot
+// (ConfLive), not the non-thread-safe global viper -- this runs in the signing
+// hot path concurrent with config reload.
+func resignScanInterval() time.Duration {
+	scanInterval := time.Duration(ConfLive().ResignerInterval) * time.Second
+	if scanInterval < 60*time.Second {
+		scanInterval = 60 * time.Second
 	}
-	servedTTL := rrset.RRs[0].Header().Ttl
+	if scanInterval > 3600*time.Second {
+		scanInterval = 3600 * time.Second
+	}
+	return scanInterval
+}
+
+// renewalDueAt returns the moment rrset's earliest-crossing signature enters the
+// renewal window: its expiration less the served TTL, the propagation delay and
+// one scan interval. That is exactly the threshold NeedsResigning applies, so
+// the two can never disagree about whether an RRset is due.
+//
+// ok is false for an RRset carrying NO signature: there is nothing to renew and
+// nothing to schedule. Renewal renews; it does not repair. A missing signature
+// means a build path failed, and healing it here would hide that -- repair is
+// SignZone, reached through the API, a policy apply or a reload.
+func renewalDueAt(rrset core.RRset) (time.Time, bool) {
+	if len(rrset.RRs) == 0 || len(rrset.RRSIGs) == 0 {
+		return time.Time{}, false
+	}
+	threshold := time.Duration(rrset.RRs[0].Header().Ttl)*time.Second +
+		Conf.KaspPropagationDelay() + resignScanInterval()
+
+	var earliest time.Time
 	for _, sig := range rrset.RRSIGs {
 		rrsig, ok := sig.(*dns.RRSIG)
 		if !ok {
 			continue
 		}
-		if NeedsResigning(rrsig, servedTTL) {
-			return true
+		due := time.Unix(int64(rrsig.Expiration), 0).Add(-threshold)
+		if earliest.IsZero() || due.Before(earliest) {
+			earliest = due
 		}
 	}
-	return false
+	if earliest.IsZero() {
+		return time.Time{}, false
+	}
+	return earliest, true
+}
+
+// resignSchedule is a zone's cached answer to "when does anything here next need
+// renewing?", together with the serial it was computed from.
+//
+// The serial is what makes it safe to sleep on. Every publish stores a new
+// snapshot with a new serial, and a publish is exactly when signatures may have
+// been rewritten -- by another path, with a different validity. An estimate
+// computed from a version that is no longer published says nothing about the one
+// that is, so it is discarded rather than trusted.
+type resignSchedule struct {
+	due    time.Time
+	serial uint32
+}
+
+// setResignSchedule records when this zone next needs a renewal pass. A zero
+// time clears it: unknown, which the resigner reads as "use the coarse tick".
+func (zd *ZoneData) setResignSchedule(due time.Time, serial uint32) {
+	if due.IsZero() {
+		zd.nextResign.Store(nil)
+		return
+	}
+	zd.nextResign.Store(&resignSchedule{due: due, serial: serial})
+}
+
+// resignDue reports when this zone next needs a renewal pass. ok is false when
+// the answer is unknown -- never walked, or computed from a version that is no
+// longer published -- and the caller must fall back to its coarse tick rather
+// than sleep on it.
+func (zd *ZoneData) resignDue() (time.Time, bool) {
+	sched := zd.nextResign.Load()
+	if sched == nil {
+		return time.Time{}, false
+	}
+	snap := zd.snapshot.Load()
+	if snap == nil || snap.Serial != sched.serial {
+		return time.Time{}, false
+	}
+	return sched.due, true
 }
 
 // isGlueUnderDelegation reports whether name's addresses are glue for one of the

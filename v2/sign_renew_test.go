@@ -36,6 +36,7 @@ ns1.child.renew.example.	3600	IN	A	10.0.0.53
 		ZSKAlgorithm: dns.ED25519,
 		SigValidity:  PolicySigValidity{Default: 14 * 24 * 3600, DNSKEY: 14 * 24 * 3600, DS: 14 * 24 * 3600},
 	}
+	zd.UpdatePolicy = policyAllowing(dns.TypeA, dns.TypeTXT)
 	zd.InstallInitialSnapshot()
 	if _, err := zd.SignZone(kdb, true); err != nil {
 		t.Fatalf("initial SignZone: %v", err)
@@ -86,6 +87,37 @@ func sigStrings(od *OwnerData, rrtype uint16) []string {
 
 func sigsOf(zd *ZoneData, name string, rrtype uint16) []string {
 	return sigStrings(getOwnerFrom(zd.publishedSnapshot(), name), rrtype)
+}
+
+// assertRenewed checks that an RRset's signatures are no longer close to expiry.
+//
+// Deliberately not "the signature text changed": ED25519 is deterministic, so
+// two signings in the same second that draw the same jitter produce identical
+// bytes, and a test comparing text would fail about once in sixty runs while
+// claiming a defect that is not there. Whether the signature still expires
+// shortly is the property the pass exists to fix, and it cannot coincide.
+func assertRenewed(t *testing.T, zd *ZoneData, name string, rrtype uint16) {
+	t.Helper()
+	od := getOwnerFrom(zd.publishedSnapshot(), name)
+	if od == nil {
+		t.Fatalf("%s: gone from the zone", name)
+	}
+	var sigs []dns.RR
+	if rrtype == dns.TypeNSEC {
+		sigs = od.NSEC.RRSIGs
+	} else {
+		sigs = od.RRtypes.GetOnlyRRSet(rrtype).RRSIGs
+	}
+	if len(sigs) == 0 {
+		t.Fatalf("%s %s lost its signature entirely", name, dns.TypeToString[rrtype])
+	}
+	for _, sig := range sigs {
+		expiry := time.Unix(int64(sig.(*dns.RRSIG).Expiration), 0)
+		if time.Until(expiry) < time.Hour {
+			t.Errorf("%s %s still expires at %s: it was due for renewal and was not renewed",
+				name, dns.TypeToString[rrtype], expiry.UTC())
+		}
+	}
 }
 
 // chainShape records what the NSEC chain asserts: which name each NSEC points
@@ -157,7 +189,6 @@ func TestRenewingSignsOnlyTheAgeingRRset(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := renewalTestZone(t, kdb)
 
-	alphaBefore := sigsOf(zd, "alpha.renew.example.", dns.TypeA)
 	bravoBefore := sigsOf(zd, "bravo.renew.example.", dns.TypeA)
 	nsBefore := sigsOf(zd, "ns.renew.example.", dns.TypeA)
 	serial := zd.CurrentSerial
@@ -172,9 +203,7 @@ func TestRenewingSignsOnlyTheAgeingRRset(t *testing.T) {
 		t.Fatalf("renewed %d RRsets, want exactly the one that was ageing", renewed)
 	}
 
-	if got := sigsOf(zd, "alpha.renew.example.", dns.TypeA); len(got) == 0 || got[0] == alphaBefore[0] {
-		t.Errorf("the ageing RRset was not re-signed: %v", got)
-	}
+	assertRenewed(t, zd, "alpha.renew.example.", dns.TypeA)
 	for _, tc := range []struct {
 		name string
 		was  []string
@@ -305,8 +334,7 @@ func TestRenewingRenewsAnAgeingNsecSignature(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := renewalTestZone(t, kdb)
 
-	before := sigsOf(zd, "bravo.renew.example.", dns.TypeNSEC)
-	if len(before) == 0 {
+	if len(sigsOf(zd, "bravo.renew.example.", dns.TypeNSEC)) == 0 {
 		t.Fatal("fixture: bravo has no signed NSEC")
 	}
 	shape := chainShape(t, zd)
@@ -320,9 +348,7 @@ func TestRenewingRenewsAnAgeingNsecSignature(t *testing.T) {
 	if renewed != 1 {
 		t.Fatalf("renewed %d RRsets, want the one ageing NSEC", renewed)
 	}
-	if got := sigsOf(zd, "bravo.renew.example.", dns.TypeNSEC); len(got) == 0 || got[0] == before[0] {
-		t.Errorf("the ageing NSEC signature was not renewed: %v", got)
-	}
+	assertRenewed(t, zd, "bravo.renew.example.", dns.TypeNSEC)
 	assertChainInvariant(t, zd, "after renewing an NSEC signature")
 	if got := chainShape(t, zd); len(got) != len(shape) {
 		t.Errorf("the chain gained or lost names: %d -> %d", len(shape), len(got))
@@ -362,10 +388,15 @@ func TestRenewingDoesNotChangeTheShapeOfTheChain(t *testing.T) {
 	}
 }
 
-// Staged-but-unpublished changes belong to another writer. Renewing from the
-// snapshot and staging the result on top of them would silently revert what they
-// staged.
-func TestRenewingDefersWhileAPublishIsPending(t *testing.T) {
+// A staged change is another writer's pending version of the zone. Renewal
+// decides against THAT, so it renews around the change instead of staging a
+// re-signed copy of the published version over it.
+//
+// Declining to run while a working set exists would be worse than the revert it
+// avoids: a REJECTED zone update leaves one behind too (ensureWorkingSet runs
+// before the `updated` check), so on a zone nobody updates again renewal would
+// stop for good and the signatures would expire.
+func TestRenewingKeepsAPendingChangeAndRenewsAroundIt(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := renewalTestZone(t, kdb)
 
@@ -385,20 +416,47 @@ func TestRenewingDefersWhileAPublishIsPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if renewed != 0 {
-		t.Errorf("renewed %d RRsets while a publish was pending", renewed)
+	if renewed != 1 {
+		t.Fatalf("renewed %d RRsets; the ageing signature is due whether or not a change"+
+			" is staged, and a working set that nothing publishes would strand it", renewed)
 	}
 
+	// The pending change survived: it was not replaced by a re-signed copy of
+	// the version that was published before it was staged.
+	got := getOwnerFrom(zd.publishedSnapshot(), "bravo.renew.example.").RRtypes.GetOnlyRRSet(dns.TypeA)
+	if len(got.RRs) != 1 || got.RRs[0].String() != rr.String() {
+		t.Errorf("the staged change was reverted by the renewal: %v", got.RRs)
+	}
+	if sigs := sigsOf(zd, "alpha.renew.example.", dns.TypeA); len(sigs) == 0 {
+		t.Error("the ageing RRset lost its signature")
+	}
+}
+
+// A leftover working set must not strand renewal, which is the failure mode a
+// "defer while a publish is pending" rule would have introduced.
+func TestRenewingIsNotStrandedByALeftoverWorkingSet(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := renewalTestZone(t, kdb)
+
+	// What a rejected zone update leaves behind: a working set, nothing staged,
+	// and no publish coming to clear it.
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	zd.mu.Unlock()
+
+	ageSignatures(t, zd, "alpha.renew.example.", dns.TypeA)
+
+	renewed, err := zd.RenewZoneSignatures(kdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renewed != 1 {
+		t.Fatalf("renewed %d RRsets; a working set nobody will publish must not stop"+
+			" signatures from being renewed", renewed)
+	}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	if zd.workingSet == nil {
-		t.Fatal("the pending working set was discarded")
-	}
-	staged := zd.stagedOwner("bravo.renew.example.")
-	if staged == nil {
-		t.Fatal("the staged owner is gone")
-	}
-	if got := staged.RRtypes.GetOnlyRRSet(dns.TypeA); len(got.RRs) != 1 || got.RRs[0].String() != rr.String() {
-		t.Errorf("the pending change was overwritten by a renewal of the published version: %v", got.RRs)
+	if zd.workingSet != nil {
+		t.Error("the working set survived the publish")
 	}
 }

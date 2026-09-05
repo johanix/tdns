@@ -152,14 +152,23 @@ published. The price of doing it properly is that an empty pass holds the lock f
 walk. That is what a genuine no-op staying a no-op costs — and it is the cost §4 exists to
 stop paying once a minute.
 
-**One case the recipe declines outright**, found while implementing it: if a working set already
-exists when the lock is taken, another writer has staged a change that has not been published
-yet (`requestPublish(false)` hands the publish to the publisher goroutine, so this state is
-short-lived but real). Renewing from the snapshot and staging the result on top would silently
-revert what they staged; renewing from *their* working set would publish it early. Neither is
-this pass's call to make, and it does not have to be — `NeedsResigning` fires a served TTL plus
-a propagation delay plus a scan interval ahead of expiry, so the next pass finds the same
-signatures due against a zone that has settled. Return `0, nil` and log at debug.
+**Step 3 walks the version that will be served next, which is not always the snapshot.** Found
+while implementing it: when a writer has staged a change that is not published yet, `zd.workingSet`
+is non-nil, and deciding from the snapshot would then renew a version that is about to be
+replaced — and staging the result would put a re-signed copy of the *published* RRset over the
+pending one, silently reverting it. So: walk `zd.workingSet` when there is one, `snap.Data`
+otherwise. The clone rule is unchanged and still mandatory either way, because a working set is
+a shallow copy of the snapshot.
+
+Declining to run at all while a working set exists is the obvious alternative and it is a trap:
+a zone update that is **rejected** leaves a working set behind too — `ensureWorkingSet` runs
+before the `updated` check in `ApplyZoneUpdateToZoneData` — and on a zone nobody updates again
+there is no next publish to clear it. Renewal would stop for good and the signatures would
+expire. A rule that can strand renewal permanently is worse than the revert it avoids.
+
+One consequence: an estimate computed from a working set describes a version that is not
+published, so §4's schedule is cleared rather than recorded in that case. Unknown means the
+coarse tick, which is the safe direction.
 
 **The clone in step 5 is not hygiene, it is the difference between correct and corrupting.**
 
@@ -276,6 +285,21 @@ ticking on a fixed interval. A wake that finds nothing due costs one comparison 
 rather than a missed one: a clock step, a restart with no persisted value, an unforeseen path
 that signs without updating the estimate. An hourly sweep that recomputes from the snapshot
 costs nothing and removes the whole class of "the schedule was wrong and nobody noticed".
+
+**And a floor, which the design as first written did not have.** The configured interval is the
+lower bound on the sleep, so two passes are never closer together than the engine's own cadence.
+Without it a zone that keeps reporting a time in the past spins the engine — and that state is
+reachable: a signature collected as due that `SignRRset` then declines to renew (its remaining
+validity is by a key that is no longer active, or the clamp moved the threshold) leaves the
+estimate in the past for as long as it survives. The floor turns that from a busy loop into
+exactly today's cadence.
+
+**The estimate is tied to the serial it was computed from.** Any publish stores a new snapshot
+with a new serial, and a publish is exactly when signatures may have been rewritten — by another
+path, with a different validity. An estimate computed from a version that is no longer published
+says nothing about the one that is, so it is discarded rather than trusted, and the resigner
+falls back to the floor. This is what makes an hour-long sleep safe: it is only ever slept when
+the value describes the zone as it stands.
 
 ## 5. What each part is worth
 

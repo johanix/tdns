@@ -10,6 +10,53 @@ import (
 	"github.com/spf13/viper"
 )
 
+// resignSafetyTick bounds how long the resigner will sleep on its own estimate.
+// See nextResignWake.
+const resignSafetyTick = time.Hour
+
+// nextResignWake returns how long the resigner may sleep before its next pass:
+// until the earliest renewal any watched zone reports, bounded at both ends.
+//
+// floor -- the configured interval -- is the lower bound, so two passes are
+// never closer together than the engine's own cadence and a zone reporting a
+// time in the past cannot spin it. resignSafetyTick is the upper bound, and it
+// is what keeps this an optimisation rather than a new way to fail: a zone whose
+// estimate is stale, a clock step, or a signing path that does not update the
+// estimate degrades to a late renewal instead of a missed one.
+//
+// A zone that does not know when it is next due pulls the whole wake down to the
+// floor. Sleeping through an unknown is the one thing this must not do.
+func nextResignWake(zones map[string]*ZoneData, floor time.Duration) time.Duration {
+	var earliest time.Time
+	for _, zd := range zones {
+		if zd == nil {
+			continue
+		}
+		if !zd.Options[OptInlineSigning] && !zd.Options[OptOnlineSigning] {
+			continue
+		}
+		due, ok := zd.resignDue()
+		if !ok {
+			return floor
+		}
+		if earliest.IsZero() || due.Before(earliest) {
+			earliest = due
+		}
+	}
+	if earliest.IsZero() {
+		// Nothing signed on the watchlist.
+		return resignSafetyTick
+	}
+	switch d := time.Until(earliest); {
+	case d < floor:
+		return floor
+	case d > resignSafetyTick:
+		return resignSafetyTick
+	default:
+		return d
+	}
+}
+
 // func ResignerEngine(zoneresignch chan ZoneRefresher, stopch chan struct{}) {
 func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 
@@ -22,9 +69,6 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 	if interval > 3600 {
 		interval = 3600
 	}
-
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
-	defer ticker.Stop()
 
 	// The periodic pass is unconditional. It used to be gated on
 	// service.resign, and there is no deployment that wants signatures to
@@ -48,6 +92,25 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 	}
 
 	ZonesToKeepSigned := make(map[string]*ZoneData)
+
+	// The renewal pass is scheduled rather than merely periodic. Every zone
+	// records when its earliest signature crosses the renewal threshold, so
+	// there is no reason to wake every minute and walk every zone to be told
+	// that nothing is due.
+	//
+	// The configured interval stays the FLOOR: two passes are never closer
+	// together than it, so a zone reporting a time in the past -- a signature
+	// this pass collected and SignRRset then declined -- cannot spin the engine.
+	// resignSafetyTick is the CEILING, and it is what keeps this an
+	// optimisation rather than a new way to fail: a clock step, or any path that
+	// signs without updating the estimate, degrades to a late renewal instead of
+	// a missed one.
+	floor := time.Duration(interval) * time.Second
+
+	// Go 1.23 and later discard a stopped timer's pending send, so Stop
+	// followed by Reset needs no drain.
+	timer := time.NewTimer(floor)
+	defer timer.Stop()
 
 	// resignNow performs an immediate force re-sign of zd. Used when
 	// triggerResign fires (key-state change, etc.) — we can't wait for the
@@ -96,7 +159,12 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 			}
 			ZonesToKeepSigned[zd.ZoneName] = zd
 
-		case <-ticker.C:
+			// Whatever the engine is currently sleeping through was computed
+			// without this zone, which has no estimate of its own yet.
+			timer.Stop()
+			timer.Reset(floor)
+
+		case <-timer.C:
 			for _, zd := range ZonesToKeepSigned {
 				// Skip zones where signing has been disabled since
 				// they were added to the list. MP zones can toggle
@@ -129,6 +197,11 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 				}
 				lgSigner.Info("zone signatures renewed (periodic)", "zone", zd.ZoneName, "rrsets_renewed", renewed)
 			}
+
+			wake := nextResignWake(ZonesToKeepSigned, floor)
+			lgSigner.Debug("ResignerEngine sleeping until the next renewal is due",
+				"zones", len(ZonesToKeepSigned), "sleep", wake.String())
+			timer.Reset(wake)
 		}
 	}
 }
