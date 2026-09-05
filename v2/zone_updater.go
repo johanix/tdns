@@ -1023,10 +1023,24 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 
 		rrset, exists := owner.RRtypes.Get(rrtype)
 		if !exists {
-			lg.Warn("ApplyZoneUpdateToZoneData: no RRset for owner", "owner", ownerName, "rrtype", rrtypestr)
+			// Neither branch below is an anomaly, so neither warrants a
+			// warning. This used to log one for both, which put a WARN on the
+			// ordinary path that creates an RRset -- and, once a caller began
+			// sending an unconditional delete ahead of its add so that
+			// publishing REPLACES rather than appends (PublishCsyncRR), on
+			// every such publish rather than only the first.
 			if class == dns.ClassNONE || class == dns.ClassANY {
+				// Delete of an RRset that is not there: a no-op, and a normal
+				// thing to ask for -- "remove it if present" is how a
+				// replace is expressed.
+				lg.Debug("ApplyZoneUpdateToZoneData: delete of an absent RRset, nothing to do",
+					"owner", ownerName, "rrtype", rrtypestr)
 				continue
 			}
+			// Add of a type this owner does not carry yet: this is how every
+			// new RRset comes into existence.
+			lg.Debug("ApplyZoneUpdateToZoneData: creating a new RRset",
+				"owner", ownerName, "rrtype", rrtypestr)
 			rrset = core.RRset{
 				RRs:    []dns.RR{},
 				RRSIGs: []dns.RR{},
