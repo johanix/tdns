@@ -152,6 +152,15 @@ published. The price of doing it properly is that an empty pass holds the lock f
 walk. That is what a genuine no-op staying a no-op costs — and it is the cost §4 exists to
 stop paying once a minute.
 
+**One case the recipe declines outright**, found while implementing it: if a working set already
+exists when the lock is taken, another writer has staged a change that has not been published
+yet (`requestPublish(false)` hands the publish to the publisher goroutine, so this state is
+short-lived but real). Renewing from the snapshot and staging the result on top would silently
+revert what they staged; renewing from *their* working set would publish it early. Neither is
+this pass's call to make, and it does not have to be — `NeedsResigning` fires a served TTL plus
+a propagation delay plus a scan interval ahead of expiry, so the next pass finds the same
+signatures due against a zone that has settled. Return `0, nil` and log at debug.
+
 **The clone in step 5 is not hygiene, it is the difference between correct and corrupting.**
 
 `ensureWorkingSet` is a *shallow* copy: `workingSet[k] = snap.Data[k]`, the same `*OwnerData`,
