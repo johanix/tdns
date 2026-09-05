@@ -1,12 +1,11 @@
 # Refresh engine redesign — bounded concurrency and per-refresh deadlines (#364, #502)
 
-**Status:** design. Not implemented.
+**Status:** design, settled. **S0 is implemented** on `fix/refresh-probe-deadline-502`;
+S1–S5 are pending and land after the companion's C1–C5 (§4).
 Reviewed 2026-09-05 — `reviews/2026-09-05-tdns-refresh-engine-redesign-364-502-review.md`
 (*approve with should-fix*) and `…-rereview.md` (**approve**). S1–S8 and C1–C6 of the first
 review and N1–N4 of the re-review are folded in below; the resolution of S3 differs from its
 recommendation, is argued in §3.3, and was accepted on re-review as D7.
-**Ready to implement.** Start with S0 — and keep R4's probe-vs-transfer assertion in the
-same commit as the bound.
 **Base:** `main` @ `2a211c4a` (S0 implemented on `fix/refresh-probe-deadline-502`; the
 design was written against `d833c683` and re-verified at this base). Work in the **`v2/` tree only** (`tdns/refreshengine.go` is
 the legacy tree; the live engine starts at `v2/main_initfuncs.go:304` and `:344`).
@@ -18,11 +17,13 @@ upstream never finishes provisioning and blocks every zone behind it).
 signing, publishing and NOTIFY; this one owns concurrency and deadlines. The engine's
 three NOTIFY call sites and its two `SetupZoneSigning` calls are **deleted there**, not
 here — see §3.2. **The commit order spans both documents and lives in the companion's §6**;
-this doc's §4 covers only its own commits and assumes the companion's C1–C5 have landed.
+this doc's §4 covers only its own commits and assumes the companion's C1–C5 have landed. The
+branch state for both documents is the companion's §9.
 
-**Supersedes** `docs/2026-09-04-design-364-refresh-engine.md` and the #502 section of
-`docs/2026-09-04-shortlist-designs.md` — both written 2026-09-04 for review on the 5th, and
-both now replaced by this document and its companion. They should be deleted or marked
+**Supersedes** `2026-09-04-design-364-refresh-engine.md` and the #502 section of
+`2026-09-04-shortlist-designs.md` — written 2026-09-04 for review on the 5th, and now replaced
+by this document and its companion. Both are uncommitted working files in another checkout
+rather than files in this branch, so a reader here will not find them. They should be deleted or marked
 superseded rather than left alongside; someone reading the 09-04 pair alone would implement
 a single-envelope timeout (§3.7, R4) and a `broken=[...]` acceptance criterion (§2).
 
@@ -706,7 +707,11 @@ test figures are the softest number and should be read as a floor.
   irrelevant at lab scale; S5 takes the cheap half.
 - **Moving first load into the pool** (§3.11) — which would let §3.1 drop its exception.
 - **Coalescing dynamic-config rewrites** (R8).
-- **Parallelising the Notifier** (`v2/notifier.go:45`) — see the companion doc.
+- **Parallelising the Notifier** (`v2/notifier.go:45`). It is a single goroutine whose
+  `SendNotify` walks targets serially at roughly 2 s per unreachable one, so it is the
+  throughput ceiling on NOTIFY however many publishes feed it. The companion's C2 protects
+  *producers* from that (a non-blocking send that drops on a full queue); making the consumer
+  itself concurrent is a separate change with its own ordering questions.
 - **IXFR.** Untouched.
 
 Do not close #502 when this lands without re-running it against the lab: the provisioning
