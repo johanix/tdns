@@ -76,13 +76,25 @@ func TestPublishStaysInvisibleWhenItCannotSign(t *testing.T) {
 	}
 }
 
-// The restart case, which is the one the policy-pointer predicate used to break.
-// Keys exist, the policy is not bound yet -- a process-start publish -- and the
-// publish must resolve the keys, sign, flip Ready and notify exactly once.
-func TestPublishSignsAndBecomesReadyOnARestart(t *testing.T) {
+// The restart case. Keys exist and the policy is not bound yet -- a process-start
+// publish -- and the zone must NOT be signed there.
+//
+// This test asserted the opposite when it was written, because the design did:
+// "skip on unresolvable keys, not on a nil policy pointer" was meant to stop a
+// restart being silently skipped. It stopped the skip and introduced something
+// worse. Signing under a nil policy gives sigValiditySeconds() == 0, which
+// sigLifetime turns into five-minute RRSIGs, so a restart re-signed its whole
+// zone into signatures that expired six minutes later and that nothing renewed.
+// Observed in the lab, on every record but the SOA -- the SOA escaping because
+// it is re-signed on every publish.
+//
+// The restart is still not skipped. It is deferred by a few steps, to the moment
+// the policy binds, which is the same load.
+func TestRestartPublishesUnsignedThenSignsWhenThePolicyBinds(t *testing.T) {
 	q := withNotifyQ(t, 4)
 	zd := loadIxfrTestZone(t, basicZone)
 	makeZoneSigning(t, zd)
+	policy := zd.DnssecPolicy
 	zd.DnssecPolicy = nil // binding is post-Ready: this is every process start
 	zd.Notify = []PeerConf{{Addr: aDownstream}}
 	zd.mu.Lock()
@@ -91,67 +103,33 @@ func TestPublishSignsAndBecomesReadyOnARestart(t *testing.T) {
 
 	stageAndPublish(t, zd, stageAddA(t, zd, "one.example.test.", "192.0.2.11"))
 
-	if !zd.Ready {
-		t.Fatal("a restart with usable keys did not become Ready; the skip must be " +
-			"on unresolvable keys, not on a nil policy pointer")
+	if zd.Ready {
+		t.Fatal("a zone published before its policy bound became Ready; it is unsigned")
 	}
-	snap := zd.publishedSnapshot()
-	if soa := snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA); len(soa.RRSIGs) == 0 {
-		t.Fatal("the apex SOA was published unsigned on a restart")
+	if got := len(q); got != 0 {
+		t.Fatalf("got %d NOTIFYs for an unsigned version", got)
 	}
-	if got := len(q); got != 1 {
-		t.Fatalf("got %d NOTIFYs, want exactly 1", got)
+	if soa := zd.publishedSnapshot().Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA); len(soa.RRSIGs) != 0 {
+		t.Error("the apex SOA was signed under an unbound policy")
 	}
-}
 
-// Becoming servable is a snapshot-cutting event in its own right, and on a first
-// load whose policy sync backfills it is the ONLY one: the publish that stored
-// the snapshot ran pre-Ready and was silent, and a backfill re-signs nothing.
-func TestInstallInitialSnapshotNotifiesOnTheReadyTransition(t *testing.T) {
-	q := withNotifyQ(t, 4)
-	zd := &ZoneData{
-		ZoneName: "becomesready.example.",
-		Notify:   []PeerConf{{Addr: aDownstream}},
-	}
-	zd.snapshot.Store(&zoneSnapshot{Serial: 7, SOA: &dns.SOA{Serial: 7}})
-	Zones.Set(zd.ZoneName, zd)
-	defer Zones.Remove(zd.ZoneName)
-	defer zd.stopPublisher()
-
-	zd.InstallInitialSnapshot()
+	// The bind, and the signing it enables.
+	zd.DnssecPolicy = policy
+	signOnceAfterPolicyBind(zd)
 
 	if !zd.Ready {
-		t.Fatal("zone did not become Ready")
+		t.Fatal("the zone did not become Ready once its policy bound and it was signed")
+	}
+	soa := zd.publishedSnapshot().Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	if len(soa.RRSIGs) == 0 {
+		t.Fatal("still unsigned after the policy bound")
+	}
+	sig := soa.RRSIGs[0].(*dns.RRSIG)
+	if lifetime := sig.Expiration - sig.Inception; lifetime < 24*3600 {
+		t.Fatalf("signature lifetime %ds: still the five-minute nil-policy fallback", lifetime)
 	}
 	if got := len(q); got != 1 {
-		t.Fatalf("got %d NOTIFYs on the Ready transition, want 1: without this "+
-			"a backfilled first load serves a new serial nobody is told about", got)
-	}
-}
-
-// A full queue must drop, not block. The consumer is a single goroutine that
-// spends up to 2s per unreachable target, so a blocking send here would stall
-// publishes behind it -- while holding zd.mu.
-func TestPublishDropsNotifyWhenTheQueueIsFull(t *testing.T) {
-	q := withNotifyQ(t, 1)
-	q <- NotifyRequest{ZoneName: "occupant."} // fill it
-
-	zd := loadIxfrTestZone(t, basicZone)
-	zd.Notify = []PeerConf{{Addr: aDownstream}}
-
-	done := make(chan struct{})
-	go func() {
-		stageAndPublish(t, zd, stageAddA(t, zd, "one.example.test.", "192.0.2.11"))
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("publish blocked on a full NOTIFY queue, while holding zd.mu")
-	}
-
-	if zd.publishedSnapshot() == nil {
-		t.Fatal("a dropped NOTIFY must not prevent the publish")
+		t.Fatalf("got %d NOTIFYs, want exactly 1 -- the publish that made it servable", got)
 	}
 }
 
@@ -213,5 +191,57 @@ func TestPublishTreatsAnUnboundPolicyAsNotYetRatherThanAFault(t *testing.T) {
 	}
 	if zd.publishedSnapshot() == nil {
 		t.Error("the publish was refused; it should have gone out unsigned")
+	}
+}
+
+// Becoming servable is a snapshot-cutting event in its own right, and on a first
+// load whose policy sync BACKFILLS it is the only one: the publish that stored
+// the snapshot ran pre-Ready and was silent, and a backfill re-signs nothing and
+// publishes nothing more.
+func TestInstallInitialSnapshotNotifiesOnTheReadyTransition(t *testing.T) {
+	q := withNotifyQ(t, 4)
+	zd := &ZoneData{
+		ZoneName: "becomesready.example.",
+		Notify:   []PeerConf{{Addr: aDownstream}},
+	}
+	zd.snapshot.Store(&zoneSnapshot{Serial: 7, SOA: &dns.SOA{Serial: 7}})
+	Zones.Set(zd.ZoneName, zd)
+	defer Zones.Remove(zd.ZoneName)
+	defer zd.stopPublisher()
+
+	zd.InstallInitialSnapshot()
+
+	if !zd.Ready {
+		t.Fatal("zone did not become Ready")
+	}
+	if got := len(q); got != 1 {
+		t.Fatalf("got %d NOTIFYs on the Ready transition, want 1: without this "+
+			"a backfilled first load serves a new serial nobody is told about", got)
+	}
+}
+
+// A full queue must drop, not block. The consumer is a single goroutine that
+// spends up to 2s per unreachable target, so a blocking send here would stall
+// publishes behind it -- while holding zd.mu.
+func TestPublishDropsNotifyWhenTheQueueIsFull(t *testing.T) {
+	q := withNotifyQ(t, 1)
+	q <- NotifyRequest{ZoneName: "occupant."} // fill it
+
+	zd := loadIxfrTestZone(t, basicZone)
+	zd.Notify = []PeerConf{{Addr: aDownstream}}
+
+	done := make(chan struct{})
+	go func() {
+		stageAndPublish(t, zd, stageAddA(t, zd, "one.example.test.", "192.0.2.11"))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("publish blocked on a full NOTIFY queue, while holding zd.mu")
+	}
+
+	if zd.publishedSnapshot() == nil {
+		t.Fatal("a dropped NOTIFY must not prevent the publish")
 	}
 }

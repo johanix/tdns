@@ -137,6 +137,18 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 		return false, fmt.Errorf("SignRRset: no active DNSSEC keys available")
 	}
 
+	// A zero signature validity -- no policy bound, or a bound policy that does
+	// not set one for this type -- is silently turned into FIVE MINUTES by
+	// sigLifetime, and nothing on the normal path renews those. It is legal and
+	// almost never intended, so say so rather than let a zone go bogus a few
+	// minutes after it loads.
+	if sigValiditySeconds(zd.DnssecPolicy, rrset.RRs[0].Header().Rrtype) == 0 {
+		lgSigner.Warn("signing with no signature validity: these RRSIGs will last five minutes",
+			"zone", zd.ZoneName, "name", name,
+			"rrtype", dns.TypeToString[rrset.RRs[0].Header().Rrtype],
+			"policy_bound", zd.DnssecPolicy != nil)
+	}
+
 	if len(rrset.RRs) == 0 {
 		return false, fmt.Errorf("SignRRsetNG: rrset has no RRs")
 	}

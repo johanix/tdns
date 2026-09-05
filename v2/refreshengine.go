@@ -304,8 +304,51 @@ func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, conf
 		lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
 		return err
 	}
+	signOnceAfterPolicyBind(zd)
 	drainAndRunOnFirstLoad(zd)
 	return nil
+}
+
+// signOnceAfterPolicyBind signs a zone now that its DNSSEC policy is bound.
+//
+// First load publishes BEFORE the policy binds -- binding is post-Ready by
+// design -- so that publish cannot sign, and does not try: signing under a nil
+// policy yields sigValiditySeconds() == 0, which sigLifetime turns into a
+// five-minute signature lifetime. A whole zone of those, and nothing on the
+// normal path renews them.
+//
+// This is the step that has to exist for the deferral to be safe. The policy
+// apply covers it when it runs -- Branch 0 ends in SignZone -- but Branch 1, an
+// applied row that already matches intent, which is every ordinary restart,
+// rebinds and returns without signing. The zone would then serve exactly what
+// the unsigned first publish left it.
+//
+// force=false: sign what is unsigned. After a first load that is everything;
+// after a restart from a file that already carries good signatures it is a walk
+// that writes nothing. SignZone publishes, which is what flips the zone Ready
+// through the servable gate and emits its one NOTIFY.
+func signOnceAfterPolicyBind(zd *ZoneData) {
+	if !zd.signsItsOwnContent() || zd.DnssecPolicy == nil || zd.KeyDB == nil {
+		return
+	}
+	// Already properly signed -- by the publish path, or by a previous run whose
+	// signatures came in with the file. Signing again would republish and bump
+	// the serial for nothing, and finishFirstLoadPolicy is explicitly a
+	// retry-only path that must not re-publish.
+	zd.mu.Lock()
+	signed := zd.snapshotContentIsServableLocked(zd.snapshot.Load())
+	zd.mu.Unlock()
+	if signed {
+		return
+	}
+	newrrsigs, err := zd.SignZone(zd.KeyDB, false)
+	if err != nil {
+		lgEngine.Error("signing after the DNSSEC policy bound failed",
+			"zone", zd.ZoneName, "err", err)
+		return
+	}
+	lgEngine.Info("zone signed after its DNSSEC policy bound",
+		"zone", zd.ZoneName, "new_rrsigs", newrrsigs)
 }
 
 // completeFirstZonePolicyAndLoad finishes a first-bind after initialLoadZone:
@@ -335,6 +378,9 @@ func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Con
 		lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
 		return err
 	}
+
+	// The policy is bound now, so the zone can finally be signed properly.
+	signOnceAfterPolicyBind(zd)
 
 	// Phase 2: the file is the source of truth but lags behind it -- it holds
 	// the zone as of the last write-zone/sync/freeze, while the persisted

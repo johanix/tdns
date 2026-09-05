@@ -902,6 +902,22 @@ func (zd *ZoneData) resolveSigningMaterialLocked() (*signingMaterial, error) {
 	if !zd.signsItsOwnContent() || !zoneMayOriginateContent(zd) {
 		return nil, nil
 	}
+	// An UNBOUND policy means this publish cannot sign, however resolvable the
+	// keys are. Signing anyway is what produced the regression this guard
+	// exists for: sigValiditySeconds(nil) returns 0, sigLifetime turns 0 into
+	// FIVE MINUTES, and a zone loaded before its policy binds gets a whole
+	// zone's worth of RRSIGs that expire in five minutes -- which nothing on
+	// the normal path renews, because the policy sync's Branch 1 rebinds
+	// without re-signing.
+	//
+	// The keys-not-the-pointer rule still holds for what it was written for:
+	// the RESTART case must not be silently skipped. It is not skipped, it is
+	// deferred by a few steps -- signOnceAfterPolicyBind signs the zone as soon
+	// as the sync binds the policy, which is the same load. Until then the zone
+	// publishes unsigned and stays not Ready, so nothing can see it.
+	if zd.DnssecPolicy == nil {
+		return nil, nil
+	}
 	// No KeyDB, nothing to resolve from. Matches what zonemdSignableLocked has
 	// always said (`DnssecPolicy != nil && KeyDB != nil`) and is load-bearing
 	// rather than defensive: the KeyDB accessors do not guard their receiver all

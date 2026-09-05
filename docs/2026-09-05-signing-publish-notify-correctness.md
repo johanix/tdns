@@ -40,6 +40,12 @@ the tree and added as §9 item 9 — the SOA re-sign, the NSEC restitch and the 
 the same retired `DnssecPolicy == nil` test that C1 stopped using. Both documents marked
 frozen.
 
+**Field regression, 2026-09-05.** Review 2's predicate — "skip on unresolvable keys, not on a
+nil policy pointer" — was implemented and produced a zone whose every record but the SOA
+carried a five-minute signature. §3.3 now requires a bound policy *and* resolvable keys, and
+defers the restart's signing to the bind rather than skipping it. `SignRRset` warns when asked
+to sign with a zero validity, so the trap is visible if it recurs.
+
 **Review 3.** The `Ready` flip cannot reuse the NOTIFY predicate, which tests `Ready` first
 and is therefore circular — every zone would stay not Ready, silently. Split into a content
 half and a full test. `InstallInitialSnapshot` must notify only when *it* flipped Ready, or a
@@ -297,8 +303,21 @@ snapshot, so this is the established shape.
 **First load — keys cannot be resolved yet.** Publish unsigned, stay **not Ready**, set no
 error.
 
-The predicate is *"the keys cannot be resolved"*, **not** *"`zd.DnssecPolicy` is nil"*. Those
-differ exactly on a restart. `EnsureActiveDnssecKeys` raises its deferred-bind error only when
+**The predicate is "the keys cannot be resolved, OR the policy is not bound".**
+
+An earlier revision of this section said "keys, not the policy pointer". That was implemented
+and it broke a lab zone. Signing under a nil policy is not harmless: `sigValiditySeconds`
+returns 0, `sigLifetime` silently substitutes **five minutes**, and a first load signed the
+whole zone into signatures that expired six minutes later — every RRset except the SOA, which
+escaped only because `resignWorkingSetSOAIfSigned` re-signs it on every publish. Nothing
+renewed them: Branch 1 rebinds without re-signing, and the periodic ticker is off by default.
+
+The concern behind that revision was real and still holds — a restart must not be silently
+skipped — so the restart is **deferred, not skipped**: it signs the moment the policy binds,
+in the same load, via `signOnceAfterPolicyBind` below. Until then it publishes unsigned and
+stays not Ready, so nothing can see it.
+
+The keys half of the predicate still matters on its own, and for its own reason: `EnsureActiveDnssecKeys` raises its deferred-bind error only when
 keys are *missing*:
 
 ```go
@@ -328,6 +347,17 @@ case err != nil:
 // Keys exist: sign, bound policy or not. A nil policy means no TTL clamp, not
 // no signing.
 ```
+
+**`signOnceAfterPolicyBind` is what makes the deferral safe.** Called from both first-load
+completion paths as soon as `syncZoneDnssecPolicyFromConfig` succeeds, it signs the zone once —
+`SignZone(force=false)`, which publishes, which flips Ready through the servable gate and emits
+the one NOTIFY. It is the step C5 removed from `SetupZoneSigning`, restored deliberately rather
+than as a side effect of a registration call.
+
+It is gated on the zone actually needing it: an already content-servable snapshot is left
+alone. `finishFirstLoadPolicy` is a retry-only path that must not re-publish, and re-signing an
+already-signed zone there would bump its serial for nothing — a test pins that, and caught the
+first version of this fix violating it.
 
 `ErrDnssecPolicyNotBound` does not exist yet — `sign.go:521` returns a bare `fmt.Errorf`, so
 there is nothing to match on. Add the sentinel and wrap it there. Without it, a KeyDB failure
@@ -548,6 +578,7 @@ changed — and none at all until there is a version a downstream could take.
 | R3 | A full-zone sign fires on an inbound IXFR | **certain** if §3.1 stages a bare boolean | severe at scale: the whole zone re-materialised per delta | stage `wsSignOwners` from `ixfrTouchedOwners` for an `ixfrDerived` replacement | **not** signature counters, which stay low either way — assert untouched owners were not cloned |
 | R4 | `Ready` flips on a signing zone holding an unsigned snapshot | certain without the §3.3 gate | severe: queries answered unsigned from a Ready zone — C1's defect at first load | gate every site on the content half | first-load test |
 | R5 | Signing under `zd.mu` lengthens the lock hold on every changed refresh | certain | moderate: readers of that zone stall for the pass | signing already happened under `zd.mu` (`sign.go:871`) — the hold moves, it does not grow; C2 takes `dns.Exchange` off the same lock | publish latency per zone |
+| R13 | Signing under an unbound policy, or one with zero `SigValidity` | **certain** if the publish path signs before the bind — it did, and shipped | **severe**: every RRset gets a five-minute signature and nothing renews it; the zone goes bogus minutes after loading | require a bound policy in `resolveSigningMaterialLocked`; sign at the bind instead; `SignRRset` warns on a zero validity | a signature whose `Expiration - Inception` is ~360s, and the new warning |
 | R6 | A KeyDB fault on first load is mistaken for a deferred policy bind | high without the sentinel | moderate: a real fault published as an unsigned zone | `ErrDnssecPolicyNotBound` + `errors.Is`, not `err != nil` | a test with a broken KeyDB asserting refusal |
 | R7 | `InstallInitialSnapshot` double-notifies after the publish flip | high if it notifies unconditionally | low: a second NOTIFY for one serial, which is rule 1 | emit only when this call changed `Ready` | NOTIFY count across a restart |
 | R8 | A zone freezes at its last good version on a persistent signing failure | low | moderate, and intended (§3.3) | `DnssecError` set and surfaced | the zone is an ERROR row on `zone list` |

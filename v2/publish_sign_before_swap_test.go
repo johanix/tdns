@@ -31,6 +31,10 @@ func makeZoneSigning(t *testing.T, zd *ZoneData) *KeyDB {
 		Mode:         DnssecPolicyModeKSKZSK,
 		KSKAlgorithm: dns.ED25519,
 		ZSKAlgorithm: dns.ED25519,
+		// A real policy sets these, and a policy that does not is its own trap:
+		// sigValiditySeconds returns 0 and sigLifetime silently substitutes five
+		// minutes, which is the regression these tests exist for.
+		SigValidity: PolicySigValidity{Default: 14 * 86400, DNSKEY: 30 * 86400, DS: 14 * 86400},
 	}
 	return kdb
 }
@@ -219,5 +223,56 @@ func TestPublishSignsOnlyTheOwnersAnIxfrTouched(t *testing.T) {
 		t.Fatal("an owner the delta never touched was re-materialised: the signing " +
 			"pass staged it, and stageRRsetLocked clones. At zone scale this is the " +
 			"whole point of scoping the pass")
+	}
+}
+
+// A publish must not sign under an unbound policy.
+//
+// The regression this pins: signing with zd.DnssecPolicy == nil gives
+// sigValiditySeconds() == 0, which sigLifetime turns into a FIVE-MINUTE
+// signature lifetime -- and a first load publishes before the policy binds, so
+// a whole zone would be signed that way and nothing on the normal path renews
+// it. The zone must publish unsigned and stay not Ready instead.
+func TestPublishDoesNotSignUnderAnUnboundPolicy(t *testing.T) {
+	zd := loadIxfrTestZone(t, basicZone)
+	makeZoneSigning(t, zd)
+	policy := zd.DnssecPolicy
+	zd.DnssecPolicy = nil // as at every first load: binding is post-Ready
+	zd.mu.Lock()
+	zd.Ready = false
+	zd.mu.Unlock()
+
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	stageArrivedRRset(t, zd)
+	zd.wsNeedsFullSign = true
+	zd.publishWorkingSetLocked(zd.generation.Load(), true)
+	zd.mu.Unlock()
+
+	if rrset := publishedARRset(t, zd, replacedOwner); len(rrset.RRSIGs) != 0 {
+		sig := rrset.RRSIGs[0].(*dns.RRSIG)
+		t.Fatalf("signed under an unbound policy: inception %d expiration %d, a %d-second "+
+			"lifetime that nothing will renew", sig.Inception, sig.Expiration,
+			sig.Expiration-sig.Inception)
+	}
+	if zd.Ready {
+		t.Error("an unsigned snapshot of a signing zone became Ready")
+	}
+
+	// And once the policy binds, the zone signs with the policy's own validity.
+	zd.DnssecPolicy = policy
+	signOnceAfterPolicyBind(zd)
+
+	rrset := publishedARRset(t, zd, replacedOwner)
+	if len(rrset.RRSIGs) == 0 {
+		t.Fatal("the zone was never signed after its policy bound")
+	}
+	sig := rrset.RRSIGs[0].(*dns.RRSIG)
+	if lifetime := sig.Expiration - sig.Inception; lifetime < 24*3600 {
+		t.Fatalf("signature lifetime %ds; the bound policy asks for 14 days, so this "+
+			"is still the nil-policy fallback", lifetime)
+	}
+	if !zd.Ready {
+		t.Error("the zone did not become Ready once it was properly signed")
 	}
 }
