@@ -8,9 +8,9 @@ the already-landed C1/C2 commits must change before they un-park.
 the S0 branch. They were implemented ahead of this review — the ordering error is recorded in
 §3.10 — and are not to be merged until §3.10 is done.
 **Base:** `main` @ `d833c683`. `v2/` tree only.
-**Issues:** none filed yet — **still outstanding**, and it was meant to precede C1 landing.
-C1 (§3.1) is a correctness defect: an inline-signing secondary serves unsigned authored data
-for the length of a signing pass after every changed refresh.
+**Issue:** the C1 defect is written up in **§8**, ready to be opened. Not opened on GitHub
+yet — say the word. C1 (§3.1) is a correctness defect: an inline-signing secondary serves
+unsigned authored data for the length of a signing pass after every changed refresh.
 **Companion:** `2026-09-05-refresh-engine-redesign-364-502.md` — the refresh-engine
 concurrency work. Separate area, separate review; the global commit order across both is
 in §6.
@@ -475,8 +475,8 @@ it un-parks:
 | 3 | `Ready` must not flip on a signing zone whose snapshot has no apex SOA RRSIG — `InstallInitialSnapshot` (both branches) and `applyRefreshReplacementLocked` | §3.3; without it the unsigned first-load snapshot is served to queries, which is C1's own defect relocated |
 | 4 | `snapshotIsServableLocked` calls `signsItsOwnContent()` instead of inlining the option test | §3.4; same predicate today, two places to drift tomorrow |
 
-And one process item that was missed: the C1 issue named in the header block was to be
-filed *before* C1 landed.
+And one process item that was missed: the C1 issue was to be filed *before* C1 landed. It
+is written up in §8.
 
 ### 3.10 Not in scope, but noticed
 
@@ -589,3 +589,58 @@ has only one kind of publish to reason about.
 - **Rollover:** a key-state change re-signs via `ResignZone` and leaves no RRSIG by a
   no-longer-active key — the thing `SignZone(force=true)` never did.
 - Run all three test modules: `go test ./...` from `v2/` skips `v2/cli` and `v2/cache`.
+
+---
+
+## 8. The C1 defect, written up
+
+Ready to open against `johanix/tdns`. Kept free of deployment detail, since the repository is
+public.
+
+---
+
+**Title:** A signing secondary serves unsigned records for the length of a signing pass after
+every changed refresh
+
+A zone that signs its own content but receives it unsigned — an inline-signing secondary —
+publishes the transferred data first and signs it afterwards, in a second publish. Between the
+two, the snapshot being served holds:
+
+| | |
+|---|---|
+| apex SOA | signed — `resignWorkingSetSOAIfSigned` runs on every publish |
+| NSEC chain | signed — `restitchNsecLocked` regenerates and signs it during the publish |
+| ZONEMD | signed — computed and signed during the publish |
+| every transferred RRset | **unsigned** |
+
+The zone is `Ready`, so that version is served. A validating resolver asking for a name during
+the window gets an unsigned answer alongside a signed denial chain. `ZoneTransferOut`'s
+fail-closed guard does not stop a downstream taking it either: the guard inspects the apex
+SOA's RRSIG, and the apex SOA is signed.
+
+The window is not a race. It lasts from the refresh publish until the signing publish — a full
+signing pass over the zone, after every changed refresh, and considerably longer with PQ
+algorithms.
+
+**Where**
+
+- `applyRefreshReplacementLocked` publishes the replacement (`v2/zone_mutation.go:725`).
+- `SetupZoneSigning` → `SignZone` signs and publishes again (`v2/zone_utils.go:2006`,
+  `v2/sign.go:969`), with `bumpSerial=true`.
+
+**Also visible from outside**, and the same cause: one upstream change produces more than one
+published serial, so downstreams transfer more than once for it, and the refresh engine emits
+a NOTIFY of its own on top of the one each publish already sends.
+
+**Not affected**
+
+- Dynamic updates: `ApplyZoneUpdateToZoneData` signs each RRset as it stages it and publishes
+  once (`v2/zone_updater.go:1156`).
+- A primary reloading an already-signed file: the RRSIGs arrive with the data.
+- Zones that do not sign their own content.
+
+**Fix**
+
+Sign the staged content before the snapshot is stored, in the same publish — the argument
+`restitchNsecLocked` already makes for the NSEC chain, applied to authored data. Design:
+`docs/2026-09-05-signing-publish-notify-correctness.md`, C1.
