@@ -471,10 +471,15 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		return false, 0, nil
 	}
 	// No primary was even reachable.
+	//
+	// Counted from the snapshot taken under zd.mu at the top, not from
+	// zd.Upstreams: the engine rewrites that slice in place on every refresh
+	// that re-resolves a hostname primary, so reading it here races -- and would
+	// report a count that does not match the addresses actually tried.
 	lg.Error("DoTransfer: SOA probe failed on all upstreams (unreachable)", "zone", zd.ZoneName,
-		"count", len(zd.Upstreams), "upstreams", strings.Join(tried, ", "), "err", lastErr)
+		"count", len(upstreams), "upstreams", strings.Join(tried, ", "), "err", lastErr)
 	return false, 0, fmt.Errorf("SOA probe of %s failed: no response from any of %d upstream(s) [%s]: %w",
-		zd.ZoneName, len(zd.Upstreams), strings.Join(tried, ", "), lastErr)
+		zd.ZoneName, len(upstreams), strings.Join(tried, ", "), lastErr)
 }
 
 // newTransferScratchZone builds the throwaway ZoneData an inbound AXFR is
