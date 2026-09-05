@@ -204,7 +204,11 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	conf.Internal.DelegationSyncQ = make(chan DelegationSyncRequest, 10)
 	conf.Internal.ImrReady = NewImrReadiness()
 	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, max(10, len(conf.Zones)))
-	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
+	// Deep enough that a burst of publishes does not start dropping downstream
+	// NOTIFYs: the sender is now every publish (non-blocking, drops on a full
+	// queue) and the consumer is a single goroutine spending up to 2s per
+	// unreachable target. Matches DnsNotifyQ below.
+	conf.Internal.NotifyQ = make(chan NotifyRequest, 100)
 	conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
 	conf.Internal.RecursorCh = make(chan ImrRequest, 10)
 	// Used by tdns-auth, tdns-agent and tdns-combiner

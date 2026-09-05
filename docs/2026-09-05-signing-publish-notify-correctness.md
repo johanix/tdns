@@ -1,6 +1,6 @@
 # Signing, publishing and NOTIFY — one version, one signing pass, one NOTIFY
 
-**Status:** design, reviewed in conversation 2026-09-05. C1 implemented; C2–C5 pending.
+**Status:** design, reviewed in conversation 2026-09-05. C1 and C2 implemented; C3–C5 pending.
 **Base:** `main` @ `d833c683`. `v2/` tree only.
 **Issues:** none filed yet. C1 (§3.1) is a correctness defect and deserves one.
 **Companion:** `2026-09-05-refresh-engine-redesign-364-502.md` — the refresh-engine
@@ -253,8 +253,23 @@ Two changes bundled with it:
   servable" is a snapshot-cutting event; this keeps rule 1 exact rather than approximately
   true.
 
-`NotifyDownstreams` itself — the blocking `dns.Exchange` loop — has no remaining callers
-and is deleted.
+`NotifyDownstreams` itself — the blocking `dns.Exchange` loop — survives C2 and is deleted
+in **C3**, which removes its last three callers. This section said C2 deletes it, which was
+wrong about the ordering: after C2 the publish path no longer calls it, but
+`refreshengine.go:240` and `:1237` still do.
+
+**Implemented** on `fix/sign-before-publish`, with two mechanics the design left open:
+
+- **The send happens under `zd.mu`, deliberately.** `publishWorkingSetLocked` cannot drop
+  the lock — its callers own it — so "off the lock" is not available inside it. What makes
+  that safe is that a non-blocking channel send cannot block: there is no I/O and no
+  waiting, which is the entire property the old inline `dns.Exchange` loop lacked.
+- **The queue is read from the package-global `Conf`.** `publishWorkingSetLocked` has no
+  `*Config` in scope, and threading one onto `ZoneData` (as `DelegationSyncQ` is) would mean
+  setting it at every site that builds a `ZoneData` — miss one and that zone silently never
+  notifies. The signing path already reads `Conf` from inside this same call chain
+  (`sign.go`), and the apps initialise the global (`conf := &tdns.Conf`), so this is the
+  established shape rather than a new one. A nil queue is a no-op.
 
 ### 3.5 C3 — delete the refresh engine's NOTIFYs
 
@@ -379,7 +394,7 @@ Across both documents, on one branch:
 |---|---|---|
 | 1 | **#502 deadline stopgap** — bound the SOA probe, name the unreachable upstream ✅ **implemented** (`fix/refresh-probe-deadline-502`) | engine doc, S0 |
 | 2 | **C1** — sign wholesale replacement before the swap ✅ **implemented** (`fix/sign-before-publish`) | here, §3.1–3.3 |
-| 3 | **C2** — NOTIFY only when the version is servable, off the lock | here, §3.4 |
+| 3 | **C2** — NOTIFY only when the version is servable, off the lock ✅ **implemented** | here, §3.4 |
 | 4 | **C3** — delete the refresh engine's NOTIFYs | here, §3.5 |
 | 5 | **C4** — `ResignQ` intent; `ResignZone` for key-state changes | here, §3.6 |
 | 6 | **C5** — `SetupZoneSigning` becomes a registration | here, §3.7 |

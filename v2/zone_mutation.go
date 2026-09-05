@@ -628,7 +628,75 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		lg.Error("publish: serial mirror drift", "zone", zd.ZoneName, "current", zd.CurrentSerial, "snapshot", loaded.Serial)
 	}
 
-	_ = zd.NotifyDownstreams()
+	zd.notifyIfServableLocked(snap)
+}
+
+// notifyIfServableLocked emits at most one NOTIFY for the version just
+// published, and only if a downstream could actually take it.
+//
+// The predicate is deliberately ZoneTransferOut's own admission test. A NOTIFY
+// about a version we would then REFUSE to transfer only burns the downstream's
+// retry budget, and first load publishes exactly such a version: the load path
+// publishes before InstallInitialSnapshot marks the zone Ready, and a downstream
+// acting on that notification is refused on status.
+//
+// The hand-off is a NON-BLOCKING send to the Notifier, replacing the inline
+// NotifyDownstreams loop that used to run here. That loop ran under zd.mu, at
+// dns.Exchange's 2s per unreachable downstream, with no way to interrupt it --
+// NotifyDownstreams uses dns.Exchange, not ExchangeContext, so no deadline or
+// cancellation reaches it. A publish therefore held the zone's own lock across
+// network I/O to every downstream, blocking every reader of that zone for as
+// long as it took.
+//
+// A full queue drops and says so. NOTIFY is best-effort by design -- a
+// downstream that misses one refreshes on its SOA timer -- and blocking a
+// publish on a queue whose consumer is serial and 2s-per-target is how the stall
+// comes back somewhere new. The send cannot block, which is what makes it safe
+// to do while holding zd.mu.
+func (zd *ZoneData) notifyIfServableLocked(snap *zoneSnapshot) {
+	if len(zd.Notify) == 0 {
+		return
+	}
+	if !zd.snapshotIsServableLocked(snap) {
+		lg.Debug("publish: not notifying downstreams, this version is not servable yet",
+			"zone", zd.ZoneName, "ready", zd.Ready)
+		return
+	}
+	q := Conf.Internal.NotifyQ
+	if q == nil {
+		return
+	}
+	select {
+	case q <- NotifyRequest{
+		ZoneName: zd.ZoneName,
+		ZoneData: zd,
+		RRtype:   dns.TypeSOA,
+		Targets:  peerAddrs(zd.Notify),
+	}:
+	default:
+		lg.Warn("publish: NOTIFY queue is full, dropping a downstream notification;"+
+			" the downstream picks this up on its own SOA timer instead",
+			"zone", zd.ZoneName, "serial", snap.Serial, "downstreams", len(zd.Notify))
+	}
+}
+
+// snapshotIsServableLocked reports whether a downstream could take this
+// snapshot. The two gates are ZoneTransferOut's, for its reasons: the zone must
+// be Ready, and a zone configured to be signed must not be offering an unsigned
+// apex SOA. Keeping the predicates identical is the point -- what we notify
+// about and what we will hand over have to be the same set of versions.
+func (zd *ZoneData) snapshotIsServableLocked(snap *zoneSnapshot) bool {
+	if snap == nil || !zd.Ready {
+		return false
+	}
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return true
+	}
+	if snap.Apex == nil {
+		return false
+	}
+	soa := snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	return len(soa.RRSIGs) > 0
 }
 
 // applyRefreshReplacementLocked swaps freshly loaded zone data in and publishes
@@ -907,6 +975,13 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 		if cur := zd.snapshot.Load(); cur != nil && cur.SOA != nil {
 			zd.Ready = true
 			zd.Status = ZoneStatusReady
+			// Becoming servable is itself a snapshot-cutting event, and it is
+			// the only one on this path: the publish that stored this snapshot
+			// ran before Ready and was correctly silent, and a first load whose
+			// policy sync BACKFILLS re-signs nothing and so publishes nothing
+			// more. Without this the zone would serve a new serial that no
+			// downstream is ever told about.
+			zd.notifyIfServableLocked(cur)
 			return
 		}
 		lg.Error("InstallInitialSnapshot: no apex in data and no valid snapshot; zone left not Ready", "zone", zd.ZoneName)
@@ -919,6 +994,7 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 	zd.snapshot.Store(snap)
 	zd.Ready = true
 	zd.Status = ZoneStatusReady
+	zd.notifyIfServableLocked(snap)
 }
 
 func (zd *ZoneData) startPublisher() {
