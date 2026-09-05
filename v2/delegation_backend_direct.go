@@ -103,9 +103,14 @@ func (b *DirectDelegationBackend) GetDelegationData(parentZone, childZone string
 			continue
 		}
 		for _, rrtype := range owner.RRtypes.Keys() {
-			// Only delegation-relevant types
+			// Only delegation-relevant types. KEY is not one of them: a
+			// child's SIG(0) key lives in the truststore, and a KEY found at
+			// a delegation point in the zone is the residue of the bug that
+			// used to publish it there. Reporting it as delegation data would
+			// feed it to the scanner and to `zone childsync` as though the
+			// parent were meant to be serving it.
 			switch rrtype {
-			case dns.TypeNS, dns.TypeDS, dns.TypeA, dns.TypeAAAA, dns.TypeCDS, dns.TypeKEY:
+			case dns.TypeNS, dns.TypeDS, dns.TypeA, dns.TypeAAAA, dns.TypeCDS:
 			default:
 				continue
 			}
