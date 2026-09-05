@@ -1256,6 +1256,27 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					if Globals.Debug {
 						lg.Printf("IterativeDNSQuery: found answer to <%s, %s> in cache (result=%s)", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
 					}
+					// A NEGATIVE entry's RRset is the SOA that PROVES the
+					// denial, not an answer to the question. Returning it as
+					// the answer RRset is how a cached NODATA came back with
+					// the zone apex SOA in the ANSWER section, under a qname
+					// that SOA does not even own: every caller tests the
+					// RRset first (ProcessAuthDNSResponse: `if rrset != nil {
+					// m.Answer = rrset.RRs }`) and never reaches the context
+					// switch that would have called serveNegativeResponse and
+					// put the SOA in AUTHORITY where it belongs.
+					//
+					// The cold resolution was correct and every cache hit
+					// afterwards was wrong, which is the signature of a defect
+					// on this path rather than in the negative proof itself.
+					//
+					// The context is what carries the meaning of a negative
+					// entry; the caller re-reads the proof from the cache
+					// through serveNegativeResponse, which also restores the
+					// AD bit from the entry's validation state.
+					if crrset.Context == cache.ContextNoErrNoAns || crrset.Context == cache.ContextNXDOMAIN {
+						return nil, int(crrset.Rcode), crrset.Context, crrset.Transport, nil
+					}
 					return crrset.RRset, int(crrset.Rcode), crrset.Context, crrset.Transport, nil
 				}
 			case cache.ContextReferral, cache.ContextGlue, cache.ContextHint:
