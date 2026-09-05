@@ -1,9 +1,9 @@
 # Signing, publishing and NOTIFY — one version, one signing pass, one NOTIFY
 
 **Status:** design.
-Reviewed 2026-09-05 — `reviews/2026-09-05-tdns-signing-publish-notify-correctness-review.md`,
-*approve with should-fix*. S1–S5 and the Consider items are folded in below; §3.10 lists what
-the already-landed C1/C2 commits must change before they un-park.
+Reviewed 2026-09-05 — `…-review.md` and `…-rereview.md` under `reviews/`, both *approve with
+should-fix*. Every finding from both rounds is folded in; §0 maps them. **§3.9** lists what the
+already-landed C1/C2 commits must change before they un-park.
 **Landed, parked pending this revision:** C1 and C2 on `fix/sign-before-publish`, stacked on
 the S0 branch. They were implemented ahead of this review — the ordering error is recorded in
 §3.10 — and are not to be merged until §3.10 is done.
@@ -19,19 +19,30 @@ in §6.
 
 ## 0. Where the review's findings landed
 
+First review (`…-review.md`):
+
 | finding | addressed |
 |---|---|
-| S1 first load / nil policy | §3.3 — option A, spelled out, plus the `Ready` gate |
+| S1 first load / nil policy | §3.3 — option A, B rejected, plus the `Ready` gate |
 | S2 `notifyIfServable` = `ZoneTransferOut`'s test | §3.4 |
-| S3 no NSEC chain generation in the extraction | §3.2 |
-| S4 snapshot NOTIFY inputs before dropping the lock | §3.4 — resolved differently: the send is non-blocking and stays under the lock, with the request built there |
-| S5 companion §6 describes the old S0 | §6 — corrected when S0 was implemented |
-| C1 IXFR full-zone sign | §3.1 — promoted from Consider to the design; this is the one that changes the landed code most |
+| S3 no NSEC chain generation in the extraction | §3.1, §3.2 |
+| S4 snapshot NOTIFY inputs before dropping the lock | §3.4 — resolved differently: the request is built under the lock and the send is non-blocking, so it stays there. Endorsed on re-review |
+| S5 companion §6 describes the old S0 | §6 |
+| C1 IXFR full-zone sign | §3.1 — promoted from Consider to design; the change with the largest effect on the landed code |
 | C2 first-load vs steady-state failure | §3.3 — split, with different answers |
 | C3 file reload of an already-signed zone is a no-op | §7 |
 | C4 status line | header |
-| C5 file the C1 issue | header — still outstanding |
+| C5 file the C1 issue | §8 — written up, not yet opened on GitHub |
 | C6 `triggerResign` / ticker after C4 | §3.6 |
+
+Re-review (`…-rereview.md`), both blockers verified against the tree before folding in:
+
+| finding | addressed |
+|---|---|
+| S1 the skip predicate is "keys unresolvable", not "policy is nil" | §3.3 — this one breaks **restart**, not only first load |
+| S2 nothing flips `Ready` after the policy-apply publish | §3.3, §3.8, §3.9 item 5 — `publishWorkingSetLocked` flips it |
+| S3 the owner filter belongs in the signature now | §3.1, §3.2 — lands with §3.9 item 1 |
+| nits: stale §3.10 reference, §3.2 steps, §3.4 bullet, §5, §6, the swallowed comment | fixed in place; the comment repair is §3.9 item 6 |
 
 ## 1. The rules this is built on
 
@@ -245,7 +256,14 @@ implementation settled that the design left open:
   property signed in the same pass; the publish path must *not*, because
   `restitchNsecLocked` runs immediately afterwards and regenerates and signs the chain
   itself. Signing it here would be a second full pass over the zone for a result that is
-  about to be replaced.
+  about to be replaced. This flag — not "the extract always signs the NSEC property" — is the
+  contract.
+- **It also takes the owner filter** (nil = every owner). That is where `wsSignOwners` lands
+  for an IXFR, so it goes in with the staging change rather than as a later pass; otherwise
+  the IXFR case has nowhere to put its set.
+- **`publishDnskeyRRsLocked` lives INSIDE the extracted function**, so both callers publish the
+  DNSKEY RRset. A zone transferred from an upstream that does not sign carries none, and the
+  publish path needs it as much as `SignZone` does.
 - **The flag is cleared only on success.** Clearing `wsNeedsFullSign` before the attempt
   leaves a refused-but-still-staged working set marked as already signed, and the next
   publish puts it on the wire unsigned — the exact defect the flag exists to prevent.
@@ -304,9 +322,51 @@ deferral), the first refresh publish happens before that, and `EnsureActiveDnsse
 to mint keys with a nil policy (`sign.go:504`). Applying the steady-state rule here would
 refuse the first snapshot of every inline-signing zone, and the zone would never load at all.
 
-So `signWorkingSetBeforePublishLocked` returns cleanly when `zd.DnssecPolicy == nil`, ahead of
-any key resolution. The policy apply then signs and publishes, and that publish is the one
-that becomes visible.
+**The predicate is "the keys cannot be resolved yet", not "the policy pointer is nil".** Those
+are not the same set, and the difference is a restart.
+
+`EnsureActiveDnssecKeys` raises its deferred-bind error only when keys are *missing*:
+
+```go
+if (len(dak.KSKs) == 0 || !hasRealZSK) && zd.DnssecPolicy == nil {   // sign.go:520
+```
+
+A zone that has run before has its keys in the KeyDB, so on a restart that call returns them
+happily with a nil policy — and the policy is nil at **every process-start publish**, because
+binding is post-Ready. Skipping on the pointer therefore skips C1 on every restart of every
+inline-signing secondary, not only on a genuinely first load.
+
+Nothing downstream recovers it. The policy sync's Branch 1 — applied row present, same name,
+same algorithms — rebinds and returns **without** `SignZone` (`zone_policy_apply.go:459`).
+Branch 0's backfill cannot save it either: `zoneServesIntentSOASig` demands Ready *and* a
+matching apex SOA RRSIG (`:283`), and the SOA is unsigned too, because
+`resignWorkingSetSOAIfSigned` carries the same nil-policy skip (`zone_mutation.go:249`). Today
+`SetupZoneSigning` signs post-Ready and papers over all of it — and **C5 deletes exactly
+that**. The end state would be a secondary that publishes unsigned on every restart and never
+signs.
+
+So resolve first and decide second:
+
+```go
+// A restart has keys and no policy. A genuinely new zone has neither.
+dak, err := zd.EnsureActiveDnssecKeys(zd.KeyDB, true)
+if err != nil {
+    // Keys cannot be minted until the policy binds, which is post-Ready.
+    // Publish unsigned, stay not Ready, let the policy apply produce the
+    // first servable version. This is the ordinary first load, not a fault.
+    return errKeysNotYetAvailable
+}
+// Keys exist: sign, bound policy or not. A nil policy means no TTL clamp,
+// not no signing.
+var clamp *ClampParams
+if zd.DnssecPolicy != nil {
+    clamp, err = ClampParamsForZone(...)
+}
+```
+
+The caller distinguishes the two outcomes: `errKeysNotYetAvailable` publishes unsigned and
+leaves the zone not Ready; any other error is a real signing failure and takes the
+steady-state path above.
 
 **The Ready gate that makes the unsigned first snapshot safe.** Publishing it is only
 acceptable because nothing can see it, and that is *not* true as the code stands: `Ready` is
@@ -317,7 +377,20 @@ Ready flips until the policy apply finishes. `GetOwner` gates queries on `Ready`
 (`zone_utils.go:1236`) and `ZoneTransferOut` gates transfers on it, so the flag is the whole
 protection.
 
-Same predicate as §3.4, in all three places that set it.
+**And something has to flip it back on.** The only writers on the live zone are
+`applyRefreshReplacementLocked` (`:834`, gated `!firstLoad`) and `InstallInitialSnapshot`
+(`:976`, `:995`). `publishWorkingSetLocked` never sets Ready, nor does
+`SignZone` → `publishLocked`, and `completeFirstZonePolicyAndLoad` calls
+`InstallInitialSnapshot` *before* the policy apply and never again. Gate those sites without
+adding a flip somewhere and the zone is signed by the apply publish and **permanently
+invisible**.
+
+So `publishWorkingSetLocked` flips Ready when the snapshot it has just stored is servable, and
+that flip is what emits the Ready-transition NOTIFY when `InstallInitialSnapshot` did not. A
+first-ever load (no applied row → transactional apply → `SignZone`) then completes through the
+same door as a restart.
+
+Same predicate as §3.4, in every place that sets Ready.
 
 Alternative B — bind or mint keys before the first refresh publish, so C1 can sign it — is
 rejected here rather than left open: it reopens the PR-2 "no bind before Ready" decision, which
@@ -359,7 +432,7 @@ Two changes bundled with it:
   are read while `zd.mu` is held, and `peerAddrs` copies the targets into a fresh slice, so
   nothing is re-read from the live `ZoneData` afterwards. A hand-off that captured a
   `*ZoneData` and let the sender read `zd.Notify` later could notify the wrong set, or nil.
-- **Off the lock, and off the goroutine.** The emission hands a `NotifyRequest` to
+- **Non-blocking, so no network I/O ever runs under the lock.** The emission hands a `NotifyRequest` to
   `NotifyQ` with a **non-blocking** send (drop + count on a full queue), instead of running
   `dns.Exchange` per target under `zd.mu`. NOTIFY is best-effort by design — a downstream
   that misses one refreshes on its SOA timer — and blocking a publish on a serial consumer
@@ -455,18 +528,20 @@ the last two rows differ.
 Up to five NOTIFYs across three-plus serials, down to one per version that actually changed —
 and, importantly, none at all until there is a version a downstream could take.
 
-**§3.8 as written before this review claimed the refresh publish is signed at first load.**
-That is true only under the rejected option B (bind keys before the first publish). Under
-option A it is unsigned and invisible, and the policy apply is what produces the first
-servable version.
+**The table is the FIRST-EVER load only.** Once the zone has keys — every subsequent restart —
+the refresh publish signs, because the corrected predicate (§3.3) resolves keys rather than
+inspecting the policy pointer, and a restart has keys. That load looks like a steady-state
+refresh: one publish, signed, Ready, one NOTIFY. Saying "first load publishes unsigned"
+without that qualifier is what made the earlier wording wrong in both directions.
 
 ### 3.9 What the landed C1/C2 commits must change
 
 C1 and C2 were implemented before this review — the branch is parked, unmerged, at
-`fix/sign-before-publish`. Measured against the review, most of it stands: the nil-policy skip
-is option A (§3.3) already, the extraction leaves `GenerateNsecChainWithDak` in `SignZone`
-(§3.2), and the NOTIFY request is built under the lock (§3.4). Four things must change before
-it un-parks:
+`fix/sign-before-publish`. Measured against both reviews, its settled mechanics stand and should be
+kept: the `signNsec` flag, the flag cleared only on success, a nil `dak` refused,
+`EnsureActiveDnssecKeys(..., true)` under the lock, `GenerateNsecChainWithDak` left in
+`SignZone`, and the NOTIFY request built under the lock (endorsed on re-review as better than
+sending after unlock). Six things must change before it un-parks:
 
 | # | change | why |
 |---|---|---|
@@ -474,9 +549,17 @@ it un-parks:
 | 2 | the refusal sets `DnssecError`, not `DnssecPolicyWarning` | §3.3; the first implementation reasoned from the NSEC-chain refusal and was overruled |
 | 3 | `Ready` must not flip on a signing zone whose snapshot has no apex SOA RRSIG — `InstallInitialSnapshot` (both branches) and `applyRefreshReplacementLocked` | §3.3; without it the unsigned first-load snapshot is served to queries, which is C1's own defect relocated |
 | 4 | `snapshotIsServableLocked` calls `signsItsOwnContent()` instead of inlining the option test | §3.4; same predicate today, two places to drift tomorrow |
+| 5 | the skip becomes "keys unresolvable", not `DnssecPolicy == nil`, **and** `publishWorkingSetLocked` flips `Ready` on a servable snapshot | §3.3; as landed, C1 is skipped on every restart, and item 3 without the flip leaves a signed zone permanently invisible. These two are one change: item 3 has nowhere to land without the second half |
+| 6 | restore `refuseUnrepairableChainLocked`'s doc comment | the C1 patch anchored on the `func` line and inserted between that comment and the function it documents, so the comment now describes `signWorkingSetBeforePublishLocked` and the function it belongs to has none |
 
-And one process item that was missed: the C1 issue was to be filed *before* C1 landed. It
-is written up in §8.
+Two of the tests flip with them: `TestPublishRefusesAReplacementItCannotSign` asserts the
+warning and asserts the zone is *not* service-impacting — both invert with item 2 — and
+`TestInstallInitialSnapshotNotifiesOnTheReadyTransition` needs a signing-zone counterpart. (It
+is not itself wrong: its zone does not sign, so `signsItsOwnContent()` short-circuits and
+Ready+NOTIFY stays correct. It simply never exercises the gate.)
+
+And one process item that was missed: the C1 issue was to be filed *before* C1 landed. It is
+written up in §8.
 
 ### 3.10 Not in scope, but noticed
 
@@ -517,11 +600,11 @@ behaviour. C2–C5 are independent of it and of each other.
 | C1 | `zone_mutation.go` — flag, key resolution, sign step, failure path | 75 | 5 | +70 |
 | C1 | `structs.go` — `wsNeedsFullSign` | 8 | 0 | +8 |
 | C2 | `zone_mutation.go` — `notifyIfServable`, `InstallInitialSnapshot` emission | 55 | 2 | +53 |
-| C2 | `zone_utils.go` — delete `NotifyDownstreams` | 0 | 25 | −25 |
+| C3 | `zone_utils.go` — delete `NotifyDownstreams` once C3 removes its last callers | 0 | 25 | −25 |
 | C2 | `main_initfuncs.go` — queue depth ×2 | 2 | 2 | 0 |
 | C3 | `refreshengine.go` — delete three notify sites | 0 | 30 | −30 |
 | C4 | `resigner.go` — `ResignRequest`, reason switch, `ResignZone` for key state | 60 | 25 | +35 |
-| C4 | producers (`ksk_rollover_*`, `delegation_sync*`, `delsync_proxy*`) | 25 | 20 | +5 |
+| C4 | the producer: `triggerResign` (rollovers, `key_state_worker`, the API) | 25 | 20 | +5 |
 | C5 | `zone_utils.go` — `SetupZoneSigning` → `registerForPeriodicResign` | 20 | 35 | −15 |
 | C5 | `refreshengine.go`, `parseconfig.go`, `dynamic_primary.go` — call sites | 12 | 20 | −8 |
 | | **total** | **297** | **189** | **+108** |
@@ -555,7 +638,9 @@ Across both documents, on one branch:
 | 6 | **C5** — `SetupZoneSigning` becomes a registration | here, §3.7 |
 | 7.. | the refresh-engine work | engine doc, S1–S5 |
 
-The stopgap jumps the queue because the lab is exposed to #502 today and it is forty lines.
+The stopgap jumps the queue because the lab is exposed to #502 today and it is small and
+self-contained — a probe bound inside `DoTransfer`, a transfer bound around the transfer, and
+an address-bearing error.
 C1 comes before the NOTIFY work because once the refresh publishes signed data, C2's gate
 has only one kind of publish to reason about.
 
