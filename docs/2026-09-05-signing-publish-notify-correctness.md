@@ -9,7 +9,7 @@ punch list cannot be applied as written, or to change a rule in §1 or the order
 **Reviews:** `reviews/2026-09-05-tdns-signing-publish-notify-correctness-{review,rereview,rereview-2}.md`
 — all three *approve with should-fix*; every finding is folded into §3. §0 records what each
 round changed.
-**Issue:** the C1 defect is written up in §8, ready to open. Not opened on GitHub yet.
+**Issue:** [#512](https://github.com/johanix/tdns/issues/512) — the C1 defect. Text in §8.
 **Companion:** `2026-09-05-refresh-engine-redesign-364-502.md` — the refresh-engine
 concurrency work, separately reviewed. The commit order across both documents is §6.
 
@@ -633,8 +633,8 @@ kind of publish to reason about instead of two.
 
 ## 8. The C1 defect, written up
 
-Ready to open against `johanix/tdns`. Kept free of deployment detail, since the repository is
-public.
+Filed as [#512](https://github.com/johanix/tdns/issues/512). Kept free of deployment detail,
+since the repository is public.
 
 ---
 

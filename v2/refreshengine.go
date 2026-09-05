@@ -834,107 +834,23 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								Zonefile:   zr.Zonefile,
 							})
 						}
-						// XXX: Should do refresh in parallel
-						go func(ctx context.Context, zd *ZoneData, zone string, force bool, conf *Config, zr ZoneRefresher) {
-							// Snapshot the generation at dispatch. The pre-persist
-							// guard below drops the persist if the zone was deleted
-							// or replaced mid-refresh (generation bumped), closing
-							// the resurrection race (B5b).
-							gen := zd.generation.Load()
-							updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, force, conf)
-							if err != nil {
-								noteRefreshFailure(zd, zone, err, "zone refresh failed")
-								// If caller requested error reporting, send the error
-								if zr.Wait && zr.Response != nil {
-									zr.Response <- RefresherResponse{
-										Error:    true,
-										ErrorMsg: err.Error(),
-									}
-								}
-							} else {
-								// Clear refresh-specific error state after successful refresh.
-								// Other categories (rollover-policy, parent-DSYNC, config) are
-								// independent and survive a successful refresh.
-								if zd.HasError(RefreshError) {
-									lgEngine.Info("zone refresh succeeded, clearing RefreshError", "zone", zone)
-									zd.ClearError(RefreshError)
-								}
-								// No error from refresh - zone data is valid
-								if updated {
-									lgEngine.Info("zone updated via refresh", "zone", zd.ZoneName)
-
-									// Write zone file after successful update.
-									// Skip for primary zones loaded from file — rewriting the source
-									// is pointless unless dynamic changes have been made (OptDirty).
-									if zd.ZoneType == Primary && !zd.Options[OptDirty] {
-										lgEngine.Debug("skipping zone file write for unmodified primary zone", "zone", zd.ZoneName)
-									} else if conf.ShouldPersistZone(zd) && zoneStillLive(zd, gen) {
-										// Any persistable dynamic zone (catalog zone, catalog
-										// member, or API-managed — B5a widened this beyond
-										// OptAutomaticZone so API zones rewrite their files too).
-										// zoneStillLive guards the resurrection race: if the
-										// zone was deleted or replaced mid-refresh, skip the
-										// persist so we do not re-write a removed zone (B5b).
-										_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
-										if err != nil {
-											lgEngine.Warn("failed to write dynamic zone file", "zone", zd.ZoneName, "error", err)
-											// Don't fail the operation, just log the warning
-										}
-
-										// Update dynamic config file (zone file path may have changed, or this is first write)
-										if err := conf.AddDynamicZoneToConfig(zd); err != nil {
-											lgEngine.Warn("failed to update dynamic config file", "zone", zd.ZoneName, "error", err)
-											// Don't fail the operation, just log the warning
-										}
-									} else if refreshWritesZoneToSourceFile(zd) {
-										// Regular zone with zonefile configured (typically secondary zones)
-										lgEngine.Info("writing updated zone to file", "zone", zd.ZoneName, "file", zd.Zonefile)
-										_, err := zd.WriteFile(zd.Zonefile)
-										if err != nil {
-											lgEngine.Warn("failed to write zone file", "zone", zd.ZoneName, "error", err)
-										}
-									}
-								}
-
-								// Parse catalog zones after EVERY successful refresh (updated or not)
-								// This ensures membership is populated even if zone file hasn't changed
-								if zd.Options[OptCatalogZone] {
-									lgEngine.Info("parsing catalog zone member zones", "zone", zone, "updated", updated)
-									catalogUpdate, err := ParseCatalogZone(zd)
-									if err != nil {
-										lgEngine.Error("failed to parse catalog zone", "zone", zone, "error", err)
-									} else {
-										lgEngine.Info("parsed catalog zone", "zone", zone, "members", len(catalogUpdate.MemberZones), "serial", catalogUpdate.Serial)
-
-										// Notify all registered callbacks
-										if err := NotifyCatalogZoneUpdate(catalogUpdate); err != nil {
-											lgEngine.Error("failed to notify catalog zone callbacks", "error", err)
-										} else {
-											lgEngine.Debug("notified catalog zone callbacks")
-										}
-
-										// Auto-configure zones if enabled (in goroutine to avoid blocking on RefreshZoneCh send)
-										// Policy is now per-catalog-zone via catalog-member-auto-create option
-										go func(update *CatalogZoneUpdate, c *Config, refreshCtx context.Context) {
-											defer func() {
-												if r := recover(); r != nil {
-													lgEngine.Error("panic in catalog auto-configure goroutine", "panic", r)
-												}
-											}()
-											if err := AutoConfigureZonesFromCatalog(refreshCtx, update, c); err != nil {
-												lgEngine.Error("failed to auto-configure zones from catalog", "error", err)
-											}
-										}(catalogUpdate, conf, ctx)
-									}
-								}
-							}
-							// If caller requested error reporting, send success
-							if zr.Wait && zr.Response != nil {
-								zr.Response <- RefresherResponse{
-									Msg: fmt.Sprintf("zone %s: reloaded (updated=%v)", zone, updated),
-								}
-							}
-						}(ctx, zd, zone, zr.Force, conf, zr)
+						// The refresher is this iteration's value and the
+						// goroutine outlives the iteration, so it travels by copy.
+						zrCopy := zr
+						// Snapshot the generation at dispatch, and hand the whole
+						// refresh to runZoneRefresh. The snapshot is what lets the
+						// persist steps drop a zone that was deleted or replaced
+						// while the refresh was in flight (B5b).
+						job := refreshJob{
+							zd:    zd,
+							zone:  zone,
+							gen:   zd.generation.Load(),
+							force: zr.Force,
+							zr:    &zrCopy,
+						}
+						go func(ctx context.Context, job refreshJob, conf *Config) {
+							_, _ = runZoneRefresh(ctx, job, conf)
+						}(ctx, job, conf)
 					}
 				} else {
 					// DYNAMIC ZONE: not from config (catalog member, API-created).
@@ -1154,91 +1070,15 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						continue
 					}
 
-					updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, false, conf)
+					// Same body as the operator path above, and the same
+					// dispatch-time generation. Still inline on the engine
+					// goroutine: the worker pool that moves it off is S3.
+					_, _ = runZoneRefresh(ctx, refreshJob{
+						zd:   zd,
+						zone: zone,
+						gen:  zd.generation.Load(),
+					}, conf)
 					rc.CurRefresh = rc.SOARefresh
-					if err != nil {
-						noteRefreshFailure(zd, zone, err, "zone refresh failed")
-					} else if updated {
-						// Successful refresh clears RefreshError. Other categories
-						// (rollover-policy, parent-DSYNC, config) survive.
-						zd.ClearError(RefreshError)
-						// Apply outbound-soa-serial mode after upstream refresh —
-						// but never for a mirroring secondary (MUST-NOT-MODIFY;
-						// applyRefreshReplacementLocked already set the serial
-						// to upstream's and nothing may move it off that).
-						if zd.KeyDB != nil && !zoneMayOriginateContent(zd) {
-							// The serial belongs to upstream, so neither mode
-							// may touch it. Also clear anything persisted
-							// BEFORE this zone became a mirror: a zone that
-							// turns non-originating via a live config reload
-							// never passes through initialLoadZone, so without
-							// this its stale row survives, and a later flip back
-							// to may-originate under persist mode would let
-							// LoadOutgoingSerial resurrect an inflated serial.
-							if err := zd.KeyDB.DeleteOutgoingSerial(zone); err != nil {
-								lgEngine.Warn("failed to clear persisted outgoing serial for mirroring secondary",
-									"zone", zone, "err", err)
-							}
-						} else if zd.KeyDB != nil {
-							serialChanged := false
-							switch zd.EffectiveOutboundSoaSerial() {
-							case OutboundSoaSerialUnixtime:
-								zd.CurrentSerial = uint32(time.Now().Unix())
-								lgEngine.Info("zone updated from upstream; outbound-soa-serial=unixtime",
-									"zone", zone, "serial", zd.CurrentSerial)
-								serialChanged = true
-							case OutboundSoaSerialPersist:
-								// Only restore if the persisted serial is
-								// ahead of the just-refreshed inbound
-								// serial. See the matching note in the
-								// initial-load branch above.
-								if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
-									zd.CurrentSerial = saved
-									serialChanged = true
-								}
-							}
-							if serialChanged {
-								zd.mu.Lock()
-								zd.ensureWorkingSet()
-								zd.publishWorkingSetLocked(zd.generation.Load(), false)
-								zd.mu.Unlock()
-							}
-						}
-
-					}
-					if updated {
-						// Write zone file after successful update.
-						// Skip for primary zones loaded from file — rewriting the source
-						// is pointless unless dynamic changes have been made (OptDirty).
-						if zd.ZoneType == Primary && !zd.Options[OptDirty] {
-							lgEngine.Debug("skipping zone file write for unmodified primary zone", "zone", zd.ZoneName)
-						} else if conf.ShouldPersistZone(zd) && zoneStillLive(zd, zd.generation.Load()) {
-							// Any persistable dynamic zone (catalog zone, catalog
-							// member, or API-managed — B5a widened this beyond
-							// OptAutomaticZone so API zones rewrite their files too).
-							// zoneStillLive guards against a delete landing mid-tick:
-							// zd is the current map entry here, so the check reduces
-							// to the identity test (B5b).
-							_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
-							if err != nil {
-								lgEngine.Warn("failed to write dynamic zone file", "zone", zd.ZoneName, "error", err)
-								// Don't fail the operation, just log the warning
-							}
-
-							// Update dynamic config file (zone file path may have changed, or this is first write)
-							if err := conf.AddDynamicZoneToConfig(zd); err != nil {
-								lgEngine.Warn("failed to update dynamic config file", "zone", zd.ZoneName, "error", err)
-								// Don't fail the operation, just log the warning
-							}
-						} else if refreshWritesZoneToSourceFile(zd) {
-							// Regular zone with zonefile configured (typically secondary zones)
-							lgEngine.Info("writing updated zone to file", "zone", zd.ZoneName, "file", zd.Zonefile)
-							_, err := zd.WriteFile(zd.Zonefile)
-							if err != nil {
-								lgEngine.Warn("failed to write zone file", "zone", zd.ZoneName, "error", err)
-							}
-						}
-					}
 				}
 			}
 
