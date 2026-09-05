@@ -569,6 +569,16 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 		}
 	}
 
+	// Every steady-state refresh runs here, not on this goroutine. Shutdown is
+	// deferred so it covers all three ways out of the loop below; it closes the
+	// job channel, lets each worker finish what it holds, and waits -- so no
+	// file write outlives the engine.
+	pool := newRefreshPool(ctx, refreshWorkers(), 0, transferConcurrency(), conf)
+	defer pool.Shutdown()
+
+	// Owned by this goroutine alone. See dispatchRefresh.
+	inflight := map[string]struct{}{}
+
 	ticker := time.NewTicker(1 * time.Second)
 	lgEngine.Info("refresh engine starting")
 
@@ -866,16 +876,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// refresh to runZoneRefresh. The snapshot is what lets the
 						// persist steps drop a zone that was deleted or replaced
 						// while the refresh was in flight (B5b).
-						job := refreshJob{
+						dispatchRefresh(pool, inflight, refreshJob{
 							zd:    zd,
 							zone:  zone,
 							gen:   zd.generation.Load(),
 							force: zr.Force,
 							zr:    &zrCopy,
-						}
-						go func(ctx context.Context, job refreshJob, conf *Config) {
-							_, _ = runZoneRefresh(ctx, job, conf)
-						}(ctx, job, conf)
+						})
 					}
 				} else {
 					// DYNAMIC ZONE: not from config (catalog member, API-created).
@@ -1096,24 +1103,31 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						continue
 					}
 
-					// Same body as the operator path above, and the same
-					// dispatch-time generation. Still inline on the engine
-					// goroutine: the worker pool that moves it off is S3.
-					_, rerr := runZoneRefresh(ctx, refreshJob{
+					// Dispatched, not run: this goroutine has three other
+					// channels to read. The counter is deliberately NOT reset
+					// here -- it is reset when the outcome comes back, so a
+					// refresh that outlives its own interval does not silently
+					// get a second one queued behind it, and a zone the pool
+					// could not take stays due for the next tick.
+					dispatchRefresh(pool, inflight, refreshJob{
 						zd:   zd,
 						zone: zone,
 						gen:  zd.generation.Load(),
-					}, conf)
-					// A failure waits the zone's RETRY, not its REFRESH. The
-					// engine never read RETRY at all, so a zone whose primary was
-					// briefly unreachable waited a full refresh interval to
-					// discover it had come back -- and the reset happened before
-					// the error was even looked at.
-					if rerr != nil {
-						rc.CurRefresh = refreshCounterRetry(rc)
-					} else {
-						rc.CurRefresh = rc.SOARefresh
-					}
+					})
+				}
+			}
+
+		case out := <-pool.Done():
+			delete(inflight, out.Zone)
+			if rc, ok := refreshCounters.Get(out.Zone); ok {
+				// Reset at COMPLETION, not at dispatch. Reset-at-dispatch would
+				// double the effective interval for exactly the slow zones that
+				// can least afford it: skipped while in flight, then made to
+				// wait a full interval again.
+				if out.Err != nil {
+					rc.CurRefresh = refreshCounterRetry(rc)
+				} else {
+					rc.CurRefresh = rc.SOARefresh
 				}
 			}
 

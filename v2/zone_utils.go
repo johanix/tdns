@@ -110,6 +110,13 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 }
 
 func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, conf *Config) (bool, error) {
+	return zd.refresh(ctx, verbose, debug, force, conf, nil)
+}
+
+// refresh is Refresh with the pool's transfer gate threaded in. A nil gate is
+// ungated; see transferGate for why the cap sits around the transfer rather
+// than around this call.
+func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, conf *Config, gate *transferGate) (bool, error) {
 	var updated bool
 
 	// Collect dynamic RRs before refresh (they will be lost during refresh)
@@ -167,7 +174,7 @@ func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, con
 			} else if force {
 				lg.Debug("forced retransfer regardless of SOA serial", "zone", zd.ZoneName)
 			}
-			updated, err = zd.FetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf)
+			updated, err = zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, gate)
 			if err != nil {
 				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
@@ -952,6 +959,11 @@ func (zd *ZoneData) gateZonemdUnlessAlreadyGated(ctx context.Context, newZd *Zon
 // from our own serial would answer with a single SOA rather than the zone the
 // operator asked for.
 func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
+	return zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, nil)
+}
+
+// fetchFromUpstream is FetchFromUpstream with the pool's transfer gate.
+func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config, gate *transferGate) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {
 		return false, fmt.Errorf("FetchFromUpstream: zone %s has no upstreams configured", zd.ZoneName)
@@ -1007,9 +1019,19 @@ func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force
 		// pool worker once the worker pool lands, and on the engine goroutine
 		// only during first load, where the probe bound has already excluded the
 		// unreachable hosts that made this urgent.
+		// The transfer, and only the transfer, is what the pool's gate bounds:
+		// the probe above is one query, this is bandwidth, parse CPU and roughly
+		// twice the zone in memory. Acquired here rather than by the caller
+		// because Refresh does probe and transfer in one call, so a caller-side
+		// acquire would hold a transfer slot through every probe.
+		if gerr := gate.acquire(ctx); gerr != nil {
+			zd.SetStatus(prevStatus)
+			return false, fmt.Errorf("AXFR of %s: %w", zd.ZoneName, gerr)
+		}
 		xfrCtx, cancelXfr := context.WithTimeout(ctx, transferTimeout())
 		upToDate, err := zd.transferFromUpstream(xfrCtx, up, &new_zd, useIxfr, conf)
 		cancelXfr()
+		gate.release()
 		if err != nil {
 			lg.Warn("FetchFromUpstream: transfer from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err

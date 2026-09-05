@@ -1,7 +1,7 @@
 # Refresh engine redesign — bounded concurrency and per-refresh deadlines (#364, #502)
 
-**Status:** **frozen — implement from here.** **S0, S1 and S2 are implemented**, with the companion's
-C1–C5 landed between S0 and S1. S3–S5 remain (§4).
+**Status:** **frozen — implement from here.** **S0–S3 are implemented**, with the companion's C1–C5
+landed between S0 and S1. S4 and S5 remain (§4).
 Convergence assessed 2026-09-05 (`reviews/2026-09-05-tdns-signing-and-refresh-convergence.md`):
 no disagreement between the two documents. Re-open only to change a decision in §5 or the
 order in the companion's §6.
@@ -312,9 +312,14 @@ should be. `Refresh` remains callable from tests and from first load with `nil`.
 **The drain protocol** (review S5). Three requirements, all necessary together:
 
 - `done` is buffered to `width`, **and** the worker's outcome send is
-  `select { case p.done <- out: case <-ctx.Done(): }`. Either alone leaves a hole: an
-  unbuffered `done` plus an engine that has stopped selecting on it wedges every worker on
-  send, and `Shutdown` never returns.
+  `select { case p.done <- out: case <-ctx.Done(): }`, **and `Shutdown` drains `done` while
+  it waits**. The third was missing from this section and the implementation deadlocked
+  without it: closing `jobs` ends each worker's range, but a worker that has just finished a
+  refresh still has an outcome to hand back, the buffer absorbs only `width` of those, and
+  the ctx-guarded send helps only if the context was cancelled — true of one of the engine's
+  three exits and not of the other two (`zonerefch` or `bumpch` closing). On those, every
+  worker past the buffer blocks forever on a hand-off nobody wants and the daemon hangs on
+  shutdown. A test pins it.
 - `Shutdown` closes `jobs` so each worker's `range` exits after its current job, then
   `wg.Wait()`s.
 - The engine calls `Shutdown` before it returns, so no file write outlives the engine.
@@ -568,7 +573,7 @@ with the signing and NOTIFY tails still in it will write code that C3 and C5 the
 | S0 | `refresh: bound the SOA probe and name the upstream` | §3.7 — the **probe** bound inside `DoTransfer`, the transfer bound around the transfer, and a `RefreshError` carrying the address tried. The #502 stopgap. **Ships first, before the companion's C1.** ✅ **implemented** on `fix/refresh-probe-deadline-502` | 113 |
 | S1 | `refresh: one post-refresh body` ✅ **implemented** | Extract `runZoneRefresh` (§3.2) from the two drifted copies, including the `RefreshError`-clearing fix (§1.3 row 1) and the `Wait` response. §1.3 is the review checklist. | ~245 |
 | S2 | `refresh: retry a failed refresh on SOA RETRY` ✅ **implemented** | §3.6 — `FindSoaRetry` with the primary case, `RefreshCounter.SOARetry`, the adopted-copy fill, the failure path. | ~90 |
-| S3 | `refresh: bounded worker pool` | §3.3 + §3.4 + §3.5 + §3.8: pool, transfer gate, `inflight`, `Wait` answers, drain protocol, dispatch-time `gen`. Fixes #502 properly. | ~275 |
+| S3 | `refresh: bounded worker pool` ✅ **implemented** | §3.3 + §3.4 + §3.5 + §3.8: pool, transfer gate, `inflight`, `Wait` answers, drain protocol, dispatch-time `gen`. Fixes #502 properly. | ~275 |
 | S4 | `refresh: jitter the first counter` | §3.10. | ~30 |
 | S5 | `refresh: walk the counters without copying them` | `Items()` → `IterCb`. | ~10 |
 

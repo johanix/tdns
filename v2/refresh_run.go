@@ -24,6 +24,9 @@ type refreshJob struct {
 	// zr carries the operator's request, when there is one: a CLI reload or an
 	// API call waiting for a result. nil for a ticker-originated refresh.
 	zr *ZoneRefresher
+	// gate caps concurrent inbound transfers. Set by the pool on dispatch; nil
+	// means ungated, which is what first load and tests get.
+	gate *transferGate
 }
 
 // runZoneRefresh performs one complete refresh of a zone and everything that
@@ -51,7 +54,7 @@ type refreshJob struct {
 func runZoneRefresh(ctx context.Context, job refreshJob, conf *Config) (bool, error) {
 	zd, zone := job.zd, job.zone
 
-	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, job.force, conf)
+	updated, err := zd.refresh(ctx, Globals.Verbose, Globals.Debug, job.force, conf, job.gate)
 	if err != nil {
 		noteRefreshFailure(zd, zone, err, "zone refresh failed")
 		respondToRefresher(job.zr, RefresherResponse{Error: true, ErrorMsg: err.Error()})
