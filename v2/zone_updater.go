@@ -759,11 +759,24 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 
 		rrset, exists := owner.RRtypes.Get(rrtype)
 		if !exists {
-			lg.Warn("ApplyChildUpdateToZoneData: no RRset for owner", "owner", ownerName, "rrtype", rrtypestr)
+			// Neither branch is an anomaly, so neither warrants a warning --
+			// the comment below already said as much about the delete while
+			// the line above it warned anyway. The DSYNC API path makes this
+			// routine rather than rare: it replaces a child's DS by sending a
+			// delete of the RRset followed by the new record, so the delete
+			// removes it and the add that follows in the same update finds
+			// nothing.
 			if class == dns.ClassNONE || class == dns.ClassANY {
-				// If this is a delete then it is ok that the RRset doesn't exist.
+				// A delete of an RRset that is not there is a no-op, and a
+				// normal way to express "replace".
+				lg.Debug("ApplyChildUpdateToZoneData: delete of an absent RRset, nothing to do",
+					"owner", ownerName, "rrtype", rrtypestr)
 				continue
 			}
+			// An add of a type this owner does not carry yet is how every new
+			// RRset comes into existence.
+			lg.Debug("ApplyChildUpdateToZoneData: creating a new RRset",
+				"owner", ownerName, "rrtype", rrtypestr)
 			rrset = core.RRset{
 				RRs:    []dns.RR{},
 				RRSIGs: []dns.RR{},
