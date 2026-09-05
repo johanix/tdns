@@ -14,6 +14,7 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -144,5 +145,48 @@ func TestCachedAnswerIsStillReturned(t *testing.T) {
 	}
 	if ctxt != cache.ContextAnswer {
 		t.Errorf("context = %s, want Answer", cache.CacheContextToString[ctxt])
+	}
+}
+
+// The wire shape of the defect, end to end through the responder rather than
+// through the consult: ANSWER empty, the proof in AUTHORITY, AD restored.
+//
+// AD is the half that the consult-level tests above cannot see. The issue
+// reported it cleared on every cache hit, and it comes back only because the
+// negative path -- reached now that the SOA exclusion is gone -- sets it from
+// the entry's validation state. A fix that put the proof in AUTHORITY but left
+// AD off would still fail a validating client, and would pass every other test
+// in this file.
+func TestCachedNodataOnTheWireKeepsADAndAnEmptyAnswer(t *testing.T) {
+	imr := newTestImr(t)
+	seedNodata(t, imr, "ns1.example.", dns.TypeSOA, "example.")
+
+	r := new(dns.Msg)
+	r.SetQuestion("ns1.example.", dns.TypeSOA)
+	r.SetEdns0(4096, true)
+
+	cw := &captureWriter{}
+	imr.ImrResponder(context.Background(), cw, r, "ns1.example.", dns.TypeSOA,
+		&edns0.MsgOptions{RD: true, DO: true})
+
+	if cw.got == nil {
+		t.Fatal("responder wrote no response")
+	}
+	if cw.got.Rcode != dns.RcodeSuccess {
+		t.Errorf("rcode = %s, want NOERROR for NODATA", dns.RcodeToString[cw.got.Rcode])
+	}
+	if n := len(cw.got.Answer); n != 0 {
+		t.Fatalf("ANSWER holds %d records, want 0; the zone SOA is the proof of the denial, not the answer to it (got %s)",
+			n, cw.got.Answer[0].String())
+	}
+	if len(cw.got.Ns) == 0 {
+		t.Fatal("AUTHORITY is empty; the denial carries no proof")
+	}
+	if owner := cw.got.Ns[0].Header().Name; owner != "example." {
+		t.Errorf("proof owner = %q, want example.", owner)
+	}
+	if !cw.got.AuthenticatedData {
+		t.Error("AD is clear on a cached NODATA whose entry is ValidationStateSecure; " +
+			"a validating client sees the denial as unauthenticated")
 	}
 }
