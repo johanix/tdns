@@ -1058,9 +1058,14 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 		break
 	}
 	if !transferred {
-		lg.Error("FetchFromUpstream: AXFR failed on all upstreams", "zone", zd.ZoneName, "count", len(zd.Upstreams), "err", lastErr)
+		// Counted from the snapshot copied above, not from zd.Upstreams: the
+		// engine rewrites that slice in place on every refresh that re-resolves
+		// a hostname primary, so reading it here races -- and would report a
+		// count that does not match the upstreams actually tried. Same reason
+		// the loop walks the copy, and the same fix DoTransfer already carries.
+		lg.Error("FetchFromUpstream: AXFR failed on all upstreams", "zone", zd.ZoneName, "count", len(upstreams), "err", lastErr)
 		zd.SetStatus(prevStatus) // still serving prior data; failure surfaces as RefreshError
-		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s): %w", zd.ZoneName, len(zd.Upstreams), lastErr)
+		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s): %w", zd.ZoneName, len(upstreams), lastErr)
 	}
 
 	// A forced transfer MUST apply whatever upstream has, including a serial
@@ -2083,9 +2088,18 @@ func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 //
 // Nothing signs here any more, because by the time this runs something already
 // has. A refresh signs its own content before the swap; a policy apply signs
-// when it binds; a restart signs at the refresh publish because the keys resolve
-// even with the policy still unbound. What was missing was never the signing --
-// it was a zone quietly falling off the renewal list.
+// when it binds; a restart publishes unsigned and stays not Ready until the
+// policy binds, and signOnceAfterPolicyBind signs it then. (That last one used
+// to read "a restart signs at the refresh publish because the keys resolve even
+// with the policy still unbound" -- which was tried, and signed a whole zone
+// into five-minute signatures, because sigValiditySeconds of a nil policy is
+// zero and sigLifetime substitutes five minutes for it.) What was missing was
+// never the signing -- it was a zone quietly falling off the renewal list.
+// resignRegisterTimeout bounds the registration send. Long enough that a
+// briefly busy resigner is waited out, short enough that zone loading is not
+// held up by one that is wedged.
+const resignRegisterTimeout = 2 * time.Second
+
 func (zd *ZoneData) registerForPeriodicResign(resignq chan<- ResignRequest) error {
 	if Globals.App.Type == AppTypeAgent {
 		return nil // agents never sign
@@ -2099,14 +2113,24 @@ func (zd *ZoneData) registerForPeriodicResign(resignq chan<- ResignRequest) erro
 		return nil // non-primary zones require inline-signing to be signed
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), resignRegisterTimeout)
 	defer cancel()
 
 	select {
 	case resignq <- ResignRequest{Zd: zd, Reason: ResignPeriodic}:
 	case <-ctx.Done():
-		lg.Error("registerForPeriodicResign: timeout sending zone to the resign queue",
-			"zone", zd.ZoneName)
+		// Reported, not swallowed. A send that times out means the zone is not
+		// on the watchlist, so nothing will ever renew its signatures -- the
+		// exact failure this function exists to prevent, and the one that made
+		// SetupZoneSigning's sign-and-enqueue look necessary. Returning nil
+		// here told every caller the zone was registered when it was not.
+		//
+		// No retry: all three callers log it, and none of them can do better --
+		// a ResignQ still full after two seconds is a wedged resigner, not
+		// congestion to wait out.
+		return fmt.Errorf("registering %s for periodic re-signing: timed out sending to the resign queue"+
+			" after %s; the zone is NOT on the renewal watchlist and its signatures will expire",
+			zd.ZoneName, resignRegisterTimeout)
 	}
 
 	return nil
