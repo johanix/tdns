@@ -64,10 +64,10 @@ func TestZoneProvisioning(t *testing.T) {
 	}
 }
 
-// zoneProvisioning takes zd.mu twice -- via HasServiceImpactingError and
-// GetStatus -- and zd.mu is not reentrant, so it must acquire the lock itself
-// rather than assume a caller holds it. Both call sites are lock-free today;
-// this pins the property they depend on.
+// zoneProvisioning takes zd.mu itself, and zd.mu is not reentrant, so a caller
+// holding the lock would deadlock rather than misreport. Both call sites are
+// lock-free today; this pins the contract they depend on, which the single
+// locked snapshot made stricter rather than weaker.
 func TestZoneProvisioningTakesTheLockItself(t *testing.T) {
 	zd := &ZoneData{ZoneName: "p.example.", Ready: true}
 	zd.SetStatus(ZoneStatusReady)
