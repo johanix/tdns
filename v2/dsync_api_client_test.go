@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -13,11 +14,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/johanix/tdns/v2/cache"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -684,5 +688,266 @@ func TestPickDsyncApiUrlHonoursPriorityAndWeight(t *testing.T) {
 		if _, err := pickDsyncApiUrl([]dns.RR{uri(10, 5, "   ")}); err == nil {
 			t.Fatal("an empty target was accepted")
 		}
+	})
+}
+
+// --- Endpoint address resolution and dialling (issue #508) ---------------
+//
+// The endpoint used to travel to net/http as a URL, so the host was resolved a
+// second time through the process's stub resolver: an unvalidated answer, from
+// a resolver that need not be the one that just proved the URI, chose the
+// address the credential was sent to. These guard the fix -- discovery
+// resolves the host through its own IMR, and the POST dials what it found.
+
+func TestDsyncApiEndpointHost(t *testing.T) {
+	for _, tc := range []struct {
+		url         string
+		host        string
+		literal, ok bool
+	}{
+		{"https://dsync-api.parent.example:8443/dsync/v1", "dsync-api.parent.example", false, true},
+		{"https://dsync-api.parent.example/dsync/v1", "dsync-api.parent.example", false, true},
+		// A literal is already an address: nothing to resolve, and nothing for
+		// a stub resolver to answer differently either.
+		{"https://192.0.2.1:8443/dsync/v1", "192.0.2.1", true, true},
+		{"https://[2001:db8::1]:8443/dsync/v1", "2001:db8::1", true, true},
+		{"https:///dsync/v1", "", false, false},
+		{"://nonsense", "", false, false},
+	} {
+		host, literal, err := dsyncApiEndpointHost(tc.url)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok=%v", tc.url, err, tc.ok)
+			continue
+		}
+		if err != nil {
+			continue
+		}
+		if host != tc.host || literal != tc.literal {
+			t.Errorf("%s: host=%q literal=%v, want %q/%v", tc.url, host, literal, tc.host, tc.literal)
+		}
+	}
+}
+
+// Discovery resolves the host of the URL, not the DSYNC target. They are the
+// same name in every deployment seen so far, and resolving the target would
+// still quietly dial a different service on the day a parent publishes a URI
+// that points elsewhere.
+func TestDiscoverDsyncApiEndpointResolvesTheUrlHost(t *testing.T) {
+	const target = "dsync-api.parent.example."
+	const urlhost = "api-vip.parent.example."
+	imr := newTestImr(t)
+
+	seedSecure(t, imr, target, dns.TypeURI,
+		target+` 300 IN URI 10 1 "https://`+strings.TrimSuffix(urlhost, ".")+`:8443/dsync/v1"`)
+	seedSecure(t, imr, target, dns.TypeTXT,
+		target+` 300 IN TXT "`+DsyncApiDialectV1+`"`)
+	seedSecure(t, imr, urlhost, dns.TypeA, urlhost+" 300 IN A 192.0.2.7")
+	seedSecure(t, imr, urlhost, dns.TypeAAAA, urlhost+" 300 IN AAAA 2001:db8::7")
+	// The DSYNC target has its own, different address. Picking this one would
+	// be the bug this test exists to catch.
+	seedSecure(t, imr, target, dns.TypeA, target+" 300 IN A 198.51.100.9")
+
+	ep, err := DiscoverDsyncApiEndpoint(context.Background(), imr, target, true)
+	if err != nil {
+		t.Fatalf("DiscoverDsyncApiEndpoint: %v", err)
+	}
+	want := []string{"192.0.2.7", "2001:db8::7"}
+	if !reflect.DeepEqual(ep.Addrs, want) {
+		t.Errorf("Addrs = %v, want %v (the URL host's addresses)", ep.Addrs, want)
+	}
+}
+
+// An address literal in the URI needs no lookup, and an endpoint whose host
+// has no address at all is a dead end worth saying so about rather than
+// leaving for net/http to discover.
+func TestResolveDsyncApiEndpointAddrsLiteralAndMissing(t *testing.T) {
+	imr := newTestImr(t)
+
+	addrs, err := resolveDsyncApiEndpointAddrs(context.Background(), imr,
+		"https://192.0.2.1:8443/dsync/v1", true)
+	if err != nil || addrs != nil {
+		t.Errorf("literal: addrs=%v err=%v, want nil/nil", addrs, err)
+	}
+
+	seedCached(t, imr, "nothing.parent.example.", dns.TypeA, cache.ValidationStateSecure)
+	seedCached(t, imr, "nothing.parent.example.", dns.TypeAAAA, cache.ValidationStateSecure)
+	err = nil
+	if _, err = resolveDsyncApiEndpointAddrs(context.Background(), imr,
+		"https://nothing.parent.example:8443/dsync/v1", true); err == nil {
+		t.Fatal("an endpoint host with no address must fail discovery")
+	}
+	if !strings.Contains(err.Error(), "does not resolve") {
+		t.Errorf("error = %q; want it to name the published endpoint as the problem", err)
+	}
+
+	// A resolver that could not answer has not said the name has no address.
+	// Reporting the parent's endpoint as unresolvable for a failure on this
+	// side sends the operator to the wrong end of the problem -- which is the
+	// same mistake the whole scheme's 401 diagnosis had. Nothing is seeded
+	// here, and the empty cache knows no nameservers, so the query errors.
+	_, err = resolveDsyncApiEndpointAddrs(context.Background(), newTestImr(t),
+		"https://unreachable.parent.example:8443/dsync/v1", true)
+	if err == nil {
+		t.Fatal("a failed lookup must not pass for a successful empty answer")
+	}
+	if strings.Contains(err.Error(), "does not resolve") {
+		t.Errorf("error = %q; a local resolver failure must not be reported as the parent's", err)
+	}
+}
+
+// The address is held to the same rule as the URI and the TXT: an address
+// taken from an unvalidated answer is the address an attacker picked, which is
+// the half of the property §8 claims that the stub lookup was giving away.
+func TestResolveDsyncApiEndpointAddrsRequiresValidation(t *testing.T) {
+	const urlhost = "dsync-api.parent.example."
+	const endpoint = "https://dsync-api.parent.example:8443/dsync/v1"
+	imr := newTestImr(t)
+
+	seedState(t, imr, urlhost, dns.TypeA, cache.ValidationStateInsecure,
+		urlhost+" 300 IN A 192.0.2.7")
+	seedCached(t, imr, urlhost, dns.TypeAAAA, cache.ValidationStateInsecure)
+
+	if _, err := resolveDsyncApiEndpointAddrs(context.Background(), imr, endpoint, true); err == nil {
+		t.Error("an unvalidated address RRset must not be used to dial a bearer credential")
+	} else if !strings.Contains(err.Error(), "DNSSEC") {
+		t.Errorf("error = %q; want it to say why the address was refused", err)
+	}
+
+	// allow-insecure is one switch for both, as everywhere else in this
+	// scheme: a lab that waived the URI's validation waived the address's.
+	addrs, err := resolveDsyncApiEndpointAddrs(context.Background(), imr, endpoint, false)
+	if err != nil || !reflect.DeepEqual(addrs, []string{"192.0.2.7"}) {
+		t.Errorf("allow-insecure: addrs=%v err=%v, want [192.0.2.7]", addrs, err)
+	}
+}
+
+// The end-to-end guard for #508: the endpoint host is a name that resolves
+// nowhere, and the POST reaches the server anyway because discovery handed the
+// client an address. Before the fix this failed in net/http's stub lookup.
+//
+// It also pins the other half of the fix: only the ADDRESS comes from
+// discovery. The certificate is issued to the hostname, verification is on,
+// and it still has to pass -- so DNSSEC says which endpoint was meant and TLS
+// says this is it, which is what §8 claims.
+func TestDsyncApiPostDialsTheDiscoveredAddress(t *testing.T) {
+	const urlhost = "dsync-api.parent.example"
+
+	var served bool
+	cert, leaf := newTestTLSCert(t, []string{urlhost}, nil)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served = true
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(DsyncApiDelegation{Child: "child1.example."})
+	}))
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+	srv.StartTLS()
+	defer srv.Close()
+
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "https://"))
+	if err != nil {
+		t.Fatalf("test server address %q: %v", srv.URL, err)
+	}
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := writeCertPEM(caPath, leaf.Raw); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+
+	ep := &DsyncApiEndpoint{
+		Target:  urlhost + ".",
+		Url:     "https://" + net.JoinHostPort(urlhost, port) + "/dsync/v1",
+		Dialect: DsyncApiDialectV1,
+		Addrs:   []string{"127.0.0.1"},
+	}
+	cred := DsyncApiClientCredential{Username: "child1.example.", Key: "s3cret"}
+	rrsets := []DsyncApiRRset{{Owner: "child1.example.", Type: "NS",
+		RRs: []string{"child1.example. 60 IN NS ns1.child1.example."}}}
+
+	if _, err := DsyncApiPostDelegationRequest(context.Background(), ep, cred,
+		"child1.example.", rrsets, false, caPath); err != nil {
+		t.Fatalf("post to a discovered address: %v", err)
+	}
+	if !served {
+		t.Error("the request never reached the endpoint")
+	}
+
+	// Same server, same certificate, no discovered address: the client is back
+	// to resolving the name itself, and the name does not resolve. This is the
+	// state the bug left every request in.
+	ep.Addrs = nil
+	if _, err := DsyncApiPostDelegationRequest(context.Background(), ep, cred,
+		"child1.example.", rrsets, false, caPath); err == nil {
+		t.Error("without a discovered address the host cannot be reached; want an error")
+	}
+}
+
+// Several addresses are alternatives, not a list to give up on at the first
+// one, and a failure has to name what was actually dialled.
+func TestDsyncApiDialContext(t *testing.T) {
+	if dsyncApiDialContext(nil) != nil {
+		t.Error("no discovered addresses must leave the transport's own dialler in place")
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+
+	// ::1 at this port has nothing listening (the port was taken on 127.0.0.1
+	// alone), so the first address fails and the second must be tried.
+	dial := dsyncApiDialContext([]string{"::1", "127.0.0.1"})
+	conn, err := dial(context.Background(), "tcp", net.JoinHostPort("dsync-api.parent.example", port))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn.Close()
+
+	ln.Close()
+	_, err = dial(context.Background(), "tcp", net.JoinHostPort("dsync-api.parent.example", port))
+	if err == nil {
+		t.Fatal("dialling a closed port must fail")
+	}
+	for _, want := range []string{"dsync-api.parent.example", "127.0.0.1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func seedSecure(t *testing.T, imr *Imr, name string, rrtype uint16, rrs ...string) {
+	t.Helper()
+	seedState(t, imr, name, rrtype, cache.ValidationStateSecure, rrs...)
+}
+
+func seedState(t *testing.T, imr *Imr, name string, rrtype uint16, state cache.ValidationState, rrs ...string) {
+	t.Helper()
+	parsed := make([]dns.RR, 0, len(rrs))
+	for _, s := range rrs {
+		parsed = append(parsed, txtRR(t, s))
+	}
+	imr.Cache.Set(name, rrtype, &cache.CachedRRset{
+		Name: name, RRtype: rrtype,
+		RRset:   &core.RRset{Name: name, RRtype: rrtype, RRs: parsed},
+		Context: cache.ContextAnswer,
+		State:   state,
+	})
+}
+
+// seedCached seeds an empty answer: the name exists in the cache, with no
+// records of that type, so nothing goes to the network looking for one.
+//
+// Ttl matters here and not in seedState: Set derives the expiration from the
+// records' own TTL, and an entry with no records needs one given. Without it
+// the entry expires the instant it is written and the lookup goes out to the
+// network after all.
+func seedCached(t *testing.T, imr *Imr, name string, rrtype uint16, state cache.ValidationState) {
+	t.Helper()
+	imr.Cache.Set(name, rrtype, &cache.CachedRRset{
+		Name: name, RRtype: rrtype,
+		RRset:   &core.RRset{Name: name, RRtype: rrtype},
+		Context: cache.ContextNoErrNoAns,
+		State:   state,
+		Ttl:     300,
 	})
 }

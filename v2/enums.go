@@ -602,6 +602,15 @@ outer:
 func (zd *ZoneData) HasServiceImpactingError() bool {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	return zd.hasServiceImpactingErrorLocked()
+}
+
+// hasServiceImpactingErrorLocked is HasServiceImpactingError's body; the caller
+// MUST already hold zd.mu. Same shape, and same reason, as setErrorLocked and
+// clearErrorLocked: Go mutexes are not reentrant, so a path that already holds
+// the lock -- one deriving several pieces of zone state that have to agree with
+// each other -- cannot go through the public method.
+func (zd *ZoneData) hasServiceImpactingErrorLocked() bool {
 	for _, t := range serviceImpactingErrors {
 		if _, ok := zd.Errors[t]; ok {
 			return true

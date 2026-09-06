@@ -800,8 +800,29 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 	return cr, nil
 }
 
+// zoneStateOrUnknown is the State cell. Every production path populates
+// ZoneConf.Provisioning -- buildListZoneConf does it for both the bulk listing
+// and `zone desc`, and the list-dynamic handler does its own -- but a
+// ZoneConf that arrives without it must not render as a blank cell in a column
+// whose whole purpose is to be scanned. "unknown" is the zero value's own name
+// and says what is true: the state was not reported.
+func zoneStateOrUnknown(zconf tdns.ZoneConf) string {
+	if zconf.Provisioning == "" {
+		return tdns.ZoneStatusToString[tdns.ZoneStatusUnknown]
+	}
+	return zconf.Provisioning
+}
+
 func ListZones(cr tdns.ZoneResponse) {
-	hdr := "Zone|Type|Store|"
+	// State, not Store. "which of my zones are not OK" is asked of this
+	// listing, and Store could not answer it: the enum is down to two values
+	// in practice (slice is deprecated and folds into map, and anything unset
+	// or unrecognised defaults to map), so the column was a constant. State
+	// carries the lifecycle the server already computes, so a zone that has
+	// never loaded is visible as such from the moment it is registered rather
+	// than only once a probe has timed out and left an annotation behind.
+	// Store is still printed by `zone desc` in its detail line.
+	hdr := "Zone|Type|State|"
 	if showprimary {
 		hdr += "Primary|"
 	}
@@ -818,21 +839,23 @@ func ListZones(cr tdns.ZoneResponse) {
 	}
 	zoneLines := []string{}
 	for zname, zconf := range cr.Zones {
-		// Service-impacting errors collapse to a single ERROR row. A
-		// non-service-impacting error (e.g. ConfigWarning: serving from a subset
-		// of primaries) leaves the zone serving, so render it normally and
-		// annotate it below rather than masquerading as an ERROR.
-		if zconf.Error && tdns.ErrorTypeIsServiceImpacting(zconf.ErrorType) {
-			line := fmt.Sprintf("%s|%s||||Error[%s]: %s", zname, "ERROR", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
-			zoneLines = append(zoneLines, line)
-			continue
-		}
+		// Every zone renders as the same shape of row. A service-impacting
+		// error used to collapse into `<zone>|ERROR||||Error[...]`, putting
+		// the word ERROR in the TYPE column and blanking the rest -- a
+		// masquerade that existed because there was nowhere else to say the
+		// zone was broken. The State column is that place, so the row keeps
+		// its real type and says `error` where the state goes.
+		//
+		// Uniform rows also fix an alignment bug that came with the collapse:
+		// it emitted a fixed six fields and skipped the optional Primary /
+		// Notify / Zonefile columns, so under -p, -n or -f the ERROR row's
+		// remaining cells landed under the wrong headers.
 		opts := []string{}
 		for _, opt := range zconf.Options {
 			opts = append(opts, tdns.ZoneOptionToString[opt])
 		}
 		sort.Strings(opts)
-		line := fmt.Sprintf("%s|%s|%s|", zname, zconf.Type, zconf.Store)
+		line := fmt.Sprintf("%s|%s|%s|", zname, zconf.Type, zoneStateOrUnknown(zconf))
 		if showprimary {
 			line += fmt.Sprintf("%s|", peerConfAddrsString(zconf.Primaries))
 		}
@@ -843,7 +866,10 @@ func ListZones(cr tdns.ZoneResponse) {
 			line += fmt.Sprintf("%s|", zconf.Zonefile)
 		}
 		line += fmt.Sprintf("%t|%t|%v", zconf.Frozen, zconf.Dirty, opts)
-		if zconf.Error { // non-service-impacting => a warning; the zone still serves
+		// One annotation shape for both severities. The `Error[` prefix the
+		// collapsed row used is gone: the State column now says which of the
+		// two this is, so repeating it here was noise in the widest field.
+		if zconf.Error {
 			line += fmt.Sprintf(" [%s: %s]", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
 		}
 		zoneLines = append(zoneLines, line)
@@ -855,18 +881,11 @@ func ListZones(cr tdns.ZoneResponse) {
 	fmt.Printf("%s\n", columnize.SimpleFormat(out))
 }
 
+// VerboseListZone renders `zone list -v`: a detail block per zone, from the
+// same zoneBaseDetail that `zone desc` uses. It builds no column table -- the
+// header this function used to compute was assembled, never printed, and
+// silently disagreed with the columns ListZones actually renders.
 func VerboseListZone(cr tdns.ZoneResponse) {
-	hdr := "Zone|Type|Store|"
-	if showprimary {
-		hdr += "Primary|"
-	}
-	if shownotify {
-		hdr += "Notify|"
-	}
-	if showfile {
-		hdr += "Zonefile|"
-	}
-	hdr += "Frozen|Dirty|Options"
 	zoneLines := []string{}
 	for zname, zconf := range cr.Zones {
 		zoneLines = append(zoneLines, zoneBaseDetail(zname, zconf))
@@ -889,16 +908,22 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 func zoneBaseDetail(name string, zconf tdns.ZoneConf) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "zone: %s\n", name)
+	// State is unconditional, and is the lifecycle the server computes rather
+	// than a word picked from whether an error happens to be registered.
+	//
+	// It used to live entirely inside `if zconf.Error`, so a healthy zone
+	// printed no State at all and the only two values were ERROR and a
+	// hardcoded "serving" -- which is how a secondary that had never loaded,
+	// held no data and answered SERVFAIL to every query came to describe
+	// itself as `State: serving`.
+	//
+	// Same annotation shape as ListZones, for the same reason: the state word
+	// already says which severity this is.
+	fmt.Fprintf(&b, "\tState: %s", zoneStateOrUnknown(zconf))
 	if zconf.Error {
-		// A service-impacting error is ERROR; a non-service-impacting warning
-		// (e.g. ConfigWarning) leaves the zone serving — render it as such,
-		// matching ListZones rather than masquerading as ERROR.
-		if tdns.ErrorTypeIsServiceImpacting(zconf.ErrorType) {
-			fmt.Fprintf(&b, "\tState: ERROR ErrorType: %s ErrorMsg: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
-		} else {
-			fmt.Fprintf(&b, "\tState: serving Warning[%s]: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
-		}
+		fmt.Fprintf(&b, " [%s: %s]", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
 	}
+	fmt.Fprintf(&b, "\n")
 	opts := []string{}
 	for _, opt := range zconf.Options {
 		opts = append(opts, tdns.ZoneOptionToString[opt])
