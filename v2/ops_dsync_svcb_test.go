@@ -130,6 +130,53 @@ func TestBootstrapSVCBReconcile(t *testing.T) {
 	}
 }
 
+// A zone that already published the AliasMode record has to be healed by an
+// ordinary publish. Matching bootstrap data made it look done, so the record
+// BIND 9.18 refuses survived every republish and only UnpublishDsyncRRs first
+// could clear it.
+func TestBootstrapSVCBReconcileRewritesAliasMode(t *testing.T) {
+	target := "updates.example."
+	desired := "at-apex,at-ns"
+
+	alias := newBootstrapSVCB(target, desired, 7200)
+	alias.Priority = 0 // what an earlier version published, same data
+
+	got := bootstrapSVCBReconcile(target, desired, []dns.RR{alias}, 7200)
+	if len(got) != 2 {
+		t.Fatalf("published AliasMode with matching data: want DELETE+ADD, got %d actions", len(got))
+	}
+	if got[0].Header().Class != dns.ClassANY {
+		t.Fatal("first action must be the ClassANY delete")
+	}
+	add, ok := got[1].(*dns.SVCB)
+	if !ok {
+		t.Fatalf("second action is %T, want *dns.SVCB", got[1])
+	}
+	if add.Priority == 0 || add.Target != "." {
+		t.Errorf("replacement is %s, want ServiceMode with target \".\"", add.String())
+	}
+	if data, _ := publishedBootstrapSVCBData([]dns.RR{add}); data != desired {
+		t.Errorf("replacement data = %q, want %q", data, desired)
+	}
+
+	// The healed record must then settle: rewriting on every publish would
+	// churn the zone and its signatures forever.
+	if again := bootstrapSVCBReconcile(target, desired, []dns.RR{add}, 7200); again != nil {
+		t.Fatalf("a ServiceMode record with matching data must be a no-op, got %d actions", len(again))
+	}
+
+	// A target name whose SVCB is not ours and where we publish nothing is not
+	// this function's business, whatever mode it is in.
+	foreign := &dns.SVCB{
+		Hdr:      dns.RR_Header{Name: target, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 7200},
+		Priority: 0,
+		Target:   "svc.example.",
+	}
+	if got := bootstrapSVCBReconcile(target, "", []dns.RR{foreign}, 7200); got != nil {
+		t.Fatalf("nothing desired and no bootstrap data published: want no actions, got %d", len(got))
+	}
+}
+
 func TestPublishDsyncRRsReconcilesSVCBForExistingDSYNC(t *testing.T) {
 	prev := DelegationSyncConfig()
 	t.Cleanup(func() { _ = SetDelegationSyncConfig(*prev) })
