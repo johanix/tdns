@@ -166,6 +166,16 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 
 		case <-timer.C:
 			for _, zd := range ZonesToKeepSigned {
+				// Shutdown latency here is one pass per zone, not one pass, so
+				// the check belongs between zones: a stop during a sweep of
+				// several hundred should not wait out the whole sweep. Inside a
+				// pass there is nothing useful to abandon -- it holds zd.mu and
+				// signs only what is due, and SignZone and ResignZone bound
+				// themselves the same way.
+				if ctx.Err() != nil {
+					lgSigner.Info("ResignerEngine terminating during a renewal sweep")
+					return
+				}
 				// Skip zones where signing has been disabled since
 				// they were added to the list. MP zones can toggle
 				// OptInlineSigning dynamically based on HSYNC analysis.
