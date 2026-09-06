@@ -12,13 +12,16 @@ import (
 	"fmt"
 	"io"
 	mrand "math/rand/v2"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns/v2/cache"
 	"github.com/miekg/dns"
 )
 
@@ -41,6 +44,23 @@ type DsyncApiEndpoint struct {
 	Target  string // the DSYNC target, where URI and TXT were found
 	Url     string // from the URI record
 	Dialect string // from the TXT record
+
+	// Addrs are the addresses of the URL's host, resolved through the same
+	// IMR that did the discovery and under the same validation rule as the
+	// URI and TXT above, and they are what the POST actually dials.
+	//
+	// Without this the endpoint travelled as a URL and net/http resolved the
+	// host again through the process's stub resolver: an unvalidated answer,
+	// from a resolver that need not be the daemon's own, chose the address
+	// (issue #508). That broke every daemon whose imrengine sees the parent
+	// and whose /etc/resolv.conf does not -- which is the normal case, and
+	// the reason the imrengine exists -- and it gave away most of what the
+	// validated discovery was for: DNSSEC established which NAME was meant,
+	// and whoever answered the stub query picked the address behind it.
+	//
+	// Empty when the URL's host is an address literal, which needs no
+	// resolution and gets none from the dialler either.
+	Addrs []string
 }
 
 // dsyncApiSupportedDialects are the dialects this implementation speaks, in
@@ -98,7 +118,96 @@ func DiscoverDsyncApiEndpoint(ctx context.Context, imr *Imr, target string, requ
 		return nil, err
 	}
 
-	return &DsyncApiEndpoint{Target: target, Url: endpoint, Dialect: dialect}, nil
+	// Resolve the endpoint host here, while the IMR that proved the URI is in
+	// hand. Doing it later, in net/http, means doing it somewhere else --
+	// see the Addrs comment on DsyncApiEndpoint.
+	addrs, err := resolveDsyncApiEndpointAddrs(ctx, imr, endpoint, requireDnssec)
+	if err != nil {
+		return nil, err
+	}
+
+	return &DsyncApiEndpoint{Target: target, Url: endpoint, Dialect: dialect, Addrs: addrs}, nil
+}
+
+// resolveDsyncApiEndpointAddrs resolves the host of the discovered URL through
+// the IMR, under the same validation rule the URI and TXT obeyed.
+//
+// The host resolved is the URL's, not the DSYNC target's. They are usually the
+// same name, but the URI record may point anywhere, and resolving the target
+// would quietly dial a different service on the day they differ.
+//
+// Returns (nil, nil) for an address literal: there is nothing to resolve, and
+// nothing for a stub resolver to answer differently either.
+func resolveDsyncApiEndpointAddrs(ctx context.Context, imr *Imr, endpoint string, requireDnssec bool) ([]string, error) {
+	host, literal, err := dsyncApiEndpointHost(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if literal {
+		return nil, nil
+	}
+
+	fqdn := dns.Fqdn(host)
+	var addrs []string
+	var unvalidated []string
+	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		resp, qerr := imr.ImrQuery(ctx, fqdn, qtype, dns.ClassINET, nil)
+		if qerr != nil {
+			lgDsyncApi.Debug("DSYNC API: address lookup for the endpoint host failed",
+				"host", fqdn, "qtype", dns.TypeToString[qtype], "err", qerr)
+			continue
+		}
+		if resp == nil || resp.Error || resp.RRset == nil || len(resp.RRset.RRs) == 0 {
+			continue
+		}
+		// One family failing to validate does not condemn the other, but it
+		// is not usable: an address chosen from an unvalidated answer is the
+		// address an attacker chose. Dropped, and said out loud, because a
+		// silent drop looks exactly like the name having no record.
+		if requireDnssec && !resp.Validated {
+			unvalidated = append(unvalidated, dns.TypeToString[qtype])
+			lgDsyncApi.Warn("DSYNC API: an address RRset for the endpoint host did not DNSSEC-validate; ignoring it",
+				"host", fqdn, "qtype", dns.TypeToString[qtype], "validationstate", cache.ValidationStateToString[resp.ValidationState])
+			continue
+		}
+		for _, rr := range resp.RRset.RRs {
+			switch v := rr.(type) {
+			case *dns.A:
+				addrs = append(addrs, v.A.String())
+			case *dns.AAAA:
+				addrs = append(addrs, v.AAAA.String())
+			}
+		}
+	}
+
+	if len(addrs) == 0 {
+		if len(unvalidated) > 0 {
+			return nil, fmt.Errorf(
+				"the %s record(s) for the endpoint host %s did not DNSSEC-validate;"+
+					" refusing to send credentials to an address chosen by an unauthenticated answer",
+				strings.Join(unvalidated, "/"), host)
+		}
+		return nil, fmt.Errorf(
+			"no A or AAAA record for the endpoint host %s; the parent publishes an endpoint that does not resolve", host)
+	}
+	return addrs, nil
+}
+
+// dsyncApiEndpointHost extracts the host from a discovered endpoint URL and
+// says whether it is already an address literal.
+func dsyncApiEndpointHost(endpoint string) (string, bool, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", false, fmt.Errorf("the published endpoint %q is not a URL: %v", endpoint, err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", false, fmt.Errorf("the published endpoint %q names no host", endpoint)
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return host, true, nil
+	}
+	return host, false, nil
 }
 
 // pickDsyncApiDialect finds the first advertised dialect this implementation
@@ -298,7 +407,7 @@ func DsyncApiPostDelegationRequest(ctx context.Context, endpoint *DsyncApiEndpoi
 		req.SetBasicAuth(cred.Username, cred.Key)
 	}
 
-	client, err := dsyncApiHttpClient(caFile, cred)
+	client, err := dsyncApiHttpClient(caFile, cred, endpoint.Addrs)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +453,13 @@ func DsyncApiPostDelegationRequest(ctx context.Context, endpoint *DsyncApiEndpoi
 //     which turns a redirect into a silent auth failure rather than a leak,
 //     but a same-host redirect still carries the credential -- and a redirect
 //     on this endpoint means something is wrong either way.
-func dsyncApiHttpClient(caFile string, cred DsyncApiClientCredential) (*http.Client, error) {
+//
+// addrs are the addresses discovery resolved for the endpoint host. They
+// replace the transport's own name resolution, so "DNSSEC establishes which
+// endpoint was meant" covers the address as well as the name; see
+// dsyncApiDialContext. Empty means the URL holds an address literal, or that
+// the endpoint did not come from discovery, and the default dialler applies.
+func dsyncApiHttpClient(caFile string, cred DsyncApiClientCredential, addrs []string) (*http.Client, error) {
 	tlsconf := &tls.Config{MinVersion: tls.VersionTLS12}
 
 	if cred.CertFile != "" {
@@ -393,8 +508,59 @@ func dsyncApiHttpClient(caFile string, cred DsyncApiClientCredential) (*http.Cli
 		},
 		Transport: &http.Transport{
 			TLSClientConfig: tlsconf,
+			DialContext:     dsyncApiDialContext(addrs),
 		},
 	}, nil
+}
+
+// dsyncApiDialContext dials the addresses discovery validated rather than
+// whatever the process's stub resolver would answer for the same name.
+//
+// Only the address is substituted. The hostname stays in the request URL, so
+// SNI and certificate verification are untouched and still prove the name:
+// DNSSEC says which endpoint was meant, TLS says this is it, and neither now
+// depends on an unvalidated lookup in between.
+//
+// Returns nil -- the transport's own default dialler -- when there is nothing
+// validated to dial with. That is the address-literal case, where the default
+// dialler resolves nothing either, and the case of an endpoint built by hand
+// rather than by discovery.
+func dsyncApiDialContext(addrs []string) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	if len(addrs) == 0 {
+		return nil
+	}
+	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		// A literal was never resolved, so there is nothing to substitute.
+		if _, perr := netip.ParseAddr(host); perr == nil {
+			return d.DialContext(ctx, network, addr)
+		}
+
+		var firstErr error
+		for _, a := range addrs {
+			conn, derr := d.DialContext(ctx, network, net.JoinHostPort(a, port))
+			if derr == nil {
+				return conn, nil
+			}
+			if firstErr == nil {
+				firstErr = derr
+			}
+			// A cancelled or expired context will not be helped by the next
+			// address, and trying anyway hides the real reason.
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		// Named in full: the whole point of this fix is that the addresses
+		// dialled are the discovered ones, so a failure has to say which.
+		return nil, fmt.Errorf("dialling the endpoint host %s at its discovered address(es) %v: %v",
+			host, addrs, firstErr)
+	}
 }
 
 // DsyncApiRRsetsFromSyncStatus renders the child's desired delegation as the
