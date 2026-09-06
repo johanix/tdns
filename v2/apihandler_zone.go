@@ -448,18 +448,30 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 // Display derivation only. No classification changes: HasServiceImpactingError
 // and Ready are read, nothing is written.
 //
-// Lock discipline: HasServiceImpactingError() and GetStatus() each take zd.mu,
-// which is not reentrant, so this must be called with the lock NOT held. Both
-// call sites satisfy that -- buildListZoneConf releases zd.mu (taken only to
-// snapshot Notify) well before it gets here.
+// Lock discipline: this takes zd.mu itself, once, and must therefore be called
+// with the lock NOT held -- zd.mu is not reentrant. Both call sites satisfy
+// that; buildListZoneConf releases it (taken only to snapshot Notify) well
+// before it gets here, and TestZoneProvisioningTakesTheLockItself pins the
+// requirement.
+//
+// One lock, not three. The pieces are read together because the answer is a
+// single decision over all of them: taking the lock once per piece -- as this
+// did, via HasServiceImpactingError() and GetStatus(), with Error and Ready
+// read outside it altogether -- lets a concurrent refresh land between the
+// reads and produce a state that was never true of the zone at any instant.
+// Every writer of Errors, Error, Ready and Status holds zd.mu, so the unlocked
+// reads were races besides.
 func zoneProvisioning(zd *ZoneData) string {
-	if zd.HasServiceImpactingError() {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+
+	if zd.hasServiceImpactingErrorLocked() {
 		return "error" // refusing queries
 	}
 	if zd.Error && !zd.Ready {
 		return "error" // never loaded, and something is wrong
 	}
-	return ZoneStatusToString[zd.GetStatus()]
+	return ZoneStatusToString[zd.Status]
 }
 
 // buildListZoneConf builds the display ZoneConf for one zone exactly as the bulk

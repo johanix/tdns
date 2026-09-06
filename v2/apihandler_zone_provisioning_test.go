@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -99,4 +100,59 @@ func TestZoneOptionsFromStrings(t *testing.T) {
 	if len(opts) != 2 {
 		t.Errorf("unknown option should be ignored; got %d options", len(opts))
 	}
+}
+
+// zoneProvisioning reads four pieces of zone state -- the error registry,
+// Error, Ready and Status -- and every writer of them holds zd.mu. Reading any
+// of them outside that lock is a data race, and reading them under separate
+// acquisitions lets a concurrent refresh land between two of them and yield a
+// state that was never true of the zone at any instant.
+//
+// Run under -race this fails on the form that took the lock once per piece and
+// read Error and Ready outside it altogether.
+func TestZoneProvisioningIsRaceFree(t *testing.T) {
+	zd := &ZoneData{ZoneName: "p.example."}
+	zd.SetStatus(ZoneStatusReady)
+
+	valid := map[string]bool{"unknown": true, "pending": true, "loading": true, "ready": true, "error": true}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// A refresh cycling the zone between loaded-and-well and never-loaded-and-
+	// failing, which is exactly the pair the derivation has to tell apart.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if i%2 == 0 {
+				zd.SetError(RefreshError, "SOA probe failed")
+				zd.mu.Lock()
+				zd.Ready = false
+				zd.Status = ZoneStatusPending
+				zd.mu.Unlock()
+			} else {
+				zd.ClearError(RefreshError)
+				zd.mu.Lock()
+				zd.Ready = true
+				zd.Status = ZoneStatusReady
+				zd.mu.Unlock()
+			}
+		}
+	}()
+
+	for i := 0; i < 5000; i++ {
+		if got := zoneProvisioning(zd); !valid[got] {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("zoneProvisioning returned %q, which is not a state", got)
+		}
+	}
+	close(stop)
+	wg.Wait()
 }
