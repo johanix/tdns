@@ -103,6 +103,25 @@ func TestRestartPublishesUnsignedThenSignsWhenThePolicyBinds(t *testing.T) {
 
 	stageAndPublish(t, zd, stageAddA(t, zd, "one.example.test.", "192.0.2.11"))
 
+	// It PUBLISHED, and asserting that is the point of these two checks.
+	//
+	// The three below -- not Ready, no NOTIFY, unsigned SOA -- are every bit as
+	// true of a publish that was REFUSED, so on their own they pin nothing:
+	// turning the unbound-policy case from "publish unsigned" into "refuse and
+	// set DnssecError" passes all three. That is the arm this test exists for,
+	// and it is the field-regression path -- a restart of an inline-signing
+	// secondary would go SERVFAIL instead of serving its data unsigned while it
+	// waits for the bind.
+	if od := getOwnerFrom(zd.publishedSnapshot(), "one.example.test."); od == nil ||
+		len(od.RRtypes.GetOnlyRRSet(dns.TypeA).RRs) == 0 {
+		t.Fatal("the publish was refused: an unbound policy must publish unsigned, not refuse." +
+			" Keys that cannot be resolved YET are not a signing failure")
+	}
+	if zd.HasError(DnssecError) {
+		t.Errorf("the zone was marked service-impacting for a policy that has simply not bound"+
+			" yet: %s", zd.ErrorMsg)
+	}
+
 	if zd.Ready {
 		t.Fatal("a zone published before its policy bound became Ready; it is unsigned")
 	}
@@ -160,9 +179,14 @@ func TestInstallInitialSnapshotDoesNotReadyAnUnsignedSigningZone(t *testing.T) {
 }
 
 // An unbound policy with no keys to fall back on is the ordinary first load, not
-// a fault: publish unsigned, stay not Ready, record no error. The distinction is
-// ErrDnssecPolicyNotBound; any other resolution failure refuses the publish and
-// sets DnssecError (TestPublishRefusesAReplacementItCannotSign).
+// a fault: publish unsigned, stay not Ready, record no error. Any other
+// resolution failure refuses the publish and sets DnssecError
+// (TestPublishRefusesAReplacementItCannotSign).
+//
+// The mechanism is resolveSigningMaterialLocked's nil-policy guard, not the
+// ErrDnssecPolicyNotBound arm below it -- the guard returns before anything can
+// raise that sentinel. Mutating the arm breaks no test because no path reaches
+// it; mutating the guard breaks this test and three more.
 func TestPublishTreatsAnUnboundPolicyAsNotYetRatherThanAFault(t *testing.T) {
 	q := withNotifyQ(t, 4)
 	zd := loadIxfrTestZone(t, basicZone)

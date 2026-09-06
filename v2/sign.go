@@ -422,13 +422,18 @@ func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (b
 // fall back on. Binding happens post-Ready, so this is the ordinary state of a
 // brand-new zone's first publishes -- NOT a fault.
 //
-// It exists to be matched. The publish path has to tell this apart from a real
-// failure (an unreachable KeyDB, say): the first means "publish unsigned, stay
-// not Ready, the policy apply will sign", the second means "refuse the publish
-// and keep serving the last good snapshot". Testing err != nil cannot
-// distinguish them, and testing zd.DnssecPolicy == nil is worse -- a restart
-// has a nil policy AND usable keys, so that test skips signing on every
-// process start. See docs/2026-09-05-signing-publish-notify-correctness.md §3.3.
+// It exists to be matched, so a caller can tell it apart from a real failure
+// (an unreachable KeyDB, say): the first means "publish unsigned, stay not
+// Ready, signing follows when the policy binds", the second means "refuse the
+// publish and keep serving the last good snapshot".
+//
+// Note where it can actually be raised: only when zd.DnssecPolicy is nil (see
+// the guard below). The publish path returns on that condition BEFORE it calls
+// this function, so publishWorkingSetLocked's match on this sentinel is
+// currently unreachable and is kept as a backstop rather than as the mechanism.
+// That ordering is deliberate and was arrived at the hard way -- signing under a
+// nil policy produces five-minute signatures -- and it is explained where the
+// guard is. See docs/2026-09-05-signing-publish-notify-correctness.md §3.3.
 var ErrDnssecPolicyNotBound = errors.New("no DNSSEC policy bound yet; cannot generate active keys")
 
 func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKeys, error) {

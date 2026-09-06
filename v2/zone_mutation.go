@@ -894,10 +894,22 @@ type signingMaterial struct {
 // policy has not bound and whose keys therefore cannot be minted yet.
 // (nil, err) means resolution genuinely failed and the publish must be refused.
 //
-// The distinction is ErrDnssecPolicyNotBound, and testing zd.DnssecPolicy == nil
-// instead is the bug this replaces: a restart has a nil policy AND usable keys,
-// so the pointer test skips signing on every process start, and after C5 nothing
-// downstream signs it either.
+// Two conditions produce (nil, nil), and the order they are tested in matters.
+//
+// An earlier revision made ErrDnssecPolicyNotBound the sole distinction, on the
+// grounds that a restart has a nil policy AND usable keys and so must not be
+// skipped by a pointer test. That was implemented, and it signed a lab zone into
+// five-minute signatures: keys resolving says nothing about whether there is a
+// policy to give the signatures a lifetime. The policy pointer is therefore
+// tested FIRST, and the restart is made safe by deferring rather than skipping
+// -- signOnceAfterPolicyBind signs it in the same load.
+//
+// A consequence worth knowing before trying to test it: that guard preempts the
+// only condition under which EnsureActiveDnssecKeys raises the sentinel
+// (sign.go, "no KSK or no real ZSK, AND a nil policy"), so the errors.Is arm
+// below is unreachable today. It stays as a backstop. The behaviour it would
+// implement is pinned through the guard instead, by
+// TestPublishTreatsAnUnboundPolicyAsNotYetRatherThanAFault and three others.
 func (zd *ZoneData) resolveSigningMaterialLocked() (*signingMaterial, error) {
 	if !zd.signsItsOwnContent() || !zoneMayOriginateContent(zd) {
 		return nil, nil
