@@ -431,12 +431,47 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 }
 
 // zoneProvisioning derives the display-only lifecycle string from ZoneStatus
-// and the error registry: error takes precedence over the positive lifecycle.
+// and the error registry.
+//
+// Reads as: refusing queries -> error; nothing to serve and something is
+// wrong -> error; otherwise the lifecycle.
+//
+// Collapsing EVERY error to "error", as this did, is the mirror image of the
+// bug it is part of fixing: a zone that holds data and answers queries but
+// carries a non-service-impacting warning -- a secondary serving from a subset
+// of its primaries, a refresh that has gone stale -- was labelled "error"
+// while a secondary that had never loaded at all rendered as an ordinary
+// healthy row. Over-reporting one and under-reporting the other. The severity
+// split already exists in the error registry; this uses it rather than
+// inventing a second one.
+//
+// Display derivation only. No classification changes: HasServiceImpactingError
+// and Ready are read, nothing is written.
+//
+// Lock discipline: this takes zd.mu itself, once, and must therefore be called
+// with the lock NOT held -- zd.mu is not reentrant. Both call sites satisfy
+// that; buildListZoneConf releases it (taken only to snapshot Notify) well
+// before it gets here, and TestZoneProvisioningTakesTheLockItself pins the
+// requirement.
+//
+// One lock, not three. The pieces are read together because the answer is a
+// single decision over all of them: taking the lock once per piece -- as this
+// did, via HasServiceImpactingError() and GetStatus(), with Error and Ready
+// read outside it altogether -- lets a concurrent refresh land between the
+// reads and produce a state that was never true of the zone at any instant.
+// Every writer of Errors, Error, Ready and Status holds zd.mu, so the unlocked
+// reads were races besides.
 func zoneProvisioning(zd *ZoneData) string {
-	if zd.Error {
-		return "error"
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+
+	if zd.hasServiceImpactingErrorLocked() {
+		return "error" // refusing queries
 	}
-	return ZoneStatusToString[zd.GetStatus()]
+	if zd.Error && !zd.Ready {
+		return "error" // never loaded, and something is wrong
+	}
+	return ZoneStatusToString[zd.Status]
 }
 
 // buildListZoneConf builds the display ZoneConf for one zone exactly as the bulk

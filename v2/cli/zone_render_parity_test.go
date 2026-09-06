@@ -42,6 +42,7 @@ func parityZoneResponse() tdns.ZoneResponse {
 				Name:                   "example.",
 				Type:                   "primary",
 				Store:                  "MapZone",
+				Provisioning:           "ready",
 				EffectiveDnssecPolicy:  "default",
 				DnssecPolicyOverridden: true,
 				DnssecPolicyConfigBase: "base",
@@ -61,7 +62,10 @@ func TestVerboseListZone_GoldenParity(t *testing.T) {
 	got := captureStdout(t, func() { VerboseListZone(parityZoneResponse()) })
 	// Golden captured from VerboseListZone BEFORE the zoneBaseDetail extraction;
 	// it must remain byte-for-byte identical afterwards.
-	const golden = "zone: example.\n\tType: primary\tStore: MapZone\tOptions: []\n" +
+	// Updated deliberately: State is now unconditional (it used to appear only
+	// for a zone carrying an error, and its value was picked from the error
+	// branch rather than from the zone's lifecycle).
+	const golden = "zone: example.\n\tState: ready\n\tType: primary\tStore: MapZone\tOptions: []\n" +
 		"\tDNSSEC policy: default (override from config: base)\n" +
 		"\tPrimary: 192.0.2.1:53\tNotify: 192.0.2.2:53\tFile: /etc/tdns/example.zone\n" +
 		"\tFrozen: false\tDirty: true\tConfig: manual\n"
