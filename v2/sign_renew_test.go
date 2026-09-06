@@ -402,3 +402,106 @@ func TestRenewingDefersWhileAPublishIsPending(t *testing.T) {
 		t.Errorf("the pending change was overwritten by a renewal of the published version: %v", got.RRs)
 	}
 }
+
+// ageApexPublishOwned pushes the apex SOA's signatures to the brink of expiry.
+// The walk does not collect the SOA -- signing it there would sign the serial
+// the publish is about to replace -- so this is the case where the only thing
+// that can renew it is a publish happening at all.
+func ageApexSoaSignature(t *testing.T, zd *ZoneData) {
+	t.Helper()
+	od := getOwnerFrom(zd.publishedSnapshot(), zd.ZoneName)
+	if od == nil {
+		t.Fatal("no apex")
+	}
+	sigs := od.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs
+	if len(sigs) == 0 {
+		t.Fatal("fixture: the apex SOA is unsigned")
+	}
+	for _, sig := range sigs {
+		sig.(*dns.RRSIG).Expiration = uint32(time.Now().Add(30 * time.Second).Unix())
+	}
+}
+
+// The apex SOA is skipped by the walk because the publish re-signs it. That is
+// only true if a publish happens: with the SOA the one thing due, an earlier
+// version of this pass reported "nothing to do" and let the signature expire --
+// taking the whole zone BOGUS, since denial needs a valid SOA.
+func TestRenewingPublishesWhenOnlyTheApexSoaSignatureIsDue(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := renewalTestZone(t, kdb)
+
+	before := zd.publishedSnapshot()
+	ageApexSoaSignature(t, zd)
+
+	renewed, err := zd.RenewZoneSignatures(kdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renewed == 0 {
+		t.Fatal("reported nothing to do while the apex SOA signature was about to expire;" +
+			" only a publish renews it, so a pass that declines to publish leaves it to expire")
+	}
+	if zd.publishedSnapshot() == before {
+		t.Fatal("nothing was published, so resignWorkingSetSOAIfSigned never ran")
+	}
+	// Renewed, not merely republished. Asserted as "no longer about to expire"
+	// rather than "the bytes changed": ED25519 is deterministic, so two signings
+	// in the same second that draw the same jitter produce identical bytes.
+	for _, sig := range getOwnerFrom(zd.publishedSnapshot(), zd.ZoneName).
+		RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs {
+		expiry := time.Unix(int64(sig.(*dns.RRSIG).Expiration), 0)
+		if time.Until(expiry) < time.Hour {
+			t.Errorf("the apex SOA signature still expires at %s", expiry.UTC())
+		}
+	}
+
+	// And exactly once: the whole point of this pass is that an unchanged zone
+	// stops republishing, so renewing the SOA must not become a new way to bump
+	// the serial on every tick.
+	after := zd.publishedSnapshot()
+	serial := zd.CurrentSerial
+	for pass := 1; pass <= 3; pass++ {
+		n, err := zd.RenewZoneSignatures(kdb)
+		if err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		if n != 0 {
+			t.Errorf("pass %d renewed %d after the SOA was already renewed", pass, n)
+		}
+	}
+	if zd.publishedSnapshot() != after || zd.CurrentSerial != serial {
+		t.Errorf("the zone kept republishing after the SOA was renewed: serial %d -> %d",
+			serial, zd.CurrentSerial)
+	}
+}
+
+// The other side of that: publishing is only a way to renew the SOA on a zone
+// whose publish would re-sign it. resignWorkingSetSOAIfSigned stands down for an
+// unbound policy and for a zone that may not originate its content, and
+// publishing on the SOA's account there would renew nothing and leave it due --
+// so the next tick would publish again, and the next, which is the storm rebuilt
+// from the other end.
+//
+// The unbound policy is the arm tested here because it needs no globals; the
+// origination arm shares the same gate. It is a real state, not a contrivance:
+// a restart publishes before its policy binds, and signOnceAfterPolicyBind is
+// what signs the zone once it does.
+func TestRenewingDoesNotPublishForAnSoaItWouldNotResign(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := renewalTestZone(t, kdb)
+
+	before := zd.publishedSnapshot()
+	serial := zd.CurrentSerial
+	ageApexSoaSignature(t, zd)
+	zd.DnssecPolicy = nil
+
+	for pass := 1; pass <= 3; pass++ {
+		if _, err := zd.RenewZoneSignatures(kdb); err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+	}
+	if zd.publishedSnapshot() != before || zd.CurrentSerial != serial {
+		t.Errorf("republished for an upstream SOA signature this server does not renew:"+
+			" serial %d -> %d. Every tick would do it again", serial, zd.CurrentSerial)
+	}
+}

@@ -89,8 +89,8 @@ func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
 		return 0, nil
 	}
 
-	due := zd.collectAgeingSignaturesLocked(snap)
-	if len(due) == 0 {
+	due, publishOwned := zd.collectAgeingSignaturesLocked(snap)
+	if len(due) == 0 && publishOwned == 0 {
 		return 0, nil
 	}
 
@@ -124,7 +124,7 @@ func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
 		t.rrset = rs
 		signed = append(signed, t)
 	}
-	if len(signed) == 0 {
+	if len(signed) == 0 && publishOwned == 0 {
 		return 0, nil
 	}
 
@@ -139,10 +139,27 @@ func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
 
 	// A publish here is wanted: new signatures should reach downstreams, and the
 	// serial bump is how they learn. The publish also re-signs the SOA over the
-	// new serial and repairs the chain around what changed.
+	// new serial and recomputes the ZONEMD -- which is why a publish-owned
+	// signature coming due is on its own a reason to publish, with nothing
+	// staged at all.
 	zd.publishLocked(zd.generation.Load())
 
-	return len(signed), nil
+	// A publish that did not renew what it owns would put this pass in a loop,
+	// publishing and bumping the serial on every tick because the same
+	// signature is still due -- the storm, rebuilt from the other end. The gate
+	// on publishOwned is meant to make that impossible; say so loudly rather
+	// than quietly spin if it ever is not.
+	if publishOwned > 0 {
+		if _, stillDue := zd.collectAgeingSignaturesLocked(zd.snapshot.Load()); stillDue > 0 {
+			lgSigner.Error("RenewZoneSignatures: published to renew the SOA or ZONEMD signature"+
+				" and it is STILL due; the publish did not re-sign what it owns",
+				"zone", zd.ZoneName, "still_due", stillDue)
+		}
+	}
+
+	// Publish-owned RRsets were renewed too, by the publish rather than by the
+	// loop above, and the caller counts renewed RRsets.
+	return len(signed) + publishOwned, nil
 }
 
 // collectAgeingSignaturesLocked walks the published snapshot and returns the
@@ -151,10 +168,18 @@ func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
 // Read-only. The RRsets it returns share storage with the snapshot -- the
 // RRset struct is copied by value but its RRs and RRSIGs slices are not -- so
 // every one of them MUST be cloned before it is signed.
-func (zd *ZoneData) collectAgeingSignaturesLocked(snap *zoneSnapshot) []renewalTarget {
+func (zd *ZoneData) collectAgeingSignaturesLocked(snap *zoneSnapshot) ([]renewalTarget, int) {
 	if snap == nil {
-		return nil
+		return nil, 0
 	}
+
+	// Whether a publish would actually renew what it owns. Exactly
+	// resignWorkingSetSOAIfSigned's gate: a zone that may not originate content
+	// is mirroring an upstream SOA that is not ours to re-sign, and an unbound
+	// policy gives the publish nothing to sign under. In neither case would
+	// publishing renew the signature, so in neither case is it a reason to
+	// publish -- doing it anyway would bump the serial once a tick forever.
+	publishRenewsWhatItOwns := zoneMayOriginateContent(zd) && zd.DnssecPolicy != nil
 
 	// The delegations first, because the glue test below needs the complete set
 	// and the walk reaches each owner once.
@@ -171,6 +196,7 @@ func (zd *ZoneData) collectAgeingSignaturesLocked(snap *zoneSnapshot) []renewalT
 	managesZonemd := zd.zoneManagesZonemd()
 
 	var due []renewalTarget
+	publishOwned := 0
 	for name, owner := range snap.Data {
 		if owner == nil {
 			continue
@@ -187,11 +213,25 @@ func (zd *ZoneData) collectAgeingSignaturesLocked(snap *zoneSnapshot) []renewalT
 				// re-signs the SOA afterwards. Signing it here would sign the
 				// serial that publish is about to replace and throw the work
 				// away.
+				//
+				// But an ageing SOA signature still has to be renewed, and the
+				// only thing that renews it is a publish. Counted rather than
+				// collected, so a zone whose SOA is the only thing due
+				// publishes instead of returning "nothing to do" and letting
+				// the signature expire -- with the whole zone going BOGUS,
+				// since every answer needs a valid SOA on the denial path.
+				if publishRenewsWhatItOwns && rrsetNeedsRenewal(owner.RRtypes.GetOnlyRRSet(rrt)) {
+					publishOwned++
+				}
 				continue
 			case managesZonemd && isApex && rrt == dns.TypeZONEMD:
 				// The publish recomputes the digest -- over the chain it is
 				// about to restitch -- and signs the result. Same reason
-				// SignZone skips it.
+				// SignZone skips it, and the same reason as the SOA above for
+				// counting it: publishing is the only thing that renews it.
+				if publishRenewsWhatItOwns && rrsetNeedsRenewal(owner.RRtypes.GetOnlyRRSet(rrt)) {
+					publishOwned++
+				}
 				continue
 			case rrt == dns.TypeNS && !isApex:
 				// A delegation's NS is the child's, not ours to sign.
@@ -217,7 +257,7 @@ func (zd *ZoneData) collectAgeingSignaturesLocked(snap *zoneSnapshot) []renewalT
 			})
 		}
 	}
-	return due
+	return due, publishOwned
 }
 
 // rrsetNeedsRenewal reports whether any signature on rrset has aged into the
