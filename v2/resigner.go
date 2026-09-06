@@ -155,23 +155,46 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 
 		case <-ticker.C:
 			for _, zd := range ZonesToKeepSigned {
+				// Shutdown latency here is one pass per zone, not one pass, so
+				// the check belongs between zones: a stop during a sweep of
+				// several hundred should not wait out the whole sweep. Inside a
+				// pass there is nothing useful to abandon -- it holds zd.mu and
+				// signs only what is due, and SignZone and ResignZone bound
+				// themselves the same way.
+				if ctx.Err() != nil {
+					lgSigner.Info("ResignerEngine terminating during a renewal sweep")
+					return
+				}
 				// Skip zones where signing has been disabled since
 				// they were added to the list. MP zones can toggle
 				// OptInlineSigning dynamically based on HSYNC analysis.
 				if !zd.Options[OptInlineSigning] && !zd.Options[OptOnlineSigning] {
 					continue
 				}
-				lgSigner.Debug("re-signing zone (periodic)", "zone", zd.ZoneName)
-				newrrsigs, err := zd.SignZone(zd.KeyDB, false)
+				// Renewal, not a rebuild. SignZone(force=false) used to be
+				// called here, and it rebuilt the NSEC chain and the DNSKEY
+				// RRset unsigned before checking anything -- so the freshness
+				// check was unreachable, everything was restaged, and the
+				// unconditional publish bumped the serial and notified. Once a
+				// minute, on every signed zone, whether or not anything had
+				// changed. See docs/2026-09-05-signing-build-vs-renewal.md.
+				lgSigner.Debug("renewing ageing signatures (periodic)", "zone", zd.ZoneName)
+				renewed, err := zd.RenewZoneSignatures(zd.KeyDB)
 				if err != nil {
-					lgSigner.Error("failed to re-sign zone", "zone", zd.ZoneName, "err", err)
+					lgSigner.Error("failed to renew zone signatures", "zone", zd.ZoneName, "err", err)
 					// Nothing was signed, so do not go on to say it was. An
-					// operator watching for "zone re-signed" would read the
+					// operator watching for "signatures renewed" would read the
 					// success line and miss the failure above it -- on the one
 					// pass whose whole job is to stop signatures ageing out.
 					continue
 				}
-				lgSigner.Info("zone re-signed (periodic)", "zone", zd.ZoneName, "new_rrsigs", newrrsigs)
+				if renewed == 0 {
+					// The overwhelmingly common outcome, and not news. A line
+					// per zone per minute saying nothing happened is how this
+					// log stopped being readable.
+					continue
+				}
+				lgSigner.Info("zone signatures renewed (periodic)", "zone", zd.ZoneName, "rrsets_renewed", renewed)
 			}
 		}
 	}
