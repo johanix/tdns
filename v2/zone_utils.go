@@ -1058,9 +1058,14 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 		break
 	}
 	if !transferred {
-		lg.Error("FetchFromUpstream: AXFR failed on all upstreams", "zone", zd.ZoneName, "count", len(zd.Upstreams), "err", lastErr)
+		// Counted from the snapshot copied above, not from zd.Upstreams: the
+		// engine rewrites that slice in place on every refresh that re-resolves
+		// a hostname primary, so reading it here races -- and would report a
+		// count that does not match the upstreams actually tried. Same reason
+		// the loop walks the copy, and the same fix DoTransfer already carries.
+		lg.Error("FetchFromUpstream: AXFR failed on all upstreams", "zone", zd.ZoneName, "count", len(upstreams), "err", lastErr)
 		zd.SetStatus(prevStatus) // still serving prior data; failure surfaces as RefreshError
-		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s): %w", zd.ZoneName, len(zd.Upstreams), lastErr)
+		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s): %w", zd.ZoneName, len(upstreams), lastErr)
 	}
 
 	// A forced transfer MUST apply whatever upstream has, including a serial
