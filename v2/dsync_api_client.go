@@ -150,14 +150,34 @@ func resolveDsyncApiEndpointAddrs(ctx context.Context, imr *Imr, endpoint string
 	fqdn := dns.Fqdn(host)
 	var addrs []string
 	var unvalidated []string
+	var lookupErr error
 	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		resp, qerr := imr.ImrQuery(ctx, fqdn, qtype, dns.ClassINET, nil)
 		if qerr != nil {
+			// Kept, not just logged: a resolver that could not answer has not
+			// said the name has no address, and reporting "the parent
+			// publishes an endpoint that does not resolve" for a failure on
+			// this side sends the operator to the wrong end of the problem.
+			if lookupErr == nil {
+				lookupErr = qerr
+			}
 			lgDsyncApi.Debug("DSYNC API: address lookup for the endpoint host failed",
 				"host", fqdn, "qtype", dns.TypeToString[qtype], "err", qerr)
 			continue
 		}
-		if resp == nil || resp.Error || resp.RRset == nil || len(resp.RRset.RRs) == 0 {
+		if resp == nil {
+			continue
+		}
+		if resp.Error {
+			// Same reasoning as the qerr branch above: this is the resolver
+			// reporting that it could not answer, not that there is nothing
+			// to answer with.
+			if lookupErr == nil {
+				lookupErr = fmt.Errorf("%s: %s", dns.TypeToString[qtype], resp.ErrorMsg)
+			}
+			continue
+		}
+		if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 			continue
 		}
 		// One family failing to validate does not condemn the other, but it
@@ -186,6 +206,9 @@ func resolveDsyncApiEndpointAddrs(ctx context.Context, imr *Imr, endpoint string
 				"the %s record(s) for the endpoint host %s did not DNSSEC-validate;"+
 					" refusing to send credentials to an address chosen by an unauthenticated answer",
 				strings.Join(unvalidated, "/"), host)
+		}
+		if lookupErr != nil {
+			return nil, fmt.Errorf("resolving the endpoint host %s: %v", host, lookupErr)
 		}
 		return nil, fmt.Errorf(
 			"no A or AAAA record for the endpoint host %s; the parent publishes an endpoint that does not resolve", host)

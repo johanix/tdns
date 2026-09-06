@@ -771,9 +771,27 @@ func TestResolveDsyncApiEndpointAddrsLiteralAndMissing(t *testing.T) {
 
 	seedCached(t, imr, "nothing.parent.example.", dns.TypeA, cache.ValidationStateSecure)
 	seedCached(t, imr, "nothing.parent.example.", dns.TypeAAAA, cache.ValidationStateSecure)
-	if _, err := resolveDsyncApiEndpointAddrs(context.Background(), imr,
+	err = nil
+	if _, err = resolveDsyncApiEndpointAddrs(context.Background(), imr,
 		"https://nothing.parent.example:8443/dsync/v1", true); err == nil {
-		t.Error("an endpoint host with no address must fail discovery")
+		t.Fatal("an endpoint host with no address must fail discovery")
+	}
+	if !strings.Contains(err.Error(), "does not resolve") {
+		t.Errorf("error = %q; want it to name the published endpoint as the problem", err)
+	}
+
+	// A resolver that could not answer has not said the name has no address.
+	// Reporting the parent's endpoint as unresolvable for a failure on this
+	// side sends the operator to the wrong end of the problem -- which is the
+	// same mistake the whole scheme's 401 diagnosis had. Nothing is seeded
+	// here, and the empty cache knows no nameservers, so the query errors.
+	_, err = resolveDsyncApiEndpointAddrs(context.Background(), newTestImr(t),
+		"https://unreachable.parent.example:8443/dsync/v1", true)
+	if err == nil {
+		t.Fatal("a failed lookup must not pass for a successful empty answer")
+	}
+	if strings.Contains(err.Error(), "does not resolve") {
+		t.Errorf("error = %q; a local resolver failure must not be reported as the parent's", err)
 	}
 }
 
@@ -918,6 +936,11 @@ func seedState(t *testing.T, imr *Imr, name string, rrtype uint16, state cache.V
 
 // seedCached seeds an empty answer: the name exists in the cache, with no
 // records of that type, so nothing goes to the network looking for one.
+//
+// Ttl matters here and not in seedState: Set derives the expiration from the
+// records' own TTL, and an entry with no records needs one given. Without it
+// the entry expires the instant it is written and the lookup goes out to the
+// network after all.
 func seedCached(t *testing.T, imr *Imr, name string, rrtype uint16, state cache.ValidationState) {
 	t.Helper()
 	imr.Cache.Set(name, rrtype, &cache.CachedRRset{
@@ -925,5 +948,6 @@ func seedCached(t *testing.T, imr *Imr, name string, rrtype uint16, state cache.
 		RRset:   &core.RRset{Name: name, RRtype: rrtype},
 		Context: cache.ContextNoErrNoAns,
 		State:   state,
+		Ttl:     300,
 	})
 }
