@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 
 	"github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -118,33 +119,45 @@ func newZoneParentSyncCmd(role string) *cobra.Command {
 	rollKey.PersistentFlags().StringVarP(&rollaction, "rollaction", "r", "complete", "[debug] Phase of the rollover to perform: complete, add, remove, update-local")
 	rollKey.PersistentFlags().MarkHidden("rollaction")
 
+	inquireRun := func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		api, err := GetApiClient(role, true)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		resp, err := SendParentSyncCommand(api, tdns.ZoneParentSyncPost{
+			Command: "inquire",
+			Zone:    dns.Fqdn(tdns.Globals.Zonename),
+		})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if resp.Error {
+			fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+			os.Exit(1)
+		}
+		fmt.Printf("KeyState Inquiry for %s\n", dns.Fqdn(tdns.Globals.Zonename))
+		fmt.Printf("  KeyID:        %d\n", resp.KeyID)
+		fmt.Printf("  Parent says:  %s (code %d)\n", resp.StateName, resp.KeyState)
+		fmt.Printf("  Authenticated: %v\n", resp.Authenticated)
+	}
+
 	inquire := &cobra.Command{
 		Use:   "inquire",
 		Short: "Inquire the parent about the current SIG(0) key state",
-		Run: func(cmd *cobra.Command, args []string) {
-			PrepArgs("zonename")
-			api, err := GetApiClient(role, true)
-			if err != nil {
-				log.Fatalf("Error: %v", err)
-			}
-			resp, err := SendParentSyncCommand(api, tdns.ZoneParentSyncPost{
-				Command: "inquire",
-				Zone:    dns.Fqdn(tdns.Globals.Zonename),
-			})
-			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
-				os.Exit(1)
-			}
-			if resp.Error {
-				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
-				os.Exit(1)
-			}
-			fmt.Printf("KeyState Inquiry for %s\n", dns.Fqdn(tdns.Globals.Zonename))
-			fmt.Printf("  KeyID:        %d\n", resp.KeyID)
-			fmt.Printf("  Parent says:  %s (code %d)\n", resp.StateName, resp.KeyState)
-			fmt.Printf("  Authenticated: %v\n", resp.Authenticated)
-		},
+		Run:   inquireRun,
 	}
+	// The retired agent subtree spelled this "inquire update", with "inquire"
+	// as a bare prefix. Kept as a hidden child so that spelling still runs,
+	// rather than failing with "unknown command" for anyone who has it in a
+	// script.
+	inquire.AddCommand(&cobra.Command{
+		Use:    "update",
+		Short:  "Deprecated spelling of \"parentsync inquire\"",
+		Hidden: true,
+		Run:    inquireRun,
+	})
 
 	delta := &cobra.Command{
 		Use:   "delta",
@@ -198,6 +211,7 @@ func newZoneParentSyncCmd(role string) *cobra.Command {
 		},
 	}
 
+	var syncScheme string
 	sync := &cobra.Command{
 		Use:   "sync",
 		Short: "Sync delegation data in parent zone via DDNS UPDATE",
@@ -207,10 +221,20 @@ func newZoneParentSyncCmd(role string) *cobra.Command {
 			if err != nil {
 				log.Fatalf("Error getting API client: %v", err)
 			}
-			dr, err := SendDelegationCmd(api, tdns.DelegationPost{
+			post := tdns.DelegationPost{
 				Command: "sync",
 				Zone:    tdns.Globals.Zonename,
-			})
+			}
+			// Unset means "let the server pick", which is the normal case.
+			if syncScheme != "" {
+				val, perr := strconv.ParseUint(syncScheme, 10, 8)
+				if perr != nil {
+					fmt.Printf("Error: invalid scheme value %q: %s\n", syncScheme, perr)
+					os.Exit(1)
+				}
+				post.Scheme = uint8(val)
+			}
+			dr, err := SendDelegationCmd(api, post)
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
@@ -222,6 +246,11 @@ func newZoneParentSyncCmd(role string) *cobra.Command {
 			fmt.Printf("%s\n", dr.Msg)
 		},
 	}
+
+	// Carried over from the retired agent subtree, which was the only place
+	// this knob existed. A scheme number rather than a name, as it was there.
+	sync.Flags().StringVarP(&syncScheme, "scheme", "S", "",
+		"Force a specific DSYNC scheme number for the sync (default: let the server choose)")
 
 	c.AddCommand(status, bootstrap, rollKey, inquire, delta, sync)
 	return c
