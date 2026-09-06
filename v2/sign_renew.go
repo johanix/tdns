@@ -93,7 +93,7 @@ func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
 		source = zd.workingSet
 	}
 
-	due, nextDue := zd.collectAgeingSignaturesLocked(source)
+	due, nextDue, publishOwned := zd.collectAgeingSignaturesLocked(source)
 	if pending {
 		// The estimate describes a version that is not published, so it is not
 		// something the resigner may sleep on.
@@ -101,7 +101,7 @@ func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
 	} else {
 		zd.setResignSchedule(nextDue, snap.Serial)
 	}
-	if len(due) == 0 {
+	if len(due) == 0 && publishOwned == 0 {
 		return 0, nil
 	}
 
@@ -135,7 +135,7 @@ func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
 		t.rrset = rs
 		signed = append(signed, t)
 	}
-	if len(signed) == 0 {
+	if len(signed) == 0 && publishOwned == 0 {
 		return 0, nil
 	}
 
@@ -150,20 +150,36 @@ func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
 
 	// A publish here is wanted: new signatures should reach downstreams, and the
 	// serial bump is how they learn. The publish also re-signs the SOA over the
-	// new serial and repairs the chain around what changed.
+	// new serial and recomputes the ZONEMD -- which is why a publish-owned
+	// signature coming due is on its own a reason to publish, with nothing
+	// staged at all.
 	zd.publishLocked(zd.generation.Load())
 
-	// The signatures just written moved the zone's next renewal. Recomputed
-	// wholesale from what is now published rather than lowered incrementally:
-	// an RRset that held the minimum can have been replaced or removed, and an
-	// estimate that only ever decreases would leave a wake scheduled for a
-	// signature that no longer exists. Early is harmless; late is not.
+	// A publish that did not renew what it owns would put this pass in a loop,
+	// publishing and bumping the serial on every tick because the same
+	// signature is still due -- the storm, rebuilt from the other end. The gate
+	// on publishOwned is meant to make that impossible; say so loudly rather
+	// than quietly spin if it ever is not.
+	//
+	// The recompute has to happen anyway: the signatures just written moved the
+	// zone's next renewal. Wholesale from what is now published rather than
+	// lowered incrementally -- an RRset that held the minimum can have been
+	// replaced or removed, and an estimate that only ever decreases would leave
+	// a wake scheduled for a signature that no longer exists. Early is
+	// harmless; late is not.
 	if newSnap := zd.snapshot.Load(); newSnap != nil {
-		_, nextDue := zd.collectAgeingSignaturesLocked(newSnap.Data)
+		_, nextDue, stillDue := zd.collectAgeingSignaturesLocked(newSnap.Data)
 		zd.setResignSchedule(nextDue, newSnap.Serial)
+		if publishOwned > 0 && stillDue > 0 {
+			lgSigner.Error("RenewZoneSignatures: published to renew the SOA or ZONEMD signature"+
+				" and it is STILL due; the publish did not re-sign what it owns",
+				"zone", zd.ZoneName, "still_due", stillDue)
+		}
 	}
 
-	return len(signed), nil
+	// Publish-owned RRsets were renewed too, by the publish rather than by the
+	// loop above, and the caller counts renewed RRsets.
+	return len(signed) + publishOwned, nil
 }
 
 // collectAgeingSignaturesLocked walks one version of the zone and returns the
@@ -173,15 +189,31 @@ func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
 // the RRset struct is copied by value but its RRs and RRSIGs slices are not, and
 // a working set is a shallow copy of the snapshot -- so every one of them MUST
 // be cloned before it is signed.
+//
 // It also returns when the zone's earliest-crossing signature next enters that
 // window, over every RRset it considered -- due or not. That is the value the
 // resigner sleeps on, and it is computed here because this walk already visits
 // exactly the right set: the RRsets this pass is responsible for, and no others.
 // A zero time means the zone has no signature to schedule against.
-func (zd *ZoneData) collectAgeingSignaturesLocked(source map[string]*OwnerData) ([]renewalTarget, time.Time) {
+//
+// The third return counts the PUBLISH-OWNED signatures that are due: the apex
+// SOA and a managed ZONEMD, which are not collected because signing them here
+// would be thrown away by the publish, and which are therefore renewed only by a
+// publish happening at all. Their due times feed nextDue like any other, so the
+// resigner wakes for them -- without that, a zone whose SOA is the earliest to
+// cross would be scheduled past it.
+func (zd *ZoneData) collectAgeingSignaturesLocked(source map[string]*OwnerData) ([]renewalTarget, time.Time, int) {
 	if source == nil {
-		return nil, time.Time{}
+		return nil, time.Time{}, 0
 	}
+
+	// Whether a publish would actually renew what it owns. Exactly
+	// resignWorkingSetSOAIfSigned's gate: a zone that may not originate content
+	// is mirroring an upstream SOA that is not ours to re-sign, and an unbound
+	// policy gives the publish nothing to sign under. In neither case would
+	// publishing renew the signature, so in neither case is it a reason to
+	// publish -- doing it anyway would bump the serial once a tick forever.
+	publishRenewsWhatItOwns := zoneMayOriginateContent(zd) && zd.DnssecPolicy != nil
 
 	// The delegations first, because the glue test below needs the complete set
 	// and the walk reaches each owner once.
@@ -199,6 +231,7 @@ func (zd *ZoneData) collectAgeingSignaturesLocked(source map[string]*OwnerData) 
 
 	var due []renewalTarget
 	var nextDue time.Time
+	publishOwned := 0
 	note := func(rrset core.RRset) bool {
 		at, ok := renewalDueAt(rrset)
 		if !ok {
@@ -226,11 +259,25 @@ func (zd *ZoneData) collectAgeingSignaturesLocked(source map[string]*OwnerData) 
 				// re-signs the SOA afterwards. Signing it here would sign the
 				// serial that publish is about to replace and throw the work
 				// away.
+				//
+				// But an ageing SOA signature still has to be renewed, and the
+				// only thing that renews it is a publish. Counted rather than
+				// collected, so a zone whose SOA is the only thing due
+				// publishes instead of returning "nothing to do" and letting
+				// the signature expire -- with the whole zone going BOGUS,
+				// since every answer needs a valid SOA on the denial path.
+				if publishRenewsWhatItOwns && note(owner.RRtypes.GetOnlyRRSet(rrt)) {
+					publishOwned++
+				}
 				continue
 			case managesZonemd && isApex && rrt == dns.TypeZONEMD:
 				// The publish recomputes the digest -- over the chain it is
 				// about to restitch -- and signs the result. Same reason
-				// SignZone skips it.
+				// SignZone skips it, and the same reason as the SOA above for
+				// counting it: publishing is the only thing that renews it.
+				if publishRenewsWhatItOwns && note(owner.RRtypes.GetOnlyRRSet(rrt)) {
+					publishOwned++
+				}
 				continue
 			case rrt == dns.TypeNS && !isApex:
 				// A delegation's NS is the child's, not ours to sign.
@@ -256,7 +303,7 @@ func (zd *ZoneData) collectAgeingSignaturesLocked(source map[string]*OwnerData) 
 			})
 		}
 	}
-	return due, nextDue
+	return due, nextDue, publishOwned
 }
 
 // resignScanInterval is the resigner's own cadence, clamped, and the look-ahead

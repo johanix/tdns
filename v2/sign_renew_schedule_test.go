@@ -222,3 +222,39 @@ func TestNextResignWakeBounds(t *testing.T) {
 		}
 	})
 }
+
+// The apex SOA is not collected for signing, but it is still a signature with an
+// expiry, and a publish is the only thing that renews it. If the walk left it out
+// of the schedule too, a zone whose SOA is the earliest to cross would be
+// scheduled past it -- and the engine would sleep, bounded only by the safety
+// tick, while the signature that every denial depends on expired.
+func TestRenewalScheduleAccountsForTheApexSoa(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := renewalTestZone(t, kdb)
+
+	// The SOA the earliest to cross, by a wide margin, but not yet due.
+	expiry := time.Now().Add(48 * time.Hour)
+	od := getOwnerFrom(zd.publishedSnapshot(), zd.ZoneName)
+	for _, sig := range od.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs {
+		sig.(*dns.RRSIG).Expiration = uint32(expiry.Unix())
+	}
+
+	renewed, err := zd.RenewZoneSignatures(kdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renewed != 0 {
+		t.Fatalf("renewed %d; a signature 48h out is not due yet", renewed)
+	}
+
+	due, ok := zd.resignDue()
+	if !ok {
+		t.Fatal("no schedule")
+	}
+	want := expiry.Add(-(3600*time.Second + Conf.KaspPropagationDelay() + resignScanInterval()))
+	if delta := due.Sub(want); delta > time.Second || delta < -time.Second {
+		t.Errorf("scheduled for %s, want %s: the apex SOA's crossing has to reach nextDue,"+
+			" or the engine sleeps past the one signature it cannot collect",
+			due.UTC(), want.UTC())
+	}
+}
