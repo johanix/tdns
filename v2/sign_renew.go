@@ -87,6 +87,15 @@ func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
 	// `updated` check in ApplyZoneUpdateToZoneData), and on a zone that is not
 	// updated again there would be no next publish to clear it. Renewal would
 	// stop for good, and the signatures would expire.
+	// A leftover from a rejected or no-op zone update is not a pending change,
+	// and treating it as one keeps this zone's schedule permanently unknown --
+	// which drags the whole watchlist down to the floor (nextResignWake). Drop
+	// it here rather than walk it: it is identical to the snapshot anyway.
+	if zd.dropBareWorkingSetLocked() {
+		lgSigner.Debug("RenewZoneSignatures: dropped a working set carrying nothing",
+			"zone", zd.ZoneName)
+	}
+
 	pending := zd.workingSet != nil
 	source := snap.Data
 	if pending {

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -256,5 +257,65 @@ func TestRenewalScheduleAccountsForTheApexSoa(t *testing.T) {
 		t.Errorf("scheduled for %s, want %s: the apex SOA's crossing has to reach nextDue,"+
 			" or the engine sleeps past the one signature it cannot collect",
 			due.UTC(), want.UTC())
+	}
+}
+
+// A working set left behind by a rejected or no-op zone update must not keep a
+// zone's schedule permanently unknown. nextResignWake returns the floor for the
+// WHOLE watchlist as soon as one zone is unknown, so one stale leftover on one
+// zone would turn the scheduled sleep off across the server -- silently, since
+// renewal still works, just at the old once-a-minute cadence.
+func TestALeftoverWorkingSetDoesNotDisableTheSchedule(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := renewalTestZone(t, kdb)
+
+	// Exactly what ApplyZoneUpdateToZoneData leaves when an update does not
+	// apply: a working set, nothing staged, no publish coming.
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	zd.mu.Unlock()
+
+	renewed, err := zd.RenewZoneSignatures(kdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renewed != 0 {
+		t.Fatalf("renewed %d on a zone whose signatures are 14 days out", renewed)
+	}
+
+	zd.mu.Lock()
+	leftover := zd.workingSet != nil
+	zd.mu.Unlock()
+	if leftover {
+		t.Error("the bare working set survived; every later pass would treat this zone" +
+			" as having a pending change")
+	}
+	if _, ok := zd.resignDue(); !ok {
+		t.Error("the zone still reports no schedule, so nextResignWake will pin the whole" +
+			" watchlist to the floor and section 4's sleep never engages")
+	}
+
+	// And a working set that does carry something is still nobody else's to drop.
+	rr, err := dns.NewRR("bravo.renew.example. 3600 IN A 10.9.9.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	zd.stageRRsetLocked("bravo.renew.example.",
+		core.RRset{Name: "bravo.renew.example.", RRtype: dns.TypeA, RRs: []dns.RR{rr}})
+	zd.mu.Unlock()
+
+	if _, err := zd.RenewZoneSignatures(kdb); err != nil {
+		t.Fatal(err)
+	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.workingSet == nil {
+		t.Fatal("a staged change was dropped as though it were a bare leftover")
+	}
+	if got := zd.stagedOwner("bravo.renew.example."); got == nil ||
+		len(got.RRtypes.GetOnlyRRSet(dns.TypeA).RRs) != 1 {
+		t.Error("the staged change did not survive")
 	}
 }

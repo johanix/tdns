@@ -81,6 +81,10 @@ func (zd *ZoneData) stageOwnerReplace(name string, od *OwnerData) {
 func (zd *ZoneData) pendingChanges() *PendingChanges {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	return zd.pendingChangesLocked()
+}
+
+func (zd *ZoneData) pendingChangesLocked() *PendingChanges {
 	if zd.workingSet == nil {
 		return nil
 	}
@@ -269,6 +273,43 @@ func (zd *ZoneData) publishSync() (BumperResponse, error) {
 	zd.publishLocked(zd.generation.Load())
 	resp.NewSerial = zd.CurrentSerial
 	return resp, nil
+}
+
+// dropBareWorkingSetLocked discards a working set that carries nothing.
+//
+// ApplyZoneUpdateToZoneData calls ensureWorkingSet BEFORE anything decides
+// whether the update applies, so an update that is rejected, or that turns out
+// to be a no-op, leaves a shallow copy of the snapshot behind with no publish
+// coming to clear it. On a zone nobody updates again it stays there forever.
+//
+// That leftover is not free. It makes every renewal pass treat the zone as
+// having a pending change, which leaves its renewal schedule permanently
+// unknown -- and nextResignWake returns the floor for the WHOLE watchlist as
+// soon as any one zone is unknown. One stale leftover on one zone therefore
+// turns the scheduled sleep off across the server.
+//
+// Only a BARE working set is dropped: nothing added, replaced or deleted, no
+// queued publish, and none of the staged-intent flags set. Such a working set
+// is by definition identical to the snapshot it was copied from, so there is
+// nothing in it to lose. Anything else is somebody's pending work and is left
+// alone.
+//
+// Reports whether it dropped one. Caller holds zd.mu.
+func (zd *ZoneData) dropBareWorkingSetLocked() bool {
+	if zd.workingSet == nil {
+		return false
+	}
+	if zd.wsIxfrEpochReset || zd.wsNeedsFullSign || zd.wsPersistDelta ||
+		zd.wsSignOwners != nil || zd.wsPersistErr != nil ||
+		zd.publishQueued || zd.publishUrgent {
+		return false
+	}
+	if zd.pendingChangesLocked() != nil {
+		return false
+	}
+	zd.workingSet = nil
+	zd.wsSignalSynth = nil
+	return true
 }
 
 func (zd *ZoneData) stageRRsetLocked(name string, rs core.RRset) {
