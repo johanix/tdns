@@ -323,6 +323,19 @@ machinery is most of why this endpoint is cheap to build.
 would have returned, so the two transports diagnose alike. 401 bodies carry
 nothing: no hint about whether the username exists.
 
+The diagnosis lives in the parent's log instead, which is the only place it can
+without telling an unauthenticated caller which identities are registered. On
+the certificate path that line names the identity presented -- the subject, the
+issuer, the serial, and every identity looked up under every configured
+mechanism -- and one `reason`: `no-client-certificate`, `no-usable-identity`
+(nothing to look up, a certificate with no dNSName SAN), `unknown-identity`,
+`credential-disabled`, `credential-expired`, `untrusted-chain` (it does not
+verify against `ca-file` -- the self-signed-client-certificate case), or
+`credential-store-error`. Where several apply, the most specific is reported
+and all of them are listed. A credential refused on the way to one that is
+accepted is logged too, so a disabled row is never stepped over in silence
+(issue #533).
+
 ---
 
 ## 8. Security properties worth stating plainly

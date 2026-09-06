@@ -658,3 +658,204 @@ func TestDsyncApiClientAuthReloadWarnsWhenHandshakeDisagrees(t *testing.T) {
 		t.Fatal("config matching the requesting listener is not a mismatch")
 	}
 }
+
+// --- What the failure says (issue #533) ----------------------------------
+//
+// The 401 stays empty; the failure the middleware logs is where the answer
+// lives. These assert on the failure the authenticator returns rather than on
+// captured log output, so they pin the content and not the formatting.
+
+// certAuthRequest fakes the TLS state the middleware sees, so a failure can be
+// inspected without going through a listener.
+func certAuthRequest(leaf *x509.Certificate) *http.Request {
+	return &http.Request{TLS: &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}}
+}
+
+func TestDsyncApiCertAuthFailureReasons(t *testing.T) {
+	ca, caKey, caFile := mintTestCA(t)
+	pkixOnly := &DsyncApiClientAuthConf{Mechanisms: []string{DsyncApiAuthTLSPkix}, CAFile: caFile}
+
+	t.Run("no client certificate", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		_, fail := authenticateDsyncApiClientCert(kdb, "example.", &http.Request{}, pkixOnly)
+		if fail == nil || fail.Reason != dsyncApiCertNoCertificate {
+			t.Fatalf("fail = %+v, want %s", fail, dsyncApiCertNoCertificate)
+		}
+	})
+
+	t.Run("unknown identity names every SAN looked up", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		_, leaf := mintTestClientLeaf(t, ca, caKey, []string{"a.child.example", "b.child.example"}, "cn")
+		_, fail := authenticateDsyncApiClientCert(kdb, "example.", certAuthRequest(leaf), pkixOnly)
+		if fail == nil || fail.Reason != dsyncApiCertUnknownIdentity {
+			t.Fatalf("fail = %+v, want %s", fail, dsyncApiCertUnknownIdentity)
+		}
+		// The whole point of the issue: the operator must be able to see which
+		// identity the server actually considered, without inspecting the
+		// client's certificate by hand.
+		considered := joinDsyncApiCertNotes(fail.Notes, false)
+		for _, want := range []string{"a.child.example.", "b.child.example."} {
+			if !strings.Contains(considered, want) {
+				t.Errorf("considered %q does not name %s", considered, want)
+			}
+		}
+		if fail.Subject == "" || fail.Issuer == "" || fail.Serial == "" || fail.NotAfter == "" {
+			t.Errorf("the presented certificate is not described: %+v", fail)
+		}
+	})
+
+	// A self-signed client certificate is the case the issue calls out as
+	// looking identical to an unregistered identity. It must not.
+	t.Run("registered identity, chain does not verify", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		otherCA, otherKey, _ := mintTestCA(t)
+		_, leaf := mintTestClientLeaf(t, otherCA, otherKey, []string{"child1.example"}, "cn")
+		if err := kdb.AddDsyncApiCertCredential("example.", DsyncApiAuthTLSPkix,
+			"child1.example.", "child1.example.", "", time.Time{}); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		_, fail := authenticateDsyncApiClientCert(kdb, "example.", certAuthRequest(leaf), pkixOnly)
+		if fail == nil || fail.Reason != dsyncApiCertUntrustedChain {
+			t.Fatalf("fail = %+v, want %s", fail, dsyncApiCertUntrustedChain)
+		}
+		if fail.Err == nil {
+			t.Error("the verifier's own reason must be carried, not discarded")
+		}
+	})
+
+	t.Run("disabled and expired are told apart", func(t *testing.T) {
+		_, leaf := mintTestClientLeaf(t, ca, caKey, []string{"child1.example"}, "cn")
+
+		kdb := newTestKeyDB(t)
+		if err := kdb.AddDsyncApiCertCredential("example.", DsyncApiAuthTLSPkix,
+			"child1.example.", "child1.example.", "", time.Time{}); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		if _, err := kdb.SetDsyncApiCertCredentialDisabled("example.", DsyncApiAuthTLSPkix,
+			"child1.example.", true); err != nil {
+			t.Fatalf("disable: %v", err)
+		}
+		if _, fail := authenticateDsyncApiClientCert(kdb, "example.", certAuthRequest(leaf), pkixOnly); fail == nil ||
+			fail.Reason != dsyncApiCertDisabled {
+			t.Fatalf("disabled: fail = %+v", fail)
+		}
+
+		kdb2 := newTestKeyDB(t)
+		if err := kdb2.AddDsyncApiCertCredential("example.", DsyncApiAuthTLSPkix,
+			"child1.example.", "child1.example.", "", time.Now().Add(-time.Hour)); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		if _, fail := authenticateDsyncApiClientCert(kdb2, "example.", certAuthRequest(leaf), pkixOnly); fail == nil ||
+			fail.Reason != dsyncApiCertExpired {
+			t.Fatalf("expired: fail = %+v", fail)
+		}
+	})
+
+	// The walk is over dNSName SANs; the CN is not consulted. A certificate
+	// with no SAN therefore has nothing to look up, which is a different
+	// problem from having one that is not registered.
+	t.Run("no dNSName SAN", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		_, leaf := mintTestClientLeaf(t, ca, caKey, nil, "child1.example.")
+		_, fail := authenticateDsyncApiClientCert(kdb, "example.", certAuthRequest(leaf), pkixOnly)
+		if fail == nil || fail.Reason != dsyncApiCertNoIdentity {
+			t.Fatalf("fail = %+v, want %s", fail, dsyncApiCertNoIdentity)
+		}
+	})
+
+	// The pin is the identity under tls-pin, and it is what the operator
+	// compares against `tdns-cli` output.
+	t.Run("tls-pin reports the pin it looked up", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		_, leaf := mintTestClientLeaf(t, ca, caKey, nil, "cn")
+		_, fail := authenticateDsyncApiClientCert(kdb, "example.",
+			certAuthRequest(leaf), &DsyncApiClientAuthConf{Mechanisms: []string{DsyncApiAuthTLSPin}})
+		if fail == nil || fail.Reason != dsyncApiCertUnknownIdentity {
+			t.Fatalf("fail = %+v", fail)
+		}
+		if !strings.Contains(joinDsyncApiCertNotes(fail.Notes, false), SPKISHA256(leaf)) {
+			t.Errorf("the pin looked up is not reported: %q", joinDsyncApiCertNotes(fail.Notes, false))
+		}
+	})
+}
+
+// One request can produce several outcomes. The one reported is the most
+// specific, not whichever SAN the certificate happened to list first.
+func TestDsyncApiCertAuthFailureReasonIsTheMostSpecific(t *testing.T) {
+	_, _, caFile := mintTestCA(t)
+	otherCA, otherKey, _ := mintTestCA(t)
+	kdb := newTestKeyDB(t)
+
+	// Two SANs: the first is not registered at all, the second is registered
+	// but the certificate does not chain to the ca-file. "unknown identity"
+	// would send the operator looking for a missing registration that is not
+	// the problem.
+	_, leaf := mintTestClientLeaf(t, otherCA, otherKey,
+		[]string{"stranger.example", "child1.example"}, "cn")
+	if err := kdb.AddDsyncApiCertCredential("example.", DsyncApiAuthTLSPkix,
+		"child1.example.", "child1.example.", "", time.Time{}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	_, fail := authenticateDsyncApiClientCert(kdb, "example.", certAuthRequest(leaf),
+		&DsyncApiClientAuthConf{Mechanisms: []string{DsyncApiAuthTLSPkix}, CAFile: caFile})
+	if fail == nil || fail.Reason != dsyncApiCertUntrustedChain {
+		t.Fatalf("fail = %+v, want %s", fail, dsyncApiCertUntrustedChain)
+	}
+	// Both are still on the line: the summary is one reason, the detail is all
+	// of them.
+	considered := joinDsyncApiCertNotes(fail.Notes, false)
+	if !strings.Contains(considered, "stranger.example.") || !strings.Contains(considered, "child1.example.") {
+		t.Errorf("considered %q, want both SANs", considered)
+	}
+}
+
+// A refusal that a later mechanism recovers from is not a failure, but it is
+// not nothing either: an operator who disabled a pin and saw the request keep
+// working needs to know the pkix row is what let it in.
+func TestDsyncApiCertAuthRefusalsAreDistinguishedFromMisses(t *testing.T) {
+	ca, caKey, _ := mintTestCA(t)
+	_, leaf := mintTestClientLeaf(t, ca, caKey, []string{"child1.example"}, "cn")
+
+	notes := []dsyncApiCertAuthNote{
+		{Mech: DsyncApiAuthTLSPin, Identity: SPKISHA256(leaf), Reason: dsyncApiCertUnknownIdentity},
+		{Mech: DsyncApiAuthTLSPkix, Identity: "child1.example.", Reason: dsyncApiCertDisabled},
+	}
+	all := joinDsyncApiCertNotes(notes, false)
+	refused := joinDsyncApiCertNotes(notes, true)
+	if !strings.Contains(all, dsyncApiCertUnknownIdentity) || !strings.Contains(all, dsyncApiCertDisabled) {
+		t.Errorf("all = %q, want both", all)
+	}
+	// A miss is routine with several mechanisms configured and must not warn.
+	if strings.Contains(refused, dsyncApiCertUnknownIdentity) {
+		t.Errorf("refusals = %q; a missing row is not a refusal", refused)
+	}
+	if !strings.Contains(refused, dsyncApiCertDisabled) {
+		t.Errorf("refusals = %q, want the disabled row", refused)
+	}
+}
+
+// The 401 must not become informative just because the log did.
+func TestDsyncApiCertAuthFailureDoesNotReachTheClient(t *testing.T) {
+	registerDsyncApiParent(t, "example.")
+	_, _, caFile := mintTestCA(t)
+	setDsyncApiClientAuth(t, &DsyncApiClientAuthConf{
+		Mechanisms: []string{DsyncApiAuthTLSPkix},
+		CAFile:     caFile,
+	})
+	otherCA, otherKey, _ := mintTestCA(t)
+	cert, _ := mintTestClientLeaf(t, otherCA, otherKey, []string{"child1.example"}, "cn")
+
+	kdb := newTestKeyDB(t)
+	if err := kdb.AddDsyncApiCertCredential("example.", DsyncApiAuthTLSPkix,
+		"child1.example.", "child1.example.", "", time.Time{}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	srv := dsyncApiCertAuthServer(t, kdb, true)
+	client := dsyncApiAuthClient(t, srv, &cert)
+	resp := dsyncApiGet(t, client, srv, "child1.example.", nil)
+	body := readAuthBody(t, resp)
+	if resp.StatusCode != http.StatusUnauthorized || body != "" {
+		t.Fatalf("status %d body %q, want an empty 401", resp.StatusCode, body)
+	}
+}

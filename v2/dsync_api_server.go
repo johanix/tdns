@@ -252,16 +252,38 @@ func dsyncApiAuthMiddleware(kdb *KeyDB) mux.MiddlewareFunc {
 					return
 				}
 			} else if clientAuth := DelegationSyncConfig().Parent.Api.ClientAuth; clientAuth.Enabled() {
-				cred, err = authenticateDsyncApiClientCert(kdb, zd.ZoneName, r, clientAuth)
-				if err != nil {
+				var fail *dsyncApiCertAuthFailure
+				cred, fail = authenticateDsyncApiClientCert(kdb, zd.ZoneName, r, clientAuth)
+				if fail != nil {
+					// Answered without any of this, logged with all of it
+					// (#533): the client is told only 401, because naming the
+					// registered identities to an unauthenticated caller is
+					// the leak the Basic path above avoids. The operator gets
+					// the identity presented and the reason it was refused,
+					// which is the one fact the old line was missing.
 					lgDsyncApi.Warn("DSYNC API certificate authentication failed",
-						"zone", zd.ZoneName, "child", child, "from", r.RemoteAddr)
+						append([]any{"zone", zd.ZoneName, "child", child, "from", r.RemoteAddr},
+							fail.LogArgs()...)...)
 					w.Header().Set("WWW-Authenticate",
 						fmt.Sprintf("Basic realm=%q, charset=\"UTF-8\"", zd.ZoneName))
 					dsyncApiError(w, http.StatusUnauthorized, "")
 					return
 				}
 			} else {
+				// No Authorization header and no client-auth configured. A
+				// caller that went to the trouble of presenting a certificate
+				// to a listener that does not look at one has a configuration
+				// answer waiting on this side, and no way to see it from
+				// theirs.
+				if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+					lgDsyncApi.Warn("DSYNC API client presented a certificate but client-auth is not configured"+
+						" (delegationsync.parent.api.client-auth)",
+						"zone", zd.ZoneName, "child", child, "from", r.RemoteAddr,
+						"subject", r.TLS.PeerCertificates[0].Subject.String())
+				} else {
+					lgDsyncApi.Debug("DSYNC API request carried no credentials",
+						"zone", zd.ZoneName, "child", child, "from", r.RemoteAddr)
+				}
 				w.Header().Set("WWW-Authenticate",
 					fmt.Sprintf("Basic realm=%q, charset=\"UTF-8\"", zd.ZoneName))
 				dsyncApiError(w, http.StatusUnauthorized, "")
