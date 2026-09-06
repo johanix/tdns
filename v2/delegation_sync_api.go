@@ -68,7 +68,8 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 		return "", dns.RcodeServerFailure, fmt.Errorf("zone %s: %v", zd.ZoneName, err)
 	}
 	lgDns.Info("DSYNC API endpoint discovered", "zone", zd.ZoneName, "parent", parent,
-		"target", endpoint.Target, "endpoint", endpoint.Url, "dialect", endpoint.Dialect)
+		"target", endpoint.Target, "endpoint", endpoint.Url, "dialect", endpoint.Dialect,
+		"addrs", endpoint.Addrs)
 
 	rrsets := DsyncApiRRsetsFromSyncStatus(zd.ZoneName, syncstate)
 	if len(rrsets) == 0 {

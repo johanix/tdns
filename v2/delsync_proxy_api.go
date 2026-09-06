@@ -119,7 +119,7 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 	}
 	lgDns.Info("delegation-sync-proxy: DSYNC API endpoint discovered", "zone", zd.ZoneName,
 		"parent", parent, "target", endpoint.Target, "endpoint", endpoint.Url,
-		"dialect", endpoint.Dialect)
+		"dialect", endpoint.Dialect, "addrs", endpoint.Addrs)
 
 	rrsets := zd.proxyApiRRsets()
 	if len(rrsets) == 0 {
