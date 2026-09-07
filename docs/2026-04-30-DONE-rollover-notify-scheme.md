@@ -483,7 +483,7 @@ testbeds and adversarial-testing.
 
 This intentionally diverges from `BestSyncScheme`:
 
-- `BestSyncScheme` reads `delegationsync.parentsync.schemes` from viper
+- `BestSyncScheme` reads `parentsync.schemes` from viper
   (a process-wide list). The rollover engine has a per-policy knob.
 - `BestSyncScheme` filters NOTIFY by RRtype CSYNC or ANY. The
   rollover engine filters by RRtype CDS or ANY. A parent can

@@ -169,11 +169,58 @@ server:
 #     type:       zonefile
 #     directory:  /var/lib/tdns/delegations/dnslab
 
-delegationsync:
-   # Named policies, referenced per-zone with `delegationpolicy: <name>`.
-   # Omit binds `default`. A name that does not resolve quarantines the zone.
-   # The SVCB bootstrap advertisement is derived from the bound policy; there
-   # is no `parent.bootstrap.methods`.
+# Named policies, referenced per-zone with `delegationpolicy: <name>`.
+# Omit binds `default`. A name that does not resolve quarantines the zone.
+# The SVCB bootstrap advertisement is derived from the bound policy; there
+# is no `childsync.bootstrap.methods`.
+childsync:
+   # in parent zones, we support these schemes, and will publish DSYNC RRs
+   # if allowed to:
+   schemes:  [ notify, update ]
+   notify:
+      types:      [ CDS, CSYNC ]
+      port:       5354                      # MUST be a port the listeners: block listens on
+      target:     notifications.{ZONENAME}  # {ZONENAME} expanded at run-time
+      addresses:  [ 127.0.0.1, '::1' ]      # no port and no '[]' around v6 here
+   update:
+      types:      [ ANY ]
+      port:       5354                      # MUST be a port the listeners: block listens on
+      target:     updates.{ZONENAME}
+      addresses:  [ 127.0.0.1, '::1' ]
+      keygen:
+         # Only `algorithm` is read on the parent side; `mode` and
+         # `generator` are not.
+         algorithm:  ED25519
+
+   # The API scheme (docs/2026-08-11-dsync-api-scheme.md): for children that
+   # cannot sign a DNS message and therefore cannot use the UPDATE scheme.
+   # Not in `schemes:` above, so none of this is published until you put it
+   # there. Prefer UPDATE where the child can manage it.
+   #
+   # Three records are published, all in one update:
+   #    _dsync.{ZONENAME}   DSYNC CDS API 443 dsync-api.{ZONENAME}
+   #    dsync-api.{ZONENAME} URI  1 1 "https://dsync-api.{ZONENAME}:443/dsync/v1"
+   #    dsync-api.{ZONENAME} TXT  "tdns-child-api-v1.0"
+   #
+   # Note that unlike notify/update the target is NOT a host that receives
+   # DNS -- it is where the URI and TXT describing the endpoint live. Hence
+   # no `addresses:` is required: the URI's own host resolves normally. Set
+   # addresses only if the target is a name this zone serves and nothing
+   # else publishes its address.
+   #
+   # A child will refuse this endpoint unless the parent zone is signed and
+   # these records validate: the credential is a bearer token, so an
+   # unvalidated lookup could send it to an attacker.
+   # api:
+   #    types:     [ CDS, CSYNC ]
+   #    target:    dsync-api.{ZONENAME}     # {ZONENAME} expanded at run-time
+   #    baseurl:   "https://{TARGET}:{PORT}/dsync/v1"   # both {} are required
+   #    port:      443
+   #    dialect:   tdns-child-api-v1.0      # published in the TXT
+   #    listen:    [ "0.0.0.0:443" ]        # the DSYNC-API listener
+   #    cert:      /etc/tdns/dsync-api.crt
+   #    key:       /etc/tdns/dsync-api.key
+
    policies:
       default:
          bootstrap:
@@ -207,131 +254,85 @@ delegationsync:
             mechanisms:      [ ]            # nothing automatic
             manual:          true           # advertises "manual" only
             allow-unvalidated-upload: false
-   childsync:
-      # in parent zones, we support these schemes, and will publish DSYNC RRs
-      # if allowed to:
-      schemes:  [ notify, update ]
-      notify:
-         types:      [ CDS, CSYNC ]
-         port:       5354                      # MUST be a port the listeners: block listens on
-         target:     notifications.{ZONENAME}  # {ZONENAME} expanded at run-time
-         addresses:  [ 127.0.0.1, '::1' ]      # no port and no '[]' around v6 here
-      update:
-         types:      [ ANY ]
-         port:       5354                      # MUST be a port the listeners: block listens on
-         target:     updates.{ZONENAME}
-         addresses:  [ 127.0.0.1, '::1' ]
-         keygen:
-            # Only `algorithm` is read on the parent side; `mode` and
-            # `generator` are not.
-            algorithm:  ED25519
 
-      # The API scheme (docs/2026-08-11-dsync-api-scheme.md): for children that
-      # cannot sign a DNS message and therefore cannot use the UPDATE scheme.
-      # Not in `schemes:` above, so none of this is published until you put it
-      # there. Prefer UPDATE where the child can manage it.
-      #
-      # Three records are published, all in one update:
-      #    _dsync.{ZONENAME}   DSYNC CDS API 443 dsync-api.{ZONENAME}
-      #    dsync-api.{ZONENAME} URI  1 1 "https://dsync-api.{ZONENAME}:443/dsync/v1"
-      #    dsync-api.{ZONENAME} TXT  "tdns-child-api-v1.0"
-      #
-      # Note that unlike notify/update the target is NOT a host that receives
-      # DNS -- it is where the URI and TXT describing the endpoint live. Hence
-      # no `addresses:` is required: the URI's own host resolves normally. Set
-      # addresses only if the target is a name this zone serves and nothing
-      # else publishes its address.
-      #
-      # A child will refuse this endpoint unless the parent zone is signed and
-      # these records validate: the credential is a bearer token, so an
-      # unvalidated lookup could send it to an attacker.
-      # api:
-      #    types:     [ CDS, CSYNC ]
-      #    target:    dsync-api.{ZONENAME}     # {ZONENAME} expanded at run-time
-      #    baseurl:   "https://{TARGET}:{PORT}/dsync/v1"   # both {} are required
-      #    port:      443
-      #    dialect:   tdns-child-api-v1.0      # published in the TXT
-      #    listen:    [ "0.0.0.0:443" ]        # the DSYNC-API listener
-      #    cert:      /etc/tdns/dsync-api.crt
-      #    key:       /etc/tdns/dsync-api.key
+parentsync:
+   # in child zones, we attempt the following schemes, if the parent supports
+   # them and we're allowed to modify the child zone (adding CDS, CSYNC, KEY
+   # RRs, re-signing, etc):
+   #
+   # Preference order. Put "api" last: it is the fallback for children that
+   # cannot sign a DNS message, not the first choice. It also requires the
+   # PARENT zone to be signed -- the endpoint is discovered from DNS and the
+   # credential is a bearer token, so an unvalidated lookup could send it to
+   # an attacker.
+   schemes:  [ notify, update ]      # REQUIRED for child-side delegation sync
 
-   parentsync:
-      # in child zones, we attempt the following schemes, if the parent supports
-      # them and we're allowed to modify the child zone (adding CDS, CSYNC, KEY
-      # RRs, re-signing, etc):
-      #
-      # Preference order. Put "api" last: it is the fallback for children that
-      # cannot sign a DNS message, not the first choice. It also requires the
-      # PARENT zone to be signed -- the endpoint is discovered from DNS and the
-      # credential is a bearer token, so an unvalidated lookup could send it to
-      # an attacker.
-      schemes:  [ notify, update ]      # REQUIRED for child-side delegation sync
+   # Credentials for the api scheme, one per parent, obtained out of band
+   # from the parent operator. Without one, a parent offering only "api"
+   # logs a single line saying so and does not retry -- a credential cannot
+   # arrive by retrying.
+   #
+   # A LIST, not a map keyed by parent name: viper splits keys on ".", so a
+   # map key like "example." gets split and the credential reads back empty
+   # with nothing logged anywhere.
+   # api:
+   #    credentials:
+   #       - parent:   example.
+   #         username: child1.example.
+   #         key:      REPLACE-ME
+   #    # Permits BOTH a plain-http endpoint and one discovered without
+   #    # DNSSEC validation. Deliberately one switch: they are the same
+   #    # protection from two sides, and turning off one while believing
+   #    # the other holds leaves none. Lab only.
+   #    allow-insecure: false
+   update:
+      keygen:
+         # `algorithm` and `generator` are read on the child side; `mode` is not.
+         generator:  /opt/local/bin/dnssec-keygen
+         algorithm:  ED25519
+      bootstrap:
+         # Methods this child will accept a parent using. Intersected with
+         # the parent's advertised SVCB bootstrap set at run time; strongest
+         # overlap wins (at-apex > at-ns > unsigned > manual). Omit defaults
+         # to [at-apex, at-ns]. `at-ns` publishes the KEY at
+         # _sig0key.<child>._signal.<ns> and is offered only for a zone
+         # where at least one of its nameservers has that name in a zone
+         # this server is primary for (a proxy never can). An empty list
+         # refuses every method. `unsigned` and `manual` must be opted
+         # into. A parent template bound to the `manual` policy advertises
+         # `at-apex,at-ns,manual`; intersection with this default is
+         # `at-apex`. Absent SVCB falls back to this list; a FAILED SVCB
+         # lookup is retried, not treated as absent.
+         methods: [ at-apex, at-ns ]
 
-      # Credentials for the api scheme, one per parent, obtained out of band
-      # from the parent operator. Without one, a parent offering only "api"
-      # logs a single line saying so and does not retry -- a credential cannot
-      # arrive by retrying.
+      # Mutual authentication (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
+      # §"Mutual Authentication"). The parent's UPDATE Receiver SIG(0)-signs
+      # every KeyState response with the KEY it publishes at the DSYNC
+      # UPDATE target. This child acts on a response only if that signature
+      # verifies with a receiver KEY it can authenticate: DNSSEC-validated
+      # (the DSYNC lookup that named the target and the KEY lookup both
+      # validate), or manually trusted in the truststore:
+      #    tdns-cli truststore sig0 add   --child updates.parent.example. --src Kupdates.parent.example.+015+NNNNN.key
+      #    tdns-cli truststore sig0 trust --child updates.parent.example. --keyid NNNNN
+      # A response that cannot be authenticated is rejected, and the
+      # parent's SVCB bootstrap advertisement is ignored (the child falls
+      # back to `methods` above) unless it validates too. Set this to true
+      # to act on unauthenticated responses and advertisements anyway.
       #
-      # A LIST, not a map keyed by parent name: viper splits keys on ".", so a
-      # map key like "example." gets split and the credential reads back empty
-      # with nothing logged anywhere.
-      # api:
-      #    credentials:
-      #       - parent:   example.
-      #         username: child1.example.
-      #         key:      REPLACE-ME
-      #    # Permits BOTH a plain-http endpoint and one discovered without
-      #    # DNSSEC validation. Deliberately one switch: they are the same
-      #    # protection from two sides, and turning off one while believing
-      #    # the other holds leaves none. Lab only.
-      #    allow-insecure: false
-      update:
-         keygen:
-            # `algorithm` and `generator` are read on the child side; `mode` is not.
-            generator:  /opt/local/bin/dnssec-keygen
-            algorithm:  ED25519
-         bootstrap:
-            # Methods this child will accept a parent using. Intersected with
-            # the parent's advertised SVCB bootstrap set at run time; strongest
-            # overlap wins (at-apex > at-ns > unsigned > manual). Omit defaults
-            # to [at-apex, at-ns]. `at-ns` publishes the KEY at
-            # _sig0key.<child>._signal.<ns> and is offered only for a zone
-            # where at least one of its nameservers has that name in a zone
-            # this server is primary for (a proxy never can). An empty list
-            # refuses every method. `unsigned` and `manual` must be opted
-            # into. A parent template bound to the `manual` policy advertises
-            # `at-apex,at-ns,manual`; intersection with this default is
-            # `at-apex`. Absent SVCB falls back to this list; a FAILED SVCB
-            # lookup is retried, not treated as absent.
-            methods: [ at-apex, at-ns ]
+      # What it does NOT change: a signature that is present but wrong, or a
+      # DNSSEC verdict of BOGUS on the receiver KEY, the DSYNC or the SVCB,
+      # is rejected regardless; and the tdns-auth child's own bootstrap
+      # (zone load) makes no KeyState inquiry, so it sends its KEY UPDATE
+      # either way -- the verification applies to the KeyState poller.
+      #
+      # Unsigned-parent test setups: turning this on also makes the parent's
+      # advertisement count, and an unsigned parent advertises
+      # `unsigned,manual`, which does not intersect the default `methods`
+      # above. Add `unsigned` to `methods` as well, or enabling this refuses
+      # the bootstrap it is meant to allow. Lab convenience; never a
+      # production setting.
+      allow-insecure: false
 
-         # Mutual authentication (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
-         # §"Mutual Authentication"). The parent's UPDATE Receiver SIG(0)-signs
-         # every KeyState response with the KEY it publishes at the DSYNC
-         # UPDATE target. This child acts on a response only if that signature
-         # verifies with a receiver KEY it can authenticate: DNSSEC-validated
-         # (the DSYNC lookup that named the target and the KEY lookup both
-         # validate), or manually trusted in the truststore:
-         #    tdns-cli truststore sig0 add   --child updates.parent.example. --src Kupdates.parent.example.+015+NNNNN.key
-         #    tdns-cli truststore sig0 trust --child updates.parent.example. --keyid NNNNN
-         # A response that cannot be authenticated is rejected, and the
-         # parent's SVCB bootstrap advertisement is ignored (the child falls
-         # back to `methods` above) unless it validates too. Set this to true
-         # to act on unauthenticated responses and advertisements anyway.
-         #
-         # What it does NOT change: a signature that is present but wrong, or a
-         # DNSSEC verdict of BOGUS on the receiver KEY, the DSYNC or the SVCB,
-         # is rejected regardless; and the tdns-auth child's own bootstrap
-         # (zone load) makes no KeyState inquiry, so it sends its KEY UPDATE
-         # either way -- the verification applies to the KeyState poller.
-         #
-         # Unsigned-parent test setups: turning this on also makes the parent's
-         # advertisement count, and an unsigned parent advertises
-         # `unsigned,manual`, which does not intersect the default `methods`
-         # above. Add `unsigned` to `methods` as well, or enabling this refuses
-         # the bootstrap it is meant to allow. Lab convenience; never a
-         # production setting.
-         allow-insecure: false
 
 scanner:
    interval:  30                        # seconds between periodic scan runs

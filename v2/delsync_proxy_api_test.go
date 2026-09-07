@@ -36,24 +36,22 @@ func proxyApiSignedZone() string {
 
 func setChildApiCredentials(t *testing.T, creds ...ParentSyncApiCredentialConf) {
 	t.Helper()
-	prev := DelegationSyncConfig()
-	SetDelegationSyncConfig(DelegationSyncConf{
-		ParentSync: ParentSyncConf{
-			Api: ParentSyncApiConf{Credentials: creds},
-		},
+	prevCS, prevPS := *ChildSyncConfig(), *ParentSyncConfig()
+	SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{
+		Api: ParentSyncApiConf{Credentials: creds},
 	})
-	t.Cleanup(func() { SetDelegationSyncConfig(*prev) })
+	t.Cleanup(func() { SetDelegationSyncConfig(prevCS, prevPS) })
 }
 
-// setChildApiAllowInsecure flips delegationsync.parentsync.api.allow-insecure while
+// setChildApiAllowInsecure flips parentsync.api.allow-insecure while
 // preserving whatever credentials the test already configured.
 func setChildApiAllowInsecure(t *testing.T, v bool) {
 	t.Helper()
-	prev := DelegationSyncConfig()
-	next := *prev
-	next.ParentSync.Api.AllowInsecure = v
-	SetDelegationSyncConfig(next)
-	t.Cleanup(func() { SetDelegationSyncConfig(*prev) })
+	prevCS, prevPS := *ChildSyncConfig(), *ParentSyncConfig()
+	next := prevPS
+	next.Api.AllowInsecure = v
+	SetDelegationSyncConfig(prevCS, next)
+	t.Cleanup(func() { SetDelegationSyncConfig(prevCS, prevPS) })
 }
 
 // ---------------------------------------------------------------------------

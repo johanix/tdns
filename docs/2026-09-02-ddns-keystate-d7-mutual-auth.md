@@ -71,7 +71,7 @@ RRset with its validation state for its TTL, so repeated inquiries do not
 re-query, and a receiver key rollover becomes visible when the cache entry
 expires. Persisting would add TOFU-like state with no benefit.
 
-### Policy — `delegationsync.parentsync.update.allow-insecure`
+### Policy — `parentsync.update.allow-insecure`
 
 Default **false**: a response that cannot be authenticated is rejected. The
 draft (§"Authenticating Responses") leaves acting on unauthenticated responses

@@ -161,7 +161,7 @@ staged. What matters is the **source** and its **enabler**:
 | 4 | **Delegation sync — child-side publishing** — SIG(0) **KEY** (`Sig0KeyPreparation`), **CSYNC** (`SyncZoneDelegationViaNotify`) | each gated on `OptAllowUpdates` ([delegation_sync.go:302](../v2/delegation_sync.go)); parent-side child-apply on `OptAllowChildUpdates` | no — those options are already off (turned off as #2) | **Fix B, via #2** + **Fix D** |
 | 4b | Delegation sync — **CDS** publish (`PublishCdsRRs`, InternalUpdate) | `OptParentSync` | no — `SynthesizeCdsRRs` is empty ⇒ no-op without local DNSKEYs; sanctioned on a signing secondary | n/a (no-op); passes **Fix D** via `mayOriginate` |
 | 4c | Delegation sync — **sending** (bootstrap KEY to parent, NOTIFY, UPDATE) | `OptChildSync`/`OptParentSync` | sends outward; **does not mutate the served zone** | out of scope (§4 note) |
-| **4d** | **Delegation sync — DSYNC publication** (`SetupZoneSync` → `PublishDsyncRRs`, [zone_utils.go:773](../v2/zone_utils.go), [ops_dsync.go:16](../v2/ops_dsync.go)) — publishes `_dsync.<zone>` DSYNC + address RRs via InternalUpdate | **`OptChildSync` alone.** No `allow-updates` check. Unlike CDS it is **not** a no-op without local DNSKEYs — it synthesizes from `delegationsync.childsync.schemes` | **YES** | **Fix B** (delsync-parent joins the turn-off list) + **Fix D** |
+| **4d** | **Delegation sync — DSYNC publication** (`SetupZoneSync` → `PublishDsyncRRs`, [zone_utils.go:773](../v2/zone_utils.go), [ops_dsync.go:16](../v2/ops_dsync.go)) — publishes `_dsync.<zone>` DSYNC + address RRs via InternalUpdate | **`OptChildSync` alone.** No `allow-updates` check. Unlike CDS it is **not** a no-op without local DNSKEYs — it synthesizes from `childsync.schemes` | **YES** | **Fix B** (delsync-parent joins the turn-off list) + **Fix D** |
 | 5 | **DNSSEC signing / KSK-ZSK rollover / resign** ([sign.go](../v2/sign.go), ksk_rollover_*, resign engine) | `OptOnlineSigning`/`OptInlineSigning` **and** `SetupZoneSigning`'s role gate: a non-primary signs *only* with `inline-signing` ([zone_utils.go:1107](../v2/zone_utils.go)) | only if `inline-signing` — the **sanctioned** signing secondary | **kept** (the exception); Fix A treats it as an originator |
 | **5b** | **Per-publish SOA re-sign** — `resignWorkingSetSOAIfSigned` ([zone_mutation.go:186](../v2/zone_mutation.go)) re-signs the apex SOA inside `publishWorkingSetLocked`, i.e. on **every publish including the refresh path** | `OptOnlineSigning` or `OptInlineSigning` — **no role gate**, unlike #5. `EnsureActiveDnssecKeys` will *generate* keys if absent | **YES**, on a secondary carrying `online-signing` | **Fix B** (rev 2.1: option normalized off) + **Fix E** |
 | **5c** | **DNSKEY injection on refresh (rev 2.1)** — `CollectDynamicRRs` ([zone_utils.go:894](../v2/zone_utils.go)) pulls local DNSKEYs from the keystore and repopulates them into the served zone after **every refresh** | `OptOnlineSigning` or `OptInlineSigning` (outer gate also admits `OptAllowUpdates`) — **no role gate** | **YES**, with `online-signing` | **Fix B** (rev 2.1). NOT Fix-D-covered: publishes via the refresh working set, not UpdateQ |
@@ -410,6 +410,11 @@ edge-signer future this deliberately does not foreclose.
 **`childsync`**, **`parentsync`** (rev 2.3), **`online-signing`** (rev 2.1).
 (`allow-api-updates` and `publish-zonemd` joined the list in the code after this
 section was written; see `originationOptions` for the current set.)
+
+**Config shape (rev 2.3).** The `delegationsync:` wrapper is gone: `childsync:`
+and `parentsync:` are top-level blocks, and the delegation policies live at
+`childsync.policies:` (every consumer of a bound policy is childsync-side). The
+old block is still accepted for a deprecation cycle.
 
 **`parentsync` (rev 2.3, 2026-09-07, #538).** Rev 2 excluded it, on the grounds
 that "its publishing paths are `allow-updates`-gated and Fix D backstops them".

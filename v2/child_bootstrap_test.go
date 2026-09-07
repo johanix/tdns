@@ -87,12 +87,12 @@ func TestSelectChildBootstrapMethod(t *testing.T) {
 }
 
 func TestChildBootstrapMethodsProxyDropsAtNs(t *testing.T) {
-	var dsc DelegationSyncConf
-	dsc.ParentSync.Update.Bootstrap.Methods = []string{"at-apex", "at-ns", "unsigned"}
-	if err := SetDelegationSyncConfig(dsc); err != nil {
+	var ps ParentSyncConf
+	ps.Update.Bootstrap.Methods = []string{"at-apex", "at-ns", "unsigned"}
+	if err := SetDelegationSyncConfig(ChildSyncConf{}, ps); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
 
 	if got := childBootstrapMethods(false, true); !reflect.DeepEqual(got, []string{"at-apex", "at-ns", "unsigned"}) {
 		t.Fatalf("auth with a signal target: %v", got)
@@ -106,12 +106,12 @@ func TestChildBootstrapMethodsProxyDropsAtNs(t *testing.T) {
 }
 
 func TestZoneChildBootstrapMethodsUsesProxyOption(t *testing.T) {
-	var dsc DelegationSyncConf
-	dsc.ParentSync.Update.Bootstrap.Methods = []string{"at-apex", "at-ns"}
-	if err := SetDelegationSyncConfig(dsc); err != nil {
+	var ps ParentSyncConf
+	ps.Update.Bootstrap.Methods = []string{"at-apex", "at-ns"}
+	if err := SetDelegationSyncConfig(ChildSyncConf{}, ps); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
 
 	// signalTarget gives the zone an in-bailiwick NS (ns.<zone>), so the
 	// zone itself -- primary here -- owns the _signal name: at-ns is satisfiable.
@@ -133,10 +133,10 @@ func TestZoneChildBootstrapMethodsUsesProxyOption(t *testing.T) {
 // at-ns is in the omit-default, but a zone only offers it when this server
 // can publish the KEY at one of its NS signal names (D-6).
 func TestZoneChildBootstrapMethodsRequiresSignalTarget(t *testing.T) {
-	if err := SetDelegationSyncConfig(DelegationSyncConf{}); err != nil { // omit -> default list
+	if err := SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}); err != nil { // omit -> default list
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
 
 	local, _ := signalTarget("local.example.", nil)
 	local.Options[OptParentSync] = true

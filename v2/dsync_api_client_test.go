@@ -296,18 +296,17 @@ func keysOfRRsets(sets []DsyncApiRRset) []string {
 // for the viper reason. This is the regression guard.
 func TestDsyncApiChildCredentialsRoundTripThroughViper(t *testing.T) {
 	const y = `
-delegationsync:
-   parentsync:
-      schemes: [ update, notify, api ]
-      api:
-         allow-insecure: false
-         credentials:
-            - parent:   example.
-              username: child1.example.
-              key:      s3cret
-            - parent:   other.example.
-              username: acme-registrar
-              key:      other-secret
+parentsync:
+   schemes: [ update, notify, api ]
+   api:
+      allow-insecure: false
+      credentials:
+         - parent:   example.
+           username: child1.example.
+           key:      s3cret
+         - parent:   other.example.
+           username: acme-registrar
+           key:      other-secret
 `
 	v := viper.New()
 	v.SetConfigType("yaml")
@@ -319,7 +318,7 @@ delegationsync:
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	api := conf.DelegationSync.ParentSync.Api
+	api := conf.ParentSync.Api
 	if len(api.Credentials) != 2 {
 		t.Fatalf("got %d credentials, want 2: %+v", len(api.Credentials), api.Credentials)
 	}
@@ -346,14 +345,13 @@ delegationsync:
 
 func TestDsyncApiChildTLSCredentialRoundTripThroughViper(t *testing.T) {
 	const y = `
-delegationsync:
-   parentsync:
-      api:
-         credentials:
-            - parent: example.
-              tls:
-                 cert: /etc/tdns/child.crt
-                 key:  /etc/tdns/child.key
+parentsync:
+   api:
+      credentials:
+         - parent: example.
+           tls:
+              cert: /etc/tdns/child.crt
+              key:  /etc/tdns/child.key
 `
 	v := viper.New()
 	v.SetConfigType("yaml")
@@ -364,7 +362,7 @@ delegationsync:
 	if err := v.Unmarshal(&conf); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	cred, ok := conf.DelegationSync.ParentSync.Api.CredentialFor("example.")
+	cred, ok := conf.ParentSync.Api.CredentialFor("example.")
 	if !ok {
 		t.Fatal("tls credential not found")
 	}
@@ -561,7 +559,7 @@ func TestDsyncApiListenerBlocksUntilShutdown(t *testing.T) {
 	}
 }
 
-// dsyncApiTestListener builds a Config whose delegationsync.childsync.api points
+// dsyncApiTestListener builds a Config whose childsync.api points
 // at a free loopback port and a freshly written self-signed cert/key pair, plus
 // a router to serve. Reuses newTestTLSCert so there is one certificate
 // generator in the package rather than two.
@@ -605,10 +603,10 @@ func dsyncApiTestListener(t *testing.T) (*Config, *mux.Router, bool) {
 	ln.Close()
 
 	conf := &Config{}
-	conf.DelegationSync.ChildSync.Api.Listen = []string{addr}
-	conf.DelegationSync.ChildSync.Api.CertFile = certPath
-	conf.DelegationSync.ChildSync.Api.KeyFile = keyPath
-	SetDelegationSyncConfig(conf.DelegationSync)
+	conf.ChildSync.Api.Listen = []string{addr}
+	conf.ChildSync.Api.CertFile = certPath
+	conf.ChildSync.Api.KeyFile = keyPath
+	SetDelegationSyncConfig(conf.ChildSync, conf.ParentSync)
 
 	return conf, mux.NewRouter(), true
 }

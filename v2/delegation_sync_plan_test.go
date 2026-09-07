@@ -144,7 +144,7 @@ func TestPlanApiGateOnCredential(t *testing.T) {
 	}
 	reason, _ := skipReason(plan, "API")
 	if !strings.Contains(reason, "credentials") {
-		t.Errorf("skip reason %q should point at delegationsync.parentsync.api.credentials", reason)
+		t.Errorf("skip reason %q should point at parentsync.api.credentials", reason)
 	}
 
 	// With a credential it is a candidate -- and NO address resolution was

@@ -38,7 +38,7 @@ func childBootstrapMethods(proxy, canSignal bool) []string {
 // (compileChildBootstrapMethods) when no delegationsync block has been
 // installed at all.
 func configuredChildBootstrapMethods() []string {
-	if methods := DelegationSyncConfig().CompiledParentSyncMethods; methods != nil {
+	if methods := ParentSyncConfig().CompiledMethods; methods != nil {
 		return methods
 	}
 	return []string{"at-apex", "at-ns"}

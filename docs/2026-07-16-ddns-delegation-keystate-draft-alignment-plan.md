@@ -14,7 +14,7 @@ already-shipped work (see each item and the sizing note after the table).
 
 **2026-09-02 — delegation-sync unification (PR #471) closed the cross-cutting
 vocabulary item and shrank D-6 / D-7.** Dead KeyBootstrapper engine gone; one
-`delegationsync.policies.*` vocabulary; parent SVCB advertisement now
+`childsync.policies.*` vocabulary; parent SVCB advertisement now
 reconciles independently of DSYNC synthesize; receiver-KEY publication uses
 `DsyncUpdateTargetName` (root-zone `{ZONENAME}` expansion). Child
 `update.bootstrap.methods` is parsed and consumed at bootstrap (SVCB
@@ -25,7 +25,7 @@ intersection; absent SVCB falls back to the configured list).
 Receiver's SIG(0) on KeyState responses against a receiver KEY that is either
 manually trusted or DNSSEC-validated together with the DSYNC that named it;
 unauthenticated responses (and the SVCB bootstrap advertisement) are rejected
-unless `delegationsync.parentsync.update.allow-insecure` is set; the inquiry moved
+unless `parentsync.update.allow-insecure` is set; the inquiry moved
 to TCP. Decisions in `docs/2026-09-02-ddns-keystate-d7-mutual-auth.md`.
 Only (iii), signing plain UPDATE responses, remains of D-7.
 
@@ -184,7 +184,7 @@ truststore and marked trusted (`tdns-cli truststore sig0 add … ; … trust`), 
 DSYNC lookup DNSSEC-validated — `DsyncTarget.Validated` now exists for that;
 an unvalidated DSYNC would let a forged target choose the identity. A present
 but failing signature is always rejected. A reply that merely cannot be
-authenticated is rejected unless `delegationsync.parentsync.update.allow-insecure`
+authenticated is rejected unless `parentsync.update.allow-insecure`
 is set (then acted on with a Warn). The same switch gates the SVCB bootstrap
 advertisement, which is otherwise treated as absent when unvalidated (the
 #471 review's carry-over 6). A bogus DNSSEC verdict, on the receiver KEY,
@@ -286,7 +286,7 @@ Flip in one pass once IANA assigns: DSYNC **UPDATE scheme** (currently `2`, `v2/
 ---
 
 ## Cross-cutting cleanup
-- **Normalize the bootstrap-method vocabulary — DONE (PR #471).** One named-policy vocabulary (`delegationsync.policies.*`, bound per-zone with `delegationpolicy:`). The dead KeyBootstrapper engine is gone. Sample YAML and templates no longer mention `keybootstrap` / `keyupload` / `key-verification`. `scanner.options` / `scanner.at-apex.*` stay put (scanner-specific meaning, out of scope). Remaining D-6 work is consumption of the advertisement, not a second vocabulary.
+- **Normalize the bootstrap-method vocabulary — DONE (PR #471).** One named-policy vocabulary (`childsync.policies.*`, bound per-zone with `delegationpolicy:`). The dead KeyBootstrapper engine is gone. Sample YAML and templates no longer mention `keybootstrap` / `keyupload` / `key-verification`. `scanner.options` / `scanner.at-apex.*` stay put (scanner-specific meaning, out of scope). Remaining D-6 work is consumption of the advertisement, not a second vocabulary.
 
 ---
 

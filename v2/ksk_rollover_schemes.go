@@ -68,10 +68,10 @@ func selectRolloverDsyncRRs(dsync DsyncResult, zoneName string) (updateRR, notif
 			// records validate perfectly well.
 			//
 			// Same gate, same switch, as the delegation-sync planner.
-			if !dsync.Validated && !DelegationSyncConfig().ParentSync.Api.AllowInsecure {
+			if !dsync.Validated && !ParentSyncConfig().Api.AllowInsecure {
 				lgRollover.Warn("pickRolloverSchemes: ignoring the API scheme:"+
 					" the DSYNC lookup did not DNSSEC-validate and"+
-					" delegationsync.parentsync.api.allow-insecure is not set",
+					" parentsync.api.allow-insecure is not set",
 					"zone", zoneName)
 				continue
 			}

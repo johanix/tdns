@@ -178,21 +178,19 @@ func TestBootstrapSVCBReconcileRewritesAliasMode(t *testing.T) {
 }
 
 func TestPublishDsyncRRsReconcilesSVCBForExistingDSYNC(t *testing.T) {
-	prev := DelegationSyncConfig()
-	t.Cleanup(func() { _ = SetDelegationSyncConfig(*prev) })
-	if err := SetDelegationSyncConfig(DelegationSyncConf{
-		ChildSync: ChildSyncConf{
-			Schemes: []string{"update"},
-			Update: DsyncUpdateSchemeConf{
-				DsyncDnsSchemeConf: DsyncDnsSchemeConf{
-					Types:     []string{"ANY"},
-					Port:      53,
-					Target:    "updates.{ZONENAME}",
-					Addresses: []string{"192.0.2.1"},
-				},
+	prevCS, prevPS := *ChildSyncConfig(), *ParentSyncConfig()
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(prevCS, prevPS) })
+	if err := SetDelegationSyncConfig(ChildSyncConf{
+		Schemes: []string{"update"},
+		Update: DsyncUpdateSchemeConf{
+			DsyncDnsSchemeConf: DsyncDnsSchemeConf{
+				Types:     []string{"ANY"},
+				Port:      53,
+				Target:    "updates.{ZONENAME}",
+				Addresses: []string{"192.0.2.1"},
 			},
 		},
-	}); err != nil {
+	}, ParentSyncConf{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -227,21 +225,19 @@ _dsync.example. 7200 IN DSYNC ANY UPDATE 53 updates.example.
 }
 
 func TestPublishDsyncRRsPolicyControlsSVCB(t *testing.T) {
-	prev := DelegationSyncConfig()
-	t.Cleanup(func() { _ = SetDelegationSyncConfig(*prev) })
-	if err := SetDelegationSyncConfig(DelegationSyncConf{
-		ChildSync: ChildSyncConf{
-			Schemes: []string{"update"},
-			Update: DsyncUpdateSchemeConf{
-				DsyncDnsSchemeConf: DsyncDnsSchemeConf{
-					Types:     []string{"ANY"},
-					Port:      53,
-					Target:    "updates.{ZONENAME}",
-					Addresses: []string{"192.0.2.1"},
-				},
+	prevCS, prevPS := *ChildSyncConfig(), *ParentSyncConfig()
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(prevCS, prevPS) })
+	if err := SetDelegationSyncConfig(ChildSyncConf{
+		Schemes: []string{"update"},
+		Update: DsyncUpdateSchemeConf{
+			DsyncDnsSchemeConf: DsyncDnsSchemeConf{
+				Types:     []string{"ANY"},
+				Port:      53,
+				Target:    "updates.{ZONENAME}",
+				Addresses: []string{"192.0.2.1"},
 			},
 		},
-	}); err != nil {
+	}, ParentSyncConf{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -290,15 +286,13 @@ ns.b.example. 3600 IN A 192.0.2.2
 }
 
 func TestBootstrapSVCBActionsSkipsZoneApex(t *testing.T) {
-	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
-	if err := SetDelegationSyncConfig(DelegationSyncConf{
-		ChildSync: ChildSyncConf{
-			Schemes: []string{"update"},
-			Update: DsyncUpdateSchemeConf{
-				DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "{ZONENAME}"},
-			},
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
+	if err := SetDelegationSyncConfig(ChildSyncConf{
+		Schemes: []string{"update"},
+		Update: DsyncUpdateSchemeConf{
+			DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "{ZONENAME}"},
 		},
-	}); err != nil {
+	}, ParentSyncConf{}); err != nil {
 		t.Fatal(err)
 	}
 	zd := &ZoneData{ZoneName: "example."}

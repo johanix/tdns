@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// DelegationPolicyConf is the YAML form of a named delegationsync.policies.*
+// DelegationPolicyConf is the YAML form of a named childsync.policies.*
 // entry. Compiled to DelegationPolicy at config install.
 type DelegationPolicyConf struct {
 	Bootstrap DelegationBootstrapConf `yaml:"bootstrap" mapstructure:"bootstrap"`
@@ -137,12 +137,12 @@ func compileChildBootstrapMethods(methods []string) ([]string, error) {
 // server — the exact drift the single-typed-reader contract on this block
 // exists to prevent. SetDelegationSyncConfig is the installing caller; the CLI
 // is the read-only one.
-func CompileDelegationSyncPolicies(dsc DelegationSyncConf) (map[string]DelegationPolicy, []string, error) {
-	compiled, err := compileDelegationPolicies(dsc.Policies)
+func CompileDelegationSyncPolicies(cs ChildSyncConf, ps ParentSyncConf) (map[string]DelegationPolicy, []string, error) {
+	compiled, err := compileDelegationPolicies(cs.Policies)
 	if err != nil {
 		return nil, nil, err
 	}
-	methods, err := compileChildBootstrapMethods(dsc.ParentSync.Update.Bootstrap.Methods)
+	methods, err := compileChildBootstrapMethods(ps.Update.Bootstrap.Methods)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -171,7 +171,7 @@ func delegationPolicyName(name string) string {
 
 func lookupDelegationPolicy(name string) (DelegationPolicy, bool) {
 	name = delegationPolicyName(name)
-	if p, ok := DelegationSyncConfig().CompiledPolicies[name]; ok {
+	if p, ok := ChildSyncConfig().CompiledPolicies[name]; ok {
 		return p, true
 	}
 	if name == "default" {

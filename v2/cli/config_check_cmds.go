@@ -793,7 +793,7 @@ func checkPolicyAlgsAgainstServer(tmp string, rep *ccReport, g, role string, nPo
 func checkDelegationSync(cfg *tdns.Config, rep *ccReport) {
 	const g = "Delegation sync"
 
-	compiled, methods, err := tdns.CompileDelegationSyncPolicies(cfg.DelegationSync)
+	compiled, methods, err := tdns.CompileDelegationSyncPolicies(cfg.ChildSync, cfg.ParentSync)
 	if err != nil {
 		rep.fail(g, "delegationsync",
 			fmt.Sprintf("invalid delegationsync config: %v — the daemon refuses to start on this", err),
@@ -823,9 +823,9 @@ func checkDelegationSync(cfg *tdns.Config, rep *ccReport) {
 		}
 		if !tdns.DelegationPolicyResolves(compiled, t.DelegationPolicy) {
 			rep.fail(g, "template "+t.Name,
-				fmt.Sprintf("delegationpolicy: %q does not name an entry in delegationsync.policies — every zone using this template is quarantined at startup",
+				fmt.Sprintf("delegationpolicy: %q does not name an entry in childsync.policies — every zone using this template is quarantined at startup",
 					t.DelegationPolicy),
-				fmt.Sprintf("define it under delegationsync.policies, or use one of: %s", strings.Join(named, ", ")))
+				fmt.Sprintf("define it under childsync.policies, or use one of: %s", strings.Join(named, ", ")))
 		}
 	}
 	for i := range cfg.Zones {
@@ -839,9 +839,9 @@ func checkDelegationSync(cfg *tdns.Config, rep *ccReport) {
 		}
 		if !tdns.DelegationPolicyResolves(compiled, eff.DelegationPolicy) {
 			rep.fail(g, zname,
-				fmt.Sprintf("delegationpolicy: %q does not name an entry in delegationsync.policies — the zone is quarantined at startup",
+				fmt.Sprintf("delegationpolicy: %q does not name an entry in childsync.policies — the zone is quarantined at startup",
 					eff.DelegationPolicy),
-				fmt.Sprintf("define it under delegationsync.policies, or use one of: %s", strings.Join(named, ", ")))
+				fmt.Sprintf("define it under childsync.policies, or use one of: %s", strings.Join(named, ", ")))
 		}
 	}
 }

@@ -130,7 +130,7 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 		return nil
 	}
 
-	dsc := DelegationSyncConfig().ChildSync
+	dsc := ChildSyncConfig()
 	lg.Debug("defined DSYNC schemes", "zone", zd.ZoneName, "schemes", dsc.Schemes)
 
 	for _, scheme := range dsc.Schemes {
@@ -369,7 +369,7 @@ func expandDsyncTemplate(tpl, zonename string) string {
 // DsyncUpdateTargetName computes the DSYNC UPDATE target name for a parent zone
 // from the global config. Returns empty string if not configured.
 func DsyncUpdateTargetName(zonename string) string {
-	return expandDsyncTemplate(DelegationSyncConfig().ChildSync.Update.Target, zonename)
+	return expandDsyncTemplate(ChildSyncConfig().Update.Target, zonename)
 }
 
 func dsyncUpdateTargetIsZoneApex(zone, target string) bool {
@@ -482,7 +482,7 @@ func (zd *ZoneData) bootstrapSVCBActions(ttl uint32) []dns.RR {
 	// Only reconcile SVCB while this parent still offers UPDATE. Removing
 	// "update" from parent.schemes does not withdraw a previously published
 	// bootstrap SVCB; UnpublishDsyncRRs is the operator action that drops it.
-	if !dsyncSchemeConfigured(DelegationSyncConfig().ChildSync.Schemes, "update") {
+	if !dsyncSchemeConfigured(ChildSyncConfig().Schemes, "update") {
 		return nil
 	}
 	target := DsyncUpdateTargetName(zd.ZoneName)

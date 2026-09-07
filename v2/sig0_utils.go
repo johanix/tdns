@@ -117,7 +117,7 @@ func GenerateKeyMaterial(owner string, rrtype uint16, alg uint8, keytype string)
 	}
 
 	var pkc *PrivateKeyCache
-	modekey := "delegationsync.parentsync.update.keygen.mode"
+	modekey := "parentsync.update.keygen.mode"
 	mode := viper.GetString(modekey)
 	if rrtype == dns.TypeDNSKEY {
 		modekey = "resignerengine.keygen.mode"
@@ -194,7 +194,7 @@ func GenerateKeyMaterial(owner string, rrtype uint16, alg uint8, keytype string)
 		pkc.PrivateKey = privkeyPEM
 
 	case "external":
-		keygenprog := DelegationSyncConfig().ParentSync.Update.Keygen.Generator
+		keygenprog := ParentSyncConfig().Update.Keygen.Generator
 		if keygenprog == "" {
 			return nil, fmt.Errorf("error: key generator program not specified (keygenprog=%s, modekey=%s)", keygenprog, modekey)
 		}

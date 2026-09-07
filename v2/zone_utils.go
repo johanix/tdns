@@ -1714,11 +1714,11 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	if zd.Options[OptParentSync] &&
 		((Globals.App.Type == AppTypeAuth && !zd.Options[OptMultiProvider]) ||
 			(Globals.App.Type == AppTypeAgent && zd.Options[OptMultiProvider])) {
-		schemes := DelegationSyncConfig().ParentSync.Schemes
+		schemes := ParentSyncConfig().Schemes
 		if len(schemes) == 0 {
-			lg.Error("SetupZoneSync: zone has delegation-sync-child enabled but delegationsync.parentsync.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)
-			zd.SetError(ConfigError, "delegation-sync-child enabled but delegationsync.parentsync.schemes is not configured")
-			return fmt.Errorf("delegation-sync-child enabled but delegationsync.parentsync.schemes is not configured for zone %s", zd.ZoneName)
+			lg.Error("SetupZoneSync: zone has delegation-sync-child enabled but parentsync.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)
+			zd.SetError(ConfigError, "delegation-sync-child enabled but parentsync.schemes is not configured")
+			return fmt.Errorf("delegation-sync-child enabled but parentsync.schemes is not configured for zone %s", zd.ZoneName)
 		}
 		for _, scheme := range schemes {
 			switch scheme {
