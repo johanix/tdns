@@ -485,15 +485,68 @@ func TestProxyKeyStatusForeignKeyNamesBothKeys(t *testing.T) {
 		t.Fatalf("state = %q, want %q", state, ProxyUpdateForeignKey)
 	}
 
-	block, err := zd.proxyKeyPublishBlock(kdb)
+	// The assembled report, not just the block it embeds: the "published at the
+	// apex now" listing is what the operator reads, and it exists only here.
+	msg, err := zd.proxyKeyStatusMessage(state, kdb)
 	if err != nil {
-		t.Fatalf("proxyKeyPublishBlock: %v", err)
+		t.Fatalf("proxyKeyStatusMessage: %v", err)
 	}
-	if !strings.Contains(block, ours.String()) {
+	if !strings.Contains(msg, ours.String()) {
 		t.Error("the report does not show the KEY the agent expects")
 	}
-	if apex := zd.proxyApexKEYs(); len(apex) == 0 {
-		t.Error("the apex KEY the report is meant to show is not readable from the zone")
+	if !strings.Contains(msg, foreign.String()) {
+		t.Error("the report does not show the foreign KEY the agent found at the apex")
+	}
+	if !strings.Contains(msg, "Published at the apex now") {
+		t.Errorf("the two KEYs are not told apart:\n%s", msg)
+	}
+}
+
+// Every arm of the report, driven by state rather than through the precondition
+// check, which starts with a DSYNC lookup at the parent.
+func TestProxyKeyStatusMessagePerState(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := genProxySig0Key(t, kdb, proxyUpdZone)
+	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
+	zd.Options = map[ZoneOption]bool{OptDelSyncProxy: true}
+
+	for _, tc := range []struct {
+		state   ProxyUpdateState
+		verdict string
+	}{
+		{ProxyUpdateUnsupported, "not applicable"},
+		{ProxyUpdateReady, "READY"},
+		{ProxyUpdateForeignKey, "NOT operable"},
+		{ProxyUpdateWaiting, "WAITING"},
+	} {
+		msg, err := zd.proxyKeyStatusMessage(tc.state, kdb)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.state, err)
+		}
+		if !strings.Contains(msg, tc.verdict) {
+			t.Errorf("%s: verdict %q missing from:\n%s", tc.state, tc.verdict, msg)
+		}
+		// The point of #541: the records are there whatever the verdict says.
+		for _, want := range []string{key.String(), "HSYNCPARAM", "TYPE65286"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("%s: report does not carry %q", tc.state, want)
+			}
+		}
+	}
+
+	// With no key, every arm says so instead of erroring or printing a stray
+	// header with nothing under it.
+	bare := proxyUpdZoneData(t, newTestKeyDB(t), proxyUpdBaseZone())
+	for _, state := range []ProxyUpdateState{
+		ProxyUpdateUnsupported, ProxyUpdateReady, ProxyUpdateForeignKey, ProxyUpdateWaiting,
+	} {
+		msg, err := bare.proxyKeyStatusMessage(state, bare.KeyDB)
+		if err != nil {
+			t.Fatalf("%s with no key: %v", state, err)
+		}
+		if !strings.Contains(msg, "No SIG(0) key has been generated") {
+			t.Errorf("%s with no key does not say so:\n%s", state, msg)
+		}
 	}
 }
 

@@ -308,10 +308,18 @@ func (zd *ZoneData) clearProxyUpdateWarning() {
 }
 
 // ProxyKeyStatus is the operator-facing report for the `proxy-key` command: the
-// current UPDATE-proxy state and, in the waiting state, the records the operator
-// must publish at the primary (the KEY RR + HSYNCPARAM pubkey). It runs the
-// §10.8 precondition check (which generates a keypair if needed in the waiting
-// state) and formats a human-readable result.
+// current UPDATE-proxy state, and the records the operator must serve at the
+// primary apex -- the agent's KEY RR, the HSYNCPARAM pubkey flag, and the
+// HSYNCPARAM in RFC 3597 form.
+//
+// The records are reported in every state, not only while waiting. READY is
+// the state an operator reads when the primary looks fine and the agent still
+// cannot proxy, and a verdict with no record leaves nothing to compare against
+// what the primary serves.
+//
+// It runs the §10.8 precondition check, which is the only thing here that
+// generates a keypair, and only in the waiting state. Every other state
+// reports the absence of a key rather than filling it.
 func (zd *ZoneData) ProxyKeyStatus(ctx context.Context, kdb *KeyDB, imr *Imr) (string, error) {
 	if !zd.Options[OptDelSyncProxy] {
 		return "", fmt.Errorf("zone %s does not have the delegation-sync-proxy option", zd.ZoneName)
@@ -320,6 +328,18 @@ func (zd *ZoneData) ProxyKeyStatus(ctx context.Context, kdb *KeyDB, imr *Imr) (s
 	if err != nil {
 		return "", err
 	}
+	return zd.proxyKeyStatusMessage(state, kdb)
+}
+
+// proxyKeyStatusMessage renders the report for a state the caller has already
+// determined.
+//
+// Split out of ProxyKeyStatus so each arm can be exercised on its own. The
+// precondition check begins with a DSYNC lookup at the parent, so anything
+// going through ProxyKeyStatus without a network reaches update-unsupported
+// and no other arm -- which left the assembled text for the three states this
+// change is about untested.
+func (zd *ZoneData) proxyKeyStatusMessage(state ProxyUpdateState, kdb *KeyDB) (string, error) {
 	block, berr := zd.proxyKeyPublishBlock(kdb)
 	if berr != nil {
 		return "", berr
