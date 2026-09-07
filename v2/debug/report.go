@@ -42,6 +42,10 @@ type Report struct {
 	Skipped      []string          `json:"skipped,omitempty"` // checks not evaluated + why
 	Stats        map[string]int64  `json:"stats,omitempty"`
 	Violations   []Violation       `json:"violations,omitempty"`
+	// Detail carries the per-family record a run produces -- the relay
+	// family's per-round table, for instance. One JSON document per run beats
+	// a report and a second file the reader has to correlate by hand.
+	Detail any `json:"detail,omitempty"`
 }
 
 // Stat atomically adds delta to a named counter. Safe for concurrent actors.
