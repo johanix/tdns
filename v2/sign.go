@@ -984,13 +984,27 @@ func (zd *ZoneData) signWorkingSetLocked(dak *DnssecKeys, clamp *ClampParams, fo
 	managesZonemd := zd.zoneManagesZonemd()
 
 	for _, name := range names {
-		if !inScope(name) {
-			continue
-		}
 		owner := zd.stagedOwner(name)
 		if owner == nil {
 			continue
 		}
+		// Occlusion is tested BEFORE the scope, and the order is load-bearing
+		// where #546 and the scoped IXFR pass meet.
+		//
+		// A delegation that arrives in a delta occludes names the delta never
+		// mentions -- add NS at sub.example. and deep.sub.example. becomes the
+		// child's data without appearing in ixfrTouched. Scoping first would
+		// skip exactly those names, and skipping is what the strip below exists
+		// not to do: they would keep OUR signatures over data that is no longer
+		// ours, on the wire, until the zone was next loaded from source. The
+		// full-sign path strips them because it walks everything; the scoped
+		// path has to reach them too.
+		//
+		// It costs nothing to hoist. stripRRSIGsLocked returns early when an
+		// RRset has no signatures, so a name with nothing to strip is never
+		// staged and never cloned, and the sharing the scoped pass exists to
+		// preserve is untouched.
+		//
 		// A name below a delegation is the child zone's data, not ours: RFC
 		// 4035 §2.2 excludes it from the authoritative data, so nothing at it
 		// is signed -- not its NSEC either, which the chain generator drops
@@ -1004,6 +1018,9 @@ func (zd *ZoneData) signWorkingSetLocked(dak *DnssecKeys, clamp *ClampParams, fo
 		// visible in the first place.
 		if occluded[name] {
 			zd.stripOccludedRRSIGsLocked(name, owner)
+			continue
+		}
+		if !inScope(name) {
 			continue
 		}
 
