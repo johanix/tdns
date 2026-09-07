@@ -553,8 +553,8 @@ func (c DsyncApiSchemeConf) Validate() error {
 // that has no *Config in hand (PublishDsyncRRs is a method on ZoneData, called
 // from four places, none of which carry the config), and it is replaced
 // wholesale on config reload. An atomic.Pointer gives lock-free reads and a
-// race-free swap. Access via DelegationSyncConfig()/SetDelegationSyncConfig(),
-// never directly.
+// race-free swap. Access via ChildSyncConfig()/ParentSyncConfig() and
+// SetDelegationSyncConfig(), never directly.
 // delegationSyncRuntime is the installed pair. It is NOT a config-file shape --
 // childsync: and parentsync: are separate top-level blocks -- it exists so one
 // atomic swap replaces both, since compiling the policies and rebinding the

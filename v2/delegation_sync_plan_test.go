@@ -578,7 +578,7 @@ func TestNoViperReadsOfTheDelegationsyncBlock(t *testing.T) {
 		for i, line := range strings.Split(string(src), "\n") {
 			if pat.MatchString(line) {
 				t.Errorf("%s:%d reads the delegationsync block from viper: %s\n"+
-					"    Use DelegationSyncConfig(). viper returns empty in tdns-auth and"+
+					"    Use ChildSyncConfig()/ParentSyncConfig(). viper returns empty in tdns-auth and"+
 					" tdns-agent, which never read a config file into viper.",
 					f, i+1, strings.TrimSpace(line))
 			}

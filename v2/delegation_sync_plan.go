@@ -183,7 +183,7 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 	//
 	// The failure was total and silent: no schemes meant SkippedScheme{"all"},
 	// an unusable plan, and every configured transport ignored. zone_utils.go
-	// reads the same setting through DelegationSyncConfig(); now so does this.
+	// reads the same setting through ParentSyncConfig(); now so does this.
 	schemes := ParentSyncConfig().Schemes
 	if len(schemes) == 0 {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{
