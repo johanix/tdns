@@ -867,12 +867,14 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// the primary's sequence verbatim: it cannot ship a delta that disagrees
 	// with our own content, whatever the primary sent.
 	//
-	// Non-signing only, per §5. A signing secondary re-signs on publish, and
-	// while the same diff would in principle capture that too, the interaction
-	// between signing, NSEC chain regeneration and the chain update is not
-	// something this project audited. Deferred to PR-2 deliberately rather
-	// than assumed safe.
-	zd.wsIxfrEpochReset = !(new_zd != nil && new_zd.ixfrDerived && !zd.signsItsOwnContent())
+	// Signing secondaries included. §5 deferred them because the interaction
+	// between signing, NSEC chain regeneration and the chain update had not
+	// been audited. It has been now, and the reason it holds is that the link
+	// is computed from OUR content rather than relayed: updateIxfrChainLocked
+	// diffs the outgoing snapshot against the data about to be published, so
+	// it sees the re-signed RRsets and the repaired NSEC records as ordinary
+	// content, exactly as an AXFR of the same publish would.
+	zd.wsIxfrEpochReset = !(new_zd != nil && new_zd.ixfrDerived)
 	// This content came from a file or from an upstream, so whatever RRSIGs it
 	// carries are not ours. A zone that signs its own content must sign it
 	// before it is published, not in a pass afterwards.
@@ -1005,11 +1007,31 @@ func (zd *ZoneData) signStagedScopeLocked(sm *signingMaterial) error {
 	if sm == nil || (!zd.wsNeedsFullSign && zd.wsSignOwners == nil) {
 		return nil
 	}
-	// force=false: sign what is unsigned, which after a wholesale replacement is
-	// everything, and after an IXFR is what the delta brought.
+	// force follows the scope, and the two arms genuinely differ.
+	//
+	// A wholesale replacement (AXFR, file reload) arrives with no RRSIGs of
+	// ours on it, so "sign what is unsigned" signs all of it -- and force=false
+	// is what keeps a refresh of an unchanged large zone from re-signing every
+	// RRset in it on every pass.
+	//
+	// A delta does NOT arrive that way. It is applied onto the copy we already
+	// signed, so an RRset the delta changed but did not EMPTY still carries our
+	// RRSIG over its previous contents. SignRRset compares keytag and remaining
+	// lifetime, never rdata: it sees a signature by an active key that is
+	// nowhere near expiry and stands down, and the publish serves changed
+	// records under a signature that does not cover them. A validator calls
+	// that bogus, and nothing on the normal path repairs it -- the resigner
+	// only revisits signatures approaching expiry, so the name stays bogus for
+	// the whole signature lifetime.
+	//
+	// Forcing is affordable here precisely because the scope is small:
+	// wsSignOwners is the delta's touched set, a handful of owners, not the
+	// zone. It does mean the apex is re-signed on every inbound delta
+	// (ixfrTouchedOwners always includes it), the apex DNSKEY with it.
+	//
 	// signNsec=false: restitchNsecLocked regenerates and signs the chain a few
 	// lines below, so signing it here would be thrown away.
-	_, _, err := zd.signWorkingSetLocked(sm.dak, sm.clamp, false, false, zd.wsSignOwners)
+	_, _, err := zd.signWorkingSetLocked(sm.dak, sm.clamp, zd.wsSignOwners != nil, false, zd.wsSignOwners)
 	return err
 }
 
