@@ -185,7 +185,7 @@ For a row with `source = hsyncparam`, all of:
 
 For a row with `source = at-ns`, all of:
 
-- the zone carries `parentsync` (`OptParentSync`);
+- the zone carries `parentsync` (`OptDelSyncChild`);
 - the row's `ns` is still in the zone's apex NS RRset;
 - `FindZone(owner)` still resolves to a zone served here as primary.
 

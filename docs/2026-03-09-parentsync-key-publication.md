@@ -21,13 +21,13 @@ happen.
 The gating chain:
 1. `SetupZoneSync` (`zone_utils.go`) reads HSYNCPARAM. Only
    if `GetParentSync() == HsyncParentSyncAgent` does it set
-   `OptParentSync = true`.
+   `OptDelSyncChild = true`.
 2. Leader election (`parseconfig.go`) is gated on
-   `OptParentSync`.
+   `OptDelSyncChild`.
 3. DDNS sending (`delegation_sync.go`) is gated on
-   `OptParentSync` + `IsLeader`.
+   `OptDelSyncChild` + `IsLeader`.
 4. KEY publication (`DelegationSyncSetup`) is gated on
-   `OptParentSync`.
+   `OptDelSyncChild`.
 
 ## Two Publication Models
 
@@ -36,7 +36,7 @@ The gating chain:
 Works when the parent zone is signed (most are). The KEY RR
 is published at the child zone apex.
 
-- **Non-MP zones** (`OptParentSync`): Agent publishes KEY
+- **Non-MP zones** (`OptDelSyncChild`): Agent publishes KEY
   directly via `Sig0KeyPreparation` + `PublishKeyRRs`
   (already exists).
 - **MP zones** (`HSYNCPARAM parentsync=agent`): Agent sends
@@ -213,7 +213,7 @@ The combiner already handles `"replace"` operations
 ### Step 3: Wire KEY publication into OnFirstLoad (`parseconfig.go`)
 
 In the existing OnFirstLoad callback for
-`OptParentSync || OptMultiProvider`:
+`OptDelSyncChild || OptMultiProvider`:
 - Non-MP zones: existing `Sig0KeyPreparation` +
   `PublishKeyRRs` already handles apex KEY — no change
   needed.

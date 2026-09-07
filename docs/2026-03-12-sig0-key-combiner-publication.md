@@ -4,7 +4,7 @@ Date: 2026-03-12
 
 ## Problem
 
-After winning a leader election, `onLeaderElected` (main_initfuncs.go) should generate a SIG(0) keypair and publish the KEY RR. Currently it bails out because it checks `parentsync.schemes` for `"update"` — but that config controls *direct parent UPDATE*, not combiner-mediated publication.
+After winning a leader election, `onLeaderElected` (main_initfuncs.go) should generate a SIG(0) keypair and publish the KEY RR. Currently it bails out because it checks `delegationsync.child.schemes` for `"update"` — but that config controls *direct parent UPDATE*, not combiner-mediated publication.
 
 For multi-provider zones with `parentsync=agent`, the agent should:
 
@@ -18,10 +18,10 @@ For multi-provider zones with `parentsync=agent`, the agent should:
 ### Guard logic
 
 The correct guard for SIG(0) key generation is:
-- `OptParentSync` — means `parentsync=agent` (HSYNCPARAM)
+- `OptDelSyncChild` — means `parentsync=agent` (HSYNCPARAM)
 - **AND** parent supports UPDATE scheme — checked via live `LookupDSYNCTarget` against the parent's DSYNC RRset
 
-The old guard (`parentsync.schemes` config) controlled direct parent UPDATE and is not relevant for combiner-mediated publication.
+The old guard (`delegationsync.child.schemes` config) controlled direct parent UPDATE and is not relevant for combiner-mediated publication.
 
 ### Key publication flow (onLeaderElected)
 

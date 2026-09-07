@@ -248,7 +248,7 @@ Gate DDNS sends on leader election result. Existing `SyncZoneDelegationViaUpdate
 3. Parse HSYNCPARAM with key=value pairs → verify accessor helpers work
 4. Wire format round-trip for both record types
 5. `signers="netnod"` in HSYNCPARAM → `analyzeHsyncSigners` returns correct result
-6. Agent startup with HSYNCPARAM parentsync=agent → `OptParentSync` set automatically
+6. Agent startup with HSYNCPARAM parentsync=agent → `OptDelSyncChild` set automatically
 7. NS change in signed zone with signed delegation → CSYNC published proactively
 8. DNSKEY change in signed zone → CDS synthesized and published
 9. SIG(0) KEY published at zone apex (RFC 8078)

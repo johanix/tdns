@@ -62,9 +62,9 @@ and none of those load zones in auth mode. Verified for `cmd/auth`,
 
 Consequently, on `main` today in `tdns-auth`:
 
-- `viper.GetStringSlice("childsync.schemes")` → `[]`, so
+- `viper.GetStringSlice("delegationsync.parent.schemes")` → `[]`, so
   `PublishDsyncRRs` iterates an empty list and **publishes nothing**;
-- `viper.GetString("childsync.update.target")` → `""`, so
+- `viper.GetString("delegationsync.parent.update.target")` → `""`, so
   `SetupZoneSync` computes `dns.Fqdn("")` = `"."`, passes
   `dns.IsDomainName(".")`, and calls `ParentSig0KeyPrep(".")` — generating a
   SIG(0) keypair for the **root**. (This is precisely the bug the branch's own
@@ -92,7 +92,7 @@ MAIN    SetupZoneSync updateTarget would be "."
 ### Consequences after merge
 
 For **every zone with the `delegation-sync-parent` option** (the gate is
-`zd.Options[OptChildSync]` in `SetupZoneSync`):
+`zd.Options[OptDelSyncParent]` in `SetupZoneSync`):
 
 1. `_dsync.<zone>` gains DSYNC RRs — CDS/CSYNC via NOTIFY and ANY via UPDATE,
    both on port 5354.
@@ -235,7 +235,7 @@ Recorded so these do not get re-litigated.
 | Dependencies | **No `go.mod` / `go.sum` change at all** |
 | External consumers (`tdns-mp` compiles against `v2`) | Exported surface purely additive: **102 symbols added, 0 removed**. `DsyncResult` gains a `Validated` field; every construction in-repo is keyed. |
 | Package init side effects | **No `init()`** in any new file |
-| New DSYNC API listener | `SetupDsyncApiRouter` returns nil unless `api` ∈ `childsync.schemes`; `StartDsyncApiListener` returns nil on a nil router. **No socket bound unless opted in**, no default listen address. Refuses to start without TLS rather than falling back to plaintext. |
+| New DSYNC API listener | `SetupDsyncApiRouter` returns nil unless `api` ∈ `delegationsync.parent.schemes`; `StartDsyncApiListener` returns nil on a nil router. **No socket bound unless opted in**, no default listen address. Refuses to start without TLS rather than falling back to plaintext. |
 | New DB table `DsyncApiCredential` | `CREATE TABLE IF NOT EXISTS`, additive, no migration of existing tables |
 | New management-API route | `/dsync-api/credential`, additive, under the existing operator-key subrouter |
 | `UnpublishDsyncRRs` extra URI/TXT deletes | Gated on `api` ∈ schemes via `DsyncApiTargetName`; no change for existing deployments |
@@ -259,7 +259,7 @@ Everything else in this branch is either an improvement or provably inert.
 
 ### Follow-up worth tracking separately
 
-- Finish the viper → struct migration for the `parentsync.*` and
+- Finish the viper → struct migration for the `delegationsync.child.*` and
   keygen/key-verification subtrees, so the two halves agree.
 - Consider whether `PublishDsyncRRs`'s all-or-nothing "existing DSYNC RRset is
   the operator's" guard should become per-scheme; the branch deliberately

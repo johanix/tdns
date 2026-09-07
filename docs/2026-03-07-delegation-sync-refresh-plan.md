@@ -68,7 +68,7 @@ patterns.
 
 7. **`SetupZoneSync` uses `viper.GetString` for DSYNC
    target**: `zone_utils.go:1051` reads
-   `childsync.update.target` from global
+   `delegationsync.parent.update.target` from global
    viper instead of zone-specific config.
 
 8. **`Globals.Zonename` used in
@@ -206,7 +206,7 @@ is the right hook point)
 - After extracting `MsgOptions` and determining the
   zone, check `msgoptions.KeyState != nil`
 - If present AND this is a parent zone with
-  `OptChildSync`: call
+  `OptDelSyncParent`: call
   `kdb.HandleKeyStateOption(opt, zonename)`
 - Attach response KeyState option to the reply message
 - This completes the child->parent->child KeyState
@@ -230,8 +230,8 @@ SetupZoneSync)
 - Remove `SetupZoneSync` call from
   `refreshengine.go:99`
 - Register `SetupZoneSync` as OnFirstLoad callback in
-  `parseconfig.go` for zones with `OptChildSync`
-  or `OptParentSync`
+  `parseconfig.go` for zones with `OptDelSyncParent`
+  or `OptDelSyncChild`
 - This means DSYNC publication and child
   delegation-sync-setup happen after signing callbacks,
   which is correct (child needs signed KEY RRs before
@@ -260,7 +260,7 @@ SetupZoneSync)
 - SVCB should advertise supported bootstrap methods via
   the "bootstrap" SvcParamKey
 - Value derived from config (e.g.,
-  `childsync.bootstrap.methods`)
+  `delegationsync.parent.bootstrap.methods`)
 - Format: `updater.parent.example. IN SVCB 0 .
   bootstrap="at-apex,unsigned,manual"`
 
@@ -285,7 +285,7 @@ publication happens after signing setup. Requires
 removing the `SetupZoneSync` call from
 `refreshengine.go:99` and registering it as an
 OnFirstLoad callback in `parseconfig.go` for zones with
-`OptChildSync` or `OptParentSync`.
+`OptDelSyncParent` or `OptDelSyncChild`.
 
 **A2**: **Keep DeferredUpdaterEngine** — it's general
 infrastructure. Don't remove even after Step 4.

@@ -1,6 +1,7 @@
 # Secondary zones are immutable — MUST-NOT-MODIFY invariant + audit
 
-**Date:** 2026-07-25, revised 2026-07-26 (rev 2, rev 2.1, rev 2.2 same day)
+**Date:** 2026-07-25, revised 2026-07-26 (rev 2, rev 2.1, rev 2.2 same day),
+amended 2026-09-07 (rev 2.3 — §4 only, appended; nothing above it is edited)
 **Status:** IMPLEMENTED (2026-07-26) — all items in §14.1 landed on
 `feature/secondary-zones-immutable`; not yet reviewed or merged, and the
 live-testbed validation Fix D calls for is still outstanding. Design agreed;
@@ -159,9 +160,9 @@ staged. What matters is the **source** and its **enabler**:
 | 2 | **DDNS** (RFC 2136 UPDATE) | `OptAllowUpdates` / `OptAllowChildUpdates` ([updateresponder.go](../v2/updateresponder.go)) | only if option set (no role check; config doesn't reject it) | **Fix B** + **Fix D** |
 | 3 | **Transport signals** — `CreateTransportSignalRRs` → commit/publish ([tsignal.go](../v2/tsignal.go), refresh postpass, `RepopulateDynamicRRs`, [signal_republish.go:149](../v2/signal_republish.go)) | `OptAddTransportSignal` | only if option set | **Fix B** + **Fix D** |
 | 4 | **Delegation sync — child-side publishing** — SIG(0) **KEY** (`Sig0KeyPreparation`), **CSYNC** (`SyncZoneDelegationViaNotify`) | each gated on `OptAllowUpdates` ([delegation_sync.go:302](../v2/delegation_sync.go)); parent-side child-apply on `OptAllowChildUpdates` | no — those options are already off (turned off as #2) | **Fix B, via #2** + **Fix D** |
-| 4b | Delegation sync — **CDS** publish (`PublishCdsRRs`, InternalUpdate) | `OptParentSync` | no — `SynthesizeCdsRRs` is empty ⇒ no-op without local DNSKEYs; sanctioned on a signing secondary | n/a (no-op); passes **Fix D** via `mayOriginate` |
-| 4c | Delegation sync — **sending** (bootstrap KEY to parent, NOTIFY, UPDATE) | `OptChildSync`/`OptParentSync` | sends outward; **does not mutate the served zone** | out of scope (§4 note) |
-| **4d** | **Delegation sync — DSYNC publication** (`SetupZoneSync` → `PublishDsyncRRs`, [zone_utils.go:773](../v2/zone_utils.go), [ops_dsync.go:16](../v2/ops_dsync.go)) — publishes `_dsync.<zone>` DSYNC + address RRs via InternalUpdate | **`OptChildSync` alone.** No `allow-updates` check. Unlike CDS it is **not** a no-op without local DNSKEYs — it synthesizes from `childsync.schemes` | **YES** | **Fix B** (delsync-parent joins the turn-off list) + **Fix D** |
+| 4b | Delegation sync — **CDS** publish (`PublishCdsRRs`, InternalUpdate) | `OptDelSyncChild` | no — `SynthesizeCdsRRs` is empty ⇒ no-op without local DNSKEYs; sanctioned on a signing secondary | n/a (no-op); passes **Fix D** via `mayOriginate` |
+| 4c | Delegation sync — **sending** (bootstrap KEY to parent, NOTIFY, UPDATE) | `OptDelSyncParent`/`OptDelSyncChild` | sends outward; **does not mutate the served zone** | out of scope (§4 note) |
+| **4d** | **Delegation sync — DSYNC publication** (`SetupZoneSync` → `PublishDsyncRRs`, [zone_utils.go:773](../v2/zone_utils.go), [ops_dsync.go:16](../v2/ops_dsync.go)) — publishes `_dsync.<zone>` DSYNC + address RRs via InternalUpdate | **`OptDelSyncParent` alone.** No `allow-updates` check. Unlike CDS it is **not** a no-op without local DNSKEYs — it synthesizes from `delegationsync.parent.schemes` | **YES** | **Fix B** (delsync-parent joins the turn-off list) + **Fix D** |
 | 5 | **DNSSEC signing / KSK-ZSK rollover / resign** ([sign.go](../v2/sign.go), ksk_rollover_*, resign engine) | `OptOnlineSigning`/`OptInlineSigning` **and** `SetupZoneSigning`'s role gate: a non-primary signs *only* with `inline-signing` ([zone_utils.go:1107](../v2/zone_utils.go)) | only if `inline-signing` — the **sanctioned** signing secondary | **kept** (the exception); Fix A treats it as an originator |
 | **5b** | **Per-publish SOA re-sign** — `resignWorkingSetSOAIfSigned` ([zone_mutation.go:186](../v2/zone_mutation.go)) re-signs the apex SOA inside `publishWorkingSetLocked`, i.e. on **every publish including the refresh path** | `OptOnlineSigning` or `OptInlineSigning` — **no role gate**, unlike #5. `EnsureActiveDnssecKeys` will *generate* keys if absent | **YES**, on a secondary carrying `online-signing` | **Fix B** (rev 2.1: option normalized off) + **Fix E** |
 | **5c** | **DNSKEY injection on refresh (rev 2.1)** — `CollectDynamicRRs` ([zone_utils.go:894](../v2/zone_utils.go)) pulls local DNSKEYs from the keystore and repopulates them into the served zone after **every refresh** | `OptOnlineSigning` or `OptInlineSigning` (outer gate also admits `OptAllowUpdates`) — **no role gate** | **YES**, with `online-signing` | **Fix B** (rev 2.1). NOT Fix-D-covered: publishes via the refresh working set, not UpdateQ |
@@ -405,55 +406,62 @@ edge-signer future this deliberately does not foreclose.
 
 ## 4. Option classification
 
-**Turn OFF for a non-inline-signing tdns-auth secondary (origination) — six:**
+**Turn OFF for a non-inline-signing tdns-auth secondary (origination) — five:**
 `allow-updates`, `allow-child-updates`, `add-transport-signal`,
-**`childsync`**, **`parentsync`** (rev 2.3), **`online-signing`** (rev 2.1).
-(`allow-api-updates` and `publish-zonemd` joined the list in the code after this
-section was written; see `originationOptions` for the current set.)
+**`delegation-sync-parent`**, **`online-signing`** (rev 2.1).
 
-**Config shape (rev 2.3).** The `delegationsync:` wrapper is gone: `childsync:`
-and `parentsync:` are top-level blocks, and the delegation policies live at
-`childsync.policies:` (every consumer of a bound policy is childsync-side). The
-old block is still accepted for a deprecation cycle.
-
-**`parentsync` (rev 2.3, 2026-09-07, #538).** Rev 2 excluded it, on the grounds
-that "its publishing paths are `allow-updates`-gated and Fix D backstops them".
-#538 removed that gate as the wrong question — see the KEY-publication bullet
-below — so the first half no longer held. It is included now for the same reason
-`childsync` is: a tdns-auth secondary doing CHILD-side delegation sync is
-incoherent. Its delegation data came from upstream, a locally minted SIG(0) key
-is not in what it serves and cannot be, and telling the parent to change a
-delegation it does not own is not a secondary's business. `parentsync-proxy` is
-untouched — it is an agent secondary's whole job, and normalization is a no-op
-off tdns-auth.
+> **Rev 2.3 — amendment, 2026-09-07 (#538).** Everything from here to the end
+> of this document is as it was written on 2026-07-26 and describes the code as
+> it then stood. Two of its claims have since stopped holding, and
+> `originationOptions` in `v2/zone_option_normalize.go` still points a reader at
+> this section, so the changes are recorded here rather than edited in above.
+>
+> 1. **The turn-off list is six, not five: `parentsync` joins it.** Rev 2
+>    excluded it (see the bullet list below), reasoning that "its publishing
+>    paths are `allow-updates`-gated and Fix D backstops them". #538 removed that
+>    gate as the wrong question, so the first half stopped holding. The deeper
+>    reason never depended on it and is the same one that put `childsync` in the
+>    list: a tdns-auth secondary doing CHILD-side delegation sync is incoherent.
+>    Its delegation data came from upstream, a locally minted SIG(0) key is not
+>    in what it serves and cannot be, and telling the parent to change a
+>    delegation it does not own is not a secondary's business. `parentsync-proxy`
+>    stays out — it is an agent secondary's whole job, and normalization is a
+>    no-op off tdns-auth. (`allow-api-updates` and `publish-zonemd` also joined
+>    the list in the code after rev 2; `originationOptions` is the current set.)
+>
+> 2. **The KEY-publication bullet's gate changed.** "Publishes only
+>    `if Options[OptAllowUpdates]`" was accurate when written. It was also the
+>    wrong question: `allow-updates` governs inbound RFC 2136 DDNS, while that
+>    publish is an `InternalUpdate` which the applier admits regardless — so a
+>    delegation-sync PRIMARY that refused inbound DDNS advertised a DSYNC UPDATE
+>    target and never generated the key that target names. The gate is now the
+>    delegation-sync option that asks for the key (`childsync` on the parent
+>    side, `parentsync` on the child side — what both callers already test) plus
+>    `zoneMayOriginateContent` as a backstop. With item 1 above, this bullet's
+>    conclusion now holds on the option alone.
+>
+>    The CSYNC bullet below is the same category error and is **not** fixed:
+>    tracked as #557. Its conclusion for a secondary still holds, via
+>    `parentsync`.
+>
+> Naming, for reading the bullets below against today's code: the zone options
+> are now `childsync` (was `delegation-sync-parent`, `OptDelSyncParent`) and
+> `parentsync` (was `delegation-sync-child`, `OptDelSyncChild`), and the
+> `delegationsync:` config block is now top-level `childsync:`/`parentsync:`
+> with the policies at `childsync.policies:`.
 
 **`delegation-sync-parent` (rev 2 — reversed from rev 1).** Rev 1 excluded it,
 reasoning that every delsync path that publishes into the zone is itself gated on
 `allow-updates`/`allow-child-updates`. Those specific claims are **correct** and
 were re-verified:
 
-- child KEY publication (`Sig0KeyPreparation`) publishes only if the zone may
-  originate content ([delegation_sync.go](../v2/delegation_sync.go)), and that
-  one gate covers the parent's UPDATE-receiver key prep too
-  (`ParentSig0KeyPrep` funnels into the same function), so on a tdns-auth
-  secondary it is a clean no-op, keygen included.
-  **Rev 2.3 (2026-09-07, #538):** this gate was `Options[OptAllowUpdates]` when
-  rev 2 was written. That was the wrong question — `allow-updates` governs
-  inbound RFC 2136 DDNS, and the publish here is `InternalUpdate`, which the
-  applier admits regardless — and it broke the ordinary case it was never meant
-  to touch: a delegation-sync PRIMARY that refuses inbound DDNS advertised a
-  DSYNC UPDATE target and never generated the key that target names. The gate is
-  now the delegation-sync option that asks for the key — `childsync` on the
-  parent side (the same option that permits the DSYNC RRset naming the target),
-  `parentsync` on the child side — which is what both callers already test, plus
-  `zoneMayOriginateContent` as an explicit backstop. Both of those options are
-  now stripped from a tdns-auth secondary by `normalizeOptionsForRole`, so this
-  bullet holds on the option alone and the backstop is genuine defence in depth;
-- child CSYNC publication (`SyncZoneDelegationViaNotify`) is still gated on
-  `Options[OptAllowUpdates]` ([delegation_sync.go](../v2/delegation_sync.go)).
-  Same category error as the KEY gate above and not yet changed. On a secondary
-  the conclusion now holds via `parentsync` regardless; on a primary that refuses
-  inbound DDNS the CSYNC is not published while the NOTIFY(CSYNC) is still sent;
+- child KEY publication (`Sig0KeyPreparation`) publishes only
+  `if Options[OptAllowUpdates]` ([delegation_sync.go:302](../v2/delegation_sync.go)),
+  and that one gate covers the parent's UPDATE-receiver key prep too
+  (`ParentSig0KeyPrep` funnels into the same function), so with `allow-updates`
+  off it is a clean no-op, keygen included;
+- child CSYNC publication (`SyncZoneDelegationViaNotify`) likewise
+  ([delegation_sync.go:521](../v2/delegation_sync.go));
 - parent-side child-delegation apply goes through the CHILD-UPDATE path, gated on
   `allow-child-updates` and enforced at the applier;
 - CDS via `PublishCdsRRs` bypasses `allow-updates` but is a **no-op without local
@@ -472,7 +480,7 @@ gates **KeyState EDNS(0) processing on incoming queries**
 disables that on a tdns-auth secondary, and that is correct: the KeyState response
 is signed with the receiver's SIG(0) key, the receiver is either the primary or an
 agent, the keystore is not replicated by AXFR, and the one path that would
-generate a key locally is origination-gated and therefore off. A tdns-auth
+generate a key locally is `allow-updates`-gated and therefore off. A tdns-auth
 secondary can never hold that key in any deployment, so leaving the processing on
 would produce **unsigned** KeyState responses — worse than not answering.
 
@@ -606,7 +614,7 @@ option-adjustment stage.
 
 This ordering does double duty. The delegation-sync setup block keys off the
 freshly-parsed `options` map ([parseconfig.go:1065](../v2/parseconfig.go)); with
-the normalizer running earlier, `OptChildSync` is already false for a
+the normalizer running earlier, `OptDelSyncParent` is already false for a
 secondary, the block is skipped, and `SetupZoneSync` never registers at all — so
 vector 4d is closed at parse time with no additional wiring.
 

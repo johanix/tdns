@@ -108,8 +108,8 @@ different scopes, with three vocabularies:
 | setting | scope | governs | read at |
 |---|---|---|---|
 | `updatepolicy.child.keybootstrap: [manual\|dnssec-validated\|consistent-lookup]` | **per-zone** | how this parent bootstraps a child key | `v2/keystate.go:266` |
-| `childsync.update.key-verification.{mechanisms,require-dnssec,max-attempts,retry-interval}` | **global** | how an uploaded key is verified before trust | `v2/truststore_verify.go:86` |
-| `childsync.bootstrap.methods` (free string) | **global** | what the SVCB advertises | `v2/ops_dsync.go:297` |
+| `delegationsync.parent.update.key-verification.{mechanisms,require-dnssec,max-attempts,retry-interval}` | **global** | how an uploaded key is verified before trust | `v2/truststore_verify.go:86` |
+| `delegationsync.parent.bootstrap.methods` (free string) | **global** | what the SVCB advertises | `v2/ops_dsync.go:297` |
 
 Three defects follow:
 
@@ -382,7 +382,7 @@ of `manual`.
 
 ### 4.4 Removed keys
 
-`childsync.bootstrap.methods`; `childsync.update.key-verification.*`
+`delegationsync.parent.bootstrap.methods`; `delegationsync.parent.update.key-verification.*`
 (folded into the named policy); `updatepolicy.child.keybootstrap`;
 `updatepolicy.child.keyupload`; `verifyengine.attempts`; `verifyengine.retry_interval`;
 and the stale sample-config note naming `keystate.require_manual_bootstrap` /
@@ -515,7 +515,7 @@ those same DNSKEYs.
 - **Est.** ~250-400 LOC.
 
 ### U-3. Named parent-side delegation policies
-- **Change:** add `childsync.policies.*` and the per-zone `delegationpolicy:`
+- **Change:** add `delegationsync.policies.*` and the per-zone `delegationpolicy:`
   reference; **bind it per §4.3** — the reference shape is `dnssecpolicy`-like but
   the omission and failure cases are not, which is what §4.3 exists to stop
   anyone copying. Move
@@ -527,7 +527,7 @@ those same DNSKEYs.
   `strict-manual` enum value ceases to exist — it becomes `mechanisms: []` +
   `manual: true` + `allow-unvalidated-upload: false`.
 - **Pattern to follow, and the one place not to follow it.** Key the policies as
-  `childsync.policies.<name>`, parallel to `dnssec.policies.<name>`, and
+  `delegationsync.policies.<name>`, parallel to `dnssec.policies.<name>`, and
   reuse `resolveZonePolicyRef` (`v2/parseconfig.go:1221`) for the reference
   lookup. But **fail like `updatepolicy`, not like `dnssecpolicy`**: an
   unresolvable `dnssecpolicy` *degrades* (zone served unsigned, error recorded on
@@ -675,7 +675,7 @@ pattern repeats.
 5. **Named policies, not inline+templates** (§4). Bootstrap policy is security
    policy: a small set of named, reviewable policies audits better than per-zone
    hand-rolling, while still reaching zones through templates. Keyed
-   `childsync.policies.<name>`, parallel to `dnssec.policies.<name>`, with
+   `delegationsync.policies.<name>`, parallel to `dnssec.policies.<name>`, with
    the failure-model caveat in U-3 — quarantine on an unresolvable reference, as
    `updatepolicy` does, not degrade as `dnssecpolicy` does.
 

@@ -42,7 +42,7 @@ Election is cheap — don't optimize for avoiding it:
 - Cached leader TTL expires (default: 5 minutes)
 - Any situation where leader is unknown = call election
 
-### Flow (per zone, among agents with `OptParentSync`)
+### Flow (per zone, among agents with `OptDelSyncChild`)
 
 1. **Call**: Any agent broadcasts `ELECT-CALL` with incremented term number to all peers.
 2. **Vote**: Every agent (including the caller) generates a random uint32 and broadcasts `ELECT-VOTE` with `{vote, term}` to all peers.
@@ -145,14 +145,14 @@ conf.Internal.LeaderElectionManager = NewLeaderElectionManager(
 
 **On HSYNC3 changes** — end of `UpdateAgents` in `agent_utils.go`:
 ```go
-if zd.Options[OptParentSync] {
+if zd.Options[OptDelSyncChild] {
     lem.StartElection(zonename, len(zad.Agents))
 }
 ```
 
 **On zone startup** — in `parseconfig.go` OnFirstLoad callback after `SetupZoneSync`:
 ```go
-if zd.Options[OptParentSync] && conf.Internal.LeaderElectionManager != nil {
+if zd.Options[OptDelSyncChild] && conf.Internal.LeaderElectionManager != nil {
     zad, _ := conf.Internal.AgentRegistry.GetZoneAgentData(ZoneName(zd.ZoneName))
     conf.Internal.LeaderElectionManager.StartElection(ZoneName(zd.ZoneName), len(zad.Agents))
 }
