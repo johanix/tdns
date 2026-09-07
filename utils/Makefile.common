@@ -236,6 +236,7 @@ PKG_TDNS_AUTH:=tdns-auth-$(PKGVER).tgz
 PKG_TDNS_AGENT:=tdns-agent-$(PKGVER).tgz
 PKG_TDNS_IMR:=tdns-imr-$(PKGVER).tgz
 PKG_TDNS_CLI:=tdns-cli-$(PKGVER).tgz
+PKG_TDNS_SIGNER:=tdns-signer-$(PKGVER).tgz
 
 pkg_tdns_auth: $(PKG_TDNS_AUTH)
 $(PKG_TDNS_AUTH): $(PROG) install
@@ -243,6 +244,13 @@ $(PKG_TDNS_AUTH): $(PROG) install
 	PKGCOMMENT="tdns-auth, the tdns authoritative nameserver" \
 	/bin/sh ../../utils/mkpkg.sh tdns-auth /usr/local \
 	libexec/tdns-auth
+
+pkg_tdns_signer: $(PKG_TDNS_SIGNER)
+$(PKG_TDNS_SIGNER): $(PROG) install
+	PKGVERSION=$(PKGVER) \
+	PKGCOMMENT="tdns-signer, the tdns bump-on-the-wire DNSSEC signer" \
+	/bin/sh ../../utils/mkpkg.sh tdns-signer /usr/local \
+	libexec/tdns-signer
 
 pkg_tdns_agent: $(PKG_TDNS_AGENT)
 $(PKG_TDNS_AGENT): $(PROG) install
@@ -281,4 +289,4 @@ lint: check-no-mutators
 	golangci-lint run
 
 .PHONY: build generate version clean check-no-mutators
-.PHONY: pkg_tdns_auth pkg_tdns_agent pkg_tdns_imr pkg_tdns_cli
+.PHONY: pkg_tdns_auth pkg_tdns_agent pkg_tdns_imr pkg_tdns_cli pkg_tdns_signer

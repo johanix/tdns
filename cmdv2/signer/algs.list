@@ -1,0 +1,32 @@
+# Algorithms tdns-signer links an implementation for.
+#
+# Identical to cmdv2/auth/algs.list, and must stay that way: a bump-on-the-wire
+# signer is the component actually producing the RRSIGs, so any algorithm the
+# authoritative server can be configured to sign with, this must be able to
+# sign with. A shorter list here fails at zone-load time on a policy naming a
+# missing algorithm, which is a confusing way to discover a build-config
+# mismatch.
+#
+# One registry NAME per line (see dnssec-algorithms/registry/registry.go).
+# genalgs resolves each name to its codepoint, caps, package, and lib group,
+# checks the lib is installed, and emits registered_algs.go + metadata_algs.go.
+# Pure-Go (no lib needed):
+MLDSA44
+MLDSA65
+MLDSA87
+SLHDSA128S
+# liboqs-backed:
+FALCON512
+FALCON1024
+MAYO1
+MAYO2
+MAYO3
+MAYO5
+SNOVA24_5_4
+SNOVA37_17_2
+SNOVA25_8_3
+CROSSRSDPG128SMALL
+# SQIsign reference lib:
+SQISIGN1
+# QR-UOV reference lib:
+QRUOV_Q31_L3

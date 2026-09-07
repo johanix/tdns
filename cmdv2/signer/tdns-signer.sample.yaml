@@ -1,0 +1,170 @@
+# tdns-signer sample configuration.
+#
+# Deploy as /etc/tdns/tdns-signer.yaml -- the path is derived from the binary
+# name, so tdns-signer needs no --config, and nothing here collides with
+# tdns-auth's /etc/tdns/tdns-auth.yaml.
+#
+# tdns-signer IS tdns-auth, under a different name so the two can run on one
+# host with separate configuration. Every option in tdns-auth.sample.yaml is
+# accepted here; this file is the subset a bump-on-the-wire signer actually
+# needs, with the values that MUST differ from the authoritative server's
+# called out. Copy anything else you want across from tdns-auth.sample.yaml.
+#
+# The pipeline this is written for:
+#
+#     tdns-auth (unsigned; file / DNS UPDATE / API input)
+#         |  AXFR + NOTIFY
+#         v
+#     tdns-signer  <-- you are here: secondary + inline-signing
+#         |  AXFR + NOTIFY
+#         v
+#     published secondaries
+#
+# The signer holds each zone as `type: secondary` with the `inline-signing`
+# option. It refreshes from the primary, signs the result BEFORE publishing it,
+# and only then NOTIFYs its own downstreams -- so a downstream never pulls an
+# unsigned intermediate state.
+#
+# ---------------------------------------------------------------------------
+# RUNNING ALONGSIDE tdns-auth ON ONE HOST
+#
+# Every one of these must differ from the tdns-auth config, or the second
+# daemon to start will fail (or, worse, quietly share state):
+#
+#     db.file                     apiserver.addresses
+#     log.file                    apiserver.apikey
+#     listeners.addresses         dynamiczones.configfile / .zonedirectory
+#     include: targets
+#
+# ONE EXCEPTION THAT DOES NOT FAIL LOUDLY: if BOTH daemons set
+# listeners.udp-sockets > 1 and listen on the same address, on a platform with
+# a load-balancing reuseport option (Linux, FreeBSD, NetBSD with the
+# out-of-tree SO_REUSEPORT_LB patch), the kernel forms ONE load-balance group
+# ACROSS THE TWO DAEMONS and splits arriving queries between them. No error is
+# reported; roughly half the queries reach the wrong server. The default of 1
+# uses a plain bind, where an address collision fails loudly. Only raise it on
+# a daemon whose listen addresses are its own.
+# ---------------------------------------------------------------------------
+
+include:
+   - signer-zones.sample.yaml     # Zone declarations (rename to .yaml when deploying)
+
+service:
+   name:       TDNS-SIGNER
+   identities: [ signer.example.com. ]
+   verbose:    true
+   debug:      false
+
+listeners:
+   # Its own port: 5355 here, against tdns-auth's 5354 in the sample.
+   addresses:  [ 127.0.0.1:5355, '[::1]:5355' ]
+   transports: [ do53 ]
+   # See the SO_REUSEPORT_LB warning above before raising this.
+   # udp-sockets: 1
+
+authengine:
+   # A signer re-originates the zone it publishes, so the serial it advertises
+   # is worth thinking about:
+   #   keep      - outbound serial = the primary's serial (default). The
+   #               simplest thing, and correct when the primary's serial is
+   #               already monotonic.
+   #   unixtime  - outbound = time.Now().Unix() at zone load.
+   #   persist   - outbound = previously-saved outbound serial, DB-backed, so
+   #               a restart with no zone change does not regress the serial.
+   #               Prefer this when downstreams are BIND/Knot/NSD, where a
+   #               serial regression causes sync confusion.
+   # outbound-soa-serial:  persist
+
+resignerengine:
+   # How often to re-sign for signature freshness, independent of whether new
+   # zone content arrived. Clamped to 60..3600.
+   interval:  3600
+
+imrengine:
+   # A signer that resolves nothing needs no recursor. Turning it off drops a
+   # goroutine and a listener; leave it on if a zone here uses hostname-valued
+   # primaries or delegation-sync features that must resolve names.
+   active:  false
+
+apiserver:
+   # Its own port and its own key. Sharing an API key with tdns-auth removes
+   # the only thing that would stop a command aimed at one daemon from being
+   # accepted by the other.
+   addresses:  [ 127.0.0.1:8990 ]
+   apikey:     REPLACE-ME-with-a-key-that-is-not-the-auth-servers
+   certfile:   /etc/tdns/certs/servers/signer.crt
+   keyfile:    /etc/tdns/certs/servers/signer.key
+
+# TSIG keys for the transfers in and out. The key names used here are
+# referenced from signer-zones.sample.yaml.
+#
+# Generate a secret with e.g.  openssl rand -base64 32  and prefer adding it
+# with `tdns-cli auth keystore tsig add --secret-file` over pasting it here.
+keys:
+   tsig:
+      - name:       upstream-xfr.       # signer <- primary
+        algorithm:  hmac-sha256
+        secret:     "REPLACE-ME-base64-secret="
+
+      - name:       downstream-xfr.     # signer -> published secondaries
+        algorithm:  hmac-sha256
+        secret:     "REPLACE-ME-base64-secret="
+
+dnssec:
+   # strict (default) keeps a maintained double-signature across a ZSK
+   # algorithm rollover; relaxed drops the old key at the switch. See
+   # guide/key-rollover.md before changing this.
+   completeness: strict
+
+   policies:
+      # Static keys, no automated rollover: the least surprising starting point
+      # for a signer being brought into service. Durations are strings
+      # ("90d", "forever", "none"), never bare seconds.
+      default:
+         algorithm:  ED25519
+         ksk:
+            lifetime:  forever
+         zsk:
+            lifetime:  forever
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:  14d
+            dnskey:   30d
+            ds:       14d
+         # rollover: omitted -> method: none (static keys)
+         # clamping: omitted -> disabled (no TTL clamping)
+
+      # Automated ZSK rollover on a 30-day cadence, KSK left static. A
+      # bump-on-the-wire signer is usually where ZSK cycling should happen,
+      # since it owns the signing keys; the KSK cycle involves the parent.
+      zsk-rolling:
+         algorithm:  ED25519
+         ksk:
+            lifetime:  forever
+         zsk:
+            lifetime:  30d
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:  14d
+            dnskey:   30d
+            ds:       14d
+
+db:
+   # Its own database. The keystore lives in here, so sharing this file with
+   # tdns-auth would mean sharing every private key.
+   file:  /var/lib/tdns/tdns-signer.db
+
+log:
+   file:   /var/log/tdns/tdns-signer.log
+   level:  info
+
+   # The subsystems worth turning up while bringing a signer into service:
+   #   zones     zone load and AXFR/IXFR in and out
+   #   signer    DNSSEC signing and the key-state worker
+   #   engine    the refresh engine
+   #   rollover  key rollover
+   # subsystems:
+   #   zones:  debug
+   #   signer: debug

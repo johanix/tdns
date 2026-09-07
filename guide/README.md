@@ -18,6 +18,15 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   tdns-agent, tdns-imr, tdns-cli, dog) with links to
   detailed documentation for each.
 
+- [tdns-signer: bump-on-the-wire DNSSEC signing](app-tdns-signer.md)
+  -- Running a signer that transfers an unsigned zone in,
+  signs it, and serves the signed result onward: what makes
+  a zone a signer zone (`type: secondary` plus
+  `inline-signing`), why a downstream never sees an unsigned
+  intermediate state, what must differ between a signer's
+  config and an authoritative server's on the same host,
+  and how to verify a pipeline.
+
 - [TDNS Configuration Guide](configuration.md)
   -- How to configure each application, starting from a
   minimal working example. Conventions common to all apps
