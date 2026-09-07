@@ -667,10 +667,26 @@ feature unturnoffable. Removed in #548.
 
 ### Size, against §11
 
-§11 says "Do not count the signing-secondary staging-apply relay (§9)."
-For whoever calibrates the next brief from this one, it came to **4 files, ~358
-insertions / ~100 deletions**, of which the production change is about 40 lines
-across three files — the gate removal, the `force` change, and the parser. The
-rest is test. The estimate's instinct that this was the expensive half was
-wrong, and the reason is the one in the first subsection: #514 and #328 had
-already built both halves of the machine.
+§11 says "Do not count the signing-secondary staging-apply relay (§9)." For
+whoever calibrates the next brief from this one, counted over `369701b1..5662fea6`
+against #514 — the commit range is named because an earlier draft of this line
+quoted the PR mid-flight and was wrong by half within the hour:
+
+| | files | insertions | deletions |
+|---|---|---|---|
+| production (`v2/*.go`, tests excluded) | 3 | 56 | 54 |
+| tests (`v2/ixfr_in_test.go`) | 1 | 361 | 56 |
+| this amendment | 1 | 101 | 0 |
+| **total** | **5** | **518** | **110** |
+
+The production row is the number worth carrying: **net two lines**. This half of
+the project removed two gate clauses, changed one boolean argument and deleted a
+config exclusion. Everything else it cost was test and prose — and the tests are
+where the cost genuinely was, because the defect they pin (a valid-looking
+signature over changed rdata) is invisible to every cheaper check: the zone
+loads, the apply succeeds, the suite is green, and the signature count is right.
+
+§11's instinct that this was the expensive half was wrong, and the reason is the
+one in the first subsection — #514 and #328 had already built both halves of the
+machine, so what looked like a feature to implement was a feature to stop
+suppressing.
