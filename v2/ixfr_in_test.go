@@ -292,6 +292,7 @@ func TestParseIxfrDeltasChainsToTheBookend(t *testing.T) {
 
 const ixApplyZone = `example.	3600	IN	SOA	ns.example. hostmaster.example. 7 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
+aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 www.example.	3600	IN	AAAA	2001:db8::3
@@ -663,6 +664,7 @@ func TestIxfrInFallsBackToFullZone(t *testing.T) {
 	authApp(t)
 	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
+aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 fresh.example.	3600	IN	A	10.9.9.9
@@ -688,6 +690,7 @@ func TestIxfrInDisabledUsesAxfr(t *testing.T) {
 	authApp(t)
 	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
+aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 `
@@ -919,6 +922,7 @@ func TestIxfrInSelfHealsOnABadDelta(t *testing.T) {
 	authApp(t)
 	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
+aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 healed.example.	3600	IN	A	10.7.7.7
@@ -1003,6 +1007,7 @@ func TestIxfrInAgainstAnAxfrOnlyPrimary(t *testing.T) {
 	authApp(t)
 	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
+aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 old.example.	3600	IN	A	10.5.5.5
@@ -1305,6 +1310,7 @@ func TestSigningSecondaryDoesNotAskForDeltas(t *testing.T) {
 	authApp(t)
 	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
+aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 signed.example.	3600	IN	A	10.4.4.4
@@ -1402,6 +1408,7 @@ func TestIxfrResponseCapFallsBackToAxfr(t *testing.T) {
 	authApp(t)
 	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
+aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 capped.example.	3600	IN	A	10.6.6.6
@@ -1460,6 +1467,7 @@ func TestZonemdMissAfterApplyFallsBackToAxfr(t *testing.T) {
 
 	axfrBody := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
+aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 healed.example.	3600	IN	A	10.8.8.8
@@ -1709,5 +1717,260 @@ func BenchmarkIxfrDeltaApply(b *testing.B) {
 		}
 		b.Run(fmt.Sprintf("shared/%d", n), func(b *testing.B) { run(b, touched) })
 		b.Run(fmt.Sprintf("fullcopy/%d", n), func(b *testing.B) { run(b, nil) })
+	}
+}
+
+// --------------------------------- re-signing what a delta changed (§5 PR-2)
+
+// ixResignZone is ixApplyZone with a MULTI-RECORD RRset at www, which is the
+// whole point: a delta that leaves at least one pre-existing RR of an RRset in
+// place leaves our RRSIG over that RRset's PREVIOUS contents in place with it.
+// A singleton RRset never gets there -- see
+// TestIxfrRefusesADeltaThatWouldStripOurSignatures.
+const ixResignZone = `example.	3600	IN	SOA	ns.example. hostmaster.example. 7 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+aaa.example.	3600	IN	A	10.0.0.7
+ns.example.	3600	IN	A	10.0.0.1
+www.example.	3600	IN	A	10.0.0.3
+www.example.	3600	IN	A	10.0.0.4
+zzz.example.	3600	IN	A	10.0.0.9
+`
+
+// ixDeltaStream builds one RFC 1995 difference sequence: leading bookend, the
+// delete section under the serial it starts from, the add section under the
+// serial it arrives at, trailing bookend. Either section may be empty.
+func ixDeltaStream(t testing.TB, from, to uint32, removed, added []dns.RR) []dns.RR {
+	t.Helper()
+	out := []dns.RR{ixSOA(t, to), ixSOA(t, from)}
+	out = append(out, removed...)
+	out = append(out, ixSOA(t, to))
+	out = append(out, added...)
+	return append(out, ixSOA(t, to))
+}
+
+// ixSigningSecondary is the deployment §5 PR-2 opens up: a secondary that
+// transfers unsigned content from its primary and signs it itself, with a fully
+// signed snapshot already published for a delta to be applied onto.
+//
+// inline-signing rather than online-signing because that is the one that also
+// carries origination rights on a secondary (zoneMayOriginateContent), so the
+// publish resolves signing material instead of standing down.
+func ixSigningSecondary(t *testing.T, zoneStr string) *ZoneData {
+	t.Helper()
+	authApp(t)
+	zd := ixBase(t, zoneStr)
+	zd.ZoneType = Secondary
+	// Registered, unlike a bare ixBase zone: publishWorkingSetLocked drops any
+	// publish for a zone zoneStillLive() cannot find in Zones, and a dropped
+	// publish here would leave the baseline unsigned and prove nothing.
+	Zones.Set(zd.ZoneName, zd)
+	t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
+	makeZoneSigning(t, zd)
+	zd.Options[OptOnlineSigning] = false
+	zd.Options[OptInlineSigning] = true
+
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	zd.wsNeedsFullSign = true
+	zd.publishWorkingSetLocked(zd.generation.Load(), true)
+	zd.mu.Unlock()
+
+	// The serial the delta will be computed from.
+	zd.IncomingSerial = 7
+	return zd
+}
+
+// assertPublishedRRsetVerifies checks the published RRset's signatures against
+// the zone's OWN published DNSKEYs.
+//
+// Counting RRSIGs proves nothing here, which is why this verifies: the bug this
+// pins leaves exactly the right NUMBER of signatures in place, by an active key,
+// nowhere near expiry. Only the cryptography can tell that they cover records
+// the zone no longer serves.
+func assertPublishedRRsetVerifies(t *testing.T, zd *ZoneData, owner string, rrtype uint16) {
+	t.Helper()
+	snap := zd.publishedSnapshot()
+	apex := getOwnerFrom(snap, zd.ZoneName)
+	if apex == nil {
+		t.Fatalf("%s: no apex in the published snapshot", owner)
+	}
+	var keys []*dns.DNSKEY
+	for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
+		if k, ok := rr.(*dns.DNSKEY); ok {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		t.Fatal("the zone published no DNSKEYs, so nothing can be verified against them")
+	}
+
+	od := getOwnerFrom(snap, owner)
+	if od == nil {
+		t.Fatalf("%s is not in the published snapshot", owner)
+	}
+	rrset := od.RRtypes.GetOnlyRRSet(rrtype)
+	if len(rrset.RRs) == 0 {
+		t.Fatalf("%s %s is not published at all", owner, dns.TypeToString[rrtype])
+	}
+	if len(rrset.RRSIGs) == 0 {
+		t.Fatalf("%s %s was published with no signature", owner, dns.TypeToString[rrtype])
+	}
+	for _, sigrr := range rrset.RRSIGs {
+		sig, ok := sigrr.(*dns.RRSIG)
+		if !ok {
+			t.Fatalf("%s %s: RRSIGs holds a %T", owner, dns.TypeToString[rrtype], sigrr)
+		}
+		var matched bool
+		for _, k := range keys {
+			if k.KeyTag() != sig.KeyTag {
+				continue
+			}
+			matched = true
+			if err := sig.Verify(k, rrset.RRs); err != nil {
+				t.Errorf("%s %s is served BOGUS: the RRSIG by key %d does not cover the "+
+					"records published under it (%v). The delta changed the RRset and the "+
+					"publish kept the signature it already had.",
+					owner, dns.TypeToString[rrtype], sig.KeyTag, err)
+			}
+		}
+		if !matched {
+			t.Errorf("%s %s: RRSIG by key %d, which the zone does not publish",
+				owner, dns.TypeToString[rrtype], sig.KeyTag)
+		}
+	}
+}
+
+// applyIxfrAndPublish drives the inbound path a refresh takes once a delta has
+// been collected: apply onto a scratch zone, then swap and publish it.
+func applyIxfrAndPublish(t *testing.T, zd *ZoneData, rrs []dns.RR) {
+	t.Helper()
+	newZd := &ZoneData{ZoneName: zd.ZoneName, ZoneStore: MapZone, Logger: discardLogger()}
+	if err := zd.applyIxfrToScratch(newZd, rrs); err != nil {
+		t.Fatalf("applyIxfrToScratch refused the delta: %v", err)
+	}
+	zd.mu.Lock()
+	err := zd.applyRefreshReplacementLocked(newZd, nil, false, false)
+	zd.mu.Unlock()
+	if err != nil {
+		t.Fatalf("applyRefreshReplacementLocked: %v", err)
+	}
+}
+
+// A signing secondary must re-sign every RRset an inbound delta changed, not
+// merely every RRset the delta left unsigned.
+//
+// This is the half of §5 PR-2 the gate removal does not supply by itself. The
+// delta is applied onto the copy we already signed, so an RRset that keeps at
+// least one of its pre-existing records also keeps our RRSIG over its previous
+// contents -- and SignRRset compares keytag and remaining lifetime, never
+// rdata. With force=false the publish reads that stale signature as "already
+// signed" and serves the changed RRset under it.
+//
+// Nothing downstream catches it. The resigner only revisits signatures nearing
+// expiry, so the name stays bogus for the whole signature lifetime; and with
+// the outbound epoch no longer reset for an ixfrDerived publish, the bogus
+// RRset is relayed onward to this secondary's own downstreams as a delta.
+//
+// Both shapes below were among the ones PR #548 named as unmeasured.
+func TestPublishResignsAnRRsetAnInboundDeltaChanged(t *testing.T) {
+	for _, tc := range []struct {
+		what           string
+		removed, added []dns.RR
+	}{
+		{
+			what:  "a record added to an RRset we had already signed",
+			added: []dns.RR{ixA(t, "www.example.", "10.0.0.5")},
+		},
+		{
+			what:    "one member of an RRset replaced, the others left in place",
+			removed: []dns.RR{ixA(t, "www.example.", "10.0.0.4")},
+			added:   []dns.RR{ixA(t, "www.example.", "10.0.0.5")},
+		},
+		{
+			what:    "a record removed from an RRset that survives it",
+			removed: []dns.RR{ixA(t, "www.example.", "10.0.0.4")},
+		},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			zd := ixSigningSecondary(t, ixResignZone)
+			assertPublishedRRsetVerifies(t, zd, "www.example.", dns.TypeA)
+
+			applyIxfrAndPublish(t, zd, ixDeltaStream(t, 7, 8, tc.removed, tc.added))
+
+			assertPublishedRRsetVerifies(t, zd, "www.example.", dns.TypeA)
+		})
+	}
+}
+
+// The publish must not re-sign the whole zone to achieve that.
+//
+// force is scoped to wsSignOwners -- the delta's touched set -- and staging an
+// owner goes through cloneOwner, which builds it a fresh RRTypeStore. A forced
+// pass over the whole zone would therefore re-materialise every owner it
+// walked, which is exactly the work materializeForIxfr shares owners to avoid.
+// The store identity below is what makes a two-record delta into a 100k-owner
+// zone cheap.
+//
+// Picking the name to check needs care, and a small zone will not do it.
+// restitchNsecLocked is deliberately broader than the signing scope: it diffs
+// owner CONTENT (ownerTypesChanged -> rrsetEqual), and rewrites every changed
+// name together with its chain PREDECESSOR. Two of those are unavoidable on
+// any delta -- replaceApexSOA always rewrites the apex, so the apex is always
+// a changed name, and the apex's predecessor is the LAST name in the zone, via
+// the wrap. So in this zone (apex, aaa, ns, www, zzz) a delta at www leaves
+// exactly one owner uninvolved: aaa, which is neither changed, nor the
+// predecessor of www (that is ns), nor the predecessor of the apex (that is
+// zzz). It is the one that must still be sharing its storage afterwards.
+func TestForcedIxfrResignStaysInsideTheTouchedSet(t *testing.T) {
+	zd := ixSigningSecondary(t, ixResignZone)
+
+	const untouched = "aaa.example."
+	before := getOwnerFrom(zd.publishedSnapshot(), untouched)
+	if before == nil {
+		t.Fatalf("precondition: %s is not in the baseline snapshot", untouched)
+	}
+	beforeStore := before.RRtypes
+
+	applyIxfrAndPublish(t, zd, ixDeltaStream(t, 7, 8, nil,
+		[]dns.RR{ixA(t, "www.example.", "10.0.0.5")}))
+
+	after := getOwnerFrom(zd.publishedSnapshot(), untouched)
+	if after == nil {
+		t.Fatalf("%s vanished from the snapshot", untouched)
+	}
+	if after.RRtypes != beforeStore {
+		t.Error("an owner that is neither in the delta nor a chain neighbour of a " +
+			"changed name was re-materialised: the forced signing pass reached " +
+			"outside wsSignOwners, and at zone scale that is the whole cost the " +
+			"owner sharing exists to avoid")
+	}
+}
+
+// The delta shape that does NOT reach the publish, recorded so the boundary is
+// not mistaken for a gap in the test above.
+//
+// Emptying an RRset drops the type and our signatures with it, so a delta that
+// replaces a SINGLETON RRset would leave the re-added record unsigned mid-apply.
+// checkSignaturesIntact refuses the whole delta at that point and the caller
+// falls back to AXFR against the same upstream -- correct, but it does mean the
+// commonest change of all, a one-record RRset changing value, never travels as
+// a delta to a signing secondary.
+func TestIxfrRefusesADeltaThatWouldStripOurSignatures(t *testing.T) {
+	zd := ixSigningSecondary(t, ixResignZone)
+
+	// ns.example. has exactly one A, so removing it empties the RRset.
+	rrs := ixDeltaStream(t, 7, 8,
+		[]dns.RR{ixA(t, "ns.example.", "10.0.0.1")},
+		[]dns.RR{ixA(t, "ns.example.", "10.0.0.2")})
+
+	newZd := &ZoneData{ZoneName: zd.ZoneName, ZoneStore: MapZone, Logger: discardLogger()}
+	err := zd.applyIxfrToScratch(newZd, rrs)
+	if err == nil {
+		t.Fatal("the delta was accepted; if the apply has learned to carry the " +
+			"signatures across an emptied RRset, this test should assert that " +
+			"instead -- but silently serving it is the failure this guards")
+	}
+	if !strings.Contains(err.Error(), "would be served unsigned") {
+		t.Errorf("refused for the wrong reason: %v", err)
 	}
 }
