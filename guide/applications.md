@@ -5,6 +5,7 @@ TDNS includes several applications built on the TDNS Go library.
 | Application     | Binary       | Description                              |
 |-----------------|--------------|------------------------------------------|
 | tdns-auth       | tdns-auth    | Authoritative DNS nameserver             |
+| tdns-signer     | tdns-signer  | Bump-on-the-wire DNSSEC signer           |
 | tdns-agent      | tdns-agent   | Single-provider delegation-sync agent    |
 | tdns-imr        | tdns-imr     | Recursive DNS nameserver (IMR)           |
 | tdns-cli        | tdns-cli     | Management CLI for all TDNS services     |
@@ -28,6 +29,19 @@ zones (RFC 9432), dynamic zone management via REST API, and
 zone templates.
 
 [Full documentation](app-tdns-auth.md)
+
+## tdns-signer -- Bump-on-the-wire DNSSEC signer
+
+The same program as tdns-auth, built as a second binary so
+that a signer and an authoritative server can run on one
+host without their configuration colliding (it reads
+`/etc/tdns/tdns-signer.yaml`). Holds each zone as a
+secondary with `inline-signing`: transfers the zone in
+unsigned, signs it, serves and transfers the signed result
+onward. The primary then never holds a private key, and the
+signer has exactly one input.
+
+[Full documentation](app-tdns-signer.md)
 
 ## tdns-agent -- Delegation-Sync Agent
 

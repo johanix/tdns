@@ -4,9 +4,10 @@ TDNS is a set of DNS libraries written in Go together with a
 number of applications built on those libraries.
 
 The applications include an authoritative nameserver, a
-recursive nameserver, a dig-like query tool with extensions
-for additional DNS record types, a single-provider agent
-for delegation synchronization, and a management CLI.
+bump-on-the-wire DNSSEC signer, a recursive nameserver, a
+dig-like query tool with extensions for additional DNS
+record types, a single-provider agent for delegation
+synchronization, and a management CLI.
 
 For multi-provider DNSSEC coordination (RFC 8901), see the
 companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
@@ -17,6 +18,16 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   -- Overview of all tdns applications (tdns-auth,
   tdns-agent, tdns-imr, tdns-cli, dog) with links to
   detailed documentation for each.
+
+- [tdns-signer: bump-on-the-wire DNSSEC signing](app-tdns-signer.md)
+  -- Running a signer that transfers an unsigned zone in,
+  signs it, and serves the signed result onward: what makes
+  a zone a signer zone (`type: secondary` plus
+  `inline-signing`), the window in which a downstream can
+  still transfer a not-yet-signed zone (tdns#512), what must
+  differ between a signer's
+  config and an authoritative server's on the same host,
+  and how to verify a pipeline.
 
 - [TDNS Configuration Guide](configuration.md)
   -- How to configure each application, starting from a

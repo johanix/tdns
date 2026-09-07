@@ -1,0 +1,117 @@
+# Zone declarations for tdns-signer.
+#
+# Deploy as /etc/tdns/signer-zones.yaml (and point tdns-signer.yaml's include:
+# at it). Keeping this separate from the auth server's zone file is what lets
+# both configs live in /etc/tdns without colliding.
+#
+# A bump-on-the-wire signer zone is:
+#
+#     type:      secondary          -- it never originates the zone's content
+#     options:   [ inline-signing ] -- but it DOES originate the signatures
+#
+# `inline-signing` on a secondary is a long-standing, sanctioned mode, not
+# something tdns-signer invents: it is the one exception to "a secondary is
+# immutable" (docs/2026-07-25-secondary-zones-immutable.md). Without it the
+# zone is refused the right to add RRSIGs and is served exactly as received.
+#
+# ORDER OF OPERATIONS: on each refresh the server transfers the zone in,
+# publishes it, and signs it in a second publish. A downstream reacting to the
+# first NOTIFY can therefore transfer a not-yet-signed zone. That window is
+# tdns#512 -- it applies to every inline-signing secondary -- and #514 is the fix.
+#
+# Note `zones:` is a LIST of entries each carrying its own `name:`, not a map
+# keyed by zone name. See auth-zones.sample.yaml for the full property list and
+# every available option; this file shows only the signer-shaped cases.
+
+zones:
+
+   # ===========================================================================
+   # EXAMPLE 1: the basic bump-on-the-wire zone
+   # ===========================================================================
+   # Pulls unsigned from the primary, signs, serves, and notifies onward.
+   - name:            example.com.
+     type:            secondary
+     store:           map
+     # Optional: keep a copy of the SIGNED zone on disk. Useful for inspection
+     # and for a warm start; not required.
+     zonefile:        /var/lib/tdns/zones/signed/example.com.zone
+
+     # Where the unsigned zone comes from. NOKEY means an unauthenticated
+     # transfer -- acceptable over loopback to a primary on the same host, and
+     # not acceptable over anything else. Prefer a named key (EXAMPLE 2).
+     upstreams:
+        - addr: "127.0.0.1:5354"        # the tdns-auth instance on this host
+          key:  NOKEY
+
+     # Who may NOTIFY us that the zone changed. Without this the signer only
+     # picks up changes on its SOA refresh timer.
+     allow-notify:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+
+     # Who may transfer the SIGNED zone out of us.
+     downstreams:
+        - prefix: "192.0.2.0/24"
+          key:    downstream-xfr
+
+     # Who to tell, once the signed zone is published.
+     notify:
+        - addr: "192.0.2.10:53"
+          key:  downstream-xfr
+        - addr: "192.0.2.11:53"
+          key:  downstream-xfr
+
+     options:
+        - inline-signing
+
+     dnssecpolicy:    default
+
+   # ===========================================================================
+   # EXAMPLE 2: the same, with TSIG on both sides
+   # ===========================================================================
+   # What you want whenever either transfer crosses a network. The key names
+   # refer to keys: tsig: entries in tdns-signer.yaml.
+   - name:            example.net.
+     type:            secondary
+     store:           map
+     upstreams:
+        - addr: "203.0.113.1:53"
+          key:  upstream-xfr
+        - addr: "203.0.113.2:53"        # fallback, tried in order
+          key:  upstream-xfr
+     allow-notify:
+        - prefix: "203.0.113.1/32"
+          key:    upstream-xfr
+        - prefix: "203.0.113.2/32"
+          key:    upstream-xfr
+     downstreams:
+        - prefix: "192.0.2.0/24"
+          key:    downstream-xfr
+     notify:
+        - addr: "192.0.2.10:53"
+          key:  downstream-xfr
+     options:
+        - inline-signing
+     dnssecpolicy:    zsk-rolling
+
+   # ===========================================================================
+   # EXAMPLE 3: pulling over XoT (XFR-over-TLS, RFC 9103)
+   # ===========================================================================
+   # Commented out: it needs a primary that offers DoT and a trust decision.
+   # Every dot upstream MUST declare how the server certificate is
+   # authenticated (tls-auth: dane | pkix | pin). See guide/xot.md.
+   #
+   # - name:            example.org.
+   #   type:            secondary
+   #   store:           map
+   #   upstreams:
+   #      - addr: "ns1.example.org"      # hostname: port defaults to 853, and
+   #        key:  NOKEY                  # the name doubles as SNI + TLSA base
+   #        transport: dot
+   #        tls-auth: dane
+   #   downstreams:
+   #      - prefix: "192.0.2.0/24"
+   #        key:    downstream-xfr
+   #   options:
+   #      - inline-signing
+   #   dnssecpolicy:    default

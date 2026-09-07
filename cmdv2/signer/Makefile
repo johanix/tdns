@@ -1,0 +1,23 @@
+PROG:=tdns-signer
+
+GO:= CGO_ENABLED=1 go
+
+include ../../utils/Makefile.common
+
+# Shared ALGREPO cache (cmdv2/algs-env.mk) + per-app C-library env
+# (algs-libs.mk). Written by tdns-genalgs; -include so a fresh tree is OK
+# until genalgs has been run once with --algrepo.
+-include ../algs-env.mk
+-include algs-libs.mk
+
+.PHONY: clean install pkg
+
+install:
+	install -s -b -c ${PROG} /usr/local/libexec/
+
+# NetBSD binary package; rule and rationale in ../../utils/Makefile.common.
+pkg:	pkg_tdns_signer
+
+clean:
+	rm -f $(PROG)
+	find . -type f -name '*~' -delete
