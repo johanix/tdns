@@ -30,7 +30,6 @@ type RuntimeConfig struct {
 	MaxRefresh       int  // service.maxrefresh
 	MinRefresh       int  // service.minrefresh
 	ResignerInterval int  // resignerengine.interval
-	PeriodicResign   bool // service.resign
 	ServiceDebug     bool // service.debug
 }
 
@@ -64,7 +63,6 @@ func (conf *Config) buildRuntimeConfig() *RuntimeConfig {
 		MaxRefresh:       viper.GetInt("service.maxrefresh"),
 		MinRefresh:       viper.GetInt("service.minrefresh"),
 		ResignerInterval: viper.GetInt("resignerengine.interval"),
-		PeriodicResign:   viper.GetBool("service.resign"),
 		ServiceDebug:     viper.GetBool("service.debug"),
 	}
 }

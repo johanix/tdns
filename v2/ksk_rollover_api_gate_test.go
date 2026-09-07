@@ -13,11 +13,11 @@ func gateDsyncRR(scheme core.DsyncScheme, rrtype uint16, target string) *core.DS
 
 func setRolloverApiAllowInsecure(t *testing.T, v bool) {
 	t.Helper()
-	prev := DelegationSyncConfig()
-	next := *prev
-	next.Child.Api.AllowInsecure = v
-	SetDelegationSyncConfig(next)
-	t.Cleanup(func() { SetDelegationSyncConfig(*prev) })
+	prevCS, prevPS := *ChildSyncConfig(), *ParentSyncConfig()
+	next := prevPS
+	next.Api.AllowInsecure = v
+	SetDelegationSyncConfig(prevCS, next)
+	t.Cleanup(func() { SetDelegationSyncConfig(prevCS, prevPS) })
 }
 
 // The rollover DS push must not use the API scheme off an unvalidated DSYNC

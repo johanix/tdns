@@ -68,7 +68,7 @@ delegationsync:
 	if err := decodeConfigMap(m, &c, nil); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	p := c.DelegationSync.Parent
+	p := c.ChildSync
 	// The embedded DsyncDnsSchemeConf must still decode from the same node.
 	if p.Update.Target != "updates.{ZONENAME}" || p.Update.Port != 5354 {
 		t.Errorf("squashed scheme keys lost: target=%q port=%d", p.Update.Target, p.Update.Port)
@@ -79,25 +79,25 @@ delegationsync:
 	if p.Update.Keygen.Algorithm != "ED25519" || p.Update.Keygen.Generator != "/usr/bin/keygen" {
 		t.Errorf("parent keygen: %+v", p.Update.Keygen)
 	}
-	def := c.DelegationSync.Policies["default"]
+	def := c.ChildSync.Policies["default"]
 	if len(def.Bootstrap.Mechanisms) != 2 || def.Bootstrap.Retry.MaxAttempts != 7 || def.Bootstrap.Retry.Interval.String() != "5s" {
 		t.Errorf("default policy: %+v", def.Bootstrap)
 	}
 	if def.Bootstrap.RequireDnssec == nil || !*def.Bootstrap.RequireDnssec {
 		t.Errorf("default require-dnssec: %v (want explicit true)", def.Bootstrap.RequireDnssec)
 	}
-	perm := c.DelegationSync.Policies["permissive"]
+	perm := c.ChildSync.Policies["permissive"]
 	if perm.Bootstrap.RequireDnssec == nil || *perm.Bootstrap.RequireDnssec {
 		t.Errorf("permissive require-dnssec: %v (want explicit false)", perm.Bootstrap.RequireDnssec)
 	}
 	if !perm.Bootstrap.Manual || !perm.Bootstrap.AllowUnvalidatedUpload {
 		t.Errorf("permissive flags: %+v", perm.Bootstrap)
 	}
-	locked := c.DelegationSync.Policies["locked-down"]
+	locked := c.ChildSync.Policies["locked-down"]
 	if locked.Bootstrap.Mechanisms == nil || len(locked.Bootstrap.Mechanisms) != 0 {
 		t.Errorf("locked-down mechanisms: %v (want empty, not nil-or-filled)", locked.Bootstrap.Mechanisms)
 	}
-	ch := c.DelegationSync.Child
+	ch := c.ParentSync
 	if ch.Update.Keygen.Generator != "/usr/bin/childkeygen" {
 		t.Errorf("child keygen: %+v", ch.Update.Keygen)
 	}
@@ -107,7 +107,7 @@ delegationsync:
 	if !ch.Update.AllowInsecure {
 		t.Error("child update allow-insecure: false (want true; the D-7 knob must decode)")
 	}
-	if c.DelegationSync.Child.Api.AllowInsecure {
+	if c.ParentSync.Api.AllowInsecure {
 		t.Error("child update allow-insecure leaked into child api allow-insecure")
 	}
 	// Absent require-dnssec must stay nil, not become false.
@@ -117,7 +117,7 @@ delegationsync:
 	if err := decodeConfigMap(m2, &c2, nil); err != nil {
 		t.Fatalf("decode 2: %v", err)
 	}
-	if c2.DelegationSync.Policies["custom"].Bootstrap.RequireDnssec != nil {
+	if c2.ChildSync.Policies["custom"].Bootstrap.RequireDnssec != nil {
 		t.Error("an absent require-dnssec decoded as non-nil; absent and false must differ")
 	}
 }

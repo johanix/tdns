@@ -57,14 +57,12 @@ func TestUnpublishDsyncPlaceholderHasAllRdataFields(t *testing.T) {
 // Unpublish must remove the bootstrap SVCB and the receiver KEY at the DSYNC
 // UPDATE target — the same owner PublishDsyncRRs uses — not the apex KEY.
 func TestUnpublishDsyncRemovesBootstrapSVCBAndReceiverKEY(t *testing.T) {
-	t.Cleanup(func() { SetDelegationSyncConfig(DelegationSyncConf{}) })
-	SetDelegationSyncConfig(DelegationSyncConf{
-		Parent: DelegationSyncParentConf{
-			Update: DsyncUpdateSchemeConf{
-				DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "updates.{ZONENAME}"},
-			},
+	t.Cleanup(func() { SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
+	SetDelegationSyncConfig(ChildSyncConf{
+		Update: DsyncUpdateSchemeConf{
+			DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "updates.{ZONENAME}"},
 		},
-	})
+	}, ParentSyncConf{})
 	q := make(chan UpdateRequest, 1)
 	zd := &ZoneData{
 		ZoneName: "example.",
@@ -106,14 +104,12 @@ func TestUnpublishDsyncRemovesBootstrapSVCBAndReceiverKEY(t *testing.T) {
 }
 
 func TestUnpublishDsyncSkipsApexSVCBAndKEY(t *testing.T) {
-	t.Cleanup(func() { SetDelegationSyncConfig(DelegationSyncConf{}) })
-	SetDelegationSyncConfig(DelegationSyncConf{
-		Parent: DelegationSyncParentConf{
-			Update: DsyncUpdateSchemeConf{
-				DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "{ZONENAME}"},
-			},
+	t.Cleanup(func() { SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
+	SetDelegationSyncConfig(ChildSyncConf{
+		Update: DsyncUpdateSchemeConf{
+			DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "{ZONENAME}"},
 		},
-	})
+	}, ParentSyncConf{})
 	q := make(chan UpdateRequest, 1)
 	zd := &ZoneData{
 		ZoneName: "example.",

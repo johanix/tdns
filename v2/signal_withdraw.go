@@ -138,7 +138,7 @@ func (zd *ZoneData) withdrawUnwarrantedSignalPublications() {
 
 // warrantedSignalOwners returns the signal names this zone's current state
 // justifies, split by which publisher's rows they justify. The two are kept
-// apart on purpose: a zone can carry parentsync (OptDelSyncChild) without
+// apart on purpose: a zone can carry parentsync (OptParentSync) without
 // carrying use-hsyncparam, and a shared set would then let one option's
 // warrant retain the other option's records.
 //
@@ -195,7 +195,7 @@ func (zd *ZoneData) warrantedSignalOwners(nsNames []string) (keepHsync, keepAtNs
 func (zd *ZoneData) signalOptions() (useHsyncparam, delSyncChild bool) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return zd.Options[OptUseHsyncparam], zd.Options[OptDelSyncChild]
+	return zd.Options[OptUseHsyncparam], zd.Options[OptParentSync]
 }
 
 // signalOrphanSweepArmed gates the target-side role below, and

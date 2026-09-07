@@ -14,8 +14,10 @@ import (
 // SendImrMgmtCmd POSTs an ImrMgmtPost to the configured daemon's
 // /imr endpoint. The role argument selects which ApiClient to use --
 // "agent" (tdns-agent), "auth" (tdns-auth), or "imr" (tdns-imr).
-// This is the IMR-only sibling of SendAgentMgmtCmd (which targets
-// /agent and is kept around for non-IMR commands like parentsync-*).
+// It posts to /imr; the agent's own management endpoint, /agent, is reached
+// by building the request inline (see agent_zone_cmds.go) -- the shared
+// SendAgentMgmtCmd that used to sit beside this went with the parentsync
+// election command, whose handler lives in tdns-mp rather than here.
 // ctx is the cobra command's context, so ExecuteContext cancellation
 // (Ctrl-C) interrupts the request instead of waiting out the transport
 // timeout — which matters for the probe commands, whose server side

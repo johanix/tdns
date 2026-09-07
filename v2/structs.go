@@ -389,7 +389,7 @@ type ZoneData struct {
 	// result from the PreRefresh hook (which sees old+new zone data) to the
 	// PostRefresh hook (which acts). nil when no proxy analysis is pending.
 	// Set/consumed only on the OnZonePreRefresh/PostRefresh path for zones with
-	// OptDelSyncProxy; protected by zd.mu.
+	// OptParentSyncProxy; protected by zd.mu.
 	ProxyRefreshAnalysis *ProxyDelegationAnalysis
 }
 

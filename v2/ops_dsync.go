@@ -130,7 +130,7 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 		return nil
 	}
 
-	dsc := DelegationSyncConfig().Parent
+	dsc := ChildSyncConfig()
 	lg.Debug("defined DSYNC schemes", "zone", zd.ZoneName, "schemes", dsc.Schemes)
 
 	for _, scheme := range dsc.Schemes {
@@ -369,7 +369,7 @@ func expandDsyncTemplate(tpl, zonename string) string {
 // DsyncUpdateTargetName computes the DSYNC UPDATE target name for a parent zone
 // from the global config. Returns empty string if not configured.
 func DsyncUpdateTargetName(zonename string) string {
-	return expandDsyncTemplate(DelegationSyncConfig().Parent.Update.Target, zonename)
+	return expandDsyncTemplate(ChildSyncConfig().Update.Target, zonename)
 }
 
 func dsyncUpdateTargetIsZoneApex(zone, target string) bool {
@@ -378,8 +378,21 @@ func dsyncUpdateTargetIsZoneApex(zone, target string) bool {
 
 func newBootstrapSVCB(target, data string, ttl uint32) *dns.SVCB {
 	return &dns.SVCB{
-		Hdr:      dns.RR_Header{Name: target, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: ttl},
-		Priority: 0,
+		Hdr: dns.RR_Header{Name: target, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: ttl},
+		// ServiceMode -- SvcPriority non-zero -- and NOT the "SVCB 0 ." the
+		// draft's example shows. In AliasMode a TargetName of "." says the
+		// service does not exist (RFC 9460 §2.5.1), and recipients MUST ignore
+		// any SvcParams that are present (§2.4.2). Published that way, this
+		// record announces the opposite of what it is for and carries a
+		// bootstrap signal every conforming recipient is required to discard.
+		// In ServiceMode a TargetName of "." denotes the owner name itself
+		// (§2.5.2), which is the intended meaning.
+		//
+		// It is also the difference between parseable and not. BIND 9.18
+		// refuses an AliasMode SVCB carrying SvcParams outright -- "extra input
+		// data" -- so a zone publishing one fails AXFR for those clients, and
+		// the failure names the whole message rather than the record.
+		Priority: 1,
 		Target:   ".",
 		Value: []dns.SVCBKeyValue{
 			&dns.SVCBLocal{
@@ -408,12 +421,46 @@ func publishedBootstrapSVCBData(rrs []dns.RR) (data string, count int) {
 	return data, count
 }
 
+// bootstrapSVCBCurrent reports whether every published SVCB at the target is in
+// the shape this version writes: ServiceMode (SvcPriority non-zero) with a
+// TargetName of ".", which denotes the owner name itself (RFC 9460 §2.5.2).
+//
+// Deliberately not folded into publishedBootstrapSVCBData, because the reader
+// and the writer want opposite things from the same record. The reader is
+// mode-blind on purpose: a child must still act on an advertisement that a
+// not-yet-upgraded parent published in AliasMode. The writer must treat exactly
+// that record as needing replacement.
+//
+// Using the reader's equality test as the writer's meant an already-published
+// AliasMode record carrying the right bootstrap string counted as "already
+// correct", so the record BIND 9.18 refuses -- taking the whole zone transfer
+// with it -- survived every subsequent PublishDsyncRRs, and the only way out
+// was UnpublishDsyncRRs first.
+func bootstrapSVCBCurrent(rrs []dns.RR) bool {
+	for _, rr := range rrs {
+		svcb, ok := rr.(*dns.SVCB)
+		if !ok {
+			continue
+		}
+		if svcb.Priority == 0 || svcb.Target != "." {
+			return false
+		}
+	}
+	return true
+}
+
 func bootstrapSVCBReconcile(target, desired string, existing []dns.RR, ttl uint32) []dns.RR {
 	if target == "" {
 		return nil
 	}
 	current, count := publishedBootstrapSVCBData(existing)
-	if count == 1 && current == desired {
+	// Matching data is not enough to call it done: a record written by an
+	// earlier version carries the right bootstrap string in the wrong mode.
+	// The rewrite is only worth doing when there is something to publish --
+	// with nothing desired the branch below withdraws the record anyway, and
+	// with nothing desired AND nothing published there is no record of ours to
+	// repair, only whatever else may sit at that name.
+	if count == 1 && current == desired && (desired == "" || bootstrapSVCBCurrent(existing)) {
 		return nil
 	}
 	if count == 0 && desired == "" {
@@ -435,7 +482,7 @@ func (zd *ZoneData) bootstrapSVCBActions(ttl uint32) []dns.RR {
 	// Only reconcile SVCB while this parent still offers UPDATE. Removing
 	// "update" from parent.schemes does not withdraw a previously published
 	// bootstrap SVCB; UnpublishDsyncRRs is the operator action that drops it.
-	if !dsyncSchemeConfigured(DelegationSyncConfig().Parent.Schemes, "update") {
+	if !dsyncSchemeConfigured(ChildSyncConfig().Schemes, "update") {
 		return nil
 	}
 	target := DsyncUpdateTargetName(zd.ZoneName)

@@ -435,7 +435,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	// SetupZoneSync's delegation-sync-child path does an unbounded send to
 	// DelegationSyncQ, and OnFirstLoad callbacks run inside the RefreshEngine
 	// loop — dispatch async so a full/stopped consumer cannot stall it.
-	if options[OptDelSyncParent] || options[OptDelSyncChild] {
+	if options[OptChildSync] || options[OptParentSync] {
 		delegationSyncQ := conf.Internal.DelegationSyncQ
 		zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
 			if delegationSyncQ == nil {

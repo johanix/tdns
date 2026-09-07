@@ -351,7 +351,7 @@ A zone is one entry in the top-level `zones:` list.
 | `downstreams` | list of `{prefix, key}` | provide-xfr ACL |
 | `options` | list of strings | see below |
 | `dnssecpolicy` | string | names an entry in `dnssec.policies:`; `none` == unset |
-| `delegationpolicy` | string | names an entry in `delegationsync.policies:`; omitted binds `default` |
+| `delegationpolicy` | string | names an entry in `childsync.policies:`; omitted binds `default` |
 | `multisigner` | string | names an entry in `multisigner:` |
 | `updatepolicy` | block | DNS UPDATE authorization |
 | `delegationbackend` | string | required if the zone accepts child updates |

@@ -32,7 +32,7 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 		return "", dns.RcodeServerFailure, fmt.Errorf("zone %s: parent zone unknown", zd.ZoneName)
 	}
 
-	childconf := DelegationSyncConfig().Child.Api
+	childconf := ParentSyncConfig().Api
 	// Child-aware even here, where the zone IS the child and a generic
 	// per-parent entry is the normal config. Passing the zone name costs
 	// nothing and means an operator who does name a child on the entry gets
@@ -45,7 +45,7 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 		// cannot make one appear.
 		return "", dns.RcodeRefused, fmt.Errorf(
 			"zone %s: parent %s offers only the DSYNC API scheme but no credential is configured for it"+
-				" (delegationsync.child.api.credentials); obtain one from the parent operator",
+				" (parentsync.api.credentials); obtain one from the parent operator",
 			zd.ZoneName, parent)
 	}
 	if !cred.Usable() {
@@ -68,7 +68,8 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 		return "", dns.RcodeServerFailure, fmt.Errorf("zone %s: %v", zd.ZoneName, err)
 	}
 	lgDns.Info("DSYNC API endpoint discovered", "zone", zd.ZoneName, "parent", parent,
-		"target", endpoint.Target, "endpoint", endpoint.Url, "dialect", endpoint.Dialect)
+		"target", endpoint.Target, "endpoint", endpoint.Url, "dialect", endpoint.Dialect,
+		"addrs", endpoint.Addrs)
 
 	rrsets := DsyncApiRRsetsFromSyncStatus(zd.ZoneName, syncstate)
 	if len(rrsets) == 0 {

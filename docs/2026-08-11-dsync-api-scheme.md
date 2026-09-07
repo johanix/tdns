@@ -323,6 +323,19 @@ machinery is most of why this endpoint is cheap to build.
 would have returned, so the two transports diagnose alike. 401 bodies carry
 nothing: no hint about whether the username exists.
 
+The diagnosis lives in the parent's log instead, which is the only place it can
+without telling an unauthenticated caller which identities are registered. On
+the certificate path that line names the identity presented -- the subject, the
+issuer, the serial, and every identity looked up under every configured
+mechanism -- and one `reason`: `no-client-certificate`, `no-usable-identity`
+(nothing to look up, a certificate with no dNSName SAN), `unknown-identity`,
+`credential-disabled`, `credential-expired`, `untrusted-chain` (it does not
+verify against `ca-file` -- the self-signed-client-certificate case), or
+`credential-store-error`. Where several apply, the most specific is reported
+and all of them are listed. A credential refused on the way to one that is
+accepted is logged too, so a disabled row is never stepped over in silence
+(issue #533).
+
 ---
 
 ## 8. Security properties worth stating plainly
@@ -342,10 +355,32 @@ Therefore:
    zone is unsigned, or validation is indeterminate, the child MUST NOT use
    this scheme. There is no lab exemption for this one that is not also the
    `allow-insecure` exemption; treat them as the same switch.
-2. **TLS validation is not optional** (§5.1) — DNSSEC establishes the intended
-   endpoint, TLS establishes that you reached it.
-3. **No redirects** (§5.1).
-4. **The credential is scoped to one parent.** A child that syncs with several
+2. **The endpoint host's address MUST come from the same resolver, under the
+   same rule.** The child resolves the URL's host through its own IMR at
+   discovery time and dials what it found; it does not hand the URL to an HTTP
+   client and let the process's stub resolver answer the question a second
+   time. Two reasons, and the second is this section's subject:
+
+   - The daemon's resolver and the host's stub resolver are routinely
+     different — a tdns daemon runs an `imrengine` precisely so that they can
+     be — and a scheme that discovers an endpoint successfully and then cannot
+     reach it is not usable.
+   - Point 1 otherwise establishes only which *name* was meant. Whoever
+     answers the unvalidated stub query picks the address behind it, which is
+     most of what point 1 was for. TLS still refuses a certificate that does
+     not match the name, so this is not wide open, but it is not what this
+     section claims either.
+
+   The host resolved is the URL's, not the DSYNC target's: usually the same
+   name, but the URI may point anywhere. An address literal in the URI is
+   already an address and is dialled as it stands. Issue #508.
+3. **TLS validation is not optional** (§5.1) — DNSSEC establishes the intended
+   endpoint, TLS establishes that you reached it. Note that this is what makes
+   point 2 safe to state as narrowly as it is: only the *address* comes from
+   discovery, the hostname stays in the request for SNI and certificate
+   verification, so the name is still proved by TLS.
+4. **No redirects** (§5.1).
+5. **The credential is scoped to one parent.** A child that syncs with several
    parents holds several credentials and never sends one to the other's
    endpoint. Match on the URI's origin, not just the hostname.
 
@@ -649,12 +684,20 @@ and an operator who disables one while believing the other still holds has no
 protection at all. One switch, `delegationsync.child.api.allow-insecure`,
 covers both. Certificate validation has no switch at all.
 
-### 16.7 Address resolution is skipped for this scheme
+### 16.7 The DSYNC target is not resolved; the endpoint's host is
 
 `BestSyncScheme` resolves the DSYNC target to an address, because NOTIFY and
 UPDATE send DNS to it. An API target is a service description point whose
 address records are optional, so resolving it would fail on a *correctly*
 configured parent. Skipped for `SchemeAPI` only.
+
+What is resolved, at discovery time and through the same IMR, is the host of
+the URL the URI record carries (§8 point 2). The two are different names in
+principle and usually the same in practice, and the distinction matters: the
+target may legitimately have no address, while the endpoint that a credential
+is about to be sent to must have one. A published endpoint whose host does not
+resolve therefore fails discovery, with that as the reason, rather than
+failing later inside an HTTP client.
 
 ---
 
