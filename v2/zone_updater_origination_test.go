@@ -92,8 +92,10 @@ func TestApplierGateDropsInternalUpdateOnSecondary(t *testing.T) {
 
 // TestApplierGateAllowsInlineSigningSecondary guards the sanctioned exception:
 // an inline-signing secondary may originate, so CDS/CSYNC-style internal
-// updates must still reach the applier. Asserting "not dropped by the gate" —
-// the request gets past it and into the command switch.
+// updates must still reach the applier. This is the predicate on its own -- it
+// sends no request. The end-to-end version, an InternalUpdate that goes all the
+// way through the applier and changes the zone, is
+// TestInternalUpdateOnAnInlineSigningSecondaryIsApplied.
 func TestApplierGateAllowsInlineSigningSecondary(t *testing.T) {
 	withAppType(t, AppTypeAuth)
 	zd, _ := updaterTestZone(t, Secondary, map[ZoneOption]bool{OptInlineSigning: true})

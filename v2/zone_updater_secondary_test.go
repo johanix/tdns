@@ -166,3 +166,51 @@ func TestZoneUpdateOnAMirroringSecondaryIsRefusedWithAnError(t *testing.T) {
 		t.Error("the update was applied to a mirroring secondary")
 	}
 }
+
+// C1: the sanctioned tdns-auth exception, end to end. An inline-signing
+// secondary may originate, so the gate lets it past while it still holds the
+// Secondary role -- which is exactly the arm the placeholder used to swallow.
+// The Agent test above covers the same switch arm through the app-type escape;
+// this one is the shape a CDS/CSYNC publisher actually has: AppTypeAuth, an
+// InternalUpdate, and a zone that signs what it applies.
+func TestInternalUpdateOnAnInlineSigningSecondaryIsApplied(t *testing.T) {
+	withAppType(t, AppTypeAuth)
+	zd, kdb := updaterZoneWithRealKeyDB(t, Secondary, map[ZoneOption]bool{
+		OptInlineSigning: true,
+	})
+	zd.DnssecPolicy = &DnssecPolicy{
+		Mode:         DnssecPolicyModeKSKZSK,
+		KSKAlgorithm: dns.ED25519,
+		ZSKAlgorithm: dns.ED25519,
+		SigValidity: PolicySigValidity{
+			Default: 30 * 86400, DNSKEY: 30 * 86400, DS: 30 * 86400,
+		},
+	}
+	if !zoneMayOriginateContent(zd) {
+		t.Fatal("an inline-signing secondary must be allowed past the origination gate")
+	}
+	before := zd.CurrentSerial
+
+	res := runUpdaterForResult(t, kdb, UpdateRequest{
+		Cmd:            "ZONE-UPDATE",
+		ZoneName:       zd.ZoneName,
+		Actions:        []dns.RR{injectedRR(t)},
+		InternalUpdate: true,
+		Trusted:        true,
+		Description:    "test: internal update against an inline-signing secondary",
+	})
+
+	if res.Err != nil {
+		t.Fatalf("refused: %v", res.Err)
+	}
+	if !res.Applied {
+		t.Error("reported as not applied")
+	}
+	if !injectedPresent(t, zd) {
+		t.Error("the sanctioned exception answered success and the published zone" +
+			" is unchanged: the update went to the placeholder")
+	}
+	if zd.CurrentSerial == before {
+		t.Errorf("serial did not move (%d): nothing was published", before)
+	}
+}
