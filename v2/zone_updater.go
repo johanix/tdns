@@ -766,6 +766,23 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 		rrcopy.Header().Ttl = zd.UpdatePolicy.Child.TTL
 		rrcopy.Header().Class = dns.ClassINET
 
+		// A child's KEY is truststore material. It goes to
+		// ApplyChildUpdateToDB, and it is NEVER a record of the parent zone --
+		// not signed, and not unsigned either.
+		//
+		// Two things that look like they already prevent this do not. The
+		// classifier routes such an update away from here (childKeyRR in
+		// updateresponder.go), but that is the door, not the applier. And
+		// updatepolicy.child MUST list KEY or no child could bootstrap a
+		// SIG(0) key at all, so the allowlist below is the one filter that
+		// cannot be the one saying no -- which is exactly how a KEY got into
+		// a parent zone once already.
+		if rrtype == dns.TypeKEY {
+			lg.Warn("ApplyChildUpdateToZoneData: refusing to write a child KEY into zone content; it belongs in the truststore",
+				"zone", zd.ZoneName, "owner", ownerName)
+			continue
+		}
+
 		// First check whether this update is allowed by the update-policy.
 		if _, ok := zd.UpdatePolicy.Child.RRtypes[rrtype]; !ok {
 			lg.Error("ApplyChildUpdateToZoneData: RR type denied by policy", "rrtype", rrtypestr)
@@ -819,10 +836,10 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 			if len(rrset.RRs) == 0 {
 				zd.stageDeleteLocked(ownerName, rrtype)
 			} else {
-				// RFC 4035 §2.2: at a delegation point, only DS is
-				// authoritative parent data and gets an RRSIG. NS and
-				// glue (A/AAAA) MUST NOT be signed at the parent.
-				if dak != nil && rrtype == dns.TypeDS {
+				// RFC 4035 §2.2, via the predicate the whole tree now shares:
+				// at a delegation point only the DS is authoritative parent
+				// data. NS and glue are the child's, signed in the child.
+				if dak != nil && zd.signableLocked(ownerName, rrtype) {
 					_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
 					if err != nil {
 						lg.Error("ApplyChildUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
@@ -862,10 +879,9 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 			lg.Debug("ApplyChildUpdateToZoneData: adding RR", "rrtype", rrtypestr, "rr", rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			rrset.RRSIGs = []dns.RR{}
-			// RFC 4035 §2.2: only DS gets an RRSIG at a delegation
-			// point. NS and glue (A/AAAA) MUST NOT be signed at the
-			// parent.
-			if dak != nil && rrtype == dns.TypeDS {
+			// See the removal branch above: only the DS at a delegation
+			// point is ours to sign.
+			if dak != nil && zd.signableLocked(ownerName, rrtype) {
 				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
 				if err != nil {
 					lg.Error("ApplyChildUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
@@ -962,6 +978,20 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 
 		if _, seen := nsBefore[ownerName]; !seen {
 			nsBefore[ownerName] = zd.ownerIsDelegationLocked(ownerName)
+		}
+
+		// A KEY at a delegation point is a child's, and a child's KEY is never
+		// zone content. The classifier sends these to the truststore path
+		// before they reach here (childKeyRR in updateresponder.go); this is
+		// the applier refusing the same thing, because the road it guards --
+		// updatepolicy.zone permitting the signer and the KEY type -- is one
+		// the classifier is the only thing standing in. The zone's OWN KEY,
+		// at the apex or at any name that is not a cut, is ordinary content
+		// and is untouched by this.
+		if rrtype == dns.TypeKEY && zd.ownerIsDelegationLocked(ownerName) {
+			lg.Warn("ApplyZoneUpdateToZoneData: refusing to write a KEY at a delegation point into zone content; a child's KEY belongs in the truststore",
+				"zone", zd.ZoneName, "owner", ownerName)
+			continue
 		}
 
 		// CDS-publication observability: trace the apex CDS RRset's
@@ -1259,46 +1289,44 @@ func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, d
 
 	all := zd.workingOwnerNamesLocked()
 	for _, cut := range flipped {
-		nowDelegation := zd.ownerIsDelegationLocked(cut)
-		for _, below := range all {
-			if core.EqualNames(below, cut) || !dns.IsSubDomain(cut, below) {
+		// The cut itself is in scope, not only what is under it: the name at a
+		// delegation point keeps its DS and loses everything else, and when the
+		// delegation goes its former glue becomes ordinary address data. It
+		// also covers an update whose own actions arrive in an awkward order --
+		// glue added before the NS that turns the name into a cut.
+		for _, name := range all {
+			if !dns.IsSubDomain(cut, name) {
 				continue
 			}
-			od := zd.stagedOwner(below)
+			od := zd.stagedOwner(name)
 			if od == nil {
 				continue
 			}
-
-			if nowDelegation {
-				zd.stripOccludedRRSIGsLocked(below, od)
-				continue
-			}
-
-			// The cut is gone. Anything still under another delegation stays
-			// the child's -- nested delegations mean one disappearing does not
-			// necessarily surface what is beneath it.
-			if dak == nil || zd.nameOccludedLocked(below) {
-				continue
-			}
 			for _, rrt := range od.RRtypes.Keys() {
-				if !zd.signableLocked(below, rrt) {
+				if rrt == dns.TypeRRSIG {
 					continue
 				}
 				rrset := od.RRtypes.GetOnlyRRSet(rrt)
-				if len(rrset.RRs) == 0 {
+				if !zd.signableLocked(name, rrt) {
+					zd.stripRRSIGsLocked(name, rrt, rrset)
+					continue
+				}
+				// Ours now. Sign only what is actually unsigned: everything
+				// else under the cut was already correct before it moved.
+				if dak == nil || len(rrset.RRs) == 0 || len(rrset.RRSIGs) > 0 {
 					continue
 				}
 				rrset.RRtype = rrt
-				if _, serr := zd.SignRRset(&rrset, below, dak, true, nil); serr != nil {
-					lg.Error("reconcileDelegationChangesLocked: signing a name a removed delegation uncovered failed",
-						"zone", zd.ZoneName, "name", below, "rrtype", dns.TypeToString[rrt], "error", serr)
+				if _, serr := zd.SignRRset(&rrset, name, dak, true, nil); serr != nil {
+					lg.Error("reconcileDelegationChangesLocked: signing a name the moved delegation uncovered failed",
+						"zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[rrt], "error", serr)
 					continue
 				}
-				zd.stageRRsetLocked(below, rrset)
+				zd.stageRRsetLocked(name, rrset)
 			}
 		}
 		lg.Debug("reconcileDelegationChangesLocked: delegation boundary moved",
-			"zone", zd.ZoneName, "name", cut, "is_delegation_now", nowDelegation)
+			"zone", zd.ZoneName, "name", cut, "is_delegation_now", zd.ownerIsDelegationLocked(cut))
 	}
 }
 

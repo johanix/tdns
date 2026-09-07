@@ -683,6 +683,9 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 			zd.stripOccludedRRSIGsLocked(name, owner)
 			continue
 		}
+		_, hasNS := owner.RRtypes.Get(dns.TypeNS)
+		isDelegation := hasNS && !core.EqualNames(name, zd.ZoneName)
+
 		for _, rrt := range owner.RRtypes.Keys() {
 			if rrt == dns.TypeRRSIG {
 				continue
@@ -695,8 +698,10 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 			if managesZonemd && rrt == dns.TypeZONEMD && core.EqualNames(name, zd.ZoneName) {
 				continue
 			}
-			if rrt == dns.TypeNS && !core.EqualNames(name, zd.ZoneName) {
-				continue // delegation NS — not signed
+			// Only the DS at a delegation point; see SignZone.
+			if isDelegation && rrt != dns.TypeDS {
+				zd.stripRRSIGsLocked(name, rrt, owner.RRtypes.GetOnlyRRSet(rrt))
+				continue
 			}
 			// Work on a local copy. The published RRset stays unchanged
 			// until we Set the new one back in a single atomic store, so
@@ -922,6 +927,9 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			continue
 		}
 
+		_, hasNS := owner.RRtypes.Get(dns.TypeNS)
+		isDelegation := hasNS && !core.EqualNames(name, zd.ZoneName)
+
 		for _, rrt := range owner.RRtypes.Keys() {
 			rrset := owner.RRtypes.GetOnlyRRSet(rrt)
 			if rrt == dns.TypeRRSIG {
@@ -935,8 +943,13 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			if managesZonemd && rrt == dns.TypeZONEMD && core.EqualNames(name, zd.ZoneName) {
 				continue
 			}
-			if rrt == dns.TypeNS && !core.EqualNames(name, zd.ZoneName) {
-				continue // dont' sign delegations
+			// At a delegation point the DS is the only thing that is ours; see
+			// signableLocked. Strip rather than skip, so a zone an older build
+			// signed heals on its next pass instead of carrying those
+			// signatures until it is loaded from source again.
+			if isDelegation && rrt != dns.TypeDS {
+				zd.stripRRSIGsLocked(name, rrt, rrset)
+				continue
 			}
 			rrset, _ = MaybeSignRRset(rrset, zd.ZoneName)
 			zd.stageRRsetLocked(name, rrset)
@@ -1093,11 +1106,20 @@ func (zd *ZoneData) ownerIsDelegationLocked(name string) bool {
 // signableLocked reports whether (name, rrtype) is this zone's own
 // authoritative data -- whether it gets an RRSIG at all (RFC 4035 §2.2).
 //
-// Three rules, and the bulk signing passes apply the same three: the apex is
-// always ours; nothing below a delegation is; and the NS RRset at a delegation
-// point is the child's copy, so it is never signed above the apex. A DS at a
-// delegation point IS ours, which is why the test is on the type and not on
-// the name alone.
+// Three rules, and the bulk signing passes apply the same three:
+//
+//	the apex                  -> ours, every type
+//	below a delegation        -> the child's, every type
+//	AT a delegation point     -> the DS, and nothing else
+//
+// The third is why the test is on the type and not on the name alone. A cut
+// is where one zone ends and another begins, so the name at it is the child's
+// apex: its NS RRset is the child's own, and an address there is glue. Both
+// are signed in the child, by the child's keys, and a parent's signature over
+// them is one no resolver asks for. The DS is the exception that the whole
+// chain of trust runs through -- it exists only in the parent, and only the
+// parent can sign it. The delegation point's NSEC is ours too; it is not an
+// RRtypes entry and the chain path signs it.
 //
 // The apex ZONEMD is a separate matter, and not one for this predicate: the
 // publish that computes its digest signs it afterwards. See zonemd_publish.go.
@@ -1108,7 +1130,17 @@ func (zd *ZoneData) signableLocked(name string, rrtype uint16) bool {
 	if zd.nameOccludedLocked(name) {
 		return false
 	}
-	return rrtype != dns.TypeNS
+	// A non-apex NS is never ours, and this must not be routed through
+	// ownerIsDelegationLocked: an update ADDING that NS asks before it is
+	// staged, so the owner is not a delegation point yet and the answer would
+	// come back "sign it" for the very record that makes the cut.
+	if rrtype == dns.TypeNS {
+		return false
+	}
+	if zd.ownerIsDelegationLocked(name) {
+		return rrtype == dns.TypeDS
+	}
+	return true
 }
 
 // stripOccludedRRSIGsLocked removes every RRSIG at one owner and stages the
@@ -1121,22 +1153,29 @@ func (zd *ZoneData) signableLocked(name string, rrtype uint16) bool {
 func (zd *ZoneData) stripOccludedRRSIGsLocked(name string, owner *OwnerData) int {
 	removed := 0
 	for _, rrt := range owner.RRtypes.Keys() {
-		rrset := owner.RRtypes.GetOnlyRRSet(rrt)
-		if len(rrset.RRSIGs) == 0 {
-			continue
-		}
-		removed += len(rrset.RRSIGs)
-		// GetOnlyRRSet returns an RRset whose RRtype field is unset (the store
-		// keys by type); set it so the RRset is staged under its own type
-		// rather than under type 0. Same trap as StripZoneRRSIGs.
-		rrset.RRtype = rrt
-		rrset.RRSIGs = nil
-		zd.stageRRsetLocked(name, rrset)
+		removed += zd.stripRRSIGsLocked(name, rrt, owner.RRtypes.GetOnlyRRSet(rrt))
 	}
 	if removed > 0 {
 		lgSigner.Info("stripped RRSIGs from a name below a delegation",
 			"zone", zd.ZoneName, "name", name, "count", removed)
 	}
+	return removed
+}
+
+// stripRRSIGsLocked drops the RRSIGs from one RRset and stages it, returning
+// how many went. Staging nothing when there were none is what keeps the signing
+// passes from touching every delegation on every run.
+func (zd *ZoneData) stripRRSIGsLocked(name string, rrt uint16, rrset core.RRset) int {
+	if len(rrset.RRSIGs) == 0 {
+		return 0
+	}
+	removed := len(rrset.RRSIGs)
+	// GetOnlyRRSet returns an RRset whose RRtype field is unset (the store keys
+	// by type); set it so the RRset is staged under its own type rather than
+	// under type 0. Same trap as StripZoneRRSIGs.
+	rrset.RRtype = rrt
+	rrset.RRSIGs = nil
+	zd.stageRRsetLocked(name, rrset)
 	return removed
 }
 
