@@ -21,6 +21,20 @@ type ApiDetails struct {
 	AuthMethod string `validate:"required" yaml:"authmethod"`
 	RootCA     string `yaml:"rootca"`
 	Command    string `yaml:"command,omitempty"`
+	// Role names the command tree this entry is reachable through, for a
+	// SECOND (third, ...) instance of a daemon this CLI already knows how to
+	// drive. `role: auth` on an entry named "sectdns" builds the whole auth
+	// command tree a second time, targeting this entry, reachable as
+	// `tdns-cli sectdns ...`.
+	//
+	// Empty is the normal case and means "this entry is the canonical target
+	// for whichever role RegisterRole maps to its Name" -- i.e. every config
+	// written before this field existed keeps working unchanged.
+	//
+	// mapstructure as well as yaml, for the same reason ConfigFile below
+	// carries one: the CLI roots decode with viper.Unmarshal, which never
+	// consults yaml tags.
+	Role string `yaml:"role,omitempty" mapstructure:"role"`
 	// mapstructure as well as yaml: the CLI roots decode this file with
 	// viper.Unmarshal, which never consults yaml tags. "config-file" does not
 	// match the field name, so without this tag it decodes to "" in silence.

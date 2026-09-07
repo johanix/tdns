@@ -200,10 +200,47 @@ Exit status is non-zero if any check FAILs (WARNs do not fail the run).`,
 // per role are collected here rather than sprinkled through the checks.
 // ---------------------------------------------------------------------------
 
-// defaultCfgFileForRole returns the compiled-in default config path used when
-// neither an explicit path nor daemon path-discovery yields one.
+// instanceFlavour reports the built-in role an extra daemon instance behaves
+// as, or "" when role is not an extra instance.
+//
+// An instance named "sectdns" with `role: auth` IS a tdns-auth: it serves the
+// same endpoints and its config takes the same sections. Every per-role
+// decision below therefore has to ask what an instance is a flavour OF, not
+// just compare its name against the built-in role names.
+func instanceFlavour(role string) string {
+	if ad := getApiDetailsByClientKey(role); ad != nil {
+		return ad.Role
+	}
+	return ""
+}
+
+// effectiveRole collapses an instance role onto the built-in role it behaves
+// as, so the switches below stay written in terms of the three built-ins.
+func effectiveRole(role string) string {
+	if f := instanceFlavour(role); f != "" {
+		return f
+	}
+	return role
+}
+
+// defaultCfgFileForRole returns the default config path used when neither an
+// explicit path nor daemon path-discovery yields one.
+//
+// An extra instance's config file is whatever its apiservers entry says, which
+// is the whole point of being able to keep both configs in one directory:
+//
+//   - name: sectdns
+//     role: auth
+//     config-file: /etc/tdns/sec-tdns-auth.yaml
+//
+// Without this, `config check` against an instance would silently check the
+// CANONICAL daemon's config file and report on the wrong server -- the same
+// class of wrong-target failure as a hardcoded role, one level up.
 func defaultCfgFileForRole(role string) string {
-	switch role {
+	if ad := getApiDetailsByClientKey(role); ad != nil && ad.ConfigFile != "" {
+		return ad.ConfigFile
+	}
+	switch effectiveRole(role) {
 	case "agent":
 		return tdns.DefaultAgentCfgFile
 	case "imr":
@@ -216,7 +253,7 @@ func defaultCfgFileForRole(role string) string {
 // appTypeForRole maps a CLI role to the tdns app type, which selects the
 // sections tdns.ValidateConfig enforces.
 func appTypeForRole(role string) tdns.AppType {
-	switch role {
+	switch effectiveRole(role) {
 	case "agent":
 		return tdns.AppTypeAgent
 	case "imr":
@@ -230,7 +267,9 @@ func appTypeForRole(role string) tdns.AppType {
 // Only tdns-auth registers it (see SetupAPIRouter) — so for every other role
 // the target config file cannot be discovered from the running daemon, and
 // crucially a 404 there must NOT be read as "the daemon is down".
-func roleHasConfigPaths(role string) bool { return role == "auth" }
+//
+// An extra tdns-auth instance registers it too: it is the same daemon.
+func roleHasConfigPaths(role string) bool { return effectiveRole(role) == "auth" }
 
 // daemonReachable probes the daemon with an API ping. This is deliberately
 // separate from fetchDaemonPaths: /config/paths is auth-only, so using it as
