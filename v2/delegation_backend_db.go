@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
  * DBDelegationBackend stores child delegation data in the ChildDelegationData
- * SQLite table. Extracts and replaces the existing ApplyChildUpdateToDB logic.
+ * SQLite table, and is the only reader or writer of it.
  */
 package tdns
 
