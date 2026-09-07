@@ -1049,6 +1049,68 @@ func occludedNames(names, delegations []string) map[string]bool {
 	return occluded
 }
 
+// parentName returns name's parent, or "" when there is none. No allocation:
+// the parent is a suffix of the name.
+func parentName(name string) string {
+	i, end := dns.NextLabel(name, 0)
+	if end {
+		return ""
+	}
+	return name[i:]
+}
+
+// nameOccludedLocked reports whether name lies strictly below a delegation:
+// walk from its parent up to the apex, stopping at the first owner with an NS
+// RRset.
+//
+// The bulk signing passes ask occludedNames() instead. One survey of the zone
+// beats a walk per owner when every owner is being visited anyway; this is for
+// the paths that touch a handful of names, where the survey is the expensive
+// half. Both answer the same question.
+func (zd *ZoneData) nameOccludedLocked(name string) bool {
+	for p := parentName(name); p != "" && !core.EqualNames(p, zd.ZoneName); p = parentName(p) {
+		if zd.ownerIsDelegationLocked(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ownerIsDelegationLocked reports whether name is a delegation point of this
+// zone: a non-apex owner carrying an NS RRset.
+func (zd *ZoneData) ownerIsDelegationLocked(name string) bool {
+	if core.EqualNames(name, zd.ZoneName) {
+		return false
+	}
+	od := zd.stagedOwner(name)
+	if od == nil {
+		return false
+	}
+	_, isDelegation := od.RRtypes.Get(dns.TypeNS)
+	return isDelegation
+}
+
+// signableLocked reports whether (name, rrtype) is this zone's own
+// authoritative data -- whether it gets an RRSIG at all (RFC 4035 §2.2).
+//
+// Three rules, and the bulk signing passes apply the same three: the apex is
+// always ours; nothing below a delegation is; and the NS RRset at a delegation
+// point is the child's copy, so it is never signed above the apex. A DS at a
+// delegation point IS ours, which is why the test is on the type and not on
+// the name alone.
+//
+// The apex ZONEMD is a separate matter, and not one for this predicate: the
+// publish that computes its digest signs it afterwards. See zonemd_publish.go.
+func (zd *ZoneData) signableLocked(name string, rrtype uint16) bool {
+	if core.EqualNames(name, zd.ZoneName) {
+		return true
+	}
+	if zd.nameOccludedLocked(name) {
+		return false
+	}
+	return rrtype != dns.TypeNS
+}
+
 // stripOccludedRRSIGsLocked removes every RRSIG at one owner and stages the
 // result, returning how many went. Called on a name below a delegation, where
 // no RRSIG belongs at all, so it does not ask which key wrote them -- unlike

@@ -945,11 +945,24 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 	zd.ensureWorkingSet()
 
 	lg.Debug("ApplyZoneUpdateToZoneData: processing actions", "zone", zd.ZoneName, "count", len(ur.Actions))
+
+	// A delegation appearing or disappearing moves everything below it across
+	// the boundary of the zone's authoritative data, without this update
+	// touching those names at all. Remember what each owner this update touches
+	// looked like beforehand; the reconcile after the loop compares (#550).
+	// Keyed on every touched owner, not only the NS actions: a DELNAME arrives
+	// as one TypeANY action and takes the NS RRset with it.
+	nsBefore := map[string]bool{}
+
 	for actionIdx, rr := range ur.Actions {
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
 		rrtype := rr.Header().Rrtype
 		rrtypestr := dns.TypeToString[rrtype]
+
+		if _, seen := nsBefore[ownerName]; !seen {
+			nsBefore[ownerName] = zd.ownerIsDelegationLocked(ownerName)
+		}
 
 		// CDS-publication observability: trace the apex CDS RRset's
 		// lifecycle through the update path so we can see whether the
@@ -1100,12 +1113,18 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 			rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) // Cannot remove rr, because it is in the wrong class.
 			if len(rrset.RRs) == 0 {
 				zd.stageDeleteLocked(ownerName, rrtype)
-			} else {
+			} else if zd.signableLocked(ownerName, rrtype) {
 				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
 				if err != nil {
 					lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 					// Continue anyway - the record is still added, just not signed
 				}
+				zd.stageRRsetLocked(ownerName, rrset)
+			} else {
+				// Below a delegation, or the delegation's own NS RRset: not
+				// this zone's authoritative data, so it carries no signature
+				// (RFC 4035 §2.2, #550). Drop any it arrived holding.
+				rrset.RRSIGs = nil
 				zd.stageRRsetLocked(ownerName, rrset)
 			}
 			updated = true
@@ -1181,10 +1200,16 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 			lg.Debug("ApplyZoneUpdateToZoneData: adding RR", "rrtype", rrtypestr, "rr", rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			// rrset.RRSIGs = []dns.RR{} // XXX: The RRset changed, so any old RRSIGs are now invalid.
-			_, err = zd.SignRRset(&rrset, ownerName, dak, true, nil)
-			if err != nil {
-				lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
-				// Continue anyway - the record is still added, just not signed
+			if zd.signableLocked(ownerName, rrtype) {
+				_, err = zd.SignRRset(&rrset, ownerName, dak, true, nil)
+				if err != nil {
+					lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
+					// Continue anyway - the record is still added, just not signed
+				}
+			} else {
+				// Not this zone's authoritative data; see the removal branch
+				// above (RFC 4035 §2.2, #550).
+				rrset.RRSIGs = nil
 			}
 			zd.stageRRsetLocked(ownerName, rrset)
 			updated = true
@@ -1198,9 +1223,83 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 		continue
 	}
 
+	zd.reconcileDelegationChangesLocked(nsBefore, dak)
+
 	lg.Debug("ApplyZoneUpdateToZoneData done", "updated", updated)
 
 	return updated, nil
+}
+
+// reconcileDelegationChangesLocked repairs the RRSIGs below a delegation this
+// update created or removed. nsBefore holds, per owner the update touched,
+// whether it was a delegation point beforehand.
+//
+// The names below a cut are never in the update themselves, so nothing else on
+// this path looks at them, and both directions leave the zone wrong until the
+// next full signing pass:
+//
+//	a delegation appears    -> what was ours is the child's, and still signed
+//	a delegation disappears -> what was the child's is ours, and still unsigned
+//
+// The second is the one that hurts. An extra RRSIG over occluded data is a
+// protocol violation a resolver never sees; an unsigned RRset inside a signed
+// zone is a SERVFAIL for anyone validating. The NSEC chain is already repaired
+// for both directions by restitchNsecLocked, which walks every name for exactly
+// this reason -- this is the signature half of the same reconciliation.
+func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, dak *DnssecKeys) {
+	var flipped []string
+	for name, had := range nsBefore {
+		if had != zd.ownerIsDelegationLocked(name) {
+			flipped = append(flipped, name)
+		}
+	}
+	if len(flipped) == 0 {
+		return
+	}
+
+	all := zd.workingOwnerNamesLocked()
+	for _, cut := range flipped {
+		nowDelegation := zd.ownerIsDelegationLocked(cut)
+		for _, below := range all {
+			if core.EqualNames(below, cut) || !dns.IsSubDomain(cut, below) {
+				continue
+			}
+			od := zd.stagedOwner(below)
+			if od == nil {
+				continue
+			}
+
+			if nowDelegation {
+				zd.stripOccludedRRSIGsLocked(below, od)
+				continue
+			}
+
+			// The cut is gone. Anything still under another delegation stays
+			// the child's -- nested delegations mean one disappearing does not
+			// necessarily surface what is beneath it.
+			if dak == nil || zd.nameOccludedLocked(below) {
+				continue
+			}
+			for _, rrt := range od.RRtypes.Keys() {
+				if !zd.signableLocked(below, rrt) {
+					continue
+				}
+				rrset := od.RRtypes.GetOnlyRRSet(rrt)
+				if len(rrset.RRs) == 0 {
+					continue
+				}
+				rrset.RRtype = rrt
+				if _, serr := zd.SignRRset(&rrset, below, dak, true, nil); serr != nil {
+					lg.Error("reconcileDelegationChangesLocked: signing a name a removed delegation uncovered failed",
+						"zone", zd.ZoneName, "name", below, "rrtype", dns.TypeToString[rrt], "error", serr)
+					continue
+				}
+				zd.stageRRsetLocked(below, rrset)
+			}
+		}
+		lg.Debug("reconcileDelegationChangesLocked: delegation boundary moved",
+			"zone", zd.ZoneName, "name", cut, "is_delegation_now", nowDelegation)
+	}
 }
 
 func (kdb *KeyDB) ApplyZoneUpdateToDB(ur UpdateRequest) error {
