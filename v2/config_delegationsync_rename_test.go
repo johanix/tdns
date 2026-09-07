@@ -148,16 +148,52 @@ func TestBothShapesIsAnError(t *testing.T) {
 // An EMPTY deprecated block must not erase a populated canonical one. This is
 // why the shadow fields are pointers: with plain structs, "absent" and "present
 // but empty" decode identically and the fold would silently blank the config.
+//
+// Two shapes, because they fail differently with plain structs:
+//   - a bare `delegationsync:` with no members must fold to nothing at all;
+//   - an empty MEMBER (`delegationsync: {parent: {}}`) beside a populated
+//     childsync: is a half-finished migration and must be REFUSED. With plain
+//     structs it is indistinguishable from absent, and the fold would blank a
+//     populated block instead — silently, which is the whole failure mode.
 func TestEmptyDeprecatedBlockDoesNotEraseCanonical(t *testing.T) {
-	c := decodeInto(t, map[string]interface{}{"childsync": childsyncBlock()})
-	if got := c.ChildSync.Update.Target; got != "updates.{ZONENAME}" {
-		t.Fatalf("childsync.update.target = %q before folding again", got)
-	}
-	// Folding a second time is a no-op, so a reload cannot lose the block.
-	if err := c.FoldDeprecatedDelegationSync(); err != nil {
-		t.Fatalf("second fold: %v", err)
-	}
-	if got := c.ChildSync.Update.Target; got != "updates.{ZONENAME}" {
-		t.Errorf("childsync.update.target = %q after a second fold, want it unchanged", got)
-	}
+	t.Run("bare wrapper", func(t *testing.T) {
+		c := decodeInto(t, map[string]interface{}{
+			"childsync":      childsyncBlock(),
+			"delegationsync": map[string]interface{}{},
+		})
+		if got := c.ChildSync.Update.Target; got != "updates.{ZONENAME}" {
+			t.Errorf("childsync.update.target = %q, want the canonical block untouched", got)
+		}
+		if got := len(c.ChildSync.Schemes); got != 2 {
+			t.Errorf("childsync.schemes = %d entries, want 2", got)
+		}
+		if c.DeprecatedDelegationSync != nil {
+			t.Error("the deprecated block must be cleared after folding")
+		}
+	})
+
+	t.Run("empty member is refused", func(t *testing.T) {
+		var c Config
+		err := decodeConfigMap(map[string]interface{}{
+			"childsync":      childsyncBlock(),
+			"delegationsync": map[string]interface{}{"parent": map[string]interface{}{}},
+		}, &c, nil)
+		if err == nil {
+			t.Fatalf("an empty deprecated `parent:` beside a populated childsync: was accepted;"+
+				" childsync.update.target = %q", c.ChildSync.Update.Target)
+		}
+		if !strings.Contains(err.Error(), "delegationsync.parent:") {
+			t.Errorf("error does not name the deprecated key: %v", err)
+		}
+	})
+
+	t.Run("second fold is a no-op", func(t *testing.T) {
+		c := decodeInto(t, map[string]interface{}{"childsync": childsyncBlock()})
+		if err := c.FoldDeprecatedDelegationSync(); err != nil {
+			t.Fatalf("second fold: %v", err)
+		}
+		if got := c.ChildSync.Update.Target; got != "updates.{ZONENAME}" {
+			t.Errorf("childsync.update.target = %q after a second fold, want it unchanged", got)
+		}
+	})
 }

@@ -12,24 +12,27 @@ import (
 	"github.com/miekg/dns"
 )
 
-// The delegationsync: block, typed.
+// The childsync: and parentsync: blocks, typed, plus the fold that still
+// accepts the retired `delegationsync:` wrapper they were hoisted out of.
 //
-// This block was read with viper.GetString/GetStringSlice from a dozen call
-// sites. It is now modelled in full and this struct is the ONLY reader: parent
-// bootstrap policy lives in named childsync.policies.*, and child
-// update.bootstrap.methods is parsed here and consumed at bootstrap. No viper read of
-// the delegationsync block remains, with one deliberate exception: the child
-// keygen MODE is still read from viper in sig0_utils.go and is intentionally
-// NOT modelled here -- the sample config says "`algorithm` and `generator` are
-// read on the child side; `mode` is not", and modelling it would turn a setting
-// that has never had any effect into a live one.
+// childsync: is what a PARENT offers its children -- the DSYNC RRset, the
+// schemes behind it, the UPDATE receiver's key, and the named delegation
+// policies. parentsync: is what a CHILD does towards its parent. Each is named
+// for the zone option that switches it on.
+//
+// These were read with viper.GetString/GetStringSlice from a dozen call sites.
+// They are now modelled in full and these structs are the ONLY reader, with one
+// deliberate exception: the parentsync keygen MODE is still read from viper in
+// sig0_utils.go and is intentionally NOT modelled here -- the sample config says
+// "`algorithm` and `generator` are read on the child side; `mode` is not", and
+// modelling it would turn a setting that has never had any effect into a live one.
 //
 // Why it was unwound: viper splits keys on ".". Any config shape with a dotted
 // key silently arrives empty, the setting reads back as its zero value, and
-// nothing logs a thing. Zone names are dotted, so a per-zone setting under this
-// block was unreadable through viper and gave no sign of it.
+// nothing logs a thing. Zone names are dotted, so a per-zone setting under these
+// blocks was unreadable through viper and gave no sign of it.
 //
-// Keep it complete. A subtree modelled here while its readers still call viper
+// Keep them complete. A subtree modelled here while its readers still call viper
 // is worse than one that is honestly absent, because the field looks
 // authoritative and returns a zero value; add the fields and move the readers
 // in the same change.

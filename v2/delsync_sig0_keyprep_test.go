@@ -147,10 +147,10 @@ func TestSig0KeyPreparationDontPublishKeyStillOptsOut(t *testing.T) {
 // it does not own.
 func TestSig0KeyPreparationSecondaryDoesNotOriginate(t *testing.T) {
 	zd, kdb, q := newSig0KeyPrepZone(t, sig0KeyPrepZone, Secondary)
-	// parentsync, not childsync: childsync is stripped from a tdns-auth
-	// secondary by normalizeOptionsForRole, so the parent side never reaches
-	// here. parentsync is NOT stripped, which is exactly the case this gate
-	// has to hold on its own.
+	// Options set directly, not through normalizeOptionsForRole, which strips
+	// both childsync and parentsync from a tdns-auth secondary. That is the
+	// point: this pins the backstop itself, on the ZoneData shape the
+	// normalizer never saw.
 	zd.Options = map[ZoneOption]bool{OptParentSync: true}
 
 	if err := zd.Sig0KeyPreparation("updates.example.", dns.ED25519, kdb); err != nil {

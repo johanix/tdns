@@ -330,13 +330,14 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		return nil
 	}
 
-	// 2. Origination backstop, and NOT redundant with the gate above.
-	// normalizeOptionsForRole strips childsync from a tdns-auth secondary, so
-	// the parent side is covered by the option alone -- but parentsync is
-	// deliberately NOT in originationOptions, and the justification recorded
-	// there is precisely the allow-updates gate removed above. Without this, a
-	// tdns-auth secondary carrying parentsync would mint a local SIG(0) key and
-	// publish it into a zone whose content belongs to upstream.
+	// 2. Origination backstop -- defence in depth, not the load-bearing gate.
+	// normalizeOptionsForRole strips BOTH childsync and parentsync from a
+	// tdns-auth secondary (parentsync joined originationOptions with #538, once
+	// the allow-updates gate that had justified its exclusion was gone), so
+	// after a real config load such a zone never reaches here with either
+	// option set. This catches a ZoneData whose Options were assembled without
+	// the normalizer, and states the invariant where the publish happens:
+	// content this server did not originate is not ours to write into.
 	if !zoneMayOriginateContent(zd) {
 		lgDns.Warn("Sig0KeyPreparation: zone may not originate content, no SIG(0) key will be generated or published",
 			"zone", zd.ZoneName, "name", name, "zonetype", ZoneTypeToString[zd.ZoneType], "keyrrexist", keyrrexist)
