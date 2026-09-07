@@ -113,7 +113,7 @@ zones:
      downstreams:                    # who may pull the SIGNED zone
         - prefix: "192.0.2.0/24"
           key:    downstream-xfr
-     notify:                         # who to tell once it is signed
+     notify:                         # who to tell once it is published
         - addr: "192.0.2.10:53"
           key:  downstream-xfr
 ```
@@ -200,7 +200,7 @@ With the primary on port 5364 and the signer on 5365:
 dig @127.0.0.1 -p 5364 +dnssec SOA example.com.     # no RRSIG
 
 # the signer serves the same zone, signed
-dig @127.0.0.1 -p 5365 +dnssec SOA example.com.     # RRSIG present
+dig @127.0.0.1 -p 5365 +dnssec SOA example.com.     # RRSIG present: signing is on
 dig @127.0.0.1 -p 5365 DNSKEY example.com.          # KSK + ZSK
 
 # and hands the signed zone onward
@@ -213,6 +213,19 @@ Change something on the primary and confirm it arrives signed:
 dig @127.0.0.1 -p 5364 TXT new.example.com.         # on the primary
 dig @127.0.0.1 -p 5365 +dnssec TXT new.example.com. # signed, on the signer
 ```
+
+**Ask about the RRset you changed, not about the SOA.** The apex SOA is signed
+throughout the window described above, so a signed SOA says nothing about
+whether the rest of the zone has caught up: a mid-flight AXFR can carry a signed
+SOA over tens of thousands of unsigned RRsets, and it is logged as a complete
+transfer. Measured on a 100k-name zone: 25 seconds after the first NOTIFY, a
+transfer returned 337k records of an eventual 475k. Polling the SOA RRSIG is
+what made an earlier check of this look green.
+
+The two `dig`s above are the right shape because they name the record that
+changed. Nothing below a delegation is signed either, and legitimately so, so
+"are there unsigned RRsets in this transfer" is not the question — "is the RRset
+I just changed signed yet" is.
 
 A transfer refused with `zone status loading` immediately after start-up is
 normal: the zone is not advertised as ready until its first publish completes.
