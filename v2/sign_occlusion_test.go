@@ -201,3 +201,59 @@ func TestOccludedNames(t *testing.T) {
 		t.Error("a zone with no delegation should allocate no map")
 	}
 }
+
+// seedOccludedRRSIG attaches an RRSIG to an occluded name's RRset, the way an
+// older build that signed below the cut would have left it, and republishes.
+func seedOccludedRRSIG(t *testing.T, zd *ZoneData, name string, rrtype uint16) {
+	t.Helper()
+	od, ok := zd.Data.Get(name)
+	if !ok {
+		t.Fatalf("%q missing from zd.Data", name)
+	}
+	rrset := od.RRtypes.GetOnlyRRSet(rrtype)
+	if len(rrset.RRs) == 0 {
+		t.Fatalf("%q has no %s RRset to seed", name, dns.TypeToString[rrtype])
+	}
+	rrset.RRtype = rrtype
+	rrset.RRSIGs = []dns.RR{&dns.RRSIG{
+		Hdr:         dns.RR_Header{Name: name, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
+		TypeCovered: rrtype,
+		KeyTag:      4242,
+		SignerName:  zd.ZoneName,
+	}}
+	od.RRtypes.Set(rrtype, rrset)
+	zd.InstallInitialSnapshot()
+}
+
+// A signing pass must HEAL a zone an older build signed below the cut, not just
+// stop adding to it. Merely skipping the owner leaves those signatures on the
+// wire until the zone is next loaded from source -- and AXFR is where #546 was
+// visible in the first place. ResignZone in particular used to nil-and-resign
+// these RRsets, so a bare skip would swap refreshed signatures for frozen ones.
+func TestSigningStripsRRSIGsAlreadyOnOccludedNames(t *testing.T) {
+	for _, tc := range []struct {
+		pass string
+		run  func(zd *ZoneData, kdb *KeyDB) error
+	}{
+		{"SignZone", func(zd *ZoneData, kdb *KeyDB) error { _, err := zd.SignZone(kdb, true); return err }},
+		{"ResignZone", func(zd *ZoneData, kdb *KeyDB) error { _, err := zd.ResignZone(kdb); return err }},
+	} {
+		t.Run(tc.pass, func(t *testing.T) {
+			kdb := newTestKeyDB(t)
+			zd := occlusionTestZone(t, kdb)
+			seedOccludedRRSIG(t, zd, "occluded.child.occl.example.", dns.TypeTXT)
+			seedOccludedRRSIG(t, zd, "ns1.child.occl.example.", dns.TypeA)
+
+			// Both cases need one pass to have happened: ResignZone re-signs an
+			// already-signed zone, and its own guard refuses an unsigned one.
+			if _, err := zd.SignZone(kdb, true); err != nil {
+				t.Fatalf("SignZone: %v", err)
+			}
+			if err := tc.run(zd, kdb); err != nil {
+				t.Fatalf("%s: %v", tc.pass, err)
+			}
+
+			assertOcclusionInvariants(t, zd, tc.pass+" over pre-signed occluded data")
+		})
+	}
+}

@@ -672,12 +672,15 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 
 	newrrsigs := 0
 	for _, name := range names {
-		// Below a delegation is the child's data; see SignZone (#546).
-		if occluded[name] {
-			continue
-		}
 		owner := zd.stagedOwner(name)
 		if owner == nil {
+			continue
+		}
+		// Below a delegation is the child's data; see SignZone (#546). This
+		// path used to nil-and-resign these RRsets, so without the strip the
+		// change would swap refreshed signatures for frozen ones.
+		if occluded[name] {
+			zd.stripOccludedRRSIGsLocked(name, owner)
 			continue
 		}
 		for _, rrt := range owner.RRtypes.Keys() {
@@ -899,17 +902,23 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	var maxObservedTTL uint32
 	for _, name := range names {
 		// log.Printf("SignZone: signing RRsets under name %s", name)
-		// A name below a delegation is the child zone's data, not ours: RFC
-		// 4035 §2.2 excludes it from the authoritative data, so nothing at it
-		// is signed -- not its NSEC either, and the chain does not carry it.
-		// The glue addresses the old per-type test singled out are simply the
-		// occluded data it happened to look for; every other type below a cut
-		// went on to be signed (#546).
-		if occluded[name] {
-			continue
-		}
 		owner := zd.stagedOwner(name)
 		if owner == nil {
+			continue
+		}
+		// A name below a delegation is the child zone's data, not ours: RFC
+		// 4035 §2.2 excludes it from the authoritative data, so nothing at it
+		// is signed -- not its NSEC either, which the chain generator drops
+		// along with the name. The glue addresses the old per-type test singled
+		// out are simply the occluded data it happened to look for; every other
+		// type below a cut went on to be signed (#546).
+		//
+		// Strip rather than merely skip. A pass that only stopped signing would
+		// leave whatever an older build wrote there on the wire until the zone
+		// was next loaded from source -- and AXFR is exactly where #546 was
+		// visible in the first place.
+		if occluded[name] {
+			zd.stripOccludedRRSIGsLocked(name, owner)
 			continue
 		}
 
@@ -1038,6 +1047,35 @@ func occludedNames(names, delegations []string) map[string]bool {
 		}
 	}
 	return occluded
+}
+
+// stripOccludedRRSIGsLocked removes every RRSIG at one owner and stages the
+// result, returning how many went. Called on a name below a delegation, where
+// no RRSIG belongs at all, so it does not ask which key wrote them -- unlike
+// StripZoneRRSIGs, whose whole job is to remove one key's and keep the rest.
+//
+// Cheap on the steady state: once an owner is clean there is nothing to stage,
+// and a zone with no occluded data never reaches here.
+func (zd *ZoneData) stripOccludedRRSIGsLocked(name string, owner *OwnerData) int {
+	removed := 0
+	for _, rrt := range owner.RRtypes.Keys() {
+		rrset := owner.RRtypes.GetOnlyRRSet(rrt)
+		if len(rrset.RRSIGs) == 0 {
+			continue
+		}
+		removed += len(rrset.RRSIGs)
+		// GetOnlyRRSet returns an RRset whose RRtype field is unset (the store
+		// keys by type); set it so the RRset is staged under its own type
+		// rather than under type 0. Same trap as StripZoneRRSIGs.
+		rrset.RRtype = rrt
+		rrset.RRSIGs = nil
+		zd.stageRRsetLocked(name, rrset)
+	}
+	if removed > 0 {
+		lgSigner.Info("stripped RRSIGs from a name below a delegation",
+			"zone", zd.ZoneName, "name", name, "count", removed)
+	}
+	return removed
 }
 
 // nsecTTLLocked returns the TTL an NSEC record should carry: the SOA minimum
