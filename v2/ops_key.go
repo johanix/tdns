@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -61,92 +60,58 @@ func (zd *ZoneData) UnpublishKeyRRs() error {
 	return nil
 }
 
-func (zd *ZoneData) VerifyPublishedKeyRRs() error {
-	apex, err := zd.GetOwner(zd.ZoneName)
+// VerifyPublishedKeyRRs checks that every KEY published at name is backed by a
+// private key this server actually holds, and warns about the ones that are not.
+//
+// name, not the zone apex. Sig0KeyPreparation is the only caller, and on a
+// delegation-sync parent it passes the DSYNC UPDATE target (updates.<zone>),
+// where the apex is the wrong owner entirely: the check found no KEY there,
+// concluded the zone had none, and minted an apex SIG(0) key nothing had asked
+// for -- using the algorithm from the CHILD half of the delegationsync config,
+// which on a parent is usually unset, so the whole call failed with "unknown
+// keygen algorithm". On the child path name IS the apex, so nothing changes there.
+//
+// That generate-and-publish tail is gone with it. Publishing was never this
+// function's job: the caller's own step 3 does it, for the right name and with
+// the algorithm the caller was given, and reaches it in exactly the case this
+// function is not called (no KEY published yet).
+func (zd *ZoneData) VerifyPublishedKeyRRs(name string) error {
+	owner, err := zd.GetOwner(name)
 	if err != nil {
 		return err
 	}
-	key_rrset, exist := apex.RRtypes.Get(dns.TypeKEY)
+	if owner == nil || owner.RRtypes == nil {
+		return nil // nothing published at name, nothing to verify
+	}
+	key_rrset, exist := owner.RRtypes.Get(dns.TypeKEY)
 	numpubkeys := len(key_rrset.RRs)
-	if exist && numpubkeys > 0 {
-		// If there is already a KEY RRset, we must ensure that we have access to the
-		// private key to be able to sign updates.
-		if numpubkeys > 1 {
-			zd.Logger.Printf("Warning: Zone %q has %d KEY records published. This is likely a mistake.", zd.ZoneName, numpubkeys)
-		}
-		// 1. Get the keys from the keystore
-		zd.Logger.Printf("VerifyPublishedKeyRRs(%q): KEY RRset exists. Checking availability of private key.", zd.ZoneName)
-		sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
-		if err != nil {
-			zd.Logger.Printf("Error from GetSig0Keys(%q, %s): %v", zd.ZoneName, Sig0StateActive, err)
-			return err
-		}
-		// 2. Iterate through the keys to match against keyid of published keys.
-		for _, pkey := range key_rrset.RRs {
-			found := false
-			pkeyid := pkey.(*dns.KEY).KeyTag()
-			for _, key := range sak.Keys {
-				if key.KeyRR.KeyTag() == pkeyid {
-					found = true
-					break
-				}
-			}
-			if !found {
-				zd.Logger.Printf("Warning: Zone %q: no active private key for the published KEY with keyid=%d. This key should be removed.", zd.ZoneName, pkeyid)
-			}
-		}
+	if !exist || numpubkeys == 0 {
 		return nil
 	}
 
-	// No KEY RRset found, try to find an active key in the keystore
-	sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
-	if err != nil {
-		return fmt.Errorf("VerifyPublishedKeyRRs(%q) failed to get SIG(0) active keys: %v", zd.ZoneName, err)
-	}
-	if len(sak.Keys) == 0 {
-		// Ok, no active key found, try to generate a new one
-		algstr := DelegationSyncConfig().Child.Update.Keygen.Algorithm
-		alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
-		if alg == 0 {
-			return fmt.Errorf("unknown keygen algorithm: %q", algstr)
-		}
-		// Generate a new key and store it in the KeyStore
-		// pkc, msg, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "tdns-auth", "active", dns.TypeKEY, alg, "", nil) // nil = no tx
-		// if err != nil {
-		// 	zd.Logger.Printf("Error from GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
-		// 	return err
-		// }
-
-		// zd.Logger.Printf(msg)
-
-		kp := KeystorePost{
-			Command:     "sig0-mgmt",
-			SubCommand:  "generate",
-			Zone:        zd.ZoneName,
-			Algorithm:   alg,
-			State:       Sig0StateActive,
-			ParentState: 255, // XXX: FIXME johani 20250930
-			Creator:     "bootstrap-sig0",
-		}
-		resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
-		if err != nil {
-			return fmt.Errorf("VerifyPublishedKeyRRs(%q) failed to generate keypair: %v", zd.ZoneName, err)
-		}
-		zd.Logger.Printf("%s", resp.Msg)
-
-		sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
-		if err != nil {
-			return fmt.Errorf("VerifyPublishedKeyRRs(%q) failed to get SIG(0) active keys: %v", zd.ZoneName, err)
-		}
-		if len(sak.Keys) == 0 {
-			return fmt.Errorf("VerifyPublishedKeyRRs(%q) failed to get SIG(0) active keys: %v", zd.ZoneName, err)
-		}
+	if numpubkeys > 1 {
+		zd.Logger.Printf("Warning: %q has %d KEY records published. This is likely a mistake.", name, numpubkeys)
 	}
 
-	err = zd.PublishKeyRRs(sak)
+	// A published KEY is only useful if we can sign with it.
+	zd.Logger.Printf("VerifyPublishedKeyRRs(%q): KEY RRset exists. Checking availability of private key.", name)
+	sak, err := zd.KeyDB.GetSig0Keys(name, Sig0StateActive)
 	if err != nil {
-		zd.Logger.Printf("Error from PublishKeyRRs(%q): %v", zd.ZoneName, err)
+		zd.Logger.Printf("Error from GetSig0Keys(%q, %s): %v", name, Sig0StateActive, err)
 		return err
+	}
+	for _, pkey := range key_rrset.RRs {
+		found := false
+		pkeyid := pkey.(*dns.KEY).KeyTag()
+		for _, key := range sak.Keys {
+			if key.KeyRR.KeyTag() == pkeyid {
+				found = true
+				break
+			}
+		}
+		if !found {
+			zd.Logger.Printf("Warning: %q: no active private key for the published KEY with keyid=%d. This key should be removed.", name, pkeyid)
+		}
 	}
 	return nil
 }

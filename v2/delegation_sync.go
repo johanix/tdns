@@ -289,9 +289,8 @@ func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
 }
 
 func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error {
-	lgDns.Info("Sig0KeyPreparation: setting up SIG(0) key pair", "zone", zd.ZoneName, "name", name)
+	lgDns.Debug("Sig0KeyPreparation: setting up SIG(0) key pair", "zone", zd.ZoneName, "name", name)
 
-	lgDns.Debug("Sig0KeyPreparation: checking whether zone allows updates and has KEY RRset published", "zone", zd.ZoneName, "name", name)
 	owner, err := zd.GetOwner(name)
 	lgDns.Debug("Sig0KeyPreparation: GetOwner result", "name", name, "owner", owner, "err", err)
 	if err != nil {
@@ -303,8 +302,32 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		_, keyrrexist = owner.RRtypes.Get(dns.TypeKEY)
 	}
 
+	// 1. May this server put anything of its own into the zone at all?
+	//
+	// This used to ask `allow-updates`, and that was the wrong question (#538).
+	// `allow-updates` gates inbound RFC 2136 DDNS arriving from the network;
+	// what happens below is an INTERNAL publish -- PublishKeyRRs posts
+	// UpdateRequest{InternalUpdate: true}, which ZoneUpdater admits regardless
+	// of that option, exactly as it admits the DSYNC RRset that PublishDsyncRRs
+	// publishes a few lines earlier in SetupZoneSync with no such gate.
+	//
+	// The consequence was a delegation-sync parent that advertised a DSYNC
+	// UPDATE target and then never generated the SIG(0) key that target names,
+	// so its KeyState responses went out unsigned. `updatepolicy.zone.type:
+	// none` -- the correct posture for such a parent -- clears allow-updates,
+	// so refusing inbound DDNS silently disabled the parent's own key.
+	//
+	// What actually governs an internal publish is whether this server
+	// originates the zone's content; a tdns-auth secondary must serve what it
+	// received, unmodified. dont-publish-key is the per-zone opt-out, below.
+	if !zoneMayOriginateContent(zd) {
+		lgDns.Warn("Sig0KeyPreparation: zone may not originate content, no SIG(0) key will be generated or published",
+			"zone", zd.ZoneName, "name", name, "zonetype", ZoneTypeToString[zd.ZoneType], "keyrrexist", keyrrexist)
+		return nil
+	}
+
 	if keyrrexist && !zd.Options[OptDontPublishKey] {
-		err := zd.VerifyPublishedKeyRRs()
+		err := zd.VerifyPublishedKeyRRs(name)
 		if err != nil {
 			lgDns.Error("error from VerifyPublishedKeyRRs", "name", name, "err", err)
 			return err
@@ -312,20 +335,17 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		lgDns.Info("Sig0KeyPreparation: verified published KEY RRset", "name", name)
 	}
 
-	// 1. Are updates to the zone data allowed?
-	if !zd.Options[OptAllowUpdates] {
-		if keyrrexist {
-			lgDns.Debug("Sig0KeyPreparation: zone does not allow updates, but KEY RRset is already published", "zone", zd.ZoneName, "name", name)
-		} else {
-			lgDns.Debug("Sig0KeyPreparation: zone does not allow updates, cannot publish KEY RRset", "zone", zd.ZoneName, "name", name)
-		}
+	// 2. The per-zone opt-out for this specific publish. Checked again inside
+	// PublishKeyRRs, which refuses outright; saying so here keeps the reason
+	// visible at default log level rather than only as a Debug non-event.
+	if zd.Options[OptDontPublishKey] {
+		lgDns.Info("Sig0KeyPreparation: dont-publish-key is set, no KEY RR will be published",
+			"zone", zd.ZoneName, "name", name, "keyrrexist", keyrrexist)
 		return nil
 	}
 
-	lgDns.Debug("Sig0KeyPreparation: zone allows updates", "zone", zd.ZoneName, "name", name, "keyrrexist", keyrrexist, "dontPublishKey", zd.Options[OptDontPublishKey])
-
-	// 2. Updates allowed, but there is no KEY RRset published.
-	if !keyrrexist && !zd.Options[OptDontPublishKey] {
+	// 3. Publication allowed, but there is no KEY RRset published.
+	if !keyrrexist {
 		lgDns.Debug("Sig0KeyPreparation: fetching the private SIG(0) key", "name", name)
 		sak, err := kdb.GetSig0Keys(name, Sig0StateActive)
 		if err != nil {

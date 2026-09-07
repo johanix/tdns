@@ -414,13 +414,24 @@ reasoning that every delsync path that publishes into the zone is itself gated o
 `allow-updates`/`allow-child-updates`. Those specific claims are **correct** and
 were re-verified:
 
-- child KEY publication (`Sig0KeyPreparation`) publishes only
-  `if Options[OptAllowUpdates]` ([delegation_sync.go:302](../v2/delegation_sync.go)),
-  and that one gate covers the parent's UPDATE-receiver key prep too
-  (`ParentSig0KeyPrep` funnels into the same function), so with `allow-updates`
-  off it is a clean no-op, keygen included;
-- child CSYNC publication (`SyncZoneDelegationViaNotify`) likewise
-  ([delegation_sync.go:521](../v2/delegation_sync.go));
+- child KEY publication (`Sig0KeyPreparation`) publishes only if the zone may
+  originate content ([delegation_sync.go](../v2/delegation_sync.go)), and that
+  one gate covers the parent's UPDATE-receiver key prep too
+  (`ParentSig0KeyPrep` funnels into the same function), so on a tdns-auth
+  secondary it is a clean no-op, keygen included.
+  **Rev 2.3 (2026-09-07, #538):** this gate was `Options[OptAllowUpdates]` when
+  rev 2 was written. That was the wrong question — `allow-updates` governs
+  inbound RFC 2136 DDNS, and the publish here is `InternalUpdate`, which the
+  applier admits regardless — and it broke the ordinary case it was never meant
+  to touch: a delegation-sync PRIMARY that refuses inbound DDNS advertised a
+  DSYNC UPDATE target and never generated the key that target names. It is now
+  `zoneMayOriginateContent`, i.e. the same predicate as Fix D, which is a
+  *stronger* statement of what this bullet needs than the option was;
+- child CSYNC publication (`SyncZoneDelegationViaNotify`) is still gated on
+  `Options[OptAllowUpdates]` ([delegation_sync.go](../v2/delegation_sync.go)).
+  Same category error as the KEY gate above and not yet changed: on a secondary
+  the conclusion holds either way, but on a primary that refuses inbound DDNS
+  the CSYNC is not published while the NOTIFY(CSYNC) is still sent;
 - parent-side child-delegation apply goes through the CHILD-UPDATE path, gated on
   `allow-child-updates` and enforced at the applier;
 - CDS via `PublishCdsRRs` bypasses `allow-updates` but is a **no-op without local
@@ -439,7 +450,7 @@ gates **KeyState EDNS(0) processing on incoming queries**
 disables that on a tdns-auth secondary, and that is correct: the KeyState response
 is signed with the receiver's SIG(0) key, the receiver is either the primary or an
 agent, the keystore is not replicated by AXFR, and the one path that would
-generate a key locally is `allow-updates`-gated and therefore off. A tdns-auth
+generate a key locally is origination-gated and therefore off. A tdns-auth
 secondary can never hold that key in any deployment, so leaving the processing on
 would produce **unsigned** KeyState responses — worse than not answering.
 
