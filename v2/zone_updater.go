@@ -756,6 +756,11 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 	}()
 	zd.ensureWorkingSet()
 
+	// A CSYNC/DSYNC-driven child update can create or remove a delegation, and
+	// the names under it are not in the update -- same reconciliation the zone
+	// path needs, for the same reason (#550).
+	childNsBefore := map[string]bool{}
+
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
@@ -766,6 +771,18 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 		rrcopy.Header().Ttl = zd.UpdatePolicy.Child.TTL
 		rrcopy.Header().Class = dns.ClassINET
 
+		if _, seen := childNsBefore[ownerName]; !seen {
+			childNsBefore[ownerName] = zd.ownerIsDelegationLocked(ownerName)
+		}
+
+		// No KEY guard here on purpose. ZoneUpdater's CHILD-UPDATE case
+		// already refuses key material, loudly and for every delegation
+		// backend, and this applier's only caller is the direct backend --
+		// which runs downstream of it. Adding a second rule at one backend is
+		// the per-backend enforcement that guard's own comment exists to
+		// argue against. The reconcile below still deletes a KEY at a cut,
+		// so a leak that predates the guard is cleaned up rather than kept.
+		//
 		// First check whether this update is allowed by the update-policy.
 		if _, ok := zd.UpdatePolicy.Child.RRtypes[rrtype]; !ok {
 			lg.Error("ApplyChildUpdateToZoneData: RR type denied by policy", "rrtype", rrtypestr)
@@ -819,10 +836,10 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 			if len(rrset.RRs) == 0 {
 				zd.stageDeleteLocked(ownerName, rrtype)
 			} else {
-				// RFC 4035 §2.2: at a delegation point, only DS is
-				// authoritative parent data and gets an RRSIG. NS and
-				// glue (A/AAAA) MUST NOT be signed at the parent.
-				if dak != nil && rrtype == dns.TypeDS {
+				// RFC 4035 §2.2, via the predicate the whole tree now shares:
+				// at a delegation point only the DS is authoritative parent
+				// data. NS and glue are the child's, signed in the child.
+				if dak != nil && zd.signableLocked(ownerName, rrtype) {
 					_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
 					if err != nil {
 						lg.Error("ApplyChildUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
@@ -862,10 +879,9 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 			lg.Debug("ApplyChildUpdateToZoneData: adding RR", "rrtype", rrtypestr, "rr", rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			rrset.RRSIGs = []dns.RR{}
-			// RFC 4035 §2.2: only DS gets an RRSIG at a delegation
-			// point. NS and glue (A/AAAA) MUST NOT be signed at the
-			// parent.
-			if dak != nil && rrtype == dns.TypeDS {
+			// See the removal branch above: only the DS at a delegation
+			// point is ours to sign.
+			if dak != nil && zd.signableLocked(ownerName, rrtype) {
 				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
 				if err != nil {
 					lg.Error("ApplyChildUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
@@ -877,6 +893,8 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 		}
 		continue
 	}
+
+	zd.reconcileDelegationChangesLocked(childNsBefore, dak)
 
 	lg.Debug("ApplyChildUpdateToZoneData done", "updated", updated)
 
@@ -962,6 +980,35 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 
 		if _, seen := nsBefore[ownerName]; !seen {
 			nsBefore[ownerName] = zd.ownerIsDelegationLocked(ownerName)
+		}
+
+		// A KEY at a delegation point is a child's, and a child's KEY is never
+		// zone content. Unlike CHILD-UPDATE, the ZONE-UPDATE path has no
+		// choke-point guard in ZoneUpdater -- and two of this applier's three
+		// callers never pass through ZoneUpdater at all. zone_delta_replay
+		// re-applies persisted deltas with InternalUpdate set, deliberately
+		// skipping the update-policy re-check, so anything that once reached a
+		// delta replays past every check upstream of here. This is the last
+		// point before the write, which is the only place that covers it.
+		//
+		// ADDS only. A delete must be able to take a KEY back out -- one that
+		// leaked in before this rule existed, or through the ordering below --
+		// and refusing the delete along with the add is how a leak becomes
+		// permanent.
+		//
+		// And this test is deliberately not the whole rule: it asks whether
+		// the name is a cut ALREADY, so an update that writes the KEY before
+		// the NS that makes it one walks straight past. That is the same trap
+		// signableLocked documents for NS. What closes it is removal rather
+		// than refusal -- reconcileDelegationChangesLocked below, and the
+		// signing passes, delete a KEY found at a cut however it arrived.
+		//
+		// The zone's OWN KEY, at the apex or at any name that is not a cut, is
+		// ordinary content and is untouched by this.
+		if rrtype == dns.TypeKEY && class == dns.ClassINET && zd.ownerIsDelegationLocked(ownerName) {
+			lg.Warn("ApplyZoneUpdateToZoneData: refusing to add a KEY at a delegation point as zone content; a child's KEY belongs in the truststore",
+				"zone", zd.ZoneName, "owner", ownerName)
+			continue
 		}
 
 		// CDS-publication observability: trace the apex CDS RRset's
@@ -1259,46 +1306,52 @@ func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, d
 
 	all := zd.workingOwnerNamesLocked()
 	for _, cut := range flipped {
-		nowDelegation := zd.ownerIsDelegationLocked(cut)
-		for _, below := range all {
-			if core.EqualNames(below, cut) || !dns.IsSubDomain(cut, below) {
+		// The cut itself is in scope, not only what is under it: the name at a
+		// delegation point keeps its DS and loses everything else, and when the
+		// delegation goes its former glue becomes ordinary address data. It
+		// also covers an update whose own actions arrive in an awkward order --
+		// glue added before the NS that turns the name into a cut.
+		for _, name := range all {
+			if !dns.IsSubDomain(cut, name) {
 				continue
 			}
-			od := zd.stagedOwner(below)
+			od := zd.stagedOwner(name)
 			if od == nil {
 				continue
 			}
-
-			if nowDelegation {
-				zd.stripOccludedRRSIGsLocked(below, od)
-				continue
-			}
-
-			// The cut is gone. Anything still under another delegation stays
-			// the child's -- nested delegations mean one disappearing does not
-			// necessarily surface what is beneath it.
-			if dak == nil || zd.nameOccludedLocked(below) {
-				continue
-			}
+			isCut := zd.ownerIsDelegationLocked(name)
 			for _, rrt := range od.RRtypes.Keys() {
-				if !zd.signableLocked(below, rrt) {
+				if rrt == dns.TypeRRSIG {
+					continue
+				}
+				// Key material at a cut is removed, not merely unsigned. This
+				// is what catches a KEY added before the NS that made the name
+				// a delegation, which the applier's own test above cannot see.
+				if rrt == dns.TypeKEY && isCut {
+					zd.deleteChildKeyAtCutLocked(name)
 					continue
 				}
 				rrset := od.RRtypes.GetOnlyRRSet(rrt)
-				if len(rrset.RRs) == 0 {
+				if !zd.signableLocked(name, rrt) {
+					zd.stripRRSIGsLocked(name, rrt, rrset)
+					continue
+				}
+				// Ours now. Sign only what is actually unsigned: everything
+				// else under the cut was already correct before it moved.
+				if dak == nil || len(rrset.RRs) == 0 || len(rrset.RRSIGs) > 0 {
 					continue
 				}
 				rrset.RRtype = rrt
-				if _, serr := zd.SignRRset(&rrset, below, dak, true, nil); serr != nil {
-					lg.Error("reconcileDelegationChangesLocked: signing a name a removed delegation uncovered failed",
-						"zone", zd.ZoneName, "name", below, "rrtype", dns.TypeToString[rrt], "error", serr)
+				if _, serr := zd.SignRRset(&rrset, name, dak, true, nil); serr != nil {
+					lg.Error("reconcileDelegationChangesLocked: signing a name the moved delegation uncovered failed",
+						"zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[rrt], "error", serr)
 					continue
 				}
-				zd.stageRRsetLocked(below, rrset)
+				zd.stageRRsetLocked(name, rrset)
 			}
 		}
 		lg.Debug("reconcileDelegationChangesLocked: delegation boundary moved",
-			"zone", zd.ZoneName, "name", cut, "is_delegation_now", nowDelegation)
+			"zone", zd.ZoneName, "name", cut, "is_delegation_now", zd.ownerIsDelegationLocked(cut))
 	}
 }
 
