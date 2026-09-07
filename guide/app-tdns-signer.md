@@ -19,6 +19,28 @@ This separates the two jobs cleanly. The primary deals with zone content
 arriving in whatever form it arrives in, and never holds a private key. The
 signer holds the keys, runs the rollovers, and has one input: a zone transfer.
 
+## Why not just sign on the primary?
+
+tdns-auth can sign its own zones, so a signer is only worth running when the
+two ends should differ. The usual reason is **asymmetric hardware**.
+
+Put the authoritative server where the zone data is — which may be modest
+hardware, an appliance or a small board — and put the signer on a host chosen
+for the signing work. The signer can then use an algorithm set the primary
+could not carry: the post-quantum algorithms in particular (Falcon, MAYO,
+SNOVA, SQIsign, ML-DSA — see [post-quantum DNSSEC](pq-dnssec.md)) are far more
+expensive to sign with than ECDSA or Ed25519, in CPU and in key and signature
+size.
+
+So the signer's algorithm selection (`cmdv2/signer/algs.list`) is **expected to
+differ** from the primary's, and usually to be larger. If the two were
+constrained to the same set there would be little reason to split them at all.
+
+What the signer's selection must cover is every algorithm named by a DNSSEC
+policy it is asked to apply — not whatever the primary happens to have linked.
+A policy naming an algorithm the binary did not link quarantines that zone at
+load, naming the algorithm.
+
 ## It is tdns-auth under another name
 
 `tdns-signer` is the same program as `tdns-auth`, built as a second binary.
