@@ -55,18 +55,18 @@ func updaterTestZone(t *testing.T, ztype ZoneType, opts map[ZoneOption]bool) (*Z
 // bypasses the allow-updates call-site convention -- through the engine against
 // a mirroring secondary, and asserts the zone is untouched.
 //
-// HONESTY NOTE: this is a smoke test, not a mutation-verified one. Removing the
-// gate does NOT make it fail, because the ZONE-UPDATE apply path for a
-// ZoneType==Secondary calls kdb.ApplyZoneUpdateToDB, which is currently a
-// `return nil` placeholder -- so today a ZONE-UPDATE against a secondary is
-// already inert for a second, unrelated reason. The gate's real value here is
-// that it forecloses the vector *before* that placeholder is implemented, at
-// which point every InternalUpdate publisher would start mutating secondaries.
-// The gate's logic itself is pinned by the unit-level tests below; the
-// end-to-end behaviour on a secondary is on the testbed list.
+// This IS mutation-verified now (#554). It was not: the ZONE-UPDATE apply path
+// for a ZoneType==Secondary went to kdb.ApplyZoneUpdateToDB, a `return nil`
+// placeholder, so a ZONE-UPDATE against a secondary was inert for a second and
+// unrelated reason and removing the gate changed nothing. That placeholder is
+// gone -- a secondary that gets past the gate now has the update applied to its
+// zone data like any other zone -- so this test fails when the gate does, which
+// is what it was always meant to assert. It needs a KeyDB with a database
+// behind it for that: the applier resolves DNSSEC keys before it looks at
+// whether the zone signs at all.
 func TestApplierGateDropsInternalUpdateOnSecondary(t *testing.T) {
 	withAppType(t, AppTypeAuth)
-	zd, kdb := updaterTestZone(t, Secondary, map[ZoneOption]bool{})
+	zd, kdb := updaterZoneWithRealKeyDB(t, Secondary, map[ZoneOption]bool{})
 	before := zd.CurrentSerial
 
 	rr, err := dns.NewRR("injected.example.test. 60 IN TXT \"mutation\"")
