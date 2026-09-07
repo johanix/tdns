@@ -18,6 +18,10 @@ non-signing case** — the serial-mirror fix in [[secondary-zones-immutable]]
 collapses the inbound/outbound serial spaces, making an inbound delta a verbatim
 outbound-chain link (§5). Only the *signing*-secondary relay (staging-apply)
 stays deferred (§7 F2-follow-up, §8 PR-2).
+**Amended 2026-09-07 (§12):** PR-2 has since landed (#548, on top of #514), so
+the signing-secondary relay is no longer deferred. §5, §8 and §9 are left as
+written; §12 records what the implementation found, including one case §5's
+reasoning does not cover.
 **Depends on:** `2026-07-25-secondary-zones-immutable.md` — **landed**, whatever
 that document's own status line still says: `v2/zone_origination.go`
 (`zoneMayOriginateContent`), the `SuppressedOptions` plumbing and the
@@ -573,3 +577,100 @@ SOA by `ParseZoneFromReader`, and until a restarted secondary loads its
 persisted copy the serial is 0 — so the first transfer after every restart is a
 full AXFR no matter how good the delta path is. That brief's Stage 2.1 is what
 gives this one a base to ask from.
+
+---
+
+## 12. Amendment 2026-09-07 — PR-2 landed (#548)
+
+Everything above is left as written. This section records what happened when
+the deferred half was actually built, on top of `fix/sign-before-publish`
+(#514).
+
+**§9's first bullet is closed.** Signing-secondary onward-relay (F2-follow-up
+second half, §5, §8 PR-2) is implemented in #548. The change is the removal of
+two clauses, both `&& !zd.signsItsOwnContent()`: one in `shouldRequestIxfr`
+(`v2/zone_utils.go`), which gated *asking* for a delta, and one staging
+`wsIxfrEpochReset` (`v2/zone_mutation.go`), which gated *keeping* the outbound
+chain.
+
+### §5's "harder staging-apply variant" did not need building
+
+§5 describes the signing case as one where the secondary "would have to *build*
+fresh outbound deltas from its re-signed data — the harder staging-apply
+variant". That framing was right about the requirement and wrong about the
+cost. `updateIxfrChainLocked` already diffs the outgoing snapshot against the
+data about to be published, so it *is* a builder of fresh outbound deltas from
+re-signed data; letting it run on a signing secondary produces the link §5 says
+has to be constructed. No staging API and no serial translation were needed
+there either — the difference from the non-signing case is only that the link is
+computed rather than carried over verbatim, and computing it is what the publish
+path already did.
+
+The inbound half was likewise mostly in place before this PR: #514's scoped
+signing already staged `wsSignOwners = new_zd.ixfrTouched`, so the publish knew
+which owners a delta had reached.
+
+### What the plan did not anticipate: knowing the scope is not re-signing it
+
+Scoping the signing pass to the touched owners is necessary and was not
+sufficient. `signStagedScopeLocked` signed with `force=false` — "sign what is
+unsigned" — which is correct for a wholesale replacement, since an AXFR or a
+file reload arrives carrying no RRSIGs of ours. A delta does not arrive that
+way. It is applied onto the copy we already signed, so an RRset the delta
+changed but did not *empty* keeps our RRSIG over its previous contents, and
+`SignRRset` compares keytag and remaining lifetime, never rdata: it sees a
+signature by an active key nowhere near expiry, stands down, and the publish
+serves changed records under a signature that does not cover them.
+
+Not self-healing, unlike every failure §1 reasons about. The resigner only
+revisits signatures approaching expiry, so the name stays bogus for the whole
+signature lifetime — and because the outbound epoch is no longer reset, the
+bogus RRset is relayed onward as a delta. Fixed in #548 by making `force`
+follow the scope (`zd.wsSignOwners != nil`), so only the delta arm forces.
+
+The general lesson for §1: the self-healing invariant covers the *apply*, which
+fails closed to AXFR. It does not extend to the *publish*, where a delta that
+applied cleanly can still be signed wrongly, and nothing downstream disagrees
+loudly enough to notice.
+
+### §5's optimism needs one qualification
+
+On a signing secondary, a delta increments in fewer cases than §5's reasoning
+implies:
+
+| delta shape | outcome |
+|---|---|
+| new name, or a new type at an existing name | applies, signed correctly |
+| RRset keeps ≥ 1 pre-existing record | applies, signed correctly (after the `force` fix) |
+| RRset emptied and refilled | **refused**, AXFR fallback on the same upstream |
+
+The third row is `checkSignaturesIntact` doing what §4.4's decision asks of it —
+"a step that leaves an RRset unsigned aborts to AXFR" — and it is correct. But
+emptying an RRset drops the type and our signatures with it, so a *one-record
+RRset changing value* always trips it. That is the commonest change there is,
+and on a signing secondary it never travels as a delta at all. §5's "onward
+relay is nearly free" holds for the non-signing mirror it was written about;
+for the signing case the delta path covers a real but narrower set of changes.
+
+A signed *upstream* is outside that table entirely: the apply is exact-match, so
+a primary's own RRSIG and NSEC records in a delete section match nothing we hold
+and the delta is refused. The increment only ever happens against an unsigned
+upstream, which is the bump-in-the-wire deployment this is for.
+
+### Config
+
+§8 PR-1's `request-ixfr` option acquired a signing-secondary exclusion in the
+parser that is not in this plan and did not survive review: it discarded both
+`request-ixfr` and `no-request-ixfr` on a signing zone. Since F1 makes the
+default ON, discarding the opt-out did not make an option inert, it made the
+feature unturnoffable. Removed in #548.
+
+### Size, against §11
+
+§11 says "Do not count the signing-secondary staging-apply relay (§9)."
+For whoever calibrates the next brief from this one, it came to **4 files, ~358
+insertions / ~100 deletions**, of which the production change is about 40 lines
+across three files — the gate removal, the `force` change, and the parser. The
+rest is test. The estimate's instinct that this was the expensive half was
+wrong, and the reason is the one in the first subsection: #514 and #328 had
+already built both halves of the machine.
