@@ -1832,6 +1832,41 @@ func assertPublishedRRsetVerifies(t *testing.T, zd *ZoneData, owner string, rrty
 	}
 }
 
+// assertPublishedAddresses checks the exact rdata set published at an owner's A
+// RRset.
+//
+// The signature check above cannot stand in for this, and the gap is the point:
+// a delta that applied as a NO-OP would leave the previous RRset in place,
+// still correctly signed by us, and every verification would pass. Naming the
+// set the delta should have produced is what makes these tests observe that it
+// landed at all, rather than only that whatever is there is signed.
+func assertPublishedAddresses(t *testing.T, zd *ZoneData, owner string, want []string) {
+	t.Helper()
+	od := getOwnerFrom(zd.publishedSnapshot(), owner)
+	if od == nil {
+		t.Fatalf("%s is not in the published snapshot", owner)
+	}
+	var got []string
+	for _, rr := range od.RRtypes.GetOnlyRRSet(dns.TypeA).RRs {
+		a, ok := rr.(*dns.A)
+		if !ok {
+			t.Fatalf("%s A RRset holds a %T", owner, rr)
+		}
+		got = append(got, a.A.String())
+	}
+	sort.Strings(got)
+	sorted := append([]string(nil), want...)
+	sort.Strings(sorted)
+	if len(got) != len(sorted) {
+		t.Fatalf("%s publishes %d A records %v, want %d %v", owner, len(got), got, len(sorted), sorted)
+	}
+	for i := range got {
+		if got[i] != sorted[i] {
+			t.Fatalf("%s publishes %v, want %v", owner, got, sorted)
+		}
+	}
+}
+
 // applyIxfrAndPublish drives the inbound path a refresh takes once a delta has
 // been collected: apply onto a scratch zone, then swap and publish it.
 func applyIxfrAndPublish(t *testing.T, zd *ZoneData, rrs []dns.RR) {
@@ -1865,30 +1900,41 @@ func applyIxfrAndPublish(t *testing.T, zd *ZoneData, rrs []dns.RR) {
 //
 // Both shapes below were among the ones PR #548 named as unmeasured.
 func TestPublishResignsAnRRsetAnInboundDeltaChanged(t *testing.T) {
+	// ixResignZone publishes www with 10.0.0.3 and 10.0.0.4.
+	const before = "10.0.0.3"
 	for _, tc := range []struct {
 		what           string
 		removed, added []dns.RR
+		want           []string
 	}{
 		{
 			what:  "a record added to an RRset we had already signed",
 			added: []dns.RR{ixA(t, "www.example.", "10.0.0.5")},
+			want:  []string{before, "10.0.0.4", "10.0.0.5"},
 		},
 		{
 			what:    "one member of an RRset replaced, the others left in place",
 			removed: []dns.RR{ixA(t, "www.example.", "10.0.0.4")},
 			added:   []dns.RR{ixA(t, "www.example.", "10.0.0.5")},
+			want:    []string{before, "10.0.0.5"},
 		},
 		{
 			what:    "a record removed from an RRset that survives it",
 			removed: []dns.RR{ixA(t, "www.example.", "10.0.0.4")},
+			want:    []string{before},
 		},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			zd := ixSigningSecondary(t, ixResignZone)
+			assertPublishedAddresses(t, zd, "www.example.", []string{before, "10.0.0.4"})
 			assertPublishedRRsetVerifies(t, zd, "www.example.", dns.TypeA)
 
 			applyIxfrAndPublish(t, zd, ixDeltaStream(t, 7, 8, tc.removed, tc.added))
 
+			// The delta landed, and what landed is signed. Both halves are
+			// needed: the first alone would pass on a bogus zone, the second
+			// alone would pass on a zone the delta never reached.
+			assertPublishedAddresses(t, zd, "www.example.", tc.want)
 			assertPublishedRRsetVerifies(t, zd, "www.example.", dns.TypeA)
 		})
 	}
