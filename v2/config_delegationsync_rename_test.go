@@ -145,6 +145,89 @@ func TestBothShapesIsAnError(t *testing.T) {
 	}
 }
 
+// Regression for an incomplete hasContent: a canonical block whose ONLY setting
+// was one the old field list did not look at read as absent, so the fold
+// overwrote it with the deprecated block instead of refusing the pair — the
+// silent overwrite the both-shapes error exists to prevent.
+//
+// Each case sets exactly one canonical field the enumeration missed, plus a
+// deprecated member for the same side. All must be refused.
+func TestCanonicalOnlyFieldsAreNotSilentlyOverwritten(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		m    map[string]interface{}
+		want string
+	}{
+		{"childsync.api.baseurl", map[string]interface{}{
+			"childsync": map[string]interface{}{
+				"api": map[string]interface{}{"baseurl": "https://{TARGET}:{PORT}/dsync/v1"},
+			},
+			"delegationsync": map[string]interface{}{"parent": childsyncBlock()},
+		}, "delegationsync.parent:"},
+		{"childsync.api.cert", map[string]interface{}{
+			"childsync": map[string]interface{}{
+				"api": map[string]interface{}{"cert": "/etc/tdns/dsync-api.crt"},
+			},
+			"delegationsync": map[string]interface{}{"parent": childsyncBlock()},
+		}, "delegationsync.parent:"},
+		{"parentsync.api.cafile", map[string]interface{}{
+			"parentsync": map[string]interface{}{
+				"api": map[string]interface{}{"cafile": "/etc/tdns/dsync-api-ca.crt"},
+			},
+			"delegationsync": map[string]interface{}{"child": parentsyncBlock()},
+		}, "delegationsync.child:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var c Config
+			if err := decodeConfigMap(tc.m, &c, nil); err == nil {
+				t.Fatalf("a canonical block setting only %s was silently overwritten by the deprecated one", tc.name)
+			} else if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error does not name the deprecated key: %v", err)
+			}
+		})
+	}
+}
+
+// An explicitly empty `bootstrap.methods: []` is not the same as an absent one:
+// compileChildBootstrapMethods reads nil as the default pair (at-apex, at-ns)
+// and a non-nil empty slice as "no methods at all". A len() > 0 presence test
+// erased that distinction, so an operator's explicit empty was replaced by
+// whatever the deprecated block said.
+func TestExplicitEmptyBootstrapMethodsCountsAsContent(t *testing.T) {
+	var c Config
+	m := map[string]interface{}{
+		"parentsync": map[string]interface{}{
+			"update": map[string]interface{}{
+				"bootstrap": map[string]interface{}{"methods": []interface{}{}},
+			},
+		},
+		"delegationsync": map[string]interface{}{"child": parentsyncBlock()},
+	}
+	if err := decodeConfigMap(m, &c, nil); err == nil {
+		t.Fatalf("an explicit `methods: []` was silently replaced; methods = %#v",
+			c.ParentSync.Update.Bootstrap.Methods)
+	} else if !strings.Contains(err.Error(), "delegationsync.child:") {
+		t.Errorf("error does not name the deprecated key: %v", err)
+	}
+
+	// And the distinction the refusal protects: nil is the default pair,
+	// explicitly empty is no methods.
+	fromNil, err := compileChildBootstrapMethods(nil)
+	if err != nil {
+		t.Fatalf("compile(nil): %v", err)
+	}
+	if len(fromNil) != 2 {
+		t.Errorf("compile(nil) = %v, want the default pair", fromNil)
+	}
+	fromEmpty, err := compileChildBootstrapMethods([]string{})
+	if err != nil {
+		t.Fatalf("compile([]): %v", err)
+	}
+	if len(fromEmpty) != 0 {
+		t.Errorf("compile([]) = %v, want no methods", fromEmpty)
+	}
+}
+
 // An EMPTY deprecated block must not erase a populated canonical one. This is
 // why the shadow fields are pointers: with plain structs, "absent" and "present
 // but empty" decode identically and the fold would silently blank the config.

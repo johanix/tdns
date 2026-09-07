@@ -45,7 +45,10 @@ func keyRRsFor(q chan UpdateRequest, name string) []*dns.KEY {
 	var out []*dns.KEY
 	for {
 		select {
-		case ur := <-q:
+		case ur, ok := <-q:
+			if !ok {
+				return out
+			}
 			if !ur.InternalUpdate {
 				continue
 			}

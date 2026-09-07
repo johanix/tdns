@@ -120,7 +120,7 @@ func compileChildBootstrapMethods(methods []string) ([]string, error) {
 		// zone that cannot use it nothing.
 		return []string{"at-apex", "at-ns"}, nil
 	}
-	if err := validateConfigTokens(methods, validChildMethods, "child.update.bootstrap.methods"); err != nil {
+	if err := validateConfigTokens(methods, validChildMethods, "parentsync.update.bootstrap.methods"); err != nil {
 		return nil, err
 	}
 	return methods, nil

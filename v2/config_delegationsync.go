@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"sync/atomic"
 
@@ -118,19 +119,31 @@ func (conf *Config) FoldDeprecatedDelegationSync() error {
 // only to catch a config that sets both the canonical and the deprecated
 // spelling; a zero block is indistinguishable from an absent one, which is
 // exactly the case where folding is safe.
+//
+// DeepEqual against the zero value, NOT a hand-written field list. The
+// enumeration this replaces was incomplete -- it never looked at api.baseurl,
+// api.dialect, api.cert/key, api.client-auth or api.cafile -- so a canonical
+// block that set only one of those read as ABSENT, and the fold overwrote it
+// with the deprecated block instead of refusing the pair. Silently: the exact
+// failure the both-shapes error exists to prevent. An enumeration also has to be
+// revisited every time a field is added to either block, and would not have been.
+//
+// DeepEqual also distinguishes a nil slice from an explicitly empty one, which
+// is load bearing here: compileChildBootstrapMethods reads nil as "the default
+// pair, at-apex + at-ns" and a non-nil empty slice as "no methods at all", so
+// `len(...) > 0` silently erased an operator's `bootstrap.methods: []`.
+//
+// The derived fields are zeroed first. They are never decoded, and the fold runs
+// before anything compiles them, but comparing them would make the predicate
+// depend on WHEN it is called.
 func (c ChildSyncConf) hasContent() bool {
-	return len(c.Schemes) > 0 ||
-		c.Notify.Target != "" || c.Notify.Port != 0 || len(c.Notify.Types) > 0 || len(c.Notify.Addresses) > 0 ||
-		c.Update.Target != "" || c.Update.Port != 0 || len(c.Update.Types) > 0 || len(c.Update.Addresses) > 0 ||
-		c.Update.Keygen != DsyncKeygenConf{} ||
-		c.Api.Target != "" || c.Api.Port != 0 || len(c.Api.Listen) > 0 ||
-		len(c.Policies) > 0
+	c.CompiledPolicies = nil
+	return !reflect.DeepEqual(c, ChildSyncConf{})
 }
 
 func (c ParentSyncConf) hasContent() bool {
-	return len(c.Schemes) > 0 ||
-		len(c.Update.Bootstrap.Methods) > 0 || c.Update.Keygen != DsyncKeygenConf{} || c.Update.AllowInsecure ||
-		len(c.Api.Credentials) > 0 || c.Api.AllowInsecure
+	c.CompiledMethods = nil
+	return !reflect.DeepEqual(c, ParentSyncConf{})
 }
 
 type ChildSyncConf struct {
