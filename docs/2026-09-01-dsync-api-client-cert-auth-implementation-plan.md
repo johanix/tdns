@@ -548,7 +548,7 @@ func (t *DsyncApiChildTLSConf) Validate() error {
 		return nil
 	}
 	if strings.TrimSpace(t.CertFile) == "" || strings.TrimSpace(t.KeyFile) == "" {
-		return fmt.Errorf("delegationsync.child.api.credentials[].tls needs both cert and key")
+		return fmt.Errorf("delegationsync.parentsync.api.credentials[].tls needs both cert and key")
 	}
 	return nil
 }

@@ -25,7 +25,7 @@ intersection; absent SVCB falls back to the configured list).
 Receiver's SIG(0) on KeyState responses against a receiver KEY that is either
 manually trusted or DNSSEC-validated together with the DSYNC that named it;
 unauthenticated responses (and the SVCB bootstrap advertisement) are rejected
-unless `delegationsync.child.update.allow-insecure` is set; the inquiry moved
+unless `delegationsync.parentsync.update.allow-insecure` is set; the inquiry moved
 to TCP. Decisions in `docs/2026-09-02-ddns-keystate-d7-mutual-auth.md`.
 Only (iii), signing plain UPDATE responses, remains of D-7.
 
@@ -184,7 +184,7 @@ truststore and marked trusted (`tdns-cli truststore sig0 add … ; … trust`), 
 DSYNC lookup DNSSEC-validated — `DsyncTarget.Validated` now exists for that;
 an unvalidated DSYNC would let a forged target choose the identity. A present
 but failing signature is always rejected. A reply that merely cannot be
-authenticated is rejected unless `delegationsync.child.update.allow-insecure`
+authenticated is rejected unless `delegationsync.parentsync.update.allow-insecure`
 is set (then acted on with a Warn). The same switch gates the SVCB bootstrap
 advertisement, which is otherwise treated as absent when unvalidated (the
 #471 review's carry-over 6). A bogus DNSSEC verdict, on the receiver KEY,

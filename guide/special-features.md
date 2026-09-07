@@ -83,7 +83,7 @@ by adding the zone option `childsync` (zone
 option `OptChildSync`). When set, tdns-auth synthesises
 the necessary DSYNC RRs at the well-known owner name
 `_dsync.<zonename>` based on the global
-`delegationsync.parent.*` configuration:
+`delegationsync.childsync.*` configuration:
 
 ```yaml
 delegationsync:
@@ -350,7 +350,7 @@ Four rules matter more than the list itself:
 - **An advertisement that cannot be authenticated is
   ignored**, and the configured list is used instead. The
   SVCB and the DSYNC record that named its target must both
-  be DNSSEC-validated; `delegationsync.child.update.allow-insecure`
+  be DNSSEC-validated; `delegationsync.parentsync.update.allow-insecure`
   waives that for a lab, but nothing waives a **bogus**
   verdict — a failed chain of trust is never treated as an
   unsigned one.
@@ -533,7 +533,7 @@ tdns-cli auth dsync-api cert-credential add \
 
 `credential list` and `cert-credential list` show both kinds. The child
 configures a nested `tls:` block instead of `username`/`key`. The parent
-opts in with `delegationsync.parent.api.client-auth`. Enabling or
+opts in with `delegationsync.childsync.api.client-auth`. Enabling or
 disabling that block changes the TLS handshake and needs a process
 restart; a config reload updates the middleware but not the
 `CertificateRequest`.
@@ -682,7 +682,7 @@ So, on the child side:
 - **A credential is scoped to one parent** and is never sent
   to another.
 
-`delegationsync.child.api.allow-insecure` relaxes the first
+`delegationsync.parentsync.api.allow-insecure` relaxes the first
 two of those -- plaintext endpoints *and* unvalidated
 discovery, deliberately as a single switch, because they are
 the same protection seen from two sides and an operator who

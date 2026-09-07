@@ -33,6 +33,12 @@ func TestClassifyUnusedConfigKeys(t *testing.T) {
 		"delegationsync.parent.update.key-verification",
 		"delegationsync.parent.bootstrap",
 		"delegationsync.parent.bootstrap.methods",
+		// The same retired keys under the block's new name: an operator who
+		// renamed parent: -> childsync: but kept a retired subkey must still be
+		// told it is retired, not that it is a typo.
+		"delegationsync.childsync.update.key-verification",
+		"delegationsync.childsync.bootstrap",
+		"delegationsync.childsync.bootstrap.methods",
 		// genuine typos — not deprecated, should land in unknown
 		"servce", // misspelled "service"
 		"dnsengine.adresses",
@@ -61,6 +67,12 @@ func TestClassifyUnusedConfigKeys(t *testing.T) {
 		"delegationsync.parent.update.key-verification",
 		"delegationsync.parent.bootstrap",
 		"delegationsync.parent.bootstrap.methods",
+		// The same retired keys under the block's new name: an operator who
+		// renamed parent: -> childsync: but kept a retired subkey must still be
+		// told it is retired, not that it is a typo.
+		"delegationsync.childsync.update.key-verification",
+		"delegationsync.childsync.bootstrap",
+		"delegationsync.childsync.bootstrap.methods",
 	} {
 		if !gotDep[want] {
 			t.Errorf("expected %q classified as deprecated, was not", want)

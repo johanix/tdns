@@ -409,7 +409,7 @@ func DsyncApiPostDelegationRequest(ctx context.Context, endpoint *DsyncApiEndpoi
 		if !allowInsecure {
 			return nil, fmt.Errorf(
 				"the published endpoint %q is not https; refusing to send a bearer credential in clear"+
-					" (set delegationsync.child.api.allow-insecure to override, in a lab only)", endpoint.Url)
+					" (set delegationsync.parentsync.api.allow-insecure to override, in a lab only)", endpoint.Url)
 		}
 		lgDns.Warn("DSYNC API: sending a credential over a non-https endpoint because allow-insecure is set",
 			"endpoint", endpoint.Url)
@@ -502,7 +502,7 @@ func dsyncApiHttpClient(caFile string, cred DsyncApiClientCredential, addrs []st
 	if strings.TrimSpace(caFile) != "" {
 		pem, err := os.ReadFile(caFile)
 		if err != nil {
-			return nil, fmt.Errorf("reading delegationsync.child.api.cafile %q: %v", caFile, err)
+			return nil, fmt.Errorf("reading delegationsync.parentsync.api.cafile %q: %v", caFile, err)
 		}
 		// Additive: the private CA is ADDED to the system roots, so an endpoint
 		// chaining to a public CA keeps verifying. Falling back to an empty
@@ -512,7 +512,7 @@ func dsyncApiHttpClient(caFile string, cred DsyncApiClientCredential, addrs []st
 		pool, err := x509.SystemCertPool()
 		if err != nil || pool == nil {
 			lgDsyncApi.Warn("system certificate pool unavailable;"+
-				" verifying against delegationsync.child.api.cafile alone."+
+				" verifying against delegationsync.parentsync.api.cafile alone."+
 				" An endpoint whose certificate chains to a public CA will not verify.",
 				"cafile", caFile, "err", err)
 			pool = x509.NewCertPool()

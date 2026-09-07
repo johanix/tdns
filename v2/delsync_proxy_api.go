@@ -87,7 +87,7 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 		return "", fmt.Errorf("ProxyApiParent: %w", perr)
 	}
 
-	childconf := DelegationSyncConfig().Child.Api
+	childconf := DelegationSyncConfig().ParentSync.Api
 	// Keyed on (parent, child): one agent can be secondary for several child
 	// zones under the same parent, each with its own credential there. An entry
 	// with no child named matches any child under that parent, which is what a
@@ -96,7 +96,7 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 	if !ok {
 		return "", fmt.Errorf(
 			"zone %s: parent %s advertises the DSYNC API scheme but this agent has no credential for it"+
-				" (delegationsync.child.api.credentials; set `child: %s` on the entry if this agent proxies"+
+				" (delegationsync.parentsync.api.credentials; set `child: %s` on the entry if this agent proxies"+
 				" more than one zone under %s): %w",
 			zd.ZoneName, parent, zd.ZoneName, parent, ErrProxyApiNoCredential)
 	}

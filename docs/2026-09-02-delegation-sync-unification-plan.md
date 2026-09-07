@@ -108,8 +108,8 @@ different scopes, with three vocabularies:
 | setting | scope | governs | read at |
 |---|---|---|---|
 | `updatepolicy.child.keybootstrap: [manual\|dnssec-validated\|consistent-lookup]` | **per-zone** | how this parent bootstraps a child key | `v2/keystate.go:266` |
-| `delegationsync.parent.update.key-verification.{mechanisms,require-dnssec,max-attempts,retry-interval}` | **global** | how an uploaded key is verified before trust | `v2/truststore_verify.go:86` |
-| `delegationsync.parent.bootstrap.methods` (free string) | **global** | what the SVCB advertises | `v2/ops_dsync.go:297` |
+| `delegationsync.childsync.update.key-verification.{mechanisms,require-dnssec,max-attempts,retry-interval}` | **global** | how an uploaded key is verified before trust | `v2/truststore_verify.go:86` |
+| `delegationsync.childsync.bootstrap.methods` (free string) | **global** | what the SVCB advertises | `v2/ops_dsync.go:297` |
 
 Three defects follow:
 
@@ -382,7 +382,7 @@ of `manual`.
 
 ### 4.4 Removed keys
 
-`delegationsync.parent.bootstrap.methods`; `delegationsync.parent.update.key-verification.*`
+`delegationsync.childsync.bootstrap.methods`; `delegationsync.childsync.update.key-verification.*`
 (folded into the named policy); `updatepolicy.child.keybootstrap`;
 `updatepolicy.child.keyupload`; `verifyengine.attempts`; `verifyengine.retry_interval`;
 and the stale sample-config note naming `keystate.require_manual_bootstrap` /

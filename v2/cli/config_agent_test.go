@@ -177,7 +177,7 @@ func TestCheckAgentZoneOptions(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &tdns.Config{Zones: []tdns.ZoneConf{tc.zone}}
-			cfg.DelegationSync.Child.Schemes = tc.schemes
+			cfg.DelegationSync.ParentSync.Schemes = tc.schemes
 			rep := newCCReport()
 			checkAgentZoneOptions(cfg, rep)
 

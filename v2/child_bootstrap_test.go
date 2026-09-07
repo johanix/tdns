@@ -88,7 +88,7 @@ func TestSelectChildBootstrapMethod(t *testing.T) {
 
 func TestChildBootstrapMethodsProxyDropsAtNs(t *testing.T) {
 	var dsc DelegationSyncConf
-	dsc.Child.Update.Bootstrap.Methods = []string{"at-apex", "at-ns", "unsigned"}
+	dsc.ParentSync.Update.Bootstrap.Methods = []string{"at-apex", "at-ns", "unsigned"}
 	if err := SetDelegationSyncConfig(dsc); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestChildBootstrapMethodsProxyDropsAtNs(t *testing.T) {
 
 func TestZoneChildBootstrapMethodsUsesProxyOption(t *testing.T) {
 	var dsc DelegationSyncConf
-	dsc.Child.Update.Bootstrap.Methods = []string{"at-apex", "at-ns"}
+	dsc.ParentSync.Update.Bootstrap.Methods = []string{"at-apex", "at-ns"}
 	if err := SetDelegationSyncConfig(dsc); err != nil {
 		t.Fatal(err)
 	}

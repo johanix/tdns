@@ -54,7 +54,7 @@ func dsyncApiUriRR(target string, c DsyncApiSchemeConf, ttl uint32) (*dns.URI, e
 	if !strings.HasPrefix(strings.ToLower(endpoint), "https://") {
 		// Published anyway: a conforming child refuses it (the credential is
 		// a bearer token and plaintext hands it away), and a lab that wants
-		// this sets delegationsync.child.api.allow-insecure on the child. But
+		// this sets delegationsync.parentsync.api.allow-insecure on the child. But
 		// it is never what a production parent meant to configure.
 		lg.Warn("DSYNC API endpoint is not https; conforming children will refuse it",
 			"target", target, "endpoint", endpoint)
@@ -92,7 +92,7 @@ func dsyncApiTxtRR(target string, c DsyncApiSchemeConf, ttl uint32) *dns.TXT {
 // DsyncApiTargetName computes the DSYNC API target name for a parent zone from
 // the global config. Returns empty string if the scheme is not configured.
 func DsyncApiTargetName(zonename string) string {
-	dsc := DelegationSyncConfig().Parent
+	dsc := DelegationSyncConfig().ChildSync
 	if !dsyncSchemeConfigured(dsc.Schemes, "api") {
 		return ""
 	}

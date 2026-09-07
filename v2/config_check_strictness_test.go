@@ -82,10 +82,10 @@ delegationsync:
 	if _, _, _, err := decodeConfigFile(writeCfg(t, good), &conf); err != nil {
 		t.Fatalf("the daemon decoder refused the documented shape: %v", err)
 	}
-	if got := conf.DelegationSync.Parent.Schemes; len(got) != 2 {
+	if got := conf.DelegationSync.ChildSync.Schemes; len(got) != 2 {
 		t.Fatalf("schemes decoded as %#v, want two entries", got)
 	}
-	if got := conf.DelegationSync.Parent.Notify.Port; got != 5354 {
+	if got := conf.DelegationSync.ChildSync.Notify.Port; got != 5354 {
 		t.Fatalf("port decoded as %d, want 5354", got)
 	}
 }

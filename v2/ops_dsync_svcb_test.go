@@ -181,7 +181,7 @@ func TestPublishDsyncRRsReconcilesSVCBForExistingDSYNC(t *testing.T) {
 	prev := DelegationSyncConfig()
 	t.Cleanup(func() { _ = SetDelegationSyncConfig(*prev) })
 	if err := SetDelegationSyncConfig(DelegationSyncConf{
-		Parent: DelegationSyncParentConf{
+		ChildSync: ChildSyncConf{
 			Schemes: []string{"update"},
 			Update: DsyncUpdateSchemeConf{
 				DsyncDnsSchemeConf: DsyncDnsSchemeConf{
@@ -230,7 +230,7 @@ func TestPublishDsyncRRsPolicyControlsSVCB(t *testing.T) {
 	prev := DelegationSyncConfig()
 	t.Cleanup(func() { _ = SetDelegationSyncConfig(*prev) })
 	if err := SetDelegationSyncConfig(DelegationSyncConf{
-		Parent: DelegationSyncParentConf{
+		ChildSync: ChildSyncConf{
 			Schemes: []string{"update"},
 			Update: DsyncUpdateSchemeConf{
 				DsyncDnsSchemeConf: DsyncDnsSchemeConf{
@@ -292,7 +292,7 @@ ns.b.example. 3600 IN A 192.0.2.2
 func TestBootstrapSVCBActionsSkipsZoneApex(t *testing.T) {
 	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
 	if err := SetDelegationSyncConfig(DelegationSyncConf{
-		Parent: DelegationSyncParentConf{
+		ChildSync: ChildSyncConf{
 			Schemes: []string{"update"},
 			Update: DsyncUpdateSchemeConf{
 				DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "{ZONENAME}"},

@@ -188,7 +188,7 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 	lgHandler.Info("BootstrapSig0KeyWithParent: DSYNC target found", "zone", zd.ZoneName, "target", dsyncTarget.RR)
 
 	advertised, present, aerr := advertisedBootstrapMethods(ctx, Globals.ImrEngine, dsyncTarget,
-		DelegationSyncConfig().Child.Update.AllowInsecure)
+		DelegationSyncConfig().ParentSync.Update.AllowInsecure)
 	if aerr != nil {
 		// Retryable, not "no advertisement": see advertisedBootstrapMethods.
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): %v", zd.ZoneName, aerr), UpdateResult{},

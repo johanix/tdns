@@ -84,7 +84,7 @@ func TestParseKeygenAlgorithmTakesAValue(t *testing.T) {
 		{"", dns.ED25519},          // unset -> default
 		{"NOSUCHALG", dns.ED25519}, // unknown -> default
 		// A config KEY must not resolve; that was the bug.
-		{"delegationsync.child.update.keygen.algorithm", dns.ED25519},
+		{"delegationsync.parentsync.update.keygen.algorithm", dns.ED25519},
 	}
 	for _, tc := range cases {
 		got, err := parseKeygenAlgorithm(tc.in, dns.ED25519)

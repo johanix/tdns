@@ -68,7 +68,7 @@ delegationsync:
 	if err := decodeConfigMap(m, &c, nil); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	p := c.DelegationSync.Parent
+	p := c.DelegationSync.ChildSync
 	// The embedded DsyncDnsSchemeConf must still decode from the same node.
 	if p.Update.Target != "updates.{ZONENAME}" || p.Update.Port != 5354 {
 		t.Errorf("squashed scheme keys lost: target=%q port=%d", p.Update.Target, p.Update.Port)
@@ -97,7 +97,7 @@ delegationsync:
 	if locked.Bootstrap.Mechanisms == nil || len(locked.Bootstrap.Mechanisms) != 0 {
 		t.Errorf("locked-down mechanisms: %v (want empty, not nil-or-filled)", locked.Bootstrap.Mechanisms)
 	}
-	ch := c.DelegationSync.Child
+	ch := c.DelegationSync.ParentSync
 	if ch.Update.Keygen.Generator != "/usr/bin/childkeygen" {
 		t.Errorf("child keygen: %+v", ch.Update.Keygen)
 	}
@@ -107,7 +107,7 @@ delegationsync:
 	if !ch.Update.AllowInsecure {
 		t.Error("child update allow-insecure: false (want true; the D-7 knob must decode)")
 	}
-	if c.DelegationSync.Child.Api.AllowInsecure {
+	if c.DelegationSync.ParentSync.Api.AllowInsecure {
 		t.Error("child update allow-insecure leaked into child api allow-insecure")
 	}
 	// Absent require-dnssec must stay nil, not become false.

@@ -34,24 +34,24 @@ func proxyApiSignedZone() string {
 		"api.example.	3600 IN DNSKEY 257 3 15 l02Woi0iS8Aa25FQkUd9RMzZHJpBoRQwAQEX1SxZJA4=\n"
 }
 
-func setChildApiCredentials(t *testing.T, creds ...DsyncApiChildCredentialConf) {
+func setChildApiCredentials(t *testing.T, creds ...ParentSyncApiCredentialConf) {
 	t.Helper()
 	prev := DelegationSyncConfig()
 	SetDelegationSyncConfig(DelegationSyncConf{
-		Child: DelegationSyncChildConf{
-			Api: DsyncApiChildConf{Credentials: creds},
+		ParentSync: ParentSyncConf{
+			Api: ParentSyncApiConf{Credentials: creds},
 		},
 	})
 	t.Cleanup(func() { SetDelegationSyncConfig(*prev) })
 }
 
-// setChildApiAllowInsecure flips delegationsync.child.api.allow-insecure while
+// setChildApiAllowInsecure flips delegationsync.parentsync.api.allow-insecure while
 // preserving whatever credentials the test already configured.
 func setChildApiAllowInsecure(t *testing.T, v bool) {
 	t.Helper()
 	prev := DelegationSyncConfig()
 	next := *prev
-	next.Child.Api.AllowInsecure = v
+	next.ParentSync.Api.AllowInsecure = v
 	SetDelegationSyncConfig(next)
 	t.Cleanup(func() { SetDelegationSyncConfig(*prev) })
 }
@@ -63,7 +63,7 @@ func setChildApiAllowInsecure(t *testing.T, v bool) {
 // The whole reason the child field exists: one agent, two proxied zones, one
 // parent. Parent alone cannot say which credential is which.
 func TestCredentialForChildPrefersTheChildSpecificEntry(t *testing.T) {
-	conf := DsyncApiChildConf{Credentials: []DsyncApiChildCredentialConf{
+	conf := ParentSyncApiConf{Credentials: []ParentSyncApiCredentialConf{
 		{Parent: "example.", Child: "a.example.", Username: "a-user", Key: "a-key"},
 		{Parent: "example.", Child: "b.example.", Username: "b-user", Key: "b-key"},
 	}}
@@ -90,7 +90,7 @@ func TestCredentialForChildPrefersTheChildSpecificEntry(t *testing.T) {
 // Every config written before the field existed looks like this. It must keep
 // working, and it must keep working for ANY child under that parent.
 func TestCredentialForChildFallsBackToTheGenericEntry(t *testing.T) {
-	conf := DsyncApiChildConf{Credentials: []DsyncApiChildCredentialConf{
+	conf := ParentSyncApiConf{Credentials: []ParentSyncApiCredentialConf{
 		{Parent: "example.", Username: "generic", Key: "k"},
 	}}
 	for _, child := range []string{"a.example.", "b.example.", ""} {
@@ -106,7 +106,7 @@ func TestCredentialForChildFallsBackToTheGenericEntry(t *testing.T) {
 
 // Most specific wins even when the generic entry comes first in the list.
 func TestCredentialForChildSpecificBeatsGenericRegardlessOfOrder(t *testing.T) {
-	conf := DsyncApiChildConf{Credentials: []DsyncApiChildCredentialConf{
+	conf := ParentSyncApiConf{Credentials: []ParentSyncApiCredentialConf{
 		{Parent: "example.", Username: "generic", Key: "k"},
 		{Parent: "example.", Child: "a.example.", Username: "a-user", Key: "a-key"},
 	}}
@@ -123,7 +123,7 @@ func TestCredentialForChildSpecificBeatsGenericRegardlessOfOrder(t *testing.T) {
 
 // A config may be written with or without trailing dots, in any case.
 func TestCredentialForChildNormalisesNames(t *testing.T) {
-	conf := DsyncApiChildConf{Credentials: []DsyncApiChildCredentialConf{
+	conf := ParentSyncApiConf{Credentials: []ParentSyncApiCredentialConf{
 		{Parent: "EXAMPLE", Child: "A.Example", Username: "a-user", Key: "a-key"},
 	}}
 	cred, ok := conf.CredentialForChild("example.", "a.example.")
@@ -135,13 +135,13 @@ func TestCredentialForChildNormalisesNames(t *testing.T) {
 // CredentialFor is CredentialForChild with no child: it must still find a
 // generic entry, and must not accidentally match a child-specific one.
 func TestCredentialForWithoutChildOnlyMatchesGeneric(t *testing.T) {
-	specific := DsyncApiChildConf{Credentials: []DsyncApiChildCredentialConf{
+	specific := ParentSyncApiConf{Credentials: []ParentSyncApiCredentialConf{
 		{Parent: "example.", Child: "a.example.", Username: "a-user", Key: "a-key"},
 	}}
 	if _, ok := specific.CredentialFor("example."); ok {
 		t.Error("a child-specific credential matched a lookup that named no child")
 	}
-	generic := DsyncApiChildConf{Credentials: []DsyncApiChildCredentialConf{
+	generic := ParentSyncApiConf{Credentials: []ParentSyncApiCredentialConf{
 		{Parent: "example.", Username: "generic", Key: "k"},
 	}}
 	if cred, ok := generic.CredentialFor("example."); !ok || cred.Username != "generic" {
@@ -253,7 +253,7 @@ func TestProxyApiParentReportsMissingCredentialAsSuch(t *testing.T) {
 	}
 
 	// A credential for a DIFFERENT parent must not be borrowed.
-	setChildApiCredentials(t, DsyncApiChildCredentialConf{
+	setChildApiCredentials(t, ParentSyncApiCredentialConf{
 		Parent: "other.example.", Username: "u", Key: "k"})
 	_, err = zd.ProxyApiParent(context.Background(), &Imr{}, target, &ProxyDelegationAnalysis{NsOrGlueChanged: true})
 	if !errors.Is(err, ErrProxyApiNoCredential) {
@@ -268,7 +268,7 @@ func TestProxyApiParentTreatsIncompleteCredentialAsMissing(t *testing.T) {
 	zd.SetParent("example.")
 	target := &DsyncTarget{Name: "dsync-api.example."}
 
-	for name, cred := range map[string]DsyncApiChildCredentialConf{
+	for name, cred := range map[string]ParentSyncApiCredentialConf{
 		"no username": {Parent: "example.", Key: "k"},
 		"no key":      {Parent: "example.", Username: "u"},
 	} {
@@ -291,7 +291,7 @@ func TestProxyApiParentTreatsIncompleteCredentialAsMissing(t *testing.T) {
 func TestProxyApiParentRefusesWithoutTargetOrImr(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
 	zd.SetParent("example.")
-	setChildApiCredentials(t, DsyncApiChildCredentialConf{
+	setChildApiCredentials(t, ParentSyncApiCredentialConf{
 		Parent: "example.", Username: "u", Key: "k"})
 
 	analysis := &ProxyDelegationAnalysis{NsOrGlueChanged: true}

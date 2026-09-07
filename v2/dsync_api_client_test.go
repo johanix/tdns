@@ -297,7 +297,7 @@ func keysOfRRsets(sets []DsyncApiRRset) []string {
 func TestDsyncApiChildCredentialsRoundTripThroughViper(t *testing.T) {
 	const y = `
 delegationsync:
-   child:
+   parentsync:
       schemes: [ update, notify, api ]
       api:
          allow-insecure: false
@@ -319,7 +319,7 @@ delegationsync:
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	api := conf.DelegationSync.Child.Api
+	api := conf.DelegationSync.ParentSync.Api
 	if len(api.Credentials) != 2 {
 		t.Fatalf("got %d credentials, want 2: %+v", len(api.Credentials), api.Credentials)
 	}
@@ -347,7 +347,7 @@ delegationsync:
 func TestDsyncApiChildTLSCredentialRoundTripThroughViper(t *testing.T) {
 	const y = `
 delegationsync:
-   child:
+   parentsync:
       api:
          credentials:
             - parent: example.
@@ -364,7 +364,7 @@ delegationsync:
 	if err := v.Unmarshal(&conf); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	cred, ok := conf.DelegationSync.Child.Api.CredentialFor("example.")
+	cred, ok := conf.DelegationSync.ParentSync.Api.CredentialFor("example.")
 	if !ok {
 		t.Fatal("tls credential not found")
 	}
@@ -561,7 +561,7 @@ func TestDsyncApiListenerBlocksUntilShutdown(t *testing.T) {
 	}
 }
 
-// dsyncApiTestListener builds a Config whose delegationsync.parent.api points
+// dsyncApiTestListener builds a Config whose delegationsync.childsync.api points
 // at a free loopback port and a freshly written self-signed cert/key pair, plus
 // a router to serve. Reuses newTestTLSCert so there is one certificate
 // generator in the package rather than two.
@@ -605,9 +605,9 @@ func dsyncApiTestListener(t *testing.T) (*Config, *mux.Router, bool) {
 	ln.Close()
 
 	conf := &Config{}
-	conf.DelegationSync.Parent.Api.Listen = []string{addr}
-	conf.DelegationSync.Parent.Api.CertFile = certPath
-	conf.DelegationSync.Parent.Api.KeyFile = keyPath
+	conf.DelegationSync.ChildSync.Api.Listen = []string{addr}
+	conf.DelegationSync.ChildSync.Api.CertFile = certPath
+	conf.DelegationSync.ChildSync.Api.KeyFile = keyPath
 	SetDelegationSyncConfig(conf.DelegationSync)
 
 	return conf, mux.NewRouter(), true

@@ -66,9 +66,9 @@ delegationsync:
          bootstrap:
             mechanisms: [ ]
             manual:     true
-   parent:
+   childsync:
       schemes: [ notify, update ]
-   child:
+   parentsync:
       schemes: [ notify, update ]
       update:
          bootstrap:
@@ -88,13 +88,13 @@ delegationsync:
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if got := cfg.DelegationSync.Child.Schemes; len(got) != 2 || got[0] != "notify" || got[1] != "update" {
+	if got := cfg.DelegationSync.ParentSync.Schemes; len(got) != 2 || got[0] != "notify" || got[1] != "update" {
 		t.Fatalf("child.schemes decoded as %v; the typed check would report it empty", got)
 	}
-	if got := cfg.DelegationSync.Parent.Schemes; len(got) != 2 {
+	if got := cfg.DelegationSync.ChildSync.Schemes; len(got) != 2 {
 		t.Fatalf("parent.schemes decoded as %v", got)
 	}
-	if got := cfg.DelegationSync.Child.Update.Bootstrap.Methods; len(got) != 1 || got[0] != "at-apex" {
+	if got := cfg.DelegationSync.ParentSync.Update.Bootstrap.Methods; len(got) != 1 || got[0] != "at-apex" {
 		t.Fatalf("child bootstrap methods decoded as %v", got)
 	}
 

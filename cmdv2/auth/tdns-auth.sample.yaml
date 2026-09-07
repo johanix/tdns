@@ -207,7 +207,7 @@ delegationsync:
             mechanisms:      [ ]            # nothing automatic
             manual:          true           # advertises "manual" only
             allow-unvalidated-upload: false
-   parent:
+   childsync:
       # in parent zones, we support these schemes, and will publish DSYNC RRs
       # if allowed to:
       schemes:  [ notify, update ]
@@ -255,7 +255,7 @@ delegationsync:
       #    cert:      /etc/tdns/dsync-api.crt
       #    key:       /etc/tdns/dsync-api.key
 
-   child:
+   parentsync:
       # in child zones, we attempt the following schemes, if the parent supports
       # them and we're allowed to modify the child zone (adding CDS, CSYNC, KEY
       # RRs, re-signing, etc):

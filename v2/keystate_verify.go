@@ -48,7 +48,7 @@ import (
 // response that merely CANNOT be authenticated (unsigned, or signed with a key
 // the child has no authenticated copy of, or an unsigned parent zone) is
 // rejected by default and accepted, with a warning, only under
-// delegationsync.child.update.allow-insecure, which is the draft's "subject
+// delegationsync.parentsync.update.allow-insecure, which is the draft's "subject
 // to local policy" escape for unsigned parent zones -- and only for those.
 
 // receiverKeyFetcher returns the KEY RRset published at the UPDATE Receiver's
@@ -148,7 +148,7 @@ func receiverSigFailure(receiver string, sig *dns.SIG, err error) error {
 	return fmt.Errorf("KeyState response from %s: SIG(0) by keyid %d does not verify: %v", receiver, sig.KeyTag, err)
 }
 
-const allowInsecureKnob = "delegationsync.child.update.allow-insecure"
+const allowInsecureKnob = "delegationsync.parentsync.update.allow-insecure"
 
 // verifyKeyStateResponse authenticates a KeyState response. wire is the
 // response exactly as received (SIG(0) verification runs over the bytes the

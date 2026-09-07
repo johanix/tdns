@@ -110,7 +110,7 @@ func checkAgentZoneOptions(cfg *tdns.Config, rep *ccReport) {
 	// sign anything went wrong, so a viper read here would report "schemes is
 	// empty" against a config that sets them perfectly well -- a check that
 	// fails the operator's correct config is worse than no check.
-	childSchemes := cfg.DelegationSync.Child.Schemes
+	childSchemes := cfg.DelegationSync.ParentSync.Schemes
 
 	for i := range cfg.Zones {
 		eff := effectiveZone(cfg.Zones[i], templates)
@@ -138,13 +138,13 @@ func checkAgentZoneOptions(cfg *tdns.Config, rep *ccReport) {
 		// The proxy sends to the parent as the child, so it walks the same
 		// plan as a parentsync child and reads the same setting:
 		// BuildParentSyncPlan returns SkippedScheme{"all"} for BOTH roles when
-		// delegationsync.child.schemes is empty. The zone is not quarantined —
+		// delegationsync.parentsync.schemes is empty. The zone is not quarantined —
 		// it loads, serves, and silently forwards nothing, which is why this
 		// is worth predicting rather than leaving to a log line.
 		if hasProxy && len(childSchemes) == 0 {
 			rep.fail(g, zname,
-				"parentsync-proxy is enabled but delegationsync.child.schemes is empty — every transport is skipped and nothing is ever forwarded",
-				"set delegationsync.child.schemes (e.g. [ notify, update ])")
+				"parentsync-proxy is enabled but delegationsync.parentsync.schemes is empty — every transport is skipped and nothing is ever forwarded",
+				"set delegationsync.parentsync.schemes (e.g. [ notify, update ])")
 		}
 
 		// On an agent, parentsync only engages when the zone also
@@ -158,8 +158,8 @@ func checkAgentZoneOptions(cfg *tdns.Config, rep *ccReport) {
 					"add the multi-provider option, or host the zone on tdns-auth where parentsync works standalone")
 			case len(childSchemes) == 0:
 				rep.fail(g, zname,
-					"parentsync is enabled but delegationsync.child.schemes is empty — the zone will be quarantined",
-					"set delegationsync.child.schemes (e.g. [ notify, update ])")
+					"parentsync is enabled but delegationsync.parentsync.schemes is empty — the zone will be quarantined",
+					"set delegationsync.parentsync.schemes (e.g. [ notify, update ])")
 			}
 		}
 	}

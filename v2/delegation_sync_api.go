@@ -32,7 +32,7 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 		return "", dns.RcodeServerFailure, fmt.Errorf("zone %s: parent zone unknown", zd.ZoneName)
 	}
 
-	childconf := DelegationSyncConfig().Child.Api
+	childconf := DelegationSyncConfig().ParentSync.Api
 	// Child-aware even here, where the zone IS the child and a generic
 	// per-parent entry is the normal config. Passing the zone name costs
 	// nothing and means an operator who does name a child on the entry gets
@@ -45,7 +45,7 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 		// cannot make one appear.
 		return "", dns.RcodeRefused, fmt.Errorf(
 			"zone %s: parent %s offers only the DSYNC API scheme but no credential is configured for it"+
-				" (delegationsync.child.api.credentials); obtain one from the parent operator",
+				" (delegationsync.parentsync.api.credentials); obtain one from the parent operator",
 			zd.ZoneName, parent)
 	}
 	if !cred.Usable() {

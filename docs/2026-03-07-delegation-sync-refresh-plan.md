@@ -68,7 +68,7 @@ patterns.
 
 7. **`SetupZoneSync` uses `viper.GetString` for DSYNC
    target**: `zone_utils.go:1051` reads
-   `delegationsync.parent.update.target` from global
+   `delegationsync.childsync.update.target` from global
    viper instead of zone-specific config.
 
 8. **`Globals.Zonename` used in
@@ -260,7 +260,7 @@ SetupZoneSync)
 - SVCB should advertise supported bootstrap methods via
   the "bootstrap" SvcParamKey
 - Value derived from config (e.g.,
-  `delegationsync.parent.bootstrap.methods`)
+  `delegationsync.childsync.bootstrap.methods`)
 - Format: `updater.parent.example. IN SVCB 0 .
   bootstrap="at-apex,unsigned,manual"`
 

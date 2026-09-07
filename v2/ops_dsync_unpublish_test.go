@@ -59,7 +59,7 @@ func TestUnpublishDsyncPlaceholderHasAllRdataFields(t *testing.T) {
 func TestUnpublishDsyncRemovesBootstrapSVCBAndReceiverKEY(t *testing.T) {
 	t.Cleanup(func() { SetDelegationSyncConfig(DelegationSyncConf{}) })
 	SetDelegationSyncConfig(DelegationSyncConf{
-		Parent: DelegationSyncParentConf{
+		ChildSync: ChildSyncConf{
 			Update: DsyncUpdateSchemeConf{
 				DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "updates.{ZONENAME}"},
 			},
@@ -108,7 +108,7 @@ func TestUnpublishDsyncRemovesBootstrapSVCBAndReceiverKEY(t *testing.T) {
 func TestUnpublishDsyncSkipsApexSVCBAndKEY(t *testing.T) {
 	t.Cleanup(func() { SetDelegationSyncConfig(DelegationSyncConf{}) })
 	SetDelegationSyncConfig(DelegationSyncConf{
-		Parent: DelegationSyncParentConf{
+		ChildSync: ChildSyncConf{
 			Update: DsyncUpdateSchemeConf{
 				DsyncDnsSchemeConf: DsyncDnsSchemeConf{Target: "{ZONENAME}"},
 			},

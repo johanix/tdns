@@ -15,7 +15,7 @@ func setRolloverApiAllowInsecure(t *testing.T, v bool) {
 	t.Helper()
 	prev := DelegationSyncConfig()
 	next := *prev
-	next.Child.Api.AllowInsecure = v
+	next.ParentSync.Api.AllowInsecure = v
 	SetDelegationSyncConfig(next)
 	t.Cleanup(func() { SetDelegationSyncConfig(*prev) })
 }

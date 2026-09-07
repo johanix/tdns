@@ -176,6 +176,14 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 	if derr := decoder.Decode(configMap); derr != nil {
 		return fmt.Errorf("error decoding config: %v", derr)
 	}
+
+	// delegationsync: `parent:`/`child:` -> `childsync:`/`parentsync:`. Done
+	// here, in the one decode helper every full-Config path goes through
+	// (ParseConfig, the zone-reload path, `config check`), so no reader ever
+	// has to know both spellings.
+	if err := conf.DelegationSync.FoldDeprecatedDelegationSyncKeys(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -380,10 +388,18 @@ var deprecatedConfigKeys = append([]deprecatedConfigKey{
 		advice: "`keyupload:` moved to `delegationsync.policies.*.bootstrap.allow-unvalidated-upload`"},
 	{match: ".key-verification",
 		advice: "`key-verification:` moved to `delegationsync.policies.*.bootstrap` (mechanisms, require-dnssec, retry)"},
+	// Both spellings of the block. The key itself is retired either way, so the
+	// advice names the one the operator actually wrote -- an operator who has
+	// migrated the block to `childsync:` but kept the retired `bootstrap:`
+	// under it would otherwise be told about a key they do not have.
 	{match: ".parent.bootstrap",
 		advice: "`delegationsync.parent.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
 	{match: ".parent.bootstrap.methods",
 		advice: "`delegationsync.parent.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
+	{match: ".childsync.bootstrap",
+		advice: "`delegationsync.childsync.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
+	{match: ".childsync.bootstrap.methods",
+		advice: "`delegationsync.childsync.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
 }, underscoreSpellingMigrations()...)
 
 // snakeCaseConfigKeys lists every config key that was spelled with underscores
@@ -724,7 +740,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("delegationsync config: %w", err)
 	}
 	if reload {
-		warnDsyncApiClientAuthReload(conf.DelegationSync.Parent.Api.ClientAuth.Enabled())
+		warnDsyncApiClientAuthReload(conf.DelegationSync.ChildSync.Api.ClientAuth.Enabled())
 	}
 
 	// On first start: build the KeyDB. On reload: keep the existing
@@ -2077,6 +2093,9 @@ func (conf *Config) reloadDelegationSyncFromFile() error {
 	}
 	if err := decoder.Decode(configMap); err != nil {
 		return fmt.Errorf("error decoding delegationsync config: %v", err)
+	}
+	if err := partial.DelegationSync.FoldDeprecatedDelegationSyncKeys(); err != nil {
+		return err
 	}
 
 	if err := SetDelegationSyncConfig(partial.DelegationSync); err != nil {

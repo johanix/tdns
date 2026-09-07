@@ -111,7 +111,7 @@ delegationsync:
             mechanisms:      [ ]
             manual:          true
             allow-unvalidated-upload: false
-   parent:
+   childsync:
       # in parent zones, we support these schemes, and will publish DSYNC RRs
       # if allowed to:
       schemes:		[ notify, update ]
@@ -129,7 +129,7 @@ delegationsync:
             mode:	internal # internal | external
             generator:	/opt/local/bin/dnssec-keygen
             algorithm:	ED25519
-   child:
+   parentsync:
       # in child zones, we will attempt the following schemes, if the parent
       # supports them and we're allowed to modify the child zone if needed
       # (adding CDS, CSYNC, KEY RRs, re-signing, etc):

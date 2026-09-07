@@ -220,13 +220,13 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 		return nil
 	}
 
-	// algstr := DelegationSyncConfig().Child.Update.Keygen.Algorithm
+	// algstr := DelegationSyncConfig().ParentSync.Update.Keygen.Algorithm
 	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	// if alg == 0 {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Child.Update.Keygen.Algorithm, dns.ED25519)
+	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().ParentSync.Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("DelegationSyncSetup: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
@@ -255,13 +255,13 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 }
 
 func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
-	// algstr := DelegationSyncConfig().Parent.Update.Keygen.Algorithm
+	// algstr := DelegationSyncConfig().ChildSync.Update.Keygen.Algorithm
 	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	// if alg == 0 {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Parent.Update.Keygen.Algorithm, dns.ED25519)
+	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().ChildSync.Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("ParentSig0KeyPrep: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
@@ -273,13 +273,13 @@ func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
 // MusicSig0KeyPrep and ParentSig0KeyPrep are identical except for the source of the keygen algorithm
 // which is specified in the relevant section of the configuration file.
 func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
-	// algstr := DelegationSyncConfig().Child.Update.Keygen.Algorithm
+	// algstr := DelegationSyncConfig().ParentSync.Update.Keygen.Algorithm
 	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	// if alg == 0 {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Child.Update.Keygen.Algorithm, dns.ED25519)
+	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().ParentSync.Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("MusicSig0KeyPrep: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err

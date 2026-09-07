@@ -37,7 +37,7 @@ inside `v2/parseconfig.go`, which `cmdv2/auth` does depend on.
 
 This matches operational evidence: if viper were empty, `tdns-auth` on `main`
 would already be broken in many places (`dnsengine.ports.*`, `external.tmpdir`,
-`delegationsync.child.schemes`, …). It is not.
+`delegationsync.parentsync.schemes`, …). It is not.
 
 ---
 
@@ -160,7 +160,7 @@ succeeded. Pre-existing error swallowing, newly visible as success.
 ### FINDING D — `api` already present in `parent.schemes` becomes a real scheme (LOW, config-dependent)
 
 On `main`, `PublishDsyncRRs` treats unknown scheme names as a warn-and-skip.
-`api` in `delegationsync.parent.schemes` is therefore **inert today**.
+`api` in `delegationsync.childsync.schemes` is therefore **inert today**.
 
 After merge it is a real scheme: DSYNC + URI + TXT are published (defaults
 fill in if the `api:` block is absent), and `StartDsyncApiListener` runs.
@@ -185,7 +185,7 @@ resolution is unchanged.
 | Viper population in `tdns-auth` | `viper.ReadConfig` in `ParseConfig`. Finding 1's premise is false. |
 | Parent DSYNC publication for `notify`/`update` | Same values from the struct as from viper, on the sample shape. Existing RRset still short-circuits (`PublishDsyncRRs` all-or-nothing guard unchanged). |
 | `SetupZoneSync` empty `update.target` | New skip avoids generating a SIG(0) key for `"."`. Only differs when the template is empty. Sample has a target. A notify-only parent with no update target is a fix, not a break. |
-| Child `delegationsync.child.*` / keygen / key-verification | Still viper. Viper is populated. The "half-done migration" is real as a consistency footnote, not a behaviour change. |
+| Child `delegationsync.parentsync.*` / keygen / key-verification | Still viper. Viper is populated. The "half-done migration" is real as a consistency footnote, not a behaviour change. |
 | `UnpublishDsyncRRs` extra URI/TXT deletes | Gated on `api` ∈ schemes via `DsyncApiTargetName`. No change unless `api` is offered. |
 | New listener | `SetupDsyncApiRouter` returns nil unless `api` ∈ schemes; `StartDsyncApiListener` returns nil on a nil router. `StartAuth` always starts the engine goroutine; it exits immediately when unconfigured. One extra "starting engine" log line. No socket. Refuses plaintext. |
 | New DB table `DsyncApiCredential` | `CREATE TABLE IF NOT EXISTS`, additive. Production `NewKeyDB(..., force=false, ...)`. |
@@ -195,7 +195,7 @@ resolution is unchanged.
 | Dependencies | No `go.mod` / `go.sum` change. |
 | Package `init()` | None in new files. |
 | Zone load on `PublishDsyncRRs` error | All three `SetupZoneSync` call sites log and continue. Unchanged. |
-| Unused-key warnings | On `main`, mapstructure reports the whole `delegationsync` key as unused (and viper still uses it). After merge that warning goes away and `delegationsync.parent.update.keygen` / `delegationsync.child.update` appear instead — still used by viper. Log noise, not a functional change. Do not delete those subtrees because the warning says "unknown". |
+| Unused-key warnings | On `main`, mapstructure reports the whole `delegationsync` key as unused (and viper still uses it). After merge that warning goes away and `delegationsync.childsync.update.keygen` / `delegationsync.parentsync.update` appear instead — still used by viper. Log noise, not a functional change. Do not delete those subtrees because the warning says "unknown". |
 
 ---
 
@@ -206,7 +206,7 @@ Merge, after two config glances rather than a zone-by-zone DSYNC audit:
 1. Live `delegationsync:` uses list form for `schemes` / `types` / `addresses`
    and an unquoted integer `port` (Finding A). If yes, ParseConfig will not
    newly fail.
-2. Live `delegationsync.parent.schemes` does **not** already contain `api`
+2. Live `delegationsync.childsync.schemes` does **not** already contain `api`
    (Finding D). If it does, decide whether publishing the API records (and
    possibly starting a listener) is intended.
 

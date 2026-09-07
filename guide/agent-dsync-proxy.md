@@ -146,7 +146,7 @@ it once at the primary.
 **READY means "the agent can sign", not "the parent trusts it".** The ceremony
 is a separate step and can be refused: the parent may require manual bootstrap,
 or its advertised bootstrap methods may not intersect the agent's
-`delegationsync.child.update.bootstrap.methods` (a proxy drops `at-ns` from that
+`delegationsync.parentsync.update.bootstrap.methods` (a proxy drops `at-ns` from that
 set, since RFC 9615 `_signal` names live in the nameserver's zone). Either way
 the UPDATE scheme is skipped and the log says which; NOTIFY may still apply.
 Once the parent does trust the key, a later `BADKEY` re-runs the ceremony

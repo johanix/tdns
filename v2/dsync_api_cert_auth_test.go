@@ -113,7 +113,7 @@ func setDsyncApiClientAuth(t *testing.T, ca *DsyncApiClientAuthConf) {
 	t.Helper()
 	prev := DelegationSyncConfig()
 	next := *prev
-	next.Parent.Api.ClientAuth = ca
+	next.ChildSync.Api.ClientAuth = ca
 	SetDelegationSyncConfig(next)
 	t.Cleanup(func() { SetDelegationSyncConfig(*prev) })
 }
@@ -525,7 +525,7 @@ func TestDsyncApiCertAuth_PolicySameAsBearer(t *testing.T) {
 func TestDsyncApiListenerClientAuthHandshake(t *testing.T) {
 	rootsFromConf := func(t *testing.T, conf *Config) *x509.CertPool {
 		t.Helper()
-		pemBytes, err := os.ReadFile(conf.DelegationSync.Parent.Api.CertFile)
+		pemBytes, err := os.ReadFile(conf.DelegationSync.ChildSync.Api.CertFile)
 		if err != nil {
 			t.Fatalf("read server cert: %v", err)
 		}
@@ -595,7 +595,7 @@ func TestDsyncApiListenerClientAuthHandshake(t *testing.T) {
 		}
 		startListener(t, conf, router)
 
-		addr := conf.DelegationSync.Parent.Api.Listen[0]
+		addr := conf.DelegationSync.ChildSync.Api.Listen[0]
 		requested, err := handshake(t, addr, rootsFromConf(t, conf))
 		if err != nil {
 			t.Fatalf("handshake: %v", err)
@@ -610,14 +610,14 @@ func TestDsyncApiListenerClientAuthHandshake(t *testing.T) {
 		if !ok {
 			t.Skip("no test certificate available")
 		}
-		conf.DelegationSync.Parent.Api.ClientAuth = &DsyncApiClientAuthConf{
+		conf.DelegationSync.ChildSync.Api.ClientAuth = &DsyncApiClientAuthConf{
 			Mechanisms: []string{DsyncApiAuthTLSPin},
 		}
 		SetDelegationSyncConfig(conf.DelegationSync)
 
 		startListener(t, conf, router)
 
-		addr := conf.DelegationSync.Parent.Api.Listen[0]
+		addr := conf.DelegationSync.ChildSync.Api.Listen[0]
 		requested, err := handshake(t, addr, rootsFromConf(t, conf))
 		if err != nil {
 			t.Fatalf("certless handshake failed: %v", err)

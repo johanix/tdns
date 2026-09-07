@@ -142,7 +142,7 @@ func CompileDelegationSyncPolicies(dsc DelegationSyncConf) (map[string]Delegatio
 	if err != nil {
 		return nil, nil, err
 	}
-	methods, err := compileChildBootstrapMethods(dsc.Child.Update.Bootstrap.Methods)
+	methods, err := compileChildBootstrapMethods(dsc.ParentSync.Update.Bootstrap.Methods)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -144,13 +144,13 @@ func TestPlanApiGateOnCredential(t *testing.T) {
 	}
 	reason, _ := skipReason(plan, "API")
 	if !strings.Contains(reason, "credentials") {
-		t.Errorf("skip reason %q should point at delegationsync.child.api.credentials", reason)
+		t.Errorf("skip reason %q should point at delegationsync.parentsync.api.credentials", reason)
 	}
 
 	// With a credential it is a candidate -- and NO address resolution was
 	// needed to get there (§16.7): an API target is a service description
 	// point, and requiring A/AAAA would fail on a correctly configured parent.
-	setChildApiCredentials(t, DsyncApiChildCredentialConf{
+	setChildApiCredentials(t, ParentSyncApiCredentialConf{
 		Parent: "example.", Username: "u", Key: "k"})
 	plan = &ParentSyncPlan{Parent: "example."}
 	zd.planConsiderApi(res, plan)
@@ -181,7 +181,7 @@ func TestPlanApiGateUsesTheChildSpecificCredential(t *testing.T) {
 
 	// A credential that names a DIFFERENT child under the same parent must not
 	// satisfy this zone's gate.
-	setChildApiCredentials(t, DsyncApiChildCredentialConf{
+	setChildApiCredentials(t, ParentSyncApiCredentialConf{
 		Parent: "example.", Child: "other.example.", Username: "u", Key: "k"})
 	plan := &ParentSyncPlan{Parent: "example."}
 	zd.planConsiderApi(res, plan)
@@ -511,7 +511,7 @@ func TestWalkSyncPlanCancelledMidwayReportsWhatWasTried(t *testing.T) {
 func TestPlanApiRequiresAValidatedDsyncLookup(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
 	zd.SetParent("example.")
-	setChildApiCredentials(t, DsyncApiChildCredentialConf{
+	setChildApiCredentials(t, ParentSyncApiCredentialConf{
 		Parent: "example.", Username: "u", Key: "k"})
 
 	unvalidated := DsyncResult{

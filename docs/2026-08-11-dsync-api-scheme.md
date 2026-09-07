@@ -137,7 +137,7 @@ way, `updatepolicy.child` sees one DNS name.
 
 Client certificates are additive. A deployment that authenticates with
 `<username, key>` today keeps working with no config change. The listener
-requests a client certificate only when `delegationsync.parent.api.client-auth`
+requests a client certificate only when `delegationsync.childsync.api.client-auth`
 is set, and never requires one. An `Authorization` header, including a wrong
 one or a non-Basic one, selects the Basic path; the certificate path runs only
 when that header is absent.
@@ -148,7 +148,7 @@ See `docs/2026-09-01-dsync-api-client-cert-auth-implementation-plan.md`.
 
 - **TLS is mandatory.** A URI with an `http://` scheme is refused by the child
   before any request is made. One escape hatch, off by default, named so it
-  reads like what it is (`delegationsync.child.api.allow-insecure`), because
+  reads like what it is (`delegationsync.parentsync.api.allow-insecure`), because
   the lab will want it and nothing else should.
 - **Full certificate validation**, with the URI's host as the verified name. No
   `InsecureSkipVerify` on this path, ever. The XoT/PKIX tooling from PR #316
@@ -393,7 +393,7 @@ parent being signed that the UPDATE scheme does not have.
 ## 9. Parent-side configuration
 
 Read from the config struct, **not from viper.** The existing
-`delegationsync.parent.*` block is read with `viper.GetString` /
+`delegationsync.childsync.*` block is read with `viper.GetString` /
 `viper.GetStringSlice` throughout `ops_dsync.go` and `childsync_utils.go`; new
 code does not extend that pattern, and the parentupdater work in labstuff is a
 recent reminder of why (dotted keys silently vanish, and nothing logs it).
@@ -515,7 +515,7 @@ line saying exactly that, and does not retry in a loop.
 - The NOTIFY and UPDATE schemes: untouched, including preference order for
   deployments that do not configure `api`.
 - Phase 1 and phase 2 behaviour, except the §6.3 extraction.
-- A parent that does not configure `delegationsync.parent.api` publishes no API
+- A parent that does not configure `delegationsync.childsync.api` publishes no API
   DSYNC record, opens no listener, and is bit-for-bit as it is today.
 
 ---
@@ -681,7 +681,7 @@ The design gave `allow-insecure` for `http://` and treated the DNSSEC
 requirement separately. They are the same protection seen from two sides —
 DNSSEC establishes which endpoint was meant, TLS establishes that this is it —
 and an operator who disables one while believing the other still holds has no
-protection at all. One switch, `delegationsync.child.api.allow-insecure`,
+protection at all. One switch, `delegationsync.parentsync.api.allow-insecure`,
 covers both. Certificate validation has no switch at all.
 
 ### 16.7 The DSYNC target is not resolved; the endpoint's host is
@@ -727,7 +727,7 @@ three pieces work:
   `dsync-api.dsynctest.example.`, the listener configured with that pair, and a
   request validated against the CA file: certificate chain verified, SAN
   matched, Basic authenticated, policy approved, change applied and served.
-  This is what `delegationsync.child.api.cafile` exists for — trusting a
+  This is what `delegationsync.parentsync.api.cafile` exists for — trusting a
   private CA without granting it authority over every TLS connection the host
   makes.
 - **The parent signs and the trust anchor works.** `inline-signing` plus a

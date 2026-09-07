@@ -184,10 +184,10 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 	// The failure was total and silent: no schemes meant SkippedScheme{"all"},
 	// an unusable plan, and every configured transport ignored. zone_utils.go
 	// reads the same setting through DelegationSyncConfig(); now so does this.
-	schemes := DelegationSyncConfig().Child.Schemes
+	schemes := DelegationSyncConfig().ParentSync.Schemes
 	if len(schemes) == 0 {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{
-			Scheme: "all", Reason: "no schemes configured in delegationsync.child.schemes"})
+			Scheme: "all", Reason: "no schemes configured in delegationsync.parentsync.schemes"})
 		return plan, nil
 	}
 
@@ -205,7 +205,7 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 			zd.planConsiderNotify(ctx, imr, dsyncRes, plan, role)
 		default:
 			plan.Skipped = append(plan.Skipped, SkippedScheme{
-				Scheme: scheme, Reason: "unknown scheme name in delegationsync.child.schemes"})
+				Scheme: scheme, Reason: "unknown scheme name in delegationsync.parentsync.schemes"})
 		}
 	}
 	return plan, nil
@@ -323,19 +323,19 @@ func (zd *ZoneData) planConsiderApi(res DsyncResult, plan *ParentSyncPlan) {
 	// way. allow-insecure is the same switch DiscoverDsyncApiEndpoint uses for
 	// its own requireDnssec, so one setting governs the whole path rather than
 	// half of it.
-	if !res.Validated && !DelegationSyncConfig().Child.Api.AllowInsecure {
+	if !res.Validated && !DelegationSyncConfig().ParentSync.Api.AllowInsecure {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{"API",
 			"the DSYNC lookup did not DNSSEC-validate and" +
-				" delegationsync.child.api.allow-insecure is not set"})
+				" delegationsync.parentsync.api.allow-insecure is not set"})
 		return
 	}
 	// The credential arrives out of band by definition (§10), so its absence
 	// is settled here rather than after a round trip: there is nothing to wait
 	// for and nothing to retry.
-	cred, ok := DelegationSyncConfig().Child.Api.CredentialForChild(zd.GetParent(), zd.ZoneName)
+	cred, ok := DelegationSyncConfig().ParentSync.Api.CredentialForChild(zd.GetParent(), zd.ZoneName)
 	if !ok || !cred.Usable() {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{"API",
-			fmt.Sprintf("no usable credential for parent %s (delegationsync.child.api.credentials)", zd.GetParent())})
+			fmt.Sprintf("no usable credential for parent %s (delegationsync.parentsync.api.credentials)", zd.GetParent())})
 		return
 	}
 	// No address resolution for API (§16.7): the DSYNC target is a service
