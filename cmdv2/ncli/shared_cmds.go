@@ -7,7 +7,7 @@ import (
 	cli "github.com/johanix/tdns/v2/cli"
 )
 
-// NOTE: this file is deliberately a near-copy of cmdv2/ncli/shared_cmds.go.
+// NOTE: this file is deliberately a near-copy of cmdv2/cli/shared_cmds.go.
 // The parallel-binary strategy accepts the duplication (see
 // docs/2026-09-07-cli-multi-instance-design.md); what it does NOT accept is
 // silent drift. A command added to one and not the other reaches `auth` on one

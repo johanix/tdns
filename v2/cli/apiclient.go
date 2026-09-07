@@ -21,6 +21,21 @@ type ApiDetails struct {
 	AuthMethod string `validate:"required" yaml:"authmethod"`
 	RootCA     string `yaml:"rootca"`
 	Command    string `yaml:"command,omitempty"`
+	// Role names the command tree this entry is reachable through, for a
+	// SECOND (third, ...) instance of a daemon this CLI already knows how to
+	// drive. `role: auth` on an entry named "sectdns" builds the whole auth
+	// command tree a second time, targeting this entry, reachable as
+	// `tdns-ncli sectdns ...`. (tdns-cli ignores the field entirely; only
+	// tdns-ncli wires instance trees.)
+	//
+	// Empty is the normal case and means "this entry is the canonical target
+	// for whichever role RegisterRole maps to its Name" -- i.e. every config
+	// written before this field existed keeps working unchanged.
+	//
+	// mapstructure as well as yaml, for the same reason ConfigFile below
+	// carries one: the CLI roots decode with viper.Unmarshal, which never
+	// consults yaml tags.
+	Role string `yaml:"role,omitempty" mapstructure:"role"`
 	// mapstructure as well as yaml: the CLI roots decode this file with
 	// viper.Unmarshal, which never consults yaml tags. "config-file" does not
 	// match the field name, so without this tag it decodes to "" in silence.
@@ -50,9 +65,12 @@ var roleToClientKey = map[string]string{}
 // same role override earlier ones — this is how tdns-mp overrides the
 // "agent" → "tdns-agent" default with "agent" → "tdns-mpagent".
 //
-// Safe only from init() (map is not concurrency-safe; init ordering
-// inside a package is deterministic, across imported packages it is
-// topological and thus deterministic for override purposes).
+// The map is not concurrency-safe, so this must be called before any
+// goroutine can read it. Two callers qualify: package init() (init ordering
+// inside a package is deterministic, and across imported packages topological,
+// which is what makes downstream overrides work), and WireInstanceTrees during
+// Execute, before cobra dispatches anything. Do not call it from a running
+// command.
 func RegisterRole(role, clientKey string) {
 	roleToClientKey[role] = clientKey
 }

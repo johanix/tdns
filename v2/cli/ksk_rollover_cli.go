@@ -428,7 +428,7 @@ config file so the CLI can find db.file and the zone's policy.`,
 				runWhenOffline(z, keytype)
 				return
 			}
-			runWhenOnline(z, keytype)
+			runWhenOnline(cmd, z, keytype)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
@@ -439,8 +439,8 @@ config file so the CLI can find db.file and the zone's policy.`,
 
 // runWhenOnline is the default path: GET /api/v1/rollover/when via
 // the configured API client. No daemon config loaded on the CLI host.
-func runWhenOnline(z, keytype string) {
-	api, err := GetApiClient("auth", true)
+func runWhenOnline(cmd *cobra.Command, z, keytype string) {
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		cliFatalf("error getting API client: %v", err)
 	}
@@ -651,7 +651,7 @@ Online-only: scheduling against a stopped daemon is meaningless
 				keytype = "ZSK"
 			}
 
-			api, err := GetApiClient("auth", true)
+			api, err := GetApiClientForCmd(cmd, true)
 			if err != nil {
 				cliFatalf("error getting API client: %v", err)
 			}
@@ -707,7 +707,7 @@ manual_rollover_* row isn't being read by anything).`,
 				keytype = "ZSK"
 			}
 
-			api, err := GetApiClient("auth", true)
+			api, err := GetApiClientForCmd(cmd, true)
 			if err != nil {
 				cliFatalf("error getting API client: %v", err)
 			}
@@ -765,7 +765,7 @@ and the policy summary.`,
 			if offline {
 				s = fetchRolloverStatusOffline(z)
 			} else {
-				s = fetchRolloverStatusOnline(z)
+				s = fetchRolloverStatusOnline(cmd, z)
 			}
 			renderRolloverStatus(s, verbose, showKSK, showZSK)
 		},
@@ -780,8 +780,8 @@ and the policy summary.`,
 // fetchRolloverStatusOnline is the default path: GET
 // /api/v1/rollover/status via the configured API client. No daemon
 // config loaded on the CLI host.
-func fetchRolloverStatusOnline(z string) *tdns.RolloverStatus {
-	api, err := GetApiClient("auth", true)
+func fetchRolloverStatusOnline(cmd *cobra.Command, z string) *tdns.RolloverStatus {
+	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
 		cliFatalf("error getting API client: %v", err)
 	}
@@ -1624,7 +1624,7 @@ stopped first).`,
 				return
 			}
 
-			api, err := GetApiClient("auth", true)
+			api, err := GetApiClientForCmd(cmd, true)
 			if err != nil {
 				cliFatalf("error getting API client: %v", err)
 			}
@@ -1695,7 +1695,7 @@ Differs from 'reset' (which clears last_rollover_error for one keyid).`,
 				return
 			}
 
-			api, err := GetApiClient("auth", true)
+			api, err := GetApiClientForCmd(cmd, true)
 			if err != nil {
 				cliFatalf("error getting API client: %v", err)
 			}
@@ -1798,7 +1798,7 @@ change, or a second policy-change while a roll is in flight, is refused.`,
 			}
 			z := dns.Fqdn(tdns.Globals.Zonename)
 
-			api, err := GetApiClient("auth", true)
+			api, err := GetApiClientForCmd(cmd, true)
 			if err != nil {
 				cliFatalf("error getting API client: %v", err)
 			}
