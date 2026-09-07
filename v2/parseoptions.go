@@ -183,9 +183,9 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 		}
 
 		switch opt {
-		case OptDelSyncParent,
-			OptDelSyncChild,
-			OptDelSyncProxy,
+		case OptChildSync,
+			OptParentSync,
+			OptParentSyncProxy,
 			OptAllowUpdates,
 			OptAllowChildUpdates,
 			OptAllowApiUpdates,
@@ -392,7 +392,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 		}
 	}
 	// Mutual exclusion: parentsync and parentsync-proxy cannot both be set.
-	if options[OptDelSyncChild] && options[OptDelSyncProxy] {
+	if options[OptParentSync] && options[OptParentSyncProxy] {
 		msg := fmt.Sprintf("parentsync and parentsync-proxy are mutually exclusive on zone %s; zone will be quarantined", zname)
 		lg.Error("mutually exclusive options", "zone", zname, "option1", "parentsync", "option2", "parentsync-proxy")
 		if zd != nil {

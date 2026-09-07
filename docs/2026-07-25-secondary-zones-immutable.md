@@ -1,6 +1,7 @@
 # Secondary zones are immutable — MUST-NOT-MODIFY invariant + audit
 
-**Date:** 2026-07-25, revised 2026-07-26 (rev 2, rev 2.1, rev 2.2 same day)
+**Date:** 2026-07-25, revised 2026-07-26 (rev 2, rev 2.1, rev 2.2 same day),
+amended 2026-09-07 (rev 2.3 — §4 only, appended; nothing above it is edited)
 **Status:** IMPLEMENTED (2026-07-26) — all items in §14.1 landed on
 `feature/secondary-zones-immutable`; not yet reviewed or merged, and the
 live-testbed validation Fix D calls for is still outstanding. Design agreed;
@@ -408,6 +409,46 @@ edge-signer future this deliberately does not foreclose.
 **Turn OFF for a non-inline-signing tdns-auth secondary (origination) — five:**
 `allow-updates`, `allow-child-updates`, `add-transport-signal`,
 **`delegation-sync-parent`**, **`online-signing`** (rev 2.1).
+
+> **Rev 2.3 — amendment, 2026-09-07 (#538).** Everything from here to the end
+> of this document is as it was written on 2026-07-26 and describes the code as
+> it then stood. Two of its claims have since stopped holding, and
+> `originationOptions` in `v2/zone_option_normalize.go` still points a reader at
+> this section, so the changes are recorded here rather than edited in above.
+>
+> 1. **The turn-off list is six, not five: `parentsync` joins it.** Rev 2
+>    excluded it (see the bullet list below), reasoning that "its publishing
+>    paths are `allow-updates`-gated and Fix D backstops them". #538 removed that
+>    gate as the wrong question, so the first half stopped holding. The deeper
+>    reason never depended on it and is the same one that put `childsync` in the
+>    list: a tdns-auth secondary doing CHILD-side delegation sync is incoherent.
+>    Its delegation data came from upstream, a locally minted SIG(0) key is not
+>    in what it serves and cannot be, and telling the parent to change a
+>    delegation it does not own is not a secondary's business. `parentsync-proxy`
+>    stays out — it is an agent secondary's whole job, and normalization is a
+>    no-op off tdns-auth. (`allow-api-updates` and `publish-zonemd` also joined
+>    the list in the code after rev 2; `originationOptions` is the current set.)
+>
+> 2. **The KEY-publication bullet's gate changed.** "Publishes only
+>    `if Options[OptAllowUpdates]`" was accurate when written. It was also the
+>    wrong question: `allow-updates` governs inbound RFC 2136 DDNS, while that
+>    publish is an `InternalUpdate` which the applier admits regardless — so a
+>    delegation-sync PRIMARY that refused inbound DDNS advertised a DSYNC UPDATE
+>    target and never generated the key that target names. The gate is now the
+>    delegation-sync option that asks for the key (`childsync` on the parent
+>    side, `parentsync` on the child side — what both callers already test) plus
+>    `zoneMayOriginateContent` as a backstop. With item 1 above, this bullet's
+>    conclusion now holds on the option alone.
+>
+>    The CSYNC bullet below is the same category error and is **not** fixed:
+>    tracked as #557. Its conclusion for a secondary still holds, via
+>    `parentsync`.
+>
+> Naming, for reading the bullets below against today's code: the zone options
+> are now `childsync` (was `delegation-sync-parent`, `OptDelSyncParent`) and
+> `parentsync` (was `delegation-sync-child`, `OptDelSyncChild`), and the
+> `delegationsync:` config block is now top-level `childsync:`/`parentsync:`
+> with the policies at `childsync.policies:`.
 
 **`delegation-sync-parent` (rev 2 — reversed from rev 1).** Rev 1 excluded it,
 reasoning that every delsync path that publishes into the zone is itself gated on

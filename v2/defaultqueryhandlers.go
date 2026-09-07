@@ -54,7 +54,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	// response option to whatever DNS reply is sent. Per draft-berra-dnsop-keystate-03,
 	// the response is also signed with the UPDATE Receiver's SIG(0) key.
 	if msgoptions.KeyState != nil && kdb != nil {
-		if zd := FindZone(qname); zd != nil && zd.Options[OptDelSyncParent] {
+		if zd := FindZone(qname); zd != nil && zd.Options[OptChildSync] {
 			lgHandler.Debug("processing KeyState option from query", "qname", qname, "keyid", msgoptions.KeyState.KeyID, "state", msgoptions.KeyState.KeyState)
 			ksResponse, err := kdb.ProcessKeyState(msgoptions.KeyState, qname)
 			if err != nil {

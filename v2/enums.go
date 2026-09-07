@@ -24,8 +24,8 @@ const (
 )
 
 const (
-	OptDelSyncParent ZoneOption = iota + 1
-	OptDelSyncChild
+	OptChildSync ZoneOption = iota + 1
+	OptParentSync
 	OptAllowUpdates
 	OptAllowChildUpdates
 	OptAllowEdits // Dynamically et if app=combiner and zone contains a HSYNC RRset
@@ -49,8 +49,8 @@ const (
 	OptApiManagedZone // zone created/managed via the dynamic-zones API (zone add/delete/modify)
 	OptCatalogMemberAutoCreate
 	OptCatalogMemberAutoDelete
-	OptMultiSigner  // Dynamically set by signer when HSYNC shows multiple signers
-	OptDelSyncProxy // agent secondary: proxy CDS/CSYNC NOTIFYs upstream for a DSYNC-unaware primary
+	OptMultiSigner     // Dynamically set by signer when HSYNC shows multiple signers
+	OptParentSyncProxy // agent secondary: proxy CDS/CSYNC NOTIFYs upstream for a DSYNC-unaware primary
 	// OptAllowApiUpdates gates RR updates arriving over the management API,
 	// separately from allow-updates (which gates RFC 2136 DDNS). Appended here
 	// rather than beside allow-updates on purpose: ZoneOption values are
@@ -125,8 +125,8 @@ const (
 const _ uint = uint(TdnsZoneOptionMax) - uint(optZoneOptionTdnsSentinel-1)
 
 var ZoneOptionToString = map[ZoneOption]string{
-	OptDelSyncParent:     "childsync",
-	OptDelSyncChild:      "parentsync",
+	OptChildSync:         "childsync",
+	OptParentSync:        "parentsync",
 	OptAllowUpdates:      "allow-updates",
 	OptAllowChildUpdates: "allow-child-updates",
 	OptAllowEdits:        "allow-edits", // Dynamically et if app=combiner and zone contains a HSYNC RRset
@@ -147,7 +147,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptCatalogMemberAutoCreate: "catalog-member-auto-create",
 	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
 	OptMultiSigner:             "multi-signer",
-	OptDelSyncProxy:            "parentsync-proxy",
+	OptParentSyncProxy:         "parentsync-proxy",
 	OptAllowApiUpdates:         "allow-api-updates",
 	OptOnConflictDBWins:        "on-conflict-db-wins",
 	OptOnConflictZonefileWins:  "on-conflict-zonefile-wins",
@@ -159,10 +159,10 @@ var ZoneOptionToString = map[ZoneOption]string{
 }
 
 var StringToZoneOption = map[string]ZoneOption{
-	"childsync":                  OptDelSyncParent,
-	"parentsync":                 OptDelSyncChild,
-	"delegation-sync-parent":     OptDelSyncParent, // deprecated alias
-	"delegation-sync-child":      OptDelSyncChild,  // deprecated alias
+	"childsync":                  OptChildSync,
+	"parentsync":                 OptParentSync,
+	"delegation-sync-parent":     OptChildSync,  // deprecated alias
+	"delegation-sync-child":      OptParentSync, // deprecated alias
 	"allow-updates":              OptAllowUpdates,
 	"allow-child-updates":        OptAllowChildUpdates,
 	"allow-edits":                OptAllowEdits,
@@ -182,8 +182,8 @@ var StringToZoneOption = map[string]ZoneOption{
 	"catalog-member-auto-create": OptCatalogMemberAutoCreate,
 	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
 	"multi-signer":               OptMultiSigner,
-	"parentsync-proxy":           OptDelSyncProxy,
-	"delegation-sync-proxy":      OptDelSyncProxy, // deprecated alias
+	"parentsync-proxy":           OptParentSyncProxy,
+	"delegation-sync-proxy":      OptParentSyncProxy, // deprecated alias
 	"allow-api-updates":          OptAllowApiUpdates,
 	"on-conflict-db-wins":        OptOnConflictDBWins,
 	"on-conflict-zonefile-wins":  OptOnConflictZonefileWins,

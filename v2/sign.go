@@ -632,9 +632,8 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 // would have left the entire zone partially unsigned during the
 // sign pass — visible to any concurrent query or zone transfer.
 //
-// Delegations and glue follow the same rules as SignZone: delegation
-// NS RRsets are not signed, glue addresses (A/AAAA at delegation
-// names) are not signed.
+// Delegations follow the same rules as SignZone: a delegation NS RRset
+// is not signed, and nothing below a delegation is signed at all.
 //
 // Returns the count of RRSIGs written by the final pass.
 func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
@@ -689,6 +688,8 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 		}
 	}
 
+	occluded := occludedNames(names, delegations)
+
 	managesZonemd := zd.zoneManagesZonemd()
 
 	newrrsigs := 0
@@ -697,6 +698,16 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 		if owner == nil {
 			continue
 		}
+		// Below a delegation is the child's data; see SignZone (#546). This
+		// path used to nil-and-resign these RRsets, so without the strip the
+		// change would swap refreshed signatures for frozen ones.
+		if occluded[name] {
+			zd.stripOccludedRRSIGsLocked(name, owner)
+			continue
+		}
+		_, hasNS := owner.RRtypes.Get(dns.TypeNS)
+		isDelegation := hasNS && !core.EqualNames(name, zd.ZoneName)
+
 		for _, rrt := range owner.RRtypes.Keys() {
 			if rrt == dns.TypeRRSIG {
 				continue
@@ -709,22 +720,15 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 			if managesZonemd && rrt == dns.TypeZONEMD && core.EqualNames(name, zd.ZoneName) {
 				continue
 			}
-			if rrt == dns.TypeNS && !core.EqualNames(name, zd.ZoneName) {
-				continue // delegation NS — not signed
-			}
-			if rrt == dns.TypeA || rrt == dns.TypeAAAA {
-				var isglue bool
-				for _, del := range delegations {
-					if !core.EqualNames(name, del) && dns.IsSubDomain(del, name) {
-						isglue = true
-						break
-					}
-				}
-				if isglue {
+			// Only the DS at a delegation point; see SignZone.
+			if isDelegation && rrt != dns.TypeDS {
+				if rrt == dns.TypeKEY {
+					zd.deleteChildKeyAtCutLocked(name)
 					continue
 				}
+				zd.stripRRSIGsLocked(name, rrt, owner.RRtypes.GetOnlyRRSet(rrt))
+				continue
 			}
-
 			// Work on a local copy. The published RRset stays unchanged
 			// until we Set the new one back in a single atomic store, so
 			// readers never observe an unsigned intermediate state.
@@ -973,6 +977,8 @@ func (zd *ZoneData) signWorkingSetLocked(dak *DnssecKeys, clamp *ClampParams, fo
 		}
 	}
 
+	occluded := occludedNames(names, delegations)
+
 	lgSigner.Debug("zone delegations", "zone", zd.ZoneName, "delegations", delegations)
 
 	managesZonemd := zd.zoneManagesZonemd()
@@ -985,6 +991,24 @@ func (zd *ZoneData) signWorkingSetLocked(dak *DnssecKeys, clamp *ClampParams, fo
 		if owner == nil {
 			continue
 		}
+		// A name below a delegation is the child zone's data, not ours: RFC
+		// 4035 §2.2 excludes it from the authoritative data, so nothing at it
+		// is signed -- not its NSEC either, which the chain generator drops
+		// along with the name. The glue addresses the old per-type test singled
+		// out are simply the occluded data it happened to look for; every other
+		// type below a cut went on to be signed (#546).
+		//
+		// Strip rather than merely skip. A pass that only stopped signing would
+		// leave whatever an older build wrote there on the wire until the zone
+		// was next loaded from source -- and AXFR is exactly where #546 was
+		// visible in the first place.
+		if occluded[name] {
+			zd.stripOccludedRRSIGsLocked(name, owner)
+			continue
+		}
+
+		_, hasNS := owner.RRtypes.Get(dns.TypeNS)
+		isDelegation := hasNS && !core.EqualNames(name, zd.ZoneName)
 
 		for _, rrt := range owner.RRtypes.Keys() {
 			rrset := owner.RRtypes.GetOnlyRRSet(rrt)
@@ -999,22 +1023,22 @@ func (zd *ZoneData) signWorkingSetLocked(dak *DnssecKeys, clamp *ClampParams, fo
 			if managesZonemd && rrt == dns.TypeZONEMD && core.EqualNames(name, zd.ZoneName) {
 				continue
 			}
-			if rrt == dns.TypeNS && !core.EqualNames(name, zd.ZoneName) {
-				continue // dont' sign delegations
-			}
-			// XXX: What is the best way to identify that an RR is a glue record?
-			var wasglue bool
-			if rrt == dns.TypeA || rrt == dns.TypeAAAA {
-				// log.Printf("SignZone: checking whether %s %s is a glue record for a delegation", name, dns.TypeToString[uint16(rrt)])
-				for _, del := range delegations {
-					if !core.EqualNames(name, del) && dns.IsSubDomain(del, name) {
-						lgSigner.Debug("not signing glue record", "zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[uint16(rrt)], "delegation", del)
-						wasglue = true
-						continue
-					}
+			// At a delegation point the DS is the only thing that is ours.
+			// This is signableLocked's third clause, inlined: the owner-level
+			// occluded skip above has already settled the other two for this
+			// name, and asking the predicate per RRtype would walk the labels
+			// to the apex again for every type in the zone. The rule is stated
+			// once, there.
+			//
+			// Strip rather than skip, so a zone an older build signed heals on
+			// its next pass instead of carrying those signatures until it is
+			// loaded from source again.
+			if isDelegation && rrt != dns.TypeDS {
+				if rrt == dns.TypeKEY {
+					zd.deleteChildKeyAtCutLocked(name)
+					continue
 				}
-			}
-			if wasglue {
+				zd.stripRRSIGsLocked(name, rrt, rrset)
 				continue
 			}
 			rrset, _ = MaybeSignRRset(rrset, zd.ZoneName)
@@ -1073,6 +1097,8 @@ func (zd *ZoneData) chainNamesLocked(names []string) []string {
 	// names in the chain of every zone that has no delegation at all -- which
 	// is most of them.
 
+	occluded := occludedNames(names, delegations)
+
 	out := make([]string, 0, len(names))
 	for _, name := range names {
 		// A name that owns no RRsets is not in the zone, whatever the working
@@ -1081,20 +1107,184 @@ func (zd *ZoneData) chainNamesLocked(names []string) []string {
 		if !ownerHasData(zd.stagedOwner(name)) {
 			continue
 		}
-		occluded := false
+		if occluded[name] {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// occludedNames returns the subset of names that lie strictly below one of the
+// delegation points: the child zones' data, which RFC 4035 §2.2 leaves out of
+// this zone's authoritative data. A delegation point itself is NOT occluded --
+// its DS and its NSEC are ours, and only its NS RRset and its glue are not.
+//
+// The signer and chainNamesLocked share this so the RRSIGs and the NSEC chain
+// cannot disagree about where the zone ends. They did (#546): the chain was
+// right, and the signer recognised occlusion only for the glue address types,
+// so every other type below a cut was signed.
+//
+// A nil map is a usable result -- reading a nil map yields false -- so a zone
+// with no delegation costs nothing.
+func occludedNames(names, delegations []string) map[string]bool {
+	if len(delegations) == 0 {
+		return nil
+	}
+	occluded := make(map[string]bool)
+	for _, name := range names {
 		for _, del := range delegations {
 			// Label-aware: a plain suffix test also matches
 			// "notexample.com." against "example.com.".
 			if !core.EqualNames(name, del) && dns.IsSubDomain(del, name) {
-				occluded = true
+				occluded[name] = true
 				break
 			}
 		}
-		if !occluded {
-			out = append(out, name)
+	}
+	return occluded
+}
+
+// parentName returns name's parent, or "" when there is none. No allocation:
+// the parent is a suffix of the name.
+func parentName(name string) string {
+	i, end := dns.NextLabel(name, 0)
+	if end {
+		return ""
+	}
+	return name[i:]
+}
+
+// nameOccludedLocked reports whether name lies strictly below a delegation:
+// walk from its parent up to the apex, stopping at the first owner with an NS
+// RRset.
+//
+// The bulk signing passes ask occludedNames() instead. One survey of the zone
+// beats a walk per owner when every owner is being visited anyway; this is for
+// the paths that touch a handful of names, where the survey is the expensive
+// half. Both answer the same question.
+func (zd *ZoneData) nameOccludedLocked(name string) bool {
+	for p := parentName(name); p != "" && !core.EqualNames(p, zd.ZoneName); p = parentName(p) {
+		if zd.ownerIsDelegationLocked(p) {
+			return true
 		}
 	}
-	return out
+	return false
+}
+
+// ownerIsDelegationLocked reports whether name is a delegation point of this
+// zone: a non-apex owner carrying an NS RRset.
+func (zd *ZoneData) ownerIsDelegationLocked(name string) bool {
+	if core.EqualNames(name, zd.ZoneName) {
+		return false
+	}
+	od := zd.stagedOwner(name)
+	if od == nil {
+		return false
+	}
+	_, isDelegation := od.RRtypes.Get(dns.TypeNS)
+	return isDelegation
+}
+
+// signableLocked reports whether (name, rrtype) is this zone's own
+// authoritative data -- whether it gets an RRSIG at all (RFC 4035 §2.2).
+//
+// Three rules, and the bulk signing passes apply the same three:
+//
+//	the apex                  -> ours, every type
+//	below a delegation        -> the child's, every type
+//	AT a delegation point     -> the DS, and nothing else
+//
+// The third is why the test is on the type and not on the name alone. A cut
+// is where one zone ends and another begins, so the name at it is the child's
+// apex: its NS RRset is the child's own, and an address there is glue. Both
+// are signed in the child, by the child's keys, and a parent's signature over
+// them is one no resolver asks for. The DS is the exception that the whole
+// chain of trust runs through -- it exists only in the parent, and only the
+// parent can sign it. The delegation point's NSEC is ours too; it is not an
+// RRtypes entry and the chain path signs it.
+//
+// The apex ZONEMD is a separate matter, and not one for this predicate: the
+// publish that computes its digest signs it afterwards. See zonemd_publish.go.
+func (zd *ZoneData) signableLocked(name string, rrtype uint16) bool {
+	if core.EqualNames(name, zd.ZoneName) {
+		return true
+	}
+	if zd.nameOccludedLocked(name) {
+		return false
+	}
+	// A non-apex NS is never ours, and this must not be routed through
+	// ownerIsDelegationLocked: an update ADDING that NS asks before it is
+	// staged, so the owner is not a delegation point yet and the answer would
+	// come back "sign it" for the very record that makes the cut.
+	if rrtype == dns.TypeNS {
+		return false
+	}
+	if zd.ownerIsDelegationLocked(name) {
+		return rrtype == dns.TypeDS
+	}
+	return true
+}
+
+// stripOccludedRRSIGsLocked removes every RRSIG at one owner and stages the
+// result, returning how many went. Called on a name below a delegation, where
+// no RRSIG belongs at all, so it does not ask which key wrote them -- unlike
+// StripZoneRRSIGs, whose whole job is to remove one key's and keep the rest.
+//
+// Cheap on the steady state: once an owner is clean there is nothing to stage,
+// and a zone with no occluded data never reaches here.
+func (zd *ZoneData) stripOccludedRRSIGsLocked(name string, owner *OwnerData) int {
+	removed := 0
+	for _, rrt := range owner.RRtypes.Keys() {
+		removed += zd.stripRRSIGsLocked(name, rrt, owner.RRtypes.GetOnlyRRSet(rrt))
+	}
+	if removed > 0 {
+		lgSigner.Info("stripped RRSIGs from a name below a delegation",
+			"zone", zd.ZoneName, "name", name, "count", removed)
+	}
+	return removed
+}
+
+// deleteChildKeyAtCutLocked removes a KEY RRset from a delegation point.
+//
+// Every other kind of data that is not ours is KEPT and left unsigned -- an
+// occluded name is still carried in a transfer (#549), and glue at a cut keeps
+// its records and loses only its signature. Key material is the one exception,
+// and deliberately so: a child's SIG(0) KEY belongs in the truststore, its home
+// in the parent is a database table and never the zone, and "published but
+// unsigned" is not an acceptable resting state for it. So it goes, wherever it
+// came from -- an older build, a leaked write, or an update that added the KEY
+// before the NS that turned the name into a cut.
+//
+// Only AT the cut, which is the child's apex and where a child's SIG(0) key
+// would land. A KEY deeper inside the child's namespace is ordinary occluded
+// data and is left alone, unsigned, like everything else down there.
+func (zd *ZoneData) deleteChildKeyAtCutLocked(name string) {
+	if od := zd.stagedOwner(name); od == nil {
+		return
+	} else if _, has := od.RRtypes.Get(dns.TypeKEY); !has {
+		return
+	}
+	lgSigner.Warn("removing a KEY published at a delegation point; a child's key material belongs in the truststore, not in this zone",
+		"zone", zd.ZoneName, "name", name)
+	zd.stageDeleteLocked(name, dns.TypeKEY)
+}
+
+// stripRRSIGsLocked drops the RRSIGs from one RRset and stages it, returning
+// how many went. Staging nothing when there were none is what keeps the signing
+// passes from touching every delegation on every run.
+func (zd *ZoneData) stripRRSIGsLocked(name string, rrt uint16, rrset core.RRset) int {
+	if len(rrset.RRSIGs) == 0 {
+		return 0
+	}
+	removed := len(rrset.RRSIGs)
+	// GetOnlyRRSet returns an RRset whose RRtype field is unset (the store keys
+	// by type); set it so the RRset is staged under its own type rather than
+	// under type 0. Same trap as StripZoneRRSIGs.
+	rrset.RRtype = rrt
+	rrset.RRSIGs = nil
+	zd.stageRRsetLocked(name, rrset)
+	return removed
 }
 
 // nsecTTLLocked returns the TTL an NSEC record should carry: the SOA minimum

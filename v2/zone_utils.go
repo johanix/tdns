@@ -1740,7 +1740,7 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 }
 
 func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
-	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild] || zd.Options[OptDelSyncProxy]
+	wantsSync := zd.Options[OptChildSync] || zd.Options[OptParentSync] || zd.Options[OptParentSyncProxy]
 
 	// Dynamic parentsync=agent detection removed — handled by tdns-mp
 	// MPPostRefresh (hsync_utils.go) and OnFirstLoad (start_agent.go).
@@ -1752,7 +1752,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	lg.Debug("SetupZoneSync: zone requests delegation sync", "zone", zd.ZoneName)
 
 	// Is this a parent zone and should we then publish a DSYNC RRset?
-	if zd.Options[OptDelSyncParent] {
+	if zd.Options[OptChildSync] {
 		// For the moment we receive both updates and notifies on the same address as the rest of
 		// the DNS service. Doesn't have to be that way, but for now it is.
 
@@ -1805,14 +1805,14 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	// ensure that there is a SIG(0) keypair and that the public key is published in the zone.
 	// delegation-sync-child is valid for auth (standalone) or agent+multi-provider zones.
 	// Combiner and signer roles don't do child delegation sync.
-	if zd.Options[OptDelSyncChild] &&
+	if zd.Options[OptParentSync] &&
 		((Globals.App.Type == AppTypeAuth && !zd.Options[OptMultiProvider]) ||
 			(Globals.App.Type == AppTypeAgent && zd.Options[OptMultiProvider])) {
-		schemes := DelegationSyncConfig().Child.Schemes
+		schemes := ParentSyncConfig().Schemes
 		if len(schemes) == 0 {
-			lg.Error("SetupZoneSync: zone has delegation-sync-child enabled but delegationsync.child.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)
-			zd.SetError(ConfigError, "delegation-sync-child enabled but delegationsync.child.schemes is not configured")
-			return fmt.Errorf("delegation-sync-child enabled but delegationsync.child.schemes is not configured for zone %s", zd.ZoneName)
+			lg.Error("SetupZoneSync: zone has delegation-sync-child enabled but parentsync.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)
+			zd.SetError(ConfigError, "delegation-sync-child enabled but parentsync.schemes is not configured")
+			return fmt.Errorf("delegation-sync-child enabled but parentsync.schemes is not configured for zone %s", zd.ZoneName)
 		}
 		for _, scheme := range schemes {
 			switch scheme {
@@ -1839,7 +1839,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	// KEY is published at the apex, DNS UPDATEs — to the parent on the primary's
 	// behalf. Valid only for agent + secondary zones; reject other combinations
 	// so a misconfiguration is loud rather than silently inert.
-	if zd.Options[OptDelSyncProxy] {
+	if zd.Options[OptParentSyncProxy] {
 		if Globals.App.Type != AppTypeAgent || zd.ZoneType != Secondary {
 			lg.Error("SetupZoneSync: delegation-sync-proxy is only valid for a tdns-agent secondary zone",
 				"zone", zd.ZoneName, "app", Globals.App.Type, "zonetype", zd.ZoneType)

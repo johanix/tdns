@@ -74,7 +74,7 @@ so).`,
 				// daemon's policy name takes precedence over an
 				// inferred-from-YAML lookup; explicit --policy still
 				// overrides both.
-				api, err := GetApiClient("auth", true)
+				api, err := GetApiClientForCmd(cmd, true)
 				if err != nil {
 					cliFatalf("error getting API client: %v", err)
 				}

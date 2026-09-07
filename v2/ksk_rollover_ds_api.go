@@ -96,7 +96,7 @@ func pushDSRRsetViaApi(ctx context.Context, deps RolloverEngineDeps, target *Dsy
 		return out, fmt.Errorf("pushDSRRsetViaApi: no DS records to publish for zone %s", child)
 	}
 
-	childconf := DelegationSyncConfig().Child.Api
+	childconf := ParentSyncConfig().Api
 	cred, ok := childconf.CredentialFor(parent)
 	if !ok || !cred.Usable() {
 		// A local configuration gap, NOT waiting-for-parent. The parent is
@@ -107,7 +107,7 @@ func pushDSRRsetViaApi(ctx context.Context, deps RolloverEngineDeps, target *Dsy
 		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf(
 			"pushDSRRsetViaApi: no DSYNC API credential for parent %s"+
-				" (delegationsync.child.api.credentials); obtain one from the parent operator", parent)
+				" (parentsync.api.credentials); obtain one from the parent operator", parent)
 	}
 
 	// One switch for plaintext and for unvalidated discovery (§16.6): they are

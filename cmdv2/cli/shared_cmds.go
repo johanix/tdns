@@ -7,6 +7,16 @@ import (
 	cli "github.com/johanix/tdns/v2/cli"
 )
 
+// NOTE: this file is deliberately a near-copy of cmdv2/ncli/shared_cmds.go.
+// The parallel-binary strategy accepts the duplication (see
+// docs/2026-09-07-cli-multi-instance-design.md); what it does NOT accept is
+// silent drift. A command added to one and not the other reaches `auth` on one
+// binary and not the other, with no compile error.
+//
+// TestInstanceTreeMatchesCanonicalAuthTree (cmdv2/ncli) catches the case that
+// matters -- a command on the canonical tree but on no instance tree. Adding a
+// command here means adding it there too.
+
 func init() {
 	// From ../../v2/cli/db_cmds.go: per-daemon factory; both auth and agent
 	// have their own SQLite DB so each gets its own 'db init' command.

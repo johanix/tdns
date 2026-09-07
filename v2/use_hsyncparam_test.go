@@ -152,7 +152,7 @@ func TestRefreshHooksRegisterAtFirstLoad(t *testing.T) {
 	}
 }
 
-// The proxy's registered pre-refresh closure gates on OptDelSyncProxy. The
+// The proxy's registered pre-refresh closure gates on OptParentSyncProxy. The
 // closure is the live wiring registered on every zone; ProxyDelegationPreRefresh
 // itself is the pure diff (exercised directly by the delsync_proxy_p2 tests).
 // Without the option the closure must not run the diff, so registering it
@@ -187,7 +187,7 @@ func TestProxyRefreshClosureGatesOnOption(t *testing.T) {
 
 	// Option on: the CSYNC change is detected.
 	on, onNew := makeZones()
-	on.SetOption(OptDelSyncProxy, true)
+	on.SetOption(OptParentSyncProxy, true)
 	preClosure(on, onNew)
 	if on.ProxyRefreshAnalysis == nil || !on.ProxyRefreshAnalysis.CsyncChanged {
 		t.Fatalf("proxy closure missed the CSYNC change with the option set: %+v", on.ProxyRefreshAnalysis)

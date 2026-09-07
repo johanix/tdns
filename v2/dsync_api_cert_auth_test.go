@@ -101,7 +101,7 @@ func registerDsyncApiParent(t *testing.T, zone string) {
 	zd := &ZoneData{
 		ZoneName: zone,
 		Options: map[ZoneOption]bool{
-			OptDelSyncParent:     true,
+			OptChildSync:         true,
 			OptAllowChildUpdates: true,
 		},
 	}
@@ -111,11 +111,11 @@ func registerDsyncApiParent(t *testing.T, zone string) {
 
 func setDsyncApiClientAuth(t *testing.T, ca *DsyncApiClientAuthConf) {
 	t.Helper()
-	prev := DelegationSyncConfig()
-	next := *prev
-	next.Parent.Api.ClientAuth = ca
-	SetDelegationSyncConfig(next)
-	t.Cleanup(func() { SetDelegationSyncConfig(*prev) })
+	prevCS, prevPS := *ChildSyncConfig(), *ParentSyncConfig()
+	next := prevCS
+	next.Api.ClientAuth = ca
+	SetDelegationSyncConfig(next, prevPS)
+	t.Cleanup(func() { SetDelegationSyncConfig(prevCS, prevPS) })
 }
 
 func dsyncApiCertAuthServer(t *testing.T, kdb *KeyDB, requestCert bool) *httptest.Server {
@@ -525,7 +525,7 @@ func TestDsyncApiCertAuth_PolicySameAsBearer(t *testing.T) {
 func TestDsyncApiListenerClientAuthHandshake(t *testing.T) {
 	rootsFromConf := func(t *testing.T, conf *Config) *x509.CertPool {
 		t.Helper()
-		pemBytes, err := os.ReadFile(conf.DelegationSync.Parent.Api.CertFile)
+		pemBytes, err := os.ReadFile(conf.ChildSync.Api.CertFile)
 		if err != nil {
 			t.Fatalf("read server cert: %v", err)
 		}
@@ -595,7 +595,7 @@ func TestDsyncApiListenerClientAuthHandshake(t *testing.T) {
 		}
 		startListener(t, conf, router)
 
-		addr := conf.DelegationSync.Parent.Api.Listen[0]
+		addr := conf.ChildSync.Api.Listen[0]
 		requested, err := handshake(t, addr, rootsFromConf(t, conf))
 		if err != nil {
 			t.Fatalf("handshake: %v", err)
@@ -610,14 +610,14 @@ func TestDsyncApiListenerClientAuthHandshake(t *testing.T) {
 		if !ok {
 			t.Skip("no test certificate available")
 		}
-		conf.DelegationSync.Parent.Api.ClientAuth = &DsyncApiClientAuthConf{
+		conf.ChildSync.Api.ClientAuth = &DsyncApiClientAuthConf{
 			Mechanisms: []string{DsyncApiAuthTLSPin},
 		}
-		SetDelegationSyncConfig(conf.DelegationSync)
+		SetDelegationSyncConfig(conf.ChildSync, conf.ParentSync)
 
 		startListener(t, conf, router)
 
-		addr := conf.DelegationSync.Parent.Api.Listen[0]
+		addr := conf.ChildSync.Api.Listen[0]
 		requested, err := handshake(t, addr, rootsFromConf(t, conf))
 		if err != nil {
 			t.Fatalf("certless handshake failed: %v", err)

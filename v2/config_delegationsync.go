@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"sync/atomic"
 
@@ -12,36 +13,140 @@ import (
 	"github.com/miekg/dns"
 )
 
-// The delegationsync: block, typed.
+// The childsync: and parentsync: blocks, typed, plus the fold that still
+// accepts the retired `delegationsync:` wrapper they were hoisted out of.
 //
-// This block was read with viper.GetString/GetStringSlice from a dozen call
-// sites. It is now modelled in full and this struct is the ONLY reader: parent
-// bootstrap policy lives in named delegationsync.policies.*, and child
-// update.bootstrap.methods is parsed here and consumed at bootstrap. No viper read of
-// the delegationsync block remains, with one deliberate exception: the child
-// keygen MODE is still read from viper in sig0_utils.go and is intentionally
-// NOT modelled here -- the sample config says "`algorithm` and `generator` are
-// read on the child side; `mode` is not", and modelling it would turn a setting
-// that has never had any effect into a live one.
+// childsync: is what a PARENT offers its children -- the DSYNC RRset, the
+// schemes behind it, the UPDATE receiver's key, and the named delegation
+// policies. parentsync: is what a CHILD does towards its parent. Each is named
+// for the zone option that switches it on.
+//
+// These were read with viper.GetString/GetStringSlice from a dozen call sites.
+// They are now modelled in full and these structs are the ONLY reader, with one
+// deliberate exception: the parentsync keygen MODE is still read from viper in
+// sig0_utils.go and is intentionally NOT modelled here -- the sample config says
+// "`algorithm` and `generator` are read on the child side; `mode` is not", and
+// modelling it would turn a setting that has never had any effect into a live one.
 //
 // Why it was unwound: viper splits keys on ".". Any config shape with a dotted
 // key silently arrives empty, the setting reads back as its zero value, and
-// nothing logs a thing. Zone names are dotted, so a per-zone setting under this
-// block was unreadable through viper and gave no sign of it.
+// nothing logs a thing. Zone names are dotted, so a per-zone setting under these
+// blocks was unreadable through viper and gave no sign of it.
 //
-// Keep it complete. A subtree modelled here while its readers still call viper
+// Keep them complete. A subtree modelled here while its readers still call viper
 // is worse than one that is honestly absent, because the field looks
 // authoritative and returns a zero value; add the fields and move the readers
 // in the same change.
-type DelegationSyncConf struct {
-	Parent               DelegationSyncParentConf        `yaml:"parent" mapstructure:"parent"`
-	Child                DelegationSyncChildConf         `yaml:"child" mapstructure:"child"`
-	Policies             map[string]DelegationPolicyConf `yaml:"policies" mapstructure:"policies"`
-	CompiledPolicies     map[string]DelegationPolicy     `yaml:"-" mapstructure:"-"`
-	CompiledChildMethods []string                        `yaml:"-" mapstructure:"-"`
+// DeprecatedDelegationSyncConf is the retired `delegationsync:` block.
+//
+// It wrapped three things -- `parent:`, `child:` and `policies:` -- under a
+// level that said nothing the members did not. Worse, `parent:` and `child:`
+// were each named after the FAR END of the relationship they configure:
+// `delegationsync.parent` is what a CHILDSYNC zone publishes to its children.
+// The two blocks are now top-level `childsync:` and `parentsync:`, matching the
+// zone options, and the policies live at `childsync.policies:` because every
+// consumer of a bound policy is childsync-side.
+//
+// Pointers so "absent" and "present but empty" stay distinguishable: folding an
+// empty block over a populated canonical one would silently erase it.
+// foldDeprecatedKeys moves them into place and clears the block, so nothing
+// downstream ever sees a non-nil one. Remove this type, the Config field, the
+// fold and the hasContent helpers together when the deprecation cycle ends.
+type DeprecatedDelegationSyncConf struct {
+	Parent   *ChildSyncConf                  `yaml:"parent" mapstructure:"parent"`
+	Child    *ParentSyncConf                 `yaml:"child" mapstructure:"child"`
+	Policies map[string]DelegationPolicyConf `yaml:"policies" mapstructure:"policies"`
 }
 
-type DelegationSyncParentConf struct {
+// foldDeprecatedDelegationSync moves a `delegationsync:` block onto the
+// top-level childsync:/parentsync: fields and clears it, so every reader sees
+// one shape and a second call is a no-op.
+//
+// Setting a member in both places is an ERROR, not a precedence rule. It means
+// a half-finished migration, and picking a winner silently would leave the
+// operator reading one block while the server obeys the other -- the exact
+// failure mode the rename exists to end. Moving the blocks but not yet the
+// policies is NOT that: it is a coherent half-step, so it folds with a warning.
+//
+// Returns the deprecation warnings for the caller to log: a config-parsing
+// helper has no business choosing a logger.
+func (conf *Config) foldDeprecatedDelegationSync() ([]string, error) {
+	ds := conf.DeprecatedDelegationSync
+	if ds == nil {
+		return nil, nil
+	}
+	var warnings []string
+	if ds.Parent != nil {
+		if conf.ChildSync.hasContent() {
+			return nil, fmt.Errorf("both the top-level `childsync:` and the deprecated `delegationsync.parent:` are set; keep only `childsync:`")
+		}
+		conf.ChildSync = *ds.Parent
+		warnings = append(warnings, "delegationsync.parent: is deprecated, move it to the top-level childsync: (it configures what a childsync zone offers its children)")
+	}
+	if ds.Child != nil {
+		if conf.ParentSync.hasContent() {
+			return nil, fmt.Errorf("both the top-level `parentsync:` and the deprecated `delegationsync.child:` are set; keep only `parentsync:`")
+		}
+		conf.ParentSync = *ds.Child
+		warnings = append(warnings, "delegationsync.child: is deprecated, move it to the top-level parentsync: (it configures what a parentsync zone does towards its parent)")
+	}
+	if len(ds.Policies) > 0 {
+		if len(conf.ChildSync.Policies) > 0 {
+			return nil, fmt.Errorf("both `childsync.policies:` and the deprecated `delegationsync.policies:` are set; keep only `childsync.policies:`")
+		}
+		conf.ChildSync.Policies = ds.Policies
+		warnings = append(warnings, "delegationsync.policies: is deprecated, move it to childsync.policies: (a delegation policy governs what a childsync zone advertises and accepts)")
+	}
+	conf.DeprecatedDelegationSync = nil
+	return warnings, nil
+}
+
+// FoldDeprecatedDelegationSync folds the retired `delegationsync:` block and
+// logs the warnings. Every config-decode path calls this; the fold is
+// idempotent, so a path reached twice costs nothing.
+func (conf *Config) FoldDeprecatedDelegationSync() error {
+	warnings, err := conf.foldDeprecatedDelegationSync()
+	if err != nil {
+		return err
+	}
+	for _, w := range warnings {
+		lgConfig.Warn(w)
+	}
+	return nil
+}
+
+// hasContent reports whether an operator wrote anything into the block. Used
+// only to catch a config that sets both the canonical and the deprecated
+// spelling; a zero block is indistinguishable from an absent one, which is
+// exactly the case where folding is safe.
+//
+// DeepEqual against the zero value, NOT a hand-written field list. The
+// enumeration this replaces was incomplete -- it never looked at api.baseurl,
+// api.dialect, api.cert/key, api.client-auth or api.cafile -- so a canonical
+// block that set only one of those read as ABSENT, and the fold overwrote it
+// with the deprecated block instead of refusing the pair. Silently: the exact
+// failure the both-shapes error exists to prevent. An enumeration also has to be
+// revisited every time a field is added to either block, and would not have been.
+//
+// DeepEqual also distinguishes a nil slice from an explicitly empty one, which
+// is load bearing here: compileChildBootstrapMethods reads nil as "the default
+// pair, at-apex + at-ns" and a non-nil empty slice as "no methods at all", so
+// `len(...) > 0` silently erased an operator's `bootstrap.methods: []`.
+//
+// The derived fields are zeroed first. They are never decoded, and the fold runs
+// before anything compiles them, but comparing them would make the predicate
+// depend on WHEN it is called.
+func (c ChildSyncConf) hasContent() bool {
+	c.CompiledPolicies = nil
+	return !reflect.DeepEqual(c, ChildSyncConf{})
+}
+
+func (c ParentSyncConf) hasContent() bool {
+	c.CompiledMethods = nil
+	return !reflect.DeepEqual(c, ParentSyncConf{})
+}
+
+type ChildSyncConf struct {
 	// Schemes we are willing to offer children, and therefore publish DSYNC
 	// records for: notify, update, api.
 	Schemes []string           `yaml:"schemes" mapstructure:"schemes"`
@@ -50,22 +155,36 @@ type DelegationSyncParentConf struct {
 	// hangs off the same YAML node, which is why it is not a plain
 	// DsyncDnsSchemeConf like Notify. Embedding keeps Parent.Update.Target and
 	// friends reading exactly as before. Bootstrap policy is not here: it lives
-	// in named delegationsync.policies.* and is referenced per-zone.
+	// in named childsync.policies.* and is referenced per-zone.
 	Update DsyncUpdateSchemeConf `yaml:"update" mapstructure:"update"`
 	Api    DsyncApiSchemeConf    `yaml:"api" mapstructure:"api"`
+
+	// Policies are the named delegation policies, referenced per-zone with
+	// `delegationpolicy: <name>`. They live here, not at the top level,
+	// because every consumer of a bound policy is childsync-side: the SVCB
+	// bootstrap advertisement a childsync zone publishes, and what it accepts
+	// from a child (ApproveChildUpdate, ApproveTrustUpdate, SIG(0) validation).
+	// A child that needs its parent's policy reads it off the parent zone.
+	Policies map[string]DelegationPolicyConf `yaml:"policies" mapstructure:"policies"`
+	// CompiledPolicies is derived, never decoded: SetDelegationSyncConfig fills
+	// it from Policies.
+	CompiledPolicies map[string]DelegationPolicy `yaml:"-" mapstructure:"-"`
 }
 
-type DelegationSyncChildConf struct {
+type ParentSyncConf struct {
 	// Schemes we are willing to use against a parent, in preference order.
 	Schemes []string             `yaml:"schemes" mapstructure:"schemes"`
-	Api     DsyncApiChildConf    `yaml:"api" mapstructure:"api"`
-	Update  DsyncChildUpdateConf `yaml:"update" mapstructure:"update"`
+	Api     ParentSyncApiConf    `yaml:"api" mapstructure:"api"`
+	Update  ParentSyncUpdateConf `yaml:"update" mapstructure:"update"`
+
+	// CompiledMethods is derived from Update.Bootstrap.Methods, never decoded.
+	CompiledMethods []string `yaml:"-" mapstructure:"-"`
 }
 
-// DsyncChildUpdateConf is the child side of the UPDATE scheme: keygen, plus
+// ParentSyncUpdateConf is the child side of the UPDATE scheme: keygen, plus
 // bootstrap.methods (intersected with the parent SVCB advertisement at
 // bootstrap time). The DSYNC keys themselves are the parent's to publish.
-type DsyncChildUpdateConf struct {
+type ParentSyncUpdateConf struct {
 	Keygen    DsyncKeygenConf `yaml:"keygen" mapstructure:"keygen"`
 	Bootstrap struct {
 		Methods []string `yaml:"methods" mapstructure:"methods"`
@@ -78,7 +197,7 @@ type DsyncChildUpdateConf struct {
 	// SVCB bootstrap advertisement discovered without DNSSEC validation. It
 	// is the draft's "subject to local policy" escape for an unsigned parent
 	// zone with no manually bootstrapped receiver key (ddns-02 §"Authenticating
-	// Responses"), and mirrors DsyncApiChildConf.AllowInsecure: one switch,
+	// Responses"), and mirrors ParentSyncApiConf.AllowInsecure: one switch,
 	// because the two inputs are the same protection seen from two sides.
 	//
 	// It does NOT make a wrong signature acceptable: a response whose SIG(0)
@@ -107,15 +226,15 @@ type DsyncKeygenConf struct {
 	Generator string `yaml:"generator" mapstructure:"generator"`
 }
 
-// DsyncApiChildConf is what a child needs to use the API scheme against its
+// ParentSyncApiConf is what a child needs to use the API scheme against its
 // parents: one credential per parent, obtained out of band.
-type DsyncApiChildConf struct {
+type ParentSyncApiConf struct {
 	// A LIST, not a map keyed by parent name. viper splits keys on ".", so a
 	// map keyed "example." would arrive keyed "example" with every setting
 	// beneath it somewhere the struct cannot see -- and the credential would
 	// read back empty with nothing logged anywhere. Same reason the labstuff
 	// parentupdater config is a list.
-	Credentials []DsyncApiChildCredentialConf `yaml:"credentials" mapstructure:"credentials"`
+	Credentials []ParentSyncApiCredentialConf `yaml:"credentials" mapstructure:"credentials"`
 
 	// CaFile is an additional CA bundle to trust for DSYNC API endpoints, on
 	// top of the system roots.
@@ -140,7 +259,7 @@ type DsyncApiChildConf struct {
 	AllowInsecure bool `yaml:"allow-insecure" mapstructure:"allow-insecure"`
 }
 
-type DsyncApiChildCredentialConf struct {
+type ParentSyncApiCredentialConf struct {
 	Parent string `yaml:"parent" mapstructure:"parent"`
 
 	// Child names the child zone this credential is for. OPTIONAL, and empty
@@ -165,12 +284,12 @@ type DsyncApiChildCredentialConf struct {
 	// that "the operator wrote no tls block" and "the operator wrote an empty
 	// one" are distinguishable -- the second is a config error worth naming,
 	// the first is every config written before this existed.
-	TLS *DsyncApiChildTLSConf `yaml:"tls" mapstructure:"tls"`
+	TLS *ParentSyncApiTLSConf `yaml:"tls" mapstructure:"tls"`
 }
 
-// DsyncApiChildTLSConf is one client keypair. Both paths, no secrets: the
+// ParentSyncApiTLSConf is one client keypair. Both paths, no secrets: the
 // private key stays in its file and is never read into the config.
-type DsyncApiChildTLSConf struct {
+type ParentSyncApiTLSConf struct {
 	CertFile string `yaml:"cert" mapstructure:"cert"`
 	KeyFile  string `yaml:"key" mapstructure:"key"`
 }
@@ -178,12 +297,12 @@ type DsyncApiChildTLSConf struct {
 // Validate rejects a half-written block early, where the error can name the
 // field, rather than at first use where it surfaces as a TLS handshake failure
 // against the parent.
-func (t *DsyncApiChildTLSConf) Validate() error {
+func (t *ParentSyncApiTLSConf) Validate() error {
 	if t == nil {
 		return nil
 	}
 	if strings.TrimSpace(t.CertFile) == "" || strings.TrimSpace(t.KeyFile) == "" {
-		return fmt.Errorf("delegationsync.child.api.credentials[].tls needs both cert and key")
+		return fmt.Errorf("parentsync.api.credentials[].tls needs both cert and key")
 	}
 	return nil
 }
@@ -191,21 +310,21 @@ func (t *DsyncApiChildTLSConf) Validate() error {
 // Validate rejects a credential entry that cannot authenticate: both a bearer
 // pair and a tls block (ambiguous; the Authorization header would win and the
 // certificate would be ignored), or a tls block that is only half written.
-func (cc DsyncApiChildCredentialConf) Validate() error {
+func (cc ParentSyncApiCredentialConf) Validate() error {
 	if err := cc.TLS.Validate(); err != nil {
 		return err
 	}
 	if cc.TLS != nil && (strings.TrimSpace(cc.Username) != "" || cc.Key.Value() != "") {
-		return fmt.Errorf("delegationsync.child.api.credentials[] cannot carry both a bearer credential and a tls block")
+		return fmt.Errorf("parentsync.api.credentials[] cannot carry both a bearer credential and a tls block")
 	}
 	return nil
 }
 
 // ValidateCredentials checks every child credential entry.
-func (c DsyncApiChildConf) ValidateCredentials() error {
+func (c ParentSyncApiConf) ValidateCredentials() error {
 	for i, cc := range c.Credentials {
 		if err := cc.Validate(); err != nil {
-			return fmt.Errorf("delegationsync.child.api.credentials[%d]: %v", i, err)
+			return fmt.Errorf("parentsync.api.credentials[%d]: %v", i, err)
 		}
 	}
 	return nil
@@ -218,7 +337,7 @@ func (c DsyncApiChildConf) ValidateCredentials() error {
 // this one cannot see a child-specific entry, so on a host that proxies
 // several children under one parent it returns whichever generic entry exists
 // -- or nothing, if every entry names a child.
-func (c DsyncApiChildConf) CredentialFor(parent string) (DsyncApiClientCredential, bool) {
+func (c ParentSyncApiConf) CredentialFor(parent string) (DsyncApiClientCredential, bool) {
 	return c.CredentialForChild(parent, "")
 }
 
@@ -232,7 +351,7 @@ func (c DsyncApiChildConf) CredentialFor(parent string) (DsyncApiClientCredentia
 // The alternative -- matching on username == child -- was rejected: §6.2 keeps
 // principal and username deliberately distinct, so the parent does not require
 // them to be equal and neither should this.
-func (c DsyncApiChildConf) CredentialForChild(parent, child string) (DsyncApiClientCredential, bool) {
+func (c ParentSyncApiConf) CredentialForChild(parent, child string) (DsyncApiClientCredential, bool) {
 	norm := func(s string) string {
 		s = strings.TrimSpace(s)
 		if s == "" {
@@ -242,7 +361,7 @@ func (c DsyncApiChildConf) CredentialForChild(parent, child string) (DsyncApiCli
 	}
 	wantParent, wantChild := norm(parent), norm(child)
 
-	build := func(cc DsyncApiChildCredentialConf) DsyncApiClientCredential {
+	build := func(cc ParentSyncApiCredentialConf) DsyncApiClientCredential {
 		out := DsyncApiClientCredential{
 			Parent:   wantParent,
 			Username: strings.TrimSpace(cc.Username),
@@ -255,7 +374,7 @@ func (c DsyncApiChildConf) CredentialForChild(parent, child string) (DsyncApiCli
 		return out
 	}
 
-	var generic *DsyncApiChildCredentialConf
+	var generic *ParentSyncApiCredentialConf
 	for i, cc := range c.Credentials {
 		if norm(cc.Parent) != wantParent {
 			continue
@@ -342,7 +461,7 @@ func (c *DsyncApiClientAuthConf) Validate() error {
 		return nil
 	}
 	if len(c.Mechanisms) == 0 {
-		return fmt.Errorf("delegationsync.parent.api.client-auth has no mechanisms")
+		return fmt.Errorf("childsync.api.client-auth has no mechanisms")
 	}
 	var hasPkix bool
 	for i, m := range c.Mechanisms {
@@ -356,18 +475,20 @@ func (c *DsyncApiClientAuthConf) Validate() error {
 		}
 	}
 	if hasPkix && strings.TrimSpace(c.CAFile) == "" {
-		lgConfig.Warn("delegationsync.parent.api.client-auth lists tls-pkix but ca-file is empty; tls-pkix will be unsatisfiable")
+		lgConfig.Warn("childsync.api.client-auth lists tls-pkix but ca-file is empty; tls-pkix will be unsatisfiable")
 	}
 	return nil
 }
 
-// Validate checks the delegationsync block beyond what DsyncApiSchemeConf.Validate
-// already does for publication: client-auth mechanisms and child credential shape.
-func (dsc DelegationSyncConf) Validate() error {
-	if err := dsc.Parent.Api.ClientAuth.Validate(); err != nil {
-		return err
-	}
-	return dsc.Child.Api.ValidateCredentials()
+// Validate checks the childsync:/parentsync: blocks beyond what
+// DsyncApiSchemeConf.Validate already does for publication: client-auth
+// mechanisms on the childsync side, credential shape on the parentsync side.
+func (c ChildSyncConf) Validate() error {
+	return c.Api.ClientAuth.Validate()
+}
+
+func (c ParentSyncConf) Validate() error {
+	return c.Api.ValidateCredentials()
 }
 
 // DsyncApiDialectV1 is the dialect identifier published in the TXT record at
@@ -412,16 +533,16 @@ func (c DsyncApiSchemeConf) WithDefaults() DsyncApiSchemeConf {
 // meaningful for a zone that actually offers the scheme.
 func (c DsyncApiSchemeConf) Validate() error {
 	if !strings.Contains(c.BaseUrl, "{TARGET}") || !strings.Contains(c.BaseUrl, "{PORT}") {
-		return fmt.Errorf("delegationsync.parent.api.baseurl %q must contain both {TARGET} and {PORT}", c.BaseUrl)
+		return fmt.Errorf("childsync.api.baseurl %q must contain both {TARGET} and {PORT}", c.BaseUrl)
 	}
 	if c.Dialect == "" {
-		return fmt.Errorf("delegationsync.parent.api.dialect is empty")
+		return fmt.Errorf("childsync.api.dialect is empty")
 	}
 	if strings.ContainsAny(c.Dialect, " \t") {
 		// The first whitespace-separated token of the TXT is the dialect;
 		// anything after it is a parameter. A dialect containing whitespace
 		// would publish as a dialect plus a garbage parameter.
-		return fmt.Errorf("delegationsync.parent.api.dialect %q must not contain whitespace", c.Dialect)
+		return fmt.Errorf("childsync.api.dialect %q must not contain whitespace", c.Dialect)
 	}
 	return nil
 }
@@ -432,31 +553,53 @@ func (c DsyncApiSchemeConf) Validate() error {
 // that has no *Config in hand (PublishDsyncRRs is a method on ZoneData, called
 // from four places, none of which carry the config), and it is replaced
 // wholesale on config reload. An atomic.Pointer gives lock-free reads and a
-// race-free swap. Access via DelegationSyncConfig()/SetDelegationSyncConfig(),
-// never directly.
-var delegationSyncConf atomic.Pointer[DelegationSyncConf]
+// race-free swap. Access via ChildSyncConfig()/ParentSyncConfig() and
+// SetDelegationSyncConfig(), never directly.
+// delegationSyncRuntime is the installed pair. It is NOT a config-file shape --
+// childsync: and parentsync: are separate top-level blocks -- it exists so one
+// atomic swap replaces both, since compiling the policies and rebinding the
+// live zones has to happen once, for both halves, or not at all.
+type delegationSyncRuntime struct {
+	ChildSync  ChildSyncConf
+	ParentSync ParentSyncConf
+}
 
-// SetDelegationSyncConfig installs the freshly-parsed block. Called from
-// ParseConfig on both first start and reload. On error the previous block
-// stays installed.
-func SetDelegationSyncConfig(dsc DelegationSyncConf) error {
-	compiled, methods, err := CompileDelegationSyncPolicies(dsc)
+var delegationSyncConf atomic.Pointer[delegationSyncRuntime]
+
+// SetDelegationSyncConfig installs the freshly-parsed childsync:/parentsync:
+// blocks. Called from ParseConfig on both first start and reload. On error the
+// previous pair stays installed.
+func SetDelegationSyncConfig(cs ChildSyncConf, ps ParentSyncConf) error {
+	compiled, err := compileDelegationPolicies(cs.Policies)
 	if err != nil {
 		return err
 	}
-	dsc.CompiledPolicies = compiled
-	dsc.CompiledChildMethods = methods
-	delegationSyncConf.Store(&dsc)
+	methods, err := compileChildBootstrapMethods(ps.Update.Bootstrap.Methods)
+	if err != nil {
+		return err
+	}
+	cs.CompiledPolicies = compiled
+	ps.CompiledMethods = methods
+	delegationSyncConf.Store(&delegationSyncRuntime{ChildSync: cs, ParentSync: ps})
 	rebindLiveDelegationPolicies()
 	return nil
 }
 
-// DelegationSyncConfig returns the current block. Never nil: a daemon that has
-// not parsed a config yet, or one whose config has no delegationsync: block at
-// all, gets the zero value — no schemes, which publishes nothing.
-func DelegationSyncConfig() *DelegationSyncConf {
-	if dsc := delegationSyncConf.Load(); dsc != nil {
-		return dsc
+// ChildSyncConfig returns the installed childsync: block. Never nil: a daemon
+// that has not parsed a config yet, or one whose config has no childsync: block
+// at all, gets the zero value — no schemes, which publishes nothing.
+func ChildSyncConfig() *ChildSyncConf {
+	if c := delegationSyncConf.Load(); c != nil {
+		return &c.ChildSync
 	}
-	return &DelegationSyncConf{}
+	return &ChildSyncConf{}
+}
+
+// ParentSyncConfig returns the installed parentsync: block. Never nil, for the
+// same reason as ChildSyncConfig.
+func ParentSyncConfig() *ParentSyncConf {
+	if c := delegationSyncConf.Load(); c != nil {
+		return &c.ParentSync
+	}
+	return &ParentSyncConf{}
 }

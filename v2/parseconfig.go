@@ -176,6 +176,14 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 	if derr := decoder.Decode(configMap); derr != nil {
 		return fmt.Errorf("error decoding config: %v", derr)
 	}
+
+	// The retired `delegationsync:` wrapper -> top-level childsync:/parentsync:
+	// (+ childsync.policies:). Done here, in the one decode helper every
+	// full-Config path goes through (ParseConfig, the zone-reload path,
+	// `config check`), so no reader ever has to know both shapes.
+	if err := conf.FoldDeprecatedDelegationSync(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -373,17 +381,27 @@ var deprecatedConfigKeys = append([]deprecatedConfigKey{
 	{match: ".multi_signer",
 		advice: "zone key is `multisigner:` (one word, no underscore); `multi_signer:` is ignored"},
 	{match: ".keybootstrap",
-		advice: "`keybootstrap:` moved to `delegationpolicy:` naming a `delegationsync.policies.*` entry (`manual: true` for the old `manual` token)"},
+		advice: "`keybootstrap:` moved to `delegationpolicy:` naming a `childsync.policies.*` entry (`manual: true` for the old `manual` token)"},
 	{match: "keybootstrap", exact: true,
-		advice: "top-level `keybootstrap:` is gone; use `delegationsync.policies.*` and per-zone `delegationpolicy:`"},
+		advice: "top-level `keybootstrap:` is gone; use `childsync.policies.*` and per-zone `delegationpolicy:`"},
 	{match: ".keyupload",
-		advice: "`keyupload:` moved to `delegationsync.policies.*.bootstrap.allow-unvalidated-upload`"},
+		advice: "`keyupload:` moved to `childsync.policies.*.bootstrap.allow-unvalidated-upload`"},
 	{match: ".key-verification",
-		advice: "`key-verification:` moved to `delegationsync.policies.*.bootstrap` (mechanisms, require-dnssec, retry)"},
+		advice: "`key-verification:` moved to `childsync.policies.*.bootstrap` (mechanisms, require-dnssec, retry)"},
+	// Both spellings of the block. The key itself is retired either way, so the
+	// advice names the one the operator actually wrote -- an operator who has
+	// migrated the block to `childsync:` but kept the retired `bootstrap:`
+	// under it would otherwise be told about a key they do not have.
 	{match: ".parent.bootstrap",
 		advice: "`delegationsync.parent.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
 	{match: ".parent.bootstrap.methods",
 		advice: "`delegationsync.parent.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
+	// childsync: is a TOP-LEVEL block, so these have no parent segment to hang
+	// a leading dot on and must match exactly.
+	{match: "childsync.bootstrap", exact: true,
+		advice: "`childsync.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
+	{match: "childsync.bootstrap.methods", exact: true,
+		advice: "`childsync.bootstrap.methods:` is gone; the SVCB advertisement is DERIVED from the zone's bound `delegationpolicy` (see §4.1)"},
 }, underscoreSpellingMigrations()...)
 
 // snakeCaseConfigKeys lists every config key that was spelled with underscores
@@ -720,11 +738,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// anything that could publish: on reload this must be swapped in before a
 	// zone re-reads it, and on first start it must be present before
 	// SetupZoneSync runs further down.
-	if err := SetDelegationSyncConfig(conf.DelegationSync); err != nil {
-		return fmt.Errorf("delegationsync config: %w", err)
+	if err := SetDelegationSyncConfig(conf.ChildSync, conf.ParentSync); err != nil {
+		return fmt.Errorf("childsync/parentsync config: %w", err)
 	}
 	if reload {
-		warnDsyncApiClientAuthReload(conf.DelegationSync.Parent.Api.ClientAuth.Enabled())
+		warnDsyncApiClientAuthReload(conf.ChildSync.Api.ClientAuth.Enabled())
 	}
 
 	// On first start: build the KeyDB. On reload: keep the existing
@@ -1509,14 +1527,14 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// Delegation sync setup: DSYNC publication (parent) or
 		// delegation sync monitoring (child), or proxy forwarding for a
 		// DSYNC-unaware primary (agent secondary).
-		if options[OptDelSyncParent] || options[OptDelSyncChild] || options[OptDelSyncProxy] {
+		if options[OptChildSync] || options[OptParentSync] || options[OptParentSyncProxy] {
 			capturedOpts := options
 			setupSync := func(zd *ZoneData) {
 				// Skip if the MP HSYNCPARAM callback already set up delegation sync for this zone.
-				if zd.Options[OptDelSyncChild] && !capturedOpts[OptDelSyncChild] {
+				if zd.Options[OptParentSync] && !capturedOpts[OptParentSync] {
 					return
 				}
-				if zd.Options[OptDelSyncParent] && !capturedOpts[OptDelSyncParent] {
+				if zd.Options[OptChildSync] && !capturedOpts[OptChildSync] {
 					return
 				}
 				delegationSyncQ := conf.Internal.DelegationSyncQ
@@ -2049,7 +2067,7 @@ func (conf *Config) reloadDnssecFromFile() error {
 func (conf *Config) reloadDelegationSyncFromFile() error {
 	cfgfile := conf.Internal.CfgFile
 	if cfgfile == "" {
-		return SetDelegationSyncConfig(conf.DelegationSync)
+		return SetDelegationSyncConfig(conf.ChildSync, conf.ParentSync)
 	}
 
 	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0, newMergeState())
@@ -2057,9 +2075,10 @@ func (conf *Config) reloadDelegationSyncFromFile() error {
 		return fmt.Errorf("error processing config: %v", err)
 	}
 
-	var partial struct {
-		DelegationSync DelegationSyncConf `yaml:"delegationsync"`
-	}
+	// Decoded into a Config so the deprecated `delegationsync:` wrapper folds
+	// through exactly the same code the full parse uses. Only the three fields
+	// the fold touches are read back.
+	var partial Config
 	decoderConfig := &mapstructure.DecoderConfig{
 		TagName: "yaml",
 		Result:  &partial,
@@ -2079,11 +2098,15 @@ func (conf *Config) reloadDelegationSyncFromFile() error {
 	if err := decoder.Decode(configMap); err != nil {
 		return fmt.Errorf("error decoding delegationsync config: %v", err)
 	}
-
-	if err := SetDelegationSyncConfig(partial.DelegationSync); err != nil {
+	if err := partial.FoldDeprecatedDelegationSync(); err != nil {
 		return err
 	}
-	conf.DelegationSync = partial.DelegationSync
+
+	if err := SetDelegationSyncConfig(partial.ChildSync, partial.ParentSync); err != nil {
+		return err
+	}
+	conf.ChildSync = partial.ChildSync
+	conf.ParentSync = partial.ParentSync
 	return nil
 }
 

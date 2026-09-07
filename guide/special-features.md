@@ -80,13 +80,13 @@ parent zone can advertise both at once:
 
 A parent zone advertises its delegation-sync capabilities
 by adding the zone option `childsync` (zone
-option `OptDelSyncParent`). When set, tdns-auth synthesises
+option `OptChildSync`). When set, tdns-auth synthesises
 the necessary DSYNC RRs at the well-known owner name
 `_dsync.<zonename>` based on the global
-`delegationsync.parent.*` configuration:
+`childsync.*` configuration:
 
 ```yaml
-delegationsync:
+childsync:
    policies:
       default:
          bootstrap:
@@ -323,14 +323,13 @@ of the intersection wins — `at-apex` > `at-ns` >
 `unsigned` > `manual`.
 
 ```yaml
-delegationsync:
-   child:
-      schemes: [ notify, update ]
-      update:
-         keygen:
-            algorithm: ED25519
-         bootstrap:
-            methods: [ at-apex, at-ns ]
+parentsync:
+   schemes: [ notify, update ]
+   update:
+      keygen:
+         algorithm: ED25519
+      bootstrap:
+         methods: [ at-apex, at-ns ]
 ```
 
 Four rules matter more than the list itself:
@@ -350,7 +349,7 @@ Four rules matter more than the list itself:
 - **An advertisement that cannot be authenticated is
   ignored**, and the configured list is used instead. The
   SVCB and the DSYNC record that named its target must both
-  be DNSSEC-validated; `delegationsync.child.update.allow-insecure`
+  be DNSSEC-validated; `parentsync.update.allow-insecure`
   waives that for a lab, but nothing waives a **bogus**
   verdict — a failed chain of trust is never treated as an
   unsigned one.
@@ -475,18 +474,17 @@ credential there.
 Parent configuration:
 
 ```yaml
-delegationsync:
-   parent:
-      schemes: [ notify, update, api ]
-      api:
-         types:    [ CDS, CSYNC ]
-         target:   dsync-api.{ZONENAME}
-         baseurl:  "https://{TARGET}:{PORT}/dsync/v1"
-         port:     443
-         dialect:  tdns-child-api-v1.0
-         listen:   [ "0.0.0.0:443" ]
-         cert:     /etc/tdns/dsync-api.crt
-         key:      /etc/tdns/dsync-api.key
+childsync:
+   schemes: [ notify, update, api ]
+   api:
+      types:    [ CDS, CSYNC ]
+      target:   dsync-api.{ZONENAME}
+      baseurl:  "https://{TARGET}:{PORT}/dsync/v1"
+      port:     443
+      dialect:  tdns-child-api-v1.0
+      listen:   [ "0.0.0.0:443" ]
+      cert:     /etc/tdns/dsync-api.crt
+      key:      /etc/tdns/dsync-api.key
 ```
 
 The listener is its **own socket, with its own router and
@@ -533,7 +531,7 @@ tdns-cli auth dsync-api cert-credential add \
 
 `credential list` and `cert-credential list` show both kinds. The child
 configures a nested `tls:` block instead of `username`/`key`. The parent
-opts in with `delegationsync.parent.api.client-auth`. Enabling or
+opts in with `childsync.api.client-auth`. Enabling or
 disabling that block changes the TLS handshake and needs a process
 restart; a config reload updates the middleware but not the
 `CertificateRequest`.
@@ -636,15 +634,14 @@ gates apply.
 #### Child side
 
 ```yaml
-delegationsync:
-   child:
-      schemes: [ notify, update, api ]     # preference order; api last
-      api:
-         cafile: /etc/tdns/dsync-api-ca.crt
-         credentials:
-            - parent:   example.
-              username: child1.example.
-              key:      "the key printed by credential add"
+parentsync:
+   schemes: [ notify, update, api ]     # preference order; api last
+   api:
+      cafile: /etc/tdns/dsync-api-ca.crt
+      credentials:
+         - parent:   example.
+           username: child1.example.
+           key:      "the key printed by credential add"
 ```
 
 A child with no credential for a parent that offers only
@@ -682,7 +679,7 @@ So, on the child side:
 - **A credential is scoped to one parent** and is never sent
   to another.
 
-`delegationsync.child.api.allow-insecure` relaxes the first
+`parentsync.api.allow-insecure` relaxes the first
 two of those -- plaintext endpoints *and* unvalidated
 discovery, deliberately as a single switch, because they are
 the same protection seen from two sides and an operator who

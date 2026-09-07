@@ -152,7 +152,10 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 
-	if err := config.DelegationSync.Validate(); err != nil {
+	if err := config.ChildSync.Validate(); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
+	if err := config.ParentSync.Validate(); err != nil {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 

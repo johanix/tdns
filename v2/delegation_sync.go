@@ -164,7 +164,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 
 				// Publish CDS records from current DNSKEYs if zone has delegation sync
-				if zd.Options[OptDelSyncChild] {
+				if zd.Options[OptParentSync] {
 					if err := zd.PublishCdsRRs(); err != nil {
 						lgDns.Error("DelegationSyncher: error publishing CDS", "zone", zd.ZoneName, "err", err)
 					} else {
@@ -215,18 +215,18 @@ func parseKeygenAlgorithm(algstr string, defaultAlg uint8) (uint8, error) {
 }
 
 func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
-	if !zd.Options[OptDelSyncChild] {
+	if !zd.Options[OptParentSync] {
 		lgDns.Debug("DelegationSyncSetup: zone does not have child-side delegation sync enabled, skipping", "zone", zd.ZoneName)
 		return nil
 	}
 
-	// algstr := DelegationSyncConfig().Child.Update.Keygen.Algorithm
+	// algstr := ParentSyncConfig().Update.Keygen.Algorithm
 	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	// if alg == 0 {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Child.Update.Keygen.Algorithm, dns.ED25519)
+	alg, err := parseKeygenAlgorithm(ParentSyncConfig().Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("DelegationSyncSetup: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
@@ -255,13 +255,13 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 }
 
 func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
-	// algstr := DelegationSyncConfig().Parent.Update.Keygen.Algorithm
+	// algstr := ChildSyncConfig().Update.Keygen.Algorithm
 	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	// if alg == 0 {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Parent.Update.Keygen.Algorithm, dns.ED25519)
+	alg, err := parseKeygenAlgorithm(ChildSyncConfig().Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("ParentSig0KeyPrep: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
@@ -273,13 +273,13 @@ func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
 // MusicSig0KeyPrep and ParentSig0KeyPrep are identical except for the source of the keygen algorithm
 // which is specified in the relevant section of the configuration file.
 func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
-	// algstr := DelegationSyncConfig().Child.Update.Keygen.Algorithm
+	// algstr := ParentSyncConfig().Update.Keygen.Algorithm
 	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	// if alg == 0 {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Child.Update.Keygen.Algorithm, dns.ED25519)
+	alg, err := parseKeygenAlgorithm(ParentSyncConfig().Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("MusicSig0KeyPrep: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
 		return err
@@ -289,9 +289,8 @@ func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
 }
 
 func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error {
-	lgDns.Info("Sig0KeyPreparation: setting up SIG(0) key pair", "zone", zd.ZoneName, "name", name)
+	lgDns.Debug("Sig0KeyPreparation: setting up SIG(0) key pair", "zone", zd.ZoneName, "name", name)
 
-	lgDns.Debug("Sig0KeyPreparation: checking whether zone allows updates and has KEY RRset published", "zone", zd.ZoneName, "name", name)
 	owner, err := zd.GetOwner(name)
 	lgDns.Debug("Sig0KeyPreparation: GetOwner result", "name", name, "owner", owner, "err", err)
 	if err != nil {
@@ -303,8 +302,50 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		_, keyrrexist = owner.RRtypes.Get(dns.TypeKEY)
 	}
 
+	// 1. Did the zone ask for this key at all?
+	//
+	// The gate is the delegation-sync option that makes the key necessary, and
+	// each of the two callers already tests it:
+	//
+	//   - childsync (parent side): the same option that permits the DSYNC
+	//     RRset advertising this very target, published from the same block of
+	//     SetupZoneSync a few lines earlier. One option, both publications.
+	//   - parentsync (child side): the option that permits the apex KEY the
+	//     bootstrap ceremony carries (DelegationSyncSetup's first line).
+	//
+	// It used to ask `allow-updates` instead, and that was the wrong question
+	// (#538): `allow-updates` governs inbound RFC 2136 DDNS from the network,
+	// whereas this is an INTERNAL publish -- PublishKeyRRs posts
+	// UpdateRequest{InternalUpdate: true}, which ZoneUpdater admits regardless.
+	// It was a second, unrelated gate on one of the two publications inside the
+	// childsync block, so a parent published a DSYNC record naming an UPDATE
+	// target and then never generated the key that target names. Worse,
+	// `updatepolicy.zone.type: none` -- the correct posture for such a parent --
+	// clears allow-updates, so refusing inbound DDNS disabled the parent's own
+	// key. Restating the callers' gate here says what actually permits the
+	// publish, and cannot be switched off by an unrelated policy decision.
+	if !zd.Options[OptChildSync] && !zd.Options[OptParentSync] {
+		lgDns.Warn("Sig0KeyPreparation: zone has neither childsync nor parentsync, no SIG(0) key will be generated or published",
+			"zone", zd.ZoneName, "name", name, "keyrrexist", keyrrexist)
+		return nil
+	}
+
+	// 2. Origination backstop -- defence in depth, not the load-bearing gate.
+	// normalizeOptionsForRole strips BOTH childsync and parentsync from a
+	// tdns-auth secondary (parentsync joined originationOptions with #538, once
+	// the allow-updates gate that had justified its exclusion was gone), so
+	// after a real config load such a zone never reaches here with either
+	// option set. This catches a ZoneData whose Options were assembled without
+	// the normalizer, and states the invariant where the publish happens:
+	// content this server did not originate is not ours to write into.
+	if !zoneMayOriginateContent(zd) {
+		lgDns.Warn("Sig0KeyPreparation: zone may not originate content, no SIG(0) key will be generated or published",
+			"zone", zd.ZoneName, "name", name, "zonetype", ZoneTypeToString[zd.ZoneType], "keyrrexist", keyrrexist)
+		return nil
+	}
+
 	if keyrrexist && !zd.Options[OptDontPublishKey] {
-		err := zd.VerifyPublishedKeyRRs()
+		err := zd.VerifyPublishedKeyRRs(name)
 		if err != nil {
 			lgDns.Error("error from VerifyPublishedKeyRRs", "name", name, "err", err)
 			return err
@@ -312,20 +353,17 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		lgDns.Info("Sig0KeyPreparation: verified published KEY RRset", "name", name)
 	}
 
-	// 1. Are updates to the zone data allowed?
-	if !zd.Options[OptAllowUpdates] {
-		if keyrrexist {
-			lgDns.Debug("Sig0KeyPreparation: zone does not allow updates, but KEY RRset is already published", "zone", zd.ZoneName, "name", name)
-		} else {
-			lgDns.Debug("Sig0KeyPreparation: zone does not allow updates, cannot publish KEY RRset", "zone", zd.ZoneName, "name", name)
-		}
+	// 3. The per-zone opt-out for this specific publish. Checked again inside
+	// PublishKeyRRs, which refuses outright; saying so here keeps the reason
+	// visible at default log level rather than only as a Debug non-event.
+	if zd.Options[OptDontPublishKey] {
+		lgDns.Info("Sig0KeyPreparation: dont-publish-key is set, no KEY RR will be published",
+			"zone", zd.ZoneName, "name", name, "keyrrexist", keyrrexist)
 		return nil
 	}
 
-	lgDns.Debug("Sig0KeyPreparation: zone allows updates", "zone", zd.ZoneName, "name", name, "keyrrexist", keyrrexist, "dontPublishKey", zd.Options[OptDontPublishKey])
-
-	// 2. Updates allowed, but there is no KEY RRset published.
-	if !keyrrexist && !zd.Options[OptDontPublishKey] {
+	// 4. Publication allowed, but there is no KEY RRset published.
+	if !keyrrexist {
 		lgDns.Debug("Sig0KeyPreparation: fetching the private SIG(0) key", "name", name)
 		sak, err := kdb.GetSig0Keys(name, Sig0StateActive)
 		if err != nil {

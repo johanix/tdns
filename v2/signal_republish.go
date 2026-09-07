@@ -91,7 +91,7 @@ var signalSpecs = []signalSpec{
 // Registered for EVERY zone regardless of type, and here that is not merely
 // harmless. The publish half self-gates on Options[OptUseHsyncparam], which
 // only a secondary can hold (parseZoneOptions drops it on a primary) -- but the
-// WITHDRAWAL half also acts on parentsync (OptDelSyncChild), for a zone whose
+// WITHDRAWAL half also acts on parentsync (OptParentSync), for a zone whose
 // own at-ns bootstrap published a _sig0key, and that zone is one this server is
 // PRIMARY for. A primary registers this hook to do work, not to no-op.
 func (zdp *ZoneData) registerSignalReconcileHook() {

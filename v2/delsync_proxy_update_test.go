@@ -273,7 +273,7 @@ func TestProxyKeyStatus(t *testing.T) {
 
 	// Proxy zone, no imr ⇒ update-unsupported message (nothing to publish).
 	zdProxy := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
-	zdProxy.Options = map[ZoneOption]bool{OptDelSyncProxy: true}
+	zdProxy.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
 	msg, err := zdProxy.ProxyKeyStatus(context.Background(), kdb, nil)
 	if err != nil {
 		t.Fatalf("ProxyKeyStatus (proxy, no imr): %v", err)
@@ -374,4 +374,194 @@ func TestProxySig0PublicationStateClearsBootstrappedFlag(t *testing.T) {
 	if zd.proxySig0ParentBootstrapped {
 		t.Fatal("flag must clear when the KEY leaves the apex")
 	}
+}
+
+// --- The proxy-key report (#541) -----------------------------------------
+
+// The KEY and the HSYNCPARAM used to appear only while WAITING. READY is the
+// state an operator looks at when something is not working, and it asserted
+// that the published key and the held key agree without showing either.
+func TestProxyKeyPublishBlockInEveryState(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := genProxySig0Key(t, kdb, proxyUpdZone)
+
+	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
+	zd.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
+
+	block, err := zd.proxyKeyPublishBlock(kdb)
+	if err != nil {
+		t.Fatalf("proxyKeyPublishBlock: %v", err)
+	}
+	for _, want := range []string{
+		key.String(), // the KEY the agent holds, in full
+		"HSYNCPARAM", // the republish signal for the other providers
+		"pubkey",     //   ...with the flag that carries it
+		"TYPE65286",  // and the same record for a server that cannot parse it
+		`\# 4`,
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("the report block does not contain %q:\n%s", want, block)
+		}
+	}
+
+	// Reachable in states where nothing was ever generated. A status command
+	// must describe that, not mint a key as a side effect of being run.
+	empty := proxyUpdZoneData(t, newTestKeyDB(t), proxyUpdBaseZone())
+	got, err := empty.proxyKeyPublishBlock(empty.KeyDB)
+	if err != nil {
+		t.Fatalf("no key present: %v", err)
+	}
+	if got != "" {
+		t.Errorf("no key present: want an empty block, got:\n%s", got)
+	}
+}
+
+// The RFC 3597 rendering has to be parseable back into the record it came
+// from -- that is the entire point of offering it.
+func TestProxyHsyncparamRFC3597RoundTrips(t *testing.T) {
+	zd := &ZoneData{ZoneName: proxyUpdZone}
+
+	unknown, err := zd.proxyHsyncparamPubkeyRFC3597()
+	if err != nil {
+		t.Fatalf("proxyHsyncparamPubkeyRFC3597: %v", err)
+	}
+	// IN, not the CLASS1 that dns.RFC3597.String() writes: this is meant to be
+	// pasted into a zone file.
+	if !strings.Contains(unknown, "\tIN\t") {
+		t.Errorf("class is not spelled IN: %q", unknown)
+	}
+	if strings.Contains(unknown, "CLASS1") {
+		t.Errorf("class rendered as CLASS1: %q", unknown)
+	}
+	if !strings.HasPrefix(unknown, proxyUpdZone) {
+		t.Errorf("not at the apex: %q", unknown)
+	}
+
+	// Parsed back, it must be the same record as the presentation form. tdns
+	// registers HSYNCPARAM as a private type, so its parser resolves the
+	// TYPE65286 spelling to the same rdata.
+	back, err := dns.NewRR(unknown)
+	if err != nil {
+		t.Fatalf("the RFC 3597 form does not parse: %v (%q)", err, unknown)
+	}
+	native, err := dns.NewRR(zd.proxyHsyncparamPubkeyRR())
+	if err != nil {
+		t.Fatalf("the presentation form does not parse: %v", err)
+	}
+	if back.Header().Rrtype != native.Header().Rrtype {
+		t.Errorf("type = %d, want %d", back.Header().Rrtype, native.Header().Rrtype)
+	}
+	wire := func(rr dns.RR) string {
+		buf := make([]byte, dns.Len(rr)+1)
+		n, err := dns.PackRR(rr, buf, 0, nil, false)
+		if err != nil {
+			t.Fatalf("pack %s: %v", rr, err)
+		}
+		return fmt.Sprintf("%x", buf[:n])
+	}
+	if wire(back) != wire(native) {
+		t.Errorf("the two forms are not the same record on the wire:\n 3597: %s\n  native: %s",
+			wire(back), wire(native))
+	}
+}
+
+// FOREIGN-KEY told the operator to "remove it" without saying which record it
+// meant, leaving them comparing key material by hand with nothing to confirm
+// the key they were looking at was the one the agent saw.
+func TestProxyKeyStatusForeignKeyNamesBothKeys(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	ours := genProxySig0Key(t, kdb, proxyUpdZone)
+
+	// A KEY at the apex whose private half the agent does not hold.
+	foreign, _ := genForeignProxyKey(t)
+	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone()+foreign.String()+"\n")
+	zd.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
+
+	state, err := zd.proxySig0PublicationState(kdb)
+	if err != nil {
+		t.Fatalf("proxySig0PublicationState: %v", err)
+	}
+	if state != ProxyUpdateForeignKey {
+		t.Fatalf("state = %q, want %q", state, ProxyUpdateForeignKey)
+	}
+
+	// The assembled report, not just the block it embeds: the "published at the
+	// apex now" listing is what the operator reads, and it exists only here.
+	msg, err := zd.proxyKeyStatusMessage(state, kdb)
+	if err != nil {
+		t.Fatalf("proxyKeyStatusMessage: %v", err)
+	}
+	if !strings.Contains(msg, ours.String()) {
+		t.Error("the report does not show the KEY the agent expects")
+	}
+	if !strings.Contains(msg, foreign.String()) {
+		t.Error("the report does not show the foreign KEY the agent found at the apex")
+	}
+	if !strings.Contains(msg, "Published at the apex now") {
+		t.Errorf("the two KEYs are not told apart:\n%s", msg)
+	}
+}
+
+// Every arm of the report, driven by state rather than through the precondition
+// check, which starts with a DSYNC lookup at the parent.
+func TestProxyKeyStatusMessagePerState(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := genProxySig0Key(t, kdb, proxyUpdZone)
+	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
+	zd.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
+
+	for _, tc := range []struct {
+		state   ProxyUpdateState
+		verdict string
+	}{
+		{ProxyUpdateUnsupported, "not applicable"},
+		{ProxyUpdateReady, "READY"},
+		{ProxyUpdateForeignKey, "NOT operable"},
+		{ProxyUpdateWaiting, "WAITING"},
+	} {
+		msg, err := zd.proxyKeyStatusMessage(tc.state, kdb)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.state, err)
+		}
+		if !strings.Contains(msg, tc.verdict) {
+			t.Errorf("%s: verdict %q missing from:\n%s", tc.state, tc.verdict, msg)
+		}
+		// The point of #541: the records are there whatever the verdict says.
+		for _, want := range []string{key.String(), "HSYNCPARAM", "TYPE65286"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("%s: report does not carry %q", tc.state, want)
+			}
+		}
+	}
+
+	// With no key, every arm says so instead of erroring or printing a stray
+	// header with nothing under it.
+	bare := proxyUpdZoneData(t, newTestKeyDB(t), proxyUpdBaseZone())
+	for _, state := range []ProxyUpdateState{
+		ProxyUpdateUnsupported, ProxyUpdateReady, ProxyUpdateForeignKey, ProxyUpdateWaiting,
+	} {
+		msg, err := bare.proxyKeyStatusMessage(state, bare.KeyDB)
+		if err != nil {
+			t.Fatalf("%s with no key: %v", state, err)
+		}
+		if !strings.Contains(msg, "No SIG(0) key has been generated") {
+			t.Errorf("%s with no key does not say so:\n%s", state, msg)
+		}
+	}
+}
+
+// genForeignProxyKey mints a KEY RR at the proxy test zone's apex whose private
+// half is nowhere in the keystore.
+func genForeignProxyKey(t *testing.T) (*dns.KEY, string) {
+	t.Helper()
+	rr, err := dns.NewRR(proxyUpdZone + " 3600 IN KEY 256 3 15 " +
+		"kRLXTKfLdCVhJUvGCwOZGNhCLBhBBqBBhBBhBBhBBhA=")
+	if err != nil {
+		t.Fatalf("build foreign KEY: %v", err)
+	}
+	k, ok := rr.(*dns.KEY)
+	if !ok {
+		t.Fatalf("built a %T, want *dns.KEY", rr)
+	}
+	return k, k.String()
 }
