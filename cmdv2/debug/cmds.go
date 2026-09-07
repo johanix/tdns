@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -62,6 +63,13 @@ var (
 	relaySettle       string
 	relayRoundTimeout string
 	relayDownDelay    string
+
+	// xfr: frame-level analysis of a zone-transfer stream.
+	xfrServer   string
+	xfrIxfr     uint32
+	xfrFile     string
+	xfrDigDump  string
+	xfrMaxFrame int
 
 	// perf qps: adaptive max-QPS finder (query path only).
 	perfUDP         bool
@@ -583,6 +591,96 @@ func parseZoneList(spec string) ([]string, error) {
 	return zones, nil
 }
 
+// ---- xfr ------------------------------------------------------------------
+
+var xfrCmd = &cobra.Command{
+	Use:   "xfr",
+	Short: "Frame-level analysis of a zone transfer: does the wire agree with itself?",
+	Long: `Walks a zone-transfer stream the way a STRICT parser does -- section by
+section, record by record, each rdata bounded by its own RDLENGTH -- and reports
+where the accounting stops adding up: bytes the header does not account for, and
+records whose rdata does not parse to exactly their RDLENGTH.
+
+This exists because a strict client's complaint names the message, not the
+record. "extra input data" for a 22 KB transfer says nothing about which of 328
+records is wrong; this says which.
+
+Three sources:
+
+  --server <addr:port> -z <zone>   run the transfer and walk every frame
+  --file <path>                    walk a saved raw DNS message
+  --dig-dump <path>                walk dig's "Got bad packet" hex dump ("-" = stdin)
+
+The last is for failures seen on someone else's machine, where the dump is the
+only artifact you have.
+
+Its silence is the least trustworthy thing about it: the parser is miekg/dns,
+the same library tdns packs with, so it agrees with tdns by construction about
+anything tdns invented. Records it accepts that a strict client may not are
+reported as HAZARD lines. Exit 0 when every byte is accounted for, 1 otherwise.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		var frames []debug.XfrFrame
+
+		switch {
+		case xfrFile != "" || xfrDigDump != "":
+			var raw []byte
+			var err error
+			if xfrFile != "" {
+				raw, err = os.ReadFile(xfrFile)
+			} else {
+				in := os.Stdin
+				if xfrDigDump != "-" {
+					f, ferr := os.Open(xfrDigDump)
+					if ferr != nil {
+						log.Fatalf("opening %s: %v", xfrDigDump, ferr)
+					}
+					defer f.Close()
+					in = f
+				}
+				raw, err = debug.ParseDigHexdump(in)
+			}
+			if err != nil {
+				log.Fatalf("reading the message: %v", err)
+			}
+			frames = []debug.XfrFrame{debug.WalkXfrMessage(1, raw)}
+
+		case xfrServer != "":
+			if zoneName == "" {
+				log.Fatal("--zone is required with --server")
+			}
+			server := xfrServer
+			if _, _, err := net.SplitHostPort(server); err != nil {
+				server = net.JoinHostPort(server, "53")
+			}
+			var err error
+			frames, err = debug.FetchXfrFrames(cmd.Context(), server, zoneName, xfrIxfr, xfrMaxFrame)
+			if err != nil {
+				// Frames collected before the failure are still worth printing:
+				// a stream that broke mid-way is exactly the case to inspect.
+				debug.RenderXfrFrames(os.Stdout, frames)
+				log.Printf("transfer error: %v", err)
+				os.Exit(debug.ExitSetup)
+			}
+
+		default:
+			log.Fatal("need one of --server (with --zone), --file or --dig-dump")
+		}
+
+		if reportJson {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(frames)
+		} else {
+			debug.RenderXfrFrames(os.Stdout, frames)
+		}
+		for _, f := range frames {
+			if !f.Clean() {
+				os.Exit(debug.ExitViolation)
+			}
+		}
+	},
+}
+
 // ---- list-tests / cleanup ---------------------------------------------------
 
 var listTestsCmd = &cobra.Command{
@@ -792,6 +890,14 @@ func init() {
 	testPolicyReloadCmd.Flags().StringVar(&policyReloadReady, "ready-timeout", "60s", "how long to wait for all zones to answer SOA again after the trigger")
 	testPolicyReloadCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
 	testCmd.AddCommand(testPolicyReloadCmd)
+
+	xfrCmd.Flags().StringVar(&xfrServer, "server", "", "server to transfer from, addr:port")
+	xfrCmd.Flags().StringVarP(&zoneName, "zone", "z", "", "zone to transfer")
+	xfrCmd.Flags().Uint32Var(&xfrIxfr, "ixfr", 0, "request IXFR from this serial instead of AXFR")
+	xfrCmd.Flags().StringVar(&xfrFile, "file", "", "walk a saved raw DNS message instead of transferring")
+	xfrCmd.Flags().StringVar(&xfrDigDump, "dig-dump", "", "walk dig's \"Got bad packet\" hex dump (\"-\" for stdin)")
+	xfrCmd.Flags().IntVar(&xfrMaxFrame, "max-frames", 0, "stop after this many frames (0 = until the closing SOA)")
+	xfrCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
 
 	cleanupCmd.Flags().StringVar(&testId, "test", "", "test identity to clean up")
 	cleanupCmd.Flags().BoolVar(&rmArtifacts, "rm", false, "also remove the local artifact directory")
