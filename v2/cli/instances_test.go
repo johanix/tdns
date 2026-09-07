@@ -279,3 +279,57 @@ func TestReservedNamesAreAllRefused(t *testing.T) {
 		})
 	}
 }
+
+// An apiservers entry living only in cli.localconfig must still become a
+// command word. The early loader read the main config but not the local one,
+// so such an entry was invisible at routing time: cobra had already failed
+// with `unknown command "..."` by the time the full load found it.
+// (CodeRabbit, PR #544.)
+func TestEarlyApiServersMergesLocalConfig(t *testing.T) {
+	dir := t.TempDir()
+	local := filepath.Join(dir, "local.yaml")
+	main := filepath.Join(dir, "main.yaml")
+
+	if err := os.WriteFile(local, []byte(`
+apiservers:
+   - name: localonly
+     role: auth
+     baseurl: https://127.0.0.1:8992/api/v1
+     apikey: k
+     authmethod: X-API-Key
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(main, []byte("cli:\n   localconfig: "+local+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := EarlyApiServers(main)
+	found := false
+	for _, e := range entries {
+		if e.Name == "localonly" && e.Role == "auth" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("instance defined only in cli.localconfig was not seen: %+v", entries)
+	}
+
+	// A named-but-absent local config is normal -- that is what makes it local
+	// -- and must not discard the entries the main config already gave us.
+	main2 := filepath.Join(dir, "main2.yaml")
+	if err := os.WriteFile(main2, []byte(`
+cli:
+   localconfig: `+filepath.Join(dir, "does-not-exist.yaml")+`
+apiservers:
+   - name: tdns-auth
+     baseurl: https://127.0.0.1:8989/api/v1
+     apikey: k
+     authmethod: X-API-Key
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := EarlyApiServers(main2); len(got) != 1 {
+		t.Errorf("a missing local config lost the main config's entries: %+v", got)
+	}
+}

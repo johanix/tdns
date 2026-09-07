@@ -8,6 +8,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -66,6 +67,22 @@ func EarlyApiServers(cfgFile string) []ApiDetails {
 	}
 	if err := tdns.MergeViperIncludes(v, cfgFile); err != nil {
 		return nil
+	}
+	// cli.localconfig, merged the same way the full load does (initConfig in
+	// each binary's root.go). Skipping it here would mean an apiservers entry
+	// that lives ONLY in the local config never becomes a command word: the
+	// full load would find it, but far too late -- cobra has already failed to
+	// resolve the command path by then, so the operator gets
+	// `unknown command "sectdns"` from a config that plainly defines it.
+	//
+	// Still best-effort: a local config that is named but absent is normal
+	// (that is what makes it local), and any error leaves the entries we
+	// already have rather than discarding them.
+	if local := v.GetString("cli.localconfig"); local != "" {
+		if _, err := os.Stat(local); err == nil {
+			v.SetConfigFile(local)
+			_ = v.MergeInConfig()
+		}
 	}
 	var entries []ApiDetails
 	if err := v.UnmarshalKey("apiservers", &entries); err != nil {

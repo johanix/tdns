@@ -161,17 +161,25 @@ func newConfigCheckCmd(role string) *cobra.Command {
 	)
 	// Only tdns-auth serves GET /config/paths, so only there can the target
 	// config file be discovered from the running daemon.
+	// label and defaultDesc must be true at CONSTRUCTION time, which is before
+	// the CLI config is loaded -- so neither may claim anything that depends on
+	// apiConfig. For a built-in role the compiled-in default is knowable and
+	// worth naming; for an extra instance it is not, and naming
+	// "/etc/tdns/tdns-<instance>.yaml" pointed the operator at a file the CLI
+	// never opens. The resolved path is printed when the command actually runs.
+	label, defaultDesc := describeConfigTarget(role)
+
 	resolution := "  1. an explicit path (positional arg or --serverconfig)\n" +
-		"  2. otherwise the compiled-in default (/etc/tdns/tdns-" + role + ".yaml)"
+		"  2. otherwise " + defaultDesc
 	if roleHasConfigPaths(role) {
 		resolution = "  1. an explicit path (positional arg or --serverconfig)\n" +
 			"  2. otherwise, online, the path the daemon reports via GET /config/paths\n" +
-			"  3. otherwise the compiled-in default (/etc/tdns/tdns-" + role + ".yaml)"
+			"  3. otherwise " + defaultDesc
 	}
 	c := &cobra.Command{
 		Use:   "check [config-file]",
-		Short: "Validate the tdns-" + role + " config and correlate it with the running daemon",
-		Long: `Validate a tdns-` + role + ` configuration file for completeness and internal
+		Short: "Validate the " + label + " config and correlate it with the running daemon",
+		Long: `Validate a ` + label + ` configuration file for completeness and internal
 consistency, and (unless --offline) correlate it against the running daemon to
 report drift between the file on disk and what the server actually loaded.
 
@@ -187,7 +195,7 @@ Exit status is non-zero if any check FAILs (WARNs do not fail the run).`,
 			runConfigCheck(role, serverConfig, offline)
 		},
 	}
-	c.Flags().StringVar(&serverConfig, "serverconfig", "", "path to the tdns-"+role+" config file to check (default: ask the daemon, else the compiled-in default)")
+	c.Flags().StringVar(&serverConfig, "serverconfig", "", "path to the "+label+" config file to check (default: ask the daemon, else the configured/compiled-in default)")
 	c.Flags().BoolVar(&offline, "offline", false, "do not contact the daemon; run static checks only")
 	return c
 }
@@ -200,6 +208,26 @@ Exit status is non-zero if any check FAILs (WARNs do not fail the run).`,
 // per role are collected here rather than sprinkled through the checks.
 // ---------------------------------------------------------------------------
 
+// describeConfigTarget returns how to NAME this target in help text, and how to
+// describe where its config comes from when no path is given.
+//
+// Both must hold at command-construction time, before any config is loaded.
+// That is the whole constraint: an extra instance's flavour and config path
+// live in the CLI config, so neither is knowable here, and the previous text
+// filled the gap by inventing "/etc/tdns/tdns-<role>.yaml".
+func describeConfigTarget(role string) (label, defaultDesc string) {
+	switch role {
+	case "auth", "agent", "imr":
+		// A built-in role: the compiled-in default is a fixed, knowable path.
+		return "tdns-" + role, "the compiled-in default (" + defaultCfgFileForRole(role) + ")"
+	default:
+		// An extra instance. Name it as the operator addresses it, and describe
+		// the resolution rather than guessing at a path.
+		return "\"" + role + "\" daemon", "the config-file: recorded for " +
+			"\"" + role + "\" in the CLI config, else the compiled-in default for its app type"
+	}
+}
+
 // instanceFlavour reports the built-in role an extra daemon instance behaves
 // as, or "" when role is not an extra instance.
 //
@@ -208,10 +236,28 @@ Exit status is non-zero if any check FAILs (WARNs do not fail the run).`,
 // decision below therefore has to ask what an instance is a flavour OF, not
 // just compare its name against the built-in role names.
 func instanceFlavour(role string) string {
-	if ad := getApiDetailsByClientKey(role); ad != nil {
+	if ad := apiDetailsForRole(role); ad != nil {
 		return ad.Role
 	}
 	return ""
+}
+
+// apiDetailsForRole finds the apiservers entry a role targets.
+//
+// Two lookups, and both are needed. An extra instance's entry is named after
+// the role itself ("sectdns"), so the raw name matches. A built-in role is
+// not: "auth" resolves through RegisterRole to the entry named "tdns-auth".
+// Trying only the raw name silently ignored config-file: on every canonical
+// entry while honouring it on instances -- the same key working for one target
+// and quietly doing nothing for another.
+func apiDetailsForRole(role string) *ApiDetails {
+	if ad := getApiDetailsByClientKey(role); ad != nil {
+		return ad
+	}
+	if key := GetClientKeyFromParent(role); key != "" && key != role {
+		return getApiDetailsByClientKey(key)
+	}
+	return nil
 }
 
 // effectiveRole collapses an instance role onto the built-in role it behaves
@@ -237,7 +283,7 @@ func effectiveRole(role string) string {
 // CANONICAL daemon's config file and report on the wrong server -- the same
 // class of wrong-target failure as a hardcoded role, one level up.
 func defaultCfgFileForRole(role string) string {
-	if ad := getApiDetailsByClientKey(role); ad != nil && ad.ConfigFile != "" {
+	if ad := apiDetailsForRole(role); ad != nil && ad.ConfigFile != "" {
 		return ad.ConfigFile
 	}
 	switch effectiveRole(role) {

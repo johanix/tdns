@@ -174,3 +174,77 @@ func TestConfigCheckResolvesPerInstancePaths(t *testing.T) {
 		t.Error("agent must not attempt /config/paths discovery")
 	}
 }
+
+// config-file: must work the same way on a canonical entry and an instance
+// entry. It did not: an instance's entry is named after the role ("sectdns"),
+// so a raw-name lookup found it, while a built-in role ("auth") resolves
+// through RegisterRole to an entry named "tdns-auth" and the raw lookup missed.
+// The key silently did nothing on every canonical entry. (CodeRabbit, PR #544.)
+func TestConfigFileHonouredOnCanonicalAndInstanceEntries(t *testing.T) {
+	saved := apiConfig
+	t.Cleanup(func() { apiConfig = saved })
+
+	apiConfig = &CliConf{ApiServers: []ApiDetails{
+		{Name: "tdns-auth", ConfigFile: "/etc/tdns/custom-auth.yaml"},
+		{Name: "tdns-agent", ConfigFile: "/etc/tdns/custom-agent.yaml"},
+		{Name: "sectdns", Role: "auth", ConfigFile: "/etc/tdns/custom-sectdns.yaml"},
+	}}
+
+	for _, tc := range []struct{ role, want string }{
+		{"auth", "/etc/tdns/custom-auth.yaml"},       // via RegisterRole -> "tdns-auth"
+		{"agent", "/etc/tdns/custom-agent.yaml"},     // ditto
+		{"sectdns", "/etc/tdns/custom-sectdns.yaml"}, // raw name
+	} {
+		if got := defaultCfgFileForRole(tc.role); got != tc.want {
+			t.Errorf("defaultCfgFileForRole(%q) = %q, want %q", tc.role, got, tc.want)
+		}
+	}
+
+	// With no config-file: anywhere, both fall back to the compiled-in default
+	// for the flavour -- the instance must not inherit the canonical entry's.
+	apiConfig = &CliConf{ApiServers: []ApiDetails{
+		{Name: "tdns-auth"},
+		{Name: "sectdns", Role: "auth"},
+	}}
+	for _, role := range []string{"auth", "sectdns"} {
+		if got := defaultCfgFileForRole(role); got != tdns.DefaultAuthCfgFile {
+			t.Errorf("defaultCfgFileForRole(%q) = %q, want the compiled-in %q",
+				role, got, tdns.DefaultAuthCfgFile)
+		}
+	}
+}
+
+// `config check --help` must not name a config path the CLI would never open.
+// It used to interpolate the role into "/etc/tdns/tdns-<role>.yaml", which for
+// an instance named sectdns advertised /etc/tdns/tdns-sectdns.yaml while the
+// command actually read the instance's own config-file:. The resolved path is
+// not knowable at construction time (apiConfig is populated later), so the
+// help describes the resolution instead of asserting a path.
+// (CodeRabbit, PR #544.)
+func TestConfigCheckHelpNamesNoBogusPath(t *testing.T) {
+	for _, role := range []string{"sectdns", "otherauth"} {
+		label, desc := describeConfigTarget(role)
+		bogus := "/etc/tdns/tdns-" + role + ".yaml"
+		if strings.Contains(desc, bogus) || strings.Contains(label, bogus) {
+			t.Errorf("help for instance %q names %q, a path the CLI never opens", role, bogus)
+		}
+		if !strings.Contains(desc, "config-file:") {
+			t.Errorf("help for instance %q should point at its config-file: entry, got %q", role, desc)
+		}
+	}
+	// A built-in role's compiled-in default IS knowable, and naming it is the
+	// useful thing to do.
+	for _, tc := range []struct{ role, want string }{
+		{"auth", tdns.DefaultAuthCfgFile},
+		{"agent", tdns.DefaultAgentCfgFile},
+		{"imr", tdns.DefaultImrCfgFile},
+	} {
+		label, desc := describeConfigTarget(tc.role)
+		if !strings.Contains(desc, tc.want) {
+			t.Errorf("help for built-in %q should name %q, got %q", tc.role, tc.want, desc)
+		}
+		if label != "tdns-"+tc.role {
+			t.Errorf("built-in %q labelled %q, want %q", tc.role, label, "tdns-"+tc.role)
+		}
+	}
+}
