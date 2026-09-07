@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"sort"
-	"strconv"
 
 	"github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -211,7 +210,6 @@ func newZoneParentSyncCmd(role string) *cobra.Command {
 		},
 	}
 
-	var syncScheme string
 	sync := &cobra.Command{
 		Use:   "sync",
 		Short: "Sync delegation data in parent zone via DDNS UPDATE",
@@ -221,20 +219,10 @@ func newZoneParentSyncCmd(role string) *cobra.Command {
 			if err != nil {
 				log.Fatalf("Error getting API client: %v", err)
 			}
-			post := tdns.DelegationPost{
+			dr, err := SendDelegationCmd(api, tdns.DelegationPost{
 				Command: "sync",
 				Zone:    tdns.Globals.Zonename,
-			}
-			// Unset means "let the server pick", which is the normal case.
-			if syncScheme != "" {
-				val, perr := strconv.ParseUint(syncScheme, 10, 8)
-				if perr != nil {
-					fmt.Printf("Error: invalid scheme value %q: %s\n", syncScheme, perr)
-					os.Exit(1)
-				}
-				post.Scheme = uint8(val)
-			}
-			dr, err := SendDelegationCmd(api, post)
+			})
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
@@ -246,11 +234,6 @@ func newZoneParentSyncCmd(role string) *cobra.Command {
 			fmt.Printf("%s\n", dr.Msg)
 		},
 	}
-
-	// Carried over from the retired agent subtree, which was the only place
-	// this knob existed. A scheme number rather than a name, as it was there.
-	sync.Flags().StringVarP(&syncScheme, "scheme", "S", "",
-		"Force a specific DSYNC scheme number for the sync (default: let the server choose)")
 
 	c.AddCommand(status, bootstrap, rollKey, inquire, delta, sync)
 	return c

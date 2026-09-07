@@ -81,15 +81,25 @@ func TestAgentZoneParentSyncHasTheSameVerbsAsAuth(t *testing.T) {
 	}
 }
 
-// election is the one verb that is genuinely agent-side: it posts to the agent
-// management API, not to /zone/parentsync, so an auth server has nothing to
-// answer it with.
-func TestParentSyncElectionIsAgentOnly(t *testing.T) {
-	if lookupCmd(AgentCmd, "zone", "parentsync", "election") == nil {
-		t.Error("agent zone parentsync election is missing")
-	}
-	if c := lookupCmd(AuthCmd, "zone", "parentsync", "election"); c != nil {
-		t.Error("auth zone parentsync election exists; election has no auth-side endpoint")
+// "election" posted parentsync-election to the agent management API, which
+// only tdns-mp's mpagent implements -- the string appears nowhere else in this
+// repository, and mpcli builds its own AgentCmd rather than this one. A
+// command tdns's own daemon cannot answer does not belong on tdns's CLI.
+func TestParentSyncHasNoElectionVerb(t *testing.T) {
+	for _, root := range []struct {
+		name string
+		cmd  *cobra.Command
+	}{
+		{"agent zone parentsync", lookupCmd(AgentCmd, "zone", "parentsync")},
+		{"agent parentsync", lookupCmd(AgentCmd, "parentsync")},
+		{"auth zone parentsync", lookupCmd(AuthCmd, "zone", "parentsync")},
+	} {
+		if root.cmd == nil {
+			t.Fatalf("%s does not exist", root.name)
+		}
+		if lookupCmd(root.cmd, "election") != nil {
+			t.Errorf("%s election is back; its handler lives in tdns-mp", root.name)
+		}
 	}
 }
 
@@ -104,7 +114,7 @@ func TestAgentParentSyncLegacyPathStillResolves(t *testing.T) {
 	if !legacy.Hidden {
 		t.Error("the legacy path must not be advertised alongside the canonical one")
 	}
-	for _, verb := range []string{"status", "bootstrap", "roll-key", "inquire", "delta", "sync", "election"} {
+	for _, verb := range []string{"status", "bootstrap", "roll-key", "inquire", "delta", "sync"} {
 		if lookupCmd(legacy, verb) == nil {
 			t.Errorf("agent parentsync %s no longer resolves", verb)
 		}
@@ -121,22 +131,36 @@ func TestAgentParentSyncLegacyPathStillResolves(t *testing.T) {
 // Each attachment gets its own command objects: cobra records the parent on
 // the command, so one shared instance could not hang off three parents.
 func TestParentSyncSubtreesAreDistinctInstances(t *testing.T) {
-	agentZone := lookupCmd(AgentCmd, "zone", "parentsync")
-	legacy := lookupCmd(AgentCmd, "parentsync")
-	auth := lookupCmd(AuthCmd, "zone", "parentsync")
-	if agentZone == legacy || agentZone == auth || legacy == auth {
-		t.Fatal("two attachment points share one command object")
+	subtrees := map[string]*cobra.Command{
+		"agent zone parentsync": lookupCmd(AgentCmd, "zone", "parentsync"),
+		"agent parentsync":      lookupCmd(AgentCmd, "parentsync"),
+		"auth zone parentsync":  lookupCmd(AuthCmd, "zone", "parentsync"),
 	}
-	for _, c := range []*cobra.Command{agentZone, legacy, auth} {
+	// Before any comparison: two missing subtrees are both nil, which would
+	// read as "these share one object" and send the reader after the wrong
+	// problem -- and the Parent() loop below would panic on the nil.
+	for name, c := range subtrees {
+		if c == nil {
+			t.Fatalf("%s does not exist", name)
+		}
+	}
+	seen := map[*cobra.Command]string{}
+	for name, c := range subtrees {
+		if other, dup := seen[c]; dup {
+			t.Fatalf("%s and %s are the same command object", name, other)
+		}
+		seen[c] = name
 		if c.Parent() == nil {
-			t.Error("a parentsync subtree is not attached to anything")
+			t.Errorf("%s is not attached to anything", name)
 		}
 	}
 }
 
-// The numeric scheme override existed only on the retired agent "sync"; it is
-// carried over rather than dropped.
-func TestParentSyncSyncKeepsTheSchemeFlag(t *testing.T) {
+// The retired agent "sync" carried a numeric --scheme override. It is not
+// carried over: APIdelegation decodes DelegationPost but builds its
+// DelegationSyncRequest without reading dp.Scheme, so the flag set a field
+// nothing on the sync path ever looked at.
+func TestParentSyncSyncHasNoSchemeFlag(t *testing.T) {
 	for _, root := range []struct {
 		name string
 		cmd  *cobra.Command
@@ -145,16 +169,10 @@ func TestParentSyncSyncKeepsTheSchemeFlag(t *testing.T) {
 		{"auth", lookupCmd(AuthCmd, "zone", "parentsync", "sync")},
 	} {
 		if root.cmd == nil {
-			t.Errorf("%s: parentsync sync is missing", root.name)
-			continue
+			t.Fatalf("%s: parentsync sync is missing", root.name)
 		}
-		f := root.cmd.Flags().Lookup("scheme")
-		if f == nil {
-			t.Errorf("%s: parentsync sync has no --scheme flag", root.name)
-			continue
-		}
-		if f.Shorthand != "S" {
-			t.Errorf("%s: --scheme shorthand = %q, want S", root.name, f.Shorthand)
+		if f := root.cmd.Flags().Lookup("scheme"); f != nil {
+			t.Errorf("%s: --scheme is back; nothing on the sync path reads it", root.name)
 		}
 	}
 }

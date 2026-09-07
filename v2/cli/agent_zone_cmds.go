@@ -425,15 +425,6 @@ var agentRollaction string
 
 // --- init ---
 
-// newAgentParentSyncCmd builds the agent's parentsync subtree: the shared,
-// role-parameterised commands that post to /zone/parentsync, plus the one verb
-// that is agent-side only.
-func newAgentParentSyncCmd() *cobra.Command {
-	c := newZoneParentSyncCmd("agent")
-	c.AddCommand(newAgentParentSyncElectionCmd())
-	return c
-}
-
 func init() {
 	AgentCmd.AddCommand(AgentZoneCmd)
 
@@ -450,11 +441,11 @@ func init() {
 	// parentsync option rather than on the app type, so every verb already
 	// worked here -- there was just no way to reach it (#539). What existed
 	// was a second, hidden implementation hanging off "agent" directly.
-	AgentZoneCmd.AddCommand(newAgentParentSyncCmd())
+	AgentZoneCmd.AddCommand(newZoneParentSyncCmd("agent"))
 	// ...and the path that second implementation occupied, kept hidden so
 	// anything invoking "agent parentsync ..." keeps working. Its own subtree,
 	// because a cobra command records its parent and cannot have two.
-	legacy := newAgentParentSyncCmd()
+	legacy := newZoneParentSyncCmd("agent")
 	legacy.Hidden = true
 	legacy.Short = "Deprecated location of \"agent zone parentsync\""
 	AgentCmd.AddCommand(legacy)
