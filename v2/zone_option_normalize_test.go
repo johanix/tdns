@@ -53,7 +53,7 @@ func TestNormalizeStripsEveryOriginationOption(t *testing.T) {
 func TestNormalizeKeepsSanctionedAndServingOptions(t *testing.T) {
 	keep := optSet(
 		OptCatalogZone, OptCatalogMemberAutoCreate, OptCatalogMemberAutoDelete,
-		OptDelSyncProxy, OptFoldCase, OptBlackLies,
+		OptParentSyncProxy, OptFoldCase, OptBlackLies,
 	)
 	eff, _, sup, msg := normalizeOptionsForRole(AppTypeAuth, Secondary, keep, "")
 

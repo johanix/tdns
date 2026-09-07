@@ -88,7 +88,7 @@ both old and new zone data:
 
 `PostRefresh` (`hsync_utils.go:1412`) then routes off that analysis:
 `ApplyHsyncDiff` into the HsyncEngine, provider-group recompute for the auditor,
-`parentsync=agent` → turn on `OptDelSyncChild`, DNSKEY sync requests.
+`parentsync=agent` → turn on `OptParentSync`, DNSKEY sync requests.
 
 The apex reader itself is four lines (`getHSYNCPARAM`, `hsync_utils.go:924`):
 get the apex owner, get the `TypeHSYNCPARAM` RRset, cast

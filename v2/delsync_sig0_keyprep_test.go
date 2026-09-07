@@ -32,7 +32,7 @@ func newSig0KeyPrepZone(t *testing.T, zonestr string, ztype ZoneType) (*ZoneData
 	withAppType(t, AppTypeAuth)
 	zd := testZone(t, "example.", zonestr)
 	zd.ZoneType = ztype
-	zd.Options = map[ZoneOption]bool{OptDelSyncParent: true}
+	zd.Options = map[ZoneOption]bool{OptChildSync: true}
 	kdb := newTestKeyDB(t)
 	q := make(chan UpdateRequest, 4)
 	kdb.UpdateQ = q
@@ -117,7 +117,7 @@ func TestSig0KeyPreparationRequiresADelegationSyncOption(t *testing.T) {
 // The child side reaches the same function with parentsync and the zone apex.
 func TestSig0KeyPreparationParentsyncPublishesApexKey(t *testing.T) {
 	zd, kdb, q := newSig0KeyPrepZone(t, sig0KeyPrepZone, Primary)
-	zd.Options = map[ZoneOption]bool{OptDelSyncChild: true}
+	zd.Options = map[ZoneOption]bool{OptParentSync: true}
 
 	if err := zd.Sig0KeyPreparation("example.", dns.ED25519, kdb); err != nil {
 		t.Fatalf("Sig0KeyPreparation: %v", err)
@@ -151,7 +151,7 @@ func TestSig0KeyPreparationSecondaryDoesNotOriginate(t *testing.T) {
 	// secondary by normalizeOptionsForRole, so the parent side never reaches
 	// here. parentsync is NOT stripped, which is exactly the case this gate
 	// has to hold on its own.
-	zd.Options = map[ZoneOption]bool{OptDelSyncChild: true}
+	zd.Options = map[ZoneOption]bool{OptParentSync: true}
 
 	if err := zd.Sig0KeyPreparation("updates.example.", dns.ED25519, kdb); err != nil {
 		t.Fatalf("Sig0KeyPreparation: %v", err)

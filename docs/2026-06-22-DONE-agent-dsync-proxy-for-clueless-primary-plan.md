@@ -135,7 +135,7 @@ already knows how to perform.
 
 3. **The config gate for the secondary-proxy role.** Today the child-side
    delegation-sync gate (`SetupZoneSync`, `zone_utils.go:858-860`) is:
-   `OptDelSyncChild AND ((auth AND !MP) OR (agent AND MP))`. A tdns-agent
+   `OptParentSync AND ((auth AND !MP) OR (agent AND MP))`. A tdns-agent
    that is a plain secondary for a clueless primary is `agent AND !MP` —
    which the current gate EXCLUDES. The proxy role is gated by a NEW,
    distinct option (§4 D2), not by loosening `delegation-sync-child`.
@@ -303,7 +303,7 @@ exactly the kind of thing that wants a testbed run against a BIND/Knot
 primary once it builds).
 
 - **Step P-1 — config: the `delegation-sync-proxy` option + gate.**
-  STATUS: DONE. Added `OptDelSyncProxy` / `"delegation-sync-proxy"` to
+  STATUS: DONE. Added `OptParentSyncProxy` / `"delegation-sync-proxy"` to
   `enums.go` (within the tdns ZoneOption range; the compile-time sentinel
   gate still passes) and to the simple-enable case in `parseoptions.go`.
   Added a proxy gate block in `SetupZoneSync` (`zone_utils.go`) that
@@ -317,7 +317,7 @@ primary once it builds).
 
 - **Step P-2 — wide change-detection hook (the trigger).** STATUS: DONE.
   Mirrored the tdns-mp template: `parseconfig.go` registers an
-  `OnZonePreRefresh` + `OnZonePostRefresh` pair for `OptDelSyncProxy`
+  `OnZonePreRefresh` + `OnZonePostRefresh` pair for `OptParentSyncProxy`
   zones. `delsync_proxy.go` adds `ProxyDelegationAnalysis` (the carrier;
   also stored on `ZoneData.ProxyRefreshAnalysis`, `structs.go`),
   `ProxyDelegationPreRefresh` (diffs old-vs-new: CDS/CSYNC via a small

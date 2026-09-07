@@ -92,7 +92,7 @@ MAIN    SetupZoneSync updateTarget would be "."
 ### Consequences after merge
 
 For **every zone with the `delegation-sync-parent` option** (the gate is
-`zd.Options[OptDelSyncParent]` in `SetupZoneSync`):
+`zd.Options[OptChildSync]` in `SetupZoneSync`):
 
 1. `_dsync.<zone>` gains DSYNC RRs — CDS/CSYNC via NOTIFY and ANY via UPDATE,
    both on port 5354.

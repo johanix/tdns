@@ -960,7 +960,7 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 		// startup. Checked here rather than in checkAgentZoneOptions because
 		// parseZoneOptions runs for every app type, so tdns-auth quarantines
 		// such a zone too.
-		if enabled := zoneOptionsEnabled(eff.OptionsStrs); enabled[tdns.OptDelSyncChild] && enabled[tdns.OptDelSyncProxy] {
+		if enabled := zoneOptionsEnabled(eff.OptionsStrs); enabled[tdns.OptParentSync] && enabled[tdns.OptParentSyncProxy] {
 			rep.fail(g, zname,
 				"parentsync and parentsync-proxy are mutually exclusive — the zone will be quarantined at startup",
 				"keep parentsync (this server syncs to the parent as the child) or parentsync-proxy (it syncs on behalf of a DSYNC-unaware primary), not both")

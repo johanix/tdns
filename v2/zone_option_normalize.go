@@ -56,8 +56,8 @@ var originationOptions = []ZoneOption{
 	// for the DDNS channel.
 	OptAllowApiUpdates,
 	OptAddTransportSignal,
-	OptDelSyncParent,
-	OptDelSyncChild,
+	OptChildSync,
+	OptParentSync,
 	OptOnlineSigning,
 	// publish-zonemd writes a locally computed record into the zone. On a
 	// secondary that mirrors upstream content that record is ours, not

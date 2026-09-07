@@ -101,7 +101,7 @@ func registerDsyncApiParent(t *testing.T, zone string) {
 	zd := &ZoneData{
 		ZoneName: zone,
 		Options: map[ZoneOption]bool{
-			OptDelSyncParent:     true,
+			OptChildSync:         true,
 			OptAllowChildUpdates: true,
 		},
 	}

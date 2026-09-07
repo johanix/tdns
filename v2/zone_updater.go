@@ -408,7 +408,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					}
 
 					// Enqueue delegation sync after successful apply
-					if updated && !ur.InternalUpdate && zd.Options[OptDelSyncChild] && !dss.InSync {
+					if updated && !ur.InternalUpdate && zd.Options[OptParentSync] && !dss.InSync {
 						lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
 						zd.DelegationSyncQ <- DelegationSyncRequest{
 							Command:    "SYNC-DELEGATION",

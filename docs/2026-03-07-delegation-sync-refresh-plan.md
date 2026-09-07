@@ -206,7 +206,7 @@ is the right hook point)
 - After extracting `MsgOptions` and determining the
   zone, check `msgoptions.KeyState != nil`
 - If present AND this is a parent zone with
-  `OptDelSyncParent`: call
+  `OptChildSync`: call
   `kdb.HandleKeyStateOption(opt, zonename)`
 - Attach response KeyState option to the reply message
 - This completes the child->parent->child KeyState
@@ -230,8 +230,8 @@ SetupZoneSync)
 - Remove `SetupZoneSync` call from
   `refreshengine.go:99`
 - Register `SetupZoneSync` as OnFirstLoad callback in
-  `parseconfig.go` for zones with `OptDelSyncParent`
-  or `OptDelSyncChild`
+  `parseconfig.go` for zones with `OptChildSync`
+  or `OptParentSync`
 - This means DSYNC publication and child
   delegation-sync-setup happen after signing callbacks,
   which is correct (child needs signed KEY RRs before
@@ -285,7 +285,7 @@ publication happens after signing setup. Requires
 removing the `SetupZoneSync` call from
 `refreshengine.go:99` and registering it as an
 OnFirstLoad callback in `parseconfig.go` for zones with
-`OptDelSyncParent` or `OptDelSyncChild`.
+`OptChildSync` or `OptParentSync`.
 
 **A2**: **Keep DeferredUpdaterEngine** — it's general
 infrastructure. Don't remove even after Step 4.

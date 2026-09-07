@@ -58,14 +58,14 @@ func (a *ProxyDelegationAnalysis) wantCSYNCNotify() bool { return a.CsyncChanged
 // why registration is unconditional and once-per-ZoneData.
 //
 // Registered for EVERY zone regardless of type or option -- so a zone that
-// gains OptDelSyncProxy on a later reload (including one reconfigured from
+// gains OptParentSyncProxy on a later reload (including one reconfigured from
 // primary to secondary) already carries the hooks.
 //
 // The option is checked HERE, in the closures, not inside
 // ProxyDelegationPreRefresh/PostRefresh: those are the diff/act primitives (and
 // the unit tests exercise them directly), while these closures are the live
 // wiring that decides whether to invoke them for this zone on this refresh.
-// Reading Options[OptDelSyncProxy] under zd.mu is what makes enabling the option
+// Reading Options[OptParentSyncProxy] under zd.mu is what makes enabling the option
 // on reload take effect without a restart -- a config reload replaces zd.Options
 // wholesale under zd.mu, and the closures run with no lock held, so the read is
 // race-free and cannot deadlock.
@@ -86,12 +86,12 @@ func (zdp *ZoneData) registerProxyDelegationHooks(delsyncq chan DelegationSyncRe
 		})
 }
 
-// proxyDelegationEnabled reports whether OptDelSyncProxy is set, reading under
+// proxyDelegationEnabled reports whether OptParentSyncProxy is set, reading under
 // zd.mu because a config reload replaces zd.Options wholesale under that lock.
 func (zd *ZoneData) proxyDelegationEnabled() bool {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return zd.Options[OptDelSyncProxy]
+	return zd.Options[OptParentSyncProxy]
 }
 
 // ProxyDelegationPreRefresh runs BEFORE the hard flip on a delegation-sync-proxy
@@ -99,7 +99,7 @@ func (zd *ZoneData) proxyDelegationEnabled() bool {
 // (zd) for the four delegation-relevant dimensions and records the result in
 // zd.ProxyRefreshAnalysis for the PostRefresh hook. It must NOT act here (the
 // new data is not yet served). The registered closure gates the call on
-// OptDelSyncProxy; this method itself always runs the diff.
+// OptParentSyncProxy; this method itself always runs the diff.
 func (zd *ZoneData) ProxyDelegationPreRefresh(new_zd *ZoneData) {
 	analysis := &ProxyDelegationAnalysis{}
 

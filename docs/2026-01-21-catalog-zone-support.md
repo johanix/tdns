@@ -222,8 +222,8 @@ zones:
 Add new zone option:
 ```go
 const (
-    OptDelSyncParent ZoneOption = iota + 1
-    OptDelSyncChild
+    OptChildSync ZoneOption = iota + 1
+    OptParentSync
     // ... existing options ...
     OptAddTransportSignal
     OptCatalogZone        // NEW: Mark zone as RFC 9432 catalog zone

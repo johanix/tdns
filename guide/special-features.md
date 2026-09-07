@@ -80,7 +80,7 @@ parent zone can advertise both at once:
 
 A parent zone advertises its delegation-sync capabilities
 by adding the zone option `childsync` (zone
-option `OptDelSyncParent`). When set, tdns-auth synthesises
+option `OptChildSync`). When set, tdns-auth synthesises
 the necessary DSYNC RRs at the well-known owner name
 `_dsync.<zonename>` based on the global
 `delegationsync.parent.*` configuration:

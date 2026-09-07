@@ -330,7 +330,7 @@ func dsyncApiParentZone(child string) (*ZoneData, error) {
 		}
 
 		zd.mu.Lock()
-		offersScheme := zd.Options[OptDelSyncParent]
+		offersScheme := zd.Options[OptChildSync]
 		allowsChildUpdates := zd.Options[OptAllowChildUpdates]
 		zd.mu.Unlock()
 

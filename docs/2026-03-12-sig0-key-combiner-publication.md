@@ -18,7 +18,7 @@ For multi-provider zones with `parentsync=agent`, the agent should:
 ### Guard logic
 
 The correct guard for SIG(0) key generation is:
-- `OptDelSyncChild` — means `parentsync=agent` (HSYNCPARAM)
+- `OptParentSync` — means `parentsync=agent` (HSYNCPARAM)
 - **AND** parent supports UPDATE scheme — checked via live `LookupDSYNCTarget` against the parent's DSYNC RRset
 
 The old guard (`delegationsync.child.schemes` config) controlled direct parent UPDATE and is not relevant for combiner-mediated publication.

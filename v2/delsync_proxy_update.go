@@ -225,7 +225,7 @@ func (zd *ZoneData) clearProxyUpdateWarning() {
 // §10.8 precondition check (which generates a keypair if needed in the waiting
 // state) and formats a human-readable result.
 func (zd *ZoneData) ProxyKeyStatus(ctx context.Context, kdb *KeyDB, imr *Imr) (string, error) {
-	if !zd.Options[OptDelSyncProxy] {
+	if !zd.Options[OptParentSyncProxy] {
 		return "", fmt.Errorf("zone %s does not have the delegation-sync-proxy option", zd.ZoneName)
 	}
 	state, err := zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr)

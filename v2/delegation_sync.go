@@ -164,7 +164,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 
 				// Publish CDS records from current DNSKEYs if zone has delegation sync
-				if zd.Options[OptDelSyncChild] {
+				if zd.Options[OptParentSync] {
 					if err := zd.PublishCdsRRs(); err != nil {
 						lgDns.Error("DelegationSyncher: error publishing CDS", "zone", zd.ZoneName, "err", err)
 					} else {
@@ -215,7 +215,7 @@ func parseKeygenAlgorithm(algstr string, defaultAlg uint8) (uint8, error) {
 }
 
 func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
-	if !zd.Options[OptDelSyncChild] {
+	if !zd.Options[OptParentSync] {
 		lgDns.Debug("DelegationSyncSetup: zone does not have child-side delegation sync enabled, skipping", "zone", zd.ZoneName)
 		return nil
 	}
@@ -324,7 +324,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 	// clears allow-updates, so refusing inbound DDNS disabled the parent's own
 	// key. Restating the callers' gate here says what actually permits the
 	// publish, and cannot be switched off by an unrelated policy decision.
-	if !zd.Options[OptDelSyncParent] && !zd.Options[OptDelSyncChild] {
+	if !zd.Options[OptChildSync] && !zd.Options[OptParentSync] {
 		lgDns.Warn("Sig0KeyPreparation: zone has neither childsync nor parentsync, no SIG(0) key will be generated or published",
 			"zone", zd.ZoneName, "name", name, "keyrrexist", keyrrexist)
 		return nil

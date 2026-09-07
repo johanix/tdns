@@ -273,7 +273,7 @@ func TestProxyKeyStatus(t *testing.T) {
 
 	// Proxy zone, no imr ⇒ update-unsupported message (nothing to publish).
 	zdProxy := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
-	zdProxy.Options = map[ZoneOption]bool{OptDelSyncProxy: true}
+	zdProxy.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
 	msg, err := zdProxy.ProxyKeyStatus(context.Background(), kdb, nil)
 	if err != nil {
 		t.Fatalf("ProxyKeyStatus (proxy, no imr): %v", err)

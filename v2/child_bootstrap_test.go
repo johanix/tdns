@@ -116,9 +116,9 @@ func TestZoneChildBootstrapMethodsUsesProxyOption(t *testing.T) {
 	// signalTarget gives the zone an in-bailiwick NS (ns.<zone>), so the
 	// zone itself -- primary here -- owns the _signal name: at-ns is satisfiable.
 	auth, _ := signalTarget("auth.example.", nil)
-	auth.Options[OptDelSyncChild] = true
+	auth.Options[OptParentSync] = true
 	proxy, _ := signalTarget("proxy.example.", nil)
-	proxy.Options[OptDelSyncProxy] = true
+	proxy.Options[OptParentSyncProxy] = true
 	registerZones(t, auth, proxy)
 
 	if got := auth.zoneChildBootstrapMethods(); !reflect.DeepEqual(got, []string{"at-apex", "at-ns"}) {
@@ -139,14 +139,14 @@ func TestZoneChildBootstrapMethodsRequiresSignalTarget(t *testing.T) {
 	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
 
 	local, _ := signalTarget("local.example.", nil)
-	local.Options[OptDelSyncChild] = true
+	local.Options[OptParentSync] = true
 	away := newMapZone("away.example.", Primary, map[string][]dns.RR{
 		"away.example.": {
 			mustRR(t, "away.example. 3600 IN SOA ns.elsewhere.net. h.away.example. 1 3600 600 604800 300"),
 			mustRR(t, "away.example. 3600 IN NS ns.elsewhere.net."),
 		},
 	})
-	away.Options[OptDelSyncChild] = true
+	away.Options[OptParentSync] = true
 	registerZones(t, local, away)
 
 	if got := local.zoneChildBootstrapMethods(); !reflect.DeepEqual(got, []string{"at-apex", "at-ns"}) {

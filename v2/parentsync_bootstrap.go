@@ -20,7 +20,7 @@ import (
 // UPDATE.
 //
 // Flow:
-//  1. Check HSYNCPARAM parentsync=agent (caller already verified OptDelSyncChild)
+//  1. Check HSYNCPARAM parentsync=agent (caller already verified OptParentSync)
 //  2. Query parent via KeyState EDNS(0) inquiry
 //  3. KeyStateTrusted → done
 //  4. KeyStateUnknown → bootstrap

@@ -92,7 +92,7 @@ zone has 'allow-child-updates' but no 'delegationbackend' configured, zone in er
    data, so this is safe before `FirstZoneLoad` has
    completed.
 
-3. The `OptDelSyncParent &&` gate is dropped — a zone that
+3. The `OptChildSync &&` gate is dropped — a zone that
    accepts child updates needs a backend regardless of
    whether it advertises itself as a delegation-sync
    parent.

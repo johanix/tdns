@@ -125,8 +125,8 @@ func checkAgentZoneOptions(cfg *tdns.Config, rep *ccReport) {
 		// Resolved through StringToZoneOption so the deprecated spellings are
 		// covered without repeating them here; see zoneOptionsEnabled.
 		enabled := zoneOptionsEnabled(eff.OptionsStrs)
-		hasProxy := enabled[tdns.OptDelSyncProxy]
-		hasChild := enabled[tdns.OptDelSyncChild]
+		hasProxy := enabled[tdns.OptParentSyncProxy]
+		hasChild := enabled[tdns.OptParentSync]
 
 		if hasProxy && lc(eff.Type) != "secondary" {
 			rep.fail(g, zname,
