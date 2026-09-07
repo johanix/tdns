@@ -1091,50 +1091,38 @@ func TestRequestIxfrOptionsAreSecondaryOnly(t *testing.T) {
 			}
 		})
 
-		t.Run(opt+" on a signing secondary warns and is dropped", func(t *testing.T) {
-			// Inert for a different reason than on a primary: the zone re-signs
-			// what it receives, so a delta computed against the primary's copy
-			// cannot apply. shouldRequestIxfr already refuses to ask; this is
-			// so the operator finds out from the config rather than from a
-			// packet capture.
-			zd := &ZoneData{ZoneName: "example."}
-			// A DnssecPolicy, because inline-signing without one raises a
-			// ConfigError of its own and this test asserts there is none.
-			zconf := &ZoneConf{Name: "example.", Type: "secondary",
-				DnssecPolicy: "default",
-				OptionsStrs:  []string{"inline-signing", opt}}
-			options := parseZoneOptions(&Config{}, "example.", zconf, zd)
+		// A signing secondary is not a special case any more. §5 PR-2 lets it
+		// ask for deltas like any other secondary, so dropping the option here
+		// would leave `no-request-ixfr` inert on exactly the zones whose
+		// operator has most reason to reach for it: the default is ON, so a
+		// dropped opt-out is not a no-op, it is the feature staying enabled
+		// with no way to turn it off.
+		//
+		// Both option orders, because the verdict used to depend on a pre-scan
+		// for the signing options and must not acquire that dependence again.
+		for _, order := range [][]string{
+			{"inline-signing", opt},
+			{opt, "inline-signing"},
+		} {
+			t.Run(opt+" on a signing secondary is accepted ("+strings.Join(order, ",")+")", func(t *testing.T) {
+				zd := &ZoneData{ZoneName: "example."}
+				// A DnssecPolicy, because inline-signing without one raises a
+				// ConfigError of its own and this test asserts there is none.
+				zconf := &ZoneConf{Name: "example.", Type: "secondary",
+					DnssecPolicy: "default",
+					OptionsStrs:  order}
+				options := parseZoneOptions(&Config{}, "example.", zconf, zd)
 
-			if options[StringToZoneOption[opt]] {
-				t.Errorf("%s was accepted on a signing secondary, where it does nothing", opt)
-			}
-			var warned bool
-			for _, e := range zd.ErrorList() {
-				switch e.Type {
-				case ConfigWarning:
-					warned = true
-				case ConfigError:
-					t.Errorf("an inert option raised a service-impacting ConfigError: %q", e.Msg)
+				if !options[StringToZoneOption[opt]] {
+					t.Errorf("%s was dropped on a signing secondary; since §5 PR-2 it is "+
+						"meaningful there, and dropping no-request-ixfr in particular "+
+						"leaves a default-on feature with no way to turn it off", opt)
 				}
-			}
-			if !warned {
-				t.Errorf("%s on a signing secondary was dropped silently", opt)
-			}
-		})
-
-		t.Run(opt+" order in the config does not change the verdict", func(t *testing.T) {
-			// The signing pre-scan exists for this: written before the signing
-			// option, the request-ixfr case would otherwise be judged before
-			// anything knew the zone signs.
-			zd := &ZoneData{ZoneName: "example."}
-			zconf := &ZoneConf{Name: "example.", Type: "secondary",
-				DnssecPolicy: "default",
-				OptionsStrs:  []string{opt, "inline-signing"}}
-			options := parseZoneOptions(&Config{}, "example.", zconf, zd)
-			if options[StringToZoneOption[opt]] {
-				t.Errorf("%s was accepted when written before inline-signing", opt)
-			}
-		})
+				for _, e := range zd.ErrorList() {
+					t.Errorf("unexpected %s error on a valid option: %q", ErrorTypeToString[e.Type], e.Msg)
+				}
+			})
+		}
 
 		t.Run(opt+" on a primary warns and is dropped", func(t *testing.T) {
 			zd := &ZoneData{ZoneName: "example."}
@@ -1374,6 +1362,16 @@ func TestShouldRequestIxfr(t *testing.T) {
 			func(z *ZoneData) { z.Options[OptInlineSigning] = true }, false, true},
 		{"online-signing likewise",
 			func(z *ZoneData) { z.Options[OptOnlineSigning] = true }, false, true},
+		// And it can still be turned off. The default is ON, so the operator's
+		// opt-out is the only way off the delta path -- which is why the
+		// config parser must stop dropping the option on a signing zone
+		// (TestRequestIxfrOptionsAreSecondaryOnly). The two halves only mean
+		// anything together.
+		{"a signing secondary can still opt out",
+			func(z *ZoneData) {
+				z.Options[OptInlineSigning] = true
+				z.Options[OptNoRequestIxfr] = true
+			}, false, false},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			zd := base(t)
