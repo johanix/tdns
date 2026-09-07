@@ -65,33 +65,35 @@ indistinguishable to it, and either rc script's `stop` matches both.
 
 Because it is the same program, every `tdns-auth` option works here.
 
-To manage it, use **`tdns-ncli`** with its own `apiservers` entry, so the
-signer is a command word of its own:
+Manage it with **`tdns-cli`**, pointed at the signer by a CLI config of its
+own. `tdns-cli` resolves `auth` to the `apiservers` entry named `tdns-auth`,
+so the signer's CLI config gives that name the signer's API:
 
 ```yaml
+# /etc/tdns/tdns-signer-cli.yaml
 apiservers:
-   - name:        tdns-auth          # the authoritative server
-     baseurl:     https://127.0.0.1:8989/api/v1
-     apikey:      ...
-     authmethod:  X-API-Key
-
-   - name:        signer             # this daemon
-     role:        auth
-     baseurl:     https://127.0.0.1:8990/api/v1
-     apikey:      ...
-     authmethod:  X-API-Key
-     config-file: /etc/tdns/tdns-signer.yaml
+   - name:       tdns-auth
+     baseurl:    https://127.0.0.1:8990/api/v1   # the SIGNER's API
+     apikey:     ...
+     authmethod: X-API-Key
 ```
 
 ```bash
-tdns-ncli signer zone list
-tdns-ncli signer keystore dnssec list -z example.com.
+tdns-cli --config /etc/tdns/tdns-signer-cli.yaml auth zone list
+tdns-cli --config /etc/tdns/tdns-signer-cli.yaml auth keystore dnssec list -z example.com.
 ```
 
-Do **not** simply repoint `tdns-cli`'s single `tdns-auth` entry at the signer:
-that is how you drive the wrong daemon without noticing, which is the failure
-[Driving several instances of one daemon](multi-instance-cli.md) exists to
-remove.
+Two configs, and `--config` on every signer command. That is the cost of
+running two daemons of the same type, and it is worth being deliberate about:
+the failure it prevents is silent. A single config whose `tdns-auth` entry
+points at one daemon while you believe it points at the other drives the wrong
+server and reports success.
+
+> `tdns-ncli` exists to remove the `--config`, by making the instance a command
+> word (`tdns-ncli signer zone list`). It is a **prototype** — not yet tested
+> enough to be the management tool — so it is an experiment to try, not the
+> recommendation here. See
+> [Driving several instances of one daemon](multi-instance-cli.md).
 
 ## Configuring a signer zone
 
@@ -182,20 +184,20 @@ it should. Only raise it on a daemon whose listen addresses are its own.
 ## Keys and rollovers
 
 The signer holds the DNSSEC keys, so the keystore and the rollover engine act
-on the signer, not on the primary — and so must the CLI. Using the `apiservers`
-entry from above:
+on the signer, not on the primary — and so must the CLI. Use the signer's own
+CLI config, as above:
 
 ```bash
-tdns-ncli signer keystore dnssec list -z example.com.
-tdns-ncli signer zone dnssec auto-rollover status -z example.com.
+tdns-cli --config /etc/tdns/tdns-signer-cli.yaml auth keystore dnssec list -z example.com.
+tdns-cli --config /etc/tdns/tdns-signer-cli.yaml auth zone dnssec auto-rollover status -z example.com.
 ```
 
 See [the keystore guide](keystore.md) and
 [Automatic DNSSEC Rollovers](key-rollover.md); nothing about them is special
-here, beyond addressing the signer rather than the primary. The same commands
-under `tdns-cli auth ...` read the *authoritative* server's keystore, because
-that is where `tdns-cli`'s single `tdns-auth` entry points — the trap the
-management section above already warns about.
+here, beyond addressing the signer rather than the primary. Forgetting
+`--config` here is the expensive case: the keystore and the rollovers are the
+signer's whole job, and the command will happily read or act on the
+authoritative server's keystore instead.
 
 The one thing worth planning: a KSK rollover involves the parent zone, and the
 signer is the thing that knows the keys. If you use delegation sync, configure
