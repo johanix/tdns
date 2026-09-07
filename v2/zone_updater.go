@@ -154,6 +154,20 @@ func logUpdateActions(updateType string, actions []dns.RR) {
 	}
 }
 
+// enqueueDelegationSync offers req to the delegation-sync queue, giving up if
+// the context is cancelled first. Reports whether it was queued.
+//
+// Extracted so the give-up path is testable without standing up the whole
+// updater: a full queue plus a cancelled context must return, not block.
+func enqueueDelegationSync(ctx context.Context, q chan DelegationSyncRequest, req DelegationSyncRequest) bool {
+	select {
+	case q <- req:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 	updateq := kdb.UpdateQ
 
@@ -407,14 +421,31 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 						}
 					}
 
-					// Enqueue delegation sync after successful apply
+					// Enqueue delegation sync after successful apply.
+					//
+					// Cancellable, and safe to be: the waiter was released
+					// above and the change is already durable, so this is
+					// follow-up work. A plain send is not safe. The only reader
+					// of this queue is DelegationSyncher, which exits on the
+					// SAME cancellation, so a full queue at shutdown left this
+					// engine blocked forever on a request nobody would ever
+					// take -- and ZoneUpdaterEngine never returned.
+					//
+					// Dropping it costs a round of parent sync, not
+					// correctness: the drift is still in the zone, and the next
+					// load re-detects it.
 					if updated && !ur.InternalUpdate && zd.Options[OptParentSync] && !dss.InSync {
 						lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
-						zd.DelegationSyncQ <- DelegationSyncRequest{
+						if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
 							Command:    "SYNC-DELEGATION",
 							ZoneName:   zd.ZoneName,
 							ZoneData:   zd,
 							SyncStatus: dss,
+						}) {
+							lg.Info("ZoneUpdater: context cancelled before the delegation-sync enqueue; the parent will be re-synced on the next load",
+								"zone", zd.ZoneName)
+							lg.Info("ZoneUpdater: terminating")
+							return nil
 						}
 						if err := zd.PublishCsyncRR(); err != nil {
 							lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
