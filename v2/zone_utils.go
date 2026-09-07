@@ -844,8 +844,17 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 // hold. What removes it is that the apply no longer works that way: the delta
 // is staged and the publish re-signs exactly the owners it touched
 // (wsSignOwners = new_zd.ixfrTouched, zone_mutation.go), and restitchNsecLocked
-// repairs the chain around those same names. The signatures in the delta are
-// never adopted; ours are computed from what we are about to serve.
+// repairs the chain around those same names -- and further, since it diffs
+// owner content rather than reading the touched set.
+//
+// Our signatures are therefore computed from what we are about to serve, never
+// carried over from the delta. Note what that does NOT claim: a SIGNED
+// upstream's delta names its own RRSIGs and NSECs in the delete section, those
+// match nothing we hold, and the apply refuses -- so the increment only ever
+// happens against an unsigned upstream, which is the bump-in-the-wire
+// deployment this is for. The delta's signatures are not adopted because the
+// apply never succeeds when they appear, not because a later pass discards
+// them.
 func (zd *ZoneData) shouldRequestIxfr(force bool) bool {
 	return zd.requestIxfr() &&
 		zd.IncomingSerial != 0 &&

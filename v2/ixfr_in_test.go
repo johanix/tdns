@@ -292,7 +292,6 @@ func TestParseIxfrDeltasChainsToTheBookend(t *testing.T) {
 
 const ixApplyZone = `example.	3600	IN	SOA	ns.example. hostmaster.example. 7 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
-aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 www.example.	3600	IN	AAAA	2001:db8::3
@@ -664,7 +663,6 @@ func TestIxfrInFallsBackToFullZone(t *testing.T) {
 	authApp(t)
 	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
-aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 fresh.example.	3600	IN	A	10.9.9.9
@@ -690,7 +688,6 @@ func TestIxfrInDisabledUsesAxfr(t *testing.T) {
 	authApp(t)
 	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
-aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 `
@@ -922,7 +919,6 @@ func TestIxfrInSelfHealsOnABadDelta(t *testing.T) {
 	authApp(t)
 	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
-aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 healed.example.	3600	IN	A	10.7.7.7
@@ -1007,7 +1003,6 @@ func TestIxfrInAgainstAnAxfrOnlyPrimary(t *testing.T) {
 	authApp(t)
 	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
-aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 old.example.	3600	IN	A	10.5.5.5
@@ -1289,16 +1284,20 @@ func TestUpToDateReplyChangesNothing(t *testing.T) {
 	}
 }
 
-// TestSigningSecondaryDoesNotAskForDeltas is what the old
-// TestIxfrInResetsTheChainForASigningSecondary name claimed and did not do.
-// A signing secondary's baseline is its own signatures, so a delta computed
-// against the primary's copy cannot apply to it -- asking costs a round trip
-// that could not have worked.
-func TestSigningSecondaryDoesNotAskForDeltas(t *testing.T) {
+// A signing secondary converges against a primary that has no delta history.
+//
+// It DOES ask now -- §5 PR-2 removed the exclusion -- and this primary answers
+// a full zone because it has no chain to answer from, so what this exercises is
+// the fallback delivering the zone rather than the decision to ask. The
+// decision itself is pinned by TestShouldRequestIxfr, which is the only place
+// the arms can be told apart: a primary with no delta history answers a full
+// zone whether we asked or not, so no end-to-end assertion here can see the
+// difference. Named for what it checks, after carrying the opposite claim in
+// its name for one commit.
+func TestSigningSecondaryConvergesFromAnAxfrOnlyPrimary(t *testing.T) {
 	authApp(t)
 	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
-aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 signed.example.	3600	IN	A	10.4.4.4
@@ -1319,10 +1318,7 @@ signed.example.	3600	IN	A	10.4.4.4
 	// Deliberately no assertion on zd.ixfrDerived: that flag lives on the
 	// transfer SCRATCH zone and is read by applyRefreshReplacementLocked for
 	// the epoch decision. It is never copied onto the live zone, so checking
-	// it here could not fail. What pins this behaviour is
-	// TestShouldRequestIxfr's inline-signing case, which fails when the clause
-	// is removed; this test is the end-to-end companion showing the AXFR
-	// actually delivers the zone.
+	// it here could not fail.
 }
 
 // TestShouldRequestIxfr asserts the attempt decision directly, clause by
@@ -1406,7 +1402,6 @@ func TestIxfrResponseCapFallsBackToAxfr(t *testing.T) {
 	authApp(t)
 	newer := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
-aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 capped.example.	3600	IN	A	10.6.6.6
@@ -1465,7 +1460,6 @@ func TestZonemdMissAfterApplyFallsBackToAxfr(t *testing.T) {
 
 	axfrBody := `example.	3600	IN	SOA	ns.example. hostmaster.example. 20 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
-aaa.example.	3600	IN	A	10.0.0.7
 ns.example.	3600	IN	A	10.0.0.1
 www.example.	3600	IN	A	10.0.0.3
 healed.example.	3600	IN	A	10.8.8.8
