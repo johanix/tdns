@@ -21,6 +21,7 @@ cmd/cli/tdns-cli
 cmd/dog/dog
 
 cmdv2/auth/tdns-auth
+cmdv2/signer/tdns-signer
 cmdv2/cli/tdns-cli
 cmdv2/ncli/tdns-ncli
 cmdv2/dog/dog

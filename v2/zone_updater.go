@@ -355,20 +355,34 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					var updated bool
 					var err error
 
+					// Both roles apply to the zone data, and by this point
+					// there is nothing role-specific left to decide. A
+					// secondary only reaches here having passed the
+					// origination gate at the head of the loop: it is an
+					// inline-signing secondary, or a zone in a derived app
+					// whose secondaries mutate by design. Either way the
+					// content is this server's to write.
+					//
+					// What used to stand in the Secondary arm was
+					// ApplyZoneUpdateToDB, a `return nil` placeholder. It
+					// dropped the update and reported that it had landed --
+					// and the DSYNC API turns that into a 200. Worse, its
+					// `err :=` shadowed the err this switch returns, so even a
+					// real failure could not have reached ur.respond (#554).
 					switch zd.ZoneType {
-					case Primary:
+					case Primary, Secondary:
 						updated, err = zd.ApplyZoneUpdateToZoneData(ur, kdb)
 						if err != nil {
 							lg.Error("ZoneUpdater: ApplyZoneUpdateToZoneData failed", "error", err)
 						}
 
-					case Secondary:
-						err := kdb.ApplyZoneUpdateToDB(ur)
-						if err != nil {
-							lg.Error("ZoneUpdater: ApplyZoneUpdateToDB failed", "error", err)
-						} else {
-							updated = true
-						}
+					default:
+						// ZoneType unset (0). The switch used to fall straight
+						// through, leaving updated=false and err=nil, which a
+						// caller checking only the error reads as success.
+						err = fmt.Errorf("zone %s has no zone type; refusing to apply a zone update", zd.ZoneName)
+						lg.Error("ZoneUpdater: zone update on a zone with no zone type",
+							"zone", zd.ZoneName, "cmd", ur.Cmd, "actions", len(ur.Actions))
 					}
 					// The change is now durable AND visible, or it failed. This is
 					// the earliest point at which a caller may honestly answer
@@ -1278,10 +1292,6 @@ func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, d
 		lg.Debug("reconcileDelegationChangesLocked: delegation boundary moved",
 			"zone", zd.ZoneName, "name", cut, "is_delegation_now", zd.ownerIsDelegationLocked(cut))
 	}
-}
-
-func (kdb *KeyDB) ApplyZoneUpdateToDB(ur UpdateRequest) error {
-	return nil // placeholder
 }
 
 // ZoneUpdateChangesDelegationDataNG: the list of actions in ddata.Actions

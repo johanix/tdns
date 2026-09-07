@@ -941,6 +941,17 @@ Notes from implementation:
   real `DelegationBackend.ApplyChildUpdate`), and the API actions (Fix C).
   §2's table should be re-read with this distinction in mind.
 
+  *(Superseded 2026-09-07 by [#556](https://github.com/johanix/tdns/pull/556),
+  which closed [#554](https://github.com/johanix/tdns/issues/554): the
+  placeholder is gone. `ZoneType == Secondary` now applies to the zone data like
+  `Primary`, because a secondary only reaches that switch having passed Fix D —
+  it is inline-signing, or off tdns-auth. So the ZONE-UPDATE vectors above are
+  **live**, exactly as this finding predicted, and Fix D is the whole of what
+  holds them. The placeholder had also been masking Fix D's own test, which
+  could not be mutation-verified while the path was inert for a second reason;
+  it is now. Read this bullet as the record of why Fix D was built structurally,
+  not as a current statement of what is inert.)*
+
 - **The as-configured/effective split (§6) resolved as `SuppressedOptions`.**
   Rather than duplicating the whole options map, `ZoneData` records only the set
   the normalizer *stripped*; the as-configured view is the union

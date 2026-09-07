@@ -1,0 +1,38 @@
+# Algorithms tdns-signer links an implementation for.
+#
+# Currently the same selection as cmdv2/auth/algs.list, but that is a starting
+# point, NOT an invariant -- and locking the two together would defeat the
+# point of running a signer at all. tdns-auth can sign its own zones; a
+# separate signer earns its keep when the two ends differ, typically because
+# the authoritative server sits on modest hardware and the signer does not.
+# The signer is then free to use algorithms the primary could not carry -- the
+# post-quantum ones especially, which are markedly more expensive to sign with.
+#
+# The requirement is coverage, not equality: this list must contain every
+# algorithm a DNSSEC policy applied here names. A policy naming an algorithm
+# this binary did not link quarantines that zone at load with the algorithm
+# named, so the failure is localised and legible rather than silent.
+#
+# One registry NAME per line (see dnssec-algorithms/registry/registry.go).
+# genalgs resolves each name to its codepoint, caps, package, and lib group,
+# checks the lib is installed, and emits registered_algs.go + metadata_algs.go.
+# Pure-Go (no lib needed):
+MLDSA44
+MLDSA65
+MLDSA87
+SLHDSA128S
+# liboqs-backed:
+FALCON512
+FALCON1024
+MAYO1
+MAYO2
+MAYO3
+MAYO5
+SNOVA24_5_4
+SNOVA37_17_2
+SNOVA25_8_3
+CROSSRSDPG128SMALL
+# SQIsign reference lib:
+SQISIGN1
+# QR-UOV reference lib:
+QRUOV_Q31_L3
