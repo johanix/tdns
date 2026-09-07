@@ -8,7 +8,7 @@ TDNS includes several applications built on the TDNS Go library.
 | tdns-agent      | tdns-agent   | Single-provider delegation-sync agent    |
 | tdns-imr        | tdns-imr     | Recursive DNS nameserver (IMR)           |
 | tdns-cli        | tdns-cli     | Management CLI for all TDNS services     |
-| tdns-ncli       | tdns-ncli    | As tdns-cli, plus multi-instance support |
+| tdns-ncli       | tdns-ncli    | PROTOTYPE: tdns-cli plus multi-instance  |
 | dog             | dog          | DNS query tool with extended RR support  |
 
 For the multi-provider applications (tdns-mpagent,
@@ -60,9 +60,13 @@ DSYNC inspection.
 
 [Full documentation](app-tdns-cli.md)
 
-## tdns-ncli -- Management CLI, multi-instance
+## tdns-ncli -- multi-instance CLI (PROTOTYPE)
 
-The same tool as `tdns-cli`, plus the ability to address
+**A prototype, not a replacement for `tdns-cli`.** It ships in parallel
+because it is not yet tested enough to be the management tool; `tdns-cli`
+still is. Use it to try the multi-instance behaviour, not to run production.
+
+Otherwise the same tool as `tdns-cli`, plus the ability to address
 several instances of one daemon -- two `tdns-auth` processes
 on one host, serving different zones -- as separate command
 words rather than by passing `--config` on every invocation:
@@ -71,8 +75,8 @@ words rather than by passing `--config` on every invocation:
     tdns-ncli sectdns zone list
 
 Installed alongside `tdns-cli`, which is unaffected and
-still the right choice when there is one instance of each
-daemon. Both read the same config file.
+remains the supported management tool. Both read the same
+config file.
 
 [Full documentation](multi-instance-cli.md)
 

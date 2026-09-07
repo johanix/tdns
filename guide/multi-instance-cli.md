@@ -1,5 +1,11 @@
 # Driving several instances of one daemon: tdns-ncli
 
+> **`tdns-ncli` is a prototype.** It is shipped alongside `tdns-cli`, not in
+> place of it, precisely because it is not yet tested enough to be the
+> management tool. `tdns-cli` remains that. Treat what follows as something to
+> try on a deployment where you can afford to, and keep driving production
+> through `tdns-cli`.
+
 One host can usefully run more than one instance of the same tdns daemon —
 two `tdns-auth` processes serving different sets of zones, each with its own
 config file, database, listen addresses and management API.
@@ -27,6 +33,12 @@ Everything else is the same tool. `tdns-ncli`'s `auth` command tree is
 identical to `tdns-cli`'s, command for command.
 
 ## tdns-ncli and tdns-cli run side by side
+
+**That is the point, not a transition step.** `tdns-ncli` is a prototype: it
+carries the multi-instance behaviour so it can be exercised without putting
+`tdns-cli` — the tool everything else depends on — behind a refactor. Until it
+has the testing to be a replacement, both exist and `tdns-cli` is the one to
+reach for.
 
 `tdns-ncli` is installed alongside `tdns-cli`, not in place of it. Both are
 built from the same library, both read the same `/etc/tdns/tdns-cli.yaml`, and
