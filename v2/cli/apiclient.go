@@ -25,7 +25,8 @@ type ApiDetails struct {
 	// SECOND (third, ...) instance of a daemon this CLI already knows how to
 	// drive. `role: auth` on an entry named "sectdns" builds the whole auth
 	// command tree a second time, targeting this entry, reachable as
-	// `tdns-cli sectdns ...`.
+	// `tdns-ncli sectdns ...`. (tdns-cli ignores the field entirely; only
+	// tdns-ncli wires instance trees.)
 	//
 	// Empty is the normal case and means "this entry is the canonical target
 	// for whichever role RegisterRole maps to its Name" -- i.e. every config

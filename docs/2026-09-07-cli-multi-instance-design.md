@@ -22,8 +22,8 @@ What we want instead:
 /etc/tdns/sec-tdns-auth.yaml      # instance 2, same directory
 /etc/tdns/tdns-cli.yaml           # one CLI config that knows about both
 
-tdns-cli auth    zone list        # instance 1
-tdns-cli sectdns zone list        # instance 2
+tdns-ncli auth    zone list       # instance 1
+tdns-ncli sectdns zone list       # instance 2
 ```
 
 The hard constraint: **the `sectdns` command tree must not be a copy of the
@@ -96,7 +96,7 @@ func newKeystoreDnssecPolicyCmd(_ string) *cobra.Command {   // role discarded!
 ```
 
 Note the `_ string`: the role is not merely unused, it is *explicitly
-discarded*. Under a per-instance tree, `tdns-cli sectdns keystore dnssec ds-push`
+discarded*. Under a per-instance tree, `tdns-ncli sectdns keystore dnssec ds-push`
 would silently drive **the wrong nameserver**. Not a crash, not an error
 message: a rollover action against the wrong server. Every one of the 24 must
 be converted to take and use the role.

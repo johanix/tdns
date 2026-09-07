@@ -100,10 +100,30 @@ func TestNearestTagWins(t *testing.T) {
 	}
 }
 
+// withCleanRoleRegistry isolates a test from the package-level role registry.
+//
+// RegisterRole writes a package-global map and WireInstanceTrees calls it, so
+// a test that wires an instance leaves that name registered for every test
+// that runs after it -- which makes results depend on test ORDER. That is not
+// hypothetical: TestDuplicateInstanceNameIsReportedAsADuplicate passed alone
+// and failed in the suite, because an earlier test had already claimed
+// "sectdns" and the first entry was then refused as a built-in-role collision.
+func withCleanRoleRegistry(t *testing.T) {
+	t.Helper()
+	saved := make(map[string]string, len(roleToClientKey))
+	for k, v := range roleToClientKey {
+		saved[k] = v
+	}
+	t.Cleanup(func() {
+		roleToClientKey = saved
+	})
+}
+
 // Every way an apiservers entry can be wrong must cost that entry its
 // subcommand and nothing else. In particular a name that shadows a built-in
 // role must be refused: honouring it would retarget the canonical tree.
 func TestWireInstanceTreesRefusesBadEntries(t *testing.T) {
+	withCleanRoleRegistry(t)
 	for _, tc := range []struct {
 		name  string
 		entry ApiDetails
@@ -137,6 +157,7 @@ func TestWireInstanceTreesRefusesBadEntries(t *testing.T) {
 // An entry with no role: is a canonical target, reached through its built-in
 // tree. It must not produce a second tree, and must not warn.
 func TestWireInstanceTreesIgnoresCanonicalEntries(t *testing.T) {
+	withCleanRoleRegistry(t)
 	root := &cobra.Command{Use: "tdns-ncli"}
 	warnings := WireInstanceTrees(root, []ApiDetails{
 		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1"},
@@ -150,6 +171,7 @@ func TestWireInstanceTreesIgnoresCanonicalEntries(t *testing.T) {
 }
 
 func TestWireInstanceTreesWiresAGoodEntry(t *testing.T) {
+	withCleanRoleRegistry(t)
 	root := &cobra.Command{Use: "tdns-ncli"}
 	warnings := WireInstanceTrees(root, []ApiDetails{
 		{Name: "sectdns", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1"},
@@ -244,6 +266,7 @@ apiservers:
 // up; show-cmds is reserved by name inside WireInstanceTrees because it has to
 // be attached after wiring in order to see the instance trees.
 func TestReservedNamesAreAllRefused(t *testing.T) {
+	withCleanRoleRegistry(t)
 	reserved := []string{
 		"auth", "agent", "imr", "scanner", // built-in roles
 		"cert", "util", "version", // built-in top-level commands
@@ -331,5 +354,42 @@ apiservers:
 	}
 	if got := EarlyApiServers(main2); len(got) != 1 {
 		t.Errorf("a missing local config lost the main config's entries: %+v", got)
+	}
+}
+
+// A name already claimed by an EARLIER apiservers entry and a name claimed by
+// a BUILT-IN role both land in the same refusal branch, and the operator needs
+// to be told which. Reporting a duplicate as "a built-in role" sends them
+// looking for a conflict that does not exist. (PR #544 re-review, R1.)
+func TestDuplicateInstanceNameIsReportedAsADuplicate(t *testing.T) {
+	withCleanRoleRegistry(t)
+	root := &cobra.Command{Use: "tdns-ncli"}
+	root.AddCommand(&cobra.Command{Use: "version"})
+
+	warnings := WireInstanceTrees(root, []ApiDetails{
+		{Name: "sectdns", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1"},
+		{Name: "sectdns", Role: "auth", BaseURL: "https://127.0.0.1:8991/api/v1"}, // duplicate
+		{Name: "auth", Role: "auth", BaseURL: "https://127.0.0.1:8992/api/v1"},    // built-in
+	})
+
+	if len(warnings) != 2 {
+		t.Fatalf("got %d warnings, want 2 (the duplicate and the built-in): %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "an earlier apiservers entry with the same name") {
+		t.Errorf("duplicate name misreported: %q", warnings[0])
+	}
+	if strings.Contains(warnings[0], "built-in role") {
+		t.Errorf("duplicate name blamed on a built-in role: %q", warnings[0])
+	}
+	if !strings.Contains(warnings[1], "a built-in role") {
+		t.Errorf("built-in collision misreported: %q", warnings[1])
+	}
+
+	// The FIRST entry still wins: a duplicate must not unwire it.
+	if findChild(root, "sectdns") == nil {
+		t.Error("the first sectdns entry was lost when the duplicate was refused")
+	}
+	if got := GetClientKeyFromParent("sectdns"); got != "sectdns" {
+		t.Errorf("sectdns role maps to %q after the duplicate was refused, want \"sectdns\"", got)
 	}
 }
