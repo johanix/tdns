@@ -23,6 +23,7 @@ cmd/dog/dog
 cmdv2/auth/tdns-auth
 cmdv2/signer/tdns-signer
 cmdv2/cli/tdns-cli
+cmdv2/ncli/tdns-ncli
 cmdv2/dog/dog
 cmdv2/imr/tdns-imr
 cmdv2/agent/tdns-agent

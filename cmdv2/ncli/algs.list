@@ -1,0 +1,6 @@
+# tdns-cli selects NO real algorithm implementations.
+# It is a query/management tool, not a signer or validator: it only needs
+# the name<->codepoint<->role metadata (compiled in for ALL registry
+# algorithms via the generated metadata_algs.go) for CLI argument
+# validation. Leaving this list empty keeps the binary pure-Go — no CIRCL,
+# no liboqs/sqisign/qruov, no cgo.

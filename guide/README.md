@@ -126,6 +126,15 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   Companion to the key-rollover guide above; required
   reading when changing engine timing behaviour.
 
+- [Driving several instances of one daemon](multi-instance-cli.md)
+  -- Running two `tdns-auth` instances on one host and
+  addressing each as its own command word with `tdns-ncli`
+  (`tdns-ncli sectdns zone list`): the `role:` key in
+  `apiservers`, keeping both daemon configs in `/etc/tdns`,
+  what `config check` reads, reserved instance names, the
+  `listeners.udp-sockets` hazard when two daemons share an
+  address, and why `tdns-cli` is unaffected.
+
 - [Structured Aggressive Testing with tdns-debug](testing.md)
   -- Developer framework for aggressive correctness testing of a
   running tdns server: the actor/ledger/checker architecture, the

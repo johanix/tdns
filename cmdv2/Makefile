@@ -13,6 +13,7 @@ version: genalgs
 	$(MAKE) -C ./auth/ version
 	$(MAKE) -C ./signer/ version
 	$(MAKE) -C ./cli/ version
+	$(MAKE) -C ./ncli/ version
 	$(MAKE) -C ./agent/ version
 	$(MAKE) -C ./imr/ version
 	$(MAKE) -C ./dog/ version
@@ -22,6 +23,7 @@ v2: genalgs
 	$(MAKE) -C ./auth/
 	$(MAKE) -C ./signer/
 	$(MAKE) -C ./cli/
+	$(MAKE) -C ./ncli/
 	$(MAKE) -C ./agent/
 	$(MAKE) -C ./imr/
 	$(MAKE) -C ./dog/
@@ -31,6 +33,7 @@ clean:
 	$(MAKE) -C ./auth/ clean
 	$(MAKE) -C ./signer/ clean
 	$(MAKE) -C ./cli/ clean
+	$(MAKE) -C ./ncli/ clean
 	$(MAKE) -C ./agent/ clean
 	$(MAKE) -C ./imr/ clean
 	$(MAKE) -C ./dog/ clean
@@ -45,6 +48,7 @@ install: check-root install-dirs
 	$(MAKE) -C ./auth/ install
 	$(MAKE) -C ./signer/ install
 	$(MAKE) -C ./cli/ install
+	$(MAKE) -C ./ncli/ install
 	$(MAKE) -C ./agent/ install
 	$(MAKE) -C ./imr/ install
 	$(MAKE) -C ./dog/ install
