@@ -139,20 +139,16 @@ func TestDsyncApiRecords(t *testing.T) {
 }
 
 func TestDsyncApiTargetName(t *testing.T) {
-	t.Cleanup(func() { SetDelegationSyncConfig(DelegationSyncConf{}) })
+	t.Cleanup(func() { SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
 
 	// Not configured for the API scheme: no target, so UnpublishDsyncRRs does
 	// not try to delete records that were never published.
-	SetDelegationSyncConfig(DelegationSyncConf{
-		Parent: DelegationSyncParentConf{Schemes: []string{"notify", "update"}},
-	})
+	SetDelegationSyncConfig(ChildSyncConf{Schemes: []string{"notify", "update"}}, ParentSyncConf{})
 	if got := DsyncApiTargetName("example."); got != "" {
 		t.Errorf("target for a zone not offering the API scheme = %q, want empty", got)
 	}
 
-	SetDelegationSyncConfig(DelegationSyncConf{
-		Parent: DelegationSyncParentConf{Schemes: []string{"notify", "update", "api"}},
-	})
+	SetDelegationSyncConfig(ChildSyncConf{Schemes: []string{"notify", "update", "api"}}, ParentSyncConf{})
 	if got, want := DsyncApiTargetName("example."), "dsync-api.example."; got != want {
 		t.Errorf("target = %q, want %q", got, want)
 	}
@@ -167,15 +163,15 @@ func TestDsyncApiTargetName(t *testing.T) {
 // reached from zone setup paths that run in tests and in tools that never call
 // ParseConfig. The zero value publishes nothing, which is the safe answer.
 func TestDelegationSyncConfigNeverNil(t *testing.T) {
-	t.Cleanup(func() { SetDelegationSyncConfig(DelegationSyncConf{}) })
+	t.Cleanup(func() { SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
 
 	delegationSyncConf.Store(nil)
-	dsc := DelegationSyncConfig()
+	dsc := ChildSyncConfig()
 	if dsc == nil {
-		t.Fatal("DelegationSyncConfig() returned nil")
+		t.Fatal("ChildSyncConfig() returned nil")
 	}
-	if len(dsc.Parent.Schemes) != 0 {
-		t.Errorf("the zero value offers schemes: %v", dsc.Parent.Schemes)
+	if len(dsc.Schemes) != 0 {
+		t.Errorf("the zero value offers schemes: %v", dsc.Schemes)
 	}
 }
 
@@ -185,30 +181,29 @@ func TestDelegationSyncConfigNeverNil(t *testing.T) {
 // new code is required to read.
 func TestDelegationSyncConfigRoundTripsThroughViper(t *testing.T) {
 	const y = `
-delegationsync:
-   parent:
-      schemes: [ notify, update, api ]
-      notify:
-         types:     [ CDS, CSYNC ]
-         port:      5354
-         target:    notifications.{ZONENAME}
-         addresses: [ 127.0.0.1, '::1' ]
-      update:
-         types:     [ ANY ]
-         port:      5354
-         target:    updates.{ZONENAME}
-         addresses: [ 127.0.0.1 ]
-      api:
-         types:   [ CDS, CSYNC ]
-         target:  dsync-api.{ZONENAME}
-         baseurl: "https://{TARGET}:{PORT}/dsync/v1"
-         port:    8443
-         dialect: tdns-child-api-v1.0
-         listen:  [ "0.0.0.0:8443" ]
-         cert:    /etc/tdns/dsync-api.crt
-         key:     /etc/tdns/dsync-api.key
-   child:
-      schemes: [ update, notify, api ]
+childsync:
+   schemes: [ notify, update, api ]
+   notify:
+      types:     [ CDS, CSYNC ]
+      port:      5354
+      target:    notifications.{ZONENAME}
+      addresses: [ 127.0.0.1, '::1' ]
+   update:
+      types:     [ ANY ]
+      port:      5354
+      target:    updates.{ZONENAME}
+      addresses: [ 127.0.0.1 ]
+   api:
+      types:   [ CDS, CSYNC ]
+      target:  dsync-api.{ZONENAME}
+      baseurl: "https://{TARGET}:{PORT}/dsync/v1"
+      port:    8443
+      dialect: tdns-child-api-v1.0
+      listen:  [ "0.0.0.0:8443" ]
+      cert:    /etc/tdns/dsync-api.crt
+      key:     /etc/tdns/dsync-api.key
+parentsync:
+   schemes: [ update, notify, api ]
 `
 	v := viper.New()
 	v.SetConfigType("yaml")
@@ -221,30 +216,30 @@ delegationsync:
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	dsc := conf.DelegationSync
-	if len(dsc.Parent.Schemes) != 3 {
-		t.Fatalf("parent schemes = %v", dsc.Parent.Schemes)
+	dsc := conf.ChildSync
+	if len(dsc.Schemes) != 3 {
+		t.Fatalf("parent schemes = %v", dsc.Schemes)
 	}
-	if len(dsc.Child.Schemes) != 3 {
-		t.Errorf("child schemes = %v", dsc.Child.Schemes)
+	if len(dsc.Schemes) != 3 {
+		t.Errorf("child schemes = %v", dsc.Schemes)
 	}
 
 	// The two pre-existing schemes must decode exactly as their viper reads
 	// did, or converting PublishDsyncRRs changed behaviour.
-	if dsc.Parent.Notify.Port != 5354 || dsc.Parent.Notify.Target != "notifications.{ZONENAME}" {
-		t.Errorf("notify decoded wrong: %+v", dsc.Parent.Notify)
+	if dsc.Notify.Port != 5354 || dsc.Notify.Target != "notifications.{ZONENAME}" {
+		t.Errorf("notify decoded wrong: %+v", dsc.Notify)
 	}
-	if len(dsc.Parent.Notify.Addresses) != 2 {
-		t.Errorf("notify addresses = %v", dsc.Parent.Notify.Addresses)
+	if len(dsc.Notify.Addresses) != 2 {
+		t.Errorf("notify addresses = %v", dsc.Notify.Addresses)
 	}
-	if dsc.Parent.Update.Port != 5354 || dsc.Parent.Update.Target != "updates.{ZONENAME}" {
-		t.Errorf("update decoded wrong: %+v", dsc.Parent.Update)
+	if dsc.Update.Port != 5354 || dsc.Update.Target != "updates.{ZONENAME}" {
+		t.Errorf("update decoded wrong: %+v", dsc.Update)
 	}
-	if len(dsc.Parent.Update.Types) != 1 || dsc.Parent.Update.Types[0] != "ANY" {
-		t.Errorf("update types = %v", dsc.Parent.Update.Types)
+	if len(dsc.Update.Types) != 1 || dsc.Update.Types[0] != "ANY" {
+		t.Errorf("update types = %v", dsc.Update.Types)
 	}
 
-	api := dsc.Parent.Api
+	api := dsc.Api
 	if api.Port != 8443 || api.Target != "dsync-api.{ZONENAME}" || api.Dialect != DsyncApiDialectV1 {
 		t.Errorf("api decoded wrong: %+v", api)
 	}
@@ -263,12 +258,11 @@ delegationsync:
 
 func TestDsyncApiClientAuthRoundTripThroughViper(t *testing.T) {
 	const y = `
-delegationsync:
-   parent:
-      api:
-         client-auth:
-            mechanisms: [ tls-pin, tls-pkix ]
-            ca-file: /etc/tdns/clients-ca.crt
+childsync:
+   api:
+      client-auth:
+         mechanisms: [ tls-pin, tls-pkix ]
+         ca-file: /etc/tdns/clients-ca.crt
 `
 	v := viper.New()
 	v.SetConfigType("yaml")
@@ -279,7 +273,7 @@ delegationsync:
 	if err := v.Unmarshal(&conf); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	ca := conf.DelegationSync.Parent.Api.ClientAuth
+	ca := conf.ChildSync.Api.ClientAuth
 	if ca == nil {
 		t.Fatal("client-auth decoded as nil")
 	}
@@ -318,16 +312,16 @@ func TestDsyncApiClientAuthValidate(t *testing.T) {
 }
 
 func TestDsyncApiChildCredentialBothKindsRefused(t *testing.T) {
-	cc := DsyncApiChildCredentialConf{
+	cc := ParentSyncApiCredentialConf{
 		Parent:   "example.",
 		Username: "u",
 		Key:      "k",
-		TLS:      &DsyncApiChildTLSConf{CertFile: "c", KeyFile: "k"},
+		TLS:      &ParentSyncApiTLSConf{CertFile: "c", KeyFile: "k"},
 	}
 	if err := cc.Validate(); err == nil {
 		t.Fatal("bearer + tls must be refused")
 	}
-	if err := (&DsyncApiChildTLSConf{CertFile: "c"}).Validate(); err == nil {
+	if err := (&ParentSyncApiTLSConf{CertFile: "c"}).Validate(); err == nil {
 		t.Fatal("half-written tls block must be refused")
 	}
 }

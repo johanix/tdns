@@ -38,14 +38,14 @@ func childBootstrapMethods(proxy, canSignal bool) []string {
 // (compileChildBootstrapMethods) when no delegationsync block has been
 // installed at all.
 func configuredChildBootstrapMethods() []string {
-	if methods := DelegationSyncConfig().CompiledChildMethods; methods != nil {
+	if methods := ParentSyncConfig().CompiledMethods; methods != nil {
 		return methods
 	}
 	return []string{"at-apex", "at-ns"}
 }
 
 func (zd *ZoneData) zoneChildBootstrapMethods() []string {
-	proxy := zd != nil && zd.Options[OptDelSyncProxy]
+	proxy := zd != nil && zd.Options[OptParentSyncProxy]
 	canSignal := !proxy && zd != nil && zd.canPublishSig0KeyAtSignal()
 	methods := childBootstrapMethods(proxy, canSignal)
 	if zd != nil && !proxy && !canSignal {

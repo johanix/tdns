@@ -299,7 +299,7 @@ func TestWithdraw_DelegationSyncTurnedOff(t *testing.T) {
 	})
 	zd.KeyDB = kdb
 	kdb.UpdateQ = q
-	zd.Options = map[ZoneOption]bool{OptDelSyncChild: true}
+	zd.Options = map[ZoneOption]bool{OptParentSync: true}
 	registerZones(t, zd)
 
 	if err := kdb.RecordSignalPublication(SignalPublication{

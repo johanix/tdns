@@ -32,7 +32,7 @@ func warnDsyncApiClientAuthReload(configured bool) {
 	if !dsyncApiClientAuthReloadMismatch(configured) {
 		return
 	}
-	lgConfig.Warn("delegationsync.parent.api.client-auth changed but the DSYNC API listener does not rebuild on reload; restart for the new handshake to take effect",
+	lgConfig.Warn("childsync.api.client-auth changed but the DSYNC API listener does not rebuild on reload; restart for the new handshake to take effect",
 		"configured", configured, "listener_requests_client_cert", dsyncApiListenerHandshakeRequestsCert.Load())
 }
 
@@ -72,7 +72,7 @@ const DsyncApiShutdownTimeout = 5 * time.Second
 // configured, which is how a deployment that has not opted in ends up with no
 // listener at all rather than a listener that refuses everything.
 func (conf *Config) SetupDsyncApiRouter(ctx context.Context) *mux.Router {
-	dsc := DelegationSyncConfig().Parent
+	dsc := ChildSyncConfig()
 	if !dsyncSchemeConfigured(dsc.Schemes, "api") {
 		return nil
 	}
@@ -99,11 +99,11 @@ func (conf *Config) StartDsyncApiListener(ctx context.Context, router *mux.Route
 	if router == nil {
 		return nil
 	}
-	api := DelegationSyncConfig().Parent.Api.WithDefaults()
+	api := ChildSyncConfig().Api.WithDefaults()
 
 	if len(api.Listen) == 0 {
-		lgDsyncApi.Warn("DSYNC API scheme is in delegationsync.parent.schemes but" +
-			" delegationsync.parent.api.listen is empty; publishing the records but not serving them")
+		lgDsyncApi.Warn("DSYNC API scheme is in childsync.schemes but" +
+			" childsync.api.listen is empty; publishing the records but not serving them")
 		return nil
 	}
 	if api.CertFile == "" || api.KeyFile == "" {
@@ -112,7 +112,7 @@ func (conf *Config) StartDsyncApiListener(ctx context.Context, router *mux.Route
 		// to the network, and a conforming child refuses a non-https endpoint
 		// anyway -- so a plaintext listener could only ever serve clients that
 		// had disabled their own protection.
-		return fmt.Errorf("delegationsync.parent.api needs both cert and key:" +
+		return fmt.Errorf("childsync.api needs both cert and key:" +
 			" this endpoint carries bearer credentials and is not served without TLS")
 	}
 
@@ -251,7 +251,7 @@ func dsyncApiAuthMiddleware(kdb *KeyDB) mux.MiddlewareFunc {
 					dsyncApiError(w, http.StatusUnauthorized, "")
 					return
 				}
-			} else if clientAuth := DelegationSyncConfig().Parent.Api.ClientAuth; clientAuth.Enabled() {
+			} else if clientAuth := ChildSyncConfig().Api.ClientAuth; clientAuth.Enabled() {
 				var fail *dsyncApiCertAuthFailure
 				cred, fail = authenticateDsyncApiClientCert(kdb, zd.ZoneName, r, clientAuth)
 				if fail != nil {
@@ -277,7 +277,7 @@ func dsyncApiAuthMiddleware(kdb *KeyDB) mux.MiddlewareFunc {
 				// theirs.
 				if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 					lgDsyncApi.Warn("DSYNC API client presented a certificate but client-auth is not configured"+
-						" (delegationsync.parent.api.client-auth)",
+						" (childsync.api.client-auth)",
 						"zone", zd.ZoneName, "child", child, "from", r.RemoteAddr,
 						"subject", r.TLS.PeerCertificates[0].Subject.String())
 				} else {
@@ -330,7 +330,7 @@ func dsyncApiParentZone(child string) (*ZoneData, error) {
 		}
 
 		zd.mu.Lock()
-		offersScheme := zd.Options[OptDelSyncParent]
+		offersScheme := zd.Options[OptChildSync]
 		allowsChildUpdates := zd.Options[OptAllowChildUpdates]
 		zd.mu.Unlock()
 

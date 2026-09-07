@@ -47,8 +47,8 @@ func TestBootstrapSVCBMethods(t *testing.T) {
 }
 
 func TestBindDelegationPolicyUnknownQuarantines(t *testing.T) {
-	SetDelegationSyncConfig(DelegationSyncConf{})
-	t.Cleanup(func() { SetDelegationSyncConfig(DelegationSyncConf{}) })
+	SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{})
+	t.Cleanup(func() { SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
 	_, err := bindDelegationPolicy(&ZoneConf{DelegationPolicy: "no-such"})
 	if err == nil {
 		t.Fatal("unknown policy must fail closed")
@@ -56,8 +56,8 @@ func TestBindDelegationPolicyUnknownQuarantines(t *testing.T) {
 }
 
 func TestBindDelegationPolicyOmittedGetsDefault(t *testing.T) {
-	SetDelegationSyncConfig(DelegationSyncConf{})
-	t.Cleanup(func() { SetDelegationSyncConfig(DelegationSyncConf{}) })
+	SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{})
+	t.Cleanup(func() { SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
 	p, err := bindDelegationPolicy(&ZoneConf{})
 	if err != nil {
 		t.Fatal(err)
@@ -142,14 +142,12 @@ func TestFindParentZoneSkipsTheChild(t *testing.T) {
 }
 
 func TestParentDelegationPolicyUnknownUsesCompiledDefault(t *testing.T) {
-	if err := SetDelegationSyncConfig(DelegationSyncConf{
-		Policies: map[string]DelegationPolicyConf{
-			"default": {Bootstrap: DelegationBootstrapConf{Mechanisms: []string{"at-ns"}}},
-		},
-	}); err != nil {
+	if err := SetDelegationSyncConfig(ChildSyncConf{Policies: map[string]DelegationPolicyConf{
+		"default": {Bootstrap: DelegationBootstrapConf{Mechanisms: []string{"at-ns"}}},
+	}}, ParentSyncConf{}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
 
 	pol := parentDelegationPolicy("orphan.example.")
 	if pol.Name != "default" || !reflect.DeepEqual(pol.Mechanisms, []string{"at-ns"}) {
@@ -158,25 +156,21 @@ func TestParentDelegationPolicyUnknownUsesCompiledDefault(t *testing.T) {
 }
 
 func TestRebindLiveDelegationPoliciesOnSetConfig(t *testing.T) {
-	if err := SetDelegationSyncConfig(DelegationSyncConf{
-		Policies: map[string]DelegationPolicyConf{
-			"default": {Bootstrap: DelegationBootstrapConf{Mechanisms: []string{"at-apex"}}},
-		},
-	}); err != nil {
+	if err := SetDelegationSyncConfig(ChildSyncConf{Policies: map[string]DelegationPolicyConf{
+		"default": {Bootstrap: DelegationBootstrapConf{Mechanisms: []string{"at-apex"}}},
+	}}, ParentSyncConf{}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
 
 	p, _ := lookupDelegationPolicy("default")
 	zd := &ZoneData{ZoneName: "rebind-t1.example.", DelegationPolicy: &p}
 	Zones.Set(zd.ZoneName, zd)
 	t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
 
-	if err := SetDelegationSyncConfig(DelegationSyncConf{
-		Policies: map[string]DelegationPolicyConf{
-			"default": {Bootstrap: DelegationBootstrapConf{Mechanisms: []string{"at-ns"}}},
-		},
-	}); err != nil {
+	if err := SetDelegationSyncConfig(ChildSyncConf{Policies: map[string]DelegationPolicyConf{
+		"default": {Bootstrap: DelegationBootstrapConf{Mechanisms: []string{"at-ns"}}},
+	}}, ParentSyncConf{}); err != nil {
 		t.Fatal(err)
 	}
 	got := zd.boundDelegationPolicy()

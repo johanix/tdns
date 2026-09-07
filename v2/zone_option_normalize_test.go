@@ -42,12 +42,18 @@ func TestNormalizeStripsEveryOriginationOption(t *testing.T) {
 
 // TestNormalizeKeepsSanctionedAndServingOptions guards the carve-outs: the
 // catalog options (consumption provisions OTHER zones — the whole point of
-// RFC 9432), delegation-sync-child, and serving-behaviour options must survive
+// RFC 9432), parentsync-proxy, and serving-behaviour options must survive
 // untouched on a secondary.
+//
+// parentsync used to be in this list. It moved to originationOptions with #538:
+// its publishing paths were justified as allow-updates-gated, that gate was the
+// wrong question, and a tdns-auth secondary doing child-side delegation sync is
+// incoherent for the same reason childsync is. parentsync-proxy stays — it is an
+// AGENT secondary's whole job, and this function is a no-op off tdns-auth.
 func TestNormalizeKeepsSanctionedAndServingOptions(t *testing.T) {
 	keep := optSet(
 		OptCatalogZone, OptCatalogMemberAutoCreate, OptCatalogMemberAutoDelete,
-		OptDelSyncChild, OptFoldCase, OptBlackLies,
+		OptParentSyncProxy, OptFoldCase, OptBlackLies,
 	)
 	eff, _, sup, msg := normalizeOptionsForRole(AppTypeAuth, Secondary, keep, "")
 

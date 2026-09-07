@@ -1047,8 +1047,8 @@ func APIzoneParentSync(ctx context.Context, app *AppDetails, refreshq chan ZoneR
 		}
 
 		// Gate: zone must have exactly one of parentsync or parentsync-proxy.
-		hasParentSync := zd.Options[OptDelSyncChild]
-		hasProxy := zd.Options[OptDelSyncProxy]
+		hasParentSync := zd.Options[OptParentSync]
+		hasProxy := zd.Options[OptParentSyncProxy]
 		if !hasParentSync && !hasProxy {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %q does not have parentsync or parentsync-proxy option", zd.ZoneName)
@@ -1080,7 +1080,7 @@ func APIzoneParentSync(ctx context.Context, app *AppDetails, refreshq chan ZoneR
 			if keyrrset != nil && len(keyrrset.RRs) > 0 {
 				resp.Functions["SIG(0) key publication"] = "done"
 			} else if zd.ZoneType == Secondary {
-				if zd.Options[OptDelSyncChild] {
+				if zd.Options[OptParentSync] {
 					resp.Functions["SIG(0) key publication"] = "not done; KEY record must be added to zone at primary server"
 					// No apex KEY to quote: GetRRset already reported none.
 					resp.Todo = append(resp.Todo, fmt.Sprintf("Add the zone's SIG(0) KEY record to %s at the primary server", zd.ZoneName))
@@ -1198,7 +1198,7 @@ func APIzoneChildSync(ctx context.Context, app *AppDetails) func(w http.Response
 		}
 
 		// Gate: zone must have childsync option.
-		if !zd.Options[OptDelSyncParent] {
+		if !zd.Options[OptChildSync] {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %q does not have the childsync option", zd.ZoneName)
 			return

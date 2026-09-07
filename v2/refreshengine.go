@@ -1046,7 +1046,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// unbounded send to DelegationSyncQ, and OnFirstLoad
 					// callbacks run inside this engine loop — dispatch async so
 					// a full/stopped consumer cannot stall refresh processing.
-					if zr.Template != "" && (zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]) {
+					if zr.Template != "" && (zd.Options[OptChildSync] || zd.Options[OptParentSync]) {
 						delegationSyncQ := conf.Internal.DelegationSyncQ
 						zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
 							if delegationSyncQ == nil {

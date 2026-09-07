@@ -51,7 +51,8 @@ func TestConfigCheckDecodesDelegationSyncTyped(t *testing.T) {
 	// false (default true), manual true (false), the retry pair 3/7s (5/10s),
 	// and default's mechanisms are at-ns alone (at-apex + at-ns).
 	body := `
-delegationsync:
+childsync:
+   schemes: [ notify, update ]
    policies:
       default:
          bootstrap:
@@ -66,13 +67,11 @@ delegationsync:
          bootstrap:
             mechanisms: [ ]
             manual:     true
-   parent:
-      schemes: [ notify, update ]
-   child:
-      schemes: [ notify, update ]
-      update:
-         bootstrap:
-            methods: [ at-apex ]
+parentsync:
+   schemes: [ notify, update ]
+   update:
+      bootstrap:
+         methods: [ at-apex ]
 `
 	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
 		t.Fatal(err)
@@ -88,13 +87,13 @@ delegationsync:
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if got := cfg.DelegationSync.Child.Schemes; len(got) != 2 || got[0] != "notify" || got[1] != "update" {
+	if got := cfg.ParentSync.Schemes; len(got) != 2 || got[0] != "notify" || got[1] != "update" {
 		t.Fatalf("child.schemes decoded as %v; the typed check would report it empty", got)
 	}
-	if got := cfg.DelegationSync.Parent.Schemes; len(got) != 2 {
+	if got := cfg.ChildSync.Schemes; len(got) != 2 {
 		t.Fatalf("parent.schemes decoded as %v", got)
 	}
-	if got := cfg.DelegationSync.Child.Update.Bootstrap.Methods; len(got) != 1 || got[0] != "at-apex" {
+	if got := cfg.ParentSync.Update.Bootstrap.Methods; len(got) != 1 || got[0] != "at-apex" {
 		t.Fatalf("child bootstrap methods decoded as %v", got)
 	}
 
@@ -103,11 +102,11 @@ delegationsync:
 	// `[ ]` arrived as nil, locked-down would silently compile to
 	// [at-apex, at-ns] and advertise them -- the advertisement lying about the
 	// policy, which is the defect §4.1 exists to close.
-	if m := cfg.DelegationSync.Policies["locked-down"].Bootstrap.Mechanisms; m == nil {
+	if m := cfg.ChildSync.Policies["locked-down"].Bootstrap.Mechanisms; m == nil {
 		t.Fatal("locked-down mechanisms decoded as nil; an explicit empty list must stay empty")
 	}
 
-	compiled, methods, err := tdns.CompileDelegationSyncPolicies(cfg.DelegationSync)
+	compiled, methods, err := tdns.CompileDelegationSyncPolicies(cfg.ChildSync, cfg.ParentSync)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -162,7 +161,7 @@ delegationsync:
 // check` must say so rather than passing the file.
 func TestCheckDelegationSyncRejectsUnknownToken(t *testing.T) {
 	var cfg tdns.Config
-	cfg.DelegationSync.Policies = map[string]tdns.DelegationPolicyConf{
+	cfg.ChildSync.Policies = map[string]tdns.DelegationPolicyConf{
 		"typo": {Bootstrap: tdns.DelegationBootstrapConf{Mechanisms: []string{"at-apx"}}},
 	}
 	rep := newCCReport()
@@ -178,7 +177,7 @@ func TestCheckDelegationSyncRejectsUnknownToken(t *testing.T) {
 // flagged when omitted (omission binds "default").
 func TestCheckDelegationSyncResolvesPolicyReferences(t *testing.T) {
 	var cfg tdns.Config
-	cfg.DelegationSync.Policies = map[string]tdns.DelegationPolicyConf{
+	cfg.ChildSync.Policies = map[string]tdns.DelegationPolicyConf{
 		"manual": {Bootstrap: tdns.DelegationBootstrapConf{Manual: true}},
 	}
 	cfg.Templates = []tdns.ZoneConf{
@@ -240,7 +239,7 @@ func TestNoViperReadsOfTheDelegationsyncBlockInCLI(t *testing.T) {
 		for i, line := range strings.Split(string(src), "\n") {
 			if pat.MatchString(line) {
 				t.Errorf("%s:%d reads the delegationsync block from viper: %s\n"+
-					"    Use the typed cfg.DelegationSync (config check decodes it with"+
+					"    Use the typed cfg.ChildSync/cfg.ParentSync (config check decodes them with"+
 					" v.Unmarshal) so the check reads the config exactly as the daemon does.",
 					f, i+1, strings.TrimSpace(line))
 			}

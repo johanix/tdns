@@ -273,7 +273,7 @@ func TestProxyKeyStatus(t *testing.T) {
 
 	// Proxy zone, no imr ⇒ update-unsupported message (nothing to publish).
 	zdProxy := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
-	zdProxy.Options = map[ZoneOption]bool{OptDelSyncProxy: true}
+	zdProxy.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
 	msg, err := zdProxy.ProxyKeyStatus(context.Background(), kdb, nil)
 	if err != nil {
 		t.Fatalf("ProxyKeyStatus (proxy, no imr): %v", err)
@@ -386,7 +386,7 @@ func TestProxyKeyPublishBlockInEveryState(t *testing.T) {
 	key := genProxySig0Key(t, kdb, proxyUpdZone)
 
 	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
-	zd.Options = map[ZoneOption]bool{OptDelSyncProxy: true}
+	zd.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
 
 	block, err := zd.proxyKeyPublishBlock(kdb)
 	if err != nil {
@@ -475,7 +475,7 @@ func TestProxyKeyStatusForeignKeyNamesBothKeys(t *testing.T) {
 	// A KEY at the apex whose private half the agent does not hold.
 	foreign, _ := genForeignProxyKey(t)
 	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone()+foreign.String()+"\n")
-	zd.Options = map[ZoneOption]bool{OptDelSyncProxy: true}
+	zd.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
 
 	state, err := zd.proxySig0PublicationState(kdb)
 	if err != nil {
@@ -508,7 +508,7 @@ func TestProxyKeyStatusMessagePerState(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	key := genProxySig0Key(t, kdb, proxyUpdZone)
 	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
-	zd.Options = map[ZoneOption]bool{OptDelSyncProxy: true}
+	zd.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
 
 	for _, tc := range []struct {
 		state   ProxyUpdateState

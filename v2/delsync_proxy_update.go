@@ -170,7 +170,7 @@ func (zd *ZoneData) proxyEnsureSig0Key(kdb *KeyDB) error {
 	if sak != nil && len(sak.Keys) > 0 {
 		return nil
 	}
-	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Child.Update.Keygen.Algorithm, dns.ED25519)
+	alg, err := parseKeygenAlgorithm(ParentSyncConfig().Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		return fmt.Errorf("keygen algorithm: %w", err)
 	}
@@ -321,7 +321,7 @@ func (zd *ZoneData) clearProxyUpdateWarning() {
 // generates a keypair, and only in the waiting state. Every other state
 // reports the absence of a key rather than filling it.
 func (zd *ZoneData) ProxyKeyStatus(ctx context.Context, kdb *KeyDB, imr *Imr) (string, error) {
-	if !zd.Options[OptDelSyncProxy] {
+	if !zd.Options[OptParentSyncProxy] {
 		return "", fmt.Errorf("zone %s does not have the delegation-sync-proxy option", zd.ZoneName)
 	}
 	state, err := zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr)
@@ -571,7 +571,7 @@ func (zd *ZoneData) proxyEnsureParentBootstrap(ctx context.Context) error {
 	if zd.proxySig0ParentBootstrapped {
 		return nil
 	}
-	alg, err := parseKeygenAlgorithm(DelegationSyncConfig().Child.Update.Keygen.Algorithm, dns.ED25519)
+	alg, err := parseKeygenAlgorithm(ParentSyncConfig().Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		return fmt.Errorf("keygen algorithm: %w", err)
 	}

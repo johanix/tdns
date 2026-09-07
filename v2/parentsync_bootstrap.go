@@ -20,7 +20,7 @@ import (
 // UPDATE.
 //
 // Flow:
-//  1. Check HSYNCPARAM parentsync=agent (caller already verified OptDelSyncChild)
+//  1. Check HSYNCPARAM parentsync=agent (caller already verified OptParentSync)
 //  2. Query parent via KeyState EDNS(0) inquiry
 //  3. KeyStateTrusted → done
 //  4. KeyStateUnknown → bootstrap
@@ -195,7 +195,7 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 // (keyName, keyid) to the parent's UPDATE Receiver, found via DSYNC discovery,
 // and returns the KeyState option from the response plus whether that response
 // was authenticated (see keystate_verify.go). A response that cannot be
-// authenticated is an error unless delegationsync.child.update.allow-insecure
+// authenticated is an error unless parentsync.update.allow-insecure
 // is set, in which case it is returned with authenticated=false; a response
 // whose signature is present but wrong is always an error.
 func QueryParentKeyState(ctx context.Context, kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (*edns0.KeyStateOption, bool, error) {
@@ -203,7 +203,7 @@ func QueryParentKeyState(ctx context.Context, kdb *KeyDB, imr *Imr, keyName stri
 	if err != nil {
 		return nil, false, fmt.Errorf("DSYNC lookup failed: %v", err)
 	}
-	allowInsecure := DelegationSyncConfig().Child.Update.AllowInsecure
+	allowInsecure := ParentSyncConfig().Update.AllowInsecure
 	return queryKeyState(ctx, kdb, keyName, keyid, dsyncTarget,
 		kdb.receiverKeyTrust(), imrReceiverKeyFetcher(imr), allowInsecure)
 }

@@ -24,10 +24,10 @@ delegationsync:
 		t.Fatal(err)
 	}
 
-	if err := SetDelegationSyncConfig(DelegationSyncConf{}); err != nil {
+	if err := SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = SetDelegationSyncConfig(DelegationSyncConf{}) })
+	t.Cleanup(func() { _ = SetDelegationSyncConfig(ChildSyncConf{}, ParentSyncConf{}) })
 
 	conf := &Config{}
 	conf.Internal.CfgFile = path
