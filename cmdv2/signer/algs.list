@@ -1,11 +1,11 @@
 # Algorithms tdns-signer links an implementation for.
 #
-# Identical to cmdv2/auth/algs.list, and must stay that way: a bump-on-the-wire
-# signer is the component actually producing the RRSIGs, so any algorithm the
-# authoritative server can be configured to sign with, this must be able to
-# sign with. A shorter list here fails at zone-load time on a policy naming a
-# missing algorithm, which is a confusing way to discover a build-config
-# mismatch.
+# Currently the same selection as cmdv2/auth/algs.list. What matters is not
+# that the two files match, but that this one covers every algorithm a DNSSEC
+# policy on this deployment names: the signer is what actually produces the
+# RRSIGs. A policy naming an algorithm this binary did not link quarantines
+# the zone at load with that algorithm named, so the failure is localised and
+# legible rather than silent.
 #
 # One registry NAME per line (see dnssec-algorithms/registry/registry.go).
 # genalgs resolves each name to its codepoint, caps, package, and lib group,

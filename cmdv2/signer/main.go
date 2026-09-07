@@ -34,8 +34,13 @@ import (
 // which is a zone declared `type: secondary` with the `inline-signing` option:
 // a sanctioned, long-standing mode (see docs/2026-07-25-secondary-zones-
 // immutable.md), not something this app adds. tdns-auth already refreshes from
-// its primary, signs synchronously before publishing, and NOTIFYs its
-// downstreams; the signer needs no new engine.
+// its primary, signs, and NOTIFYs its downstreams; the signer needs no new
+// engine.
+//
+// NOTE on ordering: on a changed refresh the zone is published BEFORE it is
+// re-signed, so a downstream can transfer a not-yet-signed zone during that
+// window. That is tdns#512, a property of every inline-signing secondary
+// rather than of this binary, and #514 is the fix. Nothing here changes it.
 //
 // WHY THIS IS A SEPARATE BINARY AT ALL: Globals.App.Name is what
 // GetDefaultConfigFile derives the config path from, and it is a compile-time

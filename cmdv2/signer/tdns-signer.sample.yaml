@@ -21,9 +21,12 @@
 #     published secondaries
 #
 # The signer holds each zone as `type: secondary` with the `inline-signing`
-# option. It refreshes from the primary, signs the result BEFORE publishing it,
-# and only then NOTIFYs its own downstreams -- so a downstream never pulls an
-# unsigned intermediate state.
+# option: it refreshes from the primary, signs the result, and serves and
+# transfers the signed zone onward.
+#
+# NOTE: on a changed refresh the zone is published before it is re-signed, so a
+# downstream can transfer a not-yet-signed zone during that window. See
+# tdns#512; #514 is the fix. Run a build with #514 if you have downstreams.
 #
 # ---------------------------------------------------------------------------
 # RUNNING ALONGSIDE tdns-auth ON ONE HOST

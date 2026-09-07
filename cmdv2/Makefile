@@ -53,7 +53,7 @@ install: check-root install-dirs
 	$(MAKE) -C ./imr/ install
 	$(MAKE) -C ./dog/ install
 
-# NetBSD binary packages -- four of them, one per component. See
+# NetBSD binary packages -- five of them, one per component. See
 # ../utils/mkpkg.sh for the reasoning and ../utils/Makefile.common for the
 # rules. Each app's "pkg" target builds, installs and packs its own binaries,
 # so this needs root for the same reason "install" does.

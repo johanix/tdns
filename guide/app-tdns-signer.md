@@ -41,9 +41,35 @@ daemons write no pidfile, so NetBSD `rc.subr` identifies a daemon by matching
 `$procname` against the running command. Two instances of one binary are
 indistinguishable to it, and either rc script's `stop` matches both.
 
-Because it is the same program, every `tdns-auth` option works here, and
-`tdns-cli auth ...` manages it (point an `apiservers` entry at its API — see
-[Driving several instances of one daemon](multi-instance-cli.md)).
+Because it is the same program, every `tdns-auth` option works here.
+
+To manage it, use **`tdns-ncli`** with its own `apiservers` entry, so the
+signer is a command word of its own:
+
+```yaml
+apiservers:
+   - name:        tdns-auth          # the authoritative server
+     baseurl:     https://127.0.0.1:8989/api/v1
+     apikey:      ...
+     authmethod:  X-API-Key
+
+   - name:        signer             # this daemon
+     role:        auth
+     baseurl:     https://127.0.0.1:8990/api/v1
+     apikey:      ...
+     authmethod:  X-API-Key
+     config-file: /etc/tdns/tdns-signer.yaml
+```
+
+```bash
+tdns-ncli signer zone list
+tdns-ncli signer keystore dnssec list -z example.com.
+```
+
+Do **not** simply repoint `tdns-cli`'s single `tdns-auth` entry at the signer:
+that is how you drive the wrong daemon without noticing, which is the failure
+[Driving several instances of one daemon](multi-instance-cli.md) exists to
+remove.
 
 ## Configuring a signer zone
 
@@ -77,16 +103,36 @@ ERROR.
 Complete examples: `cmdv2/signer/tdns-signer.sample.yaml` and
 `cmdv2/signer/signer-zones.sample.yaml`.
 
-## Ordering: why a downstream never sees an unsigned zone
+## Ordering, and a window you need to know about
 
-On every refresh the server transfers the zone in, signs it **synchronously**,
-publishes the signed result, and only then sends NOTIFY to `notify:`. The
-signing is not queued behind the publish, so there is no window in which a
-downstream that reacts instantly to the NOTIFY can pull an unsigned or
-partially signed zone.
+On a first load the zone is not advertised as ready until it has been signed,
+so nothing can be pulled before then.
+
+**On every later refresh there is a window during which the zone is published
+but not yet re-signed, and a downstream can transfer it.** This is tdns
+issue [#512][512] — a property of every inline-signing secondary, not of this
+binary — and the fix is [#514][514]. If you run a signer with downstreams,
+run it on a build that carries #514.
+
+The window is proportional to zone size, because the whole zone is re-signed
+after each changed refresh: milliseconds on a small zone, over a minute on a
+100k-name zone. Queries are protected (the responder returns SERVFAIL rather
+than an unsigned answer); transfers are not.
+
+[512]: https://github.com/johanix/tdns/issues/512
+[514]: https://github.com/johanix/tdns/pull/514
 
 The periodic re-signer (`resignerengine.interval`) is separate, and is about
 signature *freshness*, not about new content.
+
+## Do not enable inbound updates on a signer
+
+A signer's content comes from its primary. `StartSigner` is `StartAuth`, so
+the DNS UPDATE handler is running and `allow-updates` on a signer zone would
+be accepted — but it is a second, competing source of content: the next
+refresh overwrites whatever was written, and if the refresh fails the write
+survives as a divergence from the primary that nothing reconciles. The sample
+does not set it; do not add it.
 
 ## Running it beside tdns-auth on one host
 
