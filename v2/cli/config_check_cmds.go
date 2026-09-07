@@ -447,7 +447,14 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 
 	// Agent-only: config that this binary silently ignores, and options the
 	// agent rejects at startup. See config_agent_cmds.go.
-	if role == "agent" {
+	//
+	// effectiveRole, not role: an extra instance's role is its own NAME
+	// ("secagent"), so a raw comparison classifies an agent instance as a
+	// non-agent -- skipping the agent checks and running signing checks that
+	// cannot apply to it. Every behaviour branch below asks the same way.
+	// `role` itself stays the API target, so requests still reach the right
+	// instance (see checkPolicyAlgVsActiveKeys).
+	if effectiveRole(role) == "agent" {
 		checkAgentSpecifics(&cfg, v, rep)
 	}
 
@@ -460,7 +467,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	// would-break-on-reload algorithm change). Handles the offline info-skip
 	// itself. Skipped for the agent, which never signs (SetupZoneSigning
 	// returns early for AppTypeAgent), so no policy can break a reload there.
-	if role != "agent" {
+	if effectiveRole(role) != "agent" {
 		checkPolicyAlgVsActiveKeys(&cfg, v, rep, online, role)
 	}
 
@@ -651,7 +658,7 @@ func checkDnssecPolicies(v *viper.Viper, rep *ccReport, online bool, role string
 	const g = "DNSSEC policies"
 	sub := v.Get("dnssec")
 	if sub == nil {
-		if role == "agent" {
+		if effectiveRole(role) == "agent" {
 			// The agent never signs, so a missing dnssec: block is simply
 			// normal rather than a fallback-to-default situation.
 			rep.info(g, "policies", "no dnssec: block (tdns-agent never signs)")
@@ -939,7 +946,7 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 		// quarantining the zone, so the missing policy is not the problem.
 		if hasSigningOption(eff.OptionsStrs) {
 			switch {
-			case role == "agent":
+			case effectiveRole(role) == "agent":
 				rep.warn(g, zname, "online-signing/inline-signing is ignored on tdns-agent — the agent never signs",
 					"drop the option, or host the zone on tdns-auth if it needs signing")
 			case lc(eff.DnssecPolicy) == "":
@@ -963,7 +970,7 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 		case "primary":
 			// tdns-agent refuses primary zones outright (parseconfig.go): the
 			// zone is put in ConfigError state at startup, so predict it here.
-			if role == "agent" {
+			if effectiveRole(role) == "agent" {
 				rep.fail(g, zname, "tdns-agent does not serve primary zones — this zone will be quarantined at startup",
 					"make it a secondary, or host it on tdns-auth (or tdns-mpagent for multi-provider roles)")
 				continue
@@ -971,7 +978,7 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 			checkPrimaryZone(rep, g, zname, eff)
 		case "":
 			rep.warn(g, zname, "no zone type (and none inherited from a template)", "set type: primary or secondary")
-			if role == "agent" {
+			if effectiveRole(role) == "agent" {
 				// Don't fall through to the primary-zone checks on the agent;
 				// an untyped agent zone is never a primary.
 				continue

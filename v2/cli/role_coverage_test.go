@@ -248,3 +248,87 @@ func TestConfigCheckHelpNamesNoBogusPath(t *testing.T) {
 		}
 	}
 }
+
+// An instance whose flavour is "agent" must be treated as an agent by every
+// behaviour branch in config check, not just by the ones that happen to ask
+// nicely. Its command role is its own NAME ("secagent"), so a raw
+// `role == "agent"` classifies it as a non-agent — skipping checkAgentSpecifics
+// and the primary-zone refusal, and running signing checks that cannot apply.
+// (CodeRabbit, PR #544 round 2.)
+//
+// Note no agent instance can be WIRED yet — knownInstanceRoles only carries
+// "auth" — so this is latent rather than live. It is pinned now because the
+// day "agent" is added there, six silent misclassifications would arrive with
+// it.
+func TestAgentFlavouredInstanceIsClassifiedAsAnAgent(t *testing.T) {
+	saved := apiConfig
+	t.Cleanup(func() { apiConfig = saved })
+
+	apiConfig = &CliConf{ApiServers: []ApiDetails{
+		{Name: "tdns-agent", ConfigFile: "/etc/tdns/tdns-agent.yaml"},
+		{Name: "secagent", Role: "agent", ConfigFile: "/etc/tdns/sec-tdns-agent.yaml"},
+		{Name: "sectdns", Role: "auth"},
+	}}
+
+	if got := effectiveRole("secagent"); got != "agent" {
+		t.Errorf("effectiveRole(secagent) = %q, want \"agent\" — every agent-only "+
+			"branch in config check keys on this", got)
+	}
+	if got := appTypeForRole("secagent"); got != tdns.AppTypeAgent {
+		t.Errorf("appTypeForRole(secagent) = %v, want AppTypeAgent (wrong sections validated)", got)
+	}
+	// /config/paths is auth-only; an agent instance must not be probed for it,
+	// or a 404 reads as "the daemon is down".
+	if roleHasConfigPaths("secagent") {
+		t.Error("secagent: /config/paths discovery enabled, but only tdns-auth serves it")
+	}
+	if got := defaultCfgFileForRole("secagent"); got != "/etc/tdns/sec-tdns-agent.yaml" {
+		t.Errorf("defaultCfgFileForRole(secagent) = %q, want the instance's own file", got)
+	}
+	// And an auth instance is still an auth instance.
+	if got := effectiveRole("sectdns"); got != "auth" {
+		t.Errorf("effectiveRole(sectdns) = %q, want \"auth\"", got)
+	}
+	// Canonical roles unchanged.
+	for _, r := range []string{"auth", "agent", "imr"} {
+		if got := effectiveRole(r); got != r {
+			t.Errorf("effectiveRole(%q) = %q, want it unchanged", r, got)
+		}
+	}
+}
+
+// Guard against reintroducing a raw role comparison in config check. Same
+// reasoning as TestNoHardcodedAuthRoleRemains: it compiles, it passes every
+// test of the branch it sits in, and it is wrong only for an instance.
+func TestNoRawAgentRoleComparisonInConfigCheck(t *testing.T) {
+	const f = "config_check_cmds.go"
+	src, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, f, src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		bin, ok := n.(*ast.BinaryExpr)
+		if !ok || (bin.Op != token.EQL && bin.Op != token.NEQ) {
+			return true
+		}
+		lhs, ok := bin.X.(*ast.Ident)
+		if !ok || lhs.Name != "role" {
+			return true
+		}
+		lit, ok := bin.Y.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		t.Errorf(`%s:%d compares the raw role against %s.
+
+Use effectiveRole(role) for behaviour branches: an extra instance's role is its
+own name, so a raw comparison misclassifies it. Keep the raw role only where it
+identifies the API target.`, f, fset.Position(bin.Pos()).Line, lit.Value)
+		return true
+	})
+}
