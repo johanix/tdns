@@ -64,9 +64,12 @@ var roleToClientKey = map[string]string{}
 // same role override earlier ones — this is how tdns-mp overrides the
 // "agent" → "tdns-agent" default with "agent" → "tdns-mpagent".
 //
-// Safe only from init() (map is not concurrency-safe; init ordering
-// inside a package is deterministic, across imported packages it is
-// topological and thus deterministic for override purposes).
+// The map is not concurrency-safe, so this must be called before any
+// goroutine can read it. Two callers qualify: package init() (init ordering
+// inside a package is deterministic, and across imported packages topological,
+// which is what makes downstream overrides work), and WireInstanceTrees during
+// Execute, before cobra dispatches anything. Do not call it from a running
+// command.
 func RegisterRole(role, clientKey string) {
 	roleToClientKey[role] = clientKey
 }

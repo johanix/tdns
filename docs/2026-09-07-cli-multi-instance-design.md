@@ -1,7 +1,7 @@
 # Addressing several instances of one daemon from tdns-cli
 
 **Date:** 2026-09-07
-**Status:** phases 1 and 2 implemented on `feature/cli-multi-instance`
+**Status:** phases 1 and 2 implemented on `feature/multi-instance-cli`
 ## The problem
 
 A host can run **two independent `tdns-auth` instances**, responsible for

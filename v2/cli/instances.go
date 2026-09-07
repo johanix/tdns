@@ -99,6 +99,9 @@ func EarlyApiServers(cfgFile string) []ApiDetails {
 // entry should cost that entry's subcommand, not the whole CLI.
 func WireInstanceTrees(root *cobra.Command, entries []ApiDetails) []string {
 	var warnings []string
+	// Instance names wired by THIS call, so a duplicate can be reported as the
+	// duplicate it is rather than as a built-in-role collision.
+	wired := map[string]bool{}
 
 	for _, e := range entries {
 		if e.Role == "" {
@@ -119,9 +122,18 @@ func WireInstanceTrees(root *cobra.Command, entries []ApiDetails) []string {
 		// canonical tree, which is the exact failure this feature exists to
 		// prevent. Refuse it.
 		if _, taken := roleToClientKey[e.Name]; taken {
+			// Two different collisions land here and the operator needs to be
+			// told which: a built-in role (auth/agent/imr), or an earlier
+			// apiservers entry that already claimed this name. Reporting the
+			// second as "a built-in role" sends them looking for a conflict
+			// that is not there.
+			what := "a built-in role"
+			if wired[e.Name] {
+				what = "an earlier apiservers entry with the same name"
+			}
 			warnings = append(warnings, fmt.Sprintf(
-				"apiservers entry %q: name collides with a built-in role -- entry ignored (choose another name)",
-				e.Name))
+				"apiservers entry %q: name collides with %s -- entry ignored (choose another name)",
+				e.Name, what))
 			continue
 		}
 		if existing := findChild(root, e.Name); existing != nil {
@@ -149,6 +161,7 @@ func WireInstanceTrees(root *cobra.Command, entries []ApiDetails) []string {
 		// The instance is addressed by its own name at both levels: the command
 		// word IS the role IS the clientKey. One name for the operator to know.
 		RegisterRole(e.Name, e.Name)
+		wired[e.Name] = true
 		root.AddCommand(newTree(e.Name, e.Name))
 	}
 
