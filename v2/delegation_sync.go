@@ -302,24 +302,41 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		_, keyrrexist = owner.RRtypes.Get(dns.TypeKEY)
 	}
 
-	// 1. May this server put anything of its own into the zone at all?
+	// 1. Did the zone ask for this key at all?
 	//
-	// This used to ask `allow-updates`, and that was the wrong question (#538).
-	// `allow-updates` gates inbound RFC 2136 DDNS arriving from the network;
-	// what happens below is an INTERNAL publish -- PublishKeyRRs posts
-	// UpdateRequest{InternalUpdate: true}, which ZoneUpdater admits regardless
-	// of that option, exactly as it admits the DSYNC RRset that PublishDsyncRRs
-	// publishes a few lines earlier in SetupZoneSync with no such gate.
+	// The gate is the delegation-sync option that makes the key necessary, and
+	// each of the two callers already tests it:
 	//
-	// The consequence was a delegation-sync parent that advertised a DSYNC
-	// UPDATE target and then never generated the SIG(0) key that target names,
-	// so its KeyState responses went out unsigned. `updatepolicy.zone.type:
-	// none` -- the correct posture for such a parent -- clears allow-updates,
-	// so refusing inbound DDNS silently disabled the parent's own key.
+	//   - childsync (parent side): the same option that permits the DSYNC
+	//     RRset advertising this very target, published from the same block of
+	//     SetupZoneSync a few lines earlier. One option, both publications.
+	//   - parentsync (child side): the option that permits the apex KEY the
+	//     bootstrap ceremony carries (DelegationSyncSetup's first line).
 	//
-	// What actually governs an internal publish is whether this server
-	// originates the zone's content; a tdns-auth secondary must serve what it
-	// received, unmodified. dont-publish-key is the per-zone opt-out, below.
+	// It used to ask `allow-updates` instead, and that was the wrong question
+	// (#538): `allow-updates` governs inbound RFC 2136 DDNS from the network,
+	// whereas this is an INTERNAL publish -- PublishKeyRRs posts
+	// UpdateRequest{InternalUpdate: true}, which ZoneUpdater admits regardless.
+	// It was a second, unrelated gate on one of the two publications inside the
+	// childsync block, so a parent published a DSYNC record naming an UPDATE
+	// target and then never generated the key that target names. Worse,
+	// `updatepolicy.zone.type: none` -- the correct posture for such a parent --
+	// clears allow-updates, so refusing inbound DDNS disabled the parent's own
+	// key. Restating the callers' gate here says what actually permits the
+	// publish, and cannot be switched off by an unrelated policy decision.
+	if !zd.Options[OptDelSyncParent] && !zd.Options[OptDelSyncChild] {
+		lgDns.Warn("Sig0KeyPreparation: zone has neither childsync nor parentsync, no SIG(0) key will be generated or published",
+			"zone", zd.ZoneName, "name", name, "keyrrexist", keyrrexist)
+		return nil
+	}
+
+	// 2. Origination backstop, and NOT redundant with the gate above.
+	// normalizeOptionsForRole strips childsync from a tdns-auth secondary, so
+	// the parent side is covered by the option alone -- but parentsync is
+	// deliberately NOT in originationOptions, and the justification recorded
+	// there is precisely the allow-updates gate removed above. Without this, a
+	// tdns-auth secondary carrying parentsync would mint a local SIG(0) key and
+	// publish it into a zone whose content belongs to upstream.
 	if !zoneMayOriginateContent(zd) {
 		lgDns.Warn("Sig0KeyPreparation: zone may not originate content, no SIG(0) key will be generated or published",
 			"zone", zd.ZoneName, "name", name, "zonetype", ZoneTypeToString[zd.ZoneType], "keyrrexist", keyrrexist)
@@ -335,7 +352,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		lgDns.Info("Sig0KeyPreparation: verified published KEY RRset", "name", name)
 	}
 
-	// 2. The per-zone opt-out for this specific publish. Checked again inside
+	// 3. The per-zone opt-out for this specific publish. Checked again inside
 	// PublishKeyRRs, which refuses outright; saying so here keeps the reason
 	// visible at default log level rather than only as a Debug non-event.
 	if zd.Options[OptDontPublishKey] {
@@ -344,7 +361,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		return nil
 	}
 
-	// 3. Publication allowed, but there is no KEY RRset published.
+	// 4. Publication allowed, but there is no KEY RRset published.
 	if !keyrrexist {
 		lgDns.Debug("Sig0KeyPreparation: fetching the private SIG(0) key", "name", name)
 		sak, err := kdb.GetSig0Keys(name, Sig0StateActive)

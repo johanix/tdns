@@ -34,8 +34,17 @@ import (
 //
 // Deliberately NOT here: inline-signing (the sanctioned exception), the catalog
 // options (consumption provisions OTHER zones and is the whole point of RFC 9432),
-// delegation-sync-child (its publishing paths are allow-updates-gated and Fix D
-// backstops them), and every serving-behaviour option.
+// delegation-sync-child, and every serving-behaviour option.
+//
+// delegation-sync-child (parentsync) deserves a second look. Its exclusion was
+// justified by "its publishing paths are allow-updates-gated and Fix D backstops
+// them", and the first half of that stopped being true with #538: the apex KEY
+// publication in Sig0KeyPreparation is now gated on childsync/parentsync plus an
+// explicit zoneMayOriginateContent backstop, not on allow-updates. The backstop
+// holds, so nothing is open today -- but a tdns-auth secondary doing CHILD-side
+// delegation sync is as incoherent as one doing parent-side (its delegation data
+// came from upstream, and a locally minted SIG(0) key is not in what it serves),
+// so the option arguably belongs in this list beside childsync.
 var originationOptions = []ZoneOption{
 	OptAllowUpdates,
 	OptAllowChildUpdates,

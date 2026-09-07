@@ -424,9 +424,12 @@ were re-verified:
   inbound RFC 2136 DDNS, and the publish here is `InternalUpdate`, which the
   applier admits regardless — and it broke the ordinary case it was never meant
   to touch: a delegation-sync PRIMARY that refuses inbound DDNS advertised a
-  DSYNC UPDATE target and never generated the key that target names. It is now
-  `zoneMayOriginateContent`, i.e. the same predicate as Fix D, which is a
-  *stronger* statement of what this bullet needs than the option was;
+  DSYNC UPDATE target and never generated the key that target names. The gate is
+  now the delegation-sync option that asks for the key — `childsync` on the
+  parent side (the same option that permits the DSYNC RRset naming the target),
+  `parentsync` on the child side — which is what both callers already test, plus
+  `zoneMayOriginateContent` as an explicit backstop. **That backstop is what this
+  bullet now rests on**, since the option half is no longer `allow-updates`;
 - child CSYNC publication (`SyncZoneDelegationViaNotify`) is still gated on
   `Options[OptAllowUpdates]` ([delegation_sync.go](../v2/delegation_sync.go)).
   Same category error as the KEY gate above and not yet changed: on a secondary

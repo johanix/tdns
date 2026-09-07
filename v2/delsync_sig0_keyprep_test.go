@@ -32,7 +32,7 @@ func newSig0KeyPrepZone(t *testing.T, zonestr string, ztype ZoneType) (*ZoneData
 	withAppType(t, AppTypeAuth)
 	zd := testZone(t, "example.", zonestr)
 	zd.ZoneType = ztype
-	zd.Options = map[ZoneOption]bool{}
+	zd.Options = map[ZoneOption]bool{OptDelSyncParent: true}
 	kdb := newTestKeyDB(t)
 	q := make(chan UpdateRequest, 4)
 	kdb.UpdateQ = q
@@ -92,8 +92,43 @@ func TestSig0KeyPreparationDoesNotRequireAllowUpdates(t *testing.T) {
 	}
 }
 
+// A zone with neither childsync nor parentsync asked for no key, and the
+// callers do not call this for one. Restated here so the function cannot be
+// wired into publishing for a zone that wants neither.
+func TestSig0KeyPreparationRequiresADelegationSyncOption(t *testing.T) {
+	zd, kdb, q := newSig0KeyPrepZone(t, sig0KeyPrepZone, Primary)
+	zd.Options = map[ZoneOption]bool{}
+
+	if err := zd.Sig0KeyPreparation("updates.example.", dns.ED25519, kdb); err != nil {
+		t.Fatalf("Sig0KeyPreparation: %v", err)
+	}
+	sak, err := kdb.GetSig0Keys("updates.example.", Sig0StateActive)
+	if err != nil {
+		t.Fatalf("GetSig0Keys: %v", err)
+	}
+	if len(sak.Keys) != 0 {
+		t.Errorf("no delegation-sync option: %d SIG(0) keys generated, want 0", len(sak.Keys))
+	}
+	if rrs := keyRRsFor(q, "updates.example."); len(rrs) != 0 {
+		t.Errorf("no delegation-sync option: %d KEY RRs posted, want 0", len(rrs))
+	}
+}
+
+// The child side reaches the same function with parentsync and the zone apex.
+func TestSig0KeyPreparationParentsyncPublishesApexKey(t *testing.T) {
+	zd, kdb, q := newSig0KeyPrepZone(t, sig0KeyPrepZone, Primary)
+	zd.Options = map[ZoneOption]bool{OptDelSyncChild: true}
+
+	if err := zd.Sig0KeyPreparation("example.", dns.ED25519, kdb); err != nil {
+		t.Fatalf("Sig0KeyPreparation: %v", err)
+	}
+	if rrs := keyRRsFor(q, "example."); len(rrs) != 1 {
+		t.Errorf("parentsync: %d apex KEY RRs posted, want 1", len(rrs))
+	}
+}
+
 // dont-publish-key is the opt-out that survives: it stops the publish, and it
-// is the ONLY thing that does on a primary.
+// is the ONLY thing that does on a primary that asked for a key.
 func TestSig0KeyPreparationDontPublishKeyStillOptsOut(t *testing.T) {
 	zd, kdb, q := newSig0KeyPrepZone(t, sig0KeyPrepZone, Primary)
 	zd.SetOption(OptDontPublishKey, true)
@@ -112,6 +147,11 @@ func TestSig0KeyPreparationDontPublishKeyStillOptsOut(t *testing.T) {
 // it does not own.
 func TestSig0KeyPreparationSecondaryDoesNotOriginate(t *testing.T) {
 	zd, kdb, q := newSig0KeyPrepZone(t, sig0KeyPrepZone, Secondary)
+	// parentsync, not childsync: childsync is stripped from a tdns-auth
+	// secondary by normalizeOptionsForRole, so the parent side never reaches
+	// here. parentsync is NOT stripped, which is exactly the case this gate
+	// has to hold on its own.
+	zd.Options = map[ZoneOption]bool{OptDelSyncChild: true}
 
 	if err := zd.Sig0KeyPreparation("updates.example.", dns.ED25519, kdb); err != nil {
 		t.Fatalf("Sig0KeyPreparation: %v", err)
