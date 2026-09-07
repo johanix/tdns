@@ -181,11 +181,21 @@ it should. Only raise it on a daemon whose listen addresses are its own.
 
 ## Keys and rollovers
 
-The signer holds the DNSSEC keys, so the keystore, the rollover engine and
-`tdns-cli ... keystore` / `auto-rollover` all act on the signer, not on the
-primary. See [the keystore guide](keystore.md) and
+The signer holds the DNSSEC keys, so the keystore and the rollover engine act
+on the signer, not on the primary — and so must the CLI. Using the `apiservers`
+entry from above:
+
+```bash
+tdns-ncli signer keystore dnssec list -z example.com.
+tdns-ncli signer zone dnssec auto-rollover status -z example.com.
+```
+
+See [the keystore guide](keystore.md) and
 [Automatic DNSSEC Rollovers](key-rollover.md); nothing about them is special
-here, beyond remembering which daemon to point the CLI at.
+here, beyond addressing the signer rather than the primary. The same commands
+under `tdns-cli auth ...` read the *authoritative* server's keystore, because
+that is where `tdns-cli`'s single `tdns-auth` entry points — the trap the
+management section above already warns about.
 
 The one thing worth planning: a KSK rollover involves the parent zone, and the
 signer is the thing that knows the keys. If you use delegation sync, configure
