@@ -700,6 +700,10 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 			}
 			// Only the DS at a delegation point; see SignZone.
 			if isDelegation && rrt != dns.TypeDS {
+				if rrt == dns.TypeKEY {
+					zd.deleteChildKeyAtCutLocked(name)
+					continue
+				}
 				zd.stripRRSIGsLocked(name, rrt, owner.RRtypes.GetOnlyRRSet(rrt))
 				continue
 			}
@@ -943,11 +947,21 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			if managesZonemd && rrt == dns.TypeZONEMD && core.EqualNames(name, zd.ZoneName) {
 				continue
 			}
-			// At a delegation point the DS is the only thing that is ours; see
-			// signableLocked. Strip rather than skip, so a zone an older build
-			// signed heals on its next pass instead of carrying those
-			// signatures until it is loaded from source again.
+			// At a delegation point the DS is the only thing that is ours.
+			// This is signableLocked's third clause, inlined: the owner-level
+			// occluded skip above has already settled the other two for this
+			// name, and asking the predicate per RRtype would walk the labels
+			// to the apex again for every type in the zone. The rule is stated
+			// once, there.
+			//
+			// Strip rather than skip, so a zone an older build signed heals on
+			// its next pass instead of carrying those signatures until it is
+			// loaded from source again.
 			if isDelegation && rrt != dns.TypeDS {
+				if rrt == dns.TypeKEY {
+					zd.deleteChildKeyAtCutLocked(name)
+					continue
+				}
 				zd.stripRRSIGsLocked(name, rrt, rrset)
 				continue
 			}
@@ -1160,6 +1174,31 @@ func (zd *ZoneData) stripOccludedRRSIGsLocked(name string, owner *OwnerData) int
 			"zone", zd.ZoneName, "name", name, "count", removed)
 	}
 	return removed
+}
+
+// deleteChildKeyAtCutLocked removes a KEY RRset from a delegation point.
+//
+// Every other kind of data that is not ours is KEPT and left unsigned -- an
+// occluded name is still carried in a transfer (#549), and glue at a cut keeps
+// its records and loses only its signature. Key material is the one exception,
+// and deliberately so: a child's SIG(0) KEY belongs in the truststore, its home
+// in the parent is a database table and never the zone, and "published but
+// unsigned" is not an acceptable resting state for it. So it goes, wherever it
+// came from -- an older build, a leaked write, or an update that added the KEY
+// before the NS that turned the name into a cut.
+//
+// Only AT the cut, which is the child's apex and where a child's SIG(0) key
+// would land. A KEY deeper inside the child's namespace is ordinary occluded
+// data and is left alone, unsigned, like everything else down there.
+func (zd *ZoneData) deleteChildKeyAtCutLocked(name string) {
+	if od := zd.stagedOwner(name); od == nil {
+		return
+	} else if _, has := od.RRtypes.Get(dns.TypeKEY); !has {
+		return
+	}
+	lgSigner.Warn("removing a KEY published at a delegation point; a child's key material belongs in the truststore, not in this zone",
+		"zone", zd.ZoneName, "name", name)
+	zd.stageDeleteLocked(name, dns.TypeKEY)
 }
 
 // stripRRSIGsLocked drops the RRSIGs from one RRset and stages it, returning

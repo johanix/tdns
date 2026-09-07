@@ -756,6 +756,11 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 	}()
 	zd.ensureWorkingSet()
 
+	// A CSYNC/DSYNC-driven child update can create or remove a delegation, and
+	// the names under it are not in the update -- same reconciliation the zone
+	// path needs, for the same reason (#550).
+	childNsBefore := map[string]bool{}
+
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
@@ -766,23 +771,18 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 		rrcopy.Header().Ttl = zd.UpdatePolicy.Child.TTL
 		rrcopy.Header().Class = dns.ClassINET
 
-		// A child's KEY is truststore material. It goes to
-		// ApplyChildUpdateToDB, and it is NEVER a record of the parent zone --
-		// not signed, and not unsigned either.
-		//
-		// Two things that look like they already prevent this do not. The
-		// classifier routes such an update away from here (childKeyRR in
-		// updateresponder.go), but that is the door, not the applier. And
-		// updatepolicy.child MUST list KEY or no child could bootstrap a
-		// SIG(0) key at all, so the allowlist below is the one filter that
-		// cannot be the one saying no -- which is exactly how a KEY got into
-		// a parent zone once already.
-		if rrtype == dns.TypeKEY {
-			lg.Warn("ApplyChildUpdateToZoneData: refusing to write a child KEY into zone content; it belongs in the truststore",
-				"zone", zd.ZoneName, "owner", ownerName)
-			continue
+		if _, seen := childNsBefore[ownerName]; !seen {
+			childNsBefore[ownerName] = zd.ownerIsDelegationLocked(ownerName)
 		}
 
+		// No KEY guard here on purpose. ZoneUpdater's CHILD-UPDATE case
+		// already refuses key material, loudly and for every delegation
+		// backend, and this applier's only caller is the direct backend --
+		// which runs downstream of it. Adding a second rule at one backend is
+		// the per-backend enforcement that guard's own comment exists to
+		// argue against. The reconcile below still deletes a KEY at a cut,
+		// so a leak that predates the guard is cleaned up rather than kept.
+		//
 		// First check whether this update is allowed by the update-policy.
 		if _, ok := zd.UpdatePolicy.Child.RRtypes[rrtype]; !ok {
 			lg.Error("ApplyChildUpdateToZoneData: RR type denied by policy", "rrtype", rrtypestr)
@@ -894,6 +894,8 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 		continue
 	}
 
+	zd.reconcileDelegationChangesLocked(childNsBefore, dak)
+
 	lg.Debug("ApplyChildUpdateToZoneData done", "updated", updated)
 
 	return updated, nil
@@ -981,15 +983,30 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 		}
 
 		// A KEY at a delegation point is a child's, and a child's KEY is never
-		// zone content. The classifier sends these to the truststore path
-		// before they reach here (childKeyRR in updateresponder.go); this is
-		// the applier refusing the same thing, because the road it guards --
-		// updatepolicy.zone permitting the signer and the KEY type -- is one
-		// the classifier is the only thing standing in. The zone's OWN KEY,
-		// at the apex or at any name that is not a cut, is ordinary content
-		// and is untouched by this.
-		if rrtype == dns.TypeKEY && zd.ownerIsDelegationLocked(ownerName) {
-			lg.Warn("ApplyZoneUpdateToZoneData: refusing to write a KEY at a delegation point into zone content; a child's KEY belongs in the truststore",
+		// zone content. Unlike CHILD-UPDATE, the ZONE-UPDATE path has no
+		// choke-point guard in ZoneUpdater -- and two of this applier's three
+		// callers never pass through ZoneUpdater at all. zone_delta_replay
+		// re-applies persisted deltas with InternalUpdate set, deliberately
+		// skipping the update-policy re-check, so anything that once reached a
+		// delta replays past every check upstream of here. This is the last
+		// point before the write, which is the only place that covers it.
+		//
+		// ADDS only. A delete must be able to take a KEY back out -- one that
+		// leaked in before this rule existed, or through the ordering below --
+		// and refusing the delete along with the add is how a leak becomes
+		// permanent.
+		//
+		// And this test is deliberately not the whole rule: it asks whether
+		// the name is a cut ALREADY, so an update that writes the KEY before
+		// the NS that makes it one walks straight past. That is the same trap
+		// signableLocked documents for NS. What closes it is removal rather
+		// than refusal -- reconcileDelegationChangesLocked below, and the
+		// signing passes, delete a KEY found at a cut however it arrived.
+		//
+		// The zone's OWN KEY, at the apex or at any name that is not a cut, is
+		// ordinary content and is untouched by this.
+		if rrtype == dns.TypeKEY && class == dns.ClassINET && zd.ownerIsDelegationLocked(ownerName) {
+			lg.Warn("ApplyZoneUpdateToZoneData: refusing to add a KEY at a delegation point as zone content; a child's KEY belongs in the truststore",
 				"zone", zd.ZoneName, "owner", ownerName)
 			continue
 		}
@@ -1302,8 +1319,16 @@ func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, d
 			if od == nil {
 				continue
 			}
+			isCut := zd.ownerIsDelegationLocked(name)
 			for _, rrt := range od.RRtypes.Keys() {
 				if rrt == dns.TypeRRSIG {
+					continue
+				}
+				// Key material at a cut is removed, not merely unsigned. This
+				// is what catches a KEY added before the NS that made the name
+				// a delegation, which the applier's own test above cannot see.
+				if rrt == dns.TypeKEY && isCut {
+					zd.deleteChildKeyAtCutLocked(name)
 					continue
 				}
 				rrset := od.RRtypes.GetOnlyRRSet(rrt)
