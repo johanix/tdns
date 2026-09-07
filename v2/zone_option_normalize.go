@@ -20,10 +20,20 @@ import (
 //
 //   - allow-updates / allow-child-updates: DDNS and child-delegation writes.
 //   - add-transport-signal: synthesizes SVCB/TSYNC signal records into the zone.
-//   - delegation-sync-parent: publishes the _dsync DSYNC RRset (and, as an
-//     intended consequence, gates KeyState EDNS(0) processing — a secondary can
-//     never hold the receiver SIG(0) key, so leaving it on would emit UNSIGNED
-//     KeyState responses, worse than not answering).
+//   - childsync: publishes the _dsync DSYNC RRset and the receiver SIG(0) key it
+//     advertises (and, as an intended consequence, gates KeyState EDNS(0)
+//     processing — a secondary can never hold that receiver key, so leaving it on
+//     would emit UNSIGNED KeyState responses, worse than not answering).
+//   - parentsync: publishes the zone's own apex SIG(0) KEY (Sig0KeyPreparation
+//     via DelegationSyncSetup) and then tells the parent what this zone's
+//     delegation should be. Added 2026-09-07 with #538. It was excluded before,
+//     justified by "its publishing paths are allow-updates-gated and Fix D
+//     backstops them" — and the first half of that stopped being true when #538
+//     removed that gate as the wrong question. The deeper reason is the same as
+//     childsync's: a tdns-auth secondary doing child-side delegation sync is
+//     incoherent. Its delegation data came from upstream, a locally minted SIG(0)
+//     key is not in what it serves and cannot be, and telling the parent to change
+//     a delegation it does not own is not a secondary's business.
 //   - online-signing: on tdns-auth the only keys available are LOCAL ones, and
 //     signing upstream content with local keys is unsafe and plain wrong — it
 //     unlocks whole-zone re-signing via the ResignQ path, standby-key minting,
@@ -34,17 +44,8 @@ import (
 //
 // Deliberately NOT here: inline-signing (the sanctioned exception), the catalog
 // options (consumption provisions OTHER zones and is the whole point of RFC 9432),
-// delegation-sync-child, and every serving-behaviour option.
-//
-// delegation-sync-child (parentsync) deserves a second look. Its exclusion was
-// justified by "its publishing paths are allow-updates-gated and Fix D backstops
-// them", and the first half of that stopped being true with #538: the apex KEY
-// publication in Sig0KeyPreparation is now gated on childsync/parentsync plus an
-// explicit zoneMayOriginateContent backstop, not on allow-updates. The backstop
-// holds, so nothing is open today -- but a tdns-auth secondary doing CHILD-side
-// delegation sync is as incoherent as one doing parent-side (its delegation data
-// came from upstream, and a locally minted SIG(0) key is not in what it serves),
-// so the option arguably belongs in this list beside childsync.
+// parentsync-proxy (an AGENT secondary's whole job, and off tdns-auth this
+// function is a no-op anyway), and every serving-behaviour option.
 var originationOptions = []ZoneOption{
 	OptAllowUpdates,
 	OptAllowChildUpdates,
@@ -56,6 +57,7 @@ var originationOptions = []ZoneOption{
 	OptAllowApiUpdates,
 	OptAddTransportSignal,
 	OptDelSyncParent,
+	OptDelSyncChild,
 	OptOnlineSigning,
 	// publish-zonemd writes a locally computed record into the zone. On a
 	// secondary that mirrors upstream content that record is ours, not

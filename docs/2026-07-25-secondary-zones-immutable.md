@@ -405,9 +405,22 @@ edge-signer future this deliberately does not foreclose.
 
 ## 4. Option classification
 
-**Turn OFF for a non-inline-signing tdns-auth secondary (origination) — five:**
+**Turn OFF for a non-inline-signing tdns-auth secondary (origination) — six:**
 `allow-updates`, `allow-child-updates`, `add-transport-signal`,
-**`delegation-sync-parent`**, **`online-signing`** (rev 2.1).
+**`childsync`**, **`parentsync`** (rev 2.3), **`online-signing`** (rev 2.1).
+(`allow-api-updates` and `publish-zonemd` joined the list in the code after this
+section was written; see `originationOptions` for the current set.)
+
+**`parentsync` (rev 2.3, 2026-09-07, #538).** Rev 2 excluded it, on the grounds
+that "its publishing paths are `allow-updates`-gated and Fix D backstops them".
+#538 removed that gate as the wrong question — see the KEY-publication bullet
+below — so the first half no longer held. It is included now for the same reason
+`childsync` is: a tdns-auth secondary doing CHILD-side delegation sync is
+incoherent. Its delegation data came from upstream, a locally minted SIG(0) key
+is not in what it serves and cannot be, and telling the parent to change a
+delegation it does not own is not a secondary's business. `parentsync-proxy` is
+untouched — it is an agent secondary's whole job, and normalization is a no-op
+off tdns-auth.
 
 **`delegation-sync-parent` (rev 2 — reversed from rev 1).** Rev 1 excluded it,
 reasoning that every delsync path that publishes into the zone is itself gated on
@@ -428,13 +441,14 @@ were re-verified:
   now the delegation-sync option that asks for the key — `childsync` on the
   parent side (the same option that permits the DSYNC RRset naming the target),
   `parentsync` on the child side — which is what both callers already test, plus
-  `zoneMayOriginateContent` as an explicit backstop. **That backstop is what this
-  bullet now rests on**, since the option half is no longer `allow-updates`;
+  `zoneMayOriginateContent` as an explicit backstop. Both of those options are
+  now stripped from a tdns-auth secondary by `normalizeOptionsForRole`, so this
+  bullet holds on the option alone and the backstop is genuine defence in depth;
 - child CSYNC publication (`SyncZoneDelegationViaNotify`) is still gated on
   `Options[OptAllowUpdates]` ([delegation_sync.go](../v2/delegation_sync.go)).
-  Same category error as the KEY gate above and not yet changed: on a secondary
-  the conclusion holds either way, but on a primary that refuses inbound DDNS
-  the CSYNC is not published while the NOTIFY(CSYNC) is still sent;
+  Same category error as the KEY gate above and not yet changed. On a secondary
+  the conclusion now holds via `parentsync` regardless; on a primary that refuses
+  inbound DDNS the CSYNC is not published while the NOTIFY(CSYNC) is still sent;
 - parent-side child-delegation apply goes through the CHILD-UPDATE path, gated on
   `allow-child-updates` and enforced at the applier;
 - CDS via `PublishCdsRRs` bypasses `allow-updates` but is a **no-op without local
