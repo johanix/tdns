@@ -837,24 +837,20 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 //     which is either read as a no-op -- defeating the
 //     force, the one remedy for a wedged downstream --
 //     or applied as a zone consisting of one record.
-//   - !signsItsOwnContent()  the same boundary §5 draws for onward relay,
-//     applied to asking rather than relaying. A signing
-//     secondary's baseline is its OWN signatures, so a
-//     delta computed against the primary's copy cannot
-//     fit: the delete section names RRSIGs we do not
-//     hold, or replaces an RRset without re-signing it.
-//     The apply refuses and we AXFR -- correctly, but
-//     only after a round trip that could not have
-//     worked, and default-on means every existing
-//     inline-signing secondary pays it on every refresh
-//     after an upgrade. Deltas onto re-signed data are
-//     the staging variant §5 leaves to PR-2.
+//
+// A signing secondary is NO LONGER excluded here. The exclusion existed
+// because a delta computed against the primary's copy cannot be applied
+// verbatim onto re-signed data -- the delete section names RRSIGs we do not
+// hold. What removes it is that the apply no longer works that way: the delta
+// is staged and the publish re-signs exactly the owners it touched
+// (wsSignOwners = new_zd.ixfrTouched, zone_mutation.go), and restitchNsecLocked
+// repairs the chain around those same names. The signatures in the delta are
+// never adopted; ours are computed from what we are about to serve.
 func (zd *ZoneData) shouldRequestIxfr(force bool) bool {
 	return zd.requestIxfr() &&
 		zd.IncomingSerial != 0 &&
 		zd.publishedSnapshot() != nil &&
-		!force &&
-		!zd.signsItsOwnContent()
+		!force
 }
 
 // transferFromUpstream is one upstream's worth of transfer: a delta when the

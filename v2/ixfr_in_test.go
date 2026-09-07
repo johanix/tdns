@@ -1360,10 +1360,14 @@ func TestShouldRequestIxfr(t *testing.T) {
 		{"no serial to ask from",
 			func(z *ZoneData) { z.IncomingSerial = 0 }, false, false},
 		{"forced retransfer wants the whole zone", nil, true, false},
-		{"inline-signing: our baseline is our own signatures",
-			func(z *ZoneData) { z.Options[OptInlineSigning] = true }, false, false},
+		// A signing secondary asks too. Its baseline is its own signatures,
+		// but the delta is staged rather than adopted and the publish
+		// re-signs the owners it touched, so the primary's RRSIGs never have
+		// to fit ours. See shouldRequestIxfr.
+		{"inline-signing asks: the delta is staged, not adopted",
+			func(z *ZoneData) { z.Options[OptInlineSigning] = true }, false, true},
 		{"online-signing likewise",
-			func(z *ZoneData) { z.Options[OptOnlineSigning] = true }, false, false},
+			func(z *ZoneData) { z.Options[OptOnlineSigning] = true }, false, true},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			zd := base(t)

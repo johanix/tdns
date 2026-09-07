@@ -867,12 +867,14 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// the primary's sequence verbatim: it cannot ship a delta that disagrees
 	// with our own content, whatever the primary sent.
 	//
-	// Non-signing only, per §5. A signing secondary re-signs on publish, and
-	// while the same diff would in principle capture that too, the interaction
-	// between signing, NSEC chain regeneration and the chain update is not
-	// something this project audited. Deferred to PR-2 deliberately rather
-	// than assumed safe.
-	zd.wsIxfrEpochReset = !(new_zd != nil && new_zd.ixfrDerived && !zd.signsItsOwnContent())
+	// Signing secondaries included. §5 deferred them because the interaction
+	// between signing, NSEC chain regeneration and the chain update had not
+	// been audited. It has been now, and the reason it holds is that the link
+	// is computed from OUR content rather than relayed: updateIxfrChainLocked
+	// diffs the outgoing snapshot against the data about to be published, so
+	// it sees the re-signed RRsets and the repaired NSEC records as ordinary
+	// content, exactly as an AXFR of the same publish would.
+	zd.wsIxfrEpochReset = !(new_zd != nil && new_zd.ixfrDerived)
 	// This content came from a file or from an upstream, so whatever RRSIGs it
 	// carries are not ours. A zone that signs its own content must sign it
 	// before it is published, not in a pass afterwards.
