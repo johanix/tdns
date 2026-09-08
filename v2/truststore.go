@@ -38,6 +38,17 @@ func (kdb *KeyDB) Sig0TrustMgmt(tx *Tx, tp TruststorePost) (*TruststoreResponse,
 	const (
 		addkeysql = `
 INSERT OR REPLACE INTO Sig0TrustStore (zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
+		// IGNORE, not REPLACE, and only for src=dns. A discovered key is
+		// recorded with trusted=0, so REPLACE could DEMOTE a row that
+		// verification had just promoted: two concurrent first updates from
+		// the same child, the first one's verification commits trusted=1, and
+		// the second one's REPLACE puts it back to 0 and starts a second
+		// verification of a key that was already trusted. Every other src is
+		// an operator or a child ASSERTING a key, where replacing is the
+		// intent; discovery only ever means "this exists, look at it", which
+		// an existing row already says.
+		adddiscoveredkeysql = `
+INSERT OR IGNORE INTO Sig0TrustStore (zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
 		getallchildsig0keyssql = `
 SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr, validation_failed, validation_error FROM Sig0TrustStore`
 		getonechildsig0keyssql = `
@@ -146,7 +157,9 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		}
 
 		// 1. If src=file and key is supplied then add it (but as untrusted)
-		// 2. If src=dns then schedule some soort of DNS fetching exercise.
+		// 2. If src=dns, record the key the parent found (untrusted) so the
+		//    verification that can promote it has a row to promote; with no
+		//    key supplied it is still only a request to go and fetch one.
 		if tp.Src == "file" {
 			_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, false, false, false, tp.Src, tp.KeyRR)
 			if err != nil {
@@ -190,11 +203,18 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			if tp.KeyRR == "" {
 				resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key to be fetched via DNS (no key supplied)", tp.Keyname)
 			} else {
-				_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.DnssecValidated, tp.Trusted, tp.Src, tp.KeyRR)
+				res, xerr := tx.Exec(adddiscoveredkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.DnssecValidated, tp.Trusted, tp.Src, tp.KeyRR)
+				err = xerr
 				if err != nil {
 					lgSigner.Error("failed to add SIG(0) key to TrustStore from DNS", "err", err)
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
+				} else if n, aerr := res.RowsAffected(); aerr == nil && n == 0 {
+					// The row was already there, so this discovery is not news
+					// and must not start a second verification of it.
+					resp.Existed = true
+					resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d found in DNS was already in the TrustStore",
+						tp.Keyname, tp.Keyid)
 				} else {
 					resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d found in DNS (trusted=%v) added to TrustStore",
 						tp.Keyname, tp.Keyid, tp.Trusted)
