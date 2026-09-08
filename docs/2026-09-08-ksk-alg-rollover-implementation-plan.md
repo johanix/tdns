@@ -686,7 +686,7 @@ Each commit builds, tests green, and is independently revertible. Commits
 **1. `rollover: strip a removed KSK's RRSIGs before withdrawing it`**
 (F2). Port the strip block into the withdraw branch. Fixes existing
 same-algorithm behaviour. Test: KT-11.
-*~1 file, ~30 lines. Low risk.*
+*1 file, ~30 lines. Low risk.*
 
 **2. `keystore: one active key per (role, algorithm)`** (D-9 / P0-2).
 `pickActiveSEPTx` grouping + `pickActiveSEPByAlgTx` + the `RolloverKey`
@@ -740,10 +740,45 @@ KT-when, KT-abort.
 (same-algorithm double-signature, the `AtomicRollover` "4E" deferral at
 `ksk_rollover_atomic.go:18`).
 
-**Effort.** Roughly 1100 lines of production code across 8 commits, plus
-the test matrix. Materially below the 2026-07-01 doc's "materially larger
-than ~17–29 h" because per-FIFO state, FIFO instantiation machinery, and
-the double-signature generalization all fell away (§2, D-4).
+### 6.1 Effort
+
+Diff lines (added + modified), excluding comments-only churn. The
+"modified" column is existing code touched in place — the two refusals
+deleted, the tick reordered, the withdraw branch rewritten.
+
+| # | Commit | New | Modified | Files |
+|---|---|---|---|---|
+| 1 | withdraw strip (F2) | 25 | 5 | 1 |
+| 2 | one active per (role, algorithm) | 60 | 30 | 2 |
+| 3 | role-generalized in-flight predicate | 85 | 35 | 3 |
+| 4 | persist algorithm-roll state | 105 | 5 | 2 |
+| 5 | spawn the new-algorithm FIFO | 215 | 45 | 3 |
+| 6 | retire on confirm, margin, complete | 155 | 45 | 2 |
+| 7 | route the change through the engine | 110 | 40 | 2 |
+| 8 | status / when / CLI / abort / E13 | 240 | 40 | 5 |
+| | **production total** | **995** | **245** | **~14** |
+
+**~1240 lines of production diff**, of which ~1000 is new code. The two
+riskiest commits (5 and 6) are ~460 of it.
+
+Tests: the matrix in §8 is ~25 cases, several driving a full engine
+sequence against fake time. Calibrating against `zsk_alg_rollover_test.go`
+(751 lines for ~16 cases of a simpler, parent-free roll):
+
+| File | Lines |
+|---|---|
+| `ksk_alg_rollover_test.go` (entry, spawn, sequence, KT-6/13/14/16) | ~750 |
+| margin + strip table tests (KT-7, KT-11) | ~160 |
+| invariant + hazard tests (KT-10, KT-12) | ~130 |
+| status / when / abort (KT-5, KT-when, KT-abort) | ~170 |
+| **test total** | **~1210** |
+
+**Grand total ≈ 2450 lines.** Materially below the 2026-07-01 doc's
+"materially larger than ~17–29 h" estimate, because per-FIFO state, FIFO
+instantiation machinery, and the double-signature generalization all fell
+away (§2, D-4). The count excludes the optional follow-ups (P2-1, P2-4,
+P0-1/3/5, fifo D1/D2) and the testbed work (TB-1…TB-3), which is
+observation rather than code.
 
 
 ## 7. Interactions to hold in mind
