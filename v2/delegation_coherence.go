@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -186,6 +187,19 @@ func childrenWithDSChanges(parent string, actions []dns.RR) []string {
 
 // CheckDelegationCoherenceForUpdate applies the coherence rule to every
 // delegation whose DS the update touches.
+// ErrDelegationUnverifiable marks a coherence failure the parent could not
+// DECIDE, as opposed to one it decided against.
+//
+// The two are different answers to the child and want different reactions. "The
+// delegation you asked for is not what your nameservers serve" is the child's
+// to fix and will not improve by waiting. "I could not ask your nameservers" --
+// one refused the connection, or a parent-side precondition was missing -- says
+// nothing about the update at all, and is worth retrying.
+//
+// Both used to arrive as EDE 518, "Zone does not allow DNS UPDATE", on a zone
+// that had just approved the update (#571).
+var ErrDelegationUnverifiable = errors.New("the delegation could not be verified")
+
 func (zd *ZoneData) CheckDelegationCoherenceForUpdate(actions []dns.RR, fetch dnskeyFetcher) error {
 	for _, child := range childrenWithDSChanges(zd.ZoneName, actions) {
 		if err := CheckDelegationCoherence(child, zd.currentChildDS(child), actions, fetch); err != nil {
@@ -235,12 +249,12 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 		return nil
 	}
 	if fetch == nil {
-		return fmt.Errorf("cannot verify that %s would still validate: no way to look up its DNSKEYs", child)
+		return fmt.Errorf("cannot verify that %s would still validate: no way to look up its DNSKEYs: %w", child, ErrDelegationUnverifiable)
 	}
 
 	keys, validated, err := fetch(child)
 	if err != nil {
-		return fmt.Errorf("cannot verify that %s would still validate: DNSKEY lookup failed: %w", child, err)
+		return fmt.Errorf("cannot verify that %s would still validate: DNSKEY lookup failed: %v: %w", child, err, ErrDelegationUnverifiable)
 	}
 
 	// An unvalidated DNSKEY answer is only meaningful when there is something to
