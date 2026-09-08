@@ -315,20 +315,40 @@ type composedDelegationBackend struct {
 	name   string
 	store  DelegationStore
 	writer ParentZoneWriter // nil for writer: none
+	// async: the writer speaks to the network and runs through
+	// ParentPushEngine rather than inline. zd is the zone the engine
+	// reconciles for.
+	async bool
+	zd    *ZoneData
 }
 
 func (b *composedDelegationBackend) Name() string { return b.name }
 
 // ApplyChildUpdate records the change (durable on return) and then hands it
-// to the writer. The writer runs inline here: the zonefile writer's file
-// writes are local, and this is exactly what the zonefile backend did before
-// the split. A writer that speaks to the network goes through the push
-// engine instead (design §5.4, §5.5), which sets itself up when it exists.
+// to the writer. Returning the STORE's outcome is what acceptance means
+// (design D-2): the child's NOERROR says "recorded by the parent's delegation
+// service", as it already did for the db and zonefile backends.
+//
+// An inline writer -- zonefile, whose writes are local files -- runs here, as
+// the zonefile backend always did. A writer that speaks to the network is
+// handed to ParentPushEngine with a non-blocking enqueue naming the affected
+// children; a full queue is logged and not an error, because the engine
+// recomputes the delta from the store and the next refresh recovers a
+// dropped push (§5.4).
 func (b *composedDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateRequest) error {
 	if err := b.store.ApplyChildUpdate(parentZone, ur); err != nil {
 		return err
 	}
 	if b.writer == nil {
+		return nil
+	}
+	if b.async {
+		enqueueParentPush(ParentPushRequest{
+			Kind:     ParentPushChildren,
+			ZoneData: b.zd,
+			Children: affectedChildren(parentZone, ur.Actions),
+			Reason:   "child update",
+		})
 		return nil
 	}
 	return b.writer.Write(context.Background(), parentZone, ur.Actions, ur.Description)
@@ -380,7 +400,13 @@ func newDelegationBackend(spec DelegationBackendSpec, kdb *KeyDB, zd *ZoneData) 
 	if err != nil {
 		return nil, err
 	}
-	return &composedDelegationBackend{name: spec.Name, store: store, writer: writer}, nil
+	return &composedDelegationBackend{
+		name:   spec.Name,
+		store:  store,
+		writer: writer,
+		async:  spec.Writer == DelegationWriterDDNS,
+		zd:     zd,
+	}, nil
 }
 
 func newDelegationWriter(spec DelegationBackendSpec, store DelegationStore, zd *ZoneData) (ParentZoneWriter, error) {

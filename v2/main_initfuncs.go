@@ -202,6 +202,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	conf.Internal.APIStopCh = make(chan struct{}) // Used for shutdown coordination
 	conf.Internal.BumpZoneCh = make(chan BumperData, 10)
 	conf.Internal.DelegationSyncQ = make(chan DelegationSyncRequest, 10)
+	conf.Internal.ParentPushQ = make(chan ParentPushRequest, 100)
 	conf.Internal.ImrReady = NewImrReadiness()
 	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, max(10, len(conf.Zones)))
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
@@ -354,6 +355,9 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	StartEngine(&Globals.App, "DelegationSyncher", func() error {
 		return kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf)
 	})
+	// The childsync-proxy's outbound half. Idle unless a zone carries
+	// childsync-proxy with a writer that speaks to the network.
+	StartEngine(&Globals.App, "ParentPushEngine", func() error { return ParentPushEngine(ctx, conf) })
 	StartEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	StartEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
 

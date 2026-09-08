@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,14 +29,16 @@ func withAgentTsigKey(t *testing.T) {
 	Conf.Internal.TsigKeyStore = store
 }
 
-// updateSink is a fake parent primary: it records the UPDATE it receives and
-// answers with a fixed rcode.
+// updateSink is a fake parent primary: it records the UPDATEs it receives
+// and answers each with a fixed rcode.
 type updateSink struct {
 	addr     string
 	rcode    int
-	got      *dns.Msg
+	mu       sync.Mutex
+	msgs     []*dns.Msg
 	signed   bool
 	verified bool
+	received chan *dns.Msg
 }
 
 func startUpdateSink(t *testing.T, rcode int) *updateSink {
@@ -44,7 +47,7 @@ func startUpdateSink(t *testing.T, rcode int) *updateSink {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	sink := &updateSink{addr: ln.Addr().String(), rcode: rcode}
+	sink := &updateSink{addr: ln.Addr().String(), rcode: rcode, received: make(chan *dns.Msg, 32)}
 	started := make(chan struct{})
 	srv := &dns.Server{
 		Listener:     ln,
@@ -53,15 +56,21 @@ func startUpdateSink(t *testing.T, rcode int) *updateSink {
 		// tdns's own accepts them, as a real primary would.
 		MsgAcceptFunc: MsgAcceptFunc,
 		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-			sink.got = r
+			sink.mu.Lock()
+			sink.msgs = append(sink.msgs, r)
 			sink.signed = r.IsTsig() != nil
 			sink.verified = sink.signed && w.TsigStatus() == nil
+			sink.mu.Unlock()
 			m := new(dns.Msg)
 			m.SetRcode(r, sink.rcode)
-			if sink.signed {
+			if r.IsTsig() != nil {
 				m.SetTsig(r.IsTsig().Hdr.Name, r.IsTsig().Algorithm, 300, time.Now().Unix())
 			}
 			_ = w.WriteMsg(m)
+			select {
+			case sink.received <- r:
+			default:
+			}
 		}),
 		NotifyStartedFunc: func() { close(started) },
 	}
@@ -73,6 +82,40 @@ func startUpdateSink(t *testing.T, rcode int) *updateSink {
 	}
 	t.Cleanup(func() { _ = srv.Shutdown() })
 	return sink
+}
+
+// last is the most recent UPDATE received, or nil.
+func (s *updateSink) last() *dns.Msg {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.msgs) == 0 {
+		return nil
+	}
+	return s.msgs[len(s.msgs)-1]
+}
+
+func (s *updateSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.msgs)
+}
+
+func (s *updateSink) tsig() (signed, verified bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.signed, s.verified
+}
+
+// wait blocks until the sink has received an UPDATE, or fails the test.
+func (s *updateSink) wait(t *testing.T, d time.Duration) *dns.Msg {
+	t.Helper()
+	select {
+	case m := <-s.received:
+		return m
+	case <-time.After(d):
+		t.Fatalf("no UPDATE reached the sink within %s", d)
+		return nil
+	}
 }
 
 // proxyWriterFixture is a childsync-proxy's view of the parent: the served
@@ -111,17 +154,18 @@ func TestDdnsWriterSignsAndTheParentVerifies(t *testing.T) {
 	if err := w.Write(context.Background(), "parent.example.", actions, "test"); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if sink.got == nil || sink.got.Opcode != dns.OpcodeUpdate {
-		t.Fatalf("the sink did not receive an UPDATE: %v", sink.got)
+	got := sink.last()
+	if got == nil || got.Opcode != dns.OpcodeUpdate {
+		t.Fatalf("the sink did not receive an UPDATE: %v", got)
 	}
-	if !sink.signed || !sink.verified {
-		t.Fatalf("the UPDATE must be TSIG-signed and verify at the primary: signed=%v verified=%v", sink.signed, sink.verified)
+	if signed, verified := sink.tsig(); !signed || !verified {
+		t.Fatalf("the UPDATE must be TSIG-signed and verify at the primary: signed=%v verified=%v", signed, verified)
 	}
-	if got := sink.got.IsTsig().Hdr.Name; got != testAgentTsigKey {
-		t.Errorf("signed with key %q, want %q", got, testAgentTsigKey)
+	if name := got.IsTsig().Hdr.Name; name != testAgentTsigKey {
+		t.Errorf("signed with key %q, want %q", name, testAgentTsigKey)
 	}
-	if len(sink.got.Ns) != 1 || sink.got.Ns[0].String() != actions[0].String() {
-		t.Errorf("the UPDATE carries %v, want the actions verbatim", sink.got.Ns)
+	if len(got.Ns) != 1 || got.Ns[0].String() != actions[0].String() {
+		t.Errorf("the UPDATE carries %v, want the actions verbatim", got.Ns)
 	}
 }
 
@@ -136,7 +180,7 @@ func TestDdnsWriterRefusesToSendUnsignedUnlessAllowed(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unsigned") {
 		t.Fatalf("an unsigned push must be refused by default, got %v", err)
 	}
-	if sink.got != nil {
+	if sink.count() != 0 {
 		t.Fatal("the refused push still reached the primary")
 	}
 
@@ -144,8 +188,8 @@ func TestDdnsWriterRefusesToSendUnsignedUnlessAllowed(t *testing.T) {
 	if err := w.Write(context.Background(), "parent.example.", actions, "test"); err != nil {
 		t.Fatalf("allow-insecure: %v", err)
 	}
-	if sink.got == nil || sink.signed {
-		t.Fatalf("allow-insecure must send, unsigned: got=%v signed=%v", sink.got != nil, sink.signed)
+	if signed, _ := sink.tsig(); sink.count() == 0 || signed {
+		t.Fatalf("allow-insecure must send, unsigned: received=%d signed=%v", sink.count(), signed)
 	}
 }
 
@@ -200,7 +244,7 @@ func TestDdnsWriterDefaultsToTheZonesPrimaries(t *testing.T) {
 		writerRRs(t, "alpha.parent.example. 3600 IN NS ns2.alpha.parent.example."), "test"); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if sink.got == nil {
+	if sink.count() == 0 {
 		t.Fatal("nothing reached the zone's primary")
 	}
 }

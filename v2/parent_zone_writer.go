@@ -9,6 +9,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -28,7 +29,17 @@ type ddnsParentZoneWriter struct {
 	targets       []string // addr:port; empty means the zone's upstreams, read at write time
 	keyName       string
 	allowInsecure bool
+	retryInterval time.Duration // push engine backoff; zero means its default
+	maxAttempts   int
 }
+
+// WriteRefusedLocally reports that the writer declined to send at all: an
+// owner outside the delegation names (D-5), an unsigned push without
+// allow-insecure, no target to send to. Terminal for the push engine, like a
+// rejection: nothing changes by waiting.
+type WriteRefusedLocally struct{ Reason string }
+
+func (e *WriteRefusedLocally) Error() string { return e.Reason }
 
 func newDdnsParentZoneWriter(spec DelegationBackendSpec, store DelegationStore, zd *ZoneData) (*ddnsParentZoneWriter, error) {
 	if zd == nil {
@@ -51,6 +62,8 @@ func newDdnsParentZoneWriter(spec DelegationBackendSpec, store DelegationStore, 
 		targets:       targets,
 		keyName:       spec.Conf.DDNS.Key,
 		allowInsecure: spec.Conf.DDNS.AllowInsecure,
+		retryInterval: spec.Conf.DDNS.RetryInterval,
+		maxAttempts:   spec.Conf.DDNS.MaxAttempts,
 	}, nil
 }
 
@@ -95,7 +108,7 @@ func (w *ddnsParentZoneWriter) Write(ctx context.Context, parentZone string, act
 		targets = w.zd.upstreamAddrs()
 	}
 	if len(targets) == 0 {
-		return fmt.Errorf("ddns writer for %s: no ddns.targets configured and the zone has no primaries to fall back on", parentZone)
+		return &WriteRefusedLocally{Reason: fmt.Sprintf("ddns writer for %s: no ddns.targets configured and the zone has no primaries to fall back on", parentZone)}
 	}
 
 	m := new(dns.Msg)
@@ -111,8 +124,8 @@ func (w *ddnsParentZoneWriter) Write(ctx context.Context, parentZone string, act
 	}
 	if provider == nil {
 		if !w.allowInsecure {
-			return fmt.Errorf("ddns writer for %s: refusing to send an unsigned UPDATE to the parent primary;"+
-				" set ddns.key, or ddns.allow-insecure for a lab", parentZone)
+			return &WriteRefusedLocally{Reason: fmt.Sprintf("ddns writer for %s: refusing to send an unsigned UPDATE to the parent primary;"+
+				" set ddns.key, or ddns.allow-insecure for a lab", parentZone)}
 		}
 		lg.Warn("ddns writer: sending an UNSIGNED UPDATE to the parent primary (ddns.allow-insecure)",
 			"zone", parentZone, "targets", targets)
@@ -184,7 +197,7 @@ func (w *ddnsParentZoneWriter) boundToDelegationNames(parentZone string, actions
 func (w *ddnsParentZoneWriter) refuse(parentZone, owner, why string) error {
 	lg.Error("ddns writer: refusing to write outside the parent's delegation names (invariant violation)",
 		"zone", parentZone, "owner", owner, "why", why)
-	return fmt.Errorf("ddns writer for %s: refusing to write %s: %s", parentZone, owner, why)
+	return &WriteRefusedLocally{Reason: fmt.Sprintf("ddns writer for %s: refusing to write %s: %s", parentZone, owner, why)}
 }
 
 // underADelegationPoint walks up from owner to (not including) the apex and

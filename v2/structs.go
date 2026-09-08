@@ -392,6 +392,11 @@ type ZoneData struct {
 	// Set/consumed only on the OnZonePreRefresh/PostRefresh path for zones with
 	// OptParentSyncProxy; protected by zd.mu.
 	ProxyRefreshAnalysis *ProxyDelegationAnalysis
+
+	// pushState is the childsync-proxy's outbound bookkeeping: pending
+	// pushes to the parent primary and their failures. Lazily created;
+	// see parent_push_engine.go. Its own mutex, not zd.mu.
+	pushState *parentPushState
 }
 
 // Lock and Unlock expose the mutex for code that moves to
