@@ -69,6 +69,16 @@ func (zd *ZoneData) PublishCsyncRRAndWait(ctx context.Context) error {
 		if res.Err != nil {
 			return fmt.Errorf("publishing the CSYNC for %s: %w", zd.ZoneName, res.Err)
 		}
+		// res.Applied being false is not by itself a failure: republishing the
+		// same CSYNC over an identical one changes nothing, and the record the
+		// caller is about to advertise IS there. But it also covers an update
+		// the zone declined to apply, where it is not. The two are opposite
+		// outcomes behind one false, so the postcondition is checked directly
+		// rather than inferred from the signal.
+		if !zd.csyncIsPublished() {
+			return fmt.Errorf("publishing the CSYNC for %s: the update was accepted but"+
+				" no CSYNC is published", zd.ZoneName)
+		}
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("publishing the CSYNC for %s: %w", zd.ZoneName, ctx.Err())
@@ -134,4 +144,19 @@ func (zd *ZoneData) UnpublishCsyncRR() error {
 	}
 
 	return nil
+}
+
+// csyncIsPublished reports whether the zone is currently serving a CSYNC at its
+// apex.
+//
+// The NOTIFY scheme's whole promise is "come and fetch my CSYNC", so this is
+// the condition worth checking before making it -- as opposed to whether some
+// particular update reported that it changed something.
+func (zd *ZoneData) csyncIsPublished() bool {
+	rrset, err := zd.GetRRset(zd.ZoneName, dns.TypeCSYNC)
+	if err != nil {
+		lgDns.Error("could not read back the published CSYNC", "zone", zd.ZoneName, "err", err)
+		return false
+	}
+	return rrset != nil && len(rrset.RRs) > 0
 }

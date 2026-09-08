@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -48,6 +49,10 @@ func notifySchemeRig(t *testing.T, applyDelay time.Duration) (*ZoneData, chan No
 	log := &fakeUpdaterLog{}
 
 	zd := testZone(t, "example.", csyncTestZone)
+	// publishWorkingSetLocked refuses to swap a snapshot for a zone that is not
+	// in Zones (zoneStillLive), so the rig's updater could not publish anything
+	// without this.
+	registerZones(t, zd)
 	zd.KeyDB = &KeyDB{UpdateQ: updateq}
 	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true}
 	zd.CurrentSerial = 17
@@ -62,6 +67,11 @@ func notifySchemeRig(t *testing.T, applyDelay time.Duration) (*ZoneData, chan No
 			select {
 			case ur := <-updateq:
 				time.Sleep(applyDelay)
+				// Actually publish it. A rig that only ANSWERS cannot tell a
+				// caller that checks the postcondition from one that trusts
+				// the reply, and the whole point here is which of those the
+				// NOTIFY scheme does.
+				applyCsyncActions(zd, ur.Actions)
 				log.record("published")
 				ur.respond(true, nil)
 			case <-done:
@@ -87,6 +97,28 @@ func notifySchemeRig(t *testing.T, applyDelay time.Duration) (*ZoneData, chan No
 		close(done)
 		wg.Wait()
 	}
+}
+
+// applyCsyncActions publishes the add half of a CSYNC update into the zone.
+// The class-ANY delete that precedes it is a no-op here: nothing in these tests
+// starts with a CSYNC.
+func applyCsyncActions(zd *ZoneData, actions []dns.RR) {
+	var rrs []dns.RR
+	for _, rr := range actions {
+		if rr.Header().Class == dns.ClassINET && rr.Header().Rrtype == dns.TypeCSYNC {
+			rrs = append(rrs, rr)
+		}
+	}
+	if len(rrs) == 0 {
+		return
+	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.ensureWorkingSet()
+	zd.stageRRsetLocked(zd.ZoneName, core.RRset{
+		Name: zd.ZoneName, RRtype: dns.TypeCSYNC, Class: dns.ClassINET, RRs: rrs,
+	})
+	zd.publishLocked(zd.generation.Load())
 }
 
 // TestNotifySchemeTellsTheParentOnlyAfterTheCsyncIsPublished is the ordering
@@ -209,4 +241,52 @@ func waitForEvents(t *testing.T, log *fakeUpdaterLog, n int) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("only saw %v, wanted %d events", log.snapshot(), n)
+}
+
+// TestNotifySchemeRefusesWhenTheUpdateChangedNothing.
+//
+// ZONE-UPDATE answers with ur.respond(updated, err), and updated is false BOTH
+// for a republish of an identical record -- where the CSYNC is there, and the
+// NOTIFY is correct -- and for an update the zone declined to apply, where it is
+// not. One bool, two opposite outcomes, so the wait checks the postcondition:
+// is a CSYNC actually published?
+func TestNotifySchemeRefusesWhenTheUpdateChangedNothing(t *testing.T) {
+	updateq := make(chan UpdateRequest, 1)
+	notifyq := make(chan NotifyRequest, 4)
+
+	zd := testZone(t, "example.", csyncTestZone)
+	zd.KeyDB = &KeyDB{UpdateQ: updateq}
+	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true}
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case ur := <-updateq:
+				// Applied false, no error, and nothing published: the shape a
+				// declined update takes.
+				ur.respond(false, nil)
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	syncstate := DelegationSyncStatus{
+		NsAdds: []dns.RR{mustRR(t, "example. 3600 IN NS ns2.example.")},
+	}
+	target := &DsyncTarget{Name: "parent.", Addresses: []string{"192.0.2.53:53"}}
+
+	_, rcode, err := zd.SyncZoneDelegationViaNotify(context.Background(), zd.KeyDB, notifyq, syncstate, target)
+	if err == nil {
+		t.Fatal("reported success when no CSYNC was published; the parent would be told" +
+			" to fetch a record that is not there")
+	}
+	if rcode != dns.RcodeServerFailure {
+		t.Errorf("rcode = %s, want SERVFAIL", dns.RcodeToString[int(rcode)])
+	}
+	if len(notifyq) != 0 {
+		t.Error("a NOTIFY went out for a CSYNC that was never published")
+	}
 }
