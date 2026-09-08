@@ -273,14 +273,14 @@ func CheckDelegationNSCoherence(ctx context.Context, child string, currentNS []d
 	}
 
 	if fetch == nil {
-		return fmt.Errorf("cannot verify the delegation for %s: no way to ask its nameservers what they serve", child)
+		return fmt.Errorf("cannot verify the delegation for %s: no way to ask its nameservers what they serve: %w", child, ErrDelegationUnverifiable)
 	}
 
 	// The NS set must be what the child serves, as agreed by its nameservers.
 	if nsChanged {
 		served, inSync, err := fetch(ctx, child, dns.TypeNS)
 		if err != nil {
-			return fmt.Errorf("cannot verify the NS RRset for %s: %w", child, err)
+			return fmt.Errorf("cannot verify the NS RRset for %s: %v: %w", child, err, ErrDelegationUnverifiable)
 		}
 		if !inSync {
 			return fmt.Errorf("the nameservers of %s do not agree on its NS RRset; retry once they are in sync", child)
@@ -305,7 +305,7 @@ func CheckDelegationNSCoherence(ctx context.Context, child string, currentNS []d
 			resulting, _ := rrsetAfterActions(ns, t, cur, actions)
 			served, inSync, err := fetch(ctx, ns, t)
 			if err != nil {
-				return fmt.Errorf("cannot verify the %s glue for %s: %w", dns.TypeToString[t], ns, err)
+				return fmt.Errorf("cannot verify the %s glue for %s: %v: %w", dns.TypeToString[t], ns, err, ErrDelegationUnverifiable)
 			}
 			if !inSync {
 				return fmt.Errorf("the nameservers of %s do not agree on the %s records of %s; retry once they are in sync", child, dns.TypeToString[t], ns)

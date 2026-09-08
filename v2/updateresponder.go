@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -634,7 +635,7 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		lgHandler.Warn("child update refused as incoherent",
 			"zone", zd.ZoneName, "err", cerr)
 		us.ValidationRcode = dns.RcodeRefused
-		us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
+		us.RejectionEDE = delegationCoherenceEDE(cerr)
 		return false, false, cerr
 	}
 
@@ -648,11 +649,31 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		lgHandler.Warn("child update refused as incoherent",
 			"zone", zd.ZoneName, "err", cerr)
 		us.ValidationRcode = dns.RcodeRefused
-		us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
+		us.RejectionEDE = delegationCoherenceEDE(cerr)
 		return false, false, cerr
 	}
 
 	return true, updateZone, nil
+}
+
+// delegationCoherenceEDE picks the code that says what actually happened.
+//
+// Both outcomes used to be reported as EDEZoneUpdatesNotAllowed, "Zone does not
+// allow DNS UPDATE" -- on a zone that allows child updates, is configured for
+// them, and had just authenticated, authorised and APPROVED the update it was
+// about to refuse. The EDE named the one thing demonstrably not wrong, and an
+// operator reading it went and checked allow-child-updates, the update policy
+// and the DSYNC target, all of which were fine (#571).
+//
+// The split matters because the two want different responses: a mismatch is the
+// child's to fix, while a parent that could not ask -- a nameserver refusing
+// connections, or a missing parent-side precondition -- is worth retrying and
+// says nothing about the update.
+func delegationCoherenceEDE(err error) uint16 {
+	if errors.Is(err, ErrDelegationUnverifiable) {
+		return edns0.EDEDelegationUnverifiable
+	}
+	return edns0.EDEDelegationIncoherent
 }
 
 // Updates to auth data must be validated.
