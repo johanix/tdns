@@ -90,3 +90,20 @@ DSYNC discovery through imr gets `indeterminate` where unbound gets `secure`,
 and the natural conclusion for a student — and for me, earlier today — is that
 the *zone* or *dog* is broken. It also silently changes what a validating
 client behind imr sees for every NODATA answer in the lab.
+
+---
+
+## Amendment, 2026-09-08: filed and fixed
+
+The status line above is stale, and was already stale about ninety minutes
+after it was written.
+
+This was filed the same evening as
+[#518](https://github.com/johanix/tdns/issues/518) — "tdns-imr: cached NODATA
+answers carry the zone SOA in the ANSWER section (plus missing OPT, and TTLs
+that never decrement)", covering all three defects recorded here, not only the
+first. It was **closed on 2026-09-05**.
+
+Nothing above is corrected: it is the record of what was observed on the lab
+master that day, and it is what the issue was written from. Read the status
+line as "not filed *at the time of writing*".
