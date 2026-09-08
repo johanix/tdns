@@ -17,7 +17,7 @@ type DBDelegationBackend struct {
 	kdb *KeyDB
 }
 
-func (b *DBDelegationBackend) Name() string { return "db" }
+func (b *DBDelegationBackend) Name() string { return DelegationStoreSqlite }
 
 func (b *DBDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateRequest) error {
 	const (

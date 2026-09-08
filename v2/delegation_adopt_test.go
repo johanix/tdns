@@ -245,7 +245,7 @@ id INTEGER PRIMARY KEY, parent TEXT, child TEXT, owner TEXT, rrtype TEXT, rr TEX
 func TestZonefileAdoptWritesNoFragment(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	dir := t.TempDir()
-	b := &ZonefileDelegationBackend{backendName: "frag", directory: dir, kdb: kdb}
+	b := zonefileBackend(t, kdb, dir)
 
 	rr, _ := dns.NewRR("alpha.parent.example. 3600 IN NS ns.alpha.parent.example.")
 	if n, err := b.AdoptChildDelegation("parent.example.", "alpha.parent.example.", []dns.RR{rr}); err != nil || n != 1 {

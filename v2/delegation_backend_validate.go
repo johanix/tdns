@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -39,6 +40,12 @@ func validateDelegationBackendCombination(zconf *ZoneConf, options map[ZoneOptio
 	if backend == "" {
 		return nil // "no backend" is governed by the allow-child-updates rule.
 	}
+	// The rules below are about the STORE -- where the data lands -- so a
+	// named backend of type direct is judged as direct, not as "some name".
+	store, err := delegationBackendStore(backend)
+	if err != nil {
+		return err
+	}
 
 	// ParseZones accepts the zone type case-insensitively, so these rules have
 	// to normalise the same way it does. Comparing the raw string would let
@@ -62,7 +69,7 @@ func validateDelegationBackendCombination(zconf *ZoneConf, options map[ZoneOptio
 	// way. Gating it per app would also make one config valid or invalid
 	// depending on which binary read it, which is a poor property for a rule
 	// about a combination.
-	if isSecondary && backend == "direct" {
+	if isSecondary && store == DelegationStoreDirect {
 		return fmt.Errorf(
 			"zone %s is a secondary and delegationbackend is %q: a secondary's content belongs"+
 				" to its primary, so direct's edits would be overwritten at the next transfer."+
@@ -84,7 +91,7 @@ func validateDelegationBackendCombination(zconf *ZoneConf, options map[ZoneOptio
 	// The two settings describe the same deployment fact from different angles,
 	// so the fix is whichever angle the operator actually meant, and the error
 	// names both.
-	if isPrimary && options[OptOnConflictDBWins] && backend != "direct" {
+	if isPrimary && options[OptOnConflictDBWins] && store != DelegationStoreDirect {
 		return fmt.Errorf(
 			"zone %s is a primary with on-conflict-db-wins and delegationbackend %q:"+
 				" these contradict each other. db-wins says this server's own data beats the"+
@@ -108,7 +115,10 @@ func validateDelegationBackendCombination(zconf *ZoneConf, options map[ZoneOptio
 // something exists is a property of the deployment, not of the config, so it
 // cannot be validated. It can be stated.
 func delegationBackendContract(zconf *ZoneConf, options map[ZoneOption]bool) string {
-	if zconf.DelegationBackend == "" || zconf.DelegationBackend == "direct" {
+	if zconf.DelegationBackend == "" {
+		return ""
+	}
+	if store, err := delegationBackendStore(zconf.DelegationBackend); err != nil || store == DelegationStoreDirect {
 		return ""
 	}
 	if !options[OptAllowChildUpdates] {
@@ -131,4 +141,23 @@ func delegationBackendUnusedWarning(zconf *ZoneConf, options map[ZoneOption]bool
 		"zone %s sets delegationbackend %q but not the allow-child-updates option,"+
 			" so the backend is never used and no child update will be accepted",
 		zconf.Name, zconf.DelegationBackend)
+}
+
+// delegationBackendStore resolves a backend name to its store. An undefined
+// name resolves to "" with no error: the wiring step reports that, as it
+// always has, and a rule here must not pre-empt it with a worse message. A
+// name whose definition contradicts itself is an error here as anywhere.
+func delegationBackendStore(name string) (string, error) {
+	confs, err := loadDelegationBackendConfs()
+	if err != nil {
+		return "", err
+	}
+	spec, err := resolveDelegationBackendSpec(name, confs)
+	if errors.Is(err, errDelegationBackendUnknown) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return spec.Store, nil
 }

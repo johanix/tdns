@@ -12,6 +12,18 @@ import (
 	"github.com/miekg/dns"
 )
 
+// zonefileBackend composes what the zonefile type name stands for: the sqlite
+// store with the zonefile writer over dir.
+func zonefileBackend(t *testing.T, kdb *KeyDB, dir string) *composedDelegationBackend {
+	t.Helper()
+	store := &DBDelegationBackend{kdb: kdb}
+	return &composedDelegationBackend{
+		name:   "frag",
+		store:  store,
+		writer: &zonefileWriter{directory: dir, store: store},
+	}
+}
+
 // childDelete builds a CHILD-UPDATE that removes one RR (class NONE).
 func childDelete(t *testing.T, rrstr string) UpdateRequest {
 	t.Helper()
@@ -63,7 +75,7 @@ func TestDirectBackendNoDataIsEmptyNotError(t *testing.T) {
 func TestZonefileBackendFragmentFollowsTheStore(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	dir := t.TempDir()
-	b := &ZonefileDelegationBackend{backendName: "frag", directory: dir, kdb: kdb}
+	b := zonefileBackend(t, kdb, dir)
 	const ns = "child.example. 3600 IN NS ns.child.example."
 
 	if err := b.ApplyChildUpdate("example.", childUpdate(t, ns)); err != nil {
@@ -92,7 +104,7 @@ func TestZonefileBackendFragmentFollowsTheStore(t *testing.T) {
 func TestZonefileBackendKeepsFragmentWhenStoreUnreadable(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	dir := t.TempDir()
-	b := &ZonefileDelegationBackend{backendName: "frag", directory: dir, kdb: kdb}
+	b := zonefileBackend(t, kdb, dir)
 
 	if err := b.ApplyChildUpdate("example.", childUpdate(t, "child.example. 3600 IN NS ns.child.example.")); err != nil {
 		t.Fatalf("ApplyChildUpdate: %v", err)
@@ -103,7 +115,7 @@ func TestZonefileBackendKeepsFragmentWhenStoreUnreadable(t *testing.T) {
 	}
 
 	kdb.DB.Close()
-	if err := b.refreshFragments("example.", map[string]bool{"child.example.": true}); err == nil {
+	if err := b.writer.(*zonefileWriter).refreshFragments("example.", map[string]bool{"child.example.": true}); err == nil {
 		t.Fatal("an unreadable store must be reported as an error, not read as an empty child")
 	}
 	if _, err := os.Stat(frag); err != nil {
