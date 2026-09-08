@@ -1305,3 +1305,72 @@ MariaDB half skipped when no DSN is set.
 | **C-4d** | files: `v2/externaldb/{go.mod,store.go,dialect.go,schema.go,store_test.go}`, `cmdv2/agent/main.go`, `cmdv2/agent/go.mod`. The equivalence suite moves here. Tested against a live MariaDB, not sqlite alone |
 | **C-5** | `ParentPushRequest.Kind`; the engine computes advertisement deltas as well as child deltas (A-2) |
 | **C-6** | the reconciler enqueues (A-2); `ReconcileChildSyncAdvertisement` loses its network path entirely and becomes a pure in-memory diff |
+
+---
+
+## Amendment 2026-09-08 (b) — implementation notes
+
+Implemented on `feature/childsync-proxy` (off `childsync-proxy` = `main`
+f4bea22), one commit per §10 item in §10's order: C-4a, C-0, the KeyState
+half of C-7, C-2, C-4b, C-1, C-3 (+C-4c), C-5, C-6 (+the SetupZoneSync half
+of C-7), C-7's listener + C-8, C-4d, C-9. Where the code departs from the
+text above, this is where and why.
+
+**B-1. `BuildDsyncPublication` takes no arguments and has no `ReceiverKEY`.**
+It reads the served zone and the childsync configuration only, so that the
+tdns-auth path is a pure refactor (its output is pinned record-for-record by
+`TestPublishDsyncRRsSendsExactlyTheDelta`). The receiver key is added by the
+reconciler's `advertisementDelta`, which is also where the foreign-key rule of
+§5.3 step 3 lives. `DsyncPublication` carries `Synthesized`/`Published` counts
+instead, which is what PublishDsyncRRs needs to tell "nothing to do" from
+"nothing configured".
+
+**B-2. Writers.** `manual` is a spelling of `none`: an absent writer, with
+the instruction block rendered by the reconciler and the operator surface.
+The `command` writer of §7's enum is not implemented; nothing described it
+beyond the name, and the zonefile writer's `notify-command` covers the case
+it seemed to name. The ddns writer's local refusals (D-5 bound, unsigned
+without allow-insecure, no target) are `WriteRefusedLocally`, terminal for
+the push engine like a rejection.
+
+**B-3. The push engine is one coalescing worker per zone**, not a single
+sequential loop: the engine goroutine dispatches, a zone's worker drains its
+pending set and exits when empty, and per-zone serialisation is what makes
+"several updates for one child collapse into one push" true. The refresh
+reconcile of §6.4 is a request kind (`ParentPushReconcile`) the worker
+handles by walking `ListChildren` and pushing each non-empty delta -- one
+store read per known child per refresh. A per-child revision is the way to
+make that incremental; deferred. A child that deleted its whole delegation
+is pushed from the update and, if that push fails, not re-pushed by the
+reconcile, because a child with no rows is by design never touched; the
+guide says so.
+
+**B-4. The transport maps a TSIG-signed NOTAUTH to rcode NOTAUTH.** The
+library reports a signed exchange answered with NOTAUTH as ErrAuth rather
+than as a response (RFC 8945 makes NOTAUTH the TSIG-error rcode). It is an
+answer -- the primary spoke -- and `sendUpdateVia` reports it as the
+rejection it is rather than as a transport failure, so §5.6's "stop fast on
+NOTAUTH" is reachable. Unsigned sends (every existing caller) are unaffected.
+
+**B-5. The KeyState carve-out falls through to `QueryResponder`**, as §5.7(b)
+says, so an agent answers exactly what tdns-auth would (a referral for a
+delegation point). The test drives `DefaultQueryHandler` from both sides.
+
+**B-6. The store equivalence suite covers the persisting stores**, sqlite
+and external-db; `direct` keeps its own tests, the served zone being its
+store. The suite is the package `v2/delegationtest`, importable by the
+external-db module. The external-db half of it, and the change-grouping,
+origin and schema-check tests, run against a live MariaDB named by
+`TDNS_EXTERNALDB_DSN` and **have not been run on this branch**: no MariaDB
+was reachable from the build host. The dialect, DDL, outage and registration
+tests run without one. The guide's DDL block is rendered from the schema
+source and a test keeps them equal.
+
+**B-7. `UpdateRequest` carries no channel or principal.** The log's `channel`
+is derived from the request's flags (internal, validated → `update`, a
+description naming the API → `dsync-api`, else `scanner`; adoption writes
+`adopt`) and `principal` is NULL until the request carries one. An `Origin`
+on `UpdateRequest` is the right fix and is a separate change.
+
+**B-8. Line drift** on `main` from this branch's own edits is not tracked
+here; the A-1 table is for `main` versus PR #514 at the time of writing.

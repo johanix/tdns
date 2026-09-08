@@ -10,9 +10,11 @@ authoritative and recursive DNS service.
    zone changes: the NOTIFY and UPDATE schemes, delegation
    backends, the agent-as-proxy path, the
    [DSYNC API scheme](#17-the-dsync-api-scheme-https-for-children-that-cannot-sign)
-   for children that cannot sign a DNS message, and
+   for children that cannot sign a DNS message,
    [publishing a customer's bootstrap records](#18-secondary-publishing-a-customers-bootstrap-records-at-the-_signal-names)
-   at the RFC 9615 `_signal` names.
+   at the RFC 9615 `_signal` names, and
+   [an agent fronting a parent zone](#19-agent-fronting-a-parent-zone-childsync-proxy)
+   whose primary is DSYNC-unaware.
 2. [**DNS Transport Signaling**](#2-dns-transport-signaling)
    -- Enabling resolvers to discover and use encrypted
    transports (DoT, DoQ, DoH) when communicating with
@@ -219,6 +221,14 @@ the change is applied through a pluggable **delegation
 backend**. Each parent zone that accepts child updates
 **must** declare which backend it uses; config-parse
 rejects the zone otherwise. There is no silent default.
+
+A backend has two axes: **where** the intended delegation
+state is kept (`store: sqlite | direct | external-db`) and
+**how** it reaches the parent zone (`writer: none | zonefile
+| ddns`). The one-word `type:` names are shorthand for pairs
+(`db`, `direct`, `zonefile`, `upstream`, `external-db`); the
+axes, the writers and the shared-database store are
+described in the [childsync-proxy guide](childsync-proxy.md).
 
 Zones opt in by combining a zone-level switch with a
 named backend reference:
@@ -755,6 +765,29 @@ method, publishing its KEY at the `_signal` name *is* the
 intent, and the method is offered in the first place only
 when at least one of the zone's nameservers is served here as
 primary.
+
+### 1.9 Agent: fronting a parent zone (`childsync-proxy`)
+
+§1.6 is the child side seen from an agent. The parent side
+has the same shape: a tdns-agent that is a **secondary of a
+parent zone** whose primary is DSYNC-unaware (BIND, Knot, a
+registry pipeline) carries the `childsync-proxy` option and
+performs the parent's half of delegation sync on its behalf.
+It advertises the DSYNC service in the parent zone, receives
+the children's NOTIFY, UPDATE and API traffic, applies the
+parent's policy with the parent's own code, and pushes every
+approved change **to the parent primary** -- as a TSIG-signed
+DNS UPDATE, or into a shared database a provisioning system
+reads -- rather than into its own copy of the zone, which the
+next transfer would replace.
+
+The option implies `childsync`; acceptance is decoupled from
+publication (a child's NOERROR means "recorded", as it already
+does for the `db` and `zonefile` backends); and the store is
+seeded from the served zone on first load so the scanner
+never diffs against nothing. The operator guide is
+[childsync-proxy.md](childsync-proxy.md); the design is
+`docs/2026-09-08-childsync-proxy.md`.
 
 
 ## 2. DNS Transport Signaling

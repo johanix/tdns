@@ -244,4 +244,3 @@ func TestUnsupportedDriverAndMissingDSN(t *testing.T) {
 		t.Errorf("missing dsn: %v", err)
 	}
 }
-
