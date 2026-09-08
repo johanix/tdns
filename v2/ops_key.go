@@ -60,21 +60,6 @@ func (zd *ZoneData) UnpublishKeyRRs() error {
 	return nil
 }
 
-// VerifyPublishedKeyRRs checks that every KEY published at name is backed by a
-// private key this server actually holds, and warns about the ones that are not.
-//
-// name, not the zone apex. Sig0KeyPreparation is the only caller, and on a
-// delegation-sync parent it passes the DSYNC UPDATE target (updates.<zone>),
-// where the apex is the wrong owner entirely: the check found no KEY there,
-// concluded the zone had none, and minted an apex SIG(0) key nothing had asked
-// for -- using the algorithm from the CHILD half of the delegationsync config,
-// which on a parent is usually unset, so the whole call failed with "unknown
-// keygen algorithm". On the child path name IS the apex, so nothing changes there.
-//
-// That generate-and-publish tail is gone with it. Publishing was never this
-// function's job: the caller's own step 3 does it, for the right name and with
-// the algorithm the caller was given, and reaches it in exactly the case this
-// function is not called (no KEY published yet).
 // sig0KeyIsUsable reports whether any KEY published at name is backed by an
 // active private key -- i.e. whether this zone can actually sign with what it
 // has published.
@@ -88,6 +73,23 @@ func (zd *ZoneData) sig0KeyIsUsable(name string) bool {
 	return usable
 }
 
+// VerifyPublishedKeyRRs checks that every KEY published at name is backed by a
+// private key this server actually holds, and warns about the ones that are
+// not. It reports only whether the check could be CARRIED OUT; use
+// sig0KeyIsUsable for the answer itself.
+//
+// name, not the zone apex. On a delegation-sync parent the caller passes the
+// DSYNC UPDATE target (updates.<zone>), where the apex is the wrong owner
+// entirely: the check found no KEY there, concluded the zone had none, and
+// minted an apex SIG(0) key nothing had asked for -- using the algorithm from
+// the CHILD half of the delegationsync config, which on a parent is usually
+// unset, so the whole call failed with "unknown keygen algorithm". On the child
+// path name IS the apex, so nothing changes there.
+//
+// The generate-and-publish tail this function once had is gone. Publishing was
+// never its job: the caller's own step 4 does it, for the right name and with
+// the algorithm the caller was given, and reaches it in exactly the case this
+// function is not called (no KEY published yet).
 func (zd *ZoneData) VerifyPublishedKeyRRs(name string) error {
 	_, err := zd.verifyPublishedKeyRRs(name)
 	return err
