@@ -1099,85 +1099,98 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			}
 
 		case <-ticker.C:
-			// IterCb rather than Items(): Items() copies the whole map every
-			// second, and at any real zone count that is a copy per tick for
-			// the sake of a handful of due zones.
+			// IterCb holds each shard's read lock while the callback runs, so
+			// the callback does nothing but decrement and collect. Every
+			// decision, and every map mutation, happens AFTER the walk.
 			//
-			// It holds each shard's read lock while the callback runs, so a
-			// counter that has to GO is collected here and removed after the
-			// walk -- Remove takes the same shard's write lock, and calling it
-			// from inside would deadlock the engine on the first orphan.
-			var orphaned []string
+			// Remove takes the same shard's write lock -- that much was already
+			// handled here. So does Set, and initialLoadZone calls Set for the
+			// very zone being iterated (both on the adopted-copy path and on
+			// success). Taking a shard's write lock while holding its read lock
+			// in the same goroutine deadlocks permanently, and a blocked engine
+			// stops reading zonerefch and bumpch: the whole-engine stall this
+			// branch exists to remove, reached by another road.
+			//
+			// Collecting counters rather than names because the counter carries
+			// its own Name, and because the map entry may be replaced by the
+			// work below -- the pointer stays valid either way.
+			var due []*RefreshCounter
 			refreshCounters.IterCb(func(zone string, rc *RefreshCounter) {
 				rc.CurRefresh--
 				if rc.CurRefresh <= 0 {
-					lgEngine.Debug("refreshing zone due to refresh counter", "zone", zone)
-					// log.Printf("Len(Zones) = %d", len(Zones))
-					zd, ok := Zones.Get(zone)
-					if !ok || zd == nil {
-						// Zone was deleted (RemoveDynamicZone / config reload)
-						// after its counter was created. Drop the orphaned counter
-						// so we never dereference a missing entry on the next tick.
-						lgEngine.Debug("ticker: zone gone, dropping stale refresh counter", "zone", zone)
-						orphaned = append(orphaned, zone)
-						return
-					}
-					if zd.HasServiceImpactingError() {
-						lgEngine.Warn("zone in error state, not refreshing", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
-						return
-					}
-
-					// If zone never completed initial load, retry via initialLoadZone
-					// to get the full treatment (callbacks, signing, sync setup).
-					if zd.FirstZoneLoad {
-						lgEngine.Info("retrying initial load for zone", "zone", zone)
-						// Clear RefreshError to allow the retry. Other categories
-						// (rollover-policy, config) are independent and survive.
-						zd.ClearError(RefreshError)
-						if _, err := initialLoadZone(ctx, zd, zone, ZoneRefresher{Name: zone, Force: true}, conf,
-							refreshCounters, tryPostpass); err != nil {
-							noteRefreshFailure(zd, zone, err, "initial load retry failed")
-						} else {
-							if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); err != nil {
-								lgEngine.Error("initial load retry: policy sync failed", "zone", zone, "error", err)
-								zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
-								zd.LatestError = time.Now()
-								rc.CurRefresh = 30 // retry sooner
-								return
-							}
-						}
-						rc.CurRefresh = rc.SOARefresh
-						return
-					}
-
-					// Data loaded + Ready, but first-load policy sync/drain did
-					// not finish (OnFirstLoad retained). Retry only that — no
-					// re-Refresh, no re-InstallInitialSnapshot.
-					if hasPendingOnFirstLoad(zd) {
-						if err := finishFirstLoadPolicy(ctx, zd, conf, zd.DnssecPolicyName); err != nil {
-							lgEngine.Warn("first-load policy completion retry failed", "zone", zone, "err", err)
-							zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
-							zd.LatestError = time.Now()
-							rc.CurRefresh = 30
-							return
-						}
-						rc.CurRefresh = rc.SOARefresh
-						return
-					}
-
-					// Dispatched, not run: this goroutine has three other
-					// channels to read. The counter is deliberately NOT reset
-					// here -- it is reset when the outcome comes back, so a
-					// refresh that outlives its own interval does not silently
-					// get a second one queued behind it, and a zone the pool
-					// could not take stays due for the next tick.
-					dispatchRefresh(pool, inflight, refreshJob{
-						zd:   zd,
-						zone: zone,
-						gen:  zd.generation.Load(),
-					})
+					due = append(due, rc)
 				}
 			})
+
+			var orphaned []string
+			for _, rc := range due {
+				zone := rc.Name
+				lgEngine.Debug("refreshing zone due to refresh counter", "zone", zone)
+				// log.Printf("Len(Zones) = %d", len(Zones))
+				zd, ok := Zones.Get(zone)
+				if !ok || zd == nil {
+					// Zone was deleted (RemoveDynamicZone / config reload)
+					// after its counter was created. Drop the orphaned counter
+					// so we never dereference a missing entry on the next tick.
+					lgEngine.Debug("ticker: zone gone, dropping stale refresh counter", "zone", zone)
+					orphaned = append(orphaned, zone)
+					continue
+				}
+				if zd.HasServiceImpactingError() {
+					lgEngine.Warn("zone in error state, not refreshing", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
+					continue
+				}
+
+				// If zone never completed initial load, retry via initialLoadZone
+				// to get the full treatment (callbacks, signing, sync setup).
+				if zd.FirstZoneLoad {
+					lgEngine.Info("retrying initial load for zone", "zone", zone)
+					// Clear RefreshError to allow the retry. Other categories
+					// (rollover-policy, config) are independent and survive.
+					zd.ClearError(RefreshError)
+					if _, err := initialLoadZone(ctx, zd, zone, ZoneRefresher{Name: zone, Force: true}, conf,
+						refreshCounters, tryPostpass); err != nil {
+						noteRefreshFailure(zd, zone, err, "initial load retry failed")
+					} else {
+						if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); err != nil {
+							lgEngine.Error("initial load retry: policy sync failed", "zone", zone, "error", err)
+							zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
+							zd.LatestError = time.Now()
+							rc.CurRefresh = 30 // retry sooner
+							continue
+						}
+					}
+					rc.CurRefresh = rc.SOARefresh
+					continue
+				}
+
+				// Data loaded + Ready, but first-load policy sync/drain did
+				// not finish (OnFirstLoad retained). Retry only that — no
+				// re-Refresh, no re-InstallInitialSnapshot.
+				if hasPendingOnFirstLoad(zd) {
+					if err := finishFirstLoadPolicy(ctx, zd, conf, zd.DnssecPolicyName); err != nil {
+						lgEngine.Warn("first-load policy completion retry failed", "zone", zone, "err", err)
+						zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
+						zd.LatestError = time.Now()
+						rc.CurRefresh = 30
+						continue
+					}
+					rc.CurRefresh = rc.SOARefresh
+					continue
+				}
+
+				// Dispatched, not run: this goroutine has three other
+				// channels to read. The counter is deliberately NOT reset
+				// here -- it is reset when the outcome comes back, so a
+				// refresh that outlives its own interval does not silently
+				// get a second one queued behind it, and a zone the pool
+				// could not take stays due for the next tick.
+				dispatchRefresh(pool, inflight, refreshJob{
+					zd:   zd,
+					zone: zone,
+					gen:  zd.generation.Load(),
+				})
+			}
 			for _, zone := range orphaned {
 				refreshCounters.Remove(zone)
 			}
