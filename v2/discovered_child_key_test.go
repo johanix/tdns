@@ -95,3 +95,71 @@ func TestARecordedKeyIsFoundBeforeTheDiscoveryPath(t *testing.T) {
 		t.Error("the row became trusted without any verification")
 	}
 }
+
+// The trust rule itself, pinned.
+//
+// A child KEY found where the policy allows and DNSSEC-validated there is
+// SUFFICIENT for promotion to trusted. Nothing further is required, and
+// nothing further should ever be added quietly: without this rule holding,
+// both bootstrap mechanisms are impossible, because DNSSEC validation of the
+// published KEY is the only evidence either of them produces.
+//
+// require-dnssec makes that evidence NECESSARY. This asserts the other half --
+// that it is also enough.
+func TestDnssecValidationIsSufficientForTrust(t *testing.T) {
+	pol := DefaultDelegationPolicy()
+	if !pol.RequireDnssec {
+		t.Fatal("the default policy no longer requires DNSSEC; the necessary half is gone")
+	}
+	if len(pol.Mechanisms) == 0 {
+		t.Fatal("the default policy has no mechanisms, so it never bootstraps at all")
+	}
+
+	for _, tc := range []struct {
+		name          string
+		verified      bool
+		dnssec        bool
+		requireDnssec bool
+		wantAccepted  bool
+		why           string
+	}{
+		{
+			name: "found and DNSSEC-validated", verified: true, dnssec: true,
+			requireDnssec: true, wantAccepted: true,
+			why: "this is the whole of the at-apex and at-ns bootstrap: if it does not " +
+				"promote, neither mechanism can ever complete",
+		},
+		{
+			name: "found but not DNSSEC-validated, and required", verified: true, dnssec: false,
+			requireDnssec: true, wantAccepted: false,
+			why: "require-dnssec means the evidence is necessary",
+		},
+		{
+			name: "found, not validated, not required", verified: true, dnssec: false,
+			requireDnssec: false, wantAccepted: true,
+			why: "an operator who turned require-dnssec off asked for exactly this",
+		},
+		{
+			name: "not found where the policy looks", verified: false, dnssec: true,
+			requireDnssec: true, wantAccepted: false,
+			why: "mechanisms are the scope of the search; a key validated somewhere " +
+				"the parent was not asked to look is not evidence for this parent",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			accepted := tc.verified && !(tc.requireDnssec && !tc.dnssec)
+			if accepted != tc.wantAccepted {
+				t.Fatalf("the rule this test encodes disagrees with itself; fix the test")
+			}
+			// And the rule as the code applies it, through the same predicate
+			// imrChildKeyVerifier uses.
+			got := childKeyAcceptable(tc.verified, tc.dnssec, DelegationPolicy{
+				Mechanisms:    []string{"at-apex", "at-ns"},
+				RequireDnssec: tc.requireDnssec,
+			})
+			if got != tc.wantAccepted {
+				t.Errorf("accepted=%v, want %v: %s", got, tc.wantAccepted, tc.why)
+			}
+		})
+	}
+}

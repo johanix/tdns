@@ -283,6 +283,30 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, pa
 // verifier is imrChildKeyVerifier.
 type childKeyVerifier func(ctx context.Context) (accepted, dnssecValidated bool, reason error)
 
+// childKeyAcceptable is the trust rule, in one place so it cannot quietly grow
+// a third condition.
+//
+// A child KEY found where the policy allows, and DNSSEC-validated there, is
+// SUFFICIENT for promotion to trusted. That is not a convenience: DNSSEC
+// validation of the published KEY is the only evidence the at-apex and at-ns
+// mechanisms produce, so if it is not enough on its own, neither mechanism can
+// ever complete and there is no automatic bootstrap at all.
+//
+// require-dnssec makes that evidence necessary; nothing makes it insufficient.
+// mechanisms are the SCOPE of the search rather than an extra requirement --
+// VerifyChildKey only looks where they say -- so "validated" already means
+// "validated somewhere this parent agreed to look".
+//
+// The one thing that is not a cryptographic question: a policy with no
+// mechanisms at all is an operator declining automatic bootstrap, and
+// TriggerChildKeyVerification returns before reaching here.
+func childKeyAcceptable(verified, dnssecValidated bool, pol DelegationPolicy) bool {
+	if !verified {
+		return false
+	}
+	return dnssecValidated || !pol.RequireDnssec
+}
+
 func imrChildKeyVerifier(childZone, keyRR string, pol DelegationPolicy) childKeyVerifier {
 	return func(ctx context.Context) (bool, bool, error) {
 		imr := Globals.ImrEngine
@@ -296,6 +320,9 @@ func imrChildKeyVerifier(childZone, keyRR string, pol DelegationPolicy) childKey
 		// Compiled policy: absent require-dnssec became true at compile.
 		if pol.RequireDnssec && !dnssecValidated {
 			return false, false, errors.New("KEY found but not DNSSEC-validated, and require-dnssec is set")
+		}
+		if !childKeyAcceptable(verified, dnssecValidated, pol) {
+			return false, false, errors.New("KEY not acceptable under the delegation policy")
 		}
 		return true, dnssecValidated, nil
 	}
