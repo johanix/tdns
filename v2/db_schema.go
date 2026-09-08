@@ -28,6 +28,7 @@ child	  TEXT,
 owner	  TEXT,
 rrtype	  TEXT,
 rr		  TEXT,
+origin	  TEXT NOT NULL DEFAULT 'asserted',
 UNIQUE (owner,rr)
 )`,
 

@@ -1678,6 +1678,12 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		// no error, no warning -- and the documented remedy was to unpublish
 		// the whole RRset and republish, which discards the operator's own
 		// records.
+		// Seed the delegation store from the served zone before anything
+		// reads it, and before the DSYNC publication below can fail and
+		// return: the two are independent, and an unseeded store is the
+		// worse outcome. See delegation_adopt.go.
+		zd.seedDelegationStore()
+
 		lg.Debug("SetupZoneSync: reconciling the DSYNC RRset", "zone", zd.ZoneName)
 		if err := zd.PublishDsyncRRs(context.Background()); err != nil {
 			lg.Error("PublishDsyncRRs failed", "zone", zd.ZoneName, "err", err)

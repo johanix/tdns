@@ -87,6 +87,15 @@ func (b *ZonefileDelegationBackend) refreshFragments(parentZone string, affected
 	return nil
 }
 
+// AdoptChildDelegation implements DelegationAdopter. The rows go into the
+// store only; no fragment is written, because what is being adopted was read
+// from the served zone and is therefore already in whatever generates it. The
+// child's next update regenerates its fragment from the store, observations
+// included.
+func (b *ZonefileDelegationBackend) AdoptChildDelegation(parentZone, childZone string, rrs []dns.RR) (int, error) {
+	return (&DBDelegationBackend{kdb: b.kdb}).AdoptChildDelegation(parentZone, childZone, rrs)
+}
+
 func (b *ZonefileDelegationBackend) GetDelegationData(parentZone, childZone string) (map[string]map[uint16][]dns.RR, error) {
 	dbBackend := &DBDelegationBackend{kdb: b.kdb}
 	return dbBackend.GetDelegationData(parentZone, childZone)
