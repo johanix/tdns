@@ -206,6 +206,94 @@ func waitOrDone(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// rememberDiscoveredChildKey records a child SIG(0) key that was found in DNS
+// as known-but-untrusted, and starts the verification that can promote it.
+//
+// Without this a key the parent can find AND validate is refused forever.
+// TriggerChildKeyVerification had exactly one caller: the TRUSTSTORE-UPDATE arm
+// of the updater, after a key has been STORED. The DNS-discovery path in
+// ValidateUpdate stores nothing, so it produced no verification, so the key
+// stayed untrusted and every update from that child was refused with "known but
+// not trusted" -- permanently, with nothing in the log to say what was being
+// waited for. Neither delegation policy offered a way out: with unvalidated
+// uploads refused nothing is ever stored, and with them allowed a child that
+// already holds a key never runs the upload ceremony in the first place (#574).
+//
+// A row has to exist before the verifier can do anything: promotion is an
+// UPDATE of the TrustStore row, so a verification with no row promotes nothing.
+// Stored untrusted, which authorises nothing by itself -- the verification is
+// what decides, exactly as it does for an uploaded key.
+//
+// Reached at most once per key. ValidateUpdate consults the TrustStore first
+// and returns on a hit whether or not the row is trusted, so the second update
+// from this child takes that path instead and no second verification starts.
+//
+// Best effort: a child that cannot be recorded is refused as it was before,
+// which is what would have happened anyway.
+func (zd *ZoneData) rememberDiscoveredChildKey(key *Sig0Key) {
+	if zd == nil || zd.KeyDB == nil || key == nil {
+		return
+	}
+	// Only for names this zone actually delegates. Any signer at all can
+	// publish a KEY and send us a signed UPDATE; without this that is a way to
+	// have rows created for arbitrary names.
+	if !zd.IsChildDelegation(key.Name) {
+		lgSigner.Debug("not recording a discovered SIG(0) key: not a child delegation of this zone",
+			"zone", zd.ZoneName, "signer", key.Name, "keyid", key.Keyid)
+		return
+	}
+
+	keyRR := key.Key.String()
+	tx, err := zd.KeyDB.Begin("rememberDiscoveredChildKey")
+	if err != nil {
+		lgSigner.Error("cannot record a discovered child SIG(0) key", "zone", key.Name, "err", err)
+		return
+	}
+	resp, err := zd.KeyDB.Sig0TrustMgmt(tx, TruststorePost{
+		Command:    "sig0",
+		SubCommand: "add",
+		Zone:       zd.ZoneName,
+		Keyname:    key.Name,
+		Keyid:      int(key.Keyid),
+		// Validated is what the DNS lookup concluded; trusted is not ours to
+		// grant here.
+		Validated:       key.Validated,
+		DnssecValidated: key.Validated,
+		Trusted:         false,
+		Src:             "dns",
+		KeyRR:           keyRR,
+	})
+	if err != nil || (resp != nil && resp.Error) {
+		_ = tx.Rollback()
+		msg := ""
+		if resp != nil {
+			msg = resp.ErrorMsg
+		}
+		lgSigner.Error("cannot record a discovered child SIG(0) key",
+			"zone", key.Name, "keyid", key.Keyid, "err", err, "resp", msg)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		lgSigner.Error("cannot commit a discovered child SIG(0) key",
+			"zone", key.Name, "keyid", key.Keyid, "err", err)
+		return
+	}
+
+	lgSigner.Info("recorded a child SIG(0) key found in DNS; verifying it",
+		"parent", zd.ZoneName, "zone", key.Name, "keyid", key.Keyid, "dnssec_validated", key.Validated)
+	zd.KeyDB.TriggerChildKeyVerification(zd.KeyDB.lifetimeCtx(), key.Name, zd.ZoneName, key.Keyid, keyRR)
+}
+
+// lifetimeCtx is the process-lifetime context if one has been recorded, and a
+// background context otherwise -- a CLI or a test that never starts the updater
+// engine still gets a usable one.
+func (kdb *KeyDB) lifetimeCtx() context.Context {
+	if kdb == nil || kdb.engineCtx == nil {
+		return context.Background()
+	}
+	return kdb.engineCtx
+}
+
 // TriggerChildKeyVerification starts an async verification of a child KEY
 // that was just stored in the TrustStore: DNS lookup, retry with backoff, then
 // trust. ctx is the engine's lifetime context. The verification retries with
@@ -238,6 +326,30 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, pa
 // verifier is imrChildKeyVerifier.
 type childKeyVerifier func(ctx context.Context) (accepted, dnssecValidated bool, reason error)
 
+// childKeyAcceptable is the trust rule, in one place so it cannot quietly grow
+// a third condition.
+//
+// A child KEY found where the policy allows, and DNSSEC-validated there, is
+// SUFFICIENT for promotion to trusted. That is not a convenience: DNSSEC
+// validation of the published KEY is the only evidence the at-apex and at-ns
+// mechanisms produce, so if it is not enough on its own, neither mechanism can
+// ever complete and there is no automatic bootstrap at all.
+//
+// require-dnssec makes that evidence necessary; nothing makes it insufficient.
+// mechanisms are the SCOPE of the search rather than an extra requirement --
+// VerifyChildKey only looks where they say -- so "validated" already means
+// "validated somewhere this parent agreed to look".
+//
+// The one thing that is not a cryptographic question: a policy with no
+// mechanisms at all is an operator declining automatic bootstrap, and
+// TriggerChildKeyVerification returns before reaching here.
+func childKeyAcceptable(verified, dnssecValidated bool, pol DelegationPolicy) bool {
+	if !verified {
+		return false
+	}
+	return dnssecValidated || !pol.RequireDnssec
+}
+
 func imrChildKeyVerifier(childZone, keyRR string, pol DelegationPolicy) childKeyVerifier {
 	return func(ctx context.Context) (bool, bool, error) {
 		imr := Globals.ImrEngine
@@ -251,6 +363,9 @@ func imrChildKeyVerifier(childZone, keyRR string, pol DelegationPolicy) childKey
 		// Compiled policy: absent require-dnssec became true at compile.
 		if pol.RequireDnssec && !dnssecValidated {
 			return false, false, errors.New("KEY found but not DNSSEC-validated, and require-dnssec is set")
+		}
+		if !childKeyAcceptable(verified, dnssecValidated, pol) {
+			return false, false, errors.New("KEY not acceptable under the delegation policy")
 		}
 		return true, dnssecValidated, nil
 	}

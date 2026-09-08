@@ -176,8 +176,30 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 					tp.Keyname, tp.Keyid, tp.Trusted)
 			}
 		} else if tp.Src == "dns" {
-			resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key to be fetched via DNS (not yet done)", tp.Keyname)
-			// schedule some sort of DNS fetching exercise.
+			// A key the parent found in DNS for itself, recorded so the
+			// verification that can promote it has a row to promote.
+			//
+			// This used to store nothing at all -- "to be fetched via DNS (not
+			// yet done)" -- which is half of why a discovered key could never
+			// become trusted: no row, so nothing for the verifier to update,
+			// so the child was refused forever (#574).
+			//
+			// The KeyRR guard is the original intent of the branch, kept: a
+			// caller that names a key without supplying it is asking for a
+			// fetch, and there is nothing to write yet.
+			if tp.KeyRR == "" {
+				resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key to be fetched via DNS (no key supplied)", tp.Keyname)
+			} else {
+				_, err = tx.Exec(addkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.DnssecValidated, tp.Trusted, tp.Src, tp.KeyRR)
+				if err != nil {
+					lgSigner.Error("failed to add SIG(0) key to TrustStore from DNS", "err", err)
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				} else {
+					resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d found in DNS (trusted=%v) added to TrustStore",
+						tp.Keyname, tp.Keyid, tp.Trusted)
+				}
+			}
 		}
 
 		// Must also delete from the cache
