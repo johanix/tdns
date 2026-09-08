@@ -935,6 +935,24 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 // wants that. The publish path does not: restitchNsecLocked runs immediately
 // after and regenerates and signs the chain itself, so doing it here would be a
 // second full pass over the zone for a result that is about to be replaced.
+// describeRRset names an RRset for a log line or an error, from whatever it
+// actually has. It never indexes RRs: its callers are error paths, and an empty
+// RRset is one of the things they report.
+func describeRRset(rrset core.RRset) (owner, rrtype string) {
+	if len(rrset.RRs) > 0 {
+		h := rrset.RRs[0].Header()
+		return h.Name, dns.TypeToString[h.Rrtype]
+	}
+	owner = rrset.Name
+	if owner == "" {
+		owner = "<unnamed>"
+	}
+	if rrtype = dns.TypeToString[rrset.RRtype]; rrtype == "" {
+		rrtype = "<unknown type>"
+	}
+	return owner, rrtype
+}
+
 func (zd *ZoneData) signWorkingSetLocked(dak *DnssecKeys, clamp *ClampParams, force, signNsec bool, owners map[string]bool) (int, uint32, error) {
 	if dak == nil {
 		return 0, 0, fmt.Errorf("signWorkingSetLocked: zone %s: nil DnssecKeys; the caller must resolve them (see the note above)", zd.ZoneName)
@@ -943,10 +961,36 @@ func (zd *ZoneData) signWorkingSetLocked(dak *DnssecKeys, clamp *ClampParams, fo
 	newrrsigs := 0
 	var maxObservedTTL uint32
 
+	// The first signing failure, kept so the caller can refuse.
+	//
+	// This used to be logged and dropped. signWorkingSetLocked then returned
+	// nil, signStagedScopeLocked returned nil, and publishWorkingSetLocked went
+	// on to swap in a snapshot whose RRsets had NOT been signed -- publishing a
+	// signing zone's content unsigned, which is the one outcome
+	// refuseUnsignableWorkingSetLocked exists to prevent. That refusal only ever
+	// fired when KEY RESOLUTION failed, never when signing itself did.
+	//
+	// The walk continues after a failure rather than stopping at the first one:
+	// the log then names every RRset that could not be signed, which is what an
+	// operator needs, and the publish is refused either way.
+	var signErr error
 	MaybeSignRRset := func(rrset core.RRset, zone string) (core.RRset, bool) {
 		resigned, err := zd.SignRRset(&rrset, zone, dak, force, clamp)
 		if err != nil {
-			lgSigner.Error("failed to sign RRset", "name", rrset.RRs[0].Header().Name, "rrtype", dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], "zone", zd.ZoneName)
+			// Described WITHOUT reading RRs[0].
+			//
+			// This log line used to name the RRset by its first record, and one
+			// of the errors it reports is "rrset has no RRs" -- so the
+			// diagnostic panicked on precisely the case it exists to describe,
+			// taking the process down from inside the signing walk. Exactly
+			// #565, one layer further in: a dereference above the guard that
+			// makes it safe.
+			owner, rrtype := describeRRset(rrset)
+			lgSigner.Error("failed to sign RRset", "name", owner, "rrtype", rrtype,
+				"zone", zd.ZoneName, "err", err)
+			if signErr == nil {
+				signErr = fmt.Errorf("signing %s %s: %w", owner, rrtype, err)
+			}
 		}
 		if resigned {
 			newrrsigs++
@@ -1089,6 +1133,13 @@ func (zd *ZoneData) signWorkingSetLocked(dak *DnssecKeys, clamp *ClampParams, fo
 		}
 	}
 
+	// A failure anywhere in the walk refuses the whole pass. The caller on the
+	// publish path turns this into refuseUnsignableWorkingSetLocked: the
+	// previous snapshot goes on being served and the change stays staged,
+	// which is the right answer to "some of this zone would go out unsigned".
+	if signErr != nil {
+		return newrrsigs, maxObservedTTL, signErr
+	}
 	return newrrsigs, maxObservedTTL, nil
 }
 

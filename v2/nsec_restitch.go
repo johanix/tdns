@@ -7,7 +7,6 @@ package tdns
 import (
 	"fmt"
 	"sort"
-	"time"
 
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -176,14 +175,16 @@ func (zd *ZoneData) restitchNsecLocked(sm *signingMaterial) error {
 	// nil clamp would leave these records outside the TTL ceiling the rest of
 	// the zone is held to, so the chain would drift above the policy after
 	// every update that touched it.
-	var clamp *ClampParams
-	if zd.DnssecPolicy != nil {
-		var cerr error
-		clamp, cerr = ClampParamsForZone(zd.KeyDB, zd.ZoneName, zd.DnssecPolicy, time.Now())
-		if cerr != nil {
-			return fmt.Errorf("resolving clamp parameters to restitch the NSEC chain: %w", cerr)
-		}
-	}
+	// The publish's own clamp, not a second resolution.
+	//
+	// publishWorkingSetLocked resolves signing material ONCE for the publish so
+	// that every signing step in it observes the same K -- its comment says so,
+	// and this was the one step that did not. Resolving again here used a fresh
+	// time.Now(), so the NSEC records could be signed under a different K-step
+	// than the SOA and ZONEMD in the same snapshot, and a resolution that failed
+	// on the second attempt refused a publish whose material had already
+	// resolved successfully.
+	clamp := sm.clamp
 
 	ttl := zd.nsecTTLLocked()
 	rewritten := 0

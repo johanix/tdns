@@ -1050,8 +1050,27 @@ func (zd *ZoneData) signStagedScopeLocked(sm *signingMaterial) error {
 // an unrepairable chain is a defect in derived data, an unsignable zone means
 // this server can no longer produce the signatures its own configuration says
 // it must.
+// clearQueuedPublishAfterRefusalLocked stops the publisher spinning on a
+// publish that has just been refused.
+//
+// The refusal helpers restore the serial and leave the working set staged, on
+// purpose: the change is not lost and a later publish retries it. But they left
+// publishQueued set and lastPublish untouched, and runPublisher republishes
+// whenever publishQueued is set and the cadence has elapsed -- which it has,
+// because lastPublish never moved. So a zone that cannot sign was re-attempting
+// the same doomed publish as fast as the publisher could take zd.mu.
+//
+// The queue flag goes and the clock moves, so the retry waits out the
+// configured cadence like any other. The working set stays exactly where it is.
+func (zd *ZoneData) clearQueuedPublishAfterRefusalLocked() {
+	zd.publishQueued = false
+	zd.publishUrgent = false
+	zd.lastPublish = time.Now()
+}
+
 func (zd *ZoneData) refuseUnsignableWorkingSetLocked(prevSerial uint32, err error) {
 	zd.CurrentSerial = prevSerial
+	zd.clearQueuedPublishAfterRefusalLocked()
 	lg.Error("publish: refusing to publish unsigned content for a zone that signs"+
 		" its own; the previous snapshot is still being served and the change"+
 		" remains staged", "zone", zd.ZoneName, "error", err)
@@ -1075,6 +1094,7 @@ func (zd *ZoneData) refuseUnsignableWorkingSetLocked(prevSerial uint32, err erro
 // that no snapshot carries and no secondary will ever be offered.
 func (zd *ZoneData) refuseUnrepairableChainLocked(prevSerial uint32, err error) {
 	zd.CurrentSerial = prevSerial
+	zd.clearQueuedPublishAfterRefusalLocked()
 	lg.Error("publish: refusing to publish, because the NSEC chain could not be"+
 		" repaired to describe this zone; the previous snapshot is still being"+
 		" served and the change remains staged",
