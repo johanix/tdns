@@ -291,6 +291,12 @@ var rootCmd = &cobra.Command{
 					m.SetQuestion(qname, rrtype)
 				}
 				// Set CD (Checking Disabled) flag if requested
+				if options["ad_bit"] == "true" {
+					m.MsgHdr.AuthenticatedData = true
+				}
+				if options["ad_bit"] == "false" {
+					m.MsgHdr.AuthenticatedData = false
+				}
 				if options["cd_bit"] == "true" {
 					m.MsgHdr.CheckingDisabled = true
 				}
@@ -457,8 +463,37 @@ var rootCmd = &cobra.Command{
 					}
 				}
 
+				// +time=: bound each attempt. Without this the client's own
+				// default applies and there is no way to shorten it from the
+				// command line.
+				if v := options["timeout"]; v != "" {
+					if n, cerr := strconv.Atoi(v); cerr == nil {
+						clientOpts = append(clientOpts,
+							core.WithTimeout(time.Duration(n)*time.Second))
+					}
+				}
 				client := core.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
-				res, _, err := client.Exchange(m, server, false) // FIXME: duration is always zero
+
+				// +tries=: total attempts, not retries after the first. Only a
+				// transport failure is retried -- a response carrying SERVFAIL
+				// or NXDOMAIN is an answer, and asking again just makes a
+				// negative slower.
+				tries := 1
+				if v := options["tries"]; v != "" {
+					if n, cerr := strconv.Atoi(v); cerr == nil && n > 0 {
+						tries = n
+					}
+				}
+				var res *dns.Msg
+				for attempt := 1; ; attempt++ {
+					res, _, err = client.Exchange(m, server, false) // FIXME: duration is always zero
+					if err == nil || attempt >= tries {
+						break
+					}
+					if tdns.Globals.Verbose {
+						fmt.Fprintf(os.Stderr, ";; attempt %d/%d failed: %v\n", attempt, tries, err)
+					}
+				}
 				if err == nil && res != nil && res.Truncated && t == core.TransportDo53 && !forceTCP {
 					// Warn if strict privacy was requested and we are falling
 					// back to unencrypted TCP.
@@ -829,6 +864,45 @@ func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]st
 		options["pins"] += pin
 		return options, nil
 	}
+	// dig compatibility: +time=/+timeout= bound one query, +tries=/+retry=
+	// decide how many attempts it gets. Scripts reach for these when they must
+	// not hang, and rejecting them fatally means a dig-shaped script dies here
+	// rather than degrading.
+	if strings.HasPrefix(ucarg, "+TIME=") || strings.HasPrefix(ucarg, "+TIMEOUT=") {
+		v := arg[strings.Index(arg, "=")+1:]
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("+time= requires a number of seconds, not %q", v)
+		}
+		// dig clamps rather than refusing: 0 means "as fast as possible", and
+		// its ceiling is 255.
+		if n < 1 {
+			n = 1
+		}
+		if n > 255 {
+			n = 255
+		}
+		options["timeout"] = strconv.Itoa(n)
+		return options, nil
+	}
+	if strings.HasPrefix(ucarg, "+TRIES=") || strings.HasPrefix(ucarg, "+RETRY=") {
+		v := arg[strings.Index(arg, "=")+1:]
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("%s requires a number, not %q", strings.SplitN(ucarg, "=", 2)[0], v)
+		}
+		// dig's two spellings differ by one: +tries is the total number of
+		// attempts, +retry is the number AFTER the first. Both clamp to at
+		// least one attempt -- +tries=0 in dig still sends one query.
+		if strings.HasPrefix(ucarg, "+RETRY=") {
+			n = n + 1
+		}
+		if n < 1 {
+			n = 1
+		}
+		options["tries"] = strconv.Itoa(n)
+		return options, nil
+	}
 	if strings.HasPrefix(ucarg, "+CAFILE=") {
 		path := arg[len("+cafile="):]
 		if path == "" {
@@ -875,6 +949,16 @@ func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]st
 		return options, nil
 	case "+CD":
 		options["cd_bit"] = "true"
+		return options, nil
+	case "+ADFLAG", "+AD":
+		// The AD bit in the OUTGOING query. dig sets it by default; dog does
+		// not, and this does not change that -- it makes the flag work for
+		// callers that ask explicitly. Changing the default is a separate
+		// decision, tracked in the issue.
+		options["ad_bit"] = "true"
+		return options, nil
+	case "+NOADFLAG", "+NOAD":
+		options["ad_bit"] = "false"
 		return options, nil
 	case "+COMPACT", "+CO":
 		options["co_bit"] = "true"
