@@ -194,6 +194,11 @@ func TestApproveChildUpdateReportsCoherenceOnTheDSPathToo(t *testing.T) {
 			us.RejectionEDE, edns0.EDECodeToString[us.RejectionEDE],
 			edns0.EDEDelegationUnverifiable, err)
 	}
+	if us.ValidationRcode != dns.RcodeRefused {
+		t.Errorf("rcode %s, want REFUSED: a coherence refusal is permanent and must not"+
+			" answer SERVFAIL, on this arm as much as the other",
+			dns.RcodeToString[int(us.ValidationRcode)])
+	}
 }
 
 // N1: nameservers that disagree with each other. The parent asked and got
