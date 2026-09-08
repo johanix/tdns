@@ -79,7 +79,8 @@ func TestUnverifiableCoherenceFailuresAreMarkedAsSuch(t *testing.T) {
 		dsActions := []dns.RR{addRR(t, "child.example. 3600 IN DS 12345 15 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")}
 		err := zd.CheckDelegationCoherenceForUpdate(dsActions, nil)
 		if err == nil {
-			t.Skip("this parent does not require a DNSKEY lookup for these actions")
+			t.Fatal("a DS change with no way to look up the child's DNSKEYs was accepted;" +
+				" the DS arm of the coherence check is not being exercised at all")
 		}
 		if !errors.Is(err, ErrDelegationUnverifiable) {
 			t.Errorf("not marked unverifiable: %v", err)
@@ -124,10 +125,12 @@ func TestApproveChildUpdateReportsCoherenceNotPolicy(t *testing.T) {
 
 	approved, _, err := zd.ApproveChildUpdate(zd.ZoneName, us, r)
 	if approved {
-		t.Skip("this update was approved, so it never reached the coherence check")
+		t.Fatal("the update was approved, so it never reached the coherence check." +
+			" Skipping here would turn a broken fixture into a green test, which is" +
+			" how the thing this test exists for shipped in the first place")
 	}
 	if err == nil {
-		t.Skip("refused without an error, so not the coherence path")
+		t.Fatal("refused with no error, so this is not the coherence path")
 	}
 
 	if us.RejectionEDE == edns0.EDEZoneUpdatesNotAllowed {
@@ -142,5 +145,73 @@ func TestApproveChildUpdateReportsCoherenceNotPolicy(t *testing.T) {
 	if us.ValidationRcode != dns.RcodeRefused {
 		t.Errorf("rcode %s, want REFUSED: a coherence refusal is permanent and must not"+
 			" answer SERVFAIL", dns.RcodeToString[int(us.ValidationRcode)])
+	}
+}
+
+// N2's twin: the DS arm. ApproveChildUpdate runs the DS coherence check before
+// the NS one, so a test that only ever reaches the NS site leaves the DS call
+// site free to go back to 518 unnoticed -- which is the exact failure mode this
+// PR is about.
+func TestApproveChildUpdateReportsCoherenceOnTheDSPathToo(t *testing.T) {
+	zd := childKeyParent(t)
+
+	// No IMR, so there is no way to look up the child's DNSKEYs: the DS arm's
+	// "unverifiable" shape.
+	prevImr := Conf.Internal.ImrEngine
+	Conf.Internal.ImrEngine = nil
+	t.Cleanup(func() { Conf.Internal.ImrEngine = prevImr })
+	prevGlobal := Globals.ImrEngine
+	Globals.ImrEngine = nil
+	t.Cleanup(func() { Globals.ImrEngine = prevGlobal })
+
+	r := new(dns.Msg)
+	r.SetUpdate(zd.ZoneName)
+	r.Ns = []dns.RR{mustRR(t,
+		"child.parent.example. 3600 IN DS 12345 15 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")}
+
+	us := &UpdateStatus{
+		Type:                  "CHILD-UPDATE",
+		Validated:             true,
+		ValidatedByTrustedKey: true,
+		SignerName:            "child.parent.example.",
+		ValidationRcode:       dns.RcodeSuccess,
+	}
+
+	approved, _, err := zd.ApproveChildUpdate(zd.ZoneName, us, r)
+	if approved {
+		t.Fatal("a DS change was approved with no way to check that the child would still" +
+			" validate; the DS coherence arm is not being exercised")
+	}
+	if err == nil {
+		t.Fatal("refused with no error, so this is not the coherence path")
+	}
+	if us.RejectionEDE == edns0.EDEZoneUpdatesNotAllowed {
+		t.Fatalf("the DS arm still reports 'Zone does not allow DNS UPDATE'. The real reason"+
+			" was: %v", err)
+	}
+	if us.RejectionEDE != edns0.EDEDelegationUnverifiable {
+		t.Errorf("RejectionEDE = %d (%s), want unverifiable (%d). err=%v",
+			us.RejectionEDE, edns0.EDECodeToString[us.RejectionEDE],
+			edns0.EDEDelegationUnverifiable, err)
+	}
+}
+
+// N1: nameservers that disagree with each other. The parent asked and got
+// answers; they conflicted, so nothing was established about the delegation.
+// That is the retryable arm, and the message has always said so -- "retry once
+// they are in sync" is 544's advice, while 543 tells a child its delegation is
+// wrong.
+func TestDisagreeingNameserversAreUnverifiableNotIncoherent(t *testing.T) {
+	for _, err := range []error{
+		fmt.Errorf("the nameservers of child.example. do not agree on its NS RRset; retry once they are in sync: %w",
+			ErrDelegationUnverifiable),
+		fmt.Errorf("the nameservers of child.example. do not agree on the A records of ns1.child.example.; retry once they are in sync: %w",
+			ErrDelegationUnverifiable),
+	} {
+		if got := delegationCoherenceEDE(err); got != edns0.EDEDelegationUnverifiable {
+			t.Errorf("EDE %d (%s) for %q, want unverifiable: the message tells the child to"+
+				" retry, and the code should not tell it its delegation is wrong",
+				got, edns0.EDECodeToString[got], err)
+		}
 	}
 }
