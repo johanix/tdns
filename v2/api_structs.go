@@ -482,7 +482,9 @@ type ZoneParentSyncResponse struct {
 
 // ZoneChildSyncPost is the request type for /zone/childsync (parent-side operations).
 type ZoneChildSyncPost struct {
-	Command string // publish | unpublish
+	// publish | unpublish (tdns-auth), proxy-status | advert | reconcile
+	// (a childsync-proxy on tdns-agent).
+	Command string
 	Zone    string
 }
 
@@ -492,6 +494,12 @@ type ZoneChildSyncResponse struct {
 	Msg      string
 	Error    bool
 	ErrorMsg string
+
+	// The childsync-proxy's state, on the proxy commands.
+	ProxyStatus *ChildSyncProxyStatus `json:",omitempty"`
+	PushStatus  *ParentPushStatus     `json:",omitempty"`
+	// Advert is the advertisement delta as an nsupdate block (advert).
+	Advert string `json:",omitempty"`
 }
 
 // DsyncApiCredentialPost manages credentials for the DSYNC API scheme

@@ -334,6 +334,14 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 // StartAgent starts subsystems for tdns-agent
 func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error {
 	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
+	// The DSYNC API listener, for a childsync-proxy that offers the API
+	// scheme on its parent's behalf. Its own socket and its own auth, as on
+	// tdns-auth (StartAuth says why); SetupDsyncApiRouter returns nil when
+	// the scheme is not configured, so an agent that does not offer API gets
+	// no listener.
+	StartEngine(&Globals.App, "DsyncApiListener", func() error {
+		return conf.StartDsyncApiListener(ctx, conf.SetupDsyncApiRouter(ctx), conf.Internal.APIStopCh)
+	})
 	// In tdns-agent, IMR is active by default unless explicitly set to false
 	imrActive := conf.Imr.Active == nil || *conf.Imr.Active
 	if imrActive {
