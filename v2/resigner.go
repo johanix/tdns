@@ -73,6 +73,11 @@ func nextResignWake(zones map[string]*ZoneData, floor time.Duration) time.Durati
 		if !zd.Options[OptInlineSigning] && !zd.Options[OptOnlineSigning] {
 			continue
 		}
+		if zd.resignPendingSet() {
+			// Work already owed. Sleeping an hour on the renewal estimate
+			// would be sleeping through it.
+			return floor
+		}
 		due, ok := zd.resignDue()
 		if !ok {
 			return floor
@@ -149,35 +154,6 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 	timer := time.NewTimer(floor)
 	defer timer.Stop()
 
-	// replaceSignatures brings the served RRSIG set into line with the zone's
-	// currently-active keys, immediately. It cannot wait for the periodic
-	// ticker, because NeedsResigning short-circuits while validity is healthy --
-	// which is exactly the case after a rollover, where the existing RRSIGs are
-	// perfectly valid and merely made by the wrong key.
-	//
-	// ResignZone, not SignZone(force=true), and the difference is the point.
-	// SignZone is ADDITIVE: it writes signatures by the active keys and leaves
-	// RRSIGs by no-longer-active ones in place -- SignRRset says so itself, and
-	// says that replacing them belongs to ResignZone. So the forced pass this
-	// replaces added the right signatures and left the wrong ones on the wire,
-	// which is not what a key-state change needs. ResignZone strips and re-signs
-	// per RRset, on a local copy, so readers never see an unsigned intermediate.
-	replaceSignatures := func(zd *ZoneData) {
-		if zd == nil {
-			return
-		}
-		if !zd.signsItsOwnContent() {
-			return
-		}
-		lgSigner.Debug("resigner: replacing signatures after a key-state change", "zone", zd.ZoneName)
-		newrrsigs, err := zd.ResignZone(zd.KeyDB)
-		if err != nil {
-			lgSigner.Error("resigner: replacing signatures failed", "zone", zd.ZoneName, "err", err)
-			return
-		}
-		lgSigner.Info("resigner: signatures replaced", "zone", zd.ZoneName, "new_rrsigs", newrrsigs)
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -201,7 +177,7 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 			// anything is due.
 			switch req.Reason {
 			case ResignKeyStateChanged:
-				replaceSignatures(zd)
+				zd.replaceSignaturesNow()
 			case ResignPeriodic:
 				// Registration only; the watchlist add below is the whole effect.
 			default:
@@ -233,36 +209,7 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 					lgSigner.Info("ResignerEngine terminating during a renewal sweep")
 					return
 				}
-				// Skip zones where signing has been disabled since
-				// they were added to the list. MP zones can toggle
-				// OptInlineSigning dynamically based on HSYNC analysis.
-				if !zd.Options[OptInlineSigning] && !zd.Options[OptOnlineSigning] {
-					continue
-				}
-				// Renewal, not a rebuild. SignZone(force=false) used to be
-				// called here, and it rebuilt the NSEC chain and the DNSKEY
-				// RRset unsigned before checking anything -- so the freshness
-				// check was unreachable, everything was restaged, and the
-				// unconditional publish bumped the serial and notified. Once a
-				// minute, on every signed zone, whether or not anything had
-				// changed. See docs/2026-09-05-signing-build-vs-renewal.md.
-				lgSigner.Debug("renewing ageing signatures (periodic)", "zone", zd.ZoneName)
-				renewed, err := zd.RenewZoneSignatures(zd.KeyDB)
-				if err != nil {
-					lgSigner.Error("failed to renew zone signatures", "zone", zd.ZoneName, "err", err)
-					// Nothing was signed, so do not go on to say it was. An
-					// operator watching for "signatures renewed" would read the
-					// success line and miss the failure above it -- on the one
-					// pass whose whole job is to stop signatures ageing out.
-					continue
-				}
-				if renewed == 0 {
-					// The overwhelmingly common outcome, and not news. A line
-					// per zone per minute saying nothing happened is how this
-					// log stopped being readable.
-					continue
-				}
-				lgSigner.Info("zone signatures renewed (periodic)", "zone", zd.ZoneName, "rrsets_renewed", renewed)
+				resignSweepZone(zd)
 			}
 
 			wake := nextResignWake(ZonesToKeepSigned, floor)
@@ -271,4 +218,88 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 			timer.Reset(wake)
 		}
 	}
+}
+
+// replaceSignaturesNow brings the served RRSIG set into line with the zone's
+// currently-active keys, immediately. It cannot wait for the renewal pass,
+// because NeedsResigning short-circuits while validity is healthy -- which is
+// exactly the case after a rollover, where the existing RRSIGs are perfectly
+// valid and merely made by the wrong key.
+//
+// ResignZone, not SignZone(force=true), and the difference is the point.
+// SignZone is ADDITIVE: it writes signatures by the active keys and leaves
+// RRSIGs by no-longer-active ones in place -- SignRRset says so itself, and
+// says that replacing them belongs to ResignZone. So the forced pass this
+// replaces added the right signatures and left the wrong ones on the wire,
+// which is not what a key-state change needs. ResignZone strips and re-signs
+// per RRset, on a local copy, so readers never see an unsigned intermediate.
+func (zd *ZoneData) replaceSignaturesNow() {
+	if zd == nil {
+		return
+	}
+	if !zd.signsItsOwnContent() {
+		// Nothing here signs, so nothing is owed. Leaving the flag set would
+		// make every sweep retry a zone that can never satisfy it.
+		zd.takeResignPending()
+		return
+	}
+	// Claimed, not read: a concurrent trigger for the same zone should not
+	// produce two replaces of the same signatures.
+	zd.takeResignPending()
+	lgSigner.Debug("resigner: replacing signatures after a key-state change", "zone", zd.ZoneName)
+	newrrsigs, err := zd.ResignZone(zd.KeyDB)
+	if err != nil {
+		// Put it back. A failed replace leaves the zone serving signatures by
+		// keys that are no longer active, and the renewal pass will not find
+		// them: they are valid, just made by the wrong key.
+		zd.markResignPending()
+		lgSigner.Error("resigner: replacing signatures failed, will retry on the next pass",
+			"zone", zd.ZoneName, "err", err)
+		return
+	}
+	lgSigner.Info("resigner: signatures replaced", "zone", zd.ZoneName, "new_rrsigs", newrrsigs)
+}
+
+// resignSweepZone is one zone's share of a periodic resigner pass.
+//
+// Lifted out of the engine loop so the two things it has to get right can be
+// asserted without waiting out a real tick: an owed replace is not skipped, and
+// renewal does not stand in for one.
+func resignSweepZone(zd *ZoneData) {
+	// Skip zones where signing has been disabled since they were added to the
+	// list. MP zones can toggle OptInlineSigning dynamically based on HSYNC
+	// analysis.
+	if !zd.Options[OptInlineSigning] && !zd.Options[OptOnlineSigning] {
+		return
+	}
+	// A replace that never happened comes first: the request was dropped by a
+	// full queue, or the pass itself failed. Renewal cannot substitute for it
+	// -- it looks at signature AGE, and a post-rollover RRSIG by a retired key
+	// is valid and not old -- so without this the zone would go on serving
+	// signatures by a key that is gone until they finally expired.
+	if zd.resignPendingSet() {
+		zd.replaceSignaturesNow()
+	}
+	// Renewal, not a rebuild. SignZone(force=false) used to be called here, and
+	// it rebuilt the NSEC chain and the DNSKEY RRset unsigned before checking
+	// anything -- so the freshness check was unreachable, everything was
+	// restaged, and the unconditional publish bumped the serial and notified.
+	// Once a minute, on every signed zone, whether or not anything had changed.
+	// See docs/2026-09-05-signing-build-vs-renewal.md.
+	lgSigner.Debug("renewing ageing signatures (periodic)", "zone", zd.ZoneName)
+	renewed, err := zd.RenewZoneSignatures(zd.KeyDB)
+	if err != nil {
+		// Nothing was signed, so do not go on to say it was. An operator
+		// watching for "signatures renewed" would read the success line and
+		// miss the failure above it -- on the one pass whose whole job is to
+		// stop signatures ageing out.
+		lgSigner.Error("failed to renew zone signatures", "zone", zd.ZoneName, "err", err)
+		return
+	}
+	if renewed == 0 {
+		// The overwhelmingly common outcome, and not news. A line per zone per
+		// minute saying nothing happened is how this log stopped being readable.
+		return
+	}
+	lgSigner.Info("zone signatures renewed (periodic)", "zone", zd.ZoneName, "rrsets_renewed", renewed)
 }

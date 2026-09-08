@@ -407,6 +407,34 @@ func (zd *ZoneData) resignDue() (time.Time, bool) {
 	return sched.due, true
 }
 
+// markResignPending records that this zone needs its signatures replaced.
+//
+// triggerResign hands the zone to the resigner for an immediate pass, but that
+// send can be dropped (a full queue) and the pass itself can fail. Either way
+// the zone keeps serving signatures by keys that are no longer active, and the
+// renewal ticker will not notice: those signatures are VALID, so NeedsResigning
+// short-circuits and nothing is ever found due. The flag is what makes
+// triggerResign's "re-sign will happen on next cycle" true rather than a
+// reassuring log line.
+func (zd *ZoneData) markResignPending() {
+	zd.resignPending.Store(true)
+}
+
+// takeResignPending claims a pending replace, reporting whether there was one.
+//
+// Claiming rather than reading: the resigner is not the only possible caller,
+// and two passes replacing the same signatures concurrently is wasted work on
+// a zone that is already behind. A failed replace re-marks.
+func (zd *ZoneData) takeResignPending() bool {
+	return zd.resignPending.CompareAndSwap(true, false)
+}
+
+// resignPendingSet reports whether a replace is still owed, without claiming
+// it. For the scheduler, which only needs to know not to sleep long.
+func (zd *ZoneData) resignPendingSet() bool {
+	return zd.resignPending.Load()
+}
+
 // isGlueUnderDelegation reports whether name's addresses are glue for one of the
 // zone's delegations rather than authoritative data of our own.
 func isGlueUnderDelegation(name string, delegations []string) bool {

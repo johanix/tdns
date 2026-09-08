@@ -437,10 +437,22 @@ func triggerResign(conf *Config, zoneName string) {
 		return
 	}
 
+	// Marked BEFORE the send, not only on the drop. The request can also be
+	// delivered and then fail inside the resigner, and both outcomes leave the
+	// zone serving signatures by keys that are no longer active. The resigner
+	// clears this only when a replace has actually succeeded.
+	zd.markResignPending()
+
 	select {
 	case conf.Internal.ResignQ <- ResignRequest{Zd: zd, Reason: ResignKeyStateChanged}:
 		lgSigner.Debug("KeyStateWorker: triggered re-sign", "zone", zoneName)
 	default:
-		lgSigner.Warn("KeyStateWorker: ResignQ full, re-sign will happen on next cycle", "zone", zoneName)
+		// Dropping used to lose the request outright. The log said it would
+		// happen on the next cycle; that stopped being true when the ticker
+		// moved from a full rebuild to renewal, because renewal only looks at
+		// signature AGE and a post-rollover RRSIG by a retired key is not old.
+		// The flag above is what the next cycle now finds.
+		lgSigner.Warn("KeyStateWorker: ResignQ full, re-sign deferred to the next resigner pass",
+			"zone", zoneName)
 	}
 }

@@ -246,6 +246,13 @@ type ZoneData struct {
 	// missed renewal. In memory only: persisting it would add a value that can
 	// be wrong across a version change, to buy nothing a first pass does not.
 	nextResign atomic.Pointer[resignSchedule]
+	// resignPending records that this zone's signatures must be REPLACED --
+	// a key became active, inactive or retired -- and that it has not happened
+	// yet. The renewal ticker cannot discover this on its own: after a
+	// rollover the published RRSIGs are perfectly valid and merely made by the
+	// wrong key, so NeedsResigning short-circuits and renewal finds nothing
+	// due. Set by triggerResign, cleared only by a replace that succeeded.
+	resignPending atomic.Bool
 	// signingKeys is the per-zone copy-on-write active DNSSEC key set (G3).
 	// Lock-free reads via SigningKeys() / ActiveDnssecKeys(); writers republish
 	// post-commit via republishSigningKeys. Separate from the zone-data snapshot.
