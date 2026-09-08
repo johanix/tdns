@@ -4,7 +4,6 @@
 package tdns
 
 import (
-	"context"
 	"crypto"
 	"database/sql"
 	"log"
@@ -1276,15 +1275,7 @@ type DnssecKeys struct {
 type KeyDB struct {
 	DB     *sql.DB
 	DBFile string // sqlite file path, recorded by NewKeyDB
-	// engineCtx is the process-lifetime context, recorded by ZoneUpdaterEngine.
-	//
-	// Child-key verification retries with exponential backoff and can be
-	// sleeping for a long time when the process is asked to stop, so it must be
-	// started with a context that is cancelled at shutdown. The updater has one
-	// and the UPDATE validation path does not, and both now need to start a
-	// verification -- see rememberDiscoveredChildKey.
-	engineCtx context.Context
-	mu        sync.Mutex
+	mu     sync.Mutex
 	// Sig0Cache   map[string]*Sig0KeyCache
 	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
 	TruststoreSig0Cache *Sig0StoreT // was *Sig0StoreT

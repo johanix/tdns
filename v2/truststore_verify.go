@@ -235,7 +235,7 @@ func waitOrDone(ctx context.Context, d time.Duration) bool {
 // way that did not happen -- not a child, a policy that will not verify, a row
 // that was already there, a database failure -- so a caller (and a test) can
 // tell "verification is now under way because of me" from "nothing happened".
-func (zd *ZoneData) rememberDiscoveredChildKey(key *Sig0Key) bool {
+func (zd *ZoneData) rememberDiscoveredChildKey(ctx context.Context, key *Sig0Key) bool {
 	if zd == nil || zd.KeyDB == nil || key == nil {
 		return false
 	}
@@ -306,18 +306,8 @@ func (zd *ZoneData) rememberDiscoveredChildKey(key *Sig0Key) bool {
 
 	lgSigner.Info("recorded a child SIG(0) key found in DNS; verifying it",
 		"parent", zd.ZoneName, "zone", key.Name, "keyid", key.Keyid, "dnssec_validated", key.Validated)
-	zd.KeyDB.TriggerChildKeyVerification(zd.KeyDB.lifetimeCtx(), key.Name, zd.ZoneName, key.Keyid, keyRR)
+	zd.KeyDB.TriggerChildKeyVerification(ctx, key.Name, zd.ZoneName, key.Keyid, keyRR)
 	return true
-}
-
-// lifetimeCtx is the process-lifetime context if one has been recorded, and a
-// background context otherwise -- a CLI or a test that never starts the updater
-// engine still gets a usable one.
-func (kdb *KeyDB) lifetimeCtx() context.Context {
-	if kdb == nil || kdb.engineCtx == nil {
-		return context.Background()
-	}
-	return kdb.engineCtx
 }
 
 // TriggerChildKeyVerification starts an async verification of a child KEY

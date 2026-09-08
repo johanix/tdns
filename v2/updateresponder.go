@@ -67,7 +67,7 @@ func UpdateHandler(ctx context.Context, conf *Config) error {
 				lgHandler.Info("DnsUpdateResponderEngine: dnsupdateq closed")
 				return nil
 			}
-			err := UpdateResponder(&dhr, updateq)
+			err := UpdateResponder(ctx, &dhr, updateq)
 			if err != nil {
 				lgHandler.Error("error from UpdateResponder", "err", err)
 			}
@@ -123,7 +123,7 @@ func applyValidationFailure(m *dns.Msg, us *UpdateStatus) {
 	}
 }
 
-func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
+func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	w := dur.ResponseWriter
 	r := dur.Msg
 	qname := dur.Qname
@@ -334,7 +334,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// known" for what is actually FORMERR + a format error — mislabelling a
 	// malformed request as a server-side fault and directing the child at
 	// bootstrapping a key, which does not fix a malformed message.
-	err := zd.ValidateUpdate(r, dur.Status)
+	err := zd.ValidateUpdate(ctx, r, dur.Status)
 	if err != nil {
 		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
 		applyValidationFailure(m, dur.Status)

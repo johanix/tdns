@@ -40,8 +40,8 @@ func TestADiscoveredChildKeyIsRecordedForVerification(t *testing.T) {
 		}
 	}
 
-	boundedVerification(t, zd, kdb)
-	zd.rememberDiscoveredChildKey(discovered)
+	ctx := boundedVerification(t, zd)
+	zd.rememberDiscoveredChildKey(ctx, discovered)
 
 	sk, err := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
 	if err != nil || sk == nil {
@@ -69,7 +69,7 @@ func TestADiscoveredKeyForANonChildIsNotRecorded(t *testing.T) {
 	zd.KeyDB = kdb
 
 	key := mustRR(t, "stranger.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
-	zd.rememberDiscoveredChildKey(&Sig0Key{
+	zd.rememberDiscoveredChildKey(context.Background(), &Sig0Key{
 		Name:      "stranger.example.",
 		Keyid:     key.KeyTag(),
 		Validated: true,
@@ -94,7 +94,7 @@ func TestARecordedKeyIsFoundBeforeTheDiscoveryPath(t *testing.T) {
 	key := mustRR(t, "child.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
 	discovered := &Sig0Key{Name: "child.example.", Keyid: key.KeyTag(), Validated: true, Source: "dns", Key: *key}
 
-	zd.rememberDiscoveredChildKey(discovered)
+	zd.rememberDiscoveredChildKey(boundedVerification(t, zd), discovered)
 
 	sk, err := zd.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
 	if err != nil || sk == nil {
@@ -216,15 +216,19 @@ func signedUpdateFrom(t *testing.T, zone, signer string, keyid uint16) *dns.Msg 
 // and a half, writing to a t.TempDir database that has gone. One attempt, on a
 // context cancelled at cleanup, exits at once and records no verdict (a
 // cancelled context is a shutdown, not a judgement on the key).
-func boundedVerification(t *testing.T, zd *ZoneData, kdb *KeyDB) {
+//
+// Returns the context to hand to whatever starts the verification. It used to
+// stash it on the KeyDB, which is what the production path did too -- and that
+// was the race the threading removed.
+func boundedVerification(t *testing.T, zd *ZoneData) context.Context {
 	t.Helper()
 	pol := compiledDefaultDelegationPolicy()
 	pol.RetryMaxAttempts = 1
 	zd.DelegationPolicy = &pol
 
 	ctx, cancel := context.WithCancel(context.Background())
-	kdb.engineCtx = ctx
 	t.Cleanup(cancel)
+	return ctx
 }
 
 func discoveredTestKey(t *testing.T) *Sig0Key {
@@ -249,14 +253,14 @@ func TestValidateUpdateRecordsAKeyItDiscoveredInDns(t *testing.T) {
 	zd := cuParentZone(t)
 	zd.KeyDB = kdb
 	registerZones(t, zd)
-	boundedVerification(t, zd, kdb)
+	ctx := boundedVerification(t, zd)
 
 	discovered := discoveredTestKey(t)
 	stubDnsDiscovery(t, discovered)
 	stubSig0Verify(t) // the signature verifies
 
 	us := &UpdateStatus{}
-	if err := zd.ValidateUpdate(signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
+	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
 	}
 
@@ -282,14 +286,14 @@ func TestValidateUpdateDoesNotRecordAKeyWhoseSignatureFailed(t *testing.T) {
 	zd := cuParentZone(t)
 	zd.KeyDB = kdb
 	registerZones(t, zd)
-	boundedVerification(t, zd, kdb)
+	ctx := boundedVerification(t, zd)
 
 	discovered := discoveredTestKey(t)
 	stubDnsDiscovery(t, discovered)
 	stubSig0Verify(t, discovered.Keyid) // this signature does NOT verify
 
 	us := &UpdateStatus{}
-	if err := zd.ValidateUpdate(signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
+	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
 	}
 
@@ -369,10 +373,10 @@ func TestRediscoveringATrustedKeyDoesNotDemoteIt(t *testing.T) {
 	zd := cuParentZone(t)
 	zd.KeyDB = kdb
 	registerZones(t, zd)
-	boundedVerification(t, zd, kdb)
+	ctx := boundedVerification(t, zd)
 
 	discovered := discoveredTestKey(t)
-	zd.rememberDiscoveredChildKey(discovered)
+	zd.rememberDiscoveredChildKey(ctx, discovered)
 
 	// Verification concludes: the key is trusted.
 	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
@@ -388,7 +392,7 @@ func TestRediscoveringATrustedKeyDoesNotDemoteIt(t *testing.T) {
 	}
 
 	// A second discovery of the same key.
-	if zd.rememberDiscoveredChildKey(discovered) {
+	if zd.rememberDiscoveredChildKey(ctx, discovered) {
 		t.Error("rediscovering a key that is already in the truststore started another" +
 			" verification; the row already says everything the discovery does, and the" +
 			" key may by now be trusted")
@@ -422,10 +426,60 @@ func TestAZoneThatWillNotVerifyRecordsNothing(t *testing.T) {
 	zd.DelegationPolicy = &pol
 
 	discovered := discoveredTestKey(t)
-	zd.rememberDiscoveredChildKey(discovered)
+	zd.rememberDiscoveredChildKey(context.Background(), discovered)
 
 	if sk, _ := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid); sk != nil {
 		t.Error("a row was stored for a zone whose policy has no verification mechanisms;" +
 			" nothing will ever promote it, so it is an entry that only looks like progress")
+	}
+}
+
+// TestTheUpdatePathCarriesItsOwnShutdownContext.
+//
+// The verification a discovered key starts used to take its context from
+// KeyDB.engineCtx, a plain field written by ZoneUpdaterEngine's goroutine and
+// read from the UPDATE path on another. Two failures in one: an unsynchronised
+// write against a concurrent read, and -- before the updater had got round to
+// storing it -- a nil field, which lifetimeCtx turned into context.Background(),
+// so a verification started then could outlive shutdown entirely.
+//
+// The context now comes down the call chain. This asserts it arrives: cancel it
+// and the verification must not survive.
+func TestTheUpdatePathCarriesItsOwnShutdownContext(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := cuParentZone(t)
+	zd.KeyDB = kdb
+	registerZones(t, zd)
+
+	pol := compiledDefaultDelegationPolicy()
+	pol.RetryMaxAttempts = 5
+	pol.RetryInterval = time.Hour // asleep until cancelled
+	zd.DelegationPolicy = &pol
+
+	discovered := discoveredTestKey(t)
+	stubDnsDiscovery(t, discovered)
+	stubSig0Verify(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	us := &UpdateStatus{}
+	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
+		t.Fatalf("ValidateUpdate: %v", err)
+	}
+	if sk, _ := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid); sk == nil {
+		t.Fatal("the key was not recorded, so no verification was started to cancel")
+	}
+
+	// Cancelling the UPDATE path's context must reach the verifier it started.
+	// A verifier holding context.Background() would sit out its hour instead.
+	cancel()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		sk, _ := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
+		if sk != nil && sk.ValidationFailed {
+			t.Fatal("cancellation was recorded as a validation failure; a shutdown is not a" +
+				" verdict on the key")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

@@ -215,7 +215,7 @@ func TestUpdateSharesTheQueryPredicate(t *testing.T) {
 			t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
 		}
 		rw := &fakeRW{remote: udpAddr("127.0.0.1")}
-		if err := UpdateResponder(&DnsUpdateRequest{
+		if err := UpdateResponder(context.Background(), &DnsUpdateRequest{
 			ResponseWriter: rw,
 			Msg:            r,
 			Qname:          qname,

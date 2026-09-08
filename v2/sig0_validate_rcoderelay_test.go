@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	"github.com/johanix/tdns/v2/edns0"
@@ -190,7 +191,7 @@ func TestValidateUpdateUnsignedSetsFormError(t *testing.T) {
 	r.SetUpdate("example.")
 	r.Extra = nil // no OPT, no SIG
 
-	if err := zd.ValidateUpdate(r, us); err == nil {
+	if err := zd.ValidateUpdate(context.Background(), r, us); err == nil {
 		t.Fatal("expected an error for an UPDATE with no signature")
 	}
 	if us.ValidationRcode != dns.RcodeFormatError {

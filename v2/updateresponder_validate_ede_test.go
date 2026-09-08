@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -78,7 +79,7 @@ ns.parent.example.	3600	IN	A	192.0.2.53
 
 	// An unsigned update is expected to return an error; we assert on the wire
 	// response, not on the error.
-	_ = UpdateResponder(dur, nil)
+	_ = UpdateResponder(context.Background(), dur, nil)
 
 	if cw.got == nil {
 		t.Fatal("responder wrote no response")
