@@ -114,6 +114,31 @@ type DelegationBackendConf struct {
 	NotifyCommand string `yaml:"notify-command" mapstructure:"notify-command"` // zonefile writer
 
 	DDNS DdnsWriterConf `yaml:"ddns" mapstructure:"ddns"` // ddns writer
+
+	ExternalDB ExternalDBConf `yaml:"external-db" mapstructure:"external-db"` // external-db store
+}
+
+// ExternalDBConf configures the external-db store: a shared MariaDB holding
+// delegation data for a provisioning consumer to read. Data only -- the
+// store, and the driver it needs, live in the v2/externaldb module, which
+// registers the store in the binaries whose main imports it (amendment A-3).
+type ExternalDBConf struct {
+	Driver string `yaml:"driver" mapstructure:"driver"` // mysql (MariaDB)
+	// DSN in the driver's format, e.g. tdns:@tcp(db.example.net:3306)/reg.
+	// It may carry the password; SensitiveString keeps it out of every
+	// rendering of the config.
+	DSN      SensitiveString `yaml:"dsn" mapstructure:"dsn"`
+	Password SensitiveString `yaml:"password" mapstructure:"password"`
+	// TLS to the database. nil means on for any non-loopback address.
+	TLS    *bool  `yaml:"tls" mapstructure:"tls"`
+	CAFile string `yaml:"ca-file" mapstructure:"ca-file"`
+	// TablePrefix defaults to tdns_.
+	TablePrefix string `yaml:"table-prefix" mapstructure:"table-prefix"`
+	// AutoMigrate creates the tables if absent. Off by default: tdns ships
+	// the DDL and the DBA runs it. It never alters an existing table.
+	AutoMigrate  bool          `yaml:"auto-migrate" mapstructure:"auto-migrate"`
+	MaxOpenConns int           `yaml:"max-open-conns" mapstructure:"max-open-conns"`
+	Timeout      time.Duration `yaml:"timeout" mapstructure:"timeout"`
 }
 
 // DdnsWriterConf configures the ddns writer: RFC 2136 UPDATEs, TSIG-signed,
@@ -215,6 +240,9 @@ func resolveDelegationBackendSpec(name string, confs []DelegationBackendConf) (D
 	if _, ok := delegationStoreFactory(store); !ok {
 		return spec, fmt.Errorf("delegation backend %q: store %q is not compiled into %s (available: %s)",
 			name, store, appBinaryName(), strings.Join(RegisteredDelegationStores(), ", "))
+	}
+	if store == DelegationStoreExternalDB && bc.ExternalDB.DSN.Value() == "" {
+		return spec, fmt.Errorf("delegation backend %q: store external-db requires external-db.dsn", name)
 	}
 	switch writer {
 	case DelegationWriterNone:

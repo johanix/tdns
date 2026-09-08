@@ -222,6 +222,12 @@ func (b *DBDelegationBackend) ListChildren(parentZone string) ([]string, error) 
 	return children, nil
 }
 
+// ChildZoneFromOwner is childZoneFromOwner for the store modules outside
+// this package, which file rows under the same child a sqlite row would be.
+func ChildZoneFromOwner(owner, parentZone string) string {
+	return childZoneFromOwner(owner, parentZone)
+}
+
 // childZoneFromOwner extracts the immediate child zone name from an owner name.
 // E.g. owner="ns1.whisky.dnslab.", parent="dnslab." → "whisky.dnslab."
 // If owner is already a direct child, returns owner itself.
