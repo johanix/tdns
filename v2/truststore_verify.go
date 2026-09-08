@@ -136,10 +136,53 @@ func VerifyChildKey(ctx context.Context, childZone string, keyRR string, imr *Im
 	return foundUnvalidated, false
 }
 
-// matchKeyRR checks if any of the RRs match the given keyRR string.
+// matchKeyRR reports whether any of rrs carries the same KEY as keyRR.
+//
+// Compares the RDATA -- flags, protocol, algorithm, public key -- rather than
+// the rendered record, because the two verification mechanisms fetch the same
+// key under DIFFERENT owner names, and with whatever TTL the cache has left on
+// it.
+//
+// at-ns is why. The child publishes its apex KEY re-owned to the RFC 9615
+// signal name, _sig0key.<child>._signal.<ns>. -- that re-owning IS the
+// mechanism -- while keyRR is the child-apex form the parent was handed. Two
+// rendered strings that differ in their owner name by construction never
+// compared equal, so at-ns could not verify a key in any configuration, and the
+// log said "key not found" about a record that was present and validating
+// (#569).
+//
+// TTL is the same defect one step quieter. Both lookups go through
+// imr.ImrQuery, so a record served from a warm cache renders with a decremented
+// TTL and stops matching. at-apex worked only for as long as the TTLs happened
+// to come back unchanged. The producer side had already settled this for the
+// same comparison -- signalRRsEqual is documented as "same set, ignoring TTL".
+//
+// No identity is given up by ignoring the owner: both lookups are already
+// scoped to the child, at-apex by querying it and at-ns by building the signal
+// name from it, so the only open question here is whether the key found there
+// is the key that was offered.
 func matchKeyRR(rrs []dns.RR, keyRR string) bool {
+	parsed, err := dns.NewRR(keyRR)
+	if err != nil {
+		lgSigner.Warn("matchKeyRR: cannot parse the offered key record", "err", err)
+		return false
+	}
+	want, ok := parsed.(*dns.KEY)
+	if !ok {
+		lgSigner.Warn("matchKeyRR: the offered record is not a KEY",
+			"rrtype", dns.TypeToString[parsed.Header().Rrtype])
+		return false
+	}
+
 	for _, rr := range rrs {
-		if rr.String() == keyRR {
+		key, ok := rr.(*dns.KEY)
+		if !ok {
+			continue
+		}
+		if key.Flags == want.Flags &&
+			key.Protocol == want.Protocol &&
+			key.Algorithm == want.Algorithm &&
+			key.PublicKey == want.PublicKey {
 			return true
 		}
 	}
