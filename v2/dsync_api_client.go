@@ -656,13 +656,14 @@ func DsyncApiRRsetsFromSyncStatus(child string, syncstate DelegationSyncStatus) 
 		}
 		for _, rr := range removes {
 			owner := rr.Header().Name
+			// Storing the nil is what makes this emit once per owner: the
+			// second removed record for the same name finds the key present
+			// and stops here, exactly as an owner with surviving glue does.
 			if _, declared := byOwner[owner]; declared {
 				continue
 			}
-			if _, done := byOwner[owner]; !done {
-				byOwner[owner] = nil // emit once per owner
-				add(owner, rrtype, nil)
-			}
+			byOwner[owner] = nil
+			add(owner, rrtype, nil)
 		}
 	}
 	// NewDSKnown, not len>0: an empty NewDS with the flag set is a real
