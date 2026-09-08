@@ -307,6 +307,29 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "child-sig0-mgmt":
+			// "add" from a client never confers trust, whatever it asked for.
+			//
+			// This decodes client JSON straight into a TruststorePost, so Src
+			// and Trusted are both attacker-chosen here. Without this an
+			// authenticated client could add a KEY for any child name with
+			// trusted=true and skip verification entirely -- ApproveChildUpdate
+			// would then accept that key's signature on the child's delegation
+			// data.
+			//
+			// Manual approval is not affected: an operator trusts a key with
+			// the "trust" subcommand, which UPDATEs a row that already exists
+			// and is a deliberate decision about a key someone has looked at.
+			// Adding a key and asserting it is trusted in one unauthenticated
+			// step is the thing that has no legitimate caller -- every internal
+			// producer of a trusted row (the keystore import, the verified
+			// child-update, the completed DNS verification) calls
+			// Sig0TrustMgmt directly and never passes through here.
+			if tp.SubCommand == "add" && tp.Trusted {
+				lgApi.Warn("refusing a client-supplied trusted flag on a truststore add;"+
+					" the key is stored untrusted and must be trusted explicitly",
+					"zone", tp.Keyname, "keyid", tp.Keyid, "src", tp.Src, "from", r.RemoteAddr)
+				tp.Trusted = false
+			}
 			resp, err = kdb.Sig0TrustMgmt(tx, tp)
 			if err != nil {
 				lgApi.Error("Sig0TrustMgmt failed", "err", err)

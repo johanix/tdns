@@ -483,3 +483,85 @@ func TestTheUpdatePathCarriesItsOwnShutdownContext(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// TestAClientCannotAssertTrustForADnsDiscoveredKey.
+//
+// APItruststore decodes client JSON straight into a TruststorePost and hands it
+// to Sig0TrustMgmt, so every field is attacker-chosen on that path. An
+// authenticated client could POST src=dns with trusted=true and get a trusted
+// row for any child name -- no lookup, no verification -- and from then on
+// ApproveChildUpdate accepts that key's signature on delegation data.
+//
+// Discovery records that a key EXISTS. Promotion is the verify subcommand's
+// job, after VerifyChildKey has actually found and validated it.
+func TestAClientCannotAssertTrustForADnsDiscoveredKey(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := mustRR(t, "victim.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
+
+	resp, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command:    "sig0",
+		SubCommand: "add",
+		Keyname:    "victim.example.",
+		Keyid:      int(key.KeyTag()),
+		Src:        "dns",
+		KeyRR:      key.String(),
+		// What an attacker would send.
+		Trusted:         true,
+		Validated:       true,
+		DnssecValidated: true,
+	})
+	if err != nil || (resp != nil && resp.Error) {
+		t.Fatalf("Sig0TrustMgmt: %v %+v", err, resp)
+	}
+
+	sk, err := kdb.FindSig0TrustedKey("victim.example.", key.KeyTag())
+	if err != nil || sk == nil {
+		t.Fatalf("no row was written: %v", err)
+	}
+	if sk.Trusted {
+		t.Error("a client-supplied trusted flag was persisted for a DNS-discovered key;" +
+			" anyone who can reach the truststore API can now sign delegation updates" +
+			" for that child")
+	}
+}
+
+// TestManualApprovalStillTrustsADiscoveredKey.
+//
+// The guard above refuses a client-asserted trusted flag on "add". This is the
+// path it must NOT have broken: an operator looks at a discovered key and
+// decides to trust it. That is the "trust" subcommand -- an UPDATE of a row
+// that already exists, about a key someone has actually examined -- and it is a
+// different thing from asserting trust for a key in the same breath as adding
+// it.
+func TestManualApprovalStillTrustsADiscoveredKey(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := mustRR(t, "child.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
+	const name = "child.example."
+
+	// Discovered and recorded, untrusted.
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "sig0", SubCommand: "add", Keyname: name, Keyid: int(key.KeyTag()),
+		Src: "dns", KeyRR: key.String(),
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if sk, _ := kdb.FindSig0TrustedKey(name, key.KeyTag()); sk == nil || sk.Trusted {
+		t.Fatalf("fixture: expected an untrusted row, got %+v", sk)
+	}
+
+	// The operator approves it.
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "trust", Keyname: name, Keyid: int(key.KeyTag()),
+	}); err != nil {
+		t.Fatalf("trust: %v", err)
+	}
+
+	sk, err := kdb.FindSig0TrustedKey(name, key.KeyTag())
+	if err != nil || sk == nil {
+		t.Fatalf("the row went missing: %v", err)
+	}
+	if !sk.Trusted {
+		t.Error("manual approval no longer trusts a key; the operator's deliberate decision" +
+			" is the whole point of the trust subcommand and must keep working")
+	}
+}
