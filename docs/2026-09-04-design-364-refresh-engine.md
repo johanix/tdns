@@ -136,3 +136,20 @@ inherited by accident.
   release if that is cheap - a training lab is a bad place to discover a
   concurrency regression, and being able to turn it off is worth more than the
   elegance lost.
+
+---
+
+## Amendment, 2026-09-08: committed, and superseded in detail
+
+"Not committed" above was true when written. This document was committed
+2026-09-08 in [#581](https://github.com/johanix/tdns/pull/581).
+
+Its design was superseded by
+`2026-09-05-refresh-engine-redesign-364-502.md`, which is the frozen one to
+implement from. This is kept for the framing it established — that #502 is a
+consequence of #364 rather than a separate bug.
+
+[#364](https://github.com/johanix/tdns/issues/364) and
+[#502](https://github.com/johanix/tdns/issues/502) are both still **open**; the
+implementation is on PR #514 and the lab close-out in the redesign's §9 is what
+remains.

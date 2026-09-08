@@ -113,3 +113,23 @@ group address including unbuilt ones.
 
 Related: #355 (no-op republish bumps the serial) is the same family, now
 driven once a minute instead of occasionally.
+
+---
+
+## Amendment, 2026-09-08: filed as #519, fix implemented, issue still open
+
+"Not filed yet" above was true when written.
+
+Filed as [#519](https://github.com/johanix/tdns/issues/519) — "Periodic re-sign
+churns every signed zone once a minute: NSEC and DNSKEY are re-signed
+unconditionally", which is this document's finding. **#519 is still open.**
+
+The fix was designed in `2026-09-05-signing-build-vs-renewal.md` (§3.2) and
+implemented: `SignZone` stays the build, and the resigner ticker calls
+`RenewZoneSignatures`, which renews only what is actually ageing. That is on PR
+#514, not yet on `main`.
+
+**The operational verdict above is stale.** "The master is not healthy enough to
+roll the group VMs forward" was the state of the milestone build this was found
+on. Do not read it as current lab guidance; re-verify against whatever build is
+in front of you.

@@ -234,3 +234,18 @@ are cheap:
   test to close.
 
 Neither is a fix for #443. Both are why #443 was expensive.
+
+---
+
+## Amendment, 2026-09-08: committed, and #443 is closed
+
+"Not committed" above was true when written. This document was committed
+2026-09-08 in [#581](https://github.com/johanix/tdns/pull/581).
+
+[#443](https://github.com/johanix/tdns/issues/443) was **closed 2026-09-05**,
+the morning after this was written — consistent with the position recorded
+here, that it was probably already fixed and the risk was fixing it twice.
+
+The document's ask was a test rather than a patch. Nothing here records whether
+that test was written, so treat the regression coverage as unverified rather
+than as done.
