@@ -344,13 +344,35 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		return nil
 	}
 
+	// A published KEY is not the same as a key this zone can sign with, and
+	// until now the difference decided nothing. VerifyPublishedKeyRRs warned
+	// about a published KEY with no active private key behind it -- naming the
+	// exact problem -- and then the generation step below was skipped anyway,
+	// because it asks only whether a KEY RRset EXISTS.
+	//
+	// So a zone whose private key had gone from the keystore while the record
+	// remained published could neither sign updates nor bootstrap, said so in
+	// its own log, and did not recover on restart: the same two lines every
+	// time, until an operator deleted the published record by hand (#576).
 	if keyrrexist && !zd.Options[OptDontPublishKey] {
-		err := zd.VerifyPublishedKeyRRs(name)
+		usable, err := zd.verifyPublishedKeyRRs(name)
 		if err != nil {
 			lgDns.Error("error from VerifyPublishedKeyRRs", "name", name, "err", err)
 			return err
 		}
-		lgDns.Info("Sig0KeyPreparation: verified published KEY RRset", "name", name)
+		if !usable {
+			// Generate and publish a replacement rather than stop here. The
+			// orphan is left in place and keeps warning: removing published
+			// records on the zone's behalf is a bigger decision than making it
+			// able to sign again, and an extra KEY nobody holds the private
+			// half of is inert -- a signer is matched by key tag.
+			lgDns.Warn("Sig0KeyPreparation: the published KEY RRset has no active private key behind it;"+
+				" generating a replacement. The orphaned record should be removed",
+				"zone", zd.ZoneName, "name", name)
+			keyrrexist = false
+		} else {
+			lgDns.Info("Sig0KeyPreparation: verified published KEY RRset", "name", name)
+		}
 	}
 
 	// 3. The per-zone opt-out for this specific publish. Checked again inside
