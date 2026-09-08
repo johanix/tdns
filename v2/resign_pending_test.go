@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -32,7 +33,7 @@ func triggerResignConf(t *testing.T, zd *ZoneData, depth int) *Config {
 func TestRenewalCannotStandInForAKeyStateResign(t *testing.T) {
 	zd, kdb, oldTag := rolledZone(t)
 
-	if _, err := zd.RenewZoneSignatures(kdb); err != nil {
+	if _, err := zd.RenewZoneSignatures(context.Background(), kdb); err != nil {
 		t.Fatalf("RenewZoneSignatures: %v", err)
 	}
 
@@ -69,7 +70,7 @@ func TestTheResignerSweepPicksUpADroppedTrigger(t *testing.T) {
 	conf := triggerResignConf(t, zd, 0)
 
 	triggerResign(conf, zd.ZoneName)
-	resignSweepZone(zd)
+	resignSweepZone(context.Background(), zd)
 
 	tags := zd.mustRRSIGKeytags(t, signedName, dns.TypeA)
 	if len(tags) == 0 {
@@ -95,7 +96,7 @@ func TestAFailedReplaceStaysOwed(t *testing.T) {
 	// A zone in DnssecError is the realistic shape: ResignZone refuses outright
 	// rather than signing with something it does not trust.
 	zd.SetError(DnssecError, "injected: signing is broken for this zone")
-	zd.replaceSignaturesNow()
+	zd.replaceSignaturesNow(context.Background())
 
 	if !zd.resignPendingSet() {
 		t.Error("a failed replace cleared the flag; the zone would go on serving" +
@@ -111,7 +112,7 @@ func TestAZoneThatDoesNotSignDropsTheClaim(t *testing.T) {
 	zd.Options[OptInlineSigning] = false
 	zd.markResignPending()
 
-	zd.replaceSignaturesNow()
+	zd.replaceSignaturesNow(context.Background())
 
 	if zd.resignPendingSet() {
 		t.Error("a non-signing zone stayed marked; nothing will ever clear it")
@@ -252,4 +253,50 @@ func countStandbyZsks(t *testing.T, kdb *KeyDB, zoneName string) int {
 		}
 	}
 	return n
+}
+
+// TestTheResignerPassesRefuseToStartOnACancelledContext.
+//
+// ResignZone and RenewZoneSignatures both walk a zone and can sign a share of
+// it while holding zd.mu. Neither took a context, so a root cancellation could
+// not stop a pass and shutdown waited for work proportional to the zone.
+//
+// Refusing rather than truncating, for the same reason the signing walk does:
+// a pass abandoned half way has staged signatures that must not be published,
+// and the error is what refuses the publish.
+func TestTheResignerPassesRefuseToStartOnACancelledContext(t *testing.T) {
+	zd, kdb, _ := rolledZone(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := zd.RenewZoneSignatures(ctx, kdb); err == nil {
+		t.Error("RenewZoneSignatures started a pass on a cancelled context")
+	} else if !errors.Is(err, context.Canceled) {
+		t.Errorf("RenewZoneSignatures: %v does not match context.Canceled, so a caller"+
+			" cannot tell a shutdown from a signing failure", err)
+	}
+
+	if _, err := zd.ResignZone(ctx, kdb); err == nil {
+		t.Error("ResignZone started a replacement pass on a cancelled context")
+	}
+}
+
+// The engine's own sweep must stop too, and must not mark a zone as having had
+// its replacement done when it did not.
+func TestACancelledSweepLeavesTheReplaceStillOwed(t *testing.T) {
+	zd, _, oldTag := rolledZone(t)
+	zd.markResignPending()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	resignSweepZone(ctx, zd)
+
+	if !zd.resignPendingSet() {
+		t.Error("a sweep abandoned at shutdown cleared the pending replace; the zone would" +
+			" go on serving signatures by a retired key with nothing left to retry it")
+	}
+	if !hasKeytag(zd.mustRRSIGKeytags(t, signedName, dns.TypeA), oldTag) {
+		t.Log("the retired key's signature is gone, so the pass ran despite cancellation")
+	}
 }

@@ -159,7 +159,7 @@ func TestRenewingAnUnchangedZonePublishesNothing(t *testing.T) {
 	serial := zd.CurrentSerial
 
 	for pass := 1; pass <= 3; pass++ {
-		renewed, err := zd.RenewZoneSignatures(kdb)
+		renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
 		if err != nil {
 			t.Fatalf("pass %d: %v", pass, err)
 		}
@@ -196,7 +196,7 @@ func TestRenewingSignsOnlyTheAgeingRRset(t *testing.T) {
 
 	ageSignatures(t, zd, "alpha.renew.example.", dns.TypeA)
 
-	renewed, err := zd.RenewZoneSignatures(kdb)
+	renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestRenewingDoesNotWriteThroughToThePublishedSnapshot(t *testing.T) {
 	// the exact bytes a downstream holding this serial would have.
 	publishedAlpha := sigStrings(getOwnerFrom(published, "alpha.renew.example."), dns.TypeA)
 
-	if _, err := zd.RenewZoneSignatures(kdb); err != nil {
+	if _, err := zd.RenewZoneSignatures(context.Background(), kdb); err != nil {
 		t.Fatal(err)
 	}
 
@@ -266,7 +266,7 @@ func TestRenewingDoesNotRepairAMissingSignature(t *testing.T) {
 	rs.RRSIGs = nil
 	od.RRtypes.Set(dns.TypeA, rs)
 
-	renewed, err := zd.RenewZoneSignatures(kdb)
+	renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestRenewingSkipsDelegationsAndGlue(t *testing.T) {
 		od.RRtypes.Set(tc.rrtype, rs)
 	}
 
-	renewed, err := zd.RenewZoneSignatures(kdb)
+	renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +342,7 @@ func TestRenewingRenewsAnAgeingNsecSignature(t *testing.T) {
 
 	ageSignatures(t, zd, "bravo.renew.example.", dns.TypeNSEC)
 
-	renewed, err := zd.RenewZoneSignatures(kdb)
+	renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +373,7 @@ func TestRenewingDoesNotChangeTheShapeOfTheChain(t *testing.T) {
 	shape := chainShape(t, zd)
 	ageSignatures(t, zd, "alpha.renew.example.", dns.TypeA)
 
-	if _, err := zd.RenewZoneSignatures(kdb); err != nil {
+	if _, err := zd.RenewZoneSignatures(context.Background(), kdb); err != nil {
 		t.Fatal(err)
 	}
 
@@ -413,7 +413,7 @@ func TestRenewingKeepsAPendingChangeAndRenewsAroundIt(t *testing.T) {
 		core.RRset{Name: "bravo.renew.example.", RRtype: dns.TypeA, RRs: []dns.RR{rr}})
 	zd.mu.Unlock()
 
-	renewed, err := zd.RenewZoneSignatures(kdb)
+	renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestRenewingIsNotStrandedByALeftoverWorkingSet(t *testing.T) {
 
 	ageSignatures(t, zd, "alpha.renew.example.", dns.TypeA)
 
-	renewed, err := zd.RenewZoneSignatures(kdb)
+	renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +492,7 @@ func TestRenewingPublishesWhenOnlyTheApexSoaSignatureIsDue(t *testing.T) {
 	before := zd.publishedSnapshot()
 	ageApexSoaSignature(t, zd)
 
-	renewed, err := zd.RenewZoneSignatures(kdb)
+	renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +520,7 @@ func TestRenewingPublishesWhenOnlyTheApexSoaSignatureIsDue(t *testing.T) {
 	after := zd.publishedSnapshot()
 	serial := zd.CurrentSerial
 	for pass := 1; pass <= 3; pass++ {
-		n, err := zd.RenewZoneSignatures(kdb)
+		n, err := zd.RenewZoneSignatures(context.Background(), kdb)
 		if err != nil {
 			t.Fatalf("pass %d: %v", pass, err)
 		}
@@ -555,7 +555,7 @@ func TestRenewingDoesNotPublishForAnSoaItWouldNotResign(t *testing.T) {
 	zd.DnssecPolicy = nil
 
 	for pass := 1; pass <= 3; pass++ {
-		if _, err := zd.RenewZoneSignatures(kdb); err != nil {
+		if _, err := zd.RenewZoneSignatures(context.Background(), kdb); err != nil {
 			t.Fatalf("pass %d: %v", pass, err)
 		}
 	}

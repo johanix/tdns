@@ -4,8 +4,9 @@
 package tdns
 
 import (
-	"sync"
+	"context"
 	"testing"
+	"time"
 )
 
 // TestOutboundSerialIsSettledUnderTheZoneLock.
@@ -24,19 +25,13 @@ func TestOutboundSerialIsSettledUnderTheZoneLock(t *testing.T) {
 	zd.KeyDB = kdb
 	zd.OutboundSoaSerial = OutboundSoaSerialUnixtime
 
-	var wg sync.WaitGroup
-	stop := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	readerDone := make(chan struct{})
 
 	// A reader that takes the lock, as every locked reader of this field does.
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
+		defer close(readerDone)
+		for ctx.Err() == nil {
 			zd.mu.Lock()
 			_ = zd.CurrentSerial
 			zd.mu.Unlock()
@@ -47,8 +42,14 @@ func TestOutboundSerialIsSettledUnderTheZoneLock(t *testing.T) {
 		applyOutboundSerialAfterRefresh(zd, zd.ZoneName)
 	}
 
-	close(stop)
-	wg.Wait()
+	cancel()
+	// Bounded: a reader wedged on zd.mu would otherwise hold this test until
+	// the package timeout, reporting a lock bug as a hang.
+	select {
+	case <-readerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the locked reader did not exit; something is still holding zd.mu")
+	}
 
 	zd.mu.Lock()
 	current := zd.CurrentSerial

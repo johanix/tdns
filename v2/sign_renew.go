@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -34,7 +35,14 @@ type renewalTarget struct {
 // Returns the number of RRsets whose signatures were renewed. Zero means the
 // zone was left exactly as it was: nothing staged, nothing published, no serial
 // bump, no NOTIFY.
-func (zd *ZoneData) RenewZoneSignatures(kdb *KeyDB) (int, error) {
+func (zd *ZoneData) RenewZoneSignatures(ctx context.Context, kdb *KeyDB) (int, error) {
+	// Before the lock. A renewal pass walks the zone and can sign a share of
+	// it while holding zd.mu, so a sweep that is already being shut down should
+	// not start another one -- the resigner checks between zones, and this is
+	// the same check one level in.
+	if err := ctx.Err(); err != nil {
+		return 0, fmt.Errorf("renewing signatures for %s: %w", zd.ZoneName, err)
+	}
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return 0, fmt.Errorf("RenewZoneSignatures: zone %s should not be signed here (neither online-signing nor inline-signing)", zd.ZoneName)
 	}

@@ -167,3 +167,62 @@ func TestASuccessfulPostBindSigningReportsSuccess(t *testing.T) {
 		t.Fatalf("a zone that signs cleanly was reported as failed: %v", err)
 	}
 }
+
+// TestACancelledSignZoneGeneratesNoKeys.
+//
+// SignZone did not look at its context until the owner walk. Before that,
+// EnsureActiveDnssecKeys can GENERATE a keypair and persist it, and
+// GenerateNsecChainWithDak traverses the whole zone under zd.mu. So a cancelled
+// API request, or a shutdown that arrived while the request was queued, did
+// both anyway -- with a key written to the keystore as a side effect of work
+// nobody was waiting for.
+func TestACancelledSignZoneGeneratesNoKeys(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	const zone = `cancelsign.example.	3600	IN	SOA	ns.cancelsign.example. h.cancelsign.example. 1 3600 600 604800 300
+cancelsign.example.	3600	IN	NS	ns.cancelsign.example.
+ns.cancelsign.example.	3600	IN	A	192.0.2.1
+`
+	zd := testZone(t, "cancelsign.example.", zone)
+	registerZones(t, zd)
+	zd.KeyDB = kdb
+	zd.ZoneType = Primary
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	zd.DnssecPolicy = &DnssecPolicy{
+		Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519,
+		SigValidity: PolicySigValidity{Default: 14 * 86400, DNSKEY: 14 * 86400, DS: 14 * 86400},
+	}
+
+	countKeys := func() int {
+		n := 0
+		for _, st := range []string{DnskeyStateActive, DnskeyStatePublished, DnskeyStateStandby} {
+			ks, err := GetDnssecKeysByState(kdb, zd.ZoneName, st)
+			if err != nil {
+				t.Fatalf("GetDnssecKeysByState(%s): %v", st, err)
+			}
+			n += len(ks)
+		}
+		return n
+	}
+	before := countKeys()
+	var err error
+	_ = err
+	if before != 0 {
+		t.Fatalf("fixture: the keystore already holds %d keys", before)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := zd.SignZone(ctx, kdb, false); err == nil {
+		t.Error("a cancelled SignZone reported success")
+	} else if !errors.Is(err, context.Canceled) {
+		t.Errorf("%v does not match context.Canceled, so a caller cannot tell a shutdown"+
+			" from a signing failure", err)
+	}
+
+	if after := countKeys(); after != 0 {
+		t.Errorf("a cancelled SignZone generated %d key(s); key generation is a persistent"+
+			" side effect of work nobody was waiting for", after)
+	}
+}

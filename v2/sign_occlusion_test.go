@@ -157,7 +157,7 @@ func TestResignZoneLeavesOccludedNamesUnsigned(t *testing.T) {
 	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
-	if _, err := zd.ResignZone(kdb); err != nil {
+	if _, err := zd.ResignZone(context.Background(), kdb); err != nil {
 		t.Fatalf("ResignZone: %v", err)
 	}
 	assertOcclusionInvariants(t, zd, "ResignZone")
@@ -240,7 +240,7 @@ func TestSigningStripsRRSIGsAlreadyOnOccludedNames(t *testing.T) {
 			_, err := zd.SignZone(context.Background(), kdb, true)
 			return err
 		}},
-		{"ResignZone", func(zd *ZoneData, kdb *KeyDB) error { _, err := zd.ResignZone(kdb); return err }},
+		{"ResignZone", func(zd *ZoneData, kdb *KeyDB) error { _, err := zd.ResignZone(context.Background(), kdb); return err }},
 	} {
 		t.Run(tc.pass, func(t *testing.T) {
 			kdb := newTestKeyDB(t)

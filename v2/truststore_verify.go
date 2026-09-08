@@ -231,13 +231,15 @@ func waitOrDone(ctx context.Context, d time.Duration) bool {
 // Best effort: a child that cannot be recorded is refused as it was before,
 // which is what would have happened anyway.
 //
-// Reports whether this call is what started a verification. False covers every
-// way that did not happen -- not a child, a policy that will not verify, a row
-// that was already there, a database failure -- so a caller (and a test) can
-// tell "verification is now under way because of me" from "nothing happened".
-func (zd *ZoneData) rememberDiscoveredChildKey(ctx context.Context, key *Sig0Key) bool {
+// Returns the verifier's completion channel, or nil when this call did not
+// start one. Nil covers every way that can happen -- not a child, a policy that
+// will not verify, a row that was already there, a database failure -- so a
+// caller can tell "verification is under way because of me" from "nothing
+// happened", and a test can wait for that verifier rather than racing its own
+// cleanup against it.
+func (zd *ZoneData) rememberDiscoveredChildKey(ctx context.Context, key *Sig0Key) <-chan struct{} {
 	if zd == nil || zd.KeyDB == nil || key == nil {
-		return false
+		return nil
 	}
 	// Only for names this zone actually delegates. Any signer at all can
 	// publish a KEY and send us a signed UPDATE; without this that is a way to
@@ -245,7 +247,7 @@ func (zd *ZoneData) rememberDiscoveredChildKey(ctx context.Context, key *Sig0Key
 	if !zd.IsChildDelegation(key.Name) {
 		lgSigner.Debug("not recording a discovered SIG(0) key: not a child delegation of this zone",
 			"zone", zd.ZoneName, "signer", key.Name, "keyid", key.Keyid)
-		return false
+		return nil
 	}
 
 	// A policy with no mechanisms is an operator declining automatic
@@ -257,14 +259,14 @@ func (zd *ZoneData) rememberDiscoveredChildKey(ctx context.Context, key *Sig0Key
 		lgSigner.Info("not recording a discovered SIG(0) key: this zone's delegation policy"+
 			" has no verification mechanisms, so nothing could promote it",
 			"zone", zd.ZoneName, "signer", key.Name, "keyid", key.Keyid)
-		return false
+		return nil
 	}
 
 	keyRR := key.Key.String()
 	tx, err := zd.KeyDB.Begin("rememberDiscoveredChildKey")
 	if err != nil {
 		lgSigner.Error("cannot record a discovered child SIG(0) key", "zone", key.Name, "err", err)
-		return false
+		return nil
 	}
 	resp, err := zd.KeyDB.Sig0TrustMgmt(tx, TruststorePost{
 		Command:    "sig0",
@@ -288,12 +290,12 @@ func (zd *ZoneData) rememberDiscoveredChildKey(ctx context.Context, key *Sig0Key
 		}
 		lgSigner.Error("cannot record a discovered child SIG(0) key",
 			"zone", key.Name, "keyid", key.Keyid, "err", err, "resp", msg)
-		return false
+		return nil
 	}
 	if err := tx.Commit(); err != nil {
 		lgSigner.Error("cannot commit a discovered child SIG(0) key",
 			"zone", key.Name, "keyid", key.Keyid, "err", err)
-		return false
+		return nil
 	}
 	if resp != nil && resp.Existed {
 		// Already recorded, so a verification is already running or has
@@ -301,13 +303,12 @@ func (zd *ZoneData) rememberDiscoveredChildKey(ctx context.Context, key *Sig0Key
 		// by now be trusted.
 		lgSigner.Debug("discovered child SIG(0) key was already in the truststore",
 			"parent", zd.ZoneName, "zone", key.Name, "keyid", key.Keyid)
-		return false
+		return nil
 	}
 
 	lgSigner.Info("recorded a child SIG(0) key found in DNS; verifying it",
 		"parent", zd.ZoneName, "zone", key.Name, "keyid", key.Keyid, "dnssec_validated", key.Validated)
-	zd.KeyDB.TriggerChildKeyVerification(ctx, key.Name, zd.ZoneName, key.Keyid, keyRR)
-	return true
+	return zd.KeyDB.TriggerChildKeyVerification(ctx, key.Name, zd.ZoneName, key.Keyid, keyRR)
 }
 
 // TriggerChildKeyVerification starts an async verification of a child KEY
@@ -316,7 +317,12 @@ func (zd *ZoneData) rememberDiscoveredChildKey(ctx context.Context, key *Sig0Key
 // exponential backoff and can therefore be sleeping for a long time when the
 // process is asked to stop; without it the goroutine ignores shutdown and the
 // deferred key cleanup it performs runs against a database that is closing.
-func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, parentZone string, keyid uint16, keyRR string) {
+// Returns a channel closed when the verifier goroutine exits, and nil when no
+// verification was started. Production ignores it; it exists so a test can wait
+// for THIS verifier rather than watching the process-wide goroutine count,
+// which an unrelated goroutine starting or stopping makes meaningless in either
+// direction. Same shape as deferForImr.
+func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, parentZone string, keyid uint16, keyRR string) <-chan struct{} {
 	var pol DelegationPolicy
 	if parentZone != "" {
 		if pzd, ok := Zones.Get(parentZone); ok {
@@ -330,9 +336,14 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, pa
 	if len(pol.Mechanisms) == 0 {
 		lgSigner.Info("TriggerChildKeyVerification: policy has empty mechanisms; not verifying",
 			"zone", childZone, "keyid", keyid, "policy", pol.Name)
-		return
+		return nil
 	}
-	go kdb.runChildKeyVerification(ctx, childZone, keyid, pol, imrChildKeyVerifier(childZone, keyRR, pol))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		kdb.runChildKeyVerification(ctx, childZone, keyid, pol, imrChildKeyVerifier(childZone, keyRR, pol))
+	}()
+	return done
 }
 
 // childKeyVerifier makes one verification attempt. accepted means the key may

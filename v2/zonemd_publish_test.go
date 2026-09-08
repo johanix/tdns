@@ -233,7 +233,7 @@ func TestZonemdSurvivesSigningPasses(t *testing.T) {
 	}
 	assertZonemdMatchesSnapshot(t, zd, "after SignZone")
 
-	if _, err := zd.ResignZone(kdb); err != nil {
+	if _, err := zd.ResignZone(context.Background(), kdb); err != nil {
 		t.Fatalf("ResignZone: %v", err)
 	}
 	assertZonemdMatchesSnapshot(t, zd, "after ResignZone")

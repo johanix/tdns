@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func TestRenewalScheduleMatchesTheSignatureThreshold(t *testing.T) {
 	expiry := time.Now().Add(48 * time.Hour)
 	setExpiration(t, zd, "alpha.renew.example.", dns.TypeA, expiry)
 
-	renewed, err := zd.RenewZoneSignatures(kdb)
+	renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +68,7 @@ func TestRenewalScheduleIsDiscardedAfterAnUnrelatedPublish(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := renewalTestZone(t, kdb)
 
-	if _, err := zd.RenewZoneSignatures(kdb); err != nil {
+	if _, err := zd.RenewZoneSignatures(context.Background(), kdb); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := zd.resignDue(); !ok {
@@ -95,7 +96,7 @@ func TestRenewalScheduleIsRecomputedAfterRenewing(t *testing.T) {
 
 	ageSignatures(t, zd, "alpha.renew.example.", dns.TypeA)
 
-	renewed, err := zd.RenewZoneSignatures(kdb)
+	renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +127,7 @@ func TestRenewalScheduleRisesWhenTheMinimumHolderIsRemoved(t *testing.T) {
 	zd := renewalTestZone(t, kdb)
 
 	setExpiration(t, zd, "alpha.renew.example.", dns.TypeA, time.Now().Add(48*time.Hour))
-	if _, err := zd.RenewZoneSignatures(kdb); err != nil {
+	if _, err := zd.RenewZoneSignatures(context.Background(), kdb); err != nil {
 		t.Fatal(err)
 	}
 	low, ok := zd.resignDue()
@@ -136,7 +137,7 @@ func TestRenewalScheduleRisesWhenTheMinimumHolderIsRemoved(t *testing.T) {
 
 	applyRR(t, zd, kdb, VerbDelRR, "alpha.renew.example. 3600 IN A 10.0.0.1")
 
-	if _, err := zd.RenewZoneSignatures(kdb); err != nil {
+	if _, err := zd.RenewZoneSignatures(context.Background(), kdb); err != nil {
 		t.Fatal(err)
 	}
 	high, ok := zd.resignDue()
@@ -240,7 +241,7 @@ func TestRenewalScheduleAccountsForTheApexSoa(t *testing.T) {
 		sig.(*dns.RRSIG).Expiration = uint32(expiry.Unix())
 	}
 
-	renewed, err := zd.RenewZoneSignatures(kdb)
+	renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +276,7 @@ func TestALeftoverWorkingSetDoesNotDisableTheSchedule(t *testing.T) {
 	zd.ensureWorkingSet()
 	zd.mu.Unlock()
 
-	renewed, err := zd.RenewZoneSignatures(kdb)
+	renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +307,7 @@ func TestALeftoverWorkingSetDoesNotDisableTheSchedule(t *testing.T) {
 		core.RRset{Name: "bravo.renew.example.", RRtype: dns.TypeA, RRs: []dns.RR{rr}})
 	zd.mu.Unlock()
 
-	if _, err := zd.RenewZoneSignatures(kdb); err != nil {
+	if _, err := zd.RenewZoneSignatures(context.Background(), kdb); err != nil {
 		t.Fatal(err)
 	}
 	zd.mu.Lock()

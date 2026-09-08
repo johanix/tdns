@@ -53,7 +53,14 @@ func TestAPublishedScannerIsAlwaysFullyInitialised(t *testing.T) {
 
 	<-watchDone
 	cancel()
-	<-engineDone
+	// Bounded. An unbounded receive turns a shutdown regression into a hung
+	// test run rather than a failure, which is the opposite of what a
+	// shutdown assertion is for.
+	select {
+	case <-engineDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ScannerEngine did not return within 5s of its context being cancelled")
+	}
 
 	select {
 	case s := <-observed:

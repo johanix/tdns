@@ -40,8 +40,8 @@ func TestADiscoveredChildKeyIsRecordedForVerification(t *testing.T) {
 		}
 	}
 
-	ctx := boundedVerification(t, zd)
-	zd.rememberDiscoveredChildKey(ctx, discovered)
+	ctx, waitForVerifier := boundedVerification(t, zd)
+	defer waitForVerifier(zd.rememberDiscoveredChildKey(ctx, discovered))
 
 	sk, err := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
 	if err != nil || sk == nil {
@@ -94,7 +94,7 @@ func TestARecordedKeyIsFoundBeforeTheDiscoveryPath(t *testing.T) {
 	key := mustRR(t, "child.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
 	discovered := &Sig0Key{Name: "child.example.", Keyid: key.KeyTag(), Validated: true, Source: "dns", Key: *key}
 
-	zd.rememberDiscoveredChildKey(boundedVerification(t, zd), discovered)
+	func() { c, w := boundedVerification(t, zd); w(zd.rememberDiscoveredChildKey(c, discovered)) }()
 
 	sk, err := zd.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
 	if err != nil || sk == nil {
@@ -217,10 +217,16 @@ func signedUpdateFrom(t *testing.T, zone, signer string, keyid uint16) *dns.Msg 
 // context cancelled at cleanup, exits at once and records no verdict (a
 // cancelled context is a shutdown, not a judgement on the key).
 //
-// Returns the context to hand to whatever starts the verification. It used to
-// stash it on the KeyDB, which is what the production path did too -- and that
-// was the race the threading removed.
-func boundedVerification(t *testing.T, zd *ZoneData) context.Context {
+// Returns the context to hand to whatever starts the verification, and a wait
+// function for the verifier it starts. It used to stash the context on the
+// KeyDB, which is what the production path did too -- and that was the race the
+// threading removed.
+//
+// Cancelling is not enough on its own: the verifier is a goroutine, and a test
+// that only cancels can return while it is still running and let fixture
+// cleanup race it to the TempDir database. waitFor is how a test says "and it
+// has actually finished".
+func boundedVerification(t *testing.T, zd *ZoneData) (context.Context, func(<-chan struct{})) {
 	t.Helper()
 	pol := compiledDefaultDelegationPolicy()
 	pol.RetryMaxAttempts = 1
@@ -228,7 +234,21 @@ func boundedVerification(t *testing.T, zd *ZoneData) context.Context {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return ctx
+
+	waitFor := func(done <-chan struct{}) {
+		t.Helper()
+		if done == nil {
+			return // no verifier was started; nothing to wait for
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("the child-key verifier did not exit within 5s of cancellation;" +
+				" it outlives the test and writes to a database that has gone")
+		}
+	}
+	return ctx, waitFor
 }
 
 func discoveredTestKey(t *testing.T) *Sig0Key {
@@ -253,7 +273,8 @@ func TestValidateUpdateRecordsAKeyItDiscoveredInDns(t *testing.T) {
 	zd := cuParentZone(t)
 	zd.KeyDB = kdb
 	registerZones(t, zd)
-	ctx := boundedVerification(t, zd)
+	ctx, waitForVerifier := boundedVerification(t, zd)
+	_ = waitForVerifier
 
 	discovered := discoveredTestKey(t)
 	stubDnsDiscovery(t, discovered)
@@ -286,7 +307,8 @@ func TestValidateUpdateDoesNotRecordAKeyWhoseSignatureFailed(t *testing.T) {
 	zd := cuParentZone(t)
 	zd.KeyDB = kdb
 	registerZones(t, zd)
-	ctx := boundedVerification(t, zd)
+	ctx, waitForVerifier := boundedVerification(t, zd)
+	_ = waitForVerifier
 
 	discovered := discoveredTestKey(t)
 	stubDnsDiscovery(t, discovered)
@@ -373,10 +395,10 @@ func TestRediscoveringATrustedKeyDoesNotDemoteIt(t *testing.T) {
 	zd := cuParentZone(t)
 	zd.KeyDB = kdb
 	registerZones(t, zd)
-	ctx := boundedVerification(t, zd)
+	ctx, waitForVerifier := boundedVerification(t, zd)
 
 	discovered := discoveredTestKey(t)
-	zd.rememberDiscoveredChildKey(ctx, discovered)
+	defer waitForVerifier(zd.rememberDiscoveredChildKey(ctx, discovered))
 
 	// Verification concludes: the key is trusted.
 	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
@@ -392,7 +414,7 @@ func TestRediscoveringATrustedKeyDoesNotDemoteIt(t *testing.T) {
 	}
 
 	// A second discovery of the same key.
-	if zd.rememberDiscoveredChildKey(ctx, discovered) {
+	if zd.rememberDiscoveredChildKey(ctx, discovered) != nil {
 		t.Error("rediscovering a key that is already in the truststore started another" +
 			" verification; the row already says everything the discovery does, and the" +
 			" key may by now be trusted")

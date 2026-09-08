@@ -640,7 +640,7 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 // is not signed, and nothing below a delegation is signed at all.
 //
 // Returns the count of RRSIGs written by the final pass.
-func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
+func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return 0, fmt.Errorf("ResignZone: zone %s should not be signed here (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
@@ -668,7 +668,7 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 	zd.ensureWorkingSet()
 
 	if !zd.Options[OptBlackLies] {
-		if err := zd.GenerateNsecChainWithDak(dak); err != nil {
+		if err := zd.GenerateNsecChainWithDak(ctx, dak); err != nil {
 			return 0, err
 		}
 	}
@@ -858,6 +858,18 @@ func (zd *ZoneData) SignZone(ctx context.Context, kdb *KeyDB, force bool) (int, 
 		return 0, fmt.Errorf("SignZone: zone %s has DNSSEC error: %s", zd.ZoneName, zd.ErrorMsg)
 	}
 
+	// Before the setup, not only before the owner walk.
+	//
+	// EnsureActiveDnssecKeys can GENERATE keys and write them to the keystore,
+	// and GenerateNsecChainWithDak traverses the whole zone under zd.mu. A
+	// cancelled API request or a shutdown that arrived while this was queued
+	// used to do both before reaching the first cancellation check, so the
+	// caller had gone and the work happened anyway -- with a keypair persisted
+	// as a side effect.
+	if err := ctx.Err(); err != nil {
+		return 0, fmt.Errorf("signing zone %s: %w", zd.ZoneName, err)
+	}
+
 	// Single-signer signing (mode 1). Multi-provider signing
 	// (modes 2-4) is handled by mpzd.SignZone() in tdns-mp.
 
@@ -890,7 +902,7 @@ func (zd *ZoneData) SignZone(ctx context.Context, kdb *KeyDB, force bool) (int, 
 	zd.ensureWorkingSet()
 
 	if !zd.Options[OptBlackLies] {
-		if err = zd.GenerateNsecChainWithDak(dak); err != nil {
+		if err = zd.GenerateNsecChainWithDak(ctx, dak); err != nil {
 			return 0, err
 		}
 	}
@@ -1447,7 +1459,7 @@ func (zd *ZoneData) nsecRRForLocked(name, next string, ttl uint32, dak *DnssecKe
 }
 
 // GenerateNsecChainWithDak builds or refreshes the NSEC chain using the given active DNSSEC keys.
-func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
+func (zd *ZoneData) GenerateNsecChainWithDak(ctx context.Context, dak *DnssecKeys) error {
 	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return fmt.Errorf("GenerateNsecChainWithDak: zone %s is not allowed to be updated or signed", zd.ZoneName)
 	}
@@ -1456,6 +1468,10 @@ func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
 	// is the child's data, not this zone's, and must not appear: verified
 	// against BIND, which emits an NSEC at the delegation point and none for
 	// the glue beneath it.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("generating the NSEC chain for %s: %w", zd.ZoneName, err)
+	}
+
 	all := zd.workingOwnerNamesLocked()
 	names := zd.chainNamesLocked(all)
 

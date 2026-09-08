@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -90,7 +91,7 @@ func TestNsecTTLIsTheSOAMinimum(t *testing.T) {
 
 	// And it reaches the record itself.
 	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true}
-	if err := zd.GenerateNsecChainWithDak(&DnssecKeys{}); err != nil {
+	if err := zd.GenerateNsecChainWithDak(context.Background(), &DnssecKeys{}); err != nil {
 		t.Fatalf("GenerateNsecChainWithDak: %v", err)
 	}
 	od := zd.stagedOwner("alpha.scope.example.")

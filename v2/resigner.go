@@ -177,7 +177,7 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 			// anything is due.
 			switch req.Reason {
 			case ResignKeyStateChanged:
-				zd.replaceSignaturesNow()
+				zd.replaceSignaturesNow(ctx)
 			case ResignPeriodic:
 				// Registration only; the watchlist add below is the whole effect.
 			default:
@@ -209,7 +209,7 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 					lgSigner.Info("ResignerEngine terminating during a renewal sweep")
 					return
 				}
-				resignSweepZone(zd)
+				resignSweepZone(ctx, zd)
 			}
 
 			wake := nextResignWake(ZonesToKeepSigned, floor)
@@ -233,7 +233,7 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 // replaces added the right signatures and left the wrong ones on the wire,
 // which is not what a key-state change needs. ResignZone strips and re-signs
 // per RRset, on a local copy, so readers never see an unsigned intermediate.
-func (zd *ZoneData) replaceSignaturesNow() {
+func (zd *ZoneData) replaceSignaturesNow(ctx context.Context) {
 	if zd == nil {
 		return
 	}
@@ -247,7 +247,7 @@ func (zd *ZoneData) replaceSignaturesNow() {
 	// produce two replaces of the same signatures.
 	zd.takeResignPending()
 	lgSigner.Debug("resigner: replacing signatures after a key-state change", "zone", zd.ZoneName)
-	newrrsigs, err := zd.ResignZone(zd.KeyDB)
+	newrrsigs, err := zd.ResignZone(ctx, zd.KeyDB)
 	if err != nil {
 		// Put it back. A failed replace leaves the zone serving signatures by
 		// keys that are no longer active, and the renewal pass will not find
@@ -265,7 +265,7 @@ func (zd *ZoneData) replaceSignaturesNow() {
 // Lifted out of the engine loop so the two things it has to get right can be
 // asserted without waiting out a real tick: an owed replace is not skipped, and
 // renewal does not stand in for one.
-func resignSweepZone(zd *ZoneData) {
+func resignSweepZone(ctx context.Context, zd *ZoneData) {
 	// Skip zones where signing has been disabled since they were added to the
 	// list. MP zones can toggle OptInlineSigning dynamically based on HSYNC
 	// analysis.
@@ -278,7 +278,7 @@ func resignSweepZone(zd *ZoneData) {
 	// is valid and not old -- so without this the zone would go on serving
 	// signatures by a key that is gone until they finally expired.
 	if zd.resignPendingSet() {
-		zd.replaceSignaturesNow()
+		zd.replaceSignaturesNow(ctx)
 	}
 	// Renewal, not a rebuild. SignZone(force=false) used to be called here, and
 	// it rebuilt the NSEC chain and the DNSKEY RRset unsigned before checking
@@ -287,7 +287,7 @@ func resignSweepZone(zd *ZoneData) {
 	// Once a minute, on every signed zone, whether or not anything had changed.
 	// See docs/2026-09-05-signing-build-vs-renewal.md.
 	lgSigner.Debug("renewing ageing signatures (periodic)", "zone", zd.ZoneName)
-	renewed, err := zd.RenewZoneSignatures(zd.KeyDB)
+	renewed, err := zd.RenewZoneSignatures(ctx, zd.KeyDB)
 	if err != nil {
 		// Nothing was signed, so do not go on to say it was. An operator
 		// watching for "signatures renewed" would read the success line and

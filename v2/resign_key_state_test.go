@@ -74,7 +74,7 @@ func hasKeytag(tags []uint16, want uint16) bool {
 func TestResignZoneRemovesSignaturesByARetiredKey(t *testing.T) {
 	zd, kdb, oldTag := rolledZone(t)
 
-	if _, err := zd.ResignZone(kdb); err != nil {
+	if _, err := zd.ResignZone(context.Background(), kdb); err != nil {
 		t.Fatalf("ResignZone: %v", err)
 	}
 

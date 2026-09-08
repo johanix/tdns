@@ -95,7 +95,7 @@ func TestResignZoneSignsOnlyTheDSAtADelegationPoint(t *testing.T) {
 	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
-	if _, err := zd.ResignZone(kdb); err != nil {
+	if _, err := zd.ResignZone(context.Background(), kdb); err != nil {
 		t.Fatalf("ResignZone: %v", err)
 	}
 	assertCutInvariants(t, zd, "ResignZone")
