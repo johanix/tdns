@@ -137,6 +137,14 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 		return false, fmt.Errorf("SignRRset: no active DNSSEC keys available")
 	}
 
+	// Before anything reads RRs[0]. An empty RRset is a caller error, and this
+	// used to be the first thing the function did; the validity warning below
+	// was added above it and turned that error return into a panic in a server
+	// goroutine, which takes the process down (#565).
+	if len(rrset.RRs) == 0 {
+		return false, fmt.Errorf("SignRRset: rrset has no RRs")
+	}
+
 	// A zero signature validity -- no policy bound, or a bound policy that does
 	// not set one for this type -- is silently turned into FIVE MINUTES by
 	// sigLifetime, and nothing on the normal path renews those. It is legal and
@@ -147,10 +155,6 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 			"zone", zd.ZoneName, "name", name,
 			"rrtype", dns.TypeToString[rrset.RRs[0].Header().Rrtype],
 			"policy_bound", zd.DnssecPolicy != nil)
-	}
-
-	if len(rrset.RRs) == 0 {
-		return false, fmt.Errorf("SignRRsetNG: rrset has no RRs")
 	}
 
 	// Snapshot TTLs and the RRSIGs slice before any in-place mutation,

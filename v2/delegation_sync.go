@@ -526,24 +526,18 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 			return "", dns.RcodeServerFailure, err
 		}
 
-		// Try to sign the CSYNC RRset
-		if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
-			apex, _ := zd.GetOwner(zd.ZoneName)
-			rrset, _ := apex.RRtypes.Get(dns.TypeCSYNC)
-			//			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
-			//			if err != nil {
-			//				log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
-			//			} else {
-			//			if len(dak.ZSKs) > 0 {
-			_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, true, nil) // Let's force signing
-			if err != nil {
-				lgDns.Error("error signing CSYNC RRset", "zone", zd.ZoneName, "err", err)
-			} else {
-				lgDns.Debug("signed CSYNC RRset", "zone", zd.ZoneName)
-			}
-			//			}
-			//			}
-		}
+		// Nothing signs the CSYNC here. PublishCsyncRR only ENQUEUES a
+		// ZONE-UPDATE, and the updater signs every RRset it stages before the
+		// publish that carries it, so by the time the record exists it is
+		// already signed by the path that owns it.
+		//
+		// There used to be a force-sign here, and it was wrong three times
+		// over: it fetched the CSYNC before the queued update had applied, so
+		// on a zone with no CSYNC yet the RRset was empty and SignRRset
+		// panicked (#565); it discarded the `ok` from both lookups, which is
+		// exactly the signal that would have said so; and it signed a struct
+		// copy whose slices alias the live zone, mutating published records in
+		// place and then throwing the result away without staging it.
 	}
 	// 2. Create Notify msg
 	// 3. Send Notify msg
