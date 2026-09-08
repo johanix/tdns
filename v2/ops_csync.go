@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -40,7 +41,44 @@ func csyncDeleteRR(zone string) dns.RR {
 	return anti
 }
 
+// PublishCsyncRR stages the CSYNC and returns as soon as the update is queued.
+//
+// PublishCsyncRRAndWait is the variant for a caller that is about to tell
+// somebody else to come and look.
 func (zd *ZoneData) PublishCsyncRR() error {
+	return zd.publishCsyncRR(context.Background(), nil)
+}
+
+// PublishCsyncRRAndWait stages the CSYNC and waits for the update to be
+// applied and published.
+//
+// The plain version returns once the request is QUEUED, which is the right
+// answer for a caller that only wants the record to exist eventually -- and the
+// wrong one for the NOTIFY scheme, which follows it by telling the parent to
+// come and fetch a CSYNC that may not be there yet.
+//
+// Not the default, because the zone updater itself publishes a CSYNC on one of
+// its own paths: waiting there would be the updater waiting on itself.
+func (zd *ZoneData) PublishCsyncRRAndWait(ctx context.Context) error {
+	resp := make(chan ZoneUpdateResult, 1)
+	if err := zd.publishCsyncRR(ctx, resp); err != nil {
+		return err
+	}
+	select {
+	case res := <-resp:
+		if res.Err != nil {
+			return fmt.Errorf("publishing the CSYNC for %s: %w", zd.ZoneName, res.Err)
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("publishing the CSYNC for %s: %w", zd.ZoneName, ctx.Err())
+	case <-time.After(UpdateApplyTimeout):
+		return fmt.Errorf("publishing the CSYNC for %s: timed out after %s waiting for it to be applied",
+			zd.ZoneName, UpdateApplyTimeout)
+	}
+}
+
+func (zd *ZoneData) publishCsyncRR(ctx context.Context, resp chan ZoneUpdateResult) error {
 	csync := dns.CSYNC{
 		Serial: zd.CurrentSerial,
 		// The immediate flag is what makes a parent act on this CSYNC at all:
@@ -72,7 +110,10 @@ func (zd *ZoneData) PublishCsyncRR() error {
 		// bump and leave a window with none published at all.
 		Actions:        []dns.RR{csyncDeleteRR(zd.ZoneName), &csync},
 		InternalUpdate: true,
+		Resp:           resp,
 	}:
+	case <-ctx.Done():
+		return fmt.Errorf("PublishCsyncRR: %s: %w", zd.ZoneName, ctx.Err())
 	case <-time.After(5 * time.Second):
 		return fmt.Errorf("PublishCsyncRR: timeout sending update for zone %s", zd.ZoneName)
 	}
