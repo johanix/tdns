@@ -87,13 +87,12 @@ func TestEDECodeValues(t *testing.T) {
 		// at the end of the block on 2026-09-02.
 		{"EDESig0KeyValidationFailed", EDESig0KeyValidationFailed, 541},
 		{"EDESig0ManualBootstrapRequired", EDESig0ManualBootstrapRequired, 542},
-		{"EDESig0UnvalidatedUploadNotAccepted", EDESig0UnvalidatedUploadNotAccepted, 543},
-		// 543 is taken here by the code above, which reached this branch first.
-		// These two are 543/544 on their own branch off main, so whichever of
-		// the two PRs lands on main second has to renumber -- and this table is
-		// what will say so, which is the whole reason it exists.
-		{"EDEDelegationIncoherent", EDEDelegationIncoherent, 544},
-		{"EDEDelegationUnverifiable", EDEDelegationUnverifiable, 545},
+		// 543 and 544 are what PR #573 published on main. They keep those
+		// values here; the code below is the one that had not shipped, so it
+		// took the next number instead of pushing these two along.
+		{"EDEDelegationIncoherent", EDEDelegationIncoherent, 543},
+		{"EDEDelegationUnverifiable", EDEDelegationUnverifiable, 544},
+		{"EDESig0UnvalidatedUploadNotAccepted", EDESig0UnvalidatedUploadNotAccepted, 545},
 
 		// The standard code must keep its RFC 8914 value and must not be part
 		// of the private sequence.
