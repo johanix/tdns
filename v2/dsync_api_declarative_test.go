@@ -335,3 +335,28 @@ func TestTheGuardAllowsAWithdrawal(t *testing.T) {
 		t.Errorf("glue adds with nothing declared reported %d gaps, want 1: %v", len(gaps), gaps)
 	}
 }
+
+// Emit-once per owner, when several of its records are being removed. The loop
+// relies on storing the nil to mark the owner done, so a second removed record
+// for the same name must not produce a second RRset -- dsyncApiBuildActions
+// refuses a payload that names the same owner and type twice.
+func TestAWithdrawalIsDeclaredOncePerOwner(t *testing.T) {
+	syncstate := DelegationSyncStatus{
+		ZoneName: "child.example.",
+		NewNS:    rrsOf(t, "child.example. 3600 IN NS ns1.child.example."),
+		ARemoves: rrsOf(t,
+			"ns4.child.example. 3600 IN A 192.0.2.4",
+			"ns4.child.example. 3600 IN A 192.0.2.5"),
+	}
+
+	n := 0
+	for _, s := range DsyncApiRRsetsFromSyncStatus("child.example.", syncstate) {
+		if s.Owner == "ns4.child.example." && s.Type == "A" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("the withdrawal was declared %d times, want once: the endpoint refuses a"+
+			" payload naming the same owner and type twice", n)
+	}
+}
