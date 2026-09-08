@@ -187,7 +187,7 @@ func TestProxyUpdateModeDefaultAndOverride(t *testing.T) {
 	}
 }
 
-// U-d: proxyCurrentDelegationRRs reads the current authoritative NS + glue + DS
+// U-d: currentDelegationRRs reads the current authoritative NS + glue + DS
 // (DS derived from apex DNSKEY SEP keys) from the served zone.
 func TestProxyCurrentDelegationRRs(t *testing.T) {
 	kdb := newTestKeyDB(t)
@@ -201,7 +201,7 @@ ns2.upd.example.	3600 IN A 192.0.2.2
 upd.example.	3600 IN DNSKEY 257 3 15 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA=
 `
 	zd := proxyUpdZoneData(t, kdb, zoneStr)
-	newNS, newA, newAAAA, newDS := zd.proxyCurrentDelegationRRs()
+	newNS, newA, newAAAA, newDS := zd.currentDelegationRRs()
 	if len(newNS) != 2 {
 		t.Fatalf("NS = %d, want 2", len(newNS))
 	}
@@ -228,7 +228,7 @@ upd.example.	3600 IN NS ns1.upd.example.
 ns1.upd.example.	3600 IN A 192.0.2.1
 `
 	zd := proxyUpdZoneData(t, kdb, zoneStr)
-	newNS, newA, _, newDS := zd.proxyCurrentDelegationRRs()
+	newNS, newA, _, newDS := zd.currentDelegationRRs()
 	if len(newNS) != 1 || len(newA) != 1 {
 		t.Fatalf("NS/A = %d/%d, want 1/1", len(newNS), len(newA))
 	}

@@ -385,13 +385,22 @@ func (zd *ZoneData) proxyKeyStatusMessage(state ProxyUpdateState, kdb *KeyDB) (s
 	}
 }
 
-// proxyCurrentDelegationRRs reads the current authoritative delegation RRsets
-// from the SERVED zone (the freshly-transferred data): the apex NS, the in-
-// bailiwick glue (A/AAAA) for those nameservers, and the DS derived from the
-// apex DNSKEY SEP keys. These are the replace-form UPDATE's "new members" — the
+// currentDelegationRRs reads the current authoritative delegation RRsets
+// from the SERVED zone.
+//
+// Shared by the proxy path and by AnalyseZoneDelegation's declarative fields,
+// deliberately: the same defect was found twice. The proxy case hit it first --
+// feeding DsyncApiRRsetsFromSyncStatus an analysis produced an empty request,
+// because the analysis fills deltas and not the New* fields -- and was fixed by
+// reading the served zone instead. The explicit-analysis path had the same hole
+// and kept it, which is #507. One implementation now, so a third path cannot
+// rediscover it.
+//
+// Reads the apex NS, the in-bailiwick glue (A/AAAA) for those nameservers, and
+// the DS derived from the apex DNSKEY SEP keys. These are the replace-form UPDATE's "new members" — the
 // payload never depends on the parent's state (that is the point of replace).
 // For an unsigned zone newDS is empty (no DNSKEYs), which is correct.
-func (zd *ZoneData) proxyCurrentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR) {
+func (zd *ZoneData) currentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR) {
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || apex == nil {
 		return nil, nil, nil, nil
@@ -428,7 +437,7 @@ func (zd *ZoneData) proxyCurrentDelegationRRs() (newNS, newA, newAAAA, newDS []d
 // (DNSKEYs present, none SEP) leaves the parent DS alone; SEP keys are
 // restated and ZSKs are not hashed.
 func (zd *ZoneData) proxyReplaceSyncState() DelegationSyncStatus {
-	newNS, newA, newAAAA, newDS := zd.proxyCurrentDelegationRRs()
+	newNS, newA, newAAAA, newDS := zd.currentDelegationRRs()
 	return DelegationSyncStatus{
 		ZoneName:   zd.ZoneName,
 		Parent:     zd.GetParent(),

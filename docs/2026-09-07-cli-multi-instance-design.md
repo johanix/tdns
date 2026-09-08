@@ -219,10 +219,16 @@ emergency fallback if the 24-site conversion runs long.
 
 ## Delivery vehicle: a parallel binary, not a change to tdns-cli
 
-Changing `tdns-cli` in place would put every existing invocation, every written
-procedure and every expectation of behaviour on a refactor landing cleanly. So
-the new behaviour ships as a **second binary alongside the existing one**,
-`tdns-ncli` (`cmdv2/ncli/`).
+`tdns-ncli` is a **prototype**, and that is the reason for the parallel binary
+rather than a consequence of it. The multi-instance behaviour needs to be run
+and exercised before anything depends on it, and `tdns-cli` is depended on by
+everything. So the new behaviour ships as a **second binary alongside the
+existing one**, `tdns-ncli` (`cmdv2/ncli/`), and `tdns-cli` stays the
+management tool until the prototype has earned the name.
+
+Changing `tdns-cli` in place would also put every existing invocation, every
+written procedure and every expectation of behaviour on a refactor landing
+cleanly — but that is the secondary argument, not the first one.
 
 This works because of how the change splits:
 

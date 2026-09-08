@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -51,6 +52,24 @@ var (
 	policyReloadZones string
 	policyReloadTol   int
 	policyReloadReady string
+
+	// test relay: the notify-semantics rig. The rig sits on both sides of the
+	// SUT, so it needs two listen addresses of its own as well as the SUT's.
+	relaySUT          string
+	relayProfile      string
+	relayUpListen     string
+	relayDownListen   string
+	relayRounds       int
+	relaySettle       string
+	relayRoundTimeout string
+	relayDownDelay    string
+
+	// xfr: frame-level analysis of a zone-transfer stream.
+	xfrServer   string
+	xfrIxfr     uint32
+	xfrFile     string
+	xfrDigDump  string
+	xfrMaxFrame int
 
 	// perf qps: adaptive max-QPS finder (query path only).
 	perfUDP         bool
@@ -203,6 +222,113 @@ func mustDur(s, name string) time.Duration {
 		log.Fatalf("invalid --%s %q: %v", name, s, err)
 	}
 	return d
+}
+
+// ---- test relay -----------------------------------------------------------
+
+var testRelayCmd = &cobra.Command{
+	Use:   "relay",
+	Short: "Notify-semantics rig: one inbound change, how many outbound changes?",
+	Long: `Sits on BOTH sides of a tdns-auth secondary. The rig plays the upstream
+primary -- authoring a change, sending NOTIFY, serving the AXFR/IXFR that
+follows -- and the downstream secondary, receiving the SUT's own NOTIFYs and
+transferring the result back. For one inbound change it then answers: how many
+versions were published, how many NOTIFYs were sent, at which serials, and does
+the content that came out match what went in.
+
+Two profiles, because the correct answer differs:
+
+  signing  (default)  an inline-signing secondary. It originates content and
+                      advances the serial in its own space, so the rig checks
+                      that each announced version is fully signed and that no
+                      version is signed twice.
+  mirror              a plain secondary. It originates nothing, so what comes
+                      out must equal what went in exactly -- signer-owned
+                      records and the SOA serial included (MUST-NOT-MODIFY).
+
+Verdicts are three-valued. The rig races the server it measures, so a round
+whose observations cannot decide an invariant is reported as a skip, never as a
+pass. --generate-config emits the SUT's zone block and stops.
+
+See docs/2026-09-05-notify-semantics-rig.md.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		if zoneName == "" {
+			log.Fatal("--zone is required")
+		}
+		if genConfig {
+			snippet, todo, err := debug.RelayConfigSnippet(debug.RelayProvisionInput{
+				Zone:       zoneName,
+				Profile:    relayProfile,
+				Upstream:   relayUpListen,
+				Downstream: relayDownListen,
+			})
+			if err != nil {
+				log.Fatalf("generate-config: %v", err)
+			}
+			fmt.Print(snippet)
+			fmt.Printf("\nOperator to-do:\n")
+			for i, t := range todo {
+				fmt.Printf("  %d. %s\n", i+1, t)
+			}
+			return
+		}
+		if relaySUT == "" {
+			log.Fatal("--sut <addr:port> is required to run (provision first with --generate-config)")
+		}
+		runRelay(cmd.Context())
+	},
+}
+
+func runRelay(ctx context.Context) {
+	sut := relaySUT
+	if _, _, err := net.SplitHostPort(sut); err != nil {
+		sut = net.JoinHostPort(sut, "53")
+	}
+
+	cfg := debug.RelayConfig{
+		Zone:             zoneName,
+		SUT:              sut,
+		Profile:          relayProfile,
+		UpstreamListen:   relayUpListen,
+		DownstreamListen: relayDownListen,
+		Rounds:           relayRounds,
+		Settle:           mustDur(relaySettle, "settle"),
+		RoundTimeout:     mustDur(relayRoundTimeout, "round-timeout"),
+		DownstreamDelay:  mustDur(relayDownDelay, "downstream-delay"),
+		Seed:             seed,
+		Tool:             appName + " " + appVersion,
+	}
+
+	up, down, err := debug.NewRelayPeers(cfg)
+	if err != nil {
+		log.Printf("relay setup error: %v", err)
+		os.Exit(debug.ExitSetup)
+	}
+	up.Start()
+	down.Start()
+	defer up.Stop()
+	defer down.Stop()
+
+	fmt.Printf("rig upstream (primary for %s): %s\n", cfg.Zone, up.Addr())
+	fmt.Printf("rig downstream (notify target): %s\n", down.Addr())
+	fmt.Printf("SUT: %s, profile %s, %d round(s)\n", cfg.SUT, cfg.Profile, cfg.Rounds)
+
+	rep, res, err := debug.RunRelay(ctx, cfg, up, down)
+	if err != nil {
+		log.Printf("relay setup error: %v", err)
+		os.Exit(debug.ExitSetup)
+	}
+	if reportJson {
+		_ = rep.RenderJSON(os.Stdout)
+	} else {
+		rep.RenderText(os.Stdout)
+		debug.RenderRounds(os.Stdout, res)
+	}
+	// Stopped explicitly: os.Exit does not run deferred functions, and leaving
+	// the listeners bound would make an immediately following run fail to bind.
+	up.Stop()
+	down.Stop()
+	os.Exit(rep.ExitCode())
 }
 
 // ---- test reload ----------------------------------------------------------
@@ -465,6 +591,96 @@ func parseZoneList(spec string) ([]string, error) {
 	return zones, nil
 }
 
+// ---- xfr ------------------------------------------------------------------
+
+var xfrCmd = &cobra.Command{
+	Use:   "xfr",
+	Short: "Frame-level analysis of a zone transfer: does the wire agree with itself?",
+	Long: `Walks a zone-transfer stream the way a STRICT parser does -- section by
+section, record by record, each rdata bounded by its own RDLENGTH -- and reports
+where the accounting stops adding up: bytes the header does not account for, and
+records whose rdata does not parse to exactly their RDLENGTH.
+
+This exists because a strict client's complaint names the message, not the
+record. "extra input data" for a 22 KB transfer says nothing about which of 328
+records is wrong; this says which.
+
+Three sources:
+
+  --server <addr:port> -z <zone>   run the transfer and walk every frame
+  --file <path>                    walk a saved raw DNS message
+  --dig-dump <path>                walk dig's "Got bad packet" hex dump ("-" = stdin)
+
+The last is for failures seen on someone else's machine, where the dump is the
+only artifact you have.
+
+Its silence is the least trustworthy thing about it: the parser is miekg/dns,
+the same library tdns packs with, so it agrees with tdns by construction about
+anything tdns invented. Records it accepts that a strict client may not are
+reported as HAZARD lines. Exit 0 when every byte is accounted for, 1 otherwise.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		var frames []debug.XfrFrame
+
+		switch {
+		case xfrFile != "" || xfrDigDump != "":
+			var raw []byte
+			var err error
+			if xfrFile != "" {
+				raw, err = os.ReadFile(xfrFile)
+			} else {
+				in := os.Stdin
+				if xfrDigDump != "-" {
+					f, ferr := os.Open(xfrDigDump)
+					if ferr != nil {
+						log.Fatalf("opening %s: %v", xfrDigDump, ferr)
+					}
+					defer f.Close()
+					in = f
+				}
+				raw, err = debug.ParseDigHexdump(in)
+			}
+			if err != nil {
+				log.Fatalf("reading the message: %v", err)
+			}
+			frames = []debug.XfrFrame{debug.WalkXfrMessage(1, raw)}
+
+		case xfrServer != "":
+			if zoneName == "" {
+				log.Fatal("--zone is required with --server")
+			}
+			server := xfrServer
+			if _, _, err := net.SplitHostPort(server); err != nil {
+				server = net.JoinHostPort(server, "53")
+			}
+			var err error
+			frames, err = debug.FetchXfrFrames(cmd.Context(), server, zoneName, xfrIxfr, xfrMaxFrame)
+			if err != nil {
+				// Frames collected before the failure are still worth printing:
+				// a stream that broke mid-way is exactly the case to inspect.
+				debug.RenderXfrFrames(os.Stdout, frames)
+				log.Printf("transfer error: %v", err)
+				os.Exit(debug.ExitSetup)
+			}
+
+		default:
+			log.Fatal("need one of --server (with --zone), --file or --dig-dump")
+		}
+
+		if reportJson {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(frames)
+		} else {
+			debug.RenderXfrFrames(os.Stdout, frames)
+		}
+		for _, f := range frames {
+			if !f.Clean() {
+				os.Exit(debug.ExitViolation)
+			}
+		}
+	},
+}
+
 // ---- list-tests / cleanup ---------------------------------------------------
 
 var listTestsCmd = &cobra.Command{
@@ -653,6 +869,20 @@ func init() {
 	testReloadCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
 	testCmd.AddCommand(testReloadCmd)
 
+	testRelayCmd.Flags().BoolVar(&genConfig, "generate-config", false, "emit the SUT's zone block and stop")
+	testRelayCmd.Flags().StringVarP(&zoneName, "zone", "z", "", "the zone relayed through the SUT")
+	testRelayCmd.Flags().StringVar(&relaySUT, "sut", "", "the tdns-auth under test, addr:port")
+	testRelayCmd.Flags().StringVar(&relayProfile, "profile", "signing", "what the SUT does with the zone: signing | mirror")
+	testRelayCmd.Flags().StringVar(&relayUpListen, "upstream-listen", "127.0.0.1:5361", "where the rig serves the zone TO the SUT")
+	testRelayCmd.Flags().StringVar(&relayDownListen, "downstream-listen", "127.0.0.1:5362", "where the rig receives the SUT's NOTIFYs")
+	testRelayCmd.Flags().IntVar(&relayRounds, "rounds", 12, "changes to author, one at a time")
+	testRelayCmd.Flags().StringVar(&relaySettle, "settle", "10s", "quiet period that ends a round")
+	testRelayCmd.Flags().StringVar(&relayRoundTimeout, "round-timeout", "2m", "hard cap on one round")
+	testRelayCmd.Flags().StringVar(&relayDownDelay, "downstream-delay", "0s", "hold each NOTIFY reply this long (provokes the SUT's zone-lock hold)")
+	testRelayCmd.Flags().Int64Var(&seed, "seed", 0, "PRNG seed for a reproducible change mix")
+	testRelayCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
+	testCmd.AddCommand(testRelayCmd)
+
 	testPolicyReloadCmd.Flags().StringVar(&targetName, "target", "", "apiservers entry name for the mgmt API")
 	testPolicyReloadCmd.Flags().StringVar(&dnsServer, "dns", "", "DNS server addr:port to observe")
 	testPolicyReloadCmd.Flags().StringVar(&policyReloadZones, "zones", "", "explicit signed-zone set: a,b,c or @file (default: enumerate signed zones via the mgmt API)")
@@ -660,6 +890,14 @@ func init() {
 	testPolicyReloadCmd.Flags().StringVar(&policyReloadReady, "ready-timeout", "60s", "how long to wait for all zones to answer SOA again after the trigger")
 	testPolicyReloadCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
 	testCmd.AddCommand(testPolicyReloadCmd)
+
+	xfrCmd.Flags().StringVar(&xfrServer, "server", "", "server to transfer from, addr:port")
+	xfrCmd.Flags().StringVarP(&zoneName, "zone", "z", "", "zone to transfer")
+	xfrCmd.Flags().Uint32Var(&xfrIxfr, "ixfr", 0, "request IXFR from this serial instead of AXFR")
+	xfrCmd.Flags().StringVar(&xfrFile, "file", "", "walk a saved raw DNS message instead of transferring")
+	xfrCmd.Flags().StringVar(&xfrDigDump, "dig-dump", "", "walk dig's \"Got bad packet\" hex dump (\"-\" for stdin)")
+	xfrCmd.Flags().IntVar(&xfrMaxFrame, "max-frames", 0, "stop after this many frames (0 = until the closing SOA)")
+	xfrCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
 
 	cleanupCmd.Flags().StringVar(&testId, "test", "", "test identity to clean up")
 	cleanupCmd.Flags().BoolVar(&rmArtifacts, "rm", false, "also remove the local artifact directory")
