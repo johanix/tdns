@@ -935,21 +935,24 @@ func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request)
 	return func(w http.ResponseWriter, r *http.Request) {
 		jobID := r.URL.Query().Get("job_id")
 
-		if conf.Internal.Scanner == nil {
+		// Bound once: the handler must work on one Scanner throughout, not
+		// re-read the pointer between the nil check and each use.
+		scanner := conf.Internal.GetScanner()
+		if scanner == nil {
 			http.Error(w, "Scanner not initialized", http.StatusServiceUnavailable)
 			return
 		}
 
-		conf.Internal.Scanner.JobsMutex.RLock()
+		scanner.JobsMutex.RLock()
 
 		if jobID == "" {
 			// Return all jobs - create deep copies to avoid race conditions during encoding
 			lgApi.Debug("listing all scanner jobs")
-			jobs := make([]*ScanJobStatus, 0, len(conf.Internal.Scanner.Jobs))
-			for _, job := range conf.Internal.Scanner.Jobs {
+			jobs := make([]*ScanJobStatus, 0, len(scanner.Jobs))
+			for _, job := range scanner.Jobs {
 				jobs = append(jobs, deepCopyScanJobStatus(job))
 			}
-			conf.Internal.Scanner.JobsMutex.RUnlock()
+			scanner.JobsMutex.RUnlock()
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(jobs)
 			return
@@ -957,17 +960,17 @@ func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		// Return specific job - create deep copy to avoid race conditions during encoding
 		lgApi.Debug("job status inquiry", "jobID", jobID)
-		job, exists := conf.Internal.Scanner.Jobs[jobID]
+		job, exists := scanner.Jobs[jobID]
 
 		if !exists {
-			conf.Internal.Scanner.JobsMutex.RUnlock()
+			scanner.JobsMutex.RUnlock()
 			lgApi.Warn("scan job not found", "jobID", jobID)
 			http.Error(w, "Scan job not found", http.StatusNotFound)
 			return
 		}
 
 		job = deepCopyScanJobStatus(job)
-		conf.Internal.Scanner.JobsMutex.RUnlock()
+		scanner.JobsMutex.RUnlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(job)
@@ -980,13 +983,14 @@ func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		jobID := r.URL.Query().Get("job_id")
 		deleteAll := r.URL.Query().Get("all") == "true"
 
-		if conf.Internal.Scanner == nil {
+		scanner := conf.Internal.GetScanner()
+		if scanner == nil {
 			http.Error(w, "Scanner not initialized", http.StatusServiceUnavailable)
 			return
 		}
 
-		conf.Internal.Scanner.JobsMutex.Lock()
-		defer conf.Internal.Scanner.JobsMutex.Unlock()
+		scanner.JobsMutex.Lock()
+		defer scanner.JobsMutex.Unlock()
 
 		resp := ScannerResponse{
 			AppName: Globals.App.Name,
@@ -995,20 +999,20 @@ func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		if deleteAll {
 			// Delete all jobs
-			count := len(conf.Internal.Scanner.Jobs)
-			conf.Internal.Scanner.Jobs = make(map[string]*ScanJobStatus)
+			count := len(scanner.Jobs)
+			scanner.Jobs = make(map[string]*ScanJobStatus)
 			lgApi.Info("deleted all scanner jobs", "count", count)
 			resp.Msg = fmt.Sprintf("Deleted all %d jobs", count)
 			resp.Status = "success"
 		} else if jobID != "" {
 			// Delete specific job
-			_, exists := conf.Internal.Scanner.Jobs[jobID]
+			_, exists := scanner.Jobs[jobID]
 			if !exists {
 				lgApi.Warn("scan job not found for deletion", "jobID", jobID)
 				http.Error(w, "Scan job not found", http.StatusNotFound)
 				return
 			}
-			delete(conf.Internal.Scanner.Jobs, jobID)
+			delete(scanner.Jobs, jobID)
 			lgApi.Info("deleted scanner job", "jobID", jobID)
 			resp.Msg = fmt.Sprintf("Deleted job %s", jobID)
 			resp.Status = "success"

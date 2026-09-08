@@ -645,7 +645,7 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	ctx, cancel := context.WithTimeout(context.Background(), delegationCheckTimeout)
 	defer cancel()
 	if cerr := zd.CheckDelegationNSCoherenceForUpdate(ctx, r.Ns,
-		Conf.Internal.Scanner.childNameserverAsker(nil)); cerr != nil {
+		Conf.Internal.GetScanner().childNameserverAsker(nil)); cerr != nil {
 		lgHandler.Warn("child update refused as incoherent",
 			"zone", zd.ZoneName, "err", cerr)
 		us.ValidationRcode = dns.RcodeRefused

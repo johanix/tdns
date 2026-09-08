@@ -229,9 +229,12 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 		}
 	}
 
-	// Store scanner instance in Config for API handler access
-	conf.Internal.Scanner = scanner
+	// Finish initialising BEFORE publishing. Publication is what other
+	// goroutines synchronise on, and this used to publish first: an API
+	// request or an UPDATE arriving in that window got a Scanner whose conf
+	// was still nil, and scanner.imr() dereferences it.
 	scanner.conf = conf
+	conf.Internal.PublishScanner(scanner)
 
 	lg.Info("ScannerEngine: starting")
 	defer ticker.Stop()

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
@@ -848,9 +849,34 @@ type InternalDnsConf struct {
 	// ImrReady is closed once ImrEngine has been stored, giving other engines
 	// a synchronised way to learn it is usable. Read ImrEngine only after
 	// receiving from it -- see ImrReadiness.
-	ImrReady     *ImrReadiness
-	Scanner      *Scanner      // Scanner instance for async job tracking
+	ImrReady *ImrReadiness
+	// scanner is the Scanner instance, for async job tracking and for the
+	// delegation-coherence checks that ask a child's own nameservers.
+	//
+	// Atomic, and unexported so it can only be reached through the accessors.
+	// It is written once by ScannerEngine's goroutine and read by API
+	// handlers, the UPDATE responder and the DSYNC API -- all on other
+	// goroutines -- so a plain field was a data race, and a reader could
+	// observe the pointer before ScannerEngine had finished initialising what
+	// it pointed at.
+	scanner      atomic.Pointer[Scanner]
 	TsigKeyStore *TsigKeyStore // name->secret store for replication TSIG (Improvement 2)
+}
+
+// PublishScanner makes the scanner visible to every other goroutine.
+//
+// Call it only once the Scanner is fully initialised: publication is what
+// readers synchronise on, so anything assigned after this point is assigned
+// into an object other goroutines are already using.
+func (ic *InternalDnsConf) PublishScanner(s *Scanner) {
+	ic.scanner.Store(s)
+}
+
+// GetScanner returns the scanner, or nil if ScannerEngine has not published one
+// yet. Every caller must handle nil: the engines start concurrently, so an
+// early request genuinely can arrive first.
+func (ic *InternalDnsConf) GetScanner() *Scanner {
+	return ic.scanner.Load()
 }
 
 // InternalConf holds DNS-internal state (channels, engine references).
