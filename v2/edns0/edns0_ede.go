@@ -95,6 +95,20 @@ const (
 	// IANA assigns (plan Phase 3).
 	EDESig0KeyValidationFailed     // "SIG(0) key is known, but validation failed": waiting will not help
 	EDESig0ManualBootstrapRequired // "Automatic bootstrap of SIG(0) keys not supported; manual bootstrap required"
+
+	// Delegation-coherence outcomes. A coherence refusal is not a policy
+	// refusal: the update was authenticated, authorised and approved, and then
+	// the parent asked whether the delegation it would produce still works.
+	// Reporting that as EDEZoneUpdatesNotAllowed sent the operator to check
+	// allow-child-updates and the update policy, which are the two things
+	// demonstrably not wrong.
+	//
+	// Split in two because the answers differ. Incoherent is the child's to
+	// fix; unverifiable is a parent that could not ask -- a nameserver that
+	// refused the connection, or a parent-side precondition -- and is worth
+	// retrying.
+	EDEDelegationIncoherent
+	EDEDelegationUnverifiable
 )
 
 // NOTE for anyone adding codes above: append at the END of the const block.
@@ -139,6 +153,9 @@ var EDECodeToString = map[uint16]string{
 
 	EDESig0KeyValidationFailed:     "SIG(0) key known, but validation failed; re-bootstrap after fixing the key's publication",
 	EDESig0ManualBootstrapRequired: "Automatic bootstrap of SIG(0) keys not supported; manual bootstrap required",
+
+	EDEDelegationIncoherent:   "the resulting delegation is not what the child's nameservers serve",
+	EDEDelegationUnverifiable: "the parent could not verify the delegation against the child's nameservers; try again later",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response

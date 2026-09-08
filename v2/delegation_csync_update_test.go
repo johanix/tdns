@@ -133,6 +133,13 @@ func TestNSCoherenceRefusesWhenTheNameserversDisagree(t *testing.T) {
 	actions := []dns.RR{delRR(t, "child.example. 3600 IN NS ns.provider.net.")}
 	err := zd.CheckDelegationNSCoherenceForUpdate(context.Background(), actions, askerFor(stub, &asked))
 	expectRefusal(t, err, "do not agree")
+	// On the sentinel, not on the prose. Disagreeing nameservers are the
+	// retryable arm (EDE 544), and unwrapping the production return would
+	// otherwise leave both this test and the classifier's own test green while
+	// the child started being told its delegation is wrong.
+	if !errors.Is(err, ErrDelegationUnverifiable) {
+		t.Errorf("nameserver disagreement is not marked unverifiable: %v", err)
+	}
 }
 
 func TestNSCoherenceRefusesWhenTheLookupFails(t *testing.T) {
