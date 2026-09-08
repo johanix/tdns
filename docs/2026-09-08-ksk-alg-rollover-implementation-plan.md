@@ -956,3 +956,153 @@ the injected-observed-set seam the existing KSK engine tests use
    with E13 in commit 8.
 4. **`policy-reset` wording** (§5.5). Confirm the operator-facing text
    change is wanted now that a gradual KSK path exists.
+
+
+## 10. Risk and blast radius
+
+### 10.1 The dominant safety property
+
+Every failure mode of a wrong branch is **"refused" or "stuck", never
+"bogus zone"**, because the legacy synchronous retire is *deleted* rather
+than rerouted. There is no code path in this plan that retires a KSK
+without either (a) the parent having confirmed a DS for its successor, or
+(b) the successor already signing the apex DNSKEY RRset. A mis-implemented
+gate yields a roll that does not start, or one that sits in a phase
+forever with the zone fully valid and double-signed — both visible in
+`auto-rollover status`, neither resolver-visible.
+
+### 10.2 Additive vs. in-place
+
+Roughly 80% of the diff is additive — new file, new sibling functions,
+nullable columns — and cannot regress anything by construction:
+
+`ksk_rollover_alg.go` (whole file), `confirmDSAndRetireOldAlgHeadTx` (a
+deliberate sibling of `confirmDSAndAdvanceCreatedKeysTx`, not an edit to
+it), `LoadKskAlgRollState` / `setKskAlgRollTx` / `clearKskAlgRollTx`,
+`keyFifo`, `pickActiveSEPByAlgTx`, and the four `ALTER TABLE` columns.
+
+The in-place edits are the whole regression surface, ranked:
+
+| Edit | Fan-in | Why it is / is not risky |
+|---|---|---|
+| `pending-child-withdraw`: F2 strip + margin signature | every rollover zone | **Highest.** The strip changes shipped same-algorithm behaviour (intentionally — it is the bug fix). Fail-soft by design: a strip error leaves the key `retired` and retries. |
+| `RolloverAutomatedTick` head reordering | every rollover zone, every tick | **Structural but verified pure** — see 10.3. |
+| `reconcileActiveKeyAlgorithms` KSK branch | 35 upstream call sites via `EnsureActiveDnssecKeys` | Hottest path touched, but the change is refusal → no-op+log: strictly *fewer* failures. Adds **no query** — the function already calls `LoadRolloverZoneRow` (`sign.go:311`), so the four new columns ride along free. |
+| confirm branches (observe + softfail-recovery) | every rollover zone | Forked on `algRoll != nil`; the same-algorithm arm calls the existing function unchanged. Note there are **two** call sites (`:403`, `:479`) — missing the second is the likeliest slip. |
+| `pending-child-publish` wait | every rollover zone | Guarded; same-algorithm path byte-identical. |
+| `RolloverKey` single-active guard | 2 callers | See R2. |
+| `pickActiveSEPTx` grouping | 1 caller (`AtomicRollover`) | Negligible. |
+| `changeZonePolicy` KSK branch | — | Currently an unconditional refusal, so nothing depends on it succeeding. |
+
+### 10.3 The tick reordering, verified
+
+Moving `LoadRolloverZoneRow` above the pipeline-fill loop is the most
+structurally invasive edit. It is safe because **pipeline-fill writes
+nothing that `RolloverZoneRow` carries**: its only `RolloverZoneState`
+write is `next_rollover_index` (via `nextRolloverIndexTx`,
+`ksk_rollover_zone_state.go:209`), and that column is *not* in
+`LoadRolloverZoneRow`'s SELECT list (`:115-127`) nor in the struct
+(`:13-73`). The fields the phase switch reads — phase, phase_at, observe
+schedule, softfail, DS ranges — are untouched by the fill. The fill's
+DnssecKeyStore writes are re-read fresh by `ComputeTargetDSSetForZone` in
+the idle branch, not from `row`.
+
+Pin this with a test, because a future field added to `RolloverZoneRow`
+that pipeline-fill *does* write would silently reintroduce staleness.
+
+### 10.4 Regression surfaces found while scoping this section
+
+Four items, none in §5–§8 as originally written. R1 and R2 are required
+work, not optional.
+
+**R1 — the config-reload guardrail refuses the whole reload.**
+`policyAlgStrandsActiveKeys` (`config_reload_guardrail.go:96`) encodes, in
+code and in its doc comment, "A KSK/CSK algorithm change is a strand in
+either mode (no automatic KSK-algorithm rollover exists)", and
+`detectStrandingPolicyChanges` (`:158`) **refuses the WHOLE reload
+atomically** on a finding (`:22`). Its CLI-side twin `missingRoleAlgs`
+(`cli/config_check_cmds.go:1322`) predicts the same. After commit 7 both
+are wrong: a KSK algorithm change made in YAML would still be refused at
+reload, making the feature reachable only via `policy-change`. Both must
+be updated in commit 7, mirroring how they already special-case the
+relaxed-mode ZSK roll as "not a strand". **Add to commit 7: ~40 lines,
+2 files, plus a guardrail test.**
+
+**R2 — the manual `keystore rollover` path.** `RolloverKey` has a second
+caller at `keystore.go:647` (the `rollover` keystore operation), which
+accepts `keytype: "KSK"`. During the overlap the zone has two active SEP
+keys of different algorithms, and that path takes "the first
+role-matching active" — arbitrary between A and B. The D-9 guard as
+specified (error only on >1 active sharing an *algorithm*) would not
+catch it. Add an explicit refusal when an algorithm roll is in flight:
+"manual KSK rollover refused while a KSK algorithm rollover is in
+progress". **Add to commit 2: ~15 lines.**
+
+**R3 — JSON wire-contract skew.** `messages_rollover.go:3-7` states the
+field names lock the API contract and must not be renamed without a
+coordinated CLI bump. Turning `AlgTransition` into `AlgTransitions`
+crosses that line. The plan's deprecated-alias approach handles it, but
+the ordering matters: ship the server emitting **both** fields for one
+release, and only drop the singular once the CLI floor moves. An old CLI
+against a new daemon otherwise silently stops showing ZSK algorithm
+transitions.
+
+**R4 — `EffectiveMarginForZone` is exported with zero in-repo callers**
+(`ksk_rollover_automated.go:1626`, "the exported alias used by the
+auto-rollover…"). It is either dead or consumed out-of-tree (tdns-mp is
+the likely candidate). **Do not change its signature.** Add
+`effectiveMarginForRoll` alongside and leave the exported alias
+delegating to the existing two-argument form.
+
+### 10.5 The feature is dormant until commit 7
+
+Commits 1–6 cannot start a rollover, because the state that triggers one
+— an active KSK whose algorithm differs from the bound policy's — is
+unreachable while `changeZonePolicy` (`apihandler_zone.go:780`) and
+`reconcileActiveKeyAlgorithms` (`sign.go:322`) still refuse it, and the
+reload guardrail (R1) blocks the YAML route. So 1–6 can be merged and
+soaked in production ahead of the switch, and commit 7 is a small,
+revertible flip.
+
+**One caveat, and a pre-flight check.** If a zone is *already* in the
+mismatch state — hand-edited keystore, or stranded before the guardrail
+existed — commit 5 would spawn a roll on it at the next tick. Such a zone
+is one the signer is currently refusing to sign, so it is not healthy
+either way, but the spawn should not be a surprise. Before deploying
+commit 5, run:
+
+```sql
+SELECT k.zonename, k.keyid, k.algorithm
+FROM DnssecKeyStore k
+WHERE k.state = 'active' AND (CAST(k.flags AS INTEGER) & 1) = 1;
+```
+
+and compare each against its zone's bound `KSKAlgorithm`. Expect zero
+rows to differ.
+
+### 10.6 Baseline and coverage
+
+Measured on `f4bea22`, 2026-09-08: `go test ./...` passes, 1522 test
+functions in the `v2` package. Across 8 consecutive runs, 7 were clean and
+the first failed somewhere in the AXFR / zone-transfer tests (`up.example.`
+transfers on random ports) — **the suite carries at least one timing
+flake**, which matters here only because it makes a failure harder to
+attribute to a change. Worth isolating before commit 6.
+
+The uncomfortable asymmetry: the KSK engine is the **least**-covered thing
+this plan modifies most.
+
+| Area | Test funcs |
+|---|---|
+| ZSK algorithm rollover (`zsk_alg_rollover_test.go`) | 19 |
+| Reconcile (`sign_reconcile_test.go`) | 5 |
+| Reload guardrail | 5 |
+| KSK standby-time / DNSKEY-TTL / softfail / api-gate | 8 |
+| **KSK automated engine (`ksk_rollover_automated_test.go`)** | **1** |
+
+The withdraw phase, the confirm branches and the tick head — the three
+most invasive edits in 10.2 — sit behind that single test. **Commits 1
+and 2 should each land with their own tests before the feature commits
+build on them** (KT-11 and KT-10 respectively); they are the cheapest
+place to add coverage to code that currently has almost none, and they
+are useful regardless of whether the rest of this plan is built.
