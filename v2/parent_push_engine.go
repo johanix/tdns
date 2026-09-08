@@ -43,6 +43,9 @@ const (
 	ParentPushChildren ParentPushKind = iota + 1
 	// ParentPushAdvertisement reconciles this agent's own DSYNC advertisement.
 	ParentPushAdvertisement
+	// ParentPushReconcile reconciles every child the store holds rows for
+	// against the served zone (§6.4). Enqueued by the refresh hook.
+	ParentPushReconcile
 )
 
 func (k ParentPushKind) String() string {
@@ -51,6 +54,8 @@ func (k ParentPushKind) String() string {
 		return "children"
 	case ParentPushAdvertisement:
 		return "advertisement"
+	case ParentPushReconcile:
+		return "reconcile"
 	}
 	return fmt.Sprintf("kind(%d)", int(k))
 }
@@ -119,6 +124,7 @@ type parentPushState struct {
 	running   bool
 	pending   map[string]bool
 	advertise bool
+	reconcile bool
 	failures  map[string]*ParentPushFailure
 	lastPush  time.Time
 	lastOK    time.Time
@@ -166,6 +172,9 @@ func (zd *ZoneData) ParentPushStatus() ParentPushStatus {
 	if st.advertise {
 		out.Pending = append(out.Pending, parentPushAdvertisementSubject)
 	}
+	if st.reconcile {
+		out.Pending = append(out.Pending, "reconcile")
+	}
 	sort.Strings(out.Pending)
 	for _, f := range st.failures {
 		out.Failures = append(out.Failures, *f)
@@ -187,6 +196,8 @@ func (zd *ZoneData) schedulePush(ctx context.Context, req ParentPushRequest) {
 		}
 	case ParentPushAdvertisement:
 		st.advertise = true
+	case ParentPushReconcile:
+		st.reconcile = true
 	default:
 		lg.Warn("ParentPushEngine: unknown request kind, ignoring", "zone", zd.ZoneName, "kind", int(req.Kind))
 		return
@@ -212,9 +223,9 @@ func (zd *ZoneData) runParentPushes(ctx context.Context) {
 			children = append(children, c)
 		}
 		st.pending = map[string]bool{}
-		advertise := st.advertise
-		st.advertise = false
-		if len(children) == 0 && !advertise || ctx.Err() != nil {
+		advertise, reconcile := st.advertise, st.reconcile
+		st.advertise, st.reconcile = false, false
+		if len(children) == 0 && !advertise && !reconcile || ctx.Err() != nil {
 			st.running = false
 			st.mu.Unlock()
 			return
@@ -231,7 +242,47 @@ func (zd *ZoneData) runParentPushes(ctx context.Context) {
 		if advertise && ctx.Err() == nil {
 			zd.pushAdvertisement(ctx)
 		}
+		if reconcile && ctx.Err() == nil {
+			zd.reconcileKnownChildren(ctx)
+		}
 	}
+}
+
+// reconcileKnownChildren is §6.4 for the children: every child the store
+// holds rows for is compared against the served zone and pushed if they
+// differ. This is what recovers a push dropped on a full queue, one the
+// primary silently declined, an operator's edit at the primary that
+// contradicts recorded intent, and a restart with an empty in-flight queue.
+//
+// A child with NO rows is never touched. An empty store must never be able
+// to empty a parent zone -- and with an external store an empty result is
+// also what a fresh database, a wrong table prefix or a schema restored from
+// nothing looks like.
+//
+// One store read per known child, on every refresh. On a parent with very
+// many children a per-child revision in the store is the way to make this
+// incremental; deferred.
+func (zd *ZoneData) reconcileKnownChildren(ctx context.Context) {
+	_, store, ok := zd.asyncParentWriter()
+	if !ok {
+		return
+	}
+	children, err := store.ListChildren(zd.ZoneName)
+	if err != nil {
+		lg.Error("childsync-proxy: cannot list the store's children for reconciliation", "zone", zd.ZoneName, "err", err)
+		return
+	}
+	pushed := 0
+	for _, child := range children {
+		if ctx.Err() != nil {
+			return
+		}
+		if zd.pushChild(ctx, child) {
+			pushed++
+		}
+	}
+	lg.Info("childsync-proxy: reconciled the known children against the served zone",
+		"zone", zd.ZoneName, "children", len(children), "pushed", pushed)
 }
 
 // asyncParentWriter is the zone's writer when pushes go through this engine:
@@ -249,23 +300,25 @@ func (zd *ZoneData) asyncParentWriter() (ParentZoneWriter, DelegationStore, bool
 	return c.writer, c.store, true
 }
 
-func (zd *ZoneData) pushChild(ctx context.Context, child string) {
+// pushChild reconciles one child. Reports whether a push was attempted.
+func (zd *ZoneData) pushChild(ctx context.Context, child string) bool {
 	writer, store, ok := zd.asyncParentWriter()
 	if !ok {
-		return
+		return false
 	}
 	actions, err := zd.childDelegationDelta(store, child)
 	if err != nil {
 		zd.recordPushFailure(child, 1, err, false)
-		return
+		return false
 	}
 	if len(actions) == 0 {
 		lg.Debug("ParentPushEngine: nothing to push, the parent already serves the intended delegation",
 			"zone", zd.ZoneName, "child", child)
 		zd.recordPushSuccess(child)
-		return
+		return false
 	}
 	zd.deliver(ctx, writer, child, actions, "delegation of "+child)
+	return true
 }
 
 func (zd *ZoneData) pushAdvertisement(ctx context.Context) {
@@ -468,14 +521,11 @@ func delegationRRKey(rr dns.RR) string {
 }
 
 // childSyncAdvertisementDelta is what the agent's own advertisement still
-// lacks in the served parent zone: the DSYNC publication as BuildDsyncPublication
-// computes it. The receiver KEY joins it with the proxy reconciler (C-6).
+// lacks in the served parent zone: the DSYNC publication plus the receiver
+// KEY, as the reconciler computes it (childsync_proxy.go).
 func (zd *ZoneData) childSyncAdvertisementDelta() ([]dns.RR, error) {
-	pub, err := zd.BuildDsyncPublication()
-	if err != nil {
-		return nil, err
-	}
-	return pub.Actions(), nil
+	actions, _, err := zd.advertisementDelta()
+	return actions, err
 }
 
 // affectedChildren names the children an update's actions touch.

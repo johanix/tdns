@@ -92,7 +92,8 @@ func TestChildsyncProxyNeverPublishesLocally(t *testing.T) {
 	q := make(chan UpdateRequest, 4)
 	zd := testZone(t, "example.", partiallyAdvertisedParent)
 	zd.ZoneType = Secondary
-	zd.KeyDB = &KeyDB{UpdateQ: q}
+	zd.KeyDB = newTestKeyDB(t)
+	zd.KeyDB.UpdateQ = q
 	zd.Options = map[ZoneOption]bool{OptChildSyncProxy: true, OptChildSync: true}
 	p := DefaultDelegationPolicy()
 	zd.DelegationPolicy = &p

@@ -52,7 +52,14 @@ func startPushFixture(t *testing.T, rcode int, targets ...string) (*pushFixture,
 	if _, _, err := zd.AdoptServedDelegations(); err != nil {
 		t.Fatalf("seeding: %v", err)
 	}
+	cancel, done := runParentPushEngine(t)
+	return &pushFixture{zd: zd, sink: sink, done: done}, cancel
+}
 
+// runParentPushEngine runs the engine against Conf's queue until the test
+// ends, and fails the test if it does not exit on cancel.
+func runParentPushEngine(t *testing.T) (context.CancelFunc, chan struct{}) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -67,7 +74,7 @@ func startPushFixture(t *testing.T, rcode int, targets ...string) (*pushFixture,
 			t.Error("ParentPushEngine did not exit on cancel")
 		}
 	})
-	return &pushFixture{zd: zd, sink: sink, done: done}, cancel
+	return cancel, done
 }
 
 func childAdd(t *testing.T, zd *ZoneData, rrs ...string) {

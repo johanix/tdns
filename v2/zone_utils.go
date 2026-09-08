@@ -1707,6 +1707,10 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		if zd.Options[OptChildSyncProxy] {
 			lg.Debug("SetupZoneSync: childsync-proxy zone; the advertisement is reconciled towards the parent primary, not published here",
 				"zone", zd.ZoneName)
+			// The refresh hook already ran once for the first transfer,
+			// before the store was seeded above. Once more now, so the
+			// first reconciliation of the children sees a seeded store.
+			zd.ChildSyncProxyPostRefresh()
 		} else {
 			lg.Debug("SetupZoneSync: reconciling the DSYNC RRset", "zone", zd.ZoneName)
 			if err := zd.PublishDsyncRRs(context.Background()); err != nil {

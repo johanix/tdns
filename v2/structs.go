@@ -397,6 +397,9 @@ type ZoneData struct {
 	// pushes to the parent primary and their failures. Lazily created;
 	// see parent_push_engine.go. Its own mutex, not zd.mu.
 	pushState *parentPushState
+	// childSyncProxy is the last advertisement reconcile's outcome
+	// (childsync_proxy.go); protected by zd.mu.
+	childSyncProxy *ChildSyncProxyStatus
 }
 
 // Lock and Unlock expose the mutex for code that moves to
