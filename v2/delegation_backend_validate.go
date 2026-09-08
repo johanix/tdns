@@ -42,9 +42,30 @@ func validateDelegationBackendCombination(zconf *ZoneConf, options map[ZoneOptio
 	}
 	// The rules below are about the STORE -- where the data lands -- so a
 	// named backend of type direct is judged as direct, not as "some name".
-	store, err := delegationBackendStore(backend)
+	store, writer, err := delegationBackendAxes(backend)
 	if err != nil {
 		return err
+	}
+
+	// (0) A childsync-proxy hands data OUT of process: its own copy of the
+	// zone is replaced by the next transfer, so store direct cannot hold
+	// what it accepts. Any other (store, writer) pair can.
+	if options[OptChildSyncProxy] && store == DelegationStoreDirect {
+		return fmt.Errorf(
+			"zone %s has childsync-proxy and delegationbackend %q stores into the served zone (store direct):"+
+				" a proxy's copy of the zone is replaced at the next transfer, so approved child updates must be"+
+				" recorded in a store (sqlite, external-db) and delivered by a writer (ddns, zonefile)",
+			zconf.Name, backend)
+	}
+	// The ddns writer pushes UPDATEs to the primary of a zone this server is
+	// a secondary of. That is the childsync-proxy's job and nobody else's:
+	// on any other zone it would be this server rewriting a delegation in
+	// somebody else's zone.
+	if writer == DelegationWriterDDNS && !options[OptChildSyncProxy] {
+		return fmt.Errorf(
+			"zone %s: delegationbackend %q has writer ddns, which pushes to the parent primary on a"+
+				" childsync-proxy's behalf; set the childsync-proxy option on the zone, or use another writer",
+			zconf.Name, backend)
 	}
 
 	// ParseZones accepts the zone type case-insensitively, so these rules have
@@ -118,7 +139,7 @@ func delegationBackendContract(zconf *ZoneConf, options map[ZoneOption]bool) str
 	if zconf.DelegationBackend == "" {
 		return ""
 	}
-	if store, err := delegationBackendStore(zconf.DelegationBackend); err != nil || store == DelegationStoreDirect {
+	if store, _, err := delegationBackendAxes(zconf.DelegationBackend); err != nil || store == DelegationStoreDirect {
 		return ""
 	}
 	if !options[OptAllowChildUpdates] {
@@ -143,21 +164,22 @@ func delegationBackendUnusedWarning(zconf *ZoneConf, options map[ZoneOption]bool
 		zconf.Name, zconf.DelegationBackend)
 }
 
-// delegationBackendStore resolves a backend name to its store. An undefined
-// name resolves to "" with no error: the wiring step reports that, as it
-// always has, and a rule here must not pre-empt it with a worse message. A
-// name whose definition contradicts itself is an error here as anywhere.
-func delegationBackendStore(name string) (string, error) {
+// delegationBackendAxes resolves a backend name to its store and writer. An
+// undefined name resolves to ("", "") with no error: the wiring step reports
+// that, as it always has, and a rule here must not pre-empt it with a worse
+// message. A name whose definition contradicts itself is an error here as
+// anywhere.
+func delegationBackendAxes(name string) (store, writer string, err error) {
 	confs, err := loadDelegationBackendConfs()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	spec, err := resolveDelegationBackendSpec(name, confs)
 	if errors.Is(err, errDelegationBackendUnknown) {
-		return "", nil
+		return "", "", nil
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return spec.Store, nil
+	return spec.Store, spec.Writer, nil
 }

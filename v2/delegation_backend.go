@@ -112,6 +112,28 @@ type DelegationBackendConf struct {
 
 	Directory     string `yaml:"directory" mapstructure:"directory"`           // zonefile writer
 	NotifyCommand string `yaml:"notify-command" mapstructure:"notify-command"` // zonefile writer
+
+	DDNS DdnsWriterConf `yaml:"ddns" mapstructure:"ddns"` // ddns writer
+}
+
+// DdnsWriterConf configures the ddns writer: RFC 2136 UPDATEs, TSIG-signed,
+// to the primary of the parent zone this server is a secondary of.
+type DdnsWriterConf struct {
+	// Targets are the primaries to update, addr or addr:port (53 assumed).
+	// Empty means the zone's own primaries: the machine this server already
+	// transfers from is, in every sane deployment, the machine to update.
+	Targets []string `yaml:"targets" mapstructure:"targets"`
+	// Key names the TSIG key, from the keystore, that signs the UPDATE.
+	Key string `yaml:"key" mapstructure:"key"`
+	// AllowInsecure permits an UNSIGNED UPDATE. A lab convenience, never a
+	// production setting: the parent's update-policy is the only thing
+	// bounding what this server may write, and an unsigned UPDATE is
+	// whoever can spoof the source address.
+	AllowInsecure bool `yaml:"allow-insecure" mapstructure:"allow-insecure"`
+	// RetryInterval and MaxAttempts bound the push engine's retries after a
+	// transport failure or a SERVFAIL. Zero means the engine's defaults.
+	RetryInterval time.Duration `yaml:"retry-interval" mapstructure:"retry-interval"`
+	MaxAttempts   int           `yaml:"max-attempts" mapstructure:"max-attempts"`
 }
 
 var delegationBackendTypeSugar = map[string][2]string{
@@ -182,24 +204,31 @@ func resolveDelegationBackendSpec(name string, confs []DelegationBackendConf) (D
 	}
 	spec.Store, spec.Writer = store, writer
 
+	// direct is the one combination that is not free-form: the in-memory
+	// zone IS the delivery, so there is nothing for a writer to deliver to.
+	// Judged before the writer's own rules, because it is the more basic
+	// contradiction.
+	if store == DelegationStoreDirect && writer != DelegationWriterNone {
+		return spec, fmt.Errorf("delegation backend %q: store direct accepts only writer none;"+
+			" the served zone is the delivery, there is nothing for a %s writer to deliver to", name, writer)
+	}
 	if _, ok := delegationStoreFactory(store); !ok {
 		return spec, fmt.Errorf("delegation backend %q: store %q is not compiled into %s (available: %s)",
 			name, store, appBinaryName(), strings.Join(RegisteredDelegationStores(), ", "))
 	}
 	switch writer {
-	case DelegationWriterNone, DelegationWriterDDNS:
+	case DelegationWriterNone:
+	case DelegationWriterDDNS:
+		if bc.DDNS.Key == "" && !bc.DDNS.AllowInsecure {
+			return spec, fmt.Errorf("delegation backend %q (writer ddns): set ddns.key (a TSIG key from the keystore)"+
+				" or ddns.allow-insecure (lab only); an unsigned UPDATE to the parent primary is refused otherwise", name)
+		}
 	case DelegationWriterZonefile:
 		if bc.Directory == "" {
 			return spec, fmt.Errorf("delegation backend %q (writer zonefile): directory is required", name)
 		}
 	default:
 		return spec, fmt.Errorf("delegation backend %q: unknown writer %q (none, zonefile, ddns)", name, bc.Writer)
-	}
-	// direct is the one combination that is not free-form: the in-memory
-	// zone IS the delivery, so there is nothing for a writer to deliver to.
-	if store == DelegationStoreDirect && writer != DelegationWriterNone {
-		return spec, fmt.Errorf("delegation backend %q: store direct accepts only writer none;"+
-			" the served zone is the delivery, there is nothing for a %s writer to deliver to", name, writer)
 	}
 	return spec, nil
 }
@@ -347,14 +376,14 @@ func newDelegationBackend(spec DelegationBackendSpec, kdb *KeyDB, zd *ZoneData) 
 	if err != nil {
 		return nil, fmt.Errorf("delegation backend %q: %w", spec.Name, err)
 	}
-	writer, err := newDelegationWriter(spec, store)
+	writer, err := newDelegationWriter(spec, store, zd)
 	if err != nil {
 		return nil, err
 	}
 	return &composedDelegationBackend{name: spec.Name, store: store, writer: writer}, nil
 }
 
-func newDelegationWriter(spec DelegationBackendSpec, store DelegationStore) (ParentZoneWriter, error) {
+func newDelegationWriter(spec DelegationBackendSpec, store DelegationStore, zd *ZoneData) (ParentZoneWriter, error) {
 	switch spec.Writer {
 	case DelegationWriterNone:
 		return nil, nil
@@ -365,7 +394,7 @@ func newDelegationWriter(spec DelegationBackendSpec, store DelegationStore) (Par
 			store:         store,
 		}, nil
 	case DelegationWriterDDNS:
-		return nil, fmt.Errorf("delegation backend %q: the ddns writer is not available in this build", spec.Name)
+		return newDdnsParentZoneWriter(spec, store, zd)
 	}
 	return nil, fmt.Errorf("delegation backend %q: unknown writer %q", spec.Name, spec.Writer)
 }
