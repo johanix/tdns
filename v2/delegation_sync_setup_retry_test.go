@@ -23,7 +23,7 @@ func TestSetupRetryDelaySchedule(t *testing.T) {
 func TestDeferSetupRetryDeliversWithAdvancedAttempt(t *testing.T) {
 	q := make(chan DelegationSyncRequest, 1)
 	ds := DelegationSyncRequest{Command: "DELEGATION-SYNC-SETUP", ZoneName: "child.example.", Attempt: 1}
-	done := deferSetupRetryAfter(context.Background(), q, ds, time.Millisecond)
+	done := deferSetupRetryAfter(context.Background(), q, ds, time.Millisecond, "test")
 	select {
 	case got := <-q:
 		if got.Attempt != 2 || got.ZoneName != ds.ZoneName || got.Command != ds.Command {
@@ -43,7 +43,7 @@ func TestDeferSetupRetryHonoursCancellation(t *testing.T) {
 	q := make(chan DelegationSyncRequest, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	ds := DelegationSyncRequest{Command: "DELEGATION-SYNC-SETUP", ZoneName: "child.example."}
-	done := deferSetupRetryAfter(ctx, q, ds, time.Hour)
+	done := deferSetupRetryAfter(ctx, q, ds, time.Hour, "test")
 	cancel()
 	select {
 	case <-done:
