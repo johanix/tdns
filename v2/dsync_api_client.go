@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -641,4 +642,91 @@ func DsyncApiRRsetsFromSyncStatus(child string, syncstate DelegationSyncStatus) 
 	}
 
 	return out
+}
+
+// dsyncApiUnconverged reports which of the RRsets just sent are not reflected
+// in the delegation the parent returned after applying them.
+//
+// The endpoint's reply is the parent's own account of the delegation it now
+// holds, so this is the cheapest possible end-to-end check: not "did the
+// request parse and get authorized", which a 200 already says, but "is the
+// delegation what the child declared". Those two answers diverged silently for
+// as long as the payload was incomplete.
+//
+// Content comparison, ignoring TTL and case, because the parent is entitled to
+// apply its own TTLs -- the same rule rrsetContentEqual already uses for the
+// signal-name comparison. Anything the parent returns that was NOT sent is left
+// alone: this asks whether what was declared took effect, not whether the
+// parent holds anything else.
+func dsyncApiUnconverged(sent []DsyncApiRRset, got *DsyncApiDelegation) []string {
+	if got == nil {
+		return []string{"the parent returned no delegation to compare against"}
+	}
+
+	type key struct {
+		owner  string
+		rrtype string
+	}
+	have := map[key][]dns.RR{}
+	for _, set := range got.RRsets {
+		k := key{core.CanonicalizeName(set.Owner), strings.ToUpper(set.Type)}
+		for _, s := range set.RRs {
+			rr, err := dns.NewRR(s)
+			if err != nil {
+				continue
+			}
+			have[k] = append(have[k], rr)
+		}
+	}
+
+	var diffs []string
+	for _, set := range sent {
+		k := key{core.CanonicalizeName(set.Owner), strings.ToUpper(set.Type)}
+		var want []dns.RR
+		for _, s := range set.RRs {
+			rr, err := dns.NewRR(s)
+			if err != nil {
+				diffs = append(diffs, fmt.Sprintf("%s %s: cannot re-parse what was sent (%q)",
+					set.Owner, set.Type, s))
+				continue
+			}
+			want = append(want, rr)
+		}
+		if !rrsetContentEqual(have[k], want) {
+			diffs = append(diffs, fmt.Sprintf("%s %s: sent %d record(s), parent reports %d",
+				set.Owner, set.Type, len(want), len(have[k])))
+		}
+	}
+	return diffs
+}
+
+// dsyncApiIncoherentStatus reports the ways a sync status describes changes it
+// does not then declare.
+//
+// The DSYNC API scheme sends an end state, not a list of edits:
+// DsyncApiRRsetsFromSyncStatus reads NewNS/NewA/NewAAAA/NewDS and nothing else.
+// A status that says the NS RRset differs, while leaving NewNS empty, therefore
+// produces a request with no NS in it at all -- and every party involved reports
+// success, because each did exactly what it was asked (#507).
+//
+// The two are not interchangeable and the mismatch is not detectable downstream,
+// so it is caught here, at the point where edits are about to be turned into a
+// declaration.
+func dsyncApiIncoherentStatus(s DelegationSyncStatus) []string {
+	var gaps []string
+	check := func(what string, edits int, declared int) {
+		if edits > 0 && declared == 0 {
+			gaps = append(gaps, fmt.Sprintf("%d %s change(s) to make, but nothing declared for %s",
+				edits, what, what))
+		}
+	}
+	check("NS", len(s.NsAdds)+len(s.NsRemoves), len(s.NewNS))
+	check("A glue", len(s.AAdds)+len(s.ARemoves), len(s.NewA))
+	check("AAAA glue", len(s.AAAAAdds)+len(s.AAAARemoves), len(s.NewAAAA))
+	// DS is different: an empty NewDS is a real instruction to withdraw the DS,
+	// which is why NewDSKnown exists. The flag is the declaration.
+	if (len(s.DSAdds)+len(s.DSRemoves)) > 0 && !s.NewDSKnown {
+		gaps = append(gaps, "DS changes to make, but no DS declared (NewDSKnown is false)")
+	}
+	return gaps
 }

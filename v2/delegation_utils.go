@@ -24,6 +24,51 @@ import (
 // 4. When all parent-side data is collected, compare to the data in the ZoneData struct
 
 // Return insync (bool), adds, removes ([]dns.RR) and error
+// declareDelegationFromChild fills the DECLARATIVE fields of a sync status --
+// NewNS, NewA, NewAAAA -- from the child's own authoritative data.
+//
+// Some schemes send a list of edits and some send an end state. The DSYNC API
+// scheme is the second kind: DsyncApiRRsetsFromSyncStatus builds its entire
+// payload from these three fields plus NewDS. They were never assigned on the
+// explicit-analysis path, so that payload carried the DS alone and silently
+// dropped every NS and glue change -- while both sides reported success, so the
+// delegation never converged and each sync rewrote the DS it already had
+// (#507).
+//
+// The child's own data IS the intent here, which is why this needs no diffing:
+// it is the same reasoning that already makes NewDS the child's own DS RRset.
+//
+// Gathered from the child alone, and before anything is asked of the parent, on
+// purpose. The comparison loop below abandons a nameserver when a query to the
+// parent fails; gathering the declarative glue there would drop that
+// nameserver's records from a payload that REPLACES RRsets, which is worse than
+// sending nothing at all. For the same reason this always takes a whole RRset
+// per owner and never a subset.
+func (zd *ZoneData) declareDelegationFromChild(resp *DelegationSyncStatus) {
+	// currentDelegationRRs is the shared reader -- the proxy path uses the same
+	// one. Its DS is deliberately not taken: this path computes NewDS with more
+	// care than "hash the SEP keys", because a KSK rollover in flight means the
+	// DS RRset is not this function's to have an opinion about.
+	newNS, newA, newAAAA, _ := zd.currentDelegationRRs()
+
+	// Copied, because the reader returns slices that alias the served zone's
+	// own RRsets and this status outlives the call.
+	resp.NewNS = copyRRs(newNS)
+	resp.NewA = copyRRs(newA)
+	resp.NewAAAA = copyRRs(newAAAA)
+}
+
+func copyRRs(in []dns.RR) []dns.RR {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]dns.RR, 0, len(in))
+	for _, rr := range in {
+		out = append(out, dns.Copy(rr))
+	}
+	return out
+}
+
 func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error) {
 	var resp = DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
@@ -72,6 +117,11 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 
 	resp.NsAdds = append(resp.NsAdds, adds...)
 	resp.NsRemoves = append(resp.NsRemoves, removes...)
+
+	// The declarative form of the same answer, for the schemes that send what
+	// the delegation SHOULD be rather than a list of edits. Gathered in one
+	// place, from the child alone, before anything is asked of the parent.
+	zd.declareDelegationFromChild(&resp)
 
 	// 2. Compute the names of the in-bailiwick subset of nameservers
 	child_inb, _ := BailiwickNS(zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs)
