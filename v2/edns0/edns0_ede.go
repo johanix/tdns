@@ -95,6 +95,16 @@ const (
 	// IANA assigns (plan Phase 3).
 	EDESig0KeyValidationFailed     // "SIG(0) key is known, but validation failed": waiting will not help
 	EDESig0ManualBootstrapRequired // "Automatic bootstrap of SIG(0) keys not supported; manual bootstrap required"
+
+	// The parent does automatic bootstrap, but not on trust: its delegation
+	// policy sets allow-unvalidated-upload false, so a self-signed KEY upload
+	// from an unknown key is refused. Distinct from
+	// EDESig0ManualBootstrapRequired, which says no automatic bootstrap exists
+	// at all -- here it exists, and the child completes it from the other end
+	// by publishing the KEY where the parent can fetch and validate it.
+	//
+	// Terminal for the upload: retrying it cannot succeed.
+	EDESig0UnvalidatedUploadNotAccepted
 )
 
 // NOTE for anyone adding codes above: append at the END of the const block.
@@ -139,6 +149,8 @@ var EDECodeToString = map[uint16]string{
 
 	EDESig0KeyValidationFailed:     "SIG(0) key known, but validation failed; re-bootstrap after fixing the key's publication",
 	EDESig0ManualBootstrapRequired: "Automatic bootstrap of SIG(0) keys not supported; manual bootstrap required",
+
+	EDESig0UnvalidatedUploadNotAccepted: "unvalidated SIG(0) key upload not accepted by policy; publish the KEY at the zone apex or the RFC 9615 signal name so it can be fetched and validated",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response

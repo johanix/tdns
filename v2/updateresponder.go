@@ -724,6 +724,7 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	addKey, _, isCeremony := bootstrapCeremony(r.Ns)
 	if len(r.Ns) != 1 && !isCeremony {
 		us.Approved = false
+		us.RejectionEDE = edns0.EDESig0FormatError
 		lgHandler.Warn("trust update rejected: only a single KEY record or a bootstrap DEL+ADD ceremony allowed", "rrs", len(r.Ns))
 		return false, false, nil
 	}
@@ -748,12 +749,15 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		// rejected, except in the special case of unvalidated key uploads.
 
 		if rrtype != dns.TypeKEY {
+			us.Approved = false
+			us.RejectionEDE = edns0.EDEZoneUpdateRRtypeNotAllowed
 			lgHandler.Warn("trust update rejected: must be for a KEY RR", "rrtype", dns.TypeToString[rrtype])
 			return false, false, nil
 		}
 
 		if rrclass == dns.ClassNONE || rrclass == dns.ClassANY {
 			us.Approved = false
+			us.RejectionEDE = edns0.EDESig0KeyKnownButNotTrusted
 			lgHandler.Warn("trust update rejected: KEY delete signed by untrusted key")
 			return false, false, nil
 		}
@@ -771,23 +775,44 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 			us.Approved = true
 			return true, false, nil
 		}
+
+		// And this is that policy saying no, which is a different thing from
+		// every other reason an UPDATE gets REFUSED and has to say so. The
+		// operator has deliberately declined to take keys on trust; what the
+		// child needs to learn is that the ceremony it just attempted is not
+		// the way in, and that publishing the KEY where the parent can fetch
+		// and validate it is. Falling through to the generic
+		// "signature did not validate" below told it none of that, and carried
+		// no EDE at all, so the child could not tell policy from a wrong
+		// target or an ACL (#570).
+		us.Approved = false
+		us.RejectionEDE = edns0.EDESig0UnvalidatedUploadNotAccepted
+		lgHandler.Warn("trust update rejected: unvalidated KEY upload not accepted by policy",
+			"zone", zone, "signer", us.SignerName,
+			"delegationpolicy", zd.boundDelegationPolicy().Name)
+		return false, false, nil
 	}
 
 	// Past the unvalidated key upload; from here update MUST be validated
 	if (us.ValidationRcode != dns.RcodeSuccess || !us.Validated) && !unvalidatedKeyUpload {
 		us.Approved = false
+		if us.RejectionEDE == 0 {
+			us.RejectionEDE = edns0.EDESig0BadSignature
+		}
 		lgHandler.Warn("trust update rejected: signature did not validate")
 		return false, false, nil
 	}
 
 	if !us.ValidatedByTrustedKey && !unvalidatedKeyUpload {
 		us.Approved = false
+		us.RejectionEDE = edns0.EDESig0KeyKnownButNotTrusted
 		lgHandler.Warn("trust update rejected: signature validated but key not trusted")
 		return false, false, nil
 	}
 
 	if !zd.UpdatePolicy.Child.RRtypes[rrtype] {
 		us.Approved = false
+		us.RejectionEDE = edns0.EDEZoneUpdateRRtypeNotAllowed
 		lgHandler.Warn("trust update rejected: unapproved RR type", "rrtype", dns.TypeToString[rr.Header().Rrtype])
 		return false, false, nil
 	}
@@ -803,6 +828,7 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		// true for the signer name itself, which selfsub has always allowed.
 		if !dns.IsSubDomain(us.SignerName, rr.Header().Name) {
 			us.Approved = false
+			us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
 			lgHandler.Warn("trust update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
 			return false, false, nil
 		}
@@ -810,6 +836,7 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	case "self":
 		if !core.EqualNames(rr.Header().Name, us.SignerName) {
 			us.Approved = false
+			us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
 			lgHandler.Warn("trust update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
 			return false, false, nil
 		}

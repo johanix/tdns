@@ -87,6 +87,7 @@ func TestEDECodeValues(t *testing.T) {
 		// at the end of the block on 2026-09-02.
 		{"EDESig0KeyValidationFailed", EDESig0KeyValidationFailed, 541},
 		{"EDESig0ManualBootstrapRequired", EDESig0ManualBootstrapRequired, 542},
+		{"EDESig0UnvalidatedUploadNotAccepted", EDESig0UnvalidatedUploadNotAccepted, 543},
 
 		// The standard code must keep its RFC 8914 value and must not be part
 		// of the private sequence.

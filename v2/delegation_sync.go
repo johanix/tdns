@@ -250,6 +250,19 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 		}
 		return err
 	}
+	// A nil error means the exchange happened, not that the parent accepted it.
+	// This used to report "bootstrap complete" for a ceremony the parent had
+	// REFUSED, so an operator read a completed bootstrap in the child's log and
+	// then a parent rejecting every signed update as "SIG(0) key not known"
+	// (#570).
+	if ur.Rcode != dns.RcodeSuccess {
+		args := []any{"zone", zd.ZoneName, "rcode", dns.RcodeToString[ur.Rcode], "msg", msg}
+		if ur.EDEFound {
+			args = append(args, "ede", ur.EDECode, "edeMsg", ur.EDEMessage)
+		}
+		lgDns.Warn("DelegationSyncSetup: the parent did not accept the SIG(0) key bootstrap", args...)
+		return nil
+	}
 	lgDns.Info("DelegationSyncSetup: SIG(0) key bootstrap complete", "zone", zd.ZoneName, "msg", msg)
 	return nil
 }
