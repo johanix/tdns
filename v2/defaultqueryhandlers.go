@@ -160,7 +160,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	lgHandler.Debug("query refers to zone", "qname", qname, "zone", zd.ZoneName)
 
 	lgHandler.Debug("app mode check", "appMode", AppTypeToString[Globals.App.Type])
-	if Globals.App.Type == AppTypeAgent {
+	if Globals.App.Type == AppTypeAgent && !agentAnswersKeyStateInquiry(zd, msgoptions) {
 		lgHandler.Debug("agent mode, refusing ordinary query", "qname", qname)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeRefused)
@@ -209,6 +209,26 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		lgHandler.Error("QueryResponder failed", "error", err)
 	}
 	return nil
+}
+
+// agentAnswersKeyStateInquiry is the one carve-out from "an agent answers no
+// ordinary query".
+//
+// A child verifying its SIG(0) key with its parent sends a KEY query carrying
+// the KeyState EDNS(0) option to the parent's DSYNC UPDATE target
+// (queryKeyState), and treats any rcode but NOERROR as failure. When a
+// tdns-agent is that target -- a childsync parent it fronts as a secondary --
+// the blanket refusal sat BELOW the KeyState wrapper installed at the top of
+// DefaultQueryHandler, so the inquiry got a REFUSED reply with the option
+// attached, and the channel was dead against every agent.
+//
+// The carve-out is exactly the inquiry: the option must be present and the
+// enclosing zone must offer childsync. Then the query falls through to
+// QueryResponder as it does on tdns-auth, which for a delegation point is a
+// referral. Everything else the agent is asked stays refused: the agent is
+// not in the NS set and must not look like it is.
+func agentAnswersKeyStateInquiry(zd *ZoneData, opts *edns0.MsgOptions) bool {
+	return opts != nil && opts.KeyState != nil && zd != nil && zd.Options[OptChildSync]
 }
 
 // RegisterDefaultQueryHandlers registers the default zone-based query handler.
