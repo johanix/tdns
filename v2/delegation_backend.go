@@ -24,6 +24,13 @@ type DelegationBackend interface {
 
 	// GetDelegationData returns current delegation RRs for a child zone,
 	// grouped by owner name and RR type.
+	//
+	// A child with nothing stored yields an EMPTY map and a nil error. An
+	// error means the store could not be read, and no caller may read it as
+	// "nothing there": a store behind a network fails for reasons that have
+	// nothing to do with the child, and the two answers lead to opposite
+	// actions -- an empty delegation is something to reconcile against, an
+	// unreadable one is something to leave alone.
 	GetDelegationData(parentZone, childZone string) (map[string]map[uint16][]dns.RR, error)
 
 	// ListChildren returns all child zones with stored delegation data.

@@ -118,10 +118,11 @@ func (b *DBDelegationBackend) GetDelegationData(parentZone, childZone string) (m
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows iteration: %w", err)
 	}
-
-	if len(result) == 0 {
-		return nil, fmt.Errorf("no delegation data for %s in zone %s", childZone, parentZone)
-	}
+	// No rows is an empty result, not an error. This used to return an error
+	// for it, and ZonefileDelegationBackend read that error as "no data left,
+	// remove the fragment" -- an error value carrying a meaning, which made a
+	// genuinely failed read indistinguishable from an empty child. See the
+	// interface doc.
 	return result, nil
 }
 

@@ -44,19 +44,8 @@ func (b *ZonefileDelegationBackend) ApplyChildUpdate(parentZone string, ur Updat
 		affected[child] = true
 	}
 
-	// Regenerate zone file fragment for each affected child
-	for childZone := range affected {
-		data, err := dbBackend.GetDelegationData(parentZone, childZone)
-		if err != nil {
-			// No data left (all deleted) — remove the file
-			path := b.filePath(childZone)
-			os.Remove(path)
-			lg.Info("ZonefileDelegationBackend: removed delegation file (no data left)", "child", childZone)
-			continue
-		}
-		if err := b.writeZoneFile(childZone, data); err != nil {
-			return fmt.Errorf("write zone file for %s failed: %w", childZone, err)
-		}
+	if err := b.refreshFragments(parentZone, affected); err != nil {
+		return err
 	}
 
 	// Run notify command if configured
@@ -64,6 +53,37 @@ func (b *ZonefileDelegationBackend) ApplyChildUpdate(parentZone string, ur Updat
 		b.runNotifyCommand(parentZone)
 	}
 
+	return nil
+}
+
+// refreshFragments regenerates the fragment of every child in affected from
+// what the store holds: written when the child has data, removed when it has
+// none.
+//
+// A store that cannot be READ is neither. It used to be: GetDelegationData
+// returned an error for an empty child, this loop took any error as "no data
+// left" and removed the fragment, and so a transient database failure would
+// have deleted a child's delegation from the generated parent zone. The store
+// now answers empty with an empty map, and an error here is returned as one.
+func (b *ZonefileDelegationBackend) refreshFragments(parentZone string, affected map[string]bool) error {
+	dbBackend := &DBDelegationBackend{kdb: b.kdb}
+	for childZone := range affected {
+		data, err := dbBackend.GetDelegationData(parentZone, childZone)
+		if err != nil {
+			return fmt.Errorf("reading delegation data for %s: %w", childZone, err)
+		}
+		if len(data) == 0 {
+			path := b.filePath(childZone)
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("removing delegation file for %s: %w", childZone, err)
+			}
+			lg.Info("ZonefileDelegationBackend: removed delegation file (no data left)", "child", childZone)
+			continue
+		}
+		if err := b.writeZoneFile(childZone, data); err != nil {
+			return fmt.Errorf("write zone file for %s failed: %w", childZone, err)
+		}
+	}
 	return nil
 }
 

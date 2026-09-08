@@ -125,9 +125,7 @@ func (b *DirectDelegationBackend) GetDelegationData(parentZone, childZone string
 		}
 	}
 
-	if len(result) == 0 {
-		return nil, fmt.Errorf("no delegation data for %s in zone %s", childZone, parentZone)
-	}
+	// Empty is empty, not an error: same contract as the db backend.
 	return result, nil
 }
 
