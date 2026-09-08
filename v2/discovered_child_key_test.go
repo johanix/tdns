@@ -1,7 +1,11 @@
 package tdns
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -36,6 +40,7 @@ func TestADiscoveredChildKeyIsRecordedForVerification(t *testing.T) {
 		}
 	}
 
+	boundedVerification(t, zd, kdb)
 	zd.rememberDiscoveredChildKey(discovered)
 
 	sk, err := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
@@ -49,6 +54,10 @@ func TestADiscoveredChildKeyIsRecordedForVerification(t *testing.T) {
 	}
 	if !sk.Validated {
 		t.Error("the DNSSEC validation result from the lookup was not carried onto the row")
+	}
+	if !sk.DnssecValidated {
+		t.Error("dnssecvalidated was not persisted; it is what childKeyAcceptable reads to" +
+			" decide whether the key may be promoted, so losing it stalls the bootstrap")
 	}
 }
 
@@ -161,5 +170,262 @@ func TestDnssecValidationIsSufficientForTrust(t *testing.T) {
 				t.Errorf("accepted=%v, want %v: %s", got, tc.wantAccepted, tc.why)
 			}
 		})
+	}
+}
+
+// stubDnsDiscovery makes ValidateUpdate's DNS-discovery arm return key for the
+// given signer, without an IMR. Same seam and same discipline as
+// stubSig0Verify.
+func stubDnsDiscovery(t *testing.T, key *Sig0Key) {
+	t.Helper()
+	orig := findSig0KeyViaDNS
+	t.Cleanup(func() { findSig0KeyViaDNS = orig })
+	findSig0KeyViaDNS = func(zd *ZoneData, signer string, keyid uint16) (*Sig0Key, error) {
+		if key != nil && signer == key.Name && keyid == key.Keyid {
+			k := *key
+			return &k, nil
+		}
+		return nil, fmt.Errorf("no key for %s keyid %d", signer, keyid)
+	}
+}
+
+// signedUpdateFrom builds an UPDATE carrying a SIG(0) from the named signer.
+// The signature bytes are not real -- stubSig0Verify decides the outcome --
+// because what is under test is what ValidateUpdate DOES with the verdict.
+func signedUpdateFrom(t *testing.T, zone, signer string, keyid uint16) *dns.Msg {
+	t.Helper()
+	m := new(dns.Msg)
+	m.SetUpdate(zone)
+	m.Ns = []dns.RR{mustRR(t, "child.example. 3600 IN NS ns2.child.example.")}
+	sig := new(dns.SIG)
+	sig.Hdr = dns.RR_Header{Name: ".", Rrtype: dns.TypeSIG, Class: dns.ClassANY}
+	sig.RRSIG.KeyTag = keyid
+	sig.RRSIG.SignerName = signer
+	sig.RRSIG.Algorithm = dns.ED25519
+	sig.RRSIG.Inception = uint32(time.Now().Add(-time.Minute).Unix())
+	sig.RRSIG.Expiration = uint32(time.Now().Add(time.Hour).Unix())
+	m.Extra = []dns.RR{sig}
+	return m
+}
+
+// boundedVerification keeps the verifier that rememberDiscoveredChildKey
+// starts from outliving the test.
+//
+// The default policy is five attempts ten seconds apart, doubling, and with no
+// IMR every attempt fails -- so the goroutine sits in waitOrDone for a minute
+// and a half, writing to a t.TempDir database that has gone. One attempt, on a
+// context cancelled at cleanup, exits at once and records no verdict (a
+// cancelled context is a shutdown, not a judgement on the key).
+func boundedVerification(t *testing.T, zd *ZoneData, kdb *KeyDB) {
+	t.Helper()
+	pol := compiledDefaultDelegationPolicy()
+	pol.RetryMaxAttempts = 1
+	zd.DelegationPolicy = &pol
+
+	ctx, cancel := context.WithCancel(context.Background())
+	kdb.engineCtx = ctx
+	t.Cleanup(cancel)
+}
+
+func discoveredTestKey(t *testing.T) *Sig0Key {
+	t.Helper()
+	key := mustRR(t, "child.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
+	return &Sig0Key{
+		Name:      "child.example.",
+		Keyid:     key.KeyTag(),
+		Validated: true,
+		Source:    "dns",
+		Key:       *key,
+	}
+}
+
+// TestValidateUpdateRecordsAKeyItDiscoveredInDns is the WIRING.
+//
+// The tests above call rememberDiscoveredChildKey directly, so deleting the
+// call from ValidateUpdate -- which IS the #574 fix -- left every one of them
+// green. This one drives ValidateUpdate itself.
+func TestValidateUpdateRecordsAKeyItDiscoveredInDns(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := cuParentZone(t)
+	zd.KeyDB = kdb
+	registerZones(t, zd)
+	boundedVerification(t, zd, kdb)
+
+	discovered := discoveredTestKey(t)
+	stubDnsDiscovery(t, discovered)
+	stubSig0Verify(t) // the signature verifies
+
+	us := &UpdateStatus{}
+	if err := zd.ValidateUpdate(signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
+		t.Fatalf("ValidateUpdate: %v", err)
+	}
+
+	sk, err := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
+	if err != nil || sk == nil {
+		t.Fatalf("ValidateUpdate discovered the key in DNS but recorded nothing (err=%v);"+
+			" with no row there is nothing for a verification to promote, so the child"+
+			" is refused forever", err)
+	}
+	if sk.Trusted {
+		t.Error("the discovered key was recorded as trusted; discovery is not verification")
+	}
+}
+
+// TestValidateUpdateDoesNotRecordAKeyWhoseSignatureFailed.
+//
+// Recording is a database transaction plus a goroutine that makes IMR queries
+// with backoff. It used to run inside the discovery loop, before any signature
+// had been checked -- so anyone able to send an UPDATE naming a child of this
+// zone could buy that work, repeatedly, from off-net.
+func TestValidateUpdateDoesNotRecordAKeyWhoseSignatureFailed(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := cuParentZone(t)
+	zd.KeyDB = kdb
+	registerZones(t, zd)
+	boundedVerification(t, zd, kdb)
+
+	discovered := discoveredTestKey(t)
+	stubDnsDiscovery(t, discovered)
+	stubSig0Verify(t, discovered.Keyid) // this signature does NOT verify
+
+	us := &UpdateStatus{}
+	if err := zd.ValidateUpdate(signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
+		t.Fatalf("ValidateUpdate: %v", err)
+	}
+
+	if sk, _ := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid); sk != nil {
+		t.Error("a key was recorded for an UPDATE whose signature did not verify; a stream" +
+			" of spoofed updates would each cost a transaction and a verifier goroutine")
+	}
+}
+
+// TestTheDiscoveredKeyVerifierExitsOnShutdown.
+//
+// rememberDiscoveredChildKey starts a goroutine that retries with exponential
+// backoff -- five attempts ten seconds apart by default, doubling -- so by the
+// time the process is asked to stop it is usually asleep, and it writes to the
+// database on the way out. It has to notice.
+//
+// Driven through runChildKeyVerification with an injected verifier so the
+// cancellation lands inside the retry wait, which is where the goroutine
+// actually spends its life.
+func TestTheDiscoveredKeyVerifierExitsOnShutdown(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	pol := compiledDefaultDelegationPolicy()
+	pol.RetryMaxAttempts = 5
+	pol.RetryInterval = time.Hour // asleep until cancelled, or the test hangs
+
+	attempted := make(chan struct{}, 1)
+	verify := func(ctx context.Context) (bool, bool, error) {
+		select {
+		case attempted <- struct{}{}:
+		default:
+		}
+		return false, false, errors.New("not yet")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	returned := make(chan bool, 1)
+	go func() {
+		returned <- kdb.runChildKeyVerification(ctx, "child.example.", 4711, pol, verify)
+	}()
+
+	select {
+	case <-attempted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the verifier never made its first attempt")
+	}
+	cancel()
+
+	select {
+	case accepted := <-returned:
+		if accepted {
+			t.Error("a verifier abandoned at shutdown reported the key as accepted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the verifier did not return after its context was cancelled; it would go on" +
+			" sleeping through shutdown and then write to a closing database")
+	}
+
+	// A cancel is a shutdown, not a verdict: nothing may be recorded against
+	// the key, or a child would be told that waiting will not help when
+	// nothing was concluded.
+	if sk, _ := kdb.FindSig0TrustedKey("child.example.", 4711); sk != nil && sk.ValidationFailed {
+		t.Error("shutdown recorded a validation failure; the key was never judged")
+	}
+}
+
+// TestRediscoveringATrustedKeyDoesNotDemoteIt.
+//
+// The add was INSERT OR REPLACE and discovery writes trusted=0, so a second
+// discovery of a key that verification had already promoted put it straight
+// back to untrusted -- and started a second verification of a key that was
+// already trusted. Two concurrent first updates from the same child are enough
+// to reach it: ValidateUpdate's truststore lookup only short-circuits once a
+// row exists.
+func TestRediscoveringATrustedKeyDoesNotDemoteIt(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := cuParentZone(t)
+	zd.KeyDB = kdb
+	registerZones(t, zd)
+	boundedVerification(t, zd, kdb)
+
+	discovered := discoveredTestKey(t)
+	zd.rememberDiscoveredChildKey(discovered)
+
+	// Verification concludes: the key is trusted.
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		SubCommand:      "verify",
+		Keyname:         discovered.Name,
+		Keyid:           int(discovered.Keyid),
+		DnssecValidated: true,
+	}); err != nil {
+		t.Fatalf("promoting the key: %v", err)
+	}
+	if sk, _ := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid); sk == nil || !sk.Trusted {
+		t.Fatal("fixture: the key was not promoted, so there is no demotion to test")
+	}
+
+	// A second discovery of the same key.
+	if zd.rememberDiscoveredChildKey(discovered) {
+		t.Error("rediscovering a key that is already in the truststore started another" +
+			" verification; the row already says everything the discovery does, and the" +
+			" key may by now be trusted")
+	}
+
+	sk, err := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
+	if err != nil || sk == nil {
+		t.Fatalf("the row disappeared: %v", err)
+	}
+	if !sk.Trusted {
+		t.Error("rediscovering a key that was already trusted demoted it to untrusted;" +
+			" every update from that child is refused again until a second verification" +
+			" happens to complete")
+	}
+}
+
+// TestAZoneThatWillNotVerifyRecordsNothing.
+//
+// A delegation policy with no mechanisms is an operator declining automatic
+// bootstrap. Recording a row anyway leaves an untrusted entry that nothing can
+// ever promote, and no log line saying so -- the same dead end #574 was, only
+// now it looks like progress in the truststore listing.
+func TestAZoneThatWillNotVerifyRecordsNothing(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := cuParentZone(t)
+	zd.KeyDB = kdb
+	registerZones(t, zd)
+
+	pol := compiledDefaultDelegationPolicy()
+	pol.Mechanisms = nil
+	zd.DelegationPolicy = &pol
+
+	discovered := discoveredTestKey(t)
+	zd.rememberDiscoveredChildKey(discovered)
+
+	if sk, _ := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid); sk != nil {
+		t.Error("a row was stored for a zone whose policy has no verification mechanisms;" +
+			" nothing will ever promote it, so it is an entry that only looks like progress")
 	}
 }

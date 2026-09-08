@@ -240,8 +240,13 @@ type TruststoreResponse struct {
 	ChildDnskeys  map[string]cache.CachedDnskeyRRset
 	ChildSig0keys map[string]Sig0Key
 	Msg           string
-	Error         bool
-	ErrorMsg      string
+	// Existed reports that an "add" found the row already present and left it
+	// alone. Only src=dns sets it: discovery of a key that is already recorded
+	// is not news, and acting on it again would re-verify a key that may
+	// already be trusted.
+	Existed  bool
+	Error    bool
+	ErrorMsg string
 }
 
 type CommandPost struct {

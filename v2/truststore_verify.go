@@ -230,9 +230,14 @@ func waitOrDone(ctx context.Context, d time.Duration) bool {
 //
 // Best effort: a child that cannot be recorded is refused as it was before,
 // which is what would have happened anyway.
-func (zd *ZoneData) rememberDiscoveredChildKey(key *Sig0Key) {
+//
+// Reports whether this call is what started a verification. False covers every
+// way that did not happen -- not a child, a policy that will not verify, a row
+// that was already there, a database failure -- so a caller (and a test) can
+// tell "verification is now under way because of me" from "nothing happened".
+func (zd *ZoneData) rememberDiscoveredChildKey(key *Sig0Key) bool {
 	if zd == nil || zd.KeyDB == nil || key == nil {
-		return
+		return false
 	}
 	// Only for names this zone actually delegates. Any signer at all can
 	// publish a KEY and send us a signed UPDATE; without this that is a way to
@@ -240,14 +245,26 @@ func (zd *ZoneData) rememberDiscoveredChildKey(key *Sig0Key) {
 	if !zd.IsChildDelegation(key.Name) {
 		lgSigner.Debug("not recording a discovered SIG(0) key: not a child delegation of this zone",
 			"zone", zd.ZoneName, "signer", key.Name, "keyid", key.Keyid)
-		return
+		return false
+	}
+
+	// A policy with no mechanisms is an operator declining automatic
+	// bootstrap. Storing a row anyway leaves an untrusted entry that nothing
+	// will ever promote and no log line explaining why -- the same dead end
+	// #574 was, dressed as progress. The update is still refused; it is just
+	// refused without pretending a verification is under way.
+	if len(zd.boundDelegationPolicy().Mechanisms) == 0 {
+		lgSigner.Info("not recording a discovered SIG(0) key: this zone's delegation policy"+
+			" has no verification mechanisms, so nothing could promote it",
+			"zone", zd.ZoneName, "signer", key.Name, "keyid", key.Keyid)
+		return false
 	}
 
 	keyRR := key.Key.String()
 	tx, err := zd.KeyDB.Begin("rememberDiscoveredChildKey")
 	if err != nil {
 		lgSigner.Error("cannot record a discovered child SIG(0) key", "zone", key.Name, "err", err)
-		return
+		return false
 	}
 	resp, err := zd.KeyDB.Sig0TrustMgmt(tx, TruststorePost{
 		Command:    "sig0",
@@ -271,17 +288,26 @@ func (zd *ZoneData) rememberDiscoveredChildKey(key *Sig0Key) {
 		}
 		lgSigner.Error("cannot record a discovered child SIG(0) key",
 			"zone", key.Name, "keyid", key.Keyid, "err", err, "resp", msg)
-		return
+		return false
 	}
 	if err := tx.Commit(); err != nil {
 		lgSigner.Error("cannot commit a discovered child SIG(0) key",
 			"zone", key.Name, "keyid", key.Keyid, "err", err)
-		return
+		return false
+	}
+	if resp != nil && resp.Existed {
+		// Already recorded, so a verification is already running or has
+		// already concluded. Starting another would re-verify a key that may
+		// by now be trusted.
+		lgSigner.Debug("discovered child SIG(0) key was already in the truststore",
+			"parent", zd.ZoneName, "zone", key.Name, "keyid", key.Keyid)
+		return false
 	}
 
 	lgSigner.Info("recorded a child SIG(0) key found in DNS; verifying it",
 		"parent", zd.ZoneName, "zone", key.Name, "keyid", key.Keyid, "dnssec_validated", key.Validated)
 	zd.KeyDB.TriggerChildKeyVerification(zd.KeyDB.lifetimeCtx(), key.Name, zd.ZoneName, key.Keyid, keyRR)
+	return true
 }
 
 // lifetimeCtx is the process-lifetime context if one has been recorded, and a
@@ -360,12 +386,14 @@ func imrChildKeyVerifier(childZone, keyRR string, pol DelegationPolicy) childKey
 		if !verified {
 			return false, false, fmt.Errorf("KEY not found via %v", pol.Mechanisms)
 		}
+		// One predicate, and only one. This used to repeat the require-dnssec
+		// condition inline and THEN call the helper, which left the helper
+		// unable to reject anything -- so a rule added to it would have had no
+		// effect here, which is the opposite of why it was extracted.
 		// Compiled policy: absent require-dnssec became true at compile.
-		if pol.RequireDnssec && !dnssecValidated {
-			return false, false, errors.New("KEY found but not DNSSEC-validated, and require-dnssec is set")
-		}
 		if !childKeyAcceptable(verified, dnssecValidated, pol) {
-			return false, false, errors.New("KEY not acceptable under the delegation policy")
+			return false, false, errors.New(
+				"KEY found but not DNSSEC-validated, and require-dnssec is set")
 		}
 		return true, dnssecValidated, nil
 	}
