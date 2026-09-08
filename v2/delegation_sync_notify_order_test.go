@@ -290,3 +290,65 @@ func TestNotifySchemeRefusesWhenTheUpdateChangedNothing(t *testing.T) {
 		t.Error("a NOTIFY went out for a CSYNC that was never published")
 	}
 }
+
+// TestNotifySchemeRefusesWhenOnlyAStaleCsyncIsPublished.
+//
+// The wait checks that the CSYNC is published. It has to check that THIS CSYNC
+// is published: a zone whose apex still holds an older record, whose
+// replacement was then declined, satisfies "a CSYNC exists" while the parent
+// would come and fetch the stale one -- and act on a serial the child is no
+// longer advertising. That is the same silent divergence the wait was added to
+// prevent, one level down.
+func TestNotifySchemeRefusesWhenOnlyAStaleCsyncIsPublished(t *testing.T) {
+	updateq := make(chan UpdateRequest, 1)
+	notifyq := make(chan NotifyRequest, 4)
+
+	zd := testZone(t, "example.", csyncTestZone)
+	registerZones(t, zd)
+	zd.KeyDB = &KeyDB{UpdateQ: updateq}
+	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true}
+	zd.CurrentSerial = 17
+
+	// An older CSYNC is already published, carrying a serial the child has
+	// moved on from.
+	stale := &dns.CSYNC{Serial: 11, Flags: csyncFlagImmediate, TypeBitMap: csyncPublishedTypes}
+	stale.Hdr = dns.RR_Header{Name: zd.ZoneName, Rrtype: dns.TypeCSYNC, Class: dns.ClassINET, Ttl: 120}
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	zd.stageRRsetLocked(zd.ZoneName, core.RRset{
+		Name: zd.ZoneName, RRtype: dns.TypeCSYNC, Class: dns.ClassINET, RRs: []dns.RR{stale},
+	})
+	zd.publishLocked(zd.generation.Load())
+	zd.mu.Unlock()
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case ur := <-updateq:
+				// Declined: the replacement never lands, the stale record stays.
+				ur.respond(false, nil)
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	syncstate := DelegationSyncStatus{
+		NsAdds: []dns.RR{mustRR(t, "example. 3600 IN NS ns2.example.")},
+	}
+	target := &DsyncTarget{Name: "parent.", Addresses: []string{"192.0.2.53:53"}}
+
+	_, rcode, err := zd.SyncZoneDelegationViaNotify(context.Background(), zd.KeyDB, notifyq, syncstate, target)
+	if err == nil {
+		t.Fatal("reported success while only a STALE CSYNC was published; the parent would" +
+			" fetch it and act on a serial the child no longer advertises")
+	}
+	if rcode != dns.RcodeServerFailure {
+		t.Errorf("rcode = %s, want SERVFAIL", dns.RcodeToString[int(rcode)])
+	}
+	if len(notifyq) != 0 {
+		t.Error("a NOTIFY went out for a CSYNC that was never published")
+	}
+}

@@ -445,7 +445,13 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	respch := make(chan ZoneUpdateResult, 1)
 
 	// XXX: This should be separated into updates to auth data in the zone and updates to child data.
-	updateq <- UpdateRequest{
+	//
+	// Cancellable. A bare send here blocked forever if the updater had already
+	// stopped -- and the updater exits on the SAME root context, so at shutdown
+	// this was a handoff to a queue nobody would ever read again, holding the
+	// DNS update engine open indefinitely. The waiter below is answered with a
+	// failure rather than left hanging.
+	req := UpdateRequest{
 		Cmd:       dur.Status.Type,
 		ZoneName:  zone,
 		Actions:   r.Ns,
@@ -453,6 +459,14 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		Trusted:   dur.Status.ValidatedByTrustedKey,
 		Status:    dur.Status,
 		Resp:      respch,
+	}
+
+	select {
+	case updateq <- req:
+	case <-ctx.Done():
+		lgHandler.Info("shutting down before the update could be handed to the updater",
+			"zone", zone, "type", dur.Status.Type)
+		return fmt.Errorf("update for %s not queued: %w", zone, ctx.Err())
 	}
 
 	select {

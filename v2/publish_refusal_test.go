@@ -130,3 +130,40 @@ func TestACancelledSigningWalkRefusesRatherThanPublishesHalfOfIt(t *testing.T) {
 		t.Error("the published snapshot changed despite the walk being abandoned")
 	}
 }
+
+// TestAFailedPostBindSigningIsNotReportedAsASuccessfulLoad.
+//
+// signOnceAfterPolicyBind used to log its SignZone error and return nothing.
+// Both callers then carried on: completeFirstZonePolicyAndLoad replayed deltas
+// and drained OnFirstLoad, finishFirstLoadPolicy drained them. The load
+// reported success while a signing zone sat unsigned and not Ready -- and
+// nothing retried it, because the callbacks a retry needs had already been
+// spent and the refresh flow considered the first load done.
+func TestAFailedPostBindSigningIsNotReportedAsASuccessfulLoad(t *testing.T) {
+	zd, kdb, _ := rolledZone(t)
+	zd.KeyDB = kdb
+
+	// Unservable content forces SignZone to fail: the policy is bound, the
+	// zone signs its own content, but signing is refused.
+	zd.SetError(DnssecError, "injected: signing is broken for this zone")
+
+	// Not already signed, or the function returns before it tries.
+	zd.snapshot.Store(nil)
+
+	if err := signOnceAfterPolicyBind(context.Background(), zd); err == nil {
+		t.Fatal("a failed post-bind signing reported success; the caller then replays deltas" +
+			" and drains OnFirstLoad on a zone that cannot be served, and nothing retries it")
+	}
+}
+
+// The other half: a zone that signs cleanly must not be reported as a failure,
+// or every first load of a healthy signing zone would be retried forever.
+func TestASuccessfulPostBindSigningReportsSuccess(t *testing.T) {
+	zd, kdb, _ := rolledZone(t)
+	zd.KeyDB = kdb
+	zd.snapshot.Store(nil)
+
+	if err := signOnceAfterPolicyBind(context.Background(), zd); err != nil {
+		t.Fatalf("a zone that signs cleanly was reported as failed: %v", err)
+	}
+}

@@ -2,8 +2,11 @@ package tdns
 
 import (
 	"context"
+	"log"
 	"net"
+	"os"
 	"testing"
+	"time"
 
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -105,5 +108,81 @@ ns.parent.example.	3600	IN	A	192.0.2.53
 	}
 	if dur.Status.Validated {
 		t.Error("Status.Validated is true for an unsigned update")
+	}
+}
+
+// TestUpdateResponderReleasesOnShutdownRatherThanBlocking.
+//
+// The handoff to the zone updater was a bare channel send. The updater exits on
+// the SAME root context, so at shutdown this was a send to a queue nobody would
+// ever read again -- and the DNS update engine stayed open on it indefinitely.
+//
+// The update has to VALIDATE for the responder to reach the send at all, which
+// is why this carries a trusted key and a stubbed verifier: an unsigned message
+// is refused long before the queue, and a test built on one passes whether the
+// send is cancellable or not.
+func TestUpdateResponderReleasesOnShutdownRatherThanBlocking(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := cuParentZone(t)
+	registerZones(t, zd)
+	zd.KeyDB = kdb
+	zd.Logger = log.New(os.Stderr, "", 0)
+	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true, OptAllowChildUpdates: true}
+	// ApproveUpdate rejects anything the policy does not name, and a rejected
+	// update is answered immediately -- never reaching the queue.
+	zd.UpdatePolicy = UpdatePolicy{
+		Zone: UpdatePolicyDetail{Type: "selfsub", RRtypes: map[uint16]bool{dns.TypeA: true}, TTL: 3600},
+	}
+
+	// A key the parent already trusts, so ValidateUpdate + TrustUpdate accept
+	// the message and the responder gets as far as the queue.
+	key := mustRR(t, "example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "sig0", SubCommand: "add", Keyname: "example.",
+		Keyid: int(key.KeyTag()), Src: "file", KeyRR: key.String(),
+	}); err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "trust", Keyname: "example.",
+		Keyid: int(key.KeyTag()),
+	}); err != nil {
+		t.Fatalf("trust key: %v", err)
+	}
+	stubSig0Verify(t)
+
+	full := make(chan UpdateRequest) // unbuffered, no reader: the stopped updater
+	ctx, cancel := context.WithCancel(context.Background())
+
+	m := signedUpdateFrom(t, zd.ZoneName, "example.", key.KeyTag())
+	// A name in the parent that is NOT a delegation, so this is a ZONE-UPDATE
+	// rather than a CHILD-UPDATE (which the coherence checks refuse with no
+	// scanner configured, long before the queue).
+	m.Ns = []dns.RR{mustRR(t, "www.example. 3600 IN A 192.0.2.1")}
+	dur := &DnsUpdateRequest{
+		ResponseWriter: &captureWriter{},
+		Msg:            m,
+		Qname:          zd.ZoneName,
+		Status:         &UpdateStatus{},
+	}
+
+	returned := make(chan error, 1)
+	go func() { returned <- UpdateResponder(ctx, dur, full) }()
+
+	// It must actually be parked on the send, or this proves nothing.
+	select {
+	case err := <-returned:
+		t.Fatalf("the responder returned before reaching the update queue (%v); the fixture"+
+			" is being refused somewhere earlier and the send is never exercised", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	cancel()
+
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("UpdateResponder did not return after its context was cancelled; the DNS" +
+			" update engine cannot shut down while it is parked on this send")
 	}
 }

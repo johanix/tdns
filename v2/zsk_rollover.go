@@ -319,10 +319,18 @@ func ComputeZskRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time
 	}
 
 	// Next scheduled = active_at + ZSK.Lifetime.
-	if pol.ZSK.Lifetime > 0 && activeZSK.ActiveAt != nil {
+	//
+	// The SAME predicate the engine rolls on. `Lifetime > 0` is true for
+	// `forever`, which the engine explicitly refuses to schedule, so this
+	// reported a date that would never arrive -- an operator watching
+	// NextScheduled would wait for a rollover nothing was ever going to
+	// perform.
+	if lifetimeSchedulesRoll(pol.ZSK.Lifetime) && activeZSK.ActiveAt != nil {
 		out.NextScheduled = activeZSK.ActiveAt.Add(time.Duration(pol.ZSK.Lifetime) * time.Second).UTC().Format(time.RFC3339)
 	} else if pol.ZSK.Lifetime == 0 {
 		out.Note = "ZSK.Lifetime is 0 (no scheduled ZSK rollover); roll manually with \"asap --zsk\""
+	} else if pol.ZSK.Lifetime == foreverLifetimeSecs {
+		out.Note = "ZSK.Lifetime is forever (no scheduled ZSK rollover); roll manually with \"asap --zsk\""
 	}
 
 	// Earliest possible. No parent gates — bounded only by standby readiness
