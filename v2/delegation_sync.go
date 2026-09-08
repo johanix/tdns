@@ -42,7 +42,29 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 
 			case "DELEGATION-SYNC-SETUP":
 				// This is the initial setup request, when we first load a zone that has the delegation-sync-child option set.
+				//
+				// It needs the IMR: the parent zone is discovered, not
+				// configured. At startup this request routinely arrives before
+				// InitImrEngine has published the engine -- the same race the
+				// PROXY-SYNC arm below defers for -- and the failure was logged
+				// and the request dropped. Nothing retried it, so a child never
+				// bootstrapped unaided: every key had to be presented to the
+				// parent by hand after the daemon had settled.
+				//
+				// Put it back rather than run it against a nil IMR, and let it
+				// return exactly when the IMR is announced.
+				if !conf.Internal.ImrReady.Published() {
+					_ = deferForImr(ctx, delsyncq, conf.Internal.ImrReady, ds)
+					continue
+				}
 				err = zd.DelegationSyncSetup(ctx, kdb)
+				if errors.Is(err, ErrNoImrEngine) {
+					// Published, and still not usable from here. Defer on the
+					// same signal rather than drop: whatever the reason, the
+					// request is no more final than the pre-check case.
+					_ = deferForImr(ctx, delsyncq, conf.Internal.ImrReady, ds)
+					continue
+				}
 				if errors.Is(err, errBootstrapAdvertisementLookup) {
 					// The parent's SVCB advertisement could not be looked up:
 					// not a verdict on the method set, so not final. Retry with
@@ -615,6 +637,15 @@ const imrWaitWarnAfter = 60 * time.Second
 // test can wait for THIS worker rather than watching the process-wide goroutine
 // count, which an unrelated goroutine starting or stopping makes meaningless in
 // either direction.
+// ErrNoImrEngine reports that a step needed the IMR and there was not one yet.
+//
+// It is not a verdict on anything: InitImrEngine publishes the IMR
+// asynchronously and routinely finishes after the engines start, so this is the
+// ordinary state of the first seconds of a process. Matched rather than logged
+// and dropped, because the one chance a child gets to bootstrap must not be the
+// one it loses to startup ordering (#575).
+var ErrNoImrEngine = errors.New("no IMR engine available yet")
+
 func deferForImr(ctx context.Context, delsyncq chan DelegationSyncRequest,
 	ready *ImrReadiness, ds DelegationSyncRequest) <-chan struct{} {
 

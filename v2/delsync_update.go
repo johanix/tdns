@@ -153,7 +153,7 @@ func (zd *ZoneData) ResolveParentVia(imr *Imr) (string, error) {
 		return p, nil
 	}
 	if imr == nil {
-		return "", fmt.Errorf("parent zone for %s is unknown: no IMR engine to resolve it", zd.ZoneName)
+		return "", fmt.Errorf("parent zone for %s is unknown: %w", zd.ZoneName, ErrNoImrEngine)
 	}
 	p, err := imr.ParentZone(zd.ZoneName)
 	if err != nil {
