@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -59,7 +60,7 @@ func TestGeneratingAStandbyKeyTriggersAResign(t *testing.T) {
 	t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
 
 	// No standby ZSK exists, so this generates one.
-	maintainStandbyKeysForType(conf, kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 1, false)
+	maintainStandbyKeysForType(context.Background(), conf, kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 1, false)
 
 	select {
 	case req := <-q:
@@ -94,7 +95,7 @@ func TestNoStandbyKeyGeneratedMeansNoResign(t *testing.T) {
 
 	// Ask for zero standbys: the count is already satisfied, nothing is
 	// generated, and the served RRset does not change.
-	maintainStandbyKeysForType(conf, kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 0, false)
+	maintainStandbyKeysForType(context.Background(), conf, kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 0, false)
 
 	select {
 	case req := <-q:

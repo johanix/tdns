@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -142,4 +143,113 @@ func TestTheSchedulerDoesNotSleepOnAnOwedReplace(t *testing.T) {
 		t.Errorf("slept %s with a replace owed, want the floor %s: the zone is serving"+
 			" signatures by a key that is no longer active", got, floor)
 	}
+}
+
+// countStagedZsks returns how many ZSKs the maintainer has minted. A generated
+// key is staged as PUBLISHED, not standby -- it has to propagate before it can
+// become one -- so PUBLISHED is where the loop's output lands.
+func countStagedZsks(t *testing.T, kdb *KeyDB, zoneName string) int {
+	t.Helper()
+	keys, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStatePublished)
+	if err != nil {
+		t.Fatalf("GetDnssecKeysByState: %v", err)
+	}
+	return countKeysForMaintain(keys, 256, dns.ED25519, false)
+}
+
+// TestStandbyKeyGenerationStopsOnCancellation. Generating a keypair is
+// unbounded work -- seconds each for a large RSA key, worse for the PQ
+// algorithms -- and this loop mints one per missing standby key, for every
+// signing zone on the server. Without a context check it went on minting them
+// right through shutdown.
+//
+// Cancelled before the call rather than mid-flight: the contract is that the
+// check is consulted at all, and a timing race would make the test flaky
+// without making it stronger.
+func TestStandbyKeyGenerationStopsOnCancellation(t *testing.T) {
+	zd, kdb, _ := rolledZone(t)
+	conf := triggerResignConf(t, zd, 4)
+
+	before := countStagedZsks(t, kdb, zd.ZoneName)
+	if before != 0 {
+		t.Fatalf("test setup: %d ZSKs already in the pipeline, so the maintainer would"+
+			" return before it reached the generation loop", before)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	maintainStandbyKeysForType(ctx, conf, kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 2, false)
+
+	if got := countStagedZsks(t, kdb, zd.ZoneName); got != before {
+		t.Errorf("generated %d keys after cancellation; shutdown waits out every one of them",
+			got-before)
+	}
+}
+
+// The other half: the check must stop generation on cancellation and nothing
+// else. A guard that never lets the loop run would pass the test above.
+func TestStandbyKeyGenerationStillRunsWhenLive(t *testing.T) {
+	zd, kdb, _ := rolledZone(t)
+	conf := triggerResignConf(t, zd, 4)
+
+	before := countStagedZsks(t, kdb, zd.ZoneName)
+	maintainStandbyKeysForType(context.Background(), conf, kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 1, false)
+
+	if got := countStagedZsks(t, kdb, zd.ZoneName); got <= before {
+		t.Errorf("standby ZSKs went %d -> %d; the zone is short of the configured count", before, got)
+	}
+}
+
+// The per-zone walk takes the same check, and it is not made redundant by the
+// one inside the generator: the rest of the loop body still runs. In relaxed
+// mode that includes capStandbyZsksByCount, which DELETES surplus standby ZSKs.
+// A shutdown should not get halfway through a deletion sweep across every zone
+// on the server.
+func TestStandbyMaintenanceStopsBetweenZonesOnCancellation(t *testing.T) {
+	zd, kdb, _ := rolledZone(t)
+	conf := triggerResignConf(t, zd, 4)
+	zd.DnssecPolicy.ZSKAlgorithm = dns.ED25519
+
+	prev := Conf.Internal.Completeness
+	Conf.Internal.Completeness = CompletenessRelaxed
+	t.Cleanup(func() { Conf.Internal.Completeness = prev })
+
+	// Two standby ZSKs against a cap of one: the surplus is what the cap
+	// deletes, and what a cancelled walk must leave alone.
+	for i := 0; i < 2; i++ {
+		if _, _, err := kdb.GenerateKeypair(zd.ZoneName, "test", DnskeyStateStandby,
+			dns.TypeDNSKEY, dns.ED25519, "ZSK", nil); err != nil {
+			t.Fatalf("generate standby ZSK: %v", err)
+		}
+	}
+	before := countStandbyZsks(t, kdb, zd.ZoneName)
+	if before != 2 {
+		t.Fatalf("test setup: %d standby ZSKs, want 2", before)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	maintainStandbyKeys(ctx, conf, kdb, 1, 0)
+
+	if got := countStandbyZsks(t, kdb, zd.ZoneName); got != before {
+		t.Errorf("standby ZSKs went %d -> %d after cancellation; the walk carried on"+
+			" into the relaxed-mode deletion sweep", before, got)
+	}
+}
+
+// countStandbyZsks returns how many standby ZSKs the zone has, any algorithm --
+// which is what the relaxed-mode cap counts.
+func countStandbyZsks(t *testing.T, kdb *KeyDB, zoneName string) int {
+	t.Helper()
+	keys, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateStandby)
+	if err != nil {
+		t.Fatalf("GetDnssecKeysByState: %v", err)
+	}
+	n := 0
+	for _, k := range keys {
+		if k.Flags == 256 {
+			n++
+		}
+	}
+	return n
 }

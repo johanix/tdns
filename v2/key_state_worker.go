@@ -121,7 +121,7 @@ func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propa
 
 	transitionRetiredToRemoved(ctx, conf, kdb, now, propagationDelay)
 
-	maintainStandbyKeys(conf, kdb, standbyZskCount, standbyKskCount)
+	maintainStandbyKeys(ctx, conf, kdb, standbyZskCount, standbyKskCount)
 }
 
 // transitionPublishedToStandby transitions keys that have been in "published"
@@ -264,8 +264,18 @@ func transitionRetiredToRemoved(ctx context.Context, conf *Config, kdb *KeyDB, n
 // maintainStandbyKeys ensures each signing zone has the configured number of
 // standby keys for both ZSKs and KSKs. If a zone has fewer standby keys than
 // required and no keys are in the published pipeline, new keys are generated.
-func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCount int) {
+//
+// ctx is honoured between zones. This was the last step of the worker's tick
+// that did not take one, and it is the expensive one: generating a keypair is
+// unbounded work -- seconds each for a large RSA key, and the PQ algorithms are
+// worse -- so a server with a few hundred signing zones that all wanted a
+// standby key would go on minting them right through shutdown.
+func maintainStandbyKeys(ctx context.Context, conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCount int) {
 	for zoneName, zd := range Zones.Items() {
+		if ctx.Err() != nil {
+			lgSigner.Info("KeyStateWorker: stopping standby-key maintenance on context cancellation")
+			return
+		}
 		if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 			continue
 		}
@@ -287,7 +297,7 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCo
 		// promoted). STRICT keeps per-(role,algorithm) counting (the maintained
 		// double-signature shape). See the algorithm-rollover plan §8.3 / D5.
 		relaxed := Conf.Internal.Completeness == CompletenessRelaxed
-		maintainStandbyKeysForType(conf, kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, standbyZskCount, relaxed)
+		maintainStandbyKeysForType(ctx, conf, kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, standbyZskCount, relaxed)
 
 		// In relaxed mode, cap the standby-ZSK TOTAL (any algorithm) at
 		// standbyZskCount: with the algorithm-based deletion skipped, an
@@ -303,7 +313,7 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCo
 			// KSK is always per-(role,algorithm): relaxed mode's role-only
 			// discipline is a ZSK-roll property (the ZSK signs the whole zone);
 			// a KSK algorithm change is refused, not gradually rolled, here.
-			maintainStandbyKeysForType(conf, kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, standbyKskCount, false)
+			maintainStandbyKeysForType(ctx, conf, kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, standbyKskCount, false)
 		}
 	}
 }
@@ -316,7 +326,7 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCo
 // conf is threaded in for triggerResign: a key generated here is PUBLISHED, and
 // FetchZoneDnskeysSql serves published keys, so the moment the row exists the
 // served DNSKEY RRset has a key in it that the current RRSIG does not cover.
-func maintainStandbyKeysForType(conf *Config, kdb *KeyDB, zoneName string, alg uint8, keytype string, expectedFlags uint16, standbyKeyCount int, roleOnly bool) {
+func maintainStandbyKeysForType(ctx context.Context, conf *Config, kdb *KeyDB, zoneName string, alg uint8, keytype string, expectedFlags uint16, standbyKeyCount int, roleOnly bool) {
 	standbyKeys, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateStandby)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting standby keys", "zone", zoneName, "keytype", keytype, "err", err)
@@ -345,6 +355,15 @@ func maintainStandbyKeysForType(conf *Config, kdb *KeyDB, zoneName string, alg u
 
 	generated := 0
 	for i := 0; i < needed; i++ {
+		// Between keys, not inside one. A half-generated keypair is not a
+		// thing that can be abandoned usefully, and each one that IS finished
+		// is staged and durable, so stopping here loses nothing: the next tick
+		// recounts and mints whatever is still short.
+		if ctx.Err() != nil {
+			lgSigner.Info("KeyStateWorker: stopping key generation on context cancellation",
+				"zone", zoneName, "keytype", keytype, "generated", generated, "wanted", needed)
+			break
+		}
 		keyid, err := GenerateAndStageKey(kdb, zoneName, "key-state-worker", alg, keytype)
 		if err != nil {
 			lgSigner.Error("KeyStateWorker: key generation failed", "zone", zoneName, "keytype", keytype, "err", err)
