@@ -287,7 +287,7 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCo
 		// promoted). STRICT keeps per-(role,algorithm) counting (the maintained
 		// double-signature shape). See the algorithm-rollover plan §8.3 / D5.
 		relaxed := Conf.Internal.Completeness == CompletenessRelaxed
-		maintainStandbyKeysForType(kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, standbyZskCount, relaxed)
+		maintainStandbyKeysForType(conf, kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, standbyZskCount, relaxed)
 
 		// In relaxed mode, cap the standby-ZSK TOTAL (any algorithm) at
 		// standbyZskCount: with the algorithm-based deletion skipped, an
@@ -303,7 +303,7 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCo
 			// KSK is always per-(role,algorithm): relaxed mode's role-only
 			// discipline is a ZSK-roll property (the ZSK signs the whole zone);
 			// a KSK algorithm change is refused, not gradually rolled, here.
-			maintainStandbyKeysForType(kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, standbyKskCount, false)
+			maintainStandbyKeysForType(conf, kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, standbyKskCount, false)
 		}
 	}
 }
@@ -313,7 +313,10 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCo
 // ZSK), the standby/published pipeline counts are by ROLE (flags) only, not by
 // (role, algorithm): N old-algorithm standbys satisfy the count and nothing is
 // generated. When false (strict, or any KSK), counts are per-(role, algorithm).
-func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype string, expectedFlags uint16, standbyKeyCount int, roleOnly bool) {
+// conf is threaded in for triggerResign: a key generated here is PUBLISHED, and
+// FetchZoneDnskeysSql serves published keys, so the moment the row exists the
+// served DNSKEY RRset has a key in it that the current RRSIG does not cover.
+func maintainStandbyKeysForType(conf *Config, kdb *KeyDB, zoneName string, alg uint8, keytype string, expectedFlags uint16, standbyKeyCount int, roleOnly bool) {
 	standbyKeys, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateStandby)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting standby keys", "zone", zoneName, "keytype", keytype, "err", err)
@@ -340,13 +343,31 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 	needed := standbyKeyCount - standbyCount
 	lgSigner.Info("KeyStateWorker: generating standby keys", "zone", zoneName, "keytype", keytype, "have", standbyCount, "need", standbyKeyCount, "generating", needed)
 
+	generated := 0
 	for i := 0; i < needed; i++ {
 		keyid, err := GenerateAndStageKey(kdb, zoneName, "key-state-worker", alg, keytype)
 		if err != nil {
 			lgSigner.Error("KeyStateWorker: key generation failed", "zone", zoneName, "keytype", keytype, "err", err)
 			break
 		}
+		generated++
 		lgSigner.Info("KeyStateWorker: generated key", "zone", zoneName, "keytype", keytype, "keyid", keyid)
+	}
+
+	// A generated key is staged as PUBLISHED, and FetchZoneDnskeysSql serves
+	// published keys, so it is in the served DNSKEY RRset from this moment --
+	// under an RRSIG that was made over the set without it. That is not a stale
+	// signature, it is a BOGUS zone: a validator gets "no valid signature
+	// found" for the DNSKEY RRset and the whole zone, and everything delegated
+	// beneath it, fails to validate.
+	//
+	// So this is a key-state change like the ones at the two transitions above,
+	// and it takes the same trigger. Adding a key to the RRset needs the
+	// re-sign exactly as much as removing one does -- the keystore DELETE path
+	// has always taken it, which is why deleting the key appeared to "fix" the
+	// zone (#566).
+	if generated > 0 {
+		triggerResign(conf, zoneName)
 	}
 }
 

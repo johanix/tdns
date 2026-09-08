@@ -167,7 +167,7 @@ func TestT3RoleOnlyCountGeneratesNothing(t *testing.T) {
 	stampPublishedAt(t, kdb, s2, time.Now().Add(-1*time.Hour))
 
 	// New policy ZSK alg = RSASHA256; role-only count of standbys = 2 ≥ 2.
-	maintainStandbyKeysForType(kdb, algZone, dns.RSASHA256, "ZSK", 256, 2, true /*roleOnly*/)
+	maintainStandbyKeysForType(noResignQ(), kdb, algZone, dns.RSASHA256, "ZSK", 256, 2, true /*roleOnly*/)
 
 	if n := countStandbyZSKs(t, kdb); n != 2 {
 		t.Fatalf("standby ZSK count = %d, want 2 (nothing generated)", n)
@@ -198,7 +198,7 @@ func TestT3bGenerateOnDrainUsesNewAlg(t *testing.T) {
 	stampPublishedAt(t, kdb, s1, time.Now().Add(-2*time.Hour))
 
 	// Maintainer with new policy alg RSASHA256, standby target 2, role-only.
-	maintainStandbyKeysForType(kdb, algZone, dns.RSASHA256, "ZSK", 256, 2, true)
+	maintainStandbyKeysForType(noResignQ(), kdb, algZone, dns.RSASHA256, "ZSK", 256, 2, true)
 
 	// It should have generated exactly one new key, staged to published, NEW alg.
 	pub, _ := GetDnssecKeysByState(kdb, algZone, DnskeyStatePublished)
@@ -262,7 +262,7 @@ func TestT4SweepCapDeletesYoungestSurplus(t *testing.T) {
 
 	// Maintainer + cap agree: with 2 standbys and target 2, role-only maintainer
 	// generates nothing, cap removes nothing — no oscillation.
-	maintainStandbyKeysForType(kdb, algZone, dns.RSASHA256, "ZSK", 256, 2, true)
+	maintainStandbyKeysForType(noResignQ(), kdb, algZone, dns.RSASHA256, "ZSK", 256, 2, true)
 	capStandbyZsksByCount(kdb, algZone, 2)
 	if n := countStandbyZSKs(t, kdb); n != 2 {
 		t.Fatalf("after maintainer+cap re-run, standby count = %d, want stable 2", n)
@@ -338,7 +338,7 @@ func TestT5FullSequenceViaAsap(t *testing.T) {
 
 	// change-policy bound new alg (simulated by maintainer/promotions using newA).
 	// 1) maintainer: role-only count = 2, generates nothing.
-	maintainStandbyKeysForType(kdb, algZone, newA, "ZSK", 256, 2, true)
+	maintainStandbyKeysForType(noResignQ(), kdb, algZone, newA, "ZSK", 256, 2, true)
 	if countPublishedZSKs(t, kdb) != 0 || countStandbyZSKs(t, kdb) != 2 {
 		t.Fatalf("step1: expected 2 standby, 0 published; got %d/%d", countStandbyZSKs(t, kdb), countPublishedZSKs(t, kdb))
 	}
@@ -357,7 +357,7 @@ func TestT5FullSequenceViaAsap(t *testing.T) {
 	if countStandbyZSKs(t, kdb) != 0 {
 		t.Fatalf("after draining both standbys, standby count = %d, want 0", countStandbyZSKs(t, kdb))
 	}
-	maintainStandbyKeysForType(kdb, algZone, newA, "ZSK", 256, 2, true)
+	maintainStandbyKeysForType(noResignQ(), kdb, algZone, newA, "ZSK", 256, 2, true)
 	// Move the freshly-generated published keys to standby (the worker's
 	// published→standby transition), stamping published_at oldest-first.
 	pub, _ := GetDnssecKeysByState(kdb, algZone, DnskeyStatePublished)
