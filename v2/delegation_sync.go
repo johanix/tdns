@@ -41,48 +41,8 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 			switch ds.Command {
 
 			case "DELEGATION-SYNC-SETUP":
-				// This is the initial setup request, when we first load a zone that has the delegation-sync-child option set.
-				//
-				// It needs the IMR: the parent zone is discovered, not
-				// configured. At startup this request routinely arrives before
-				// InitImrEngine has published the engine -- the same race the
-				// PROXY-SYNC arm below defers for -- and the failure was logged
-				// and the request dropped. Nothing retried it, so a child never
-				// bootstrapped unaided: every key had to be presented to the
-				// parent by hand after the daemon had settled.
-				//
-				// Put it back rather than run it against a nil IMR, and let it
-				// return exactly when the IMR is announced.
-				if !conf.Internal.ImrReady.Published() {
-					_ = deferForImr(ctx, delsyncq, conf.Internal.ImrReady, ds)
-					continue
-				}
-				err = zd.DelegationSyncSetup(ctx, kdb)
-				if errors.Is(err, ErrNoImrEngine) {
-					// Published, and still not usable from here. Defer on the
-					// same signal rather than drop: whatever the reason, the
-					// request is no more final than the pre-check case.
-					_ = deferForImr(ctx, delsyncq, conf.Internal.ImrReady, ds)
-					continue
-				}
-				if errors.Is(err, errBootstrapAdvertisementLookup) {
-					// The parent's SVCB advertisement could not be looked up:
-					// not a verdict on the method set, so not final. Retry with
-					// the delegation-sync backoff, the way the KeyState poller
-					// and the BADKEY arm do, rather than leaving the zone loaded
-					// and never bootstrapped until the next reload.
-					if ds.Attempt+1 >= delegationSyncMaxRetries {
-						lgDns.Error("DelegationSyncher: SIG(0) bootstrap setup gave up after repeated advertisement lookup failures",
-							"zone", ds.ZoneName, "attempts", ds.Attempt+1, "err", err)
-						continue
-					}
-					_ = deferSetupRetry(ctx, delsyncq, ds)
-					continue
-				}
-				if err != nil {
-					lgDns.Error("DelegationSyncher: error from DelegationSyncSetup, ignoring sync request", "zone", ds.ZoneName, "err", err)
-					continue
-				}
+				handleDelegationSyncSetup(ctx, conf, delsyncq, kdb, zd, ds)
+				continue
 
 			case "INITIAL-KEY-UPLOAD":
 				// This case is not yet used, intended for automating the initial key upload to parent
@@ -642,7 +602,7 @@ var ErrNoImrEngine = errors.New("no IMR engine available yet")
 func deferForImr(ctx context.Context, delsyncq chan DelegationSyncRequest,
 	ready *ImrReadiness, ds DelegationSyncRequest) <-chan struct{} {
 
-	lgDns.Info("DelegationSyncher: IMR not up yet, deferring proxy work until it is",
+	lgDns.Info("DelegationSyncher: IMR not up yet, deferring this request until it is",
 		"zone", ds.ZoneName, "command", ds.Command)
 
 	done := make(chan struct{})
@@ -657,7 +617,7 @@ func deferForImr(ctx context.Context, delsyncq chan DelegationSyncRequest,
 				return
 			case <-warn.C:
 				lgDns.Warn("DelegationSyncher: still waiting for the IMR;"+
-					" proxy work for this zone cannot start without one",
+					" this request cannot be served without one",
 					"zone", ds.ZoneName, "command", ds.Command, "waited", imrWaitWarnAfter)
 			case <-ready.Ready():
 				select {
@@ -685,15 +645,16 @@ func setupRetryDelay(attempt int) time.Duration {
 // its attempt, with the attempt count advanced. Off the syncher goroutine so a
 // waiting zone does not stall the others; cancelled with ctx. The returned
 // channel closes when the worker exits, for tests.
-func deferSetupRetry(ctx context.Context, delsyncq chan DelegationSyncRequest, ds DelegationSyncRequest) <-chan struct{} {
-	return deferSetupRetryAfter(ctx, delsyncq, ds, setupRetryDelay(ds.Attempt))
+func deferSetupRetry(ctx context.Context, delsyncq chan DelegationSyncRequest, ds DelegationSyncRequest, reason string) <-chan struct{} {
+	return deferSetupRetryAfter(ctx, delsyncq, ds, setupRetryDelay(ds.Attempt), reason)
 }
 
 // deferSetupRetryAfter is deferSetupRetry with the delay supplied, so a test
 // need not wait out the real schedule.
-func deferSetupRetryAfter(ctx context.Context, delsyncq chan DelegationSyncRequest, ds DelegationSyncRequest, delay time.Duration) <-chan struct{} {
-	lgDns.Warn("DelegationSyncher: SIG(0) bootstrap setup deferred, advertisement lookup failed; will retry",
-		"zone", ds.ZoneName, "attempt", ds.Attempt+1, "of", delegationSyncMaxRetries, "delay", delay)
+func deferSetupRetryAfter(ctx context.Context, delsyncq chan DelegationSyncRequest, ds DelegationSyncRequest, delay time.Duration, reason string) <-chan struct{} {
+	lgDns.Warn("DelegationSyncher: SIG(0) bootstrap setup deferred; will retry",
+		"zone", ds.ZoneName, "reason", reason,
+		"attempt", ds.Attempt+1, "of", delegationSyncMaxRetries, "delay", delay)
 	next := ds
 	next.Attempt++
 	done := make(chan struct{})
@@ -741,4 +702,86 @@ func proxyStartupReconcile(ctx context.Context, zd *ZoneData, kdb *KeyDB, notify
 		return
 	}
 	lgDns.Info("DelegationSyncher: proxy startup reconcile", "zone", ds.ZoneName, "msg", msg)
+}
+
+// handleDelegationSyncSetup is the DELEGATION-SYNC-SETUP arm of the syncher.
+//
+// Extracted from the loop because its decisions are the interesting part and
+// they were unreachable from a test: which failures wait for the IMR, which
+// back off, which give up, and which are simply final. Reverting any one of
+// them inside the switch used to leave every test green.
+//
+// SETUP needs the IMR, because the parent zone is discovered rather than
+// configured. At startup this request routinely arrives before InitImrEngine
+// has published the engine -- the same race the PROXY arm defers for -- and it
+// used to be logged and dropped, so a child never bootstrapped unaided (#575).
+func handleDelegationSyncSetup(ctx context.Context, conf *Config, delsyncq chan DelegationSyncRequest,
+	kdb *KeyDB, zd *ZoneData, ds DelegationSyncRequest) {
+
+	_ = handleDelegationSyncSetupWith(ctx, conf, delsyncq, ds, func() error {
+		return zd.DelegationSyncSetup(ctx, kdb)
+	})
+}
+
+// handleDelegationSyncSetupWith is the decision half of the SETUP arm: given an
+// outcome, does the request wait for the IMR, back off, give up, or stop here?
+//
+// setup is passed in rather than called directly because that is what makes the
+// four answers reachable. Producing each of them from a real DelegationSyncSetup
+// needs a differently-broken zone every time -- and the one that matters most,
+// ErrNoImrEngine after readiness, is behind a fully built and loaded zone, so it
+// was never covered at all.
+//
+// Returns the channel of whatever follow-up work it scheduled, closed when that
+// work finishes, and nil when it scheduled none -- the request succeeded, or it
+// was final, or the retries ran out. The engine ignores it; it exists so
+// "nothing more will happen for this zone" is observable rather than inferred
+// from waiting out a backoff.
+func handleDelegationSyncSetupWith(ctx context.Context, conf *Config, delsyncq chan DelegationSyncRequest,
+	ds DelegationSyncRequest, setup func() error) <-chan struct{} {
+
+	// Not up yet: put the request back rather than run it against a nil IMR,
+	// and let it return exactly when the IMR is announced.
+	if !conf.Internal.ImrReady.Published() {
+		return deferForImr(ctx, delsyncq, conf.Internal.ImrReady, ds)
+	}
+
+	err := setup()
+	switch {
+	case err == nil:
+		return nil
+
+	case errors.Is(err, ErrNoImrEngine):
+		// Published, and STILL not usable from here. This must not go back to
+		// deferForImr: that waits on ImrReady, which is already closed, so the
+		// request would come straight back and the single syncher goroutine
+		// would spin on this one zone and starve every other. Whatever the
+		// cause, it is a condition to wait out, so it takes the same bounded
+		// backoff as any other non-final failure.
+		if ds.Attempt+1 >= delegationSyncMaxRetries {
+			lgDns.Error("DelegationSyncher: SIG(0) bootstrap setup gave up; the IMR is published"+
+				" but still not usable for this zone",
+				"zone", ds.ZoneName, "attempts", ds.Attempt+1, "err", err)
+			return nil
+		}
+		return deferSetupRetry(ctx, delsyncq, ds, "IMR published but not usable")
+
+	case errors.Is(err, errBootstrapAdvertisementLookup):
+		// The parent's SVCB advertisement could not be looked up: not a verdict
+		// on the method set, so not final. Retry with the delegation-sync
+		// backoff, the way the KeyState poller and the BADKEY arm do, rather
+		// than leaving the zone loaded and never bootstrapped until the next
+		// reload.
+		if ds.Attempt+1 >= delegationSyncMaxRetries {
+			lgDns.Error("DelegationSyncher: SIG(0) bootstrap setup gave up after repeated advertisement lookup failures",
+				"zone", ds.ZoneName, "attempts", ds.Attempt+1, "err", err)
+			return nil
+		}
+		return deferSetupRetry(ctx, delsyncq, ds, "advertisement lookup failed")
+
+	default:
+		lgDns.Error("DelegationSyncher: error from DelegationSyncSetup, ignoring sync request",
+			"zone", ds.ZoneName, "err", err)
+	}
+	return nil
 }

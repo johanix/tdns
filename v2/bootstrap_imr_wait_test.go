@@ -3,6 +3,7 @@ package tdns
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -60,11 +61,165 @@ func TestMissingImrIsAMatchableCondition(t *testing.T) {
 
 	err := zd.resolveParentZone()
 	if err == nil {
-		t.Skip("this build resolves a parent without an IMR")
+		// Not a build to skip over: this fixture is a bare ZoneData with every
+		// IMR pointer nil, so resolving a parent is impossible. Succeeding
+		// means the fixture stopped being what the test says it is, and
+		// skipping would turn that into a pass.
+		t.Fatal("resolveParentZone succeeded with no IMR anywhere; the fixture no longer" +
+			" reproduces the startup state this test is about")
 	}
 	if !errors.Is(err, ErrNoImrEngine) {
 		t.Errorf("resolveParentZone reported %v, which does not match ErrNoImrEngine."+
 			" The syncher then cannot tell 'the IMR is not up yet' from a real failure,"+
 			" and drops a request that should have been deferred", err)
+	}
+}
+
+// setupRig stands up what handleDelegationSyncSetup needs: a queue, a
+// readiness signal, and a Config wired to it.
+func setupRig(t *testing.T, published bool) (*Config, chan DelegationSyncRequest) {
+	t.Helper()
+	conf := &Config{}
+	conf.Internal.ImrReady = NewImrReadiness()
+	if published {
+		conf.Internal.ImrReady.Publish()
+	}
+	return conf, make(chan DelegationSyncRequest, 4)
+}
+
+// TestSetupWaitsForTheImrRatherThanRunningWithoutOne drives the syncher's own
+// SETUP arm, not the helper underneath it. Reverting the Published() check
+// inside that arm used to leave every #575 test green.
+func TestSetupWaitsForTheImrRatherThanRunningWithoutOne(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conf, q := setupRig(t, false) // IMR not published
+	zd := &ZoneData{ZoneName: "child.example."}
+	ds := DelegationSyncRequest{Command: "DELEGATION-SYNC-SETUP", ZoneName: "child.example.", ZoneData: zd}
+
+	handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
+		t.Error("setup ran with no IMR published; that is what the pre-check exists to prevent")
+		return nil
+	})
+
+	select {
+	case <-q:
+		t.Fatal("the request came back before the IMR was published")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	conf.Internal.ImrReady.Publish()
+
+	select {
+	case got := <-q:
+		if got.Command != "DELEGATION-SYNC-SETUP" {
+			t.Errorf("re-enqueued the wrong request: %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the setup request was dropped rather than deferred; this is the one chance" +
+			" the child gets to bootstrap unaided")
+	}
+}
+
+// TestSetupDoesNotSpinWhenTheImrIsPublishedButUnusable.
+//
+// After Published() is true the readiness signal is CLOSED, so deferring on it
+// re-enqueues immediately. The single DelegationSyncher goroutine would then
+// spin on one zone and starve every other. This arm has to back off instead.
+func TestSetupDoesNotSpinWhenTheImrIsPublishedButUnusable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conf, q := setupRig(t, true) // published...
+	ds := DelegationSyncRequest{Command: "DELEGATION-SYNC-SETUP", ZoneName: "child.example."}
+
+	// ...and still no usable IMR from here, which is the whole point of the
+	// post-readiness branch.
+	handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
+		return fmt.Errorf("setting up %s: %w", ds.ZoneName, ErrNoImrEngine)
+	})
+
+	// The backoff is seconds; an immediate re-enqueue is the bug.
+	select {
+	case got := <-q:
+		t.Fatalf("the request came straight back (attempt %d); on a closed readiness signal"+
+			" that is a tight loop in the one goroutine that serves every zone", got.Attempt)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// Backing off is not dropping: the request must still come back, once.
+func TestSetupRetriesAnUnusableImrAfterABackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conf, q := setupRig(t, true)
+	ds := DelegationSyncRequest{Command: "DELEGATION-SYNC-SETUP", ZoneName: "child.example."}
+
+	// deferSetupRetryAfter is the bounded-wait primitive the arm uses; drive it
+	// directly with a short delay so the test does not sit out a real backoff.
+	handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
+		return fmt.Errorf("setting up %s: %w", ds.ZoneName, ErrNoImrEngine)
+	})
+
+	select {
+	case got := <-q:
+		if got.Attempt != ds.Attempt+1 {
+			t.Errorf("re-enqueued at attempt %d, want %d; without the increment the backoff"+
+				" never reaches its limit and the zone retries forever", got.Attempt, ds.Attempt+1)
+		}
+	case <-time.After(setupRetryDelay(ds.Attempt) + 5*time.Second):
+		t.Error("the request never came back; a published-but-unusable IMR is a condition to" +
+			" wait out, not a verdict on the zone")
+	}
+}
+
+// The backoff is bounded: a zone that can never be set up must stop asking.
+func TestSetupGivesUpAfterRepeatedUnusableImr(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conf, q := setupRig(t, true)
+	ds := DelegationSyncRequest{
+		Command:  "DELEGATION-SYNC-SETUP",
+		ZoneName: "child.example.",
+		Attempt:  delegationSyncMaxRetries - 1, // the last one
+	}
+
+	scheduled := handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
+		return fmt.Errorf("setting up %s: %w", ds.ZoneName, ErrNoImrEngine)
+	})
+
+	if scheduled != nil {
+		t.Error("another attempt was scheduled past the retry limit; a zone that can never" +
+			" be set up would keep asking for the life of the process")
+	}
+	select {
+	case got := <-q:
+		t.Fatalf("still retrying past the limit (attempt %d of %d)", got.Attempt, delegationSyncMaxRetries)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// A failure that is neither "no IMR" nor an advertisement lookup is final:
+// retrying it would just repeat the same answer.
+func TestSetupDoesNotRetryAFinalFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conf, q := setupRig(t, true)
+	ds := DelegationSyncRequest{Command: "DELEGATION-SYNC-SETUP", ZoneName: "child.example."}
+
+	if scheduled := handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
+		return errors.New("the zone has no parent and never will")
+	}); scheduled != nil {
+		t.Error("a final failure scheduled a retry; it would just get the same answer")
+	}
+
+	select {
+	case got := <-q:
+		t.Fatalf("a final failure was re-enqueued: %+v", got)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
