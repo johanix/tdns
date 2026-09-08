@@ -427,7 +427,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	if options[OptOnlineSigning] || options[OptInlineSigning] {
 		resignQ := conf.Internal.ResignQ
 		zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
-			if err := z.registerForPeriodicResign(resignQ); err != nil {
+			if err := z.registerForPeriodicResign(ctx, resignQ); err != nil {
 				lg.Error("registerForPeriodicResign failed in OnFirstLoad", "zone", z.ZoneName, "error", err)
 			}
 		})

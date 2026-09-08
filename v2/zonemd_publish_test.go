@@ -739,5 +739,14 @@ func mustSigningMaterial(t *testing.T, zd *ZoneData) *signingMaterial {
 	if err != nil {
 		t.Fatalf("resolveSigningMaterialLocked: %v", err)
 	}
+	if sm == nil {
+		// nil with no error is the unbound-policy answer, and every caller
+		// below quietly does nothing with it: restitchNsecLocked returns
+		// without touching the chain, abandonZonemdLocked reports success, and
+		// the failure surfaces much later as a stale ZONEMD in a bitmap
+		// assertion. Report the broken fixture where it broke.
+		t.Fatal("resolveSigningMaterialLocked returned no signing material and no error;" +
+			" the fixture's DNSSEC policy is not bound, so nothing below will sign")
+	}
 	return sm
 }

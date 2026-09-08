@@ -1493,7 +1493,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		if options[OptOnlineSigning] || options[OptInlineSigning] {
 			if zdp.FirstZoneLoad {
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					if err := zd.registerForPeriodicResign(conf.Internal.ResignQ); err != nil {
+					if err := zd.registerForPeriodicResign(ctx, conf.Internal.ResignQ); err != nil {
 						lgConfig.Error("registerForPeriodicResign failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
 					}
 				})

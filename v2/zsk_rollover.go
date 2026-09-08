@@ -474,8 +474,15 @@ func rolloverZskForZone(ctx context.Context, conf *Config, kdb *KeyDB, zd *ZoneD
 		// An empty pipeline is the case actually worth reporting.
 		published, perr := GetDnssecKeysByState(kdb, zone, DnskeyStatePublished)
 		if perr != nil {
-			lgSigner.Warn("zsk rollover: cannot tell whether a replacement ZSK is propagating",
-				"zone", zone, "err", perr)
+			// Unknown is not empty. Falling through left inFlight false, and
+			// the line below then stated as fact that no replacement ZSK
+			// exists -- an operator paging on "no standby ZSK available" would
+			// be chasing a key that may well be propagating normally, when what
+			// actually failed was the keystore lookup.
+			lgSigner.Warn("zsk rollover: roll is due, but the keystore lookup failed so"+
+				" whether a replacement ZSK is propagating is unknown",
+				"zone", zone, "active_keyid", activeZSK.KeyTag, "err", perr)
+			return nil
 		}
 		inFlight := false
 		for i := range published {

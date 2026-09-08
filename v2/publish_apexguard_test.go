@@ -122,11 +122,13 @@ resign.example.	3600	IN	NS	ns.resign.example.
 	// PUBLISH the DNSKEY RRset — the fresh-key branch that re-locked zd.mu.
 
 	done := make(chan struct{})
+	var smErr error
 	go func() {
 		zd.mu.Lock() // the publishWorkingSetLocked context: zd.mu held across the re-sign
 		defer zd.mu.Unlock()
 		zd.ensureWorkingSet()
-		sm, _ := zd.resolveSigningMaterialLocked()
+		var sm *signingMaterial
+		sm, smErr = zd.resolveSigningMaterialLocked()
 		zd.resignWorkingSetSOAIfSigned(sm)
 		close(done)
 	}()
@@ -134,7 +136,17 @@ resign.example.	3600	IN	NS	ns.resign.example.
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("resignWorkingSetSOAIfSigned deadlocked while zd.mu was held (re-entrant zd.mu via EnsureActiveDnssecKeys -> PublishDnskeyRRs)")
+		// Key resolution runs INSIDE the lock too, so the deadlock this test
+		// hunts can happen before resignWorkingSetSOAIfSigned is ever reached.
+		t.Fatal("deadlocked while zd.mu was held, in resolveSigningMaterialLocked or" +
+			" resignWorkingSetSOAIfSigned (re-entrant zd.mu via EnsureActiveDnssecKeys" +
+			" -> PublishDnskeyRRs)")
+	}
+	// Reported, not discarded. A real error yields sm == nil,
+	// resignWorkingSetSOAIfSigned then returns without doing anything, and the
+	// missing-RRSIG assertion below fails with the symptom instead of the cause.
+	if smErr != nil {
+		t.Fatalf("resolveSigningMaterialLocked: %v", smErr)
 	}
 
 	// The SOA must actually carry an RRSIG now — proves the re-sign ran to

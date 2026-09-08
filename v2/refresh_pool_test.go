@@ -3,6 +3,7 @@ package tdns
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -75,21 +76,12 @@ func assertAnswered(t *testing.T, resp chan RefresherResponse, want string) {
 		if !got.Error {
 			t.Errorf("a skipped refresh answered success: %+v", got)
 		}
-		if want != "" && !contains(got.ErrorMsg, want) {
+		if want != "" && !strings.Contains(got.ErrorMsg, want) {
 			t.Errorf("answer %q does not mention %q", got.ErrorMsg, want)
 		}
 	default:
 		t.Fatal("a Wait-ing caller was never answered; tdns-cli zone reload would hang")
 	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
 
 // The gate caps concurrent transfers, and a nil gate is ungated.

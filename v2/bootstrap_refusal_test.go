@@ -108,7 +108,12 @@ func TestUnvalidatedUploadRefusalCarriesItsOwnEDE(t *testing.T) {
 // without configuring anything.
 func TestDefaultDelegationPolicyRefusesUnvalidatedUploads(t *testing.T) {
 	if DefaultDelegationPolicy().AllowUnvalidatedUpload {
-		t.Skip("the default now allows unvalidated uploads; this test guarded the other case")
+		// Not a reason to skip. The default refusing unvalidated uploads is the
+		// property this test exists to hold; a default that has become
+		// permissive is precisely the regression, and skipping would report it
+		// as a pass.
+		t.Fatal("the default delegation policy now ALLOWS unvalidated SIG(0) uploads;" +
+			" any child could assert its own key to this parent")
 	}
 	if txt := edns0.EDECodeToString[edns0.EDESig0UnvalidatedUploadNotAccepted]; txt == "" {
 		t.Error("the EDE has no text, so the child receives a bare code")

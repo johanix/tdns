@@ -1023,7 +1023,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					if Globals.App.Type != AppTypeAgent {
 						resignQ := conf.Internal.ResignQ
 						zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
-							if err := z.registerForPeriodicResign(resignQ); err != nil {
+							if err := z.registerForPeriodicResign(ctx, resignQ); err != nil {
 								lgEngine.Error("registerForPeriodicResign failed", "zone", z.ZoneName, "error", err)
 							}
 						})
@@ -1128,21 +1128,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			// work below -- the pointer stays valid either way.
 			var due []*RefreshCounter
 			refreshCounters.IterCb(func(zone string, rc *RefreshCounter) {
-				// Zero IS due, and the counter is unsigned. Decrementing it at
-				// zero wraps to 4294967295, and the zone then stops being due
-				// for the life of the process -- the opposite of what every
-				// caller that leaves it at zero intends.
-				//
-				// It is left at zero on purpose in several places: a zone
-				// dispatched and still in flight (reset happens when the
-				// outcome returns), a job the pool refused as busy or
-				// saturated, and a zone skipped for a service-impacting error.
-				// Each of those says "still due, try again next tick", and the
-				// wrap turned every one of them into "never again".
-				if rc.CurRefresh > 0 {
-					rc.CurRefresh--
-				}
-				if rc.CurRefresh == 0 {
+				if refreshCounterTick(rc) {
 					due = append(due, rc)
 				}
 			})
@@ -1186,11 +1172,18 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							lgEngine.Error("initial load retry: policy sync failed", "zone", zone, "error", err)
 							zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 							zd.LatestError = time.Now()
-							rc.CurRefresh = 30 // retry sooner
+							// The LIVE counter, not the one collected by the
+							// walk. A successful initialLoadZone Sets a NEW
+							// RefreshCounter for this zone, so rc is by now
+							// detached from the map and writing 30 to it went
+							// nowhere: the zone waited out a full jittered SOA
+							// REFRESH before retrying a policy sync that had
+							// just failed.
+							setRefreshRetry(refreshCounters, zone, rc, 30)
 							continue
 						}
 					}
-					rc.CurRefresh = rc.SOARefresh
+					setRefreshRetry(refreshCounters, zone, rc, 0) // 0 == use the live SOARefresh
 					continue
 				}
 
@@ -1406,4 +1399,47 @@ func FindSoaRefresh(zd *ZoneData) (uint32, error) {
 		refresh = minrefresh
 	}
 	return refresh, nil
+}
+
+// refreshCounterTick performs the ticker's guarded decrement and reports
+// whether the zone is now due.
+//
+// Extracted so the ticker and the test that pins this cannot drift apart. The
+// test used to carry its own copy of the guard, which meant an unguarded
+// decrement in the ticker passed every test in the package.
+//
+// Zero IS due, and the counter is unsigned. Decrementing it at zero wraps to
+// 4294967295, and the zone then stops being due for the life of the process --
+// the opposite of what every caller that leaves it at zero intends.
+//
+// It is left at zero on purpose in several places: a zone dispatched and still
+// in flight (the reset happens when the outcome returns), a job the pool
+// refused as busy or saturated, and a zone skipped for a service-impacting
+// error. Each of those says "still due, try again next tick", and the wrap
+// turned every one of them into "never again".
+func refreshCounterTick(rc *RefreshCounter) bool {
+	if rc.CurRefresh > 0 {
+		rc.CurRefresh--
+	}
+	return rc.CurRefresh == 0
+}
+
+// setRefreshRetry writes the next interval onto the counter the MAP currently
+// holds for zone, falling back to the one the caller collected.
+//
+// The ticker collects counters and then does work that can replace them:
+// initialLoadZone Sets a brand-new RefreshCounter on success, so a pointer
+// taken before that call no longer reaches the map, and an interval written
+// through it is silently discarded. secs of 0 means "whatever the live counter
+// says its SOA REFRESH is", which is the normal reset.
+func setRefreshRetry(refreshCounters *core.ConcurrentMap[string, *RefreshCounter], zone string, rc *RefreshCounter, secs uint32) {
+	live := rc
+	if cur, ok := refreshCounters.Get(zone); ok && cur != nil {
+		live = cur
+	}
+	if secs == 0 {
+		live.CurRefresh = live.SOARefresh
+		return
+	}
+	live.CurRefresh = secs
 }

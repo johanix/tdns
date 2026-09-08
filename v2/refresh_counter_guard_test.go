@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	core "github.com/johanix/tdns/v2/core"
 	"testing"
 )
 
@@ -14,13 +15,11 @@ import (
 // due, try again next tick". The wrap turned every one of those into "never
 // again".
 func TestTheRefreshCounterDoesNotWrapPastDue(t *testing.T) {
-	tick := func(rc *RefreshCounter) bool {
-		// The guarded decrement the ticker performs.
-		if rc.CurRefresh > 0 {
-			rc.CurRefresh--
-		}
-		return rc.CurRefresh == 0
-	}
+	// The PRODUCTION guard, not a copy of it. This test used to carry its own
+	// reimplementation of the decrement, which meant an unguarded one in the
+	// ticker passed every test in the package -- the test pinned its own
+	// behaviour and nothing else.
+	tick := refreshCounterTick
 
 	rc := &RefreshCounter{Name: "z.example.", SOARefresh: 3, SOARetry: 2, CurRefresh: 2}
 
@@ -60,5 +59,42 @@ func TestAnErroredZoneReschedulesRatherThanStayingDue(t *testing.T) {
 	noRetry := &RefreshCounter{Name: "z.example.", SOARefresh: 3600, CurRefresh: 0}
 	if got := refreshCounterRetry(noRetry); got != 3600 {
 		t.Errorf("with no SOA RETRY: %d, want the REFRESH interval 3600", got)
+	}
+}
+
+// TestRetryIntervalReachesTheCounterTheMapHolds.
+//
+// The ticker collects counters under IterCb and then does work that can REPLACE
+// them: a successful initialLoadZone calls refreshCounters.Set for the very
+// zone being processed, so the pointer collected before that call no longer
+// reaches the map. Writing the retry interval through it went nowhere, and a
+// zone whose policy sync had just failed waited out a full jittered SOA REFRESH
+// instead of retrying in thirty seconds.
+func TestRetryIntervalReachesTheCounterTheMapHolds(t *testing.T) {
+	const zone = "z.example."
+	counters := core.NewCmap[*RefreshCounter]()
+
+	stale := &RefreshCounter{Name: zone, SOARefresh: 3600, CurRefresh: 0}
+	counters.Set(zone, stale)
+
+	// What initialLoadZone does on success: a brand-new counter for this zone.
+	fresh := &RefreshCounter{Name: zone, SOARefresh: 7200, CurRefresh: 0}
+	counters.Set(zone, fresh)
+
+	// The ticker still holds `stale`.
+	setRefreshRetry(counters, zone, stale, 30)
+
+	if got, _ := counters.Get(zone); got.CurRefresh != 30 {
+		t.Errorf("the live counter has CurRefresh=%d, want 30; the retry was written to a"+
+			" counter that is no longer in the map, so the zone waits out a full SOA"+
+			" REFRESH before retrying", got.CurRefresh)
+	}
+
+	// 0 means "reset to whatever the LIVE counter's SOA REFRESH is" -- not the
+	// stale one's, which is a different zone's worth of seconds.
+	setRefreshRetry(counters, zone, stale, 0)
+	if got, _ := counters.Get(zone); got.CurRefresh != 7200 {
+		t.Errorf("reset to %d, want the live counter's SOARefresh 7200 (the stale one says %d)",
+			got.CurRefresh, stale.SOARefresh)
 	}
 }

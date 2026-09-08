@@ -101,7 +101,7 @@ func TestForcedSignZoneLeavesSignaturesByARetiredKey(t *testing.T) {
 
 	tags := zd.mustRRSIGKeytags(t, signedName, dns.TypeA)
 	if !hasKeytag(tags, oldTag) {
-		t.Skipf("a forced SignZone removed the retired key's signature (%v); the "+
+		t.Fatalf("a forced SignZone removed the retired key's signature (%v); the "+
 			"additive contract this test documents has changed, and the resigner's "+
 			"choice of ResignZone should be revisited", tags)
 	}

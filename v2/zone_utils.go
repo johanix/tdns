@@ -1068,9 +1068,21 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 		// a hostname primary, so reading it here races -- and would report a
 		// count that does not match the upstreams actually tried. Same reason
 		// the loop walks the copy, and the same fix DoTransfer already carries.
-		lg.Error("FetchFromUpstream: AXFR failed on all upstreams", "zone", zd.ZoneName, "count", len(upstreams), "err", lastErr)
+		// Named, not counted. DoTransfer already reports the addresses it
+		// probed, and an operator reading a zone's RefreshError after a
+		// transfer failure needs the same thing here: "tried all 3 upstreams"
+		// does not say WHICH, so the two failure modes gave different
+		// diagnostic quality for the same zone.
+		addrs := make([]string, 0, len(upstreams))
+		for _, u := range upstreams {
+			addrs = append(addrs, u.Addr)
+		}
+		tried := strings.Join(addrs, ", ")
+		lg.Error("FetchFromUpstream: AXFR failed on all upstreams",
+			"zone", zd.ZoneName, "upstreams", tried, "err", lastErr)
 		zd.SetStatus(prevStatus) // still serving prior data; failure surfaces as RefreshError
-		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s): %w", zd.ZoneName, len(upstreams), lastErr)
+		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s) [%s]: %w",
+			zd.ZoneName, len(upstreams), tried, lastErr)
 	}
 
 	// A forced transfer MUST apply whatever upstream has, including a serial
@@ -2105,7 +2117,7 @@ func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 // held up by one that is wedged.
 const resignRegisterTimeout = 2 * time.Second
 
-func (zd *ZoneData) registerForPeriodicResign(resignq chan<- ResignRequest) error {
+func (zd *ZoneData) registerForPeriodicResign(ctx context.Context, resignq chan<- ResignRequest) error {
 	if Globals.App.Type == AppTypeAgent {
 		return nil // agents never sign
 	}
@@ -2118,7 +2130,13 @@ func (zd *ZoneData) registerForPeriodicResign(resignq chan<- ResignRequest) erro
 		return nil // non-primary zones require inline-signing to be signed
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), resignRegisterTimeout)
+	// Derived from the caller's context, not Background(). This runs in the
+	// synchronous OnFirstLoad callback, so a full ResignQ used to hold the
+	// caller here for the whole resignRegisterTimeout with no way to notice
+	// that the engine it belongs to had already been told to stop -- two
+	// seconds of shutdown latency per zone, for a registration nobody would
+	// read.
+	ctx, cancel := context.WithTimeout(ctx, resignRegisterTimeout)
 	defer cancel()
 
 	select {
