@@ -903,7 +903,19 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.SetError(RefreshError, "get soa error: %v", err)
 							zd.LatestError = time.Now()
 						} else if soa != nil {
-							refresh = soa.Refresh
+							// FindSoaRefresh, not the raw SOA field: it applies
+							// the configured floor and ceiling and the primary
+							// special case. A zone whose SOA says 0 would
+							// otherwise put 0 in SOARefresh, which pool.Done()
+							// copies back into CurRefresh after every refresh --
+							// permanently due, and permanently at the value the
+							// decrement above must not be allowed to wrap.
+							if r, ferr := FindSoaRefresh(zd); ferr != nil {
+								lgEngine.Warn("FindSoaRefresh failed; keeping the previous interval",
+									"zone", zone, "error", ferr)
+							} else {
+								refresh = r
+							}
 						}
 						if rc, haveParams := refreshCounters.Get(zone); haveParams {
 							// Update existing refreshCounter with new config values
@@ -1116,8 +1128,21 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			// work below -- the pointer stays valid either way.
 			var due []*RefreshCounter
 			refreshCounters.IterCb(func(zone string, rc *RefreshCounter) {
-				rc.CurRefresh--
-				if rc.CurRefresh <= 0 {
+				// Zero IS due, and the counter is unsigned. Decrementing it at
+				// zero wraps to 4294967295, and the zone then stops being due
+				// for the life of the process -- the opposite of what every
+				// caller that leaves it at zero intends.
+				//
+				// It is left at zero on purpose in several places: a zone
+				// dispatched and still in flight (reset happens when the
+				// outcome returns), a job the pool refused as busy or
+				// saturated, and a zone skipped for a service-impacting error.
+				// Each of those says "still due, try again next tick", and the
+				// wrap turned every one of them into "never again".
+				if rc.CurRefresh > 0 {
+					rc.CurRefresh--
+				}
+				if rc.CurRefresh == 0 {
 					due = append(due, rc)
 				}
 			})
@@ -1138,6 +1163,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 				}
 				if zd.HasServiceImpactingError() {
 					lgEngine.Warn("zone in error state, not refreshing", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
+					// Reschedule on the retry interval rather than leaving the
+					// counter at zero. At zero this zone is due again on every
+					// tick, so a zone in a persistent error state is walked and
+					// logged once a second until it clears.
+					rc.CurRefresh = refreshCounterRetry(rc)
 					continue
 				}
 

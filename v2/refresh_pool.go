@@ -88,10 +88,12 @@ type refreshOutcome struct {
 // the whole point: one unreachable primary must not stop the engine reading its
 // other channels, which is what #502 was.
 type refreshPool struct {
-	jobs chan refreshJob
-	done chan refreshOutcome
-	gate *transferGate
-	wg   sync.WaitGroup
+	// cancel stops the pool's own context; see newRefreshPool and Shutdown.
+	cancel context.CancelFunc
+	jobs   chan refreshJob
+	done   chan refreshOutcome
+	gate   *transferGate
+	wg     sync.WaitGroup
 }
 
 func newRefreshPool(ctx context.Context, width, queue, transfers int, conf *Config) *refreshPool {
@@ -101,8 +103,19 @@ func newRefreshPool(ctx context.Context, width, queue, transfers int, conf *Conf
 	if queue <= 0 {
 		queue = 4 * width
 	}
+	// The pool's own context, so Shutdown can stop the work it is about to wait
+	// for. Cancelling the caller's would stop far more than the pool.
+	//
+	// Without this, Shutdown closes jobs and then waits while the workers run
+	// every job still queued -- each of which may spend a full transferTimeout
+	// on an unreachable upstream. The engine can be asked to stop and then take
+	// minutes to do it, on exactly the zones that are already not answering.
+	// The pool exists to stop one dead primary costing everyone else time; it
+	// should not reintroduce that at shutdown.
+	poolCtx, cancel := context.WithCancel(ctx)
 	p := &refreshPool{
-		jobs: make(chan refreshJob, queue),
+		cancel: cancel,
+		jobs:   make(chan refreshJob, queue),
 		// Buffered to width so every worker can hand back an outcome without
 		// waiting for the engine to be looking. See Shutdown for the other half.
 		done: make(chan refreshOutcome, width),
@@ -114,7 +127,7 @@ func newRefreshPool(ctx context.Context, width, queue, transfers int, conf *Conf
 			defer p.wg.Done()
 			for job := range p.jobs {
 				job.gate = p.gate
-				updated, err := runZoneRefresh(ctx, job, conf)
+				updated, err := runZoneRefresh(poolCtx, job, conf)
 				select {
 				case p.done <- refreshOutcome{Zone: job.zone, Updated: updated, Err: err}:
 				case <-ctx.Done():
@@ -154,6 +167,12 @@ func (p *refreshPool) Done() <-chan refreshOutcome { return p.done }
 // on a hand-off nobody wants, and Wait would never return: the daemon hangs on
 // shutdown rather than exiting.
 func (p *refreshPool) Shutdown() {
+	// Cancel BEFORE closing jobs: queued work is about to be run by the
+	// draining workers, and in-flight work is what the wait is for. Both have
+	// to see the cancellation or the wait below is unbounded in practice.
+	if p.cancel != nil {
+		p.cancel()
+	}
 	close(p.jobs)
 
 	drained := make(chan struct{})
