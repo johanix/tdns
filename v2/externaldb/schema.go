@@ -27,7 +27,10 @@ import (
 //
 // The name columns are ascii, and that is not cosmetic: it keeps the primary
 // key under InnoDB's 3072-byte limit. rr is unbounded (a long TXT, a
-// post-quantum KEY), so a stored SHA-256 of it is what sits in the key.
+// post-quantum KEY), so its SHA-256 is what sits in the key. tdns computes
+// and writes rr_hash; it is not a generated column, because MariaDB refuses
+// a PRIMARY KEY on one (error 1903) -- learned from the first live run. A
+// consumer can still verify a row with rr_hash = UNHEX(SHA2(rr, 256)).
 
 const DefaultTablePrefix = "tdns_"
 
@@ -38,7 +41,7 @@ var mariadbDDL = []string{
     owner       VARCHAR(255) CHARACTER SET ascii NOT NULL,
     rrtype      VARCHAR(16)  CHARACTER SET ascii NOT NULL,
     rr          TEXT NOT NULL,
-    rr_hash     BINARY(32) AS (UNHEX(SHA2(rr, 256))) STORED,
+    rr_hash     BINARY(32) NOT NULL,
     origin      VARCHAR(16) NOT NULL,
     revision    BIGINT      NOT NULL,
     updated_at  DATETIME(3) NOT NULL,

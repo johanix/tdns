@@ -1374,3 +1374,11 @@ on `UpdateRequest` is the right fix and is a separate change.
 
 **B-8. Line drift** on `main` from this branch's own edits is not tracked
 here; the A-1 table is for `main` versus PR #514 at the time of writing.
+
+**B-9. `rr_hash` is a plain column, not a generated one.** MariaDB 11.4
+refuses `PRIMARY KEY` on a generated column (error 1903), so §5.8.2's
+`rr_hash BINARY(32) AS (UNHEX(SHA2(rr, 256))) STORED` cannot be created.
+tdns computes the SHA-256 of the normalised rr text and writes it; the value
+is what `UNHEX(SHA2(rr, 256))` yields, so a consumer can verify a row in SQL.
+Found by the first run against a live MariaDB (11.4.7, 2026-09-08); the
+MariaDB-backed tests now run and B-6's caveat is withdrawn.

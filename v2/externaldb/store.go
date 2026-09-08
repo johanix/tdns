@@ -18,6 +18,7 @@ package externaldb
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -153,6 +154,13 @@ func rrText(rr dns.RR) string {
 	return c.String()
 }
 
+// rrHash is the key column for the unbounded rr text: its SHA-256, the value
+// UNHEX(SHA2(rr, 256)) would give, so a consumer can verify it in SQL.
+func rrHash(text string) []byte {
+	h := sha256.Sum256([]byte(text))
+	return h[:]
+}
+
 func newChangeID() ([]byte, error) {
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {
@@ -199,7 +207,7 @@ func (s *Store) logAction(ctx context.Context, tx *sql.Tx, changeID []byte, pare
 
 func (s *Store) upsertState(ctx context.Context, tx *sql.Tx, parent, child, owner, rrtype, rr, origin string, rev int64) error {
 	_, err := tx.ExecContext(ctx, s.q(fmt.Sprintf(s.d.upsertState, s.table("delegation"))),
-		parent, child, owner, rrtype, rr, origin, rev)
+		parent, child, owner, rrtype, rr, rrHash(rr), origin, rev)
 	if err != nil {
 		return fmt.Errorf("external-db: upsert %s %s: %w", owner, rrtype, err)
 	}
@@ -240,8 +248,8 @@ func (s *Store) ApplyChildUpdate(parentZone string, ur tdns.UpdateRequest) (err 
 				return err
 			}
 			if _, err = tx.ExecContext(ctx, s.q(fmt.Sprintf(
-				`DELETE FROM %s WHERE parent = ? AND owner = ? AND rrtype = ? AND rr_hash = UNHEX(SHA2(?, 256))`, s.table("delegation"))),
-				parentZone, owner, rrtype, text); err != nil {
+				`DELETE FROM %s WHERE parent = ? AND owner = ? AND rrtype = ? AND rr_hash = ?`, s.table("delegation"))),
+				parentZone, owner, rrtype, rrHash(text)); err != nil {
 				return fmt.Errorf("external-db: delete RR: %w", err)
 			}
 		case dns.ClassANY:

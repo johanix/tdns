@@ -26,8 +26,8 @@ type dialect struct {
 	// placeholder renders the i-th (1-based) parameter marker.
 	placeholder func(i int) string
 	// upsertState is the state-table upsert, with %s for the table name.
-	// The parameter order is parent, child, owner, rrtype, rr, origin,
-	// revision.
+	// The parameter order is parent, child, owner, rrtype, rr, rr_hash,
+	// origin, revision.
 	upsertState string
 	// dsn turns the config into a driver DSN.
 	dsn func(c tdns.ExternalDBConf) (string, error)
@@ -47,8 +47,8 @@ var mariadbDialect = &dialect{
 	// A child's assertion replaces the row's child, origin and revision; the
 	// key (parent, owner, rrtype, rr_hash) is what identifies it. VALUES()
 	// rather than the newer alias form, which MariaDB does not accept.
-	upsertState: `INSERT INTO %s (parent, child, owner, rrtype, rr, origin, revision, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, NOW(3))
+	upsertState: `INSERT INTO %s (parent, child, owner, rrtype, rr, rr_hash, origin, revision, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(3))
 ON DUPLICATE KEY UPDATE child = VALUES(child), origin = VALUES(origin), revision = VALUES(revision), updated_at = NOW(3)`,
 	dsn: mariadbDSN,
 	ddl: mariadbDDL,
@@ -77,9 +77,10 @@ func mariadbDSN(c tdns.ExternalDBConf) (string, error) {
 	}
 	cfg.Params["sql_mode"] = "'STRICT_ALL_TABLES'"
 
-	// TLS on by default off loopback. There is no switch for turning
+	// TLS on by default off loopback. A unix socket is local by definition
+	// (and cannot carry TLS at all). There is no switch for turning
 	// verification off; ca-file is how a private CA is trusted.
-	wantTLS := !isLoopback(cfg.Addr)
+	wantTLS := cfg.Net != "unix" && !isLoopback(cfg.Addr)
 	if c.TLS != nil {
 		wantTLS = *c.TLS
 	}

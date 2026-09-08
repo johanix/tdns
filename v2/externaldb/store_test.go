@@ -204,6 +204,11 @@ func TestDSNFoldsPasswordTLSAndTimeouts(t *testing.T) {
 	if !strings.Contains(dsn, "tls=tdns-external-db") {
 		t.Errorf("tls: true was ignored on loopback: %s", dsn)
 	}
+	// A unix socket is local by definition: no TLS unless asked for.
+	dsn, _ = mariadbDSN(tdns.ExternalDBConf{DSN: "tdns:pw@unix(/var/run/mysqld.sock)/reg"})
+	if strings.Contains(dsn, "tls=") {
+		t.Errorf("a unix socket got TLS by default: %s", dsn)
+	}
 	if _, err := mariadbDSN(tdns.ExternalDBConf{DSN: "not a dsn at all"}); err == nil {
 		t.Error("a malformed dsn was accepted")
 	}
