@@ -118,8 +118,32 @@ func applyOutboundSerialAfterRefresh(zd *ZoneData, zone string) {
 		return
 	}
 
+	mode := zd.EffectiveOutboundSoaSerial()
+
+	// The persisted serial is read BEFORE the lock. It is a SQLite round trip,
+	// and zd.mu is the lock every reader of this zone contends on; the
+	// comparison it feeds still happens under the lock, where CurrentSerial is
+	// stable.
+	var saved uint32
+	var haveSaved bool
+	if mode == OutboundSoaSerialPersist {
+		if s, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil {
+			saved, haveSaved = s, true
+		}
+	}
+
+	// CurrentSerial is guarded by zd.mu: publishWorkingSetLocked both reads and
+	// writes it under the lock, and logs "serial mirror drift" if it ever
+	// disagrees with the published snapshot. This function used to decide and
+	// assign outside the lock and take it only for the publish, so a concurrent
+	// publish could interleave between the assignment and the publish that was
+	// supposed to carry it -- leaving the zone advertising a serial no snapshot
+	// has, which is the drift that check exists to catch.
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+
 	serialChanged := false
-	switch zd.EffectiveOutboundSoaSerial() {
+	switch mode {
 	case OutboundSoaSerialUnixtime:
 		zd.CurrentSerial = uint32(time.Now().Unix())
 		lgEngine.Info("zone updated from upstream; outbound-soa-serial=unixtime",
@@ -129,16 +153,14 @@ func applyOutboundSerialAfterRefresh(zd *ZoneData, zone string) {
 		// Only when the persisted serial is AHEAD of the one just refreshed in.
 		// If upstream advanced while we were down, the inbound serial is the one
 		// to honour: moving backwards would break every downstream.
-		if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
+		if haveSaved && saved > zd.CurrentSerial {
 			zd.CurrentSerial = saved
 			serialChanged = true
 		}
 	}
 	if serialChanged {
-		zd.mu.Lock()
 		zd.ensureWorkingSet()
 		zd.publishWorkingSetLocked(zd.generation.Load(), false)
-		zd.mu.Unlock()
 	}
 }
 
