@@ -1172,3 +1172,136 @@ deployment doc has to state plainly rather than leave implied.
   can be.
 - **No migration of the KeyDB off sqlite.** See D-8. `external-db` is one
   handoff table set, not a database abstraction layer for tdns.
+
+---
+
+## Amendment 2026-09-08 — implementation basis
+
+Implementation authorised 2026-09-08. Branch `feature/childsync-proxy`, cut from
+`childsync-proxy` (= `main` f4bea22 plus this document). One commit per §10
+item, in §10 order, with C-4a, C-0 and the KeyState half of C-7 first so each
+can be peeled into its own PR.
+
+### A-1. PR #514 audit
+
+PR #514 (`fix/sign-before-publish`, 93 commits) has merge-base f4bea22, this
+document's base. Of the files this document cites, 24 are byte-identical on
+#514, including every file it creates or rewrites: `ops_dsync.go`, the four
+`delegation_backend*.go`, `zone_hooks.go`, `defaultqueryhandlers.go`,
+`notifyresponder.go`, `delsync_proxy*.go`, `childsync_utils.go`,
+`tsig_peer.go`, `db.go`, `db_schema.go`, `zone_origination.go`,
+`config_delegationsync.go`, `keystate_verify.go`. The `DelegationBackend`
+interface, the `CHILD-UPDATE` choke point, the `OnZonePostRefresh` mechanism,
+`SetupZoneSync`'s body and `zoneMayOriginateContent` are unchanged. D-1 to D-9
+stand. A branch cut from either base merges forward onto the other without
+conflict.
+
+**Interface drift on #514, none of it a design change:**
+
+- `UpdateResponder` and `ValidateUpdate` take a `context.Context`. C-7's tests
+  that drive the UPDATE channel pass one.
+- `Conf.Internal.Scanner` became `Conf.Internal.GetScanner()`, an atomic that
+  returns nil before `ScannerEngine` publishes. `childNameserverAsker` is
+  nil-safe, and `StartAgent` starts the scanner, so the agent path holds.
+- `rememberDiscoveredChildKey` takes a context and returns a done channel;
+  `KeyDB.engineCtx` is gone. §8's "trust boundaries unchanged" holds.
+- `ResignQ` carries `ResignRequest`; `SetupZoneSigning` is
+  `registerForPeriodicResign`. Agents never sign; nothing here touches them.
+
+**What #514 supplies, to be reused rather than rebuilt (§12):**
+
+- `scanner.imr()` resolves the IMR at the point of use, fixing #503. A freshly
+  started proxy therefore accepts child UPDATEs before any NOTIFY has arrived.
+- `retryWithBackoff` (`delsync_retry.go`) is context-aware. §5.5's backoff is
+  that function. Note the divergence from `sendUpdateWithRetry`, which retries
+  `REFUSED`; §5.6 stops fast on it, because on this side `REFUSED` means the
+  primary's policy, an operator problem.
+- `sameKeyRdata` (`ops_key.go`) compares KEY records on RDATA, ignoring owner
+  and TTL. §5.3 step 3's "present and ours" is that comparison.
+- `PublishCsyncRRAndWait` (`ops_csync.go`) is a publish-then-verify-postcondition
+  shape C-2 may follow.
+
+**Line drift.** Citations in this document were taken on `main`; on #514 they
+move as follows. Cosmetic, listed so a reader on either base can follow them.
+
+| citation | main | #514 |
+|---|---|---|
+| `zone_utils.go` `SetupZoneSync` / proxy `ConfigError` | 1661 / 1749 | 1754 / 1854 |
+| `delegation_sync.go` `Sig0KeyPreparation` / childsync gate / origination backstop | 273 / 309 / 323 | 289 / 325 / 339 |
+| `main_initfuncs.go` `StartAuth` / `StartAgent` | 283 / 334 | 287 / 338 |
+| `parseoptions.go` parentsync exclusivity | 420 | 396 |
+| `structs.go` `Primaries` | 441 | 488 |
+| `scanner.go` `ScannerEngine` / `OnDelegationChange` / DS read / NS read | 110 / 137 / 251 / 877 | 145 / 172 / 288 / 927 |
+| `updateresponder.go` `ApproveChildUpdate` | 515 | 529 |
+| `zone_updater.go` dispatch / KEY guard / truststore | 241 / 273 / 480 | 238 / 270 / 477 |
+
+`zone_hooks.go:67` is line 65 on both bases.
+
+### A-2. §5.3 step 5: the reconciler enqueues; it never writes
+
+Step 5 of §5.3 is replaced:
+
+> 5. Non-empty delta → `manual` writer: `ChildSyncProxyWaiting`, the warning
+>    and the instruction block, all in memory. Any other writer: a
+>    **non-blocking enqueue** of `ParentPushRequest{Kind: advertisement}` to
+>    `ParentPushEngine`, state `ChildSyncProxyPublishing`. A full queue is
+>    logged and recovered by the next refresh, exactly as §5.4 says for child
+>    pushes.
+
+The hook runs in two places, and neither may do network I/O. On first load it
+runs on the refresh engine goroutine (`initialLoadZone` → `Refresh` →
+`FetchFromUpstream` → `OnZonePostRefresh`), where #514's engine redesign states
+the invariant that the engine goroutine performs no unbounded blocking
+operation. On every later refresh it runs on a pool worker, and a DDNS exchange
+with backoff there holds one of a bounded set. The hook signature
+`func(zd *ZoneData)` also carries no context. The enqueue makes both moot.
+
+Consequently `ParentPushRequest` carries a `Kind` — `children` (the affected
+child names) or `advertisement` — and `ParentZoneWriter.Write` is called from
+exactly one goroutine, the push engine's. §5.5 step 1–2 compute the delta per
+kind: for `advertisement`, from `BuildDsyncPublication` against the served
+zone; for `children`, from the store against the served zone. The D-5 name
+bound applies to both, and the advertisement names are the third bullet of
+D-5.
+
+### A-3. `external-db` lives in its own module
+
+What links a driver into a binary is the import graph. `v2/db.go` imports the
+sqlite driver, so every binary that links `v2/` carries it; a MariaDB driver
+imported from package `tdns` would spread the same way, which is what §5.8.3's
+review note observed. The store is therefore not a file in `v2/`.
+
+**Decision:** module `github.com/johanix/tdns/v2/externaldb` at
+`v2/externaldb/`, with its own `go.mod`, importing `v2/` the way `v2/cli` and
+`v2/debug` do. It implements `DelegationStore` and so imports `tdns`; `tdns`
+cannot import it back. Wiring is by registration:
+
+- package `tdns` gains `RegisterDelegationStore(name string, factory
+  DelegationStoreFactory)`, consulted by the store axis of the composed backend
+  (§5.4). Part of C-4b, since it is the seam.
+- `externaldb` registers `"external-db"` in `init()`.
+- `cmdv2/agent/main.go` blank-imports the module, beside the sqlite driver it
+  already imports; `cmdv2/agent/go.mod` gains the replace line. No other
+  binary imports it.
+- A binary whose main did not import it reports `store: external-db` as a
+  `ConfigError` naming the binary: "not compiled into tdns-auth".
+
+The `external-db:` config block of §7 is parsed by `tdns` into a plain
+`ExternalDBConf` (data only, no driver) and handed to the factory. §5.8.3's
+dependency note is retired: the driver is linked into tdns-agent only. D-8
+gains the sentence "and it is linked into the agent alone".
+
+The store equivalence suite (§10 *Tests*) cannot be an internal test of package
+`tdns` — importing the store there is an import cycle. It lives in the
+`externaldb` module's tests, driving both stores through the registry, with the
+MariaDB half skipped when no DSN is set.
+
+### A-4. §10 corrections
+
+| # | change |
+|---|---|
+| **C-0** | the sqlite table gains an `origin` column (`asserted` \| `observed`) through `dbMigrateSchema`'s `ALTER TABLE ADD COLUMN` path, default `asserted` for existing rows. The pass runs once per zone from the `OnFirstLoad` path (`SetupZoneSync`), for any `OptChildSync` zone whose store is not `direct` |
+| **C-4b** | adds the store registry (`delegation_backend.go`, ~40 lines) |
+| **C-4d** | files: `v2/externaldb/{go.mod,store.go,dialect.go,schema.go,store_test.go}`, `cmdv2/agent/main.go`, `cmdv2/agent/go.mod`. The equivalence suite moves here. Tested against a live MariaDB, not sqlite alone |
+| **C-5** | `ParentPushRequest.Kind`; the engine computes advertisement deltas as well as child deltas (A-2) |
+| **C-6** | the reconciler enqueues (A-2); `ReconcileChildSyncAdvertisement` loses its network path entirely and becomes a pure in-memory diff |
