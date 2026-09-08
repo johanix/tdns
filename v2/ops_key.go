@@ -60,33 +60,56 @@ func (zd *ZoneData) UnpublishKeyRRs() error {
 	return nil
 }
 
+// sig0KeyIsUsable reports whether any KEY published at name is backed by an
+// active private key -- i.e. whether this zone can actually sign with what it
+// has published.
+//
+// The distinction matters because a published KEY used to be taken as proof
+// that the key situation was in hand. It is not: the record can outlive the
+// private key, and then the zone can neither sign updates nor bootstrap, while
+// looking from the outside exactly like one that can (#576).
+func (zd *ZoneData) sig0KeyIsUsable(name string) bool {
+	usable, _ := zd.verifyPublishedKeyRRs(name)
+	return usable
+}
+
 // VerifyPublishedKeyRRs checks that every KEY published at name is backed by a
-// private key this server actually holds, and warns about the ones that are not.
+// private key this server actually holds, and warns about the ones that are
+// not. It reports only whether the check could be CARRIED OUT; use
+// sig0KeyIsUsable for the answer itself.
 //
-// name, not the zone apex. Sig0KeyPreparation is the only caller, and on a
-// delegation-sync parent it passes the DSYNC UPDATE target (updates.<zone>),
-// where the apex is the wrong owner entirely: the check found no KEY there,
-// concluded the zone had none, and minted an apex SIG(0) key nothing had asked
-// for -- using the algorithm from the CHILD half of the delegationsync config,
-// which on a parent is usually unset, so the whole call failed with "unknown
-// keygen algorithm". On the child path name IS the apex, so nothing changes there.
+// name, not the zone apex. On a delegation-sync parent the caller passes the
+// DSYNC UPDATE target (updates.<zone>), where the apex is the wrong owner
+// entirely: the check found no KEY there, concluded the zone had none, and
+// minted an apex SIG(0) key nothing had asked for -- using the algorithm from
+// the CHILD half of the delegationsync config, which on a parent is usually
+// unset, so the whole call failed with "unknown keygen algorithm". On the child
+// path name IS the apex, so nothing changes there.
 //
-// That generate-and-publish tail is gone with it. Publishing was never this
-// function's job: the caller's own step 3 does it, for the right name and with
+// The generate-and-publish tail this function once had is gone. Publishing was
+// never its job: the caller's own step 4 does it, for the right name and with
 // the algorithm the caller was given, and reaches it in exactly the case this
 // function is not called (no KEY published yet).
 func (zd *ZoneData) VerifyPublishedKeyRRs(name string) error {
+	_, err := zd.verifyPublishedKeyRRs(name)
+	return err
+}
+
+// verifyPublishedKeyRRs is VerifyPublishedKeyRRs plus the answer it was already
+// computing and throwing away: whether at least one published KEY has an active
+// private key behind it.
+func (zd *ZoneData) verifyPublishedKeyRRs(name string) (bool, error) {
 	owner, err := zd.GetOwner(name)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if owner == nil || owner.RRtypes == nil {
-		return nil // nothing published at name, nothing to verify
+		return false, nil // nothing published at name, nothing to verify
 	}
 	key_rrset, exist := owner.RRtypes.Get(dns.TypeKEY)
 	numpubkeys := len(key_rrset.RRs)
 	if !exist || numpubkeys == 0 {
-		return nil
+		return false, nil
 	}
 
 	if numpubkeys > 1 {
@@ -98,8 +121,9 @@ func (zd *ZoneData) VerifyPublishedKeyRRs(name string) error {
 	sak, err := zd.KeyDB.GetSig0Keys(name, Sig0StateActive)
 	if err != nil {
 		zd.Logger.Printf("Error from GetSig0Keys(%q, %s): %v", name, Sig0StateActive, err)
-		return err
+		return false, err
 	}
+	usable := false
 	for _, pkey := range key_rrset.RRs {
 		found := false
 		pkeyid := pkey.(*dns.KEY).KeyTag()
@@ -109,11 +133,13 @@ func (zd *ZoneData) VerifyPublishedKeyRRs(name string) error {
 				break
 			}
 		}
-		if !found {
-			zd.Logger.Printf("Warning: %q: no active private key for the published KEY with keyid=%d. This key should be removed.", name, pkeyid)
+		if found {
+			usable = true
+			continue
 		}
+		zd.Logger.Printf("Warning: %q: no active private key for the published KEY with keyid=%d. This key should be removed.", name, pkeyid)
 	}
-	return nil
+	return usable, nil
 }
 
 // errBootstrapManual: the selected SIG(0) bootstrap method is manual, so no

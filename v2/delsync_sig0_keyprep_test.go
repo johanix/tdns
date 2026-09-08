@@ -3,6 +3,7 @@ package tdns
 import (
 	"testing"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -22,9 +23,6 @@ updates.example.	3600	IN	A	192.0.2.1
 
 // sig0KeyPrepZone with a KEY already at the UPDATE target, so the "already
 // published" branch is exercised against real data rather than a nil owner.
-const sig0KeyPrepZoneWithKEY = sig0KeyPrepZone +
-	"updates.example.	3600	IN	KEY	512 3 15 3JCRDXeH72YOO4vRPWL8Ac2NmyJnn1zLbnhNIWSXjnk=\n"
-
 // newSig0KeyPrepZone builds a Ready MapZone zone wired to a real keystore and a
 // buffered UpdateQ, which is what PublishKeyRRs posts the internal update to.
 func newSig0KeyPrepZone(t *testing.T, zonestr string, ztype ZoneType) (*ZoneData, *KeyDB, chan UpdateRequest) {
@@ -184,7 +182,42 @@ func TestSig0KeyPreparationSecondaryDoesNotOriginate(t *testing.T) {
 // before, because the allow-updates gate meant a parent never got a published
 // KEY in the first place; the #538 fix is what makes this the ordinary path.
 func TestSig0KeyPreparationExistingKeyNotRepublished(t *testing.T) {
-	zd, kdb, q := newSig0KeyPrepZone(t, sig0KeyPrepZoneWithKEY, Primary)
+	// The published KEY has to be one this server can actually SIGN with, or
+	// the test does not test what its name says.
+	//
+	// It used to publish a literal KEY into a zone whose keystore was empty --
+	// which is an orphaned record, the state #576 is about, and the assertion
+	// "nothing is republished" was pinning exactly the behaviour that made a
+	// zone unable to sign or bootstrap until an operator deleted the record by
+	// hand. Generating the key and publishing that one keeps the subject
+	// ("an existing key is not republished") and drops the accident.
+	zd, kdb, q := newSig0KeyPrepZone(t, sig0KeyPrepZone, Primary)
+	registerZones(t, zd)
+
+	if _, err := kdb.Sig0KeyMgmt(nil, KeystorePost{
+		Command:    "sig0-mgmt",
+		SubCommand: "generate",
+		Zone:       zd.ZoneName,
+		Keyname:    "updates.example.",
+		Algorithm:  dns.ED25519,
+		State:      Sig0StateActive,
+		Creator:    "test",
+	}); err != nil {
+		t.Fatalf("generating the key that is already published: %v", err)
+	}
+	sak, err := kdb.GetSig0Keys("updates.example.", Sig0StateActive)
+	if err != nil || len(sak.Keys) == 0 {
+		t.Fatalf("no active key after generating one: %v", err)
+	}
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	zd.stageRRsetLocked("updates.example.", core.RRset{
+		Name: "updates.example.", RRtype: dns.TypeKEY, Class: dns.ClassINET,
+		RRs: []dns.RR{&sak.Keys[0].KeyRR},
+	})
+	zd.publishLocked(zd.generation.Load())
+	zd.mu.Unlock()
+	drainUpdateQ(q)
 
 	if err := zd.Sig0KeyPreparation("updates.example.", dns.ED25519, kdb); err != nil {
 		t.Fatalf("Sig0KeyPreparation: %v", err)
@@ -196,11 +229,11 @@ func TestSig0KeyPreparationExistingKeyNotRepublished(t *testing.T) {
 		t.Errorf("%d KEY RRs posted for the apex, want 0: the verify step must look at"+
 			" the UPDATE target, not the apex", len(rrs))
 	}
-	sak, err := kdb.GetSig0Keys("example.", Sig0StateActive)
+	apex, err := kdb.GetSig0Keys("example.", Sig0StateActive)
 	if err != nil {
 		t.Fatalf("GetSig0Keys: %v", err)
 	}
-	if len(sak.Keys) != 0 {
-		t.Errorf("%d apex SIG(0) keys generated, want 0", len(sak.Keys))
+	if len(apex.Keys) != 0 {
+		t.Errorf("%d apex SIG(0) keys generated, want 0", len(apex.Keys))
 	}
 }
