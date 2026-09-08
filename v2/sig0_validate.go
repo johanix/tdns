@@ -181,6 +181,11 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 
 			sig0key.PublishedInDNS = true
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: sig0key})
+			// Found and validated is not the same as trusted, and until now
+			// nothing took the key from the first state to the second on this
+			// path: no row was stored, so no verification ran, so the child was
+			// refused forever (#574).
+			zd.rememberDiscoveredChildKey(sig0key)
 			continue // key found
 		} else {
 			lgDns.Debug("ValidateUpdate: SIG(0) key NOT found via DNS lookup", "signer", signername, "keyid", keyid)
