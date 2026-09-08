@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 	// "github.com/gookit/goutil/dump"
@@ -108,6 +109,10 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 	var sig *dns.SIG
 	var ok bool
 
+	// Keys found in DNS during this pass, by signer. They are RECORDED only
+	// after their signature has been checked -- see the loop below.
+	discovered := map[string]bool{}
+
 	// Iterate over all SIG RRs in the Additional section of the update to find all keys that
 	// signed the update.
 	// log.Printf("ValidateAndTrustUpdate: There are %d RRs in the Additional section of the update", len(r.Extra))
@@ -158,7 +163,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		// trusted via some sort of TrustBootstrapper a la RFC8078.
 
 		// BERRA TODO flytta
-		sig0key, err = zd.FindSig0KeyViaDNS(signername, keyid)
+		sig0key, err = findSig0KeyViaDNS(zd, signername, keyid)
 		if err == nil && sig0key != nil {
 			lgDns.Info("ValidateUpdate: SIG(0) key found via DNS lookup", "signer", signername, "keyid", keyid)
 			// ok, great that we found the key. but if this is a self-signed key
@@ -181,6 +186,9 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 
 			sig0key.PublishedInDNS = true
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: sig0key})
+			// Noted, not recorded. Recording happens after verifySigners: see
+			// the loop at the end of this function.
+			discovered[sig0SignerKey(signername, keyid)] = true
 			continue // key found
 		} else {
 			lgDns.Debug("ValidateUpdate: SIG(0) key NOT found via DNS lookup", "signer", signername, "keyid", keyid)
@@ -210,9 +218,52 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// verify correctly.
 	verifySigners(us, msgbuf)
 
+	// Only now record what was found in DNS.
+	//
+	// Recording used to happen inside the discovery loop, BEFORE any signature
+	// had been checked. Each call is a database transaction plus a goroutine
+	// that then makes IMR queries with backoff, and anyone at all can send an
+	// UPDATE carrying a SIG that names a child of this zone -- so a stream of
+	// spoofed updates bought unauthenticated work on the parent, from off-net.
+	//
+	// A signature that verifies against the discovered key proves the sender
+	// holds the private half, which is not trust -- promotion is still the
+	// verifier's decision -- but it is enough to say this is not a stranger
+	// making us do work.
+	for _, signer := range us.Signers {
+		if !signer.Validated || signer.Sig0Key == nil {
+			continue
+		}
+		if discovered[sig0SignerKey(signer.Name, signer.KeyId)] {
+			// Found and validated is not the same as trusted, and until this
+			// call existed nothing took the key from the first state to the
+			// second on this path: no row was stored, so no verification ran,
+			// so the child was refused forever (#574).
+			zd.rememberDiscoveredChildKey(signer.Sig0Key)
+		}
+	}
+
 	// When we get here then we have tried to validate all signatures and the result is in
 	// the us.Signers data.
 	return nil
+}
+
+// sig0SignerKey identifies one signer of an UPDATE. Name and key id together,
+// because a child may sign with more than one key during a rollover.
+func sig0SignerKey(name string, keyid uint16) string {
+	return fmt.Sprintf("%s::%d", core.CanonicalizeName(name), keyid)
+}
+
+// findSig0KeyViaDNS indirects the DNS-discovery lookup, for the same reason
+// sig0Verify below exists: ValidateUpdate's discovery arm cannot otherwise be
+// driven in a test without standing up an IMR and a validating resolver, and
+// that arm is where a discovered key is recorded (#574) -- the wiring worth
+// pinning.
+//
+// Production code MUST NOT reassign this. Tests reassign it and restore the
+// original via t.Cleanup.
+var findSig0KeyViaDNS = func(zd *ZoneData, signer string, keyid uint16) (*Sig0Key, error) {
+	return zd.FindSig0KeyViaDNS(signer, keyid)
 }
 
 // sig0Verify indirects SIG(0) signature verification so that verifySigners can

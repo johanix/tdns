@@ -169,6 +169,9 @@ func enqueueDelegationSync(ctx context.Context, q chan DelegationSyncRequest, re
 }
 
 func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
+	// Recorded for the paths that must start a child-key verification without a
+	// context of their own; see KeyDB.engineCtx.
+	kdb.engineCtx = ctx
 	updateq := kdb.UpdateQ
 
 	lg.Info("ZoneUpdater starting")
