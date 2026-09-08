@@ -33,7 +33,7 @@ func zskRollDue(now time.Time, activeAt *time.Time, lifetimeSec uint32, manualEa
 			lgSigner.Warn("zsk rollover: invalid manual_rollover_earliest", "value", manualEarliest, "err", err)
 		}
 	}
-	if lifetimeSec == 0 || activeAt == nil {
+	if !lifetimeSchedulesRoll(lifetimeSec) || activeAt == nil {
 		return false, false
 	}
 	lifetime := time.Duration(lifetimeSec) * time.Second
@@ -463,7 +463,40 @@ func rolloverZskForZone(ctx context.Context, conf *Config, kdb *KeyDB, zd *ZoneD
 		// here — it must persist until the roll actually commits, so the
 		// trigger fires when a standby appears (e.g. a fresh key still
 		// propagating). Just wait for the next tick.
-		lgSigner.Warn("zsk rollover: roll due but no standby ZSK available", "zone", zone, "active_keyid", activeZSK.KeyTag, "manual", isManual)
+		//
+		// Whether that is worth an operator's attention depends on WHY there is
+		// no standby, and the two cases are indistinguishable from here without
+		// the check below. A key the key-state worker has already generated
+		// sits in `published` until it has propagated long enough to be
+		// promoted, and during that window this is the system working -- but it
+		// logged at Warn on every tick for the whole propagation delay, per
+		// zone, which reads as a stuck rollover and was reported as one (#567).
+		// An empty pipeline is the case actually worth reporting.
+		published, perr := GetDnssecKeysByState(kdb, zone, DnskeyStatePublished)
+		if perr != nil {
+			lgSigner.Warn("zsk rollover: cannot tell whether a replacement ZSK is propagating",
+				"zone", zone, "err", perr)
+		}
+		inFlight := false
+		for i := range published {
+			if published[i].Flags == 256 {
+				inFlight = true
+				break
+			}
+		}
+
+		// The lifetime and the elapsed time say WHY the roll is due, which is
+		// the question anyone reading this line asks next.
+		args := []any{"zone", zone, "active_keyid", activeZSK.KeyTag, "manual", isManual,
+			"zsk_lifetime", renderLifetime(pol.ZSK.Lifetime)}
+		if activeZSK.ActiveAt != nil {
+			args = append(args, "active_for", now.Sub(*activeZSK.ActiveAt).Truncate(time.Second).String())
+		}
+		if inFlight {
+			lgSigner.Debug("zsk rollover: roll due; the replacement ZSK is still propagating", args...)
+		} else {
+			lgSigner.Warn("zsk rollover: roll due but no standby ZSK available", args...)
+		}
 		return nil
 	}
 

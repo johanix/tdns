@@ -1030,7 +1030,7 @@ func TransitionRolloverKskDsPublishedToPublished(ctx context.Context, conf *Conf
 			continue
 		}
 		pol := zd.DnssecPolicy
-		if pol.KSK.Lifetime == 0 {
+		if !lifetimeSchedulesRoll(pol.KSK.Lifetime) {
 			continue
 		}
 		deps := RolloverEngineDeps{
@@ -1566,8 +1566,8 @@ func rolloverDue(kdb *KeyDB, zone string, pol *DnssecPolicy, row *RolloverZoneRo
 		}
 	}
 
-	// Scheduled: KSK.Lifetime == 0 means "never expires."
-	if pol.KSK.Lifetime == 0 {
+	// Scheduled. An unset lifetime, and "forever", both mean never expires.
+	if !lifetimeSchedulesRoll(pol.KSK.Lifetime) {
 		return false, false, nil
 	}
 	lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
