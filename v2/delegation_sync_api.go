@@ -109,7 +109,16 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 	// change still got a 200 and still reported success, so nothing converged
 	// and each sync repeated the same no-op (#507). A scheme whose whole point
 	// is declaring an end state can check it reached that state.
-	if diffs := dsyncApiUnconverged(rrsets, del); len(diffs) > 0 {
+	diffs, comparable := dsyncApiUnconverged(rrsets, del)
+	switch {
+	case !comparable:
+		// The apply is the parent's 200; the read-back is a courtesy. An
+		// unreadable or empty one leaves convergence UNKNOWN, and unknown is
+		// not failure -- reporting it as one would retry a change that has
+		// already been applied, persisted and published.
+		lgDns.Warn("the parent accepted the delegation update; its read-back could not be compared",
+			"zone", zd.ZoneName, "parent", parent)
+	case len(diffs) > 0:
 		lgDns.Error("the parent accepted the delegation update but the result differs from what was sent",
 			"zone", zd.ZoneName, "parent", parent, "differences", strings.Join(diffs, "; "))
 		return "", dns.RcodeServerFailure,

@@ -74,7 +74,11 @@ func TestUnconvergedIsDetectedFromTheParentsOwnAnswer(t *testing.T) {
 
 	t.Run("the parent applied everything", func(t *testing.T) {
 		got := &DsyncApiDelegation{Child: "child.example.", RRsets: sent}
-		if diffs := dsyncApiUnconverged(sent, got); len(diffs) != 0 {
+		diffs, comparable := dsyncApiUnconverged(sent, got)
+		if !comparable {
+			t.Fatal("a readable reply was reported as not comparable")
+		}
+		if len(diffs) != 0 {
 			t.Errorf("reported %v for a delegation that matches", diffs)
 		}
 	})
@@ -88,7 +92,11 @@ func TestUnconvergedIsDetectedFromTheParentsOwnAnswer(t *testing.T) {
 				"child.example. 86400 IN DS 12345 15 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}},
 		}
 		got := &DsyncApiDelegation{Child: "child.example.", RRsets: reTTLd}
-		if diffs := dsyncApiUnconverged(sent, got); len(diffs) != 0 {
+		diffs, comparable := dsyncApiUnconverged(sent, got)
+		if !comparable {
+			t.Fatal("a readable reply was reported as not comparable")
+		}
+		if len(diffs) != 0 {
 			t.Errorf("a differing TTL was reported as a difference: %v."+
 				" The parent is entitled to its own TTLs", diffs)
 		}
@@ -97,15 +105,42 @@ func TestUnconvergedIsDetectedFromTheParentsOwnAnswer(t *testing.T) {
 	t.Run("the parent kept only the DS", func(t *testing.T) {
 		// #507 exactly: the DS applied, the NS silently not.
 		got := &DsyncApiDelegation{Child: "child.example.", RRsets: []DsyncApiRRset{sent[1]}}
-		diffs := dsyncApiUnconverged(sent, got)
+		diffs, comparable := dsyncApiUnconverged(sent, got)
+		if !comparable {
+			t.Fatal("a readable reply was reported as not comparable")
+		}
 		if len(diffs) != 1 {
 			t.Fatalf("reported %d differences, want 1: %v", len(diffs), diffs)
 		}
 	})
 
-	t.Run("the parent returned nothing at all", func(t *testing.T) {
-		if diffs := dsyncApiUnconverged(sent, nil); len(diffs) == 0 {
-			t.Error("a missing delegation was reported as converged")
+	// An unreadable or empty read-back leaves convergence UNKNOWN, and unknown
+	// must not be reported as failure: the apply is the parent's 200, and both
+	// sides of this exchange deliberately return success in exactly these two
+	// cases so that a landed change is not retried.
+	//
+	// This test asserted the opposite before, which is how it shipped.
+	t.Run("the parent returned no delegation", func(t *testing.T) {
+		diffs, comparable := dsyncApiUnconverged(sent, nil)
+		if comparable {
+			t.Error("a missing delegation was treated as evidence")
+		}
+		if len(diffs) != 0 {
+			t.Errorf("reported differences from a reply that says nothing: %v", diffs)
+		}
+	})
+
+	t.Run("the parent returned an empty delegation", func(t *testing.T) {
+		// What the endpoint answers when its own read-back fails, AFTER
+		// applying the update.
+		got := &DsyncApiDelegation{Child: "child.example."}
+		diffs, comparable := dsyncApiUnconverged(sent, got)
+		if comparable {
+			t.Error("an empty read-back was treated as evidence that nothing applied;" +
+				" that retries a change the parent has already applied and persisted")
+		}
+		if len(diffs) != 0 {
+			t.Errorf("reported differences: %v", diffs)
 		}
 	})
 }
@@ -206,4 +241,97 @@ func TestIncompleteDeclarativeStatusIsRefused(t *testing.T) {
 			t.Errorf("DS edits with no declaration reported %d gaps, want 1: %v", len(gaps), gaps)
 		}
 	})
+}
+
+// A withdrawal is a declaration too, and the endpoint spells one as an RRset
+// with no records. Declaring nothing at all is not the same thing: the payload
+// REPLACES what it names, so an owner left unmentioned keeps whatever stale
+// records the parent still holds.
+func TestWithdrawalsAreDeclaredNotOmitted(t *testing.T) {
+	child := "child.example."
+
+	t.Run("glue removed in full", func(t *testing.T) {
+		syncstate := DelegationSyncStatus{
+			ZoneName: child,
+			NewNS:    rrsOf(t, "child.example. 3600 IN NS ns1.child.example."),
+			// ns4's glue is going away entirely, so nothing is left to declare
+			// for it and it appears only in the removes.
+			ARemoves: rrsOf(t, "ns4.child.example. 3600 IN A 192.0.2.4"),
+			NewA:     rrsOf(t, "ns1.child.example. 3600 IN A 192.0.2.1"),
+		}
+
+		sets := DsyncApiRRsetsFromSyncStatus(child, syncstate)
+		found := false
+		for _, s := range sets {
+			if s.Owner == "ns4.child.example." && s.Type == "A" {
+				found = true
+				if len(s.RRs) != 0 {
+					t.Errorf("the withdrawal carries %d records, want an empty RRset: %v", len(s.RRs), s.RRs)
+				}
+			}
+		}
+		if !found {
+			t.Error("the glue being removed was not named in the payload at all, so the parent" +
+				" keeps serving it; a declarative payload only replaces what it names")
+		}
+	})
+
+	t.Run("DS withdrawn", func(t *testing.T) {
+		// NewDSKnown with an empty NewDS is the documented instruction to
+		// withdraw: "no opinion" and "withdraw" are the same nil slice
+		// otherwise, which is why the flag exists.
+		syncstate := DelegationSyncStatus{
+			ZoneName:   child,
+			NewNS:      rrsOf(t, "child.example. 3600 IN NS ns1.child.example."),
+			NewDS:      nil,
+			NewDSKnown: true,
+		}
+
+		sets := DsyncApiRRsetsFromSyncStatus(child, syncstate)
+		found := false
+		for _, s := range sets {
+			if s.Type == "DS" {
+				found = true
+				if len(s.RRs) != 0 {
+					t.Errorf("the DS withdrawal carries %d records: %v", len(s.RRs), s.RRs)
+				}
+			}
+		}
+		if !found {
+			t.Error("a declared DS withdrawal was never sent; the guard allows it and the" +
+				" payload dropped it, so the parent keeps a DS the child has withdrawn")
+		}
+	})
+
+	t.Run("no opinion about the DS sends nothing", func(t *testing.T) {
+		syncstate := DelegationSyncStatus{
+			ZoneName:   child,
+			NewNS:      rrsOf(t, "child.example. 3600 IN NS ns1.child.example."),
+			NewDSKnown: false,
+		}
+		for _, s := range DsyncApiRRsetsFromSyncStatus(child, syncstate) {
+			if s.Type == "DS" {
+				t.Error("sent a DS RRset for a status with no opinion about the DS;" +
+					" that withdraws a DS nobody asked to withdraw")
+			}
+		}
+	})
+}
+
+// The guard must not block a withdrawal. Removing glue means there is nothing
+// left to declare for that owner, which is the one shape where an empty
+// declaration is correct.
+func TestTheGuardAllowsAWithdrawal(t *testing.T) {
+	removes := rrsOf(t, "ns4.child.example. 3600 IN A 192.0.2.4")
+
+	if gaps := dsyncApiIncoherentStatus(DelegationSyncStatus{ARemoves: removes}); len(gaps) != 0 {
+		t.Errorf("a glue withdrawal was refused as incoherent: %v."+
+			" Removing the last address for a nameserver leaves nothing to declare,"+
+			" and the empty RRset is the declaration", gaps)
+	}
+	// Adding glue and declaring none is still the #507 shape.
+	adds := rrsOf(t, "ns4.child.example. 3600 IN A 192.0.2.4")
+	if gaps := dsyncApiIncoherentStatus(DelegationSyncStatus{AAdds: adds}); len(gaps) != 1 {
+		t.Errorf("glue adds with nothing declared reported %d gaps, want 1: %v", len(gaps), gaps)
+	}
 }
