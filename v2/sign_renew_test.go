@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -38,7 +39,7 @@ ns1.child.renew.example.	3600	IN	A	10.0.0.53
 	}
 	zd.UpdatePolicy = policyAllowing(dns.TypeA, dns.TypeTXT)
 	zd.InstallInitialSnapshot()
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("initial SignZone: %v", err)
 	}
 	return zd

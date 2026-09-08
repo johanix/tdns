@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -121,7 +122,7 @@ func zonemdSigningTestZone(t *testing.T, kdb *KeyDB) *ZoneData {
 		},
 	}
 	zd.UpdatePolicy = policyAllowing(dns.TypeA, dns.TypeTXT, dns.TypeZONEMD)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("initial SignZone: %v", err)
 	}
 	return zd
@@ -227,7 +228,7 @@ func TestZonemdSurvivesSigningPasses(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := zonemdSigningTestZone(t, kdb)
 
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	assertZonemdMatchesSnapshot(t, zd, "after SignZone")

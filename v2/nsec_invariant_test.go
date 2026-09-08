@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -125,7 +126,7 @@ charlie.inv.example.	3600	IN	A	10.0.0.3
 
 	// Sign the zone, which builds the chain and signs it in one pass -- the
 	// only way a chain is produced.
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("initial SignZone: %v", err)
 	}
 	return zd

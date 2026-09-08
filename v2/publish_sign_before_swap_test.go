@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -261,7 +262,7 @@ func TestPublishDoesNotSignUnderAnUnboundPolicy(t *testing.T) {
 
 	// And once the policy binds, the zone signs with the policy's own validity.
 	zd.DnssecPolicy = policy
-	signOnceAfterPolicyBind(zd)
+	signOnceAfterPolicyBind(context.Background(), zd)
 
 	rrset := publishedARRset(t, zd, replacedOwner)
 	if len(rrset.RRSIGs) == 0 {

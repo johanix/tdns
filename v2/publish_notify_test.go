@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -134,7 +135,7 @@ func TestRestartPublishesUnsignedThenSignsWhenThePolicyBinds(t *testing.T) {
 
 	// The bind, and the signing it enables.
 	zd.DnssecPolicy = policy
-	signOnceAfterPolicyBind(zd)
+	signOnceAfterPolicyBind(context.Background(), zd)
 
 	if !zd.Ready {
 		t.Fatal("the zone did not become Ready once its policy bound and it was signed")

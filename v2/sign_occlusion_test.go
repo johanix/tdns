@@ -9,6 +9,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -141,7 +142,7 @@ func TestSignZoneLeavesOccludedNamesUnsigned(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := occlusionTestZone(t, kdb)
 
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	assertOcclusionInvariants(t, zd, "SignZone")
@@ -153,7 +154,7 @@ func TestResignZoneLeavesOccludedNamesUnsigned(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := occlusionTestZone(t, kdb)
 
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	if _, err := zd.ResignZone(kdb); err != nil {
@@ -235,7 +236,10 @@ func TestSigningStripsRRSIGsAlreadyOnOccludedNames(t *testing.T) {
 		pass string
 		run  func(zd *ZoneData, kdb *KeyDB) error
 	}{
-		{"SignZone", func(zd *ZoneData, kdb *KeyDB) error { _, err := zd.SignZone(kdb, true); return err }},
+		{"SignZone", func(zd *ZoneData, kdb *KeyDB) error {
+			_, err := zd.SignZone(context.Background(), kdb, true)
+			return err
+		}},
 		{"ResignZone", func(zd *ZoneData, kdb *KeyDB) error { _, err := zd.ResignZone(kdb); return err }},
 	} {
 		t.Run(tc.pass, func(t *testing.T) {
@@ -246,7 +250,7 @@ func TestSigningStripsRRSIGsAlreadyOnOccludedNames(t *testing.T) {
 
 			// Both cases need one pass to have happened: ResignZone re-signs an
 			// already-signed zone, and its own guard refuses an unsigned one.
-			if _, err := zd.SignZone(kdb, true); err != nil {
+			if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 				t.Fatalf("SignZone: %v", err)
 			}
 			if err := tc.run(zd, kdb); err != nil {

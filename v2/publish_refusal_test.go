@@ -1,6 +1,8 @@
 package tdns
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -36,7 +38,7 @@ func TestASigningFailureRefusesThePass(t *testing.T) {
 		Name: "alpha.inv.example.", RRtype: dns.TypeTXT, Class: dns.ClassINET,
 	})
 
-	_, _, err = zd.signWorkingSetLocked(dak, nil, true, false, nil)
+	_, _, err = zd.signWorkingSetLocked(context.Background(), dak, nil, true, false, nil)
 	if err == nil {
 		t.Fatal("an RRset that could not be signed was reported as a clean pass;" +
 			" the publish path then swaps in unsigned content for a zone that signs")
@@ -85,3 +87,46 @@ var errTestSigning = &testSigningError{}
 type testSigningError struct{}
 
 func (e *testSigningError) Error() string { return "test: could not sign" }
+
+// TestACancelledSigningWalkRefusesRatherThanPublishesHalfOfIt.
+//
+// signWorkingSetLocked holds zd.mu and, on a full pass, visits every owner in
+// the zone -- unbounded work on a large one, with no way to stop it. Making it
+// cancellable is only safe if abandoning it is an ERROR: a short walk that
+// reported success would let publishWorkingSetLocked swap in a snapshot whose
+// remaining RRsets were never signed, which is the outcome
+// refuseUnsignableWorkingSetLocked exists to prevent. Cancelled means refused,
+// and the zone goes on serving what it already had.
+func TestACancelledSigningWalkRefusesRatherThanPublishesHalfOfIt(t *testing.T) {
+	zd, kdb, _ := rolledZone(t)
+
+	before := zd.publishedSnapshot()
+	if before == nil {
+		t.Fatal("fixture: nothing published to keep serving")
+	}
+
+	dak, err := zd.EnsureActiveDnssecKeys(kdb, false)
+	if err != nil {
+		t.Fatalf("EnsureActiveDnssecKeys: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	_, _, err = zd.signWorkingSetLocked(ctx, dak, nil, true, false, nil)
+	zd.mu.Unlock()
+
+	if err == nil {
+		t.Fatal("a cancelled signing walk reported success; the caller would then publish a" +
+			" snapshot whose RRsets were never signed")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error %v does not match context.Canceled, so a caller cannot tell a shutdown"+
+			" from a genuine signing failure", err)
+	}
+	if after := zd.publishedSnapshot(); after != before {
+		t.Error("the published snapshot changed despite the walk being abandoned")
+	}
+}

@@ -850,7 +850,7 @@ func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG)
 // XXX: MaybesignRRset should report on whether it actually signed anything
 // At the end, is anything hass been signed, then we must end by bumping the
 // SOA Serial and resigning the SOA.
-func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
+func (zd *ZoneData) SignZone(ctx context.Context, kdb *KeyDB, force bool) (int, error) {
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return 0, fmt.Errorf("SignZone: zone %s should not be signed here (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
@@ -895,7 +895,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		}
 	}
 
-	newrrsigs, maxObservedTTL, err := zd.signWorkingSetLocked(dak, clamp, force, true, nil)
+	newrrsigs, maxObservedTTL, err := zd.signWorkingSetLocked(ctx, dak, clamp, force, true, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -953,7 +953,7 @@ func describeRRset(rrset core.RRset) (owner, rrtype string) {
 	return owner, rrtype
 }
 
-func (zd *ZoneData) signWorkingSetLocked(dak *DnssecKeys, clamp *ClampParams, force, signNsec bool, owners map[string]bool) (int, uint32, error) {
+func (zd *ZoneData) signWorkingSetLocked(ctx context.Context, dak *DnssecKeys, clamp *ClampParams, force, signNsec bool, owners map[string]bool) (int, uint32, error) {
 	if dak == nil {
 		return 0, 0, fmt.Errorf("signWorkingSetLocked: zone %s: nil DnssecKeys; the caller must resolve them (see the note above)", zd.ZoneName)
 	}
@@ -1032,6 +1032,20 @@ func (zd *ZoneData) signWorkingSetLocked(dak *DnssecKeys, clamp *ClampParams, fo
 	managesZonemd := zd.zoneManagesZonemd()
 
 	for _, name := range names {
+		// Between owners, and an ERROR rather than a short walk.
+		//
+		// This loop holds zd.mu and, on a full pass, visits every owner in the
+		// zone; on a large one that is unbounded work with no way to stop. But
+		// stopping half way leaves the working set PARTIALLY signed, and the
+		// one thing that must never happen is publishing that: the caller
+		// refuses the swap on an error, so the zone goes on serving the
+		// snapshot it already had. Returning success with a short walk would
+		// swap in a snapshot whose remaining RRsets were never signed, which is
+		// the same outcome refuseUnsignableWorkingSetLocked exists to prevent.
+		if err := ctx.Err(); err != nil {
+			return newrrsigs, maxObservedTTL,
+				fmt.Errorf("signing zone %s: abandoned after %d RRsets: %w", zd.ZoneName, newrrsigs, err)
+		}
 		owner := zd.stagedOwner(name)
 		if owner == nil {
 			continue

@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -469,7 +470,15 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	//
 	// Refuse rather than publish unsigned: the previous snapshot is still good
 	// and is still being served.
-	if err := zd.signStagedScopeLocked(sm); err != nil {
+	// context.Background(), deliberately and for now.
+	//
+	// publishWorkingSetLocked has no context, and giving it one means threading
+	// it through eighteen publish call sites across the updater, the refresh
+	// engine, the catalog API and the signal paths -- a change with its own
+	// blast radius that does not belong inside a signing fix. The whole-zone
+	// walk that SignZone drives IS cancellable now, which is the unbounded one
+	// an operator waits on.
+	if err := zd.signStagedScopeLocked(context.Background(), sm); err != nil {
 		zd.refuseUnsignableWorkingSetLocked(prevSerial, err)
 		return
 	}
@@ -1003,7 +1012,7 @@ func (zd *ZoneData) resolveSigningMaterialLocked() (*signingMaterial, error) {
 // signStagedScopeLocked signs the scope applyRefreshReplacementLocked staged:
 // every authored owner after an AXFR or a file reload, or just the owners an
 // inbound IXFR touched. No staged scope means nothing to do.
-func (zd *ZoneData) signStagedScopeLocked(sm *signingMaterial) error {
+func (zd *ZoneData) signStagedScopeLocked(ctx context.Context, sm *signingMaterial) error {
 	if sm == nil || (!zd.wsNeedsFullSign && zd.wsSignOwners == nil) {
 		return nil
 	}
@@ -1031,7 +1040,7 @@ func (zd *ZoneData) signStagedScopeLocked(sm *signingMaterial) error {
 	//
 	// signNsec=false: restitchNsecLocked regenerates and signs the chain a few
 	// lines below, so signing it here would be thrown away.
-	_, _, err := zd.signWorkingSetLocked(sm.dak, sm.clamp, zd.wsSignOwners != nil, false, zd.wsSignOwners)
+	_, _, err := zd.signWorkingSetLocked(ctx, sm.dak, sm.clamp, zd.wsSignOwners != nil, false, zd.wsSignOwners)
 	return err
 }
 

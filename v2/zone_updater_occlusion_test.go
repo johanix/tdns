@@ -9,6 +9,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -20,7 +21,7 @@ func updatableOcclusionZone(t *testing.T, kdb *KeyDB) *ZoneData {
 	zd := occlusionTestZone(t, kdb)
 	zd.Options[OptAllowApiUpdates] = true
 	zd.UpdatePolicy = policyAllowing(dns.TypeA, dns.TypeTXT, dns.TypeNS, dns.TypeDS, dns.TypeMX)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("initial SignZone: %v", err)
 	}
 	return zd
@@ -82,7 +83,7 @@ func TestUpdateDoesNotSignADelegationNS(t *testing.T) {
 	}
 
 	// A full pass does not clean up after it, which is the point.
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	if n := sigCount(t, zd, "sub.occl.example.", dns.TypeNS); n != 0 {

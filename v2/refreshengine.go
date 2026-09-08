@@ -304,7 +304,7 @@ func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, conf
 		lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
 		return err
 	}
-	signOnceAfterPolicyBind(zd)
+	signOnceAfterPolicyBind(ctx, zd)
 	drainAndRunOnFirstLoad(zd)
 	return nil
 }
@@ -327,7 +327,7 @@ func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, conf
 // after a restart from a file that already carries good signatures it is a walk
 // that writes nothing. SignZone publishes, which is what flips the zone Ready
 // through the servable gate and emits its one NOTIFY.
-func signOnceAfterPolicyBind(zd *ZoneData) {
+func signOnceAfterPolicyBind(ctx context.Context, zd *ZoneData) {
 	if !zd.signsItsOwnContent() || zd.DnssecPolicy == nil || zd.KeyDB == nil {
 		return
 	}
@@ -341,7 +341,7 @@ func signOnceAfterPolicyBind(zd *ZoneData) {
 	if signed {
 		return
 	}
-	newrrsigs, err := zd.SignZone(zd.KeyDB, false)
+	newrrsigs, err := zd.SignZone(ctx, zd.KeyDB, false)
 	if err != nil {
 		lgEngine.Error("signing after the DNSSEC policy bound failed",
 			"zone", zd.ZoneName, "err", err)
@@ -380,7 +380,7 @@ func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Con
 	}
 
 	// The policy is bound now, so the zone can finally be signed properly.
-	signOnceAfterPolicyBind(zd)
+	signOnceAfterPolicyBind(ctx, zd)
 
 	// Phase 2: the file is the source of truth but lags behind it -- it holds
 	// the zone as of the last write-zone/sync/freeze, while the persisted

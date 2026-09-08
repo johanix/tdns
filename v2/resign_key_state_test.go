@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -39,7 +40,7 @@ func rolledZone(t *testing.T) (*ZoneData, *KeyDB, uint16) {
 	}
 	oldTag := oldZsk.DnskeyRR.KeyTag()
 
-	if _, err := zd.SignZone(kdb, false); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, false); err != nil {
 		t.Fatalf("baseline SignZone: %v", err)
 	}
 	if !hasKeytag(zd.mustRRSIGKeytags(t, signedName, dns.TypeA), oldTag) {
@@ -94,7 +95,7 @@ func TestResignZoneRemovesSignaturesByARetiredKey(t *testing.T) {
 func TestForcedSignZoneLeavesSignaturesByARetiredKey(t *testing.T) {
 	zd, kdb, oldTag := rolledZone(t)
 
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone(force): %v", err)
 	}
 
