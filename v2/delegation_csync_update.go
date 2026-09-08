@@ -283,7 +283,14 @@ func CheckDelegationNSCoherence(ctx context.Context, child string, currentNS []d
 			return fmt.Errorf("cannot verify the NS RRset for %s: %v: %w", child, err, ErrDelegationUnverifiable)
 		}
 		if !inSync {
-			return fmt.Errorf("the nameservers of %s do not agree on its NS RRset; retry once they are in sync", child)
+			// Unverifiable, not incoherent. The parent asked and got answers;
+			// they conflicted, so there is no served set to compare the update
+			// against and no verdict to reach. The advice in the message --
+			// wait for them to agree -- is what EDE 544 says and what 543 does
+			// not: 543 tells a child its delegation is wrong, and here nothing
+			// has been established about the delegation at all.
+			return fmt.Errorf("the nameservers of %s do not agree on its NS RRset; retry once they are in sync: %w",
+				child, ErrDelegationUnverifiable)
 		}
 		if changed, extra, missing := core.RRsetDiffer(child, resultingNS, served, dns.TypeNS, discardLog, false, false); changed {
 			return fmt.Errorf("the resulting NS RRset for %s is not what its nameservers serve: %d record(s) not served, %d served but absent; a scan would publish the served set",
@@ -308,7 +315,9 @@ func CheckDelegationNSCoherence(ctx context.Context, child string, currentNS []d
 				return fmt.Errorf("cannot verify the %s glue for %s: %v: %w", dns.TypeToString[t], ns, err, ErrDelegationUnverifiable)
 			}
 			if !inSync {
-				return fmt.Errorf("the nameservers of %s do not agree on the %s records of %s; retry once they are in sync", child, dns.TypeToString[t], ns)
+				// Same as the NS case above: no consensus is no verdict.
+				return fmt.Errorf("the nameservers of %s do not agree on the %s records of %s; retry once they are in sync: %w",
+					child, dns.TypeToString[t], ns, ErrDelegationUnverifiable)
 			}
 			if changed, extra, missing := core.RRsetDiffer(ns, resulting, served, t, discardLog, false, false); changed {
 				return fmt.Errorf("the resulting %s glue for %s is not what %s's nameservers serve: %d record(s) not served, %d served but absent",
