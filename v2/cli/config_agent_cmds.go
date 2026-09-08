@@ -135,6 +135,22 @@ func checkAgentZoneOptions(cfg *tdns.Config, rep *ccReport) {
 				"set type: secondary, or drop the parentsync-proxy option")
 		}
 
+		// The parent-side proxy has the same shape: an agent secondary, of
+		// the PARENT zone, offering the childsync schemes on its behalf.
+		if hasChildProxy := enabled[tdns.OptChildSyncProxy]; hasChildProxy {
+			if lc(eff.Type) != "secondary" {
+				rep.fail(g, zname,
+					fmt.Sprintf("childsync-proxy requires a secondary zone (this zone is %q) — it will be quarantined at startup",
+						eff.Type),
+					"set type: secondary, or drop the childsync-proxy option")
+			}
+			if len(cfg.ChildSync.Schemes) == 0 {
+				rep.fail(g, zname,
+					"childsync-proxy is enabled but childsync.schemes is empty — there is no DSYNC service to advertise or receive on",
+					"set childsync.schemes (e.g. [ notify, update, api ])")
+			}
+		}
+
 		// The proxy sends to the parent as the child, so it walks the same
 		// plan as a parentsync child and reads the same setting:
 		// BuildParentSyncPlan returns SkippedScheme{"all"} for BOTH roles when
