@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -635,10 +636,155 @@ func DsyncApiRRsetsFromSyncStatus(child string, syncstate DelegationSyncStatus) 
 		for _, owner := range order {
 			add(owner, rrtype, byOwner[owner])
 		}
+
+		// Withdrawal. An owner whose glue is being removed in full has nothing
+		// left to declare, so it appears in the removes and in no RRset above --
+		// and the payload REPLACES what it names, so saying nothing leaves the
+		// parent's stale glue in place. An empty RRset is how this endpoint
+		// spells "delete", which is what the removal asked for.
+		//
+		// Driven by the removes rather than by every in-bailiwick nameserver:
+		// this way an owner nobody asked to change is never named, so a
+		// momentarily incomplete view of the child cannot delete glue by
+		// omission.
+		var removes []dns.RR
+		switch rrtype {
+		case dns.TypeA:
+			removes = syncstate.ARemoves
+		case dns.TypeAAAA:
+			removes = syncstate.AAAARemoves
+		}
+		for _, rr := range removes {
+			owner := rr.Header().Name
+			// Storing the nil is what makes this emit once per owner: the
+			// second removed record for the same name finds the key present
+			// and stops here, exactly as an owner with surviving glue does.
+			if _, declared := byOwner[owner]; declared {
+				continue
+			}
+			byOwner[owner] = nil
+			add(owner, rrtype, nil)
+		}
 	}
-	if len(syncstate.NewDS) > 0 {
+	// NewDSKnown, not len>0: an empty NewDS with the flag set is a real
+	// instruction to WITHDRAW the DS, and the endpoint spells a withdrawal as
+	// an RRset with no records (dsyncApiBuildActions turns that into a
+	// delrrset). Emitting only non-empty sets meant the withdrawal could be
+	// declared, and guarded for, and still never sent.
+	if syncstate.NewDSKnown || len(syncstate.NewDS) > 0 {
 		add(child, dns.TypeDS, syncstate.NewDS)
 	}
 
 	return out
+}
+
+// dsyncApiUnconverged reports which of the RRsets just sent are not reflected
+// in the delegation the parent returned after applying them.
+//
+// The endpoint's reply is the parent's own account of the delegation it now
+// holds, so this is the cheapest possible end-to-end check: not "did the
+// request parse and get authorized", which a 200 already says, but "is the
+// delegation what the child declared". Those two answers diverged silently for
+// as long as the payload was incomplete.
+//
+// Content comparison, ignoring TTL and case, because the parent is entitled to
+// apply its own TTLs -- the same rule rrsetContentEqual already uses for the
+// signal-name comparison. Anything the parent returns that was NOT sent is left
+// alone: this asks whether what was declared took effect, not whether the
+// parent holds anything else.
+// comparable is false when the reply cannot serve as evidence either way: no
+// delegation came back, or it carried no RRsets. Both are documented SUCCESS
+// paths on the two sides of this exchange, and neither says anything about
+// whether the change landed:
+//
+//   - DsyncApiPostDelegationRequest returns (nil, nil) when a 200 response body
+//     will not parse, precisely so that an apply which already succeeded is not
+//     retried -- its own comment says so.
+//   - the endpoint answers 200 with an empty RRsets list when its read-back of
+//     the delegation fails, having already applied the update.
+//
+// Treating either as "unconverged" turns a landed change into a SERVFAIL and a
+// retry, which is worse than the silent success #507 had. Convergence is only
+// DISPROVED by a reply that can be read and disagrees.
+func dsyncApiUnconverged(sent []DsyncApiRRset, got *DsyncApiDelegation) (diffs []string, comparable bool) {
+	if got == nil || len(got.RRsets) == 0 {
+		return nil, false
+	}
+
+	type key struct {
+		owner  string
+		rrtype string
+	}
+	have := map[key][]dns.RR{}
+	for _, set := range got.RRsets {
+		k := key{core.CanonicalizeName(set.Owner), strings.ToUpper(set.Type)}
+		for _, s := range set.RRs {
+			rr, err := dns.NewRR(s)
+			if err != nil {
+				continue
+			}
+			have[k] = append(have[k], rr)
+		}
+	}
+
+	for _, set := range sent {
+		k := key{core.CanonicalizeName(set.Owner), strings.ToUpper(set.Type)}
+		var want []dns.RR
+		for _, s := range set.RRs {
+			rr, err := dns.NewRR(s)
+			if err != nil {
+				// We built this payload and it parsed once already, so this is
+				// our own inconsistency rather than the parent's answer. It
+				// says nothing about whether the change landed, and calling it
+				// a difference would retry an apply on the strength of a local
+				// bug -- the same asymmetry as reading the parent's records,
+				// which are skipped when they will not parse.
+				lgDns.Error("DSYNC API: cannot re-parse a record this client just sent",
+					"owner", set.Owner, "type", set.Type, "rr", s, "err", err)
+				return nil, false
+			}
+			want = append(want, rr)
+		}
+		if !rrsetContentEqual(have[k], want) {
+			diffs = append(diffs, fmt.Sprintf("%s %s: sent %d record(s), parent reports %d",
+				set.Owner, set.Type, len(want), len(have[k])))
+		}
+	}
+	return diffs, true
+}
+
+// dsyncApiIncoherentStatus reports the ways a sync status describes changes it
+// does not then declare.
+//
+// The DSYNC API scheme sends an end state, not a list of edits:
+// DsyncApiRRsetsFromSyncStatus reads NewNS/NewA/NewAAAA/NewDS and nothing else.
+// A status that says the NS RRset differs, while leaving NewNS empty, therefore
+// produces a request with no NS in it at all -- and every party involved reports
+// success, because each did exactly what it was asked (#507).
+//
+// The two are not interchangeable and the mismatch is not detectable downstream,
+// so it is caught here, at the point where edits are about to be turned into a
+// declaration.
+func dsyncApiIncoherentStatus(s DelegationSyncStatus) []string {
+	var gaps []string
+	check := func(what string, edits int, declared int) {
+		if edits > 0 && declared == 0 {
+			gaps = append(gaps, fmt.Sprintf("%d %s change(s) to make, but nothing declared for %s",
+				edits, what, what))
+		}
+	}
+	// NS counts removes too: a delegation always has nameservers, so an empty
+	// NewNS is never a declaration, it is a missing one.
+	check("NS", len(s.NsAdds)+len(s.NsRemoves), len(s.NewNS))
+	// Glue counts only ADDS. A removal with nothing left to declare is a
+	// withdrawal, which the payload now emits as an empty RRset -- refusing it
+	// here would block the one operation that needs saying nothing.
+	check("A glue", len(s.AAdds), len(s.NewA))
+	check("AAAA glue", len(s.AAAAAdds), len(s.NewAAAA))
+	// DS is different: an empty NewDS is a real instruction to withdraw the DS,
+	// which is why NewDSKnown exists. The flag is the declaration.
+	if (len(s.DSAdds)+len(s.DSRemoves)) > 0 && !s.NewDSKnown {
+		gaps = append(gaps, "DS changes to make, but no DS declared (NewDSKnown is false)")
+	}
+	return gaps
 }

@@ -6,6 +6,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -71,6 +72,22 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 		"target", endpoint.Target, "endpoint", endpoint.Url, "dialect", endpoint.Dialect,
 		"addrs", endpoint.Addrs)
 
+	// A declarative payload built from a status that carries edits but no end
+	// state is silently incomplete: the fields the builder reads are empty, so
+	// the changes those edits describe are simply not in the request. That is
+	// #507, and it was invisible from both ends -- the parent applied what it
+	// was given and answered 200, the child reported success, and the
+	// delegation never converged.
+	//
+	// Checked here rather than in the producer because there is more than one
+	// producer, and the same hole had already been found and fixed once in the
+	// proxy path before turning up again in this one.
+	if gaps := dsyncApiIncoherentStatus(syncstate); len(gaps) > 0 {
+		return "", dns.RcodeServerFailure,
+			fmt.Errorf("zone %s: refusing to send an incomplete declarative delegation to parent %s: %s",
+				zd.ZoneName, parent, strings.Join(gaps, "; "))
+	}
+
 	rrsets := DsyncApiRRsetsFromSyncStatus(zd.ZoneName, syncstate)
 	if len(rrsets) == 0 {
 		// Sending nothing would be a request the parent refuses as malformed.
@@ -79,9 +96,34 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 			dns.RcodeSuccess, nil
 	}
 
-	if _, err := DsyncApiPostDelegationRequest(dctx, endpoint, cred, zd.ZoneName, rrsets,
-		childconf.AllowInsecure, childconf.CaFile); err != nil {
+	del, err := DsyncApiPostDelegationRequest(dctx, endpoint, cred, zd.ZoneName, rrsets,
+		childconf.AllowInsecure, childconf.CaFile)
+	if err != nil {
 		return "", dns.RcodeServerFailure, fmt.Errorf("zone %s: %v", zd.ZoneName, err)
+	}
+
+	// The endpoint answers with the delegation as it stands AFTER applying, and
+	// that answer used to be discarded. Checking it is what turns "the parent
+	// accepted my request" into "the delegation is what I asked for", and the
+	// two came apart badly: a payload that silently dropped every NS and glue
+	// change still got a 200 and still reported success, so nothing converged
+	// and each sync repeated the same no-op (#507). A scheme whose whole point
+	// is declaring an end state can check it reached that state.
+	diffs, comparable := dsyncApiUnconverged(rrsets, del)
+	switch {
+	case !comparable:
+		// The apply is the parent's 200; the read-back is a courtesy. An
+		// unreadable or empty one leaves convergence UNKNOWN, and unknown is
+		// not failure -- reporting it as one would retry a change that has
+		// already been applied, persisted and published.
+		lgDns.Warn("the parent accepted the delegation update; its read-back could not be compared",
+			"zone", zd.ZoneName, "parent", parent)
+	case len(diffs) > 0:
+		lgDns.Error("the parent accepted the delegation update but the result differs from what was sent",
+			"zone", zd.ZoneName, "parent", parent, "differences", strings.Join(diffs, "; "))
+		return "", dns.RcodeServerFailure,
+			fmt.Errorf("zone %s: parent %s applied the update but the delegation still differs from what was sent: %s",
+				zd.ZoneName, parent, strings.Join(diffs, "; "))
 	}
 
 	lgDns.Info("delegation synced to parent over the DSYNC API scheme",

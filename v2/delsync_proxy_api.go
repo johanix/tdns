@@ -56,7 +56,7 @@ const proxyApiDiscoveryTimeout = 60 * time.Second
 // delegation SHOULD be rather than what changed, so a retry after an ambiguous
 // failure is safe and a replayed send is a no-op at the parent.
 //
-// The payload is read from the SERVED zone (proxyCurrentDelegationRRs), which
+// The payload is read from the SERVED zone (currentDelegationRRs), which
 // is the same source the UPDATE proxy's replace form uses. It deliberately does
 // NOT come from the ProxyDelegationAnalysis deltas: DelegationDataChangedNG
 // fills only the Adds/Removes fields, never the New* ones that the declarative
@@ -166,7 +166,7 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 // derived set -- those are different questions and conflating them is what
 // would delete a CSK-signed child's DS.
 func (zd *ZoneData) proxyApiRRsets() []DsyncApiRRset {
-	newNS, newA, newAAAA, _ := zd.proxyCurrentDelegationRRs()
+	newNS, newA, newAAAA, _ := zd.currentDelegationRRs()
 
 	rrsets := DsyncApiRRsetsFromSyncStatus(zd.ZoneName, DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
