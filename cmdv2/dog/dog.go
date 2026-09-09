@@ -291,14 +291,16 @@ var rootCmd = &cobra.Command{
 					m.SetQuestion(qname, rrtype)
 				}
 				// Set CD (Checking Disabled) flag if requested
+				if options["cd_bit"] == "true" {
+					m.MsgHdr.CheckingDisabled = true
+				}
+				// The AD bit on the OUTGOING query (+adflag / +noadflag).
+				// Absent unless asked for: dog's default stays off.
 				if options["ad_bit"] == "true" {
 					m.MsgHdr.AuthenticatedData = true
 				}
 				if options["ad_bit"] == "false" {
 					m.MsgHdr.AuthenticatedData = false
-				}
-				if options["cd_bit"] == "true" {
-					m.MsgHdr.CheckingDisabled = true
 				}
 				ednsUDPSize, err := dogopts.EDNSUDPSizeFromMap(options)
 				if err != nil {
@@ -469,26 +471,9 @@ var rootCmd = &cobra.Command{
 				clientOpts = append(clientOpts, timeoutOptions(options)...)
 				client := core.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
 
-				// +tries=: total attempts, not retries after the first. Only a
-				// transport failure is retried -- a response carrying SERVFAIL
-				// or NXDOMAIN is an answer, and asking again just makes a
-				// negative slower.
-				tries := 1
-				if v := options["tries"]; v != "" {
-					if n, cerr := strconv.Atoi(v); cerr == nil && n > 0 {
-						tries = n
-					}
-				}
+				tries := triesFrom(options)
 				var res *dns.Msg
-				for attempt := 1; ; attempt++ {
-					res, _, err = client.Exchange(m, server, false) // FIXME: duration is always zero
-					if err == nil || attempt >= tries {
-						break
-					}
-					if tdns.Globals.Verbose {
-						fmt.Fprintf(os.Stderr, ";; attempt %d/%d failed: %v\n", attempt, tries, err)
-					}
-				}
+				res, err = exchangeWithTries(client, m, server, tries) // FIXME: duration is always zero
 				if err == nil && res != nil && res.Truncated && t == core.TransportDo53 && !forceTCP {
 					// Warn if strict privacy was requested and we are falling
 					// back to unencrypted TCP.
@@ -510,7 +495,11 @@ var rootCmd = &cobra.Command{
 					// exactly the point a query got slower.
 					tcpOpts = append(tcpOpts, timeoutOptions(options)...)
 					tcpClient := core.NewDNSClient(core.TransportDo53, options["port"], tlsConfig, tcpOpts...)
-					res, _, err = tcpClient.Exchange(m, server, false)
+					// dig's +tries is "the number of times to try UDP AND TCP
+					// queries"; the fallback is a second client on a path that
+					// is already slower than the one that truncated, so it gets
+					// the same budget rather than a single shot.
+					res, err = exchangeWithTries(tcpClient, m, server, tries)
 					options["transport"] = "Do53-TCP"
 				}
 
@@ -643,6 +632,10 @@ func loadChaserAnchors() []*dns.DS {
 
 // verifyFlagsGiven reports whether any of the certificate-verification
 // options (+tlsa, +pin=, +cafile=) was requested.
+func verifyFlagsGiven(options map[string]string) bool {
+	return options["tlsa"] == "true" || options["pins"] != "" || options["cafile"] != ""
+}
+
 // timeoutOptions returns the client options implied by +time=, or nil.
 //
 // Shared because dog builds TWO clients: the one that sends the query, and the
@@ -655,6 +648,9 @@ func timeoutOptions(options map[string]string) []core.DNSClientOption {
 	if v == "" {
 		return nil
 	}
+	// ProcessOptions has already rejected anything unparsable and raised
+	// anything below 1, so this cannot fail; it is here so a future caller
+	// that has not been through the parser cannot produce an instant timeout.
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
 		return nil
@@ -662,8 +658,41 @@ func timeoutOptions(options map[string]string) []core.DNSClientOption {
 	return []core.DNSClientOption{core.WithTimeout(time.Duration(n) * time.Second)}
 }
 
-func verifyFlagsGiven(options map[string]string) bool {
-	return options["tlsa"] == "true" || options["pins"] != "" || options["cafile"] != ""
+// triesFrom is the +tries= budget: the TOTAL number of attempts, not the
+// number after the first. One when nothing was asked for -- dog sends a single
+// query by default, where dig sends three; changing that would alter every
+// existing dog invocation, so it is left alone.
+func triesFrom(options map[string]string) int {
+	v := options["tries"]
+	if v == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 1
+	}
+	return n
+}
+
+// exchangeWithTries spends the +tries= budget on one client.
+//
+// Only a transport failure is retried. A response that came back at all is an
+// answer -- SERVFAIL, NXDOMAIN, or one whose TSIG did not verify (miekg
+// returns the message alongside that error, which is why the caller prints it)
+// -- and asking the same server the same question again cannot change it,
+// only make the failure slower and noisier.
+func exchangeWithTries(client *core.DNSClient, m *dns.Msg, server string, tries int) (*dns.Msg, error) {
+	var res *dns.Msg
+	var err error
+	for attempt := 1; ; attempt++ {
+		res, _, err = client.Exchange(m, server, false)
+		if err == nil || res != nil || attempt >= tries {
+			return res, err
+		}
+		if tdns.Globals.Verbose {
+			fmt.Fprintf(os.Stderr, ";; attempt %d/%d failed: %v\n", attempt, tries, err)
+		}
+	}
 }
 
 // clientIdentityGiven reports whether a client identity (+cert=/+key=) was
@@ -893,13 +922,18 @@ func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]st
 		if err != nil {
 			return nil, fmt.Errorf("+time= requires a number of seconds, not %q", v)
 		}
-		// dig clamps rather than refusing: 0 means "as fast as possible", and
-		// its ceiling is 255.
+		// dig raises anything below 1 to 1 silently ("An attempt to set T to
+		// less than 1 is silently set to 1"), and REFUSES anything above
+		// MAXTIMEOUT -- 0xffff in bin/dig/dighost.h, where the +timeout case
+		// does parse_uint(&timeout, value, MAXTIMEOUT, "timeout") and exits
+		// when that fails. Match both. Silently shortening a timeout the
+		// caller asked for is the same class of trap as reading "+time=5s" as
+		// 5: the script gets a value it did not choose and no diagnostic.
 		if n < 1 {
 			n = 1
 		}
-		if n > 255 {
-			n = 255
+		if n > 65535 {
+			return nil, fmt.Errorf("+time= must be at most 65535 seconds, not %q", v)
 		}
 		options["timeout"] = strconv.Itoa(n)
 		return options, nil

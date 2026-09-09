@@ -28,14 +28,21 @@ func TestTimeFlagAndAlias(t *testing.T) {
 	}
 }
 
-// dig clamps rather than refusing: 0 means "as fast as possible" and 255 is the
-// ceiling. A script passing either must not die.
-func TestTimeFlagClamps(t *testing.T) {
+// dig's two ends are not symmetric, and matching it matters more than being
+// uniform. Below 1 it raises silently to 1 -- a script passing 0 must not die.
+// Above MAXTIMEOUT (0xffff, bin/dig/dighost.h) it refuses, and so do we: a
+// timeout silently shortened from the one the caller asked for is the same
+// trap as reading "+time=5s" as 5.
+func TestTimeFlagFloorAndCeiling(t *testing.T) {
 	if got := opt(t, "+time=0")["timeout"]; got != "1" {
 		t.Errorf("+time=0 gave %q, want 1", got)
 	}
-	if got := opt(t, "+time=999")["timeout"]; got != "255" {
-		t.Errorf("+time=999 gave %q, want 255", got)
+	// Well past the old 255, and accepted, because dig accepts it.
+	if got := opt(t, "+time=999")["timeout"]; got != "999" {
+		t.Errorf("+time=999 gave %q, want 999", got)
+	}
+	if got := opt(t, "+time=65535")["timeout"]; got != "65535" {
+		t.Errorf("+time=65535 gave %q, want 65535", got)
 	}
 }
 
@@ -72,7 +79,7 @@ func TestAdFlag(t *testing.T) {
 // "+time=5s" quietly meaning 5 seconds on one build and 0 on another is how a
 // script hangs in production and nowhere else.
 func TestBadValuesAreErrors(t *testing.T) {
-	for _, a := range []string{"+time=abc", "+tries=x", "+retry=", "+timeout=1s"} {
+	for _, a := range []string{"+time=abc", "+tries=x", "+retry=", "+timeout=1s", "+time=65536"} {
 		m := map[string]string{}
 		if _, err := ProcessOptions(m, strings.ToUpper(a), a); err == nil {
 			t.Errorf("ProcessOptions(%q) accepted a malformed value", a)
@@ -101,5 +108,32 @@ func TestTimeoutOptionsIsSharedAndSafe(t *testing.T) {
 		if got := timeoutOptions(m); got != nil {
 			t.Errorf("timeoutOptions(%v) returned %d options, want none", m, len(got))
 		}
+	}
+}
+
+// The +tries= budget the exchange loop actually spends. Absent means one
+// attempt: dog sends a single query where dig sends three, and this locks that
+// difference in rather than leaving it to be rediscovered.
+func TestTriesFrom(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		options map[string]string
+		want    int
+	}{
+		{"not asked for", map[string]string{}, 1},
+		{"empty", map[string]string{"tries": ""}, 1},
+		{"as parsed", map[string]string{"tries": "3"}, 3},
+		{"+retry=2 became 3 attempts", opt(t, "+retry=2"), 3},
+		{"+tries=2 stayed 2", opt(t, "+tries=2"), 2},
+		// States ProcessOptions cannot produce, but a bare map can.
+		{"unparsable", map[string]string{"tries": "x"}, 1},
+		{"zero", map[string]string{"tries": "0"}, 1},
+		{"negative", map[string]string{"tries": "-3"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := triesFrom(tc.options); got != tc.want {
+				t.Errorf("triesFrom(%v) = %d, want %d", tc.options, got, tc.want)
+			}
+		})
 	}
 }
