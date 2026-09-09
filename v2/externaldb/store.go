@@ -22,6 +22,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +49,12 @@ var pools = struct {
 	sync.Mutex
 	byKey map[string]*sql.DB
 }{byKey: map[string]*sql.DB{}}
+
+// validPrefix is what a table prefix may be: an identifier fragment. The
+// prefix is formatted into every statement, so this is what makes that safe.
+var validPrefix = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
+
+func lg() *slog.Logger { return tdns.Logger("externaldb") }
 
 // New is the DelegationStoreFactory registered as "external-db".
 func New(spec tdns.DelegationBackendSpec, _ *tdns.KeyDB, _ *tdns.ZoneData) (tdns.DelegationStore, error) {
@@ -76,6 +84,9 @@ func Open(c tdns.ExternalDBConf) (*Store, error) {
 	prefix := c.TablePrefix
 	if prefix == "" {
 		prefix = DefaultTablePrefix
+	}
+	if !validPrefix.MatchString(prefix) {
+		return nil, fmt.Errorf("external-db: table-prefix %q must be letters, digits and underscores only", c.TablePrefix)
 	}
 	db, err := openPool(d.driverName, dsn, c.MaxOpenConns)
 	if err != nil {
@@ -270,7 +281,10 @@ func (s *Store) ApplyChildUpdate(parentZone string, ur tdns.UpdateRequest) (err 
 				return err
 			}
 		default:
-			// Unknown class: skipped, as the sqlite store skips it.
+			// Skipped, as the sqlite store skips it -- and said, so the
+			// child is not silently told an action it sent was applied.
+			lg().Warn("external-db: unknown class in a child update, skipping the action",
+				"parent", parentZone, "child", child, "owner", owner, "rrtype", rrtype, "class", rr.Header().Class)
 		}
 	}
 	if err = tx.Commit(); err != nil {
@@ -298,7 +312,11 @@ func (s *Store) GetDelegationData(parentZone, childZone string) (map[string]map[
 		}
 		rr, err := dns.NewRR(text)
 		if err != nil {
-			continue // a row that does not parse is not this child's delegation
+			// Not this child's delegation, and not silently: an unparsable
+			// row must not look like a child with no rows.
+			lg().Warn("external-db: stored row does not parse as a record, skipping it",
+				"parent", parentZone, "child", childZone, "row", text, "err", err)
+			continue
 		}
 		t := rr.Header().Rrtype
 		if out[owner] == nil {
@@ -338,7 +356,11 @@ func (s *Store) ListChildren(parentZone string) ([]string, error) {
 func (s *Store) AdoptChildDelegation(parentZone, childZone string, rrs []dns.RR) (n int, err error) {
 	ctx, cancel := s.ctx()
 	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
+	// "Write only if empty" has to hold against a concurrent adopter of the
+	// same child: FOR UPDATE under REPEATABLE READ takes the gap lock on the
+	// (parent, child) range, so a second adopter waits and then sees the
+	// rows the first one wrote.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return 0, fmt.Errorf("external-db: begin: %w", err)
 	}
@@ -349,7 +371,7 @@ func (s *Store) AdoptChildDelegation(parentZone, childZone string, rrs []dns.RR)
 	}()
 	var existing int
 	if err = tx.QueryRowContext(ctx, s.q(fmt.Sprintf(
-		`SELECT COUNT(*) FROM %s WHERE parent = ? AND child = ?`, s.table("delegation"))), parentZone, childZone).Scan(&existing); err != nil {
+		`SELECT COUNT(*) FROM %s WHERE parent = ? AND child = ? FOR UPDATE`, s.table("delegation"))), parentZone, childZone).Scan(&existing); err != nil {
 		return 0, fmt.Errorf("external-db: count: %w", err)
 	}
 	if existing > 0 {

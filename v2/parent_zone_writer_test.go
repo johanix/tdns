@@ -306,9 +306,9 @@ func TestRenderNsupdateBlock(t *testing.T) {
 	want := "server 192.0.2.1:53\n" +
 		"; sign with TSIG key agent-to-primary. (nsupdate -k <keyfile>)\n" +
 		"zone parent.example.\n" +
-		"update add alpha.parent.example.\t3600\tIN\tNS\tnew.alpha.parent.example.\n" +
 		"update delete alpha.parent.example.\t0\tIN\tNS\told.alpha.parent.example.\n" +
 		"update delete bravo.parent.example. DS\n" +
+		"update add alpha.parent.example.\t3600\tIN\tNS\tnew.alpha.parent.example.\n" +
 		"send\n"
 	if got != want {
 		t.Fatalf("rendered block differs.\n--- got ---\n%s--- want ---\n%s", got, want)

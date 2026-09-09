@@ -277,21 +277,28 @@ func RenderNsupdateBlock(parentZone string, targets []string, keyName string, ac
 		fmt.Fprintf(&b, "; sign with TSIG key %s (nsupdate -k <keyfile>)\n", keyName)
 	}
 	fmt.Fprintf(&b, "zone %s\n", parentZone)
-	lines := make([]string, 0, len(actions))
+	// Deletes before adds, each group sorted. RFC 2136 applies the records
+	// in order, and diffDelegation emits removes first for exactly this
+	// reason: sorting all lines together put every "update add" ahead of
+	// every "update delete", so a script that added records at a name and
+	// then deleted the RRset there removed what it had just added.
+	var deletes, adds []string
 	for _, rr := range actions {
 		switch rr.Header().Class {
 		case dns.ClassANY:
-			lines = append(lines, fmt.Sprintf("update delete %s %s", rr.Header().Name, dns.TypeToString[rr.Header().Rrtype]))
+			deletes = append(deletes, fmt.Sprintf("update delete %s %s", rr.Header().Name, dns.TypeToString[rr.Header().Rrtype]))
 		case dns.ClassNONE:
 			c := dns.Copy(rr)
 			c.Header().Class = dns.ClassINET
 			c.Header().Ttl = 0
-			lines = append(lines, "update delete "+c.String())
+			deletes = append(deletes, "update delete "+c.String())
 		default:
-			lines = append(lines, "update add "+rr.String())
+			adds = append(adds, "update add "+rr.String())
 		}
 	}
-	sort.Stable(sort.StringSlice(lines))
+	sort.Strings(deletes)
+	sort.Strings(adds)
+	lines := append(deletes, adds...)
 	for _, l := range lines {
 		b.WriteString(l)
 		b.WriteString("\n")

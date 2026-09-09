@@ -114,9 +114,13 @@ func TestExternalDBChangeGrouping(t *testing.T) {
 	if err := s.ApplyChildUpdate("parent.example.", tdns.UpdateRequest{Cmd: "CHILD-UPDATE", ZoneName: "parent.example.", Actions: []dns.RR{del}}); err != nil {
 		t.Fatal(err)
 	}
+	first := string(log[0].ChangeID)
 	log, _ = s.Log(ctx, "parent.example.", log[1].Revision)
-	if len(log) != 1 || log[0].Op != "del-rr" || string(log[0].ChangeID) == string(ur.Actions[0].String()) {
+	if len(log) != 1 || log[0].Op != "del-rr" {
 		t.Fatalf("after the delete: %+v", log)
+	}
+	if string(log[0].ChangeID) == first {
+		t.Fatal("the delete reused the first update's change id")
 	}
 	if !strings.Contains(log[0].RR, "192.0.2.51") {
 		t.Errorf("the delete's log row does not name the record: %+v", log[0])
@@ -204,10 +208,28 @@ func TestDSNFoldsPasswordTLSAndTimeouts(t *testing.T) {
 	if !strings.Contains(dsn, "tls=tdns-external-db") {
 		t.Errorf("tls: true was ignored on loopback: %s", dsn)
 	}
-	// A unix socket is local by definition: no TLS unless asked for.
+	// A unix socket is local by definition: no TLS unless asked for, and
+	// asking for it is refused in words, since there is no name to verify.
 	dsn, _ = mariadbDSN(tdns.ExternalDBConf{DSN: "tdns:pw@unix(/var/run/mysqld.sock)/reg"})
 	if strings.Contains(dsn, "tls=") {
 		t.Errorf("a unix socket got TLS by default: %s", dsn)
+	}
+	if _, err := mariadbDSN(tdns.ExternalDBConf{DSN: "tdns:pw@unix(/var/run/mysqld.sock)/reg", TLS: boolPtr(true)}); err == nil || !strings.Contains(err.Error(), "names no server to verify") {
+		t.Errorf("tls on a unix socket must be refused in words, got %v", err)
+	}
+	// Two configurations register two TLS names: the registry is global.
+	a, _ := mariadbDSN(tdns.ExternalDBConf{DSN: "tdns:pw@tcp(db-a.example.net:3306)/reg"})
+	b, _ := mariadbDSN(tdns.ExternalDBConf{DSN: "tdns:pw@tcp(db-b.example.net:3306)/reg"})
+	tlsName := func(dsn string) string {
+		i := strings.Index(dsn, "tls=")
+		rest := dsn[i+4:]
+		if j := strings.Index(rest, "&"); j >= 0 {
+			rest = rest[:j]
+		}
+		return rest
+	}
+	if tlsName(a) == tlsName(b) {
+		t.Errorf("two hosts share one TLS registration: %s", tlsName(a))
 	}
 	if _, err := mariadbDSN(tdns.ExternalDBConf{DSN: "not a dsn at all"}); err == nil {
 		t.Error("a malformed dsn was accepted")
@@ -247,5 +269,10 @@ func TestUnsupportedDriverAndMissingDSN(t *testing.T) {
 	}
 	if _, err := Open(tdns.ExternalDBConf{}); err == nil || !strings.Contains(err.Error(), "dsn is required") {
 		t.Errorf("missing dsn: %v", err)
+	}
+	// The prefix is formatted into every statement; only an identifier
+	// fragment is accepted, and it is refused before any connection.
+	if _, err := Open(tdns.ExternalDBConf{DSN: "x@tcp(127.0.0.1:1)/db", TablePrefix: "bad prefix;"}); err == nil || !strings.Contains(err.Error(), "table-prefix") {
+		t.Errorf("a bad prefix was accepted: %v", err)
 	}
 }

@@ -251,11 +251,11 @@ func TestProxyRefreshReconcileIsAdditiveForUnknownChildren(t *testing.T) {
 
 	// Empty store, two served delegations: nothing may be pushed.
 	zd.ChildSyncProxyPostRefresh()
-	waitFor(t, time.Second, "the reconcile to run", func() bool {
-		st := zd.ParentPushStatus()
-		return !st.Running && len(st.Pending) == 0
+	// The reconcile's own completion, not the worker's idleness: the
+	// worker is idle before the queued request has been picked up too.
+	waitFor(t, 2*time.Second, "the queued reconcile to complete", func() bool {
+		return !zd.ParentPushStatus().LastChildReconcile.IsZero()
 	})
-	time.Sleep(50 * time.Millisecond)
 	if n := sink.count(); n != 0 {
 		t.Fatalf("an empty store produced %d push(es):\n%s", n, strings.Join(actionStrings(sink.last().Ns), "\n"))
 	}

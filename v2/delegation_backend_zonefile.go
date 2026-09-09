@@ -135,10 +135,17 @@ func (w *zonefileWriter) writeZoneFile(childZone string, data map[string]map[uin
 	return nil
 }
 
+// notifyCommandTimeout bounds the notify command. It runs inline on the
+// ZoneUpdater goroutine, which serves every zone, so a command that hangs
+// would stall them all; killed after this, it is reported as failed.
+const notifyCommandTimeout = 60 * time.Second
+
 func (w *zonefileWriter) runNotifyCommand(parentZone string) {
 	cmd := strings.ReplaceAll(w.notifyCommand, "{ZONENAME}", parentZone)
 	lg.Info("zonefile writer: running notify command", "cmd", cmd)
-	out, err := exec.Command("sh", "-c", cmd).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), notifyCommandTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "sh", "-c", cmd).CombinedOutput()
 	if err != nil {
 		lg.Error("zonefile writer: notify command failed", "cmd", cmd, "error", err, "output", string(out))
 	}

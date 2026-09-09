@@ -4,8 +4,10 @@
 package externaldb
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -85,12 +87,17 @@ func mariadbDSN(c tdns.ExternalDBConf) (string, error) {
 		wantTLS = *c.TLS
 	}
 	if wantTLS {
-		tc := &tls.Config{MinVersion: tls.VersionTLS12}
-		if host, _, err := net.SplitHostPort(cfg.Addr); err == nil {
-			tc.ServerName = host
+		// TLS verifies a server NAME. A unix socket has none, and neither
+		// does an address the driver could not split; refusing here beats
+		// the handshake error the library would give later.
+		host, _, err := net.SplitHostPort(cfg.Addr)
+		if cfg.Net == "unix" || err != nil || host == "" {
+			return "", fmt.Errorf("external-db: tls is on but the dsn address %q names no server to verify", cfg.Addr)
 		}
+		tc := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host}
+		var pem []byte
 		if c.CAFile != "" {
-			pem, err := os.ReadFile(c.CAFile)
+			pem, err = os.ReadFile(c.CAFile)
 			if err != nil {
 				return "", fmt.Errorf("external-db: reading ca-file: %w", err)
 			}
@@ -100,7 +107,11 @@ func mariadbDSN(c tdns.ExternalDBConf) (string, error) {
 			}
 			tc.RootCAs = pool
 		}
-		name := "tdns-external-db"
+		// One registration per distinct configuration. The name is the DSN's
+		// key into a process-global registry, so a shared name would make
+		// the last zone's CA and server name apply to every store.
+		sum := sha256.Sum256([]byte(host + "\x00" + c.CAFile + "\x00" + string(pem)))
+		name := "tdns-external-db-" + hex.EncodeToString(sum[:8])
 		if err := mysql.RegisterTLSConfig(name, tc); err != nil {
 			return "", fmt.Errorf("external-db: registering the TLS config: %w", err)
 		}

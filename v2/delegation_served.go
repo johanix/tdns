@@ -31,7 +31,11 @@ func (zd *ZoneData) servedDelegationChildrenLocked() ([]string, error) {
 			continue
 		}
 		owner, err := zd.GetOwner(ownerName)
-		if err != nil || owner == nil {
+		if err != nil {
+			lg.Warn("servedDelegationChildrenLocked: cannot read an owner, skipping it", "zone", zd.ZoneName, "owner", ownerName, "err", err)
+			continue
+		}
+		if owner == nil {
 			continue
 		}
 		if _, ok := owner.RRtypes.Get(dns.TypeNS); ok {
@@ -56,7 +60,11 @@ func (zd *ZoneData) servedDelegationDataLocked(childZone string, want func(owner
 			continue
 		}
 		owner, err := zd.GetOwner(ownerName)
-		if err != nil || owner == nil {
+		if err != nil {
+			lg.Warn("servedDelegationDataLocked: cannot read an owner, skipping it", "zone", zd.ZoneName, "owner", ownerName, "err", err)
+			continue
+		}
+		if owner == nil {
 			continue
 		}
 		for _, rrtype := range owner.RRtypes.Keys() {

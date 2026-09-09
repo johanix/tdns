@@ -128,6 +128,9 @@ type parentPushState struct {
 	failures  map[string]*ParentPushFailure
 	lastPush  time.Time
 	lastOK    time.Time
+	// lastReconcile is when the last walk of the store's children finished,
+	// pushes included: the completion signal for a queued reconcile.
+	lastReconcile time.Time
 }
 
 // ParentPushFailure is the operator-visible record of a push that did not
@@ -144,11 +147,14 @@ type ParentPushFailure struct {
 
 // ParentPushStatus is the operator's view of a zone's outbound pushes.
 type ParentPushStatus struct {
-	Pending  []string            `json:"pending"`
-	Running  bool                `json:"running"`
-	LastPush time.Time           `json:"last_push,omitempty"`
-	LastOK   time.Time           `json:"last_ok,omitempty"`
-	Failures []ParentPushFailure `json:"failures,omitempty"`
+	Pending  []string  `json:"pending"`
+	Running  bool      `json:"running"`
+	LastPush time.Time `json:"last_push,omitempty"`
+	LastOK   time.Time `json:"last_ok,omitempty"`
+	// LastChildReconcile is when the last refresh reconcile of the store's
+	// children completed, pushes included.
+	LastChildReconcile time.Time           `json:"last_child_reconcile,omitempty"`
+	Failures           []ParentPushFailure `json:"failures,omitempty"`
 }
 
 func (zd *ZoneData) parentPush() *parentPushState {
@@ -165,7 +171,7 @@ func (zd *ZoneData) ParentPushStatus() ParentPushStatus {
 	st := zd.parentPush()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	out := ParentPushStatus{Running: st.running, LastPush: st.lastPush, LastOK: st.lastOK}
+	out := ParentPushStatus{Running: st.running, LastPush: st.lastPush, LastOK: st.lastOK, LastChildReconcile: st.lastReconcile}
 	for c := range st.pending {
 		out.Pending = append(out.Pending, c)
 	}
@@ -283,6 +289,10 @@ func (zd *ZoneData) reconcileKnownChildren(ctx context.Context) {
 	}
 	lg.Info("childsync-proxy: reconciled the known children against the served zone",
 		"zone", zd.ZoneName, "children", len(children), "pushed", pushed)
+	st := zd.parentPush()
+	st.mu.Lock()
+	st.lastReconcile = time.Now()
+	st.mu.Unlock()
 }
 
 // asyncParentWriter is the zone's writer when pushes go through this engine:

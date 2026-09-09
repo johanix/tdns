@@ -23,9 +23,13 @@ func agentApp(t *testing.T) {
 // askKeyState sends what queryKeyState sends: a KEY query for the child's
 // name carrying a KeyState inquiry option.
 func askKeyState(t *testing.T, child string, keyid uint16) *dns.Msg {
+	return askKeyStateFor(t, child, dns.TypeKEY, keyid)
+}
+
+func askKeyStateFor(t *testing.T, child string, qtype uint16, keyid uint16) *dns.Msg {
 	t.Helper()
 	req := new(dns.Msg)
-	req.SetQuestion(child, dns.TypeKEY)
+	req.SetQuestion(child, qtype)
 	edns0.AttachKeyStateToResponse(req, &edns0.KeyStateOption{KeyID: keyid, KeyState: edns0.KeyStateInquiryKey})
 	msgo, err := edns0.ExtractFlagsAndEDNS0Options(req)
 	if err != nil {
@@ -36,7 +40,7 @@ func askKeyState(t *testing.T, child string, keyid uint16) *dns.Msg {
 		ResponseWriter: rw,
 		Msg:            req,
 		Qname:          child,
-		Qtype:          dns.TypeKEY,
+		Qtype:          qtype,
 		Options:        msgo,
 	}); err != nil {
 		t.Fatalf("DefaultQueryHandler: %v", err)
@@ -65,6 +69,12 @@ func TestAgentAnswersAKeyStateInquiryForAChildsyncZone(t *testing.T) {
 	// the option is an ordinary query, and the agent is not a nameserver.
 	if plain := ask(t, "alpha.parent.example.", dns.TypeKEY); plain.Rcode != dns.RcodeRefused {
 		t.Errorf("a plain KEY query to the agent got %s, want REFUSED", dns.RcodeToString[plain.Rcode])
+	}
+
+	// The option stapled to a query that is not the inquiry -- another qtype
+	// -- does not open the agent either.
+	if resp := askKeyStateFor(t, "alpha.parent.example.", dns.TypeA, 4242); resp.Rcode != dns.RcodeRefused {
+		t.Errorf("a KeyState option on an A query got %s, want REFUSED", dns.RcodeToString[resp.Rcode])
 	}
 
 	// And the option alone does not open a zone that offers no childsync.

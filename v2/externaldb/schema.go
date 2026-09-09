@@ -139,6 +139,12 @@ func (s *Store) VerifySchema(ctx context.Context) error {
 			}
 			have[strings.ToLower(col)] = true
 		}
+		// rows.Next returns false at the end AND on an error, and only the
+		// first is a complete column list.
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("external-db: reading the schema of %s: %w", table, err)
+		}
 		rows.Close()
 		if len(have) == 0 {
 			problems = append(problems, fmt.Sprintf("table %s is missing", table))
