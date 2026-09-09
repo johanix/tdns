@@ -79,3 +79,27 @@ func TestBadValuesAreErrors(t *testing.T) {
 		}
 	}
 }
+
+// Both clients dog builds -- the one that queries and the one that retries a
+// truncated answer over TCP -- take their timeout from here. A +time= that
+// applied to the first but not the second would lapse exactly when a response
+// was large enough to need the retry.
+//
+// This covers the shared source. Proving the fallback path itself calls it
+// needs a server that truncates, which this package has no harness for.
+func TestTimeoutOptionsIsSharedAndSafe(t *testing.T) {
+	if got := timeoutOptions(map[string]string{"timeout": "5"}); len(got) != 1 {
+		t.Errorf("timeout=5 gave %d options, want 1", len(got))
+	}
+	for _, m := range []map[string]string{
+		{},                 // not asked for
+		{"timeout": ""},    // empty
+		{"timeout": "abc"}, // unparsable
+		{"timeout": "0"},   // would be an instant timeout
+		{"timeout": "-1"},  // ditto
+	} {
+		if got := timeoutOptions(m); got != nil {
+			t.Errorf("timeoutOptions(%v) returned %d options, want none", m, len(got))
+		}
+	}
+}

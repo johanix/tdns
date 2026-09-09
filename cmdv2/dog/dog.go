@@ -466,12 +466,7 @@ var rootCmd = &cobra.Command{
 				// +time=: bound each attempt. Without this the client's own
 				// default applies and there is no way to shorten it from the
 				// command line.
-				if v := options["timeout"]; v != "" {
-					if n, cerr := strconv.Atoi(v); cerr == nil {
-						clientOpts = append(clientOpts,
-							core.WithTimeout(time.Duration(n)*time.Second))
-					}
-				}
+				clientOpts = append(clientOpts, timeoutOptions(options)...)
 				client := core.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
 
 				// +tries=: total attempts, not retries after the first. Only a
@@ -509,6 +504,11 @@ var rootCmd = &cobra.Command{
 					if tsigOpt != nil {
 						tcpOpts = append(tcpOpts, tsigOpt)
 					}
+					// The retry is a second client built from a separate
+					// option list, so +time= has to be applied again here.
+					// Without it the timeout silently stopped applying at
+					// exactly the point a query got slower.
+					tcpOpts = append(tcpOpts, timeoutOptions(options)...)
 					tcpClient := core.NewDNSClient(core.TransportDo53, options["port"], tlsConfig, tcpOpts...)
 					res, _, err = tcpClient.Exchange(m, server, false)
 					options["transport"] = "Do53-TCP"
@@ -643,6 +643,25 @@ func loadChaserAnchors() []*dns.DS {
 
 // verifyFlagsGiven reports whether any of the certificate-verification
 // options (+tlsa, +pin=, +cafile=) was requested.
+// timeoutOptions returns the client options implied by +time=, or nil.
+//
+// Shared because dog builds TWO clients: the one that sends the query, and the
+// one that retries over TCP when the answer comes back truncated. They are
+// constructed from separate option lists, and a +time= that applies to the
+// first but not the second is a timeout that lapses precisely when a response
+// is large enough to need the retry.
+func timeoutOptions(options map[string]string) []core.DNSClientOption {
+	v := options["timeout"]
+	if v == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return nil
+	}
+	return []core.DNSClientOption{core.WithTimeout(time.Duration(n) * time.Second)}
+}
+
 func verifyFlagsGiven(options map[string]string) bool {
 	return options["tlsa"] == "true" || options["pins"] != "" || options["cafile"] != ""
 }
