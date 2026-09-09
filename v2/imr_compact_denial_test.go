@@ -151,8 +151,9 @@ func TestCompactDenialAnswerFollowsTheClient(t *testing.T) {
 		// the only answer consistent with the proof it is given.
 		{"DO, no CO", true, false, dns.RcodeSuccess, true, true, false},
 		// CO without DO is a client that reads NXNAME but asked for no
-		// DNSSEC records: a plain NXDOMAIN, nothing to mark.
-		{"CO, no DO", false, true, dns.RcodeNameError, false, false, false},
+		// DNSSEC records: a plain NXDOMAIN, and CO back because the flag
+		// answers "this resolver speaks CO", not "this answer is compact".
+		{"CO, no DO", false, true, dns.RcodeNameError, false, false, true},
 		// The client said it reads NXNAME: the compact form, marked as such.
 		{"DO and CO", true, true, dns.RcodeNameError, true, true, true},
 	}
@@ -263,5 +264,65 @@ func TestHandleNegativeCachesCompactDenialAsNXDOMAIN(t *testing.T) {
 	}
 	if c := imr.Cache.Get(existing, dns.TypeMX); c == nil || c.CompactDenial {
 		t.Fatalf("NODATA cached as a compact denial: %+v", c)
+	}
+}
+
+// CD used to take the proof away and leave the rcode behind. serveNegativeResponse
+// answered a +cd client with the SOA alone, whatever it had asked for, while the
+// cached-answer path in ImrResponder never looked at CD and sent the NSEC. On a
+// compact denial the two disagreed in the worst direction: negativeRcode
+// downgrades to NOERROR *because* the client is about to read the owner=qname
+// NSEC as existence, so dropping that NSEC left a +cd +dnssec client holding
+// NOERROR and nothing else for a name that does not exist.
+func TestCompactDenialWithCheckingDisabled(t *testing.T) {
+	const qname = "nosuch.example."
+
+	for _, tc := range []struct {
+		name   string
+		do, co bool
+		rcode  int
+		nsec   bool
+	}{
+		// The regression: DO asked for the proof, CD must not withhold it.
+		{"CD, DO, no CO", true, false, dns.RcodeSuccess, true},
+		{"CD, DO and CO", true, true, dns.RcodeNameError, true},
+		// CD without DO is unchanged: the SOA and nothing else, and NXDOMAIN
+		// is safe because no NSEC goes with it.
+		{"CD, no DO", false, false, dns.RcodeNameError, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			imr := newTestImr(t)
+			seedCompactDenial(t, imr, qname, dns.TypeMX, "example.")
+
+			r := flaggedQuery(qname, dns.TypeMX, tc.do, tc.co)
+			r.CheckingDisabled = true
+			msgo, err := edns0.ExtractFlagsAndEDNS0Options(r)
+			if err != nil {
+				t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
+			}
+			if !msgo.CD {
+				t.Fatal("setup: the query did not carry CD")
+			}
+
+			w := &fakeResponseWriter{}
+			m := new(dns.Msg)
+			edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
+			if _, err := imr.ProcessAuthDNSResponse(context.Background(), qname, dns.TypeMX,
+				nil, dns.RcodeNameError, cache.ContextNXDOMAIN, msgo, m, w, r, core.TransportDo53); err != nil {
+				t.Fatalf("ProcessAuthDNSResponse: %v", err)
+			}
+			if w.msg == nil {
+				t.Fatal("nothing was written")
+			}
+			if w.msg.Rcode != tc.rcode {
+				t.Errorf("rcode = %s, want %s", dns.RcodeToString[w.msg.Rcode], dns.RcodeToString[tc.rcode])
+			}
+			if got := authorityHas(w.msg, dns.TypeNSEC); got != tc.nsec {
+				t.Errorf("NSEC in AUTHORITY = %v, want %v (a NOERROR without the NSEC is a NODATA for a name that does not exist)", got, tc.nsec)
+			}
+			if !authorityHas(w.msg, dns.TypeSOA) {
+				t.Error("no SOA in AUTHORITY")
+			}
+		})
 	}
 }

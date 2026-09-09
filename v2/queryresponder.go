@@ -818,6 +818,21 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	// truncation preserves the OPT and re-appends it after trimming.
 	edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
 
+	// RFC 9824 section 5.1: "In responses to such queries, an authoritative
+	// server implementing both Compact Denial of Existence and this signaling
+	// scheme will set the Compact Answers OK EDNS header flag and, for
+	// nonexistent names, will additionally set the response code field to
+	// NXDOMAIN." Two acts, not one: the flag on every response to a CO query
+	// says this server speaks CO, and the rcode is the additional step for
+	// nonexistent names (addCDEResponse). Echoed here beside the OPT so a CO
+	// client learns it from a NODATA too -- section 5.1 asks downstream
+	// resolvers to "record the presence of this flag in associated cache
+	// data", and a flag that appears only on NXDOMAIN cannot be recorded from
+	// anything else.
+	if msgoptions.CO {
+		edns0.SetCO(m)
+	}
+
 	// Pin ONE snapshot for the whole response so the answer, authority SOA, NS,
 	// and glue all come from the same serial — no intra-response tearing (C1).
 	snap := zd.publishedSnapshot()
@@ -1122,13 +1137,10 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 		// For NODATA: Rcode = NOERROR
 		if rrtypeList != nil {
 			m.MsgHdr.Rcode = dns.RcodeSuccess
-		} else {
-			// For NXDOMAIN, Rcode is already RcodeNameError from caller.
-			// The response says so as well: CO on the response marks an
-			// NXDOMAIN that stands beside an NSEC owned by the denied name,
-			// the form the client said it could read (RFC 9824).
-			edns0.SetCO(m)
 		}
+		// For NXDOMAIN, Rcode is already RcodeNameError from caller. The CO
+		// flag on the response is not set here: QueryResponder echoes it onto
+		// every response to a CO query, which is what section 5.1 describes.
 	} else {
 		// Traditional DNSSEC: For synthetic NSEC (owner=qname), Rcode must be NOERROR
 		// because the NSEC makes it appear the name exists

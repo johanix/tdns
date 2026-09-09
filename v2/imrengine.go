@@ -963,6 +963,18 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	// the recursive one never did.
 	edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
 
+	// RFC 9824 section 5.1: a responder implementing the signalling scheme
+	// "will set the Compact Answers OK EDNS header flag" in responses to
+	// queries that carried it, and for nonexistent names "will additionally
+	// set the response code field to NXDOMAIN". Two separate acts: the flag
+	// says this responder speaks CO, the rcode is what CO then buys. Echoed
+	// here, once, so every exit below carries it -- a client that gets NOERROR
+	// back from a CO-speaking resolver knows it means NODATA and not an
+	// untranslated compact denial.
+	if msgoptions.CO {
+		edns0.SetCO(m)
+	}
+
 	crrset := imr.Cache.Get(qname, qtype)
 	if crrset != nil {
 		// Strict privacy: cached data that arrived over an unencrypted
@@ -1015,7 +1027,6 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 		switch {
 		case crrset.Rcode == uint8(dns.RcodeNameError) && crrset.Context == cache.ContextNXDOMAIN:
 			m.SetRcode(r, negativeRcode(crrset, msgoptions))
-			markCompactAnswer(m, crrset, msgoptions)
 			negStart := len(m.Ns)
 			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, msgoptions) && crrset.RRset != nil {
 				appendSOAToMessage(crrset.RRset, msgoptions, m)
@@ -1330,16 +1341,18 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 	switch context {
 	case cache.ContextNXDOMAIN:
 		// handleNegative has just cached this denial, and the entry is what
-		// says whether it is a compact one. A miss (evicted underneath us)
-		// serves the NXDOMAIN the context stands for, as this always did.
-		rc := dns.RcodeNameError
+		// says whether it is a compact one. Read ONCE and handed to
+		// serveNegativeResponse: two independent Gets could disagree if the
+		// entry were evicted between them, and the rcode and the proof would
+		// then come from different answers. A miss serves the NXDOMAIN the
+		// context stands for, with no proof beside it to contradict.
 		cached := imr.Cache.Get(qname, qtype)
+		rc := dns.RcodeNameError
 		if cached != nil {
 			rc = negativeRcode(cached, msgoptions)
 		}
 		m.SetRcode(r, rc)
-		markCompactAnswer(m, cached, msgoptions)
-		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r)
+		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r, cached)
 		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil
@@ -1348,7 +1361,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		return false, nil
 	case cache.ContextNoErrNoAns:
 		m.SetRcode(r, dns.RcodeSuccess)
-		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r)
+		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r, imr.Cache.Get(qname, qtype))
 		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil
@@ -1376,16 +1389,6 @@ func negativeRcode(c *cache.CachedRRset, msgoptions *edns0.MsgOptions) int {
 		return dns.RcodeSuccess
 	}
 	return int(c.Rcode)
-}
-
-// markCompactAnswer sets CO on the response when it is the compact form the
-// client asked to be able to read: an NXDOMAIN standing beside the owner=qname
-// NSEC, which is the DO-and-CO row of negativeRcode. A client without DO gets
-// the NXDOMAIN and no NSEC, which is an ordinary denial and is not marked.
-func markCompactAnswer(m *dns.Msg, c *cache.CachedRRset, msgoptions *edns0.MsgOptions) {
-	if c != nil && c.CompactDenial && msgoptions.DO && msgoptions.CO {
-		edns0.SetCO(m)
-	}
 }
 
 func appendSOAToMessage(soa *core.RRset, msgoptions *edns0.MsgOptions, m *dns.Msg) {
@@ -1502,13 +1505,21 @@ func applyRemainingTTL(sect []dns.RR, start int, ttl uint32) {
 	}
 }
 
-func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype uint16, msgoptions *edns0.MsgOptions, resp *dns.Msg, src *dns.Msg) bool {
+func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype uint16, msgoptions *edns0.MsgOptions, resp *dns.Msg, src *dns.Msg, cached *cache.CachedRRset) bool {
 	if resp == nil {
 		return false
 	}
-	cached := imr.Cache.Get(qname, qtype)
 
-	if msgoptions.CD {
+	// CD without DO: the SOA and nothing else, as before. CD WITH DO still
+	// gets the proof -- CD means "do not validate on my behalf" (RFC 4035
+	// section 3.2.2), not "do not send me the records", and stripping them
+	// here made this path disagree with the cached-answer path in
+	// ImrResponder, which never consulted CD. On a compact denial the
+	// disagreement was not cosmetic: negativeRcode downgrades to NOERROR
+	// precisely BECAUSE the client is about to see the owner=qname NSEC, so
+	// dropping that NSEC left a +cd +dnssec client with NOERROR and no proof
+	// at all for a name that does not exist.
+	if msgoptions.CD && !msgoptions.DO {
 		if cached != nil && cached.RRset != nil {
 			start := len(resp.Ns)
 			appendSOAToMessage(cached.RRset, msgoptions, resp)

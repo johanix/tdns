@@ -56,13 +56,21 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
   - Detects compact denial NXDOMAIN (bitmap = RRSIG, NSEC, NXNAME)
   - Detects compact denial NODATA (qtype not in bitmap)
   - Modifies Rcode from NOERROR to NXDOMAIN when appropriate
-- **Resolver (tdns-imr) response code restoration**: a compact denial is cached as
-  NXDOMAIN (`CompactDenialNXDOMAIN()` in `handleNegative()`, independent of
-  validation) and the rcode served follows the client (`negativeRcode()`):
-  NXDOMAIN to a client without DO, NOERROR plus the NSEC to a DO client without
-  CO (the NSEC reads as existence to a validator without NXNAME support), and
-  NXDOMAIN plus the NSEC, with CO set on the response, to a client with DO and CO
+- **Resolver (tdns-imr) response code restoration** (§5, §5.1), NSEC only: a
+  compact denial is cached as NXDOMAIN (`CompactDenialNXDOMAIN()` in
+  `handleNegative()`, independent of validation) and the rcode served follows
+  the client (`negativeRcode()`): NXDOMAIN to a client without DO, NOERROR plus
+  the NSEC to a DO client without CO (the NSEC reads as existence to a validator
+  without NXNAME support), and NXDOMAIN plus the NSEC to a client with DO and CO
   - Without DO no NSEC/NSEC3 or RRSIG from the cached proof is served
+- **CO echoed on responses** (§5.1): both responders set the Compact Answers OK
+  flag on every response to a query that carried it — the flag says the
+  responder speaks CO, and the NXDOMAIN rcode is the additional step §5.1
+  describes for nonexistent names
+- **Not implemented**: the NSEC3 form of compact denial (§4), where NXNAME is the
+  sole entry in the bitmap under a hashed owner. Recognising it needs the qname
+  hashed under the NSEC3 parameters, and tdns has no NSEC3 denial validation yet,
+  so an NSEC3 compact denial is still served as the NODATA its rcode claims
 
 ---
 

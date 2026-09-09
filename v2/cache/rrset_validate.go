@@ -1209,6 +1209,13 @@ func isCompactDenialNXDOMAIN(bitmap []uint16) bool {
 // compact denial proving that qname does not exist: an NSEC whose owner is
 // qname itself and whose type bitmap is exactly RRSIG, NSEC and NXNAME.
 //
+// NSEC only. RFC 9824 section 4 defines the NSEC3 form too -- NXNAME as the
+// sole entry in the bitmap, under a hashed owner -- and recognising that needs
+// the qname hashed under the NSEC3 parameters before the owner can be
+// compared. tdns has no NSEC3 denial validation yet (ValidateNegativeResponse
+// only notes nsec3Present), so an NSEC3 compact denial is still cached and
+// served as the NODATA the upstream rcode says it is.
+//
 // This is a question about the SHAPE of the proof, not its validity, and the
 // resolver asks it before validation runs. The rcode an authoritative server
 // puts on such a response (NOERROR, unless the query set CO) describes how the
@@ -1217,14 +1224,19 @@ func isCompactDenialNXDOMAIN(bitmap []uint16) bool {
 // validated. ValidateNegativeResponse makes the same check on the way to the
 // AD bit; this one decides what gets cached.
 func CompactDenialNXDOMAIN(qname string, negAuthority []*core.RRset) bool {
-	qnameCanon := dns.CanonicalName(qname)
+	// core.CanonicalizeName, not dns.CanonicalName: the latter rewrites every
+	// octet that is not valid UTF-8 into U+FFFD, so two distinct binary labels
+	// compare equal -- which here would let an NSEC owned by a DIFFERENT
+	// nonexistent name satisfy the owner check and be cached as this name's
+	// NXDOMAIN. Same reasoning as rrset_cache.go's map keys.
+	qnameCanon := core.CanonicalizeName(qname)
 	for _, set := range negAuthority {
 		if set == nil || set.RRtype != dns.TypeNSEC {
 			continue
 		}
 		for _, rr := range set.RRs {
 			nsec, ok := rr.(*dns.NSEC)
-			if !ok || dns.CanonicalName(nsec.Hdr.Name) != qnameCanon {
+			if !ok || core.CanonicalizeName(nsec.Hdr.Name) != qnameCanon {
 				continue
 			}
 			if isCompactDenialNXDOMAIN(nsec.TypeBitMap) {

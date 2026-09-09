@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -13,10 +14,13 @@ import (
 
 // The synthesised denial is one NSEC, owned by the denied name, and what it
 // means depends on who reads it. RFC 9824 settles the two readings with the
-// CO flag: NXDOMAIN, marked CO on the response, for a client that reads
-// NXNAME; NOERROR for one that would read the NSEC as existence. The NXNAME
-// in the bitmap is what a resolver uses to tell the two denials apart and
-// does not depend on the flag.
+// CO flag: NXDOMAIN for a client that reads NXNAME, NOERROR for one that would
+// read the NSEC as existence. The NXNAME in the bitmap is what a resolver uses
+// to tell the two denials apart and does not depend on the flag.
+//
+// The CO flag on the RESPONSE is not this function's: QueryResponder echoes it
+// onto every answer to a CO query (RFC 9824 section 5.1), which is what
+// TestQueryResponderEchoesCO covers.
 func TestAddCDEResponseFollowsCO(t *testing.T) {
 	zd := testSnapshotZone(t, "example.", `example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200
 example. 3600 IN NS ns.example.
@@ -82,9 +86,6 @@ ns.example. 3600 IN A 10.0.0.1
 		if m.Rcode != dns.RcodeNameError {
 			t.Errorf("rcode = %s, want NXDOMAIN", dns.RcodeToString[m.Rcode])
 		}
-		if !edns0.HasCO(m) {
-			t.Error("CO not set on a compact NXDOMAIN response")
-		}
 		if nsec := nsecOf(t, m); nsec.Hdr.Name != qname || !hasNXNAME(nsec) {
 			t.Errorf("NSEC = %s, want owner %s with NXNAME", nsec, qname)
 		}
@@ -94,9 +95,6 @@ ns.example. 3600 IN A 10.0.0.1
 		m := build(t, false, nil)
 		if m.Rcode != dns.RcodeSuccess {
 			t.Errorf("rcode = %s, want NOERROR beside an owner=qname NSEC", dns.RcodeToString[m.Rcode])
-		}
-		if edns0.HasCO(m) {
-			t.Error("CO set on a response to a client that did not ask for compact answers")
 		}
 		// The bitmap signal is for resolvers and does not depend on CO.
 		if nsec := nsecOf(t, m); !hasNXNAME(nsec) {
@@ -109,11 +107,78 @@ ns.example. 3600 IN A 10.0.0.1
 		if m.Rcode != dns.RcodeSuccess {
 			t.Errorf("rcode = %s, want NOERROR", dns.RcodeToString[m.Rcode])
 		}
-		if edns0.HasCO(m) {
-			t.Error("CO set on a NODATA; only the NXDOMAIN form is marked")
-		}
 		if nsec := nsecOf(t, m); hasNXNAME(nsec) {
 			t.Errorf("NXNAME in a NODATA bitmap: %s", nsec)
 		}
 	})
+}
+
+// RFC 9824 section 5.1: "In responses to such queries, an authoritative server
+// implementing both Compact Denial of Existence and this signaling scheme will
+// set the Compact Answers OK EDNS header flag and, for nonexistent names, will
+// additionally set the response code field to NXDOMAIN."
+//
+// Two acts. The flag goes on EVERY response to a CO query -- it is how a client
+// learns this server speaks CO -- and the NXDOMAIN is the additional step for
+// nonexistent names. Setting the flag only on the NXDOMAIN left a CO client
+// with no way to record the capability from a NODATA, which section 5.1 asks
+// downstream resolvers to do.
+func TestQueryResponderEchoesCO(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := testSnapshotZone(t, "example.", `example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200
+example. 3600 IN NS ns.example.
+ns.example. 3600 IN A 10.0.0.1
+www.example. 3600 IN A 10.0.0.2
+`)
+	ctx := context.Background()
+
+	ask := func(t *testing.T, qname string, qtype uint16, do, co bool) *dns.Msg {
+		t.Helper()
+		req := new(dns.Msg)
+		req.SetQuestion(qname, qtype)
+		req.SetEdns0(4096, do)
+		if co {
+			edns0.SetCO(req)
+		}
+		msgo, err := edns0.ExtractFlagsAndEDNS0Options(req)
+		if err != nil {
+			t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
+		}
+		rw := &fakeRW{}
+		if err := zd.QueryResponder(ctx, rw, req, qname, qtype, msgo, kdb, nil); err != nil {
+			t.Fatalf("QueryResponder: %v", err)
+		}
+		if rw.written == nil {
+			t.Fatal("no response written")
+		}
+		return rw.written
+	}
+
+	for _, tc := range []struct {
+		name   string
+		qname  string
+		qtype  uint16
+		do, co bool
+		rcode  int
+		wantCO bool
+	}{
+		{"NXDOMAIN to a DO+CO client", "nosuch.example.", dns.TypeMX, true, true, dns.RcodeNameError, true},
+		// The gap this closes: a CO client asking about a name that exists.
+		{"NODATA to a DO+CO client", "www.example.", dns.TypeMX, true, true, dns.RcodeSuccess, true},
+		// CO without DO still says "I speak CO"; there is just no proof to read.
+		{"NXDOMAIN to a CO client without DO", "nosuch.example.", dns.TypeMX, false, true, dns.RcodeNameError, true},
+		// And a client that never asked is told nothing.
+		{"nothing back to a client that did not ask", "nosuch.example.", dns.TypeMX, true, false, dns.RcodeSuccess, false},
+		{"a positive answer to a CO client", "www.example.", dns.TypeA, true, true, dns.RcodeSuccess, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := ask(t, tc.qname, tc.qtype, tc.do, tc.co)
+			if resp.Rcode != tc.rcode {
+				t.Errorf("rcode = %s, want %s", dns.RcodeToString[resp.Rcode], dns.RcodeToString[tc.rcode])
+			}
+			if got := edns0.HasCO(resp); got != tc.wantCO {
+				t.Errorf("CO on response = %v, want %v", got, tc.wantCO)
+			}
+		})
+	}
 }
