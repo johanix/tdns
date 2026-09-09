@@ -27,6 +27,36 @@ type EDNS0Option struct {
 	Data []byte
 }
 
+// coFlagBit is the Compact Answers OK flag (RFC 9824): bit 14 of the OPT
+// record's TTL field, next to DO at bit 15.
+const coFlagBit = uint32(1 << 14)
+
+// SetCO sets the Compact Answers OK flag on the OPT record m already carries.
+// A message without an OPT is left alone: the flag lives in the OPT, and a
+// plain-DNS query gets a plain-DNS reply.
+//
+// The flag is not copied from the query the way DO is (EnsureResponseOPT).
+// Set on a response it means "this answer IS the compact form you said you
+// could read": an NXDOMAIN beside an NSEC owned by the denied name. A
+// responder sets it only where it produces exactly that.
+func SetCO(m *dns.Msg) {
+	if m == nil {
+		return
+	}
+	if opt := m.IsEdns0(); opt != nil {
+		opt.Hdr.Ttl |= coFlagBit
+	}
+}
+
+// HasCO reports whether m carries an OPT with the Compact Answers OK flag.
+func HasCO(m *dns.Msg) bool {
+	if m == nil {
+		return false
+	}
+	opt := m.IsEdns0()
+	return opt != nil && (opt.Hdr.Ttl&coFlagBit) != 0
+}
+
 func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 	msgoptions := &MsgOptions{}
 	msgoptions.CD = r.MsgHdr.CheckingDisabled
@@ -44,7 +74,7 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 	msgoptions.DO = opt.Do()
 
 	// Extract CO bit (Compact Ok) - bit 14 (RFC 9824)
-	msgoptions.CO = (opt.Hdr.Ttl & (1 << 14)) != 0
+	msgoptions.CO = (opt.Hdr.Ttl & coFlagBit) != 0
 
 	// PRIVACY option: one octet, 0 = no opinion, 1 = opportunistic, 2 = strict.
 	// Presence is recorded separately from the level, because a response only

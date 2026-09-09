@@ -1204,3 +1204,33 @@ func isCompactDenialNXDOMAIN(bitmap []uint16) bool {
 
 	return hasRRSIG && hasNSEC && hasNXNAME
 }
+
+// CompactDenialNXDOMAIN reports whether negAuthority carries an RFC 9824
+// compact denial proving that qname does not exist: an NSEC whose owner is
+// qname itself and whose type bitmap is exactly RRSIG, NSEC and NXNAME.
+//
+// This is a question about the SHAPE of the proof, not its validity, and the
+// resolver asks it before validation runs. The rcode an authoritative server
+// puts on such a response (NOERROR, unless the query set CO) describes how the
+// NSEC reads to a validator without NXNAME support, not what it proves; and
+// which name a denial is for has to be known whether or not the proof can be
+// validated. ValidateNegativeResponse makes the same check on the way to the
+// AD bit; this one decides what gets cached.
+func CompactDenialNXDOMAIN(qname string, negAuthority []*core.RRset) bool {
+	qnameCanon := dns.CanonicalName(qname)
+	for _, set := range negAuthority {
+		if set == nil || set.RRtype != dns.TypeNSEC {
+			continue
+		}
+		for _, rr := range set.RRs {
+			nsec, ok := rr.(*dns.NSEC)
+			if !ok || dns.CanonicalName(nsec.Hdr.Name) != qnameCanon {
+				continue
+			}
+			if isCompactDenialNXDOMAIN(nsec.TypeBitMap) {
+				return true
+			}
+		}
+	}
+	return false
+}

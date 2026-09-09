@@ -909,10 +909,17 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			}
 		}
 		m.Ns = append(m.Ns, soaRRset.RRs...)
+		// Rcode BEFORE the denial is built. addCDEResponse decides, from the
+		// client's CO flag, whether an NXDOMAIN may stand beside the
+		// owner=qname NSEC it synthesises, and downgrades to NOERROR when it
+		// may not. Set afterwards, as it was, NXDOMAIN overrode that decision
+		// on this path alone (sendNXDOMAIN had the order right), and a DO
+		// client without CO was handed a proof that the name exists next to
+		// an rcode saying it does not.
+		m.MsgHdr.Rcode = dns.RcodeNameError
 		if msgoptions.DO {
 			zd.addCDEResponse(m, origqname, apex, nil, msgoptions, MaybeSignRRset)
 		}
-		m.MsgHdr.Rcode = dns.RcodeNameError
 		w.WriteMsg(m)
 		return nil
 	}
@@ -1115,8 +1122,13 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 		// For NODATA: Rcode = NOERROR
 		if rrtypeList != nil {
 			m.MsgHdr.Rcode = dns.RcodeSuccess
+		} else {
+			// For NXDOMAIN, Rcode is already RcodeNameError from caller.
+			// The response says so as well: CO on the response marks an
+			// NXDOMAIN that stands beside an NSEC owned by the denied name,
+			// the form the client said it could read (RFC 9824).
+			edns0.SetCO(m)
 		}
-		// For NXDOMAIN, Rcode is already RcodeNameError from caller
 	} else {
 		// Traditional DNSSEC: For synthetic NSEC (owner=qname), Rcode must be NOERROR
 		// because the NSEC makes it appear the name exists
