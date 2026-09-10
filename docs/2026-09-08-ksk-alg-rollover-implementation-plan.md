@@ -7,6 +7,10 @@ document settles the one question the 2026-07-01 design left open (its §7),
 corrects two of its claims, and turns the model into a commit-by-commit
 build order with a test matrix.
 
+Amended 2026-09-10: §3/F1 carries amendment A1 — two caveats on the
+soundness of the widened margin. No decision, estimate or commit in the
+build order changes.
+
 Code references are `file:line` into `v2/` at `f4bea22` (main), verified
 2026-09-08. Cross-references of the form "(fifo §N)" point at the
 2026-07-01 design; "(K-N)" at the 2026-06-21 plan; "(P0-N)" at
@@ -207,6 +211,57 @@ RRset it is entitled to sign, which is harmless.
 The same-algorithm multi-DS path keeps today's
 `max(clamping.margin, max_observed_ttl)` — do not widen it, or every
 existing rollover slows down for no reason.
+
+**Amendment A1 (2026-09-10) — two caveats on F1's soundness.** The formula
+and the conclusion above are unchanged; these are the two things a reader
+has to know before implementing them. Code references verified at
+`efb6dcd3` (main).
+
+**A1(a) — "confirmed" is a single-agent observation, and
+`ds-publish-delay` is the term that covers the gap.** Both confirm call
+sites issue one `QueryParentAgentDS(ctx, zone, agent)` against a single
+parent-agent address (`ksk_rollover_automated.go:371` in the observe
+branch, `:462` in the softfail-recovery twin; the helper itself takes one
+`agentAddr`, `ksk_rollover_parent_poll.go:96`, and so does
+`PollParentDSUntilMatch`, `:129`). Confirmation therefore establishes that
+*one* parent server was seen serving the mixed DS RRset — not that every
+parent nameserver has it. A lagging parent NS can still be answering with
+the pre-push `{DS(A)}` at the instant `retired_at` is stamped, and that
+server's `DS_TTL` clock has not started yet.
+
+That is what the `+ rollover.ds-publish-delay` addend is doing: it is
+defined as the parent-propagation approximation `parent_prop`
+(`ksk_rollover_validation.go:213-216`), and here it pads `retired_at`
+forward to cover a parent whose own fan-out has not finished. The formula
+is correct as written, but for a reason the text above does not state.
+Record the rationale at the implementation site (§5.3, in the
+`effectiveMarginForRoll` doc comment); otherwise the term reads as
+double-counting a delay the confirm already waited out, and a later
+cleanup will reduce it to `parent_DS_TTL` alone and silently reintroduce
+the F1 hazard for every multi-nameserver parent. KT-7 (§8) should pin the
+addend explicitly, not only the `DS_TTL` term.
+
+**A1(b) — "defer and log" is the normal path after a restart, not an
+exceptional one.** `ParentDSTTLObserved` is a field on the in-memory
+`ZoneData` (`structs.go:236`), not a persisted column, so any daemon
+restart mid-drain zeroes it. `resolveDSTTL` then reports unknown,
+`effectiveMarginForRoll` returns `ok=false`, and the withdraw phase
+defers — until the `ObserveParentDSTTL` goroutine started at zone load
+(`parseconfig.go:1522`) records a fresh observation, or a `ttls.parent-ds`
+override supplies one. The behaviour is right and fails in the safe
+direction (A keeps signing an RRset it is entitled to sign), but two
+consequences follow:
+
+- Word the deferral log line as an expected transient rather than an
+  alarm. It fires on every restart that lands inside a drain window, and
+  for a PQ-sized rollover that is a wide target.
+- E13 (§5.7) must be a `RolloverPolicyWarning` and never an error, for the
+  same reason. Its text should distinguish "not yet observed since
+  startup" from "no parent DS TTL is observable at all"; only the second
+  is operator-actionable (set `ttls.parent-ds`).
+
+Neither caveat changes the build order, the effort estimate, or any
+decision in §4.
 
 ### F2 — the withdraw phase leaves orphan RRSIGs behind
 
