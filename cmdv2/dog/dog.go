@@ -64,8 +64,9 @@ quic:// doq://. Queries are always class IN.
 Query:
   +opcode=QUERY|NOTIFY|UPDATE
                           set the opcode (numeric 0/4/5 also accepted)
-  +recurse, +rec          set the RD (Recursion Desired) bit (the default)
-  +norecurse, +norec      clear it: ask a cache or an authoritative server a
+  +recurse, +rec, +rdflag set the RD (Recursion Desired) bit (the default)
+  +norecurse, +norec, +nordflag
+                          clear it: ask a cache or an authoritative server a
                           non-recursive question
 
 DNSSEC and EDNS flags:
@@ -1079,14 +1080,19 @@ func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]st
 	case "+NOADFLAG", "+NOAD":
 		options["ad_bit"] = "false"
 		return options, nil
-	// dig's +recurse/+norecurse, with dig's abbreviations. miekg's SetQuestion
-	// sets RD, so without these there is no way to ask a cache or an
-	// authoritative server a non-recursive question -- which is what a debug
-	// window onto a resolver's cache is for.
-	case "+RECURSE", "+REC":
+	// miekg's SetQuestion sets RD, so without these there is no way to ask a
+	// cache or an authoritative server a non-recursive question -- which is
+	// what a debug window onto a resolver's cache is for.
+	//
+	// dig spells this two ways and so do we: +recurse/+norecurse (its own
+	// naming, back-formed from "recursion"; the verb is "recur") and
+	// +rdflag/+nordflag, which names the header bit instead and is documented
+	// as a synonym. +rec/+norec are dig's abbreviations and read correctly
+	// either way.
+	case "+RECURSE", "+REC", "+RDFLAG":
 		options["rd_bit"] = "true"
 		return options, nil
-	case "+NORECURSE", "+NOREC":
+	case "+NORECURSE", "+NOREC", "+NORDFLAG":
 		options["rd_bit"] = "false"
 		return options, nil
 	case "+COMPACT", "+CO":

@@ -56,8 +56,8 @@ Do53-TCP and DoT only).
 | `+CD` | Set the CD (Checking Disabled) bit |
 | `+ADFLAG`, `+AD` | Set the AD bit on the outgoing query. dig sets it by default; dog does not |
 | `+NOADFLAG`, `+NOAD` | Clear it again. Last one wins |
-| `+RECURSE`, `+REC` | Set the RD (Recursion Desired) bit. This is the default |
-| `+NORECURSE`, `+NOREC` | Clear RD: ask a cache or an authoritative server a non-recursive question |
+| `+RECURSE`, `+REC`, `+RDFLAG` | Set the RD (Recursion Desired) bit. This is the default |
+| `+NORECURSE`, `+NOREC`, `+NORDFLAG` | Clear RD: ask a cache or an authoritative server a non-recursive question. dig spells it both ways — `+recurse` is its own back-formation from "recursion", `+rdflag` names the header bit |
 | `+COMPACT`, `+CO` | Set the CO bit (compact denial of existence) |
 | `+DELEG`, `+DE` | Set the DE (Delegation Extension) EDNS bit |
 | `+BUFSIZE=N`, `+BUFSIZ=N` | EDNS(0) UDP payload size. Default 4096; per RFC 6891 a value below 512 is raised to 512 |
