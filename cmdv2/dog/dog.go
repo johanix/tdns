@@ -51,28 +51,77 @@ var defaultPorts = map[string]string{
 
 var rootCmd = &cobra.Command{
 	Use:   "dog",
-	Short: "CLI utility used issue DNS queries and present the result",
-	Long: `dog is a CLI utility used issue DNS queries and present the result.
-	
-	Options:
-		+DNSSEC or +DO: Set the DO (DNSSEC OK) bit in queries
-		+CD: Set the CD (Checking Disabled) bit in queries
-		+COMPACT: Set the COMPACT bit in queries (for compact denial of existence proofs)
-		+TCP: Force TCP transport
-		+TLS: Force TLS transport
-		+HTTPS: Force HTTPS transport
-		+QUIC: Force QUIC transport
-		+WIDTH=N: Set the width of the output to N characters
-		+BUFsize=N: Set the EDNS(0) UDP payload size (dig-compatible; +BUFSIZ=N accepted)
-		+OPCODE=QUERY|NOTIFY|UPDATE: Set the opcode of the query
-		+OOTS=opt_in|opt_out: Set the OOTS (transport signaling) EDNS(0)option
-		+ER=agent.domain: Add EDNS(0) Error Reporting option with agent domain (RFC9567)
-		+DELEG: Set the DELEG bit in queries
-		+PRIVACY or +PR[=strict|opportunistic|none]: Add the PRIVACY EDNS(0) option. Bare +PR means strict (the resolver must use an encrypted transport or fail); opportunistic asks it to prefer one but accepts cleartext
-		+MULTI: Present RRs in multi-line format
-		+SHORT: Only print the RDATA of the Answer RRset (dig-compatible; same as --short)
-		+SIGCHASE or +SC: Walk and verify the DNSSEC chain for the qname/qtype, emitting a per-link verdict tree. Server must be a recursive resolver. Trust anchors come from --trust-anchor, the IMR config, or the compiled-in root KSKs.
-		+ALGCHASE or +AC: Like +SIGCHASE, but also annotate each algorithm number in the chain with its algorithm name (e.g. "alg=13 (ECDSAP256SHA256)"). Implies +SIGCHASE.
+	Short: "CLI utility used to issue DNS queries and present the result",
+	Long: `dog issues DNS queries and presents the result. The CLI is as close to
+dig's as possible; arguments are case-insensitive and may appear in any order.
+
+  dog [@server] [name] [type] [+option ...]
+
+@server takes @host, @host:port, @[ipv6], @[ipv6]:port, or a URL form that
+selects the transport directly: dns:// tcp:// tls:// dot:// https:// doh://
+quic:// doq://. Queries are always class IN.
+
+Query:
+  +opcode=QUERY|NOTIFY|UPDATE
+                          set the opcode (numeric 0/4/5 also accepted)
+  +recurse, +rec          set the RD (Recursion Desired) bit (the default)
+  +norecurse, +norec      clear it: ask a cache or an authoritative server a
+                          non-recursive question
+
+DNSSEC and EDNS flags:
+  +dnssec, +do            set the DO (DNSSEC OK) bit
+  +cd                     set the CD (Checking Disabled) bit
+  +adflag, +ad            set the AD bit on the outgoing query
+  +noadflag, +noad        clear it (the default)
+  +compact, +co           set the CO bit (RFC 9824 compact denial of existence)
+  +deleg, +de             set the DE (Delegation Extension) bit
+  +bufsize=N, +bufsiz=N   EDNS(0) UDP payload size (default 4096, floor 512)
+  +oots, +oots=opt_in|opt_out
+                          EDNS(0) transport-signaling option
+  +er=<agent.domain>      EDNS(0) Error Reporting (RFC 9567)
+  +privacy, +pr[=strict|opportunistic|none]
+                          PRIVACY EDNS(0) option; bare +pr is strict
+
+Transport:
+  +tcp                    force Do53 over TCP
+  +tls, +dot              DoT (default port 853)
+  +https, +doh            DoH (default port 443)
+  +quic, +doq             DoQ (default port 853)
+
+Timeouts and retries:
+  +time=T, +timeout=T     per-attempt timeout in seconds (below 1 becomes 1,
+                          above 65535 is refused, as in dig)
+  +tries=A                total attempts, default 1 (dig's default is 3)
+  +retry=T                retries after the first, i.e. tries = T+1
+                          Only a transport failure is retried; a response that
+                          came back is an answer.
+
+Server certificate (encrypted transports only):
+  +cert=<file>, +key=<file>
+                          present a client certificate (XoT / mutual DoT)
+  +cafile=<file>          verify the server cert against a PEM CA bundle
+  +pin=<spki-b64>         verify the server cert by SPKI pin (repeatable)
+  +tlsa                   DANE-verify against _port._tcp.<server>
+  +showpin                print the server cert's SPKI pin and exit
+
+Zone transfers:
+  AXFR, IXFR=<serial>     as the query type; both run over Do53-TCP and DoT
+  +zonemd, +zmd           after an AXFR, verify the apex ZONEMD (RFC 8976);
+                          exits non-zero if it does not verify
+  +ignoreserial, +ignser  with +zonemd, digest against the serial each ZONEMD
+                          names rather than the SOA's
+
+DNSSEC chain validation:
+  +sigchase, +sigcha, +sc walk and validate the chain, per-link verdict
+  +algchase, +algcha, +ac as +sigchase, naming each algorithm number
+
+Output:
+  +short                  print only the answer RDATA (same as --short)
+  +multi                  multi-line RR output
+  +width=N                right margin for +multi
+
+Anything else is rejected. A truncated UDP response is retried over TCP.
+See guide/app-dog.md for the long form.
 	`,
 
 	Run: func(cmd *cobra.Command, args []string) {
@@ -310,6 +359,14 @@ var rootCmd = &cobra.Command{
 				}
 				if options["ad_bit"] == "false" {
 					m.MsgHdr.AuthenticatedData = false
+				}
+				// RD (+recurse / +norecurse). SetQuestion/SetUpdate leave it
+				// set, so only an explicit +norec clears it.
+				if options["rd_bit"] == "true" {
+					m.MsgHdr.RecursionDesired = true
+				}
+				if options["rd_bit"] == "false" {
+					m.MsgHdr.RecursionDesired = false
 				}
 				ednsUDPSize, err := dogopts.EDNSUDPSizeFromMap(options)
 				if err != nil {
@@ -1021,6 +1078,16 @@ func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]st
 		return options, nil
 	case "+NOADFLAG", "+NOAD":
 		options["ad_bit"] = "false"
+		return options, nil
+	// dig's +recurse/+norecurse, with dig's abbreviations. miekg's SetQuestion
+	// sets RD, so without these there is no way to ask a cache or an
+	// authoritative server a non-recursive question -- which is what a debug
+	// window onto a resolver's cache is for.
+	case "+RECURSE", "+REC":
+		options["rd_bit"] = "true"
+		return options, nil
+	case "+NORECURSE", "+NOREC":
+		options["rd_bit"] = "false"
 		return options, nil
 	case "+COMPACT", "+CO":
 		options["co_bit"] = "true"

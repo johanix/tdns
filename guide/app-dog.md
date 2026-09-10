@@ -54,8 +54,13 @@ Do53-TCP and DoT only).
 |--------|--------|
 | `+DNSSEC`, `+DO` | Set the DO (DNSSEC OK) bit |
 | `+CD` | Set the CD (Checking Disabled) bit |
+| `+ADFLAG`, `+AD` | Set the AD bit on the outgoing query. dig sets it by default; dog does not |
+| `+NOADFLAG`, `+NOAD` | Clear it again. Last one wins |
+| `+RECURSE`, `+REC` | Set the RD (Recursion Desired) bit. This is the default |
+| `+NORECURSE`, `+NOREC` | Clear RD: ask a cache or an authoritative server a non-recursive question |
 | `+COMPACT`, `+CO` | Set the CO bit (compact denial of existence) |
 | `+DELEG`, `+DE` | Set the DE (Delegation Extension) EDNS bit |
+| `+BUFSIZE=N`, `+BUFSIZ=N` | EDNS(0) UDP payload size. Default 4096; per RFC 6891 a value below 512 is raised to 512 |
 | `+PRIVACY`, `+PR[=strict\|opportunistic\|none]` | Add the PRIVACY EDNS(0) option. Bare `+PR` is strict: the resolver must reach the authoritative servers over an encrypted transport or fail with SERVFAIL + EDE. `opportunistic` asks it to prefer one but accepts cleartext |
 | `+MULTI` | Multi-line RR output |
 | `+WIDTH=N` | Right margin for `+MULTI` |
@@ -68,17 +73,25 @@ Do53-TCP and DoT only).
 | `+TLS`, `+DOT` | DoT (default port 853) |
 | `+HTTPS`, `+DOH` | DoH (default port 443) |
 | `+QUIC`, `+DOQ` | DoQ (default port 853) |
+| `+TIME=T`, `+TIMEOUT=T` | Per-attempt timeout in seconds. dig's range: below 1 is raised to 1, above 65535 is refused rather than silently shortened |
+| `+TRIES=A` | Total attempts. Default 1, where dig's default is 3 |
+| `+RETRY=T` | Retries *after* the first, i.e. `tries = T+1` |
 | `+cert=<file>`, `+key=<file>` | Present a client certificate (XoT / mutual DoT); needs an encrypted transport |
 | `+cafile=<file>` | Verify the server cert against a PEM CA bundle (encrypted transport) |
 | `+pin=<spki-b64>` | Verify the server cert by SPKI pin (encrypted transport) |
 | `+tlsa` | DANE-verify the server cert against `_port._tcp.<server>` (encrypted transport) |
 | `+showpin` | Print the server cert's SPKI pin (for use with `+pin=`/`pins:`) |
 | `+OPCODE=QUERY\|NOTIFY\|UPDATE` | Set the opcode (numeric 0/4/5 also accepted) |
-| `+OTS`, `+OTS=opt_in\|opt_out` | EDNS(0) transport-signaling option |
+| `+OOTS`, `+OOTS=opt_in\|opt_out` | EDNS(0) transport-signaling option |
 | `+ER=<agent.domain>` | EDNS(0) Error Reporting, RFC 9567 |
 
-Anything else is rejected as an unknown option. A truncated UDP response is
-retried over TCP automatically.
+Anything else is rejected as an unknown option.
+
+A truncated UDP response is retried over TCP automatically. `+time=` and
+`+tries=` cover that second query as well as the first, and `+time=` also
+bounds the `+sigchase` chain walker. Only a transport failure is retried: a
+response that came back — SERVFAIL, NXDOMAIN, or one whose TSIG did not
+verify — is an answer, and asking again cannot change it.
 
 ## DNSSEC chain validation
 
