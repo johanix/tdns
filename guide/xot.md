@@ -80,9 +80,11 @@ is `tdns-cli cert init` (see [Certificate Provisioning](cert-provisioning.md)).
 
 ## Example 1 — `tls-pkix` (one CA, many secondaries)
 
-pkix is the mode that scales: the primary trusts a **single CA file**, and every
-secondary whose client cert was signed by that CA (and carries the expected
-name) is authorized — no per-secondary config on the primary.
+pkix is the mode that scales: the primary trusts a **single CA file**, and two
+shapes follow from it. Name a peer per secondary and require the expected SAN on
+its client leaf (1b), or define one chain-only peer that authorizes any client
+whose cert chains to that CA (below). Only the second has no per-secondary
+config on the primary.
 
 ### 1a. Provision the certificates
 
@@ -129,6 +131,34 @@ zones:
 > `NOKEY`) and use `downstream-auth: [ tls-pkix ]` — the entry then requires
 > *both* a valid TSIG and the client cert, because `tls-*` is additive. Use
 > `NOKEY` only when the certificate alone is the intended credential.
+
+#### Chain-only: one peer for every secondary
+
+A peer with no `tls-name`, and no `addr` to default one from, carries no
+identity to pin against. Membership of the CA is then the whole test, and any
+client whose certificate chains to that anchor is authorized whatever name it
+presents:
+
+```yaml
+peers:
+   ca-member:
+      prefixes: [ 0.0.0.0/0, "::/0" ]          # any source address
+      keys:     [ NOKEY ]                      # the cert is the sole credential
+      ca-file:  /etc/tdns/certs/tdns-ca.crt    # chaining to this anchor is the test
+
+zones:
+   - name:      example.com.
+     type:      primary
+     zonefile:  /etc/tdns/zones/example.com
+     downstream-auth: [ tls-pkix ]
+     downstreams:
+        - peers: [ ca-member ]
+```
+
+Adding a secondary is then a matter of issuing it a client cert; the primary's
+config does not change. The trade is that the CA becomes the entire boundary —
+anyone holding a certificate it signed can transfer this zone — so give this
+shape a CA that issues for nothing else.
 
 ### 1c. Secondary: pull over XoT and verify the primary
 

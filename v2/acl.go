@@ -105,6 +105,28 @@ func ValidateACL(acl []AclEntry, keyDefined func(string) bool) error {
 		if e.Legacy != "" {
 			return fmt.Errorf("entry %q is a legacy bare-string address; migrate to { prefix: %s, key: NOKEY } — {prefix, key} is now required, and downstreams: is an AXFR ACL (not a notify list)", e.Legacy, e.Legacy)
 		}
+		// A reference entry names peers instead of carrying a prefix of its
+		// own. expandAclList turns it into the peer's prefix x key cross-
+		// product at zone load, and diagnoses an unknown id, a broken peer or
+		// a peer with no prefixes there. Validating it here as though it were
+		// inline rejected the ONLY spelling that can carry a TLS identity, so
+		// a zone with downstream-auth: [tls-pin|tls-pkix|tls-dane] could not
+		// authorise anyone: the entries that carry an identity would not
+		// start, and the ones that start carry none.
+		//
+		// This does not weaken the check the validator was added for. An
+		// `- addr: 192.0.2.1:53` written into downstreams: decodes to an entry
+		// with an empty PeersRef AND an empty Prefix, so it still falls
+		// through to ValidateIPSpec and is still caught.
+		if len(e.PeersRef) > 0 {
+			// Same rule expandAclList applies, applied at config-check time
+			// rather than at zone load, so both spellings of a bad reference
+			// entry are reported by the same pass.
+			if e.Prefix != "" || e.Key != "" {
+				return fmt.Errorf("acl entry referencing peers %v: an entry may be a reference (peers:) or inline (prefix/key), not both", e.PeersRef)
+			}
+			continue
+		}
 		if err := ValidateIPSpec(e.Prefix); err != nil {
 			return fmt.Errorf("acl entry %q: %w", e.Prefix, err)
 		}
