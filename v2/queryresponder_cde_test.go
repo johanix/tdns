@@ -182,3 +182,77 @@ www.example. 3600 IN A 10.0.0.2
 		})
 	}
 }
+
+// The two exits that build their own message rather than the one every other
+// path shares: a cancelled context and a signing failure on a must-be-signed
+// zone. Both attached the OPT and stopped there, so a CO client got a SERVFAIL
+// without the flag RFC 9824 section 5.1 puts on every response to such a query.
+// respondEDNS pairs the two so they cannot drift apart again.
+func TestServfailPathsEchoCO(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	coQuery := func(qname string, qtype uint16) (*dns.Msg, *edns0.MsgOptions) {
+		req := new(dns.Msg)
+		req.SetQuestion(qname, qtype)
+		req.SetEdns0(4096, true)
+		edns0.SetCO(req)
+		msgo, err := edns0.ExtractFlagsAndEDNS0Options(req)
+		if err != nil {
+			t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
+		}
+		if !msgo.CO {
+			t.Fatal("setup: the query did not carry CO")
+		}
+		return req, msgo
+	}
+
+	t.Run("cancelled context", func(t *testing.T) {
+		zd := testSnapshotZone(t, "example.", `example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200
+example. 3600 IN NS ns.example.
+ns.example. 3600 IN A 10.0.0.1
+`)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		req, msgo := coQuery("www.example.", dns.TypeA)
+		rw := &fakeRW{}
+		// Returns ctx.Err() by design; the response is what is under test.
+		_ = zd.QueryResponder(ctx, rw, req, "www.example.", dns.TypeA, msgo, kdb, nil)
+		if rw.written == nil {
+			t.Fatal("no response written")
+		}
+		if rw.written.Rcode != dns.RcodeServerFailure {
+			t.Errorf("rcode = %s, want SERVFAIL", dns.RcodeToString[rw.written.Rcode])
+		}
+		if !edns0.HasCO(rw.written) {
+			t.Error("no CO on the cancelled-context SERVFAIL")
+		}
+	})
+
+	t.Run("signing failure", func(t *testing.T) {
+		// A zone that must be signed whose snapshot carries no RRSIGs: the DO
+		// arm builds a fresh SERVFAIL rather than reusing m.
+		zd := testSnapshotZone(t, "broken.example.", `broken.example. 3600 IN SOA ns.broken.example. hostmaster.broken.example. 1 7200 1800 604800 7200
+broken.example. 3600 IN NS ns.broken.example.
+ns.broken.example. 3600 IN A 10.0.0.1
+www.broken.example. 3600 IN A 10.0.0.2
+`)
+		zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+		zd.KeyDB = kdb
+
+		req, msgo := coQuery("www.broken.example.", dns.TypeA)
+		rw := &fakeRW{}
+		if err := zd.QueryResponder(context.Background(), rw, req, "www.broken.example.", dns.TypeA, msgo, kdb, nil); err != nil {
+			t.Fatalf("QueryResponder: %v", err)
+		}
+		if rw.written == nil {
+			t.Fatal("no response written")
+		}
+		if rw.written.Rcode != dns.RcodeServerFailure {
+			t.Fatalf("rcode = %s, want SERVFAIL (the fixture is a broken signed zone)", dns.RcodeToString[rw.written.Rcode])
+		}
+		if !edns0.HasCO(rw.written) {
+			t.Error("no CO on the signing-failure SERVFAIL")
+		}
+	})
+}

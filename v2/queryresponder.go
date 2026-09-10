@@ -432,6 +432,30 @@ func (zd *ZoneData) sendReferral(m *dns.Msg, w dns.ResponseWriter, cdd *ChildDel
 }
 
 // sendNXDOMAIN sends an NXDOMAIN response with proper DNSSEC negative response if requested.
+// respondEDNS attaches the response OPT and, for a client that asked for
+// compact answers, the CO flag beside it.
+//
+// RFC 9824 section 5.1: "In responses to such queries, an authoritative server
+// implementing both Compact Denial of Existence and this signaling scheme will
+// set the Compact Answers OK EDNS header flag and, for nonexistent names, will
+// additionally set the response code field to NXDOMAIN." Two acts, not one:
+// the flag on every response to a CO query says this server speaks CO, and the
+// rcode is the additional step for nonexistent names (addCDEResponse). A CO
+// client therefore learns the capability from a NODATA too, which is what
+// section 5.1's "resolvers will need to record the presence of this flag in
+// associated cache data" asks for.
+//
+// The two go together in one call because QueryResponder has three exits that
+// build their own message -- the long-lived m, and the SERVFAILs for a
+// cancelled context and a signing failure. Attaching the OPT without the flag
+// is what those two did, and a paired helper is what stops them drifting again.
+func respondEDNS(m, r *dns.Msg, msgoptions *edns0.MsgOptions) {
+	edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
+	if msgoptions != nil && msgoptions.CO {
+		edns0.SetCO(m)
+	}
+}
+
 func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData, snap *zoneSnapshot,
 	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
 	m.MsgHdr.Rcode = dns.RcodeNameError
@@ -770,7 +794,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		lgHandler.Info("QueryResponder: context cancelled")
 		m := new(dns.Msg)
 		m.SetReply(r)
-		edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
+		respondEDNS(m, r, msgoptions)
 		m.MsgHdr.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(m)
 		return ctx.Err()
@@ -816,22 +840,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	// this m) carries it. No-op for non-EDNS queries. Later EDE/CDE error paths
 	// find and reuse this OPT rather than adding a second one. Downstream UDP
 	// truncation preserves the OPT and re-appends it after trimming.
-	edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
-
-	// RFC 9824 section 5.1: "In responses to such queries, an authoritative
-	// server implementing both Compact Denial of Existence and this signaling
-	// scheme will set the Compact Answers OK EDNS header flag and, for
-	// nonexistent names, will additionally set the response code field to
-	// NXDOMAIN." Two acts, not one: the flag on every response to a CO query
-	// says this server speaks CO, and the rcode is the additional step for
-	// nonexistent names (addCDEResponse). Echoed here beside the OPT so a CO
-	// client learns it from a NODATA too -- section 5.1 asks downstream
-	// resolvers to "record the presence of this flag in associated cache
-	// data", and a flag that appears only on NXDOMAIN cannot be recorded from
-	// anything else.
-	if msgoptions.CO {
-		edns0.SetCO(m)
-	}
+	respondEDNS(m, r, msgoptions)
 
 	// Pin ONE snapshot for the whole response so the answer, authority SOA, NS,
 	// and glue all come from the same serial — no intra-response tearing (C1).
@@ -1004,7 +1013,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 					servfail := new(dns.Msg)
 					servfail.SetReply(r)
 					servfail.MsgHdr.Authoritative = true
-					edns0.EnsureResponseOPT(servfail, r, dns.DefaultMsgSize)
+					respondEDNS(servfail, r, msgoptions)
 					servfail.MsgHdr.Rcode = dns.RcodeServerFailure
 					w.WriteMsg(servfail)
 					return nil

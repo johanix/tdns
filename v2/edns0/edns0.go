@@ -35,10 +35,16 @@ const coFlagBit = uint32(1 << 14)
 // A message without an OPT is left alone: the flag lives in the OPT, and a
 // plain-DNS query gets a plain-DNS reply.
 //
-// The flag is not copied from the query the way DO is (EnsureResponseOPT).
-// Set on a response it means "this answer IS the compact form you said you
-// could read": an NXDOMAIN beside an NSEC owned by the denied name. A
-// responder sets it only where it produces exactly that.
+// This is the bit-setter and nothing more; WHEN to set it is the responder's
+// decision. The flag is not copied from the query the way DO is
+// (EnsureResponseOPT), because it is not an echo of a capability the client
+// announced -- RFC 9824 section 5.1 defines it on a response as the RESPONDER
+// saying it implements the scheme: "an authoritative server implementing both
+// Compact Denial of Existence and this signaling scheme will set the Compact
+// Answers OK EDNS header flag and, for nonexistent names, will additionally
+// set the response code field to NXDOMAIN". Two acts, and this is only the
+// first. tdns sets it on every response to a query that carried CO; see
+// QueryResponder and ImrResponder.
 func SetCO(m *dns.Msg) {
 	if m == nil {
 		return
