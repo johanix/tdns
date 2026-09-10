@@ -180,6 +180,24 @@ func RunStoreSuite(t *testing.T, newStore func(t *testing.T) tdns.DelegationStor
 		}
 	})
 
+	t.Run("AnUnknownClassFailsTheWholeUpdate", func(t *testing.T) {
+		// A class other than IN, NONE or ANY is a defect in the update.
+		// The store must not apply the rest and answer NOERROR: nothing of
+		// the update may be kept.
+		s := newStore(t)
+		ur := update(t, dns.ClassINET, "alpha.parent.example. 3600 IN NS ns.alpha.parent.example.")
+		odd := mustRR(t, "alpha.parent.example. 3600 IN NS ns2.alpha.parent.example.")
+		odd.Header().Class = dns.ClassCHAOS
+		ur.Actions = append(ur.Actions, odd)
+		if err := s.ApplyChildUpdate(parent, ur); err == nil {
+			t.Fatal("an update with an action of unknown class was accepted")
+		}
+		data, err := s.GetDelegationData(parent, "alpha.parent.example.")
+		if err != nil || len(data) != 0 {
+			t.Fatalf("part of a refused update was kept: data=%v err=%v", data, err)
+		}
+	})
+
 	t.Run("ChildrenAreScopedToTheirParent", func(t *testing.T) {
 		s := newStore(t)
 		if err := s.ApplyChildUpdate(parent, update(t, dns.ClassINET,

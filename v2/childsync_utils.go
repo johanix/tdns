@@ -199,9 +199,11 @@ func sendUpdateVia(ctx context.Context, msg *dns.Msg, zonename string, addrs []s
 			// NOTAUTH the rcode of a TSIG failure, and the client will not
 			// hand up a message it could not authenticate. It IS an answer,
 			// though -- the primary spoke, and said the key or the zone is not
-			// its -- and the one thing it cannot be is a reason to try the
-			// next address or to retry later. Reported as the rejection it is,
-			// so the caller's rcode policy sees NOTAUTH.
+			// its -- so it is recorded as the rejection it is, rcode NOTAUTH,
+			// and the walk goes on to the next address exactly as it does for
+			// every other rejection. If no address accepts, the caller's rcode
+			// policy sees NOTAUTH rather than a transport failure. The ddns
+			// writer's NOTAUTH test drives this path.
 			if provider != nil && errors.Is(err, dns.ErrAuth) {
 				lgDns.Warn("target answered NOTAUTH to a TSIG-signed UPDATE (the key is unknown to it, or the zone is not its)",
 					"zone", zonename, "dst", dst)

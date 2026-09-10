@@ -135,6 +135,15 @@ func checkAgentZoneOptions(cfg *tdns.Config, rep *ccReport) {
 				"set type: secondary, or drop the parentsync-proxy option")
 		}
 
+		// childsync without the proxy option on an agent secondary is the
+		// footgun the option gate cannot see: the advertisement goes into a
+		// copy the next transfer replaces.
+		if enabled[tdns.OptChildSync] && !enabled[tdns.OptChildSyncProxy] && lc(eff.Type) == "secondary" && !opts["multi-provider"] {
+			rep.warn(g, zname,
+				"childsync on an agent secondary publishes the DSYNC advertisement into a copy the next transfer replaces",
+				"set childsync-proxy instead, or drop childsync")
+		}
+
 		// The parent-side proxy has the same shape: an agent secondary, of
 		// the PARENT zone, offering the childsync schemes on its behalf.
 		if hasChildProxy := enabled[tdns.OptChildSyncProxy]; hasChildProxy {

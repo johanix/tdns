@@ -224,6 +224,13 @@ func (zd *ZoneData) runParentPushes(ctx context.Context) {
 	st := zd.parentPush()
 	for {
 		st.mu.Lock()
+		// Before the drain, not after: a cancelled worker leaves the pending
+		// set where it is rather than taking it and dropping it.
+		if ctx.Err() != nil {
+			st.running = false
+			st.mu.Unlock()
+			return
+		}
 		children := make([]string, 0, len(st.pending))
 		for c := range st.pending {
 			children = append(children, c)
@@ -231,7 +238,7 @@ func (zd *ZoneData) runParentPushes(ctx context.Context) {
 		st.pending = map[string]bool{}
 		advertise, reconcile := st.advertise, st.reconcile
 		st.advertise, st.reconcile = false, false
-		if len(children) == 0 && !advertise && !reconcile || ctx.Err() != nil {
+		if len(children) == 0 && !advertise && !reconcile {
 			st.running = false
 			st.mu.Unlock()
 			return

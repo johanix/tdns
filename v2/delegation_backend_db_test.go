@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,5 +121,50 @@ func TestZonefileBackendKeepsFragmentWhenStoreUnreadable(t *testing.T) {
 	}
 	if _, err := os.Stat(frag); err != nil {
 		t.Fatalf("the fragment was removed on a store READ failure: %v", err)
+	}
+}
+
+// A commit that fails is the caller's error. The old defer logged it and the
+// function returned nil: a child heard NOERROR for a change the store did
+// not keep, which is the one thing acceptance-means-recorded forbids.
+func TestFinishTxReturnsTheCommitError(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	tx, err := kdb.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A transaction that is already gone cannot be committed: the same
+	// shape as any commit failure, without needing a full disk.
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := finishTx(tx, nil); err == nil || !strings.Contains(err.Error(), "committing") {
+		t.Fatalf("a failed commit must come back as an error, got %v", err)
+	}
+
+	tx2, err := kdb.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cause := errors.New("the update was bad")
+	if err := finishTx(tx2, cause); err != cause {
+		t.Fatalf("with a cause, finishTx must roll back and return the cause, got %v", err)
+	}
+}
+
+// A stored row that does not parse makes the child unreadable, in words. It
+// must not read as a smaller delegation: the push engine would diff that
+// against the served zone and delete at the primary what it could not parse.
+func TestDBBackendUnreadableRowIsAnError(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	b := &DBDelegationBackend{kdb: kdb}
+	if _, err := kdb.DB.Exec(`INSERT INTO ChildDelegationData (parent, child, owner, rrtype, rr, origin) VALUES (?, ?, ?, ?, ?, ?)`,
+		"example.", "child.example.", "child.example.", "NS", "this is not a record", "asserted"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.GetDelegationData("example.", "child.example.")
+	if err == nil || !strings.Contains(err.Error(), "does not parse") {
+		t.Fatalf("an unparsable row must be a read error naming it, got %v", err)
 	}
 }

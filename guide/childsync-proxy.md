@@ -417,3 +417,10 @@ discrepancy. The daemon and its other zones keep running.
 - The refresh reconcile reads the store once per known child. On a parent
   with very many children that is the cost of every refresh.
 - Only the `mysql` driver ships. The dialect shim is where PostgreSQL would go.
+- `childsync.update.target` must be a name below the apex. The proxy mints
+  no receiver KEY at the apex, so with the target there the UPDATE scheme is
+  advertised but cannot be signed; the log says so on every reconcile.
+- `childsync` **without** `childsync-proxy` on an agent secondary publishes
+  the advertisement into the agent's own copy, which the next transfer
+  replaces. The zone gets a config warning and `tdns-cli agent config check`
+  reports it.

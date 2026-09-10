@@ -1712,6 +1712,18 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 			// first reconciliation of the children sees a seeded store.
 			zd.ChildSyncProxyPostRefresh()
 		} else {
+			// An agent secondary with childsync but not childsync-proxy
+			// publishes the advertisement into a copy the next transfer
+			// replaces (design §3.1), and no origination gate stops it off
+			// tdns-auth. The option gate cannot see this case; say it here.
+			// Multi-provider zones are tdns-mp's and excluded, as in the
+			// parentsync branch below.
+			if Globals.App.Type == AppTypeAgent && zd.ZoneType == Secondary && !zd.Options[OptMultiProvider] {
+				lg.Warn("SetupZoneSync: childsync on an agent secondary publishes the DSYNC advertisement into a copy"+
+					" the next transfer replaces; set childsync-proxy instead", "zone", zd.ZoneName)
+				zd.SetError(ConfigWarning, "childsync on an agent secondary publishes the DSYNC advertisement into a copy"+
+					" the next transfer replaces; set childsync-proxy instead")
+			}
 			lg.Debug("SetupZoneSync: reconciling the DSYNC RRset", "zone", zd.ZoneName)
 			if err := zd.PublishDsyncRRs(context.Background()); err != nil {
 				lg.Error("PublishDsyncRRs failed", "zone", zd.ZoneName, "err", err)

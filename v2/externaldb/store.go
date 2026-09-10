@@ -281,10 +281,12 @@ func (s *Store) ApplyChildUpdate(parentZone string, ur tdns.UpdateRequest) (err 
 				return err
 			}
 		default:
-			// Skipped, as the sqlite store skips it -- and said, so the
-			// child is not silently told an action it sent was applied.
-			lg().Warn("external-db: unknown class in a child update, skipping the action",
-				"parent", parentZone, "child", child, "owner", owner, "rrtype", rrtype, "class", rr.Header().Class)
+			// Not skipped: the whole update rolls back, as in the sqlite
+			// store. Answering NOERROR for an update applied only in part
+			// would tell the child it was applied.
+			err = fmt.Errorf("external-db: action for %s %s has class %d; an update action must be IN, NONE or ANY",
+				owner, rrtype, rr.Header().Class)
+			return err
 		}
 	}
 	if err = tx.Commit(); err != nil {
@@ -312,11 +314,11 @@ func (s *Store) GetDelegationData(parentZone, childZone string) (map[string]map[
 		}
 		rr, err := dns.NewRR(text)
 		if err != nil {
-			// Not this child's delegation, and not silently: an unparsable
-			// row must not look like a child with no rows.
-			lg().Warn("external-db: stored row does not parse as a record, skipping it",
-				"parent", parentZone, "child", childZone, "row", text, "err", err)
-			continue
+			// The store could not be read, which is the other answer the
+			// interface allows -- not a smaller delegation that the push
+			// engine would then diff against the served zone.
+			return nil, fmt.Errorf("external-db: stored row for %s in %s does not parse as a record (%q): %w",
+				childZone, parentZone, text, err)
 		}
 		t := rr.Header().Rrtype
 		if out[owner] == nil {

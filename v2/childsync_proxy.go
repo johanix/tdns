@@ -118,7 +118,17 @@ func (zd *ZoneData) receiverKeyDelta() (receiverKeyState, dns.RR, error) {
 		return receiverKeyNotWanted, nil, nil
 	}
 	target := DsyncUpdateTargetName(zd.ZoneName)
-	if target == "" || dsyncUpdateTargetIsZoneApex(zd.ZoneName, target) {
+	if target == "" {
+		return receiverKeyNotWanted, nil, nil
+	}
+	if dsyncUpdateTargetIsZoneApex(zd.ZoneName, target) {
+		// No receiver KEY is minted at the apex from a proxy: the apex is
+		// the primary's, and the bootstrap SVCB refuses the apex for the
+		// same reason. The DSYNC records still go out; the UPDATE scheme
+		// they advertise cannot be signed until the target moves.
+		lg.Warn("childsync-proxy: childsync.update.target is the zone apex; no receiver KEY is minted there,"+
+			" so the UPDATE scheme cannot be signed. Point the target below the apex",
+			"zone", zd.ZoneName, "target", target)
 		return receiverKeyNotWanted, nil, nil
 	}
 	if zd.KeyDB == nil {

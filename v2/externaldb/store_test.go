@@ -276,3 +276,18 @@ func TestUnsupportedDriverAndMissingDSN(t *testing.T) {
 		t.Errorf("a bad prefix was accepted: %v", err)
 	}
 }
+
+// A stored row that does not parse is a read error, not a smaller child.
+func TestExternalDBUnreadableRowIsAnError(t *testing.T) {
+	s := liveStore(t)
+	ctx := context.Background()
+	if _, err := s.db.ExecContext(ctx, s.q(fmt.Sprintf(
+		`INSERT INTO %s (parent, child, owner, rrtype, rr, rr_hash, origin, revision, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'asserted', 1, NOW(3))`,
+		s.table("delegation"))), "parent.example.", "alpha.parent.example.", "alpha.parent.example.", "NS", "this is not a record", rrHash("this is not a record")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.GetDelegationData("parent.example.", "alpha.parent.example.")
+	if err == nil || !strings.Contains(err.Error(), "does not parse") {
+		t.Fatalf("an unparsable row must be a read error naming it, got %v", err)
+	}
+}
