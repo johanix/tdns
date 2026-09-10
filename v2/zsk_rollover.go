@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -205,10 +206,103 @@ func LoadZskManualRollover(kdb *KeyDB, zone string) (ZskManualRollover, error) {
 // pipeline members of any algorithm).
 type ZskAlgRollState struct {
 	InFlight bool
+	// FromAlg is the source algorithm named in operator-facing text. With
+	// more than one non-target algorithm present (FromAlgs) it is the one
+	// with the most keys, lowest codepoint on a tie -- deterministic, unlike
+	// the first-seen pick it replaces.
 	FromAlg  uint8
+	FromAlgs []uint8
 	ToAlg    uint8
 	Done     int
 	Total    int
+}
+
+// AlgRollState is the role-generic answer to "is an algorithm rollover
+// toward ToAlg in flight for this role". Both role wrappers derive from it.
+type AlgRollState struct {
+	InFlight bool
+	Role     string // "KSK" | "ZSK"
+	// FromAlgs is the set of non-target algorithms present among the
+	// role's live keys, ascending. Normally one element; more than one
+	// means an earlier transition never finished draining.
+	FromAlgs []uint8
+	ToAlg    uint8
+	Done     int // live keys already on ToAlg
+	Total    int // live keys of the role
+}
+
+// FromAlg returns the algorithm operator-facing text should name as the
+// source: the most-populated non-target algorithm, lowest codepoint on a
+// tie; 0 when nothing is in flight.
+func (st AlgRollState) FromAlg() uint8 {
+	if !st.InFlight || len(st.FromAlgs) == 0 {
+		return 0
+	}
+	return st.FromAlgs[0]
+}
+
+// zskAlgRollLiveStates are the ZSK key states that count as "live" for the
+// in-flight predicate: standby / active / retired. A published ZSK has not
+// yet propagated and a removed one is terminal; neither says anything
+// about which algorithm the zone is signing under.
+var zskAlgRollLiveStates = []string{DnskeyStateStandby, DnskeyStateActive, DnskeyStateRetired}
+
+// kskAlgRollLiveStates are the KSK states that count as live: everything
+// non-terminal. A created or ds-published KSK of a wrong algorithm is a
+// pipeline member the engine still has to deal with, so it keeps the roll
+// "in flight" for the re-entrancy guard and for status.
+var kskAlgRollLiveStates = []string{
+	DnskeyStateCreated, DnskeyStateDsPublished, DnskeyStatePublished,
+	DnskeyStateStandby, DnskeyStateActive, DnskeyStateRetired,
+}
+
+// algRollInFlight is the shared core of zskAlgRollInFlight and
+// kskAlgRollInFlight: over the zone's keys of one role (sep selects the
+// SEP bit) in the given states, count those on targetAlg and collect the
+// set of other algorithms present. Any other algorithm present means a
+// transition toward targetAlg is in flight -- the fuller drain-window
+// predicate (§8.3), which stays true after the new-algorithm key is
+// active while an old-algorithm key is still draining.
+func algRollInFlight(kdb *KeyDB, zone string, sep bool, targetAlg uint8, states []string) (AlgRollState, error) {
+	zone = dns.Fqdn(zone)
+	role := "ZSK"
+	if sep {
+		role = "KSK"
+	}
+	out := AlgRollState{Role: role, ToAlg: targetAlg}
+	counts := map[uint8]int{}
+	for _, state := range states {
+		keys, err := GetDnssecKeysByState(kdb, zone, state)
+		if err != nil {
+			return out, fmt.Errorf("algRollInFlight: list %s keys for zone %s: %w", state, zone, err)
+		}
+		for _, k := range keys {
+			if (k.Flags&dns.SEP != 0) != sep {
+				continue
+			}
+			out.Total++
+			if k.Algorithm == targetAlg {
+				out.Done++
+				continue
+			}
+			counts[k.Algorithm]++
+		}
+	}
+	if len(counts) == 0 {
+		return out, nil
+	}
+	out.InFlight = true
+	for alg := range counts {
+		out.FromAlgs = append(out.FromAlgs, alg)
+	}
+	sort.Slice(out.FromAlgs, func(i, j int) bool {
+		ci, cj := counts[out.FromAlgs[i]], counts[out.FromAlgs[j]]
+		if ci != cj {
+			return ci > cj
+		}
+		return out.FromAlgs[i] < out.FromAlgs[j]
+	})
+	return out, nil
 }
 
 // zskAlgRollInFlight reports whether a ZSK algorithm rollover toward targetZSKAlg
@@ -220,34 +314,30 @@ type ZskAlgRollState struct {
 // old-alg ZSK is still retired/draining. Both the change-policy re-entrancy
 // guard and the status display derive "in flight" from this one function.
 func zskAlgRollInFlight(kdb *KeyDB, zone string, targetZSKAlg uint8) (ZskAlgRollState, error) {
-	zone = dns.Fqdn(zone)
-	var out ZskAlgRollState
-	var fromAlg uint8
-	for _, state := range []string{DnskeyStateStandby, DnskeyStateActive, DnskeyStateRetired} {
-		keys, err := GetDnssecKeysByState(kdb, zone, state)
-		if err != nil {
-			return out, fmt.Errorf("zskAlgRollInFlight: list %s keys for zone %s: %w", state, zone, err)
-		}
-		for _, k := range keys {
-			if k.Flags != 256 {
-				continue
-			}
-			out.Total++
-			if k.Algorithm == targetZSKAlg {
-				out.Done++
-			} else {
-				out.InFlight = true
-				if fromAlg == 0 {
-					fromAlg = k.Algorithm
-				}
-			}
-		}
+	st, err := algRollInFlight(kdb, zone, false, targetZSKAlg, zskAlgRollLiveStates)
+	if err != nil {
+		return ZskAlgRollState{}, err
 	}
-	if out.InFlight {
-		out.FromAlg = fromAlg
+	out := ZskAlgRollState{
+		InFlight: st.InFlight,
+		FromAlgs: st.FromAlgs,
+		Done:     st.Done,
+		Total:    st.Total,
+	}
+	if st.InFlight {
+		out.FromAlg = st.FromAlg()
 		out.ToAlg = targetZSKAlg
 	}
 	return out, nil
+}
+
+// kskAlgRollInFlight is the KSK twin of zskAlgRollInFlight: a SEP key of an
+// algorithm other than targetKSKAlg in any non-terminal state. Because the
+// KSK algorithm rollover keeps the old-algorithm head ACTIVE through its
+// drain (plan A2), the active state alone carries the whole roll; the other
+// states cover the window between a policy bind and the engine's spawn.
+func kskAlgRollInFlight(kdb *KeyDB, zone string, targetKSKAlg uint8) (AlgRollState, error) {
+	return algRollInFlight(kdb, zone, true, targetKSKAlg, kskAlgRollLiveStates)
 }
 
 // ComputeZskRolloverWhen answers "when will / could the ZSK roll" — the ZSK
