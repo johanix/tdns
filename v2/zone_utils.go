@@ -2204,13 +2204,13 @@ func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string, nsNames []stri
 	// Use "invalid." as the NS record for all autozones (RFC 9432 recommendation)
 	tmpl := `
 $ORIGIN {ZONENAME}
-$TTL 86400
+$TTL 3600
 {ZONENAME}    IN SOA ns1.{ZONENAME} hostmaster.{ZONENAME} (
           {SERIAL}   ; serial
           3600       ; refresh (1 hour)
           1800       ; retry (30 minutes)
           1209600    ; expire (2 weeks)
-          86400      ; minimum (1 day)
+          3600       ; minimum (1 hour)
           )
 {ZONENAME}     IN NS  invalid.
 `
