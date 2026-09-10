@@ -44,6 +44,12 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
   - **NODATA**: NSEC with owner=qname, bitmap containing RRSIG, NSEC, and existing types (not qtype); Rcode=NOERROR
   - Implemented in `addCDEResponse()` function
   - Rcode handling based on CO bit: CO=1 uses compact denial Rcode semantics, CO=0 uses traditional DNSSEC
+- **Empty Non-Terminals (Section 3.2)**: an ENT is a name that exists, so it is answered
+  NODATA with a bitmap of exactly RRSIG and NSEC — never NXNAME, which would assert that a
+  name with descendants does not exist. `sendENTNodata()` in `v2/queryresponder.go`; the
+  zone's ENTs are derived per snapshot by `entNamesFrom()` in `v2/zone_snapshot.go`
+  - Not yet: the precomputed NSEC chain a zone can publish is built from its owner set and
+    so carries no NSEC at an ENT
 - **Unsigned Referrals (Section 3.4)**: Full support for adding NSEC to referral responses
   - NSEC covering the delegation point (zone cut)
   - Type bitmap contains NS, NSEC, RRSIG (indicating delegation point exists)
@@ -56,6 +62,21 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
   - Detects compact denial NXDOMAIN (bitmap = RRSIG, NSEC, NXNAME)
   - Detects compact denial NODATA (qtype not in bitmap)
   - Modifies Rcode from NOERROR to NXDOMAIN when appropriate
+- **Resolver (tdns-imr) response code restoration** (§5, §5.1), NSEC only: a
+  compact denial is cached as NXDOMAIN (`CompactDenialNXDOMAIN()` in
+  `handleNegative()`, independent of validation) and the rcode served follows
+  the client (`negativeRcode()`): NXDOMAIN to a client without DO, NOERROR plus
+  the NSEC to a DO client without CO (the NSEC reads as existence to a validator
+  without NXNAME support), and NXDOMAIN plus the NSEC to a client with DO and CO
+  - Without DO no NSEC/NSEC3 or RRSIG from the cached proof is served
+- **CO echoed on responses** (§5.1): both responders set the Compact Answers OK
+  flag on every response to a query that carried it — the flag says the
+  responder speaks CO, and the NXDOMAIN rcode is the additional step §5.1
+  describes for nonexistent names
+- **Not implemented**: the NSEC3 form of compact denial (§4), where NXNAME is the
+  sole entry in the bitmap under a hashed owner. Recognising it needs the qname
+  hashed under the NSEC3 parameters, and tdns has no NSEC3 denial validation yet,
+  so an NSEC3 compact denial is still served as the NODATA its rcode claims
 
 ---
 

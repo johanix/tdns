@@ -74,6 +74,13 @@
 #                           on behalf of a DSYNC-unaware primary
 #                           (see guide/agent-dsync-proxy.md)
 #
+#   childsync-proxy:    Agent secondary of a PARENT zone performs the
+#                           parent's half of delegation sync for a
+#                           DSYNC-unaware primary: advertises DSYNC, receives
+#                           child NOTIFY/UPDATE/API traffic, pushes approved
+#                           changes to the primary. Implies childsync.
+#                           tdns-agent secondary zones only.
+#
 # ZONE MODIFICATION OPTIONS:
 #   allow-updates:           Allow zone modifications via DNS UPDATE
 #                           (general updates to any RRset in the zone)

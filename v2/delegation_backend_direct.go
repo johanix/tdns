@@ -80,84 +80,24 @@ func (b *DirectDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateR
 }
 
 func (b *DirectDelegationBackend) GetDelegationData(parentZone, childZone string) (map[string]map[uint16][]dns.RR, error) {
-	result := map[string]map[uint16][]dns.RR{}
-
 	b.zd.mu.Lock()
 	defer b.zd.mu.Unlock()
-
-	ownerNames, err := b.zd.GetOwnerNames()
-	if err != nil {
-		return nil, fmt.Errorf("GetOwnerNames: %w", err)
-	}
-
-	// Walk all owners that are at or below the child zone name
-	for _, ownerName := range ownerNames {
-		// dns.IsSubDomain is true for the child name itself, so the separate
-		// equality test this used to carry was dead -- and case-sensitive,
-		// which would have made it wrong had it ever been reachable.
-		if !dns.IsSubDomain(childZone, ownerName) {
-			continue
+	// Only delegation-relevant types. KEY is not one of them: a child's SIG(0)
+	// key lives in the truststore, and a KEY found at a delegation point in
+	// the zone is the residue of the bug that used to publish it there.
+	// Reporting it as delegation data would feed it to the scanner and to
+	// `zone childsync` as though the parent were meant to be serving it.
+	return b.zd.servedDelegationDataLocked(childZone, func(_ string, rrtype uint16) bool {
+		switch rrtype {
+		case dns.TypeNS, dns.TypeDS, dns.TypeA, dns.TypeAAAA, dns.TypeCDS:
+			return true
 		}
-		owner, err := b.zd.GetOwner(ownerName)
-		if err != nil || owner == nil {
-			continue
-		}
-		for _, rrtype := range owner.RRtypes.Keys() {
-			// Only delegation-relevant types. KEY is not one of them: a
-			// child's SIG(0) key lives in the truststore, and a KEY found at
-			// a delegation point in the zone is the residue of the bug that
-			// used to publish it there. Reporting it as delegation data would
-			// feed it to the scanner and to `zone childsync` as though the
-			// parent were meant to be serving it.
-			switch rrtype {
-			case dns.TypeNS, dns.TypeDS, dns.TypeA, dns.TypeAAAA, dns.TypeCDS:
-			default:
-				continue
-			}
-			rrset, ok := owner.RRtypes.Get(rrtype)
-			if !ok || len(rrset.RRs) == 0 {
-				continue
-			}
-			if result[ownerName] == nil {
-				result[ownerName] = map[uint16][]dns.RR{}
-			}
-			result[ownerName][rrtype] = append(result[ownerName][rrtype], rrset.RRs...)
-		}
-	}
-
-	if len(result) == 0 {
-		return nil, fmt.Errorf("no delegation data for %s in zone %s", childZone, parentZone)
-	}
-	return result, nil
+		return false
+	})
 }
 
 func (b *DirectDelegationBackend) ListChildren(parentZone string) ([]string, error) {
-	children := map[string]bool{}
-
 	b.zd.mu.Lock()
 	defer b.zd.mu.Unlock()
-
-	ownerNames, err := b.zd.GetOwnerNames()
-	if err != nil {
-		return nil, fmt.Errorf("GetOwnerNames: %w", err)
-	}
-
-	for _, ownerName := range ownerNames {
-		if ownerName == b.zd.ZoneName {
-			continue // skip apex
-		}
-		owner, err := b.zd.GetOwner(ownerName)
-		if err != nil || owner == nil {
-			continue
-		}
-		if _, ok := owner.RRtypes.Get(dns.TypeNS); ok {
-			children[ownerName] = true
-		}
-	}
-
-	var result []string
-	for child := range children {
-		result = append(result, child)
-	}
-	return result, nil
+	return b.zd.servedDelegationChildrenLocked()
 }

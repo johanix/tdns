@@ -60,6 +60,48 @@ func publishedDsyncSchemes(rrs []dns.RR) map[core.DsyncScheme]bool {
 	return out
 }
 
+// DsyncPublication is what a childsync zone still has to get published for
+// its DSYNC service to be discoverable and usable: the delta between what the
+// configuration asks for and what the zone serves. It is what PublishDsyncRRs
+// sends to this server's own zone, and what a childsync-proxy hands to the
+// parent primary it fronts instead (docs/2026-09-08-childsync-proxy.md §5.2).
+type DsyncPublication struct {
+	// DsyncRRs is the _dsync.<zone> RRset to publish -- the records already
+	// there plus one per (type, scheme) for every configured scheme that has
+	// none -- and, for the API scheme, the URI and TXT at its target. Sent
+	// whole, and only when something in it is new: re-adding a published
+	// record is a no-op in the zone, and this is how the RRset has always
+	// been sent. Empty when every configured scheme is already published.
+	DsyncRRs []dns.RR
+	// SVCBRRs are the bootstrap SVCB reconcile actions at the UPDATE target,
+	// derived from the bound delegation policy: adds and deletes.
+	SVCBRRs []dns.RR
+	// AddressRRs are the A/AAAA records at the targets of the schemes being
+	// published that the zone does not already carry.
+	AddressRRs []dns.RR
+	// Synthesized counts the DSYNC records this build made for schemes not
+	// yet published; Published counts the ones the zone already has. Their
+	// combination is what separates "nothing to do" from "nothing
+	// configured", which PublishDsyncRRs reports differently.
+	Synthesized, Published int
+}
+
+// Actions is the update, in the order PublishDsyncRRs has always sent it:
+// the DSYNC RRset with the API service description, the SVCB reconcile, then
+// the addresses.
+func (p *DsyncPublication) Actions() []dns.RR {
+	out := make([]dns.RR, 0, len(p.DsyncRRs)+len(p.SVCBRRs)+len(p.AddressRRs))
+	out = append(out, p.DsyncRRs...)
+	out = append(out, p.SVCBRRs...)
+	out = append(out, p.AddressRRs...)
+	return out
+}
+
+// Empty reports that the served zone already carries the whole advertisement.
+func (p *DsyncPublication) Empty() bool {
+	return len(p.DsyncRRs) == 0 && len(p.SVCBRRs) == 0 && len(p.AddressRRs) == 0
+}
+
 // Every RR added to the DSYNC RRset below goes through core.RRset.Add, which
 // refuses a duplicate, rather than through a plain append.
 //
@@ -69,8 +111,14 @@ func publishedDsyncSchemes(rrs []dns.RR) map[core.DsyncScheme]bool {
 // URI, TXT and SVCB records at its _dsync owner -- observed while testing the
 // DSYNC API scheme. The address-RR paths in this file already guarded; these
 // did not.
-func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
-	lg.Debug("PublishDsyncRRs", "zone", zd.ZoneName)
+
+// BuildDsyncPublication computes what this zone still has to publish for its
+// DSYNC service, and publishes nothing. It reads the served zone and the
+// childsync configuration; a re-run against a zone that carries the result
+// builds an empty publication, which is what makes it safe to run on every
+// refresh.
+func (zd *ZoneData) BuildDsyncPublication() (*DsyncPublication, error) {
+	lg.Debug("BuildDsyncPublication", "zone", zd.ZoneName)
 	rrset := core.RRset{
 		Name: zd.ZoneName,
 	}
@@ -88,7 +136,7 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 	// schemes with no DSYNC record of their own are synthesized.
 	owner, err := zd.GetOwner(dsyncOwnerName(zd.ZoneName))
 	if err != nil {
-		return fmt.Errorf("PublishDsyncRRs: error fetching _dsync owner for zone %s: %v", zd.ZoneName, err)
+		return nil, fmt.Errorf("BuildDsyncPublication: error fetching _dsync owner for zone %s: %v", zd.ZoneName, err)
 	}
 	if owner != nil {
 		// Copy, do not alias. The published RRset's backing array usually has
@@ -104,7 +152,7 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 
 	ttl := 7200
 	addr_rrs := []dns.RR{}
-	dsync_added := false
+	synthesized := 0
 
 	MaybeAddAddressRR := func(target, addr string) error {
 		var addrstr string
@@ -144,72 +192,72 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 		case "NOTIFY":
 			target := expandDsyncTemplate(dsc.Notify.Target, zd.ZoneName)
 			if _, ok := dns.IsDomainName(target); !ok {
-				return fmt.Errorf("zone %s: invalid DSYNC notify target: %s", zd.ZoneName, target)
+				return nil, fmt.Errorf("zone %s: invalid DSYNC notify target: %s", zd.ZoneName, target)
 			}
 
 			port := dsc.Notify.Port
 			if port == 0 {
-				return fmt.Errorf("zone %s: no notify port found, config broken", zd.ZoneName)
+				return nil, fmt.Errorf("zone %s: no notify port found, config broken", zd.ZoneName)
 			}
 
 			notifyTypes := dsc.Notify.Types
 			if len(notifyTypes) == 0 {
-				return fmt.Errorf("zone %s: no notify types found, config broken", zd.ZoneName)
+				return nil, fmt.Errorf("zone %s: no notify types found, config broken", zd.ZoneName)
 			}
 			for _, t := range notifyTypes {
 				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", dsyncOwnerName(zd.ZoneName), ttl, t, s, port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
-					return err
+					return nil, err
 				}
 				rrset.Add(dsyncrr)
-				dsync_added = true
+				synthesized++
 			}
 
 			notifyAddresses := dsc.Notify.Addresses
 			if len(notifyAddresses) == 0 {
-				return fmt.Errorf("zone %s: no notify addresses found, config broken", zd.ZoneName)
+				return nil, fmt.Errorf("zone %s: no notify addresses found, config broken", zd.ZoneName)
 			}
 			for _, addr := range notifyAddresses {
 				if err := MaybeAddAddressRR(target, addr); err != nil {
-					return err
+					return nil, err
 				}
 			}
 
 		case "UPDATE":
 			target := expandDsyncTemplate(dsc.Update.Target, zd.ZoneName)
 			if _, ok := dns.IsDomainName(target); !ok {
-				return fmt.Errorf("zone %s: invalid DSYNC update target: %s", zd.ZoneName, target)
+				return nil, fmt.Errorf("zone %s: invalid DSYNC update target: %s", zd.ZoneName, target)
 			}
 
 			port := dsc.Update.Port
 			if port == 0 {
-				return fmt.Errorf("zone %s: no update port found, config broken", zd.ZoneName)
+				return nil, fmt.Errorf("zone %s: no update port found, config broken", zd.ZoneName)
 			}
 
 			updateTypes := dsc.Update.Types
 			if len(updateTypes) == 0 {
-				return fmt.Errorf("zone %s: no update types found, config broken", zd.ZoneName)
+				return nil, fmt.Errorf("zone %s: no update types found, config broken", zd.ZoneName)
 			}
 			for _, t := range updateTypes {
 				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", dsyncOwnerName(zd.ZoneName), ttl, t, s, port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
-					return err
+					return nil, err
 				}
 				rrset.Add(dsyncrr)
-				dsync_added = true
+				synthesized++
 			}
 
 			updateAddresses := dsc.Update.Addresses
 			if len(updateAddresses) == 0 {
-				return fmt.Errorf("zone %s: no update addresses found, config broken", zd.ZoneName)
+				return nil, fmt.Errorf("zone %s: no update addresses found, config broken", zd.ZoneName)
 			}
 			for _, addr := range updateAddresses {
 				if err := MaybeAddAddressRR(target, addr); err != nil {
-					return err
+					return nil, err
 				}
 			}
 
@@ -225,12 +273,12 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 			// fail. One update, one serial bump, all three visible together.
 			apiconf := dsc.Api.WithDefaults()
 			if err := apiconf.Validate(); err != nil {
-				return fmt.Errorf("zone %s: %v", zd.ZoneName, err)
+				return nil, fmt.Errorf("zone %s: %v", zd.ZoneName, err)
 			}
 
 			target := expandDsyncTemplate(apiconf.Target, zd.ZoneName)
 			if _, ok := dns.IsDomainName(target); !ok {
-				return fmt.Errorf("zone %s: invalid DSYNC api target: %s", zd.ZoneName, target)
+				return nil, fmt.Errorf("zone %s: invalid DSYNC api target: %s", zd.ZoneName, target)
 			}
 
 			for _, t := range apiconf.Types {
@@ -238,15 +286,15 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
-					return err
+					return nil, err
 				}
 				rrset.Add(dsyncrr)
-				dsync_added = true
+				synthesized++
 			}
 
 			uriRR, err := dsyncApiUriRR(target, apiconf, uint32(ttl))
 			if err != nil {
-				return fmt.Errorf("zone %s: %v", zd.ZoneName, err)
+				return nil, fmt.Errorf("zone %s: %v", zd.ZoneName, err)
 			}
 			txtRR := dsyncApiTxtRR(target, apiconf, uint32(ttl))
 			rrset.Add(uriRR)
@@ -258,7 +306,7 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 			// ordinary means, and is often a name this zone does not serve.
 			for _, addr := range apiconf.Addresses {
 				if err := MaybeAddAddressRR(target, addr); err != nil {
-					return err
+					return nil, err
 				}
 			}
 
@@ -268,38 +316,23 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 		}
 	}
 
-	svcbActions := zd.bootstrapSVCBActions(uint32(ttl))
-
-	if !dsync_added {
-		// Every configured scheme is already published. SVCB still has to
-		// be reconciled independently: a policy edit must update the
-		// advertisement even when the DSYNC RRset did not change.
-		if alreadyPublished == 0 && len(svcbActions) == 0 {
-			return fmt.Errorf("no DSYNC RRs added for zone %s", zd.ZoneName)
-		}
-		if alreadyPublished > 0 && len(svcbActions) == 0 {
-			lg.Debug("every configured DSYNC scheme is already published and bootstrap SVCB matches, nothing to do",
-				"zone", zd.ZoneName, "records", alreadyPublished)
-			return nil
-		}
-		rrset.RRs = nil
+	pub := &DsyncPublication{
+		SVCBRRs:     zd.bootstrapSVCBActions(uint32(ttl)),
+		Synthesized: synthesized,
+		Published:   alreadyPublished,
 	}
-
-	actions := append(append([]dns.RR{}, rrset.RRs...), svcbActions...)
-
-	ur := UpdateRequest{
-		Cmd:            "ZONE-UPDATE",
-		ZoneName:       zd.ZoneName,
-		Description:    fmt.Sprintf("Publish DSYNC RRs for zone %s", zd.ZoneName),
-		Actions:        actions,
-		InternalUpdate: true,
+	// The RRset is sent only when something in it is new. With every
+	// configured scheme already published there is nothing to say about
+	// DSYNC, however many records the zone carries.
+	if synthesized > 0 {
+		pub.DsyncRRs = rrset.RRs
 	}
 
 	for _, addr_rr := range addr_rrs {
 		new_addr := false
 		owner, err := zd.GetOwner(addr_rr.Header().Name)
 		if err != nil {
-			return fmt.Errorf("error fetching owner for address %s: %v", addr_rr.Header().Name, err)
+			return nil, fmt.Errorf("error fetching owner for address %s: %v", addr_rr.Header().Name, err)
 		}
 
 		if owner == nil {
@@ -325,8 +358,44 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 			}
 		}
 		if new_addr {
-			ur.Actions = append(ur.Actions, addr_rr)
+			pub.AddressRRs = append(pub.AddressRRs, addr_rr)
 		}
+	}
+
+	return pub, nil
+}
+
+// PublishDsyncRRs builds the publication and installs it in this server's own
+// copy of the zone through a ZONE-UPDATE. The build is BuildDsyncPublication;
+// this is the tdns-auth half, where the zone this server serves is the zone
+// to publish into.
+func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
+	lg.Debug("PublishDsyncRRs", "zone", zd.ZoneName)
+	pub, err := zd.BuildDsyncPublication()
+	if err != nil {
+		return err
+	}
+
+	if pub.Synthesized == 0 {
+		// Every configured scheme is already published. SVCB still has to
+		// be reconciled independently: a policy edit must update the
+		// advertisement even when the DSYNC RRset did not change.
+		if pub.Published == 0 && len(pub.SVCBRRs) == 0 {
+			return fmt.Errorf("no DSYNC RRs added for zone %s", zd.ZoneName)
+		}
+		if pub.Published > 0 && len(pub.SVCBRRs) == 0 {
+			lg.Debug("every configured DSYNC scheme is already published and bootstrap SVCB matches, nothing to do",
+				"zone", zd.ZoneName, "records", pub.Published)
+			return nil
+		}
+	}
+
+	ur := UpdateRequest{
+		Cmd:            "ZONE-UPDATE",
+		ZoneName:       zd.ZoneName,
+		Description:    fmt.Sprintf("Publish DSYNC RRs for zone %s", zd.ZoneName),
+		Actions:        pub.Actions(),
+		InternalUpdate: true,
 	}
 
 	// ctx as well as the timer: UpdateQ is unbuffered, so a stopped updater

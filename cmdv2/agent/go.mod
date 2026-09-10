@@ -7,21 +7,25 @@ replace (
 	github.com/johanix/tdns/v2/cache => ../../v2/cache
 	github.com/johanix/tdns/v2/core => ../../v2/core
 	github.com/johanix/tdns/v2/edns0 => ../../v2/edns0
+	github.com/johanix/tdns/v2/externaldb => ../../v2/externaldb
 )
 
 require (
 	github.com/johanix/dnssec-algorithms v0.0.0-20260706125906-0101974d6755
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v2/externaldb v0.0.0-00010101000000-000000000000
 	github.com/mattn/go-sqlite3 v1.14.16
 )
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.22.1 // indirect
+	github.com/go-sql-driver/mysql v1.9.3 // indirect
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect

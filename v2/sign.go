@@ -1468,6 +1468,13 @@ func (zd *ZoneData) GenerateNsecChainWithDak(ctx context.Context, dak *DnssecKey
 	// is the child's data, not this zone's, and must not appear: verified
 	// against BIND, which emits an NSEC at the delegation point and none for
 	// the glue beneath it.
+	//
+	// It also covers OWNERS only, so an empty non-terminal gets no NSEC and the
+	// one covering the gap denies a name that exists. Denial is answered by
+	// compact denial rather than from the chain (see entNamesFrom and
+	// sendENTNodata), so this is about the data a zone publishes; closing it
+	// means giving an ENT a real owner carrying NSEC and RRSIG, which changes
+	// what the deltas and pendingChanges see. Not done here.
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("generating the NSEC chain for %s: %w", zd.ZoneName, err)
 	}

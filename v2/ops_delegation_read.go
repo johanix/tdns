@@ -66,6 +66,14 @@ func (zd *ZoneData) ApiZoneGetDelegation(zp ZonePost) (*ChildDelegationReport, e
 	if err != nil {
 		return nil, err
 	}
+	// The store answers "nothing" with an empty map. At the operator surface
+	// that is worth saying in words: an empty report reads as a child with an
+	// empty delegation, which is not the same thing as a child this parent
+	// has never heard of.
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("no delegation data for %s in zone %s (backend %s)",
+			child, zd.ZoneName, backend.Name())
+	}
 
 	out := &ChildDelegationReport{
 		Parent:  zd.ZoneName,

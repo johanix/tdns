@@ -110,6 +110,17 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   change mapping, the UPDATE KEY-bootstrap (`zone proxy-key`),
   limitations, and verification.
 
+- [Agent fronting a parent zone](childsync-proxy.md)
+  -- The other end of the delegation: tdns-agent as a
+  secondary of a PARENT zone whose primary is DSYNC-unaware,
+  advertising and receiving the childsync schemes on its
+  behalf and pushing approved changes to the primary
+  (`childsync-proxy`). Delegation backends as a store and a
+  writer, the `ddns` writer and the primary-side
+  update-policy, the `external-db` handoff to a provisioning
+  system with its schema and consumer contract, operation
+  and failure modes.
+
 - [Automatic DNSSEC Rollovers](key-rollover.md)
   -- Operator manual for all three rollover kinds:
   parent-coordinated **KSK** rollover (the bulk -- policy

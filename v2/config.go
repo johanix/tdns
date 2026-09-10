@@ -841,11 +841,14 @@ type InternalDnsConf struct {
 	UpdateHandlers      []UpdateHandlerRegistration    // UPDATE handlers (registered via RegisterUpdateHandler)
 	UpdateHandlersMutex sync.RWMutex                   // protects UpdateHandlers slice
 	DelegationSyncQ     chan DelegationSyncRequest
-	NotifyQ             chan NotifyRequest
-	AuthQueryQ          chan AuthQueryRequest
-	ResignQ             chan ResignRequest // zones needing a re-sign, and why (see ResignReason)
-	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
-	ImrEngine           *Imr
+	// ParentPushQ feeds ParentPushEngine: a childsync-proxy's pushes to the
+	// parent primary. See parent_push_engine.go.
+	ParentPushQ chan ParentPushRequest
+	NotifyQ     chan NotifyRequest
+	AuthQueryQ  chan AuthQueryRequest
+	ResignQ     chan ResignRequest // zones needing a re-sign, and why (see ResignReason)
+	RRsetCache  *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
+	ImrEngine   *Imr
 	// ImrReady is closed once ImrEngine has been stored, giving other engines
 	// a synchronised way to learn it is usable. Read ImrEngine only after
 	// receiving from it -- see ImrReadiness.

@@ -225,7 +225,16 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error: invalid transport %s: %v\n", options["transport"], err)
 					os.Exit(1)
 				}
-				chaserClient := core.NewDNSClient(chaserTransport, options["port"], nil)
+				// +time= bounds the chase too. This is the third client dog
+				// builds, and it drifted for the same reason the TCP fallback
+				// did -- a separate construction site with its own option
+				// list. A chain walk is many queries rather than one, so an
+				// unbounded chase is the place a timeout matters most.
+				//
+				// +tries and +adflag do not reach it: retries and the outgoing
+				// AD bit are the chaser's own to decide, and neither is
+				// reachable from here without changing its API.
+				chaserClient := core.NewDNSClient(chaserTransport, options["port"], nil, timeoutOptions(options)...)
 				dss := loadChaserAnchors()
 				chaser := tdns.NewChaser(chaserClient, options["server"], dss)
 				result, err := chaser.Chase(qname, rrtype)
@@ -293,6 +302,14 @@ var rootCmd = &cobra.Command{
 				// Set CD (Checking Disabled) flag if requested
 				if options["cd_bit"] == "true" {
 					m.MsgHdr.CheckingDisabled = true
+				}
+				// The AD bit on the OUTGOING query (+adflag / +noadflag).
+				// Absent unless asked for: dog's default stays off.
+				if options["ad_bit"] == "true" {
+					m.MsgHdr.AuthenticatedData = true
+				}
+				if options["ad_bit"] == "false" {
+					m.MsgHdr.AuthenticatedData = false
 				}
 				ednsUDPSize, err := dogopts.EDNSUDPSizeFromMap(options)
 				if err != nil {
@@ -457,8 +474,15 @@ var rootCmd = &cobra.Command{
 					}
 				}
 
+				// +time=: bound each attempt. Without this the client's own
+				// default applies and there is no way to shorten it from the
+				// command line.
+				clientOpts = append(clientOpts, timeoutOptions(options)...)
 				client := core.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
-				res, _, err := client.Exchange(m, server, false) // FIXME: duration is always zero
+
+				tries := triesFrom(options)
+				var res *dns.Msg
+				res, err = exchangeWithTries(client, m, server, tries) // FIXME: duration is always zero
 				if err == nil && res != nil && res.Truncated && t == core.TransportDo53 && !forceTCP {
 					// Warn if strict privacy was requested and we are falling
 					// back to unencrypted TCP.
@@ -474,8 +498,17 @@ var rootCmd = &cobra.Command{
 					if tsigOpt != nil {
 						tcpOpts = append(tcpOpts, tsigOpt)
 					}
+					// The retry is a second client built from a separate
+					// option list, so +time= has to be applied again here.
+					// Without it the timeout silently stopped applying at
+					// exactly the point a query got slower.
+					tcpOpts = append(tcpOpts, timeoutOptions(options)...)
 					tcpClient := core.NewDNSClient(core.TransportDo53, options["port"], tlsConfig, tcpOpts...)
-					res, _, err = tcpClient.Exchange(m, server, false)
+					// dig's +tries is "the number of times to try UDP AND TCP
+					// queries"; the fallback is a second client on a path that
+					// is already slower than the one that truncated, so it gets
+					// the same budget rather than a single shot.
+					res, err = exchangeWithTries(tcpClient, m, server, tries)
 					options["transport"] = "Do53-TCP"
 				}
 
@@ -610,6 +643,65 @@ func loadChaserAnchors() []*dns.DS {
 // options (+tlsa, +pin=, +cafile=) was requested.
 func verifyFlagsGiven(options map[string]string) bool {
 	return options["tlsa"] == "true" || options["pins"] != "" || options["cafile"] != ""
+}
+
+// timeoutOptions returns the client options implied by +time=, or nil.
+//
+// Shared because dog builds TWO clients: the one that sends the query, and the
+// one that retries over TCP when the answer comes back truncated. They are
+// constructed from separate option lists, and a +time= that applies to the
+// first but not the second is a timeout that lapses precisely when a response
+// is large enough to need the retry.
+func timeoutOptions(options map[string]string) []core.DNSClientOption {
+	v := options["timeout"]
+	if v == "" {
+		return nil
+	}
+	// ProcessOptions has already rejected anything unparsable and raised
+	// anything below 1, so this cannot fail; it is here so a future caller
+	// that has not been through the parser cannot produce an instant timeout.
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return nil
+	}
+	return []core.DNSClientOption{core.WithTimeout(time.Duration(n) * time.Second)}
+}
+
+// triesFrom is the +tries= budget: the TOTAL number of attempts, not the
+// number after the first. One when nothing was asked for -- dog sends a single
+// query by default, where dig sends three; changing that would alter every
+// existing dog invocation, so it is left alone.
+func triesFrom(options map[string]string) int {
+	v := options["tries"]
+	if v == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 1
+	}
+	return n
+}
+
+// exchangeWithTries spends the +tries= budget on one client.
+//
+// Only a transport failure is retried. A response that came back at all is an
+// answer -- SERVFAIL, NXDOMAIN, or one whose TSIG did not verify (miekg
+// returns the message alongside that error, which is why the caller prints it)
+// -- and asking the same server the same question again cannot change it,
+// only make the failure slower and noisier.
+func exchangeWithTries(client *core.DNSClient, m *dns.Msg, server string, tries int) (*dns.Msg, error) {
+	var res *dns.Msg
+	var err error
+	for attempt := 1; ; attempt++ {
+		res, _, err = client.Exchange(m, server, false)
+		if err == nil || res != nil || attempt >= tries {
+			return res, err
+		}
+		if tdns.Globals.Verbose {
+			fmt.Fprintf(os.Stderr, ";; attempt %d/%d failed: %v\n", attempt, tries, err)
+		}
+	}
 }
 
 // clientIdentityGiven reports whether a client identity (+cert=/+key=) was
@@ -829,6 +921,50 @@ func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]st
 		options["pins"] += pin
 		return options, nil
 	}
+	// dig compatibility: +time=/+timeout= bound one query, +tries=/+retry=
+	// decide how many attempts it gets. Scripts reach for these when they must
+	// not hang, and rejecting them fatally means a dig-shaped script dies here
+	// rather than degrading.
+	if strings.HasPrefix(ucarg, "+TIME=") || strings.HasPrefix(ucarg, "+TIMEOUT=") {
+		v := arg[strings.Index(arg, "=")+1:]
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("+time= requires a number of seconds, not %q", v)
+		}
+		// dig raises anything below 1 to 1 silently ("An attempt to set T to
+		// less than 1 is silently set to 1"), and REFUSES anything above
+		// MAXTIMEOUT -- 0xffff in bin/dig/dighost.h, where the +timeout case
+		// does parse_uint(&timeout, value, MAXTIMEOUT, "timeout") and exits
+		// when that fails. Match both. Silently shortening a timeout the
+		// caller asked for is the same class of trap as reading "+time=5s" as
+		// 5: the script gets a value it did not choose and no diagnostic.
+		if n < 1 {
+			n = 1
+		}
+		if n > 65535 {
+			return nil, fmt.Errorf("+time= must be at most 65535 seconds, not %q", v)
+		}
+		options["timeout"] = strconv.Itoa(n)
+		return options, nil
+	}
+	if strings.HasPrefix(ucarg, "+TRIES=") || strings.HasPrefix(ucarg, "+RETRY=") {
+		v := arg[strings.Index(arg, "=")+1:]
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("%s requires a number, not %q", strings.SplitN(ucarg, "=", 2)[0], v)
+		}
+		// dig's two spellings differ by one: +tries is the total number of
+		// attempts, +retry is the number AFTER the first. Both clamp to at
+		// least one attempt -- +tries=0 in dig still sends one query.
+		if strings.HasPrefix(ucarg, "+RETRY=") {
+			n = n + 1
+		}
+		if n < 1 {
+			n = 1
+		}
+		options["tries"] = strconv.Itoa(n)
+		return options, nil
+	}
 	if strings.HasPrefix(ucarg, "+CAFILE=") {
 		path := arg[len("+cafile="):]
 		if path == "" {
@@ -875,6 +1011,16 @@ func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]st
 		return options, nil
 	case "+CD":
 		options["cd_bit"] = "true"
+		return options, nil
+	case "+ADFLAG", "+AD":
+		// The AD bit in the OUTGOING query. dig sets it by default; dog does
+		// not, and this does not change that -- it makes the flag work for
+		// callers that ask explicitly. Changing the default is a separate
+		// decision, tracked in the issue.
+		options["ad_bit"] = "true"
+		return options, nil
+	case "+NOADFLAG", "+NOAD":
+		options["ad_bit"] = "false"
 		return options, nil
 	case "+COMPACT", "+CO":
 		options["co_bit"] = "true"

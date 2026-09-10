@@ -1,13 +1,17 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * ZonefileDelegationBackend writes per-child delegation data as DNS zone file
- * fragments. Each child zone gets its own file that can be $INCLUDEd into the
- * parent zone file. Files are written atomically (write-to-temp + rename).
+ * zonefileWriter is the zonefile writer: after the store has recorded a child
+ * update, it regenerates that child's delegation data as a DNS zone file
+ * fragment that can be $INCLUDEd into the parent zone file, and optionally
+ * runs a command to tell whatever generates the zone. Files are written
+ * atomically (write-to-temp + rename). Before the split this and the sqlite
+ * store together were the "zonefile" backend.
  */
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,76 +23,72 @@ import (
 	"github.com/miekg/dns"
 )
 
-type ZonefileDelegationBackend struct {
-	backendName   string
+type zonefileWriter struct {
 	directory     string
 	notifyCommand string
-	kdb           *KeyDB
+	store         DelegationStore
 }
 
-func (b *ZonefileDelegationBackend) Name() string { return b.backendName }
+func (w *zonefileWriter) Name() string { return DelegationWriterZonefile }
 
-// ApplyChildUpdate persists the update to the DB (as source of truth) and
-// then regenerates the child's zone file fragment from the DB state.
-func (b *ZonefileDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateRequest) error {
-	// Use the DB backend as persistent storage
-	dbBackend := &DBDelegationBackend{kdb: b.kdb}
-	if err := dbBackend.ApplyChildUpdate(parentZone, ur); err != nil {
-		return fmt.Errorf("db persist failed: %w", err)
-	}
-
-	// Determine which child zone(s) were affected
+// Write regenerates the fragment of every child the actions touch, from what
+// the store now holds, and then runs the notify command if there is one.
+func (w *zonefileWriter) Write(ctx context.Context, parentZone string, actions []dns.RR, desc string) error {
 	affected := map[string]bool{}
-	for _, rr := range ur.Actions {
-		child := childZoneFromOwner(rr.Header().Name, parentZone)
-		affected[child] = true
+	for _, rr := range actions {
+		affected[childZoneFromOwner(rr.Header().Name, parentZone)] = true
 	}
-
-	// Regenerate zone file fragment for each affected child
-	for childZone := range affected {
-		data, err := dbBackend.GetDelegationData(parentZone, childZone)
-		if err != nil {
-			// No data left (all deleted) — remove the file
-			path := b.filePath(childZone)
-			os.Remove(path)
-			lg.Info("ZonefileDelegationBackend: removed delegation file (no data left)", "child", childZone)
-			continue
-		}
-		if err := b.writeZoneFile(childZone, data); err != nil {
-			return fmt.Errorf("write zone file for %s failed: %w", childZone, err)
-		}
+	if err := w.refreshFragments(parentZone, affected); err != nil {
+		return err
 	}
-
-	// Run notify command if configured
-	if b.notifyCommand != "" {
-		b.runNotifyCommand(parentZone)
+	if w.notifyCommand != "" {
+		w.runNotifyCommand(parentZone)
 	}
-
 	return nil
 }
 
-func (b *ZonefileDelegationBackend) GetDelegationData(parentZone, childZone string) (map[string]map[uint16][]dns.RR, error) {
-	dbBackend := &DBDelegationBackend{kdb: b.kdb}
-	return dbBackend.GetDelegationData(parentZone, childZone)
+// refreshFragments regenerates the fragment of every child in affected from
+// what the store holds: written when the child has data, removed when it has
+// none.
+//
+// A store that cannot be READ is neither. It used to be: GetDelegationData
+// returned an error for an empty child, this loop took any error as "no data
+// left" and removed the fragment, and so a transient database failure would
+// have deleted a child's delegation from the generated parent zone. The store
+// now answers empty with an empty map, and an error here is returned as one.
+func (w *zonefileWriter) refreshFragments(parentZone string, affected map[string]bool) error {
+	for childZone := range affected {
+		data, err := w.store.GetDelegationData(parentZone, childZone)
+		if err != nil {
+			return fmt.Errorf("reading delegation data for %s: %w", childZone, err)
+		}
+		if len(data) == 0 {
+			path := w.filePath(childZone)
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("removing delegation file for %s: %w", childZone, err)
+			}
+			lg.Info("zonefile writer: removed delegation file (no data left)", "child", childZone)
+			continue
+		}
+		if err := w.writeZoneFile(childZone, data); err != nil {
+			return fmt.Errorf("write zone file for %s failed: %w", childZone, err)
+		}
+	}
+	return nil
 }
 
-func (b *ZonefileDelegationBackend) ListChildren(parentZone string) ([]string, error) {
-	dbBackend := &DBDelegationBackend{kdb: b.kdb}
-	return dbBackend.ListChildren(parentZone)
-}
-
-func (b *ZonefileDelegationBackend) filePath(childZone string) string {
+func (w *zonefileWriter) filePath(childZone string) string {
 	// Use child zone name as filename, strip trailing dot for filesystem
 	name := strings.TrimSuffix(childZone, ".")
-	return filepath.Join(b.directory, name+".zone")
+	return filepath.Join(w.directory, name+".zone")
 }
 
-func (b *ZonefileDelegationBackend) writeZoneFile(childZone string, data map[string]map[uint16][]dns.RR) error {
-	path := b.filePath(childZone)
+func (w *zonefileWriter) writeZoneFile(childZone string, data map[string]map[uint16][]dns.RR) error {
+	path := w.filePath(childZone)
 
 	// Ensure directory exists
-	if err := os.MkdirAll(b.directory, 0755); err != nil {
-		return fmt.Errorf("create directory %s: %w", b.directory, err)
+	if err := os.MkdirAll(w.directory, 0755); err != nil {
+		return fmt.Errorf("create directory %s: %w", w.directory, err)
 	}
 
 	// Collect all RRs, sorted by owner then type
@@ -131,15 +131,22 @@ func (b *ZonefileDelegationBackend) writeZoneFile(childZone string, data map[str
 		return fmt.Errorf("rename temp file: %w", err)
 	}
 
-	lg.Info("ZonefileDelegationBackend: wrote delegation file", "child", childZone, "path", path)
+	lg.Info("zonefile writer: wrote delegation file", "child", childZone, "path", path)
 	return nil
 }
 
-func (b *ZonefileDelegationBackend) runNotifyCommand(parentZone string) {
-	cmd := strings.ReplaceAll(b.notifyCommand, "{ZONENAME}", parentZone)
-	lg.Info("ZonefileDelegationBackend: running notify command", "cmd", cmd)
-	out, err := exec.Command("sh", "-c", cmd).CombinedOutput()
+// notifyCommandTimeout bounds the notify command. It runs inline on the
+// ZoneUpdater goroutine, which serves every zone, so a command that hangs
+// would stall them all; killed after this, it is reported as failed.
+const notifyCommandTimeout = 60 * time.Second
+
+func (w *zonefileWriter) runNotifyCommand(parentZone string) {
+	cmd := strings.ReplaceAll(w.notifyCommand, "{ZONENAME}", parentZone)
+	lg.Info("zonefile writer: running notify command", "cmd", cmd)
+	ctx, cancel := context.WithTimeout(context.Background(), notifyCommandTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "sh", "-c", cmd).CombinedOutput()
 	if err != nil {
-		lg.Error("ZonefileDelegationBackend: notify command failed", "cmd", cmd, "error", err, "output", string(out))
+		lg.Error("zonefile writer: notify command failed", "cmd", cmd, "error", err, "output", string(out))
 	}
 }

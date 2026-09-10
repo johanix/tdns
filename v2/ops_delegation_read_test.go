@@ -93,3 +93,18 @@ func TestApiZoneGetDelegationRejectsAnOutOfZoneChild(t *testing.T) {
 		t.Error("expected an error for the apex, which is not a delegated child")
 	}
 }
+
+// The store answers an unknown child with an empty map (see the
+// DelegationBackend contract). The operator surface turns that back into
+// words: an empty report would read as "this child has an empty delegation".
+func TestApiZoneGetDelegationUnknownChildSaysSo(t *testing.T) {
+	zd := delegationParent(t)
+
+	_, err := zd.ApiZoneGetDelegation(ZonePost{ChildZone: "charlie.parent.example."})
+	if err == nil {
+		t.Fatal("expected an error for a child the parent holds nothing for")
+	}
+	if !strings.Contains(err.Error(), "no delegation data for charlie.parent.example.") {
+		t.Errorf("error should name the child: %v", err)
+	}
+}

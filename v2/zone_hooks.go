@@ -62,7 +62,12 @@ package tdns
 // a second copy of every hook on the reload after a failed one. Registering at
 // construction makes "exactly once, before anyone can see it" true by
 // construction rather than by argument.
+//   - childsync-proxy: an agent secondary of a PARENT zone reconciles its
+//     DSYNC advertisement and the known children's delegations against every
+//     transfer, and hands the differences to the push engine
+//     (childsync_proxy.go). Self-gates on OptChildSyncProxy.
 func (zdp *ZoneData) registerStandardRefreshHooks(delsyncq chan DelegationSyncRequest) {
 	zdp.registerProxyDelegationHooks(delsyncq)
 	zdp.registerSignalReconcileHook()
+	zdp.registerChildSyncProxyHook()
 }

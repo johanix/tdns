@@ -190,6 +190,41 @@ func WithForceTCP() DNSClientOption {
 	}
 }
 
+// WithTimeout sets the per-query timeout (dig's +time=).
+//
+// It reaches into the transport clients as well as the field, because options
+// are applied AFTER NewDNSClient has already built the dns.Client, http.Client
+// and quic.Config from DefaultClientTimeout. Setting c.Timeout alone would
+// leave every actual transport on the default while the field claimed
+// otherwise -- a timeout that reports as configured and does nothing.
+//
+// A non-positive duration is ignored rather than producing a client that times
+// out instantly.
+func WithTimeout(d time.Duration) DNSClientOption {
+	return func(c *DNSClient) {
+		if d <= 0 {
+			return
+		}
+		c.Timeout = d
+		if c.DNSClientUDP != nil {
+			c.DNSClientUDP.Timeout = d
+		}
+		if c.DNSClientTCP != nil {
+			c.DNSClientTCP.Timeout = d
+		}
+		if c.DNSClientTLS != nil {
+			c.DNSClientTLS.Timeout = d
+		}
+		if c.HTTPClient != nil {
+			c.HTTPClient.Timeout = d
+		}
+		if c.QUICConfig != nil {
+			c.QUICConfig.MaxIdleTimeout = d
+			c.QUICConfig.KeepAlivePeriod = d / 2
+		}
+	}
+}
+
 // WithTsigSecret enables TSIG on the underlying miekg clients (Do53 / Do53-TCP /
 // DoT). A query signed with msg.SetTsig(keyname, algo, ...) is then MAC'd on
 // send, and the response's TSIG is verified on receive, using the base64 secret

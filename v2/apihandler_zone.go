@@ -1233,6 +1233,44 @@ func APIzoneChildSync(ctx context.Context, app *AppDetails) func(w http.Response
 				return
 			}
 
+		// The childsync-proxy's operator surface. None of these write into
+		// the zone: proxy-status reports, advert computes and renders,
+		// reconcile runs the refresh hook's body -- in-memory work and an
+		// enqueue to the push engine.
+		case "proxy-status", "advert", "reconcile":
+			if !zd.Options[OptChildSyncProxy] {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Zone %q is not a childsync-proxy", zd.ZoneName)
+				return
+			}
+			switch req.Command {
+			case "reconcile":
+				zd.ChildSyncProxyPostRefresh()
+				resp.Msg = fmt.Sprintf("Zone %s: advertisement and known children reconciled", zd.ZoneName)
+			case "advert":
+				actions, keyState, aerr := zd.advertisementDelta()
+				if aerr != nil {
+					resp.Error = true
+					resp.ErrorMsg = aerr.Error()
+					return
+				}
+				if len(actions) == 0 {
+					resp.Msg = fmt.Sprintf("Zone %s: the served zone carries the whole advertisement", zd.ZoneName)
+				} else {
+					resp.Advert = RenderNsupdateBlock(zd.ZoneName, zd.upstreamAddrs(), "", actions)
+					resp.Msg = fmt.Sprintf("Zone %s: %d record(s) missing from the served zone", zd.ZoneName, len(actions))
+				}
+				if keyState == receiverKeyForeign {
+					resp.Msg += "; a KEY this agent does not hold is published at the UPDATE target"
+				}
+			default:
+				resp.Msg = fmt.Sprintf("Zone %s: childsync-proxy status", zd.ZoneName)
+			}
+			ps := zd.ChildSyncProxyStatus()
+			resp.ProxyStatus = &ps
+			pu := zd.ParentPushStatus()
+			resp.PushStatus = &pu
+
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("unknown childsync command: %s", req.Command)
