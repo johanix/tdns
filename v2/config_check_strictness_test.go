@@ -206,3 +206,88 @@ zones:
 		t.Fatalf("the documented shape was rejected: %v", err)
 	}
 }
+
+// A `- peers: [ id ]` reference in downstreams: must survive config check.
+//
+// It did not between 2026-08-19 (b3df0dc7, which started validating the raw
+// per-zone lists) and the fix. Because a downstreams entry's TLSIdentity is
+// built only by peer expansion, rejecting the reference shape took every
+// inbound client-certificate mechanism with it: a zone with
+// downstream-auth: [ tls-pkix ] could not be configured at all, in any tdns
+// deployment, and the daemon refused to start rather than failing at the
+// zone.
+//
+// The ladder's own tests construct AclEntry values with TLSIdentity set
+// directly in Go, so they kept passing throughout. This one goes through the
+// config, which is the part that broke.
+func TestConfigCheckAcceptsPeerReferencesInAcls(t *testing.T) {
+	const good = `
+peers:
+   ca-member:
+      keys:     [ NOKEY ]
+      prefixes: [ "0.0.0.0/0", "::/0" ]
+      ca-file:  /tmp/ca.crt
+   a-secondary:
+      addr: "192.0.2.9:853"
+      keys: [ NOKEY ]
+
+zones:
+   - name: example.com.
+     type: primary
+     zonefile: /tmp/example.com
+     downstream-auth: [ tls-pkix ]
+     downstreams:
+        - peers: [ ca-member ]
+   - name: example.net.
+     type: primary
+     zonefile: /tmp/example.net
+     allow-notify:
+        - peers: [ a-secondary ]
+     downstreams:
+        - peers: [ a-secondary ]
+        - prefix: "192.0.2.0/24"
+          key:    NOKEY
+`
+	var conf Config
+	if _, _, _, err := decodeConfigFile(writeCfg(t, good), &conf); err != nil {
+		t.Fatalf("decode of a peer-referencing config failed: %v", err)
+	}
+	if err := validateZonePeersAndAcls(&conf); err != nil {
+		t.Fatalf("a peer reference in an ACL was rejected: %v", err)
+	}
+}
+
+// The exemption must not swallow the mistake the validator exists for.
+func TestConfigCheckStillCatchesAddrUnderDownstreams(t *testing.T) {
+	const bad = `
+zones:
+   - name: example.com.
+     type: primary
+     zonefile: /tmp/example.com
+     downstreams:
+        - addr: "192.0.2.1:53"
+`
+	err := ValidateConfig(nil, writeCfg(t, bad))
+	if err == nil {
+		t.Fatal("addr: under downstreams: passed config check")
+	}
+	if !strings.Contains(err.Error(), "downstreams") || !strings.Contains(err.Error(), "belongs in") {
+		t.Fatalf("error does not point at the right list: %v", err)
+	}
+}
+
+// ValidateACL is called by post-expansion callers too. After expansion there
+// are no references left, so the exemption must be inert there -- in
+// particular it must not let a genuinely malformed expanded entry through.
+func TestValidateACLExemptionIsInertPostExpansion(t *testing.T) {
+	defined := func(string) bool { return true }
+	// What expandAclList produces: prefix and key set, PeersRef cleared.
+	expanded := []AclEntry{{Prefix: "192.0.2.0/24", Key: NOKEY, PeerName: "ca-member"}}
+	if err := ValidateACL(expanded, defined); err != nil {
+		t.Fatalf("an expanded peer entry was rejected: %v", err)
+	}
+	// And a bad prefix in an expanded entry is still an error.
+	if err := ValidateACL([]AclEntry{{Prefix: "garbage", Key: NOKEY}}, defined); err == nil {
+		t.Fatal("a malformed prefix passed ValidateACL")
+	}
+}

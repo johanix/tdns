@@ -102,6 +102,28 @@ func ValidateIPSpec(spec string) error {
 // name). Returns the first error, for per-zone quarantine.
 func ValidateACL(acl []AclEntry, keyDefined func(string) bool) error {
 	for _, e := range acl {
+		// A `- peers: [ id, ... ]` reference entry has no prefix or key of
+		// its own: it stands for the peer's prefixes and keys, which
+		// expandAclList substitutes at zone load. Validating it here as
+		// though it were an inline entry rejects the one shape that can
+		// carry a peer's tls-identity, and with it every inbound
+		// client-certificate mechanism -- tls-pin, tls-pkix and tls-dane
+		// are reachable only through a peer reference.
+		//
+		// Skipping is safe in both directions. Post-expansion callers never
+		// see a reference (expandAclList emits plain prefix/key entries), so
+		// this is a no-op for them. And a reference that is malformed is
+		// still caught, by expandAclList: prefix-and-peers together, an
+		// unknown id, and a peer with no prefixes are all diagnosed there,
+		// with messages that name the peer rather than an empty ip-spec.
+		//
+		// What motivated validating this list in the first place -- writing
+		// `- addr: "192.0.2.1:53"` under downstreams:, which mapstructure
+		// decodes to an entry with nothing set -- is unaffected: that entry
+		// has an empty PeersRef and still fails below.
+		if len(e.PeersRef) > 0 {
+			continue
+		}
 		if e.Legacy != "" {
 			return fmt.Errorf("entry %q is a legacy bare-string address; migrate to { prefix: %s, key: NOKEY } — {prefix, key} is now required, and downstreams: is an AXFR ACL (not a notify list)", e.Legacy, e.Legacy)
 		}
