@@ -34,8 +34,16 @@ type CachedRRset struct {
 	Rcode        uint8
 	RRset        *core.RRset
 	NegAuthority []*core.RRset
-	Ttl          uint32
-	Context      CacheContext
+	// CompactDenial marks a negative entry that arrived as an RFC 9824
+	// compact denial of existence: an NSEC owned by the qname itself, with
+	// NXNAME in its bitmap, proving that the name does not exist. The entry
+	// is cached as NXDOMAIN, which is what the proof means. But read by a
+	// validator that does not know NXNAME, that same NSEC says the name
+	// EXISTS, so the rcode a client is shown depends on the client: see
+	// negativeRcode in the resolver.
+	CompactDenial bool
+	Ttl           uint32
+	Context       CacheContext
 	// OBE Validated    bool
 	// OBE Bogus        bool
 	State      ValidationState

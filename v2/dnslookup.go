@@ -3429,6 +3429,23 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 		}
 	}
 
+	// RFC 9824: a compact denial of existence proves that qname does not
+	// exist with an NSEC owned by qname itself, and the authoritative server
+	// sends it with rcode NOERROR unless the query set CO (this resolver does
+	// not). That rcode describes how the NSEC reads to a validator without
+	// NXNAME support; the bitmap says what it proves. Cache what it proves,
+	// NXDOMAIN, marked compact so the responder can pick the rcode each
+	// client can cope with (negativeRcode).
+	//
+	// Decided on the shape of the proof, before validation. Whether the proof
+	// validates decides the AD bit, not which name it denies: behind
+	// validation, as this once was, a zone without a trust anchor was cached
+	// as NODATA and every client was told the name existed.
+	compactDenial := cache.CompactDenialNXDOMAIN(qname, negAuthority)
+	if compactDenial {
+		negContext = cache.ContextNXDOMAIN
+	}
+
 	var edeCode uint16
 	var edeText string
 	if skipDNSKEYValidation && hasValidatedDS && soaOwner != "" {
@@ -3458,6 +3475,9 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	}
 
 	cachedRcode := uint8(r.MsgHdr.Rcode)
+	if compactDenial {
+		cachedRcode = uint8(dns.RcodeNameError)
+	}
 	// In the specific case where ValidateNegativeResponse has modified the rcode from NOERROR to NXDOMAIN we propagate this change.
 	if negRcode != uint8(r.MsgHdr.Rcode) && negRcode == dns.RcodeNameError && uint8(r.MsgHdr.Rcode) == dns.RcodeSuccess {
 		lgDns.Debug("handleNegative: ValidateNegativeResponse has modified the rcode from NOERROR to NXDOMAIN")
@@ -3481,17 +3501,18 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	}
 
 	imr.Cache.Set(qname, qtype, &cache.CachedRRset{
-		Name:         qname,
-		RRtype:       qtype,
-		Rcode:        cachedRcode,
-		RRset:        soarrset,
-		NegAuthority: negAuthority,
-		Context:      negContext,
-		State:        vstate,
-		Expiration:   expiration, // XXX: This will be overridden by rrcache.Set(). TODO: Fix this.
-		EDECode:      edeCode,
-		EDEText:      edeText,
-		Transport:    transport,
+		Name:          qname,
+		RRtype:        qtype,
+		Rcode:         cachedRcode,
+		RRset:         soarrset,
+		NegAuthority:  negAuthority,
+		CompactDenial: compactDenial,
+		Context:       negContext,
+		State:         vstate,
+		Expiration:    expiration, // XXX: This will be overridden by rrcache.Set(). TODO: Fix this.
+		EDECode:       edeCode,
+		EDEText:       edeText,
+		Transport:     transport,
 	})
 
 	// XXX: should do either of:
