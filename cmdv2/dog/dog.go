@@ -225,7 +225,16 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error: invalid transport %s: %v\n", options["transport"], err)
 					os.Exit(1)
 				}
-				chaserClient := core.NewDNSClient(chaserTransport, options["port"], nil)
+				// +time= bounds the chase too. This is the third client dog
+				// builds, and it drifted for the same reason the TCP fallback
+				// did -- a separate construction site with its own option
+				// list. A chain walk is many queries rather than one, so an
+				// unbounded chase is the place a timeout matters most.
+				//
+				// +tries and +adflag do not reach it: retries and the outgoing
+				// AD bit are the chaser's own to decide, and neither is
+				// reachable from here without changing its API.
+				chaserClient := core.NewDNSClient(chaserTransport, options["port"], nil, timeoutOptions(options)...)
 				dss := loadChaserAnchors()
 				chaser := tdns.NewChaser(chaserClient, options["server"], dss)
 				result, err := chaser.Chase(qname, rrtype)
