@@ -775,10 +775,37 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 			dns.AlgorithmToString[curZSKAlg], dns.AlgorithmToString[pol.ZSKAlgorithm], zd.ZoneName)
 	}
 
-	// KSK-only algorithm change: not implemented (parent-coordinated engine).
+	// KSK-only algorithm change: bound here, carried by the auto-rollover
+	// engine (double-signature ordering, whatever rollover.method says).
+	// This command binds and gates; the engine's next tick spawns the roll.
+	// Gates, in order: an engine must exist; no KSK rollover of any kind
+	// may be in flight (K-3, both the DS dance and the drain); no ZSK
+	// algorithm roll may be draining (D-11, the shared check below); and
+	// the zone must not carry an engine-blocking error.
 	if kskChanged {
-		return "", fmt.Errorf("change-policy: KSK algorithm rollover not implemented for zone %s (%s→%s); route via the auto-rollover engine — not yet built",
-			zd.ZoneName, dns.AlgorithmToString[curKSKAlg], dns.AlgorithmToString[pol.KSKAlgorithm])
+		if pol.Rollover.Method == RolloverMethodNone {
+			return "", fmt.Errorf("change-policy: policy %q has no auto-rollover engine (rollover.method: none); a KSK algorithm change for zone %s (%s→%s) is parent-coordinated and needs rollover.method multi-ds or double-signature",
+				policyName, zd.ZoneName, dns.AlgorithmToString[curKSKAlg], dns.AlgorithmToString[pol.KSKAlgorithm])
+		}
+		row, err := LoadRolloverZoneRow(kdb, zd.ZoneName)
+		if err != nil {
+			return "", fmt.Errorf("change-policy: reading rollover state for zone %s: %w", zd.ZoneName, err)
+		}
+		if row != nil && (row.RolloverInProgress || (row.RolloverPhase != "" && row.RolloverPhase != rolloverPhaseIdle)) {
+			return "", fmt.Errorf("change-policy: a KSK rollover is already in progress for zone %s (phase %s); wait for it to complete before changing the KSK algorithm",
+				zd.ZoneName, row.RolloverPhase)
+		}
+		if st, err := kskAlgRollInFlight(kdb, zd.ZoneName, curKSKAlg); err != nil {
+			return "", fmt.Errorf("change-policy: checking in-flight KSK algorithm roll for zone %s: %w", zd.ZoneName, err)
+		} else if st.InFlight {
+			return "", fmt.Errorf("change-policy: a KSK algorithm rollover is already in progress for zone %s (%s→%s); let it finish and then change policy again, or cancel it before the parent has confirmed the DS with \"auto-rollover cancel -z %s --ksk --alg-roll\"",
+				zd.ZoneName, dns.AlgorithmToString[st.FromAlg()], dns.AlgorithmToString[st.ToAlg], zd.ZoneName)
+		}
+		if zd.HasAutoRolloverImpactingError() {
+			errs, _ := collectRolloverGatingErrorMessages(zd.ZoneName)
+			return "", fmt.Errorf("change-policy: the auto-rollover engine is blocked for zone %s and cannot carry a KSK algorithm change: %s",
+				zd.ZoneName, strings.Join(errs, "; "))
+		}
 	}
 
 	// Re-entrancy: refuse if a ZSK alg roll is already in flight. "In flight" is
@@ -795,6 +822,17 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 	} else if inflight.InFlight {
 		return "", fmt.Errorf("change-policy: a ZSK algorithm rollover is already in progress for zone %s (%s→%s); wait for it to complete, or cancel it with \"auto-rollover cancel -z %s --zsk\" before changing course",
 			zd.ZoneName, dns.AlgorithmToString[inflight.FromAlg], dns.AlgorithmToString[inflight.ToAlg], zd.ZoneName)
+	}
+
+	// One role at a time, the other way round (D-11): a ZSK algorithm change
+	// while a KSK algorithm rollover is draining is refused.
+	if zskChanged {
+		if st, err := kskAlgRollInFlight(kdb, zd.ZoneName, curKSKAlg); err != nil {
+			return "", fmt.Errorf("change-policy: checking in-flight KSK algorithm roll for zone %s: %w", zd.ZoneName, err)
+		} else if st.InFlight {
+			return "", fmt.Errorf("change-policy: a KSK algorithm rollover is in progress for zone %s (%s→%s); roll one role at a time -- wait for it to complete before changing the ZSK algorithm",
+				zd.ZoneName, dns.AlgorithmToString[st.FromAlg()], dns.AlgorithmToString[st.ToAlg])
+		}
 	}
 
 	// Strict mode: a ZSK alg change is not implemented (the reconcile refuses).
@@ -824,11 +862,20 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 	} else {
 		fmt.Fprintf(&b, "Zone %s: DNSSEC policy bound to %q.\n", zd.ZoneName, policyName)
 	}
-	if zskChanged {
+	switch {
+	case kskChanged:
+		fmt.Fprintf(&b, "KSK algorithm will roll %s → %s via DOUBLE-SIGNATURE: the rollover engine mints a %s KSK straight into active, double-signs the DNSKEY RRset with both keys, pushes the mixed DS RRset to the parent, and removes the %s KSK once the parent has confirmed it and the drain window (parent DS TTL included) has elapsed.\n",
+			dns.AlgorithmToString[curKSKAlg], dns.AlgorithmToString[pol.KSKAlgorithm],
+			dns.AlgorithmToString[pol.KSKAlgorithm], dns.AlgorithmToString[curKSKAlg])
+		fmt.Fprintf(&b, "This command does NOT perform the roll; the engine starts it on its next tick. Watch it with \"auto-rollover status -z %s --ksk\".\n", zd.ZoneName)
+		if warn := kskAlgRollBindWarning(ctx, zd, &pol); warn != "" {
+			fmt.Fprintf(&b, "WARNING: %s\n", warn)
+		}
+	case zskChanged:
 		fmt.Fprintf(&b, "ZSK algorithm will roll %s → %s GRADUALLY: future-generated ZSKs carry the new algorithm and the existing keys drain in FIFO order.\n",
 			dns.AlgorithmToString[curZSKAlg], dns.AlgorithmToString[pol.ZSKAlgorithm])
 		fmt.Fprintf(&b, "This command does NOT perform the roll. It advances on the normal ZSK cadence, or run \"auto-rollover asap -z %s --zsk\" to promote the next standby now (repeat to accelerate).\n", zd.ZoneName)
-	} else {
+	default:
 		b.WriteString("Algorithms unchanged; new policy timings take effect. No algorithm roll is triggered.\n")
 	}
 	b.WriteString("WARNING: the policy change is stored in the keystore, not the zone config.\n")
@@ -836,10 +883,35 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 	return b.String(), nil
 }
 
+// kskAlgRollBindWarning is the bind-time heads-up for a KSK algorithm
+// change: if the parent advertises no usable DSYNC scheme, the roll will
+// double-sign and then sit in parent-push-softfail until the parent does
+// (safe, but invisible unless someone reads status). Best-effort and
+// bounded: no IMR, a lookup failure or a slow parent produce a hedged line
+// or nothing, never a refusal.
+func kskAlgRollBindWarning(ctx context.Context, zd *ZoneData, pol *DnssecPolicy) string {
+	imr := Conf.Internal.ImrEngine
+	if imr == nil || pol == nil {
+		return ""
+	}
+	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	choices, _, _, err := pickRolloverSchemes(lctx, zd, imr, pol)
+	if err != nil {
+		return fmt.Sprintf("could not check the parent's DSYNC advertisement (%v); if the parent advertises no usable scheme the roll will wait in parent-push-softfail until it does", err)
+	}
+	if len(choices) == 0 {
+		return "the parent advertises no usable DSYNC scheme; the roll will double-sign and then wait in parent-push-softfail until the parent advertises one"
+	}
+	return ""
+}
+
 // resetZonePolicy is the `zone dnssec policy-reset` escape hatch (test/lab). An
-// abrupt policy switch that changes a zone's KSK/ZSK ALGORITHM is refused by
-// design — it needs a key rollover that is not built — which is correct for
-// production but blocks iteration on test zones. policy-reset forces the zone's
+// abrupt policy switch that changes a zone's KSK/ZSK ALGORITHM has gradual,
+// safe paths — policy-change rolls a ZSK algorithm in relaxed completeness
+// mode and hands a KSK algorithm change to the auto-rollover engine — but
+// those take a drain window, which blocks iteration on test zones.
+// policy-reset is the destructive shortcut: it forces the zone's
 // active key set to match the config policy's algorithms per role, then re-signs
 // under config, records applied=config, and clears the CLI override.
 //

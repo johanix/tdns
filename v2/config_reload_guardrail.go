@@ -91,9 +91,13 @@ type policyAlgMiss struct {
 // relaxed reflects the NEW dnssec.completeness: a ZSK algorithm change in relaxed
 // mode is carried by the gradual FIFO ZSK roll (reconcile no-ops on it), so it is
 // NOT a strand and is not flagged — flagging it would refuse a supported, safe
-// transition. A KSK/CSK algorithm change is a strand in either mode (no automatic
-// KSK-algorithm rollover exists). Pure and dependency-free so it is unit-testable.
-func policyAlgStrandsActiveKeys(want policyRoleAlgs, active zoneActiveAlgs, relaxed bool) []policyAlgMiss {
+// transition. kskEngine reflects the NEW policy's rollover.method: with an
+// auto-rollover engine (multi-ds or double-signature) a KSK algorithm change
+// is carried by the engine's KSK algorithm rollover (the reconcile no-ops on
+// it and the engine spawns the roll), so it is not a strand either. A KSK
+// change without an engine, and a CSK change, strand in every mode. Pure and
+// dependency-free so it is unit-testable.
+func policyAlgStrandsActiveKeys(want policyRoleAlgs, active zoneActiveAlgs, relaxed, kskEngine bool) []policyAlgMiss {
 	var miss []policyAlgMiss
 	check := func(role string, wantAlg uint8, have map[uint8]bool) {
 		if wantAlg == 0 || len(have) == 0 || have[wantAlg] {
@@ -105,7 +109,9 @@ func policyAlgStrandsActiveKeys(want policyRoleAlgs, active zoneActiveAlgs, rela
 		check("CSK", want.ksk, active.ksk)
 		return miss
 	}
-	check("KSK", want.ksk, active.ksk)
+	if !kskEngine {
+		check("KSK", want.ksk, active.ksk)
+	}
 	if !relaxed {
 		check("ZSK", want.zsk, active.zsk)
 	}
@@ -194,7 +200,8 @@ func (conf *Config) detectStrandingPolicyChanges(newPolicies map[string]DnssecPo
 		if want.mode == "" {
 			want.mode = DnssecPolicyModeKSKZSK
 		}
-		miss := policyAlgStrandsActiveKeys(want, active, relaxed)
+		kskEngine := newPol.Rollover.Method != RolloverMethodNone
+		miss := policyAlgStrandsActiveKeys(want, active, relaxed, kskEngine)
 		if len(miss) == 0 {
 			continue
 		}
@@ -289,7 +296,7 @@ func (e *ReloadGuardrailError) Error() string {
 		}
 	}
 	b.WriteString("These zones would keep serving their current signatures until expiry, then go BOGUS.\n")
-	b.WriteString("Re-run with confirm=true (CLI: --confirm) to apply anyway, roll the key deliberately via the auto-rollover engine, or on a test zone run `tdns-cli auth zone dnssec policy-reset`.")
+	b.WriteString("Re-run with confirm=true (CLI: --confirm) to apply anyway; roll the key deliberately instead (a KSK: give the policy rollover.method multi-ds or double-signature and the engine rolls the algorithm; a ZSK: dnssec.completeness: relaxed); or on a test zone run `tdns-cli auth zone dnssec policy-reset`.")
 	return b.String()
 }
 

@@ -308,20 +308,36 @@ func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (b
 	relaxed := Conf.Internal.Completeness == CompletenessRelaxed
 
 	rolloverInProgress := false
+	var algRoll *KskAlgRollState
 	if row, err := LoadRolloverZoneRow(kdb, zd.ZoneName); err != nil {
 		return false, err
 	} else if row != nil {
 		rolloverInProgress = row.RolloverInProgress
+		algRoll = kskAlgRollFromRow(row)
 	}
 
-	// KSK algorithm mismatch is REFUSED in both modes — a KSK alg rollover is
-	// parent-coordinated engine work (not yet built), and the legacy immediate
-	// retire below would bypass the standby DS gate and bogus the parent chain.
+	// KSK algorithm mismatch: never the legacy synchronous retire, which
+	// would bypass the parent DS and bogus the chain. A KSK algorithm
+	// rollover is parent-coordinated engine work: with an auto-rollover
+	// policy bound the engine spawns one on its next tick and this is a
+	// no-op (mirroring the relaxed ZSK branch below); during the roll the
+	// old-algorithm head is the engine's, still signing, and is skipped;
+	// with no engine (rollover.method: none) nothing can carry the
+	// transition and the mismatch is refused.
 	for _, ksk := range dak.KSKs {
-		if ksk.DnskeyRR.Algorithm != zd.DnssecPolicy.KSKAlgorithm {
-			return false, fmt.Errorf("KSK algorithm rollover not implemented for zone %s (active KSK %d is %s, policy wants %s); route via the auto-rollover engine — not yet built",
+		if ksk.DnskeyRR.Algorithm == zd.DnssecPolicy.KSKAlgorithm {
+			continue
+		}
+		if algRoll != nil && ksk.DnskeyRR.Algorithm == algRoll.FromAlg {
+			continue
+		}
+		if zd.DnssecPolicy.Rollover.Method == RolloverMethodNone {
+			return false, fmt.Errorf("KSK algorithm rollover requires an auto-rollover policy for zone %s (active KSK %d is %s, policy wants %s, rollover.method is none); bind a policy with rollover.method multi-ds or double-signature, or on a test zone run `zone dnssec policy-reset`",
 				zd.ZoneName, ksk.KeyId, dns.AlgorithmToString[ksk.DnskeyRR.Algorithm], dns.AlgorithmToString[zd.DnssecPolicy.KSKAlgorithm])
 		}
+		lgSigner.Info("active KSK algorithm differs from policy; the rollover engine will spawn an algorithm roll on its next tick (not retiring)",
+			"zone", zd.ZoneName, "keyid", ksk.KeyId,
+			"have", dns.AlgorithmToString[ksk.DnskeyRR.Algorithm], "want", dns.AlgorithmToString[zd.DnssecPolicy.KSKAlgorithm])
 	}
 
 	// ZSK algorithm mismatch: refuse in strict mode; no-op in relaxed mode (the
@@ -374,7 +390,10 @@ func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (b
 				// Legitimate old-alg FIFO member during a relaxed roll.
 				continue
 			}
-			if role == "KSK" && rolloverInProgress {
+			if role == "KSK" && (rolloverInProgress || (algRoll != nil && k.Algorithm == algRoll.FromAlg)) {
+				// The engine owns every KSK while a rollover is in flight,
+				// and the old-algorithm FIFO in particular during an
+				// algorithm roll (its spawn already froze the pipeline).
 				lgSigner.Warn("non-active KSK algorithm differs from policy but a rollover is in progress; deferring removal",
 					"zone", zd.ZoneName, "keyid", k.KeyTag, "state", state)
 				continue

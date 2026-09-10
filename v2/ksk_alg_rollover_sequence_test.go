@@ -134,8 +134,69 @@ func ktPhase(t *testing.T, kdb *KeyDB, zone string) (string, bool) {
 	return row.RolloverPhase, row.RolloverInProgress
 }
 
-// KT-6, with KT-8 (mixed confirm), KT-14 (D-7 wait) and KT-15 (delegation
-// sync hands-off) asserted along the way.
+// ktAssertChain: for the DS RRset a resolver could hold (parentDS), at least
+// one DS names a DNSKEY that is in the served RRset AND has an RRSIG over
+// the DNSKEY RRset by that key -- one complete DS→DNSKEY→RRSIG chain.
+func ktAssertChain(t *testing.T, zd *ZoneData, step string, parentDS []dns.RR) {
+	t.Helper()
+	owner, _ := zd.GetOwner(zd.ZoneName)
+	if owner == nil {
+		t.Fatalf("%s: no apex", step)
+	}
+	dnskeys, _ := owner.RRtypes.Get(dns.TypeDNSKEY)
+	published := map[uint16]bool{}
+	for _, rr := range dnskeys.RRs {
+		if k, ok := rr.(*dns.DNSKEY); ok {
+			published[k.KeyTag()] = true
+		}
+	}
+	signed := map[uint16]bool{}
+	for _, sig := range dnskeys.RRSIGs {
+		signed[sig.(*dns.RRSIG).KeyTag] = true
+	}
+	for _, rr := range parentDS {
+		if ds, ok := rr.(*dns.DS); ok && published[ds.KeyTag] && signed[ds.KeyTag] {
+			return
+		}
+	}
+	t.Fatalf("%s: no complete chain: parent DS %v, published %v, signed %v", step, ktDSKeytags(parentDS), published, signed)
+}
+
+// ktAssertDNSKEYSigs runs every zone-level re-sign path -- SignZone forced,
+// SignZone unforced, ResignZone (strip-and-replace) -- and after each
+// asserts the apex DNSKEY RRset carries exactly the RRSIGs by want. This
+// is KT-17, the join between the engine and the signer: whichever path a
+// key-state change or the periodic pass takes, the drain window keeps
+// both signatures and removal leaves neither behind.
+func ktAssertDNSKEYSigs(t *testing.T, zd *ZoneData, kdb *KeyDB, step string, want ...uint16) {
+	t.Helper()
+	paths := []struct {
+		name string
+		run  func() error
+	}{
+		{"SignZone(force)", func() error { _, err := zd.SignZone(kdb, true); return err }},
+		{"SignZone(renew)", func() error { _, err := zd.SignZone(kdb, false); return err }},
+		{"ResignZone", func() error { _, err := zd.ResignZone(kdb); return err }},
+	}
+	for _, p := range paths {
+		if err := p.run(); err != nil {
+			t.Fatalf("%s: %s: %v", step, p.name, err)
+		}
+		tags := zd.mustRRSIGKeytags(t, zd.ZoneName, dns.TypeDNSKEY)
+		if len(tags) != len(want) {
+			t.Fatalf("%s: after %s the DNSKEY RRSIG keytags are %v, want %v", step, p.name, tags, want)
+		}
+		for _, w := range want {
+			if !ktHasKeytag(tags, w) {
+				t.Fatalf("%s: after %s the DNSKEY RRSIG keytags are %v, want %v", step, p.name, tags, want)
+			}
+		}
+	}
+}
+
+// KT-6, with KT-8 (mixed confirm), KT-14 (D-7 wait), KT-15 (delegation
+// sync hands-off) and KT-17 (both re-sign paths keep the double signature
+// through the drain) asserted along the way.
 func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 	parent := ktInstallFakeParent(t)
 	kdb := newTestKeyDB(t)
@@ -185,6 +246,12 @@ func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 		t.Fatalf("spawn: roll state %+v", st)
 	}
 	b := st.NewHeadKeyID
+	// The spawn's triggerResign is a no-op here (no resigner): do its job,
+	// and check every re-sign path double-signs. A pre-push resolver holds
+	// {DS(A)}; its chain runs through A.
+	ktAssertDNSKEYSigs(t, zd, kdb, "spawn", a, b)
+	preTarget, _, _, _, _ := ComputeTargetDSSetForZone(kdb, ktAlgZone, uint8(dns.SHA256), pol)
+	ktAssertChain(t, zd, "spawn", ktDSSubset(preTarget, 3600, a))
 
 	// 2. KT-14: no push before propagation-delay + DNSKEY_TTL from the spawn.
 	tick("wait-early", t0.Add(propagation+dnskeyTTL-30*time.Second))
@@ -236,6 +303,12 @@ func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 	if zd.ParentDSTTLObserved != 3600 {
 		t.Fatalf("confirm: parent DS TTL observed = %d, want 3600", zd.ParentDSTTLObserved)
 	}
+	// KT-17: through the drain every re-sign path keeps BOTH signatures --
+	// including ResignZone, which strips and re-signs with the active keys
+	// only, and which a key-state change triggers after PR #514.
+	ktAssertDNSKEYSigs(t, zd, kdb, "drain", a, b)
+	ktAssertChain(t, zd, "drain (pre-push resolver)", ktDSSubset(target, 3600, a))
+	ktAssertChain(t, zd, "drain (post-push resolver)", ktDSSubset(target, 3600, a, b))
 
 	// 6. F1 margin: max(2h margin, 3600s max TTL, 3600s DS TTL + 5m) = 2h.
 	tick("drain-early", tConfirm.Add(2*time.Hour-30*time.Second))
@@ -250,10 +323,13 @@ func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 	if s := ktKeyState(t, kdb, ktAlgZone, a); s != DnskeyStateRemoved {
 		t.Fatalf("drain-done: A is %s, want removed", s)
 	}
-	// The served-zone assertions (RRSIG(A) stripped, both chains valid at
-	// every step) live in TestKT16/KT17: until the entry layer lets the
-	// signer through, every publish of this zone is refused by the
-	// reconcile's KSK-mismatch backstop, so the strip cannot land.
+	if tags := zd.mustRRSIGKeytags(t, ktAlgZone, dns.TypeDNSKEY); ktHasKeytag(tags, a) {
+		t.Fatalf("drain-done: RRSIG by removed KSK %d still on the DNSKEY RRset: %v", a, tags)
+	}
+	// KT-17: after removal no re-sign path brings RRSIG(A) back, and a
+	// resolver holding the still-mixed parent RRset validates through B.
+	ktAssertDNSKEYSigs(t, zd, kdb, "removed", b)
+	ktAssertChain(t, zd, "removed", ktDSSubset(target, 3600, a, b))
 	if st, _ := LoadKskAlgRollState(kdb, ktAlgZone); st != nil {
 		t.Fatalf("drain-done: roll state not cleared: %+v", st)
 	}

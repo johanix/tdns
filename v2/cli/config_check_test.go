@@ -73,6 +73,20 @@ func TestMissingRoleAlgs(t *testing.T) {
 			active:   activeKeyAlgs{ksk: algSet("ed25519"), zsk: algSet("ecdsap256sha256")},
 			wantMiss: []string{"KSK", "ZSK"},
 		},
+		{
+			// The auto-rollover engine carries a KSK algorithm change as a
+			// KSK algorithm rollover: not a miss.
+			name:   "split: KSK algorithm changed under an engine -> no finding",
+			want:   wantAlgs{mode: ksz, ksk: "falcon512", zsk: "ed25519", kskEngine: true},
+			active: activeKeyAlgs{ksk: algSet("ed25519"), zsk: algSet("ed25519")},
+		},
+		{
+			// The engine says nothing about the ZSK.
+			name:     "split: both roles changed under an engine -> ZSK WARN only",
+			want:     wantAlgs{mode: ksz, ksk: "falcon512", zsk: "falcon512", kskEngine: true},
+			active:   activeKeyAlgs{ksk: algSet("ed25519"), zsk: algSet("ecdsap256sha256")},
+			wantMiss: []string{"ZSK"},
+		},
 	}
 
 	for _, tc := range cases {
@@ -157,5 +171,13 @@ func TestCheckPeers_PeerlessNoRefs(t *testing.T) {
 	checkPeers(cfg, rep)
 	if got := len(rep.byGroup["Peers"]); got != 0 {
 		t.Fatalf("expected no Peers findings for a peerless config with no refs, got %d: %+v", got, rep.byGroup["Peers"])
+	}
+}
+
+func TestPolicyHasKskEngine(t *testing.T) {
+	for in, want := range map[string]bool{"": false, "none": false, "NONE": false, " multi-ds ": true, "double-signature": true} {
+		if got := policyHasKskEngine(in); got != want {
+			t.Errorf("policyHasKskEngine(%q) = %v, want %v", in, got, want)
+		}
 	}
 }

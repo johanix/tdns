@@ -799,6 +799,11 @@ type PolicyAlgNames struct {
 	Alg    string // default / CSK
 	KSKAlg string
 	ZSKAlg string
+	// RolloverMethod is the policy's rollover.method as written ("none",
+	// "multi-ds", "double-signature"; empty resolves to "none"). config
+	// check uses it to know whether a KSK algorithm change is carried by
+	// the auto-rollover engine.
+	RolloverMethod string
 }
 
 // ResolveDnssecPolicyAlgNames returns each policy's effective algorithm NAMES
@@ -827,7 +832,11 @@ func ResolveDnssecPolicyAlgNames(path string) (map[string]PolicyAlgNames, error)
 		if mode == "" {
 			mode = DnssecPolicyModeKSKZSK
 		}
-		out[name] = PolicyAlgNames{Mode: mode, Alg: def, KSKAlg: ksk, ZSKAlg: zsk}
+		method := strings.ToLower(strings.TrimSpace(dp.Rollover.Method))
+		if method == "" {
+			method = "none"
+		}
+		out[name] = PolicyAlgNames{Mode: mode, Alg: def, KSKAlg: ksk, ZSKAlg: zsk, RolloverMethod: method}
 	}
 	return out, nil
 }
