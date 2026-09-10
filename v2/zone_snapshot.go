@@ -27,6 +27,57 @@ type zoneSnapshot struct {
 	// not from here. Injection prefers an authoritative copy over a synth entry.
 	signalSynth map[string]*core.RRset
 	IxfrChain   []Ixfr
+	// ents holds the zone's empty non-terminals: names that own no records
+	// but have descendants that do. They are NOT owners -- putting synthetic
+	// entries in Data would make every path that diffs a published snapshot
+	// against the working set (pendingChanges, changedChainNames, the IXFR
+	// deltas) see phantom additions and deletions. A separate set costs one
+	// map lookup on the denial path and perturbs nothing else.
+	ents map[string]struct{}
+}
+
+// entNamesFrom collects the zone's empty non-terminals from its owner map: for
+// every owner, each ancestor between it and the apex that owns nothing.
+//
+// An ENT exists. RFC 1034 section 4.3.2 resolves against the label tree, and
+// RFC 4592 section 2.2.2 defines the ENT as "a domain name that owns no
+// resource records but has subdomains that do". Names below a zone cut are
+// included and never consulted: the responder answers a referral before it
+// reaches the ENT check.
+func entNamesFrom(apexName string, data map[string]*OwnerData) map[string]struct{} {
+	apex := core.CanonicalizeName(apexName)
+	ents := map[string]struct{}{}
+	for name := range data {
+		n := name
+		for {
+			idx := strings.Index(n, ".")
+			if idx < 0 {
+				break
+			}
+			n = n[idx+1:]
+			if n == "" || n == apex {
+				break
+			}
+			if _, owned := data[n]; owned {
+				continue
+			}
+			ents[n] = struct{}{}
+		}
+	}
+	if len(ents) == 0 {
+		return nil
+	}
+	return ents
+}
+
+// isEmptyNonTerminal reports whether qname is a name in snap that owns no
+// records but has descendants that do.
+func isEmptyNonTerminal(snap *zoneSnapshot, qname string) bool {
+	if snap == nil || snap.ents == nil {
+		return false
+	}
+	_, ok := snap.ents[core.CanonicalizeName(qname)]
+	return ok
 }
 
 // PendingChanges describes staged-but-unpublished zone deltas (B2 observability).

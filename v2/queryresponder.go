@@ -378,6 +378,14 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 			w.WriteMsg(m)
 			return nil
 		}
+		// DS is trapped ahead of the main path, so the ENT case has to be
+		// answered here too, with the same NODATA.
+		if isEmptyNonTerminal(psnap, qname) {
+			lgHandler.Debug("QueryResponder: DS query for an empty non-terminal — NODATA",
+				"qname", qname, "zone", pzd.ZoneName)
+			pzd.sendENTNodata(m, w, qname, papex, psnap, msgoptions, pSign)
+			return nil
+		}
 		lgHandler.Debug("QueryResponder: DS query for a name that does not exist — NXDOMAIN",
 			"qname", qname, "zone", pzd.ZoneName)
 		pzd.sendNXDOMAIN(m, w, qname, papex, psnap, msgoptions, pSign)
@@ -440,6 +448,27 @@ func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string,
 	if msgoptions.DO {
 		// RFC 9824: Compact denial if CO bit is set, otherwise traditional DNSSEC negative response
 		zd.addCDEResponse(m, qname, apex, nil, msgoptions, signFunc)
+	}
+	w.WriteMsg(m)
+}
+
+// sendENTNodata answers for an empty non-terminal: a name that owns no records
+// but has descendants that do. It EXISTS -- RFC 1034 section 4.3.2 resolves
+// against the label tree, RFC 4592 section 2.2.2 names the case -- so the
+// answer is NODATA, and NXDOMAIN would be a lie the zone signs.
+//
+// The rrtypeList is empty but NOT nil, which is the whole difference from
+// sendNXDOMAIN: addCDEResponse reads nil as "the name does not exist" and puts
+// NXNAME in the bitmap, and a non-nil list as "these are the types here". An
+// empty one therefore yields NOERROR with a bitmap of exactly RRSIG and NSEC,
+// which is what RFC 9824 section 3.2 specifies for an ENT.
+func (zd *ZoneData) sendENTNodata(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData, snap *zoneSnapshot,
+	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
+	m.MsgHdr.Rcode = dns.RcodeSuccess
+	soaRRset := zd.soaForResponseFrom(snap, apex)
+	m.Ns = append(m.Ns, soaRRset.RRs...)
+	if msgoptions.DO {
+		zd.addCDEResponse(m, qname, apex, []uint16{}, msgoptions, signFunc)
 	}
 	w.WriteMsg(m)
 }
@@ -871,6 +900,17 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		// If there is delegation data and an NS RRset is present, return a referral
 		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
 			zd.sendReferral(m, w, cdd, apex, msgoptions, MaybeSignRRset)
+			return nil
+		}
+
+		// An empty non-terminal exists, so it is NODATA -- and it blocks
+		// wildcard synthesis: RFC 4592 section 4.1 uses a wildcard only for a
+		// name that does not exist, which is why this stands ahead of the
+		// wildcard lookup. It stands behind the delegation check above because
+		// anything below a zone cut is the child's to answer for.
+		if isEmptyNonTerminal(snap, qname) {
+			lgHandler.Debug("empty non-terminal", "qname", qname, "zone", zd.ZoneName)
+			zd.sendENTNodata(m, w, qname, apex, snap, msgoptions, MaybeSignRRset)
 			return nil
 		}
 
