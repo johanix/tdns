@@ -378,6 +378,14 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 			w.WriteMsg(m)
 			return nil
 		}
+		// DS is trapped ahead of the main path, so the ENT case has to be
+		// answered here too, with the same NODATA.
+		if isEmptyNonTerminal(psnap, qname) {
+			lgHandler.Debug("QueryResponder: DS query for an empty non-terminal — NODATA",
+				"qname", qname, "zone", pzd.ZoneName)
+			pzd.sendENTNodata(m, w, qname, papex, psnap, msgoptions, pSign)
+			return nil
+		}
 		lgHandler.Debug("QueryResponder: DS query for a name that does not exist — NXDOMAIN",
 			"qname", qname, "zone", pzd.ZoneName)
 		pzd.sendNXDOMAIN(m, w, qname, papex, psnap, msgoptions, pSign)
@@ -432,6 +440,30 @@ func (zd *ZoneData) sendReferral(m *dns.Msg, w dns.ResponseWriter, cdd *ChildDel
 }
 
 // sendNXDOMAIN sends an NXDOMAIN response with proper DNSSEC negative response if requested.
+// respondEDNS attaches the response OPT and, for a client that asked for
+// compact answers, the CO flag beside it.
+//
+// RFC 9824 section 5.1: "In responses to such queries, an authoritative server
+// implementing both Compact Denial of Existence and this signaling scheme will
+// set the Compact Answers OK EDNS header flag and, for nonexistent names, will
+// additionally set the response code field to NXDOMAIN." Two acts, not one:
+// the flag on every response to a CO query says this server speaks CO, and the
+// rcode is the additional step for nonexistent names (addCDEResponse). A CO
+// client therefore learns the capability from a NODATA too, which is what
+// section 5.1's "resolvers will need to record the presence of this flag in
+// associated cache data" asks for.
+//
+// The two go together in one call because QueryResponder has three exits that
+// build their own message -- the long-lived m, and the SERVFAILs for a
+// cancelled context and a signing failure. Attaching the OPT without the flag
+// is what those two did, and a paired helper is what stops them drifting again.
+func respondEDNS(m, r *dns.Msg, msgoptions *edns0.MsgOptions) {
+	edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
+	if msgoptions != nil && msgoptions.CO {
+		edns0.SetCO(m)
+	}
+}
+
 func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData, snap *zoneSnapshot,
 	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
 	m.MsgHdr.Rcode = dns.RcodeNameError
@@ -440,6 +472,27 @@ func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string,
 	if msgoptions.DO {
 		// RFC 9824: Compact denial if CO bit is set, otherwise traditional DNSSEC negative response
 		zd.addCDEResponse(m, qname, apex, nil, msgoptions, signFunc)
+	}
+	w.WriteMsg(m)
+}
+
+// sendENTNodata answers for an empty non-terminal: a name that owns no records
+// but has descendants that do. It EXISTS -- RFC 1034 section 4.3.2 resolves
+// against the label tree, RFC 4592 section 2.2.2 names the case -- so the
+// answer is NODATA, and NXDOMAIN would be a lie the zone signs.
+//
+// The rrtypeList is empty but NOT nil, which is the whole difference from
+// sendNXDOMAIN: addCDEResponse reads nil as "the name does not exist" and puts
+// NXNAME in the bitmap, and a non-nil list as "these are the types here". An
+// empty one therefore yields NOERROR with a bitmap of exactly RRSIG and NSEC,
+// which is what RFC 9824 section 3.2 specifies for an ENT.
+func (zd *ZoneData) sendENTNodata(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData, snap *zoneSnapshot,
+	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
+	m.MsgHdr.Rcode = dns.RcodeSuccess
+	soaRRset := zd.soaForResponseFrom(snap, apex)
+	m.Ns = append(m.Ns, soaRRset.RRs...)
+	if msgoptions.DO {
+		zd.addCDEResponse(m, qname, apex, []uint16{}, msgoptions, signFunc)
 	}
 	w.WriteMsg(m)
 }
@@ -770,7 +823,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		lgHandler.Info("QueryResponder: context cancelled")
 		m := new(dns.Msg)
 		m.SetReply(r)
-		edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
+		respondEDNS(m, r, msgoptions)
 		m.MsgHdr.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(m)
 		return ctx.Err()
@@ -816,7 +869,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	// this m) carries it. No-op for non-EDNS queries. Later EDE/CDE error paths
 	// find and reuse this OPT rather than adding a second one. Downstream UDP
 	// truncation preserves the OPT and re-appends it after trimming.
-	edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
+	respondEDNS(m, r, msgoptions)
 
 	// Pin ONE snapshot for the whole response so the answer, authority SOA, NS,
 	// and glue all come from the same serial — no intra-response tearing (C1).
@@ -874,6 +927,17 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			return nil
 		}
 
+		// An empty non-terminal exists, so it is NODATA -- and it blocks
+		// wildcard synthesis: RFC 4592 section 4.1 uses a wildcard only for a
+		// name that does not exist, which is why this stands ahead of the
+		// wildcard lookup. It stands behind the delegation check above because
+		// anything below a zone cut is the child's to answer for.
+		if isEmptyNonTerminal(snap, qname) {
+			lgHandler.Debug("empty non-terminal", "qname", qname, "zone", zd.ZoneName)
+			zd.sendENTNodata(m, w, qname, apex, snap, msgoptions, MaybeSignRRset)
+			return nil
+		}
+
 		wildqname = "*." + strings.Join(strings.Split(qname, ".")[1:], ".")
 		// log.Printf("---> Checking for existence of wildcard %s", wildqname)
 
@@ -899,6 +963,18 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	// 0. Check for *any* existence of qname in zone
 	// log.Printf("---> Checking for any existence of qname %s", qname)
 	if owner.RRtypes.Count() == 0 {
+		// A node holding no records is only absent if nothing lives beneath
+		// it. With descendants it is an empty non-terminal and NODATA, the
+		// same as one that never had a node at all -- an UPDATE that removes
+		// an owner's last RRset without removing the node must not turn the
+		// name into a signed denial while its children still answer. The
+		// ENT check on the !nameExistsFrom path above cannot see this one:
+		// the name IS in Data, so nameExistsFrom sent us straight here.
+		if isEmptyNonTerminal(snap, qname) {
+			lgHandler.Debug("empty non-terminal with an empty owner node", "qname", qname, "zone", zd.ZoneName)
+			zd.sendENTNodata(m, w, origqname, apex, snap, msgoptions, MaybeSignRRset)
+			return nil
+		}
 		soaRRset, err := MaybeSignRRset(zd.soaForResponseFrom(snap, apex), zd.ZoneName)
 		if err != nil {
 			lgHandler.Error("failed to sign SOA RRset", "zone", zd.ZoneName, "err", err)
@@ -909,10 +985,17 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			}
 		}
 		m.Ns = append(m.Ns, soaRRset.RRs...)
+		// Rcode BEFORE the denial is built. addCDEResponse decides, from the
+		// client's CO flag, whether an NXDOMAIN may stand beside the
+		// owner=qname NSEC it synthesises, and downgrades to NOERROR when it
+		// may not. Set afterwards, as it was, NXDOMAIN overrode that decision
+		// on this path alone (sendNXDOMAIN had the order right), and a DO
+		// client without CO was handed a proof that the name exists next to
+		// an rcode saying it does not.
+		m.MsgHdr.Rcode = dns.RcodeNameError
 		if msgoptions.DO {
 			zd.addCDEResponse(m, origqname, apex, nil, msgoptions, MaybeSignRRset)
 		}
-		m.MsgHdr.Rcode = dns.RcodeNameError
 		w.WriteMsg(m)
 		return nil
 	}
@@ -982,7 +1065,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 					servfail := new(dns.Msg)
 					servfail.SetReply(r)
 					servfail.MsgHdr.Authoritative = true
-					edns0.EnsureResponseOPT(servfail, r, dns.DefaultMsgSize)
+					respondEDNS(servfail, r, msgoptions)
 					servfail.MsgHdr.Rcode = dns.RcodeServerFailure
 					w.WriteMsg(servfail)
 					return nil
@@ -1116,7 +1199,9 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 		if rrtypeList != nil {
 			m.MsgHdr.Rcode = dns.RcodeSuccess
 		}
-		// For NXDOMAIN, Rcode is already RcodeNameError from caller
+		// For NXDOMAIN, Rcode is already RcodeNameError from caller. The CO
+		// flag on the response is not set here: QueryResponder echoes it onto
+		// every response to a CO query, which is what section 5.1 describes.
 	} else {
 		// Traditional DNSSEC: For synthetic NSEC (owner=qname), Rcode must be NOERROR
 		// because the NSEC makes it appear the name exists

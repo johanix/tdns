@@ -27,6 +27,42 @@ type EDNS0Option struct {
 	Data []byte
 }
 
+// coFlagBit is the Compact Answers OK flag (RFC 9824): bit 14 of the OPT
+// record's TTL field, next to DO at bit 15.
+const coFlagBit = uint32(1 << 14)
+
+// SetCO sets the Compact Answers OK flag on the OPT record m already carries.
+// A message without an OPT is left alone: the flag lives in the OPT, and a
+// plain-DNS query gets a plain-DNS reply.
+//
+// This is the bit-setter and nothing more; WHEN to set it is the responder's
+// decision. The flag is not copied from the query the way DO is
+// (EnsureResponseOPT), because it is not an echo of a capability the client
+// announced -- RFC 9824 section 5.1 defines it on a response as the RESPONDER
+// saying it implements the scheme: "an authoritative server implementing both
+// Compact Denial of Existence and this signaling scheme will set the Compact
+// Answers OK EDNS header flag and, for nonexistent names, will additionally
+// set the response code field to NXDOMAIN". Two acts, and this is only the
+// first. tdns sets it on every response to a query that carried CO; see
+// QueryResponder and ImrResponder.
+func SetCO(m *dns.Msg) {
+	if m == nil {
+		return
+	}
+	if opt := m.IsEdns0(); opt != nil {
+		opt.Hdr.Ttl |= coFlagBit
+	}
+}
+
+// HasCO reports whether m carries an OPT with the Compact Answers OK flag.
+func HasCO(m *dns.Msg) bool {
+	if m == nil {
+		return false
+	}
+	opt := m.IsEdns0()
+	return opt != nil && (opt.Hdr.Ttl&coFlagBit) != 0
+}
+
 func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 	msgoptions := &MsgOptions{}
 	msgoptions.CD = r.MsgHdr.CheckingDisabled
@@ -44,7 +80,7 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 	msgoptions.DO = opt.Do()
 
 	// Extract CO bit (Compact Ok) - bit 14 (RFC 9824)
-	msgoptions.CO = (opt.Hdr.Ttl & (1 << 14)) != 0
+	msgoptions.CO = (opt.Hdr.Ttl & coFlagBit) != 0
 
 	// PRIVACY option: one octet, 0 = no opinion, 1 = opportunistic, 2 = strict.
 	// Presence is recorded separately from the level, because a response only
