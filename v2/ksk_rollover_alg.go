@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -285,4 +286,90 @@ ORDER BY keyid ASC`, zone)
 		lgRollover.Info("rollover: froze old-algorithm pipeline KSK", "zone", zone, "keyid", v.kid, "algorithm", v.alg, "was", v.state)
 	}
 	return len(victims), nil
+}
+
+// AbortKskAlgRollover cancels an in-flight KSK algorithm rollover before
+// the parent has confirmed the mixed DS RRset (D-12). Until then nobody
+// relies on DS(B): abort means strip B's signatures, mark B removed, clear
+// the roll marker, and return the zone to idle; the next idle tick pushes
+// the shrunken DS set if a push had gone out. After confirmation "abort"
+// would be a reverse algorithm rollover -- refused, with the guidance to
+// let the roll finish and then change policy back.
+//
+// Returns a one-line description of what was done for the operator.
+func AbortKskAlgRollover(conf *Config, kdb *KeyDB, zone string) (string, error) {
+	zone = dns.Fqdn(strings.TrimSpace(zone))
+	row, err := LoadRolloverZoneRow(kdb, zone)
+	if err != nil {
+		return "", fmt.Errorf("read rollover state: %w", err)
+	}
+	algRoll := kskAlgRollFromRow(row)
+	if algRoll == nil {
+		return "", fmt.Errorf("no KSK algorithm rollover is in progress")
+	}
+	if algRoll.OldHeadRetireAt != nil || row.RolloverPhase == rolloverPhasePendingChildWithdraw {
+		return "", fmt.Errorf("the parent has already confirmed the mixed DS RRset (%s -> %s); aborting now would be a reverse algorithm rollover -- let it finish, then change policy back",
+			dns.AlgorithmToString[algRoll.FromAlg], dns.AlgorithmToString[algRoll.ToAlg])
+	}
+
+	// B has signed the apex DNSKEY RRset since the spawn: strip its
+	// signatures before it goes, or they dangle (F2).
+	if zd, ok := Zones.Get(zone); ok && zd != nil {
+		if _, err := zd.StripZoneRRSIGs(context.Background(), func(s *dns.RRSIG) bool {
+			return s.KeyTag == algRoll.NewHeadKeyID
+		}); err != nil {
+			return "", fmt.Errorf("strip the new-algorithm KSK's signatures: %w", err)
+		}
+	}
+
+	tx, err := kdb.Begin("AbortKskAlgRollover")
+	if err != nil {
+		return "", fmt.Errorf("begin: %w", err)
+	}
+	commit := false
+	defer func() {
+		if !commit {
+			tx.Rollback()
+		}
+	}()
+	if err := UpdateDnssecKeyStateTx(tx, kdb, zone, algRoll.NewHeadKeyID, DnskeyStateRemoved); err != nil {
+		return "", fmt.Errorf("remove new-algorithm KSK %d: %w", algRoll.NewHeadKeyID, err)
+	}
+	if err := stampRolloverStateAtTx(tx, zone, algRoll.NewHeadKeyID, time.Now().UTC()); err != nil {
+		return "", fmt.Errorf("rollover_state_at (keyid %d): %w", algRoll.NewHeadKeyID, err)
+	}
+	if err := clearKskAlgRollTx(tx, zone); err != nil {
+		return "", fmt.Errorf("clear algorithm-roll state: %w", err)
+	}
+	if err := clearObserveScheduleTx(tx, zone); err != nil {
+		return "", fmt.Errorf("clear observe schedule: %w", err)
+	}
+	if err := setRolloverInProgressTx(tx, zone, false); err != nil {
+		return "", fmt.Errorf("clear rollover_in_progress: %w", err)
+	}
+	if err := setRolloverPhaseTx(tx, zone, rolloverPhaseIdle); err != nil {
+		return "", fmt.Errorf("reset phase: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit: %w", err)
+	}
+	commit = true
+
+	if rerr := republishSigningKeysForZone(kdb, zone); rerr != nil {
+		return "", fmt.Errorf("republish signing keys: %w", rerr)
+	}
+	lgRollover.Warn("rollover: KSK algorithm rollover ABORTED before DS confirmation",
+		"zone", zone, "from", dns.AlgorithmToString[algRoll.FromAlg], "to", dns.AlgorithmToString[algRoll.ToAlg],
+		"removed_new_head", algRoll.NewHeadKeyID, "kept_old_head", algRoll.OldHeadKeyID)
+	triggerResign(conf, zone)
+
+	detail := fmt.Sprintf("aborted the %s -> %s KSK algorithm rollover: removed the %s KSK %d, kept the %s KSK %d active; the zone is idle again",
+		dns.AlgorithmToString[algRoll.FromAlg], dns.AlgorithmToString[algRoll.ToAlg],
+		dns.AlgorithmToString[algRoll.ToAlg], algRoll.NewHeadKeyID,
+		dns.AlgorithmToString[algRoll.FromAlg], algRoll.OldHeadKeyID)
+	if row.LastSubmittedHigh.Valid {
+		detail += "; a DS push had been sent, so the next tick pushes the DS RRset without the removed key"
+	}
+	detail += ". The bound policy still names the new algorithm: change policy back, or the engine will start the roll again on its next tick."
+	return detail, nil
 }

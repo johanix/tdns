@@ -33,10 +33,16 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 	lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
 
 	// Anchor: active KSK's active_at. Without it we can't time any
-	// of the standby/active/retired transitions.
+	// of the standby/active/retired transitions. During a KSK algorithm
+	// rollover there are two active KSKs; the new-algorithm head is the
+	// one the lifetime cadence continues from.
+	algRoll, _ := LoadKskAlgRollState(kdb, zone)
 	var activeAt *time.Time
 	for _, e := range out.KSKs {
 		if e.State != DnskeyStateActive {
+			continue
+		}
+		if algRoll != nil && e.KeyID == algRoll.OldHeadKeyID {
 			continue
 		}
 		t, err := RolloverKeyActiveAt(kdb, zone, e.KeyID)
@@ -193,6 +199,24 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 			}
 
 		case DnskeyStateActive:
+			if algRoll != nil && e.KeyID == algRoll.OldHeadKeyID {
+				// The draining old-algorithm head: active until its own
+				// clock (stamped at DS confirm) plus the widened margin
+				// elapses, then removed directly. It never goes through
+				// retired -- it keeps signing to the end (plan A2).
+				e.NextTransition = "active → removed"
+				switch {
+				case algRoll.OldHeadRetireAt == nil:
+					e.NextTransitionNote = "after parent confirms the mixed DS"
+				default:
+					if at, ok := projectedAlgRollRemoveAt(kdb, zone, pol, algRoll); ok {
+						e.NextTransitionAt = at.UTC().Format(time.RFC3339)
+					} else {
+						e.NextTransitionNote = "awaiting parent DS TTL observation"
+					}
+				}
+				break
+			}
 			e.NextTransition = "active → retired"
 			if activeAt == nil {
 				break

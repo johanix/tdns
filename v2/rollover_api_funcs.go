@@ -48,6 +48,7 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 	if row != nil {
 		populateFromZoneRow(out, row)
 	}
+	algRoll := kskAlgRollFromRow(row)
 
 	// CdsPublishedKeyIDs / CdsPublishedAt: historical fact — what
 	// CDS RRset did the engine publish at the child apex via
@@ -73,28 +74,45 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 	}
 
 	out.Headline = headlineForPhase(out.Phase)
-	out.Hint = hintForState(out.Phase, row, pol, now)
+	out.Hint = hintForState(out.Phase, row, pol, algRoll, now)
 
 	if pol != nil {
 		populateAttemptTiming(out, row, pol)
 		out.Policy = policySummary(pol)
 
-		// Surface an in-flight ZSK algorithm rollover in the header (shares the
-		// drain-window predicate with the change-policy re-entrancy guard). Only
-		// meaningful for KSK-ZSK mode; a CSK has no separate ZSK algorithm.
+		// Surface in-flight algorithm rollovers in the header, KSK first,
+		// each from the shared drain-window predicate the change-policy
+		// re-entrancy guard uses. Only meaningful for KSK-ZSK mode; a CSK
+		// has no separate per-role algorithm.
+		if pol.Mode == DnssecPolicyModeKSKZSK && pol.KSKAlgorithm != 0 {
+			if st, err := kskAlgRollInFlight(kdb, zone, pol.KSKAlgorithm); err != nil {
+				lgRollover.Debug("ComputeRolloverStatus: kskAlgRollInFlight failed", "zone", zone, "err", err)
+			} else if st.InFlight {
+				out.AlgTransitions = append(out.AlgTransitions, AlgTransitionInfo{
+					Role:    "KSK",
+					FromAlg: dns.AlgorithmToString[st.FromAlg()],
+					ToAlg:   dns.AlgorithmToString[st.ToAlg],
+					Done:    st.Done,
+					Total:   st.Total,
+				})
+			}
+		}
 		if pol.Mode == DnssecPolicyModeKSKZSK && pol.ZSKAlgorithm != 0 {
 			if st, err := zskAlgRollInFlight(kdb, zone, pol.ZSKAlgorithm); err != nil {
 				lgRollover.Debug("ComputeRolloverStatus: zskAlgRollInFlight failed", "zone", zone, "err", err)
 			} else if st.InFlight {
-				out.AlgTransition = &AlgTransitionInfo{
+				zt := AlgTransitionInfo{
 					Role:    "ZSK",
 					FromAlg: dns.AlgorithmToString[st.FromAlg],
 					ToAlg:   dns.AlgorithmToString[st.ToAlg],
 					Done:    st.Done,
 					Total:   st.Total,
 				}
+				out.AlgTransitions = append(out.AlgTransitions, zt)
+				out.AlgTransition = &zt // deprecated singular, one release
 			}
 		}
+		populateKskAlgRollDetail(out, kdb, zone, pol, algRoll)
 	}
 
 	var hiddenRemoved int
@@ -110,10 +128,90 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 
 	applyInFlightPublicationLabels(out)
 	populateRolloverWarnings(out, pol, checkInterval, now)
+	populateKskAlgRollWarnings(out, kdb, zone, pol, algRoll, now)
 	populateRolloverPolicyErrors(out, zone)
 	populateNextTransitions(out, kdb, zone, pol, propagationDelay, now)
 
 	return out, nil
+}
+
+// populateKskAlgRollDetail fills the AlgRoll* fields from the persisted
+// roll state, including the projected removal of the old-algorithm head
+// when the drain margin can be computed.
+func populateKskAlgRollDetail(out *RolloverStatus, kdb *KeyDB, zone string, pol *DnssecPolicy, algRoll *KskAlgRollState) {
+	if algRoll == nil {
+		return
+	}
+	out.AlgRollFromAlg = dns.AlgorithmToString[algRoll.FromAlg]
+	out.AlgRollToAlg = dns.AlgorithmToString[algRoll.ToAlg]
+	if !algRoll.StartedAt.IsZero() {
+		out.AlgRollStartedAt = algRoll.StartedAt.UTC().Format(time.RFC3339)
+	}
+	out.AlgRollHeadKeyID = algRoll.NewHeadKeyID
+	out.AlgRollOldHeadKeyID = algRoll.OldHeadKeyID
+	if algRoll.OldHeadRetireAt != nil {
+		out.AlgRollOldHeadRetireAt = algRoll.OldHeadRetireAt.UTC().Format(time.RFC3339)
+		if at, ok := projectedAlgRollRemoveAt(kdb, zone, pol, algRoll); ok {
+			out.AlgRollProjectedRemoveAt = at.UTC().Format(time.RFC3339)
+		}
+	}
+}
+
+// projectedAlgRollRemoveAt is old_head_retire_at + the algorithm-roll
+// drain margin, when both are known.
+func projectedAlgRollRemoveAt(kdb *KeyDB, zone string, pol *DnssecPolicy, algRoll *KskAlgRollState) (time.Time, bool) {
+	if algRoll == nil || algRoll.OldHeadRetireAt == nil || pol == nil {
+		return time.Time{}, false
+	}
+	zd, _ := Zones.Get(zone)
+	eff, ok, err := effectiveMarginForRoll(zd, kdb, zone, pol, algRoll)
+	if err != nil || !ok {
+		return time.Time{}, false
+	}
+	return algRoll.OldHeadRetireAt.Add(eff), true
+}
+
+// populateKskAlgRollWarnings adds the algorithm-roll-specific warnings
+// (plan §5.7 E13 and §9 Q3), computed at status time so they can never
+// clobber the E5/E10/E11 zone-error categories:
+//
+//   - E13: the drain cannot finish until the parent DS TTL is known.
+//     Routine after a restart (the observation is in-memory and is
+//     re-made on the next observe poll or at zone load), so it is a
+//     warning with a distinction between "not observed yet" and "cannot
+//     be observed" -- only the latter is operator-actionable.
+//   - Q3: the roll has been waiting on the parent for more than twice
+//     confirm-timeout. Nothing else time-limits the double-signed state;
+//     it is safe, but it should not be invisible.
+func populateKskAlgRollWarnings(out *RolloverStatus, kdb *KeyDB, zone string, pol *DnssecPolicy, algRoll *KskAlgRollState, now time.Time) {
+	if algRoll == nil || pol == nil {
+		return
+	}
+	zd, _ := Zones.Get(zone)
+	if _, known := resolveDSTTL(zd, pol); !known {
+		if pol.Rollover.ParentAgent == "" {
+			out.Warnings = append(out.Warnings,
+				"E13: no parent DS TTL can be observed (rollover.parent-agent is unset) and ttls.parent-ds is not set; the old-algorithm KSK's removal will defer indefinitely -- set ttls.parent-ds")
+		} else {
+			out.Warnings = append(out.Warnings,
+				"E13: parent DS TTL not observed since startup; the old-algorithm KSK is held (still signing) until the next observe poll records it -- routine after a restart, or set ttls.parent-ds to override")
+		}
+	}
+	waitingOnParent := out.Phase == rolloverPhasePendingParentPush ||
+		out.Phase == rolloverPhasePendingParentObserve ||
+		out.Phase == rolloverPhasePushSoftfail
+	if waitingOnParent && !algRoll.StartedAt.IsZero() {
+		timeout := pol.Rollover.ConfirmTimeout
+		if timeout <= 0 {
+			timeout = defaultConfirmTimeout
+		}
+		if elapsed := now.Sub(algRoll.StartedAt); elapsed > 2*timeout {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("KSK algorithm rollover %s -> %s has waited %s for the parent to confirm the mixed DS RRset (more than 2 x confirm-timeout, %s); the zone stays valid and double-signed meanwhile -- check the parent and its DSYNC advertisement",
+					dns.AlgorithmToString[algRoll.FromAlg], dns.AlgorithmToString[algRoll.ToAlg],
+					elapsed.Truncate(time.Minute), 2*timeout))
+		}
+	}
 }
 
 // collectRolloverGatingErrorMessages returns active rollover-gating
@@ -345,6 +443,28 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 		return out, nil
 	}
 
+	// A KSK algorithm rollover drives itself: there is no next lifetime
+	// roll to schedule until it completes. Report its projected completion
+	// instead of a misleading NextScheduled.
+	if row, err := LoadRolloverZoneRow(kdb, zone); err == nil && row != nil {
+		if algRoll := kskAlgRollFromRow(row); algRoll != nil {
+			out.InProgress = true
+			out.Status = "alg-rollover-in-progress"
+			out.FromKeyID = algRoll.OldHeadKeyID
+			out.ToKeyID = algRoll.NewHeadKeyID
+			out.Note = fmt.Sprintf("KSK algorithm rollover %s -> %s in progress (phase %s); next scheduled is its projected completion",
+				dns.AlgorithmToString[algRoll.FromAlg], dns.AlgorithmToString[algRoll.ToAlg], row.RolloverPhase)
+			if at, ok := projectedAlgRollRemoveAt(kdb, zone, pol, algRoll); ok {
+				out.NextScheduled = at.UTC().Format(time.RFC3339)
+			} else if algRoll.OldHeadRetireAt == nil {
+				out.Note += "; completion is not projectable until the parent confirms the mixed DS RRset"
+			} else {
+				out.Note += "; completion is not projectable until the parent DS TTL is observed"
+			}
+			return out, nil
+		}
+	}
+
 	// In-progress: compute projections rather than refusing.
 	if row, err := LoadRolloverZoneRow(kdb, zone); err == nil && row != nil && row.RolloverInProgress {
 		out.InProgress = true
@@ -528,8 +648,29 @@ func headlineForPhase(phase string) string {
 
 // hintForState returns a plain-English diagnosis line keyed off the
 // current phase plus the elapsed time relative to the policy's
-// ds-publish-delay and confirm-timeout. Empty for steady states.
-func hintForState(phase string, row *RolloverZoneRow, pol *DnssecPolicy, now time.Time) string {
+// ds-publish-delay and confirm-timeout. Empty for steady states. During
+// a KSK algorithm rollover (algRoll non-nil) the two "waiting is
+// correct" states get a hint of their own, since their waits are longer
+// than the same-algorithm ones and an operator would otherwise read them
+// as stuck.
+func hintForState(phase string, row *RolloverZoneRow, pol *DnssecPolicy, algRoll *KskAlgRollState, now time.Time) string {
+	if algRoll != nil {
+		switch phase {
+		case rolloverPhasePendingChildPublish:
+			return "algorithm rollover: waiting propagation-delay + DNSKEY TTL before pushing the mixed DS RRset, so every resolver holds a DNSKEY RRset with the new key first"
+		case rolloverPhasePendingChildWithdraw:
+			if algRoll.OldHeadRetireAt == nil {
+				return "algorithm rollover: holding the old-algorithm KSK (still signing); awaiting the parent's confirmation"
+			}
+			return "algorithm rollover: holding the old-algorithm KSK (still signing) for the drain window, which includes the parent DS TTL — waiting is correct"
+		case rolloverPhasePushSoftfail:
+			if row != nil && row.LastSoftfailCategory.Valid &&
+				row.LastSoftfailCategory.String == SoftfailChildConfigWaitingForParent {
+				return "algorithm rollover blocked, safely: the parent advertises no usable DSYNC scheme; the zone stays valid and double-signed until it does"
+			}
+			return "algorithm rollover: parent fix will be auto-detected — the zone stays valid and double-signed meanwhile"
+		}
+	}
 	switch phase {
 	case rolloverPhasePushSoftfail:
 		// child-config:waiting-for-parent has a different operational
