@@ -604,6 +604,23 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 				stillWaiting++
 				continue
 			}
+			// Strip the key's RRSIGs from the served zone BEFORE marking it
+			// removed -- the same ordering as the generic worker's
+			// retired→removed path (key_state_worker.go). SignRRset is
+			// additive and only replaces an RRSIG when re-signing with that
+			// same key, so without this the removed key's signature over the
+			// apex DNSKEY RRset would stay on the wire indefinitely. Strip
+			// first so a failure leaves the key retired and this tick's
+			// sequence is retried next time; nothing is half-done.
+			if err := stripRRSIGsBeforeRemoval(ctx, zd, k.KeyTag); err != nil {
+				if ctx.Err() != nil {
+					lgSigner.Info("rollover: stopping retired→removed sweep on context cancellation", "zone", zone)
+					return nil
+				}
+				lgSigner.Error("rollover: failed to strip removed key's RRSIGs, will retry", "zone", zone, "keyid", k.KeyTag, "err", err)
+				stillWaiting++
+				continue
+			}
 			if err := UpdateDnssecKeyState(kdb, zone, k.KeyTag, DnskeyStateRemoved); err != nil {
 				lgSigner.Error("rollover: retired→removed failed", "zone", zone, "keyid", k.KeyTag, "err", err)
 				stillWaiting++
@@ -626,6 +643,21 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		}
 	}
 	return nil
+}
+
+// stripRRSIGsBeforeRemoval removes every RRSIG made by keytag from the
+// served zone. Called by pending-child-withdraw immediately before a
+// retired SEP key is marked removed, and by the algorithm-rollover
+// withdraw arm for the old-algorithm head. A nil or unloaded zone has
+// nothing to serve and nothing to strip.
+func stripRRSIGsBeforeRemoval(ctx context.Context, zd *ZoneData, keytag uint16) error {
+	if zd == nil {
+		return nil
+	}
+	_, err := zd.StripZoneRRSIGs(ctx, func(s *dns.RRSIG) bool {
+		return s.KeyTag == keytag
+	})
+	return err
 }
 
 // confirmDSAndAdvanceCreatedKeysTx performs all post-observation state writes
