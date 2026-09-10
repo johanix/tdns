@@ -77,8 +77,9 @@ DNSSEC and EDNS flags:
   +compact, +co           set the CO bit (RFC 9824 compact denial of existence)
   +deleg, +de             set the DE (Delegation Extension) bit
   +bufsize=N, +bufsiz=N   EDNS(0) UDP payload size (default 4096, floor 512)
-  +oots, +oots=opt_in|opt_out
-                          EDNS(0) transport-signaling option
+  +oots, +oots=opt_in     EDNS(0) transport-signaling option. Presence-only in
+                          the -03 draft: there is no opt-out value, and
+                          +oots=opt_out is rejected
   +er=<agent.domain>      EDNS(0) Error Reporting (RFC 9567)
   +privacy, +pr[=strict|opportunistic|none]
                           PRIVACY EDNS(0) option; bare +pr is strict

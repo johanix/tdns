@@ -6,6 +6,7 @@ package main
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -122,4 +123,97 @@ func readGuideAppDog() (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// parserSourceFiles are the files that dispatch on a "+option" literal.
+// ProcessOptions is most of it; +bufsize is recognised in internal/options.
+var parserSourceFiles = []string{"dog.go", "internal/options/options.go"}
+
+// optionLiteral matches a dispatch literal: "+TCP", "+TIME=", "+ER" (the
+// handler checks for "=" itself). Uppercase because ProcessOptions dispatches
+// on an uppercased argument.
+var optionLiteral = regexp.MustCompile(`"(\+[A-Z][A-Z0-9_]*)=?"`)
+
+// bareName strips a trailing "=" and any sample value, so "+time=5", "+TIME="
+// and "+time" all reduce to "+time".
+func bareName(s string) string {
+	if i := strings.Index(s, "="); i >= 0 {
+		s = s[:i]
+	}
+	return strings.ToLower(s)
+}
+
+// dogOptions has to cover every option the parser dispatches on, or the two
+// tests above are only as good as somebody's memory: an option added to
+// ProcessOptions and not to the list passes all of them while being
+// undocumented, which is exactly how +time= and +adflag shipped in #591.
+//
+// Scanning the source is the cheap way to make the list authoritative. The
+// thorough way is for ProcessOptions to dispatch FROM a shared definition that
+// the tests consume, which is a refactor of the parser rather than of its
+// documentation; this closes the same hole without touching parsing.
+func TestDogOptionsCoversTheParser(t *testing.T) {
+	covered := map[string]bool{}
+	for _, o := range dogOptions {
+		covered[bareName(o.arg)] = true
+	}
+
+	seen := 0
+	for _, f := range parserSourceFiles {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("reading %s: %v", f, err)
+		}
+		for _, m := range optionLiteral.FindAllStringSubmatch(string(src), -1) {
+			name := bareName(m[1])
+			seen++
+			if !covered[name] {
+				t.Errorf("%s dispatches on %q, which is not in dogOptions — so nothing checks that it is documented", f, m[1])
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("scanned no option literals; the regex or the file list has gone stale")
+	}
+}
+
+// documentedValues are the arguments the help text and the guide spell out for
+// the options that take an enumerated value. Each must be accepted.
+//
+// A separate list because the name-level checks cannot see them: `dog -h` said
+// "+oots=opt_in|opt_out" for as long as +oots has existed, and the parser
+// rejects opt_out as "presence-only (-03)". Documenting a value that does not
+// work is the same defect as documenting an option that does not exist.
+func TestDocumentedValuesAreAccepted(t *testing.T) {
+	for _, arg := range []string{
+		"+oots", "+oots=opt_in", "+oots=1",
+		"+pr", "+pr=strict", "+pr=opportunistic", "+pr=none",
+		"+privacy", "+privacy=strict", "+privacy=opportunistic", "+privacy=none",
+		"+opcode=QUERY", "+opcode=NOTIFY", "+opcode=UPDATE",
+		"+opcode=0", "+opcode=4", "+opcode=5",
+		"+time=1", "+time=65535", "+tries=1", "+retry=0",
+		"+bufsize=512", "+bufsize=4096", "+bufsiz=1232",
+	} {
+		t.Run(arg, func(t *testing.T) {
+			if _, err := ProcessOptions(map[string]string{}, strings.ToUpper(arg), arg); err != nil {
+				t.Errorf("ProcessOptions(%q) rejected a documented value: %v", arg, err)
+			}
+		})
+	}
+}
+
+// The value the docs used to advertise and the parser never took.
+func TestOotsOptOutIsRejected(t *testing.T) {
+	if _, err := ProcessOptions(map[string]string{}, "+OOTS=OPT_OUT", "+oots=opt_out"); err == nil {
+		t.Error("+oots=opt_out was accepted; if OOTS gained an opt-out value, document it")
+	}
+	for _, f := range append([]string{"../../guide/app-dog.md"}, "dog.go") {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(strings.ToLower(string(b)), "opt_in|opt_out") {
+			t.Errorf("%s still advertises +oots=opt_in|opt_out", f)
+		}
+	}
 }

@@ -82,7 +82,7 @@ Do53-TCP and DoT only).
 | `+tlsa` | DANE-verify the server cert against `_port._tcp.<server>` (encrypted transport) |
 | `+showpin` | Print the server cert's SPKI pin (for use with `+pin=`/`pins:`) |
 | `+OPCODE=QUERY\|NOTIFY\|UPDATE` | Set the opcode (numeric 0/4/5 also accepted) |
-| `+OOTS`, `+OOTS=opt_in\|opt_out` | EDNS(0) transport-signaling option |
+| `+OOTS`, `+OOTS=opt_in` | EDNS(0) transport-signaling option. Presence-only in the -03 draft: `opt_in` and `1` are the only accepted arguments, and `+oots=opt_out` is rejected |
 | `+ER=<agent.domain>` | EDNS(0) Error Reporting, RFC 9567 |
 
 Anything else is rejected as an unknown option.
