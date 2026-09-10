@@ -21,22 +21,13 @@ www.a.example. 3600 IN A 10.0.0.2
 _25._tcp.mail.example. 3600 IN TXT "tlsa-ish"
 `
 
-// entSetCO sets the Compact Answers OK flag (RFC 9824 section 5.1), bit 14 of
-// the OPT TTL field. By hand because edns0.SetCO arrives with the
-// compact-denial work on another branch; the two are independent.
-func entSetCO(m *dns.Msg) {
-	if opt := m.IsEdns0(); opt != nil {
-		opt.Hdr.Ttl |= 1 << 14
-	}
-}
-
 func entAsk(t *testing.T, zd *ZoneData, kdb *KeyDB, qname string, qtype uint16, do, co bool) *dns.Msg {
 	t.Helper()
 	req := new(dns.Msg)
 	req.SetQuestion(qname, qtype)
 	req.SetEdns0(4096, do)
 	if co {
-		entSetCO(req)
+		edns0.SetCO(req)
 	}
 	msgo, err := edns0.ExtractFlagsAndEDNS0Options(req)
 	if err != nil {
@@ -219,5 +210,81 @@ func TestEntNamesFrom(t *testing.T) {
 	// A flat zone has none, and the result is nil rather than an empty map.
 	if got := entNamesFrom("example.", map[string]*OwnerData{"example.": {}, "www.example.": {}}); got != nil {
 		t.Errorf("flat zone produced %v, want nil", got)
+	}
+}
+
+// An owner can exist in Data holding no records — an UPDATE that deleted its
+// last RRset without deleting the node. With descendants beneath it that is an
+// empty non-terminal like any other, and it must not become a signed denial
+// while its children still answer.
+//
+// It reaches QueryResponder by a different route: the name IS in Data, so
+// nameExistsFrom sends it past the ENT check to the Count() == 0 branch, which
+// used to answer NXDOMAIN with NXNAME. A snapshot is built directly here
+// because a zone file cannot express an owner with no records.
+func TestEmptyOwnerNodeWithDescendantsIsNodata(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := testSnapshotZone(t, "example.", entZone)
+
+	base := zd.publishedSnapshot()
+	if base == nil {
+		t.Fatal("no published snapshot")
+	}
+	data := map[string]*OwnerData{}
+	for k, v := range base.Data {
+		data[k] = v
+	}
+	// a.example. gains a node holding nothing; www.a.example. stays beneath it.
+	// vestigial.example. gains one with nothing beneath it at all.
+	data["a.example."] = NewOwnerData("a.example.")
+	data["vestigial.example."] = NewOwnerData("vestigial.example.")
+	zd.snapshot.Store(zd.buildSnapshotLocked(base.Serial, data, nil))
+
+	t.Run("with descendants: NODATA", func(t *testing.T) {
+		m := entAsk(t, zd, kdb, "a.example.", dns.TypeA, true, true)
+		if m.Rcode != dns.RcodeSuccess {
+			t.Errorf("rcode = %s, want NOERROR: www.a.example. still answers beneath it",
+				dns.RcodeToString[m.Rcode])
+		}
+		if nsec := entNSEC(t, m); entHasType(nsec, dns.TypeNXNAME) {
+			t.Errorf("NXNAME for a name with descendants: %s", nsec)
+		}
+	})
+
+	t.Run("nothing beneath it: still NXDOMAIN", func(t *testing.T) {
+		m := entAsk(t, zd, kdb, "vestigial.example.", dns.TypeA, true, true)
+		if m.Rcode != dns.RcodeNameError {
+			t.Errorf("rcode = %s, want NXDOMAIN: the node holds nothing and nothing is beneath it",
+				dns.RcodeToString[m.Rcode])
+		}
+	})
+}
+
+// #594 landed the CO echo and this PR landed the ENT answer; they meet on the
+// same response. A CO client asking about an ENT gets the flag (RFC 9824
+// §5.1 puts it on every response to a CO query) and a bitmap with no NXNAME
+// (§3.2). Neither change can quietly undo the other.
+func TestEmptyNonTerminalAnswersACOClient(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := testSnapshotZone(t, "example.", entZone)
+
+	m := entAsk(t, zd, kdb, "a.example.", dns.TypeA, true, true)
+	if m.Rcode != dns.RcodeSuccess {
+		t.Errorf("rcode = %s, want NOERROR", dns.RcodeToString[m.Rcode])
+	}
+	if !edns0.HasCO(m) {
+		t.Error("no CO on a response to a CO query")
+	}
+	if nsec := entNSEC(t, m); entHasType(nsec, dns.TypeNXNAME) {
+		t.Errorf("NXNAME in an ENT bitmap: %s", nsec)
+	}
+
+	// And the contrast still holds with CO in play.
+	nx := entAsk(t, zd, kdb, "nosuch.example.", dns.TypeA, true, true)
+	if nx.Rcode != dns.RcodeNameError {
+		t.Errorf("rcode = %s, want NXDOMAIN for a name that does not exist", dns.RcodeToString[nx.Rcode])
+	}
+	if !entHasType(entNSEC(t, nx), dns.TypeNXNAME) {
+		t.Error("NXNAME missing for a name that genuinely does not exist")
 	}
 }

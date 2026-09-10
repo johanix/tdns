@@ -58,7 +58,14 @@ func entNamesFrom(apexName string, data map[string]*OwnerData) map[string]struct
 			if n == "" || n == apex {
 				break
 			}
-			if _, owned := data[n]; owned {
+			// "Owns nothing" is about RECORDS, not about having a node.
+			// An owner can exist in Data with an empty RRtypes -- an UPDATE
+			// that deleted its last RRset without deleting the node -- and if
+			// it has descendants it is an empty non-terminal like any other.
+			// Reading the map key alone would call it owned, leave it out of
+			// this set, and send it down the Count() == 0 branch in
+			// QueryResponder, which denies the name.
+			if od, owned := data[n]; owned && od != nil && od.RRtypes != nil && od.RRtypes.Count() > 0 {
 				continue
 			}
 			ents[n] = struct{}{}

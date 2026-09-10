@@ -963,6 +963,18 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	// 0. Check for *any* existence of qname in zone
 	// log.Printf("---> Checking for any existence of qname %s", qname)
 	if owner.RRtypes.Count() == 0 {
+		// A node holding no records is only absent if nothing lives beneath
+		// it. With descendants it is an empty non-terminal and NODATA, the
+		// same as one that never had a node at all -- an UPDATE that removes
+		// an owner's last RRset without removing the node must not turn the
+		// name into a signed denial while its children still answer. The
+		// ENT check on the !nameExistsFrom path above cannot see this one:
+		// the name IS in Data, so nameExistsFrom sent us straight here.
+		if isEmptyNonTerminal(snap, qname) {
+			lgHandler.Debug("empty non-terminal with an empty owner node", "qname", qname, "zone", zd.ZoneName)
+			zd.sendENTNodata(m, w, origqname, apex, snap, msgoptions, MaybeSignRRset)
+			return nil
+		}
 		soaRRset, err := MaybeSignRRset(zd.soaForResponseFrom(snap, apex), zd.ZoneName)
 		if err != nil {
 			lgHandler.Error("failed to sign SOA RRset", "zone", zd.ZoneName, "err", err)
