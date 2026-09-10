@@ -10,7 +10,8 @@ build order with a test matrix.
 Amended 2026-09-10: §3 carries amendments A1 (two caveats on the widened
 margin; nothing changes) and A2 (the old-algorithm KSK stays `active`
 through the drain — supersedes the "retire A" step of D-1/§5.3; two
-more columns in §5.1; KT-17 added).
+more columns in §5.1; KT-17 added). §6 carries A3, the implementation
+record: what the eight commits did differently from §5–§6 and why.
 
 Code references are `file:line` into `v2/` at `f4bea22` (main), verified
 2026-09-08. Cross-references of the form "(fifo §N)" point at the
@@ -886,6 +887,111 @@ KT-when, KT-abort.
 `firstKeyOfRole`, P0-1/P0-3/P0-5 ZSK hygiene, and fifo D1/D2
 (same-algorithm double-signature, the `AtomicRollover` "4E" deferral at
 `ksk_rollover_atomic.go:18`).
+
+**Amendment A3 (2026-09-10) — implementation record.** The eight commits
+above were built on branch `ksk-alg-rollover-impl` (tdns PR, see the
+branch) with all three test modules green after each. These are the
+points where the code differs from §5–§6 as written, each decided at the
+keyboard for the reason given. Nothing in §4 changed.
+
+1. **The test seams the plan assumed did not exist.** §8 says the engine
+   tests use "the injected-observed-set seam the existing KSK engine
+   tests use (`ksk_rollover_parent_poll_test.go`)". There was no such
+   seam: `QueryParentAgentDS` and `PushDSRRsetForRollover` were called
+   directly and the one existing engine test was a pure table test of
+   `kskIndexPushNeeded`. Commit 6 adds two package variables,
+   `queryParentAgentDS` and `pushDSRRsetForRollover`, bound to the real
+   functions and used at the four call sites; the sequence tests
+   substitute a fake parent through them. Production never reassigns
+   them.
+
+2. **A bound change the engine cannot carry yet suspends the fill and
+   arms no push** (extends D-8). With a ZSK algorithm roll draining, the
+   spawn waits (D-11) — but the tick's pipeline-fill and idle-branch push
+   ran regardless, minting new-algorithm `created` keys and pushing their
+   DS ahead of the spawn. `kskAlgRollNeeded` now reports `mismatch` and
+   `blocked` separately; a blocked mismatch ends the tick.
+
+3. **The algorithm-roll confirm also advances created keys.** D-2 says
+   "an algorithm roll has no `created` keys". True at spawn, but a
+   `created` key can exist when the change is bound during a same-algorithm
+   roll's withdraw (the fill runs then), and after the push confirms, such
+   a key must advance or it sits in `created` forever. The created-advance
+   loop is factored into `advanceCreatedKeysInRangeTx` and both confirm
+   siblings call it; the siblings stay separate otherwise.
+
+4. **Completion arms `pending-parent-push` directly instead of `idle`.**
+   D-1's last row relies on the idle branch to arm the shrink push. A
+   `method: double-signature` zone never runs the idle branch (D-4 lets it
+   in only while rolling), so it would never shrink its DS set. Arming the
+   push at completion is what the idle branch would do for a multi-DS zone
+   one tick later, and works for both. The push carries the refilled
+   pipeline's DS as well (§9 Q2): the final DS set is "every SEP key of the
+   new algorithm", not exactly `{DS(B)}`.
+
+5. **The withdraw arm drains retired SEP keys too.** A retired key from an
+   earlier same-algorithm roll can coexist with the algorithm roll; the arm
+   removes it on its own `retired_at` clock with the widened margin, and
+   completes only when both clocks are done.
+
+6. **E13 and the §9 Q3 stall notice are computed at status time**, in
+   `populateKskAlgRollWarnings`, as `RolloverStatus.Warnings` rather than
+   `RolloverPolicyWarning` zone errors. `EvaluateRolloverPolicyInvariants`
+   writes the warning category wholesale on every observe poll, so a
+   roll-scoped warning set there would be clobbered or would clobber E11.
+   Status output is where §5.7 wanted it visible anyway. E13 distinguishes
+   "not observed since startup" (routine, A1(b)) from "cannot be observed"
+   (`parent-agent` unset; set `ttls.parent-ds`).
+
+7. **The YAML rename route is carried, not just the same-name edit.** R1
+   covers the reload guardrail and `config check` (both done, both with
+   the engine case). Beyond R1, `syncZoneDnssecPolicyFromConfig` used to
+   refuse every `PolicyChangeIncompatibleAlg`; a KSK-only change toward a
+   policy with an engine now applies transactionally (the reconcile no-ops,
+   the tick spawns), and a config apply mid-KSK-roll is skipped like the
+   ZSK case. `PolicyAlgNames` gains `RolloverMethod` for the CLI side.
+
+8. **`kskAlgRollInFlight` counts every non-terminal SEP state**, not the
+   ZSK's standby/active/retired, and ORs in the persisted marker. A
+   wrong-algorithm KSK still in the DS pipeline is the engine's to deal
+   with, so it keeps the roll in flight for the re-entrancy guard; the
+   marker covers any instant where the key shape alone reads as settled.
+
+9. **The freeze removes stray third-algorithm pipeline keys too**, and
+   keeps non-active keys of the *target* algorithm (a legitimate new-FIFO
+   member). §5.2 step 5 named only `fromAlg`.
+
+10. **R2 is enforced on the key shape.** `RolloverKey` refuses a manual KSK
+    rollover when the active KSKs span two algorithms — observable at
+    commit 2 without the marker column, and true for exactly the overlap.
+
+11. **Abort strips the new head's signatures before removing it.** D-12
+    says "mark B removed"; B has signed the DNSKEY RRset since the spawn,
+    so F2 applies to the abort as much as to the withdraw.
+
+12. **§10.5's "safe testbed checkpoint" is safe but frozen.** Before commit
+    7, every publish of a rolling zone is refused: the publish path's NSEC
+    restitch signs, signing resolves active keys, and the reconcile's
+    KSK-mismatch backstop refuses. The zone keeps serving its pre-spawn
+    snapshot (valid, single-signed) — the double signature only reaches
+    the wire once commit 7 lets the signer through. Commits 5–6 can still
+    be merged and soaked; they just cannot be *observed* double-signing.
+
+13. **E14 was not added.** An earlier draft of A2 proposed it for the
+    one-shot re-sign variant; the final A2 keeps the old head active, so
+    it is renewed like any active key and no validity-vs-margin invariant
+    is needed. KT-17 pins that instead.
+
+14. **Q1 and Q4 done; Q2 accepted.** `change-policy` warns at bind time
+    when the parent advertises no usable DSYNC scheme (best-effort,
+    5-second bound, skipped without an IMR); `policy-reset`'s dry run
+    names the gradual path.
+
+Effort, as landed: production +2 505 / −164 across 22 files, tests
++1 210 across 8 files — 29 files, +3 715 / −164 in total, a third above the
+§6.1 estimate, most of it in the 2–6 gap: seams, the blocked-spawn arm,
+the created-advance sharing and the retired-key drain were not in the
+estimate. TB-1–3 remain open; they need the lab.
 
 ### 6.1 Effort
 
