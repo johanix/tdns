@@ -336,8 +336,34 @@ func zskAlgRollInFlight(kdb *KeyDB, zone string, targetZSKAlg uint8) (ZskAlgRoll
 // KSK algorithm rollover keeps the old-algorithm head ACTIVE through its
 // drain (plan A2), the active state alone carries the whole roll; the other
 // states cover the window between a policy bind and the engine's spawn.
+//
+// The persisted roll marker (alg_roll_from_alg on RolloverZoneState) is
+// OR-ed in: it is authoritative from spawn to completion, including any
+// instant where the key shape alone would read as settled.
 func kskAlgRollInFlight(kdb *KeyDB, zone string, targetKSKAlg uint8) (AlgRollState, error) {
-	return algRollInFlight(kdb, zone, true, targetKSKAlg, kskAlgRollLiveStates)
+	st, err := algRollInFlight(kdb, zone, true, targetKSKAlg, kskAlgRollLiveStates)
+	if err != nil {
+		return st, err
+	}
+	roll, err := LoadKskAlgRollState(kdb, zone)
+	if err != nil {
+		return st, fmt.Errorf("kskAlgRollInFlight: load roll state for zone %s: %w", zone, err)
+	}
+	if roll == nil {
+		return st, nil
+	}
+	st.InFlight = true
+	found := false
+	for _, a := range st.FromAlgs {
+		if a == roll.FromAlg {
+			found = true
+			break
+		}
+	}
+	if !found {
+		st.FromAlgs = append(st.FromAlgs, roll.FromAlg)
+	}
+	return st, nil
 }
 
 // ComputeZskRolloverWhen answers "when will / could the ZSK roll" — the ZSK
