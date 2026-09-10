@@ -72,11 +72,45 @@ resolver:
 # Without one the read path (scanner) and write path (zone updater) disagree
 # on where current delegation data lives, and DS/NS records accumulate
 # without ever being removed.
+# A backend has two axes: WHERE intended delegation state is kept (store)
+# and HOW it reaches the parent zone (writer). The one-word type names are
+# shorthand: db = sqlite/none, direct = direct/none, zonefile =
+# sqlite/zonefile, upstream = sqlite/ddns, external-db = external-db/none.
+# Writing type: together with store: or writer: is an error.
 delegationbackends:
    - name:		files-dnslab
      type:		zonefile
      directory:	/var/lib/tdns/delegations/dnslab
      # notify-command: "rndc reload {ZONENAME}"
+
+   # A childsync-proxy (an agent secondary fronting a PARENT zone, see
+   # guide/childsync-proxy.md) pushes approved child updates and its own
+   # DSYNC advertisement to the parent primary as TSIG-signed UPDATEs:
+   # - name:   parent-primary
+   #   store:  sqlite
+   #   writer: ddns
+   #   ddns:
+   #     targets: []              # default: the zone's own primaries
+   #     key: agent-to-primary    # TSIG key from the keystore
+   #     allow-insecure: false    # lab only
+   #     retry-interval: 5s
+   #     max-attempts: 5
+   #
+   # ...or hands them to a registry provisioning system through a shared
+   # MariaDB it reads (tdns-agent only; the DDL is in the guide):
+   # - name:   registry-handoff
+   #   store:  external-db
+   #   writer: none
+   #   external-db:
+   #     driver: mysql
+   #     dsn: "tdns:@tcp(db.example.net:3306)/reg"
+   #     password: "..."
+   #     tls: true
+   #     ca-file: /etc/tdns/db-ca.pem
+   #     table-prefix: tdns_
+   #     auto-migrate: false
+   #     max-open-conns: 8
+   #     timeout: 5s
 
 # In zone config, reference a backend:
 #   zones:
@@ -84,6 +118,14 @@ delegationbackends:
 #       delegationbackend: db            # predefined, no config needed
 #     - name:  example.com.
 #       delegationbackend: files-dnslab  # looked up from delegationbackends above
+#     - name:  example.                  # a childsync-proxy: agent secondary of the PARENT
+#       type:  secondary
+#       primaries: [ { addr: 192.0.2.1:53, key: xfr-key } ]
+#       options: [ childsync-proxy, allow-child-updates ]
+#       delegationbackend: parent-primary
+#       delegationpolicy: registry-strict
+#       updatepolicy:
+#         child: { type: selfsub, rrtypes: [ NS, A, AAAA, DS, KEY ] }
 
 # Leader election TTL: how long a leader remains valid before re-election.
 # Elections require ALL configured peers to participate — if any peer is

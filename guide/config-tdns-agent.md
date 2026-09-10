@@ -21,6 +21,16 @@ Two differences are worth knowing now:
   already documented, as an operator how-to, in
   [Agent as a DSYNC proxy](agent-dsync-proxy.md).
 
+- **The agent can front a parent zone** the same way, with the
+  `childsync-proxy` zone option: a secondary of the parent that advertises
+  and receives the childsync schemes and pushes approved changes to the
+  parent primary. It takes the `childsync:` block as tdns-auth does, a
+  `delegationbackend` whose store is not `direct`, and -- to push -- a TSIG
+  key the primary accepts. The how-to is
+  [Agent fronting a parent zone](childsync-proxy.md); `tdns-cli agent config
+  check` reports the option on a non-secondary zone and an empty
+  `childsync.schemes`.
+
 ## The `parentsync:` block
 
 An agent is never a delegation-sync parent, so it reads `parentsync:` and

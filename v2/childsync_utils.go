@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -105,6 +106,18 @@ func exchangeCancellable(ctx context.Context, client *dns.Client, msg *dns.Msg, 
 // Every caller must therefore check the rcode as well as the error; a nil error
 // alone does NOT mean the parent applied the update.
 func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
+	return sendUpdateVia(ctx, msg, zonename, addrs, nil)
+}
+
+// sendUpdateVia is SendUpdate with a TSIG provider: the same transport, the
+// same return contract, and a client that signs with (and verifies against)
+// provider when one is given. A message sent through it must already carry
+// its TSIG RR (StampTsigForPeer), stamped immediately beforehand.
+//
+// One function, not two: the return contract above -- transport error versus
+// rejection rcode, and the cancellation handling in exchangeCancellable -- is
+// subtle and hard-won, and a second copy of it would drift.
+func sendUpdateVia(ctx context.Context, msg *dns.Msg, zonename string, addrs []string, provider dns.TsigProvider) (int, UpdateResult, error) {
 	if zonename == "" {
 		lgDns.Error("SendUpdate: zone name not specified")
 		return 0, UpdateResult{}, fmt.Errorf("zone name not specified")
@@ -135,6 +148,9 @@ func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []stri
 	// UPDATEs regardless of size, not only the large ones.
 	useTCP := true
 	client := &dns.Client{Net: "tcp"}
+	if provider != nil {
+		client.TsigProvider = provider
+	}
 
 	// The last rejection RCODE actually received from a responding address,
 	// and the EDE that came with it. Tracked across the loop so that a
@@ -177,6 +193,24 @@ func SendUpdate(ctx context.Context, msg *dns.Msg, zonename string, addrs []stri
 			if cerr := ctx.Err(); cerr != nil {
 				return 0, ur, fmt.Errorf("UPDATE to %s abandoned mid-exchange with %s: %w",
 					zonename, dst, cerr)
+			}
+			// A TSIG-signed exchange answered with NOTAUTH surfaces from the
+			// library as ErrAuth rather than as a response: RFC 8945 makes
+			// NOTAUTH the rcode of a TSIG failure, and the client will not
+			// hand up a message it could not authenticate. It IS an answer,
+			// though -- the primary spoke, and said the key or the zone is not
+			// its -- so it is recorded as the rejection it is, rcode NOTAUTH,
+			// and the walk goes on to the next address exactly as it does for
+			// every other rejection. If no address accepts, the caller's rcode
+			// policy sees NOTAUTH rather than a transport failure. The ddns
+			// writer's NOTAUTH test drives this path.
+			if provider != nil && errors.Is(err, dns.ErrAuth) {
+				lgDns.Warn("target answered NOTAUTH to a TSIG-signed UPDATE (the key is unknown to it, or the zone is not its)",
+					"zone", zonename, "dst", dst)
+				ur.TargetStatus[dst] = TargetUpdateStatus{Rcode: dns.RcodeNotAuth, Sender: dst, Error: true, ErrorMsg: err.Error()}
+				lastRcode, gotResponse = dns.RcodeNotAuth, true
+				lastEDEFound, lastEDECode, lastEDEMessage, lastEDESender = false, 0, "", ""
+				continue
 			}
 			lgDns.Warn("error from dns.Exchange, trying next address", "dst", dst, "err", err)
 			ur.TargetStatus[dst] = TargetUpdateStatus{

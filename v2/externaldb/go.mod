@@ -1,43 +1,41 @@
-module tdns-agent
+module github.com/johanix/tdns/v2/externaldb
 
 go 1.25.2
 
 replace (
-	github.com/johanix/tdns/v2 => ../../v2
-	github.com/johanix/tdns/v2/cache => ../../v2/cache
-	github.com/johanix/tdns/v2/core => ../../v2/core
-	github.com/johanix/tdns/v2/edns0 => ../../v2/edns0
-	github.com/johanix/tdns/v2/externaldb => ../../v2/externaldb
+	github.com/johanix/tdns/v2 => ../
+	github.com/johanix/tdns/v2/cache => ../cache
+	github.com/johanix/tdns/v2/core => ../core
+	github.com/johanix/tdns/v2/edns0 => ../edns0
 )
 
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2
+
 require (
-	github.com/johanix/dnssec-algorithms v0.0.0-20260706125906-0101974d6755
+	github.com/go-sql-driver/mysql v1.9.3
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v2/externaldb v0.0.0-00010101000000-000000000000
-	github.com/mattn/go-sqlite3 v1.14.16
+	github.com/miekg/dns v1.1.70
 )
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
-	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.22.1 // indirect
-	github.com/go-sql-driver/mysql v1.9.3 // indirect
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
-	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39 // indirect
+	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/v2/core v0.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
-	github.com/miekg/dns v1.1.70 // indirect
+	github.com/mattn/go-sqlite3 v1.14.16 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
-	github.com/open-quantum-safe/liboqs-go v0.0.0-20260310140033-75451133b94a // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/spf13/afero v1.9.5 // indirect
@@ -58,5 +56,3 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2

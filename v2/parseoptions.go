@@ -196,6 +196,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 		case OptChildSync,
 			OptParentSync,
 			OptParentSyncProxy,
+			OptChildSyncProxy,
 			OptAllowUpdates,
 			OptAllowChildUpdates,
 			OptAllowApiUpdates,
@@ -423,6 +424,18 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 		if zd != nil {
 			zd.SetError(ConfigError, "%s", msg)
 		}
+	}
+
+	// childsync-proxy IMPLIES childsync (design D-1). A proxy zone genuinely
+	// offers childsync -- it advertises DSYNC, receives on every scheme and
+	// applies the parent's policy -- and differs only in where its writes
+	// land, so every existing OptChildSync gate keeps working unchanged and
+	// the few places that must behave differently test OptChildSyncProxy.
+	// Materialised in the EFFECTIVE set only: the as-configured list keeps
+	// saying what the operator wrote, and writing both is legal.
+	if options[OptChildSyncProxy] && !options[OptChildSync] {
+		options[OptChildSync] = true
+		lg.Debug("childsync-proxy implies childsync", "zone", zname)
 	}
 
 	zconf.Options = cleanoptions

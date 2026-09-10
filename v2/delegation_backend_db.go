@@ -17,11 +17,14 @@ type DBDelegationBackend struct {
 	kdb *KeyDB
 }
 
-func (b *DBDelegationBackend) Name() string { return "db" }
+func (b *DBDelegationBackend) Name() string { return DelegationStoreSqlite }
 
-func (b *DBDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateRequest) error {
+func (b *DBDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateRequest) (err error) {
 	const (
-		adddelsql   = `INSERT OR REPLACE INTO ChildDelegationData (parent, child, owner, rrtype, rr) VALUES (?, ?, ?, ?, ?)`
+		// A child's assertion replaces whatever the row held before, an
+		// adoption-pass observation included: INSERT OR REPLACE rewrites
+		// origin along with the rest of the row.
+		adddelsql   = `INSERT OR REPLACE INTO ChildDelegationData (parent, child, owner, rrtype, rr, origin) VALUES (?, ?, ?, ?, ?, 'asserted')`
 		delrrsql    = `DELETE FROM ChildDelegationData WHERE parent=? AND owner=? AND rrtype=? AND rr=?`
 		delrrsetsql = `DELETE FROM ChildDelegationData WHERE parent=? AND owner=? AND rrtype=?`
 	)
@@ -30,21 +33,10 @@ func (b *DBDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateReque
 	if err != nil {
 		return err
 	}
-
-	defer func() {
-		if err == nil {
-			err1 := tx.Commit()
-			if err1 != nil {
-				lg.Error("DBDelegationBackend: tx.Commit failed", "error", err1)
-			}
-		} else {
-			lg.Error("DBDelegationBackend: rolling back", "error", err)
-			err1 := tx.Rollback()
-			if err1 != nil {
-				lg.Error("DBDelegationBackend: tx.Rollback failed", "error", err1)
-			}
-		}
-	}()
+	// The named return is what makes a failed commit the caller's error
+	// rather than a log line. Acceptance means recorded (design D-2): a
+	// child must not hear NOERROR for a change the store did not keep.
+	defer func() { err = finishTx(tx, err) }()
 
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
@@ -82,7 +74,11 @@ func (b *DBDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateReque
 			}
 
 		default:
-			lg.Warn("DBDelegationBackend: unknown class, skipping", "rr", rr.String())
+			// Not skipped. A class other than IN, NONE or ANY is a defect in
+			// the update, and answering NOERROR for an update this store
+			// applied only in part would tell the child it was applied.
+			return fmt.Errorf("action for %s %s has class %d; an update action must be IN, NONE or ANY",
+				owner, rrtypestr, class)
 		}
 	}
 
@@ -106,8 +102,12 @@ func (b *DBDelegationBackend) GetDelegationData(parentZone, childZone string) (m
 		}
 		rr, err := dns.NewRR(rrstr)
 		if err != nil {
-			lg.Warn("DBDelegationBackend: bad RR in DB, skipping", "rr", rrstr, "error", err)
-			continue
+			// The store could not be read: the other answer the interface
+			// allows, and not "a smaller delegation". Dropping the row would
+			// let the push engine diff a partial state against the served
+			// zone and delete at the primary what it could not parse here.
+			return nil, fmt.Errorf("stored row for %s in %s does not parse as a record (%q): %w",
+				childZone, parentZone, rrstr, err)
 		}
 		rrtype := rr.Header().Rrtype
 		if result[owner] == nil {
@@ -118,11 +118,89 @@ func (b *DBDelegationBackend) GetDelegationData(parentZone, childZone string) (m
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows iteration: %w", err)
 	}
-
-	if len(result) == 0 {
-		return nil, fmt.Errorf("no delegation data for %s in zone %s", childZone, parentZone)
-	}
+	// No rows is an empty result, not an error. This used to return an error
+	// for it, and ZonefileDelegationBackend read that error as "no data left,
+	// remove the fragment" -- an error value carrying a meaning, which made a
+	// genuinely failed read indistinguishable from an empty child. See the
+	// interface doc.
 	return result, nil
+}
+
+// AdoptChildDelegation implements DelegationAdopter: the rows are written only
+// if the store holds NOTHING for the child, and are marked origin=observed so
+// a later reader can tell an observation of the served zone from something a
+// child asserted. One transaction, so the "nothing yet" test and the inserts
+// cannot interleave with a child update for the same name.
+func (b *DBDelegationBackend) AdoptChildDelegation(parentZone, childZone string, rrs []dns.RR) (n int, err error) {
+	const (
+		countsql = `SELECT COUNT(*) FROM ChildDelegationData WHERE parent=? AND child=?`
+		adoptsql = `INSERT OR REPLACE INTO ChildDelegationData (parent, child, owner, rrtype, rr, origin) VALUES (?, ?, ?, ?, ?, 'observed')`
+	)
+
+	tx, err := b.kdb.Begin("DBDelegationBackend.AdoptChildDelegation")
+	if err != nil {
+		return 0, err
+	}
+	defer func() { err = finishTx(tx, err) }()
+
+	var existing int
+	if err = tx.QueryRow(countsql, parentZone, childZone).Scan(&existing); err != nil {
+		return 0, fmt.Errorf("counting stored rows for %s: %w", childZone, err)
+	}
+	if existing > 0 {
+		return 0, nil
+	}
+	for _, rr := range rrs {
+		rrcopy := dns.Copy(rr)
+		rrcopy.Header().Ttl = 0
+		rrcopy.Header().Class = dns.ClassINET
+		if _, err = tx.Exec(adoptsql, parentZone, childZone, rr.Header().Name,
+			dns.TypeToString[rr.Header().Rrtype], rrcopy.String()); err != nil {
+			return n, fmt.Errorf("adopting %s: %w", rrcopy.String(), err)
+		}
+		n++
+	}
+	return n, nil
+}
+
+// finishTx ends a transaction the way its outcome says: commit when err is
+// nil, roll back otherwise. The result is what the caller must return. A
+// commit that fails is an error the caller did not have yet, and swallowing
+// it is how a store answers NOERROR for a change it did not keep -- which is
+// what ApplyChildUpdate did before this existed.
+func finishTx(tx *Tx, err error) error {
+	if err != nil {
+		if rerr := tx.Rollback(); rerr != nil {
+			lg.Error("DBDelegationBackend: tx.Rollback failed", "error", rerr, "cause", err)
+		}
+		return err
+	}
+	if cerr := tx.Commit(); cerr != nil {
+		return fmt.Errorf("committing the delegation store: %w", cerr)
+	}
+	return nil
+}
+
+// delegationOrigins reports where each stored RR for a child came from,
+// keyed by the RR's stored text: "asserted" or "observed".
+func (b *DBDelegationBackend) delegationOrigins(parentZone, childZone string) (map[string]string, error) {
+	const query = `SELECT rr, origin FROM ChildDelegationData WHERE parent=? AND child=?`
+
+	rows, err := b.kdb.Query(query, parentZone, childZone)
+	if err != nil {
+		return nil, fmt.Errorf("query failed: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]string{}
+	for rows.Next() {
+		var rr, origin string
+		if err := rows.Scan(&rr, &origin); err != nil {
+			return nil, fmt.Errorf("scan failed: %w", err)
+		}
+		out[rr] = origin
+	}
+	return out, rows.Err()
 }
 
 func (b *DBDelegationBackend) ListChildren(parentZone string) ([]string, error) {
@@ -146,6 +224,12 @@ func (b *DBDelegationBackend) ListChildren(parentZone string) ([]string, error) 
 		return nil, fmt.Errorf("rows iteration: %w", err)
 	}
 	return children, nil
+}
+
+// ChildZoneFromOwner is childZoneFromOwner for the store modules outside
+// this package, which file rows under the same child a sqlite row would be.
+func ChildZoneFromOwner(owner, parentZone string) string {
+	return childZoneFromOwner(owner, parentZone)
 }
 
 // childZoneFromOwner extracts the immediate child zone name from an owner name.

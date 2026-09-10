@@ -207,6 +207,11 @@ func dbMigrateSchema(db *sql.DB) {
 		// MAX(active_seq)+1 over the zone's ZSK rows, stamped at standby→active.
 		{"DnssecKeyStore", "active_seq", "ALTER TABLE DnssecKeyStore ADD COLUMN active_seq INTEGER"},
 		{"Sig0KeyStore", "parent_state", "ALTER TABLE Sig0KeyStore ADD COLUMN parent_state INTEGER DEFAULT 0"},
+		// Where a delegation row came from: 'asserted' by the child over a
+		// delegation-sync channel, or 'observed' in the served zone by the
+		// adoption pass (delegation_adopt.go). Every row an older tdns wrote
+		// was a child's assertion, so that is the default.
+		{"ChildDelegationData", "origin", "ALTER TABLE ChildDelegationData ADD COLUMN origin TEXT NOT NULL DEFAULT 'asserted'"},
 		// Which digest computation produced the stored value. Defaults to 0,
 		// which is exactly right: every row an older tdns wrote used the
 		// pre-RDATA-sort digest, and 0 is the codepoint for that. The compare

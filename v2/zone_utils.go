@@ -1646,7 +1646,8 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 }
 
 func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
-	wantsSync := zd.Options[OptChildSync] || zd.Options[OptParentSync] || zd.Options[OptParentSyncProxy]
+	wantsSync := zd.Options[OptChildSync] || zd.Options[OptParentSync] || zd.Options[OptParentSyncProxy] ||
+		zd.Options[OptChildSyncProxy]
 
 	// Dynamic parentsync=agent detection removed — handled by tdns-mp
 	// MPPostRefresh (hsync_utils.go) and OnFirstLoad (start_agent.go).
@@ -1656,6 +1657,19 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		return nil
 	}
 	lg.Debug("SetupZoneSync: zone requests delegation sync", "zone", zd.ZoneName)
+
+	// childsync-proxy: a tdns-agent acting as a SECONDARY for a PARENT zone
+	// whose primary is DSYNC-unaware. Valid only for agent + secondary, and
+	// loud otherwise, exactly as parentsync-proxy below.
+	if zd.Options[OptChildSyncProxy] {
+		if Globals.App.Type != AppTypeAgent || zd.ZoneType != Secondary {
+			lg.Error("SetupZoneSync: childsync-proxy is only valid for a tdns-agent secondary zone",
+				"zone", zd.ZoneName, "app", AppTypeToString[Globals.App.Type], "zonetype", ZoneTypeToString[zd.ZoneType])
+			zd.SetError(ConfigError, "childsync-proxy is only valid for an agent secondary zone")
+			return fmt.Errorf("childsync-proxy on zone %s requires a tdns-agent secondary zone", zd.ZoneName)
+		}
+		lg.Info("SetupZoneSync: childsync-proxy enabled (agent secondary)", "zone", zd.ZoneName)
+	}
 
 	// Is this a parent zone and should we then publish a DSYNC RRset?
 	if zd.Options[OptChildSync] {
@@ -1678,31 +1692,64 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		// no error, no warning -- and the documented remedy was to unpublish
 		// the whole RRset and republish, which discards the operator's own
 		// records.
-		lg.Debug("SetupZoneSync: reconciling the DSYNC RRset", "zone", zd.ZoneName)
-		if err := zd.PublishDsyncRRs(context.Background()); err != nil {
-			lg.Error("PublishDsyncRRs failed", "zone", zd.ZoneName, "err", err)
-			return err
-		}
+		// Seed the delegation store from the served zone before anything
+		// reads it, and before the DSYNC publication below can fail and
+		// return: the two are independent, and an unseeded store is the
+		// worse outcome. See delegation_adopt.go.
+		zd.seedDelegationStore()
 
-		// Figure out if there is a DSYNC RR with scheme UPDATE; if so, we need to ensure that
-		// we generate a SIG(0) key pair for the target and publish the public key in the zone.
-		//
-		// An unset target means this parent does not offer the UPDATE scheme
-		// — which used to be unusual and is now ordinary, since a parent may
-		// offer only API. Without the guard the empty template expands to ".",
-		// which is a syntactically valid domain name, and the zone would get a
-		// SIG(0) keypair generated for the root.
-		updateTarget := DsyncUpdateTargetName(zd.ZoneName)
-		if updateTarget == "" {
-			lg.Debug("SetupZoneSync: no DSYNC update target configured, skipping SIG(0) key prep", "zone", zd.ZoneName)
-		} else if _, ok := dns.IsDomainName(updateTarget); !ok {
-			lg.Error("SetupZoneSync: invalid DSYNC update target", "zone", zd.ZoneName, "target", updateTarget)
+		// A childsync-proxy publishes nothing into its OWN copy of the zone.
+		// That copy is replaced by the next transfer, and
+		// zoneMayOriginateContent is true off tdns-auth by design, so no
+		// gate below would stop the update: it would be applied and silently
+		// lost (design §3.1). The advertisement, receiver key included,
+		// reaches the parent primary through the proxy reconciler (§5.3).
+		if zd.Options[OptChildSyncProxy] {
+			lg.Debug("SetupZoneSync: childsync-proxy zone; the advertisement is reconciled towards the parent primary, not published here",
+				"zone", zd.ZoneName)
+			// The refresh hook already ran once for the first transfer,
+			// before the store was seeded above. Once more now, so the
+			// first reconciliation of the children sees a seeded store.
+			zd.ChildSyncProxyPostRefresh()
 		} else {
-			lg.Debug("SetupZoneSync: DSYNC update target", "zone", zd.ZoneName, "target", updateTarget)
-			err := zd.ParentSig0KeyPrep(updateTarget, zd.KeyDB)
-			if err != nil {
-				lg.Error("ParentSig0KeyPrep failed", "target", updateTarget, "err", err)
+			// An agent secondary with childsync but not childsync-proxy
+			// publishes the advertisement into a copy the next transfer
+			// replaces (design §3.1), and no origination gate stops it off
+			// tdns-auth. The option gate cannot see this case; say it here.
+			// Multi-provider zones are tdns-mp's and excluded, as in the
+			// parentsync branch below.
+			if Globals.App.Type == AppTypeAgent && zd.ZoneType == Secondary && !zd.Options[OptMultiProvider] {
+				lg.Warn("SetupZoneSync: childsync on an agent secondary publishes the DSYNC advertisement into a copy"+
+					" the next transfer replaces; set childsync-proxy instead", "zone", zd.ZoneName)
+				zd.SetError(ConfigWarning, "childsync on an agent secondary publishes the DSYNC advertisement into a copy"+
+					" the next transfer replaces; set childsync-proxy instead")
+			}
+			lg.Debug("SetupZoneSync: reconciling the DSYNC RRset", "zone", zd.ZoneName)
+			if err := zd.PublishDsyncRRs(context.Background()); err != nil {
+				lg.Error("PublishDsyncRRs failed", "zone", zd.ZoneName, "err", err)
 				return err
+			}
+
+			// Figure out if there is a DSYNC RR with scheme UPDATE; if so, we need to ensure that
+			// we generate a SIG(0) key pair for the target and publish the public key in the zone.
+			//
+			// An unset target means this parent does not offer the UPDATE scheme
+			// — which used to be unusual and is now ordinary, since a parent may
+			// offer only API. Without the guard the empty template expands to ".",
+			// which is a syntactically valid domain name, and the zone would get a
+			// SIG(0) keypair generated for the root.
+			updateTarget := DsyncUpdateTargetName(zd.ZoneName)
+			if updateTarget == "" {
+				lg.Debug("SetupZoneSync: no DSYNC update target configured, skipping SIG(0) key prep", "zone", zd.ZoneName)
+			} else if _, ok := dns.IsDomainName(updateTarget); !ok {
+				lg.Error("SetupZoneSync: invalid DSYNC update target", "zone", zd.ZoneName, "target", updateTarget)
+			} else {
+				lg.Debug("SetupZoneSync: DSYNC update target", "zone", zd.ZoneName, "target", updateTarget)
+				err := zd.ParentSig0KeyPrep(updateTarget, zd.KeyDB)
+				if err != nil {
+					lg.Error("ParentSig0KeyPrep failed", "target", updateTarget, "err", err)
+					return err
+				}
 			}
 		}
 	}

@@ -202,6 +202,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	conf.Internal.APIStopCh = make(chan struct{}) // Used for shutdown coordination
 	conf.Internal.BumpZoneCh = make(chan BumperData, 10)
 	conf.Internal.DelegationSyncQ = make(chan DelegationSyncRequest, 10)
+	conf.Internal.ParentPushQ = make(chan ParentPushRequest, 100)
 	conf.Internal.ImrReady = NewImrReadiness()
 	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, max(10, len(conf.Zones)))
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
@@ -333,6 +334,14 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 // StartAgent starts subsystems for tdns-agent
 func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error {
 	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
+	// The DSYNC API listener, for a childsync-proxy that offers the API
+	// scheme on its parent's behalf. Its own socket and its own auth, as on
+	// tdns-auth (StartAuth says why); SetupDsyncApiRouter returns nil when
+	// the scheme is not configured, so an agent that does not offer API gets
+	// no listener.
+	StartEngine(&Globals.App, "DsyncApiListener", func() error {
+		return conf.StartDsyncApiListener(ctx, conf.SetupDsyncApiRouter(ctx), conf.Internal.APIStopCh)
+	})
 	// In tdns-agent, IMR is active by default unless explicitly set to false
 	imrActive := conf.Imr.Active == nil || *conf.Imr.Active
 	if imrActive {
@@ -354,6 +363,9 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	StartEngine(&Globals.App, "DelegationSyncher", func() error {
 		return kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf)
 	})
+	// The childsync-proxy's outbound half. Idle unless a zone carries
+	// childsync-proxy with a writer that speaks to the network.
+	StartEngine(&Globals.App, "ParentPushEngine", func() error { return ParentPushEngine(ctx, conf) })
 	StartEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	StartEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
 

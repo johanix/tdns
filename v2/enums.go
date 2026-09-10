@@ -115,6 +115,13 @@ const (
 	// ZoneOption values are positional, so inserting mid-list renumbers
 	// everything after.
 	OptUseHsyncparam
+	// OptChildSyncProxy: a tdns-agent SECONDARY of a parent zone whose primary
+	// is DSYNC-unaware performs the parent's half of delegation sync on its
+	// behalf -- advertises DSYNC, receives on every scheme, applies the
+	// parent's policy -- and pushes approved changes to the parent primary
+	// instead of into its own copy. Implies OptChildSync, which
+	// parseZoneOptions materialises. docs/2026-09-08-childsync-proxy.md.
+	OptChildSyncProxy
 	optZoneOptionTdnsSentinel
 )
 
@@ -156,6 +163,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptRequestIxfr:             "request-ixfr",
 	OptNoRequestIxfr:           "no-request-ixfr",
 	OptUseHsyncparam:           "use-hsyncparam",
+	OptChildSyncProxy:          "childsync-proxy",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -192,6 +200,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"request-ixfr":               OptRequestIxfr,
 	"no-request-ixfr":            OptNoRequestIxfr,
 	"use-hsyncparam":             OptUseHsyncparam,
+	"childsync-proxy":            OptChildSyncProxy,
 }
 
 // deprecatedZoneOptionNames maps old option spellings to the canonical name

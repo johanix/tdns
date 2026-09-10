@@ -1526,7 +1526,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// Delegation sync setup: DSYNC publication (parent) or
 		// delegation sync monitoring (child), or proxy forwarding for a
 		// DSYNC-unaware primary (agent secondary).
-		if options[OptChildSync] || options[OptParentSync] || options[OptParentSyncProxy] {
+		if options[OptChildSync] || options[OptParentSync] || options[OptParentSyncProxy] || options[OptChildSyncProxy] {
 			capturedOpts := options
 			setupSync := func(zd *ZoneData) {
 				// Skip if the MP HSYNCPARAM callback already set up delegation sync for this zone.
