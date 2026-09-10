@@ -44,6 +44,12 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
   - **NODATA**: NSEC with owner=qname, bitmap containing RRSIG, NSEC, and existing types (not qtype); Rcode=NOERROR
   - Implemented in `addCDEResponse()` function
   - Rcode handling based on CO bit: CO=1 uses compact denial Rcode semantics, CO=0 uses traditional DNSSEC
+- **Empty Non-Terminals (Section 3.2)**: an ENT is a name that exists, so it is answered
+  NODATA with a bitmap of exactly RRSIG and NSEC — never NXNAME, which would assert that a
+  name with descendants does not exist. `sendENTNodata()` in `v2/queryresponder.go`; the
+  zone's ENTs are derived per snapshot by `entNamesFrom()` in `v2/zone_snapshot.go`
+  - Not yet: the precomputed NSEC chain a zone can publish is built from its owner set and
+    so carries no NSEC at an ENT
 - **Unsigned Referrals (Section 3.4)**: Full support for adding NSEC to referral responses
   - NSEC covering the delegation point (zone cut)
   - Type bitmap contains NS, NSEC, RRSIG (indicating delegation point exists)

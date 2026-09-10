@@ -768,6 +768,9 @@ func (zd *ZoneData) buildSnapshotLocked(serial uint32, data map[string]*OwnerDat
 		Data:        data,
 		signalSynth: cloneSignalSynth(signalSynth),
 		IxfrChain:   copyIxfrChain(zd.IxfrChain),
+		// Derived from data rather than stored beside it, so it cannot go
+		// stale: every snapshot recomputes it from the owners it publishes.
+		ents: entNamesFrom(zd.ZoneName, data),
 	}
 }
 

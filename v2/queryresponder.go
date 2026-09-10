@@ -378,6 +378,14 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 			w.WriteMsg(m)
 			return nil
 		}
+		// DS is trapped ahead of the main path, so the ENT case has to be
+		// answered here too, with the same NODATA.
+		if isEmptyNonTerminal(psnap, qname) {
+			lgHandler.Debug("QueryResponder: DS query for an empty non-terminal — NODATA",
+				"qname", qname, "zone", pzd.ZoneName)
+			pzd.sendENTNodata(m, w, qname, papex, psnap, msgoptions, pSign)
+			return nil
+		}
 		lgHandler.Debug("QueryResponder: DS query for a name that does not exist — NXDOMAIN",
 			"qname", qname, "zone", pzd.ZoneName)
 		pzd.sendNXDOMAIN(m, w, qname, papex, psnap, msgoptions, pSign)
@@ -464,6 +472,27 @@ func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string,
 	if msgoptions.DO {
 		// RFC 9824: Compact denial if CO bit is set, otherwise traditional DNSSEC negative response
 		zd.addCDEResponse(m, qname, apex, nil, msgoptions, signFunc)
+	}
+	w.WriteMsg(m)
+}
+
+// sendENTNodata answers for an empty non-terminal: a name that owns no records
+// but has descendants that do. It EXISTS -- RFC 1034 section 4.3.2 resolves
+// against the label tree, RFC 4592 section 2.2.2 names the case -- so the
+// answer is NODATA, and NXDOMAIN would be a lie the zone signs.
+//
+// The rrtypeList is empty but NOT nil, which is the whole difference from
+// sendNXDOMAIN: addCDEResponse reads nil as "the name does not exist" and puts
+// NXNAME in the bitmap, and a non-nil list as "these are the types here". An
+// empty one therefore yields NOERROR with a bitmap of exactly RRSIG and NSEC,
+// which is what RFC 9824 section 3.2 specifies for an ENT.
+func (zd *ZoneData) sendENTNodata(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData, snap *zoneSnapshot,
+	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
+	m.MsgHdr.Rcode = dns.RcodeSuccess
+	soaRRset := zd.soaForResponseFrom(snap, apex)
+	m.Ns = append(m.Ns, soaRRset.RRs...)
+	if msgoptions.DO {
+		zd.addCDEResponse(m, qname, apex, []uint16{}, msgoptions, signFunc)
 	}
 	w.WriteMsg(m)
 }
@@ -898,6 +927,17 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			return nil
 		}
 
+		// An empty non-terminal exists, so it is NODATA -- and it blocks
+		// wildcard synthesis: RFC 4592 section 4.1 uses a wildcard only for a
+		// name that does not exist, which is why this stands ahead of the
+		// wildcard lookup. It stands behind the delegation check above because
+		// anything below a zone cut is the child's to answer for.
+		if isEmptyNonTerminal(snap, qname) {
+			lgHandler.Debug("empty non-terminal", "qname", qname, "zone", zd.ZoneName)
+			zd.sendENTNodata(m, w, qname, apex, snap, msgoptions, MaybeSignRRset)
+			return nil
+		}
+
 		wildqname = "*." + strings.Join(strings.Split(qname, ".")[1:], ".")
 		// log.Printf("---> Checking for existence of wildcard %s", wildqname)
 
@@ -923,6 +963,18 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	// 0. Check for *any* existence of qname in zone
 	// log.Printf("---> Checking for any existence of qname %s", qname)
 	if owner.RRtypes.Count() == 0 {
+		// A node holding no records is only absent if nothing lives beneath
+		// it. With descendants it is an empty non-terminal and NODATA, the
+		// same as one that never had a node at all -- an UPDATE that removes
+		// an owner's last RRset without removing the node must not turn the
+		// name into a signed denial while its children still answer. The
+		// ENT check on the !nameExistsFrom path above cannot see this one:
+		// the name IS in Data, so nameExistsFrom sent us straight here.
+		if isEmptyNonTerminal(snap, qname) {
+			lgHandler.Debug("empty non-terminal with an empty owner node", "qname", qname, "zone", zd.ZoneName)
+			zd.sendENTNodata(m, w, origqname, apex, snap, msgoptions, MaybeSignRRset)
+			return nil
+		}
 		soaRRset, err := MaybeSignRRset(zd.soaForResponseFrom(snap, apex), zd.ZoneName)
 		if err != nil {
 			lgHandler.Error("failed to sign SOA RRset", "zone", zd.ZoneName, "err", err)
