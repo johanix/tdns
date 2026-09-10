@@ -76,9 +76,13 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	if pol.Rollover.Method == RolloverMethodNone {
 		return nil
 	}
-	if pol.Rollover.Method == RolloverMethodDoubleSignature {
-		return nil
-	}
+	// D-4: the KSK algorithm rollover takes the double-signature ordering
+	// regardless of rollover.method, so a method: double-signature zone is
+	// let in far enough to spawn and drive one. Its SAME-algorithm cadence
+	// is still unimplemented (4E): outside an algorithm roll such a zone
+	// does no pipeline-fill, no scheduled rollover, and returns below once
+	// the row shows it idle.
+	dsOnly := pol.Rollover.Method == RolloverMethodDoubleSignature
 
 	// Refuse to advance keys when the zone has an auto-rollover-
 	// impacting error: a hard policy violation (E5/E10) means rolling
@@ -137,6 +141,54 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	// with clamping.enabled: false.
 	kStepScheduler(zd, kdb, pol, now)
 
+	row, err := LoadRolloverZoneRow(kdb, zone)
+	if err != nil {
+		return err
+	}
+	if row == nil {
+		return nil
+	}
+	phase := row.RolloverPhase
+	if phase == "" {
+		phase = rolloverPhaseIdle
+	}
+	algRoll := kskAlgRollFromRow(row)
+
+	// KSK algorithm rollover (D-5): change-policy binds and gates; the
+	// tick spawns. Detecting the mismatch here -- an active KSK whose
+	// algorithm differs from the bound policy's, on an idle zone with
+	// nothing in flight -- is crash-safe and idempotent: a bind that
+	// failed half-way is simply re-detected next tick.
+	if algRoll == nil && phase == rolloverPhaseIdle && !row.RolloverInProgress {
+		from, to, mismatch, blocked, err := kskAlgRollNeeded(kdb, zone, pol)
+		if err != nil {
+			lgSigner.Warn("rollover: KSK algorithm-roll check failed", "zone", zone, "err", err)
+		} else if mismatch && blocked {
+			// A bind the engine cannot carry yet. Do nothing else this
+			// tick: pipeline-fill would mint new-algorithm keys ahead of
+			// the spawn and the idle branch would push their DS.
+			return nil
+		} else if mismatch {
+			if _, err := SpawnKskAlgRollover(conf, kdb, zone, from, to); err != nil {
+				lgSigner.Error("rollover: KSK algorithm rollover spawn failed; will retry next tick", "zone", zone, "err", err)
+				return nil
+			}
+			row, err = LoadRolloverZoneRow(kdb, zone)
+			if err != nil {
+				return err
+			}
+			if row == nil {
+				return nil
+			}
+			phase = row.RolloverPhase
+			algRoll = kskAlgRollFromRow(row)
+		}
+	}
+	if dsOnly && algRoll == nil && phase == rolloverPhaseIdle {
+		// Same-algorithm double-signature cadence: not built (4E).
+		return nil
+	}
+
 	// Pipeline-fill: maintain num_ds DS records at the parent, plus one
 	// 'created' key in flight (total cap num_ds + 1). The two checks gate
 	// generation independently:
@@ -150,10 +202,15 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	// growth on a single tick; this layer catches a future bug that bypasses
 	// or weakens the cap. CRIT log so the operator sees it before the
 	// next status query.
+	//
+	// Suspended for the duration of a KSK algorithm rollover (D-8): the
+	// counters are algorithm-blind and would mint new-algorithm keys into
+	// slots the frozen old FIFO used to hold. The fill resumes when the
+	// roll completes and refills the new-algorithm FIFO to num_ds.
 	num := pol.Rollover.NumDS
 	maxPipeline := num + 1
 	circuitBreakerCeiling := 2 * maxPipeline
-	for {
+	for algRoll == nil && !dsOnly {
 		total, err := CountKskInPipeline(kdb, zone)
 		if err != nil {
 			return err
@@ -179,18 +236,6 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			break
 		}
 		lgSigner.Info("rollover: generated pipeline KSK", "zone", zone, "keyid", kid)
-	}
-
-	row, err := LoadRolloverZoneRow(kdb, zone)
-	if err != nil {
-		return err
-	}
-	if row == nil {
-		return nil
-	}
-	phase := row.RolloverPhase
-	if phase == "" {
-		phase = rolloverPhaseIdle
 	}
 
 	// CDS-publication observability: when the engine claims ownership
