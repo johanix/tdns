@@ -8,6 +8,7 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	"github.com/johanix/tdns/v2/edns0"
+	"github.com/miekg/dns"
 )
 
 // A zero-tuple result means the query is never sent at all. It used to leave no
@@ -181,7 +182,7 @@ func TestPrioritizeServersHandlesANilServerEntry(t *testing.T) {
 
 	// Must not panic, and the healthy server must still be usable: one bad map
 	// entry cannot be allowed to take the whole zone down with it.
-	_, _, tuples := imr.prioritizeServers("foo.example.", serverMap, edns0.PrivacyNone)
+	_, _, tuples := imr.prioritizeServers("foo.example.", dns.TypeA, serverMap, edns0.PrivacyNone)
 	if len(tuples) == 0 {
 		t.Fatal("a nil entry suppressed the healthy server alongside it")
 	}
@@ -192,7 +193,7 @@ func TestPrioritizeServersHandlesANilServerEntry(t *testing.T) {
 	}
 
 	// And with ONLY a nil entry, still no panic and no tuples.
-	_, _, tuples = imr.prioritizeServers("foo.example.", map[string]*cache.AuthServer{
+	_, _, tuples = imr.prioritizeServers("foo.example.", dns.TypeA, map[string]*cache.AuthServer{
 		"ns1.example.": nil,
 	}, edns0.PrivacyNone)
 	if len(tuples) != 0 {

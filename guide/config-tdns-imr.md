@@ -223,7 +223,7 @@ imrengine:
          multiplier:        3.0   # exponential growth factor
          jitter-fraction:   0.25  # must be in [0,1), else reset to the default
          routing-failure:   1h    # backoff after an unreachable-network error
-         lame-delegation:   1h    # backoff after a lame delegation
+         lame-delegation:   5m    # backoff after REFUSED/NOTAUTH (lame); RFC 9520 caps failure caching at 5m
       address-family:
          window-duration:   10m   # observation window for per-family failures
          failure-threshold: 5     # distinct failures before a family is suspect
@@ -234,12 +234,22 @@ imrengine:
          max-failures:        3   # give up discovery after this many
       query-budget:              8s     # total wall-clock budget for one query
       upgrade-indirect-cache-hits: true # left unset in code; treated as true
+      cache-max-ttl:             86400  # seconds; ceiling on cached lifetimes
+      cache-min-ttl:             0      # seconds; floor on cached lifetimes (0 = none)
 ```
 
 The `address-family` group is what demotes a broken IPv6 (or IPv4) path: once
 `failure-threshold` distinct failures are seen inside `window-duration`, that
 family is treated as suspect for `suspect-duration` and re-probed every
 `probe-interval`.
+
+`cache-max-ttl` and `cache-min-ttl` are Unbound's knobs of the same names, with
+the same units (seconds, not durations) and defaults. They bound how long
+anything learned from the network stays in the cache, positive and negative
+answers alike, and because the TTL a client is served is what remains of the
+cached lifetime, clients see the bounded TTL too. Root hints and trust anchors
+are configuration, not cached data, and are not bounded. When `cache-min-ttl`
+exceeds `cache-max-ttl`, the maximum wins.
 
 ## large-algorithms
 

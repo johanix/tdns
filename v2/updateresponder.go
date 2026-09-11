@@ -169,8 +169,9 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		qname = r.Ns[0].Header().Name // If there is only one RR in the update, we will use that name as the qname
 	}
 	// 1. Is qname inside or below a zone that we're auth for?
-	// Let's see if we can find the zone
-	zd := FindZone(qname)
+	// Let's see if we can find the zone. OrRoot: a single-RR UPDATE of a
+	// TLD's delegation arrives here as the TLD's name, and its zone is ".".
+	zd := FindZoneOrRoot(qname)
 	if zd == nil {
 		lgHandler.Warn("zone not found", "qname", qname)
 		m.SetRcode(r, dns.RcodeRefused)

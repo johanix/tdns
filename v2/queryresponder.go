@@ -57,6 +57,7 @@ var tdnsSpecialTypes = map[uint16]bool{
 	core.TypeHSYNC3:     true,
 	core.TypeHSYNCPARAM: true,
 	core.TypeTSYNC:      true,
+	core.TypeJWK:        true,
 }
 
 var standardDNSTypes = map[uint16]bool{
@@ -200,13 +201,17 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 	if len(rrset.RRSIGs) > 0 {
 		return rrset, nil
 	}
+	// Zone is legitimately unsigned — serve unsigned. Ahead of the KeyDB check:
+	// an unsigned zone needs no keys, and asking for a KeyDB first made every
+	// DO answer from an unsigned zone served without one a SERVFAIL, the
+	// opposite of QueryResponder's "responding without DNSSEC". A missing
+	// KeyDB is an error only for a zone that must be signed.
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return rrset, nil
+	}
 	if kdb == nil {
 		lgHandler.Warn("no KeyDB available, cannot sign", "zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[rrset.RRtype])
 		return rrset, fmt.Errorf("no KeyDB available for zone %s", zd.ZoneName)
-	}
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
-		// Zone is legitimately unsigned — serve unsigned.
-		return rrset, nil
 	}
 
 	// The zone MUST be signed but this RRset has no stored RRSIGs. Only a
@@ -257,17 +262,23 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 // handleDSQuery answers a DS query. DS is parent-side data (RFC 4035 §3.1.4.1):
 // it is authoritative in the zone that DELEGATES to qname, never in qname's own
 // zone. The answering zone is therefore the nearest zone we host that is a
-// STRICT ancestor of qname — found by stripping qname's leftmost label and
-// letting FindZone walk up from there, entirely within the local Zones map. We
-// NEVER chase the parent via the recursive resolver.
+// STRICT ancestor of qname — found by FindParentZone, entirely within the local
+// Zones map. We NEVER chase the parent via the recursive resolver.
 //
 // Outcomes, ordered from most to least common (a grandparent referral is by far
 // the rarest, so it is the last arm):
 //
-//   - No hosted ancestor at all: REFUSED. The DS lives in a parent we don't
-//     host; answering NODATA would be us authoritatively denying parent-side
-//     data we don't own. (A correct validator asks the parent's servers for DS,
-//     never the child's, so this should not occur in practice.)
+//   - No hosted ancestor, and qname is the apex of the zone we do host: an
+//     authoritative NODATA from that child zone, as RFC 4035 §3.1.4.1 requires
+//     of a server authoritative for the child but not the parent -- it "MUST
+//     return an authoritative 'no data' response showing that the DS RRset does
+//     not exist in the child zone's apex". BIND and NSD do the same. REFUSED,
+//     which this used to answer, gives a resolver that asked the wrong server
+//     no hint at all (#150).
+//
+//   - No hosted ancestor and qname is not our apex: REFUSED. Unreachable in
+//     practice -- the caller found zd for qname, and below its apex zd itself
+//     is the hosted ancestor -- but there is nothing to answer from.
 //
 //   - We host the immediate parent (it delegates directly to qname): serve the
 //     DS RRset if present; otherwise an authenticated NODATA proving the
@@ -281,15 +292,20 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
 
-	// DS can never live in qname's own zone, so strip qname's leftmost label
-	// and look up the parent side. FindZone walks up from there and returns the
-	// nearest hosted strict ancestor of qname (with the same case-folding as the
-	// main lookup); it can never return qname's own zone. qname is a FQDN here,
-	// so it always has at least the root dot.
-	pzd := FindZone(qname[strings.Index(qname, ".")+1:])
+	// DS can never live in qname's own zone, so look up the parent side.
+	// FindParentZone starts one label in and walks up to the nearest hosted
+	// strict ancestor (with the same case-folding as the main lookup). It, and
+	// not FindZone on the remainder, because it reads the empty remainder of a
+	// TLD as the root: FindZone("") tries nothing, and a server hosting both
+	// "." and a TLD answered the TLD's DS with the TLD's own NODATA. For "."
+	// itself it returns the root, which has no parent and answers NODATA.
+	pzd := FindParentZone(qname)
 	if pzd == nil {
-		// We host nothing above qname (at most qname itself). Nothing to serve
-		// or refer to → REFUSED.
+		if core.EqualNames(qname, zd.ZoneName) {
+			return zd.sendChildApexDSNodata(m, w, qname, msgoptions, kdb)
+		}
+		// We host nothing above qname, and qname is not our apex. Nothing to
+		// serve or refer to → REFUSED.
 		lgHandler.Debug("QueryResponder: DS query, no hosted parent zone — REFUSED",
 			"qname", qname)
 		m.MsgHdr.Authoritative = false
@@ -358,7 +374,9 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		m.MsgHdr.Rcode = dns.RcodeSuccess
 		m.Ns = append(m.Ns, pzd.soaForResponseFrom(psnap, papex).RRs...)
 		if msgoptions.DO {
-			pzd.addCDEResponse(m, qname, papex, []uint16{dns.TypeNS}, msgoptions, pSign)
+			if err := pzd.addCDEResponse(m, qname, papex, []uint16{dns.TypeNS}, msgoptions, pSign); err != nil {
+				failUnsignedDenial(m)
+			}
 		}
 		w.WriteMsg(m)
 		return nil
@@ -373,7 +391,9 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 			m.Ns = append(m.Ns, pzd.soaForResponseFrom(psnap, papex).RRs...)
 			if msgoptions.DO {
 				// Existing types at qname (DS is not among them) → NODATA proof.
-				pzd.addCDEResponse(m, qname, papex, owner.RRtypes.Keys(), msgoptions, pSign)
+				if err := pzd.addCDEResponse(m, qname, papex, owner.RRtypes.Keys(), msgoptions, pSign); err != nil {
+					failUnsignedDenial(m)
+				}
 			}
 			w.WriteMsg(m)
 			return nil
@@ -401,6 +421,59 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		pzd.sendReferral(m, w, cdd, papex, msgoptions, pSign)
 		return nil
 	}
+}
+
+// sendChildApexDSNodata answers a DS query for our own apex when we do not host
+// the parent: the authoritative NODATA of RFC 4035 §3.1.4.1, from the child
+// zone, with its SOA and -- for a DO query -- the denial at the apex, whose
+// bitmap lists the types the apex holds and so shows DS absent.
+//
+// A validator must not take this as proof that the delegation is insecure: the
+// denial is the child's, signed with the child's keys, and says nothing about
+// the parent side of the cut (RFC 6840 §4.4). What it is for is the resolver
+// that asked the wrong server -- a plain NODATA it can recognise, instead of
+// a REFUSED it cannot tell from a lame server.
+func (zd *ZoneData) sendChildApexDSNodata(m *dns.Msg, w dns.ResponseWriter, qname string,
+	msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
+
+	snap := zd.publishedSnapshot()
+	if snap == nil {
+		lgHandler.Error("DS query at apex: no published snapshot", "zone", zd.ZoneName)
+		m.MsgHdr.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(m)
+		return nil
+	}
+	apex := getOwnerFrom(snap, zd.ZoneName)
+	if apex == nil {
+		lgHandler.Error("DS query at apex: snapshot missing apex", "zone", zd.ZoneName)
+		m.MsgHdr.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(m)
+		return nil
+	}
+	lgHandler.Debug("QueryResponder: DS query at our apex, parent not hosted — authoritative NODATA",
+		"qname", qname, "zone", zd.ZoneName)
+	m.MsgHdr.Authoritative = true
+	m.MsgHdr.Rcode = dns.RcodeSuccess
+	m.Ns = append(m.Ns, zd.soaForResponseFrom(snap, apex).RRs...)
+	if msgoptions.DO {
+		// The apex's own types, never DS: a DS stored at the apex is parent-side
+		// data that does not belong in the child, and a bitmap listing it would
+		// contradict the NODATA it is meant to prove.
+		var types []uint16
+		for _, t := range apex.RRtypes.Keys() {
+			if t != dns.TypeDS {
+				types = append(types, t)
+			}
+		}
+		sign := func(rrset core.RRset, name string) (core.RRset, error) {
+			return zd.signRRsetForZone(rrset, name, msgoptions, kdb, nil)
+		}
+		if err := zd.addCDEResponse(m, qname, apex, types, msgoptions, sign); err != nil {
+			failUnsignedDenial(m)
+		}
+	}
+	w.WriteMsg(m)
+	return nil
 }
 
 // sendReferral sends a referral response for a child delegation.
@@ -432,7 +505,12 @@ func (zd *ZoneData) sendReferral(m *dns.Msg, w dns.ResponseWriter, cdd *ChildDel
 			}
 		} else {
 			// Insecure delegation (RFC 9824 §3.4): NSEC proving no DS exists.
-			addReferralNSEC(m, cdd, apex, zd.ZoneName, signFunc)
+			// Unlike the DS above, this is synthesized now, and a zone that
+			// must be signed and cannot sign it is broken right now: SERVFAIL,
+			// as for every other denial.
+			if err := addReferralNSEC(m, cdd, apex, zd.ZoneName, signFunc); err != nil {
+				failUnsignedDenial(m)
+			}
 		}
 	}
 
@@ -471,7 +549,9 @@ func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string,
 	m.Ns = append(m.Ns, soaRRset.RRs...)
 	if msgoptions.DO {
 		// RFC 9824: Compact denial if CO bit is set, otherwise traditional DNSSEC negative response
-		zd.addCDEResponse(m, qname, apex, nil, msgoptions, signFunc)
+		if err := zd.addCDEResponse(m, qname, apex, nil, msgoptions, signFunc); err != nil {
+			failUnsignedDenial(m)
+		}
 	}
 	w.WriteMsg(m)
 }
@@ -492,7 +572,9 @@ func (zd *ZoneData) sendENTNodata(m *dns.Msg, w dns.ResponseWriter, qname string
 	soaRRset := zd.soaForResponseFrom(snap, apex)
 	m.Ns = append(m.Ns, soaRRset.RRs...)
 	if msgoptions.DO {
-		zd.addCDEResponse(m, qname, apex, []uint16{}, msgoptions, signFunc)
+		if err := zd.addCDEResponse(m, qname, apex, []uint16{}, msgoptions, signFunc); err != nil {
+			failUnsignedDenial(m)
+		}
 	}
 	w.WriteMsg(m)
 }
@@ -718,7 +800,12 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 	visited := make(map[string]bool)
 	visited[qname] = true
 
-	for depth < maxDepth {
+	// RFC 1034 section 4.3.2 step 3a follows a CNAME only when QTYPE does not
+	// match it. A query for the CNAME itself, or for ANY, is an exact match:
+	// the CNAME already in the answer is all of it.
+	chase := qtype != dns.TypeCNAME && qtype != dns.TypeANY
+
+	for chase && depth < maxDepth {
 		// Get the current CNAME target
 		if currentOwner.RRtypes.Count() != 1 {
 			break // Not a CNAME-only owner anymore
@@ -747,8 +834,19 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 			break
 		}
 
-		// Get owner data from the target zone (pin ITS snapshot).
-		tgtOwner := getOwnerFrom(tgtZone.publishedSnapshot(), tgt)
+		// Pin the target zone's snapshot for the cut check and the read.
+		tgtSnap := tgtZone.publishedSnapshot()
+
+		// A target at or below a zone cut in the target zone is the child's to
+		// answer for: all the target zone holds there is glue and occluded
+		// data, and a query for the target itself gets a referral. Stop with
+		// the CNAME only, as for a target outside our authority.
+		if cdd := tgtZone.findDelegationFrom(tgtSnap, tgt, msgoptions.DO); cdd != nil {
+			lgHandler.Debug("CNAME target at or below a zone cut", "target", tgt, "zone", tgtZone.ZoneName, "cut", cdd.ChildName)
+			break
+		}
+
+		tgtOwner := getOwnerFrom(tgtSnap, tgt)
 		if tgtOwner == nil {
 			lgHandler.Error("failed to get owner for CNAME target", "target", tgt, "zone", tgtZone.ZoneName)
 			break
@@ -994,13 +1092,29 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		// an rcode saying it does not.
 		m.MsgHdr.Rcode = dns.RcodeNameError
 		if msgoptions.DO {
-			zd.addCDEResponse(m, origqname, apex, nil, msgoptions, MaybeSignRRset)
+			if err := zd.addCDEResponse(m, origqname, apex, nil, msgoptions, MaybeSignRRset); err != nil {
+				failUnsignedDenial(m)
+			}
 		}
 		w.WriteMsg(m)
 		return nil
 	}
 
 	if len(qname) > len(zd.ZoneName) {
+		// 1. If qname is below the zone apex, check for child delegation.
+		// Before the CNAME: at or below a cut this zone holds only glue and
+		// occluded data, and a CNAME among it is no more ours to serve than
+		// an address is. RFC 1034 section 4.3.2 step 3 descends label by
+		// label, so it meets the cut before it reaches the node.
+		// log.Printf("---> Checking for child delegation for %s", qname)
+		cdd := zd.findDelegationFrom(snap, qname, msgoptions.DO)
+
+		// If there is delegation data and an NS RRset is present, return a referral
+		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
+			zd.sendReferral(m, w, cdd, apex, msgoptions, MaybeSignRRset)
+			return nil
+		}
+
 		// 2. Check for qname + CNAME (only if CNAME is the only RR type)
 		lgHandler.Debug("checking for CNAME", "qname", qname, "zone", zd.ZoneName)
 		handled, err := zd.handleCNAMEChain(m, w, qname, qtype, owner, snap, msgoptions, kdb, apex, minimalResponses)
@@ -1013,19 +1127,9 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			w.WriteMsg(m)
 			return nil
 		}
-
-		// 1. If qname is below the zone apex, check for child delegation
-		// log.Printf("---> Checking for child delegation for %s", qname)
-		cdd := zd.findDelegationFrom(snap, qname, msgoptions.DO)
-
-		// If there is delegation data and an NS RRset is present, return a referral
-		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
-			zd.sendReferral(m, w, cdd, apex, msgoptions, MaybeSignRRset)
-			return nil
-		}
 	}
 
-	// 2. Check for exact match qname+qtype
+	// 3. Check for exact match qname+qtype
 	lgHandler.Debug("checking for exact match", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName)
 
 	if tdnsSpecialTypes[qtype] || standardDNSTypes[qtype] {
@@ -1088,7 +1192,9 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 				// RFC 9824: Compact denial if CO bit is set, otherwise traditional DNSSEC negative response
 				rrtypeList := []uint16{}
 				rrtypeList = append(rrtypeList, owner.RRtypes.Keys()...)
-				zd.addCDEResponse(m, origqname, apex, rrtypeList, msgoptions, MaybeSignRRset)
+				if err := zd.addCDEResponse(m, origqname, apex, rrtypeList, msgoptions, MaybeSignRRset); err != nil {
+					failUnsignedDenial(m)
+				}
 			}
 		}
 		w.WriteMsg(m)
@@ -1133,7 +1239,12 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 // addReferralNSEC adds an NSEC record to a referral response per RFC 9824, Section 3.4
 // This NSEC covers the delegation point (zone cut) and indicates that qname doesn't exist in the current zone
-func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zoneName string, signFunc func(core.RRset, string) (core.RRset, error)) {
+//
+// It is the referral's proof that the delegation has no DS, synthesized per
+// response like addCDEResponse's, and the error is the one from signing it: the
+// caller answers SERVFAIL on it (failUnsignedDenial) rather than send a referral
+// without the proof.
+func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zoneName string, signFunc func(core.RRset, string) (core.RRset, error)) error {
 	var soaMinTTL uint32 = 3600
 	if soaRR, ok := apex.RRtypes.Get(dns.TypeSOA); ok && len(soaRR.RRs) > 0 {
 		if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
@@ -1169,11 +1280,12 @@ func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zone
 	// Sign the NSEC record
 	nsecRRset, err := signFunc(core.RRset{RRs: []dns.RR{nsecRR}}, zoneName)
 	if err != nil {
-		lgHandler.Error("failed to sign NSEC RRset for referral at zone cut", "child", cdd.ChildName, "err", err)
-	} else {
-		m.Ns = append(m.Ns, nsecRR)
-		m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
+		lgHandler.Error("failed to sign NSEC RRset for referral at zone cut; serving SERVFAIL", "child", cdd.ChildName, "err", err)
+		return err
 	}
+	m.Ns = append(m.Ns, nsecRR)
+	m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
+	return nil
 }
 
 // addCDEResponse adds a DNSSEC negative response to the message
@@ -1181,7 +1293,10 @@ func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zone
 // Otherwise, uses traditional DNSSEC negative response format
 // rrtypeList == nil means NXDOMAIN (name doesn't exist)
 // rrtypeList != nil means NODATA (name exists but qtype doesn't)
-func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rrtypeList []uint16, msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
+//
+// The error is the one from signing the denial, and every caller must answer
+// SERVFAIL on it (failUnsignedDenial) rather than send the message as built.
+func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rrtypeList []uint16, msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) error {
 	var soaMinTTL uint32 = 3600
 
 	if soaRR, ok := apex.RRtypes.Get(dns.TypeSOA); ok && len(soaRR.RRs) > 0 {
@@ -1237,7 +1352,28 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 
 	nsecRRset, err := signFunc(core.RRset{RRs: []dns.RR{nsecRR}}, zd.ZoneName)
 	if err != nil {
-		lgHandler.Error("failed to sign NSEC RRset for CDE response", "zone", zd.ZoneName, "err", err)
+		lgHandler.Error("failed to sign NSEC RRset for CDE response; serving SERVFAIL", "zone", zd.ZoneName, "err", err)
+		return err
 	}
 	m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
+	return nil
+}
+
+// failUnsignedDenial turns a response whose denial could not be signed into a
+// SERVFAIL: a negative answer, or a referral's proof that the delegation has
+// no DS. The denial is synthesized per response, so a zone that must be signed
+// and cannot sign it is broken right now, and a DO client handed the unsigned
+// proof has nothing to authenticate -- the positive path already answers that
+// case with SERVFAIL. The sections go: a SERVFAIL carries no partial proof,
+// and no glue from a referral. Only the OPT stays.
+func failUnsignedDenial(m *dns.Msg) {
+	m.Answer, m.Ns = nil, nil
+	var opt []dns.RR
+	for _, rr := range m.Extra {
+		if rr.Header().Rrtype == dns.TypeOPT {
+			opt = append(opt, rr)
+		}
+	}
+	m.Extra = opt
+	m.MsgHdr.Rcode = dns.RcodeServerFailure
 }

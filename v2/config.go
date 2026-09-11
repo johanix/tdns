@@ -438,7 +438,17 @@ type ImrTuningConf struct {
 	// tdns-mp overrides this to false in its default config to cut
 	// gossip-driven query volume.
 	UpgradeIndirectCacheHits *bool `yaml:"upgrade-indirect-cache-hits" mapstructure:"upgrade-indirect-cache-hits"`
+	// CacheMaxTTL and CacheMinTTL bound, in seconds, how long data learned
+	// from the network stays in the cache -- and so the TTL clients are
+	// served. Same names, units and defaults as Unbound: max 86400, min 0 (no
+	// floor). Seconds rather than a duration because they are TTLs, and so an
+	// unbound.conf value can be copied as it stands. When min > max, max wins.
+	CacheMaxTTL uint32 `yaml:"cache-max-ttl" mapstructure:"cache-max-ttl"`
+	CacheMinTTL uint32 `yaml:"cache-min-ttl" mapstructure:"cache-min-ttl"`
 }
+
+// DefaultCacheMaxTTL is Unbound's cache-max-ttl default: one day.
+const DefaultCacheMaxTTL = 86400
 
 // BackoffConf tunes per-(address, transport) backoff behaviour
 // after a failed query. Replaces the hardcoded 2 min / 1 h constants
@@ -503,7 +513,9 @@ func LoadImrTuningDefaults(t *ImrTuningConf) {
 		t.Backoff.RoutingFailure = 1 * time.Hour
 	}
 	if t.Backoff.LameDelegation <= 0 {
-		t.Backoff.LameDelegation = 1 * time.Hour
+		// RFC 9520 section 3.2: a resolution failure MUST NOT be cached for
+		// longer than 5 minutes, and a shunned zone server is exactly that.
+		t.Backoff.LameDelegation = 5 * time.Minute
 	}
 	// AddressFamily
 	if t.AddressFamily.WindowDuration <= 0 {
@@ -528,6 +540,15 @@ func LoadImrTuningDefaults(t *ImrTuningConf) {
 	// QueryBudget
 	if t.QueryBudget <= 0 {
 		t.QueryBudget = 8 * time.Second
+	}
+	// Cache TTL bounds. Zero min is the default (no floor), so only max needs
+	// filling. A floor above the ceiling is lowered to it: Unbound applies
+	// the ceiling last, so max is what wins there too.
+	if t.CacheMaxTTL == 0 {
+		t.CacheMaxTTL = DefaultCacheMaxTTL
+	}
+	if t.CacheMinTTL > t.CacheMaxTTL {
+		t.CacheMinTTL = t.CacheMaxTTL
 	}
 }
 

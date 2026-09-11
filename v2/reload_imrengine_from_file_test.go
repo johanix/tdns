@@ -8,11 +8,14 @@
 package tdns
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	cache "github.com/johanix/tdns/v2/cache"
 )
 
 func writeImrConfig(t *testing.T, body string) *Config {
@@ -217,6 +220,101 @@ func TestApplyImrEngineReload_ReportsRestartRequiredFromFile(t *testing.T) {
 	}
 	if !strings.Contains(res.Summary(), "restart required for imrengine.tuning") {
 		t.Errorf("summary does not carry the restart notice: %q", res.Summary())
+	}
+}
+
+// imrRootForward forwards the root, which keeps a real InitImrEngine offline:
+// a forwarded root is primed from the compiled-in hints only.
+const imrRootForward = `imrengine:
+   forward:
+      - zone: .
+        upstreams:
+           - addr: 192.0.2.1
+             transport: do53
+`
+
+// bootImrFromFile boots a resolver the way the daemon does: the config file
+// through the decoder ParseConfig uses, then InitImrEngine, which applies the
+// tuning defaults before it snapshots bootConf. A bootConf built by hand skips
+// that step and so cannot see what the defaults do to the reload diff.
+func bootImrFromFile(t *testing.T, body string) *Config {
+	t.Helper()
+	savedImr, savedPolicy := Globals.ImrEngine, cache.GetBackoffPolicy()
+	t.Cleanup(func() {
+		Globals.ImrEngine = savedImr
+		cache.SetBackoffPolicy(savedPolicy)
+	})
+	conf := writeImrConfig(t, body)
+	cfg := conf.Internal.CfgFile
+	configMap, _, err := processConfigFile(cfg, filepath.Dir(cfg), 0, newMergeState())
+	if err != nil {
+		t.Fatalf("processConfigFile: %v", err)
+	}
+	if err := decodeConfigMap(configMap, conf, nil); err != nil {
+		t.Fatalf("decodeConfigMap: %v", err)
+	}
+	conf.Internal.ServerErrors = NewServerErrorRegistry()
+	if err := conf.InitImrEngine(context.Background(), true); err != nil {
+		t.Fatalf("InitImrEngine: %v", err)
+	}
+	return conf
+}
+
+// TestApplyImrEngineReload_UnchangedFileReportsNothing: reloading the very
+// file the resolver booted from must report no restart-required key.
+//
+// InitImrEngine fills the tuning defaults in before it snapshots bootConf,
+// while the reload decodes the file raw. Compared by value, a file with no
+// tuning: block -- or a partial one -- differed from the snapshot on every
+// defaulted knob, and every reload told the operator to restart for an edit
+// nobody made.
+func TestApplyImrEngineReload_UnchangedFileReportsNothing(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"no tuning block", imrRootForward},
+		{"partial tuning block", imrRootForward + `   tuning:
+      query-budget: 12s
+      backoff:
+         first-failure: 30s
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := bootImrFromFile(t, tc.body)
+			res, err := conf.applyImrEngineReload()
+			if err != nil {
+				t.Fatalf("applyImrEngineReload: %v", err)
+			}
+			if len(res.RestartRequired) != 0 {
+				t.Errorf("unchanged config reported as needing a restart: %v", res.RestartRequired)
+			}
+			if res.Summary() != "" {
+				t.Errorf("unchanged config produced a reload summary: %q", res.Summary())
+			}
+		})
+	}
+}
+
+// TestApplyImrEngineReload_TuningEditAfterRealBoot: comparing what the
+// resolver would actually run must still catch a real edit -- including the
+// removal of a non-default value, which falls back to the default.
+func TestApplyImrEngineReload_TuningEditAfterRealBoot(t *testing.T) {
+	booted := imrRootForward + "   tuning:\n      query-budget: 12s\n"
+	for _, tc := range []struct{ name, body string }{
+		{"query-budget changed", imrRootForward + "   tuning:\n      query-budget: 30s\n"},
+		{"query-budget removed", imrRootForward},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := bootImrFromFile(t, booted)
+			if err := os.WriteFile(conf.Internal.CfgFile, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			res, err := conf.applyImrEngineReload()
+			if err != nil {
+				t.Fatalf("applyImrEngineReload: %v", err)
+			}
+			if len(res.RestartRequired) != 1 || res.RestartRequired[0] != "imrengine.tuning" {
+				t.Fatalf("RestartRequired = %v, want [imrengine.tuning]", res.RestartRequired)
+			}
+		})
 	}
 }
 

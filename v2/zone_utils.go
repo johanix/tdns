@@ -1568,6 +1568,9 @@ func (zd *ZoneData) normalizeZoneName() {
 // left-hand labels did not -- WWW.example.com. against example.com. -- took the
 // first pass, kept its spelling, and went on to miss the exact-keyed owner
 // lookup. The zone was found and the name inside it was not. See tdns#415.
+//
+// It never returns the root for a name below it; see FindZoneOrRoot for the
+// callers that need it to.
 func FindZone(qname string) *ZoneData {
 	labels := strings.Split(qname, ".")
 	for i := 0; i < len(labels)-1; i++ {
@@ -1576,6 +1579,27 @@ func FindZone(qname string) *ZoneData {
 		}
 	}
 	lg.Debug("FindZone: no zone found", "qname", qname)
+	return nil
+}
+
+// FindZoneOrRoot is FindZone for the paths that ANSWER for a name -- query,
+// UPDATE and KeyState dispatch -- where a hosted root is the zone for any name
+// no more specific hosted zone covers. Those paths handle zone cuts
+// themselves: a name under a TLD delegation gets the root's referral, a TLD's
+// DS the root's DS. Without the fallback, a server hosting only the root
+// REFUSED every query below it.
+//
+// FindZone itself does not fall back, and should not: its other callers read
+// it as "the co-hosted zone whose data holds this name" (transport signals,
+// signal publication, CNAME targets), and the root, which delegates nearly
+// everything, is the wrong answer to that question.
+func FindZoneOrRoot(qname string) *ZoneData {
+	if zd := FindZone(qname); zd != nil {
+		return zd
+	}
+	if zd, ok := Zones.Get("."); ok {
+		return zd
+	}
 	return nil
 }
 
