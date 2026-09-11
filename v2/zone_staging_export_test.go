@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
@@ -448,22 +447,36 @@ www.example.	3600	IN	A	192.0.2.50
 `
 	newZd := draftZone(t, "example.", refreshed)
 
+	// Every wait below is bounded: a stalled batch or refresh must fail the
+	// test, not park the whole package until go test's own timeout.
+	const patience = 10 * time.Second
+	waitFor := func(ch <-chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(patience):
+			t.Fatalf("%s did not happen within %s", what, patience)
+		}
+	}
+
 	inBatch := make(chan struct{})
 	release := make(chan struct{})
-	var wg sync.WaitGroup
+	batchDone := make(chan struct{})
 	var batchResp BumperResponse
 	var batchErr error
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer close(batchDone)
 		batchResp, batchErr = zd.StageBatch(func(s Stager) (bool, error) {
 			s.SetRRset("www.example.", coreRRset("www.example.", dns.TypeA, "192.0.2.2"))
 			close(inBatch)
-			<-release
+			select {
+			case <-release:
+			case <-time.After(patience):
+			}
 			return true, nil
 		})
 	}()
-	<-inBatch
+	waitFor(inBatch, "the batch reaching its callback")
 
 	refreshDone := make(chan struct{})
 	go func() {
@@ -486,8 +499,8 @@ www.example.	3600	IN	A	192.0.2.50
 	}
 
 	close(release)
-	wg.Wait()
-	<-refreshDone
+	waitFor(batchDone, "the batch finishing")
+	waitFor(refreshDone, "the refresh finishing")
 
 	if batchErr != nil {
 		t.Fatalf("StageBatch: %v", batchErr)

@@ -23,7 +23,20 @@ import (
 // in the DNSKEY RRset, loadDnssecKeysFromDB(..., active) decides which keys
 // sign, and the worker's walks decide which states move on a timer. A hook
 // that stages keys into a state of its own therefore also owns the transition
-// out of it.
+// out of it. The state a hook names must not be one of tdns's own lifecycle
+// states (created, published, standby, active, retired, removed): a staged
+// state of "active" would put an unconfirmed key into service, a retired
+// state of "retired" would loop the worker. Such an answer is logged and the
+// default used.
+//
+// LOCKING. MayPromote, MayGenerate and OnStateChange can run while a zone's
+// zd.mu is held: the publish path resolves its signing keys under that lock
+// (resolveSigningMaterialLocked -> EnsureActiveDnssecKeys), and the promotion
+// or mint it makes reports through OnStateChange. The lock is not
+// re-entrant, so these three must not call StageRRset, StageDelete,
+// StageOwnerDelete, StageBatch or Publish, nor anything else that takes
+// zd.mu; database reads, and handing work to another goroutine, are fine.
+// StagedState and RetiredState run from the key-state worker, outside it.
 type KeyLifecycleHooks struct {
 	// StagedState is the state a newly generated standby key starts in:
 	// "published" by default. Keys in this state count as "in the pipeline"
@@ -47,7 +60,11 @@ type KeyLifecycleHooks struct {
 	// OnStateChange runs after every committed state change of a DNSKEY:
 	// UpdateDnssecKeyState, PromoteDnssecKey, and a GenerateKeypair that owns
 	// its transaction (from is "" for a new key). It runs on the caller's
-	// goroutine after the commit; it must not block on the caller.
+	// goroutine after the commit; it must not block on the caller. Not
+	// reported: a change made through UpdateDnssecKeyStateTx on a caller's
+	// own transaction (the policy cleanup, the atomic KSK rollover and its
+	// observe-advance step), whose commit tdns does not see; those are the
+	// rollover paths, which skip multi-provider zones.
 	OnStateChange func(zone string, keyid uint16, from, to string)
 }
 
@@ -88,6 +105,29 @@ func zoneForKeyHooks(zone string) *ZoneData {
 	return zd
 }
 
+// builtinKeyStates are tdns's own lifecycle states, which a hook must not
+// name as a state of its own: each has meaning on the worker's timers or in
+// the signing path.
+var builtinKeyStates = map[string]bool{
+	DnskeyStateCreated: true, DnskeyStatePublished: true, DnskeyStateDsPublished: true,
+	DnskeyStateStandby: true, DnskeyStateActive: true, DnskeyStateRetired: true,
+	DnskeyStateRemoved: true,
+}
+
+// hookState returns the state a hook named, or def when the hook named
+// nothing or named one of tdns's own states other than def.
+func hookState(zone, which, named, def string) string {
+	if named == "" || named == def {
+		return def
+	}
+	if builtinKeyStates[named] {
+		lgSigner.Error("key lifecycle hook named one of tdns's own key states; using the default",
+			"zone", zone, "hook", which, "named", named, "default", def)
+		return def
+	}
+	return named
+}
+
 // keyStagedStateFor is the state a newly generated standby key of zone starts
 // in: the StagedState hook's answer, or "published".
 func keyStagedStateFor(zone string) string {
@@ -99,10 +139,7 @@ func keyStagedStateFor(zone string) string {
 	if zd == nil {
 		return DnskeyStatePublished
 	}
-	if s := h.StagedState(zd); s != "" {
-		return s
-	}
-	return DnskeyStatePublished
+	return hookState(zone, "StagedState", h.StagedState(zd), DnskeyStatePublished)
 }
 
 // keyRetiredStateFor is the state a retired key of zone moves to once its
@@ -116,10 +153,7 @@ func keyRetiredStateFor(zone string) string {
 	if zd == nil {
 		return DnskeyStateRemoved
 	}
-	if s := h.RetiredState(zd); s != "" {
-		return s
-	}
-	return DnskeyStateRemoved
+	return hookState(zone, "RetiredState", h.RetiredState(zd), DnskeyStateRemoved)
 }
 
 func keyMayPromote(zd *ZoneData, keyid uint16) bool {

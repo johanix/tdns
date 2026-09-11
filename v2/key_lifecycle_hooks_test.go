@@ -460,3 +460,22 @@ func TestHooksReportEveryCommittedChange(t *testing.T) {
 		t.Fatalf("reported changes %v, want %v", got, want)
 	}
 }
+
+// A hook that names one of tdns's own states is refused: the default is
+// used and the answer logged. "active" as a staged state would put an
+// unconfirmed key into service; "retired" as a retired state would loop the
+// worker.
+func TestHooksMayNotNameABuiltinState(t *testing.T) {
+	zd, kdb := mpSigningZone(t)
+	withKeyHooks(t, KeyLifecycleHooks{
+		StagedState:  func(*ZoneData) string { return DnskeyStateActive },
+		RetiredState: func(*ZoneData) string { return DnskeyStateRetired },
+	})
+	if got := keyStagedStateFor(zd.ZoneName); got != DnskeyStatePublished {
+		t.Fatalf("StagedState naming %q was honoured: %q", DnskeyStateActive, got)
+	}
+	if got := keyRetiredStateFor(zd.ZoneName); got != DnskeyStateRemoved {
+		t.Fatalf("RetiredState naming %q was honoured: %q", DnskeyStateRetired, got)
+	}
+	_ = kdb
+}
