@@ -25,7 +25,8 @@ func TestBootstrapSetupComesBackOnceTheImrIsReady(t *testing.T) {
 	ready := NewImrReadiness()
 	ds := DelegationSyncRequest{Command: "DELEGATION-SYNC-SETUP", ZoneName: "child.example."}
 
-	_ = deferForImr(ctx, q, ready, ds)
+	done := deferForImr(ctx, q, ready, ds)
+	defer awaitExit(t, cancel, done)
 
 	select {
 	case got := <-q:
@@ -77,6 +78,32 @@ func TestMissingImrIsAMatchableCondition(t *testing.T) {
 
 // setupRig stands up what handleDelegationSyncSetup needs: a queue, a
 // readiness signal, and a Config wired to it.
+// awaitExit cancels a deferred-request worker's context and waits for it to
+// finish, with a deadline.
+//
+// Every test here that starts one of these workers used to leave it to
+// `defer cancel()`: the worker was told to stop, and nothing checked that it
+// did. A regression that made deferForImr or deferSetupRetry ignore
+// cancellation -- sleeping out a backoff, or blocking on a queue nobody reads
+// any more -- would have passed all of them.
+//
+// Two seconds, against a retry backoff that starts at five: a worker that
+// honours cancellation is gone at once, and one that does not is still asleep.
+// nil means no worker was started, and there is nothing to wait for.
+func awaitExit(t *testing.T, cancel context.CancelFunc, done <-chan struct{}) {
+	t.Helper()
+	if done == nil {
+		return
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the deferred worker did not exit within 2s of its context being cancelled;" +
+			" it would outlive shutdown")
+	}
+}
+
 func setupRig(t *testing.T, published bool) (*Config, chan DelegationSyncRequest) {
 	t.Helper()
 	conf := &Config{}
@@ -98,10 +125,11 @@ func TestSetupWaitsForTheImrRatherThanRunningWithoutOne(t *testing.T) {
 	zd := &ZoneData{ZoneName: "child.example."}
 	ds := DelegationSyncRequest{Command: "DELEGATION-SYNC-SETUP", ZoneName: "child.example.", ZoneData: zd}
 
-	handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
+	done := handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
 		t.Error("setup ran with no IMR published; that is what the pre-check exists to prevent")
 		return nil
 	})
+	defer awaitExit(t, cancel, done)
 
 	select {
 	case <-q:
@@ -136,9 +164,12 @@ func TestSetupDoesNotSpinWhenTheImrIsPublishedButUnusable(t *testing.T) {
 
 	// ...and still no usable IMR from here, which is the whole point of the
 	// post-readiness branch.
-	handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
+	done := handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
 		return fmt.Errorf("setting up %s: %w", ds.ZoneName, ErrNoImrEngine)
 	})
+	// The worker is asleep in its backoff when the test ends. It has to wake
+	// on cancellation rather than sleep it out.
+	defer awaitExit(t, cancel, done)
 
 	// The backoff is seconds; an immediate re-enqueue is the bug.
 	select {
@@ -157,11 +188,10 @@ func TestSetupRetriesAnUnusableImrAfterABackoff(t *testing.T) {
 	conf, q := setupRig(t, true)
 	ds := DelegationSyncRequest{Command: "DELEGATION-SYNC-SETUP", ZoneName: "child.example."}
 
-	// deferSetupRetryAfter is the bounded-wait primitive the arm uses; drive it
-	// directly with a short delay so the test does not sit out a real backoff.
-	handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
+	done := handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
 		return fmt.Errorf("setting up %s: %w", ds.ZoneName, ErrNoImrEngine)
 	})
+	defer awaitExit(t, cancel, done)
 
 	select {
 	case got := <-q:
@@ -190,6 +220,9 @@ func TestSetupGivesUpAfterRepeatedUnusableImr(t *testing.T) {
 	scheduled := handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
 		return fmt.Errorf("setting up %s: %w", ds.ZoneName, ErrNoImrEngine)
 	})
+	// None should have started; if one did, the test fails below and this
+	// still stops it rather than leaking it into the rest of the run.
+	defer awaitExit(t, cancel, scheduled)
 
 	if scheduled != nil {
 		t.Error("another attempt was scheduled past the retry limit; a zone that can never" +
@@ -211,9 +244,11 @@ func TestSetupDoesNotRetryAFinalFailure(t *testing.T) {
 	conf, q := setupRig(t, true)
 	ds := DelegationSyncRequest{Command: "DELEGATION-SYNC-SETUP", ZoneName: "child.example."}
 
-	if scheduled := handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
+	scheduled := handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
 		return errors.New("the zone has no parent and never will")
-	}); scheduled != nil {
+	})
+	defer awaitExit(t, cancel, scheduled)
+	if scheduled != nil {
 		t.Error("a final failure scheduled a retry; it would just get the same answer")
 	}
 

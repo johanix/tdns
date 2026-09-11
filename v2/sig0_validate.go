@@ -515,7 +515,7 @@ func knownUntrustedKeyEDE(key *Sig0Key, manual bool) uint16 {
 
 func (zd *ZoneData) FindSig0KeyViaDNS(signer string, keyid uint16) (*Sig0Key, error) {
 	lgDns.Debug("FindSig0KeyViaDNS: looking up SIG(0) key in DNS", "signer", signer, "keyid", keyid)
-	rrset, err := zd.LookupRRset(signer, dns.TypeKEY, true)
+	rrset, err := zd.lookupRRset(signer, dns.TypeKEY, true, false)
 	if err != nil {
 		return nil, err
 	}

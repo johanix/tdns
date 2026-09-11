@@ -134,6 +134,13 @@ func (zd *ZoneData) LookupAndValidateRRset(qname string, qtype uint16,
 // XXX: This should not be a method of ZoneData, but rather a function.
 
 func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*core.RRset, error) {
+	return zd.lookupRRset(qname, qtype, verbose, true)
+}
+
+// lookupRRset is LookupRRset with wildcard synthesis optional. SIG(0) key
+// discovery turns it off: a signer's KEY is the one published at the signer's
+// name, not one a wildcard would synthesise for any name beneath it.
+func (zd *ZoneData) lookupRRset(qname string, qtype uint16, verbose, wildcards bool) (*core.RRset, error) {
 	zd.Logger.Printf("LookupRRset: looking up %s %s", qname, dns.TypeToString[qtype])
 	var rrset *core.RRset
 	var wildqname string
@@ -141,8 +148,15 @@ func (zd *ZoneData) LookupRRset(qname string, qtype uint16, verbose bool) (*core
 
 	// Is answer in this zone or further down?
 	if !zd.NameExists(qname) {
-		// Here we should do wildcard expansion like in QueryResponder()
-		wildqname = "*." + strings.Join(strings.Split(qname, ".")[1:], ".")
+		// A name that does not exist may be answered by the wildcard at its
+		// closest encloser, as in QueryResponder. An empty non-terminal
+		// exists, so no wildcard answers for it.
+		snap := zd.publishedSnapshot()
+		if !wildcards || isEmptyNonTerminal(snap, qname) {
+			zd.Logger.Printf("*** No data for %s in %s", qname, zd.ZoneName)
+			return nil, nil
+		}
+		wildqname = wildcardSourceFrom(snap, zd.ZoneName, qname)
 		lgDns.Debug("---> Checking for existence of wildcard", "wildcard", wildqname)
 		if !zd.NameExists(wildqname) {
 			// no, nothing
