@@ -747,8 +747,19 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 			break
 		}
 
-		// Get owner data from the target zone (pin ITS snapshot).
-		tgtOwner := getOwnerFrom(tgtZone.publishedSnapshot(), tgt)
+		// Pin the target zone's snapshot for the cut check and the read.
+		tgtSnap := tgtZone.publishedSnapshot()
+
+		// A target at or below a zone cut in the target zone is the child's to
+		// answer for: all the target zone holds there is glue and occluded
+		// data, and a query for the target itself gets a referral. Stop with
+		// the CNAME only, as for a target outside our authority.
+		if cdd := tgtZone.findDelegationFrom(tgtSnap, tgt, msgoptions.DO); cdd != nil {
+			lgHandler.Debug("CNAME target at or below a zone cut", "target", tgt, "zone", tgtZone.ZoneName, "cut", cdd.ChildName)
+			break
+		}
+
+		tgtOwner := getOwnerFrom(tgtSnap, tgt)
 		if tgtOwner == nil {
 			lgHandler.Error("failed to get owner for CNAME target", "target", tgt, "zone", tgtZone.ZoneName)
 			break
