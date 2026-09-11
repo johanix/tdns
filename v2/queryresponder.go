@@ -798,6 +798,16 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname, or
 		} else {
 			m.Answer = append(m.Answer, reown(rrset.RRs)...)
 			m.Answer = append(m.Answer, reown(rrset.RRSIGs)...)
+			if qname != origqname && len(rrset.RRSIGs) > 0 {
+				sign := func(rs core.RRset, name string) (core.RRset, error) {
+					return zd.signRRsetForZone(rs, name, msgoptions, kdb, nil)
+				}
+				if err := zd.addWildcardProof(m, snap, apex, origqname, qname, sign); err != nil {
+					failUnsignedDenial(m)
+					w.WriteMsg(m)
+					return false, fmt.Errorf("failed to sign the wildcard proof for qname %s: %v", origqname, err)
+				}
+			}
 		}
 	} else {
 		m.Answer = append(m.Answer, reown(v.RRs)...)
@@ -1195,6 +1205,13 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 				} else {
 					tmp := WildcardReplace(rrset.RRSIGs, qname, origqname)
 					m.Answer = append(m.Answer, tmp...)
+					if len(rrset.RRSIGs) > 0 {
+						if err := zd.addWildcardProof(m, snap, apex, origqname, qname, MaybeSignRRset); err != nil {
+							failUnsignedDenial(m)
+							w.WriteMsg(m)
+							return nil
+						}
+					}
 				}
 				// Note: NS and glue RRSIGs are already added by addNSAndGlue
 			}

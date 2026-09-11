@@ -3,6 +3,7 @@ package tdns
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -34,6 +35,14 @@ type zoneSnapshot struct {
 	// deltas) see phantom additions and deletions. A separate set costs one
 	// map lookup on the denial path and perturbs nothing else.
 	ents map[string]struct{}
+
+	// nsecIndex lists the owners that carry a stored NSEC, in the order the
+	// chain was built in, for finding the chain record that proves a wildcard
+	// answer (nsecCoveringFrom). Built on first use, since only a signed
+	// wildcard answer needs it; a snapshot does not change once published,
+	// so neither does its index.
+	nsecOnce  sync.Once
+	nsecIndex []nsecIndexEntry
 }
 
 // entNamesFrom collects the zone's empty non-terminals from its owner map: for
