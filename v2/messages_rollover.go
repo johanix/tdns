@@ -136,8 +136,8 @@ type RolloverStatus struct {
 
 	// KSK algorithm rollover detail, set while one is in flight
 	// (alg_roll_from_alg on RolloverZoneState). Algorithm names; RFC3339
-	// times. AlgRollOldHeadRetireAt is empty until the parent has
-	// confirmed the mixed DS RRset; AlgRollProjectedRemoveAt is that
+	// times. AlgRollOldHeadRetireAt is empty until the parent has been
+	// seen serving only the new-algorithm DS; AlgRollProjectedRemoveAt is that
 	// plus the drain margin, empty while the margin cannot be computed
 	// (parent DS TTL not yet observed).
 	AlgRollFromAlg           string `json:"algRollFromAlg,omitempty"`
@@ -333,8 +333,8 @@ type RolloverCancelRequest struct {
 	KeyType string `json:"keytype,omitempty"`
 	// AlgRoll (KSK only): abort an in-flight KSK algorithm rollover
 	// instead of clearing a manual request. Only possible before the
-	// parent has confirmed the mixed DS RRset; after that, "abort" would
-	// be a reverse algorithm rollover and is refused.
+	// parent has confirmed the new-algorithm DS; after that, "abort"
+	// would be a reverse algorithm rollover and is refused.
 	AlgRoll bool `json:"algRoll,omitempty"`
 }
 

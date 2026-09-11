@@ -232,6 +232,14 @@ func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 		}
 	}
 
+	// The DS the parent serves before the roll: the pre-swap resolver's
+	// view for the chain assertions below.
+	dsBefore, _, _, _, err := ComputeTargetDSSetForZone(kdb, ktAlgZone, uint8(dns.SHA256), pol)
+	if err != nil || len(dsBefore) != 1 {
+		t.Fatalf("pre-roll target DS set: %v (%d records)", err, len(dsBefore))
+	}
+	dsA := ktDSSubset(dsBefore, 3600, a)
+
 	pol.KSKAlgorithm = dns.RSASHA256 // the bind
 	t0 := time.Now()
 	dnskeyTTL := time.Duration(pol.TTLS.DNSKEY) * time.Second
@@ -250,8 +258,13 @@ func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 	// and check every re-sign path double-signs. A pre-push resolver holds
 	// {DS(A)}; its chain runs through A.
 	ktAssertDNSKEYSigs(t, zd, kdb, "spawn", a, b)
-	preTarget, _, _, _, _ := ComputeTargetDSSetForZone(kdb, ktAlgZone, uint8(dns.SHA256), pol)
-	ktAssertChain(t, zd, "spawn", ktDSSubset(preTarget, 3600, a))
+	ktAssertChain(t, zd, "spawn", dsA)
+	// KT-18 in situ: from the spawn on the target DS set is {DS(B)} -- the
+	// active, signing old head is deliberately not in it (A4).
+	postTarget, _, _, _, _ := ComputeTargetDSSetForZone(kdb, ktAlgZone, uint8(dns.SHA256), pol)
+	if tags := ktDSKeytags(postTarget); len(tags) != 1 || !ktHasKeytag(tags, b) {
+		t.Fatalf("spawn: target DS set keytags = %v, want exactly {%d}", tags, b)
+	}
 
 	// 2. KT-14: no push before propagation-delay + DNSKEY_TTL from the spawn.
 	tick("wait-early", t0.Add(propagation+dnskeyTTL-30*time.Second))
@@ -264,7 +277,8 @@ func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 	expectPhase("wait-done", rolloverPhasePendingParentPush, true)
 	expectOwnsDS("wait-done", true)
 
-	// 3. push {DS(A), DS(B)}
+	// 3. push: the parent's DS is swapped, DS(B) replacing DS(A) in one
+	// step (RFC 6781 §4.1.4, A4). A is still active and signing.
 	tPush := tArm.Add(time.Second)
 	tick("push", tPush)
 	expectPhase("push", rolloverPhasePendingParentObserve, true)
@@ -273,23 +287,37 @@ func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 		t.Fatalf("push: %d pushes, want 1", len(pushes))
 	}
 	tags := ktDSKeytags(pushes[0])
-	if len(tags) != 2 || !ktHasKeytag(tags, a) || !ktHasKeytag(tags, b) {
-		t.Fatalf("push: DS set keytags = %v, want exactly {%d, %d}", tags, a, b)
+	if len(tags) != 1 || !ktHasKeytag(tags, b) {
+		t.Fatalf("push: DS set keytags = %v, want exactly {%d}: the old-algorithm DS leaves the parent before the old KSK leaves the child", tags, b)
 	}
-	target := pushes[0]
-
-	// 4. KT-8 live: DS(A) alone at the parent does not confirm.
-	parent.serve(ktDSSubset(target, 3600, a))
-	tObs1 := tPush.Add(pol.Rollover.ConfirmInitialWait + time.Second)
-	tick("observe-partial", tObs1)
-	expectPhase("observe-partial", rolloverPhasePendingParentObserve, true)
 	if s := ktKeyState(t, kdb, ktAlgZone, a); s != DnskeyStateActive {
-		t.Fatalf("observe-partial: A is %s", s)
+		t.Fatalf("push: A is %s, want active", s)
+	}
+	dsB := ktDSSubset(pushes[0], 3600, b)
+	dsAB := append(append([]dns.RR{}, dsA...), dsB...)
+
+	// 4. KT-8 live: a parent still serving DS(A) -- alone, or next to
+	// DS(B) as a lagging nameserver would -- does not confirm. The drain
+	// clock must not start while a resolver can still pick up DS(A).
+	parent.serve(dsA)
+	tObs1 := tPush.Add(pol.Rollover.ConfirmInitialWait + time.Second)
+	tick("observe-old", tObs1)
+	expectPhase("observe-old", rolloverPhasePendingParentObserve, true)
+	parent.serve(dsAB)
+	tObs2 := tObs1.Add(pol.Rollover.ConfirmPollMax + time.Second)
+	tick("observe-lagging", tObs2)
+	expectPhase("observe-lagging", rolloverPhasePendingParentObserve, true)
+	if s := ktKeyState(t, kdb, ktAlgZone, a); s != DnskeyStateActive {
+		t.Fatalf("observe-lagging: A is %s", s)
+	}
+	if st, _ := LoadKskAlgRollState(kdb, ktAlgZone); st == nil || st.OldHeadRetireAt != nil {
+		t.Fatalf("observe-lagging: drain clock started while the parent still served DS(A): %+v", st)
 	}
 
-	// 5. confirm: both DS present. A stays ACTIVE (A2); its clock starts.
-	parent.serve(ktDSSubset(target, 3600, a, b))
-	tConfirm := tObs1.Add(pol.Rollover.ConfirmPollMax + time.Second)
+	// 5. confirm: the parent serves DS(B) only. A stays ACTIVE (A2); its
+	// clock starts.
+	parent.serve(dsB)
+	tConfirm := tObs2.Add(pol.Rollover.ConfirmPollMax + time.Second)
 	tick("confirm", tConfirm)
 	expectPhase("confirm", rolloverPhasePendingChildWithdraw, true)
 	expectOwnsDS("confirm", true)
@@ -305,12 +333,15 @@ func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 	}
 	// KT-17: through the drain every re-sign path keeps BOTH signatures --
 	// including ResignZone, which strips and re-signs with the active keys
-	// only, and which a key-state change triggers after PR #514.
+	// only, and which a key-state change triggers after PR #514. A resolver
+	// that still holds the pre-swap DS(A) validates through A; one that
+	// has the new DS(B) validates through B.
 	ktAssertDNSKEYSigs(t, zd, kdb, "drain", a, b)
-	ktAssertChain(t, zd, "drain (pre-push resolver)", ktDSSubset(target, 3600, a))
-	ktAssertChain(t, zd, "drain (post-push resolver)", ktDSSubset(target, 3600, a, b))
+	ktAssertChain(t, zd, "drain (resolver holding the pre-swap DS)", dsA)
+	ktAssertChain(t, zd, "drain (resolver holding the new DS)", dsB)
 
-	// 6. F1 margin: max(2h margin, 3600s max TTL, 3600s DS TTL + 5m) = 2h.
+	// 6. F1 margin: max(2h margin, 3600s max TTL, 3600s DS TTL + 5m) = 2h --
+	// the time for every cached copy of the pre-swap DS(A) to expire.
 	tick("drain-early", tConfirm.Add(2*time.Hour-30*time.Second))
 	expectPhase("drain-early", rolloverPhasePendingChildWithdraw, true)
 	if s := ktKeyState(t, kdb, ktAlgZone, a); s != DnskeyStateActive {
@@ -326,37 +357,31 @@ func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 	if tags := zd.mustRRSIGKeytags(t, ktAlgZone, dns.TypeDNSKEY); ktHasKeytag(tags, a) {
 		t.Fatalf("drain-done: RRSIG by removed KSK %d still on the DNSKEY RRset: %v", a, tags)
 	}
-	// KT-17: after removal no re-sign path brings RRSIG(A) back, and a
-	// resolver holding the still-mixed parent RRset validates through B.
+	// KT-17: after removal no re-sign path brings RRSIG(A) back, and the
+	// chain runs through the DS the parent has served since the confirm.
 	ktAssertDNSKEYSigs(t, zd, kdb, "removed", b)
-	ktAssertChain(t, zd, "removed", ktDSSubset(target, 3600, a, b))
+	ktAssertChain(t, zd, "removed", dsB)
 	if st, _ := LoadKskAlgRollState(kdb, ktAlgZone); st != nil {
 		t.Fatalf("drain-done: roll state not cleared: %+v", st)
 	}
-	expectPhase("drain-done", rolloverPhasePendingParentPush, false)
-	expectOwnsDS("drain-done", true) // phase busy: the shrink push is still ours
+	// Nothing left to push: the parent has held the final set since the
+	// confirm, so the roll ends in idle, not in another push.
+	expectPhase("drain-done", rolloverPhaseIdle, false)
+	expectOwnsDS("drain-done", false)
 
-	// 7. the DS set shrinks to the new algorithm (plus the refilled pipeline).
-	tShrink := tDone.Add(time.Second)
-	tick("shrink-push", tShrink)
-	expectPhase("shrink-push", rolloverPhasePendingParentObserve, false)
-	pushes = parent.pushes()
-	if len(pushes) != 2 {
-		t.Fatalf("shrink-push: %d pushes, want 2", len(pushes))
-	}
-	final := pushes[1]
-	if tags := ktDSKeytags(final); ktHasKeytag(tags, a) || !ktHasKeytag(tags, b) {
-		t.Fatalf("shrink-push: DS set keytags = %v; must drop %d and keep %d", tags, a, b)
-	}
-	for _, rr := range final {
-		if ds := rr.(*dns.DS); ds.Algorithm != dns.RSASHA256 {
-			t.Fatalf("shrink-push: DS for keytag %d is algorithm %d, want RSASHA256", ds.KeyTag, ds.Algorithm)
+	// 7. Whatever the idle branch pushes from here on (the refilled
+	// multi-DS pipeline) is new-algorithm only: DS(A) never comes back.
+	tick("after", tDone.Add(time.Minute))
+	for i, push := range parent.pushes()[1:] {
+		if tags := ktDSKeytags(push); ktHasKeytag(tags, a) {
+			t.Fatalf("after: push %d carries DS(%d) again: %v", i+2, a, tags)
+		}
+		for _, rr := range push {
+			if ds := rr.(*dns.DS); ds.Algorithm != dns.RSASHA256 {
+				t.Fatalf("after: DS for keytag %d is algorithm %d, want RSASHA256", ds.KeyTag, ds.Algorithm)
+			}
 		}
 	}
-	parent.serve(ktDSSubset(final, 3600, ktDSKeytags(final)...))
-	tick("shrink-confirm", tShrink.Add(pol.Rollover.ConfirmInitialWait+time.Second))
-	expectPhase("shrink-confirm", rolloverPhaseIdle, false)
-	expectOwnsDS("shrink-confirm", false)
 
 	seps := ktActiveSEPs(t, kdb, ktAlgZone)
 	if len(seps) != 1 || seps[0].KeyTag != b || seps[0].Algorithm != dns.RSASHA256 {
@@ -394,24 +419,80 @@ func TestKT14DeferWithoutDnskeyTTL(t *testing.T) {
 	}
 }
 
-// KT-8: the DS confirm matcher on a mixed-algorithm expected set.
-func TestKT8MixedAlgDSConfirm(t *testing.T) {
+// KT-8: the DS confirm on a swapped set. The generic matcher ignores DS
+// records for keys it does not manage, so {DS(A), DS(B)} would satisfy an
+// expected {DS(B)}; the algorithm-roll tightening refuses it until DS(A)
+// is gone from the parent (A4).
+func TestKT8SwappedDSConfirm(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	pol := ktSequencePolicy(RolloverMethodMultiDS)
 	a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 	b := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.RSASHA256)
-	expected, _, _, _, err := ComputeTargetDSSetForZone(kdb, ktAlgZone, uint8(dns.SHA256), pol)
-	if err != nil || len(expected) != 2 {
-		t.Fatalf("target DS set: %v (%d records)", err, len(expected))
+	all, _, _, _, err := ComputeTargetDSSetForZone(kdb, ktAlgZone, uint8(dns.SHA256), pol)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("target DS set: %v (%d records)", err, len(all))
 	}
-	if ObservedDSSetMatchesExpected(ktDSSubset(expected, 3600, a), expected) {
-		t.Fatal("DS(A) alone must not confirm a mixed set")
+	expected := ktDSSubset(all, 3600, b)
+	roll := &KskAlgRollState{FromAlg: dns.ED25519, ToAlg: dns.RSASHA256, OldHeadKeyID: a, NewHeadKeyID: b}
+	confirms := func(obs []dns.RR) bool {
+		return ObservedDSSetMatchesExpected(obs, expected) && !observedDSStillHasOldHead(obs, roll)
 	}
-	if ObservedDSSetMatchesExpected(ktDSSubset(expected, 3600, b), expected) {
-		t.Fatal("DS(B) alone must not confirm a mixed set")
+	if confirms(ktDSSubset(all, 3600, a)) {
+		t.Fatal("DS(A) alone must not confirm")
 	}
-	if !ObservedDSSetMatchesExpected(ktDSSubset(expected, 3600, a, b), expected) {
-		t.Fatal("both DS present must confirm")
+	if confirms(ktDSSubset(all, 3600, a, b)) {
+		t.Fatal("DS(A) next to DS(B) must not confirm: the old-algorithm DS has to leave the parent first")
+	}
+	if !confirms(ktDSSubset(all, 3600, b)) {
+		t.Fatal("DS(B) alone must confirm")
+	}
+	if observedDSStillHasOldHead(ktDSSubset(all, 3600, a, b), nil) {
+		t.Fatal("no roll in flight: the tightening must not apply")
+	}
+}
+
+// KT-18 (A4): the target DS set drops the roll's old head at the spawn,
+// while that key is still active and signing, and an abort brings it
+// back so a swap that already went out can be undone at the parent.
+func TestKT18TargetDSSetExcludesOldHeadDuringRoll(t *testing.T) {
+	ktInstallFakeParent(t)
+	kdb := newTestKeyDB(t)
+	pol := ktSequencePolicy(RolloverMethodMultiDS)
+	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
+	a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
+	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
+	if _, err := zd.SignZone(kdb, true); err != nil {
+		t.Fatalf("SignZone: %v", err)
+	}
+	target := func(step string) []uint16 {
+		t.Helper()
+		set, _, _, _, err := ComputeTargetDSSetForZone(kdb, ktAlgZone, uint8(dns.SHA256), pol)
+		if err != nil {
+			t.Fatalf("%s: target DS set: %v", step, err)
+		}
+		return ktDSKeytags(set)
+	}
+	if tags := target("before"); len(tags) != 1 || !ktHasKeytag(tags, a) {
+		t.Fatalf("before the roll: target DS set = %v, want {%d}", tags, a)
+	}
+	pol.KSKAlgorithm = dns.RSASHA256
+	ktTick(t, zd, kdb, time.Now().Add(time.Second))
+	st, _ := LoadKskAlgRollState(kdb, ktAlgZone)
+	if st == nil {
+		t.Fatal("no roll spawned")
+	}
+	b := st.NewHeadKeyID
+	if s := ktKeyState(t, kdb, ktAlgZone, a); s != DnskeyStateActive {
+		t.Fatalf("A is %s, want active", s)
+	}
+	if tags := target("during"); len(tags) != 1 || !ktHasKeytag(tags, b) {
+		t.Fatalf("during the roll: target DS set = %v, want {%d}: the active old head %d must not be in it", tags, b, a)
+	}
+	if _, err := AbortKskAlgRollover(&Conf, kdb, ktAlgZone); err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	if tags := target("after-abort"); len(tags) != 1 || !ktHasKeytag(tags, a) {
+		t.Fatalf("after the abort: target DS set = %v, want {%d} back", tags, a)
 	}
 }
 

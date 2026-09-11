@@ -452,7 +452,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		// whether it matches expected. The "DS observed" status line
 		// shows the latest poll, not the latest confirmed match.
 		_ = setLastDsObserved(kdb, zone, dsKeyids(obs), now)
-		if !ObservedDSSetMatchesExpected(obs, expected) {
+		if !ObservedDSSetMatchesExpected(obs, expected) || observedDSStillHasOldHead(obs, algRoll) {
 			scheduleNextObservePoll(kdb, zone, row, now, pollMax)
 			return nil
 		}
@@ -546,7 +546,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 				// reflects the latest poll, not the latest confirm.
 				_ = setLastDsObserved(kdb, zone, dsKeyids(obs), now)
 			}
-			if qerr == nil && ObservedDSSetMatchesExpected(obs, expected) {
+			if qerr == nil && ObservedDSSetMatchesExpected(obs, expected) && !observedDSStillHasOldHead(obs, algRoll) {
 				if !idxOK {
 					lgSigner.Warn("rollover: DS observed during softfail but rollover_index incomplete; cannot advance", "zone", zone)
 					_ = clearObserveSchedule(kdb, zone)
@@ -847,6 +847,26 @@ func advanceCreatedKeysInRangeTx(tx *Tx, kdb *KeyDB, zone string, low, high int,
 	return advanced, nil
 }
 
+// observedDSStillHasOldHead is the algorithm-roll tightening of the DS
+// confirm. ObservedDSSetMatchesExpected ignores DS records for keys the
+// engine does not manage, but the roll's old-algorithm head IS managed:
+// its DS must be gone from the parent before the drain clock starts,
+// because the drain is what lets that RRset expire from caches before
+// the old DNSKEY is withdrawn (RFC 6781 §4.1.4, plan A4). A lagging
+// parent nameserver still serving {DS(A), DS(B)} therefore does not
+// confirm. Never true without a roll in flight.
+func observedDSStillHasOldHead(obs []dns.RR, algRoll *KskAlgRollState) bool {
+	if algRoll == nil {
+		return false
+	}
+	for _, rr := range obs {
+		if d, ok := rr.(*dns.DS); ok && d.KeyTag == algRoll.OldHeadKeyID && d.Algorithm == algRoll.FromAlg {
+			return true
+		}
+	}
+	return false
+}
+
 // clearObserveScheduleTx clears the observe-phase schedule columns on an
 // existing TX.
 func clearObserveScheduleTx(tx *Tx, zone string) error {
@@ -861,15 +881,17 @@ WHERE zone = ?`, zone)
 // confirmDSAndStartOldHeadDrainTx is the algorithm-roll sibling of
 // confirmDSAndAdvanceCreatedKeysTx, deliberately separate so no edit to
 // one can regress the other. The parent has been observed serving the
-// mixed {DS(A), DS(B)} RRset. In one transaction: persist the confirmed
-// range, advance any created keys the push carried, stamp the old head's
-// drain clock (alg_roll_old_head_retire_at = now), clear the observe
-// schedule, and move to pending-child-withdraw.
+// swapped DS RRset -- DS(B) present, DS(A) gone (RFC 6781 §4.1.4, plan
+// A4). In one transaction: persist the confirmed range, advance any
+// created keys the push carried, stamp the old head's drain clock
+// (alg_roll_old_head_retire_at = now), clear the observe schedule, and
+// move to pending-child-withdraw.
 //
 // The old head's key STATE is untouched: it stays active, and keeps
 // signing the apex DNSKEY RRset under every re-sign path, for the whole
-// drain (plan A2). Its removal is the withdraw arm's job, measured from
-// the clock stamped here.
+// drain (plan A2) -- a validator still holding the pre-swap {DS(A)}
+// needs it until that RRset expires. Its removal is the withdraw arm's
+// job, measured from the clock stamped here.
 func confirmDSAndStartOldHeadDrainTx(kdb *KeyDB, zone string, low, high int, now time.Time) (int, error) {
 	tx, err := kdb.Begin("confirmDSAndStartOldHeadDrainTx")
 	if err != nil {
@@ -901,7 +923,7 @@ func confirmDSAndStartOldHeadDrainTx(kdb *KeyDB, zone string, low, high int, now
 		return 0, fmt.Errorf("commit: %w", err)
 	}
 	commit = true
-	lgRollover.Info("rollover: parent confirmed the mixed DS RRset; old-algorithm KSK drain started",
+	lgRollover.Info("rollover: parent now serves only the new-algorithm DS; old-algorithm KSK drain started",
 		"zone", zone, "retire_at", now.UTC().Format(time.RFC3339))
 	return advanced, nil
 }
@@ -910,11 +932,13 @@ func confirmDSAndStartOldHeadDrainTx(kdb *KeyDB, zone string, low, high int, now
 // KSK algorithm rollover. The same-algorithm multi-DS margin is
 // max(clamping.margin, max_observed_ttl): every resolver that can hold a
 // DS RRset old enough to predate the push already holds the incoming
-// key's DS, because multi-DS pre-positions it. Double-signature publishes
-// DS(B) for the first time in the push, so a resolver holding the
-// pre-push {DS(A)} keeps it for up to the parent DS TTL after the push --
-// and for that resolver the chain is DS(A) → A → RRSIG(A) until then. So
-// for an algorithm roll:
+// key's DS, because multi-DS pre-positions it. Double-signature swaps
+// DS(A) for DS(B) in the push, so a resolver holding the pre-swap
+// {DS(A)} keeps it for up to the parent DS TTL after the push -- and for
+// that resolver the chain is DS(A) → A → RRSIG(A) until then; withdraw A
+// earlier and it is bogus (RFC 6781 §4.1.4: the old DNSKEY goes only
+// "after the cache data for the old DS RRset has expired"). So for an
+// algorithm roll:
 //
 //	max( clamping.margin, max_observed_ttl, parent_DS_TTL + ds-publish-delay )
 //
@@ -1071,13 +1095,12 @@ func dnssecKeyStateOf(kdb *KeyDB, zone string, keyid uint16) (string, error) {
 }
 
 // completeKskAlgRollWithdraw ends a KSK algorithm rollover: in one
-// transaction clear the roll marker, clear rollover_in_progress, and arm
-// pending-parent-push so the parent DS RRset shrinks to the new
-// algorithm on the next tick. Arming the push directly rather than going
-// through idle is what a method: double-signature zone needs (it never
-// runs the idle branch) and is exactly what the idle branch would do for
-// a multi-DS zone. Pipeline-fill resumes on the next tick and refills the
-// new-algorithm FIFO to num_ds.
+// transaction clear the roll marker, clear rollover_in_progress, and go
+// idle. Nothing is left to push: the parent has served only the
+// new-algorithm DS since the confirm (plan A4), and the withdrawn head
+// no longer contributes to the target set. Pipeline-fill resumes on the
+// next tick and refills the new-algorithm FIFO to num_ds; a multi-DS
+// zone arms its own push from the idle branch as usual.
 func completeKskAlgRollWithdraw(conf *Config, kdb *KeyDB, zone string, algRoll *KskAlgRollState) error {
 	tx, err := kdb.Begin("completeKskAlgRollWithdraw")
 	if err != nil {
@@ -1095,14 +1118,14 @@ func completeKskAlgRollWithdraw(conf *Config, kdb *KeyDB, zone string, algRoll *
 	if err := setRolloverInProgressTx(tx, zone, false); err != nil {
 		return fmt.Errorf("clear rollover_in_progress: %w", err)
 	}
-	if err := setRolloverPhaseTx(tx, zone, rolloverPhasePendingParentPush); err != nil {
-		return fmt.Errorf("arm DS push: %w", err)
+	if err := setRolloverPhaseTx(tx, zone, rolloverPhaseIdle); err != nil {
+		return fmt.Errorf("set phase idle: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 	commit = true
-	lgRollover.Info("rollover: KSK algorithm rollover complete; arming the DS push that drops the old algorithm at the parent",
+	lgRollover.Info("rollover: KSK algorithm rollover complete; the parent already serves only the new-algorithm DS",
 		"zone", zone, "from", dns.AlgorithmToString[algRoll.FromAlg], "to", dns.AlgorithmToString[algRoll.ToAlg],
 		"new_head", algRoll.NewHeadKeyID)
 	triggerResign(conf, zone)

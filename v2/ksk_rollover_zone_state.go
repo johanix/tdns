@@ -89,8 +89,9 @@ type RolloverZoneRow struct {
 // The new-algorithm head is minted straight into active (plan D-6). The
 // old-algorithm head stays ACTIVE through the drain window so it keeps
 // signing the apex DNSKEY RRset under every re-sign path (A2);
-// OldHeadRetireAt, stamped when the parent confirms the mixed DS RRset,
-// is the clock its removal is measured from. Nil until then.
+// OldHeadRetireAt, stamped when the parent is seen serving only the
+// new-algorithm DS (A4), is the clock its removal is measured from. Nil
+// until then.
 type KskAlgRollState struct {
 	FromAlg         uint8
 	ToAlg           uint8
@@ -154,7 +155,7 @@ WHERE zone = ?`,
 
 // setKskAlgRollOldHeadRetireAtTx starts the old-algorithm head's removal
 // clock. Called in the same transaction that records the parent's
-// confirmation of the mixed DS RRset.
+// confirmation of the swapped (new-algorithm-only) DS RRset.
 func setKskAlgRollOldHeadRetireAtTx(tx *Tx, zone string, at time.Time) error {
 	_, err := tx.Exec(`UPDATE RolloverZoneState SET alg_roll_old_head_retire_at = ? WHERE zone = ?`,
 		at.UTC().Format(time.RFC3339), zone)

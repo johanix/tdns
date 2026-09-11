@@ -17,19 +17,23 @@ import (
 // standby key and promoting later (multi-DS), the new-algorithm KSK is
 // minted straight into active so it signs the apex DNSKEY RRset BEFORE its
 // DS is pushed -- double-signature -- and the old-algorithm KSK stays active,
-// still signing, until the parent has confirmed the mixed DS RRset and a
-// full drain window has elapsed. See
-// docs/2026-09-08-ksk-alg-rollover-implementation-plan.md (§2, §5.2, A2).
+// still signing, until the parent has swapped DS(A) for DS(B) and a full
+// drain window (the parent DS TTL included) has elapsed. That order --
+// the old algorithm's DS leaves the parent first, the old DNSKEY leaves
+// the child only after that RRset has expired from caches -- is RFC 6781
+// §4.1.4; the other way round, a validator that supports A but not B
+// holds DS {A,B} against a DNSKEY RRset without A and goes bogus. See
+// docs/2026-09-08-ksk-alg-rollover-implementation-plan.md (§2, §5.2, A2, A4).
 //
 // Sequence, mapped onto the phases the machine already has:
 //
 //	spawn (this file)              → pending-child-publish
 //	wait propagation + DNSKEY_TTL  → pending-child-publish handler
-//	push {DS(A), DS(B)}            → pending-parent-push
-//	observe until both confirmed   → pending-parent-observe
+//	push {DS(B)} (replaces DS(A))  → pending-parent-push
+//	observe until only B is served → pending-parent-observe
 //	confirm ⇒ start A's clock      → pending-child-withdraw
 //	hold margin, remove A          → pending-child-withdraw (alg-roll arm)
-//	DS shrinks to {DS(B)}          → a final push, then idle
+//	done, nothing left to push     → idle
 
 // kskAlgRollNeeded is the trigger predicate the tick evaluates on an idle
 // zone with no roll in flight. mismatch reports that the zone has exactly
@@ -289,12 +293,14 @@ ORDER BY keyid ASC`, zone)
 }
 
 // AbortKskAlgRollover cancels an in-flight KSK algorithm rollover before
-// the parent has confirmed the mixed DS RRset (D-12). Until then nobody
-// relies on DS(B): abort means strip B's signatures, mark B removed, clear
-// the roll marker, and return the zone to idle; the next idle tick pushes
-// the shrunken DS set if a push had gone out. After confirmation "abort"
-// would be a reverse algorithm rollover -- refused, with the guidance to
-// let the roll finish and then change policy back.
+// the parent has confirmed the new-algorithm DS (D-12). Until then the
+// old head A is still signing and still valid for every resolver: abort
+// means strip B's signatures, mark B removed, clear the roll marker, and
+// return the zone to idle; with the marker gone A is back in the target
+// DS set, so if the swap push had already gone out the next idle tick
+// pushes DS(A) back. After confirmation "abort" would be a reverse
+// algorithm rollover -- refused, with the guidance to let the roll
+// finish and then change policy back.
 //
 // Returns a one-line description of what was done for the operator.
 func AbortKskAlgRollover(conf *Config, kdb *KeyDB, zone string) (string, error) {
@@ -308,7 +314,7 @@ func AbortKskAlgRollover(conf *Config, kdb *KeyDB, zone string) (string, error) 
 		return "", fmt.Errorf("no KSK algorithm rollover is in progress")
 	}
 	if algRoll.OldHeadRetireAt != nil || row.RolloverPhase == rolloverPhasePendingChildWithdraw {
-		return "", fmt.Errorf("the parent has already confirmed the mixed DS RRset (%s -> %s); aborting now would be a reverse algorithm rollover -- let it finish, then change policy back",
+		return "", fmt.Errorf("the parent has already swapped in the new-algorithm DS (%s -> %s); aborting now would be a reverse algorithm rollover -- let it finish, then change policy back",
 			dns.AlgorithmToString[algRoll.FromAlg], dns.AlgorithmToString[algRoll.ToAlg])
 	}
 

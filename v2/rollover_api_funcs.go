@@ -207,7 +207,7 @@ func populateKskAlgRollWarnings(out *RolloverStatus, kdb *KeyDB, zone string, po
 		}
 		if elapsed := now.Sub(algRoll.StartedAt); elapsed > 2*timeout {
 			out.Warnings = append(out.Warnings,
-				fmt.Sprintf("KSK algorithm rollover %s -> %s has waited %s for the parent to confirm the mixed DS RRset (more than 2 x confirm-timeout, %s); the zone stays valid and double-signed meanwhile -- check the parent and its DSYNC advertisement",
+				fmt.Sprintf("KSK algorithm rollover %s -> %s has waited %s for the parent to swap in the new-algorithm DS (more than 2 x confirm-timeout, %s); the zone stays valid and double-signed meanwhile -- check the parent and its DSYNC advertisement",
 					dns.AlgorithmToString[algRoll.FromAlg], dns.AlgorithmToString[algRoll.ToAlg],
 					elapsed.Truncate(time.Minute), 2*timeout))
 		}
@@ -457,7 +457,7 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 			if at, ok := projectedAlgRollRemoveAt(kdb, zone, pol, algRoll); ok {
 				out.NextScheduled = at.UTC().Format(time.RFC3339)
 			} else if algRoll.OldHeadRetireAt == nil {
-				out.Note += "; completion is not projectable until the parent confirms the mixed DS RRset"
+				out.Note += "; completion is not projectable until the parent serves only the new-algorithm DS"
 			} else {
 				out.Note += "; completion is not projectable until the parent DS TTL is observed"
 			}
@@ -657,7 +657,7 @@ func hintForState(phase string, row *RolloverZoneRow, pol *DnssecPolicy, algRoll
 	if algRoll != nil {
 		switch phase {
 		case rolloverPhasePendingChildPublish:
-			return "algorithm rollover: waiting propagation-delay + DNSKEY TTL before pushing the mixed DS RRset, so every resolver holds a DNSKEY RRset with the new key first"
+			return "algorithm rollover: waiting propagation-delay + DNSKEY TTL before swapping the DS at the parent, so every resolver holds a DNSKEY RRset with the new key first"
 		case rolloverPhasePendingChildWithdraw:
 			if algRoll.OldHeadRetireAt == nil {
 				return "algorithm rollover: holding the old-algorithm KSK (still signing); awaiting the parent's confirmation"

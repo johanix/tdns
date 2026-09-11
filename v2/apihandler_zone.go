@@ -864,9 +864,9 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 	}
 	switch {
 	case kskChanged:
-		fmt.Fprintf(&b, "KSK algorithm will roll %s → %s via DOUBLE-SIGNATURE: the rollover engine mints a %s KSK straight into active, double-signs the DNSKEY RRset with both keys, pushes the mixed DS RRset to the parent, and removes the %s KSK once the parent has confirmed it and the drain window (parent DS TTL included) has elapsed.\n",
+		fmt.Fprintf(&b, "KSK algorithm will roll %s → %s via DOUBLE-SIGNATURE: the rollover engine mints a %s KSK straight into active, double-signs the DNSKEY RRset with both keys, waits for every resolver to hold that RRset, replaces the DS at the parent with the %s DS (RFC 6781 §4.1.4), and removes the %s KSK once the parent has confirmed the swap and the drain window (parent DS TTL included) has elapsed.\n",
 			dns.AlgorithmToString[curKSKAlg], dns.AlgorithmToString[pol.KSKAlgorithm],
-			dns.AlgorithmToString[pol.KSKAlgorithm], dns.AlgorithmToString[curKSKAlg])
+			dns.AlgorithmToString[pol.KSKAlgorithm], dns.AlgorithmToString[pol.KSKAlgorithm], dns.AlgorithmToString[curKSKAlg])
 		fmt.Fprintf(&b, "This command does NOT perform the roll; the engine starts it on its next tick. Watch it with \"auto-rollover status -z %s --ksk\".\n", zd.ZoneName)
 		if warn := kskAlgRollBindWarning(ctx, zd, &pol); warn != "" {
 			fmt.Fprintf(&b, "WARNING: %s\n", warn)

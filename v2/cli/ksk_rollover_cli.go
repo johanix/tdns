@@ -694,7 +694,7 @@ that have already fired or on scheduled (lifetime-driven) rollovers.
 
 With --ksk --alg-roll it instead ABORTS an in-flight KSK algorithm
 rollover. That is only possible before the parent has confirmed the
-mixed DS RRset: the new-algorithm KSK is removed and the zone returns
+new-algorithm DS: the new-algorithm KSK is removed and the zone returns
 to idle. After confirmation an abort would be a reverse algorithm
 rollover and is refused -- let the roll finish, then change policy
 back.
@@ -742,7 +742,7 @@ manual_rollover_* row isn't being read by anything).`,
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
-	c.Flags().BoolVar(&autoRolloverFlags.algRoll, "alg-roll", false, "Abort an in-flight KSK algorithm rollover (before the parent confirms the mixed DS RRset)")
+	c.Flags().BoolVar(&autoRolloverFlags.algRoll, "alg-roll", false, "Abort an in-flight KSK algorithm rollover (before the parent confirms the new-algorithm DS)")
 	_ = c.MarkFlagRequired("zone")
 	return c
 }
@@ -995,7 +995,7 @@ func printZoneGlobalHeader(s *tdns.RolloverStatus, verbose bool) {
 					fmt.Printf("  parent confirmed %s; old KSK removal awaits the parent DS TTL observation\n",
 						formatRolloverTime(s.AlgRollOldHeadRetireAt))
 				default:
-					fmt.Println("  awaiting the parent's confirmation of the mixed DS RRset")
+					fmt.Println("  awaiting the parent's swap to the new-algorithm DS")
 				}
 			}
 			printed = true
@@ -1561,7 +1561,7 @@ func headlinePhraseForAlgRoll(headline, phase string) string {
 	case "pending-child-publish":
 		return "waiting for the new-algorithm KSK to reach every resolver"
 	case "pending-parent-observe":
-		return "observing parent for the mixed DS RRset"
+		return "observing parent for the new-algorithm DS"
 	case "pending-child-withdraw":
 		return "holding the old-algorithm KSK for the drain window"
 	}
@@ -1860,9 +1860,10 @@ to promote the next standby now (repeat to accelerate).
 KSK: the auto-rollover engine (rollover.method multi-ds or
 double-signature) carries it as a double-signature rollover: a
 new-algorithm KSK is minted straight into active, the DNSKEY RRset is
-double-signed, the mixed DS RRset is pushed to the parent, and the old
-KSK is removed once the parent has confirmed it and the drain window
-(parent DS TTL included) has elapsed. The engine starts it on its next
+double-signed, the DS at the parent is replaced by the new-algorithm DS
+once every resolver can hold the double-signed RRset, and the old KSK
+is removed once the parent has confirmed the swap and the drain window
+(parent DS TTL included) has elapsed (RFC 6781 §4.1.4). The engine starts it on its next
 tick. Watch it with "auto-rollover status -z <zone> --ksk"; abort it
 before the parent confirms with "auto-rollover cancel -z <zone> --ksk
 --alg-roll".

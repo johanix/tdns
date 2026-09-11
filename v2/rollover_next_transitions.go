@@ -207,7 +207,7 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 				e.NextTransition = "active → removed"
 				switch {
 				case algRoll.OldHeadRetireAt == nil:
-					e.NextTransitionNote = "after parent confirms the mixed DS"
+					e.NextTransitionNote = "after the parent serves only the new-algorithm DS"
 				default:
 					if at, ok := projectedAlgRollRemoveAt(kdb, zone, pol, algRoll); ok {
 						e.NextTransitionAt = at.UTC().Format(time.RFC3339)

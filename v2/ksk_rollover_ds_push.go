@@ -131,6 +131,32 @@ ORDER BY COALESCE(r.rollover_index, 2147483646) ASC, k.keyid ASC`
 	if err := sqlRows.Err(); err != nil {
 		return nil, 0, 0, false, err
 	}
+	sqlRows.Close()
+
+	// An in-flight KSK algorithm rollover keeps its old-algorithm head
+	// ACTIVE through the drain (plan A2), but the parent must stop
+	// serving that key's DS before the head leaves the DNSKEY RRset
+	// (RFC 6781 §4.1.4, plan A4): a validator that supports the old
+	// algorithm but not the new one holds DS {A,B} and, once A is gone
+	// from the child, has no supported path -- bogus, where DS {B}
+	// alone would have made it insecure. So the target set is the set
+	// above minus the roll's old head, from the spawn on: the push that
+	// follows the D-7 wait swaps DS(A) for DS(B) in one step, and the
+	// drain then covers the parent DS TTL before A is withdrawn. Once
+	// the roll is cleared (completion, or an abort) the old head is a
+	// plain active key again and, if still present, returns to the set
+	// -- which is what lets an abort push DS(A) back.
+	if zrow, zerr := LoadRolloverZoneRow(kdb, childZone); zerr == nil {
+		if algRoll := kskAlgRollFromRow(zrow); algRoll != nil {
+			kept := rows[:0]
+			for _, row := range rows {
+				if row.keyid != algRoll.OldHeadKeyID {
+					kept = append(kept, row)
+				}
+			}
+			rows = kept
+		}
+	}
 
 	indexRangeKnown = len(rows) > 0
 	for _, row := range rows {
@@ -160,7 +186,8 @@ ORDER BY COALESCE(r.rollover_index, 2147483646) ASC, k.keyid ASC`
 
 // ComputeTargetDSSetForZone returns the DS RRset the parent should publish for this child,
 // per §6.1: one DS per KSK (SEP) in states created, ds-published, standby, published, active, retired
-// (created included for multi-DS pre-publish DS at parent).
+// (created included for multi-DS pre-publish DS at parent), minus the old-algorithm head of an
+// in-flight KSK algorithm rollover (see loadTargetKSKsForRollover).
 // Digest is SHA-256 only in this phase. DS owner names use child as FQDN.
 // indexLow/indexHigh are min/max rollover_index when every contributing key has a
 // RolloverKeyState row; otherwise indexRangeKnown is false and callers must not treat
