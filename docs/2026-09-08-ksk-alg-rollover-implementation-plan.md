@@ -7,6 +7,11 @@ document settles the one question the 2026-07-01 design left open (its §7),
 corrects two of its claims, and turns the model into a commit-by-commit
 build order with a test matrix.
 
+Amended 2026-09-10: §3 carries amendments A1 (two caveats on the widened
+margin; nothing changes) and A2 (the old-algorithm KSK stays `active`
+through the drain — supersedes the "retire A" step of D-1/§5.3; two
+more columns in §5.1; KT-17 added).
+
 Code references are `file:line` into `v2/` at `f4bea22` (main), verified
 2026-09-08. Cross-references of the form "(fifo §N)" point at the
 2026-07-01 design; "(K-N)" at the 2026-06-21 plan; "(P0-N)" at
@@ -207,6 +212,148 @@ RRset it is entitled to sign, which is harmless.
 The same-algorithm multi-DS path keeps today's
 `max(clamping.margin, max_observed_ttl)` — do not widen it, or every
 existing rollover slows down for no reason.
+
+**Amendment A1 (2026-09-10) — two caveats on F1's soundness.** The formula
+and the conclusion above are unchanged; these are the two things a reader
+has to know before implementing them. Code references verified at
+`efb6dcd3` (main).
+
+**A1(a) — "confirmed" is a single-agent observation, and
+`ds-publish-delay` is the term that covers the gap.** Both confirm call
+sites issue one `QueryParentAgentDS(ctx, zone, agent)` against a single
+parent-agent address (`ksk_rollover_automated.go:371` in the observe
+branch, `:462` in the softfail-recovery twin; the helper itself takes one
+`agentAddr`, `ksk_rollover_parent_poll.go:96`, and so does
+`PollParentDSUntilMatch`, `:129`). Confirmation therefore establishes that
+*one* parent server was seen serving the mixed DS RRset — not that every
+parent nameserver has it. A lagging parent NS can still be answering with
+the pre-push `{DS(A)}` at the instant `retired_at` is stamped, and that
+server's `DS_TTL` clock has not started yet.
+
+That is what the `+ rollover.ds-publish-delay` addend is doing: it is
+defined as the parent-propagation approximation `parent_prop`
+(`ksk_rollover_validation.go:213-216`), and here it pads `retired_at`
+forward to cover a parent whose own fan-out has not finished. The formula
+is correct as written, but for a reason the text above does not state.
+Record the rationale at the implementation site (§5.3, in the
+`effectiveMarginForRoll` doc comment); otherwise the term reads as
+double-counting a delay the confirm already waited out, and a later
+cleanup will reduce it to `parent_DS_TTL` alone and silently reintroduce
+the F1 hazard for every multi-nameserver parent. KT-7 (§8) should pin the
+addend explicitly, not only the `DS_TTL` term.
+
+**A1(b) — "defer and log" is the normal path after a restart, not an
+exceptional one.** `ParentDSTTLObserved` is a field on the in-memory
+`ZoneData` (`structs.go:236`), not a persisted column, so any daemon
+restart mid-drain zeroes it. `resolveDSTTL` then reports unknown,
+`effectiveMarginForRoll` returns `ok=false`, and the withdraw phase
+defers — until the `ObserveParentDSTTL` goroutine started at zone load
+(`parseconfig.go:1522`) records a fresh observation, or a `ttls.parent-ds`
+override supplies one. The behaviour is right and fails in the safe
+direction (A keeps signing an RRset it is entitled to sign), but two
+consequences follow:
+
+- Word the deferral log line as an expected transient rather than an
+  alarm. It fires on every restart that lands inside a drain window, and
+  for a PQ-sized rollover that is a wide target.
+- E13 (§5.7) must be a `RolloverPolicyWarning` and never an error, for the
+  same reason. Its text should distinguish "not yet observed since
+  startup" from "no parent DS TTL is observable at all"; only the second
+  is operator-actionable (set `ttls.parent-ds`).
+
+Neither caveat changes the build order, the effort estimate, or any
+decision in §4.
+
+**Amendment A2 (2026-09-10) — the old-algorithm KSK must stay a *signing*
+key through the drain; `retired` cannot carry it.** §5.3 says "A retires
+but **keeps signing** — `sign.go` only strips an RRSIG when re-signing with
+that key". That is true of one re-sign path, and is about to stop being
+true of the one that matters.
+
+The signing key set is the active keys — `dak` is
+`GetDnssecKeys(zone, DnskeyStateActive)` (`sign.go:412`, `:497`) — so from
+the confirm event onward a `retired` A is not a signing key. What then
+happens to its existing `RRSIG(A)` over the apex DNSKEY RRset depends on
+which zone-level re-sign runs:
+
+- `SignZone` — `triggerResign` → `resignNow` on main, and the periodic
+  ticker with `force=false` — is additive: it hands the served RRset to
+  `SignRRset`, which strips only same-key RRSIGs (`sign.go:182-202`).
+  `RRSIG(A)` survives, unrenewed, ageing toward the expiry of its last
+  pre-retire renewal.
+- `ResignZone` — the API `resign` op, `apihandler_zone.go:193` — is a
+  replacement: `rrset.RRSIGs = nil` before `SignRRset`. `RRSIG(A)` is gone
+  the first time it runs.
+
+PR #514 (`fix/sign-before-publish`, open) moves `triggerResign` from the
+first path to the second. `replaceSignaturesNow` (`resigner.go:229-261` on
+#514) calls `ResignZone` on purpose — "SignZone is ADDITIVE … left the
+wrong ones on the wire, which is not what a key-state change needs" — and
+the periodic pass becomes `RenewZoneSignatures` (`sign_renew.go:57,135`),
+additive per RRset but built from the same active-only `dak`. After #514,
+the next `triggerResign` on the zone after A retires deletes `RRSIG(A)` —
+and #514 adds such a trigger to every key the key-state worker mints
+(`maintainStandbyKeysForType`, the `generated > 0` tail), so a routine
+standby-ZSK top-up during the drain is enough. That leaves a pre-push
+resolver holding `{DS(A)}` alone with no `RRSIG(A)`: F1's bogus
+delegation, produced by our own signer, inside the very window F1 widened
+to protect. On main today the failure is softer — `RRSIG(A)` merely
+expires unrenewed if the drain outlasts its remaining validity — but the
+design must not depend on which of the two it gets.
+
+**Fix — keep A `active` through the drain.** The alg-roll state carries
+the old head and its own clock:
+
+```sql
+alg_roll_old_head_keyid      INTEGER,  -- A
+alg_roll_old_head_retire_at  TEXT      -- RFC3339; stamped at DS confirm; NULL until then
+```
+
+(six columns in §5.1, not four). `confirmDSAndRetireOldAlgHeadTx` (§5.3)
+stamps `alg_roll_old_head_retire_at = now` and leaves A's key state
+untouched; `pending-child-withdraw` gains an alg-roll arm that selects
+`old_head_keyid` instead of `retired` SEP keys, measures
+`effectiveMarginForRoll` from `old_head_retire_at`, and on expiry strips
+A's RRSIGs (F2, same fail-soft), sets A `active → removed`, and triggers
+the re-sign. Nothing in the signer changes: A is in `dak.KSKs` until the
+moment it is removed, so every re-sign path — additive or replacement,
+main or #514 — writes both `RRSIG(A)` and `RRSIG(B)` over the DNSKEY RRset
+for the whole drain.
+
+What this touches elsewhere: D-1's row "confirm ⇒ retire A" becomes
+"confirm ⇒ stamp the drain clock; A stays active"; D-9's "at most one
+active per (role, algorithm)" already permits it; the DS target set
+(`ksk_rollover_ds_push.go:107`) keeps `DS(A)` for an active key exactly as
+it would for a retired one; the multi-DS-only transitions (§7.5) select
+neither active nor old-algorithm keys; the generic worker's
+`transitionRetiredToRemoved` never sees A; and `maintainStandbyKeys`'s KSK
+branch runs only under `rollover.method: none`, so D-8's suspension is not
+undercut. The `reconcileActiveKeyAlgorithms` skip for `algRoll.FromAlg`
+keys (§5.5) becomes load-bearing for the whole drain, not only the
+overlap. Status shows A as `active` under the old algorithm with the
+alg-roll header giving the removal time — clearer than "retired but
+signing".
+
+The alternative — leave A `retired` and add the retired old-algorithm head
+to `dak.KSKs` while an alg roll is in flight — keeps D-1's wording but
+edits how `dak` is built on the hottest path in the tree (§10.2: 35
+callers) and needs a state lookup there. Not chosen.
+
+**F2 in light of #514.** F2 is real on main, where the withdraw path's
+`triggerResign` is additive. After #514 the served-zone residue is cleaned
+up by `ResignZone` regardless, but commit 1's strip-before-transition
+ordering is still the correct sequence — it is what makes the transition
+retryable — so commit 1 stands unchanged.
+
+**Build-order impact.** Commit 4: two more columns and fields. Commit 6:
+the alg-roll arm of `pending-child-withdraw` replaces the plan's "retire
+A" fork (net size ≈ 0). Commit 8: status wording. Tests: **KT-17** — at
+every step of KT-6 from confirm to removal, the served apex DNSKEY RRset
+carries a valid `RRSIG(A)` *and* `RRSIG(B)`, asserted after each of
+`SignZone(force=true)`, `SignZone(force=false)` and `ResignZone`; and
+after removal none of the three leaves an `RRSIG(A)`. That test is the
+join between this engine and the signer, and it must pass on both sides
+of #514.
 
 ### F2 — the withdraw phase leaves orphan RRSIGs behind
 
