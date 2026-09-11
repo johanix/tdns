@@ -247,6 +247,11 @@ func TestApplyZonePolicyTransactionalRevertOnSignFailure(t *testing.T) {
 	polB := kskzsk(dns.RSASHA256, dns.ED25519) // KSK alg change → SignZone refuses
 	withLivePolicies(t, map[string]DnssecPolicy{"polB": polB})
 
+	// A warning the zone already carried. polB's floor check produces none,
+	// so it clears this one; a revert that restores the binding but not the
+	// error state loses it.
+	zd.SetError(DnssecPolicyWarning, "prior warning")
+
 	if _, err := applyZonePolicyTransactional(context.Background(), zd, kdb, &polB, "polB", PolicyApplySourceCommand); err == nil {
 		t.Fatal("expected SignZone failure on incompatible KSK algorithm change")
 	}
@@ -259,11 +264,107 @@ func TestApplyZonePolicyTransactionalRevertOnSignFailure(t *testing.T) {
 	if gotName != "polA" || gotKSK != dns.ED25519 {
 		t.Fatalf("binding not reverted: got (%q, ksk=%s), want (polA, ED25519)", gotName, dns.AlgorithmToString[gotKSK])
 	}
+	// Error state reverted with it.
+	if got := errorMsg(zd, DnssecPolicyWarning); got != "prior warning" {
+		t.Errorf("DnssecPolicyWarning after revert = %q, want the prior warning back", got)
+	}
 	// Nothing persisted.
 	if _, _, ok, _ := GetZoneAppliedPolicy(kdb, algZone); ok {
 		t.Fatal("failed apply must not write an applied record")
 	}
 	if _, ok, _ := GetZonePolicyOverride(kdb, algZone); ok {
 		t.Fatal("failed apply must not write a CLI override")
+	}
+}
+
+// floorViolatingPolicy is a policy whose signature validity is far below the
+// served TTL, so UpdateSigValidityFloor sets DnssecError for it -- and SignZone,
+// which refuses any zone carrying DnssecError, fails the apply.
+func floorViolatingPolicy() DnssecPolicy {
+	p := kskzsk(dns.ED25519, dns.ED25519)
+	p.TTLS.MaxServed = 3600
+	p.SigValidity = PolicySigValidity{Default: 60, DNSKEY: 60, DS: 60}
+	return p
+}
+
+func applyRejectedPolicy(t *testing.T, zd *ZoneData, kdb *KeyDB) {
+	t.Helper()
+	bad := floorViolatingPolicy()
+	withLivePolicies(t, map[string]DnssecPolicy{"bad": bad})
+	if _, err := applyZonePolicyTransactional(context.Background(), zd, kdb, &bad, "bad", PolicyApplySourceCommand); err == nil {
+		t.Fatal("fixture: the floor-violating policy was accepted, so there is no rollback to test")
+	}
+}
+
+// TestARejectedPolicyLeavesNoFloorErrorBehind.
+//
+// The rollback restored the policy binding but not the DnssecError the floor
+// check had set for the rejected policy. SignZone refuses any zone carrying
+// DnssecError, so the zone was left unable to sign under the policy it had
+// gone back to -- a rejected change that broke the zone it was rejected from.
+func TestARejectedPolicyLeavesNoFloorErrorBehind(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := algTestZone(dns.ED25519, dns.ED25519)
+
+	applyRejectedPolicy(t, zd, kdb)
+
+	if zd.DnssecPolicyName != "base" {
+		t.Fatalf("binding not reverted: %q", zd.DnssecPolicyName)
+	}
+	if zd.HasError(DnssecError) {
+		t.Error("the rejected policy's DnssecError survived the rollback; SignZone refuses any" +
+			" zone carrying it, so the zone can no longer sign under the policy it kept")
+	}
+}
+
+// The undo is exact: an error that was there before the attempt is still there
+// after it, with its own message -- not cleared, and not replaced by the
+// rejected policy's.
+func TestARejectedPolicyRestoresAPriorErrorExactly(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := algTestZone(dns.ED25519, dns.ED25519)
+	zd.SetError(DnssecError, "prior: unrelated to this apply, 100%% genuine")
+	// The other category the floor check writes. The rejected policy produces
+	// no warnings, so its floor check CLEARS this -- only the restore brings
+	// it back.
+	zd.SetError(DnssecPolicyWarning, "prior warning, also kept")
+
+	applyRejectedPolicy(t, zd, kdb)
+
+	if got, want := errorMsg(zd, DnssecError), "prior: unrelated to this apply, 100% genuine"; got != want {
+		t.Errorf("DnssecError after rollback = %q, want the prior %q", got, want)
+	}
+	if got, want := errorMsg(zd, DnssecPolicyWarning), "prior warning, also kept"; got != want {
+		t.Errorf("DnssecPolicyWarning after rollback = %q, want the prior %q; the snapshot"+
+			" covers both categories the floor check writes", got, want)
+	}
+}
+
+// errorMsg returns the message recorded for one error category, or "".
+func errorMsg(zd *ZoneData, typ ErrorType) string {
+	for _, e := range zd.ErrorList() {
+		if e.Type == typ {
+			return e.Msg
+		}
+	}
+	return ""
+}
+
+// With no policy bound before, recomputing the floor "for the old policy" does
+// nothing -- UpdateSigValidityFloor returns early on a nil policy -- and the
+// rejected policy's error would survive. The snapshot handles it.
+func TestARejectedFirstPolicyLeavesNoFloorError(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := algTestZone(dns.ED25519, dns.ED25519)
+	zd.DnssecPolicy = nil
+	zd.DnssecPolicyName = ""
+
+	applyRejectedPolicy(t, zd, kdb)
+
+	if zd.DnssecPolicy != nil {
+		t.Fatal("binding not reverted to no policy")
+	}
+	if zd.HasError(DnssecError) {
+		t.Error("the rejected first policy's DnssecError survived the rollback")
 	}
 }
