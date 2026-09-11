@@ -25,7 +25,7 @@ type BackoffPolicy struct {
 	Multiplier     float64       // exponential growth factor per consecutive failure
 	JitterFraction float64       // ±fraction applied to the chosen duration
 	RoutingFailure time.Duration // immediate backoff on routing errors
-	LameDelegation time.Duration // backoff on REFUSED / NOTAUTH / SERVFAIL (lame delegation)
+	LameDelegation time.Duration // backoff on REFUSED / NOTAUTH (lame delegation); SERVFAIL takes the FirstFailure schedule
 }
 
 var (
@@ -37,7 +37,7 @@ var (
 		Multiplier:     3.0,
 		JitterFraction: 0.0,
 		RoutingFailure: 1 * time.Hour,
-		LameDelegation: 1 * time.Hour,
+		LameDelegation: 5 * time.Minute,
 	}
 )
 
