@@ -171,13 +171,27 @@ func applyOutboundSerialAfterRefresh(zd *ZoneData, zone string) {
 // race: a zone deleted or replaced while its refresh was in flight must not be
 // written back to disk, nor re-added to the dynamic config.
 func persistRefreshedZone(zd *ZoneData, zone string, gen uint64, conf *Config) {
+	// Liveness first, for EVERY write below, not as one arm's condition.
+	//
+	// It used to be ANDed into the dynamic-zone arm only. A persistent
+	// secondary that had been deleted or replaced mid-refresh then failed that
+	// arm on liveness, fell through to refreshWritesZoneToSourceFile -- which a
+	// non-primary with a Zonefile also satisfies -- and wrote the stale zone to
+	// its source file anyway: the very resurrection the guard exists to stop,
+	// reached one case further down.
+	if !zoneStillLive(zd, gen) {
+		lgEngine.Debug("not persisting a refresh for a zone that was deleted or replaced while it ran",
+			"zone", zone)
+		return
+	}
+
 	switch {
 	case zd.ZoneType == Primary && !zd.Options[OptDirty]:
 		// A primary's file is its SOURCE and the refresh has just read it.
 		// Writing it back rewrites the operator's file behind their back.
 		lgEngine.Debug("skipping zone file write for unmodified primary zone", "zone", zone)
 
-	case conf.ShouldPersistZone(zd) && zoneStillLive(zd, gen):
+	case conf.ShouldPersistZone(zd):
 		if _, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory); err != nil {
 			lgEngine.Warn("failed to write dynamic zone file", "zone", zone, "error", err)
 		}
