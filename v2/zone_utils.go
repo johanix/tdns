@@ -777,6 +777,9 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 		lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		return false, err
 	}
+	if firstLoad {
+		zd.postRefreshOwed = true
+	}
 	zd.mu.Unlock()
 
 	// Reconcile the journal with the file that was just adopted -- the same
@@ -795,12 +798,70 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 		zd.reconcileZoneFileWithJournal(verdict, prev, verr)
 	}
 
-	// Post-refresh callbacks: queue sends and notifications that need the live zone pointer.
+	// Post-refresh callbacks: queue sends and notifications that need the live
+	// zone pointer. Deferred on a first load; see runPostRefreshCallbacks.
+	zd.runPostRefreshCallbacks(firstLoad)
+
+	return true, nil
+}
+
+// runPostRefreshCallbacks runs the OnZonePostRefresh callbacks for a refresh
+// that has just published -- unless this was the zone's FIRST load.
+//
+// A first load publishes before the zone is Ready: applyRefreshReplacementLocked
+// withholds Ready, and for a zone that signs its own content Ready arrives
+// only with the publish that signs it, after the DNSSEC policy binds. A
+// callback running here on a first load therefore ran against a zone whose
+// GetOwner refuses with ErrZoneNotReady, while the callbacks of every later
+// refresh run against a Ready zone. The asymmetry was the callbacks running on
+// the wrong side of a deliberate deferral, not the deferral itself: Ready means
+// "complete content", and a to-be-signed zone must not be readable before its
+// first sign.
+//
+// So a first load records the debt instead (postRefreshOwed, set by the caller
+// under the zd.mu it holds around the publish) and the first-load completion
+// pays it the moment the zone is Ready, through runOwedPostRefreshCallbacks:
+// after the policy sync, the sign and the journal replay, before OnFirstLoad.
+// Every later refresh is unchanged, and a later refresh that runs the
+// callbacks pays an outstanding debt too, so the same change is never applied
+// twice.
+//
+// tdns's own post-refresh consumers are enqueue-only and idempotent
+// (ProxyDelegationPostRefresh, ChildSyncProxyPostRefresh); running them a few
+// steps later on the same goroutine changes nothing they depend on.
+func (zd *ZoneData) runPostRefreshCallbacks(firstLoad bool) {
+	if firstLoad {
+		return
+	}
+	zd.mu.Lock()
+	zd.postRefreshOwed = false
+	zd.mu.Unlock()
 	for _, cb := range zd.OnZonePostRefresh {
 		cb(zd)
 	}
+}
 
-	return true, nil
+// runOwedPostRefreshCallbacks runs the post-refresh callbacks a first load
+// deferred, if the zone is Ready, and reports whether it did. The flag clears
+// on that run and on no other completion path: a first-load completion that
+// leaves the zone not Ready -- a signing zone whose sign failed, which the
+// ticker retries through finishFirstLoadPolicy -- leaves them owed for the
+// retry that succeeds.
+func (zd *ZoneData) runOwedPostRefreshCallbacks() bool {
+	zd.mu.Lock()
+	due := zd.postRefreshOwed && zd.Ready
+	if due {
+		zd.postRefreshOwed = false
+	}
+	zd.mu.Unlock()
+	if !due {
+		return false
+	}
+	lg.Debug("running the post-refresh callbacks deferred by the first load", "zone", zd.ZoneName)
+	for _, cb := range zd.OnZonePostRefresh {
+		cb(zd)
+	}
+	return true
 }
 
 // shouldDiscardUnchangedTransfer reports whether a completed transfer should be
@@ -1144,12 +1205,14 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 		lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		return false, err
 	}
+	if firstLoad {
+		zd.postRefreshOwed = true
+	}
 	zd.mu.Unlock()
 
-	// Post-refresh callbacks: queue sends and notifications that need the live zone pointer.
-	for _, cb := range zd.OnZonePostRefresh {
-		cb(zd)
-	}
+	// Post-refresh callbacks: queue sends and notifications that need the live
+	// zone pointer. Deferred on a first load; see runPostRefreshCallbacks.
+	zd.runPostRefreshCallbacks(firstLoad)
 
 	if ConfLive().ServiceDebug {
 		fname, err := zd.ZoneFileName()

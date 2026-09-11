@@ -310,6 +310,11 @@ func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, conf
 	if err := signOnceAfterPolicyBind(ctx, zd); err != nil {
 		return err
 	}
+	// The post-refresh callbacks the first load deferred, now that the sign
+	// has made the zone Ready. There is no journal replay on this retry-only
+	// path, so the drain follows the sign directly. Ready-guarded inside: a
+	// zone the sign left not Ready keeps them owed.
+	zd.runOwedPostRefreshCallbacks()
 	drainAndRunOnFirstLoad(zd)
 	return nil
 }
@@ -406,6 +411,15 @@ func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Con
 	// deltas hold everything that has happened since. Serving the file alone
 	// would silently roll the zone back to that point.
 	replayZoneDeltasOnLoad(zd)
+
+	// The post-refresh callbacks the first load deferred (see
+	// runPostRefreshCallbacks). After the replay, so that they see the zone's
+	// actual content, as a later refresh's callbacks do; before OnFirstLoad,
+	// which is the order a later refresh keeps as well. Ready-guarded inside:
+	// for a signing zone Ready came with the sign above, for any other zone
+	// with InstallInitialSnapshot, and a zone that is still not Ready keeps
+	// them owed for the ticker's retry.
+	zd.runOwedPostRefreshCallbacks()
 
 	drainAndRunOnFirstLoad(zd)
 	return nil

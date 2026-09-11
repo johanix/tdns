@@ -261,6 +261,15 @@ type ZoneData struct {
 	// older overlapping republish cannot overwrite a newer snapshot.
 	signingKeysGen atomic.Uint64
 	workingSet     map[string]*OwnerData
+	// postRefreshOwed records that a FIRST load deferred its OnZonePostRefresh
+	// callbacks. A first load publishes before the zone is Ready -- and for a
+	// zone that signs its own content Ready arrives only with the publish that
+	// signs it, after the policy binds -- so running the callbacks there, as
+	// every later refresh does after its publish, would have them read a zone
+	// whose GetOwner refuses. They run instead from the first-load completion
+	// once the zone is Ready (runOwedPostRefreshCallbacks), and the flag clears
+	// only when they run. Guarded by mu.
+	postRefreshOwed bool
 	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
 	// next publish (see zoneSnapshot.signalSynth). Seeded from the published
 	// snapshot in ensureWorkingSet so unrelated publishes preserve it.
