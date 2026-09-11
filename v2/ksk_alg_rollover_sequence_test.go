@@ -331,6 +331,11 @@ func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 	if zd.ParentDSTTLObserved != 3600 {
 		t.Fatalf("confirm: parent DS TTL observed = %d, want 3600", zd.ParentDSTTLObserved)
 	}
+	// The push schedule is over: a stale next_push_at would show as a
+	// past "next probe" in status from here on.
+	if r, err := LoadRolloverZoneRow(kdb, ktAlgZone); err != nil || r == nil || r.NextPushAt.Valid {
+		t.Fatalf("confirm: next_push_at not cleared: row=%+v err=%v", r, err)
+	}
 	// KT-17: through the drain every re-sign path keeps BOTH signatures --
 	// including ResignZone, which strips and re-signs with the active keys
 	// only, and which a key-state change triggers after PR #514. A resolver
@@ -605,5 +610,104 @@ func TestKT19ConfirmWithoutIndexRangeStillStartsDrain(t *testing.T) {
 	st, err = LoadKskAlgRollState(kdb, ktAlgZone)
 	if err != nil || st == nil || st.OldHeadRetireAt == nil {
 		t.Fatalf("confirm: drain clock not stamped: %+v, %v", st, err)
+	}
+}
+
+// tdns#609, second part: with one active KSK and num-ds 2, one pass mints
+// ONE pipeline key. A key already created counts toward the target; its DS
+// goes out with the next push.
+func TestPipelineFillCountsCreatedKeys(t *testing.T) {
+	ktInstallFakeParent(t)
+	kdb := newTestKeyDB(t)
+	pol := ktSequencePolicy(RolloverMethodMultiDS)
+	pol.Rollover.NumDS = 2
+	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
+	ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
+	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
+	if _, err := zd.SignZone(kdb, true); err != nil {
+		t.Fatalf("SignZone: %v", err)
+	}
+	ktTick(t, zd, kdb, time.Now())
+	if n := ktCountSEPsInState(t, kdb, ktAlgZone, DnskeyStateCreated); n != 1 {
+		t.Fatalf("one pass minted %d created KSKs for num-ds 2 with one active KSK, want 1", n)
+	}
+}
+
+// tdns#609, first part: asap on a zone whose next-up KSK is ds-published
+// (the steady state under lifetime forever). The request anchors the
+// publish step: the key is published on the next pass, reaches standby
+// after propagation, and the request fires.
+func TestManualAsapPublishesDsPublishedNextUp(t *testing.T) {
+	parent := ktInstallFakeParent(t)
+	kdb := newTestKeyDB(t)
+	pol := ktSequencePolicy(RolloverMethodMultiDS)
+	pol.Rollover.NumDS = 2
+	pol.KSK.Lifetime = 10000 * 3600
+	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
+	a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
+	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
+	if _, err := zd.SignZone(kdb, true); err != nil {
+		t.Fatalf("SignZone: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	tick := func(step string, now time.Time) {
+		t.Helper()
+		deps := ktDeps(zd, kdb, now)
+		deps.Imr = &Imr{}
+		if err := RolloverAutomatedTick(ctx, deps); err != nil {
+			t.Fatalf("%s: tick: %v", step, err)
+		}
+	}
+	t0 := time.Now()
+	// The multi-DS steady state: the fill mints the next-up key, its DS
+	// is pushed and confirmed, and it rests in ds-published.
+	tick("fill", t0.Add(time.Second))
+	var b uint16
+	if err := kdb.DB.QueryRow(`SELECT keyid FROM DnssecKeyStore WHERE zonename = ? AND state = 'created' AND (CAST(flags AS INTEGER) & 1) != 0`, ktAlgZone).Scan(&b); err != nil {
+		t.Fatalf("no pipeline key minted: %v", err)
+	}
+	tick("push", t0.Add(2*time.Second))
+	pushes := parent.pushes()
+	if len(pushes) != 1 {
+		t.Fatalf("push: %d pushes, want 1", len(pushes))
+	}
+	parent.serve(ktDSSubset(pushes[0], 3600, ktDSKeytags(pushes[0])...))
+	tConfirm := t0.Add(pol.Rollover.ConfirmInitialWait + 5*time.Second)
+	tick("confirm", tConfirm)
+	if s := ktKeyState(t, kdb, ktAlgZone, b); s != DnskeyStateDsPublished {
+		t.Fatalf("after the confirm the next-up key %d is %s, want ds-published", b, s)
+	}
+	if p, ip := ktPhase(t, kdb, ktAlgZone); p != rolloverPhaseIdle || ip {
+		t.Fatalf("after the confirm: phase=%q in_progress=%v", p, ip)
+	}
+	// The cadence alone does not publish it: T_roll is 10000 hours out.
+	tCad := tConfirm.Add(time.Second)
+	TransitionRolloverKskDsPublishedToPublished(ctx, &Conf, kdb, tCad, time.Minute)
+	if s := ktKeyState(t, kdb, ktAlgZone, b); s != DnskeyStateDsPublished {
+		t.Fatalf("the lifetime cadence published %d under lifetime forever: %s", b, s)
+	}
+	// The request, as APIRolloverAsap persists it, and the pass after it.
+	earliest := t0.Add(2 * time.Hour)
+	if err := SetManualRolloverRequest(kdb, ktAlgZone, tCad, earliest); err != nil {
+		t.Fatalf("SetManualRolloverRequest: %v", err)
+	}
+	TransitionRolloverKskDsPublishedToPublished(ctx, &Conf, kdb, tCad, time.Minute)
+	if s := ktKeyState(t, kdb, ktAlgZone, b); s != DnskeyStatePublished {
+		t.Fatalf("asap did not publish the next-up key %d: %s", b, s)
+	}
+	// Past both propagation gates (DNSKEY: published_at + 1m + 3600s; DS:
+	// observed_at + ds-publish-delay + 3600s).
+	tStandby := t0.Add(3 * time.Hour)
+	TransitionRolloverKskPublishedToStandby(ctx, &Conf, kdb, tStandby, time.Minute)
+	if s := ktKeyState(t, kdb, ktAlgZone, b); s != DnskeyStateStandby {
+		t.Fatalf("published key %d did not reach standby: %s", b, s)
+	}
+	tick("fire", tStandby.Add(time.Minute))
+	if s := ktKeyState(t, kdb, ktAlgZone, b); s != DnskeyStateActive {
+		t.Fatalf("asap did not fire once a standby existed: %d is %s", b, s)
+	}
+	if s := ktKeyState(t, kdb, ktAlgZone, a); s != DnskeyStateRetired {
+		t.Fatalf("old active %d is %s, want retired", a, s)
 	}
 }

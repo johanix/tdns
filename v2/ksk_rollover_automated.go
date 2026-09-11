@@ -244,7 +244,11 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		if err != nil {
 			return err
 		}
-		if n >= num {
+		// A key already created counts toward the target: its DS goes out
+		// with the next push. Counting DS-at-parent alone minted one key
+		// per pass until the cap, and the parent ended up with num_ds+1
+		// DS records (tdns#609).
+		if n >= num || total >= num {
 			break
 		}
 		kid, _, err := GenerateKskRolloverCreated(kdb, zone, "key-state-worker", pol.KSKAlgorithm, pol.Rollover.Method)
@@ -508,6 +512,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		// Clear last_softfail_*: the previous softfail event is no
 		// longer informative now that we're back in sync.
 		_ = clearLastSoftfail(kdb, zone)
+		_ = clearNextPushAt(kdb, zone)
 		// Trigger 1 — confirmed observation: if NOTIFY-pushed CDS is
 		// still on the wire (last_published_cds_index_low/high
 		// non-NULL), unpublish it now per RFC 7344 §4.1. Best-effort.
@@ -587,6 +592,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 				// it's the operator-facing "DS UPDATE: sent <time>".
 				// See the matching block in pendingParentObserve.
 				_ = clearLastSoftfail(kdb, zone)
+				_ = clearNextPushAt(kdb, zone)
 				// Trigger 1 — confirmed observation, softfail-recovery path.
 				cleanupCdsAfterConfirm(zd, kdb)
 				if advanced > 0 {
@@ -1530,7 +1536,21 @@ func transitionDsPublishedToPublishedForZone(deps RolloverEngineDeps, dsPubs []*
 		return
 	}
 	activeAt, err := RolloverKeyActiveAt(kdb, zoneName, activeKid)
-	if err != nil || activeAt == nil {
+	if err != nil {
+		return
+	}
+	// A pending manual request is an anchor too. `asap` persists
+	// manual_rollover_earliest computed as if the next-up key were
+	// published now; if only the lifetime cadence could publish it, the
+	// request would wait for T_roll -- never, under lifetime forever --
+	// while rolloverDue waits for a standby that never comes (tdns#609).
+	var manualAt *time.Time
+	if row, rerr := LoadRolloverZoneRow(kdb, zoneName); rerr == nil && row != nil && row.ManualRolloverEarliest.Valid {
+		if t, perr := time.Parse(time.RFC3339, strings.TrimSpace(row.ManualRolloverEarliest.String)); perr == nil {
+			manualAt = &t
+		}
+	}
+	if activeAt == nil && manualAt == nil {
 		return
 	}
 
@@ -1596,7 +1616,17 @@ func transitionDsPublishedToPublishedForZone(deps RolloverEngineDeps, dsPubs []*
 		// standbyCount+1: standby keys 1..standbyCount activate
 		// first, this key activates after them.
 		slot := standbyCount + i + 1
-		tRoll := activeAt.Add(time.Duration(slot) * lifetime)
+		var tRoll time.Time
+		if activeAt != nil {
+			tRoll = activeAt.Add(time.Duration(slot) * lifetime)
+		}
+		// The manual request names the roll time of the next-up key only.
+		if i == 0 && manualAt != nil && (activeAt == nil || manualAt.Before(tRoll)) {
+			tRoll = *manualAt
+		}
+		if tRoll.IsZero() {
+			break
+		}
 		// E12: T_publish = T_roll − child_prop − DNSKEY_TTL.
 		tPublish := tRoll.Add(-(deps.PropagationDelay + dnskeyTTL))
 		if now.Before(tPublish) {

@@ -1083,6 +1083,15 @@ func parseDsObservedKeyids(csv string) []uint16 {
 // next_push_at forward by softfail_delay regardless of probe outcome
 // but preserves the previous softfail's category and detail for
 // status display continuity.
+// clearNextPushAt forgets the push schedule. Called at confirm: the push
+// cycle is over, and a stale next_push_at otherwise shows as a past
+// "next probe" in status and as "DS push pending; next attempt <past>" in
+// when, for good.
+func clearNextPushAt(kdb *KeyDB, zone string) error {
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET next_push_at = NULL WHERE zone = ?`, zone)
+	return err
+}
+
 func setNextPushAt(kdb *KeyDB, zone string, at time.Time) error {
 	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
 		return err

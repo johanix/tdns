@@ -598,6 +598,14 @@ func ParseDnssecPolicyConfQuiet(name string, dp *DnssecPolicyConf) (*DnssecPolic
 	return parseDnssecPolicyConfImpl(name, dp, true, nil)
 }
 
+// ParseDnssecPolicyConfQuietWithSplit is ParseDnssecPolicyConfQuiet with the
+// file's dnssec.split-algorithms allowlist, so an offline re-parse judges a
+// KSK/ZSK algorithm split the way the daemon did. Without it every split
+// policy reads as "not listed in dnssec.split-algorithms".
+func ParseDnssecPolicyConfQuietWithSplit(name string, dp *DnssecPolicyConf, split map[string][]string) (*DnssecPolicy, error) {
+	return parseDnssecPolicyConfImpl(name, dp, true, buildSplitAlgorithmSet(split))
+}
+
 // parseDnssecPolicyConfImpl resolves and validates one policy. splitAllowed
 // is the KSK/ZSK pairing allowlist (kskAlg -> permitted zskAlgs); nil means
 // only same-algorithm policies pass (fail closed).
