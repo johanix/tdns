@@ -267,3 +267,83 @@ func TestApplyZonePolicyTransactionalRevertOnSignFailure(t *testing.T) {
 		t.Fatal("failed apply must not write a CLI override")
 	}
 }
+
+// floorViolatingPolicy is a policy whose signature validity is far below the
+// served TTL, so UpdateSigValidityFloor sets DnssecError for it -- and SignZone,
+// which refuses any zone carrying DnssecError, fails the apply.
+func floorViolatingPolicy() DnssecPolicy {
+	p := kskzsk(dns.ED25519, dns.ED25519)
+	p.TTLS.MaxServed = 3600
+	p.SigValidity = PolicySigValidity{Default: 60, DNSKEY: 60, DS: 60}
+	return p
+}
+
+func applyRejectedPolicy(t *testing.T, zd *ZoneData, kdb *KeyDB) {
+	t.Helper()
+	bad := floorViolatingPolicy()
+	withLivePolicies(t, map[string]DnssecPolicy{"bad": bad})
+	if _, err := applyZonePolicyTransactional(context.Background(), zd, kdb, &bad, "bad", PolicyApplySourceCommand); err == nil {
+		t.Fatal("fixture: the floor-violating policy was accepted, so there is no rollback to test")
+	}
+}
+
+// TestARejectedPolicyLeavesNoFloorErrorBehind.
+//
+// The rollback restored the policy binding but not the DnssecError the floor
+// check had set for the rejected policy. SignZone refuses any zone carrying
+// DnssecError, so the zone was left unable to sign under the policy it had
+// gone back to -- a rejected change that broke the zone it was rejected from.
+func TestARejectedPolicyLeavesNoFloorErrorBehind(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := algTestZone(dns.ED25519, dns.ED25519)
+
+	applyRejectedPolicy(t, zd, kdb)
+
+	if zd.DnssecPolicyName != "base" {
+		t.Fatalf("binding not reverted: %q", zd.DnssecPolicyName)
+	}
+	if zd.HasError(DnssecError) {
+		t.Error("the rejected policy's DnssecError survived the rollback; SignZone refuses any" +
+			" zone carrying it, so the zone can no longer sign under the policy it kept")
+	}
+}
+
+// The undo is exact: an error that was there before the attempt is still there
+// after it, with its own message -- not cleared, and not replaced by the
+// rejected policy's.
+func TestARejectedPolicyRestoresAPriorErrorExactly(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := algTestZone(dns.ED25519, dns.ED25519)
+	zd.SetError(DnssecError, "prior: unrelated to this apply, 100%% genuine")
+
+	applyRejectedPolicy(t, zd, kdb)
+
+	var got string
+	for _, e := range zd.ErrorList() {
+		if e.Type == DnssecError {
+			got = e.Msg
+		}
+	}
+	if want := "prior: unrelated to this apply, 100% genuine"; got != want {
+		t.Errorf("DnssecError after rollback = %q, want the prior %q", got, want)
+	}
+}
+
+// With no policy bound before, recomputing the floor "for the old policy" does
+// nothing -- UpdateSigValidityFloor returns early on a nil policy -- and the
+// rejected policy's error would survive. The snapshot handles it.
+func TestARejectedFirstPolicyLeavesNoFloorError(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := algTestZone(dns.ED25519, dns.ED25519)
+	zd.DnssecPolicy = nil
+	zd.DnssecPolicyName = ""
+
+	applyRejectedPolicy(t, zd, kdb)
+
+	if zd.DnssecPolicy != nil {
+		t.Fatal("binding not reverted to no policy")
+	}
+	if zd.HasError(DnssecError) {
+		t.Error("the rejected first policy's DnssecError survived the rollback")
+	}
+}
