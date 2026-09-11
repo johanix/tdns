@@ -809,9 +809,11 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname, or
 	maxDepth := 10
 	depth := 0
 
+	// Keyed by canonical name: the query and each CNAME target come spelled
+	// however they were written, and a loop is the same loop in any case.
 	visited := make(map[string]bool)
-	visited[qname] = true
-	visited[origqname] = true
+	visited[core.CanonicalizeName(qname)] = true
+	visited[core.CanonicalizeName(origqname)] = true
 
 	// RFC 1034 section 4.3.2 step 3a follows a CNAME only when QTYPE does not
 	// match it. A query for the CNAME itself, or for ANY, is an exact match:
@@ -833,11 +835,11 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname, or
 		tgt := currentCNAME.RRs[0].(*dns.CNAME).Target
 		lgHandler.Debug("following CNAME chain", "depth", depth+1, "from", currentName, "to", tgt)
 
-		if visited[tgt] {
+		if visited[core.CanonicalizeName(tgt)] {
 			lgHandler.Warn("CNAME chain loop detected", "from", currentName, "to", tgt)
 			break
 		}
-		visited[tgt] = true
+		visited[core.CanonicalizeName(tgt)] = true
 
 		// Find which zone the target belongs to
 		tgtZone := FindZone(tgt)
