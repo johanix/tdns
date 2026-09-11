@@ -67,7 +67,7 @@ func UpdateHandler(ctx context.Context, conf *Config) error {
 				lgHandler.Info("DnsUpdateResponderEngine: dnsupdateq closed")
 				return nil
 			}
-			err := UpdateResponder(&dhr, updateq)
+			err := UpdateResponder(ctx, &dhr, updateq)
 			if err != nil {
 				lgHandler.Error("error from UpdateResponder", "err", err)
 			}
@@ -123,7 +123,7 @@ func applyValidationFailure(m *dns.Msg, us *UpdateStatus) {
 	}
 }
 
-func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
+func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	w := dur.ResponseWriter
 	r := dur.Msg
 	qname := dur.Qname
@@ -335,7 +335,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// known" for what is actually FORMERR + a format error — mislabelling a
 	// malformed request as a server-side fault and directing the child at
 	// bootstrapping a key, which does not fix a malformed message.
-	err := zd.ValidateUpdate(r, dur.Status)
+	err := zd.ValidateUpdate(ctx, r, dur.Status)
 	if err != nil {
 		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
 		applyValidationFailure(m, dur.Status)
@@ -446,7 +446,13 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	respch := make(chan ZoneUpdateResult, 1)
 
 	// XXX: This should be separated into updates to auth data in the zone and updates to child data.
-	updateq <- UpdateRequest{
+	//
+	// Cancellable. A bare send here blocked forever if the updater had already
+	// stopped -- and the updater exits on the SAME root context, so at shutdown
+	// this was a handoff to a queue nobody would ever read again, holding the
+	// DNS update engine open indefinitely. The waiter below is answered with a
+	// failure rather than left hanging.
+	req := UpdateRequest{
 		Cmd:       dur.Status.Type,
 		ZoneName:  zone,
 		Actions:   r.Ns,
@@ -454,6 +460,14 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		Trusted:   dur.Status.ValidatedByTrustedKey,
 		Status:    dur.Status,
 		Resp:      respch,
+	}
+
+	select {
+	case updateq <- req:
+	case <-ctx.Done():
+		lgHandler.Info("shutting down before the update could be handed to the updater",
+			"zone", zone, "type", dur.Status.Type)
+		return fmt.Errorf("update for %s not queued: %w", zone, ctx.Err())
 	}
 
 	select {
@@ -646,7 +660,7 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	ctx, cancel := context.WithTimeout(context.Background(), delegationCheckTimeout)
 	defer cancel()
 	if cerr := zd.CheckDelegationNSCoherenceForUpdate(ctx, r.Ns,
-		Conf.Internal.Scanner.childNameserverAsker(nil)); cerr != nil {
+		Conf.Internal.GetScanner().childNameserverAsker(nil)); cerr != nil {
 		lgHandler.Warn("child update refused as incoherent",
 			"zone", zd.ZoneName, "err", cerr)
 		us.ValidationRcode = dns.RcodeRefused
@@ -746,6 +760,7 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	addKey, _, isCeremony := bootstrapCeremony(r.Ns)
 	if len(r.Ns) != 1 && !isCeremony {
 		us.Approved = false
+		us.RejectionEDE = edns0.EDESig0FormatError
 		lgHandler.Warn("trust update rejected: only a single KEY record or a bootstrap DEL+ADD ceremony allowed", "rrs", len(r.Ns))
 		return false, false, nil
 	}
@@ -770,12 +785,15 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		// rejected, except in the special case of unvalidated key uploads.
 
 		if rrtype != dns.TypeKEY {
+			us.Approved = false
+			us.RejectionEDE = edns0.EDEZoneUpdateRRtypeNotAllowed
 			lgHandler.Warn("trust update rejected: must be for a KEY RR", "rrtype", dns.TypeToString[rrtype])
 			return false, false, nil
 		}
 
 		if rrclass == dns.ClassNONE || rrclass == dns.ClassANY {
 			us.Approved = false
+			us.RejectionEDE = edns0.EDESig0KeyKnownButNotTrusted
 			lgHandler.Warn("trust update rejected: KEY delete signed by untrusted key")
 			return false, false, nil
 		}
@@ -793,23 +811,44 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 			us.Approved = true
 			return true, false, nil
 		}
+
+		// And this is that policy saying no, which is a different thing from
+		// every other reason an UPDATE gets REFUSED and has to say so. The
+		// operator has deliberately declined to take keys on trust; what the
+		// child needs to learn is that the ceremony it just attempted is not
+		// the way in, and that publishing the KEY where the parent can fetch
+		// and validate it is. Falling through to the generic
+		// "signature did not validate" below told it none of that, and carried
+		// no EDE at all, so the child could not tell policy from a wrong
+		// target or an ACL (#570).
+		us.Approved = false
+		us.RejectionEDE = edns0.EDESig0UnvalidatedUploadNotAccepted
+		lgHandler.Warn("trust update rejected: unvalidated KEY upload not accepted by policy",
+			"zone", zone, "signer", us.SignerName,
+			"delegationpolicy", zd.boundDelegationPolicy().Name)
+		return false, false, nil
 	}
 
 	// Past the unvalidated key upload; from here update MUST be validated
 	if (us.ValidationRcode != dns.RcodeSuccess || !us.Validated) && !unvalidatedKeyUpload {
 		us.Approved = false
+		if us.RejectionEDE == 0 {
+			us.RejectionEDE = edns0.EDESig0BadSignature
+		}
 		lgHandler.Warn("trust update rejected: signature did not validate")
 		return false, false, nil
 	}
 
 	if !us.ValidatedByTrustedKey && !unvalidatedKeyUpload {
 		us.Approved = false
+		us.RejectionEDE = edns0.EDESig0KeyKnownButNotTrusted
 		lgHandler.Warn("trust update rejected: signature validated but key not trusted")
 		return false, false, nil
 	}
 
 	if !zd.UpdatePolicy.Child.RRtypes[rrtype] {
 		us.Approved = false
+		us.RejectionEDE = edns0.EDEZoneUpdateRRtypeNotAllowed
 		lgHandler.Warn("trust update rejected: unapproved RR type", "rrtype", dns.TypeToString[rr.Header().Rrtype])
 		return false, false, nil
 	}
@@ -825,6 +864,7 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		// true for the signer name itself, which selfsub has always allowed.
 		if !dns.IsSubDomain(us.SignerName, rr.Header().Name) {
 			us.Approved = false
+			us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
 			lgHandler.Warn("trust update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
 			return false, false, nil
 		}
@@ -832,6 +872,7 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	case "self":
 		if !core.EqualNames(rr.Header().Name, us.SignerName) {
 			us.Approved = false
+			us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
 			lgHandler.Warn("trust update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
 			return false, false, nil
 		}

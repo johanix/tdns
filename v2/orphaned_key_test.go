@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -210,5 +211,153 @@ updates.orphanparent.example.	3600	IN	KEY	256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKu
 	}
 	if !waitForUsableKey(t, zd, target) {
 		t.Errorf("a replacement key was generated for %s but never published", target)
+	}
+}
+
+// TestAKeytagCollisionDoesNotMakeAnOrphanLookUsable.
+//
+// A key tag is sixteen bits and is not unique. The published-key check matched
+// on the tag alone, so an active keystore key colliding with an orphaned
+// published KEY reported the orphan as usable -- the zone looks prepared, signs
+// with a key nobody can find, and every signature fails against the published
+// record. That is #576 again by a different route, and with no warning, because
+// the tag matched.
+func TestAKeytagCollisionDoesNotMakeAnOrphanLookUsable(t *testing.T) {
+	published := mustRR(t, "collide.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
+
+	// Same tag, different key -- constructed, not searched for (see
+	// keyWithSameTag). It used to be a different public key with no check that
+	// the tags matched, so the test was named after a collision it did not
+	// have; a fixture that stops colliding must fail here, not pass quietly.
+	other := *keyWithSameTag(t, published)
+	if other.KeyTag() != published.KeyTag() {
+		t.Fatalf("fixture: tags %d and %d differ, so there is no collision to test",
+			other.KeyTag(), published.KeyTag())
+	}
+	if sameKeyRdata(published, &other) {
+		t.Error("two KEYs with different public keys compared equal; a tag collision would" +
+			" report an orphaned published key as usable and skip publishing the real one")
+	}
+	if !sameKeyRdata(published, published) {
+		t.Error("a key did not compare equal to itself")
+	}
+
+	// The fields that are part of the key's identity.
+	for _, tc := range []struct {
+		name string
+		mut  func(k *dns.KEY)
+	}{
+		{"flags", func(k *dns.KEY) { k.Flags ^= 0x0100 }},
+		{"protocol", func(k *dns.KEY) { k.Protocol++ }},
+		{"algorithm", func(k *dns.KEY) { k.Algorithm++ }},
+		{"public key", func(k *dns.KEY) { k.PublicKey = "AAAA" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := *published
+			tc.mut(&m)
+			if sameKeyRdata(published, &m) {
+				t.Errorf("keys differing in %s compared equal", tc.name)
+			}
+		})
+	}
+
+	// Owner and TTL are not identity: the published record and the keystore
+	// copy legitimately differ there.
+	m := *published
+	m.Hdr.Name = "elsewhere.example."
+	m.Hdr.Ttl = 60
+	if !sameKeyRdata(published, &m) {
+		t.Error("the same key at a different owner or TTL compared unequal; the published" +
+			" record and the keystore copy always differ that way")
+	}
+}
+
+// keyWithSameTag returns a copy of k whose key tag is identical but whose
+// public key is not.
+//
+// Constructed rather than searched for. RFC 4034 Appendix B computes the tag as
+// a sum over the RDATA octets, with even offsets landing in the high byte of
+// the accumulator and odd offsets in the low one, so adjusting two octets at
+// the SAME parity by +1 and -1 leaves the tag unchanged. Hunting for a natural
+// collision would be a 1-in-65536 search for something this constructs exactly.
+func keyWithSameTag(t *testing.T, k *dns.KEY) *dns.KEY {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(k.PublicKey)
+	if err != nil {
+		t.Fatalf("decoding the public key: %v", err)
+	}
+	if len(raw) < 5 {
+		t.Fatalf("public key too short to perturb: %d bytes", len(raw))
+	}
+	// Two octets at the same parity, one up and one down, avoiding wrap.
+	i, j := -1, -1
+	for n := 0; n+2 < len(raw); n += 2 {
+		if raw[n] < 0xff && raw[n+2] > 0x00 {
+			i, j = n, n+2
+			break
+		}
+	}
+	if i < 0 {
+		t.Skip("no suitable octet pair in this key to perturb without wrapping")
+	}
+	perturbed := append([]byte(nil), raw...)
+	perturbed[i]++
+	perturbed[j]--
+
+	out := *k
+	out.PublicKey = base64.StdEncoding.EncodeToString(perturbed)
+	if out.KeyTag() != k.KeyTag() {
+		t.Fatalf("construction failed: tags %d vs %d", out.KeyTag(), k.KeyTag())
+	}
+	if out.PublicKey == k.PublicKey {
+		t.Fatal("construction failed: the keys are identical")
+	}
+	return &out
+}
+
+// TestAnOrphanWithACollidingKeytagIsStillAnOrphan drives the real check, not
+// the comparison helper. Reverting the call site to a key-tag match must fail
+// HERE -- a test that only exercises sameKeyRdata stays green through exactly
+// the regression it is meant to catch.
+func TestAnOrphanWithACollidingKeytagIsStillAnOrphan(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	const zone = `collide.example.	3600	IN	SOA	ns.collide.example. h.collide.example. 1 3600 600 604800 300
+collide.example.	3600	IN	NS	ns.collide.example.
+`
+	zd := testZone(t, "collide.example.", zone)
+	registerZones(t, zd)
+	zd.KeyDB = kdb
+	zd.ZoneType = Primary
+	zd.Options = map[ZoneOption]bool{OptParentSync: true, OptAllowUpdates: true}
+
+	// The key this server actually holds.
+	if _, err := kdb.Sig0KeyMgmt(nil, KeystorePost{
+		Command: "sig0-mgmt", SubCommand: "generate", Zone: zd.ZoneName,
+		Keyname: zd.ZoneName, Algorithm: dns.ED25519, State: Sig0StateActive, Creator: "test",
+	}); err != nil {
+		t.Fatalf("generating the active key: %v", err)
+	}
+	sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+	if err != nil || len(sak.Keys) == 0 {
+		t.Fatalf("no active key: %v", err)
+	}
+	active := &sak.Keys[0].KeyRR
+
+	// Publish a DIFFERENT key that happens to share its tag.
+	orphan := keyWithSameTag(t, active)
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	zd.stageRRsetLocked(zd.ZoneName, core.RRset{
+		Name: zd.ZoneName, RRtype: dns.TypeKEY, Class: dns.ClassINET, RRs: []dns.RR{orphan},
+	})
+	zd.publishLocked(zd.generation.Load())
+	zd.mu.Unlock()
+
+	if zd.sig0KeyIsUsable(zd.ZoneName) {
+		t.Error("a published KEY whose private half this server does NOT hold was reported" +
+			" usable because its key tag collided with an active one; the zone looks" +
+			" prepared, signs with a key nobody can find, and every signature fails to" +
+			" validate against the published record")
 	}
 }

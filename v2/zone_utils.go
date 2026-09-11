@@ -110,6 +110,13 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 }
 
 func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, conf *Config) (bool, error) {
+	return zd.refresh(ctx, verbose, debug, force, conf, nil)
+}
+
+// refresh is Refresh with the pool's transfer gate threaded in. A nil gate is
+// ungated; see transferGate for why the cap sits around the transfer rather
+// than around this call.
+func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, conf *Config, gate *transferGate) (bool, error) {
 	var updated bool
 
 	// Collect dynamic RRs before refresh (they will be lost during refresh)
@@ -167,7 +174,7 @@ func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, con
 			} else if force {
 				lg.Debug("forced retransfer regardless of SOA serial", "zone", zd.ZoneName)
 			}
-			updated, err = zd.FetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf)
+			updated, err = zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, gate)
 			if err != nil {
 				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
@@ -199,6 +206,39 @@ func firstUpstreamAddr(upstreams []PeerConf) string {
 		return ""
 	}
 	return upstreams[0].Addr
+}
+
+// Compile-time bounds for the two refresh deadlines, applied when
+// service.probetimeout / service.transfertimeout are not configured.
+//
+// They are far apart, and the distance is the point (#502). The two bound
+// different populations: a primary that is unreachable dies in the SOA probe
+// and NEVER reaches a transfer, while a transfer only starts once a primary has
+// just answered. So a single generous bound would make every dead upstream cost
+// the budget that exists for a legitimate slow AXFR of a large zone -- which,
+// at first load, is spent on the refresh engine's own goroutine with every
+// other zone waiting behind it. That was the 2026-09-04 outage.
+const (
+	defaultProbeTimeout    = 5 * time.Second
+	defaultTransferTimeout = 300 * time.Second
+)
+
+// probeTimeout bounds ONE SOA probe against ONE upstream. Signed-int read with
+// a positive gate, as the refresh clamps do: a negative value in the config
+// falls back to the default rather than wrapping.
+func probeTimeout() time.Duration {
+	if cfg := ConfLive().ProbeTimeout; cfg > 0 {
+		return time.Duration(cfg) * time.Second
+	}
+	return defaultProbeTimeout
+}
+
+// transferTimeout bounds ONE inbound zone transfer from ONE upstream.
+func transferTimeout() time.Duration {
+	if cfg := ConfLive().TransferTimeout; cfg > 0 {
+		return time.Duration(cfg) * time.Second
+	}
+	return defaultTransferTimeout
 }
 
 // Return shouldTransfer, new upstream serial, error
@@ -268,6 +308,13 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 			lg.Debug("DoTransfer: no port specified for upstream, using transport default", "zone", zd.ZoneName, "upstream", p.upstream)
 		}
 		p.client = new(dns.Client)
+		// miekg tightens the socket deadlines to the EARLIER of the client's own
+		// Timeout and the context's, and with Timeout unset that is its 2s
+		// default -- so a configured probe budget LARGER than 2s would be
+		// silently inert, and service.probetimeout would look like it did
+		// nothing. Set it here; the per-attempt context in phase 2 still bounds
+		// the dial and is what carries cancellation.
+		p.client.Timeout = probeTimeout()
 		// XoT peer: probe the SOA over the same verified-TLS channel the
 		// transfer itself will use (same pin/dane/pkix gate).
 		if tlsCfg, terr := conf.ClientTLSConfigForPeer(up); terr != nil {
@@ -295,13 +342,17 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 	// Phase 2 -- network only. Nothing here reads shared config.
 	sawResponse := false
 	var lastErr error
+	// The addresses actually probed. An operator reading the zone's
+	// RefreshError needs to know WHICH primaries were tried, not just how
+	// many (#502).
+	var tried []string
 	for i := range plans {
 		p := &plans[i]
 		up, upstream := p.up, p.upstream
 
 		if p.err != nil {
 			lg.Error("DoTransfer: peer config setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", p.err)
-			lastErr = p.err
+			lastErr = fmt.Errorf("%s: %w", upstream, p.err)
 			continue
 		}
 		// Nobody is waiting for this result any more; stop walking upstreams.
@@ -338,17 +389,40 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 			lg.Warn("DoTransfer: no configured transfer-src matches this upstream's family; probing unbound",
 				"zone", zd.ZoneName, "upstream", upstream, "configured", probeSrcs, "from", probeSrcTier)
 		}
-		r, _, err := c.ExchangeContext(ctx, m, upstream)
+		// Bound THIS attempt, not the walk. miekg's default is 2s per exchange,
+		// which is tight for a slow-but-alive primary; this makes the budget
+		// explicit and configurable without letting it grow into the transfer
+		// budget. See the note on defaultProbeTimeout.
+		probeCtx, cancelProbe := context.WithTimeout(ctx, probeTimeout())
+		// exchangeCancellable, not ExchangeContext: the latter hands the context
+		// to the dial and then only tightens the socket deadlines with it -- it
+		// never watches ctx.Done() -- so a read already in flight runs to the
+		// probe budget no matter what the caller does. That was tolerable while
+		// the budget was miekg's 2s default; making it configurable (and 5s by
+		// default, so a slow-but-alive primary is not cut off) would otherwise
+		// have made every shutdown wait out an in-flight probe. This closes the
+		// connection on cancellation instead, and it honours c.Dialer, so the
+		// transfer-src binding below and the XoT client survive it (#409).
+		r, _, err := exchangeCancellable(probeCtx, c, m, upstream)
+		cancelProbe()
+		tried = append(tried, upstream)
 		if err != nil {
 			// A cancelled exchange is not a sick primary: every sibling would
-			// fail the same way. Return it as cancellation rather than letting
-			// the loop treat it as "try the next one".
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, err)
+			// fail the same way. Ask the PARENT context rather than the error --
+			// the per-attempt deadline above also surfaces as DeadlineExceeded,
+			// and THAT one means "this upstream did not answer in time, try the
+			// next", which is the whole point of bounding the attempt instead of
+			// the walk. Testing errors.Is(err, DeadlineExceeded) here would
+			// abandon every remaining sibling the moment one primary went quiet.
+			if cerr := ctx.Err(); cerr != nil {
+				return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
 			}
 			// Transport failure (or a TSIG response-verify failure) — try the next sibling.
 			lg.Warn("DoTransfer: SOA probe failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", err)
-			lastErr = err
+			// Wrapped with the address: this error becomes the zone's
+			// RefreshError, and "i/o timeout" on its own tells an operator
+			// nothing about WHICH primary is unreachable (#502).
+			lastErr = fmt.Errorf("%s: %w", upstream, err)
 			continue
 		}
 		sawResponse = true
@@ -397,8 +471,15 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		return false, 0, nil
 	}
 	// No primary was even reachable.
-	lg.Error("DoTransfer: SOA probe failed on all upstreams (unreachable)", "zone", zd.ZoneName, "count", len(zd.Upstreams), "err", lastErr)
-	return false, 0, fmt.Errorf("SOA probe of %s failed: all %d upstream(s) unreachable: %w", zd.ZoneName, len(zd.Upstreams), lastErr)
+	//
+	// Counted from the snapshot taken under zd.mu at the top, not from
+	// zd.Upstreams: the engine rewrites that slice in place on every refresh
+	// that re-resolves a hostname primary, so reading it here races -- and would
+	// report a count that does not match the addresses actually tried.
+	lg.Error("DoTransfer: SOA probe failed on all upstreams (unreachable)", "zone", zd.ZoneName,
+		"count", len(upstreams), "upstreams", strings.Join(tried, ", "), "err", lastErr)
+	return false, 0, fmt.Errorf("SOA probe of %s failed: no response from any of %d upstream(s) [%s]: %w",
+		zd.ZoneName, len(upstreams), strings.Join(tried, ", "), lastErr)
 }
 
 // newTransferScratchZone builds the throwaway ZoneData an inbound AXFR is
@@ -756,24 +837,29 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 //     which is either read as a no-op -- defeating the
 //     force, the one remedy for a wedged downstream --
 //     or applied as a zone consisting of one record.
-//   - !signsItsOwnContent()  the same boundary §5 draws for onward relay,
-//     applied to asking rather than relaying. A signing
-//     secondary's baseline is its OWN signatures, so a
-//     delta computed against the primary's copy cannot
-//     fit: the delete section names RRSIGs we do not
-//     hold, or replaces an RRset without re-signing it.
-//     The apply refuses and we AXFR -- correctly, but
-//     only after a round trip that could not have
-//     worked, and default-on means every existing
-//     inline-signing secondary pays it on every refresh
-//     after an upgrade. Deltas onto re-signed data are
-//     the staging variant §5 leaves to PR-2.
+//
+// A signing secondary is NO LONGER excluded here. The exclusion existed
+// because a delta computed against the primary's copy cannot be applied
+// verbatim onto re-signed data -- the delete section names RRSIGs we do not
+// hold. What removes it is that the apply no longer works that way: the delta
+// is staged and the publish re-signs exactly the owners it touched
+// (wsSignOwners = new_zd.ixfrTouched, zone_mutation.go), and restitchNsecLocked
+// repairs the chain around those same names -- and further, since it diffs
+// owner content rather than reading the touched set.
+//
+// Our signatures are therefore computed from what we are about to serve, never
+// carried over from the delta. Note what that does NOT claim: a SIGNED
+// upstream's delta names its own RRSIGs and NSECs in the delete section, those
+// match nothing we hold, and the apply refuses -- so the increment only ever
+// happens against an unsigned upstream, which is the bump-in-the-wire
+// deployment this is for. The delta's signatures are not adopted because the
+// apply never succeeds when they appear, not because a later pass discards
+// them.
 func (zd *ZoneData) shouldRequestIxfr(force bool) bool {
 	return zd.requestIxfr() &&
 		zd.IncomingSerial != 0 &&
 		zd.publishedSnapshot() != nil &&
-		!force &&
-		!zd.signsItsOwnContent()
+		!force
 }
 
 // transferFromUpstream is one upstream's worth of transfer: a delta when the
@@ -883,6 +969,11 @@ func (zd *ZoneData) gateZonemdUnlessAlreadyGated(ctx context.Context, newZd *Zon
 // from our own serial would answer with a single SOA rather than the zone the
 // operator asked for.
 func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
+	return zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, nil)
+}
+
+// fetchFromUpstream is FetchFromUpstream with the pool's transfer gate.
+func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config, gate *transferGate) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {
 		return false, fmt.Errorf("FetchFromUpstream: zone %s has no upstreams configured", zd.ZoneName)
@@ -926,7 +1017,31 @@ func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force
 		}
 		upstream := up.Addr
 		new_zd = newTransferScratchZone(zd)
-		upToDate, err := zd.transferFromUpstream(ctx, up, &new_zd, useIxfr, conf)
+		// Bound THIS transfer. Separate from the probe budget and much larger:
+		// reaching here means this primary answered the SOA probe, so what is
+		// bounded is a slow or dribbling transfer, not an unreachable host.
+		// miekg's Transfer bounds each ENVELOPE read, not the stream, so without
+		// this a primary sending one envelope every 1.9s transfers forever.
+		//
+		// Per attempt rather than per walk, so a large zone still gets its full
+		// budget from a sibling after the first primary stalls mid-stream. The
+		// walk-level cost is therefore transfertimeout x upstreams -- paid by a
+		// pool worker once the worker pool lands, and on the engine goroutine
+		// only during first load, where the probe bound has already excluded the
+		// unreachable hosts that made this urgent.
+		// The transfer, and only the transfer, is what the pool's gate bounds:
+		// the probe above is one query, this is bandwidth, parse CPU and roughly
+		// twice the zone in memory. Acquired here rather than by the caller
+		// because Refresh does probe and transfer in one call, so a caller-side
+		// acquire would hold a transfer slot through every probe.
+		if gerr := gate.acquire(ctx); gerr != nil {
+			zd.SetStatus(prevStatus)
+			return false, fmt.Errorf("AXFR of %s: %w", zd.ZoneName, gerr)
+		}
+		xfrCtx, cancelXfr := context.WithTimeout(ctx, transferTimeout())
+		upToDate, err := zd.transferFromUpstream(xfrCtx, up, &new_zd, useIxfr, conf)
+		cancelXfr()
+		gate.release()
 		if err != nil {
 			lg.Warn("FetchFromUpstream: transfer from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
@@ -948,9 +1063,26 @@ func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force
 		break
 	}
 	if !transferred {
-		lg.Error("FetchFromUpstream: AXFR failed on all upstreams", "zone", zd.ZoneName, "count", len(zd.Upstreams), "err", lastErr)
+		// Counted from the snapshot copied above, not from zd.Upstreams: the
+		// engine rewrites that slice in place on every refresh that re-resolves
+		// a hostname primary, so reading it here races -- and would report a
+		// count that does not match the upstreams actually tried. Same reason
+		// the loop walks the copy, and the same fix DoTransfer already carries.
+		// Named, not counted. DoTransfer already reports the addresses it
+		// probed, and an operator reading a zone's RefreshError after a
+		// transfer failure needs the same thing here: "tried all 3 upstreams"
+		// does not say WHICH, so the two failure modes gave different
+		// diagnostic quality for the same zone.
+		addrs := make([]string, 0, len(upstreams))
+		for _, u := range upstreams {
+			addrs = append(addrs, u.Addr)
+		}
+		tried := strings.Join(addrs, ", ")
+		lg.Error("FetchFromUpstream: AXFR failed on all upstreams",
+			"zone", zd.ZoneName, "upstreams", tried, "err", lastErr)
 		zd.SetStatus(prevStatus) // still serving prior data; failure surfaces as RefreshError
-		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s): %w", zd.ZoneName, len(zd.Upstreams), lastErr)
+		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s) [%s]: %w",
+			zd.ZoneName, len(upstreams), tried, lastErr)
 	}
 
 	// A forced transfer MUST apply whatever upstream has, including a serial
@@ -1365,32 +1497,6 @@ func (zd *ZoneData) PrintOwners() {
 	for _, key := range names {
 		fmt.Printf("%s\n", key)
 	}
-}
-
-func (zd *ZoneData) NotifyDownstreams() error {
-	// zd.Logger.Printf("NotifyDownstreams: Zone %s has downstreams: %v", zd.ZoneName, zd.Downstreams)
-	if zd == nil {
-		lg.Error("NotifyDownstreams: zonedata is nil")
-		return fmt.Errorf("zonedata is nil")
-	}
-	for _, d := range zd.Notify {
-
-		// log.Printf("%s: Notifying downstream server %s about new SOA serial", zd.ZoneName, d.Addr)
-
-		m := new(dns.Msg)
-		m.SetNotify(zd.ZoneName)
-		r, err := dns.Exchange(m, d.Addr)
-		if err != nil {
-			// well, we tried
-			lg.Error("downstream NOTIFY failed", "downstream", d.Addr, "zone", zd.ZoneName, "err", err)
-			continue
-		}
-		if r.Opcode != dns.OpcodeNotify {
-			// well, we tried
-			lg.Error("unexpected opcode from downstream on NOTIFY", "downstream", d.Addr, "zone", zd.ZoneName, "opcode", dns.OpcodeToString[r.Opcode])
-		}
-	}
-	return nil
 }
 
 func WildcardReplace(rrs []dns.RR, qname, origqname string) []dns.RR {
@@ -2060,12 +2166,34 @@ func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 }
 
-func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
+// registerForPeriodicResign puts a zone on the resigner's watchlist, so its
+// signatures are renewed before they age out.
+//
+// It used to be SetupZoneSigning, and it used to SIGN -- a full pass, inline,
+// wherever it was called -- and then enqueue the zone, which the resigner could
+// only read as "force-sign this now". Every updated refresh of a signed zone
+// therefore signed it twice, and published twice, and notified twice.
+//
+// Nothing signs here any more, because by the time this runs something already
+// has. A refresh signs its own content before the swap; a policy apply signs
+// when it binds; a restart publishes unsigned and stays not Ready until the
+// policy binds, and signOnceAfterPolicyBind signs it then. (That last one used
+// to read "a restart signs at the refresh publish because the keys resolve even
+// with the policy still unbound" -- which was tried, and signed a whole zone
+// into five-minute signatures, because sigValiditySeconds of a nil policy is
+// zero and sigLifetime substitutes five minutes for it.) What was missing was
+// never the signing -- it was a zone quietly falling off the renewal list.
+// resignRegisterTimeout bounds the registration send. Long enough that a
+// briefly busy resigner is waited out, short enough that zone loading is not
+// held up by one that is wedged.
+const resignRegisterTimeout = 2 * time.Second
+
+func (zd *ZoneData) registerForPeriodicResign(ctx context.Context, resignq chan<- ResignRequest) error {
 	if Globals.App.Type == AppTypeAgent {
 		return nil // agents never sign
 	}
 
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.signsItsOwnContent() {
 		return nil // this zone should not be signed (at least not by us)
 	}
 
@@ -2073,22 +2201,30 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 		return nil // non-primary zones require inline-signing to be signed
 	}
 
-	kdb := zd.KeyDB
-	newrrsigs, err := zd.SignZone(kdb, false)
-	if err != nil {
-		lg.Error("SignZone failed", "zone", zd.ZoneName, "err", err)
-		return err
-	}
-
-	lg.Info("SetupZoneSigning: zone signed", "zone", zd.ZoneName, "newRRSIGs", newrrsigs)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Derived from the caller's context, not Background(). This runs in the
+	// synchronous OnFirstLoad callback, so a full ResignQ used to hold the
+	// caller here for the whole resignRegisterTimeout with no way to notice
+	// that the engine it belongs to had already been told to stop -- two
+	// seconds of shutdown latency per zone, for a registration nobody would
+	// read.
+	ctx, cancel := context.WithTimeout(ctx, resignRegisterTimeout)
 	defer cancel()
 
 	select {
-	case resignq <- zd:
+	case resignq <- ResignRequest{Zd: zd, Reason: ResignPeriodic}:
 	case <-ctx.Done():
-		lg.Error("SetupZoneSigning: timeout sending zone to resign queue", "zone", zd.ZoneName)
+		// Reported, not swallowed. A send that times out means the zone is not
+		// on the watchlist, so nothing will ever renew its signatures -- the
+		// exact failure this function exists to prevent, and the one that made
+		// SetupZoneSigning's sign-and-enqueue look necessary. Returning nil
+		// here told every caller the zone was registered when it was not.
+		//
+		// No retry: all three callers log it, and none of them can do better --
+		// a ResignQ still full after two seconds is a wedged resigner, not
+		// congestion to wait out.
+		return fmt.Errorf("registering %s for periodic re-signing: timed out sending to the resign queue"+
+			" after %s; the zone is NOT on the renewal watchlist and its signatures will expire",
+			zd.ZoneName, resignRegisterTimeout)
 	}
 
 	return nil

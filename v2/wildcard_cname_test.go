@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -74,7 +75,7 @@ func TestSignedWildcardCNAMEValidates(t *testing.T) {
 		},
 	}
 	zd.InstallInitialSnapshot()
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 

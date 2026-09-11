@@ -154,6 +154,28 @@ type DnssecPolicyInfo struct {
 // "forever" keyword (10000h). Rendered back as "forever" for display.
 const foreverLifetimeSecs = uint32(10000 * 3600)
 
+// lifetimeSchedulesRoll reports whether a key lifetime should ever trigger an
+// automatic rollover.
+//
+// Two values mean it should not, and only one of them used to be tested for.
+// Zero is "unset" (GenKeyLifetime maps both "" and "none" to it) and every
+// rollover path already treats it as never-expires. The "forever" keyword maps
+// to foreverLifetimeSecs, which is a large FINITE number chosen so renderLifetime
+// can print it back as "forever" -- and to the rollover paths that was simply a
+// lifetime of about 417 days.
+//
+// So a policy saying "forever" scheduled a roll, and the operator had no way to
+// see it: the config says forever and the API renders forever. BuiltinDefaultDnssecPolicy
+// uses "forever" for both KSK and ZSK and documents itself as "No automatic key
+// rollovers", which was therefore untrue of every zone that took the built-in
+// default (#567).
+//
+// Every roll decision goes through here so the two spellings of "never" cannot
+// drift apart again.
+func lifetimeSchedulesRoll(secs uint32) bool {
+	return secs != 0 && secs != foreverLifetimeSecs
+}
+
 // renderLifetime turns a KeyLifetime's seconds into the operator-facing string:
 // "none" for 0, "forever" for the forever sentinel, else a duration.
 func renderLifetime(secs uint32) string {

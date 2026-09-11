@@ -109,6 +109,21 @@ const (
 	// retrying.
 	EDEDelegationIncoherent
 	EDEDelegationUnverifiable
+
+	// Ordered AFTER the coherence pair on purpose. Those two are 543 and 544 on
+	// main, published by PR #573, and this code has shipped nowhere -- so this
+	// is the one that moves. Renumbering the pair to make room here would
+	// change the meaning of two codes that are already on the wire, which is
+	// the exact hazard the note at the end of this block describes.
+	// The parent does automatic bootstrap, but not on trust: its delegation
+	// policy sets allow-unvalidated-upload false, so a self-signed KEY upload
+	// from an unknown key is refused. Distinct from
+	// EDESig0ManualBootstrapRequired, which says no automatic bootstrap exists
+	// at all -- here it exists, and the child completes it from the other end
+	// by publishing the KEY where the parent can fetch and validate it.
+	//
+	// Terminal for the upload: retrying it cannot succeed.
+	EDESig0UnvalidatedUploadNotAccepted
 )
 
 // NOTE for anyone adding codes above: append at the END of the const block.
@@ -154,8 +169,9 @@ var EDECodeToString = map[uint16]string{
 	EDESig0KeyValidationFailed:     "SIG(0) key known, but validation failed; re-bootstrap after fixing the key's publication",
 	EDESig0ManualBootstrapRequired: "Automatic bootstrap of SIG(0) keys not supported; manual bootstrap required",
 
-	EDEDelegationIncoherent:   "the resulting delegation is not what the child's nameservers serve",
-	EDEDelegationUnverifiable: "the parent could not verify the delegation against the child's nameservers; try again later",
+	EDESig0UnvalidatedUploadNotAccepted: "unvalidated SIG(0) key upload not accepted by policy; publish the KEY at the zone apex or the RFC 9615 signal name so it can be fetched and validated",
+	EDEDelegationIncoherent:             "the resulting delegation is not what the child's nameservers serve",
+	EDEDelegationUnverifiable:           "the parent could not verify the delegation against the child's nameservers; try again later",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response

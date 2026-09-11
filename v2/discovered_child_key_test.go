@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,8 +41,8 @@ func TestADiscoveredChildKeyIsRecordedForVerification(t *testing.T) {
 		}
 	}
 
-	boundedVerification(t, zd, kdb)
-	zd.rememberDiscoveredChildKey(discovered)
+	ctx, waitForVerifier := boundedVerification(t, zd)
+	defer waitForVerifier(zd.rememberDiscoveredChildKey(ctx, discovered))
 
 	sk, err := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
 	if err != nil || sk == nil {
@@ -69,7 +70,7 @@ func TestADiscoveredKeyForANonChildIsNotRecorded(t *testing.T) {
 	zd.KeyDB = kdb
 
 	key := mustRR(t, "stranger.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
-	zd.rememberDiscoveredChildKey(&Sig0Key{
+	zd.rememberDiscoveredChildKey(context.Background(), &Sig0Key{
 		Name:      "stranger.example.",
 		Keyid:     key.KeyTag(),
 		Validated: true,
@@ -94,7 +95,7 @@ func TestARecordedKeyIsFoundBeforeTheDiscoveryPath(t *testing.T) {
 	key := mustRR(t, "child.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
 	discovered := &Sig0Key{Name: "child.example.", Keyid: key.KeyTag(), Validated: true, Source: "dns", Key: *key}
 
-	zd.rememberDiscoveredChildKey(discovered)
+	func() { c, w := boundedVerification(t, zd); w(zd.rememberDiscoveredChildKey(c, discovered)) }()
 
 	sk, err := zd.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
 	if err != nil || sk == nil {
@@ -216,15 +217,39 @@ func signedUpdateFrom(t *testing.T, zone, signer string, keyid uint16) *dns.Msg 
 // and a half, writing to a t.TempDir database that has gone. One attempt, on a
 // context cancelled at cleanup, exits at once and records no verdict (a
 // cancelled context is a shutdown, not a judgement on the key).
-func boundedVerification(t *testing.T, zd *ZoneData, kdb *KeyDB) {
+//
+// Returns the context to hand to whatever starts the verification, and a wait
+// function for the verifier it starts. It used to stash the context on the
+// KeyDB, which is what the production path did too -- and that was the race the
+// threading removed.
+//
+// Cancelling is not enough on its own: the verifier is a goroutine, and a test
+// that only cancels can return while it is still running and let fixture
+// cleanup race it to the TempDir database. waitFor is how a test says "and it
+// has actually finished".
+func boundedVerification(t *testing.T, zd *ZoneData) (context.Context, func(<-chan struct{})) {
 	t.Helper()
 	pol := compiledDefaultDelegationPolicy()
 	pol.RetryMaxAttempts = 1
 	zd.DelegationPolicy = &pol
 
 	ctx, cancel := context.WithCancel(context.Background())
-	kdb.engineCtx = ctx
 	t.Cleanup(cancel)
+
+	waitFor := func(done <-chan struct{}) {
+		t.Helper()
+		if done == nil {
+			return // no verifier was started; nothing to wait for
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("the child-key verifier did not exit within 5s of cancellation;" +
+				" it outlives the test and writes to a database that has gone")
+		}
+	}
+	return ctx, waitFor
 }
 
 func discoveredTestKey(t *testing.T) *Sig0Key {
@@ -249,15 +274,20 @@ func TestValidateUpdateRecordsAKeyItDiscoveredInDns(t *testing.T) {
 	zd := cuParentZone(t)
 	zd.KeyDB = kdb
 	registerZones(t, zd)
-	boundedVerification(t, zd, kdb)
+	ctx, waitForVerifier := boundedVerification(t, zd)
 
 	discovered := discoveredTestKey(t)
 	stubDnsDiscovery(t, discovered)
 	stubSig0Verify(t) // the signature verifies
 
 	us := &UpdateStatus{}
-	if err := zd.ValidateUpdate(signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
+	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
+	}
+	// The verifier this validation started, waited for rather than left to race
+	// the fixture's database on the way out.
+	for _, done := range us.verifications {
+		defer waitForVerifier(done)
 	}
 
 	sk, err := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
@@ -282,14 +312,14 @@ func TestValidateUpdateDoesNotRecordAKeyWhoseSignatureFailed(t *testing.T) {
 	zd := cuParentZone(t)
 	zd.KeyDB = kdb
 	registerZones(t, zd)
-	boundedVerification(t, zd, kdb)
+	ctx, _ := boundedVerification(t, zd) // no key is recorded, so no verifier starts
 
 	discovered := discoveredTestKey(t)
 	stubDnsDiscovery(t, discovered)
 	stubSig0Verify(t, discovered.Keyid) // this signature does NOT verify
 
 	us := &UpdateStatus{}
-	if err := zd.ValidateUpdate(signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
+	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
 	}
 
@@ -369,10 +399,10 @@ func TestRediscoveringATrustedKeyDoesNotDemoteIt(t *testing.T) {
 	zd := cuParentZone(t)
 	zd.KeyDB = kdb
 	registerZones(t, zd)
-	boundedVerification(t, zd, kdb)
+	ctx, waitForVerifier := boundedVerification(t, zd)
 
 	discovered := discoveredTestKey(t)
-	zd.rememberDiscoveredChildKey(discovered)
+	defer waitForVerifier(zd.rememberDiscoveredChildKey(ctx, discovered))
 
 	// Verification concludes: the key is trusted.
 	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
@@ -388,7 +418,7 @@ func TestRediscoveringATrustedKeyDoesNotDemoteIt(t *testing.T) {
 	}
 
 	// A second discovery of the same key.
-	if zd.rememberDiscoveredChildKey(discovered) {
+	if zd.rememberDiscoveredChildKey(ctx, discovered) != nil {
 		t.Error("rediscovering a key that is already in the truststore started another" +
 			" verification; the row already says everything the discovery does, and the" +
 			" key may by now be trusted")
@@ -422,10 +452,169 @@ func TestAZoneThatWillNotVerifyRecordsNothing(t *testing.T) {
 	zd.DelegationPolicy = &pol
 
 	discovered := discoveredTestKey(t)
-	zd.rememberDiscoveredChildKey(discovered)
+	zd.rememberDiscoveredChildKey(context.Background(), discovered)
 
 	if sk, _ := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid); sk != nil {
 		t.Error("a row was stored for a zone whose policy has no verification mechanisms;" +
 			" nothing will ever promote it, so it is an entry that only looks like progress")
+	}
+}
+
+// TestTheUpdatePathCarriesItsOwnShutdownContext.
+//
+// The verification a discovered key starts used to take its context from
+// KeyDB.engineCtx, a plain field written by ZoneUpdaterEngine's goroutine and
+// read from the UPDATE path on another. Two failures in one: an unsynchronised
+// write against a concurrent read, and -- before the updater had got round to
+// storing it -- a nil field, which lifetimeCtx turned into context.Background(),
+// so a verification started then could outlive shutdown entirely.
+//
+// The context now comes down the call chain. This asserts it arrives: cancel it
+// and the verification must not survive.
+func TestTheUpdatePathCarriesItsOwnShutdownContext(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := cuParentZone(t)
+	zd.KeyDB = kdb
+	registerZones(t, zd)
+
+	pol := compiledDefaultDelegationPolicy()
+	pol.RetryMaxAttempts = 5
+	pol.RetryInterval = time.Hour // asleep until cancelled
+	zd.DelegationPolicy = &pol
+
+	discovered := discoveredTestKey(t)
+	stubDnsDiscovery(t, discovered)
+	stubSig0Verify(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	us := &UpdateStatus{}
+	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
+		t.Fatalf("ValidateUpdate: %v", err)
+	}
+	if sk, _ := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid); sk == nil {
+		t.Fatal("the key was not recorded, so no verification was started to cancel")
+	}
+
+	if len(us.verifications) != 1 {
+		t.Fatalf("validation started %d verifications, want exactly 1", len(us.verifications))
+	}
+
+	// Cancelling the UPDATE path's context must reach the verifier it started.
+	// A verifier holding context.Background() would sit out its hour instead.
+	//
+	// Waited on directly. This used to poll for five seconds and only ever
+	// proved that no failure row appeared -- it cost five seconds on every run
+	// and never showed the verifier had actually exited, which is the claim.
+	cancel()
+	select {
+	case <-us.verifications[0]:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the verifier did not exit after the UPDATE path's context was cancelled;" +
+			" it is holding a context that never cancels")
+	}
+
+	if sk, _ := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid); sk != nil && sk.ValidationFailed {
+		t.Error("cancellation was recorded as a validation failure; a shutdown is not a" +
+			" verdict on the key")
+	}
+}
+
+// TestAClientCannotAssertTrustForADnsDiscoveredKey.
+//
+// APItruststore decodes client JSON straight into a TruststorePost and hands it
+// to Sig0TrustMgmt, so every field is attacker-chosen on that path. An
+// authenticated client could POST src=dns with trusted=true and get a trusted
+// row for any child name -- no lookup, no verification -- and from then on
+// ApproveChildUpdate accepts that key's signature on delegation data.
+//
+// Discovery records that a key EXISTS. Promotion is the verify subcommand's
+// job, after VerifyChildKey has actually found and validated it.
+func TestAClientCannotAssertTrustForADnsDiscoveredKey(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := mustRR(t, "victim.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
+
+	resp, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command:    "sig0",
+		SubCommand: "add",
+		Keyname:    "victim.example.",
+		Keyid:      int(key.KeyTag()),
+		Src:        "dns",
+		KeyRR:      key.String(),
+		// What an attacker would send.
+		Trusted:         true,
+		Validated:       true,
+		DnssecValidated: true,
+	})
+	if err != nil || (resp != nil && resp.Error) {
+		t.Fatalf("Sig0TrustMgmt: %v %+v", err, resp)
+	}
+
+	sk, err := kdb.FindSig0TrustedKey("victim.example.", key.KeyTag())
+	if err != nil || sk == nil {
+		t.Fatalf("no row was written: %v", err)
+	}
+	if sk.Trusted {
+		t.Error("a client-supplied trusted flag was persisted for a DNS-discovered key;" +
+			" anyone who can reach the truststore API can now sign delegation updates" +
+			" for that child")
+	}
+}
+
+// TestManualApprovalStillTrustsADiscoveredKey.
+//
+// The guard above refuses a client-asserted trusted flag on "add". This is the
+// path it must NOT have broken: an operator looks at a discovered key and
+// decides to trust it. That is the "trust" subcommand -- an UPDATE of a row
+// that already exists, about a key someone has actually examined -- and it is a
+// different thing from asserting trust for a key in the same breath as adding
+// it.
+func TestManualApprovalStillTrustsADiscoveredKey(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := mustRR(t, "child.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
+	const name = "child.example."
+
+	// Discovered and recorded, untrusted.
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "sig0", SubCommand: "add", Keyname: name, Keyid: int(key.KeyTag()),
+		Src: "dns", KeyRR: key.String(),
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if sk, _ := kdb.FindSig0TrustedKey(name, key.KeyTag()); sk == nil || sk.Trusted {
+		t.Fatalf("fixture: expected an untrusted row, got %+v", sk)
+	}
+
+	// The operator approves it.
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "trust", Keyname: name, Keyid: int(key.KeyTag()),
+	}); err != nil {
+		t.Fatalf("trust: %v", err)
+	}
+
+	sk, err := kdb.FindSig0TrustedKey(name, key.KeyTag())
+	if err != nil || sk == nil {
+		t.Fatalf("the row went missing: %v", err)
+	}
+	if !sk.Trusted {
+		t.Error("manual approval no longer trusts a key; the operator's deliberate decision" +
+			" is the whole point of the trust subcommand and must keep working")
+	}
+}
+
+// The success message must describe what was STORED. The row is always
+// untrusted on this path; saying trusted=true to a caller who asked for it
+// contradicts the row on the one field the branch overrides.
+func TestTheAddMessageReportsTheStoredTrustState(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := mustRR(t, "msg.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
+	resp, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "sig0", SubCommand: "add", Keyname: "msg.example.",
+		Keyid: int(key.KeyTag()), Src: "dns", KeyRR: key.String(), Trusted: true,
+	})
+	if err != nil || resp == nil {
+		t.Fatalf("Sig0TrustMgmt: %v", err)
+	}
+	if strings.Contains(resp.Msg, "trusted=true") {
+		t.Errorf("message %q claims trusted=true; the row was stored untrusted", resp.Msg)
 	}
 }

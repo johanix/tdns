@@ -162,16 +162,6 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 		}
 	}
 
-	// PRE-SCAN: signing, for the same reason -- request-ixfr's verdict below
-	// depends on it, and YAML option order must not decide the answer.
-	signsOwnContent := false
-	for _, option := range zconf.OptionsStrs {
-		switch strings.ToLower(strings.TrimSpace(option)) {
-		case "inline-signing", "online-signing":
-			signsOwnContent = true
-		}
-	}
-
 	for _, option := range zconf.OptionsStrs {
 		option = strings.ToLower(strings.TrimSpace(option))
 		if option == "" {
@@ -237,28 +227,13 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 				}
 				continue
 			}
-			// A signing secondary never asks for a delta either
-			// (shouldRequestIxfr): its baseline is its OWN signatures, so a
-			// difference sequence computed against the primary's copy names
-			// records it does not hold. Reported for the same reason the
-			// primary case is -- an option that does nothing produces no
-			// symptom, so silence leaves the operator believing it works.
+			// A signing secondary is NOT excluded, and must not be: since
+			// §5 PR-2 it asks for deltas like any other secondary
+			// (shouldRequestIxfr), so dropping the option here would leave
+			// `no-request-ixfr` inert on exactly the zones whose operator has
+			// the strongest reason to reach for it -- the delta path would
+			// stay on with no way to turn it off, because the default is ON.
 			//
-			// Worth distinguishing from the primary case when reading the
-			// message: here the option is inert only while the zone signs.
-			// Turn signing off and it takes effect, which is why the text
-			// names the reason rather than the role.
-			if signsOwnContent {
-				errorMsg := fmt.Sprintf("Zone %s: %s is ignored while the zone signs its own content; "+
-					"a delta computed against the primary's copy cannot apply to locally re-signed data",
-					zname, ZoneOptionToString[opt])
-				lg.Error("option ignored: zone signs its own content", "zone", zname,
-					"option", ZoneOptionToString[opt])
-				if zd != nil {
-					zd.SetError(ConfigWarning, "%s", errorMsg)
-				}
-				continue
-			}
 			// Default ON is expressed by requestIxfr() rather than by
 			// materialising a flag here, so the persisted as-configured set
 			// keeps saying what the operator actually wrote.

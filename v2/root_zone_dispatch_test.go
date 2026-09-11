@@ -73,7 +73,7 @@ func TestUpdateOfATLDDelegationFindsTheHostedRoot(t *testing.T) {
 	}
 	m.Insert([]dns.RR{rr})
 	cw := &captureWriter{}
-	_ = UpdateResponder(&DnsUpdateRequest{ResponseWriter: cw, Msg: m, Qname: ".", Status: &UpdateStatus{}}, nil)
+	_ = UpdateResponder(context.Background(), &DnsUpdateRequest{ResponseWriter: cw, Msg: m, Qname: ".", Status: &UpdateStatus{}}, nil)
 
 	if cw.got == nil {
 		t.Fatal("responder wrote no response")

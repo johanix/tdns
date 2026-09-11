@@ -192,7 +192,6 @@ func applyZonePolicyTransactionalLocked(
 	newName string,
 	source PolicyApplySource,
 ) (newRRSIGs int, err error) {
-	_ = ctx // reserved: no ctx-aware downstream call yet (see doc comment)
 	if newPol == nil {
 		return 0, fmt.Errorf("applyZonePolicyTransactional: nil policy %q for zone %s", newName, zd.ZoneName)
 	}
@@ -217,7 +216,7 @@ func applyZonePolicyTransactionalLocked(
 
 	UpdateSigValidityFloor(zd, newPol, Conf.KaspPropagationDelay(), 0, false, Conf.IsLargeAlgorithm, false)
 
-	newRRSIGs, err = zd.SignZone(kdb, true)
+	newRRSIGs, err = zd.SignZone(ctx, kdb, true)
 	if err != nil {
 		// Undo the floor check too. A policy that violates the sig-validity
 		// floor sets DnssecError before SignZone runs -- which is exactly why

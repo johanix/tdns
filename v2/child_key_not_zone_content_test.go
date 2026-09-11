@@ -7,6 +7,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	edns0 "github.com/johanix/tdns/v2/edns0"
@@ -51,7 +52,7 @@ func classify(t *testing.T, zd *ZoneData, rrs ...dns.RR) (*DnsUpdateRequest, *dn
 
 	cw := &captureWriter{}
 	dur := &DnsUpdateRequest{ResponseWriter: cw, Msg: m, Qname: zd.ZoneName, Status: &UpdateStatus{}}
-	_ = UpdateResponder(dur, nil)
+	_ = UpdateResponder(context.Background(), dur, nil)
 	if cw.got == nil {
 		t.Fatal("responder wrote no response")
 	}

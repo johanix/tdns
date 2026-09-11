@@ -136,13 +136,16 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				lgDns.Info("DelegationSyncher: request for DNSKEY RRset sync", "zone", ds.ZoneName)
 				if zd.Options[OptMultiProvider] {
 					lgDns.Info("DelegationSyncher: multisigner zone, notifying controller", "zone", ds.ZoneName)
-					notifyq <- NotifyRequest{
+					if !sendNotifyRequest(ctx, notifyq, NotifyRequest{
 						ZoneName: zd.ZoneName,
 						ZoneData: zd,
 						RRtype:   dns.TypeDNSKEY, // this is only about syncing delegation data, not about rolling DNSSEC keys.
 						// Targets:  dsynctarget.Addresses, // already in addr:port format
 						Targets: zd.MultiSigner.Controller.Notify.Targets,
 						Urgent:  true,
+					}) {
+						lgDns.Info("DelegationSyncher: terminating")
+						return nil
 					}
 				}
 
@@ -472,7 +475,7 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 		case "UPDATE":
 			m, candRcode, candUr, e = zd.SyncZoneDelegationViaUpdate(ctx, kdb, syncstate, cand.Target)
 		case "NOTIFY":
-			m, candRcode, e = zd.SyncZoneDelegationViaNotify(kdb, notifyq, syncstate, cand.Target)
+			m, candRcode, e = zd.SyncZoneDelegationViaNotify(ctx, kdb, notifyq, syncstate, cand.Target)
 		case "API":
 			m, candRcode, e = zd.SyncZoneDelegationViaApi(ctx, imr, syncstate, cand.Target)
 		default:
@@ -503,35 +506,59 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(ctx context.Context, kdb *KeyDB,
 	return zd.SendDelegationUpdate(ctx, kdb, syncstate, dsynctarget, updateMode)
 }
 
-func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyRequest, syncstate DelegationSyncStatus,
-	dsynctarget *DsyncTarget) (string, uint8, error) {
+// sendNotifyRequest hands a NotifyRequest to the notifier, giving up if the
+// context is cancelled first. Reports whether the notifier took it.
+//
+// These were bare channel sends. The notifier is a separate goroutine with its
+// own queue, and a backed-up one blocked the delegation syncher -- the single
+// goroutine that has to keep servicing every other zone -- with no way to
+// abandon the wait at shutdown. Same shape as emitProxyNotifies, which already
+// makes its sends ctx-aware for this reason.
+//
+// It waits rather than dropping on a full queue: the whole NOTIFY scheme is
+// this one message, so a dropped one is a delegation that silently never
+// converges. The bool exists so the caller reports the sync as not done rather
+// than claiming a NOTIFY it never sent.
+func sendNotifyRequest(ctx context.Context, notifyq chan NotifyRequest, req NotifyRequest) bool {
+	select {
+	case notifyq <- req:
+		return true
+	case <-ctx.Done():
+		lgDns.Warn("cancelled before the NOTIFY could be handed to the notifier",
+			"zone", req.ZoneName, "rrtype", dns.TypeToString[req.RRtype])
+		return false
+	}
+}
+
+func (zd *ZoneData) SyncZoneDelegationViaNotify(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest,
+	syncstate DelegationSyncStatus, dsynctarget *DsyncTarget) (string, uint8, error) {
 
 	if zd.Options[OptAllowUpdates] {
-		// 1. Verify that a CSYNC (or CDS) RR is published. If not, create and publish as needed.
-		err := zd.PublishCsyncRR()
-		if err != nil {
+		// 1. Publish the CSYNC, and WAIT for it.
+		//
+		// The whole of this scheme is telling the parent to come and fetch a
+		// CSYNC. PublishCsyncRR only queues a ZONE-UPDATE, so notifying right
+		// after it told the parent to look before the record existed -- and a
+		// parent that looks and finds nothing concludes there is nothing to
+		// do. Both sides then report success and the delegation does not
+		// converge, which is #507's shape on a different scheme.
+		if err := zd.PublishCsyncRRAndWait(ctx); err != nil {
 			lgDns.Error("SyncZoneDelegationViaNotify: error from PublishCsyncRR", "err", err)
 			return "", dns.RcodeServerFailure, err
 		}
 
-		// Try to sign the CSYNC RRset
-		if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
-			apex, _ := zd.GetOwner(zd.ZoneName)
-			rrset, _ := apex.RRtypes.Get(dns.TypeCSYNC)
-			//			dak, err := kdb.GetDnssecActiveKeys(zd.ZoneName)
-			//			if err != nil {
-			//				log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
-			//			} else {
-			//			if len(dak.ZSKs) > 0 {
-			_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, true, nil) // Let's force signing
-			if err != nil {
-				lgDns.Error("error signing CSYNC RRset", "zone", zd.ZoneName, "err", err)
-			} else {
-				lgDns.Debug("signed CSYNC RRset", "zone", zd.ZoneName)
-			}
-			//			}
-			//			}
-		}
+		// Nothing signs the CSYNC here. PublishCsyncRR only ENQUEUES a
+		// ZONE-UPDATE, and the updater signs every RRset it stages before the
+		// publish that carries it, so by the time the record exists it is
+		// already signed by the path that owns it.
+		//
+		// There used to be a force-sign here, and it was wrong three times
+		// over: it fetched the CSYNC before the queued update had applied, so
+		// on a zone with no CSYNC yet the RRset was empty and SignRRset
+		// panicked (#565); it discarded the `ok` from both lookups, which is
+		// exactly the signal that would have said so; and it signed a struct
+		// copy whose slices alias the live zone, mutating published records in
+		// place and then throwing the result away without staging it.
 	}
 	// 2. Create Notify msg
 	// 3. Send Notify msg
@@ -549,22 +576,28 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 
 	// Send NOTIFY(CSYNC) for NS or glue (A/AAAA) changes
 	if len(syncstate.NsAdds) > 0 || len(syncstate.NsRemoves) > 0 || len(syncstate.AAdds) > 0 || len(syncstate.ARemoves) > 0 || len(syncstate.AAAAAdds) > 0 || len(syncstate.AAAARemoves) > 0 {
-		notifyq <- NotifyRequest{
+		if !sendNotifyRequest(ctx, notifyq, NotifyRequest{
 			ZoneName: zd.ZoneName,
 			ZoneData: zd,
 			RRtype:   dns.TypeCSYNC,
 			Targets:  dsynctarget.Addresses,
+		}) {
+			return "", dns.RcodeServerFailure,
+				fmt.Errorf("zone %s: could not hand NOTIFY(CSYNC) to the notifier", zd.ZoneName)
 		}
 		lgDns.Info("SyncZoneDelegationViaNotify: sent NOTIFY(CSYNC)", "zone", zd.ZoneName)
 	}
 
 	// Send NOTIFY(CDS) for DS/DNSKEY changes
 	if len(syncstate.DSAdds) > 0 || len(syncstate.DSRemoves) > 0 {
-		notifyq <- NotifyRequest{
+		if !sendNotifyRequest(ctx, notifyq, NotifyRequest{
 			ZoneName: zd.ZoneName,
 			ZoneData: zd,
 			RRtype:   dns.TypeCDS,
 			Targets:  dsynctarget.Addresses,
+		}) {
+			return "", dns.RcodeServerFailure,
+				fmt.Errorf("zone %s: could not hand NOTIFY(CDS) to the notifier", zd.ZoneName)
 		}
 		lgDns.Info("SyncZoneDelegationViaNotify: sent NOTIFY(CDS)", "zone", zd.ZoneName)
 	}

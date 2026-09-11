@@ -88,8 +88,8 @@ func tNextRoll(kdb *KeyDB, zone string, pol *DnssecPolicy) (time.Time, bool, err
 		}
 	}
 
-	// Scheduled.
-	if pol.KSK.Lifetime == 0 {
+	// Scheduled. An unset lifetime, and "forever", both mean never expires.
+	if !lifetimeSchedulesRoll(pol.KSK.Lifetime) {
 		return time.Time{}, false, nil
 	}
 	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)

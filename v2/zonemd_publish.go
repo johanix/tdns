@@ -7,7 +7,6 @@ package tdns
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -102,11 +101,14 @@ func (zd *ZoneData) zonemdAlgsLocked() []uint8 {
 // the restitch, where the answer decides whether the apex NSEC bitmap lists
 // ZONEMD at all, and EnsureActiveDnssecKeys is not a predicate -- it mints a
 // zone's first keys as a side effect.
-func (zd *ZoneData) zonemdSignableLocked() bool {
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+func (zd *ZoneData) zonemdSignableLocked(sm *signingMaterial) bool {
+	if !zd.signsItsOwnContent() {
 		return true // unsigned zone: nothing to sign, so nothing to be unable to sign
 	}
-	return zd.DnssecPolicy != nil && zd.KeyDB != nil
+	// Whatever the publish resolved. Still a cheap predicate -- the resolution
+	// happened once, at the top of publishWorkingSetLocked, precisely so this
+	// gate does not have to call EnsureActiveDnssecKeys itself.
+	return sm != nil
 }
 
 // zonemdTTLLocked returns the TTL for the apex ZONEMD RRset: the SOA's own,
@@ -172,11 +174,11 @@ func zonemdPairsMatch(rs core.RRset, scheme uint8, algs []uint8) bool {
 // proof no validator will accept.
 //
 // Runs with zd.mu held.
-func (zd *ZoneData) ensureZonemdPresenceLocked() {
+func (zd *ZoneData) ensureZonemdPresenceLocked(sm *signingMaterial) {
 	if zd.workingSet == nil {
 		return
 	}
-	if !zd.zoneManagesZonemd() || !zd.zonemdSignableLocked() {
+	if !zd.zoneManagesZonemd() || !zd.zonemdSignableLocked(sm) {
 		// Only our own record comes out. An apex ZONEMD on a zone that does
 		// not manage one is operator data -- someone wrote it into the zone
 		// file -- and removing it because we happen not to be maintaining it
@@ -241,11 +243,11 @@ func (zd *ZoneData) ensureZonemdPresenceLocked() {
 // prevSerial is the serial to restore if the publish is abandoned.
 //
 // Runs with zd.mu held.
-func (zd *ZoneData) updateZonemdLocked(serial, prevSerial uint32) bool {
+func (zd *ZoneData) updateZonemdLocked(serial, prevSerial uint32, sm *signingMaterial) bool {
 	if zd.workingSet == nil {
 		return true
 	}
-	if !zd.zoneManagesZonemd() || !zd.zonemdSignableLocked() {
+	if !zd.zoneManagesZonemd() || !zd.zonemdSignableLocked(sm) {
 		zd.zonemdDigests = nil
 		zd.zonemdDigestSerial = 0
 		return true
@@ -262,7 +264,7 @@ func (zd *ZoneData) updateZonemdLocked(serial, prevSerial uint32) bool {
 	// reused rather than rebuilt. See zonemd_cache.go.
 	digests, derr := zd.zonemdDigestsLocked(scheme, algs)
 	if derr != nil {
-		return zd.abandonZonemdLocked(prevSerial, fmt.Errorf("computing the digest: %w", derr))
+		return zd.abandonZonemdLocked(prevSerial, sm, fmt.Errorf("computing the digest: %w", derr))
 	}
 
 	ttl := zd.zonemdTTLLocked()
@@ -274,7 +276,7 @@ func (zd *ZoneData) updateZonemdLocked(serial, prevSerial uint32) bool {
 	for _, alg := range algs {
 		digest, ok := digests[alg]
 		if !ok {
-			return zd.abandonZonemdLocked(prevSerial,
+			return zd.abandonZonemdLocked(prevSerial, sm,
 				fmt.Errorf("no %s digest was produced", zonemdAlgName(alg)))
 		}
 		rs.RRs = append(rs.RRs, &dns.ZONEMD{
@@ -296,21 +298,8 @@ func (zd *ZoneData) updateZonemdLocked(serial, prevSerial uint32) bool {
 		// SignRRset does not reach its own EnsureActiveDnssecKeys -- that path
 		// gets to PublishDnskeyRRs and re-locks zd.mu. Same deadlock class as
 		// the SOA re-sign and the NSEC restitch alongside this.
-		dak, err := zd.EnsureActiveDnssecKeys(zd.KeyDB, true)
-		if err != nil {
-			return zd.abandonZonemdLocked(prevSerial,
-				fmt.Errorf("resolving keys to sign the ZONEMD: %w", err))
-		}
-		var clamp *ClampParams
-		if zd.DnssecPolicy != nil {
-			clamp, err = ClampParamsForZone(zd.KeyDB, zd.ZoneName, zd.DnssecPolicy, time.Now())
-			if err != nil {
-				return zd.abandonZonemdLocked(prevSerial,
-					fmt.Errorf("resolving clamp parameters to sign the ZONEMD: %w", err))
-			}
-		}
-		if _, err := zd.SignRRset(&rs, zd.ZoneName, dak, true, clamp); err != nil {
-			return zd.abandonZonemdLocked(prevSerial, fmt.Errorf("signing the ZONEMD: %w", err))
+		if _, err := zd.SignRRset(&rs, zd.ZoneName, sm.dak, true, sm.clamp); err != nil {
+			return zd.abandonZonemdLocked(prevSerial, sm, fmt.Errorf("signing the ZONEMD: %w", err))
 		}
 	}
 
@@ -341,7 +330,7 @@ func (zd *ZoneData) updateZonemdLocked(serial, prevSerial uint32) bool {
 // Returns false only when the chain cannot be brought back into agreement with
 // the zone, which is the one case where publishing anyway would put the very
 // inconsistency this function exists to avoid onto the wire.
-func (zd *ZoneData) abandonZonemdLocked(prevSerial uint32, err error) bool {
+func (zd *ZoneData) abandonZonemdLocked(prevSerial uint32, sm *signingMaterial, err error) bool {
 	zd.removeZonemdLocked()
 	zd.noteZonemdStateLocked(err.Error())
 
@@ -350,7 +339,7 @@ func (zd *ZoneData) abandonZonemdLocked(prevSerial uint32, err error) bool {
 	// alone it would assert a type the apex no longer owns, and the NXRRSET
 	// proof for ZONEMD would fail. A second restitch is O(zone) and this is a
 	// path that should never run twice in a row.
-	rerr := zd.restitchNsecLocked()
+	rerr := zd.restitchNsecLocked(sm)
 	if rerr == nil {
 		return true
 	}

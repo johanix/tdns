@@ -34,15 +34,19 @@ nilpol.example.	3600	IN	NS	ns.nilpol.example.
 
 	zd.mu.Lock()
 	zd.ensureWorkingSet()
-	zd.resignWorkingSetSOAIfSigned() // must NOT panic (was a SIGSEGV)
+	// Resolved the way publishWorkingSetLocked resolves it: the SIGSEGV this
+	// pins was in the resolution, so it has to stay inside the locked section.
+	sm, _ := zd.resolveSigningMaterialLocked()
+	zd.resignWorkingSetSOAIfSigned(sm) // must NOT panic (was a SIGSEGV)
 	apex := zd.workingSet[zd.ZoneName]
 	zd.mu.Unlock()
 
 	if apex == nil {
 		t.Fatal("apex missing from working set after resign")
 	}
-	// Nothing to sign under yet — the zone is signed later by SetupZoneSigning
-	// once the sync binds a policy. The point is it returned cleanly.
+	// No keys and no policy, so nothing signs here: the publish goes out
+	// unsigned and not Ready, and the policy apply signs once the sync binds.
+	// The point is that it returned cleanly rather than dereferencing nil.
 	if soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA); len(soa.RRSIGs) != 0 {
 		t.Fatalf("expected no RRSIG on SOA with no policy bound, got %d", len(soa.RRSIGs))
 	}

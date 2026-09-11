@@ -203,7 +203,33 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			if tp.KeyRR == "" {
 				resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key to be fetched via DNS (no key supplied)", tp.Keyname)
 			} else {
-				res, xerr := tx.Exec(adddiscoveredkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.DnssecValidated, tp.Trusted, tp.Src, tp.KeyRR)
+				// trusted=false, always, whatever the caller said.
+				//
+				// APItruststore decodes client JSON straight into a
+				// TruststorePost and hands it here, so every field below is
+				// attacker-chosen on that path. An authenticated client could
+				// POST src=dns with trusted=true and get a trusted row for any
+				// child name -- no DNS lookup, no verification, and from then
+				// on ApproveChildUpdate accepts that key's signature on
+				// delegation data.
+				//
+				// Discovery is not verification, which is what this branch is
+				// for: it records that a key EXISTS so the verifier has a row
+				// to promote. Promotion is the "verify" subcommand's job, after
+				// VerifyChildKey has actually found and validated the key. So
+				// the one field that confers authority is not the caller's to
+				// set here.
+				//
+				// The validated/dnssecvalidated columns stay as passed. They
+				// confer nothing on an untrusted row, and the verify path
+				// overwrites both from a real verification before anything
+				// reads them for a decision.
+				if tp.Trusted {
+					lgSigner.Warn("refusing a client-supplied trusted flag on a DNS-discovered"+
+						" SIG(0) key; it is recorded untrusted and must be verified",
+						"zone", tp.Keyname, "keyid", tp.Keyid)
+				}
+				res, xerr := tx.Exec(adddiscoveredkeysql, tp.Keyname, tp.Keyid, tp.Validated, tp.DnssecValidated, false, tp.Src, tp.KeyRR)
 				err = xerr
 				if err != nil {
 					lgSigner.Error("failed to add SIG(0) key to TrustStore from DNS", "err", err)
@@ -216,8 +242,11 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 					resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d found in DNS was already in the TrustStore",
 						tp.Keyname, tp.Keyid)
 				} else {
-					resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d found in DNS (trusted=%v) added to TrustStore",
-						tp.Keyname, tp.Keyid, tp.Trusted)
+					// What was STORED, which on this branch is always untrusted.
+					// Echoing tp.Trusted told a caller who asked for trusted=true
+					// that it got it, on the one field this branch overrides.
+					resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d found in DNS added to TrustStore (trusted=false; verification decides)",
+						tp.Keyname, tp.Keyid)
 				}
 			}
 		}
