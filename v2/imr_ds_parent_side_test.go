@@ -55,17 +55,34 @@ func startDSAuthDouble(t *testing.T, ip net.IP, port int, zone string, ds dns.RR
 		_ = w.WriteMsg(m)
 	})
 	started := make(chan struct{})
+	served := make(chan error, 1)
 	srv := &dns.Server{PacketConn: pc, Handler: handler, NotifyStartedFunc: func() { close(started) }}
-	go func() { _ = srv.ActivateAndServe() }()
+	go func() { served <- srv.ActivateAndServe() }()
 	select {
 	case <-started:
+	case err := <-served:
+		t.Fatalf("auth double on %s failed to serve: %v", ip, err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("auth double did not start")
 	}
+	// The stop joins the serve goroutine, as startStubAuthServer does: a
+	// double still serving after its test returns can answer the next test's
+	// queries on a reused port, and a serve error nobody reads is a failure
+	// nobody sees.
 	return pc.LocalAddr().(*net.UDPAddr).Port, &dsQueries, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = srv.ShutdownContext(ctx)
+		if err := srv.ShutdownContext(ctx); err != nil {
+			t.Errorf("auth double on %s shutdown: %v", ip, err)
+		}
+		select {
+		case err := <-served:
+			if err != nil {
+				t.Errorf("auth double on %s stopped serving with: %v", ip, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("auth double on %s: serve goroutine did not exit", ip)
+		}
 	}
 }
 
