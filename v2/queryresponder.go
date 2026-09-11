@@ -1102,7 +1102,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		}
 	}
 
-	// 2. Check for exact match qname+qtype
+	// 3. Check for exact match qname+qtype
 	lgHandler.Debug("checking for exact match", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName)
 
 	if tdnsSpecialTypes[qtype] || standardDNSTypes[qtype] {

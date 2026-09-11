@@ -52,7 +52,9 @@ func (zd *ZoneData) findDelegationFrom(snap *zoneSnapshot, qname string, dnssec_
 			}
 		}
 	}
-	zd.Logger.Printf("FindZone: no delegation for qname=%s found in %s", qname, zd.ZoneName)
+	if zd.Debug {
+		zd.Logger.Printf("FindDelegation: no delegation for qname=%s found in %s", qname, zd.ZoneName)
+	}
 	return nil
 }
 
