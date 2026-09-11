@@ -257,9 +257,8 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 // handleDSQuery answers a DS query. DS is parent-side data (RFC 4035 §3.1.4.1):
 // it is authoritative in the zone that DELEGATES to qname, never in qname's own
 // zone. The answering zone is therefore the nearest zone we host that is a
-// STRICT ancestor of qname — found by stripping qname's leftmost label and
-// letting FindZone walk up from there, entirely within the local Zones map. We
-// NEVER chase the parent via the recursive resolver.
+// STRICT ancestor of qname — found by FindParentZone, entirely within the local
+// Zones map. We NEVER chase the parent via the recursive resolver.
 //
 // Outcomes, ordered from most to least common (a grandparent referral is by far
 // the rarest, so it is the last arm):
@@ -288,12 +287,14 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
 
-	// DS can never live in qname's own zone, so strip qname's leftmost label
-	// and look up the parent side. FindZone walks up from there and returns the
-	// nearest hosted strict ancestor of qname (with the same case-folding as the
-	// main lookup); it can never return qname's own zone. qname is a FQDN here,
-	// so it always has at least the root dot.
-	pzd := FindZone(qname[strings.Index(qname, ".")+1:])
+	// DS can never live in qname's own zone, so look up the parent side.
+	// FindParentZone starts one label in and walks up to the nearest hosted
+	// strict ancestor (with the same case-folding as the main lookup). It, and
+	// not FindZone on the remainder, because it reads the empty remainder of a
+	// TLD as the root: FindZone("") tries nothing, and a server hosting both
+	// "." and a TLD answered the TLD's DS with the TLD's own NODATA. For "."
+	// itself it returns the root, which has no parent and answers NODATA.
+	pzd := FindParentZone(qname)
 	if pzd == nil {
 		if core.EqualNames(qname, zd.ZoneName) {
 			return zd.sendChildApexDSNodata(m, w, qname, msgoptions, kdb)

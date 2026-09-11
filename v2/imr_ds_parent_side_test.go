@@ -157,6 +157,78 @@ func TestClientDSQueryGoesToTheParent(t *testing.T) {
 	})
 }
 
+// A DS query goes to the parent's servers, so the zone it is accounted to must
+// be the parent's too: the zone whose backoff filters its tuples, and the zone
+// whose NS set is widened when they run out. Both used to be the qname's own.
+func TestDSQueryIsAccountedToTheParentZone(t *testing.T) {
+	imr := newTestImr(t)
+	zones := map[string]*cache.Zone{}
+	for _, z := range []string{"example.", "kid.example."} {
+		imr.Cache.ServerMap.Set(z, map[string]*cache.AuthServer{})
+		zones[z] = &cache.Zone{ZoneName: z}
+		imr.Cache.ZoneMap.Set(z, zones[z])
+	}
+
+	t.Run("prioritizeServers", func(t *testing.T) {
+		// The parent's server has a backoff booked against the CHILD zone,
+		// which must not keep it out of the parent's DS query -- and must
+		// still filter it from a query that is the child's.
+		const addr = "192.0.2.1"
+		s := cache.NewAuthServer("ns1.example.")
+		s.SetAddrs([]string{addr})
+		s.SetTransports([]core.Transport{core.TransportDo53})
+		s.SetTransportWeight(core.TransportDo53, 100)
+		zones["kid.example."].RecordZoneAddressFailureForRcode(addr, core.TransportDo53, dns.RcodeRefused, false)
+		sm := map[string]*cache.AuthServer{"ns1.example.": s}
+
+		if zone, _, tuples := imr.prioritizeServers("kid.example.", dns.TypeDS, sm, edns0.PrivacyNone); zone != "example." || len(tuples) == 0 {
+			t.Errorf("DS: zone %q with %d tuples; want the parent example. and its server", zone, len(tuples))
+		}
+		if zone, _, tuples := imr.prioritizeServers("kid.example.", dns.TypeA, sm, edns0.PrivacyNone); zone != "kid.example." || len(tuples) != 0 {
+			t.Errorf("A: zone %q with %d tuples; want kid.example., whose backoff filters the server", zone, len(tuples))
+		}
+	})
+
+	t.Run("expandServerMapWithMissingNS", func(t *testing.T) {
+		for zone, ns := range map[string]string{"example.": "ns1.example.", "kid.example.": "ns.kid.example."} {
+			imr.Cache.Set(zone, dns.TypeNS, &cache.CachedRRset{
+				Name: zone, RRtype: dns.TypeNS, Context: cache.ContextAnswer,
+				RRset: &core.RRset{Name: zone, Class: dns.ClassINET, RRtype: dns.TypeNS,
+					RRs: []dns.RR{mustNSRR(t, zone+" 3600 IN NS "+ns)}},
+			})
+		}
+		// A cancelled context stops the helper before it resolves anything,
+		// but only after it has entered the missing NS name into the map --
+		// which is exactly the choice under test, with no network.
+		cctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		for _, c := range []struct {
+			qtype     uint16
+			want, not string
+		}{
+			{dns.TypeDS, "ns1.example.", "ns.kid.example."},
+			{dns.TypeA, "ns.kid.example.", "ns1.example."},
+		} {
+			sm := map[string]*cache.AuthServer{}
+			imr.expandServerMapWithMissingNS(cctx, "kid.example.", c.qtype, sm)
+			if _, ok := sm[cache.ServerKey(c.want)]; !ok {
+				t.Errorf("%s: widened with %v, want %s", dns.TypeToString[c.qtype], keysOf(sm), c.want)
+			}
+			if _, ok := sm[cache.ServerKey(c.not)]; ok {
+				t.Errorf("%s: widened with %s, which is the other side of the cut", dns.TypeToString[c.qtype], c.not)
+			}
+		}
+	})
+}
+
+func keysOf(m map[string]*cache.AuthServer) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // FindClosestKnownZoneFor is the whole choice: the parent's zone for a DS, the
 // qname's own for anything else, and the root for the root's DS.
 func TestFindClosestKnownZoneForDS(t *testing.T) {

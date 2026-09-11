@@ -3571,7 +3571,7 @@ func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, for
 		imr.Cache.Logger.Printf("*** IterativeDNSQuery: found CNAME target: %s, chasing.", cur)
 		bestmatch, tmpservers, err := imr.Cache.FindClosestKnownZoneFor(cur, qtype)
 		if err != nil {
-			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from FindClosestKnownZone: %v", err)
+			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from FindClosestKnownZoneFor: %v", err)
 			return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, err
 		}
 		imr.Cache.Logger.Printf("*** IterativeDNSQuery: best match for target %s is %s", cur, bestmatch)
@@ -3629,7 +3629,7 @@ func (imr *Imr) DefaultRRsetFetcher(ctx context.Context, qname string, qtype uin
 	// implement with your IterativeDNSQuery + server selection
 	best, servers, err := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
 	if err != nil {
-		return nil, fmt.Errorf("FindClosestKnownZone error for %s: %v", qname, err)
+		return nil, fmt.Errorf("FindClosestKnownZoneFor error for %s %s: %v", qname, dns.TypeToString[qtype], err)
 	}
 	_ = best // could be used for logging
 	if len(servers) == 0 {

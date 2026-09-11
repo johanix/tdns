@@ -57,6 +57,72 @@ ns.c.pq.example.	3600	IN	A	192.0.2.2
 		}
 	})
 
+	t.Run("root_parent_serves_TLD_DS", func(t *testing.T) {
+		// The same cut one label higher: we host the root and a TLD. Stripping
+		// one label off "tld." leaves the empty name, which must be read as the
+		// root -- otherwise the TLD finds no hosted parent and answers its own
+		// NODATA while the root holding its DS sits in the same server.
+		root := `.	3600	IN	SOA	ns.tld. hostmaster.tld. 1 7200 1800 604800 7200
+.	3600	IN	NS	ns.tld.
+tld.	3600	IN	NS	ns.tld.
+tld.	3600	IN	DS	12345 8 2 E2D3C916F6DEEAC73294E8268FB5885044A833FC5459588F4A9184CFC41A5766
+ns.tld.	3600	IN	A	192.0.2.6
+`
+		tld := `tld.	3600	IN	SOA	ns.tld. hostmaster.tld. 1 7200 1800 604800 7200
+tld.	3600	IN	NS	ns.tld.
+ns.tld.	3600	IN	A	192.0.2.6
+`
+		testSnapshotZone(t, ".", root)
+		tldZd := testSnapshotZone(t, "tld.", tld)
+
+		rw := &fakeRW{}
+		if err := tldZd.handleDSQuery(new(dns.Msg), rw, "tld.", &edns0.MsgOptions{}, nil); err != nil {
+			t.Fatalf("handleDSQuery: %v", err)
+		}
+		resp := rw.written
+		if resp == nil || resp.MsgHdr.Rcode != dns.RcodeSuccess {
+			t.Fatalf("want NOERROR, got %+v", resp)
+		}
+		var gotDS bool
+		for _, rr := range resp.Answer {
+			if ds, ok := rr.(*dns.DS); ok && ds.Header().Name == "tld." {
+				gotDS = true
+			}
+		}
+		if !gotDS {
+			t.Fatalf("the TLD's DS should be served from the hosted root; answer=%v authority=%v", resp.Answer, resp.Ns)
+		}
+	})
+
+	t.Run("root_DS_is_the_roots_NODATA", func(t *testing.T) {
+		// The root has no parent. Its DS query finds the root itself and
+		// answers NODATA from it, never a referral or REFUSED.
+		root := `.	3600	IN	SOA	ns.tld. hostmaster.tld. 1 7200 1800 604800 7200
+.	3600	IN	NS	ns.tld.
+tld.	3600	IN	NS	ns.tld.
+ns.tld.	3600	IN	A	192.0.2.6
+`
+		rootZd := testSnapshotZone(t, ".", root)
+
+		rw := &fakeRW{}
+		if err := rootZd.handleDSQuery(new(dns.Msg), rw, ".", &edns0.MsgOptions{}, nil); err != nil {
+			t.Fatalf("handleDSQuery: %v", err)
+		}
+		resp := rw.written
+		if resp == nil || resp.MsgHdr.Rcode != dns.RcodeSuccess || !resp.MsgHdr.Authoritative || len(resp.Answer) != 0 {
+			t.Fatalf("want an authoritative NODATA, got %+v", resp)
+		}
+		var soaOwner string
+		for _, rr := range resp.Ns {
+			if rr.Header().Rrtype == dns.TypeSOA {
+				soaOwner = rr.Header().Name
+			}
+		}
+		if soaOwner != "." {
+			t.Fatalf("want the root's SOA in authority; got %v", resp.Ns)
+		}
+	})
+
 	t.Run("grandparent_refers_to_parent", func(t *testing.T) {
 		// We host a grandparent (which delegates to the child's real parent) and
 		// the child, but NOT the immediate parent. All we can do is refer down to
