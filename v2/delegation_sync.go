@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -216,24 +217,7 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 
 	// EnsureApexKEY (PublishKeyRRs via Sig0KeyPreparation) then the ceremony.
 	// The proxy path uses a no-op ensurer: the operator publishes the KEY.
-	msg, ur, err := zd.bootstrapSig0Key(ctx, alg, authApexKEY{zd: zd, kdb: kdb, alg: alg})
-	if errors.Is(err, errBootstrapManual) {
-		// The parent's bootstrap is manual by design; this is the state
-		// MANUAL-BOOTSTRAP-REQUIRED exists for, and it recurs on every load
-		// until the operator acts. Not an error.
-		lgDns.Info("DelegationSyncSetup: parent requires manual SIG(0) bootstrap; the apex KEY is published, waiting for the operator",
-			"zone", zd.ZoneName, "msg", msg)
-		return nil
-	}
-	if err != nil {
-		lgDns.Error("DelegationSyncSetup: error from BootstrapSig0KeyWithParent", "zone", zd.ZoneName, "err", err)
-		for _, tes := range ur.TargetStatus {
-			lgDns.Error("DelegationSyncSetup: TargetUpdateStatus", "zone", zd.ZoneName, "status", tes)
-		}
-		return err
-	}
-	lgDns.Info("DelegationSyncSetup: SIG(0) key bootstrap complete", "zone", zd.ZoneName, "msg", msg)
-	return nil
+	return zd.finishDelegationSyncSetup(zd.bootstrapSig0Key(ctx, alg, authApexKEY{zd: zd, kdb: kdb, alg: alg}))
 }
 
 func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
@@ -788,6 +772,16 @@ func handleDelegationSyncSetupWith(ctx context.Context, conf *Config, delsyncq c
 		}
 		return deferSetupRetry(ctx, delsyncq, ds, "IMR published but not usable")
 
+	case errors.Is(err, errBootstrapTransient):
+		// The parent's answer was not final. Same bounded backoff as the
+		// other non-final failures, and the same give-up limit.
+		if ds.Attempt+1 >= delegationSyncMaxRetries {
+			lgDns.Error("DelegationSyncher: SIG(0) bootstrap setup gave up; the parent's answer"+
+				" never became final", "zone", ds.ZoneName, "attempts", ds.Attempt+1, "err", err)
+			return nil
+		}
+		return deferSetupRetry(ctx, delsyncq, ds, "the parent's answer was not final")
+
 	case errors.Is(err, errBootstrapAdvertisementLookup):
 		// The parent's SVCB advertisement could not be looked up: not a verdict
 		// on the method set, so not final. Retry with the delegation-sync
@@ -805,5 +799,87 @@ func handleDelegationSyncSetupWith(ctx context.Context, conf *Config, delsyncq c
 		lgDns.Error("DelegationSyncher: error from DelegationSyncSetup, ignoring sync request",
 			"zone", ds.ZoneName, "err", err)
 	}
+	return nil
+}
+
+// errBootstrapTransient marks a SIG(0) bootstrap whose outcome is not final:
+// the parent could not be reached, failed, or is still verifying the key.
+// Retry with backoff rather than treating the attempt as done.
+var errBootstrapTransient = errors.New("the parent's answer to the SIG(0) bootstrap is not final")
+
+// bootstrapOutcome turns the parent's answer to the bootstrap UPDATE into an
+// error the setup arm can act on.
+//
+// The ceremony hands back the parent's rcode and EDE with a nil error, on
+// purpose -- sendUpdateVia says so, "so it can apply the draft's per-RCODE,
+// per-EDE policy". Nothing applied it. DelegationSyncSetup logged "bootstrap
+// complete" for a SERVFAIL or a REFUSED alike, returned nil, and the setup arm
+// took nil as done: a zone whose parent answered "not yet" was left
+// unbootstrapped until the next reload. #575's symptom, by another road.
+//
+// Three outcomes, and only one of them retries:
+//   - not final -- no answer at all, SERVFAIL, or REFUSED with EDE
+//     KnownButNotTrusted (the parent has the key and is still verifying it):
+//     errBootstrapTransient.
+//   - the parent requires manual bootstrap (EDE ManualBootstrapRequired):
+//     errBootstrapManual, which the caller already treats as waiting for the
+//     operator, not as an error.
+//   - anything else, including a failed validation and any other refusal: a
+//     plain error. Retrying a verdict only repeats it.
+func bootstrapOutcome(ur UpdateResult, err error) error {
+	if err != nil {
+		if errors.Is(err, ErrUpdateUnreachable) {
+			return fmt.Errorf("%w: %v", errBootstrapTransient, err)
+		}
+		return err
+	}
+	switch ur.Rcode {
+	case dns.RcodeSuccess:
+		return nil
+	case dns.RcodeServerFailure:
+		return fmt.Errorf("%w: the parent answered SERVFAIL", errBootstrapTransient)
+	case dns.RcodeRefused:
+		if ur.EDEFound {
+			switch ur.EDECode {
+			case edns0.EDESig0KeyKnownButNotTrusted:
+				return fmt.Errorf("%w: the parent has the key and is still verifying it (EDE %d)",
+					errBootstrapTransient, ur.EDECode)
+			case edns0.EDESig0ManualBootstrapRequired:
+				return fmt.Errorf("%w (EDE %d)", errBootstrapManual, ur.EDECode)
+			}
+		}
+	}
+	if ur.EDEFound {
+		return fmt.Errorf("the parent refused the SIG(0) bootstrap: rcode %s, EDE %d %q",
+			dns.RcodeToString[ur.Rcode], ur.EDECode, ur.EDEMessage)
+	}
+	return fmt.Errorf("the parent refused the SIG(0) bootstrap: rcode %s", dns.RcodeToString[ur.Rcode])
+}
+
+// finishDelegationSyncSetup decides what a bootstrap ceremony's result means
+// for the setup: done, waiting for the operator, retry, or failed.
+//
+// Split from DelegationSyncSetup, which tail-calls it, so the decision is
+// reachable from a test. Driving DelegationSyncSetup itself needs a zone, a
+// DSYNC lookup and a keystore; without the split, deleting the one line that
+// applies bootstrapOutcome left every test green.
+func (zd *ZoneData) finishDelegationSyncSetup(msg string, ur UpdateResult, err error) error {
+	err = bootstrapOutcome(ur, err)
+	if errors.Is(err, errBootstrapManual) {
+		// The parent's bootstrap is manual by design; this is the state
+		// MANUAL-BOOTSTRAP-REQUIRED exists for, and it recurs on every load
+		// until the operator acts. Not an error.
+		lgDns.Info("DelegationSyncSetup: parent requires manual SIG(0) bootstrap; the apex KEY is published, waiting for the operator",
+			"zone", zd.ZoneName, "msg", msg)
+		return nil
+	}
+	if err != nil {
+		lgDns.Error("DelegationSyncSetup: error from BootstrapSig0KeyWithParent", "zone", zd.ZoneName, "err", err)
+		for _, tes := range ur.TargetStatus {
+			lgDns.Error("DelegationSyncSetup: TargetUpdateStatus", "zone", zd.ZoneName, "status", tes)
+		}
+		return err
+	}
+	lgDns.Info("DelegationSyncSetup: SIG(0) key bootstrap complete", "zone", zd.ZoneName, "msg", msg)
 	return nil
 }
