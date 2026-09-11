@@ -799,7 +799,12 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 	visited := make(map[string]bool)
 	visited[qname] = true
 
-	for depth < maxDepth {
+	// RFC 1034 section 4.3.2 step 3a follows a CNAME only when QTYPE does not
+	// match it. A query for the CNAME itself, or for ANY, is an exact match:
+	// the CNAME already in the answer is all of it.
+	chase := qtype != dns.TypeCNAME && qtype != dns.TypeANY
+
+	for chase && depth < maxDepth {
 		// Get the current CNAME target
 		if currentOwner.RRtypes.Count() != 1 {
 			break // Not a CNAME-only owner anymore
@@ -828,8 +833,19 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 			break
 		}
 
-		// Get owner data from the target zone (pin ITS snapshot).
-		tgtOwner := getOwnerFrom(tgtZone.publishedSnapshot(), tgt)
+		// Pin the target zone's snapshot for the cut check and the read.
+		tgtSnap := tgtZone.publishedSnapshot()
+
+		// A target at or below a zone cut in the target zone is the child's to
+		// answer for: all the target zone holds there is glue and occluded
+		// data, and a query for the target itself gets a referral. Stop with
+		// the CNAME only, as for a target outside our authority.
+		if cdd := tgtZone.findDelegationFrom(tgtSnap, tgt, msgoptions.DO); cdd != nil {
+			lgHandler.Debug("CNAME target at or below a zone cut", "target", tgt, "zone", tgtZone.ZoneName, "cut", cdd.ChildName)
+			break
+		}
+
+		tgtOwner := getOwnerFrom(tgtSnap, tgt)
 		if tgtOwner == nil {
 			lgHandler.Error("failed to get owner for CNAME target", "target", tgt, "zone", tgtZone.ZoneName)
 			break
@@ -1084,6 +1100,20 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	}
 
 	if len(qname) > len(zd.ZoneName) {
+		// 1. If qname is below the zone apex, check for child delegation.
+		// Before the CNAME: at or below a cut this zone holds only glue and
+		// occluded data, and a CNAME among it is no more ours to serve than
+		// an address is. RFC 1034 section 4.3.2 step 3 descends label by
+		// label, so it meets the cut before it reaches the node.
+		// log.Printf("---> Checking for child delegation for %s", qname)
+		cdd := zd.findDelegationFrom(snap, qname, msgoptions.DO)
+
+		// If there is delegation data and an NS RRset is present, return a referral
+		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
+			zd.sendReferral(m, w, cdd, apex, msgoptions, MaybeSignRRset)
+			return nil
+		}
+
 		// 2. Check for qname + CNAME (only if CNAME is the only RR type)
 		lgHandler.Debug("checking for CNAME", "qname", qname, "zone", zd.ZoneName)
 		handled, err := zd.handleCNAMEChain(m, w, qname, qtype, owner, snap, msgoptions, kdb, apex, minimalResponses)
@@ -1096,19 +1126,9 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			w.WriteMsg(m)
 			return nil
 		}
-
-		// 1. If qname is below the zone apex, check for child delegation
-		// log.Printf("---> Checking for child delegation for %s", qname)
-		cdd := zd.findDelegationFrom(snap, qname, msgoptions.DO)
-
-		// If there is delegation data and an NS RRset is present, return a referral
-		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
-			zd.sendReferral(m, w, cdd, apex, msgoptions, MaybeSignRRset)
-			return nil
-		}
 	}
 
-	// 2. Check for exact match qname+qtype
+	// 3. Check for exact match qname+qtype
 	lgHandler.Debug("checking for exact match", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName)
 
 	if tdnsSpecialTypes[qtype] || standardDNSTypes[qtype] {
