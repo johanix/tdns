@@ -481,7 +481,8 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 // this function about it is a compile error, not a silently missed report.
 func imrTuningEqual(a, b ImrTuningConf) bool {
 	if a.Backoff != b.Backoff || a.AddressFamily != b.AddressFamily ||
-		a.Discovery != b.Discovery || a.QueryBudget != b.QueryBudget {
+		a.Discovery != b.Discovery || a.QueryBudget != b.QueryBudget ||
+		a.CacheMaxTTL != b.CacheMaxTTL || a.CacheMinTTL != b.CacheMinTTL {
 		return false
 	}
 	x, y := a.UpgradeIndirectCacheHits, b.UpgradeIndirectCacheHits

@@ -202,6 +202,10 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		RoutingFailure: conf.Imr.Tuning.Backoff.RoutingFailure,
 		LameDelegation: conf.Imr.Tuning.Backoff.LameDelegation,
 	})
+	cache.SetTTLLimits(cache.TTLLimits{
+		Min: conf.Imr.Tuning.CacheMinTTL,
+		Max: conf.Imr.Tuning.CacheMaxTTL,
+	})
 	imr := &Imr{
 		Cache:                   rrcache,
 		DnskeyCache:             rrcache.DnskeyCache,

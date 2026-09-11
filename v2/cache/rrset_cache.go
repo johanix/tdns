@@ -53,9 +53,18 @@ func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 	return &tmp
 }
 
+// Set stores a validated key. Keys learned from the network are subject to
+// cache-min-ttl / cache-max-ttl like the DNSKEY RRset they came from; without
+// that a key would stay usable for validation long after the RRset carrying it
+// had been capped out of the RRset cache. Trust anchors are configuration and
+// keep their own lifetime.
 func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRset) {
 	lookupKey := dnskeyKey(zonename, keyid)
-	dkc.Map.Set(lookupKey, *cdr)
+	entry := *cdr
+	if !entry.TrustAnchor {
+		entry.Expiration, _, _ = GetTTLLimits().bound(entry.Expiration, time.Now())
+	}
+	dkc.Map.Set(lookupKey, entry)
 }
 
 // var RRsetCache = NewRRsetCache()
@@ -137,6 +146,13 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 		rrcache.evictOldestRRset()
 	}
 
+	// cache-min-ttl / cache-max-ttl, for data learned from the network. The
+	// lifetime decided here is also the TTL every client is served, so this is
+	// the one place the limits need to be applied.
+	now := time.Now()
+	bounded := ttlBounded(crrset.Context)
+	limits := GetTTLLimits()
+
 	// Compute min TTL and set Expiration accordingly when RRset present
 	if crrset.RRset != nil && len(crrset.RRset.RRs) > 0 {
 		minTTL := crrset.RRset.RRs[0].Header().Ttl
@@ -152,14 +168,26 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 			}
 			minTTL = 10
 		}
+		if bounded {
+			minTTL = limits.Clamp(minTTL)
+		}
 		if rrcache.Debug && qtype == dns.TypeNS {
 			log.Printf("RRsetCache:Set: NS minTTL=%ds for zone %q (Context=%s)", minTTL, qname, CacheContextToString[crrset.Context])
 		}
 		crrset.Ttl = minTTL
-		crrset.Expiration = time.Now().Add(time.Duration(minTTL) * time.Second)
-	} else if crrset.Expiration.IsZero() && crrset.Ttl > 0 {
-		// For negative/no-RRset entries, if Expiration not set but TTL is provided
-		crrset.Expiration = time.Now().Add(time.Duration(crrset.Ttl) * time.Second)
+		crrset.Expiration = now.Add(time.Duration(minTTL) * time.Second)
+	} else {
+		if crrset.Expiration.IsZero() && crrset.Ttl > 0 {
+			// For negative/no-RRset entries, if Expiration not set but TTL is provided
+			crrset.Expiration = now.Add(time.Duration(crrset.Ttl) * time.Second)
+		}
+		// A negative entry without an RRset carries the lifetime its caller
+		// computed, so bound that.
+		if bounded {
+			if exp, ttl, changed := limits.bound(crrset.Expiration, now); changed {
+				crrset.Expiration, crrset.Ttl = exp, ttl
+			}
+		}
 	}
 
 	rrcache.RRsets.Set(lookupKey, *crrset)
@@ -677,6 +705,10 @@ func (rrcache *RRsetCacheT) StoreTLSAForServer(base, owner string, rrset *core.R
 	if st == nil {
 		return
 	}
+	// Bounded like the copy of the same RRset in the RRset cache, so a DANE pin
+	// does not outlive the data it was taken from.
+	now := time.Now()
+	exp, _, _ := GetTTLLimits().bound(now.Add(GetMinTTL(rrset.RRs)), now)
 	st.mu.Lock()
 	st.recs[owner] = &CachedRRset{
 		Name:   owner,
@@ -690,7 +722,7 @@ func (rrcache *RRsetCacheT) StoreTLSAForServer(base, owner string, rrset *core.R
 		},
 		Context:    ContextAnswer,
 		State:      vstate,
-		Expiration: time.Now().Add(GetMinTTL(rrset.RRs)),
+		Expiration: exp,
 	}
 	st.mu.Unlock()
 }
