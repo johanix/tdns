@@ -8,10 +8,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/johanix/tdns/v2/edns0"
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
