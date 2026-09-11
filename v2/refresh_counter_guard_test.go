@@ -1,8 +1,9 @@
 package tdns
 
 import (
-	core "github.com/johanix/tdns/v2/core"
 	"testing"
+
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // The counter is unsigned and zero means DUE, so decrementing at zero wraps to
