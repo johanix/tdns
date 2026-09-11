@@ -504,7 +504,12 @@ func (zd *ZoneData) sendReferral(m *dns.Msg, w dns.ResponseWriter, cdd *ChildDel
 			}
 		} else {
 			// Insecure delegation (RFC 9824 §3.4): NSEC proving no DS exists.
-			addReferralNSEC(m, cdd, apex, zd.ZoneName, signFunc)
+			// Unlike the DS above, this is synthesized now, and a zone that
+			// must be signed and cannot sign it is broken right now: SERVFAIL,
+			// as for every other denial.
+			if err := addReferralNSEC(m, cdd, apex, zd.ZoneName, signFunc); err != nil {
+				failUnsignedDenial(m)
+			}
 		}
 	}
 
@@ -1213,7 +1218,12 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 // addReferralNSEC adds an NSEC record to a referral response per RFC 9824, Section 3.4
 // This NSEC covers the delegation point (zone cut) and indicates that qname doesn't exist in the current zone
-func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zoneName string, signFunc func(core.RRset, string) (core.RRset, error)) {
+//
+// It is the referral's proof that the delegation has no DS, synthesized per
+// response like addCDEResponse's, and the error is the one from signing it: the
+// caller answers SERVFAIL on it (failUnsignedDenial) rather than send a referral
+// without the proof.
+func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zoneName string, signFunc func(core.RRset, string) (core.RRset, error)) error {
 	var soaMinTTL uint32 = 3600
 	if soaRR, ok := apex.RRtypes.Get(dns.TypeSOA); ok && len(soaRR.RRs) > 0 {
 		if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
@@ -1249,11 +1259,12 @@ func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zone
 	// Sign the NSEC record
 	nsecRRset, err := signFunc(core.RRset{RRs: []dns.RR{nsecRR}}, zoneName)
 	if err != nil {
-		lgHandler.Error("failed to sign NSEC RRset for referral at zone cut", "child", cdd.ChildName, "err", err)
-	} else {
-		m.Ns = append(m.Ns, nsecRR)
-		m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
+		lgHandler.Error("failed to sign NSEC RRset for referral at zone cut; serving SERVFAIL", "child", cdd.ChildName, "err", err)
+		return err
 	}
+	m.Ns = append(m.Ns, nsecRR)
+	m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
+	return nil
 }
 
 // addCDEResponse adds a DNSSEC negative response to the message
@@ -1327,13 +1338,21 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 	return nil
 }
 
-// failUnsignedDenial turns a negative response whose denial could not be
-// signed into a SERVFAIL. The denial is synthesized per response, so a zone
-// that must be signed and cannot sign it is broken right now, and a DO client
-// handed the unsigned proof has nothing to authenticate -- the positive path
-// already answers that case with SERVFAIL. The sections go: a SERVFAIL carries
-// no partial proof. The OPT in Extra stays.
+// failUnsignedDenial turns a response whose denial could not be signed into a
+// SERVFAIL: a negative answer, or a referral's proof that the delegation has
+// no DS. The denial is synthesized per response, so a zone that must be signed
+// and cannot sign it is broken right now, and a DO client handed the unsigned
+// proof has nothing to authenticate -- the positive path already answers that
+// case with SERVFAIL. The sections go: a SERVFAIL carries no partial proof,
+// and no glue from a referral. Only the OPT stays.
 func failUnsignedDenial(m *dns.Msg) {
 	m.Answer, m.Ns = nil, nil
+	var opt []dns.RR
+	for _, rr := range m.Extra {
+		if rr.Header().Rrtype == dns.TypeOPT {
+			opt = append(opt, rr)
+		}
+	}
+	m.Extra = opt
 	m.MsgHdr.Rcode = dns.RcodeServerFailure
 }

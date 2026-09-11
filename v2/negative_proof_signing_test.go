@@ -70,6 +70,9 @@ func TestUnsignableDenialIsServfail(t *testing.T) {
 		{"DS at an insecure delegation", zd, "insecure.neg.example.", dns.TypeDS, dns.RcodeSuccess},
 		{"DS for an in-zone name", zd, "ns.neg.example.", dns.TypeDS, dns.RcodeSuccess},
 		{"DS at a child-only apex", kid, "kid.example.", dns.TypeDS, dns.RcodeSuccess},
+		// A referral to an insecure delegation carries a synthesized denial
+		// too: the NSEC proving there is no DS.
+		{"referral to an insecure delegation", zd, "www.insecure.neg.example.", dns.TypeA, dns.RcodeSuccess},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -84,6 +87,15 @@ func TestUnsignableDenialIsServfail(t *testing.T) {
 			if len(m.Answer) != 0 || len(m.Ns) != 0 {
 				t.Errorf("SERVFAIL carries answer %v authority %v; want neither", m.Answer, m.Ns)
 			}
+			// Nothing but the OPT: a referral's glue must not ride along.
+			for _, rr := range m.Extra {
+				if rr.Header().Rrtype != dns.TypeOPT {
+					t.Errorf("SERVFAIL carries additional %v; want only the OPT", rr)
+				}
+			}
+			if m.IsEdns0() == nil {
+				t.Error("SERVFAIL lost the OPT of an EDNS query")
+			}
 		})
 	}
 }
@@ -97,7 +109,28 @@ func TestUnsignedZoneWithoutKeyDBAnswersDO(t *testing.T) {
 	if m := respondWith(t, zd, "ns.neg.example.", dns.TypeA, true); m.Rcode != dns.RcodeSuccess || len(m.Answer) == 0 {
 		t.Errorf("positive answer: rcode %s answer %v; want the A record", dns.RcodeToString[m.Rcode], m.Answer)
 	}
-	if m := respondWith(t, zd, "nope.neg.example.", dns.TypeA, true); m.Rcode == dns.RcodeServerFailure {
-		t.Errorf("denial: SERVFAIL for an unsigned zone")
+	// The denial is the one a DO query gets from any zone: without the CO flag,
+	// NOERROR with the SOA and a synthesized NSEC at the qname whose bitmap
+	// holds NXNAME (RFC 9824) -- NOERROR rather than NXDOMAIN, because the NSEC
+	// makes the name look as if it exists to a validator that does not know
+	// NXNAME.
+	m := respondWith(t, zd, "nope.neg.example.", dns.TypeA, true)
+	var soa bool
+	var nxname bool
+	for _, rr := range m.Ns {
+		switch x := rr.(type) {
+		case *dns.SOA:
+			soa = true
+		case *dns.NSEC:
+			if x.Hdr.Name == "nope.neg.example." {
+				for _, t := range x.TypeBitMap {
+					nxname = nxname || t == dns.TypeNXNAME
+				}
+			}
+		}
+	}
+	if m.Rcode != dns.RcodeSuccess || !soa || !nxname {
+		t.Errorf("denial: rcode %s authority %v; want NOERROR with the SOA and an NXNAME NSEC at nope.neg.example.",
+			dns.RcodeToString[m.Rcode], m.Ns)
 	}
 }
