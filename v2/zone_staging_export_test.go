@@ -305,6 +305,17 @@ func TestStagerReadsNextContent(t *testing.T) {
 		if s.RRset("www.example.", dns.TypeTXT) != nil {
 			t.Fatal("an absent type reads as non-nil")
 		}
+		if types := s.Types("www.example."); len(types) != 1 || types[0] != dns.TypeA {
+			t.Fatalf("Types(www) = %v, want [A]", types)
+		}
+		if s.Types("nothere.example.") != nil {
+			t.Fatal("Types of an absent owner is not nil")
+		}
+		s.Delete("www.example.", dns.TypeA)
+		if types := s.Types("www.example."); len(types) != 0 {
+			t.Fatalf("Types(www) after deleting its only type = %v, want none", types)
+		}
+		s.SetRRset("www.example.", *before)
 		return true, nil
 	})
 	if err != nil {
@@ -319,6 +330,9 @@ func TestStageBatchDeleteOwnerDropsTheName(t *testing.T) {
 	zd := testSnapshotZone(t, "example.", stagingTestZone)
 	_, err := zd.StageBatch(func(s Stager) (bool, error) {
 		s.Delete("txt.example.", dns.TypeTXT)
+		if len(s.Types("txt.example.")) != 0 {
+			t.Fatal("txt.example. still has types after its only one was deleted")
+		}
 		s.DeleteOwner("txt.example.")
 		s.Delete("ghost.example.", dns.TypeA) // absent: must not create it
 		return true, nil

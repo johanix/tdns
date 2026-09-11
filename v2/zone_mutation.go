@@ -1480,6 +1480,11 @@ type Stager interface {
 	// The result is a COPY. Edit it and hand it back through SetRRset; nothing
 	// reachable from the served snapshot is reachable through it.
 	RRset(name string, rrtype uint16) *core.RRset
+	// Types lists the RR types an owner has in the zone's next content, nil
+	// when the owner is absent. For "delete the owner when its last type
+	// goes": after Delete, an owner with no types left is one DeleteOwner
+	// should remove, or it publishes as an empty name.
+	Types(name string) []uint16
 	// SetRRset replaces one RRset of one owner: StageRRset, inside the batch.
 	SetRRset(name string, rs core.RRset)
 	// Delete removes one RRset of one owner: StageDelete, inside the batch. A
@@ -1521,6 +1526,26 @@ func (s *batchStager) RRset(name string, rrtype uint16) *core.RRset {
 	}
 	out := cloneRRset(rs)
 	return &out
+}
+
+func (s *batchStager) Types(name string) []uint16 {
+	var od *OwnerData
+	if s.draft {
+		if s.zd.Data == nil {
+			return nil
+		}
+		found, ok := s.zd.Data.Get(name)
+		if !ok {
+			return nil
+		}
+		od = &found
+	} else {
+		od = s.zd.stagedOwner(name)
+	}
+	if od == nil || od.RRtypes == nil {
+		return nil
+	}
+	return od.RRtypes.Keys()
 }
 
 func (s *batchStager) SetRRset(name string, rs core.RRset) {
