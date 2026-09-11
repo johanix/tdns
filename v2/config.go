@@ -512,7 +512,9 @@ func LoadImrTuningDefaults(t *ImrTuningConf) {
 		t.Backoff.RoutingFailure = 1 * time.Hour
 	}
 	if t.Backoff.LameDelegation <= 0 {
-		t.Backoff.LameDelegation = 1 * time.Hour
+		// RFC 9520 section 3.2: a resolution failure MUST NOT be cached for
+		// longer than 5 minutes, and a shunned zone server is exactly that.
+		t.Backoff.LameDelegation = 5 * time.Minute
 	}
 	// AddressFamily
 	if t.AddressFamily.WindowDuration <= 0 {

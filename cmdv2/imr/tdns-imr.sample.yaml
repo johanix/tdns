@@ -139,7 +139,7 @@ imrengine:
    #       multiplier:        3.0    # exponential growth factor
    #       jitter-fraction:   0.25   # must be in [0,1); else reset to default
    #       routing-failure:   1h     # backoff after an unreachable-network error
-   #       lame-delegation:   1h     # backoff after a lame delegation
+   #       lame-delegation:   5m     # backoff after REFUSED/NOTAUTH (lame); RFC 9520 caps at 5m
    #    address-family:
    #       window-duration:   10m    # observation window for per-family failures
    #       failure-threshold: 5      # distinct failures before a family is suspect
