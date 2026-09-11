@@ -200,13 +200,17 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 	if len(rrset.RRSIGs) > 0 {
 		return rrset, nil
 	}
+	// Zone is legitimately unsigned — serve unsigned. Ahead of the KeyDB check:
+	// an unsigned zone needs no keys, and asking for a KeyDB first made every
+	// DO answer from an unsigned zone served without one a SERVFAIL, the
+	// opposite of QueryResponder's "responding without DNSSEC". A missing
+	// KeyDB is an error only for a zone that must be signed.
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return rrset, nil
+	}
 	if kdb == nil {
 		lgHandler.Warn("no KeyDB available, cannot sign", "zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[rrset.RRtype])
 		return rrset, fmt.Errorf("no KeyDB available for zone %s", zd.ZoneName)
-	}
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
-		// Zone is legitimately unsigned — serve unsigned.
-		return rrset, nil
 	}
 
 	// The zone MUST be signed but this RRset has no stored RRSIGs. Only a
@@ -369,7 +373,9 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		m.MsgHdr.Rcode = dns.RcodeSuccess
 		m.Ns = append(m.Ns, pzd.soaForResponseFrom(psnap, papex).RRs...)
 		if msgoptions.DO {
-			pzd.addCDEResponse(m, qname, papex, []uint16{dns.TypeNS}, msgoptions, pSign)
+			if err := pzd.addCDEResponse(m, qname, papex, []uint16{dns.TypeNS}, msgoptions, pSign); err != nil {
+				failUnsignedDenial(m)
+			}
 		}
 		w.WriteMsg(m)
 		return nil
@@ -384,7 +390,9 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 			m.Ns = append(m.Ns, pzd.soaForResponseFrom(psnap, papex).RRs...)
 			if msgoptions.DO {
 				// Existing types at qname (DS is not among them) → NODATA proof.
-				pzd.addCDEResponse(m, qname, papex, owner.RRtypes.Keys(), msgoptions, pSign)
+				if err := pzd.addCDEResponse(m, qname, papex, owner.RRtypes.Keys(), msgoptions, pSign); err != nil {
+					failUnsignedDenial(m)
+				}
 			}
 			w.WriteMsg(m)
 			return nil
@@ -459,7 +467,9 @@ func (zd *ZoneData) sendChildApexDSNodata(m *dns.Msg, w dns.ResponseWriter, qnam
 		sign := func(rrset core.RRset, name string) (core.RRset, error) {
 			return zd.signRRsetForZone(rrset, name, msgoptions, kdb, nil)
 		}
-		zd.addCDEResponse(m, qname, apex, types, msgoptions, sign)
+		if err := zd.addCDEResponse(m, qname, apex, types, msgoptions, sign); err != nil {
+			failUnsignedDenial(m)
+		}
 	}
 	w.WriteMsg(m)
 	return nil
@@ -494,7 +504,12 @@ func (zd *ZoneData) sendReferral(m *dns.Msg, w dns.ResponseWriter, cdd *ChildDel
 			}
 		} else {
 			// Insecure delegation (RFC 9824 §3.4): NSEC proving no DS exists.
-			addReferralNSEC(m, cdd, apex, zd.ZoneName, signFunc)
+			// Unlike the DS above, this is synthesized now, and a zone that
+			// must be signed and cannot sign it is broken right now: SERVFAIL,
+			// as for every other denial.
+			if err := addReferralNSEC(m, cdd, apex, zd.ZoneName, signFunc); err != nil {
+				failUnsignedDenial(m)
+			}
 		}
 	}
 
@@ -533,7 +548,9 @@ func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string,
 	m.Ns = append(m.Ns, soaRRset.RRs...)
 	if msgoptions.DO {
 		// RFC 9824: Compact denial if CO bit is set, otherwise traditional DNSSEC negative response
-		zd.addCDEResponse(m, qname, apex, nil, msgoptions, signFunc)
+		if err := zd.addCDEResponse(m, qname, apex, nil, msgoptions, signFunc); err != nil {
+			failUnsignedDenial(m)
+		}
 	}
 	w.WriteMsg(m)
 }
@@ -554,7 +571,9 @@ func (zd *ZoneData) sendENTNodata(m *dns.Msg, w dns.ResponseWriter, qname string
 	soaRRset := zd.soaForResponseFrom(snap, apex)
 	m.Ns = append(m.Ns, soaRRset.RRs...)
 	if msgoptions.DO {
-		zd.addCDEResponse(m, qname, apex, []uint16{}, msgoptions, signFunc)
+		if err := zd.addCDEResponse(m, qname, apex, []uint16{}, msgoptions, signFunc); err != nil {
+			failUnsignedDenial(m)
+		}
 	}
 	w.WriteMsg(m)
 }
@@ -1056,7 +1075,9 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		// an rcode saying it does not.
 		m.MsgHdr.Rcode = dns.RcodeNameError
 		if msgoptions.DO {
-			zd.addCDEResponse(m, origqname, apex, nil, msgoptions, MaybeSignRRset)
+			if err := zd.addCDEResponse(m, origqname, apex, nil, msgoptions, MaybeSignRRset); err != nil {
+				failUnsignedDenial(m)
+			}
 		}
 		w.WriteMsg(m)
 		return nil
@@ -1150,7 +1171,9 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 				// RFC 9824: Compact denial if CO bit is set, otherwise traditional DNSSEC negative response
 				rrtypeList := []uint16{}
 				rrtypeList = append(rrtypeList, owner.RRtypes.Keys()...)
-				zd.addCDEResponse(m, origqname, apex, rrtypeList, msgoptions, MaybeSignRRset)
+				if err := zd.addCDEResponse(m, origqname, apex, rrtypeList, msgoptions, MaybeSignRRset); err != nil {
+					failUnsignedDenial(m)
+				}
 			}
 		}
 		w.WriteMsg(m)
@@ -1195,7 +1218,12 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 // addReferralNSEC adds an NSEC record to a referral response per RFC 9824, Section 3.4
 // This NSEC covers the delegation point (zone cut) and indicates that qname doesn't exist in the current zone
-func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zoneName string, signFunc func(core.RRset, string) (core.RRset, error)) {
+//
+// It is the referral's proof that the delegation has no DS, synthesized per
+// response like addCDEResponse's, and the error is the one from signing it: the
+// caller answers SERVFAIL on it (failUnsignedDenial) rather than send a referral
+// without the proof.
+func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zoneName string, signFunc func(core.RRset, string) (core.RRset, error)) error {
 	var soaMinTTL uint32 = 3600
 	if soaRR, ok := apex.RRtypes.Get(dns.TypeSOA); ok && len(soaRR.RRs) > 0 {
 		if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
@@ -1231,11 +1259,12 @@ func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zone
 	// Sign the NSEC record
 	nsecRRset, err := signFunc(core.RRset{RRs: []dns.RR{nsecRR}}, zoneName)
 	if err != nil {
-		lgHandler.Error("failed to sign NSEC RRset for referral at zone cut", "child", cdd.ChildName, "err", err)
-	} else {
-		m.Ns = append(m.Ns, nsecRR)
-		m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
+		lgHandler.Error("failed to sign NSEC RRset for referral at zone cut; serving SERVFAIL", "child", cdd.ChildName, "err", err)
+		return err
 	}
+	m.Ns = append(m.Ns, nsecRR)
+	m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
+	return nil
 }
 
 // addCDEResponse adds a DNSSEC negative response to the message
@@ -1243,7 +1272,10 @@ func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zone
 // Otherwise, uses traditional DNSSEC negative response format
 // rrtypeList == nil means NXDOMAIN (name doesn't exist)
 // rrtypeList != nil means NODATA (name exists but qtype doesn't)
-func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rrtypeList []uint16, msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
+//
+// The error is the one from signing the denial, and every caller must answer
+// SERVFAIL on it (failUnsignedDenial) rather than send the message as built.
+func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rrtypeList []uint16, msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) error {
 	var soaMinTTL uint32 = 3600
 
 	if soaRR, ok := apex.RRtypes.Get(dns.TypeSOA); ok && len(soaRR.RRs) > 0 {
@@ -1299,7 +1331,28 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 
 	nsecRRset, err := signFunc(core.RRset{RRs: []dns.RR{nsecRR}}, zd.ZoneName)
 	if err != nil {
-		lgHandler.Error("failed to sign NSEC RRset for CDE response", "zone", zd.ZoneName, "err", err)
+		lgHandler.Error("failed to sign NSEC RRset for CDE response; serving SERVFAIL", "zone", zd.ZoneName, "err", err)
+		return err
 	}
 	m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
+	return nil
+}
+
+// failUnsignedDenial turns a response whose denial could not be signed into a
+// SERVFAIL: a negative answer, or a referral's proof that the delegation has
+// no DS. The denial is synthesized per response, so a zone that must be signed
+// and cannot sign it is broken right now, and a DO client handed the unsigned
+// proof has nothing to authenticate -- the positive path already answers that
+// case with SERVFAIL. The sections go: a SERVFAIL carries no partial proof,
+// and no glue from a referral. Only the OPT stays.
+func failUnsignedDenial(m *dns.Msg) {
+	m.Answer, m.Ns = nil, nil
+	var opt []dns.RR
+	for _, rr := range m.Extra {
+		if rr.Header().Rrtype == dns.TypeOPT {
+			opt = append(opt, rr)
+		}
+	}
+	m.Extra = opt
+	m.MsgHdr.Rcode = dns.RcodeServerFailure
 }
