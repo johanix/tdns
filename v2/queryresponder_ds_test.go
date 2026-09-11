@@ -57,6 +57,72 @@ ns.c.pq.example.	3600	IN	A	192.0.2.2
 		}
 	})
 
+	t.Run("root_parent_serves_TLD_DS", func(t *testing.T) {
+		// The same cut one label higher: we host the root and a TLD. Stripping
+		// one label off "tld." leaves the empty name, which must be read as the
+		// root -- otherwise the TLD finds no hosted parent and answers its own
+		// NODATA while the root holding its DS sits in the same server.
+		root := `.	3600	IN	SOA	ns.tld. hostmaster.tld. 1 7200 1800 604800 7200
+.	3600	IN	NS	ns.tld.
+tld.	3600	IN	NS	ns.tld.
+tld.	3600	IN	DS	12345 8 2 E2D3C916F6DEEAC73294E8268FB5885044A833FC5459588F4A9184CFC41A5766
+ns.tld.	3600	IN	A	192.0.2.6
+`
+		tld := `tld.	3600	IN	SOA	ns.tld. hostmaster.tld. 1 7200 1800 604800 7200
+tld.	3600	IN	NS	ns.tld.
+ns.tld.	3600	IN	A	192.0.2.6
+`
+		testSnapshotZone(t, ".", root)
+		tldZd := testSnapshotZone(t, "tld.", tld)
+
+		rw := &fakeRW{}
+		if err := tldZd.handleDSQuery(new(dns.Msg), rw, "tld.", &edns0.MsgOptions{}, nil); err != nil {
+			t.Fatalf("handleDSQuery: %v", err)
+		}
+		resp := rw.written
+		if resp == nil || resp.MsgHdr.Rcode != dns.RcodeSuccess {
+			t.Fatalf("want NOERROR, got %+v", resp)
+		}
+		var gotDS bool
+		for _, rr := range resp.Answer {
+			if ds, ok := rr.(*dns.DS); ok && ds.Header().Name == "tld." {
+				gotDS = true
+			}
+		}
+		if !gotDS {
+			t.Fatalf("the TLD's DS should be served from the hosted root; answer=%v authority=%v", resp.Answer, resp.Ns)
+		}
+	})
+
+	t.Run("root_DS_is_the_roots_NODATA", func(t *testing.T) {
+		// The root has no parent. Its DS query finds the root itself and
+		// answers NODATA from it, never a referral or REFUSED.
+		root := `.	3600	IN	SOA	ns.tld. hostmaster.tld. 1 7200 1800 604800 7200
+.	3600	IN	NS	ns.tld.
+tld.	3600	IN	NS	ns.tld.
+ns.tld.	3600	IN	A	192.0.2.6
+`
+		rootZd := testSnapshotZone(t, ".", root)
+
+		rw := &fakeRW{}
+		if err := rootZd.handleDSQuery(new(dns.Msg), rw, ".", &edns0.MsgOptions{}, nil); err != nil {
+			t.Fatalf("handleDSQuery: %v", err)
+		}
+		resp := rw.written
+		if resp == nil || resp.MsgHdr.Rcode != dns.RcodeSuccess || !resp.MsgHdr.Authoritative || len(resp.Answer) != 0 {
+			t.Fatalf("want an authoritative NODATA, got %+v", resp)
+		}
+		var soaOwner string
+		for _, rr := range resp.Ns {
+			if rr.Header().Rrtype == dns.TypeSOA {
+				soaOwner = rr.Header().Name
+			}
+		}
+		if soaOwner != "." {
+			t.Fatalf("want the root's SOA in authority; got %v", resp.Ns)
+		}
+	})
+
 	t.Run("grandparent_refers_to_parent", func(t *testing.T) {
 		// We host a grandparent (which delegates to the child's real parent) and
 		// the child, but NOT the immediate parent. All we can do is refer down to
@@ -99,10 +165,12 @@ ns.x.p.example.	3600	IN	A	192.0.2.4
 		}
 	})
 
-	t.Run("child_only_refused", func(t *testing.T) {
-		// We host the child but no ancestor at all. The DS lives in a parent we
-		// don't host and there is nothing to refer to → REFUSED (never a NODATA
-		// that would deny parent-side data we don't own).
+	t.Run("child_only_nodata", func(t *testing.T) {
+		// We host the child but no ancestor at all. RFC 4035 §3.1.4.1: a server
+		// authoritative for the child and not the parent MUST answer an
+		// authoritative NODATA from the child's apex. This used to be REFUSED,
+		// which BIND and NSD do not answer and which a resolver cannot tell from
+		// a lame server (#150).
 		child := `lonely.example.	3600	IN	SOA	ns.lonely.example. hostmaster.lonely.example. 1 7200 1800 604800 7200
 lonely.example.	3600	IN	NS	ns.lonely.example.
 ns.lonely.example.	3600	IN	A	192.0.2.5
@@ -114,11 +182,63 @@ ns.lonely.example.	3600	IN	A	192.0.2.5
 			t.Fatalf("handleDSQuery: %v", err)
 		}
 		resp := rw.written
-		if resp == nil || resp.MsgHdr.Rcode != dns.RcodeRefused {
-			t.Fatalf("want REFUSED, got %+v", resp)
+		if resp == nil || resp.MsgHdr.Rcode != dns.RcodeSuccess {
+			t.Fatalf("want NOERROR, got %+v", resp)
 		}
-		if resp.MsgHdr.Authoritative {
-			t.Fatal("REFUSED must not set the AA bit")
+		if !resp.MsgHdr.Authoritative {
+			t.Fatal("the NODATA is the child's own, and authoritative")
+		}
+		if len(resp.Answer) != 0 {
+			t.Fatalf("NODATA has no answer records; got %v", resp.Answer)
+		}
+		var soaOwner string
+		for _, rr := range resp.Ns {
+			if rr.Header().Rrtype == dns.TypeSOA {
+				soaOwner = rr.Header().Name
+			}
+		}
+		if soaOwner != "lonely.example." {
+			t.Fatalf("want the child's SOA in authority; got %v", resp.Ns)
+		}
+	})
+
+	t.Run("child_only_nodata_proof_omits_DS", func(t *testing.T) {
+		// With DO, the denial at the apex lists what the apex holds, and so
+		// shows DS absent -- even for a zone that wrongly stores a DS at its own
+		// apex, which would otherwise contradict the NODATA it proves.
+		child := `lonely.example.	3600	IN	SOA	ns.lonely.example. hostmaster.lonely.example. 1 7200 1800 604800 7200
+lonely.example.	3600	IN	NS	ns.lonely.example.
+lonely.example.	3600	IN	DS	12345 8 2 E2D3C916F6DEEAC73294E8268FB5885044A833FC5459588F4A9184CFC41A5766
+ns.lonely.example.	3600	IN	A	192.0.2.5
+`
+		childZd := testSnapshotZone(t, "lonely.example.", child)
+
+		rw := &fakeRW{}
+		if err := childZd.handleDSQuery(new(dns.Msg), rw, "lonely.example.", &edns0.MsgOptions{DO: true}, nil); err != nil {
+			t.Fatalf("handleDSQuery: %v", err)
+		}
+		resp := rw.written
+		if resp == nil || resp.MsgHdr.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 {
+			t.Fatalf("want NODATA, got %+v", resp)
+		}
+		var nsec *dns.NSEC
+		for _, rr := range resp.Ns {
+			if n, ok := rr.(*dns.NSEC); ok && n.Header().Name == "lonely.example." {
+				nsec = n
+			}
+		}
+		if nsec == nil {
+			t.Fatalf("want a denial owned by the apex; authority=%v", resp.Ns)
+		}
+		has := map[uint16]bool{}
+		for _, t := range nsec.TypeBitMap {
+			has[t] = true
+		}
+		if has[dns.TypeDS] {
+			t.Errorf("the denial's bitmap lists DS, contradicting the NODATA: %v", nsec.TypeBitMap)
+		}
+		if !has[dns.TypeSOA] || !has[dns.TypeNS] {
+			t.Errorf("the denial's bitmap should list the apex's SOA and NS: %v", nsec.TypeBitMap)
 		}
 	})
 }

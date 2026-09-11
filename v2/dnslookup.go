@@ -726,8 +726,11 @@ type ServerAddrXportTuple struct {
 // privacy is passed through to candidateTransports: PrivacyStrict excludes
 // Do53 tuples, and a server with no encrypted transport then contributes no
 // tuples at all.
-func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) (string, *cache.Zone, []ServerAddrXportTuple) {
-	zoneName, _, _ := imr.Cache.FindClosestKnownZone(qname)
+//
+// qtype picks the zone whose backoff applies: the zone holding the data, which
+// for a DS is the parent's, the zone of the servers the DS query goes to.
+func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) (string, *cache.Zone, []ServerAddrXportTuple) {
+	zoneName, _, _ := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
 	var zone *cache.Zone
 	if zoneName != "" {
 		if z, ok := imr.Cache.ZoneMap.Get(zoneName); ok {
@@ -1129,11 +1132,15 @@ func maxInt(a, b int) int {
 // Synchronous on purpose: only called after the optimistic try-all-known-
 // addresses pass has failed. Each ImrQuery here runs the normal chain
 // walk, which has its own W2 budget and is not bound by serverMap.
-func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, serverMap map[string]*cache.AuthServer) int {
+//
+// qtype picks the zone whose NS set is expanded, the same zone the query was
+// sent to: for a DS, the parent's. Expanding the child's instead would add the
+// servers that do not hold the DS to a map of servers that do.
+func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer) int {
 	if imr == nil || imr.Cache == nil || serverMap == nil {
 		return 0
 	}
-	zonename, _, _ := imr.Cache.FindClosestKnownZone(qname)
+	zonename, _, _ := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
 	if zonename == "" {
 		return 0
 	}
@@ -1401,7 +1408,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// just failed.
 	dnskeyAttempted := map[cache.AddrXport]bool{}
 	for attempt := 0; attempt < 2; attempt++ {
-		zoneName, zone, prioritized = imr.prioritizeServers(qname, serverMap, privacy)
+		zoneName, zone, prioritized = imr.prioritizeServers(qname, qtype, serverMap, privacy)
 		if Globals.Debug {
 			lg.Printf("IterativeDNSQuery: prioritized %d (server,addr,transport) tuples (from %d servers) attempt=%d", len(prioritized), len(serverMap), attempt+1)
 		}
@@ -1588,7 +1595,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		// missing (typical for out-of-bailiwick NS that the parent could
 		// not glue) and retry. If nothing new was added, give up.
 		if attempt == 0 {
-			added := imr.expandServerMapWithMissingNS(ctx, qname, serverMap)
+			added := imr.expandServerMapWithMissingNS(ctx, qname, qtype, serverMap)
 			if added > 0 {
 				if Globals.Debug {
 					lg.Printf("IterativeDNSQuery: expanded serverMap with %d previously-unresolved NS addresses; retrying", added)
@@ -3562,9 +3569,9 @@ func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, for
 		default:
 		}
 		imr.Cache.Logger.Printf("*** IterativeDNSQuery: found CNAME target: %s, chasing.", cur)
-		bestmatch, tmpservers, err := imr.Cache.FindClosestKnownZone(cur)
+		bestmatch, tmpservers, err := imr.Cache.FindClosestKnownZoneFor(cur, qtype)
 		if err != nil {
-			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from FindClosestKnownZone: %v", err)
+			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from FindClosestKnownZoneFor: %v", err)
 			return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, err
 		}
 		imr.Cache.Logger.Printf("*** IterativeDNSQuery: best match for target %s is %s", cur, bestmatch)
@@ -3620,9 +3627,9 @@ func (imr *Imr) DefaultDNSKEYFetcher(ctx context.Context, name string) (*core.RR
 
 func (imr *Imr) DefaultRRsetFetcher(ctx context.Context, qname string, qtype uint16) (*core.RRset, error) {
 	// implement with your IterativeDNSQuery + server selection
-	best, servers, err := imr.Cache.FindClosestKnownZone(qname)
+	best, servers, err := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
 	if err != nil {
-		return nil, fmt.Errorf("FindClosestKnownZone error for %s: %v", qname, err)
+		return nil, fmt.Errorf("FindClosestKnownZoneFor error for %s %s: %v", qname, dns.TypeToString[qtype], err)
 	}
 	_ = best // could be used for logging
 	if len(servers) == 0 {
