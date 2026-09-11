@@ -1049,8 +1049,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			return nil
 		}
 
-		wildqname = "*." + strings.Join(strings.Split(qname, ".")[1:], ".")
-		// log.Printf("---> Checking for existence of wildcard %s", wildqname)
+		wildqname = wildcardSourceFrom(snap, zd.ZoneName, qname)
 
 		if !nameExistsFrom(snap, wildqname) {
 			// return NXDOMAIN
