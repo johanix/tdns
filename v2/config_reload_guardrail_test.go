@@ -42,11 +42,12 @@ func TestPolicyAlgStrandsActiveKeys(t *testing.T) {
 	)
 
 	tests := []struct {
-		name     string
-		want     policyRoleAlgs
-		active   zoneActiveAlgs
-		relaxed  bool
-		wantMiss []string // roles expected to be flagged, in order
+		name      string
+		want      policyRoleAlgs
+		active    zoneActiveAlgs
+		relaxed   bool
+		kskEngine bool
+		wantMiss  []string // roles expected to be flagged, in order
 	}{
 		{
 			// The core blind spot: KSK Ed25519 -> new alg, zone still bound to the
@@ -119,11 +120,35 @@ func TestPolicyAlgStrandsActiveKeys(t *testing.T) {
 			active:   active([]uint8{ed}, nil),
 			wantMiss: nil,
 		},
+		{
+			// The auto-rollover engine carries a KSK algorithm change as a
+			// KSK algorithm rollover: not a strand.
+			name:      "KSK alg change under an engine is not flagged",
+			want:      ksz(fal, ed),
+			active:    active([]uint8{ed}, []uint8{ed}),
+			kskEngine: true,
+			wantMiss:  nil,
+		},
+		{
+			name:      "both roles change under an engine, strict -> only ZSK flagged",
+			want:      ksz(fal, fal),
+			active:    active([]uint8{ed}, []uint8{rsa}),
+			kskEngine: true,
+			wantMiss:  []string{"ZSK"},
+		},
+		{
+			// The engine says nothing about a CSK.
+			name:      "CSK alg change is flagged even with an engine",
+			want:      csk(fal),
+			active:    active([]uint8{ed}, nil),
+			kskEngine: true,
+			wantMiss:  []string{"CSK"},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			miss := policyAlgStrandsActiveKeys(tc.want, tc.active, tc.relaxed)
+			miss := policyAlgStrandsActiveKeys(tc.want, tc.active, tc.relaxed, tc.kskEngine)
 			var got []string
 			for _, m := range miss {
 				got = append(got, m.role)
@@ -327,7 +352,8 @@ func TestDetectStrandingRelaxedForwardsZSKSkip(t *testing.T) {
 		t.Fatalf("relaxed: a ZSK-only alg change must not strand, got %+v", relaxed)
 	}
 
-	// A KSK algorithm change is a strand even in relaxed mode.
+	// A KSK algorithm change under a policy WITHOUT an auto-rollover engine
+	// is a strand in either mode.
 	kskChange := map[string]DnssecPolicy{
 		"foo": {Name: "foo", Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.RSASHA256, ZSKAlgorithm: dns.ED25519},
 	}
@@ -336,6 +362,21 @@ func TestDetectStrandingRelaxedForwardsZSKSkip(t *testing.T) {
 		t.Fatalf("detectStrandingPolicyChanges (relaxed KSK): %v", err)
 	}
 	if len(stillStrands) != 1 || len(stillStrands[0].Roles) != 1 || stillStrands[0].Roles[0].Role != "KSK" {
-		t.Fatalf("relaxed: a KSK alg change must still strand, got %+v", stillStrands)
+		t.Fatalf("relaxed: a KSK alg change with no engine must still strand, got %+v", stillStrands)
+	}
+
+	// With an engine (rollover.method multi-ds / double-signature) the same
+	// change is carried by the KSK algorithm rollover: the collector must
+	// forward that and NOT flag it (R1).
+	kskChangeEngine := map[string]DnssecPolicy{
+		"foo": {Name: "foo", Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.RSASHA256, ZSKAlgorithm: dns.ED25519,
+			Rollover: RolloverPolicy{Method: RolloverMethodMultiDS}},
+	}
+	carried, err := conf.detectStrandingPolicyChanges(kskChangeEngine, false)
+	if err != nil {
+		t.Fatalf("detectStrandingPolicyChanges (engine KSK): %v", err)
+	}
+	if len(carried) != 0 {
+		t.Fatalf("a KSK alg change under an auto-rollover engine must not strand, got %+v", carried)
 	}
 }

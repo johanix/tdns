@@ -598,6 +598,14 @@ func ParseDnssecPolicyConfQuiet(name string, dp *DnssecPolicyConf) (*DnssecPolic
 	return parseDnssecPolicyConfImpl(name, dp, true, nil)
 }
 
+// ParseDnssecPolicyConfQuietWithSplit is ParseDnssecPolicyConfQuiet with the
+// file's dnssec.split-algorithms allowlist, so an offline re-parse judges a
+// KSK/ZSK algorithm split the way the daemon did. Without it every split
+// policy reads as "not listed in dnssec.split-algorithms".
+func ParseDnssecPolicyConfQuietWithSplit(name string, dp *DnssecPolicyConf, split map[string][]string) (*DnssecPolicy, error) {
+	return parseDnssecPolicyConfImpl(name, dp, true, buildSplitAlgorithmSet(split))
+}
+
 // parseDnssecPolicyConfImpl resolves and validates one policy. splitAllowed
 // is the KSK/ZSK pairing allowlist (kskAlg -> permitted zskAlgs); nil means
 // only same-algorithm policies pass (fail closed).
@@ -799,6 +807,11 @@ type PolicyAlgNames struct {
 	Alg    string // default / CSK
 	KSKAlg string
 	ZSKAlg string
+	// RolloverMethod is the policy's rollover.method as written ("none",
+	// "multi-ds", "double-signature"; empty resolves to "none"). config
+	// check uses it to know whether a KSK algorithm change is carried by
+	// the auto-rollover engine.
+	RolloverMethod string
 }
 
 // ResolveDnssecPolicyAlgNames returns each policy's effective algorithm NAMES
@@ -827,7 +840,11 @@ func ResolveDnssecPolicyAlgNames(path string) (map[string]PolicyAlgNames, error)
 		if mode == "" {
 			mode = DnssecPolicyModeKSKZSK
 		}
-		out[name] = PolicyAlgNames{Mode: mode, Alg: def, KSKAlg: ksk, ZSKAlg: zsk}
+		method := strings.ToLower(strings.TrimSpace(dp.Rollover.Method))
+		if method == "" {
+			method = "none"
+		}
+		out[name] = PolicyAlgNames{Mode: mode, Alg: def, KSKAlg: ksk, ZSKAlg: zsk, RolloverMethod: method}
 	}
 	return out, nil
 }

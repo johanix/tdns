@@ -131,6 +131,17 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "failed to read rollover state", http.StatusInternalServerError)
 			return
 		}
+		algRoll, aerr := kskAlgRollFromRow(row)
+		if aerr != nil {
+			lgApi.Warn("rollover/asap: corrupt algorithm-roll record", "zone", zone, "err", aerr)
+			http.Error(w, "failed to read rollover state", http.StatusInternalServerError)
+			return
+		}
+		if algRoll != nil {
+			http.Error(w, fmt.Sprintf("zone %s: a KSK algorithm rollover (%s -> %s) is in progress and drives itself -- there is no standby to promote; watch it with \"auto-rollover status -z %s --ksk\"",
+				zone, dns.AlgorithmToString[algRoll.FromAlg], dns.AlgorithmToString[algRoll.ToAlg], zone), http.StatusBadRequest)
+			return
+		}
 		if row != nil && row.RolloverInProgress {
 			http.Error(w, fmt.Sprintf("zone %s: rollover already in progress", zone), http.StatusBadRequest)
 			return
@@ -202,6 +213,13 @@ func APIRolloverCancel(conf *Config) func(w http.ResponseWriter, r *http.Request
 		lock.Lock()
 		defer lock.Unlock()
 
+		// An algorithm-roll abort is a KSK operation. Sent with KeyType
+		// "ZSK" it would fall into the branch below and clear a ZSK manual
+		// request instead: refuse the combination outright.
+		if req.AlgRoll && strings.EqualFold(req.KeyType, "ZSK") {
+			http.Error(w, "algRoll applies to KSK rollovers only", http.StatusBadRequest)
+			return
+		}
 		if strings.EqualFold(req.KeyType, "ZSK") {
 			if err := ClearZskManualRolloverRequest(kdb, zone); err != nil {
 				lgApi.Warn("rollover/cancel: ClearZskManualRolloverRequest failed", "zone", zone, "err", err)
@@ -209,6 +227,17 @@ func APIRolloverCancel(conf *Config) func(w http.ResponseWriter, r *http.Request
 				return
 			}
 			_ = json.NewEncoder(w).Encode(RolloverCancelResponse{Zone: zone, Cleared: true})
+			return
+		}
+
+		if req.AlgRoll {
+			detail, err := AbortKskAlgRollover(r.Context(), conf, kdb, zone)
+			if err != nil {
+				lgApi.Warn("rollover/cancel: abort KSK algorithm rollover refused", "zone", zone, "err", err)
+				http.Error(w, fmt.Sprintf("zone %s: %v", zone, err), http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(RolloverCancelResponse{Zone: zone, Cleared: true, Aborted: true, Detail: detail})
 			return
 		}
 

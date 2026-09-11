@@ -143,6 +143,9 @@ so).`,
 type minimalConfigForValidate struct {
 	Dnssec struct {
 		Policies map[string]tdns.DnssecPolicyConf `yaml:"policies"`
+		// The allowlist the daemon applied; without it a KSK/ZSK split the
+		// daemon accepted fails the offline re-parse.
+		SplitAlgorithms map[string][]string `yaml:"split-algorithms"`
 	} `yaml:"dnssec"`
 	Zones []minimalZoneEntry `yaml:"zones"`
 }
@@ -202,7 +205,7 @@ func loadPolicyFromYAMLFile(path, zone, policyName string) (*tdns.DnssecPolicy, 
 	// Quiet variant suppresses the daemon-style logger calls inside
 	// FinishDnssecPolicy; structured warnings are rendered by the
 	// validate report via tdns.CollectDnssecPolicyCouplingWarnings.
-	out, err := tdns.ParseDnssecPolicyConfQuiet(resolved, &pc)
+	out, err := tdns.ParseDnssecPolicyConfQuietWithSplit(resolved, &pc, raw.Dnssec.SplitAlgorithms)
 	if err != nil {
 		return nil, "", fmt.Errorf("parse policy: %w", err)
 	}

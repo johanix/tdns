@@ -124,11 +124,29 @@ type RolloverStatus struct {
 	// removed ZSKs beyond the display cap, omitted from ZSKs.
 	HiddenRemovedZskCount int `json:"hiddenRemovedZskCount,omitempty"`
 
-	// AlgTransition is set when a ZSK algorithm rollover is in flight (an
-	// active/standby/retired ZSK whose algorithm ≠ the effective-policy ZSK
-	// algorithm — the same drain-window predicate the change-policy re-entrancy
-	// guard uses). nil when no roll is in progress.
+	// AlgTransitions lists every algorithm rollover in flight, KSK first
+	// then ZSK, each derived from the shared in-flight predicate
+	// (kskAlgRollInFlight / zskAlgRollInFlight). Empty when none.
+	AlgTransitions []AlgTransitionInfo `json:"algTransitions,omitempty"`
+	// AlgTransition is the pre-KSK-rollover singular: the ZSK transition,
+	// when one is in flight. Deprecated in favour of AlgTransitions; the
+	// daemon keeps emitting it for one release so an older CLI still shows
+	// ZSK algorithm transitions. nil when no ZSK roll is in progress.
 	AlgTransition *AlgTransitionInfo `json:"algTransition,omitempty"`
+
+	// KSK algorithm rollover detail, set while one is in flight
+	// (alg_roll_from_alg on RolloverZoneState). Algorithm names; RFC3339
+	// times. AlgRollOldHeadRetireAt is empty until the parent has been
+	// seen serving only the new-algorithm DS; AlgRollProjectedRemoveAt is that
+	// plus the drain margin, empty while the margin cannot be computed
+	// (parent DS TTL not yet observed).
+	AlgRollFromAlg           string `json:"algRollFromAlg,omitempty"`
+	AlgRollToAlg             string `json:"algRollToAlg,omitempty"`
+	AlgRollStartedAt         string `json:"algRollStartedAt,omitempty"`
+	AlgRollHeadKeyID         uint16 `json:"algRollHeadKeyid,omitempty"`
+	AlgRollOldHeadKeyID      uint16 `json:"algRollOldHeadKeyid,omitempty"`
+	AlgRollOldHeadRetireAt   string `json:"algRollOldHeadRetireAt,omitempty"`
+	AlgRollProjectedRemoveAt string `json:"algRollProjectedRemoveAt,omitempty"`
 
 	// Policy summary. Verbose mode shows this; compact mode hides it.
 	Policy *PolicySummary `json:"policy,omitempty"`
@@ -223,12 +241,12 @@ type PolicySummary struct {
 	ClampingMargin           string `json:"clampingMargin,omitempty"`
 }
 
-// AlgTransitionInfo describes an in-flight ZSK algorithm rollover for the
-// status header line: e.g. "ZSK alg rollover: ED25519 → MAYO5 (in progress)".
+// AlgTransitionInfo describes an in-flight algorithm rollover for the
+// status header line: e.g. "Algorithm rollover: KSK ED25519 -> MAYO5".
 // FromAlg/ToAlg are algorithm names; Done/Total are a coarse progress count
-// (target-alg ZSKs / all live ZSK pipeline members).
+// (target-alg keys / all live pipeline members of the role).
 type AlgTransitionInfo struct {
-	Role    string `json:"role"` // currently always "ZSK"
+	Role    string `json:"role"` // "KSK" | "ZSK"
 	FromAlg string `json:"fromAlg"`
 	ToAlg   string `json:"toAlg"`
 	Done    int    `json:"done"`
@@ -267,7 +285,10 @@ type RolloverWhenResponse struct {
 	// Status / Blocker distinguish Case 1 (parent DS not at parent
 	// — engine cannot promote, no ETA) from Case 2 (DS observed,
 	// awaiting cache-flush — Earliest is set). Status values:
-	// "ready", "waiting-for-parent", "policy-blocked".
+	// "ready", "waiting-for-parent", "policy-blocked", and
+	// "alg-rollover-in-progress" (a KSK algorithm rollover drives
+	// itself; NextScheduled is its projected completion, FromKeyID /
+	// ToKeyID the old and new heads).
 	Status  string                `json:"status,omitempty"`
 	Blocker *RolloverBlockerEntry `json:"blocker,omitempty"`
 }
@@ -310,11 +331,20 @@ type RolloverCancelRequest struct {
 	Zone string `json:"zone"`
 	// KeyType: "" / "KSK" (default) = KSK, "ZSK" = ZSK.
 	KeyType string `json:"keytype,omitempty"`
+	// AlgRoll (KSK only): abort an in-flight KSK algorithm rollover
+	// instead of clearing a manual request. Only possible before the
+	// parent has confirmed the new-algorithm DS; after that, "abort"
+	// would be a reverse algorithm rollover and is refused.
+	AlgRoll bool `json:"algRoll,omitempty"`
 }
 
 type RolloverCancelResponse struct {
 	Zone    string `json:"zone"`
 	Cleared bool   `json:"cleared"`
+	// Aborted / Detail describe an AlgRoll abort: which key was removed
+	// and what happens next.
+	Aborted bool   `json:"aborted,omitempty"`
+	Detail  string `json:"detail,omitempty"`
 }
 
 // Request/response types for POST /api/v1/rollover/reset.

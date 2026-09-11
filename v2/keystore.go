@@ -1578,15 +1578,35 @@ func (kdb *KeyDB) RolloverKey(zonename string, keytype string, tx *Tx) (uint16, 
 		return 0, 0, fmt.Errorf("error getting active keys: %w", err)
 	}
 
+	// One active key per (role, algorithm). Collect every role-matching
+	// active instead of taking the first: two actives of one algorithm is a
+	// broken invariant we must not silently "fix" by retiring one of them,
+	// and for the KSK two actives of DIFFERENT algorithms is the legitimate
+	// overlap of an algorithm rollover -- which this manual path must not
+	// drive, since the engine owns both keys and the parent DS set.
 	var activeKey *DnssecKeyWithTimestamps
+	algsSeen := map[uint8]int{}
 	for i, k := range activeKeys {
-		if k.Flags == expectedFlags {
+		if k.Flags != expectedFlags {
+			continue
+		}
+		algsSeen[k.Algorithm]++
+		if activeKey == nil {
 			activeKey = &activeKeys[i]
-			break
 		}
 	}
 	if activeKey == nil {
 		return 0, 0, fmt.Errorf("no active %s found for zone %s", keytype, zonename)
+	}
+	for alg, n := range algsSeen {
+		if n > 1 {
+			return 0, 0, fmt.Errorf("zone %s has %d active %s keys of algorithm %s; refusing to pick one to retire (one active key per role and algorithm)",
+				zonename, n, keytype, dns.AlgorithmToString[alg])
+		}
+	}
+	if len(algsSeen) > 1 {
+		return 0, 0, fmt.Errorf("manual %s rollover refused for zone %s: active %s keys of %d algorithms means a KSK algorithm rollover is in progress and the auto-rollover engine owns them; let it finish or cancel it",
+			keytype, zonename, keytype, len(algsSeen))
 	}
 
 	// Get standby keys of this type

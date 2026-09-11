@@ -21,6 +21,14 @@ const (
 	rolloverPhasePendingChildWithdraw = "pending-child-withdraw"
 )
 
+// The two wire operations the tick performs, as package variables so the
+// engine tests can drive a full rollover sequence against a fake parent.
+// Production never reassigns them.
+var (
+	queryParentAgentDS     = QueryParentAgentDS
+	pushDSRRsetForRollover = PushDSRRsetForRollover
+)
+
 // jitterUpTo returns a random duration in [-d, +d]. Used to spread
 // next_push_at across zones sharing a parent so that a parent outage
 // doesn't cause every child zone's softfail probe to fire on the same
@@ -76,9 +84,13 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	if pol.Rollover.Method == RolloverMethodNone {
 		return nil
 	}
-	if pol.Rollover.Method == RolloverMethodDoubleSignature {
-		return nil
-	}
+	// D-4: the KSK algorithm rollover takes the double-signature ordering
+	// regardless of rollover.method, so a method: double-signature zone is
+	// let in far enough to spawn and drive one. Its SAME-algorithm cadence
+	// is still unimplemented (4E): outside an algorithm roll such a zone
+	// does no pipeline-fill, no scheduled rollover, and returns below once
+	// the row shows it idle.
+	dsOnly := pol.Rollover.Method == RolloverMethodDoubleSignature
 
 	// Refuse to advance keys when the zone has an auto-rollover-
 	// impacting error: a hard policy violation (E5/E10) means rolling
@@ -137,6 +149,63 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	// with clamping.enabled: false.
 	kStepScheduler(zd, kdb, pol, now)
 
+	row, err := LoadRolloverZoneRow(kdb, zone)
+	if err != nil {
+		return err
+	}
+	if row == nil {
+		return nil
+	}
+	phase := row.RolloverPhase
+	if phase == "" {
+		phase = rolloverPhaseIdle
+	}
+	algRoll, err := kskAlgRollFromRow(row)
+	if err != nil {
+		return err
+	}
+
+	// KSK algorithm rollover (D-5): change-policy binds and gates; the
+	// tick spawns. Detecting the mismatch here -- an active KSK whose
+	// algorithm differs from the bound policy's, on an idle zone with
+	// nothing in flight -- is crash-safe and idempotent: a bind that
+	// failed half-way is simply re-detected next tick.
+	if algRoll == nil && phase == rolloverPhaseIdle && !row.RolloverInProgress {
+		from, to, mismatch, blocked, err := kskAlgRollNeeded(kdb, zone, pol)
+		if err != nil {
+			lgSigner.Warn("rollover: KSK algorithm-roll check failed", "zone", zone, "err", err)
+			// The mismatch state is unknown. Do nothing else this tick:
+			// pipeline-fill would mint new-algorithm keys ahead of a
+			// spawn that may still be needed.
+			return nil
+		} else if mismatch && blocked {
+			// A bind the engine cannot carry yet. Do nothing else this
+			// tick: pipeline-fill would mint new-algorithm keys ahead of
+			// the spawn and the idle branch would push their DS.
+			return nil
+		} else if mismatch {
+			if _, err := SpawnKskAlgRollover(conf, kdb, zone, from, to); err != nil {
+				lgSigner.Error("rollover: KSK algorithm rollover spawn failed; will retry next tick", "zone", zone, "err", err)
+				return nil
+			}
+			row, err = LoadRolloverZoneRow(kdb, zone)
+			if err != nil {
+				return err
+			}
+			if row == nil {
+				return nil
+			}
+			phase = row.RolloverPhase
+			if algRoll, err = kskAlgRollFromRow(row); err != nil {
+				return err
+			}
+		}
+	}
+	if dsOnly && algRoll == nil && phase == rolloverPhaseIdle {
+		// Same-algorithm double-signature cadence: not built (4E).
+		return nil
+	}
+
 	// Pipeline-fill: maintain num_ds DS records at the parent, plus one
 	// 'created' key in flight (total cap num_ds + 1). The two checks gate
 	// generation independently:
@@ -150,10 +219,15 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	// growth on a single tick; this layer catches a future bug that bypasses
 	// or weakens the cap. CRIT log so the operator sees it before the
 	// next status query.
+	//
+	// Suspended for the duration of a KSK algorithm rollover (D-8): the
+	// counters are algorithm-blind and would mint new-algorithm keys into
+	// slots the frozen old FIFO used to hold. The fill resumes when the
+	// roll completes and refills the new-algorithm FIFO to num_ds.
 	num := pol.Rollover.NumDS
 	maxPipeline := num + 1
 	circuitBreakerCeiling := 2 * maxPipeline
-	for {
+	for algRoll == nil && !dsOnly {
 		total, err := CountKskInPipeline(kdb, zone)
 		if err != nil {
 			return err
@@ -170,7 +244,11 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		if err != nil {
 			return err
 		}
-		if n >= num {
+		// A key already created counts toward the target: its DS goes out
+		// with the next push. Counting DS-at-parent alone minted one key
+		// per pass until the cap, and the parent ended up with num_ds+1
+		// DS records (tdns#609).
+		if n >= num || total >= num {
 			break
 		}
 		kid, _, err := GenerateKskRolloverCreated(kdb, zone, "key-state-worker", pol.KSKAlgorithm, pol.Rollover.Method)
@@ -179,18 +257,6 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			break
 		}
 		lgSigner.Info("rollover: generated pipeline KSK", "zone", zone, "keyid", kid)
-	}
-
-	row, err := LoadRolloverZoneRow(kdb, zone)
-	if err != nil {
-		return err
-	}
-	if row == nil {
-		return nil
-	}
-	phase := row.RolloverPhase
-	if phase == "" {
-		phase = rolloverPhaseIdle
 	}
 
 	// CDS-publication observability: when the engine claims ownership
@@ -261,8 +327,24 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		// §8.8: wait kasp.propagation-delay from rollover_phase_at, then
 		// arm the DS push. Real child-secondary observation is post-4
 		// future work; here we use a fixed wait.
+		//
+		// During a KSK algorithm rollover the wait is propagation-delay
+		// PLUS the served DNSKEY TTL (D-7): DS(B) must not appear at the
+		// parent while any resolver can still hold a DNSKEY RRset without
+		// B in it. Multi-DS pre-positions the DS long before the key is
+		// active and never needs this; the double-signature ordering
+		// publishes the DS for a key that is already signing.
+		wait := propagationDelay
+		if algRoll != nil {
+			ttl, ok := effectiveServedDnskeyTTL(kdb, zone, pol)
+			if !ok {
+				lgSigner.Info("rollover: deferring DS push for the KSK algorithm rollover; served DNSKEY TTL not yet observable", "zone", zone)
+				return nil
+			}
+			wait += ttl
+		}
 		if t, ok := parseOptionalTime(row.RolloverPhaseAt); ok {
-			if now.Sub(t) < propagationDelay {
+			if now.Sub(t) < wait {
 				return nil
 			}
 		} else {
@@ -283,7 +365,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		}
 		_ = setLastAttemptStarted(kdb, zone, now)
 		pushCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		res, err := PushDSRRsetForRollover(pushCtx, deps)
+		res, err := pushDSRRsetForRollover(pushCtx, deps)
 		cancel()
 		if err != nil {
 			cat := res.Category
@@ -368,7 +450,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			}
 		}
 
-		obs, err := QueryParentAgentDS(ctx, zone, agent)
+		obs, err := queryParentAgentDS(ctx, zone, agent)
 		_ = setLastPoll(kdb, zone, now)
 		if err != nil {
 			lgSigner.Debug("rollover: parent-agent DS query failed", "zone", zone, "err", err)
@@ -383,11 +465,11 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		// whether it matches expected. The "DS observed" status line
 		// shows the latest poll, not the latest confirmed match.
 		_ = setLastDsObserved(kdb, zone, dsKeyids(obs), now)
-		if !ObservedDSSetMatchesExpected(obs, expected) {
+		if !ObservedDSSetMatchesExpected(obs, expected) || observedDSStillHasOldHead(obs, algRoll) {
 			scheduleNextObservePoll(kdb, zone, row, now, pollMax)
 			return nil
 		}
-		if !idxOK {
+		if !idxOK && algRoll == nil {
 			lgSigner.Warn("rollover: DS observed but rollover_index incomplete for all KSK rows; cannot advance created→ds-published", "zone", zone)
 			_ = clearObserveSchedule(kdb, zone)
 			if err := SetRolloverPhase(kdb, zone, rolloverPhaseIdle); err != nil {
@@ -395,12 +477,26 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			}
 			return nil
 		}
+		if !idxOK {
+			// An algorithm roll has no created keys to advance (the fill is
+			// suspended), so an incomplete index range must not park it:
+			// idle with the marker still set is a roll that never confirms
+			// and never spawns. Confirm without the range bookkeeping.
+			lgSigner.Warn("rollover: DS observed with an incomplete rollover_index; confirming the algorithm roll without a confirmed range", "zone", zone)
+		}
 
 		// §9.4: wrap the confirmed-range write, the created→ds-published
 		// state transitions, the ds_observed_at timestamps, the
 		// observe-schedule clear, and the phase reset to idle in a
-		// single transaction.
-		advanced, err := confirmDSAndAdvanceCreatedKeysTx(kdb, zone, low, high, now)
+		// single transaction. An algorithm roll takes its own sibling:
+		// the parent has been seen serving only DS(B), so the old head's
+		// drain clock starts and the zone goes to pending-child-withdraw.
+		var advanced int
+		if algRoll != nil {
+			advanced, err = confirmDSAndStartOldHeadDrainTx(kdb, zone, low, high, idxOK, now)
+		} else {
+			advanced, err = confirmDSAndAdvanceCreatedKeysTx(kdb, zone, low, high, now)
+		}
 		if err != nil {
 			return fmt.Errorf("rollover: confirm DS and advance keys: %w", err)
 		}
@@ -416,6 +512,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		// Clear last_softfail_*: the previous softfail event is no
 		// longer informative now that we're back in sync.
 		_ = clearLastSoftfail(kdb, zone)
+		_ = clearNextPushAt(kdb, zone)
 		// Trigger 1 — confirmed observation: if NOTIFY-pushed CDS is
 		// still on the wire (last_published_cds_index_low/high
 		// non-NULL), unpublish it now per RFC 7344 §4.1. Best-effort.
@@ -459,7 +556,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		}
 		agent := pol.Rollover.ParentAgent
 		if pollDue && agent != "" {
-			obs, qerr := QueryParentAgentDS(ctx, zone, agent)
+			obs, qerr := queryParentAgentDS(ctx, zone, agent)
 			_ = setLastPoll(kdb, zone, now)
 			if qerr == nil {
 				// W2: refresh observed parent DS TTL + re-evaluate
@@ -470,13 +567,22 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 				// reflects the latest poll, not the latest confirm.
 				_ = setLastDsObserved(kdb, zone, dsKeyids(obs), now)
 			}
-			if qerr == nil && ObservedDSSetMatchesExpected(obs, expected) {
-				if !idxOK {
+			if qerr == nil && ObservedDSSetMatchesExpected(obs, expected) && !observedDSStillHasOldHead(obs, algRoll) {
+				if !idxOK && algRoll == nil {
 					lgSigner.Warn("rollover: DS observed during softfail but rollover_index incomplete; cannot advance", "zone", zone)
 					_ = clearObserveSchedule(kdb, zone)
 					return SetRolloverPhase(kdb, zone, rolloverPhaseIdle)
 				}
-				advanced, terr := confirmDSAndAdvanceCreatedKeysTx(kdb, zone, low, high, now)
+				if !idxOK {
+					lgSigner.Warn("rollover: DS observed during softfail with an incomplete rollover_index; confirming the algorithm roll without a confirmed range", "zone", zone)
+				}
+				var advanced int
+				var terr error
+				if algRoll != nil {
+					advanced, terr = confirmDSAndStartOldHeadDrainTx(kdb, zone, low, high, idxOK, now)
+				} else {
+					advanced, terr = confirmDSAndAdvanceCreatedKeysTx(kdb, zone, low, high, now)
+				}
 				if terr != nil {
 					return fmt.Errorf("rollover: confirm DS and advance keys: %w", terr)
 				}
@@ -486,6 +592,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 				// it's the operator-facing "DS UPDATE: sent <time>".
 				// See the matching block in pendingParentObserve.
 				_ = clearLastSoftfail(kdb, zone)
+				_ = clearNextPushAt(kdb, zone)
 				// Trigger 1 — confirmed observation, softfail-recovery path.
 				cleanupCdsAfterConfirm(zd, kdb)
 				if advanced > 0 {
@@ -516,7 +623,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		}
 		_ = setLastAttemptStarted(kdb, zone, now)
 		pushCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		res, perr := PushDSRRsetForRollover(pushCtx, deps)
+		res, perr := pushDSRRsetForRollover(pushCtx, deps)
 		cancel()
 		if perr != nil {
 			cat := res.Category
@@ -563,6 +670,9 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		lgSigner.Info("rollover: softfail probe accepted, observing", "zone", zone, "first_poll_at", nextPoll.Format(time.RFC3339), "next_probe_at", nextPush.Format(time.RFC3339))
 		scheduleFastObservePoll(ctx, deps, initial)
 	case rolloverPhasePendingChildWithdraw:
+		if algRoll != nil {
+			return withdrawKskAlgRoll(ctx, deps, zone, algRoll, now)
+		}
 		// §8.8: wait effective_margin = max(policy.clamping.margin,
 		// max_observed_ttl) from each retired SEP key's retired_at, then
 		// advance to removed. When all retired SEP keys for the zone have
@@ -604,6 +714,23 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 				stillWaiting++
 				continue
 			}
+			// Strip the key's RRSIGs from the served zone BEFORE marking it
+			// removed -- the same ordering as the generic worker's
+			// retired→removed path (key_state_worker.go). SignRRset is
+			// additive and only replaces an RRSIG when re-signing with that
+			// same key, so without this the removed key's signature over the
+			// apex DNSKEY RRset would stay on the wire indefinitely. Strip
+			// first so a failure leaves the key retired and this tick's
+			// sequence is retried next time; nothing is half-done.
+			if err := stripRRSIGsBeforeRemoval(ctx, zd, k.KeyTag); err != nil {
+				if ctx.Err() != nil {
+					lgSigner.Info("rollover: stopping retired→removed sweep on context cancellation", "zone", zone)
+					return nil
+				}
+				lgSigner.Error("rollover: failed to strip removed key's RRSIGs, will retry", "zone", zone, "keyid", k.KeyTag, "err", err)
+				stillWaiting++
+				continue
+			}
 			if err := UpdateDnssecKeyState(kdb, zone, k.KeyTag, DnskeyStateRemoved); err != nil {
 				lgSigner.Error("rollover: retired→removed failed", "zone", zone, "keyid", k.KeyTag, "err", err)
 				stillWaiting++
@@ -628,6 +755,21 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	return nil
 }
 
+// stripRRSIGsBeforeRemoval removes every RRSIG made by keytag from the
+// served zone. Called by pending-child-withdraw immediately before a
+// retired SEP key is marked removed, and by the algorithm-rollover
+// withdraw arm for the old-algorithm head. A nil or unloaded zone has
+// nothing to serve and nothing to strip.
+func stripRRSIGsBeforeRemoval(ctx context.Context, zd *ZoneData, keytag uint16) error {
+	if zd == nil {
+		return nil
+	}
+	_, err := zd.StripZoneRRSIGs(ctx, func(s *dns.RRSIG) bool {
+		return s.KeyTag == keytag
+	})
+	return err
+}
+
 // confirmDSAndAdvanceCreatedKeysTx performs all post-observation state writes
 // in a single transaction: persist last_ds_confirmed_*, advance every created
 // SEP key whose rollover_index falls inside [low, high] to ds-published, stamp
@@ -649,11 +791,50 @@ func confirmDSAndAdvanceCreatedKeysTx(kdb *KeyDB, zone string, low, high int, no
 		return 0, fmt.Errorf("save confirmed range: %w", err)
 	}
 
+	advanced, err := advanceCreatedKeysInRangeTx(tx, kdb, zone, low, high, now)
+	if err != nil {
+		return 0, err
+	}
+
+	// Clear the observe-schedule fields and reset the phase, all inside
+	// the same TX as the state advances.
+	if err := clearObserveScheduleTx(tx, zone); err != nil {
+		return 0, fmt.Errorf("clear observe schedule: %w", err)
+	}
+	// 4B routing: if a rollover is in progress (set by AtomicRollover),
+	// the post-observe path leads to pending-child-withdraw, not idle.
+	// Read rollover_in_progress inside this same TX so the read and the
+	// phase write are atomic.
+	inProgress, err := getRolloverInProgressTx(tx, zone)
+	if err != nil {
+		return 0, fmt.Errorf("read rollover_in_progress: %w", err)
+	}
+	nextPhase := rolloverPhaseIdle
+	if inProgress {
+		nextPhase = rolloverPhasePendingChildWithdraw
+	}
+	if err := setRolloverPhaseTx(tx, zone, nextPhase); err != nil {
+		return 0, fmt.Errorf("reset phase: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	commit = true
+	return advanced, nil
+}
+
+// advanceCreatedKeysInRangeTx moves every created SEP key whose
+// rollover_index lies in [low, high] to ds-published, stamps
+// ds_observed_at, and clears any stale last_rollover_error. Shared by the
+// same-algorithm confirm and the algorithm-roll confirm: a created key
+// whose DS the parent has just confirmed advances the same way whichever
+// kind of rollover carried the push.
+func advanceCreatedKeysInRangeTx(tx *Tx, kdb *KeyDB, zone string, low, high int, now time.Time) (int, error) {
 	created, err := GetDnssecKeysByState(kdb, zone, DnskeyStateCreated)
 	if err != nil {
 		return 0, fmt.Errorf("list created keys: %w", err)
 	}
-
 	advanced := 0
 	for i := range created {
 		k := &created[i]
@@ -688,37 +869,301 @@ func confirmDSAndAdvanceCreatedKeysTx(kdb *KeyDB, zone string, low, high int, no
 		}
 		advanced++
 	}
+	return advanced, nil
+}
 
-	// Clear the observe-schedule fields and reset the phase, all inside
-	// the same TX as the state advances.
-	if _, err := tx.Exec(`UPDATE RolloverZoneState
+// observedDSStillHasOldHead is the algorithm-roll tightening of the DS
+// confirm. ObservedDSSetMatchesExpected ignores DS records for keys the
+// engine does not manage, but the roll's old-algorithm head IS managed:
+// its DS must be gone from the parent before the drain clock starts,
+// because the drain is what lets that RRset expire from caches before
+// the old DNSKEY is withdrawn (RFC 6781 §4.1.4, plan A4). A lagging
+// parent nameserver still serving {DS(A), DS(B)} therefore does not
+// confirm. Never true without a roll in flight.
+func observedDSStillHasOldHead(obs []dns.RR, algRoll *KskAlgRollState) bool {
+	if algRoll == nil {
+		return false
+	}
+	for _, rr := range obs {
+		if d, ok := rr.(*dns.DS); ok && d.KeyTag == algRoll.OldHeadKeyID && d.Algorithm == algRoll.FromAlg {
+			return true
+		}
+	}
+	return false
+}
+
+// clearObserveScheduleTx clears the observe-phase schedule columns on an
+// existing TX.
+func clearObserveScheduleTx(tx *Tx, zone string) error {
+	_, err := tx.Exec(`UPDATE RolloverZoneState
 SET observe_started_at = NULL,
     observe_next_poll_at = NULL,
     observe_backoff_seconds = NULL
-WHERE zone = ?`, zone); err != nil {
+WHERE zone = ?`, zone)
+	return err
+}
+
+// confirmDSAndStartOldHeadDrainTx is the algorithm-roll sibling of
+// confirmDSAndAdvanceCreatedKeysTx, deliberately separate so no edit to
+// one can regress the other. The parent has been observed serving the
+// swapped DS RRset -- DS(B) present, DS(A) gone (RFC 6781 §4.1.4, plan
+// A4). In one transaction: persist the confirmed range, advance any
+// created keys the push carried, stamp the old head's drain clock
+// (alg_roll_old_head_retire_at = now), clear the observe schedule, and
+// move to pending-child-withdraw.
+//
+// The old head's key STATE is untouched: it stays active, and keeps
+// signing the apex DNSKEY RRset under every re-sign path, for the whole
+// drain (plan A2) -- a validator still holding the pre-swap {DS(A)}
+// needs it until that RRset expires. Its removal is the withdraw arm's
+// job, measured from the clock stamped here.
+//
+// rangeKnown is ComputeTargetDSSetForZone's indexRangeKnown: false when a
+// KSK row has no rollover_index (an imported or hand-repaired keystore).
+// The range is bookkeeping for created keys, of which an algorithm roll
+// has none, so an unknown range is logged and skipped; the drain still
+// starts.
+func confirmDSAndStartOldHeadDrainTx(kdb *KeyDB, zone string, low, high int, rangeKnown bool, now time.Time) (int, error) {
+	tx, err := kdb.Begin("confirmDSAndStartOldHeadDrainTx")
+	if err != nil {
+		return 0, fmt.Errorf("begin: %w", err)
+	}
+	commit := false
+	defer func() {
+		if !commit {
+			tx.Rollback()
+		}
+	}()
+	var advanced int
+	if rangeKnown {
+		if err := saveLastDSConfirmedRangeTx(tx, zone, low, high); err != nil {
+			return 0, fmt.Errorf("save confirmed range: %w", err)
+		}
+		if advanced, err = advanceCreatedKeysInRangeTx(tx, kdb, zone, low, high, now); err != nil {
+			return 0, err
+		}
+	}
+	if err := setKskAlgRollOldHeadRetireAtTx(tx, zone, now); err != nil {
+		return 0, fmt.Errorf("stamp old head retire_at: %w", err)
+	}
+	if err := clearObserveScheduleTx(tx, zone); err != nil {
 		return 0, fmt.Errorf("clear observe schedule: %w", err)
 	}
-	// 4B routing: if a rollover is in progress (set by AtomicRollover),
-	// the post-observe path leads to pending-child-withdraw, not idle.
-	// Read rollover_in_progress inside this same TX so the read and the
-	// phase write are atomic.
-	inProgress, err := getRolloverInProgressTx(tx, zone)
-	if err != nil {
-		return 0, fmt.Errorf("read rollover_in_progress: %w", err)
+	if err := setRolloverPhaseTx(tx, zone, rolloverPhasePendingChildWithdraw); err != nil {
+		return 0, fmt.Errorf("set phase: %w", err)
 	}
-	nextPhase := rolloverPhaseIdle
-	if inProgress {
-		nextPhase = rolloverPhasePendingChildWithdraw
-	}
-	if err := setRolloverPhaseTx(tx, zone, nextPhase); err != nil {
-		return 0, fmt.Errorf("reset phase: %w", err)
-	}
-
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit: %w", err)
 	}
 	commit = true
+	lgRollover.Info("rollover: parent now serves only the new-algorithm DS; old-algorithm KSK drain started",
+		"zone", zone, "retire_at", now.UTC().Format(time.RFC3339))
 	return advanced, nil
+}
+
+// effectiveMarginForRoll is the withdraw margin for a zone, widened for a
+// KSK algorithm rollover. The same-algorithm multi-DS margin is
+// max(clamping.margin, max_observed_ttl): every resolver that can hold a
+// DS RRset old enough to predate the push already holds the incoming
+// key's DS, because multi-DS pre-positions it. Double-signature swaps
+// DS(A) for DS(B) in the push, so a resolver holding the pre-swap
+// {DS(A)} keeps it for up to the parent DS TTL after the push -- and for
+// that resolver the chain is DS(A) → A → RRSIG(A) until then; withdraw A
+// earlier and it is bogus (RFC 6781 §4.1.4: the old DNSKEY goes only
+// "after the cache data for the old DS RRset has expired"). So for an
+// algorithm roll:
+//
+//	max( clamping.margin, max_observed_ttl, parent_DS_TTL + ds-publish-delay )
+//
+// measured from the confirm. The + ds-publish-delay term is not double
+// counting: the confirm is a single parent-agent observation, and a
+// lagging parent nameserver may still be serving the old RRset at that
+// instant (plan A1(a)). ok=false when the parent DS TTL is not known --
+// the caller defers, since the cost of deferring is only that A keeps
+// signing an RRset it is entitled to sign. The TTL is in-memory state
+// re-observed after every restart (A1(b)), so a deferral is routine, not
+// an alarm.
+//
+// With algRoll nil this is exactly effectiveMarginForZone. The exported
+// EffectiveMarginForZone keeps its two-argument form for out-of-tree
+// callers.
+func effectiveMarginForRoll(zd *ZoneData, kdb *KeyDB, zone string, pol *DnssecPolicy, algRoll *KskAlgRollState) (time.Duration, bool, error) {
+	base, err := effectiveMarginForZone(kdb, zone, pol)
+	if err != nil {
+		return base, false, err
+	}
+	if algRoll == nil {
+		return base, true, nil
+	}
+	dsTTL, known := resolveDSTTL(zd, pol)
+	if !known {
+		return base, false, nil
+	}
+	if widened := dsTTL + pol.Rollover.DsPublishDelay; widened > base {
+		return widened, true, nil
+	}
+	return base, true, nil
+}
+
+// withdrawKskAlgRoll is the pending-child-withdraw arm for a KSK
+// algorithm rollover. Two clocks may be running: the old-algorithm head
+// (active, measured from alg_roll_old_head_retire_at) and any SEP key
+// already in retired (measured from its retired_at). Both use the
+// widened algorithm-roll margin. Each key is stripped of its RRSIGs
+// before its state changes (F2), fail-soft: a strip failure leaves it
+// where it is and the next tick retries. When neither clock is left the
+// roll completes.
+func withdrawKskAlgRoll(ctx context.Context, deps RolloverEngineDeps, zone string, algRoll *KskAlgRollState, now time.Time) error {
+	zd, kdb, pol, conf := deps.Zone, deps.KDB, deps.Policy, deps.Conf
+
+	if algRoll.OldHeadRetireAt == nil {
+		// Cannot happen through the confirm path; a hand-edited row could
+		// produce it. Never guess a clock: hold, loudly.
+		lgSigner.Warn("rollover: KSK algorithm rollover in pending-child-withdraw with no old-head retire_at; holding", "zone", zone)
+		return nil
+	}
+	eff, ok, err := effectiveMarginForRoll(zd, kdb, zone, pol, algRoll)
+	if err != nil {
+		lgSigner.Warn("rollover: effective margin lookup failed", "zone", zone, "err", err)
+		return nil
+	}
+	if !ok {
+		lgSigner.Info("rollover: holding the old-algorithm KSK; parent DS TTL not yet observed since startup (expected after a restart)",
+			"zone", zone, "old_head", algRoll.OldHeadKeyID)
+		return nil
+	}
+
+	stillWaiting := 0
+	advanced := 0
+
+	// (a) The old-algorithm head.
+	oldState, err := dnssecKeyStateOf(kdb, zone, algRoll.OldHeadKeyID)
+	if err != nil {
+		return fmt.Errorf("old head state: %w", err)
+	}
+	switch oldState {
+	case DnskeyStateRemoved, "":
+		// Already done (or gone); nothing to wait for.
+	default:
+		if now.Sub(*algRoll.OldHeadRetireAt) < eff {
+			stillWaiting++
+		} else {
+			if err := stripRRSIGsBeforeRemoval(ctx, zd, algRoll.OldHeadKeyID); err != nil {
+				if ctx.Err() != nil {
+					lgSigner.Info("rollover: stopping algorithm-roll withdraw on context cancellation", "zone", zone)
+					return nil
+				}
+				lgSigner.Error("rollover: failed to strip old-algorithm KSK's RRSIGs, will retry", "zone", zone, "keyid", algRoll.OldHeadKeyID, "err", err)
+				stillWaiting++
+			} else if err := UpdateDnssecKeyState(kdb, zone, algRoll.OldHeadKeyID, DnskeyStateRemoved); err != nil {
+				lgSigner.Error("rollover: old-algorithm KSK active→removed failed", "zone", zone, "keyid", algRoll.OldHeadKeyID, "err", err)
+				stillWaiting++
+			} else {
+				lgRollover.Info("rollover: old-algorithm KSK removed; drain complete",
+					"zone", zone, "keyid", algRoll.OldHeadKeyID,
+					"from", dns.AlgorithmToString[algRoll.FromAlg], "to", dns.AlgorithmToString[algRoll.ToAlg],
+					"effective_margin", eff)
+				advanced++
+			}
+		}
+	}
+
+	// (b) Retired SEP keys from an earlier same-algorithm roll's drain.
+	retired, err := GetDnssecKeysByState(kdb, zone, DnskeyStateRetired)
+	if err != nil {
+		return fmt.Errorf("list retired keys: %w", err)
+	}
+	for i := range retired {
+		k := &retired[i]
+		if k.Flags&dns.SEP == 0 {
+			continue
+		}
+		if k.RetiredAt == nil {
+			lgSigner.Warn("rollover: retired SEP key has no retired_at; cannot advance", "zone", zone, "keyid", k.KeyTag)
+			stillWaiting++
+			continue
+		}
+		if now.Sub(*k.RetiredAt) < eff {
+			stillWaiting++
+			continue
+		}
+		if err := stripRRSIGsBeforeRemoval(ctx, zd, k.KeyTag); err != nil {
+			if ctx.Err() != nil {
+				lgSigner.Info("rollover: stopping algorithm-roll retired-key sweep on context cancellation", "zone", zone)
+				return nil
+			}
+			lgSigner.Error("rollover: failed to strip removed key's RRSIGs, will retry", "zone", zone, "keyid", k.KeyTag, "err", err)
+			stillWaiting++
+			continue
+		}
+		if err := UpdateDnssecKeyState(kdb, zone, k.KeyTag, DnskeyStateRemoved); err != nil {
+			lgSigner.Error("rollover: retired→removed failed", "zone", zone, "keyid", k.KeyTag, "err", err)
+			stillWaiting++
+			continue
+		}
+		lgSigner.Info("rollover: retired→removed (pending-child-withdraw, algorithm roll)", "zone", zone, "keyid", k.KeyTag, "effective_margin", eff)
+		advanced++
+	}
+
+	if advanced > 0 {
+		triggerResign(conf, zone)
+	}
+	if stillWaiting == 0 {
+		return completeKskAlgRollWithdraw(conf, kdb, zone, algRoll)
+	}
+	return nil
+}
+
+// dnssecKeyStateOf returns a key's state, or "" when the key does not
+// exist.
+func dnssecKeyStateOf(kdb *KeyDB, zone string, keyid uint16) (string, error) {
+	var st string
+	err := kdb.DB.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename = ? AND keyid = ?`, zone, int(keyid)).Scan(&st)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return st, nil
+}
+
+// completeKskAlgRollWithdraw ends a KSK algorithm rollover: in one
+// transaction clear the roll marker, clear rollover_in_progress, and go
+// idle. Nothing is left to push: the parent has served only the
+// new-algorithm DS since the confirm (plan A4), and the withdrawn head
+// no longer contributes to the target set. Pipeline-fill resumes on the
+// next tick and refills the new-algorithm FIFO to num_ds; a multi-DS
+// zone arms its own push from the idle branch as usual.
+func completeKskAlgRollWithdraw(conf *Config, kdb *KeyDB, zone string, algRoll *KskAlgRollState) error {
+	tx, err := kdb.Begin("completeKskAlgRollWithdraw")
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	commit := false
+	defer func() {
+		if !commit {
+			tx.Rollback()
+		}
+	}()
+	if err := clearKskAlgRollTx(tx, zone); err != nil {
+		return fmt.Errorf("clear algorithm-roll state: %w", err)
+	}
+	if err := setRolloverInProgressTx(tx, zone, false); err != nil {
+		return fmt.Errorf("clear rollover_in_progress: %w", err)
+	}
+	if err := setRolloverPhaseTx(tx, zone, rolloverPhaseIdle); err != nil {
+		return fmt.Errorf("set phase idle: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	commit = true
+	lgRollover.Info("rollover: KSK algorithm rollover complete; the parent already serves only the new-algorithm DS",
+		"zone", zone, "from", dns.AlgorithmToString[algRoll.FromAlg], "to", dns.AlgorithmToString[algRoll.ToAlg],
+		"new_head", algRoll.NewHeadKeyID)
+	triggerResign(conf, zone)
+	return nil
 }
 
 // scheduleFastObservePoll spawns a one-shot goroutine that fires the
@@ -1091,7 +1536,21 @@ func transitionDsPublishedToPublishedForZone(deps RolloverEngineDeps, dsPubs []*
 		return
 	}
 	activeAt, err := RolloverKeyActiveAt(kdb, zoneName, activeKid)
-	if err != nil || activeAt == nil {
+	if err != nil {
+		return
+	}
+	// A pending manual request is an anchor too. `asap` persists
+	// manual_rollover_earliest computed as if the next-up key were
+	// published now; if only the lifetime cadence could publish it, the
+	// request would wait for T_roll -- never, under lifetime forever --
+	// while rolloverDue waits for a standby that never comes (tdns#609).
+	var manualAt *time.Time
+	if row, rerr := LoadRolloverZoneRow(kdb, zoneName); rerr == nil && row != nil && row.ManualRolloverEarliest.Valid {
+		if t, perr := time.Parse(time.RFC3339, strings.TrimSpace(row.ManualRolloverEarliest.String)); perr == nil {
+			manualAt = &t
+		}
+	}
+	if activeAt == nil && manualAt == nil {
 		return
 	}
 
@@ -1157,7 +1616,17 @@ func transitionDsPublishedToPublishedForZone(deps RolloverEngineDeps, dsPubs []*
 		// standbyCount+1: standby keys 1..standbyCount activate
 		// first, this key activates after them.
 		slot := standbyCount + i + 1
-		tRoll := activeAt.Add(time.Duration(slot) * lifetime)
+		var tRoll time.Time
+		if activeAt != nil {
+			tRoll = activeAt.Add(time.Duration(slot) * lifetime)
+		}
+		// The manual request names the roll time of the next-up key only.
+		if i == 0 && manualAt != nil && (activeAt == nil || manualAt.Before(tRoll)) {
+			tRoll = *manualAt
+		}
+		if tRoll.IsZero() {
+			break
+		}
 		// E12: T_publish = T_roll − child_prop − DNSKEY_TTL.
 		tPublish := tRoll.Add(-(deps.PropagationDelay + dnskeyTTL))
 		if now.Before(tPublish) {

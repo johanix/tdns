@@ -168,7 +168,13 @@ UNIQUE (keyname)
 		last_ds_observed_keyids        TEXT,
 		last_ds_observed_at            TEXT,
 		parent_advertises_update       INTEGER,
-		parent_advertises_notify       INTEGER
+		parent_advertises_notify       INTEGER,
+		alg_roll_from_alg              INTEGER,
+		alg_roll_to_alg                INTEGER,
+		alg_roll_started_at            TEXT,
+		alg_roll_new_head_keyid        INTEGER,
+		alg_roll_old_head_keyid        INTEGER,
+		alg_roll_old_head_retire_at    TEXT
 	)`,
 
 	// ZoneSigningState holds per-zone signing-loop state. max_observed_ttl

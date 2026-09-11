@@ -70,6 +70,127 @@ type RolloverZoneRow struct {
 	// from "engine hasn't pushed via this scheme yet".
 	ParentAdvertisesUpdate sql.NullBool
 	ParentAdvertisesNotify sql.NullBool
+
+	// KSK algorithm rollover (plan §5.1 + A2). AlgRollFromAlg.Valid is
+	// THE predicate for "an algorithm roll is in flight"; the rest is
+	// roll-scoped bookkeeping. See KskAlgRollState for the typed view.
+	AlgRollFromAlg         sql.NullInt64
+	AlgRollToAlg           sql.NullInt64
+	AlgRollStartedAt       sql.NullString
+	AlgRollNewHeadKeyID    sql.NullInt64
+	AlgRollOldHeadKeyID    sql.NullInt64
+	AlgRollOldHeadRetireAt sql.NullString
+}
+
+// KskAlgRollState is the typed view of the alg_roll_* columns on
+// RolloverZoneState: which algorithms the in-flight KSK algorithm
+// rollover is between, when it started, and the two heads it involves.
+//
+// The new-algorithm head is minted straight into active (plan D-6). The
+// old-algorithm head stays ACTIVE through the drain window so it keeps
+// signing the apex DNSKEY RRset under every re-sign path (A2);
+// OldHeadRetireAt, stamped when the parent is seen serving only the
+// new-algorithm DS (A4), is the clock its removal is measured from. Nil
+// until then.
+type KskAlgRollState struct {
+	FromAlg         uint8
+	ToAlg           uint8
+	StartedAt       time.Time
+	NewHeadKeyID    uint16
+	OldHeadKeyID    uint16
+	OldHeadRetireAt *time.Time
+}
+
+// kskAlgRollFromRow projects the alg_roll_* columns of an already-loaded
+// row. nil when no algorithm roll is in flight. Callers that hold a row
+// use this instead of LoadKskAlgRollState so the predicate costs no
+// extra query on hot paths (reconcileActiveKeyAlgorithms already loads
+// the row).
+func kskAlgRollFromRow(row *RolloverZoneRow) (*KskAlgRollState, error) {
+	if row == nil || !row.AlgRollFromAlg.Valid {
+		return nil, nil
+	}
+	// The alg_roll_* columns are all-or-nothing: setKskAlgRollTx writes
+	// the five together and clearKskAlgRollTx NULLs all six. A marker with
+	// a companion missing or out of range is a corrupt record, and reading
+	// it as a roll of key 0 would send the withdraw arm after a key that
+	// does not exist and make the target-DS filter drop nothing.
+	if !row.AlgRollToAlg.Valid || !row.AlgRollNewHeadKeyID.Valid || !row.AlgRollOldHeadKeyID.Valid || !row.AlgRollStartedAt.Valid {
+		return nil, fmt.Errorf("incomplete KSK algorithm-roll record: alg_roll_from_alg is set but a companion column is NULL")
+	}
+	in := func(v, lo, hi int64) bool { return v >= lo && v <= hi }
+	if !in(row.AlgRollFromAlg.Int64, 1, 255) || !in(row.AlgRollToAlg.Int64, 1, 255) ||
+		!in(row.AlgRollNewHeadKeyID.Int64, 1, 65535) || !in(row.AlgRollOldHeadKeyID.Int64, 1, 65535) {
+		return nil, fmt.Errorf("KSK algorithm-roll record out of range: from_alg=%d to_alg=%d new_head=%d old_head=%d",
+			row.AlgRollFromAlg.Int64, row.AlgRollToAlg.Int64, row.AlgRollNewHeadKeyID.Int64, row.AlgRollOldHeadKeyID.Int64)
+	}
+	started, ok := parseOptionalTime(row.AlgRollStartedAt)
+	if !ok {
+		return nil, fmt.Errorf("KSK algorithm-roll record: unparsable alg_roll_started_at %q", row.AlgRollStartedAt.String)
+	}
+	st := &KskAlgRollState{
+		FromAlg:      uint8(row.AlgRollFromAlg.Int64),
+		ToAlg:        uint8(row.AlgRollToAlg.Int64),
+		StartedAt:    started,
+		NewHeadKeyID: uint16(row.AlgRollNewHeadKeyID.Int64),
+		OldHeadKeyID: uint16(row.AlgRollOldHeadKeyID.Int64),
+	}
+	if t, ok := parseOptionalTime(row.AlgRollOldHeadRetireAt); ok {
+		st.OldHeadRetireAt = &t
+	}
+	return st, nil
+}
+
+// LoadKskAlgRollState returns the in-flight KSK algorithm rollover for
+// the zone, or nil when there is none (no row, or alg_roll_from_alg NULL).
+func LoadKskAlgRollState(kdb *KeyDB, zone string) (*KskAlgRollState, error) {
+	row, err := LoadRolloverZoneRow(kdb, zone)
+	if err != nil {
+		return nil, err
+	}
+	return kskAlgRollFromRow(row)
+}
+
+// setKskAlgRollTx records the start of a KSK algorithm rollover on an
+// existing TX. The caller is responsible for row existence
+// (EnsureRolloverZoneRow). OldHeadRetireAt is written NULL: it is
+// stamped later, at DS confirm, by setKskAlgRollOldHeadRetireAtTx.
+func setKskAlgRollTx(tx *Tx, zone string, st KskAlgRollState) error {
+	_, err := tx.Exec(`UPDATE RolloverZoneState
+SET alg_roll_from_alg = ?,
+    alg_roll_to_alg = ?,
+    alg_roll_started_at = ?,
+    alg_roll_new_head_keyid = ?,
+    alg_roll_old_head_keyid = ?,
+    alg_roll_old_head_retire_at = NULL
+WHERE zone = ?`,
+		int(st.FromAlg), int(st.ToAlg), st.StartedAt.UTC().Format(time.RFC3339),
+		int(st.NewHeadKeyID), int(st.OldHeadKeyID), zone)
+	return err
+}
+
+// setKskAlgRollOldHeadRetireAtTx starts the old-algorithm head's removal
+// clock. Called in the same transaction that records the parent's
+// confirmation of the swapped (new-algorithm-only) DS RRset.
+func setKskAlgRollOldHeadRetireAtTx(tx *Tx, zone string, at time.Time) error {
+	_, err := tx.Exec(`UPDATE RolloverZoneState SET alg_roll_old_head_retire_at = ? WHERE zone = ?`,
+		at.UTC().Format(time.RFC3339), zone)
+	return err
+}
+
+// clearKskAlgRollTx ends a KSK algorithm rollover on an existing TX:
+// every alg_roll_* column back to NULL. Used by the withdraw completion
+// and by abort.
+func clearKskAlgRollTx(tx *Tx, zone string) error {
+	_, err := tx.Exec(`UPDATE RolloverZoneState
+SET alg_roll_from_alg = NULL,
+    alg_roll_to_alg = NULL,
+    alg_roll_started_at = NULL,
+    alg_roll_new_head_keyid = NULL,
+    alg_roll_old_head_keyid = NULL,
+    alg_roll_old_head_retire_at = NULL
+WHERE zone = ?`, zone)
+	return err
 }
 
 // setParentDsyncAdvertised snapshots the parent's DSYNC RRset
@@ -123,7 +244,9 @@ SELECT zone,
        last_success_at, last_attempt_started_at, last_poll_at,
        last_attempt_scheme, last_published_cds_index_low, last_published_cds_index_high,
        last_ds_observed_keyids, last_ds_observed_at,
-       parent_advertises_update, parent_advertises_notify
+       parent_advertises_update, parent_advertises_notify,
+       alg_roll_from_alg, alg_roll_to_alg, alg_roll_started_at,
+       alg_roll_new_head_keyid, alg_roll_old_head_keyid, alg_roll_old_head_retire_at
 FROM RolloverZoneState WHERE zone = ?`
 	var r RolloverZoneRow
 	var inProg int
@@ -140,6 +263,8 @@ FROM RolloverZoneState WHERE zone = ?`
 		&r.LastAttemptScheme, &r.LastPublishedCdsIndexLow, &r.LastPublishedCdsIndexHigh,
 		&r.LastDsObservedKeyids, &r.LastDsObservedAt,
 		&r.ParentAdvertisesUpdate, &r.ParentAdvertisesNotify,
+		&r.AlgRollFromAlg, &r.AlgRollToAlg, &r.AlgRollStartedAt,
+		&r.AlgRollNewHeadKeyID, &r.AlgRollOldHeadKeyID, &r.AlgRollOldHeadRetireAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -958,6 +1083,15 @@ func parseDsObservedKeyids(csv string) []uint16 {
 // next_push_at forward by softfail_delay regardless of probe outcome
 // but preserves the previous softfail's category and detail for
 // status display continuity.
+// clearNextPushAt forgets the push schedule. Called at confirm: the push
+// cycle is over, and a stale next_push_at otherwise shows as a past
+// "next probe" in status and as "DS push pending; next attempt <past>" in
+// when, for good.
+func clearNextPushAt(kdb *KeyDB, zone string) error {
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET next_push_at = NULL WHERE zone = ?`, zone)
+	return err
+}
+
 func setNextPushAt(kdb *KeyDB, zone string, at time.Time) error {
 	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
 		return err

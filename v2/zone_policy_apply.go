@@ -477,6 +477,30 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 			"zone", zd.ZoneName, "applied", appliedName, "intent", intentName)
 		return nil
 	}
+	// Branch 1c — in-flight KSK algorithm roll: likewise. The engine owns
+	// both KSKs and the parent DS set until the roll completes; a config
+	// apply that rebinds mid-roll could only confuse it.
+	kst, kerr := kskAlgRollInFlight(kdb, zd.ZoneName, appliedPol.KSKAlgorithm)
+	if kerr != nil {
+		return fmt.Errorf("check KSK algorithm rollover for zone %s: %w", zd.ZoneName, kerr)
+	}
+	if kst.InFlight {
+		lgEngine.Debug("skipping config DNSSEC policy apply; KSK algorithm roll in flight",
+			"zone", zd.ZoneName, "applied", appliedName, "intent", intentName)
+		return nil
+	}
+	// ... and an ordinary KSK rollover owns the KSK and the parent DS set
+	// just the same. The command path checks this (changeZonePolicy); the
+	// config path must not be the one that rebinds under it.
+	row, rerr := LoadRolloverZoneRow(kdb, zd.ZoneName)
+	if rerr != nil {
+		return fmt.Errorf("check KSK rollover for zone %s: %w", zd.ZoneName, rerr)
+	}
+	if row != nil && (row.RolloverInProgress || (row.RolloverPhase != "" && row.RolloverPhase != rolloverPhaseIdle)) {
+		lgEngine.Debug("skipping config DNSSEC policy apply; KSK rollover in flight",
+			"zone", zd.ZoneName, "applied", appliedName, "intent", intentName, "phase", row.RolloverPhase)
+		return nil
+	}
 
 	switch class {
 	case PolicyChangeCompatibleName:
@@ -489,6 +513,23 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 		return nil
 
 	case PolicyChangeIncompatibleAlg:
+		if kskOnlyAlgChangeWithEngine(appliedPol, intentPol) {
+			// A KSK-only algorithm change toward a policy with an
+			// auto-rollover engine is the one incompatible change the tree
+			// can carry: bind transactionally (the reconcile no-ops on the
+			// mismatch) and the engine spawns the algorithm roll on its
+			// next tick. Same outcome as `zone dnssec policy-change`.
+			if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+				lgEngine.Warn("KSK algorithm-change policy apply failed; binding reverted",
+					"zone", zd.ZoneName, "from", appliedName, "to", intentName, "err", aerr)
+				return aerr
+			}
+			lgEngine.Info("bound a KSK algorithm change from config; the rollover engine will spawn the algorithm roll",
+				"zone", zd.ZoneName, "from", appliedName, "to", intentName,
+				"ksk_from", dns.AlgorithmToString[appliedPol.KSKAlgorithm], "ksk_to", dns.AlgorithmToString[intentPol.KSKAlgorithm])
+			zd.ClearError(DnssecPolicyWarning)
+			return nil
+		}
 		refuseIncompatiblePolicyChange(zd, intentName, appliedName, appliedPol)
 		return nil
 
@@ -501,9 +542,27 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 	}
 }
 
+// kskOnlyAlgChangeWithEngine reports whether the applied→intent change is
+// exactly a KSK algorithm change (ZSK algorithm unchanged, split mode on
+// both sides) toward a policy with an auto-rollover engine -- the shape the
+// KSK algorithm rollover carries.
+func kskOnlyAlgChangeWithEngine(appliedPol, intentPol *DnssecPolicy) bool {
+	if appliedPol == nil || intentPol == nil {
+		return false
+	}
+	if appliedPol.Mode == DnssecPolicyModeCSK || intentPol.Mode == DnssecPolicyModeCSK {
+		return false
+	}
+	return appliedPol.KSKAlgorithm != intentPol.KSKAlgorithm &&
+		appliedPol.ZSKAlgorithm == intentPol.ZSKAlgorithm &&
+		intentPol.Rollover.Method != RolloverMethodNone
+}
+
 // refuseIncompatiblePolicyChange keeps the zone signing under appliedPol
 // (rebind when needed) and logs a warning. Used when classify reports
-// PolicyChangeIncompatibleAlg on the config path (rollover not implemented).
+// PolicyChangeIncompatibleAlg on the config path and nothing can carry the
+// change: a ZSK algorithm change (policy-change in relaxed mode is the
+// route), a KSK change toward a policy without an engine, or a CSK.
 // Does not bind a policy whose Error field is set.
 func refuseIncompatiblePolicyChange(zd *ZoneData, intentName, appliedName string, appliedPol *DnssecPolicy) {
 	if appliedPol == nil || appliedPol.Error != "" {
@@ -520,7 +579,7 @@ func refuseIncompatiblePolicyChange(zd *ZoneData, intentName, appliedName string
 		"applied_ksk_alg", dns.AlgorithmToString[appliedPol.KSKAlgorithm],
 		"config_intent", intentName,
 		"applied_zsk_alg", dns.AlgorithmToString[appliedPol.ZSKAlgorithm],
-		"reason", "algorithm change requires a key rollover (not implemented)")
+		"reason", "algorithm change requires a key rollover: a ZSK rolls via `zone dnssec policy-change` in relaxed completeness mode; a KSK needs a policy with rollover.method multi-ds or double-signature")
 }
 
 // zoneActiveKeyRoleChanges reports, per role, whether the zone's ACTIVE keys must
@@ -617,6 +676,7 @@ const policyResetDryRunConfirm = "Re-run with --confirm to apply."
 // policyResetDryRunDSBreak is the DS-break line for a dry-run preview whose
 // apply would roll the KSK (or CSK), plus the confirm prompt.
 const policyResetDryRunDSBreak = "  * !! BREAK the chain of trust: the parent DS would no longer match the new KSK, and validators would go BOGUS until you re-publish the DS.\n" +
+	"    (A KSK algorithm change has a gradual path that keeps the chain intact: bind the zone to a policy with rollover.method multi-ds or double-signature via `zone dnssec policy-change`. policy-reset is the destructive shortcut.)\n" +
 	policyResetDryRunConfirm
 
 // policyResetDryRunReport describes what a policy-reset WOULD do, WITHOUT making
