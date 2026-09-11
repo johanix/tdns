@@ -240,7 +240,9 @@ func (zd *ZoneData) ValidateUpdate(ctx context.Context, r *dns.Msg, us *UpdateSt
 			// call existed nothing took the key from the first state to the
 			// second on this path: no row was stored, so no verification ran,
 			// so the child was refused forever (#574).
-			zd.rememberDiscoveredChildKey(ctx, signer.Sig0Key)
+			if done := zd.rememberDiscoveredChildKey(ctx, signer.Sig0Key); done != nil {
+				us.verifications = append(us.verifications, done)
+			}
 		}
 	}
 

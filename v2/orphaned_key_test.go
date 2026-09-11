@@ -225,15 +225,14 @@ updates.orphanparent.example.	3600	IN	KEY	256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKu
 func TestAKeytagCollisionDoesNotMakeAnOrphanLookUsable(t *testing.T) {
 	published := mustRR(t, "collide.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
 
-	// Same tag, different key. Constructed rather than found: a natural
-	// collision is a 1-in-65536 search, and the point is the comparison.
-	other := *published
-	other.PublicKey = "zLDk2H1Pktp2vPvj8vc33odOoFzR0o7iGsZcMePXqnY="
-
-	if published.KeyTag() == other.KeyTag() {
-		if sameKeyRdata(published, &other) {
-			t.Fatal("the two fixtures are the same key; nothing is being tested")
-		}
+	// Same tag, different key -- constructed, not searched for (see
+	// keyWithSameTag). It used to be a different public key with no check that
+	// the tags matched, so the test was named after a collision it did not
+	// have; a fixture that stops colliding must fail here, not pass quietly.
+	other := *keyWithSameTag(t, published)
+	if other.KeyTag() != published.KeyTag() {
+		t.Fatalf("fixture: tags %d and %d differ, so there is no collision to test",
+			other.KeyTag(), published.KeyTag())
 	}
 	if sameKeyRdata(published, &other) {
 		t.Error("two KEYs with different public keys compared equal; a tag collision would" +

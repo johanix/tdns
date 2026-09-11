@@ -242,8 +242,11 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 					resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d found in DNS was already in the TrustStore",
 						tp.Keyname, tp.Keyid)
 				} else {
-					resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d found in DNS (trusted=%v) added to TrustStore",
-						tp.Keyname, tp.Keyid, tp.Trusted)
+					// What was STORED, which on this branch is always untrusted.
+					// Echoing tp.Trusted told a caller who asked for trusted=true
+					// that it got it, on the one field this branch overrides.
+					resp.Msg = fmt.Sprintf("Zone %s: SIG(0) key with keyid %d found in DNS added to TrustStore (trusted=false; verification decides)",
+						tp.Keyname, tp.Keyid)
 				}
 			}
 		}

@@ -1360,15 +1360,26 @@ const (
 // engine, and after the worker pool lands it should not be able to pin a worker
 // either (a dead zone costs probe-timeout / retry-interval of one).
 func FindSoaRetry(zd *ZoneData) (uint32, error) {
-	var retry uint32
-	soa, _ := zd.GetSOA()
-	if soa != nil {
-		retry = soa.Retry
-	}
+	soa, err := zd.GetSOA()
 
 	if zd.ZoneType == Primary {
 		return 86400, nil
 	}
+
+	// An unreadable SOA is an error, not a zero. It used to be discarded, and
+	// the zero then clamped up to the minimum interval and came back as a
+	// valid-looking answer -- so the reload path, which deliberately keeps the
+	// existing retry when this fails, never saw it fail and replaced a good
+	// interval with the floor. Returning 0 also serves the callers that store
+	// the result directly: refreshCounterRetry reads a zero SOARetry as "fall
+	// back to SOA REFRESH".
+	if err != nil || soa == nil {
+		if err == nil {
+			err = fmt.Errorf("no SOA at the apex")
+		}
+		return 0, fmt.Errorf("FindSoaRetry: zone %s: %w", zd.ZoneName, err)
+	}
+	retry := soa.Retry
 
 	maxrefresh := defaultMaxRefresh
 	if cfg := ConfLive().MaxRefresh; cfg > 0 {

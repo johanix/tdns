@@ -195,25 +195,35 @@ func TestRestitchUnderLockNoSelfDeadlock(t *testing.T) {
 	}
 
 	done := make(chan struct{})
+	var smErr error
 	go func() {
 		zd.mu.Lock()
 		defer zd.mu.Unlock()
+		defer close(done)
 		zd.ensureWorkingSet()
 		zd.stageRRsetLocked("newname.inv.example.",
 			core.RRset{Name: "newname.inv.example.", RRtype: dns.TypeA, RRs: []dns.RR{rr}})
 		if changed := changedChainNames(zd.snapshot.Load(), zd.workingSet); len(changed) == 0 {
 			panic("test setup: no staged change, so the signing path is never reached")
 		}
-		sm, _ := zd.resolveSigningMaterialLocked()
+		var sm *signingMaterial
+		// Captured, not discarded: with no material restitch returns without
+		// touching the chain, and the failure would surface below as an
+		// unsigned NSEC -- the symptom, not the cause.
+		if sm, smErr = zd.resolveSigningMaterialLocked(); smErr != nil {
+			return
+		}
 		zd.restitchNsecLocked(sm)
-		close(done)
 	}()
 
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("restitchNsecLocked deadlocked while zd.mu was held" +
-			" (re-entrant zd.mu via EnsureActiveDnssecKeys -> PublishDnskeyRRs)")
+		t.Fatal("deadlocked while zd.mu was held, in resolveSigningMaterialLocked or" +
+			" restitchNsecLocked (re-entrant zd.mu via EnsureActiveDnssecKeys -> PublishDnskeyRRs)")
+	}
+	if smErr != nil {
+		t.Fatalf("resolveSigningMaterialLocked: %v", smErr)
 	}
 
 	// And it got far enough to sign: an unsigned or missing NSEC here would

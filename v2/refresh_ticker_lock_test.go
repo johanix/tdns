@@ -1,6 +1,10 @@
 package tdns
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,28 +29,47 @@ import (
 // callback and the collect-then-process shape is no longer required. That is
 // worth knowing deliberately rather than discovering by simplifying it away.
 func TestMutatingTheCounterMapInsideIterCbDeadlocks(t *testing.T) {
-	m := core.NewCmap[*RefreshCounter]()
-	m.Set("one.example.", &RefreshCounter{Name: "one.example."})
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
+	// The probe itself runs in a CHILD process, because a deadlocked goroutine
+	// cannot be stopped: this used to run it in-process and leave it blocked
+	// for the rest of the package run, which is a leak by construction and one
+	// that would poison any later goroutine-leak check. The child is killed
+	// once it has proved the point; nothing is left behind here.
+	if os.Getenv(iterCbDeadlockProbeEnv) == "1" {
+		m := core.NewCmap[*RefreshCounter]()
+		m.Set("one.example.", &RefreshCounter{Name: "one.example."})
 		m.IterCb(func(zone string, rc *RefreshCounter) {
 			// Exactly what initialLoadZone does with the zone being iterated.
 			m.Set(zone, rc)
 		})
-	}()
+		// Reaching here means it did NOT deadlock.
+		os.Exit(0)
+	}
 
-	select {
-	case <-done:
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0],
+		"-test.run=^TestMutatingTheCounterMapInsideIterCbDeadlocks$", "-test.timeout=30s")
+	cmd.Env = append(os.Environ(), iterCbDeadlockProbeEnv+"=1")
+	out, err := cmd.CombinedOutput()
+
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		// Still blocked when the deadline came, and killed: deadlocked, as the
+		// engine's structure assumes.
+	case err == nil:
 		t.Fatal("mutating the map from inside IterCb completed. The engine's" +
 			" collect-then-process shape exists only because this deadlocks;" +
 			" if the map has changed, revisit that shape deliberately")
-	case <-time.After(250 * time.Millisecond):
-		// Deadlocked, as the engine's structure assumes. The goroutine stays
-		// blocked on a map that is local to this test.
+	case strings.Contains(string(out), "all goroutines are asleep - deadlock"):
+		// The runtime noticed the deadlock itself and said so. Same verdict.
+	default:
+		t.Fatalf("the deadlock probe failed for some other reason: %v\n%s", err, out)
 	}
 }
+
+// iterCbDeadlockProbeEnv tells the test binary it is the child of
+// TestMutatingTheCounterMapInsideIterCbDeadlocks and should run the probe.
+const iterCbDeadlockProbeEnv = "TDNS_ITERCB_DEADLOCK_PROBE"
 
 // And the shape that avoids it: decide nothing inside the walk, mutate after.
 func TestCollectingInsideThenMutatingAfterIsSafe(t *testing.T) {

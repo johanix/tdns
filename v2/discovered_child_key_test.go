@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -274,7 +275,6 @@ func TestValidateUpdateRecordsAKeyItDiscoveredInDns(t *testing.T) {
 	zd.KeyDB = kdb
 	registerZones(t, zd)
 	ctx, waitForVerifier := boundedVerification(t, zd)
-	_ = waitForVerifier
 
 	discovered := discoveredTestKey(t)
 	stubDnsDiscovery(t, discovered)
@@ -283,6 +283,11 @@ func TestValidateUpdateRecordsAKeyItDiscoveredInDns(t *testing.T) {
 	us := &UpdateStatus{}
 	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
+	}
+	// The verifier this validation started, waited for rather than left to race
+	// the fixture's database on the way out.
+	for _, done := range us.verifications {
+		defer waitForVerifier(done)
 	}
 
 	sk, err := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
@@ -307,8 +312,7 @@ func TestValidateUpdateDoesNotRecordAKeyWhoseSignatureFailed(t *testing.T) {
 	zd := cuParentZone(t)
 	zd.KeyDB = kdb
 	registerZones(t, zd)
-	ctx, waitForVerifier := boundedVerification(t, zd)
-	_ = waitForVerifier
+	ctx, _ := boundedVerification(t, zd) // no key is recorded, so no verifier starts
 
 	discovered := discoveredTestKey(t)
 	stubDnsDiscovery(t, discovered)
@@ -491,18 +495,27 @@ func TestTheUpdatePathCarriesItsOwnShutdownContext(t *testing.T) {
 		t.Fatal("the key was not recorded, so no verification was started to cancel")
 	}
 
+	if len(us.verifications) != 1 {
+		t.Fatalf("validation started %d verifications, want exactly 1", len(us.verifications))
+	}
+
 	// Cancelling the UPDATE path's context must reach the verifier it started.
 	// A verifier holding context.Background() would sit out its hour instead.
+	//
+	// Waited on directly. This used to poll for five seconds and only ever
+	// proved that no failure row appeared -- it cost five seconds on every run
+	// and never showed the verifier had actually exited, which is the claim.
 	cancel()
+	select {
+	case <-us.verifications[0]:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the verifier did not exit after the UPDATE path's context was cancelled;" +
+			" it is holding a context that never cancels")
+	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		sk, _ := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid)
-		if sk != nil && sk.ValidationFailed {
-			t.Fatal("cancellation was recorded as a validation failure; a shutdown is not a" +
-				" verdict on the key")
-		}
-		time.Sleep(5 * time.Millisecond)
+	if sk, _ := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid); sk != nil && sk.ValidationFailed {
+		t.Error("cancellation was recorded as a validation failure; a shutdown is not a" +
+			" verdict on the key")
 	}
 }
 
@@ -585,5 +598,23 @@ func TestManualApprovalStillTrustsADiscoveredKey(t *testing.T) {
 	if !sk.Trusted {
 		t.Error("manual approval no longer trusts a key; the operator's deliberate decision" +
 			" is the whole point of the trust subcommand and must keep working")
+	}
+}
+
+// The success message must describe what was STORED. The row is always
+// untrusted on this path; saying trusted=true to a caller who asked for it
+// contradicts the row on the one field the branch overrides.
+func TestTheAddMessageReportsTheStoredTrustState(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := mustRR(t, "msg.example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
+	resp, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "sig0", SubCommand: "add", Keyname: "msg.example.",
+		Keyid: int(key.KeyTag()), Src: "dns", KeyRR: key.String(), Trusted: true,
+	})
+	if err != nil || resp == nil {
+		t.Fatalf("Sig0TrustMgmt: %v", err)
+	}
+	if strings.Contains(resp.Msg, "trusted=true") {
+		t.Errorf("message %q claims trusted=true; the row was stored untrusted", resp.Msg)
 	}
 }

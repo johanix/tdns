@@ -29,14 +29,14 @@ func TestOutboundSerialIsSettledUnderTheZoneLock(t *testing.T) {
 	readerDone := make(chan struct{})
 
 	// A reader that takes the lock, as every locked reader of this field does.
-	go func() {
+	go func(ctx context.Context) {
 		defer close(readerDone)
 		for ctx.Err() == nil {
 			zd.mu.Lock()
 			_ = zd.CurrentSerial
 			zd.mu.Unlock()
 		}
-	}()
+	}(ctx)
 
 	for i := 0; i < 20; i++ {
 		applyOutboundSerialAfterRefresh(zd, zd.ZoneName)

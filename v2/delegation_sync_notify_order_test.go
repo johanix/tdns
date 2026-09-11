@@ -41,6 +41,45 @@ func (l *fakeUpdaterLog) snapshot() []string {
 // The updater deliberately takes its time before it responds. That delay is
 // the whole test: the ordering bug is invisible when the apply is instant,
 // because the race is only ever won by a hair in production too.
+// serveQueue runs handle for every request on q, on its own goroutine, until
+// the test ends.
+//
+// One shape for every fake engine in this file, because each of them used to
+// get it slightly wrong: a done channel closed on the way out and never waited
+// for, a receive that ignored ok (so a closed queue delivered zero values
+// forever), and a sleep inside the loop that cancellation could not reach.
+// Here the loop exits on the context or on a closed queue, handle is given the
+// context so any wait inside it can be abandoned, and cleanup cancels and then
+// WAITS -- with a deadline, so a wedged fake fails the test instead of hanging
+// the run.
+func serveQueue[T any](t *testing.T, q <-chan T, handle func(ctx context.Context, req T)) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	exited := make(chan struct{})
+	go func(ctx context.Context) {
+		defer close(exited)
+		for {
+			select {
+			case req, ok := <-q:
+				if !ok {
+					return
+				}
+				handle(ctx, req)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}(ctx)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-exited:
+		case <-time.After(5 * time.Second):
+			t.Error("a fake engine did not exit within 5s of cancellation")
+		}
+	})
+}
+
 func notifySchemeRig(t *testing.T, applyDelay time.Duration) (*ZoneData, chan NotifyRequest, *fakeUpdaterLog, func()) {
 	t.Helper()
 
@@ -57,46 +96,30 @@ func notifySchemeRig(t *testing.T, applyDelay time.Duration) (*ZoneData, chan No
 	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true}
 	zd.CurrentSerial = 17
 
-	var wg sync.WaitGroup
-	done := make(chan struct{})
-
-	wg.Add(1)
-	go func() { // the zone updater
-		defer wg.Done()
-		for {
-			select {
-			case ur := <-updateq:
-				time.Sleep(applyDelay)
-				// Actually publish it. A rig that only ANSWERS cannot tell a
-				// caller that checks the postcondition from one that trusts
-				// the reply, and the whole point here is which of those the
-				// NOTIFY scheme does.
-				applyCsyncActions(zd, ur.Actions)
-				log.record("published")
-				ur.respond(true, nil)
-			case <-done:
-				return
-			}
+	// The zone updater.
+	serveQueue(t, updateq, func(ctx context.Context, ur UpdateRequest) {
+		// Cancellable, so a test that ends mid-delay does not leave this
+		// goroutine asleep past its own cleanup.
+		select {
+		case <-time.After(applyDelay):
+		case <-ctx.Done():
+			return
 		}
-	}()
+		// Actually publish it. A rig that only ANSWERS cannot tell a caller
+		// that checks the postcondition from one that trusts the reply, and
+		// the whole point here is which of those the NOTIFY scheme does.
+		applyCsyncActions(zd, ur.Actions)
+		log.record("published")
+		ur.respond(true, nil)
+	})
 
-	wg.Add(1)
-	go func() { // the notifier
-		defer wg.Done()
-		for {
-			select {
-			case <-notifyq:
-				log.record("notified")
-			case <-done:
-				return
-			}
-		}
-	}()
+	// The notifier.
+	serveQueue(t, notifyq, func(ctx context.Context, _ NotifyRequest) {
+		log.record("notified")
+	})
 
-	return zd, notifyq, log, func() {
-		close(done)
-		wg.Wait()
-	}
+	// Kept for the callers' defer; serveQueue's cleanup does the stopping.
+	return zd, notifyq, log, func() {}
 }
 
 // applyCsyncActions publishes the add half of a CSYNC update into the zone.
@@ -165,18 +188,9 @@ func TestNotifySchemeReportsFailureWhenTheCsyncCannotBePublished(t *testing.T) {
 	zd.KeyDB = &KeyDB{UpdateQ: updateq}
 	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true}
 
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		for {
-			select {
-			case ur := <-updateq:
-				ur.respond(false, errTestApplyRefused)
-			case <-done:
-				return
-			}
-		}
-	}()
+	serveQueue(t, updateq, func(_ context.Context, ur UpdateRequest) {
+		ur.respond(false, errTestApplyRefused)
+	})
 
 	syncstate := DelegationSyncStatus{
 		NsAdds: []dns.RR{mustRR(t, "example. 3600 IN NS ns2.example.")},
@@ -258,20 +272,11 @@ func TestNotifySchemeRefusesWhenTheUpdateChangedNothing(t *testing.T) {
 	zd.KeyDB = &KeyDB{UpdateQ: updateq}
 	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true}
 
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		for {
-			select {
-			case ur := <-updateq:
-				// Applied false, no error, and nothing published: the shape a
-				// declined update takes.
-				ur.respond(false, nil)
-			case <-done:
-				return
-			}
-		}
-	}()
+	serveQueue(t, updateq, func(_ context.Context, ur UpdateRequest) {
+		// Applied false, no error, and nothing published: the shape a
+		// declined update takes.
+		ur.respond(false, nil)
+	})
 
 	syncstate := DelegationSyncStatus{
 		NsAdds: []dns.RR{mustRR(t, "example. 3600 IN NS ns2.example.")},
@@ -321,19 +326,10 @@ func TestNotifySchemeRefusesWhenOnlyAStaleCsyncIsPublished(t *testing.T) {
 	zd.publishLocked(zd.generation.Load())
 	zd.mu.Unlock()
 
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		for {
-			select {
-			case ur := <-updateq:
-				// Declined: the replacement never lands, the stale record stays.
-				ur.respond(false, nil)
-			case <-done:
-				return
-			}
-		}
-	}()
+	serveQueue(t, updateq, func(_ context.Context, ur UpdateRequest) {
+		// Declined: the replacement never lands, the stale record stays.
+		ur.respond(false, nil)
+	})
 
 	syncstate := DelegationSyncStatus{
 		NsAdds: []dns.RR{mustRR(t, "example. 3600 IN NS ns2.example.")},

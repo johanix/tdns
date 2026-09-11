@@ -1223,6 +1223,13 @@ type UpdateStatus struct {
 	Error        bool
 	ErrorMsg     string
 	Status       bool
+
+	// verifications holds the completion channel of every child-key
+	// verification this update's validation started (see
+	// rememberDiscoveredChildKey). Production ignores it. It exists so a test
+	// can wait for the verifier IT caused, rather than cancelling and hoping
+	// the goroutine is gone before the fixture's database is.
+	verifications []<-chan struct{}
 }
 
 type NotifyStatus struct {

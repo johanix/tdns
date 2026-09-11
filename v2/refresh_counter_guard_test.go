@@ -98,3 +98,42 @@ func TestRetryIntervalReachesTheCounterTheMapHolds(t *testing.T) {
 			got.CurRefresh, stale.SOARefresh)
 	}
 }
+
+// TestAnUnreadableSOAIsAnErrorNotTheMinimumRetry.
+//
+// FindSoaRetry discarded GetSOA's error and clamped the resulting zero up to
+// the minimum, returning it as a valid answer. The reload path keeps a zone's
+// existing retry exactly when this fails -- so it never saw a failure, and
+// replaced a good retry interval with the floor.
+func TestAnUnreadableSOAIsAnErrorNotTheMinimumRetry(t *testing.T) {
+	// READY, with data it has lost the apex of. A secondary that has never
+	// been transferred gets GetSOA's deliberate synthetic SOA instead, which is
+	// a different and correct case.
+	zd := &ZoneData{ZoneName: "nosoa.example.", ZoneType: Secondary, ZoneStore: MapZone,
+		Ready: true, IncomingSerial: 42}
+
+	retry, err := FindSoaRetry(zd)
+	if err == nil {
+		t.Fatalf("no SOA, but FindSoaRetry answered %d with no error; a caller that keeps"+
+			" its existing interval on failure overwrites it with this instead", retry)
+	}
+	if retry != 0 {
+		t.Errorf("returned %d alongside the error; a caller that stores the result directly"+
+			" should get 0, which refreshCounterRetry turns into the SOA REFRESH fallback", retry)
+	}
+
+	// And the consumer's fallback is what that zero buys.
+	rc := &RefreshCounter{SOARefresh: 3600, SOARetry: retry}
+	if got := refreshCounterRetry(rc); got != 3600 {
+		t.Errorf("retry interval %d, want the SOA REFRESH fallback 3600", got)
+	}
+}
+
+// A primary still gets its fixed interval: it reloads from file, and an
+// unreadable SOA there is not a transfer problem.
+func TestAPrimaryStillGetsItsFixedRetry(t *testing.T) {
+	zd := &ZoneData{ZoneName: "primary.example.", ZoneType: Primary, ZoneStore: MapZone}
+	if retry, err := FindSoaRetry(zd); err != nil || retry != 86400 {
+		t.Errorf("primary: got (%d, %v), want (86400, nil)", retry, err)
+	}
+}
