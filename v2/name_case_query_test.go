@@ -133,6 +133,7 @@ func TestQueryPathIgnoresCase(t *testing.T) {
 		{"NXDOMAIN", "nothere.example.", dns.TypeA},
 		{"CNAME", "alias.example.", dns.TypeA},
 		{"wildcard", "anything.wild.example.", dns.TypeA},
+		{"wildcard, two labels below", "a.b.wild.example.", dns.TypeA},
 		{"delegation referral", "host.child.example.", dns.TypeA},
 		{"delegation name itself", "child.example.", dns.TypeNS},
 		// DS is trapped at the top of QueryResponder and answered from the
