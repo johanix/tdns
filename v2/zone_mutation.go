@@ -1304,3 +1304,320 @@ func (zd *ZoneData) snapshotGeneration() uint32 {
 func (zd *ZoneData) testPublishNow() {
 	zd.publishNow(zd.generation.Load())
 }
+
+// ---------------------------------------------------------------------------
+// The exported staging surface.
+//
+// Everything above is package-private: tdns's own writers reach the working set
+// through the *Locked helpers under the zd.mu they already hold. A consumer in
+// another package -- tdns-mp's combiner is the one this was built for -- cannot
+// reach them, because embedding ZoneData does not promote unexported methods
+// across a package boundary (the 2026-07-02 design's §9 assumed it did; see its
+// dated amendment). What such a consumer gets instead is the surface below:
+// one RRset at a time (StageRRset, StageDelete, StageOwnerDelete, then
+// Publish), or one logical change at a time (StageBatch), which stages
+// everything under one hold of zd.mu and publishes once.
+//
+// Both forms are DRAFT-AWARE. A draft is a ZoneData that holds content in Data
+// and has published nothing: the scratch zone FetchFromUpstream and
+// FetchFromFile hand to the OnZonePreRefresh callbacks, whose Data the refresh
+// publish then consumes as its working set. Staging into a draft writes Data;
+// staging into a live zone stages into the working set. In neither case does
+// the served snapshot change before the next publish. The draft test is the
+// same one ownerForAnalysis makes: no published snapshot.
+
+// isDraftLocked reports whether the zone holds unpublished content in Data,
+// the shape the pre-refresh callbacks receive. Caller holds zd.mu; a draft's
+// mutex is uncontended, so taking it there costs nothing.
+func (zd *ZoneData) isDraftLocked() bool {
+	return zd.publishedSnapshot() == nil
+}
+
+// stageDraftRRsetLocked replaces one RRset of one owner in a draft's Data.
+//
+// The RRset is cloned, as it is for a live zone: the fresh-alloc rule holds for
+// drafts too, because a caller's RRset may alias a store the caller keeps for
+// itself (the combiner's contribution tables, for one) and would otherwise be
+// shared with the snapshot the refresh is about to publish from this Data.
+func (zd *ZoneData) stageDraftRRsetLocked(name string, rs core.RRset) {
+	rrtype := rs.RRtype
+	if rrtype == 0 && len(rs.RRs) > 0 {
+		rrtype = rs.RRs[0].Header().Rrtype
+	}
+	rs.RRtype = rrtype
+	if zd.Data == nil {
+		zd.Data = core.NewNameMap[OwnerData]()
+	}
+	od, ok := zd.Data.Get(name)
+	if !ok {
+		od = OwnerData{Name: name, RRtypes: NewRRTypeStore()}
+	} else if od.RRtypes == nil {
+		od.RRtypes = NewRRTypeStore()
+	}
+	od.RRtypes.Set(rrtype, cloneRRset(rs))
+	zd.Data.Set(name, od)
+}
+
+// stageDraftDeleteLocked removes one RRset of one owner from a draft's Data.
+// An absent owner is left absent: deleting a type from a name that is not
+// there must not bring the name into existence.
+func (zd *ZoneData) stageDraftDeleteLocked(name string, rrtype uint16) {
+	if zd.Data == nil {
+		return
+	}
+	od, ok := zd.Data.Get(name)
+	if !ok || od.RRtypes == nil {
+		return
+	}
+	// RRtypes is a pointer shared with the stored value, so the delete lands
+	// in Data without a Set.
+	od.RRtypes.Delete(rrtype)
+}
+
+// stageDraftOwnerDeleteLocked removes an owner from a draft's Data.
+func (zd *ZoneData) stageDraftOwnerDeleteLocked(name string) {
+	if zd.Data == nil {
+		return
+	}
+	zd.Data.Remove(name)
+}
+
+// StageRRset replaces one RRset of one owner in the zone's next content.
+//
+// On a zone with a published snapshot it stages into the working set under
+// zd.mu, cloning rs; the change is served by the next publish (Publish, or a
+// StageBatch that reports a change, or any other writer's publish). On a draft
+// -- a zone that holds content in Data and has published nothing, which is
+// what the OnZonePreRefresh callbacks receive -- it writes Data, which the
+// refresh publish consumes. Either way the served snapshot is untouched until
+// the next publish.
+//
+// One call is one lock hold. A logical change that stages several RRsets and
+// must publish exactly once belongs in StageBatch, where a refresh of the same
+// zone cannot interleave between two of its writes.
+func (zd *ZoneData) StageRRset(name string, rs core.RRset) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.isDraftLocked() {
+		zd.stageDraftRRsetLocked(name, rs)
+		return
+	}
+	zd.stageRRsetLocked(name, rs)
+}
+
+// StageDelete removes one RRset of one owner from the zone's next content.
+// Draft-aware like StageRRset. An owner that is not there stays not there. An
+// owner whose last RRset this removes is NOT removed with it: that is
+// StageOwnerDelete's job, and a caller that leaves such an owner behind
+// publishes it as an empty name.
+func (zd *ZoneData) StageDelete(name string, rrtype uint16) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.isDraftLocked() {
+		zd.stageDraftDeleteLocked(name, rrtype)
+		return
+	}
+	if zd.stagedOwner(name) == nil {
+		return
+	}
+	zd.stageDeleteLocked(name, rrtype)
+}
+
+// StageOwnerDelete removes an owner, and everything under it, from the zone's
+// next content. Draft-aware like StageRRset. This is what a caller uses when
+// the last RRtype of a name goes: an owner left in the working set with no
+// RRsets would publish as an empty name (compare the stageOwnerDeleteLocked
+// callers in nsec_restitch.go).
+func (zd *ZoneData) StageOwnerDelete(name string) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.isDraftLocked() {
+		zd.stageDraftOwnerDeleteLocked(name)
+		return
+	}
+	zd.stageOwnerDeleteLocked(name)
+}
+
+// Publish cuts a new snapshot from whatever is staged: one serial, one
+// snapshot, one IXFR delta, one NOTIFY. It is the same call as
+// BumpSerialOnly, under the name that says what it does.
+//
+// It bumps even when nothing is staged: with no working set, publishSync seeds
+// one from the served snapshot and republishes identical content under a new
+// serial. A caller that may have staged nothing should use StageBatch, whose
+// callback reports whether anything changed.
+func (zd *ZoneData) Publish() (BumperResponse, error) {
+	return zd.publishSync()
+}
+
+// StopPublisher terminates the zone's coalescing publisher goroutine, the one
+// InstallInitialSnapshot and requestPublish start. For harnesses outside this
+// package that build zones by hand (ReadZoneData, InstallInitialSnapshot) and
+// would otherwise leak one goroutine per zone; a zone removed through the
+// registry has it done for it. Safe to call more than once.
+func (zd *ZoneData) StopPublisher() {
+	zd.stopPublisher()
+}
+
+// Stager is what StageBatch hands its callback: staged writes, and reads of
+// the zone's NEXT content, all under the zd.mu the batch holds.
+type Stager interface {
+	// RRset returns one RRset of the zone's next content -- the served content
+	// plus whatever this batch has staged so far -- or nil when the owner or
+	// the type is absent. On a live zone that means the working set, seeded
+	// from the published snapshot on the first read if nothing was pending
+	// (the working set is nil between publishes); on a draft it means Data.
+	//
+	// The result is a COPY. Edit it and hand it back through SetRRset; nothing
+	// reachable from the served snapshot is reachable through it.
+	RRset(name string, rrtype uint16) *core.RRset
+	// SetRRset replaces one RRset of one owner: StageRRset, inside the batch.
+	SetRRset(name string, rs core.RRset)
+	// Delete removes one RRset of one owner: StageDelete, inside the batch. A
+	// name with nothing left must be removed with DeleteOwner, or it
+	// publishes as an empty owner.
+	Delete(name string, rrtype uint16)
+	// DeleteOwner removes an owner and everything under it: StageOwnerDelete,
+	// inside the batch.
+	DeleteOwner(name string)
+}
+
+// batchStager is the Stager StageBatch hands out. draft is decided once, when
+// the batch starts, and every call goes to the matching branch.
+type batchStager struct {
+	zd    *ZoneData
+	draft bool
+}
+
+func (s *batchStager) RRset(name string, rrtype uint16) *core.RRset {
+	var od *OwnerData
+	if s.draft {
+		if s.zd.Data == nil {
+			return nil
+		}
+		found, ok := s.zd.Data.Get(name)
+		if !ok {
+			return nil
+		}
+		od = &found
+	} else {
+		od = s.zd.stagedOwner(name)
+	}
+	if od == nil || od.RRtypes == nil {
+		return nil
+	}
+	rs, ok := od.RRtypes.Get(rrtype)
+	if !ok {
+		return nil
+	}
+	out := cloneRRset(rs)
+	return &out
+}
+
+func (s *batchStager) SetRRset(name string, rs core.RRset) {
+	if s.draft {
+		s.zd.stageDraftRRsetLocked(name, rs)
+		return
+	}
+	s.zd.stageRRsetLocked(name, rs)
+}
+
+func (s *batchStager) Delete(name string, rrtype uint16) {
+	if s.draft {
+		s.zd.stageDraftDeleteLocked(name, rrtype)
+		return
+	}
+	if s.zd.stagedOwner(name) == nil {
+		return
+	}
+	s.zd.stageDeleteLocked(name, rrtype)
+}
+
+func (s *batchStager) DeleteOwner(name string) {
+	if s.draft {
+		s.zd.stageDraftOwnerDeleteLocked(name)
+		return
+	}
+	s.zd.stageOwnerDeleteLocked(name)
+}
+
+// StageBatch runs fn with zd.mu held and publishes once, through the same
+// path as Publish, if fn reports a change. On a draft it writes Data and
+// publishes nothing: the refresh publish that consumes the draft is the
+// publish.
+//
+// This is the form for a logical change of several RRsets -- a combiner pass
+// over a zone, say -- that must cost exactly one serial. The per-call Stage*
+// functions take and drop zd.mu per call, so a refresh of the same zone can
+// land between two of them, replace the working set and publish on its own;
+// the trailing Publish then republishes content the refresh already served,
+// one serial later. Under StageBatch the refresh waits for zd.mu instead.
+//
+// fn MUST NOT call anything that takes zd.mu -- GetOwner and the other served
+// readers included, since the lock is not re-entrant. Read the next content
+// through the Stager it is given. Copy whatever else it needs out of the
+// caller's own structures BEFORE the batch, under those structures' locks, so
+// the callback takes no locks at all.
+//
+// A batch whose callback returns an error publishes nothing, and on a live
+// zone its writes are unwound: the working set is put back to what it was when
+// the batch started (nil, in the common case), so nothing the callback staged
+// before failing can ride out on a later publish. On a draft the writes made
+// before the error stay in Data; a callback on a draft that can fail part-way
+// must undo its own writes.
+//
+// The response carries the serials before and after. NewSerial == OldSerial
+// means nothing was published: no change reported, a draft, or a publish the
+// zone refused (an apex-less or unsignable working set, which is logged).
+func (zd *ZoneData) StageBatch(fn func(s Stager) (changed bool, err error)) (BumperResponse, error) {
+	resp := BumperResponse{Zone: zd.ZoneName}
+	if fn == nil {
+		resp.Error = true
+		resp.ErrorMsg = "StageBatch: nil callback"
+		return resp, fmt.Errorf("StageBatch: zone %s: nil callback", zd.ZoneName)
+	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	resp.OldSerial = zd.CurrentSerial
+	resp.NewSerial = zd.CurrentSerial
+
+	draft := zd.isDraftLocked()
+	s := &batchStager{zd: zd, draft: draft}
+
+	// What was pending when the batch started, so a failed batch can be
+	// unwound without dropping somebody else's staged work along with it.
+	// The common case is nothing: the working set is nil between publishes,
+	// and restoring nil is what discards the failed batch's writes.
+	var saved map[string]*OwnerData
+	savedSynth := zd.wsSignalSynth
+	if !draft && zd.workingSet != nil {
+		saved = make(map[string]*OwnerData, len(zd.workingSet))
+		for k, v := range zd.workingSet {
+			saved[k] = v
+		}
+	}
+
+	changed, err := fn(s)
+	if err != nil {
+		if !draft {
+			zd.workingSet = saved
+			zd.wsSignalSynth = savedSynth
+		}
+		resp.Error = true
+		resp.ErrorMsg = err.Error()
+		return resp, fmt.Errorf("StageBatch: zone %s: %w", zd.ZoneName, err)
+	}
+	if draft {
+		return resp, nil
+	}
+	if !changed {
+		// The reads may have seeded a working set from the snapshot; a bare
+		// one is dropped so the zone is not left looking as though it has a
+		// pending change (see dropBareWorkingSetLocked for why that matters).
+		zd.dropBareWorkingSetLocked()
+		return resp, nil
+	}
+	zd.publishLocked(zd.generation.Load())
+	resp.NewSerial = zd.CurrentSerial
+	return resp, nil
+}

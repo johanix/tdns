@@ -444,3 +444,31 @@ func (zd *ZoneData) rrsetForAnalysis(qname string, rrtype uint16) (*core.RRset, 
 	}
 	return nil, nil
 }
+
+// OwnerForAnalysis is the exported ownerForAnalysis: the owner data for qname
+// from the published snapshot where one exists, from Data otherwise, and never
+// a panic at a missing apex.
+//
+// This is the reader for anything that runs on both a live zone and a draft --
+// the incoming zone the OnZonePreRefresh callbacks receive, which holds its
+// content in Data and has published nothing. GetOwner reads the published
+// snapshot only, and gates on Ready, so it sees an empty zone there. Not a
+// serve-path reader: queries and transfers stay on GetOwner and its Ready gate,
+// which is what keeps an unsigned first snapshot off the wire.
+func (zd *ZoneData) OwnerForAnalysis(qname string) (*OwnerData, error) {
+	return zd.ownerForAnalysis(qname)
+}
+
+// RRsetForAnalysis is OwnerForAnalysis's RRset counterpart, and the exported
+// rrsetForAnalysis. (nil, nil) for an absent owner or type.
+func (zd *ZoneData) RRsetForAnalysis(qname string, rrtype uint16) (*core.RRset, error) {
+	return zd.rrsetForAnalysis(qname, rrtype)
+}
+
+// CloneRRset returns a fresh RRset with copied RRs and RRSIGs: the one-line way
+// to build a new RRset from a served one before appending to it. An RRset read
+// from a served owner shares its slices with the published snapshot, and
+// appending onto those is the aliasing the snapshot model forbids.
+func CloneRRset(rs core.RRset) core.RRset {
+	return cloneRRset(rs)
+}
