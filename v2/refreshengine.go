@@ -314,7 +314,8 @@ func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, conf
 	return nil
 }
 
-// signOnceAfterPolicyBind signs a zone now that its DNSSEC policy is bound.
+// signOnceAfterPolicyBind signs a zone now that its DNSSEC policy is bound,
+// and reports whether that succeeded.
 //
 // First load publishes BEFORE the policy binds -- binding is post-Ready by
 // design -- so that publish cannot sign, and does not try: signing under a nil
@@ -332,15 +333,12 @@ func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, conf
 // after a restart from a file that already carries good signatures it is a walk
 // that writes nothing. SignZone publishes, which is what flips the zone Ready
 // through the servable gate and emits its one NOTIFY.
-// signOnceAfterPolicyBind signs a zone that has just had its DNSSEC policy
-// bound, and reports whether that succeeded.
 //
 // The error is RETURNED, not merely logged. A signing zone that could not be
-// signed is not servable: it stays not-Ready, and the callers below go on to
-// replay deltas and drain OnFirstLoad on it -- so the load reported success
-// while the zone sat unsigned and unanswerable, and nothing retried it because
-// as far as the refresh flow was concerned the first load had completed. The
-// log line said so; nothing acted on it.
+// signed is not servable: it stays not-Ready. Both callers used to carry on
+// regardless -- replaying deltas and draining OnFirstLoad -- so the load
+// reported success while the zone sat unsigned and unanswerable, and nothing
+// retried it, because the callbacks a retry needs had already been spent.
 func signOnceAfterPolicyBind(ctx context.Context, zd *ZoneData) error {
 	if !zd.signsItsOwnContent() || zd.DnssecPolicy == nil || zd.KeyDB == nil {
 		return nil
