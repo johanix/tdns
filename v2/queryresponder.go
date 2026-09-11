@@ -780,7 +780,12 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 	visited := make(map[string]bool)
 	visited[qname] = true
 
-	for depth < maxDepth {
+	// RFC 1034 section 4.3.2 step 3a follows a CNAME only when QTYPE does not
+	// match it. A query for the CNAME itself, or for ANY, is an exact match:
+	// the CNAME already in the answer is all of it.
+	chase := qtype != dns.TypeCNAME && qtype != dns.TypeANY
+
+	for chase && depth < maxDepth {
 		// Get the current CNAME target
 		if currentOwner.RRtypes.Count() != 1 {
 			break // Not a CNAME-only owner anymore
