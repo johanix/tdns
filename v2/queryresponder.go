@@ -1012,6 +1012,20 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	}
 
 	if len(qname) > len(zd.ZoneName) {
+		// 1. If qname is below the zone apex, check for child delegation.
+		// Before the CNAME: at or below a cut this zone holds only glue and
+		// occluded data, and a CNAME among it is no more ours to serve than
+		// an address is. RFC 1034 section 4.3.2 step 3 descends label by
+		// label, so it meets the cut before it reaches the node.
+		// log.Printf("---> Checking for child delegation for %s", qname)
+		cdd := zd.findDelegationFrom(snap, qname, msgoptions.DO)
+
+		// If there is delegation data and an NS RRset is present, return a referral
+		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
+			zd.sendReferral(m, w, cdd, apex, msgoptions, MaybeSignRRset)
+			return nil
+		}
+
 		// 2. Check for qname + CNAME (only if CNAME is the only RR type)
 		lgHandler.Debug("checking for CNAME", "qname", qname, "zone", zd.ZoneName)
 		handled, err := zd.handleCNAMEChain(m, w, qname, qtype, owner, snap, msgoptions, kdb, apex, minimalResponses)
@@ -1022,16 +1036,6 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		}
 		if handled {
 			w.WriteMsg(m)
-			return nil
-		}
-
-		// 1. If qname is below the zone apex, check for child delegation
-		// log.Printf("---> Checking for child delegation for %s", qname)
-		cdd := zd.findDelegationFrom(snap, qname, msgoptions.DO)
-
-		// If there is delegation data and an NS RRset is present, return a referral
-		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
-			zd.sendReferral(m, w, cdd, apex, msgoptions, MaybeSignRRset)
 			return nil
 		}
 	}

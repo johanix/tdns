@@ -200,3 +200,39 @@ func TestCNAMEChaseToGlueInASignedZone(t *testing.T) {
 		t.Error("no RRSIG over the CNAME in a signed zone under DO")
 	}
 }
+
+// Asked directly, a name below a cut gets a referral, whatever the parent
+// holds there. Glue already did. An occluded CNAME did not: QueryResponder
+// looked for a CNAME before it looked for a cut, and served the stale CNAME
+// with the chase behind it as an authoritative answer.
+func TestQueryBelowZoneCutIsReferral(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	testSnapshotZone(t, "example.", occParentZone)
+
+	for _, tc := range []struct {
+		what  string
+		qname string
+		qtype uint16
+	}{
+		{"glue", "ns.sub.example.", dns.TypeA},
+		{"occluded CNAME", "old.sub.example.", dns.TypeA},
+		{"occluded CNAME, asked for the CNAME", "old.sub.example.", dns.TypeCNAME},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			m := occAsk(t, kdb, tc.qname, tc.qtype, false)
+			if m.Rcode != dns.RcodeSuccess {
+				t.Errorf("rcode = %s, want NOERROR", dns.RcodeToString[m.Rcode])
+			}
+			if m.Authoritative {
+				t.Error("AA set on what must be a referral")
+			}
+			if got := occSection(m.Answer); len(got) != 0 {
+				t.Errorf("ANSWER = %q, want empty: the name is below the sub.example. cut", got)
+			}
+			want := []string{"sub.example. NS ns.sub.example."}
+			if got := occSection(m.Ns); !reflect.DeepEqual(got, want) {
+				t.Errorf("AUTHORITY = %q, want the referral %q", got, want)
+			}
+		})
+	}
+}
