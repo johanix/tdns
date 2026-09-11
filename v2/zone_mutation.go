@@ -997,6 +997,15 @@ func (zd *ZoneData) resolveSigningMaterialLocked() (*signingMaterial, error) {
 	switch {
 	case errors.Is(err, ErrDnssecPolicyNotBound):
 		return nil, nil
+	case errors.Is(err, ErrKeyGenerationDeferred) && !zd.Ready:
+		// The lifecycle hooks (KeyLifecycleHooks) hold this zone's keys back
+		// and forbid minting beside them. On a zone that has never served a
+		// signed version that is the same "not yet" as an unbound policy:
+		// publish unsigned, stay not Ready, and sign when a key is released.
+		// On a Ready signing zone the same answer would publish an unsigned
+		// version over a signed one, which is the C1 defect; there it is a
+		// fault and the publish is refused below.
+		return nil, nil
 	case err != nil:
 		return nil, fmt.Errorf("resolving signing keys: %w", err)
 	}
