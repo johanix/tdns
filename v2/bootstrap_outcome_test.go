@@ -112,9 +112,13 @@ func TestTheSetupArmRetriesATransientBootstrapWithinItsLimit(t *testing.T) {
 	transient := func() error { return errors.Join(errBootstrapTransient, errors.New("SERVFAIL")) }
 
 	ds := DelegationSyncRequest{Command: "DELEGATION-SYNC-SETUP", ZoneName: "child.example."}
-	if handleDelegationSyncSetupWith(ctx, conf, q, ds, transient) == nil {
+	done := handleDelegationSyncSetupWith(ctx, conf, q, ds, transient)
+	if done == nil {
 		t.Error("a transient bootstrap outcome scheduled no retry; the zone waits for a reload")
 	}
+	// Scheduled, and also stoppable: the retry is asleep in its backoff, and a
+	// shutdown has to wake it rather than wait the backoff out.
+	defer awaitExit(t, cancel, done)
 
 	last := ds
 	last.Attempt = delegationSyncMaxRetries - 1
