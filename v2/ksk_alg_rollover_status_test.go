@@ -233,7 +233,7 @@ func TestKTAbortKskAlgRoll(t *testing.T) {
 			t.Fatalf("fixture: B has not signed: %v", tags)
 		}
 
-		detail, err := AbortKskAlgRollover(&Conf, kdb, ktAlgZone)
+		detail, err := AbortKskAlgRollover(context.Background(), &Conf, kdb, ktAlgZone)
 		if err != nil {
 			t.Fatalf("abort before confirm: %v", err)
 		}
@@ -269,7 +269,7 @@ func TestKTAbortKskAlgRoll(t *testing.T) {
 
 	t.Run("after-confirm-refused", func(t *testing.T) {
 		zd, kdb, _, a, b, _, _ := ktRollToConfirm(t)
-		_, err := AbortKskAlgRollover(&Conf, kdb, ktAlgZone)
+		_, err := AbortKskAlgRollover(context.Background(), &Conf, kdb, ktAlgZone)
 		if err == nil || !strings.Contains(err.Error(), "reverse algorithm rollover") {
 			t.Fatalf("abort after confirm must be refused with the finish-then-reverse guidance, got %v", err)
 		}
@@ -286,7 +286,7 @@ func TestKTAbortKskAlgRoll(t *testing.T) {
 
 	t.Run("nothing-to-abort", func(t *testing.T) {
 		kdb := newTestKeyDB(t)
-		if _, err := AbortKskAlgRollover(&Conf, kdb, ktAlgZone); err == nil || !strings.Contains(err.Error(), "no KSK algorithm rollover") {
+		if _, err := AbortKskAlgRollover(context.Background(), &Conf, kdb, ktAlgZone); err == nil || !strings.Contains(err.Error(), "no KSK algorithm rollover") {
 			t.Fatalf("got %v", err)
 		}
 	})

@@ -106,23 +106,39 @@ type KskAlgRollState struct {
 // use this instead of LoadKskAlgRollState so the predicate costs no
 // extra query on hot paths (reconcileActiveKeyAlgorithms already loads
 // the row).
-func kskAlgRollFromRow(row *RolloverZoneRow) *KskAlgRollState {
+func kskAlgRollFromRow(row *RolloverZoneRow) (*KskAlgRollState, error) {
 	if row == nil || !row.AlgRollFromAlg.Valid {
-		return nil
+		return nil, nil
+	}
+	// The alg_roll_* columns are all-or-nothing: setKskAlgRollTx writes
+	// the five together and clearKskAlgRollTx NULLs all six. A marker with
+	// a companion missing or out of range is a corrupt record, and reading
+	// it as a roll of key 0 would send the withdraw arm after a key that
+	// does not exist and make the target-DS filter drop nothing.
+	if !row.AlgRollToAlg.Valid || !row.AlgRollNewHeadKeyID.Valid || !row.AlgRollOldHeadKeyID.Valid || !row.AlgRollStartedAt.Valid {
+		return nil, fmt.Errorf("incomplete KSK algorithm-roll record: alg_roll_from_alg is set but a companion column is NULL")
+	}
+	in := func(v, lo, hi int64) bool { return v >= lo && v <= hi }
+	if !in(row.AlgRollFromAlg.Int64, 1, 255) || !in(row.AlgRollToAlg.Int64, 1, 255) ||
+		!in(row.AlgRollNewHeadKeyID.Int64, 1, 65535) || !in(row.AlgRollOldHeadKeyID.Int64, 1, 65535) {
+		return nil, fmt.Errorf("KSK algorithm-roll record out of range: from_alg=%d to_alg=%d new_head=%d old_head=%d",
+			row.AlgRollFromAlg.Int64, row.AlgRollToAlg.Int64, row.AlgRollNewHeadKeyID.Int64, row.AlgRollOldHeadKeyID.Int64)
+	}
+	started, ok := parseOptionalTime(row.AlgRollStartedAt)
+	if !ok {
+		return nil, fmt.Errorf("KSK algorithm-roll record: unparsable alg_roll_started_at %q", row.AlgRollStartedAt.String)
 	}
 	st := &KskAlgRollState{
 		FromAlg:      uint8(row.AlgRollFromAlg.Int64),
 		ToAlg:        uint8(row.AlgRollToAlg.Int64),
+		StartedAt:    started,
 		NewHeadKeyID: uint16(row.AlgRollNewHeadKeyID.Int64),
 		OldHeadKeyID: uint16(row.AlgRollOldHeadKeyID.Int64),
-	}
-	if t, ok := parseOptionalTime(row.AlgRollStartedAt); ok {
-		st.StartedAt = t
 	}
 	if t, ok := parseOptionalTime(row.AlgRollOldHeadRetireAt); ok {
 		st.OldHeadRetireAt = &t
 	}
-	return st
+	return st, nil
 }
 
 // LoadKskAlgRollState returns the in-flight KSK algorithm rollover for
@@ -132,7 +148,7 @@ func LoadKskAlgRollState(kdb *KeyDB, zone string) (*KskAlgRollState, error) {
 	if err != nil {
 		return nil, err
 	}
-	return kskAlgRollFromRow(row), nil
+	return kskAlgRollFromRow(row)
 }
 
 // setKskAlgRollTx records the start of a KSK algorithm rollover on an

@@ -303,13 +303,16 @@ ORDER BY keyid ASC`, zone)
 // finish and then change policy back.
 //
 // Returns a one-line description of what was done for the operator.
-func AbortKskAlgRollover(conf *Config, kdb *KeyDB, zone string) (string, error) {
+func AbortKskAlgRollover(ctx context.Context, conf *Config, kdb *KeyDB, zone string) (string, error) {
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	row, err := LoadRolloverZoneRow(kdb, zone)
 	if err != nil {
 		return "", fmt.Errorf("read rollover state: %w", err)
 	}
-	algRoll := kskAlgRollFromRow(row)
+	algRoll, err := kskAlgRollFromRow(row)
+	if err != nil {
+		return "", err
+	}
 	if algRoll == nil {
 		return "", fmt.Errorf("no KSK algorithm rollover is in progress")
 	}
@@ -321,7 +324,7 @@ func AbortKskAlgRollover(conf *Config, kdb *KeyDB, zone string) (string, error) 
 	// B has signed the apex DNSKEY RRset since the spawn: strip its
 	// signatures before it goes, or they dangle (F2).
 	if zd, ok := Zones.Get(zone); ok && zd != nil {
-		if _, err := zd.StripZoneRRSIGs(context.Background(), func(s *dns.RRSIG) bool {
+		if _, err := zd.StripZoneRRSIGs(ctx, func(s *dns.RRSIG) bool {
 			return s.KeyTag == algRoll.NewHeadKeyID
 		}); err != nil {
 			return "", fmt.Errorf("strip the new-algorithm KSK's signatures: %w", err)

@@ -157,10 +157,21 @@ func TestKT2dChangePolicyReentrancy(t *testing.T) {
 		}
 		ktTick(t, zd, kdb, time.Now())
 		// Fake the confirm: clock stamped, phase withdraw; A still active.
-		tx, _ := kdb.Begin("test")
-		_ = setKskAlgRollOldHeadRetireAtTx(tx, ktAlgZone, time.Now())
-		_ = setRolloverPhaseTx(tx, ktAlgZone, rolloverPhasePendingChildWithdraw)
-		_ = tx.Commit()
+		tx, err := kdb.Begin("test")
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := setKskAlgRollOldHeadRetireAtTx(tx, ktAlgZone, time.Now()); err != nil {
+			tx.Rollback()
+			t.Fatalf("stamp retire_at: %v", err)
+		}
+		if err := setRolloverPhaseTx(tx, ktAlgZone, rolloverPhasePendingChildWithdraw); err != nil {
+			tx.Rollback()
+			t.Fatalf("set phase: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
 		if st := ktKeyState(t, kdb, ktAlgZone, a); st != DnskeyStateActive {
 			t.Fatalf("A is %s", st)
 		}

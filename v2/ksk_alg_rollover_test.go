@@ -130,7 +130,10 @@ func TestKT3SpawnMintsOneNewAlgKSKIntoActive(t *testing.T) {
 	if !row.RolloverInProgress || row.RolloverPhase != rolloverPhasePendingChildPublish {
 		t.Fatalf("after spawn: in_progress=%v phase=%q", row.RolloverInProgress, row.RolloverPhase)
 	}
-	st := kskAlgRollFromRow(row)
+	st, serr := kskAlgRollFromRow(row)
+	if serr != nil {
+		t.Fatalf("kskAlgRollFromRow: %v", serr)
+	}
 	if st == nil || st.FromAlg != dns.ED25519 || st.ToAlg != dns.RSASHA256 ||
 		st.OldHeadKeyID != a || st.NewHeadKeyID != b || st.OldHeadRetireAt != nil {
 		t.Fatalf("alg-roll state = %+v", st)
@@ -198,7 +201,13 @@ func TestKT13NoPipelineFillDuringAlgRoll(t *testing.T) {
 		t.Fatalf("pipeline-fill minted %d created keys during the roll", n)
 	}
 
-	st, _ := LoadKskAlgRollState(kdb, ktAlgZone)
+	st, err := LoadKskAlgRollState(kdb, ktAlgZone)
+	if err != nil {
+		t.Fatalf("LoadKskAlgRollState: %v", err)
+	}
+	if st == nil {
+		t.Fatal("no algorithm roll recorded after the spawn tick")
+	}
 	ctx := context.Background()
 	TransitionRolloverKskDsPublishedToPublished(ctx, &Conf, kdb, now, time.Minute)
 	TransitionRolloverKskPublishedToStandby(ctx, &Conf, kdb, now, time.Minute)

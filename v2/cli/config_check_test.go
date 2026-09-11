@@ -175,7 +175,7 @@ func TestCheckPeers_PeerlessNoRefs(t *testing.T) {
 }
 
 func TestPolicyHasKskEngine(t *testing.T) {
-	for in, want := range map[string]bool{"": false, "none": false, "NONE": false, " multi-ds ": true, "double-signature": true} {
+	for in, want := range map[string]bool{"": false, "none": false, "NONE": false, " multi-ds ": true, "double-signature": true, "Multi-DS": true, "typo": false, "multi-ds-x": false} {
 		if got := policyHasKskEngine(in); got != want {
 			t.Errorf("policyHasKskEngine(%q) = %v, want %v", in, got, want)
 		}

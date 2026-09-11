@@ -25,7 +25,7 @@ import (
 // projected at active_at + (slot+1) × Lifetime; that's the engine's
 // current intent and shifts when an asap fires. The renderer is
 // guidance, not contract.
-func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *DnssecPolicy, propagationDelay time.Duration, now time.Time) {
+func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *DnssecPolicy, algRoll *KskAlgRollState, propagationDelay time.Duration, now time.Time) {
 	populateZskNextTransitions(out, kdb, zone, pol, propagationDelay)
 	if pol == nil || pol.Rollover.Method == RolloverMethodNone || pol.KSK.Lifetime == 0 {
 		return
@@ -35,8 +35,8 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 	// Anchor: active KSK's active_at. Without it we can't time any
 	// of the standby/active/retired transitions. During a KSK algorithm
 	// rollover there are two active KSKs; the new-algorithm head is the
-	// one the lifetime cadence continues from.
-	algRoll, _ := LoadKskAlgRollState(kdb, zone)
+	// one the lifetime cadence continues from. algRoll is the caller's:
+	// ComputeRolloverStatus has already read the zone row.
 	var activeAt *time.Time
 	for _, e := range out.KSKs {
 		if e.State != DnskeyStateActive {

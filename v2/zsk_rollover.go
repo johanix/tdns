@@ -223,8 +223,10 @@ type AlgRollState struct {
 	InFlight bool
 	Role     string // "KSK" | "ZSK"
 	// FromAlgs is the set of non-target algorithms present among the
-	// role's live keys, ascending. Normally one element; more than one
-	// means an earlier transition never finished draining.
+	// role's live keys, most-populated first with the lowest codepoint as
+	// the tie-break; for a KSK roll the persisted marker is always first.
+	// Normally one element; more than one means an earlier transition
+	// never finished draining.
 	FromAlgs []uint8
 	ToAlg    uint8
 	Done     int // live keys already on ToAlg
@@ -361,7 +363,8 @@ func kskAlgRollInFlight(kdb *KeyDB, zone string, targetKSKAlg uint8) (AlgRollSta
 		}
 	}
 	if !found {
-		st.FromAlgs = append(st.FromAlgs, roll.FromAlg)
+		// The marker is authoritative, so it is the head FromAlg() returns.
+		st.FromAlgs = append([]uint8{roll.FromAlg}, st.FromAlgs...)
 	}
 	return st, nil
 }

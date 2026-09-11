@@ -48,7 +48,10 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 	if row != nil {
 		populateFromZoneRow(out, row)
 	}
-	algRoll := kskAlgRollFromRow(row)
+	algRoll, err := kskAlgRollFromRow(row)
+	if err != nil {
+		return nil, err
+	}
 
 	// CdsPublishedKeyIDs / CdsPublishedAt: historical fact — what
 	// CDS RRset did the engine publish at the child apex via
@@ -130,7 +133,7 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 	populateRolloverWarnings(out, pol, checkInterval, now)
 	populateKskAlgRollWarnings(out, kdb, zone, pol, algRoll, now)
 	populateRolloverPolicyErrors(out, zone)
-	populateNextTransitions(out, kdb, zone, pol, propagationDelay, now)
+	populateNextTransitions(out, kdb, zone, pol, algRoll, propagationDelay, now)
 
 	return out, nil
 }
@@ -443,11 +446,23 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 		return out, nil
 	}
 
+	// One read of the zone row serves both checks below. A read failure is
+	// an error, not "no roll": answering with a lifetime schedule while a
+	// roll may be in flight would be wrong.
+	row, err := LoadRolloverZoneRow(kdb, zone)
+	if err != nil {
+		return nil, fmt.Errorf("rollover when: read rollover state for %s: %w", zone, err)
+	}
+
 	// A KSK algorithm rollover drives itself: there is no next lifetime
 	// roll to schedule until it completes. Report its projected completion
 	// instead of a misleading NextScheduled.
-	if row, err := LoadRolloverZoneRow(kdb, zone); err == nil && row != nil {
-		if algRoll := kskAlgRollFromRow(row); algRoll != nil {
+	if row != nil {
+		algRoll, aerr := kskAlgRollFromRow(row)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if algRoll != nil {
 			out.InProgress = true
 			out.Status = "alg-rollover-in-progress"
 			out.FromKeyID = algRoll.OldHeadKeyID
@@ -466,7 +481,7 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 	}
 
 	// In-progress: compute projections rather than refusing.
-	if row, err := LoadRolloverZoneRow(kdb, zone); err == nil && row != nil && row.RolloverInProgress {
+	if row != nil && row.RolloverInProgress {
 		out.InProgress = true
 		out.Note = "current rollover in progress; times below project the rollover after it completes"
 		if pol.KSK.Lifetime > 0 {

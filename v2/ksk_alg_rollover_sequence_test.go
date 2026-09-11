@@ -488,7 +488,7 @@ func TestKT18TargetDSSetExcludesOldHeadDuringRoll(t *testing.T) {
 	if tags := target("during"); len(tags) != 1 || !ktHasKeytag(tags, b) {
 		t.Fatalf("during the roll: target DS set = %v, want {%d}: the active old head %d must not be in it", tags, b, a)
 	}
-	if _, err := AbortKskAlgRollover(&Conf, kdb, ktAlgZone); err != nil {
+	if _, err := AbortKskAlgRollover(context.Background(), &Conf, kdb, ktAlgZone); err != nil {
 		t.Fatalf("abort: %v", err)
 	}
 	if tags := target("after-abort"); len(tags) != 1 || !ktHasKeytag(tags, a) {

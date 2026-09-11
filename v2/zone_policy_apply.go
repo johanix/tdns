@@ -489,6 +489,18 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 			"zone", zd.ZoneName, "applied", appliedName, "intent", intentName)
 		return nil
 	}
+	// ... and an ordinary KSK rollover owns the KSK and the parent DS set
+	// just the same. The command path checks this (changeZonePolicy); the
+	// config path must not be the one that rebinds under it.
+	row, rerr := LoadRolloverZoneRow(kdb, zd.ZoneName)
+	if rerr != nil {
+		return fmt.Errorf("check KSK rollover for zone %s: %w", zd.ZoneName, rerr)
+	}
+	if row != nil && (row.RolloverInProgress || (row.RolloverPhase != "" && row.RolloverPhase != rolloverPhaseIdle)) {
+		lgEngine.Debug("skipping config DNSSEC policy apply; KSK rollover in flight",
+			"zone", zd.ZoneName, "applied", appliedName, "intent", intentName, "phase", row.RolloverPhase)
+		return nil
+	}
 
 	switch class {
 	case PolicyChangeCompatibleName:

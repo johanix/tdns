@@ -146,16 +146,24 @@ ORDER BY COALESCE(r.rollover_index, 2147483646) ASC, k.keyid ASC`
 	// the roll is cleared (completion, or an abort) the old head is a
 	// plain active key again and, if still present, returns to the set
 	// -- which is what lets an abort push DS(A) back.
-	if zrow, zerr := LoadRolloverZoneRow(kdb, childZone); zerr == nil {
-		if algRoll := kskAlgRollFromRow(zrow); algRoll != nil {
-			kept := rows[:0]
-			for _, row := range rows {
-				if row.keyid != algRoll.OldHeadKeyID {
-					kept = append(kept, row)
-				}
+	zrow, zerr := LoadRolloverZoneRow(kdb, childZone)
+	if zerr != nil {
+		// Fail closed: without the row the old head cannot be filtered,
+		// and a push with {DS(A), DS(B)} is the order A4 exists to prevent.
+		return nil, 0, 0, false, fmt.Errorf("loadTargetKSKsForRollover: read rollover state for %s: %w", childZone, zerr)
+	}
+	algRoll, aerr := kskAlgRollFromRow(zrow)
+	if aerr != nil {
+		return nil, 0, 0, false, fmt.Errorf("loadTargetKSKsForRollover: %w", aerr)
+	}
+	if algRoll != nil {
+		kept := rows[:0]
+		for _, row := range rows {
+			if row.keyid != algRoll.OldHeadKeyID {
+				kept = append(kept, row)
 			}
-			rows = kept
 		}
+		rows = kept
 	}
 
 	indexRangeKnown = len(rows) > 0

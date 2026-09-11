@@ -160,7 +160,10 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	if phase == "" {
 		phase = rolloverPhaseIdle
 	}
-	algRoll := kskAlgRollFromRow(row)
+	algRoll, err := kskAlgRollFromRow(row)
+	if err != nil {
+		return err
+	}
 
 	// KSK algorithm rollover (D-5): change-policy binds and gates; the
 	// tick spawns. Detecting the mismatch here -- an active KSK whose
@@ -171,6 +174,10 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		from, to, mismatch, blocked, err := kskAlgRollNeeded(kdb, zone, pol)
 		if err != nil {
 			lgSigner.Warn("rollover: KSK algorithm-roll check failed", "zone", zone, "err", err)
+			// The mismatch state is unknown. Do nothing else this tick:
+			// pipeline-fill would mint new-algorithm keys ahead of a
+			// spawn that may still be needed.
+			return nil
 		} else if mismatch && blocked {
 			// A bind the engine cannot carry yet. Do nothing else this
 			// tick: pipeline-fill would mint new-algorithm keys ahead of
@@ -189,7 +196,9 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 				return nil
 			}
 			phase = row.RolloverPhase
-			algRoll = kskAlgRollFromRow(row)
+			if algRoll, err = kskAlgRollFromRow(row); err != nil {
+				return err
+			}
 		}
 	}
 	if dsOnly && algRoll == nil && phase == rolloverPhaseIdle {
@@ -1056,6 +1065,7 @@ func withdrawKskAlgRoll(ctx context.Context, deps RolloverEngineDeps, zone strin
 		}
 		if err := stripRRSIGsBeforeRemoval(ctx, zd, k.KeyTag); err != nil {
 			if ctx.Err() != nil {
+				lgSigner.Info("rollover: stopping algorithm-roll retired-key sweep on context cancellation", "zone", zone)
 				return nil
 			}
 			lgSigner.Error("rollover: failed to strip removed key's RRSIGs, will retry", "zone", zone, "keyid", k.KeyTag, "err", err)

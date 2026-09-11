@@ -574,7 +574,10 @@ func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
 		currentTime = time.Now().UTC().Format("15:04:05 UTC (Mon Jan 2 2006)")
 	}
 	fmt.Printf("%s rollover schedule for zone %s  Current time: %s\n", role, resp.Zone, currentTime)
-	if resp.InProgress {
+	switch {
+	case resp.Status == "alg-rollover-in-progress":
+		fmt.Println("  (KSK algorithm rollover in progress; \"next scheduled\" is its projected completion)")
+	case resp.InProgress:
 		fmt.Println("  (current rollover in progress; times below project the rollover after it completes)")
 	}
 
@@ -729,22 +732,38 @@ manual_rollover_* row isn't being read by anything).`,
 			if status != http.StatusOK {
 				cliFatalf("unexpected status %d from rollover/cancel: %s", status, strings.TrimSpace(string(body)))
 			}
-			if autoRolloverFlags.algRoll {
-				var resp tdns.RolloverCancelResponse
-				if err := json.Unmarshal(body, &resp); err == nil && resp.Detail != "" {
-					fmt.Println(resp.Detail)
-					return
-				}
-				fmt.Printf("aborted the KSK algorithm rollover for zone %s\n", z)
-				return
+			msg, err := cancelResponseMessage(body, autoRolloverFlags.algRoll, keytype, z)
+			if err != nil {
+				cliFatalf("%v", err)
 			}
-			fmt.Printf("cleared manual %s rollover request for zone %s\n", keytype, z)
+			fmt.Println(msg)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
 	c.Flags().BoolVar(&autoRolloverFlags.algRoll, "alg-roll", false, "Abort an in-flight KSK algorithm rollover (before the parent confirms the new-algorithm DS)")
 	_ = c.MarkFlagRequired("zone")
 	return c
+}
+
+// cancelResponseMessage turns the daemon's rollover/cancel reply into the
+// operator line. An --alg-roll abort has to be confirmed by the daemon: a
+// 200 that only says {"cleared":true} is the manual-request path answering,
+// which means no algorithm roll was aborted, and must not read as success.
+func cancelResponseMessage(body []byte, algRoll bool, keytype, zone string) (string, error) {
+	if !algRoll {
+		return fmt.Sprintf("cleared manual %s rollover request for zone %s", keytype, zone), nil
+	}
+	var resp tdns.RolloverCancelResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("error parsing rollover/cancel response: %v", err)
+	}
+	if !resp.Aborted {
+		return "", fmt.Errorf("daemon did not confirm the KSK algorithm rollover abort (response: %s)", strings.TrimSpace(string(body)))
+	}
+	if resp.Detail != "" {
+		return resp.Detail, nil
+	}
+	return fmt.Sprintf("aborted the KSK algorithm rollover for zone %s", zone), nil
 }
 
 func newAutoRolloverStatusCmd() *cobra.Command {

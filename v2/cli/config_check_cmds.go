@@ -1360,11 +1360,14 @@ func missingRoleAlgs(want wantAlgs, active activeKeyAlgs) []roleMiss {
 // policyHasKskEngine reports whether a rollover.method name denotes an
 // auto-rollover engine that carries KSK algorithm changes.
 func policyHasKskEngine(method string) bool {
+	// Only the two methods the engine implements count. The declared
+	// value is copied unvalidated from the file (ResolveDnssecPolicyAlgNames),
+	// so a typo must read as "no engine", not as one.
 	switch lc(strings.TrimSpace(method)) {
-	case "", "none":
-		return false
+	case "multi-ds", "double-signature":
+		return true
 	}
-	return true
+	return false
 }
 
 func sortedKeys(m map[string]bool) []string {

@@ -313,7 +313,9 @@ func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (b
 		return false, err
 	} else if row != nil {
 		rolloverInProgress = row.RolloverInProgress
-		algRoll = kskAlgRollFromRow(row)
+		if algRoll, err = kskAlgRollFromRow(row); err != nil {
+			return false, err
+		}
 	}
 
 	// KSK algorithm mismatch: never the legacy synchronous retire, which
