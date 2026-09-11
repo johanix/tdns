@@ -465,7 +465,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			scheduleNextObservePoll(kdb, zone, row, now, pollMax)
 			return nil
 		}
-		if !idxOK {
+		if !idxOK && algRoll == nil {
 			lgSigner.Warn("rollover: DS observed but rollover_index incomplete for all KSK rows; cannot advance created→ds-published", "zone", zone)
 			_ = clearObserveSchedule(kdb, zone)
 			if err := SetRolloverPhase(kdb, zone, rolloverPhaseIdle); err != nil {
@@ -473,16 +473,23 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			}
 			return nil
 		}
+		if !idxOK {
+			// An algorithm roll has no created keys to advance (the fill is
+			// suspended), so an incomplete index range must not park it:
+			// idle with the marker still set is a roll that never confirms
+			// and never spawns. Confirm without the range bookkeeping.
+			lgSigner.Warn("rollover: DS observed with an incomplete rollover_index; confirming the algorithm roll without a confirmed range", "zone", zone)
+		}
 
 		// §9.4: wrap the confirmed-range write, the created→ds-published
 		// state transitions, the ds_observed_at timestamps, the
 		// observe-schedule clear, and the phase reset to idle in a
 		// single transaction. An algorithm roll takes its own sibling:
-		// the parent has confirmed {DS(A), DS(B)}, so the old head's
+		// the parent has been seen serving only DS(B), so the old head's
 		// drain clock starts and the zone goes to pending-child-withdraw.
 		var advanced int
 		if algRoll != nil {
-			advanced, err = confirmDSAndStartOldHeadDrainTx(kdb, zone, low, high, now)
+			advanced, err = confirmDSAndStartOldHeadDrainTx(kdb, zone, low, high, idxOK, now)
 		} else {
 			advanced, err = confirmDSAndAdvanceCreatedKeysTx(kdb, zone, low, high, now)
 		}
@@ -556,15 +563,18 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 				_ = setLastDsObserved(kdb, zone, dsKeyids(obs), now)
 			}
 			if qerr == nil && ObservedDSSetMatchesExpected(obs, expected) && !observedDSStillHasOldHead(obs, algRoll) {
-				if !idxOK {
+				if !idxOK && algRoll == nil {
 					lgSigner.Warn("rollover: DS observed during softfail but rollover_index incomplete; cannot advance", "zone", zone)
 					_ = clearObserveSchedule(kdb, zone)
 					return SetRolloverPhase(kdb, zone, rolloverPhaseIdle)
 				}
+				if !idxOK {
+					lgSigner.Warn("rollover: DS observed during softfail with an incomplete rollover_index; confirming the algorithm roll without a confirmed range", "zone", zone)
+				}
 				var advanced int
 				var terr error
 				if algRoll != nil {
-					advanced, terr = confirmDSAndStartOldHeadDrainTx(kdb, zone, low, high, now)
+					advanced, terr = confirmDSAndStartOldHeadDrainTx(kdb, zone, low, high, idxOK, now)
 				} else {
 					advanced, terr = confirmDSAndAdvanceCreatedKeysTx(kdb, zone, low, high, now)
 				}
@@ -901,7 +911,13 @@ WHERE zone = ?`, zone)
 // drain (plan A2) -- a validator still holding the pre-swap {DS(A)}
 // needs it until that RRset expires. Its removal is the withdraw arm's
 // job, measured from the clock stamped here.
-func confirmDSAndStartOldHeadDrainTx(kdb *KeyDB, zone string, low, high int, now time.Time) (int, error) {
+//
+// rangeKnown is ComputeTargetDSSetForZone's indexRangeKnown: false when a
+// KSK row has no rollover_index (an imported or hand-repaired keystore).
+// The range is bookkeeping for created keys, of which an algorithm roll
+// has none, so an unknown range is logged and skipped; the drain still
+// starts.
+func confirmDSAndStartOldHeadDrainTx(kdb *KeyDB, zone string, low, high int, rangeKnown bool, now time.Time) (int, error) {
 	tx, err := kdb.Begin("confirmDSAndStartOldHeadDrainTx")
 	if err != nil {
 		return 0, fmt.Errorf("begin: %w", err)
@@ -912,12 +928,14 @@ func confirmDSAndStartOldHeadDrainTx(kdb *KeyDB, zone string, low, high int, now
 			tx.Rollback()
 		}
 	}()
-	if err := saveLastDSConfirmedRangeTx(tx, zone, low, high); err != nil {
-		return 0, fmt.Errorf("save confirmed range: %w", err)
-	}
-	advanced, err := advanceCreatedKeysInRangeTx(tx, kdb, zone, low, high, now)
-	if err != nil {
-		return 0, err
+	var advanced int
+	if rangeKnown {
+		if err := saveLastDSConfirmedRangeTx(tx, zone, low, high); err != nil {
+			return 0, fmt.Errorf("save confirmed range: %w", err)
+		}
+		if advanced, err = advanceCreatedKeysInRangeTx(tx, kdb, zone, low, high, now); err != nil {
+			return 0, err
+		}
 	}
 	if err := setKskAlgRollOldHeadRetireAtTx(tx, zone, now); err != nil {
 		return 0, fmt.Errorf("stamp old head retire_at: %w", err)

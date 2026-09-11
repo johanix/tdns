@@ -548,3 +548,62 @@ func TestKT7EffectiveMarginForRoll(t *testing.T) {
 		})
 	}
 }
+
+// KT-19 (external review A4): a KSK row without a rollover_index (an
+// imported or hand-repaired keystore) makes the target set's index range
+// unknown. For a multi-DS zone that parks the observe in idle; for an
+// algorithm roll it must not -- idle with the marker still set is a roll
+// that never confirms and never spawns. The confirm proceeds without the
+// range bookkeeping and the drain starts.
+func TestKT19ConfirmWithoutIndexRangeStillStartsDrain(t *testing.T) {
+	parent := ktInstallFakeParent(t)
+	kdb := newTestKeyDB(t)
+	pol := ktSequencePolicy(RolloverMethodMultiDS)
+	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
+	ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
+	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
+	if _, err := zd.SignZone(kdb, true); err != nil {
+		t.Fatalf("SignZone: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	tick := func(step string, now time.Time) {
+		t.Helper()
+		deps := ktDeps(zd, kdb, now)
+		deps.Imr = &Imr{}
+		if err := RolloverAutomatedTick(ctx, deps); err != nil {
+			t.Fatalf("%s: tick: %v", step, err)
+		}
+	}
+	pol.KSKAlgorithm = dns.RSASHA256
+	t0 := time.Now()
+	dnskeyTTL := time.Duration(pol.TTLS.DNSKEY) * time.Second
+	tick("spawn", t0.Add(time.Second))
+	st, err := LoadKskAlgRollState(kdb, ktAlgZone)
+	if err != nil || st == nil {
+		t.Fatalf("spawn: roll state %+v, %v", st, err)
+	}
+	b := st.NewHeadKeyID
+	tArm := t0.Add(time.Minute + dnskeyTTL + 30*time.Second)
+	tick("arm", tArm)
+	tPush := tArm.Add(time.Second)
+	tick("push", tPush)
+	pushes := parent.pushes()
+	if len(pushes) != 1 {
+		t.Fatalf("push: %d pushes, want 1", len(pushes))
+	}
+	// Lose the new head's index row, so the filtered target set has no
+	// known range at the confirm.
+	if _, err := kdb.DB.Exec(`DELETE FROM RolloverKeyState WHERE zone = ? AND keyid = ?`, ktAlgZone, int(b)); err != nil {
+		t.Fatalf("drop rollover_index row: %v", err)
+	}
+	parent.serve(ktDSSubset(pushes[0], 3600, b))
+	tick("confirm", tPush.Add(pol.Rollover.ConfirmInitialWait+time.Second))
+	if p, ip := ktPhase(t, kdb, ktAlgZone); p != rolloverPhasePendingChildWithdraw || !ip {
+		t.Fatalf("confirm: phase=%q in_progress=%v, want pending-child-withdraw/true: an unknown index range must not park the roll", p, ip)
+	}
+	st, err = LoadKskAlgRollState(kdb, ktAlgZone)
+	if err != nil || st == nil || st.OldHeadRetireAt == nil {
+		t.Fatalf("confirm: drain clock not stamped: %+v, %v", st, err)
+	}
+}
