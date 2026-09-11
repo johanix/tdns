@@ -153,6 +153,9 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 	// followed by Reset needs no drain.
 	timer := time.NewTimer(floor)
 	defer timer.Stop()
+	// When the timer is currently due to fire. A request may only ever bring
+	// this EARLIER; see earlierResignWake.
+	nextWake := time.Now().Add(floor)
 
 	for {
 		select {
@@ -193,9 +196,13 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 			ZonesToKeepSigned[zd.ZoneName] = zd
 
 			// Whatever the engine is currently sleeping through was computed
-			// without this zone, which has no estimate of its own yet.
-			timer.Stop()
-			timer.Reset(floor)
+			// without this zone, which has no estimate of its own yet -- so it
+			// may need an earlier wake. Never a later one.
+			if at, sooner := earlierResignWake(nextWake, time.Now(), floor); sooner {
+				timer.Stop()
+				timer.Reset(time.Until(at))
+				nextWake = at
+			}
 
 		case <-timer.C:
 			for _, zd := range ZonesToKeepSigned {
@@ -213,6 +220,7 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 			}
 
 			wake := nextResignWake(ZonesToKeepSigned, floor)
+			nextWake = time.Now().Add(wake)
 			lgSigner.Debug("ResignerEngine sleeping until the next renewal is due",
 				"zones", len(ZonesToKeepSigned), "sleep", wake.String())
 			timer.Reset(wake)
@@ -302,4 +310,23 @@ func resignSweepZone(ctx context.Context, zd *ZoneData) {
 		return
 	}
 	lgSigner.Info("zone signatures renewed (periodic)", "zone", zd.ZoneName, "rrsets_renewed", renewed)
+}
+
+// earlierResignWake reports whether a zone just added to the watchlist needs
+// the resigner to wake sooner than it is already going to, and if so, when.
+//
+// A new zone has no renewal estimate of its own, so it wants a pass within one
+// floor. That can only ever move the wake EARLIER. Each request used to stop the
+// timer and reset it to a full floor unconditionally, so a request arriving
+// before the timer fired pushed the sweep out by another floor -- and on a
+// server where zone loads and key-state changes arrive more often than once a
+// floor, the timer never fired at all and nothing on the watchlist was renewed.
+// The one pass whose whole job is to stop signatures expiring, postponed
+// indefinitely by the traffic it exists to serve.
+func earlierResignWake(nextWake, now time.Time, floor time.Duration) (time.Time, bool) {
+	want := now.Add(floor)
+	if want.Before(nextWake) {
+		return want, true
+	}
+	return nextWake, false
 }

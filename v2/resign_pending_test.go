@@ -300,3 +300,50 @@ func TestACancelledSweepLeavesTheReplaceStillOwed(t *testing.T) {
 		t.Log("the retired key's signature is gone, so the pass ran despite cancellation")
 	}
 }
+
+// TestAStreamOfRequestsCannotPostponeTheRenewalSweep.
+//
+// Every request used to reset the resigner's timer to a full floor, so each one
+// that arrived before the timer fired pushed the sweep out again. Requests are
+// steady-state traffic -- one per zone load, one per key-state change -- and on
+// a busy server they can come more often than once a floor. The sweep then
+// never runs, and nothing on the watchlist is renewed.
+//
+// Simulates exactly that: a request every 20s against a 60s floor, for ten
+// minutes. The sweep must still come due at the first deadline.
+func TestAStreamOfRequestsCannotPostponeTheRenewalSweep(t *testing.T) {
+	const floor = 60 * time.Second
+	start := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	nextWake := start.Add(floor)
+	deadline := nextWake
+
+	for tick := 1; tick <= 30; tick++ {
+		now := start.Add(time.Duration(tick) * 20 * time.Second)
+		if !now.Before(deadline) {
+			break // the timer would have fired by now
+		}
+		nextWake, _ = earlierResignWake(nextWake, now, floor)
+		if nextWake.After(deadline) {
+			t.Fatalf("a request at %s moved the sweep from %s to %s; repeated requests"+
+				" would postpone renewal indefinitely", now.Sub(start), deadline.Sub(start), nextWake.Sub(start))
+		}
+	}
+}
+
+// And the case it still has to handle: a long sleep (up to resignSafetyTick) is
+// cut short by a new zone, which has no estimate and wants a pass within one
+// floor.
+func TestANewZoneStillShortensALongSleep(t *testing.T) {
+	const floor = 60 * time.Second
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	longSleep := now.Add(resignSafetyTick)
+
+	at, sooner := earlierResignWake(longSleep, now, floor)
+	if !sooner {
+		t.Fatal("a new zone did not shorten an hour-long sleep; it would wait the full hour" +
+			" for its first renewal pass with no estimate to justify it")
+	}
+	if want := now.Add(floor); !at.Equal(want) {
+		t.Errorf("woke at %s, want one floor from now (%s)", at, want)
+	}
+}
