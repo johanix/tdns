@@ -753,7 +753,9 @@ func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *Owner
 
 // handleCNAMEChain handles CNAME responses, including following CNAME chains across zones.
 // Returns true if a CNAME response was handled and the message should be sent, false otherwise.
-func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname string, qtype uint16, owner *OwnerData, snap *zoneSnapshot,
+// qname is the owner that matched, which is the wildcard when one did, and
+// origqname the name that was asked.
+func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname, origqname string, qtype uint16, owner *OwnerData, snap *zoneSnapshot,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB, apex *OwnerData, minimalResponses bool) (bool, error) {
 
 	if owner.RRtypes.Count() != 1 {
@@ -770,6 +772,17 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 		lgHandler.Warn("illegal content: multiple CNAME RRs", "zone", zd.ZoneName, "rrset", v)
 	}
 
+	// A CNAME synthesised from a wildcard is owned by the name that was asked,
+	// not by the wildcard (RFC 1034 section 4.3.2 step 3c), and so is its
+	// RRSIG. The RRSIG keeps the wildcard's Labels field, which is how a
+	// validator knows to rebuild the wildcard owner before it verifies.
+	reown := func(rrs []dns.RR) []dns.RR {
+		if qname == origqname {
+			return rrs
+		}
+		return WildcardReplace(rrs, qname, origqname)
+	}
+
 	// Add the first CNAME to the answer
 	// Sign it first if DNSSEC is enabled
 	if msgoptions.DO {
@@ -783,21 +796,22 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 			w.WriteMsg(m)
 			return false, fmt.Errorf("failed to sign initial CNAME RRset for qname %s: %v", qname, err)
 		} else {
-			m.Answer = append(m.Answer, rrset.RRs...)
-			m.Answer = append(m.Answer, rrset.RRSIGs...)
+			m.Answer = append(m.Answer, reown(rrset.RRs)...)
+			m.Answer = append(m.Answer, reown(rrset.RRSIGs)...)
 		}
 	} else {
-		m.Answer = append(m.Answer, v.RRs...)
+		m.Answer = append(m.Answer, reown(v.RRs)...)
 	}
 
 	// Follow CNAME chain with max depth to prevent infinite loops
-	currentName := qname
+	currentName := origqname
 	currentOwner := owner
 	maxDepth := 10
 	depth := 0
 
 	visited := make(map[string]bool)
 	visited[qname] = true
+	visited[origqname] = true
 
 	// RFC 1034 section 4.3.2 step 3a follows a CNAME only when QTYPE does not
 	// match it. A query for the CNAME itself, or for ANY, is an exact match:
@@ -1116,7 +1130,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 		// 2. Check for qname + CNAME (only if CNAME is the only RR type)
 		lgHandler.Debug("checking for CNAME", "qname", qname, "zone", zd.ZoneName)
-		handled, err := zd.handleCNAMEChain(m, w, qname, qtype, owner, snap, msgoptions, kdb, apex, minimalResponses)
+		handled, err := zd.handleCNAMEChain(m, w, qname, origqname, qtype, owner, snap, msgoptions, kdb, apex, minimalResponses)
 		if err != nil {
 			lgHandler.Error("error handling CNAME chain", "err", err)
 			// Error response already sent by handleCNAMEChain
