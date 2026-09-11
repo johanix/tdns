@@ -247,6 +247,11 @@ func TestApplyZonePolicyTransactionalRevertOnSignFailure(t *testing.T) {
 	polB := kskzsk(dns.RSASHA256, dns.ED25519) // KSK alg change → SignZone refuses
 	withLivePolicies(t, map[string]DnssecPolicy{"polB": polB})
 
+	// A warning the zone already carried. polB's floor check produces none,
+	// so it clears this one; a revert that restores the binding but not the
+	// error state loses it.
+	zd.SetError(DnssecPolicyWarning, "prior warning")
+
 	if _, err := applyZonePolicyTransactional(context.Background(), zd, kdb, &polB, "polB", PolicyApplySourceCommand); err == nil {
 		t.Fatal("expected SignZone failure on incompatible KSK algorithm change")
 	}
@@ -258,6 +263,10 @@ func TestApplyZonePolicyTransactionalRevertOnSignFailure(t *testing.T) {
 	zd.mu.Unlock()
 	if gotName != "polA" || gotKSK != dns.ED25519 {
 		t.Fatalf("binding not reverted: got (%q, ksk=%s), want (polA, ED25519)", gotName, dns.AlgorithmToString[gotKSK])
+	}
+	// Error state reverted with it.
+	if got := errorMsg(zd, DnssecPolicyWarning); got != "prior warning" {
+		t.Errorf("DnssecPolicyWarning after revert = %q, want the prior warning back", got)
 	}
 	// Nothing persisted.
 	if _, _, ok, _ := GetZoneAppliedPolicy(kdb, algZone); ok {
@@ -315,18 +324,30 @@ func TestARejectedPolicyRestoresAPriorErrorExactly(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := algTestZone(dns.ED25519, dns.ED25519)
 	zd.SetError(DnssecError, "prior: unrelated to this apply, 100%% genuine")
+	// The other category the floor check writes. The rejected policy produces
+	// no warnings, so its floor check CLEARS this -- only the restore brings
+	// it back.
+	zd.SetError(DnssecPolicyWarning, "prior warning, also kept")
 
 	applyRejectedPolicy(t, zd, kdb)
 
-	var got string
-	for _, e := range zd.ErrorList() {
-		if e.Type == DnssecError {
-			got = e.Msg
-		}
-	}
-	if want := "prior: unrelated to this apply, 100% genuine"; got != want {
+	if got, want := errorMsg(zd, DnssecError), "prior: unrelated to this apply, 100% genuine"; got != want {
 		t.Errorf("DnssecError after rollback = %q, want the prior %q", got, want)
 	}
+	if got, want := errorMsg(zd, DnssecPolicyWarning), "prior warning, also kept"; got != want {
+		t.Errorf("DnssecPolicyWarning after rollback = %q, want the prior %q; the snapshot"+
+			" covers both categories the floor check writes", got, want)
+	}
+}
+
+// errorMsg returns the message recorded for one error category, or "".
+func errorMsg(zd *ZoneData, typ ErrorType) string {
+	for _, e := range zd.ErrorList() {
+		if e.Type == typ {
+			return e.Msg
+		}
+	}
+	return ""
 }
 
 // With no policy bound before, recomputing the floor "for the old policy" does
