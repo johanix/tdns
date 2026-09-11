@@ -1060,6 +1060,22 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	return bestmatch, cp, nil
 }
 
+// FindClosestKnownZoneFor is FindClosestKnownZone for a question rather than a
+// name: the zone, and its servers, that hold <qname, qtype>.
+//
+// That is the closest zone to qname for every type but DS. A DS lives on the
+// PARENT side of the zone cut (RFC 4035 §3.1.4.1), so it is found one label up:
+// asked with qname itself, FindClosestKnownZone returns the child's own
+// servers, which do not hold the DS and answer REFUSED or NODATA (#150). The
+// root has no parent and no DS; parentOf(".") is the root again, whose servers
+// will say so.
+func (rrcache *RRsetCacheT) FindClosestKnownZoneFor(qname string, qtype uint16) (string, map[string]*AuthServer, error) {
+	if qtype == dns.TypeDS {
+		qname = parentOf(qname)
+	}
+	return rrcache.FindClosestKnownZone(qname)
+}
+
 func GetMinTTL(rrs []dns.RR) time.Duration {
 	if len(rrs) == 0 {
 		return 0

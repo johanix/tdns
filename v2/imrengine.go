@@ -691,7 +691,8 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		} else {
 			maxiter--
 		}
-		bestmatch, authservers, err := imr.Cache.FindClosestKnownZone(qname)
+		// For, not the bare name: a DS is asked of the parent's servers.
+		bestmatch, authservers, err := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
@@ -1010,14 +1011,11 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	// DS records are exclusively published at the parent zone, so a
 	// cached DS entry with ContextReferral (the canonical path: we
 	// learned it from the parent's referral in handleReferral) IS the
-	// authoritative answer. Serve it directly. Without this branch the
-	// switch below falls through, the responder re-queries iteratively,
-	// the iterative path's FindClosestKnownZone returns the qname's
-	// OWN serverMap (e.g. net.'s servers for `net DS`), the qname's
-	// servers respond NODATA (DS doesn't live at zone apex), and we
-	// hand the client a phantom NODATA for a DS that's right there in
-	// cache as `state: secure`. Confirmed via `dog @127.0.0.1:1099
-	// net DS +dnssec` and tdns-mp `dog sigchase` against the local IMR.
+	// authoritative answer. Serve it directly rather than asking the
+	// parent again for what it already told us. (This branch predates
+	// the iterative loop below asking the parent at all: it used to
+	// take the qname's OWN servers, e.g. net.'s for `net DS`, and hand
+	// the client their NODATA for a DS sitting in cache as secure.)
 	if crrset != nil && qtype == dns.TypeDS && crrset.Context == cache.ContextReferral &&
 		crrset.RRset != nil && crrset.RRset.RRtype == dns.TypeDS && len(crrset.RRset.RRs) > 0 {
 		m.SetRcode(r, dns.RcodeSuccess)
@@ -1120,7 +1118,10 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			} else {
 				maxiter--
 			}
-			bestmatch, authservers, err := imr.Cache.FindClosestKnownZone(qname)
+			// For, not the bare name: a DS is PARENT-side data, and asking the
+			// qname's own servers for it got REFUSED from a child that is not
+			// also the parent, and a SERVFAIL for the client (#150).
+			bestmatch, authservers, err := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
 			if err != nil {
 				// resp.Error = true
 				// resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
