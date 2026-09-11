@@ -331,6 +331,8 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				},
 				"query_budget":                t.QueryBudget.String(),
 				"upgrade_indirect_cache_hits": upgradeStr,
+				"cache_max_ttl":               t.CacheMaxTTL,
+				"cache_min_ttl":               t.CacheMinTTL,
 			}
 			resp.Data = data
 			resp.Msg = "IMR tuning snapshot"

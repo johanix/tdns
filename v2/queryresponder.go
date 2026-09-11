@@ -257,17 +257,23 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 // handleDSQuery answers a DS query. DS is parent-side data (RFC 4035 §3.1.4.1):
 // it is authoritative in the zone that DELEGATES to qname, never in qname's own
 // zone. The answering zone is therefore the nearest zone we host that is a
-// STRICT ancestor of qname — found by stripping qname's leftmost label and
-// letting FindZone walk up from there, entirely within the local Zones map. We
-// NEVER chase the parent via the recursive resolver.
+// STRICT ancestor of qname — found by FindParentZone, entirely within the local
+// Zones map. We NEVER chase the parent via the recursive resolver.
 //
 // Outcomes, ordered from most to least common (a grandparent referral is by far
 // the rarest, so it is the last arm):
 //
-//   - No hosted ancestor at all: REFUSED. The DS lives in a parent we don't
-//     host; answering NODATA would be us authoritatively denying parent-side
-//     data we don't own. (A correct validator asks the parent's servers for DS,
-//     never the child's, so this should not occur in practice.)
+//   - No hosted ancestor, and qname is the apex of the zone we do host: an
+//     authoritative NODATA from that child zone, as RFC 4035 §3.1.4.1 requires
+//     of a server authoritative for the child but not the parent -- it "MUST
+//     return an authoritative 'no data' response showing that the DS RRset does
+//     not exist in the child zone's apex". BIND and NSD do the same. REFUSED,
+//     which this used to answer, gives a resolver that asked the wrong server
+//     no hint at all (#150).
+//
+//   - No hosted ancestor and qname is not our apex: REFUSED. Unreachable in
+//     practice -- the caller found zd for qname, and below its apex zd itself
+//     is the hosted ancestor -- but there is nothing to answer from.
 //
 //   - We host the immediate parent (it delegates directly to qname): serve the
 //     DS RRset if present; otherwise an authenticated NODATA proving the
@@ -281,15 +287,20 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
 
-	// DS can never live in qname's own zone, so strip qname's leftmost label
-	// and look up the parent side. FindZone walks up from there and returns the
-	// nearest hosted strict ancestor of qname (with the same case-folding as the
-	// main lookup); it can never return qname's own zone. qname is a FQDN here,
-	// so it always has at least the root dot.
-	pzd := FindZone(qname[strings.Index(qname, ".")+1:])
+	// DS can never live in qname's own zone, so look up the parent side.
+	// FindParentZone starts one label in and walks up to the nearest hosted
+	// strict ancestor (with the same case-folding as the main lookup). It, and
+	// not FindZone on the remainder, because it reads the empty remainder of a
+	// TLD as the root: FindZone("") tries nothing, and a server hosting both
+	// "." and a TLD answered the TLD's DS with the TLD's own NODATA. For "."
+	// itself it returns the root, which has no parent and answers NODATA.
+	pzd := FindParentZone(qname)
 	if pzd == nil {
-		// We host nothing above qname (at most qname itself). Nothing to serve
-		// or refer to → REFUSED.
+		if core.EqualNames(qname, zd.ZoneName) {
+			return zd.sendChildApexDSNodata(m, w, qname, msgoptions, kdb)
+		}
+		// We host nothing above qname, and qname is not our apex. Nothing to
+		// serve or refer to → REFUSED.
 		lgHandler.Debug("QueryResponder: DS query, no hosted parent zone — REFUSED",
 			"qname", qname)
 		m.MsgHdr.Authoritative = false
@@ -401,6 +412,57 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		pzd.sendReferral(m, w, cdd, papex, msgoptions, pSign)
 		return nil
 	}
+}
+
+// sendChildApexDSNodata answers a DS query for our own apex when we do not host
+// the parent: the authoritative NODATA of RFC 4035 §3.1.4.1, from the child
+// zone, with its SOA and -- for a DO query -- the denial at the apex, whose
+// bitmap lists the types the apex holds and so shows DS absent.
+//
+// A validator must not take this as proof that the delegation is insecure: the
+// denial is the child's, signed with the child's keys, and says nothing about
+// the parent side of the cut (RFC 6840 §4.4). What it is for is the resolver
+// that asked the wrong server -- a plain NODATA it can recognise, instead of
+// a REFUSED it cannot tell from a lame server.
+func (zd *ZoneData) sendChildApexDSNodata(m *dns.Msg, w dns.ResponseWriter, qname string,
+	msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
+
+	snap := zd.publishedSnapshot()
+	if snap == nil {
+		lgHandler.Error("DS query at apex: no published snapshot", "zone", zd.ZoneName)
+		m.MsgHdr.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(m)
+		return nil
+	}
+	apex := getOwnerFrom(snap, zd.ZoneName)
+	if apex == nil {
+		lgHandler.Error("DS query at apex: snapshot missing apex", "zone", zd.ZoneName)
+		m.MsgHdr.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(m)
+		return nil
+	}
+	lgHandler.Debug("QueryResponder: DS query at our apex, parent not hosted — authoritative NODATA",
+		"qname", qname, "zone", zd.ZoneName)
+	m.MsgHdr.Authoritative = true
+	m.MsgHdr.Rcode = dns.RcodeSuccess
+	m.Ns = append(m.Ns, zd.soaForResponseFrom(snap, apex).RRs...)
+	if msgoptions.DO {
+		// The apex's own types, never DS: a DS stored at the apex is parent-side
+		// data that does not belong in the child, and a bitmap listing it would
+		// contradict the NODATA it is meant to prove.
+		var types []uint16
+		for _, t := range apex.RRtypes.Keys() {
+			if t != dns.TypeDS {
+				types = append(types, t)
+			}
+		}
+		sign := func(rrset core.RRset, name string) (core.RRset, error) {
+			return zd.signRRsetForZone(rrset, name, msgoptions, kdb, nil)
+		}
+		zd.addCDEResponse(m, qname, apex, types, msgoptions, sign)
+	}
+	w.WriteMsg(m)
+	return nil
 }
 
 // sendReferral sends a referral response for a child delegation.
