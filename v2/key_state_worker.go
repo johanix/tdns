@@ -126,6 +126,13 @@ func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propa
 
 // transitionPublishedToStandby transitions keys that have been in "published"
 // state long enough for the DNSKEY RRset to propagate through all caches.
+//
+// A global walk: it reaches every zone's published keys, including those of a
+// zone whose keys are steered by the lifecycle hooks (KeyLifecycleHooks). It
+// needs nothing from the hooks beyond the OnStateChange that
+// UpdateDnssecKeyState fires for it, and it must not grow a skip for such
+// zones: a key their owner has moved to "published" is one it wants on this
+// timer.
 func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStatePublished)
 	if err != nil {
@@ -251,9 +258,14 @@ func transitionRetiredToRemoved(ctx context.Context, conf *Config, kdb *KeyDB, n
 			}
 		}
 
-		lgSigner.Info("KeyStateWorker: transitioning retired→removed", "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
-		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, DnskeyStateRemoved); err != nil {
-			lgSigner.Error("KeyStateWorker: retired→removed failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
+		// "removed", or the state the RetiredState hook names for this zone
+		// (KeyLifecycleHooks): a key whose withdrawal the hook's owner still
+		// has to confirm parks there, out of the served RRset, and the owner
+		// moves it on.
+		next := keyRetiredStateFor(key.ZoneName)
+		lgSigner.Info("KeyStateWorker: transitioning retired→"+next, "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
+		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, next); err != nil {
+			lgSigner.Error("KeyStateWorker: retired→"+next+" failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
 			continue
 		}
 
@@ -264,6 +276,9 @@ func transitionRetiredToRemoved(ctx context.Context, conf *Config, kdb *KeyDB, n
 // maintainStandbyKeys ensures each signing zone has the configured number of
 // standby keys for both ZSKs and KSKs. If a zone has fewer standby keys than
 // required and no keys are in the published pipeline, new keys are generated.
+// Every signing zone, including one whose keys are steered by the lifecycle
+// hooks: for such a zone the generated key lands in the hooks' staged state
+// and that state counts as pipeline (maintainStandbyKeysForType).
 //
 // ctx is honoured between zones. This was the last step of the worker's tick
 // that did not take one, and it is the expensive one: generating a keypair is
@@ -277,12 +292,6 @@ func maintainStandbyKeys(ctx context.Context, conf *Config, kdb *KeyDB, standbyZ
 			return
 		}
 		if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
-			continue
-		}
-
-		// MP zones have their own key state worker and their own
-		// keystore table (MPDnssecKeyStore). Skip them here.
-		if zd.Options[OptMultiProvider] {
 			continue
 		}
 
@@ -345,8 +354,21 @@ func maintainStandbyKeysForType(ctx context.Context, conf *Config, kdb *KeyDB, z
 	}
 	publishedCount := countKeysForMaintain(publishedKeys, expectedFlags, alg, roleOnly)
 
+	// The pipeline is `published` plus whatever state the StagedState hook
+	// stages new keys into (KeyLifecycleHooks): a key waiting there is a key
+	// on its way to standby, and minting another beside it would double the
+	// count the hook's owner is pacing.
+	if staged := keyStagedStateFor(zoneName); staged != DnskeyStatePublished {
+		stagedKeys, err := GetDnssecKeysByState(kdb, zoneName, staged)
+		if err != nil {
+			lgSigner.Error("KeyStateWorker: error getting staged keys", "zone", zoneName, "keytype", keytype, "state", staged, "err", err)
+			return
+		}
+		publishedCount += countKeysForMaintain(stagedKeys, expectedFlags, alg, roleOnly)
+	}
+
 	if publishedCount > 0 {
-		lgSigner.Debug("KeyStateWorker: keys in pipeline, not generating", "zone", zoneName, "keytype", keytype, "published", publishedCount)
+		lgSigner.Debug("KeyStateWorker: keys in pipeline, not generating", "zone", zoneName, "keytype", keytype, "pipeline", publishedCount)
 		return
 	}
 

@@ -18,10 +18,18 @@ import (
 // brief window after refresh where standby DNSKEYs disappear from
 // the served RRset until the next SignZone call.
 //
-// The set is `published` ∪ `standby` ∪ `retired`. Active keys are
-// fetched separately via GetDnssecKeys(..., DnskeyStateActive).
+// The set is `published` ∪ `standby` ∪ `retired` ∪ `mpdist` ∪ `foreign`.
+// Active keys are fetched separately via GetDnssecKeys(..., DnskeyStateActive).
+//
+// The last two are states a derived application stages keys into through
+// the key lifecycle hooks (KeyLifecycleHooks): `mpdist`, a key of this
+// zone's that is served ahead of its promotion and is released by its owner,
+// and `foreign`, a DNSKEY that is served here but was generated elsewhere and
+// has no private half. tdns attaches no meaning to either beyond "served":
+// neither is ever loaded as a signing key (that is loadDnssecKeysFromDB with
+// state active), and neither moves on the worker's timers.
 const FetchZoneDnskeysSql = `
-SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='standby' OR state='retired')`
+SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='standby' OR state='retired' OR state='mpdist' OR state='foreign')`
 
 func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
