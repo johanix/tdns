@@ -3,9 +3,11 @@ package tdns
 import (
 	"context"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -245,5 +247,124 @@ func TestFirstLoadPostRefreshStaysOwedUntilReady(t *testing.T) {
 	}
 	if p.runs != 1 {
 		t.Fatalf("a second completion re-ran the callbacks: runs=%d", p.runs)
+	}
+}
+
+// A pre-registered secondary whose first successful load is NOTIFY-driven:
+// the refresher names only the zone, the policy comes from what the zone
+// recorded at registration.
+func TestFirstLoadBindsTheRegisteredPolicyWhenTheRefresherNamesNone(t *testing.T) {
+	zd := &ZoneData{ZoneName: "late.example.", DnssecPolicyName: "base"}
+	if got := firstLoadPolicyName(zd, ZoneRefresher{Name: "late.example."}); got != "base" {
+		t.Fatalf("NOTIFY-built refresher: bound %q, want the registered %q", got, "base")
+	}
+	if got := firstLoadPolicyName(zd, ZoneRefresher{Name: "late.example.", DnssecPolicy: "other"}); got != "other" {
+		t.Fatalf("config-driven refresher: bound %q, want its own %q", got, "other")
+	}
+	if got := firstLoadPolicyName(&ZoneData{ZoneName: "plain.example."}, ZoneRefresher{Name: "plain.example."}); got != "" {
+		t.Fatalf("no policy anywhere: bound %q, want none", got)
+	}
+}
+
+// The engine-level shape of the same: a pre-registered secondary that signs
+// its own content, first tried while its primary is down, then loaded by the
+// refresher a NOTIFY builds -- what a signer sees when a customer's zone is
+// published after the signer started. The policy the zone recorded at
+// registration is bound, keys are minted, the zone is signed and Ready.
+func TestNotifyDrivenFirstLoadBindsTheRegisteredPolicy(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	withLivePolicies(t, map[string]DnssecPolicy{"base": kskzsk(dns.ED25519, dns.ED25519)})
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 1)
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+
+	// the primary's address, decided before anything listens on it
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := probe.Addr().String()
+	probe.Close()
+
+	// pre-registered, the way ParseZones leaves a zone before its first load
+	zd := &ZoneData{ZoneName: "example.", Logger: discardLogger(), FirstZoneLoad: true}
+	zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+	Zones.Set("example.", zd)
+	t.Cleanup(func() { Zones.Remove("example.") })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); RefreshEngine(ctx, conf) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("RefreshEngine did not shut down")
+		}
+	})
+
+	// the config-driven refresher, primary down: registration, no data
+	conf.Internal.RefreshZoneCh <- ZoneRefresher{
+		Name:          "example.",
+		ZoneType:      Secondary,
+		ZoneStore:     MapZone,
+		PrimariesConf: []PeerConf{{Addr: addr}},
+		Primaries:     []PeerConf{{Addr: addr}},
+		Options:       map[ZoneOption]bool{OptInlineSigning: true},
+		DnssecPolicy:  "base",
+		ConfigUpdate:  true,
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !zd.HasError(RefreshError) {
+		if time.Now().After(deadline) {
+			t.Fatal("the first attempt against the down primary did not fail")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	zd.mu.Lock()
+	first, name := zd.FirstZoneLoad, zd.DnssecPolicyName
+	zd.mu.Unlock()
+	if !first || name != "base" {
+		t.Fatalf("after the failed attempt: FirstZoneLoad=%v policy name %q, want true and base", first, name)
+	}
+
+	// the primary comes up and NOTIFYs; the refresher a NOTIFY builds
+	pzd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, ZoneType: Primary, Logger: discardLogger(),
+		Ready: true, Status: ZoneStatusReady, Downstreams: []AclEntry{{Prefix: "127.0.0.0/8", Key: NOKEY}}}
+	if _, _, err := pzd.ReadZoneData(s2Zone, true); err != nil {
+		t.Fatalf("primary ReadZoneData: %v", err)
+	}
+	pzd.InstallInitialSnapshot()
+	t.Cleanup(pzd.stopPublisher)
+	_, stop := serveTestPrimaryOn(t, pzd, addr)
+	t.Cleanup(stop)
+	conf.Internal.RefreshZoneCh <- ZoneRefresher{Name: "example.", ZoneStore: MapZone}
+
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		zd.mu.Lock()
+		ready, pol, name := zd.Ready, zd.DnssecPolicy, zd.DnssecPolicyName
+		zd.mu.Unlock()
+		if ready && pol != nil && name == "base" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the NOTIFY-driven load: Ready=%v policy bound=%v name=%q; the load bound the "+
+				"refresher's empty policy name instead of the zone's", ready, pol != nil, name)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, _, ok, err := GetZoneAppliedPolicy(kdb, "example."); err != nil || !ok {
+		t.Fatalf("applied policy not recorded: ok=%v err=%v", ok, err)
+	}
+	apex, err := zd.GetOwner("example.")
+	if err != nil || apex == nil {
+		t.Fatalf("apex: %v", err)
+	}
+	if soa, ok := apex.RRtypes.Get(dns.TypeSOA); !ok || len(soa.RRSIGs) == 0 {
+		t.Fatal("the apex SOA is served unsigned after the policy bound")
 	}
 }

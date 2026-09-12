@@ -694,7 +694,15 @@ func startTestPrimary(t *testing.T, zoneStr string) (string, func()) {
 // ZoneData itself and then serve it.
 func serveTestPrimary(t *testing.T, pzd *ZoneData) (string, func()) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	return serveTestPrimaryOn(t, pzd, "127.0.0.1:0")
+}
+
+// serveTestPrimaryOn is serveTestPrimary at a chosen address: a test that
+// must first see the primary DOWN at an address the secondary already holds
+// starts it here afterwards.
+func serveTestPrimaryOn(t *testing.T, pzd *ZoneData, addr string) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatalf("listen tcp: %v", err)
 	}
