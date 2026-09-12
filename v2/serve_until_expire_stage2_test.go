@@ -714,7 +714,10 @@ func serveTestPrimaryOn(t *testing.T, pzd *ZoneData, addr string) (string, func(
 		t.Fatalf("listen udp on the tcp port: %v", err)
 	}
 
-	srvCtx, srvCancel := context.WithCancel(context.Background())
+	// The test's own context: cancelled at cleanup, so a transfer still in
+	// flight in ZoneTransferOut is cancelled with the test rather than
+	// outliving it.
+	srvCtx, srvCancel := context.WithCancel(t.Context())
 	mux := dns.NewServeMux()
 	mux.HandleFunc("example.", func(w dns.ResponseWriter, r *dns.Msg) {
 		if len(r.Question) == 1 {
@@ -752,8 +755,12 @@ func serveTestPrimaryOn(t *testing.T, pzd *ZoneData, addr string) (string, func(
 		srvCancel()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = tcpSrv.ShutdownContext(ctx)
-		_ = udpSrv.ShutdownContext(ctx)
+		if err := tcpSrv.ShutdownContext(ctx); err != nil {
+			t.Errorf("test primary: tcp server did not shut down: %v", err)
+		}
+		if err := udpSrv.ShutdownContext(ctx); err != nil {
+			t.Errorf("test primary: udp server did not shut down: %v", err)
+		}
 	}
 }
 
