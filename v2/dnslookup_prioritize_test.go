@@ -223,14 +223,14 @@ func TestPrioritizeServers_PerTransportBackoffFiltering(t *testing.T) {
 
 	// Baseline: both (addr, DoT) and (addr, Do53) should be in the list.
 	serverMap := map[string]*cache.AuthServer{ns: s}
-	_, _, tuples := imr.prioritizeServers("foo.example.", serverMap, edns0.PrivacyNone)
+	_, _, tuples := imr.prioritizeServers("foo.example.", dns.TypeA, serverMap, edns0.PrivacyNone)
 	if len(tuples) != 2 {
 		t.Fatalf("baseline: expected 2 tuples (DoT + Do53 fallback), got %d (%+v)", len(tuples), tuples)
 	}
 
 	// Poison (addr, DoT). (addr, Do53) must remain.
 	s.RecordAddressFailure(addr, core.TransportDoT, fmt.Errorf("dot handshake"))
-	_, _, tuples = imr.prioritizeServers("foo.example.", serverMap, edns0.PrivacyNone)
+	_, _, tuples = imr.prioritizeServers("foo.example.", dns.TypeA, serverMap, edns0.PrivacyNone)
 	if len(tuples) != 1 {
 		t.Fatalf("after DoT failure: expected 1 tuple (Do53 only), got %d (%+v)", len(tuples), tuples)
 	}
@@ -253,7 +253,7 @@ func TestPrioritizeServers_RequireEncryptedFilters(t *testing.T) {
 	s.SetTransportWeight(core.TransportDo53, 50)
 
 	serverMap := map[string]*cache.AuthServer{ns: s}
-	_, _, tuples := imr.prioritizeServers("foo.example.", serverMap, edns0.PrivacyStrict)
+	_, _, tuples := imr.prioritizeServers("foo.example.", dns.TypeA, serverMap, edns0.PrivacyStrict)
 	for _, tup := range tuples {
 		if tup.Transport == core.TransportDo53 {
 			t.Errorf("strict privacy but Do53 tuple emitted: %+v", tup)
@@ -286,7 +286,7 @@ func TestPrioritizeServers_RTTSortAcrossServers(t *testing.T) {
 		"fast.example.": fast,
 		"slow.example.": slow,
 	}
-	_, _, tuples := imr.prioritizeServers("q.example.", serverMap, edns0.PrivacyNone)
+	_, _, tuples := imr.prioritizeServers("q.example.", dns.TypeA, serverMap, edns0.PrivacyNone)
 	if len(tuples) < 2 {
 		t.Fatalf("expected at least 2 tuples, got %d", len(tuples))
 	}
@@ -331,7 +331,7 @@ func TestPrioritizeServers_OotsRankBeatsRTT(t *testing.T) {
 	s.RecordRTT(addr, core.TransportDo53, 500*time.Millisecond)
 
 	serverMap := map[string]*cache.AuthServer{ns: s}
-	_, _, tuples := imr.prioritizeServers(qname, serverMap, edns0.PrivacyNone)
+	_, _, tuples := imr.prioritizeServers(qname, dns.TypeA, serverMap, edns0.PrivacyNone)
 	if len(tuples) < 2 {
 		t.Fatalf("expected Do53+DoT tuples, got %d (%+v)", len(tuples), tuples)
 	}
@@ -368,7 +368,7 @@ func TestPrioritizeServers_UnprobedSentinelOrdering(t *testing.T) {
 		"slow.example.": slow,
 		"new.example.":  unprobed,
 	}
-	_, _, tuples := imr.prioritizeServers("q.example.", serverMap, edns0.PrivacyNone)
+	_, _, tuples := imr.prioritizeServers("q.example.", dns.TypeA, serverMap, edns0.PrivacyNone)
 	if len(tuples) != 3 {
 		t.Fatalf("expected 3 tuples, got %d (%+v)", len(tuples), tuples)
 	}
@@ -402,7 +402,7 @@ func TestPrioritizeServers_SuspectFamilyDeprioritized(t *testing.T) {
 	s.SetTransportWeight(core.TransportDo53, 100)
 	serverMap := map[string]*cache.AuthServer{ns: s}
 
-	_, _, tuples := imr.prioritizeServers("q.example.", serverMap, edns0.PrivacyNone)
+	_, _, tuples := imr.prioritizeServers("q.example.", dns.TypeA, serverMap, edns0.PrivacyNone)
 	if len(tuples) < 1 {
 		t.Fatal("expected at least the v4 tuple")
 	}
@@ -411,7 +411,7 @@ func TestPrioritizeServers_SuspectFamilyDeprioritized(t *testing.T) {
 	}
 	// First prioritizeServers call may have included one v6 probe at back.
 	// A second call with no time elapsed must NOT include another v6 probe.
-	_, _, tuples2 := imr.prioritizeServers("q.example.", serverMap, edns0.PrivacyNone)
+	_, _, tuples2 := imr.prioritizeServers("q.example.", dns.TypeA, serverMap, edns0.PrivacyNone)
 	for _, tup := range tuples2 {
 		if cache.FamilyOf(tup.Addr) == cache.FamilyV6 {
 			t.Errorf("second call within ProbeInterval should not include any v6 tuple, got %+v", tup)
@@ -430,14 +430,14 @@ func TestExpandServerMapWithMissingNS_EarlyExits(t *testing.T) {
 	imr := newTestImr(t)
 
 	// 1. Empty serverMap, no zone known -> 0 added.
-	got := imr.expandServerMapWithMissingNS(context.Background(), "anything.example.", map[string]*cache.AuthServer{})
+	got := imr.expandServerMapWithMissingNS(context.Background(), "anything.example.", dns.TypeA, map[string]*cache.AuthServer{})
 	if got != 0 {
 		t.Errorf("no closest known zone: expected 0 added, got %d", got)
 	}
 
 	// 2. Closest zone known but no NS RRset cached -> 0 added.
 	imr.Cache.ZoneMap.Set("example.", &cache.Zone{ZoneName: "example."})
-	got = imr.expandServerMapWithMissingNS(context.Background(), "anything.example.", map[string]*cache.AuthServer{})
+	got = imr.expandServerMapWithMissingNS(context.Background(), "anything.example.", dns.TypeA, map[string]*cache.AuthServer{})
 	if got != 0 {
 		t.Errorf("no cached NS RRset: expected 0 added, got %d", got)
 	}
@@ -460,13 +460,13 @@ func TestExpandServerMapWithMissingNS_EarlyExits(t *testing.T) {
 	srv := cache.NewAuthServer("ns1.example.")
 	srv.SetAddrs([]string{"10.0.0.1:53"})
 	sm := map[string]*cache.AuthServer{"ns1.example.": srv}
-	got = imr.expandServerMapWithMissingNS(context.Background(), "thing.example.", sm)
+	got = imr.expandServerMapWithMissingNS(context.Background(), "thing.example.", dns.TypeA, sm)
 	if got != 0 {
 		t.Errorf("all NS already resolved: expected 0 added, got %d", got)
 	}
 
 	// 4. nil serverMap is a safe no-op.
-	got = imr.expandServerMapWithMissingNS(context.Background(), "thing.example.", nil)
+	got = imr.expandServerMapWithMissingNS(context.Background(), "thing.example.", dns.TypeA, nil)
 	if got != 0 {
 		t.Errorf("nil serverMap: expected 0 added, got %d", got)
 	}
@@ -485,7 +485,7 @@ func TestExpandServerMapWithMissingNS_EarlyExits(t *testing.T) {
 	imr.Cache.ZoneMap.Set("other.", &cache.Zone{ZoneName: "other."})
 	cctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	got = imr.expandServerMapWithMissingNS(cctx, "thing.other.", map[string]*cache.AuthServer{})
+	got = imr.expandServerMapWithMissingNS(cctx, "thing.other.", dns.TypeA, map[string]*cache.AuthServer{})
 	if got != 0 {
 		t.Errorf("canceled ctx: expected 0 added, got %d", got)
 	}

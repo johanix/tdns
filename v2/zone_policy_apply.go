@@ -192,7 +192,6 @@ func applyZonePolicyTransactionalLocked(
 	newName string,
 	source PolicyApplySource,
 ) (newRRSIGs int, err error) {
-	_ = ctx // reserved: no ctx-aware downstream call yet (see doc comment)
 	if newPol == nil {
 		return 0, fmt.Errorf("applyZonePolicyTransactional: nil policy %q for zone %s", newName, zd.ZoneName)
 	}
@@ -203,21 +202,36 @@ func applyZonePolicyTransactionalLocked(
 		return 0, fmt.Errorf("applyZonePolicyTransactional: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
-	// Snapshot the current binding for revert-on-failure ONLY.
+	// Snapshot the current binding for revert-on-failure ONLY -- and the two
+	// error categories UpdateSigValidityFloor writes, because a revert that
+	// restores the binding but not those leaves the zone flagged by a policy
+	// it no longer has.
 	zd.mu.Lock()
 	oldPol := zd.DnssecPolicy
 	oldName := zd.DnssecPolicyName
+	oldFloorErrs := zd.snapshotErrorsLocked(DnssecError, DnssecPolicyWarning)
 	zd.DnssecPolicy = newPol
 	zd.DnssecPolicyName = newName
 	zd.mu.Unlock()
 
 	UpdateSigValidityFloor(zd, newPol, Conf.KaspPropagationDelay(), 0, false, Conf.IsLargeAlgorithm, false)
 
-	newRRSIGs, err = zd.SignZone(kdb, true)
+	newRRSIGs, err = zd.SignZone(ctx, kdb, true)
 	if err != nil {
+		// Undo the floor check too. A policy that violates the sig-validity
+		// floor sets DnssecError before SignZone runs -- which is exactly why
+		// SignZone refused -- and restoring only the binding left that error
+		// in place. SignZone refuses any zone carrying DnssecError, so the
+		// zone was left unable to sign under the policy it had gone back to.
+		//
+		// Restored from the snapshot rather than recomputed for oldPol: with
+		// no previous policy UpdateSigValidityFloor returns without touching
+		// either category, and the rejected policy's error would survive the
+		// revert all the same.
 		zd.mu.Lock()
 		zd.DnssecPolicy = oldPol
 		zd.DnssecPolicyName = oldName
+		zd.restoreErrorsLocked(oldFloorErrs, DnssecError, DnssecPolicyWarning)
 		zd.mu.Unlock()
 		return 0, fmt.Errorf("re-sign zone %s under policy %q: %w", zd.ZoneName, newName, err)
 	}

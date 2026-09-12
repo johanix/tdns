@@ -22,7 +22,7 @@ func ktRollToConfirm(t *testing.T) (zd *ZoneData, kdb *KeyDB, parent *ktFakePare
 	zd = ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	a = ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -43,7 +43,7 @@ func ktRollToConfirm(t *testing.T) (zd *ZoneData, kdb *KeyDB, parent *ktFakePare
 		t.Fatal("no spawn")
 	}
 	b = st.NewHeadKeyID
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("re-sign after spawn: %v", err)
 	}
 	tArm := t0.Add(time.Minute + time.Duration(pol.TTLS.DNSKEY)*time.Second + 30*time.Second)
@@ -163,7 +163,7 @@ func TestStallWarningAfterTwiceConfirmTimeout(t *testing.T) {
 	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	pol.KSKAlgorithm = dns.RSASHA256
@@ -218,7 +218,7 @@ func TestKTAbortKskAlgRoll(t *testing.T) {
 		zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 		a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 		ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
-		if _, err := zd.SignZone(kdb, true); err != nil {
+		if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 			t.Fatalf("SignZone: %v", err)
 		}
 		pol.KSKAlgorithm = dns.RSASHA256
@@ -226,7 +226,7 @@ func TestKTAbortKskAlgRoll(t *testing.T) {
 		ktTick(t, zd, kdb, t0.Add(time.Second))
 		st, _ := LoadKskAlgRollState(kdb, ktAlgZone)
 		b := st.NewHeadKeyID
-		if _, err := zd.SignZone(kdb, true); err != nil {
+		if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 			t.Fatalf("re-sign: %v", err)
 		}
 		if tags := zd.mustRRSIGKeytags(t, ktAlgZone, dns.TypeDNSKEY); !ktHasKeytag(tags, b) {

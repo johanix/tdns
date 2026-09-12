@@ -9,6 +9,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -141,7 +142,7 @@ func TestSignZoneLeavesOccludedNamesUnsigned(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := occlusionTestZone(t, kdb)
 
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	assertOcclusionInvariants(t, zd, "SignZone")
@@ -153,10 +154,10 @@ func TestResignZoneLeavesOccludedNamesUnsigned(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := occlusionTestZone(t, kdb)
 
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
-	if _, err := zd.ResignZone(kdb); err != nil {
+	if _, err := zd.ResignZone(context.Background(), kdb); err != nil {
 		t.Fatalf("ResignZone: %v", err)
 	}
 	assertOcclusionInvariants(t, zd, "ResignZone")
@@ -235,8 +236,11 @@ func TestSigningStripsRRSIGsAlreadyOnOccludedNames(t *testing.T) {
 		pass string
 		run  func(zd *ZoneData, kdb *KeyDB) error
 	}{
-		{"SignZone", func(zd *ZoneData, kdb *KeyDB) error { _, err := zd.SignZone(kdb, true); return err }},
-		{"ResignZone", func(zd *ZoneData, kdb *KeyDB) error { _, err := zd.ResignZone(kdb); return err }},
+		{"SignZone", func(zd *ZoneData, kdb *KeyDB) error {
+			_, err := zd.SignZone(context.Background(), kdb, true)
+			return err
+		}},
+		{"ResignZone", func(zd *ZoneData, kdb *KeyDB) error { _, err := zd.ResignZone(context.Background(), kdb); return err }},
 	} {
 		t.Run(tc.pass, func(t *testing.T) {
 			kdb := newTestKeyDB(t)
@@ -246,7 +250,7 @@ func TestSigningStripsRRSIGsAlreadyOnOccludedNames(t *testing.T) {
 
 			// Both cases need one pass to have happened: ResignZone re-signs an
 			// already-signed zone, and its own guard refuses an unsigned one.
-			if _, err := zd.SignZone(kdb, true); err != nil {
+			if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 				t.Fatalf("SignZone: %v", err)
 			}
 			if err := tc.run(zd, kdb); err != nil {
@@ -255,5 +259,64 @@ func TestSigningStripsRRSIGsAlreadyOnOccludedNames(t *testing.T) {
 
 			assertOcclusionInvariants(t, zd, tc.pass+" over pre-signed occluded data")
 		})
+	}
+}
+
+// A delegation arriving in a DELTA occludes names the delta never mentions,
+// and those names must lose our signatures too.
+//
+// The seam this guards is where #546's strip meets the scoped signing pass an
+// inbound IXFR uses (#548). Each is correct alone and neither branch could see
+// the problem: before #548 the scoped pass was unreachable for a signing zone,
+// so #546 only ever ran over the whole zone; and #548's own branch had no strip
+// to skip. Together, testing the scope before the occlusion would skip exactly
+// the names a new cut occludes -- deep.sub.example. below, which the delta does
+// not name and so is not in ixfrTouched -- leaving our RRSIGs on the child's
+// data on the wire until the zone was next loaded from source. AXFR is where
+// #546 was visible in the first place.
+func TestDeltaCreatedDelegationStripsRRSIGsBelowTheNewCut(t *testing.T) {
+	const zone = `example.	3600	IN	SOA	ns.example. hostmaster.example. 7 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+aaa.example.	3600	IN	A	10.0.0.7
+ns.example.	3600	IN	A	10.0.0.1
+sub.example.	3600	IN	A	10.0.0.20
+deep.sub.example.	3600	IN	A	10.0.0.21
+zzz.example.	3600	IN	A	10.0.0.9
+`
+	sigs := func(t *testing.T, zd *ZoneData, owner string) int {
+		t.Helper()
+		od := getOwnerFrom(zd.publishedSnapshot(), owner)
+		if od == nil {
+			t.Fatalf("%s is not published", owner)
+		}
+		n := 0
+		for _, rrt := range od.RRtypes.Keys() {
+			n += len(od.RRtypes.GetOnlyRRSet(rrt).RRSIGs)
+		}
+		return n
+	}
+
+	zd := ixSigningSecondary(t, zone)
+	// Both are ordinary authoritative names to start with, and signed as such.
+	for _, name := range []string{"sub.example.", "deep.sub.example."} {
+		if got := sigs(t, zd, name); got == 0 {
+			t.Fatalf("precondition: %s starts out unsigned", name)
+		}
+	}
+
+	// The delta delegates sub.example. It names sub.example. and nothing below
+	// it, so deep.sub.example. is occluded without being touched.
+	ns, err := dns.NewRR("sub.example. 3600 IN NS ns.sub.example.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyIxfrAndPublish(t, zd, ixDeltaStream(t, 7, 8, nil, []dns.RR{ns}))
+
+	for _, name := range []string{"sub.example.", "deep.sub.example."} {
+		if got := sigs(t, zd, name); got != 0 {
+			t.Errorf("%s is below the delegation the delta created and still carries "+
+				"%d of our RRSIGs: the publish signed to a scope and the strip never "+
+				"reached it", name, got)
+		}
 	}
 }

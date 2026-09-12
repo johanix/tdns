@@ -4,7 +4,6 @@
 package tdns
 
 import (
-	"context"
 	"crypto"
 	"database/sql"
 	"log"
@@ -237,6 +236,22 @@ type ZoneData struct {
 
 	// Zone snapshot publish path (Project B).
 	snapshot atomic.Pointer[zoneSnapshot]
+	// nextResign caches when this zone's earliest-expiring signature crosses
+	// the renewal threshold, so the resigner can sleep until then instead of
+	// walking every zone every minute to find out that nothing is due. Written
+	// by RenewZoneSignatures, read without zd.mu by the resigner. Nil means
+	// unknown, which means the coarse tick -- so a restart, or any path that
+	// signs without updating it, degrades to today's behaviour rather than to a
+	// missed renewal. In memory only: persisting it would add a value that can
+	// be wrong across a version change, to buy nothing a first pass does not.
+	nextResign atomic.Pointer[resignSchedule]
+	// resignPending records that this zone's signatures must be REPLACED --
+	// a key became active, inactive or retired -- and that it has not happened
+	// yet. The renewal ticker cannot discover this on its own: after a
+	// rollover the published RRSIGs are perfectly valid and merely made by the
+	// wrong key, so NeedsResigning short-circuits and renewal finds nothing
+	// due. Set by triggerResign, cleared only by a replace that succeeded.
+	resignPending atomic.Bool
 	// signingKeys is the per-zone copy-on-write active DNSSEC key set (G3).
 	// Lock-free reads via SigningKeys() / ActiveDnssecKeys(); writers republish
 	// post-commit via republishSigningKeys. Separate from the zone-data snapshot.
@@ -261,10 +276,42 @@ type ZoneData struct {
 	// docs/2026-07-25-inbound-ixfr-plan.md.
 	ixfrDerived bool
 
+	// ixfrTouched is the owner set that delta reached, carried from the IXFR
+	// apply to applyRefreshReplacementLocked so it can stage wsSignOwners.
+	// Set only alongside ixfrDerived.
+	ixfrTouched map[string]bool
+
 	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale
 	// zone replacement): updateIxfrChainLocked clears the delta history
 	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked.
 	wsIxfrEpochReset bool
+	// wsNeedsFullSign marks a working set as carrying WHOLESALE-REPLACEMENT
+	// content that this server has not signed yet -- an AXFR, or a file reload
+	// of a zone that signs its own content. publishWorkingSetLocked signs it
+	// before the swap, so no version a validator or a downstream can see is
+	// ever published unsigned.
+	//
+	// Deliberately NOT set by the incremental paths: ApplyZoneUpdateToZoneData
+	// signs each RRset as it stages it, so a full pass there would walk the
+	// whole zone on every DDNS update to re-confirm signatures that already
+	// exist.
+	wsNeedsFullSign bool
+
+	// wsSignOwners is the same instruction scoped to a set: sign THESE owners
+	// and no others. Staged for an inbound IXFR, where the delta names what
+	// changed and materializeForIxfr has already deep-copied exactly that set
+	// while SHARING every other owner with the published snapshot.
+	//
+	// A full pass on an IXFR would undo that sharing. The cost is not the
+	// signatures -- SignRRset short-circuits on NeedsResigning, and the
+	// untouched owners arrive carrying valid RRSIGs -- it is that the pass
+	// stages every RRset it visits, and stageRRsetLocked goes through
+	// cloneOwner, which allocates a fresh OwnerData and RRTypeStore per owner.
+	// A two-record delta into a 100k-RRset zone would re-materialise the whole
+	// zone, which is the work materializeForIxfr exists to avoid.
+	//
+	// nil, with wsNeedsFullSign false, means there is nothing to sign.
+	wsSignOwners map[string]bool
 	// wsPersistDelta marks the next publish as a real content change whose
 	// delta belongs in the ZoneDelta table (Phase 2). Only the applier sets
 	// it. Every other publish -- refresh, reload, signalSynth-only, and above
@@ -1176,6 +1223,13 @@ type UpdateStatus struct {
 	Error        bool
 	ErrorMsg     string
 	Status       bool
+
+	// verifications holds the completion channel of every child-key
+	// verification this update's validation started (see
+	// rememberDiscoveredChildKey). Production ignores it. It exists so a test
+	// can wait for the verifier IT caused, rather than cancelling and hoping
+	// the goroutine is gone before the fixture's database is.
+	verifications []<-chan struct{}
 }
 
 type NotifyStatus struct {
@@ -1236,15 +1290,7 @@ type DnssecKeys struct {
 type KeyDB struct {
 	DB     *sql.DB
 	DBFile string // sqlite file path, recorded by NewKeyDB
-	// engineCtx is the process-lifetime context, recorded by ZoneUpdaterEngine.
-	//
-	// Child-key verification retries with exponential backoff and can be
-	// sleeping for a long time when the process is asked to stop, so it must be
-	// started with a context that is cancelled at shutdown. The updater has one
-	// and the UPDATE validation path does not, and both now need to start a
-	// verification -- see rememberDiscoveredChildKey.
-	engineCtx context.Context
-	mu        sync.Mutex
+	mu     sync.Mutex
 	// Sig0Cache   map[string]*Sig0KeyCache
 	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
 	TruststoreSig0Cache *Sig0StoreT // was *Sig0StoreT

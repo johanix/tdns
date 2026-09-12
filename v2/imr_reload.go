@@ -462,6 +462,16 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 		}
 		return *a == *b
 	}
+	// Tuning is compared as the resolver would run it. InitImrEngine fills the
+	// defaults in before it snapshots bootConf, while the reload decodes the
+	// file raw, so an absent or partial tuning: block differed from the
+	// snapshot on every defaulted knob and every reload asked for a restart.
+	// t is a copy; the one pointer in it, UpgradeIndirectCacheHits, is left
+	// alone by LoadImrTuningDefaults.
+	effective := func(t ImrTuningConf) ImrTuningConf {
+		LoadImrTuningDefaults(&t)
+		return t
+	}
 	check("active", bothNil(boot.Active, current.Active))
 	check("root-hints", boot.RootHints == current.RootHints)
 	check("options", slices.Equal(boot.OptionsStrs, current.OptionsStrs))
@@ -472,7 +482,7 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 	check("verbose", boot.Verbose == current.Verbose)
 	check("debug", boot.Debug == current.Debug)
 	check("logging", boot.Logging == current.Logging)
-	check("tuning", imrTuningEqual(boot.Tuning, current.Tuning))
+	check("tuning", imrTuningEqual(effective(boot.Tuning), effective(current.Tuning)))
 	return keys
 }
 
@@ -481,7 +491,8 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 // this function about it is a compile error, not a silently missed report.
 func imrTuningEqual(a, b ImrTuningConf) bool {
 	if a.Backoff != b.Backoff || a.AddressFamily != b.AddressFamily ||
-		a.Discovery != b.Discovery || a.QueryBudget != b.QueryBudget {
+		a.Discovery != b.Discovery || a.QueryBudget != b.QueryBudget ||
+		a.CacheMaxTTL != b.CacheMaxTTL || a.CacheMinTTL != b.CacheMinTTL {
 		return false
 	}
 	x, y := a.UpgradeIndirectCacheHits, b.UpgradeIndirectCacheHits

@@ -107,9 +107,9 @@ func TestApproveChildUpdateReportsCoherenceNotPolicy(t *testing.T) {
 	// No scanner is configured here, so the parent has no way to ask the
 	// child's nameservers what they serve -- the "unverifiable" arm, and the
 	// shape a parent-side precondition takes.
-	prev := Conf.Internal.Scanner
-	Conf.Internal.Scanner = nil
-	t.Cleanup(func() { Conf.Internal.Scanner = prev })
+	prev := Conf.Internal.GetScanner()
+	Conf.Internal.PublishScanner(nil)
+	t.Cleanup(func() { Conf.Internal.PublishScanner(prev) })
 
 	r := new(dns.Msg)
 	r.SetUpdate(zd.ZoneName)

@@ -271,7 +271,7 @@ func DsyncApiPostDelegation() func(w http.ResponseWriter, r *http.Request) {
 		nsctx, cancel := context.WithTimeout(context.Background(), delegationCheckTimeout)
 		defer cancel()
 		if cerr := zd.CheckDelegationNSCoherenceForUpdate(nsctx, actions,
-			Conf.Internal.Scanner.childNameserverAsker(nil)); cerr != nil {
+			Conf.Internal.GetScanner().childNameserverAsker(nil)); cerr != nil {
 			lgDsyncApi.Warn("DSYNC API update refused as incoherent",
 				"zone", zd.ZoneName, "child", child, "principal", cred.Principal, "err", cerr)
 			dsyncApiError(w, http.StatusConflict, "%v", cerr)

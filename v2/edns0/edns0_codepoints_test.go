@@ -87,8 +87,12 @@ func TestEDECodeValues(t *testing.T) {
 		// at the end of the block on 2026-09-02.
 		{"EDESig0KeyValidationFailed", EDESig0KeyValidationFailed, 541},
 		{"EDESig0ManualBootstrapRequired", EDESig0ManualBootstrapRequired, 542},
+		// 543 and 544 are what PR #573 published on main. They keep those
+		// values here; the code below is the one that had not shipped, so it
+		// took the next number instead of pushing these two along.
 		{"EDEDelegationIncoherent", EDEDelegationIncoherent, 543},
 		{"EDEDelegationUnverifiable", EDEDelegationUnverifiable, 544},
+		{"EDESig0UnvalidatedUploadNotAccepted", EDESig0UnvalidatedUploadNotAccepted, 545},
 
 		// The standard code must keep its RFC 8914 value and must not be part
 		// of the private sequence.

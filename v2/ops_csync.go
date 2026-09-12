@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -40,7 +41,62 @@ func csyncDeleteRR(zone string) dns.RR {
 	return anti
 }
 
+// PublishCsyncRR stages the CSYNC and returns as soon as the update is queued.
+//
+// PublishCsyncRRAndWait is the variant for a caller that is about to tell
+// somebody else to come and look.
 func (zd *ZoneData) PublishCsyncRR() error {
+	_, err := zd.publishCsyncRR(context.Background(), nil)
+	return err
+}
+
+// PublishCsyncRRAndWait stages the CSYNC and waits for the update to be
+// applied and published.
+//
+// The plain version returns once the request is QUEUED, which is the right
+// answer for a caller that only wants the record to exist eventually -- and the
+// wrong one for the NOTIFY scheme, which follows it by telling the parent to
+// come and fetch a CSYNC that may not be there yet.
+//
+// Not the default, because the zone updater itself publishes a CSYNC on one of
+// its own paths: waiting there would be the updater waiting on itself.
+func (zd *ZoneData) PublishCsyncRRAndWait(ctx context.Context) error {
+	resp := make(chan ZoneUpdateResult, 1)
+	want, err := zd.publishCsyncRR(ctx, resp)
+	if err != nil {
+		return err
+	}
+	select {
+	case res := <-resp:
+		if res.Err != nil {
+			return fmt.Errorf("publishing the CSYNC for %s: %w", zd.ZoneName, res.Err)
+		}
+		// res.Applied being false is not by itself a failure: republishing an
+		// identical CSYNC changes nothing, and the record the caller is about
+		// to advertise IS there. But it also covers an update the zone declined
+		// to apply, where it is not. The two are opposite outcomes behind one
+		// false, so the postcondition is checked directly rather than inferred
+		// from the signal.
+		//
+		// And the postcondition is THIS record, not any CSYNC. A zone that
+		// still has an older CSYNC published, whose replacement was then
+		// declined, satisfies "a CSYNC exists" while the parent would fetch the
+		// stale one -- which is the same silent divergence the wait was added
+		// to prevent, one level down.
+		if !zd.csyncIsPublished(want) {
+			return fmt.Errorf("publishing the CSYNC for %s: the update was accepted but the"+
+				" requested CSYNC (serial %d) is not what is published", zd.ZoneName, want.Serial)
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("publishing the CSYNC for %s: %w", zd.ZoneName, ctx.Err())
+	case <-time.After(UpdateApplyTimeout):
+		return fmt.Errorf("publishing the CSYNC for %s: timed out after %s waiting for it to be applied",
+			zd.ZoneName, UpdateApplyTimeout)
+	}
+}
+
+func (zd *ZoneData) publishCsyncRR(ctx context.Context, resp chan ZoneUpdateResult) (*dns.CSYNC, error) {
 	csync := dns.CSYNC{
 		Serial: zd.CurrentSerial,
 		// The immediate flag is what makes a parent act on this CSYNC at all:
@@ -72,12 +128,15 @@ func (zd *ZoneData) PublishCsyncRR() error {
 		// bump and leave a window with none published at all.
 		Actions:        []dns.RR{csyncDeleteRR(zd.ZoneName), &csync},
 		InternalUpdate: true,
+		Resp:           resp,
 	}:
+	case <-ctx.Done():
+		return nil, fmt.Errorf("PublishCsyncRR: %s: %w", zd.ZoneName, ctx.Err())
 	case <-time.After(5 * time.Second):
-		return fmt.Errorf("PublishCsyncRR: timeout sending update for zone %s", zd.ZoneName)
+		return nil, fmt.Errorf("PublishCsyncRR: timeout sending update for zone %s", zd.ZoneName)
 	}
 
-	return nil
+	return &csync, nil
 }
 
 func (zd *ZoneData) UnpublishCsyncRR() error {
@@ -93,4 +152,54 @@ func (zd *ZoneData) UnpublishCsyncRR() error {
 	}
 
 	return nil
+}
+
+// csyncIsPublished reports whether the zone is serving the CSYNC in want at its
+// apex.
+//
+// The NOTIFY scheme's promise is "come and fetch MY CSYNC" -- this one, the one
+// that carries the serial the child is advertising. Asking only whether some
+// CSYNC exists is not the same question: a zone whose apex still holds an older
+// record satisfies it while the parent would fetch the stale one.
+//
+// Compared on the RDATA that identifies the record. TTL is excluded: it is not
+// part of what the parent acts on, and the updater is free to normalise it.
+func (zd *ZoneData) csyncIsPublished(want *dns.CSYNC) bool {
+	if want == nil {
+		return false
+	}
+	rrset, err := zd.GetRRset(zd.ZoneName, dns.TypeCSYNC)
+	if err != nil {
+		lgDns.Error("could not read back the published CSYNC", "zone", zd.ZoneName, "err", err)
+		return false
+	}
+	if rrset == nil {
+		return false
+	}
+	for _, rr := range rrset.RRs {
+		got, ok := rr.(*dns.CSYNC)
+		if !ok {
+			continue
+		}
+		if got.Serial == want.Serial && got.Flags == want.Flags &&
+			sameTypeBitmap(got.TypeBitMap, want.TypeBitMap) {
+			return true
+		}
+	}
+	return false
+}
+
+// sameTypeBitmap compares two CSYNC type bitmaps. Order is significant in the
+// wire format and both sides are built the same way, so this is a plain
+// element-wise comparison rather than a set comparison.
+func sameTypeBitmap(a, b []uint16) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

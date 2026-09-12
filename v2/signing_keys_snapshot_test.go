@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"log"
 	"os"
 	"sync"
@@ -174,7 +175,7 @@ ns.zsk-alg.example.		3600	IN	A	192.0.2.1
 		t.Fatal("ActiveDnssecKeys read republished keys snapshot")
 	}
 
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	if zd.signingKeys.Load() != before {

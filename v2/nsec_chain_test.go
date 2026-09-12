@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"sort"
 	"testing"
 
@@ -76,7 +77,7 @@ deep.sub.cycle.example.	300	IN	A	10.0.0.2
 	zd := testZone(t, "cycle.example.", z)
 	zd.ensureWorkingSet()
 	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true}
-	if err := zd.GenerateNsecChainWithDak(&DnssecKeys{}); err != nil {
+	if err := zd.GenerateNsecChainWithDak(context.Background(), &DnssecKeys{}); err != nil {
 		t.Fatalf("GenerateNsecChainWithDak: %v", err)
 	}
 

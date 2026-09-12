@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -19,7 +20,7 @@ import (
 // successfully validates the update.
 
 // XXX: This should perhaps not be a method of ZoneData, but rather of KeyDB.
-func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
+func (zd *ZoneData) ValidateUpdate(ctx context.Context, r *dns.Msg, us *UpdateStatus) error {
 	// Fail closed by default. Each branch that successfully verifies a
 	// signature lifts ValidationRcode to RcodeSuccess (or another specific
 	// rcode such as RcodeBadTime for "verified but outside validity
@@ -239,7 +240,9 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			// call existed nothing took the key from the first state to the
 			// second on this path: no row was stored, so no verification ran,
 			// so the child was refused forever (#574).
-			zd.rememberDiscoveredChildKey(signer.Sig0Key)
+			if done := zd.rememberDiscoveredChildKey(ctx, signer.Sig0Key); done != nil {
+				us.verifications = append(us.verifications, done)
+			}
 		}
 	}
 
@@ -512,7 +515,7 @@ func knownUntrustedKeyEDE(key *Sig0Key, manual bool) uint16 {
 
 func (zd *ZoneData) FindSig0KeyViaDNS(signer string, keyid uint16) (*Sig0Key, error) {
 	lgDns.Debug("FindSig0KeyViaDNS: looking up SIG(0) key in DNS", "signer", signer, "keyid", keyid)
-	rrset, err := zd.LookupRRset(signer, dns.TypeKEY, true)
+	rrset, err := zd.lookupRRset(signer, dns.TypeKEY, true, false)
 	if err != nil {
 		return nil, err
 	}

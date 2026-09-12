@@ -117,6 +117,13 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 				case edns0.EDESig0ManualBootstrapRequired:
 					return true, fmt.Errorf("parent REFUSED the delegation UPDATE: the parent requires manual SIG(0) bootstrap (EDE %d: %s); complete it and retry",
 						ur.EDECode, ur.EDEMessage)
+				case edns0.EDESig0UnvalidatedUploadNotAccepted:
+					// Terminal for the same reason as the two above: the parent
+					// will not take a key on trust, so re-sending the same
+					// self-signed upload cannot start working. The way forward
+					// is the other bootstrap direction entirely.
+					return true, fmt.Errorf("parent REFUSED the delegation UPDATE: the parent does not accept unvalidated SIG(0) key uploads (EDE %d: %s); publish the KEY at the zone apex or the RFC 9615 signal name and let the parent fetch it",
+						ur.EDECode, ur.EDEMessage)
 				}
 			}
 			lgDns.Warn("sendUpdateWithRetry: parent REFUSED, bounded retry", "attempt", attempt, "ede", ur.EDECode, "edeMsg", ur.EDEMessage)

@@ -128,11 +128,11 @@ func ktWithdrawFixture(t *testing.T) (*ZoneData, *KeyDB, uint16, uint16) {
 
 	a := ktGenKSK(t, kdb, ktWithdrawZone, DnskeyStateActive, dns.ED25519)
 	ktGenZSK(t, kdb, ktWithdrawZone, DnskeyStateActive, dns.ED25519)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone (A): %v", err)
 	}
 	b := ktGenKSK(t, kdb, ktWithdrawZone, DnskeyStateActive, dns.ED25519)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone (A+B): %v", err)
 	}
 	tags := zd.mustRRSIGKeytags(t, ktWithdrawZone, dns.TypeDNSKEY)

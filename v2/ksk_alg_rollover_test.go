@@ -32,7 +32,7 @@ func ktAlgFixture(t *testing.T, method RolloverMethod) (*ZoneData, *KeyDB, uint1
 	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	return zd, kdb, a

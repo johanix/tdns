@@ -182,7 +182,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			resp.Artefact = jr.Artefact
 
 		case "sign-zone":
-			newrrsigs, err := zd.SignZone(kdb, zp.Force)
+			newrrsigs, err := zd.SignZone(r.Context(), kdb, zp.Force)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -190,7 +190,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			resp.Msg = fmt.Sprintf("Zone %s: signed with %d new RRSIGs", zd.ZoneName, newrrsigs)
 
 		case "resign-zone":
-			newrrsigs, err := zd.ResignZone(kdb)
+			newrrsigs, err := zd.ResignZone(r.Context(), kdb)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

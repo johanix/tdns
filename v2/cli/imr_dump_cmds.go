@@ -397,6 +397,10 @@ var dumpTuningCmd = &cobra.Command{
 			}
 		}
 		fmt.Printf("Upgrade indirect cache hits: %s\n", upgradeStr)
+		fmt.Println()
+		fmt.Println("Cache TTL bounds (seconds):")
+		fmt.Printf("  cache-max-ttl : %d\n", t.CacheMaxTTL)
+		fmt.Printf("  cache-min-ttl : %d\n", t.CacheMinTTL)
 	},
 }
 

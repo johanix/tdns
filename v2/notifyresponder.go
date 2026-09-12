@@ -7,7 +7,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -229,10 +228,12 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		targetZoneName = zd.ZoneName
 
 	case dns.TypeCDS, dns.TypeCSYNC:
-		// For CDS and CSYNC, find the parent zone locally.
-		// Strip first label and use FindZone to walk up.
-		labels := strings.SplitN(qname, ".", 2)
-		if len(labels) < 2 || labels[1] == "" {
+		// For CDS and CSYNC, find the parent zone locally. FindParentZone
+		// walks up from one label in and reads a TLD's empty remainder as the
+		// root, so a hosted root is the parent of its TLDs. Stripping the label
+		// by hand and handing the rest to FindZone refused every TLD as having
+		// "no parent", and FindZone never returns the root anyway.
+		if dns.CountLabel(qname) == 0 {
 			lgHandler.Warn("NOTIFY(CDS/CSYNC) qname has no parent", "qname", qname)
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
 			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyTargetNotChildDelegation,
@@ -240,7 +241,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			writeNotifyReply(dnr, m)
 			return nil
 		}
-		zd = FindZone(labels[1])
+		zd = FindParentZone(qname)
 		if zd == nil {
 			lgHandler.Warn("parent zone not authoritative, refusing NOTIFY", "type", dns.TypeToString[ntype], "qname", qname)
 			m.SetRcode(dnr.Msg, dns.RcodeNotAuth)

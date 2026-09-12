@@ -920,11 +920,10 @@ func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher
 	// lame delegation, putting the (addr, transport) into a zone backoff, after
 	// which prioritizeServers had nothing left to offer and every subsequent
 	// query for the zone failed without a single auth-server attempt.
-	parent := parentOf(name)
-	_, servers, err := rrcache.FindClosestKnownZone(parent)
+	_, servers, err := rrcache.FindClosestKnownZoneFor(name, dns.TypeDS)
 	if err != nil {
 		if rrcache.Verbose {
-			log.Printf("backfillDS: FindClosestKnownZone(%q) failed: %v", parent, err)
+			log.Printf("backfillDS: FindClosestKnownZoneFor(%q, DS) failed: %v", name, err)
 		}
 		return nil
 	}

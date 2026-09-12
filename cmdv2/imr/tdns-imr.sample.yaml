@@ -139,7 +139,7 @@ imrengine:
    #       multiplier:        3.0    # exponential growth factor
    #       jitter-fraction:   0.25   # must be in [0,1); else reset to default
    #       routing-failure:   1h     # backoff after an unreachable-network error
-   #       lame-delegation:   1h     # backoff after a lame delegation
+   #       lame-delegation:   5m     # backoff after REFUSED/NOTAUTH (lame); RFC 9520 caps at 5m
    #    address-family:
    #       window-duration:   10m    # observation window for per-family failures
    #       failure-threshold: 5      # distinct failures before a family is suspect
@@ -150,6 +150,8 @@ imrengine:
    #       max-failures:        3    # give up discovery after this many
    #    query-budget:            8s  # total wall-clock budget for one query
    #    upgrade-indirect-cache-hits: true   # left unset in code; treated as true
+   #    cache-max-ttl:        86400  # seconds, as in Unbound; ceiling on cached lifetimes
+   #    cache-min-ttl:            0  # seconds, as in Unbound; floor (0 = none)
 
 # DNSSEC algorithms whose DNSKEY/RRSIG payloads are large for UDP. When a
 # referral DS RRset uses one, the IMR fetches the child zone's DNSKEY over TCP

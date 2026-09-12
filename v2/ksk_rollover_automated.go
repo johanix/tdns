@@ -1475,9 +1475,6 @@ func TransitionRolloverKskDsPublishedToPublished(ctx context.Context, conf *Conf
 			continue
 		}
 		pol := zd.DnssecPolicy
-		if pol.KSK.Lifetime == 0 {
-			continue
-		}
 		deps := RolloverEngineDeps{
 			Conf:             conf,
 			KDB:              kdb,
@@ -1520,6 +1517,15 @@ func transitionDsPublishedToPublishedForZone(deps RolloverEngineDeps, dsPubs []*
 		return
 	}
 
+	// No scheduled lifetime (unset, or forever) means no T_roll to publish
+	// towards, so the scheduled rule below cannot run. See
+	// transitionDsPublishedForManualRollover for what replaces it.
+	if !lifetimeSchedulesRoll(pol.KSK.Lifetime) {
+		sortDsPublishedByPromotionOrder(kdb, zoneName, dsPubs)
+		transitionDsPublishedForManualRollover(deps, dsPubs, dnskeyTTL)
+		return
+	}
+
 	// Anchor T_roll on the active KSK's active_at.
 	active, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateActive)
 	if err != nil {
@@ -1539,11 +1545,13 @@ func transitionDsPublishedToPublishedForZone(deps RolloverEngineDeps, dsPubs []*
 	if err != nil {
 		return
 	}
-	// A pending manual request is an anchor too. `asap` persists
-	// manual_rollover_earliest computed as if the next-up key were
-	// published now; if only the lifetime cadence could publish it, the
-	// request would wait for T_roll -- never, under lifetime forever --
-	// while rolloverDue waits for a standby that never comes (tdns#609).
+	// A pending manual request is an anchor too, on a zone whose lifetime
+	// does schedule a roll. `asap` persists manual_rollover_earliest computed
+	// as if the next-up key were published now; if only the cadence could
+	// publish it, the request would wait until this key's own T_publish --
+	// weeks out for a long lifetime -- while rolloverDue waits for a standby
+	// (tdns#609). A zone with no scheduled lifetime (unset or forever) never
+	// gets here: transitionDsPublishedForManualRollover handles it above.
 	var manualAt *time.Time
 	if row, rerr := LoadRolloverZoneRow(kdb, zoneName); rerr == nil && row != nil && row.ManualRolloverEarliest.Valid {
 		if t, perr := time.Parse(time.RFC3339, strings.TrimSpace(row.ManualRolloverEarliest.String)); perr == nil {
@@ -1570,43 +1578,14 @@ func transitionDsPublishedToPublishedForZone(deps RolloverEngineDeps, dsPubs []*
 	// quantum-opacity goal violated; DNSKEY public key visible in
 	// the zone way ahead of need.
 	standbyCount, err := countDnskeyInZoneSEPKeys(kdb, zoneName)
+	inZoneKnown := err == nil
 	if err != nil {
 		deps.Logger.Warn("rollover: countDnskeyInZoneSEPKeys failed; defaulting to 0",
 			"zone", zoneName, "err", err)
 		standbyCount = 0
 	}
 
-	// Sort ds-published keys by ds_observed_at ascending — this is
-	// the promotion order within the ds-published cohort (oldest =
-	// next up).
-	//
-	// Tie-break: confirmDSAndAdvanceCreatedKeysTx() stamps the same
-	// ds_observed_at on every key advanced in one confirmation
-	// batch, so keys often share a timestamp. Order ties by
-	// rollover_index ascending — that's the canonical rollover
-	// sequence; earlier index promotes first. Final fallback to
-	// KeyTag is defensive (shouldn't happen for keys with assigned
-	// rollover_index).
-	//
-	// Keys with no ds_observed_at (shouldn't happen for
-	// state=ds-published, but be defensive) sort to the back.
-	sort.SliceStable(dsPubs, func(a, b int) bool {
-		ta, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[a].KeyTag)
-		tb, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[b].KeyTag)
-		if ta == nil && tb == nil {
-			return dsPubsRolloverIndexLess(kdb, zoneName, dsPubs[a].KeyTag, dsPubs[b].KeyTag)
-		}
-		if ta == nil {
-			return false
-		}
-		if tb == nil {
-			return true
-		}
-		if !ta.Equal(*tb) {
-			return ta.Before(*tb)
-		}
-		return dsPubsRolloverIndexLess(kdb, zoneName, dsPubs[a].KeyTag, dsPubs[b].KeyTag)
-	})
+	sortDsPublishedByPromotionOrder(kdb, zoneName, dsPubs)
 
 	lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
 	promoted := false
@@ -1620,8 +1599,13 @@ func transitionDsPublishedToPublishedForZone(deps RolloverEngineDeps, dsPubs []*
 		if activeAt != nil {
 			tRoll = activeAt.Add(time.Duration(slot) * lifetime)
 		}
-		// The manual request names the roll time of the next-up key only.
-		if i == 0 && manualAt != nil && (activeAt == nil || manualAt.Before(tRoll)) {
+		// The manual request names the roll time of the next-up key only,
+		// and only when no SEP key already has its DNSKEY in the zone -- the
+		// same guard as transitionDsPublishedForManualRollover. A successor
+		// already in the zone is the one the rollover will use; exposing a
+		// second public key early, or on a count we could not read, is what
+		// multi-DS exists to avoid.
+		if i == 0 && manualAt != nil && inZoneKnown && standbyCount == 0 && (activeAt == nil || manualAt.Before(tRoll)) {
 			tRoll = *manualAt
 		}
 		if tRoll.IsZero() {
@@ -2035,8 +2019,8 @@ func rolloverDue(kdb *KeyDB, zone string, pol *DnssecPolicy, row *RolloverZoneRo
 		}
 	}
 
-	// Scheduled: KSK.Lifetime == 0 means "never expires."
-	if pol.KSK.Lifetime == 0 {
+	// Scheduled. An unset lifetime, and "forever", both mean never expires.
+	if !lifetimeSchedulesRoll(pol.KSK.Lifetime) {
 		return false, false, nil
 	}
 	lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
@@ -2197,4 +2181,113 @@ func promoteStandbyKskBootstrapAll(conf *Config, kdb *KeyDB) {
 		}
 		PromoteStandbyKskIfNoActive(conf, kdb, zoneName)
 	}
+}
+
+// sortDsPublishedByPromotionOrder orders ds-published keys the way they will
+// be promoted, the next one up first. Shared by the scheduled and the manual
+// path so they cannot disagree about which key is next.
+func sortDsPublishedByPromotionOrder(kdb *KeyDB, zoneName string, dsPubs []*DnssecKeyWithTimestamps) {
+	// Sort ds-published keys by ds_observed_at ascending — this is
+	// the promotion order within the ds-published cohort (oldest =
+	// next up).
+	//
+	// Tie-break: confirmDSAndAdvanceCreatedKeysTx() stamps the same
+	// ds_observed_at on every key advanced in one confirmation
+	// batch, so keys often share a timestamp. Order ties by
+	// rollover_index ascending — that's the canonical rollover
+	// sequence; earlier index promotes first. Final fallback to
+	// KeyTag is defensive (shouldn't happen for keys with assigned
+	// rollover_index).
+	//
+	// Keys with no ds_observed_at (shouldn't happen for
+	// state=ds-published, but be defensive) sort to the back.
+	sort.SliceStable(dsPubs, func(a, b int) bool {
+		ta, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[a].KeyTag)
+		tb, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[b].KeyTag)
+		if ta == nil && tb == nil {
+			return dsPubsRolloverIndexLess(kdb, zoneName, dsPubs[a].KeyTag, dsPubs[b].KeyTag)
+		}
+		if ta == nil {
+			return false
+		}
+		if tb == nil {
+			return true
+		}
+		if !ta.Equal(*tb) {
+			return ta.Before(*tb)
+		}
+		return dsPubsRolloverIndexLess(kdb, zoneName, dsPubs[a].KeyTag, dsPubs[b].KeyTag)
+	})
+}
+
+// transitionDsPublishedForManualRollover publishes the one ds-published key a
+// pending manual rollover needs, for a zone whose lifetime schedules no roll.
+//
+// With no scheduled lifetime there is no T_roll, so the scheduled rule cannot
+// place anything -- and it used to mean nothing ever left ds-published. That is
+// right when nobody has asked for a roll, and wrong when an operator has:
+// rolloverDue needs a standby before it will honour a manual request, and the
+// only way to get one is through ds-published -> published -> standby. So the
+// request sat pending and the key sat in ds-published, indefinitely. That was
+// already so for an unset lifetime, and making `forever` mean never roll
+// extended it to `forever` too.
+//
+// What still holds is multi-DS's reason for existing: a DNSKEY reveals the
+// public key and a DS does not, so a future key's DNSKEY stays out of the zone
+// until it is needed. Hence only when a manual request is pending, only when no
+// SEP key already has its DNSKEY in the zone, and only the next key up. The
+// request's earliest time stands in for T_roll, with the same E12 margin the
+// scheduled path uses -- which for `rollover asap` is now, since
+// ComputeEarliestRollover already assumes the successor's DNSKEY goes out
+// immediately.
+func transitionDsPublishedForManualRollover(deps RolloverEngineDeps, dsPubs []*DnssecKeyWithTimestamps, dnskeyTTL time.Duration) {
+	if len(dsPubs) == 0 {
+		return
+	}
+	zoneName := deps.Zone.ZoneName
+	kdb := deps.KDB
+	now := deps.Now()
+
+	inZone, err := countDnskeyInZoneSEPKeys(kdb, zoneName)
+	if err != nil || inZone > 0 {
+		// A successor is already in the zone -- the rollover will use it --
+		// or we cannot tell, and exposing a key on a guess is the one thing
+		// this must not do.
+		return
+	}
+
+	row, err := LoadRolloverZoneRow(kdb, zoneName)
+	if err != nil || row == nil || !row.ManualRolloverEarliest.Valid {
+		return
+	}
+	raw := strings.TrimSpace(row.ManualRolloverEarliest.String)
+	if raw == "" {
+		return
+	}
+	earliest, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		deps.Logger.Warn("rollover: invalid manual_rollover_earliest; not publishing a successor",
+			"zone", zoneName, "value", raw, "err", err)
+		return
+	}
+	tPublish := earliest.Add(-(deps.PropagationDelay + dnskeyTTL))
+	if now.Before(tPublish) {
+		return
+	}
+
+	k := dsPubs[0]
+	if err := UpdateDnssecKeyState(kdb, zoneName, k.KeyTag, DnskeyStatePublished); err != nil {
+		deps.Logger.Error("rollover: ds-published→published failed",
+			"zone", zoneName, "keyid", k.KeyTag, "err", err)
+		return
+	}
+	if err := setRolloverKeyPublishedAt(kdb, zoneName, k.KeyTag, now); err != nil {
+		deps.Logger.Warn("rollover: published_at stamp failed",
+			"zone", zoneName, "keyid", k.KeyTag, "err", err)
+	}
+	deps.Logger.Info("rollover: ds-published→published for a manual rollover (no scheduled lifetime)",
+		"zone", zoneName, "keyid", k.KeyTag,
+		"manual_earliest", earliest.UTC().Format(time.RFC3339),
+		"t_publish", tPublish.UTC().Format(time.RFC3339))
+	triggerResign(deps.Conf, zoneName)
 }

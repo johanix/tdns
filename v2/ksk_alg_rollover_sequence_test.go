@@ -174,9 +174,9 @@ func ktAssertDNSKEYSigs(t *testing.T, zd *ZoneData, kdb *KeyDB, step string, wan
 		name string
 		run  func() error
 	}{
-		{"SignZone(force)", func() error { _, err := zd.SignZone(kdb, true); return err }},
-		{"SignZone(renew)", func() error { _, err := zd.SignZone(kdb, false); return err }},
-		{"ResignZone", func() error { _, err := zd.ResignZone(kdb); return err }},
+		{"SignZone(force)", func() error { _, err := zd.SignZone(context.Background(), kdb, true); return err }},
+		{"SignZone(renew)", func() error { _, err := zd.SignZone(context.Background(), kdb, false); return err }},
+		{"ResignZone", func() error { _, err := zd.ResignZone(context.Background(), kdb); return err }},
 	}
 	for _, p := range paths {
 		if err := p.run(); err != nil {
@@ -204,7 +204,7 @@ func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -404,7 +404,7 @@ func TestKT14DeferWithoutDnskeyTTL(t *testing.T) {
 	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	pol.KSKAlgorithm = dns.RSASHA256
@@ -466,7 +466,7 @@ func TestKT18TargetDSSetExcludesOldHeadDuringRoll(t *testing.T) {
 	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	target := func(step string) []uint16 {
@@ -567,7 +567,7 @@ func TestKT19ConfirmWithoutIndexRangeStillStartsDrain(t *testing.T) {
 	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -624,7 +624,7 @@ func TestPipelineFillCountsCreatedKeys(t *testing.T) {
 	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	ktTick(t, zd, kdb, time.Now())
@@ -634,7 +634,9 @@ func TestPipelineFillCountsCreatedKeys(t *testing.T) {
 }
 
 // tdns#609, first part: asap on a zone whose next-up KSK is ds-published
-// (the steady state under lifetime forever). The request anchors the
+// on a zone whose lifetime schedules its next roll far out. (Unset and
+// forever lifetimes take transitionDsPublishedForManualRollover instead;
+// ksk_manual_forever_test.go covers those.) The request anchors the
 // publish step: the key is published on the next pass, reaches standby
 // after propagation, and the request fires.
 func TestManualAsapPublishesDsPublishedNextUp(t *testing.T) {
@@ -642,11 +644,11 @@ func TestManualAsapPublishesDsPublishedNextUp(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	pol := ktSequencePolicy(RolloverMethodMultiDS)
 	pol.Rollover.NumDS = 2
-	pol.KSK.Lifetime = 10000 * 3600
+	pol.KSK.Lifetime = 1000 * 3600 // scheduled; 10000h is the forever sentinel
 	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -681,7 +683,7 @@ func TestManualAsapPublishesDsPublishedNextUp(t *testing.T) {
 	if p, ip := ktPhase(t, kdb, ktAlgZone); p != rolloverPhaseIdle || ip {
 		t.Fatalf("after the confirm: phase=%q in_progress=%v", p, ip)
 	}
-	// The cadence alone does not publish it: T_roll is 10000 hours out.
+	// The cadence alone does not publish it: T_roll is 1000 hours out.
 	tCad := tConfirm.Add(time.Second)
 	TransitionRolloverKskDsPublishedToPublished(ctx, &Conf, kdb, tCad, time.Minute)
 	if s := ktKeyState(t, kdb, ktAlgZone, b); s != DnskeyStateDsPublished {
@@ -709,5 +711,36 @@ func TestManualAsapPublishesDsPublishedNextUp(t *testing.T) {
 	}
 	if s := ktKeyState(t, kdb, ktAlgZone, a); s != DnskeyStateRetired {
 		t.Fatalf("old active %d is %s, want retired", a, s)
+	}
+}
+
+// The manual anchor on a scheduled lifetime, in isolation: a request due now
+// publishes the next-up successor although its own T_publish is weeks out.
+func TestManualAnchorPublishesSuccessorOnScheduledLifetime(t *testing.T) {
+	zd, kdb, tag, deps := manualForeverZone(t, 1000*3600)
+	if err := SetManualRolloverRequest(kdb, zd.ZoneName, time.Now(), time.Now()); err != nil {
+		t.Fatalf("SetManualRolloverRequest: %v", err)
+	}
+	transitionDsPublishedToPublishedForZone(deps, dsPublishedKSKs(t, kdb, zd.ZoneName))
+	if st := keyState(t, kdb, zd.ZoneName, tag); st != DnskeyStatePublished {
+		t.Fatalf("a pending request did not publish the successor on a scheduled lifetime: %s", st)
+	}
+}
+
+// ... and its guard, the same one the forever path has: with a SEP key
+// already in the zone (the successor the rollover will use), a pending
+// request does not put a second successor's DNSKEY out.
+func TestManualAnchorLeavesSecondSuccessorOutWhenOneIsInZone(t *testing.T) {
+	zd, kdb, tag, deps := manualForeverZone(t, 1000*3600)
+	if _, _, err := kdb.GenerateKeypair(zd.ZoneName, "test", DnskeyStateStandby,
+		dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
+		t.Fatalf("standby KSK: %v", err)
+	}
+	if err := SetManualRolloverRequest(kdb, zd.ZoneName, time.Now(), time.Now()); err != nil {
+		t.Fatalf("SetManualRolloverRequest: %v", err)
+	}
+	transitionDsPublishedToPublishedForZone(deps, dsPublishedKSKs(t, kdb, zd.ZoneName))
+	if st := keyState(t, kdb, zd.ZoneName, tag); st != DnskeyStateDsPublished {
+		t.Fatalf("a second successor's DNSKEY was published while one was already in the zone: %s", st)
 	}
 }

@@ -422,7 +422,7 @@ func TestExpiredSecondaryStopsAnswering(t *testing.T) {
 	r.SetUpdate("example.")
 	msgo, _ := edns0.ExtractFlagsAndEDNS0Options(r)
 	rw := &fakeRW{remote: udpAddr("127.0.0.1")}
-	if err := UpdateResponder(&DnsUpdateRequest{
+	if err := UpdateResponder(context.Background(), &DnsUpdateRequest{
 		ResponseWriter: rw, Msg: r, Qname: "example.", Options: msgo, Status: &UpdateStatus{},
 	}, nil); err != nil {
 		t.Fatalf("UpdateResponder: %v", err)

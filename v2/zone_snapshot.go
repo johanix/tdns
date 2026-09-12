@@ -87,6 +87,27 @@ func isEmptyNonTerminal(snap *zoneSnapshot, qname string) bool {
 	return ok
 }
 
+// wildcardSourceFrom returns the wildcard that may answer for qname, a name
+// that does not exist in snap: the one at qname's closest encloser, its
+// nearest ancestor that does (RFC 4592 section 3.3.1). A name exists if it
+// owns records or is an empty non-terminal, the same test entNamesFrom
+// applies, so an ENT stops the walk: only a wildcard directly beneath it may
+// answer, never one further up. The apex always exists, which bounds the walk
+// for any name in the zone.
+func wildcardSourceFrom(snap *zoneSnapshot, zoneName, qname string) string {
+	labels := dns.SplitDomainName(qname)
+	for i := 1; i < len(labels); i++ {
+		ce := strings.Join(labels[i:], ".") + "."
+		if core.EqualNames(ce, zoneName) || isEmptyNonTerminal(snap, ce) {
+			return "*." + ce
+		}
+		if od := getOwnerFrom(snap, ce); od != nil && od.RRtypes != nil && od.RRtypes.Count() > 0 {
+			return "*." + ce
+		}
+	}
+	return "*." // the root zone, whose apex is above every label
+}
+
 // PendingChanges describes staged-but-unpublished zone deltas (B2 observability).
 type PendingChanges struct {
 	PublishedSerial uint32

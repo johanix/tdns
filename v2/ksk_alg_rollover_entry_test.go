@@ -39,7 +39,7 @@ func ktBoundFixture(t *testing.T) (*ZoneData, *KeyDB, uint16) {
 	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, base)
 	a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	return zd, kdb, a
@@ -222,7 +222,7 @@ func TestKT9ReloadMidRollKeepsOldHead(t *testing.T) {
 	ktTick(t, zd, kdb, time.Now())
 	before, _ := LoadKskAlgRollState(kdb, ktAlgZone)
 	for i := 0; i < 3; i++ {
-		if _, err := zd.SignZone(kdb, true); err != nil {
+		if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 			t.Fatalf("re-sign %d mid-roll: %v", i, err)
 		}
 		dak, _ := kdb.GetDnssecKeys(ktAlgZone, DnskeyStateActive)
@@ -252,7 +252,7 @@ func TestKT16SignerDoubleSignsDNSKEYOnly(t *testing.T) {
 		t.Fatal("no roll")
 	}
 	// The spawn's triggerResign is a no-op here (no resigner); do its job.
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone after spawn: %v", err)
 	}
 	tags := zd.mustRRSIGKeytags(t, ktAlgZone, dns.TypeDNSKEY)
