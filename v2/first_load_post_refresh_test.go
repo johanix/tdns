@@ -371,11 +371,12 @@ func TestNotifyDrivenFirstLoadBindsTheRegisteredPolicy(t *testing.T) {
 
 // A pre-registered secondary in an application that originates content (a
 // combiner: not tdns-auth) with a persisted outbound serial ahead of the
-// upstream's: the first load restores the persisted serial, so the serial
-// the zone publishes never goes backwards across a restart. The first
-// publish used to persist the upstream's serial over the saved one before
-// the engine's restore looked, so a combiner came back from a restart at a
-// lower serial and its signer ignored its NOTIFYs.
+// upstream's: the first load restores the persisted serial, one past it,
+// so the serial the zone publishes never goes backwards across a restart
+// and a downstream holding the saved serial fetches what may have changed.
+// The first publish used to persist the upstream's serial over the saved
+// one before the engine's restore looked, so a combiner came back from a
+// restart at a lower serial and its signer ignored its NOTIFYs.
 func TestFirstLoadRestoresThePersistedSerialForAnOriginatingSecondary(t *testing.T) {
 	authApp(t)
 	Globals.App.Type = AppTypeAgent // any originating role but tdns-auth
@@ -424,12 +425,78 @@ func TestFirstLoadRestoresThePersistedSerialForAnOriginatingSecondary(t *testing
 		zd.mu.Lock()
 		ready, cur := zd.Ready, zd.CurrentSerial
 		zd.mu.Unlock()
-		if ready && cur == 1000 {
+		if ready && cur == 1001 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("after the first load: Ready=%v CurrentSerial=%d RefreshCount=%d mode=%q keydb=%v, want the persisted 1000 restored over the upstream's 7", ready, cur, zd.RefreshCount, zd.EffectiveOutboundSoaSerial(), zd.KeyDB != nil)
+			t.Fatalf("after the first load: Ready=%v CurrentSerial=%d, want 1001: the persisted 1000 restored over the upstream's 7, one past it", ready, cur)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	if snap := zd.publishedSnapshot(); snap == nil || snap.Serial != 1001 {
+		t.Fatalf("the served snapshot is not at 1001: %+v", snap)
+	}
+}
+
+// The same for a file-backed primary under tdns-auth, which never restored
+// its persisted serial either: with a file at serial 7 and 1000 persisted,
+// the zone comes up serving 1001.
+func TestFirstLoadRestoresThePersistedSerialForAPrimary(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	if err := applyOutboundSoaSerial(kdb, OutboundSoaSerialPersist); err != nil {
+		t.Fatalf("persist mode: %v", err)
+	}
+	if err := kdb.SaveOutgoingSerial("example.", 1000); err != nil {
+		t.Fatalf("seed the persisted serial: %v", err)
+	}
+	zf := filepath.Join(t.TempDir(), "example.zone")
+	if err := os.WriteFile(zf, []byte(s2Zone), 0644); err != nil { // serial 7
+		t.Fatalf("write zone file: %v", err)
+	}
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 1)
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+
+	zd := &ZoneData{ZoneName: "example.", Logger: discardLogger(), FirstZoneLoad: true}
+	zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+	Zones.Set("example.", zd)
+	t.Cleanup(func() { Zones.Remove("example.") })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); RefreshEngine(ctx, conf) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("RefreshEngine did not shut down")
+		}
+	})
+	conf.Internal.RefreshZoneCh <- ZoneRefresher{
+		Name:         "example.",
+		ZoneType:     Primary,
+		ZoneStore:    MapZone,
+		Zonefile:     zf,
+		Options:      map[ZoneOption]bool{},
+		ConfigUpdate: true,
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		zd.mu.Lock()
+		ready, cur := zd.Ready, zd.CurrentSerial
+		zd.mu.Unlock()
+		if ready && cur == 1001 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the first load: Ready=%v CurrentSerial=%d, want 1001", ready, cur)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if snap := zd.publishedSnapshot(); snap == nil || snap.Serial != 1001 {
+		t.Fatalf("the served snapshot is not at 1001: %+v", snap)
 	}
 }

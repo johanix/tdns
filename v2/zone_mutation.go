@@ -790,12 +790,18 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		// before the engine's own restore looked, and the zone would come
 		// back from a restart with a lower serial than it served before --
 		// its downstreams then ignore every NOTIFY until it catches up.
+		//
+		// One past the saved serial, not the saved serial itself: the
+		// content may have changed while the zone was down, and a downstream
+		// that already holds the saved serial would otherwise never fetch
+		// it. (The engine's restore bumped the same way, through the publish
+		// path.) One extra transfer per restart is the price.
 		if zd.KeyDB != nil && zoneMayOriginateContent(zd) &&
 			zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
 			if saved, err := zd.KeyDB.LoadOutgoingSerial(zd.ZoneName); err == nil && saved > zd.CurrentSerial {
-				lg.Info("first load; outbound-soa-serial=persist (restored saved serial)",
-					"zone", zd.ZoneName, "incoming", zd.CurrentSerial, "persisted", saved)
-				zd.CurrentSerial = saved
+				lg.Info("first load; outbound-soa-serial=persist (restored saved serial, plus one)",
+					"zone", zd.ZoneName, "incoming", zd.CurrentSerial, "persisted", saved, "serving", saved+1)
+				zd.CurrentSerial = saved + 1
 			}
 		}
 		zd.FirstZoneLoad = false
