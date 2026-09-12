@@ -368,3 +368,68 @@ func TestNotifyDrivenFirstLoadBindsTheRegisteredPolicy(t *testing.T) {
 		t.Fatal("the apex SOA is served unsigned after the policy bound")
 	}
 }
+
+// A pre-registered secondary in an application that originates content (a
+// combiner: not tdns-auth) with a persisted outbound serial ahead of the
+// upstream's: the first load restores the persisted serial, so the serial
+// the zone publishes never goes backwards across a restart. The first
+// publish used to persist the upstream's serial over the saved one before
+// the engine's restore looked, so a combiner came back from a restart at a
+// lower serial and its signer ignored its NOTIFYs.
+func TestFirstLoadRestoresThePersistedSerialForAnOriginatingSecondary(t *testing.T) {
+	authApp(t)
+	Globals.App.Type = AppTypeAgent // any originating role but tdns-auth
+	kdb := Conf.Internal.KeyDB
+	if err := applyOutboundSoaSerial(kdb, OutboundSoaSerialPersist); err != nil {
+		t.Fatalf("persist mode: %v", err)
+	}
+	if err := kdb.SaveOutgoingSerial("example.", 1000); err != nil {
+		t.Fatalf("seed the persisted serial: %v", err)
+	}
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 1)
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+
+	addr, stop := startTestPrimary(t, s2Zone) // serial 7
+	t.Cleanup(stop)
+
+	zd := &ZoneData{ZoneName: "example.", Logger: discardLogger(), FirstZoneLoad: true}
+	zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+	Zones.Set("example.", zd)
+	t.Cleanup(func() { Zones.Remove("example.") })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); RefreshEngine(ctx, conf) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("RefreshEngine did not shut down")
+		}
+	})
+	conf.Internal.RefreshZoneCh <- ZoneRefresher{
+		Name:          "example.",
+		ZoneType:      Secondary,
+		ZoneStore:     MapZone,
+		PrimariesConf: []PeerConf{{Addr: addr}},
+		Primaries:     []PeerConf{{Addr: addr}},
+		Options:       map[ZoneOption]bool{},
+		ConfigUpdate:  true,
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		zd.mu.Lock()
+		ready, cur := zd.Ready, zd.CurrentSerial
+		zd.mu.Unlock()
+		if ready && cur == 1000 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the first load: Ready=%v CurrentSerial=%d RefreshCount=%d mode=%q keydb=%v, want the persisted 1000 restored over the upstream's 7", ready, cur, zd.RefreshCount, zd.EffectiveOutboundSoaSerial(), zd.KeyDB != nil)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

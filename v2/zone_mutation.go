@@ -783,6 +783,21 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	switch {
 	case firstLoad:
 		zd.CurrentSerial = new_zd.CurrentSerial
+		// A zone that originates content and persists its outbound serial
+		// takes the persisted one back here when it is ahead of the
+		// upstream's. The first publish, below, persists CurrentSerial: left
+		// at the upstream's serial it would record that over the saved one
+		// before the engine's own restore looked, and the zone would come
+		// back from a restart with a lower serial than it served before --
+		// its downstreams then ignore every NOTIFY until it catches up.
+		if zd.KeyDB != nil && zoneMayOriginateContent(zd) &&
+			zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
+			if saved, err := zd.KeyDB.LoadOutgoingSerial(zd.ZoneName); err == nil && saved > zd.CurrentSerial {
+				lg.Info("first load; outbound-soa-serial=persist (restored saved serial)",
+					"zone", zd.ZoneName, "incoming", zd.CurrentSerial, "persisted", saved)
+				zd.CurrentSerial = saved
+			}
+		}
 		zd.FirstZoneLoad = false
 
 	case !zoneMayOriginateContent(zd):
