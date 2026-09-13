@@ -646,10 +646,15 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	// long as it is configured to, which is why the rcode is set explicitly
 	// alongside an EDE that names the reason.
 	if cerr := zd.CheckDelegationCoherenceForUpdate(r.Ns,
-		imrDnskeyFetcher(Conf.Internal.ImrEngine)); cerr != nil {
+		coherenceDnskeyFetcher(&Conf)); cerr != nil {
 		lgHandler.Warn("child update refused as incoherent",
 			"zone", zd.ZoneName, "err", cerr)
 		us.ValidationRcode = dns.RcodeRefused
+		// The exception: a parent whose own resolver has not started yet has
+		// not checked anything, and that is exactly what a child should retry.
+		if errors.Is(cerr, ErrNoImrEngine) {
+			us.ValidationRcode = dns.RcodeServerFailure
+		}
 		us.RejectionEDE = delegationCoherenceEDE(cerr)
 		return false, false, cerr
 	}

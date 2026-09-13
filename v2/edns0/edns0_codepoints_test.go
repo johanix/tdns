@@ -97,6 +97,7 @@ func TestEDECodeValues(t *testing.T) {
 		// The standard code must keep its RFC 8914 value and must not be part
 		// of the private sequence.
 		{"EDEDNSSECBogus", EDEDNSSECBogus, 6},
+		{"EDEDNSSECIndeterminate", EDEDNSSECIndeterminate, 5},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %d, want %d", tc.name, tc.got, tc.want)
