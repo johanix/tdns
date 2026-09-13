@@ -57,6 +57,13 @@ func (zd *ZoneData) SynthesizeCdsRRs() ([]dns.RR, error) {
 	return cdsRRs, nil
 }
 
+// PublishCdsRRs publishes the CDS for every SEP key of the served DNSKEY RRset,
+// replacing any CDS RRset already there.
+//
+// Inside tdns every CDS write goes through the DS engine (ds_engine.go), which
+// asks the zone's DS model what the CDS should hold. PublishCdsRRs,
+// UnpublishCdsRRs and SynthesizeCdsRRs stay exported for tdns-mp, which publishes
+// CDS for multi-provider zones itself.
 func (zd *ZoneData) PublishCdsRRs() error {
 	cdsRRs, err := zd.SynthesizeCdsRRs()
 	if err != nil {

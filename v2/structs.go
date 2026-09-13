@@ -71,6 +71,15 @@ const (
 	DnskeyStateActive      string = "active"
 	DnskeyStateRetired     string = "retired"
 	DnskeyStateRemoved     string = "removed"
+	// DnskeyStateMpdist and DnskeyStateForeign are staged by a derived
+	// application through the key lifecycle hooks: mpdist is a multi-provider
+	// zone's own key, served while it is distributed to the other providers and
+	// before it is promoted; foreign is another provider's key, served here and
+	// generated elsewhere. DnskeyStateMpremove is tdns-mp's own state for a key
+	// on its way out of a multi-provider zone; tdns does not act on it.
+	DnskeyStateMpdist   string = "mpdist"
+	DnskeyStateForeign  string = "foreign"
+	DnskeyStateMpremove string = "mpremove"
 )
 
 // MPdata caches multi-provider membership and signing state for a zone.
@@ -1305,6 +1314,15 @@ type KeyDB struct {
 	TruststoreSig0Cache *Sig0StoreT // was *Sig0StoreT
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
+	// DSEngineQ is the DS engine's request queue (ds_engine.go). The engine owns
+	// the CDS RRset of the zones whose keys this keystore holds.
+	DSEngineQ chan DSEngineRequest
+	// dsDirty holds the zones whose KSK set changed since the DS engine last
+	// looked, and dsWakeCh wakes it; see dsEngineKeysChanged. Both guarded by
+	// dsDirtyMu.
+	dsDirtyMu sync.Mutex
+	dsDirty   map[string]*ZoneData
+	dsWakeCh  chan struct{}
 	// options holds the parsed DnsEngine auth options. It is read on the hot
 	// query path (QueryResponder, per request) and replaced wholesale on config
 	// reload, so it is stored behind an atomic.Pointer for lock-free reads and a

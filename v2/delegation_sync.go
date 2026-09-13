@@ -149,12 +149,19 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					}
 				}
 
-				// Publish CDS records from current DNSKEYs if zone has delegation sync
+				// Publish the CDS if the zone has delegation sync. The DS engine owns
+				// the CDS RRset and asks the zone's DS model what goes in it. For a
+				// multi-provider zone it writes none: that DS set is the
+				// multi-provider agent's to coordinate.
 				if zd.Options[OptParentSync] {
-					if err := zd.PublishCdsRRs(); err != nil {
-						lgDns.Error("DelegationSyncher: error publishing CDS", "zone", zd.ZoneName, "err", err)
-					} else {
-						lgDns.Info("DelegationSyncher: published CDS from DNSKEYs", "zone", zd.ZoneName)
+					res := kdb.askDSEngine(ctx, DSEngineRequest{cmd: dsCmdEnsureCDS, zd: zd})
+					switch {
+					case res.err != nil:
+						lgDns.Error("DelegationSyncher: error publishing CDS", "zone", zd.ZoneName, "err", res.err)
+					case res.deferred != "":
+						lgDns.Info("DelegationSyncher: CDS left to its owner", "zone", zd.ZoneName, "reason", res.deferred)
+					default:
+						lgDns.Info("DelegationSyncher: published CDS", "zone", zd.ZoneName, "keyids", cdsKeyids(res.cds))
 					}
 				}
 
@@ -574,8 +581,38 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(ctx context.Context, kdb *KeyDB,
 
 	lgDns.Debug("DSYNC target for NOTIFY", "zone", zd.ZoneName, "target", dsynctarget)
 
+	nsOrGlueChanged := len(syncstate.NsAdds) > 0 || len(syncstate.NsRemoves) > 0 ||
+		len(syncstate.AAdds) > 0 || len(syncstate.ARemoves) > 0 ||
+		len(syncstate.AAAAAdds) > 0 || len(syncstate.AAAARemoves) > 0
+
+	// A NOTIFY(CDS) says "come and read my CDS", so the CDS has to be served
+	// before it goes out -- the rule the CSYNC above already follows. Until the
+	// DS engine, nothing published one at all for a zone the KSK rollover engine
+	// does not manage: the parent scanned, found no CDS, both ends reported
+	// success, and the walk never reached UPDATE or API.
+	//
+	// Asked before any NOTIFY is sent, so a candidate that cannot back its
+	// NOTIFY(CDS) fails whole and the plan moves on, instead of having told the
+	// parent half of it.
+	notifyCds := false
+	if len(syncstate.DSAdds) > 0 || len(syncstate.DSRemoves) > 0 {
+		res := kdb.askDSEngine(ctx, DSEngineRequest{cmd: dsCmdEnsureCDS, zd: zd})
+		switch {
+		case res.err != nil:
+			return "", dns.RcodeServerFailure,
+				fmt.Errorf("zone %s: no CDS for a NOTIFY(CDS) to point at: %w", zd.ZoneName, res.err)
+		case res.deferred != "":
+			lgDns.Info("SyncZoneDelegationViaNotify: not sending NOTIFY(CDS); the DS is not delegation sync's",
+				"zone", zd.ZoneName, "reason", res.deferred)
+		default:
+			notifyCds = true
+		}
+	}
+
+	var sent []string
+
 	// Send NOTIFY(CSYNC) for NS or glue (A/AAAA) changes
-	if len(syncstate.NsAdds) > 0 || len(syncstate.NsRemoves) > 0 || len(syncstate.AAdds) > 0 || len(syncstate.ARemoves) > 0 || len(syncstate.AAAAAdds) > 0 || len(syncstate.AAAARemoves) > 0 {
+	if nsOrGlueChanged {
 		if !sendNotifyRequest(ctx, notifyq, NotifyRequest{
 			ZoneName: zd.ZoneName,
 			ZoneData: zd,
@@ -586,10 +623,11 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(ctx context.Context, kdb *KeyDB,
 				fmt.Errorf("zone %s: could not hand NOTIFY(CSYNC) to the notifier", zd.ZoneName)
 		}
 		lgDns.Info("SyncZoneDelegationViaNotify: sent NOTIFY(CSYNC)", "zone", zd.ZoneName)
+		sent = append(sent, "CSYNC")
 	}
 
 	// Send NOTIFY(CDS) for DS/DNSKEY changes
-	if len(syncstate.DSAdds) > 0 || len(syncstate.DSRemoves) > 0 {
+	if notifyCds {
 		if !sendNotifyRequest(ctx, notifyq, NotifyRequest{
 			ZoneName: zd.ZoneName,
 			ZoneData: zd,
@@ -600,9 +638,15 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(ctx context.Context, kdb *KeyDB,
 				fmt.Errorf("zone %s: could not hand NOTIFY(CDS) to the notifier", zd.ZoneName)
 		}
 		lgDns.Info("SyncZoneDelegationViaNotify: sent NOTIFY(CDS)", "zone", zd.ZoneName)
+		sent = append(sent, "CDS")
 	}
 
-	msg := fmt.Sprintf("SyncZoneDelegationViaNotify: Sent notify request(s) for zone %s to NotifierEngine", zd.ZoneName)
+	if len(sent) == 0 {
+		return fmt.Sprintf("SyncZoneDelegationViaNotify: nothing to notify for zone %s", zd.ZoneName),
+			dns.RcodeSuccess, nil
+	}
+	msg := fmt.Sprintf("SyncZoneDelegationViaNotify: Sent NOTIFY(%s) for zone %s to NotifierEngine",
+		strings.Join(sent, ", "), zd.ZoneName)
 	return msg, dns.RcodeSuccess, nil
 }
 

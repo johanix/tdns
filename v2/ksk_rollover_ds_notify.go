@@ -10,44 +10,31 @@ import (
 )
 
 // pushDSRRsetViaNotify is the NOTIFY(CDS) counterpart to
-// pushDSRRsetViaUpdate. It computes the engine's target CDS set,
-// queues a publish-and-sign for it at the child apex via the
-// internal-update queue, and dispatches NOTIFY(CDS) to the parent's
-// DSYNC NOTIFY target. The publish path is best-effort
-// (queue-and-forget): see "Implementation note" below.
+// pushDSRRsetViaUpdate. It asks the DS engine to publish the CDS for
+// the rollover target at the child apex, and dispatches NOTIFY(CDS) to
+// the parent's DSYNC NOTIFY target once the zone serves it.
 //
-// On NOTIFY NOERROR: persist last_published_cds_index_low/high to
-// claim ownership of the on-wire CDS for cleanup-time comparison.
-// CDS stays published until cleanupCdsAfterConfirm runs (Phase 5).
+// The DS engine also persists last_published_cds_index_low/high, the
+// claim on the on-wire CDS that cleanup-time comparison reads, before
+// this sends the NOTIFY. CDS stays published until
+// cleanupCdsAfterConfirm runs (Phase 5).
 //
 // On NOTIFY failure (transport or parent-rejected): leave CDS
 // published. Next attempt re-derives the same CDS set; the publish
 // step becomes a no-op (anti-CDS ClassANY delete + identical adds)
 // and NOTIFY is re-sent. No churn.
 //
-// Implementation note (divergence from design doc):
-// the design doc specifies "(publish CDS, sign CDS RRset, re-sign
-// apex NSEC) as a single transaction" with a synchronous rollback
-// path on sign failure. The codebase's existing CDS-publish path
-// (PublishCdsRRs in ops_cds.go) is asynchronous fire-and-forget via
-// kdb.UpdateQ — sign and NSEC re-sign happen in the resigner
-// pipeline downstream, not synchronously with the publish. Adding
-// the synchronous transaction would require widening the publish
-// API across the codebase. This implementation uses a short
-// queue-side timeout to detect immediate queue-full failures and
-// otherwise relies on the asynchronous apply+sign racing forward
-// before the parent fetches CDS. Acceptable in practice: a sign
-// failure surfaces as a delay in CDS appearing on the wire, the
-// parent's CDS-fetch retries, and the rollover engine's observe
-// phase categorises it as parent-publish-failure on the next
-// attempt window. The rollback path is unreachable in this design;
-// document this when revisiting publish/sign sync.
+// The publish waits. It used to be queue-and-forget, relying on the
+// asynchronous apply and sign racing ahead of the parent's fetch; a
+// parent that fetched first found no CDS, or the previous one, and
+// the attempt surfaced as a parent-side failure. The zone updater signs
+// what it stages before the publish that carries it, so a CDS the zone
+// serves is already signed.
 func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *DsyncTarget) (KSKDSPushResult, error) {
 	var out KSKDSPushResult
 	zd := deps.Zone
 	kdb := deps.KDB
 	notifyq := deps.NotifyQ
-	updateq := deps.InternalUpdateQ
 	if zd == nil || kdb == nil {
 		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaNotify: nil argument")
@@ -60,90 +47,22 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaNotify: NotifyQ not configured")
 	}
-	if updateq == nil {
-		out.Category = SoftfailChildConfigLocalError
-		return out, fmt.Errorf("pushDSRRsetViaNotify: InternalUpdateQ not configured")
-	}
 
 	child := dns.Fqdn(zd.ZoneName)
 
-	var (
-		cdsSet []dns.RR
-		low    int
-		high   int
-		idxOK  bool
-		err    error
-	)
-	if deps.TargetKeySnapshot != nil {
-		cdsSet, low, high, idxOK, err = cdsSetFromSnapshot(deps.TargetKeySnapshot, child)
-	} else {
-		cdsSet, low, high, idxOK, err = ComputeTargetCDSSetForZone(kdb, child)
-	}
-	if err != nil {
+	pub := kdb.askDSEngine(ctx, DSEngineRequest{
+		cmd:      dsCmdPublishRolloverCDS,
+		zd:       zd,
+		snapshot: deps.TargetKeySnapshot,
+	})
+	if pub.err != nil {
 		out.Category = SoftfailChildConfigLocalError
-		return out, err
+		return out, fmt.Errorf("pushDSRRsetViaNotify: %w", pub.err)
 	}
-	if len(cdsSet) == 0 {
-		out.Category = SoftfailChildConfigLocalError
-		return out, fmt.Errorf("pushDSRRsetViaNotify: no CDS records to publish for zone %s", child)
-	}
-
-	// Build the publish payload: anti-CDS ClassANY delete to clear
-	// any prior CDS RRset, then ClassINET adds for the engine-computed
-	// target. Same shape as ops_cds.go PublishCdsRRs but parameterized
-	// on our explicit set.
-	antiCds := &dns.CDS{}
-	antiCds.Hdr = dns.RR_Header{
-		Name:   child,
-		Rrtype: dns.TypeCDS,
-		Class:  dns.ClassANY,
-		Ttl:    0,
-	}
-	actions := make([]dns.RR, 0, 1+len(cdsSet))
-	actions = append(actions, antiCds)
-	actions = append(actions, cdsSet...)
-
-	lgRollover.Debug("pushDSRRsetViaNotify: queueing CDS publish",
-		"zone", child, "cds_count", len(cdsSet), "actions", len(actions),
-		"index_low", low, "index_high", high, "index_known", idxOK)
-	select {
-	case updateq <- UpdateRequest{
-		Cmd:            "ZONE-UPDATE",
-		ZoneName:       child,
-		Actions:        actions,
-		InternalUpdate: true,
-	}:
-		lgRollover.Debug("pushDSRRsetViaNotify: CDS publish enqueued on InternalUpdateQ",
-			"zone", child)
-	case <-time.After(5 * time.Second):
-		out.Category = SoftfailChildConfigLocalError
-		return out, fmt.Errorf("pushDSRRsetViaNotify: InternalUpdateQ full for 5s, skipping")
-	case <-ctx.Done():
-		out.Category = SoftfailChildConfigLocalError
-		return out, ctx.Err()
-	}
-
-	// Persist the CDS-ownership marker before sending NOTIFY: if the
-	// daemon crashes between publish and NOTIFY, the next attempt's
-	// Trigger-2 cleanup logic still has a record of what we own, so
-	// we don't orphan CDS.
-	if idxOK {
-		if err := setPublishedCdsRange(kdb, child, low, high); err != nil {
-			out.Category = SoftfailChildConfigLocalError
-			return out, fmt.Errorf("pushDSRRsetViaNotify: persist CDS range: %w", err)
-		}
-		lgRollover.Debug("pushDSRRsetViaNotify: CDS ownership marker stored",
-			"zone", child, "index_low", low, "index_high", high)
-	} else {
-		// No authoritative range to record. Clear any stale range so a
-		// subsequent cleanup pass doesn't compare against an old set.
-		if err := clearPublishedCdsRange(kdb, child); err != nil {
-			out.Category = SoftfailChildConfigLocalError
-			return out, fmt.Errorf("pushDSRRsetViaNotify: clear CDS range: %w", err)
-		}
-		lgRollover.Debug("pushDSRRsetViaNotify: CDS ownership marker cleared (index range incomplete)",
-			"zone", child)
-	}
+	cdsSet := pub.cds
+	lgRollover.Debug("pushDSRRsetViaNotify: CDS published",
+		"zone", child, "cds_count", len(cdsSet),
+		"index_low", pub.low, "index_high", pub.high, "index_known", pub.rangeKnown)
 
 	// Send NOTIFY(CDS) and wait for the per-target aggregate response.
 	respCh := make(chan NotifyResponse, 1)

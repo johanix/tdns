@@ -649,6 +649,14 @@ ns.signed-wild.example. 3600 IN A 10.0.0.1
 `)
 		zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
 		zd.KeyDB = kdb
+		// Healthy means it can sign, too: the answer carries an NSEC proving
+		// host.signed-wild.example. does not exist, and with no stored chain
+		// that NSEC is signed per response.
+		for _, role := range []string{"KSK", "ZSK"} {
+			if _, _, err := kdb.GenerateKeypair("signed-wild.example.", "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, role, nil); err != nil {
+				t.Fatalf("generate %s: %v", role, err)
+			}
+		}
 
 		req := new(dns.Msg)
 		req.SetQuestion("host.signed-wild.example.", dns.TypeA)

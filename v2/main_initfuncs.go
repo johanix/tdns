@@ -224,6 +224,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		kdb := conf.Internal.KeyDB
 		kdb.UpdateQ = make(chan UpdateRequest, 50)
 		conf.Internal.UpdateQ = kdb.UpdateQ
+		kdb.DSEngineQ = make(chan DSEngineRequest, 100)
 	}
 	// if Globals.Debug {
 	//	log.Printf("*** MainInit: 5 ***")
@@ -315,6 +316,8 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	StartEngine(&Globals.App, "DelegationSyncher", func() error {
 		return kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf)
 	})
+	// The CDS RRset's one owner; the rollover engine and delegation sync ask it.
+	StartEngine(&Globals.App, "DSEngine", func() error { return kdb.DSEngine(ctx) })
 	// DNS engines (needed by all auth-like apps including MPSigner)
 	StartEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	StartEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
@@ -367,6 +370,8 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	StartEngine(&Globals.App, "DelegationSyncher", func() error {
 		return kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf)
 	})
+	// The CDS RRset's one owner; the rollover engine and delegation sync ask it.
+	StartEngine(&Globals.App, "DSEngine", func() error { return kdb.DSEngine(ctx) })
 	// The childsync-proxy's outbound half. Idle unless a zone carries
 	// childsync-proxy with a writer that speaks to the network.
 	StartEngine(&Globals.App, "ParentPushEngine", func() error { return ParentPushEngine(ctx, conf) })

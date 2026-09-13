@@ -38,6 +38,15 @@ type DSIntent struct {
 // so every state from ds-published onward has, or should have, a DS. created
 // has not had one placed yet, and retired and removed are on their way out.
 //
+// mpdist is a multi-provider zone's own key, served while it is distributed to
+// the other providers and before its owner promotes it to published. Its DS does
+// not belong at the parent until then.
+//
+// foreign (another provider's key) and mpremove (tdns-mp's state for a key on
+// its way out of a multi-provider zone) are not classified here. tdns does not
+// act on either -- a foreign key's DS is not this zone's decision, and mpremove
+// is tdns-mp's to manage -- so DSIntentForZone declines for a zone holding one.
+//
 // Written this way so that a state added later has to be classified explicitly
 // rather than silently defaulting to "no DS", which would express itself as a
 // DS deletion.
@@ -45,7 +54,7 @@ func dsBelongsAtParent(state string) (belongs, recognised bool) {
 	switch state {
 	case DnskeyStateDsPublished, DnskeyStatePublished, DnskeyStateStandby, DnskeyStateActive:
 		return true, true
-	case DnskeyStateCreated, DnskeyStateRetired, DnskeyStateRemoved:
+	case DnskeyStateCreated, DnskeyStateMpdist, DnskeyStateRetired, DnskeyStateRemoved:
 		return false, true
 	default:
 		return false, false
@@ -73,10 +82,22 @@ WHERE zonename = ? AND (CAST(flags AS INTEGER) & ?) != 0`
 // Withdrawing the DS of such a zone would break it, so the absence of rows
 // means the DS is not ours to have an opinion about.
 //
+// Known is also false when the zone holds a KSK tdns does not act on: another
+// provider's key (state foreign), whose DS is not this zone's decision, or a
+// key tdns-mp is removing from a multi-provider zone (state mpremove). Every
+// consumer of the intent acts on the parent's whole DS set: replace mode
+// rewrites it, and delta mode removes whatever the set lacks. No set tdns could
+// state would leave such a key's DS alone; declining does.
+//
 // Known is true with an empty Set when tdns does hold keys for the zone and
 // none of them should have a DS -- a zone that has been un-signed. That is a
-// real instruction to withdraw, and the distinction from the case above is the
+// real instruction to withdraw, and the distinction from the cases above is the
 // whole reason Known exists.
+//
+// An mpdist key does not make that answer. It gets no DS of its own, but it is
+// served: a zone whose only DS-less keys include one is signed, with a key on
+// its way to promotion, not un-signed. If nothing else gives the set a member,
+// the intent is unknown rather than an instruction to withdraw the parent's DS.
 func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error) {
 	var out DSIntent
 	if kdb == nil {
@@ -90,14 +111,22 @@ func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error
 	}
 	defer rows.Close()
 
-	seen := false
+	seen, sawMpdist := false, false
 	for rows.Next() {
 		var state, keyrr string
 		if err := rows.Scan(&state, &keyrr); err != nil {
 			return DSIntent{}, fmt.Errorf("DSIntentForZone: scan key row for %s: %w", zonename, err)
 		}
 		seen = true
+		if state == DnskeyStateMpdist {
+			sawMpdist = true
+		}
 
+		if state == DnskeyStateForeign || state == DnskeyStateMpremove {
+			lgDns.Debug("DSIntentForZone: the zone holds a KSK tdns does not act on; declining to state a DS intent",
+				"zone", zonename, "state", state)
+			return DSIntent{}, nil
+		}
 		belongs, recognised := dsBelongsAtParent(state)
 		if !recognised {
 			// A state this code does not know about makes the whole answer
@@ -128,6 +157,12 @@ func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error
 	}
 	if err := rows.Err(); err != nil {
 		return DSIntent{}, fmt.Errorf("DSIntentForZone: iterate key rows for %s: %w", zonename, err)
+	}
+
+	if len(out.Set) == 0 && sawMpdist {
+		lgDns.Debug("DSIntentForZone: no key warrants a DS but an mpdist key is served; declining to state a DS intent",
+			"zone", zonename)
+		return DSIntent{}, nil
 	}
 
 	out.Known = seen
