@@ -75,9 +75,11 @@ const (
 	// application through the key lifecycle hooks: mpdist is a multi-provider
 	// zone's own key, served while it is distributed to the other providers and
 	// before it is promoted; foreign is another provider's key, served here and
-	// generated elsewhere.
-	DnskeyStateMpdist  string = "mpdist"
-	DnskeyStateForeign string = "foreign"
+	// generated elsewhere. DnskeyStateMpremove is tdns-mp's own state for a key
+	// on its way out of a multi-provider zone; tdns does not act on it.
+	DnskeyStateMpdist   string = "mpdist"
+	DnskeyStateForeign  string = "foreign"
+	DnskeyStateMpremove string = "mpremove"
 )
 
 // MPdata caches multi-provider membership and signing state for a zone.

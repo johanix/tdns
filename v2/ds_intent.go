@@ -42,9 +42,10 @@ type DSIntent struct {
 // the other providers and before its owner promotes it to published. Its DS does
 // not belong at the parent until then.
 //
-// foreign, another provider's key, is not classified here: whether its DS
-// belongs at the parent is not this zone's decision, and DSIntentForZone
-// declines for a zone that holds one.
+// foreign (another provider's key) and mpremove (tdns-mp's state for a key on
+// its way out of a multi-provider zone) are not classified here. tdns does not
+// act on either -- a foreign key's DS is not this zone's decision, and mpremove
+// is tdns-mp's to manage -- so DSIntentForZone declines for a zone holding one.
 //
 // Written this way so that a state added later has to be classified explicitly
 // rather than silently defaulting to "no DS", which would express itself as a
@@ -81,11 +82,12 @@ WHERE zonename = ? AND (CAST(flags AS INTEGER) & ?) != 0`
 // Withdrawing the DS of such a zone would break it, so the absence of rows
 // means the DS is not ours to have an opinion about.
 //
-// Known is also false when the zone holds another provider's KSK (state
-// foreign). Whether that key's DS belongs at the parent is not this zone's
-// decision, and every consumer of the intent acts on the parent's whole DS set:
-// replace mode rewrites it, and delta mode removes whatever the set lacks. No
-// set tdns could state would leave that DS alone; declining does.
+// Known is also false when the zone holds a KSK tdns does not act on: another
+// provider's key (state foreign), whose DS is not this zone's decision, or a
+// key tdns-mp is removing from a multi-provider zone (state mpremove). Every
+// consumer of the intent acts on the parent's whole DS set: replace mode
+// rewrites it, and delta mode removes whatever the set lacks. No set tdns could
+// state would leave such a key's DS alone; declining does.
 //
 // Known is true with an empty Set when tdns does hold keys for the zone and
 // none of them should have a DS -- a zone that has been un-signed. That is a
@@ -112,9 +114,9 @@ func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error
 		}
 		seen = true
 
-		if state == DnskeyStateForeign {
-			lgDns.Debug("DSIntentForZone: the zone holds another provider's KSK, whose DS is not this zone's"+
-				" decision; declining to state a DS intent", "zone", zonename)
+		if state == DnskeyStateForeign || state == DnskeyStateMpremove {
+			lgDns.Debug("DSIntentForZone: the zone holds a KSK tdns does not act on; declining to state a DS intent",
+				"zone", zonename, "state", state)
 			return DSIntent{}, nil
 		}
 		belongs, recognised := dsBelongsAtParent(state)

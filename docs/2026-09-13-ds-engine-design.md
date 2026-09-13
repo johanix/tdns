@@ -11,6 +11,9 @@ Revisions:
   no DS at the parent; a `foreign` KSK makes the DS intent unknown, since its DS
   is not this zone's decision. The `multi-provider` model no longer publishes the
   SEP keys of the DNSKEY RRset: the DS set is the multi-provider agent's.
+- r4 2026-09-13: an `mpremove` KSK, tdns-mp's state for a key on its way out,
+  is treated like a `foreign` one: tdns does not act on it, and the DS intent is
+  unknown for a zone holding one.
 
 ## Why
 
@@ -46,7 +49,7 @@ keys:
 
 | Model | Source | Target DS set |
 |---|---|---|
-| `none` | no automated rollover (`rollover.method: none` or no policy) | `DSIntentForZone`: KSKs from `ds-published` to `active`. An `mpdist` KSK gets no DS; a `foreign` KSK makes the intent unknown, because whether its DS belongs at the parent is not this zone's decision |
+| `none` | no automated rollover (`rollover.method: none` or no policy) | `DSIntentForZone`: KSKs from `ds-published` to `active`. An `mpdist` KSK gets no DS; a `foreign` or `mpremove` KSK makes the intent unknown: a foreign key's DS is not this zone's decision, and `mpremove` is tdns-mp's state, which tdns does not act on |
 | `multi-ds` | `rollover.method: multi-ds` | the rollover target (`loadTargetKSKsForRollover`: `created` to `retired`), a pipeline of pre-published DS |
 | `double-signature` | `rollover.method: double-signature` | the new key is published and signs alongside the old one before the DS is swapped; accepted by the policy parser, not implemented by the rollover engine |
 | `multi-provider` | zone option `multi-provider` | not this zone's decision: the served DNSKEY RRset carries the zone's own `mpdist` keys, which get no DS until promoted, and other providers' `foreign` keys, whose DS is theirs to decide; the multi-provider agent coordinates the DS set |

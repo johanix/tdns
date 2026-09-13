@@ -160,6 +160,24 @@ func TestDSIntentDeclinesForAZoneHoldingAForeignKSK(t *testing.T) {
 		}
 	})
 
+	// mpremove is tdns-mp's state for a key on its way out of a multi-provider
+	// zone. tdns does not act on it: leaving it out of the set while stating an
+	// intent would have replace mode remove its DS.
+	t.Run("mpremove KSK", func(t *testing.T) {
+		kdb := intentTestKeyDB(t)
+		seedKey(t, kdb, "child.example.", DnskeyStateActive, 257, pubA)
+		seedKey(t, kdb, "child.example.", DnskeyStateMpremove, 257, pubB)
+
+		intent, err := DSIntentForZone(kdb, "child.example.", dns.SHA256)
+		if err != nil {
+			t.Fatalf("DSIntentForZone: %v", err)
+		}
+		if intent.Known || len(intent.Set) != 0 {
+			t.Errorf("intent = {known %v, %d DS} for a zone holding an mpremove KSK, want unknown and empty",
+				intent.Known, len(intent.Set))
+		}
+	})
+
 	t.Run("a foreign ZSK has no DS and changes nothing", func(t *testing.T) {
 		kdb := intentTestKeyDB(t)
 		seedKey(t, kdb, "child.example.", DnskeyStateActive, 257, pubA)
