@@ -493,28 +493,48 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 	if len(dpk.KSKs) > 0 || len(dpk.ZSKs) > 0 {
 		lgSigner.Info("published DNSSEC keys available for promotion", "zone", zd.ZoneName)
 
+		// The lifecycle hooks may hold a published key back (KeyLifecycleHooks
+		// MayPromote): the first key of each role the hooks release is the one
+		// promoted. Nil hooks release every key, which is the promotion this
+		// has always made.
 		var promotedKskKeyId uint16
+		promotedKsk := false
 
-		// Promote the first KSK from published to active
-		if len(dpk.KSKs) > 0 {
-			promotedKskKeyId = dpk.KSKs[0].KeyId
+		// Promote the first promotable KSK from published to active
+		for _, ksk := range dpk.KSKs {
+			if !keyMayPromote(zd, ksk.KeyId) {
+				lgSigner.Info("published KSK is not yet promotable, leaving it published", "zone", zd.ZoneName, "keyid", ksk.KeyId)
+				continue
+			}
+			promotedKskKeyId = ksk.KeyId
 			err = kdb.PromoteDnssecKey(zd.ZoneName, promotedKskKeyId, DnskeyStatePublished, DnskeyStateActive)
 			if err != nil {
 				lgSigner.Error("failed to promote published KSK to active", "zone", zd.ZoneName, "err", err)
 				return nil, err
 			}
 			lgSigner.Info("promoted published KSK to active", "zone", zd.ZoneName, "keyid", promotedKskKeyId)
+			promotedKsk = true
+			break
 		}
 
-		// Promote the first ZSK from published to active unless it has the same keyid as the promoted KSK
-		if len(dpk.ZSKs) > 0 && (len(dpk.KSKs) == 0 || dpk.ZSKs[0].KeyId != promotedKskKeyId) {
-			zskKeyId := dpk.ZSKs[0].KeyId
+		// Promote the first promotable ZSK from published to active unless it
+		// has the same keyid as the promoted KSK
+		for _, zsk := range dpk.ZSKs {
+			if promotedKsk && zsk.KeyId == promotedKskKeyId {
+				continue
+			}
+			if !keyMayPromote(zd, zsk.KeyId) {
+				lgSigner.Info("published ZSK is not yet promotable, leaving it published", "zone", zd.ZoneName, "keyid", zsk.KeyId)
+				continue
+			}
+			zskKeyId := zsk.KeyId
 			err = kdb.PromoteDnssecKey(zd.ZoneName, zskKeyId, DnskeyStatePublished, DnskeyStateActive)
 			if err != nil {
 				lgSigner.Error("failed to promote published ZSK to active", "zone", zd.ZoneName, "err", err)
 				return nil, err
 			}
 			lgSigner.Info("promoted published ZSK to active", "zone", zd.ZoneName, "keyid", zskKeyId)
+			break
 		}
 
 		// Re-fetch active keys after promotion
@@ -548,8 +568,16 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s: %w", zd.ZoneName, ErrDnssecPolicyNotBound)
 	}
 
-	// Generate KSK if still missing
+	// Generate KSK if still missing -- unless the lifecycle hooks say not to
+	// (KeyLifecycleHooks MayGenerate): a KSK that exists in a state the
+	// hooks' owner has not released is not a reason to mint a second one
+	// beside it, and the error says so. When allowed, the key is generated
+	// ACTIVE, as it always has been: a zone with no active key cannot sign,
+	// so the staged state is not on this path.
 	if len(dak.KSKs) == 0 {
+		if !keyMayGenerate(zd, "KSK") {
+			return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s: KSK: %w", zd.ZoneName, ErrKeyGenerationDeferred)
+		}
 		pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate KSK for zone %s: %v", zd.ZoneName, err)
@@ -576,8 +604,11 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		}
 	}
 
-	// Generate ZSK only if we have zero real ZSKs
+	// Generate ZSK only if we have zero real ZSKs; same hook as for the KSK.
 	if realZSKCount == 0 {
+		if !keyMayGenerate(zd, "ZSK") {
+			return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s: ZSK: %w", zd.ZoneName, ErrKeyGenerationDeferred)
+		}
 		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate ZSK for zone %s: %v", zd.ZoneName, err)
