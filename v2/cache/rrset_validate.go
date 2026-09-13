@@ -311,8 +311,13 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 	// (Go-default-initialised) is 0, NOT ValidationStateNone (=1). A cached
 	// entry written without an explicit State field has State==0 and must be
 	// treated as "not validated yet", not as a usable cached verdict.
+	//
+	// Indeterminate is not reused either. It records that the chain could not be
+	// followed when the entry was made -- a DNSKEY fetch that timed out, an
+	// anchor not loaded yet -- and reusing it turned a moment's gap into the
+	// verdict for the rest of the entry's lifetime.
 	cached := rrcache.Get(rrset.Name, rrset.RRtype)
-	if cached != nil && cached.State > ValidationStateNone {
+	if cached != nil && cached.State > ValidationStateNone && cached.State != ValidationStateIndeterminate {
 		// Get() already checks expiration and returns nil if expired, so if cached is not nil, it's not expired
 		// But we double-check expiration to be explicit about the semantics
 		if cached.Expiration.Before(time.Now()) {
