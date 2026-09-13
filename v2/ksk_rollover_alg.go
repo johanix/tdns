@@ -321,10 +321,21 @@ func AbortKskAlgRollover(ctx context.Context, conf *Config, kdb *KeyDB, zone str
 			dns.AlgorithmToString[algRoll.FromAlg], dns.AlgorithmToString[algRoll.ToAlg])
 	}
 
+	// A cancelled request stops here, before anything has changed. Past this
+	// point the abort runs to completion: StripZoneRRSIGs stages each
+	// stripped RRset in the working set and publishes once at the end, so a
+	// strip cancelled halfway would leave partial removals staged for the
+	// next publish while B -- still active, the roll marker still set -- has
+	// lost some of its signatures.
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("abort not started: %w", err)
+	}
+	stripCtx := context.WithoutCancel(ctx)
+
 	// B has signed the apex DNSKEY RRset since the spawn: strip its
 	// signatures before it goes, or they dangle (F2).
 	if zd, ok := Zones.Get(zone); ok && zd != nil {
-		if _, err := zd.StripZoneRRSIGs(ctx, func(s *dns.RRSIG) bool {
+		if _, err := zd.StripZoneRRSIGs(stripCtx, func(s *dns.RRSIG) bool {
 			return s.KeyTag == algRoll.NewHeadKeyID
 		}); err != nil {
 			return "", fmt.Errorf("strip the new-algorithm KSK's signatures: %w", err)

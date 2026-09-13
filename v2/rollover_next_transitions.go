@@ -230,7 +230,7 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 			// projection if that key is currently in published or
 			// ds-published.
 			tRetire := activeAt.Add(lifetime)
-			if t, ok := projectedNextUpStandbyAt(out, kdb, zone, pol, lifetime, dnskeyTTLKnown, dnskeyTTL, propagationDelay, now, dnskeyInZoneKids, dsPubKids); ok {
+			if t, ok := projectedNextUpStandbyAt(out, kdb, zone, pol, lifetime, dnskeyTTLKnown, dnskeyTTL, propagationDelay, now, dnskeyInZoneKids, dsPubKids, activeAt); ok {
 				gated := t.Add(pol.Rollover.StandbyTime)
 				if gated.After(tRetire) {
 					tRetire = gated
@@ -325,7 +325,7 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 // time agrees with the next-up key's actual readiness path. Without
 // chaining through these states, the active row could project a time
 // earlier than the next-up key can possibly be ready.
-func projectedNextUpStandbyAt(out *RolloverStatus, kdb *KeyDB, zone string, pol *DnssecPolicy, lifetime time.Duration, dnskeyTTLKnown bool, dnskeyTTL time.Duration, propagationDelay time.Duration, now time.Time, dnskeyInZoneKids []uint16, dsPubKids []uint16) (time.Time, bool) {
+func projectedNextUpStandbyAt(out *RolloverStatus, kdb *KeyDB, zone string, pol *DnssecPolicy, lifetime time.Duration, dnskeyTTLKnown bool, dnskeyTTL time.Duration, propagationDelay time.Duration, now time.Time, dnskeyInZoneKids []uint16, dsPubKids []uint16, activeAt *time.Time) (time.Time, bool) {
 	// 1. Already in genuine standby.
 	for _, kid := range dnskeyInZoneKids {
 		state := ""
@@ -394,7 +394,9 @@ func projectedNextUpStandbyAt(out *RolloverStatus, kdb *KeyDB, zone string, pol 
 		// dnskeyInZoneKids is empty in steady state. Slot accounting
 		// uses len(dnskeyInZoneKids) as the offset to be safe in
 		// any transient state.
-		activeAt := findActiveAt(out, kdb, zone)
+		// activeAt is the caller's: during a KSK algorithm rollover it is the
+		// new-algorithm head's, not that of whichever active KSK is listed
+		// first -- often the old head.
 		if activeAt == nil {
 			return time.Time{}, false
 		}
@@ -405,22 +407,6 @@ func projectedNextUpStandbyAt(out *RolloverStatus, kdb *KeyDB, zone string, pol 
 	}
 
 	return time.Time{}, false
-}
-
-// findActiveAt is a small helper that returns the active KSK's
-// active_at, or nil when no active key exists.
-func findActiveAt(out *RolloverStatus, kdb *KeyDB, zone string) *time.Time {
-	for _, e := range out.KSKs {
-		if e.State != DnskeyStateActive {
-			continue
-		}
-		t, err := RolloverKeyActiveAt(kdb, zone, e.KeyID)
-		if err == nil && t != nil {
-			return t
-		}
-		break
-	}
-	return nil
 }
 
 // slotFromKid returns the 1-based slot index of kid in ordered.

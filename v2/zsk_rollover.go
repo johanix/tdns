@@ -355,17 +355,17 @@ func kskAlgRollInFlight(kdb *KeyDB, zone string, targetKSKAlg uint8) (AlgRollSta
 		return st, nil
 	}
 	st.InFlight = true
-	found := false
+	// The marker is authoritative, so it is the head FromAlg() returns --
+	// also when the key shape already lists it behind a more populated
+	// leftover algorithm.
+	ordered := make([]uint8, 0, len(st.FromAlgs)+1)
+	ordered = append(ordered, roll.FromAlg)
 	for _, a := range st.FromAlgs {
-		if a == roll.FromAlg {
-			found = true
-			break
+		if a != roll.FromAlg {
+			ordered = append(ordered, a)
 		}
 	}
-	if !found {
-		// The marker is authoritative, so it is the head FromAlg() returns.
-		st.FromAlgs = append([]uint8{roll.FromAlg}, st.FromAlgs...)
-	}
+	st.FromAlgs = ordered
 	return st, nil
 }
 

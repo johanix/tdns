@@ -1553,9 +1553,15 @@ func transitionDsPublishedToPublishedForZone(deps RolloverEngineDeps, dsPubs []*
 	// (tdns#609). A zone with no scheduled lifetime (unset or forever) never
 	// gets here: transitionDsPublishedForManualRollover handles it above.
 	var manualAt *time.Time
-	if row, rerr := LoadRolloverZoneRow(kdb, zoneName); rerr == nil && row != nil && row.ManualRolloverEarliest.Valid {
+	if row, rerr := LoadRolloverZoneRow(kdb, zoneName); rerr != nil {
+		deps.Logger.Warn("rollover: manual anchor lookup failed; using the scheduled anchor only",
+			"zone", zoneName, "err", rerr)
+	} else if row != nil && row.ManualRolloverEarliest.Valid {
 		if t, perr := time.Parse(time.RFC3339, strings.TrimSpace(row.ManualRolloverEarliest.String)); perr == nil {
 			manualAt = &t
+		} else {
+			deps.Logger.Warn("rollover: invalid manual_rollover_earliest; using the scheduled anchor only",
+				"zone", zoneName, "value", row.ManualRolloverEarliest.String, "err", perr)
 		}
 	}
 	if activeAt == nil && manualAt == nil {

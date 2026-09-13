@@ -192,6 +192,7 @@ func TestKskAlgRollFromRowRejectsIncompleteRecord(t *testing.T) {
 		{"new head 0", `UPDATE RolloverZoneState SET alg_roll_new_head_keyid = 0 WHERE zone = ?`},
 		{"to alg out of range", `UPDATE RolloverZoneState SET alg_roll_to_alg = 300 WHERE zone = ?`},
 		{"started_at NULL", `UPDATE RolloverZoneState SET alg_roll_started_at = NULL WHERE zone = ?`},
+		{"retire_at unparsable", `UPDATE RolloverZoneState SET alg_roll_old_head_retire_at = 'not-a-time' WHERE zone = ?`},
 	} {
 		if _, err := kdb.DB.Exec(c.sql, ktStateZone); err != nil {
 			t.Fatalf("%s: corrupt the row: %v", c.name, err)
@@ -200,5 +201,25 @@ func TestKskAlgRollFromRowRejectsIncompleteRecord(t *testing.T) {
 			t.Fatalf("%s: got %+v, want an error", c.name, st)
 		}
 		ktSetAlgRoll(t, kdb, KskAlgRollState{FromAlg: 15, ToAlg: 8, StartedAt: time.Now().UTC().Truncate(time.Second), NewHeadKeyID: 1001, OldHeadKeyID: 1000})
+	}
+}
+
+// The persisted marker heads FromAlgs even when the key shape lists it behind a
+// more populated leftover algorithm, so FromAlg() reports the roll's source.
+func TestKskAlgRollInFlightMarkerHeadsFromAlgs(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	ktGenKSK(t, kdb, ktStateZone, DnskeyStateActive, dns.ED25519)
+	ktGenKSK(t, kdb, ktStateZone, DnskeyStatePublished, dns.ECDSAP256SHA256)
+	ktGenKSK(t, kdb, ktStateZone, DnskeyStateStandby, dns.ECDSAP256SHA256)
+	ktSetAlgRoll(t, kdb, KskAlgRollState{FromAlg: dns.ED25519, ToAlg: dns.RSASHA256, StartedAt: time.Now(), NewHeadKeyID: 1001, OldHeadKeyID: 1000})
+	st, err := kskAlgRollInFlight(kdb, ktStateZone, dns.RSASHA256)
+	if err != nil {
+		t.Fatalf("kskAlgRollInFlight: %v", err)
+	}
+	if st.FromAlg() != dns.ED25519 {
+		t.Fatalf("FromAlg() = %d, want the marker's ED25519 (FromAlgs %v)", st.FromAlg(), st.FromAlgs)
+	}
+	if len(st.FromAlgs) != 2 || st.FromAlgs[1] != dns.ECDSAP256SHA256 {
+		t.Fatalf("FromAlgs = %v, want [ED25519 ECDSAP256SHA256] without duplicates", st.FromAlgs)
 	}
 }

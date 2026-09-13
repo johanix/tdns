@@ -2,7 +2,10 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -290,4 +293,121 @@ func TestKTAbortKskAlgRoll(t *testing.T) {
 			t.Fatalf("got %v", err)
 		}
 	})
+}
+
+// ktCancelledAfterFirstCheck is live for its first Err() call and cancelled
+// from then on: a request cancelled once the abort is already under way.
+type ktCancelledAfterFirstCheck struct {
+	context.Context
+	checks atomic.Int32
+	once   sync.Once
+	done   chan struct{}
+}
+
+func newKtCancelledAfterFirstCheck() *ktCancelledAfterFirstCheck {
+	return &ktCancelledAfterFirstCheck{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *ktCancelledAfterFirstCheck) Done() <-chan struct{} { return c.done }
+
+func (c *ktCancelledAfterFirstCheck) Err() error {
+	if c.checks.Add(1) == 1 {
+		return nil
+	}
+	c.once.Do(func() { close(c.done) })
+	return context.Canceled
+}
+
+// KT-abort under cancellation. A request cancelled before the abort starts
+// changes nothing: B keeps its signature and the roll stays in flight. A
+// request cancelled once the abort is under way does not stop the strip
+// halfway, which would leave partial removals staged for the next publish:
+// the abort completes and B's signature is gone.
+func TestKTAbortKskAlgRollRefusesCancelledRequest(t *testing.T) {
+	ktInstallFakeParent(t)
+	kdb := newTestKeyDB(t)
+	pol := ktSequencePolicy(RolloverMethodMultiDS)
+	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
+	a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
+	ktGenZSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
+		t.Fatalf("SignZone: %v", err)
+	}
+	pol.KSKAlgorithm = dns.RSASHA256
+	ktTick(t, zd, kdb, time.Now().Add(time.Second))
+	st, err := LoadKskAlgRollState(kdb, ktAlgZone)
+	if err != nil || st == nil {
+		t.Fatalf("spawn: roll state %+v, %v", st, err)
+	}
+	b := st.NewHeadKeyID
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
+		t.Fatalf("re-sign: %v", err)
+	}
+	if tags := zd.mustRRSIGKeytags(t, ktAlgZone, dns.TypeDNSKEY); !ktHasKeytag(tags, b) {
+		t.Fatalf("fixture: B has not signed: %v", tags)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := AbortKskAlgRollover(cancelled, &Conf, kdb, ktAlgZone); !errors.Is(err, context.Canceled) {
+		t.Fatalf("abort with a cancelled request: err = %v, want context.Canceled", err)
+	}
+	if s := ktKeyState(t, kdb, ktAlgZone, b); s != DnskeyStateActive {
+		t.Fatalf("after the refused abort B is %s, want active", s)
+	}
+	if tags := zd.mustRRSIGKeytags(t, ktAlgZone, dns.TypeDNSKEY); !ktHasKeytag(tags, a) || !ktHasKeytag(tags, b) {
+		t.Fatalf("after the refused abort the DNSKEY RRSIG keytags are %v, want both %d and %d", tags, a, b)
+	}
+	if st, err := LoadKskAlgRollState(kdb, ktAlgZone); err != nil || st == nil {
+		t.Fatalf("after the refused abort the roll must still be in flight: %+v, %v", st, err)
+	}
+
+	underWay := newKtCancelledAfterFirstCheck()
+	if _, err := AbortKskAlgRollover(underWay, &Conf, kdb, ktAlgZone); err != nil {
+		t.Fatalf("abort cancelled once under way: %v, want it to run to completion", err)
+	}
+	if underWay.checks.Load() < 1 {
+		t.Fatalf("fixture: the abort never checked its context")
+	}
+	if tags := zd.mustRRSIGKeytags(t, ktAlgZone, dns.TypeDNSKEY); ktHasKeytag(tags, b) {
+		t.Fatalf("after the abort B's signature remains: %v", tags)
+	}
+	if st, err := LoadKskAlgRollState(kdb, ktAlgZone); err != nil || st != nil {
+		t.Fatalf("after the abort the roll must be cleared: %+v, %v", st, err)
+	}
+}
+
+// The next-up standby projection during a KSK algorithm roll uses the caller's
+// active_at -- the new-algorithm head's -- not that of whichever active KSK the
+// status lists first, which during a roll is often the old head.
+func TestProjectedNextUpStandbyUsesSelectedActiveAt(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	pol := ktSequencePolicy(RolloverMethodMultiDS)
+	out := &RolloverStatus{KSKs: []RolloverKeyEntry{
+		{KeyID: 1000, State: DnskeyStateActive}, // old head, listed first
+		{KeyID: 2000, State: DnskeyStateActive}, // new head
+		{KeyID: 3000, State: DnskeyStateDsPublished},
+	}}
+	newHeadActiveAt := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	lifetime := 24 * time.Hour
+	// The old head has a recorded active_at of its own, a lifetime earlier, so
+	// a projection from the first-listed active KSK lands on a different time.
+	tx, err := kdb.Begin("test")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := insertRolloverKeyStateTx(tx, ktAlgZone, 1000, 0, RolloverMethodMultiDS); err != nil {
+		t.Fatalf("seed old head: %v", err)
+	}
+	if err := setRolloverKeyActiveAtTx(tx, ktAlgZone, 1000, newHeadActiveAt.Add(-lifetime)); err != nil {
+		t.Fatalf("seed old head active_at: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	got, ok := projectedNextUpStandbyAt(out, kdb, ktAlgZone, pol, lifetime, true, time.Hour, time.Minute, time.Now(),
+		nil, []uint16{3000}, &newHeadActiveAt)
+	if want := newHeadActiveAt.Add(lifetime); !ok || !got.Equal(want) {
+		t.Fatalf("projected standby = %v (ok %v), want %v: slot 1 from the new head's active_at", got, ok, want)
+	}
 }

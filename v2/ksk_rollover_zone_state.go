@@ -135,7 +135,13 @@ func kskAlgRollFromRow(row *RolloverZoneRow) (*KskAlgRollState, error) {
 		NewHeadKeyID: uint16(row.AlgRollNewHeadKeyID.Int64),
 		OldHeadKeyID: uint16(row.AlgRollOldHeadKeyID.Int64),
 	}
-	if t, ok := parseOptionalTime(row.AlgRollOldHeadRetireAt); ok {
+	if row.AlgRollOldHeadRetireAt.Valid {
+		// Present but unparsable is corrupt, not absent: read as absent, the
+		// withdraw arm would wait for a confirm that already happened.
+		t, ok := parseOptionalTime(row.AlgRollOldHeadRetireAt)
+		if !ok {
+			return nil, fmt.Errorf("KSK algorithm-roll record: unparsable alg_roll_old_head_retire_at %q", row.AlgRollOldHeadRetireAt.String)
+		}
 		st.OldHeadRetireAt = &t
 	}
 	return st, nil
