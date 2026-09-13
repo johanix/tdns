@@ -2,6 +2,12 @@
 
 Written 2026-09-13. Step 1 implemented on branch `feat/ds-engine-cds`.
 
+Revisions:
+- r1 2026-09-13: first version.
+- r2 2026-09-13: step 2 re-scoped. The DS engine does not talk to the parent;
+  the rollover engine's DS pushes move into the delegation syncher, not into the
+  DS engine. Added "Why not inside the delegation syncher".
+
 ## Why
 
 What a child asks its parent to hold as DS had two half-owners and a gap
@@ -19,11 +25,14 @@ between them.
 - **The KSK rollover engine** publishes CDS for its own target set, pushes DS
   itself, and removes its CDS after the parent confirms. Its publish is
   queue-and-forget, so the NOTIFY that follows can race it -- #507's shape.
+- **The rollover engine carries its own copy of delegation sync's transport**:
+  scheme selection (`pickRolloverSchemes`) and UPDATE, NOTIFY and API push paths
+  (`pushDSRRsetViaUpdate`, `pushDSRRsetViaNotify`, `pushDSRRsetViaApi`), beside
+  the delegation syncher's plan walk and senders. Two components talk to the
+  same parent about the same delegation, and in replace mode delegation sync's
+  UPDATE rewrites the DS as well.
 - The only coordination is a lock-out: `rolloverOwnsDS` makes delegation sync
   leave the DS alone while a rollover phase is busy.
-
-A child-side DS engine that both send their requests to replaces that with one
-owner.
 
 ## DS models
 
@@ -42,12 +51,39 @@ Every request the engine serves starts by asking the zone's model for the target
 and a model the engine does not implement is refused by name rather than
 approximated.
 
-## What the engine owns
+## The split
 
-Eventually: the served CDS RRset, publish-and-wait before any NOTIFY(CDS), the
-UPDATE and API DS pushes, confirmation that the parent holds the target, and
-periodic reconciliation of target against parent. Clients state what they need;
-the engine decides what goes on the wire.
+- **The DS engine** owns what a zone asks its parent to hold as DS: the DS model,
+  the CDS RRset and its lifecycle, and the criterion for the parent's DS being
+  in step (does the parent hold the model's target). It does not talk to the
+  parent.
+- **The delegation syncher** is the one component that talks to the parent, for
+  NS, glue and DS alike: DSYNC discovery, the plan, the UPDATE, NOTIFY and API
+  senders.
+- **The KSK rollover engine** runs the key state machine. It tells the DS engine
+  what its phase needs and hands DS delivery to the delegation syncher, instead
+  of pushing itself.
+
+## Why not inside the delegation syncher
+
+Folding CDS ownership into the delegation syncher, rather than a separate engine,
+was considered after step 1 was built. It was not chosen:
+
+- **Different knowledge, different triggers.** The syncher answers "how does
+  delegation data reach the parent". The CDS answers "which DS does this zone
+  want", from the keystore and the rollover state, and changes on key events
+  (`PublishDnskeyRRs`), not delegation events. CSYNC sits naturally with the
+  syncher because its content is NS and glue; CDS content is key data.
+- **Latency.** The syncher is one goroutine doing network round trips for every
+  zone; a plan walk can take tens of seconds, and some senders take no context. A
+  rollover tick asking for its CDS would wait behind other zones' parent traffic.
+  The DS engine answers from the keystore and the zone updater.
+- **The queue.** `DelegationSyncQ` holds ten requests and the zone updater sends
+  `SYNC-DELEGATION` into it with a blocking send. The key-change notification
+  runs with the zone lock held and must be non-blocking; in that queue it would
+  be dropped exactly when the syncher is busy.
+
+The duplication that matters is the transport, and step 2 removes it.
 
 ## Steps
 
@@ -64,13 +100,19 @@ the engine decides what goes on the wire.
      with a rollover phase in flight the engine answers "deferred": the DS is the
      rollover's, and no NOTIFY(CDS) is sent for it.
    - The `SYNC-DNSKEY-RRSET` arm asks the engine instead of publishing directly.
-2. **Pushes.** Move the UPDATE and API DS pushes, and confirmation polling, into
-   the engine; `rolloverOwnsDS` disappears.
-3. **Reconciliation.** Periodic comparison of each zone's target with the
-   parent's DS, from the engine. This also covers a child whose one-shot sync
-   failed at startup.
+2. **One transport.** The rollover engine's DS pushes (`pickRolloverSchemes`,
+   `pushDSRRsetViaUpdate`, `pushDSRRsetViaNotify`, `pushDSRRsetViaApi`) move into
+   the delegation syncher, which already discovers the parent's schemes and walks
+   them for NS and glue. The rollover hands its DS to the syncher; the syncher
+   asks the DS engine for the CDS as delegation sync does in step 1.
+   `rolloverOwnsDS` disappears: with one sender there is nothing to lock out.
+   Where confirmation polling lives is settled in this step; the criterion is the
+   DS engine's.
+3. **Reconciliation.** Periodic comparison of each zone's DS target (from the DS
+   engine) with the parent's DS, handing a zone that is out of step to the
+   syncher. This also covers a child whose one-shot sync failed at startup.
 4. **double-signature.** When the rollover engine implements it, the model's
-   target moves into the engine with it.
+   target moves into the DS engine with it.
 
 ## CDS lifecycle per model in step 1
 
@@ -88,7 +130,7 @@ the engine decides what goes on the wire.
   DNSKEY RRset is built from the keystore, tells the engine when a zone that
   serves a CDS changes its KSK set, and the engine brings the CDS back to the
   target, or withdraws it when no key warrants a DS. Removal after the parent
-  confirms arrives with step 2's confirmation polling.
+  confirms comes with confirmation in step 2.
 - **Keys tdns does not manage** (a zone signed elsewhere). The engine writes no
   CDS. If the zone already serves one, published by its signer, delegation sync's
   NOTIFY(CDS) points the parent at it; if it serves none, the NOTIFY candidate
@@ -104,7 +146,8 @@ back to UPDATE or API.
 
 ## Not in step 1
 
-- The UPDATE and API pushes, confirmation polling, periodic reconciliation.
+- The rollover engine's own parent pushes, which step 2 moves into the delegation
+  syncher; confirmation; periodic reconciliation.
 - `PublishCdsRRs`, `UnpublishCdsRRs` and `SynthesizeCdsRRs` stay exported: tdns-mp
   calls them. Inside tdns every CDS write goes through the engine.
 - tdns-mp builds `RolloverEngineDeps` for the rollover engine and has to start
