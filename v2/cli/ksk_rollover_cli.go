@@ -574,7 +574,10 @@ func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
 		currentTime = time.Now().UTC().Format("15:04:05 UTC (Mon Jan 2 2006)")
 	}
 	fmt.Printf("%s rollover schedule for zone %s  Current time: %s\n", role, resp.Zone, currentTime)
-	if resp.InProgress {
+	switch {
+	case resp.Status == "alg-rollover-in-progress":
+		fmt.Println("  (KSK algorithm rollover in progress; \"next scheduled\" is its projected completion)")
+	case resp.InProgress:
 		fmt.Println("  (current rollover in progress; times below project the rollover after it completes)")
 	}
 
@@ -687,10 +690,17 @@ Online-only: scheduling against a stopped daemon is meaningless
 func newAutoRolloverCancelCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "cancel",
-		Short: "Cancel a pending manual KSK rollover request",
+		Short: "Cancel a pending manual KSK rollover request, or abort a KSK algorithm rollover",
 		Long: `Asks the daemon to clear manual_rollover_requested_at and
 manual_rollover_earliest on the zone row. Has no effect on rollovers
 that have already fired or on scheduled (lifetime-driven) rollovers.
+
+With --ksk --alg-roll it instead ABORTS an in-flight KSK algorithm
+rollover. That is only possible before the parent has confirmed the
+new-algorithm DS: the new-algorithm KSK is removed and the zone returns
+to idle. After confirmation an abort would be a reverse algorithm
+rollover and is refused -- let the roll finish, then change policy
+back.
 
 Online-only: cancelling against a stopped daemon is meaningless (the
 manual_rollover_* row isn't being read by anything).`,
@@ -706,25 +716,54 @@ manual_rollover_* row isn't being read by anything).`,
 			if autoRolloverFlags.zskOnly {
 				keytype = "ZSK"
 			}
+			if autoRolloverFlags.algRoll && keytype != "KSK" {
+				cliFatalf("--alg-roll applies to the KSK algorithm rollover only (use --ksk)")
+			}
 
 			api, err := GetApiClientForCmd(cmd, true)
 			if err != nil {
 				cliFatalf("error getting API client: %v", err)
 			}
 			status, body, err := api.RequestNG("POST", "/rollover/cancel",
-				tdns.RolloverCancelRequest{Zone: z, KeyType: keytype}, true)
+				tdns.RolloverCancelRequest{Zone: z, KeyType: keytype, AlgRoll: autoRolloverFlags.algRoll}, true)
 			if err != nil {
 				cliFatalf("error calling rollover/cancel: %v", err)
 			}
 			if status != http.StatusOK {
 				cliFatalf("unexpected status %d from rollover/cancel: %s", status, strings.TrimSpace(string(body)))
 			}
-			fmt.Printf("cleared manual %s rollover request for zone %s\n", keytype, z)
+			msg, err := cancelResponseMessage(body, autoRolloverFlags.algRoll, keytype, z)
+			if err != nil {
+				cliFatalf("%v", err)
+			}
+			fmt.Println(msg)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
+	c.Flags().BoolVar(&autoRolloverFlags.algRoll, "alg-roll", false, "Abort an in-flight KSK algorithm rollover (before the parent confirms the new-algorithm DS)")
 	_ = c.MarkFlagRequired("zone")
 	return c
+}
+
+// cancelResponseMessage turns the daemon's rollover/cancel reply into the
+// operator line. An --alg-roll abort has to be confirmed by the daemon: a
+// 200 that only says {"cleared":true} is the manual-request path answering,
+// which means no algorithm roll was aborted, and must not read as success.
+func cancelResponseMessage(body []byte, algRoll bool, keytype, zone string) (string, error) {
+	if !algRoll {
+		return fmt.Sprintf("cleared manual %s rollover request for zone %s", keytype, zone), nil
+	}
+	var resp tdns.RolloverCancelResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("error parsing rollover/cancel response: %v", err)
+	}
+	if !resp.Aborted {
+		return "", fmt.Errorf("daemon did not confirm the KSK algorithm rollover abort (response: %s)", strings.TrimSpace(string(body)))
+	}
+	if resp.Detail != "" {
+		return resp.Detail, nil
+	}
+	return fmt.Sprintf("aborted the KSK algorithm rollover for zone %s", zone), nil
 }
 
 func newAutoRolloverStatusCmd() *cobra.Command {
@@ -954,9 +993,34 @@ func printZoneGlobalHeader(s *tdns.RolloverStatus, verbose bool) {
 		}
 		printed = true
 	}
-	if t := s.AlgTransition; t != nil {
-		// ASCII "->" (not the Unicode arrow); spell out "algorithm"; describe
-		// the count as published ZSKs (the live keys in the DNSKEY RRset).
+	transitions := s.AlgTransitions
+	if len(transitions) == 0 && s.AlgTransition != nil {
+		// Older daemon: only the singular ZSK field.
+		transitions = []tdns.AlgTransitionInfo{*s.AlgTransition}
+	}
+	for _, t := range transitions {
+		// ASCII "->" (not the Unicode arrow); spell out "algorithm".
+		if t.Role == "KSK" {
+			line := fmt.Sprintf("Algorithm rollover: KSK %s -> %s  (double-signature, in progress)", t.FromAlg, t.ToAlg)
+			fmt.Println(line)
+			if s.AlgRollFromAlg != "" {
+				fmt.Printf("  started %s; old KSK %d (%s, still signing) / new KSK %d (%s)\n",
+					formatRolloverTime(s.AlgRollStartedAt), s.AlgRollOldHeadKeyID, s.AlgRollFromAlg, s.AlgRollHeadKeyID, s.AlgRollToAlg)
+				switch {
+				case s.AlgRollProjectedRemoveAt != "":
+					fmt.Printf("  parent confirmed %s; old KSK removal expected %s\n",
+						formatRolloverTime(s.AlgRollOldHeadRetireAt), formatRolloverTime(s.AlgRollProjectedRemoveAt))
+				case s.AlgRollOldHeadRetireAt != "":
+					fmt.Printf("  parent confirmed %s; old KSK removal awaits the parent DS TTL observation\n",
+						formatRolloverTime(s.AlgRollOldHeadRetireAt))
+				default:
+					fmt.Println("  awaiting the parent's swap to the new-algorithm DS")
+				}
+			}
+			printed = true
+			continue
+		}
+		// Describe the count as published ZSKs (the live keys in the DNSKEY RRset).
 		line := fmt.Sprintf("Algorithm rollover: %s %s -> %s  (in progress)", t.Role, t.FromAlg, t.ToAlg)
 		if t.Total > 0 {
 			line += fmt.Sprintf(", %d of %d published ZSKs on new algorithm", t.Done, t.Total)
@@ -1064,7 +1128,13 @@ func printStateTable(s *tdns.RolloverStatus) {
 	// Left column: this zone's current intent + DS state. (The effective
 	// policy and any in-flight algorithm rollover are zone-global facts and
 	// print in printZoneGlobalHeader, above both role sections.)
-	left = append(left, kv{"status:", s.Headline + " — " + headlinePhraseFor(s.Headline, s.Phase)})
+	phrase := headlinePhraseFor(s.Headline, s.Phase)
+	if s.AlgRollFromAlg != "" {
+		if p := headlinePhraseForAlgRoll(s.Headline, s.Phase); p != "" {
+			phrase = p
+		}
+	}
+	left = append(left, kv{"status:", s.Headline + " — " + phrase})
 	if s.Phase != "" && s.Phase != "idle" {
 		left = append(left, kv{"phase:", s.Phase})
 	}
@@ -1500,6 +1570,23 @@ func formatZskNextRollCol(k tdns.RolloverKeyEntry) string {
 
 // headlinePhraseFor returns the phrase appended after the headline
 // word to give the operator a human-readable summary of the state.
+// headlinePhraseForAlgRoll overrides headlinePhraseFor's phase wording
+// while a KSK algorithm rollover is in flight; "" means keep the default.
+func headlinePhraseForAlgRoll(headline, phase string) string {
+	if headline != "ACTIVE" {
+		return ""
+	}
+	switch phase {
+	case "pending-child-publish":
+		return "waiting for the new-algorithm KSK to reach every resolver"
+	case "pending-parent-observe":
+		return "observing parent for the new-algorithm DS"
+	case "pending-child-withdraw":
+		return "holding the old-algorithm KSK for the drain window"
+	}
+	return ""
+}
+
 func headlinePhraseFor(headline, phase string) string {
 	switch headline {
 	case "OK":
@@ -1726,6 +1813,7 @@ var autoRolloverFlags struct {
 	kskOnly    bool
 	zskOnly    bool
 	policyName string
+	algRoll    bool
 }
 
 // newAutoRolloverCmd returns the parent command holding the auto-rollover
@@ -1767,29 +1855,41 @@ func newAutoRolloverCmd(_ string) *cobra.Command {
 }
 
 // newAutoRolloverPolicyChangeCmd binds a zone toward a new DNSSEC policy for a
-// gradual, relaxed-mode ZSK ALGORITHM rollover. It only sets the algorithm of
-// future-generated keys (writes the policy override + rebinds); it does NOT
-// perform the roll. `auto-rollover asap -z <zone> --zsk` is the throttle.
+// gradual ALGORITHM rollover of one role: a relaxed-mode ZSK roll, or a KSK
+// roll carried by the auto-rollover engine. It binds and gates; it does NOT
+// perform the roll.
 func newAutoRolloverPolicyChangeCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "policy-change",
-		Short: "Bind a zone to a new DNSSEC policy for a gradual ZSK algorithm rollover",
-		Long: `Bind a zone toward a new DNSSEC policy so its ZSK algorithm rolls over
+		Short: "Bind a zone to a new DNSSEC policy for a gradual ZSK or KSK algorithm rollover",
+		Long: `Bind a zone toward a new DNSSEC policy so ONE role's algorithm rolls over
 GRADUALLY. Unlike "zone dnssec policy-set" (which retires the old key
-synchronously — unsafe for an algorithm change), this only sets the
-algorithm of FUTURE-generated ZSKs: the existing FIFO key pipeline drains
-in order, oldest first.
+synchronously — unsafe for an algorithm change), this only binds the
+target; the roll itself is gradual.
 
-This command does NOT perform the roll. After binding, the algorithm
-rolls on the normal ZSK cadence — OR run
+ZSK: only the algorithm of FUTURE-generated ZSKs changes; the existing
+FIFO key pipeline drains in order, oldest first. Requires
+dnssec.completeness: relaxed. After binding, the algorithm rolls on the
+normal ZSK cadence — OR run
 
   auto-rollover asap -z <zone> --zsk
 
-to promote the next standby now (repeat to accelerate through the
-already-propagated old-alg standbys to the new algorithm).
+to promote the next standby now (repeat to accelerate).
 
-Requires dnssec.completeness: relaxed. A KSK / CSK / both-role algorithm
-change, or a second policy-change while a roll is in flight, is refused.`,
+KSK: the auto-rollover engine (rollover.method multi-ds or
+double-signature) carries it as a double-signature rollover: a
+new-algorithm KSK is minted straight into active, the DNSKEY RRset is
+double-signed, the DS at the parent is replaced by the new-algorithm DS
+once every resolver can hold the double-signed RRset, and the old KSK
+is removed once the parent has confirmed the swap and the drain window
+(parent DS TTL included) has elapsed (RFC 6781 §4.1.4). The engine starts it on its next
+tick. Watch it with "auto-rollover status -z <zone> --ksk"; abort it
+before the parent confirms with "auto-rollover cancel -z <zone> --ksk
+--alg-roll".
+
+A CSK or both-role algorithm change, a KSK change without an engine, or
+a second policy-change while a roll of either role is in flight, is
+refused.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			tdns.Globals.App.Type = tdns.AppTypeCli

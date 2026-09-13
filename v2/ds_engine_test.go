@@ -452,11 +452,22 @@ func TestEnsureCDSUnderMultiDSLeavesTheRolloverAbleToCleanUp(t *testing.T) {
 // TestRolloverCDSWhoseClaimCannotBeRecordedIsWithdrawn: the claim is what lets the
 // rollover's cleanup remove its CDS. A CDS published without one would stay on
 // the wire with nothing to ever take it down, so it is withdrawn instead.
+//
+// Only the claim WRITE is made to fail. The rollover state stays readable,
+// because the target set reads it too -- to leave an in-flight KSK algorithm
+// roll's old head out of the published set -- and refuses when that read fails
+// (TestRolloverCDSIsNotPublishedWhenRolloverStateCannotBeRead). Removing the
+// table would stop the publish before any claim is attempted.
 func TestRolloverCDSWhoseClaimCannotBeRecordedIsWithdrawn(t *testing.T) {
 	r := newDSEngineRig(t, 0, false)
 	seedKeyWithIndex(t, r.kdb, "example.", DnskeyStateActive, pubA, 0)
-	if _, err := r.kdb.DB.Exec(`DROP TABLE RolloverZoneState`); err != nil {
-		t.Fatalf("drop RolloverZoneState: %v", err)
+	for _, trigger := range []string{
+		`CREATE TRIGGER refuse_claim_insert BEFORE INSERT ON RolloverZoneState BEGIN SELECT RAISE(ABORT, 'claim write refused'); END`,
+		`CREATE TRIGGER refuse_claim_update BEFORE UPDATE ON RolloverZoneState BEGIN SELECT RAISE(ABORT, 'claim write refused'); END`,
+	} {
+		if _, err := r.kdb.DB.Exec(trigger); err != nil {
+			t.Fatalf("make the claim write fail: %v", err)
+		}
 	}
 
 	res := r.kdb.askDSEngine(context.Background(), DSEngineRequest{cmd: dsCmdPublishRolloverCDS, zd: r.zd})
@@ -465,6 +476,26 @@ func TestRolloverCDSWhoseClaimCannotBeRecordedIsWithdrawn(t *testing.T) {
 	}
 	if got := servedCDS(t, r.zd); len(got) != 0 {
 		t.Errorf("a CDS without a claim was left published (keyids %v)", tupleKeyids(got))
+	}
+}
+
+// TestRolloverCDSIsNotPublishedWhenRolloverStateCannotBeRead: the target set
+// reads the rollover state to leave an in-flight KSK algorithm roll's old head
+// out. When that read fails it cannot tell, so it refuses rather than publish a
+// set that may still name the old algorithm -- and nothing is published.
+func TestRolloverCDSIsNotPublishedWhenRolloverStateCannotBeRead(t *testing.T) {
+	r := newDSEngineRig(t, 0, false)
+	seedKeyWithIndex(t, r.kdb, "example.", DnskeyStateActive, pubA, 0)
+	if _, err := r.kdb.DB.Exec(`DROP TABLE RolloverZoneState`); err != nil {
+		t.Fatalf("drop RolloverZoneState: %v", err)
+	}
+
+	res := r.kdb.askDSEngine(context.Background(), DSEngineRequest{cmd: dsCmdPublishRolloverCDS, zd: r.zd})
+	if res.err == nil || !strings.Contains(res.err.Error(), "read rollover state") {
+		t.Fatalf("err = %v, want a refusal naming the unreadable rollover state", res.err)
+	}
+	if got := servedCDS(t, r.zd); len(got) != 0 {
+		t.Errorf("a CDS was published although the rollover state could not be read (keyids %v)", tupleKeyids(got))
 	}
 }
 

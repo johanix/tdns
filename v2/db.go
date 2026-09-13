@@ -256,6 +256,19 @@ func dbMigrateSchema(db *sql.DB) {
 		// pushed via this scheme yet".
 		{"RolloverZoneState", "parent_advertises_update", "ALTER TABLE RolloverZoneState ADD COLUMN parent_advertises_update INTEGER"},
 		{"RolloverZoneState", "parent_advertises_notify", "ALTER TABLE RolloverZoneState ADD COLUMN parent_advertises_notify INTEGER"},
+		// KSK algorithm rollover (docs/2026-09-08-ksk-alg-rollover-implementation-plan.md
+		// §5.1 + A2). alg_roll_from_alg IS NOT NULL is the single "an
+		// algorithm roll is in flight" predicate. new_head is the
+		// new-algorithm KSK minted straight into active; old_head is the
+		// old-algorithm KSK that stays active through the drain, with
+		// old_head_retire_at (stamped at DS confirm) as its removal clock.
+		// All NULL for existing rows: no roll in flight.
+		{"RolloverZoneState", "alg_roll_from_alg", "ALTER TABLE RolloverZoneState ADD COLUMN alg_roll_from_alg INTEGER"},
+		{"RolloverZoneState", "alg_roll_to_alg", "ALTER TABLE RolloverZoneState ADD COLUMN alg_roll_to_alg INTEGER"},
+		{"RolloverZoneState", "alg_roll_started_at", "ALTER TABLE RolloverZoneState ADD COLUMN alg_roll_started_at TEXT"},
+		{"RolloverZoneState", "alg_roll_new_head_keyid", "ALTER TABLE RolloverZoneState ADD COLUMN alg_roll_new_head_keyid INTEGER"},
+		{"RolloverZoneState", "alg_roll_old_head_keyid", "ALTER TABLE RolloverZoneState ADD COLUMN alg_roll_old_head_keyid INTEGER"},
+		{"RolloverZoneState", "alg_roll_old_head_retire_at", "ALTER TABLE RolloverZoneState ADD COLUMN alg_roll_old_head_retire_at TEXT"},
 		// Split of the old "standby" state into "published" (DNSKEY in
 		// zone, propagation incomplete) + "standby" (propagation
 		// complete, ready for AtomicRollover). published_at carries
