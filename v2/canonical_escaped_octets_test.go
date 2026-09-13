@@ -151,9 +151,9 @@ func TestCanonicalSortKeyOrdersByWireOctets(t *testing.T) {
 	}
 }
 
-// One name spelled several ways shares one key, and groupByOwner, folding
-// text, keeps the escaped spellings apart. Where they sort among themselves
-// must not depend on the order they arrived in -- they arrive in map order.
+// One name spelled several ways shares one key. Owner keys are canonical and
+// never tie, but where spellings of one name do meet, where they sort among
+// themselves must not depend on the order they arrived in.
 func TestCanonicalOwnerOrderBreaksKeyTiesBySpelling(t *testing.T) {
 	want := []string{"A.example.", `\065.example.`, `\a.example.`, "a.example.", "b.example."}
 	rng := rand.New(rand.NewSource(65))
@@ -169,9 +169,9 @@ func TestCanonicalOwnerOrderBreaksKeyTiesBySpelling(t *testing.T) {
 	}
 }
 
-// ...which is what keeps the digest of such a zone one value. It is computed
-// over a map of owners, and the file-change detector fires whenever two
-// computations over one zone disagree.
+// And the digest of a zone that writes one name several ways is one value:
+// the file-change detector fires whenever two computations over one zone
+// disagree.
 func TestZoneDigestIsStableOverOneNameSpelledTwoWays(t *testing.T) {
 	mkA := func(owner, addr string) dns.RR {
 		return &dns.A{
@@ -198,6 +198,36 @@ func TestZoneDigestIsStableOverOneNameSpelledTwoWays(t *testing.T) {
 		}
 		if !bytes.Equal(got, first) {
 			t.Fatalf("computation %d digests the same zone to a different value", i+2)
+		}
+	}
+}
+
+// RFC 4034 §6.2 lowers an owner's US-ASCII letters before it is hashed, and
+// \065 is one of them: a zone that writes its owner \065.example. digests as
+// the zone that writes it a.example.
+func TestZoneDigestReadsEscapesInOwnerNames(t *testing.T) {
+	mkA := func(owner string) dns.RR {
+		return &dns.A{
+			Hdr: dns.RR_Header{Name: owner, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.ParseIP("192.0.2.1"),
+		}
+	}
+	soa, err := dns.NewRR("example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200")
+	if err != nil {
+		t.Fatalf("building the SOA: %v", err)
+	}
+
+	want, err := ZoneDigest("example.", []dns.RR{soa, mkA("a.example.")}, 1, 1)
+	if err != nil {
+		t.Fatalf("ZoneDigest: %v", err)
+	}
+	for _, owner := range []string{`\065.example.`, `\097.example.`, "A.example."} {
+		got, err := ZoneDigest("example.", []dns.RR{soa, mkA(owner)}, 1, 1)
+		if err != nil {
+			t.Fatalf("ZoneDigest with owner %q: %v", owner, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("a zone writing its owner %q digests differently from one writing a.example.", owner)
 		}
 	}
 }

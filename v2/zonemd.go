@@ -129,8 +129,9 @@ func canonicalSortKey(name string) []byte {
 	// This key IS the canonical order: it decides the NSEC chain and the order
 	// records are fed to the ZONEMD digest. RFC 4034 6.1 folds US-ASCII A-Z
 	// and leaves every other octet alone, and the fold applies to the decoded
-	// octet -- \065 is an A -- which core.CanonicalizeName, folding text,
-	// cannot do. strings.ToLower breaks the rule in two separate ways:
+	// octet: \065 is an A. core.CanonicalizeName reads escapes the same way, so
+	// two names share a key here exactly when they share an owner-map key.
+	// strings.ToLower breaks the rule in two separate ways:
 	//
 	//   U+212A KELVIN SIGN folds onto "k", so \u212a.example. and k.example. --
 	//   two different names -- produce the SAME key and occupy one position.
@@ -470,9 +471,10 @@ func canonicalOwnerOrder(names []string) {
 		if c := bytes.Compare(tmp[i].key, tmp[j].key); c != 0 {
 			return c < 0
 		}
-		// One name spelled two ways -- \065 and A -- which callers that fold
-		// text keep apart. Order by spelling, so neither this order nor a
-		// digest fed in it depends on the order the names arrived in.
+		// One name spelled two ways -- \065 and A. Owner keys are canonical and
+		// never tie; a caller holding names that are not could hand over both.
+		// Order by spelling, so neither this order nor a digest fed in it
+		// depends on the order the names arrived in.
 		return tmp[i].name < tmp[j].name
 	})
 	for i := range tmp {
