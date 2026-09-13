@@ -2088,10 +2088,17 @@ func (imr *Imr) updateDNSKEYCacheFromRRset(anchorName string, rrset *core.RRset,
 				Expiration:  exp,
 			}
 			imr.DnskeyCache.Set(anchorName, keyid, &cdr)
+			// Log what the store kept, not what was asked for: for a trust
+			// anchor the two differ, and logging the request is how a
+			// 15-minute anchor went unnoticed.
+			stored := cdr.Expiration
+			if k := imr.DnskeyCache.Get(anchorName, keyid); k != nil {
+				stored = k.Expiration
+			}
 			if trustAnchor {
-				lgImr.Info("cached DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "trustAnchor", true, "expires", exp)
+				lgImr.Info("cached DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "trustAnchor", true, "expires", stored)
 			} else {
-				lgImr.Info("cached DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "expires", exp)
+				lgImr.Info("cached DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "expires", stored)
 			}
 		}
 	}

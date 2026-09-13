@@ -37,17 +37,22 @@ func dnskeyKey(zonename string, keyid uint16) string {
 	return fmt.Sprintf("%s::%d", core.CanonicalizeName(zonename), keyid)
 }
 
+// Get returns the key stored under zonename::keyid. An expired learned key is
+// removed and not returned. A trust anchor is returned whatever its Expiration
+// says: it is configuration, and once it is gone nothing below it can validate
+// again for the life of the process.
 func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 	lookupKey := dnskeyKey(zonename, keyid)
 	tmp, ok := dkc.Map.Get(lookupKey)
 	if !ok {
 		return nil
 	}
-	if tmp.Expiration.Before(time.Now()) {
-		dkc.Map.Remove(lookupKey)
-		// if dkc.Debug {
-		//	log.Printf("DnskeyCache: Removed expired key %s", lookupKey)
-		//}
+	if !tmp.TrustAnchor && tmp.Expiration.Before(time.Now()) {
+		// Under the shard lock, so a trust anchor stored since the read above
+		// is not removed in its place.
+		dkc.Map.RemoveCb(lookupKey, func(_ string, v CachedDnskeyRRset, exists bool) bool {
+			return exists && !v.TrustAnchor && v.Expiration.Before(time.Now())
+		})
 		return nil
 	}
 	return &tmp
@@ -58,13 +63,27 @@ func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 // that a key would stay usable for validation long after the RRset carrying it
 // had been capped out of the RRset cache. Trust anchors are configuration and
 // keep their own lifetime.
+//
+// A trust anchor's key is also a member of its zone's DNSKEY RRset, and every
+// fetch of that RRset stores the key again, with the RRset's TTL and, from
+// some callers, without the TrustAnchor flag. Such a write refreshes the key;
+// it does not end the anchor, so the flag and the longer lifetime are kept.
 func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRset) {
 	lookupKey := dnskeyKey(zonename, keyid)
-	entry := *cdr
-	if !entry.TrustAnchor {
-		entry.Expiration, _, _ = GetTTLLimits().bound(entry.Expiration, time.Now())
-	}
-	dkc.Map.Set(lookupKey, entry)
+	limits := GetTTLLimits()
+	now := time.Now()
+	dkc.Map.Upsert(lookupKey, *cdr, func(exists bool, old, entry CachedDnskeyRRset) CachedDnskeyRRset {
+		if exists && old.TrustAnchor {
+			entry.TrustAnchor = true
+			if old.Expiration.After(entry.Expiration) {
+				entry.Expiration = old.Expiration
+			}
+		}
+		if !entry.TrustAnchor {
+			entry.Expiration, _, _ = limits.bound(entry.Expiration, now)
+		}
+		return entry
+	})
 }
 
 // var RRsetCache = NewRRsetCache()
