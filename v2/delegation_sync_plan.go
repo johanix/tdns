@@ -398,9 +398,10 @@ func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncR
 	// without this the UPDATE and API transports this whole plan exists to
 	// offer would never be reached for such a zone.
 	//
-	// Scoped to the proxy role. A tdns-auth child publishes its own CDS as part
-	// of signing, so the same test there would race its first publication for
-	// no benefit.
+	// Scoped to the proxy role. A tdns-auth child's NOTIFY sender asks the DS
+	// engine for its CDS before it notifies, and fails the candidate when there
+	// is none to point at, so the same test there would only race that
+	// publication.
 	if role == SyncRoleProxy && !zoneHasCdsOrCsync(zd) {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{"NOTIFY",
 			"proxied zone publishes neither CDS nor CSYNC; a NOTIFY would leave the parent nothing to read"})
