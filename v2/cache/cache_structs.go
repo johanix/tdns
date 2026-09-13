@@ -111,10 +111,28 @@ type Zone struct {
 	// Tracks per-zone, per-(address,transport) failures (e.g., REFUSED for
 	// this zone from this address over a specific transport).
 	AddressBackoffs map[AddrXport]*AddressBackoff
-	mu              sync.Mutex // Protects State and AddressBackoffs
+	mu              sync.Mutex // Protects State, stateSince and AddressBackoffs
+
+	// stateSince is when State was last set, or when an Indeterminate state
+	// written by a struct literal was first read. Only Indeterminate uses it.
+	stateSince time.Time
 }
 
-// GetState returns the current validation state of the zone.
+// ZoneIndeterminateRetry is how long a zone's Indeterminate state stands before
+// GetState stops reporting it and the validator tries the chain again.
+//
+// Indeterminate means "the chain could not be followed": a DNSKEY fetch that
+// timed out, a parent that did not answer, an anchor that was not usable at
+// that moment. The validator records it so it does not hammer an unreachable
+// chain, and nothing ever cleared it -- ZoneMap entries are never removed -- so
+// one bad moment made a zone, and every zone below it, unvalidatable for the
+// life of the process. Thirty seconds is long enough to stop the hammering and
+// short enough that a cold start converges without anyone restarting anything.
+var ZoneIndeterminateRetry = 30 * time.Second
+
+// GetState returns the current validation state of the zone. An Indeterminate
+// state older than ZoneIndeterminateRetry reads as ValidationStateNone ("not
+// known"), which sends every reader back to following the chain.
 // Thread-safe: acquires mu lock.
 func (z *Zone) GetState() ValidationState {
 	if z == nil {
@@ -122,6 +140,14 @@ func (z *Zone) GetState() ValidationState {
 	}
 	z.mu.Lock()
 	defer z.mu.Unlock()
+	if z.State == ValidationStateIndeterminate {
+		if z.stateSince.IsZero() {
+			// Written by a struct literal: the clock starts now.
+			z.stateSince = time.Now()
+		} else if time.Since(z.stateSince) > ZoneIndeterminateRetry {
+			return ValidationStateNone
+		}
+	}
 	return z.State
 }
 
@@ -134,6 +160,7 @@ func (z *Zone) SetState(state ValidationState) {
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	z.State = state
+	z.stateSince = time.Now()
 }
 
 type CacheContext uint8
