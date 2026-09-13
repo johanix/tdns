@@ -303,6 +303,16 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		lgImr.Info("adding forward zone", "zone", fz.Zone, "trust-ad", fz.TrustAD, "upstreams", strings.Join(ups, ", "))
 	}
 
+	// Trust anchors are configuration, and priming already validates what it
+	// fetches: load them first. They used to be loaded only after
+	// InitImrEngine returned, so priming validated ". NS" and ". DNSKEY"
+	// against no anchor, cached the root NS as Indeterminate, and every start
+	// logged "NS RRset failed to validate for trust anchor zone" -- until that
+	// cached verdict expired. Only the offline half here; fetching and
+	// validating the anchored zones' DNSKEYs still needs the primed cache and
+	// stays in initializeImrTrustAnchors.
+	imr.loadConfiguredTrustAnchors(conf)
+
 	if !rrcache.IsPrimed() {
 		if imr.forwardZoneFor(".") != nil {
 			// The root is covered by a forward zone: the hint-seeded root
