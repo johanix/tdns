@@ -6,6 +6,7 @@ package tdns
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -261,7 +262,17 @@ func DsyncApiPostDelegation() func(w http.ResponseWriter, r *http.Request) {
 		// parent checks that itself, on every channel, because a check done by
 		// the requesting client is not a check.
 		if cerr := zd.CheckDelegationCoherenceForUpdate(actions,
-			imrDnskeyFetcher(Conf.Internal.ImrEngine)); cerr != nil {
+			coherenceDnskeyFetcher(&Conf)); cerr != nil {
+			// A check that could not run yet has decided nothing: 503 with a
+			// Retry-After sends the client back, where 409 would tell it the
+			// delegation is wrong.
+			if errors.Is(cerr, ErrNoImrEngine) {
+				lgDsyncApi.Warn("DSYNC API update deferred: the resolver is not running yet",
+					"zone", zd.ZoneName, "child", child, "principal", cred.Principal, "err", cerr)
+				w.Header().Set("Retry-After", "15")
+				dsyncApiError(w, http.StatusServiceUnavailable, "%v", cerr)
+				return
+			}
 			lgDsyncApi.Warn("DSYNC API update refused as incoherent",
 				"zone", zd.ZoneName, "child", child, "principal", cred.Principal, "err", cerr)
 			dsyncApiError(w, http.StatusConflict, "%v", cerr)
