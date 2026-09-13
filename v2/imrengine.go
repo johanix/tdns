@@ -1001,11 +1001,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			crrset.Context == cache.ContextHint) &&
 		crrset.RRset != nil && crrset.RRset.RRtype == qtype {
 		lgImr.Debug("ImrResponder: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
-		m.SetRcode(r, dns.RcodeSuccess)
-		m.Answer = crrset.ServeAnswer(time.Now(), msgoptions.DO)
-		m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
-		setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
-		w.WriteMsg(m)
+		imr.serveCachedPositive(ctx, w, r, m, qname, qtype, crrset, msgoptions)
 		return
 	}
 	// DS records are exclusively published at the parent zone, so a
@@ -1018,11 +1014,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	// the client their NODATA for a DS sitting in cache as secure.)
 	if crrset != nil && qtype == dns.TypeDS && crrset.Context == cache.ContextReferral &&
 		crrset.RRset != nil && crrset.RRset.RRtype == dns.TypeDS && len(crrset.RRset.RRs) > 0 {
-		m.SetRcode(r, dns.RcodeSuccess)
-		m.Answer = crrset.ServeAnswer(time.Now(), msgoptions.DO)
-		m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
-		setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
-		w.WriteMsg(m)
+		imr.serveCachedPositive(ctx, w, r, m, qname, qtype, crrset, msgoptions)
 		return
 	}
 	if crrset != nil {
@@ -1041,7 +1033,8 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			// } else if crrset.Validated {
 			//	m.AuthenticatedData = true
 			// }
-			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
+			m.AuthenticatedData = negativeAD(crrset, r, msgoptions)
+			attachNegativeEDE(m, msgoptions, crrset, r)
 			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 			w.WriteMsg(m)
 			return
@@ -1072,43 +1065,16 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			// } else if crrset.Validated {
 			//	m.AuthenticatedData = true
 			// }
-			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
+			m.AuthenticatedData = negativeAD(crrset, r, msgoptions)
+			attachNegativeEDE(m, msgoptions, crrset, r)
 			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 			w.WriteMsg(m)
 			return
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextAnswer &&
 			crrset.RRset != nil && crrset.RRset.RRtype == qtype:
 			// Same verdict-to-response rule as a fresh answer
-			// (ProcessAuthDNSResponse, dispositionFor). A verdict that says
-			// "could not tell yet" is asked again rather than served as it was.
-			state := crrset.State
-			signed := len(crrset.RRset.RRSIGs) > 0
-			if !verdictReusable(state) && signed && !msgoptions.CD && imr.Cache != nil {
-				if v, err := imr.Cache.ValidateRRsetWithParentZone(ctx, crrset.RRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone); err == nil {
-					state = v
-				}
-			}
-			disp, ede := imr.dispositionFor(state, crrset.EDECode, signed, msgoptions)
-			if disp == answerServfail {
-				lgImr.Debug("ImrResponder: returning SERVFAIL for cached data that did not validate", "qname", qname, "qtype", dns.TypeToString[qtype], "edeCode", ede, "state", cache.ValidationStateToString[state])
-				m.Answer = nil
-				m.Ns = nil
-				m.SetRcode(r, dns.RcodeServerFailure)
-				if r.IsEdns0() != nil {
-					if crrset.EDECode != 0 && crrset.EDEText != "" {
-						edns0.AttachEDEToResponseWithText(m, crrset.EDECode, crrset.EDEText, msgoptions.DO)
-					} else {
-						edns0.AttachEDEToResponse(m, ede)
-					}
-				}
-				w.WriteMsg(m)
-				return
-			}
-			m.SetRcode(r, dns.RcodeSuccess)
-			m.Answer = crrset.ServeAnswer(time.Now(), msgoptions.DO)
-			m.AuthenticatedData = disp == answerServeSecure && adWanted(r, msgoptions)
-			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
-			w.WriteMsg(m)
+			// (ProcessAuthDNSResponse, dispositionFor).
+			imr.serveCachedPositive(ctx, w, r, m, qname, qtype, crrset, msgoptions)
 			return
 		}
 	}
@@ -1544,9 +1510,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 			start := len(resp.Ns)
 			appendSOAToMessage(cached.RRset, msgoptions, resp)
 			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(time.Now()))
-			if cached.State == cache.ValidationStateSecure {
-				resp.AuthenticatedData = true
-			}
+			resp.AuthenticatedData = negativeAD(cached, src, msgoptions)
 			attachNegativeEDE(resp, msgoptions, cached, src)
 			return true
 		}

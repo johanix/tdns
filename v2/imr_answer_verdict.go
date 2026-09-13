@@ -4,6 +4,9 @@
 package tdns
 
 import (
+	"context"
+	"time"
+
 	"github.com/johanix/tdns/v2/cache"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -65,6 +68,18 @@ func adWanted(r *dns.Msg, msgoptions *edns0.MsgOptions) bool {
 	return (msgoptions != nil && msgoptions.DO) || (r != nil && r.AuthenticatedData)
 }
 
+// negativeAD reports whether a denial served from entry c may carry AD: only a
+// Secure proof, and only to a client that can take the bit.
+//
+// Denials do not go through dispositionFor. A bogus one never reaches the cache
+// (handleNegative refuses it), the only EDE a cached denial carries is served
+// beside it rather than instead of it, and ValidateNegativeResponse still
+// returns Indeterminate for every NSEC3 proof -- SERVFAIL for a signed,
+// Indeterminate denial would fail every NXDOMAIN from an NSEC3-signed zone.
+func negativeAD(c *cache.CachedRRset, r *dns.Msg, msgoptions *edns0.MsgOptions) bool {
+	return c != nil && c.State == cache.ValidationStateSecure && adWanted(r, msgoptions)
+}
+
 // verdictReusable reports whether a cached verdict can be served as it stands.
 // Indeterminate and "no verdict" cannot: they mean the chain was not available
 // when the entry was made, and the only way to find out whether it is now is to
@@ -75,6 +90,48 @@ func verdictReusable(state cache.ValidationState) bool {
 		return true
 	}
 	return false
+}
+
+// serveCachedPositive answers r from a cached positive entry under the same
+// rule as a fresh answer: a verdict that says "could not tell yet" is asked
+// again, a failing one is SERVFAIL with its EDE, and AD goes only to a client
+// that can take it.
+//
+// Every cache branch that serves positive data comes through here: the ordinary
+// answer, a DS served from the parent's referral, and indirect data (referral,
+// glue, hint) served without upgrading. The last two used to set AD from the
+// entry's state for every client, and served a bogus entry as NOERROR.
+func (imr *Imr) serveCachedPositive(ctx context.Context, w dns.ResponseWriter, r, m *dns.Msg, qname string, qtype uint16, crrset *cache.CachedRRset, msgoptions *edns0.MsgOptions) {
+	state := crrset.State
+	signed := crrset.RRset != nil && len(crrset.RRset.RRSIGs) > 0
+	if !verdictReusable(state) && signed && !msgoptions.CD && imr.Cache != nil {
+		if v, err := imr.Cache.ValidateRRsetWithParentZone(ctx, crrset.RRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone); err == nil {
+			state = v
+		}
+	}
+	disp, ede := imr.dispositionFor(state, crrset.EDECode, signed, msgoptions)
+	if disp == answerServfail {
+		lgImr.Debug("ImrResponder: returning SERVFAIL for cached data that did not validate",
+			"qname", qname, "qtype", dns.TypeToString[qtype], "edeCode", ede,
+			"state", cache.ValidationStateToString[state], "context", cache.CacheContextToString[crrset.Context])
+		m.Answer = nil
+		m.Ns = nil
+		m.SetRcode(r, dns.RcodeServerFailure)
+		if r.IsEdns0() != nil {
+			if crrset.EDECode != 0 && crrset.EDEText != "" {
+				edns0.AttachEDEToResponseWithText(m, crrset.EDECode, crrset.EDEText, msgoptions.DO)
+			} else {
+				edns0.AttachEDEToResponse(m, ede)
+			}
+		}
+		w.WriteMsg(m)
+		return
+	}
+	m.SetRcode(r, dns.RcodeSuccess)
+	m.Answer = crrset.ServeAnswer(time.Now(), msgoptions.DO)
+	m.AuthenticatedData = disp == answerServeSecure && adWanted(r, msgoptions)
+	setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
+	w.WriteMsg(m)
 }
 
 // hasTrustAnchors reports whether this resolver holds any trust anchor, i.e.
