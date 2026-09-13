@@ -295,8 +295,9 @@ func TestKTAbortKskAlgRoll(t *testing.T) {
 	})
 }
 
-// ktCancelledAfterFirstCheck is live for its first Err() call and cancelled
-// from then on: a request cancelled once the abort is already under way.
+// ktCancelledAfterFirstCheck passes its first Err() check and is cancelled
+// the moment that check returns: a request cancelled once the abort is
+// already under way.
 type ktCancelledAfterFirstCheck struct {
 	context.Context
 	checks atomic.Int32
@@ -312,9 +313,9 @@ func (c *ktCancelledAfterFirstCheck) Done() <-chan struct{} { return c.done }
 
 func (c *ktCancelledAfterFirstCheck) Err() error {
 	if c.checks.Add(1) == 1 {
+		c.once.Do(func() { close(c.done) })
 		return nil
 	}
-	c.once.Do(func() { close(c.done) })
 	return context.Canceled
 }
 
@@ -366,8 +367,10 @@ func TestKTAbortKskAlgRollRefusesCancelledRequest(t *testing.T) {
 	if _, err := AbortKskAlgRollover(underWay, &Conf, kdb, ktAlgZone); err != nil {
 		t.Fatalf("abort cancelled once under way: %v, want it to run to completion", err)
 	}
-	if underWay.checks.Load() < 1 {
-		t.Fatalf("fixture: the abort never checked its context")
+	select {
+	case <-underWay.Done():
+	default:
+		t.Fatalf("fixture: the abort never checked its context, so the request was never cancelled")
 	}
 	if tags := zd.mustRRSIGKeytags(t, ktAlgZone, dns.TypeDNSKEY); ktHasKeytag(tags, b) {
 		t.Fatalf("after the abort B's signature remains: %v", tags)
