@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -770,6 +771,25 @@ func (zd *ZoneData) snapshotContentIsServableLocked(snap *zoneSnapshot) bool {
 // delta journal to the content it has just loaded.
 func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset,
 	firstLoad, fromZoneFile bool) error {
+	// The persisted outbound serial a first load may restore, read before this
+	// function changes anything: a read that fails must leave the zone exactly
+	// as it was, IncomingSerial included, or the retry would take the
+	// upstream's serial as already held and never transfer again. Only a
+	// missing row means nothing was saved. Any other error fails the load, as
+	// a refresh that cannot save its serial does below: carrying on would let
+	// the first publish persist the upstream's serial over the saved one.
+	var restoreSerial uint32
+	var haveRestoreSerial bool
+	if firstLoad && zd.KeyDB != nil && zoneMayOriginateContent(zd) &&
+		zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
+		saved, err := zd.KeyDB.LoadOutgoingSerial(zd.ZoneName)
+		switch {
+		case err == nil:
+			restoreSerial, haveRestoreSerial = saved, true
+		case !errors.Is(err, sql.ErrNoRows):
+			return fmt.Errorf("read the persisted outgoing serial for zone %s: %w", zd.ZoneName, err)
+		}
+	}
 	// The zone has just been re-read; whatever was replayed on top of the
 	// PREVIOUS file no longer applies to this one, so a replay for the new file
 	// is due again.
@@ -784,25 +804,24 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	case firstLoad:
 		zd.CurrentSerial = new_zd.CurrentSerial
 		// A zone that originates content and persists its outbound serial
-		// takes the persisted one back here when it is ahead of the
-		// upstream's. The first publish, below, persists CurrentSerial: left
-		// at the upstream's serial it would record that over the saved one
-		// before the engine's own restore looked, and the zone would come
-		// back from a restart with a lower serial than it served before --
-		// its downstreams then ignore every NOTIFY until it catches up.
+		// takes the saved one back when it is newer than the upstream's, in
+		// RFC 1982 order. The first publish, below, persists CurrentSerial:
+		// left at the upstream's serial it would record that over the saved
+		// one before the engine's own restore looked, and the zone would come
+		// back from a restart below the serial it served -- its downstreams
+		// then ignore every NOTIFY until it catches up.
 		//
-		// One past the saved serial, not the saved serial itself: the
-		// content may have changed while the zone was down, and a downstream
-		// that already holds the saved serial would otherwise never fetch
-		// it. (The engine's restore bumped the same way, through the publish
-		// path.) One extra transfer per restart is the price.
-		if zd.KeyDB != nil && zoneMayOriginateContent(zd) &&
-			zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
-			if saved, err := zd.KeyDB.LoadOutgoingSerial(zd.ZoneName); err == nil && saved > zd.CurrentSerial {
-				lg.Info("first load; outbound-soa-serial=persist (restored saved serial, plus one)",
-					"zone", zd.ZoneName, "incoming", zd.CurrentSerial, "persisted", saved, "serving", saved+1)
-				zd.CurrentSerial = saved + 1
-			}
+		// One past the saved serial, not the saved serial itself: the content
+		// may have changed while the zone was down, and a downstream that
+		// already holds the saved serial would otherwise never fetch it. One
+		// extra transfer per restart is the price. The two later restores, in
+		// initialLoadZone and after a refresh, keep a restored serial as it
+		// is; by the time either runs, the serial chosen here or by the
+		// refresh has been persisted, so they find nothing newer.
+		if haveRestoreSerial && serialNewer(restoreSerial, zd.CurrentSerial) {
+			lg.Info("first load; outbound-soa-serial=persist (restored saved serial, plus one)",
+				"zone", zd.ZoneName, "incoming", zd.CurrentSerial, "persisted", restoreSerial, "serving", restoreSerial+1)
+			zd.CurrentSerial = restoreSerial + 1
 		}
 		zd.FirstZoneLoad = false
 

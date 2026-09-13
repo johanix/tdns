@@ -2,10 +2,12 @@ package tdns
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -438,28 +440,32 @@ func TestFirstLoadRestoresThePersistedSerialForAnOriginatingSecondary(t *testing
 	}
 }
 
-// The same for a file-backed primary under tdns-auth, which never restored
-// its persisted serial either: with a file at serial 7 and 1000 persisted,
-// the zone comes up serving 1001.
-func TestFirstLoadRestoresThePersistedSerialForAPrimary(t *testing.T) {
+// persistPrimary starts a RefreshEngine with outbound-soa-serial=persist, a
+// saved outgoing serial when saved is non-zero, and a pre-registered primary
+// for example. that is to load zoneStr from a file. load sends the config
+// refresher that starts the first load.
+func persistPrimary(t *testing.T, zoneStr string, saved uint32) (zd *ZoneData, conf *Config, load func()) {
+	t.Helper()
 	authApp(t)
 	kdb := Conf.Internal.KeyDB
 	if err := applyOutboundSoaSerial(kdb, OutboundSoaSerialPersist); err != nil {
 		t.Fatalf("persist mode: %v", err)
 	}
-	if err := kdb.SaveOutgoingSerial("example.", 1000); err != nil {
-		t.Fatalf("seed the persisted serial: %v", err)
+	if saved != 0 {
+		if err := kdb.SaveOutgoingSerial("example.", saved); err != nil {
+			t.Fatalf("seed the persisted serial: %v", err)
+		}
 	}
 	zf := filepath.Join(t.TempDir(), "example.zone")
-	if err := os.WriteFile(zf, []byte(s2Zone), 0644); err != nil { // serial 7
+	if err := os.WriteFile(zf, []byte(zoneStr), 0644); err != nil {
 		t.Fatalf("write zone file: %v", err)
 	}
-	conf := &Config{}
+	conf = &Config{}
 	conf.Internal.KeyDB = kdb
 	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 1)
 	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
 
-	zd := &ZoneData{ZoneName: "example.", Logger: discardLogger(), FirstZoneLoad: true}
+	zd = &ZoneData{ZoneName: "example.", Logger: discardLogger(), FirstZoneLoad: true}
 	zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
 	Zones.Set("example.", zd)
 	t.Cleanup(func() { Zones.Remove("example.") })
@@ -475,28 +481,97 @@ func TestFirstLoadRestoresThePersistedSerialForAPrimary(t *testing.T) {
 			t.Error("RefreshEngine did not shut down")
 		}
 	})
-	conf.Internal.RefreshZoneCh <- ZoneRefresher{
-		Name:         "example.",
-		ZoneType:     Primary,
-		ZoneStore:    MapZone,
-		Zonefile:     zf,
-		Options:      map[ZoneOption]bool{},
-		ConfigUpdate: true,
+	load = func() {
+		conf.Internal.RefreshZoneCh <- ZoneRefresher{
+			Name:         "example.",
+			ZoneType:     Primary,
+			ZoneStore:    MapZone,
+			Zonefile:     zf,
+			Options:      map[ZoneOption]bool{},
+			ConfigUpdate: true,
+		}
 	}
+	return zd, conf, load
+}
+
+// waitServing waits for the zone to be Ready and to serve want, in its
+// CurrentSerial and in the published snapshot.
+func waitServing(t *testing.T, zd *ZoneData, want uint32) {
+	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		zd.mu.Lock()
 		ready, cur := zd.Ready, zd.CurrentSerial
 		zd.mu.Unlock()
-		if ready && cur == 1001 {
-			break
+		snap := zd.publishedSnapshot()
+		if ready && cur == want && snap != nil && snap.Serial == want {
+			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("after the first load: Ready=%v CurrentSerial=%d, want 1001", ready, cur)
+			t.Fatalf("after the first load: Ready=%v CurrentSerial=%d, want %d served", ready, cur, want)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if snap := zd.publishedSnapshot(); snap == nil || snap.Serial != 1001 {
-		t.Fatalf("the served snapshot is not at 1001: %+v", snap)
+}
+
+// soaSerial is s2Zone with its SOA serial (7) replaced.
+func soaSerial(serial uint32) string {
+	return strings.Replace(s2Zone, "hostmaster.example. 7 ", fmt.Sprintf("hostmaster.example. %d ", serial), 1)
+}
+
+// A file-backed primary under tdns-auth never restored its persisted serial
+// either: with a file at serial 7 and 1000 persisted, the zone comes up
+// serving 1001.
+func TestFirstLoadRestoresThePersistedSerialForAPrimary(t *testing.T) {
+	zd, _, load := persistPrimary(t, s2Zone, 1000)
+	load()
+	waitServing(t, zd, 1001)
+}
+
+// Newer is RFC 1982 order, not a numeric compare: a saved serial that has
+// wrapped past zero is newer than a file serial just below the wrap, and one
+// just below the wrap is older than a file serial past it.
+func TestFirstLoadComparesThePersistedSerialInRFC1982Order(t *testing.T) {
+	t.Run("saved past the wrap is restored", func(t *testing.T) {
+		zd, _, load := persistPrimary(t, soaSerial(4294967290), 5)
+		load()
+		waitServing(t, zd, 6)
+	})
+	t.Run("saved before the wrap is not", func(t *testing.T) {
+		zd, _, load := persistPrimary(t, soaSerial(5), 4294967290)
+		load()
+		waitServing(t, zd, 5)
+	})
+}
+
+// A persisted serial that cannot be read fails the first load rather than
+// letting the first publish overwrite it, and leaves nothing behind that
+// would stop the retry: once the read works, the next attempt loads and
+// restores.
+func TestFirstLoadFailsWhenThePersistedSerialCannotBeRead(t *testing.T) {
+	zd, conf, load := persistPrimary(t, s2Zone, 1000)
+	kdb := Conf.Internal.KeyDB
+	if _, err := kdb.DB.Exec(`ALTER TABLE OutgoingSerials RENAME TO OutgoingSerialsAway`); err != nil {
+		t.Fatalf("hide the table: %v", err)
 	}
+	load()
+	deadline := time.Now().Add(5 * time.Second)
+	for !zd.HasError(RefreshError) {
+		if time.Now().After(deadline) {
+			t.Fatal("the first load did not fail with the persisted serial unreadable")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	zd.mu.Lock()
+	first, incoming := zd.FirstZoneLoad, zd.IncomingSerial
+	zd.mu.Unlock()
+	if zd.publishedSnapshot() != nil || !first || incoming != 0 {
+		t.Fatalf("a failed first load left state behind: published=%v FirstZoneLoad=%v IncomingSerial=%d",
+			zd.publishedSnapshot() != nil, first, incoming)
+	}
+	if _, err := kdb.DB.Exec(`ALTER TABLE OutgoingSerialsAway RENAME TO OutgoingSerials`); err != nil {
+		t.Fatalf("restore the table: %v", err)
+	}
+	conf.Internal.RefreshZoneCh <- ZoneRefresher{Name: "example.", ZoneStore: MapZone} // a retry, as the ticker sends
+	waitServing(t, zd, 1001)
 }

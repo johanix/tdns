@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -248,7 +249,11 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 				// while we were down, the inbound serial is the one to
 				// honour — moving zd.CurrentSerial backwards would break
 				// secondaries.
-				if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
+				saved, err := zd.KeyDB.LoadOutgoingSerial(zone)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					lgEngine.Warn("reading the persisted outgoing serial failed", "zone", zone, "err", err)
+				}
+				if err == nil && serialNewer(saved, zd.CurrentSerial) {
 					lgEngine.Info("zone loaded; outbound-soa-serial=persist (restored saved serial)",
 						"zone", zone, "incoming", zd.CurrentSerial, "persisted", saved)
 					zd.CurrentSerial = saved
