@@ -440,3 +440,44 @@ Scope, when it runs:
 
 Because migration + re-pin happen together here and MP never re-pins during B, B
 itself needs no MP-compatibility concessions.
+
+### Amendment 2026-09-11 — B-MP: receivers do not promote, and what tdns exports instead
+
+Written when B-MP's tdns half (T-A) was implemented; the section above is
+left as it was written.
+
+**The premise of §9 is wrong.** `MPZoneData` embeds `tdns.ZoneData`, but the
+staging receivers (`stageRRset`, `stageDelete`, `publishLocked`, ...) are
+unexported, and Go does not promote unexported methods across a package
+boundary. tdns-mp gets nothing "for free"; every write it makes after the
+re-pin goes to `zd.Data`, which after a load is neither the working set nor
+the snapshot, and is lost. The trial re-pin of 2026-09-10 found this, and the
+B-MP plan (`tdns-mp/docs/2026-09-11-bmp-snapshot-plan.md`, §1) records the
+four defects it causes on tdns main.
+
+**What tdns exports instead (T-A, `v2/zone_mutation.go`, `v2/zone_snapshot.go`):**
+
+| export | what |
+|---|---|
+| `OwnerForAnalysis`, `RRsetForAnalysis` | the existing `ownerForAnalysis` / `rrsetForAnalysis`: published snapshot where one exists, `Data` otherwise, never a panic at a missing apex. The reader for anything that runs on both a live zone and a draft. Not a serve-path reader; `GetOwner` and its `Ready` gate stay the serve path. |
+| `StageRRset`, `StageDelete`, `StageOwnerDelete` | one RRset (or owner) at a time, draft-aware: on a zone with a published snapshot they stage into the working set under `zd.mu`; on a draft (content in `Data`, nothing published: what `OnZonePreRefresh` receives) they write `Data`, which the refresh publish consumes. The draft test is `publishedSnapshot() == nil`, the same one `ownerForAnalysis` makes. |
+| `Stager`, `StageBatch(fn)` | one logical change under one hold of `zd.mu`, published once when `fn` reports a change; on a draft it writes `Data` and publishes nothing. `Stager.RRset` reads the zone's *next* content (the working set, seeded from the snapshot on the first read; `Data` on a draft) and returns a copy. A failed `fn` is unwound on a live zone. `fn` must not take `zd.mu`. |
+| `CloneRRset` | `cloneRRset`, for building a new RRset from a served one before appending. |
+| `Publish` | `BumpSerialOnly` under the name that says what it does. |
+| `StopPublisher` | `stopPublisher`, for harnesses that build zones by hand. |
+
+**Why a batch, not exported `*Locked` functions.** The per-call form takes and
+drops `zd.mu` per call, so a refresh of the same zone can land between two
+stages of one logical change, replace the working set and publish on its own;
+the trailing `Publish` then republishes what the refresh already served, one
+serial later. A closure holding the lock across the change cannot be misused
+by calling a locking wrapper while the lock is held, and its `Stager` gives the
+read-your-own-writes view the per-call form lacks (plan §2.1, §6 Q11).
+
+**The mutator gate is unchanged.** The draft branch writes `Data.Set` from
+`zone_mutation.go`, which is allowlisted; tdns-mp adopts the same gate over
+its own tree in the B-MP plan's M-1.
+
+**B-MP is the tdns-mp plan**, not this document: the tdns-mp side (readers,
+combiner staging, the key seam, the rigs) is specified there and decided in
+its §9.
