@@ -1078,28 +1078,35 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			return
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextAnswer &&
 			crrset.RRset != nil && crrset.RRset.RRtype == qtype:
-			if !msgoptions.CD && (crrset.EDECode != 0 || crrset.State == cache.ValidationStateBogus) {
-				lgImr.Debug("ImrResponder: returning SERVFAIL for bogus cached data", "qname", qname, "qtype", dns.TypeToString[qtype], "edeCode", crrset.EDECode, "state", cache.ValidationStateToString[crrset.State])
+			// Same verdict-to-response rule as a fresh answer
+			// (ProcessAuthDNSResponse, dispositionFor). A verdict that says
+			// "could not tell yet" is asked again rather than served as it was.
+			state := crrset.State
+			signed := len(crrset.RRset.RRSIGs) > 0
+			if !verdictReusable(state) && signed && !msgoptions.CD && imr.Cache != nil {
+				if v, err := imr.Cache.ValidateRRsetWithParentZone(ctx, crrset.RRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone); err == nil {
+					state = v
+				}
+			}
+			disp, ede := imr.dispositionFor(state, crrset.EDECode, signed, msgoptions)
+			if disp == answerServfail {
+				lgImr.Debug("ImrResponder: returning SERVFAIL for cached data that did not validate", "qname", qname, "qtype", dns.TypeToString[qtype], "edeCode", ede, "state", cache.ValidationStateToString[state])
 				m.Answer = nil
 				m.Ns = nil
 				m.SetRcode(r, dns.RcodeServerFailure)
-				// Attach EDE if query had EDNS0 (check if request had OPT RR)
-				hasEDNS0 := r.IsEdns0() != nil
-				lgImr.Debug("ImrResponder: EDE details", "hasEDNS0", hasEDNS0, "edeCode", crrset.EDECode, "state", cache.ValidationStateToString[crrset.State])
-				if crrset.EDECode != 0 && hasEDNS0 {
-					edns0.AttachEDEToResponseWithText(m, crrset.EDECode, crrset.EDEText, msgoptions.DO)
-					lgImr.Debug("ImrResponder: attached EDE code to response", "edeCode", crrset.EDECode)
-				} else if crrset.State == cache.ValidationStateBogus && hasEDNS0 {
-					// Attach EDE 6 (DNSSEC Bogus) if no specific EDE code is set and query had EDNS0
-					edns0.AttachEDEToResponse(m, edns0.EDEDNSSECBogus)
-					lgImr.Debug("ImrResponder: attached EDE 6 (DNSSEC Bogus) to response")
+				if r.IsEdns0() != nil {
+					if crrset.EDECode != 0 && crrset.EDEText != "" {
+						edns0.AttachEDEToResponseWithText(m, crrset.EDECode, crrset.EDEText, msgoptions.DO)
+					} else {
+						edns0.AttachEDEToResponse(m, ede)
+					}
 				}
 				w.WriteMsg(m)
 				return
 			}
 			m.SetRcode(r, dns.RcodeSuccess)
 			m.Answer = crrset.ServeAnswer(time.Now(), msgoptions.DO)
-			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
+			m.AuthenticatedData = disp == answerServeSecure && adWanted(r, msgoptions)
 			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 			w.WriteMsg(m)
 			return
@@ -1277,19 +1284,24 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		// than the data got. Only ImrResponder's own cache short-circuits,
 		// above, can say "from cache" without qualification.
 		//
-		// Set AD if this RRset is ValidationStateSecure (from cache or on-the-fly)
+		// The verdict is the validation's, whatever the client asked for: DO
+		// decides what the answer carries, not whether it is judged. handleAnswer
+		// has normally just validated this RRset and cached the verdict; reuse
+		// it unless it is one that says "could not tell yet".
 		vstate := cache.ValidationStateNone
-		var err error
-		shouldValidate := msgoptions.DO && !msgoptions.CD
-		if imr.Cache != nil && shouldValidate {
-			if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil && c.State == cache.ValidationStateSecure {
-				vstate = c.State
+		var edeCode uint16
+		var edeText string
+		if imr.Cache != nil {
+			if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil && verdictReusable(c.State) {
+				vstate, edeCode, edeText = c.State, c.EDECode, c.EDEText
 			} else {
+				var err error
 				vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
-				if err != nil {
+				if err != nil && !msgoptions.CD {
 					lgImr.Error("failed to validate RRset", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
+					m.Answer = nil
+					m.Ns = nil
 					m.SetRcode(r, dns.RcodeServerFailure)
-					// Attach EDE 6 (DNSSEC Bogus) if validation failed and query had EDNS0
 					if r.IsEdns0() != nil {
 						edns0.AttachEDEToResponse(m, edns0.EDEDNSSECBogus)
 					}
@@ -1298,39 +1310,31 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 				}
 			}
 		}
-		if vstate == cache.ValidationStateSecure && shouldValidate {
-			m.AuthenticatedData = true
-			setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
-			w.WriteMsg(m)
-			return true, nil
-		}
-		if !shouldValidate {
-			setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
-			w.WriteMsg(m)
-			return true, nil
-		}
-		// Validation was attempted but failed (bogus or indeterminate)
-		if vstate == cache.ValidationStateBogus {
+		disp, ede := imr.dispositionFor(vstate, edeCode, len(rrset.RRSIGs) > 0, msgoptions)
+		switch disp {
+		case answerServeSecure:
+			m.AuthenticatedData = adWanted(r, msgoptions)
+		case answerServfail:
 			m.Answer = nil
 			m.Ns = nil
 			m.SetRcode(r, dns.RcodeServerFailure)
-			edeCode, edeText := imr.Cache.MarkRRsetBogus(qname, qtype, rrset, msgoptions.DO)
-			// Attach EDE if query had EDNS0 (check if request had OPT RR)
+			if vstate == cache.ValidationStateBogus && edeCode == 0 {
+				// Record the verdict on the entry, and take its more specific EDE.
+				if code, text := imr.Cache.MarkRRsetBogus(qname, qtype, rrset, msgoptions.DO); code != 0 {
+					ede, edeText = code, text
+				}
+			}
 			if r.IsEdns0() != nil {
-				if edeCode != 0 {
-					edns0.AttachEDEToResponseWithText(m, edeCode, edeText, msgoptions.DO)
+				if edeText != "" {
+					edns0.AttachEDEToResponseWithText(m, ede, edeText, msgoptions.DO)
 				} else {
-					// Attach EDE 6 (DNSSEC Bogus) as fallback if no specific EDE code is available
-					edns0.AttachEDEToResponse(m, edns0.EDEDNSSECBogus)
+					edns0.AttachEDEToResponse(m, ede)
 				}
 			}
 			w.WriteMsg(m)
 			return true, nil
 		}
-		// Indeterminate or other validation state - return SERVFAIL without EDE
-		m.Answer = nil
-		m.Ns = nil
-		m.SetRcode(r, dns.RcodeServerFailure)
+		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil
 	}
