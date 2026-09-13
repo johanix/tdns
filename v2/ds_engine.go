@@ -37,7 +37,9 @@ const (
 	// does not implement it.
 	DSModelDoubleSignature
 	// DSModelMultiProvider is a zone whose DNSKEY RRset carries every provider's
-	// keys, so its DS set is the SEP keys of that RRset.
+	// keys: the zone's own, some of them mpdist (no DS until promoted), and the
+	// other providers' foreign keys, whose DS is theirs to decide. The
+	// multi-provider agent coordinates its DS set; this engine does not.
 	DSModelMultiProvider
 )
 
@@ -364,11 +366,20 @@ func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 	case DSModelDoubleSignature:
 		return dsEngineResult{err: fmt.Errorf("zone %s: %w: %s", zd.ZoneName, errDSModelNotImplemented, model)}
 	case DSModelMultiProvider:
-		synth, err := zd.SynthesizeCdsRRs()
+		// Not this zone's decision. The DNSKEY RRset of a multi-provider zone
+		// carries its own mpdist keys, which get no DS until they are promoted,
+		// and the other providers' foreign keys, whose DS is theirs to decide;
+		// the multi-provider agent coordinates the DS set. What the agent has
+		// published, a NOTIFY(CDS) may point the parent at.
+		served, err := servedCDSRRs(zd)
 		if err != nil {
 			return dsEngineResult{err: err}
 		}
-		cds = synth
+		if len(served) > 0 {
+			return dsEngineResult{cds: served}
+		}
+		return dsEngineResult{err: fmt.Errorf("zone %s: %w: %s; the zone serves no CDS, and its DS set is"+
+			" the multi-provider agent's to coordinate", zd.ZoneName, errDSModelNotImplemented, model)}
 	default:
 		intent, err := DSIntentForZone(kdb, zd.ZoneName, dns.SHA256)
 		if err != nil {

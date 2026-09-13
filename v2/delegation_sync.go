@@ -150,8 +150,9 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 
 				// Publish the CDS if the zone has delegation sync. The DS engine owns
-				// the CDS RRset and asks the zone's DS model what goes in it; for a
-				// multi-provider zone that is still every SEP key of the DNSKEY RRset.
+				// the CDS RRset and asks the zone's DS model what goes in it. For a
+				// multi-provider zone it writes none: that DS set is the
+				// multi-provider agent's to coordinate.
 				if zd.Options[OptParentSync] {
 					res := kdb.askDSEngine(ctx, DSEngineRequest{cmd: dsCmdEnsureCDS, zd: zd})
 					switch {

@@ -7,6 +7,10 @@ Revisions:
 - r2 2026-09-13: step 2 re-scoped. The DS engine does not talk to the parent;
   the rollover engine's DS pushes move into the delegation syncher, not into the
   DS engine. Added "Why not inside the delegation syncher".
+- r3 2026-09-13: the key states the lifecycle hooks added. An `mpdist` KSK gets
+  no DS at the parent; a `foreign` KSK makes the DS intent unknown, since its DS
+  is not this zone's decision. The `multi-provider` model no longer publishes the
+  SEP keys of the DNSKEY RRset: the DS set is the multi-provider agent's.
 
 ## Why
 
@@ -42,10 +46,10 @@ keys:
 
 | Model | Source | Target DS set |
 |---|---|---|
-| `none` | no automated rollover (`rollover.method: none` or no policy) | `DSIntentForZone`: KSKs from `ds-published` to `active` |
+| `none` | no automated rollover (`rollover.method: none` or no policy) | `DSIntentForZone`: KSKs from `ds-published` to `active`. An `mpdist` KSK gets no DS; a `foreign` KSK makes the intent unknown, because whether its DS belongs at the parent is not this zone's decision |
 | `multi-ds` | `rollover.method: multi-ds` | the rollover target (`loadTargetKSKsForRollover`: `created` to `retired`), a pipeline of pre-published DS |
 | `double-signature` | `rollover.method: double-signature` | the new key is published and signs alongside the old one before the DS is swapped; accepted by the policy parser, not implemented by the rollover engine |
-| `multi-provider` | zone option `multi-provider` | every provider's KSK: the SEP keys of the served DNSKEY RRset, which carries them all |
+| `multi-provider` | zone option `multi-provider` | not this zone's decision: the served DNSKEY RRset carries the zone's own `mpdist` keys, which get no DS until promoted, and other providers' `foreign` keys, whose DS is theirs to decide; the multi-provider agent coordinates the DS set |
 
 Every request the engine serves starts by asking the zone's model for the target,
 and a model the engine does not implement is refused by name rather than
@@ -135,9 +139,14 @@ The duplication that matters is the transport, and step 2 removes it.
   CDS. If the zone already serves one, published by its signer, delegation sync's
   NOTIFY(CDS) points the parent at it; if it serves none, the NOTIFY candidate
   fails.
-- **`multi-provider`.** The engine publishes the SEP keys of the served DNSKEY
-  RRset, which is what the `SYNC-DNSKEY-RRSET` arm did. The multi-provider agent in
-  tdns-mp publishes its own CDS and is not changed.
+- **`multi-provider`.** The engine writes no CDS: the zone's DS set is the
+  multi-provider agent's to coordinate. If the agent serves a CDS, delegation
+  sync's NOTIFY(CDS) points the parent at it; if not, the NOTIFY candidate fails.
+  (The `SYNC-DNSKEY-RRSET` arm used to publish the SEP keys of the served DNSKEY
+  RRset. Since the key lifecycle hooks, that RRset also carries `mpdist` keys,
+  whose DS must not be at the parent, and `foreign` keys, whose DS is not ours to
+  decide.) The multi-provider agent in tdns-mp publishes its own CDS and is not
+  changed.
 - **`double-signature`.** Refused.
 
 Withdrawing a DS through CDS needs an RFC 8078 delete CDS, which tdns does not

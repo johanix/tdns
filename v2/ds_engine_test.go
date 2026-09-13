@@ -287,6 +287,10 @@ func TestNotifySchemeSendsNothingItCannotBackWithACds(t *testing.T) {
 			seedKey(t, r.kdb, "example.", DnskeyStateActive, 257, pubA)
 			r.zd.DnssecPolicy = &DnssecPolicy{Rollover: RolloverPolicy{Method: RolloverMethodDoubleSignature}}
 		}, "double-signature"},
+		{"a multi-provider zone's DS set is not this zone's to decide", func(t *testing.T, r *dsEngineRig) {
+			seedKey(t, r.kdb, "example.", DnskeyStateActive, 257, pubA)
+			r.zd.Options[OptMultiProvider] = true
+		}, "multi-provider agent"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -313,35 +317,51 @@ func TestNotifySchemeSendsNothingItCannotBackWithACds(t *testing.T) {
 	}
 }
 
-// TestNotifySchemeNotifiesForACdsSomeoneElsePublished: a zone whose keys tdns does
-// not manage is signed elsewhere, and its signer may well publish a CDS. That CDS
-// is not the DS engine's to write, but a NOTIFY(CDS) pointing the parent at it is
-// exactly right.
+// TestNotifySchemeNotifiesForACdsSomeoneElsePublished: some zones' DS set is not
+// tdns's to decide -- a zone signed elsewhere, or a multi-provider zone, whose DS
+// set the multi-provider agent coordinates. Whoever does decide may well publish
+// a CDS. That CDS is not the DS engine's to write, but a NOTIFY(CDS) pointing the
+// parent at it is exactly right.
 func TestNotifySchemeNotifiesForACdsSomeoneElsePublished(t *testing.T) {
-	r := newDSEngineRig(t, 0, false)
-	stageCDS(t, r.zd, cdsFor("example.", pubB))
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, r *dsEngineRig)
+	}{
+		{"keys tdns does not manage", func(t *testing.T, r *dsEngineRig) {}},
+		{"a multi-provider zone", func(t *testing.T, r *dsEngineRig) {
+			seedKey(t, r.kdb, "example.", DnskeyStateActive, 257, pubA)
+			r.zd.Options[OptMultiProvider] = true
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newDSEngineRig(t, 0, false)
+			tc.setup(t, r)
+			stageCDS(t, r.zd, cdsFor("example.", pubB))
 
-	_, rcode, err := r.zd.SyncZoneDelegationViaNotify(context.Background(), r.kdb, r.notifyq,
-		dsChangeFor("example.", pubB), testDsyncTarget)
-	if err != nil {
-		t.Fatalf("SyncZoneDelegationViaNotify: %v", err)
-	}
-	if rcode != dns.RcodeSuccess {
-		t.Errorf("rcode = %s, want NOERROR", dns.RcodeToString[int(rcode)])
-	}
-	if n := len(r.notifyq); n != 1 {
-		t.Fatalf("%d NOTIFY(s) sent, want one NOTIFY(CDS)", n)
-	}
-	if req := <-r.notifyq; req.RRtype != dns.TypeCDS {
-		t.Errorf("sent a NOTIFY(%s), want NOTIFY(CDS)", dns.TypeToString[req.RRtype])
-	}
-	for _, e := range r.log.snapshot() {
-		if strings.Contains(e, "CDS") {
-			t.Errorf("the DS engine wrote to a CDS it does not own: %q", e)
-		}
-	}
-	if want := cdsTuplesOf(cdsFor("example.", pubB)); !cdsTupleSetsEqual(servedCDS(t, r.zd), want) {
-		t.Errorf("served CDS keyids %v, want the signer's %v", tupleKeyids(servedCDS(t, r.zd)), tupleKeyids(want))
+			_, rcode, err := r.zd.SyncZoneDelegationViaNotify(context.Background(), r.kdb, r.notifyq,
+				dsChangeFor("example.", pubB), testDsyncTarget)
+			if err != nil {
+				t.Fatalf("SyncZoneDelegationViaNotify: %v", err)
+			}
+			if rcode != dns.RcodeSuccess {
+				t.Errorf("rcode = %s, want NOERROR", dns.RcodeToString[int(rcode)])
+			}
+			if n := len(r.notifyq); n != 1 {
+				t.Fatalf("%d NOTIFY(s) sent, want one NOTIFY(CDS)", n)
+			}
+			if req := <-r.notifyq; req.RRtype != dns.TypeCDS {
+				t.Errorf("sent a NOTIFY(%s), want NOTIFY(CDS)", dns.TypeToString[req.RRtype])
+			}
+			for _, e := range r.log.snapshot() {
+				if strings.Contains(e, "CDS") {
+					t.Errorf("the DS engine wrote to a CDS it does not own: %q", e)
+				}
+			}
+			if want := cdsTuplesOf(cdsFor("example.", pubB)); !cdsTupleSetsEqual(servedCDS(t, r.zd), want) {
+				t.Errorf("served CDS keyids %v, want the publisher's %v", tupleKeyids(servedCDS(t, r.zd)), tupleKeyids(want))
+			}
+		})
 	}
 }
 

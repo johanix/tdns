@@ -55,7 +55,7 @@ const (
 // onwards should have one.
 func TestDSBelongsAtParent(t *testing.T) {
 	yes := []string{DnskeyStateDsPublished, DnskeyStatePublished, DnskeyStateStandby, DnskeyStateActive}
-	no := []string{DnskeyStateCreated, DnskeyStateRetired, DnskeyStateRemoved}
+	no := []string{DnskeyStateCreated, DnskeyStateMpdist, DnskeyStateRetired, DnskeyStateRemoved}
 
 	for _, st := range yes {
 		belongs, recognised := dsBelongsAtParent(st)
@@ -101,6 +101,78 @@ func TestDSIntentUnknownWhenAKeyHasAnUnrecognisedState(t *testing.T) {
 	if len(intent.Set) != 0 {
 		t.Errorf("unknown intent carried %d DS records", len(intent.Set))
 	}
+}
+
+// intentDS is the DS a KSK with this public key hashes to.
+func intentDS(zone, pubkey string) *dns.DS {
+	key := &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags:     257,
+		Protocol:  3,
+		Algorithm: dns.ED25519,
+		PublicKey: pubkey,
+	}
+	return key.ToDS(dns.SHA256)
+}
+
+// An mpdist key is a multi-provider zone's own key, served while it is
+// distributed to the other providers and before it is promoted. Its DS does not
+// belong at the parent until then -- but it is a classified state, so the intent
+// is still an answer for the zone's other keys.
+func TestDSIntentGivesAnMpdistKeyNoDS(t *testing.T) {
+	kdb := intentTestKeyDB(t)
+	seedKey(t, kdb, "child.example.", DnskeyStateActive, 257, pubA)
+	seedKey(t, kdb, "child.example.", DnskeyStateMpdist, 257, pubB)
+
+	intent, err := DSIntentForZone(kdb, "child.example.", dns.SHA256)
+	if err != nil {
+		t.Fatalf("DSIntentForZone: %v", err)
+	}
+	if !intent.Known {
+		t.Fatal("an mpdist key made the intent unknown; the zone's active key still warrants its DS")
+	}
+	want := intentDS("child.example.", pubA)
+	if len(intent.Set) != 1 || intent.Set[0].(*dns.DS).Digest != want.Digest {
+		t.Errorf("intent = %v, want only the active key's DS %v", intent.Set, want)
+	}
+}
+
+// A foreign key is another provider's. Whether its DS belongs at the parent is
+// not this zone's decision, and every consumer of the intent acts on the whole
+// DS set -- replace mode rewrites it, delta mode removes what it lacks -- so no
+// set tdns could state would leave that DS alone. The intent is unknown.
+func TestDSIntentDeclinesForAZoneHoldingAForeignKSK(t *testing.T) {
+	t.Run("foreign KSK", func(t *testing.T) {
+		kdb := intentTestKeyDB(t)
+		seedKey(t, kdb, "child.example.", DnskeyStateActive, 257, pubA)
+		seedKey(t, kdb, "child.example.", DnskeyStateForeign, 257, pubB)
+
+		intent, err := DSIntentForZone(kdb, "child.example.", dns.SHA256)
+		if err != nil {
+			t.Fatalf("DSIntentForZone: %v", err)
+		}
+		if intent.Known {
+			t.Fatalf("stated a DS intent (%d records) for a zone holding another provider's KSK;"+
+				" the parent's DS for that key is not this zone's to keep or remove", len(intent.Set))
+		}
+		if len(intent.Set) != 0 {
+			t.Errorf("unknown intent carried %d DS records", len(intent.Set))
+		}
+	})
+
+	t.Run("a foreign ZSK has no DS and changes nothing", func(t *testing.T) {
+		kdb := intentTestKeyDB(t)
+		seedKey(t, kdb, "child.example.", DnskeyStateActive, 257, pubA)
+		seedKey(t, kdb, "child.example.", DnskeyStateForeign, 256, pubB)
+
+		intent, err := DSIntentForZone(kdb, "child.example.", dns.SHA256)
+		if err != nil {
+			t.Fatalf("DSIntentForZone: %v", err)
+		}
+		if !intent.Known || len(intent.Set) != 1 {
+			t.Errorf("intent = {known %v, %d DS}, want known with the active KSK's DS", intent.Known, len(intent.Set))
+		}
+	})
 }
 
 // The regression the gated insert prevents: a producer with no DS opinion must
