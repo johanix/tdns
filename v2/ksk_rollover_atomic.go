@@ -152,35 +152,89 @@ func AtomicRollover(conf *Config, kdb *KeyDB, zone string) (oldKid, newKid uint1
 }
 
 // pickActiveSEPTx returns the (single) active SEP keyid for the zone, or 0
-// if no active SEP exists. Returns an error if the zone has more than one
-// active SEP key (violates §3.4 invariant).
+// if no active SEP exists.
+//
+// The invariant is one active SEP key per ALGORITHM, not one per zone: a
+// KSK algorithm rollover double-signs the apex DNSKEY RRset with an active
+// KSK of each algorithm for the whole of its drain window. So:
+//   - one active key of one algorithm: return it;
+//   - two or more active keys sharing an algorithm: the §3.4 invariant is
+//     broken, error;
+//   - active keys of two algorithms: an algorithm rollover is in flight and
+//     a same-algorithm rollover must not run on top of it, error. The only
+//     caller (AtomicRollover) is already gated by rollover_in_progress; this
+//     is defence in depth with a message that names the real reason.
 func pickActiveSEPTx(tx *Tx, zone string) (uint16, error) {
-	rows, err := tx.Query(`
-SELECT keyid FROM DnssecKeyStore
-WHERE zonename = ? AND state = ? AND (flags & 1) = 1`,
-		zone, DnskeyStateActive)
+	byAlg, err := activeSEPsByAlgTx(tx, zone)
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
-	var found []uint16
-	for rows.Next() {
-		var k int
-		if err := rows.Scan(&k); err != nil {
-			return 0, err
-		}
-		found = append(found, uint16(k))
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	if len(found) == 0 {
+	if len(byAlg) == 0 {
 		return 0, nil
 	}
-	if len(found) > 1 {
-		return 0, fmt.Errorf("invariant violated: zone %s has %d active SEP keys (expected 1)", zone, len(found))
+	if len(byAlg) > 1 {
+		return 0, fmt.Errorf("zone %s has active SEP keys of %d algorithms; a same-algorithm rollover is refused while an algorithm rollover is in flight", zone, len(byAlg))
 	}
-	return found[0], nil
+	for _, kids := range byAlg {
+		if len(kids) > 1 {
+			return 0, fmt.Errorf("invariant violated: zone %s has %d active SEP keys (expected 1)", zone, len(kids))
+		}
+		return kids[0], nil
+	}
+	return 0, nil
+}
+
+// pickActiveSEPByAlgTx returns the active SEP keyid of the given algorithm,
+// or 0 if there is none. Errors if more than one active SEP key carries
+// that algorithm. Used by the algorithm-rollover spawn to identify the
+// old-algorithm head it is rolling away from.
+func pickActiveSEPByAlgTx(tx *Tx, zone string, alg uint8) (uint16, error) {
+	byAlg, err := activeSEPsByAlgTx(tx, zone)
+	if err != nil {
+		return 0, err
+	}
+	kids := byAlg[alg]
+	switch len(kids) {
+	case 0:
+		return 0, nil
+	case 1:
+		return kids[0], nil
+	default:
+		return 0, fmt.Errorf("invariant violated: zone %s has %d active SEP keys of algorithm %s (expected 1)",
+			zone, len(kids), dns.AlgorithmToString[alg])
+	}
+}
+
+// activeSEPsByAlgTx groups the zone's active SEP keyids by algorithm.
+// Keys whose stored algorithm name does not resolve are skipped, matching
+// GetDnssecKeysByState.
+func activeSEPsByAlgTx(tx *Tx, zone string) (map[uint8][]uint16, error) {
+	rows, err := tx.Query(`
+SELECT keyid, algorithm FROM DnssecKeyStore
+WHERE zonename = ? AND state = ? AND (flags & 1) = 1
+ORDER BY keyid ASC`,
+		zone, DnskeyStateActive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[uint8][]uint16{}
+	for rows.Next() {
+		var k int
+		var algName string
+		if err := rows.Scan(&k, &algName); err != nil {
+			return nil, err
+		}
+		alg, ok := dns.StringToAlgorithm[algName]
+		if !ok {
+			continue
+		}
+		out[alg] = append(out[alg], uint16(k))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // pickStandbyForPromotion picks the standby SEP key with the oldest
