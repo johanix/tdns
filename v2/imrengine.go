@@ -235,34 +235,7 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	}
 
 	if conf.Imr.Logging.Enabled {
-		logfile := conf.Imr.Logging.File
-		if logfile == "" {
-			logfile = "/var/log/tdns/imr-debug.log"
-		}
-		f, err := os.OpenFile(logfile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			lgImr.Error("failed to open IMR debug log file, debug logging disabled", "file", logfile, "err", err)
-		} else {
-			imr.DebugLog = log.New(f, "", log.Ldate|log.Ltime|log.Lmicroseconds)
-			lgImr.Info("IMR debug logging enabled", "file", logfile)
-			dl := imr.DebugLog
-			RegisterImrOutboundQueryHook(func(ctx context.Context, qname string, qtype uint16, serverName, serverAddr string, transport core.Transport) error {
-				dl.Printf("OUTBOUND qname=%s qtype=%s server=%s addr=%s transport=%s",
-					qname, dns.TypeToString[qtype], serverName, serverAddr, core.TransportToString[transport])
-				return nil
-			})
-			RegisterImrResponseHook(func(ctx context.Context, qname string, qtype uint16, serverName, serverAddr string, transport core.Transport, response *dns.Msg, rcode int) {
-				var ans []string
-				if response != nil {
-					for _, rr := range response.Answer {
-						ans = append(ans, rr.String())
-					}
-				}
-				dl.Printf("RESPONSE qname=%s qtype=%s server=%s addr=%s transport=%s rcode=%s answer=%v",
-					qname, dns.TypeToString[qtype], serverName, serverAddr,
-					core.TransportToString[transport], dns.RcodeToString[rcode], ans)
-			})
-		}
+		imr.DebugLog = imrDebugLogger(conf.Imr.Logging.File)
 	}
 
 	// Build the forward table before anything sends a query: PrimeWithHints
@@ -395,18 +368,15 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 		lgImr.Info("ImrEngine starting")
 	}
 
-	// Initialize the Imr if not already done (e.g. by a prior InitImrEngine call).
-	// Propagate the init error to the engine supervisor rather than calling
-	// Shutdowner here — that would leave conf.Internal.ImrEngine nil and the
-	// dereference below would panic.
+	// Initialize the Imr if not already done (e.g. by a prior InitImrEngine call),
+	// retrying for as long as that fails: priming is the step most likely to
+	// fail at boot, and the daemon is useless without it (imr_init_retry.go).
+	// Returns an error only if ctx ends first, and never calls Shutdowner --
+	// that would leave conf.Internal.ImrEngine nil and the dereference below
+	// would panic.
 	if conf.Internal.ImrEngine == nil {
-		if err := conf.InitImrEngine(ctx, quiet); err != nil {
-			// The engine supervisor only LOGS this error while the daemon
-			// keeps running — with no DNS listeners. Register the condition
-			// so `config status` shows DEGRADED instead of a healthy-looking
-			// process that answers nothing.
-			conf.Internal.ServerErrors.SetImrPrimingError(
-				fmt.Sprintf("IMR did not start (no DNS listeners): %v", err))
+		init := func() error { return conf.InitImrEngine(ctx, quiet) }
+		if err := conf.initImrEngineRetrying(ctx, init, imrInitRetryDelay); err != nil {
 			return fmt.Errorf("ImrEngine: InitImrEngine failed: %w", err)
 		}
 	}
