@@ -8,6 +8,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
@@ -203,6 +204,14 @@ func TestValidationFailureLeavesNoPrivacyStatus(t *testing.T) {
 			A:   net.ParseIP("192.0.2.1"),
 		}},
 	}
+
+	// A verdict that fails. An unsigned RRset nobody can judge used to be enough
+	// -- the responder SERVFAILed everything that was not Secure -- but that was
+	// the defect that failed every insecure zone, so the test now says Bogus.
+	imr.Cache.Set("www.example.", dns.TypeA, &cache.CachedRRset{
+		Name: "www.example.", RRtype: dns.TypeA, RRset: rrset, Context: cache.ContextAnswer,
+		State: cache.ValidationStateBogus, Expiration: time.Now().Add(time.Minute),
+	})
 
 	w := &fakeResponseWriter{}
 	m := new(dns.Msg)
