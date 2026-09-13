@@ -1296,6 +1296,9 @@ type KeyDB struct {
 	TruststoreSig0Cache *Sig0StoreT // was *Sig0StoreT
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
+	// DSEngineQ is the DS engine's request queue (ds_engine.go). The engine owns
+	// the CDS RRset of the zones whose keys this keystore holds.
+	DSEngineQ chan DSEngineRequest
 	// options holds the parsed DnsEngine auth options. It is read on the hot
 	// query path (QueryResponder, per request) and replaced wholesale on config
 	// reload, so it is stored behind an atomic.Pointer for lock-free reads and a

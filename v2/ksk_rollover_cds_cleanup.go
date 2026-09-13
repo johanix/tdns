@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -23,6 +24,27 @@ import (
 //     adds a terminal-hardfail site. Today the post-overhaul model is
 //     indefinite softfail; no such site exists yet.
 //
+// The DS engine owns the CDS RRset, so this is the rollover engine's
+// request to it; the work is releaseRolloverCDS, on the engine's
+// goroutine.
+//
+// All three triggers are best-effort: on any error, log WARN and
+// return without escalating. CDS RRset is not on any rollover-critical
+// path; an orphaned CDS will eventually be replaced by the general
+// delegation-sync path or by another rollover attempt.
+func cleanupCdsAfterConfirm(ctx context.Context, zd *ZoneData, kdb *KeyDB) {
+	if zd == nil || kdb == nil {
+		return
+	}
+	res := kdb.askDSEngine(ctx, DSEngineRequest{cmd: dsCmdReleaseRolloverCDS, zd: zd})
+	if res.err != nil {
+		lgSigner.Warn("rollover: cleanupCdsAfterConfirm", "zone", dns.Fqdn(zd.ZoneName), "err", res.err)
+	}
+}
+
+// releaseRolloverCDS is cleanupCdsAfterConfirm's work, run by the DS
+// engine.
+//
 // Behavior:
 //   - last_published_cds_index_low/high NULL → no-op (we own no CDS).
 //   - Reload the KSK rows referenced by the saved range. Re-derive
@@ -32,32 +54,23 @@ import (
 //   - Read the current CDS RRset from the in-memory zone. Compare
 //     expected vs current as a set of (KeyTag, Algorithm, DigestType,
 //     Digest) tuples — TTL, ownername case, and order are immaterial.
-//   - Equal sets → queue UnpublishCdsRRs (anti-CDS ClassANY delete);
-//     clear last_published_cds_index_low/high.
+//   - Equal sets → unpublish the CDS RRset and wait until the zone
+//     serves none; then clear last_published_cds_index_low/high.
 //   - Unequal sets → another caller has taken ownership; log INFO,
 //     clear last_published_cds_index_low/high (so we don't retry next
 //     cycle), leave CDS on the wire untouched.
-//
-// All three triggers are best-effort: on any error, log WARN and
-// return without escalating. CDS RRset is not on any rollover-critical
-// path; an orphaned CDS will eventually be replaced by the general
-// delegation-sync path or by another rollover attempt.
-func cleanupCdsAfterConfirm(zd *ZoneData, kdb *KeyDB) {
-	if zd == nil || kdb == nil {
-		return
-	}
+func (kdb *KeyDB) releaseRolloverCDS(ctx context.Context, zd *ZoneData) error {
 	zone := dns.Fqdn(zd.ZoneName)
 
 	row, err := LoadRolloverZoneRow(kdb, zone)
 	if err != nil {
-		lgSigner.Warn("rollover: cleanupCdsAfterConfirm: load row", "zone", zone, "err", err)
-		return
+		return fmt.Errorf("load row: %w", err)
 	}
 	if row == nil {
-		return
+		return nil
 	}
 	if !row.LastPublishedCdsIndexLow.Valid || !row.LastPublishedCdsIndexHigh.Valid {
-		return
+		return nil
 	}
 	low := int(row.LastPublishedCdsIndexLow.Int64)
 	high := int(row.LastPublishedCdsIndexHigh.Int64)
@@ -68,42 +81,35 @@ func cleanupCdsAfterConfirm(zd *ZoneData, kdb *KeyDB) {
 	// tuple — only the digest matters for comparison.
 	expected, err := expectedCdsTuplesForRange(kdb, zone, low, high)
 	if err != nil {
-		lgSigner.Warn("rollover: cleanupCdsAfterConfirm: re-derive expected CDS",
-			"zone", zone, "low", low, "high", high, "err", err)
 		// Treat as "unequal" — clear range, leave CDS in place. The
 		// stored range is no longer authoritative for cleanup.
 		_ = clearPublishedCdsRange(kdb, zone)
-		return
+		return fmt.Errorf("re-derive expected CDS for index range [%d,%d]: %w", low, high, err)
 	}
 
 	current, err := currentCdsTuples(zd)
 	if err != nil {
-		lgSigner.Warn("rollover: cleanupCdsAfterConfirm: read current CDS",
-			"zone", zone, "err", err)
 		_ = clearPublishedCdsRange(kdb, zone)
-		return
+		return fmt.Errorf("read current CDS: %w", err)
 	}
 
 	if !cdsTupleSetsEqual(expected, current) {
 		lgSigner.Info("rollover: CDS no longer matches last push, leaving in place",
 			"zone", zone, "expected_count", len(expected), "current_count", len(current))
-		_ = clearPublishedCdsRange(kdb, zone)
-		return
+		return clearPublishedCdsRange(kdb, zone)
 	}
 
-	// Equal — we still own this CDS RRset. Unpublish.
-	if err := zd.UnpublishCdsRRs(); err != nil {
-		lgSigner.Warn("rollover: cleanupCdsAfterConfirm: UnpublishCdsRRs",
-			"zone", zone, "err", err)
+	// Equal — we still own this CDS RRset. Unpublish, and give up the
+	// claim only once the zone serves no CDS.
+	if err := zd.unpublishCDSAndWait(ctx, kdb); err != nil {
 		// Don't clear the range yet — we'll retry on the next trigger.
-		return
+		return err
 	}
 	if err := clearPublishedCdsRange(kdb, zone); err != nil {
-		lgSigner.Warn("rollover: cleanupCdsAfterConfirm: clearPublishedCdsRange",
-			"zone", zone, "err", err)
-		return
+		return fmt.Errorf("clearPublishedCdsRange: %w", err)
 	}
 	lgSigner.Info("rollover: CDS cleanup complete", "zone", zone)
+	return nil
 }
 
 // cdsTuple is the comparison key for compare-on-cleanup. RFC 4034
@@ -212,6 +218,6 @@ func cdsTupleSetsEqual(a, b map[cdsTuple]struct{}) bool {
 // transition can call it without re-discovering the cleanup helper.
 //
 //nolint:unused // wired by the future terminal-hardfail commit.
-func cleanupCdsAfterHardfail(zd *ZoneData, kdb *KeyDB, _ time.Time) {
-	cleanupCdsAfterConfirm(zd, kdb)
+func cleanupCdsAfterHardfail(ctx context.Context, zd *ZoneData, kdb *KeyDB, _ time.Time) {
+	cleanupCdsAfterConfirm(ctx, zd, kdb)
 }

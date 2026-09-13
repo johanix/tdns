@@ -419,7 +419,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		// Trigger 1 — confirmed observation: if NOTIFY-pushed CDS is
 		// still on the wire (last_published_cds_index_low/high
 		// non-NULL), unpublish it now per RFC 7344 §4.1. Best-effort.
-		cleanupCdsAfterConfirm(zd, kdb)
+		cleanupCdsAfterConfirm(ctx, zd, kdb)
 		if advanced > 0 {
 			triggerResign(conf, zone)
 		}
@@ -487,7 +487,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 				// See the matching block in pendingParentObserve.
 				_ = clearLastSoftfail(kdb, zone)
 				// Trigger 1 — confirmed observation, softfail-recovery path.
-				cleanupCdsAfterConfirm(zd, kdb)
+				cleanupCdsAfterConfirm(ctx, zd, kdb)
 				if advanced > 0 {
 					triggerResign(conf, zone)
 				}
