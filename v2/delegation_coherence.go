@@ -249,7 +249,7 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 		return nil
 	}
 	if fetch == nil {
-		return fmt.Errorf("cannot verify that %s would still validate: no way to look up its DNSKEYs: %w", child, ErrDelegationUnverifiable)
+		return fmt.Errorf("cannot verify that %s would still validate: %w: %w", child, errNoDnskeyFetcher, ErrDelegationUnverifiable)
 	}
 
 	keys, validated, err := fetch(child)
