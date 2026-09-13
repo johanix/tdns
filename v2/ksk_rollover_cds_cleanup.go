@@ -79,17 +79,16 @@ func (kdb *KeyDB) releaseRolloverCDS(ctx context.Context, zd *ZoneData) error {
 	// rollover_index falls in [low, high]. State may have advanced
 	// since we published, but key material is what defines a CDS
 	// tuple — only the digest matters for comparison.
+	// A failure to compare is not a mismatch. The claim stays, so the
+	// next trigger can try again: cleared here, it would leave a CDS
+	// that may well be ours with nothing left to ever remove it.
 	expected, err := expectedCdsTuplesForRange(kdb, zone, low, high)
 	if err != nil {
-		// Treat as "unequal" — clear range, leave CDS in place. The
-		// stored range is no longer authoritative for cleanup.
-		_ = clearPublishedCdsRange(kdb, zone)
 		return fmt.Errorf("re-derive expected CDS for index range [%d,%d]: %w", low, high, err)
 	}
 
 	current, err := currentCdsTuples(zd)
 	if err != nil {
-		_ = clearPublishedCdsRange(kdb, zone)
 		return fmt.Errorf("read current CDS: %w", err)
 	}
 

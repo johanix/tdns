@@ -97,8 +97,6 @@ const (
 	dsCmdReleaseRolloverCDS
 	// dsCmdEnsureCDS: delegation sync, before a NOTIFY(CDS).
 	dsCmdEnsureCDS
-	// dsCmdKeysChanged: PublishDnskeyRRs saw a zone serving a CDS change its KSKs.
-	dsCmdKeysChanged
 )
 
 // DSEngineRequest is one request to the DS engine. Requests are built inside
@@ -108,6 +106,11 @@ type DSEngineRequest struct {
 	zd       *ZoneData
 	snapshot *RolloverTargetKeySnapshot
 	resp     chan dsEngineResult
+	// ctx is cancelled when the requester stops waiting. The engine skips a
+	// request whose requester has already given up; once it has started on one
+	// it finishes under its own context, so a CDS publish is never separated from
+	// the claim recorded with it by a requester that left in between.
+	ctx context.Context
 }
 
 type dsEngineResult struct {
@@ -128,23 +131,36 @@ type dsEngineResult struct {
 //
 // In this first step it owns the CDS RRset. The KSK rollover engine asks it to
 // publish and to release the rollover target's CDS; delegation sync asks it for
-// the CDS a NOTIFY(CDS) points at; PublishDnskeyRRs tells it when a zone that
-// serves a CDS changes its KSKs.
+// the CDS a NOTIFY(CDS) points at; PublishDnskeyRRs marks zones that serve a CDS
+// and have changed their KSKs, and the engine brings their CDS back in step.
 //
 // One goroutine serves every zone, one request at a time. That is the point:
 // what this replaces is two writers each replacing the whole CDS RRset from their
 // own view. A request may wait up to UpdateApplyTimeout on the zone updater.
 func (kdb *KeyDB) DSEngine(ctx context.Context) error {
 	lgDSEngine.Info("DSEngine: starting")
+	wake := kdb.dsWake()
 	for {
 		select {
 		case <-ctx.Done():
 			lgDSEngine.Info("DSEngine: terminating")
 			return nil
+		case <-wake:
+			for _, zd := range kdb.takeDSDirty() {
+				kdb.followKeysWithCDS(ctx, zd)
+			}
 		case req, ok := <-kdb.DSEngineQ:
 			if !ok {
 				lgDSEngine.Info("DSEngine: queue closed, terminating")
 				return nil
+			}
+			if req.ctx != nil && req.ctx.Err() != nil {
+				// Nobody is waiting for the answer any more, and the requester has
+				// already reported the attempt as failed: publishing or withdrawing
+				// a CDS now would be work its owner does not know happened.
+				lgDSEngine.Debug("skipping a request whose requester stopped waiting",
+					"cmd", int(req.cmd), "zone", dsRequestZone(req))
+				continue
 			}
 			res := kdb.serveDSEngineRequest(ctx, req)
 			if req.resp != nil {
@@ -159,20 +175,31 @@ func (kdb *KeyDB) DSEngine(ctx context.Context) error {
 	}
 }
 
+func dsRequestZone(req DSEngineRequest) string {
+	if req.zd == nil {
+		return ""
+	}
+	return req.zd.ZoneName
+}
+
 // askDSEngine hands req to the DS engine and waits for its answer.
 //
 // Bounded at both ends: an engine that is missing or wedged must fail the
 // requester -- a rollover tick, or the delegation syncher, each serving every
-// zone -- rather than stall it.
+// zone -- rather than stall it. The request is cancelled when this returns, so
+// one still queued is skipped instead of served for nobody.
 func (kdb *KeyDB) askDSEngine(ctx context.Context, req DSEngineRequest) dsEngineResult {
 	if kdb == nil || kdb.DSEngineQ == nil {
 		return dsEngineResult{err: errDSEngineNotRunning}
 	}
+	reqCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	req.ctx = reqCtx
 	req.resp = make(chan dsEngineResult, 1)
 	select {
 	case kdb.DSEngineQ <- req:
-	case <-ctx.Done():
-		return dsEngineResult{err: fmt.Errorf("handing a request to the DS engine: %w", ctx.Err())}
+	case <-reqCtx.Done():
+		return dsEngineResult{err: fmt.Errorf("handing a request to the DS engine: %w", reqCtx.Err())}
 	case <-time.After(dsEngineEnqueueTimeout):
 		return dsEngineResult{err: fmt.Errorf("%w: its queue took nothing for %s",
 			errDSEngineNotRunning, dsEngineEnqueueTimeout)}
@@ -180,28 +207,63 @@ func (kdb *KeyDB) askDSEngine(ctx context.Context, req DSEngineRequest) dsEngine
 	select {
 	case res := <-req.resp:
 		return res
-	case <-ctx.Done():
-		return dsEngineResult{err: fmt.Errorf("waiting for the DS engine: %w", ctx.Err())}
+	case <-reqCtx.Done():
+		return dsEngineResult{err: fmt.Errorf("waiting for the DS engine: %w", reqCtx.Err())}
 	case <-time.After(dsEngineReplyTimeout):
 		return dsEngineResult{err: fmt.Errorf("the DS engine did not answer within %s", dsEngineReplyTimeout)}
 	}
 }
 
-// dsEngineKeysChanged tells the DS engine that zd's KSK set changed.
+// dsEngineKeysChanged records that zd's KSK set changed, for the DS engine to
+// bring its CDS back in step.
 //
-// Called from the signing path with zd.mu held, so it never blocks: a full queue
-// drops the notification, and says so. The CDS then lags the keys until they
-// next change.
+// Called from the signing path with zd.mu held, so it must not block, and it must
+// not lose the change either: a CDS left out of step with the keys is the case
+// this exists for. So it marks the zone rather than queueing a request. A zone is
+// marked once however many times it changes before the engine looks, and the
+// wake-up signal has room for one, so neither can fill up.
 func (kdb *KeyDB) dsEngineKeysChanged(zd *ZoneData) {
-	if kdb == nil || kdb.DSEngineQ == nil {
+	if kdb == nil || kdb.DSEngineQ == nil || zd == nil {
 		return
 	}
-	select {
-	case kdb.DSEngineQ <- DSEngineRequest{cmd: dsCmdKeysChanged, zd: zd}:
-	default:
-		lgDSEngine.Warn("DS engine queue full; this zone's CDS may lag its keys until they next change",
-			"zone", zd.ZoneName)
+	kdb.dsDirtyMu.Lock()
+	if kdb.dsDirty == nil {
+		kdb.dsDirty = make(map[string]*ZoneData)
 	}
+	kdb.dsDirty[zd.ZoneName] = zd
+	wake := kdb.dsWakeLocked()
+	kdb.dsDirtyMu.Unlock()
+	select {
+	case wake <- struct{}{}:
+	default: // already signalled; the engine will find this zone marked
+	}
+}
+
+func (kdb *KeyDB) dsWake() chan struct{} {
+	kdb.dsDirtyMu.Lock()
+	defer kdb.dsDirtyMu.Unlock()
+	return kdb.dsWakeLocked()
+}
+
+func (kdb *KeyDB) dsWakeLocked() chan struct{} {
+	if kdb.dsWakeCh == nil {
+		kdb.dsWakeCh = make(chan struct{}, 1)
+	}
+	return kdb.dsWakeCh
+}
+
+// takeDSDirty returns the zones marked by dsEngineKeysChanged, in name order, and
+// clears the marks.
+func (kdb *KeyDB) takeDSDirty() []*ZoneData {
+	kdb.dsDirtyMu.Lock()
+	defer kdb.dsDirtyMu.Unlock()
+	out := make([]*ZoneData, 0, len(kdb.dsDirty))
+	for _, zd := range kdb.dsDirty {
+		out = append(out, zd)
+	}
+	kdb.dsDirty = nil
+	sort.Slice(out, func(i, j int) bool { return out[i].ZoneName < out[j].ZoneName })
+	return out
 }
 
 func (kdb *KeyDB) serveDSEngineRequest(ctx context.Context, req DSEngineRequest) dsEngineResult {
@@ -215,9 +277,6 @@ func (kdb *KeyDB) serveDSEngineRequest(ctx context.Context, req DSEngineRequest)
 		return dsEngineResult{err: kdb.releaseRolloverCDS(ctx, req.zd)}
 	case dsCmdEnsureCDS:
 		return kdb.ensureCDS(ctx, req.zd)
-	case dsCmdKeysChanged:
-		kdb.followKeysWithCDS(ctx, req.zd)
-		return dsEngineResult{}
 	}
 	return dsEngineResult{err: fmt.Errorf("unknown DS engine command %d", req.cmd)}
 }
@@ -259,11 +318,14 @@ func (kdb *KeyDB) publishRolloverCDS(ctx context.Context, zd *ZoneData, snap *Ro
 	if err := zd.publishCDSAndWait(ctx, kdb, cds); err != nil {
 		return dsEngineResult{err: err}
 	}
-	// Recorded before anyone is told to fetch the CDS, as it always was, so a
-	// crash before the NOTIFY still leaves the claim for the cleanup triggers.
+	// The claim is recorded after the publish and before anyone is told to fetch
+	// the CDS. Not before the publish: a publish that then failed would leave the
+	// previous CDS served under a claim that no longer describes it, and nothing
+	// would ever remove it. A CDS whose claim cannot be recorded is taken back
+	// down instead, for the same reason.
 	if idxOK {
 		if err := setPublishedCdsRange(kdb, child, low, high); err != nil {
-			return dsEngineResult{err: fmt.Errorf("persist CDS range: %w", err)}
+			return dsEngineResult{err: zd.withdrawUnclaimedCDS(ctx, kdb, fmt.Errorf("persist CDS range: %w", err))}
 		}
 	} else if err := clearPublishedCdsRange(kdb, child); err != nil {
 		return dsEngineResult{err: fmt.Errorf("clear CDS range: %w", err)}
@@ -271,6 +333,15 @@ func (kdb *KeyDB) publishRolloverCDS(ctx context.Context, zd *ZoneData, snap *Ro
 	lgDSEngine.Debug("published the rollover target's CDS", "zone", child, "keyids", cdsKeyids(cds),
 		"index_low", low, "index_high", high, "index_known", idxOK)
 	return dsEngineResult{cds: cds, low: low, high: high, rangeKnown: idxOK}
+}
+
+// withdrawUnclaimedCDS takes down a CDS just published whose claim could not be
+// recorded, and returns cause, with the withdrawal's own failure if it had one.
+func (zd *ZoneData) withdrawUnclaimedCDS(ctx context.Context, kdb *KeyDB, cause error) error {
+	if uerr := zd.unpublishCDSAndWait(ctx, kdb); uerr != nil {
+		return fmt.Errorf("%w; the CDS it was for is still published: %v", cause, uerr)
+	}
+	return fmt.Errorf("%w; the CDS it was for has been withdrawn", cause)
 }
 
 // ensureCDS makes the zone serve the CDS its DS model says the parent should

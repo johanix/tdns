@@ -6,6 +6,7 @@ package tdns
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 )
 
 // dsEngineRig is a keystore, a zone, a zone updater that really publishes what it
-// is given, a notifier, and a running DS engine.
+// is given, a notifier, and (normally) a running DS engine.
 type dsEngineRig struct {
 	kdb     *KeyDB
 	zd      *ZoneData
@@ -23,10 +24,19 @@ type dsEngineRig struct {
 	log     *fakeUpdaterLog
 }
 
-// newDSEngineRig builds the rig. applyDelay slows the zone updater, which is what
-// makes a caller that does not wait for its update visible. With serveNotify
-// false nothing reads notifyq, so a test can count what was sent.
+// newDSEngineRig builds the rig and starts the DS engine. applyDelay slows the
+// zone updater, which is what makes a caller that does not wait for its update
+// visible. With serveNotify false nothing reads notifyq, so a test can count what
+// was sent.
 func newDSEngineRig(t *testing.T, applyDelay time.Duration, serveNotify bool) *dsEngineRig {
+	t.Helper()
+	r := buildDSEngineRig(t, applyDelay, serveNotify)
+	startDSEngine(t, r.kdb)
+	return r
+}
+
+// buildDSEngineRig is newDSEngineRig without starting the engine.
+func buildDSEngineRig(t *testing.T, applyDelay time.Duration, serveNotify bool) *dsEngineRig {
 	t.Helper()
 	kdb := newTestKeyDB(t)
 	kdb.UpdateQ = make(chan UpdateRequest, 8)
@@ -58,7 +68,6 @@ func newDSEngineRig(t *testing.T, applyDelay time.Duration, serveNotify bool) *d
 			}
 		})
 	}
-	startDSEngine(t, kdb)
 	return r
 }
 
@@ -190,6 +199,17 @@ func eventIndex(events []string, want string) int {
 		}
 	}
 	return -1
+}
+
+func dirtyZoneNames(kdb *KeyDB) []string {
+	kdb.dsDirtyMu.Lock()
+	defer kdb.dsDirtyMu.Unlock()
+	var out []string
+	for name := range kdb.dsDirty {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 var testDsyncTarget = &DsyncTarget{Name: "parent.", Addresses: []string{"192.0.2.53:53"}}
@@ -409,6 +429,58 @@ func TestEnsureCDSUnderMultiDSLeavesTheRolloverAbleToCleanUp(t *testing.T) {
 	})
 }
 
+// TestRolloverCDSWhoseClaimCannotBeRecordedIsWithdrawn: the claim is what lets the
+// rollover's cleanup remove its CDS. A CDS published without one would stay on
+// the wire with nothing to ever take it down, so it is withdrawn instead.
+func TestRolloverCDSWhoseClaimCannotBeRecordedIsWithdrawn(t *testing.T) {
+	r := newDSEngineRig(t, 0, false)
+	seedKeyWithIndex(t, r.kdb, "example.", DnskeyStateActive, pubA, 0)
+	if _, err := r.kdb.DB.Exec(`DROP TABLE RolloverZoneState`); err != nil {
+		t.Fatalf("drop RolloverZoneState: %v", err)
+	}
+
+	res := r.kdb.askDSEngine(context.Background(), DSEngineRequest{cmd: dsCmdPublishRolloverCDS, zd: r.zd})
+	if res.err == nil || !strings.Contains(res.err.Error(), "persist CDS range") {
+		t.Fatalf("err = %v, want the failure to record the claim", res.err)
+	}
+	if got := servedCDS(t, r.zd); len(got) != 0 {
+		t.Errorf("a CDS without a claim was left published (keyids %v)", tupleKeyids(got))
+	}
+}
+
+// TestRolloverCleanupKeepsItsClaimWhenItCannotCompare: failing to compare is not
+// a mismatch. Clearing the claim then would leave a CDS that may be the
+// rollover's with nothing to ever remove it; kept, the next trigger retries.
+func TestRolloverCleanupKeepsItsClaimWhenItCannotCompare(t *testing.T) {
+	r := newDSEngineRig(t, 0, false)
+	stageCDS(t, r.zd, cdsFor("example.", pubA))
+	// A key in the claimed range whose stored DNSKEY cannot be parsed.
+	if _, err := r.kdb.DB.Exec(`INSERT INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr)
+		VALUES ('example.', ?, 4711, 257, ?, 'test', '', 'not a DNSKEY')`, DnskeyStateActive, dns.ED25519); err != nil {
+		t.Fatalf("seed unparseable key: %v", err)
+	}
+	if _, err := r.kdb.DB.Exec(`INSERT INTO RolloverKeyState (zone, keyid, rollover_index, rollover_method, rollover_state_at)
+		VALUES ('example.', 4711, 0, 'multi-ds', ?)`, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("seed RolloverKeyState: %v", err)
+	}
+	if err := setPublishedCdsRange(r.kdb, "example.", 0, 0); err != nil {
+		t.Fatalf("setPublishedCdsRange: %v", err)
+	}
+
+	cleanupCdsAfterConfirm(context.Background(), r.zd, r.kdb)
+
+	row, err := LoadRolloverZoneRow(r.kdb, "example.")
+	if err != nil || row == nil {
+		t.Fatalf("LoadRolloverZoneRow: row=%v err=%v", row, err)
+	}
+	if !row.LastPublishedCdsIndexLow.Valid || !row.LastPublishedCdsIndexHigh.Valid {
+		t.Error("the claim was cleared although the cleanup could not compare; nothing can remove the CDS now")
+	}
+	if got := servedCDS(t, r.zd); len(got) != 1 {
+		t.Errorf("served CDS keyids %v; a cleanup that could not compare must not withdraw it", tupleKeyids(got))
+	}
+}
+
 // TestRolloverNotifyPushWaitsUntilTheCdsIsServed: the rollover's NOTIFY push
 // used to queue its CDS and notify at once, racing the parent's fetch against the
 // apply. The updater is slow on purpose.
@@ -480,15 +552,16 @@ func TestAPublishedCdsFollowsTheKeys(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := newDSEngineRig(t, 0, false)
+			// No engine: followKeysWithCDS is called directly, on the test's own
+			// goroutine, so the assertions below run after it has finished.
+			r := buildDSEngineRig(t, 0, false)
 			if len(tc.served) > 0 {
 				stageCDS(t, r.zd, cdsFor("example.", tc.served...))
 			}
 			tc.setup(t, r)
 
-			if res := r.kdb.askDSEngine(context.Background(), DSEngineRequest{cmd: dsCmdKeysChanged, zd: r.zd}); res.err != nil {
-				t.Fatalf("keys changed: %v", res.err)
-			}
+			r.kdb.followKeysWithCDS(context.Background(), r.zd)
+
 			want := cdsTuplesOf(cdsFor("example.", tc.want...))
 			if got := servedCDS(t, r.zd); !cdsTupleSetsEqual(got, want) {
 				t.Errorf("served CDS keyids %v, want %v", tupleKeyids(got), tupleKeyids(want))
@@ -497,15 +570,35 @@ func TestAPublishedCdsFollowsTheKeys(t *testing.T) {
 	}
 }
 
+// TestKeyChangesReachTheEngine: a key change marked by the signing path is picked
+// up by the running engine, which brings the CDS back in step.
+func TestKeyChangesReachTheEngine(t *testing.T) {
+	r := newDSEngineRig(t, 0, false)
+	stageCDS(t, r.zd, cdsFor("example.", pubB))
+	seedKey(t, r.kdb, "example.", DnskeyStateActive, 257, pubA)
+
+	r.kdb.dsEngineKeysChanged(r.zd)
+
+	want := cdsTuplesOf(cdsFor("example.", pubA))
+	deadline := time.Now().Add(2 * time.Second)
+	for !cdsTupleSetsEqual(servedCDS(t, r.zd), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("served CDS keyids %v two seconds after the key change, want %v",
+				tupleKeyids(servedCDS(t, r.zd)), tupleKeyids(want))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestPublishDnskeyRRsTellsTheDSEngineWhenAKskChanges: the DNSKEY RRset is built
-// from the keystore in one place, so that is where a KSK change shows. It tells
-// the DS engine only when it matters -- a zone serving a CDS whose KSK set
-// changed -- and never blocks, since it runs with zd.mu held.
+// from the keystore in one place, so that is where a KSK change shows. It marks
+// the zone only when it matters -- a zone serving a CDS whose KSK set changed --
+// and it neither blocks, since it runs with zd.mu held, nor loses a change.
 func TestPublishDnskeyRRsTellsTheDSEngineWhenAKskChanges(t *testing.T) {
 	newZone := func(t *testing.T, withCDS bool) (*ZoneData, *KeyDB) {
 		t.Helper()
 		kdb := newTestKeyDB(t)
-		kdb.DSEngineQ = make(chan DSEngineRequest, 4)
+		kdb.DSEngineQ = make(chan DSEngineRequest) // unbuffered, nobody reading
 		zd := testZone(t, "example.", csyncTestZone)
 		registerZones(t, zd)
 		zd.KeyDB = kdb
@@ -515,53 +608,8 @@ func TestPublishDnskeyRRsTellsTheDSEngineWhenAKskChanges(t *testing.T) {
 		}
 		return zd, kdb
 	}
-
-	t.Run("a KSK change on a zone serving a CDS", func(t *testing.T) {
-		zd, kdb := newZone(t, true)
-		seedKey(t, kdb, "example.", DnskeyStatePublished, 257, pubA)
-		if err := zd.PublishDnskeyRRs(&DnssecKeys{}); err != nil {
-			t.Fatalf("PublishDnskeyRRs: %v", err)
-		}
-		if n := len(kdb.DSEngineQ); n != 1 {
-			t.Fatalf("the DS engine was told %d time(s), want once", n)
-		}
-		if req := <-kdb.DSEngineQ; req.cmd != dsCmdKeysChanged || req.zd != zd {
-			t.Errorf("request = {cmd %d, zone %p}, want keys-changed for this zone", req.cmd, req.zd)
-		}
-		if err := zd.PublishDnskeyRRs(&DnssecKeys{}); err != nil {
-			t.Fatalf("PublishDnskeyRRs again: %v", err)
-		}
-		if n := len(kdb.DSEngineQ); n != 0 {
-			t.Errorf("republishing the same KSKs told the DS engine %d time(s)", n)
-		}
-	})
-
-	t.Run("a zone serving no CDS", func(t *testing.T) {
-		zd, kdb := newZone(t, false)
-		seedKey(t, kdb, "example.", DnskeyStatePublished, 257, pubA)
-		if err := zd.PublishDnskeyRRs(&DnssecKeys{}); err != nil {
-			t.Fatalf("PublishDnskeyRRs: %v", err)
-		}
-		if n := len(kdb.DSEngineQ); n != 0 {
-			t.Errorf("told the DS engine %d time(s) about a zone with no CDS to follow", n)
-		}
-	})
-
-	t.Run("a ZSK change", func(t *testing.T) {
-		zd, kdb := newZone(t, true)
-		seedKey(t, kdb, "example.", DnskeyStatePublished, 256, pubA)
-		if err := zd.PublishDnskeyRRs(&DnssecKeys{}); err != nil {
-			t.Fatalf("PublishDnskeyRRs: %v", err)
-		}
-		if n := len(kdb.DSEngineQ); n != 0 {
-			t.Errorf("told the DS engine %d time(s) about a ZSK, which has no DS", n)
-		}
-	})
-
-	t.Run("a full queue does not block", func(t *testing.T) {
-		zd, kdb := newZone(t, true)
-		kdb.DSEngineQ = make(chan DSEngineRequest) // nobody reading
-		seedKey(t, kdb, "example.", DnskeyStatePublished, 257, pubA)
+	publish := func(t *testing.T, zd *ZoneData) {
+		t.Helper()
 		done := make(chan error, 1)
 		go func() { done <- zd.PublishDnskeyRRs(&DnssecKeys{}) }()
 		select {
@@ -570,9 +618,84 @@ func TestPublishDnskeyRRsTellsTheDSEngineWhenAKskChanges(t *testing.T) {
 				t.Fatalf("PublishDnskeyRRs: %v", err)
 			}
 		case <-time.After(2 * time.Second):
-			t.Fatal("PublishDnskeyRRs blocked on the DS engine queue with zd.mu held")
+			t.Fatal("PublishDnskeyRRs blocked with zd.mu held")
+		}
+	}
+
+	t.Run("a KSK change on a zone serving a CDS", func(t *testing.T) {
+		zd, kdb := newZone(t, true)
+		seedKey(t, kdb, "example.", DnskeyStatePublished, 257, pubA)
+		publish(t, zd)
+		if got := dirtyZoneNames(kdb); len(got) != 1 || got[0] != "example." {
+			t.Fatalf("marked zones = %v, want [example.]", got)
+		}
+		if n := len(kdb.dsWake()); n != 1 {
+			t.Errorf("wake-up signals pending = %d, want 1", n)
+		}
+		if taken := kdb.takeDSDirty(); len(taken) != 1 || taken[0] != zd {
+			t.Errorf("takeDSDirty = %v, want this zone", taken)
+		}
+
+		publish(t, zd)
+		if got := dirtyZoneNames(kdb); len(got) != 0 {
+			t.Errorf("republishing the same KSKs marked %v", got)
 		}
 	})
+
+	t.Run("changes coalesce", func(t *testing.T) {
+		zd, kdb := newZone(t, true)
+		for i := 0; i < 1000; i++ {
+			kdb.dsEngineKeysChanged(zd)
+		}
+		if got := dirtyZoneNames(kdb); len(got) != 1 {
+			t.Errorf("marked zones = %v after 1000 changes to one zone, want it once", got)
+		}
+		if n := len(kdb.dsWake()); n != 1 {
+			t.Errorf("wake-up signals pending = %d, want 1", n)
+		}
+	})
+
+	t.Run("a zone serving no CDS", func(t *testing.T) {
+		zd, kdb := newZone(t, false)
+		seedKey(t, kdb, "example.", DnskeyStatePublished, 257, pubA)
+		publish(t, zd)
+		if got := dirtyZoneNames(kdb); len(got) != 0 {
+			t.Errorf("marked %v, a zone with no CDS to follow", got)
+		}
+	})
+
+	t.Run("a ZSK change", func(t *testing.T) {
+		zd, kdb := newZone(t, true)
+		seedKey(t, kdb, "example.", DnskeyStatePublished, 256, pubA)
+		publish(t, zd)
+		if got := dirtyZoneNames(kdb); len(got) != 0 {
+			t.Errorf("marked %v for a ZSK change; a ZSK has no DS", got)
+		}
+	})
+}
+
+// TestTheEngineSkipsARequestItsRequesterAbandoned: a request still queued when its
+// requester stops waiting has already been reported as failed. Serving it later
+// would publish a CDS its owner does not know about.
+func TestTheEngineSkipsARequestItsRequesterAbandoned(t *testing.T) {
+	r := buildDSEngineRig(t, 0, false)
+	seedKey(t, r.kdb, "example.", DnskeyStateActive, 257, pubA)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if res := r.kdb.askDSEngine(ctx, DSEngineRequest{cmd: dsCmdEnsureCDS, zd: r.zd}); res.err == nil {
+		t.Fatal("no error from a DS engine that is not running yet")
+	}
+
+	startDSEngine(t, r.kdb)
+	// Queued behind the abandoned request, so its answer means the engine has
+	// dealt with that one first.
+	if res := r.kdb.askDSEngine(context.Background(), DSEngineRequest{cmd: dsCmdReleaseRolloverCDS, zd: r.zd}); res.err != nil {
+		t.Fatalf("release: %v", res.err)
+	}
+	if got := servedCDS(t, r.zd); len(got) != 0 {
+		t.Errorf("the abandoned request was served: CDS keyids %v published", tupleKeyids(got))
+	}
 }
 
 // TestAskingAnAbsentDSEngineFails: a rollover tick or the delegation syncher that
