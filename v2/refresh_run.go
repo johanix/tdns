@@ -5,6 +5,8 @@ package tdns
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -127,8 +129,12 @@ func applyOutboundSerialAfterRefresh(zd *ZoneData, zone string) {
 	var saved uint32
 	var haveSaved bool
 	if mode == OutboundSoaSerialPersist {
-		if s, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil {
+		s, err := zd.KeyDB.LoadOutgoingSerial(zone)
+		switch {
+		case err == nil:
 			saved, haveSaved = s, true
+		case !errors.Is(err, sql.ErrNoRows):
+			lgEngine.Warn("reading the persisted outgoing serial failed", "zone", zone, "err", err)
 		}
 	}
 
@@ -153,7 +159,7 @@ func applyOutboundSerialAfterRefresh(zd *ZoneData, zone string) {
 		// Only when the persisted serial is AHEAD of the one just refreshed in.
 		// If upstream advanced while we were down, the inbound serial is the one
 		// to honour: moving backwards would break every downstream.
-		if haveSaved && saved > zd.CurrentSerial {
+		if haveSaved && serialNewer(saved, zd.CurrentSerial) {
 			zd.CurrentSerial = saved
 			serialChanged = true
 		}
