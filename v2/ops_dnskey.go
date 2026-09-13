@@ -18,10 +18,18 @@ import (
 // brief window after refresh where standby DNSKEYs disappear from
 // the served RRset until the next SignZone call.
 //
-// The set is `published` ∪ `standby` ∪ `retired`. Active keys are
-// fetched separately via GetDnssecKeys(..., DnskeyStateActive).
+// The set is `published` ∪ `standby` ∪ `retired` ∪ `mpdist` ∪ `foreign`.
+// Active keys are fetched separately via GetDnssecKeys(..., DnskeyStateActive).
+//
+// The last two are states a derived application stages keys into through
+// the key lifecycle hooks (KeyLifecycleHooks): `mpdist`, a key of this
+// zone's that is served ahead of its promotion and is released by its owner,
+// and `foreign`, a DNSKEY that is served here but was generated elsewhere and
+// has no private half. tdns attaches no meaning to either beyond "served":
+// neither is ever loaded as a signing key (that is loadDnssecKeysFromDB with
+// state active), and neither moves on the worker's timers.
 const FetchZoneDnskeysSql = `
-SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='standby' OR state='retired')`
+SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='standby' OR state='retired' OR state='mpdist' OR state='foreign')`
 
 func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
@@ -37,6 +45,15 @@ func (zd *ZoneData) publishDnskeyRRsLocked(dak *DnssecKeys) error {
 	apex := zd.stagedOwner(zd.ZoneName)
 	if apex == nil {
 		return fmt.Errorf("PublishDnskeyRRs: zone apex %q not found", zd.ZoneName)
+	}
+
+	// Read before the new RRset replaces the old one; see the DS engine note at
+	// the end.
+	var servesCds bool
+	var oldSEP map[string]struct{}
+	if apex.RRtypes != nil {
+		servesCds = len(apex.RRtypes.GetOnlyRRSet(dns.TypeCDS).RRs) > 0
+		oldSEP = sepKeyIdentities(apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs)
 	}
 
 	// Ensure that all active DNSKEYs are included in the DNSKEY RRset
@@ -103,6 +120,15 @@ func (zd *ZoneData) publishDnskeyRRsLocked(dak *DnssecKeys) error {
 	}
 
 	zd.stageRRsetLocked(zd.ZoneName, dnskeys)
+
+	// A zone that serves a CDS must not go on serving one that no longer
+	// matches its keys: a parent polling CDS would point the DS at keys the zone
+	// has stopped using. This is the one place the DNSKEY RRset is built from
+	// the keystore, so it is where a KSK change shows; the DS engine owns the CDS
+	// and decides what follows. It never blocks, which matters with zd.mu held.
+	if servesCds && !sameKeyIdentities(oldSEP, sepKeyIdentities(publishkeys)) {
+		zd.KeyDB.dsEngineKeysChanged(zd)
+	}
 
 	return nil
 }

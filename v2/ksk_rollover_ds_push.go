@@ -356,7 +356,7 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 		// and the parent has lost the ability to consume it, unpublish
 		// best-effort. Otherwise CDS sits orphaned for the duration of
 		// the parent-side outage.
-		cleanupCdsAfterConfirm(deps.Zone, deps.KDB)
+		cleanupCdsAfterConfirm(ctx, deps.Zone, deps.KDB)
 		// Two error shapes from pickRolloverSchemes:
 		//   - errNoUsableScheme (and force-X-not-advertised wraps of
 		//     it) → child-config:waiting-for-parent. 1h-cap backoff,
@@ -398,7 +398,7 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 	// will not be republished by this attempt. Unpublish before
 	// dispatch so it doesn't sit stale through the rollover.
 	if !schemesContainNotify(choices) {
-		cleanupCdsAfterConfirm(deps.Zone, deps.KDB)
+		cleanupCdsAfterConfirm(ctx, deps.Zone, deps.KDB)
 	}
 
 	results := make([]pathResultLite, len(choices))

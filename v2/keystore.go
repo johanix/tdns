@@ -1303,6 +1303,7 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 		return fmt.Errorf("commit failed: %w", err)
 	}
 	committed = true
+	notifyKeyStateChange(zonename, keyid, oldstate, newstate)
 
 	// Post-commit signing-keys republish (own-tx; R1).
 	if rerr := republishSigningKeysForZone(kdb, zonename); rerr != nil {
@@ -1311,7 +1312,9 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 	return nil
 }
 
-// GenerateAndStageKey generates a new DNSSEC key and stages it (created → published).
+// GenerateAndStageKey generates a new DNSSEC key and stages it: created →
+// published, or created → whatever state the registered StagedState hook
+// names for this zone (KeyLifecycleHooks).
 func GenerateAndStageKey(kdb *KeyDB, zone, creator string, alg uint8, keytype string) (uint16, error) {
 	pkc, _, err := kdb.GenerateKeypair(zone, creator, DnskeyStateCreated, dns.TypeDNSKEY, alg, keytype, nil)
 	if err != nil {
@@ -1319,12 +1322,13 @@ func GenerateAndStageKey(kdb *KeyDB, zone, creator string, alg uint8, keytype st
 	}
 
 	keyid := pkc.KeyId
+	staged := keyStagedStateFor(zone)
 
-	if err := UpdateDnssecKeyState(kdb, zone, keyid, DnskeyStatePublished); err != nil {
-		return 0, fmt.Errorf("GenerateAndStageKey: state transition to published failed: %w", err)
+	if err := UpdateDnssecKeyState(kdb, zone, keyid, staged); err != nil {
+		return 0, fmt.Errorf("GenerateAndStageKey: state transition to %s failed: %w", staged, err)
 	}
 
-	lgSigner.Info("generated and staged DNSSEC key", "zone", zone, "keyid", keyid, "keytype", keytype, "state", DnskeyStatePublished)
+	lgSigner.Info("generated and staged DNSSEC key", "zone", zone, "keyid", keyid, "keytype", keytype, "state", staged)
 	return keyid, nil
 }
 
@@ -1496,13 +1500,17 @@ func UpdateDnssecKeyState(kdb *KeyDB, zonename string, keyid uint16, newstate st
 		}
 	}()
 
-	if err := UpdateDnssecKeyStateTx(tx, kdb, zonename, keyid, newstate); err != nil {
+	oldstate, err := updateDnssecKeyStateTx(tx, kdb, zonename, keyid, newstate)
+	if err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit failed: %w", err)
 	}
 	committed = true
+	// After the commit and before the republish: the change is durable, and
+	// a republish failure below is reported to the caller either way.
+	notifyKeyStateChange(zonename, keyid, oldstate, newstate)
 	if rerr := republishSigningKeysForZone(kdb, zonename); rerr != nil {
 		return fmt.Errorf("UpdateDnssecKeyState: republish signing keys: %w", rerr)
 	}
@@ -1516,14 +1524,24 @@ func UpdateDnssecKeyState(kdb *KeyDB, zonename string, keyid uint16, newstate st
 // Does NOT republish the signing-keys snapshot — the caller must call
 // republishSigningKeysForZone after their Commit (R1). Callers today:
 // DnssecKeyMgmt (policy-cleanup; R2 defer), AtomicRollover, KSK observe-advance.
+// Nor does it run the OnStateChange hook: that fires after a commit, and the
+// caller owns this one.
 func UpdateDnssecKeyStateTx(tx *Tx, kdb *KeyDB, zonename string, keyid uint16, newstate string) error {
+	_, err := updateDnssecKeyStateTx(tx, kdb, zonename, keyid, newstate)
+	return err
+}
+
+// updateDnssecKeyStateTx is the body of UpdateDnssecKeyStateTx, returning the
+// state the key was in, for the hook UpdateDnssecKeyState fires after its
+// commit.
+func updateDnssecKeyStateTx(tx *Tx, kdb *KeyDB, zonename string, keyid uint16, newstate string) (string, error) {
 	var oldstate string
 	err := tx.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&oldstate)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("key with keyid %d not found in zone %s", keyid, zonename)
+			return "", fmt.Errorf("key with keyid %d not found in zone %s", keyid, zonename)
 		}
-		return fmt.Errorf("error querying DnssecKeyStore: %v", err)
+		return "", fmt.Errorf("error querying DnssecKeyStore: %v", err)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -1545,16 +1563,16 @@ func UpdateDnssecKeyStateTx(tx *Tx, kdb *KeyDB, zonename string, keyid uint16, n
 	}
 
 	if err != nil {
-		return fmt.Errorf("error updating DnssecKeyStore: %v", err)
+		return "", fmt.Errorf("error updating DnssecKeyStore: %v", err)
 	}
 
 	rowsAffected, _ := res.RowsAffected()
 	if rowsAffected == 0 {
-		return fmt.Errorf("no rows updated for key %d in zone %s", keyid, zonename)
+		return "", fmt.Errorf("no rows updated for key %d in zone %s", keyid, zonename)
 	}
 
 	lgSigner.Info("DNSKEY state updated", "zone", zonename, "keyid", keyid, "oldstate", oldstate, "newstate", newstate)
-	return nil
+	return oldstate, nil
 }
 
 // RolloverKey performs a manual key rollover for the specified zone and key type.
