@@ -57,6 +57,7 @@ var tdnsSpecialTypes = map[uint16]bool{
 	core.TypeHSYNC3:     true,
 	core.TypeHSYNCPARAM: true,
 	core.TypeTSYNC:      true,
+	core.TypeJWK:        true,
 }
 
 var standardDNSTypes = map[uint16]bool{

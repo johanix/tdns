@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -116,7 +117,7 @@ func signedProofZone(t *testing.T, blackLies bool) (*ZoneData, *KeyDB) {
 		},
 	}
 	zd.InstallInitialSnapshot()
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	return zd, kdb

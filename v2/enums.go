@@ -512,6 +512,33 @@ func (zd *ZoneData) setErrorLocked(errtype ErrorType, errmsg string, args ...int
 	Zones.Set(zd.ZoneName, zd)
 }
 
+// snapshotErrorsLocked copies the current entries for the given categories, for
+// a later restoreErrorsLocked. The caller MUST hold zd.mu.
+func (zd *ZoneData) snapshotErrorsLocked(types ...ErrorType) map[ErrorType]ZoneError {
+	saved := make(map[ErrorType]ZoneError, len(types))
+	for _, t := range types {
+		if e, ok := zd.Errors[t]; ok {
+			saved[t] = e
+		}
+	}
+	return saved
+}
+
+// restoreErrorsLocked puts the given categories back exactly as snapshotted:
+// set where they were set, cleared where they were not. Other categories are
+// untouched. The caller MUST hold zd.mu.
+func (zd *ZoneData) restoreErrorsLocked(saved map[ErrorType]ZoneError, types ...ErrorType) {
+	for _, t := range types {
+		if e, ok := saved[t]; ok {
+			// "%s", not the message as the format: it is stored text, and a
+			// literal % in it would otherwise be read as a verb.
+			zd.setErrorLocked(t, "%s", e.Msg)
+		} else {
+			zd.clearErrorLocked(t)
+		}
+	}
+}
+
 // ClearError removes one error category. ClearError(NoError) clears
 // every error.
 func (zd *ZoneData) ClearError(errtype ErrorType) {

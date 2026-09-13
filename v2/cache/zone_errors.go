@@ -32,7 +32,13 @@ func (z *Zone) RecordZoneAddressFailureForRcode(addr string, t core.Transport, r
 	var backoffDuration time.Duration
 	var errMsg string
 	switch rcode {
-	case dns.RcodeRefused, dns.RcodeNotAuth, dns.RcodeServerFailure:
+	// SERVFAIL is not evidence of lameness: a server that has the zone
+	// configured but not loaded yet -- a secondary that has not finished its
+	// first transfer -- says SERVFAIL for a few seconds. Booked as lame, that
+	// shut the zone's servers out for the full LameDelegation backoff. It
+	// takes the ordinary failure schedule below, as the server-scoped path
+	// already does (RecordAddressFailureForRcode).
+	case dns.RcodeRefused, dns.RcodeNotAuth:
 		backoffDuration = applyJitter(GetBackoffPolicy().LameDelegation)
 		if debug {
 			errMsg = fmt.Sprintf("rcode=%d: lame delegation", rcode)

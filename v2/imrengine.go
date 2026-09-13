@@ -235,34 +235,7 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	}
 
 	if conf.Imr.Logging.Enabled {
-		logfile := conf.Imr.Logging.File
-		if logfile == "" {
-			logfile = "/var/log/tdns/imr-debug.log"
-		}
-		f, err := os.OpenFile(logfile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			lgImr.Error("failed to open IMR debug log file, debug logging disabled", "file", logfile, "err", err)
-		} else {
-			imr.DebugLog = log.New(f, "", log.Ldate|log.Ltime|log.Lmicroseconds)
-			lgImr.Info("IMR debug logging enabled", "file", logfile)
-			dl := imr.DebugLog
-			RegisterImrOutboundQueryHook(func(ctx context.Context, qname string, qtype uint16, serverName, serverAddr string, transport core.Transport) error {
-				dl.Printf("OUTBOUND qname=%s qtype=%s server=%s addr=%s transport=%s",
-					qname, dns.TypeToString[qtype], serverName, serverAddr, core.TransportToString[transport])
-				return nil
-			})
-			RegisterImrResponseHook(func(ctx context.Context, qname string, qtype uint16, serverName, serverAddr string, transport core.Transport, response *dns.Msg, rcode int) {
-				var ans []string
-				if response != nil {
-					for _, rr := range response.Answer {
-						ans = append(ans, rr.String())
-					}
-				}
-				dl.Printf("RESPONSE qname=%s qtype=%s server=%s addr=%s transport=%s rcode=%s answer=%v",
-					qname, dns.TypeToString[qtype], serverName, serverAddr,
-					core.TransportToString[transport], dns.RcodeToString[rcode], ans)
-			})
-		}
+		imr.DebugLog = imrDebugLogger(conf.Imr.Logging.File)
 	}
 
 	// Build the forward table before anything sends a query: PrimeWithHints
@@ -302,6 +275,16 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		}
 		lgImr.Info("adding forward zone", "zone", fz.Zone, "trust-ad", fz.TrustAD, "upstreams", strings.Join(ups, ", "))
 	}
+
+	// Trust anchors are configuration, and priming already validates what it
+	// fetches: load them first. They used to be loaded only after
+	// InitImrEngine returned, so priming validated ". NS" and ". DNSKEY"
+	// against no anchor, cached the root NS as Indeterminate, and every start
+	// logged "NS RRset failed to validate for trust anchor zone" -- until that
+	// cached verdict expired. Only the offline half here; fetching and
+	// validating the anchored zones' DNSKEYs still needs the primed cache and
+	// stays in initializeImrTrustAnchors.
+	imr.loadConfiguredTrustAnchors(conf)
 
 	if !rrcache.IsPrimed() {
 		if imr.forwardZoneFor(".") != nil {
@@ -395,18 +378,15 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 		lgImr.Info("ImrEngine starting")
 	}
 
-	// Initialize the Imr if not already done (e.g. by a prior InitImrEngine call).
-	// Propagate the init error to the engine supervisor rather than calling
-	// Shutdowner here — that would leave conf.Internal.ImrEngine nil and the
-	// dereference below would panic.
+	// Initialize the Imr if not already done (e.g. by a prior InitImrEngine call),
+	// retrying for as long as that fails: priming is the step most likely to
+	// fail at boot, and the daemon is useless without it (imr_init_retry.go).
+	// Returns an error only if ctx ends first, and never calls Shutdowner --
+	// that would leave conf.Internal.ImrEngine nil and the dereference below
+	// would panic.
 	if conf.Internal.ImrEngine == nil {
-		if err := conf.InitImrEngine(ctx, quiet); err != nil {
-			// The engine supervisor only LOGS this error while the daemon
-			// keeps running — with no DNS listeners. Register the condition
-			// so `config status` shows DEGRADED instead of a healthy-looking
-			// process that answers nothing.
-			conf.Internal.ServerErrors.SetImrPrimingError(
-				fmt.Sprintf("IMR did not start (no DNS listeners): %v", err))
+		init := func() error { return conf.InitImrEngine(ctx, quiet) }
+		if err := conf.initImrEngineRetrying(ctx, init, imrInitRetryDelay); err != nil {
 			return fmt.Errorf("ImrEngine: InitImrEngine failed: %w", err)
 		}
 	}
@@ -1001,11 +981,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			crrset.Context == cache.ContextHint) &&
 		crrset.RRset != nil && crrset.RRset.RRtype == qtype {
 		lgImr.Debug("ImrResponder: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
-		m.SetRcode(r, dns.RcodeSuccess)
-		m.Answer = crrset.ServeAnswer(time.Now(), msgoptions.DO)
-		m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
-		setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
-		w.WriteMsg(m)
+		imr.serveCachedPositive(ctx, w, r, m, qname, qtype, crrset, msgoptions)
 		return
 	}
 	// DS records are exclusively published at the parent zone, so a
@@ -1018,11 +994,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	// the client their NODATA for a DS sitting in cache as secure.)
 	if crrset != nil && qtype == dns.TypeDS && crrset.Context == cache.ContextReferral &&
 		crrset.RRset != nil && crrset.RRset.RRtype == dns.TypeDS && len(crrset.RRset.RRs) > 0 {
-		m.SetRcode(r, dns.RcodeSuccess)
-		m.Answer = crrset.ServeAnswer(time.Now(), msgoptions.DO)
-		m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
-		setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
-		w.WriteMsg(m)
+		imr.serveCachedPositive(ctx, w, r, m, qname, qtype, crrset, msgoptions)
 		return
 	}
 	if crrset != nil {
@@ -1041,7 +1013,8 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			// } else if crrset.Validated {
 			//	m.AuthenticatedData = true
 			// }
-			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
+			m.AuthenticatedData = negativeAD(crrset, r, msgoptions)
+			attachNegativeEDE(m, msgoptions, crrset, r)
 			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 			w.WriteMsg(m)
 			return
@@ -1072,36 +1045,16 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			// } else if crrset.Validated {
 			//	m.AuthenticatedData = true
 			// }
-			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
+			m.AuthenticatedData = negativeAD(crrset, r, msgoptions)
+			attachNegativeEDE(m, msgoptions, crrset, r)
 			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 			w.WriteMsg(m)
 			return
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextAnswer &&
 			crrset.RRset != nil && crrset.RRset.RRtype == qtype:
-			if !msgoptions.CD && (crrset.EDECode != 0 || crrset.State == cache.ValidationStateBogus) {
-				lgImr.Debug("ImrResponder: returning SERVFAIL for bogus cached data", "qname", qname, "qtype", dns.TypeToString[qtype], "edeCode", crrset.EDECode, "state", cache.ValidationStateToString[crrset.State])
-				m.Answer = nil
-				m.Ns = nil
-				m.SetRcode(r, dns.RcodeServerFailure)
-				// Attach EDE if query had EDNS0 (check if request had OPT RR)
-				hasEDNS0 := r.IsEdns0() != nil
-				lgImr.Debug("ImrResponder: EDE details", "hasEDNS0", hasEDNS0, "edeCode", crrset.EDECode, "state", cache.ValidationStateToString[crrset.State])
-				if crrset.EDECode != 0 && hasEDNS0 {
-					edns0.AttachEDEToResponseWithText(m, crrset.EDECode, crrset.EDEText, msgoptions.DO)
-					lgImr.Debug("ImrResponder: attached EDE code to response", "edeCode", crrset.EDECode)
-				} else if crrset.State == cache.ValidationStateBogus && hasEDNS0 {
-					// Attach EDE 6 (DNSSEC Bogus) if no specific EDE code is set and query had EDNS0
-					edns0.AttachEDEToResponse(m, edns0.EDEDNSSECBogus)
-					lgImr.Debug("ImrResponder: attached EDE 6 (DNSSEC Bogus) to response")
-				}
-				w.WriteMsg(m)
-				return
-			}
-			m.SetRcode(r, dns.RcodeSuccess)
-			m.Answer = crrset.ServeAnswer(time.Now(), msgoptions.DO)
-			m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
-			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
-			w.WriteMsg(m)
+			// Same verdict-to-response rule as a fresh answer
+			// (ProcessAuthDNSResponse, dispositionFor).
+			imr.serveCachedPositive(ctx, w, r, m, qname, qtype, crrset, msgoptions)
 			return
 		}
 	}
@@ -1277,19 +1230,24 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		// than the data got. Only ImrResponder's own cache short-circuits,
 		// above, can say "from cache" without qualification.
 		//
-		// Set AD if this RRset is ValidationStateSecure (from cache or on-the-fly)
+		// The verdict is the validation's, whatever the client asked for: DO
+		// decides what the answer carries, not whether it is judged. handleAnswer
+		// has normally just validated this RRset and cached the verdict; reuse
+		// it unless it is one that says "could not tell yet".
 		vstate := cache.ValidationStateNone
-		var err error
-		shouldValidate := msgoptions.DO && !msgoptions.CD
-		if imr.Cache != nil && shouldValidate {
-			if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil && c.State == cache.ValidationStateSecure {
-				vstate = c.State
+		var edeCode uint16
+		var edeText string
+		if imr.Cache != nil {
+			if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil && verdictReusable(c.State) {
+				vstate, edeCode, edeText = c.State, c.EDECode, c.EDEText
 			} else {
+				var err error
 				vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
-				if err != nil {
+				if err != nil && !msgoptions.CD {
 					lgImr.Error("failed to validate RRset", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
+					m.Answer = nil
+					m.Ns = nil
 					m.SetRcode(r, dns.RcodeServerFailure)
-					// Attach EDE 6 (DNSSEC Bogus) if validation failed and query had EDNS0
 					if r.IsEdns0() != nil {
 						edns0.AttachEDEToResponse(m, edns0.EDEDNSSECBogus)
 					}
@@ -1298,39 +1256,31 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 				}
 			}
 		}
-		if vstate == cache.ValidationStateSecure && shouldValidate {
-			m.AuthenticatedData = true
-			setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
-			w.WriteMsg(m)
-			return true, nil
-		}
-		if !shouldValidate {
-			setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
-			w.WriteMsg(m)
-			return true, nil
-		}
-		// Validation was attempted but failed (bogus or indeterminate)
-		if vstate == cache.ValidationStateBogus {
+		disp, ede := imr.dispositionFor(vstate, edeCode, len(rrset.RRSIGs) > 0, msgoptions)
+		switch disp {
+		case answerServeSecure:
+			m.AuthenticatedData = adWanted(r, msgoptions)
+		case answerServfail:
 			m.Answer = nil
 			m.Ns = nil
 			m.SetRcode(r, dns.RcodeServerFailure)
-			edeCode, edeText := imr.Cache.MarkRRsetBogus(qname, qtype, rrset, msgoptions.DO)
-			// Attach EDE if query had EDNS0 (check if request had OPT RR)
+			if vstate == cache.ValidationStateBogus && edeCode == 0 {
+				// Record the verdict on the entry, and take its more specific EDE.
+				if code, text := imr.Cache.MarkRRsetBogus(qname, qtype, rrset, msgoptions.DO); code != 0 {
+					ede, edeText = code, text
+				}
+			}
 			if r.IsEdns0() != nil {
-				if edeCode != 0 {
-					edns0.AttachEDEToResponseWithText(m, edeCode, edeText, msgoptions.DO)
+				if edeText != "" {
+					edns0.AttachEDEToResponseWithText(m, ede, edeText, msgoptions.DO)
 				} else {
-					// Attach EDE 6 (DNSSEC Bogus) as fallback if no specific EDE code is available
-					edns0.AttachEDEToResponse(m, edns0.EDEDNSSECBogus)
+					edns0.AttachEDEToResponse(m, ede)
 				}
 			}
 			w.WriteMsg(m)
 			return true, nil
 		}
-		// Indeterminate or other validation state - return SERVFAIL without EDE
-		m.Answer = nil
-		m.Ns = nil
-		m.SetRcode(r, dns.RcodeServerFailure)
+		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil
 	}
@@ -1540,9 +1490,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 			start := len(resp.Ns)
 			appendSOAToMessage(cached.RRset, msgoptions, resp)
 			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(time.Now()))
-			if cached.State == cache.ValidationStateSecure {
-				resp.AuthenticatedData = true
-			}
+			resp.AuthenticatedData = negativeAD(cached, src, msgoptions)
 			attachNegativeEDE(resp, msgoptions, cached, src)
 			return true
 		}
@@ -2108,10 +2056,17 @@ func (imr *Imr) updateDNSKEYCacheFromRRset(anchorName string, rrset *core.RRset,
 				Expiration:  exp,
 			}
 			imr.DnskeyCache.Set(anchorName, keyid, &cdr)
+			// Log what the store kept, not what was asked for: for a trust
+			// anchor the two differ, and logging the request is how a
+			// 15-minute anchor went unnoticed.
+			stored := cdr.Expiration
+			if k := imr.DnskeyCache.Get(anchorName, keyid); k != nil {
+				stored = k.Expiration
+			}
 			if trustAnchor {
-				lgImr.Info("cached DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "trustAnchor", true, "expires", exp)
+				lgImr.Info("cached DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "trustAnchor", true, "expires", stored)
 			} else {
-				lgImr.Info("cached DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "expires", exp)
+				lgImr.Info("cached DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "expires", stored)
 			}
 		}
 	}

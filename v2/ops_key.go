@@ -126,9 +126,21 @@ func (zd *ZoneData) verifyPublishedKeyRRs(name string) (bool, error) {
 	usable := false
 	for _, pkey := range key_rrset.RRs {
 		found := false
-		pkeyid := pkey.(*dns.KEY).KeyTag()
+		published, ok := pkey.(*dns.KEY)
+		if !ok {
+			continue
+		}
+		pkeyid := published.KeyTag()
 		for _, key := range sak.Keys {
-			if key.KeyRR.KeyTag() == pkeyid {
+			// The whole key, not the tag. A key tag is sixteen bits and is not
+			// unique: an active keystore key can collide with an orphaned
+			// published one, and on a tag-only match this reported the orphan
+			// as usable and skipped publishing the active key. The zone then
+			// looks prepared, signs with a key nobody can find, and every
+			// signature fails to validate against the published record -- the
+			// #576 failure again, reached by a different route and with no
+			// warning at all, because the tag matched.
+			if sameKeyRdata(&key.KeyRR, published) {
 				found = true
 				break
 			}
@@ -528,4 +540,19 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 
 	return fmt.Sprintf("RolloverSig0KeyWithParent(%q) successfully rolled from SIG(0) key %d to SIG(0) key %d",
 		zd.ZoneName, sak.Keys[0].KeyRR.KeyTag(), pkc.KeyRR.KeyTag()), oldkeyid, newkeyid, ur, nil
+}
+
+// sameKeyRdata reports whether two KEY records carry the same key.
+//
+// RDATA only: owner name and TTL are not part of the key's identity, and the
+// two sides genuinely differ there -- one is read from the published RRset at
+// some owner, the other from the keystore.
+func sameKeyRdata(a, b *dns.KEY) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Flags == b.Flags &&
+		a.Protocol == b.Protocol &&
+		a.Algorithm == b.Algorithm &&
+		a.PublicKey == b.PublicKey
 }

@@ -25,6 +25,14 @@ service:
    # minrefresh:		60      # seconds, floor for SOA Refresh
    # maxrefresh:		1800    # seconds, ceiling for SOA Refresh
 
+   # Deadlines for a secondary's refresh. Deliberately far apart: an
+   # unreachable primary dies in the SOA probe and never reaches a transfer,
+   # so the probe bound is what stops one dead upstream from costing a whole
+   # transfer budget. Both default in code (probe 5s, transfer 300s).
+   # Each applies PER UPSTREAM ATTEMPT, not per refresh.
+   # probetimeout:    5        # seconds, one SOA probe against one upstream
+   # transfertimeout: 300      # seconds, one inbound transfer from one upstream
+
 # Same listeners: schema as every tdns app (#446). The agent's embedded
 # resolver is internal and binds NO service listeners; imr-debug-address
 # opens a loopback-only window into its cache.

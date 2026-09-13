@@ -9,6 +9,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -82,7 +83,7 @@ func assertCutInvariants(t *testing.T, zd *ZoneData, pass string) {
 func TestSignZoneSignsOnlyTheDSAtADelegationPoint(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := cutTestZone(t, kdb)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	assertCutInvariants(t, zd, "SignZone")
@@ -91,10 +92,10 @@ func TestSignZoneSignsOnlyTheDSAtADelegationPoint(t *testing.T) {
 func TestResignZoneSignsOnlyTheDSAtADelegationPoint(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := cutTestZone(t, kdb)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
-	if _, err := zd.ResignZone(kdb); err != nil {
+	if _, err := zd.ResignZone(context.Background(), kdb); err != nil {
 		t.Fatalf("ResignZone: %v", err)
 	}
 	assertCutInvariants(t, zd, "ResignZone")
@@ -108,7 +109,7 @@ func TestSigningStripsGlueRRSIGsLeftAtADelegationPoint(t *testing.T) {
 	seedOccludedRRSIG(t, zd, "child.cut.example.", dns.TypeA)
 	seedOccludedRRSIG(t, zd, "child.cut.example.", dns.TypeNS)
 
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	assertCutInvariants(t, zd, "SignZone over pre-signed glue")
@@ -120,7 +121,7 @@ func TestSigningStripsGlueRRSIGsLeftAtADelegationPoint(t *testing.T) {
 func TestUpdateSignsOnlyTheDSAtADelegationPoint(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := cutTestZone(t, kdb)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 
@@ -153,7 +154,7 @@ func TestUpdateSignsOnlyTheDSAtADelegationPoint(t *testing.T) {
 func TestRemovingADelegationSignsItsFormerGlue(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := cutTestZone(t, kdb)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 
@@ -177,7 +178,7 @@ func TestRemovingADelegationSignsItsFormerGlue(t *testing.T) {
 func TestZoneUpdateApplierRefusesAChildKeyAtADelegationPoint(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := cutTestZone(t, kdb)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 
@@ -234,7 +235,7 @@ func TestAChildKeyAtACutIsRemovedHoweverItArrived(t *testing.T) {
 	t.Run("KEY added before the NS that makes the cut", func(t *testing.T) {
 		kdb := newTestKeyDB(t)
 		zd := cutTestZone(t, kdb)
-		if _, err := zd.SignZone(kdb, true); err != nil {
+		if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 			t.Fatalf("SignZone: %v", err)
 		}
 		applyRR(t, zd, kdb, VerbAddRR, "fresh.cut.example. 3600 IN "+keyStr)
@@ -247,7 +248,7 @@ func TestAChildKeyAtACutIsRemovedHoweverItArrived(t *testing.T) {
 		zd := cutTestZone(t, kdb)
 		seedKeyAt(t, zd, "child.cut.example.", keyStr)
 
-		if _, err := zd.SignZone(kdb, true); err != nil {
+		if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 			t.Fatalf("SignZone: %v", err)
 		}
 		assertNoKeyInZone(t, zd, "child.cut.example.", "SignZone")
@@ -256,7 +257,7 @@ func TestAChildKeyAtACutIsRemovedHoweverItArrived(t *testing.T) {
 	t.Run("a delete can take one back out", func(t *testing.T) {
 		kdb := newTestKeyDB(t)
 		zd := cutTestZone(t, kdb)
-		if _, err := zd.SignZone(kdb, true); err != nil {
+		if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 			t.Fatalf("SignZone: %v", err)
 		}
 		// Seeded, so there is something for the delete to remove: refusing the

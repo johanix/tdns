@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -121,7 +122,7 @@ func zonemdSigningTestZone(t *testing.T, kdb *KeyDB) *ZoneData {
 		},
 	}
 	zd.UpdatePolicy = policyAllowing(dns.TypeA, dns.TypeTXT, dns.TypeZONEMD)
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("initial SignZone: %v", err)
 	}
 	return zd
@@ -227,12 +228,12 @@ func TestZonemdSurvivesSigningPasses(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := zonemdSigningTestZone(t, kdb)
 
-	if _, err := zd.SignZone(kdb, true); err != nil {
+	if _, err := zd.SignZone(context.Background(), kdb, true); err != nil {
 		t.Fatalf("SignZone: %v", err)
 	}
 	assertZonemdMatchesSnapshot(t, zd, "after SignZone")
 
-	if _, err := zd.ResignZone(kdb); err != nil {
+	if _, err := zd.ResignZone(context.Background(), kdb); err != nil {
 		t.Fatalf("ResignZone: %v", err)
 	}
 	assertZonemdMatchesSnapshot(t, zd, "after ResignZone")
@@ -667,12 +668,13 @@ func TestAbandoningTheZonemdRefusesThePublishWhenTheChainCannotBeRepaired(t *tes
 	beforeSerial := zd.publishedSnapshot().Serial
 	beforeSnap := zd.publishedSnapshot()
 
-	// Break key resolution, which is what restitchNsecLocked needs to sign the
-	// NSECs it rewrites. Closing the keystore is the bluntest honest way to
-	// make it fail; nothing else in the publish is touched.
-	if err := kdb.DB.Close(); err != nil {
-		t.Fatalf("closing the keystore: %v", err)
-	}
+	// Break the signing restitchNsecLocked does on the NSECs it rewrites. This
+	// used to close the keystore, which worked while the restitch resolved its
+	// own keys; the publish now resolves ONCE and passes the material in, so
+	// closing the store fails the resolution instead -- earlier, and in a
+	// different function. A material carrying no usable keys injects the failure
+	// where the test wants it: SignRRset refuses that directly.
+	unusable := &signingMaterial{dak: &DnssecKeys{}}
 
 	zd.mu.Lock()
 	zd.ensureWorkingSet()
@@ -682,7 +684,7 @@ func TestAbandoningTheZonemdRefusesThePublishWhenTheChainCannotBeRepaired(t *tes
 		Name: "newname.md.example.", Class: dns.ClassINET, RRtype: dns.TypeA,
 		RRs: []dns.RR{mustRR(t, "newname.md.example. 3600 IN A 10.5.5.5")},
 	})
-	cont := zd.abandonZonemdLocked(beforeSerial, fmt.Errorf("forced failure"))
+	cont := zd.abandonZonemdLocked(beforeSerial, unusable, fmt.Errorf("forced failure"))
 	gotSerial := zd.CurrentSerial
 	zd.mu.Unlock()
 
@@ -710,7 +712,7 @@ func TestAbandoningTheZonemdContinuesWhenTheChainRepairsCleanly(t *testing.T) {
 
 	zd.mu.Lock()
 	zd.ensureWorkingSet()
-	cont := zd.abandonZonemdLocked(beforeSerial, fmt.Errorf("forced failure"))
+	cont := zd.abandonZonemdLocked(beforeSerial, mustSigningMaterial(t, zd), fmt.Errorf("forced failure"))
 	staged := zd.stagedOwner(zd.ZoneName)
 	zd.mu.Unlock()
 
@@ -726,4 +728,25 @@ func TestAbandoningTheZonemdContinuesWhenTheChainRepairsCleanly(t *testing.T) {
 			t.Error("the apex NSEC still claims a ZONEMD the zone no longer carries")
 		}
 	}
+}
+
+// mustSigningMaterial resolves a publish's signing context the way
+// publishWorkingSetLocked does, for tests that call a publish-path helper
+// directly.
+func mustSigningMaterial(t *testing.T, zd *ZoneData) *signingMaterial {
+	t.Helper()
+	sm, err := zd.resolveSigningMaterialLocked()
+	if err != nil {
+		t.Fatalf("resolveSigningMaterialLocked: %v", err)
+	}
+	if sm == nil {
+		// nil with no error is the unbound-policy answer, and every caller
+		// below quietly does nothing with it: restitchNsecLocked returns
+		// without touching the chain, abandonZonemdLocked reports success, and
+		// the failure surfaces much later as a stale ZONEMD in a bitmap
+		// assertion. Report the broken fixture where it broke.
+		t.Fatal("resolveSigningMaterialLocked returned no signing material and no error;" +
+			" the fixture's DNSSEC policy is not bound, so nothing below will sign")
+	}
+	return sm
 }

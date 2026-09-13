@@ -269,8 +269,13 @@ func sendUpdateVia(ctx context.Context, msg *dns.Msg, zonename string, addrs []s
 	}
 
 	// No address produced a DNS response at all — a genuine transport failure.
-	return 0, ur, fmt.Errorf("all target addresses %v were unreachable", addrs)
+	return 0, ur, fmt.Errorf("%w: %v", ErrUpdateUnreachable, addrs)
 }
+
+// ErrUpdateUnreachable reports that no address of an UPDATE's target produced
+// a DNS response at all. Matchable, so a caller can tell "the parent could not
+// be reached" -- a condition to wait out -- from a parent that answered.
+var ErrUpdateUnreachable = errors.New("all target addresses were unreachable")
 
 // Parent is the zone to apply the update to.
 // XXX: This is to focused on creating updates for child delegation info. Need a more general

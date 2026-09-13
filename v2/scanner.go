@@ -51,8 +51,10 @@ type ScanResponse struct {
 // if we could wait on an external signal OR an internal quit channel. TBD.
 
 type Scanner struct {
-	AuthQueryQ         chan AuthQueryRequest
-	ImrEngine          *Imr
+	AuthQueryQ chan AuthQueryRequest
+	// conf is how the IMR is resolved, at the point of use -- see imr(). The
+	// Scanner deliberately does not keep an *Imr of its own.
+	conf               *Config
 	Options            []string
 	AtApexChecks       int
 	AtApexInterval     time.Duration
@@ -64,6 +66,39 @@ type Scanner struct {
 	Debug              bool
 	Jobs               map[string]*ScanJobStatus
 	JobsMutex          sync.RWMutex
+}
+
+// imr resolves the IMR at the point of use.
+//
+// Not a cached field, and not captured when the Scanner is built, because
+// neither works: InitImrEngine publishes the IMR asynchronously and routinely
+// finishes AFTER the engines start (see DelegationSyncher's PROXY-SYNC arm for
+// the same race), so anything captured at construction would be nil forever.
+//
+// It used to be latched inside the SCAN arm of the ScannerEngine loop instead,
+// which is enqueued only on receipt of a generalized NOTIFY. That made every
+// other entry point into the scanner depend on an unrelated NOTIFY having
+// arrived first: on a freshly started parent the UPDATE-scheme coherence check
+// refused every child update as incoherent, reporting an IMR that was in fact
+// initialized and usable, until some unrelated NOTIFY happened to latch the
+// pointer (#503). Two schemes specified as independent alternatives were
+// hard-coupled, invisibly.
+//
+// Resolving here removes the class rather than moving the assignment: there is
+// no window in which a copy can be stale, and a nil return now means what the
+// callers' guards already assume it means -- the IMR is genuinely not usable.
+//
+// The readiness check is the documented protocol for this pointer: publishImr
+// stores the IMR and THEN announces it, so a reader that checks Published()
+// first is guaranteed a fully constructed value.
+func (scanner *Scanner) imr() *Imr {
+	if scanner == nil || scanner.conf == nil {
+		return nil
+	}
+	if !scanner.conf.Internal.ImrReady.Published() {
+		return nil
+	}
+	return scanner.conf.Internal.ImrEngine
 }
 
 func (scanner *Scanner) HasOption(name string) bool {
@@ -194,8 +229,12 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 		}
 	}
 
-	// Store scanner instance in Config for API handler access
-	conf.Internal.Scanner = scanner
+	// Finish initialising BEFORE publishing. Publication is what other
+	// goroutines synchronise on, and this used to publish first: an API
+	// request or an UPDATE arriving in that window got a Scanner whose conf
+	// was still nil, and scanner.imr() dereferences it.
+	scanner.conf = conf
+	conf.Internal.PublishScanner(scanner)
 
 	lg.Info("ScannerEngine: starting")
 	defer ticker.Stop()
@@ -214,8 +253,6 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 			}
 			switch sr.Cmd {
 			case "SCAN":
-				scanner.ImrEngine = conf.Internal.ImrEngine
-
 				// Bridge NOTIFY → ScanTuples: if ScanTuples is empty but
 				// ChildZone+RRtype are set (from NOTIFY), synthesize a tuple.
 				if len(sr.ScanTuples) == 0 && sr.ChildZone != "" && sr.RRtype != 0 {
@@ -488,7 +525,7 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 	// from inside a server handler goroutine, killing the daemon on
 	// otherwise-accepted NOTIFY(CDS/CSYNC) traffic.
 	if imr == nil {
-		return nil, false, fmt.Errorf("queryAllNSAndCompare: IMR is not initialized; cannot compare child NS data")
+		return nil, false, fmt.Errorf("queryAllNSAndCompare: no IMR available yet; cannot compare child NS data")
 	}
 	// Extract nameserver names from NS RRset
 	var nsNames []string
@@ -599,7 +636,7 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 // scanned one is.
 func (scanner *Scanner) childRRsetFetcher(nsRRset *core.RRset, lg *log.Logger) childRRsetFetcher {
 	return func(ctx context.Context, name string, qtype uint16) ([]dns.RR, bool, error) {
-		rrset, inSync, err := scanner.queryAllNSAndCompare(ctx, name, qtype, nsRRset, scanner.ImrEngine, lg)
+		rrset, inSync, err := scanner.queryAllNSAndCompare(ctx, name, qtype, nsRRset, scanner.imr(), lg)
 		if err != nil {
 			return nil, false, err
 		}
@@ -628,6 +665,19 @@ func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType 
 		NewData:  newData.ToJSON(),
 	}
 
+	// Both branches below dereference the IMR directly. Resolved and checked
+	// once here rather than at each: a nil deref in this function panics a
+	// server handler goroutine and takes the daemon down, which is the same
+	// hazard queryAllNSAndCompare's guard exists for.
+	imr := scanner.imr()
+	if imr == nil {
+		scanLog.Printf("CheckCDS: Zone %s: no IMR available yet", zone)
+		response.Error = true
+		response.ErrorMsg = "no IMR available yet; cannot check CDS"
+		responseCh <- response
+		return
+	}
+
 	// Check if "all-ns" option is set
 	checkAllNS := false
 	for _, opt := range tuple.Options {
@@ -639,7 +689,7 @@ func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType 
 
 	if !checkAllNS {
 		// Simple case: just query for CDS and compare to CurrentData
-		resp, err := scanner.ImrEngine.ImrQuery(ctx, zone, dns.TypeCDS, dns.ClassINET, nil)
+		resp, err := imr.ImrQuery(ctx, zone, dns.TypeCDS, dns.ClassINET, nil)
 		if err != nil {
 			scanLog.Printf("CheckCDS: Zone %s: error from ImrQuery: %v", zone, err)
 			response.Error = true
@@ -680,7 +730,7 @@ func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType 
 	scanLog.Printf("CheckCDS: Zone %s: checking all authoritative nameservers", zone)
 
 	// Find the enclosing zone and its NS RRset
-	_, nsRRset, err := scanner.ImrEngine.findEnclosingZoneNS(ctx, zone, scanLog)
+	_, nsRRset, err := imr.findEnclosingZoneNS(ctx, zone, scanLog)
 	if err != nil {
 		scanLog.Printf("CheckCDS: Zone %s: error finding enclosing zone NS: %v", zone, err)
 		response.Error = true
@@ -690,7 +740,7 @@ func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType 
 	}
 
 	// Query CDS from all nameservers and compare
-	cdsRRset, allInSync, err := scanner.queryAllNSAndCompare(ctx, zone, dns.TypeCDS, nsRRset, scanner.ImrEngine, scanLog)
+	cdsRRset, allInSync, err := scanner.queryAllNSAndCompare(ctx, zone, dns.TypeCDS, nsRRset, imr, scanLog)
 	if err != nil {
 		scanLog.Printf("CheckCDS: Zone %s: error querying all NS: %v", zone, err)
 		response.Error = true
@@ -763,7 +813,7 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	}
 
 	// 2. Query SOA from child (start serial) — RFC 7477 step 1
-	soaRRset, soaInSync, err := scanner.queryAllNSAndCompare(ctx, childZone, dns.TypeSOA, nsRRset, scanner.ImrEngine, scanLog)
+	soaRRset, soaInSync, err := scanner.queryAllNSAndCompare(ctx, childZone, dns.TypeSOA, nsRRset, scanner.imr(), scanLog)
 	if err != nil {
 		scanLog.Printf("ProcessCSYNCNotify: %s: error querying SOA: %v", childZone, err)
 		response.Error = true
@@ -786,7 +836,7 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	}
 
 	// 3. Query CSYNC from child — RFC 7477 step 2
-	csyncRRset, csyncInSync, err := scanner.queryAllNSAndCompare(ctx, childZone, dns.TypeCSYNC, nsRRset, scanner.ImrEngine, scanLog)
+	csyncRRset, csyncInSync, err := scanner.queryAllNSAndCompare(ctx, childZone, dns.TypeCSYNC, nsRRset, scanner.imr(), scanLog)
 	if err != nil {
 		scanLog.Printf("ProcessCSYNCNotify: %s: error querying CSYNC: %v", childZone, err)
 		response.Error = true
@@ -924,7 +974,7 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	dataChanged := delta.Changed
 
 	// 8. Query SOA again (end serial) — RFC 7477 step 4
-	endSOARRset, _, err := scanner.queryAllNSAndCompare(ctx, childZone, dns.TypeSOA, nsRRset, scanner.ImrEngine, scanLog)
+	endSOARRset, _, err := scanner.queryAllNSAndCompare(ctx, childZone, dns.TypeSOA, nsRRset, scanner.imr(), scanLog)
 	if err != nil {
 		scanLog.Printf("ProcessCSYNCNotify: %s: error querying end SOA: %v", childZone, err)
 		response.Error = true
@@ -970,8 +1020,9 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 
 func (scanner *Scanner) CheckDNSKEY(ctx context.Context, tuple ScanTuple, scanType ScanType, options *edns0.MsgOptions, responseCh chan<- ScanTupleResponse) {
 	lg.Info("ScannerEngine: checking DNSKEY", "zone", tuple.Zone)
-	err := scanner.ImrEngine.SendRfc9567ErrorReport(ctx, tuple.Zone, dns.TypeDNSKEY, edns0.EDECSyncScannerNotImplemented, options)
-	if err != nil {
+	if imr := scanner.imr(); imr == nil {
+		lg.Warn("ScannerEngine: no IMR available yet; not sending the error report", "zone", tuple.Zone)
+	} else if err := imr.SendRfc9567ErrorReport(ctx, tuple.Zone, dns.TypeDNSKEY, edns0.EDECSyncScannerNotImplemented, options); err != nil {
 		lg.Error("ScannerEngine: SendRfc9567ErrorReport failed", "error", err)
 	}
 
@@ -1026,7 +1077,7 @@ func (scanner *Scanner) ProcessCDSNotify(ctx context.Context, tuple ScanTuple, p
 	}
 
 	// 2. Query CDS from all child NS via AuthQueryNG/TCP
-	cdsRRset, allInSync, err := scanner.queryAllNSAndCompare(ctx, childZone, dns.TypeCDS, nsRRset, scanner.ImrEngine, scanLog)
+	cdsRRset, allInSync, err := scanner.queryAllNSAndCompare(ctx, childZone, dns.TypeCDS, nsRRset, scanner.imr(), scanLog)
 	if err != nil {
 		scanLog.Printf("ProcessCDSNotify: %s: error querying CDS from child NS: %v", childZone, err)
 		response.Error = true
@@ -1167,7 +1218,8 @@ func (scanner *Scanner) ProcessCDSNotify(ctx context.Context, tuple ScanTuple, p
 // consistency with direct CDS queries to the child NS.
 // Returns the CDS RRset if all signaling queries agree, or an error.
 func (scanner *Scanner) queryCDSAtSignalingNames(ctx context.Context, childZone string, nsRRset *core.RRset, directCDS *core.RRset, scanLog *log.Logger) (*core.RRset, error) {
-	if scanner.ImrEngine == nil {
+	imr := scanner.imr()
+	if imr == nil {
 		return nil, fmt.Errorf("IMR engine required for RFC 9615 signaling queries")
 	}
 
@@ -1191,7 +1243,7 @@ func (scanner *Scanner) queryCDSAtSignalingNames(ctx context.Context, childZone 
 		signalingName := signalOwnerName(signalPrefixDsboot, childZone, nsName)
 		scanLog.Printf("queryCDSAtSignalingNames: %s: querying CDS at signaling name %s", childZone, signalingName)
 
-		resp, err := scanner.ImrEngine.ImrQuery(ctx, signalingName, dns.TypeCDS, dns.ClassINET, nil)
+		resp, err := imr.ImrQuery(ctx, signalingName, dns.TypeCDS, dns.ClassINET, nil)
 		if err != nil {
 			scanLog.Printf("queryCDSAtSignalingNames: %s: error querying %s: %v", childZone, signalingName, err)
 			return nil, fmt.Errorf("signaling query to %s failed: %v", signalingName, err)
