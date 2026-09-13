@@ -137,6 +137,39 @@ func TestDSIntentGivesAnMpdistKeyNoDS(t *testing.T) {
 	}
 }
 
+// An mpdist key is served, so a zone holding one is signed. If none of the
+// zone's keys warrants a DS, that is a key on its way to promotion, not a zone
+// that has been un-signed: an empty, known intent would have replace mode
+// withdraw the parent's DS.
+func TestDSIntentIsUnknownWhenOnlyAnMpdistKeyIsLeft(t *testing.T) {
+	cases := []struct {
+		name   string
+		others []string
+	}{
+		{"mpdist only", nil},
+		{"mpdist beside a retired key", []string{DnskeyStateRetired}},
+		{"mpdist beside a created key", []string{DnskeyStateCreated}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kdb := intentTestKeyDB(t)
+			seedKey(t, kdb, "child.example.", DnskeyStateMpdist, 257, pubA)
+			for i, st := range tc.others {
+				seedKey(t, kdb, "child.example.", st, 257, []string{pubB, pubC}[i])
+			}
+
+			intent, err := DSIntentForZone(kdb, "child.example.", dns.SHA256)
+			if err != nil {
+				t.Fatalf("DSIntentForZone: %v", err)
+			}
+			if intent.Known {
+				t.Fatalf("stated a known intent (%d DS) for a zone that still serves an mpdist key;"+
+					" replace mode would withdraw the parent's DS", len(intent.Set))
+			}
+		})
+	}
+}
+
 // A foreign key is another provider's. Whether its DS belongs at the parent is
 // not this zone's decision, and every consumer of the intent acts on the whole
 // DS set -- replace mode rewrites it, delta mode removes what it lacks -- so no

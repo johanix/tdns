@@ -93,6 +93,11 @@ WHERE zonename = ? AND (CAST(flags AS INTEGER) & ?) != 0`
 // none of them should have a DS -- a zone that has been un-signed. That is a
 // real instruction to withdraw, and the distinction from the cases above is the
 // whole reason Known exists.
+//
+// An mpdist key does not make that answer. It gets no DS of its own, but it is
+// served: a zone whose only DS-less keys include one is signed, with a key on
+// its way to promotion, not un-signed. If nothing else gives the set a member,
+// the intent is unknown rather than an instruction to withdraw the parent's DS.
 func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error) {
 	var out DSIntent
 	if kdb == nil {
@@ -106,13 +111,16 @@ func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error
 	}
 	defer rows.Close()
 
-	seen := false
+	seen, sawMpdist := false, false
 	for rows.Next() {
 		var state, keyrr string
 		if err := rows.Scan(&state, &keyrr); err != nil {
 			return DSIntent{}, fmt.Errorf("DSIntentForZone: scan key row for %s: %w", zonename, err)
 		}
 		seen = true
+		if state == DnskeyStateMpdist {
+			sawMpdist = true
+		}
 
 		if state == DnskeyStateForeign || state == DnskeyStateMpremove {
 			lgDns.Debug("DSIntentForZone: the zone holds a KSK tdns does not act on; declining to state a DS intent",
@@ -149,6 +157,12 @@ func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error
 	}
 	if err := rows.Err(); err != nil {
 		return DSIntent{}, fmt.Errorf("DSIntentForZone: iterate key rows for %s: %w", zonename, err)
+	}
+
+	if len(out.Set) == 0 && sawMpdist {
+		lgDns.Debug("DSIntentForZone: no key warrants a DS but an mpdist key is served; declining to state a DS intent",
+			"zone", zonename)
+		return DSIntent{}, nil
 	}
 
 	out.Known = seen
