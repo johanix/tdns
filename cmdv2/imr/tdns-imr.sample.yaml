@@ -152,6 +152,7 @@ imrengine:
    #    upgrade-indirect-cache-hits: true   # left unset in code; treated as true
    #    cache-max-ttl:        86400  # seconds, as in Unbound; ceiling on cached lifetimes
    #    cache-min-ttl:            0  # seconds, as in Unbound; floor (0 = none)
+   #    zone-state-recheck:     30s  # how long an insecure or indeterminate zone verdict stands
 
 # DNSSEC algorithms whose DNSKEY/RRSIG payloads are large for UDP. When a
 # referral DS RRset uses one, the IMR fetches the child zone's DNSKEY over TCP
