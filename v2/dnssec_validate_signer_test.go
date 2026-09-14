@@ -202,8 +202,11 @@ func TestZoneDataSignerHoldsOwnerInZoneCallers(t *testing.T) {
 // accepted the child's DNSKEY RRset once one KSK in it matched the parent's DS
 // and ValidateRRset passed the RRset's signature, and then held its ZSKs
 // Secure in the process-wide DnskeyCache, which the in-process IMR validates
-// with too. A nameserver for the child, or anyone on the path to one, can put
-// the child's real KSK next to a ZSK of its own.
+// with too. A nameserver for the child, or anyone on the path to one, could put
+// the child's real KSK next to a ZSK of its own and sign the RRset with the key
+// of a zone whose name ends the child's. The RRset must now be signed by the
+// DS-matched KSK, which they do not hold; dnssec_validate_child_ksk_test.go
+// covers that rule.
 //
 // SIG(0) key discovery gets there from an UPDATE: the signer's KEY is fetched
 // from the child, and its RRSIG names a ZSK that is not yet held.
