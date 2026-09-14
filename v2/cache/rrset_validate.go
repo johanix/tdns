@@ -296,9 +296,13 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 	return rrcache.ValidateRRsetWithParentZone(ctx, rrset, fetcher, nil)
 }
 
-// ValidateRRsetWithParentZone validates an RRset, optionally using a ParentZoneFinder to find the authoritative zone.
-// If parentZoneFinder is nil, it falls back to checking ZoneMap by walking up the domain name.
+// ValidateRRsetWithParentZone validates an RRset.
 // If the RRset is already cached with a validation state, that state is returned without re-validating.
+//
+// parentZoneFinder is ignored. It named the zone of an RRset with no RRSIGs, and
+// for data at a zone apex it named the zone above, its SOA lookup starting one
+// label up; the ZoneMap entry closest to the owner names that zone now
+// (unsignedRRsetState).
 func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrset *core.RRset, fetcher RRsetFetcher, parentZoneFinder ParentZoneFinder) (ValidationState, error) {
 	if rrcache == nil {
 		log.Printf("ValidateRRset: rrcache is nil; nothing to validate")
@@ -403,58 +407,7 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 		if rrcache.Debug {
 			log.Printf("ValidateRRset: no RRSIGs present for %s %s", rrset.Name, dns.TypeToString[rrset.RRtype])
 		}
-		// Check zone state to determine appropriate return value
-		// Find the authoritative zone for this RRset (rrset.Name might be a nameserver name for glue records, not the zone name)
-		name := dns.Fqdn(rrset.Name)
-		var foundZone *Zone
-		var foundZoneName string
-
-		if parentZoneFinder != nil {
-			// Use ParentZoneFinder to find the authoritative zone (checks cache first, queries if needed)
-			zoneName, err := parentZoneFinder(name)
-			if err == nil && zoneName != "" {
-				if zone, ok := rrcache.ZoneMap.Get(zoneName); ok {
-					foundZone = zone
-					foundZoneName = zoneName
-				}
-			}
-		}
-
-		// Fallback: walk up the domain name and check ZoneMap. A DS is the
-		// parent's data, so for a DS the walk starts at the parent.
-		if foundZone == nil {
-			labels := strings.Split(name, ".")
-			start := 0
-			if rrset.RRtype == dns.TypeDS {
-				start = 1
-			}
-			for i := start; i < len(labels)-1; i++ {
-				zoneName := strings.Join(labels[i:], ".")
-				if zone, ok := rrcache.ZoneMap.Get(zoneName); ok {
-					foundZone = zone
-					foundZoneName = zoneName
-					break
-				}
-			}
-		}
-
-		if foundZone != nil {
-			if rrcache.Debug {
-				log.Printf("ValidateRRset: found zone %q for %s %s (state=%s)", foundZoneName, rrset.Name, dns.TypeToString[rrset.RRtype], ValidationStateToString[foundZone.GetState()])
-			}
-			switch foundZone.GetState() {
-			case ValidationStateIndeterminate, ValidationStateInsecure:
-				return foundZone.GetState(), nil
-			default:
-				return ValidationStateInsecure, nil
-			}
-		}
-		// No zone found - return indeterminate without flagging an error
-		// This can happen during priming before zone state is established
-		if rrcache.Verbose {
-			log.Printf("ValidateRRset: no zone found for %s %s; returning indeterminate", rrset.Name, dns.TypeToString[rrset.RRtype])
-		}
-		return ValidationStateIndeterminate, nil
+		return rrcache.unsignedRRsetState(ctx, rrset, fetcher), nil
 	}
 
 	// Track the failure category across all RRSIGs. The inner function
