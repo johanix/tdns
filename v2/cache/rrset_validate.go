@@ -30,6 +30,29 @@ type RRsetFetcher func(ctx context.Context, qname string, qtype uint16, servers 
 // Returns the zone name and an error if not found.
 type ParentZoneFinder func(name string) (string, error)
 
+// secureHolderBelow reports whether a zone held Secure lies below signer and
+// holds rrset, in which case signer did not sign it. The walk starts at the
+// RRset's name, or at its parent for a DS and for an NSEC not owned by signer:
+// at a cut both are the parent's records.
+func (rrcache *RRsetCacheT) secureHolderBelow(rrset *core.RRset, signer string) bool {
+	n := dns.Fqdn(rrset.Name)
+	switch {
+	case rrset.RRtype == dns.TypeDS:
+		n = parentOf(n)
+	case rrset.RRtype == dns.TypeNSEC && !core.EqualNames(n, signer):
+		n = parentOf(n)
+	}
+	for ; !core.EqualNames(n, signer); n = parentOf(n) {
+		if zone, ok := rrcache.ZoneMap.Get(n); ok && zone.GetState() == ValidationStateSecure {
+			return true
+		}
+		if n == "." {
+			return false
+		}
+	}
+	return false
+}
+
 // validateRRsetWithRRSIG validates a single RRSIG against an RRset.
 // Returns:
 //   - valid: true if the signature is valid and time-valid
@@ -42,6 +65,19 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 	if rrcache.Debug {
 		log.Printf("ValidateRRset: evaluating signature: signer=%q keyid=%d covered=%s inception=%d expiration=%d",
 			signer, keyid, dns.TypeToString[sig.TypeCovered], sig.Inception, sig.Expiration)
+	}
+	// A signer above a zone held Secure that holds the RRset did not sign it,
+	// whatever state its own zone is held in (RFC 4035 section 5.3.1): the Secure
+	// zone signs what it holds. Decided before the signer's state is looked at,
+	// which let an RRSIG that merely named a zone held Insecure make a DS
+	// Insecure, unverified -- and the child below a secure parent with it, as
+	// ValidateDNSKEYs gives a zone its DS's state.
+	if rrcache.secureHolderBelow(rrset, signer) {
+		if rrcache.Verbose {
+			log.Printf("ValidateRRset: signer %q is above a secure zone holding %s %s; signature rejected",
+				signer, rrset.Name, dns.TypeToString[rrset.RRtype])
+		}
+		return false, false, ValidationStateBogus, nil
 	}
 	// A signer held Insecure has its parent asked for a DS again once the state
 	// has stood for ZoneStateRecheck.
