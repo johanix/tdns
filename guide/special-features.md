@@ -197,7 +197,10 @@ trusted:
   of a child that has a DS, it is the CDS (RFC 7344 §6.2). A
   child with no DS bootstraps only through a mechanism the
   policy lists: `at-ns` (RFC 9615 signaling names, validated)
-  or `at-apex` with a CDS that validates at the apex.
+  or `at-apex` with a CDS that validates at the apex. A child
+  the parent holds no DS for is not Secure at its apex, so
+  under `require-dnssec` a first DS comes through `at-ns`,
+  which needs nameservers outside the child, in signed zones.
 - **`require-dnssec: false`**: the same paths without
   validation. `at-apex` accepts a CDS after one all-NS check
   (RFC 8078).
