@@ -93,7 +93,8 @@ func TestValidator_ChainUnavailableReturnsIndeterminate(t *testing.T) {
 	// Real-looking RRSIG with a signer we have no DNSKEY for. ctx=nil
 	// below prevents the validator from attempting to fetch the missing
 	// DNSKEY, so we deterministically land on the "chain unavailable"
-	// path.
+	// path. The signer is the owner's zone: one that could not hold the
+	// owner is rejected as Bogus before any key is looked for.
 	sig := &dns.RRSIG{
 		Hdr:         dns.RR_Header{Name: "data.chain.example.", Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 60},
 		TypeCovered: dns.TypeA,
@@ -103,7 +104,7 @@ func TestValidator_ChainUnavailableReturnsIndeterminate(t *testing.T) {
 		Inception:   uint32(time.Now().Add(-1 * time.Hour).Unix()),
 		Expiration:  uint32(time.Now().Add(24 * time.Hour).Unix()),
 		KeyTag:      9999,
-		SignerName:  "unknown.example.",
+		SignerName:  "chain.example.",
 		Signature:   "AAAA", // irrelevant for this test path
 	}
 	rrset := &core.RRset{

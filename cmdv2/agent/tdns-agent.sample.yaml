@@ -86,9 +86,9 @@ resolver:
 # sqlite/zonefile, upstream = sqlite/ddns, external-db = external-db/none.
 # Writing type: together with store: or writer: is an error.
 delegationbackends:
-   - name:		files-dnslab
+   - name:		files-example
      type:		zonefile
-     directory:	/var/lib/tdns/delegations/dnslab
+     directory:	/var/lib/tdns/delegations/example.com
      # notify-command: "rndc reload {ZONENAME}"
 
    # A childsync-proxy (an agent secondary fronting a PARENT zone, see
@@ -122,10 +122,10 @@ delegationbackends:
 
 # In zone config, reference a backend:
 #   zones:
-#     - name:  dnslab.
+#     - name:  example.org.
 #       delegationbackend: db            # predefined, no config needed
 #     - name:  example.com.
-#       delegationbackend: files-dnslab  # looked up from delegationbackends above
+#       delegationbackend: files-example # looked up from delegationbackends above
 #     - name:  example.                  # a childsync-proxy: agent secondary of the PARENT
 #       type:  secondary
 #       primaries: [ { addr: 192.0.2.1:53, key: xfr-key } ]

@@ -180,14 +180,35 @@ periodic interval:
 ```yaml
 scanner:
    interval: 3600              # seconds
-   options:
-      - at-apex                # RFC 8078 bootstrap support
-      - at-ns                  # RFC 9615 signaling support
-      # - no-dnssec-validation # lab/testbed only
    at-apex:
-      checks:   3
+      checks:   1              # only 1 is implemented; more refuses an unvalidated at-apex bootstrap
       interval: 600
 ```
+
+What the scanner accepts from a child is decided by the
+delegation policy bound to the parent zone
+(`childsync.policies.*`, bound with `delegationpolicy:`), the
+same policy that decides whether a child's SIG(0) key is
+trusted:
+
+- **`require-dnssec: true`**: every RRset copied from the
+  child must validate Secure. For CSYNC that is the SOA, the
+  CSYNC, the NS RRset and the glue (RFC 7477 §2). For the CDS
+  of a child that has a DS, it is the CDS (RFC 7344 §6.2). A
+  child with no DS bootstraps only through a mechanism the
+  policy lists: `at-ns` (RFC 9615 signaling names, validated)
+  or `at-apex` with a CDS that validates at the apex. A child
+  the parent holds no DS for is not Secure at its apex, so
+  under `require-dnssec` a first DS comes through `at-ns`,
+  which needs nameservers outside the child, in signed zones.
+- **`require-dnssec: false`**: the same paths without
+  validation. `at-apex` accepts a CDS after one all-NS check
+  (RFC 8078).
+
+Each scan result says whether its data was `validated`,
+`unvalidated` or `refused`, and why. `scanner.options` takes no
+part: `at-apex`, `at-ns` and `no-dnssec-validation` there are
+logged as ignored at startup.
 
 For each scan the engine:
 
@@ -196,10 +217,8 @@ For each scan the engine:
 - Requires that all NS for the child return the same
   RRset -- partial consistency is treated as a transient
   state and rejected.
-- Validates DNSSEC where possible. For first-time CDS
-  bootstrap with no existing DS, the `at-apex` option
-  permits an opportunistic accept after `checks` repeated
-  matches separated by `interval` seconds (RFC 8078).
+- Authenticates the data under the parent zone's delegation
+  policy, as above.
 - For CDS: converts each CDS to its DS form (RFC 7344) and
   detects the algorithm-0 removal sentinel.
 - For CSYNC: extracts the type bitmap, honours `IMMEDIATE`
@@ -238,7 +257,7 @@ zones:
    example.com.:
       type:                primary
       options:             [ childsync, allow-child-updates ]
-      delegationbackend:     files-dnslab
+      delegationbackend:     files-example
 ```
 
 Named backends live at the top level of the daemon's
@@ -246,9 +265,9 @@ config:
 
 ```yaml
 delegationbackends:
-   - name:           files-dnslab
+   - name:           files-example
      type:           zonefile
-     directory:      /var/lib/tdns/delegations/dnslab
+     directory:      /var/lib/tdns/delegations/example.com
      notify-command: /usr/bin/notify-hook.sh
 
    - name: inline
