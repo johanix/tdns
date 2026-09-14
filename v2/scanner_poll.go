@@ -34,6 +34,9 @@ import (
 // A round scans at most scanner.poll.concurrency children at once and does not
 // start while the previous one is still running. It is not recorded as a
 // scanner job: rounds repeat without end, and Jobs is never pruned.
+//
+// The log says whether the server polls: the settings when the engine starts
+// and whenever they change, and one line per round.
 
 // defaultPollConcurrency is how many children a round scans at once when
 // scanner.poll.concurrency is unset. Every query to a child goes through the
@@ -58,9 +61,23 @@ func readScannerPollConf() scannerPollConf {
 	return c
 }
 
-// scannerPollState is the Scanner's poll bookkeeping.
+// scannerPollState is the Scanner's poll bookkeeping. running is shared with
+// the round's goroutine; logged and last belong to the engine's.
 type scannerPollState struct {
 	running atomic.Bool // a round is in progress
+	logged  bool
+	last    scannerPollConf
+}
+
+// notePollConf logs the poll settings the first time and whenever they differ
+// from the last ones logged.
+func (scanner *Scanner) notePollConf(conf scannerPollConf, interval time.Duration) {
+	if scanner.poll.logged && scanner.poll.last == conf {
+		return
+	}
+	scanner.poll.logged, scanner.poll.last = true, conf
+	lg.Info("ScannerEngine: poll settings", "enabled", conf.Enabled, "interval", interval,
+		"bootstrap", conf.Bootstrap, "concurrency", conf.Concurrency)
 }
 
 // pollParents returns the zones a poll round covers: those that allow child
@@ -171,11 +188,7 @@ feed:
 	close(jobs)
 	wg.Wait()
 
-	logf := lg.Debug
-	if changes > 0 || failed > 0 || unreadable > 0 {
-		logf = lg.Info
-	}
-	logf("ScannerEngine: poll round done", "parents", len(parents), "children", queued, "withoutDS", withoutDS,
+	lg.Info("ScannerEngine: poll round done", "parents", len(parents), "children", queued, "withoutDS", withoutDS,
 		"unreadable", unreadable, "scans", scans, "changes", changes, "errors", failed,
 		"duration", time.Since(started).Round(time.Millisecond))
 }
