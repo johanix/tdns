@@ -30,6 +30,36 @@ type RRsetFetcher func(ctx context.Context, qname string, qtype uint16, servers 
 // Returns the zone name and an error if not found.
 type ParentZoneFinder func(name string) (string, error)
 
+// signerHoldsRRset reports whether sig's Signer's Name can be the zone that
+// holds rrset (RFC 4035 section 5.3.1). RRSIG.Verify only checks that the
+// owner ends with the signer's name as a string, which accepts "ictim.example."
+// as the zone of "www.victim.example.", and it knows nothing of the name the
+// RRset is cached and served under.
+//
+//   - The signer is that name or an ancestor of it, compared label by label,
+//     and so is it for the owner of the records the signature covers.
+//   - A DS is parent-side data: its signer is a strict ancestor.
+//   - A wildcard expansion was signed as the wildcard at the owner cut down to
+//     Labels labels, and that name must be inside the signer too.
+func signerHoldsRRset(rrset *core.RRset, sig *dns.RRSIG) bool {
+	signer := dns.Fqdn(sig.SignerName)
+	owners := []string{rrset.Name}
+	if len(rrset.RRs) > 0 {
+		owners = append(owners, rrset.RRs[0].Header().Name)
+	}
+	ds := rrset.RRtype == dns.TypeDS || sig.TypeCovered == dns.TypeDS
+	for _, owner := range owners {
+		owner = dns.Fqdn(owner)
+		if !dns.IsSubDomain(signer, owner) {
+			return false
+		}
+		if ds && core.EqualNames(signer, owner) {
+			return false
+		}
+	}
+	return int(sig.Labels) >= dns.CountLabel(signer)
+}
+
 // validateRRsetWithRRSIG validates a single RRSIG against an RRset.
 // Returns:
 //   - valid: true if the signature is valid and time-valid
@@ -42,6 +72,18 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 	if rrcache.Debug {
 		log.Printf("ValidateRRset: evaluating signature: signer=%q keyid=%d covered=%s inception=%d expiration=%d",
 			signer, keyid, dns.TypeToString[sig.TypeCovered], sig.Inception, sig.Expiration)
+	}
+	// A signer that cannot hold the RRset did not sign it, whatever its key
+	// says. Decided before the signer's zone state and keys are looked at: a
+	// signer name the resolver holds Insecure used to make any RRset carrying
+	// it Insecure, unverified, and an arbitrary one sent the resolver off to
+	// fetch that zone's DNSKEYs.
+	if !signerHoldsRRset(rrset, sig) {
+		if rrcache.Verbose {
+			log.Printf("ValidateRRset: signer %q cannot hold %s %s (labels=%d); signature rejected",
+				signer, rrset.Name, dns.TypeToString[rrset.RRtype], sig.Labels)
+		}
+		return false, false, ValidationStateBogus, nil
 	}
 	// Check the signer zone's state in ZoneMap. If indeterminate or insecure, we cannot validate.
 	if zone, ok := rrcache.ZoneMap.Get(signer); ok {
