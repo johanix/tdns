@@ -119,8 +119,8 @@ func ownerPolicyFieldsDiffer(a, b *DnssecPolicy) bool {
 	if a == nil || b == nil {
 		return a != b
 	}
-	return a.Mode != b.Mode || a.KSKAlgorithm != b.KSKAlgorithm || a.ZSKAlgorithm != b.ZSKAlgorithm ||
-		a.KSK.Lifetime != b.KSK.Lifetime || a.ZSK.Lifetime != b.ZSK.Lifetime ||
+	return a.Mode != b.Mode || a.Algorithm != b.Algorithm || a.KSKAlgorithm != b.KSKAlgorithm || a.ZSKAlgorithm != b.ZSKAlgorithm ||
+		a.KSK.Lifetime != b.KSK.Lifetime || a.ZSK.Lifetime != b.ZSK.Lifetime || a.CSK.Lifetime != b.CSK.Lifetime ||
 		a.Rollover.Method != b.Rollover.Method || a.Rollover.NumDS != b.Rollover.NumDS
 }
 

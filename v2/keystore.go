@@ -622,15 +622,18 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		// through setKeyRowTx like every other, and any state is the owner's
 		// to name.
 		var stateFlags KeyRowFlags
-		if kp.Pub != nil && kp.Sign != nil && kp.DS != nil {
+		zd, owned := zoneOwnedByName(kp.Keyname)
+		if owned && kp.Pub != nil && kp.Sign != nil && kp.DS != nil {
 			stateFlags = KeyRowFlags{Pub: *kp.Pub, Sign: *kp.Sign, DS: sql.NullBool{Bool: *kp.DS, Valid: true}}
 		} else {
-			if zd, owned := zoneOwnedByName(kp.Keyname); owned {
+			if owned {
 				err := fmt.Errorf("%w; setstate on it names pub, sign and ds", ownedRefusal(zd, "setstate"))
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 				return &resp, err
 			}
+			// On a zone tdns runs, the columns follow the state and the
+			// state is one of tdns's own; the request's columns are ignored.
 			allowed := map[string]bool{
 				DnskeyStateCreated: true, DnskeyStatePublished: true, DnskeyStateDsPublished: true,
 				DnskeyStateStandby: true, DnskeyStateActive: true, DnskeyStateRetired: true, DnskeyStateRemoved: true,
