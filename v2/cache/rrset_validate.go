@@ -30,6 +30,29 @@ type RRsetFetcher func(ctx context.Context, qname string, qtype uint16, servers 
 // Returns the zone name and an error if not found.
 type ParentZoneFinder func(name string) (string, error)
 
+// secureHolderBelow reports whether a zone held Secure lies below signer and
+// holds rrset, in which case signer did not sign it. The walk starts at the
+// RRset's name, or at its parent for a DS and for an NSEC not owned by signer:
+// at a cut both are the parent's records.
+func (rrcache *RRsetCacheT) secureHolderBelow(rrset *core.RRset, signer string) bool {
+	n := dns.Fqdn(rrset.Name)
+	switch {
+	case rrset.RRtype == dns.TypeDS:
+		n = parentOf(n)
+	case rrset.RRtype == dns.TypeNSEC && !core.EqualNames(n, signer):
+		n = parentOf(n)
+	}
+	for ; !core.EqualNames(n, signer); n = parentOf(n) {
+		if zone, ok := rrcache.ZoneMap.Get(n); ok && zone.GetState() == ValidationStateSecure {
+			return true
+		}
+		if n == "." {
+			return false
+		}
+	}
+	return false
+}
+
 // SignerHoldsRRset reports whether sig's Signer's Name can be the zone that
 // holds rrset (RFC 4035 section 5.3.1). RRSIG.Verify only checks that the
 // owner ends with the signer's name as a string, which accepts "ictim.example."
@@ -82,6 +105,19 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 		if rrcache.Verbose {
 			log.Printf("ValidateRRset: signer %q cannot hold %s %s (labels=%d); signature rejected",
 				signer, rrset.Name, dns.TypeToString[rrset.RRtype], sig.Labels)
+		}
+		return false, false, ValidationStateBogus, nil
+	}
+	// A signer above a zone held Secure that holds the RRset did not sign it,
+	// whatever state its own zone is held in (RFC 4035 section 5.3.1): the Secure
+	// zone signs what it holds. Decided before the signer's state is looked at,
+	// which let an RRSIG that merely named a zone held Insecure make a DS
+	// Insecure, unverified -- and the child below a secure parent with it, as
+	// ValidateDNSKEYs gives a zone its DS's state.
+	if rrcache.secureHolderBelow(rrset, signer) {
+		if rrcache.Verbose {
+			log.Printf("ValidateRRset: signer %q is above a secure zone holding %s %s; signature rejected",
+				signer, rrset.Name, dns.TypeToString[rrset.RRtype])
 		}
 		return false, false, ValidationStateBogus, nil
 	}
@@ -1048,18 +1084,12 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 	if !dns.IsSubDomain(zoneName, qnameCanon) {
 		return ValidationStateBogus, rcode, nil // XXX: The zone name does not match the qname
 	}
-	// What the resolver already knows about the zone decides what a missing
-	// signature means. In a zone known to be signed, a denial with no signatures
-	// at all is not an insecure answer, it is a stripped one.
-	zoneSecure := false
-	if zone, ok := rrcache.ZoneMap.Get(zoneName); ok && zone.GetState() == ValidationStateSecure {
-		zoneSecure = true
-	}
+	// What the resolver already knows decides what a missing signature means. A
+	// denial with no signatures at all, from a zone known to be signed or from a
+	// zone below one that nothing proves insecure, is not an insecure answer, it
+	// is a stripped one (unsignedDenialState).
 	if !hasSignatures {
-		if zoneSecure {
-			return ValidationStateBogus, rcode, nil
-		}
-		return ValidationStateInsecure, rcode, nil
+		return rrcache.unsignedDenialState(ctx, zoneName, qnameCanon, qtype, fetcher), rcode, nil
 	}
 
 	// Only records that validated can prove anything. The NSEC and NSEC3 records
@@ -1107,10 +1137,7 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		}
 	}
 	if sawInsecure {
-		if zoneSecure {
-			return ValidationStateBogus, rcode, nil
-		}
-		return ValidationStateInsecure, rcode, nil
+		return rrcache.unsignedDenialState(ctx, zoneName, qnameCanon, qtype, fetcher), rcode, nil
 	}
 	nsecs, nsec3Present = provenNsecs, provenNsec3
 
