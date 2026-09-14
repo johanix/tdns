@@ -30,6 +30,36 @@ type RRsetFetcher func(ctx context.Context, qname string, qtype uint16, servers 
 // Returns the zone name and an error if not found.
 type ParentZoneFinder func(name string) (string, error)
 
+// signerHoldsRRset reports whether sig's Signer's Name can be the zone that
+// holds rrset (RFC 4035 section 5.3.1). RRSIG.Verify only checks that the
+// owner ends with the signer's name as a string, which accepts "ictim.example."
+// as the zone of "www.victim.example.", and it knows nothing of the name the
+// RRset is cached and served under.
+//
+//   - The signer is that name or an ancestor of it, compared label by label,
+//     and so is it for the owner of the records the signature covers.
+//   - A DS is parent-side data: its signer is a strict ancestor.
+//   - A wildcard expansion was signed as the wildcard at the owner cut down to
+//     Labels labels, and that name must be inside the signer too.
+func signerHoldsRRset(rrset *core.RRset, sig *dns.RRSIG) bool {
+	signer := dns.Fqdn(sig.SignerName)
+	owners := []string{rrset.Name}
+	if len(rrset.RRs) > 0 {
+		owners = append(owners, rrset.RRs[0].Header().Name)
+	}
+	ds := rrset.RRtype == dns.TypeDS || sig.TypeCovered == dns.TypeDS
+	for _, owner := range owners {
+		owner = dns.Fqdn(owner)
+		if !dns.IsSubDomain(signer, owner) {
+			return false
+		}
+		if ds && core.EqualNames(signer, owner) {
+			return false
+		}
+	}
+	return int(sig.Labels) >= dns.CountLabel(signer)
+}
+
 // validateRRsetWithRRSIG validates a single RRSIG against an RRset.
 // Returns:
 //   - valid: true if the signature is valid and time-valid
@@ -42,6 +72,18 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 	if rrcache.Debug {
 		log.Printf("ValidateRRset: evaluating signature: signer=%q keyid=%d covered=%s inception=%d expiration=%d",
 			signer, keyid, dns.TypeToString[sig.TypeCovered], sig.Inception, sig.Expiration)
+	}
+	// A signer that cannot hold the RRset did not sign it, whatever its key
+	// says. Decided before the signer's zone state and keys are looked at: a
+	// signer name the resolver holds Insecure used to make any RRset carrying
+	// it Insecure, unverified, and an arbitrary one sent the resolver off to
+	// fetch that zone's DNSKEYs.
+	if !signerHoldsRRset(rrset, sig) {
+		if rrcache.Verbose {
+			log.Printf("ValidateRRset: signer %q cannot hold %s %s (labels=%d); signature rejected",
+				signer, rrset.Name, dns.TypeToString[rrset.RRtype], sig.Labels)
+		}
+		return false, false, ValidationStateBogus, nil
 	}
 	// A signer held Insecure has its parent asked for a DS again once the state
 	// has stood for ZoneStateRecheck.
@@ -296,9 +338,13 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 	return rrcache.ValidateRRsetWithParentZone(ctx, rrset, fetcher, nil)
 }
 
-// ValidateRRsetWithParentZone validates an RRset, optionally using a ParentZoneFinder to find the authoritative zone.
-// If parentZoneFinder is nil, it falls back to checking ZoneMap by walking up the domain name.
+// ValidateRRsetWithParentZone validates an RRset.
 // If the RRset is already cached with a validation state, that state is returned without re-validating.
+//
+// parentZoneFinder is ignored. It named the zone of an RRset with no RRSIGs, and
+// for data at a zone apex it named the zone above, its SOA lookup starting one
+// label up; the ZoneMap entry closest to the owner names that zone now
+// (unsignedRRsetState).
 func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrset *core.RRset, fetcher RRsetFetcher, parentZoneFinder ParentZoneFinder) (ValidationState, error) {
 	if rrcache == nil {
 		log.Printf("ValidateRRset: rrcache is nil; nothing to validate")
@@ -403,58 +449,7 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 		if rrcache.Debug {
 			log.Printf("ValidateRRset: no RRSIGs present for %s %s", rrset.Name, dns.TypeToString[rrset.RRtype])
 		}
-		// Check zone state to determine appropriate return value
-		// Find the authoritative zone for this RRset (rrset.Name might be a nameserver name for glue records, not the zone name)
-		name := dns.Fqdn(rrset.Name)
-		var foundZone *Zone
-		var foundZoneName string
-
-		if parentZoneFinder != nil {
-			// Use ParentZoneFinder to find the authoritative zone (checks cache first, queries if needed)
-			zoneName, err := parentZoneFinder(name)
-			if err == nil && zoneName != "" {
-				if zone, ok := rrcache.ZoneMap.Get(zoneName); ok {
-					foundZone = zone
-					foundZoneName = zoneName
-				}
-			}
-		}
-
-		// Fallback: walk up the domain name and check ZoneMap. A DS is the
-		// parent's data, so for a DS the walk starts at the parent.
-		if foundZone == nil {
-			labels := strings.Split(name, ".")
-			start := 0
-			if rrset.RRtype == dns.TypeDS {
-				start = 1
-			}
-			for i := start; i < len(labels)-1; i++ {
-				zoneName := strings.Join(labels[i:], ".")
-				if zone, ok := rrcache.ZoneMap.Get(zoneName); ok {
-					foundZone = zone
-					foundZoneName = zoneName
-					break
-				}
-			}
-		}
-
-		if foundZone != nil {
-			if rrcache.Debug {
-				log.Printf("ValidateRRset: found zone %q for %s %s (state=%s)", foundZoneName, rrset.Name, dns.TypeToString[rrset.RRtype], ValidationStateToString[foundZone.GetState()])
-			}
-			switch foundZone.GetState() {
-			case ValidationStateIndeterminate, ValidationStateInsecure:
-				return foundZone.GetState(), nil
-			default:
-				return ValidationStateInsecure, nil
-			}
-		}
-		// No zone found - return indeterminate without flagging an error
-		// This can happen during priming before zone state is established
-		if rrcache.Verbose {
-			log.Printf("ValidateRRset: no zone found for %s %s; returning indeterminate", rrset.Name, dns.TypeToString[rrset.RRtype])
-		}
-		return ValidationStateIndeterminate, nil
+		return rrcache.unsignedRRsetState(ctx, rrset, fetcher), nil
 	}
 
 	// Track the failure category across all RRSIGs. The inner function
