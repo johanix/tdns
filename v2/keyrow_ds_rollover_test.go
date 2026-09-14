@@ -307,8 +307,11 @@ func TestDsTimelineAlgRollover(t *testing.T) {
 	tPush := tArm.Add(time.Second)
 	tick("push", tPush)
 	pushes := parent.pushes()
-	if len(pushes) != 1 || !sameTags(ktDSKeytags(pushes[0]), []uint16{b}) {
-		t.Fatalf("push: %d pushes, first %v, want one push of {%d}", len(pushes), ktDSKeytags(pushes[0]), b)
+	if len(pushes) != 1 {
+		t.Fatalf("push: %d pushes, want one push of {%d}", len(pushes), b)
+	}
+	if !sameTags(ktDSKeytags(pushes[0]), []uint16{b}) {
+		t.Fatalf("push: first %v, want one push of {%d}", ktDSKeytags(pushes[0]), b)
 	}
 	parent.serve(ktDSSubset(pushes[0], 3600, b))
 	tConfirm := tPush.Add(pol.Rollover.ConfirmInitialWait + time.Second)

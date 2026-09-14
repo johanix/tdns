@@ -241,7 +241,9 @@ func TestWritersRefuseDsOnAKeyWithoutTheSepBit(t *testing.T) {
 	if _, err := setKeyRowTx(tx, zone, ksk, DnskeyStateActive, KeyRowFlags{Pub: true, Sign: true, DS: sql.NullBool{Bool: true, Valid: true}}, ""); err != nil {
 		t.Errorf("ds on a KSK refused: %v", err)
 	}
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, ds := readKeyRowFlags(t, kdb, zone, ksk); flagString(ds) != "1" {
 		t.Errorf("ds=%s on the KSK, want 1", flagString(ds))
 	}

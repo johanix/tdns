@@ -469,3 +469,56 @@ func TestOneTimePassOnPreColumnRows(t *testing.T) {
 		}
 	}
 }
+
+// A policy bind that changes the zone's DS model re-resolves ds for every
+// row in one of tdns's own states: a published, created or retired KSK is 0
+// under none and 1 under multi-DS, and no transition would rewrite it. A
+// bind that keeps the model fills only what is unset.
+func TestModelChangeReResolvesDs(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	const zone = "modelchange.ds.example."
+	zd := dsTestZone(t, kdb, zone, RolloverMethodNone)
+	rng := newTestRand(80)
+	rows := map[string]uint16{}
+	for _, state := range []string{DnskeyStateCreated, DnskeyStatePublished, DnskeyStateActive, DnskeyStateRetired} {
+		rows[state] = insertTestKeyRow(t, kdb, zone, state, "KSK", rng)
+	}
+	zsk := insertTestKeyRow(t, kdb, zone, DnskeyStateActive, "ZSK", rng)
+	check := func(model DSModel) {
+		t.Helper()
+		for state, keyid := range rows {
+			if got, want := dsOf(t, kdb, zone, keyid), boolFlag(wantDs[model][state]); got != want {
+				t.Errorf("%s: KSK %s has ds=%s, want %s", model, state, got, want)
+			}
+		}
+		if got := dsOf(t, kdb, zone, zsk); got != "0" {
+			t.Errorf("%s: ZSK has ds=%s, want 0", model, got)
+		}
+	}
+	check(DSModelNone)
+
+	rebind := func(method RolloverMethod) *DnssecPolicy {
+		old := *zd.DnssecPolicy
+		pol := old
+		pol.Rollover.Method = method
+		zd.DnssecPolicy = &pol
+		return &old
+	}
+	reconcileDsAfterBind(kdb, zd, rebind(RolloverMethodMultiDS))
+	check(DSModelMultiDS)
+	reconcileDsAfterBind(kdb, zd, rebind(RolloverMethodNone))
+	check(DSModelNone)
+
+	// The same model again: nothing to rewrite, and a row left unset is filled.
+	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET ds=NULL WHERE zonename=? AND keyid=?`, zone, rows[DnskeyStateActive]); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := kdb.RefreshDsForZone(zd)
+	if err != nil || rep.Changed != 0 || rep.Filled != 1 {
+		t.Errorf("refresh under the same model: changed=%d filled=%d err=%v, want 0 changed, 1 filled", rep.Changed, rep.Filled, err)
+	}
+	check(DSModelNone)
+	if vs := CheckKeyRowInvariants(kdb, zone); len(vs) != 0 {
+		t.Errorf("after the refreshes: %s", violationList(vs))
+	}
+}

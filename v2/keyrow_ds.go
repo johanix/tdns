@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
@@ -58,7 +59,8 @@ const (
 // DsFillReport is what the one-time pass did for one zone.
 type DsFillReport struct {
 	Zone        string
-	Filled      int
+	Filled      int // rows that had ds unset and got it
+	Changed     int // rows rewritten by a refresh after a DS model change
 	Differences []DsDifference
 }
 
@@ -172,6 +174,19 @@ func refreshKeyRowFlagsTx(tx *Tx, zone string, keyid uint16) error {
 // code before it derived from the state (dsBelongsAtParent). A
 // multi-provider zone gets nothing from tdns.
 func (kdb *KeyDB) FillDsForZone(zd *ZoneData) (DsFillReport, error) {
+	return kdb.fillDsForZone(zd, false)
+}
+
+// RefreshDsForZone re-resolves ds for every row of the zone in one of tdns's
+// own states, unset or not: what a bind of a policy with another DS model
+// needs, since the rows written under the old model carry its answers and
+// no transition rewrites them (a published KSK is 1 under multi-DS and 0
+// under none). Rows in an owner's states are not touched.
+func (kdb *KeyDB) RefreshDsForZone(zd *ZoneData) (DsFillReport, error) {
+	return kdb.fillDsForZone(zd, true)
+}
+
+func (kdb *KeyDB) fillDsForZone(zd *ZoneData, force bool) (DsFillReport, error) {
 	rep := DsFillReport{Zone: zd.ZoneName}
 	if zd.Options[OptMultiProvider] || zd.DnssecPolicy == nil {
 		return rep, nil
@@ -184,7 +199,7 @@ func (kdb *KeyDB) FillDsForZone(zd *ZoneData) (DsFillReport, error) {
 	} else if st != nil {
 		oldHead = st.OldHeadKeyID
 	}
-	rows, err := kdb.DB.Query(`SELECT keyid, state, flags FROM DnssecKeyStore WHERE zonename=? AND ds IS NULL ORDER BY keyid`, zone)
+	rows, err := kdb.DB.Query(`SELECT keyid, state, flags, ds FROM DnssecKeyStore WHERE zonename=? AND (ds IS NULL OR ? = 1) ORDER BY keyid`, zone, boolInt(force))
 	if err != nil {
 		return rep, fmt.Errorf("FillDsForZone: read %s: %w", zone, err)
 	}
@@ -192,13 +207,15 @@ func (kdb *KeyDB) FillDsForZone(zd *ZoneData) (DsFillReport, error) {
 		keyid uint16
 		state string
 		sep   bool
+		had   sql.NullInt64
 		ds    sql.NullBool
 	}
 	var todos []todo
 	for rows.Next() {
 		var keyid, flags int
 		var state string
-		if err := rows.Scan(&keyid, &state, &flags); err != nil {
+		var had sql.NullInt64
+		if err := rows.Scan(&keyid, &state, &flags, &had); err != nil {
 			rows.Close()
 			return rep, err
 		}
@@ -207,7 +224,7 @@ func (kdb *KeyDB) FillDsForZone(zd *ZoneData) (DsFillReport, error) {
 		if ds.Valid && ds.Bool && uint16(keyid) == oldHead {
 			ds.Bool = false
 		}
-		todos = append(todos, todo{uint16(keyid), state, sep, ds})
+		todos = append(todos, todo{uint16(keyid), state, sep, had, ds})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -228,6 +245,17 @@ func (kdb *KeyDB) FillDsForZone(zd *ZoneData) (DsFillReport, error) {
 	}()
 	for _, td := range todos {
 		if !td.ds.Valid {
+			continue
+		}
+		if td.had.Valid {
+			// A refresh: rewrite only what the model changes.
+			if (td.had.Int64 != 0) == td.ds.Bool {
+				continue
+			}
+			if _, err := tx.Exec(`UPDATE DnssecKeyStore SET ds=? WHERE zonename=? AND keyid=?`, boolInt(td.ds.Bool), zone, td.keyid); err != nil {
+				return rep, fmt.Errorf("RefreshDsForZone: %s keyid %d: %w", zone, td.keyid, err)
+			}
+			rep.Changed++
 			continue
 		}
 		if _, err := tx.Exec(`UPDATE DnssecKeyStore SET ds=? WHERE zonename=? AND keyid=? AND ds IS NULL`, boolInt(td.ds.Bool), zone, td.keyid); err != nil {
@@ -269,10 +297,51 @@ func (kdb *KeyDB) FillDsForZone(zd *ZoneData) (DsFillReport, error) {
 	return rep, nil
 }
 
+// dsModelOfPolicy is the DS model a policy's rollover method implies.
+func dsModelOfPolicy(pol *DnssecPolicy) DSModel {
+	if pol == nil {
+		return DSModelNone
+	}
+	switch pol.Rollover.Method {
+	case RolloverMethodMultiDS:
+		return DSModelMultiDS
+	case RolloverMethodDoubleSignature:
+		return DSModelDoubleSignature
+	}
+	return DSModelNone
+}
+
+// reconcileDsAfterBind runs after a policy is bound to a zone: rows with ds
+// unset get it, and if the bind changed the zone's DS model, every row in
+// one of tdns's own states is re-resolved, since the rows written under the
+// old model carry its answers and nothing else rewrites them. oldPol is the
+// policy bound before, nil for a first bind.
+func reconcileDsAfterBind(kdb *KeyDB, zd *ZoneData, oldPol *DnssecPolicy) {
+	if kdb == nil || zd == nil || zd.Options[OptMultiProvider] || zd.DnssecPolicy == nil {
+		return
+	}
+	changed := oldPol != nil && dsModelOfPolicy(oldPol) != dsModelOfPolicy(zd.DnssecPolicy)
+	rep, err := kdb.fillDsForZone(zd, changed)
+	if err != nil {
+		lgSigner.Error("ds column: the pass after the policy bind failed", "zone", zd.ZoneName, "err", err)
+		return
+	}
+	if changed {
+		lgSigner.Info("ds column: the DS model changed with the policy; rows re-resolved",
+			"zone", zd.ZoneName, "from", dsModelOfPolicy(oldPol).String(), "to", dsModelForZone(zd).String(), "changed", rep.Changed, "filled", rep.Filled)
+	} else if rep.Filled > 0 {
+		lgSigner.Info("ds column: filled from the zone's DS model", "zone", zd.ZoneName, "rows", rep.Filled, "model", dsModelForZone(zd).String())
+	}
+}
+
 // fillDsForPolicyZones runs the one-time pass over every loaded zone with a
-// policy bound. Cheap when there is nothing to do: one count per zone.
-func fillDsForPolicyZones(kdb *KeyDB) {
+// policy bound. Cheap when there is nothing to do: one count per zone. Stops
+// between zones when the worker's context ends.
+func fillDsForPolicyZones(ctx context.Context, kdb *KeyDB) {
 	for _, zd := range Zones.Items() {
+		if ctx.Err() != nil {
+			return
+		}
 		if zd.DnssecPolicy == nil || zd.Options[OptMultiProvider] {
 			continue
 		}
@@ -280,19 +349,6 @@ func fillDsForPolicyZones(kdb *KeyDB) {
 		if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=? AND ds IS NULL`, dns.Fqdn(zd.ZoneName)).Scan(&n); err != nil || n == 0 {
 			continue
 		}
-		fillDsAfterBind(kdb, zd)
-	}
-}
-
-// fillDsAfterBind is the one-time pass for a zone whose policy was just
-// bound, so the readers see the column before the worker's next tick.
-func fillDsAfterBind(kdb *KeyDB, zd *ZoneData) {
-	if kdb == nil || zd == nil {
-		return
-	}
-	if rep, err := kdb.FillDsForZone(zd); err != nil {
-		lgSigner.Error("ds column: the one-time pass failed", "zone", zd.ZoneName, "err", err)
-	} else if rep.Filled > 0 {
-		lgSigner.Info("ds column: filled from the zone's DS model", "zone", zd.ZoneName, "rows", rep.Filled, "model", dsModelForZone(zd).String())
+		reconcileDsAfterBind(kdb, zd, nil)
 	}
 }
