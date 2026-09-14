@@ -42,13 +42,10 @@ func (n *trustNet) query(_ context.Context, qname string, qtype uint16, _ *core.
 		n.queried = map[string]int{}
 	}
 	n.queried[k]++
-	rrs := n.served[k]
-	if len(rrs) == 0 {
-		// What queryAllNSAndCompare says when no nameserver has the data.
-		return nil, false, fmt.Errorf("no %s RRsets retrieved from any nameserver", dns.TypeToString[qtype])
-	}
+	// Data nobody serves comes back the way queryAllNSAndCompare reports every
+	// nameserver answering that there is none: an empty RRset, in sync.
 	inSync := !(n.queried[k] > 1 && n.laterDisagree[k])
-	return &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: rrs}, inSync, nil
+	return &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: n.served[k]}, inSync, nil
 }
 
 func (n *trustNet) validate(_ context.Context, rrset *core.RRset) (cache.ValidationState, error) {
@@ -156,7 +153,7 @@ func csyncMove(t *testing.T, child string) *trustNet {
 
 func runCSYNC(t *testing.T, sc *Scanner, zd *ZoneData, child string) ScanTupleResponse {
 	t.Helper()
-	t.Cleanup(func() { delete(KnownCsyncMinSOAs, child) })
+	t.Cleanup(func() { forgetCsyncProcessed(child) })
 	ch := make(chan ScanTupleResponse, 1)
 	sc.ProcessCSYNCNotify(context.Background(), ScanTuple{Zone: child}, zd, ScanCSYNC, nil, ch)
 	return <-ch
@@ -228,7 +225,7 @@ func TestScanCSYNCUnderRequireDnssecRefusesDataThatIsNotSecure(t *testing.T) {
 			if !strings.Contains(resp.ValidationReason, `"strict"`) {
 				t.Errorf("reason %q does not name the policy", resp.ValidationReason)
 			}
-			if _, marked := KnownCsyncMinSOAs[child]; marked {
+			if _, marked := csyncProcessedSerial(child); marked {
 				t.Error("a refused CSYNC was recorded as processed, so it would never be retried")
 			}
 		})
@@ -297,7 +294,7 @@ func TestScanCSYNCEndSOAIsValidatedAndAgreedOn(t *testing.T) {
 					t.Error("a CSYNC stopped at the end SOA would be applied")
 				}
 			}
-			if _, marked := KnownCsyncMinSOAs[child]; marked {
+			if _, marked := csyncProcessedSerial(child); marked {
 				t.Error("a CSYNC stopped at the end SOA was recorded as processed")
 			}
 		})

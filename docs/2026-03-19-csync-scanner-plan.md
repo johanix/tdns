@@ -562,3 +562,31 @@ nothing is validated and the scan result says `unvalidated`.
 This validates the direct answers rather than querying via the
 IMR, which would validate cached data that the NOTIFY has just
 made stale. See `v2/scanner_trust.go`.
+
+## Amendment, 2026-09-14 (b): RFC 7477 conformance fixes
+
+- **The processed-serial memory is locked.** The per-child
+  serial of the last CSYNC processed (`KnownCsyncMinSOAs`, now
+  `csyncProcessed` in `v2/scanner_csync.go`) is read and written
+  under a mutex. Scans run in their own goroutines, so
+  concurrent NOTIFY(CSYNC) could crash the server with
+  `concurrent map writes`.
+- **Only the listed types are processed** (RFC 7477 §3.2.2). NS
+  is no longer processed when the bitmap omits it. Without NS,
+  glue is computed for the nameservers the parent already has.
+- **A bitmap type other than NS, A and AAAA refuses the CSYNC**
+  (RFC 7477 §2.1.1.2.1). Such a type used to be skipped.
+- **An empty answer is an answer.** A nameserver that answers
+  with authority that an RRset does not exist is compared like
+  any other. A kept nameserver can therefore lose all of one
+  address type, and data one nameserver serves and another
+  denies is a disagreement. A reply without AA and without data
+  is an error: the server is lame. Under `require-dnssec: true`
+  an empty answer stays an error, because the denial is not
+  validated.
+- **No in-bailiwick nameserver is left without glue** (RFC 7477
+  §3.2.2). A CSYNC whose result would leave one with neither A
+  nor AAAA is not processed. The UPDATE path refuses the same
+  for a nameserver the update adds or whose glue it touches.
+- **`StartScanner` starts `AuthQueryEngine`.** Without it the
+  standalone scanner's first query to a child blocked forever.

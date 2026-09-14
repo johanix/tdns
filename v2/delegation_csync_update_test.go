@@ -190,10 +190,18 @@ func TestNSCoherenceNewInBailiwickNameserverNeedsItsServedGlue(t *testing.T) {
 	stub.rrs["ns2.child.example./A"] = rrs(t, "ns2.child.example. 3600 IN A 192.0.2.2")
 	var asked []dns.RR
 
-	// NS added without its glue: the child serves an A for it, so the
-	// delegation the scanner would produce has that glue.
+	// NS added without any glue: an in-bailiwick nameserver needs an address
+	// at the parent (RFC 7477 §3.2.2).
 	err := zd.CheckDelegationNSCoherenceForUpdate(context.Background(),
 		[]dns.RR{addRR(t, "child.example. 3600 IN NS ns2.child.example.")}, askerFor(stub, &asked))
+	expectRefusal(t, err, "nameserver ns2.child.example. of child.example. with no A or AAAA glue")
+
+	// NS added with an AAAA but without the A the child serves: the
+	// delegation the scanner would produce has that A.
+	err = zd.CheckDelegationNSCoherenceForUpdate(context.Background(), []dns.RR{
+		addRR(t, "child.example. 3600 IN NS ns2.child.example."),
+		addRR(t, "ns2.child.example. 3600 IN AAAA 2001:db8::2"),
+	}, askerFor(stub, &asked))
 	expectRefusal(t, err, "A glue for ns2.child.example.")
 
 	// With the glue the child serves: accepted.
@@ -211,6 +219,36 @@ func TestNSCoherenceNewInBailiwickNameserverNeedsItsServedGlue(t *testing.T) {
 		addRR(t, "ns2.child.example. 3600 IN A 192.0.2.99"),
 	}, askerFor(stub, &asked))
 	expectRefusal(t, err, "A glue for ns2.child.example.")
+}
+
+// RFC 7477 §3.2.2, as the scanner applies it: no in-bailiwick nameserver is
+// left without glue. The child serving no address for a nameserver is no
+// longer an unverifiable lookup error, so this has to be refused on its own.
+func TestNSCoherenceRefusesAnInBailiwickNameserverWithoutGlue(t *testing.T) {
+	zd := cuParentZone(t)
+	stub := servedChild(t)
+	stub.rrs[cuChild+"/NS"] = append(stub.rrs[cuChild+"/NS"], addRR(t, "child.example. 3600 IN NS ns2.child.example."))
+	var asked []dns.RR
+
+	// A new in-bailiwick nameserver the child serves no address for.
+	err := zd.CheckDelegationNSCoherenceForUpdate(context.Background(),
+		[]dns.RR{addRR(t, "child.example. 3600 IN NS ns2.child.example.")}, askerFor(stub, &asked))
+	expectRefusal(t, err, "nameserver ns2.child.example. of child.example. with no A or AAAA glue")
+
+	// A kept nameserver losing both address types.
+	err = zd.CheckDelegationNSCoherenceForUpdate(context.Background(), []dns.RR{
+		delRRset("ns1.child.example.", dns.TypeA),
+		delRRset("ns1.child.example.", dns.TypeAAAA),
+	}, askerFor(stub, &asked))
+	expectRefusal(t, err, "nameserver ns1.child.example. of child.example. with no A or AAAA glue")
+
+	// Losing one of the two, which the child no longer serves, is accepted.
+	delete(stub.rrs, "ns1.child.example./AAAA")
+	err = zd.CheckDelegationNSCoherenceForUpdate(context.Background(),
+		[]dns.RR{delRRset("ns1.child.example.", dns.TypeAAAA)}, askerFor(stub, &asked))
+	if err != nil {
+		t.Fatalf("dropping AAAA glue the child no longer serves, keeping A: %v", err)
+	}
 }
 
 func TestNSCoherenceRefusesAddressRecordsThatAreNotGlue(t *testing.T) {
