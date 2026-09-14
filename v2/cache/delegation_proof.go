@@ -5,6 +5,7 @@ package cache
 
 import (
 	"context"
+	"log"
 	"slices"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -16,6 +17,116 @@ import (
 // above it is not judged. 150 was the limit validators shared when RFC 9276 was
 // written.
 const maxNSEC3Iterations = 150
+
+// dsProofKey marks a context as inside ReferralChildState's questions to the
+// parent side.
+type dsProofKey struct{}
+
+// ReferralChildState is the ZoneMap state for child, delegated by a referral
+// with no DS that validated, and whether there is a state to enter at all.
+//
+// The closest zone above the child that decides (judgedZone) settles it:
+//
+//   - None: the verdict referrals always gave, Insecure with a trust anchor and
+//     Indeterminate without.
+//   - Insecure or Indeterminate: nothing below it has a chain of trust either,
+//     and the child takes its state.
+//   - Secure: the parent signs its delegations, so a child without a DS must be
+//     proven insecure (RFC 4035 section 5.2, RFC 6840 section 4.4). The proof is
+//     the referral's own NSEC or NSEC3 at the cut, or, when it carries none, the
+//     parent side's answer to the DS question, asked for each name from the
+//     parent down to the child as unsignedRRsetState asks it. A DS that
+//     validates makes the child Secure, a proof of no DS Insecure, and a proof
+//     over maxNSEC3Iterations Indeterminate.
+//   - Bogus, or a Secure parent that proves nothing: the child is not entered,
+//     and its data is judged when it arrives (unsignedRRsetState).
+//
+// This used to be Insecure whenever the resolver held any trust anchor. An
+// attacker who stripped the DS and its RRSIG from the first referral to a
+// signed zone had the zone entered as Insecure, and every answer from it,
+// stripped or altered, validated Insecure from then on.
+//
+// A stub or forward zone at or above the child, below the zone that decides,
+// keeps the old verdict: its servers are the operator's, and the public tree
+// does not speak for it.
+func (rrcache *RRsetCacheT) ReferralChildState(ctx context.Context, child string, authority []dns.RR, fetcher RRsetFetcher) (ValidationState, bool) {
+	child = dns.Fqdn(child)
+	if child == "." {
+		return ValidationStateNone, false
+	}
+	legacy := ValidationStateIndeterminate
+	if rrcache.anyTrustAnchor() {
+		legacy = ValidationStateInsecure
+	}
+	var parentName string
+	var parent *Zone
+	for n := child; parent == nil; n = parentOf(n) {
+		if !core.EqualNames(n, child) {
+			if zone, ok := rrcache.ZoneMap.Get(n); ok && rrcache.judgedZone(n, zone) {
+				parentName, parent = n, zone
+				break
+			}
+		}
+		if n == "." || (rrcache.ConfiguredZone != nil && rrcache.ConfiguredZone(n)) {
+			return legacy, true
+		}
+	}
+	switch state := parent.GetState(); state {
+	case ValidationStateSecure:
+	case ValidationStateInsecure, ValidationStateIndeterminate:
+		return state, true
+	default:
+		return ValidationStateNone, false
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Value(dsProofKey{}) != nil {
+		// A DS question asked for another referral was itself answered with a
+		// referral. What the cache holds is all there is to go on: asking again
+		// from here is how two lying servers would keep the resolver asking.
+		fetcher = nil
+	} else {
+		ctx = context.WithValue(ctx, dsProofKey{}, true)
+	}
+
+	switch rrcache.cutProof(ctx, child, rrsetsOf(authority), fetcher) {
+	case evidenceInsecureCut:
+		return ValidationStateInsecure, true
+	case evidenceUnjudged:
+		return ValidationStateIndeterminate, true
+	}
+	for _, n := range rrcache.proofNames(parentName, child) {
+		if n == "." {
+			continue // the root has no parent side to ask
+		}
+		switch ev := rrcache.delegationEvidence(ctx, n, fetcher); ev {
+		case evidenceSecureCut, evidenceNoCut:
+			if core.EqualNames(n, child) {
+				if ev == evidenceSecureCut {
+					return ValidationStateSecure, true
+				}
+				break // the parent denies the cut it has just referred to
+			}
+			continue
+		case evidenceInsecureCut:
+			if !core.EqualNames(n, child) {
+				rrcache.markZoneInsecure(n)
+			}
+			return ValidationStateInsecure, true
+		case evidenceUnjudged:
+			return ValidationStateIndeterminate, true
+		default:
+			if rrcache.Verbose {
+				log.Printf("ReferralChildState: the DS question at %q below secure zone %q got %s; %q not entered",
+					n, parentName, evidenceToString[ev], child)
+			}
+		}
+		return ValidationStateNone, false
+	}
+	return ValidationStateNone, false
+}
 
 // judgedZone reports whether zone, the ZoneMap entry for name, decides for the
 // names below it. An entry made before its zone was judged does not. Nor does
@@ -185,4 +296,46 @@ func signedBy(set *core.RRset, zone string) *core.RRset {
 		return nil
 	}
 	return &core.RRset{Name: set.Name, Class: set.Class, RRtype: set.RRtype, RRs: set.RRs, RRSIGs: sigs}
+}
+
+// rrsetsOf groups a message section into RRsets, each with the RRSIGs covering
+// it. The records are copies: validation caps TTLs in place.
+func rrsetsOf(rrs []dns.RR) []*core.RRset {
+	var sets []*core.RRset
+	setFor := func(name string, rrtype uint16) *core.RRset {
+		for _, s := range sets {
+			if s.RRtype == rrtype && core.EqualNames(s.Name, name) {
+				return s
+			}
+		}
+		s := &core.RRset{Name: name, Class: dns.ClassINET, RRtype: rrtype}
+		sets = append(sets, s)
+		return s
+	}
+	for _, rr := range rrs {
+		if rr == nil {
+			continue
+		}
+		if sig, ok := rr.(*dns.RRSIG); ok {
+			s := setFor(sig.Hdr.Name, sig.TypeCovered)
+			s.RRSIGs = append(s.RRSIGs, dns.Copy(rr))
+			continue
+		}
+		s := setFor(rr.Header().Name, rr.Header().Rrtype)
+		s.RRs = append(s.RRs, dns.Copy(rr))
+	}
+	return sets
+}
+
+// anyTrustAnchor reports whether the resolver holds a trust anchor for any zone.
+func (rrcache *RRsetCacheT) anyTrustAnchor() bool {
+	if rrcache.DnskeyCache == nil {
+		return false
+	}
+	for item := range rrcache.DnskeyCache.Map.IterBuffered() {
+		if item.Val.TrustAnchor {
+			return true
+		}
+	}
+	return false
 }

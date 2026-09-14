@@ -76,6 +76,15 @@ func apexNSEC3(zone string) *dns.NSEC3 {
 	return nsec3In(zone, zone, false, 0, 0, dns.TypeNS, dns.TypeSOA, dns.TypeRRSIG, dns.TypeDNSKEY, dns.TypeNSEC3PARAM)
 }
 
+// flatten lays RRsets out as a message section.
+func flatten(sets ...*core.RRset) []dns.RR {
+	var rrs []dns.RR
+	for _, s := range sets {
+		rrs = append(append(rrs, s.RRs...), s.RRSIGs...)
+	}
+	return rrs
+}
+
 // An NSEC3-signed parent proves a cut the NSEC3 way (RFC 5155 section 8.9): a
 // matching NSEC3, or a closest encloser proof whose covering NSEC3 has Opt-Out.
 func TestNSEC3ProofOfAZoneCut(t *testing.T) {
@@ -198,6 +207,132 @@ func TestAnUnjudgedEntryBelowASecureZoneDecidesNothing(t *testing.T) {
 			rrcache.ZoneMap.Set(secKid, &Zone{ZoneName: secKid, State: state})
 			if got := validateUnsigned(t, rrcache, kidWWW+" 300 IN A 192.0.2.2", (&dsQuestionCounter{}).fetch); got != ValidationStateBogus {
 				t.Errorf("state %s, want bogus", ValidationStateToString[got])
+			}
+		})
+	}
+}
+
+// What a referral to kid without a DS makes of the child, by the state of the
+// zone above it. Only a Secure parent asks the parent side anything.
+func TestReferralChildStateTakesTheParentsState(t *testing.T) {
+	servers := func(rrcache *RRsetCacheT, zone string) {
+		rrcache.ServerMap.Set(zone, map[string]*AuthServer{"ns." + zone: NewAuthServer("ns." + zone)})
+	}
+	withZone := func(zone string, state ValidationState) func(*testing.T, *RRsetCacheT) {
+		return func(_ *testing.T, rrcache *RRsetCacheT) {
+			rrcache.ZoneMap.Set(zone, &Zone{ZoneName: zone, State: state})
+			servers(rrcache, zone)
+		}
+	}
+	belowSecure := func(state ValidationState) func(*testing.T, *RRsetCacheT) {
+		return func(t *testing.T, rrcache *RRsetCacheT) {
+			newZoneKey(t, rrcache, "example.", true)
+			withZone("example.", ValidationStateSecure)(t, rrcache)
+			withZone(secZone, state)(t, rrcache)
+		}
+	}
+	cases := []struct {
+		name      string
+		setup     func(t *testing.T, rrcache *RRsetCacheT)
+		want      ValidationState
+		entered   bool
+		questions bool
+	}{
+		{"no zone above, no trust anchor", func(*testing.T, *RRsetCacheT) {}, ValidationStateIndeterminate, true, false},
+		{"no zone above, a trust anchor elsewhere", func(t *testing.T, rrcache *RRsetCacheT) {
+			newZoneKey(t, rrcache, "other.", true)
+		}, ValidationStateInsecure, true, false},
+		{"insecure parent", withZone(secZone, ValidationStateInsecure), ValidationStateInsecure, true, false},
+		{"indeterminate parent", withZone(secZone, ValidationStateIndeterminate), ValidationStateIndeterminate, true, false},
+		{"bogus parent", withZone(secZone, ValidationStateBogus), ValidationStateNone, false, false},
+		{"unjudged parent below a secure zone", belowSecure(ValidationStateNone), ValidationStateNone, false, true},
+		{"indeterminate parent below a secure zone", belowSecure(ValidationStateIndeterminate), ValidationStateNone, false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rrcache := negCache(t)
+			c.setup(t, rrcache)
+			f := &dsQuestionCounter{}
+			state, entered := rrcache.ReferralChildState(context.Background(), secKid, nil, f.fetch)
+			if entered != c.entered || (entered && state != c.want) {
+				t.Errorf("got %s (entered %v), want %s (entered %v)",
+					ValidationStateToString[state], entered, ValidationStateToString[c.want], c.entered)
+			}
+			if asked := f.n > 0; asked != c.questions {
+				t.Errorf("%d DS question(s) asked, want questions %v", f.n, c.questions)
+			}
+		})
+	}
+}
+
+// Below a Secure parent the child is entered only as proven, and the parent
+// side is asked for the DS only when the referral carries no proof.
+func TestReferralChildStateBelowASecureParent(t *testing.T) {
+	nsecAtKid := func() dns.RR { return rrFrom(t, secKid+" 300 IN NSEC "+secWWW+" NS RRSIG NSEC") }
+	cases := []struct {
+		name      string
+		child     string
+		setup     func(t *testing.T, rrcache *RRsetCacheT, k *zoneKey) []dns.RR
+		ctx       context.Context
+		want      ValidationState
+		entered   bool
+		questions bool
+	}{
+		{name: "the referral's NSEC proves no DS", setup: func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []dns.RR {
+			return flatten(k.sign(t, nsecAtKid()))
+		}, want: ValidationStateInsecure, entered: true},
+		{name: "the referral's NSEC3 Opt-Out span proves no DS", setup: func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []dns.RR {
+			return flatten(k.sign(t, apexNSEC3(secZone)), k.sign(t, nsec3In(secZone, secKid, true, 1, 0, dns.TypeA, dns.TypeRRSIG)))
+		}, want: ValidationStateInsecure, entered: true},
+		{name: "a stripped NSEC, and no answer to the DS question", setup: func(t *testing.T, _ *RRsetCacheT, _ *zoneKey) []dns.RR {
+			return flatten(unsigned(nsecAtKid()))
+		}, questions: true},
+		{name: "an NSEC signed by the child", setup: func(t *testing.T, rrcache *RRsetCacheT, _ *zoneKey) []dns.RR {
+			return flatten(newZoneKey(t, rrcache, secKid, false).sign(t, nsecAtKid()))
+		}, questions: true},
+		{name: "an NSEC for another name", setup: func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []dns.RR {
+			return flatten(k.sign(t, rrFrom(t, secWWW+" 300 IN NSEC zzz."+secZone+" NS RRSIG NSEC")))
+		}, questions: true},
+		{name: "the DS question answered with a secure DS", setup: func(t *testing.T, rrcache *RRsetCacheT, k *zoneKey) []dns.RR {
+			ds := k.sign(t, rrFrom(t, secKid+" 300 IN DS 4242 15 2 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"))
+			rrcache.Set(secKid, dns.TypeDS, &CachedRRset{Name: secKid, RRtype: dns.TypeDS, RRset: ds,
+				Context: ContextAnswer, State: ValidationStateSecure, Expiration: time.Now().Add(5 * time.Minute)})
+			return nil
+		}, want: ValidationStateSecure, entered: true},
+		{name: "the DS question answered with a proof of none", setup: func(t *testing.T, rrcache *RRsetCacheT, k *zoneKey) []dns.RR {
+			seedDSDenial(t, rrcache, secKid, k.sign(t, soaFor(t, secZone)), k.sign(t, nsecAtKid()))
+			return nil
+		}, want: ValidationStateInsecure, entered: true},
+		{name: "the DS question answered with a stray-key denial", setup: func(t *testing.T, rrcache *RRsetCacheT, k *zoneKey) []dns.RR {
+			seedDSDenial(t, rrcache, secKid, k.sign(t, soaFor(t, secZone)), strayKey(t, secZone).sign(t, nsecAtKid()))
+			return nil
+		}},
+		{name: "a stub or forward zone in between", child: "sub." + secKid, setup: func(t *testing.T, rrcache *RRsetCacheT, _ *zoneKey) []dns.RR {
+			rrcache.ConfiguredZone = func(name string) bool { return core.EqualNames(name, secKid) }
+			return nil
+		}, want: ValidationStateInsecure, entered: true},
+		{name: "asked from inside another referral's questions", ctx: context.WithValue(context.Background(), dsProofKey{}, true),
+			setup: func(*testing.T, *RRsetCacheT, *zoneKey) []dns.RR { return nil }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rrcache, k := secCache(t)
+			authority := c.setup(t, rrcache, k)
+			child, ctx := c.child, c.ctx
+			if child == "" {
+				child = secKid
+			}
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			f := &dsQuestionCounter{}
+			state, entered := rrcache.ReferralChildState(ctx, child, authority, f.fetch)
+			if entered != c.entered || (entered && state != c.want) {
+				t.Errorf("got %s (entered %v), want %s (entered %v)",
+					ValidationStateToString[state], entered, ValidationStateToString[c.want], c.entered)
+			}
+			if asked := f.n > 0; asked != c.questions {
+				t.Errorf("%d DS question(s) asked, want questions %v", f.n, c.questions)
 			}
 		})
 	}
