@@ -149,6 +149,16 @@ func (zd *ZoneData) ValidateUpdate(ctx context.Context, r *dns.Msg, us *UpdateSt
 		if err == nil && sig0key != nil {
 			lgDns.Info("ValidateUpdate: SIG(0) key found in TrustStore",
 				"signer", signername, "keyid", keyid, "validated", sig0key.Validated, "trusted", sig0key.Trusted)
+			// Known, untrusted, and uploading itself again: a re-bootstrap,
+			// which starts verification over exactly as a first upload does.
+			if reupload := reBootstrapOfKnownKey(r.Ns, sig, sig0key); reupload != nil {
+				lgDns.Info("ValidateUpdate: untrusted key re-uploaded through the bootstrap ceremony; verification starts over",
+					"signer", signername, "keyid", keyid, "validation_failed", sig0key.ValidationFailed)
+				us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: reupload})
+				us.Data = "key"
+				us.Type = "TRUSTSTORE-UPDATE"
+				continue
+			}
 			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: sig0key})
 			continue // key found
 		} else {

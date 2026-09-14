@@ -49,7 +49,46 @@ func (rrcache *RRsetCacheT) unsignedRRsetState(ctx context.Context, rrset *core.
 	if state := zone.GetState(); state != ValidationStateSecure {
 		return state
 	}
+	return rrcache.belowSecureZone(ctx, zoneName, name, rrset.Name+" "+dns.TypeToString[rrset.RRtype], fetcher)
+}
 
+// unsignedDenialState is the verdict for a denial from zone, its SOA owner, whose
+// signatures prove nothing: it has none, or its proof validated Insecure.
+//
+// This used to be Bogus only when zone had a ZoneMap entry of its own held
+// Secure. A signed child of a secure zone has none when its parent's servers
+// serve it too, so the resolver never saw a referral, or when the DS question
+// for its referral went unanswered (ReferralChildState). Its NXDOMAIN and NODATA
+// answers, stripped of their RRSIGs and NSEC records on the way, validated
+// Insecure.
+//
+// A denial is data from zone, and is judged as unsigned data is: below the
+// closest zone held Secure it is Bogus unless the parent side proves an insecure
+// delegation on the way down to zone (belowSecureZone). Outside a zone held
+// Secure it is Insecure, as it always was.
+//
+// A denial of the DS at zone's own apex is the child speaking for its parent's
+// data, and is judged from the zone above, as an unsigned DS is. That also keeps
+// the DS questions asked for a DS denial strictly above the name denied, so the
+// denials those questions draw cannot lead back to it.
+func (rrcache *RRsetCacheT) unsignedDenialState(ctx context.Context, zone, qname string, qtype uint16, fetcher RRsetFetcher) ValidationState {
+	name := dns.Fqdn(zone)
+	if qtype == dns.TypeDS && core.EqualNames(name, qname) {
+		name = parentOf(name)
+	}
+	zoneName, z := rrcache.closestKnownZone(name)
+	if z == nil || z.GetState() != ValidationStateSecure {
+		return ValidationStateInsecure
+	}
+	return rrcache.belowSecureZone(ctx, zoneName, name, "the denial of "+qname+" "+dns.TypeToString[qtype], fetcher)
+}
+
+// belowSecureZone is the verdict for unsigned data at name, in or below the zone
+// zoneName held Secure: Insecure if the way down from zoneName passes a proven
+// insecure delegation or a stub or forward zone, Indeterminate if it passes a
+// proof that cannot be judged, and Bogus otherwise. what names the data in the
+// log.
+func (rrcache *RRsetCacheT) belowSecureZone(ctx context.Context, zoneName, name, what string, fetcher RRsetFetcher) ValidationState {
 	for _, n := range rrcache.proofNames(zoneName, name) {
 		// A stub or forward zone is reached through servers the operator named,
 		// and the public tree does not speak for it: its unsigned data is served
@@ -64,7 +103,7 @@ func (rrcache *RRsetCacheT) unsignedRRsetState(ctx context.Context, rrset *core.
 		case evidenceInsecureCut:
 			rrcache.markZoneInsecure(n)
 			if rrcache.Verbose {
-				log.Printf("ValidateRRset: %q is an insecure delegation; %s %s is insecure", n, rrset.Name, dns.TypeToString[rrset.RRtype])
+				log.Printf("ValidateRRset: %q is an insecure delegation; %s is insecure", n, what)
 			}
 			return ValidationStateInsecure
 		case evidenceUnjudged:
@@ -73,13 +112,13 @@ func (rrcache *RRsetCacheT) unsignedRRsetState(ctx context.Context, rrset *core.
 			return ValidationStateIndeterminate
 		}
 		if rrcache.Verbose {
-			log.Printf("ValidateRRset: %s %s has no RRSIGs below secure zone %q, and the DS question at %q got %s; bogus",
-				rrset.Name, dns.TypeToString[rrset.RRtype], zoneName, n, evidenceToString[ev])
+			log.Printf("ValidateRRset: %s is unsigned below secure zone %q, and the DS question at %q got %s; bogus",
+				what, zoneName, n, evidenceToString[ev])
 		}
 		return ValidationStateBogus
 	}
 	if rrcache.Verbose {
-		log.Printf("ValidateRRset: %s %s has no RRSIGs in secure zone %q; bogus", rrset.Name, dns.TypeToString[rrset.RRtype], zoneName)
+		log.Printf("ValidateRRset: %s is unsigned in secure zone %q; bogus", what, zoneName)
 	}
 	return ValidationStateBogus
 }

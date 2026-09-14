@@ -1002,6 +1002,10 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	if crrset != nil {
 		switch {
 		case crrset.Rcode == uint8(dns.RcodeNameError) && crrset.Context == cache.ContextNXDOMAIN:
+			if bogusDenial(crrset, msgoptions) {
+				writeBogusDenial(w, r, m)
+				return
+			}
 			m.SetRcode(r, negativeRcode(crrset, msgoptions))
 			negStart := len(m.Ns)
 			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, msgoptions) && crrset.RRset != nil {
@@ -1034,6 +1038,10 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 		// that HAS one is cached as ContextAnswer and handled by the case
 		// below.
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextNoErrNoAns:
+			if bogusDenial(crrset, msgoptions) {
+				writeBogusDenial(w, r, m)
+				return
+			}
 			m.SetRcode(r, dns.RcodeSuccess)
 			negStart := len(m.Ns)
 			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, msgoptions) && crrset.RRset != nil {
@@ -1304,6 +1312,10 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		// then come from different answers. A miss serves the NXDOMAIN the
 		// context stands for, with no proof beside it to contradict.
 		cached := imr.Cache.Get(qname, qtype)
+		if bogusDenial(cached, msgoptions) {
+			writeBogusDenial(w, r, m)
+			return true, nil
+		}
 		rc := dns.RcodeNameError
 		if cached != nil {
 			rc = negativeRcode(cached, msgoptions)
@@ -1317,8 +1329,13 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		// continue // if all is good we will now hit the new referral and get further
 		return false, nil
 	case cache.ContextNoErrNoAns:
+		cached := imr.Cache.Get(qname, qtype)
+		if bogusDenial(cached, msgoptions) {
+			writeBogusDenial(w, r, m)
+			return true, nil
+		}
 		m.SetRcode(r, dns.RcodeSuccess)
-		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r, imr.Cache.Get(qname, qtype))
+		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r, cached)
 		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil

@@ -71,13 +71,37 @@ func adWanted(r *dns.Msg, msgoptions *edns0.MsgOptions) bool {
 // negativeAD reports whether a denial served from entry c may carry AD: only a
 // Secure proof, and only to a client that can take the bit.
 //
-// Denials do not go through dispositionFor. A bogus one never reaches the cache
-// (handleNegative refuses it), the only EDE a cached denial carries is served
-// beside it rather than instead of it, and ValidateNegativeResponse still
-// returns Indeterminate for every NSEC3 proof -- SERVFAIL for a signed,
-// Indeterminate denial would fail every NXDOMAIN from an NSEC3-signed zone.
+// Denials do not go through dispositionFor. A bogus one is SERVFAIL
+// (bogusDenial), the only EDE a cached denial carries is served beside it
+// rather than instead of it, and ValidateNegativeResponse still returns
+// Indeterminate for every NSEC3 proof -- SERVFAIL for a signed, Indeterminate
+// denial would fail every NXDOMAIN from an NSEC3-signed zone.
 func negativeAD(c *cache.CachedRRset, r *dns.Msg, msgoptions *edns0.MsgOptions) bool {
 	return c != nil && c.State == cache.ValidationStateSecure && adWanted(r, msgoptions)
+}
+
+// bogusDenial reports whether a denial cached as c is answered SERVFAIL rather
+// than served: its verdict is Bogus, and the client did not set CD, which asks
+// for the records to validate them itself.
+//
+// A bogus denial used to be served, without AD. handleNegative refuses a denial
+// only when validation fails with an error, and a stripped denial from a zone
+// known to be signed is not an error but a verdict: it was cached as Bogus, and
+// the name an attacker wanted gone was gone for every client that does not
+// validate for itself.
+func bogusDenial(c *cache.CachedRRset, msgoptions *edns0.MsgOptions) bool {
+	return c != nil && c.State == cache.ValidationStateBogus && (msgoptions == nil || !msgoptions.CD)
+}
+
+// writeBogusDenial answers r with a SERVFAIL carrying EDE 6 (DNSSEC Bogus), as a
+// bogus answer is answered (dispositionFor).
+func writeBogusDenial(w dns.ResponseWriter, r, m *dns.Msg) {
+	m.Answer, m.Ns = nil, nil
+	m.SetRcode(r, dns.RcodeServerFailure)
+	if r.IsEdns0() != nil {
+		edns0.AttachEDEToResponse(m, edns0.EDEDNSSECBogus)
+	}
+	w.WriteMsg(m)
 }
 
 // verdictReusable reports whether a cached verdict can be served as it stands.
