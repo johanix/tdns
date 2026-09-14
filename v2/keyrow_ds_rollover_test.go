@@ -148,17 +148,19 @@ func TestDsTimelineMultiDS(t *testing.T) {
 	t0 := time.Now()
 	tick := func(step string, now time.Time) {
 		t.Helper()
+		before := len(parent.pushes())
 		deps := ktDeps(zd, kdb, now)
 		deps.Imr = &Imr{}
 		if err := RolloverAutomatedTick(context.Background(), deps); err != nil {
 			t.Fatalf("%s: tick: %v", step, err)
 		}
 		checkStep(t, kdb, zd, step)
-		if pushes := parent.pushes(); len(pushes) > 0 {
-			last := ktDSKeytags(pushes[len(pushes)-1])
-			sort.Slice(last, func(i, j int) bool { return last[i] < last[j] })
-			if !sameTags(last, dsOneSepKeytags(t, kdb, zone)) {
-				t.Errorf("%s: the last push %v is not the ds=1 rows %v", step, last, dsOneSepKeytags(t, kdb, zone))
+		// A push made on this tick carries exactly the ds=1 rows.
+		if pushes := parent.pushes(); len(pushes) > before {
+			got := ktDSKeytags(pushes[len(pushes)-1])
+			sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+			if want := dsOneSepKeytags(t, kdb, zone); !sameTags(got, want) {
+				t.Errorf("%s: the push %v is not the ds=1 rows %v", step, got, want)
 			}
 		}
 	}
@@ -207,26 +209,38 @@ func TestDsTimelineMultiDS(t *testing.T) {
 	if got := dsOf(t, kdb, zone, a); got != "1" {
 		t.Errorf("retired KSK under multi-DS: ds=%s, want 1 until the withdrawal", got)
 	}
-	zd.ParentDSTTLObserved = 3600
+	// The engine takes the rolled zone through the publish wait, a push that
+	// still carries A (retired keeps its DS under multi-DS), the parent's
+	// confirmation and the withdraw phase. Only A's removal drops its DS,
+	// and the push after that leaves A out.
 	tRoll := t0.Add(pol.Rollover.ConfirmInitialWait + 3*time.Second)
-	tick("withdraw-early", tRoll)
+	tick("publish-wait", tRoll)
+	tick("push-2", tRoll.Add(time.Second))
+	pushes = parent.pushes()
+	if len(pushes) != 2 {
+		t.Fatalf("after the second push tick: %d pushes, want 2", len(pushes))
+	}
+	parent.serve(ktDSSubset(pushes[1], 3600, a, b))
+	tConfirm := tRoll.Add(pol.Rollover.ConfirmInitialWait + 3*time.Second)
+	tick("confirm-2", tConfirm)
 	if st := ktKeyState(t, kdb, zone, a); st != DnskeyStateRetired {
-		t.Fatalf("withdraw-early: A is %s, want retired", st)
+		t.Fatalf("confirm-2: A is %s, want retired", st)
 	}
 	for _, p := range parent.pushes() {
 		if !ktHasKeytag(ktDSKeytags(p), a) {
 			t.Fatalf("a push without A's DS before A was withdrawn: %v", ktDSKeytags(p))
 		}
 	}
-	tick("withdraw-done", tRoll.Add(pol.Clamping.Margin+2*time.Hour))
+	tick("withdraw", tConfirm.Add(pol.Clamping.Margin+time.Second))
 	if st := ktKeyState(t, kdb, zone, a); st != DnskeyStateRemoved {
-		t.Fatalf("withdraw-done: A is %s, want removed", st)
+		t.Fatalf("withdraw: A is %s, want removed", st)
 	}
 	if got := dsOf(t, kdb, zone, a); got != "0" {
 		t.Errorf("removed KSK: ds=%s, want 0", got)
 	}
-	tick("after", tRoll.Add(pol.Clamping.Margin+3*time.Hour))
-	tick("after-push", tRoll.Add(pol.Clamping.Margin+3*time.Hour+time.Second))
+	tAfter := tConfirm.Add(pol.Clamping.Margin + 2*time.Second)
+	tick("after", tAfter)
+	tick("after-push", tAfter.Add(time.Second))
 	last := parent.pushes()[len(parent.pushes())-1]
 	if tags := ktDSKeytags(last); ktHasKeytag(tags, a) || !ktHasKeytag(tags, b) {
 		t.Errorf("after the withdrawal the last push is %v, want {%d} only", tags, b)
@@ -249,6 +263,7 @@ func TestDsTimelineAlgRollover(t *testing.T) {
 	checkStep(t, kdb, zd, "start")
 	tick := func(step string, now time.Time) {
 		t.Helper()
+		before := len(parent.pushes())
 		deps := ktDeps(zd, kdb, now)
 		deps.Imr = &Imr{}
 		if err := RolloverAutomatedTick(context.Background(), deps); err != nil {
@@ -265,11 +280,12 @@ func TestDsTimelineAlgRollover(t *testing.T) {
 				t.Fatalf("%s: a push carried the old head's DS: %v", step, ktDSKeytags(p))
 			}
 		}
-		if pushes := parent.pushes(); len(pushes) > 0 {
-			last := ktDSKeytags(pushes[len(pushes)-1])
-			sort.Slice(last, func(i, j int) bool { return last[i] < last[j] })
-			if !sameTags(last, dsOneSepKeytags(t, kdb, ktAlgZone)) {
-				t.Errorf("%s: the last push %v is not the ds=1 rows %v", step, last, dsOneSepKeytags(t, kdb, ktAlgZone))
+		// A push made on this tick carries exactly the ds=1 rows.
+		if pushes := parent.pushes(); len(pushes) > before {
+			got := ktDSKeytags(pushes[len(pushes)-1])
+			sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+			if want := dsOneSepKeytags(t, kdb, ktAlgZone); !sameTags(got, want) {
+				t.Errorf("%s: the push %v is not the ds=1 rows %v", step, got, want)
 			}
 		}
 	}

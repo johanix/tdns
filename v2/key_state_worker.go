@@ -110,6 +110,10 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propagationDelay time.Duration, standbyZskCount, standbyKskCount int) {
 	now := time.Now()
 
+	// Rows whose ds is still unset get it from their zone's DS model, before
+	// anything below reads it (keyrow_ds.go).
+	fillDsForPolicyZones(kdb)
+
 	rolloverAutomatedForAllZones(ctx, conf, kdb, propagationDelay, now)
 	TransitionRolloverKskDsPublishedToPublished(ctx, conf, kdb, now, propagationDelay)
 	TransitionRolloverKskPublishedToStandby(ctx, conf, kdb, now, propagationDelay)

@@ -432,6 +432,7 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 			zd.DnssecPolicyName = intentName
 			zd.mu.Unlock()
 			UpdateSigValidityFloor(zd, intentPol, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
+			fillDsAfterBind(kdb, zd)
 			lgEngine.Info("backfilled applied DNSSEC policy without re-sign",
 				"zone", zd.ZoneName, "policy", intentName)
 			return nil
@@ -477,6 +478,7 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 		zd.DnssecPolicyName = intentName
 		zd.mu.Unlock()
 		UpdateSigValidityFloor(zd, intentPol, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
+		fillDsAfterBind(kdb, zd)
 		zd.ClearError(DnssecPolicyWarning)
 		return nil
 	}

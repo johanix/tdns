@@ -88,9 +88,9 @@ func TestStateWritesSetDsByTheZonesModel(t *testing.T) {
 	for model, method := range map[DSModel]RolloverMethod{DSModelNone: RolloverMethodNone, DSModelMultiDS: RolloverMethodMultiDS} {
 		zone := fmt.Sprintf("%s.ds.example.", model)
 		dsTestZone(t, kdb, zone, method)
-		rng := newTestRand(uint64(model) + 40)
-		ksk := insertTestKeyRow(t, kdb, zone, DnskeyStateCreated, "KSK", rng)
-		zsk := insertTestKeyRow(t, kdb, zone, DnskeyStateCreated, "ZSK", rng)
+		// Real keys: a transition on a loaded zone republishes its signing set.
+		ksk := ktGenKSK(t, kdb, zone, DnskeyStateCreated, dns.ED25519)
+		zsk := ktGenZSK(t, kdb, zone, DnskeyStateCreated, dns.ED25519)
 		if got, want := dsOf(t, kdb, zone, ksk), boolFlag(wantDs[model][DnskeyStateCreated]); got != want {
 			t.Errorf("%s: created KSK ds=%s, want %s", model, got, want)
 		}

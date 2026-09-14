@@ -165,6 +165,14 @@ func setKeyRowTx(tx *Tx, zone string, keyid uint16, state string, f KeyRowFlags,
 	if expectOld != "" && old != expectOld {
 		return "", fmt.Errorf("key with keyid %d in zone %s is not in state %s", keyid, zone, expectOld)
 	}
+	if !f.DS.Valid {
+		// The caller left ds open: the zone's DS model decides (keyrow_ds.go).
+		ds, err := dsForKeyTx(tx, zone, keyid, state, uint16(flags))
+		if err != nil {
+			return "", fmt.Errorf("key with keyid %d in zone %s to state %s: %w", keyid, zone, state, err)
+		}
+		f.DS = ds
+	}
 	if err := checkKeyRowFlags(f, uint16(flags)); err != nil {
 		return "", fmt.Errorf("key with keyid %d in zone %s to state %s: %w", keyid, zone, state, err)
 	}
@@ -231,6 +239,14 @@ func insertKeyRowTx(tx *Tx, row KeyRow) error {
 		if f, ok = keyFlagsForState(row.State); !ok {
 			return fmt.Errorf("insertKeyRowTx: no flags known for key state %q (zone %s, keyid %d); register the state with RegisterKeyStateFlags or pass the flags", row.State, row.Zone, row.Keyid)
 		}
+	}
+	if !f.DS.Valid {
+		// The caller left ds open: the zone's DS model decides (keyrow_ds.go).
+		ds, err := dsForKeyTx(tx, row.Zone, row.Keyid, row.State, row.Flags)
+		if err != nil {
+			return fmt.Errorf("insertKeyRowTx: %s keyid %d: %w", row.Zone, row.Keyid, err)
+		}
+		f.DS = ds
 	}
 	if err := checkKeyRowFlags(f, row.Flags); err != nil {
 		return fmt.Errorf("insertKeyRowTx: %s keyid %d: %w", row.Zone, row.Keyid, err)
