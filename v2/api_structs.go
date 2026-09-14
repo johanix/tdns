@@ -32,6 +32,11 @@ type KeystorePost struct {
 	ParentState     uint8
 	Creator         string
 	Force           bool // commit destructive operation; otherwise dry-run (used by 'purge')
+	// The key columns for a "setstate" that names them (design §3.2): on a
+	// zone whose key lifecycle is owned, setstate without them is refused.
+	Pub  *bool `json:"pub,omitempty"`
+	Sign *bool `json:"sign,omitempty"`
+	DS   *bool `json:"ds,omitempty"`
 	// TSIG keystore (tsig-mgmt); do not overload Algorithm uint8 above.
 	TsigKeyname      string   `json:"tsigkeyname,omitempty"`
 	TsigAlgorithm    string   `json:"tsigalgorithm,omitempty"`
