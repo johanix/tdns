@@ -30,7 +30,7 @@ type RRsetFetcher func(ctx context.Context, qname string, qtype uint16, servers 
 // Returns the zone name and an error if not found.
 type ParentZoneFinder func(name string) (string, error)
 
-// signerHoldsRRset reports whether sig's Signer's Name can be the zone that
+// SignerHoldsRRset reports whether sig's Signer's Name can be the zone that
 // holds rrset (RFC 4035 section 5.3.1). RRSIG.Verify only checks that the
 // owner ends with the signer's name as a string, which accepts "ictim.example."
 // as the zone of "www.victim.example.", and it knows nothing of the name the
@@ -41,7 +41,7 @@ type ParentZoneFinder func(name string) (string, error)
 //   - A DS is parent-side data: its signer is a strict ancestor.
 //   - A wildcard expansion was signed as the wildcard at the owner cut down to
 //     Labels labels, and that name must be inside the signer too.
-func signerHoldsRRset(rrset *core.RRset, sig *dns.RRSIG) bool {
+func SignerHoldsRRset(rrset *core.RRset, sig *dns.RRSIG) bool {
 	signer := dns.Fqdn(sig.SignerName)
 	owners := []string{rrset.Name}
 	if len(rrset.RRs) > 0 {
@@ -78,7 +78,7 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 	// signer name the resolver holds Insecure used to make any RRset carrying
 	// it Insecure, unverified, and an arbitrary one sent the resolver off to
 	// fetch that zone's DNSKEYs.
-	if !signerHoldsRRset(rrset, sig) {
+	if !SignerHoldsRRset(rrset, sig) {
 		if rrcache.Verbose {
 			log.Printf("ValidateRRset: signer %q cannot hold %s %s (labels=%d); signature rejected",
 				signer, rrset.Name, dns.TypeToString[rrset.RRtype], sig.Labels)

@@ -15,40 +15,16 @@ import (
 	"github.com/miekg/dns"
 )
 
-// signerHoldsRRset reports whether sig's Signer's Name can be the zone that
-// holds rrset (RFC 4035 section 5.3.1). RRSIG.Verify only checks that the
-// owner ends with the signer's name as a string, which accepts "ictim.example."
-// as the zone of "www.victim.example.".
-//
-//   - The signer is the owner or an ancestor of it, compared label by label.
-//     The owner is the RRset's name and that of its first record; RRsets
-//     built from a response or from zone data often carry only the records.
-//   - A DS is parent-side data: its signer is a strict ancestor.
-//   - A wildcard expansion was signed as the wildcard at the owner cut down to
-//     Labels labels, and that name must be inside the signer too.
+// signerHoldsRRset is cache.SignerHoldsRRset for the RRsets this validator is
+// given. AuthDNSQuery and lookupRRset build them from the records alone, and
+// the IMR's rule takes a missing name for the root, which no signer but the
+// root can hold; the first record's owner stands in for it.
 func signerHoldsRRset(rrset *core.RRset, sig *dns.RRSIG) bool {
-	var owners []string
-	if rrset.Name != "" {
-		owners = append(owners, rrset.Name)
+	named := *rrset
+	if named.Name == "" && len(named.RRs) > 0 {
+		named.Name = named.RRs[0].Header().Name
 	}
-	if len(rrset.RRs) > 0 {
-		owners = append(owners, rrset.RRs[0].Header().Name)
-	}
-	if len(owners) == 0 {
-		return false
-	}
-	signer := dns.Fqdn(sig.SignerName)
-	ds := rrset.RRtype == dns.TypeDS || sig.TypeCovered == dns.TypeDS
-	for _, owner := range owners {
-		owner = dns.Fqdn(owner)
-		if !dns.IsSubDomain(signer, owner) {
-			return false
-		}
-		if ds && core.EqualNames(signer, owner) {
-			return false
-		}
-	}
-	return int(sig.Labels) >= dns.CountLabel(signer)
+	return cache.SignerHoldsRRset(&named, sig)
 }
 
 // XXX: This should not be a method of ZoneData, but rather a function.
