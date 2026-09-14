@@ -196,6 +196,9 @@ var StatusCmd = &cobra.Command{
 							}
 						}
 					}
+					if resp.Validation != "" {
+						fmt.Printf("    Validation: %s (%s)\n", resp.Validation, resp.ValidationReason)
+					}
 					if resp.Error {
 						fmt.Printf("    Error: %s\n", resp.ErrorMsg)
 					}
@@ -325,6 +328,9 @@ var ResultsCmd = &cobra.Command{
 							break
 						}
 					}
+				}
+				if resp.Validation != "" {
+					fmt.Printf("  Validation: %s (%s)\n", resp.Validation, resp.ValidationReason)
 				}
 				if resp.Error {
 					fmt.Printf("  Error: %s\n", resp.ErrorMsg)

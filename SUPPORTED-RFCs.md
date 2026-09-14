@@ -128,11 +128,11 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 
 ### RFC 7477 - Child-to-Parent Synchronization in DNS (CSYNC)
 **Status**: ✅ Partially Supported  
-**Implementation**: `tdns/scanner_csync.go`  
+**Implementation**: `tdns/v2/scanner.go` (`ProcessCSYNCNotify`), `tdns/v2/delegation_csync.go`, `tdns/v2/scanner_trust.go`  
 **Notes**: 
-- CSYNC record parsing and processing
-- References RFC 7477 procedures in code comments
-- Used for scanning child zones for delegation changes
+- Parent side: a NOTIFY(CSYNC) starts a scan that copies the child's NS RRset and in-bailiwick glue
+- Under a parent zone delegation policy with `require-dnssec: true`, the CSYNC and all data copied from the child must validate Secure, or nothing is processed (§2, §3)
+- Only immediate processing; `soaminimum` is honoured
 
 ### RFC 7344 - Automating DNSSEC Delegation Trust Maintenance (CDS)
 **Status**: ✅ Supported  
@@ -178,14 +178,14 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
   than the child's. `signalOwnerName()` is the single spelling of that name,
   shared by the producer and both consumers so they cannot drift.
 - **Consumer, parent side** (`queryCDSAtSignalingNames`, `tdns/v2/scanner.go`):
-  a scanner configured with the `at-ns` option verifies every NOTIFY(CDS) this
-  way instead of by direct DNSSEC validation. It queries CDS at the signaling
-  name under each *out-of-bailiwick* NS via the IMR, requires each answer to be
-  DNSSEC-validated (unless run with `no-dnssec-validation`), requires every NS
-  to agree, and checks the result against a direct query to the child; any
-  failure rejects the NOTIFY. A child whose NS are all in-bailiwick has no
-  signaling name a parent can validate, so that case falls back to the
-  direct/apex path.
+  when the delegation policy bound to the parent zone lists `at-ns`, a
+  NOTIFY(CDS) for a child with no DS is verified this way. It queries CDS at the
+  signaling name under each *out-of-bailiwick* NS via the IMR, requires each
+  answer to be DNSSEC-validated when the policy has `require-dnssec: true`,
+  requires every NS to agree, and checks the result against a direct query to
+  the child; any failure refuses the NOTIFY. A child whose NS are all
+  in-bailiwick has no signaling name, so only `at-apex` remains, and under
+  `require-dnssec` that needs a CDS that validates at the apex.
 - **Consumer, SIG(0) side** (`LookupChildKeyAtSignal`, `tdns/v2/truststore_verify.go`):
   the same shape for a child's SIG(0) `KEY` at `_sig0key.<child>._signal.<ns>`,
   used to verify a child's key before trusting a cross-zone-cut DNS UPDATE.

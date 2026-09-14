@@ -795,6 +795,11 @@ type ScanTupleResponse struct {
 	GlueRemoves []dns.RR            // A/AAAA glue records to remove
 	Error       bool                // Whether an error occurred
 	ErrorMsg    string              // Error message if Error is true
+	// Validation says how the child data was authenticated under the parent
+	// zone's delegation policy: validated, unvalidated, or refused. Empty when
+	// the scan stopped before a decision (see scanner_trust.go).
+	Validation       ScanValidation `json:",omitempty"`
+	ValidationReason string         `json:",omitempty"` // why, for all three
 }
 
 type ScannerPost struct {
