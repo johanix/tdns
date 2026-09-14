@@ -43,12 +43,11 @@ func (rrcache *RRsetCacheT) unsignedRRsetState(ctx context.Context, rrset *core.
 		}
 		return ValidationStateIndeterminate
 	}
-	switch state := zone.GetState(); state {
-	case ValidationStateSecure:
-	case ValidationStateIndeterminate, ValidationStateInsecure:
+	// closestKnownZone passes over entries that do not decide (judgedZone), so
+	// the state is a verdict, and any verdict but Secure is the data's too: a
+	// zone held Bogus serves nothing, signed or not.
+	if state := zone.GetState(); state != ValidationStateSecure {
 		return state
-	default:
-		return ValidationStateInsecure
 	}
 
 	for _, n := range rrcache.proofNames(zoneName, name) {
@@ -85,12 +84,12 @@ func (rrcache *RRsetCacheT) unsignedRRsetState(ctx context.Context, rrset *core.
 	return ValidationStateBogus
 }
 
-// closestKnownZone is the ZoneMap entry at name or nearest above it. The root is
-// not looked up, as it was not before: unsigned data that no zone below the root
-// claims stays Indeterminate.
+// closestKnownZone is the ZoneMap entry at name or nearest above it that decides
+// for the names below it (judgedZone). The root is not looked up, as it was not
+// before: unsigned data that no zone below the root claims stays Indeterminate.
 func (rrcache *RRsetCacheT) closestKnownZone(name string) (string, *Zone) {
 	for n := dns.Fqdn(name); n != "."; n = parentOf(n) {
-		if zone, ok := rrcache.ZoneMap.Get(n); ok && zone != nil {
+		if zone, ok := rrcache.ZoneMap.Get(n); ok && rrcache.judgedZone(n, zone) {
 			return n, zone
 		}
 	}
@@ -165,14 +164,18 @@ var evidenceToString = map[cutEvidence]string{
 //     it whose bitmap has NS and neither DS nor SOA: an insecure delegation (RFC
 //     4035 section 5.2). Any other validated denial -- name is ordinary data,
 //     an empty non-terminal, or does not exist -- means no delegation at name.
-//   - An answer that validated Indeterminate -- an NSEC3 denial, which
-//     ValidateNegativeResponse does not check yet, or a chain that could not be
-//     followed -- cannot be judged.
+//   - An NSEC3 denial is read the same way (nsec3CutProof): a matching NSEC3, or
+//     an Opt-Out span covering name, proves an insecure delegation.
+//   - A proof over maxNSEC3Iterations cannot be judged, nor can a DS that
+//     validated Insecure, nor an answer whose chain could not be followed when
+//     the zone above name is not held Secure either.
 //   - Everything else is bogus. The parent side of name lies inside the signed
 //     tree, so its answer is signed: an unsigned denial is a stripped one, or
 //     the child's own, which proves nothing about the parent side (RFC 6840
-//     section 4.4). And no answer at all counts the same, because whoever can
-//     strip the signatures can as easily drop the question.
+//     section 4.4). A signed answer whose chain cannot be followed below a
+//     Secure zone counts the same -- a signature by a key the zone does not
+//     have validates Indeterminate -- and so does no answer at all, because
+//     whoever can strip the signatures can as easily drop the question.
 func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string, fetcher RRsetFetcher) cutEvidence {
 	crr := rrcache.Get(name, dns.TypeDS)
 	if crr == nil && ctx != nil && fetcher != nil {
@@ -208,42 +211,57 @@ func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string,
 	switch state {
 	case ValidationStateSecure:
 		return evidenceSecureCut
-	case ValidationStateIndeterminate, ValidationStateInsecure:
+	case ValidationStateInsecure:
 		return evidenceUnjudged
+	case ValidationStateIndeterminate:
+		if !rrcache.parentSideSecure(name) {
+			return evidenceUnjudged
+		}
 	}
 	return evidenceBogus
 }
 
+// denialEvidence is delegationEvidence for a cached denial of the DS at name,
+// and its proof decides (cutProof). A denial that validated Secure with no
+// proof about name in it shows that name is no delegation: ordinary data, an
+// empty non-terminal, or no name at all. One that validated Indeterminate --
+// every NSEC3 denial does, as does a chain that could not be followed -- and
+// holds no proof that validates is bogus below a Secure zone: an NSEC3 denial
+// that proves nothing about name, or a signature made with a key the zone does
+// not have, is not a reason to serve unsigned data.
 func (rrcache *RRsetCacheT) denialEvidence(ctx context.Context, name string, crr *CachedRRset, fetcher RRsetFetcher) cutEvidence {
 	switch crr.State {
-	case ValidationStateSecure:
-	case ValidationStateIndeterminate:
-		return evidenceUnjudged
+	case ValidationStateSecure, ValidationStateIndeterminate:
 	case ValidationStateBogus, ValidationStateInsecure:
 		return evidenceBogus
 	default:
 		return evidenceNone
 	}
-	for _, set := range crr.NegAuthority {
-		if set == nil || set.RRtype != dns.TypeNSEC || !core.EqualNames(set.Name, name) {
-			continue
+	if ev := rrcache.cutProof(ctx, name, crr.NegAuthority, fetcher); ev != evidenceNone {
+		return ev
+	}
+	switch {
+	case crr.State == ValidationStateSecure:
+		return evidenceNoCut
+	case !rrcache.parentSideSecure(name):
+		return evidenceUnjudged
+	}
+	return evidenceBogus
+}
+
+// parentSideSecure reports whether the closest zone above name that decides
+// (judgedZone) is held Secure. What that zone says about name is signed, and a
+// signature whose chain cannot be followed there is an attacker's as easily as a
+// missing one.
+func (rrcache *RRsetCacheT) parentSideSecure(name string) bool {
+	for n := parentOf(dns.Fqdn(name)); ; n = parentOf(n) {
+		if zone, ok := rrcache.ZoneMap.Get(n); ok && rrcache.judgedZone(n, zone) {
+			return zone.GetState() == ValidationStateSecure
 		}
-		proof := signedFromAbove(set, name)
-		if proof == nil {
-			continue
-		}
-		if state, err := rrcache.ValidateRRset(ctx, proof, fetcher); err != nil || state != ValidationStateSecure {
-			continue
-		}
-		for _, rr := range proof.RRs {
-			nsec, ok := rr.(*dns.NSEC)
-			if ok && slices.Contains(nsec.TypeBitMap, dns.TypeNS) &&
-				!slices.Contains(nsec.TypeBitMap, dns.TypeDS) && !slices.Contains(nsec.TypeBitMap, dns.TypeSOA) {
-				return evidenceInsecureCut
-			}
+		if n == "." {
+			return false
 		}
 	}
-	return evidenceNoCut
 }
 
 // signedFromAbove returns set carrying only the signatures made by a zone above

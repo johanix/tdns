@@ -191,14 +191,24 @@ func TestWhatDoesNotProveAnInsecureDelegation(t *testing.T) {
 			want: ValidationStateBogus,
 		},
 		{
-			// A signed NSEC3 denial, which ValidateNegativeResponse cannot check
-			// yet: the delegation may be insecure, and nothing says it is not.
-			name: "NSEC3 denial",
+			// A signed NSEC3 denial that neither matches kid nor holds a closest
+			// encloser proof for it proves nothing about kid (nsec3CutProof).
+			name: "NSEC3 denial proving nothing about kid",
 			proof: func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []*core.RRset {
 				return []*core.RRset{k.sign(t, soaFor(t, secZone)),
 					k.sign(t, rrFrom(t, "2vptu5timamqttgl4luu9kg21e0aor3s."+secZone+" 300 IN NSEC3 1 0 0 - 2vptu5timamqttgl4luu9kg21e0aor3t NS RRSIG"))}
 			},
-			want: ValidationStateIndeterminate,
+			want: ValidationStateBogus,
+		},
+		{
+			// A proof of no DS signed with a key secZone does not have validates
+			// Indeterminate, which anyone can make.
+			name: "denial signed with a stray key",
+			proof: func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []*core.RRset {
+				return []*core.RRset{k.sign(t, soaFor(t, secZone)),
+					strayKey(t, secZone).sign(t, rrFrom(t, secKid+" 300 IN NSEC "+secWWW+" NS RRSIG NSEC"))}
+			},
+			want: ValidationStateBogus,
 		},
 	}
 	for _, c := range cases {
