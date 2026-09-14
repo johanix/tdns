@@ -162,7 +162,14 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 	}
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 
-	scanner := NewScanner(authqueryq, true, true)
+	// Quiet by default. A poll round scans every child with a DS, and the scan
+	// functions narrate every step to scanner.Log, with RRset dumps when Debug is
+	// set. What a scan decided is logged once per scan instead
+	// (scanChildAndApply). scanner.verbose brings the narration back, and
+	// scanner.debug adds the RRset dumps. Read at startup: a change needs a
+	// restart.
+	debug := viper.GetBool("scanner.debug")
+	scanner := NewScanner(authqueryq, debug || viper.GetBool("scanner.verbose"), debug)
 	scanner.Options = viper.GetStringSlice("scanner.options")
 	scanner.AtApexChecks = viper.GetInt("scanner.at-apex.checks")
 	if scanner.AtApexChecks < 1 {
@@ -178,6 +185,11 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 	scanner.AddLogger("CSYNC")
 	scanner.AddLogger("DNSKEY")
 	scanner.AddLogger("GENERIC")
+	if !scanner.Verbose {
+		for rrtype := range scanner.Log {
+			scanner.Log[rrtype] = discardLog
+		}
+	}
 
 	// Wire callback to apply delegation changes via CHILD-UPDATE.
 	// Handles both CDS (DS adds/removes) and CSYNC (NS/glue adds/removes).
