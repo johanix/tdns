@@ -234,7 +234,9 @@ func (rrcache *RRsetCacheT) evictOldestRRset() {
 
 // FlushDomain removes cached RRsets at or below the provided domain.
 // When keepStructural is true, NS/DS/DNSKEY RRsets and the address
-// records for their nameservers are preserved.
+// records for their nameservers are preserved. When it is false, the
+// validation states of the zones at or below the domain go as well; see
+// forgetZoneStates.
 func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int, error) {
 	if rrcache == nil {
 		return 0, fmt.Errorf("rrcache is nil")
@@ -283,6 +285,10 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 	}
 	removed := len(keysToRemove)
 
+	if !keepStructural {
+		rrcache.forgetZoneStates(domain)
+	}
+
 	if !keepStructural && removed > 0 {
 		var auxKeys []string
 		for item := range rrcache.Servers.IterBuffered() {
@@ -308,7 +314,9 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 }
 
 // FlushAll removes all cached data except root zone priming data (NS for ".",
-// root server A/AAAA records). Returns the number of RRsets removed.
+// root server A/AAAA records), along with the validation state of every zone
+// without a trust anchor (see forgetZoneStates). Returns the number of RRsets
+// removed.
 func (rrcache *RRsetCacheT) FlushAll() int {
 	if rrcache == nil {
 		return 0
@@ -376,7 +384,51 @@ func (rrcache *RRsetCacheT) FlushAll() int {
 		rrcache.ServerMap.Remove(key)
 	}
 
+	rrcache.forgetZoneStates(".")
+
 	return len(keysToRemove)
+}
+
+// forgetZoneStates drops the validation state, and with it the address
+// backoffs, of every zone at or below domain ("." for all of them), except the
+// zones holding a configured trust anchor, whose state is configuration rather
+// than something learned. The next query into a dropped zone learns its state
+// from the chain again, as after a restart.
+//
+// That is what a flush is for. A zone's state is drawn from the data being
+// flushed -- the referral without a DS, the DNSKEY fetch that failed -- and kept
+// past it, the resolver goes on acting on a verdict about data it no longer
+// holds, and flushing changes nothing (#636).
+func (rrcache *RRsetCacheT) forgetZoneStates(domain string) {
+	anchored := rrcache.trustAnchorZones()
+	var keys []string
+	for item := range rrcache.ZoneMap.IterBuffered() {
+		if !isSubdomainOf(item.Key, domain) {
+			continue
+		}
+		if _, ok := anchored[core.CanonicalizeName(item.Key)]; ok {
+			continue
+		}
+		keys = append(keys, item.Key)
+	}
+	for _, key := range keys {
+		rrcache.ZoneMap.Remove(key)
+	}
+}
+
+// trustAnchorZones returns the canonical names of the zones with a trust anchor
+// in the DNSKEY cache.
+func (rrcache *RRsetCacheT) trustAnchorZones() map[string]struct{} {
+	zones := map[string]struct{}{}
+	if rrcache.DnskeyCache == nil {
+		return zones
+	}
+	for item := range rrcache.DnskeyCache.Map.IterBuffered() {
+		if item.Val.TrustAnchor {
+			zones[core.CanonicalizeName(item.Val.Name)] = struct{}{}
+		}
+	}
+	return zones
 }
 
 func isStructuralRRset(cr *CachedRRset, nsHosts map[string]struct{}) bool {

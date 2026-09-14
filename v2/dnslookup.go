@@ -2793,8 +2793,9 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 				return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err
 			}
 		}
-		// XXX: ValidateRRset *must* return one of secure or indeterminate. There is
-		// a DS, so insecure or none should not be possible.
+		// A signed DS validates Secure or Indeterminate, or Insecure when the
+		// parent is insecure: a DS is the parent's data. An unsigned one stays
+		// None.
 		imr.noteDSEncountered(dsRRs)
 		imr.Cache.Set(zonename, dns.TypeDS, &cache.CachedRRset{
 			Name:       zonename,
@@ -2817,8 +2818,16 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		switch vstate {
 		case cache.ValidationStateSecure, cache.ValidationStateIndeterminate:
 			z.SetState(vstate)
+		case cache.ValidationStateInsecure:
+			// The parent is insecure, so the child is, unless the child is
+			// already Secure: below an insecure parent that takes a trust
+			// anchor of its own. This used to be logged as impossible, leaving
+			// the zone as it was (#636).
+			if z.GetState() != cache.ValidationStateSecure {
+				z.SetState(vstate)
+			}
 		default:
-			lgDns.Debug("handleReferral: ERROR (should not happen): invalid DS validation state", "state", vstate)
+			lgDns.Debug("handleReferral: DS validation state leaves the zone state as it was", "zone", zonename, "state", vstate)
 		}
 		imr.Cache.ZoneMap.Set(zonename, z)
 	}
