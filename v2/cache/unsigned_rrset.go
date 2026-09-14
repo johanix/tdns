@@ -292,15 +292,27 @@ func (rrcache *RRsetCacheT) denialEvidence(ctx context.Context, name string, crr
 // (judgedZone) is held Secure. What that zone says about name is signed, and a
 // signature whose chain cannot be followed there is an attacker's as easily as a
 // missing one.
+//
+// Only zones held Secure, Insecure or Bogus are looked at, the root included. One
+// held Indeterminate, or with no state, cannot change the answer: judgedZone
+// counts it only when nothing above it is Secure, and then it is not Secure
+// either. Asking judgedZone about each zone instead made the two call each other:
+// over again for every zone above, doubling the work with each label, and for
+// ever at the root, which is its own parent -- a root held Indeterminate
+// overflowed the stack.
 func (rrcache *RRsetCacheT) parentSideSecure(name string) bool {
-	for n := parentOf(dns.Fqdn(name)); ; n = parentOf(n) {
-		if zone, ok := rrcache.ZoneMap.Get(n); ok && rrcache.judgedZone(n, zone) {
-			return zone.GetState() == ValidationStateSecure
-		}
-		if n == "." {
-			return false
+	for n := dns.Fqdn(name); n != "."; {
+		n = parentOf(n)
+		if zone, ok := rrcache.ZoneMap.Get(n); ok && zone != nil {
+			switch zone.GetState() {
+			case ValidationStateSecure:
+				return true
+			case ValidationStateInsecure, ValidationStateBogus:
+				return false
+			}
 		}
 	}
+	return false
 }
 
 // signedFromAbove returns set carrying only the signatures made by a zone above

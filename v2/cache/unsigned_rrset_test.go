@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -492,6 +493,69 @@ func TestAnUnsignedDenialFromASecureZoneWhoseDSIsGoneIsInsecure(t *testing.T) {
 		pk.sign(t, rrFrom(t, secZone+" 300 IN NSEC zzz."+parent+" NS RRSIG NSEC")))
 	if state := validateDenial(t, rrcache, secWWW, dns.TypeA, nil, unsigned(soaFor(t, secZone))); state != ValidationStateInsecure {
 		t.Fatalf("DS disproved: state %s, want insecure", ValidationStateToString[state])
+	}
+}
+
+// The root is its own parent. Whether a zone held Indeterminate decides for the
+// names below it depends on whether its parent side is Secure, and that question
+// asked about the root asked about the root again, for ever: a root held
+// Indeterminate -- what the validator writes when it cannot anchor the root's
+// keys, as on a resolver without a trust anchor -- overflowed the stack.
+func TestAnIndeterminateRootIsNotItsOwnParent(t *testing.T) {
+	rrcache := negCache(t)
+	rrcache.ZoneMap.Set(".", &Zone{ZoneName: ".", State: ValidationStateIndeterminate})
+	rrcache.ZoneMap.Set("example.", &Zone{ZoneName: "example.", State: ValidationStateIndeterminate})
+	if state := validateUnsigned(t, rrcache, "www.example. 300 IN A 192.0.2.1", nil); state != ValidationStateIndeterminate {
+		t.Fatalf("state %s, want indeterminate", ValidationStateToString[state])
+	}
+}
+
+// Whether the parent side of a name is Secure was worked out again for every
+// zone above it, and again for every zone above each of those: the work doubled
+// with each label of zones held Indeterminate.
+func TestParentSideSecureIsLinearInTheLabels(t *testing.T) {
+	rrcache := negCache(t)
+	rrcache.ZoneMap.Set(secZone, &Zone{ZoneName: secZone, State: ValidationStateSecure})
+	name := secZone
+	for i := 0; i < 40; i++ {
+		name = "l" + strconv.Itoa(i) + "." + name
+		rrcache.ZoneMap.Set(name, &Zone{ZoneName: name, State: ValidationStateIndeterminate})
+	}
+	done := make(chan bool, 1)
+	go func() { done <- rrcache.parentSideSecure("www." + name) }()
+	select {
+	case secure := <-done:
+		if !secure {
+			t.Fatalf("the parent side of a name below secure zone %s is not secure", secZone)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("parentSideSecure did not answer within 5s for 40 labels of zones held indeterminate")
+	}
+}
+
+// The root is looked at too, not only the zones below it. A TLD held Secure
+// whose DS now comes back with a chain that cannot be followed -- signed by a
+// root key nobody holds -- has a Secure root above it, so that answer is bogus,
+// not a reason to serve the TLD's unsigned data.
+func TestAChainGapBelowASecureRootIsBogus(t *testing.T) {
+	const tld = "tld."
+	rrcache := negCache(t)
+	rrcache.ZoneMap.Set(".", &Zone{ZoneName: ".", State: ValidationStateSecure})
+	rrcache.ZoneMap.Set(tld, &Zone{ZoneName: tld, State: ValidationStateSecure})
+	ds := rrFrom(t, tld+" 300 IN DS 4242 15 2 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF")
+	rrcache.Set(tld, dns.TypeDS, &CachedRRset{Name: tld, RRtype: dns.TypeDS, Context: ContextReferral,
+		State: ValidationStateIndeterminate, Expiration: time.Now().Add(5 * time.Minute),
+		RRset: &core.RRset{Name: tld, Class: dns.ClassINET, RRtype: dns.TypeDS, RRs: []dns.RR{ds},
+			RRSIGs: []dns.RR{&dns.RRSIG{
+				Hdr:         dns.RR_Header{Name: tld, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 300},
+				TypeCovered: dns.TypeDS, Algorithm: dns.ED25519, Labels: 1, OrigTtl: 300,
+				Inception:  uint32(time.Now().Add(-time.Hour).Unix()),
+				Expiration: uint32(time.Now().Add(time.Hour).Unix()),
+				KeyTag:     4243, SignerName: ".", Signature: "AAAA",
+			}}}})
+
+	if state := validateUnsigned(t, rrcache, tld+" 300 IN MX 10 mail."+tld, nil); state != ValidationStateBogus {
+		t.Fatalf("state %s, want bogus: the root above the TLD is held secure", ValidationStateToString[state])
 	}
 }
 

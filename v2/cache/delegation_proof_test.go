@@ -231,6 +231,25 @@ func TestReferralChildStateTakesTheParentsState(t *testing.T) {
 			withZone(secZone, state)(t, rrcache)
 		}
 	}
+	// The root is where every walk up ends. The validator enters it as
+	// Indeterminate itself, on a resolver with no trust anchor, when it cannot
+	// anchor the root's DNSKEYs.
+	withRoot := func(state ValidationState, anchored bool) func(*testing.T, *RRsetCacheT) {
+		return func(t *testing.T, rrcache *RRsetCacheT) {
+			if anchored {
+				newZoneKey(t, rrcache, ".", true)
+			}
+			rrcache.ZoneMap.Set(".", &Zone{ZoneName: ".", State: state})
+			rrcache.ServerMap.Set(".", map[string]*AuthServer{"a.root-servers.net.": NewAuthServer("a.root-servers.net.")})
+		}
+	}
+	both := func(setups ...func(*testing.T, *RRsetCacheT)) func(*testing.T, *RRsetCacheT) {
+		return func(t *testing.T, rrcache *RRsetCacheT) {
+			for _, s := range setups {
+				s(t, rrcache)
+			}
+		}
+	}
 	cases := []struct {
 		name      string
 		setup     func(t *testing.T, rrcache *RRsetCacheT)
@@ -247,6 +266,11 @@ func TestReferralChildStateTakesTheParentsState(t *testing.T) {
 		{"bogus parent", withZone(secZone, ValidationStateBogus), ValidationStateNone, false, false},
 		{"unjudged parent below a secure zone", belowSecure(ValidationStateNone), ValidationStateNone, false, true},
 		{"indeterminate parent below a secure zone", belowSecure(ValidationStateIndeterminate), ValidationStateNone, false, true},
+		{"root held indeterminate, no trust anchor", withRoot(ValidationStateIndeterminate, false), ValidationStateIndeterminate, true, false},
+		{"indeterminate parent below an indeterminate root",
+			both(withRoot(ValidationStateIndeterminate, false), withZone(secZone, ValidationStateIndeterminate)), ValidationStateIndeterminate, true, false},
+		{"indeterminate parent below a secure root",
+			both(withRoot(ValidationStateSecure, true), withZone(secZone, ValidationStateIndeterminate)), ValidationStateNone, false, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

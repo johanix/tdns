@@ -2718,6 +2718,18 @@ func collectDSFromAuthority(authority []dns.RR, zonename string) (dsRRs, dsSigs 
 	return dsRRs, dsSigs
 }
 
+// zoneHasVerdict reports whether a ZoneMap entry holds a validation verdict. An
+// entry made before its zone was judged holds none, and an Indeterminate state
+// reads as none once it has stood for cache.ZoneStateRecheck.
+func zoneHasVerdict(z *cache.Zone) bool {
+	switch z.GetState() {
+	case cache.ValidationStateSecure, cache.ValidationStateInsecure,
+		cache.ValidationStateIndeterminate, cache.ValidationStateBogus:
+		return true
+	}
+	return false
+}
+
 func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, transport core.Transport, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	if Globals.Debug && !imr.Quiet {
 		imr.Cache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
@@ -2793,8 +2805,9 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 				return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err
 			}
 		}
-		// XXX: ValidateRRset *must* return one of secure or indeterminate. There is
-		// a DS, so insecure or none should not be possible.
+		// A signed DS validates Secure or Indeterminate, or Insecure when the
+		// parent is insecure: a DS is the parent's data. An unsigned one stays
+		// None.
 		imr.noteDSEncountered(dsRRs)
 		imr.Cache.Set(zonename, dns.TypeDS, &cache.CachedRRset{
 			Name:       zonename,
@@ -2822,13 +2835,21 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		}
 	}
 	// A child the referral has not made Secure is entered as its parent proves
-	// it (ReferralChildState). This used to be Insecure whenever the resolver
-	// held any trust anchor, so a referral with its DS stripped turned DNSSEC off
-	// for the child.
+	// it (ReferralChildState), and so is one whose entry holds no verdict: an
+	// Indeterminate state reads as none once it has stood for ZoneStateRecheck.
+	// This used to be Insecure whenever the resolver held any trust anchor, so a
+	// referral with its DS stripped turned DNSSEC off for the child. A DS that
+	// validated Insecure is decided the same way, by the parent's own state:
+	// that verdict alone comes as easily from an RRSIG that merely names a zone
+	// held Insecure as its signer.
 	if nsRRset != nil && zonename != "" && len(nsRRset.RRs) > 0 {
-		if _, exists := imr.Cache.ZoneMap.Get(zonename); !exists {
+		if z, exists := imr.Cache.ZoneMap.Get(zonename); !exists || !zoneHasVerdict(z) {
 			if state, ok := imr.Cache.ReferralChildState(ctx, zonename, r.Ns, imr.IterativeDNSQueryFetcher()); ok {
-				imr.Cache.ZoneMap.SetIfAbsent(zonename, &cache.Zone{ZoneName: zonename, State: state})
+				if exists {
+					z.SetState(state)
+				} else {
+					imr.Cache.ZoneMap.SetIfAbsent(zonename, &cache.Zone{ZoneName: zonename, State: state})
+				}
 			}
 		}
 	}

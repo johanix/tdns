@@ -206,6 +206,7 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		Min: conf.Imr.Tuning.CacheMinTTL,
 		Max: conf.Imr.Tuning.CacheMaxTTL,
 	})
+	cache.SetZoneStateRecheck(conf.Imr.Tuning.ZoneStateRecheck)
 	imr := &Imr{
 		Cache:                   rrcache,
 		DnskeyCache:             rrcache.DnskeyCache,
