@@ -380,4 +380,29 @@ func TestAChainGapBelowASecureRootIsBogus(t *testing.T) {
 	}
 }
 
+// A DS that validates Insecure below a zone held Secure is no reason to serve
+// unsigned data. An RRSIG earns that verdict unverified by naming a signer the
+// resolver holds as Insecure -- here the parent of a zone held Secure under its
+// own trust anchor, which is an ancestor of the DS and so a signer it could
+// have. The zone above the DS is Secure and signs what it serves: bogus.
+func TestADSThatValidatedInsecureBelowASecureZoneIsBogus(t *testing.T) {
+	rrcache, _ := secCache(t)
+	rrcache.ZoneMap.Set("example.", &Zone{ZoneName: "example.", State: ValidationStateInsecure})
+	ds := rrFrom(t, secKid+" 300 IN DS 4242 15 2 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF")
+	rrcache.Set(secKid, dns.TypeDS, &CachedRRset{Name: secKid, RRtype: dns.TypeDS, Context: ContextAnswer,
+		Expiration: time.Now().Add(5 * time.Minute),
+		RRset: &core.RRset{Name: secKid, Class: dns.ClassINET, RRtype: dns.TypeDS, RRs: []dns.RR{ds},
+			RRSIGs: []dns.RR{&dns.RRSIG{
+				Hdr:         dns.RR_Header{Name: secKid, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 300},
+				TypeCovered: dns.TypeDS, Algorithm: dns.ED25519, Labels: 3, OrigTtl: 300,
+				Inception:  uint32(time.Now().Add(-time.Hour).Unix()),
+				Expiration: uint32(time.Now().Add(time.Hour).Unix()),
+				KeyTag:     1, SignerName: "example.", Signature: "AAAA",
+			}}}})
+
+	if state := validateUnsigned(t, rrcache, kidWWW+" 300 IN A 192.0.2.2", nil); state != ValidationStateBogus {
+		t.Fatalf("state %s, want bogus: the DS below secure zone %s validated insecure", ValidationStateToString[state], secZone)
+	}
+}
+
 func ptr[T any](v T) *T { return &v }

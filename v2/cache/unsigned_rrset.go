@@ -167,15 +167,17 @@ var evidenceToString = map[cutEvidence]string{
 //   - An NSEC3 denial is read the same way (nsec3CutProof): a matching NSEC3, or
 //     an Opt-Out span covering name, proves an insecure delegation.
 //   - A proof over maxNSEC3Iterations cannot be judged, nor can a DS that
-//     validated Insecure, nor an answer whose chain could not be followed when
-//     the zone above name is not held Secure either.
+//     validated Insecure or Indeterminate when the zone above name is not held
+//     Secure either.
 //   - Everything else is bogus. The parent side of name lies inside the signed
 //     tree, so its answer is signed: an unsigned denial is a stripped one, or
 //     the child's own, which proves nothing about the parent side (RFC 6840
 //     section 4.4). A signed answer whose chain cannot be followed below a
 //     Secure zone counts the same -- a signature by a key the zone does not
-//     have validates Indeterminate -- and so does no answer at all, because
-//     whoever can strip the signatures can as easily drop the question.
+//     have validates Indeterminate -- and so does a DS that validated Insecure
+//     there, a verdict an RRSIG earns unverified by naming a signer held
+//     Insecure. And so does no answer at all, because whoever can strip the
+//     signatures can as easily drop the question.
 func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string, fetcher RRsetFetcher) cutEvidence {
 	crr := rrcache.Get(name, dns.TypeDS)
 	if crr == nil && ctx != nil && fetcher != nil {
@@ -211,9 +213,7 @@ func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string,
 	switch state {
 	case ValidationStateSecure:
 		return evidenceSecureCut
-	case ValidationStateInsecure:
-		return evidenceUnjudged
-	case ValidationStateIndeterminate:
+	case ValidationStateInsecure, ValidationStateIndeterminate:
 		if !rrcache.parentSideSecure(name) {
 			return evidenceUnjudged
 		}
