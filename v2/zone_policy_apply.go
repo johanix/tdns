@@ -328,7 +328,7 @@ func zoneServesIntentSOASig(zd *ZoneData, intentPol *DnssecPolicy) bool {
 // zone is actually signed under them. Combined with zoneServesIntentSOASig it
 // forms the backfill eligibility predicate.
 func zoneActiveKeysMatchAlgs(kdb *KeyDB, zone string, pol *DnssecPolicy) (bool, error) {
-	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
+	active, err := GetSigningKeyRows(kdb, zone)
 	if err != nil {
 		return false, err
 	}
@@ -620,7 +620,7 @@ func zoneActiveKeyRoleChanges(kdb *KeyDB, zone string, pol *DnssecPolicy, curren
 		return true, true, nil
 	}
 
-	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
+	active, err := GetSigningKeyRows(kdb, zone)
 	if err != nil {
 		return false, false, err
 	}

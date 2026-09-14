@@ -660,6 +660,21 @@ containing either the private or the public SIG(0) key and the name of the zone.
 		},
 	}
 
+	check := &cobra.Command{
+		Use:   "check",
+		Short: "Check the key invariants (pub, sign, ds against the state and the served zone)",
+		Long: `Check the invariants of the keystore's key rows and of the served zone:
+sign implies pub and a private key, ds only on SEP keys, one signing key per
+role and algorithm, the served DNSKEY RRset equals the pub rows, the RRSIGs
+are by the sign keys, the served CDS follows the ds rows, no row lacks its
+flags, and the flags match the state. One zone with --zone, or every zone in
+the keystore. Exits non-zero when a violation is found.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			dnssecKeyMgmt(role, "check")
+		},
+	}
+	check.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to check (default: every zone in the keystore)")
+
 	export := &cobra.Command{
 		Use:   "export",
 		Short: "Export a DNSSEC key pair from the keystore as BIND-style .private/.key files",
@@ -813,7 +828,7 @@ without modifying anything. Pass --force to actually delete.`,
 
 	// auto-rollover moved to `zone dnssec auto-rollover` (auth only; agents never
 	// sign, so it was vestigial under `agent keystore dnssec`).
-	c.AddCommand(add, importCmd, generate, algorithms, policies, list, export, delete, setstate, genDS, rollover, clear, policyCleanup, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role))
+	c.AddCommand(add, importCmd, generate, algorithms, policies, list, check, export, delete, setstate, genDS, rollover, clear, policyCleanup, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role))
 	addBulkCommands(c, role, "dnssec")
 	return c
 }
@@ -1068,6 +1083,11 @@ func dnssecKeyMgmt(role, cmd string) {
 	case "clear", "policy-cleanup":
 		data.Zone = tdns.Globals.Zonename
 
+	case "check":
+		if z := strings.TrimSpace(tdns.Globals.Zonename); z != "" {
+			data.Zone = dns.Fqdn(z)
+		}
+
 	default:
 		fmt.Printf("Unknown keystore command: \"%s\"\n", cmd)
 		os.Exit(1)
@@ -1090,54 +1110,7 @@ func dnssecKeyMgmt(role, cmd string) {
 
 	switch cmd {
 	case "list":
-		type dnssecListEntry struct {
-			zone     string
-			state    string // display form, may be "[foreign]"
-			rawState string // raw state value used for sorting
-			keyid    string
-			flags    uint16
-			alg      string
-			keystr   string
-		}
-		var entries []dnssecListEntry
-		if len(tr.Dnskeys) > 0 {
-			fmt.Printf("Known DNSSEC key pairs:\n")
-			for k, v := range tr.Dnskeys {
-				tmp := strings.Split(k, "::")
-				state := v.State
-				if state == "foreign" {
-					state = "[foreign]"
-				}
-				entries = append(entries, dnssecListEntry{
-					zone: tmp[0], state: state, rawState: v.State, keyid: tmp[1],
-					flags: v.Flags, alg: v.Algorithm, keystr: v.Keystr,
-				})
-			}
-			// Sort by zone, then by raw state (so the "[foreign]"
-			// display bracket doesn't perturb order — "[" sorts
-			// before lowercase letters), then by keyid.
-			sort.Slice(entries, func(i, j int) bool {
-				if entries[i].zone != entries[j].zone {
-					return entries[i].zone < entries[j].zone
-				}
-				if entries[i].rawState != entries[j].rawState {
-					return entries[i].rawState < entries[j].rawState
-				}
-				return entries[i].keyid < entries[j].keyid
-			})
-			var out []string
-			for _, e := range entries {
-				out = append(out, fmt.Sprintf("%s|%s|%s|%d|%s|%.50s...\n",
-					e.zone, e.state, e.keyid, e.flags, e.alg, e.keystr))
-			}
-			if tdns.Globals.ShowHeaders {
-				out = append([]string{"Signer|State|KeyID|Flags|Algorithm|DNSKEY Record"}, out...)
-			}
-
-			fmt.Printf("%s\n", columnize.SimpleFormat(out))
-		} else {
-			fmt.Printf("No DNSSEC key pairs found\n")
-		}
+		fmt.Print(formatDnssecKeyList(tr.Dnskeys, tdns.Globals.ShowHeaders))
 
 	case "export":
 		if len(tr.Dnskeys) == 0 {
@@ -1159,8 +1132,27 @@ func dnssecKeyMgmt(role, cmd string) {
 		if tr.Msg != "" {
 			fmt.Printf("%s\n", tr.Msg)
 		}
+
+	case "check":
+		fmt.Print(formatKeyViolations(tr.Msg, tr.KeyViolations))
+		if len(tr.KeyViolations) > 0 {
+			os.Exit(1)
+		}
 	}
 
+}
+
+// formatKeyViolations renders "keystore dnssec check": the daemon's summary
+// and one line per violation.
+func formatKeyViolations(msg string, violations []tdns.KeyInvariantViolation) string {
+	var b strings.Builder
+	if msg != "" {
+		b.WriteString(msg + "\n")
+	}
+	for _, v := range violations {
+		b.WriteString("  " + v.String() + "\n")
+	}
+	return b.String()
 }
 
 // dnssecKeyPurgeCmd handles "keystore dnssec purge". The zone "all"
@@ -1400,4 +1392,72 @@ func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.Keystore
 	}
 
 	return kr, nil
+}
+
+// formatDnssecKeyList renders "keystore dnssec list": one line per key,
+// sorted by zone, state and keyid, with the mechanism columns pub, sign and
+// ds beside the state. A foreign key's state is shown in brackets; ds is "-"
+// while unknown.
+func formatDnssecKeyList(keys map[string]tdns.DnssecKey, showHeaders bool) string {
+	if len(keys) == 0 {
+		return "No DNSSEC key pairs found\n"
+	}
+	type entry struct {
+		zone, state, rawState, keyid string
+		flags                        uint16
+		alg, pub, sign, ds, keystr   string
+	}
+	var entries []entry
+	for k, v := range keys {
+		tmp := strings.Split(k, "::")
+		state := v.State
+		if state == "foreign" {
+			state = "[foreign]"
+		}
+		entries = append(entries, entry{
+			zone: tmp[0], state: state, rawState: v.State, keyid: tmp[1],
+			flags: v.Flags, alg: v.Algorithm, keystr: v.Keystr,
+			pub: flagColumn(v.Pub), sign: flagColumn(v.Sign), ds: dsColumn(v.DS),
+		})
+	}
+	// Sort by the raw state so the "[foreign]" bracket does not perturb it
+	// ("[" sorts before lowercase letters).
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].zone != entries[j].zone {
+			return entries[i].zone < entries[j].zone
+		}
+		if entries[i].rawState != entries[j].rawState {
+			return entries[i].rawState < entries[j].rawState
+		}
+		// Key ids are decimal: 999 before 10000.
+		ki, ei := strconv.ParseUint(entries[i].keyid, 10, 16)
+		kj, ej := strconv.ParseUint(entries[j].keyid, 10, 16)
+		if ei != nil || ej != nil {
+			return entries[i].keyid < entries[j].keyid
+		}
+		return ki < kj
+	})
+	var out []string
+	for _, e := range entries {
+		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%s|%.50s...\n",
+			e.zone, e.state, e.pub, e.sign, e.ds, e.keyid, e.flags, e.alg, e.keystr))
+	}
+	if showHeaders {
+		out = append([]string{"Signer|State|Pub|Sign|DS|KeyID|Flags|Algorithm|DNSKEY Record"}, out...)
+	}
+	return "Known DNSSEC key pairs:\n" + columnize.SimpleFormat(out) + "\n"
+}
+
+func flagColumn(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+func dsColumn(b *bool) string {
+	if b == nil {
+		return "-"
+	}
+	return flagColumn(*b)
 }

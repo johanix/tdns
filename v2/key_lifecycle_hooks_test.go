@@ -347,9 +347,21 @@ func TestForeignAndStagedKeysAreServedAndNeverSign(t *testing.T) {
 		t.Fatalf("GenerateKeyMaterial: %v", err)
 	}
 	foreignTag := foreign.DnskeyRR.KeyTag()
-	if _, err := kdb.DB.Exec(`INSERT INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags, creator, privatekey, keyrr) VALUES (?, 'foreign', ?, ?, 256, 'test', '', ?)`,
-		zd.ZoneName, foreignTag, dns.AlgorithmToString[dns.ED25519], foreign.DnskeyRR.String()); err != nil {
+	// Written as an owner writes a foreign row: through InsertKeyRowTx, so
+	// the row carries pub from its state.
+	tx, err := kdb.Begin("foreign")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := InsertKeyRowTx(tx, KeyRow{
+		Zone: zd.ZoneName, State: DnskeyStateForeign, Keyid: foreignTag, Flags: 256,
+		Algorithm: dns.AlgorithmToString[dns.ED25519], Creator: "test", KeyRR: foreign.DnskeyRR.String(),
+	}); err != nil {
+		tx.Rollback()
 		t.Fatalf("insert foreign row: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 	stagedTag := genKey(t, kdb, zd.ZoneName, "mpdist", "ZSK")
 

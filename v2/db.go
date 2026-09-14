@@ -190,6 +190,16 @@ WHERE policy IS NOT NULL AND policy != ''
 			lgConfig.Error("data migration: seed applied_policy from CLI overrides failed", "err", err)
 		}
 	}
+
+	// The key columns (keyrow.go): pub and sign follow from the state for
+	// every row that has them unset. Last, after the state rewrites above,
+	// and at every open, so a row an older binary wrote without them gets
+	// them back (design R2).
+	if n, err := backfillKeyRowFlags(db); err != nil {
+		lgConfig.Error("data migration: deriving the key columns from the states failed", "err", err)
+	} else if n > 0 {
+		lgConfig.Info("data migration: derived pub and sign from the state for key rows that lacked them", "rows", n)
+	}
 }
 
 // dbMigrateSchema adds columns that may be missing from tables created by older schema versions.
@@ -206,6 +216,13 @@ func dbMigrateSchema(db *sql.DB) {
 		// ZSK active_seq: monotonic per-key roll counter (operator feedback),
 		// MAX(active_seq)+1 over the zone's ZSK rows, stamped at standby→active.
 		{"DnssecKeyStore", "active_seq", "ALTER TABLE DnssecKeyStore ADD COLUMN active_seq INTEGER"},
+		// The mechanism columns beside the lifecycle state (keyrow.go): pub
+		// and sign are derived from the state for every row that lacks them
+		// at each open (dbMigrateData); ds stays NULL, "unknown", until the
+		// state machine that owns the zone writes it.
+		{"DnssecKeyStore", "pub", "ALTER TABLE DnssecKeyStore ADD COLUMN pub INTEGER"},
+		{"DnssecKeyStore", "sign", "ALTER TABLE DnssecKeyStore ADD COLUMN sign INTEGER"},
+		{"DnssecKeyStore", "ds", "ALTER TABLE DnssecKeyStore ADD COLUMN ds INTEGER"},
 		{"Sig0KeyStore", "parent_state", "ALTER TABLE Sig0KeyStore ADD COLUMN parent_state INTEGER DEFAULT 0"},
 		// Where a delegation row came from: 'asserted' by the child over a
 		// delegation-sync channel, or 'observed' in the served zone by the
@@ -395,6 +412,11 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 	// Prime the empty-ledger fast path the signal-name reconciler consults on
 	// every zone refresh (db_signal_publication.go).
 	kdb.RefreshSignalLedgerEmpty()
+	// The key columns must say what the states say (design R1).
+	if err := kdb.checkKeyColumnsAtOpen(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return kdb, nil
 }
 

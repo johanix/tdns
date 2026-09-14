@@ -265,12 +265,8 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		return nil, "", err
 	}
 
-	const (
-		addSig0KeySql = `
+	const addSig0KeySql = `
 INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
-		addDnssecKeySql = `
-INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	)
 
 	// When tx != nil (external), the caller must republishSigningKeysForZone
 	// after their Commit if the active set may have changed (R1). When tx == nil
@@ -305,14 +301,18 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 		if keytype == "ZSK" {
 			flags = 256
 		}
-		// pkc.PrivateKey should already be in PEM format from above
-		_, err = tx.Exec(addDnssecKeySql, owner, state, pkc.KeyId,
-			dns.AlgorithmToString[pkc.Algorithm], flags, creator, pkc.PrivateKey, pkc.DnskeyRR.String())
-		if err == nil && state == DnskeyStateActive {
-			now := time.Now().UTC().Format(time.RFC3339)
-			_, err = tx.Exec(`UPDATE DnssecKeyStore SET active_at=? WHERE zonename=? AND keyid=?`,
-				now, owner, pkc.KeyId)
+		// pkc.PrivateKey should already be in PEM format from above. The
+		// row's pub and sign follow from its state; a key minted active is
+		// active from now.
+		row := KeyRow{
+			Zone: owner, State: state, Keyid: pkc.KeyId, Flags: uint16(flags),
+			Algorithm: dns.AlgorithmToString[pkc.Algorithm], Creator: creator,
+			PrivateKey: pkc.PrivateKey, KeyRR: pkc.DnskeyRR.String(), Replace: true,
 		}
+		if state == DnskeyStateActive {
+			row.ActiveAt = time.Now().UTC().Format(time.RFC3339)
+		}
+		err = insertKeyRowTx(tx, row)
 	}
 	if err != nil {
 		lgDns.Error("GenerateKeypair: error storing key in keystore", "err", err)

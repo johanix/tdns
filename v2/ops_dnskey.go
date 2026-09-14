@@ -10,26 +10,80 @@ import (
 	"github.com/miekg/dns"
 )
 
-// FetchZoneDnskeysSql is the canonical SQL for "DNSKEYs that belong in
-// the served zone DNSKEY RRset, as built from the keystore." Both
-// PublishDnskeyRRs (sign-time RRset construction) and CollectDynamicRRs
-// (refresh-time snapshot) must use this exact predicate so the two
-// build identical sets — divergence between them would produce a
-// brief window after refresh where standby DNSKEYs disappear from
-// the served RRset until the next SignZone call.
-//
-// The set is `published` ∪ `standby` ∪ `retired` ∪ `mpdist` ∪ `foreign`.
-// Active keys are fetched separately via GetDnssecKeys(..., DnskeyStateActive).
-//
-// The last two are states a derived application stages keys into through
-// the key lifecycle hooks (KeyLifecycleHooks): `mpdist`, a key of this
-// zone's that is served ahead of its promotion and is released by its owner,
-// and `foreign`, a DNSKEY that is served here but was generated elsewhere and
-// has no private half. tdns attaches no meaning to either beyond "served":
-// neither is ever loaded as a signing key (that is loadDnssecKeysFromDB with
-// state active), and neither moves on the worker's timers.
+// FetchZoneDnskeysSql is the canonical SQL for "DNSKEYs that belong in the
+// served zone DNSKEY RRset, as built from the keystore": the rows with pub
+// set (design D3). Whatever state a row is in, tdns's own or an owner's, the
+// column says whether the key is served; the signing keys are among them.
+// Both PublishDnskeyRRs (sign-time RRset construction) and CollectDynamicRRs
+// (refresh-time snapshot) build the set through servedDnskeyRRs, so the two
+// cannot drift apart -- a divergence would produce a brief window after
+// refresh where standby DNSKEYs disappear from the served RRset until the
+// next SignZone call.
 const FetchZoneDnskeysSql = `
-SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='standby' OR state='retired' OR state='mpdist' OR state='foreign')`
+SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND pub=1`
+
+// servedDnskeyRRs is the zone's DNSKEY RRset as the keystore says it should
+// be: the pub=1 rows, plus the signing keys the caller holds in dak (every
+// signing key has pub set, so these only add a key the caller minted and the
+// database does not show yet), without duplicates.
+func servedDnskeyRRs(kdb *KeyDB, zone string, dak *DnssecKeys) ([]dns.RR, error) {
+	var out []dns.RR
+	seen := map[string]bool{}
+	add := func(rr dns.RR) {
+		id := dnskeyIdentity(rr)
+		if seen[id] {
+			return
+		}
+		seen[id] = true
+		out = append(out, rr)
+	}
+	if dak != nil {
+		for _, ksk := range dak.KSKs {
+			add(dns.RR(&ksk.DnskeyRR))
+		}
+		for _, zsk := range dak.ZSKs {
+			// A ZSK with flags 257 is the KSK reused as CSK, already added.
+			if zsk.DnskeyRR.Flags == 257 {
+				continue
+			}
+			add(dns.RR(&zsk.DnskeyRR))
+		}
+	}
+	rows, err := kdb.Query(FetchZoneDnskeysSql, zone)
+	if err != nil {
+		return nil, fmt.Errorf("servedDnskeyRRs: query the keystore for %s: %w", zone, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var keyid, flags, algorithm, keyrr string
+		if err := rows.Scan(&keyid, &flags, &algorithm, &keyrr); err != nil {
+			return nil, fmt.Errorf("servedDnskeyRRs: scan a key row of %s: %w", zone, err)
+		}
+		rr, err := dns.NewRR(keyrr)
+		if err != nil {
+			return nil, fmt.Errorf("servedDnskeyRRs: %s keyid %s: parse the stored DNSKEY: %w", zone, keyid, err)
+		}
+		if _, ok := rr.(*dns.DNSKEY); !ok {
+			lgHandler.Error("servedDnskeyRRs: stored key row is not a DNSKEY", "zone", zone, "keyid", keyid, "rrtype", dns.TypeToString[rr.Header().Rrtype])
+			continue
+		}
+		add(rr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("servedDnskeyRRs: iterate the key rows of %s: %w", zone, err)
+	}
+	return out, nil
+}
+
+// dnskeyIdentity identifies a DNSKEY by what makes it the same key: flags,
+// protocol, algorithm and public key, not TTL or owner case.
+func dnskeyIdentity(rr dns.RR) string {
+	dk, ok := rr.(*dns.DNSKEY)
+	if !ok {
+		return rr.String()
+	}
+	return fmt.Sprintf("%d %d %d %s", dk.Flags, dk.Protocol, dk.Algorithm, dk.PublicKey)
+}
 
 func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
@@ -56,55 +110,13 @@ func (zd *ZoneData) publishDnskeyRRsLocked(dak *DnssecKeys) error {
 		oldSEP = sepKeyIdentities(apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs)
 	}
 
-	// Ensure that all active DNSKEYs are included in the DNSKEY RRset
-	// XXX: Note that here we do not judge whether some other DNSKEY shouldn't
-	// be part of the DNSKEY RRset. We just include all active DNSKEYs.
-	var publishkeys []dns.RR
-	for _, ksk := range dak.KSKs {
-		zd.Logger.Printf("PublishDnskeyRRs: ksk: %v", ksk.DnskeyRR.String())
-		publishkeys = append(publishkeys, dns.RR(&ksk.DnskeyRR))
-	}
-	for _, zsk := range dak.ZSKs {
-		zd.Logger.Printf("PublishDnskeyRRs: zsk: %v", zsk.DnskeyRR.String())
-		// If a ZSK has flags = 257 then it is a clone of a KSK and should not be included twice
-		if zsk.DnskeyRR.Flags == 257 {
-			continue
-		}
-		publishkeys = append(publishkeys, dns.RR(&zsk.DnskeyRR))
-	}
-
-	zd.Logger.Printf("PublishDnskeyRRs: there are %d active KSKs and %d active ZSKs", len(dak.KSKs), len(dak.ZSKs))
-	zd.Logger.Printf("PublishDnskeyRRs: publishkeys (active): %v", publishkeys)
-
-	rows, err := zd.KeyDB.Query(FetchZoneDnskeysSql, zd.ZoneName)
+	// The served set is the keystore's pub=1 rows plus whatever signing keys
+	// the caller holds; see servedDnskeyRRs. Nothing here judges which keys
+	// belong: the columns do.
+	zd.Logger.Printf("PublishDnskeyRRs: there are %d signing KSKs and %d signing ZSKs", len(dak.KSKs), len(dak.ZSKs))
+	publishkeys, err := servedDnskeyRRs(zd.KeyDB, zd.ZoneName, dak)
 	if err != nil {
-		lgHandler.Error("PublishDnskeyRRs: error querying DNSKEY store", "zone", zd.ZoneName, "err", err)
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var keyid, flags, algorithm string
-		var keyrr string
-		err = rows.Scan(&keyid, &flags, &algorithm, &keyrr)
-		if err != nil {
-			lgHandler.Error("PublishDnskeyRRs: error scanning DNSKEY row", "err", err)
-			return err
-		}
-
-		rr, err := dns.NewRR(keyrr)
-		if err != nil {
-			lgHandler.Error("PublishDnskeyRRs: error creating dns.RR from keyrr", "err", err)
-			return err
-		}
-		if _, ok := rr.(*dns.DNSKEY); !ok {
-			lgHandler.Error("PublishDnskeyRRs: parsed RR is not a DNSKEY", "rrtype", dns.TypeToString[rr.Header().Rrtype], "keyrr", keyrr)
-			continue
-		}
-		publishkeys = append(publishkeys, rr)
-	}
-	if err = rows.Err(); err != nil {
-		lgHandler.Error("PublishDnskeyRRs: rows iteration error", "err", err)
+		lgHandler.Error("PublishDnskeyRRs: error building the DNSKEY RRset from the keystore", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 
