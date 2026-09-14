@@ -181,6 +181,23 @@ func fixtureTransition(t *testing.T, kdb *KeyDB, zone string, keyid uint16, stat
 
 func keyFixturePath(name string) string { return filepath.Join("testdata", "keyfixtures", name+".sql") }
 
+// fixtureHasKeyColumns reports whether a dump's DnssecKeyStore already has
+// the key columns: such a dump is post-migration and proves nothing.
+func fixtureHasKeyColumns(dump string) bool {
+	i := strings.Index(dump, "CREATE TABLE 'DnssecKeyStore'")
+	if i < 0 {
+		i = strings.Index(dump, "CREATE TABLE DnssecKeyStore")
+	}
+	if i < 0 {
+		return false
+	}
+	ddl := dump[i:]
+	if j := strings.Index(ddl, ";\n"); j >= 0 {
+		ddl = ddl[:j]
+	}
+	return strings.Contains(ddl, "\npub ") || strings.Contains(ddl, "\nsign ") || strings.Contains(ddl, "\nds ")
+}
+
 // TestWriteKeyFixtures regenerates the fixtures. Skipped unless asked for.
 func TestWriteKeyFixtures(t *testing.T) {
 	if os.Getenv("TDNS_WRITE_KEY_FIXTURES") == "" {
@@ -198,6 +215,9 @@ func TestWriteKeyFixtures(t *testing.T) {
 		fx.build(t, kdb, fx.zone)
 		dump := dumpKeyFixture(t, kdb)
 		kdb.Close()
+		if fixtureHasKeyColumns(dump) {
+			t.Fatalf("%s: the dump carries the pub/sign/ds columns, so it would not exercise the migration; generate the fixtures from the code before the columns (the tests-first commit of S1a)", fx.name)
+		}
 		if err := os.WriteFile(keyFixturePath(fx.name), []byte(dump), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -273,6 +293,9 @@ func loadKeyFixture(t *testing.T, name string) *KeyDB {
 	script, err := os.ReadFile(keyFixturePath(name))
 	if err != nil {
 		t.Fatalf("fixture %s: %v (regenerate with TDNS_WRITE_KEY_FIXTURES=1)", name, err)
+	}
+	if fixtureHasKeyColumns(string(script)) {
+		t.Fatalf("fixture %s already carries the pub/sign/ds columns and cannot exercise the migration", name)
 	}
 	f := filepath.Join(t.TempDir(), name+".db")
 	raw, err := sql.Open("sqlite3", f)

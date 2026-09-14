@@ -1429,7 +1429,13 @@ func formatDnssecKeyList(keys map[string]tdns.DnssecKey, showHeaders bool) strin
 		if entries[i].rawState != entries[j].rawState {
 			return entries[i].rawState < entries[j].rawState
 		}
-		return entries[i].keyid < entries[j].keyid
+		// Key ids are decimal: 999 before 10000.
+		ki, ei := strconv.ParseUint(entries[i].keyid, 10, 16)
+		kj, ej := strconv.ParseUint(entries[j].keyid, 10, 16)
+		if ei != nil || ej != nil {
+			return entries[i].keyid < entries[j].keyid
+		}
+		return ki < kj
 	})
 	var out []string
 	for _, e := range entries {

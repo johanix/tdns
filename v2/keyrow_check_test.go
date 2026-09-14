@@ -67,17 +67,7 @@ func newCheckerZone(t *testing.T) *checkerZone {
 		{DnskeyStateStandby, "ZSK"}, {DnskeyStateRetired, "ZSK"}, {DnskeyStateCreated, "KSK"},
 	} {
 		row := testKeyRow(zone, sr[0], sr[1], rng)
-		tx, err := kdb.Begin("checker")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := insertKeyRowTx(tx, row); err != nil {
-			tx.Rollback()
-			t.Fatalf("insert %v: %v", sr, err)
-		}
-		if err := tx.Commit(); err != nil {
-			t.Fatal(err)
-		}
+		c.insertRow(t, row)
 		c.rows[sr[0]+" "+sr[1]] = row
 	}
 	c.serveFromRows(t)
@@ -85,6 +75,21 @@ func newCheckerZone(t *testing.T) *checkerZone {
 }
 
 func (c *checkerZone) row(state, role string) KeyRow { return c.rows[state+" "+role] }
+
+func (c *checkerZone) insertRow(t *testing.T, row KeyRow) {
+	t.Helper()
+	tx, err := c.kdb.Begin("checker")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := insertKeyRowTx(tx, row); err != nil {
+		tx.Rollback()
+		t.Fatalf("insert %s %d: %v", row.State, row.Keyid, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
 
 // serveFromRows stages the DNSKEY RRset from the pub=1 rows, signed by the
 // active KSK, and signs the SOA with the active ZSK.
@@ -165,11 +170,7 @@ func TestCheckerI4OneSignerPerRoleAndAlgorithm(t *testing.T) {
 	// A second active ZSK of the same algorithm, served and signing the SOA
 	// beside the first: only I4 is broken by it.
 	row := testKeyRow(c.zd.ZoneName, DnskeyStateActive, "ZSK", newTestRand(11))
-	tx, _ := c.kdb.Begin("i4")
-	if err := insertKeyRowTx(tx, row); err != nil {
-		t.Fatal(err)
-	}
-	tx.Commit()
+	c.insertRow(t, row)
 	c.rows["active ZSK2"] = row
 	dk, _ := c.zd.RRsetForAnalysis(c.zd.ZoneName, dns.TypeDNSKEY)
 	rrs := append(append([]dns.RR{}, dk.RRs...), parseRR(t, row.KeyRR))
@@ -188,11 +189,7 @@ func TestCheckerI4AllowsTwoSepSignersOfDifferentAlgorithms(t *testing.T) {
 	rr.Algorithm = dns.ECDSAP256SHA256
 	row.KeyRR = rr.String()
 	row.Keyid = rr.KeyTag()
-	tx, _ := c.kdb.Begin("i4b")
-	if err := insertKeyRowTx(tx, row); err != nil {
-		t.Fatal(err)
-	}
-	tx.Commit()
+	c.insertRow(t, row)
 	dk, _ := c.zd.RRsetForAnalysis(c.zd.ZoneName, dns.TypeDNSKEY)
 	rrs := append(append([]dns.RR{}, dk.RRs...), rr)
 	sigs := append(append([]dns.RR{}, dk.RRSIGs...), rrsigByAlg(c.zd.ZoneName, dns.TypeDNSKEY, row.Keyid, dns.ECDSAP256SHA256))

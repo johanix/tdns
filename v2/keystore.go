@@ -862,7 +862,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 	case "check":
 		// The key invariants (keyrow_check.go) for one zone, or for every
 		// zone in the keystore. Read-only.
-		violations, n, err := kdb.checkKeystoreZones(kp.Zone)
+		violations, n, err := kdb.checkKeystoreZones(ctx, kp.Zone)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = err.Error()

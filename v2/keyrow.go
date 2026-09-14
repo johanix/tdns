@@ -260,13 +260,29 @@ func (kdb *KeyDB) BackfillKeyRowFlags() (int64, error) { return backfillKeyRowFl
 
 // The sets the code before the key columns computed from the states, kept
 // while S1a is the running code so that startup can compare them with the
-// columns (design R1). S4 removes them with the state names.
+// columns (design R1). S4 removes them with the state names. The comparison
+// covers the states that code knew, tdns's own table: a state an owner
+// registers beyond them has no "old way" to compare with and is left out of
+// both sides.
 const (
-	stateSigningKeysSql  = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state='active'`
-	stateServedKeysSql   = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state IN ('active','published','standby','retired','mpdist','foreign')`
-	columnSigningKeysSql = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND sign=1`
-	columnServedKeysSql  = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND pub=1`
+	stateSigningKeysSql = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state='active'`
+	stateServedKeysSql  = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state IN ('active','published','standby','retired','mpdist','foreign')`
 )
+
+var (
+	columnSigningKeysSql = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND sign=1 AND state IN (` + sqlStateList(keyStateFlags) + `)`
+	columnServedKeysSql  = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND pub=1 AND state IN (` + sqlStateList(keyStateFlags) + `)`
+)
+
+// sqlStateList renders the states of a flag table as a quoted, sorted SQL list.
+func sqlStateList(table map[string]KeyRowFlags) string {
+	var states []string
+	for s := range table {
+		states = append(states, "'"+s+"'")
+	}
+	sort.Strings(states)
+	return strings.Join(states, ",")
+}
 
 // CheckKeyColumnEquivalence compares, per zone, the signing set and the served
 // DNSKEY set computed from the states with the same sets computed from the
@@ -331,9 +347,31 @@ func (kdb *KeyDB) keyidList(q, zone string) ([]int, error) {
 	return out, rows.Err()
 }
 
-// checkKeyColumnsAtOpen runs the equivalence check when the keystore opens:
-// every difference is logged, and in strict mode the open fails.
+// checkKeyColumnsAtOpen guards the open: the columns must exist and every
+// row in a known state must carry pub and sign, or the signer and the DNSKEY
+// publisher would read nothing; that refuses the open in every mode. Then
+// the equivalence check runs: every difference is logged, and in strict
+// mode the open fails.
 func (kdb *KeyDB) checkKeyColumnsAtOpen() error {
+	for _, col := range []string{"pub", "sign", "ds"} {
+		if !dbColumnExists(kdb.DB, "DnssecKeyStore", col) {
+			return fmt.Errorf("keystore: DnssecKeyStore has no %q column; the schema migration failed", col)
+		}
+	}
+	var unset int
+	states := sqlStateList(keyStateFlags)
+	ownerKeyStateFlagsMu.RLock()
+	if len(ownerKeyStateFlags) > 0 {
+		states += "," + sqlStateList(ownerKeyStateFlags)
+	}
+	ownerKeyStateFlagsMu.RUnlock()
+	err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE (pub IS NULL OR sign IS NULL) AND state IN (` + states + `)`).Scan(&unset)
+	if err != nil {
+		return fmt.Errorf("keystore: counting key rows without flags: %w", err)
+	}
+	if unset > 0 {
+		return fmt.Errorf("keystore: %d key row(s) in a known state have pub or sign unset; the backfill at open failed", unset)
+	}
 	diffs := kdb.CheckKeyColumnEquivalence()
 	if len(diffs) == 0 {
 		return nil

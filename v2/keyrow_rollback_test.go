@@ -58,13 +58,15 @@ func TestBackfillDoesNotOverwriteFlagsAlreadySet(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	const zone = "keep.example."
 	keyid := insertTestKeyRow(t, kdb, zone, DnskeyStateActive, "KSK", newTestRand(5))
-	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET ds=1 WHERE zonename=? AND keyid=?`, zone, keyid); err != nil {
+	// Values the table would not give an active key: they must survive.
+	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET pub=0, sign=0, ds=1 WHERE zonename=? AND keyid=?`, zone, keyid); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := kdb.BackfillKeyRowFlags(); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ds := readKeyRowFlags(t, kdb, zone, keyid); flagString(ds) != "1" {
-		t.Errorf("ds=%s after the backfill, want 1", flagString(ds))
+	pub, sign, ds := readKeyRowFlags(t, kdb, zone, keyid)
+	if flagString(pub) != "0" || flagString(sign) != "0" || flagString(ds) != "1" {
+		t.Errorf("pub=%s sign=%s ds=%s after the backfill, want 0/0/1", flagString(pub), flagString(sign), flagString(ds))
 	}
 }

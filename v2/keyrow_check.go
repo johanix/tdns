@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sort"
@@ -183,9 +184,14 @@ func checkServedDnskeys(zd *ZoneData, zone string, rows []keyRowView) []KeyInvar
 	var out []KeyInvariantViolation
 	want := map[string]uint16{}
 	for _, r := range rows {
-		if r.pub() && r.DNSKEY != nil {
-			want[dnskeyIdentity(r.DNSKEY)] = r.Keyid
+		if !r.pub() {
+			continue
 		}
+		if r.DNSKEY == nil {
+			out = append(out, KeyInvariantViolation{Invariant: "I5", Zone: zone, KeyID: r.Keyid, Detail: "pub is set but the stored keyrr is not a DNSKEY"})
+			continue
+		}
+		want[dnskeyIdentity(r.DNSKEY)] = r.Keyid
 	}
 	served := map[string]*dns.DNSKEY{}
 	if rs, err := zd.RRsetForAnalysis(zone, dns.TypeDNSKEY); err == nil && rs != nil {
@@ -326,8 +332,9 @@ func checkServedCds(zd *ZoneData, zone string, rows []keyRowView) []KeyInvariant
 }
 
 // checkKeystoreZones runs the checker over the named zone, or over every zone
-// in the keystore, using the loaded zone where there is one.
-func (kdb *KeyDB) checkKeystoreZones(zone string) ([]KeyInvariantViolation, int, error) {
+// in the keystore, using the loaded zone where there is one. A cancelled
+// context stops it between zones.
+func (kdb *KeyDB) checkKeystoreZones(ctx context.Context, zone string) ([]KeyInvariantViolation, int, error) {
 	var zones []string
 	if strings.TrimSpace(zone) != "" {
 		zones = []string{dns.Fqdn(zone)}
@@ -339,6 +346,9 @@ func (kdb *KeyDB) checkKeystoreZones(zone string) ([]KeyInvariantViolation, int,
 	}
 	var out []KeyInvariantViolation
 	for _, z := range zones {
+		if err := ctx.Err(); err != nil {
+			return out, len(zones), err
+		}
 		if zd, ok := Zones.Get(z); ok && zd != nil {
 			out = append(out, CheckKeyInvariants(kdb, zd)...)
 		} else {

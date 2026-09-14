@@ -37,6 +37,9 @@ func pubRowIdentities(t *testing.T, kdb *KeyDB, zone string) []string {
 		}
 		out = append(out, dnskeyIdentity(parseRR(t, keyrr)))
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	sort.Strings(out)
 	return out
 }
@@ -74,7 +77,9 @@ func TestServedDnskeyRRsetIsThePubRowsOnceEach(t *testing.T) {
 	if err := InsertKeyRowTx(tx, testKeyRow(zone, DnskeyStateForeign, "KSK", newTestRand(21))); err != nil {
 		t.Fatal(err)
 	}
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 
 	want := pubRowIdentities(t, kdb, zone)
 	if len(want) != 5 {
