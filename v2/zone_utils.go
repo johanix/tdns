@@ -2030,43 +2030,11 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 		if err != nil {
 			lg.Error("CollectDynamicRRs: failed to get DNSSEC keys", "zone", zd.ZoneName, "err", err)
 		} else if dak != nil {
-			var publishkeys []dns.RR
-			for _, ksk := range dak.KSKs {
-				publishkeys = append(publishkeys, dns.RR(&ksk.DnskeyRR))
-			}
-			for _, zsk := range dak.ZSKs {
-				// If a ZSK has flags = 257 then it is a clone of a KSK and should not be included twice
-				if zsk.DnskeyRR.Flags == 257 {
-					continue
-				}
-				publishkeys = append(publishkeys, dns.RR(&zsk.DnskeyRR))
-			}
-
-			// Use the shared FetchZoneDnskeysSql (ops_dnskey.go) so
-			// the snapshot here exactly matches PublishDnskeyRRs's
-			// served RRset. Centralizing the predicate prevents the
-			// two from drifting apart again.
-			rows, err := zd.KeyDB.Query(FetchZoneDnskeysSql, zd.ZoneName)
+			// The same set PublishDnskeyRRs serves, from the same helper, so
+			// the snapshot here cannot drift from the served RRset.
+			publishkeys, err := servedDnskeyRRs(zd.KeyDB, zd.ZoneName, dak)
 			if err != nil {
-				lg.Error("CollectDynamicRRs: failed to query DNSKEYs", "zone", zd.ZoneName, "err", err)
-			} else {
-				defer rows.Close()
-				for rows.Next() {
-					var keyid, flags, algorithm string
-					var keyrr string
-					if err := rows.Scan(&keyid, &flags, &algorithm, &keyrr); err != nil {
-						lg.Error("CollectDynamicRRs: failed to scan DNSKEY row", "zone", zd.ZoneName, "err", err)
-						continue
-					}
-					if rr, err := dns.NewRR(keyrr); err == nil {
-						publishkeys = append(publishkeys, rr)
-					} else {
-						lg.Error("CollectDynamicRRs: failed to parse DNSKEY RR", "keyrr", keyrr, "zone", zd.ZoneName, "err", err)
-					}
-				}
-				if err := rows.Err(); err != nil {
-					lg.Error("CollectDynamicRRs: DNSKEY row iteration failed", "zone", zd.ZoneName, "err", err)
-				}
+				lg.Error("CollectDynamicRRs: failed to build the DNSKEY RRset from the keystore", "zone", zd.ZoneName, "err", err)
 			}
 
 			if len(publishkeys) > 0 {

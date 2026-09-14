@@ -33,10 +33,27 @@ func seedKey(t *testing.T, kdb *KeyDB, zone, state string, flags uint16, pubkey 
 		PublicKey: pubkey,
 	}
 	keyid := key.KeyTag()
-	_, err := kdb.DB.Exec(
-		`INSERT INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		zone, state, keyid, flags, dns.ED25519, "test", "", key.String())
+	// Through the one insert, as every writer is: a raw insert would leave
+	// pub and sign unset, and the key would be neither served nor signing.
+	tx, err := kdb.Begin("seedKey")
+	if err != nil {
+		t.Fatalf("seed key: begin: %v", err)
+	}
+	row := KeyRow{
+		Zone: zone, State: state, Keyid: keyid, Flags: flags,
+		Algorithm: dns.AlgorithmToString[dns.ED25519], Creator: "test", KeyRR: key.String(),
+	}
+	if _, known := keyFlagsForState(state); !known {
+		// A state nobody classified: written the way an owner writes its
+		// own, with the flags given, so the test can seed one.
+		row.RowFlags = &KeyRowFlags{}
+	}
+	err = insertKeyRowTx(tx, row)
+	if err == nil {
+		err = tx.Commit()
+	} else {
+		tx.Rollback()
+	}
 	if err != nil {
 		t.Fatalf("seed key (%s,%s,keyid=%d): %v", zone, state, keyid, err)
 	}

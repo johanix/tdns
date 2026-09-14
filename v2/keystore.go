@@ -1226,9 +1226,11 @@ func (kdb *KeyDB) GetSig0KeyRaw(zonename, state string) (algorithm, privatekey, 
 	return "", "", "", false, nil
 }
 
-// GetDnssecKeys returns DNSSEC keys for zonename in the given state.
-// Active keys for a loaded zone are served from the per-zone signing-keys
-// snapshot (CAS-if-unbuilt on first access). Cold states are always DB-direct.
+// GetDnssecKeys returns DNSSEC keys for zonename in the given state. Asked for
+// DnskeyStateActive it returns the keys that sign, which is the sign column
+// rather than the state: for a loaded zone from the per-zone signing-keys
+// snapshot (CAS-if-unbuilt on first access), otherwise DB-direct. The other
+// states are lifecycle questions and are always DB-direct by state.
 func (kdb *KeyDB) GetDnssecKeys(zonename, state string) (*DnssecKeys, error) {
 	zonename = dns.Fqdn(strings.TrimSpace(zonename))
 	if state != DnskeyStateActive {
@@ -1237,7 +1239,7 @@ func (kdb *KeyDB) GetDnssecKeys(zonename, state string) (*DnssecKeys, error) {
 	if zd, ok := Zones.Get(zonename); ok && zd != nil {
 		return zd.activeKeysCAS(kdb)
 	}
-	return loadDnssecKeysFromDB(kdb, zonename, DnskeyStateActive)
+	return loadSigningKeysFromDB(kdb, zonename)
 }
 
 func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, newstate string) (err error) {
@@ -1316,7 +1318,7 @@ type KeyInventoryItem struct {
 // across all states. Used by the signer to respond to RFI KEYSTATE requests.
 // Returns lightweight entries (keytag, algorithm, flags, state, keyrr) without private keys.
 func GetKeyInventory(kdb *KeyDB, zonename string) ([]KeyInventoryItem, error) {
-	const inventorySql = `SELECT keyid, flags, algorithm, state, COALESCE(keyrr, '') FROM DnssecKeyStore WHERE zonename=?`
+	const inventorySql = `SELECT keyid, flags, algorithm, state, COALESCE(keyrr, ''), pub, sign, ds FROM DnssecKeyStore WHERE zonename=?`
 
 	rows, err := kdb.Query(inventorySql, zonename)
 	if err != nil {
@@ -1329,7 +1331,8 @@ func GetKeyInventory(kdb *KeyDB, zonename string) ([]KeyInventoryItem, error) {
 		var keyid, flags int
 		var algorithm string
 		var state, keyrr string
-		if err := rows.Scan(&keyid, &flags, &algorithm, &state, &keyrr); err != nil {
+		var pub, sign, ds sql.NullInt64
+		if err := rows.Scan(&keyid, &flags, &algorithm, &state, &keyrr, &pub, &sign, &ds); err != nil {
 			return nil, fmt.Errorf("GetKeyInventory: scan failed: %w", err)
 		}
 		alg, ok := dns.StringToAlgorithm[algorithm]
@@ -1343,6 +1346,9 @@ func GetKeyInventory(kdb *KeyDB, zonename string) ([]KeyInventoryItem, error) {
 			Flags:     uint16(flags),
 			State:     state,
 			KeyRR:     keyrr,
+			Pub:       pub.Valid && pub.Int64 != 0,
+			Sign:      sign.Valid && sign.Int64 != 0,
+			DS:        nullBoolPtr(ds),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -1373,9 +1379,22 @@ type DnssecKeyWithTimestamps struct {
 // GetDnssecKeysByState returns all DNSSEC keys in a given state, with lifecycle timestamps.
 // If zone is empty, returns keys across all zones.
 func GetDnssecKeysByState(kdb *KeyDB, zone string, state string) ([]DnssecKeyWithTimestamps, error) {
-	var query string
-	var args []interface{}
+	if zone == "" {
+		return queryKeyRows(kdb, `state=?`, state)
+	}
+	return queryKeyRows(kdb, `zonename=? AND state=?`, zone, state)
+}
 
+// GetSigningKeyRows returns the zone's rows with sign set: the keys that
+// sign, whatever their state (design D3). This is what a policy compares its
+// algorithms against; a lifecycle question is GetDnssecKeysByState.
+func GetSigningKeyRows(kdb *KeyDB, zone string) ([]DnssecKeyWithTimestamps, error) {
+	return queryKeyRows(kdb, `zonename=? AND sign=1`, zone)
+}
+
+// queryKeyRows reads DnssecKeyStore rows matching where, with their lifecycle
+// timestamps.
+func queryKeyRows(kdb *KeyDB, where string, args ...interface{}) ([]DnssecKeyWithTimestamps, error) {
 	// ORDER BY published_at ASC, keyid ASC makes the result deterministic and
 	// FIFO by propagation age (oldest-published first). This is REQUIRED for
 	// correct ZSK rollover: RolloverKey promotes the first standby returned
@@ -1384,13 +1403,7 @@ func GetDnssecKeysByState(kdb *KeyDB, zone string, state string) ([]DnssecKeyWit
 	// standby must promote before a younger new-alg one. NULL published_at
 	// sorts first (an unpublished key precedes published ones); standby keys
 	// always have published_at, so the promotion pick is unaffected.
-	if zone == "" {
-		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, ''), active_seq FROM DnssecKeyStore WHERE state=? ORDER BY published_at ASC, keyid ASC`
-		args = []interface{}{state}
-	} else {
-		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, ''), active_seq FROM DnssecKeyStore WHERE zonename=? AND state=? ORDER BY published_at ASC, keyid ASC`
-		args = []interface{}{zone, state}
-	}
+	query := `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, ''), active_seq FROM DnssecKeyStore WHERE ` + where + ` ORDER BY published_at ASC, keyid ASC`
 
 	rows, err := kdb.Query(query, args...)
 	if err != nil {
