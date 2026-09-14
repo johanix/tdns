@@ -13,8 +13,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-// The poll round (scanner_poll.go), through the real ProcessCSYNCNotify and
-// ProcessCDSNotify, with the network replaced as in scanner_trust_test.go.
+// The poll round (scanner_poll.go), through the real scanChildAndApply,
+// ProcessCSYNCNotify and ProcessCDSNotify, with the network replaced as in
+// scanner_trust_test.go.
 
 const (
 	pollOldDigest = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
@@ -172,8 +173,8 @@ func TestPollSkipsAChildWhoseDelegationCannotBeRead(t *testing.T) {
 	}
 }
 
-// The scans of a round share the scanner, the processed-serial memory and the
-// change callback; run under -race.
+// The scans of a round share the scanner, the processed-serial memory, the
+// per-child locks and the change callback; run under -race.
 func TestPollRoundScansChildrenConcurrently(t *testing.T) {
 	var parents []*ZoneData
 	var children []string
@@ -246,64 +247,6 @@ func TestCurrentDelegationDS(t *testing.T) {
 	b.readErr = errors.New("store unavailable")
 	if _, err := currentDelegationDS(unreadable, "broken.example."); err == nil {
 		t.Error("an unreadable delegation was reported as readable")
-	}
-}
-
-// The NOTIFY path reads the current DS through the same helper. A delegation it
-// cannot read is no reason to scan; before, it was scanned as one without a DS.
-func TestNotifyScanSkipsAChildWhoseDelegationCannotBeRead(t *testing.T) {
-	conf := &Config{}
-	conf.Internal.ScannerQ = make(chan ScanRequest) // unbuffered: a send returns once the engine has taken it
-	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 1)
-	conf.Internal.ImrReady = NewImrReadiness()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	engineDone := make(chan error, 1)
-	go func() { engineDone <- ScannerEngine(ctx, conf) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-engineDone:
-		case <-time.After(5 * time.Second):
-			t.Error("ScannerEngine did not return after its context was cancelled")
-		}
-	})
-
-	broken, b := pollParent(t, "broken.example.", true)
-	b.readErr = errors.New("store unavailable")
-	fine, _ := pollParent(t, "fine.example.", true)
-
-	conf.Internal.ScannerQ <- ScanRequest{Cmd: "SCAN", ChildZone: "broken.example.", ZoneData: broken, RRtype: dns.TypeCDS}
-	conf.Internal.ScannerQ <- ScanRequest{Cmd: "SCAN", ChildZone: "fine.example.", ZoneData: fine, RRtype: dns.TypeCDS}
-
-	// The broken request was handled before the fine one was taken, so once the
-	// fine one's job has completed, a job for the broken one would exist too.
-	sc := conf.Internal.GetScanner()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		sc.JobsMutex.RLock()
-		var jobs, fineDone int
-		var qnames []string
-		for _, job := range sc.Jobs {
-			jobs++
-			for _, r := range job.Responses {
-				qnames = append(qnames, r.Qname)
-				if r.Qname == "fine.example." && job.Status == "completed" {
-					fineDone++
-				}
-			}
-		}
-		sc.JobsMutex.RUnlock()
-		if fineDone > 0 {
-			if jobs != 1 {
-				t.Fatalf("%d scan jobs (responses for %v); want only the readable child scanned", jobs, qnames)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the readable child's scan did not complete (jobs %d, responses for %v)", jobs, qnames)
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 

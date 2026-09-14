@@ -165,8 +165,8 @@ type csyncDelta struct {
 //   - any other type is refused. csyncTypes refuses such a bitmap before
 //     anything is fetched; this refuses it too, for a caller that builds its
 //     own type list.
-//   - a change that would leave an in-bailiwick nameserver of the resulting NS
-//     set with neither A nor AAAA glue is refused as a whole
+//   - a change that would leave a nameserver it adds, or whose glue it changes,
+//     with neither A nor AAAA glue is refused as a whole
 //     (csyncNameserversWithoutGlue).
 //   - a scan refusal from fetch (the parent's policy requires DNSSEC and the
 //     data did not validate, scanner_trust.go) is terminal in both passes:
@@ -300,7 +300,7 @@ func computeCsyncDelta(ctx context.Context, childZone string, types []uint16, cu
 		if len(resultingNS) == 0 {
 			resultingNS = currentNS
 		}
-		if bare := csyncNameserversWithoutGlue(childZone, resultingNS, currentGlue, d.GlueAdds, d.GlueRemoves); len(bare) > 0 {
+		if bare := csyncNameserversWithoutGlue(childZone, resultingNS, currentNS, currentGlue, d.GlueAdds, d.GlueRemoves); len(bare) > 0 {
 			lg.Printf("ProcessCSYNCNotify: %s: the result would leave %v with no glue, not processing the CSYNC", childZone, bare)
 			return csyncDelta{}, fmt.Errorf("the result would leave in-bailiwick nameserver(s) %s of %s with no A or AAAA glue, so the CSYNC is not processed (RFC 7477 §3.2.2)",
 				strings.Join(bare, ", "), childZone)
@@ -309,7 +309,8 @@ func computeCsyncDelta(ctx context.Context, childZone string, types []uint16, cu
 	return d, nil
 }
 
-// csyncNameserversWithoutGlue returns the in-bailiwick nameservers in nsRRs
+// csyncNameserversWithoutGlue returns the in-bailiwick nameservers of the
+// resulting NS set nsRRs that the change adds or whose glue it changes, and
 // that would have neither A nor AAAA glue once adds and removes are applied to
 // the glue the parent holds now.
 //
@@ -319,9 +320,24 @@ func computeCsyncDelta(ctx context.Context, childZone string, types []uint16, cu
 // nameserver, and computeCsyncDelta refuses the whole CSYNC rather than only
 // its glue: an NS change published without its glue is the broken delegation
 // the rule is there to prevent.
-func csyncNameserversWithoutGlue(zone string, nsRRs []dns.RR, currentGlue currentGlueLookup, adds, removes []dns.RR) []string {
+//
+// A nameserver in currentNS whose glue the change does not touch is not
+// checked, as on the UPDATE path (CheckDelegationNSCoherence). If it already
+// has no glue, that delegation was broken before this CSYNC, and refusing
+// every CSYNC the child sends until someone repairs it helps no one.
+func csyncNameserversWithoutGlue(zone string, nsRRs, currentNS []dns.RR, currentGlue currentGlueLookup, adds, removes []dns.RR) []string {
+	kept := canonicalNameSet(inBailiwickNSNames(zone, currentNS))
+	touched := map[string]bool{}
+	for _, set := range [][]dns.RR{adds, removes} {
+		for _, rr := range set {
+			touched[core.CanonicalizeName(dns.Fqdn(rr.Header().Name))] = true
+		}
+	}
 	var bare []string
 	for _, ns := range inBailiwickNSNames(zone, nsRRs) {
+		if key := core.CanonicalizeName(dns.Fqdn(ns)); kept[key] && !touched[key] {
+			continue
+		}
 		if len(csyncGlueAfter(ns, dns.TypeA, currentGlue, adds, removes))+
 			len(csyncGlueAfter(ns, dns.TypeAAAA, currentGlue, adds, removes)) == 0 {
 			bare = append(bare, ns)

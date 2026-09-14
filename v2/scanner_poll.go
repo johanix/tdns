@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -29,11 +28,12 @@ import (
 //     its first DS, under the parent zone's delegation policy like any other
 //     scan; with it off, the default, a poll never does.
 //
-// Each scan is the one a NOTIFY starts (ProcessCSYNCNotify, ProcessCDSNotify),
-// and a change it finds is applied the same way, through OnDelegationChange.
-// A round scans at most scanner.poll.concurrency children at once and does not
-// start while the previous one is still running. It is not recorded as a
-// scanner job: rounds repeat without end, and Jobs is never pruned.
+// Each scan goes through scanChildAndApply, as a NOTIFY-started one does: under
+// the child's lock, so a poll and a NOTIFY of the same child do not overlap,
+// and its change is applied before the lock is released. A round scans at most
+// scanner.poll.concurrency children at once and does not start while the
+// previous one is still running. It is not recorded as a scanner job: rounds
+// repeat without end, and Jobs is never pruned.
 //
 // The log says whether the server polls: the settings when the engine starts
 // and whenever they change, and one line per round.
@@ -82,35 +82,24 @@ func (scanner *Scanner) notePollConf(conf scannerPollConf, interval time.Duratio
 
 // pollParents returns the zones a poll round covers: those that allow child
 // updates, have a delegation backend to read the current delegation from, and
-// have no error that stops them being served.
+// have no error that stops them being served. Options and DelegationBackend are
+// read under zd.mu, which a config reload holds while it changes them.
 func pollParents(zones map[string]*ZoneData) []*ZoneData {
 	var parents []*ZoneData
 	for _, zd := range zones {
-		if zd == nil || !zd.Options[OptAllowChildUpdates] || zd.DelegationBackend == nil || zd.HasServiceImpactingError() {
+		if zd == nil {
+			continue
+		}
+		zd.mu.Lock()
+		allowChildUpdates := zd.Options[OptAllowChildUpdates]
+		hasBackend := zd.DelegationBackend != nil
+		zd.mu.Unlock()
+		if !allowChildUpdates || !hasBackend || zd.HasServiceImpactingError() {
 			continue
 		}
 		parents = append(parents, zd)
 	}
 	return parents
-}
-
-// currentDelegationDS returns the DS RRset the parent's delegation backend
-// holds for child, or nil when it holds none. An error means the backend could
-// not be read, which is not the same as no DS (see DelegationBackend): taken
-// for "no DS", it would send a child that has one down the first-DS path.
-func currentDelegationDS(parent *ZoneData, child string) (*core.RRset, error) {
-	data, err := parent.DelegationBackend.GetDelegationData(parent.ZoneName, child)
-	if err != nil {
-		return nil, err
-	}
-	var ds []dns.RR
-	for _, byType := range data {
-		ds = append(ds, byType[dns.TypeDS]...)
-	}
-	if len(ds) == 0 {
-		return nil, nil
-	}
-	return &core.RRset{Name: child, RRtype: dns.TypeDS, RRs: ds}, nil
 }
 
 // startPollRound starts a poll round in the background unless the previous one
@@ -167,6 +156,8 @@ feed:
 			if !parent.IsChildDelegation(child) {
 				continue
 			}
+			// Whether the child has a DS decides whether it is polled. The DS a
+			// CDS scan compares against is read again, under the child's lock.
 			ds, err := currentDelegationDS(parent, child)
 			if err != nil {
 				lg.Warn("ScannerEngine: poll: cannot read the delegation, not scanning the child", "parent", parent.ZoneName, "child", child, "error", err)
@@ -193,9 +184,8 @@ feed:
 		"duration", time.Since(started).Round(time.Millisecond))
 }
 
-// pollChild scans one child, CSYNC before CDS, and applies what each scan
-// finds. A child without a DS -- polled only for bootstrap -- gets the CDS scan
-// alone.
+// pollChild scans one child, CSYNC before CDS, each through scanChildAndApply.
+// A child without a DS -- polled only for bootstrap -- gets the CDS scan alone.
 func (scanner *Scanner) pollChild(ctx context.Context, parent *ZoneData, tuple ScanTuple) (scans, changes, errs int) {
 	types := []ScanType{ScanCDS}
 	if tuple.CurrentData.DS != nil {
@@ -205,20 +195,12 @@ func (scanner *Scanner) pollChild(ctx context.Context, parent *ZoneData, tuple S
 		if ctx.Err() != nil {
 			break
 		}
-		// Every return path of both functions sends exactly one response.
-		ch := make(chan ScanTupleResponse, 1)
-		if scanType == ScanCSYNC {
-			scanner.ProcessCSYNCNotify(ctx, tuple, parent, scanType, nil, ch)
-		} else {
-			scanner.ProcessCDSNotify(ctx, tuple, parent, scanType, nil, ch)
-		}
-		resp := <-ch
+		resp := scanner.scanChildAndApply(ctx, parent, scanType, tuple, nil)
 		scans++
 		if resp.Error {
 			errs++
 		}
-		if scanner.OnDelegationChange != nil && scanResponseChangesDelegation(resp) {
-			scanner.OnDelegationChange(parent.ZoneName, parent, resp)
+		if scanResponseChangesDelegation(resp) {
 			changes++
 		}
 	}
