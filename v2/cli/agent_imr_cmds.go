@@ -212,6 +212,7 @@ func newImrDumpTuningCmd(role string) *cobra.Command {
 			printSection("Discovery state machine (config; activates with W9):", "discovery")
 			fmt.Printf("Per-query budget          : %v\n", data["query_budget"])
 			fmt.Printf("Upgrade indirect cache hits: %v\n", data["upgrade_indirect_cache_hits"])
+			fmt.Printf("Zone state recheck        : %v\n", data["zone_state_recheck"])
 		},
 	}
 }

@@ -445,6 +445,11 @@ type ImrTuningConf struct {
 	// unbound.conf value can be copied as it stands. When min > max, max wins.
 	CacheMaxTTL uint32 `yaml:"cache-max-ttl" mapstructure:"cache-max-ttl"`
 	CacheMinTTL uint32 `yaml:"cache-min-ttl" mapstructure:"cache-min-ttl"`
+	// ZoneStateRecheck is how long a zone's Indeterminate or Insecure
+	// validation state stands before the resolver looks at the zone again: an
+	// Indeterminate zone has its chain followed afresh, an Insecure one has its
+	// parent asked for a DS. Default 30s. See cache.ZoneStateRecheck.
+	ZoneStateRecheck time.Duration `yaml:"zone-state-recheck" mapstructure:"zone-state-recheck"`
 }
 
 // DefaultCacheMaxTTL is Unbound's cache-max-ttl default: one day.
@@ -549,6 +554,9 @@ func LoadImrTuningDefaults(t *ImrTuningConf) {
 	}
 	if t.CacheMinTTL > t.CacheMaxTTL {
 		t.CacheMinTTL = t.CacheMaxTTL
+	}
+	if t.ZoneStateRecheck <= 0 {
+		t.ZoneStateRecheck = cache.DefaultZoneStateRecheck
 	}
 }
 

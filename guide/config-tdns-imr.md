@@ -236,6 +236,7 @@ imrengine:
       upgrade-indirect-cache-hits: true # left unset in code; treated as true
       cache-max-ttl:             86400  # seconds; ceiling on cached lifetimes
       cache-min-ttl:             0      # seconds; floor on cached lifetimes (0 = none)
+      zone-state-recheck:        30s    # how long an insecure or indeterminate zone verdict stands
 ```
 
 The `address-family` group is what demotes a broken IPv6 (or IPv4) path: once
@@ -250,6 +251,18 @@ answers alike, and because the TTL a client is served is what remains of the
 cached lifetime, clients see the bounded TTL too. Root hints and trust anchors
 are configuration, not cached data, and are not bounded. When `cache-min-ttl`
 exceeds `cache-max-ttl`, the maximum wins.
+
+`zone-state-recheck` is how long the resolver acts on a zone's Indeterminate or
+Insecure DNSSEC verdict before it looks at the zone again. An Indeterminate zone,
+one whose chain of trust could not be followed, has its chain followed afresh. An
+Insecure zone, one delegated without a DS, has its parent asked for a DS the next
+time a signature from the zone is checked, and a DS that validates makes the zone
+secure. A zone whose parent starts publishing a DS therefore validates within
+about this interval, with no flush and no restart. Only signed data prompts a
+recheck, so a zone that stays unsigned costs nothing, while a signed zone still
+delegated without a DS costs one DS query per interval for as long as it is in
+use. Flushing a zone without keeping its structural records, or resetting the
+cache, drops these verdicts at once.
 
 ## large-algorithms
 
