@@ -173,9 +173,9 @@ server:
 # on where current delegation data lives, and DS/NS records accumulate
 # without ever being removed.
 # delegationbackends:
-#   - name:       files-dnslab
+#   - name:       files-example
 #     type:       zonefile
-#     directory:  /var/lib/tdns/delegations/dnslab
+#     directory:  /var/lib/tdns/delegations/example.com
 
 # Named policies, referenced per-zone with `delegationpolicy: <name>`.
 # Omit binds `default`. A name that does not resolve quarantines the zone.

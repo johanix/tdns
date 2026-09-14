@@ -238,7 +238,7 @@ zones:
    example.com.:
       type:                primary
       options:             [ childsync, allow-child-updates ]
-      delegationbackend:     files-dnslab
+      delegationbackend:     files-example
 ```
 
 Named backends live at the top level of the daemon's
@@ -246,9 +246,9 @@ config:
 
 ```yaml
 delegationbackends:
-   - name:           files-dnslab
+   - name:           files-example
      type:           zonefile
-     directory:      /var/lib/tdns/delegations/dnslab
+     directory:      /var/lib/tdns/delegations/example.com
      notify-command: /usr/bin/notify-hook.sh
 
    - name: inline
