@@ -249,12 +249,12 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 		return nil
 	}
 	if fetch == nil {
-		return fmt.Errorf("cannot verify that %s would still validate: no way to look up its DNSKEYs: %w", child, ErrDelegationUnverifiable)
+		return fmt.Errorf("cannot verify that %s would still validate: %w: %w", child, errNoDnskeyFetcher, ErrDelegationUnverifiable)
 	}
 
 	keys, validated, err := fetch(child)
 	if err != nil {
-		return fmt.Errorf("cannot verify that %s would still validate: DNSKEY lookup failed: %v: %w", child, err, ErrDelegationUnverifiable)
+		return fmt.Errorf("cannot verify that %s would still validate: DNSKEY lookup failed: %w: %w", child, err, ErrDelegationUnverifiable)
 	}
 
 	// An unvalidated DNSKEY answer is only meaningful when there is something to
@@ -336,6 +336,31 @@ func equalFoldASCII(a, b string) bool {
 		}
 	}
 	return true
+}
+
+// coherenceDnskeyFetcher is the fetcher the coherence check gets on a server
+// built from conf.
+//
+// Three cases, because they call for three different answers. A running
+// resolver is asked. A server without one gets nil, and the check refuses as
+// unverifiable: that will not change by asking again. A daemon whose resolver
+// has not started yet -- still priming, or retrying a failed priming -- gets a
+// fetcher that fails with ErrNoImrEngine, which the callers answer as "try
+// again" rather than as a verdict on the delegation.
+func coherenceDnskeyFetcher(conf *Config) dnskeyFetcher {
+	// ImrEngine may be read only once readiness is published. No readiness
+	// signal at all means no engine goroutine that could still bring a resolver
+	// up (a CLI, a test): whatever the field holds is all there will be.
+	r := conf.Internal.ImrReady
+	if r == nil || r.Published() {
+		return imrDnskeyFetcher(conf.Internal.ImrEngine)
+	}
+	if conf.Imr.Active != nil && !*conf.Imr.Active {
+		return nil
+	}
+	return func(child string) ([]dns.RR, bool, error) {
+		return nil, false, fmt.Errorf("this server's resolver is not running yet: %w", ErrNoImrEngine)
+	}
 }
 
 // imrDnskeyFetcher looks the child's DNSKEY RRset up through the iterative

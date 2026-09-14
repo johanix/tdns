@@ -209,11 +209,10 @@ func (r *ServerErrorRegistry) ClearConfigCertMissing() {
 	r.clear(ErrCatConfig, ErrSubCertMissing)
 }
 
-// Owned by ImrEngine (v2/imrengine.go). Set when InitImrEngine fails (root
-// priming could not complete), which leaves the daemon running WITHOUT its
-// DNS listeners: without this entry the only trace is one log line while the
-// process looks alive. Cleared implicitly by restart (boot-scoped, the init
-// path does not retry).
+// Owned by ImrEngine (v2/imr_init_retry.go). Set while InitImrEngine keeps
+// failing (root priming could not complete), which leaves the daemon running
+// WITHOUT its DNS listeners: without this entry the only trace is a log line
+// while the process looks alive. Cleared when a retry succeeds.
 func (r *ServerErrorRegistry) SetImrPrimingError(msg string) {
 	r.set(ErrCatUpstream, ErrSubImrPriming, msg)
 }
