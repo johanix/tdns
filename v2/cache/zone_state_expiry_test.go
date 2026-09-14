@@ -22,9 +22,9 @@ func TestZoneIndeterminateStateLapses(t *testing.T) {
 	if got := z.GetState(); got != ValidationStateIndeterminate {
 		t.Fatalf("fresh Indeterminate reads %s", ValidationStateToString[got])
 	}
-	z.stateSince = time.Now().Add(-ZoneIndeterminateRetry - time.Second)
+	z.stateSince = time.Now().Add(-ZoneStateRecheck() - time.Second)
 	if got := z.GetState(); got != ValidationStateNone {
-		t.Fatalf("Indeterminate older than %s reads %s, want none", ZoneIndeterminateRetry, ValidationStateToString[got])
+		t.Fatalf("Indeterminate older than %s reads %s, want none", ZoneStateRecheck(), ValidationStateToString[got])
 	}
 
 	for _, st := range []ValidationState{ValidationStateSecure, ValidationStateInsecure} {
@@ -76,7 +76,7 @@ func TestAZoneMarkedIndeterminateValidatesOnceTheStateLapses(t *testing.T) {
 
 	// Once it lapses, it does.
 	z.mu.Lock()
-	z.stateSince = time.Now().Add(-ZoneIndeterminateRetry - time.Second)
+	z.stateSince = time.Now().Add(-ZoneStateRecheck() - time.Second)
 	z.mu.Unlock()
 	got, err := rrcache.ValidateRRsetWithParentZone(context.Background(), rrset, nil, nil)
 	if err != nil {
