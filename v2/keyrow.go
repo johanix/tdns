@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // KeyRowFlags are the mechanism columns of a DnssecKeyStore row, kept beside
@@ -141,10 +143,19 @@ var errKeyRowNotFound = errors.New("key not found")
 // (published_at, active_at or retired_at), and returns the state the row was
 // in. With expectOld set it is a compare-and-set: a row in another state is
 // left alone and an error returned. ds is written only when f.DS is Valid;
-// otherwise the column keeps what it has, which until S1b is NULL.
+// otherwise the column keeps what it has.
+//
+// A write that leaves the state as it is keeps a timestamp the row already
+// has: setting a published key published again must not restart its
+// propagation clock. It still fills one that is empty, which is how the key
+// state worker stamps a legacy key that has none.
+//
+// The invariants the writer can see are enforced here rather than left to the
+// checker: sign implies pub (I1), and ds only on a key with the SEP bit (I3).
 func setKeyRowTx(tx *Tx, zone string, keyid uint16, state string, f KeyRowFlags, expectOld string) (string, error) {
 	var old string
-	err := tx.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zone, keyid).Scan(&old)
+	var flags int
+	err := tx.QueryRow(`SELECT state, flags FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zone, keyid).Scan(&old, &flags)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", fmt.Errorf("key with keyid %d not found in zone %s: %w", keyid, zone, errKeyRowNotFound)
@@ -154,6 +165,9 @@ func setKeyRowTx(tx *Tx, zone string, keyid uint16, state string, f KeyRowFlags,
 	if expectOld != "" && old != expectOld {
 		return "", fmt.Errorf("key with keyid %d in zone %s is not in state %s", keyid, zone, expectOld)
 	}
+	if err := checkKeyRowFlags(f, uint16(flags)); err != nil {
+		return "", fmt.Errorf("key with keyid %d in zone %s to state %s: %w", keyid, zone, state, err)
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	q := `UPDATE DnssecKeyStore SET state=?, pub=?, sign=?`
@@ -162,16 +176,22 @@ func setKeyRowTx(tx *Tx, zone string, keyid uint16, state string, f KeyRowFlags,
 		q += `, ds=?`
 		args = append(args, boolInt(f.DS.Bool))
 	}
+	stamp := func(col string) {
+		if old == state {
+			// Keep a timestamp the row has; fill one it lacks.
+			q += `, ` + col + ` = CASE WHEN ` + col + ` IS NULL OR ` + col + ` = '' THEN ? ELSE ` + col + ` END`
+		} else {
+			q += `, ` + col + `=?`
+		}
+		args = append(args, now)
+	}
 	switch state {
 	case DnskeyStatePublished:
-		q += `, published_at=?`
-		args = append(args, now)
+		stamp("published_at")
 	case DnskeyStateActive:
-		q += `, active_at=?`
-		args = append(args, now)
+		stamp("active_at")
 	case DnskeyStateRetired:
-		q += `, retired_at=?`
-		args = append(args, now)
+		stamp("retired_at")
 	}
 	q += ` WHERE zonename=? AND keyid=?`
 	args = append(args, zone, keyid)
@@ -189,6 +209,18 @@ func setKeyRowTx(tx *Tx, zone string, keyid uint16, state string, f KeyRowFlags,
 	return old, nil
 }
 
+// checkKeyRowFlags is what a writer can verify of the invariants: I1, sign
+// implies pub; I3, ds only on a key with the SEP bit.
+func checkKeyRowFlags(f KeyRowFlags, flags uint16) error {
+	if f.Sign && !f.Pub {
+		return errors.New("sign set without pub: a key cannot sign without being in the DNSKEY RRset")
+	}
+	if f.DS.Valid && f.DS.Bool && flags&dns.SEP == 0 {
+		return errors.New("ds set on a key without the SEP bit")
+	}
+	return nil
+}
+
 // insertKeyRowTx is the only INSERT into DnssecKeyStore.
 func insertKeyRowTx(tx *Tx, row KeyRow) error {
 	f := KeyRowFlags{}
@@ -199,6 +231,9 @@ func insertKeyRowTx(tx *Tx, row KeyRow) error {
 		if f, ok = keyFlagsForState(row.State); !ok {
 			return fmt.Errorf("insertKeyRowTx: no flags known for key state %q (zone %s, keyid %d); register the state with RegisterKeyStateFlags or pass the flags", row.State, row.Zone, row.Keyid)
 		}
+	}
+	if err := checkKeyRowFlags(f, row.Flags); err != nil {
+		return fmt.Errorf("insertKeyRowTx: %s keyid %d: %w", row.Zone, row.Keyid, err)
 	}
 	var comment, ds any
 	if row.Comment != "" {

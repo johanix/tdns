@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"database/sql"
 	"testing"
 )
 
@@ -115,5 +116,133 @@ func TestStateWriteRefusesAStaleExpectation(t *testing.T) {
 	}
 	if state != DnskeyStateStandby {
 		t.Errorf("state changed to %q under a stale expectation", state)
+	}
+}
+
+// A write that leaves the state as it is keeps the timestamp the row has:
+// "setstate published" on a published key does not restart its propagation
+// clock. An empty one is still filled, which is how a legacy key without
+// published_at gets one.
+func TestSameStateWriteKeepsAnExistingTimestamp(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	const zone = "restamp.example."
+	keyid := insertTestKeyRow(t, kdb, zone, DnskeyStateCreated, "ZSK", newTestRand(31))
+	write := func(state string) {
+		t.Helper()
+		tx, err := kdb.Begin("test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, _ := keyFlagsForState(state)
+		if _, err := setKeyRowTx(tx, zone, keyid, state, f, ""); err != nil {
+			tx.Rollback()
+			t.Fatalf("to %s: %v", state, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publishedAt := func() string {
+		t.Helper()
+		var v string
+		if err := kdb.DB.QueryRow(`SELECT COALESCE(published_at,'') FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zone, keyid).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	write(DnskeyStatePublished)
+	if publishedAt() == "" {
+		t.Fatal("created→published did not stamp published_at")
+	}
+	const old = "2026-01-01T00:00:00Z"
+	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET published_at=? WHERE zonename=? AND keyid=?`, old, zone, keyid); err != nil {
+		t.Fatal(err)
+	}
+	write(DnskeyStatePublished)
+	if got := publishedAt(); got != old {
+		t.Errorf("published→published re-stamped published_at to %s; want the old %s kept", got, old)
+	}
+	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET published_at='' WHERE zonename=? AND keyid=?`, zone, keyid); err != nil {
+		t.Fatal(err)
+	}
+	write(DnskeyStatePublished)
+	if publishedAt() == "" {
+		t.Error("published→published left an empty published_at empty; a legacy key must get one")
+	}
+}
+
+// The writers enforce what they can see of the invariants: sign implies pub
+// (I1), and ds only on a key with the SEP bit (I3). An owner passing flags by
+// hand cannot write a row the checker would report.
+func TestWritersRefuseSignWithoutPub(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	const zone = "i1.example."
+	rng := newTestRand(32)
+	row := testKeyRow(zone, DnskeyStateActive, "ZSK", rng)
+	row.RowFlags = &KeyRowFlags{Pub: false, Sign: true}
+	tx, err := kdb.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertKeyRowTx(tx, row); err == nil {
+		t.Error("insert with sign and no pub was accepted")
+	}
+	tx.Rollback()
+
+	keyid := insertTestKeyRow(t, kdb, zone, DnskeyStateStandby, "ZSK", rng)
+	tx, err = kdb.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setKeyRowTx(tx, zone, keyid, DnskeyStateActive, KeyRowFlags{Pub: false, Sign: true}, ""); err == nil {
+		t.Error("state write with sign and no pub was accepted")
+	}
+	tx.Rollback()
+	var state string
+	if err := kdb.DB.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zone, keyid).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != DnskeyStateStandby {
+		t.Errorf("the refused write changed the state to %q", state)
+	}
+}
+
+func TestWritersRefuseDsOnAKeyWithoutTheSepBit(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	const zone = "i3.example."
+	rng := newTestRand(33)
+	row := testKeyRow(zone, DnskeyStateActive, "ZSK", rng)
+	row.RowFlags = &KeyRowFlags{Pub: true, Sign: true, DS: sql.NullBool{Bool: true, Valid: true}}
+	tx, err := kdb.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertKeyRowTx(tx, row); err == nil {
+		t.Error("insert of a ZSK with ds set was accepted")
+	}
+	tx.Rollback()
+
+	zsk := insertTestKeyRow(t, kdb, zone, DnskeyStateActive, "ZSK", rng)
+	tx, err = kdb.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setKeyRowTx(tx, zone, zsk, DnskeyStateActive, KeyRowFlags{Pub: true, Sign: true, DS: sql.NullBool{Bool: true, Valid: true}}, ""); err == nil {
+		t.Error("state write setting ds on a ZSK was accepted")
+	}
+	tx.Rollback()
+
+	// A KSK may carry ds.
+	ksk := insertTestKeyRow(t, kdb, zone, DnskeyStateActive, "KSK", rng)
+	tx, err = kdb.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setKeyRowTx(tx, zone, ksk, DnskeyStateActive, KeyRowFlags{Pub: true, Sign: true, DS: sql.NullBool{Bool: true, Valid: true}}, ""); err != nil {
+		t.Errorf("ds on a KSK refused: %v", err)
+	}
+	tx.Commit()
+	if _, _, ds := readKeyRowFlags(t, kdb, zone, ksk); flagString(ds) != "1" {
+		t.Errorf("ds=%s on the KSK, want 1", flagString(ds))
 	}
 }
