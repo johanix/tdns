@@ -660,6 +660,21 @@ containing either the private or the public SIG(0) key and the name of the zone.
 		},
 	}
 
+	check := &cobra.Command{
+		Use:   "check",
+		Short: "Check the key invariants (pub, sign, ds against the state and the served zone)",
+		Long: `Check the invariants of the keystore's key rows and of the served zone:
+sign implies pub and a private key, ds only on SEP keys, one signing key per
+role and algorithm, the served DNSKEY RRset equals the pub rows, the RRSIGs
+are by the sign keys, the served CDS follows the ds rows, no row lacks its
+flags, and the flags match the state. One zone with --zone, or every zone in
+the keystore. Exits non-zero when a violation is found.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			dnssecKeyMgmt(role, "check")
+		},
+	}
+	check.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to check (default: every zone in the keystore)")
+
 	export := &cobra.Command{
 		Use:   "export",
 		Short: "Export a DNSSEC key pair from the keystore as BIND-style .private/.key files",
@@ -813,7 +828,7 @@ without modifying anything. Pass --force to actually delete.`,
 
 	// auto-rollover moved to `zone dnssec auto-rollover` (auth only; agents never
 	// sign, so it was vestigial under `agent keystore dnssec`).
-	c.AddCommand(add, importCmd, generate, algorithms, policies, list, export, delete, setstate, genDS, rollover, clear, policyCleanup, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role))
+	c.AddCommand(add, importCmd, generate, algorithms, policies, list, check, export, delete, setstate, genDS, rollover, clear, policyCleanup, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role))
 	addBulkCommands(c, role, "dnssec")
 	return c
 }
@@ -1068,6 +1083,11 @@ func dnssecKeyMgmt(role, cmd string) {
 	case "clear", "policy-cleanup":
 		data.Zone = tdns.Globals.Zonename
 
+	case "check":
+		if z := strings.TrimSpace(tdns.Globals.Zonename); z != "" {
+			data.Zone = dns.Fqdn(z)
+		}
+
 	default:
 		fmt.Printf("Unknown keystore command: \"%s\"\n", cmd)
 		os.Exit(1)
@@ -1112,8 +1132,27 @@ func dnssecKeyMgmt(role, cmd string) {
 		if tr.Msg != "" {
 			fmt.Printf("%s\n", tr.Msg)
 		}
+
+	case "check":
+		fmt.Print(formatKeyViolations(tr.Msg, tr.KeyViolations))
+		if len(tr.KeyViolations) > 0 {
+			os.Exit(1)
+		}
 	}
 
+}
+
+// formatKeyViolations renders "keystore dnssec check": the daemon's summary
+// and one line per violation.
+func formatKeyViolations(msg string, violations []tdns.KeyInvariantViolation) string {
+	var b strings.Builder
+	if msg != "" {
+		b.WriteString(msg + "\n")
+	}
+	for _, v := range violations {
+		b.WriteString("  " + v.String() + "\n")
+	}
+	return b.String()
 }
 
 // dnssecKeyPurgeCmd handles "keystore dnssec purge". The zone "all"

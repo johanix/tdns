@@ -33,9 +33,13 @@ func parseRR(t *testing.T, s string) dns.RR {
 }
 
 func rrsigBy(zone string, covered uint16, keytag uint16) dns.RR {
+	return rrsigByAlg(zone, covered, keytag, dns.ED25519)
+}
+
+func rrsigByAlg(zone string, covered uint16, keytag uint16, alg uint8) dns.RR {
 	return &dns.RRSIG{
 		Hdr:         dns.RR_Header{Name: zone, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
-		TypeCovered: covered, Algorithm: dns.ED25519, KeyTag: keytag, SignerName: zone,
+		TypeCovered: covered, Algorithm: alg, KeyTag: keytag, SignerName: zone,
 	}
 }
 
@@ -158,8 +162,8 @@ func TestCheckerI3DsOnlyOnSepKeys(t *testing.T) {
 
 func TestCheckerI4OneSignerPerRoleAndAlgorithm(t *testing.T) {
 	c := newCheckerZone(t)
-	// A second active ZSK of the same algorithm, served and signing nothing:
-	// only I4 is broken by it once the RRset includes it.
+	// A second active ZSK of the same algorithm, served and signing the SOA
+	// beside the first: only I4 is broken by it.
 	row := testKeyRow(c.zd.ZoneName, DnskeyStateActive, "ZSK", newTestRand(11))
 	tx, _ := c.kdb.Begin("i4")
 	if err := insertKeyRowTx(tx, row); err != nil {
@@ -170,6 +174,9 @@ func TestCheckerI4OneSignerPerRoleAndAlgorithm(t *testing.T) {
 	dk, _ := c.zd.RRsetForAnalysis(c.zd.ZoneName, dns.TypeDNSKEY)
 	rrs := append(append([]dns.RR{}, dk.RRs...), parseRR(t, row.KeyRR))
 	stageApexRRset(t, c.zd, dns.TypeDNSKEY, rrs, dk.RRSIGs)
+	soa, _ := c.zd.RRsetForAnalysis(c.zd.ZoneName, dns.TypeSOA)
+	sigs := append(append([]dns.RR{}, soa.RRSIGs...), rrsigBy(c.zd.ZoneName, dns.TypeSOA, row.Keyid))
+	stageApexRRset(t, c.zd, dns.TypeSOA, soa.RRs, sigs)
 	expectOnly(t, CheckKeyInvariants(c.kdb, c.zd), "I4")
 }
 
@@ -188,7 +195,7 @@ func TestCheckerI4AllowsTwoSepSignersOfDifferentAlgorithms(t *testing.T) {
 	tx.Commit()
 	dk, _ := c.zd.RRsetForAnalysis(c.zd.ZoneName, dns.TypeDNSKEY)
 	rrs := append(append([]dns.RR{}, dk.RRs...), rr)
-	sigs := append(append([]dns.RR{}, dk.RRSIGs...), rrsigBy(c.zd.ZoneName, dns.TypeDNSKEY, row.Keyid))
+	sigs := append(append([]dns.RR{}, dk.RRSIGs...), rrsigByAlg(c.zd.ZoneName, dns.TypeDNSKEY, row.Keyid, dns.ECDSAP256SHA256))
 	stageApexRRset(t, c.zd, dns.TypeDNSKEY, rrs, sigs)
 	if vs := CheckKeyInvariants(c.kdb, c.zd); len(vs) != 0 {
 		t.Errorf("an algorithm rollover's two SEP signers were reported: %s", violationList(vs))

@@ -859,6 +859,18 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		resp = *purgeResp
 		needsRepublish = true
 
+	case "check":
+		// The key invariants (keyrow_check.go) for one zone, or for every
+		// zone in the keystore. Read-only.
+		violations, n, err := kdb.checkKeystoreZones(kp.Zone)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		resp.KeyViolations = violations
+		resp.Msg = fmt.Sprintf("Checked the key invariants of %d zone(s): %d violation(s)", n, len(violations))
+
 	default:
 		resp.Msg = fmt.Sprintf("Unknown keystore dnssec sub-command: %s", kp.SubCommand)
 		lgSigner.Warn("unknown DnssecKeyMgmt subcommand", "subcommand", kp.SubCommand)

@@ -347,34 +347,6 @@ func (kdb *KeyDB) checkKeyColumnsAtOpen() error {
 	return nil
 }
 
-// KeyInvariantViolation is one finding of CheckKeyInvariants: which invariant
-// (I1..I9 of the test plan), in which zone, for which key.
-type KeyInvariantViolation struct {
-	Invariant string
-	Zone      string
-	KeyID     uint16
-	Detail    string
-}
-
-func (v KeyInvariantViolation) String() string {
-	if v.KeyID != 0 {
-		return fmt.Sprintf("%s %s keyid %d: %s", v.Invariant, v.Zone, v.KeyID, v.Detail)
-	}
-	return fmt.Sprintf("%s %s: %s", v.Invariant, v.Zone, v.Detail)
-}
-
-// CheckKeyInvariants checks I1-I9 for one zone: the row-level invariants
-// against the keystore, and the served-zone ones (I5, I6, I7) against zd's
-// snapshot when the zone is loaded.
-func CheckKeyInvariants(kdb *KeyDB, zd *ZoneData) []KeyInvariantViolation {
-	return []KeyInvariantViolation{{Invariant: "I0", Detail: "not implemented"}}
-}
-
-// CheckKeyRowInvariants is CheckKeyInvariants for a zone that is not loaded.
-func CheckKeyRowInvariants(kdb *KeyDB, zone string) []KeyInvariantViolation {
-	return []KeyInvariantViolation{{Invariant: "I0", Zone: zone, Detail: "not implemented"}}
-}
-
 func nullBoolPtr(v sql.NullInt64) *bool {
 	if !v.Valid {
 		return nil
