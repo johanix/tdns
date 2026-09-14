@@ -34,7 +34,7 @@ include:
 
 service:
    name:              TDNS-AUTH
-   identities:        [ ns.axfr.net., nsa.johani.org., foo.com. ]
+   identities:        [ ns1.example.net., ns2.example.org., ns.example.com. ]
    verbose:           true
    debug:             true     # writes processed zone to disk
    # Optional clamps on the SOA Refresh value used for secondary
@@ -173,9 +173,9 @@ server:
 # on where current delegation data lives, and DS/NS records accumulate
 # without ever being removed.
 # delegationbackends:
-#   - name:       files-dnslab
+#   - name:       files-example
 #     type:       zonefile
-#     directory:  /var/lib/tdns/delegations/dnslab
+#     directory:  /var/lib/tdns/delegations/example.com
 
 # Named policies, referenced per-zone with `delegationpolicy: <name>`.
 # Omit binds `default`. A name that does not resolve quarantines the zone.
@@ -344,12 +344,12 @@ parentsync:
 
 scanner:
    interval:  30                        # seconds between periodic scan runs
-   options:   [ no-dnssec-validation ]
-   # options: [ at-apex ]                  # RFC 8078 opportunistic onboarding
-   # options: [ at-ns ]                    # RFC 9615 signaling name verification
-   # options: [ no-dnssec-validation ]     # accept CDS without DNSSEC (lab only)
+   # What the scanner accepts from a child (CDS, CSYNC) is decided by the
+   # delegation policy bound to the parent zone: require-dnssec and mechanisms
+   # under childsync.policies. scanner.options no-dnssec-validation, at-apex
+   # and at-ns are ignored, and logged as such at startup.
    at-apex:
-      checks:    1     # consecutive all-NS checks before accepting (default: 1)
+      checks:    1     # only 1 is implemented; > 1 refuses an unvalidated at-apex bootstrap
       interval:  300   # seconds between checks (default: 300)
 
 # DNSSEC policies. Each policy is referenced from a zone's `dnssecpolicy:`
@@ -702,8 +702,8 @@ db:
 #       # key that differs REPLACES the keystore's copy instead of being skipped.
 #       #
 #       # Set this only where the exported directory is the source of truth and
-#       # the keystore is disposable — a host rebuilt from a config repo, e.g. a
-#       # training lab. It makes such a build scriptable with no manual step.
+#       # the keystore is disposable — a host rebuilt from a config repo on
+#       # every deploy. It makes such a build scriptable with no manual step.
 #       #
 #       # Do NOT set it on a host whose keystore is authoritative. Unlike the
 #       # one-shot 'bulk-import --force', this stays armed on every restart, so a
@@ -713,7 +713,7 @@ db:
 #       overwrite-existing-keys:  false
 
 log:
-   file:   /var/log/axfr.net/tdns-auth.log
+   file:   /var/log/tdns/tdns-auth.log
 
    # Global log level, applied to every subsystem unless overridden below.
    # One of: debug | info | warn | error   (empty defaults to info)
@@ -753,17 +753,17 @@ common:
 # response to queries for child._dsync.parent. DSYNC
 registrars:
    ooga-reg:
-      - child._dsync.parent.   IN DSYNC CDS    NOTIFY 5354 notifications.ooga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC CSYNC  NOTIFY 5354 notifications.ooga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC ANY    UPDATE 5354 updates.ooga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC CDS    NOTIFY 5354 notifications.ooga-reg.example.net.
+      - child._dsync.parent.   IN DSYNC CSYNC  NOTIFY 5354 notifications.ooga-reg.example.net.
+      - child._dsync.parent.   IN DSYNC ANY    UPDATE 5354 updates.ooga-reg.example.net.
    booga-reg:
-      - child._dsync.parent.   IN DSYNC CDS    NOTIFY 5354 notifications.booga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC CSYNC  NOTIFY 5354 notifications.booga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC ANY    UPDATE 5354 notifications.booga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC CDS    NOTIFY 5354 notifications.booga-reg.example.net.
+      - child._dsync.parent.   IN DSYNC CSYNC  NOTIFY 5354 notifications.booga-reg.example.net.
+      - child._dsync.parent.   IN DSYNC ANY    UPDATE 5354 notifications.booga-reg.example.net.
    mooga-reg:
-      - child._dsync.parent.   IN DSYNC CDS    NOTIFY 5354 notifications.mooga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC CSYNC  NOTIFY 5354 notifications.mooga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC ANY    UPDATE 5354 notifications.mooga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC CDS    NOTIFY 5354 notifications.mooga-reg.example.net.
+      - child._dsync.parent.   IN DSYNC CSYNC  NOTIFY 5354 notifications.mooga-reg.example.net.
+      - child._dsync.parent.   IN DSYNC ANY    UPDATE 5354 notifications.mooga-reg.example.net.
 
 # journal: -- the delta journal (persistence of zone updates).
 #

@@ -128,25 +128,29 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 
 ### RFC 7477 - Child-to-Parent Synchronization in DNS (CSYNC)
 **Status**: ✅ Partially Supported  
-**Implementation**: `tdns/scanner_csync.go`  
+**Implementation**: `tdns/v2/ops_csync.go` (child); `tdns/v2/scanner.go` (`ProcessCSYNCNotify`), `tdns/v2/delegation_csync.go`, `tdns/v2/scanner_trust.go` (parent)  
 **Notes**: 
-- CSYNC record parsing and processing
-- References RFC 7477 procedures in code comments
-- Used for scanning child zones for delegation changes
+- **Child:** publishes a CSYNC with the `immediate` flag and the type bitmap `A NS AAAA`, replacing the previous record rather than adding to it.
+- **Parent:** a NOTIFY(CSYNC) starts a scan that copies the child's NS RRset and in-bailiwick glue into the parent's delegation.
+- **DNSSEC (§2, §3):** under a parent zone delegation policy with `require-dnssec: true`, the SOA, the CSYNC and all data copied from the child must validate Secure, or nothing is processed. Under `require-dnssec: false` nothing is validated, and the scan result says so.
+- **Limits:** only immediate processing; `soaminimum` is honoured. Glue for a nameserver that cannot be reached is left as it is.
 
 ### RFC 7344 - Automating DNSSEC Delegation Trust Maintenance (CDS)
-**Status**: ✅ Supported  
-**Implementation**: Standard DNS record type support  
+**Status**: ✅ Partially Supported  
+**Implementation**: `tdns/v2/ops_cds.go`, `tdns/v2/ds_engine.go` (child); `tdns/v2/scanner.go` (`ProcessCDSNotify`), `tdns/v2/scanner_trust.go` (parent)  
 **Notes**: 
-- CDS record type is recognized and can be queried/managed
-- Used in multi-provider synchronization scenarios
+- **Child:** the DS engine publishes CDS records derived from the zone's KSKs.
+- **Parent:** a NOTIFY(CDS) starts a scan that turns the CDS RRset every child nameserver serves into the child's DS RRset.
+- **DNSSEC (§6.2):** for a child that has a DS, the CDS must validate Secure under a parent zone delegation policy with `require-dnssec: true`.
+- **Not yet:** the §4.1 signer rule, a key in the DS RRset signing the CDS. tdns signs CDS with its ZSKs, so the signer and the parent's check change together: [tdns#641](https://github.com/johanix/tdns/issues/641).
 
 ### RFC 8078 - Managing DS Records from the Parent via CDS/CDNSKEY (CDNSKEY)
-**Status**: ✅ Supported  
-**Implementation**: Standard DNS record type support  
+**Status**: ✅ Partially Supported  
+**Implementation**: `tdns/v2/scanner.go`, `tdns/v2/scanner_trust.go` (parent)  
 **Notes**: 
-- CDNSKEY record type is recognized and can be queried/managed
-- Used alongside CDS for delegation trust maintenance
+- **Delete (§4):** a CDS with algorithm 0 removes the child's DS RRset; for a child with no DS it changes nothing. tdns does not publish the delete CDS as a child.
+- **Bootstrap (§3):** a child with no DS gets its first DS only through a mechanism the parent zone's delegation policy lists. `at-apex` accepts the apex CDS after one check under `require-dnssec: false`, and refuses when `scanner.at-apex.checks` is above 1, since repeated checks (§3.3) are not implemented. Under `require-dnssec: true` the apex CDS of a child without a DS is not Secure, so the first DS comes through `at-ns` (RFC 9615).
+- **CDNSKEY:** served and queryable. The parent acts on CDS only, and a child publishes no CDNSKEY of its own; a secondary republishes a customer's CDNSKEY at the RFC 9615 signaling names.
 
 ### RFC 9460 - Service Binding and Parameter Specification via the DNS (SVCB)
 **Status**: ✅ Supported  
@@ -178,14 +182,15 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
   than the child's. `signalOwnerName()` is the single spelling of that name,
   shared by the producer and both consumers so they cannot drift.
 - **Consumer, parent side** (`queryCDSAtSignalingNames`, `tdns/v2/scanner.go`):
-  a scanner configured with the `at-ns` option verifies every NOTIFY(CDS) this
-  way instead of by direct DNSSEC validation. It queries CDS at the signaling
-  name under each *out-of-bailiwick* NS via the IMR, requires each answer to be
-  DNSSEC-validated (unless run with `no-dnssec-validation`), requires every NS
-  to agree, and checks the result against a direct query to the child; any
-  failure rejects the NOTIFY. A child whose NS are all in-bailiwick has no
-  signaling name a parent can validate, so that case falls back to the
-  direct/apex path.
+  when the delegation policy bound to the parent zone lists `at-ns`, a
+  NOTIFY(CDS) for a child with no DS is verified this way. It queries CDS at the
+  signaling name under each *out-of-bailiwick* NS via the IMR, requires each
+  answer to be DNSSEC-validated when the policy has `require-dnssec: true`,
+  requires every NS to agree, and checks the result against a direct query to
+  the child; any failure refuses the NOTIFY. A child whose NS are all
+  in-bailiwick has no signaling name. `at-apex` is then the only mechanism
+  left, and under `require-dnssec` it cannot bootstrap a first DS: without a
+  DS at the parent, the apex CDS is not Secure.
 - **Consumer, SIG(0) side** (`LookupChildKeyAtSignal`, `tdns/v2/truststore_verify.go`):
   the same shape for a child's SIG(0) `KEY` at `_sig0key.<child>._signal.<ns>`,
   used to verify a child's key before trusting a cross-zone-cut DNS UPDATE.

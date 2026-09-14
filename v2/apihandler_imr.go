@@ -333,6 +333,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				"upgrade_indirect_cache_hits": upgradeStr,
 				"cache_max_ttl":               t.CacheMaxTTL,
 				"cache_min_ttl":               t.CacheMinTTL,
+				"zone_state_recheck":          t.ZoneStateRecheck.String(),
 			}
 			resp.Data = data
 			resp.Msg = "IMR tuning snapshot"
@@ -393,6 +394,65 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				}
 			} else {
 				resp.Msg = fmt.Sprintf("%d zone-scoped backoffs", len(records))
+			}
+
+		case "imr-resolve":
+			// A lookup through the resolver, which is what "imr query" does
+			// inside tdns-imr's own shell. imr-query above reads the cache and
+			// nothing else; tdns-cli had no way to ask the daemon a question.
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			qname, _ := amp.Data["qname"].(string)
+			qtypeStr, _ := amp.Data["qtype"].(string)
+			if qname == "" || qtypeStr == "" {
+				resp.Error = true
+				resp.ErrorMsg = "qname and qtype are required"
+				return
+			}
+			qname = dns.Fqdn(qname)
+			qtype, ok := dns.StringToType[strings.ToUpper(qtypeStr)]
+			if !ok {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("unknown RR type: %s", qtypeStr)
+				return
+			}
+			ir, err := imr.ImrQuery(r.Context(), qname, qtype, dns.ClassINET, nil)
+			data := map[string]interface{}{"qname": qname, "qtype": dns.TypeToString[qtype]}
+			if ir != nil {
+				data["state"] = cache.ValidationStateToString[ir.ValidationState]
+				data["validated"] = ir.Validated
+				if ir.RRset != nil {
+					var rrs, sigs []string
+					for _, rr := range ir.RRset.RRs {
+						rrs = append(rrs, rr.String())
+					}
+					for _, rr := range ir.RRset.RRSIGs {
+						sigs = append(sigs, rr.String())
+					}
+					data["records"] = rrs
+					data["rrsigs"] = sigs
+				}
+			}
+			// A denial is cached with its own context and verdict; say which.
+			if c := imr.Cache.Get(qname, qtype); c != nil &&
+				(c.Context == cache.ContextNXDOMAIN || c.Context == cache.ContextNoErrNoAns) {
+				data["negative"] = cache.CacheContextToString[c.Context]
+				data["state"] = cache.ValidationStateToString[c.State]
+			}
+			resp.Data = data
+			switch {
+			case err != nil:
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			case ir != nil && ir.Error:
+				resp.Error = true
+				resp.ErrorMsg = ir.ErrorMsg
+			default:
+				resp.Msg = fmt.Sprintf("%s %s", qname, dns.TypeToString[qtype])
 			}
 
 		case "imr-transport-stats":

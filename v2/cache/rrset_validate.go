@@ -43,6 +43,9 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 		log.Printf("ValidateRRset: evaluating signature: signer=%q keyid=%d covered=%s inception=%d expiration=%d",
 			signer, keyid, dns.TypeToString[sig.TypeCovered], sig.Inception, sig.Expiration)
 	}
+	// A signer held Insecure has its parent asked for a DS again once the state
+	// has stood for ZoneStateRecheck.
+	rrcache.recheckInsecureZone(ctx, signer, fetcher)
 	// Check the signer zone's state in ZoneMap. If indeterminate or insecure, we cannot validate.
 	if zone, ok := rrcache.ZoneMap.Get(signer); ok {
 		switch zone.GetState() {
@@ -311,8 +314,13 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 	// (Go-default-initialised) is 0, NOT ValidationStateNone (=1). A cached
 	// entry written without an explicit State field has State==0 and must be
 	// treated as "not validated yet", not as a usable cached verdict.
+	//
+	// Indeterminate is not reused either. It records that the chain could not be
+	// followed when the entry was made -- a DNSKEY fetch that timed out, an
+	// anchor not loaded yet -- and reusing it turned a moment's gap into the
+	// verdict for the rest of the entry's lifetime.
 	cached := rrcache.Get(rrset.Name, rrset.RRtype)
-	if cached != nil && cached.State > ValidationStateNone {
+	if cached != nil && cached.State > ValidationStateNone && cached.State != ValidationStateIndeterminate {
 		// Get() already checks expiration and returns nil if expired, so if cached is not nil, it's not expired
 		// But we double-check expiration to be explicit about the semantics
 		if cached.Expiration.Before(time.Now()) {
@@ -359,14 +367,28 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 	log.Printf("ValidateRRset: start: owner=%q type=%s sigs=%d rrs=%d",
 		rrset.Name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs), len(rrset.RRs))
 
-	// Early check: if the zone containing this RRset is insecure (unsigned),
-	// return insecure state (regardless of whether RRset has RRSIGs or not)
-	zoneName := dns.Fqdn(rrset.Name)
-	if zone, ok := rrcache.ZoneMap.Get(zoneName); ok && zone.GetState() == ValidationStateInsecure {
-		if rrcache.Verbose {
-			log.Printf("ValidateRRset: zone %q is insecure (unsigned); returning insecure state for %s %s", zoneName, rrset.Name, dns.TypeToString[rrset.RRtype])
+	// Early check, for an unsigned RRset: if the zone it belongs to is
+	// insecure, so is the RRset. For a DS that zone is the parent's.
+	//
+	// A signed RRset is judged by its signer instead, in
+	// validateRRsetWithRRSIG. Owner and signer differ at a zone cut, where the
+	// parent's DS and NSEC carry the child's name but are the parent's data,
+	// signed with the parent's key. Judged by the owner, a child held Insecure
+	// had a new DS reported Insecure without the parent's signature being
+	// looked at, so the child could never become Secure; and the parent's NSEC
+	// proving there was no DS came back Insecure, which a denial from a secure
+	// parent turns into Bogus (#636).
+	if len(rrset.RRSIGs) == 0 {
+		zoneName := dns.Fqdn(rrset.Name)
+		if rrset.RRtype == dns.TypeDS {
+			zoneName = parentOf(zoneName)
 		}
-		return ValidationStateInsecure, nil
+		if zone, ok := rrcache.ZoneMap.Get(zoneName); ok && zone.GetState() == ValidationStateInsecure {
+			if rrcache.Verbose {
+				log.Printf("ValidateRRset: zone %q is insecure (unsigned); returning insecure state for %s %s", zoneName, rrset.Name, dns.TypeToString[rrset.RRtype])
+			}
+			return ValidationStateInsecure, nil
+		}
 	}
 
 	// Special-case DNSKEY RRset validation: must anchor via DS and the specific KSK
@@ -398,10 +420,15 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 			}
 		}
 
-		// Fallback: walk up the domain name and check ZoneMap
+		// Fallback: walk up the domain name and check ZoneMap. A DS is the
+		// parent's data, so for a DS the walk starts at the parent.
 		if foundZone == nil {
 			labels := strings.Split(name, ".")
-			for i := 0; i < len(labels)-1; i++ {
+			start := 0
+			if rrset.RRtype == dns.TypeDS {
+				start = 1
+			}
+			for i := start; i < len(labels)-1; i++ {
 				zoneName := strings.Join(labels[i:], ".")
 				if zone, ok := rrcache.ZoneMap.Get(zoneName); ok {
 					foundZone = zone
@@ -632,6 +659,9 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	var zstate ValidationState
 
 	// Check if zone is in ZoneMap and return early for cases not requiring further validation
+	if len(rrset.RRSIGs) > 0 {
+		rrcache.recheckInsecureZone(ctx, name, fetcher)
+	}
 	if zone, ok := rrcache.ZoneMap.Get(name); ok {
 		zstate = zone.GetState()
 		switch zstate {
@@ -1023,25 +1053,71 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 	if !dns.IsSubDomain(zoneName, qnameCanon) {
 		return ValidationStateBogus, rcode, nil // XXX: The zone name does not match the qname
 	}
-	if !hasSignatures {
-		return ValidationStateInsecure, rcode, nil // XXX: Need to know if zone is secure, but for now: No signatures, so we are insecure
+	// What the resolver already knows about the zone decides what a missing
+	// signature means. In a zone known to be signed, a denial with no signatures
+	// at all is not an insecure answer, it is a stripped one.
+	zoneSecure := false
+	if zone, ok := rrcache.ZoneMap.Get(zoneName); ok && zone.GetState() == ValidationStateSecure {
+		zoneSecure = true
 	}
+	if !hasSignatures {
+		if zoneSecure {
+			return ValidationStateBogus, rcode, nil
+		}
+		return ValidationStateInsecure, rcode, nil
+	}
+
+	// Only records that validated can prove anything. The NSEC and NSEC3 records
+	// collected above came from every authority RRset, signed or not, so the
+	// coverage checks below used to accept an unsigned NSEC placed beside a
+	// validly signed SOA as a secure proof. They now see only the ones that
+	// validated Secure.
+	//
+	// And a proof that validated Insecure -- a zone the resolver holds as
+	// insecure -- is served, but proves nothing: it used to fall through to the
+	// coverage checks, which then returned Secure, and the answer went out with
+	// AD from a zone that has no chain of trust.
+	var provenNsecs []*dns.NSEC
+	provenNsec3 := false
+	sawInsecure := false
 	for _, set := range negAuthority {
 		if set == nil {
 			continue
 		}
 		if len(set.RRSIGs) == 0 {
-			continue // XXX: Here we need to know if the zone is insecure or not, for now: no signatures, so we are insecure
+			continue
 		}
 		vstate, err := rrcache.ValidateRRset(ctx, set, fetcher)
 		if err != nil {
 			return vstate, rcode, err
 		}
 		// The Auth section has a set of RRsets that prove non-existence. Each RRset must validate for the proof to be valid
-		if vstate == ValidationStateBogus || vstate == ValidationStateIndeterminate {
+		switch vstate {
+		case ValidationStateBogus, ValidationStateIndeterminate:
 			return vstate, rcode, fmt.Errorf("negative authority RRset for %s is bogus or indeterminate", qname)
+		case ValidationStateSecure:
+		default:
+			sawInsecure = true
+			continue
+		}
+		switch set.RRtype {
+		case dns.TypeNSEC:
+			for _, rr := range set.RRs {
+				if nsec, ok := rr.(*dns.NSEC); ok {
+					provenNsecs = append(provenNsecs, nsec)
+				}
+			}
+		case dns.TypeNSEC3:
+			provenNsec3 = true
 		}
 	}
+	if sawInsecure {
+		if zoneSecure {
+			return ValidationStateBogus, rcode, nil
+		}
+		return ValidationStateInsecure, rcode, nil
+	}
+	nsecs, nsec3Present = provenNsecs, provenNsec3
 
 	// NSEC case: Check for traditional denial (NXDOMAIN) or compact denial (RFC 9824)
 	if len(nsecs) > 0 {
@@ -1082,26 +1158,30 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 			}
 		}
 
-		// Traditional denial (NXDOMAIN): NSECs must cover both qname and wildcard
-		baseZone := strings.TrimSuffix(zoneName, ".")
-		wildcard := dns.CanonicalName("*." + baseZone)
-		coveredQname := false
-		coveredWildcard := false
+		// Traditional denial (NXDOMAIN), RFC 4035 §5.4: an NSEC covering qname,
+		// and one covering the wildcard at the closest encloser that NSEC
+		// proves. The wildcard used to be the one at the zone apex, which is the
+		// right name only when the closest encloser IS the apex: a denial below
+		// an existing name was declared bogus for lacking a record it does not
+		// need.
+		var qnameCover *dns.NSEC
 		for _, nsec := range nsecs {
 			if nsecCoversName(qnameCanon, nsec) {
-				coveredQname = true
-			}
-			if nsecCoversName(wildcard, nsec) {
-				coveredWildcard = true
-			}
-			if coveredQname && coveredWildcard {
+				qnameCover = nsec
 				break
 			}
 		}
-		if !coveredQname || !coveredWildcard {
-			return ValidationStateBogus, rcode, nil // The NSECs do not cover the qname and the wildcard
+		if qnameCover == nil {
+			return ValidationStateBogus, rcode, nil // no NSEC covers the qname
 		}
-		return ValidationStateSecure, rcode, nil // NSECs present, we do not yet verify them, but we assume they are secure so we are secure
+		wildcard := wildcardAt(closestEncloser(qnameCanon, qnameCover, zoneName))
+		for _, nsec := range nsecs {
+			if nsecCoversName(wildcard, nsec) {
+				// Every record used here validated Secure above.
+				return ValidationStateSecure, rcode, nil
+			}
+		}
+		return ValidationStateBogus, rcode, nil // no NSEC covers the wildcard at the closest encloser
 	}
 
 	// NSEC3 case: Check for traditional denial (NXDOMAIN) or compact denial (RFC 9824 NODATA)
@@ -1142,20 +1222,28 @@ func WithinValidityPeriod(inc, exp uint32, t time.Time) bool {
 	return ti <= utc && utc <= te
 }
 
+// nsecCoversName reports whether an NSEC proves that name does not exist: name
+// sorts strictly between the NSEC's owner and its next name in canonical order,
+// or, for the NSEC that closes the chain (next sorts before owner), after the
+// owner or before the next name.
+//
+// Canonical order, not string order: see canonicalNameCompare. And strictly
+// between: the owner exists, so an NSEC never proves its own owner absent.
 func nsecCoversName(name string, nsec *dns.NSEC) bool {
 	if nsec == nil {
 		return false
 	}
-	owner := dns.CanonicalName(nsec.Hdr.Name)
-	next := dns.CanonicalName(nsec.NextDomain)
-	target := dns.CanonicalName(name)
-	if owner == next {
-		return true
+	afterOwner := canonicalNameCompare(name, nsec.Hdr.Name) > 0
+	beforeNext := canonicalNameCompare(name, nsec.NextDomain) < 0
+	switch c := canonicalNameCompare(nsec.Hdr.Name, nsec.NextDomain); {
+	case c == 0:
+		// A zone of one name: its NSEC points at itself and covers every other name.
+		return canonicalNameCompare(name, nsec.Hdr.Name) != 0
+	case c < 0:
+		return afterOwner && beforeNext
+	default:
+		return afterOwner || beforeNext
 	}
-	if strings.Compare(owner, next) < 0 {
-		return strings.Compare(target, owner) >= 0 && strings.Compare(target, next) < 0
-	}
-	return strings.Compare(target, owner) >= 0 || strings.Compare(target, next) < 0
 }
 
 // typeInBitmap checks if a given record type is present in an NSEC type bitmap.

@@ -261,10 +261,17 @@ func DsyncApiPostDelegation() func(w http.ResponseWriter, r *http.Request) {
 		// parent checks that itself, on every channel, because a check done by
 		// the requesting client is not a check.
 		if cerr := zd.CheckDelegationCoherenceForUpdate(actions,
-			imrDnskeyFetcher(Conf.Internal.ImrEngine)); cerr != nil {
-			lgDsyncApi.Warn("DSYNC API update refused as incoherent",
-				"zone", zd.ZoneName, "child", child, "principal", cred.Principal, "err", cerr)
-			dsyncApiError(w, http.StatusConflict, "%v", cerr)
+			coherenceDnskeyFetcher(&Conf)); cerr != nil {
+			status := dsyncApiCoherenceStatus(cerr)
+			if status == http.StatusServiceUnavailable {
+				lgDsyncApi.Warn("DSYNC API update deferred: the delegation could not be verified yet",
+					"zone", zd.ZoneName, "child", child, "principal", cred.Principal, "err", cerr)
+				w.Header().Set("Retry-After", "15")
+			} else {
+				lgDsyncApi.Warn("DSYNC API update refused as incoherent",
+					"zone", zd.ZoneName, "child", child, "principal", cred.Principal, "err", cerr)
+			}
+			dsyncApiError(w, status, "%v", cerr)
 			return
 		}
 		// And the NS/glue half, on the same rules the CSYNC scanner applies.

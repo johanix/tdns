@@ -1303,6 +1303,10 @@ type wantAlgs struct {
 	mode string // "csk" | "ksk-zsk"
 	ksk  string // KSK (split) or CSK (csk mode) algorithm name
 	zsk  string // ZSK algorithm name (unused in csk mode)
+	// kskEngine: the policy has an auto-rollover engine (rollover.method
+	// multi-ds or double-signature), which carries a KSK algorithm change
+	// as a KSK algorithm rollover -- so such a change is not a miss.
+	kskEngine bool
 }
 
 // activeKeyAlgs is the set of active-key algorithm NAMES present per role in the
@@ -1321,12 +1325,14 @@ type roleMiss struct {
 
 // missingRoleAlgs is the pure dry-run of reconcileActiveKeyAlgorithms, in the
 // lenient zoneActiveKeysMatchAlgs sense: a role is a "miss" only when the zone
-// HAS active key(s) for that role but NONE carries the wanted algorithm. Two
+// HAS active key(s) for that role but NONE carries the wanted algorithm. Three
 // deliberate non-findings:
 //   - zero active keys for a role -> not a miss: the signer generates fresh
 //     keys of the policy algorithm on first sign, it does not refuse.
 //   - the wanted algorithm present alongside a wrong-algorithm key
 //     (mid-rollover, both old+new active) -> not a miss.
+//   - a KSK algorithm change under a policy with an auto-rollover engine
+//     (want.kskEngine) -> not a miss: the engine rolls the algorithm.
 //
 // Pure and dependency-free so it is directly unit-testable.
 func missingRoleAlgs(want wantAlgs, active activeKeyAlgs) []roleMiss {
@@ -1344,9 +1350,24 @@ func missingRoleAlgs(want wantAlgs, active activeKeyAlgs) []roleMiss {
 		check("CSK", want.ksk, active.ksk)
 		return miss
 	}
-	check("KSK", want.ksk, active.ksk)
+	if !want.kskEngine {
+		check("KSK", want.ksk, active.ksk)
+	}
 	check("ZSK", want.zsk, active.zsk)
 	return miss
+}
+
+// policyHasKskEngine reports whether a rollover.method name denotes an
+// auto-rollover engine that carries KSK algorithm changes.
+func policyHasKskEngine(method string) bool {
+	// Only the two methods the engine implements count. The declared
+	// value is copied unvalidated from the file (ResolveDnssecPolicyAlgNames),
+	// so a typo must read as "no engine", not as one.
+	switch lc(strings.TrimSpace(method)) {
+	case "multi-ds", "double-signature":
+		return true
+	}
+	return false
 }
 
 func sortedKeys(m map[string]bool) []string {
@@ -1403,16 +1424,18 @@ func resolveWantAlgs(polName string, declared map[string]tdns.PolicyAlgNames, se
 		// PQ policy this client cannot codepoint-resolve is still comparable — the
 		// active-key side is server-reported names too.
 		return wantAlgs{
-			mode: normalizeMode(pa.Mode),
-			ksk:  lc(pa.KSKAlg),
-			zsk:  lc(pa.ZSKAlg),
+			mode:      normalizeMode(pa.Mode),
+			ksk:       lc(pa.KSKAlg),
+			zsk:       lc(pa.ZSKAlg),
+			kskEngine: policyHasKskEngine(pa.RolloverMethod),
 		}, true
 	}
 	if sp, ok := serverPols[pn]; ok {
 		return wantAlgs{
-			mode: normalizeMode(sp.Mode),
-			ksk:  lc(sp.KSKAlgorithm),
-			zsk:  lc(sp.ZSKAlgorithm),
+			mode:      normalizeMode(sp.Mode),
+			ksk:       lc(sp.KSKAlgorithm),
+			zsk:       lc(sp.ZSKAlgorithm),
+			kskEngine: policyHasKskEngine(sp.RolloverMethod),
 		}, true
 	}
 	return wantAlgs{}, false
@@ -1498,9 +1521,9 @@ func checkPolicyAlgVsActiveKeys(cfg *tdns.Config, v *viper.Viper, rep *ccReport,
 		}
 		for _, m := range miss {
 			rep.warn(g, z.name,
-				fmt.Sprintf("config policy %q wants %s algorithm %s, but the running zone's active %s key(s) are [%s]. A reload-zones/restart would REFUSE this change (no automatic KSK/ZSK-algorithm rollover) — the zone keeps serving its current signatures until they expire, then goes bogus",
+				fmt.Sprintf("config policy %q wants %s algorithm %s, but the running zone's active %s key(s) are [%s]. A reload-zones/restart would REFUSE this change (nothing carries it: a KSK needs rollover.method multi-ds or double-signature, a ZSK needs dnssec.completeness: relaxed) — the zone keeps serving its current signatures until they expire, then goes bogus",
 					z.policy, m.role, m.wantAlg, m.role, strings.Join(m.haveAlgs, ", ")),
-				"roll the key deliberately via the rollover engine, or (test zones only) `tdns-cli auth zone dnssec policy-reset`")
+				"give the policy an auto-rollover engine (KSK) or relaxed completeness (ZSK) so the change rolls gradually, or (test zones only) `tdns-cli auth zone dnssec policy-reset`")
 		}
 	}
 }

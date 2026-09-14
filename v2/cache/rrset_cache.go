@@ -37,17 +37,22 @@ func dnskeyKey(zonename string, keyid uint16) string {
 	return fmt.Sprintf("%s::%d", core.CanonicalizeName(zonename), keyid)
 }
 
+// Get returns the key stored under zonename::keyid. An expired learned key is
+// removed and not returned. A trust anchor is returned whatever its Expiration
+// says: it is configuration, and once it is gone nothing below it can validate
+// again for the life of the process.
 func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 	lookupKey := dnskeyKey(zonename, keyid)
 	tmp, ok := dkc.Map.Get(lookupKey)
 	if !ok {
 		return nil
 	}
-	if tmp.Expiration.Before(time.Now()) {
-		dkc.Map.Remove(lookupKey)
-		// if dkc.Debug {
-		//	log.Printf("DnskeyCache: Removed expired key %s", lookupKey)
-		//}
+	if !tmp.TrustAnchor && tmp.Expiration.Before(time.Now()) {
+		// Under the shard lock, so a trust anchor stored since the read above
+		// is not removed in its place.
+		dkc.Map.RemoveCb(lookupKey, func(_ string, v CachedDnskeyRRset, exists bool) bool {
+			return exists && !v.TrustAnchor && v.Expiration.Before(time.Now())
+		})
 		return nil
 	}
 	return &tmp
@@ -58,13 +63,27 @@ func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 // that a key would stay usable for validation long after the RRset carrying it
 // had been capped out of the RRset cache. Trust anchors are configuration and
 // keep their own lifetime.
+//
+// A trust anchor's key is also a member of its zone's DNSKEY RRset, and every
+// fetch of that RRset stores the key again, with the RRset's TTL and, from
+// some callers, without the TrustAnchor flag. Such a write refreshes the key;
+// it does not end the anchor, so the flag and the longer lifetime are kept.
 func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRset) {
 	lookupKey := dnskeyKey(zonename, keyid)
-	entry := *cdr
-	if !entry.TrustAnchor {
-		entry.Expiration, _, _ = GetTTLLimits().bound(entry.Expiration, time.Now())
-	}
-	dkc.Map.Set(lookupKey, entry)
+	limits := GetTTLLimits()
+	now := time.Now()
+	dkc.Map.Upsert(lookupKey, *cdr, func(exists bool, old, entry CachedDnskeyRRset) CachedDnskeyRRset {
+		if exists && old.TrustAnchor {
+			entry.TrustAnchor = true
+			if old.Expiration.After(entry.Expiration) {
+				entry.Expiration = old.Expiration
+			}
+		}
+		if !entry.TrustAnchor {
+			entry.Expiration, _, _ = limits.bound(entry.Expiration, now)
+		}
+		return entry
+	})
 }
 
 // var RRsetCache = NewRRsetCache()
@@ -215,7 +234,9 @@ func (rrcache *RRsetCacheT) evictOldestRRset() {
 
 // FlushDomain removes cached RRsets at or below the provided domain.
 // When keepStructural is true, NS/DS/DNSKEY RRsets and the address
-// records for their nameservers are preserved.
+// records for their nameservers are preserved. When it is false, the
+// validation states of the zones at or below the domain go as well; see
+// forgetZoneStates.
 func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int, error) {
 	if rrcache == nil {
 		return 0, fmt.Errorf("rrcache is nil")
@@ -264,6 +285,10 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 	}
 	removed := len(keysToRemove)
 
+	if !keepStructural {
+		rrcache.forgetZoneStates(domain)
+	}
+
 	if !keepStructural && removed > 0 {
 		var auxKeys []string
 		for item := range rrcache.Servers.IterBuffered() {
@@ -289,7 +314,9 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 }
 
 // FlushAll removes all cached data except root zone priming data (NS for ".",
-// root server A/AAAA records). Returns the number of RRsets removed.
+// root server A/AAAA records), along with the validation state of every zone
+// without a trust anchor (see forgetZoneStates). Returns the number of RRsets
+// removed.
 func (rrcache *RRsetCacheT) FlushAll() int {
 	if rrcache == nil {
 		return 0
@@ -357,7 +384,51 @@ func (rrcache *RRsetCacheT) FlushAll() int {
 		rrcache.ServerMap.Remove(key)
 	}
 
+	rrcache.forgetZoneStates(".")
+
 	return len(keysToRemove)
+}
+
+// forgetZoneStates drops the validation state, and with it the address
+// backoffs, of every zone at or below domain ("." for all of them), except the
+// zones holding a configured trust anchor, whose state is configuration rather
+// than something learned. The next query into a dropped zone learns its state
+// from the chain again, as after a restart.
+//
+// That is what a flush is for. A zone's state is drawn from the data being
+// flushed -- the referral without a DS, the DNSKEY fetch that failed -- and kept
+// past it, the resolver goes on acting on a verdict about data it no longer
+// holds, and flushing changes nothing (#636).
+func (rrcache *RRsetCacheT) forgetZoneStates(domain string) {
+	anchored := rrcache.trustAnchorZones()
+	var keys []string
+	for item := range rrcache.ZoneMap.IterBuffered() {
+		if !isSubdomainOf(item.Key, domain) {
+			continue
+		}
+		if _, ok := anchored[core.CanonicalizeName(item.Key)]; ok {
+			continue
+		}
+		keys = append(keys, item.Key)
+	}
+	for _, key := range keys {
+		rrcache.ZoneMap.Remove(key)
+	}
+}
+
+// trustAnchorZones returns the canonical names of the zones with a trust anchor
+// in the DNSKEY cache.
+func (rrcache *RRsetCacheT) trustAnchorZones() map[string]struct{} {
+	zones := map[string]struct{}{}
+	if rrcache.DnskeyCache == nil {
+		return zones
+	}
+	for item := range rrcache.DnskeyCache.Map.IterBuffered() {
+		if item.Val.TrustAnchor {
+			zones[core.CanonicalizeName(item.Val.Name)] = struct{}{}
+		}
+	}
+	return zones
 }
 
 func isStructuralRRset(cr *CachedRRset, nsHosts map[string]struct{}) bool {
