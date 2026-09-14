@@ -97,6 +97,11 @@ authengine:
    #                              and NXDOMAIN/NODATA paths are unaffected.
    #                              Bool; absence = false. "minimal-responses:false"
    #                              disables explicitly.
+   #   allow-any-queries        — answer an ANY query with every RRset at the
+   #                              name, its NSEC included. Without it ANY gets
+   #                              a single RRset (RFC 8482). Bool; absence =
+   #                              false, and an invalid value also reads as
+   #                              false.
    #   parent-update:delta      — parent delegation update mode (delta only).
    # options:
    #    - minimal-responses
