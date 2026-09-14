@@ -68,6 +68,8 @@ type Scanner struct {
 	Jobs               map[string]*ScanJobStatus
 	JobsMutex          sync.RWMutex
 
+	poll scannerPollState // scanner_poll.go
+
 	// queryChild and validateRRset stand in, in tests, for the network behind
 	// the CDS and CSYNC paths: asking every child nameserver
 	// (queryAllNSAndCompare) and the IMR's validator. Nil in production; see
@@ -254,6 +256,11 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 			lg.Info("ScannerEngine: context cancelled")
 			return nil
 		case <-ticker.C:
+			if pc := readScannerPollConf(); pc.Enabled {
+				if !scanner.startPollRound(ctx, pollParents(Zones.Items()), pc) {
+					lg.Debug("ScannerEngine: the previous poll round is still running, skipping this tick")
+				}
+			}
 
 		case sr, ok := <-scannerq:
 			if !ok {
@@ -294,24 +301,14 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 							lg.Warn("ScannerEngine: parent zone has no DelegationBackend, cannot read current DS for diff", "child", sr.ChildZone, "parent", sr.ZoneData.ZoneName)
 						}
 					} else {
-						delegData, err := sr.ZoneData.DelegationBackend.GetDelegationData(sr.ZoneData.ZoneName, sr.ChildZone)
+						ds, err := currentDelegationDS(sr.ZoneData, sr.ChildZone)
 						if err != nil {
-							lg.Warn("ScannerEngine: error fetching delegation data", "child", sr.ChildZone, "error", err)
-						} else if delegData != nil {
-							var dsRRs []dns.RR
-							for _, rrsByType := range delegData {
-								if dsRecords, ok := rrsByType[dns.TypeDS]; ok {
-									dsRRs = append(dsRRs, dsRecords...)
-								}
-							}
-							if len(dsRRs) > 0 {
-								tuple.CurrentData.DS = &core.RRset{
-									Name:   sr.ChildZone,
-									RRtype: dns.TypeDS,
-									RRs:    dsRRs,
-								}
-							}
+							// Not "no DS": scanning on would treat a child that
+							// has a DS as one waiting for its first.
+							lg.Error("ScannerEngine: cannot read the current delegation, not scanning", "child", sr.ChildZone, "parent", sr.ZoneData.ZoneName, "error", err)
+							continue
 						}
+						tuple.CurrentData.DS = ds
 					}
 
 					sr.ScanTuples = []ScanTuple{tuple}
@@ -878,8 +875,13 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 		startSerial = soa.Serial
 	}
 
-	// 3. Query CSYNC from child — RFC 7477 step 2
-	csyncRRs, csyncInSync, err := fetch(ctx, childZone, dns.TypeCSYNC)
+	// 3. Query CSYNC from child — RFC 7477 step 2. Asked outside the trust
+	// gate: a child that publishes no CSYNC asks for nothing, and a no-op needs
+	// no authentication (like the CDS removal sentinel for a child without a
+	// DS). Through the secured fetcher, a missing CSYNC under require-dnssec
+	// was an error, which a poll would log for every such child on every round.
+	// A CSYNC that is there is validated before anything is read from it.
+	csyncRRset, csyncInSync, err := scanner.askChild(ctx, childZone, dns.TypeCSYNC, nsRRset, scanLog)
 	if err != nil {
 		fail("error querying CSYNC", err)
 		return
@@ -891,12 +893,19 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 		responseCh <- response
 		return
 	}
-	if len(csyncRRs) == 0 {
+	if csyncRRset == nil || len(csyncRRset.RRs) == 0 {
 		scanLog.Printf("ProcessCSYNCNotify: %s: no CSYNC records found", childZone)
 		response.DataChanged = false
 		responseCh <- response
 		return
 	}
+	if pol.RequireDnssec {
+		if err := scanner.requireSecure(ctx, csyncRRset, pol); err != nil {
+			fail("", err)
+			return
+		}
+	}
+	csyncRRs := csyncRRset.RRs
 
 	// Extract the CSYNC RR
 	var csyncrr *dns.CSYNC

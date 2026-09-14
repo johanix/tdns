@@ -348,7 +348,15 @@ parentsync:
 
 
 scanner:
-   interval:  30                        # seconds between periodic scan runs
+   interval:  30                        # seconds between periodic scan runs (poll rounds)
+   # Poll the children of every zone with allow-child-updates, for children
+   # that never send NOTIFY(CDS) or NOTIFY(CSYNC). A child with a DS is scanned
+   # for CSYNC and CDS. A child without one is not scanned unless bootstrap is
+   # set; then its CDS is, and a poll can give it its first DS.
+   poll:
+      enabled:     false
+      bootstrap:   false
+      concurrency: 4                    # children scanned at once
    # What the scanner accepts from a child (CDS, CSYNC) is decided by the
    # delegation policy bound to the parent zone: require-dnssec and mechanisms
    # under childsync.policies. scanner.options no-dnssec-validation, at-apex

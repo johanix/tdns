@@ -590,3 +590,28 @@ made stale. See `v2/scanner_trust.go`.
   for a nameserver the update adds or whose glue it touches.
 - **`StartScanner` starts `AuthQueryEngine`.** Without it the
   standalone scanner's first query to a child blocked forever.
+
+## Amendment, 2026-09-14 (c): polling
+
+The scanner polls. With `scanner.poll.enabled` set, a poll round
+runs every `scanner.interval` seconds over the children of every
+zone that allows child updates and has a delegation backend
+(`v2/scanner_poll.go`):
+
+- a child with a DS is scanned for CSYNC, then for CDS;
+- a child without a DS is not scanned unless
+  `scanner.poll.bootstrap` is set. Then only its CDS is, and a
+  poll can give it a first DS under the parent zone's delegation
+  policy. The setting is off by default.
+
+Each scan is the one a NOTIFY starts, and its changes are applied
+the same way. A round scans at most `scanner.poll.concurrency`
+children at once (default 4) and does not start while the
+previous one is still running. A child whose delegation cannot be
+read is skipped. The NOTIFY path skips it too; it used to scan it
+as a child without a DS.
+
+A child that publishes no CSYNC is a no-op before the trust gate,
+like a CDS removal sentinel for a child without a DS. Under
+`require-dnssec: true` a missing CSYNC used to be an error, which
+a poll would have logged for every such child on every round.
