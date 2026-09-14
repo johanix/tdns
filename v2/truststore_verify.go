@@ -338,9 +338,20 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, pa
 			"zone", childZone, "keyid", keyid, "policy", pol.Name)
 		return nil
 	}
+	// One verification per key (childKeyVerifications says why). A second
+	// request while one runs is not lost: the running one decides the same row.
+	id := childKeyVerificationID(childZone, keyid)
+	if _, running := childKeyVerifications.LoadOrStore(id, struct{}{}); running {
+		lgSigner.Info("TriggerChildKeyVerification: already verifying this key; not starting another",
+			"zone", childZone, "keyid", keyid)
+		return nil
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		// Released before done closes, so a caller that waits on done can
+		// start the next verification of the key.
+		defer childKeyVerifications.Delete(id)
 		kdb.runChildKeyVerification(ctx, childZone, keyid, pol, imrChildKeyVerifier(childZone, keyRR, pol))
 	}()
 	return done
