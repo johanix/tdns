@@ -136,13 +136,15 @@ func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propa
 // needs nothing from the hooks beyond the OnStateChange that
 // UpdateDnssecKeyState fires for it, and it must not grow a skip for such
 // zones: a key their owner has moved to "published" is one it wants on this
-// timer.
+// timer. A zone whose lifecycle is OWNED (KeyLifecycleOwner) is different:
+// its owner runs every timer, and this walk leaves its keys alone.
 func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStatePublished)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting published keys", "err", err)
 		return
 	}
+	keys = keysOfUnownedZones(keys)
 
 	for _, key := range keys {
 		if key.Flags&dns.SEP != 0 {
@@ -195,6 +197,7 @@ func transitionRetiredToRemoved(ctx context.Context, conf *Config, kdb *KeyDB, n
 		lgSigner.Error("KeyStateWorker: error getting retired keys", "err", err)
 		return
 	}
+	keys = keysOfUnownedZones(keys)
 
 	for _, key := range keys {
 		// 4B guard: SEP keys in rollover-managed zones are owned by the
@@ -297,6 +300,9 @@ func maintainStandbyKeys(ctx context.Context, conf *Config, kdb *KeyDB, standbyZ
 		}
 		if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 			continue
+		}
+		if zoneOwned(zd) {
+			continue // the owner keeps its own standby keys
 		}
 
 		if zd.DnssecPolicy == nil {

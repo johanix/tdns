@@ -35,6 +35,9 @@ import (
 // trigger has already fired and there is a usable standby. Returns an error
 // (no state change) if no standby SEP key exists.
 func AtomicRollover(conf *Config, kdb *KeyDB, zone string) (oldKid, newKid uint16, err error) {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return 0, 0, ownedRefusal(zd, "rollover")
+	}
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	if zone == "" {
 		return 0, 0, fmt.Errorf("AtomicRollover: empty zone")

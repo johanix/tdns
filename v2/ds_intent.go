@@ -98,6 +98,15 @@ WHERE zonename = ? AND (CAST(flags AS INTEGER) & ?) != 0`
 // real instruction to withdraw, and the distinction from the cases above is
 // the whole reason Known exists.
 func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error) {
+	// An owned zone's DS is its owner's answer (§4): the rows here are one
+	// provider's view, the owner's covers every signing provider.
+	if zd, owned := zoneOwnedByName(zonename); owned {
+		in, err := currentKeyLifecycleOwner().DSIntent(zd, digest)
+		if err != nil {
+			return DSIntent{}, fmt.Errorf("DSIntentForZone: the owner of %s: %w", zonename, err)
+		}
+		return in, nil
+	}
 	var out DSIntent
 	if kdb == nil {
 		return out, nil

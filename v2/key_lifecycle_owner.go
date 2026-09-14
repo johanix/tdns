@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -94,4 +95,48 @@ func ownedRefusal(zd *ZoneData, verb string) error {
 		return fmt.Errorf("%w: zone %s: %s runs its key lifecycle, not tdns", ErrZoneOwned, zd.ZoneName, name)
 	}
 	return fmt.Errorf("%w: zone %s: %s runs its key lifecycle; use `%s`", ErrZoneOwned, zd.ZoneName, name, cmd)
+}
+
+// keysOfUnownedZones drops the keys of owned zones from a global walk's list.
+func keysOfUnownedZones(keys []DnssecKeyWithTimestamps) []DnssecKeyWithTimestamps {
+	if currentKeyLifecycleOwner() == nil {
+		return keys
+	}
+	out := keys[:0]
+	for _, k := range keys {
+		if _, owned := zoneOwnedByName(k.ZoneName); !owned {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// ownerPolicyFieldsDiffer reports whether two policies differ in a field
+// that is the owner's on an owned zone (design Q1): the algorithms, the
+// lifetimes and the rollover method. Signature validity, TTLs and the
+// clamp's signature parameters are mechanism and tdns's to apply.
+func ownerPolicyFieldsDiffer(a, b *DnssecPolicy) bool {
+	if a == nil || b == nil {
+		return a != b
+	}
+	return a.Mode != b.Mode || a.KSKAlgorithm != b.KSKAlgorithm || a.ZSKAlgorithm != b.ZSKAlgorithm ||
+		a.KSK.Lifetime != b.KSK.Lifetime || a.ZSK.Lifetime != b.ZSK.Lifetime ||
+		a.Rollover.Method != b.Rollover.Method || a.Rollover.NumDS != b.Rollover.NumDS
+}
+
+// What an owner needs from tdns (§3.5, "tdns exports what an owner needs").
+
+// TriggerResign asks the signer to re-sign zone: what an owner calls after
+// a key change of its own.
+func TriggerResign(conf *Config, zone string) { triggerResign(conf, zone) }
+
+// PublishCDSAndWait publishes cds as the zone's CDS RRset and returns once
+// the zone serves it; UnpublishCDSAndWait removes the RRset and returns once
+// the zone serves none. The pair an owner uses in place of SynthesizeCdsRRs.
+func (zd *ZoneData) PublishCDSAndWait(ctx context.Context, kdb *KeyDB, cds []dns.RR) error {
+	return zd.publishCDSAndWait(ctx, kdb, cds)
+}
+
+func (zd *ZoneData) UnpublishCDSAndWait(ctx context.Context, kdb *KeyDB) error {
+	return zd.unpublishCDSAndWait(ctx, kdb)
 }

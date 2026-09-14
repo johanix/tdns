@@ -152,6 +152,9 @@ func EnsureZskRolloverRow(kdb *KeyDB, zone string) error {
 // SetZskManualRolloverRequest stamps a manual ZSK-rollover request. Mirrors
 // the KSK SetManualRolloverRequest, on ZskRolloverState.
 func SetZskManualRolloverRequest(kdb *KeyDB, zone string, requestedAt, earliest time.Time) error {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return ownedRefusal(zd, "asap")
+	}
 	if err := EnsureZskRolloverRow(kdb, zone); err != nil {
 		return err
 	}

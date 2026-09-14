@@ -713,6 +713,9 @@ func LoadLastRolloverError(kdb *KeyDB, zone string, keyid uint16) (string, error
 // ClearLastRolloverError zeroes last_rollover_error for one key. Used by the
 // `rollover reset` CLI to unstick a hard-failed key after operator action.
 func ClearLastRolloverError(kdb *KeyDB, zone string, keyid uint16) error {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return ownedRefusal(zd, "reset")
+	}
 	res, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET last_rollover_error = NULL WHERE zone = ? AND keyid = ?`, zone, int(keyid))
 	if err != nil {
 		return err
@@ -745,6 +748,9 @@ func ClearLastRolloverError(kdb *KeyDB, zone string, keyid uint16) error {
 // down). Function-level locking would deadlock with composite
 // handlers like asap that need the lock around compute+set.
 func UnstickRollover(kdb *KeyDB, zone string) error {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return ownedRefusal(zd, "unstick")
+	}
 	zone = strings.TrimSpace(zone)
 	if zone == "" {
 		return fmt.Errorf("UnstickRollover: empty zone")
@@ -760,6 +766,9 @@ func UnstickRollover(kdb *KeyDB, zone string) error {
 // manual_rollover_earliest = earliest. Called by `rollover asap` after
 // ComputeEarliestRollover succeeds.
 func SetManualRolloverRequest(kdb *KeyDB, zone string, requestedAt, earliest time.Time) error {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return ownedRefusal(zd, "asap")
+	}
 	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
 		return err
 	}

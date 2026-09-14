@@ -162,9 +162,17 @@ func lifecyclePaths() []lifecyclePath {
 		{"rollover tick", func(t *testing.T, kdb *KeyDB, zd *ZoneData) func(*testing.T) bool {
 			return func(t *testing.T) bool { return len(keystoreWrites(t, kdb)) > 0 }
 		}, func(t *testing.T, kdb *KeyDB, zd *ZoneData) {
+			// the walks over every zone, and the tick entered directly for
+			// this zone, as a caller with its own deps would
+			ktInstallFakeParent(t)
 			rolloverAutomatedForAllZones(context.Background(), &Conf, kdb, time.Minute, time.Now())
 			promoteStandbyKskBootstrapAll(&Conf, kdb)
 			rolloverZsksForAllZones(context.Background(), &Conf, kdb, time.Minute, time.Now())
+			deps := ktDeps(zd, kdb, time.Now())
+			deps.Imr = &Imr{}
+			if err := RolloverAutomatedTick(context.Background(), deps); err != nil {
+				t.Fatalf("tick: %v", err)
+			}
 		}},
 		{"ensure: promotion", func(t *testing.T, kdb *KeyDB, zd *ZoneData) func(*testing.T) bool {
 			// no active KSK, a published one: EnsureActiveDnssecKeys promotes it
@@ -398,7 +406,32 @@ func TestMultiProviderZoneNotOwnedKeepsHooks(t *testing.T) {
 func TestKeyWritersAreOwnershipChecked(t *testing.T) {
 	writers := map[string]bool{"UpdateDnssecKeyState": true, "UpdateDnssecKeyStateTx": true, "PromoteDnssecKey": true, "GenerateKeypair": true}
 	// function (or method, as Type.Method) -> why it may call a writer
-	allowed := map[string]string{}
+	allowed := map[string]string{
+		"AbortKskAlgRollover":                     "refuses an owned zone (cancel)",
+		"AtomicRollover":                          "refuses an owned zone (rollover)",
+		"GenerateAndStageKey":                     "refuses an owned zone (generate)",
+		"GenerateKskRolloverCreated":              "reached from RolloverAutomatedTick, which skips an owned zone",
+		"KeyDB.DnssecKeyMgmt":                     "every lifecycle verb refuses an owned zone; setstate names the columns",
+		"KeyDB.forceZoneKeysToPolicyRoles":        "refuses an owned zone (policy-reset)",
+		"PromoteStandbyKskIfNoActive":             "skips an owned zone",
+		"RolloverAutomatedTick":                   "skips an owned zone",
+		"SpawnKskAlgRollover":                     "refuses an owned zone (alg-rollover)",
+		"ZoneData.EnsureActiveDnssecKeys":         "returns an owned zone's active set untouched",
+		"ZoneData.reconcileActiveKeyAlgorithms":   "reached from EnsureActiveDnssecKeys only",
+		"advanceCreatedKeysInRangeTx":             "reached from the tick's confirm only",
+		"capStandbyZsksByCount":                   "reached from maintainStandbyKeys, which skips an owned zone",
+		"freezeNonActiveSEPKeysTx":                "reached from SpawnKskAlgRollover only",
+		"transitionDsPublishedForManualRollover":  "the ds-published walk skips an owned zone",
+		"transitionDsPublishedToPublishedForZone": "the ds-published walk skips an owned zone",
+		"transitionPublishedToStandby":            "leaves an owned zone's keys alone",
+		"transitionPublishedToStandbyForZone":     "the published walk skips an owned zone",
+		"transitionRetiredToRemoved":              "leaves an owned zone's keys alone",
+		"withdrawKskAlgRoll":                      "reached from the tick only",
+		// SIG(0) keys (KEY records) share GenerateKeypair; they are not part
+		// of the DNSSEC key lifecycle an owner runs.
+		"KeyDB.SendSig0KeyUpdate": "SIG(0) keys, outside the owner's lifecycle",
+		"KeyDB.Sig0KeyMgmt":       "SIG(0) keys, outside the owner's lifecycle",
+	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
