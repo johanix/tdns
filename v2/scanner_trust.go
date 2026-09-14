@@ -170,7 +170,9 @@ func (scanner *Scanner) requireSecure(ctx context.Context, rrset *core.RRset, po
 //
 // An empty answer has no signature to validate, so it is an error rather than
 // data: the NS pass stops on it, and the glue pass leaves that nameserver's
-// glue as it is. queryAllNSAndCompare already reports one that way.
+// glue as it is. queryAllNSAndCompare reports an empty RRset the nameservers
+// agree on as data; here it stops counting as proof of absence, because the
+// denial behind it is not validated.
 func (scanner *Scanner) securedChildRRsetFetcher(pol DelegationPolicy, nsRRset *core.RRset, lg *log.Logger) childRRsetFetcher {
 	return func(ctx context.Context, name string, qtype uint16) ([]dns.RR, bool, error) {
 		rrset, inSync, err := scanner.askChild(ctx, name, qtype, nsRRset, lg)

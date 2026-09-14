@@ -487,6 +487,23 @@ func TestComputeCsyncDeltaNameserversKeepGlue(t *testing.T) {
 			t.Fatalf("glue removes %v, want only the A", names(d.GlueRemoves))
 		}
 	})
+
+	// Scoped like the UPDATE path: a nameserver the parent already had, whose
+	// glue the change does not touch, is not checked.
+	t.Run("a kept nameserver that already had no glue does not stop an unrelated change", func(t *testing.T) {
+		withBare := rrs(t, "child.example. 3600 IN NS ns1.child.example.", "child.example. 3600 IN NS ns0.child.example.",
+			"child.example. 3600 IN NS ns.provider.net.")
+		moved := rrs(t, "child.example. 3600 IN NS ns1.child.example.", "child.example. 3600 IN NS ns0.child.example.",
+			"child.example. 3600 IN NS ns2.provider.net.")
+		child := &stubChild{rrs: map[string][]dns.RR{csChild + "/NS": moved}}
+		d, err := computeCsyncDelta(ctx, csChild, []uint16{dns.TypeNS}, withBare, glueFrom(current), child.fetch, quietLog(), false, false)
+		if err != nil {
+			t.Fatalf("a nameserver that already had no glue refused an NS change that does not touch it: %v", err)
+		}
+		if len(d.NSAdds) != 1 || len(d.NSRemoves) != 1 {
+			t.Fatalf("NS adds %v removes %v, want the provider moved", names(d.NSAdds), names(d.NSRemoves))
+		}
+	})
 }
 
 // computeCsyncDelta is a free function now, and its next caller is a different

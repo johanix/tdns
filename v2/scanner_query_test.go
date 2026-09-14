@@ -2,23 +2,32 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
-// How the scanner asks a child's nameservers: what AuthQueryEngine makes of
-// one response, how the answers of all of them combine, and the per-child
-// memory of processed CSYNC serials that concurrent scans share.
+// How the scanner asks a child's nameservers and applies what it finds: what
+// AuthQueryEngine makes of one response, how the answers of all of them
+// combine, the per-child memory of processed CSYNC serials, and the per-child
+// serialisation of scanning and applying.
 
-// noDataServer answers every query over TCP with NOERROR, no records, an OPT
-// record when the query had one, and the given AA bit.
-func noDataServer(t *testing.T, authoritative bool) string {
+// testAuthServer answers every query over TCP with NOERROR, the given answer
+// records, an OPT record when the query had one, and the given AA bit.
+func testAuthServer(t *testing.T, authoritative bool, answer ...string) string {
 	t.Helper()
+	var records []dns.RR
+	for _, s := range answer {
+		records = append(records, mustRR(t, s))
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -32,6 +41,7 @@ func noDataServer(t *testing.T, authoritative bool) string {
 			m := new(dns.Msg)
 			m.SetReply(r)
 			m.Authoritative = authoritative
+			m.Answer = records
 			if opt := r.IsEdns0(); opt != nil {
 				m.SetEdns0(opt.UDPSize(), opt.Do())
 			}
@@ -40,28 +50,63 @@ func noDataServer(t *testing.T, authoritative bool) string {
 	}
 	go func() { _ = srv.ActivateAndServe() }()
 	<-started
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() {
+			_ = srv.Shutdown()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("the test DNS server did not shut down within 5s")
+		}
+	})
 	return ln.Addr().String()
 }
 
-func TestAuthQueryEngineCountsNoDataOnlyWithAuthority(t *testing.T) {
+// startAuthQueryEngine runs AuthQueryEngine for the rest of the test, and fails
+// the test if it has not returned within 5s of being cancelled.
+func startAuthQueryEngine(t *testing.T) chan AuthQueryRequest {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	q := make(chan AuthQueryRequest)
-	go AuthQueryEngine(ctx, q)
-	sc := NewScanner(q, false, false)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		AuthQueryEngine(ctx, q)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("AuthQueryEngine did not return within 5s of being cancelled")
+		}
+	})
+	return q
+}
 
-	rrset, err := sc.AuthQueryNG("ns1.child.example.", noDataServer(t, true), dns.TypeAAAA, "tcp")
-	if err != nil {
-		t.Fatalf("an authoritative NODATA is an answer: %v", err)
-	}
-	if rrset == nil || len(rrset.RRs) != 0 {
-		t.Fatalf("rrset %v, want an empty RRset", rrset)
-	}
+// Only an authoritative reply counts, with or without data. An authoritative
+// NODATA is an answer.
+func TestAuthQueryEngineRequiresAuthority(t *testing.T) {
+	sc := NewScanner(startAuthQueryEngine(t), false, false)
+	const name = "ns1.child.example."
+	aaaa := name + " 3600 IN AAAA 2001:db8::1"
 
-	_, err = sc.AuthQueryNG("ns1.child.example.", noDataServer(t, false), dns.TypeAAAA, "tcp")
-	if err == nil || !strings.Contains(err.Error(), "not authoritative") {
-		t.Fatalf("err = %v, want a non-authoritative response to be an error", err)
+	rrset, err := sc.AuthQueryNG(name, testAuthServer(t, true), dns.TypeAAAA, "tcp")
+	if err != nil || rrset == nil || len(rrset.RRs) != 0 {
+		t.Errorf("authoritative NODATA: %v, %v; want an empty RRset", rrset, err)
+	}
+	rrset, err = sc.AuthQueryNG(name, testAuthServer(t, true, aaaa), dns.TypeAAAA, "tcp")
+	if err != nil || rrset == nil || len(rrset.RRs) != 1 {
+		t.Errorf("authoritative data: %v, %v; want the AAAA", rrset, err)
+	}
+	for _, answer := range [][]string{nil, {aaaa}} {
+		_, err := sc.AuthQueryNG(name, testAuthServer(t, false, answer...), dns.TypeAAAA, "tcp")
+		if err == nil || !strings.Contains(err.Error(), "not authoritative") {
+			t.Errorf("non-authoritative reply with %d record(s): err = %v; want it refused", len(answer), err)
+		}
 	}
 }
 
@@ -207,5 +252,176 @@ func TestCsyncProcessedSerialsAreSafeForConcurrentScans(t *testing.T) {
 	}
 	if sc.ZoneCSYNCKnown("race0.example.", &dns.CSYNC{Serial: 100}) {
 		t.Error("the CSYNC last processed is not processed again")
+	}
+}
+
+// Two scans of one child run one after the other, each from before it asks the
+// child anything until its change has been applied. Unserialised, the second
+// scan runs while the first one's slow apply is still in progress.
+func TestScansOfOneChildAreSerialised(t *testing.T) {
+	const child = "serial.example."
+	t.Cleanup(func() { forgetCsyncProcessed(child) })
+	n := csyncMove(t, child)
+	zd := trustParent(t, child, trustLax())
+	sc := trustScanner(n)
+
+	var mu sync.Mutex
+	var events []string
+	sc.queryChild = func(ctx context.Context, qname string, qtype uint16, ns *core.RRset) (*core.RRset, bool, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if qtype == dns.TypeCSYNC {
+			events = append(events, "scan")
+		}
+		return n.query(ctx, qname, qtype, ns)
+	}
+	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) {
+		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, "applied")
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sc.scanChildAndApply(context.Background(), zd, ScanCSYNC, ScanTuple{Zone: child}, nil)
+		}()
+	}
+	wg.Wait()
+
+	if got := strings.Join(events, ","); got != "scan,applied,scan,applied" {
+		t.Fatalf("events %s; want each scan to finish applying before the next one starts", got)
+	}
+}
+
+func TestApplyScanChildUpdateWaitsForTheUpdater(t *testing.T) {
+	q := make(chan UpdateRequest)
+	var applied atomic.Bool
+	go func() {
+		ur := <-q
+		time.Sleep(30 * time.Millisecond)
+		applied.Store(true)
+		ur.respond(true, nil)
+	}()
+	if !applyScanChildUpdate(context.Background(), q, UpdateRequest{Cmd: "CHILD-UPDATE", ZoneName: "example."}) {
+		t.Fatal("an applied update was reported as not applied")
+	}
+	if !applied.Load() {
+		t.Fatal("returned before the updater had applied the change")
+	}
+
+	prev := scanApplyTimeout
+	scanApplyTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { scanApplyTimeout = prev })
+	go func() { <-q }() // takes the request and never answers
+	if applyScanChildUpdate(context.Background(), q, UpdateRequest{Cmd: "CHILD-UPDATE", ZoneName: "example."}) {
+		t.Fatal("an update the updater never answered was reported as applied")
+	}
+}
+
+// unreadableBackend is a delegation backend whose delegation data cannot be read.
+type unreadableBackend struct{ trustBackend }
+
+func (b *unreadableBackend) GetDelegationData(string, string) (map[string]map[uint16][]dns.RR, error) {
+	return nil, errors.New("store unavailable")
+}
+
+func cdsNet(t *testing.T, child string) *trustNet {
+	t.Helper()
+	return &trustNet{
+		served:  map[string][]dns.RR{trustKey(child, dns.TypeCDS): rrs(t, child+" 3600 IN CDS 2371 13 2 "+strings.Repeat("ab", 32))},
+		verdict: map[string]cache.ValidationState{},
+	}
+}
+
+// A CDS scan takes the current DS from the delegation backend, inside the lock.
+func TestCDSScanReadsTheCurrentDSFromTheBackend(t *testing.T) {
+	const child = "hasds.example."
+	zd := trustParent(t, child, trustLax())
+	zd.DelegationBackend.(*trustBackend).data[child][dns.TypeDS] = rrs(t, child+" 3600 IN DS 1111 13 2 "+strings.Repeat("cd", 32))
+	sc := trustScanner(cdsNet(t, child))
+	var applied int
+	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) { applied++ }
+
+	resp := sc.scanChildAndApply(context.Background(), zd, ScanCDS, ScanTuple{Zone: child}, nil)
+
+	if resp.Error || len(resp.DSRemoves) != 1 || len(resp.DSAdds) != 1 || applied != 1 {
+		t.Fatalf("error %q, DS adds %v removes %v, applied %d; want the backend's DS replaced once",
+			resp.ErrorMsg, names(resp.DSAdds), names(resp.DSRemoves), applied)
+	}
+}
+
+// A delegation that cannot be read is not scanned: taken for one without a DS,
+// a child that has one would be scanned as waiting for its first.
+func TestCDSScanOfAnUnreadableDelegationIsNotRun(t *testing.T) {
+	const child = "unreadable.example."
+	zd := trustParent(t, child, trustLax())
+	zd.DelegationBackend = &unreadableBackend{}
+	n := cdsNet(t, child)
+	sc := trustScanner(n)
+	applied := false
+	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) { applied = true }
+
+	resp := sc.scanChildAndApply(context.Background(), zd, ScanCDS, ScanTuple{Zone: child}, nil)
+
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "cannot read the current delegation") {
+		t.Fatalf("error %v %q; want the scan stopped", resp.Error, resp.ErrorMsg)
+	}
+	if len(n.queried) != 0 || applied {
+		t.Fatalf("queried %v, applied %v, although the delegation could not be read", n.queried, applied)
+	}
+}
+
+// A NOTIFY-started scan goes through scanChildAndApply: the error only it gives
+// for an unreadable delegation comes back in the scan job.
+func TestNotifyScansGoThroughScanChildAndApply(t *testing.T) {
+	conf := &Config{}
+	conf.Internal.ScannerQ = make(chan ScanRequest) // unbuffered: a send returns once the engine has taken it
+	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 1)
+	conf.Internal.ImrReady = NewImrReadiness()
+	ctx, cancel := context.WithCancel(context.Background())
+	engineDone := make(chan error, 1)
+	go func() { engineDone <- ScannerEngine(ctx, conf) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-engineDone:
+		case <-time.After(5 * time.Second):
+			t.Error("ScannerEngine did not return within 5s of being cancelled")
+		}
+	})
+
+	const child = "notified.example."
+	zd := trustParent(t, child, trustLax())
+	zd.DelegationBackend = &unreadableBackend{}
+	conf.Internal.ScannerQ <- ScanRequest{Cmd: "SCAN", ChildZone: child, ZoneData: zd, RRtype: dns.TypeCDS}
+
+	sc := conf.Internal.GetScanner()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var msg string
+		var completed bool
+		sc.JobsMutex.RLock()
+		for _, job := range sc.Jobs {
+			for _, r := range job.Responses {
+				if r.Qname == child && job.Status == "completed" {
+					msg, completed = r.ErrorMsg, true
+				}
+			}
+		}
+		sc.JobsMutex.RUnlock()
+		if completed {
+			if !strings.Contains(msg, "cannot read the current delegation") {
+				t.Fatalf("scan error %q; want the scan to have gone through scanChildAndApply", msg)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the scan job did not complete")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

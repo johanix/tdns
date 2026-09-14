@@ -202,6 +202,16 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 				continue
 			}
 
+			// Only an authoritative reply says anything about the child's data.
+			// A lame server, or one that hosts only the parent and answers with
+			// its referral, would otherwise have its records -- in that case the
+			// parent's NS set -- compared as the child's.
+			if !res.Authoritative {
+				req.response <- &AuthQueryResponse{&rrset, fmt.Errorf("non-authoritative response for %s %s: the server is not authoritative for the zone",
+					req.qname, dns.TypeToString[req.rrtype])}
+				continue
+			}
+
 			if len(res.Answer) > 0 {
 				lg.Debug("AuthQueryEngine: looking up RRset from answer", "qname", req.qname, "rrtype", dns.TypeToString[req.rrtype])
 				for _, rr := range res.Answer {
@@ -216,7 +226,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 						lg.Warn("AuthQueryEngine: answer is not expected RR type", "expectedRrtype", dns.TypeToString[req.rrtype], "rr", rr.String())
 					}
 				}
-				req.response <- authQueryAnswer(&rrset, res)
+				req.response <- &AuthQueryResponse{&rrset, nil}
 				continue
 			}
 
@@ -250,27 +260,13 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 						rrset.RRSIGs = append(rrset.RRSIGs, rr)
 					}
 				}
-				req.response <- authQueryAnswer(&rrset, res)
+				req.response <- &AuthQueryResponse{&rrset, nil}
 				continue
 			}
 
-			req.response <- authQueryAnswer(&rrset, res)
+			req.response <- &AuthQueryResponse{&rrset, nil}
 		}
 	}
-}
-
-// authQueryAnswer is the response to a query that got NOERROR. No records for
-// the question mean the name has no such RRset only when the server answered
-// with authority. A server that is not authoritative for the zone -- a lame
-// delegation answering with a referral or from a cache -- has said nothing
-// about it, and taking its reply as "no records" would count it as a
-// nameserver that disagrees with the ones that have the data.
-func authQueryAnswer(rrset *core.RRset, res *dns.Msg) *AuthQueryResponse {
-	if len(rrset.RRs) == 0 && !res.Authoritative {
-		return &AuthQueryResponse{rrset, fmt.Errorf("non-authoritative response with no %s %s: the server is not authoritative for the zone",
-			rrset.Name, dns.TypeToString[rrset.RRtype])}
-	}
-	return &AuthQueryResponse{rrset, nil}
 }
 
 func (scanner *Scanner) AuthQueryNG(qname, ns string, rrtype uint16, transport string) (*core.RRset, error) {

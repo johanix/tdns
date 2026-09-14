@@ -570,7 +570,20 @@ made stale. See `v2/scanner_trust.go`.
   `csyncProcessed` in `v2/scanner_csync.go`) is read and written
   under a mutex. Scans run in their own goroutines, so
   concurrent NOTIFY(CSYNC) could crash the server with
-  `concurrent map writes`.
+  `concurrent map writes`. The serial-dedup description above
+  predates this: a CSYNC with a lower serial than the last one
+  processed is skipped, and the same serial is processed again,
+  which is how a change that failed to apply gets retried.
+- **Scans of one child are serialised.** A CDS or CSYNC scan of a
+  child holds that child's lock from before it reads anything
+  until its change has been applied (`scanChildAndApply`,
+  `v2/scanner_apply.go`). Two overlapping scans used to both
+  pass the serial check, and the older one's change could be
+  applied after the newer one's.
+- **Only authoritative replies count.** A reply without AA is an
+  error, with or without data: a lame server, or one that hosts
+  only the parent and answers with its referral, says nothing
+  about the child.
 - **Only the listed types are processed** (RFC 7477 §3.2.2). NS
   is no longer processed when the bitmap omits it. Without NS,
   glue is computed for the nameservers the parent already has.
@@ -585,8 +598,10 @@ made stale. See `v2/scanner_trust.go`.
   an empty answer stays an error, because the denial is not
   validated.
 - **No in-bailiwick nameserver is left without glue** (RFC 7477
-  §3.2.2). A CSYNC whose result would leave one with neither A
-  nor AAAA is not processed. The UPDATE path refuses the same
-  for a nameserver the update adds or whose glue it touches.
+  §3.2.2). A CSYNC is not processed if a nameserver it adds, or
+  whose glue it changes, would end up with neither A nor AAAA.
+  The UPDATE path refuses the same for a nameserver the update
+  adds or whose glue it touches. A nameserver that already had
+  no glue, and that the change does not touch, stops neither.
 - **`StartScanner` starts `AuthQueryEngine`.** Without it the
   standalone scanner's first query to a child blocked forever.
