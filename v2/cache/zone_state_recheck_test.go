@@ -22,10 +22,12 @@ import (
 type chain636 struct {
 	rrcache       *RRsetCacheT
 	parent, child string
-	dsRRset       *core.RRset // the child's DS, signed by the parent
-	dnskeyRRset   *core.RRset // the child's DNSKEY RRset, signed by the child
-	www           *core.RRset // data in the child, signed by the child
-	publishDS     bool        // whether the parent answers a DS query with dsRRset
+	dsRRset       *core.RRset   // the child's DS, signed by the parent
+	dsDenial      []*core.RRset // the parent's proof that the child has no DS
+	dnskeyRRset   *core.RRset   // the child's DNSKEY RRset, signed by the child
+	soa           *core.RRset   // the child's apex SOA, signed by the child
+	www           *core.RRset   // data in the child, signed by the child
+	publishDS     bool          // whether the parent answers a DS query with dsRRset
 	dsQueries     int
 }
 
@@ -60,6 +62,13 @@ func newChain636(t *testing.T) *chain636 {
 		}
 		return k, priv
 	}
+	soa := func(zone string) dns.RR {
+		rr, err := dns.NewRR(zone + " 300 IN SOA ns." + zone + " hostmaster." + zone + " 1 1800 900 604800 300")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rr
+	}
 
 	// The parent is Secure, with its key validated.
 	pk, ppriv := newKey(c.parent, 256)
@@ -72,11 +81,24 @@ func newChain636(t *testing.T) *chain636 {
 	// The child signs its DNSKEY RRset and its data with one KSK.
 	ck, cpriv := newKey(c.child, 257)
 	c.dnskeyRRset = sign636(t, ck, cpriv, ck)
+	c.soa = sign636(t, ck, cpriv, soa(c.child))
 	c.www = sign636(t, ck, cpriv, &dns.A{
 		Hdr: dns.RR_Header{Name: "www." + c.child, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
 		A:   net.ParseIP("192.0.2.36"),
 	})
+
+	// What the parent says about the child's DS: the DS once it is published,
+	// and until then an NSEC at the cut, owned by the child's name, with NS and
+	// no DS in its bitmap. Both are the parent's data, signed by the parent.
 	c.dsRRset = sign636(t, pk, ppriv, ck.ToDS(dns.SHA256))
+	c.dsDenial = []*core.RRset{
+		sign636(t, pk, ppriv, soa(c.parent)),
+		sign636(t, pk, ppriv, &dns.NSEC{
+			Hdr:        dns.RR_Header{Name: c.child, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: 300},
+			NextDomain: "d." + c.parent,
+			TypeBitMap: []uint16{dns.TypeNS, dns.TypeRRSIG, dns.TypeNSEC},
+		}),
+	}
 	return c
 }
 
@@ -123,6 +145,45 @@ func TestADSForAnInsecureChildValidatesAgainstItsParent(t *testing.T) {
 	}
 	if st := z.GetState(); st != ValidationStateSecure {
 		t.Errorf("the child is %s after its DS validated, want secure", ValidationStateToString[st])
+	}
+}
+
+// THE SAME DEFECT, at the denial. The parent's proof that a child has no DS is
+// an NSEC owned by the child's name. It was judged by the child's state, so once
+// the child was held Insecure the NSEC validated Insecure, and an insecure proof
+// from a secure zone is Bogus: a signed child without a DS had its missing DS
+// held as bogus. The NSEC is the parent's, and the denial is Secure whatever
+// the child is held as.
+func TestTheParentsDenialOfADSIsSecureWhateverTheChildIsHeldAs(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		c := newChain636(t)
+		if held {
+			c.holdChildInsecure(0)
+		}
+		got, _, err := c.rrcache.ValidateNegativeResponse(context.Background(), c.child, dns.TypeDS,
+			uint8(dns.RcodeSuccess), c.dsDenial, nil)
+		if err != nil {
+			t.Fatalf("child held insecure=%v: ValidateNegativeResponse: %v", held, err)
+		}
+		if got != ValidationStateSecure {
+			t.Errorf("child held insecure=%v: the parent's denial of a DS validated %s, want secure",
+				held, ValidationStateToString[got])
+		}
+	}
+}
+
+// Judging signed data by its signer leaves the child's own data where it was:
+// the apex SOA of a child held Insecure, signed by the child, is Insecure.
+func TestAChildHeldInsecureStillMakesItsOwnDataInsecure(t *testing.T) {
+	c := newChain636(t)
+	c.holdChildInsecure(0)
+
+	got, err := c.rrcache.ValidateRRset(context.Background(), c.soa, nil)
+	if err != nil {
+		t.Fatalf("ValidateRRset: %v", err)
+	}
+	if got != ValidationStateInsecure {
+		t.Errorf("the apex SOA of a child held insecure validated %s, want insecure", ValidationStateToString[got])
 	}
 }
 
