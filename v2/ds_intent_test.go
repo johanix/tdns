@@ -43,7 +43,16 @@ func seedKey(t *testing.T, kdb *KeyDB, zone, state string, flags uint16, pubkey 
 		Zone: zone, State: state, Keyid: keyid, Flags: flags,
 		Algorithm: dns.AlgorithmToString[dns.ED25519], Creator: "test", KeyRR: key.String(),
 	}
-	if _, known := keyFlagsForState(state); !known {
+	if f, known := keyFlagsForState(state); known {
+		if _, loaded := dsModelForKeyWrite(zone); !loaded {
+			// The zone is not loaded with a policy, so the writer cannot
+			// resolve ds from its DS model; the test writes it the way a zone
+			// without automated rollover gets it (design §3.4). A loaded zone
+			// gets ds from the writer, per its model.
+			f.DS = dsFlagFor(DSModelNone, state, flags&dns.SEP != 0)
+		}
+		row.RowFlags = &f
+	} else {
 		// A state nobody classified: written the way an owner writes its
 		// own, with the flags given, so the test can seed one.
 		row.RowFlags = &KeyRowFlags{}
@@ -133,9 +142,10 @@ func intentDS(zone, pubkey string) *dns.DS {
 }
 
 // An mpdist key is a multi-provider zone's own key, served while it is
-// distributed to the other providers and before it is promoted. Its DS does not
-// belong at the parent until then -- but it is a classified state, so the intent
-// is still an answer for the zone's other keys.
+// distributed to the other providers and before it is promoted. Its ds is its
+// owner's to write (design §3.4): while unset, nobody has decided, and the
+// intent is unknown; once the owner has written 0, the zone's other keys
+// answer.
 func TestDSIntentGivesAnMpdistKeyNoDS(t *testing.T) {
 	kdb := intentTestKeyDB(t)
 	seedKey(t, kdb, "child.example.", DnskeyStateActive, 257, pubA)
@@ -145,8 +155,18 @@ func TestDSIntentGivesAnMpdistKeyNoDS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DSIntentForZone: %v", err)
 	}
+	if intent.Known {
+		t.Fatalf("an mpdist key with ds unset gave a known intent (%d records); nobody has decided its DS", len(intent.Set))
+	}
+	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET ds=0 WHERE zonename=? AND state=?`, "child.example.", DnskeyStateMpdist); err != nil {
+		t.Fatal(err)
+	}
+	intent, err = DSIntentForZone(kdb, "child.example.", dns.SHA256)
+	if err != nil {
+		t.Fatalf("DSIntentForZone: %v", err)
+	}
 	if !intent.Known {
-		t.Fatal("an mpdist key made the intent unknown; the zone's active key still warrants its DS")
+		t.Fatal("with the owner's ds=0 on the mpdist key the intent is unknown; the zone's active key still warrants its DS")
 	}
 	want := intentDS("child.example.", pubA)
 	if len(intent.Set) != 1 || intent.Set[0].(*dns.DS).Digest != want.Digest {

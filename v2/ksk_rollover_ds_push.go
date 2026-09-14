@@ -104,7 +104,7 @@ func loadTargetKSKsForRollover(kdb *KeyDB, childZone string) (rows []kskForDSRow
 SELECT k.keyid, k.flags, k.keyrr, r.rollover_index
 FROM DnssecKeyStore k
 LEFT JOIN RolloverKeyState r ON k.zonename = r.zone AND k.keyid = r.keyid
-WHERE k.zonename = ? AND k.state IN ('created','ds-published','standby','published','active','retired')
+WHERE k.zonename = ? AND k.ds = 1
   AND (CAST(k.flags AS INTEGER) & ?) != 0
 ORDER BY COALESCE(r.rollover_index, 2147483646) ASC, k.keyid ASC`
 
@@ -192,10 +192,11 @@ ORDER BY COALESCE(r.rollover_index, 2147483646) ASC, k.keyid ASC`
 	return rows, indexLow, indexHigh, indexRangeKnown, nil
 }
 
-// ComputeTargetDSSetForZone returns the DS RRset the parent should publish for this child,
-// per §6.1: one DS per KSK (SEP) in states created, ds-published, standby, published, active, retired
-// (created included for multi-DS pre-publish DS at parent), minus the old-algorithm head of an
-// in-flight KSK algorithm rollover (see loadTargetKSKsForRollover).
+// ComputeTargetDSSetForZone returns the DS RRset the parent should publish for this child:
+// one DS per KSK (SEP) whose ds column is 1. The state machine writes ds by the zone's DS
+// model (keyrow_ds.go): under multi-DS from created through retired, and 0 for the
+// old-algorithm head of an in-flight KSK algorithm rollover, which loadTargetKSKsForRollover
+// also filters out on its own.
 // Digest is SHA-256 only in this phase. DS owner names use child as FQDN.
 // indexLow/indexHigh are min/max rollover_index when every contributing key has a
 // RolloverKeyState row; otherwise indexRangeKnown is false and callers must not treat
