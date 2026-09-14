@@ -1002,19 +1002,25 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	glueAdds, glueRemoves := delta.GlueAdds, delta.GlueRemoves
 	dataChanged := delta.Changed
 
-	// 8. Query SOA again (end serial) — RFC 7477 step 4. Only the serial is
-	// used, to compare with the start SOA, so it is not validated again.
-	endSOARRset, _, err := scanner.askChild(ctx, childZone, dns.TypeSOA, nsRRset, scanLog)
+	// 8. Query SOA again (end serial) — RFC 7477 step 4. Through fetch, like
+	// the start SOA: RFC 7477 §3 refuses a CSYNC unless all the data from these
+	// queries validates, and an end serial nobody authenticated, or one the
+	// nameservers disagree on, could hide a change made during the analysis.
+	endSOARRs, endInSync, err := fetch(ctx, childZone, dns.TypeSOA)
 	if err != nil {
-		scanLog.Printf("ProcessCSYNCNotify: %s: error querying end SOA: %v", childZone, err)
+		fail("error querying end SOA", err)
+		return
+	}
+	if !endInSync {
+		scanLog.Printf("ProcessCSYNCNotify: %s: child NS not in sync for end SOA, aborting", childZone)
 		response.Error = true
-		response.ErrorMsg = fmt.Sprintf("error querying end SOA: %v", err)
+		response.ErrorMsg = "child nameservers not in sync for end SOA"
 		responseCh <- response
 		return
 	}
 	var endSerial uint32
-	if endSOARRset != nil && len(endSOARRset.RRs) > 0 {
-		if soa, ok := endSOARRset.RRs[0].(*dns.SOA); ok {
+	if len(endSOARRs) > 0 {
+		if soa, ok := endSOARRs[0].(*dns.SOA); ok {
 			endSerial = soa.Serial
 		}
 	}

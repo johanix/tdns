@@ -26,26 +26,52 @@ type trustNet struct {
 	served    map[string][]dns.RR
 	verdict   map[string]cache.ValidationState // absent: insecure
 	validated []string                         // keys handed to the validator
+
+	// laterVerdict and laterDisagree apply from the second validation or
+	// query of a key on: what differs between the start and the end SOA.
+	laterVerdict  map[string]cache.ValidationState
+	laterDisagree map[string]bool
+	queried       map[string]int
 }
 
 func trustKey(name string, qtype uint16) string { return name + "/" + dns.TypeToString[qtype] }
 
 func (n *trustNet) query(_ context.Context, qname string, qtype uint16, _ *core.RRset) (*core.RRset, bool, error) {
-	rrs := n.served[trustKey(qname, qtype)]
+	k := trustKey(qname, qtype)
+	if n.queried == nil {
+		n.queried = map[string]int{}
+	}
+	n.queried[k]++
+	rrs := n.served[k]
 	if len(rrs) == 0 {
 		// What queryAllNSAndCompare says when no nameserver has the data.
 		return nil, false, fmt.Errorf("no %s RRsets retrieved from any nameserver", dns.TypeToString[qtype])
 	}
-	return &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: rrs}, true, nil
+	inSync := !(n.queried[k] > 1 && n.laterDisagree[k])
+	return &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: rrs}, inSync, nil
 }
 
 func (n *trustNet) validate(_ context.Context, rrset *core.RRset) (cache.ValidationState, error) {
 	k := trustKey(rrset.Name, rrset.RRtype)
+	seen := n.validations(k)
 	n.validated = append(n.validated, k)
+	if v, ok := n.laterVerdict[k]; ok && seen > 0 {
+		return v, nil
+	}
 	if v, ok := n.verdict[k]; ok {
 		return v, nil
 	}
 	return cache.ValidationStateInsecure, nil
+}
+
+func (n *trustNet) validations(key string) int {
+	count := 0
+	for _, k := range n.validated {
+		if k == key {
+			count++
+		}
+	}
+	return count
 }
 
 func (n *trustNet) set(state cache.ValidationState, keys ...string) {
@@ -228,6 +254,53 @@ func TestScanCSYNCUnderRequireDnssecAppliesSecureData(t *testing.T) {
 	}
 	if !scanResponseChangesDelegation(resp) {
 		t.Error("a validated change would not be applied")
+	}
+	if got := n.validations(trustKey(child, dns.TypeSOA)); got != 2 {
+		t.Errorf("the SOA was validated %d time(s), want 2: the start and the end SOA", got)
+	}
+}
+
+// The end SOA goes through the same fetch as the start SOA. An end serial that
+// does not validate, or that the nameservers disagree on, could hide a change
+// made during the analysis, so it stops the CSYNC before anything is recorded.
+func TestScanCSYNCEndSOAIsValidatedAndAgreedOn(t *testing.T) {
+	for i, tc := range []struct {
+		name    string
+		prepare func(n *trustNet, soa string)
+		refused bool
+		want    string
+	}{
+		{name: "the end SOA is bogus", refused: true, want: "SOA is bogus", prepare: func(n *trustNet, soa string) {
+			n.laterVerdict = map[string]cache.ValidationState{soa: cache.ValidationStateBogus}
+		}},
+		{name: "the nameservers disagree on the end SOA", want: "not in sync for end SOA", prepare: func(n *trustNet, soa string) {
+			n.laterDisagree = map[string]bool{soa: true}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			child := fmt.Sprintf("endsoa%d.example.", i)
+			n := csyncMove(t, child)
+			soa := trustKey(child, dns.TypeSOA)
+			n.set(cache.ValidationStateSecure, soa, trustKey(child, dns.TypeCSYNC),
+				trustKey(child, dns.TypeNS), trustKey("ns1."+child, dns.TypeA))
+			tc.prepare(n, soa)
+
+			resp := runCSYNC(t, trustScanner(n), trustParent(t, child, trustStrict()), child)
+
+			if tc.refused {
+				assertRefused(t, resp, tc.want)
+			} else {
+				if !resp.Error || !strings.Contains(resp.ErrorMsg, tc.want) {
+					t.Fatalf("error %v %q; want an error saying %q", resp.Error, resp.ErrorMsg, tc.want)
+				}
+				if scanResponseChangesDelegation(resp) {
+					t.Error("a CSYNC stopped at the end SOA would be applied")
+				}
+			}
+			if _, marked := KnownCsyncMinSOAs[child]; marked {
+				t.Error("a CSYNC stopped at the end SOA was recorded as processed")
+			}
+		})
 	}
 }
 
