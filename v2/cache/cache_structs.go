@@ -116,10 +116,19 @@ type Zone struct {
 	// Tracks per-zone, per-(address,transport) failures (e.g., REFUSED for
 	// this zone from this address over a specific transport).
 	AddressBackoffs map[AddrXport]*AddressBackoff
-	mu              sync.Mutex // Protects State and AddressBackoffs
+	mu              sync.Mutex // Protects State, stateSince and AddressBackoffs
+
+	// stateSince is when State was last set, or, for a state written by a
+	// struct literal, when it was first read. Indeterminate and Insecure use
+	// it; see ZoneStateRecheck.
+	stateSince time.Time
 }
 
-// GetState returns the current validation state of the zone.
+// GetState returns the current validation state of the zone. An Indeterminate
+// state older than ZoneStateRecheck reads as ValidationStateNone ("not known"),
+// which sends every reader back to following the chain. An Insecure state reads
+// as Insecure however old it is; recheckInsecureZone is what revisits it. A
+// state written by a struct literal starts its clock when first read.
 // Thread-safe: acquires mu lock.
 func (z *Zone) GetState() ValidationState {
 	if z == nil {
@@ -127,6 +136,14 @@ func (z *Zone) GetState() ValidationState {
 	}
 	z.mu.Lock()
 	defer z.mu.Unlock()
+	switch z.State {
+	case ValidationStateIndeterminate, ValidationStateInsecure:
+		if z.stateSince.IsZero() {
+			z.stateSince = time.Now()
+		} else if z.State == ValidationStateIndeterminate && time.Since(z.stateSince) > ZoneStateRecheck() {
+			return ValidationStateNone
+		}
+	}
 	return z.State
 }
 
@@ -139,6 +156,7 @@ func (z *Zone) SetState(state ValidationState) {
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	z.State = state
+	z.stateSince = time.Now()
 }
 
 type CacheContext uint8
