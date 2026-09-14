@@ -492,7 +492,8 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 func imrTuningEqual(a, b ImrTuningConf) bool {
 	if a.Backoff != b.Backoff || a.AddressFamily != b.AddressFamily ||
 		a.Discovery != b.Discovery || a.QueryBudget != b.QueryBudget ||
-		a.CacheMaxTTL != b.CacheMaxTTL || a.CacheMinTTL != b.CacheMinTTL {
+		a.CacheMaxTTL != b.CacheMaxTTL || a.CacheMinTTL != b.CacheMinTTL ||
+		a.ZoneStateRecheck != b.ZoneStateRecheck {
 		return false
 	}
 	x, y := a.UpgradeIndirectCacheHits, b.UpgradeIndirectCacheHits
