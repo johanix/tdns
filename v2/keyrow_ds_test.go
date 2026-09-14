@@ -409,3 +409,63 @@ func TestUnsetDsMeansUnknown(t *testing.T) {
 }
 
 var _ = sql.NullBool{}
+
+// T1b.3 per model and state: rows an older binary wrote (state only, no
+// columns) get pub and sign from the backfill and ds from the one-time pass,
+// per the table; the pass names exactly the differences the design allows
+// against the state-derived rule, one per row that differs.
+func TestOneTimePassOnPreColumnRows(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	rng := newTestRand(70)
+	for model, method := range map[DSModel]RolloverMethod{DSModelNone: RolloverMethodNone, DSModelMultiDS: RolloverMethodMultiDS, DSModelDoubleSignature: RolloverMethodDoubleSignature} {
+		zone := fmt.Sprintf("precolumn-%s.ds.example.", model)
+		zd := dsTestZone(t, kdb, zone, method)
+		ksks := map[string]uint16{}
+		for _, state := range tdnsKeyStates {
+			ksks[state] = insertRawTestKeyRow(t, kdb, zone, state, "KSK", rng)
+			insertRawTestKeyRow(t, kdb, zone, state, "ZSK", rng)
+		}
+		if _, err := kdb.BackfillKeyRowFlags(); err != nil {
+			t.Fatalf("%s: backfill: %v", model, err)
+		}
+		rep, err := kdb.FillDsForZone(zd)
+		if err != nil {
+			t.Fatalf("%s: FillDsForZone: %v", model, err)
+		}
+		if rep.Filled != 2*len(tdnsKeyStates) {
+			t.Errorf("%s: the pass filled %d rows, want %d", model, rep.Filled, 2*len(tdnsKeyStates))
+		}
+		for state, keyid := range ksks {
+			if got, want := dsOf(t, kdb, zone, keyid), boolFlag(wantDs[model][state]); got != want {
+				t.Errorf("%s: KSK %s: ds=%s after the pass, want %s", model, state, got, want)
+			}
+		}
+		assertDsAgrees(t, kdb, zone, model, 0)
+		want := map[string]int{}
+		for _, state := range tdnsKeyStates {
+			if old, _ := dsBelongsAtParent(state); old == wantDs[model][state] {
+				continue
+			}
+			switch {
+			case model != DSModelMultiDS && state == DnskeyStatePublished:
+				want[DsDiffPublishedOutsideMultiDS]++
+			case model == DSModelMultiDS && state == DnskeyStateCreated:
+				want[DsDiffMultiDSCreated]++
+			case model == DSModelMultiDS && state == DnskeyStateRetired:
+				want[DsDiffMultiDSRetired]++
+			default:
+				t.Errorf("%s %s: the table and the state-derived rule differ where the design allows no difference", model, state)
+			}
+		}
+		got := map[string]int{}
+		for _, d := range rep.Differences {
+			got[d.Kind]++
+		}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("%s: the pass reported %v, want %v", model, got, want)
+		}
+		if vs := CheckKeyRowInvariants(kdb, zone); len(vs) != 0 {
+			t.Errorf("%s: after the pass: %s", model, violationList(vs))
+		}
+	}
+}
