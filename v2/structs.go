@@ -1161,6 +1161,10 @@ type DnssecKey struct {
 	Keystr                 string
 	PropagationConfirmed   bool      // True when all remote providers confirmed this key
 	PropagationConfirmedAt time.Time // When propagation was confirmed (zero if not confirmed)
+	// The mechanism columns beside the state (KeyRowFlags). DS nil is unknown.
+	Pub  bool
+	Sign bool
+	DS   *bool
 }
 
 type DelegationSyncRequest struct {

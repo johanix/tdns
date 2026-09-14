@@ -100,6 +100,7 @@ func newTestKeyDB(t *testing.T) *KeyDB {
 	if err != nil {
 		t.Fatalf("NewKeyDB: %v", err)
 	}
+	installTestKeystoreGuards(t, kdb)
 	return kdb
 }
 

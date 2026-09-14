@@ -1343,6 +1343,10 @@ type KeyInventoryItem struct {
 	Flags     uint16
 	State     string // "created","published","standby","active","retired","removed"
 	KeyRR     string // Full DNSKEY RR string (public key data, no private key)
+	// The mechanism columns beside the state (KeyRowFlags). DS nil is unknown.
+	Pub  bool
+	Sign bool
+	DS   *bool
 }
 
 // GetKeyInventory returns the complete DNSKEY inventory for a zone — all keys

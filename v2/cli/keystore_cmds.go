@@ -1090,54 +1090,7 @@ func dnssecKeyMgmt(role, cmd string) {
 
 	switch cmd {
 	case "list":
-		type dnssecListEntry struct {
-			zone     string
-			state    string // display form, may be "[foreign]"
-			rawState string // raw state value used for sorting
-			keyid    string
-			flags    uint16
-			alg      string
-			keystr   string
-		}
-		var entries []dnssecListEntry
-		if len(tr.Dnskeys) > 0 {
-			fmt.Printf("Known DNSSEC key pairs:\n")
-			for k, v := range tr.Dnskeys {
-				tmp := strings.Split(k, "::")
-				state := v.State
-				if state == "foreign" {
-					state = "[foreign]"
-				}
-				entries = append(entries, dnssecListEntry{
-					zone: tmp[0], state: state, rawState: v.State, keyid: tmp[1],
-					flags: v.Flags, alg: v.Algorithm, keystr: v.Keystr,
-				})
-			}
-			// Sort by zone, then by raw state (so the "[foreign]"
-			// display bracket doesn't perturb order — "[" sorts
-			// before lowercase letters), then by keyid.
-			sort.Slice(entries, func(i, j int) bool {
-				if entries[i].zone != entries[j].zone {
-					return entries[i].zone < entries[j].zone
-				}
-				if entries[i].rawState != entries[j].rawState {
-					return entries[i].rawState < entries[j].rawState
-				}
-				return entries[i].keyid < entries[j].keyid
-			})
-			var out []string
-			for _, e := range entries {
-				out = append(out, fmt.Sprintf("%s|%s|%s|%d|%s|%.50s...\n",
-					e.zone, e.state, e.keyid, e.flags, e.alg, e.keystr))
-			}
-			if tdns.Globals.ShowHeaders {
-				out = append([]string{"Signer|State|KeyID|Flags|Algorithm|DNSKEY Record"}, out...)
-			}
-
-			fmt.Printf("%s\n", columnize.SimpleFormat(out))
-		} else {
-			fmt.Printf("No DNSSEC key pairs found\n")
-		}
+		fmt.Print(formatDnssecKeyList(tr.Dnskeys, tdns.Globals.ShowHeaders))
 
 	case "export":
 		if len(tr.Dnskeys) == 0 {
@@ -1400,4 +1353,66 @@ func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.Keystore
 	}
 
 	return kr, nil
+}
+
+// formatDnssecKeyList renders "keystore dnssec list": one line per key,
+// sorted by zone, state and keyid, with the mechanism columns pub, sign and
+// ds beside the state. A foreign key's state is shown in brackets; ds is "-"
+// while unknown.
+func formatDnssecKeyList(keys map[string]tdns.DnssecKey, showHeaders bool) string {
+	if len(keys) == 0 {
+		return "No DNSSEC key pairs found\n"
+	}
+	type entry struct {
+		zone, state, rawState, keyid string
+		flags                        uint16
+		alg, pub, sign, ds, keystr   string
+	}
+	var entries []entry
+	for k, v := range keys {
+		tmp := strings.Split(k, "::")
+		state := v.State
+		if state == "foreign" {
+			state = "[foreign]"
+		}
+		entries = append(entries, entry{
+			zone: tmp[0], state: state, rawState: v.State, keyid: tmp[1],
+			flags: v.Flags, alg: v.Algorithm, keystr: v.Keystr,
+			pub: flagColumn(v.Pub), sign: flagColumn(v.Sign), ds: dsColumn(v.DS),
+		})
+	}
+	// Sort by the raw state so the "[foreign]" bracket does not perturb it
+	// ("[" sorts before lowercase letters).
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].zone != entries[j].zone {
+			return entries[i].zone < entries[j].zone
+		}
+		if entries[i].rawState != entries[j].rawState {
+			return entries[i].rawState < entries[j].rawState
+		}
+		return entries[i].keyid < entries[j].keyid
+	})
+	var out []string
+	for _, e := range entries {
+		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%s|%.50s...\n",
+			e.zone, e.state, e.pub, e.sign, e.ds, e.keyid, e.flags, e.alg, e.keystr))
+	}
+	if showHeaders {
+		out = append([]string{"Signer|State|Pub|Sign|DS|KeyID|Flags|Algorithm|DNSKEY Record"}, out...)
+	}
+	return "Known DNSSEC key pairs:\n" + columnize.SimpleFormat(out) + "\n"
+}
+
+func flagColumn(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+func dsColumn(b *bool) string {
+	if b == nil {
+		return "-"
+	}
+	return flagColumn(*b)
 }
