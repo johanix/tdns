@@ -15,6 +15,42 @@ import (
 	"github.com/miekg/dns"
 )
 
+// signerHoldsRRset reports whether sig's Signer's Name can be the zone that
+// holds rrset (RFC 4035 section 5.3.1). RRSIG.Verify only checks that the
+// owner ends with the signer's name as a string, which accepts "ictim.example."
+// as the zone of "www.victim.example.".
+//
+//   - The signer is the owner or an ancestor of it, compared label by label.
+//     The owner is the RRset's name and that of its first record; RRsets
+//     built from a response or from zone data often carry only the records.
+//   - A DS is parent-side data: its signer is a strict ancestor.
+//   - A wildcard expansion was signed as the wildcard at the owner cut down to
+//     Labels labels, and that name must be inside the signer too.
+func signerHoldsRRset(rrset *core.RRset, sig *dns.RRSIG) bool {
+	var owners []string
+	if rrset.Name != "" {
+		owners = append(owners, rrset.Name)
+	}
+	if len(rrset.RRs) > 0 {
+		owners = append(owners, rrset.RRs[0].Header().Name)
+	}
+	if len(owners) == 0 {
+		return false
+	}
+	signer := dns.Fqdn(sig.SignerName)
+	ds := rrset.RRtype == dns.TypeDS || sig.TypeCovered == dns.TypeDS
+	for _, owner := range owners {
+		owner = dns.Fqdn(owner)
+		if !dns.IsSubDomain(signer, owner) {
+			return false
+		}
+		if ds && core.EqualNames(signer, owner) {
+			return false
+		}
+	}
+	return int(sig.Labels) >= dns.CountLabel(signer)
+}
+
 // XXX: This should not be a method of ZoneData, but rather a function.
 func (zd *ZoneData) ValidateRRset(rrset *core.RRset, verbose bool) (bool, error) {
 	if len(rrset.RRSIGs) == 0 {
@@ -29,6 +65,14 @@ func (zd *ZoneData) ValidateRRset(rrset *core.RRset, verbose bool) (bool, error)
 		}
 		rrsig := rr.(*dns.RRSIG)
 		zd.Logger.Printf("RRset is signed by \"%s\".", rrsig.SignerName)
+		// A signer that cannot hold the RRset did not sign it, whatever key it
+		// names. Decided before FindDnskey, which fetches and caches the
+		// DNSKEYs of whatever delegation the signer's name is found under.
+		if !signerHoldsRRset(rrset, rrsig) {
+			zd.Logger.Printf("ValidateRRset: signer %q cannot hold the RRset (labels=%d); signature ignored",
+				rrsig.SignerName, rrsig.Labels)
+			continue
+		}
 		ta, err := zd.FindDnskey(rrsig.SignerName, rrsig.KeyTag)
 		if err != nil {
 			msg := fmt.Sprintf("Error from FindDnskey(%s, %d): %v", rrsig.SignerName, rrsig.KeyTag, err)
@@ -98,6 +142,17 @@ func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*cache.CachedDnskey
 	return cdr, nil
 }
 
+// lookupChildRRset indirects the query to a child's nameservers, which
+// AuthDNSQuery always sends to port 53, so that ValidateChildDnskeys and the
+// delegation arm of lookupRRset can be driven in a test without a listener on
+// a privileged port.
+//
+// Production code MUST NOT reassign this. Tests reassign it and restore the
+// original via t.Cleanup.
+var lookupChildRRset = func(zd *ZoneData, qname string, qtype uint16, addrs []string, verbose bool) (*core.RRset, error) {
+	return zd.LookupChildRRsetNG(qname, qtype, addrs, verbose)
+}
+
 // ValidateChildDnskeys: we have the ChildDelegationData for the child zone,
 // containing both the NS RRset and the DS RRset.
 // 1. Fetch the child DNSKEY RRset from one of the child nameservers
@@ -112,7 +167,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 		return false, err
 	}
 
-	dnskeyrrset, err := zd.LookupChildRRsetNG(cdd.ChildName, dns.TypeDNSKEY, addrs, verbose)
+	dnskeyrrset, err := lookupChildRRset(zd, cdd.ChildName, dns.TypeDNSKEY, addrs, verbose)
 	if err != nil {
 		return false, err
 	}
