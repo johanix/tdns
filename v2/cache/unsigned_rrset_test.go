@@ -369,7 +369,12 @@ func TestAStrippedDenialBelowASecureZoneIsBogus(t *testing.T) {
 				rrcache, k := secCache(t)
 				ds.setup(t, rrcache, k)
 				f := &dsQuestionCounter{}
-				if state := validateDenial(t, rrcache, d.qname, d.qtype, f.fetch, d.auth(t, rrcache)...); state != ValidationStateBogus {
+				// A signature the validator refuses outright -- one naming a zone
+				// that does not hold kid (secureHolderBelow) -- comes back Bogus
+				// with an error, and handleNegative caches nothing: the verdict is
+				// what counts here.
+				state, _, _ := rrcache.ValidateNegativeResponse(context.Background(), d.qname, d.qtype, dns.RcodeNameError, d.auth(t, rrcache), f.fetch)
+				if state != ValidationStateBogus {
 					t.Errorf("state %s, want bogus", ValidationStateToString[state])
 				}
 				if z, ok := rrcache.ZoneMap.Get(secKid); ok && z.GetState() == ValidationStateInsecure {
