@@ -80,6 +80,18 @@ func (imr *Imr) ForwardZones() []*ForwardZone { return imr.zoneTable().forwards 
 // learned from referrals — those must not override a configured forward.
 func (imr *Imr) StubZones() []string { return imr.zoneTable().stubs }
 
+// configuredZone reports whether name is the apex of a configured stub or
+// forward zone. The cache's validator asks, through RRsetCacheT.ConfiguredZone.
+func (imr *Imr) configuredZone(name string) bool {
+	table := imr.zoneTable()
+	for _, fz := range table.forwards {
+		if core.EqualNames(fz.Zone, name) {
+			return true
+		}
+	}
+	return slices.ContainsFunc(table.stubs, func(z string) bool { return core.EqualNames(z, name) })
+}
+
 // setZoneTable publishes a table directly. Init and tests only; a reload goes
 // through ReloadZones, which reconciles rather than replaces.
 func (imr *Imr) setZoneTable(forwards []*ForwardZone, stubs []string, stubFP map[string]string) {

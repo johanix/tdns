@@ -82,6 +82,11 @@ type RRsetCacheT struct {
 	ServerTLSA    *core.NameMap[*ServerTLSARecords] // nsname -> validated TLSA cache, decoupled from AuthServer instances
 	DnskeyCache   *DnskeyCacheT
 	DNSClient     map[core.Transport]core.DNSClienter
+	// ConfiguredZone reports whether a name is the apex of a stub or forward
+	// zone, whose servers the operator named. Unsigned data from such a zone is
+	// not held to a delegation proof from the public tree, which does not speak
+	// for it (unsignedRRsetState). Nil when there are none.
+	ConfiguredZone func(name string) bool
 	//Options                map[ImrOption]string
 	Primed               bool
 	Logger               *log.Logger

@@ -233,6 +233,7 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		largeAlgs:       conf.Internal.LargeAlgorithms,
 		dnskeyTransport: conf.Internal.DNSKEYTransport,
 	}
+	rrcache.ConfiguredZone = imr.configuredZone
 
 	if conf.Imr.Logging.Enabled {
 		imr.DebugLog = imrDebugLogger(conf.Imr.Logging.File)
