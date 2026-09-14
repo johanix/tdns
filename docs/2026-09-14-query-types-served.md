@@ -344,3 +344,23 @@ predicate.
   bitmap; an RRSIG NODATA from such a zone is one of them. That predates this
   design.
 - **The legacy `tdns/` module**, which carries its own copy of both lists.
+
+## Amendment 2026-09-14: implementation
+
+Implemented on branch `feat/query-types-served`, following section 2's order.
+Where it differs from the text above:
+
+- **The unknown-type example.** TYPE65000, the "stored unknown type" in the
+  test list, lies in the reserved range 61440-65279, so section 1 refuses it.
+  The test uses TYPE20000, an unassigned data type.
+- **CHUNK.** The test serves an unregistered private-use type (TYPE65400) in
+  place of a stored CHUNK, whose presentation format carries a manifest; both
+  take the same path. JWK keeps its own test (`queryresponder_jwk_test.go`).
+- **The refusal to a query without EDNS.** EDE 30 goes only on a response to an
+  EDNS query, beside its OPT. A query without EDNS gets REFUSED and no OPT (RFC
+  6891 section 7). The NXNAME path is unchanged.
+- **Size.** 730 lines added and 148 removed in all, against 674 and 108
+  estimated. Production code in `v2/` is 273 added and 147 removed, 126 net
+  against 105: moving the exact-match branch into `sendAnswer` and
+  `sendTypeNodata` removed more than estimated, and the new helpers carry longer
+  comments. The tests are 446 lines against 450.

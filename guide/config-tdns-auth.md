@@ -870,11 +870,16 @@ port over ssh to profile a remote host.
 change does not regress the serial and does not provoke a needless AXFR — the
 right choice for a primary with BIND/Knot/NSD secondaries.
 
-Two `options:` values are recognized:
+Three `options:` values are recognized:
 
 - **`minimal-responses`** — omit the authority NS RRset and apex glue from
   positive answers, BIND-style. Referrals and NXDOMAIN/NODATA are unaffected.
   Absence means false; `minimal-responses:false` disables it explicitly.
+- **`allow-any-queries`** — answer an ANY query with every RRset at the name,
+  its NSEC included, with their signatures under DO. Without it an ANY query
+  gets a single RRset, the one with the lowest type code (RFC 8482 section
+  4.1). Absence means false, and so does an invalid value;
+  `allow-any-queries:false` disables it explicitly.
 - **`parent-update:delta`** or **`parent-update:replace`** — how delegation
   updates are applied to the parent. `delta` is the default and applies even
   when no `options:` block is present.

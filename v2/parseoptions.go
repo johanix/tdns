@@ -130,6 +130,19 @@ func (conf *Config) ParseAuthOptions() {
 				lg.Warn("Auth option has invalid value, defaulting to true", "option", key, "value", optval)
 				clean[authOpt] = "true"
 			}
+		case AuthOptAllowAnyQueries:
+			// An invalid value reads as off, where minimal-responses reads
+			// one as on: a mistyped value must not turn on the larger answers.
+			val := strings.ToLower(optval)
+			switch val {
+			case "", "true":
+				clean[authOpt] = "true"
+			case "false":
+				clean[authOpt] = "false"
+			default:
+				lg.Warn("Auth option has invalid value, defaulting to false", "option", key, "value", optval)
+				clean[authOpt] = "false"
+			}
 		default:
 			clean[authOpt] = optval
 		}

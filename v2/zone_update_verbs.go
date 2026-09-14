@@ -282,7 +282,7 @@ func specRrtype(s string) (uint16, error) {
 	// silently does nothing. OPT is a pseudo-RR that lives in the additional
 	// section; 128-255 covers TKEY, TSIG, IXFR, AXFR, MAILB and MAILA (ANY is
 	// caught above with a more useful message).
-	if rrtype == dns.TypeOPT || (rrtype >= 128 && rrtype <= 255) {
+	if core.IsMetaType(rrtype) {
 		return 0, fmt.Errorf("%q is a meta type and never exists as an RRset in a zone", s)
 	}
 	return rrtype, nil
