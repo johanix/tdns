@@ -2718,6 +2718,18 @@ func collectDSFromAuthority(authority []dns.RR, zonename string) (dsRRs, dsSigs 
 	return dsRRs, dsSigs
 }
 
+// zoneHasVerdict reports whether a ZoneMap entry holds a validation verdict. An
+// entry made before its zone was judged holds none, and an Indeterminate state
+// reads as none once it has stood for cache.ZoneStateRecheck.
+func zoneHasVerdict(z *cache.Zone) bool {
+	switch z.GetState() {
+	case cache.ValidationStateSecure, cache.ValidationStateInsecure,
+		cache.ValidationStateIndeterminate, cache.ValidationStateBogus:
+		return true
+	}
+	return false
+}
+
 func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, transport core.Transport, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	if Globals.Debug && !imr.Quiet {
 		imr.Cache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
@@ -2807,60 +2819,38 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			Expiration: time.Now().Add(cache.GetMinTTL(dsRRs)),
 			Transport:  transport,
 		})
-		// Update ZoneMap based on DS validation state
-		z, ok := imr.Cache.ZoneMap.Get(zonename)
-		if !ok {
-			z = &cache.Zone{
-				ZoneName: zonename,
-				State:    cache.ValidationStateIndeterminate,
+		// A DS that validated makes the child Secure. Any other verdict proves
+		// nothing about the child by itself, and ReferralChildState below
+		// decides, knowing whether the parent's DS had to validate. This used to
+		// enter the child as Indeterminate, so a DS altered on the path, or
+		// stripped of its RRSIG, left a signed child whose unsigned answers were
+		// served.
+		if vstate == cache.ValidationStateSecure {
+			z, ok := imr.Cache.ZoneMap.Get(zonename)
+			if !ok {
+				z = &cache.Zone{ZoneName: zonename}
 			}
-		}
-		switch vstate {
-		case cache.ValidationStateSecure, cache.ValidationStateIndeterminate:
 			z.SetState(vstate)
-		case cache.ValidationStateInsecure:
-			// The parent is insecure, so the child is, unless the child is
-			// already Secure: below an insecure parent that takes a trust
-			// anchor of its own. This used to be logged as impossible, leaving
-			// the zone as it was (#636).
-			if z.GetState() != cache.ValidationStateSecure {
-				z.SetState(vstate)
-			}
-		default:
-			lgDns.Debug("handleReferral: DS validation state leaves the zone state as it was", "zone", zonename, "state", vstate)
+			imr.Cache.ZoneMap.Set(zonename, z)
 		}
-		imr.Cache.ZoneMap.Set(zonename, z)
 	}
-	// If we have an NS RRset but no DS record (or DS validation didn't result in secure state),
-	// add the zone to ZoneMap. State depends on whether we have trust anchors:
-	// - If trust anchors exist and zone is unsigned: ValidationStateInsecure
-	// - If no trust anchors: ValidationStateIndeterminate
+	// A child the referral has not made Secure is entered as its parent proves
+	// it (ReferralChildState), and so is one whose entry holds no verdict: an
+	// Indeterminate state reads as none once it has stood for ZoneStateRecheck.
+	// This used to be Insecure whenever the resolver held any trust anchor, so a
+	// referral with its DS stripped turned DNSSEC off for the child. A DS that
+	// validated Insecure is decided the same way, by the parent's own state:
+	// that verdict alone comes as easily from an RRSIG that merely names a zone
+	// held Insecure as its signer.
 	if nsRRset != nil && zonename != "" && len(nsRRset.RRs) > 0 {
-		_, exists := imr.Cache.ZoneMap.Get(zonename)
-		if !exists {
-			// Zone not in ZoneMap yet. Check if we have trust anchors to determine state.
-			// If no trust anchors configured, state is indeterminate (we can't validate).
-			// If trust anchors exist but zone is unsigned, state is insecure.
-			state := cache.ValidationStateIndeterminate
-			hasTrustAnchors := false
-			if imr.Cache.DnskeyCache != nil {
-				// Check if there are any trust anchors (DNSKEYs with TrustAnchor=true)
-				for _, key := range imr.Cache.DnskeyCache.Map.Keys() {
-					if val, ok := imr.Cache.DnskeyCache.Map.Get(key); ok && val.TrustAnchor {
-						hasTrustAnchors = true
-						break
-					}
+		if z, exists := imr.Cache.ZoneMap.Get(zonename); !exists || !zoneHasVerdict(z) {
+			if state, ok := imr.Cache.ReferralChildState(ctx, zonename, r.Ns, imr.IterativeDNSQueryFetcher()); ok {
+				if exists {
+					z.SetState(state)
+				} else {
+					imr.Cache.ZoneMap.SetIfAbsent(zonename, &cache.Zone{ZoneName: zonename, State: state})
 				}
 			}
-			if hasTrustAnchors {
-				// We have trust anchors, so unsigned zone is insecure
-				state = cache.ValidationStateInsecure
-			}
-			z := &cache.Zone{
-				ZoneName: zonename,
-				State:    state,
-			}
-			imr.Cache.ZoneMap.Set(zonename, z)
 		}
 	}
 	serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRset, zonename, nsMap, r)

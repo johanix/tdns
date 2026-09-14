@@ -279,8 +279,10 @@ func TestCachedDSAndIndirectAnswersFollowTheSameRule(t *testing.T) {
 
 // A denial gets the same response fresh and cached. Both used to set AD for a
 // secure proof whatever the client asked for, and the cached path dropped the
-// EDE the fresh one attaches. Denials do not SERVFAIL on Indeterminate: NSEC3
-// proofs still validate to Indeterminate, and every NSEC3-signed zone would fail.
+// EDE the fresh one attaches. A bogus denial is SERVFAIL unless the client set
+// CD; both paths used to serve it. Denials do not SERVFAIL on Indeterminate:
+// NSEC3 proofs still validate to Indeterminate, and every NSEC3-signed zone would
+// fail.
 func TestFreshAndCachedDenialsAgree(t *testing.T) {
 	const denied = "nx.verdict.example."
 	soa, err := dns.NewRR("verdict.example. 900 IN SOA ns1.verdict.example. hostmaster.verdict.example. 1 7200 1800 604800 900")
@@ -296,18 +298,22 @@ func TestFreshAndCachedDenialsAgree(t *testing.T) {
 		{"NODATA", cache.ContextNoErrNoAns, dns.RcodeSuccess},
 	}
 	verdicts := []struct {
-		name    string
-		state   cache.ValidationState
-		edeCode uint16
-		q       verdictQuery
-		ad      bool
+		name     string
+		state    cache.ValidationState
+		edeCode  uint16
+		q        verdictQuery
+		ad       bool
+		servfail bool
 	}{
-		{"secure, plain query", cache.ValidationStateSecure, 0, verdictQuery{}, false},
-		{"secure, AD bit", cache.ValidationStateSecure, 0, verdictQuery{ad: true}, true},
-		{"secure, DO", cache.ValidationStateSecure, 0, verdictQuery{do: true}, true},
-		{"insecure, DO", cache.ValidationStateInsecure, 0, verdictQuery{do: true}, false},
-		{"indeterminate, DO", cache.ValidationStateIndeterminate, 0, verdictQuery{do: true}, false},
-		{"DNSKEY missing, DO", cache.ValidationStateNone, 9, verdictQuery{do: true}, false},
+		{"secure, plain query", cache.ValidationStateSecure, 0, verdictQuery{}, false, false},
+		{"secure, AD bit", cache.ValidationStateSecure, 0, verdictQuery{ad: true}, true, false},
+		{"secure, DO", cache.ValidationStateSecure, 0, verdictQuery{do: true}, true, false},
+		{"insecure, DO", cache.ValidationStateInsecure, 0, verdictQuery{do: true}, false, false},
+		{"indeterminate, DO", cache.ValidationStateIndeterminate, 0, verdictQuery{do: true}, false, false},
+		{"DNSKEY missing, DO", cache.ValidationStateNone, 9, verdictQuery{do: true}, false, false},
+		{"bogus, DO", cache.ValidationStateBogus, 0, verdictQuery{do: true}, false, true},
+		{"bogus, no DO", cache.ValidationStateBogus, 0, verdictQuery{}, false, true},
+		{"bogus, CD", cache.ValidationStateBogus, 0, verdictQuery{do: true, cd: true}, false, false},
 	}
 	for _, k := range kinds {
 		for _, v := range verdicts {
@@ -331,15 +337,19 @@ func TestFreshAndCachedDenialsAgree(t *testing.T) {
 				if fw.msg == nil {
 					t.Fatal("fresh path wrote nothing")
 				}
+				rcode, ede := k.rcode, v.edeCode
+				if v.servfail {
+					rcode, ede = dns.RcodeServerFailure, edns0.EDEDNSSECBogus
+				}
 				for path, m := range map[string]*dns.Msg{"fresh": fw.msg, "cached": cachedAs(t, imr, denied, dns.TypeA, v.q)} {
-					if m.Rcode != k.rcode {
-						t.Errorf("%s: rcode %s, want %s", path, dns.RcodeToString[m.Rcode], dns.RcodeToString[k.rcode])
+					if m.Rcode != rcode {
+						t.Errorf("%s: rcode %s, want %s", path, dns.RcodeToString[m.Rcode], dns.RcodeToString[rcode])
 					}
 					if m.AuthenticatedData != v.ad {
 						t.Errorf("%s: AD %v, want %v", path, m.AuthenticatedData, v.ad)
 					}
-					if edeOf(m) != v.edeCode {
-						t.Errorf("%s: EDE %d, want %d", path, edeOf(m), v.edeCode)
+					if edeOf(m) != ede {
+						t.Errorf("%s: EDE %d, want %d", path, edeOf(m), ede)
 					}
 				}
 			})

@@ -55,6 +55,16 @@ func TestAReferralWithADSMakesAnInsecureZoneSecure(t *testing.T) {
 	if err := dsSig.Sign(ppriv.(crypto.Signer), []dns.RR{ds}); err != nil {
 		t.Fatal(err)
 	}
+	// Before the DS, the parent's NSEC at the cut proves there is none: a secure
+	// parent's referral without a DS makes the child Insecure only with that
+	// proof (ReferralChildState).
+	nsec := &dns.NSEC{Hdr: dns.RR_Header{Name: child, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: 300},
+		NextDomain: "zzz." + parent, TypeBitMap: []uint16{dns.TypeNS, dns.TypeRRSIG, dns.TypeNSEC}}
+	nsecSig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: pk.KeyTag(), SignerName: parent,
+		Inception: uint32(time.Now().Add(-time.Hour).Unix()), Expiration: uint32(time.Now().Add(time.Hour).Unix())}
+	if err := nsecSig.Sign(ppriv.(crypto.Signer), []dns.RR{nsec}); err != nil {
+		t.Fatal(err)
+	}
 
 	// The child's nameserver is out of bailiwick, with its address already
 	// cached, so the referral needs neither glue nor a lookup.
@@ -74,6 +84,8 @@ func TestAReferralWithADSMakesAnInsecureZoneSecure(t *testing.T) {
 		m.Ns = []dns.RR{&dns.NS{Hdr: dns.RR_Header{Name: child, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 300}, Ns: ns}}
 		if withDS {
 			m.Ns = append(m.Ns, ds, dsSig)
+		} else {
+			m.Ns = append(m.Ns, nsec, nsecSig)
 		}
 		imr.handleReferral(ctx, "www."+child, dns.TypeA, m, false, map[string]bool{}, core.TransportDo53, edns0.PrivacyNone)
 	}
