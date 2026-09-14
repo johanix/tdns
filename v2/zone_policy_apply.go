@@ -235,6 +235,9 @@ func applyZonePolicyTransactionalLocked(
 		zd.mu.Unlock()
 		return 0, fmt.Errorf("re-sign zone %s under policy %q: %w", zd.ZoneName, newName, err)
 	}
+	// Bound and signed under newPol: rows written under the old policy's DS
+	// model carry its ds; re-resolve them if the model changed.
+	reconcileDsAfterBind(kdb, zd, oldPol)
 
 	// Zone is now signed under newPol. Persist the last-applied record. A
 	// persistence failure does NOT revert the binding (the zone IS correctly
@@ -328,7 +331,7 @@ func zoneServesIntentSOASig(zd *ZoneData, intentPol *DnssecPolicy) bool {
 // zone is actually signed under them. Combined with zoneServesIntentSOASig it
 // forms the backfill eligibility predicate.
 func zoneActiveKeysMatchAlgs(kdb *KeyDB, zone string, pol *DnssecPolicy) (bool, error) {
-	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
+	active, err := GetSigningKeyRows(kdb, zone)
 	if err != nil {
 		return false, err
 	}
@@ -432,6 +435,7 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 			zd.DnssecPolicyName = intentName
 			zd.mu.Unlock()
 			UpdateSigValidityFloor(zd, intentPol, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
+			reconcileDsAfterBind(kdb, zd, nil)
 			lgEngine.Info("backfilled applied DNSSEC policy without re-sign",
 				"zone", zd.ZoneName, "policy", intentName)
 			return nil
@@ -473,10 +477,14 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 	// Branch 1 — same name, same algs (incl. internals-only edits).
 	if intentName == appliedName && class == PolicyChangeNone {
 		zd.mu.Lock()
+		oldPol := zd.DnssecPolicy
 		zd.DnssecPolicy = intentPol
 		zd.DnssecPolicyName = intentName
 		zd.mu.Unlock()
 		UpdateSigValidityFloor(zd, intentPol, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
+		// A same-name edit may change the rollover method, and with it the
+		// DS model: the rows keep the old model's ds until re-resolved.
+		reconcileDsAfterBind(kdb, zd, oldPol)
 		zd.ClearError(DnssecPolicyWarning)
 		return nil
 	}
@@ -620,7 +628,7 @@ func zoneActiveKeyRoleChanges(kdb *KeyDB, zone string, pol *DnssecPolicy, curren
 		return true, true, nil
 	}
 
-	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
+	active, err := GetSigningKeyRows(kdb, zone)
 	if err != nil {
 		return false, false, err
 	}

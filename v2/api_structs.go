@@ -110,11 +110,13 @@ type KeystoreResponse struct {
 	// the exact failure the invalidation exists to prevent.
 	BulkSig0InvalidateZones []string                   `json:"-"`
 	Algorithms              []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
-	Policies                []DnssecPolicyInfo         // populated by the "list-policies" command
-	Msg                     string
-	Error                   bool
-	ErrorMsg                string
-	TsigCacheDelta          *TsigCacheDelta `json:"-"`
+	// KeyViolations is what "keystore dnssec check" found (CheckKeyInvariants).
+	KeyViolations  []KeyInvariantViolation `json:"keyviolations,omitempty"`
+	Policies       []DnssecPolicyInfo      // populated by the "list-policies" command
+	Msg            string
+	Error          bool
+	ErrorMsg       string
+	TsigCacheDelta *TsigCacheDelta `json:"-"`
 	// NeedsSigningKeysRepublish is set by DnssecKeyMgmt when the operation can
 	// change the zone's active signing-key set. External-tx callers (APIkeystore)
 	// must call republishSigningKeysForZone after their Commit (R1).

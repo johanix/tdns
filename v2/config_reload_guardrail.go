@@ -133,11 +133,11 @@ func sortedAlgs(m map[uint8]bool) []uint8 {
 // Correlation: new policies vs running zones' active keys
 // ---------------------------------------------------------------------------
 
-// loadZoneActiveAlgs reads a zone's active DNSSEC keys and returns their algorithm
-// codepoints split by SEP bit.
+// loadZoneActiveAlgs reads a zone's signing DNSSEC keys (sign=1) and returns
+// their algorithm codepoints split by SEP bit.
 func loadZoneActiveAlgs(kdb *KeyDB, zone string) (zoneActiveAlgs, error) {
 	out := zoneActiveAlgs{ksk: map[uint8]bool{}, zsk: map[uint8]bool{}}
-	keys, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
+	keys, err := GetSigningKeyRows(kdb, zone)
 	if err != nil {
 		return out, err
 	}

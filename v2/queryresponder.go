@@ -46,41 +46,14 @@ func QueryHandler(ctx context.Context, conf *Config, handlerFunc func(context.Co
 	}
 }
 
-// Define sets of known types
-var tdnsSpecialTypes = map[uint16]bool{
-	core.TypeDSYNC:      true,
-	core.TypeNOTIFY:     true,
-	core.TypeMSIGNER:    true,
-	core.TypeDELEG:      true,
-	core.TypeHSYNC:      true,
-	core.TypeHSYNC2:     true,
-	core.TypeHSYNC3:     true,
-	core.TypeHSYNCPARAM: true,
-	core.TypeTSYNC:      true,
-	core.TypeJWK:        true,
-}
-
-var standardDNSTypes = map[uint16]bool{
-	dns.TypeSOA:        true,
-	dns.TypeMX:         true,
-	dns.TypeTLSA:       true,
-	dns.TypeSRV:        true,
-	dns.TypeA:          true,
-	dns.TypeAAAA:       true,
-	dns.TypeNS:         true,
-	dns.TypeTXT:        true,
-	dns.TypeZONEMD:     true,
-	dns.TypeKEY:        true,
-	dns.TypeURI:        true,
-	dns.TypeSVCB:       true,
-	dns.TypeNSEC:       true,
-	dns.TypeNSEC3:      true,
-	dns.TypeNSEC3PARAM: true,
-	dns.TypeRRSIG:      true,
-	dns.TypeDNSKEY:     true,
-	dns.TypeCSYNC:      true,
-	dns.TypeCDS:        true,
-	dns.TypeCDNSKEY:    true,
+// servableQtype reports whether qtype names data a zone can hold: the data and
+// private-use ranges of RFC 6895 section 3.1. It replaces two lists of the
+// types this server would answer for, which refused every type left off them
+// -- PTR, CAA and HTTPS among them -- although the zone held the data, the
+// signer signed it and a transfer carried it.
+// See docs/2026-09-14-query-types-served.md.
+func servableQtype(qtype uint16) bool {
+	return !core.IsMetaType(qtype) && !core.IsReservedType(qtype)
 }
 
 // 0. Check for *any* existence of qname
@@ -579,6 +552,172 @@ func (zd *ZoneData) sendENTNodata(m *dns.Msg, w dns.ResponseWriter, qname string
 	w.WriteMsg(m)
 }
 
+// refuseQtype makes m the refusal for a qtype no zone can hold, a Meta-TYPE or
+// a reserved type (RFC 6895 section 3.1): REFUSED, with AA clear since nothing
+// in it is authoritative data, and no NS RRset or glue. An EDNS query gets EDE
+// 30 (Invalid Query Type), as the NXNAME refusal does, beside the response OPT
+// QueryResponder attached; a query without EDNS gets no OPT.
+func refuseQtype(m *dns.Msg) {
+	m.MsgHdr.Authoritative = false
+	m.MsgHdr.Rcode = dns.RcodeRefused
+	if m.IsEdns0() != nil {
+		edns0.AttachEDEToResponse(m, dns.ExtendedErrorCodeInvalidQueryType)
+	}
+}
+
+// sendAnswer sends a positive answer: rrsets, stored at owner name qname, as
+// the answer for origqname. The two differ when a wildcard matched, and the
+// records are then re-owned to the name that was asked. The authority NS
+// RRset, glue and transport signals follow, as on every positive answer.
+//
+// Under DO every RRset goes through signFunc, its signatures following its
+// records. That fails closed: a must-be-signed zone whose stored RRset carries
+// no RRSIGs is broken, and the answer is SERVFAIL -- ephemeral signing would
+// mask the broken zone, and an unsigned answer would be a silent downgrade
+// (signRRsetForZone). The check runs on the stored RRset, before re-owning, so
+// a wildcard answer gets it too. A signed wildcard answer carries the proof
+// that origqname does not exist.
+func (zd *ZoneData) sendAnswer(m, r *dns.Msg, w dns.ResponseWriter, qname, origqname string, rrsets []core.RRset,
+	apex *OwnerData, snap *zoneSnapshot, sigs []core.RRset, msgoptions *edns0.MsgOptions, minimalResponses bool,
+	signFunc func(core.RRset, string) (core.RRset, error)) {
+	reown := func(rrs []dns.RR) []dns.RR {
+		if qname == origqname {
+			return rrs
+		}
+		return WildcardReplace(rrs, qname, origqname)
+	}
+	signed := false
+	for _, rrset := range rrsets {
+		if msgoptions.DO {
+			s, err := signFunc(rrset, qname)
+			if err != nil {
+				lgHandler.Error("failed to sign answer RRset; serving SERVFAIL", "qname", qname, "origqname", origqname, "zone", zd.ZoneName, "err", err)
+				servfail := new(dns.Msg)
+				servfail.SetReply(r)
+				servfail.MsgHdr.Authoritative = true
+				respondEDNS(servfail, r, msgoptions)
+				servfail.MsgHdr.Rcode = dns.RcodeServerFailure
+				w.WriteMsg(servfail)
+				return
+			}
+			rrset = s
+		}
+		m.Answer = append(m.Answer, reown(rrset.RRs)...)
+		if msgoptions.DO && len(rrset.RRSIGs) > 0 {
+			m.Answer = append(m.Answer, reown(rrset.RRSIGs)...)
+			signed = true
+		}
+	}
+	zd.addNSAndGlue(m, apex, snap, msgoptions, minimalResponses)
+	zd.addTransportSignal(m, sigs, msgoptions)
+	if signed && qname != origqname {
+		if err := zd.addWildcardProof(m, snap, apex, origqname, qname, signFunc); err != nil {
+			failUnsignedDenial(m)
+		}
+	}
+	w.WriteMsg(m)
+}
+
+// sendTypeNodata answers NODATA for a qtype the owner does not hold: the SOA in
+// AUTHORITY and, for a DO query, the denial whose bitmap lists the types the
+// owner does hold. qname is the name that was asked.
+func (zd *ZoneData) sendTypeNodata(m *dns.Msg, w dns.ResponseWriter, qname string, owner, apex *OwnerData, snap *zoneSnapshot,
+	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
+	m.Ns = append(m.Ns, zd.soaForResponseFrom(snap, apex).RRs...)
+	if msgoptions.DO {
+		// RFC 9824: Compact denial if CO bit is set, otherwise traditional DNSSEC negative response
+		rrtypeList := []uint16{}
+		rrtypeList = append(rrtypeList, owner.RRtypes.Keys()...)
+		if err := zd.addCDEResponse(m, qname, apex, rrtypeList, msgoptions, signFunc); err != nil {
+			failUnsignedDenial(m)
+		}
+	}
+	w.WriteMsg(m)
+}
+
+// answerRRSIG answers an explicit RRSIG query with the signatures stored at
+// owner: those over each RRset it holds, and over its NSEC. They are the data
+// asked for, so they are served with or without DO, and they bypass
+// signRRsetForZone: an RRSIG RRset carries no signatures of its own, and that
+// function would take it for a must-be-signed RRset missing them. An owner
+// holding no signatures, as every owner in an unsigned zone does, gets NODATA.
+//
+// Through a wildcard the signatures are re-owned to the query name, those over
+// the wildcard's NSEC are left out as the NSEC itself is (ownerRRsetForQuery),
+// and a DO answer carries the wildcard proof.
+func (zd *ZoneData) answerRRSIG(m *dns.Msg, w dns.ResponseWriter, qname, origqname string, owner, apex *OwnerData,
+	snap *zoneSnapshot, sigs []core.RRset, msgoptions *edns0.MsgOptions, minimalResponses bool,
+	signFunc func(core.RRset, string) (core.RRset, error)) {
+	wildcard := qname != origqname
+	var rrsigs []dns.RR
+	for _, t := range sortedRRtypes(owner) {
+		rrsigs = append(rrsigs, owner.RRtypes.GetOnlyRRSet(t).RRSIGs...)
+	}
+	if !wildcard {
+		rrsigs = append(rrsigs, owner.NSEC.RRSIGs...)
+	}
+	if len(rrsigs) == 0 {
+		zd.sendTypeNodata(m, w, origqname, owner, apex, snap, msgoptions, signFunc)
+		return
+	}
+	if wildcard {
+		rrsigs = WildcardReplace(rrsigs, qname, origqname)
+	}
+	m.Answer = append(m.Answer, rrsigs...)
+	zd.addNSAndGlue(m, apex, snap, msgoptions, minimalResponses)
+	zd.addTransportSignal(m, sigs, msgoptions)
+	if wildcard && msgoptions.DO {
+		if err := zd.addWildcardProof(m, snap, apex, origqname, qname, signFunc); err != nil {
+			failUnsignedDenial(m)
+		}
+	}
+	w.WriteMsg(m)
+}
+
+// sortedRRtypes returns the types owner holds, lowest first. The store is a
+// map, and an answer built from it should not change order between queries.
+func sortedRRtypes(owner *OwnerData) []uint16 {
+	keys := owner.RRtypes.Keys()
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	return keys
+}
+
+// anyRRsets returns the RRsets an ANY query at owner is answered with, lowest
+// type first. With allow-any-queries (full) that is every RRset, then the NSEC,
+// a property of the owner rather than an RRtypes entry. Without it, it is the
+// minimal answer of RFC 8482 section 4.1: the first of those RRsets alone, so
+// repeated queries get the same one, and never the NSEC. A stored RRset rather
+// than section 4.2's synthesised HINFO, which a signed zone would have to sign
+// here, where nothing is signed but synthesised denials.
+//
+// At the apex a stored DS is left out: it is parent-side data, and the apex
+// denial omits it too (sendChildApexDSNodata). Through a wildcard the NSEC is
+// left out, as ownerRRsetForQuery leaves it out. The SOA goes out as
+// soaForResponseFrom renders it, as on the exact-match path.
+func (zd *ZoneData) anyRRsets(owner *OwnerData, snap *zoneSnapshot, apex *OwnerData, atApex, wildcard, full bool) []core.RRset {
+	var out []core.RRset
+	for _, t := range sortedRRtypes(owner) {
+		if t == dns.TypeDS && atApex {
+			continue
+		}
+		rrset := owner.RRtypes.GetOnlyRRSet(t)
+		if len(rrset.RRs) == 0 {
+			continue
+		}
+		if t == dns.TypeSOA {
+			rrset = zd.soaForResponseFrom(snap, apex)
+		}
+		out = append(out, rrset)
+		if !full {
+			return out
+		}
+	}
+	if full && !wildcard && len(owner.NSEC.RRs) > 0 {
+		out = append(out, owner.NSEC)
+	}
+	return out
+}
+
 // addNSAndGlue adds NS records and glue records (A/AAAA) to the message, along with DNSSEC signatures if requested.
 // When minimalResponses is true, BIND-style minimal-responses semantics apply: the authority NS RRset and
 // its associated additional-section glue (and their RRSIGs) are omitted from positive answers.
@@ -734,22 +873,6 @@ func signalChaseTargets(rs core.RRset) []string {
 		}
 	}
 	return out
-}
-
-// handleSOAQuery handles SOA queries for the zone apex.
-func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *OwnerData, snap *zoneSnapshot, sigs []core.RRset,
-	msgoptions *edns0.MsgOptions, minimalResponses bool) {
-	soaRRset := zd.soaForResponseFrom(snap, apex)
-	lgHandler.Debug("SOA RRset details", "zone", zd.ZoneName, "count", len(soaRRset.RRs), "rrset", soaRRset)
-
-	m.Answer = append(m.Answer, soaRRset.RRs[0])
-	if msgoptions.DO {
-		lgHandler.Debug("DNSSEC requested, adding RRSIGs to SOA response")
-		m.Answer = append(m.Answer, soaRRset.RRSIGs...)
-		// Note: NS and glue RRSIGs are already added by addNSAndGlue
-	}
-	zd.addNSAndGlue(m, apex, snap, msgoptions, minimalResponses)
-	zd.addTransportSignal(m, sigs, msgoptions)
 }
 
 // handleCNAMEChain handles CNAME responses, including following CNAME chains across zones.
@@ -956,10 +1079,16 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	// minimal-responses: BIND-style suppression of authority NS RRset and
 	// apex glue on positive answers. Referrals and NXDOMAIN/NODATA paths are
 	// unaffected (their authority/additional sections are still required).
+	// allow-any-queries: an ANY query gets every RRset at the owner; without
+	// it, one (see anyRRsets).
 	minimalResponses := false
+	allowAnyQueries := false
 	if kdb != nil {
 		if v, ok := kdb.AuthOption(AuthOptMinimalResponses); ok && v == "true" {
 			minimalResponses = true
+		}
+		if v, ok := kdb.AuthOption(AuthOptAllowAnyQueries); ok && v == "true" {
+			allowAnyQueries = true
 		}
 	}
 
@@ -1023,6 +1152,19 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	if qtype == dns.TypeNXNAME {
 		m.MsgHdr.Rcode = dns.RcodeFormatError
 		edns0.AttachEDEToResponse(m, dns.ExtendedErrorCodeInvalidQueryType) // EDE code 30: "Invalid Query Type"
+		w.WriteMsg(m)
+		return nil
+	}
+
+	// Meta-TYPEs and reserved types (RFC 6895 section 3.1) name nothing a zone
+	// can hold. They are refused here, ahead of the DS trap and the name
+	// lookup, so the answer is the same at a name that exists, one that does
+	// not, a zone cut and a CNAME. ANY, AXFR and IXFR are meta too, and have
+	// paths of their own below.
+	if (core.IsMetaType(qtype) || core.IsReservedType(qtype)) &&
+		qtype != dns.TypeANY && qtype != dns.TypeAXFR && qtype != dns.TypeIXFR {
+		lgHandler.Debug("refusing a meta or reserved qtype", "qname", qname, "qtype", qtype, "zone", zd.ZoneName)
+		refuseQtype(m)
 		w.WriteMsg(m)
 		return nil
 	}
@@ -1140,103 +1282,56 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			return nil
 		}
 
-		// 2. Check for qname + CNAME (only if CNAME is the only RR type)
-		lgHandler.Debug("checking for CNAME", "qname", qname, "zone", zd.ZoneName)
-		handled, err := zd.handleCNAMEChain(m, w, qname, origqname, qtype, owner, snap, msgoptions, kdb, apex, minimalResponses)
-		if err != nil {
-			lgHandler.Error("error handling CNAME chain", "err", err)
-			// Error response already sent by handleCNAMEChain
-			return nil
-		}
-		if handled {
-			w.WriteMsg(m)
-			return nil
+		// 2. Check for qname + CNAME (only if CNAME is the only RR type). Not
+		// for RRSIG or NSEC: RFC 4035 section 2.5 puts both beside a CNAME in
+		// a signed zone, so a query for either asks for data this node holds,
+		// and the CNAME is not followed.
+		if qtype != dns.TypeRRSIG && qtype != dns.TypeNSEC {
+			lgHandler.Debug("checking for CNAME", "qname", qname, "zone", zd.ZoneName)
+			handled, err := zd.handleCNAMEChain(m, w, qname, origqname, qtype, owner, snap, msgoptions, kdb, apex, minimalResponses)
+			if err != nil {
+				lgHandler.Error("error handling CNAME chain", "err", err)
+				// Error response already sent by handleCNAMEChain
+				return nil
+			}
+			if handled {
+				w.WriteMsg(m)
+				return nil
+			}
 		}
 	}
 
-	// 3. Check for exact match qname+qtype
-	lgHandler.Debug("checking for exact match", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName)
+	// 3. RRSIG. Signatures live inside the RRset they cover, never as an
+	// RRtypes entry of their own, so the exact match below would find none and
+	// answer NODATA at a name full of them.
+	if qtype == dns.TypeRRSIG {
+		zd.answerRRSIG(m, w, qname, origqname, owner, apex, snap, sigs, msgoptions, minimalResponses, MaybeSignRRset)
+		return nil
+	}
 
-	if tdnsSpecialTypes[qtype] || standardDNSTypes[qtype] {
+	// 4. ANY: every RRset at the owner with allow-any-queries, one without it.
+	if qtype == dns.TypeANY {
+		rrsets := zd.anyRRsets(owner, snap, apex, core.EqualNames(qname, zd.ZoneName), qname != origqname, allowAnyQueries)
+		if len(rrsets) == 0 {
+			zd.sendTypeNodata(m, w, origqname, owner, apex, snap, msgoptions, MaybeSignRRset)
+			return nil
+		}
+		zd.sendAnswer(m, r, w, qname, origqname, rrsets, apex, snap, sigs, msgoptions, minimalResponses, MaybeSignRRset)
+		return nil
+	}
+
+	// 5. Exact match qname+qtype, for every type a zone can hold.
+	lgHandler.Debug("checking for exact match", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName)
+	if servableQtype(qtype) {
 		if rrset, ok := ownerRRsetForQuery(owner, qtype, qname != origqname); ok && len(rrset.RRs) > 0 {
 			if qtype == dns.TypeSOA {
 				rrset = zd.soaForResponseFrom(snap, apex)
 			}
-			if qname == origqname {
-				// zd.Logger.Printf("Exact match qname %s %s", qname, dns.TypeToString[qtype])
-				m.Answer = append(m.Answer, rrset.RRs...)
-			} else {
-				// zd.Logger.Printf("Wildcard match qname %s %s", qname, origqname)
-				tmp := WildcardReplace(rrset.RRs, qname, origqname)
-				m.Answer = append(m.Answer, tmp...)
-			}
-			zd.addNSAndGlue(m, apex, snap, msgoptions, minimalResponses)
-			// Add transport signal RRs that aren't already present in the Answer section
-			zd.addTransportSignal(m, sigs, msgoptions)
-			if msgoptions.DO {
-				lgHandler.Debug("considering signing", "qname", qname, "qtype", dns.TypeToString[qtype], "origqname", origqname)
-				// Fail-closed for BOTH the exact-match answer and the wildcard-
-				// synthesized answer: a must-be-signed zone whose stored answer
-				// RRset carries no RRSIGs is broken → SERVFAIL. This check runs on
-				// the stored RRset (owner = qname, which is the *.parent wildcard
-				// name on the wildcard arm) before WildcardReplace. Previously only
-				// the exact-match arm ran it; the wildcard arm (qname != origqname)
-				// served the WildcardReplace'd answer straight from stored RRSIGs and
-				// so emitted an UNSIGNED wildcard answer for a broken zone (there
-				// were no RRSIGs to replace) — a silent downgrade. A genuinely signed
-				// wildcard still carries stored RRSIGs and answers; an unsigned-by-
-				// design zone serves unsigned as before. Ephemeral-signing the answer
-				// is not an option: it would mask the broken zone. See Finding 1 /
-				// Decision 1.
-				signed, err := MaybeSignRRset(rrset, qname)
-				if err != nil {
-					lgHandler.Error("failed to sign answer RRset; serving SERVFAIL", "qname", qname, "qtype", dns.TypeToString[qtype], "origqname", origqname, "zone", zd.ZoneName, "err", err)
-					servfail := new(dns.Msg)
-					servfail.SetReply(r)
-					servfail.MsgHdr.Authoritative = true
-					respondEDNS(servfail, r, msgoptions)
-					servfail.MsgHdr.Rcode = dns.RcodeServerFailure
-					w.WriteMsg(servfail)
-					return nil
-				}
-				rrset = signed
-
-				if qname == origqname {
-					m.Answer = append(m.Answer, rrset.RRSIGs...)
-				} else {
-					tmp := WildcardReplace(rrset.RRSIGs, qname, origqname)
-					m.Answer = append(m.Answer, tmp...)
-					if len(rrset.RRSIGs) > 0 {
-						if err := zd.addWildcardProof(m, snap, apex, origqname, qname, MaybeSignRRset); err != nil {
-							failUnsignedDenial(m)
-							w.WriteMsg(m)
-							return nil
-						}
-					}
-				}
-				// Note: NS and glue RRSIGs are already added by addNSAndGlue
-			}
-		} else {
-			lgHandler.Debug("no exact match for qname+qtype", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName)
-			soaRRset := zd.soaForResponseFrom(snap, apex)
-			m.Ns = append(m.Ns, soaRRset.RRs...)
-			if msgoptions.DO {
-				// RFC 9824: Compact denial if CO bit is set, otherwise traditional DNSSEC negative response
-				rrtypeList := []uint16{}
-				rrtypeList = append(rrtypeList, owner.RRtypes.Keys()...)
-				if err := zd.addCDEResponse(m, origqname, apex, rrtypeList, msgoptions, MaybeSignRRset); err != nil {
-					failUnsignedDenial(m)
-				}
-			}
+			zd.sendAnswer(m, r, w, qname, origqname, []core.RRset{rrset}, apex, snap, sigs, msgoptions, minimalResponses, MaybeSignRRset)
+			return nil
 		}
-		w.WriteMsg(m)
-		return nil
-	}
-
-	lgHandler.Debug("checking for SOA query", "zone", zd.ZoneName)
-	if qtype == dns.TypeSOA && core.EqualNames(qname, zd.ZoneName) {
-		zd.handleSOAQuery(m, w, apex, snap, sigs, msgoptions, minimalResponses)
-		w.WriteMsg(m)
+		lgHandler.Debug("no exact match for qname+qtype", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName)
+		zd.sendTypeNodata(m, w, origqname, owner, apex, snap, msgoptions, MaybeSignRRset)
 		return nil
 	}
 
@@ -1256,16 +1351,11 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		}
 	}
 
-	// Final catch everything we don't want to deal with.
-	// minimal-responses is defined to affect positive answers only, so on
-	// the REFUSED catch-all we keep the pre-existing behavior (always
-	// include authority NS + glue) regardless of the option.
-	m.MsgHdr.Rcode = dns.RcodeRefused
-	zd.addNSAndGlue(m, apex, snap, msgoptions, false)
+	// Nothing reaches this point: meta and reserved types were refused ahead of
+	// the name lookup, and every other qtype is answered above. One that did
+	// would get the same refusal.
+	refuseQtype(m)
 	w.WriteMsg(m)
-
-	_ = origqname
-
 	return nil
 }
 

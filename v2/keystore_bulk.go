@@ -334,13 +334,10 @@ SELECT state, flags, algorithm, creator, privatekey, keyrr, comment,
        published_at, active_at, retired_at, active_seq
 FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
 
-	bulkInsertDnssecSql = `
-INSERT INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey,
-       keyrr, comment, published_at, active_at, retired_at, active_seq)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-
-	bulkUpdateDnssecSql = `
-UPDATE DnssecKeyStore SET state=?, flags=?, algorithm=?, creator=?, privatekey=?, keyrr=?,
+	// The state and its flags go through setKeyRowTx; this rewrites the rest
+	// of a replaced row afterwards, the imported timestamps included.
+	bulkUpdateDnssecFieldsSql = `
+UPDATE DnssecKeyStore SET flags=?, algorithm=?, creator=?, privatekey=?, keyrr=?,
        comment=?, published_at=?, active_at=?, retired_at=?, active_seq=?
 WHERE zonename=? AND keyid=?`
 
@@ -423,9 +420,11 @@ func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) (di
 
 		switch {
 		case scanErr == sql.ErrNoRows:
-			if _, err := tx.Exec(bulkInsertDnssecSql, zone, k.State, int(k.Keyid), int(k.Flags),
-				k.Algorithm, k.Creator, k.PrivateKey, k.KeyRR, k.Comment,
-				k.PublishedAt, k.ActiveAt, k.RetiredAt, nullableInt64(k.ActiveSeq)); err != nil {
+			if err := insertKeyRowTx(tx, KeyRow{
+				Zone: zone, State: k.State, Keyid: k.Keyid, Flags: k.Flags, Algorithm: k.Algorithm,
+				Creator: k.Creator, PrivateKey: k.PrivateKey, KeyRR: k.KeyRR, Comment: k.Comment,
+				PublishedAt: k.PublishedAt, ActiveAt: k.ActiveAt, RetiredAt: k.RetiredAt, ActiveSeq: k.ActiveSeq,
+			}); err != nil {
 				return nil, fmt.Errorf("inserting DNSSEC key %s keyid %d: %v", zone, k.Keyid, err)
 			}
 			out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid, Status: BulkStatusImported})
@@ -454,7 +453,14 @@ func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) (di
 				out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid,
 					Status: BulkStatusConflict, Detail: strings.Join(diffs, ", ")})
 			default:
-				if _, err := tx.Exec(bulkUpdateDnssecSql, k.State, int(k.Flags), k.Algorithm,
+				stateFlags, ok := keyFlagsForState(k.State)
+				if !ok {
+					return nil, fmt.Errorf("replacing DNSSEC key %s keyid %d: state %q has no flags in the flag table", zone, k.Keyid, k.State)
+				}
+				if _, err := setKeyRowTx(tx, zone, k.Keyid, k.State, stateFlags, ""); err != nil {
+					return nil, fmt.Errorf("replacing DNSSEC key %s keyid %d: %v", zone, k.Keyid, err)
+				}
+				if _, err := tx.Exec(bulkUpdateDnssecFieldsSql, int(k.Flags), k.Algorithm,
 					k.Creator, k.PrivateKey, k.KeyRR, k.Comment, k.PublishedAt, k.ActiveAt,
 					k.RetiredAt, nullableInt64(k.ActiveSeq), zone, int(k.Keyid)); err != nil {
 					return nil, fmt.Errorf("replacing DNSSEC key %s keyid %d: %v", zone, k.Keyid, err)

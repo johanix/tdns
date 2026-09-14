@@ -63,16 +63,7 @@ func dsModelForZone(zd *ZoneData) DSModel {
 	if zd.Options[OptMultiProvider] {
 		return DSModelMultiProvider
 	}
-	if zd.DnssecPolicy == nil {
-		return DSModelNone
-	}
-	switch zd.DnssecPolicy.Rollover.Method {
-	case RolloverMethodMultiDS:
-		return DSModelMultiDS
-	case RolloverMethodDoubleSignature:
-		return DSModelDoubleSignature
-	}
-	return DSModelNone
+	return dsModelOfPolicy(zd.DnssecPolicy)
 }
 
 var (

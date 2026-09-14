@@ -54,10 +54,11 @@ func (zd *ZoneData) ActiveDnssecKeys() *DnssecKeys {
 	return s.Active
 }
 
-// buildSigningKeysSnapshot loads active keys from the keystore DB and returns a
-// fresh immutable snapshot with built=true (including keyless empty Active).
+// buildSigningKeysSnapshot loads the signing keys (sign=1) from the keystore
+// and returns a fresh immutable snapshot with built=true (including keyless
+// empty Active).
 func buildSigningKeysSnapshot(kdb *KeyDB, zone string) (*signingKeysSnapshot, error) {
-	dak, err := loadDnssecKeysFromDB(kdb, zone, DnskeyStateActive)
+	dak, err := loadSigningKeysFromDB(kdb, zone)
 	if err != nil {
 		return nil, err
 	}
@@ -135,16 +136,32 @@ func (zd *ZoneData) activeKeysCAS(kdb *KeyDB) (*DnssecKeys, error) {
 	return winner.Active, nil
 }
 
-// loadDnssecKeysFromDB loads DNSSEC keys for zone+state directly from the
-// keystore (no snapshot, no cache). Used for cold states and as the build
-// source for the active signing-keys snapshot.
+// loadDnssecKeysFromDB loads the DNSSEC keys of a zone in one lifecycle
+// state directly from the keystore (no snapshot, no cache). For the keys that
+// sign, which is a question of the sign column and not of a state, see
+// loadSigningKeysFromDB.
 func loadDnssecKeysFromDB(kdb *KeyDB, zonename, state string) (*DnssecKeys, error) {
-	const fetchDnssecPrivKeySql = `
-SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND state=?`
+	return loadDnssecKeysWhere(kdb, zonename, `state=?`, state, state)
+}
+
+// loadSigningKeysFromDB loads the keys a zone signs with: the rows with
+// sign=1 (design D3). It is the build source of the signing-keys snapshot.
+// A row with sign set but no private key cannot sign and fails the load,
+// as a missing key file always has.
+func loadSigningKeysFromDB(kdb *KeyDB, zonename string) (*DnssecKeys, error) {
+	return loadDnssecKeysWhere(kdb, zonename, `sign=1`, "signing")
+}
+
+// loadDnssecKeysWhere is the shared loader: the zone's rows matching where,
+// their private keys parsed, split by the SEP bit into KSKs and ZSKs, with
+// the KSK reused as CSK when there is no ZSK. label names the set in logs.
+func loadDnssecKeysWhere(kdb *KeyDB, zonename, where, label string, args ...any) (*DnssecKeys, error) {
+	fetchDnssecPrivKeySql := `SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND ` + where
+	state := label
 
 	var dk DnssecKeys
 
-	rows, err := kdb.Query(fetchDnssecPrivKeySql, zonename, state)
+	rows, err := kdb.Query(fetchDnssecPrivKeySql, append([]any{zonename}, args...)...)
 	if err != nil {
 		lgSigner.Error("failed to query DNSSEC keys", "sql", fetchDnssecPrivKeySql, "zone", zonename, "err", err)
 		return nil, err

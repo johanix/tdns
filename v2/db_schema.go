@@ -84,6 +84,9 @@ published_at              TEXT DEFAULT '',
 active_at                 TEXT DEFAULT '',
 retired_at                TEXT DEFAULT '',
 active_seq                INTEGER,
+pub                       INTEGER,
+sign                      INTEGER,
+ds                        INTEGER,
 	UNIQUE (zonename, keyid)
 )`,
 

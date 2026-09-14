@@ -1063,6 +1063,9 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	if err != nil {
 		return "", fmt.Errorf("policy-reset: re-signing zone %s under config policy %q FAILED — the config-policy keys are already in the keystore, so run `zone dnssec resign -z %s` to converge (do NOT re-run policy-reset): %w", zd.ZoneName, configName, zd.ZoneName, err)
 	}
+	// Signed under the config policy: rows written under the old policy's DS
+	// model carry its ds; re-resolve them if the model changed.
+	reconcileDsAfterBind(kdb, zd, oldPol)
 
 	// 4) Only now that the zone is signed under config and applied=config is
 	// recorded, clear any stale CLI override so intent matches reality. Done LAST
