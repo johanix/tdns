@@ -4,6 +4,7 @@ Written 2026-09-14. Proposal, not implemented.
 
 Revisions:
 - r1 2026-09-14: first version.
+- r2 2026-09-14: added "Size".
 
 ## Why
 
@@ -226,6 +227,37 @@ zone and a signed one:
 - NXNAME: FORMERR, as today.
 - A reload that sets `allow-any-queries` changes the ANY answer without a
   restart.
+
+## Size
+
+Estimated against main `d7ee7f4b` from the code each item replaces or mirrors:
+the two lists are 36 lines, the exact-match branch 78, the SOA branch and
+`handleSOAQuery` 21, and a signed-zone test fixture about 27 (`signedProofZone`
+in `wildcard_proof_test.go`).
+
+| Item | Added | Removed | Risk |
+|---|---|---|---|
+| `servableQtype` and the gate (section 1) | 17 | 37 | low |
+| The exact-match branch's positive-answer and NODATA arms, moved into helpers that sections 3 and 4 reuse | 50 | 42 | low: a move |
+| RRSIG answer (section 3) | 45 | 0 | medium: re-owning through a wildcard, leaving out the NSEC's signatures |
+| ANY answer in both modes, and reading the option (section 4) | 65 | 0 | medium: signing each RRset, one wildcard proof for the set, the apex DS |
+| Catch-all refusal (section 5) | 8 | 5 | low |
+| SOA branch and `handleSOAQuery` (section 6) | 0 | 21 | low |
+| `enums.go`, `parseoptions.go` | 13 | 0 | low |
+| `tdns-auth.sample.yaml`, `guide/config-tdns-auth.md` | 12 | 1 | none |
+| Tests, one new file | 350 | 0 | |
+| **Total** | **560** | **106** | |
+
+Production code in `v2/` grows by about 95 lines net (198 added, 105 removed);
+most of the change is tests. The test file is a signed-zone fixture (~25), the
+served, NODATA and refused table over the unsigned zone (~110), RRSIG (~50), ANY
+in both modes (~90), option parsing and a live flip through `KeyDB.SetOptions`
+(~45), and shared helpers (~30).
+
+No existing test changes. The REFUSED assertions in `v2` cover UPDATE, NOTIFY,
+transfer, IMR and agent paths, none of which reach the catch-all, and
+`cname_exact_match_test.go` pins ANY at a CNAME-only owner, which section 4
+keeps.
 
 ## Out of scope
 
