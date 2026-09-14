@@ -199,8 +199,8 @@ func TestZoneDataSignerHoldsOwnerInZoneCallers(t *testing.T) {
 }
 
 // A parent learns a child's keys from the child's nameservers. ValidateChildDnskeys
-// accepts the child's DNSKEY RRset once one KSK in it matches the parent's DS
-// and ValidateRRset passes the RRset's signature, and then holds its ZSKs
+// accepted the child's DNSKEY RRset once one KSK in it matched the parent's DS
+// and ValidateRRset passed the RRset's signature, and then held its ZSKs
 // Secure in the process-wide DnskeyCache, which the in-process IMR validates
 // with too. A nameserver for the child, or anyone on the path to one, can put
 // the child's real KSK next to a ZSK of its own.
