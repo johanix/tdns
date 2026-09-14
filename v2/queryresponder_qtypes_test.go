@@ -184,7 +184,7 @@ func TestQueryResponderRefusesMetaAndReservedTypes(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	testSnapshotZone(t, "example.", qtypesZone)
 
-	for _, qtype := range []uint16{0, dns.TypeOPT, dns.TypeTSIG, dns.TypeTKEY, dns.TypeMAILA, 61440, 65535} {
+	for _, qtype := range []uint16{0, dns.TypeOPT, dns.TypeTSIG, dns.TypeTKEY, dns.TypeMAILB, dns.TypeMAILA, 61440, 65535} {
 		for _, qname := range []string{"www.example.", "nope.example.", "host.sub.example.", "alias.example."} {
 			t.Run(fmt.Sprintf("TYPE%d at %s", qtype, qname), func(t *testing.T) {
 				m := occAsk(t, kdb, qname, qtype, false)
@@ -221,7 +221,9 @@ func TestQueryResponderRefusesMetaAndReservedTypes(t *testing.T) {
 		}
 	})
 
-	// The meta types with paths of their own keep them.
+	// The meta types with paths of their own keep them. The refusal does not
+	// look at the name, so a transfer request below the apex answering NOTAUTH
+	// shows AXFR and IXFR get past it.
 	for _, tc := range []struct {
 		what  string
 		qtype uint16
@@ -229,6 +231,7 @@ func TestQueryResponderRefusesMetaAndReservedTypes(t *testing.T) {
 	}{
 		{"NXNAME keeps its FORMERR", dns.TypeNXNAME, dns.RcodeFormatError},
 		{"AXFR below the apex reaches the transfer code", dns.TypeAXFR, dns.RcodeNotAuth},
+		{"IXFR below the apex reaches the transfer code", dns.TypeIXFR, dns.RcodeNotAuth},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			if m := occAsk(t, kdb, "www.example.", tc.qtype, false); m.Rcode != tc.rcode {
