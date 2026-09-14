@@ -548,3 +548,17 @@ No new config needed. CSYNC scanning uses the same
 The `immediate`-only restriction is hardcoded (log
 warning if CSYNC doesn't have immediate flag). This
 could become a config option later if needed.
+
+## Amendment, 2026-09-14: CSYNC data is validated (#637)
+
+The delegation policy bound to the parent zone replaces
+`scanner.options` here. Under `require-dnssec: true` the SOA,
+the CSYNC and every NS and glue RRset copied from the child
+are fetched directly from the child's nameservers, as before,
+and handed to the IMR's validator. Anything short of Secure
+refuses the CSYNC (RFC 7477 §2, §3), and a refused CSYNC is
+not recorded as processed. Under `require-dnssec: false`
+nothing is validated and the scan result says `unvalidated`.
+This validates the direct answers rather than querying via the
+IMR, which would validate cached data that the NOTIFY has just
+made stale. See `v2/scanner_trust.go`.

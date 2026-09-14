@@ -347,3 +347,16 @@ per-owner glue diffing. See
    shows updated DS
 7. Test at-apex option with multiple child NS
 8. Test at-ns option with signaling names
+
+## Amendment, 2026-09-14: the delegation policy decides (#637)
+
+`scanner.options` no longer decides what the scanner trusts. The
+delegation policy bound to the parent zone does: `require-dnssec`
+decides whether the CDS must validate, and `mechanisms` (`at-apex`,
+`at-ns`) decide how a child without a DS may bootstrap.
+`no-dnssec-validation`, `at-apex` and `at-ns` in `scanner.options`
+are logged as ignored at startup, so steps 2, 7 and 8 of the test
+plan above configure the policy instead. Each `ScanTupleResponse`
+carries `Validation` (`validated`, `unvalidated`, `refused`) and
+`ValidationReason`. See `v2/scanner_trust.go`. The RFC 7344 §4.1
+signer rule is #641.

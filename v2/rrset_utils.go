@@ -164,8 +164,13 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 			}
 
 			lg.Debug("AuthQueryEngine: received request", "qname", req.qname, "rrtype", dns.TypeToString[req.rrtype], "ns", req.ns)
+			// RRtype and Class too: the scanner hands this RRset to the IMR's
+			// validator, which looks up cached verdicts and special-cases
+			// DNSKEY by rrset.RRtype.
 			rrset := core.RRset{
-				Name: req.qname,
+				Name:   req.qname,
+				Class:  dns.ClassINET,
+				RRtype: req.rrtype,
 			}
 
 			m := new(dns.Msg)
