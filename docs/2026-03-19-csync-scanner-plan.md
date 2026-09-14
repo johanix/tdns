@@ -638,3 +638,22 @@ A child that publishes no CSYNC is a no-op before the trust gate,
 like a CDS removal sentinel for a child without a DS. Under
 `require-dnssec: true` a missing CSYNC used to be an error, which
 a poll would have logged for every such child on every round.
+
+## Amendment, 2026-09-14 (d): quieter logs, CDS validated through a DS
+
+- **A CDS for a child that already has a DS is always validated**,
+  whatever the delegation policy's `require-dnssec` says
+  (`authenticateCDS`). The DS is the chain to validate it
+  through, so an unsigned or wrong CDS can no longer replace a
+  working DS under a policy that does not require DNSSEC.
+  `require-dnssec: false` now decides only what is accepted
+  without validation: CSYNC, and CDS for a child without a DS.
+- **The scanner logs one line per scan.** `ScannerEngine: scan
+  result` (parent, child, type, validation, outcome, reason, and
+  for a change the DS, NS and glue counts) is logged at Info when
+  the scan found a change or did not process the child's data,
+  and at Debug otherwise. A CSYNC without the immediate flag
+  counts as nothing to do. The scan functions' narration is
+  silent unless `scanner.verbose` is set, and the RRset dumps need
+  `scanner.debug`. Both are read at startup and default to off;
+  they used to be hard-wired on.
