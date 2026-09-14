@@ -5,7 +5,7 @@ include:
 
 service:
    name:		TDNS-SERVER
-   identities:		[ ns.axfr.net., nsa.johani.org., foo.com. ]
+   identities:		[ ns1.example.net., ns2.example.org., ns.example.com. ]
    verbose:		true
    debug:		true   # writes processed zone to disk
    refresh:		true
@@ -160,7 +160,7 @@ db:
    file:		/var/tmp/tdns.db
 
 log:
-   file:		/var/log/axfr.net/tdns-server.log
+   file:		/var/log/tdns/tdns-server.log
 
 common:
    servername:		tdns-server
@@ -172,14 +172,14 @@ common:
 # child._dsync.parent. DSYNC
 registrars:
    ooga-reg:
-      - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.ooga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.ooga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 updates.ooga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.ooga-reg.example.net.
+      - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.ooga-reg.example.net.
+      - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 updates.ooga-reg.example.net.
    booga-reg:
-      - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.booga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.booga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 notifications.booga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.booga-reg.example.net.
+      - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.booga-reg.example.net.
+      - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 notifications.booga-reg.example.net.
    mooga-reg:
-      - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.mooga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.mooga-reg.axfr.net.
-      - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 notifications.mooga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.mooga-reg.example.net.
+      - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.mooga-reg.example.net.
+      - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 notifications.mooga-reg.example.net.
