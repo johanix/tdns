@@ -353,6 +353,8 @@ scanner:
    # that never send NOTIFY(CDS) or NOTIFY(CSYNC). A child with a DS is scanned
    # for CSYNC and CDS. A child without one is not scanned unless bootstrap is
    # set; then its CDS is, and a poll can give it its first DS.
+   # "tdns-cli daemon reload" applies a change to scanner.poll at the next
+   # round; SIGHUP does not. A change to interval needs a restart.
    poll:
       enabled:     false
       bootstrap:   false

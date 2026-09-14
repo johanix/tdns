@@ -626,6 +626,14 @@ A round scans at most `scanner.poll.concurrency` children at once
 (default 4) and does not start while the previous one is still
 running. A child whose delegation cannot be read is not polled.
 
+The engine reads `scanner.poll` from the runtime-config snapshot
+on every tick, never from viper, which a reload rewrites. A full
+config reload (`tdns-cli daemon reload`) publishes a new snapshot,
+so a change takes effect at the next round. SIGHUP reloads zone
+config only and does not re-read `scanner.poll`. The ticker is
+created when the engine starts, so a change to `scanner.interval`
+needs a restart.
+
 A child that publishes no CSYNC is a no-op before the trust gate,
 like a CDS removal sentinel for a child without a DS. Under
 `require-dnssec: true` a missing CSYNC used to be an error, which

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // The parent's periodic scan of its children.
@@ -49,11 +48,15 @@ type scannerPollConf struct {
 	Concurrency int
 }
 
+// readScannerPollConf reads the poll settings from the runtime-config snapshot
+// (runtime_config.go), which a config reload replaces whole. Reading viper here,
+// on the engine's goroutine at every tick, would race the reload writing it.
 func readScannerPollConf() scannerPollConf {
+	live := ConfLive()
 	c := scannerPollConf{
-		Enabled:     viper.GetBool("scanner.poll.enabled"),
-		Bootstrap:   viper.GetBool("scanner.poll.bootstrap"),
-		Concurrency: viper.GetInt("scanner.poll.concurrency"),
+		Enabled:     live.ScannerPollEnabled,
+		Bootstrap:   live.ScannerPollBootstrap,
+		Concurrency: live.ScannerPollConcurrency,
 	}
 	if c.Concurrency < 1 {
 		c.Concurrency = defaultPollConcurrency
