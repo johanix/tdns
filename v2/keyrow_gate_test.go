@@ -64,14 +64,17 @@ func TestKeystoreStateWritesLiveInTheOneWriteFunction(t *testing.T) {
 			continue
 		}
 		fset := token.NewFileSet()
-		af, err := parser.ParseFile(fset, f, src, 0)
+		af, err := parser.ParseFile(fset, f, src, parser.ParseComments)
 		if err != nil {
 			t.Fatalf("parse %s: %v", f, err)
 		}
 		tf := fset.File(af.Pos())
 		for _, off := range hits {
-			found++
 			pos := tf.Pos(off)
+			if inComment(af, pos) {
+				continue
+			}
+			found++
 			fn := enclosingFuncName(af, pos)
 			if _, ok := allowed[fn]; ok {
 				continue
@@ -86,6 +89,15 @@ func TestKeystoreStateWritesLiveInTheOneWriteFunction(t *testing.T) {
 	if found == 0 {
 		t.Fatal("no keystore write found at all; the scan is broken")
 	}
+}
+
+func inComment(af *ast.File, pos token.Pos) bool {
+	for _, cg := range af.Comments {
+		if pos >= cg.Pos() && pos < cg.End() {
+			return true
+		}
+	}
+	return false
 }
 
 func enclosingFuncName(af *ast.File, pos token.Pos) string {
