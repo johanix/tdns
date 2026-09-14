@@ -23,9 +23,9 @@ import (
 )
 
 const (
-	refParent = "refparent.example."
-	refKid    = "kid." + refParent
-	refKidNS  = "ns." + refKid
+	refParent  = "refparent.example."
+	refKid     = "kid." + refParent
+	refKidNS   = "ns." + refKid
 	refKidWWW  = "www." + refKid
 	refKidMail = "mail." + refKid // always served without its RRSIG
 )
@@ -79,15 +79,15 @@ func refHashStep(h string, step int) string {
 	return string(b)
 }
 
-// refNSEC3 is an NSEC3 in refParent matching name, or, with cover, covering it
-// with an interval that holds its hash and no other.
-func refNSEC3(name string, cover bool, flags uint8, types ...uint16) *dns.NSEC3 {
+// refNSEC3 is an NSEC3 in zone matching name, or, with cover, covering it with
+// an interval that holds its hash and no other.
+func refNSEC3(zone, name string, cover bool, flags uint8, types ...uint16) *dns.NSEC3 {
 	h := dns.HashName(name, dns.SHA1, 0, "")
 	owner := h
 	if cover {
 		owner = refHashStep(h, -1)
 	}
-	return &dns.NSEC3{Hdr: dns.RR_Header{Name: owner + "." + refParent, Rrtype: dns.TypeNSEC3, Class: dns.ClassINET, Ttl: 300},
+	return &dns.NSEC3{Hdr: dns.RR_Header{Name: owner + "." + zone, Rrtype: dns.TypeNSEC3, Class: dns.ClassINET, Ttl: 300},
 		Hash: dns.SHA1, Flags: flags, HashLength: 20, NextDomain: refHashStep(h, 1), TypeBitMap: types}
 }
 
@@ -121,11 +121,12 @@ const (
 )
 
 type referralSetup struct {
-	parent      cache.ValidationState // refParent's state in ZoneMap; Secure, under a trust anchor, when zero
-	unanchored  bool                  // the resolver holds no trust anchor at all
-	unsignedKid bool
-	answer      kidAnswer
-	path        func(z *referralZones) referralPath
+	parent          cache.ValidationState // refParent's state in ZoneMap; Secure, under a trust anchor, when zero
+	unanchored      bool                  // the resolver holds no trust anchor at all
+	unsignedKid     bool
+	strippedDenials bool // a signed child's denials reach the resolver as their SOA alone
+	answer          kidAnswer
+	path            func(z *referralZones) referralPath
 }
 
 // startRefDouble serves handler on ip:port (port 0 picks one) until the test ends.
@@ -177,11 +178,11 @@ func newReferralImr(t *testing.T, s referralSetup) (*Imr, *atomic.Int32) {
 	z := &referralZones{
 		ds:        parent.sign(t, ds),
 		nsec:      parent.sign(t, mustRR(t, refKid+" 300 IN NSEC zzz."+refParent+" NS RRSIG NSEC")),
-		apexNSEC3: parent.sign(t, refNSEC3(refParent, false, 0, dns.TypeNS, dns.TypeSOA, dns.TypeRRSIG, dns.TypeDNSKEY, dns.TypeNSEC3PARAM)),
+		apexNSEC3: parent.sign(t, refNSEC3(refParent, refParent, false, 0, dns.TypeNS, dns.TypeSOA, dns.TypeRRSIG, dns.TypeDNSKEY, dns.TypeNSEC3PARAM)),
 		soa:       parent.sign(t, mustRR(t, refParent+" 300 IN SOA ns."+refParent+" hostmaster."+refParent+" 1 7200 1800 604800 300")),
 	}
 	z.dsAltered = []dns.RR{altered, z.ds[1]}
-	z.optOut = slices.Concat(z.apexNSEC3, parent.sign(t, refNSEC3(refKid, true, 1, dns.TypeA, dns.TypeRRSIG)))
+	z.optOut = slices.Concat(z.apexNSEC3, parent.sign(t, refNSEC3(refParent, refKid, true, 1, dns.TypeA, dns.TypeRRSIG)))
 	var path referralPath
 	if s.path != nil {
 		path = s.path(z)
@@ -199,7 +200,10 @@ func newReferralImr(t *testing.T, s referralSetup) (*Imr, *atomic.Int32) {
 		case kidTampered:
 			www = []dns.RR{mustRR(t, refKidWWW+" 300 IN A 192.0.2.66"), signedA[1]}
 		}
-		kidDNSKEY, kidNoData = kid.sign(t, kid.key), kid.sign(t, kidSOA)
+		kidDNSKEY = kid.sign(t, kid.key)
+		if !s.strippedDenials {
+			kidNoData = kid.sign(t, kidSOA)
+		}
 	}
 	delegation := mustRR(t, refKid+" 300 IN NS "+refKidNS)
 	glue := mustRR(t, refKidNS+" 300 IN AAAA ::1")

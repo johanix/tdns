@@ -316,4 +316,183 @@ func TestUnsignedDataOutsideASecureZoneIsUnchanged(t *testing.T) {
 	}
 }
 
+// validateDenial validates a denial of qname and qtype whose authority section
+// is auth.
+func validateDenial(t *testing.T, rrcache *RRsetCacheT, qname string, qtype uint16, fetcher RRsetFetcher, auth ...*core.RRset) ValidationState {
+	t.Helper()
+	state, _, err := rrcache.ValidateNegativeResponse(context.Background(), qname, qtype, dns.RcodeNameError, auth, fetcher)
+	if err != nil {
+		t.Fatalf("ValidateNegativeResponse(%s %s): %v", qname, dns.TypeToString[qtype], err)
+	}
+	return state
+}
+
+// THE DEFECT, for denials. kid is signed and delegated from the secure zone with
+// a DS, and has no ZoneMap entry of its own: the resolver never saw a referral
+// for it, or never had the DS question answered. A denial from kid with its
+// RRSIGs stripped validated Insecure, since only a zone with an entry of its own
+// held Secure made it Bogus.
+func TestAStrippedDenialBelowASecureZoneIsBogus(t *testing.T) {
+	dsStates := []struct {
+		name  string
+		setup func(t *testing.T, rrcache *RRsetCacheT, k *zoneKey)
+	}{
+		{"no answer to the DS question", func(*testing.T, *RRsetCacheT, *zoneKey) {}},
+		{"a secure DS", func(t *testing.T, rrcache *RRsetCacheT, k *zoneKey) {
+			ds := k.sign(t, rrFrom(t, secKid+" 300 IN DS 4242 15 2 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"))
+			rrcache.Set(secKid, dns.TypeDS, &CachedRRset{Name: secKid, RRtype: dns.TypeDS, RRset: ds,
+				Context: ContextAnswer, State: ValidationStateSecure, Expiration: time.Now().Add(5 * time.Minute)})
+		}},
+	}
+	denials := []struct {
+		name  string
+		qname string
+		qtype uint16
+		auth  func(t *testing.T, rrcache *RRsetCacheT) []*core.RRset
+	}{
+		{"NXDOMAIN", "nope." + secKid, dns.TypeA, func(t *testing.T, _ *RRsetCacheT) []*core.RRset {
+			return []*core.RRset{unsigned(soaFor(t, secKid))}
+		}},
+		{"NODATA, RRSIGs stripped and NSEC left", kidWWW, dns.TypeTXT, func(t *testing.T, _ *RRsetCacheT) []*core.RRset {
+			return []*core.RRset{unsigned(soaFor(t, secKid)), unsigned(rrFrom(t, kidWWW+" 300 IN NSEC "+secKid+" A RRSIG NSEC"))}
+		}},
+		{"signed by a zone held insecure", "nope." + secKid, dns.TypeA, func(t *testing.T, rrcache *RRsetCacheT) []*core.RRset {
+			const other = "insecure.example."
+			rrcache.ZoneMap.Set(other, &Zone{ZoneName: other, State: ValidationStateInsecure})
+			return []*core.RRset{strayKey(t, other).sign(t, soaFor(t, secKid))}
+		}},
+	}
+	for _, ds := range dsStates {
+		for _, d := range denials {
+			t.Run(ds.name+"/"+d.name, func(t *testing.T) {
+				rrcache, k := secCache(t)
+				ds.setup(t, rrcache, k)
+				f := &dsQuestionCounter{}
+				if state := validateDenial(t, rrcache, d.qname, d.qtype, f.fetch, d.auth(t, rrcache)...); state != ValidationStateBogus {
+					t.Errorf("state %s, want bogus", ValidationStateToString[state])
+				}
+				if z, ok := rrcache.ZoneMap.Get(secKid); ok && z.GetState() == ValidationStateInsecure {
+					t.Errorf("%s was entered in ZoneMap as insecure", secKid)
+				}
+			})
+		}
+	}
+}
+
+// What must keep working: the parent side proves kid an insecure delegation --
+// an NSEC at the cut, or an NSEC3 Opt-Out span -- and kid's unsigned denials are
+// Insecure. kid is entered as such, and the next denial asks nothing.
+func TestAnUnsignedDenialBelowAProvenInsecureDelegationIsInsecure(t *testing.T) {
+	proofs := []struct {
+		name  string
+		proof func(t *testing.T, k *zoneKey) []*core.RRset
+	}{
+		{"NSEC", func(t *testing.T, k *zoneKey) []*core.RRset {
+			return []*core.RRset{k.sign(t, soaFor(t, secZone)), k.sign(t, rrFrom(t, secKid+" 300 IN NSEC "+secWWW+" NS RRSIG NSEC"))}
+		}},
+		{"NSEC3 Opt-Out span", func(t *testing.T, k *zoneKey) []*core.RRset {
+			return []*core.RRset{k.sign(t, soaFor(t, secZone)), k.sign(t, apexNSEC3(secZone)),
+				k.sign(t, nsec3In(secZone, secKid, true, 1, 0, dns.TypeA, dns.TypeRRSIG))}
+		}},
+	}
+	for _, p := range proofs {
+		t.Run(p.name, func(t *testing.T) {
+			rrcache, k := secCache(t)
+			seedDSDenial(t, rrcache, secKid, p.proof(t, k)...)
+			if state := validateDenial(t, rrcache, "nope."+secKid, dns.TypeA, nil, unsigned(soaFor(t, secKid))); state != ValidationStateInsecure {
+				t.Fatalf("state %s, want insecure", ValidationStateToString[state])
+			}
+			if z, ok := rrcache.ZoneMap.Get(secKid); !ok || z.GetState() != ValidationStateInsecure {
+				t.Fatalf("the proven insecure delegation %s is not in ZoneMap as insecure", secKid)
+			}
+			f := &dsQuestionCounter{}
+			if state := validateDenial(t, rrcache, kidWWW, dns.TypeTXT, f.fetch, unsigned(soaFor(t, secKid))); state != ValidationStateInsecure || f.n != 0 {
+				t.Errorf("state %s after %d DS question(s), want insecure after none", ValidationStateToString[state], f.n)
+			}
+		})
+	}
+}
+
+// Outside a zone held Secure an unsigned denial is Insecure, as it always was,
+// and nothing is asked. Nor is anything asked inside a stub or forward zone
+// below a secure zone: its servers are the operator's.
+func TestAnUnsignedDenialOutsideASecureZoneIsInsecure(t *testing.T) {
+	cases := []struct {
+		name    string
+		rrcache func(t *testing.T) *RRsetCacheT
+	}{
+		{"no zone known", negCache},
+		{"insecure zone above", func(t *testing.T) *RRsetCacheT {
+			rrcache := negCache(t)
+			rrcache.ZoneMap.Set(secZone, &Zone{ZoneName: secZone, State: ValidationStateInsecure})
+			return rrcache
+		}},
+		{"indeterminate zone above, no trust anchor", func(t *testing.T) *RRsetCacheT {
+			rrcache := negCache(t)
+			rrcache.ZoneMap.Set(secZone, &Zone{ZoneName: secZone, State: ValidationStateIndeterminate})
+			return rrcache
+		}},
+		{"configured zone below a secure zone", func(t *testing.T) *RRsetCacheT {
+			rrcache, _ := secCache(t)
+			rrcache.ConfiguredZone = func(name string) bool { return core.EqualNames(name, secKid) }
+			return rrcache
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rrcache := c.rrcache(t)
+			f := &dsQuestionCounter{}
+			if state := validateDenial(t, rrcache, "nope."+secKid, dns.TypeA, f.fetch, unsigned(soaFor(t, secKid))); state != ValidationStateInsecure {
+				t.Errorf("state %s, want insecure", ValidationStateToString[state])
+			}
+			if f.n != 0 {
+				t.Errorf("%d DS question(s) asked", f.n)
+			}
+		})
+	}
+}
+
+// A denial of kid's DS from kid's own apex is the child speaking for its
+// parent's data. Below a secure parent it proves nothing, whatever is known
+// about kid, and it is judged at the parent without a question about kid.
+func TestAnUnsignedDSDenialFromTheChildsApexIsBogus(t *testing.T) {
+	for name, entry := range map[string]*Zone{
+		"kid unknown":  nil,
+		"kid insecure": {ZoneName: secKid, State: ValidationStateInsecure},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rrcache, _ := secCache(t)
+			if entry != nil {
+				rrcache.ZoneMap.Set(secKid, entry)
+			}
+			f := &dsQuestionCounter{}
+			if state := validateDenial(t, rrcache, secKid, dns.TypeDS, f.fetch, unsigned(soaFor(t, secKid))); state != ValidationStateBogus {
+				t.Errorf("state %s, want bogus", ValidationStateToString[state])
+			}
+			if f.n != 0 {
+				t.Errorf("%d DS question(s) asked", f.n)
+			}
+		})
+	}
+}
+
+// A zone found Secure through its DS is held to that DS for its denials as for
+// its data: while nothing disproves the DS, a stripped denial is bogus; once the
+// parent proves it gone, an unsigned denial is insecure.
+func TestAnUnsignedDenialFromASecureZoneWhoseDSIsGoneIsInsecure(t *testing.T) {
+	const parent = "example."
+	rrcache := negCache(t)
+	pk := newZoneKey(t, rrcache, parent, true)
+	rrcache.ZoneMap.Set(parent, &Zone{ZoneName: parent, State: ValidationStateSecure})
+	rrcache.ZoneMap.Set(secZone, &Zone{ZoneName: secZone, State: ValidationStateSecure})
+	if state := validateDenial(t, rrcache, secWWW, dns.TypeA, nil, unsigned(soaFor(t, secZone))); state != ValidationStateBogus {
+		t.Fatalf("DS not disproved: state %s, want bogus", ValidationStateToString[state])
+	}
+	seedDSDenial(t, rrcache, secZone, pk.sign(t, soaFor(t, parent)),
+		pk.sign(t, rrFrom(t, secZone+" 300 IN NSEC zzz."+parent+" NS RRSIG NSEC")))
+	if state := validateDenial(t, rrcache, secWWW, dns.TypeA, nil, unsigned(soaFor(t, secZone))); state != ValidationStateInsecure {
+		t.Fatalf("DS disproved: state %s, want insecure", ValidationStateToString[state])
+	}
+}
+
 func ptr[T any](v T) *T { return &v }

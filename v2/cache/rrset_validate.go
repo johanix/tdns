@@ -986,18 +986,12 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 	if !dns.IsSubDomain(zoneName, qnameCanon) {
 		return ValidationStateBogus, rcode, nil // XXX: The zone name does not match the qname
 	}
-	// What the resolver already knows about the zone decides what a missing
-	// signature means. In a zone known to be signed, a denial with no signatures
-	// at all is not an insecure answer, it is a stripped one.
-	zoneSecure := false
-	if zone, ok := rrcache.ZoneMap.Get(zoneName); ok && zone.GetState() == ValidationStateSecure {
-		zoneSecure = true
-	}
+	// What the resolver already knows decides what a missing signature means. A
+	// denial with no signatures at all, from a zone known to be signed or from a
+	// zone below one that nothing proves insecure, is not an insecure answer, it
+	// is a stripped one (unsignedDenialState).
 	if !hasSignatures {
-		if zoneSecure {
-			return ValidationStateBogus, rcode, nil
-		}
-		return ValidationStateInsecure, rcode, nil
+		return rrcache.unsignedDenialState(ctx, zoneName, qnameCanon, qtype, fetcher), rcode, nil
 	}
 
 	// Only records that validated can prove anything. The NSEC and NSEC3 records
@@ -1045,10 +1039,7 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		}
 	}
 	if sawInsecure {
-		if zoneSecure {
-			return ValidationStateBogus, rcode, nil
-		}
-		return ValidationStateInsecure, rcode, nil
+		return rrcache.unsignedDenialState(ctx, zoneName, qnameCanon, qtype, fetcher), rcode, nil
 	}
 	nsecs, nsec3Present = provenNsecs, provenNsec3
 
