@@ -263,6 +263,12 @@ func newReferralImr(t *testing.T, s referralSetup) (*Imr, *atomic.Int32) {
 			Expiration: time.Now().Add(time.Hour)})
 	}
 	imr.Cache.ZoneMap.Set(refParent, &cache.Zone{ZoneName: refParent, State: state})
+	if s.unanchored {
+		// A resolver without a trust anchor holds the root as Indeterminate from
+		// its first referral on: the validator cannot anchor the root's keys.
+		// Every walk up the tree ends there.
+		imr.Cache.ZoneMap.Set(".", &cache.Zone{ZoneName: ".", State: cache.ValidationStateIndeterminate})
+	}
 	return imr, &dsQuestions
 }
 
