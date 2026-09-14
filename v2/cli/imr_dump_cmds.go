@@ -401,6 +401,8 @@ var dumpTuningCmd = &cobra.Command{
 		fmt.Println("Cache TTL bounds (seconds):")
 		fmt.Printf("  cache-max-ttl : %d\n", t.CacheMaxTTL)
 		fmt.Printf("  cache-min-ttl : %d\n", t.CacheMinTTL)
+		fmt.Println()
+		fmt.Printf("Zone state recheck : %s\n", t.ZoneStateRecheck)
 	},
 }
 

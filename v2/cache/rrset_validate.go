@@ -85,6 +85,9 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 		}
 		return false, false, ValidationStateBogus, nil
 	}
+	// A signer held Insecure has its parent asked for a DS again once the state
+	// has stood for ZoneStateRecheck.
+	rrcache.recheckInsecureZone(ctx, signer, fetcher)
 	// Check the signer zone's state in ZoneMap. If indeterminate or insecure, we cannot validate.
 	if zone, ok := rrcache.ZoneMap.Get(signer); ok {
 		switch zone.GetState() {
@@ -406,14 +409,28 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 	log.Printf("ValidateRRset: start: owner=%q type=%s sigs=%d rrs=%d",
 		rrset.Name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs), len(rrset.RRs))
 
-	// Early check: if the zone containing this RRset is insecure (unsigned),
-	// return insecure state (regardless of whether RRset has RRSIGs or not)
-	zoneName := dns.Fqdn(rrset.Name)
-	if zone, ok := rrcache.ZoneMap.Get(zoneName); ok && zone.GetState() == ValidationStateInsecure {
-		if rrcache.Verbose {
-			log.Printf("ValidateRRset: zone %q is insecure (unsigned); returning insecure state for %s %s", zoneName, rrset.Name, dns.TypeToString[rrset.RRtype])
+	// Early check, for an unsigned RRset: if the zone it belongs to is
+	// insecure, so is the RRset. For a DS that zone is the parent's.
+	//
+	// A signed RRset is judged by its signer instead, in
+	// validateRRsetWithRRSIG. Owner and signer differ at a zone cut, where the
+	// parent's DS and NSEC carry the child's name but are the parent's data,
+	// signed with the parent's key. Judged by the owner, a child held Insecure
+	// had a new DS reported Insecure without the parent's signature being
+	// looked at, so the child could never become Secure; and the parent's NSEC
+	// proving there was no DS came back Insecure, which a denial from a secure
+	// parent turns into Bogus (#636).
+	if len(rrset.RRSIGs) == 0 {
+		zoneName := dns.Fqdn(rrset.Name)
+		if rrset.RRtype == dns.TypeDS {
+			zoneName = parentOf(zoneName)
 		}
-		return ValidationStateInsecure, nil
+		if zone, ok := rrcache.ZoneMap.Get(zoneName); ok && zone.GetState() == ValidationStateInsecure {
+			if rrcache.Verbose {
+				log.Printf("ValidateRRset: zone %q is insecure (unsigned); returning insecure state for %s %s", zoneName, rrset.Name, dns.TypeToString[rrset.RRtype])
+			}
+			return ValidationStateInsecure, nil
+		}
 	}
 
 	// Special-case DNSKEY RRset validation: must anchor via DS and the specific KSK
@@ -445,10 +462,15 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 			}
 		}
 
-		// Fallback: walk up the domain name and check ZoneMap
+		// Fallback: walk up the domain name and check ZoneMap. A DS is the
+		// parent's data, so for a DS the walk starts at the parent.
 		if foundZone == nil {
 			labels := strings.Split(name, ".")
-			for i := 0; i < len(labels)-1; i++ {
+			start := 0
+			if rrset.RRtype == dns.TypeDS {
+				start = 1
+			}
+			for i := start; i < len(labels)-1; i++ {
 				zoneName := strings.Join(labels[i:], ".")
 				if zone, ok := rrcache.ZoneMap.Get(zoneName); ok {
 					foundZone = zone
@@ -679,6 +701,9 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	var zstate ValidationState
 
 	// Check if zone is in ZoneMap and return early for cases not requiring further validation
+	if len(rrset.RRSIGs) > 0 {
+		rrcache.recheckInsecureZone(ctx, name, fetcher)
+	}
 	if zone, ok := rrcache.ZoneMap.Get(name); ok {
 		zstate = zone.GetState()
 		switch zstate {

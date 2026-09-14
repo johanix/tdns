@@ -11,7 +11,7 @@ errors and problems.
 The tdns-cli tool has a new sub command, "report" which may be used to
 test and demonstrate this functionality. Example:
 
-tdns-cli report -z foffa.z2.axfr.net -S johani -D "no coffee"
+tdns-cli report -z child.example.com -S operator -D "no coffee"
 
 Arguments are:
 -z zonename

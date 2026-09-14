@@ -892,6 +892,9 @@ func deepCopyScanTupleResponse(src ScanTupleResponse) ScanTupleResponse {
 		AllNSInSync: src.AllNSInSync,
 		Error:       src.Error,
 		ErrorMsg:    src.ErrorMsg,
+
+		Validation:       src.Validation,
+		ValidationReason: src.ValidationReason,
 	}
 
 	// Deep copy Options slice

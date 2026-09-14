@@ -131,6 +131,14 @@ type csyncDelta struct {
 //     the child's nameservers disagree skips THAT nameserver and continues;
 //     a nameserver no longer in the NS set has its stored glue removed.
 //   - anything else in the bitmap is ignored.
+//   - a scan refusal from fetch (the parent's policy requires DNSSEC and the
+//     data did not validate, scanner_trust.go) is terminal in both passes:
+//     RFC 7477 §3 processes nothing then.
+//
+// The DNSSEC requirement lives in the fetcher the scanner passes, not in this
+// rule. The UPDATE path (CheckDelegationNSCoherence) authenticates the change
+// by the child's SIG(0) signature instead, and checks coherence with plain
+// agreement.
 //
 // currentNS is the NS RRset the parent publishes for the child now. The glue
 // pass falls back to it when the child's NS could not be determined, which the
@@ -157,6 +165,10 @@ func computeCsyncDelta(ctx context.Context, childZone string, types []uint16, cu
 		switch t {
 		case dns.TypeNS:
 			childNS, nsInSync, err := fetch(ctx, childZone, dns.TypeNS)
+			if isScanRefusal(err) {
+				lg.Printf("ProcessCSYNCNotify: %s: NS refused: %v", childZone, err)
+				return csyncDelta{}, err
+			}
 			if err != nil {
 				lg.Printf("ProcessCSYNCNotify: %s: error querying NS: %v", childZone, err)
 				return csyncDelta{}, fmt.Errorf("error querying NS: %v", err)
@@ -197,6 +209,12 @@ func computeCsyncDelta(ctx context.Context, childZone string, types []uint16, cu
 				nsCanon := core.CanonicalizeName(dns.Fqdn(nsName))
 
 				newGlue, glueInSync, err := fetch(ctx, nsName, t)
+				if isScanRefusal(err) {
+					// Fetched and not trusted: RFC 7477 §3 processes nothing,
+					// where a nameserver that could not be reached is only skipped.
+					lg.Printf("ProcessCSYNCNotify: %s: %s for %s refused: %v", childZone, typeStr, nsName, err)
+					return csyncDelta{}, err
+				}
 				if err != nil {
 					lg.Printf("ProcessCSYNCNotify: %s: error querying %s for %s: %v", childZone, typeStr, nsName, err)
 					continue

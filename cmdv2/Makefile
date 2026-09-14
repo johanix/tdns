@@ -59,10 +59,10 @@ install: check-root install-dirs
 # so this needs root for the same reason "install" does.
 #
 # The .tgz files are left in the app directories. Publishing is deliberately
-# NOT a target here: they go into a per-osrelease tree
-# (/var/tmp/axfr.net/ftpfiles/pkg/amd64-<osrelease>/) on a lab dom0, and the
-# same file is copied into EVERY such tree -- OS_VERSION mismatch only warns.
-# Which trees exist is a property of the lab, not of this repo.
+# NOT a target here: they go into a per-osrelease tree on whichever host
+# serves the packages, and the same file is copied into EVERY such tree --
+# OS_VERSION mismatch only warns. Which trees exist is a property of that
+# host, not of this repo.
 #
 # cli/ also builds and installs dog/, so dog is not listed separately.
 pkg: check-root install-dirs genalgs
