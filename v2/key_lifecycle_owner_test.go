@@ -282,6 +282,10 @@ func lifecycleVerbs() []lifecycleVerb {
 		{"keystore API clear", "clear", mgmt("clear")},
 		{"keystore API policy-cleanup", "policy-cleanup", mgmt("policy-cleanup")},
 		{"keystore API setstate without flags", "setstate", mgmt("setstate")},
+		{"keystore API generate without flags", "generate", func(t *testing.T, kdb *KeyDB, zd *ZoneData) error {
+			_, err := kdb.DnssecKeyMgmt(ctx, nil, KeystorePost{Command: "dnssec-mgmt", SubCommand: "generate", Zone: zd.ZoneName, KeyType: "KSK", Algorithm: dns.ED25519, State: DnskeyStateStandby})
+			return err
+		}},
 		{"rollover asap (KSK)", "asap", func(t *testing.T, kdb *KeyDB, zd *ZoneData) error {
 			return SetManualRolloverRequest(kdb, zd.ZoneName, time.Now(), time.Now())
 		}},
@@ -414,7 +418,7 @@ func TestMultiProviderZoneNotOwnedKeepsHooks(t *testing.T) {
 // T2.4: every caller of the key-writing functions is on the list of
 // ownership-checked paths; a new caller fails until it is checked and listed.
 func TestKeyWritersAreOwnershipChecked(t *testing.T) {
-	writers := map[string]bool{"UpdateDnssecKeyState": true, "UpdateDnssecKeyStateTx": true, "PromoteDnssecKey": true, "GenerateKeypair": true}
+	writers := map[string]bool{"UpdateDnssecKeyState": true, "UpdateDnssecKeyStateTx": true, "PromoteDnssecKey": true, "GenerateKeypair": true, "UpdateKeyRow": true, "UpdateKeyRowFrom": true}
 	// function (or method, as Type.Method) -> why it may call a writer
 	allowed := map[string]string{
 		"AbortKskAlgRollover":                     "refuses an owned zone (cancel)",

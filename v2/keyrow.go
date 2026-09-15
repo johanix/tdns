@@ -443,3 +443,49 @@ func nullBoolPtr(v sql.NullInt64) *bool {
 	b := v.Int64 != 0
 	return &b
 }
+
+// ErrKeyRowStateChanged: a compare-and-set state write found the row in
+// another state than the caller expected.
+var ErrKeyRowStateChanged = errors.New("the key row is not in the state the write expected")
+
+// UpdateKeyRow is the state write of an owner (KeyLifecycleOwner): state and
+// the three columns as the caller names them, in one statement through the
+// write function; then the change is reported to the hooks and the zone's
+// signing set republished, as UpdateDnssecKeyState does for tdns's own
+// transitions. An owner's states carry no defaults in tdns, so the caller
+// names every column; a ds left invalid keeps the row's ds.
+func UpdateKeyRow(kdb *KeyDB, zonename string, keyid uint16, state string, flags KeyRowFlags) error {
+	return UpdateKeyRowFrom(kdb, zonename, keyid, state, "", flags)
+}
+
+// UpdateKeyRowFrom is UpdateKeyRow with a compare-and-set on the state the
+// caller expects the row to be in ("" for any); ErrKeyRowStateChanged when
+// it is not.
+func UpdateKeyRowFrom(kdb *KeyDB, zonename string, keyid uint16, state, expectOld string, flags KeyRowFlags) error {
+	tx, err := kdb.Begin("UpdateKeyRow")
+	if err != nil {
+		return fmt.Errorf("error beginning transaction: %v", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+	oldstate, err := setKeyRowTx(tx, zonename, keyid, state, flags, expectOld)
+	if err != nil {
+		if expectOld != "" && strings.Contains(err.Error(), "is not in state") {
+			return fmt.Errorf("%w: key %d of %s, expected %s: %v", ErrKeyRowStateChanged, keyid, zonename, expectOld, err)
+		}
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit failed: %w", err)
+	}
+	committed = true
+	notifyKeyStateChange(zonename, keyid, oldstate, state)
+	if rerr := republishSigningKeysForZone(kdb, zonename); rerr != nil {
+		return fmt.Errorf("UpdateKeyRow: republish signing keys: %w", rerr)
+	}
+	return nil
+}
