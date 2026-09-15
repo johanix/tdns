@@ -1947,9 +1947,9 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		}
 	}
 
-	// If this is a child zone and we have the delegation-sync-child option set, we need to
+	// If this is a child zone and we have the parentsync option set, we need to
 	// ensure that there is a SIG(0) keypair and that the public key is published in the zone.
-	// delegation-sync-child is valid for auth (standalone) or agent+multi-provider zones.
+	// parentsync is valid for auth (standalone) or agent+multi-provider zones.
 	// Combiner and signer roles don't do child delegation sync.
 	if zd.Options[OptParentSync] &&
 		((Globals.App.Type == AppTypeAuth && !zd.Options[OptMultiProvider]) ||
@@ -1978,7 +1978,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		}
 	}
 
-	// delegation-sync-proxy: a tdns-agent acting as a SECONDARY for a zone
+	// parentsync-proxy: a tdns-agent acting as a SECONDARY for a zone
 	// whose primary is DSYNC-unaware (BIND/Knot). The agent inspects incoming
 	// transfers for CDS/CSYNC (and NS/glue/DNSKEY) changes and forwards
 	// NOTIFY(CDS/CSYNC) — and, when the parent advertises UPDATE and the agent's
@@ -2509,7 +2509,7 @@ $TTL 3600
 	// no-refresh-hooks: a catalog PRIMARY, and this is a *KeyDB method with no
 	// Config in scope to take the delegation-sync queue from. Both hooks gate
 	// on options a primary cannot hold (use-hsyncparam is dropped on a primary,
-	// delegation-sync-proxy is agent-secondary), so they would be permanent
+	// parentsync-proxy is agent-secondary), so they would be permanent
 	// no-ops. Revisit if a hook ever applies to a primary.
 	Zones.Set(zonename, zd)
 

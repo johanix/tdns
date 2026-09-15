@@ -182,7 +182,7 @@ func TestProxyRefreshClosureGatesOnOption(t *testing.T) {
 	off, offNew := makeZones()
 	preClosure(off, offNew)
 	if off.ProxyRefreshAnalysis != nil {
-		t.Fatal("proxy closure ran the diff without delegation-sync-proxy set")
+		t.Fatal("proxy closure ran the diff without parentsync-proxy set")
 	}
 
 	// Option on: the CSYNC change is detected.

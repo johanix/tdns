@@ -133,7 +133,7 @@ func (p *ParentSyncPlan) Summary() string {
 // BuildParentSyncPlan performs the single DSYNC discovery and evaluates every
 // configured scheme against it.
 //
-// It does not fail when nothing is usable. A delegation-sync-proxy zone whose
+// It does not fail when nothing is usable. A parentsync-proxy zone whose
 // parent offers nothing this host can use is operationally degraded, not
 // broken: the zone is still served, and the resilient-config quarantine model
 // says that is a per-zone warning rather than a hard error. Only a genuine

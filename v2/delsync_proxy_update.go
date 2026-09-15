@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * delegation-sync-proxy, UPDATE path (P-5): the precondition + KEY-bootstrap
+ * parentsync-proxy, UPDATE path (P-5): the precondition + KEY-bootstrap
  * state machine (§10.8 of the plan). Before the agent can proxy DNS UPDATEs to
  * the parent on a clueless primary's behalf it must (a) confirm the parent
  * actually advertises a DSYNC UPDATE receiver, and (b) hold a SIG(0) key whose
@@ -83,7 +83,7 @@ func (zd *ZoneData) proxyHoldsPrivateKeyFor(kdb *KeyDB, apexKeys []dns.RR) bool 
 }
 
 // ProxyUpdatePreconditionCheck runs the §10.8 state machine for a
-// delegation-sync-proxy zone and returns the resulting state. It is
+// parentsync-proxy zone and returns the resulting state. It is
 // side-effecting in the WAITING state only: it generates a SIG(0) keypair if the
 // keystore has none, so the operator instruction (proxyBootstrapInstruction) can
 // be produced. It records a per-zone WARNING for the non-ready, UPDATE-relevant
@@ -301,7 +301,7 @@ record in RFC 3597 form:
 `, keyRR.String(), zd.proxyHsyncparamPubkeyRR(), core.TypeHSYNCPARAM, unknown), nil
 }
 
-// clearProxyUpdateWarning removes any delegation-sync-proxy UPDATE warning set
+// clearProxyUpdateWarning removes any parentsync-proxy UPDATE warning set
 // on the zone (when the state becomes ready or update-unsupported).
 func (zd *ZoneData) clearProxyUpdateWarning() {
 	zd.ClearError(DelegationSyncWarning)
@@ -449,7 +449,7 @@ func (zd *ZoneData) proxyReplaceSyncState() DelegationSyncStatus {
 	}
 }
 
-// ProxyStartupReconcile runs once when a delegation-sync-proxy zone first
+// ProxyStartupReconcile runs once when a parentsync-proxy zone first
 // loads: a one-time parent-vs-child reconcile that catches delegation drift
 // accumulated while the agent was down, WITHOUT re-sending on every restart
 // (the InSync check gates the send even though replace-form would otherwise be

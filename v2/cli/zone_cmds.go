@@ -40,7 +40,7 @@ func peerConfAddrsString(peers []tdns.PeerConf) string {
 // every attachment point needs its own instance.
 //
 // Exported because the agent's zone subtree is built by hand in
-// agent_zone_cmds.go and has to attach this too. delegation-sync-proxy is valid
+// agent_zone_cmds.go and has to attach this too. parentsync-proxy is valid
 // ONLY on a tdns-agent secondary, so the agent is the role the command exists
 // for -- and it was reachable only through "auth", while the operator guide
 // tells the reader to run it against the agent.

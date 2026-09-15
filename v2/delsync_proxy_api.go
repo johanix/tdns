@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * delegation-sync-proxy, API path: forwarding a child's delegation to a parent
+ * parentsync-proxy, API path: forwarding a child's delegation to a parent
  * that advertises the DSYNC API scheme (docs/2026-08-11-dsync-api-scheme.md),
  * on behalf of a DSYNC-unaware primary.
  *
