@@ -282,6 +282,10 @@ func lifecycleVerbs() []lifecycleVerb {
 		{"keystore API clear", "clear", mgmt("clear")},
 		{"keystore API policy-cleanup", "policy-cleanup", mgmt("policy-cleanup")},
 		{"keystore API setstate without flags", "setstate", mgmt("setstate")},
+		{"keystore API generate without flags", "generate", func(t *testing.T, kdb *KeyDB, zd *ZoneData) error {
+			_, err := kdb.DnssecKeyMgmt(ctx, nil, KeystorePost{Command: "dnssec-mgmt", SubCommand: "generate", Zone: zd.ZoneName, KeyType: "KSK", Algorithm: dns.ED25519, State: DnskeyStateStandby})
+			return err
+		}},
 		{"rollover asap (KSK)", "asap", func(t *testing.T, kdb *KeyDB, zd *ZoneData) error {
 			return SetManualRolloverRequest(kdb, zd.ZoneName, time.Now(), time.Now())
 		}},
