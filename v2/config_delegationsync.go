@@ -263,11 +263,11 @@ type ParentSyncApiCredentialConf struct {
 	Parent string `yaml:"parent" mapstructure:"parent"`
 
 	// Child names the child zone this credential is for. OPTIONAL, and empty
-	// in every config written before delegation-sync-proxy existed.
+	// in every config written before parentsync-proxy existed.
 	//
 	// A tdns-auth child is itself the child zone, so the parent alone
 	// identifies the relationship and this stays empty. A tdns-agent running
-	// delegation-sync-proxy can be secondary for SEVERAL child zones under one
+	// parentsync-proxy can be secondary for SEVERAL child zones under one
 	// parent, each with its own username and key at that parent -- and parent
 	// alone can no longer say which. Naming the child here is how the second
 	// and subsequent ones are expressed.

@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * delegation-sync-proxy: a tdns-agent acting as a SECONDARY for a zone whose
+ * parentsync-proxy: a tdns-agent acting as a SECONDARY for a zone whose
  * primary is DSYNC-unaware (BIND/Knot). On each incoming transfer the agent
  * diffs the apex CDS / CSYNC / NS+glue / DNSKEY RRsets old-vs-new and, when a
  * relevant RRset changed, forwards a NOTIFY(CDS/CSYNC) to the parent's DSYNC
@@ -49,7 +49,7 @@ func (a *ProxyDelegationAnalysis) anyChange() bool {
 func (a *ProxyDelegationAnalysis) wantCDSNotify() bool   { return a.CdsChanged || a.DnskeyChanged }
 func (a *ProxyDelegationAnalysis) wantCSYNCNotify() bool { return a.CsyncChanged || a.NsOrGlueChanged }
 
-// registerProxyDelegationHooks appends the delegation-sync-proxy pre/post-refresh
+// registerProxyDelegationHooks appends the parentsync-proxy pre/post-refresh
 // callbacks to zdp.
 //
 // Not called directly: registerStandardRefreshHooks (v2/zone_hooks.go) is the
@@ -94,7 +94,7 @@ func (zd *ZoneData) proxyDelegationEnabled() bool {
 	return zd.Options[OptParentSyncProxy]
 }
 
-// ProxyDelegationPreRefresh runs BEFORE the hard flip on a delegation-sync-proxy
+// ProxyDelegationPreRefresh runs BEFORE the hard flip on a parentsync-proxy
 // zone. It diffs the incoming zone (new_zd) against the currently-served zone
 // (zd) for the four delegation-relevant dimensions and records the result in
 // zd.ProxyRefreshAnalysis for the PostRefresh hook. It must NOT act here (the
@@ -167,7 +167,7 @@ func (zd *ZoneData) apexRRsetChanged(new_zd *ZoneData, rrtype uint16) bool {
 }
 
 // ProxyDelegationPostRefresh runs AFTER the hard flip on a
-// delegation-sync-proxy zone. It consumes the analysis recorded by the
+// parentsync-proxy zone. It consumes the analysis recorded by the
 // PreRefresh hook and, when a NOTIFY-relevant dimension changed (D4), enqueues
 // a PROXY-NOTIFY request to the DelegationSyncher (the action lives there,
 // P-3). The analysis is cleared whether or not anything was enqueued, so a
@@ -186,7 +186,7 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 		return
 	}
 
-	lgDns.Info("delegation-sync-proxy: change detected in transfer; queueing proxy sync",
+	lgDns.Info("parentsync-proxy: change detected in transfer; queueing proxy sync",
 		"zone", zd.ZoneName,
 		"cds", analysis.CdsChanged, "csync", analysis.CsyncChanged,
 		"ns_or_glue", analysis.NsOrGlueChanged, "dnskey", analysis.DnskeyChanged,
@@ -238,7 +238,7 @@ func (zd *ZoneData) ProxyNotifyParent(ctx context.Context, notifyq chan NotifyRe
 	}
 
 	sent := zd.emitProxyNotifies(ctx, notifyq, analysis, dsynctarget.Addresses)
-	lgDns.Info("delegation-sync-proxy: forwarded NOTIFY(s) to parent",
+	lgDns.Info("parentsync-proxy: forwarded NOTIFY(s) to parent",
 		"zone", zd.ZoneName, "parent", zd.GetParent(), "sent", sent, "target", dsynctarget.Addresses)
 	return fmt.Sprintf("forwarded NOTIFY(%v) to parent %s", sent, zd.GetParent()), nil
 }

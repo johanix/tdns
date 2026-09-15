@@ -40,15 +40,15 @@ func peerConfAddrsString(peers []tdns.PeerConf) string {
 // every attachment point needs its own instance.
 //
 // Exported because the agent's zone subtree is built by hand in
-// agent_zone_cmds.go and has to attach this too. delegation-sync-proxy is valid
+// agent_zone_cmds.go and has to attach this too. parentsync-proxy is valid
 // ONLY on a tdns-agent secondary, so the agent is the role the command exists
 // for -- and it was reachable only through "auth", while the operator guide
 // tells the reader to run it against the agent.
 func NewZoneProxyKeyCmd(role string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "proxy-key",
-		Short: "Show the delegation-sync-proxy UPDATE state and the KEY to publish at the primary",
-		Long: `For a zone with the delegation-sync-proxy option (a tdns-agent acting as a
+		Short: "Show the parentsync-proxy UPDATE state and the KEY to publish at the primary",
+		Long: `For a zone with the parentsync-proxy option (a tdns-agent acting as a
 secondary for a DSYNC-unaware primary), report whether the agent can proxy
 DNS UPDATEs to the parent, and print the exact records to serve at the primary
 apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and the HSYNCPARAM again

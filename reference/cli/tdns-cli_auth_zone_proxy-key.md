@@ -1,10 +1,10 @@
 ## tdns-cli auth zone proxy-key
 
-Show the delegation-sync-proxy UPDATE state and the KEY to publish at the primary
+Show the parentsync-proxy UPDATE state and the KEY to publish at the primary
 
 ### Synopsis
 
-For a zone with the delegation-sync-proxy option (a tdns-agent acting as a
+For a zone with the parentsync-proxy option (a tdns-agent acting as a
 secondary for a DSYNC-unaware primary), report whether the agent can proxy
 DNS UPDATEs to the parent, and — when waiting — print the exact records to
 add at the primary apex (the agent's KEY RR and an HSYNCPARAM pubkey flag).

@@ -386,7 +386,7 @@ const (
 	// gates here because no scheme means no DS push is possible.
 	RolloverParentBlocker
 	// DelegationSyncWarning: a delegation-sync function is degraded but the
-	// zone is otherwise fine. Used by the delegation-sync-proxy UPDATE path
+	// zone is otherwise fine. Used by the parentsync-proxy UPDATE path
 	// when it is not operable (parent advertises no UPDATE, a foreign KEY
 	// occupies the apex, or the agent's KEY is not yet published at the
 	// primary). Visibility-only — the zone keeps serving and the NOTIFY proxy

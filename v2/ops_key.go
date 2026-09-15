@@ -78,7 +78,7 @@ func (zd *ZoneData) sig0KeyIsUsable(name string) bool {
 // not. It reports only whether the check could be CARRIED OUT; use
 // sig0KeyIsUsable for the answer itself.
 //
-// name, not the zone apex. On a delegation-sync parent the caller passes the
+// name, not the zone apex. On a childsync zone the caller passes the
 // DSYNC UPDATE target (updates.<zone>), where the apex is the wrong owner
 // entirely: the check found no KEY there, concluded the zone had none, and
 // minted an apex SIG(0) key nothing had asked for -- using the algorithm from

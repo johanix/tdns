@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// P-1: the delegation-sync-proxy zone option round-trips through the
+// P-1: the parentsync-proxy zone option round-trips through the
 // string<->enum maps and is accepted by the option parser (it must NOT fall
 // into parseZoneOptions' default "unknown option" case, which would reject it
 // with a config error).

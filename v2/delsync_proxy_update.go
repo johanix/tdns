@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * delegation-sync-proxy, UPDATE path (P-5): the precondition + KEY-bootstrap
+ * parentsync-proxy, UPDATE path (P-5): the precondition + KEY-bootstrap
  * state machine (§10.8 of the plan). Before the agent can proxy DNS UPDATEs to
  * the parent on a clueless primary's behalf it must (a) confirm the parent
  * actually advertises a DSYNC UPDATE receiver, and (b) hold a SIG(0) key whose
@@ -83,7 +83,7 @@ func (zd *ZoneData) proxyHoldsPrivateKeyFor(kdb *KeyDB, apexKeys []dns.RR) bool 
 }
 
 // ProxyUpdatePreconditionCheck runs the §10.8 state machine for a
-// delegation-sync-proxy zone and returns the resulting state. It is
+// parentsync-proxy zone and returns the resulting state. It is
 // side-effecting in the WAITING state only: it generates a SIG(0) keypair if the
 // keystore has none, so the operator instruction (proxyBootstrapInstruction) can
 // be produced. It records a per-zone WARNING for the non-ready, UPDATE-relevant
@@ -186,7 +186,7 @@ func (zd *ZoneData) proxyEnsureSig0Key(kdb *KeyDB) error {
 	if _, err := kdb.Sig0KeyMgmt(nil, kp); err != nil {
 		return fmt.Errorf("Sig0KeyMgmt generate: %w", err)
 	}
-	lgDns.Info("delegation-sync-proxy: generated SIG(0) keypair for UPDATE proxy", "zone", zd.ZoneName)
+	lgDns.Info("parentsync-proxy: generated SIG(0) keypair for UPDATE proxy", "zone", zd.ZoneName)
 	return nil
 }
 
@@ -301,7 +301,7 @@ record in RFC 3597 form:
 `, keyRR.String(), zd.proxyHsyncparamPubkeyRR(), core.TypeHSYNCPARAM, unknown), nil
 }
 
-// clearProxyUpdateWarning removes any delegation-sync-proxy UPDATE warning set
+// clearProxyUpdateWarning removes any parentsync-proxy UPDATE warning set
 // on the zone (when the state becomes ready or update-unsupported).
 func (zd *ZoneData) clearProxyUpdateWarning() {
 	zd.ClearError(DelegationSyncWarning)
@@ -322,7 +322,7 @@ func (zd *ZoneData) clearProxyUpdateWarning() {
 // reports the absence of a key rather than filling it.
 func (zd *ZoneData) ProxyKeyStatus(ctx context.Context, kdb *KeyDB, imr *Imr) (string, error) {
 	if !zd.Options[OptParentSyncProxy] {
-		return "", fmt.Errorf("zone %s does not have the delegation-sync-proxy option", zd.ZoneName)
+		return "", fmt.Errorf("zone %s does not have the parentsync-proxy option", zd.ZoneName)
 	}
 	state, err := zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr)
 	if err != nil {
@@ -449,7 +449,7 @@ func (zd *ZoneData) proxyReplaceSyncState() DelegationSyncStatus {
 	}
 }
 
-// ProxyStartupReconcile runs once when a delegation-sync-proxy zone first
+// ProxyStartupReconcile runs once when a parentsync-proxy zone first
 // loads: a one-time parent-vs-child reconcile that catches delegation drift
 // accumulated while the agent was down, WITHOUT re-sending on every restart
 // (the InSync check gates the send even though replace-form would otherwise be
@@ -478,7 +478,7 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 		return "", fmt.Errorf("ProxyStartupReconcile: AnalyseZoneDelegation(%s): %w", zd.ZoneName, aerr)
 	}
 	if dss.InSync {
-		lgDns.Info("delegation-sync-proxy: startup reconcile — parent already in sync", "zone", zd.ZoneName)
+		lgDns.Info("parentsync-proxy: startup reconcile — parent already in sync", "zone", zd.ZoneName)
 		return "startup reconcile: parent already in sync; nothing sent", nil
 	}
 
@@ -487,7 +487,7 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 	// the parent-vs-child comparison just made.
 	analysis := proxyAnalysisFromSyncStatus(dss)
 
-	lgDns.Info("delegation-sync-proxy: startup reconcile — parent out of sync",
+	lgDns.Info("parentsync-proxy: startup reconcile — parent out of sync",
 		"zone", zd.ZoneName, "plan", plan.Summary())
 	msg, serr := zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis, &dss)
 	if serr != nil {
@@ -568,7 +568,7 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
 		return "", fmt.Errorf("ProxyUpdateParent: send UPDATE to %s: %w", zd.GetParent(), uerr)
 	}
 	msg := fmt.Sprintf("proxied %s UPDATE to parent %s (rcode %s)", mode, zd.GetParent(), dns.RcodeToString[int(rcode)])
-	lgDns.Info("delegation-sync-proxy: "+msg, "zone", zd.ZoneName, "mode", mode)
+	lgDns.Info("parentsync-proxy: "+msg, "zone", zd.ZoneName, "mode", mode)
 	return msg, nil
 }
 
