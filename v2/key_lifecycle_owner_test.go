@@ -414,7 +414,7 @@ func TestMultiProviderZoneNotOwnedKeepsHooks(t *testing.T) {
 // T2.4: every caller of the key-writing functions is on the list of
 // ownership-checked paths; a new caller fails until it is checked and listed.
 func TestKeyWritersAreOwnershipChecked(t *testing.T) {
-	writers := map[string]bool{"UpdateDnssecKeyState": true, "UpdateDnssecKeyStateTx": true, "PromoteDnssecKey": true, "GenerateKeypair": true}
+	writers := map[string]bool{"UpdateDnssecKeyState": true, "UpdateDnssecKeyStateTx": true, "PromoteDnssecKey": true, "GenerateKeypair": true, "UpdateKeyRow": true, "UpdateKeyRowFrom": true}
 	// function (or method, as Type.Method) -> why it may call a writer
 	allowed := map[string]string{
 		"AbortKskAlgRollover":                     "refuses an owned zone (cancel)",
