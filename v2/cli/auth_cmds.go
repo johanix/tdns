@@ -23,6 +23,8 @@ func init() {
 	// only. Unlike the keystore commands it embeds no algorithm list in its
 	// help, so it needs no deferral until algorithms are registered.
 	AuthCmd.AddCommand(NewDsyncApiCmd("auth"))
+	// The controls of tdns-auth's built-in scanner: polling on and off.
+	AuthCmd.AddCommand(NewAuthScannerCmd())
 
 	// Keystore and truststore are wired by the binary's own init()
 	// after the binary has registered its DNSSEC algorithms — the

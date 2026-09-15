@@ -261,12 +261,12 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 	// request or an UPDATE arriving in that window got a Scanner whose conf
 	// was still nil, and scanner.imr() dereferences it.
 	scanner.conf = conf
+	scanner.poll.interval = time.Duration(interval) * time.Second
 	conf.Internal.PublishScanner(scanner)
 
 	lg.Info("ScannerEngine: starting")
 	defer ticker.Stop()
-	pollInterval := time.Duration(interval) * time.Second
-	scanner.notePollConf(readScannerPollConf(), pollInterval)
+	scanner.notePollConf(scanner.pollConf())
 
 	for {
 		select {
@@ -274,8 +274,8 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 			lg.Info("ScannerEngine: context cancelled")
 			return nil
 		case <-ticker.C:
-			pc := readScannerPollConf()
-			scanner.notePollConf(pc, pollInterval)
+			pc := scanner.pollConf()
+			scanner.notePollConf(pc)
 			if pc.Enabled {
 				if !scanner.startPollRound(ctx, pollParents(Zones.Items()), pc) {
 					lg.Debug("ScannerEngine: the previous poll round is still running, skipping this tick")
