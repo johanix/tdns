@@ -113,6 +113,9 @@ func kskAlgRollNeeded(kdb *KeyDB, zone string, pol *DnssecPolicy) (fromAlg, toAl
 // Post-commit: republish the signing-keys snapshot and trigger the
 // re-sign that puts RRSIG(B) on the wire.
 func SpawnKskAlgRollover(conf *Config, kdb *KeyDB, zone string, fromAlg, toAlg uint8) (newKid uint16, err error) {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return 0, ownedRefusal(zd, "alg-rollover")
+	}
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	if zone == "." || zone == "" {
 		return 0, fmt.Errorf("SpawnKskAlgRollover: empty zone")
@@ -310,6 +313,9 @@ ORDER BY keyid ASC`, zone)
 //
 // Returns a one-line description of what was done for the operator.
 func AbortKskAlgRollover(ctx context.Context, conf *Config, kdb *KeyDB, zone string) (string, error) {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return "", ownedRefusal(zd, "cancel")
+	}
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	row, err := LoadRolloverZoneRow(kdb, zone)
 	if err != nil {

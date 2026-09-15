@@ -73,6 +73,9 @@ func kskIndexPushNeeded(row *RolloverZoneRow, low, high int, indexOK bool, haveD
 // builds deps for each, and calls this. deps.PropagationDelay is the
 // kasp.propagation-delay used by pending-child-publish.
 func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
+	if zoneOwned(deps.Zone) {
+		return nil // the owner runs the rollovers of this zone
+	}
 	zd := deps.Zone
 	if zd == nil {
 		return nil
@@ -1471,7 +1474,7 @@ func TransitionRolloverKskDsPublishedToPublished(ctx context.Context, conf *Conf
 			return
 		}
 		zd, ok := Zones.Get(zoneName)
-		if !ok || zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method != RolloverMethodMultiDS {
+		if !ok || zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method != RolloverMethodMultiDS || zoneOwned(zd) {
 			continue
 		}
 		pol := zd.DnssecPolicy
@@ -1700,7 +1703,7 @@ func TransitionRolloverKskPublishedToStandby(ctx context.Context, conf *Config, 
 			return
 		}
 		zd, ok := Zones.Get(zoneName)
-		if !ok || zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method != RolloverMethodMultiDS {
+		if !ok || zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method != RolloverMethodMultiDS || zoneOwned(zd) {
 			continue
 		}
 		pol := zd.DnssecPolicy
@@ -1883,6 +1886,9 @@ func effectiveServedDnskeyTTL(kdb *KeyDB, zone string, pol *DnssecPolicy) (time.
 
 // PromoteStandbyKskIfNoActive activates one standby KSK when the zone has none (bootstrap).
 func PromoteStandbyKskIfNoActive(conf *Config, kdb *KeyDB, zone string) {
+	if _, owned := zoneOwnedByName(zone); owned {
+		return
+	}
 	zone = dns.Fqdn(zone)
 	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
 	if err != nil {
