@@ -657,3 +657,16 @@ a poll would have logged for every such child on every round.
   silent unless `scanner.verbose` is set, and the RRset dumps need
   `scanner.debug`. Both are read at startup and default to off;
   they used to be hard-wired on.
+
+## Amendment, 2026-09-15 (e): switching polling on and off at runtime
+
+Polling can be switched while tdns-auth runs, without editing the
+config: `POST /scanner/poll` with `{"command": "on" | "off" |
+"follow-config" | "status"}`, or `tdns-cli auth scanner poll
+on|off|follow-config|status`. The answer says whether the scanner
+polls (`enabled`). `on` and `off` override `scanner.poll.enabled`
+until `follow-config` or a restart; the switch is not persisted.
+`on` takes effect at the next round. `off` also stops a round in
+progress from starting any more children. Setting the switch is
+logged as `ScannerEngine: poll switch set`, and `ScannerEngine:
+poll round done` says whether a round was `stopped`.
