@@ -68,6 +68,8 @@ type Scanner struct {
 	Jobs               map[string]*ScanJobStatus
 	JobsMutex          sync.RWMutex
 
+	childLocks sync.Map // canonical child name -> *sync.Mutex; see scanChildAndApply
+
 	// queryChild and validateRRset stand in, in tests, for the network behind
 	// the CDS and CSYNC paths: asking every child nameserver
 	// (queryAllNSAndCompare) and the IMR's validator. Nil in production; see
@@ -227,7 +229,10 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 		}
 
 		lg.Info("ScannerEngine: OnDelegationChange: enqueuing CHILD-UPDATE", "parent", parentZone, "child", resp.Qname, "type", updateType, "actions", len(actions))
-		zd.KeyDB.UpdateQ <- UpdateRequest{
+		// Waits until the change is applied: the caller holds the child's scan
+		// lock, and the next scan of the child has to read a delegation that
+		// includes it (scanChildAndApply).
+		applyScanChildUpdate(ctx, zd.KeyDB.UpdateQ, UpdateRequest{
 			Cmd:            "CHILD-UPDATE",
 			UpdateType:     updateType,
 			ZoneName:       parentZone,
@@ -235,7 +240,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 			Trusted:        true,
 			InternalUpdate: true,
 			Description:    description,
-		}
+		})
 	}
 
 	// Finish initialising BEFORE publishing. Publication is what other
@@ -278,13 +283,13 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 						Zone: sr.ChildZone,
 					}
 
-					// Fetch current DS from delegation backend for comparison.
-					// A parent zone that accepts child updates MUST have a
-					// DelegationBackend (enforced at config-validation time).
-					// Without it the scanner has no way to know the current
-					// DS state, so every CDS-NOTIFY would look like a fresh
-					// delegation and DS records would accumulate without
-					// ever being removed.
+					// The current DS comes from the delegation backend, read by
+					// scanChildAndApply under the child's lock. A parent zone
+					// that accepts child updates MUST have a DelegationBackend
+					// (enforced at config-validation time). Without it the
+					// scanner has no way to know the current DS state, so every
+					// CDS-NOTIFY would look like a fresh delegation and DS
+					// records would accumulate without ever being removed.
 					if sr.ZoneData == nil {
 						lg.Error("ScannerEngine: no ZoneData on scan request, cannot compute current delegation state", "child", sr.ChildZone)
 					} else if sr.ZoneData.DelegationBackend == nil {
@@ -293,29 +298,10 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 						} else {
 							lg.Warn("ScannerEngine: parent zone has no DelegationBackend, cannot read current DS for diff", "child", sr.ChildZone, "parent", sr.ZoneData.ZoneName)
 						}
-					} else {
-						delegData, err := sr.ZoneData.DelegationBackend.GetDelegationData(sr.ZoneData.ZoneName, sr.ChildZone)
-						if err != nil {
-							lg.Warn("ScannerEngine: error fetching delegation data", "child", sr.ChildZone, "error", err)
-						} else if delegData != nil {
-							var dsRRs []dns.RR
-							for _, rrsByType := range delegData {
-								if dsRecords, ok := rrsByType[dns.TypeDS]; ok {
-									dsRRs = append(dsRRs, dsRecords...)
-								}
-							}
-							if len(dsRRs) > 0 {
-								tuple.CurrentData.DS = &core.RRset{
-									Name:   sr.ChildZone,
-									RRtype: dns.TypeDS,
-									RRs:    dsRRs,
-								}
-							}
-						}
 					}
 
 					sr.ScanTuples = []ScanTuple{tuple}
-					lg.Info("ScannerEngine: synthesized ScanTuple from NOTIFY", "child", sr.ChildZone, "scanType", ScanTypeToString[sr.ScanType], "hasCurrentDS", tuple.CurrentData.DS != nil)
+					lg.Info("ScannerEngine: synthesized ScanTuple from NOTIFY", "child", sr.ChildZone, "scanType", ScanTypeToString[sr.ScanType])
 				}
 
 				lg.Info("ScannerEngine: received SCAN request", "tuples", len(sr.ScanTuples), "jobID", sr.JobID)
@@ -385,10 +371,10 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 					*/
 					case ScanCDS:
 						if sr.ZoneData != nil {
-							lg.Debug("ScannerEngine: dispatching ProcessCDSNotify", "child", tuple.Zone)
+							lg.Debug("ScannerEngine: dispatching a CDS scan", "child", tuple.Zone)
 							go func(t ScanTuple, parentZD *ZoneData) {
 								defer wg.Done()
-								scanner.ProcessCDSNotify(ctx, t, parentZD, sr.ScanType, sr.Edns0Options, responseCh)
+								responseCh <- scanner.scanChildAndApply(ctx, parentZD, sr.ScanType, t, sr.Edns0Options)
 							}(tuple, sr.ZoneData)
 						} else {
 							lg.Debug("ScannerEngine: dispatching CheckCDS")
@@ -399,10 +385,10 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 						}
 					case ScanCSYNC:
 						if sr.ZoneData != nil {
-							lg.Debug("ScannerEngine: dispatching ProcessCSYNCNotify", "child", tuple.Zone)
+							lg.Debug("ScannerEngine: dispatching a CSYNC scan", "child", tuple.Zone)
 							go func(t ScanTuple, parentZD *ZoneData) {
 								defer wg.Done()
-								scanner.ProcessCSYNCNotify(ctx, t, parentZD, sr.ScanType, sr.Edns0Options, responseCh)
+								responseCh <- scanner.scanChildAndApply(ctx, parentZD, sr.ScanType, t, sr.Edns0Options)
 							}(tuple, sr.ZoneData)
 						} else {
 							lg.Warn("ScannerEngine: CSYNC scan without parent zone data not yet supported")
@@ -425,8 +411,10 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 					}
 				}
 
-				// Wait for all scans to complete and collect responses
-				go func(jobID string, parentZD *ZoneData) {
+				// Wait for all scans to complete and collect responses. A change
+				// a scan found has already been applied, by scanChildAndApply
+				// under the child's lock.
+				go func(jobID string) {
 					wg.Wait()
 					close(responseCh)
 
@@ -448,19 +436,8 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 					}
 					scanner.JobsMutex.Unlock()
 
-					// Notify caller of delegation changes (DS from CDS, NS/glue from CSYNC)
-					if scanner.OnDelegationChange != nil && parentZD != nil {
-						for _, resp := range responses {
-							// Only a result that reached a trust decision and was
-							// not refused is applied (scanner_trust.go).
-							if scanResponseChangesDelegation(resp) {
-								scanner.OnDelegationChange(parentZD.ZoneName, parentZD, resp)
-							}
-						}
-					}
-
 					lg.Info("ScannerEngine: job completed", "jobID", jobID, "responses", len(responses))
-				}(jobID, sr.ZoneData)
+				}(jobID)
 			default:
 				lg.Warn("ScannerEngine: unknown command, ignoring", "cmd", sr.Cmd)
 			}
@@ -551,9 +528,14 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 		lg.Printf("queryAllNSAndCompare: querying %s %s from %d nameservers: %v", qname, dns.TypeToString[qtype], len(nsNames), nsNames)
 	}
 
-	// Query from each nameserver and collect responses
-	var responseRRsets []*core.RRset
-	var queryErrors []error
+	// Query each nameserver and collect the answers. A nameserver that answers
+	// with authority that there is no such RRset (AuthQueryEngine returns an
+	// empty RRset) has answered, and is compared like any other: the result is
+	// empty only when every nameserver that answered agrees it is. One that
+	// cannot be reached, or answers with an error or without authority, is left
+	// out, and named in the error when no nameserver answered.
+	var answers []*core.RRset
+	var queryErrors []string
 
 	for _, nsName := range nsNames {
 		// Get A/AAAA records for the nameserver
@@ -582,6 +564,7 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 			if lg != nil {
 				lg.Printf("queryAllNSAndCompare: no addresses found for NS %s, skipping", nsName)
 			}
+			queryErrors = append(queryErrors, fmt.Sprintf("%s: no addresses", nsName))
 			continue
 		}
 
@@ -592,49 +575,56 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 			if lg != nil {
 				lg.Printf("queryAllNSAndCompare: error querying %s %s from %s (%s): %v", qname, dns.TypeToString[qtype], nsName, nsAddrs[0], err)
 			}
-			_ = append(queryErrors, fmt.Errorf("NS %s: %v", nsName, err))
+			queryErrors = append(queryErrors, fmt.Sprintf("%s (%s): %v", nsName, nsAddrs[0], err))
 			continue
 		}
-		if rrset == nil || len(rrset.RRs) == 0 {
-			if lg != nil {
-				lg.Printf("queryAllNSAndCompare: no %s RRset found from %s", dns.TypeToString[qtype], nsName)
-			}
-			continue
+		if rrset == nil {
+			rrset = &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype}
 		}
-		responseRRsets = append(responseRRsets, rrset)
+		if len(rrset.RRs) == 0 && lg != nil {
+			lg.Printf("queryAllNSAndCompare: %s serves no %s %s", nsName, qname, dns.TypeToString[qtype])
+		}
+		answers = append(answers, rrset)
 	}
 
-	// Check if we got any responses
-	if len(responseRRsets) == 0 {
-		return nil, false, fmt.Errorf("no %s RRsets retrieved from any nameserver", dns.TypeToString[qtype])
+	return compareChildAnswers(qname, qtype, answers, queryErrors, lg, scanner.Verbose, scanner.Debug)
+}
+
+// compareChildAnswers is the verdict half of queryAllNSAndCompare: the first
+// answer, and whether every answer carries the same RRset. An empty answer
+// counts, so one nameserver serving an RRset that another says does not exist
+// is a disagreement. No answer at all is an error that says why each
+// nameserver gave none.
+func compareChildAnswers(qname string, qtype uint16, answers []*core.RRset, queryErrors []string, lg *log.Logger, verbose, debug bool) (*core.RRset, bool, error) {
+	if lg == nil {
+		lg = discardLog
+	}
+	typeStr := dns.TypeToString[qtype]
+
+	if len(answers) == 0 {
+		return nil, false, fmt.Errorf("no %s RRsets retrieved from any nameserver: %s", typeStr, strings.Join(queryErrors, "; "))
 	}
 
 	// If only one response, we can't compare but return it
-	if len(responseRRsets) == 1 {
-		if lg != nil {
-			lg.Printf("queryAllNSAndCompare: only one %s RRset retrieved (cannot compare)", dns.TypeToString[qtype])
-		}
-		return responseRRsets[0], true, nil // Consider it "in sync" since there's only one
+	if len(answers) == 1 {
+		lg.Printf("queryAllNSAndCompare: only one %s RRset retrieved (cannot compare)", typeStr)
+		return answers[0], true, nil // Consider it "in sync" since there's only one
 	}
 
-	// Compare all responses to see if they're in sync
-	baseRRset := responseRRsets[0]
+	base := answers[0]
 	allInSync := true
-	for i := 1; i < len(responseRRsets); i++ {
-		changed, adds, removes := core.RRsetDiffer(qname, baseRRset.RRs, responseRRsets[i].RRs, qtype, lg, scanner.Verbose, scanner.Debug)
-		if changed {
-			if lg != nil {
-				lg.Printf("queryAllNSAndCompare: %s RRsets differ between nameservers. Adds: %d, Removes: %d", dns.TypeToString[qtype], len(adds), len(removes))
-			}
+	for _, other := range answers[1:] {
+		if changed, adds, removes := core.RRsetDiffer(qname, base.RRs, other.RRs, qtype, lg, verbose, debug); changed {
+			lg.Printf("queryAllNSAndCompare: %s RRsets differ between nameservers. Adds: %d, Removes: %d", typeStr, len(adds), len(removes))
 			allInSync = false
 		}
 	}
 
-	if allInSync && lg != nil {
-		lg.Printf("queryAllNSAndCompare: all %d nameservers have identical %s RRsets", len(responseRRsets), dns.TypeToString[qtype])
+	if allInSync {
+		lg.Printf("queryAllNSAndCompare: all %d nameservers have identical %s RRsets", len(answers), typeStr)
 	}
 
-	return baseRRset, allInSync, nil
+	return base, allInSync, nil
 }
 
 // childRRsetFetcher adapts queryAllNSAndCompare -- ask every nameserver in
@@ -774,6 +764,10 @@ func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType 
 		} else {
 			scanLog.Printf("CheckCDS: Zone %s: CDS RRset unchanged compared to CurrentData", zone)
 		}
+	} else if len(cdsRRset.RRs) == 0 {
+		// Every nameserver says there is no CDS, and none was known.
+		response.DataChanged = false
+		scanLog.Printf("CheckCDS: Zone %s: no CDS RRset served (no previous data to compare)", zone)
 	} else {
 		response.DataChanged = true // New data found where none existed before
 		scanLog.Printf("CheckCDS: Zone %s: CDS RRset retrieved (no previous data to compare)", zone)
@@ -856,11 +850,13 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 		responseCh <- response
 		return
 	}
+	if len(soaRRs) == 0 {
+		fail("error querying SOA", fmt.Errorf("the child's nameservers serve no SOA for %s", childZone))
+		return
+	}
 	var startSerial uint32
-	if len(soaRRs) > 0 {
-		if soa, ok := soaRRs[0].(*dns.SOA); ok {
-			startSerial = soa.Serial
-		}
+	if soa, ok := soaRRs[0].(*dns.SOA); ok {
+		startSerial = soa.Serial
 	}
 
 	// 3. Query CSYNC from child — RFC 7477 step 2
@@ -903,6 +899,17 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	immediate, usesoamin, err := csyncFlags(csyncrr)
 	if err != nil {
 		scanLog.Printf("ProcessCSYNCNotify: %s: unknown CSYNC flags set (0x%04x), aborting", childZone, csyncrr.Flags)
+		response.Error = true
+		response.ErrorMsg = err.Error()
+		responseCh <- response
+		return
+	}
+
+	// 4b. Type bitmap — RFC 7477 §2.1.1.2.1: a type this parent does not
+	// process means the record is not acted on.
+	csynctypes, err := csyncTypes(csyncrr)
+	if err != nil {
+		scanLog.Printf("ProcessCSYNCNotify: %s: %v", childZone, err)
 		response.Error = true
 		response.ErrorMsg = err.Error()
 		responseCh <- response
@@ -959,11 +966,10 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 		}
 	}
 
-	// 7. Process each type in bitmap (NS first) — RFC 7477 step 3.
-	// The rules live in delegation_csync.go (computeCsyncDelta), fed by
+	// 7. Process each type in the bitmap (NS first when listed) — RFC 7477
+	// step 3. The rules live in delegation_csync.go (computeCsyncDelta), fed by
 	// queryAllNSAndCompare for what the child serves and by the delegation
 	// backend for what the parent holds.
-	csynctypes := csyncTypes(csyncrr)
 	scanLog.Printf("ProcessCSYNCNotify: %s: CSYNC bitmap types: %v, immediate=%v, usesoamin=%v", childZone, csynctypes, immediate, usesoamin)
 
 	// Extract current NS from delegation data
@@ -1018,11 +1024,13 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 		responseCh <- response
 		return
 	}
+	if len(endSOARRs) == 0 {
+		fail("error querying end SOA", fmt.Errorf("the child's nameservers serve no SOA for %s", childZone))
+		return
+	}
 	var endSerial uint32
-	if len(endSOARRs) > 0 {
-		if soa, ok := endSOARRs[0].(*dns.SOA); ok {
-			endSerial = soa.Serial
-		}
+	if soa, ok := endSOARRs[0].(*dns.SOA); ok {
+		endSerial = soa.Serial
 	}
 	if startSerial != endSerial {
 		scanLog.Printf("ProcessCSYNCNotify: %s: SOA serial changed during analysis (%d → %d), aborting", childZone, startSerial, endSerial)
@@ -1034,7 +1042,7 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	scanLog.Printf("ProcessCSYNCNotify: %s: SOA serial stable (%d)", childZone, startSerial)
 
 	// 9. Update serial tracking
-	KnownCsyncMinSOAs[childZone] = csyncrr.Serial
+	recordCsyncProcessed(childZone, csyncrr.Serial)
 
 	// 10. Report results
 	response.DataChanged = dataChanged

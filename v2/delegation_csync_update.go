@@ -272,6 +272,26 @@ func CheckDelegationNSCoherence(ctx context.Context, child string, currentNS []d
 		}
 	}
 
+	// No in-bailiwick nameserver may be left without glue (RFC 7477 §3.2.2,
+	// as computeCsyncDelta applies it). Scoped like the glue check below: a
+	// nameserver the update adds, or whose glue it touches.
+	currentSet := canonicalNameSet(inBailiwickNSNames(child, currentNS))
+	for _, ns := range inBailiwick {
+		key := core.CanonicalizeName(dns.Fqdn(ns))
+		if currentSet[key] && !glueTouched[key] {
+			continue
+		}
+		left := 0
+		for _, t := range []uint16{dns.TypeA, dns.TypeAAAA} {
+			cur, _ := currentGlue(ns, t)
+			resulting, _ := rrsetAfterActions(ns, t, cur, actions)
+			left += len(resulting)
+		}
+		if left == 0 {
+			return fmt.Errorf("the update would leave in-bailiwick nameserver %s of %s with no A or AAAA glue (RFC 7477 §3.2.2)", ns, child)
+		}
+	}
+
 	if fetch == nil {
 		return fmt.Errorf("cannot verify the delegation for %s: no way to ask its nameservers what they serve: %w", child, ErrDelegationUnverifiable)
 	}
@@ -301,7 +321,6 @@ func CheckDelegationNSCoherence(ctx context.Context, child string, currentNS []d
 	// Glue: for every in-bailiwick nameserver the update adds to the NS set,
 	// and every one whose glue it touches, the resulting glue must be what the
 	// child serves, per type.
-	currentSet := canonicalNameSet(inBailiwickNSNames(child, currentNS))
 	for _, ns := range inBailiwick {
 		key := core.CanonicalizeName(dns.Fqdn(ns))
 		if currentSet[key] && !glueTouched[key] {

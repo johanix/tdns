@@ -280,6 +280,9 @@ func (conf *Config) StartImr(ctx context.Context, apirouter *mux.Router) error {
 func (conf *Config) StartScanner(ctx context.Context, apirouter *mux.Router) error {
 	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
 	StartEngine(&Globals.App, "ScannerEngine", func() error { return ScannerEngine(ctx, conf) })
+	// The scanner asks child nameservers through AuthQueryQ (AuthQueryNG);
+	// without this engine the first such query blocks its scan for good.
+	StartEngineNoError(&Globals.App, "AuthQueryEngine", func() { AuthQueryEngine(ctx, conf.Internal.AuthQueryQ) })
 	StartEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
 	StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, false) })
 	return nil

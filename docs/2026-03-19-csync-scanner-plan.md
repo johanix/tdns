@@ -562,3 +562,46 @@ nothing is validated and the scan result says `unvalidated`.
 This validates the direct answers rather than querying via the
 IMR, which would validate cached data that the NOTIFY has just
 made stale. See `v2/scanner_trust.go`.
+
+## Amendment, 2026-09-14 (b): RFC 7477 conformance fixes
+
+- **The processed-serial memory is locked.** The per-child
+  serial of the last CSYNC processed (`KnownCsyncMinSOAs`, now
+  `csyncProcessed` in `v2/scanner_csync.go`) is read and written
+  under a mutex. Scans run in their own goroutines, so
+  concurrent NOTIFY(CSYNC) could crash the server with
+  `concurrent map writes`. The serial-dedup description above
+  predates this: a CSYNC with a lower serial than the last one
+  processed is skipped, and the same serial is processed again,
+  which is how a change that failed to apply gets retried.
+- **Scans of one child are serialised.** A CDS or CSYNC scan of a
+  child holds that child's lock from before it reads anything
+  until its change has been applied (`scanChildAndApply`,
+  `v2/scanner_apply.go`). Two overlapping scans used to both
+  pass the serial check, and the older one's change could be
+  applied after the newer one's.
+- **Only authoritative replies count.** A reply without AA is an
+  error, with or without data: a lame server, or one that hosts
+  only the parent and answers with its referral, says nothing
+  about the child.
+- **Only the listed types are processed** (RFC 7477 §3.2.2). NS
+  is no longer processed when the bitmap omits it. Without NS,
+  glue is computed for the nameservers the parent already has.
+- **A bitmap type other than NS, A and AAAA refuses the CSYNC**
+  (RFC 7477 §2.1.1.2.1). Such a type used to be skipped.
+- **An empty answer is an answer.** A nameserver that answers
+  with authority that an RRset does not exist is compared like
+  any other. A kept nameserver can therefore lose all of one
+  address type, and data one nameserver serves and another
+  denies is a disagreement. A reply without AA and without data
+  is an error: the server is lame. Under `require-dnssec: true`
+  an empty answer stays an error, because the denial is not
+  validated.
+- **No in-bailiwick nameserver is left without glue** (RFC 7477
+  §3.2.2). A CSYNC is not processed if a nameserver it adds, or
+  whose glue it changes, would end up with neither A nor AAAA.
+  The UPDATE path refuses the same for a nameserver the update
+  adds or whose glue it touches. A nameserver that already had
+  no glue, and that the change does not touch, stops neither.
+- **`StartScanner` starts `AuthQueryEngine`.** Without it the
+  standalone scanner's first query to a child blocked forever.

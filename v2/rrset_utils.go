@@ -202,6 +202,16 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 				continue
 			}
 
+			// Only an authoritative reply says anything about the child's data.
+			// A lame server, or one that hosts only the parent and answers with
+			// its referral, would otherwise have its records -- in that case the
+			// parent's NS set -- compared as the child's.
+			if !res.Authoritative {
+				req.response <- &AuthQueryResponse{&rrset, fmt.Errorf("non-authoritative response for %s %s: the server is not authoritative for the zone",
+					req.qname, dns.TypeToString[req.rrtype])}
+				continue
+			}
+
 			if len(res.Answer) > 0 {
 				lg.Debug("AuthQueryEngine: looking up RRset from answer", "qname", req.qname, "rrtype", dns.TypeToString[req.rrtype])
 				for _, rr := range res.Answer {

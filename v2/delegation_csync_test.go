@@ -112,20 +112,46 @@ func TestCsyncSuppressedBySoaMinimum(t *testing.T) {
 	}
 }
 
-func TestCsyncTypesNSFirst(t *testing.T) {
-	got := csyncTypes(&dns.CSYNC{TypeBitMap: []uint16{dns.TypeA, dns.TypeNS, dns.TypeAAAA}})
-	want := []uint16{dns.TypeNS, dns.TypeA, dns.TypeAAAA}
-	if len(got) != len(want) {
-		t.Fatalf("got %v want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("got %v want %v", got, want)
-		}
-	}
-	// NS is processed even when the bitmap omits it, as it always was.
-	if got := csyncTypes(&dns.CSYNC{TypeBitMap: []uint16{dns.TypeA}}); len(got) != 2 || got[0] != dns.TypeNS {
-		t.Fatalf("bitmap without NS: %v", got)
+func TestCsyncTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		bitmap []uint16
+		want   []uint16
+		refuse string
+	}{
+		{name: "NS first, then the address types as listed",
+			bitmap: []uint16{dns.TypeA, dns.TypeNS, dns.TypeAAAA}, want: []uint16{dns.TypeNS, dns.TypeA, dns.TypeAAAA}},
+		// RFC 7477 §3.2.2: a type whose bit is clear stays as it is, NS included.
+		{name: "NS is not processed when the bitmap omits it",
+			bitmap: []uint16{dns.TypeA}, want: []uint16{dns.TypeA}},
+		{name: "an empty bitmap processes nothing"},
+		// RFC 7477 §2.1.1.2.1: a bit the parent does not understand means the
+		// record is not acted on.
+		{name: "a type this parent does not process refuses the record",
+			bitmap: []uint16{dns.TypeNS, dns.TypeTXT, dns.TypeA}, refuse: "lists TXT"},
+		{name: "an unassigned type number refuses the record",
+			bitmap: []uint16{dns.TypeNS, 20000}, refuse: "lists TYPE20000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := csyncTypes(&dns.CSYNC{TypeBitMap: tc.bitmap})
+			if tc.refuse != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.refuse) {
+					t.Fatalf("types %v, err %v; want a refusal saying %q", got, err, tc.refuse)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("got %v want %v", got, tc.want)
+				}
+			}
+		})
 	}
 }
 
@@ -154,7 +180,12 @@ func TestComputeCsyncDeltaNS(t *testing.T) {
 		child := &stubChild{rrs: map[string][]dns.RR{
 			csChild + "/NS": rrs(t, "child.example. 3600 IN NS ns1.child.example.", "child.example. 3600 IN NS new.provider.net."),
 		}}
-		d, err := computeCsyncDelta(ctx, csChild, nsOnly, currentNS, glueFrom(nil), child.fetch, quietLog(), false, false)
+		// ns1 has its address: a change may not leave an in-bailiwick
+		// nameserver without glue.
+		glue := glueFrom(map[string]map[uint16][]dns.RR{
+			"ns1.child.example.": {dns.TypeA: rrs(t, "ns1.child.example. 3600 IN A 192.0.2.1")},
+		})
+		d, err := computeCsyncDelta(ctx, csChild, nsOnly, currentNS, glue, child.fetch, quietLog(), false, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -359,16 +390,120 @@ func TestComputeCsyncDeltaRemovedNSGlue(t *testing.T) {
 	})
 }
 
-func TestComputeCsyncDeltaIgnoresUnknownTypes(t *testing.T) {
+// RFC 7477 §2.1.1.2.1: a type the parent does not process means the CSYNC is
+// not acted on. csyncTypes refuses such a bitmap first; computeCsyncDelta
+// refuses it too, for a caller that builds its own type list.
+func TestComputeCsyncDeltaRefusesUnsupportedTypes(t *testing.T) {
 	currentNS := rrs(t, "child.example. 3600 IN NS ns.provider.net.")
 	child := &stubChild{rrs: map[string][]dns.RR{csChild + "/NS": currentNS}}
-	d, err := computeCsyncDelta(context.Background(), csChild, []uint16{dns.TypeNS, dns.TypeTXT}, currentNS, glueFrom(nil), child.fetch, quietLog(), false, false)
+	_, err := computeCsyncDelta(context.Background(), csChild, []uint16{dns.TypeNS, dns.TypeTXT}, currentNS, glueFrom(nil), child.fetch, quietLog(), false, false)
+	if err == nil || !strings.Contains(err.Error(), "lists TXT") {
+		t.Fatalf("err = %v, want a refusal naming TXT", err)
+	}
+}
+
+// RFC 7477 §3.2.2: a type whose bit is clear stays as it is. Without NS in the
+// bitmap the child's NS RRset is not even asked for, and glue is computed for
+// the nameservers the parent already has.
+func TestComputeCsyncDeltaWithoutNSKeepsTheNSRRset(t *testing.T) {
+	currentNS := rrs(t, "child.example. 3600 IN NS ns1.child.example.")
+	current := map[string]map[uint16][]dns.RR{
+		"ns1.child.example.": {dns.TypeA: rrs(t, "ns1.child.example. 3600 IN A 192.0.2.1")},
+	}
+	child := &stubChild{rrs: map[string][]dns.RR{
+		csChild + "/NS":        rrs(t, "child.example. 3600 IN NS ns9.provider.net."), // would replace it, if asked
+		"ns1.child.example./A": rrs(t, "ns1.child.example. 3600 IN A 192.0.2.2"),
+	}}
+	d, err := computeCsyncDelta(context.Background(), csChild, []uint16{dns.TypeA}, currentNS, glueFrom(current), child.fetch, quietLog(), false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Changed || len(child.calls) != 1 {
-		t.Fatalf("delta %+v calls %v", d, child.calls)
+	if len(d.NSAdds)+len(d.NSRemoves) != 0 {
+		t.Errorf("NS adds %v removes %v, want the NS RRset left alone", names(d.NSAdds), names(d.NSRemoves))
 	}
+	if len(d.GlueAdds) != 1 || len(d.GlueRemoves) != 1 || !strings.Contains(d.GlueAdds[0].String(), "192.0.2.2") {
+		t.Errorf("glue adds %v removes %v, want 192.0.2.1 replaced by 192.0.2.2", names(d.GlueAdds), names(d.GlueRemoves))
+	}
+	for _, c := range child.calls {
+		if c == csChild+"/NS" {
+			t.Errorf("NS was fetched although the bitmap does not list it")
+		}
+	}
+}
+
+// RFC 7477 §3.2.2: an address type the child's nameservers agree is empty
+// becomes an empty set at the parent, but no in-bailiwick nameserver of the
+// result may be left with no glue at all; such a CSYNC is not processed.
+func TestComputeCsyncDeltaNameserversKeepGlue(t *testing.T) {
+	ctx := context.Background()
+	currentNS := rrs(t, "child.example. 3600 IN NS ns1.child.example.", "child.example. 3600 IN NS ns.provider.net.")
+	withNS2 := rrs(t, "child.example. 3600 IN NS ns1.child.example.", "child.example. 3600 IN NS ns2.child.example.",
+		"child.example. 3600 IN NS ns.provider.net.")
+	ns1A := rrs(t, "ns1.child.example. 3600 IN A 192.0.2.1")
+	ns1AAAA := rrs(t, "ns1.child.example. 3600 IN AAAA 2001:db8::1")
+	current := map[string]map[uint16][]dns.RR{"ns1.child.example.": {dns.TypeA: ns1A, dns.TypeAAAA: ns1AAAA}}
+	all := []uint16{dns.TypeNS, dns.TypeA, dns.TypeAAAA}
+	run := func(types []uint16, served map[string][]dns.RR) (csyncDelta, error) {
+		return computeCsyncDelta(ctx, csChild, types, currentNS, glueFrom(current), (&stubChild{rrs: served}).fetch, quietLog(), false, false)
+	}
+	refused := func(t *testing.T, err error, ns string) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), ns) || !strings.Contains(err.Error(), "no A or AAAA glue") {
+			t.Fatalf("err = %v, want a refusal naming %s", err, ns)
+		}
+	}
+
+	t.Run("a kept nameserver loses one address type the child no longer serves", func(t *testing.T) {
+		d, err := run(all, map[string][]dns.RR{csChild + "/NS": currentNS, "ns1.child.example./A": ns1A})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.GlueAdds) != 0 || len(d.GlueRemoves) != 1 || !strings.Contains(d.GlueRemoves[0].String(), "2001:db8::1") {
+			t.Fatalf("glue adds %v removes %v, want the AAAA removed", names(d.GlueAdds), names(d.GlueRemoves))
+		}
+	})
+
+	t.Run("a kept nameserver would lose both address types", func(t *testing.T) {
+		_, err := run(all, map[string][]dns.RR{csChild + "/NS": currentNS})
+		refused(t, err, "ns1.child.example.")
+	})
+
+	t.Run("a new in-bailiwick nameserver the child serves no address for", func(t *testing.T) {
+		_, err := run(all, map[string][]dns.RR{csChild + "/NS": withNS2, "ns1.child.example./A": ns1A, "ns1.child.example./AAAA": ns1AAAA})
+		refused(t, err, "ns2.child.example.")
+	})
+
+	t.Run("a new in-bailiwick nameserver with the address types not in the bitmap", func(t *testing.T) {
+		_, err := run([]uint16{dns.TypeNS}, map[string][]dns.RR{csChild + "/NS": withNS2})
+		refused(t, err, "ns2.child.example.")
+	})
+
+	t.Run("the parent's AAAA counts when the bitmap does not list AAAA", func(t *testing.T) {
+		d, err := run([]uint16{dns.TypeA}, map[string][]dns.RR{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.GlueRemoves) != 1 || !strings.Contains(d.GlueRemoves[0].String(), "192.0.2.1") {
+			t.Fatalf("glue removes %v, want only the A", names(d.GlueRemoves))
+		}
+	})
+
+	// Scoped like the UPDATE path: a nameserver the parent already had, whose
+	// glue the change does not touch, is not checked.
+	t.Run("a kept nameserver that already had no glue does not stop an unrelated change", func(t *testing.T) {
+		withBare := rrs(t, "child.example. 3600 IN NS ns1.child.example.", "child.example. 3600 IN NS ns0.child.example.",
+			"child.example. 3600 IN NS ns.provider.net.")
+		moved := rrs(t, "child.example. 3600 IN NS ns1.child.example.", "child.example. 3600 IN NS ns0.child.example.",
+			"child.example. 3600 IN NS ns2.provider.net.")
+		child := &stubChild{rrs: map[string][]dns.RR{csChild + "/NS": moved}}
+		d, err := computeCsyncDelta(ctx, csChild, []uint16{dns.TypeNS}, withBare, glueFrom(current), child.fetch, quietLog(), false, false)
+		if err != nil {
+			t.Fatalf("a nameserver that already had no glue refused an NS change that does not touch it: %v", err)
+		}
+		if len(d.NSAdds) != 1 || len(d.NSRemoves) != 1 {
+			t.Fatalf("NS adds %v removes %v, want the provider moved", names(d.NSAdds), names(d.NSRemoves))
+		}
+	})
 }
 
 // computeCsyncDelta is a free function now, and its next caller is a different

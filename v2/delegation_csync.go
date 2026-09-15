@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -40,8 +41,9 @@ import (
 
 // childRRsetFetcher answers what the child's nameservers serve at (name,
 // qtype): the RRset (nil or empty when there is none) and whether every
-// nameserver that answered agreed. The scanner backs it with
-// queryAllNSAndCompare; tests with a map.
+// nameserver that answered agreed. A nameserver that answers that there is
+// none has answered, so an empty RRset in agreement means the child serves
+// none. The scanner backs it with queryAllNSAndCompare; tests with a map.
 type childRRsetFetcher func(ctx context.Context, name string, qtype uint16) (rrs []dns.RR, allInSync bool, err error)
 
 // currentGlueLookup returns the glue RRset of qtype the parent currently
@@ -77,18 +79,46 @@ func csyncSuppressedBySoaMinimum(useSoaMinimum bool, c *dns.CSYNC, soaSerial uin
 	return useSoaMinimum && c.Serial > soaSerial
 }
 
-// csyncTypes is the CSYNC type bitmap in processing order: NS always first
-// (RFC 7477 §3.2.1 -- glue depends on the NS set), then the rest as listed.
-// NS is processed whether or not the bitmap names it, as it always has been.
-func csyncTypes(c *dns.CSYNC) []uint16 {
-	types := []uint16{dns.TypeNS}
+// errCsyncUnsupportedTypes refuses a CSYNC whose type bitmap lists types this
+// parent does not process. RFC 7477 §2.1.1.2.1: "If a bit has been set that a
+// parental agent implementation does not understand, the parental agent MUST
+// NOT act upon the record."
+func errCsyncUnsupportedTypes(types []string) error {
+	return fmt.Errorf("CSYNC type bitmap lists %s, which this parent does not process: the CSYNC is not acted on (RFC 7477 §2.1.1.2.1)",
+		strings.Join(types, " "))
+}
+
+// csyncTypes is the CSYNC type bitmap in processing order, or a refusal.
+//
+//   - Only the listed types are processed. With the AAAA bit clear the parent's
+//     AAAA glue stays as it is, and with the NS bit clear so does its NS RRset
+//     (RFC 7477 §3.2.2).
+//   - NS comes first when listed: address records are processed after NS
+//     (RFC 7477 §3.2.2), because glue depends on the NS set.
+//   - A bitmap that lists anything but NS, A and AAAA is refused
+//     (errCsyncUnsupportedTypes).
+func csyncTypes(c *dns.CSYNC) ([]uint16, error) {
+	var ns, addrs []uint16
+	var unsupported []string
+	seen := map[uint16]bool{}
 	for _, t := range c.TypeBitMap {
-		if t == dns.TypeNS {
+		if seen[t] {
 			continue
 		}
-		types = append(types, t)
+		seen[t] = true
+		switch t {
+		case dns.TypeNS:
+			ns = append(ns, t)
+		case dns.TypeA, dns.TypeAAAA:
+			addrs = append(addrs, t)
+		default:
+			unsupported = append(unsupported, dns.Type(t).String())
+		}
 	}
-	return types
+	if len(unsupported) > 0 {
+		return nil, errCsyncUnsupportedTypes(unsupported)
+	}
+	return append(ns, addrs...), nil
 }
 
 // inBailiwickNSNames returns the names of the nameservers in nsRRs that lie
@@ -128,9 +158,16 @@ type csyncDelta struct {
 //     terminal (RFC 7477 §3.2.1 rejects an empty NS RRset).
 //   - A / AAAA: glue only for nameservers inside the child zone, per
 //     nameserver of the resulting NS set. A glue fetch that fails or on which
-//     the child's nameservers disagree skips THAT nameserver and continues;
-//     a nameserver no longer in the NS set has its stored glue removed.
-//   - anything else in the bitmap is ignored.
+//     the child's nameservers disagree skips THAT nameserver and continues.
+//     An RRset they agree is empty removes that type's glue (RFC 7477 §3.2.2:
+//     the result "should be an empty set"). A nameserver no longer in the NS
+//     set has its stored glue removed.
+//   - any other type is refused. csyncTypes refuses such a bitmap before
+//     anything is fetched; this refuses it too, for a caller that builds its
+//     own type list.
+//   - a change that would leave a nameserver it adds, or whose glue it changes,
+//     with neither A nor AAAA glue is refused as a whole
+//     (csyncNameserversWithoutGlue).
 //   - a scan refusal from fetch (the parent's policy requires DNSSEC and the
 //     data did not validate, scanner_trust.go) is terminal in both passes:
 //     RFC 7477 §3 processes nothing then.
@@ -138,15 +175,13 @@ type csyncDelta struct {
 // The DNSSEC requirement lives in the fetcher the scanner passes, not in this
 // rule. The UPDATE path (CheckDelegationNSCoherence) authenticates the change
 // by the child's SIG(0) signature instead, and checks coherence with plain
-// agreement.
+// agreement. Under a policy that requires DNSSEC the fetcher reports an empty
+// answer as an error, because RFC 7477 wants the absence proven and the proof
+// is not validated, so there a glue type is never removed this way.
 //
-// currentNS is the NS RRset the parent publishes for the child now. The glue
-// pass falls back to it when the child's NS could not be determined, which the
-// only current caller never produces: csyncTypes always puts NS in the list
-// and first, so by the time a glue pass runs the NS pass has either populated
-// the set or returned terminally. The fallback is kept because that invariant
-// belongs to csyncTypes, not to this function -- a caller that assembles its
-// own type list (step 2 will) does not inherit it.
+// currentNS is the NS RRset the parent publishes for the child now. When the
+// bitmap does not list NS it is also the resulting NS set: the NS RRset stays
+// as it is, and the glue passes work from it.
 func computeCsyncDelta(ctx context.Context, childZone string, types []uint16, currentNS []dns.RR,
 	currentGlue currentGlueLookup, fetch childRRsetFetcher, lg *log.Logger, verbose, debug bool) (csyncDelta, error) {
 
@@ -255,8 +290,84 @@ func computeCsyncDelta(ctx context.Context, childZone string, types []uint16, cu
 			}
 
 		default:
-			lg.Printf("ProcessCSYNCNotify: %s: unknown RR type %s in CSYNC bitmap, skipping", childZone, dns.TypeToString[t])
+			lg.Printf("ProcessCSYNCNotify: %s: RR type %s in CSYNC bitmap is not processed here, not acting on the CSYNC", childZone, dns.Type(t).String())
+			return csyncDelta{}, errCsyncUnsupportedTypes([]string{dns.Type(t).String()})
+		}
+	}
+
+	if d.Changed {
+		resultingNS := newNSRRs
+		if len(resultingNS) == 0 {
+			resultingNS = currentNS
+		}
+		if bare := csyncNameserversWithoutGlue(childZone, resultingNS, currentNS, currentGlue, d.GlueAdds, d.GlueRemoves); len(bare) > 0 {
+			lg.Printf("ProcessCSYNCNotify: %s: the result would leave %v with no glue, not processing the CSYNC", childZone, bare)
+			return csyncDelta{}, fmt.Errorf("the result would leave in-bailiwick nameserver(s) %s of %s with no A or AAAA glue, so the CSYNC is not processed (RFC 7477 §3.2.2)",
+				strings.Join(bare, ", "), childZone)
 		}
 	}
 	return d, nil
+}
+
+// csyncNameserversWithoutGlue returns the in-bailiwick nameservers of the
+// resulting NS set nsRRs that the change adds or whose glue it changes, and
+// that would have neither A nor AAAA glue once adds and removes are applied to
+// the glue the parent holds now.
+//
+// RFC 7477 §3.2.2: "if the end result of processing would leave no glue
+// records present in the parent zone for any of the in-bailiwick NS records,
+// then the parent MUST NOT update the glue address records." It is read per
+// nameserver, and computeCsyncDelta refuses the whole CSYNC rather than only
+// its glue: an NS change published without its glue is the broken delegation
+// the rule is there to prevent.
+//
+// A nameserver in currentNS whose glue the change does not touch is not
+// checked, as on the UPDATE path (CheckDelegationNSCoherence). If it already
+// has no glue, that delegation was broken before this CSYNC, and refusing
+// every CSYNC the child sends until someone repairs it helps no one.
+func csyncNameserversWithoutGlue(zone string, nsRRs, currentNS []dns.RR, currentGlue currentGlueLookup, adds, removes []dns.RR) []string {
+	kept := canonicalNameSet(inBailiwickNSNames(zone, currentNS))
+	touched := map[string]bool{}
+	for _, set := range [][]dns.RR{adds, removes} {
+		for _, rr := range set {
+			touched[core.CanonicalizeName(dns.Fqdn(rr.Header().Name))] = true
+		}
+	}
+	var bare []string
+	for _, ns := range inBailiwickNSNames(zone, nsRRs) {
+		if key := core.CanonicalizeName(dns.Fqdn(ns)); kept[key] && !touched[key] {
+			continue
+		}
+		if len(csyncGlueAfter(ns, dns.TypeA, currentGlue, adds, removes))+
+			len(csyncGlueAfter(ns, dns.TypeAAAA, currentGlue, adds, removes)) == 0 {
+			bare = append(bare, ns)
+		}
+	}
+	return bare
+}
+
+// csyncGlueAfter is the glue of qtype at owner once adds and removes are
+// applied to what the parent holds now.
+func csyncGlueAfter(owner string, qtype uint16, currentGlue currentGlueLookup, adds, removes []dns.RR) []dns.RR {
+	has := func(set []dns.RR, rr dns.RR) bool {
+		for _, s := range set {
+			if core.IsDuplicate(s, rr) {
+				return true
+			}
+		}
+		return false
+	}
+	current, _ := currentGlue(owner, qtype)
+	var out []dns.RR
+	for _, rr := range current {
+		if !has(removes, rr) {
+			out = append(out, rr)
+		}
+	}
+	for _, rr := range adds {
+		if h := rr.Header(); h.Rrtype == qtype && core.EqualNames(h.Name, owner) && !has(out, rr) {
+			out = append(out, rr)
+		}
+	}
+	return out
 }
