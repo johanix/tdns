@@ -93,6 +93,23 @@ func BenchmarkCanonicalOwnerLess(b *testing.B) {
 	}
 }
 
+// Building a key is the per-name cost of every publish's sort.
+func BenchmarkCanonicalSortKey(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = canonicalSortKey("alpha.bench.example.")
+	}
+}
+
+// An ip6.arpa owner: 34 labels, the deepest names a large zone commonly holds.
+func BenchmarkCanonicalSortKeyIP6Arpa(b *testing.B) {
+	name := "b.a.9.8.7.6.5.0.4.0.0.0.3.0.0.0.2.0.0.0.1.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = canonicalSortKey(name)
+	}
+}
+
 func BenchmarkCanonicalSortKeyCompare(b *testing.B) {
 	kx, ky := canonicalSortKey("alpha.bench.example."), canonicalSortKey("bravo.bench.example.")
 	b.ReportAllocs()
