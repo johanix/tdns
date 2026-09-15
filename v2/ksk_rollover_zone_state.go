@@ -785,6 +785,9 @@ WHERE zone = ?`,
 // ClearManualRolloverRequest nulls both manual_rollover_* columns. Called by
 // `rollover cancel` and after a manual-ASAP rollover fires.
 func ClearManualRolloverRequest(kdb *KeyDB, zone string) error {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return ownedRefusal(zd, "cancel")
+	}
 	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
 SET manual_rollover_requested_at = NULL,
     manual_rollover_earliest = NULL

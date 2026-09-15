@@ -171,6 +171,9 @@ WHERE zone = ?`,
 // ClearZskManualRolloverRequest nulls the manual-request columns. Called by
 // `cancel --zsk` and after a manual ZSK roll commits.
 func ClearZskManualRolloverRequest(kdb *KeyDB, zone string) error {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return ownedRefusal(zd, "cancel")
+	}
 	_, err := kdb.DB.Exec(`UPDATE ZskRolloverState
 SET manual_rollover_requested_at = NULL,
     manual_rollover_earliest = NULL

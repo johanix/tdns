@@ -292,6 +292,16 @@ func lifecycleVerbs() []lifecycleVerb {
 			_, err := AbortKskAlgRollover(ctx, &Conf, kdb, zd.ZoneName)
 			return err
 		}},
+		{"rollover cancel (KSK manual request)", "cancel", func(t *testing.T, kdb *KeyDB, zd *ZoneData) error {
+			return ClearManualRolloverRequest(kdb, zd.ZoneName)
+		}},
+		{"rollover cancel (ZSK manual request)", "cancel", func(t *testing.T, kdb *KeyDB, zd *ZoneData) error {
+			return ClearZskManualRolloverRequest(kdb, zd.ZoneName)
+		}},
+		{"atomic rollover", "rollover", func(t *testing.T, kdb *KeyDB, zd *ZoneData) error {
+			_, _, err := AtomicRollover(&Conf, kdb, zd.ZoneName)
+			return err
+		}},
 		{"rollover reset", "reset", func(t *testing.T, kdb *KeyDB, zd *ZoneData) error {
 			return ClearLastRolloverError(kdb, zd.ZoneName, 0)
 		}},
@@ -549,5 +559,32 @@ func TestOwnedZoneSetstateNeedsTheColumns(t *testing.T) {
 	}
 	if w := keystoreWrites(t, kdb); len(w) != 1 {
 		t.Errorf("setstate with the columns made %d writes, want 1: %v", len(w), w)
+	}
+}
+
+// policy-set on an owned zone (design Q1): a policy that changes an owner
+// field, the KSK algorithm here, is refused; one that changes only a
+// mechanism field, the signature validity, is not refused as owned.
+func TestOwnedZonePolicySetKeepsTheOwnersFields(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := ownerZone(t, kdb, "owned.example.")
+	installOwner(t, &testOwner{owns: map[string]bool{zd.ZoneName: true}})
+	same := *zd.DnssecPolicy
+	ttl := *zd.DnssecPolicy
+	ttl.SigValidity.Default = zd.DnssecPolicy.SigValidity.Default + 3600
+	alg := *zd.DnssecPolicy
+	alg.KSKAlgorithm = dns.RSASHA256
+	withLivePolicies(t, map[string]DnssecPolicy{"same": same, "ttl": ttl, "alg": alg})
+	resetKeystoreWrites(t, kdb)
+	if _, err := setZonePolicy(context.Background(), zd, kdb, "alg"); err == nil || !errors.Is(err, ErrZoneOwned) {
+		t.Errorf("policy-set to a policy with another KSK algorithm on an owned zone: err=%v, want ErrZoneOwned", err)
+	}
+	if w := keystoreWrites(t, kdb); len(w) != 0 {
+		t.Errorf("the refused policy-set wrote: %v", w)
+	}
+	for _, name := range []string{"same", "ttl"} {
+		if _, err := setZonePolicy(context.Background(), zd, kdb, name); err != nil && errors.Is(err, ErrZoneOwned) {
+			t.Errorf("policy-set to %q, which keeps the owner's fields, was refused as owned: %v", name, err)
+		}
 	}
 }
