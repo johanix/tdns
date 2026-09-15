@@ -186,7 +186,7 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 		return
 	}
 
-	lgDns.Info("delegation-sync-proxy: change detected in transfer; queueing proxy sync",
+	lgDns.Info("parentsync-proxy: change detected in transfer; queueing proxy sync",
 		"zone", zd.ZoneName,
 		"cds", analysis.CdsChanged, "csync", analysis.CsyncChanged,
 		"ns_or_glue", analysis.NsOrGlueChanged, "dnskey", analysis.DnskeyChanged,
@@ -238,7 +238,7 @@ func (zd *ZoneData) ProxyNotifyParent(ctx context.Context, notifyq chan NotifyRe
 	}
 
 	sent := zd.emitProxyNotifies(ctx, notifyq, analysis, dsynctarget.Addresses)
-	lgDns.Info("delegation-sync-proxy: forwarded NOTIFY(s) to parent",
+	lgDns.Info("parentsync-proxy: forwarded NOTIFY(s) to parent",
 		"zone", zd.ZoneName, "parent", zd.GetParent(), "sent", sent, "target", dsynctarget.Addresses)
 	return fmt.Sprintf("forwarded NOTIFY(%v) to parent %s", sent, zd.GetParent()), nil
 }

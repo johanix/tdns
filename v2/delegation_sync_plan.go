@@ -439,7 +439,7 @@ func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan
 	imr *Imr, plan *ParentSyncPlan, analysis *ProxyDelegationAnalysis, updateSync *DelegationSyncStatus) (string, error) {
 
 	if !plan.Usable() {
-		lgDns.Info("delegation-sync-proxy: nothing forwarded", "zone", zd.ZoneName,
+		lgDns.Info("parentsync-proxy: nothing forwarded", "zone", zd.ZoneName,
 			"parent", plan.Parent, "plan", plan.Summary())
 		return "no usable sync scheme; nothing forwarded (" + plan.Summary() + ")", nil
 	}

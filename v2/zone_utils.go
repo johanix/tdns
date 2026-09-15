@@ -1956,9 +1956,9 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 			(Globals.App.Type == AppTypeAgent && zd.Options[OptMultiProvider])) {
 		schemes := ParentSyncConfig().Schemes
 		if len(schemes) == 0 {
-			lg.Error("SetupZoneSync: zone has delegation-sync-child enabled but parentsync.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)
-			zd.SetError(ConfigError, "delegation-sync-child enabled but parentsync.schemes is not configured")
-			return fmt.Errorf("delegation-sync-child enabled but parentsync.schemes is not configured for zone %s", zd.ZoneName)
+			lg.Error("SetupZoneSync: zone has parentsync enabled but parentsync.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)
+			zd.SetError(ConfigError, "parentsync enabled but parentsync.schemes is not configured")
+			return fmt.Errorf("parentsync enabled but parentsync.schemes is not configured for zone %s", zd.ZoneName)
 		}
 		for _, scheme := range schemes {
 			switch scheme {
@@ -1987,12 +1987,12 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	// so a misconfiguration is loud rather than silently inert.
 	if zd.Options[OptParentSyncProxy] {
 		if Globals.App.Type != AppTypeAgent || zd.ZoneType != Secondary {
-			lg.Error("SetupZoneSync: delegation-sync-proxy is only valid for a tdns-agent secondary zone",
+			lg.Error("SetupZoneSync: parentsync-proxy is only valid for a tdns-agent secondary zone",
 				"zone", zd.ZoneName, "app", Globals.App.Type, "zonetype", zd.ZoneType)
-			zd.SetError(ConfigError, "delegation-sync-proxy is only valid for an agent secondary zone")
-			return fmt.Errorf("delegation-sync-proxy on zone %s requires a tdns-agent secondary zone", zd.ZoneName)
+			zd.SetError(ConfigError, "parentsync-proxy is only valid for an agent secondary zone")
+			return fmt.Errorf("parentsync-proxy on zone %s requires a tdns-agent secondary zone", zd.ZoneName)
 		}
-		lg.Info("SetupZoneSync: delegation-sync-proxy enabled (agent secondary)", "zone", zd.ZoneName)
+		lg.Info("SetupZoneSync: parentsync-proxy enabled (agent secondary)", "zone", zd.ZoneName)
 		// Run the UPDATE-proxy precondition check (§10.8) off the refresh path,
 		// via the DelegationSyncher: it does DSYNC discovery (network) and may
 		// generate a SIG(0) key, so it must not run inline here. The check is a

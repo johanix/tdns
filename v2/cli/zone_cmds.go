@@ -47,8 +47,8 @@ func peerConfAddrsString(peers []tdns.PeerConf) string {
 func NewZoneProxyKeyCmd(role string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "proxy-key",
-		Short: "Show the delegation-sync-proxy UPDATE state and the KEY to publish at the primary",
-		Long: `For a zone with the delegation-sync-proxy option (a tdns-agent acting as a
+		Short: "Show the parentsync-proxy UPDATE state and the KEY to publish at the primary",
+		Long: `For a zone with the parentsync-proxy option (a tdns-agent acting as a
 secondary for a DSYNC-unaware primary), report whether the agent can proxy
 DNS UPDATEs to the parent, and print the exact records to serve at the primary
 apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and the HSYNCPARAM again
