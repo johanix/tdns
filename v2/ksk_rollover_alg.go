@@ -217,6 +217,12 @@ func SpawnKskAlgRollover(conf *Config, kdb *KeyDB, zone string, fromAlg, toAlg u
 	}); err != nil {
 		return 0, fmt.Errorf("record algorithm roll: %w", err)
 	}
+	// The old head stays active and signs through the drain, but the parent
+	// must not hold its DS from here on (plan A4): with the roll recorded,
+	// its ds resolves to 0.
+	if err := refreshKeyRowFlagsTx(tx, zone, oldKid); err != nil {
+		return 0, fmt.Errorf("clear the old head's ds: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit: %w", err)
@@ -360,6 +366,10 @@ func AbortKskAlgRollover(ctx context.Context, conf *Config, kdb *KeyDB, zone str
 	}
 	if err := clearKskAlgRollTx(tx, zone); err != nil {
 		return "", fmt.Errorf("clear algorithm-roll state: %w", err)
+	}
+	// The old head is a plain active key again, with its DS.
+	if err := refreshKeyRowFlagsTx(tx, zone, algRoll.OldHeadKeyID); err != nil {
+		return "", fmt.Errorf("restore the old head's ds: %w", err)
 	}
 	if err := clearObserveScheduleTx(tx, zone); err != nil {
 		return "", fmt.Errorf("clear observe schedule: %w", err)
