@@ -605,3 +605,36 @@ made stale. See `v2/scanner_trust.go`.
   no glue, and that the change does not touch, stops neither.
 - **`StartScanner` starts `AuthQueryEngine`.** Without it the
   standalone scanner's first query to a child blocked forever.
+
+## Amendment, 2026-09-14 (c): polling
+
+The scanner polls. With `scanner.poll.enabled` set, a poll round
+runs every `scanner.interval` seconds over the children of every
+zone that allows child updates and has a delegation backend
+(`v2/scanner_poll.go`):
+
+- a child with a DS is scanned for CSYNC, then for CDS;
+- a child without a DS is not scanned unless
+  `scanner.poll.bootstrap` is set. Then only its CDS is, and a
+  poll can give it a first DS under the parent zone's delegation
+  policy. The setting is off by default.
+
+Each scan goes through `scanChildAndApply`, as a NOTIFY-started
+one does, so a poll and a NOTIFY of the same child do not overlap
+and a change is applied before the next scan of the child starts.
+A round scans at most `scanner.poll.concurrency` children at once
+(default 4) and does not start while the previous one is still
+running. A child whose delegation cannot be read is not polled.
+
+The engine reads `scanner.poll` from the runtime-config snapshot
+on every tick, never from viper, which a reload rewrites. A full
+config reload (`tdns-cli daemon reload`) publishes a new snapshot,
+so a change takes effect at the next round. SIGHUP reloads zone
+config only and does not re-read `scanner.poll`. The ticker is
+created when the engine starts, so a change to `scanner.interval`
+needs a restart.
+
+A child that publishes no CSYNC is a no-op before the trust gate,
+like a CDS removal sentinel for a child without a DS. Under
+`require-dnssec: true` a missing CSYNC used to be an error, which
+a poll would have logged for every such child on every round.

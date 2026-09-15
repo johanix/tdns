@@ -68,7 +68,8 @@ type Scanner struct {
 	Jobs               map[string]*ScanJobStatus
 	JobsMutex          sync.RWMutex
 
-	childLocks sync.Map // canonical child name -> *sync.Mutex; see scanChildAndApply
+	childLocks sync.Map         // canonical child name -> *sync.Mutex; see scanChildAndApply
+	poll       scannerPollState // scanner_poll.go
 
 	// queryChild and validateRRset stand in, in tests, for the network behind
 	// the CDS and CSYNC paths: asking every child nameserver
@@ -252,6 +253,8 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 
 	lg.Info("ScannerEngine: starting")
 	defer ticker.Stop()
+	pollInterval := time.Duration(interval) * time.Second
+	scanner.notePollConf(readScannerPollConf(), pollInterval)
 
 	for {
 		select {
@@ -259,6 +262,13 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 			lg.Info("ScannerEngine: context cancelled")
 			return nil
 		case <-ticker.C:
+			pc := readScannerPollConf()
+			scanner.notePollConf(pc, pollInterval)
+			if pc.Enabled {
+				if !scanner.startPollRound(ctx, pollParents(Zones.Items()), pc) {
+					lg.Debug("ScannerEngine: the previous poll round is still running, skipping this tick")
+				}
+			}
 
 		case sr, ok := <-scannerq:
 			if !ok {
@@ -859,8 +869,13 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 		startSerial = soa.Serial
 	}
 
-	// 3. Query CSYNC from child — RFC 7477 step 2
-	csyncRRs, csyncInSync, err := fetch(ctx, childZone, dns.TypeCSYNC)
+	// 3. Query CSYNC from child — RFC 7477 step 2. Asked outside the trust
+	// gate: a child that publishes no CSYNC asks for nothing, and a no-op needs
+	// no authentication (like the CDS removal sentinel for a child without a
+	// DS). Through the secured fetcher, a missing CSYNC under require-dnssec
+	// was an error, which a poll would log for every such child on every round.
+	// A CSYNC that is there is validated before anything is read from it.
+	csyncRRset, csyncInSync, err := scanner.askChild(ctx, childZone, dns.TypeCSYNC, nsRRset, scanLog)
 	if err != nil {
 		fail("error querying CSYNC", err)
 		return
@@ -872,12 +887,19 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 		responseCh <- response
 		return
 	}
-	if len(csyncRRs) == 0 {
+	if csyncRRset == nil || len(csyncRRset.RRs) == 0 {
 		scanLog.Printf("ProcessCSYNCNotify: %s: no CSYNC records found", childZone)
 		response.DataChanged = false
 		responseCh <- response
 		return
 	}
+	if pol.RequireDnssec {
+		if err := scanner.requireSecure(ctx, csyncRRset, pol); err != nil {
+			fail("", err)
+			return
+		}
+	}
+	csyncRRs := csyncRRset.RRs
 
 	// Extract the CSYNC RR
 	var csyncrr *dns.CSYNC
