@@ -1779,7 +1779,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		}
 
 		if CaseFoldContains(conf.Listeners.Transports, "doh") {
-			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), certFile, keyFile, ImrHandler)
+			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), conf.Listeners.DoHPath, certFile, keyFile, ImrHandler)
 			if err != nil {
 				lgImr.Error("failed to setup DoH server", "err", err)
 			}

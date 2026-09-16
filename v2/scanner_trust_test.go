@@ -348,8 +348,14 @@ func TestScanCDSFollowsTheDelegationPolicy(t *testing.T) {
 			want: ScanRefused, wantReason: "CDS is insecure", wantValidated: 1},
 		{name: "with a DS, strict: a secure CDS is applied", pol: trustStrict(), hasDS: true,
 			cdsVerdict: cache.ValidationStateSecure, want: ScanValidated, wantReason: "through the child's DS", wantValidated: 1},
-		{name: "with a DS, lax: applied without validation", pol: trustLax(), hasDS: true,
-			cdsVerdict: cache.ValidationStateBogus, want: ScanUnvalidated, wantReason: "does not require DNSSEC"},
+		// With a DS the chain exists, so the CDS is validated whatever the
+		// policy's require-dnssec says.
+		{name: "with a DS, lax: a bogus CDS changes nothing", pol: trustLax(), hasDS: true,
+			cdsVerdict: cache.ValidationStateBogus, want: ScanRefused, wantReason: "has a DS, so its CDS must validate", wantValidated: 1},
+		{name: "with a DS, lax: an insecure CDS changes nothing", pol: trustLax(), hasDS: true,
+			want: ScanRefused, wantReason: "CDS is insecure", wantValidated: 1},
+		{name: "with a DS, lax: a secure CDS is applied, validated", pol: trustLax(), hasDS: true,
+			cdsVerdict: cache.ValidationStateSecure, want: ScanValidated, wantReason: "through the child's DS", wantValidated: 1},
 		{name: "bootstrap under at-ns only: at-apex in scanner.options is not taken", pol: atNSOnly, inBailiwick: true,
 			cdsVerdict: cache.ValidationStateSecure, options: []string{"at-apex", "no-dnssec-validation"},
 			want: ScanRefused, wantReason: "no bootstrap mechanism"},

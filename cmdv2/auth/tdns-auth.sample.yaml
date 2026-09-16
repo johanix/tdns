@@ -68,6 +68,10 @@ listeners:
       doq:   [ 853 ]
       dot:   [ 853 ]
       doh:   [ 443 ]
+   # The one HTTP path DoH answers on; every other path is 404. Default
+   # /dns-query. Nothing advertises the path, so clients need the full URI
+   # template, e.g. https://ns.example/dns-query{?dns}.
+   # doh-path:  /dns-query
    # certfile/keyfile are required for dot, doh and doq. If either is empty
    # those listeners are not started (do53 is unaffected).
    certfile:  /etc/tdns/certs/servers/localhost..crt
@@ -348,11 +352,31 @@ parentsync:
 
 
 scanner:
-   interval:  30                        # seconds between periodic scan runs
+   interval:  30                        # seconds between periodic scan runs (poll rounds)
+   # Poll the children of every zone with allow-child-updates, for children
+   # that never send NOTIFY(CDS) or NOTIFY(CSYNC). A child with a DS is scanned
+   # for CSYNC and CDS. A child without one is not scanned unless bootstrap is
+   # set; then its CDS is, and a poll can give it its first DS.
+   # "tdns-cli daemon reload" applies a change to scanner.poll at the next
+   # round; SIGHUP does not. A change to interval needs a restart.
+   # "tdns-cli auth scanner poll on|off|follow-config" (POST /scanner/poll)
+   # switches polling while tdns-auth runs, overriding enabled until
+   # follow-config or a restart; "poll status" shows whether it polls.
+   poll:
+      enabled:     false
+      bootstrap:   false
+      concurrency: 4                    # children scanned at once
+   # Logging: one "ScannerEngine: scan result" line per scan, at Info for a
+   # change or for child data not processed, at Debug otherwise. verbose adds
+   # each scan's step-by-step narration; debug also dumps the RRsets compared.
+   # Read at startup.
+   verbose:   false
+   debug:     false
    # What the scanner accepts from a child (CDS, CSYNC) is decided by the
    # delegation policy bound to the parent zone: require-dnssec and mechanisms
-   # under childsync.policies. scanner.options no-dnssec-validation, at-apex
-   # and at-ns are ignored, and logged as such at startup.
+   # under childsync.policies. A CDS for a child that already has a DS is
+   # always validated. scanner.options no-dnssec-validation, at-apex and at-ns
+   # are ignored, and logged as such at startup.
    at-apex:
       checks:    1     # only 1 is implemented; > 1 refuses an unvalidated at-apex bootstrap
       interval:  300   # seconds between checks (default: 300)
