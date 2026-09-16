@@ -5,8 +5,10 @@
 package cache
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"sync"
 	"testing"
 )
 
@@ -47,4 +49,42 @@ func TestServerMapAccessorsCopy(t *testing.T) {
 		t.Fatalf("FindClosestKnownZone: %v", err)
 	}
 	check("FindClosestKnownZone", servers)
+}
+
+// TestAddServersConcurrentWriters: AddServers copies the stored map, adds to
+// the copy and stores it. Two writers for one zone that interleave those steps
+// would each store a map without the other's server. Background nameserver
+// address lookups add servers to a zone concurrently (#682), so every one of
+// them must survive.
+func TestAddServersConcurrentWriters(t *testing.T) {
+	rrcache := NewRRsetCache(log.New(os.Stderr, "test ", log.LstdFlags), false, false)
+	const (
+		zone    = "example."
+		writers = 64
+	)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := fmt.Sprintf("ns%d.example.net.", i)
+			srv := NewAuthServer(name)
+			srv.AddAddr(fmt.Sprintf("192.0.2.%d", i+1))
+			<-start
+			if err := rrcache.AddServers(zone, map[string]*AuthServer{ServerKey(name): srv}); err != nil {
+				t.Errorf("AddServers(%s): %v", name, err)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	stored, ok := rrcache.ServerMap.Get(zone)
+	if !ok {
+		t.Fatalf("zone %s missing from the server map", zone)
+	}
+	if len(stored) != writers {
+		t.Errorf("server map holds %d servers, want %d: concurrent writers lost servers", len(stored), writers)
+	}
 }
