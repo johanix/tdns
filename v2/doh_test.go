@@ -16,6 +16,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -30,12 +32,37 @@ type dohTestEngine struct {
 	client *http.Client
 }
 
+// dohEngineGoroutines counts the goroutines DnsDoHEngine started and that are
+// still running: one per listener serving, and the one waiting to shut them
+// down. They are found in a full goroutine dump by their creator, so the count
+// covers this engine code only. A process-wide count would not do: an
+// unrelated goroutine exiting could satisfy it while an engine's stayed up.
+func dohEngineGoroutines() int {
+	creator := "created by " + runtime.FuncForPC(reflect.ValueOf(DnsDoHEngine).Pointer()).Name() + " in goroutine "
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Count(string(buf[:n]), creator)
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
 // startTestDoHEngine runs the real DnsDoHEngine, not a copy of its handler:
 // what is under test is what the engine puts behind its listener. The engine
 // binds in a goroutine and reports nothing back, so this picks a free port,
-// hands it over and waits until TLS connects. The engine is stopped when the
-// test ends, and the wait for its port to close keeps it out of the next test.
-// path is listeners.doh-path: "" is the default.
+// hands it over and waits until TLS connects. path is listeners.doh-path: ""
+// is the default.
+//
+// When the test ends the engine is cancelled, and the test fails unless every
+// goroutine the engine started has exited within 3s. A closed port is not
+// enough: http.Server.Shutdown closes its listeners first and only then waits
+// for connections, so the port closes while the engine is still running. The
+// shutdown goroutine exits only after Shutdown returns, by which time every
+// connection is closed. The wait compares against the count from before this
+// engine started, which is exact because these tests do not run in parallel
+// and cleanups run in reverse order: the last engine started stops first.
 func startTestDoHEngine(t *testing.T, path string) *dohTestEngine {
 	t.Helper()
 	cert, pool := newUpstreamTestCert(t)
@@ -66,26 +93,35 @@ func startTestDoHEngine(t *testing.T, path string) *dohTestEngine {
 		m.SetReply(r)
 		_ = w.WriteMsg(m)
 	}
+	tlsConf := &tls.Config{RootCAs: pool, ServerName: "dns.test.example"}
+	e := &dohTestEngine{
+		base:   "https://" + hostport,
+		client: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsConf}},
+	}
+
+	before := dohEngineGoroutines()
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := DnsDoHEngine(ctx, &Config{}, []string{"127.0.0.1"}, []string{port}, path, certFile, keyFile, handler); err != nil {
 		cancel()
 		t.Fatalf("DnsDoHEngine: %v", err)
 	}
 	t.Cleanup(func() {
+		// Shutdown closes idle connections on its own; closing the client's
+		// kept-alive ones too keeps the client's connection goroutines from
+		// outliving the test.
+		e.client.CloseIdleConnections()
 		cancel()
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			c, err := net.DialTimeout("tcp", hostport, 100*time.Millisecond)
-			if err != nil {
+		deadline := time.Now().Add(3 * time.Second)
+		for dohEngineGoroutines() > before {
+			if time.Now().After(deadline) {
+				t.Errorf("DoH engine on %s: %d of its goroutines still running 3s after cancel",
+					hostport, dohEngineGoroutines()-before)
 				return
 			}
-			c.Close()
 			time.Sleep(20 * time.Millisecond)
 		}
-		t.Errorf("DoH engine on %s still accepting 5s after cancel", hostport)
 	})
 
-	tlsConf := &tls.Config{RootCAs: pool, ServerName: "dns.test.example"}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		c, err := tls.DialWithDialer(&net.Dialer{Timeout: 200 * time.Millisecond}, "tcp", hostport, tlsConf)
@@ -98,10 +134,12 @@ func startTestDoHEngine(t *testing.T, path string) *dohTestEngine {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return &dohTestEngine{
-		base:   "https://" + hostport,
-		client: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsConf}},
+	// Without this the shutdown wait proves nothing: if the dump stopped
+	// naming DnsDoHEngine as the creator, the count would stay at before.
+	if dohEngineGoroutines() <= before {
+		t.Fatalf("the goroutine dump shows no goroutines created by DnsDoHEngine; the shutdown check would pass vacuously")
 	}
+	return e
 }
 
 func (e *dohTestEngine) get(t *testing.T, path string) (int, []byte) {
