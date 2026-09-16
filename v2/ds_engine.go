@@ -207,6 +207,12 @@ func (kdb *KeyDB) askDSEngine(ctx context.Context, req DSEngineRequest) dsEngine
 	}
 }
 
+// KeysChanged tells the DS engine a zone's key rows changed in a way the
+// served DNSKEY RRset may not show: a key's ds column, which decides the
+// DS set of an owned zone (arrow 1). The owner calls it after such a
+// write; the DNSKEY publish path calls the same for a SEP change.
+func (kdb *KeyDB) KeysChanged(zd *ZoneData) { kdb.dsEngineKeysChanged(zd) }
+
 // dsEngineKeysChanged records that zd's KSK set changed, for the DS engine to
 // bring its CDS back in step.
 //
@@ -215,12 +221,6 @@ func (kdb *KeyDB) askDSEngine(ctx context.Context, req DSEngineRequest) dsEngine
 // this exists for. So it marks the zone rather than queueing a request. A zone is
 // marked once however many times it changes before the engine looks, and the
 // wake-up signal has room for one, so neither can fill up.
-// KeysChanged tells the DS engine a zone's key rows changed in a way the
-// served DNSKEY RRset may not show: a key's ds column, which decides the
-// DS set of an owned zone (arrow 1). The owner calls it after such a
-// write; the DNSKEY publish path calls the same for a SEP change.
-func (kdb *KeyDB) KeysChanged(zd *ZoneData) { kdb.dsEngineKeysChanged(zd) }
-
 func (kdb *KeyDB) dsEngineKeysChanged(zd *ZoneData) {
 	if kdb == nil || kdb.DSEngineQ == nil || zd == nil {
 		return

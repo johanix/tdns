@@ -204,8 +204,10 @@ type KeyInventoryEntry struct {
 	KeyRR     string `json:"keyrr"` // Full DNSKEY RR string (public key data)
 	// The key row's columns beside the state (key lifecycle ownership
 	// design §3.2): served, signing, and whether its DS belongs at the
-	// parent. A sender that predates them sends none: ds is then nil, and
-	// pub and sign are what the state implies.
+	// parent. pub and sign are omitted when false, so an absent one and a
+	// false one decode the same; ds is a pointer, so an explicit false
+	// travels. A sender that predates the columns sends none: the receiver
+	// sees ds nil, and takes pub and sign from what the state implies.
 	Pub  bool  `json:"pub,omitempty"`
 	Sign bool  `json:"sign,omitempty"`
 	DS   *bool `json:"ds,omitempty"`
