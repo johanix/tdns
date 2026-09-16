@@ -213,6 +213,7 @@ listeners:
    #      dot: [ 853 ]
    #      doh: [ 443 ]
    #      doq: [ 853 ]
+   #   doh-path: /dns-query   # the one path DoH answers on; this is the default
    certfile:  {{CERT}}
    keyfile:   {{KEY}}
 
@@ -244,16 +245,16 @@ dnssec:
             dnskey:   30d
             ds:       14d
 
-# Delegation sync, PARENT side. Defined but not yet switched on: no zone below
-# carries the delegation-sync-parent option, so nothing is published. Policies
-# are inert until a zone binds one, which makes this safe to ship and gives you
-# something to reference when you do enable it.
+# childsync: what a childsync zone offers its children. Defined but not yet
+# switched on: no zone below carries the childsync option, so nothing is
+# published. Policies are inert until a zone binds one, which makes this safe
+# to ship and gives you something to reference when you do enable it.
 #
-# To turn a zone into a delegation-sync parent: add delegation-sync-parent to
-# its options: and (optionally) delegationpolicy: <name> to pick a policy.
+# To make a zone a childsync zone: add childsync to its options: and
+# (optionally) delegationpolicy: <name> to pick a policy.
 # Omitting delegationpolicy: binds "default"; naming a policy that does not
 # exist QUARANTINES the zone, so config check verifies the reference.
-delegationsync:
+childsync:
    policies:
       # How a child's SIG(0) key becomes trusted. Two orthogonal axes:
       # mechanisms = WHERE to look for the key, require-dnssec = HOW strongly
@@ -282,24 +283,23 @@ delegationsync:
             mechanisms:      [ ]
             manual:          true
             allow-unvalidated-upload: false
-   parent:
-      # Which DSYNC schemes this parent advertises at _dsync.<zone>. There is
-      # deliberately no bootstrap.methods: here — the SVCB advertisement is
-      # DERIVED from each zone's bound policy, so a parent cannot advertise
-      # something it will not do.
-      schemes: [ notify, update ]
-      notify:
-         types:     [ CDS, CSYNC ]
-         target:    notifications.{ZONENAME}
-         port:      {{DNSPORT}}
-         addresses: [ 127.0.0.1, '::1' ]
-      update:
-         types:     [ ANY ]
-         target:    updates.{ZONENAME}
-         port:      {{DNSPORT}}
-         addresses: [ 127.0.0.1, '::1' ]
-         keygen:
-            algorithm: ED25519
+   # Which DSYNC schemes this parent advertises at _dsync.<zone>. There is
+   # deliberately no bootstrap.methods: here — the SVCB advertisement is
+   # DERIVED from each zone's bound policy, so a parent cannot advertise
+   # something it will not do.
+   schemes: [ notify, update ]
+   notify:
+      types:     [ CDS, CSYNC ]
+      target:    notifications.{ZONENAME}
+      port:      {{DNSPORT}}
+      addresses: [ 127.0.0.1, '::1' ]
+   update:
+      types:     [ ANY ]
+      target:    updates.{ZONENAME}
+      port:      {{DNSPORT}}
+      addresses: [ 127.0.0.1, '::1' ]
+      keygen:
+         algorithm: ED25519
 
 # Zone templates. The two primaries below use two DIFFERENT templates; the
 # commented-out secondary uses a third.

@@ -152,6 +152,9 @@ func EnsureZskRolloverRow(kdb *KeyDB, zone string) error {
 // SetZskManualRolloverRequest stamps a manual ZSK-rollover request. Mirrors
 // the KSK SetManualRolloverRequest, on ZskRolloverState.
 func SetZskManualRolloverRequest(kdb *KeyDB, zone string, requestedAt, earliest time.Time) error {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return ownedRefusal(zd, "asap")
+	}
 	if err := EnsureZskRolloverRow(kdb, zone); err != nil {
 		return err
 	}
@@ -168,6 +171,9 @@ WHERE zone = ?`,
 // ClearZskManualRolloverRequest nulls the manual-request columns. Called by
 // `cancel --zsk` and after a manual ZSK roll commits.
 func ClearZskManualRolloverRequest(kdb *KeyDB, zone string) error {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return ownedRefusal(zd, "cancel")
+	}
 	_, err := kdb.DB.Exec(`UPDATE ZskRolloverState
 SET manual_rollover_requested_at = NULL,
     manual_rollover_earliest = NULL

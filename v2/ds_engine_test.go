@@ -505,9 +505,11 @@ func TestRolloverCDSIsNotPublishedWhenRolloverStateCannotBeRead(t *testing.T) {
 func TestRolloverCleanupKeepsItsClaimWhenItCannotCompare(t *testing.T) {
 	r := newDSEngineRig(t, 0, false)
 	stageCDS(t, r.zd, cdsFor("example.", pubA))
-	// A key in the claimed range whose stored DNSKEY cannot be parsed.
-	if _, err := r.kdb.DB.Exec(`INSERT INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr)
-		VALUES ('example.', ?, 4711, 257, ?, 'test', '', 'not a DNSKEY')`, DnskeyStateActive, dns.ED25519); err != nil {
+	// A key in the claimed range, with its DS at the parent, whose stored
+	// DNSKEY cannot be parsed. Raw: the one insert would not take the row
+	// either way, and the point is the row's shape, not the writer.
+	if _, err := r.kdb.DB.Exec(`INSERT INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pub, sign, ds)
+		VALUES ('example.', ?, 4711, 257, ?, 'test', '', 'not a DNSKEY', 1, 1, 1)`, DnskeyStateActive, dns.ED25519); err != nil {
 		t.Fatalf("seed unparseable key: %v", err)
 	}
 	if _, err := r.kdb.DB.Exec(`INSERT INTO RolloverKeyState (zone, keyid, rollover_index, rollover_method, rollover_state_at)

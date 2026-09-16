@@ -113,6 +113,9 @@ func kskAlgRollNeeded(kdb *KeyDB, zone string, pol *DnssecPolicy) (fromAlg, toAl
 // Post-commit: republish the signing-keys snapshot and trigger the
 // re-sign that puts RRSIG(B) on the wire.
 func SpawnKskAlgRollover(conf *Config, kdb *KeyDB, zone string, fromAlg, toAlg uint8) (newKid uint16, err error) {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return 0, ownedRefusal(zd, "alg-rollover")
+	}
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	if zone == "." || zone == "" {
 		return 0, fmt.Errorf("SpawnKskAlgRollover: empty zone")
@@ -217,6 +220,12 @@ func SpawnKskAlgRollover(conf *Config, kdb *KeyDB, zone string, fromAlg, toAlg u
 	}); err != nil {
 		return 0, fmt.Errorf("record algorithm roll: %w", err)
 	}
+	// The old head stays active and signs through the drain, but the parent
+	// must not hold its DS from here on (plan A4): with the roll recorded,
+	// its ds resolves to 0.
+	if err := refreshKeyRowFlagsTx(tx, zone, oldKid); err != nil {
+		return 0, fmt.Errorf("clear the old head's ds: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit: %w", err)
@@ -304,6 +313,9 @@ ORDER BY keyid ASC`, zone)
 //
 // Returns a one-line description of what was done for the operator.
 func AbortKskAlgRollover(ctx context.Context, conf *Config, kdb *KeyDB, zone string) (string, error) {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return "", ownedRefusal(zd, "cancel")
+	}
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	row, err := LoadRolloverZoneRow(kdb, zone)
 	if err != nil {
@@ -360,6 +372,10 @@ func AbortKskAlgRollover(ctx context.Context, conf *Config, kdb *KeyDB, zone str
 	}
 	if err := clearKskAlgRollTx(tx, zone); err != nil {
 		return "", fmt.Errorf("clear algorithm-roll state: %w", err)
+	}
+	// The old head is a plain active key again, with its DS.
+	if err := refreshKeyRowFlagsTx(tx, zone, algRoll.OldHeadKeyID); err != nil {
+		return "", fmt.Errorf("restore the old head's ds: %w", err)
 	}
 	if err := clearObserveScheduleTx(tx, zone); err != nil {
 		return "", fmt.Errorf("clear observe schedule: %w", err)

@@ -37,6 +37,13 @@ func EvaluateRolloverPolicyInvariants(zd *ZoneData, pol *DnssecPolicy) {
 	if zd == nil || pol == nil || pol.Rollover.Method == RolloverMethodNone {
 		return
 	}
+	if zoneOwned(zd) {
+		// The rollover policy is the owner's to validate; a verdict from
+		// before the owner took the zone no longer applies.
+		zd.ClearError(RolloverPolicyViolation)
+		zd.ClearError(RolloverPolicyWarning)
+		return
+	}
 
 	// Two severities, one combined error category each:
 	//   - RolloverPolicyViolation: E5 (hard) and E10 (hard).

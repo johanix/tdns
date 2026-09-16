@@ -661,6 +661,12 @@ func setZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName str
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return "", fmt.Errorf("policy-set: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
+	// On an owned zone the algorithms, lifetimes, standby counts and the
+	// rollover method are the owner's (design Q1); a policy that keeps them
+	// and changes only the mechanism fields may still be set.
+	if zoneOwned(zd) && ownerPolicyFieldsDiffer(zd.DnssecPolicy, &pol) {
+		return "", ownedRefusal(zd, "policy-set")
+	}
 
 	// Capture the current policy name + algorithms for the operator message
 	// (transition wording + whether the change transiently double-signs). This
@@ -731,6 +737,9 @@ func setZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName str
 //   - KSK-only alg target / strict mode: deferred to the reconcile, which
 //     refuses (defensive backstop) — but we surface a clean error here too.
 func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
+	if zoneOwned(zd) {
+		return "", ownedRefusal(zd, "policy-change")
+	}
 	policyName = strings.TrimSpace(policyName)
 	if policyName == "" {
 		return "", fmt.Errorf("change-policy: no policy specified")
@@ -939,6 +948,9 @@ func boundPolicyMode(zd *ZoneData) string {
 }
 
 func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool) (string, error) {
+	if zoneOwned(zd) {
+		return "", ownedRefusal(zd, "policy-reset")
+	}
 	// Resolve the zone's CONFIG-base policy (its YAML dnssec_policy) — what the
 	// zone falls back to once the override + applied records are cleared. Read
 	// the name from Conf.Zones (as the list-zones handler does) and the struct
@@ -1063,6 +1075,9 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	if err != nil {
 		return "", fmt.Errorf("policy-reset: re-signing zone %s under config policy %q FAILED — the config-policy keys are already in the keystore, so run `zone dnssec resign -z %s` to converge (do NOT re-run policy-reset): %w", zd.ZoneName, configName, zd.ZoneName, err)
 	}
+	// Signed under the config policy: rows written under the old policy's DS
+	// model carry its ds; re-resolve them if the model changed.
+	reconcileDsAfterBind(kdb, zd, oldPol)
 
 	// 4) Only now that the zone is signed under config and applied=config is
 	// recorded, clear any stale CLI override so intent matches reality. Done LAST

@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"database/sql"
 	"fmt"
 
 	"github.com/miekg/dns"
@@ -62,7 +63,7 @@ func dsBelongsAtParent(state string) (belongs, recognised bool) {
 }
 
 const dsIntentKeysSql = `
-SELECT state, keyrr
+SELECT state, keyrr, ds
 FROM DnssecKeyStore
 WHERE zonename = ? AND (CAST(flags AS INTEGER) & ?) != 0`
 
@@ -82,23 +83,30 @@ WHERE zonename = ? AND (CAST(flags AS INTEGER) & ?) != 0`
 // Withdrawing the DS of such a zone would break it, so the absence of rows
 // means the DS is not ours to have an opinion about.
 //
-// Known is also false when the zone holds a KSK tdns does not act on: another
-// provider's key (state foreign), whose DS is not this zone's decision, or a
-// key tdns-mp is removing from a multi-provider zone (state mpremove). Every
-// consumer of the intent acts on the parent's whole DS set: replace mode
-// rewrites it, and delta mode removes whatever the set lacks. No set tdns could
-// state would leave such a key's DS alone; declining does.
+// The answer is the ds column of the zone's SEP rows (design §3.3, §3.4): the
+// state machine that owns a zone writes ds at its transitions, and this reader
+// never needs to know the zone's DS model. Known is false as soon as one SEP
+// row has ds unset: another provider's key (state foreign), a key tdns-mp is
+// removing (mpremove) or distributing (mpdist), a row written before the
+// column, a zone whose policy is not bound yet. Every consumer of the intent
+// acts on the parent's whole DS set -- replace mode rewrites it, and delta
+// mode removes whatever the set lacks -- so no set tdns could state would
+// leave an undecided key's DS alone; declining does.
 //
-// Known is true with an empty Set when tdns does hold keys for the zone and
-// none of them should have a DS -- a zone that has been un-signed. That is a
-// real instruction to withdraw, and the distinction from the cases above is the
-// whole reason Known exists.
-//
-// An mpdist key does not make that answer. It gets no DS of its own, but it is
-// served: a zone whose only DS-less keys include one is signed, with a key on
-// its way to promotion, not un-signed. If nothing else gives the set a member,
-// the intent is unknown rather than an instruction to withdraw the parent's DS.
+// Known is true with an empty Set when tdns does hold SEP keys for the zone
+// and every one of them has ds=0 -- a zone that has been un-signed. That is a
+// real instruction to withdraw, and the distinction from the cases above is
+// the whole reason Known exists.
 func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error) {
+	// An owned zone's DS is its owner's answer (§4): the rows here are one
+	// provider's view, the owner's covers every signing provider.
+	if zd, owned := zoneOwnedByName(zonename); owned {
+		in, err := currentKeyLifecycleOwner().DSIntent(zd, digest)
+		if err != nil {
+			return DSIntent{}, fmt.Errorf("DSIntentForZone: the owner of %s: %w", zonename, err)
+		}
+		return in, nil
+	}
 	var out DSIntent
 	if kdb == nil {
 		return out, nil
@@ -111,36 +119,29 @@ func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error
 	}
 	defer rows.Close()
 
-	seen, sawMpdist := false, false
+	seen := false
 	for rows.Next() {
 		var state, keyrr string
-		if err := rows.Scan(&state, &keyrr); err != nil {
+		var ds sql.NullInt64
+		if err := rows.Scan(&state, &keyrr, &ds); err != nil {
 			return DSIntent{}, fmt.Errorf("DSIntentForZone: scan key row for %s: %w", zonename, err)
 		}
 		seen = true
-		if state == DnskeyStateMpdist {
-			sawMpdist = true
-		}
 
-		if state == DnskeyStateForeign || state == DnskeyStateMpremove {
-			lgDns.Debug("DSIntentForZone: the zone holds a KSK tdns does not act on; declining to state a DS intent",
+		// The ds column is the answer (design §3.3). A row whose ds is unset
+		// is one nobody has decided: another provider's key, a key tdns-mp is
+		// removing, a row written before the column, a zone whose policy has
+		// not bound yet. Excluding it while still reporting Known would present
+		// a short set as authoritative, and replace mode would delete DS
+		// records on the strength of a decision nobody made. Refusing to have
+		// an opinion is the only outcome that cannot turn "unknown" into a DS
+		// removal.
+		if !ds.Valid {
+			lgDns.Debug("DSIntentForZone: a KSK's ds is unset; declining to state a DS intent for this zone",
 				"zone", zonename, "state", state)
 			return DSIntent{}, nil
 		}
-		belongs, recognised := dsBelongsAtParent(state)
-		if !recognised {
-			// A state this code does not know about makes the whole answer
-			// unsafe, not merely incomplete. Excluding the key from Set while
-			// still reporting Known would present an empty or short set as
-			// authoritative, and replace mode would delete DS records on the
-			// strength of a state nobody has classified yet. Refusing to have
-			// an opinion is the only outcome that cannot turn a schema addition
-			// into a DS removal.
-			lgDns.Warn("DSIntentForZone: unrecognised DNSKEY state; declining to state a DS intent for this zone",
-				"zone", zonename, "state", state)
-			return DSIntent{}, nil
-		}
-		if !belongs {
+		if ds.Int64 == 0 {
 			continue
 		}
 		rr, perr := dns.NewRR(keyrr)
@@ -157,12 +158,6 @@ func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error
 	}
 	if err := rows.Err(); err != nil {
 		return DSIntent{}, fmt.Errorf("DSIntentForZone: iterate key rows for %s: %w", zonename, err)
-	}
-
-	if len(out.Set) == 0 && sawMpdist {
-		lgDns.Debug("DSIntentForZone: no key warrants a DS but an mpdist key is served; declining to state a DS intent",
-			"zone", zonename)
-		return DSIntent{}, nil
 	}
 
 	out.Known = seen

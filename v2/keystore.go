@@ -602,7 +602,31 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		return &resp, nil
 
 	case "generate":
-		_, msg, err := kdb.GenerateKeypair(kp.Zone, "api-request", kp.State, dns.TypeDNSKEY, kp.Algorithm, kp.KeyType, tx)
+		// On a zone whose key lifecycle is owned, generate names the key
+		// columns like setstate (design Q4): a state alone would have the
+		// store fill them from tdns's table, minting a key the owner did
+		// not ask for in a shape it did not name.
+		var genFlags *KeyRowFlags
+		genState := kp.State
+		if genState == "" {
+			genState = DnskeyStateActive // GenerateKeypair's default, named once for both writes
+		}
+		if zd, owned := zoneOwnedByName(kp.Zone); owned {
+			if kp.Pub == nil || kp.Sign == nil || kp.DS == nil {
+				err := fmt.Errorf("%w; generate on it names pub, sign and ds", ownedRefusal(zd, "generate"))
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return &resp, err
+			}
+			genFlags = &KeyRowFlags{Pub: *kp.Pub, Sign: *kp.Sign, DS: sql.NullBool{Bool: *kp.DS, Valid: true}}
+		}
+		var msg string
+		var err error
+		if genFlags != nil {
+			_, msg, err = kdb.GenerateKeypairWithColumns(kp.Zone, "api-request", genState, kp.Algorithm, kp.KeyType, *genFlags, tx)
+		} else {
+			_, msg, err = kdb.GenerateKeypair(kp.Zone, "api-request", genState, dns.TypeDNSKEY, kp.Algorithm, kp.KeyType, tx)
+		}
 		if err != nil {
 			lgSigner.Error("GenerateKeypair failed", "err", err)
 			resp.Error = true
@@ -616,16 +640,35 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		return &resp, err
 
 	case "setstate":
-		allowed := map[string]bool{
-			DnskeyStateCreated: true, DnskeyStatePublished: true, DnskeyStateDsPublished: true,
-			DnskeyStateStandby: true, DnskeyStateActive: true, DnskeyStateRetired: true, DnskeyStateRemoved: true,
+		// On a zone whose key lifecycle is owned, setstate names the key
+		// columns (design §3.2): the owner's states are its own, and a bare
+		// state write would bypass it. With the columns the write goes
+		// through setKeyRowTx like every other, and any state is the owner's
+		// to name.
+		var stateFlags KeyRowFlags
+		zd, owned := zoneOwnedByName(kp.Keyname)
+		if owned && kp.Pub != nil && kp.Sign != nil && kp.DS != nil {
+			stateFlags = KeyRowFlags{Pub: *kp.Pub, Sign: *kp.Sign, DS: sql.NullBool{Bool: *kp.DS, Valid: true}}
+		} else {
+			if owned {
+				err := fmt.Errorf("%w; setstate on it names pub, sign and ds", ownedRefusal(zd, "setstate"))
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return &resp, err
+			}
+			// On a zone tdns runs, the columns follow the state and the
+			// state is one of tdns's own; the request's columns are ignored.
+			allowed := map[string]bool{
+				DnskeyStateCreated: true, DnskeyStatePublished: true, DnskeyStateDsPublished: true,
+				DnskeyStateStandby: true, DnskeyStateActive: true, DnskeyStateRetired: true, DnskeyStateRemoved: true,
+			}
+			if !allowed[kp.State] {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("invalid dnssec state %q", kp.State)
+				return &resp, fmt.Errorf("invalid dnssec state %q", kp.State)
+			}
+			stateFlags, _ = keyFlagsForState(kp.State)
 		}
-		if !allowed[kp.State] {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("invalid dnssec state %q", kp.State)
-			return &resp, fmt.Errorf("invalid dnssec state %q", kp.State)
-		}
-		stateFlags, _ := keyFlagsForState(kp.State)
 		if _, err := setKeyRowTx(tx, kp.Keyname, kp.Keyid, kp.State, stateFlags, ""); err != nil {
 			if errors.Is(err, errKeyRowNotFound) {
 				resp.Msg = fmt.Sprintf("Key with name \"%s\" and keyid %d not found.", kp.Keyname, kp.Keyid)
@@ -730,6 +773,12 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 			resp.ErrorMsg = "zone is required for clear"
 			return &resp, fmt.Errorf("zone is required for clear")
 		}
+		if zd, owned := zoneOwnedByName(kp.Zone); owned {
+			err := ownedRefusal(zd, "clear")
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
 		result, err := tx.Exec(`DELETE FROM DnssecKeyStore WHERE zonename=?`, kp.Zone)
 		if err != nil {
 			resp.Error = true
@@ -811,6 +860,12 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 			resp.Error = true
 			resp.ErrorMsg = "zone is required for policy-cleanup"
 			return &resp, fmt.Errorf("zone is required for policy-cleanup")
+		}
+		if zd, owned := zoneOwnedByName(kp.Zone); owned {
+			err := ownedRefusal(zd, "policy-cleanup")
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
 		}
 		retired, err := GetDnssecKeysByState(kdb, kp.Zone, DnskeyStateRetired)
 		if err != nil {
@@ -900,6 +955,9 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 // every key and regenerates one CSK (dropZSK is ignored). For a split policy the
 // SEP bit selects the role (KSK = flags&1==1, ZSK = flags&1==0).
 func (kdb *KeyDB) forceZoneKeysToPolicyRoles(zd *ZoneData, pol *DnssecPolicy, dropKSK, dropZSK bool) (map[uint16]bool, error) {
+	if zoneOwned(zd) {
+		return nil, ownedRefusal(zd, "policy-reset")
+	}
 	if pol == nil {
 		return nil, fmt.Errorf("forceZoneKeysToPolicyRoles: nil policy for zone %s", zd.ZoneName)
 	}
@@ -1293,6 +1351,9 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 // published, or created → whatever state the registered StagedState hook
 // names for this zone (KeyLifecycleHooks).
 func GenerateAndStageKey(kdb *KeyDB, zone, creator string, alg uint8, keytype string) (uint16, error) {
+	if zd, owned := zoneOwnedByName(zone); owned {
+		return 0, ownedRefusal(zd, "generate")
+	}
 	pkc, _, err := kdb.GenerateKeypair(zone, creator, DnskeyStateCreated, dns.TypeDNSKEY, alg, keytype, nil)
 	if err != nil {
 		return 0, fmt.Errorf("GenerateAndStageKey: key generation failed: %w", err)
@@ -1544,6 +1605,9 @@ func updateDnssecKeyStateTx(tx *Tx, kdb *KeyDB, zonename string, keyid uint16, n
 // Returns the old active keyid and the new active keyid.
 // If tx is non-nil, uses the existing transaction; otherwise begins its own.
 func (kdb *KeyDB) RolloverKey(zonename string, keytype string, tx *Tx) (uint16, uint16, error) {
+	if zd, owned := zoneOwnedByName(zonename); owned {
+		return 0, 0, ownedRefusal(zd, "rollover")
+	}
 	var expectedFlags uint16
 	switch keytype {
 	case "ZSK":

@@ -15,6 +15,18 @@ import (
 	"github.com/miekg/dns"
 )
 
+// signerHoldsRRset is cache.SignerHoldsRRset for the RRsets this validator is
+// given. AuthDNSQuery and lookupRRset build them from the records alone, and
+// the IMR's rule takes a missing name for the root, which no signer but the
+// root can hold; the first record's owner stands in for it.
+func signerHoldsRRset(rrset *core.RRset, sig *dns.RRSIG) bool {
+	named := *rrset
+	if named.Name == "" && len(named.RRs) > 0 {
+		named.Name = named.RRs[0].Header().Name
+	}
+	return cache.SignerHoldsRRset(&named, sig)
+}
+
 // XXX: This should not be a method of ZoneData, but rather a function.
 func (zd *ZoneData) ValidateRRset(rrset *core.RRset, verbose bool) (bool, error) {
 	if len(rrset.RRSIGs) == 0 {
@@ -29,6 +41,14 @@ func (zd *ZoneData) ValidateRRset(rrset *core.RRset, verbose bool) (bool, error)
 		}
 		rrsig := rr.(*dns.RRSIG)
 		zd.Logger.Printf("RRset is signed by \"%s\".", rrsig.SignerName)
+		// A signer that cannot hold the RRset did not sign it, whatever key it
+		// names. Decided before FindDnskey, which fetches and caches the
+		// DNSKEYs of whatever delegation the signer's name is found under.
+		if !signerHoldsRRset(rrset, rrsig) {
+			zd.Logger.Printf("ValidateRRset: signer %q cannot hold the RRset (labels=%d); signature ignored",
+				rrsig.SignerName, rrsig.Labels)
+			continue
+		}
 		ta, err := zd.FindDnskey(rrsig.SignerName, rrsig.KeyTag)
 		if err != nil {
 			msg := fmt.Sprintf("Error from FindDnskey(%s, %d): %v", rrsig.SignerName, rrsig.KeyTag, err)
@@ -98,12 +118,23 @@ func (zd *ZoneData) FindDnskey(signer string, keyid uint16) (*cache.CachedDnskey
 	return cdr, nil
 }
 
+// lookupChildRRset indirects the query to a child's nameservers, which
+// AuthDNSQuery always sends to port 53, so that ValidateChildDnskeys and the
+// delegation arm of lookupRRset can be driven in a test without a listener on
+// a privileged port.
+//
+// Production code MUST NOT reassign this. Tests reassign it and restore the
+// original via t.Cleanup.
+var lookupChildRRset = func(zd *ZoneData, qname string, qtype uint16, addrs []string, verbose bool) (*core.RRset, error) {
+	return zd.LookupChildRRsetNG(qname, qtype, addrs, verbose)
+}
+
 // ValidateChildDnskeys: we have the ChildDelegationData for the child zone,
 // containing both the NS RRset and the DS RRset.
 // 1. Fetch the child DNSKEY RRset from one of the child nameservers
-// 2. Verify the child KSK against the DS that we have
-// 3. Verify the child DNSKEY RRset against the verified KSK
-// 4. Store the child DNSKEY RRset in the TrustAnchor store
+// 2. Find the child KSKs that match the DS that we have
+// 3. Verify the child DNSKEY RRset against one of those KSKs
+// 4. Store the KSKs and the ZSKs in the DnskeyCache
 // 5. Return true if the child DNSKEY RRset is validated
 func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool) (bool, error) {
 
@@ -112,12 +143,10 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 		return false, err
 	}
 
-	dnskeyrrset, err := zd.LookupChildRRsetNG(cdd.ChildName, dns.TypeDNSKEY, addrs, verbose)
+	dnskeyrrset, err := lookupChildRRset(zd, cdd.ChildName, dns.TypeDNSKEY, addrs, verbose)
 	if err != nil {
 		return false, err
 	}
-
-	kskValidated := false
 
 	if dnskeyrrset == nil {
 		return false, fmt.Errorf("ValidateChildDnskeys: Error: No DNSKEY RRset found for child zone %s", cdd.ChildName)
@@ -133,6 +162,7 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 		}
 	}
 
+	var ksks []*dns.DNSKEY
 	for _, rr := range dnskeyrrset.RRs {
 		if dnskey, ok := rr.(*dns.DNSKEY); ok {
 			// if dnskey.Flags != 257 {
@@ -154,39 +184,44 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 						// Compare the computed DS with the DS record from the parent zone
 						// Use constant-time comparison to prevent timing side-channel attacks
 						if subtle.ConstantTimeCompare([]byte(strings.ToLower(computedDS.Digest)), []byte(strings.ToLower(dsrr.Digest))) == 1 {
-							zd.Logger.Printf("ValidateChildDnskeys: DNSKEY matches DS record. Adding to TAStore.")
-
-							// Store the KSK in the DnskeyCache
-							keyname := dnskey.Header().Name
-							expiration := time.Now().Add(time.Duration(minTTL) * time.Second)
-							cdr := cache.CachedDnskeyRRset{
-								Name:       keyname,
-								Keyid:      keyid,
-								RRset:      dnskeyrrset,
-								State:      cache.ValidationStateSecure,
-								Dnskey:     *dnskey,
-								Expiration: expiration,
-							}
-							cache.DnskeyCache.Set(keyname, keyid, &cdr)
-							zd.Logger.Printf("ValidateChildDnskeys: Stored KSK in TAStore with key %s::%d and expiration %v", keyname, keyid, expiration)
-							kskValidated = true
-						} else {
-							zd.Logger.Printf("ValidateChildDnskeys: DNSKEY does not match DS record")
+							zd.Logger.Printf("ValidateChildDnskeys: DNSKEY %d matches DS record", keyid)
+							ksks = append(ksks, dnskey)
+							break
 						}
+						zd.Logger.Printf("ValidateChildDnskeys: DNSKEY does not match DS record")
 					}
 				}
 			}
 		}
 	}
 
-	if !kskValidated {
+	if len(ksks) == 0 {
 		return false, fmt.Errorf("no valid KSK found for child zone %s", cdd.ChildName)
 	}
 
-	// Validate the entire DNSKEY RRset
-	valid, err := zd.ValidateRRset(dnskeyrrset, verbose)
-	if err != nil || !valid {
+	// RFC 4035 section 5.2: the RRset is authenticated by a key that matches
+	// the DS. Not by ValidateRRset: FindDnskey takes any key held for the
+	// signer, an ancestor's or a ZSK from an earlier fetch, and for a key tag
+	// not held it fetches and validates this RRset again, without end.
+	if !zd.dnskeysSignedByKsk(dnskeyrrset, ksks, verbose) {
 		return false, fmt.Errorf("failed to validate DNSKEY RRset for child zone %s", cdd.ChildName)
+	}
+
+	// Add the KSKs to the DnskeyCache, now that the RRset they are in is valid
+	for _, ksk := range ksks {
+		keyname := ksk.Header().Name
+		keyid := ksk.KeyTag()
+		expiration := time.Now().Add(time.Duration(minTTL) * time.Second)
+		cdr := cache.CachedDnskeyRRset{
+			Name:       keyname,
+			Keyid:      keyid,
+			RRset:      dnskeyrrset,
+			State:      cache.ValidationStateSecure,
+			Dnskey:     *ksk,
+			Expiration: expiration,
+		}
+		cache.DnskeyCache.Set(keyname, keyid, &cdr)
+		zd.Logger.Printf("ValidateChildDnskeys: Stored KSK in DnskeyCache with key %s::%d and expiration %v", keyname, keyid, expiration)
 	}
 
 	// Add ZSKs to the DnskeyCache
@@ -212,4 +247,39 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 	}
 
 	return true, nil
+}
+
+// dnskeysSignedByKsk reports whether one of the signatures on a child's DNSKEY
+// RRset was made by one of ksks, the keys in it that match the parent's DS,
+// and is within its validity period. Every signature is tried: during a KSK
+// rollover the RRset also carries one by a KSK the DS does not name yet.
+func (zd *ZoneData) dnskeysSignedByKsk(rrset *core.RRset, ksks []*dns.DNSKEY, verbose bool) bool {
+	now := time.Now().UTC()
+	for _, rr := range rrset.RRSIGs {
+		rrsig, ok := rr.(*dns.RRSIG)
+		if !ok {
+			continue
+		}
+		for _, ksk := range ksks {
+			// Verify checks these too; checked here so that only a KSK the
+			// signature names is tried.
+			if rrsig.KeyTag != ksk.KeyTag() || rrsig.Algorithm != ksk.Algorithm ||
+				!core.EqualNames(rrsig.SignerName, ksk.Header().Name) {
+				continue
+			}
+			if err := rrsig.Verify(ksk, rrset.RRs); err != nil {
+				zd.Logger.Printf("ValidateChildDnskeys: RRSIG by KSK %d does not verify: %v", ksk.KeyTag(), err)
+				continue
+			}
+			if !cache.WithinValidityPeriod(rrsig.Inception, rrsig.Expiration, now) {
+				zd.Logger.Printf("ValidateChildDnskeys: RRSIG by KSK %d is not within its validity period", ksk.KeyTag())
+				continue
+			}
+			if verbose {
+				zd.Logger.Printf("ValidateChildDnskeys: DNSKEY RRset verified by KSK %d", ksk.KeyTag())
+			}
+			return true
+		}
+	}
+	return false
 }

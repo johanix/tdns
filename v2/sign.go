@@ -460,6 +460,17 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		return nil, err
 	}
 
+	// A zone whose key lifecycle is owned (KeyLifecycleOwner): the owner
+	// promotes, mints and reconciles; this path only reads. A role without
+	// an active key is one the owner has not released yet, which the
+	// publish path reads as "not yet".
+	if zoneOwned(zd) {
+		if len(dak.KSKs) == 0 || len(dak.ZSKs) == 0 {
+			return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s: %w (its key lifecycle is owned)", zd.ZoneName, ErrKeyGenerationDeferred)
+		}
+		return dak, nil
+	}
+
 	// Reconcile the active key algorithms against the policy. An active-key
 	// algorithm mismatch is REFUSED with an error (a KSK mismatch in either
 	// mode, a ZSK mismatch under strict completeness) — never the legacy

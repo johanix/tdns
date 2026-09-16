@@ -33,7 +33,7 @@ Prefix command, not usable by itself
 * [tdns-cli auth zone list](tdns-cli_auth_zone_list.md)	 - List configured zones
 * [tdns-cli auth zone list-dynamic](tdns-cli_auth_zone_list-dynamic.md)	 - List dynamic zones (catalog members + API-managed) and their provisioning state
 * [tdns-cli auth zone modify](tdns-cli_auth_zone_modify.md)	 - Modify a dynamic (API-managed) zone's primary or options
-* [tdns-cli auth zone proxy-key](tdns-cli_auth_zone_proxy-key.md)	 - Show the delegation-sync-proxy UPDATE state and the KEY to publish at the primary
+* [tdns-cli auth zone proxy-key](tdns-cli_auth_zone_proxy-key.md)	 - Show the parentsync-proxy UPDATE state and the KEY to publish at the primary
 * [tdns-cli auth zone readfake](tdns-cli_auth_zone_readfake.md)	 - Create a fake zone from a compiled in string
 * [tdns-cli auth zone reload](tdns-cli_auth_zone_reload.md)	 - Request re-loading a zone
 * [tdns-cli auth zone thaw](tdns-cli_auth_zone_thaw.md)	 - Thaw a zone (i.e. accept DDNS updates to the zone data again)

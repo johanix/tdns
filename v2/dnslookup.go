@@ -190,7 +190,7 @@ func (zd *ZoneData) lookupRRset(qname string, qtype uint16, verbose, wildcards b
 			zd.Logger.Printf("LookupRRset: Error from ChildGlueRRsToAddrs: %v", err)
 			return nil, err
 		}
-		rrset, err = zd.LookupChildRRsetNG(qname, qtype, addrs, verbose)
+		rrset, err = lookupChildRRset(zd, qname, qtype, addrs, verbose)
 		if err != nil {
 			zd.Logger.Printf("LookupRRset: Error from LookupChildRRset: %v", err)
 		}
