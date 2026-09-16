@@ -602,7 +602,7 @@ func checkListeners(cfg *tdns.Config, rep *ccReport) {
 		rep.fail(g, "transports", "listeners.transports is empty",
 			"list at least one of do53, dot, doh, doq")
 	}
-	needCert := false
+	needCert, doh := false, false
 	for _, t := range cfg.Listeners.Transports {
 		lt := strings.ToLower(strings.TrimSpace(t))
 		if !validT[lt] {
@@ -613,7 +613,11 @@ func checkListeners(cfg *tdns.Config, rep *ccReport) {
 		if lt != "do53" {
 			needCert = true
 		}
+		if lt == "doh" {
+			doh = true
+		}
 	}
+	checkDoHPath(cfg, rep, g, doh)
 	if needCert {
 		if cfg.Listeners.CertFile == "" || cfg.Listeners.KeyFile == "" {
 			rep.warn(g, "cert", "dot/doh/doq configured but listeners.certfile/keyfile not set — those listeners will be skipped",
@@ -622,6 +626,23 @@ func checkListeners(cfg *tdns.Config, rep *ccReport) {
 			checkFileExists(rep, g, "certfile", cfg.Listeners.CertFile)
 			checkFileExists(rep, g, "keyfile", cfg.Listeners.KeyFile)
 		}
+	}
+}
+
+// checkDoHPath reports the path the DoH listeners will answer on. An invalid
+// path never gets here: ValidateConfig has already failed on it. A path set
+// with doh not among the transports is most likely a doh left out by
+// mistake, so it warns rather than passing silently.
+func checkDoHPath(cfg *tdns.Config, rep *ccReport, g string, doh bool) {
+	path := cfg.Listeners.DoHPath
+	switch {
+	case doh && path == "":
+		rep.pass(g, "doh-path", fmt.Sprintf("DoH answers on %s (the default)", tdns.DefaultDoHPath))
+	case doh:
+		rep.pass(g, "doh-path", fmt.Sprintf("DoH answers on %s; clients need the full URI template, e.g. https://<host>%s{?dns}", path, path))
+	case path != "":
+		rep.warn(g, "doh-path", fmt.Sprintf("listeners.doh-path %q is set but doh is not in listeners.transports", path),
+			"add doh to listeners.transports, or remove doh-path")
 	}
 }
 
@@ -1186,12 +1207,26 @@ func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, rep *ccReport, 
 			fmt.Sprintf("config listeners.addresses %v differ from running %v", cfg.Listeners.Addresses, resp.Listeners.Addresses),
 			"a `config reload` does not re-open DNS listeners; restart to change listen addresses")
 	}
+	// A server from before doh-path existed reports none, and serves the default.
+	if dohPathOrDefault(cfg.Listeners.DoHPath) != dohPathOrDefault(resp.Listeners.DoHPath) {
+		rep.warn(g, "listeners-doh-path",
+			fmt.Sprintf("config listeners.doh-path %s differs from running %s",
+				dohPathOrDefault(cfg.Listeners.DoHPath), dohPathOrDefault(resp.Listeners.DoHPath)),
+			"a `config reload` does not re-open DNS listeners; restart to change the DoH path")
+	}
 	if resp.ApiServer.ApiKey.Value() != "" && cfg.ApiServer.ApiKey.Value() != "" &&
 		resp.ApiServer.ApiKey.Value() != cfg.ApiServer.ApiKey.Value() {
 		rep.warn(g, "apikey",
 			"apiserver.apikey in the file differs from the running server's apikey",
 			"the running apikey changes only on restart")
 	}
+}
+
+func dohPathOrDefault(path string) string {
+	if path == "" {
+		return tdns.DefaultDoHPath
+	}
+	return path
 }
 
 func correlateZones(role string, cfg *tdns.Config, rep *ccReport, g string) {
