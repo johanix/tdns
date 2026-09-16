@@ -49,6 +49,29 @@ type DsyncApiDelegation struct {
 	RRsets []DsyncApiRRset `json:"rrsets"`
 }
 
+// dsyncApiRRsetsForLog renders a declared delegation as one log value, the
+// same way on both ends of the exchange, so the payload a sender logged and
+// the one its parent received can be compared line for line.
+//
+// Records keep their TTL and class: a class that is not IN is exactly the kind
+// of fault this exists to show. An empty RRset is spelled out, because on this
+// endpoint it means "delete", and a bare [] reads as "nothing".
+func dsyncApiRRsetsForLog(rrsets []DsyncApiRRset) string {
+	parts := make([]string, 0, len(rrsets))
+	for _, set := range rrsets {
+		if len(set.RRs) == 0 {
+			parts = append(parts, fmt.Sprintf("%s %s: delete RRset", set.Owner, set.Type))
+			continue
+		}
+		rrs := make([]string, 0, len(set.RRs))
+		for _, s := range set.RRs {
+			rrs = append(rrs, strings.Join(strings.Fields(s), " "))
+		}
+		parts = append(parts, fmt.Sprintf("%s %s: replace with [%s]", set.Owner, set.Type, strings.Join(rrs, ", ")))
+	}
+	return strings.Join(parts, "; ")
+}
+
 // dsyncApiManagedTypes are the types this endpoint will report and accept.
 //
 // A subset of what a delegation can contain, and deliberately not driven by
@@ -218,6 +241,11 @@ func DsyncApiPostDelegation() func(w http.ResponseWriter, r *http.Request) {
 			dsyncApiError(w, http.StatusBadRequest, "cannot parse request: %v", err)
 			return
 		}
+		// Before any check, so a refusal below can be read against what was
+		// actually asked for rather than reconstructed from the error text.
+		lgDsyncApi.Info("DSYNC API delegation request received",
+			"zone", zd.ZoneName, "child", child, "principal", cred.Principal,
+			"rrsets", dsyncApiRRsetsForLog(req.RRsets))
 
 		// The child in the body must agree with the child in the path, if it
 		// is given at all. Two names that disagree is a client that has built
