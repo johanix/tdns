@@ -354,6 +354,16 @@ func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS 
 // same nil either way, and which of the two it means depends on who filled it
 // in, so the answer is a parameter rather than an inference.
 func CreateChildReplaceUpdateWithDS(parent, child string, newNS, newA, newAAAA, newDS []dns.RR, dsKnown bool) (*dns.Msg, error) {
+	return createChildReplaceUpdate(parent, child, newNS, newA, newAAAA, newDS, dsKnown, nil)
+}
+
+// createChildReplaceUpdate is CreateChildReplaceUpdateWithDS that also deletes
+// the glue of the nameservers the change withdraws (withdrawnGlueOwners).
+//
+// The replace form otherwise deletes glue only for the nameservers it is about
+// to re-add, so a withdrawn nameserver's address records stayed at the parent
+// (#665).
+func createChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS []dns.RR, dsKnown bool, withdrawn []string) (*dns.Msg, error) {
 	if parent == "" {
 		return nil, fmt.Errorf("parent zone name not specified. Terminating")
 	}
@@ -388,6 +398,19 @@ func CreateChildReplaceUpdateWithDS(parent, child string, newNS, newA, newAAAA, 
 	for _, aaaarr := range newAAAA {
 		if dns.IsSubDomain(child, aaaarr.Header().Name) {
 			nsNames[aaaarr.Header().Name] = true
+		}
+	}
+
+	for _, name := range withdrawn {
+		present := false
+		for have := range nsNames {
+			if core.EqualNames(have, name) {
+				present = true
+				break
+			}
+		}
+		if !present {
+			nsNames[name] = true
 		}
 	}
 

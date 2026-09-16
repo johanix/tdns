@@ -3,6 +3,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/miekg/dns"
 )
@@ -43,7 +44,8 @@ func (zd *ZoneData) SendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 	}
 
 	lgDns.Info("SendDelegationUpdate: sending the signed update",
-		"zone", zd.ZoneName, "target", target.Name, "addresses", target.Addresses, "port", target.Port)
+		"zone", zd.ZoneName, "target", target.Name, "addresses", target.Addresses, "port", target.Port,
+		"mode", mode, "update", strings.Join(ZoneUpdateActionsSummary(m.Ns), "; "))
 
 	rcode, ur, err := zd.SendUpdateWithRetry(ctx, smsg, parent, target.Addresses)
 	if err != nil {
@@ -58,9 +60,9 @@ func (zd *ZoneData) SendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 func buildDelegationUpdate(parent, child string, syncstate DelegationSyncStatus, mode string) (*dns.Msg, error) {
 	if mode == UpdateModeReplace {
 		lgDns.Info("SendDelegationUpdate: using replace mode", "zone", child)
-		return CreateChildReplaceUpdateWithDS(parent, child,
+		return createChildReplaceUpdate(parent, child,
 			syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA,
-			syncstate.NewDS, syncstate.NewDSKnown)
+			syncstate.NewDS, syncstate.NewDSKnown, withdrawnGlueOwners(child, syncstate))
 	}
 	lgDns.Info("SendDelegationUpdate: using delta mode", "zone", child)
 	adds := append([]dns.RR{}, syncstate.NsAdds...)

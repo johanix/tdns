@@ -127,6 +127,12 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 				}
 			}
 			lgDns.Warn("sendUpdateWithRetry: parent REFUSED, bounded retry", "attempt", attempt, "ede", ur.EDECode, "edeMsg", ur.EDEMessage)
+			// The EDE is the parent's reason. This error is what the caller
+			// finally reports, so without it a refusal logged only its code
+			// on the retry lines and nothing at all on the outcome.
+			if ur.EDEFound {
+				return false, fmt.Errorf("parent REFUSED the delegation UPDATE (EDE %d: %s)", ur.EDECode, ur.EDEMessage)
+			}
 			return false, fmt.Errorf("parent REFUSED the delegation UPDATE")
 		case dns.RcodeServerFailure:
 			// Transient by definition: the parent failed to process a request

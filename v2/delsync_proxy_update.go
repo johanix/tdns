@@ -436,7 +436,12 @@ func (zd *ZoneData) currentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR
 // no DNSKEY RRset at all is an empty-DS delete (#468); a flags-256 CSK
 // (DNSKEYs present, none SEP) leaves the parent DS alone; SEP keys are
 // restated and ZSKs are not hashed.
-func (zd *ZoneData) proxyReplaceSyncState() DelegationSyncStatus {
+//
+// analysis is the comparison that triggered the sync; only the NS records it
+// saw leave are read from it (proxyRemovedNS). The served zone cannot say
+// that, and without it the replace form never deletes a withdrawn
+// nameserver's glue (#665). nil means nothing was removed.
+func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis) DelegationSyncStatus {
 	newNS, newA, newAAAA, newDS := zd.currentDelegationRRs()
 	return DelegationSyncStatus{
 		ZoneName:   zd.ZoneName,
@@ -446,6 +451,7 @@ func (zd *ZoneData) proxyReplaceSyncState() DelegationSyncStatus {
 		NewAAAA:    newAAAA,
 		NewDS:      newDS,
 		NewDSKnown: !zd.hasDnskeyRRset() || len(newDS) > 0,
+		NsRemoves:  proxyRemovedNS(analysis),
 	}
 }
 
@@ -538,7 +544,7 @@ func proxyUpdateMode(kdb *KeyDB) string {
 // its gate, so it never sends an UPDATE the parent would REFUSE — the check
 // simply happens earlier, and once.
 func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
-	target *DsyncTarget, precomputed *DelegationSyncStatus) (string, error) {
+	target *DsyncTarget, precomputed *DelegationSyncStatus, analysis *ProxyDelegationAnalysis) (string, error) {
 
 	mode := proxyUpdateMode(kdb)
 	var dss DelegationSyncStatus
@@ -556,7 +562,7 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
 			return "delta: parent already in sync; nothing sent", nil
 		}
 	} else {
-		dss = zd.proxyReplaceSyncState()
+		dss = zd.proxyReplaceSyncState(analysis)
 	}
 
 	if err := zd.proxyEnsureParentBootstrap(ctx); err != nil {
@@ -565,6 +571,10 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
 
 	_, rcode, _, uerr := zd.SendDelegationUpdate(ctx, kdb, dss, target, mode)
 	if uerr != nil {
+		// SendDelegationUpdate has logged the update it sent; this is the
+		// outcome, with the parent's reason in err.
+		lgDns.Error("parentsync-proxy: the parent did not accept the delegation UPDATE",
+			"zone", zd.ZoneName, "parent", zd.GetParent(), "mode", mode, "err", uerr)
 		return "", fmt.Errorf("ProxyUpdateParent: send UPDATE to %s: %w", zd.GetParent(), uerr)
 	}
 	msg := fmt.Sprintf("proxied %s UPDATE to parent %s (rcode %s)", mode, zd.GetParent(), dns.RcodeToString[int(rcode)])

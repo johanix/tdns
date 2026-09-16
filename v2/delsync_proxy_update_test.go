@@ -325,7 +325,7 @@ func TestProxyReplaceDSStatementDependsOnTheDnskeyRRsetNotTheSEPBit(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			zd := testZone(t, proxyApiZone, tc.zone)
 			zd.SetParent(parent)
-			dss := zd.proxyReplaceSyncState()
+			dss := zd.proxyReplaceSyncState(nil)
 			if dss.NewDSKnown != tc.wantKnown {
 				t.Errorf("NewDSKnown=%v, want %v", dss.NewDSKnown, tc.wantKnown)
 			}

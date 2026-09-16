@@ -58,6 +58,41 @@ func (zd *ZoneData) declareDelegationFromChild(resp *DelegationSyncStatus) {
 	resp.NewAAAA = copyRRs(newAAAA)
 }
 
+// withdrawnGlueOwners returns the in-bailiwick nameservers a sync status takes
+// out of the delegation: named by an NS in NsRemoves, below the child, and no
+// longer the target of any NS in NewNS. Canonical names, in NsRemoves order.
+//
+// Their glue has to go in the same transaction. The replace forms name only
+// what the child still has, and an owner a replace-form payload does not name
+// is left alone at the parent -- so a withdrawn nameserver's address records
+// stayed behind, and a parent checking coherence refused the whole change
+// (#665). The delta form has always deleted this glue (CreateChildUpdate);
+// this is the same rule for the forms that declare an end state.
+func withdrawnGlueOwners(child string, s DelegationSyncStatus) []string {
+	child = dns.Fqdn(child)
+	kept := map[string]bool{}
+	for _, rr := range s.NewNS {
+		if ns, ok := rr.(*dns.NS); ok {
+			kept[core.CanonicalizeName(dns.Fqdn(ns.Ns))] = true
+		}
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, rr := range s.NsRemoves {
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			continue
+		}
+		name := core.CanonicalizeName(dns.Fqdn(ns.Ns))
+		if !dns.IsSubDomain(child, name) || kept[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
 func copyRRs(in []dns.RR) []dns.RR {
 	if len(in) == 0 {
 		return nil
@@ -370,17 +405,16 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 			if err != nil {
 				lgDns.Warn("DDCNG: nsname of NS has no RRs", "nsname", nsrr.Ns, "ns", nsrr.String())
 			} else if nsowner != nil { // nsowner != nil if the NS is in bailiwick
+				// Copies: these are the served zone's own records (#665).
 				if a_rrset, exists := nsowner.RRtypes.Get(dns.TypeA); exists {
 					for _, rr := range a_rrset.RRs {
-						rr.Header().Class = dns.ClassNONE
-						dss.ARemoves = append(dss.ARemoves, rr)
+						dss.ARemoves = appendRecordOnce(dss.ARemoves, removalOf(rr))
 						dss.InSync = false
 					}
 				}
 				if aaaa_rrset, exists := nsowner.RRtypes.Get(dns.TypeAAAA); exists {
 					for _, rr := range aaaa_rrset.RRs {
-						rr.Header().Class = dns.ClassNONE
-						dss.AAAARemoves = append(dss.AAAARemoves, rr)
+						dss.AAAARemoves = appendRecordOnce(dss.AAAARemoves, removalOf(rr))
 						dss.InSync = false
 					}
 				}
@@ -424,25 +458,27 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 		if err != nil || newowner == nil {
 			lgDns.Warn("DDCNG: in-bailiwick nameserver has no address records in new zone", "ns", nsname)
 			for _, rr := range oldowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs {
-				rr.Header().Class = dns.ClassNONE
-				dss.ARemoves = append(dss.ARemoves, rr)
+				dss.ARemoves = appendRecordOnce(dss.ARemoves, removalOf(rr))
 			}
 			for _, rr := range oldowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs {
-				rr.Header().Class = dns.ClassNONE
-				dss.AAAARemoves = append(dss.AAAARemoves, rr)
+				dss.AAAARemoves = appendRecordOnce(dss.AAAARemoves, removalOf(rr))
 			}
 			continue
 		}
 		diff, adds, removes := core.RRsetDiffer(nsname, newowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs, oldowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs, dns.TypeA, zd.Logger, Globals.Verbose, Globals.Debug)
 		if diff {
 			dss.AAdds = append(dss.AAdds, adds...)
-			dss.ARemoves = append(dss.ARemoves, removes...)
+			for _, rr := range removes {
+				dss.ARemoves = appendRecordOnce(dss.ARemoves, rr)
+			}
 			dss.InSync = false
 		}
 		diff, adds, removes = core.RRsetDiffer(nsname, newowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs, oldowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs, dns.TypeAAAA, zd.Logger, Globals.Verbose, Globals.Debug)
 		if diff {
 			dss.AAAAAdds = append(dss.AAAAAdds, adds...)
-			dss.AAAARemoves = append(dss.AAAARemoves, removes...)
+			for _, rr := range removes {
+				dss.AAAARemoves = appendRecordOnce(dss.AAAARemoves, rr)
+			}
 			dss.InSync = false
 		}
 	}

@@ -167,7 +167,7 @@ func rrsetFor(rrsets []DsyncApiRRset, owner, rrtype string) (DsyncApiRRset, bool
 func TestProxyApiRRsetsAreBuiltFromTheServedZone(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiSignedZone())
 
-	rrsets := zd.proxyApiRRsets()
+	rrsets := zd.proxyApiRRsets(nil)
 	if len(rrsets) == 0 {
 		t.Fatal("no rrsets built from a zone that plainly has a delegation")
 	}
@@ -213,7 +213,7 @@ func TestProxyApiRRsetsAreBuiltFromTheServedZone(t *testing.T) {
 func TestProxyApiRRsetsDeclareEmptyDSWhenTheChildIsUnsigned(t *testing.T) {
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
 
-	rrsets := zd.proxyApiRRsets()
+	rrsets := zd.proxyApiRRsets(nil)
 	ds, ok := rrsetFor(rrsets, proxyApiZone, "DS")
 	if !ok {
 		t.Fatal("no DS rrset for an unsigned child; the parent would keep a DS that makes the child bogus")
@@ -356,7 +356,7 @@ func TestProxyApiDSStatementDependsOnTheDnskeyRRsetNotTheSEPBit(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			zd := testZone(t, proxyApiZone, tc.zone)
-			rrsets := zd.proxyApiRRsets()
+			rrsets := zd.proxyApiRRsets(nil)
 
 			ds, ok := rrsetFor(rrsets, proxyApiZone, "DS")
 			if tc.wantEmpty {
@@ -377,7 +377,7 @@ func TestProxyApiDSStatementDependsOnTheDnskeyRRsetNotTheSEPBit(t *testing.T) {
 
 	// The rest of the delegation goes out either way.
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
-	if _, ok := rrsetFor(zd.proxyApiRRsets(), proxyApiZone, "NS"); !ok {
+	if _, ok := rrsetFor(zd.proxyApiRRsets(nil), proxyApiZone, "NS"); !ok {
 		t.Error("no NS rrset")
 	}
 }

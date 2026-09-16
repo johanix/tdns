@@ -1391,18 +1391,22 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 					if err != nil {
 						lg.Error("ZUCDDNG: NS owner has no RRs", "nsname", nsrr.Ns, "ns", nsrr.String())
 					} else if nsowner != nil { // nsowner != nil if the NS is in bailiwick
+						// Removals are built from copies. These records are
+						// the served zone's own: setting their class here
+						// rewrote the zone, so the update that follows could
+						// no longer find them to delete (#665).
 						if a_rrset, exists := nsowner.RRtypes.Get(dns.TypeA); exists {
 							for _, rr := range a_rrset.RRs {
-								rr.Header().Class = dns.ClassNONE
-								dss.ARemoves = append(dss.ARemoves, rr)
-								ddata.Actions = append(ddata.Actions, rr)
+								gone := removalOf(rr)
+								dss.ARemoves = appendRecordOnce(dss.ARemoves, gone)
+								ddata.Actions = append(ddata.Actions, gone)
 							}
 						}
 						if aaaa_rrset, exists := nsowner.RRtypes.Get(dns.TypeAAAA); exists {
 							for _, rr := range aaaa_rrset.RRs {
-								rr.Header().Class = dns.ClassNONE
-								dss.AAAARemoves = append(dss.AAAARemoves, rr)
-								ddata.Actions = append(ddata.Actions, rr)
+								gone := removalOf(rr)
+								dss.AAAARemoves = appendRecordOnce(dss.AAAARemoves, gone)
+								ddata.Actions = append(ddata.Actions, gone)
 							}
 						}
 					}
@@ -1411,13 +1415,16 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			// Is this a change to glue for a nameserver?
 			for _, nsname := range ddata.BailiwickNS {
 				if core.EqualNames(nsname, ownerName) {
+					// Once: removing a nameserver above already listed its
+					// glue, and an update that also deletes that glue by hand
+					// names the same records a second time.
 					if rrtype == dns.TypeA {
 						dss.InSync = false
-						dss.ARemoves = append(dss.ARemoves, rrcopy)
+						dss.ARemoves = appendRecordOnce(dss.ARemoves, rrcopy)
 						ddata.Actions = append(ddata.Actions, rrcopy)
 					} else if rrtype == dns.TypeAAAA {
 						dss.InSync = false
-						dss.AAAARemoves = append(dss.AAAARemoves, rrcopy)
+						dss.AAAARemoves = appendRecordOnce(dss.AAAARemoves, rrcopy)
 						ddata.Actions = append(ddata.Actions, rrcopy)
 					}
 				}
@@ -1662,9 +1669,12 @@ func computeNewNSFromCurrent(dss *DelegationSyncStatus, currentNS []dns.RR) {
 		dss.NewNS = append(dss.NewNS, dns.Copy(rr))
 	}
 
+	// sameRecord, not dns.IsDuplicate: a removal carries CLASS NONE and the
+	// record it removes is IN, and IsDuplicate compares class. Every removal
+	// used to miss, so the "new" NS set was the current one (#665).
 	for _, remove := range dss.NsRemoves {
 		for i := len(dss.NewNS) - 1; i >= 0; i-- {
-			if dns.IsDuplicate(dss.NewNS[i], remove) {
+			if sameRecord(dss.NewNS[i], remove) {
 				dss.NewNS = append(dss.NewNS[:i], dss.NewNS[i+1:]...)
 				break
 			}
@@ -1713,12 +1723,13 @@ func computeNewGlue(dss *DelegationSyncStatus, zoneName string, ddata *Delegatio
 		}
 	}
 
-	// Apply removes to current glue
+	// Apply removes to current glue. sameRecord for the same reason as the NS
+	// set above: a removal is CLASS NONE.
 	for _, remove := range dss.ARemoves {
 		nsname := remove.Header().Name
 		if glue, exists := current_a_glue[nsname]; exists {
 			for i := len(glue) - 1; i >= 0; i-- {
-				if dns.IsDuplicate(glue[i], remove) {
+				if sameRecord(glue[i], remove) {
 					glue = append(glue[:i], glue[i+1:]...)
 					current_a_glue[nsname] = glue
 					break
@@ -1730,7 +1741,7 @@ func computeNewGlue(dss *DelegationSyncStatus, zoneName string, ddata *Delegatio
 		nsname := remove.Header().Name
 		if glue, exists := current_aaaa_glue[nsname]; exists {
 			for i := len(glue) - 1; i >= 0; i-- {
-				if dns.IsDuplicate(glue[i], remove) {
+				if sameRecord(glue[i], remove) {
 					glue = append(glue[:i], glue[i+1:]...)
 					current_aaaa_glue[nsname] = glue
 					break
@@ -1931,6 +1942,29 @@ func apexNSReplacementRecords(actions []dns.RR, zone string) []dns.RR {
 		return newNS
 	}
 	return nil
+}
+
+// removalOf returns a CLASS NONE copy of rr: the form a delete-RR takes in an
+// update, built without touching rr itself.
+//
+// The records being removed are usually the served zone's own, read straight
+// out of its RRsets. Setting the class on those in place changed what the zone
+// served, and made the update that followed unable to delete them (#665).
+func removalOf(rr dns.RR) dns.RR {
+	gone := dns.Copy(rr)
+	gone.Header().Class = dns.ClassNONE
+	return gone
+}
+
+// appendRecordOnce appends rr unless the list already holds the same record,
+// class and TTL aside.
+func appendRecordOnce(list []dns.RR, rr dns.RR) []dns.RR {
+	for _, have := range list {
+		if sameRecord(have, rr) {
+			return list
+		}
+	}
+	return append(list, rr)
 }
 
 // rrPresentIn reports whether rr appears in the list, comparing rdata rather
