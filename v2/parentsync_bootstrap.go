@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -54,9 +55,19 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 		return
 	}
 
+	// One poll per key, shared with the tdns-auth post-bootstrap poll.
+	id := childKeyVerificationID(keyName, keyid)
+	if _, running := childKeyStatePolls.LoadOrStore(id, struct{}{}); running {
+		lgElect.Info("ParentSyncAfterKeyPublication: already polling the parent for this key",
+			"zone", zone, "keyid", keyid)
+		return
+	}
+	defer childKeyStatePolls.Delete(id)
+
 	syncErr := conf.pollParentKeyState(ctx, parentKeyStatePoll{
-		zone:  zone,
-		keyid: keyid,
+		zone:                      zone,
+		keyid:                     keyid,
+		syncDelegationWhenTrusted: true,
 		query: func(ctx context.Context) (*edns0.KeyStateOption, bool, error) {
 			return QueryParentKeyState(ctx, kdb, imr, keyName, keyid)
 		},
@@ -74,11 +85,94 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 	}
 }
 
+// childKeyStatePolls holds the child keys a KeyState poll of the parent is
+// running for in this process, so that there is at most one per key: the
+// agent's (ParentSyncAfterKeyPublication) or the tdns-auth post-bootstrap one
+// (pollAfterAcceptedBootstrap). Keyed like childKeyVerifications.
+var childKeyStatePolls sync.Map
+
+// startChildKeyStatePoll runs poll in its own goroutine, unless a poll for
+// zone's key keyid is already running. It returns a channel closed when the
+// goroutine exits, or nil when none was started.
+func startChildKeyStatePoll(zone string, keyid uint16, poll func()) <-chan struct{} {
+	id := childKeyVerificationID(zone, keyid)
+	if _, running := childKeyStatePolls.LoadOrStore(id, struct{}{}); running {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer childKeyStatePolls.Delete(id)
+		poll()
+	}()
+	return done
+}
+
+// pollAfterAcceptedBootstrap polls the parent's KeyState after it accepted a
+// tdns-auth child's bootstrap ceremony, the way an agent polls after
+// publishing its key (#677). A failed verification then leads to a
+// re-bootstrap on the child's schedule, not to silence.
+//
+// The key is the zone's first active SIG(0) key, the one the ceremony sent
+// (bootstrapSig0KeyWithParent). The ceremony has been sent, so a parent that
+// still does not know the key is polled again, not bootstrapped again. Unlike
+// the agent, this poll does not start a delegation sync when the key is
+// trusted: the ceremony runs at every zone load, and so does this poll.
+func (conf *Config) pollAfterAcceptedBootstrap(ctx context.Context, kdb *KeyDB, zd *ZoneData, algorithm uint8) <-chan struct{} {
+	imr := conf.Internal.ImrEngine
+	if imr == nil || kdb == nil {
+		lgElect.Warn("pollAfterAcceptedBootstrap: no IMR or keystore; not polling the parent",
+			"zone", zd.ZoneName)
+		return nil
+	}
+	sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+	if err != nil || sak == nil || len(sak.Keys) == 0 {
+		lgElect.Warn("pollAfterAcceptedBootstrap: no active SIG(0) key to poll the parent about",
+			"zone", zd.ZoneName, "err", err)
+		return nil
+	}
+	keyName := zd.ZoneName
+	keyid := sak.Keys[0].KeyRR.KeyTag()
+
+	done := startChildKeyStatePoll(keyName, keyid, func() {
+		err := conf.pollParentKeyState(ctx, parentKeyStatePoll{
+			zone:         ZoneName(keyName),
+			keyid:        keyid,
+			bootstrapped: true,
+			query: func(ctx context.Context) (*edns0.KeyStateOption, bool, error) {
+				return QueryParentKeyState(ctx, kdb, imr, keyName, keyid)
+			},
+			record: func(state uint8) { UpdateParentState(kdb, keyName, keyid, state) },
+			bootstrap: func(ctx context.Context) error {
+				return BootstrapWithParent(ctx, ZoneName(keyName), keyName, algorithm)
+			},
+			pollDelay:        delegationSyncInitialDelay,
+			wait:             waitOrDone,
+			reBootstrapDelay: childReBootstrapDelay,
+		})
+		if err != nil {
+			lgElect.Warn("pollAfterAcceptedBootstrap: gave up polling the parent",
+				"zone", keyName, "keyid", keyid, "err", err)
+		}
+	})
+	if done == nil {
+		lgElect.Debug("pollAfterAcceptedBootstrap: already polling the parent for this key",
+			"zone", keyName, "keyid", keyid)
+	}
+	return done
+}
+
 // parentKeyStatePoll is what pollParentKeyState needs from the outside world,
 // injected so a test can play the parent.
 type parentKeyStatePoll struct {
 	zone  ZoneName
 	keyid uint16
+	// bootstrapped: the ceremony has already been sent, so a parent that does
+	// not know the key yet is polled again rather than bootstrapped again.
+	bootstrapped bool
+	// syncDelegationWhenTrusted enqueues a delegation sync once the parent
+	// trusts the key.
+	syncDelegationWhenTrusted bool
 	// query asks the parent for our key's state; authenticated says whether
 	// the answer was.
 	query func(ctx context.Context) (ks *edns0.KeyStateOption, authenticated bool, err error)
@@ -105,7 +199,7 @@ type parentKeyStatePoll struct {
 // verify again, and poll again, up to childReBootstrapRounds times.
 func (conf *Config) pollParentKeyState(ctx context.Context, p parentKeyStatePoll) error {
 	zone, keyid := p.zone, p.keyid
-	bootstrapped := false
+	bootstrapped := p.bootstrapped
 	for round := 0; ; round++ {
 		validationFailed := false
 		syncErr := retryWithBackoff(ctx, delegationSyncMaxRetries, p.pollDelay, func(attempt int) (bool, error) {
@@ -165,7 +259,7 @@ func (conf *Config) onParentKeyState(ctx context.Context, p parentKeyStatePoll, 
 		// Post-bootstrap: verify delegation data is in sync with parent.
 		// Enqueue EXPLICIT-SYNC-DELEGATION which queries the parent and
 		// only syncs if there is a real delta.
-		if delsyncq := conf.Internal.DelegationSyncQ; delsyncq != nil {
+		if delsyncq := conf.Internal.DelegationSyncQ; delsyncq != nil && p.syncDelegationWhenTrusted {
 			zd, exists := Zones.Get(string(zone))
 			if exists {
 				lgElect.Info("ParentSyncAfterKeyPublication: enqueuing post-bootstrap delegation verification", "zone", zone)
