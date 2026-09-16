@@ -208,9 +208,17 @@ func parseKeygenAlgorithm(algstr string, defaultAlg uint8) (uint8, error) {
 }
 
 func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
+	_, _, err := zd.delegationSyncSetup(ctx, kdb)
+	return err
+}
+
+// delegationSyncSetup is DelegationSyncSetup that also reports whether the
+// parent accepted the bootstrap ceremony (bootstrapAccepted), and the key
+// algorithm it was run with.
+func (zd *ZoneData) delegationSyncSetup(ctx context.Context, kdb *KeyDB) (accepted bool, alg uint8, err error) {
 	if !zd.Options[OptParentSync] {
 		lgDns.Debug("DelegationSyncSetup: zone does not have child-side delegation sync enabled, skipping", "zone", zd.ZoneName)
-		return nil
+		return false, 0, nil
 	}
 
 	// algstr := ParentSyncConfig().Update.Keygen.Algorithm
@@ -219,15 +227,25 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm(ParentSyncConfig().Update.Keygen.Algorithm, dns.ED25519)
+	alg, err = parseKeygenAlgorithm(ParentSyncConfig().Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("DelegationSyncSetup: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
-		return err
+		return false, 0, err
 	}
 
 	// EnsureApexKEY (PublishKeyRRs via Sig0KeyPreparation) then the ceremony.
 	// The proxy path uses a no-op ensurer: the operator publishes the KEY.
-	return zd.finishDelegationSyncSetup(zd.bootstrapSig0Key(ctx, alg, authApexKEY{zd: zd, kdb: kdb, alg: alg}))
+	msg, ur, berr := zd.bootstrapSig0Key(ctx, alg, authApexKEY{zd: zd, kdb: kdb, alg: alg})
+	return bootstrapAccepted(ur, berr), alg, zd.finishDelegationSyncSetup(msg, ur, berr)
+}
+
+// bootstrapAccepted reports whether the bootstrap ceremony reached the parent
+// and was answered NOERROR: the parent has stored the key, untrusted, and is
+// verifying it. The error comes first on purpose. A ceremony that was never
+// sent (a manual parent, a failed lookup) returns an empty UpdateResult, whose
+// zero Rcode reads as NOERROR.
+func bootstrapAccepted(ur UpdateResult, err error) bool {
+	return err == nil && ur.Rcode == dns.RcodeSuccess
 }
 
 func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
@@ -820,9 +838,28 @@ func proxyStartupReconcile(ctx context.Context, zd *ZoneData, kdb *KeyDB, notify
 func handleDelegationSyncSetup(ctx context.Context, conf *Config, delsyncq chan DelegationSyncRequest,
 	kdb *KeyDB, zd *ZoneData, ds DelegationSyncRequest) {
 
-	_ = handleDelegationSyncSetupWith(ctx, conf, delsyncq, ds, func() error {
-		return zd.DelegationSyncSetup(ctx, kdb)
-	})
+	_ = handleDelegationSyncSetupWith(ctx, conf, delsyncq, ds, setupThenPoll(
+		func() (bool, uint8, error) { return zd.delegationSyncSetup(ctx, kdb) },
+		func(alg uint8) { conf.pollAfterAcceptedBootstrap(ctx, kdb, zd, alg) },
+	))
+}
+
+// setupThenPoll runs the setup and, when the parent accepted the bootstrap
+// ceremony, starts the post-bootstrap KeyState poll. It returns the setup's
+// error for the SETUP arm to act on.
+//
+// Only an accepted ceremony starts the poll. The parent answers NOERROR as soon
+// as it has stored the key, and decides trust afterwards, by a verification
+// that may fail (#677). Nothing else would tell a tdns-auth child: it would
+// hear the failure only on its next delegation UPDATE, or its next reload.
+func setupThenPoll(setup func() (accepted bool, alg uint8, err error), poll func(alg uint8)) func() error {
+	return func() error {
+		accepted, alg, err := setup()
+		if accepted {
+			poll(alg)
+		}
+		return err
+	}
 }
 
 // handleDelegationSyncSetupWith is the decision half of the SETUP arm: given an
