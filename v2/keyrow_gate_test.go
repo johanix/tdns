@@ -19,8 +19,9 @@ import (
 // This scans source, so it holds for code that no test exercises.
 func TestKeystoreStateWritesLiveInTheOneWriteFunction(t *testing.T) {
 	allowed := map[string]string{
-		"setKeyRowTx":    "the one UPDATE of state",
-		"insertKeyRowTx": "the one INSERT",
+		"setKeyRowTx":     "the one UPDATE of state (a wrapper of setKeyRowTxOpts)",
+		"setKeyRowTxOpts": "the one UPDATE of state",
+		"insertKeyRowTx":  "the one INSERT",
 		// The data migrations run before the flag backfill that follows them
 		// in the same open, so a state they rewrite gets its flags derived
 		// again; they cannot use the write function, which needs a KeyDB.

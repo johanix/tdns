@@ -1286,7 +1286,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// allow-child-updates is set without a delegationbackend, and a
 		// secondary configured that way should get the soft warning and keep
 		// serving, not be taken out of service. Running here also means the
-		// delegation-sync setup block further down sees delegation-sync-parent
+		// delegation-sync setup block further down sees childsync
 		// already false, so SetupZoneSync never registers for a secondary and
 		// the DSYNC vector is closed at parse time with no extra wiring.
 		//

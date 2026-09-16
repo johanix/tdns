@@ -296,6 +296,7 @@ listeners:
    #      dot: [ "853" ]
    #      doh: [ "443" ]
    #      doq: [ "853" ]
+   #   doh-path: /dns-query   # the one path DoH answers on; this is the default
    certfile:  {{CERT}}
    keyfile:   {{KEY}}
    # The agent's in-process resolver is INTERNAL and binds no service
@@ -328,37 +329,37 @@ imrengine:
    # In a lab without a complete DNSSEC chain, relax validation:
    #   require-dnssec-validation: false
 
-# Delegation sync, CHILD side. The agent is never a delegation-sync parent, so
-# there is no policies:/parent: here — those live on the tdns-auth parent (see
-# its MWE, and guide/special-features.md).
+# parentsync: what a parentsync zone does towards its parent. The agent is
+# never a childsync zone, so there is no childsync: block (or its policies:)
+# here — those live on the tdns-auth parent (see its MWE, and
+# guide/special-features.md).
 #
 # This block is what makes the proxy-secondary template below actually work:
 # the proxy sends to the parent AS the child, so it walks the same plan a
-# delegation-sync child does and reads the same setting. With child.schemes
+# parentsync zone does and reads the same setting. With parentsync.schemes
 # empty, every transport is skipped and the zone forwards nothing — it still
 # loads and serves, so the symptom is silence, not an error.
-delegationsync:
-   child:
-      # Transports to try toward the parent, in the operator's preference
-      # order. The parent must advertise the scheme in its DSYNC RRset for it
-      # to be used.
-      schemes: [ notify, update ]
-      update:
-         keygen:
-            algorithm: ED25519
-         bootstrap:
-            # SIG(0) bootstrap methods this child will let a parent use,
-            # intersected with the parent's advertised set at run time; the
-            # strongest survivor wins. An empty intersection refuses rather
-            # than silently downgrading.
-            #
-            # at-ns is listed but is dropped automatically for every zone this
-            # agent proxies for: it needs the child's KEY published at
-            # _sig0key.<child>._signal.<ns>, and those names live in the
-            # NAMESERVER's zone, which a secondary does not control. Listing it
-            # costs such a zone nothing and keeps this file usable if the agent
-            # later serves a zone that can signal.
-            methods: [ at-apex, at-ns ]
+parentsync:
+   # Transports to try toward the parent, in the operator's preference
+   # order. The parent must advertise the scheme in its DSYNC RRset for it
+   # to be used.
+   schemes: [ notify, update ]
+   update:
+      keygen:
+         algorithm: ED25519
+      bootstrap:
+         # SIG(0) bootstrap methods this child will let a parent use,
+         # intersected with the parent's advertised set at run time; the
+         # strongest survivor wins. An empty intersection refuses rather
+         # than silently downgrading.
+         #
+         # at-ns is listed but is dropped automatically for every zone this
+         # agent proxies for: it needs the child's KEY published at
+         # _sig0key.<child>._signal.<ns>, and those names live in the
+         # NAMESERVER's zone, which a secondary does not control. Listing it
+         # costs such a zone nothing and keeps this file usable if the agent
+         # later serves a zone that can signal.
+         methods: [ at-apex, at-ns ]
 
 # Zone templates. Both are SECONDARY templates — see the note at the top.
 # The commented-out zone below uses the first one.

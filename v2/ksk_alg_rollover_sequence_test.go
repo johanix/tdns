@@ -431,6 +431,7 @@ func TestKT14DeferWithoutDnskeyTTL(t *testing.T) {
 func TestKT8SwappedDSConfirm(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	pol := ktSequencePolicy(RolloverMethodMultiDS)
+	ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol) // the keys get their ds from the loaded zone's model
 	a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
 	b := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.RSASHA256)
 	all, _, _, _, err := ComputeTargetDSSetForZone(kdb, ktAlgZone, uint8(dns.SHA256), pol)

@@ -171,7 +171,7 @@ orphanprep.example.	3600	IN	KEY	256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzN
 
 // TestSig0KeyPreparationReplacesAnOrphanedKeyAtTheUpdateTarget is the parent
 // path, and it is the shape the bug was originally found in: on a
-// delegation-sync parent the name is the DSYNC UPDATE target, not the apex.
+// childsync zone the name is the DSYNC UPDATE target, not the apex.
 //
 // Production threads one `name` through verify, generate and publish, so the
 // logic is shared -- but the apex is the easy case, and it was the only one

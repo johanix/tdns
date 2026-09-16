@@ -289,7 +289,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 		}
 
 		if CaseFoldContains(conf.Listeners.Transports, "doh") {
-			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), certFile, keyFile, authDNSHandler)
+			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), conf.Listeners.DoHPath, certFile, keyFile, authDNSHandler)
 			if err != nil {
 				lgDns.Error("Failed to setup the DoH server", "err", err)
 			}

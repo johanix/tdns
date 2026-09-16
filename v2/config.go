@@ -249,6 +249,13 @@ type ListenersConf struct {
 	// certfile+keyfile and take their ports from ports: below.
 	Transports []string          `yaml:"transports" mapstructure:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"`
 	Ports      ListenerPortsConf `yaml:"ports" mapstructure:"ports"`
+	// DoHPath is the one HTTP path the doh listeners answer on (#666);
+	// every other path is 404. Empty is DefaultDoHPath, /dns-query, which
+	// is what DoH clients assume when given only a host. Nothing advertises
+	// another path, so each client needs the full URI template. A literal
+	// path, matched exactly: see validateDoHPath for what it may contain.
+	// Like the rest of this block, a change needs a restart.
+	DoHPath string `yaml:"doh-path,omitempty" mapstructure:"doh-path"`
 	// NOTE: there is deliberately NO listener-level client-cert policy here.
 	// Transfer authentication is per-zone (downstream-auth: + peers
 	// tls-identity, enforced at transfer time); dropping non-TLS traffic is

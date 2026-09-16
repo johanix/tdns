@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * delegation-sync-proxy, API path. Everything here is post-network: discovery
+ * parentsync-proxy, API path. Everything here is post-network: discovery
  * and the POST are exercised on the testbed (and by dsync_api_client_test.go
  * against a real listener). What is unit-tested is the logic that decides WHAT
  * gets sent and WHETHER a credential exists to send it with -- which is where

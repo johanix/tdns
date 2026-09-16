@@ -30,7 +30,7 @@ package tdns
 //
 // The hooks:
 //
-//   - delegation-sync-proxy: an agent secondary forwards NOTIFY(CDS/CSYNC) to
+//   - parentsync-proxy: an agent secondary forwards NOTIFY(CDS/CSYNC) to
 //     the parent when a relevant RRset changes in an incoming transfer. The
 //     OnZonePreRefresh callback diffs old vs new into zd.ProxyRefreshAnalysis
 //     and the OnZonePostRefresh callback acts on it (P-3). Mirrors the tdns-mp

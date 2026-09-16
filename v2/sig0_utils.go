@@ -260,6 +260,18 @@ func GenerateKeyMaterial(owner string, rrtype uint16, alg uint8, keytype string)
 //
 //	flags field, which is not yet set here.
 func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, alg uint8, keytype string, tx *Tx) (*PrivateKeyCache, string, error) {
+	return kdb.generateKeypair(owner, creator, state, rrtype, alg, keytype, nil, tx)
+}
+
+// GenerateKeypairWithColumns is GenerateKeypair for a DNSKEY whose row
+// columns (pub, sign, ds) the caller names: one INSERT carries state and
+// columns, so an owner's mint (key lifecycle ownership design §3.2, Q4)
+// is one write and never a row the store shaped by its own table.
+func (kdb *KeyDB) GenerateKeypairWithColumns(owner, creator, state string, alg uint8, keytype string, cols KeyRowFlags, tx *Tx) (*PrivateKeyCache, string, error) {
+	return kdb.generateKeypair(owner, creator, state, dns.TypeDNSKEY, alg, keytype, &cols, tx)
+}
+
+func (kdb *KeyDB) generateKeypair(owner, creator, state string, rrtype uint16, alg uint8, keytype string, cols *KeyRowFlags, tx *Tx) (*PrivateKeyCache, string, error) {
 	pkc, err := GenerateKeyMaterial(owner, rrtype, alg, keytype)
 	if err != nil {
 		return nil, "", err
@@ -308,9 +320,18 @@ INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator,
 			Zone: owner, State: state, Keyid: pkc.KeyId, Flags: uint16(flags),
 			Algorithm: dns.AlgorithmToString[pkc.Algorithm], Creator: creator,
 			PrivateKey: pkc.PrivateKey, KeyRR: pkc.DnskeyRR.String(), Replace: true,
+			RowFlags: cols,
 		}
-		if state == DnskeyStateActive {
-			row.ActiveAt = time.Now().UTC().Format(time.RFC3339)
+		// the stamp the state owns: a key minted into a state carries the
+		// time it entered it, as a transition there would have stamped it
+		now := time.Now().UTC().Format(time.RFC3339)
+		switch state {
+		case DnskeyStateActive:
+			row.ActiveAt = now
+		case DnskeyStatePublished, DnskeyStateDsPublished:
+			row.PublishedAt = now
+		case DnskeyStateRetired:
+			row.RetiredAt = now
 		}
 		err = insertKeyRowTx(tx, row)
 	}

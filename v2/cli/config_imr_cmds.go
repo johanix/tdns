@@ -194,7 +194,7 @@ func checkImrEngine(cfg *tdns.Config, rep *ccReport) {
 	if len(cfg.Listeners.Transports) == 0 {
 		rep.fail(g, "transports", "listeners.transports is empty", "list at least one of do53, dot, doh, doq")
 	}
-	needCert := false
+	needCert, doh := false, false
 	for _, t := range cfg.Listeners.Transports {
 		lt := lc(t)
 		if !validT[lt] {
@@ -204,7 +204,11 @@ func checkImrEngine(cfg *tdns.Config, rep *ccReport) {
 		if lt != "do53" {
 			needCert = true
 		}
+		if lt == "doh" {
+			doh = true
+		}
 	}
+	checkDoHPath(cfg, rep, g, doh)
 	if needCert {
 		if cfg.Listeners.CertFile == "" || cfg.Listeners.KeyFile == "" {
 			rep.warn(g, "cert", "dot/doh/doq configured but listeners.certfile/keyfile not set — those listeners will be skipped",
@@ -418,6 +422,7 @@ listeners:
    #      dot: [ 853 ]
    #      doh: [ 443 ]
    #      doq: [ 853 ]
+   #   doh-path: /dns-query   # the one path DoH answers on; this is the default
    # certfile:  {{CERT}}
    # keyfile:   {{KEY}}
 

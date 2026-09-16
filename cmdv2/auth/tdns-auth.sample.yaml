@@ -68,6 +68,10 @@ listeners:
       doq:   [ 853 ]
       dot:   [ 853 ]
       doh:   [ 443 ]
+   # The one HTTP path DoH answers on; every other path is 404. Default
+   # /dns-query. Nothing advertises the path, so clients need the full URI
+   # template, e.g. https://ns.example/dns-query{?dns}.
+   # doh-path:  /dns-query
    # certfile/keyfile are required for dot, doh and doq. If either is empty
    # those listeners are not started (do53 is unaffected).
    certfile:  /etc/tdns/certs/servers/localhost..crt

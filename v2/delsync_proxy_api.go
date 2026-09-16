@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * delegation-sync-proxy, API path: forwarding a child's delegation to a parent
+ * parentsync-proxy, API path: forwarding a child's delegation to a parent
  * that advertises the DSYNC API scheme (docs/2026-08-11-dsync-api-scheme.md),
  * on behalf of a DSYNC-unaware primary.
  *
@@ -117,7 +117,7 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 	if err != nil {
 		return "", fmt.Errorf("zone %s: %v", zd.ZoneName, err)
 	}
-	lgDns.Info("delegation-sync-proxy: DSYNC API endpoint discovered", "zone", zd.ZoneName,
+	lgDns.Info("parentsync-proxy: DSYNC API endpoint discovered", "zone", zd.ZoneName,
 		"parent", parent, "target", endpoint.Target, "endpoint", endpoint.Url,
 		"dialect", endpoint.Dialect, "addrs", endpoint.Addrs)
 
@@ -135,7 +135,7 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 
 	msg := fmt.Sprintf("proxied delegation to parent %s via the DSYNC API scheme (%d RRset%s)",
 		parent, len(rrsets), plural(len(rrsets)))
-	lgDns.Info("delegation-sync-proxy: "+msg, "zone", zd.ZoneName, "parent", parent)
+	lgDns.Info("parentsync-proxy: "+msg, "zone", zd.ZoneName, "parent", parent)
 	return msg, nil
 }
 
@@ -177,7 +177,7 @@ func (zd *ZoneData) proxyApiRRsets() []DsyncApiRRset {
 	})
 
 	if !zd.hasDnskeyRRset() {
-		lgDns.Info("delegation-sync-proxy: child publishes no DNSKEY RRset;"+
+		lgDns.Info("parentsync-proxy: child publishes no DNSKEY RRset;"+
 			" declaring an empty DS so the parent stops making it bogus", "zone", zd.ZoneName)
 		rrsets = append(rrsets, DsyncApiRRset{
 			Owner: dns.Fqdn(zd.ZoneName),

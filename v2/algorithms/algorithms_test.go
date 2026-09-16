@@ -16,6 +16,7 @@ func TestBuiltinsPreRegistered(t *testing.T) {
 		{dns.ECDSAP256SHA256, "ECDSAP256SHA256"},
 		{dns.ECDSAP384SHA384, "ECDSAP384SHA384"},
 		{dns.ED25519, "ED25519"},
+		{dns.ED448, "ED448"},
 	} {
 		num, ok := AlgorithmNumber(want.name)
 		if !ok {
@@ -41,7 +42,7 @@ func TestBuiltinsPreRegistered(t *testing.T) {
 func TestSupportedSIG0_IncludesBuiltins(t *testing.T) {
 	got := SupportedSIG0()
 	wantContains := []string{"RSASHA256", "RSASHA512", "ECDSAP256SHA256",
-		"ECDSAP384SHA384", "ED25519"}
+		"ECDSAP384SHA384", "ED25519", "ED448"}
 	for _, w := range wantContains {
 		if !contains(got, w) {
 			t.Errorf("SupportedSIG0() = %v; missing %q", got, w)
@@ -52,7 +53,7 @@ func TestSupportedSIG0_IncludesBuiltins(t *testing.T) {
 func TestSupportedDNSSEC_IncludesBuiltins(t *testing.T) {
 	got := SupportedDNSSEC()
 	wantContains := []string{"RSASHA256", "RSASHA512", "ECDSAP256SHA256",
-		"ECDSAP384SHA384", "ED25519"}
+		"ECDSAP384SHA384", "ED25519", "ED448"}
 	for _, w := range wantContains {
 		if !contains(got, w) {
 			t.Errorf("SupportedDNSSEC() = %v; missing %q", got, w)
@@ -220,4 +221,16 @@ func contains(xs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// ED448 is not a miekg/dns built-in: it has to be registered for real, or it
+// is listed as usable and fails at the first key.
+func TestED448RegisteredForReal(t *testing.T) {
+	if _, ok := CapsReal(dns.ED448); !ok {
+		t.Fatal("CapsReal(ED448) not registered as real")
+	}
+	k := &dns.DNSKEY{Hdr: dns.RR_Header{Name: "example.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET}, Flags: 257, Protocol: 3, Algorithm: dns.ED448}
+	if _, err := k.Generate(0); err != nil {
+		t.Fatalf("ED448 is recorded but not wired into miekg/dns: %v", err)
+	}
 }

@@ -33,7 +33,7 @@ Two differences are worth knowing now:
 
 ## The `parentsync:` block
 
-An agent is never a delegation-sync parent, so it reads `parentsync:` and
+An agent is never a childsync zone, so it reads `parentsync:` and
 nothing else of the pair: `childsync:` — including `childsync.policies:` — and
 the per-zone `delegationpolicy:` reference that selects a policy all belong on
 the tdns-auth parent
@@ -75,7 +75,7 @@ zone nothing.
 
 **`parentsync.schemes` governs the proxy too, and this is the trap.** A zone with
 `parentsync-proxy` sends to the parent *as the child*, so it walks the same
-plan a delegation-sync child does and reads the same setting. With `schemes:`
+plan a parentsync zone does and reads the same setting. With `schemes:`
 empty, every transport is skipped — and the zone is not quarantined. It loads,
 serves, and forwards nothing, so the only symptom is silence.
 `tdns-cli agent config check` fails on exactly this, and the config written by
