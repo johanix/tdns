@@ -23,10 +23,19 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, c
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
 
 	lgDns.Info("DnsEngine: DoH addresses", "addrs", dohaddrs)
+	// This engine's own mux, never http.DefaultServeMux. The default mux is
+	// process-wide: whatever registers on it is served by every server that
+	// leaves Handler nil. net/http/pprof registers /debug/pprof/ there from
+	// its init(), and this package imports it for service.pprof-address, so a
+	// nil Handler put the profiler on the public DoH port, unauthenticated,
+	// whether or not pprof-address was set. A second registration of
+	// /dns-query on the default mux also panics, so two DoH engines could not
+	// share a process.
+	mux := http.NewServeMux()
 	// The closure captures ourDNSHandler (a function parameter) and conf (a pointer).
 	// Both are set once at startup before any HTTP requests are served, so there is
 	// no data race despite the closure being invoked concurrently by the HTTP server.
-	http.HandleFunc("/dns-query", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/dns-query", func(w http.ResponseWriter, r *http.Request) {
 		var dnsQuery []byte
 		var err error
 		msg := new(dns.Msg)
@@ -95,7 +104,7 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, c
 			hostport := net.JoinHostPort(addr, port)
 			srv := &http.Server{
 				Addr:    hostport,
-				Handler: nil,
+				Handler: mux,
 				TLSConfig: &tls.Config{
 					MinVersion: tls.VersionTLS13,
 				},
