@@ -1132,8 +1132,14 @@ func maxInt(a, b int) int {
 
 // expandServerMapWithMissingNS resolves A/AAAA records for any NS names in
 // the qname's closest known zone that are missing from serverMap (or
-// present but with no addresses). Returns the number of addresses added
-// across all NS names.
+// present but with no addresses). Returns the number of servers that now
+// have addresses in serverMap and had none there before.
+//
+// Servers are counted, not addresses. AuthServer instances are shared across
+// zones, so a nameserver can already carry addresses when it is put into this
+// map. Counting new addresses reported 0 for exactly that server, the caller
+// gave up without retrying, and the query ended with no auth-server attempts
+// although the map now held a usable server (#675).
 //
 // This is the fallback path for the case where the parent zone provided
 // glue only for in-bailiwick NS names but every in-bailiwick server is
@@ -1170,14 +1176,14 @@ func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, 
 		}
 		nsname := dns.Fqdn(ns.Ns)
 		srv, present := serverMap[cache.ServerKey(nsname)]
-		if present && len(srv.Addrs) > 0 {
+		if present && len(srv.GetAddrs()) > 0 {
 			continue // already have addresses, nothing to do
 		}
 		if srv == nil {
 			srv = imr.Cache.GetOrCreateAuthServer(nsname)
 			serverMap[cache.ServerKey(nsname)] = srv
 		}
-		before := len(srv.Addrs)
+		before := len(srv.GetAddrs())
 		for _, atype := range []uint16{dns.TypeA, dns.TypeAAAA} {
 			select {
 			case <-ctx.Done():
@@ -1208,10 +1214,13 @@ func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, 
 				srv.AddAddr(addrStr)
 			}
 		}
-		added += len(srv.Addrs) - before
-		if Globals.Debug && len(srv.Addrs) > before {
+		addrs := srv.GetAddrs()
+		if len(addrs) > 0 {
+			added++
+		}
+		if Globals.Debug && len(addrs) > before {
 			lgDns.Debug("expandServerMapWithMissingNS: resolved addresses for previously-unresolved NS",
-				"ns", nsname, "zone", zonename, "addresses", srv.Addrs)
+				"ns", nsname, "zone", zonename, "addresses", addrs)
 		}
 	}
 	return added
