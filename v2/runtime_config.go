@@ -33,6 +33,12 @@ type RuntimeConfig struct {
 	TransferTimeout  int  // service.transfertimeout (seconds)
 	ResignerInterval int  // resignerengine.interval
 	ServiceDebug     bool // service.debug
+
+	// The scanner's poll settings, read by ScannerEngine on every tick
+	// (scanner_poll.go).
+	ScannerPollEnabled     bool // scanner.poll.enabled
+	ScannerPollBootstrap   bool // scanner.poll.bootstrap
+	ScannerPollConcurrency int  // scanner.poll.concurrency
 }
 
 // liveConfig holds the current published snapshot. Seeded with an empty snapshot
@@ -68,6 +74,10 @@ func (conf *Config) buildRuntimeConfig() *RuntimeConfig {
 		TransferTimeout:  viper.GetInt("service.transfertimeout"),
 		ResignerInterval: viper.GetInt("resignerengine.interval"),
 		ServiceDebug:     viper.GetBool("service.debug"),
+
+		ScannerPollEnabled:     viper.GetBool("scanner.poll.enabled"),
+		ScannerPollBootstrap:   viper.GetBool("scanner.poll.bootstrap"),
+		ScannerPollConcurrency: viper.GetInt("scanner.poll.concurrency"),
 	}
 }
 
