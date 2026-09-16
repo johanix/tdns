@@ -740,6 +740,25 @@ func deferSetupRetryAfter(ctx context.Context, delsyncq chan DelegationSyncReque
 		"attempt", ds.Attempt+1, "of", delegationSyncMaxRetries, "delay", delay)
 	next := ds
 	next.Attempt++
+	return requeueSetupAfter(ctx, delsyncq, next, delay)
+}
+
+// nextReBootstrap is the DELEGATION-SYNC-SETUP to enqueue, and when, after
+// the parent reported the key's validation failed; ok is false once the
+// rounds have run out. A round starts with a fresh transient-retry budget.
+func nextReBootstrap(ds DelegationSyncRequest) (next DelegationSyncRequest, delay time.Duration, ok bool) {
+	if ds.ReBootstrapRound >= childReBootstrapRounds {
+		return ds, 0, false
+	}
+	next = ds
+	next.Attempt = 0
+	next.ReBootstrapRound++
+	return next, childReBootstrapDelay(ds.ReBootstrapRound), true
+}
+
+// requeueSetupAfter enqueues next after delay, off the syncher goroutine and
+// cancelled with ctx. The returned channel closes when the worker exits.
+func requeueSetupAfter(ctx context.Context, delsyncq chan DelegationSyncRequest, next DelegationSyncRequest, delay time.Duration) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -872,6 +891,22 @@ func handleDelegationSyncSetupWith(ctx context.Context, conf *Config, delsyncq c
 		}
 		return deferSetupRetry(ctx, delsyncq, ds, "advertisement lookup failed")
 
+	case errors.Is(err, errBootstrapValidationFailed):
+		// The parent looked and did not accept the key, and keeps no state
+		// waiting for us (#677). What it could not find may still appear, so
+		// re-bootstrap later, which has it verify again, a few times.
+		next, delay, ok := nextReBootstrap(ds)
+		if !ok {
+			lgDns.Error("DelegationSyncher: SIG(0) bootstrap gave up; the parent still reports the key's"+
+				" validation failed after every re-bootstrap. Fix the KEY's publication and re-bootstrap",
+				"zone", ds.ZoneName, "rebootstraps", ds.ReBootstrapRound, "err", err)
+			return nil
+		}
+		lgDns.Warn("DelegationSyncher: the parent reports the SIG(0) key's validation failed; will re-bootstrap",
+			"zone", ds.ZoneName, "round", next.ReBootstrapRound, "of", childReBootstrapRounds,
+			"delay", delay, "err", err)
+		return requeueSetupAfter(ctx, delsyncq, next, delay)
+
 	default:
 		lgDns.Error("DelegationSyncher: error from DelegationSyncSetup, ignoring sync request",
 			"zone", ds.ZoneName, "err", err)
@@ -883,6 +918,12 @@ func handleDelegationSyncSetupWith(ctx context.Context, conf *Config, delsyncq c
 // the parent could not be reached, failed, or is still verifying the key.
 // Retry with backoff rather than treating the attempt as done.
 var errBootstrapTransient = errors.New("the parent's answer to the SIG(0) bootstrap is not final")
+
+// errBootstrapValidationFailed marks a SIG(0) bootstrap the parent refused
+// because its verification of the key already failed (EDE
+// KEY-VALIDATION-FAILED). Final for this attempt; the setup arm re-bootstraps
+// later, a limited number of times.
+var errBootstrapValidationFailed = errors.New("the parent's validation of the SIG(0) key failed")
 
 // bootstrapOutcome turns the parent's answer to the bootstrap UPDATE into an
 // error the setup arm can act on.
@@ -901,8 +942,11 @@ var errBootstrapTransient = errors.New("the parent's answer to the SIG(0) bootst
 //   - the parent requires manual bootstrap (EDE ManualBootstrapRequired):
 //     errBootstrapManual, which the caller already treats as waiting for the
 //     operator, not as an error.
-//   - anything else, including a failed validation and any other refusal: a
-//     plain error. Retrying a verdict only repeats it.
+//   - a failed validation (EDE KeyValidationFailed): errBootstrapValidationFailed.
+//     Final now; the setup arm re-bootstraps later, when what the parent could
+//     not find may have appeared.
+//   - anything else, any other refusal: a plain error. Retrying a verdict only
+//     repeats it.
 func bootstrapOutcome(ur UpdateResult, err error) error {
 	if err != nil {
 		if errors.Is(err, ErrUpdateUnreachable) {
@@ -923,6 +967,8 @@ func bootstrapOutcome(ur UpdateResult, err error) error {
 					errBootstrapTransient, ur.EDECode)
 			case edns0.EDESig0ManualBootstrapRequired:
 				return fmt.Errorf("%w (EDE %d)", errBootstrapManual, ur.EDECode)
+			case edns0.EDESig0KeyValidationFailed:
+				return fmt.Errorf("%w (EDE %d %q)", errBootstrapValidationFailed, ur.EDECode, ur.EDEMessage)
 			}
 		}
 	}
