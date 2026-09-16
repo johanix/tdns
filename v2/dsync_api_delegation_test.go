@@ -234,3 +234,23 @@ func TestDsyncApiPolicyReasonsAreExplained(t *testing.T) {
 		t.Error("an unmapped EDE produced an empty reason")
 	}
 }
+
+// The payload log has to show a withdrawal as a withdrawal, and keep the class:
+// a restated RRset, an emptied one and a record in the wrong class all have to
+// be told apart from the log line alone.
+func TestDsyncApiRRsetsForLog(t *testing.T) {
+	got := dsyncApiRRsetsForLog([]DsyncApiRRset{
+		{Owner: "child.example.", Type: "NS", RRs: []string{
+			"child.example.\t3600\tIN\tNS\tns1.child.example.",
+			"child.example.\t3600\tIN\tNS\tns2.child.example.",
+		}},
+		{Owner: "ns2.child.example.", Type: "A", RRs: nil},
+		{Owner: "ns1.child.example.", Type: "A", RRs: []string{"ns1.child.example.\t3600\tNONE\tA\t192.0.2.1"}},
+	})
+	want := "child.example. NS: replace with [child.example. 3600 IN NS ns1.child.example., child.example. 3600 IN NS ns2.child.example.]; " +
+		"ns2.child.example. A: delete RRset; " +
+		"ns1.child.example. A: replace with [ns1.child.example. 3600 NONE A 192.0.2.1]"
+	if got != want {
+		t.Errorf("dsyncApiRRsetsForLog:\n got  %q\n want %q", got, want)
+	}
+}
