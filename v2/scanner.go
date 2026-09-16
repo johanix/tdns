@@ -1274,7 +1274,10 @@ func (scanner *Scanner) queryCDSAtSignalingNames(ctx context.Context, childZone 
 			}
 			allValidated = false
 		}
-		signalingResults = append(signalingResults, resp.RRset)
+		// Re-owned onto the child before it is compared to anything, or
+		// returned: everything downstream wants the child's owner, not the
+		// signaling one (#688, cdsAtChildOwner).
+		signalingResults = append(signalingResults, cdsAtChildOwner(resp.RRset, childZone))
 		queriedNS++
 	}
 
@@ -1303,4 +1306,40 @@ func (scanner *Scanner) queryCDSAtSignalingNames(ctx context.Context, childZone 
 	}
 
 	return signalingResults[0], allValidated, nil
+}
+
+// cdsAtChildOwner returns a copy of an RFC 9615 signaling CDS RRset owned by the
+// child, instead of by _dsboot.<child>._signal.<ns>.
+//
+// The signaling copy is the same CDS published somewhere else, and everything
+// downstream wants it at the child's owner:
+//
+//   - the agreement checks compare whole RRs through core.RRsetDiffer, and
+//     dns.IsDuplicate compares Class, Rrtype and the OWNER NAME before it looks
+//     at the RDATA. Left un-normalised, a signaling CDS never matches the apex
+//     CDS however identical the key tag, algorithm and digest, so the check was
+//     unsatisfiable and no at-ns bootstrap could complete (#688).
+//   - the CDS -> DS conversion copies cds.Hdr.Name into the DS, which would put
+//     the child's DS at the signaling name.
+//
+// Clone() first: the RRset may be held in the IMR cache, so renaming it in place
+// would corrupt the cached entry for every other reader.
+//
+// The RRSIGs are dropped. They cover the signaling owner and cannot cover the
+// re-owned records; whether the signaling copy validated has already been
+// decided by the caller, from the IMR's answer.
+func cdsAtChildOwner(rrset *core.RRset, childZone string) *core.RRset {
+	if rrset == nil {
+		return nil
+	}
+	owner := dns.Fqdn(childZone)
+	out := rrset.Clone()
+	out.Name = owner
+	out.RRSIGs = nil
+	for _, rr := range out.RRs {
+		if rr != nil {
+			rr.Header().Name = owner
+		}
+	}
+	return out
 }

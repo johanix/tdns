@@ -208,9 +208,17 @@ func parseKeygenAlgorithm(algstr string, defaultAlg uint8) (uint8, error) {
 }
 
 func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
+	_, _, err := zd.delegationSyncSetup(ctx, kdb)
+	return err
+}
+
+// delegationSyncSetup is DelegationSyncSetup that also reports whether the
+// parent accepted the bootstrap ceremony (bootstrapAccepted), and the key
+// algorithm it was run with.
+func (zd *ZoneData) delegationSyncSetup(ctx context.Context, kdb *KeyDB) (accepted bool, alg uint8, err error) {
 	if !zd.Options[OptParentSync] {
 		lgDns.Debug("DelegationSyncSetup: zone does not have child-side delegation sync enabled, skipping", "zone", zd.ZoneName)
-		return nil
+		return false, 0, nil
 	}
 
 	// algstr := ParentSyncConfig().Update.Keygen.Algorithm
@@ -219,15 +227,25 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
 	// 	alg = dns.ED25519
 	// }
-	alg, err := parseKeygenAlgorithm(ParentSyncConfig().Update.Keygen.Algorithm, dns.ED25519)
+	alg, err = parseKeygenAlgorithm(ParentSyncConfig().Update.Keygen.Algorithm, dns.ED25519)
 	if err != nil {
 		lgDns.Error("DelegationSyncSetup: error from parseKeygenAlgorithm", "zone", zd.ZoneName, "err", err)
-		return err
+		return false, 0, err
 	}
 
 	// EnsureApexKEY (PublishKeyRRs via Sig0KeyPreparation) then the ceremony.
 	// The proxy path uses a no-op ensurer: the operator publishes the KEY.
-	return zd.finishDelegationSyncSetup(zd.bootstrapSig0Key(ctx, alg, authApexKEY{zd: zd, kdb: kdb, alg: alg}))
+	msg, ur, berr := zd.bootstrapSig0Key(ctx, alg, authApexKEY{zd: zd, kdb: kdb, alg: alg})
+	return bootstrapAccepted(ur, berr), alg, zd.finishDelegationSyncSetup(msg, ur, berr)
+}
+
+// bootstrapAccepted reports whether the bootstrap ceremony reached the parent
+// and was answered NOERROR: the parent has stored the key, untrusted, and is
+// verifying it. The error comes first on purpose. A ceremony that was never
+// sent (a manual parent, a failed lookup) returns an empty UpdateResult, whose
+// zero Rcode reads as NOERROR.
+func bootstrapAccepted(ur UpdateResult, err error) bool {
+	return err == nil && ur.Rcode == dns.RcodeSuccess
 }
 
 func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
@@ -740,6 +758,25 @@ func deferSetupRetryAfter(ctx context.Context, delsyncq chan DelegationSyncReque
 		"attempt", ds.Attempt+1, "of", delegationSyncMaxRetries, "delay", delay)
 	next := ds
 	next.Attempt++
+	return requeueSetupAfter(ctx, delsyncq, next, delay)
+}
+
+// nextReBootstrap is the DELEGATION-SYNC-SETUP to enqueue, and when, after
+// the parent reported the key's validation failed; ok is false once the
+// rounds have run out. A round starts with a fresh transient-retry budget.
+func nextReBootstrap(ds DelegationSyncRequest) (next DelegationSyncRequest, delay time.Duration, ok bool) {
+	if ds.ReBootstrapRound >= childReBootstrapRounds {
+		return ds, 0, false
+	}
+	next = ds
+	next.Attempt = 0
+	next.ReBootstrapRound++
+	return next, childReBootstrapDelay(ds.ReBootstrapRound), true
+}
+
+// requeueSetupAfter enqueues next after delay, off the syncher goroutine and
+// cancelled with ctx. The returned channel closes when the worker exits.
+func requeueSetupAfter(ctx context.Context, delsyncq chan DelegationSyncRequest, next DelegationSyncRequest, delay time.Duration) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -801,9 +838,28 @@ func proxyStartupReconcile(ctx context.Context, zd *ZoneData, kdb *KeyDB, notify
 func handleDelegationSyncSetup(ctx context.Context, conf *Config, delsyncq chan DelegationSyncRequest,
 	kdb *KeyDB, zd *ZoneData, ds DelegationSyncRequest) {
 
-	_ = handleDelegationSyncSetupWith(ctx, conf, delsyncq, ds, func() error {
-		return zd.DelegationSyncSetup(ctx, kdb)
-	})
+	_ = handleDelegationSyncSetupWith(ctx, conf, delsyncq, ds, setupThenPoll(
+		func() (bool, uint8, error) { return zd.delegationSyncSetup(ctx, kdb) },
+		func(alg uint8) { conf.pollAfterAcceptedBootstrap(ctx, kdb, zd, alg) },
+	))
+}
+
+// setupThenPoll runs the setup and, when the parent accepted the bootstrap
+// ceremony, starts the post-bootstrap KeyState poll. It returns the setup's
+// error for the SETUP arm to act on.
+//
+// Only an accepted ceremony starts the poll. The parent answers NOERROR as soon
+// as it has stored the key, and decides trust afterwards, by a verification
+// that may fail (#677). Nothing else would tell a tdns-auth child: it would
+// hear the failure only on its next delegation UPDATE, or its next reload.
+func setupThenPoll(setup func() (accepted bool, alg uint8, err error), poll func(alg uint8)) func() error {
+	return func() error {
+		accepted, alg, err := setup()
+		if accepted {
+			poll(alg)
+		}
+		return err
+	}
 }
 
 // handleDelegationSyncSetupWith is the decision half of the SETUP arm: given an
@@ -872,6 +928,22 @@ func handleDelegationSyncSetupWith(ctx context.Context, conf *Config, delsyncq c
 		}
 		return deferSetupRetry(ctx, delsyncq, ds, "advertisement lookup failed")
 
+	case errors.Is(err, errBootstrapValidationFailed):
+		// The parent looked and did not accept the key, and keeps no state
+		// waiting for us (#677). What it could not find may still appear, so
+		// re-bootstrap later, which has it verify again, a few times.
+		next, delay, ok := nextReBootstrap(ds)
+		if !ok {
+			lgDns.Error("DelegationSyncher: SIG(0) bootstrap gave up; the parent still reports the key's"+
+				" validation failed after every re-bootstrap. Fix the KEY's publication and re-bootstrap",
+				"zone", ds.ZoneName, "rebootstraps", ds.ReBootstrapRound, "err", err)
+			return nil
+		}
+		lgDns.Warn("DelegationSyncher: the parent reports the SIG(0) key's validation failed; will re-bootstrap",
+			"zone", ds.ZoneName, "round", next.ReBootstrapRound, "of", childReBootstrapRounds,
+			"delay", delay, "err", err)
+		return requeueSetupAfter(ctx, delsyncq, next, delay)
+
 	default:
 		lgDns.Error("DelegationSyncher: error from DelegationSyncSetup, ignoring sync request",
 			"zone", ds.ZoneName, "err", err)
@@ -883,6 +955,12 @@ func handleDelegationSyncSetupWith(ctx context.Context, conf *Config, delsyncq c
 // the parent could not be reached, failed, or is still verifying the key.
 // Retry with backoff rather than treating the attempt as done.
 var errBootstrapTransient = errors.New("the parent's answer to the SIG(0) bootstrap is not final")
+
+// errBootstrapValidationFailed marks a SIG(0) bootstrap the parent refused
+// because its verification of the key already failed (EDE
+// KEY-VALIDATION-FAILED). Final for this attempt; the setup arm re-bootstraps
+// later, a limited number of times.
+var errBootstrapValidationFailed = errors.New("the parent's validation of the SIG(0) key failed")
 
 // bootstrapOutcome turns the parent's answer to the bootstrap UPDATE into an
 // error the setup arm can act on.
@@ -901,8 +979,11 @@ var errBootstrapTransient = errors.New("the parent's answer to the SIG(0) bootst
 //   - the parent requires manual bootstrap (EDE ManualBootstrapRequired):
 //     errBootstrapManual, which the caller already treats as waiting for the
 //     operator, not as an error.
-//   - anything else, including a failed validation and any other refusal: a
-//     plain error. Retrying a verdict only repeats it.
+//   - a failed validation (EDE KeyValidationFailed): errBootstrapValidationFailed.
+//     Final now; the setup arm re-bootstraps later, when what the parent could
+//     not find may have appeared.
+//   - anything else, any other refusal: a plain error. Retrying a verdict only
+//     repeats it.
 func bootstrapOutcome(ur UpdateResult, err error) error {
 	if err != nil {
 		if errors.Is(err, ErrUpdateUnreachable) {
@@ -923,6 +1004,8 @@ func bootstrapOutcome(ur UpdateResult, err error) error {
 					errBootstrapTransient, ur.EDECode)
 			case edns0.EDESig0ManualBootstrapRequired:
 				return fmt.Errorf("%w (EDE %d)", errBootstrapManual, ur.EDECode)
+			case edns0.EDESig0KeyValidationFailed:
+				return fmt.Errorf("%w (EDE %d %q)", errBootstrapValidationFailed, ur.EDECode, ur.EDEMessage)
 			}
 		}
 	}

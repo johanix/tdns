@@ -1180,6 +1180,10 @@ type DelegationSyncRequest struct {
 	// bootstrap was deferred because the parent's SVCB advertisement could not
 	// be looked up (errBootstrapAdvertisementLookup). Zero on the first try.
 	Attempt int
+	// ReBootstrapRound counts re-enqueues of a DELEGATION-SYNC-SETUP after the
+	// parent reported the key's validation failed (errBootstrapValidationFailed),
+	// up to childReBootstrapRounds. Zero on the first try.
+	ReBootstrapRound int
 	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
 	// set the proxy NOTIFY action keys on (parentsync-proxy).
 	ProxyAnalysis *ProxyDelegationAnalysis

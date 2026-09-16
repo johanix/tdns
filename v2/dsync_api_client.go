@@ -422,6 +422,13 @@ func DsyncApiPostDelegationRequest(ctx context.Context, endpoint *DsyncApiEndpoi
 	}
 
 	reqUrl := strings.TrimSuffix(endpoint.Url, "/") + "/delegation/" + url.PathEscape(dns.Fqdn(child))
+
+	// Both senders -- a zone's own tdns-auth and a parentsync-proxy agent --
+	// post through here, so this is the one place the payload is certain to be
+	// seen. The parent logs what it received in the same form.
+	lgDsyncApi.Info("DSYNC API posting delegation",
+		"child", dns.Fqdn(child), "endpoint", reqUrl, "rrsets", dsyncApiRRsetsForLog(rrsets))
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqUrl, bytes.NewReader(body))
 	if err != nil {
 		return nil, err

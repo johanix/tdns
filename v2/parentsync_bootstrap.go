@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -54,140 +55,319 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 		return
 	}
 
-	// Poll the parent's KeyState with the shared delegation-sync backoff
-	// (5s, 10s, 20s, 40s, then give up), re-bootstrapping once if the parent
-	// reports our key as unknown.
-	bootstrapped := false
-	syncErr := retryWithBackoff(ctx, delegationSyncMaxRetries, delegationSyncInitialDelay, func(attempt int) (bool, error) {
-		ks, authenticated, err := QueryParentKeyState(ctx, kdb, imr, keyName, keyid)
-		if err != nil {
-			lgElect.Warn("ParentSyncAfterKeyPublication: KeyState inquiry failed",
-				"zone", zone, "attempt", attempt, "err", err)
-			return false, err // retry
-		}
-		keyState := ks.KeyState
-		// authenticated=false here means allow-insecure let an unauthenticated
-		// answer through; every transition below says so, so a bootstrap or a
-		// "trusted" verdict driven by such an answer is traceable in the log.
-		if !authenticated {
-			lgElect.Warn("ParentSyncAfterKeyPublication: acting on an UNAUTHENTICATED KeyState answer (allow-insecure)",
-				"zone", zone, "keyid", keyid, "state", keyState, "statename", edns0.KeyStateToString(keyState))
-		}
+	// One poll per key, shared with the tdns-auth post-bootstrap poll.
+	id := childKeyVerificationID(keyName, keyid)
+	if _, running := childKeyStatePolls.LoadOrStore(id, struct{}{}); running {
+		lgElect.Info("ParentSyncAfterKeyPublication: already polling the parent for this key",
+			"zone", zone, "keyid", keyid)
+		return
+	}
+	defer childKeyStatePolls.Delete(id)
 
-		switch keyState {
-		case edns0.KeyStateTrusted:
-			lgElect.Info("ParentSyncAfterKeyPublication: parent trusts our key",
-				"zone", zone, "keyid", keyid, "authenticated", authenticated)
-			UpdateParentState(kdb, keyName, keyid, keyState)
-
-			// Post-bootstrap: verify delegation data is in sync with parent.
-			// Enqueue EXPLICIT-SYNC-DELEGATION which queries the parent and
-			// only syncs if there is a real delta.
-			if delsyncq := conf.Internal.DelegationSyncQ; delsyncq != nil {
-				zd, exists := Zones.Get(string(zone))
-				if exists {
-					lgElect.Info("ParentSyncAfterKeyPublication: enqueuing post-bootstrap delegation verification", "zone", zone)
-					delsyncq <- DelegationSyncRequest{
-						Command:  "EXPLICIT-SYNC-DELEGATION",
-						ZoneName: string(zone),
-						ZoneData: zd,
-					}
-				} else {
-					lgElect.Warn("ParentSyncAfterKeyPublication: zone not found, skipping delegation verification", "zone", zone)
-				}
-			}
-			return true, nil // done
-
-		case edns0.KeyStateUnknown:
-			if bootstrapped {
-				// Already sent bootstrap, parent hasn't processed it yet — keep polling
-				lgElect.Info("ParentSyncAfterKeyPublication: parent still unknown after bootstrap, polling",
-					"zone", zone, "keyid", keyid, "attempt", attempt)
-				return false, nil // retry
-			}
-			lgElect.Info("ParentSyncAfterKeyPublication: parent does not know our key, bootstrapping",
-				"zone", zone, "keyid", keyid, "authenticated", authenticated)
-			UpdateParentState(kdb, keyName, keyid, keyState)
-			if err := BootstrapWithParent(ctx, zone, keyName, algorithm); err != nil {
-				if errors.Is(err, errBootstrapManual) {
-					// MANUAL-BOOTSTRAP-REQUIRED from the child's side: nothing
-					// automatic will change this; the operator has to act.
-					lgElect.Info("ParentSyncAfterKeyPublication: parent requires manual SIG(0) bootstrap; waiting for the operator",
-						"zone", zone, "keyid", keyid)
-					return true, nil // done, not a failure
-				}
-				if errors.Is(err, errBootstrapAdvertisementLookup) {
-					// The parent's SVCB advertisement could not be looked up.
-					// Not a verdict on the method set, so not terminal: retry
-					// with the same backoff rather than either giving up or
-					// guessing.
-					lgElect.Warn("ParentSyncAfterKeyPublication: bootstrap deferred, advertisement lookup failed",
-						"zone", zone, "attempt", attempt, "err", err)
-					return false, err // retry
-				}
-				lgElect.Error("ParentSyncAfterKeyPublication: bootstrap failed",
-					"zone", zone, "err", err)
-				return true, err // done (terminal error)
-			}
-			lgElect.Info("ParentSyncAfterKeyPublication: bootstrap UPDATE sent to parent, will poll for trust",
-				"zone", zone, "keyid", keyid)
-			bootstrapped = true
-			return false, nil // retry
-
-		case edns0.KeyStateBootstrapAutoOngoing:
-			lgElect.Info("ParentSyncAfterKeyPublication: parent is verifying key, will poll",
-				"zone", zone, "keyid", keyid, "attempt", attempt)
-			UpdateParentState(kdb, keyName, keyid, keyState)
-			return false, nil // retry
-
-		case edns0.KeyStateBootstrapManualRequired:
-			// keystate-03 code 10: the parent knows the key but will only
-			// trust it after a manual step. Terminal for this poll, and not
-			// a failure: the operator has to act. Same treatment as the
-			// child-side selection of the manual method above.
-			lgElect.Info("ParentSyncAfterKeyPublication: parent requires manual bootstrap for our key; waiting for the operator",
-				"zone", zone, "keyid", keyid, "detail", ks.ExtraText)
-			UpdateParentState(kdb, keyName, keyid, keyState)
-			return true, nil // done
-
-		case edns0.KeyStateValidationFail:
-			// keystate-03 code 8: the parent tried to verify the key and gave
-			// up. Waiting will not resolve it and re-sending the same key
-			// would fail the same way; the EXTRA-TEXT says what the parent
-			// could not find. Terminal and an error.
-			lgElect.Error("ParentSyncAfterKeyPublication: parent reports our key's validation FAILED;"+
-				" it will not become trusted by waiting. Fix the KEY's publication (at-apex / at-ns, DNSSEC if the parent requires it) and re-bootstrap",
-				"zone", zone, "keyid", keyid, "detail", ks.ExtraText)
-			UpdateParentState(kdb, keyName, keyid, keyState)
-			return true, fmt.Errorf("parent reports KEY_VALIDATION_FAILED for keyid %d: %s", keyid, ks.ExtraText)
-
-		case edns0.KeyStateTemporaryFailure:
-			// keystate-03: the receiver understood the inquiry but is
-			// temporarily unable to determine the key's state (e.g. a transient
-			// truststore error) — the child MAY retry later. Keep polling with
-			// backoff rather than giving up as the default branch would.
-			lgElect.Info("ParentSyncAfterKeyPublication: parent reports a temporary failure, will retry",
-				"zone", zone, "keyid", keyid, "attempt", attempt)
-			UpdateParentState(kdb, keyName, keyid, keyState)
-			return false, nil // retry
-
-		default:
-			// Terminal, and a failure: the child's key is not trusted and no
-			// further attempt will change that. Reported at Info it looked like
-			// a successful outcome in the logs, and the caller's "gave up"
-			// branch never fired because the error was nil.
-			lgElect.Error("ParentSyncAfterKeyPublication: parent returned an unexpected key state;"+
-				" the child's key is NOT trusted and bootstrap will not complete",
-				"zone", zone, "keyid", keyid, "state", keyState,
-				"statename", edns0.KeyStateToString(keyState))
-			UpdateParentState(kdb, keyName, keyid, keyState)
-			return true, fmt.Errorf("parent returned unexpected key state %d (%s)",
-				keyState, edns0.KeyStateToString(keyState))
-		}
+	syncErr := conf.pollParentKeyState(ctx, parentKeyStatePoll{
+		zone:                      zone,
+		keyid:                     keyid,
+		syncDelegationWhenTrusted: true,
+		query: func(ctx context.Context) (*edns0.KeyStateOption, bool, error) {
+			return QueryParentKeyState(ctx, kdb, imr, keyName, keyid)
+		},
+		record: func(state uint8) { UpdateParentState(kdb, keyName, keyid, state) },
+		bootstrap: func(ctx context.Context) error {
+			return BootstrapWithParent(ctx, zone, keyName, algorithm)
+		},
+		pollDelay:        delegationSyncInitialDelay,
+		wait:             waitOrDone,
+		reBootstrapDelay: childReBootstrapDelay,
 	})
 	if syncErr != nil {
 		lgElect.Warn("ParentSyncAfterKeyPublication: gave up (exhausted retries or terminal error)",
 			"zone", zone, "keyid", keyid, "err", syncErr)
+	}
+}
+
+// childKeyStatePolls holds the child keys a KeyState poll of the parent is
+// running for in this process, so that there is at most one per key: the
+// agent's (ParentSyncAfterKeyPublication) or the tdns-auth post-bootstrap one
+// (pollAfterAcceptedBootstrap). Keyed like childKeyVerifications.
+var childKeyStatePolls sync.Map
+
+// startChildKeyStatePoll runs poll in its own goroutine, unless a poll for
+// zone's key keyid is already running. It returns a channel closed when the
+// goroutine exits, or nil when none was started.
+func startChildKeyStatePoll(zone string, keyid uint16, poll func()) <-chan struct{} {
+	id := childKeyVerificationID(zone, keyid)
+	if _, running := childKeyStatePolls.LoadOrStore(id, struct{}{}); running {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer childKeyStatePolls.Delete(id)
+		poll()
+	}()
+	return done
+}
+
+// pollAfterAcceptedBootstrap polls the parent's KeyState after it accepted a
+// tdns-auth child's bootstrap ceremony, the way an agent polls after
+// publishing its key (#677). A failed verification then leads to a
+// re-bootstrap on the child's schedule, not to silence.
+//
+// The key is the zone's first active SIG(0) key, the one the ceremony sent
+// (bootstrapSig0KeyWithParent). The ceremony has been sent, so a parent that
+// still does not know the key is polled again, not bootstrapped again. Unlike
+// the agent, this poll does not start a delegation sync when the key is
+// trusted: the ceremony runs at every zone load, and so does this poll.
+func (conf *Config) pollAfterAcceptedBootstrap(ctx context.Context, kdb *KeyDB, zd *ZoneData, algorithm uint8) <-chan struct{} {
+	imr := conf.Internal.ImrEngine
+	if imr == nil || kdb == nil {
+		lgElect.Warn("pollAfterAcceptedBootstrap: no IMR or keystore; not polling the parent",
+			"zone", zd.ZoneName)
+		return nil
+	}
+	sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+	if err != nil || sak == nil || len(sak.Keys) == 0 {
+		lgElect.Warn("pollAfterAcceptedBootstrap: no active SIG(0) key to poll the parent about",
+			"zone", zd.ZoneName, "err", err)
+		return nil
+	}
+	keyName := zd.ZoneName
+	keyid := sak.Keys[0].KeyRR.KeyTag()
+
+	done := startChildKeyStatePoll(keyName, keyid, func() {
+		err := conf.pollParentKeyState(ctx, parentKeyStatePoll{
+			zone:         ZoneName(keyName),
+			keyid:        keyid,
+			bootstrapped: true,
+			query: func(ctx context.Context) (*edns0.KeyStateOption, bool, error) {
+				return QueryParentKeyState(ctx, kdb, imr, keyName, keyid)
+			},
+			record: func(state uint8) { UpdateParentState(kdb, keyName, keyid, state) },
+			bootstrap: func(ctx context.Context) error {
+				return BootstrapWithParent(ctx, ZoneName(keyName), keyName, algorithm)
+			},
+			pollDelay:        delegationSyncInitialDelay,
+			wait:             waitOrDone,
+			reBootstrapDelay: childReBootstrapDelay,
+		})
+		if err != nil {
+			lgElect.Warn("pollAfterAcceptedBootstrap: gave up polling the parent",
+				"zone", keyName, "keyid", keyid, "err", err)
+		}
+	})
+	if done == nil {
+		lgElect.Debug("pollAfterAcceptedBootstrap: already polling the parent for this key",
+			"zone", keyName, "keyid", keyid)
+	}
+	return done
+}
+
+// parentKeyStatePoll is what pollParentKeyState needs from the outside world,
+// injected so a test can play the parent.
+type parentKeyStatePoll struct {
+	zone  ZoneName
+	keyid uint16
+	// bootstrapped: the ceremony has already been sent, so a parent that does
+	// not know the key yet is polled again rather than bootstrapped again.
+	bootstrapped bool
+	// syncDelegationWhenTrusted enqueues a delegation sync once the parent
+	// trusts the key.
+	syncDelegationWhenTrusted bool
+	// query asks the parent for our key's state; authenticated says whether
+	// the answer was.
+	query func(ctx context.Context) (ks *edns0.KeyStateOption, authenticated bool, err error)
+	// record stores the parent's answer in the local keystore.
+	record func(state uint8)
+	// bootstrap sends the bootstrap ceremony to the parent.
+	bootstrap func(ctx context.Context) error
+	// pollDelay is the first wait between inquiries; it doubles.
+	pollDelay time.Duration
+	// wait sleeps for d, or returns false when ctx is cancelled.
+	wait func(ctx context.Context, d time.Duration) bool
+	// reBootstrapDelay is the wait before re-bootstrap round (0-based).
+	reBootstrapDelay func(round int) time.Duration
+}
+
+// pollParentKeyState polls the parent's KeyState with the shared
+// delegation-sync backoff (5s, 10s, 20s, 40s, then give up), bootstrapping if
+// the parent reports our key as unknown.
+//
+// A parent that reports the key's validation FAILED is not the end (#677). The
+// parent looked a few times and keeps no state waiting for us, and what it
+// could not find may still appear: typically a KEY our provider has not yet
+// published at its signal name. So we wait, re-bootstrap, which has the parent
+// verify again, and poll again, up to childReBootstrapRounds times.
+func (conf *Config) pollParentKeyState(ctx context.Context, p parentKeyStatePoll) error {
+	zone, keyid := p.zone, p.keyid
+	bootstrapped := p.bootstrapped
+	for round := 0; ; round++ {
+		validationFailed := false
+		syncErr := retryWithBackoff(ctx, delegationSyncMaxRetries, p.pollDelay, func(attempt int) (bool, error) {
+			return conf.onParentKeyState(ctx, p, round, attempt, &bootstrapped, &validationFailed)
+		})
+		if !validationFailed {
+			return syncErr
+		}
+		if !p.wait(ctx, p.reBootstrapDelay(round)) {
+			return fmt.Errorf("shut down while waiting to re-bootstrap: %w", ctx.Err())
+		}
+		lgElect.Info("ParentSyncAfterKeyPublication: re-bootstrapping after the parent reported our key's validation failed",
+			"zone", zone, "keyid", keyid, "round", round+1, "of", childReBootstrapRounds)
+		if err := p.bootstrap(ctx); err != nil {
+			if errors.Is(err, errBootstrapManual) {
+				lgElect.Info("ParentSyncAfterKeyPublication: parent requires manual SIG(0) bootstrap; waiting for the operator",
+					"zone", zone, "keyid", keyid)
+				return nil
+			}
+			// The poll that follows reports where the parent stands.
+			lgElect.Warn("ParentSyncAfterKeyPublication: re-bootstrap failed; polling the parent anyway",
+				"zone", zone, "keyid", keyid, "err", err)
+		}
+		bootstrapped = true
+	}
+}
+
+// onParentKeyState acts on one KeyState inquiry. It returns what
+// retryWithBackoff wants: done, and the error that ends or explains the
+// attempt. It sets *validationFailed when the parent reports the key's
+// validation failed and another re-bootstrap round is due.
+func (conf *Config) onParentKeyState(ctx context.Context, p parentKeyStatePoll, round, attempt int,
+	bootstrapped, validationFailed *bool) (bool, error) {
+
+	zone, keyid := p.zone, p.keyid
+	ks, authenticated, err := p.query(ctx)
+	if err != nil {
+		lgElect.Warn("ParentSyncAfterKeyPublication: KeyState inquiry failed",
+			"zone", zone, "attempt", attempt, "err", err)
+		return false, err // retry
+	}
+	keyState := ks.KeyState
+	// authenticated=false here means allow-insecure let an unauthenticated
+	// answer through; every transition below says so, so a bootstrap or a
+	// "trusted" verdict driven by such an answer is traceable in the log.
+	if !authenticated {
+		lgElect.Warn("ParentSyncAfterKeyPublication: acting on an UNAUTHENTICATED KeyState answer (allow-insecure)",
+			"zone", zone, "keyid", keyid, "state", keyState, "statename", edns0.KeyStateToString(keyState))
+	}
+
+	switch keyState {
+	case edns0.KeyStateTrusted:
+		lgElect.Info("ParentSyncAfterKeyPublication: parent trusts our key",
+			"zone", zone, "keyid", keyid, "authenticated", authenticated)
+		p.record(keyState)
+
+		// Post-bootstrap: verify delegation data is in sync with parent.
+		// Enqueue EXPLICIT-SYNC-DELEGATION which queries the parent and
+		// only syncs if there is a real delta.
+		if delsyncq := conf.Internal.DelegationSyncQ; delsyncq != nil && p.syncDelegationWhenTrusted {
+			zd, exists := Zones.Get(string(zone))
+			if exists {
+				lgElect.Info("ParentSyncAfterKeyPublication: enqueuing post-bootstrap delegation verification", "zone", zone)
+				delsyncq <- DelegationSyncRequest{
+					Command:  "EXPLICIT-SYNC-DELEGATION",
+					ZoneName: string(zone),
+					ZoneData: zd,
+				}
+			} else {
+				lgElect.Warn("ParentSyncAfterKeyPublication: zone not found, skipping delegation verification", "zone", zone)
+			}
+		}
+		return true, nil // done
+
+	case edns0.KeyStateUnknown:
+		if *bootstrapped {
+			// Already sent bootstrap, parent hasn't processed it yet — keep polling
+			lgElect.Info("ParentSyncAfterKeyPublication: parent still unknown after bootstrap, polling",
+				"zone", zone, "keyid", keyid, "attempt", attempt)
+			return false, nil // retry
+		}
+		lgElect.Info("ParentSyncAfterKeyPublication: parent does not know our key, bootstrapping",
+			"zone", zone, "keyid", keyid, "authenticated", authenticated)
+		p.record(keyState)
+		if err := p.bootstrap(ctx); err != nil {
+			if errors.Is(err, errBootstrapManual) {
+				// MANUAL-BOOTSTRAP-REQUIRED from the child's side: nothing
+				// automatic will change this; the operator has to act.
+				lgElect.Info("ParentSyncAfterKeyPublication: parent requires manual SIG(0) bootstrap; waiting for the operator",
+					"zone", zone, "keyid", keyid)
+				return true, nil // done, not a failure
+			}
+			if errors.Is(err, errBootstrapAdvertisementLookup) {
+				// The parent's SVCB advertisement could not be looked up.
+				// Not a verdict on the method set, so not terminal: retry
+				// with the same backoff rather than either giving up or
+				// guessing.
+				lgElect.Warn("ParentSyncAfterKeyPublication: bootstrap deferred, advertisement lookup failed",
+					"zone", zone, "attempt", attempt, "err", err)
+				return false, err // retry
+			}
+			lgElect.Error("ParentSyncAfterKeyPublication: bootstrap failed",
+				"zone", zone, "err", err)
+			return true, err // done (terminal error)
+		}
+		lgElect.Info("ParentSyncAfterKeyPublication: bootstrap UPDATE sent to parent, will poll for trust",
+			"zone", zone, "keyid", keyid)
+		*bootstrapped = true
+		return false, nil // retry
+
+	case edns0.KeyStateBootstrapAutoOngoing:
+		lgElect.Info("ParentSyncAfterKeyPublication: parent is verifying key, will poll",
+			"zone", zone, "keyid", keyid, "attempt", attempt)
+		p.record(keyState)
+		return false, nil // retry
+
+	case edns0.KeyStateBootstrapManualRequired:
+		// keystate-03 code 10: the parent knows the key but will only
+		// trust it after a manual step. Terminal for this poll, and not
+		// a failure: the operator has to act. Same treatment as the
+		// child-side selection of the manual method above.
+		lgElect.Info("ParentSyncAfterKeyPublication: parent requires manual bootstrap for our key; waiting for the operator",
+			"zone", zone, "keyid", keyid, "detail", ks.ExtraText)
+		p.record(keyState)
+		return true, nil // done
+
+	case edns0.KeyStateValidationFail:
+		// keystate-03 code 8: the parent tried to verify the key and gave
+		// up. Polling will not change that; the EXTRA-TEXT says what the
+		// parent could not accept. A re-bootstrap has it verify again, so
+		// end this poll and let pollParentKeyState schedule one, until the
+		// rounds run out.
+		p.record(keyState)
+		if round >= childReBootstrapRounds {
+			lgElect.Error("ParentSyncAfterKeyPublication: parent still reports our key's validation FAILED"+
+				" after every re-bootstrap. Fix the KEY's publication (at-apex / at-ns, DNSSEC if the parent requires it) and re-bootstrap",
+				"zone", zone, "keyid", keyid, "rebootstraps", round, "detail", ks.ExtraText)
+			return true, fmt.Errorf("parent reports KEY_VALIDATION_FAILED for keyid %d after %d re-bootstraps: %s",
+				keyid, round, ks.ExtraText)
+		}
+		lgElect.Warn("ParentSyncAfterKeyPublication: parent reports our key's validation FAILED; will re-bootstrap",
+			"zone", zone, "keyid", keyid, "round", round+1, "of", childReBootstrapRounds,
+			"delay", p.reBootstrapDelay(round), "detail", ks.ExtraText)
+		*validationFailed = true
+		return true, nil
+
+	case edns0.KeyStateTemporaryFailure:
+		// keystate-03: the receiver understood the inquiry but is
+		// temporarily unable to determine the key's state (e.g. a transient
+		// truststore error) — the child MAY retry later. Keep polling with
+		// backoff rather than giving up as the default branch would.
+		lgElect.Info("ParentSyncAfterKeyPublication: parent reports a temporary failure, will retry",
+			"zone", zone, "keyid", keyid, "attempt", attempt)
+		p.record(keyState)
+		return false, nil // retry
+
+	default:
+		// Terminal, and a failure: the child's key is not trusted and no
+		// further attempt will change that. Reported at Info it looked like
+		// a successful outcome in the logs, and the caller's "gave up"
+		// branch never fired because the error was nil.
+		lgElect.Error("ParentSyncAfterKeyPublication: parent returned an unexpected key state;"+
+			" the child's key is NOT trusted and bootstrap will not complete",
+			"zone", zone, "keyid", keyid, "state", keyState,
+			"statename", edns0.KeyStateToString(keyState))
+		p.record(keyState)
+		return true, fmt.Errorf("parent returned unexpected key state %d (%s)",
+			keyState, edns0.KeyStateToString(keyState))
 	}
 }
 
