@@ -621,6 +621,7 @@ func DsyncApiRRsetsFromSyncStatus(child string, syncstate DelegationSyncStatus) 
 	if len(syncstate.NewNS) > 0 {
 		add(child, dns.TypeNS, syncstate.NewNS)
 	}
+	withdrawn := withdrawnGlueOwners(child, syncstate)
 	// Glue is grouped by owner: one entry per nameserver name per address
 	// family, because each is its own RRset and the endpoint addresses RRsets.
 	for _, rrtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
@@ -640,8 +641,12 @@ func DsyncApiRRsetsFromSyncStatus(child string, syncstate DelegationSyncStatus) 
 			}
 			byOwner[owner] = append(byOwner[owner], rr)
 		}
+		// declared is by canonical name: the endpoint refuses an RRset named
+		// twice, and it compares names the way DNS does.
+		declared := map[string]bool{}
 		for _, owner := range order {
 			add(owner, rrtype, byOwner[owner])
+			declared[core.CanonicalizeName(owner)] = true
 		}
 
 		// Withdrawal. An owner whose glue is being removed in full has nothing
@@ -663,14 +668,24 @@ func DsyncApiRRsetsFromSyncStatus(child string, syncstate DelegationSyncStatus) 
 		}
 		for _, rr := range removes {
 			owner := rr.Header().Name
-			// Storing the nil is what makes this emit once per owner: the
-			// second removed record for the same name finds the key present
-			// and stops here, exactly as an owner with surviving glue does.
-			if _, declared := byOwner[owner]; declared {
-				continue
+			// Marking it declared is what makes this emit once per owner: the
+			// second removed record for the same name finds it and stops here,
+			// exactly as an owner with surviving glue does.
+			if key := core.CanonicalizeName(owner); !declared[key] {
+				declared[key] = true
+				add(owner, rrtype, nil)
 			}
-			byOwner[owner] = nil
-			add(owner, rrtype, nil)
+		}
+		// A nameserver leaving the delegation takes its glue with it, whether
+		// or not the status listed that glue among the removes: the proxy's
+		// payload is built from the served zone, where a withdrawn
+		// nameserver's addresses are simply absent (#665). Both families, as
+		// the delta form's CreateChildUpdate does.
+		for _, owner := range withdrawn {
+			if !declared[owner] {
+				declared[owner] = true
+				add(owner, rrtype, nil)
+			}
 		}
 	}
 	// NewDSKnown, not len>0: an empty NewDS with the flag set is a real

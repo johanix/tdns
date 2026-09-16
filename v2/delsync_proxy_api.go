@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -61,13 +62,14 @@ const proxyApiDiscoveryTimeout = 60 * time.Second
 // NOT come from the ProxyDelegationAnalysis deltas: DelegationDataChangedNG
 // fills only the Adds/Removes fields, never the New* ones that the declarative
 // form is built from, so feeding it the analysis would produce an empty request
-// and a silent no-op. The analysis is the trigger, not the payload.
+// and a silent no-op. The analysis is the trigger, not the payload -- with one
+// exception: the nameservers it saw LEAVE the NS RRset. The served zone has no
+// trace of those, and their glue has to be deleted in the same request
+// (proxyRemovedNS, #665).
 //
-// It is no longer the un-signing witness either, and nothing in this function
-// reads it: the DS question is decided by hasDnskeyRRset alone. The parameter
-// stays for the uniform SyncWithParent dispatch signature. Said explicitly
-// because the previous wording sent a reader looking for a witness check that
-// does not exist.
+// It is not the un-signing witness: the DS question is decided by
+// hasDnskeyRRset alone. Said explicitly because an earlier wording sent a
+// reader looking for a witness check that does not exist.
 func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *DsyncTarget,
 	analysis *ProxyDelegationAnalysis) (string, error) {
 
@@ -121,22 +123,58 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 		"parent", parent, "target", endpoint.Target, "endpoint", endpoint.Url,
 		"dialect", endpoint.Dialect, "addrs", endpoint.Addrs)
 
-	rrsets := zd.proxyApiRRsets()
+	rrsets := zd.proxyApiRRsets(analysis)
 	if len(rrsets) == 0 {
 		// An empty request is refused as malformed by the endpoint, and rightly
 		// so: nothing to declare has to mean nothing, not "remove everything".
 		return fmt.Sprintf("zone %s: nothing to declare to parent %s; nothing sent", zd.ZoneName, parent), nil
 	}
 
-	if _, err := DsyncApiPostDelegationRequest(dctx, endpoint, cred, zd.ZoneName, rrsets,
-		childconf.AllowInsecure, childconf.CaFile); err != nil {
+	// The change is already public -- the agent learnt of it by transfer -- so
+	// there is nothing to hold back on a refusal. What is left is to say
+	// exactly what was sent and what the parent made of it, in the line that
+	// reports the outcome.
+	payload := dsyncApiRRsetsForLog(rrsets)
+	del, err := DsyncApiPostDelegationRequest(dctx, endpoint, cred, zd.ZoneName, rrsets,
+		childconf.AllowInsecure, childconf.CaFile)
+	if err != nil {
+		lgDns.Error("parentsync-proxy: the parent did not accept the delegation",
+			"zone", zd.ZoneName, "parent", parent, "err", err, "rrsets", payload)
 		return "", fmt.Errorf("zone %s: %v", zd.ZoneName, err)
+	}
+
+	// A 200 says applied; the read-back says whether the delegation is now
+	// what was declared. Same check as the tdns-auth child path.
+	diffs, comparable := dsyncApiUnconverged(rrsets, del)
+	switch {
+	case !comparable:
+		lgDns.Warn("parentsync-proxy: the parent accepted the delegation; its read-back could not be compared",
+			"zone", zd.ZoneName, "parent", parent, "rrsets", payload)
+	case len(diffs) > 0:
+		lgDns.Error("parentsync-proxy: the parent accepted the delegation but it differs from what was sent",
+			"zone", zd.ZoneName, "parent", parent, "differences", strings.Join(diffs, "; "), "rrsets", payload)
+		return "", fmt.Errorf("zone %s: parent %s applied the update but the delegation still differs from what was sent: %s",
+			zd.ZoneName, parent, strings.Join(diffs, "; "))
 	}
 
 	msg := fmt.Sprintf("proxied delegation to parent %s via the DSYNC API scheme (%d RRset%s)",
 		parent, len(rrsets), plural(len(rrsets)))
-	lgDns.Info("parentsync-proxy: "+msg, "zone", zd.ZoneName, "parent", parent)
+	lgDns.Info("parentsync-proxy: "+msg, "zone", zd.ZoneName, "parent", parent, "rrsets", payload)
 	return msg, nil
+}
+
+// proxyRemovedNS returns the NS records a proxy sync takes out of the
+// delegation, from whichever comparison triggered it: the transfer diff
+// (PreRefresh) or, at startup, the parent-versus-child analysis.
+//
+// The served zone cannot answer this. A withdrawn nameserver is simply absent
+// from it, so a payload built from it alone never deleted that nameserver's
+// glue at the parent (#665).
+func proxyRemovedNS(analysis *ProxyDelegationAnalysis) []dns.RR {
+	if analysis == nil {
+		return nil
+	}
+	return analysis.DelegationStatus.NsRemoves
 }
 
 // proxyApiRRsets renders the served zone's delegation in the declarative form
@@ -165,15 +203,21 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 // key to provide. The predicate is the absence of the RRset, NOT an empty
 // derived set -- those are different questions and conflating them is what
 // would delete a CSK-signed child's DS.
-func (zd *ZoneData) proxyApiRRsets() []DsyncApiRRset {
+//
+// analysis is the comparison that triggered the sync. Only the NS records it
+// saw leave the delegation are read from it (proxyRemovedNS): that is the one
+// thing the served zone cannot say, and it is what deletes a withdrawn
+// nameserver's glue. nil means nothing was removed.
+func (zd *ZoneData) proxyApiRRsets(analysis *ProxyDelegationAnalysis) []DsyncApiRRset {
 	newNS, newA, newAAAA, _ := zd.currentDelegationRRs()
 
 	rrsets := DsyncApiRRsetsFromSyncStatus(zd.ZoneName, DelegationSyncStatus{
-		ZoneName: zd.ZoneName,
-		Parent:   zd.GetParent(),
-		NewNS:    newNS,
-		NewA:     newA,
-		NewAAAA:  newAAAA,
+		ZoneName:  zd.ZoneName,
+		Parent:    zd.GetParent(),
+		NewNS:     newNS,
+		NewA:      newA,
+		NewAAAA:   newAAAA,
+		NsRemoves: proxyRemovedNS(analysis),
 	})
 
 	if !zd.hasDnskeyRRset() {

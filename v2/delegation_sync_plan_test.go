@@ -291,7 +291,7 @@ func TestProxyAnalysisFromSyncStatusReportsADSDisagreement(t *testing.T) {
 	}
 
 	zd := testZone(t, proxyApiZone, proxyApiBaseZone()) // unsigned
-	rrsets := zd.proxyApiRRsets()
+	rrsets := zd.proxyApiRRsets(nil)
 	ds, ok := rrsetFor(rrsets, proxyApiZone, "DS")
 	if !ok || len(ds.RRs) != 0 {
 		t.Fatalf("want an explicit empty DS rrset, got present=%v rrs=%v", ok, ds.RRs)

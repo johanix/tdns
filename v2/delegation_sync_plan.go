@@ -447,7 +447,7 @@ func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan
 	return zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
 		switch cand.Scheme {
 		case "UPDATE":
-			return zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target, updateSync)
+			return zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target, updateSync, analysis)
 		case "API":
 			return zd.ProxyApiParent(ctx, imr, cand.Target, analysis)
 		case "NOTIFY":
