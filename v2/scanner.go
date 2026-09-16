@@ -1259,6 +1259,16 @@ func (scanner *Scanner) ProcessCDSNotify(ctx context.Context, tuple ScanTuple, p
 	}
 
 	changed, adds, removes := core.RRsetDiffer(childZone, newDSRRs, currentDSRRs, dns.TypeDS, scanLog, scanner.Verbose, scanner.Debug)
+	if changed {
+		// 6. The DS RRset the CDS asks for must lead to a key the child
+		// publishes. A CDS can validate and still name no key.
+		if err := scanner.checkDSMatchesChildKeys(ctx, childZone, nsRRset, currentDSRRs, adds, removes, scanLog); err != nil {
+			scanLog.Printf("ProcessCDSNotify: %s: refused: %v", childZone, err)
+			refuseScan(&response, err)
+			responseCh <- response
+			return
+		}
+	}
 	response.DataChanged = changed
 	if changed {
 		response.DSAdds = adds
