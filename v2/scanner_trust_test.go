@@ -322,10 +322,7 @@ func TestScanCSYNCWithoutRequireDnssecIsAppliedAndSaysUnvalidated(t *testing.T) 
 }
 
 func TestScanCDSFollowsTheDelegationPolicy(t *testing.T) {
-	const (
-		newDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-		oldDigest = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
-	)
+	const oldDigest = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 	atNSOnly := DelegationPolicy{Name: "ns-only", Mechanisms: []string{"at-ns"}, RequireDnssec: true}
 	atApexStrict := DelegationPolicy{Name: "apex-strict", Mechanisms: []string{"at-apex"}, RequireDnssec: true}
 	lockedDown := DelegationPolicy{Name: "locked", Mechanisms: []string{}, RequireDnssec: true}
@@ -347,7 +344,7 @@ func TestScanCDSFollowsTheDelegationPolicy(t *testing.T) {
 		{name: "with a DS, strict: an insecure CDS changes nothing", pol: trustStrict(), hasDS: true,
 			want: ScanRefused, wantReason: "CDS is insecure", wantValidated: 1},
 		{name: "with a DS, strict: a secure CDS is applied", pol: trustStrict(), hasDS: true,
-			cdsVerdict: cache.ValidationStateSecure, want: ScanValidated, wantReason: "through the child's DS", wantValidated: 1},
+			cdsVerdict: cache.ValidationStateSecure, want: ScanValidated, wantReason: "through the child's DS", wantValidated: 2},
 		// With a DS the chain exists, so the CDS is validated whatever the
 		// policy's require-dnssec says.
 		{name: "with a DS, lax: a bogus CDS changes nothing", pol: trustLax(), hasDS: true,
@@ -355,7 +352,7 @@ func TestScanCDSFollowsTheDelegationPolicy(t *testing.T) {
 		{name: "with a DS, lax: an insecure CDS changes nothing", pol: trustLax(), hasDS: true,
 			want: ScanRefused, wantReason: "CDS is insecure", wantValidated: 1},
 		{name: "with a DS, lax: a secure CDS is applied, validated", pol: trustLax(), hasDS: true,
-			cdsVerdict: cache.ValidationStateSecure, want: ScanValidated, wantReason: "through the child's DS", wantValidated: 1},
+			cdsVerdict: cache.ValidationStateSecure, want: ScanValidated, wantReason: "through the child's DS", wantValidated: 2},
 		{name: "bootstrap under at-ns only: at-apex in scanner.options is not taken", pol: atNSOnly, inBailiwick: true,
 			cdsVerdict: cache.ValidationStateSecure, options: []string{"at-apex", "no-dnssec-validation"},
 			want: ScanRefused, wantReason: "no bootstrap mechanism"},
@@ -380,12 +377,9 @@ func TestScanCDSFollowsTheDelegationPolicy(t *testing.T) {
 			} else {
 				zd = trustParent(t, child, tc.pol)
 			}
-			n := &trustNet{
-				served: map[string][]dns.RR{
-					trustKey(child, dns.TypeCDS): rrs(t, child+" 3600 IN CDS 2371 13 2 "+newDigest),
-				},
-				verdict: map[string]cache.ValidationState{},
-			}
+			n := &trustNet{served: map[string][]dns.RR{}, verdict: map[string]cache.ValidationState{}}
+			serveKeyAndCDS(t, n, child)
+			n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeDNSKEY))
 			if tc.cdsVerdict != 0 {
 				n.set(tc.cdsVerdict, trustKey(child, dns.TypeCDS))
 			}
@@ -414,6 +408,93 @@ func TestScanCDSFollowsTheDelegationPolicy(t *testing.T) {
 			}
 			if len(n.validated) != tc.wantValidated {
 				t.Errorf("validator asked about %v, want %d call(s)", n.validated, tc.wantValidated)
+			}
+		})
+	}
+}
+
+// serveKeyAndCDS makes n serve a new DNSKEY for child and a CDS naming it, and
+// returns both.
+func serveKeyAndCDS(t *testing.T, n *trustNet, child string) (*dns.DNSKEY, *dns.CDS) {
+	t.Helper()
+	key := &dns.DNSKEY{Hdr: dns.RR_Header{Name: child, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags: 257, Protocol: 3, Algorithm: dns.ECDSAP256SHA256}
+	if _, err := key.Generate(256); err != nil {
+		t.Fatalf("generating a key for %s: %v", child, err)
+	}
+	cds := key.ToDS(dns.SHA256).ToCDS()
+	n.served[trustKey(child, dns.TypeDNSKEY)] = []dns.RR{key}
+	n.served[trustKey(child, dns.TypeCDS)] = []dns.RR{cds}
+	return key, cds
+}
+
+// A CDS that passes the trust gate can still name no key the child publishes: a
+// typo in a digest, or a key not published yet. Applied, its DS would make the
+// child's whole zone bogus. The scan refuses it by the rule a DS change by
+// UPDATE meets (CheckDelegationCoherence).
+func TestScanCDSMustLeadToAKeyTheChildPublishes(t *testing.T) {
+	const oldDigest = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	for i, tc := range []struct {
+		name       string
+		hasDS      bool
+		prepare    func(t *testing.T, n *trustNet, child string)
+		wantReason string // empty: applied
+	}{
+		{name: "with a DS: a CDS for the published key is applied", hasDS: true},
+		{name: "with a DS: a CDS for a key not published is refused", hasDS: true,
+			prepare: func(t *testing.T, n *trustNet, child string) {
+				other := &trustNet{served: map[string][]dns.RR{}}
+				key, _ := serveKeyAndCDS(t, other, child)
+				n.served[trustKey(child, dns.TypeDNSKEY)] = []dns.RR{key}
+			},
+			wantReason: "matches none of the 1 DNSKEY(s)"},
+		{name: "with a DS: no DNSKEY published is refused", hasDS: true,
+			prepare: func(t *testing.T, n *trustNet, child string) {
+				delete(n.served, trustKey(child, dns.TypeDNSKEY))
+			},
+			wantReason: "publishes no DNSKEY RRset"},
+		{name: "with a DS: a DNSKEY RRset that does not validate is refused", hasDS: true,
+			prepare: func(t *testing.T, n *trustNet, child string) {
+				n.set(cache.ValidationStateInsecure, trustKey(child, dns.TypeDNSKEY))
+			},
+			wantReason: "did not DNSSEC-validate"},
+		{name: "with a DS: one CDS record for a published key is enough", hasDS: true,
+			prepare: func(t *testing.T, n *trustNet, child string) {
+				n.served[trustKey(child, dns.TypeCDS)] = append(n.served[trustKey(child, dns.TypeCDS)],
+					mustRR(t, child+" 3600 IN CDS 4444 13 2 "+strings.Repeat("ab", 32)))
+			}},
+		{name: "first DS: an unvalidated DNSKEY RRset with the key is enough"},
+		{name: "first DS: a CDS for a key not published is refused",
+			prepare: func(t *testing.T, n *trustNet, child string) {
+				other := &trustNet{served: map[string][]dns.RR{}}
+				key, _ := serveKeyAndCDS(t, other, child)
+				n.served[trustKey(child, dns.TypeDNSKEY)] = []dns.RR{key}
+			},
+			wantReason: "matches none of the 1 DNSKEY(s)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			child := fmt.Sprintf("cdskey%d.example.", i)
+			zd := trustParent(t, child, trustLax())
+			n := &trustNet{served: map[string][]dns.RR{}, verdict: map[string]cache.ValidationState{}}
+			serveKeyAndCDS(t, n, child)
+			n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS), trustKey(child, dns.TypeDNSKEY))
+			if tc.prepare != nil {
+				tc.prepare(t, n, child)
+			}
+			sc := trustScanner(n)
+			var currentDS []dns.RR
+			if tc.hasDS {
+				currentDS = rrs(t, child+" 3600 IN DS 1111 13 2 "+oldDigest)
+			}
+
+			resp := runCDS(t, sc, zd, child, currentDS)
+
+			if tc.wantReason != "" {
+				assertRefused(t, resp, tc.wantReason)
+				return
+			}
+			if resp.Error || !scanResponseChangesDelegation(resp) {
+				t.Fatalf("error %q, applied %v; want the DS change applied", resp.ErrorMsg, scanResponseChangesDelegation(resp))
 			}
 		})
 	}

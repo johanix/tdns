@@ -690,3 +690,18 @@ poll round done` says whether a round was `stopped`.
   rule to the DS it reads under the lock: a child that has lost
   its DS in between is not scanned for CSYNC, nor for CDS unless
   `scanner.poll.bootstrap` is set.
+
+## Amendment, 2026-09-16 (g): a CDS must lead to a published key
+
+A CDS scan refuses a DS change whose resulting DS RRset matches
+none of the DNSKEYs the child publishes (`checkDSMatchesChildKeys`,
+`v2/scanner_trust.go`). A CDS can pass the trust gate and still
+name no key -- a typo in a digest, a key not yet published -- and
+the DS it asks for would make the child's zone bogus. The rule is
+the one a DS change by UPDATE or the API already meets
+(`CheckDelegationCoherence`): at least one DS of the resulting
+RRset matches a published key, an empty RRset is allowed, and for
+a child that already has a DS the DNSKEY RRset must validate. The
+DNSKEYs are asked of the child's nameservers, as the CDS is, and
+they must agree on them. A DNSKEY lookup that fails refuses the
+change; the next poll, or the child's next NOTIFY, tries again.

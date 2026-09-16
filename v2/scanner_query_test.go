@@ -390,12 +390,12 @@ func (b *unreadableBackend) GetDelegationData(string, string) (map[string]map[ui
 	return nil, errors.New("store unavailable")
 }
 
+// cdsNet serves a new DNSKEY for child and a CDS naming it.
 func cdsNet(t *testing.T, child string) *trustNet {
 	t.Helper()
-	return &trustNet{
-		served:  map[string][]dns.RR{trustKey(child, dns.TypeCDS): rrs(t, child+" 3600 IN CDS 2371 13 2 "+strings.Repeat("ab", 32))},
-		verdict: map[string]cache.ValidationState{},
-	}
+	n := &trustNet{served: map[string][]dns.RR{}, verdict: map[string]cache.ValidationState{}}
+	serveKeyAndCDS(t, n, child)
+	return n
 }
 
 // A CDS scan takes the current DS from the delegation backend, inside the lock.
@@ -404,8 +404,8 @@ func TestCDSScanReadsTheCurrentDSFromTheBackend(t *testing.T) {
 	zd := trustParent(t, child, trustLax())
 	zd.DelegationBackend.(*trustBackend).data[child][dns.TypeDS] = rrs(t, child+" 3600 IN DS 1111 13 2 "+strings.Repeat("cd", 32))
 	n := cdsNet(t, child)
-	// With a DS the CDS is validated, whatever the policy says.
-	n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS))
+	// With a DS the CDS and the DNSKEYs are validated, whatever the policy says.
+	n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS), trustKey(child, dns.TypeDNSKEY))
 	sc := trustScanner(n)
 	var applied int
 	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) { applied++ }

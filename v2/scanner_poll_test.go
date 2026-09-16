@@ -17,10 +17,7 @@ import (
 // ProcessCSYNCNotify and ProcessCDSNotify, with the network replaced as in
 // scanner_trust_test.go.
 
-const (
-	pollOldDigest = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
-	pollNewDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-)
+const pollOldDigest = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 
 // pollBackend is trustBackend with children to list and, when readErr is set,
 // a delegation it cannot read.
@@ -53,7 +50,8 @@ func pollParent(t *testing.T, child string, withDS bool) (*ZoneData, *pollBacken
 	return zd, b
 }
 
-// pollNet serves, for each child, what csyncMove serves and a CDS for a new key.
+// pollNet serves, for each child, what csyncMove serves, a new DNSKEY and a CDS
+// for it.
 func pollNet(t *testing.T, children ...string) *trustNet {
 	t.Helper()
 	n := &trustNet{served: map[string][]dns.RR{}, verdict: map[string]cache.ValidationState{}}
@@ -61,9 +59,10 @@ func pollNet(t *testing.T, children ...string) *trustNet {
 		for k, v := range csyncMove(t, child).served {
 			n.served[k] = v
 		}
-		n.served[trustKey(child, dns.TypeCDS)] = rrs(t, child+" 3600 IN CDS 2371 13 2 "+pollNewDigest)
-		// A child with a DS has its CDS validated, whatever the policy says.
-		n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS))
+		serveKeyAndCDS(t, n, child)
+		// A child with a DS has its CDS and its DNSKEYs validated, whatever the
+		// policy says.
+		n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS), trustKey(child, dns.TypeDNSKEY))
 	}
 	return n
 }
