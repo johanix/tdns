@@ -52,11 +52,18 @@ type UpdateRequest struct {
 	// updater is never held up by a caller that has given up waiting, and a
 	// double send (belt-and-braces responses on several exit paths) is
 	// harmless.
-	Resp         chan ZoneUpdateResult
-	Status       *UpdateStatus
-	Description  string
-	PreCondition func() bool
-	Action       func() error
+	Resp chan ZoneUpdateResult
+	// ParentSyncDone marks an update whose NS and glue the parent has already
+	// been given -- a nameserver removal applied only after the parent
+	// confirmed it, or the local half of one (delegation_parent_first.go). The
+	// updater queues no delegation sync for it. A DNSKEY change riding in the
+	// same update still gets one: the parent-first transaction says nothing
+	// about DS.
+	ParentSyncDone bool
+	Status         *UpdateStatus
+	Description    string
+	PreCondition   func() bool
+	Action         func() error
 }
 
 // ZoneUpdateResult is the outcome of one update, delivered on UpdateRequest.Resp.
@@ -448,7 +455,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					// Dropping it costs a round of parent sync, not
 					// correctness: the drift is still in the zone, and the next
 					// load re-detects it.
-					if updated && !ur.InternalUpdate && zd.Options[OptParentSync] && !dss.InSync {
+					if updated && !ur.InternalUpdate && zd.Options[OptParentSync] && !dss.InSync &&
+						(!ur.ParentSyncDone || len(dss.DNSKEYAdds)+len(dss.DNSKEYRemoves) > 0) {
 						lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
 						if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
 							Command:    "SYNC-DELEGATION",
@@ -1708,113 +1716,78 @@ func computeNewGlue(dss *DelegationSyncStatus, zoneName string, ddata *Delegatio
 		return err
 	}
 
+	// Every map here is keyed by canonical name. The glue comes keyed by the
+	// nameserver name as the NS record spells it, and the adds and removes by
+	// the owner as the update spells it; DNS says those are the same name
+	// whatever their case, and a raw-string key said they were not, so a
+	// removal written in another case silently removed nothing.
 	current_a_glue := make(map[string][]dns.RR)
 	current_aaaa_glue := make(map[string][]dns.RR)
 	for nsname, rrset := range ddata.A_glue {
-		current_a_glue[nsname] = make([]dns.RR, len(rrset.RRs))
-		for i, rr := range rrset.RRs {
-			current_a_glue[nsname][i] = dns.Copy(rr)
+		key := core.CanonicalizeName(nsname)
+		for _, rr := range rrset.RRs {
+			current_a_glue[key] = append(current_a_glue[key], dns.Copy(rr))
 		}
 	}
 	for nsname, rrset := range ddata.AAAA_glue {
-		current_aaaa_glue[nsname] = make([]dns.RR, len(rrset.RRs))
-		for i, rr := range rrset.RRs {
-			current_aaaa_glue[nsname][i] = dns.Copy(rr)
+		key := core.CanonicalizeName(nsname)
+		for _, rr := range rrset.RRs {
+			current_aaaa_glue[key] = append(current_aaaa_glue[key], dns.Copy(rr))
 		}
+	}
+	newNames := map[string]bool{}
+	for _, nsname := range new_bailiwick_ns {
+		newNames[core.CanonicalizeName(nsname)] = true
 	}
 
 	// Apply removes to current glue. sameRecord for the same reason as the NS
 	// set above: a removal is CLASS NONE.
-	for _, remove := range dss.ARemoves {
-		nsname := remove.Header().Name
-		if glue, exists := current_a_glue[nsname]; exists {
+	applyRemoves := func(glueByName map[string][]dns.RR, removes []dns.RR) {
+		for _, remove := range removes {
+			key := core.CanonicalizeName(remove.Header().Name)
+			glue := glueByName[key]
 			for i := len(glue) - 1; i >= 0; i-- {
 				if sameRecord(glue[i], remove) {
-					glue = append(glue[:i], glue[i+1:]...)
-					current_a_glue[nsname] = glue
+					glueByName[key] = append(glue[:i], glue[i+1:]...)
 					break
 				}
 			}
 		}
 	}
-	for _, remove := range dss.AAAARemoves {
-		nsname := remove.Header().Name
-		if glue, exists := current_aaaa_glue[nsname]; exists {
-			for i := len(glue) - 1; i >= 0; i-- {
-				if sameRecord(glue[i], remove) {
-					glue = append(glue[:i], glue[i+1:]...)
-					current_aaaa_glue[nsname] = glue
-					break
-				}
-			}
-		}
-	}
+	applyRemoves(current_a_glue, dss.ARemoves)
+	applyRemoves(current_aaaa_glue, dss.AAAARemoves)
 
-	// Apply adds to current glue
-	for _, add := range dss.AAdds {
-		nsname := add.Header().Name
-		if slices.Contains(new_bailiwick_ns, nsname) {
-			if glue, exists := current_a_glue[nsname]; exists {
-				dup := false
-				for _, existing := range glue {
-					if dns.IsDuplicate(existing, add) {
-						dup = true
-						break
-					}
-				}
-				if !dup {
-					rrcopy := dns.Copy(add)
-					rrcopy.Header().Ttl = 3600
-					rrcopy.Header().Class = dns.ClassINET
-					current_a_glue[nsname] = append(current_a_glue[nsname], rrcopy)
-				}
-			} else {
-				rrcopy := dns.Copy(add)
-				rrcopy.Header().Ttl = 3600
-				rrcopy.Header().Class = dns.ClassINET
-				current_a_glue[nsname] = []dns.RR{rrcopy}
+	// Apply adds to current glue, for nameservers of the new NS set only.
+	applyAdds := func(glueByName map[string][]dns.RR, adds []dns.RR) {
+		for _, add := range adds {
+			key := core.CanonicalizeName(add.Header().Name)
+			if !newNames[key] || recordIn(glueByName[key], add) {
+				continue
 			}
+			rrcopy := dns.Copy(add)
+			rrcopy.Header().Ttl = 3600
+			rrcopy.Header().Class = dns.ClassINET
+			glueByName[key] = append(glueByName[key], rrcopy)
 		}
 	}
-	for _, add := range dss.AAAAAdds {
-		nsname := add.Header().Name
-		if slices.Contains(new_bailiwick_ns, nsname) {
-			if glue, exists := current_aaaa_glue[nsname]; exists {
-				dup := false
-				for _, existing := range glue {
-					if dns.IsDuplicate(existing, add) {
-						dup = true
-						break
-					}
-				}
-				if !dup {
-					rrcopy := dns.Copy(add)
-					rrcopy.Header().Ttl = 3600
-					rrcopy.Header().Class = dns.ClassINET
-					current_aaaa_glue[nsname] = append(current_aaaa_glue[nsname], rrcopy)
-				}
-			} else {
-				rrcopy := dns.Copy(add)
-				rrcopy.Header().Ttl = 3600
-				rrcopy.Header().Class = dns.ClassINET
-				current_aaaa_glue[nsname] = []dns.RR{rrcopy}
-			}
-		}
-	}
+	applyAdds(current_a_glue, dss.AAdds)
+	applyAdds(current_aaaa_glue, dss.AAAAAdds)
 
 	// Collect all glue records for the new bailiwick NS
 	dss.NewA = []dns.RR{}
 	dss.NewAAAA = []dns.RR{}
+	collected := map[string]bool{}
 	for _, nsname := range new_bailiwick_ns {
-		if glue, exists := current_a_glue[nsname]; exists {
-			for _, rr := range glue {
-				dss.NewA = append(dss.NewA, dns.Copy(rr))
-			}
+		key := core.CanonicalizeName(nsname)
+		if collected[key] {
+			continue
 		}
-		if glue, exists := current_aaaa_glue[nsname]; exists {
-			for _, rr := range glue {
-				dss.NewAAAA = append(dss.NewAAAA, dns.Copy(rr))
-			}
+		collected[key] = true
+		for _, rr := range current_a_glue[key] {
+			dss.NewA = append(dss.NewA, dns.Copy(rr))
+		}
+		for _, rr := range current_aaaa_glue[key] {
+			dss.NewAAAA = append(dss.NewAAAA, dns.Copy(rr))
 		}
 	}
 

@@ -22,6 +22,7 @@ var (
 	zoneUpdateName   string
 	zoneUpdateRrtype string
 	zoneUpdateFile   string
+	zoneUpdateForce  bool
 )
 
 // AttachZoneUpdateVerbs adds the one-off content statements to an existing
@@ -136,6 +137,11 @@ applied as ONE update — there is no half-applied outcome.`,
 		sub.Args = cobra.NoArgs
 		sub.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
 		sub.Flags().StringVar(&zoneUpdateVia, "via", "", "Transport: \"api\" or \"ddns\" (required)")
+		// A removal of a nameserver is sent to the parent before it is applied,
+		// and applied only if the parent confirms it. --force applies it
+		// anyway. API only: a DNS UPDATE has no way to carry it.
+		sub.Flags().BoolVar(&zoneUpdateForce, "force", false,
+			"Apply a nameserver removal even if the parent does not confirm it (--via api only)")
 		// --signer/--server/--key are only consulted for --via ddns, but are
 		// attached everywhere so the flag set does not change shape per verb.
 		AttachUpdateCreateFlags(sub)
@@ -256,6 +262,7 @@ func runZoneUpdateViaApi(role, zone string, spec tdns.ZoneUpdateSpec) {
 	cr, err := SendZoneCommand(api, tdns.ZonePost{
 		Command:            "update",
 		Zone:               zone,
+		Force:              zoneUpdateForce,
 		UpdateVerb:         spec.Verb,
 		UpdateRRs:          spec.RRs,
 		UpdateName:         spec.Name,
@@ -277,6 +284,10 @@ func runZoneUpdateViaApi(role, zone string, spec tdns.ZoneUpdateSpec) {
 // runZoneUpdateViaDdns builds an RFC 2136 UPDATE locally, signs it with SIG(0)
 // when a key is available, and sends it to --server.
 func runZoneUpdateViaDdns(zone string, spec tdns.ZoneUpdateSpec) {
+	if zoneUpdateForce {
+		fmt.Printf("Error: --force works only with --via api; a DNS UPDATE has no way to carry it\n")
+		os.Exit(1)
+	}
 	actions, err := tdns.BuildZoneUpdateActions(zone, spec)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)

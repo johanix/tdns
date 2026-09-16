@@ -339,3 +339,32 @@ func TestRefusedUpdateErrorCarriesTheEDE(t *testing.T) {
 		t.Errorf("err = %q; want it to carry the parent's EDE text", err)
 	}
 }
+
+// A glue removal whose owner is spelled in another case than the nameserver's
+// still removes the record. The glue was keyed by the name as the NS record
+// spells it and looked up by the name as the update spells it, so the record
+// stayed in NewA and the parent was told to keep it.
+func TestChildGlueRemovalMatchesTheOwnerWhateverItsCase(t *testing.T) {
+	const zone = `child.test.	3600	IN	SOA	ns1.child.test. hostmaster.child.test. 1 7200 1800 604800 7200
+child.test.	3600	IN	NS	ns1.child.test.
+ns1.child.test.	3600	IN	A	192.0.2.1
+ns1.child.test.	3600	IN	A	192.0.2.11
+`
+	zd := testZone(t, withdrawalChild, zone)
+	registerZones(t, zd)
+	zd.UpdatePolicy = policyAllowing(dns.TypeNS, dns.TypeA, dns.TypeAAAA)
+
+	dss, err := zd.ZoneUpdateChangesDelegationDataNG(UpdateRequest{
+		Cmd: "ZONE-UPDATE", ZoneName: withdrawalChild,
+		Actions: []dns.RR{removalOf(withdrawalRR(t, "NS1.CHILD.TEST. 3600 IN A 192.0.2.11"))},
+	})
+	if err != nil {
+		t.Fatalf("ZoneUpdateChangesDelegationDataNG: %v", err)
+	}
+	if len(dss.NewA) != 1 {
+		t.Fatalf("NewA = %v, want only 192.0.2.1", dss.NewA)
+	}
+	if a, ok := dss.NewA[0].(*dns.A); !ok || a.A.String() != "192.0.2.1" {
+		t.Errorf("NewA = %v, want only 192.0.2.1", dss.NewA)
+	}
+}

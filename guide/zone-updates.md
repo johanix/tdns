@@ -209,6 +209,14 @@ So:
 `UpdateApplyTimeout` is 10 seconds. It covers a database write
 and, on a signed zone, re-signing the affected RRsets.
 
+One kind of update waits longer. On a zone with `parentsync`, an
+update that removes a nameserver from the apex NS RRset is sent to
+the parent before it is applied, and applied only if the parent
+confirms it (up to 60 seconds for the parent's answer). If the
+parent does not confirm, nothing is applied. The CLI's `--force`
+applies it anyway (`--via api` only). See
+[special-features.md §1.5](special-features.md#15-child-pushing-changes).
+
 
 ## 6. Durability: the zone file, and the delta journal
 
@@ -620,6 +628,7 @@ same applier as a typed statement.
 | `outside the zone` | an owner name not in bailiwick |
 | `the apex ZONEMD RRset is maintained by the server` | the zone has `publish-zonemd`, which recomputes the digest on every publish; an update to it would be overwritten in the same breath. Turn the option off to author the record yourself |
 | `on-conflict-db-wins and on-conflict-zonefile-wins are mutually exclusive` | both named on one zone; they are a contradiction, not a preference order (§6) |
+| `parent … did not confirm the delegation change` | the update removes a nameserver on a `parentsync` zone, and the parent refused it, could not be reached, or offers only NOTIFY. Nothing was applied; `--force` applies it without the parent (§5) |
 | `refusing to merge, because the records that would lose could not be saved` | the `.rejected` artefact could not be written, so the merge was abandoned rather than resolved silently (§6) |
 
 On the DDNS path a policy refusal is REFUSED with an EDE naming

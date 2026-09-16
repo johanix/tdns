@@ -211,7 +211,12 @@ type ZoneData struct {
 	// at the apex. Cleared when the KEY leaves the apex so a later
 	// WAITING→READY transition runs the ceremony again.
 	proxySig0ParentBootstrapped bool
-	AppType                     AppType
+	// parentFirstMu serialises the updates to a zone that syncs its own
+	// delegation (lockDelegationChanges, delegation_parent_first.go). Between
+	// computing a removal's transaction for the parent and applying it here,
+	// no other update may reshape the delegation it was computed from.
+	parentFirstMu sync.Mutex
+	AppType       AppType
 	// Errors holds all active error conditions on this zone. Use SetError /
 	// ClearError to mutate; HasError / ErrorList to inspect.
 	// The fields below (Error, ErrorType, ErrorMsg) are derived from
