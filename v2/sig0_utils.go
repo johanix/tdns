@@ -322,8 +322,16 @@ INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator,
 			PrivateKey: pkc.PrivateKey, KeyRR: pkc.DnskeyRR.String(), Replace: true,
 			RowFlags: cols,
 		}
-		if state == DnskeyStateActive {
-			row.ActiveAt = time.Now().UTC().Format(time.RFC3339)
+		// the stamp the state owns: a key minted into a state carries the
+		// time it entered it, as a transition there would have stamped it
+		now := time.Now().UTC().Format(time.RFC3339)
+		switch state {
+		case DnskeyStateActive:
+			row.ActiveAt = now
+		case DnskeyStatePublished, DnskeyStateDsPublished:
+			row.PublishedAt = now
+		case DnskeyStateRetired:
+			row.RetiredAt = now
 		}
 		err = insertKeyRowTx(tx, row)
 	}

@@ -135,6 +135,12 @@ func TestOwnedZoneGenerateNamesTheColumns(t *testing.T) {
 	if w := keystoreWrites(t, kdb); len(w) != 1 || !strings.HasPrefix(w[0], "insert") {
 		t.Errorf("generate with the columns named wrote %v, want one INSERT", w)
 	}
+	// ... and the stamp the state owns: a key minted into published carries
+	// its published_at, so the propagation wait (T8) can run from it
+	var published string
+	if err := kdb.DB.QueryRow(`SELECT COALESCE(published_at,'') FROM DnssecKeyStore WHERE zonename=? AND state=? AND (flags & 1)=1`, zd.ZoneName, DnskeyStatePublished).Scan(&published); err != nil || published == "" {
+		t.Errorf("the key minted into published has published_at %q (err %v), want the time it entered the state", published, err)
+	}
 	// no state named: GenerateKeypair's default, active, on the row too
 	resp, err = kdb.DnssecKeyMgmt(context.Background(), nil, KeystorePost{Command: "dnssec-mgmt", SubCommand: "generate", Zone: zd.ZoneName, KeyType: "ZSK", Algorithm: dns.ED25519, Pub: &yes, Sign: &yes, DS: &no})
 	if err != nil || resp == nil || resp.Error {
