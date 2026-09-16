@@ -296,23 +296,36 @@ func cascadeConvertRun(f *bulkFlags) {
 		AllowRollInProgress: f.allowRoll,
 		MultiSigner:         f.multiSigner,
 	})
-	converted, skipped := printCascadeDispositions(ds)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
+		// A refusal comes before anything is written, and the dispositions it
+		// returns say "converted" for keys that were only planned; printing
+		// them above "Nothing was written" would contradict it. The error names
+		// the key that stopped the run.
 		var partial *tdns.PartialConvertError
 		if errors.As(err, &partial) {
 			fmt.Printf("\nThe failure happened after writing began, so %s MAY hold some of the\n"+
 				"keys and an out-of-date manifest. Cascade's own files were not touched.\n"+
 				"Re-running into the same directory is safe.\n", f.dest)
+			if len(ds) > 0 {
+				fmt.Printf("Keys this run planned to convert:\n")
+				printCascadeDispositions(ds)
+			}
 		} else {
 			fmt.Printf("Nothing was written. Cascade's own files were not touched.\n")
 		}
 		os.Exit(1)
 	}
 
+	converted, skipped := printCascadeDispositions(ds)
 	fmt.Printf("Converted %d DNSSEC key(s) into %s; %d not converted.\n", converted, f.dest, skipped)
 	if converted > 0 {
-		if mode, leaks, err := tdns.DirLeaksBeyondOwner(f.dest); err == nil && leaks {
+		// The keys are written by now, so a failed check is a warning, not an
+		// exit: the operator still needs to know the mode was not checked.
+		if mode, leaks, err := tdns.DirLeaksBeyondOwner(f.dest); err != nil {
+			fmt.Printf("WARNING: cannot check permissions on %s: %v. It holds private key\n"+
+				"         material; make sure it is not readable beyond its owner.\n", f.dest, err)
+		} else if leaks {
 			fmt.Printf("WARNING: %s is mode %04o, i.e. readable beyond its owner, and holds\n"+
 				"         private key material. Run 'chmod 700 %s'\n"+
 				"         unless that exposure is intended.\n", f.dest, mode, f.dest)
