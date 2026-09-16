@@ -451,7 +451,7 @@ type ZoneData struct {
 	// DelegationSyncQ) that need the live zone pointer, and any post-flip notifications.
 	OnZonePostRefresh []func(zd *ZoneData)
 
-	// ProxyRefreshAnalysis carries the delegation-sync-proxy change-detection
+	// ProxyRefreshAnalysis carries the parentsync-proxy change-detection
 	// result from the PreRefresh hook (which sees old+new zone data) to the
 	// PostRefresh hook (which acts). nil when no proxy analysis is pending.
 	// Set/consumed only on the OnZonePreRefresh/PostRefresh path for zones with
@@ -1181,7 +1181,7 @@ type DelegationSyncRequest struct {
 	// be looked up (errBootstrapAdvertisementLookup). Zero on the first try.
 	Attempt int
 	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
-	// set the proxy NOTIFY action keys on (delegation-sync-proxy).
+	// set the proxy NOTIFY action keys on (parentsync-proxy).
 	ProxyAnalysis *ProxyDelegationAnalysis
 }
 

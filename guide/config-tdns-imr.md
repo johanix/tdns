@@ -77,6 +77,7 @@ interactive shell.
 | `listeners.transports` | — | **required**. Any of `do53`, `dot`, `doh`, `doq` |
 | `listeners.certfile` / `keyfile` | — | required for `dot`/`doh`/`doq` |
 | `listeners.ports.{dot,doh,doq}` | 853/443/853 | per-transport listen ports (numbers) |
+| `listeners.doh-path` | `/dns-query` | the one HTTP path the DoH listener answers on, matched exactly; every other path gets 404. Same rules as in the [tdns-auth reference](config-tdns-auth.md#the-listeners-and-authengine-blocks). It sets only what this resolver serves: DoH to forwarding upstreams still goes to `/dns-query` |
 | `imrengine.active` | `true` | set `false` to disable the resolver entirely |
 | `imrengine.root-hints` | compiled-in | path to a root hints file |
 | `imrengine.require-dnssec-validation` | `true` | — |

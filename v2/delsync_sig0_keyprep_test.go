@@ -8,7 +8,7 @@ import (
 )
 
 // #538: Sig0KeyPreparation gated its INTERNAL publish on allow-updates, the
-// option that governs inbound RFC 2136 DDNS. A delegation-sync parent that
+// option that governs inbound RFC 2136 DDNS. A childsync zone that
 // (correctly) refuses DDNS therefore published a DSYNC record advertising an
 // UPDATE target and never generated the SIG(0) key that target names, so its
 // KeyState responses went out unsigned.
@@ -172,7 +172,7 @@ func TestSig0KeyPreparationSecondaryDoesNotOriginate(t *testing.T) {
 
 // An already-published KEY is left alone: no second key, no second publish.
 // This is what makes the function safe to re-run on every zone load, which it
-// is -- SetupZoneSync calls it on every load of every delegation-sync parent.
+// is -- SetupZoneSync calls it on every load of every childsync zone.
 //
 // The apex assertion is the second defect's regression guard. The verify step
 // used to look at the zone APEX rather than at name, so on a parent it found no

@@ -1091,7 +1091,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// delegation sync on first load, as ParseZones does for
 					// static zones. Scoped to zr.Template != "" so no
 					// pre-existing dynamic-zone class changes behavior.
-					// SetupZoneSync's delegation-sync-child path does an
+					// SetupZoneSync's parentsync path does an
 					// unbounded send to DelegationSyncQ, and OnFirstLoad
 					// callbacks run inside this engine loop — dispatch async so
 					// a full/stopped consumer cannot stall refresh processing.

@@ -10,23 +10,81 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 )
 
-func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, certFile, keyFile string,
+// DefaultDoHPath is the path the DoH listeners answer on when
+// listeners.doh-path is unset: the one RFC 8484 uses in its examples, and the
+// one clients assume when given only a host.
+const DefaultDoHPath = "/dns-query"
+
+// validateDoHPath checks listeners.doh-path (#666). Empty means
+// DefaultDoHPath. The listener compares the request path byte for byte, so
+// the rules keep out what a client would rewrite before sending, which could
+// then never match, and what would read as something else in a URI template:
+//   - it starts with "/";
+//   - no empty, "." or ".." segments, which clients normalise away (a
+//     trailing "/" is kept by clients and is allowed);
+//   - RFC 3986 path characters only, without percent-encoding: no query,
+//     fragment, space or braces.
+func validateDoHPath(path string) error {
+	if path == "" {
+		return nil
+	}
+	if path[0] != '/' {
+		return fmt.Errorf("listeners.doh-path %q must start with \"/\"", path)
+	}
+	for i := 0; i < len(path); i++ {
+		if !isDoHPathByte(path[i]) {
+			return fmt.Errorf("listeners.doh-path %q: %q is not allowed; use letters, digits, \"/\" and -._~!$&'()*+,;=:@ (no query, fragment or percent-encoding)",
+				path, string(path[i]))
+		}
+	}
+	segments := strings.Split(path[1:], "/")
+	for i, seg := range segments {
+		switch {
+		case seg == "" && i < len(segments)-1:
+			return fmt.Errorf("listeners.doh-path %q has an empty segment (\"//\"), which clients collapse", path)
+		case seg == "." || seg == "..":
+			return fmt.Errorf("listeners.doh-path %q has a %q segment, which clients resolve away", path, seg)
+		}
+	}
+	return nil
+}
+
+// isDoHPathByte is RFC 3986 pchar without pct-encoded, plus "/".
+func isDoHPathByte(c byte) bool {
+	switch {
+	case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		return true
+	}
+	return strings.IndexByte("-._~!$&'()*+,;=:@/", c) >= 0
+}
+
+func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, path, certFile, keyFile string,
 	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
 
-	lgDns.Info("DnsEngine: DoH addresses", "addrs", dohaddrs)
+	// path comes from the caller's listeners: block, like ports. The config
+	// loader has already refused a bad one; this is for any other caller.
+	if err := validateDoHPath(path); err != nil {
+		return err
+	}
+	if path == "" {
+		path = DefaultDoHPath
+	}
+	lgDns.Info("DnsEngine: DoH addresses", "addrs", dohaddrs, "path", path)
 	// The closure captures ourDNSHandler (a function parameter) and conf (a pointer).
 	// Both are set once at startup before any HTTP requests are served, so there is
 	// no data race despite the closure being invoked concurrently by the HTTP server.
-	http.HandleFunc("/dns-query", func(w http.ResponseWriter, r *http.Request) {
+	serveQuery := func(w http.ResponseWriter, r *http.Request) {
 		var dnsQuery []byte
 		var err error
 		msg := new(dns.Msg)
@@ -83,6 +141,25 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, c
 		if _, err := w.Write(buf.Bytes()); err != nil {
 			lgDns.Warn("DoH: error writing response", "err", err)
 		}
+	}
+
+	// The servers get this handler, never http.DefaultServeMux. The default
+	// mux is process-wide: whatever registers on it is served by every server
+	// that leaves Handler nil. net/http/pprof registers /debug/pprof/ there
+	// from its init(), and this package imports it for service.pprof-address,
+	// so a nil Handler put the profiler on the public DoH port,
+	// unauthenticated, whether or not pprof-address was set.
+	//
+	// One path, compared exactly, and not a ServeMux either: a mux pattern
+	// ending in "/" matches everything below it, and the mux answers paths it
+	// would clean with a redirect, so a configured path would not mean only
+	// itself.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != path {
+			http.NotFound(w, r)
+			return
+		}
+		serveQuery(w, r)
 	})
 
 	// ports comes from the caller's listeners: block (#444/#446).
@@ -95,7 +172,7 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, c
 			hostport := net.JoinHostPort(addr, port)
 			srv := &http.Server{
 				Addr:    hostport,
-				Handler: nil,
+				Handler: handler,
 				TLSConfig: &tls.Config{
 					MinVersion: tls.VersionTLS13,
 				},
@@ -118,7 +195,7 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, c
 			}
 			servers = append(servers, srv)
 			go func(s *http.Server, hp string) {
-				lgDns.Info("DnsEngine: setting up DoH server", "hostport", hp)
+				lgDns.Info("DnsEngine: setting up DoH server", "hostport", hp, "path", path)
 				if err := s.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
 					lgDns.Error("failed to setup DoH server", "hostport", hp, "err", err)
 					if ctx.Err() == nil {

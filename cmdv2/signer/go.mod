@@ -10,7 +10,7 @@ replace (
 )
 
 require (
-	github.com/johanix/dnssec-algorithms v0.0.0-20260706125906-0101974d6755
+	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/mattn/go-sqlite3 v1.14.28
 )

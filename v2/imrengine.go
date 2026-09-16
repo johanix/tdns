@@ -135,7 +135,7 @@ type ImrResponse struct {
 	// ValidationState is the DNSSEC verdict behind Validated. Its zero value
 	// means validation was not attempted (no answer, or an error before it
 	// ran). Consumers that must tell an UNSIGNED zone apart from a FAILED
-	// signature -- the delegation-sync child deciding what "allow-insecure"
+	// signature -- the parentsync zone deciding what "allow-insecure"
 	// may waive -- read this; Bogus is an attack signal, Insecure is not.
 	ValidationState cache.ValidationState
 	Error           bool
@@ -1757,7 +1757,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		}
 
 		if CaseFoldContains(conf.Listeners.Transports, "doh") {
-			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), certFile, keyFile, ImrHandler)
+			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), conf.Listeners.DoHPath, certFile, keyFile, ImrHandler)
 			if err != nil {
 				lgImr.Error("failed to setup DoH server", "err", err)
 			}

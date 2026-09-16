@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // KeyRowFlags are the mechanism columns of a DnssecKeyStore row, kept beside
@@ -141,10 +143,27 @@ var errKeyRowNotFound = errors.New("key not found")
 // (published_at, active_at or retired_at), and returns the state the row was
 // in. With expectOld set it is a compare-and-set: a row in another state is
 // left alone and an error returned. ds is written only when f.DS is Valid;
-// otherwise the column keeps what it has, which until S1b is NULL.
+// otherwise the column keeps what it has.
+//
+// A write that leaves the state as it is keeps a timestamp the row already
+// has: setting a published key published again must not restart its
+// propagation clock. It still fills one that is empty, which is how the key
+// state worker stamps a legacy key that has none.
+//
+// The invariants the writer can see are enforced here rather than left to the
+// checker: sign implies pub (I1), and ds only on a key with the SEP bit (I3).
 func setKeyRowTx(tx *Tx, zone string, keyid uint16, state string, f KeyRowFlags, expectOld string) (string, error) {
+	return setKeyRowTxOpts(tx, zone, keyid, state, f, expectOld, false)
+}
+
+// setKeyRowTxOpts is setKeyRowTx with keepDS: a ds left invalid is then
+// left as the row has it (NULL included) instead of resolved from the
+// zone's DS model, which is what an owner's write means by leaving it
+// open (UpdateKeyRow).
+func setKeyRowTxOpts(tx *Tx, zone string, keyid uint16, state string, f KeyRowFlags, expectOld string, keepDS bool) (string, error) {
 	var old string
-	err := tx.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zone, keyid).Scan(&old)
+	var flags int
+	err := tx.QueryRow(`SELECT state, flags FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zone, keyid).Scan(&old, &flags)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", fmt.Errorf("key with keyid %d not found in zone %s: %w", keyid, zone, errKeyRowNotFound)
@@ -154,6 +173,17 @@ func setKeyRowTx(tx *Tx, zone string, keyid uint16, state string, f KeyRowFlags,
 	if expectOld != "" && old != expectOld {
 		return "", fmt.Errorf("key with keyid %d in zone %s is not in state %s", keyid, zone, expectOld)
 	}
+	if !f.DS.Valid && !keepDS {
+		// The caller left ds open: the zone's DS model decides (keyrow_ds.go).
+		ds, err := dsForKeyTx(tx, zone, keyid, state, uint16(flags))
+		if err != nil {
+			return "", fmt.Errorf("key with keyid %d in zone %s to state %s: %w", keyid, zone, state, err)
+		}
+		f.DS = ds
+	}
+	if err := checkKeyRowFlags(f, uint16(flags)); err != nil {
+		return "", fmt.Errorf("key with keyid %d in zone %s to state %s: %w", keyid, zone, state, err)
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	q := `UPDATE DnssecKeyStore SET state=?, pub=?, sign=?`
@@ -162,16 +192,22 @@ func setKeyRowTx(tx *Tx, zone string, keyid uint16, state string, f KeyRowFlags,
 		q += `, ds=?`
 		args = append(args, boolInt(f.DS.Bool))
 	}
+	stamp := func(col string) {
+		if old == state {
+			// Keep a timestamp the row has; fill one it lacks.
+			q += `, ` + col + ` = CASE WHEN ` + col + ` IS NULL OR ` + col + ` = '' THEN ? ELSE ` + col + ` END`
+		} else {
+			q += `, ` + col + `=?`
+		}
+		args = append(args, now)
+	}
 	switch state {
 	case DnskeyStatePublished:
-		q += `, published_at=?`
-		args = append(args, now)
+		stamp("published_at")
 	case DnskeyStateActive:
-		q += `, active_at=?`
-		args = append(args, now)
+		stamp("active_at")
 	case DnskeyStateRetired:
-		q += `, retired_at=?`
-		args = append(args, now)
+		stamp("retired_at")
 	}
 	q += ` WHERE zonename=? AND keyid=?`
 	args = append(args, zone, keyid)
@@ -189,6 +225,18 @@ func setKeyRowTx(tx *Tx, zone string, keyid uint16, state string, f KeyRowFlags,
 	return old, nil
 }
 
+// checkKeyRowFlags is what a writer can verify of the invariants: I1, sign
+// implies pub; I3, ds only on a key with the SEP bit.
+func checkKeyRowFlags(f KeyRowFlags, flags uint16) error {
+	if f.Sign && !f.Pub {
+		return errors.New("sign set without pub: a key cannot sign without being in the DNSKEY RRset")
+	}
+	if f.DS.Valid && f.DS.Bool && flags&dns.SEP == 0 {
+		return errors.New("ds set on a key without the SEP bit")
+	}
+	return nil
+}
+
 // insertKeyRowTx is the only INSERT into DnssecKeyStore.
 func insertKeyRowTx(tx *Tx, row KeyRow) error {
 	f := KeyRowFlags{}
@@ -199,6 +247,17 @@ func insertKeyRowTx(tx *Tx, row KeyRow) error {
 		if f, ok = keyFlagsForState(row.State); !ok {
 			return fmt.Errorf("insertKeyRowTx: no flags known for key state %q (zone %s, keyid %d); register the state with RegisterKeyStateFlags or pass the flags", row.State, row.Zone, row.Keyid)
 		}
+	}
+	if !f.DS.Valid {
+		// The caller left ds open: the zone's DS model decides (keyrow_ds.go).
+		ds, err := dsForKeyTx(tx, row.Zone, row.Keyid, row.State, row.Flags)
+		if err != nil {
+			return fmt.Errorf("insertKeyRowTx: %s keyid %d: %w", row.Zone, row.Keyid, err)
+		}
+		f.DS = ds
+	}
+	if err := checkKeyRowFlags(f, row.Flags); err != nil {
+		return fmt.Errorf("insertKeyRowTx: %s keyid %d: %w", row.Zone, row.Keyid, err)
 	}
 	var comment, ds any
 	if row.Comment != "" {
@@ -391,4 +450,50 @@ func nullBoolPtr(v sql.NullInt64) *bool {
 	}
 	b := v.Int64 != 0
 	return &b
+}
+
+// ErrKeyRowStateChanged: a compare-and-set state write found the row in
+// another state than the caller expected.
+var ErrKeyRowStateChanged = errors.New("the key row is not in the state the write expected")
+
+// UpdateKeyRow is the state write of an owner (KeyLifecycleOwner): state and
+// the three columns as the caller names them, in one statement through the
+// write function; then the change is reported to the hooks and the zone's
+// signing set republished, as UpdateDnssecKeyState does for tdns's own
+// transitions. An owner's states carry no defaults in tdns, so the caller
+// names every column; a ds left invalid keeps the row's ds.
+func UpdateKeyRow(kdb *KeyDB, zonename string, keyid uint16, state string, flags KeyRowFlags) error {
+	return UpdateKeyRowFrom(kdb, zonename, keyid, state, "", flags)
+}
+
+// UpdateKeyRowFrom is UpdateKeyRow with a compare-and-set on the state the
+// caller expects the row to be in ("" for any); ErrKeyRowStateChanged when
+// it is not.
+func UpdateKeyRowFrom(kdb *KeyDB, zonename string, keyid uint16, state, expectOld string, flags KeyRowFlags) error {
+	tx, err := kdb.Begin("UpdateKeyRow")
+	if err != nil {
+		return fmt.Errorf("error beginning transaction: %v", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+	oldstate, err := setKeyRowTxOpts(tx, zonename, keyid, state, flags, expectOld, true)
+	if err != nil {
+		if expectOld != "" && strings.Contains(err.Error(), "is not in state") {
+			return fmt.Errorf("%w: key %d of %s, expected %s: %v", ErrKeyRowStateChanged, keyid, zonename, expectOld, err)
+		}
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit failed: %w", err)
+	}
+	committed = true
+	notifyKeyStateChange(zonename, keyid, oldstate, state)
+	if rerr := republishSigningKeysForZone(kdb, zonename); rerr != nil {
+		return fmt.Errorf("UpdateKeyRow: republish signing keys: %w", rerr)
+	}
+	return nil
 }

@@ -1838,6 +1838,18 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 	return &cdd, nil
 }
 
+// multiProviderAgentAppTypes are the app types that run delegation sync for
+// a multi-provider zone the way tdns-agent does. tdns-mp's agent runs under
+// its own app type and registers it (key lifecycle ownership design §4.2:
+// delegation-sync setup must run for the multi-provider agent).
+var multiProviderAgentAppTypes = map[AppType]bool{AppTypeAgent: true}
+
+// RegisterMultiProviderAgentAppType adds an app type to those SetupZoneSync
+// treats as a multi-provider agent.
+func RegisterMultiProviderAgentAppType(t AppType) { multiProviderAgentAppTypes[t] = true }
+
+func multiProviderAgentApp(t AppType) bool { return multiProviderAgentAppTypes[t] }
+
 func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	wantsSync := zd.Options[OptChildSync] || zd.Options[OptParentSync] || zd.Options[OptParentSyncProxy] ||
 		zd.Options[OptChildSyncProxy]
@@ -1947,18 +1959,18 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		}
 	}
 
-	// If this is a child zone and we have the delegation-sync-child option set, we need to
+	// If this is a child zone and we have the parentsync option set, we need to
 	// ensure that there is a SIG(0) keypair and that the public key is published in the zone.
-	// delegation-sync-child is valid for auth (standalone) or agent+multi-provider zones.
+	// parentsync is valid for auth (standalone) or agent+multi-provider zones.
 	// Combiner and signer roles don't do child delegation sync.
 	if zd.Options[OptParentSync] &&
 		((Globals.App.Type == AppTypeAuth && !zd.Options[OptMultiProvider]) ||
-			(Globals.App.Type == AppTypeAgent && zd.Options[OptMultiProvider])) {
+			(multiProviderAgentApp(Globals.App.Type) && zd.Options[OptMultiProvider])) {
 		schemes := ParentSyncConfig().Schemes
 		if len(schemes) == 0 {
-			lg.Error("SetupZoneSync: zone has delegation-sync-child enabled but parentsync.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)
-			zd.SetError(ConfigError, "delegation-sync-child enabled but parentsync.schemes is not configured")
-			return fmt.Errorf("delegation-sync-child enabled but parentsync.schemes is not configured for zone %s", zd.ZoneName)
+			lg.Error("SetupZoneSync: zone has parentsync enabled but parentsync.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)
+			zd.SetError(ConfigError, "parentsync enabled but parentsync.schemes is not configured")
+			return fmt.Errorf("parentsync enabled but parentsync.schemes is not configured for zone %s", zd.ZoneName)
 		}
 		for _, scheme := range schemes {
 			switch scheme {
@@ -1978,7 +1990,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		}
 	}
 
-	// delegation-sync-proxy: a tdns-agent acting as a SECONDARY for a zone
+	// parentsync-proxy: a tdns-agent acting as a SECONDARY for a zone
 	// whose primary is DSYNC-unaware (BIND/Knot). The agent inspects incoming
 	// transfers for CDS/CSYNC (and NS/glue/DNSKEY) changes and forwards
 	// NOTIFY(CDS/CSYNC) — and, when the parent advertises UPDATE and the agent's
@@ -1987,12 +1999,12 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	// so a misconfiguration is loud rather than silently inert.
 	if zd.Options[OptParentSyncProxy] {
 		if Globals.App.Type != AppTypeAgent || zd.ZoneType != Secondary {
-			lg.Error("SetupZoneSync: delegation-sync-proxy is only valid for a tdns-agent secondary zone",
+			lg.Error("SetupZoneSync: parentsync-proxy is only valid for a tdns-agent secondary zone",
 				"zone", zd.ZoneName, "app", Globals.App.Type, "zonetype", zd.ZoneType)
-			zd.SetError(ConfigError, "delegation-sync-proxy is only valid for an agent secondary zone")
-			return fmt.Errorf("delegation-sync-proxy on zone %s requires a tdns-agent secondary zone", zd.ZoneName)
+			zd.SetError(ConfigError, "parentsync-proxy is only valid for an agent secondary zone")
+			return fmt.Errorf("parentsync-proxy on zone %s requires a tdns-agent secondary zone", zd.ZoneName)
 		}
-		lg.Info("SetupZoneSync: delegation-sync-proxy enabled (agent secondary)", "zone", zd.ZoneName)
+		lg.Info("SetupZoneSync: parentsync-proxy enabled (agent secondary)", "zone", zd.ZoneName)
 		// Run the UPDATE-proxy precondition check (§10.8) off the refresh path,
 		// via the DelegationSyncher: it does DSYNC discovery (network) and may
 		// generate a SIG(0) key, so it must not run inline here. The check is a
@@ -2049,6 +2061,19 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	}
 
 	// 2. Collect SIG(0) KEY records (if they should be published)
+	// A multi-provider zone this instance signs and whose key lifecycle is
+	// owned serves the CDS of its DS set (key lifecycle ownership design
+	// §4.1, arrow 1): the DS engine owns the content, and a transfer from
+	// the combiner is where it would be lost.
+	if cds := ownedZoneCDS(zd); len(cds) > 0 {
+		dynamicRRs = append(dynamicRRs, &core.RRset{
+			Name:   zd.ZoneName,
+			Class:  dns.ClassINET,
+			RRtype: dns.TypeCDS,
+			RRs:    cds,
+		})
+	}
+
 	if !zd.Options[OptDontPublishKey] {
 		sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 		if err != nil {
@@ -2509,7 +2534,7 @@ $TTL 3600
 	// no-refresh-hooks: a catalog PRIMARY, and this is a *KeyDB method with no
 	// Config in scope to take the delegation-sync queue from. Both hooks gate
 	// on options a primary cannot hold (use-hsyncparam is dropped on a primary,
-	// delegation-sync-proxy is agent-secondary), so they would be permanent
+	// parentsync-proxy is agent-secondary), so they would be permanent
 	// no-ops. Revisit if a hook ever applies to a primary.
 	Zones.Set(zonename, zd)
 
