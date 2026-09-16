@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/miekg/dns"
@@ -121,7 +122,7 @@ func ownerPolicyFieldsDiffer(a, b *DnssecPolicy) bool {
 	}
 	return a.Mode != b.Mode || a.Algorithm != b.Algorithm || a.KSKAlgorithm != b.KSKAlgorithm || a.ZSKAlgorithm != b.ZSKAlgorithm ||
 		a.KSK.Lifetime != b.KSK.Lifetime || a.ZSK.Lifetime != b.ZSK.Lifetime || a.CSK.Lifetime != b.CSK.Lifetime ||
-		a.Rollover.Method != b.Rollover.Method || a.Rollover.NumDS != b.Rollover.NumDS
+		a.Rollover.Method != b.Rollover.Method || a.Rollover.NumDS != b.Rollover.NumDS || a.Rollover.StandbyTime != b.Rollover.StandbyTime
 }
 
 // What an owner needs from tdns (§3.5, "tdns exports what an owner needs").
@@ -139,4 +140,59 @@ func (zd *ZoneData) PublishCDSAndWait(ctx context.Context, kdb *KeyDB, cds []dns
 
 func (zd *ZoneData) UnpublishCDSAndWait(ctx context.Context, kdb *KeyDB) error {
 	return zd.unpublishCDSAndWait(ctx, kdb)
+}
+
+// SetZonePolicyForOwner binds policyName to an owned zone on the owner's
+// behalf, the way policy-set does for a zone nobody owns: the mechanism
+// fields are applied by tdns as ever (a resign under the new policy), and
+// the owner's fields (lifetimes, standby counts, the withdrawal margin)
+// change with the binding, since they are the owner's to set (design Q1).
+// What is not a binding but a rollover the owner runs is refused: the mode,
+// an algorithm (the top-level one CSK mode generates with, or either
+// role's), and the DS model (an owned zone is a multi-provider zone; its DS
+// set is every signing provider's KSKs, D4). A zone nobody owns keeps
+// policy-set.
+func SetZonePolicyForOwner(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
+	if zd == nil {
+		return "", fmt.Errorf("owner policy-set: no zone")
+	}
+	if !zoneOwned(zd) {
+		return "", fmt.Errorf("owner policy-set: zone %s: its key lifecycle is not owned; policy-set applies", zd.ZoneName)
+	}
+	policyName = strings.TrimSpace(policyName)
+	if policyName == "" {
+		return "", fmt.Errorf("owner policy-set: no policy specified")
+	}
+	pol, ok := ConfLive().DnssecPolicies[policyName]
+	if !ok {
+		return "", fmt.Errorf("owner policy-set: DNSSEC policy %q does not exist", policyName)
+	}
+	if pol.Error != "" {
+		return "", fmt.Errorf("owner policy-set: DNSSEC policy %q is broken: %s", policyName, pol.Error)
+	}
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return "", fmt.Errorf("owner policy-set: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
+	}
+	zd.mu.Lock()
+	cur := zd.DnssecPolicy
+	oldName := zd.DnssecPolicyName
+	zd.mu.Unlock()
+	if cur != nil {
+		switch {
+		case cur.Mode != pol.Mode:
+			return "", fmt.Errorf("owner policy-set: zone %s: policy %q changes the mode (%s to %s); that is not a policy binding", zd.ZoneName, policyName, cur.Mode, pol.Mode)
+		case cur.Algorithm != pol.Algorithm || cur.KSKAlgorithm != pol.KSKAlgorithm || cur.ZSKAlgorithm != pol.ZSKAlgorithm:
+			return "", fmt.Errorf("owner policy-set: zone %s: policy %q changes an algorithm (CSK %d to %d, KSK %d to %d, ZSK %d to %d); that is a rollover the owner runs, not a policy binding", zd.ZoneName, policyName, cur.Algorithm, pol.Algorithm, cur.KSKAlgorithm, pol.KSKAlgorithm, cur.ZSKAlgorithm, pol.ZSKAlgorithm)
+		case cur.Rollover.Method != pol.Rollover.Method || cur.Rollover.NumDS != pol.Rollover.NumDS:
+			return "", fmt.Errorf("owner policy-set: zone %s: policy %q changes the DS model (%s/%d to %s/%d); an owned zone's DS set is the multi-provider one", zd.ZoneName, policyName, cur.Rollover.Method, cur.Rollover.NumDS, pol.Rollover.Method, pol.Rollover.NumDS)
+		}
+	}
+	newrrsigs, err := applyZonePolicyTransactional(ctx, zd, kdb, &pol, policyName, PolicyApplySourceCommand)
+	if err != nil {
+		return "", fmt.Errorf("owner policy-set: %w", err)
+	}
+	if oldName != "" && oldName != policyName {
+		return fmt.Sprintf("Zone %s: DNSSEC policy changed from %q to %q by its key lifecycle owner (%d new RRSIGs). Update the zone's dnssec_policy in YAML to make %q permanent.", zd.ZoneName, oldName, policyName, newrrsigs, policyName), nil
+	}
+	return fmt.Sprintf("Zone %s: DNSSEC policy set to %q by its key lifecycle owner (%d new RRSIGs). Update the zone's dnssec_policy in YAML to make %q permanent.", zd.ZoneName, policyName, newrrsigs, policyName), nil
 }
