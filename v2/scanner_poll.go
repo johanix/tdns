@@ -96,14 +96,15 @@ func (s pollSwitch) String() string {
 // scannerPollState is the Scanner's poll bookkeeping.
 //   - interval is set before the scanner is published and never changes.
 //   - running and switched are shared with the API and the round's goroutine.
-//   - logged and last belong to the engine's goroutine.
+//   - logged, last and lastSwitch belong to the engine's goroutine.
 type scannerPollState struct {
 	interval time.Duration
 	running  atomic.Bool  // a round is in progress
 	switched atomic.Int32 // a pollSwitch
 
-	logged bool
-	last   scannerPollConf
+	logged     bool
+	last       scannerPollConf
+	lastSwitch pollSwitch
 }
 
 // pollConf is the poll settings the scanner acts on: the running config's,
@@ -128,14 +129,16 @@ func (scanner *Scanner) setPollSwitch(s pollSwitch) {
 	lg.Info("ScannerEngine: poll switch set", "switch", s.String(), "enabled", scanner.pollConf().Enabled)
 }
 
-// notePollConf logs the poll settings the first time and whenever they differ
-// from the last ones logged.
+// notePollConf logs the poll settings the first time and whenever they, or the
+// switch, differ from the last ones logged. The switch counts on its own:
+// switching on a server whose config already polls changes no setting.
 func (scanner *Scanner) notePollConf(conf scannerPollConf) {
-	if scanner.poll.logged && scanner.poll.last == conf {
+	sw := scanner.pollSwitch()
+	if scanner.poll.logged && scanner.poll.last == conf && scanner.poll.lastSwitch == sw {
 		return
 	}
-	scanner.poll.logged, scanner.poll.last = true, conf
-	lg.Info("ScannerEngine: poll settings", "enabled", conf.Enabled, "switch", scanner.pollSwitch().String(),
+	scanner.poll.logged, scanner.poll.last, scanner.poll.lastSwitch = true, conf, sw
+	lg.Info("ScannerEngine: poll settings", "enabled", conf.Enabled, "switch", sw.String(),
 		"interval", scanner.poll.interval, "bootstrap", conf.Bootstrap, "concurrency", conf.Concurrency)
 }
 
@@ -195,7 +198,7 @@ func (scanner *Scanner) pollRound(ctx context.Context, parents []*ZoneData, conf
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				s, c, f := scanner.pollChild(ctx, job.parent, job.tuple)
+				s, c, f := scanner.pollChild(ctx, job.parent, job.tuple, conf.Bootstrap)
 				mu.Lock()
 				scans, changes, failed = scans+s, changes+c, failed+f
 				mu.Unlock()
@@ -251,7 +254,8 @@ feed:
 
 // pollChild scans one child, CSYNC before CDS, each through scanChildAndApply.
 // A child without a DS -- polled only for bootstrap -- gets the CDS scan alone.
-func (scanner *Scanner) pollChild(ctx context.Context, parent *ZoneData, tuple ScanTuple) (scans, changes, errs int) {
+// Each scan checks the DS again under the child's lock (pollScan).
+func (scanner *Scanner) pollChild(ctx context.Context, parent *ZoneData, tuple ScanTuple, bootstrap bool) (scans, changes, errs int) {
 	types := []ScanType{ScanCDS}
 	if tuple.CurrentData.DS != nil {
 		types = []ScanType{ScanCSYNC, ScanCDS}
@@ -260,7 +264,7 @@ func (scanner *Scanner) pollChild(ctx context.Context, parent *ZoneData, tuple S
 		if ctx.Err() != nil {
 			break
 		}
-		resp := scanner.scanChildAndApply(ctx, parent, scanType, tuple, nil)
+		resp := scanner.scanChildAndApply(ctx, parent, scanType, tuple, nil, &pollScan{bootstrap: bootstrap})
 		scans++
 		if resp.Error {
 			errs++
