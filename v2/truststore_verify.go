@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -30,24 +31,94 @@ func LookupChildKeyAtApex(ctx context.Context, childZone string, imr *Imr) ([]dn
 	return resp.RRset.RRs, resp.Validated, nil
 }
 
-// LookupChildKeyAtSignal queries _sig0key.<childzone>._signal.<ns>. for KEY
-// records for each NS serving the child zone. Returns the union of KEY RRs
-// found, whether all responses were DNSSEC-validated, and any error.
-func LookupChildKeyAtSignal(ctx context.Context, childZone string, imr *Imr) ([]dns.RR, bool, error) {
-	// First, look up the child zone's NS records.
-	nsResp, err := imr.ImrQuery(ctx, dns.Fqdn(childZone), dns.TypeNS, dns.ClassINET, nil)
-	if err != nil {
-		return nil, false, fmt.Errorf("IMR query for %s NS failed: %v", childZone, err)
+// childKeySignalQuery indirects the KEY lookup at one signal name, so a test
+// can see which names at-ns asks without standing up an IMR. Which names are
+// asked is the thing worth pinning (#677).
+//
+// Production code MUST NOT reassign this. Tests reassign it and restore the
+// original via t.Cleanup.
+var childKeySignalQuery = func(ctx context.Context, imr *Imr, name string) (*ImrResponse, error) {
+	return imr.ImrQuery(ctx, name, dns.TypeKEY, dns.ClassINET, nil)
+}
+
+// atNsNameservers returns the nameservers at-ns builds its signal names from:
+// the NS RRset of childZone's delegation, as parentZone holds it on this server.
+//
+// Read from the parent's own zone data, never resolved. It used to be the
+// child's apex NS RRset, asked of the IMR. That had two faults (#677). A stale
+// cached RRset sent every attempt to the old nameservers and never to the one
+// holding the key, so a correct, validating KEY failed its bootstrap. And the
+// child chose which nameservers were asked for its own key, which is what
+// signal names exist to prevent. The parent is authoritative for the
+// delegation, so it has nothing to resolve and nothing to validate.
+//
+// Nameservers inside the child zone are dropped while the parent holds no DS
+// for the child. Their signal names lie inside the child zone itself, so the
+// child alone controls them, and with no DS nothing there can validate. With a
+// DS the child's chain of trust reaches them, and they are kept.
+//
+// Read at every attempt rather than once, so a delegation update that lands
+// after the key upload is seen by the next attempt.
+//
+// An error means there is nothing to ask: no delegating zone was named, this
+// server does not hold it, it holds no NS for the child, or every NS is inside
+// the child and there is no DS. Falling back to the child's apex NS would
+// reintroduce both faults.
+func atNsNameservers(parentZone, childZone string) (*core.RRset, error) {
+	if parentZone == "" {
+		return nil, fmt.Errorf("no delegating zone known for %s", childZone)
 	}
-	if nsResp.Error || nsResp.RRset == nil || len(nsResp.RRset.RRs) == 0 {
-		return nil, false, fmt.Errorf("no NS records found for %s", childZone)
+	if core.EqualNames(parentZone, childZone) {
+		return nil, fmt.Errorf("%s cannot be its own delegating zone", childZone)
+	}
+	pzd, ok := Zones.Get(parentZone)
+	if !ok {
+		return nil, fmt.Errorf("this server is not authoritative for %s, the zone delegating %s", parentZone, childZone)
+	}
+	child := dns.Fqdn(childZone)
+	nsRRset, err := pzd.GetRRset(child, dns.TypeNS)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the delegation of %s from %s: %v", childZone, parentZone, err)
+	}
+	if nsRRset == nil || len(nsRRset.RRs) == 0 {
+		return nil, fmt.Errorf("%s holds no NS delegation for %s", parentZone, childZone)
+	}
+	dsRRset, err := pzd.GetRRset(child, dns.TypeDS)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the DS of %s from %s: %v", childZone, parentZone, err)
+	}
+	if dsRRset != nil && len(dsRRset.RRs) > 0 {
+		return nsRRset, nil
+	}
+
+	out := &core.RRset{Name: nsRRset.Name, Class: nsRRset.Class, RRtype: nsRRset.RRtype}
+	for _, rr := range nsRRset.RRs {
+		if ns, ok := rr.(*dns.NS); ok && dns.IsSubDomain(child, ns.Ns) {
+			continue
+		}
+		out.RRs = append(out.RRs, rr)
+	}
+	if len(out.RRs) == 0 {
+		return nil, fmt.Errorf("every NS of %s is inside the child and %s holds no DS for it", childZone, parentZone)
+	}
+	return out, nil
+}
+
+// LookupChildKeyAtSignal queries _sig0key.<childzone>._signal.<ns>. for KEY
+// records, for each NS in nameservers: those of the parent's own delegation
+// that atNsNameservers selects (it says why not the child's apex NS). Returns the
+// union of KEY RRs found, whether all responses were DNSSEC-validated, and any
+// error.
+func LookupChildKeyAtSignal(ctx context.Context, childZone string, nameservers *core.RRset, imr *Imr) ([]dns.RR, bool, error) {
+	if nameservers == nil || len(nameservers.RRs) == 0 {
+		return nil, false, fmt.Errorf("no nameservers to build signal names for %s from", childZone)
 	}
 
 	var allKeys []dns.RR
 	allValidated := true
 	found := false
 
-	for _, rr := range nsResp.RRset.RRs {
+	for _, rr := range nameservers.RRs {
 		nsRR, ok := rr.(*dns.NS)
 		if !ok {
 			continue
@@ -58,12 +129,12 @@ func LookupChildKeyAtSignal(ctx context.Context, childZone string, imr *Imr) ([]
 		signalName := signalOwnerName(signalPrefixSig0Key, childZone, nsRR.Ns)
 		lgSigner.Debug("LookupChildKeyAtSignal: querying", "name", signalName)
 
-		keyResp, err := imr.ImrQuery(ctx, signalName, dns.TypeKEY, dns.ClassINET, nil)
+		keyResp, err := childKeySignalQuery(ctx, imr, signalName)
 		if err != nil {
 			lgSigner.Debug("LookupChildKeyAtSignal: query failed", "name", signalName, "err", err)
 			continue
 		}
-		if keyResp.Error || keyResp.RRset == nil || len(keyResp.RRset.RRs) == 0 {
+		if keyResp == nil || keyResp.Error || keyResp.RRset == nil || len(keyResp.RRset.RRs) == 0 {
 			continue
 		}
 
@@ -85,8 +156,9 @@ func LookupChildKeyAtSignal(ctx context.Context, childZone string, imr *Imr) ([]
 // be found via the policy's verification mechanisms (at-apex, at-ns). The
 // policy is the caller's: TriggerChildKeyVerification resolves it once from
 // the receiving parent zone and passes it here rather than looking it up
-// again from the child name.
-func VerifyChildKey(ctx context.Context, childZone string, keyRR string, imr *Imr, pol DelegationPolicy) (verified bool, dnssecValidated bool) {
+// again from the child name. parentZone is that same zone: at-ns reads the
+// child's delegation from it (atNsNameservers).
+func VerifyChildKey(ctx context.Context, childZone, parentZone string, keyRR string, imr *Imr, pol DelegationPolicy) (verified bool, dnssecValidated bool) {
 	mechanisms := pol.Mechanisms
 	if len(mechanisms) == 0 {
 		return false, false
@@ -116,7 +188,13 @@ func VerifyChildKey(ctx context.Context, childZone string, keyRR string, imr *Im
 			}
 
 		case "at-ns":
-			keys, validated, err := LookupChildKeyAtSignal(ctx, childZone, imr)
+			nsRRset, err := atNsNameservers(parentZone, childZone)
+			if err != nil {
+				lgSigner.Info("VerifyChildKey: at-ns not tried, no nameserver in the delegation to build signal names from",
+					"zone", childZone, "parent", parentZone, "err", err)
+				continue
+			}
+			keys, validated, err := LookupChildKeyAtSignal(ctx, childZone, nsRRset, imr)
 			if err != nil {
 				lgSigner.Debug("VerifyChildKey: at-ns failed", "zone", childZone, "err", err)
 				continue
@@ -323,16 +401,7 @@ func (zd *ZoneData) rememberDiscoveredChildKey(ctx context.Context, key *Sig0Key
 // which an unrelated goroutine starting or stopping makes meaningless in either
 // direction. Same shape as deferForImr.
 func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, parentZone string, keyid uint16, keyRR string) <-chan struct{} {
-	var pol DelegationPolicy
-	if parentZone != "" {
-		if pzd, ok := Zones.Get(parentZone); ok {
-			pol = pzd.boundDelegationPolicy()
-		} else {
-			pol = compiledDefaultDelegationPolicy()
-		}
-	} else {
-		pol = parentDelegationPolicy(childZone)
-	}
+	pol, parentZone := childKeyPolicy(childZone, parentZone)
 	if len(pol.Mechanisms) == 0 {
 		lgSigner.Info("TriggerChildKeyVerification: policy has empty mechanisms; not verifying",
 			"zone", childZone, "keyid", keyid, "policy", pol.Name)
@@ -352,9 +421,32 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, pa
 		// Released before done closes, so a caller that waits on done can
 		// start the next verification of the key.
 		defer childKeyVerifications.Delete(id)
-		kdb.runChildKeyVerification(ctx, childZone, keyid, pol, imrChildKeyVerifier(childZone, keyRR, pol))
+		kdb.runChildKeyVerification(ctx, childZone, keyid, pol, imrChildKeyVerifier(childZone, parentZone, keyRR, pol))
 	}()
 	return done
+}
+
+// childKeyPolicy resolves the delegation policy for verifying childZone's key,
+// and the delegating zone at-ns reads the delegation from. Both come from the
+// same zone, so the policy and the delegation it is applied to cannot belong
+// to different parents.
+//
+// parentZone is the receiving zone when the caller knows it. When it is not
+// held here, the compiled default policy applies and the name is kept:
+// atNsNameservers reports it as not authoritative at each attempt, and at-ns is
+// not tried. An empty parentZone means the caller does not know it (only tests
+// reach this today), and the closest enclosing zone held here is used.
+func childKeyPolicy(childZone, parentZone string) (DelegationPolicy, string) {
+	if parentZone != "" {
+		if pzd, ok := Zones.Get(parentZone); ok {
+			return pzd.boundDelegationPolicy(), parentZone
+		}
+		return compiledDefaultDelegationPolicy(), parentZone
+	}
+	if pzd := FindParentZone(childZone); pzd != nil {
+		return pzd.boundDelegationPolicy(), pzd.ZoneName
+	}
+	return compiledDefaultDelegationPolicy(), ""
 }
 
 // childKeyVerifier makes one verification attempt. accepted means the key may
@@ -388,13 +480,13 @@ func childKeyAcceptable(verified, dnssecValidated bool, pol DelegationPolicy) bo
 	return dnssecValidated || !pol.RequireDnssec
 }
 
-func imrChildKeyVerifier(childZone, keyRR string, pol DelegationPolicy) childKeyVerifier {
+func imrChildKeyVerifier(childZone, parentZone, keyRR string, pol DelegationPolicy) childKeyVerifier {
 	return func(ctx context.Context) (bool, bool, error) {
 		imr := Globals.ImrEngine
 		if imr == nil {
 			return false, false, errors.New("IMR engine not yet available")
 		}
-		verified, dnssecValidated := VerifyChildKey(ctx, childZone, keyRR, imr, pol)
+		verified, dnssecValidated := VerifyChildKey(ctx, childZone, parentZone, keyRR, imr, pol)
 		if !verified {
 			return false, false, fmt.Errorf("KEY not found via %v", pol.Mechanisms)
 		}
