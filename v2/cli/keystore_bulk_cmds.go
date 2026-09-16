@@ -42,6 +42,13 @@ type bulkFlags struct {
 	force     bool
 	selExact  []string
 	selSubtre []string
+
+	// bulk-convert --from cascade
+	from        string
+	stateFiles  []string
+	keysDir     string
+	allowRoll   bool
+	multiSigner bool
 }
 
 // addBulkCommands hangs bulk-export/bulk-import off a class's command tree.
@@ -141,22 +148,84 @@ retired key gets published again.
 
 Runs entirely locally: no daemon, no API, no keystore. That is the point --
 these directories are built and committed before the server that serves them
-exists. Re-running is safe; already-converted keys are left alone.`, classLabel(class)),
+exists. Re-running is safe; already-converted keys are left alone.
+
+--from cascade (DNSSEC only) converts the keys of zones signed by NLnet Labs'
+Cascade, so a zone moves to tdns with the same keys and the parent's DS is left
+as it is. Give each zone's dnst state file with --state-file (in Cascade's
+keys-dir, <zone>.state) and a NEW directory with --dest: Cascade's files are
+only read, never rewritten. The state file decides each key's tdns state, and
+the conversion is refused unless the result reproduces the DNSKEY RRset and DS
+set Cascade serves. A key roll in progress is refused unless
+--allow-roll-in-progress; another signer's key in the DNSKEY RRset is refused
+unless --multi-signer (the target is tdns-mpsigner, which takes such keys from
+its incoming zone). See docs/2026-09-16-cascade-key-migration.md.`, classLabel(class)),
 		Run: func(cmd *cobra.Command, args []string) {
 			bulkConvertRun(class, f)
 		},
 	}
-	bulkConvert.Flags().StringVar(&f.dir, "dir", "", "Directory of bind9 key files to convert in place")
+	bulkConvert.Flags().StringVar(&f.dir, "dir", "", "Directory of bind9 key files to convert in place (--from bind)")
 	bulkConvert.Flags().StringVar(&f.state, "state", "",
-		"Key state for keys with no .state file (required only for those)")
+		"Key state for keys with no .state file (required only for those; --from bind)")
 	bulkConvert.Flags().BoolVar(&f.noBackup, "no-backup", false,
-		"Do not keep the original bind-format key as .private.orig")
-	bulkConvert.MarkFlagRequired("dir")
+		"Do not keep the original bind-format key as .private.orig (--from bind)")
+	if class == "dnssec" {
+		bulkConvert.Short = "Convert DNSSEC keys written by bind9 or Cascade into a directory tdns can pre-load"
+		bulkConvert.Flags().StringVar(&f.from, "from", "bind", "Signer that wrote the keys: bind or cascade")
+		bulkConvert.Flags().StringArrayVar(&f.stateFiles, "state-file", nil,
+			"Cascade: a zone's dnst state file, <keys-dir>/<zone>.state (repeatable)")
+		bulkConvert.Flags().StringVar(&f.dest, "dest", "", "Cascade: new directory to write the converted keys and manifest to")
+		bulkConvert.Flags().StringVar(&f.keysDir, "keys-dir", "",
+			"Cascade: where the key files are, when not beside the state file")
+		bulkConvert.Flags().BoolVar(&f.allowRoll, "allow-roll-in-progress", false,
+			"Cascade: convert a zone with a key roll in progress (tdns does not continue the roll)")
+		bulkConvert.Flags().BoolVar(&f.multiSigner, "multi-signer", false,
+			"Cascade: accept other signers' keys in the DNSKEY RRset; the target is tdns-mpsigner")
+	}
 
 	parent.AddCommand(bulkConvert)
 }
 
+// bulkConvertFlagsError checks that the flags given fit the --from chosen,
+// before anything is read.
+func bulkConvertFlagsError(class string, f *bulkFlags) error {
+	switch f.from {
+	case "", "bind":
+		if f.dir == "" {
+			return fmt.Errorf("--dir is required")
+		}
+		if len(f.stateFiles) > 0 || f.dest != "" || f.keysDir != "" || f.allowRoll || f.multiSigner {
+			return fmt.Errorf("--state-file, --dest, --keys-dir, --allow-roll-in-progress and --multi-signer apply only to --from cascade")
+		}
+	case "cascade":
+		if class != "dnssec" {
+			return fmt.Errorf("--from cascade converts DNSSEC keys only")
+		}
+		if len(f.stateFiles) == 0 {
+			return fmt.Errorf("--from cascade needs at least one --state-file")
+		}
+		if f.dest == "" {
+			return fmt.Errorf("--from cascade needs --dest: Cascade's own files are never rewritten")
+		}
+		if f.dir != "" || f.state != "" || f.noBackup {
+			return fmt.Errorf("--dir, --state and --no-backup apply only to --from bind")
+		}
+	default:
+		return fmt.Errorf("unknown --from %q (want bind or cascade)", f.from)
+	}
+	return nil
+}
+
 func bulkConvertRun(class string, f *bulkFlags) {
+	if err := bulkConvertFlagsError(class, f); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	if f.from == "cascade" {
+		cascadeConvertRun(f)
+		return
+	}
+
 	// The destination holds private keys and is about to hold more of them in a
 	// second form. Same check the export path makes, and for the same reason:
 	// MkdirAll's mode is not involved here at all, so an existing 0755 course
@@ -217,6 +286,68 @@ func bulkConvertRun(class string, f *bulkFlags) {
 		}
 		fmt.Printf("Point keystore.preload.%s at this directory to load them at startup.\n", class)
 	}
+}
+
+func cascadeConvertRun(f *bulkFlags) {
+	ds, err := tdns.ConvertCascadeKeys(tdns.CascadeConvertOptions{
+		StateFiles:          f.stateFiles,
+		KeysDir:             f.keysDir,
+		Dest:                f.dest,
+		AllowRollInProgress: f.allowRoll,
+		MultiSigner:         f.multiSigner,
+	})
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		// A refusal comes before anything is written, and the dispositions it
+		// returns say "converted" for keys that were only planned; printing
+		// them above "Nothing was written" would contradict it. The error names
+		// the key that stopped the run.
+		var partial *tdns.PartialConvertError
+		if errors.As(err, &partial) {
+			fmt.Printf("\nThe failure happened after writing began, so %s MAY hold some of the\n"+
+				"keys and an out-of-date manifest. Cascade's own files were not touched.\n"+
+				"Re-running into the same directory is safe.\n", f.dest)
+			if len(ds) > 0 {
+				fmt.Printf("Keys this run planned to convert:\n")
+				printCascadeDispositions(ds)
+			}
+		} else {
+			fmt.Printf("Nothing was written. Cascade's own files were not touched.\n")
+		}
+		os.Exit(1)
+	}
+
+	converted, skipped := printCascadeDispositions(ds)
+	fmt.Printf("Converted %d DNSSEC key(s) into %s; %d not converted.\n", converted, f.dest, skipped)
+	if converted > 0 {
+		// The keys are written by now, so a failed check is a warning, not an
+		// exit: the operator still needs to know the mode was not checked.
+		if mode, leaks, err := tdns.DirLeaksBeyondOwner(f.dest); err != nil {
+			fmt.Printf("WARNING: cannot check permissions on %s: %v. It holds private key\n"+
+				"         material; make sure it is not readable beyond its owner.\n", f.dest, err)
+		} else if leaks {
+			fmt.Printf("WARNING: %s is mode %04o, i.e. readable beyond its owner, and holds\n"+
+				"         private key material. Run 'chmod 700 %s'\n"+
+				"         unless that exposure is intended.\n", f.dest, mode, f.dest)
+		}
+		fmt.Printf("Point keystore.preload.dnssec at this directory, and match the zone's DNSSEC\n" +
+			"policy (mode and algorithms) to the keys, before the first start.\n")
+	}
+}
+
+func printCascadeDispositions(ds []tdns.CascadeConvertDisposition) (converted, skipped int) {
+	for _, d := range ds {
+		result := d.State
+		if d.Status == tdns.CascadeConvertConverted {
+			converted++
+		} else {
+			skipped++
+			result = d.Detail
+		}
+		fmt.Printf("  %-9s %s keyid %d %s %s, Cascade: %s -> %s\n",
+			d.Status, d.Zone, d.Keyid, d.Algorithm, d.Role, d.Cascade, result)
+	}
+	return converted, skipped
 }
 
 func classLabel(class string) string {

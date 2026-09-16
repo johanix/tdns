@@ -18,6 +18,7 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.1.1 // indirect
+	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
@@ -28,7 +29,7 @@ require (
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/dnssec-algorithms v0.0.0-20260706125906-0101974d6755 // indirect
+	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
