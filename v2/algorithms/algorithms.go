@@ -6,7 +6,10 @@
 // names are valid input and what algorithms appear in --help.
 //
 // Built-in algorithms (RSASHA*, ECDSAP*, ED25519) are pre-registered
-// at this package's init time. Out-of-tree algorithms (typically
+// at this package's init time, and so is ED448: miekg/dns names it but
+// does not implement it, so its implementation comes from
+// github.com/johanix/dnssec-algorithms/ed448 and is registered for real,
+// in every binary. Out-of-tree algorithms (typically
 // ML-DSA / SLH-DSA / Falcon / MAYO / SNOVA via the
 // github.com/johanix/dnssec-algorithms subpackages) are registered
 // by the application's main package:
@@ -32,6 +35,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/johanix/dnssec-algorithms/ed448"
 	"github.com/miekg/dns"
 )
 
@@ -328,4 +332,16 @@ func init() {
 		// its per-algorithm switch arms), so they are real.
 		record(b.num, b.name, b.caps, b.facts, true)
 	}
+
+	// ED448 (RFC 8080) is a standard algorithm every validator is expected
+	// to implement, so every binary gets it, like the built-ins above, and
+	// not through an app's algs.list. It is NOT a built-in, though:
+	// miekg/dns has the constant and the name but no implementation. It
+	// must therefore go through Register, which wires the implementation
+	// into miekg/dns (dns.RegisterAlgorithm) before recording it. In the
+	// record loop above it would be listed as usable and fail to parse,
+	// sign or verify at the first key. genalgs does not emit it:
+	// dnssec-algorithms keeps ED448 out of its registry table.
+	Register(dns.ED448, ed448.New(), dnssecCaps,
+		Facts{PubKeyBytes: 57, SigBytes: 114, SecKeyBytes: 57, Maturity: "builtin", Description: "Edwards-curve DSA (RFC 8080); classical"})
 }
