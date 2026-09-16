@@ -188,3 +188,18 @@ accepted. It hears 541 only on its next delegation UPDATE
 (`sendUpdateWithRetry`, still terminal there) or its next setup. Having the
 setup arm run `pollParentKeyState` after an accepted bootstrap would give
 tdns-auth the same recovery as the agent.
+
+### Follow-up, same day: the tdns-auth child polls
+
+The "Still open" item above is closed. When the parent accepts a tdns-auth
+child's bootstrap ceremony (answered NOERROR, `bootstrapAccepted`), the setup
+arm starts `pollAfterAcceptedBootstrap`. This is the agent's
+`pollParentKeyState` with two differences. The ceremony has already been sent,
+so a parent that does not know the key yet is polled again rather than sent a
+second ceremony. And trust does not start a delegation sync, because the
+ceremony and the poll run at every zone load. KeyState 8 now leads to the same
+re-bootstrap rounds as for an agent.
+
+There is at most one poll per key (`childKeyStatePolls`), shared between the
+agent path and this one. A 541 on a later delegation UPDATE is still final in
+`sendUpdateWithRetry`. By then the poll has usually seen code 8 already.

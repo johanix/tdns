@@ -670,3 +670,38 @@ until `follow-config` or a restart; the switch is not persisted.
 progress from starting any more children. Setting the switch is
 logged as `ScannerEngine: poll switch set`, and `ScannerEngine:
 poll round done` says whether a round was `stopped`.
+
+## Amendment, 2026-09-16 (f): a change still queued; the poll's DS rule
+
+- **A scan waits for a change an earlier scan left queued.** A
+  scan waits at most `UpdateApplyTimeout` for its CHILD-UPDATE.
+  When it gives up, the change is still queued and the zone
+  updater may still apply it, but the child's lock is released.
+  The next scan of that child used to read a delegation without
+  the change and work from it. It now first waits, under the
+  lock, for that change to be answered, and is not run while it
+  is still queued (`awaitPendingApply`, `v2/scanner_apply.go`).
+  The updater applies changes in the order they were queued, so
+  a late change never lands after a later scan's; what this
+  closes is the stale read.
+- **A poll checks the DS again under the child's lock.** A round
+  decides whether to scan a child from the DS it had when the
+  round read it. A scan the round started now applies the same
+  rule to the DS it reads under the lock: a child that has lost
+  its DS in between is not scanned for CSYNC, nor for CDS unless
+  `scanner.poll.bootstrap` is set.
+
+## Amendment, 2026-09-16 (g): a CDS must lead to a published key
+
+A CDS scan refuses a DS change whose resulting DS RRset matches
+none of the DNSKEYs the child publishes (`checkDSMatchesChildKeys`,
+`v2/scanner_trust.go`). A CDS can pass the trust gate and still
+name no key -- a typo in a digest, a key not yet published -- and
+the DS it asks for would make the child's zone bogus. The rule is
+the one a DS change by UPDATE or the API already meets
+(`CheckDelegationCoherence`): at least one DS of the resulting
+RRset matches a published key, an empty RRset is allowed, and for
+a child that already has a DS the DNSKEY RRset must validate. The
+DNSKEYs are asked of the child's nameservers, as the CDS is, and
+they must agree on them. A DNSKEY lookup that fails refuses the
+change; the next poll, or the child's next NOTIFY, tries again.

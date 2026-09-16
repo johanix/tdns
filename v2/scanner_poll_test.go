@@ -17,10 +17,7 @@ import (
 // ProcessCSYNCNotify and ProcessCDSNotify, with the network replaced as in
 // scanner_trust_test.go.
 
-const (
-	pollOldDigest = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
-	pollNewDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-)
+const pollOldDigest = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 
 // pollBackend is trustBackend with children to list and, when readErr is set,
 // a delegation it cannot read.
@@ -53,7 +50,8 @@ func pollParent(t *testing.T, child string, withDS bool) (*ZoneData, *pollBacken
 	return zd, b
 }
 
-// pollNet serves, for each child, what csyncMove serves and a CDS for a new key.
+// pollNet serves, for each child, what csyncMove serves, a new DNSKEY and a CDS
+// for it.
 func pollNet(t *testing.T, children ...string) *trustNet {
 	t.Helper()
 	n := &trustNet{served: map[string][]dns.RR{}, verdict: map[string]cache.ValidationState{}}
@@ -61,9 +59,10 @@ func pollNet(t *testing.T, children ...string) *trustNet {
 		for k, v := range csyncMove(t, child).served {
 			n.served[k] = v
 		}
-		n.served[trustKey(child, dns.TypeCDS)] = rrs(t, child+" 3600 IN CDS 2371 13 2 "+pollNewDigest)
-		// A child with a DS has its CDS validated, whatever the policy says.
-		n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS))
+		serveKeyAndCDS(t, n, child)
+		// A child with a DS has its CDS and its DNSKEYs validated, whatever the
+		// policy says.
+		n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS), trustKey(child, dns.TypeDNSKEY))
 	}
 	return n
 }
@@ -148,6 +147,39 @@ func TestPollScansCSYNCAndCDSOfAChildWithADS(t *testing.T) {
 	if applied.count(child, ScanCSYNC) != 1 || applied.count(child, ScanCDS) != 1 {
 		t.Errorf("applied %d CSYNC and %d CDS change(s); want the NS move and the new DS",
 			applied.count(child, ScanCSYNC), applied.count(child, ScanCDS))
+	}
+}
+
+// A round decides from the DS a child had when the round read it; each scan
+// decides again under the child's lock. A child that has lost its DS in between
+// -- a NOTIFY-started scan applied a CDS delete first, say -- is polled as one
+// without a DS: no CSYNC scan, and a CDS scan only with bootstrap set.
+func TestPollScanOfAChildThatHasLostItsDS(t *testing.T) {
+	const child = "lostds.example."
+	for _, tc := range []struct {
+		name      string
+		bootstrap bool
+		wantCDS   bool
+	}{
+		{name: "bootstrap off: not scanned", bootstrap: false, wantCDS: false},
+		{name: "bootstrap on: the CDS alone", bootstrap: true, wantCDS: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(func() { forgetCsyncProcessed(child) })
+			zd, _ := pollParent(t, child, false) // the backend no longer holds the DS
+			n := pollNet(t, child)
+			sc, _ := pollScanner(n)
+			listed := &core.RRset{Name: child, RRtype: dns.TypeDS, RRs: rrs(t, child+" 3600 IN DS 1111 13 2 "+pollOldDigest)}
+
+			sc.pollChild(context.Background(), zd, ScanTuple{Zone: child, CurrentData: CurrentScanData{DS: listed}}, tc.bootstrap)
+
+			if got := n.queried[trustKey(child, dns.TypeCSYNC)]; got != 0 {
+				t.Errorf("asked for CSYNC %d time(s); a child without a DS is not polled for CSYNC", got)
+			}
+			if got := n.queried[trustKey(child, dns.TypeCDS)] > 0; got != tc.wantCDS {
+				t.Errorf("asked for CDS: %v, want %v", got, tc.wantCDS)
+			}
+		})
 	}
 }
 
