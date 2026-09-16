@@ -11,7 +11,7 @@ replace (
 )
 
 require (
-	github.com/johanix/dnssec-algorithms v0.0.0-20260916112834-cb5007c218ef
+	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000

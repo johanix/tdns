@@ -151,8 +151,8 @@ github.com/johanix/dns v1.1.72-johanix.2 h1:7w1oHX0EAYrWq04JI8QGnGp3j/08ESjonRld
 github.com/johanix/dns v1.1.72-johanix.2/go.mod h1:hBcNfObhP6OL8tg/LRRiRxqToCk64JmTahUFw2q39GM=
 github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd h1:EhQvGGv9J86jNklshspT1VW0HDihz/hPH1ZMBucV/Ks=
 github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd/go.mod h1:LeTv8626e21xs78jPQ1sW0luSyy+VsqW1OeFBzbfagI=
-github.com/johanix/dnssec-algorithms v0.0.0-20260916112834-cb5007c218ef h1:C+BPeEwulC58kGUA1FxWSyyzwhYxMIRWOosDJXgVGVM=
-github.com/johanix/dnssec-algorithms v0.0.0-20260916112834-cb5007c218ef/go.mod h1:CLJcOvHNaVOp5ciu58vfs+cJQT2dW5pjoUOj6sXNKAE=
+github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b h1:5PKALAouKMjPX00Az1az6Chdz9MscZ6ip28Tlgo6+Fc=
+github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b/go.mod h1:CLJcOvHNaVOp5ciu58vfs+cJQT2dW5pjoUOj6sXNKAE=
 github.com/jstemmer/go-junit-report v0.0.0-20190106144839-af01ea7f8024/go.mod h1:6v2b51hI/fHJwM22ozAgKL4VKDeJcHhJFhtBdhmNjmU=
 github.com/jstemmer/go-junit-report v0.9.1/go.mod h1:Brl9GWCQeLvo8nXZwPNNblvFj/XSXhF0NWZEnDohbsk=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=

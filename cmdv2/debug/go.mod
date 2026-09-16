@@ -36,7 +36,7 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/johanix/dnssec-algorithms v0.0.0-20260916112834-cb5007c218ef // indirect
+	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
