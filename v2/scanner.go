@@ -68,8 +68,9 @@ type Scanner struct {
 	Jobs               map[string]*ScanJobStatus
 	JobsMutex          sync.RWMutex
 
-	childLocks sync.Map         // canonical child name -> *sync.Mutex; see scanChildAndApply
-	poll       scannerPollState // scanner_poll.go
+	childLocks     sync.Map         // canonical child name -> *sync.Mutex; see scanChildAndApply
+	pendingApplies sync.Map         // canonical child name -> <-chan ZoneUpdateResult; see awaitPendingApply
+	poll           scannerPollState // scanner_poll.go
 
 	// queryChild and validateRRset stand in, in tests, for the network behind
 	// the CDS and CSYNC paths: asking every child nameserver
@@ -194,66 +195,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 	// Wire callback to apply delegation changes via CHILD-UPDATE.
 	// Handles both CDS (DS adds/removes) and CSYNC (NS/glue adds/removes).
 	scanner.OnDelegationChange = func(parentZone string, zd *ZoneData, resp ScanTupleResponse) {
-		if zd.KeyDB == nil || zd.KeyDB.UpdateQ == nil {
-			lg.Error("ScannerEngine: OnDelegationChange: no UpdateQ for zone", "zone", parentZone)
-			return
-		}
-		var actions []dns.RR
-		// DS changes (from CDS scan)
-		for _, rr := range resp.DSAdds {
-			cp := dns.Copy(rr)
-			cp.Header().Class = dns.ClassINET
-			actions = append(actions, cp)
-		}
-		for _, rr := range resp.DSRemoves {
-			cp := dns.Copy(rr)
-			cp.Header().Class = dns.ClassNONE
-			actions = append(actions, cp)
-		}
-		// NS changes (from CSYNC scan)
-		for _, rr := range resp.NSAdds {
-			cp := dns.Copy(rr)
-			cp.Header().Class = dns.ClassINET
-			actions = append(actions, cp)
-		}
-		for _, rr := range resp.NSRemoves {
-			cp := dns.Copy(rr)
-			cp.Header().Class = dns.ClassNONE
-			actions = append(actions, cp)
-		}
-		// Glue changes (from CSYNC scan)
-		for _, rr := range resp.GlueAdds {
-			cp := dns.Copy(rr)
-			cp.Header().Class = dns.ClassINET
-			actions = append(actions, cp)
-		}
-		for _, rr := range resp.GlueRemoves {
-			cp := dns.Copy(rr)
-			cp.Header().Class = dns.ClassNONE
-			actions = append(actions, cp)
-		}
-
-		// Determine update type from which fields are populated
-		updateType := "CDS"
-		description := fmt.Sprintf("CDS scan: DS update for %s", resp.Qname)
-		if len(resp.NSAdds) > 0 || len(resp.NSRemoves) > 0 || len(resp.GlueAdds) > 0 || len(resp.GlueRemoves) > 0 {
-			updateType = "CSYNC"
-			description = fmt.Sprintf("CSYNC scan: delegation update for %s", resp.Qname)
-		}
-
-		lg.Info("ScannerEngine: OnDelegationChange: enqueuing CHILD-UPDATE", "parent", parentZone, "child", resp.Qname, "type", updateType, "actions", len(actions))
-		// Waits until the change is applied: the caller holds the child's scan
-		// lock, and the next scan of the child has to read a delegation that
-		// includes it (scanChildAndApply).
-		applyScanChildUpdate(ctx, zd.KeyDB.UpdateQ, UpdateRequest{
-			Cmd:            "CHILD-UPDATE",
-			UpdateType:     updateType,
-			ZoneName:       parentZone,
-			Actions:        actions,
-			Trusted:        true,
-			InternalUpdate: true,
-			Description:    description,
-		})
+		scanner.applyDelegationChange(ctx, parentZone, zd, resp)
 	}
 
 	// Finish initialising BEFORE publishing. Publication is what other
@@ -396,7 +338,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 							lg.Debug("ScannerEngine: dispatching a CDS scan", "child", tuple.Zone)
 							go func(t ScanTuple, parentZD *ZoneData) {
 								defer wg.Done()
-								responseCh <- scanner.scanChildAndApply(ctx, parentZD, sr.ScanType, t, sr.Edns0Options)
+								responseCh <- scanner.scanChildAndApply(ctx, parentZD, sr.ScanType, t, sr.Edns0Options, nil)
 							}(tuple, sr.ZoneData)
 						} else {
 							lg.Debug("ScannerEngine: dispatching CheckCDS")
@@ -410,7 +352,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 							lg.Debug("ScannerEngine: dispatching a CSYNC scan", "child", tuple.Zone)
 							go func(t ScanTuple, parentZD *ZoneData) {
 								defer wg.Done()
-								responseCh <- scanner.scanChildAndApply(ctx, parentZD, sr.ScanType, t, sr.Edns0Options)
+								responseCh <- scanner.scanChildAndApply(ctx, parentZD, sr.ScanType, t, sr.Edns0Options, nil)
 							}(tuple, sr.ZoneData)
 						} else {
 							lg.Warn("ScannerEngine: CSYNC scan without parent zone data not yet supported")
