@@ -72,14 +72,26 @@ func TestCNAMEChaseInsideOutOfBailiwickZone(t *testing.T) {
 		_ = w.WriteMsg(m)
 	})
 	started := make(chan struct{})
+	served := make(chan error, 1)
 	srv := &dns.Server{PacketConn: pc, Handler: mux, NotifyStartedFunc: func() { close(started) }}
-	go func() { _ = srv.ActivateAndServe() }()
+	go func() { served <- srv.ActivateAndServe() }()
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
 		t.Fatal("auth double did not start")
 	}
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.ShutdownContext(ctx); err != nil {
+			t.Errorf("auth double shutdown: %v", err)
+		}
+		select {
+		case <-served:
+		case <-time.After(5 * time.Second):
+			t.Error("auth double serve goroutine did not exit")
+		}
+	})
 
 	lg := log.New(os.Stderr, "test", log.LstdFlags)
 	c := cache.NewRRsetCache(lg, false, false)
