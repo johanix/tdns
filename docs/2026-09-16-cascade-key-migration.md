@@ -1,6 +1,6 @@
 # Moving a zone from Cascade to tdns with the same keys
 
-**Status:** proposal, under review. Q1–Q7 decided (r2).
+**Status:** proposal, under review. Q1–Q7 decided (r2); external review worked in r3.
 **Repos:** tdns (converter, Ed448 registration), dnssec-algorithms (Ed448 implementation), johanix/dns fork (one comment)
 **Read at:** tdns `49df2c3a`; tdns-mp `2c25bcd`; dnssec-algorithms `5462dd5`; Cascade `v0.1.0-beta6` and `main` `57e2565`; dnst `v0.2.0-alpha3` and `main` `f696f0a9`; domain 0.12.1 (dnst's), `8abed138` (Cascade's) and `main` `849de477`
 **Related:** tdns-mp `docs/2026-09-13-key-lifecycle-ownership-design.md` (KLO) and its test plan `docs/2026-09-14-key-lifecycle-ownership-test-plan.md`
@@ -11,6 +11,7 @@
 |---|---|---|
 | r1 | 2026-09-16 | First version. |
 | r2 | 2026-09-16 | Johan's answers: Q1–Q7 decided. Q6 extended to multi-signer zones moving to tdns-mpsigner: foreign keys come from the incoming zone, not from the conversion, and a new `--multi-signer` flag says so (§5.2, §5.3). §6.1 gains the multi-signer verification, §7 the multi-provider own-key import. F1 filed as #668. |
+| r3 | 2026-09-16 | External review. §4.2: Ed448 goes through `Register`, which a built-in `record` does not do. §5.1: the converter ignores `available`, and makes the zone name fully qualified. §6.1 and Q6: the foreign-key path named by function, with its timing. §6.2 M2: pre-load must be in place for the first start, since imported keys are added beside minted ones. §6.3 F1: tdns-mpsigner reaches the same mint through its `MayGenerate` hook, and an owned zone does not. The review's tdns-mp findings were read on a pre-B-MP branch; this document is read at tdns-mp main `2c25bcd`. |
 
 ---
 
@@ -54,7 +55,7 @@ The tdns policy for a migrated zone has to match the zone's actual keys, whateve
 - **`keystore dnssec bulk-import --src <dir>`** and **`keystore.preload.dnssec: <dir>`** (`v2/keystore_bulk.go`, `v2/keystore_preload.go`) load an export directory into the keystore. Pre-load runs before any zone is parsed, so a signed zone finds its keys already there instead of minting its own.
 - **Import goes through the keystore's one insert function.** Since KLO S1a, `BulkImportDnssec` inserts through `insertKeyRowTx` (`keystore_bulk.go:423`). The row gets `pub` and `sign` from its state, and `ds` once the zone's policy binds (S1b). An imported `active` key is therefore `pub=1, sign=1`, and an active KSK gets `ds=1` in every DS model.
 
-`bulk-convert` already reads Cascade's key files: tdns's parser accepts `v1.2` as well as `v1.3` (the fork's `dnssec_keyscan.go:36`). Three things are missing:
+`bulk-convert` already reads Cascade's key files: tdns's parser accepts `v1.2` as well as `v1.3` (`dnssec_keyscan.go:36` in the johanix/dns fork, not in tdns). Three things are missing:
 
 1. **State.** Cascade writes no per-key `.state` file. Its state is in `<zone>.state`, which `bulk-convert` does not read. `--state` sets one state for every key in the directory.
 2. **Timestamps.** dnst writes no timing lines into `.private`, so the manifest gets none. Cascade's timestamps are in the state file.
@@ -103,7 +104,8 @@ A new package `ed448/` in dnssec-algorithms, next to `mldsa44/`:
 ### 4.2 Registration: in every binary
 
 Ed448 is a standard algorithm (RFC 8080) that every validator is expected to implement, not an experiment. **Decided (Q2):** register it the way Ed25519 is present, in every tdns binary, rather than as a line in each app's `algs.list`.
-- **Where:** `v2/algorithms`' `init` calls `Register(16, ed448.New(), dnssecCaps, facts)` next to the built-in records.
+- **Where:** `v2/algorithms`' `init` calls `Register(16, ed448.New(), dnssecCaps, facts)`.
+- **Not in the built-in loop.** The built-ins (RSA, ECDSA, Ed25519) are entered with `record(…, real: true)` only, because the library already implements them; `record` tells tdns's CLI and config checks the algorithm exists and wires nothing. Ed448 is not a built-in. `Register` calls `dns.RegisterAlgorithm`, which is what makes it parse, sign and verify, and then `record`. Put in the built-in loop, Ed448 would be listed as usable and fail at the first key.
 - **Why not `algs.list`:** tdns has seven of them (agent, auth, cli, dog, imr, ncli, signer), and tdns-mp has its own. A binary left out cannot sign or validate Ed448; a validator treats an Ed448-only zone as insecure.
 - **Cost:** `tdns/v2` imports `dnssec-algorithms/ed448` and so links CIRCL (pure Go, no cgo). tdns's pin of dnssec-algorithms moves from `v0.0.0-20260513135759-676b5158decd` to a version with the package.
 - **genalgs must not register it a second time.** Either ED448 stays out of `dnssec-algorithms/registry`'s generator table, or genalgs skips table entries tdns registers itself. The `record` promotion rule allows metadata then real, and refuses two real registrations.
@@ -142,7 +144,9 @@ No code change. `builtinAlgorithms` (`algorithm.go:106-118`) does not include 16
 | `apex_extra` | the records Cascade puts at the apex, the signed DNSKEY RRset among them. Older files may carry them only in `dnskey_rrset`. | §5.3 item 6 |
 | `ds_rrset` | the DS records for the parent | §5.3 item 6 |
 
-`cds_rrset`, `ns_rrset`, `apex_remove`, `cron_next`, `kmip`, `internal` and `decoupled` are not needed.
+`cds_rrset`, `ns_rrset`, `apex_remove`, `cron_next`, `kmip`, `internal` and `decoupled` are not needed. Nor is `available`: it only says whether a key may start a roll.
+
+The zone name has no trailing dot, while BIND conversion takes the owner from the `.key` file. The converter makes it fully qualified (`dns.Fqdn`, then `CanonicalizeName`, as `bind_convert.go` does) before it goes into the manifest; otherwise the import would not match the zone.
 
 **What the flags mean to Cascade:**
 - **Zone data** is signed by every ZSK whose state has `signer`, and every CSK whose ZSK-role state has it, provided the key has a private key (Cascade `src/signer/keys.rs`).
@@ -244,7 +248,10 @@ Per key: `K<zone>+<alg>+<keyid>.key` (the public RR, canonical text), `.private`
    - tdns's DNSKEY RRset has the same records as Cascade's;
    - tdns's RRSIGs validate against the DS the parent serves;
    - the CDS tdns publishes, if any, matches the parent's DS.
-   - **For a multi-signer zone on tdns-mpsigner:** the other signers' DNSKEYs are served too. The signer records them as foreign rows when the zone arrives, and serves them from the re-sign that follows, not from the first publish (tdns-mp `hsync_utils.go`, the comment at the `syncForeignDNSKEYs` call). Compare after that re-sign.
+   - **For a multi-signer zone on tdns-mpsigner:** the other signers' DNSKEYs must be served too.
+     - **Where they come from:** the signer records them as `foreign` rows in `syncForeignDNSKEYs` (tdns-mp `signer_keydb.go:275`). That runs from the zone's pre-refresh callback `MPPreRefresh` (`hsync_utils.go:1370`).
+     - **When they are served:** the callback runs on a refresh, after that refresh has collected its DNSKEY RRset. A change is therefore served by the re-sign the callback requests, not by the refresh itself.
+     - **When to compare:** after the zone has refreshed under tdns-mpsigner, that re-sign has run, and the keystore holds the other signers' keys as `foreign` rows.
 6. **Cut over:** the servers that take the zone from Cascade take it from tdns instead. Then stop Cascade for the zone. Never let both sign or roll the zone.
 7. **Later,** bind the zone to the policy with the rollover method it should have.
 
@@ -253,7 +260,7 @@ Per key: `K<zone>+<alg>+<keyid>.key` (the public RR, canonical text), `.private`
 | # | Risk | Mitigation |
 |---|---|---|
 | M1 | Cascade starts a roll after the conversion; the two key sets diverge. | Freeze rolls first (§6.1 step 1). The converter refuses a roll in progress, and the DNSKEY cross-check refuses a state file that doesn't match its own RRset. |
-| M2 | tdns's policy doesn't match the imported keys. An active KSK of another algorithm makes `reconcileActiveKeyAlgorithms` refuse to sign the zone. A missing role makes tdns mint a key. | Step 3 of the procedure; the verification in step 5 catches it before the cutover. |
+| M2 | tdns's policy doesn't match the imported keys. An active KSK of another algorithm makes `reconcileActiveKeyAlgorithms` refuse to sign the zone. A missing role makes tdns mint a key. | Step 3 of the procedure; the verification in step 5 catches it before the cutover. Pre-load must be configured for the **first** start. A start without it mints keys, and a later pre-load does not replace them: import matches rows by zone and key tag, so the imported keys, with other key tags, are inserted beside the minted ones. The zone then has two sets of active keys, and the DNSKEY RRset no longer matches Cascade's. Start again from an empty keystore. |
 | M3 | A CSK zone gains a ZSK at the first signing pass (F1, §6.3, #668). | Verify F1 before moving any CSK zone; until it is fixed, see F1. |
 | M4 | tdns's CDS differs from what the parent holds. tdns publishes CDS with SHA-256 only (`ops_cds.go:42`). A parent that scans CDS and holds a DS with another digest type may replace the DS: still a valid chain, but a change at the parent. | Check the parent's DS digest type at step 5. |
 | M5 | Denial of existence changes at the cutover. Cascade signs with NSEC by default, as tdns does. A zone configured for NSEC3 in Cascade becomes walkable under tdns. Validation is unaffected: each denial is self-contained. | An operator decision, not a validation risk. |
@@ -265,6 +272,8 @@ Per key: `K<zone>+<alg>+<keyid>.key` (the public RR, canonical text), `.private`
 **F1: a CSK-mode zone gets a ZSK.** `EnsureActiveDnssecKeys` (`sign.go:452`) returns early only when it finds an active KSK and an active key with flags 256. A CSK has flags 257, so it counts as "KSK reused as CSK" (`sign.go:513`), and the function mints an **active** ZSK (`sign.go:640`) without looking at `DnssecPolicy.Mode`. A throwaway test at `49df2c3a` confirms it: a zone bound to a `csk` policy, holding one active Ed25519 CSK, has an active CSK and an active ZSK after one call.
 
 - **Which zones:** only CSK zones. Cascade's default is a KSK and a ZSK.
+- **tdns-mpsigner too,** for a multi-provider zone tdns-mp does not own yet. It calls the same `EnsureActiveDnssecKeys`. Its `MayGenerate` hook (tdns-mp `signer_keydb.go:95`) counts only flags-256 keys as ZSKs, so it allows the mint.
+- **Not for an owned zone.** The early return came with KLO S2; tdns-mp registers as owner in S3. There the function returns before the mint: the signing snapshot counts a lone CSK among the ZSKs (`signing_keys_snapshot.go:228-230`), and minting is the owner's job.
 - **For a new zone** this is invisible: all its keys are new.
 - **For a migrated CSK zone** the new ZSK signs the zone data before its DNSKEY reaches resolvers. Validators that cached Cascade's DNSKEY RRset fail validation until that RRset's TTL expires.
 - **Independently of this migration,** a zone configured as CSK is not a CSK zone in tdns.
@@ -311,7 +320,7 @@ Changes inside the signer and keystore, in order of value:
 
 ### Q6: other signers' keys
 
-**tdns-mpsigner does keep foreign keys,** but it does not store them independently. `syncForeignDNSKEYs` (tdns-mp `signer_keydb.go`) runs on every incoming zone in multi-signer mode:
+**tdns-mpsigner does keep foreign keys,** but it does not store them independently. `syncForeignDNSKEYs` (tdns-mp `signer_keydb.go:275`, called from `MPPreRefresh`, `hsync_utils.go:1370`) runs on every incoming zone in multi-signer mode:
 - every DNSKEY in the zone from the combiner that is not one of the signer's own keys becomes a foreign row;
 - every foreign row whose DNSKEY is no longer in the incoming zone is deleted.
 
