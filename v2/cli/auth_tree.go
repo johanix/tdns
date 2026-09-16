@@ -54,6 +54,7 @@ target is the apiservers entry named %q in the tdns-cli config.`, role, role),
 		NewDdnsCmd(role),
 		NewDelCmd(role),
 		NewImrSubtree(role),
+		NewAuthScannerCmd(),
 	)
 
 	// Keystore and truststore last, and by the same rule they follow in

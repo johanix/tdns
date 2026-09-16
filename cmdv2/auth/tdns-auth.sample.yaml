@@ -359,6 +359,9 @@ scanner:
    # set; then its CDS is, and a poll can give it its first DS.
    # "tdns-cli daemon reload" applies a change to scanner.poll at the next
    # round; SIGHUP does not. A change to interval needs a restart.
+   # "tdns-cli auth scanner poll on|off|follow-config" (POST /scanner/poll)
+   # switches polling while tdns-auth runs, overriding enabled until
+   # follow-config or a restart; "poll status" shows whether it polls.
    poll:
       enabled:     false
       bootstrap:   false

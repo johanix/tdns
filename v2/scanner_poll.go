@@ -17,9 +17,9 @@ import (
 // A NOTIFY(CDS) or NOTIFY(CSYNC) starts a scan of one child. A child that never
 // sends one -- its software does not, or it follows RFC 7344 and RFC 7477 as
 // written, which leave the looking to the parent -- is scanned only by a poll.
-// With scanner.poll.enabled set, a poll round runs on the scanner's ticker
-// (scanner.interval) over every child of every parent zone that allows child
-// updates (pollParents):
+// With polling on, a poll round runs on the scanner's ticker (scanner.interval)
+// over every child of every parent zone that allows child updates
+// (pollParents):
 //
 //   - a child with a DS is scanned for CSYNC, then for CDS;
 //   - a child without a DS is not scanned for CSYNC, and not for CDS either
@@ -34,8 +34,16 @@ import (
 // previous one is still running. It is not recorded as a scanner job: rounds
 // repeat without end, and Jobs is never pruned.
 //
+// Whether polling is on is scanner.poll.enabled, unless the switch says
+// otherwise. The switch is set while tdns-auth runs, through POST /scanner/poll
+// or "tdns-cli auth scanner poll on|off|follow-config" (scanner_poll_api.go),
+// and overrides the config until follow-config or a restart. It is not
+// persisted. Switching polling off also stops a round in progress from starting
+// any more children.
+//
 // The log says whether the server polls: the settings when the engine starts
-// and whenever they change, and one line per round.
+// and whenever they change, the switch whenever it is set, and one line per
+// round.
 
 // defaultPollConcurrency is how many children a round scans at once when
 // scanner.poll.concurrency is unset. Every query to a child goes through the
@@ -64,23 +72,71 @@ func readScannerPollConf() scannerPollConf {
 	return c
 }
 
-// scannerPollState is the Scanner's poll bookkeeping. running is shared with
-// the round's goroutine; logged and last belong to the engine's.
+// pollSwitch is the runtime switch for polling: follow the config, or force
+// polling on or off.
+type pollSwitch int32
+
+const (
+	pollSwitchConfig pollSwitch = iota // follow scanner.poll.enabled
+	pollSwitchOn
+	pollSwitchOff
+)
+
+func (s pollSwitch) String() string {
+	switch s {
+	case pollSwitchOn:
+		return "on"
+	case pollSwitchOff:
+		return "off"
+	default:
+		return "follow-config"
+	}
+}
+
+// scannerPollState is the Scanner's poll bookkeeping.
+//   - interval is set before the scanner is published and never changes.
+//   - running and switched are shared with the API and the round's goroutine.
+//   - logged and last belong to the engine's goroutine.
 type scannerPollState struct {
-	running atomic.Bool // a round is in progress
-	logged  bool
-	last    scannerPollConf
+	interval time.Duration
+	running  atomic.Bool  // a round is in progress
+	switched atomic.Int32 // a pollSwitch
+
+	logged bool
+	last   scannerPollConf
+}
+
+// pollConf is the poll settings the scanner acts on: the running config's,
+// with enabled overridden when the switch is set.
+func (scanner *Scanner) pollConf() scannerPollConf {
+	c := readScannerPollConf()
+	switch scanner.pollSwitch() {
+	case pollSwitchOn:
+		c.Enabled = true
+	case pollSwitchOff:
+		c.Enabled = false
+	}
+	return c
+}
+
+func (scanner *Scanner) pollSwitch() pollSwitch { return pollSwitch(scanner.poll.switched.Load()) }
+
+// setPollSwitch sets the runtime switch. Polling follows it from the next tick;
+// switching off also stops a round in progress from starting more children.
+func (scanner *Scanner) setPollSwitch(s pollSwitch) {
+	scanner.poll.switched.Store(int32(s))
+	lg.Info("ScannerEngine: poll switch set", "switch", s.String(), "enabled", scanner.pollConf().Enabled)
 }
 
 // notePollConf logs the poll settings the first time and whenever they differ
 // from the last ones logged.
-func (scanner *Scanner) notePollConf(conf scannerPollConf, interval time.Duration) {
+func (scanner *Scanner) notePollConf(conf scannerPollConf) {
 	if scanner.poll.logged && scanner.poll.last == conf {
 		return
 	}
 	scanner.poll.logged, scanner.poll.last = true, conf
-	lg.Info("ScannerEngine: poll settings", "enabled", conf.Enabled, "interval", interval,
-		"bootstrap", conf.Bootstrap, "concurrency", conf.Concurrency)
+	lg.Info("ScannerEngine: poll settings", "enabled", conf.Enabled, "switch", scanner.pollSwitch().String(),
+		"interval", scanner.poll.interval, "bootstrap", conf.Bootstrap, "concurrency", conf.Concurrency)
 }
 
 // pollParents returns the zones a poll round covers: those that allow child
@@ -119,7 +175,8 @@ func (scanner *Scanner) startPollRound(ctx context.Context, parents []*ZoneData,
 }
 
 // pollRound scans the children of parents, at most conf.Concurrency at a time,
-// and returns once every scan it started has finished.
+// and returns once every scan it started has finished. It stops starting
+// children when polling is switched off.
 func (scanner *Scanner) pollRound(ctx context.Context, parents []*ZoneData, conf scannerPollConf) {
 	started := time.Now()
 
@@ -147,6 +204,7 @@ func (scanner *Scanner) pollRound(ctx context.Context, parents []*ZoneData, conf
 	}
 
 	var queued, withoutDS, unreadable int
+	var stopped bool
 feed:
 	for _, parent := range parents {
 		children, err := parent.DelegationBackend.ListChildren(parent.ZoneName)
@@ -155,6 +213,10 @@ feed:
 			continue
 		}
 		for _, child := range children {
+			if scanner.pollSwitch() == pollSwitchOff {
+				stopped = true
+				break feed
+			}
 			child = dns.Fqdn(child)
 			if !parent.IsChildDelegation(child) {
 				continue
@@ -183,7 +245,7 @@ feed:
 	wg.Wait()
 
 	lg.Info("ScannerEngine: poll round done", "parents", len(parents), "children", queued, "withoutDS", withoutDS,
-		"unreadable", unreadable, "scans", scans, "changes", changes, "errors", failed,
+		"unreadable", unreadable, "scans", scans, "changes", changes, "errors", failed, "stopped", stopped,
 		"duration", time.Since(started).Round(time.Millisecond))
 }
 
