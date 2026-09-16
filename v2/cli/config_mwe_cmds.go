@@ -213,6 +213,7 @@ listeners:
    #      dot: [ 853 ]
    #      doh: [ 443 ]
    #      doq: [ 853 ]
+   #   doh-path: /dns-query   # the one path DoH answers on; this is the default
    certfile:  {{CERT}}
    keyfile:   {{KEY}}
 
