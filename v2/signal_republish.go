@@ -16,7 +16,7 @@
 // parent/validator can find the child's bootstrap data via the child's
 // nameservers and DNSSEC-validate it with those nameservers' own keys. The
 // existing CONSUMERS of these names already live in tdns
-// (queryCDSAtSignalingNames for CDS, LookupChildKeyAtSignal for the KEY);
+// (queryCDSAtSignalingNames for CDS, atNsFindings for the KEY);
 // this is the missing PRODUCER on a plain secondary.
 //
 // The publish targets whichever LOCAL PRIMARY zone the signal name falls in
@@ -154,7 +154,7 @@ func (childZD *ZoneData) republishOneFlag(spec signalSpec, nsNames []string) {
 }
 
 // The signal-name prefixes this file produces and the parent side consumes
-// (LookupChildKeyAtSignal, queryCDSAtSignalingNames).
+// (atNsFindings, queryCDSAtSignalingNames).
 const (
 	signalPrefixSig0Key = "_sig0key"
 	signalPrefixDsboot  = "_dsboot"
@@ -183,7 +183,7 @@ type signalPublishTarget struct {
 // This is also the child-side test of whether the at-ns SIG(0) bootstrap
 // method is satisfiable at all (zoneChildBootstrapMethods): a child cannot
 // offer at-ns to a parent unless it can put its KEY somewhere the parent's
-// LookupChildKeyAtSignal will look.
+// atNsFindings will look.
 func (childZD *ZoneData) signalPublishTargets(prefix string, nsNames []string) []signalPublishTarget {
 	var out []signalPublishTarget
 	for _, ns := range nsNames {

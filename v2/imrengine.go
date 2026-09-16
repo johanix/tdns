@@ -571,6 +571,25 @@ func (imr *Imr) upgradeIndirectCacheHits() bool {
 }
 
 func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
+	return imr.imrQuery(ctx, qname, qtype, qclass, respch, false)
+}
+
+// ImrQueryFresh is ImrQuery without the cache for the answer itself: a cached
+// answer or negative answer for <qname, qtype> is not served, and the
+// iterative lookup is forced past it. Referrals, nameserver addresses and the
+// DNSKEYs that validate the answer still come from the cache. What comes back
+// is cached as usual, so a stale entry is replaced for every later reader.
+//
+// For a caller retrying a lookup whose earlier answer may since have changed.
+// The parent's SIG(0) key verification is one (#677): a KEY published at a
+// signal name moments after the first attempt would otherwise stay hidden
+// behind that attempt's cached NXDOMAIN for the whole negative TTL, and every
+// retry would read the same entry.
+func (imr *Imr) ImrQueryFresh(ctx context.Context, qname string, qtype uint16, qclass uint16) (*ImrResponse, error) {
+	return imr.imrQuery(ctx, qname, qtype, qclass, nil, true)
+}
+
+func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse, fresh bool) (*ImrResponse, error) {
 	lgImr.Debug("ImrQuery: not in cache, querying", "qname", qname, "qtype", dns.TypeToString[qtype])
 
 	// Apply per-query wall-time budget at the top-level public entry,
@@ -625,7 +644,10 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 
 	//	dump.P(imr)
 
-	crrset := imr.Cache.Get(qname, qtype)
+	var crrset *cache.CachedRRset
+	if !fresh {
+		crrset = imr.Cache.Get(qname, qtype)
+	}
 	if crrset != nil {
 		// Only use cached answer if it's a direct answer or negative response.
 		// Don't use referrals, glue, hints, priming, or failures - issue a direct query instead
@@ -687,7 +709,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		case len(authservers) == 0:
 			// Use helper function to resolve NS addresses
 			done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
-				rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
+				rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
 				if err != nil {
 					lgImr.Error("IterativeDNSQuery failed", "err", err)
 					// return false, nil // Continue trying
@@ -737,7 +759,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 
 		lgImr.Debug("ImrQuery: sending query to auth servers", "qname", qname, "qtype", dns.TypeToString[qtype], "count", len(authservers))
 
-		rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
+		rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
 		// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 		if err != nil {
 			resp.Error = true

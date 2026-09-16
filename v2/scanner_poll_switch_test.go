@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +36,33 @@ func TestPollSwitchOverridesTheConfigUntilFollowConfig(t *testing.T) {
 	sc.setPollSwitch(pollSwitchConfig)
 	if !sc.pollConf().Enabled {
 		t.Fatal("after follow-config, polling does not follow the config")
+	}
+}
+
+// Switching polling on where the config already polls changes no setting, but
+// the switch is part of what the settings line reports, so it is logged again.
+func TestPollSettingsAreLoggedAgainWhenOnlyTheSwitchChanges(t *testing.T) {
+	withLiveConfig(t, &RuntimeConfig{ScannerPollEnabled: true})
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	sc := NewScanner(nil, false, false)
+	settingsLines := func() int { return strings.Count(buf.String(), "ScannerEngine: poll settings") }
+
+	sc.notePollConf(sc.pollConf())
+	sc.notePollConf(sc.pollConf())
+	if got := settingsLines(); got != 1 {
+		t.Fatalf("%d settings line(s) before any change, want 1", got)
+	}
+
+	sc.setPollSwitch(pollSwitchOn)
+	sc.notePollConf(sc.pollConf())
+	if got := settingsLines(); got != 2 {
+		t.Fatalf("%d settings line(s) after switching on; want the switch logged", got)
+	}
+	if !strings.Contains(buf.String(), "switch=on") {
+		t.Errorf("the settings line does not say switch=on:\n%s", buf.String())
 	}
 }
 

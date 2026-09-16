@@ -30,6 +30,8 @@ func TestTheParentsAnswerDecidesWhetherBootstrapRetries(t *testing.T) {
 		ede       uint16 // 0 = no EDE
 		transient bool
 		manual    bool
+		// validationFailed: final now, and the setup arm re-bootstraps later.
+		validationFailed bool
 	}{
 		{name: "NOERROR is done", rcode: dns.RcodeSuccess},
 		{name: "SERVFAIL retries", rcode: dns.RcodeServerFailure, transient: true},
@@ -38,7 +40,7 @@ func TestTheParentsAnswerDecidesWhetherBootstrapRetries(t *testing.T) {
 		{name: "manual bootstrap required waits for the operator", rcode: dns.RcodeRefused,
 			ede: edns0.EDESig0ManualBootstrapRequired, manual: true},
 		{name: "validation failed is final", rcode: dns.RcodeRefused,
-			ede: edns0.EDESig0KeyValidationFailed},
+			ede: edns0.EDESig0KeyValidationFailed, validationFailed: true},
 		{name: "a bare REFUSED is final", rcode: dns.RcodeRefused},
 		{name: "NOTAUTH is final", rcode: dns.RcodeNotAuth},
 	} {
@@ -77,6 +79,10 @@ func TestTheParentsAnswerDecidesWhetherBootstrapRetries(t *testing.T) {
 				if errors.Is(err, errBootstrapTransient) {
 					t.Errorf("a final refusal (%v) would be retried; it would only get the"+
 						" same answer", err)
+				}
+				if got := errors.Is(err, errBootstrapValidationFailed); got != tc.validationFailed {
+					t.Errorf("errBootstrapValidationFailed=%v for %v, want %v: the setup arm"+
+						" re-bootstraps on exactly this answer", got, err, tc.validationFailed)
 				}
 			}
 		})
@@ -154,8 +160,9 @@ func TestSetupReportsTheParentsAnswerRatherThanCompletion(t *testing.T) {
 	}
 
 	ur, err = send(dns.RcodeRefused, edns0.EDESig0KeyValidationFailed)
-	if got := zd.finishDelegationSyncSetup("", ur, err); got == nil || errors.Is(got, errBootstrapTransient) {
-		t.Errorf("a failed validation: setup returned %v, want a final error", got)
+	if got := zd.finishDelegationSyncSetup("", ur, err); got == nil || errors.Is(got, errBootstrapTransient) ||
+		!errors.Is(got, errBootstrapValidationFailed) {
+		t.Errorf("a failed validation: setup returned %v, want a final errBootstrapValidationFailed", got)
 	}
 
 	ur, err = send(dns.RcodeSuccess, 0)

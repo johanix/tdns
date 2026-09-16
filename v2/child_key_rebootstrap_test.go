@@ -50,6 +50,8 @@ func rebootstrapParent(t *testing.T, failed bool) (*ZoneData, *dns.KEY) {
 	zd.DelegationPolicy = &pol
 
 	key := discoveredTestKey(t).Key
+	// A verification of this key in an earlier test leaves a cooldown behind.
+	clearChildKeyCooldown(t, key.Hdr.Name, key.KeyTag())
 	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
 		Command: "child-sig0-mgmt", SubCommand: "add", Src: "child-update",
 		Keyname: key.Hdr.Name, Keyid: int(key.KeyTag()), KeyRR: key.String(), Validated: true,

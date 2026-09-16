@@ -130,3 +130,76 @@ inquiry reports 4; a cancelled run records nothing and reports 9.
 `knownUntrustedKeyEDE` and `TrustUpdate` for all three states plus the
 verified-signer selection. `edns0_codepoints_test.go`: the two values and
 their strings. `delsync_retry_test.go`: the manual sentinel is terminal.
+
+## Amendment 2026-09-16: what fails, and what the child does about it (#677)
+
+Issue #677 showed a KEY that was published, correct and validating being
+recorded as failed. Two things caused it. The at-ns names came from a stale
+cached NS RRset (fixed in #680). And the verification treated "not there yet"
+the same as "wrong", with every retry reading the first attempt's cached
+NXDOMAIN. This amendment covers the second. It changes parts of
+"What validation failed is" and "The child's side" above.
+
+**Verdicts per lookup.** `VerifyChildKey` judges each KEY lookup on its own,
+at the apex and at each signal name (`judgeChildKeyAnswer`):
+
+- no KEY, or the lookup did not finish (a DNSSEC validation that could not be
+  concluded counts): not found, worth another attempt;
+- a KEY in a signed zone: bogus, or valid but not the offered key, is
+  rejected; the offered key, validated, is accepted;
+- a KEY in an unsigned zone: accepted only when `require-dnssec` is off.
+
+One validated KEY anywhere the policy looks is enough. The old rule required
+every signal name that answered to validate. If nothing is accepted and every
+lookup was rejected, the verdict is final (`errChildKeyFinal`) and the
+attempts stop. Otherwise the attempts continue.
+
+**Attempts.** They are spaced by `retry.interval`, not backed off. The
+defaults are 3 attempts, 10s apart (previously 5, doubling from 10s). Each
+lookup uses `ImrQueryFresh`, which skips the cache for the answer itself, so
+every attempt really asks. The parent does not wait longer than that and holds
+no state for a key that has not appeared; waiting is the child's job.
+
+**Recorded failure.** Still KeyState 8 / EDE 541, with no new code. The
+reason names every lookup, for example `3 attempts via [at-apex at-ns]:
+at-apex: the offered KEY is at child., but in an unsigned zone, and
+require-dnssec is set; at-ns: no KEY at _sig0key.child._signal.ns.provider.`.
+541's text ("re-bootstrap after fixing the key's publication") holds for a
+KEY that was not published yet, because a re-bootstrap starts verification
+over.
+
+**Cooldown.** A re-bootstrap of a key whose verification ended less than
+5 minutes ago (`childKeyReBootstrapCooldown`) starts nothing. It is refused
+the way a re-upload during a running verification is. The cooldown is kept in
+memory only.
+
+**The child re-bootstraps.** KeyState 8 and EDE 541 are no longer terminal
+where the child can wait:
+
+- the KeyState poller (`pollParentKeyState`, used by tdns-mp agents) waits
+  and re-bootstraps, then polls again, up to 4 times, 10m, 20m, 40m and 80m
+  apart. The first wait exceeds the parent's cooldown;
+- the tdns-auth setup arm treats 541 on the bootstrap UPDATE
+  (`errBootstrapValidationFailed`) the same way, re-enqueueing the setup on
+  that schedule (`DelegationSyncRequest.ReBootstrapRound`).
+
+**Still open.** A tdns-auth child does not poll after a bootstrap the parent
+accepted. It hears 541 only on its next delegation UPDATE
+(`sendUpdateWithRetry`, still terminal there) or its next setup. Having the
+setup arm run `pollParentKeyState` after an accepted bootstrap would give
+tdns-auth the same recovery as the agent.
+
+### Follow-up, same day: the tdns-auth child polls
+
+The "Still open" item above is closed. When the parent accepts a tdns-auth
+child's bootstrap ceremony (answered NOERROR, `bootstrapAccepted`), the setup
+arm starts `pollAfterAcceptedBootstrap`. This is the agent's
+`pollParentKeyState` with two differences. The ceremony has already been sent,
+so a parent that does not know the key yet is polled again rather than sent a
+second ceremony. And trust does not start a delegation sync, because the
+ceremony and the poll run at every zone load. KeyState 8 now leads to the same
+re-bootstrap rounds as for an agent.
+
+There is at most one poll per key (`childKeyStatePolls`), shared between the
+agent path and this one. A 541 on a later delegation UPDATE is still final in
+`sendUpdateWithRetry`. By then the poll has usually seen code 8 already.
