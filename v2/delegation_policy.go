@@ -46,7 +46,7 @@ func DefaultDelegationPolicy() DelegationPolicy {
 		RequireDnssec:          true,
 		Manual:                 false,
 		AllowUnvalidatedUpload: false,
-		RetryMaxAttempts:       5,
+		RetryMaxAttempts:       3,
 		RetryInterval:          10 * time.Second,
 	}
 }

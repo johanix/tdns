@@ -6,6 +6,7 @@ package tdns
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -24,6 +25,43 @@ var childKeyVerifications sync.Map
 
 func childKeyVerificationID(child string, keyid uint16) string {
 	return fmt.Sprintf("%s::%d", core.CanonicalizeName(child), keyid)
+}
+
+// childKeyReBootstrapCooldown is how long after a verification of a child key
+// ends before a re-bootstrap of that key may start the next one (#677).
+//
+// A verification that failed tells the child to re-bootstrap, and a child
+// that does starts it over. Without a pause a child could have the parent
+// repeat its lookups back to back, as fast as it can send the ceremony. The
+// child's own re-bootstrap schedule starts above this (childReBootstrapDelay),
+// so a well-behaved child never meets it.
+const childKeyReBootstrapCooldown = 5 * time.Minute
+
+// childKeyVerificationsEnded holds, per child key, when its last verification
+// in this process ended. In memory only: a restart forgets it, and a restart
+// is pause enough.
+var childKeyVerificationsEnded sync.Map
+
+// noteChildKeyVerificationEnded records that a verification of child's key
+// keyid ended at now().
+func noteChildKeyVerificationEnded(child string, keyid uint16, now func() time.Time) {
+	childKeyVerificationsEnded.Store(childKeyVerificationID(child, keyid), now())
+}
+
+// childKeyCoolingDown reports whether a verification of child's key keyid
+// ended less than childKeyReBootstrapCooldown before now. An entry older than
+// that is removed as it is found.
+func childKeyCoolingDown(child string, keyid uint16, now time.Time) bool {
+	id := childKeyVerificationID(child, keyid)
+	v, ok := childKeyVerificationsEnded.Load(id)
+	if !ok {
+		return false
+	}
+	if now.Sub(v.(time.Time)) < childKeyReBootstrapCooldown {
+		return true
+	}
+	childKeyVerificationsEnded.CompareAndDelete(id, v)
+	return false
 }
 
 // childKeyVerificationRunning reports whether a verification of child's key
@@ -53,7 +91,8 @@ func childKeyVerificationRunning(child string, keyid uint16) bool {
 //     the same tag would replace a row it has no claim to;
 //   - the stored key is not trusted, since a trusted key needs no bootstrap;
 //   - no verification of it is running: that one will decide, and starting over
-//     underneath it would reset the row it is about to write.
+//     underneath it would reset the row it is about to write;
+//   - none ended within childKeyReBootstrapCooldown.
 func reBootstrapOfKnownKey(ns []dns.RR, sig *dns.SIG, known *Sig0Key) *Sig0Key {
 	if known == nil || known.Trusted || sig == nil {
 		return nil
@@ -68,6 +107,11 @@ func reBootstrapOfKnownKey(ns []dns.RR, sig *dns.SIG, known *Sig0Key) *Sig0Key {
 		return nil
 	}
 	if childKeyVerificationRunning(sig.RRSIG.SignerName, sig.RRSIG.KeyTag) {
+		return nil
+	}
+	if childKeyCoolingDown(sig.RRSIG.SignerName, sig.RRSIG.KeyTag, time.Now()) {
+		lgSigner.Info("re-bootstrap of a child key refused: its last verification ended less than the cooldown ago",
+			"zone", sig.RRSIG.SignerName, "keyid", sig.RRSIG.KeyTag, "cooldown", childKeyReBootstrapCooldown)
 		return nil
 	}
 	reupload := *known

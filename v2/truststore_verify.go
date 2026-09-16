@@ -7,38 +7,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
-// LookupChildKeyAtApex queries the child zone apex for KEY records via the
-// IMR engine. Returns the KEY RRs found, whether the response was DNSSEC-
-// validated, and any error.
-func LookupChildKeyAtApex(ctx context.Context, childZone string, imr *Imr) ([]dns.RR, bool, error) {
-	resp, err := imr.ImrQuery(ctx, dns.Fqdn(childZone), dns.TypeKEY, dns.ClassINET, nil)
-	if err != nil {
-		return nil, false, fmt.Errorf("IMR query for %s KEY failed: %v", childZone, err)
-	}
-	if resp.Error {
-		return nil, false, fmt.Errorf("IMR query for %s KEY returned error: %s", childZone, resp.ErrorMsg)
-	}
-	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
-		return nil, false, fmt.Errorf("no KEY records found at apex of %s", childZone)
-	}
-
-	return resp.RRset.RRs, resp.Validated, nil
-}
-
-// childKeySignalQuery indirects the KEY lookup at one signal name, so a test
-// can see which names at-ns asks without standing up an IMR. Which names are
-// asked is the thing worth pinning (#677).
+// childKeyQuery looks up the KEY RRset at name for child key verification:
+// the child's apex, or one signal name.
 //
-// Production code MUST NOT reassign this. Tests reassign it and restore the
-// original via t.Cleanup.
-var childKeySignalQuery = func(ctx context.Context, imr *Imr, name string) (*ImrResponse, error) {
-	return imr.ImrQuery(ctx, name, dns.TypeKEY, dns.ClassINET, nil)
+// Fresh, past the IMR cache (ImrQueryFresh). An attempt is only worth making
+// if it can see what changed since the last one, and a KEY published after
+// the first attempt would otherwise sit behind that attempt's cached NXDOMAIN
+// for the whole negative TTL (#677).
+//
+// Indirected so a test can see which names are asked, and answer them,
+// without standing up an IMR. Production code MUST NOT reassign this. Tests
+// reassign it and restore the original via t.Cleanup.
+var childKeyQuery = func(ctx context.Context, imr *Imr, name string) (*ImrResponse, error) {
+	if imr == nil {
+		return nil, errors.New("IMR engine not available")
+	}
+	return imr.ImrQueryFresh(ctx, name, dns.TypeKEY, dns.ClassINET)
 }
 
 // atNsNameservers returns the nameservers at-ns builds its signal names from:
@@ -104,114 +96,207 @@ func atNsNameservers(parentZone, childZone string) (*core.RRset, error) {
 	return out, nil
 }
 
-// LookupChildKeyAtSignal queries _sig0key.<childzone>._signal.<ns>. for KEY
-// records, for each NS in nameservers: those of the parent's own delegation
-// that atNsNameservers selects (it says why not the child's apex NS). Returns the
-// union of KEY RRs found, whether all responses were DNSSEC-validated, and any
-// error.
-func LookupChildKeyAtSignal(ctx context.Context, childZone string, nameservers *core.RRset, imr *Imr) ([]dns.RR, bool, error) {
-	if nameservers == nil || len(nameservers.RRs) == 0 {
-		return nil, false, fmt.Errorf("no nameservers to build signal names for %s from", childZone)
+// childKeyVerdict is what one KEY lookup concluded about the offered key.
+type childKeyVerdict int
+
+const (
+	// childKeyNotFound: no KEY there, or the lookup did not finish. Another
+	// attempt may find it.
+	childKeyNotFound childKeyVerdict = iota
+	// childKeyRejected: a KEY is there and another attempt cannot change the
+	// answer. It is bogus, it is not the offered key, or it is in an unsigned
+	// zone while the policy requires DNSSEC.
+	childKeyRejected
+	// childKeyAccepted: the offered key, acceptable under the policy.
+	childKeyAccepted
+)
+
+func (v childKeyVerdict) String() string {
+	switch v {
+	case childKeyNotFound:
+		return "not-found"
+	case childKeyRejected:
+		return "rejected"
+	case childKeyAccepted:
+		return "accepted"
+	}
+	return fmt.Sprintf("verdict(%d)", int(v))
+}
+
+// childKeyFinding is the verdict on one lookup: the child's apex, or one
+// signal name.
+type childKeyFinding struct {
+	verdict childKeyVerdict
+	dnssec  bool // accepted, and DNSSEC-validated
+	why     string
+}
+
+// errChildKeyFinal marks a verification failure that no further attempt can
+// change. runChildKeyVerification stops retrying on it.
+var errChildKeyFinal = errors.New("a further attempt cannot change this verdict")
+
+type childKeyFinalError struct{ msg string }
+
+func (e *childKeyFinalError) Error() string        { return e.msg }
+func (e *childKeyFinalError) Is(target error) bool { return target == errChildKeyFinal }
+
+// judgeChildKeyAnswer turns one KEY lookup at name into a verdict on keyRR.
+// There are three cases (#677):
+//
+//   - No KEY there, or the lookup did not finish: not found, and worth another
+//     attempt. A DNSSEC validation that could not be concluded is a lookup
+//     that did not finish.
+//   - A KEY in a signed zone: DNSSEC decides. Bogus is rejected, and so is a
+//     valid KEY that is not the offered key. The offered key, validated, is
+//     accepted.
+//   - A KEY in an unsigned zone: accepted only where the policy does not
+//     require DNSSEC (childKeyAcceptable), rejected otherwise. Another attempt
+//     would find the zone just as unsigned.
+//
+// There is no "published but not yet signed" case: a signed zone serves its
+// data signed.
+func judgeChildKeyAnswer(name string, resp *ImrResponse, err error, keyRR string, pol DelegationPolicy) childKeyFinding {
+	switch {
+	case err != nil:
+		return childKeyFinding{verdict: childKeyNotFound, why: fmt.Sprintf("KEY lookup at %s failed: %v", name, err)}
+	case resp == nil:
+		return childKeyFinding{verdict: childKeyNotFound, why: fmt.Sprintf("KEY lookup at %s returned nothing", name)}
+	case resp.Error:
+		return childKeyFinding{verdict: childKeyNotFound, why: fmt.Sprintf("KEY lookup at %s failed: %s", name, resp.ErrorMsg)}
+	case resp.RRset == nil || len(resp.RRset.RRs) == 0:
+		return childKeyFinding{verdict: childKeyNotFound, why: fmt.Sprintf("no KEY at %s", name)}
 	}
 
-	var allKeys []dns.RR
-	allValidated := true
-	found := false
+	match := matchKeyRR(resp.RRset.RRs, keyRR)
+	state := resp.ValidationState
+	if resp.Validated {
+		state = cache.ValidationStateSecure
+	}
+	switch state {
+	case cache.ValidationStateBogus:
+		return childKeyFinding{verdict: childKeyRejected, why: fmt.Sprintf("the KEY at %s is DNSSEC-bogus", name)}
+	case cache.ValidationStateSecure:
+		if match {
+			return childKeyFinding{verdict: childKeyAccepted, dnssec: true,
+				why: fmt.Sprintf("the offered KEY is at %s, DNSSEC-validated", name)}
+		}
+		return childKeyFinding{verdict: childKeyRejected,
+			why: fmt.Sprintf("the KEY at %s is DNSSEC-validated but is not the offered key", name)}
+	case cache.ValidationStateInsecure:
+		if !match {
+			return childKeyFinding{verdict: childKeyRejected, why: fmt.Sprintf("the KEY at %s is not the offered key", name)}
+		}
+		if childKeyAcceptable(true, false, pol) {
+			return childKeyFinding{verdict: childKeyAccepted,
+				why: fmt.Sprintf("the offered KEY is at %s, in an unsigned zone", name)}
+		}
+		return childKeyFinding{verdict: childKeyRejected,
+			why: fmt.Sprintf("the offered KEY is at %s, but in an unsigned zone, and require-dnssec is set", name)}
+	default:
+		if match && childKeyAcceptable(true, false, pol) {
+			return childKeyFinding{verdict: childKeyAccepted,
+				why: fmt.Sprintf("the offered KEY is at %s, not DNSSEC-validated", name)}
+		}
+		return childKeyFinding{verdict: childKeyNotFound,
+			why: fmt.Sprintf("the KEY at %s could not be DNSSEC-validated (%s)", name, validationStateName(state))}
+	}
+}
 
+// atNsFindings looks for the offered key at the signal name of each
+// nameserver atNsNameservers selects, one finding per name.
+//
+// With no nameserver to ask, the finding is not-found rather than rejected:
+// the delegation the next attempt reads may name one.
+func atNsFindings(ctx context.Context, childZone, parentZone, keyRR string, imr *Imr, pol DelegationPolicy) []childKeyFinding {
+	nameservers, err := atNsNameservers(parentZone, childZone)
+	if err != nil {
+		lgSigner.Info("VerifyChildKey: at-ns not tried, no nameserver in the delegation to build signal names from",
+			"zone", childZone, "parent", parentZone, "err", err)
+		return []childKeyFinding{{verdict: childKeyNotFound, why: err.Error()}}
+	}
+	var out []childKeyFinding
 	for _, rr := range nameservers.RRs {
-		nsRR, ok := rr.(*dns.NS)
+		ns, ok := rr.(*dns.NS)
 		if !ok {
 			continue
 		}
-
 		// _sig0key.<childzone>._signal.<ns>. -- the same spelling the child
 		// side publishes (signal_republish.go).
-		signalName := signalOwnerName(signalPrefixSig0Key, childZone, nsRR.Ns)
-		lgSigner.Debug("LookupChildKeyAtSignal: querying", "name", signalName)
-
-		keyResp, err := childKeySignalQuery(ctx, imr, signalName)
-		if err != nil {
-			lgSigner.Debug("LookupChildKeyAtSignal: query failed", "name", signalName, "err", err)
-			continue
-		}
-		if keyResp == nil || keyResp.Error || keyResp.RRset == nil || len(keyResp.RRset.RRs) == 0 {
-			continue
-		}
-
-		found = true
-		allKeys = append(allKeys, keyResp.RRset.RRs...)
-		if !keyResp.Validated {
-			allValidated = false
-		}
+		name := signalOwnerName(signalPrefixSig0Key, childZone, ns.Ns)
+		lgSigner.Debug("VerifyChildKey: querying signal name", "zone", childZone, "name", name)
+		resp, err := childKeyQuery(ctx, imr, name)
+		out = append(out, judgeChildKeyAnswer(name, resp, err, keyRR, pol))
 	}
-
-	if !found {
-		return nil, false, fmt.Errorf("no KEY records found at _signal names for %s", childZone)
-	}
-
-	return allKeys, allValidated, nil
+	return out
 }
 
-// VerifyChildKey checks whether a child's KEY (identified by keyRR string) can
-// be found via the policy's verification mechanisms (at-apex, at-ns). The
-// policy is the caller's: TriggerChildKeyVerification resolves it once from
-// the receiving parent zone and passes it here rather than looking it up
+// VerifyChildKey looks for a child's offered KEY (keyRR) where the policy's
+// mechanisms say, and judges every answer on its own (judgeChildKeyAnswer).
+// The policy is the caller's: TriggerChildKeyVerification resolves it once
+// from the receiving parent zone and passes it here rather than looking it up
 // again from the child name. parentZone is that same zone: at-ns reads the
 // child's delegation from it (atNsNameservers).
-func VerifyChildKey(ctx context.Context, childZone, parentZone string, keyRR string, imr *Imr, pol DelegationPolicy) (verified bool, dnssecValidated bool) {
-	mechanisms := pol.Mechanisms
-	if len(mechanisms) == 0 {
-		return false, false
-	}
-
-	// Try each mechanism in order. Stop as soon as we have a DNSSEC-validated
-	// match. If a mechanism finds the key without DNSSEC validation, remember
-	// that but keep trying — a later mechanism may provide validation.
-	foundUnvalidated := false
-
-	for _, mech := range mechanisms {
+//
+// One DNSSEC-validated KEY, at the apex or at any one signal name, is enough,
+// and ends the search. A KEY acceptable without validation (require-dnssec
+// off) is kept while the remaining mechanisms get the chance to validate it.
+//
+// When the key is not accepted, reason says why, naming every lookup. It Is
+// errChildKeyFinal when every lookup was rejected: nothing another attempt
+// could see would change that. If any lookup found nothing, or did not finish,
+// it is a plain error, and another attempt may succeed.
+func VerifyChildKey(ctx context.Context, childZone, parentZone string, keyRR string, imr *Imr, pol DelegationPolicy) (accepted, dnssecValidated bool, reason error) {
+	var findings []childKeyFinding
+	for _, mech := range pol.Mechanisms {
+		var found []childKeyFinding
 		switch mech {
 		case "at-apex":
-			keys, validated, err := LookupChildKeyAtApex(ctx, childZone, imr)
-			if err != nil {
-				lgSigner.Debug("VerifyChildKey: at-apex failed", "zone", childZone, "err", err)
-				continue
-			}
-			if matchKeyRR(keys, keyRR) {
-				lgSigner.Info("VerifyChildKey: key found via at-apex", "zone", childZone, "dnssec", validated)
-				if validated {
-					return true, true
-				}
-				foundUnvalidated = true
-			} else {
-				lgSigner.Debug("VerifyChildKey: key not found in at-apex results", "zone", childZone)
-			}
-
+			name := dns.Fqdn(childZone)
+			resp, err := childKeyQuery(ctx, imr, name)
+			found = []childKeyFinding{judgeChildKeyAnswer(name, resp, err, keyRR, pol)}
 		case "at-ns":
-			nsRRset, err := atNsNameservers(parentZone, childZone)
-			if err != nil {
-				lgSigner.Info("VerifyChildKey: at-ns not tried, no nameserver in the delegation to build signal names from",
-					"zone", childZone, "parent", parentZone, "err", err)
-				continue
+			found = atNsFindings(ctx, childZone, parentZone, keyRR, imr, pol)
+		default:
+			continue // compileDelegationPolicy admits no other mechanism
+		}
+		for _, f := range found {
+			lgSigner.Debug("VerifyChildKey: finding", "zone", childZone, "mechanism", mech,
+				"verdict", f.verdict, "why", f.why)
+			if f.verdict == childKeyAccepted && f.dnssec {
+				lgSigner.Info("VerifyChildKey: key found and DNSSEC-validated",
+					"zone", childZone, "mechanism", mech, "why", f.why)
+				return true, true, nil
 			}
-			keys, validated, err := LookupChildKeyAtSignal(ctx, childZone, nsRRset, imr)
-			if err != nil {
-				lgSigner.Debug("VerifyChildKey: at-ns failed", "zone", childZone, "err", err)
-				continue
-			}
-			if matchKeyRR(keys, keyRR) {
-				lgSigner.Info("VerifyChildKey: key found via at-ns (_signal)", "zone", childZone, "dnssec", validated)
-				if validated {
-					return true, true
-				}
-				foundUnvalidated = true
-			} else {
-				lgSigner.Debug("VerifyChildKey: key not found in at-ns results", "zone", childZone)
-			}
+			f.why = mech + ": " + f.why
+			findings = append(findings, f)
 		}
 	}
+	return childKeyOutcome(childZone, findings)
+}
 
-	return foundUnvalidated, false
+// childKeyOutcome sums up findings that contain no validated acceptance.
+func childKeyOutcome(childZone string, findings []childKeyFinding) (accepted, dnssecValidated bool, reason error) {
+	if len(findings) == 0 {
+		return false, false, errors.New("no verification mechanism looked for the KEY")
+	}
+	final := true
+	var why []string
+	for _, f := range findings {
+		switch f.verdict {
+		case childKeyAccepted:
+			lgSigner.Info("VerifyChildKey: key found, not DNSSEC-validated, and the policy allows that",
+				"zone", childZone, "why", f.why)
+			return true, false, nil
+		case childKeyNotFound:
+			final = false
+		}
+		why = append(why, f.why)
+	}
+	msg := strings.Join(why, "; ")
+	if final {
+		return false, false, &childKeyFinalError{msg: msg}
+	}
+	return false, false, errors.New(msg)
 }
 
 // matchKeyRR reports whether any of rrs carries the same KEY as keyRR.
@@ -270,9 +355,8 @@ func matchKeyRR(rrs []dns.RR, keyRR string) bool {
 // waitOrDone sleeps for d, or returns false the moment ctx is cancelled.
 //
 // A plain time.Sleep kept the key-verification retry goroutine alive past
-// shutdown for as long as the backoff had left to run -- and the backoff
-// doubles, so with a configured retry-interval that could be a long time after
-// everything else had stopped.
+// shutdown for as long as the wait had left to run, and with a configured
+// retry-interval that could be a long time after everything else had stopped.
 func waitOrDone(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -390,11 +474,11 @@ func (zd *ZoneData) rememberDiscoveredChildKey(ctx context.Context, key *Sig0Key
 }
 
 // TriggerChildKeyVerification starts an async verification of a child KEY
-// that was just stored in the TrustStore: DNS lookup, retry with backoff, then
-// trust. ctx is the engine's lifetime context. The verification retries with
-// exponential backoff and can therefore be sleeping for a long time when the
-// process is asked to stop; without it the goroutine ignores shutdown and the
-// deferred key cleanup it performs runs against a database that is closing.
+// that was just stored in the TrustStore: DNS lookup, a few spaced retries,
+// then trust. ctx is the engine's lifetime context. The verification can be
+// asleep between attempts when the process is asked to stop; without ctx the
+// goroutine ignores shutdown and the deferred key cleanup it performs runs
+// against a database that is closing.
 // Returns a channel closed when the verifier goroutine exits, and nil when no
 // verification was started. Production ignores it; it exists so a test can wait
 // for THIS verifier rather than watching the process-wide goroutine count,
@@ -421,6 +505,10 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone, pa
 		// Released before done closes, so a caller that waits on done can
 		// start the next verification of the key.
 		defer childKeyVerifications.Delete(id)
+		// Stamped before the release above (defers run last-in, first-out),
+		// so a re-bootstrap never finds the key neither verifying nor cooling
+		// down (childKeyCoolingDown).
+		defer noteChildKeyVerificationEnded(childZone, keyid, time.Now)
 		kdb.runChildKeyVerification(ctx, childZone, keyid, pol, imrChildKeyVerifier(childZone, parentZone, keyRR, pol))
 	}()
 	return done
@@ -486,37 +574,36 @@ func imrChildKeyVerifier(childZone, parentZone, keyRR string, pol DelegationPoli
 		if imr == nil {
 			return false, false, errors.New("IMR engine not yet available")
 		}
-		verified, dnssecValidated := VerifyChildKey(ctx, childZone, parentZone, keyRR, imr, pol)
-		if !verified {
-			return false, false, fmt.Errorf("KEY not found via %v", pol.Mechanisms)
-		}
-		// One predicate, and only one. This used to repeat the require-dnssec
-		// condition inline and THEN call the helper, which left the helper
-		// unable to reject anything -- so a rule added to it would have had no
-		// effect here, which is the opposite of why it was extracted.
-		// Compiled policy: absent require-dnssec became true at compile.
-		if !childKeyAcceptable(verified, dnssecValidated, pol) {
-			return false, false, errors.New(
-				"KEY found but not DNSSEC-validated, and require-dnssec is set")
-		}
-		return true, dnssecValidated, nil
+		return VerifyChildKey(ctx, childZone, parentZone, keyRR, imr, pol)
 	}
 }
 
 // runChildKeyVerification is the retry/exhaustion engine behind
 // TriggerChildKeyVerification. On acceptance it promotes the key to trusted
 // (the "verify" truststore subcommand, which also clears any earlier failure)
-// and completes a deferred bootstrap DEL-ANY-KEY. On exhaustion it RECORDS the
-// failure on the truststore row (K-4 code 8): from then on the KeyState
-// inquiry reports KEY_VALIDATION_FAILED rather than "in progress", and a
-// signed UPDATE is refused with EDE KEY-VALIDATION-FAILED -- the child is told
-// that waiting will not help. A shutdown mid-way records nothing; the row
-// stays "in progress" and a re-upload starts over.
+// and completes a deferred bootstrap DEL-ANY-KEY.
+//
+// Attempts are pol.RetryInterval apart, not backed off (#677). A KEY that is
+// simply not there yet is worth a few attempts, each of which really asks
+// (childKeyQuery bypasses the cache). A longer wait belongs to the child,
+// which knows when it asked for its key to be published; the parent keeps no
+// goroutine waiting on someone else's schedule. A final verdict
+// (errChildKeyFinal) ends the attempts at once.
+//
+// On a final verdict or exhaustion it RECORDS the failure on the truststore
+// row (K-4 code 8): from then on the KeyState inquiry reports
+// KEY_VALIDATION_FAILED rather than "in progress", and a signed UPDATE is
+// refused with EDE KEY-VALIDATION-FAILED. The reason names every lookup. The
+// child's remedy is to re-bootstrap, which starts verification over
+// (reBootstrapOfKnownKey), once the cooldown has passed. A shutdown mid-way
+// records nothing; the row stays "in progress" and a re-upload starts over.
 func (kdb *KeyDB) runChildKeyVerification(ctx context.Context, childZone string, keyid uint16, pol DelegationPolicy, verify childKeyVerifier) bool {
 	maxAttempts, retryInterval := pol.RetryMaxAttempts, pol.RetryInterval
 	var lastReason error
+	attempts := 0
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attempts = attempt
 		lgSigner.Info("verifying child key via DNS",
 			"zone", childZone, "keyid", keyid, "attempt", attempt, "max", maxAttempts)
 
@@ -555,7 +642,15 @@ func (kdb *KeyDB) runChildKeyVerification(ctx context.Context, childZone string,
 			return true
 		}
 
+		if reason == nil {
+			reason = errors.New("the key was not accepted")
+		}
 		lastReason = reason
+		if errors.Is(reason, errChildKeyFinal) {
+			lgSigner.Info("child key verification reached a final verdict; not retrying",
+				"zone", childZone, "keyid", keyid, "reason", reason)
+			break
+		}
 		if attempt < maxAttempts {
 			lgSigner.Info("child key not yet verifiable, will retry",
 				"zone", childZone, "keyid", keyid, "reason", reason, "delay", retryInterval)
@@ -564,7 +659,6 @@ func (kdb *KeyDB) runChildKeyVerification(ctx context.Context, childZone string,
 					"zone", childZone, "keyid", keyid)
 				return false
 			}
-			retryInterval *= 2 // exponential backoff
 		}
 	}
 
@@ -579,8 +673,8 @@ func (kdb *KeyDB) runChildKeyVerification(ctx context.Context, childZone string,
 		return false
 	}
 
-	why := fmt.Sprintf("%d attempts via %v: %v", maxAttempts, pol.Mechanisms, lastReason)
-	lgSigner.Warn("child key verification exhausted all attempts; recording validation failure",
+	why := fmt.Sprintf("%s via %v: %v", attemptsText(attempts), pol.Mechanisms, lastReason)
+	lgSigner.Warn("child key verification failed; recording validation failure",
 		"zone", childZone, "keyid", keyid, "reason", why)
 	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
 		Command:         "child-sig0-mgmt",
@@ -593,4 +687,11 @@ func (kdb *KeyDB) runChildKeyVerification(ctx context.Context, childZone string,
 			"zone", childZone, "keyid", keyid, "err", err)
 	}
 	return false
+}
+
+func attemptsText(n int) string {
+	if n == 1 {
+		return "1 attempt"
+	}
+	return fmt.Sprintf("%d attempts", n)
 }
