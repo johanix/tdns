@@ -85,7 +85,11 @@ func (zd *ZoneData) ApiZoneUpdate(ctx context.Context, zp ZonePost) (string, err
 	}
 
 	// An update that removes a nameserver from a zone that syncs its own
-	// delegation goes to the parent first (delegation_parent_first.go).
+	// delegation goes to the parent first (delegation_parent_first.go). Every
+	// update to such a zone is applied under the same lock, so none lands
+	// while a removal waits for the parent.
+	unlock := zd.lockDelegationChanges()
+	defer unlock()
 	if handled, msg, err := zd.applyParentFirst(ctx, ur, zp.Force, submit, parentConfirmerFor(zd)); handled {
 		if err != nil {
 			var notConfirmed *ParentNotConfirmedError

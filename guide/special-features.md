@@ -362,6 +362,9 @@ out of the apex NS RRset (on either channel, see
    parent-first removal.
 3. On confirmation, the update is applied as sent.
 
+Other updates to the zone wait while a removal waits for the parent,
+so nothing changes the delegation underneath it.
+
 If the parent does not confirm, step 1 is undone and the update is
 refused with the parent's reason. On the management API,
 `--force` applies it anyway, and the ordinary sync to the parent

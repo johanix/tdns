@@ -211,10 +211,10 @@ type ZoneData struct {
 	// at the apex. Cleared when the KEY leaves the apex so a later
 	// WAITING→READY transition runs the ceremony again.
 	proxySig0ParentBootstrapped bool
-	// parentFirstMu serialises the nameserver removals a zone sends to its
-	// parent before applying them (delegation_parent_first.go). Between
-	// computing the parent's transaction and applying the change here, no
-	// other such change may reshape the delegation it was computed from.
+	// parentFirstMu serialises the updates to a zone that syncs its own
+	// delegation (lockDelegationChanges, delegation_parent_first.go). Between
+	// computing a removal's transaction for the parent and applying it here,
+	// no other update may reshape the delegation it was computed from.
 	parentFirstMu sync.Mutex
 	AppType       AppType
 	// Errors holds all active error conditions on this zone. Use SetError /

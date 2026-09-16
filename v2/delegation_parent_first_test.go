@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,8 +114,10 @@ func pfZoneWithUpdater(t *testing.T, opts map[ZoneOption]bool) *ZoneData {
 	zd.Options = opts
 	zd.UpdatePolicy = policyAllowing(dns.TypeNS, dns.TypeA, dns.TypeAAAA)
 	kdb := newTestKeyDB(t)
-	// Unbuffered, so that pfSettle can wait for the updater (see there).
-	kdb.UpdateQ = make(chan UpdateRequest)
+	// Buffered, as in production: the updater queues updates to itself (a
+	// delegation change republishes the CSYNC), which an unbuffered queue
+	// turns into a five-second stall.
+	kdb.UpdateQ = make(chan UpdateRequest, 16)
 	zd.KeyDB = kdb
 	zd.DelegationSyncQ = make(chan DelegationSyncRequest, 8)
 
@@ -131,15 +134,18 @@ func pfZoneWithUpdater(t *testing.T, opts map[ZoneOption]bool) *ZoneData {
 	return zd
 }
 
-// pfSettle returns once the updater has finished everything it was handed. It
-// answers a caller before it queues the delegation sync that follows an apply,
-// so a test that reads the sync queue straight after ApiZoneUpdate returns is
-// racing it. The queue is unbuffered and the updater is one goroutine, so it
-// takes this PING only when the previous request is done with.
+// pfSettle returns once the updater has finished everything it was handed
+// before. It answers a caller before it queues the delegation sync that follows
+// an apply, so a test that reads the sync queue straight after ApiZoneUpdate
+// returns is racing it. The updater is one goroutine and answers this empty
+// update only after it is done with every request ahead of it.
 func pfSettle(t *testing.T, zd *ZoneData) {
 	t.Helper()
+	respch := make(chan ZoneUpdateResult, 1)
+	zd.KeyDB.UpdateQ <- UpdateRequest{Cmd: "ZONE-UPDATE", ZoneName: pfChild, PreAuthorized: true,
+		Description: "test: wait for the updater", Resp: respch}
 	select {
-	case zd.KeyDB.UpdateQ <- UpdateRequest{Cmd: "PING"}:
+	case <-respch:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the updater did not come back")
 	}
@@ -382,7 +388,7 @@ func TestParentFirstDnsUpdateRefusalCarriesTheParentsReason(t *testing.T) {
 	m := new(dns.Msg)
 	m.SetUpdate(pfChild)
 
-	go zd.answerParentFirst(context.Background(), w, m, req, zd.KeyDB.UpdateQ, dns.RcodeSuccess)
+	go zd.answerOwnDelegationUpdate(context.Background(), w, m, req, zd.KeyDB.UpdateQ, dns.RcodeSuccess)
 
 	var reply *dns.Msg
 	select {
@@ -449,5 +455,96 @@ func TestPlanDelegationChangeGlueOfAKeptNameserverGoesFirst(t *testing.T) {
 	}
 	if len(ch.status.AAdds) != 1 || len(ch.status.ARemoves) != 1 {
 		t.Errorf("AAdds = %v, ARemoves = %v; want one each for ns1", ch.status.AAdds, ch.status.ARemoves)
+	}
+}
+
+// An update that arrives while a removal waits for its parent is applied after
+// the removal, not during the wait -- on both channels. Applied during it, an
+// addition would change the delegation the removal's transaction was computed
+// from, and its own sync would race the removal's.
+func TestParentFirstOtherUpdatesWaitForTheParent(t *testing.T) {
+	zd := pfZoneWithUpdater(t, map[ZoneOption]bool{OptParentSync: true, OptAllowApiUpdates: true, OptAllowUpdates: true})
+	parent := newPfParent(t, zd)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	withParentConfirmer(t, func(ctx context.Context, status DelegationSyncStatus) (string, error) {
+		once.Do(func() { close(entered) })
+		<-release
+		return parent.confirm(ctx, status)
+	})
+
+	removal := make(chan error, 1)
+	go func() {
+		_, err := zd.ApiZoneUpdate(context.Background(), pfDelrrNS3())
+		removal <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the removal never asked the parent")
+	}
+
+	apiAdd := make(chan error, 1)
+	go func() {
+		_, err := zd.ApiZoneUpdate(context.Background(), ZonePost{
+			Command:    "update",
+			Zone:       pfChild,
+			UpdateVerb: VerbAddRR,
+			UpdateRRs:  []string{"child.test. 3600 IN NS ns4.child.test.", "ns4.child.test. 3600 IN A 192.0.2.4"},
+		})
+		apiAdd <- err
+	}()
+
+	actions, err := BuildZoneUpdateActions(pfChild, ZoneUpdateSpec{
+		Verb: VerbAddRR,
+		RRs:  []string{"child.test. 3600 IN NS ns5.child.test.", "ns5.child.test. 3600 IN A 192.0.2.5"},
+	})
+	if err != nil {
+		t.Fatalf("BuildZoneUpdateActions: %v", err)
+	}
+	w := &chanResponseWriter{ch: make(chan *dns.Msg, 1)}
+	m := new(dns.Msg)
+	m.SetUpdate(pfChild)
+	go zd.answerOwnDelegationUpdate(context.Background(), w, m,
+		UpdateRequest{Cmd: "ZONE-UPDATE", ZoneName: pfChild, Actions: actions, Validated: true, Trusted: true},
+		zd.KeyDB.UpdateQ, dns.RcodeSuccess)
+
+	// Give both every chance to land early.
+	time.Sleep(300 * time.Millisecond)
+	for _, name := range pfNS(t, zd) {
+		if name == "ns4.child.test." || name == "ns5.child.test." {
+			t.Errorf("%s was applied while the removal waited for the parent", name)
+		}
+	}
+	select {
+	case err := <-apiAdd:
+		t.Errorf("the API addition returned during the parent wait (err %v)", err)
+	case <-w.ch:
+		t.Error("the DNS UPDATE addition was answered during the parent wait")
+	default:
+	}
+
+	close(release)
+	for what, ch := range map[string]chan error{"removal": removal, "API addition": apiAdd} {
+		select {
+		case err := <-ch:
+			if err != nil {
+				t.Errorf("%s: %v", what, err)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatalf("%s never finished", what)
+		}
+	}
+	select {
+	case reply := <-w.ch:
+		if reply.Rcode != dns.RcodeSuccess {
+			t.Errorf("DNS UPDATE addition answered %s", dns.RcodeToString[reply.Rcode])
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the DNS UPDATE addition was never answered")
+	}
+	if got := pfNS(t, zd); !pfSameNames(got, "ns1.child.test.", "ns4.child.test.", "ns5.child.test.") {
+		t.Errorf("zone NS = %v, want [ns1 ns4 ns5]", got)
 	}
 }

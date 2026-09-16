@@ -200,6 +200,22 @@ func recordIn(list []dns.RR, rr dns.RR) bool {
 	return false
 }
 
+// lockDelegationChanges takes the zone's delegation lock if the zone syncs its
+// own delegation, and returns what releases it (a no-op for any other zone).
+//
+// Every update to such a zone is applied holding it, not only the removals
+// that go to the parent first. A removal's transaction is computed from the
+// zone as it stands and may wait up to parentFirstTimeout for the parent; an
+// addition applied during that wait changes the delegation underneath it, and
+// its own sync to the parent races the removal's.
+func (zd *ZoneData) lockDelegationChanges() (unlock func()) {
+	if !zd.syncsOwnDelegation() {
+		return func() {}
+	}
+	zd.parentFirstMu.Lock()
+	return zd.parentFirstMu.Unlock
+}
+
 // syncsOwnDelegation reports whether this server sends the zone's delegation
 // to its parent as the zone's own primary. A proxy forwards a change it has
 // already seen published, and cannot go first.
@@ -230,17 +246,15 @@ var parentConfirmerFor = func(zd *ZoneData) parentConfirmer {
 // every other update, which the caller applies as before.
 //
 // force applies the update even when the parent does not confirm it.
+//
+// The caller holds the zone's delegation lock (lockDelegationChanges), and holds
+// it through applying the update itself when this returns handled == false.
 func (zd *ZoneData) applyParentFirst(ctx context.Context, ur UpdateRequest, force bool,
 	submit zoneUpdateSubmitter, confirm parentConfirmer) (handled bool, msg string, err error) {
 
 	if !zd.syncsOwnDelegation() {
 		return false, "", nil
 	}
-
-	// One at a time per zone: the parent's transaction is computed from the
-	// zone as it stands, and must still describe it when step 3 applies.
-	zd.parentFirstMu.Lock()
-	defer zd.parentFirstMu.Unlock()
 
 	change, perr := zd.planDelegationChange(ur.Actions)
 	if perr != nil {

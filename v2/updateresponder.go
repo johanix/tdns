@@ -442,18 +442,18 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		Status:    dur.Status,
 	}
 
-	// An update that removes a nameserver from a zone that syncs its own
-	// delegation goes to the parent before it is applied
-	// (delegation_parent_first.go). That is a network round trip of up to
-	// parentFirstTimeout, and this goroutine serves every UPDATE on the server
-	// -- including, when the parent is served here too, the very UPDATE that
-	// round trip sends. So it runs on its own and answers the client when it is
-	// done. The DNS handler does not wait for this function either way.
+	// A zone that syncs its own delegation: an update that removes a
+	// nameserver goes to the parent before it is applied, a network round trip
+	// of up to parentFirstTimeout, and every other update to the zone waits for
+	// it (delegation_parent_first.go). This goroutine serves every UPDATE on the
+	// server -- including, when the parent is served here too, the very UPDATE
+	// that round trip sends -- so neither the round trip nor the wait may
+	// happen on it. The update runs on its own goroutine and answers the client
+	// when it is done. The DNS handler does not wait for this function either
+	// way.
 	if req.Cmd == "ZONE-UPDATE" && zd.syncsOwnDelegation() {
-		if change, perr := zd.planDelegationChange(r.Ns); perr != nil || change.removesNS {
-			go zd.answerParentFirst(ctx, w, m, req, updateq, finalRcode)
-			return nil
-		}
+		go zd.answerOwnDelegationUpdate(ctx, w, m, req, updateq, finalRcode)
+		return nil
 	}
 
 	return answerAfterApply(ctx, w, m, req, updateq, finalRcode)
@@ -524,16 +524,20 @@ func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req
 	return nil
 }
 
-// answerParentFirst applies a nameserver removal parent-first and answers the
-// client. A DNS UPDATE has no way to say "apply it anyway", so a removal the
-// parent does not confirm is REFUSED, with the parent's reason in the EDE.
-func (zd *ZoneData) answerParentFirst(ctx context.Context, w dns.ResponseWriter, m *dns.Msg,
+// answerOwnDelegationUpdate applies an update to a zone that syncs its own
+// delegation, holding the zone's delegation lock, and answers the client. A
+// nameserver removal goes to the parent first. A DNS UPDATE has no way to say
+// "apply it anyway", so a removal the parent does not confirm is REFUSED, with
+// the parent's reason in the EDE.
+func (zd *ZoneData) answerOwnDelegationUpdate(ctx context.Context, w dns.ResponseWriter, m *dns.Msg,
 	req UpdateRequest, updateq chan UpdateRequest, finalRcode int) {
+
+	unlock := zd.lockDelegationChanges()
+	defer unlock()
 
 	handled, msg, err := zd.applyParentFirst(ctx, req, false, dnsZoneUpdateSubmitter(updateq), parentConfirmerFor(zd))
 	if !handled {
-		// Planned again under the zone's lock, the update no longer removes a
-		// nameserver: an earlier one already did.
+		// Removes no nameserver: applied as before, but still in turn.
 		if aerr := answerAfterApply(ctx, w, m, req, updateq, finalRcode); aerr != nil {
 			lgHandler.Error("error from answerAfterApply", "zone", req.ZoneName, "err", aerr)
 		}

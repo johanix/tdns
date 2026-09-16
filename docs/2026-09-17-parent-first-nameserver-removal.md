@@ -31,7 +31,7 @@ however the transaction is built.
 
 ## Child: three steps
 
-`applyParentFirst` (`v2/delegation_parent_first.go`), under a per-zone lock:
+`applyParentFirst` (`v2/delegation_parent_first.go`):
 
 1. **Here first:** what the update adds to the delegation (new NS, their
    glue), and glue changes for nameservers that stay. These are zone-first
@@ -73,10 +73,17 @@ The three steps run detached from the caller's cancellation. A client that
 hangs up after step 1 must not leave the zone half-changed with nobody to undo
 it.
 
-On DNS UPDATE the flow runs in its own goroutine and answers the client
-itself. The UPDATE engine is one goroutine for every zone. When the parent is
-served by the same server, the round trip's own UPDATE queues behind it, so
-running inline would deadlock.
+Every update to a zone that syncs its own delegation is applied holding the
+zone's delegation lock (`lockDelegationChanges`), not only the removals. An
+update that arrives while a removal waits for the parent is applied after it.
+Otherwise it would change the delegation the removal's transaction was computed
+from, and its own sync to the parent would race the removal's.
+
+On DNS UPDATE, every update to such a zone therefore runs in its own goroutine
+and answers the client itself. The UPDATE engine is one goroutine for every
+zone, so neither the parent round trip nor the wait for the lock may happen on
+it. When the parent is served by the same server, the round trip's own UPDATE
+would queue behind it and deadlock.
 
 ## Parent: every resulting nameserver served
 
@@ -103,6 +110,9 @@ moment it is asked, so the order itself is under test. Covered:
 - a DNS UPDATE refusal and its EDE;
 - the plan filter;
 - the kept-nameserver glue split.
+
+Also covered: an API update and a DNS UPDATE that arrive during the parent wait
+are applied only after the removal.
 
 Each piece was reverted in turn and at least one test fails for each. Not
 covered by a test: the four-line hook in `UpdateResponder` that starts the
