@@ -1,6 +1,6 @@
 # Moving a zone from Cascade to tdns with the same keys
 
-**Status:** proposal, under review
+**Status:** proposal, under review. Q1–Q7 decided (r2).
 **Repos:** tdns (converter, Ed448 registration), dnssec-algorithms (Ed448 implementation), johanix/dns fork (one comment)
 **Read at:** tdns `49df2c3a`; tdns-mp `2c25bcd`; dnssec-algorithms `5462dd5`; Cascade `v0.1.0-beta6` and `main` `57e2565`; dnst `v0.2.0-alpha3` and `main` `f696f0a9`; domain 0.12.1 (dnst's), `8abed138` (Cascade's) and `main` `849de477`
 **Related:** tdns-mp `docs/2026-09-13-key-lifecycle-ownership-design.md` (KLO) and its test plan `docs/2026-09-14-key-lifecycle-ownership-test-plan.md`
@@ -10,6 +10,7 @@
 | Rev | Date | Change |
 |---|---|---|
 | r1 | 2026-09-16 | First version. |
+| r2 | 2026-09-16 | Johan's answers: Q1–Q7 decided. Q6 extended to multi-signer zones moving to tdns-mpsigner: foreign keys come from the incoming zone, not from the conversion, and a new `--multi-signer` flag says so (§5.2, §5.3). §6.1 gains the multi-signer verification, §7 the multi-provider own-key import. F1 filed as #668. |
 
 ---
 
@@ -101,7 +102,7 @@ A new package `ed448/` in dnssec-algorithms, next to `mldsa44/`:
 
 ### 4.2 Registration: in every binary
 
-Ed448 is a standard algorithm (RFC 8080) that every validator is expected to implement, not an experiment. **Proposal:** register it the way Ed25519 is present, in every tdns binary, rather than as a line in each app's `algs.list`.
+Ed448 is a standard algorithm (RFC 8080) that every validator is expected to implement, not an experiment. **Decided (Q2):** register it the way Ed25519 is present, in every tdns binary, rather than as a line in each app's `algs.list`.
 - **Where:** `v2/algorithms`' `init` calls `Register(16, ed448.New(), dnssecCaps, facts)` next to the built-in records.
 - **Why not `algs.list`:** tdns has seven of them (agent, auth, cli, dog, imr, ncli, signer), and tdns-mp has its own. A binary left out cannot sign or validate Ed448; a validator treats an Ed448-only zone as insecure.
 - **Cost:** `tdns/v2` imports `dnssec-algorithms/ed448` and so links CIRCL (pure Go, no cgo). tdns's pin of dnssec-algorithms moves from `v0.0.0-20260513135759-676b5158decd` to a version with the package.
@@ -151,11 +152,12 @@ No code change. `builtinAlgorithms` (`algorithm.go:106-118`) does not include 16
 
 ### 5.2 The command
 
-**Proposal:** `keystore dnssec bulk-convert --from cascade --state-file <zone>.state [--state-file …] --dest <dir> [--keys-dir <dir>] [--allow-roll-in-progress]`.
+**Decided (Q1):** `keystore dnssec bulk-convert --from cascade --state-file <zone>.state [--state-file …] --dest <dir> [--keys-dir <dir>] [--allow-roll-in-progress] [--multi-signer]`.
 
 - `--from bind` (the default) keeps today's behaviour, including `--state`, the state for BIND keys without a `.state` file. The Cascade flag is `--state-file` so the two don't collide.
 - **`--from cascade` never writes to the source.** It reads the state files and the key files they name, and writes a new export directory at `--dest`. It refuses a `--dest` that holds any file it read. Cascade's `keys-dir` stays usable by Cascade, which is also what makes a rehearsal harmless.
 - **Key files are found by base name.** A state file names each key by an absolute `file://` URL on the Cascade host. The converter takes the URL's base name and looks for it in `--keys-dir`, which defaults to the state file's own directory. That works both for the live directory and for a copy.
+- **`--multi-signer`** states that the target is tdns-mpsigner in a multi-signer zone, where the other signers' keys arrive in the incoming zone (§5.3 item 3, Q6).
 - **Several state files, one destination:** one run can move many zones.
 - **Offline,** like `bind` conversion: no daemon, no API, no keystore.
 
@@ -164,15 +166,18 @@ No code change. `builtinAlgorithms` (`algorithm.go:106-118`) does not include 16
 The converter reads and checks everything before it writes anything, as the BIND conversion does:
 
 1. **The state file parses** into the fields the converter needs. Unknown fields are ignored (the format is a pre-1.0 serialization, and newer releases add fields with serde defaults). Missing required fields are refused.
-2. **No key roll is in progress:** `rollstates` is `{}`. Otherwise the converter refuses, unless `--allow-roll-in-progress` is given (§5.4).
+2. **No key roll is in progress:** `rollstates` is `{}`. Otherwise the converter refuses, unless `--allow-roll-in-progress` is given (§5.4; decided, Q3).
 3. **Every key to convert is file-backed.**
    - A `kmip://` reference is refused: the private key is in an HSM, outside this design.
-   - A key with no private key (`privref` is `null`, as for an `Include` key) is skipped and reported (Q6).
+   - **A key with no private key** (`privref` is `null`, as for an `Include` key) is another signer's key. It is never written to the export directory, but it is listed in the report with its key tag, flags, algorithm, `present` and `at_parent`. The cross-checks in item 6 count it.
+   - **Such a key with `present` is refused unless `--multi-signer` is given.** tdns-auth and tdns-signer build the DNSKEY RRset from their own keystore rows only, so the zone would lose the other signer's key. tdns-mpsigner instead takes the other signers' keys from its incoming zone (Q6).
 4. **Every key file agrees with its state entry:** algorithm and key tag from the `.key` file match the entry, and the SEP bit matches the role (KSK and CSK have it, ZSK does not).
 5. **Every pair belongs together:** parse the `.private`, re-encode it as PEM, sign and verify against the `.key` (`PrepareKeyCache` and `VerifyKeyPairCorrespondence`, as `bind_convert.go` does).
 6. **The mapping reproduces what Cascade serves.** A mismatch in either check is refused.
-   - **DNSKEY RRset:** the keys mapped to a state with `pub=1` must be exactly the DNSKEY records in `apex_extra` (or `dnskey_rrset`), compared as RDATA.
-   - **DS set:** with no roll in progress, the active KSKs and CSKs, the keys with `at_parent`, and the keys `ds_rrset` names (when it is not empty) must be the same set.
+   - **DNSKEY RRset:** the keys mapped to a state with `pub=1`, together with the other signers' keys that have `present`, must be exactly the DNSKEY records in `apex_extra` (or `dnskey_rrset`), compared as RDATA.
+   - **DS set:** with no roll in progress, two sets must be the same, and must also match the keys `ds_rrset` names when it is not empty:
+     - the active KSKs and CSKs, together with the other signers' keys that have `at_parent`;
+     - all keys with `at_parent`.
    
    These checks prove, for this zone, that §5.4 got "active" right.
 
@@ -239,6 +244,7 @@ Per key: `K<zone>+<alg>+<keyid>.key` (the public RR, canonical text), `.private`
    - tdns's DNSKEY RRset has the same records as Cascade's;
    - tdns's RRSIGs validate against the DS the parent serves;
    - the CDS tdns publishes, if any, matches the parent's DS.
+   - **For a multi-signer zone on tdns-mpsigner:** the other signers' DNSKEYs are served too. The signer records them as foreign rows when the zone arrives, and serves them from the re-sign that follows, not from the first publish (tdns-mp `hsync_utils.go`, the comment at the `syncForeignDNSKEYs` call). Compare after that re-sign.
 6. **Cut over:** the servers that take the zone from Cascade take it from tdns instead. Then stop Cascade for the zone. Never let both sign or roll the zone.
 7. **Later,** bind the zone to the policy with the rollover method it should have.
 
@@ -248,7 +254,7 @@ Per key: `K<zone>+<alg>+<keyid>.key` (the public RR, canonical text), `.private`
 |---|---|---|
 | M1 | Cascade starts a roll after the conversion; the two key sets diverge. | Freeze rolls first (§6.1 step 1). The converter refuses a roll in progress, and the DNSKEY cross-check refuses a state file that doesn't match its own RRset. |
 | M2 | tdns's policy doesn't match the imported keys. An active KSK of another algorithm makes `reconcileActiveKeyAlgorithms` refuse to sign the zone. A missing role makes tdns mint a key. | Step 3 of the procedure; the verification in step 5 catches it before the cutover. |
-| M3 | A CSK zone gains a ZSK at the first signing pass (F1, §6.3). | Verify F1 before moving any CSK zone; until it is fixed, see F1. |
+| M3 | A CSK zone gains a ZSK at the first signing pass (F1, §6.3, #668). | Verify F1 before moving any CSK zone; until it is fixed, see F1. |
 | M4 | tdns's CDS differs from what the parent holds. tdns publishes CDS with SHA-256 only (`ops_cds.go:42`). A parent that scans CDS and holds a DS with another digest type may replace the DS: still a valid chain, but a change at the parent. | Check the parent's DS digest type at step 5. |
 | M5 | Denial of existence changes at the cutover. Cascade signs with NSEC by default, as tdns does. A zone configured for NSEC3 in Cascade becomes walkable under tdns. Validation is unaffected: each denial is self-contained. | An operator decision, not a validation risk. |
 | M6 | The state file format changes between Cascade releases. It is a pre-1.0 serialization with no version field. | Tolerant parsing (§5.3 item 1), fixtures from each release (§6.4), and the cross-checks in §5.3 item 6. |
@@ -262,7 +268,7 @@ Per key: `K<zone>+<alg>+<keyid>.key` (the public RR, canonical text), `.private`
 - **For a new zone** this is invisible: all its keys are new.
 - **For a migrated CSK zone** the new ZSK signs the zone data before its DNSKEY reaches resolvers. Validators that cached Cascade's DNSKEY RRset fail validation until that RRset's TTL expires.
 - **Independently of this migration,** a zone configured as CSK is not a CSK zone in tdns.
-- **The fix is in the signer,** the code KLO is changing (§3.5 of that design lists `EnsureActiveDnssecKeys` among the lifecycle paths). It waits for KLO, and is to be filed as its own issue.
+- **The fix is in the signer,** the code KLO is changing (§3.5 of that design lists `EnsureActiveDnssecKeys` among the lifecycle paths). It waits for KLO. Filed as #668.
 - **Until then:** a CSK zone either migrates with a DNSKEY TTL short enough to accept a brief validation failure, or waits for the fix.
 
 ### 6.4 Tests
@@ -282,20 +288,49 @@ Changes inside the signer and keystore, in order of value:
 2. **The rollover clock:** carry `active_at` from the manifest into the rollover bookkeeping. Today `healBootstrapActiveAt` (`ksk_rollover_automated.go:2155`) registers an imported active KSK that lacks a rollover row, so its lifetime starts again rather than continuing Cascade's.
 3. **A roll in progress:** map Cascade's roll states onto tdns's rollover rows so tdns continues the roll rather than the operator waiting for it to finish.
 4. **Import into a running daemon** for a zone that is already loaded and signing, instead of pre-load before the first start.
+5. **A multi-provider zone's own keys.** The conversion itself is the same for tdns-mpsigner. What changes with KLO S3 and S5 is who adopts the imported keys:
+   - tdns-mp's state machine owns the zone and writes its columns;
+   - the zone's DS set follows D4;
+   - foreign rows gain a provider and a state (tdns-mp #58).
+   
+   Whether the owner accepts an imported active key that has no distribution record is S3's question. The multi-signer procedure is validated end to end once S5 has landed.
 
 ---
 
-## 8. Open questions
+## 8. Questions
 
-| # | Question | Recommendation |
+| # | Question | Answer |
 |---|---|---|
-| Q1 | Extend `bulk-convert` with `--from cascade`, or add a verb of its own? | Extend it: one command for "keys from another signer". `--dest` is required for Cascade; BIND conversion stays in place. |
-| Q2 | Ed448 in every binary, or through `algs.list`? | Every binary (§4.2). |
-| Q3 | Refuse a roll in progress, or convert with the approximate mapping? | Refuse by default; `--allow-roll-in-progress` for a zone that cannot wait. |
-| Q4 | A key that is leaving but still signs: `active` or `retired`? | `active`: it signs, and "active" is what must be right. |
-| Q5 | A CSK with different states in its two roles? | Active if either role signs; otherwise the KSK role decides (§5.4). This occurs only during a CSK roll. |
-| Q6 | A public-only key (another signer's, `Include`)? | Skip it and report it. tdns cannot import a key row without a private key (`validateBulkPrivateKey`), and a single-provider zone has no foreign rows. |
-| Q7 | Where do Cascade's other timestamps go (`creation`, `visible`, `ds_visible`)? | Into the manifest comment. The manifest has no field for them. Adding one means manifest version 2, which every reader of export directories would have to learn. |
+| Q1 | Extend `bulk-convert` with `--from cascade`, or add a verb of its own? | **Decided:** extend it: one command for "keys from another signer". `--dest` is required for Cascade; BIND conversion stays in place. |
+| Q2 | Ed448 in every binary, or through `algs.list`? | **Decided:** every binary, not through `algs.list` (§4.2). |
+| Q3 | Refuse a roll in progress, or convert with the approximate mapping? | **Decided:** refuse by default; `--allow-roll-in-progress` for a zone that cannot wait. |
+| Q4 | A key that is leaving but still signs: `active` or `retired`? | **Decided:** `active`. It signs, and "active" is what must be right. |
+| Q5 | A CSK with different states in its two roles? | **Decided:** active if either role signs; otherwise the KSK role decides (§5.4). This occurs only during a CSK roll. |
+| Q6 | A public-only key (another signer's, `Include`), including a multi-signer zone moving from Cascade to tdns-mpsigner? | **Decided:** never convert it, and report it. Refuse a present one unless `--multi-signer`. Reasons below. |
+| Q7 | Where do Cascade's other timestamps go (`creation`, `visible`, `ds_visible`)? | **Decided:** into the manifest comment. The manifest has no field for them. Adding one means manifest version 2, which every reader of export directories would have to learn. |
+
+### Q6: other signers' keys
+
+**tdns-mpsigner does keep foreign keys,** but it does not store them independently. `syncForeignDNSKEYs` (tdns-mp `signer_keydb.go`) runs on every incoming zone in multi-signer mode:
+- every DNSKEY in the zone from the combiner that is not one of the signer's own keys becomes a foreign row;
+- every foreign row whose DNSKEY is no longer in the incoming zone is deleted.
+
+The foreign rows are a mirror of the combiner's DNSKEY RRset. A foreign row imported from a Cascade state file would therefore be either:
+- **redundant:** the combiner carries the key, and the signer creates the same row itself; or
+- **deleted at the next transfer:** the combiner does not carry the key.
+
+Two more reasons not to import them:
+- **Missing provenance.** After KLO S5, a foreign row carries the provider and that provider's state for the key (tdns-mp #58, D4). A Cascade state file knows neither.
+- **Cascade got them from the same place.** Cascade replaces the incoming apex DNSKEY RRset with its own (`apex_remove`), so in a multi-signer arrangement the operator had to mirror the other signers' DNSKEYs into dnst as `Include` keys. On tdns-mpsigner that manual step disappears: the keys come straight from the incoming zone.
+
+**The import path via tdns-mp** is therefore:
+- the converter writes only the zone's own keys, the same export directory as for tdns-auth;
+- tdns-mpsigner pre-loads them;
+- the other signers' keys arrive with the zone.
+
+What the Cascade state file still contributes is the check: the DNSKEY and DS cross-checks (§5.3 item 6) account for the `Include` keys. The verification before the cutover (§6.1 step 5) compares tdns-mpsigner's served RRset, foreign rows included, with Cascade's.
+
+**Without `--multi-signer`,** a present `Include` key is refused. The target would be tdns-auth or tdns-signer, whose publish rebuilds the DNSKEY RRset from the keystore and drops whatever DNSKEYs the upstream carried. The other signer's key would vanish from the zone.
 
 ## 9. Size
 
