@@ -2,7 +2,9 @@ package tdns
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -44,10 +46,13 @@ func TestSetZonePolicyForOwner(t *testing.T) {
 	rsa := cur
 	rsa.Name = "mds-rsa"
 	rsa.KSKAlgorithm = dns.RSASHA256
+	csk := cur
+	csk.Name = "mds-csk"
+	csk.Algorithm = dns.RSASHA256 // the top-level algorithm, what CSK mode generates with
 	model := cur
 	model.Name = "mds-3"
 	model.Rollover.NumDS = 3
-	publishPolicies(t, &cur, &longer, &rsa, &model)
+	publishPolicies(t, &cur, &longer, &rsa, &csk, &model)
 	owner := &testOwner{owns: map[string]bool{zd.ZoneName: true}}
 	installOwner(t, owner)
 
@@ -74,6 +79,7 @@ func TestSetZonePolicyForOwner(t *testing.T) {
 
 	for _, tc := range []struct{ policy, refusal string }{
 		{"mds-rsa", "algorithm"},
+		{"mds-csk", "algorithm"},
 		{"mds-3", "DS model"},
 		{"nonesuch", "does not exist"},
 	} {
@@ -115,6 +121,7 @@ func TestOwnedZoneGenerateNamesTheColumns(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := ownerZone(t, kdb, "genowned.example.")
 	installOwner(t, &testOwner{owns: map[string]bool{zd.ZoneName: true}})
+	resetKeystoreWrites(t, kdb)
 	yes, no := true, false
 	resp, err := kdb.DnssecKeyMgmt(context.Background(), nil, KeystorePost{Command: "dnssec-mgmt", SubCommand: "generate", Zone: zd.ZoneName, KeyType: "KSK", Algorithm: dns.ED25519, State: DnskeyStatePublished, Pub: &yes, Sign: &no, DS: &no})
 	if err != nil || resp == nil || resp.Error {
@@ -123,5 +130,62 @@ func TestOwnedZoneGenerateNamesTheColumns(t *testing.T) {
 	var n int
 	if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=? AND state=? AND pub=1 AND sign=0 AND ds=0 AND (flags & 1)=1`, zd.ZoneName, DnskeyStatePublished).Scan(&n); err != nil || n != 1 {
 		t.Errorf("the generated KSK with the columns named: %d rows, err %v", n, err)
+	}
+	// one write: the INSERT carries the columns; no UPDATE follows
+	if w := keystoreWrites(t, kdb); len(w) != 1 || !strings.HasPrefix(w[0], "insert") {
+		t.Errorf("generate with the columns named wrote %v, want one INSERT", w)
+	}
+	// no state named: GenerateKeypair's default, active, on the row too
+	resp, err = kdb.DnssecKeyMgmt(context.Background(), nil, KeystorePost{Command: "dnssec-mgmt", SubCommand: "generate", Zone: zd.ZoneName, KeyType: "ZSK", Algorithm: dns.ED25519, Pub: &yes, Sign: &yes, DS: &no})
+	if err != nil || resp == nil || resp.Error {
+		t.Fatalf("generate without a state: err=%v resp=%+v", err, resp)
+	}
+	if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=? AND state='' `, zd.ZoneName).Scan(&n); err != nil || n != 0 {
+		t.Errorf("%d rows with an empty state after generate without a state (err %v), want 0", n, err)
+	}
+}
+
+// An owner's write that leaves ds open keeps the row's ds, NULL included;
+// the zone's DS model does not fill it in behind the owner's back. The
+// zone here is one with a DS model the store would otherwise apply (a
+// multi-DS policy; a multi-provider zone's model writes NULL anyway).
+func TestOwnerWriteLeavingDsOpenKeepsTheRowsDs(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := ownerZone(t, kdb, "dsopen.example.")
+	zd.Options[OptMultiProvider] = false
+	ksk := activeKeytags(t, kdb, zd.ZoneName, true)[0]
+	dsOf := func() string {
+		var ds sql.NullBool
+		if err := kdb.DB.QueryRow(`SELECT ds FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zd.ZoneName, ksk).Scan(&ds); err != nil {
+			t.Fatal(err)
+		}
+		if !ds.Valid {
+			return "NULL"
+		}
+		return fmt.Sprint(ds.Bool)
+	}
+	if err := UpdateKeyRow(kdb, zd.ZoneName, ksk, DnskeyStateActive, KeyRowFlags{Pub: true, Sign: true, DS: sql.NullBool{Bool: true, Valid: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateKeyRow(kdb, zd.ZoneName, ksk, DnskeyStateStandby, KeyRowFlags{Pub: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := dsOf(); got != "true" {
+		t.Errorf("ds left open on a standby write: %s, want the row's true kept", got)
+	}
+	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET ds=NULL WHERE zonename=? AND keyid=?`, zd.ZoneName, ksk); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateKeyRow(kdb, zd.ZoneName, ksk, DnskeyStateActive, KeyRowFlags{Pub: true, Sign: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := dsOf(); got != "NULL" {
+		t.Errorf("ds left open on a row with ds NULL: %s, want NULL kept (the multi-DS model would say true)", got)
+	}
+	if err := UpdateKeyRow(kdb, zd.ZoneName, ksk, DnskeyStateActive, KeyRowFlags{Pub: true, Sign: true, DS: sql.NullBool{Bool: false, Valid: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := dsOf(); got != "false" {
+		t.Errorf("an explicit false: %s, want false", got)
 	}
 }

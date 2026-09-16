@@ -607,6 +607,10 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		// store fill them from tdns's table, minting a key the owner did
 		// not ask for in a shape it did not name.
 		var genFlags *KeyRowFlags
+		genState := kp.State
+		if genState == "" {
+			genState = DnskeyStateActive // GenerateKeypair's default, named once for both writes
+		}
 		if zd, owned := zoneOwnedByName(kp.Zone); owned {
 			if kp.Pub == nil || kp.Sign == nil || kp.DS == nil {
 				err := fmt.Errorf("%w; generate on it names pub, sign and ds", ownedRefusal(zd, "generate"))
@@ -616,18 +620,17 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			}
 			genFlags = &KeyRowFlags{Pub: *kp.Pub, Sign: *kp.Sign, DS: sql.NullBool{Bool: *kp.DS, Valid: true}}
 		}
-		pkc, msg, err := kdb.GenerateKeypair(kp.Zone, "api-request", kp.State, dns.TypeDNSKEY, kp.Algorithm, kp.KeyType, tx)
+		var msg string
+		var err error
+		if genFlags != nil {
+			_, msg, err = kdb.GenerateKeypairWithColumns(kp.Zone, "api-request", genState, kp.Algorithm, kp.KeyType, *genFlags, tx)
+		} else {
+			_, msg, err = kdb.GenerateKeypair(kp.Zone, "api-request", genState, dns.TypeDNSKEY, kp.Algorithm, kp.KeyType, tx)
+		}
 		if err != nil {
 			lgSigner.Error("GenerateKeypair failed", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
-		}
-		if err == nil && genFlags != nil {
-			if _, err = setKeyRowTx(tx, kp.Zone, pkc.KeyId, kp.State, *genFlags, ""); err != nil {
-				lgSigner.Error("columns of the generated key", "err", err)
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
-			}
 		}
 		resp.Msg = msg
 		if err == nil {

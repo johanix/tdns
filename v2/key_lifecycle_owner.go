@@ -148,9 +148,10 @@ func (zd *ZoneData) UnpublishCDSAndWait(ctx context.Context, kdb *KeyDB) error {
 // the owner's fields (lifetimes, standby counts, the withdrawal margin)
 // change with the binding, since they are the owner's to set (design Q1).
 // What is not a binding but a rollover the owner runs is refused: the mode,
-// an algorithm of either role, and the DS model (an owned zone is a
-// multi-provider zone; its DS set is the multi-DS one, D4). A zone nobody
-// owns keeps policy-set.
+// an algorithm (the top-level one CSK mode generates with, or either
+// role's), and the DS model (an owned zone is a multi-provider zone; its DS
+// set is every signing provider's KSKs, D4). A zone nobody owns keeps
+// policy-set.
 func SetZonePolicyForOwner(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
 	if zd == nil {
 		return "", fmt.Errorf("owner policy-set: no zone")
@@ -180,8 +181,8 @@ func SetZonePolicyForOwner(ctx context.Context, zd *ZoneData, kdb *KeyDB, policy
 		switch {
 		case cur.Mode != pol.Mode:
 			return "", fmt.Errorf("owner policy-set: zone %s: policy %q changes the mode (%s to %s); that is not a policy binding", zd.ZoneName, policyName, cur.Mode, pol.Mode)
-		case cur.KSKAlgorithm != pol.KSKAlgorithm || cur.ZSKAlgorithm != pol.ZSKAlgorithm:
-			return "", fmt.Errorf("owner policy-set: zone %s: policy %q changes an algorithm (KSK %d to %d, ZSK %d to %d); that is a rollover the owner runs, not a policy binding", zd.ZoneName, policyName, cur.KSKAlgorithm, pol.KSKAlgorithm, cur.ZSKAlgorithm, pol.ZSKAlgorithm)
+		case cur.Algorithm != pol.Algorithm || cur.KSKAlgorithm != pol.KSKAlgorithm || cur.ZSKAlgorithm != pol.ZSKAlgorithm:
+			return "", fmt.Errorf("owner policy-set: zone %s: policy %q changes an algorithm (CSK %d to %d, KSK %d to %d, ZSK %d to %d); that is a rollover the owner runs, not a policy binding", zd.ZoneName, policyName, cur.Algorithm, pol.Algorithm, cur.KSKAlgorithm, pol.KSKAlgorithm, cur.ZSKAlgorithm, pol.ZSKAlgorithm)
 		case cur.Rollover.Method != pol.Rollover.Method || cur.Rollover.NumDS != pol.Rollover.NumDS:
 			return "", fmt.Errorf("owner policy-set: zone %s: policy %q changes the DS model (%s/%d to %s/%d); an owned zone's DS set is the multi-provider one", zd.ZoneName, policyName, cur.Rollover.Method, cur.Rollover.NumDS, pol.Rollover.Method, pol.Rollover.NumDS)
 		}
