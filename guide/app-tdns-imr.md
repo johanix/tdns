@@ -147,8 +147,10 @@ Details of forwarding behaviour:
   until the quarantined upstream or zone is fixed or removed too. Repair
   first, then extend — or restart, which quarantines and starts. The rest of `imrengine:` still needs
   a restart, and a reload says which edited keys those were.
-- **Limits**: upstream addresses are IP literals (no hostnames) and the DoH
-  path is fixed at `/dns-query`.
+- **Limits**: upstream addresses are IP literals (no hostnames), and DoH
+  queries to an upstream always go to `/dns-query`: there is no per-upstream
+  path, and the `dohpath` SvcParam is not read (#674). The path this resolver
+  itself serves DoH on is `listeners.doh-path`.
 
 Configuration reference and examples for both `stubs:` and `forward:` are in
 [tdns-imr configuration](config-tdns-imr.md).

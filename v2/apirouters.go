@@ -124,6 +124,8 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		sr.HandleFunc("/rollover/reset", APIRolloverReset(conf)).Methods("POST")
 		sr.HandleFunc("/rollover/unstick", APIRolloverUnstick(conf)).Methods("POST")
 		sr.HandleFunc("/config/paths", APIConfigPaths(conf)).Methods("GET")
+		// The poll scan of all children: switch it on or off, or read its state.
+		sr.HandleFunc("/scanner/poll", APIscannerPoll(conf)).Methods("POST")
 	}
 
 	// Auth peer routes removed — peer management is MP-only.

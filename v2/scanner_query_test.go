@@ -342,7 +342,10 @@ func TestCDSScanReadsTheCurrentDSFromTheBackend(t *testing.T) {
 	const child = "hasds.example."
 	zd := trustParent(t, child, trustLax())
 	zd.DelegationBackend.(*trustBackend).data[child][dns.TypeDS] = rrs(t, child+" 3600 IN DS 1111 13 2 "+strings.Repeat("cd", 32))
-	sc := trustScanner(cdsNet(t, child))
+	n := cdsNet(t, child)
+	// With a DS the CDS is validated, whatever the policy says.
+	n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS))
+	sc := trustScanner(n)
 	var applied int
 	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) { applied++ }
 
