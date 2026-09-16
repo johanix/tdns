@@ -813,6 +813,7 @@ listeners:
       dot:   [ 853 ]
       doh:   [ 443 ]
       doq:   [ 853 ]
+   # doh-path:  /dns-query      # the one path DoH answers on; this is the default
    certfile:  /etc/tdns/certs/server.crt
    keyfile:   /etc/tdns/certs/server.key
    # The embedded resolver is internal; a loopback-only debug window into
@@ -833,6 +834,7 @@ authengine:
 | `listeners.ports.dot` | `853` | listen ports for DoT (numbers, not strings) |
 | `listeners.ports.doh` | `443` | listen ports for DoH |
 | `listeners.ports.doq` | `853` | listen ports for DoQ (only 853 is truly supported) |
+| `listeners.doh-path` | `/dns-query` | the one HTTP path the DoH listeners answer on, matched exactly; every other path gets 404. It starts with `/` and has no query, fragment, percent-encoding, or empty or dot segments; an invalid path stops the daemon at startup. tdns does not advertise the path (#674), so clients need the full URI template, e.g. `https://ns.example/dns-query{?dns}`. Changing it needs a restart |
 | `listeners.udp-sockets` | `1` | how many UDP sockets to open per Do53 address, so the kernel can spread datagrams across that many readers. Only useful where the kernel load-balances (below); elsewhere it falls back to one socket and logs why |
 | `listeners.imr-debug-address` | — | loopback-only DNS window into the embedded resolver's cache; non-loopback is a hard error |
 | `authengine.outbound-soa-serial` | `keep` | `keep`, `unixtime` or `persist` |
