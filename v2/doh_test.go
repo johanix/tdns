@@ -261,22 +261,11 @@ func TestDoHEngineServesNothingFromDefaultServeMux(t *testing.T) {
 	}
 }
 
-// Two DoH engines in one process. On the default mux the second registration
-// of /dns-query panicked.
+// Two DoH engines in one process on the same path. On the default mux the
+// second registration of /dns-query panicked.
 func TestDoHEngineTwoInOneProcess(t *testing.T) {
 	a := startTestDoHEngine(t, "")
-	b := startTestDoHEngine(t, "/other")
-	for name, e := range map[string]*dohTestEngine{"first": a, "second": b} {
-		q := dohTestQuery(t)
-		packed, err := q.Pack()
-		if err != nil {
-			t.Fatalf("pack: %v", err)
-		}
-		path := "/dns-query"
-		if name == "second" {
-			path = "/other"
-		}
-		status, body := e.get(t, path+"?dns="+base64.RawURLEncoding.EncodeToString(packed))
-		checkDoHReply(t, name+" engine", q, status, body)
-	}
+	b := startTestDoHEngine(t, "")
+	a.checkDoHAnswers(t, DefaultDoHPath)
+	b.checkDoHAnswers(t, DefaultDoHPath)
 }
