@@ -204,6 +204,55 @@ func (scanner *Scanner) securedChildRRsetFetcher(pol DelegationPolicy, nsRRset *
 	}
 }
 
+// checkDSMatchesChildKeys refuses a DS change that would leave the child with a
+// DS RRset matching none of the DNSKEYs it publishes: applied, it would make
+// the child's whole zone bogus. A CDS that validates can still ask for that --
+// a typo in a digest, a CDS for a key not yet published or already withdrawn.
+//
+// The rule is the one a DS change by DNS UPDATE or the API meets
+// (CheckDelegationCoherence): at least one DS of the resulting RRset matches a
+// published key, an empty RRset (going insecure) is allowed, and for a child
+// that already has a DS the DNSKEY RRset must validate. The DNSKEYs are asked
+// of the child's nameservers, as the CDS was, and they must agree on them.
+func (scanner *Scanner) checkDSMatchesChildKeys(ctx context.Context, childZone string, nsRRset *core.RRset,
+	currentDS, adds, removes []dns.RR, lg *log.Logger) error {
+	var actions []dns.RR
+	for _, rr := range adds {
+		cp := dns.Copy(rr)
+		cp.Header().Class = dns.ClassINET
+		actions = append(actions, cp)
+	}
+	for _, rr := range removes {
+		cp := dns.Copy(rr)
+		cp.Header().Class = dns.ClassNONE
+		actions = append(actions, cp)
+	}
+	fetch := func(child string) ([]dns.RR, bool, error) {
+		keys, inSync, err := scanner.askChild(ctx, child, dns.TypeDNSKEY, nsRRset, lg)
+		if err != nil {
+			return nil, false, err
+		}
+		if !inSync {
+			return nil, false, errors.New("the child's nameservers do not agree on its DNSKEY RRset")
+		}
+		if keys == nil || len(keys.RRs) == 0 {
+			return nil, false, fmt.Errorf("%s publishes no DNSKEY RRset", child)
+		}
+		// Validation matters only where a DS already exists (see
+		// CheckDelegationCoherence); a child waiting for its first DS has no
+		// chain to validate through.
+		if len(currentDS) == 0 {
+			return keys.RRs, false, nil
+		}
+		state, err := scanner.validateChildData(ctx, keys)
+		return keys.RRs, err == nil && state == cache.ValidationStateSecure, nil
+	}
+	if err := CheckDelegationCoherence(childZone, currentDS, actions, fetch); err != nil {
+		return refusef("%v", err)
+	}
+	return nil
+}
+
 // authenticateCDS decides whether cds, which every one of the child's
 // nameservers serves, may change the child's DS RRset under the parent zone's
 // delegation policy. It returns the RRset to act on (the RFC 9615 path uses the

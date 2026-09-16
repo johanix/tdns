@@ -287,7 +287,7 @@ func TestScansOfOneChildAreSerialised(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sc.scanChildAndApply(context.Background(), zd, ScanCSYNC, ScanTuple{Zone: child}, nil)
+			sc.scanChildAndApply(context.Background(), zd, ScanCSYNC, ScanTuple{Zone: child}, nil, nil)
 		}()
 	}
 	wg.Wait()
@@ -306,8 +306,9 @@ func TestApplyScanChildUpdateWaitsForTheUpdater(t *testing.T) {
 		applied.Store(true)
 		ur.respond(true, nil)
 	}()
-	if !applyScanChildUpdate(context.Background(), q, UpdateRequest{Cmd: "CHILD-UPDATE", ZoneName: "example."}) {
-		t.Fatal("an applied update was reported as not applied")
+	ok, pending := applyScanChildUpdate(context.Background(), q, UpdateRequest{Cmd: "CHILD-UPDATE", ZoneName: "example."})
+	if !ok || pending != nil {
+		t.Fatalf("applied %v, pending %v; want applied and nothing pending", ok, pending != nil)
 	}
 	if !applied.Load() {
 		t.Fatal("returned before the updater had applied the change")
@@ -316,9 +317,69 @@ func TestApplyScanChildUpdateWaitsForTheUpdater(t *testing.T) {
 	prev := scanApplyTimeout
 	scanApplyTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { scanApplyTimeout = prev })
-	go func() { <-q }() // takes the request and never answers
-	if applyScanChildUpdate(context.Background(), q, UpdateRequest{Cmd: "CHILD-UPDATE", ZoneName: "example."}) {
+	taken := make(chan UpdateRequest, 1)
+	go func() { taken <- <-q }() // takes the request and does not answer in time
+	ok, pending = applyScanChildUpdate(context.Background(), q, UpdateRequest{Cmd: "CHILD-UPDATE", ZoneName: "example."})
+	if ok {
 		t.Fatal("an update the updater never answered was reported as applied")
+	}
+	if pending == nil {
+		t.Fatal("an update still queued was not reported as pending")
+	}
+	ur := <-taken
+	ur.respond(true, nil)
+	select {
+	case res := <-pending:
+		if !res.Applied {
+			t.Error("the late answer does not say applied")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the late answer did not arrive on the pending channel")
+	}
+}
+
+// A scan that gives up waiting for its change leaves the change queued, and the
+// zone updater may still apply it. The next scan of that child asks the child
+// nothing until the updater has answered: until then the delegation does not
+// show the change, and a scan working from it could undo or miss it. Through
+// applyDelegationChange, as ScannerEngine wires it.
+func TestAScanWaitsForAChangeAnEarlierScanLeftQueued(t *testing.T) {
+	const child = "slowupdater.example."
+	t.Cleanup(func() { forgetCsyncProcessed(child) })
+	prev := scanApplyTimeout
+	scanApplyTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { scanApplyTimeout = prev })
+
+	n := csyncMove(t, child)
+	zd := trustParent(t, child, trustLax())
+	q := make(chan UpdateRequest, 2) // queued, and nobody takes it until the test does
+	zd.KeyDB = &KeyDB{UpdateQ: q}
+	sc := trustScanner(n)
+	ctx := context.Background()
+	sc.OnDelegationChange = func(parentZone string, zd *ZoneData, resp ScanTupleResponse) {
+		sc.applyDelegationChange(ctx, parentZone, zd, resp)
+	}
+	csyncQueries := func() int { return n.queried[trustKey(child, dns.TypeCSYNC)] }
+
+	first := sc.scanChildAndApply(ctx, zd, ScanCSYNC, ScanTuple{Zone: child}, nil, nil)
+	if !scanResponseChangesDelegation(first) || len(q) != 1 {
+		t.Fatalf("first scan: change %v, %d queued (error %q); want the NS move queued", scanResponseChangesDelegation(first), len(q), first.ErrorMsg)
+	}
+	asked := csyncQueries()
+
+	second := sc.scanChildAndApply(ctx, zd, ScanCSYNC, ScanTuple{Zone: child}, nil, nil)
+	if !second.Error || !strings.Contains(second.ErrorMsg, "still queued") {
+		t.Fatalf("second scan: error %v %q; want it held back by the change still queued", second.Error, second.ErrorMsg)
+	}
+	if csyncQueries() != asked {
+		t.Fatal("the second scan asked the child while the first scan's change was still queued")
+	}
+
+	ur := <-q
+	ur.respond(true, nil)
+	third := sc.scanChildAndApply(ctx, zd, ScanCSYNC, ScanTuple{Zone: child}, nil, nil)
+	if strings.Contains(third.ErrorMsg, "still queued") || csyncQueries() == asked {
+		t.Fatalf("third scan: error %q, CSYNC asked %d time(s); want it to run once the change was answered", third.ErrorMsg, csyncQueries())
 	}
 }
 
@@ -329,12 +390,12 @@ func (b *unreadableBackend) GetDelegationData(string, string) (map[string]map[ui
 	return nil, errors.New("store unavailable")
 }
 
+// cdsNet serves a new DNSKEY for child and a CDS naming it.
 func cdsNet(t *testing.T, child string) *trustNet {
 	t.Helper()
-	return &trustNet{
-		served:  map[string][]dns.RR{trustKey(child, dns.TypeCDS): rrs(t, child+" 3600 IN CDS 2371 13 2 "+strings.Repeat("ab", 32))},
-		verdict: map[string]cache.ValidationState{},
-	}
+	n := &trustNet{served: map[string][]dns.RR{}, verdict: map[string]cache.ValidationState{}}
+	serveKeyAndCDS(t, n, child)
+	return n
 }
 
 // A CDS scan takes the current DS from the delegation backend, inside the lock.
@@ -343,13 +404,13 @@ func TestCDSScanReadsTheCurrentDSFromTheBackend(t *testing.T) {
 	zd := trustParent(t, child, trustLax())
 	zd.DelegationBackend.(*trustBackend).data[child][dns.TypeDS] = rrs(t, child+" 3600 IN DS 1111 13 2 "+strings.Repeat("cd", 32))
 	n := cdsNet(t, child)
-	// With a DS the CDS is validated, whatever the policy says.
-	n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS))
+	// With a DS the CDS and the DNSKEYs are validated, whatever the policy says.
+	n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS), trustKey(child, dns.TypeDNSKEY))
 	sc := trustScanner(n)
 	var applied int
 	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) { applied++ }
 
-	resp := sc.scanChildAndApply(context.Background(), zd, ScanCDS, ScanTuple{Zone: child}, nil)
+	resp := sc.scanChildAndApply(context.Background(), zd, ScanCDS, ScanTuple{Zone: child}, nil, nil)
 
 	if resp.Error || len(resp.DSRemoves) != 1 || len(resp.DSAdds) != 1 || applied != 1 {
 		t.Fatalf("error %q, DS adds %v removes %v, applied %d; want the backend's DS replaced once",
@@ -368,7 +429,7 @@ func TestCDSScanOfAnUnreadableDelegationIsNotRun(t *testing.T) {
 	applied := false
 	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) { applied = true }
 
-	resp := sc.scanChildAndApply(context.Background(), zd, ScanCDS, ScanTuple{Zone: child}, nil)
+	resp := sc.scanChildAndApply(context.Background(), zd, ScanCDS, ScanTuple{Zone: child}, nil, nil)
 
 	if !resp.Error || !strings.Contains(resp.ErrorMsg, "cannot read the current delegation") {
 		t.Fatalf("error %v %q; want the scan stopped", resp.Error, resp.ErrorMsg)
