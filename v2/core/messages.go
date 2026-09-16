@@ -188,7 +188,11 @@ type AgentKeystatePost struct {
 	Signal       string              // "propagated", "rejected", "removed", "published", "retired", "inventory"
 	Message      string              // Optional detail (e.g. rejection reason)
 	KeyInventory []KeyInventoryEntry // Complete key inventory (only when Signal == "inventory")
-	Time         time.Time           // Message timestamp
+	// Owned: the sender's key lifecycle for the zone is run by its own
+	// state machine (key lifecycle ownership design S3), so the inventory
+	// is the DS set's source for the agent (S5, arrow 2).
+	Owned bool      `json:",omitempty"`
+	Time  time.Time // Message timestamp
 }
 
 // KeyInventoryEntry describes a single DNSKEY in a KEYSTATE inventory message.
@@ -198,6 +202,13 @@ type KeyInventoryEntry struct {
 	Flags     uint16 `json:"flags"`
 	State     string `json:"state"` // "created","published","standby","active","retired","foreign"
 	KeyRR     string `json:"keyrr"` // Full DNSKEY RR string (public key data)
+	// The key row's columns beside the state (key lifecycle ownership
+	// design §3.2): served, signing, and whether its DS belongs at the
+	// parent. A sender that predates them sends none: ds is then nil, and
+	// pub and sign are what the state implies.
+	Pub  bool  `json:"pub,omitempty"`
+	Sign bool  `json:"sign,omitempty"`
+	DS   *bool `json:"ds,omitempty"`
 }
 
 // AgentKeystateResponse represents the response to a KEYSTATE message.

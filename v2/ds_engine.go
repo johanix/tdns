@@ -215,6 +215,12 @@ func (kdb *KeyDB) askDSEngine(ctx context.Context, req DSEngineRequest) dsEngine
 // this exists for. So it marks the zone rather than queueing a request. A zone is
 // marked once however many times it changes before the engine looks, and the
 // wake-up signal has room for one, so neither can fill up.
+// KeysChanged tells the DS engine a zone's key rows changed in a way the
+// served DNSKEY RRset may not show: a key's ds column, which decides the
+// DS set of an owned zone (arrow 1). The owner calls it after such a
+// write; the DNSKEY publish path calls the same for a SEP change.
+func (kdb *KeyDB) KeysChanged(zd *ZoneData) { kdb.dsEngineKeysChanged(zd) }
+
 func (kdb *KeyDB) dsEngineKeysChanged(zd *ZoneData) {
 	if kdb == nil || kdb.DSEngineQ == nil || zd == nil {
 		return
@@ -357,11 +363,23 @@ func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 	case DSModelDoubleSignature:
 		return dsEngineResult{err: fmt.Errorf("zone %s: %w: %s", zd.ZoneName, errDSModelNotImplemented, model)}
 	case DSModelMultiProvider:
-		// Not this zone's decision. The DNSKEY RRset of a multi-provider zone
-		// carries its own mpdist keys, which get no DS until they are promoted,
-		// and the other providers' foreign keys, whose DS is theirs to decide;
-		// the multi-provider agent coordinates the DS set. What the agent has
-		// published, a NOTIFY(CDS) may point the parent at.
+		// On the signer of an owned zone the CDS is the owner's DS set
+		// (arrow 1): the owner knows which of its own and the other
+		// providers' KSKs warrant a DS. Elsewhere it is not this zone's
+		// decision: the agent serves nothing the parent reads, and the
+		// DNSKEY RRset carries mpdist keys, which get no DS until promoted,
+		// and foreign keys, whose DS is their provider's; what is served
+		// as CDS is all a NOTIFY(CDS) may point the parent at.
+		if ownedZoneSignedHere(zd) {
+			intent, err := DSIntentForZone(kdb, zd.ZoneName, dns.SHA256)
+			if err != nil {
+				return dsEngineResult{err: err}
+			}
+			if intent.Known {
+				cds = cdsFromDS(zd.ZoneName, intent.Set)
+				break
+			}
+		}
 		served, err := servedCDSRRs(zd)
 		if err != nil {
 			return dsEngineResult{err: err}
@@ -415,7 +433,7 @@ func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 // the rollover engine's cleanup triggers look after its CDS; the other models are
 // not followed here.
 func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
-	if dsModelForZone(zd) != DSModelNone {
+	if model := dsModelForZone(zd); model != DSModelNone && !(model == DSModelMultiProvider && ownedZoneSignedHere(zd)) {
 		return
 	}
 	current, err := currentCdsTuples(zd)
@@ -423,7 +441,11 @@ func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
 		lgDSEngine.Warn("could not read the published CDS", "zone", zd.ZoneName, "err", err)
 		return
 	}
-	if len(current) == 0 {
+	// A zone tdns runs serves CDS only once delegation sync asked for it; an
+	// owned zone's signer serves the CDS of its DS set from the first key
+	// that warrants one (arrow 1), so a change of that set is followed
+	// whether or not a CDS is served yet.
+	if len(current) == 0 && !ownedZoneSignedHere(zd) {
 		return
 	}
 	intent, err := DSIntentForZone(kdb, zd.ZoneName, dns.SHA256)
@@ -543,6 +565,32 @@ func cdsDeleteRR(zone string) dns.RR {
 }
 
 // cdsFromDS is the CDS RRset asking the parent for dsSet.
+// ownedZoneSignedHere: a multi-provider zone whose key lifecycle is owned
+// and which this instance signs, so its served zone carries the CDS the
+// owner's DS set says (key lifecycle ownership design §4.1, arrow 1). The
+// agent of the same zone signs nothing and serves nothing the parent reads.
+func ownedZoneSignedHere(zd *ZoneData) bool {
+	return zd != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) &&
+		dsModelForZone(zd) == DSModelMultiProvider && zoneOwned(zd)
+}
+
+// ownedZoneCDS is the CDS such a zone serves: the owner's DS set as CDS,
+// nothing while the set is unknown.
+func ownedZoneCDS(zd *ZoneData) []dns.RR {
+	if !ownedZoneSignedHere(zd) || zd.KeyDB == nil {
+		return nil
+	}
+	intent, err := DSIntentForZone(zd.KeyDB, zd.ZoneName, dns.SHA256)
+	if err != nil {
+		lgDSEngine.Warn("could not determine the DS intent; serving no CDS from it", "zone", zd.ZoneName, "err", err)
+		return nil
+	}
+	if !intent.Known {
+		return nil
+	}
+	return cdsFromDS(zd.ZoneName, intent.Set)
+}
+
 func cdsFromDS(zone string, dsSet []dns.RR) []dns.RR {
 	out := make([]dns.RR, 0, len(dsSet))
 	for _, rr := range dsSet {
