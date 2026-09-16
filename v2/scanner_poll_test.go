@@ -62,8 +62,31 @@ func pollNet(t *testing.T, children ...string) *trustNet {
 			n.served[k] = v
 		}
 		n.served[trustKey(child, dns.TypeCDS)] = rrs(t, child+" 3600 IN CDS 2371 13 2 "+pollNewDigest)
+		// A child with a DS has its CDS validated, whatever the policy says.
+		n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS))
 	}
 	return n
+}
+
+// A child with a DS, under a policy that does not require DNSSEC, publishes a
+// CDS that does not validate. The poll must not replace its DS; the CSYNC,
+// which that policy accepts unvalidated, is still applied.
+func TestPollDoesNotApplyAnUnvalidatedCDSForAChildWithADS(t *testing.T) {
+	const child = "badcds.example."
+	t.Cleanup(func() { forgetCsyncProcessed(child) })
+	zd, _ := pollParent(t, child, true)
+	n := pollNet(t, child)
+	n.set(cache.ValidationStateInsecure, trustKey(child, dns.TypeCDS))
+	sc, applied := pollScanner(n)
+
+	sc.pollRound(context.Background(), []*ZoneData{zd}, scannerPollConf{Enabled: true, Concurrency: 1})
+
+	if applied.count(child, ScanCDS) != 0 {
+		t.Fatal("an unvalidated CDS replaced the DS of a child that has one")
+	}
+	if applied.count(child, ScanCSYNC) != 1 {
+		t.Errorf("applied %d CSYNC change(s), want 1", applied.count(child, ScanCSYNC))
+	}
 }
 
 // appliedChanges records what OnDelegationChange would have applied.

@@ -363,10 +363,17 @@ scanner:
       enabled:     false
       bootstrap:   false
       concurrency: 4                    # children scanned at once
+   # Logging: one "ScannerEngine: scan result" line per scan, at Info for a
+   # change or for child data not processed, at Debug otherwise. verbose adds
+   # each scan's step-by-step narration; debug also dumps the RRsets compared.
+   # Read at startup.
+   verbose:   false
+   debug:     false
    # What the scanner accepts from a child (CDS, CSYNC) is decided by the
    # delegation policy bound to the parent zone: require-dnssec and mechanisms
-   # under childsync.policies. scanner.options no-dnssec-validation, at-apex
-   # and at-ns are ignored, and logged as such at startup.
+   # under childsync.policies. A CDS for a child that already has a DS is
+   # always validated. scanner.options no-dnssec-validation, at-apex and at-ns
+   # are ignored, and logged as such at startup.
    at-apex:
       checks:    1     # only 1 is implemented; > 1 refuses an unvalidated at-apex bootstrap
       interval:  300   # seconds between checks (default: 300)

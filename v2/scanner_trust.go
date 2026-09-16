@@ -24,16 +24,20 @@ import (
 // parent whose policy said require-dnssec applied NS changes from
 // unauthenticated answers.
 //
+// Whatever the policy says, a CDS for a child that already has a DS validates
+// Secure (RFC 7344 §6.2): the DS is the chain to validate it through, so there
+// is no reason to accept one that does not. The §4.1 signer rule, a key in the
+// DS RRset, is #641.
+//
 // require-dnssec: true
 //   - CSYNC (RFC 7477 §2, §3): the SOA, the CSYNC and every RRset copied from
 //     the child validate Secure, or the CSYNC is not processed.
-//   - CDS for a child with a DS (RFC 7344 §6.2): the CDS validates Secure. The
-//     §4.1 signer rule, a key in the DS RRset, is #641.
 //   - CDS for a child without a DS: a mechanism the policy lists, validated.
 //     at-ns is RFC 9615; at-apex needs a CDS that validates at the apex.
 //
 // require-dnssec: false
-//   - the same paths without validation, and the scan response says so.
+//   - CSYNC, and CDS for a child without a DS, without validation, and the scan
+//     response says so.
 //
 // What is validated is what the child's nameservers served, fetched directly
 // with DO set and the RRSIGs kept, and handed to the IMR's validator. Asking the
@@ -152,13 +156,19 @@ func validationStateName(s cache.ValidationState) string {
 // requireSecure returns nil when rrset validates Secure, and otherwise a
 // refusal that names the policy, the RRset and the verdict.
 func (scanner *Scanner) requireSecure(ctx context.Context, rrset *core.RRset, pol DelegationPolicy) error {
+	return scanner.requireSecureBecause(ctx, rrset, fmt.Sprintf("delegation policy %q requires DNSSEC", pol.Name))
+}
+
+// requireSecureBecause is requireSecure with the reason validation is required
+// given by the caller, for a refusal that says why.
+func (scanner *Scanner) requireSecureBecause(ctx context.Context, rrset *core.RRset, why string) error {
 	what := fmt.Sprintf("%s %s", rrset.Name, dns.TypeToString[rrset.RRtype])
 	state, err := scanner.validateChildData(ctx, rrset)
 	if err != nil {
-		return refusef("delegation policy %q requires DNSSEC, and %s could not be validated: %v", pol.Name, what, err)
+		return refusef("%s, and %s could not be validated: %v", why, what, err)
 	}
 	if state != cache.ValidationStateSecure {
-		return refusef("delegation policy %q requires DNSSEC, and %s is %s", pol.Name, what, validationStateName(state))
+		return refusef("%s, and %s is %s", why, what, validationStateName(state))
 	}
 	return nil
 }
@@ -202,12 +212,12 @@ func (scanner *Scanner) authenticateCDS(ctx context.Context, childZone string, n
 	hasDS bool, pol DelegationPolicy, lg *log.Logger) (*core.RRset, ScanValidation, string, error) {
 
 	if hasDS {
-		// RFC 7344 §6.2: the parental agent obtains a validated CDS. It
-		// validates through the DS the parent already holds.
-		if !pol.RequireDnssec {
-			return cds, ScanUnvalidated, fmt.Sprintf("delegation policy %q does not require DNSSEC", pol.Name), nil
-		}
-		if err := scanner.requireSecure(ctx, cds, pol); err != nil {
+		// RFC 7344 §6.2: the parental agent obtains a validated CDS. With a DS in
+		// place the chain to validate it through exists, so it is validated
+		// whatever the policy's require-dnssec says; that setting only decides
+		// what is accepted from a child that has no DS yet. Otherwise an unsigned
+		// or wrong CDS could replace a working DS and break the child.
+		if err := scanner.requireSecureBecause(ctx, cds, "the child has a DS, so its CDS must validate"); err != nil {
 			return nil, ScanRefused, "", err
 		}
 		return cds, ScanValidated, "CDS validated through the child's DS", nil

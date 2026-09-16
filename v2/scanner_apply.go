@@ -72,10 +72,38 @@ func (scanner *Scanner) scanChildAndApply(ctx context.Context, parent *ZoneData,
 		return failed("a %s scan does not change a delegation", ScanTypeToString[scanType])
 	}
 	resp := <-ch
+	logScanResult(parent, scanType, resp)
 	if scanner.OnDelegationChange != nil && scanResponseChangesDelegation(resp) {
 		scanner.OnDelegationChange(parent.ZoneName, parent, resp)
 	}
 	return resp
+}
+
+// logScanResult logs what one scan of a child decided, in one line: at Info
+// when the scan found a change or did not process the child's data, at Debug
+// when there was nothing to do. A CSYNC without the immediate flag counts as
+// nothing to do: it is not processed here, and a poll would otherwise report it
+// on every round. How a scan got to its result is in the scan log, which is
+// silent unless scanner.verbose is set.
+func logScanResult(parent *ZoneData, scanType ScanType, resp ScanTupleResponse) {
+	args := []any{"parent", parent.ZoneName, "child", resp.Qname, "type", ScanTypeToString[scanType]}
+	if resp.Validation != "" {
+		args = append(args, "validation", string(resp.Validation))
+	}
+	switch {
+	case resp.Error && resp.ErrorMsg == errCsyncNotImmediate.Error():
+		lg.Debug("ScannerEngine: scan result", append(args, "outcome", "nothing to do", "reason", resp.ErrorMsg)...)
+	case resp.Error:
+		lg.Info("ScannerEngine: scan result", append(args, "outcome", "not processed", "reason", resp.ErrorMsg)...)
+	case scanResponseChangesDelegation(resp):
+		lg.Info("ScannerEngine: scan result", append(args, "outcome", "change",
+			"ds", fmt.Sprintf("+%d -%d", len(resp.DSAdds), len(resp.DSRemoves)),
+			"ns", fmt.Sprintf("+%d -%d", len(resp.NSAdds), len(resp.NSRemoves)),
+			"glue", fmt.Sprintf("+%d -%d", len(resp.GlueAdds), len(resp.GlueRemoves)),
+			"reason", resp.ValidationReason)...)
+	default:
+		lg.Debug("ScannerEngine: scan result", append(args, "outcome", "no change")...)
+	}
 }
 
 // currentDelegationDS returns the DS RRset the parent's delegation backend
