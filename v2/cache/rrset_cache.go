@@ -594,11 +594,15 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 	if rrcache.Debug {
 		fmt.Printf("rrcache: Adding stubs for zone %s to cache\n", zone)
 	}
+	rrcache.serverMapMu.Lock()
 	rrcache.ServerMap.Set(zone, authservers)
+	rrcache.serverMapMu.Unlock()
 	return nil
 }
 
 func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) error {
+	rrcache.serverMapMu.Lock()
+	defer rrcache.serverMapMu.Unlock()
 	serverMapOrig, ok := rrcache.ServerMap.Get(zone)
 
 	// Create a copy of the map to avoid concurrent map read/write errors
@@ -614,32 +618,36 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 		// Ensure we use a shared AuthServer instance across all zones
 		sharedServer := rrcache.GetOrCreateAuthServer(name)
 
-		// Merge data from the input server into the shared instance using thread-safe accessors
-		for _, addr := range server.Addrs {
-			sharedServer.AddAddr(addr)
-		}
-		for _, alpn := range server.Alpn {
-			t, err := core.StringToTransport(alpn)
-			if err != nil {
-				log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
-				continue
+		// Merge data from the input server into the shared instance using
+		// thread-safe accessors on both sides. Most callers pass the shared
+		// instance itself, which has nothing to merge.
+		if server != sharedServer {
+			for _, addr := range server.GetAddrs() {
+				sharedServer.AddAddr(addr)
 			}
-			sharedServer.AddAlpn(alpn)
-			sharedServer.AddTransport(t)
-		}
-		// Merge/overwrite transport weights if provided
-		if len(server.TransportWeights) > 0 {
-			sharedServer.MergeTransportWeights(server.TransportWeights)
-		}
-		// Update other fields if they're more specific
-		if server.Src != "" {
-			sharedServer.SetSrc(server.Src)
-		}
-		if server.ConnMode != ConnModeLegacy {
-			sharedServer.PromoteConnMode(server.ConnMode)
-		}
-		if server.Debug {
-			sharedServer.PromoteDebug()
+			for _, alpn := range server.GetAlpn() {
+				t, err := core.StringToTransport(alpn)
+				if err != nil {
+					log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
+					continue
+				}
+				sharedServer.AddAlpn(alpn)
+				sharedServer.AddTransport(t)
+			}
+			// Merge/overwrite transport weights if provided
+			if weights := server.GetTransportWeights(); len(weights) > 0 {
+				sharedServer.MergeTransportWeights(weights)
+			}
+			// Update other fields if they're more specific
+			if src := server.GetSrc(); src != "" {
+				sharedServer.SetSrc(src)
+			}
+			if mode := server.ConnectionMode(); mode != ConnModeLegacy {
+				sharedServer.PromoteConnMode(mode)
+			}
+			if server.GetDebug() {
+				sharedServer.PromoteDebug()
+			}
 		}
 
 		// Always assign the shared instance to this zone's map
