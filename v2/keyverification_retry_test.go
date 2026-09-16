@@ -21,11 +21,11 @@ func TestCompileDelegationPolicyRetryRejectsNonPositive(t *testing.T) {
 		wantAttempts int
 		wantInterval time.Duration
 	}{
-		{"unset", DelegationRetryConf{}, 5, 10 * time.Second},
-		{"negative attempts", DelegationRetryConf{MaxAttempts: -1}, 5, 10 * time.Second},
-		{"negative interval", DelegationRetryConf{Interval: -time.Second}, 5, 10 * time.Second},
-		{"both negative", DelegationRetryConf{MaxAttempts: -1, Interval: -time.Second}, 5, 10 * time.Second},
-		{"configured", DelegationRetryConf{MaxAttempts: 3, Interval: 2 * time.Second}, 3, 2 * time.Second},
+		{"unset", DelegationRetryConf{}, 3, 10 * time.Second},
+		{"negative attempts", DelegationRetryConf{MaxAttempts: -1}, 3, 10 * time.Second},
+		{"negative interval", DelegationRetryConf{Interval: -time.Second}, 3, 10 * time.Second},
+		{"both negative", DelegationRetryConf{MaxAttempts: -1, Interval: -time.Second}, 3, 10 * time.Second},
+		{"configured", DelegationRetryConf{MaxAttempts: 4, Interval: 2 * time.Second}, 4, 2 * time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

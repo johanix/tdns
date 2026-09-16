@@ -247,7 +247,7 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 	}
 	if method == "at-ns" {
 		// The parent will look for this KEY at _sig0key.<child>._signal.<ns>
-		// (LookupChildKeyAtSignal) the moment the ceremony arrives, so it has
+		// (atNsFindings) the moment the ceremony arrives, so it has
 		// to be APPLIED, not merely queued, before the ceremony is sent; the
 		// publish waits for the updater's verdict. The willing list only
 		// offers at-ns when at least one signal name is publishable here, so

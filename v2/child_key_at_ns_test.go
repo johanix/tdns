@@ -30,9 +30,9 @@ var (
 func stubSignalKeys(t *testing.T, published map[string]string) *[]string {
 	t.Helper()
 	var asked []string
-	orig := childKeySignalQuery
-	t.Cleanup(func() { childKeySignalQuery = orig })
-	childKeySignalQuery = func(ctx context.Context, imr *Imr, name string) (*ImrResponse, error) {
+	orig := childKeyQuery
+	t.Cleanup(func() { childKeyQuery = orig })
+	childKeyQuery = func(ctx context.Context, imr *Imr, name string) (*ImrResponse, error) {
 		asked = append(asked, name)
 		keyText, ok := published[name]
 		if !ok {
@@ -123,7 +123,7 @@ func TestAtNsAsksTheSignalNamesOfTheParentsDelegation(t *testing.T) {
 
 	// A nil IMR on purpose: the NS set must come from the parent's zone data.
 	// Resolving it would dereference the IMR and fail the test.
-	verified, dnssec := VerifyChildKey(context.Background(), cuChild, cuParent, atNsTestKey, nil, atNsOnly())
+	verified, dnssec, _ := VerifyChildKey(context.Background(), cuChild, cuParent, atNsTestKey, nil, atNsOnly())
 
 	if got := strings.Join(*asked, " "); got != atNsProviderName {
 		t.Errorf("at-ns asked %q, want only the provider's signal name %q: the parent holds"+
@@ -141,7 +141,7 @@ func TestAtNsAsksTheNameserverInsideTheChildWhenTheParentHoldsADS(t *testing.T) 
 	installParent(t, dsParent(t))
 	asked := stubSignalKeys(t, map[string]string{atNsInBailiwickName: atNsTestKey})
 
-	verified, dnssec := VerifyChildKey(context.Background(), cuChild, cuParent, atNsTestKey, nil, atNsOnly())
+	verified, dnssec, _ := VerifyChildKey(context.Background(), cuChild, cuParent, atNsTestKey, nil, atNsOnly())
 
 	want := sortedNames([]string{atNsInBailiwickName, atNsProviderName})
 	if got := sortedNames(*asked); strings.Join(got, " ") != strings.Join(want, " ") {
@@ -162,7 +162,7 @@ func TestAtNsSeesADelegationChangeAtTheNextAttempt(t *testing.T) {
 	asked := stubSignalKeys(t, map[string]string{atNsProviderName: atNsTestKey})
 	ctx := context.Background()
 
-	if verified, _ := VerifyChildKey(ctx, cuChild, cuParent, atNsTestKey, nil, atNsOnly()); verified {
+	if verified, _, _ := VerifyChildKey(ctx, cuChild, cuParent, atNsTestKey, nil, atNsOnly()); verified {
 		t.Fatal("fixture: verified before the delegation names the provider")
 	}
 	if len(*asked) != 0 {
@@ -173,7 +173,7 @@ func TestAtNsSeesADelegationChangeAtTheNextAttempt(t *testing.T) {
 	installParent(t, cuParentZone(t))
 	*asked = nil
 
-	verified, dnssec := VerifyChildKey(ctx, cuChild, cuParent, atNsTestKey, nil, atNsOnly())
+	verified, dnssec, _ := VerifyChildKey(ctx, cuChild, cuParent, atNsTestKey, nil, atNsOnly())
 	if !verified || !dnssec {
 		t.Errorf("verified=%v dnssec=%v after the delegation gained the provider; the attempt"+
 			" must read the delegation as it is now (asked %v)", verified, dnssec, *asked)
@@ -198,7 +198,7 @@ func TestAtNsAsksNothingWithoutAnAuthoritativeDelegation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			asked := stubSignalKeys(t, map[string]string{atNsProviderName: atNsTestKey})
-			verified, _ := VerifyChildKey(context.Background(), tc.child, tc.parent, atNsTestKey, nil, atNsOnly())
+			verified, _, _ := VerifyChildKey(context.Background(), tc.child, tc.parent, atNsTestKey, nil, atNsOnly())
 			if len(*asked) != 0 {
 				t.Errorf("at-ns asked %v with no authoritative delegation to build names from", *asked)
 			}
