@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -14,6 +15,16 @@ import (
 // replace). The §10.8 UPDATE gate stays in updateGateBlocked, not here.
 func (zd *ZoneData) SendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 	syncstate DelegationSyncStatus, target *DsyncTarget, mode string) (string, uint8, UpdateResult, error) {
+	return zd.sendDelegationUpdate(ctx, kdb, syncstate, target, mode,
+		delegationSyncMaxRetries, delegationSyncInitialDelay)
+}
+
+// sendDelegationUpdate is SendDelegationUpdate with the retry budget chosen by
+// the caller. A background sync can afford the full backoff; a sync an
+// operator is waiting on cannot (parentFirstUpdateAttempts).
+func (zd *ZoneData) sendDelegationUpdate(ctx context.Context, kdb *KeyDB,
+	syncstate DelegationSyncStatus, target *DsyncTarget, mode string,
+	attempts int, initialDelay time.Duration) (string, uint8, UpdateResult, error) {
 
 	if target == nil || len(target.Addresses) == 0 {
 		return "", 0, UpdateResult{}, fmt.Errorf("SendDelegationUpdate: no usable UPDATE target for %s", zd.ZoneName)
@@ -47,7 +58,7 @@ func (zd *ZoneData) SendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 		"zone", zd.ZoneName, "target", target.Name, "addresses", target.Addresses, "port", target.Port,
 		"mode", mode, "update", strings.Join(ZoneUpdateActionsSummary(m.Ns), "; "))
 
-	rcode, ur, err := zd.SendUpdateWithRetry(ctx, smsg, parent, target.Addresses)
+	rcode, ur, err := zd.sendUpdateAttempts(ctx, smsg, parent, target.Addresses, attempts, initialDelay)
 	if err != nil {
 		return "", 0, ur, err
 	}

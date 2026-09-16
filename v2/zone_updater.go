@@ -52,11 +52,18 @@ type UpdateRequest struct {
 	// updater is never held up by a caller that has given up waiting, and a
 	// double send (belt-and-braces responses on several exit paths) is
 	// harmless.
-	Resp         chan ZoneUpdateResult
-	Status       *UpdateStatus
-	Description  string
-	PreCondition func() bool
-	Action       func() error
+	Resp chan ZoneUpdateResult
+	// ParentSyncDone marks an update whose NS and glue the parent has already
+	// been given -- a nameserver removal applied only after the parent
+	// confirmed it, or the local half of one (delegation_parent_first.go). The
+	// updater queues no delegation sync for it. A DNSKEY change riding in the
+	// same update still gets one: the parent-first transaction says nothing
+	// about DS.
+	ParentSyncDone bool
+	Status         *UpdateStatus
+	Description    string
+	PreCondition   func() bool
+	Action         func() error
 }
 
 // ZoneUpdateResult is the outcome of one update, delivered on UpdateRequest.Resp.
@@ -448,7 +455,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					// Dropping it costs a round of parent sync, not
 					// correctness: the drift is still in the zone, and the next
 					// load re-detects it.
-					if updated && !ur.InternalUpdate && zd.Options[OptParentSync] && !dss.InSync {
+					if updated && !ur.InternalUpdate && zd.Options[OptParentSync] && !dss.InSync &&
+						(!ur.ParentSyncDone || len(dss.DNSKEYAdds)+len(dss.DNSKEYRemoves) > 0) {
 						lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
 						if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
 							Command:    "SYNC-DELEGATION",

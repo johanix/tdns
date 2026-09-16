@@ -182,7 +182,14 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 // the delegation-DATA senders only; the shared SendUpdate keeps single-shot
 // semantics for its other callers (KSK DS push, CLI, etc.).
 func (zd *ZoneData) SendUpdateWithRetry(ctx context.Context, msg *dns.Msg, parent string, addrs []string) (int, UpdateResult, error) {
-	return sendUpdateWithRetry(ctx, delegationSyncMaxRetries, delegationSyncInitialDelay,
+	return zd.sendUpdateAttempts(ctx, msg, parent, addrs, delegationSyncMaxRetries, delegationSyncInitialDelay)
+}
+
+// sendUpdateAttempts is SendUpdateWithRetry with the budget chosen by the
+// caller.
+func (zd *ZoneData) sendUpdateAttempts(ctx context.Context, msg *dns.Msg, parent string, addrs []string,
+	attempts int, initialDelay time.Duration) (int, UpdateResult, error) {
+	return sendUpdateWithRetry(ctx, attempts, initialDelay,
 		func() (int, UpdateResult, error) {
 			return SendUpdate(ctx, msg, parent, addrs)
 		},

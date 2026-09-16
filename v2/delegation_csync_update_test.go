@@ -125,6 +125,18 @@ func TestNSCoherenceRefusesAnNSSetTheChildDoesNotServe(t *testing.T) {
 	expectRefusal(t, err, "not what its nameservers serve")
 }
 
+// A nameserver is withdrawn at the parent before the child stops serving it
+// (#665). The resulting set is one the child serves every member of, so it is
+// accepted although the child still serves the nameserver being removed.
+func TestNSCoherenceAcceptsAWithdrawalTheChildStillServes(t *testing.T) {
+	zd := cuParentZone(t)
+	var asked []dns.RR
+	actions := []dns.RR{delRR(t, "child.example. 3600 IN NS ns.provider.net.")}
+	if err := zd.CheckDelegationNSCoherenceForUpdate(context.Background(), actions, askerFor(servedChild(t), &asked)); err != nil {
+		t.Fatalf("a withdrawal the child still serves was refused: %v", err)
+	}
+}
+
 func TestNSCoherenceRefusesWhenTheNameserversDisagree(t *testing.T) {
 	zd := cuParentZone(t)
 	stub := servedChild(t)

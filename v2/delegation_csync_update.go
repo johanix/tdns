@@ -29,19 +29,29 @@ import (
 // set is what the child's nameservers serve, in agreement, and the glue is
 // what they serve for each in-bailiwick nameserver. That is what is checked,
 // scoped to what the update touches -- the DS check's discipline: an update
-// that changes the NS set must produce the served NS set; a nameserver the
-// update adds, or whose glue it touches, must end up with the served glue; a
-// nameserver the update removes must not leave glue behind; and an address
-// record may only be added at an in-bailiwick nameserver of the resulting set.
+// that changes the NS set must produce a set the child serves every member
+// of; a nameserver the update adds, or whose glue it touches, must end up with
+// the served glue; a nameserver the update removes must not leave glue behind;
+// and an address record may only be added at an in-bailiwick nameserver of the
+// resulting set.
+//
+// The NS half is "every resulting nameserver is served", not "the resulting
+// set IS the served set", because adding and removing go in opposite orders.
+// A nameserver is added at the child first and published at the parent after.
+// It is withdrawn at the parent first and dropped by the child after, so that
+// the parent never refers resolvers to a nameserver the child has stopped
+// listing. A withdrawal the child still serves is therefore the correct order,
+// and requiring equality refused every one of them (#665).
 // Glue the update does not touch, for nameservers it keeps, is not
 // re-verified: stale glue elsewhere is the scanner's to fix, not a reason to
 // refuse this child's change.
 
 // childNameserverAsker builds, for one child, the fetcher that asks that
 // child's nameservers. Which nameservers: the parent's current delegation, so
-// the child has to have made its CURRENT servers serve the change before
-// asking the parent to publish it (RFC 7477's child-first model); for a
-// delegation that does not exist yet, the ones the update names.
+// the child has to have made its CURRENT servers serve an addition before
+// asking the parent to publish it (RFC 7477's child-first model; a withdrawal
+// goes the other way, see above); for a delegation that does not exist yet,
+// the ones the update names.
 type childNameserverAsker func(child string, nameservers []dns.RR) childRRsetFetcher
 
 // childNameserverAsker is the production asker: the scanner's
@@ -296,7 +306,9 @@ func CheckDelegationNSCoherence(ctx context.Context, child string, currentNS []d
 		return fmt.Errorf("cannot verify the delegation for %s: no way to ask its nameservers what they serve: %w", child, ErrDelegationUnverifiable)
 	}
 
-	// The NS set must be what the child serves, as agreed by its nameservers.
+	// Every nameserver in the resulting set must be served, as agreed by the
+	// child's nameservers. One they serve that the set no longer names is a
+	// withdrawal in the right order: the parent first (see the file comment).
 	if nsChanged {
 		served, inSync, err := fetch(ctx, child, dns.TypeNS)
 		if err != nil {
@@ -312,9 +324,9 @@ func CheckDelegationNSCoherence(ctx context.Context, child string, currentNS []d
 			return fmt.Errorf("the nameservers of %s do not agree on its NS RRset; retry once they are in sync: %w",
 				child, ErrDelegationUnverifiable)
 		}
-		if changed, extra, missing := core.RRsetDiffer(child, resultingNS, served, dns.TypeNS, discardLog, false, false); changed {
-			return fmt.Errorf("the resulting NS RRset for %s is not what its nameservers serve: %d record(s) not served, %d served but absent; a scan would publish the served set",
-				child, len(extra), len(missing))
+		if _, notServed, _ := core.RRsetDiffer(child, resultingNS, served, dns.TypeNS, discardLog, false, false); len(notServed) > 0 {
+			return fmt.Errorf("the resulting NS RRset for %s is not what its nameservers serve: %d record(s) not served; a nameserver is published at the parent only once the child serves it",
+				child, len(notServed))
 		}
 	}
 

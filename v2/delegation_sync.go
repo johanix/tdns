@@ -506,11 +506,16 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 func (zd *ZoneData) SyncZoneDelegationViaUpdate(ctx context.Context, kdb *KeyDB, syncstate DelegationSyncStatus,
 	dsynctarget *DsyncTarget) (string, uint8, UpdateResult, error) {
 
-	updateMode := UpdateModeDelta
+	return zd.SendDelegationUpdate(ctx, kdb, syncstate, dsynctarget, childUpdateMode(kdb))
+}
+
+// childUpdateMode is the form a tdns-auth child's UPDATE takes: the operator's
+// parent-update option, delta by default.
+func childUpdateMode(kdb *KeyDB) string {
 	if mode, exists := kdb.AuthOption(AuthOptParentUpdate); exists {
-		updateMode = mode
+		return mode
 	}
-	return zd.SendDelegationUpdate(ctx, kdb, syncstate, dsynctarget, updateMode)
+	return UpdateModeDelta
 }
 
 // sendNotifyRequest hands a NotifyRequest to the notifier, giving up if the

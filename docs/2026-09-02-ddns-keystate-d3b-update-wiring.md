@@ -119,3 +119,14 @@ A third, from the same principle: **a no-op NS edit is not checked at all** --
 a duplicate add or a delete of something absent leaves the parent where it was,
 so it neither queries the child nor is refused for lack of a scanner. That
 mirrors the DS half's `sameRRsetContent` skip.
+
+## Amendment 2026-09-17: a withdrawal the child still serves is accepted
+
+The NS half of the rule was "the resulting set is what the child's
+nameservers serve". It is now "every nameserver in the resulting set is
+served". A withdrawal goes to the parent before the child stops serving the
+nameserver, and equality refused every correctly ordered one (#665). Additions
+are checked as before, the glue rules are unchanged, and a no-op NS edit still
+asks nobody. The section "Whom the parent asks" describes the child-first model
+for additions. Removals go the other way:
+`2026-09-17-parent-first-nameserver-removal.md`.

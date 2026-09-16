@@ -433,6 +433,37 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	// dump.P(dur.Status)
 	lgHandler.Info("update queued for zone update", "cmd", dur.Status.Type, "zone", zone, "validated", dur.Status.Validated, "trusted", dur.Status.ValidatedByTrustedKey)
 
+	req := UpdateRequest{
+		Cmd:       dur.Status.Type,
+		ZoneName:  zone,
+		Actions:   r.Ns,
+		Validated: dur.Status.Validated,
+		Trusted:   dur.Status.ValidatedByTrustedKey,
+		Status:    dur.Status,
+	}
+
+	// An update that removes a nameserver from a zone that syncs its own
+	// delegation goes to the parent before it is applied
+	// (delegation_parent_first.go). That is a network round trip of up to
+	// parentFirstTimeout, and this goroutine serves every UPDATE on the server
+	// -- including, when the parent is served here too, the very UPDATE that
+	// round trip sends. So it runs on its own and answers the client when it is
+	// done. The DNS handler does not wait for this function either way.
+	if req.Cmd == "ZONE-UPDATE" && zd.syncsOwnDelegation() {
+		if change, perr := zd.planDelegationChange(r.Ns); perr != nil || change.removesNS {
+			go zd.answerParentFirst(ctx, w, m, req, updateq, finalRcode)
+			return nil
+		}
+	}
+
+	return answerAfterApply(ctx, w, m, req, updateq, finalRcode)
+}
+
+// answerAfterApply hands an approved update to the ZoneUpdater and answers the
+// client once it has been applied.
+func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req UpdateRequest,
+	updateq chan UpdateRequest, finalRcode int) error {
+
 	// RFC 2136 §3.4.2.5: a NOERROR response means the requested update HAS been
 	// made. Answering as soon as the request was queued makes that a statement
 	// of intent rather than of fact -- the client is told the change is safe
@@ -452,22 +483,14 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	// this was a handoff to a queue nobody would ever read again, holding the
 	// DNS update engine open indefinitely. The waiter below is answered with a
 	// failure rather than left hanging.
-	req := UpdateRequest{
-		Cmd:       dur.Status.Type,
-		ZoneName:  zone,
-		Actions:   r.Ns,
-		Validated: dur.Status.Validated,
-		Trusted:   dur.Status.ValidatedByTrustedKey,
-		Status:    dur.Status,
-		Resp:      respch,
-	}
+	req.Resp = respch
 
 	select {
 	case updateq <- req:
 	case <-ctx.Done():
 		lgHandler.Info("shutting down before the update could be handed to the updater",
-			"zone", zone, "type", dur.Status.Type)
-		return fmt.Errorf("update for %s not queued: %w", zone, ctx.Err())
+			"zone", req.ZoneName, "type", req.Cmd)
+		return fmt.Errorf("update for %s not queued: %w", req.ZoneName, ctx.Err())
 	}
 
 	select {
@@ -477,7 +500,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 			// the honest answer: the client learns to retry or escalate,
 			// instead of believing a change that was never made.
 			lgHandler.Error("update was not applied; answering SERVFAIL",
-				"zone", zone, "error", res.Err)
+				"zone", req.ZoneName, "error", res.Err)
 			m.SetRcode(m, dns.RcodeServerFailure)
 			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdateNotApplied)
 		} else {
@@ -492,13 +515,75 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		// an RFC 2136 update is idempotent, so a retry that arrives after a
 		// late apply is harmless.
 		lgHandler.Error("timed out waiting for the update to be applied; answering SERVFAIL",
-			"zone", zone, "timeout", UpdateApplyTimeout)
+			"zone", req.ZoneName, "timeout", UpdateApplyTimeout)
 		m.SetRcode(m, dns.RcodeServerFailure)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdateApplyTimeout)
 	}
 	w.WriteMsg(m)
 
 	return nil
+}
+
+// answerParentFirst applies a nameserver removal parent-first and answers the
+// client. A DNS UPDATE has no way to say "apply it anyway", so a removal the
+// parent does not confirm is REFUSED, with the parent's reason in the EDE.
+func (zd *ZoneData) answerParentFirst(ctx context.Context, w dns.ResponseWriter, m *dns.Msg,
+	req UpdateRequest, updateq chan UpdateRequest, finalRcode int) {
+
+	handled, msg, err := zd.applyParentFirst(ctx, req, false, dnsZoneUpdateSubmitter(updateq), parentConfirmerFor(zd))
+	if !handled {
+		// Planned again under the zone's lock, the update no longer removes a
+		// nameserver: an earlier one already did.
+		if aerr := answerAfterApply(ctx, w, m, req, updateq, finalRcode); aerr != nil {
+			lgHandler.Error("error from answerAfterApply", "zone", req.ZoneName, "err", aerr)
+		}
+		return
+	}
+	if err != nil {
+		rcode := dns.RcodeServerFailure
+		var notConfirmed *ParentNotConfirmedError
+		if errors.As(err, &notConfirmed) {
+			rcode = dns.RcodeRefused
+		}
+		lgHandler.Error("update not applied", "zone", req.ZoneName, "rcode", dns.RcodeToString[rcode], "err", err)
+		m.SetRcode(m, rcode)
+		text := err.Error()
+		if len(text) > 300 {
+			text = text[:300]
+		}
+		edns0.AttachEDEToResponseWithText(m, edns0.EDEZoneUpdateNotApplied, text, false)
+	} else {
+		lgHandler.Info("update applied parent-first", "zone", req.ZoneName, "msg", msg)
+		m.SetRcode(m, finalRcode)
+	}
+	w.WriteMsg(m)
+}
+
+// dnsZoneUpdateSubmitter applies one step of a parent-first update through the
+// ZoneUpdater, for the DNS UPDATE channel. Bounded on both sides: the steps run
+// detached from any cancellation, so a stopped updater must not hold them
+// forever.
+func dnsZoneUpdateSubmitter(updateq chan UpdateRequest) zoneUpdateSubmitter {
+	return func(ctx context.Context, ur UpdateRequest) (ZoneUpdateResult, error) {
+		respch := make(chan ZoneUpdateResult, 1)
+		ur.Resp = respch
+		select {
+		case updateq <- ur:
+		case <-ctx.Done():
+			return ZoneUpdateResult{}, fmt.Errorf("update for %s not queued: %w", ur.ZoneName, ctx.Err())
+		case <-time.After(5 * time.Second):
+			return ZoneUpdateResult{}, fmt.Errorf("timed out queueing the update for zone %s", ur.ZoneName)
+		}
+		select {
+		case res := <-respch:
+			return res, nil
+		case <-ctx.Done():
+			return ZoneUpdateResult{}, fmt.Errorf("stopped waiting for the update to %s: %w", ur.ZoneName, ctx.Err())
+		case <-time.After(UpdateApplyTimeout):
+			return ZoneUpdateResult{}, fmt.Errorf("timed out after %s waiting for the update to %s to be applied;"+
+				" it may or may not have taken effect", UpdateApplyTimeout, ur.ZoneName)
+		}
+	}
 }
 
 // UpdateApplyTimeout bounds how long an UPDATE responder waits for the

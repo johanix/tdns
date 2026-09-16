@@ -340,6 +340,39 @@ per-policy preference.
 The same dispatch logic is reused by the auto-rollover
 engine; see section 5 for the full picture.
 
+#### Removing a nameserver: the parent first
+
+Adding and removing a nameserver go in opposite orders. An
+addition is made in the zone first and sent to the parent
+after, and the parent checks that the child already serves it.
+A removal goes to the parent **first**, and is applied to the
+zone only once the parent has confirmed it, so the parent never
+refers resolvers to a nameserver the child has stopped listing.
+
+For a zone with `parentsync`, an update that takes a nameserver
+out of the apex NS RRset (on either channel, see
+[zone-updates.md](zone-updates.md)) therefore runs in three steps:
+
+1. Anything the update adds to the delegation, and any glue change
+   for a nameserver that stays, is applied to the zone.
+2. The parent is sent the delegation as it will be after the
+   update, over UPDATE or the API scheme. A NOTIFY cannot confirm
+   anything: the parent acts on it later, by reading what the child
+   serves. A parent that offers only NOTIFY cannot take a
+   parent-first removal.
+3. On confirmation, the update is applied as sent.
+
+If the parent does not confirm, step 1 is undone and the update is
+refused with the parent's reason. On the management API,
+`--force` applies it anyway, and the ordinary sync to the parent
+follows. A DNS UPDATE cannot carry that override, so there it is
+REFUSED with the reason in `EDEZoneUpdateNotApplied`.
+
+A parent running tdns accepts such a withdrawal: its coherence
+check requires every nameserver in the resulting NS set to be
+served by the child, not that the child serves nothing else.
+Glue is still checked exactly.
+
 #### Choosing a SIG(0) bootstrap method
 
 Before the child can send a signed UPDATE, the parent has
