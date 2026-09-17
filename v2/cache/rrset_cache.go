@@ -451,12 +451,14 @@ func isStructuralRRset(cr *CachedRRset, nsHosts map[string]struct{}) bool {
 
 // isSubdomainOf reports whether name is at or below parent.
 //
-// This was already correct -- it canonicalised both names and added the leading
-// dot that a byte-wise suffix test needs to respect a label boundary. It is
-// dns.IsSubDomain now because that says the same thing in one line and without
-// the two canonicalisation allocations, not because the old one was wrong.
+// dns.IsSubDomain respects label boundaries and case but compares labels as
+// they are written, and its one caller, FlushDomain, hands it a canonical
+// parent -- escapes decoded -- beside cache entries spelled as the wire spelled
+// them: a raw 0xff on one side, \255 on the other. So both are canonicalised
+// first. That allocates for a name with upper case or an escape in it, which a
+// flush, run by an operator over the whole cache, can afford.
 func isSubdomainOf(name, parent string) bool {
-	return dns.IsSubDomain(parent, name)
+	return dns.IsSubDomain(core.CanonicalizeName(parent), core.CanonicalizeName(name))
 }
 
 // ServerKey is the key a per-zone server map -- the map[string]*AuthServer
@@ -719,7 +721,7 @@ func baseFromTLSAOwner(owner string) string {
 	canon := core.CanonicalizeName(owner)
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(canon, prefix) {
-			return owner[len(prefix):]
+			return core.TrimLeadingLabels(owner, dns.CountLabel(prefix))
 		}
 	}
 	return ""

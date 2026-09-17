@@ -208,7 +208,7 @@ func (zd *ZoneData) workingOwnerNamesLocked() []string {
 	// puts the apex in the middle.
 	//
 	// Sorted on precomputed keys rather than by comparing names pairwise.
-	// canonicalOwnerLess allocates six times per comparison and this sort runs
+	// canonicalOwnerLess builds two keys per comparison and this sort runs
 	// on every publish of every signed zone, so the cost is O(n log n)
 	// allocations where O(n) will do. canonicalSortKey's byte order IS
 	// canonical order, so the result is identical.
