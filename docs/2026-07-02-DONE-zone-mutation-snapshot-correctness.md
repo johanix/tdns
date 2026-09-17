@@ -1,5 +1,9 @@
 # Project B — Zone-Mutation Correctness via an Immutable Snapshot
 
+**UPDATED BY:** `2026-09-17-publish-gate-and-transactions.md` (proposal, #653) —
+§1.3 and §1.6: every change goes through the publish gate, and transactions
+group changes that belong together.
+
 **Status:** **done (tdns-core)** — B1 (`98e50fa`), B2 (`c76dfc4`), B3 complete on branch
 `feature/zone-snapshot-correctness`. B-MP (tdns-mp) deferred per §9.
 **Date:** 2026-07-02 (plan); **implementation log:** 2026-07-08
