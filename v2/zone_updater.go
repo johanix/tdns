@@ -60,10 +60,16 @@ type UpdateRequest struct {
 	// same update still gets one: the parent-first transaction says nothing
 	// about DS.
 	ParentSyncDone bool
-	Status         *UpdateStatus
-	Description    string
-	PreCondition   func() bool
-	Action         func() error
+	// TxID and TxFlags belong to the two transaction markers, TX-BEGIN and
+	// TX-COMMIT (zone_tx.go). TxFlags is read from the begin marker only. A
+	// marker may carry a Resp: a commit's is answered once the transaction is
+	// published, or with the reason it was not.
+	TxID         TxID
+	TxFlags      TxFlags
+	Status       *UpdateStatus
+	Description  string
+	PreCondition func() bool
+	Action       func() error
 }
 
 // ZoneUpdateResult is the outcome of one update, delivered on UpdateRequest.Resp.
