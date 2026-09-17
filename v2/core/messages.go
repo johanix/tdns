@@ -105,6 +105,34 @@ type RROperation struct {
 	Operation string   `json:"operation"`         // "add", "delete", "replace"
 	RRtype    string   `json:"rrtype"`            // DNS RR type name (e.g. "DNSKEY", "NS", "A")
 	Records   []string `json:"records,omitempty"` // RR strings in ClassINET text format
+	// KeyStates: for a DNSKEY operation, what the sending provider says
+	// about each of its keys in Records (the provider is the message's
+	// originator). A sender that predates the field sends none, and a
+	// receiver that predates it ignores it as an unknown JSON field, so
+	// old and new decode each other (key lifecycle ownership design Q9).
+	KeyStates []KeyState `json:"key_states,omitempty"`
+}
+
+// KeyState is what a provider says about one of its own DNSKEYs when it
+// distributes them to the other providers (key lifecycle ownership design
+// §5, tdns-mp #58): the key's lifecycle state there, and whether its DS
+// belongs at the parent. DS is a pointer so that an explicit false
+// travels; a provider that says nothing about a key leaves the receiver's
+// row for it undecided (ds unset), which blocks the zone's DS set rather
+// than guessing it.
+type KeyState struct {
+	KeyTag uint16 `json:"key_tag"`
+	State  string `json:"state"`
+	DS     *bool  `json:"ds,omitempty"`
+}
+
+// ForeignKeyState is a KeyState another provider sent, as an agent hands
+// it on to its own signer (AgentKeystatePost with Signal "foreign"):
+// Provider is the sending provider's label among the zone's HSYNC3
+// records.
+type ForeignKeyState struct {
+	Provider string `json:"provider"`
+	KeyState
 }
 
 // AgentMsgPost represents a generic agent message (sync, update, rfi, status).
@@ -185,9 +213,13 @@ type AgentKeystatePost struct {
 	Zone         string              // Zone this key belongs to (FQDN)
 	KeyTag       uint16              // DNSKEY key tag (unused for inventory)
 	Algorithm    uint8               // DNSKEY algorithm number (unused for inventory)
-	Signal       string              // "propagated", "rejected", "removed", "published", "retired", "inventory"
+	Signal       string              // "propagated", "rejected", "removed", "published", "retired", "inventory", "foreign"
 	Message      string              // Optional detail (e.g. rejection reason)
 	KeyInventory []KeyInventoryEntry // Complete key inventory (only when Signal == "inventory")
+	// ForeignKeys: what the other providers said about their keys in the
+	// zone, the complete latest set per provider (only when Signal ==
+	// "foreign"); the signer writes ds on its foreign rows from it.
+	ForeignKeys []ForeignKeyState `json:",omitempty"`
 	// Owned: the sender's key lifecycle for the zone is run by its own
 	// state machine (key lifecycle ownership design S3), so the inventory
 	// is the DS set's source for the agent (S5, arrow 2).
