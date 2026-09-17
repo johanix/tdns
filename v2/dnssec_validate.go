@@ -172,7 +172,9 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 			keyid := dnskey.KeyTag()
 			for _, ds := range cdd.DS_rrset.RRs {
 				if dsrr, ok := ds.(*dns.DS); ok {
-					if dsrr.KeyTag == keyid {
+					// RFC 4035 section 5.2: key tag and algorithm. The digest
+					// covers the key's algorithm, not the DS's.
+					if dsrr.KeyTag == keyid && dsrr.Algorithm == dnskey.Algorithm {
 						zd.Logger.Printf("ValidateChildDnskeys: found matching DS for keyid %d", keyid)
 						// Compute the DS from the DNSKEY
 						computedDS := dnskey.ToDS(dsrr.DigestType)
