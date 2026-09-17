@@ -85,10 +85,26 @@ func TestDnskeyOperationCarriesTheKeyStates(t *testing.T) {
 	if err := json.Unmarshal(b, &oldReceiver); err != nil || len(oldReceiver.Records) != 2 || oldReceiver.RRtype != "DNSKEY" {
 		t.Errorf("an old receiver does not decode the new payload: %+v err=%v", oldReceiver, err)
 	}
-	// an operation without key states encodes as it always did
-	plain, _ := json.Marshal(RROperation{Operation: "add", RRtype: "NS", Records: []string{"z. 3600 IN NS ns1.z."}})
-	if contains(string(plain), "key_states") {
-		t.Errorf("key_states encoded when empty: %s", plain)
+	// an operation without key states encodes as it always did, and so
+	// does one whose key states are an empty list: a provider with no key
+	// to speak of sends no field, which a receiver reads as an old sender
+	for _, op := range []RROperation{
+		{Operation: "add", RRtype: "NS", Records: []string{"z. 3600 IN NS ns1.z."}},
+		{Operation: "replace", RRtype: "DNSKEY", KeyStates: []KeyState{}},
+	} {
+		plain, _ := json.Marshal(op)
+		if contains(string(plain), "key_states") {
+			t.Errorf("key_states encoded when empty: %s", plain)
+		}
+	}
+	// an explicit empty list from another implementation is a word all the
+	// same ("none of my keys"), not an absent one: non-nil after decoding
+	var empty RROperation
+	if err := json.Unmarshal([]byte(`{"operation":"replace","rrtype":"DNSKEY","key_states":[]}`), &empty); err != nil {
+		t.Fatal(err)
+	}
+	if empty.KeyStates == nil || len(empty.KeyStates) != 0 {
+		t.Errorf("an explicit empty key_states decoded as %#v, want an empty non-nil list", empty.KeyStates)
 	}
 }
 
@@ -96,7 +112,7 @@ func TestDnskeyOperationCarriesTheKeyStates(t *testing.T) {
 // provider's label beside each key state, under Signal "foreign".
 func TestKeystatePostCarriesTheForeignKeys(t *testing.T) {
 	yes := true
-	post := AgentKeystatePost{Zone: "z.", Signal: "foreign", ForeignKeys: []ForeignKeyState{
+	post := AgentKeystatePost{MessageType: AgentMsgKeystate, MyIdentity: "agent.us.example.", YourIdentity: "signer.us.example.", Zone: "z.", Signal: "foreign", ForeignKeys: []ForeignKeyState{
 		{Provider: "p2", KeyState: KeyState{KeyTag: 4711, State: "active", DS: &yes}},
 		{Provider: "p3", KeyState: KeyState{KeyTag: 4714, State: "published"}},
 	}}
@@ -104,8 +120,9 @@ func TestKeystatePostCarriesTheForeignKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !contains(string(b), `"ForeignKeys":[{"provider":"p2","key_tag":4711,"state":"active","ds":true},{"provider":"p3","key_tag":4714,"state":"published"}]`) {
-		t.Errorf("the foreign keys' payload changed: %s", b)
+	const golden = `{"MessageType":"keystate","MyIdentity":"agent.us.example.","YourIdentity":"signer.us.example.","Zone":"z.","KeyTag":0,"Algorithm":0,"Signal":"foreign","Message":"","KeyInventory":null,"ForeignKeys":[{"provider":"p2","key_tag":4711,"state":"active","ds":true},{"provider":"p3","key_tag":4714,"state":"published"}],"Time":"0001-01-01T00:00:00Z"}`
+	if string(b) != golden {
+		t.Errorf("the KEYSTATE foreign payload changed:\n got %s\nwant %s", b, golden)
 	}
 	var back AgentKeystatePost
 	if err := json.Unmarshal(b, &back); err != nil {
