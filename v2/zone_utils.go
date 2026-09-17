@@ -2452,6 +2452,19 @@ func isValidIP(addr string) bool {
 	return ip != nil
 }
 
+// autoZoneNegativeTTL is the SOA minimum of an auto zone, in seconds: how long a
+// resolver holds a denial from it (RFC 2308 section 5), and the TTL of the NSEC
+// records that prove one.
+//
+// The auto zones that are looked up are identity zones: important, rarely
+// asked, and queried by peers while they are being published. A denial from one
+// means "not yet" far more often than "never". At an hour, a peer that asked a
+// moment before a record arrived was told for the hour that it did not exist
+// (#653), thirty times longer than it would have cached the record itself, an
+// SVCB with a TTL of two minutes. The records keep the zone's $TTL; only
+// denials are short. A catalog zone is an auto zone too, and nothing resolves it.
+const autoZoneNegativeTTL = 60
+
 func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string, nsNames []string) (*ZoneData, error) {
 	if zonename == "" {
 		return nil, fmt.Errorf("zonename cannot be empty")
@@ -2473,13 +2486,14 @@ $TTL 3600
           3600       ; refresh (1 hour)
           1800       ; retry (30 minutes)
           1209600    ; expire (2 weeks)
-          3600       ; minimum (1 hour)
+          {MINIMUM}  ; minimum (autoZoneNegativeTTL)
           )
 {ZONENAME}     IN NS  invalid.
 `
 	currentTime := fmt.Sprintf("%d", time.Now().Unix())
 	zonedatastr := strings.ReplaceAll(tmpl, "{ZONENAME}", zonename)
 	zonedatastr = strings.ReplaceAll(zonedatastr, "{SERIAL}", currentTime)
+	zonedatastr = strings.ReplaceAll(zonedatastr, "{MINIMUM}", fmt.Sprintf("%d", autoZoneNegativeTTL))
 
 	// Explicit nameserver hostnames (no glue): use for NS RRset only
 	if len(nsNames) > 0 {
