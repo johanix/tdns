@@ -396,6 +396,16 @@ const (
 	// (e.g. some primaries failed to resolve while others succeeded).
 	// Visibility-only.
 	ConfigWarning
+	// FirstPublishError: a zone created held (zone_tx.go) has not published
+	// its first content. Either the transaction that holds it outlived the
+	// hold's limit without a commit, or the commit came and the content could
+	// not be signed yet. The zone has no snapshot, so it answers SERVFAIL
+	// whatever this says; the category is how the reason reaches the zone's
+	// status. It gates NOTHING, and must not: the next signing pass is what
+	// retries an unsigned first content, and the signing passes refuse a zone
+	// that carries DnssecError. Cleared by the publish that installs the first
+	// snapshot.
+	FirstPublishError
 )
 
 var ErrorTypeToString = map[ErrorType]string{
@@ -409,6 +419,7 @@ var ErrorTypeToString = map[ErrorType]string{
 	RolloverParentBlocker:   "rollover-parent-blocker",
 	DelegationSyncWarning:   "delegation-sync-warning",
 	ConfigWarning:           "config-warning",
+	FirstPublishError:       "first-publish",
 }
 
 // errorTypeReportOrder defines the deterministic order in which the
@@ -421,6 +432,7 @@ var errorTypeReportOrder = []ErrorType{
 	RefreshError,
 	AgentError,
 	DnssecError,
+	FirstPublishError,
 	RolloverPolicyViolation,
 	RolloverParentBlocker,
 	DnssecPolicyWarning,

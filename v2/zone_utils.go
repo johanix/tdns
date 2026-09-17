@@ -2466,14 +2466,40 @@ func isValidIP(addr string) bool {
 const autoZoneNegativeTTL = 60
 
 func (kdb *KeyDB) CreateAutoZone(zonename string, addrs []string, nsNames []string) (*ZoneData, error) {
+	zd, _, err := kdb.createAutoZone(zonename, addrs, nsNames, false)
+	return zd, err
+}
+
+// CreateAutoZoneHeld is CreateAutoZone for a zone whose first content is a
+// transaction (zone_tx.go). The zone is registered, so queued changes find it,
+// and it holds the returned transaction, so it has NO SNAPSHOT until that
+// transaction commits: a query into it is SERVFAIL, which no resolver caches
+// as a denial, a transfer is refused, and nothing is notified. The commit
+// installs the first snapshot, and it is the complete zone; for a zone that
+// signs its own content, the complete signed zone or none.
+//
+// CreateAutoZone, by contrast, publishes the zone as SOA and NS at once: an
+// authoritative denial of everything the zone is about to hold, for as long as
+// its creator takes to add it (#653).
+//
+// The creator sets its options, stages or queues its records, and commits the
+// way it staged: CommitTx for a creator that stages in-process, TX-COMMIT
+// through the update queue, behind its updates, for one that queues them. A
+// creator that never commits leaves the zone unpublished: the hold of a zone
+// that has never published fails closed.
+func (kdb *KeyDB) CreateAutoZoneHeld(zonename string, addrs []string, nsNames []string) (*ZoneData, TxID, error) {
+	return kdb.createAutoZone(zonename, addrs, nsNames, true)
+}
+
+func (kdb *KeyDB) createAutoZone(zonename string, addrs []string, nsNames []string, held bool) (*ZoneData, TxID, error) {
 	if zonename == "" {
-		return nil, fmt.Errorf("zonename cannot be empty")
+		return nil, "", fmt.Errorf("zonename cannot be empty")
 	}
 	if !dns.IsFqdn(zonename) {
-		return nil, fmt.Errorf("zonename must be fully qualified (end with dot)")
+		return nil, "", fmt.Errorf("zonename must be fully qualified (end with dot)")
 	}
 
-	lg.Info("CreateAutoZone", "zone", zonename)
+	lg.Info("CreateAutoZone", "zone", zonename, "held", held)
 
 	// Create a fake zone for the sidecar identity just to be able to
 	// to use to generate the TLSA.
@@ -2515,7 +2541,7 @@ $TTL 3600
 		for _, addr := range addrs {
 			if !isValidIP(addr) {
 				lg.Error("CreateAutoZone: invalid IP address", "addr", addr)
-				return nil, fmt.Errorf("invalid IP address: %s", addr)
+				return nil, "", fmt.Errorf("invalid IP address: %s", addr)
 			}
 			if strings.Contains(addr, ":") {
 				// IPv6 address
@@ -2541,10 +2567,25 @@ $TTL 3600
 	lg.Debug("CreateAutoZone: reading zone data", "zone", zonename)
 	_, _, err := zd.ReadZoneData(zonedatastr, false)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read zone data: %v", err)
+		return nil, "", fmt.Errorf("failed to read zone data: %v", err)
 	}
 
-	zd.InstallInitialSnapshot()
+	var txid TxID
+	if held {
+		// Held BEFORE it is registered, so that nothing can find the zone
+		// without its hold. No InstallInitialSnapshot: that is the whole point.
+		// The publisher is started here because InstallInitialSnapshot, which
+		// otherwise does it, is not called.
+		zd.mu.Lock()
+		zd.tx.createdHeld = true
+		txid = zd.beginTxAutoLocked(0)
+		zd.tx.createTx = txid
+		zd.Status = ZoneStatusPending
+		zd.mu.Unlock()
+		zd.startPublisher()
+	} else {
+		zd.InstallInitialSnapshot()
+	}
 	// no-refresh-hooks: a catalog PRIMARY, and this is a *KeyDB method with no
 	// Config in scope to take the delegation-sync queue from. Both hooks gate
 	// on options a primary cannot hold (use-hsyncparam is dropped on a primary,
@@ -2552,7 +2593,7 @@ $TTL 3600
 	// no-ops. Revisit if a hook ever applies to a primary.
 	Zones.Set(zonename, zd)
 
-	return zd, nil
+	return zd, txid, nil
 }
 
 // Extract the addresses we listen on from the listeners configuration. Exclude localhost and non-standard ports.
