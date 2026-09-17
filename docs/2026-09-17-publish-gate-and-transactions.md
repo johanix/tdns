@@ -1,6 +1,6 @@
 # One publish gate for every zone change, and transactions for changes that belong together
 
-**Written 2026-09-17.** #653. **Status: PROPOSAL, r2.** Nothing here is implemented.
+**Written 2026-09-17.** #653. **Status: PROPOSAL, r3.** Nothing here is implemented.
 Updates §1.3 and §1.6 of `2026-07-02-DONE-zone-mutation-snapshot-correctness.md`
 ("the July design"), which stays as it is.
 
@@ -13,8 +13,9 @@ refresh that meets an open transaction is refused and retried; the waiter margin
 has a number; an idle zone's publish stays in the caller; new sections on risks,
 size and order of work, and what must not regress. **r1 was wrong about one
 fact:** it said a wire DNS UPDATE does not wait for its change. It does, and so
-do seven other senders, not three. "What NOERROR promises" is new because of it,
-and ends in the one question this revision leaves open.
+do seven other senders, not three. "What NOERROR promises" is new because of it.
+r3: that question is decided, option A for the first implementation. Nothing is
+left open.
 
 ## What went wrong
 
@@ -262,9 +263,11 @@ a client that sends one UPDATE, waits for the answer and sends the next runs at
 | **B** | applied and durable, served within a cadence | A stage-time journal of update records, replayed into the working set at start, beside the per-publish delta journal. About 250–350 lines and a second durability path to keep right. The answer is prompt again and nothing accepted is ever lost (R2 goes away) |
 | **C** | accepted | What July's §1.6 implied. Breaks section 3.5. Not proposed |
 
-**Proposed: A now, B if a bulk dynamic-update load turns up.** A is correct, it
-is what the code promises today, and `UpdateApplyTimeout` already covers twice
-the default cadence. **This is the open question of r2.**
+**Decided (2026-09-17): A for the first implementation.** It is correct, it is
+what the code promises today, and `UpdateApplyTimeout` already covers twice the
+default cadence. B is the follow-up if a bulk dynamic-update load turns up; the
+design leaves room for it, since it changes when a waiter is answered and
+nothing about the gate or the transactions.
 
 ## Every publisher
 
