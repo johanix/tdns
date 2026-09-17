@@ -130,9 +130,12 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 	// Create the catalog membership
 	_ = GetOrCreateCatalogMembership(catalogZoneName)
 
-	// Use CreateAutoZone to create the catalog zone
+	// The catalog's first content is a transaction: created held, it is not
+	// visible as SOA and NS before its version record is there. This creator
+	// stages in-process, so it commits in-process (and could not do otherwise:
+	// its key store has no update queue).
 	kdb := &KeyDB{} // Empty KeyDB for catalog zones
-	zd, err := kdb.CreateAutoZone(catalogZoneName, []string{}, nil)
+	zd, txid, err := kdb.CreateAutoZoneHeld(catalogZoneName, []string{}, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create catalog zone: %v", err)
 	}
@@ -158,10 +161,16 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 	zd.mu.Lock()
 	zd.ensureWorkingSet()
 	zd.stageRRsetLocked(versionOwner, rrset)
-	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 	zd.mu.Unlock()
+	// The first snapshot: SOA, NS and the version record together. A catalog
+	// does not sign, so there is nothing for it to wait for.
+	if err := zd.CommitTx(txid); err != nil {
+		stopZonePublisher(catalogZoneName)
+		Zones.Remove(catalogZoneName)
+		return fmt.Errorf("failed to publish catalog zone %s: %v", catalogZoneName, err)
+	}
 
-	// no-refresh-hooks: republishes the zone CreateAutoZone already registered.
+	// no-refresh-hooks: republishes the zone CreateAutoZoneHeld already registered.
 	Zones.Set(catalogZoneName, zd)
 
 	// Write zone file if persistence is enabled

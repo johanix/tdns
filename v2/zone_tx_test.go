@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"log"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -22,16 +21,6 @@ import (
 // #653: an identity zone went out one record at a time, a secondary served an
 // intermediate serial for a second, and a peer that asked in that second was
 // told, under a valid signature, that a record about to arrive did not exist.
-
-// txTestGate keeps this step's tests skipped until its last commit turns them
-// on. TDNS_TX_TESTS=1 runs them early, to see how each one fails without the
-// change.
-func txTestGate(t *testing.T) {
-	t.Helper()
-	if !txImplemented && os.Getenv("TDNS_TX_TESTS") == "" {
-		t.Skip("zone transactions are not implemented yet; TDNS_TX_TESTS=1 shows how this fails without them")
-	}
-}
 
 // syncBuffer is a log sink the publisher goroutine and the hold's timer can
 // write while the test reads.
@@ -283,7 +272,6 @@ func TestAZoneThatOpensNoTransactionPublishesAsBefore(t *testing.T) {
 // snapshot: that, and not Ready, is what keeps it out of sight. The commit
 // installs the first snapshot, and it is the complete zone.
 func TestAHeldZoneHasNoSnapshotUntilItsCommit(t *testing.T) {
-	txTestGate(t)
 	const zone = "held.tx.example."
 	zd, id, _ := newHeldAutoZone(t, zone)
 
@@ -306,6 +294,11 @@ func TestAHeldZoneHasNoSnapshotUntilItsCommit(t *testing.T) {
 	stageTxt(t, zd, "a."+zone, "one")
 	if zd.publishedSnapshot() != nil {
 		t.Fatal("staging published the held zone")
+	}
+	// The one way to a snapshot that is not a publish of the working set.
+	zd.InstallInitialSnapshot()
+	if zd.publishedSnapshot() != nil {
+		t.Fatal("InstallInitialSnapshot got past the hold")
 	}
 
 	if err := zd.CommitTx(id); err != nil {
@@ -343,7 +336,6 @@ func TestAHeldZoneHasNoSnapshotUntilItsCommit(t *testing.T) {
 // would let each of them through. A stopped publish changes nothing: not the
 // snapshot, not the serial, not lastPublish, not what is staged for the journal.
 func TestNoPublisherGetsThroughAHold(t *testing.T) {
-	txTestGate(t)
 	const zone = "choke.tx.example."
 	zd, kdb := newPublishedAutoZone(t, zone)
 
@@ -441,7 +433,6 @@ func TestNoPublisherGetsThroughAHold(t *testing.T) {
 // cadence has run out. A publish stopped by a hold must not leave it in that
 // state, or the loop spins on zd.mu for the length of the hold.
 func TestThePublisherDoesNotSpinOnAHeldZone(t *testing.T) {
-	txTestGate(t)
 	const zone = "spin.tx.example."
 	zd, _ := newPublishedAutoZone(t, zone)
 
@@ -478,7 +469,6 @@ func TestThePublisherDoesNotSpinOnAHeldZone(t *testing.T) {
 // one commits: a commit must not publish another transaction's half. Urgent is
 // sticky for the hold.
 func TestTheZonePublishesWhenTheLastTransactionCommits(t *testing.T) {
-	txTestGate(t)
 	const zone = "two.tx.example."
 	zd, _ := newPublishedAutoZone(t, zone)
 
@@ -513,7 +503,6 @@ func TestTheZonePublishesWhenTheLastTransactionCommits(t *testing.T) {
 // zone, otherwise at lastPublish + cadence. Wrapping every change in its own
 // transaction must not bring per-record publishing back.
 func TestAPlainCommitOnAReadyZoneAsksTheGate(t *testing.T) {
-	txTestGate(t)
 	const zone = "gate.tx.example."
 	zd, _ := newPublishedAutoZone(t, zone)
 	zd.mu.Lock()
@@ -545,7 +534,6 @@ func TestAPlainCommitOnAReadyZoneAsksTheGate(t *testing.T) {
 // A transaction is not isolation. A zone has one working set, and what another
 // writer stages during the hold goes out with the commit.
 func TestAnotherWritersChangeGoesOutWithTheCommit(t *testing.T) {
-	txTestGate(t)
 	const zone = "ride.tx.example."
 	zd, id, kdb := newHeldAutoZone(t, zone)
 
@@ -573,7 +561,6 @@ func TestAnotherWritersChangeGoesOutWithTheCommit(t *testing.T) {
 // No refresh is coming for a held zone, and once its working set is seeded a
 // write to zd.Data reaches nothing.
 func TestAZoneCreatedHeldIsNeverADraft(t *testing.T) {
-	txTestGate(t)
 	const zone = "draft.tx.example."
 	zd, id, kdb := newHeldAutoZone(t, zone)
 	if zd.publishedSnapshot() != nil {
@@ -621,7 +608,6 @@ func TestAZoneCreatedHeldIsNeverADraft(t *testing.T) {
 // through the gate. The zone's previous content was valid, and so is each
 // change added to it.
 func TestALostCommitOnAPublishedZoneIsReleasedWithAWarning(t *testing.T) {
-	txTestGate(t)
 	withTxHoldLimit(t, 150*time.Millisecond)
 	logs := captureTxLogs(t)
 	const zone = "lost.tx.example."
@@ -668,7 +654,6 @@ func TestALostCommitOnAPublishedZoneIsReleasedWithAWarning(t *testing.T) {
 // forbids. The zone stays unpublished, logs an ERROR, and carries the error in
 // its status until a commit arrives.
 func TestALostCommitOnANeverPublishedZoneFailsClosed(t *testing.T) {
-	txTestGate(t)
 	withTxHoldLimit(t, 150*time.Millisecond)
 	logs := captureTxLogs(t)
 	const zone = "closed.tx.example."
@@ -710,5 +695,53 @@ func TestALostCommitOnANeverPublishedZoneFailsClosed(t *testing.T) {
 	}
 	if zd.HasError(FirstPublishError) {
 		t.Error("the error outlived the first publish")
+	}
+}
+
+// The catalog zone was the other creator that showed a zone as SOA and NS
+// first: CreateAutoZone, then the version record in a second publish. Created
+// held, its first snapshot has the version record in it. This creator stages
+// in-process, on a key store with no update queue, so it commits in-process.
+func TestACatalogZonesFirstSnapshotHasItsVersionRecord(t *testing.T) {
+	const zone = "catalog.tx.example."
+	t.Cleanup(func() {
+		stopZonePublisher(zone)
+		Zones.Remove(zone)
+	})
+
+	if err := handleCatalogCreate(zone, &CatalogResponse{}); err != nil {
+		t.Fatalf("handleCatalogCreate: %v", err)
+	}
+	zd, ok := Zones.Get(zone)
+	if !ok {
+		t.Fatal("the catalog zone is not registered")
+	}
+	snap := zd.publishedSnapshot()
+	if snap == nil {
+		t.Fatal("the catalog zone has no snapshot")
+	}
+	if !served(zd, "version."+zone, dns.TypeTXT) || !served(zd, zone, dns.TypeSOA) {
+		t.Error("the catalog zone's snapshot lacks its SOA or its version record")
+	}
+	if !zd.Ready {
+		t.Error("the catalog zone is not Ready")
+	}
+	if n := zd.txOpenCount(); n != 0 {
+		t.Errorf("%d transaction(s) left open on the catalog zone", n)
+	}
+	// The window this closes lasted microseconds and cannot be seen after the
+	// fact, so what is pinned is how the zone came to be: created held, which
+	// is what TestAHeldZoneHasNoSnapshotUntilItsCommit gives its meaning to.
+	zd.mu.Lock()
+	createdHeld, draft := zd.tx.createdHeld, zd.isDraftLocked()
+	zd.mu.Unlock()
+	if !createdHeld {
+		t.Error("the catalog zone was not created held: it was visible as SOA and NS before its version record")
+	}
+	if draft {
+		t.Error("the catalog zone is taken for a draft")
+	}
+	if n := len(snap.IxfrChain); n != 0 {
+		t.Errorf("the catalog zone has %d IXFR link(s): it was published more than once", n)
 	}
 }

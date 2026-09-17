@@ -1,8 +1,9 @@
 # One publish gate for every zone change, and transactions for changes that belong together
 
-**Written 2026-09-17.** #653. **Status: r4.** r3 was merged with #695. Nothing
-here is implemented yet, which is why r4 revises the text in place and is not
-an amendment.
+**Written 2026-09-17.** #653. **Status: r4.** r3 was merged with #695. r4 was
+written before any code, which is why it revises the text in place and is not
+an amendment, and it arrives together with step 1 of "Size and order of work"
+(transactions and held creation). Steps 2 to 4 are not implemented.
 Updates §1.3 and §1.6 of `2026-07-02-DONE-zone-mutation-snapshot-correctness.md`
 ("the July design"), which stays as it is.
 
@@ -142,13 +143,16 @@ downstreams.
 
 A commit marker can be lost: a full queue, a writer that failed, a bug.
 
-- **A zone that has published before:** a hold older than the limit is
-  released with a WARN, and what is staged publishes through the gate. Its
-  previous content was valid, and so is each change added to it.
+- **A zone that has published before:** a transaction older than the limit is
+  released with a WARN, and when that ends the hold, what is staged publishes
+  through the gate. The zone's previous content was valid, and so is each
+  change added to it. The limit is each transaction's own, counted from its
+  start; a late commit for a released transaction finds nothing to commit.
 - **A zone that has never published: fail closed.** Releasing the hold would
-  publish exactly the partial zone rule 4 forbids. The zone stays unpublished,
-  logs an ERROR, and carries the error in its status until a commit arrives.
-  Its creator is local start-up code; if that never commits, start-up failed.
+  publish exactly the partial zone rule 4 forbids. The transaction stays open,
+  the zone stays unpublished, logs an ERROR, and carries the error in its
+  status (`FirstPublishError`) until a commit arrives. Its creator is local
+  start-up code; if that never commits, start-up failed.
 
 The limit is a constant, 30 s. No knob until something needs one.
 
@@ -219,12 +223,14 @@ hot.
   rule above, and passes it once signing material exists. These passes are what
   runs when the missing thing arrives: a policy binding, the policy apply, the
   resigner.
-- **The creator commits again.** `TX-COMMIT` (or `CommitTx`) on a zone whose
-  first content is committed and unsigned is accepted and tries the publish
-  again; its `Resp` carries the outcome. A creator that wants a schedule has one
-  it controls.
+- **The creator commits again.** `TX-COMMIT` (or `CommitTx`) with the
+  creation's transaction, on a zone whose first content is committed and
+  unsigned, is accepted and tries the publish again; its `Resp` carries the
+  outcome. A creator that wants a schedule has one it controls. Once the zone
+  has published, that transaction is gone for good.
 
-**The refusal has its own error category, and it is not `DnssecError`.**
+**The refusal has its own error category, `FirstPublishError`, and it is not
+`DnssecError`.**
 `SignZone`, `ResignZone` and `RenewZoneSignatures` all refuse a zone that
 carries `DnssecError`, and only the policy and rollover validation clear it: a
 "not yet" that set it would switch its own retry off. The category gates
@@ -268,7 +274,10 @@ seven or so updates and commit fit; a queue that is full is the hold's-limit
 case. The commit's send blocks until accepted; the 5 s give-up the `ops_*`
 publishers use is wrong for it. (The buffer is the daemon's: a key store made
 by `NewKeyDB` alone has an unbuffered queue, so a test runs the engine or
-buffers the queue as the daemon does.)
+buffers the queue as the daemon does.) `TX-BEGIN` is refused on a zone that may
+not originate content: it has nothing of ours to group, and a hold would stop
+its refresh publishes. A `TX-COMMIT` is never refused on those grounds; a hold
+that got open must be closable.
 
 **The commit travels the way the changes did.** A writer that queued any of its
 changes queues its commit, or the commit overtakes them and publishes an empty
@@ -292,6 +301,8 @@ them through. No publisher installs a snapshot on a held zone.
   exits (no working set; a zone that is no longer live, which drops its working
   set held or not) and before the apex check and the serial bump. The serial,
   `lastPublish` and every `ws*` flag are as they were.
+  `InstallInitialSnapshot`, the one way to a snapshot that is not a publish of
+  a working set, refuses a held zone as well.
 - **"Wanted" is not `publishQueued`.** `runPublisher` republishes for as long
   as `publishQueued` is set and the cadence has run out, and a publish that a
   hold stopped would leave both true: a hot loop on `zd.mu`, the one
@@ -314,7 +325,9 @@ carries it, or by the refusal that drops it. This is the gate's entry, below,
 arrived at early, and that list of waiting commits is the seed of "Waiters"; in
 the first step it holds commits only. A commit that leaves other transactions
 open publishes nothing, and its `Resp` waits for the commit that closes the
-hold.
+hold. A hold that closes on a published zone with nothing staged publishes
+nothing and spends no serial; on a zone that has never published, the zone as
+it was created is its first content.
 
 **The gate's entry.** One call replaces the direct `publishLocked` in every
 writer. With no hold, on a zone that is idle or not Ready, it publishes **in

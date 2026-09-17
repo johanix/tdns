@@ -82,7 +82,6 @@ func sendTx(t *testing.T, kdb *KeyDB, ur UpdateRequest, wait bool) ZoneUpdateRes
 // commit are applied in the order sent, and the commit's Resp says the
 // transaction is published.
 func TestTheMarkersTravelTheUpdateQueue(t *testing.T) {
-	txTestGate(t)
 	const zone = "markers.tx.example."
 	zd, kdb := newPublishedAutoZone(t, zone)
 	startTxUpdater(t, kdb)
@@ -140,7 +139,6 @@ func TestTheMarkersTravelTheUpdateQueue(t *testing.T) {
 // The commit's Resp is kept on the zone and answered by the publish that
 // carries the transaction.
 func TestACommitsRespIsAnsweredByTheGatesPublish(t *testing.T) {
-	txTestGate(t)
 	const zone = "waiter.tx.example."
 	zd, kdb := newPublishedAutoZone(t, zone)
 	startTxUpdater(t, kdb)
@@ -231,7 +229,6 @@ func drainNotifies(q chan NotifyRequest) int {
 // staged before the keys existed, one the signing pass signed, and one staged
 // after it that no pass has seen.
 func TestTheFirstSnapshotOfASigningZoneIsSigned(t *testing.T) {
-	txTestGate(t)
 	const zone = "signed.tx.example."
 	notifies := withNotifyQ(t, 8)
 	zd, id, kdb := newHeldSigningZone(t, zone, txTestPolicy())
@@ -246,6 +243,29 @@ func TestTheFirstSnapshotOfASigningZoneIsSigned(t *testing.T) {
 	stageTxt(t, zd, "late."+zone, "after the signing pass")
 	if n := drainNotifies(notifies); n != 0 {
 		t.Fatalf("%d NOTIFY during the hold", n)
+	}
+
+	// What the outside sees of a held zone: SERVFAIL, which no resolver caches
+	// as a denial, and no transfer.
+	q := new(dns.Msg)
+	q.SetQuestion("early."+zone, dns.TypeTXT)
+	msgo, err := edns0.ExtractFlagsAndEDNS0Options(q)
+	if err != nil {
+		t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
+	}
+	qw := &fakeRW{remote: udpAddr("127.0.0.1")}
+	if err := zd.QueryResponder(context.Background(), qw, q, "early."+zone, dns.TypeTXT, msgo, kdb, nil); err != nil {
+		t.Fatalf("QueryResponder: %v", err)
+	}
+	if qw.written == nil || qw.written.Rcode != dns.RcodeServerFailure {
+		t.Errorf("a query into a held zone: %v, want SERVFAIL", qw.written)
+	}
+	x := new(dns.Msg)
+	x.SetAxfr(zone)
+	xw := &fakeRW{remote: udpAddr("127.0.0.1")}
+	if sent, _ := zd.ZoneTransferOut(context.Background(), xw, x, nil); sent != 0 ||
+		xw.written == nil || xw.written.Rcode != dns.RcodeRefused {
+		t.Errorf("a transfer of a held zone: %d RRs sent, response %v, want REFUSED", sent, xw.written)
 	}
 
 	if err := zd.CommitTx(id); err != nil {
@@ -283,7 +303,6 @@ func TestTheFirstSnapshotOfASigningZoneIsSigned(t *testing.T) {
 // first content that cannot be signed installs nothing, whichever publish would
 // have installed it, and is retried by the next signing pass.
 func TestAFirstContentThatCannotBeSignedInstallsNothing(t *testing.T) {
-	txTestGate(t)
 	const zone = "unsigned.tx.example."
 	notifies := withNotifyQ(t, 8)
 	zd, id, kdb := newHeldSigningZone(t, zone, nil) // no policy bound: "not yet"
@@ -361,7 +380,6 @@ func TestAFirstContentThatCannotBeSignedInstallsNothing(t *testing.T) {
 // its Resp carries the outcome. A creator that wants a schedule has one it
 // controls.
 func TestARepeatedCommitRetriesAnUnsignedFirstContent(t *testing.T) {
-	txTestGate(t)
 	const zone = "again.tx.example."
 	zd, id, kdb := newHeldSigningZone(t, zone, nil)
 	startTxUpdater(t, kdb)
@@ -392,8 +410,20 @@ func TestARepeatedCommitRetriesAnUnsignedFirstContent(t *testing.T) {
 	if snap == nil {
 		t.Fatal("the repeated commit installed nothing")
 	}
-	if unsigned, _ := unsignedRRsets(snap); len(unsigned) > 0 {
+	// Nobody called SignZone on this zone. The publish that installs the first
+	// snapshot put the whole zone in scope itself: keys, signatures, chain.
+	if !served(zd, zone, dns.TypeDNSKEY) {
+		t.Error("the first snapshot has no DNSKEY RRset")
+	}
+	unsigned, nsecs := unsignedRRsets(snap)
+	if len(unsigned) > 0 {
 		t.Errorf("unsigned RRsets in the first snapshot: %v", unsigned)
+	}
+	if nsecs == 0 {
+		t.Error("the first snapshot has no NSEC chain")
+	}
+	if !zd.Ready {
+		t.Error("the zone is not Ready")
 	}
 	if zd.HasError(FirstPublishError) {
 		t.Error("the error outlived the first publish")
@@ -421,7 +451,7 @@ type secondaryDouble struct {
 	mu        sync.Mutex
 	rcodes    []int           // every change of the SOA query's rcode, in order
 	transfers []transferred   // one per serial it could transfer
-	refused   int             // transfers that were refused
+	refused   int             // transfers of an announced serial that were refused
 	seen      map[uint32]bool // serials already transferred
 }
 
@@ -524,17 +554,23 @@ func (sd *secondaryDouble) poll() {
 			serial, have = soa.Serial, true
 		}
 	}
-	if r.Rcode == dns.RcodeSuccess && !have {
+	if r.Rcode != dns.RcodeSuccess || !have {
 		return
 	}
 	sd.mu.Lock()
-	seen := have && sd.seen[serial]
+	seen := sd.seen[serial]
 	sd.mu.Unlock()
 	if seen {
 		return
 	}
 
-	// A new serial, or no answer at all: try the transfer. A secondary does.
+	// A serial it has not seen: transfer it, as a secondary does. Only then,
+	// and not while the zone says SERVFAIL. The producer sets the zone's
+	// transfer ACL after the zone is registered, as the real one does, and the
+	// transfer path reads it without the zone's lock; a transfer attempted
+	// during the set-up would be a data race that is not this test's subject.
+	// That a transfer IS refused during the hold is pinned without concurrency
+	// by TestTheFirstSnapshotOfASigningZoneIsSigned.
 	req := new(dns.Msg)
 	req.SetAxfr(sd.zone)
 	ch, err := new(dns.Transfer).In(req, sd.addr)
@@ -663,7 +699,6 @@ func produceIdentityZone(t *testing.T, kdb *KeyDB, zone string) (*ZoneData, Zone
 // zone as SOA and NS first, an authoritative denial of everything the zone is
 // about to hold, and then a serial per record.
 func TestASecondarySeesOneSerialOfAnIdentityZone(t *testing.T) {
-	txTestGate(t)
 	const zone = "identity.tx.example."
 	notifies := withNotifyQ(t, 32)
 	kdb := newTestKeyDB(t)
@@ -708,10 +743,6 @@ func TestASecondarySeesOneSerialOfAnIdentityZone(t *testing.T) {
 	if !sawServfail {
 		t.Error("the secondary never saw SERVFAIL: the zone was answerable before its first content was complete")
 	}
-	if refused == 0 {
-		t.Error("no transfer was refused during the hold")
-	}
-
 	if len(transfers) != 1 {
 		t.Fatalf("the secondary transferred %d serials, want one", len(transfers))
 	}

@@ -291,6 +291,9 @@ type ZoneData struct {
 	publishCadence time.Duration
 	publishQueued  bool
 	publishUrgent  bool
+	// tx is the zone's transactions: the publish hold, and what a zone created
+	// held remembers about its first content. See zone_tx.go. Guarded by mu.
+	tx zoneTxState
 	// ixfrDerived marks a transfer scratch zone whose contents were produced by
 	// applying an inbound difference sequence to the copy we already served,
 	// rather than by receiving a whole zone. Set on the scratch zone by the

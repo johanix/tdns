@@ -644,6 +644,45 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 						"zone", pv.childZone, "keyid", pv.keyid)
 					kdb.TriggerChildKeyVerification(ctx, pv.childZone, pv.parentZone, pv.keyid, pv.keyRR)
 				}
+			case UpdateCmdTxBegin:
+				// {start tx <zone> <id> <flags>}: a publish hold on the zone
+				// (zone_tx.go). This queue is one ordered channel with one
+				// consumer, so a writer's begin, changes and commit are applied
+				// in the order it sent them.
+				//
+				// A zone that may not originate content has nothing of ours to
+				// group, and a hold would stop its refresh publishes. A commit,
+				// below, is never refused on those grounds: a hold that got
+				// open must be closable.
+				if !zoneMayOriginateContent(zd) {
+					lg.Warn("ZoneUpdater: refusing a transaction on a zone that may not originate content",
+						"zone", ur.ZoneName, "tx", string(ur.TxID))
+					ur.respond(false, fmt.Errorf("zone %s may not originate content", ur.ZoneName))
+					continue
+				}
+				zd.mu.Lock()
+				err := zd.beginTxLocked(ur.TxID, ur.TxFlags)
+				zd.mu.Unlock()
+				if err != nil {
+					lg.Error("ZoneUpdater: TX-BEGIN refused", "zone", ur.ZoneName, "error", err)
+				}
+				ur.respond(err == nil, err)
+
+			case UpdateCmdTxCommit:
+				// {commit tx <zone> <id>}. The Resp is NOT answered here unless
+				// the commit is refused: it is answered once the transaction is
+				// published, or with the reason it was not -- by the publish in
+				// the caller when the zone is not Ready or the hold was urgent,
+				// and otherwise by the gate's publish, in the publisher's
+				// goroutine, where this handler cannot see the outcome.
+				zd.mu.Lock()
+				err := zd.commitTxLocked(ur.TxID, ur.Resp)
+				zd.mu.Unlock()
+				if err != nil {
+					lg.Error("ZoneUpdater: TX-COMMIT refused", "zone", ur.ZoneName, "error", err)
+					ur.respond(false, err)
+				}
+
 			default:
 				lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)
 				// Including this one: a caller waiting on a command the
