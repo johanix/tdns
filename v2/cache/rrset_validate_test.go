@@ -6,6 +6,7 @@ package cache
 
 import (
 	"context"
+	"crypto"
 	"log"
 	"os"
 	"testing"
@@ -282,5 +283,62 @@ func TestValidateDNSKEYs_BackfillsMissingDS(t *testing.T) {
 	}
 	if !askedDS {
 		t.Fatalf("ValidateDNSKEYs did not fetch the missing DS for %s on a cache miss — DS-backfill regression", child)
+	}
+}
+
+// TestValidateDNSKEYs_SecureDSDenialIsInsecureCut is the regression for a
+// forwarding IMR that SERVFAILs a signed child whose parent has no DS.
+// The parent's NSEC denial of DS validates Secure; pre-fix ValidateDNSKEYs
+// treated that cache entry as a DS RRset, found no matching DS, and marked
+// the DNSKEYs Bogus (EDE 9). A Secure denial of DS is a proven insecure cut:
+// the zone is Insecure and is answered without AD.
+func TestValidateDNSKEYs_SecureDSDenialIsInsecureCut(t *testing.T) {
+	rrcache, k := secCache(t)
+	seedDSDenial(t, rrcache, secKid,
+		k.sign(t, soaFor(t, secZone)),
+		k.sign(t, rrFrom(t, secKid+" 300 IN NSEC "+secWWW+" NS RRSIG NSEC")),
+	)
+
+	ksk := &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: secKid, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
+		Flags:     257,
+		Protocol:  3,
+		Algorithm: dns.ED25519,
+	}
+	priv, err := ksk.Generate(256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := &dns.RRSIG{
+		Hdr:         dns.RR_Header{Name: secKid, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 300},
+		TypeCovered: dns.TypeDNSKEY,
+		Algorithm:   dns.ED25519,
+		Labels:      uint8(dns.CountLabel(secKid)),
+		OrigTtl:     300,
+		Inception:   uint32(time.Now().Add(-time.Hour).Unix()),
+		Expiration:  uint32(time.Now().Add(time.Hour).Unix()),
+		KeyTag:      ksk.KeyTag(),
+		SignerName:  secKid,
+	}
+	if err := sig.Sign(priv.(crypto.Signer), []dns.RR{ksk}); err != nil {
+		t.Fatal(err)
+	}
+	dnskeyRRset := &core.RRset{
+		Name:   secKid,
+		Class:  dns.ClassINET,
+		RRtype: dns.TypeDNSKEY,
+		RRs:    []dns.RR{ksk},
+		RRSIGs: []dns.RR{sig},
+	}
+
+	got, err := rrcache.ValidateDNSKEYs(context.Background(), dnskeyRRset, nil)
+	if err != nil {
+		t.Fatalf("ValidateDNSKEYs: %v", err)
+	}
+	if got != ValidationStateInsecure {
+		t.Fatalf("got %s, want insecure: a secure denial of DS is a proven insecure cut, not EDE 9 bogus", ValidationStateToString[got])
+	}
+	if z, ok := rrcache.ZoneMap.Get(secKid); !ok || z.GetState() != ValidationStateInsecure {
+		t.Fatalf("zone %s is not in ZoneMap as insecure", secKid)
 	}
 }

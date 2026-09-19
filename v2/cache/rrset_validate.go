@@ -757,16 +757,27 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			}
 			return dsRRs.State, nil
 		}
+		// A Secure DS cache entry can still be a denial (NODATA/NXDOMAIN, or
+		// NSEC/NSEC3 records stored where a DS RRset was expected). That is a
+		// proven insecure cut: the parent's NSEC says there is no DS. Matching
+		// DNSKEYs against it produces EDE 9 Bogus / SERVFAIL, which is wrong —
+		// the zone is Insecure and is answered without AD.
+		if dsRRs != nil && dsRRs.State == ValidationStateSecure && rrcache.dsCacheIsInsecureCut(ctx, name, dsRRs, fetcher) {
+			rrcache.markZoneInsecure(name)
+			if rrcache.Verbose {
+				log.Printf("ValidateDNSKEYs: DS for %q is a proven insecure cut; returning insecure", name)
+			}
+			return ValidationStateInsecure, nil
+		}
 	}
 
-	// If DS exists and is secure, use it directly (fast path)
-	if dsRRs != nil && dsRRs.RRset != nil && len(dsRRs.RRset.RRs) > 0 && dsRRs.State == ValidationStateSecure {
+	// If DS exists and is secure, use it directly (fast path).
+	// Only actual DS records count: a Secure denial's SOA/NSEC RRs must not
+	// be treated as a DS RRset (that path used to fall through to EDE 9).
+	dsRecs := actualDSRecords(dsRRs)
+	if dsRRs != nil && len(dsRecs) > 0 && dsRRs.State == ValidationStateSecure {
 		// Use DS-based validation (common case)
-		for _, rr := range dsRRs.RRset.RRs {
-			ds, ok := rr.(*dns.DS)
-			if !ok {
-				continue
-			}
+		for _, ds := range dsRecs {
 			valid, _ := ValidateDNSKEYRRsetUsingDS(rrset, ds, name, rrcache.Verbose)
 			if !valid {
 				continue
@@ -818,9 +829,10 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			taKeys = append(taKeys, &item.Val)
 		}
 	}
-	// Check for seeded DS RRset (indicates DS-based TA initialization)
+	// Check for seeded DS RRset (indicates DS-based TA initialization).
+	// A Secure denial of DS is not a seeded DS; actualDSRecords keeps it out.
 	if dsRRs == nil || dsRRs.State != ValidationStateSecure {
-		if seededDS := rrcache.Get(name, dns.TypeDS); seededDS != nil && seededDS.State == ValidationStateSecure {
+		if seededDS := rrcache.Get(name, dns.TypeDS); seededDS != nil && seededDS.State == ValidationStateSecure && len(actualDSRecords(seededDS)) > 0 {
 			seededDSs = append(seededDSs, seededDS)
 		}
 	}
@@ -941,6 +953,41 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		}
 	}
 	return ValidationStateIndeterminate, nil
+}
+
+// actualDSRecords returns the DS records in a cached DS entry. SOA/NSEC/NSEC3
+// that ride along on a denial must not be treated as a DS RRset.
+func actualDSRecords(crr *CachedRRset) []*dns.DS {
+	if crr == nil || crr.RRset == nil {
+		return nil
+	}
+	var out []*dns.DS
+	for _, rr := range crr.RRset.RRs {
+		if ds, ok := rr.(*dns.DS); ok {
+			out = append(out, ds)
+		}
+	}
+	return out
+}
+
+// dsCacheIsInsecureCut reports whether a cached DS entry is a validated proof
+// that name is a delegation with no DS (RFC 4035 §5.2), not a DS RRset.
+func (rrcache *RRsetCacheT) dsCacheIsInsecureCut(ctx context.Context, name string, dsRRs *CachedRRset, fetcher RRsetFetcher) bool {
+	if dsRRs == nil {
+		return false
+	}
+	switch dsRRs.Context {
+	case ContextNoErrNoAns, ContextNXDOMAIN:
+		return rrcache.denialEvidence(ctx, name, dsRRs, fetcher) == evidenceInsecureCut
+	}
+	if len(actualDSRecords(dsRRs)) > 0 {
+		return false
+	}
+	sets := dsRRs.NegAuthority
+	if len(sets) == 0 && dsRRs.RRset != nil {
+		sets = []*core.RRset{dsRRs.RRset}
+	}
+	return rrcache.cutProof(ctx, name, sets, fetcher) == evidenceInsecureCut
 }
 
 // backfillDS fetches and validates the DS RRset for `name` when it is not
