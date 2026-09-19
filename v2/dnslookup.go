@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	edns0 "github.com/johanix/tdns/v2/edns0"
@@ -827,7 +828,7 @@ func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[stri
 	if len(tuples) == 0 && len(suspectTuples) == 0 {
 		lgDns.Warn("prioritizeServers: no usable (server, addr, transport) tuples; the query cannot be sent",
 			"qname", qname, "zone", zoneName, "servers", len(serverMap),
-			"privacy", privacy.String(), "why", explainNoTuples(serverMap, zone, qname, privacy))
+			"privacy", privacy.String(), "why", explainNoTuples(serverMap, zone, imr.FamilyTracker, qname, privacy))
 	}
 
 	sortTuplesByRankThenRTT(tuples)
@@ -881,7 +882,7 @@ func sortTuplesByRankThenRTT(tuples []ServerAddrXportTuple) {
 // the map and named in the logs, but yields nothing -- which until now looked
 // identical to having no server at all.
 func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
-	qname string, privacy edns0.PrivacyLevel) string {
+	ft *cache.FamilyTracker, qname string, privacy edns0.PrivacyLevel) string {
 
 	if len(serverMap) == 0 {
 		return "no servers in the map for this zone"
@@ -902,7 +903,11 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 			reasons = append(reasons, fmt.Sprintf("%s: no addresses", nsname))
 			continue
 		}
-		var serverBackoff, zoneBackoff int
+		// Each tuple is counted under the first reason prioritizeServers would
+		// skip it for, so the counts add up. The family count used to be
+		// missing: "2 addr(s), 1 in server backoff" read as a contradiction when
+		// the other address was on a family the tracker held suspect (#703).
+		var serverBackoff, zoneBackoff, familySuspect int
 		for _, addr := range addrs {
 			for _, t := range candidateTransports(server, qname, privacy) {
 				if !server.IsAddrXportAvailable(addr, t) {
@@ -911,11 +916,15 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 				}
 				if zone != nil && !zone.IsZoneAddrXportAvailable(addr, t) {
 					zoneBackoff++
+					continue
+				}
+				if ft.IsSuspect(cache.FamilyOf(addr)) {
+					familySuspect++
 				}
 			}
 		}
-		reasons = append(reasons, fmt.Sprintf("%s: %d addr(s), %d in server backoff, %d in zone backoff",
-			nsname, len(addrs), serverBackoff, zoneBackoff))
+		reasons = append(reasons, fmt.Sprintf("%s: %d addr(s), %d in server backoff, %d in zone backoff, %d on a suspect address family",
+			nsname, len(addrs), serverBackoff, zoneBackoff, familySuspect))
 	}
 	sort.Strings(reasons)
 	return strings.Join(reasons, "; ")
@@ -2250,7 +2259,13 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	if cerr := ctx.Err(); cerr != nil && err != nil {
 		return nil, rtt, eff, err
 	}
-	imr.FamilyTracker.RecordResult(addr, err == nil && r != nil)
+	// A refused connection is an answer from the host: the path to it works,
+	// whatever the server does. Counted as a family failure, a few servers
+	// restarting at once (in different zones, on a family with little other
+	// traffic) marked the whole family suspect, and every zone whose servers
+	// were left with only addresses in it answered SERVFAIL until the suspect
+	// window ran out (#703).
+	imr.FamilyTracker.RecordResult(addr, (err == nil && r != nil) || isConnRefused(err))
 	if err != nil {
 		lgDns.Error("*** tryServer: query returned error",
 			"qname", qname,
@@ -3705,4 +3720,17 @@ func (imr *Imr) IterativeDNSQueryFetcher() cache.RRsetFetcher {
 		rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, servers, false, edns0.PrivacyNone) // privacy is a client signal; RRsetFetcher is our own traffic
 		return rrset, err
 	}
+}
+
+// isConnRefused reports whether err is a refused connection: TCP RST, or ICMP
+// port unreachable read back on a UDP socket. Either way the host itself
+// answered, so the network path to it is fine.
+func isConnRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	return strings.Contains(err.Error(), "connection refused")
 }
