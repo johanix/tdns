@@ -89,6 +89,13 @@ type RRsetCacheT struct {
 	// not held to a delegation proof from the public tree, which does not speak
 	// for it (unsignedRRsetState). Nil when there are none.
 	ConfiguredZone func(name string) bool
+	// KeepServerMap reports whether a zone's server map must outlive its NS
+	// RRset. Get normally drops the map when the NS RRset expires; a zone for
+	// which this says true keeps it. The resolver uses it for a forwarded
+	// root, where the root server map is only the fallback that lets a lookup
+	// reach the forward, and losing it fails every lookup whose closest cached
+	// cut is the root (#722). Nil when nothing is kept.
+	KeepServerMap func(zone string) bool
 	//Options                map[ImrOption]string
 	Primed               bool
 	Logger               *log.Logger

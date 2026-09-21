@@ -1630,3 +1630,32 @@ func TestForwardRepeatedSliceTimeoutsMarkTheUpstreamFailing(t *testing.T) {
 			failing, timeouts)
 	}
 }
+
+// A forwarded name is forwarded even when no root server map is cached
+// (#722). ImrQuery used to look for the closest cached cut first and, finding
+// no servers there, resolve that cut's nameservers -- which needs the cut's NS
+// RRset. With the root NS expired that failed with `no nameservers for zone
+// ""` before the forward was ever consulted.
+func TestImrQueryForwardsWithoutARootServerMap(t *testing.T) {
+	addr, port, logr, stop := startTestUpstream(t)
+	defer stop()
+
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
+	})
+	// Deliberately not primed: no root NS, no root server map.
+	if _, servers, _ := imr.Cache.FindClosestKnownZone("www.fwd.example."); len(servers) != 0 {
+		t.Fatalf("test setup: expected no cached servers, have %d", len(servers))
+	}
+
+	resp, err := imr.ImrQuery(context.Background(), "www.fwd.example.", dns.TypeA, dns.ClassINET, nil)
+	if err != nil {
+		t.Fatalf("ImrQuery: %v", err)
+	}
+	if resp.RRset == nil || len(resp.RRset.RRs) != 1 {
+		t.Fatalf("no answer: %+v", resp)
+	}
+	if seen := logr.find("www.fwd.example.", dns.TypeA); len(seen) == 0 {
+		t.Error("the upstream never saw the query")
+	}
+}

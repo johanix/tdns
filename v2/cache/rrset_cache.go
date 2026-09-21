@@ -135,8 +135,9 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 		if rrcache.Debug {
 			log.Printf("RRsetCache: Removed expired key %s (%s)", lookupKey, dns.TypeToString[qtype])
 		}
-		// If an NS RRset expired, also remove its server mappings for that zone
-		if qtype == dns.TypeNS {
+		// If an NS RRset expired, also remove its server mappings for that
+		// zone -- unless the zone's map is one that must outlive it.
+		if qtype == dns.TypeNS && (rrcache.KeepServerMap == nil || !rrcache.KeepServerMap(qname)) {
 			rrcache.ServerMap.Remove(qname)
 			if rrcache.Debug {
 				log.Printf("RRsetCache: Removed ServerMap entry for zone %s due to NS expiry", qname)

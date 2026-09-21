@@ -53,45 +53,23 @@ const (
 // not quietly become the source of truth. Hints stay what they are -- the
 // cold-start mechanism -- and are used here only if the root is already gone,
 // which is the state this function exists to prevent.
+//
+// A FORWARDED root is the exception (#722). With `zone: .` forwarded, every
+// ". NS" query goes to the upstream resolver, which answers from its own cache
+// with a TTL that counts down. Refreshing through it can never move the expiry
+// further than the upstream's copy lasts: inside the lead window each answer
+// moved it by the query's round trip, which passed for success, and the loop
+// spun at query rate until the upstream reached TTL 0 -- then slept the retry
+// interval with no root NS at all. A forwarded root needs no live root NS in
+// the first place: it only has to keep the root server map non-empty, so that
+// a lookup can reach the forward. The hints do that, offline.
 func (imr *Imr) RefreshRoot(ctx context.Context, hintsfile string) {
 	if imr == nil || imr.Cache == nil {
 		return
 	}
 
 	for {
-		var wait time.Duration
-
-		switch crrset := imr.Cache.Get(".", dns.TypeNS); {
-		case crrset == nil:
-			// Already gone. Nothing can be fetched without a root server
-			// address, so this is the one case that needs the hints -- and
-			// reaching it at all means a refresh was missed.
-			lgImr.Warn("RefreshRoot: the root NS RRset is gone; re-priming from hints",
-				"hintsfile", hintsfile)
-			if err := imr.Cache.PrimeFromHintsOnly(hintsfile); err != nil {
-				lgImr.Error("RefreshRoot: re-priming from hints failed", "err", err)
-				wait = rootRefreshRetry
-			} else {
-				imr.PrimedVia = "hints (re-primed after expiry)"
-				imr.PrimedAt = time.Now()
-				lgImr.Info("RefreshRoot: re-primed from hints; the next refresh" +
-					" will upgrade to the live roots")
-				wait = 0
-			}
-
-		case time.Until(crrset.Expiration) > rootRefreshLead:
-			// Healthy, and not due yet. Sleep until the lead window opens.
-			wait = time.Until(crrset.Expiration) - rootRefreshLead
-
-		default:
-			// Inside the lead window: refresh from the roots we still have.
-			if imr.refreshRootFromLiveRoots(ctx, imr.rootNSQuery) {
-				wait = 0 // re-read the new expiry on the next pass
-			} else {
-				wait = rootRefreshRetry
-			}
-		}
-
+		wait := imr.rootRefreshPass(ctx, hintsfile, imr.rootNSQuery)
 		if wait <= 0 {
 			wait = time.Millisecond // yield, then re-evaluate
 		}
@@ -102,6 +80,85 @@ func (imr *Imr) RefreshRoot(ctx context.Context, hintsfile string) {
 		case <-time.After(wait):
 		}
 	}
+}
+
+// rootRefreshPass is one turn of RefreshRoot: it acts on the root NS as the
+// cache holds it now, and returns how long to wait before the next turn.
+// query is a parameter for the same reason as in refreshRootFromLiveRoots.
+func (imr *Imr) rootRefreshPass(ctx context.Context, hintsfile string,
+	query func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error)) time.Duration {
+
+	// Asked every turn, not once: a config reload can add or remove the
+	// forward for the root while this loop runs.
+	forwarded := imr.forwardZoneFor(".") != nil
+
+	switch crrset := imr.Cache.Get(".", dns.TypeNS); {
+	case crrset == nil:
+		// Already gone. Nothing can be fetched without a root server
+		// address, so this is the one case that needs the hints -- and
+		// reaching it at all means a refresh was missed.
+		lgImr.Warn("RefreshRoot: the root NS RRset is gone; re-priming from hints",
+			"hintsfile", hintsfile)
+		if err := imr.Cache.PrimeFromHintsOnly(hintsfile); err != nil {
+			lgImr.Error("RefreshRoot: re-priming from hints failed", "err", err)
+			return rootRefreshRetry
+		}
+		imr.PrimedVia = "hints (re-primed after expiry)"
+		imr.PrimedAt = time.Now()
+		if forwarded {
+			lgImr.Info("RefreshRoot: re-primed from hints (root forwarded)")
+		} else {
+			lgImr.Info("RefreshRoot: re-primed from hints; the next refresh" +
+				" will upgrade to the live roots")
+		}
+		return 0
+
+	case time.Until(crrset.Expiration) > rootRefreshLead:
+		// Healthy, and not due yet. Sleep until the lead window opens.
+		return time.Until(crrset.Expiration) - rootRefreshLead
+
+	case forwarded:
+		// Inside the lead window, root forwarded: re-seed from the hints.
+		// The copy being replaced may be the upstream's, cached by a lookup
+		// that asked for ". NS"; its short remaining TTL is what put it here.
+		if err := imr.Cache.PrimeFromHintsOnly(hintsfile); err != nil {
+			lgImr.Error("RefreshRoot: re-seeding the forwarded root from hints failed", "err", err)
+			return rootRetryWait(crrset.Expiration)
+		}
+		imr.PrimedVia = "hints-only (root forwarded)"
+		imr.PrimedAt = time.Now()
+		lgImr.Debug("RefreshRoot: root forwarded; re-seeded the root NS from hints")
+		return 0 // re-read the new expiry on the next pass
+
+	default:
+		// Inside the lead window: refresh from the roots we still have.
+		if imr.refreshRootFromLiveRoots(ctx, query) {
+			return 0 // re-read the new expiry on the next pass
+		}
+		return rootRetryWait(crrset.Expiration)
+	}
+}
+
+// rootRetryWait is how long to wait after a turn that did not renew the root
+// NS: the retry interval, but never past the RRset's expiry. Sleeping the full
+// interval through an expiry is what left a resolver with no root NS for the
+// rest of it (#722); waking at the expiry lets the next turn re-prime from the
+// hints at once.
+func rootRetryWait(expiration time.Time) time.Duration {
+	if left := time.Until(expiration); left < rootRefreshRetry {
+		return left
+	}
+	return rootRefreshRetry
+}
+
+// keepServerMap is the cache's KeepServerMap: the zones whose server map must
+// outlive their NS RRset. Only the root, and only while it is forwarded. The
+// map is then the last-resort fallback that callers turn to when no closer cut
+// is cached, and it is never used to send a query -- the forward outranks it --
+// so letting it lapse with the NS RRset gains nothing and fails every lookup
+// that falls back to it (#722).
+func (imr *Imr) keepServerMap(zone string) bool {
+	return zone == "." && imr.forwardZoneFor(".") != nil
 }
 
 // rootNSQuery issues the actual ". NS" query for a refresh.
@@ -170,6 +227,16 @@ func (imr *Imr) refreshRootFromLiveRoots(ctx context.Context,
 	if before != nil && !after.Expiration.After(before.Expiration) {
 		lgImr.Warn("RefreshRoot: the root NS was re-fetched but its expiry did not move",
 			"expiration", after.Expiration)
+		return false
+	}
+	// Nor has one whose expiry moved but still lies inside the lead window:
+	// the next turn would refresh again at once. An answer with a counting-
+	// down TTL -- from a cache rather than a root -- does exactly that, and
+	// "moved by the round trip" passed for success, one query after another,
+	// until the RRset expired (#722).
+	if time.Until(after.Expiration) <= rootRefreshLead {
+		lgImr.Warn("RefreshRoot: the re-fetched root NS expires within the refresh lead;"+
+			" not counted as a refresh", "expiration", after.Expiration, "lead", rootRefreshLead)
 		return false
 	}
 

@@ -237,3 +237,145 @@ func TestRootNSQueryIsNotSatisfiedFromCache(t *testing.T) {
 			" would read back the entry it is trying to replace")
 	}
 }
+
+// rootNSAnswer returns a query double that stores a root NS RRset with the
+// given TTL, as a force=true query does, and hands it back.
+func rootNSAnswer(c *cache.RRsetCacheT, ttl uint32) func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error) {
+	return func(ctx context.Context, servers map[string]*cache.AuthServer) (*core.RRset, error) {
+		rr := &dns.NS{
+			Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: ttl},
+			Ns:  "a.root.",
+		}
+		set := &core.RRset{Name: ".", RRtype: dns.TypeNS, RRs: []dns.RR{rr}}
+		c.Set(".", dns.TypeNS, &cache.CachedRRset{Name: ".", RRtype: dns.TypeNS, RRset: set})
+		return set, nil
+	}
+}
+
+// An answer whose expiry moved, but not out of the lead window, is not a
+// refresh (#722). A cache -- a forward's upstream -- answers ". NS" with a TTL
+// that counts down: every answer moves the expiry by the round trip and no
+// further. Counted as success, the next turn refreshed again at once, and the
+// loop spun at query rate until the RRset expired.
+func TestRefreshWithinTheLeadIsNotARefresh(t *testing.T) {
+	c := rootNSCache(t, 20)
+	seedRootServers(t, c)
+	imr := &Imr{Cache: c}
+
+	if imr.refreshRootFromLiveRoots(context.Background(), rootNSAnswer(c, 30)) {
+		t.Error("a refreshed root NS that expires inside the lead window was" +
+			" counted as a refresh; the loop would query again at once")
+	}
+}
+
+// After a turn that did not renew the root NS, the loop waits the retry
+// interval but never past the expiry (#722): sleeping a full interval through
+// it left the resolver with no root NS until the interval ran out.
+func TestRootRetryWaitStopsAtTheExpiry(t *testing.T) {
+	if w := rootRetryWait(time.Now().Add(10 * time.Minute)); w != rootRefreshRetry {
+		t.Errorf("far from expiry: wait %s, want the retry interval %s", w, rootRefreshRetry)
+	}
+	if w := rootRetryWait(time.Now().Add(5 * time.Second)); w <= 0 || w > 5*time.Second {
+		t.Errorf("5s from expiry: wait %s, want no more than 5s", w)
+	}
+	if w := rootRetryWait(time.Now().Add(-time.Second)); w > 0 {
+		t.Errorf("already expired: wait %s, want none", w)
+	}
+
+	// Through a whole turn: a refresh that fails 5s before expiry.
+	c := rootNSCache(t, 5)
+	seedRootServers(t, c)
+	imr := &Imr{Cache: c}
+	failing := func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error) {
+		return nil, context.DeadlineExceeded
+	}
+	if w := imr.rootRefreshPass(context.Background(), "", failing); w > 5*time.Second {
+		t.Errorf("a failed refresh 5s before expiry waits %s; the root NS"+
+			" lapses for the difference", w)
+	}
+}
+
+// A forwarded root is re-seeded from the hints, never refreshed through the
+// forward (#722): the upstream can only hand back its own counting-down copy.
+func TestForwardedRootIsReseededFromHintsNotQueried(t *testing.T) {
+	imr := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.53", Port: 53}}},
+	})
+	imr.Cache.Logger = log.New(io.Discard, "", 0)
+	// The upstream's copy, 20s from expiry: what a lookup asking for ". NS"
+	// leaves in the cache of a forwarding resolver.
+	rr := &dns.NS{
+		Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 20},
+		Ns:  "a.root.",
+	}
+	imr.Cache.Set(".", dns.TypeNS, &cache.CachedRRset{Name: ".", RRtype: dns.TypeNS,
+		Context: cache.ContextAnswer,
+		RRset:   &core.RRset{Name: ".", RRtype: dns.TypeNS, RRs: []dns.RR{rr}}})
+
+	query := func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error) {
+		t.Error("a forwarded root was refreshed through the forward")
+		return nil, nil
+	}
+	if w := imr.rootRefreshPass(context.Background(), "", query); w > 0 {
+		t.Errorf("wait %s after re-seeding; want an immediate re-read", w)
+	}
+
+	crr := imr.Cache.Get(".", dns.TypeNS)
+	if crr == nil {
+		t.Fatal("no root NS after re-seeding")
+	}
+	if crr.Context != cache.ContextHint {
+		t.Errorf("root NS context %s, want the hints'", cache.CacheContextToString[crr.Context])
+	}
+	if left := time.Until(crr.Expiration); left <= rootRefreshLead {
+		t.Errorf("re-seeded root NS expires in %s, inside the lead window", left)
+	}
+	if _, servers, _ := imr.Cache.FindClosestKnownZone("www.example."); len(servers) == 0 {
+		t.Error("no root server map after re-seeding")
+	}
+}
+
+// A forwarded root keeps its server map when the root NS expires; an iterating
+// root does not (#722). The map is the fallback callers use when no closer cut
+// is cached, and with the root forwarded it only has to be there: losing it
+// with the NS RRset failed every such lookup with "no nameservers for zone".
+func TestForwardedRootServerMapOutlivesItsNS(t *testing.T) {
+	expireRootNS := func(c *cache.RRsetCacheT) {
+		rr := &dns.NS{
+			Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 0},
+			Ns:  "a.root.",
+		}
+		c.Set(".", dns.TypeNS, &cache.CachedRRset{Name: ".", RRtype: dns.TypeNS,
+			RRset: &core.RRset{Name: ".", RRtype: dns.TypeNS, RRs: []dns.RR{rr}}})
+		if c.Get(".", dns.TypeNS) != nil {
+			t.Fatal("a TTL-0 root NS read as live")
+		}
+	}
+
+	t.Run("forwarded: kept", func(t *testing.T) {
+		imr := newForwardTestImr(t, []ImrForwardConf{
+			{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.53", Port: 53}}},
+		})
+		imr.Cache.KeepServerMap = imr.keepServerMap
+		if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
+			t.Fatalf("PrimeFromHintsOnly: %v", err)
+		}
+		expireRootNS(imr.Cache)
+		if best, servers, _ := imr.Cache.FindClosestKnownZone("www.example."); best != "." || len(servers) == 0 {
+			t.Errorf("root server map gone with the NS RRset: best=%q servers=%d", best, len(servers))
+		}
+	})
+
+	t.Run("iterating: dropped", func(t *testing.T) {
+		imr := newForwardTestImr(t, nil)
+		imr.Cache.KeepServerMap = imr.keepServerMap
+		if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
+			t.Fatalf("PrimeFromHintsOnly: %v", err)
+		}
+		expireRootNS(imr.Cache)
+		if _, servers, _ := imr.Cache.FindClosestKnownZone("www.example."); len(servers) != 0 {
+			t.Errorf("an iterating root kept %d servers past its NS RRset; they"+
+				" could be stale", len(servers))
+		}
+	})
+}

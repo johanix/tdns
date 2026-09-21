@@ -238,6 +238,7 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		dnskeyTransport: conf.Internal.DNSKEYTransport,
 	}
 	rrcache.ConfiguredZone = imr.configuredZone
+	rrcache.KeepServerMap = imr.keepServerMap
 
 	if conf.Imr.Logging.Enabled {
 		imr.DebugLog = imrDebugLogger(conf.Imr.Logging.File)
@@ -709,7 +710,11 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		// ss := servers
 
 		switch {
-		case len(authservers) == 0:
+		case len(authservers) == 0 && imr.forwardZoneFor(qname) == nil:
+			// A forwarded name needs no servers from the cut: IterativeDNSQuery
+			// below hands it to the forward. Resolving the cut's nameservers
+			// instead fails whenever the cut's NS RRset has expired, which for
+			// a forwarded root is the root NS (#722).
 			// Use helper function to resolve NS addresses
 			done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
 				rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
@@ -1122,7 +1127,9 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			lgImr.Debug("ImrResponder: best zone match", "qname", qname, "bestmatch", bestmatch)
 
 			switch {
-			case len(authservers) == 0:
+			case len(authservers) == 0 && imr.forwardZoneFor(qname) == nil:
+				// Forwarded names skip this, as in imrQuery: the direct path
+				// below forwards them without the cut's nameservers (#722).
 				// Use helper function to resolve NS addresses
 				// Note: The callback is called after processing each A/AAAA response.
 				// We try the query for each address we discover, similar to the original code.
