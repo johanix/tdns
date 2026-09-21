@@ -211,6 +211,10 @@ type ZoneData struct {
 	// at the apex. Cleared when the KEY leaves the apex so a later
 	// WAITING→READY transition runs the ceremony again.
 	proxySig0ParentBootstrapped bool
+	// proxyLastSyncOK is when a parentsync-proxy sync last succeeded. A retry
+	// of a sync that failed before it is dropped (proxyRetrySuperseded).
+	// Guarded by mu.
+	proxyLastSyncOK time.Time
 	// parentFirstMu serialises the updates to a zone that syncs its own
 	// delegation (lockDelegationChanges, delegation_parent_first.go). Between
 	// computing a removal's transaction for the parent and applying it here,
@@ -1186,8 +1190,12 @@ type DelegationSyncRequest struct {
 	Response     chan DelegationSyncStatus // used for API-based requests
 	// Attempt counts re-enqueues of a DELEGATION-SYNC-SETUP whose SIG(0)
 	// bootstrap was deferred because the parent's SVCB advertisement could not
-	// be looked up (errBootstrapAdvertisementLookup). Zero on the first try.
+	// be looked up (errBootstrapAdvertisementLookup), and re-runs of a
+	// PROXY-SYNC that failed (nextProxySyncRetry). Zero on the first try.
 	Attempt int
+	// FailedAt is when the PROXY-SYNC this request retries failed. Zero on the
+	// first try.
+	FailedAt time.Time
 	// ReBootstrapRound counts re-enqueues of a DELEGATION-SYNC-SETUP after the
 	// parent reported the key's validation failed (errBootstrapValidationFailed),
 	// up to childReBootstrapRounds. Zero on the first try.

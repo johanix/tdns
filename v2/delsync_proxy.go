@@ -194,9 +194,12 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 
 	// Non-blocking enqueue: this runs on the refresh path, which has no ctx to
 	// select on, so we must not block on a backed-up queue (e.g. during
-	// shutdown). Dropping is safe — the proxy is idempotent: the next transfer
-	// re-detects the still-unforwarded change and re-enqueues. The handler picks
-	// UPDATE vs NOTIFY off the refresh path (scheme discovery is network).
+	// shutdown). Dropping loses this trigger, not the change -- but only
+	// because the next proxy sync, whatever triggers it, declares the whole
+	// delegation and also takes withdrawals from the parent (proxyParentOnlyNS).
+	// The next transfer does NOT re-detect it: it is compared with a copy that
+	// already has the change (#722). The handler picks UPDATE vs NOTIFY off the
+	// refresh path (scheme discovery is network).
 	select {
 	case delsyncq <- DelegationSyncRequest{
 		Command:       "PROXY-SYNC",

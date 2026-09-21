@@ -244,7 +244,7 @@ func proxyWithdrawal(t *testing.T) (*ZoneData, *ProxyDelegationAnalysis) {
 func TestProxyApiWithdrawalReachesTheParent(t *testing.T) {
 	zd, analysis := proxyWithdrawal(t)
 
-	sets := zd.proxyApiRRsets(analysis)
+	sets := zd.proxyApiRRsets(analysis, nil)
 	if !withdrawalDeletes(sets, "ns3.child.test.", "A") {
 		t.Errorf("payload does not delete ns3's A glue: %s", dsyncApiRRsetsForLog(sets))
 	}
@@ -253,7 +253,7 @@ func TestProxyApiWithdrawalReachesTheParent(t *testing.T) {
 	}
 
 	// Without the analysis, the served zone alone cannot say it.
-	if withdrawalDeletes(zd.proxyApiRRsets(nil), "ns3.child.test.", "A") {
+	if withdrawalDeletes(zd.proxyApiRRsets(nil, nil), "ns3.child.test.", "A") {
 		t.Error("a payload with no removals named a glue delete; the served zone has no trace of ns3")
 	}
 }
@@ -263,7 +263,7 @@ func TestProxyApiWithdrawalReachesTheParent(t *testing.T) {
 func TestProxyReplaceUpdateWithdrawalReachesTheParent(t *testing.T) {
 	zd, analysis := proxyWithdrawal(t)
 
-	dss := zd.proxyReplaceSyncState(analysis)
+	dss := zd.proxyReplaceSyncState(analysis, nil)
 	m, err := buildDelegationUpdate("test.", withdrawalChild, dss, UpdateModeReplace)
 	if err != nil {
 		t.Fatalf("buildDelegationUpdate: %v", err)
@@ -366,5 +366,70 @@ ns1.child.test.	3600	IN	A	192.0.2.11
 	}
 	if a, ok := dss.NewA[0].(*dns.A); !ok || a.A.String() != "192.0.2.1" {
 		t.Errorf("NewA = %v, want only 192.0.2.1", dss.NewA)
+	}
+}
+
+// A withdrawal whose sync failed still reaches the parent, through whatever
+// sync runs next (#722). That later sync is triggered by something else -- a
+// DNSKEY change, say -- so its own comparison says nothing about ns3; the
+// parent, which still serves the delegation from before the withdrawal, does.
+func TestProxyWithdrawalSurvivesAFailedSync(t *testing.T) {
+	zd, _ := proxyWithdrawal(t) // the triggering analysis is lost with the failed sync
+	parentNS, _, _, _ := testZone(t, withdrawalChild, withdrawalBefore).currentDelegationRRs()
+	childNS, _, _, _ := zd.currentDelegationRRs()
+	parentOnly := parentOnlyNS(withdrawalChild, childNS, parentNS)
+	if names := withdrawalNSNames(parentOnly); len(names) != 1 || !strings.EqualFold(names[0], "ns3.child.test.") {
+		t.Fatalf("parent-only NS = %v, want [ns3.child.test.]", names)
+	}
+
+	// The failure as it happened: the payload from the served zone alone
+	// leaves ns3's glue behind, and the parent refuses it.
+	if err := withdrawalApiVerdict(t, zd.proxyApiRRsets(nil, nil)); err == nil {
+		t.Fatal("test setup: the parent accepted a payload that leaves ns3's glue behind")
+	}
+
+	t.Run("API", func(t *testing.T) {
+		sets := zd.proxyApiRRsets(nil, parentOnly)
+		if !withdrawalDeletes(sets, "ns3.child.test.", "A") {
+			t.Errorf("payload does not delete ns3's A glue: %s", dsyncApiRRsetsForLog(sets))
+		}
+		if err := withdrawalApiVerdict(t, sets); err != nil {
+			t.Errorf("the parent refuses the withdrawal: %v\npayload: %s", err, dsyncApiRRsetsForLog(sets))
+		}
+	})
+
+	t.Run("replace UPDATE", func(t *testing.T) {
+		dss := zd.proxyReplaceSyncState(nil, parentOnly)
+		m, err := buildDelegationUpdate("test.", withdrawalChild, dss, UpdateModeReplace)
+		if err != nil {
+			t.Fatalf("buildDelegationUpdate: %v", err)
+		}
+		if err := withdrawalParentVerdict(t, m.Ns); err != nil {
+			t.Errorf("the parent refuses the withdrawal: %v\nupdate:\n%s", err, strings.Join(ZoneUpdateActionsSummary(m.Ns), "\n"))
+		}
+	})
+}
+
+// The parent's copy is compared as DNS data: case and TTL do not make a
+// nameserver the child still has look withdrawn.
+func TestParentOnlyNSIgnoresCaseAndTTL(t *testing.T) {
+	child := []dns.RR{
+		withdrawalRR(t, "child.test. 3600 IN NS ns1.child.test."),
+		withdrawalRR(t, "child.test. 3600 IN NS ns.other.test."),
+	}
+	parent := []dns.RR{
+		withdrawalRR(t, "CHILD.test. 86400 IN NS NS1.Child.Test."),
+		withdrawalRR(t, "child.test. 86400 IN NS ns.other.test."),
+		withdrawalRR(t, "child.test. 86400 IN NS ns2.child.test."),
+	}
+	got := withdrawalNSNames(parentOnlyNS(withdrawalChild, child, parent))
+	if len(got) != 1 || !strings.EqualFold(got[0], "ns2.child.test.") {
+		t.Errorf("parent-only NS = %v, want [ns2.child.test.]", got)
+	}
+
+	// A child with no NS at all is a failed read, not a withdrawal of every
+	// nameserver: nothing is reported, so no glue is deleted.
+	if got := parentOnlyNS(withdrawalChild, nil, parent); len(got) != 0 {
+		t.Errorf("an empty child NS set reported %d parent NS as withdrawn", len(got))
 	}
 }

@@ -104,23 +104,13 @@ func copyRRs(in []dns.RR) []dns.RR {
 	return out
 }
 
-func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error) {
-	var resp = DelegationSyncStatus{
-		ZoneName: zd.ZoneName,
-		Time:     time.Now(),
-	}
-
-	err := zd.FetchParentData(imr)
-	if err != nil {
-		return resp, err
-	}
-
-	resp.Parent = zd.GetParent()
-
+// parentNSRRset returns the zone's NS RRset as the parent serves it, and the
+// parent server that answered. The first parent server with a non-empty answer
+// wins. The caller has run FetchParentData.
+func (zd *ZoneData) parentNSRRset() ([]dns.RR, string, error) {
 	var p_nsrrs []dns.RR
 	var pserver string // outside loop to preserve for later re-use
-
-	// 1. Compare NS RRsets between parent and child
+	var err error
 	for _, pserver = range zd.ParentServers {
 		p_nsrrs, err = AuthQuery(zd.ZoneName, pserver, dns.TypeNS)
 		if err != nil {
@@ -137,7 +127,28 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 		break
 	}
 	if len(p_nsrrs) == 0 {
-		return resp, fmt.Errorf("no NS RRsets found for zone %s", zd.ZoneName)
+		return nil, pserver, fmt.Errorf("no NS RRsets found for zone %s", zd.ZoneName)
+	}
+	return p_nsrrs, pserver, nil
+}
+
+func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error) {
+	var resp = DelegationSyncStatus{
+		ZoneName: zd.ZoneName,
+		Time:     time.Now(),
+	}
+
+	err := zd.FetchParentData(imr)
+	if err != nil {
+		return resp, err
+	}
+
+	resp.Parent = zd.GetParent()
+
+	// 1. Compare NS RRsets between parent and child
+	p_nsrrs, pserver, err := zd.parentNSRRset()
+	if err != nil {
+		return resp, err
 	}
 
 	apex, err := zd.GetOwner(zd.ZoneName)

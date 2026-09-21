@@ -438,10 +438,11 @@ func (zd *ZoneData) currentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR
 // restated and ZSKs are not hashed.
 //
 // analysis is the comparison that triggered the sync; only the NS records it
-// saw leave are read from it (proxyRemovedNS). The served zone cannot say
-// that, and without it the replace form never deletes a withdrawn
-// nameserver's glue (#665). nil means nothing was removed.
-func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis) DelegationSyncStatus {
+// saw leave are read from it, together with parentOnly, the ones the parent
+// still serves (proxyRemovedNS). The served zone cannot say that, and without
+// it the replace form never deletes a withdrawn nameserver's glue (#665, #722).
+// nil for both means nothing was removed.
+func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis, parentOnly []dns.RR) DelegationSyncStatus {
 	newNS, newA, newAAAA, newDS := zd.currentDelegationRRs()
 	return DelegationSyncStatus{
 		ZoneName:   zd.ZoneName,
@@ -451,7 +452,7 @@ func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis) Del
 		NewAAAA:    newAAAA,
 		NewDS:      newDS,
 		NewDSKnown: !zd.hasDnskeyRRset() || len(newDS) > 0,
-		NsRemoves:  proxyRemovedNS(analysis),
+		NsRemoves:  proxyRemovedNS(analysis, parentOnly),
 	}
 }
 
@@ -562,7 +563,7 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
 			return "delta: parent already in sync; nothing sent", nil
 		}
 	} else {
-		dss = zd.proxyReplaceSyncState(analysis)
+		dss = zd.proxyReplaceSyncState(analysis, zd.proxyParentOnlyNS(imr))
 	}
 
 	if err := zd.proxyEnsureParentBootstrap(ctx); err != nil {
