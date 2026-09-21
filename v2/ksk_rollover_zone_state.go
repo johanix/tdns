@@ -764,7 +764,9 @@ func UnstickRollover(kdb *KeyDB, zone string) error {
 
 // SetManualRolloverRequest stamps manual_rollover_requested_at = now and
 // manual_rollover_earliest = earliest. Called by `rollover asap` after
-// ComputeEarliestRollover succeeds.
+// ComputeEarliestRollover succeeds. A repeat while a request is pending keeps
+// that request's requested_at: it is the same request, and both columns are
+// cleared when the roll fires or is cancelled.
 func SetManualRolloverRequest(kdb *KeyDB, zone string, requestedAt, earliest time.Time) error {
 	if zd, owned := zoneOwnedByName(zone); owned {
 		return ownedRefusal(zd, "asap")
@@ -773,7 +775,7 @@ func SetManualRolloverRequest(kdb *KeyDB, zone string, requestedAt, earliest tim
 		return err
 	}
 	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
-SET manual_rollover_requested_at = ?,
+SET manual_rollover_requested_at = COALESCE(manual_rollover_requested_at, ?),
     manual_rollover_earliest = ?
 WHERE zone = ?`,
 		requestedAt.UTC().Format(time.RFC3339),
