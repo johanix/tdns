@@ -999,6 +999,12 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			crrset = nil // Force query over encrypted transport
 		}
 	}
+	// qname is a CNAME and the whole chain is in the cache: answer from its
+	// links (serveChain). A chain that is not complete in the cache falls
+	// through to be resolved.
+	if crrset == nil && followsCNAME(qtype) && imr.serveChain(ctx, w, r, m, qname, qtype, msgoptions, edns0.PrivacyCached) {
+		return
+	}
 	// Optional fast return for indirect cache hits. By default
 	// ImrResponder falls through to a full iterative query for
 	// Referral/Glue/Hint entries (to get DNSSEC signatures). With
@@ -1215,6 +1221,13 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 // all errors are treated as "done"
 func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype uint16, rrset *core.RRset, rcode int, context cache.CacheContext, msgoptions *edns0.MsgOptions, m *dns.Msg, w dns.ResponseWriter, r *dns.Msg, transport core.Transport) (bool, error) {
 	lgImr.Debug("ProcessAuthDNSResponse", "qname", qname, "rcode", rcode, "context", context, "DO", msgoptions.DO, "CD", msgoptions.CD)
+	// qname is a CNAME, and what came back is the data or the denial at the
+	// chain's last name: the answer is the chain, built from its cached links
+	// (serveChain). An RRset owned by qname itself is its own answer.
+	if followsCNAME(qtype) && (rrset == nil || !core.EqualNames(rrset.Name, qname)) &&
+		imr.serveChain(ctx, w, r, m, qname, qtype, msgoptions, privacyStatusFor(transport)) {
+		return true, nil
+	}
 	m.SetRcode(r, rcode)
 	if rrset != nil {
 		lgImr.Debug("ProcessAuthDNSResponse: received response from IterativeDNSQuery", "count", len(rrset.RRs))
