@@ -45,13 +45,10 @@ func SetZoneStateRecheck(d time.Duration) {
 //     the next reader follows the chain again.
 //
 //   - Insecure means the parent delegated the zone without a DS. It does not
-//     lapse to "not known". Following the chain of a signed zone that has no DS
-//     ends in Indeterminate, or Bogus, because the validator has no
-//     authenticated denial of a DS to conclude Insecure from (see backfillDS);
-//     a lapse would turn every signed zone below an insecure delegation into a
-//     failure once per interval. Instead, once the interval has passed, the
-//     next signature from the zone that is checked has the parent asked for the
-//     zone's DS (recheckInsecureZone). A DS that validates makes the zone
+//     lapse to "not known": the verdict rests on a proof that there is no DS,
+//     and the only thing worth asking again is whether a DS has appeared since.
+//     So once the interval has passed, the next signature from the zone that is
+//     checked has the parent asked for the zone's DS (recheckInsecureZone). A DS that validates makes the zone
 //     Secure; no DS, or a DS that does not validate, leaves it Insecure for
 //     another interval. A recheck only ever upgrades.
 //
@@ -146,7 +143,7 @@ func (rrcache *RRsetCacheT) recheckInsecureZone(ctx context.Context, name string
 	}
 	if rrcache.Verbose {
 		found := "no DS"
-		if entry != nil {
+		if len(actualDSRecords(entry)) > 0 {
 			found = "a DS that is " + ValidationStateToString[entry.State]
 		}
 		log.Printf("recheckInsecureZone: zone %q stays insecure (%s); next recheck in %s", name, found, ZoneStateRecheck())
