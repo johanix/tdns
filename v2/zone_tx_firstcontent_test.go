@@ -134,6 +134,54 @@ func TestTheMarkersTravelTheUpdateQueue(t *testing.T) {
 	}
 }
 
+// A zone that may not originate content (on tdns-auth, a secondary that does
+// not sign inline) has nothing of ours to group, and a hold would stop its
+// refresh publishes. Both ways to open a transaction refuse it: the queued
+// TX-BEGIN and the in-process BeginTx.
+func TestATransactionIsRefusedOnAZoneThatMayNotOriginate(t *testing.T) {
+	// The origination gates engage on tdns-auth only. Set before the zone and
+	// its goroutines exist, restored after they are gone (cleanups run last
+	// registered first).
+	saved := Globals.App.Type
+	Globals.App.Type = AppTypeAuth
+	t.Cleanup(func() { Globals.App.Type = saved })
+
+	const zone = "secondary.tx.example."
+	zd, kdb := newPublishedAutoZone(t, zone)
+	startTxUpdater(t, kdb)
+	zd.mu.Lock()
+	zd.ZoneType = Secondary
+	delete(zd.Options, OptInlineSigning)
+	zd.mu.Unlock()
+	if zoneMayOriginateContent(zd) {
+		t.Fatal("precondition: the zone may originate content")
+	}
+
+	if res := sendTx(t, kdb, UpdateRequest{Cmd: UpdateCmdTxBegin, ZoneName: zone, TxID: "writer-1"}, true); res.Err == nil {
+		t.Error("a queued TX-BEGIN on a zone that may not originate content was accepted")
+	}
+	if id, err := zd.BeginTx(0); err == nil {
+		t.Errorf("BeginTx on a zone that may not originate content opened %q", id)
+	} else if id != "" {
+		t.Errorf("a refused BeginTx returned the id %q", id)
+	}
+	if n := zd.txOpenCount(); n != 0 {
+		t.Errorf("%d transaction(s) open on a zone that may not originate content", n)
+	}
+
+	// The role is the reason: the same zone as a primary is accepted.
+	zd.mu.Lock()
+	zd.ZoneType = Primary
+	zd.mu.Unlock()
+	id, err := zd.BeginTx(0)
+	if err != nil {
+		t.Fatalf("BeginTx on a primary: %v", err)
+	}
+	if err := zd.CommitTx(id); err != nil {
+		t.Fatalf("CommitTx: %v", err)
+	}
+}
+
 // A plain commit on a busy Ready zone asks the gate, and the publish happens in
 // the publisher's goroutine, where the commit's handler cannot see its outcome.
 // The commit's Resp is kept on the zone and answered by the publish that

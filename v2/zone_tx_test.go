@@ -98,6 +98,17 @@ func newPublishedAutoZone(t *testing.T, zone string) (*ZoneData, *KeyDB) {
 	return zd, kdb
 }
 
+// mustBeginTx opens an in-process transaction on a zone that may originate
+// content, and fails the test if it is refused.
+func mustBeginTx(t *testing.T, zd *ZoneData, flags TxFlags) TxID {
+	t.Helper()
+	id, err := zd.BeginTx(flags)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	return id
+}
+
 // newHeldAutoZone is an auto zone whose first content is a transaction.
 func newHeldAutoZone(t *testing.T, zone string) (*ZoneData, TxID, *KeyDB) {
 	t.Helper()
@@ -366,7 +377,7 @@ func TestNoPublisherGetsThroughAHold(t *testing.T) {
 	const zone = "choke.tx.example."
 	zd, kdb := newPublishedAutoZone(t, zone)
 
-	id := zd.BeginTx(TxUrgent)
+	id := mustBeginTx(t, zd, TxUrgent)
 	before := readPublishState(zd)
 
 	publishers := []struct {
@@ -463,7 +474,7 @@ func TestThePublisherDoesNotSpinOnAHeldZone(t *testing.T) {
 	const zone = "spin.tx.example."
 	zd, _ := newPublishedAutoZone(t, zone)
 
-	id := zd.BeginTx(0)
+	id := mustBeginTx(t, zd, 0)
 	stageTxt(t, zd, "a."+zone, "one")
 	zd.requestPublish(false)
 	time.Sleep(200 * time.Millisecond)
@@ -499,8 +510,8 @@ func TestTheZonePublishesWhenTheLastTransactionCommits(t *testing.T) {
 	const zone = "two.tx.example."
 	zd, _ := newPublishedAutoZone(t, zone)
 
-	plain := zd.BeginTx(0)
-	urgent := zd.BeginTx(TxUrgent)
+	plain := mustBeginTx(t, zd, 0)
+	urgent := mustBeginTx(t, zd, TxUrgent)
 	if plain == urgent {
 		t.Fatalf("two transactions share the id %q", plain)
 	}
@@ -542,7 +553,7 @@ func TestAPlainCommitOnAReadyZoneAsksTheGate(t *testing.T) {
 	}
 	busy := readPublishState(zd)
 
-	id := zd.BeginTx(0)
+	id := mustBeginTx(t, zd, 0)
 	stageTxt(t, zd, "a."+zone, "one")
 	if err := zd.CommitTx(id); err != nil {
 		t.Fatalf("CommitTx: %v", err)
@@ -643,7 +654,7 @@ func TestALostCommitOnAPublishedZoneIsReleasedWithAWarning(t *testing.T) {
 	zd.publishCadence = 50 * time.Millisecond
 	zd.mu.Unlock()
 
-	id := zd.BeginTx(0)
+	id := mustBeginTx(t, zd, 0)
 	stageTxt(t, zd, "a."+zone, "one")
 	if _, err := zd.Publish(); err != nil {
 		t.Fatalf("Publish: %v", err)
