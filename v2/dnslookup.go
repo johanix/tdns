@@ -1149,8 +1149,11 @@ func maxInt(a, b int) int {
 // the parent's referral didn't include their addresses.
 //
 // Synchronous on purpose: only called after the optimistic try-all-known-
-// addresses pass has failed. Each ImrQuery here runs the normal chain
-// walk, which has its own W2 budget and is not bound by serverMap.
+// addresses pass has failed. It waits, bounded by ctx, for the address
+// lookups of every missing name, which run at once (nsLookup). A name whose
+// lookup is already running, typically started by the referral that brought
+// the query here, is joined rather than looked up a second time. A name whose
+// shared server already has addresses needs no lookup at all.
 //
 // qtype picks the zone whose NS set is expanded, the same zone the query was
 // sent to: for a DS, the parent's. Expanding the child's instead would add the
@@ -1170,6 +1173,12 @@ func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, 
 	if crrset == nil || crrset.RRset == nil || len(crrset.RRset.RRs) == 0 {
 		return 0
 	}
+	type pending struct {
+		nsname string
+		srv    *cache.AuthServer
+		done   <-chan struct{}
+	}
+	var lookups []pending
 	added := 0
 	usable := map[string]*cache.AuthServer{}
 	for _, rr := range crrset.RRset.RRs {
@@ -1186,18 +1195,30 @@ func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, 
 			srv = imr.Cache.GetOrCreateAuthServer(nsname)
 			serverMap[cache.ServerKey(nsname)] = srv
 		}
-		before := len(srv.GetAddrs())
-		if !imr.lookupServerAddrs(ctx, srv, nsname) {
-			break
-		}
-		addrs := srv.GetAddrs()
-		if len(addrs) > 0 {
+		if len(srv.GetAddrs()) > 0 {
+			// The shared server already has addresses, from another zone's
+			// glue or an earlier lookup: usable now, no query needed.
 			added++
 			usable[cache.ServerKey(nsname)] = srv
+			continue
 		}
-		if Globals.Debug && len(addrs) > before {
-			lgDns.Debug("expandServerMapWithMissingNS: resolved addresses for previously-unresolved NS",
-				"ns", nsname, "zone", zonename, "addresses", addrs)
+		lookups = append(lookups, pending{nsname, srv, imr.nsLookup(ctx, nsname, zonename)})
+	}
+	for _, l := range lookups {
+		select {
+		case <-l.done:
+		case <-ctx.Done():
+			// The lookups go on, and store what they find in the zone's map.
+			imr.storeZoneServers(zonename, usable)
+			return added
+		}
+		if addrs := l.srv.GetAddrs(); len(addrs) > 0 {
+			added++
+			usable[cache.ServerKey(l.nsname)] = l.srv
+			if Globals.Debug {
+				lgDns.Debug("expandServerMapWithMissingNS: resolved addresses for previously-unresolved NS",
+					"ns", l.nsname, "zone", zonename, "addresses", addrs)
+			}
 		}
 	}
 	// The caller's map is a copy; the zone's cached map gets them too, or the
@@ -1643,46 +1664,6 @@ func walkErr(zoneName, lastNS, lastAddr string, lastTransport core.Transport, at
 		parts = append(parts, fmt.Sprintf("lastErr=%s", lastErr))
 	}
 	return fmt.Errorf("%w (%s)", base, strings.Join(parts, " "))
-}
-
-// CollectNSAddresses - given an NS RRset, chase down the A and AAAA records corresponding to each nsname
-func (imr *Imr) CollectNSAddresses(ctx context.Context, rrset *core.RRset, respch chan *ImrResponse) error {
-	if rrset == nil || len(rrset.RRs) == 0 {
-		return fmt.Errorf("rrset is nil or empty")
-	}
-
-	// Defensive check: ensure this is actually an NS RRset
-	if rrset.RRtype != dns.TypeNS {
-		return fmt.Errorf("CollectNSAddresses: expected NS RRset, got %s", dns.TypeToString[rrset.RRtype])
-	}
-
-	for _, rr := range rrset.RRs {
-		// Defensive check: ensure each RR is actually an NS record
-		ns, ok := rr.(*dns.NS)
-		if !ok {
-			// return fmt.Errorf("CollectNSAddresses: expected NS record, got %s", dns.TypeToString[rr.Header().Rrtype])
-			continue
-		}
-		nsname := ns.Ns
-		// Query for A and AAAA records. The caller stops reading at the first
-		// usable address and its context ends; a lookup canceled that way was
-		// abandoned, not failed.
-		for _, atype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-			go func(nsname string, atype uint16) {
-				_, err := imr.ImrQuery(ctx, nsname, atype, dns.ClassINET, respch)
-				switch {
-				case err == nil:
-				case ctx.Err() != nil:
-					lgDns.Debug("CollectNSAddresses: lookup abandoned", "nsname", nsname,
-						"qtype", dns.TypeToString[atype], "err", err)
-				default:
-					lgDns.Error("CollectNSAddresses: lookup failed", "nsname", nsname,
-						"qtype", dns.TypeToString[atype], "err", err)
-				}
-			}(nsname, atype)
-		}
-	}
-	return nil
 }
 
 // parseOwnerName extracts the base server name from an owner name, handling both
@@ -2978,7 +2959,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 					"zone", zonename, "depth", zoneDepth(zonename),
 					"budget", budget, "picked", picked)
 			}
-			imr.resolveZoneServersInBackground(zonename, picked)
+			imr.resolveZoneServersInBackground(ctx, zonename, picked)
 		}
 	}
 

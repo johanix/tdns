@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -62,115 +63,158 @@ func (imr *Imr) storeZoneServers(zone string, servers map[string]*cache.AuthServ
 	lgDns.Debug("storeZoneServers: stored servers", "zone", zone, "count", len(store))
 }
 
-// lookupServerAddrs resolves nsname's A and AAAA records and adds the
-// addresses to srv. It reports false if ctx ended before both lookups ran.
-func (imr *Imr) lookupServerAddrs(ctx context.Context, srv *cache.AuthServer, nsname string) bool {
+// lookupServerAddrs resolves nsname's A and AAAA records, the two at once, and
+// adds the addresses to srv.
+func (imr *Imr) lookupServerAddrs(ctx context.Context, srv *cache.AuthServer, nsname string) {
+	var wg sync.WaitGroup
 	for _, atype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		select {
-		case <-ctx.Done():
-			return false
-		default:
-		}
-		resp, err := imr.ImrQuery(ctx, nsname, atype, dns.ClassINET, nil)
-		if err != nil || resp == nil || resp.RRset == nil {
-			continue
-		}
-		for _, addrRR := range resp.RRset.RRs {
-			// AuthServer.Addrs stores BARE IPs (no port). Exchange
-			// adds the port via JoinHostPort when dialing. Double-
-			// porting here would produce e.g. "[1.2.3.4:53]:53" and
-			// Dial would try to resolve "1.2.3.4:53" as a hostname.
-			switch a := addrRR.(type) {
-			case *dns.A:
-				srv.AddAddr(a.A.String())
-			case *dns.AAAA:
-				srv.AddAddr(a.AAAA.String())
+		wg.Add(1)
+		go func(atype uint16) {
+			defer wg.Done()
+			resp, err := imr.ImrQuery(ctx, nsname, atype, dns.ClassINET, nil)
+			if err != nil || resp == nil || resp.RRset == nil {
+				return
 			}
-		}
+			for _, addrRR := range resp.RRset.RRs {
+				// AuthServer.Addrs stores BARE IPs (no port). Exchange
+				// adds the port via JoinHostPort when dialing. Double-
+				// porting here would produce e.g. "[1.2.3.4:53]:53" and
+				// Dial would try to resolve "1.2.3.4:53" as a hostname.
+				switch a := addrRR.(type) {
+				case *dns.A:
+					srv.AddAddr(a.A.String())
+				case *dns.AAAA:
+					srv.AddAddr(a.AAAA.String())
+				}
+			}
+		}(atype)
 	}
-	return true
+	wg.Wait()
 }
 
-// nsAddrLookups records the background nameserver address lookups in flight,
-// with the zones waiting for each. One lookup runs per nameserver name at a
-// time, however many referrals name it. That also bounds a cycle -- zone A
-// served by names in zone B, served by names in zone A -- where each lookup
-// meets a referral that would otherwise start the other one again.
+// nsAddrLookups records the nameserver address lookups in flight. One lookup
+// runs per nameserver name at a time, however many referrals and fallbacks
+// want it: a second caller joins the running one instead of sending the same
+// queries again.
 type nsAddrLookups struct {
 	mu      sync.Mutex
-	waiting map[string]map[string]bool // nameserver -> zones to add it to
+	running map[string]*nsAddrLookup // nameserver -> its lookup
 }
 
-// begin registers zone as waiting for nsname. It reports whether the caller
-// is to run the lookup: false when one is already running, which adds the
-// server to zone as well when it ends.
-func (l *nsAddrLookups) begin(nsname, zone string) bool {
+// nsAddrLookup is one running lookup.
+type nsAddrLookup struct {
+	done  chan struct{}   // closed when the lookup has ended and stored its result
+	zones map[string]bool // zones to add the server to when it has an address
+}
+
+// begin registers zone (if any) with nsname's lookup, and returns that lookup.
+// start is true when there was none and the caller is to run it.
+func (l *nsAddrLookups) begin(nsname, zone string) (lookup *nsAddrLookup, start bool) {
 	key := cache.ServerKey(nsname)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.waiting == nil {
-		l.waiting = map[string]map[string]bool{}
+	if l.running == nil {
+		l.running = map[string]*nsAddrLookup{}
 	}
-	zones, running := l.waiting[key]
+	lookup, running := l.running[key]
 	if !running {
-		zones = map[string]bool{}
-		l.waiting[key] = zones
+		lookup = &nsAddrLookup{done: make(chan struct{}), zones: map[string]bool{}}
+		l.running[key] = lookup
 	}
-	zones[core.CanonicalizeName(zone)] = true
-	return !running
+	if zone != "" {
+		lookup.zones[core.CanonicalizeName(zone)] = true
+	}
+	return lookup, !running
 }
 
-// end removes nsname's lookup and returns the zones that waited for it.
+// end removes nsname's lookup and returns the zones registered with it. A
+// caller that begins after this starts a new lookup.
 func (l *nsAddrLookups) end(nsname string) []string {
 	key := cache.ServerKey(nsname)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	zones := make([]string, 0, len(l.waiting[key]))
-	for zone := range l.waiting[key] {
+	lookup := l.running[key]
+	delete(l.running, key)
+	if lookup == nil {
+		return nil
+	}
+	zones := make([]string, 0, len(lookup.zones))
+	for zone := range lookup.zones {
 		zones = append(zones, zone)
 	}
-	delete(l.waiting, key)
 	return zones
 }
+
+// nsLookupChainKey carries, on a lookup's context, the nameservers whose
+// lookups it is nested in: the lookup's own name last.
+type nsLookupChainKey struct{}
+
+// ended is the channel nsLookup returns when it starts nothing.
+var ended = func() chan struct{} { c := make(chan struct{}); close(c); return c }()
 
 // nsAddrLookupFallbackBudget is the per-lookup budget when the IMR's tuning
 // has none: the query-budget default.
 const nsAddrLookupFallbackBudget = 8 * time.Second
 
-// resolveZoneServersInBackground resolves the addresses of nsnames, the
-// out-of-bailiwick nameservers a referral to zone carried no addresses for,
-// and adds each one that gets an address to zone's server map.
+// nsLookup starts the address lookup for nsname, or joins the one already
+// running, and registers zone to receive the server when it has an address.
+// It does not wait: the returned channel is closed when the lookup has ended
+// and its server is stored. The server is the shared instance for nsname.
 //
-// The lookups run on a detached context (detachedContext): the query that met
-// the referral returns long before they finish, and its deferred cancel used
-// to end every one of them. Each nameserver gets its own deadline, the query
-// budget per address type.
-func (imr *Imr) resolveZoneServersInBackground(zone string, nsnames []string) {
+// The lookup runs on a detached context with its own deadline (twice the query
+// budget, one per address type), so a caller that stops waiting leaves it
+// running, and its result is stored all the same.
+//
+// A lookup can come to need its own name: resolving ns1.example. may start at
+// example., which is served by ns1.example. (a nameserver without glue), or by
+// a zone that is served by names in example. (a cycle). Joining the running
+// lookup would then wait on itself until its deadline. So a lookup's context
+// carries the chain of names it is nested in, and nsLookup starts nothing for
+// a name already on ctx's chain. Two lookups that were started independently
+// can still wait on each other; those waits end when the lookups' own queries
+// run out of budget, and such a delegation has no address to find anyway.
+func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct{} {
+	key := cache.ServerKey(nsname)
+	chain, _ := ctx.Value(nsLookupChainKey{}).([]string)
+	if slices.Contains(chain, key) {
+		lgDns.Debug("nsLookup: nameserver is already being looked up on this chain",
+			"ns", nsname, "chain", chain)
+		return ended
+	}
+	lookup, start := imr.nsAddrLookups.begin(nsname, zone)
+	if !start {
+		return lookup.done
+	}
 	budget := imr.Tuning.QueryBudget
 	if budget <= 0 {
 		budget = nsAddrLookupFallbackBudget
 	}
-	for _, nsname := range nsnames {
-		if !imr.nsAddrLookups.begin(nsname, zone) {
-			lgDns.Debug("resolveZoneServersInBackground: address lookup already running",
-				"ns", nsname, "zone", zone)
-			continue
+	go func() {
+		defer close(lookup.done)
+		lctx, cancel := detachedContext(2 * budget)
+		defer cancel()
+		lctx = context.WithValue(lctx, nsLookupChainKey{}, append(slices.Clone(chain), key))
+		srv := imr.Cache.GetOrCreateAuthServer(nsname)
+		srv.SetSrc("ns-lookup")
+		imr.lookupServerAddrs(lctx, srv, nsname)
+		zones := imr.nsAddrLookups.end(nsname)
+		if len(srv.GetAddrs()) == 0 {
+			lgDns.Debug("nsLookup: no address for nameserver", "ns", nsname, "zones", zones)
+			return
 		}
-		go func(nsname string) {
-			lctx, cancel := detachedContext(2 * budget)
-			defer cancel()
-			srv := imr.Cache.GetOrCreateAuthServer(nsname)
-			srv.SetSrc("referral-oob")
-			imr.lookupServerAddrs(lctx, srv, nsname)
-			zones := imr.nsAddrLookups.end(nsname)
-			if len(srv.GetAddrs()) == 0 {
-				lgDns.Debug("resolveZoneServersInBackground: no address for nameserver",
-					"ns", nsname, "zones", zones)
-				return
-			}
-			for _, z := range zones {
-				imr.storeZoneServers(z, map[string]*cache.AuthServer{cache.ServerKey(nsname): srv})
-			}
-		}(nsname)
+		for _, z := range zones {
+			imr.storeZoneServers(z, map[string]*cache.AuthServer{key: srv})
+		}
+	}()
+	return lookup.done
+}
+
+// resolveZoneServersInBackground resolves the addresses of nsnames, the
+// out-of-bailiwick nameservers a referral to zone carried no addresses for,
+// and adds each one that gets an address to zone's server map. It does not
+// wait for them: the query that met the referral goes on without.
+func (imr *Imr) resolveZoneServersInBackground(ctx context.Context, zone string, nsnames []string) {
+	for _, nsname := range nsnames {
+		imr.nsLookup(ctx, nsname, zone)
 	}
 }

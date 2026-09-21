@@ -1123,7 +1123,7 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	}
 
 	// Return a shallow copy of the map so concurrent callers don't race
-	// on writes (e.g. processAddressRecords adding resolved NS addresses).
+	// on writes (e.g. resolveNSAddresses adding resolved NS addresses).
 	cp := make(map[string]*AuthServer, len(servers))
 	for k, v := range servers {
 		cp[k] = v
