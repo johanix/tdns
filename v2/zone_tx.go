@@ -132,10 +132,17 @@ func (zd *ZoneData) txStoppedPublishes() uint64 {
 // shortcut for a writer that queues its changes: that writer queues its
 // markers too (TX-BEGIN, TX-COMMIT), or its commit overtakes its changes and
 // publishes an empty hold.
-func (zd *ZoneData) BeginTx(flags TxFlags) TxID {
+//
+// Refused, as a queued TX-BEGIN is, on a zone that may not originate content:
+// it has nothing of ours to group, and a hold would stop its refresh publishes
+// until the hold's limit released them. No transaction is opened then.
+func (zd *ZoneData) BeginTx(flags TxFlags) (TxID, error) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return zd.beginTxAutoLocked(flags)
+	if !zoneMayOriginateContent(zd) {
+		return "", fmt.Errorf("zone %s may not originate content", zd.ZoneName)
+	}
+	return zd.beginTxAutoLocked(flags), nil
 }
 
 func (zd *ZoneData) beginTxAutoLocked(flags TxFlags) TxID {
