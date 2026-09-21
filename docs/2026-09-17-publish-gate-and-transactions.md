@@ -2,8 +2,10 @@
 
 **Written 2026-09-17.** #653. **Status: r4.** r3 was merged with #695. r4 was
 written before any code, which is why it revises the text in place and is not
-an amendment, and it arrives together with step 1 of "Size and order of work"
-(transactions and held creation). Steps 2 to 4 are not implemented.
+an amendment, and it arrived together with step 1 of "Size and order of work"
+(transactions and held creation). **Step 1 is implemented and merged**
+(2026-09-21, tdns #700 → 368a28ce), with Amendment 1 at the end. Steps 2 to 4
+are not implemented; step 2 is tdns-mp's.
 Updates §1.3 and §1.6 of `2026-07-02-DONE-zone-mutation-snapshot-correctness.md`
 ("the July design"), which stays as it is.
 
@@ -586,3 +588,14 @@ limit, which is the smaller matter of a pass and an update sharing a serial.
   that meets an open transaction is refused, and succeeds after the commit.
 - **Journal.** A transaction is one delta; `wsPersistDelta` survives a replayed
   update staged after a fresh one.
+
+## Amendment 1 (2026-09-21): the in-process begin refuses what the queued one refuses
+
+"Transactions" says that `TX-BEGIN` is refused on a zone that may not originate
+content, and names the in-process pair `BeginTx(flags) TxID` and
+`CommitTx(id)`. As merged with step 1, `BeginTx` did not make that check, so a
+mistaken in-process call on a secondary would hold its refresh publishes until
+the hold's limit released them (the external review of #700, C2). `BeginTx` is
+now `BeginTx(flags) (TxID, error)` and refuses such a zone as the queued marker
+does; no transaction is opened. `CommitTx` is still never refused on those
+grounds. Held creation opens its transaction below `BeginTx` and is unchanged.
