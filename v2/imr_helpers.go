@@ -20,22 +20,23 @@ const (
 	transportQueryReasonNewServer   = "new-auth-server"
 )
 
-// asyncContextFromQuery returns a context for fire-and-forget background
-// work spawned during a query (NS revalidation, transport-signal discovery,
-// TLSA discovery). It is decoupled from the parent's cancel signal — so
-// when the foreground IterativeDNSQuery returns and its W2 budget timeout's
-// deferred cancel fires, the background goroutine keeps running — but
-// inherits the parent's values. A safety timeout bounds total wall-clock
-// time so a stuck background goroutine cannot leak forever.
+// detachedContext returns the context for fire-and-forget background work
+// spawned during a query (NS revalidation, transport-signal and TLSA
+// discovery, out-of-bailiwick nameserver addresses). The timeout bounds it, so
+// a stuck background goroutine cannot leak forever.
 //
-// Without this detach the background work captures the foreground query's
-// short-lived context: as soon as the foreground returns, every in-flight
-// DNS query in the background fails with "context canceled" and validation
-// of e.g. an apex NS RRset cannot reach the signer's DNSKEYs. Before the
-// W2 query-budget wrap this didn't matter because the caller's ctx tended
-// to live for the duration of the API request.
-func asyncContextFromQuery(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
+// It is not derived from the query's context. The query's deferred cancel
+// fires as soon as the foreground returns, and every in-flight DNS query in
+// the background then failed with "context canceled": validation of an apex
+// NS RRset, for one, never reached the signer's DNSKEYs.
+//
+// Nor does it keep the query's values. Those describe the query: a DS proof
+// marks the context it asks its DS questions under, so that a referral met
+// there is judged from the cache alone (cache.ReferralChildState). Background
+// work that inherited the mark judged every referral of its own walk that way,
+// and stored the verdicts.
+func detachedContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), timeout)
 }
 
 func (imr *Imr) TransportSignalRRType() uint16 {
@@ -95,7 +96,7 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 		return
 	}
 	go func() {
-		queryCtx, cancel := asyncContextFromQuery(ctx, 5*time.Second)
+		queryCtx, cancel := detachedContext(5 * time.Second)
 		defer cancel()
 		rrtype := imr.TransportSignalRRType()
 		if imr.Cache.Debug {
@@ -130,7 +131,7 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 			continue
 		}
 		go func(owner string) {
-			queryCtx, cancel := asyncContextFromQuery(ctx, 5*time.Second)
+			queryCtx, cancel := detachedContext(5 * time.Second)
 			defer cancel()
 			resp, err := imr.ImrQuery(queryCtx, owner, dns.TypeTLSA, dns.ClassINET, nil)
 			if err != nil || resp == nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 {

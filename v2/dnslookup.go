@@ -2980,7 +2980,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 					"zone", zonename, "depth", zoneDepth(zonename),
 					"budget", budget, "picked", picked)
 			}
-			imr.resolveZoneServersInBackground(ctx, zonename, picked)
+			imr.resolveZoneServersInBackground(zonename, picked)
 		}
 	}
 
@@ -2988,7 +2988,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		return nil, r.MsgHdr.Rcode, cache.ContextReferral, transport, nil
 	}
 	// rrcache.Logger.Printf("*** handleReferral: calling revalidateReferralNS for zone %s, serverMap: %+v", zonename, serverMap)
-	imr.scheduleReferralNSRevalidation(ctx, zonename, serverMap)
+	imr.scheduleReferralNSRevalidation(zonename, serverMap)
 	//rrcache.Logger.Printf("*** handleReferral: revalidateReferralNS returned, calling IterativeDNSQuery for zone %s, serverMap: %+v", zonename, serverMap)
 	rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones, privacy)
 	return rrset, rcode, cacheCtx, transport, err
@@ -3012,10 +3012,7 @@ func zoneDepth(zone string) int {
 	return len(dns.SplitDomainName(zone))
 }
 
-func (imr *Imr) scheduleReferralNSRevalidation(ctx context.Context, zonename string, serverMap map[string]*cache.AuthServer) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (imr *Imr) scheduleReferralNSRevalidation(zonename string, serverMap map[string]*cache.AuthServer) {
 	if imr.Cache == nil || zonename == "" || len(serverMap) == 0 {
 		return
 	}
@@ -3032,11 +3029,11 @@ func (imr *Imr) scheduleReferralNSRevalidation(ctx context.Context, zonename str
 	}
 	go func() {
 		defer imr.Cache.ClearNSRevalidation(zonename)
-		// Detach from the caller's W2 query-budget context: the foreground
-		// IterativeDNSQuery returns long before this background chain walk
-		// completes, and its deferred cancel would otherwise kill every
-		// in-flight DNSKEY fetch this goroutine makes.
-		asyncCtx, cancel := asyncContextFromQuery(ctx, 60*time.Second)
+		// Detached (detachedContext): the foreground IterativeDNSQuery returns
+		// long before this background chain walk completes, and its deferred
+		// cancel would otherwise kill every in-flight DNSKEY fetch this
+		// goroutine makes.
+		asyncCtx, cancel := detachedContext(60 * time.Second)
 		defer cancel()
 		imr.revalidateReferralNS(asyncCtx, zonename, snapshot)
 	}()
