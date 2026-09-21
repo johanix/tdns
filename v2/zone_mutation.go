@@ -375,6 +375,14 @@ func (zd *ZoneData) publishLocked(gen uint64) {
 // false the caller has already set zd.CurrentSerial (refresh flips, transport
 // signal synthesis without a content serial change).
 func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
+	// Commits waiting to learn that their transaction is published (zone_tx.go)
+	// are answered by this publish, however it ends: every refusal below
+	// returns through here. No waiters, which is every zone that opens no
+	// transaction, and nothing is deferred.
+	if len(zd.tx.commitWaiters) > 0 {
+		before := zd.snapshot.Load()
+		defer func() { zd.txPublishDoneLocked(before) }()
+	}
 	if zd.workingSet == nil {
 		zd.publishQueued = false
 		zd.publishUrgent = false
@@ -418,6 +426,17 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		return
 	}
 
+	// An open transaction holds the zone: nothing publishes it. HERE, where
+	// every publish passes, because SignZone, StageBatch, the catalog, the
+	// update appliers and the rest call publishLocked directly and a check in
+	// runPublisher alone would let each of them through. After the two exits
+	// above, since a zone that is no longer live drops its working set held or
+	// not; before anything below touches the serial, so that a stopped publish
+	// changes nothing at all.
+	if zd.txStopPublishLocked() {
+		return
+	}
+
 	// Atomic-swap invariant: never store a snapshot without an apex. An
 	// apex-less working set (e.g. an empty rebuild during reload) would yield a
 	// snapshot with nil Apex/SOA; storing it would leave a Ready zone with no
@@ -456,6 +475,23 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	if kerr != nil {
 		zd.refuseUnsignableWorkingSetLocked(prevSerial, kerr)
 		return
+	}
+
+	// The first snapshot of a zone created held (zone_tx.go) that signs its own
+	// content is the complete SIGNED zone, or there is none. "Cannot sign yet"
+	// is nil above and, for every other zone, means "publish unsigned and stay
+	// not Ready"; but queries follow the snapshot, not Ready, so that unsigned
+	// snapshot would be queryable. And what this publish signs by itself is the
+	// apex SOA, the chain, the ZONEMD and a staged scope: a record staged
+	// before the keys resolved, or by a writer that does not sign, would go out
+	// unsigned beside a signed SOA. So the whole zone is put in scope, not
+	// forced: a working set that is signed already costs a walk.
+	if zd.txFirstSnapshotMustBeSignedLocked() {
+		if sm == nil {
+			zd.refuseUnsignedFirstContentLocked(prevSerial)
+			return
+		}
+		zd.wsNeedsFullSign, zd.wsSignOwners = true, nil
 	}
 
 	zd.resignWorkingSetSOAIfSigned(sm)
@@ -652,6 +688,9 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.publishQueued = false
 	zd.publishUrgent = false
 	zd.lastPublish = time.Now()
+	if zd.tx.createdHeld && oldSnap == nil {
+		zd.txFirstSnapshotInstalledLocked()
+	}
 
 	// Persist only for a zone that may originate: a mirroring secondary's
 	// serial is upstream's property, not ours to record and later restore.
@@ -1212,6 +1251,25 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 
+	// This installs a snapshot outside the publish path, so the hold that
+	// publishWorkingSetLocked enforces has to be repeated here: a zone with an
+	// open transaction (zone_tx.go) gets its first snapshot from the commit.
+	if zd.txHeldLocked() {
+		lg.Error("InstallInitialSnapshot: the zone has an open transaction; its snapshot comes with the commit",
+			"zone", zd.ZoneName, "open", len(zd.tx.open))
+		return
+	}
+	// A zone created held gets its first snapshot from a publish, never from
+	// here, also once its hold has closed: after a first content that could not
+	// be signed, the zone has no hold and no snapshot until a signing pass or a
+	// repeated commit installs it. zd.Data is the creation's template, SOA and
+	// NS alone, which is the partial zone the transaction exists to hide.
+	if zd.tx.createdHeld && zd.snapshot.Load() == nil {
+		lg.Error("InstallInitialSnapshot: the zone was created held and has never published; its first snapshot comes from a publish",
+			"zone", zd.ZoneName)
+		return
+	}
+
 	data := snapshotMapFromData(zd.Data)
 	if apexFromSnapshotData(zd, data) == nil {
 		// zd.Data carries no apex. Two cases:
@@ -1378,8 +1436,14 @@ func (zd *ZoneData) testPublishNow() {
 // isDraftLocked reports whether the zone holds unpublished content in Data,
 // the shape the pre-refresh callbacks receive. Caller holds zd.mu; a draft's
 // mutex is uncontended, so taking it there costs nothing.
+//
+// A zone created held (zone_tx.go) has no snapshot either, and is NOT a draft:
+// no refresh is coming to consume its Data, and once its working set has been
+// seeded from Data a write to Data reaches nothing. It stages into the working
+// set from creation on -- including after a first content that could not be
+// signed, when it has neither a hold nor a snapshot.
 func (zd *ZoneData) isDraftLocked() bool {
-	return zd.publishedSnapshot() == nil
+	return !zd.tx.createdHeld && zd.publishedSnapshot() == nil
 }
 
 // stageDraftRRsetLocked replaces one RRset of one owner in a draft's Data.

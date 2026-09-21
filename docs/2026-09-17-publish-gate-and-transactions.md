@@ -1,6 +1,9 @@
 # One publish gate for every zone change, and transactions for changes that belong together
 
-**Written 2026-09-17.** #653. **Status: PROPOSAL, r3.** Nothing here is implemented.
+**Written 2026-09-17.** #653. **Status: r4.** r3 was merged with #695. r4 was
+written before any code, which is why it revises the text in place and is not
+an amendment, and it arrives together with step 1 of "Size and order of work"
+(transactions and held creation). Steps 2 to 4 are not implemented.
 Updates §1.3 and §1.6 of `2026-07-02-DONE-zone-mutation-snapshot-correctness.md`
 ("the July design"), which stays as it is.
 
@@ -15,7 +18,16 @@ size and order of work, and what must not regress. **r1 was wrong about one
 fact:** it said a wire DNS UPDATE does not wait for its change. It does, and so
 do seven other senders, not three. "What NOERROR promises" is new because of it.
 r3: that question is decided, option A for the first implementation. Nothing is
-left open.
+left open. r4, before any code, from the implementer's read of r3 against the
+code. **r3 was wrong about three things:** a publish stopped by a hold is not
+"marked queued", which would spin the publisher; the publish does not sign what
+an update staged, so the first-snapshot rule is stated on its own and sits where
+every publish passes, not in the commit; and held creation's commit goes through
+the queue only for a creator that queues its changes. New in r4: a zone created
+held is never a draft; where a commit publishes and how its `Resp` is answered;
+what retries a first content that could not be signed; a known limit of steps 1
+and 2; the "one serial" test is the producer's half; `CreateAutoZoneHeld`; where
+the hold check sits. The decisions of r1 to r3 stand.
 
 ## What went wrong
 
@@ -110,7 +122,9 @@ downstreams.
   carried it, the closing commit publishes at once. Without it the commit
   requests a publish through the gate: at once on an idle zone, otherwise at
   `lastPublish + cadence`. Wrapping every change in a transaction therefore
-  does not bring the churn back.
+  does not bring the churn back. A zone that is not Ready is not rate-limited
+  (rule 5), so the commit of a zone's first content publishes at once too; see
+  "Where a commit publishes".
 - **No rollback.** A writer that fails part way commits what it has, or lets
   the hold run out, and logs it. Rollback needs a per-zone log of what each
   transaction staged, because restoring the working set saved at the start
@@ -129,13 +143,16 @@ downstreams.
 
 A commit marker can be lost: a full queue, a writer that failed, a bug.
 
-- **A zone that has published before:** a hold older than the limit is
-  released with a WARN, and what is staged publishes through the gate. Its
-  previous content was valid, and so is each change added to it.
+- **A zone that has published before:** a transaction older than the limit is
+  released with a WARN, and when that ends the hold, what is staged publishes
+  through the gate. The zone's previous content was valid, and so is each
+  change added to it. The limit is each transaction's own, counted from its
+  start; a late commit for a released transaction finds nothing to commit.
 - **A zone that has never published: fail closed.** Releasing the hold would
-  publish exactly the partial zone rule 4 forbids. The zone stays unpublished,
-  logs an ERROR, and carries the error in its status until a commit arrives.
-  Its creator is local start-up code; if that never commits, start-up failed.
+  publish exactly the partial zone rule 4 forbids. The transaction stays open,
+  the zone stays unpublished, logs an ERROR, and carries the error in its
+  status (`FirstPublishError`) until a commit arrives. Its creator is local
+  start-up code; if that never commits, start-up failed.
 
 The limit is a constant, 30 s. No knob until something needs one.
 
@@ -149,25 +166,92 @@ and has **no snapshot**. That, and not Ready, is what keeps it out of sight.
 - A transfer is refused and nothing is notified: the zone is not Ready either.
 - Changes stage as for any zone. `ensureWorkingSet` seeds the working set from
   `zd.Data` when there is no snapshot.
-- **The commit installs the first snapshot, and it is the complete zone.** For
-  a zone that signs its own content it is the complete *signed* zone. The
-  publish signs what it is about to install (`resolveSigningMaterialLocked`
-  and the steps after it), so signing is part of the commit, not a pass that
-  follows. If the publish cannot sign yet, which today means "publish unsigned
-  and stay not Ready", a first-content commit installs **nothing**: an unsigned
-  snapshot would be queryable. The zone stays unpublished and the commit is
-  retried when signing material exists, under the fail-closed rule above.
-- Then Ready, then one NOTIFY (`markReadyIfServableLocked` notifies only when
-  Ready flips). A secondary goes from SERVFAIL to the whole zone.
+- **A zone created held is never a draft.** The exported staging surface
+  (`StageRRset`, `StageDelete`, `StageOwnerDelete`, `StageBatch`) takes a zone
+  with no snapshot for a draft, the scratch zone a pre-refresh callback gets:
+  it writes `zd.Data` and publishes nothing, because the refresh that consumes
+  the draft is the publish. A held zone has no snapshot either, and no refresh
+  is coming. Once its working set is seeded, a write to `zd.Data` reaches
+  nothing and is lost without a trace. So held creation sets a flag on the zone,
+  and a zone that carries it stages into the working set, from creation on.
+  The flag, and not "has an open hold": a first content that could not be signed
+  (below) leaves the zone with no hold and no snapshot, and it is still not a
+  draft.
+- **The commit installs the first snapshot, and it is the complete zone.** Then
+  Ready, then one NOTIFY (`markReadyIfServableLocked` notifies only when Ready
+  flips). A secondary goes from SERVFAIL to the whole zone.
+
+### The first snapshot of a zone that signs: signed or none
+
+For a zone that signs its own content the first snapshot is the complete
+*signed* zone. A publish does not make it so by itself. What a publish signs is
+the apex SOA, the NSEC chain, the ZONEMD and a signing scope somebody staged
+(`wsNeedsFullSign`, `wsSignOwners`), which today only a refresh does. A record
+staged by an update is signed by the update's applier, and the identity zone is
+signed today because its creator calls `SignZone`. A creator that did not, or
+whose records were staged before its keys resolved, would get a signed SOA, a
+signed chain and unsigned answers. And "cannot sign yet" today means "publish
+unsigned and stay not Ready", which is queryable.
+
+**The rule sits in `publishWorkingSetLocked` and is keyed on the zone, not on
+the commit.** On a zone that was created held, has never published and signs
+its own content, *whichever* publish would install the first snapshot
+
+1. stages a full signing scope (`wsNeedsFullSign`, not forced: a working set
+   that is signed already costs a walk), and
+2. installs **nothing** when signing resolves to "not yet"
+   (`resolveSigningMaterialLocked`: no policy bound, no key store, or keys held
+   back by the key lifecycle hooks). The working set stays staged, the serial is
+   restored, and no publish stays queued.
+
+It cannot sit in the commit alone. After a commit that could not sign, the hold
+is closed, and the next publisher to arrive would install the first snapshot:
+an update's own publish, for one. With keys present by then it would install a
+zone whose earlier records are unsigned; with none, the unsigned zone.
+
+**What a commit that could not sign does.** It closes the hold: the transaction
+is over, and nothing more is coming from its writer. It logs an ERROR, puts the
+error in the zone's status, and answers its `Resp` with it. The zone has no
+snapshot and answers SERVFAIL: fail closed, as for a commit that never came.
+
+**What retries it.** Two events. No timer, and not the publisher's loop, which
+the refusal clears on purpose, because a zone that cannot sign used to retry
+hot.
+
+- **The next signing pass.** `SignZone`, `ResignZone` and
+  `RenewZoneSignatures` end in a publish. With the hold closed it reaches the
+  rule above, and passes it once signing material exists. These passes are what
+  runs when the missing thing arrives: a policy binding, the policy apply, the
+  resigner.
+- **The creator commits again.** `TX-COMMIT` (or `CommitTx`) with the
+  creation's transaction, on a zone whose first content is committed and
+  unsigned, is accepted and tries the publish again; its `Resp` carries the
+  outcome. A creator that wants a schedule has one it controls. Once the zone
+  has published, that transaction is gone for good.
+
+**The refusal has its own error category, `FirstPublishError`, and it is not
+`DnssecError`.**
+`SignZone`, `ResignZone` and `RenewZoneSignatures` all refuse a zone that
+carries `DnssecError`, and only the policy and rollover validation clear it: a
+"not yet" that set it would switch its own retry off. The category gates
+nothing, and the publish that succeeds clears it. A *real* signing failure (keys
+that do not resolve for a reason other than "not yet", a signing error) keeps
+today's behaviour, `DnssecError` included: that is a fault.
 
 In #653 the intermediate serial was signed: the denial that did the damage
 carried a valid RRSIG. A signing pass that published during the hold would
 recreate exactly that, which is why the hold is enforced where every publish
 passes (next section) and not in the publisher's loop alone.
 
-`CreateAutoZone` gets a held form that skips `InstallInitialSnapshot` and
-returns the transaction. tdns-mp's `SetupAgentAutoZone` then sets its options
-(signing, notify targets, the transfer ACL), publishes its records and commits.
+### Held creation
+
+`CreateAutoZone` gets a held form beside it, `CreateAutoZoneHeld`, which opens
+the transaction before the zone is registered, skips `InstallInitialSnapshot`,
+marks the zone as created held, and returns the zone and the transaction.
+`CreateAutoZone` itself keeps its signature and its behaviour, so no caller
+changes until it chooses to. tdns-mp's `SetupAgentAutoZone` then sets its
+options (signing, notify targets, the transfer ACL), publishes its records and
+commits.
 
 **What must be inside the identity's hold:** everything discovery reads, which
 is what `SetupAgentAutoZone` itself publishes (URI, address records, SVCB, JWK,
@@ -188,26 +272,64 @@ channel, buffered 50, with one consumer (`ZoneUpdaterEngine`), so a writer's
 begin, changes and commit are applied in the order sent. An identity's begin,
 seven or so updates and commit fit; a queue that is full is the hold's-limit
 case. The commit's send blocks until accepted; the 5 s give-up the `ops_*`
-publishers use is wrong for it.
+publishers use is wrong for it. (The buffer is the daemon's: a key store made
+by `NewKeyDB` alone has an unbuffered queue, so a test runs the engine or
+buffers the queue as the daemon does.) `TX-BEGIN` is refused on a zone that may
+not originate content: it has nothing of ours to group, and a hold would stop
+its refresh publishes. A `TX-COMMIT` is never refused on those grounds; a hold
+that got open must be closable.
 
 **The commit travels the way the changes did.** A writer that queued any of its
 changes queues its commit, or the commit overtakes them and publishes an empty
 hold. The in-process pair, `BeginTx(flags) TxID` and `CommitTx(id)` on
 `*ZoneData`, is for a writer that also stages in-process, `StageBatch`'s kind.
-It is not a shortcut for a writer that queues. Held creation opens its
-transaction in-process, because the zone must be held before it is registered;
-its commit still goes through the queue, behind the creator's updates.
+It is not a shortcut for a writer that queues. Held creation always opens its
+transaction in-process, because the zone must be held before it is registered.
+Its commit follows the same rule as any other: through the queue, behind the
+creator's updates, for a creator that queues its changes (`SetupAgentAutoZone`);
+in-process for a creator that stages in-process (`handleCatalogCreate`, whose
+key store has no queue at all).
 
 **The hold is enforced at the choke point.** Every publish of a working set
 passes `publishWorkingSetLocked`. That is where an open transaction stops it:
-the caller's changes stay staged, the publish is marked queued, and the call
-returns. `SignZone`, `StageBatch`, the catalog and the rest call `publishLocked`
-directly today, so a check in `runPublisher` alone would let them through. No
-publisher installs a snapshot on a held zone.
+the caller's changes stay staged, the hold records that a publish is wanted,
+and the call returns. `SignZone`, `StageBatch`, the catalog and the rest call
+`publishLocked` directly today, so a check in `runPublisher` alone would let
+them through. No publisher installs a snapshot on a held zone.
+
+- **A stopped publish changes nothing.** The check sits after the two early
+  exits (no working set; a zone that is no longer live, which drops its working
+  set held or not) and before the apex check and the serial bump. The serial,
+  `lastPublish` and every `ws*` flag are as they were.
+  `InstallInitialSnapshot`, the one way to a snapshot that is not a publish of
+  a working set, refuses a held zone as well, and a zone created held that has
+  no snapshot yet, whose hold may have closed on a first content that could not
+  be signed: it would install the creation's SOA and NS.
+- **"Wanted" is not `publishQueued`.** `runPublisher` republishes for as long
+  as `publishQueued` is set and the cadence has run out, and a publish that a
+  hold stopped would leave both true: a hot loop on `zd.mu`, the one
+  `clearQueuedPublishAfterRefusalLocked` exists to stop. So the want is part of
+  the hold state, `runPublisher` stands down on a held zone, and the commit
+  that closes the hold wakes it.
 
 **Hold state.** On `ZoneData`, under `zd.mu`: the open transactions with their
-start times, and whether any was urgent. The last commit publishes directly
-when urgent, and otherwise asks the gate.
+start times, whether any was urgent, whether a publish is wanted, and the
+commits waiting for their outcome.
+
+**Where a commit publishes.** The commit that closes the hold publishes **in
+the caller** (the updater's goroutine, or `CommitTx`'s caller) when the zone is
+not Ready (rule 5; a zone's first content always is) or when the hold was
+urgent, and answers its `Resp` there, with the refusal if there was one.
+Otherwise it asks the gate, and the publish happens in the publisher's
+goroutine, where the commit's handler cannot see its outcome. So a commit's
+`Resp` on that path is kept on the zone and answered by the publish that
+carries it, or by the refusal that drops it. This is the gate's entry, below,
+arrived at early, and that list of waiting commits is the seed of "Waiters"; in
+the first step it holds commits only. A commit that leaves other transactions
+open publishes nothing, and its `Resp` waits for the commit that closes the
+hold. A hold that closes on a published zone with nothing staged publishes
+nothing and spends no serial; on a zone that has never published, the zone as
+it was created is its first content.
 
 **The gate's entry.** One call replaces the direct `publishLocked` in every
 writer. With no hold, on a zone that is idle or not Ready, it publishes **in
@@ -222,7 +344,11 @@ back does not start racing a goroutine.
 `ApplyChildUpdateToZoneData` stage, mark the delta for the journal, and call the
 gate. `wsPersistDelta` is assigned per update today; under coalescing it
 accumulates (`||`), or a replayed update staged last would switch the journal
-off for a publish that carries fresh changes.
+off for a publish that carries fresh changes. A hold is coalescing already, so
+the plain assignment matters from the first step on. It is left alone until the
+gate reaches updates all the same: replay runs at start, before anything can
+open a transaction, the zones held before then have no journal, and the
+assignment is on the path of every zone that opens no transaction.
 
 **Waiters.** `UpdateRequest.Resp` promises an outcome "once the update has
 been applied, persisted and published". Eight senders wait on it: the wire DNS
@@ -241,6 +367,16 @@ and the CSYNC publisher after 5 s, which *is* the default cadence. All of them
 wait **the larger of `UpdateApplyTimeout` and twice the zone's cadence**: a wait
 equal to the cadence loses the race. A commit marker may carry a `Resp` with
 the same bound, so a writer can learn that its transaction is published.
+
+**A known limit until the waiters are on the zone (steps 1 and 2).** An
+update's applier publishes and the updater answers the update's `Resp` straight
+after. Under a hold that publish installs nothing, so the waiter is told
+"applied" when its change is staged, before anything serves it. The only holds
+in those steps are start-up holds of well under a second on auto zones that
+have never published, have no journal and are written by the send-and-forget
+publishers. An identity zone does allow updates, though, so a wire UPDATE that
+arrives inside its hold is answered NOERROR early. Step 3 closes it. Doing it
+sooner would put step 3's plumbing on the updater's path for every zone.
 
 **Observability.** `pendingChanges()` and `tdns-cli debug zone-txlog` exist
 for exactly this: what is staged and not yet served. They gain the open
@@ -285,7 +421,7 @@ Names as of `8db21168`.
 | `initialLoadZone`, `applyRefreshReplacementLocked`, `applyOutboundSerialAfterRefresh`, `RepopulateDynamicRRs` | publish a load or refresh | unchanged in timing: the content and serial are a file's or an upstream's. See the next section for what they do about staged work |
 | `ReplayPersistedDeltas` | publishes at start | unchanged: before anything can open a transaction |
 | `commitTransportSignalLocked` | republishes, no serial change | unchanged, and like every publisher it installs nothing on a held zone |
-| `handleCatalogCreate` | `CreateAutoZone`, then stages the version record and republishes: the catalog is visible as SOA and NS first | create held, stage, commit |
+| `handleCatalogCreate` | `CreateAutoZone`, then stages the version record and republishes: the catalog is visible as SOA and NS first | create held, stage in-process, commit in-process (`CommitTx`). A catalog does not sign. The commit bumps the template's serial once, on a zone nothing has seen |
 
 `requestPublish(true)` goes to `publishSync` today. After this, the only
 sources of an immediate publish of a Ready zone that is not idle are an urgent
@@ -332,7 +468,7 @@ refresh by the pre-refresh callbacks.
 | R2 | **A crash loses what was staged and not yet published.** Under option A that is never something a client was told had succeeded: every external channel is answered after the publish. What can be lost is the `ops_*` publishers' fire-and-forget records, which their owners rebuild at start | Low under A | Option A itself. Option B removes it altogether |
 | R10 | **A serial DNS UPDATE client runs at one update per cadence** on a busy zone, and a UDP client retransmits while its first copy is staged; a retransmitted update with a prerequisite can fail where the first succeeded | Medium for bulk loaders, none for the occasional update | Multi-record UPDATE messages and parallel sessions are not throttled. Option B if it matters. The duplicate is an old problem made a little more likely; RFC 2136 updates are idempotent apart from prerequisites |
 | R3 | **A refresh drops staged changes** if "publish staged first" is wrong or missed on one path (refresh, reload, first load, dynamic-RR repopulation) | High: silent data loss, and a waiter never answered | A test per path. Every working-set drop answers its waiters, so a miss is an error somebody sees |
-| R4 | **A zone stuck unpublished.** Fail closed means a creator that never commits leaves its zone at SERVFAIL for good: for an agent, an identity that never appears | High for that daemon, and loud | ERROR log, the zone's status, a commit send that blocks. It fails at start, in front of whoever started it |
+| R4 | **A zone stuck unpublished.** Fail closed means a creator that never commits leaves its zone at SERVFAIL for good: for an agent, an identity that never appears. The same for a first content that cannot be signed and whose signing material never arrives | High for that daemon, and loud | ERROR log, the zone's status, a commit send that blocks, the commit's `Resp`. It fails at start, in front of whoever started it. An unsigned first content is retried by the next signing pass and by a repeated commit, and its error category does not stop either |
 | R5 | **The test suite assumes a synchronous publish.** About 130 call sites in 40 test files apply an update, stage a batch or sign, and read the zone back (`ApplyZoneUpdateToZoneData` 35, `SignZone` 57, `Publish` 13, `StageBatch` 8, …) | Certain; a cost, not a hazard | The idle publish stays in the caller, which covers a test that makes one change. A test that makes several in a row sets the zone's cadence to zero; one package-level default in `TestMain` does it for all of them |
 | R6 | **Locking.** A deferred publish runs in the publisher's goroutine: signing, the journal write and the waiters' answers all under `zd.mu` there. This tree has deadlocked before on paths that re-enter zone locking from a publish (`PublishDnskeyRRs`) | Medium | The deferred publish is the code `runPublisher` runs today for `parseconfig.go`. Waiters are answered with the non-blocking send `respond` already uses. `-race` on every step |
 | R7 | **A signing pass no longer means "published" when it returns**, on a Ready zone that is busy. A caller that reads the snapshot straight after `SignZone` sees the previous one | Low to medium; needs a read of each caller | Not Ready and idle zones publish in the caller, which is every start-up and first-sign path. The rollover and resign callers are the ones to read |
@@ -363,7 +499,9 @@ In four steps, each a PR that is green on its own:
 
 1. **Transactions and held creation** (rows 1–3). Nothing changes for a zone
    that opens no transaction, so the blast radius is the zones that opt in.
-   This is the half that closes #653.
+   This is the half that closes #653. It brings one piece of row 5 with it, the
+   list of commits waiting for their publish, and leaves one known limit for
+   step 3 (an update's `Resp` under a hold; see "Waiters").
 2. **tdns-mp adopts it** and re-pins. #653 can be verified on a fleet here.
 3. **The gate for every update** (rows 4–6): the churn half, and the one with
    R1, R2, R3 and R5 in it. The hold is already enforced at the choke point by
@@ -393,8 +531,8 @@ limit, which is the smaller matter of a pass and an update sharing a serial.
 
 ## Not in this design
 
-- **The identity zone's negative TTL**: PR #697 (the SOA minimum, 3600 to 60),
-  and #699 for the two places that still make it an hour.
+- **The identity zone's negative TTL**: #697, merged (the SOA minimum, 3600 to
+  60 s), and #699 for the two places that still make it an hour.
 - **tdns-mp#84**: an inbound hello promotes a mechanism that has no address,
   and the peer is never discovered again.
 - **#698**: `ImrQuery` answers a cached denial with the proof SOA as the answer
@@ -406,18 +544,39 @@ limit, which is the smaller matter of a pass and an update sharing a serial.
 ## Tests
 
 - **One serial.** A secondary of a zone created held sees SERVFAIL, then one
-  transfer of the complete zone. The harness that reproduced #653 (a secondary
-  double serving SERVFAIL, an intermediate serial, the full zone) becomes this
-  test, run through the real `SetupAgentAutoZone`-shaped producer.
+  transfer of the complete zone. This is the producer's half of #653. The
+  harness that reproduced #653 is the resolver's half (a double of the
+  secondary, serving SERVFAIL, an intermediate serial and the full zone to a
+  resolver) and drives no producer, so it is a model for the double and not the
+  test. The producer is `SetupAgentAutoZone`-shaped and goes through the real
+  joins: held creation, the signing and notify options, `SignZone`, the
+  `Publish*RR` calls through a real `UpdateQ` with `ZoneUpdaterEngine` running,
+  and `TX-COMMIT` through the same queue. tdns cannot import tdns-mp, so the
+  producer is the test's own here, and step 2 runs the same test against the
+  real one. The observer is a secondary double that records every serial it can
+  transfer. Before the change it sees the zone as SOA and NS and then a serial
+  per record; after, SERVFAIL and then one serial, complete and signed.
 - **Signed or nothing.** On a held zone that signs, a signing pass during the
-  hold installs no snapshot; the commit's snapshot is signed; a commit that
-  cannot sign installs nothing and the zone stays SERVFAIL.
+  hold installs no snapshot; the commit's snapshot is signed, records staged
+  before the keys resolved included; a commit that cannot sign installs nothing,
+  reports it on its `Resp` and in the zone's status, and the zone stays
+  SERVFAIL. After such a commit, an update's own publish installs nothing
+  either. A signing pass once the policy is bound installs one signed snapshot,
+  flips Ready and sends one NOTIFY; so does a repeated commit. The refusal does
+  not set `DnssecError` and does not spin the publisher.
+- **Not a draft.** A change staged in-process (`StageRRset`, `StageBatch`) on a
+  zone created held is in the first snapshot: staged before the working set is
+  seeded, after it, and after a commit that could not sign.
 - **Coalescing.** A burst of N updates to a Ready zone is one publish when
   idle plus at most one per cadence; an urgent transaction publishes at once; a
   plain one on a busy zone waits for the gate.
 - **The hold.** Two transactions: nothing publishes until the second commits.
   Another writer's change staged during the hold goes out with the commit. A
-  direct `publishLocked` caller does not get through it.
+  direct `publishLocked` caller does not get through it, and the publish a hold
+  stopped leaves the serial, `lastPublish` and the `ws*` flags as they were.
+  The publisher does not spin on a held zone. A commit's `Resp` is answered in
+  the caller for a first content and for an urgent hold, and by the gate's
+  publish otherwise. A zone that opens no transaction publishes as before.
 - **The limit.** A lost commit on a published zone releases with a WARN. On a
   never-published zone it does not, and the zone reports the error.
 - **Waiters.** Answered by the publish that carries their change; answered
