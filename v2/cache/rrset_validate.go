@@ -702,24 +702,6 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			}
 			return zstate, nil
 		}
-	} else {
-		// Zone not in ZoneMap yet - check if we have a DS in cache
-		// If DS is not secure, we cannot validate DNSKEYs, so return the DS state
-		if name != "." {
-			dsRRs := rrcache.Get(name, dns.TypeDS)
-			if dsRRs != nil && dsRRs.State != ValidationStateSecure {
-				// DS is not secure (indeterminate, bogus, or insecure), so zone should have the same state
-				zone := &Zone{
-					ZoneName: name,
-					State:    dsRRs.State,
-				}
-				rrcache.ZoneMap.Set(name, zone)
-				if rrcache.Verbose {
-					log.Printf("ValidateDNSKEYs: zone %q not in ZoneMap but DS is %s; marking zone as %s and returning", name, ValidationStateToString[dsRRs.State], ValidationStateToString[dsRRs.State])
-				}
-				return dsRRs.State, nil
-			}
-		}
 	}
 
 	// OPTIMIZATION: Check for cached DS first (common case)
@@ -737,6 +719,18 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			// as a referral when the same server is authoritative for both
 			// parent and child, so the DS must be fetched explicitly here.
 			dsRRs = rrcache.backfillDS(ctx, name, fetcher)
+		}
+		// A denial of the DS that proves an insecure delegation (RFC 4035
+		// section 5.2) makes the zone Insecure, and its data is answered without
+		// AD. This is decided before the denial's own state is given to the
+		// zone below: every NSEC3 denial validates Indeterminate, and a proof
+		// in it still counts once its records validate (denialEvidence).
+		if rrcache.dsCacheIsInsecureCut(ctx, name, dsRRs, fetcher) {
+			rrcache.markZoneInsecure(name)
+			if rrcache.Verbose {
+				log.Printf("ValidateDNSKEYs: the parent proves %q an insecure delegation; returning insecure", name)
+			}
+			return ValidationStateInsecure, nil
 		}
 		// If DS exists but is not secure, we cannot validate DNSKEYs
 		if dsRRs != nil && dsRRs.State != ValidationStateSecure {
@@ -759,14 +753,13 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		}
 	}
 
-	// If DS exists and is secure, use it directly (fast path)
-	if dsRRs != nil && dsRRs.RRset != nil && len(dsRRs.RRset.RRs) > 0 && dsRRs.State == ValidationStateSecure {
+	// If DS exists and is secure, use it directly (fast path).
+	// Only actual DS records count: a Secure denial's SOA/NSEC RRs must not
+	// be treated as a DS RRset (that path used to fall through to EDE 9).
+	dsRecs := actualDSRecords(dsRRs)
+	if dsRRs != nil && len(dsRecs) > 0 && dsRRs.State == ValidationStateSecure {
 		// Use DS-based validation (common case)
-		for _, rr := range dsRRs.RRset.RRs {
-			ds, ok := rr.(*dns.DS)
-			if !ok {
-				continue
-			}
+		for _, ds := range dsRecs {
 			valid, _ := ValidateDNSKEYRRsetUsingDS(rrset, ds, name, rrcache.Verbose)
 			if !valid {
 				continue
@@ -818,9 +811,10 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			taKeys = append(taKeys, &item.Val)
 		}
 	}
-	// Check for seeded DS RRset (indicates DS-based TA initialization)
+	// Check for seeded DS RRset (indicates DS-based TA initialization).
+	// A Secure denial of DS is not a seeded DS; actualDSRecords keeps it out.
 	if dsRRs == nil || dsRRs.State != ValidationStateSecure {
-		if seededDS := rrcache.Get(name, dns.TypeDS); seededDS != nil && seededDS.State == ValidationStateSecure {
+		if seededDS := rrcache.Get(name, dns.TypeDS); seededDS != nil && seededDS.State == ValidationStateSecure && len(actualDSRecords(seededDS)) > 0 {
 			seededDSs = append(seededDSs, seededDS)
 		}
 	}
@@ -943,23 +937,35 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	return ValidationStateIndeterminate, nil
 }
 
-// backfillDS fetches and validates the DS RRset for `name` when it is not
-// already cached, so ValidateDNSKEYs can anchor the zone's DNSKEY to its parent
-// without depending on a prior explicit DS query. The DS lives in the parent
-// zone (signed by the parent's ZSK); fetching it drives its own validation up
-// the chain to the trust anchor. On success the validated DS is cached so
-// subsequent lookups hit the fast path; returns nil (leaving the caller to
-// report Indeterminate) when the DS cannot be obtained.
-//
-// Scope: this handles the SECURE case (a DS exists). An authenticated NODATA
-// (proof of no DS ⇒ an insecure delegation) is returned by the fetcher as an
-// empty answer here and left as Indeterminate; proper insecure-delegation
-// handling via NSEC/NSEC3 proof is separate, future work.
-//
-// Termination: validating the fetched DS needs the PARENT's DNSKEY, which may
-// recurse into ValidateDNSKEYs(parent) → backfillDS(parent) → … strictly
-// UP the tree, ending at the root / a configured trust anchor. It never
-// re-enters for `name` itself, so there is no unbounded recursion.
+// actualDSRecords returns the DS records in a cached DS entry. SOA/NSEC/NSEC3
+// that ride along on a denial must not be treated as a DS RRset.
+func actualDSRecords(crr *CachedRRset) []*dns.DS {
+	if crr == nil || crr.RRset == nil {
+		return nil
+	}
+	var out []*dns.DS
+	for _, rr := range crr.RRset.RRs {
+		if ds, ok := rr.(*dns.DS); ok {
+			out = append(out, ds)
+		}
+	}
+	return out
+}
+
+// dsCacheIsInsecureCut reports whether a cached DS entry is a denial of the DS
+// at name whose proof shows name to be a delegation with no DS (RFC 4035 section
+// 5.2). A denial is cached with its SOA as its RRset, and its proof beside it.
+func (rrcache *RRsetCacheT) dsCacheIsInsecureCut(ctx context.Context, name string, dsRRs *CachedRRset, fetcher RRsetFetcher) bool {
+	if dsRRs == nil {
+		return false
+	}
+	switch dsRRs.Context {
+	case ContextNoErrNoAns, ContextNXDOMAIN:
+		return rrcache.denialEvidence(ctx, name, dsRRs, fetcher) == evidenceInsecureCut
+	}
+	return false
+}
+
 // parentOf returns the parent zone name of a domain name. The root is its own
 // parent; callers must not ask for the root's DS.
 func parentOf(name string) string {
@@ -970,6 +976,25 @@ func parentOf(name string) string {
 	return dns.Fqdn(strings.Join(labels[1:], "."))
 }
 
+// backfillDS fetches and validates the DS RRset for `name` when it is not
+// already cached, so ValidateDNSKEYs can anchor the zone's DNSKEY to its parent
+// without depending on a prior explicit DS query. The DS lives in the parent
+// zone (signed by the parent's ZSK); fetching it drives its own validation up
+// the chain to the trust anchor. On success the validated DS is cached so
+// subsequent lookups hit the fast path.
+//
+// When there is no DS, the fetch caches the parent's denial of it, validated,
+// with its proof (handleNegative), and returns no RRset. backfillDS then
+// returns that cached denial, so ValidateDNSKEYs can read an insecure
+// delegation from it on the same pass (dsCacheIsInsecureCut). It used to
+// return nil, and the zone was Indeterminate until something validated its
+// DNSKEYs a second time. It returns nil (leaving the caller to report
+// Indeterminate) when neither a DS nor a denial can be obtained.
+//
+// Termination: validating the fetched DS needs the PARENT's DNSKEY, which may
+// recurse into ValidateDNSKEYs(parent) → backfillDS(parent) → … strictly
+// UP the tree, ending at the root / a configured trust anchor. It never
+// re-enters for `name` itself, so there is no unbounded recursion.
 func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher RRsetFetcher) *CachedRRset {
 	if fetcher == nil || name == "." {
 		return nil
@@ -998,12 +1023,11 @@ func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher
 	}
 	fetched, err := fetcher(ctx, name, dns.TypeDS, servers)
 	if err != nil || fetched == nil || len(fetched.RRs) == 0 {
-		// Fetch failed, or authenticated NODATA (no DS ⇒ insecure delegation,
-		// out of scope here). Leave the zone unresolved: caller → Indeterminate.
+		// No DS: a denial, which the fetch has cached, or no answer at all.
 		if rrcache.Verbose {
-			log.Printf("backfillDS: no DS obtained for %q (err=%v); leaving chain unanchored", name, err)
+			log.Printf("backfillDS: no DS obtained for %q (err=%v)", name, err)
 		}
-		return nil
+		return rrcache.Get(name, dns.TypeDS)
 	}
 	// Validate the fetched DS against the parent's DNSKEY (recurses up-tree).
 	// This also marks the zone Secure in ZoneMap on success (see ValidateRRset's
