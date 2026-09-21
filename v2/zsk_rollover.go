@@ -150,7 +150,9 @@ func EnsureZskRolloverRow(kdb *KeyDB, zone string) error {
 }
 
 // SetZskManualRolloverRequest stamps a manual ZSK-rollover request. Mirrors
-// the KSK SetManualRolloverRequest, on ZskRolloverState.
+// the KSK SetManualRolloverRequest, on ZskRolloverState. A repeat while a
+// request is pending keeps that request's requested_at: the request is the
+// same one, and it is cleared when the roll commits.
 func SetZskManualRolloverRequest(kdb *KeyDB, zone string, requestedAt, earliest time.Time) error {
 	if zd, owned := zoneOwnedByName(zone); owned {
 		return ownedRefusal(zd, "asap")
@@ -159,7 +161,7 @@ func SetZskManualRolloverRequest(kdb *KeyDB, zone string, requestedAt, earliest 
 		return err
 	}
 	_, err := kdb.DB.Exec(`UPDATE ZskRolloverState
-SET manual_rollover_requested_at = ?,
+SET manual_rollover_requested_at = COALESCE(manual_rollover_requested_at, ?),
     manual_rollover_earliest = ?
 WHERE zone = ?`,
 		requestedAt.UTC().Format(time.RFC3339),
@@ -203,6 +205,21 @@ func LoadZskManualRollover(kdb *KeyDB, zone string) (ZskManualRollover, error) {
 		out.Earliest = earliest.String
 	}
 	return out, nil
+}
+
+// hasStandbyZSK reports whether the zone has a standby ZSK: one a roll can
+// promote now.
+func hasStandbyZSK(kdb *KeyDB, zone string) (bool, error) {
+	standby, err := GetDnssecKeysByState(kdb, zone, DnskeyStateStandby)
+	if err != nil {
+		return false, err
+	}
+	for i := range standby {
+		if standby[i].Flags == 256 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ZskAlgRollState describes an in-flight relaxed-mode ZSK algorithm rollover.

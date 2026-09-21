@@ -441,6 +441,7 @@ func populateZskNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, po
 
 	maxTTL, _ := LoadZoneSigningMaxTTL(kdb, zone)
 	removalMargin := zskRemovalMargin(propagationDelay, maxTTL)
+	dnskeyTTL, dnskeyTTLKnown := effectiveServedDnskeyTTL(kdb, zone, pol)
 
 	for i := range out.ZSKs {
 		e := &out.ZSKs[i]
@@ -464,9 +465,14 @@ func populateZskNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, po
 				e.NextTransitionAt = t.Add(removalMargin).UTC().Format(time.RFC3339)
 			}
 		case DnskeyStatePublished:
+			// The same wait transitionPublishedToStandby applies.
 			e.NextTransition = "published → standby"
+			if !dnskeyTTLKnown {
+				e.NextTransitionNote = "DNSKEY TTL not yet observable"
+				break
+			}
 			if t, ok := parseRFC3339(e.StateSince); ok {
-				e.NextTransitionAt = t.Add(propagationDelay).UTC().Format(time.RFC3339)
+				e.NextTransitionAt = t.Add(propagationDelay + dnskeyTTL).UTC().Format(time.RFC3339)
 			}
 		}
 	}

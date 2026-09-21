@@ -640,7 +640,14 @@ AtomicRollover when t_earliest is reached. Rejects the request if a
 rollover is already in progress or the pipeline has no standby SEP key.
 
 Online-only: scheduling against a stopped daemon is meaningless
-(the manual_rollover_* row would never be read).`,
+(the manual_rollover_* row would never be read).
+
+With --zsk: the next worker tick promotes the oldest standby ZSK. A ZSK
+reaches standby once it has been published for kasp.propagation-delay
+plus the served DNSKEY TTL, so it never signs before resolvers can hold
+it. With no standby yet, the request stays pending and fires when one
+arrives. A repeat while a request is pending changes nothing; run it
+again after each promotion to drain the pipeline faster.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			tdns.Globals.App.Type = tdns.AppTypeCli
@@ -674,7 +681,11 @@ Online-only: scheduling against a stopped daemon is meaningless
 				cliFatalf("error parsing rollover/asap response: %v", err)
 			}
 			fmt.Printf("scheduled manual %s rollover for zone %s\n", keytype, resp.Zone)
-			fmt.Printf("  earliest          %s\n", formatRolloverTime(resp.Earliest))
+			if keytype == "ZSK" && resp.Earliest == "" {
+				fmt.Printf("  earliest          when a standby ZSK exists (none yet; the request stays pending)\n")
+			} else {
+				fmt.Printf("  earliest          %s\n", formatRolloverTime(resp.Earliest))
+			}
 			// ZSK response carries no from/to keyid (the standby is picked
 			// by the worker at roll time); only print it for KSK.
 			if keytype == "KSK" {
@@ -1874,7 +1885,8 @@ normal ZSK cadence — OR run
 
   auto-rollover asap -z <zone> --zsk
 
-to promote the next standby now (repeat to accelerate).
+to promote the next standby now. Run it again after each promotion to
+drain faster; a repeat while a request is pending changes nothing.
 
 KSK: the auto-rollover engine (rollover.method multi-ds or
 double-signature) carries it as a double-signature rollover: a
