@@ -116,7 +116,11 @@ func startOOBAuthDouble(t *testing.T, nsADelay time.Duration) *oobAuthDouble {
 			t.Errorf("auth double shutdown: %v", err)
 		}
 		select {
-		case <-served:
+		case err := <-served:
+			// nil after a clean shutdown; anything else is a serving failure.
+			if err != nil {
+				t.Errorf("auth double serve: %v", err)
+			}
 		case <-time.After(5 * time.Second):
 			t.Error("auth double serve goroutine did not exit")
 		}
