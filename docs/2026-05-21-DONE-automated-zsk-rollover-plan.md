@@ -3,6 +3,8 @@
 **Date:** 2026-05-21
 **Author:** Johan Stenstam
 **Status:** Implemented (2026-05-22)
+**Amended:** 2026-09-21 (#705): the `published→standby` wait, as a block at
+the head of the Design section; nothing else is edited.
 **Depends on:** `2026-05-21-configurable-rrsig-validity-plan.md`
 (configurable, adhered-to RRSIG validity + floor invariant; supplies the
 "signatures outlive the served TTL" guarantee S4 relies on).
@@ -166,6 +168,29 @@ Code:
    ZSK rollover not implemented".
 
 ## Design: the automated ZSK pre-publish roll
+
+> **Amendment, 2026-09-21 (#705).** This section is as written on 2026-05-21.
+> One claim in step 2 did not hold, and the code followed it: that "the
+> `published→standby` transition already required `propagationDelay` of
+> DNSKEY-RRset visibility, so any key *in* standby is already propagated and
+> safe to activate." `propagationDelay` covers the new key reaching every
+> server. It does not cover a resolver's cached DNSKEY RRset expiring: a
+> resolver that fetched the RRset just before the key was published may keep
+> it for the DNSKEY TTL, and signatures by the new key then fail validation
+> there unless it re-fetches on a key-tag miss.
+>
+> On the lifetime cadence a standby waits out the active key's lifetime
+> before promotion, which hid the gap. `auto-rollover asap --zsk` promotes a
+> standby on the next tick, and exposed it: up to `DNSKEY TTL −
+> propagationDelay` per promotion.
+>
+> Since #706, `published→standby` waits `published_at + propagationDelay +
+> served DNSKEY TTL` (`transitionPublishedToStandby`; the TTL comes from
+> `effectiveServedDnskeyTTL`, or from the last signing pass for a zone
+> without a policy, and the key is held back while neither is known). That is
+> the wait the KSK gate already used, and the entry-side counterpart of the
+> TTL already in `zskRemovalMargin`. With it, step 2's conclusion holds as
+> written: any key in standby is safe to activate.
 
 Per `ksk-zsk`-mode zone with a real ZSK and `ZSK.Lifetime > 0`, each
 tick:
