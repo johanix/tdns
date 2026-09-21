@@ -636,8 +636,11 @@ func newAutoRolloverAsapCmd() *cobra.Command {
 		Short: "Schedule a manual KSK rollover at the earliest safe moment",
 		Long: `Asks the daemon to compute ComputeEarliestRollover and persist
 manual_rollover_* on the zone row. The rollover worker fires
-AtomicRollover when t_earliest is reached. Rejects the request if a
-rollover is already in progress or the pipeline has no standby SEP key.
+AtomicRollover when t_earliest is reached. Rejects the request once
+that rollover has fired and is in progress, or if the pipeline has no
+standby SEP key. A repeat while a request is still pending keeps the
+earlier of the pending and the newly computed time: asking again never
+delays the roll.
 
 Online-only: scheduling against a stopped daemon is meaningless
 (the manual_rollover_* row would never be read).

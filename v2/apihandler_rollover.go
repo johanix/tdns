@@ -192,15 +192,35 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, fmt.Sprintf("zone %s: %s", zone, detail), http.StatusBadRequest)
 			return
 		}
-		if err := SetManualRolloverRequest(kdb, zone, now, res.Earliest); err != nil {
+		// A request already pending is the same request: keep the earlier of
+		// its time and the one just computed, so asking again never delays
+		// the roll. The max-ttl-expiry gate is anchored at the moment of the
+		// call, and a repeat used to move the roll later by the time between
+		// calls (#705). The pending time stays safe: TTL clamping steers
+		// toward the persisted manual_rollover_earliest (tNextRoll), and the
+		// retired KSK's removal waits max(margin, max_observed_ttl) whether
+		// or not the zone clamps (effectiveMarginForZone).
+		earliest := res.Earliest
+		requestedAt := now.UTC().Format(time.RFC3339)
+		if row != nil && row.ManualRolloverEarliest.Valid {
+			if t, err := time.Parse(time.RFC3339, strings.TrimSpace(row.ManualRolloverEarliest.String)); err == nil {
+				if t.Before(earliest) {
+					earliest = t
+				}
+				if row.ManualRolloverRequestedAt.Valid && row.ManualRolloverRequestedAt.String != "" {
+					requestedAt = row.ManualRolloverRequestedAt.String
+				}
+			}
+		}
+		if err := SetManualRolloverRequest(kdb, zone, now, earliest); err != nil {
 			lgApi.Warn("rollover/asap: SetManualRolloverRequest failed", "zone", zone, "err", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(RolloverAsapResponse{
 			Zone:        zone,
-			RequestedAt: now.UTC().Format(time.RFC3339),
-			Earliest:    res.Earliest.UTC().Format(time.RFC3339),
+			RequestedAt: requestedAt,
+			Earliest:    earliest.UTC().Format(time.RFC3339),
 			FromKeyID:   res.FromKID,
 			ToKeyID:     res.ToKID,
 		})
