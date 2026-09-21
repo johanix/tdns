@@ -67,7 +67,9 @@ type RRsetCacheT struct {
 	// published. Changing a zone's servers means building a new map (or
 	// copying the stored one) and Set-ing it — never writing into the map a
 	// Get handed back. AddStub and AddServers are the two writers, and both
-	// do exactly that.
+	// do exactly that, holding serverMapMu: AddServers copies, adds and
+	// stores, and two writers for one zone interleaving those steps would
+	// each store a map without the other's servers (#682).
 	//
 	// The invariant exists because IterativeDNSQuery writes into the server
 	// map it is given (adding servers resolved from glue, pruning expired
@@ -96,6 +98,7 @@ type RRsetCacheT struct {
 	Quiet                bool // if true, suppress informational logging (useful for CLI tools)
 	nsRevalidateMu       sync.Mutex
 	nsRevalidateInFlight map[string]struct{}
+	serverMapMu          sync.Mutex // serializes the ServerMap writers; see ServerMap
 }
 
 // ServerTLSARecords is the validated TLSA cache for one nameserver, keyed by

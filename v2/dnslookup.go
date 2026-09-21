@@ -1156,6 +1156,9 @@ func maxInt(a, b int) int {
 // qtype picks the zone whose NS set is expanded, the same zone the query was
 // sent to: for a DS, the parent's. Expanding the child's instead would add the
 // servers that do not hold the DS to a map of servers that do.
+//
+// The servers that get addresses are also stored in that zone's cached server
+// map (storeZoneServers).
 func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer) int {
 	if imr == nil || imr.Cache == nil || serverMap == nil {
 		return 0
@@ -1169,6 +1172,7 @@ func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, 
 		return 0
 	}
 	added := 0
+	usable := map[string]*cache.AuthServer{}
 	for _, rr := range crrset.RRset.RRs {
 		ns, ok := rr.(*dns.NS)
 		if !ok {
@@ -1184,45 +1188,22 @@ func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, 
 			serverMap[cache.ServerKey(nsname)] = srv
 		}
 		before := len(srv.GetAddrs())
-		for _, atype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-			select {
-			case <-ctx.Done():
-				return added
-			default:
-			}
-			resp, err := imr.ImrQuery(ctx, nsname, atype, dns.ClassINET, nil)
-			if err != nil || resp == nil || resp.RRset == nil {
-				continue
-			}
-			for _, addrRR := range resp.RRset.RRs {
-				var addrStr string
-				switch a := addrRR.(type) {
-				case *dns.A:
-					addrStr = a.A.String()
-				case *dns.AAAA:
-					addrStr = a.AAAA.String()
-				default:
-					continue
-				}
-				if addrStr == "" {
-					continue
-				}
-				// AuthServer.Addrs stores BARE IPs (no port). Exchange
-				// adds the port via JoinHostPort when dialing. Double-
-				// porting here would produce e.g. "[1.2.3.4:53]:53" and
-				// Dial would try to resolve "1.2.3.4:53" as a hostname.
-				srv.AddAddr(addrStr)
-			}
+		if !imr.lookupServerAddrs(ctx, srv, nsname) {
+			break
 		}
 		addrs := srv.GetAddrs()
 		if len(addrs) > 0 {
 			added++
+			usable[cache.ServerKey(nsname)] = srv
 		}
 		if Globals.Debug && len(addrs) > before {
 			lgDns.Debug("expandServerMapWithMissingNS: resolved addresses for previously-unresolved NS",
 				"ns", nsname, "zone", zonename, "addresses", addrs)
 		}
 	}
+	// The caller's map is a copy; the zone's cached map gets them too, or the
+	// next query into the zone would repeat these lookups (#682).
+	imr.storeZoneServers(zonename, usable)
 	return added
 }
 
@@ -1684,23 +1665,23 @@ func (imr *Imr) CollectNSAddresses(ctx context.Context, rrset *core.RRset, respc
 			continue
 		}
 		nsname := ns.Ns
-		// Query for A records
-		go func(nsname string) {
-			// log.Printf("CollectNSAddresses: querying for %s A records", nsname)
-			_, err := imr.ImrQuery(ctx, nsname, dns.TypeA, dns.ClassINET, respch)
-			if err != nil {
-				lgDns.Error("CollectNSAddresses: error querying A", "nsname", nsname, "err", err)
-			}
-		}(nsname)
-
-		// Query for AAAA records
-		go func(nsname string) {
-			// log.Printf("CollectNSAddresses: querying for %s AAAA records", nsname)
-			_, err := imr.ImrQuery(ctx, nsname, dns.TypeAAAA, dns.ClassINET, respch)
-			if err != nil {
-				lgDns.Error("CollectNSAddresses: error querying AAAA", "nsname", nsname, "err", err)
-			}
-		}(nsname)
+		// Query for A and AAAA records. The caller stops reading at the first
+		// usable address and its context ends; a lookup canceled that way was
+		// abandoned, not failed.
+		for _, atype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+			go func(nsname string, atype uint16) {
+				_, err := imr.ImrQuery(ctx, nsname, atype, dns.ClassINET, respch)
+				switch {
+				case err == nil:
+				case ctx.Err() != nil:
+					lgDns.Debug("CollectNSAddresses: lookup abandoned", "nsname", nsname,
+						"qtype", dns.TypeToString[atype], "err", err)
+				default:
+					lgDns.Error("CollectNSAddresses: lookup failed", "nsname", nsname,
+						"qtype", dns.TypeToString[atype], "err", err)
+				}
+			}(nsname, atype)
+		}
 	}
 	return nil
 }
@@ -2485,7 +2466,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 	if vstate == cache.ValidationStateSecure {
 		targetMode = cache.ConnModeValidated
 	}
-	for zone, sm := range imr.Cache.ServerMap.Items() {
+	for _, sm := range imr.Cache.ServerMap.Items() {
 		server, ok := sm[cache.ServerKey(base)]
 		if !ok {
 			continue
@@ -2561,8 +2542,10 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 			continue
 		}
 		if applied {
+			// server is the shared instance, updated in place. Storing sm
+			// again changed nothing, and could put back a map another writer
+			// had just replaced.
 			server.PromoteConnMode(targetMode)
-			imr.Cache.ServerMap.Set(zone, sm)
 		}
 	}
 }
@@ -2883,6 +2866,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		oobRRset.Name = zonename
 		oobRRset.Class = dns.ClassINET
 		oobRRset.RRtype = dns.TypeNS
+		oobKnown := map[string]*cache.AuthServer{}
 		for _, rr := range nsRRset.RRs {
 			ns, ok := rr.(*dns.NS)
 			if !ok {
@@ -2908,11 +2892,17 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			//      Answers found" when the in-bailiwick NS happened to be
 			//      down even though we knew of a working alternate.
 			//
-			//   2. No cached addresses - kick off async resolution via
-			//      CollectNSAddresses (further down). The current foreground
-			//      query may not see the result, but the next one will
-			//      benefit, and expandServerMapWithMissingNS handles the
-			//      "we need this address right now" case as a fallback.
+			//   2. No cached addresses - resolve them in the background
+			//      (resolveZoneServersInBackground, further down), which adds
+			//      each server to the zone's cached server map once it has an
+			//      address. The current foreground query may not see the
+			//      result, but the next one will, and
+			//      expandServerMapWithMissingNS handles the "we need this
+			//      address right now" case as a fallback.
+			//
+			// Case 1 servers are stored in the zone's cached map too:
+			// ParseAdditionalForNSAddrs stored it before they were added here,
+			// and serverMap is this query's copy (#682).
 			cachedA := imr.Cache.Get(ns.Ns, dns.TypeA)
 			cachedAAAA := imr.Cache.Get(ns.Ns, dns.TypeAAAA)
 			haveA := cachedA != nil && cachedA.RRset != nil && len(cachedA.RRset.RRs) > 0
@@ -2940,10 +2930,12 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 						}
 					}
 				}
+				oobKnown[cache.ServerKey(ns.Ns)] = srv
 				continue
 			}
 			oobRRset.RRs = append(oobRRset.RRs, rr)
 		}
+		imr.storeZoneServers(zonename, oobKnown)
 		// Depth-aware resolution budget: it matters more to find good
 		// addresses near the root because each TLD / SLD NS is reused
 		// across millions of downstream queries; a name deep in the
@@ -2977,21 +2969,18 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 				})
 				oobRRset.RRs = oobRRset.RRs[:budget]
 			}
-			if Globals.Debug {
-				picked := make([]string, 0, len(oobRRset.RRs))
-				for _, rr := range oobRRset.RRs {
-					if ns, ok := rr.(*dns.NS); ok {
-						picked = append(picked, ns.Ns)
-					}
+			picked := make([]string, 0, len(oobRRset.RRs))
+			for _, rr := range oobRRset.RRs {
+				if ns, ok := rr.(*dns.NS); ok {
+					picked = append(picked, ns.Ns)
 				}
+			}
+			if Globals.Debug {
 				lgDns.Debug("handleReferral: OOB resolution budget",
 					"zone", zonename, "depth", zoneDepth(zonename),
 					"budget", budget, "picked", picked)
 			}
-			if err := imr.CollectNSAddresses(ctx, &oobRRset, nil); err != nil {
-				lgDns.Error("*** handleReferral: Error from CollectNSAddresses (out-of-bailiwick)", "err", err)
-				// Non-fatal: we can still proceed with whatever glue we have.
-			}
+			imr.resolveZoneServersInBackground(ctx, zonename, picked)
 		}
 	}
 

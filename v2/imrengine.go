@@ -99,6 +99,9 @@ type Imr struct {
 	// via RefreshDnssecPolicy. The empty zero value behaves as
 	// DNSKEYTransportUseDSSignal.
 	dnskeyTransport DNSKEYTransportPolicy
+	// nsAddrLookups tracks the background address lookups for out-of-
+	// bailiwick nameservers (resolveZoneServersInBackground).
+	nsAddrLookups nsAddrLookups
 }
 
 func (imr *Imr) isLargeAlgorithm(alg uint8) bool {
@@ -868,8 +871,10 @@ func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname 
 			continue
 		}
 
-		// Process A/AAAA records and add to authservers
+		// Process A/AAAA records and add to authservers, and to the zone's
+		// cached server map: authservers is the caller's copy (#682).
 		imr.processAddressRecords(rrresp.RRset, authservers)
+		imr.storeZoneServers(bestmatch, authservers)
 
 		// Call the callback to handle the response
 		done, err := onResponse(authservers)
