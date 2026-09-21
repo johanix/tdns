@@ -104,17 +104,30 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 		// (including the "due but no standby yet" wait, since the request
 		// persists until the roll commits).
 		if strings.EqualFold(req.KeyType, "ZSK") {
+			// Without a standby, "now" is a promise the worker cannot keep:
+			// leave Earliest empty, as "when --zsk" reports
+			// waiting-for-standby for the same state.
+			ready, err := hasStandbyZSK(kdb, zone)
+			if err != nil {
+				lgApi.Warn("rollover/asap: listing standby ZSKs failed", "zone", zone, "err", err)
+				http.Error(w, "failed to read the key pipeline", http.StatusInternalServerError)
+				return
+			}
 			now := time.Now()
 			if err := SetZskManualRolloverRequest(kdb, zone, now, now); err != nil {
 				lgApi.Warn("rollover/asap: SetZskManualRolloverRequest failed", "zone", zone, "err", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(RolloverAsapResponse{
-				Zone:        zone,
-				RequestedAt: now.UTC().Format(time.RFC3339),
-				Earliest:    now.UTC().Format(time.RFC3339),
-			})
+			resp := RolloverAsapResponse{Zone: zone, RequestedAt: now.UTC().Format(time.RFC3339)}
+			// A repeat keeps the pending request's own time.
+			if m, err := LoadZskManualRollover(kdb, zone); err == nil && m.RequestedAt != "" {
+				resp.RequestedAt = m.RequestedAt
+			}
+			if ready {
+				resp.Earliest = now.UTC().Format(time.RFC3339)
+			}
+			_ = json.NewEncoder(w).Encode(resp)
 			return
 		}
 

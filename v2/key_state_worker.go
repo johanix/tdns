@@ -129,7 +129,14 @@ func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propa
 }
 
 // transitionPublishedToStandby transitions keys that have been in "published"
-// state long enough for the DNSKEY RRset to propagate through all caches.
+// state long enough for the DNSKEY RRset to propagate through all caches:
+// propagation-delay for the key to reach every server, plus the served DNSKEY
+// TTL for a resolver's copy of the RRset without it to expire. A standby key is
+// one that may sign at once -- "asap --zsk" promotes the oldest on the next
+// tick -- so leaving out the TTL let a new ZSK sign while resolvers still held
+// a DNSKEY RRset that lacked it (#705). The KSK gate
+// (transitionPublishedToStandbyForZone) and the retired-ZSK hold
+// (zskRemovalMargin) already count the TTL.
 //
 // A global walk: it reaches every zone's published keys, including those of a
 // zone whose keys are steered by the lifecycle hooks (KeyLifecycleHooks). It
@@ -145,6 +152,12 @@ func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propa
 		return
 	}
 	keys = keysOfUnownedZones(keys)
+
+	type servedTTL struct {
+		ttl   time.Duration
+		known bool
+	}
+	ttls := map[string]servedTTL{}
 
 	for _, key := range keys {
 		if key.Flags&dns.SEP != 0 {
@@ -174,12 +187,25 @@ func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propa
 			continue
 		}
 
-		elapsed := now.Sub(*key.PublishedAt)
-		if elapsed < propagationDelay {
+		st, seen := ttls[key.ZoneName]
+		if !seen {
+			st.ttl, st.known = servedDnskeyTTLForZone(kdb, key.ZoneName)
+			ttls[key.ZoneName] = st
+		}
+		if !st.known {
+			// The zone has no TTL in its policy and has not been signed yet.
+			// Clears after the first SignZone; a zone's first keys are minted
+			// active and never wait here.
+			lgSigner.Debug("KeyStateWorker: deferring published→standby; DNSKEY TTL not yet observable", "zone", key.ZoneName, "keyid", key.KeyTag)
 			continue
 		}
 
-		lgSigner.Info("KeyStateWorker: transitioning published→standby", "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
+		elapsed := now.Sub(*key.PublishedAt)
+		if elapsed < propagationDelay+st.ttl {
+			continue
+		}
+
+		lgSigner.Info("KeyStateWorker: transitioning published→standby", "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second), "propagation_delay", propagationDelay, "dnskey_ttl", st.ttl)
 		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, DnskeyStateStandby); err != nil {
 			lgSigner.Error("KeyStateWorker: published→standby failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
 			continue
@@ -187,6 +213,20 @@ func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propa
 
 		triggerResign(conf, key.ZoneName)
 	}
+}
+
+// servedDnskeyTTLForZone is how long a resolver may keep the zone's DNSKEY
+// RRset: effectiveServedDnskeyTTL for a zone with a policy, else the largest
+// TTL the last signing pass observed. (0, false) when neither is known.
+func servedDnskeyTTLForZone(kdb *KeyDB, zone string) (time.Duration, bool) {
+	if zd, ok := Zones.Get(zone); ok && zd.DnssecPolicy != nil {
+		return effectiveServedDnskeyTTL(kdb, zone, zd.DnssecPolicy)
+	}
+	obs, err := LoadZoneSigningMaxTTL(kdb, zone)
+	if err != nil || obs == 0 {
+		return 0, false
+	}
+	return time.Duration(obs) * time.Second, true
 }
 
 // transitionRetiredToRemoved transitions keys that have been in "retired"
