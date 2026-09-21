@@ -734,6 +734,7 @@ func TestACatalogZonesFirstSnapshotHasItsVersionRecord(t *testing.T) {
 	t.Cleanup(func() {
 		stopZonePublisher(zone)
 		Zones.Remove(zone)
+		forgetCatalogMembership(zone)
 	})
 
 	if err := handleCatalogCreate(zone, &CatalogResponse{}); err != nil {
@@ -771,4 +772,49 @@ func TestACatalogZonesFirstSnapshotHasItsVersionRecord(t *testing.T) {
 	if n := len(snap.IxfrChain); n != 0 {
 		t.Errorf("the catalog zone has %d IXFR link(s): it was published more than once", n)
 	}
+	if catalogMembershipOf(zone) == nil {
+		t.Error("the catalog zone has no membership after its create")
+	}
+}
+
+// The create makes the catalog's membership only once the catalog exists, so
+// a create that fails leaves none behind. A membership another catalog handler
+// made before the create is kept, members and all.
+func TestACatalogCreateKeepsAMembershipMadeBeforeIt(t *testing.T) {
+	const zone = "catalog-early.tx.example."
+	t.Cleanup(func() {
+		stopZonePublisher(zone)
+		Zones.Remove(zone)
+		forgetCatalogMembership(zone)
+	})
+
+	early := GetOrCreateCatalogMembership(zone)
+	if err := early.AddMemberZone("member.example."); err != nil {
+		t.Fatalf("AddMemberZone: %v", err)
+	}
+	if err := handleCatalogCreate(zone, &CatalogResponse{}); err != nil {
+		t.Fatalf("handleCatalogCreate: %v", err)
+	}
+	cm := catalogMembershipOf(zone)
+	if cm != early {
+		t.Fatal("the create replaced the membership made before it")
+	}
+	cm.mu.Lock()
+	_, kept := cm.MemberZones["member.example."]
+	cm.mu.Unlock()
+	if !kept {
+		t.Error("the create dropped a member of the membership made before it")
+	}
+}
+
+func catalogMembershipOf(zone string) *CatalogMembership {
+	catalogMembershipMutex.Lock()
+	defer catalogMembershipMutex.Unlock()
+	return catalogMemberships[zone]
+}
+
+func forgetCatalogMembership(zone string) {
+	catalogMembershipMutex.Lock()
+	defer catalogMembershipMutex.Unlock()
+	delete(catalogMemberships, zone)
 }

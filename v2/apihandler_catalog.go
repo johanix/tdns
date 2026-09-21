@@ -127,9 +127,6 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 		return fmt.Errorf("zone %s already exists", catalogZoneName)
 	}
 
-	// Create the catalog membership
-	_ = GetOrCreateCatalogMembership(catalogZoneName)
-
 	// The catalog's first content is a transaction: created held, it is not
 	// visible as SOA and NS before its version record is there. This creator
 	// stages in-process, so it commits in-process (and could not do otherwise:
@@ -169,6 +166,11 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 		Zones.Remove(catalogZoneName)
 		return fmt.Errorf("failed to publish catalog zone %s: %v", catalogZoneName, err)
 	}
+
+	// The membership is made once the catalog exists, so a create that fails
+	// leaves none behind. The other catalog handlers make it on demand; one
+	// they made before this create is kept as it is.
+	_ = GetOrCreateCatalogMembership(catalogZoneName)
 
 	// no-refresh-hooks: republishes the zone CreateAutoZoneHeld already registered.
 	Zones.Set(catalogZoneName, zd)
