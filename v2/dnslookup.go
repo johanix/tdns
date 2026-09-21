@@ -11,7 +11,6 @@ import (
 	"log"
 	mrand "math/rand/v2"
 	"net"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1805,10 +1804,13 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		serverMap = map[string]*cache.AuthServer{}
 	}
 
-	// Prune expired auth servers for this zone before updating
+	// Prune expired auth servers for this zone before updating. The servers are
+	// the shared instances, which other queries and the background address
+	// lookups read and write concurrently: every access goes through the
+	// accessors, which hold the server's lock.
 	now := time.Now()
 	for name, srv := range serverMap {
-		if !srv.Expire.IsZero() && srv.Expire.Before(now) {
+		if expire := srv.GetExpire(); !expire.IsZero() && expire.Before(now) {
 			delete(serverMap, name)
 			if Globals.Debug && !imr.Quiet {
 				lgDns.Debug("ParseAdditionalForNSAddrs: pruned expired server for zone", "server", name, "zone", zonename)
@@ -1904,23 +1906,19 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		// Process the record based on type
 		switch rr := rr.(type) {
 		case *dns.A:
-			addr := rr.A.String()
-			if !slices.Contains(serverMap[cache.ServerKey(serverName)].Addrs, addr) {
-				serverMap[cache.ServerKey(serverName)].Addrs = append(serverMap[cache.ServerKey(serverName)].Addrs, addr)
-			}
+			srv := serverMap[cache.ServerKey(serverName)]
+			srv.AddAddr(rr.A.String())
 			// set expiry for this server mapping from glue TTL
-			serverMap[cache.ServerKey(serverName)].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
+			srv.SetExpire(time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second))
 			tmp := glue4Map[serverName]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue4Map[serverName] = tmp
 
 		case *dns.AAAA:
-			addr := rr.AAAA.String()
-			if !slices.Contains(serverMap[cache.ServerKey(serverName)].Addrs, addr) {
-				serverMap[cache.ServerKey(serverName)].Addrs = append(serverMap[cache.ServerKey(serverName)].Addrs, addr)
-			}
+			srv := serverMap[cache.ServerKey(serverName)]
+			srv.AddAddr(rr.AAAA.String())
 			// set expiry for this server mapping from glue TTL
-			serverMap[cache.ServerKey(serverName)].Expire = time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second)
+			srv.SetExpire(time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second))
 			tmp := glue6Map[serverName]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue6Map[serverName] = tmp
@@ -1992,7 +1990,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	if Globals.Debug && !imr.Quiet {
 		lgDns.Debug("ParseAdditionalForNSAddrs: serverMap:")
 		for n, as := range serverMap {
-			lgDns.Debug("server: : (addrs: )", "server", n, "s", as.Name, "addrs", as.Addrs)
+			lgDns.Debug("server: : (addrs: )", "server", n, "s", as.Name, "addrs", as.GetAddrs())
 		}
 	}
 
@@ -2163,7 +2161,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 		lgDns.Debug("*** tryServer: calling c.Exchange",
 			"transport", core.TransportToString[eff],
 			"server", server.Name,
-			"addrs", server.Addrs,
+			"addrs", server.GetAddrs(),
 			"addr", addr,
 			"qname", qname,
 			"qtype", dns.TypeToString[qtype])
@@ -2391,7 +2389,7 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 		lgDns.Debug("*** parseTransportForServerFromAdditional: server or r is nil")
 		return
 	}
-	lgDns.Debug("parseTransportForServerFromAdditional: inspecting server", "server", server.Name, "addrs", server.Addrs)
+	lgDns.Debug("parseTransportForServerFromAdditional: inspecting server", "server", server.Name, "addrs", server.GetAddrs())
 	lgDns.Debug("pTFSA: looking for transport signal in response", "qname", r.Question[0].Name, "qtype", dns.TypeToString[r.Question[0].Qtype], "additionalRRs", len(r.Extra))
 	if len(r.Extra) == 0 {
 		lgDns.Debug("*** parseTransportForServerFromAdditional: no Additional section in response")
