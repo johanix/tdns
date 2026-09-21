@@ -70,14 +70,9 @@ type zoneTxState struct {
 	seq  uint64
 	// urgent: some transaction of the current hold carried TxUrgent.
 	urgent bool
-	// publishWanted: the hold stopped a publish. Deliberately NOT
-	// publishQueued. runPublisher republishes for as long as publishQueued is
-	// set and the cadence has run out, and a publish that a hold stopped would
-	// leave both true: a hot loop on zd.mu for the length of the hold, the one
-	// clearQueuedPublishAfterRefusalLocked exists to stop. The want lives here,
-	// the publisher stands down, and the closing commit delivers.
-	publishWanted bool
-	// stopped counts the publishes holds have stopped on this zone.
+	// stopped counts the publishes holds have stopped on this zone. Nothing
+	// has to remember that one was wanted: the commit that closes the hold
+	// publishes whatever is staged.
 	stopped uint64
 	// commitWaiters are the commits waiting to learn that their transaction is
 	// published: those that left other transactions open, and the one that
@@ -244,7 +239,6 @@ func (zd *ZoneData) txHoldClosedLocked(by string, committed bool) {
 	zd.txStopTimerLocked()
 	urgent := zd.tx.urgent
 	zd.tx.urgent = false
-	zd.tx.publishWanted = false
 
 	neverPublished := zd.snapshot.Load() == nil
 	if zd.workingSet == nil {
@@ -285,15 +279,19 @@ func (zd *ZoneData) requestPublishLocked() {
 }
 
 // txStopPublishLocked is the hold, at the choke point. It reports whether the
-// zone is held, and if it is, records that a publish is wanted. Nothing else
-// moves: not the serial, not lastPublish, not one ws* flag, and the caller's
-// changes stay staged. publishQueued is taken over (see publishWanted).
-// Caller holds zd.mu.
+// zone is held. If it is, nothing moves: not the serial, not lastPublish, not
+// one ws* flag, and the caller's changes stay staged for the commit that
+// closes the hold.
+//
+// publishQueued is the exception, and has to be. runPublisher republishes for
+// as long as publishQueued is set and the cadence has run out, and a publish
+// that a hold stopped would leave both true: a hot loop on zd.mu for the
+// length of the hold, the one clearQueuedPublishAfterRefusalLocked exists to
+// stop. So it is cleared and the publisher stands down. Caller holds zd.mu.
 func (zd *ZoneData) txStopPublishLocked() bool {
 	if !zd.txHeldLocked() {
 		return false
 	}
-	zd.tx.publishWanted = true
 	zd.tx.stopped++
 	zd.publishQueued = false
 	lg.Debug("publish stopped: the zone has an open transaction", "zone", zd.ZoneName,
@@ -302,10 +300,12 @@ func (zd *ZoneData) txStopPublishLocked() bool {
 }
 
 // txPublishDoneLocked answers the waiting commits after a publish attempt.
-// before is the snapshot the attempt started from. A publish that a hold
-// stopped answers nobody: those transactions are not published yet, and the
-// commit that closes the new hold will carry them. Caller holds zd.mu.
-func (zd *ZoneData) txPublishDoneLocked(before *zoneSnapshot) {
+// before is the snapshot the attempt started from, and errBefore the zone's
+// reported error at that point: an error the zone had already says nothing
+// about this publish. A publish that a hold stopped answers nobody: those
+// transactions are not published yet, and the commit that closes the new hold
+// will carry them. Caller holds zd.mu.
+func (zd *ZoneData) txPublishDoneLocked(before *zoneSnapshot, errBefore string) {
 	if len(zd.tx.commitWaiters) == 0 || zd.txHeldLocked() {
 		return
 	}
@@ -320,7 +320,7 @@ func (zd *ZoneData) txPublishDoneLocked(before *zoneSnapshot) {
 			zd.ZoneName, zd.wsPersistErr)
 	case zd.tx.firstErr != nil:
 		res.Err = zd.tx.firstErr
-	case zd.ErrorMsg != "":
+	case zd.ErrorMsg != "" && zd.ErrorMsg != errBefore:
 		res.Err = fmt.Errorf("zone %s: the transaction was not published: %s", zd.ZoneName, zd.ErrorMsg)
 	default:
 		res.Err = fmt.Errorf("zone %s: the transaction was not published: the publish was refused", zd.ZoneName)

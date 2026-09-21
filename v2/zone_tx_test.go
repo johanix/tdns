@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"bytes"
+	"context"
 	"log"
 	"log/slog"
 	"strings"
@@ -342,13 +343,16 @@ func TestAHeldZoneHasNoSnapshotUntilItsCommit(t *testing.T) {
 	}
 }
 
-// A zone created held whose first content could not be signed has no hold and
-// no snapshot. InstallInitialSnapshot builds from zd.Data, the creation's SOA
-// and NS alone, so it must install nothing there either: the first snapshot
-// comes from a publish, the next signing pass or a repeated commit.
+// InstallInitialSnapshot builds a snapshot from zd.Data, which for a zone
+// created held is the creation template, SOA and NS alone: the zone's content
+// lives in its working set and its snapshots. So it installs nothing on such a
+// zone, whatever its state. A zone whose first content could not be signed has
+// no hold and no snapshot, and its first snapshot comes from a publish, the
+// next signing pass or a repeated commit. A zone that has published would get
+// the template back over its content.
 func TestAZoneCreatedHeldGetsNoSnapshotFromItsTemplate(t *testing.T) {
 	const zone = "template.tx.example."
-	zd, id, _ := newHeldSigningZone(t, zone, nil) // no policy: "not yet"
+	zd, id, kdb := newHeldSigningZone(t, zone, nil) // no policy: "not yet"
 	stageTxt(t, zd, "a."+zone, "one")
 	if err := zd.CommitTx(id); err == nil {
 		t.Fatal("precondition: the commit of a first content that cannot be signed reported success")
@@ -366,6 +370,53 @@ func TestAZoneCreatedHeldGetsNoSnapshotFromItsTemplate(t *testing.T) {
 	}
 	if zd.Ready {
 		t.Error("the zone is Ready with no snapshot")
+	}
+
+	// The signing pass installs the first snapshot, with the staged record.
+	zd.mu.Lock()
+	zd.DnssecPolicy = txTestPolicy()
+	zd.mu.Unlock()
+	if _, err := zd.SignZone(context.Background(), kdb, false); err != nil {
+		t.Fatalf("SignZone: %v", err)
+	}
+	published := zd.publishedSnapshot()
+	if published == nil || !served(zd, "a."+zone, dns.TypeTXT) {
+		t.Fatal("precondition: the signing pass did not install the first snapshot with the staged record")
+	}
+
+	zd.InstallInitialSnapshot()
+	if zd.publishedSnapshot() != published || !served(zd, "a."+zone, dns.TypeTXT) {
+		t.Error("InstallInitialSnapshot replaced the snapshot of a published zone created held with its creation template")
+	}
+}
+
+// A commit whose publish is refused learns why. The zone's reported error is
+// one reason a publish can give, but only when that publish set it: an error
+// the zone already had says nothing about this commit. Here the refusal is the
+// apex check's, which records no error of its own.
+func TestAFailedCommitDoesNotReportAnOlderError(t *testing.T) {
+	const zone = "older.tx.example."
+	zd, _ := newPublishedAutoZone(t, zone)
+	const older = "an older warning that has nothing to do with the commit"
+	zd.SetError(ConfigWarning, older)
+
+	// Urgent, so the commit's publish runs in the caller and CommitTx returns
+	// its outcome.
+	id := mustBeginTx(t, zd, TxUrgent)
+	zd.mu.Lock()
+	zd.stageOwnerDeleteLocked(zone) // no apex: the publish refuses the working set
+	zd.mu.Unlock()
+	before := zd.publishedSnapshot()
+
+	err := zd.CommitTx(id)
+	if err == nil {
+		t.Fatal("the commit of a working set with no apex reported success")
+	}
+	if zd.publishedSnapshot() != before {
+		t.Fatal("precondition: a working set with no apex was published")
+	}
+	if strings.Contains(err.Error(), older) {
+		t.Errorf("the commit reported an error the zone had before it: %v", err)
 	}
 }
 

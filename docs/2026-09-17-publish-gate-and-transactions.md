@@ -4,8 +4,10 @@
 written before any code, which is why it revises the text in place and is not
 an amendment, and it arrived together with step 1 of "Size and order of work"
 (transactions and held creation). **Step 1 is implemented and merged**
-(2026-09-21, tdns #700 → 368a28ce), with Amendment 1 at the end. Steps 2 to 4
-are not implemented; step 2 is tdns-mp's.
+(2026-09-21, tdns #700 → 368a28ce). Amendment 1 (tdns #711 → e635f202) and
+Amendment 2, at the end, record what changed in it after the reviews. Steps 2
+to 4 are not implemented; step 2 is tdns-mp's. What the reviews of step 1
+carried to them is listed under "Size and order of work".
 Updates §1.3 and §1.6 of `2026-07-02-DONE-zone-mutation-snapshot-correctness.md`
 ("the July design"), which stays as it is.
 
@@ -510,6 +512,28 @@ In four steps, each a PR that is green on its own:
    step 1, so a signing pass cannot publish through a hold even before step 4.
 4. **The remaining publishers behind the gate** (row 7), observability, guide.
 
+**Carried into later steps** from the reviews of step 1:
+
+- **Step 2:** a creator configures its zone (`Notify`, `Downstreams`,
+  `Options`) after held creation has registered it, as `SetupAgentAutoZone`
+  does today, and the transfer path reads `Downstreams` without the zone's
+  lock. A secondary that asks for a transfer during the set-up races that
+  write. Either held creation takes a set-up callback that runs before the
+  zone is registered, or the creator gets setters that lock.
+- **Step 3:** `wsPersistErr` on the gate's path. A commit that publishes in the
+  caller clears it after its own publish. A publish in `runPublisher` does not,
+  so a refused journal write there is later read by an update's applier whose
+  own publish succeeded, and reported as "not applied". Latent while the only
+  holders have no journal; step 3 makes the gate's path the normal one. Clear
+  it in `runPublisher` once the waiters have it.
+- **Step 3:** the hold's limit is per transaction, so a writer that opens its
+  next transaction before its last is released keeps a published zone held
+  without end. Internal writers only, so a bug and not an attack. A cap on the
+  hold's age, from its first begin, closes it.
+- **Step 4:** the operator's `BumpSerial` and `Publish` on a held zone return
+  success with the serial unchanged and nothing that says why. The
+  `BumperResponse` should say the zone is held.
+
 Signing is "behind the gate from the start" in the sense that matters for
 correctness from step 1: no pass publishes a held zone. Step 4 adds the rate
 limit, which is the smaller matter of a pass and an update sharing a serial.
@@ -599,3 +623,28 @@ the hold's limit released them (the external review of #700, C2). `BeginTx` is
 now `BeginTx(flags) (TxID, error)` and refuses such a zone as the queued marker
 does; no transaction is opened. `CommitTx` is still never refused on those
 grounds. Held creation opens its transaction below `BeginTx` and is unchanged.
+
+## Amendment 2 (2026-09-21): step 1's review follow-ups
+
+The findings of the reviews of #700 that neither #700 nor Amendment 1 took up.
+No caller in tdns reaches any of them today.
+
+- **`InstallInitialSnapshot` refuses any zone created held,** not only one that
+  has no snapshot yet ("A stopped publish changes nothing"). Such a zone's
+  `Data` is its creation template, SOA and NS; its content lives in its working
+  set and its snapshots. Before the first snapshot, installing from `Data`
+  would be the partial zone the transaction hides. After it, it would put the
+  template back over the zone's content.
+- **Nothing records that a publish is wanted.** "The hold is enforced at the
+  choke point", "'Wanted' is not `publishQueued`" and "Hold state" describe a
+  want kept in the hold state. As merged it was written and never read, because
+  the commit that closes the hold publishes whatever is staged, and it is gone.
+  What that bullet is for stays: a stopped publish clears `publishQueued`, and
+  `runPublisher` stands down. The hold state counts the publishes it stopped.
+- **A commit that was not published is told only of an error its own publish
+  recorded.** The zone's reported error was the fallback reason, and it could
+  be older than the commit and unrelated to it.
+- **`handleCatalogCreate` builds its version record before it creates the
+  zone,** so the one exit between the held creation and the commit is the
+  commit's own, which cleans up. Before, a failure there would have left a
+  registered zone holding a transaction nobody commits.
