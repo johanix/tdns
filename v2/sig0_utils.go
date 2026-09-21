@@ -271,14 +271,40 @@ func (kdb *KeyDB) GenerateKeypairWithColumns(owner, creator, state string, alg u
 	return kdb.generateKeypair(owner, creator, state, dns.TypeDNSKEY, alg, keytype, &cols, tx)
 }
 
+// generateKeyMaterial is the generator generateKeypair draws from; a test
+// replaces it to hand out a key tag the zone already uses.
+var generateKeyMaterial = GenerateKeyMaterial
+
+// maxKeyTagDraws bounds the keys generateKeypair draws for one mint. A zone
+// holding k keys meets a used tag with probability k/65536 per draw.
+const maxKeyTagDraws = 16
+
+// keyTagInUseTx reports whether zone has a row with this key tag in the store
+// for rrtype. Any state counts, removed and foreign included: the store is
+// unique on (zonename, keyid), and a parent or a validator may still hold the
+// old key under that tag.
+func keyTagInUseTx(tx *Tx, rrtype uint16, zone string, keyid uint16) (bool, error) {
+	table := "DnssecKeyStore"
+	if rrtype == dns.TypeKEY {
+		table = "Sig0KeyStore"
+	}
+	var n int
+	err := tx.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE zonename=? AND keyid=?", zone, int(keyid)).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("keyTagInUseTx: %s keyid %d: %w", zone, keyid, err)
+	}
+	return n > 0, nil
+}
+
 func (kdb *KeyDB) generateKeypair(owner, creator, state string, rrtype uint16, alg uint8, keytype string, cols *KeyRowFlags, tx *Tx) (*PrivateKeyCache, string, error) {
-	pkc, err := GenerateKeyMaterial(owner, rrtype, alg, keytype)
+	pkc, err := generateKeyMaterial(owner, rrtype, alg, keytype)
 	if err != nil {
 		return nil, "", err
 	}
 
+	// A plain INSERT: a mint never takes an existing row (tdns#709).
 	const addSig0KeySql = `
-INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
+INSERT INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?)`
 
 	// When tx != nil (external), the caller must republishSigningKeysForZone
 	// after their Commit if the active set may have changed (R1). When tx == nil
@@ -297,6 +323,28 @@ INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator,
 			tx.Rollback()
 		}
 	}()
+
+	// A fresh key whose tag the zone already uses would collide with that
+	// key, so draw again, in this transaction so a key minted earlier in it
+	// counts too.
+	for draws := 1; ; draws++ {
+		inUse, err := keyTagInUseTx(tx, rrtype, owner, pkc.KeyId)
+		if err != nil {
+			return nil, "", err
+		}
+		if !inUse {
+			break
+		}
+		if draws == maxKeyTagDraws {
+			return nil, "", fmt.Errorf("GenerateKeypair: %s %s: %d keys drawn, each with a key tag the zone already uses (last %d)",
+				owner, dns.TypeToString[rrtype], draws, pkc.KeyId)
+		}
+		lgDns.Info("GenerateKeypair: key tag is in use for the zone, generating another key",
+			"zone", owner, "rrtype", dns.TypeToString[rrtype], "keyid", pkc.KeyId)
+		if pkc, err = generateKeyMaterial(owner, rrtype, alg, keytype); err != nil {
+			return nil, "", err
+		}
+	}
 
 	if state == "" {
 		state = "active"
@@ -319,7 +367,7 @@ INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator,
 		row := KeyRow{
 			Zone: owner, State: state, Keyid: pkc.KeyId, Flags: uint16(flags),
 			Algorithm: dns.AlgorithmToString[pkc.Algorithm], Creator: creator,
-			PrivateKey: pkc.PrivateKey, KeyRR: pkc.DnskeyRR.String(), Replace: true,
+			PrivateKey: pkc.PrivateKey, KeyRR: pkc.DnskeyRR.String(),
 			RowFlags: cols,
 		}
 		// the stamp the state owns: a key minted into a state carries the
