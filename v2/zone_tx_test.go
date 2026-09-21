@@ -331,6 +331,33 @@ func TestAHeldZoneHasNoSnapshotUntilItsCommit(t *testing.T) {
 	}
 }
 
+// A zone created held whose first content could not be signed has no hold and
+// no snapshot. InstallInitialSnapshot builds from zd.Data, the creation's SOA
+// and NS alone, so it must install nothing there either: the first snapshot
+// comes from a publish, the next signing pass or a repeated commit.
+func TestAZoneCreatedHeldGetsNoSnapshotFromItsTemplate(t *testing.T) {
+	const zone = "template.tx.example."
+	zd, id, _ := newHeldSigningZone(t, zone, nil) // no policy: "not yet"
+	stageTxt(t, zd, "a."+zone, "one")
+	if err := zd.CommitTx(id); err == nil {
+		t.Fatal("precondition: the commit of a first content that cannot be signed reported success")
+	}
+	if zd.publishedSnapshot() != nil {
+		t.Fatal("precondition: a snapshot after the refused first content")
+	}
+	if n := zd.txOpenCount(); n != 0 {
+		t.Fatalf("precondition: %d open transaction(s), want the hold closed", n)
+	}
+
+	zd.InstallInitialSnapshot()
+	if snap := zd.publishedSnapshot(); snap != nil {
+		t.Fatalf("InstallInitialSnapshot installed the creation's template on a zone created held (serial %d)", snap.Serial)
+	}
+	if zd.Ready {
+		t.Error("the zone is Ready with no snapshot")
+	}
+}
+
 // The hold is enforced where every publish passes. The publishers below all
 // call publishLocked directly today, so a check in the publisher's loop alone
 // would let each of them through. A stopped publish changes nothing: not the

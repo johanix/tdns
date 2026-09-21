@@ -1259,6 +1259,16 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 			"zone", zd.ZoneName, "open", len(zd.tx.open))
 		return
 	}
+	// A zone created held gets its first snapshot from a publish, never from
+	// here, also once its hold has closed: after a first content that could not
+	// be signed, the zone has no hold and no snapshot until a signing pass or a
+	// repeated commit installs it. zd.Data is the creation's template, SOA and
+	// NS alone, which is the partial zone the transaction exists to hide.
+	if zd.tx.createdHeld && zd.snapshot.Load() == nil {
+		lg.Error("InstallInitialSnapshot: the zone was created held and has never published; its first snapshot comes from a publish",
+			"zone", zd.ZoneName)
+		return
+	}
 
 	data := snapshotMapFromData(zd.Data)
 	if apexFromSnapshotData(zd, data) == nil {

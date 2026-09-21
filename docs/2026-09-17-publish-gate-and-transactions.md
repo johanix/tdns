@@ -302,7 +302,9 @@ them through. No publisher installs a snapshot on a held zone.
   set held or not) and before the apex check and the serial bump. The serial,
   `lastPublish` and every `ws*` flag are as they were.
   `InstallInitialSnapshot`, the one way to a snapshot that is not a publish of
-  a working set, refuses a held zone as well.
+  a working set, refuses a held zone as well, and a zone created held that has
+  no snapshot yet, whose hold may have closed on a first content that could not
+  be signed: it would install the creation's SOA and NS.
 - **"Wanted" is not `publishQueued`.** `runPublisher` republishes for as long
   as `publishQueued` is set and the cadence has run out, and a publish that a
   hold stopped would leave both true: a hot loop on `zd.mu`, the one
