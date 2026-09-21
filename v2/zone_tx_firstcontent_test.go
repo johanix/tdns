@@ -169,16 +169,33 @@ func TestATransactionIsRefusedOnAZoneThatMayNotOriginate(t *testing.T) {
 		t.Errorf("%d transaction(s) open on a zone that may not originate content", n)
 	}
 
-	// The role is the reason: the same zone as a primary is accepted.
-	zd.mu.Lock()
-	zd.ZoneType = Primary
-	zd.mu.Unlock()
-	id, err := zd.BeginTx(0)
-	if err != nil {
-		t.Fatalf("BeginTx on a primary: %v", err)
-	}
-	if err := zd.CommitTx(id); err != nil {
-		t.Fatalf("CommitTx: %v", err)
+	// The role is the reason. Accepted: the sanctioned exception, a secondary
+	// that signs inline (it originates its signatures), and the same zone as a
+	// primary.
+	for _, c := range []struct {
+		name   string
+		ztype  ZoneType
+		inline bool
+	}{
+		{"an inline-signing secondary", Secondary, true},
+		{"a primary", Primary, false},
+	} {
+		zd.mu.Lock()
+		zd.ZoneType = c.ztype
+		if c.inline {
+			zd.Options[OptInlineSigning] = true
+		} else {
+			delete(zd.Options, OptInlineSigning)
+		}
+		zd.mu.Unlock()
+		id, err := zd.BeginTx(0)
+		if err != nil {
+			t.Errorf("BeginTx on %s: %v", c.name, err)
+			continue
+		}
+		if err := zd.CommitTx(id); err != nil {
+			t.Errorf("CommitTx on %s: %v", c.name, err)
+		}
 	}
 }
 
