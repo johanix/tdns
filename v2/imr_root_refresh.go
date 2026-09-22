@@ -44,6 +44,11 @@ const (
 	// window. Short relative to the lead, so a transient failure gets several
 	// tries before anything expires.
 	rootRefreshRetry = 15 * time.Second
+
+	// rootRetryFloor is the shortest wait after an attempt that did not renew
+	// the root NS, so that a copy which has already expired does not spin the
+	// loop.
+	rootRetryFloor = time.Second
 )
 
 // RefreshRoot keeps the root NS RRset alive for as long as the daemon runs.
@@ -179,8 +184,26 @@ func (imr *Imr) rootRefreshPass(ctx context.Context, hintsfile string,
 		if imr.refreshRootFromLiveRoots(ctx, query) {
 			return 0 // re-read the new expiry on the next pass
 		}
-		return rootRefreshRetry
+		// The wait runs to the expiry of what the attempt left, which can be
+		// sooner than what it started from: an answer with a TTL that counts
+		// down, or of TTL 0, replaces the copy it was meant to renew. Peek:
+		// Get would drop an expired copy, and the root server map with it.
+		var expiration time.Time
+		if held := imr.Cache.Peek(".", dns.TypeNS); held != nil {
+			expiration = held.Expiration
+		}
+		return rootRetryWait(expiration)
 	}
+}
+
+// rootRetryWait is how long to wait after a turn that did not renew the root
+// NS, given the expiry of the root NS the cache holds after it: the retry
+// interval, but never past that expiry, and never less than rootRetryFloor.
+// Sleeping the full interval through an expiry is what left a resolver with no
+// root NS for the rest of it (#722); waking at the expiry lets the next turn
+// re-prime from the hints at once.
+func rootRetryWait(expiration time.Time) time.Duration {
+	return max(min(time.Until(expiration), rootRefreshRetry), rootRetryFloor)
 }
 
 // rootNSQuery issues the actual ". NS" query for a refresh.
@@ -220,7 +243,12 @@ func (imr *Imr) rootNSQuery(ctx context.Context, servers map[string]*cache.AuthS
 func (imr *Imr) refreshRootFromLiveRoots(ctx context.Context,
 	query func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error)) bool {
 
-	before := imr.Cache.Get(".", dns.TypeNS)
+	// Peek, not Get, here and below. Get drops an expired entry, and an
+	// expired root NS takes the root server map with it. An answer of TTL 0 is
+	// stored already expired, so reading it back with Get left the resolver
+	// with neither until a retry interval later (#722). The next turn's Get
+	// still drops it, and then re-primes at once.
+	before := imr.Cache.Peek(".", dns.TypeNS)
 
 	// A COPY. The query writes into the server map it is handed -- resolved
 	// addresses in, expired entries out -- and the map stored under "." is the
@@ -239,7 +267,7 @@ func (imr *Imr) refreshRootFromLiveRoots(ctx context.Context,
 		return false
 	}
 
-	after := imr.Cache.Get(".", dns.TypeNS)
+	after := imr.Cache.Peek(".", dns.TypeNS)
 	if after == nil {
 		lgImr.Warn("RefreshRoot: the fetch succeeded but the cache still holds no root NS")
 		return false
@@ -249,6 +277,16 @@ func (imr *Imr) refreshRootFromLiveRoots(ctx context.Context,
 	if before != nil && !after.Expiration.After(before.Expiration) {
 		lgImr.Warn("RefreshRoot: the root NS was re-fetched but its expiry did not move",
 			"expiration", after.Expiration)
+		return false
+	}
+	// Nor has one whose expiry moved but still lies inside the lead window:
+	// the next turn would refresh again at once. An answer with a counting-
+	// down TTL -- from a cache rather than a root -- does exactly that, and
+	// "moved by the round trip" passed for success, one query after another,
+	// until the RRset expired (#722).
+	if time.Until(after.Expiration) <= rootRefreshLead {
+		lgImr.Warn("RefreshRoot: the re-fetched root NS expires within the refresh lead;"+
+			" not counted as a refresh", "expiration", after.Expiration, "lead", rootRefreshLead)
 		return false
 	}
 
