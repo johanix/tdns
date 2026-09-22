@@ -115,15 +115,20 @@ func TestCNAMEChainAnswerNegativeEnds(t *testing.T) {
 //	out -> www.plain.test. A         into an unsigned zone
 //	sub  DNAME tgt; www.tgt A        the server synthesizes www.sub -> www.tgt
 //	lie  DNAME tgt                   the server's CNAME for www.lie says evil
-//	s3 also has a DS, as though it were a delegation, for the DS test
+//	s3 also has a DS, as though it were a delegation, for the DS test;
+//	asked for any other type, s3 is NODATA, proved by a signed NSEC
+//
+// The double counts the questions it is asked.
 const (
 	sigChainZone = "sigchain.example."
 	plainZone    = "plain.test."
 )
 
-func startSigChainDouble(t *testing.T, s *zoneSigner) string {
+func startSigChainDouble(t *testing.T, s *zoneSigner) (string, *chainDouble) {
 	t.Helper()
 	z := sigChainZone
+	d := &chainDouble{queries: map[string]int{}}
+	s3NSEC := mustRR(t, "s3."+z+" 300 IN NSEC sub."+z+" A RRSIG NSEC")
 	soa := mustRR(t, z+" 300 IN SOA ns."+z+" hostmaster."+z+" 1 7200 1800 604800 300")
 	plainSOA := mustRR(t, plainZone+" 300 IN SOA ns."+plainZone+" hostmaster."+plainZone+" 1 7200 1800 604800 300")
 	cnames := map[string]string{
@@ -145,6 +150,9 @@ func startSigChainDouble(t *testing.T, s *zoneSigner) string {
 		m.Authoritative = true
 		q := r.Question[0]
 		name := core.CanonicalizeName(q.Name)
+		d.mu.Lock()
+		d.queries[name+"/"+dns.TypeToString[q.Qtype]]++
+		d.mu.Unlock()
 		var dnameOwner string
 		for owner := range dnames {
 			if dns.IsSubDomain(owner, name) && name != owner {
@@ -176,6 +184,8 @@ func startSigChainDouble(t *testing.T, s *zoneSigner) string {
 			m.Answer = s.sign(t, mustRR(t, q.Name+" 300 IN DS 12345 15 2 "+strings.Repeat("AB", 32)))
 		case addrs[name] != "" && q.Qtype == dns.TypeA:
 			m.Answer = s.sign(t, mustRR(t, q.Name+" 300 IN A "+addrs[name]))
+		case name == "s3."+z:
+			m.Ns = append(s.sign(t, soa), s.sign(t, s3NSEC)...)
 		case q.Qtype == dns.TypeSOA && name == z:
 			m.Answer = s.sign(t, soa)
 		default:
@@ -212,15 +222,16 @@ func startSigChainDouble(t *testing.T, s *zoneSigner) string {
 			t.Error("auth double serve goroutine did not exit")
 		}
 	})
-	return strconv.Itoa(pc.LocalAddr().(*net.UDPAddr).Port)
+	return strconv.Itoa(pc.LocalAddr().(*net.UDPAddr).Port), d
 }
 
 // sigChainImr holds sigChainZone as Secure, under a trust anchor for its key,
-// and reaches both zones through stubs pointing at the double.
-func sigChainImr(t *testing.T) *Imr {
+// and reaches both zones through stubs pointing at the double, which it
+// returns too.
+func sigChainImr(t *testing.T) (*Imr, *chainDouble) {
 	t.Helper()
 	s := newZoneSigner(t, sigChainZone)
-	port := startSigChainDouble(t, s)
+	port, d := startSigChainDouble(t, s)
 	imr := verdictImr(t, true)
 	imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, port, nil)
 	imr.Cache.DNSClient[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, port, nil)
@@ -234,13 +245,13 @@ func sigChainImr(t *testing.T) *Imr {
 	imr.Cache.DnskeyCache.Set(sigChainZone, s.key.KeyTag(), &cache.CachedDnskeyRRset{Name: sigChainZone,
 		Keyid: s.key.KeyTag(), TrustAnchor: true, State: cache.ValidationStateSecure, Dnskey: *s.key, Expiration: time.Now().Add(time.Hour)})
 	imr.Cache.ZoneMap.Set(sigChainZone, &cache.Zone{ZoneName: sigChainZone, State: cache.ValidationStateSecure})
-	return imr
+	return imr, d
 }
 
 // A chain whose every RRset is signed is Secure: AD, and with DO the RRSIG of
 // every link and of the data.
 func TestSecureCNAMEChainIsAuthenticated(t *testing.T) {
-	imr := sigChainImr(t)
+	imr, _ := sigChainImr(t)
 	want := []string{"s1.sigchain.example. CNAME", "s2.sigchain.example. CNAME", "s3.sigchain.example. A"}
 	for _, path := range []string{"fresh", "cached"} {
 		m, _ := askChain(t, imr, "s1."+sigChainZone, dns.TypeA)
@@ -258,7 +269,7 @@ func TestSecureCNAMEChainIsAuthenticated(t *testing.T) {
 
 // A link whose RRSIG was stripped, in a zone held Secure, fails the answer.
 func TestCNAMEChainWithAStrippedLinkIsBogus(t *testing.T) {
-	imr := sigChainImr(t)
+	imr, _ := sigChainImr(t)
 	for _, path := range []string{"fresh", "cached"} {
 		m, _ := askChain(t, imr, "bad."+sigChainZone, dns.TypeA)
 		if m.Rcode != dns.RcodeServerFailure || len(m.Answer) != 0 {
@@ -274,7 +285,7 @@ func TestCNAMEChainWithAStrippedLinkIsBogus(t *testing.T) {
 // A chain that leaves the signed zone for an unsigned one is served, without
 // AD.
 func TestCNAMEChainIntoAnUnsignedZoneIsNotAuthenticated(t *testing.T) {
-	imr := sigChainImr(t)
+	imr, _ := sigChainImr(t)
 	want := []string{"out.sigchain.example. CNAME", "www.plain.test. A"}
 	for _, path := range []string{"fresh", "cached"} {
 		m, _ := askChain(t, imr, "out."+sigChainZone, dns.TypeA)
@@ -290,7 +301,7 @@ func TestCNAMEChainIntoAnUnsignedZoneIsNotAuthenticated(t *testing.T) {
 // A CNAME synthesized from a signed DNAME is unsigned; the DNAME's signature
 // covers it (RFC 6672 §5.3.1). The answer is Secure and carries the DNAME.
 func TestCNAMESynthesizedFromASignedDNAMEIsAuthenticated(t *testing.T) {
-	imr := sigChainImr(t)
+	imr, _ := sigChainImr(t)
 	want := []string{"sub.sigchain.example. DNAME", "www.sub.sigchain.example. CNAME", "www.tgt.sigchain.example. A"}
 	for _, path := range []string{"fresh", "cached"} {
 		m, _ := askChain(t, imr, "www.sub."+sigChainZone, dns.TypeA)
@@ -306,7 +317,7 @@ func TestCNAMESynthesizedFromASignedDNAMEIsAuthenticated(t *testing.T) {
 // A CNAME that differs from what its DNAME synthesizes is not followed: the
 // chain goes where the signed DNAME says (RFC 6672 §3.2).
 func TestCNAMEThatContradictsItsDNAMEIsNotFollowed(t *testing.T) {
-	imr := sigChainImr(t)
+	imr, _ := sigChainImr(t)
 	m, _ := askChain(t, imr, "www.lie."+sigChainZone, dns.TypeA)
 	want := []string{"lie.sigchain.example. DNAME", "www.lie.sigchain.example. CNAME", "www.tgt.sigchain.example. A"}
 	if m.Rcode != dns.RcodeSuccess || !sameOrder(answerOrder(m), want) {
@@ -321,20 +332,75 @@ func TestCNAMEThatContradictsItsDNAMEIsNotFollowed(t *testing.T) {
 
 // A DS question is never answered through a CNAME: DS is parent-side data about
 // a delegation, and the chain's target is another name. The double answers
-// every question at s1 with its CNAME, DS included. Asked the way the
-// validator asks (IterativeDNSQuery), the chase used to come back with the
-// chain's links.
+// every question at s1 with its CNAME, DS included, and s3 has a DS of its own.
+// Asked the way the validator asks (IterativeDNSQuery), the chase used to come
+// back with the chain's links and s3's DS.
+//
+// Two checks, so that a query that produces nothing cannot pass by accident:
+// the double is never asked for s2's or s3's DS, and whatever comes back is a
+// DS owned by s1.
 func TestDSQuestionDoesNotFollowACNAME(t *testing.T) {
-	imr := sigChainImr(t)
+	imr, d := sigChainImr(t)
 	_, servers, _ := imr.Cache.FindClosestKnownZoneFor("s1."+sigChainZone, dns.TypeDS)
 	rrset, _, _, _, _ := imr.IterativeDNSQuery(context.Background(), "s1."+sigChainZone, dns.TypeDS, servers, false, edns0.PrivacyNone)
+
+	if n := d.count("s1."+sigChainZone, dns.TypeDS); n == 0 {
+		t.Fatal("s1 DS was never asked: the test did not exercise the query")
+	}
+	for _, name := range []string{"s2.", "s3."} {
+		if n := d.count(name+sigChainZone, dns.TypeDS); n != 0 {
+			t.Errorf("%s%s DS was asked %d times: the CNAME was followed", name, sigChainZone, n)
+		}
+	}
 	if rrset == nil {
 		return
 	}
 	for _, rr := range rrset.RRs {
-		if rr.Header().Rrtype != dns.TypeDS {
-			t.Errorf("s1 DS: the result carries %s %s: the CNAME was followed",
+		if rr.Header().Rrtype != dns.TypeDS || !core.EqualNames(rr.Header().Name, "s1."+sigChainZone) {
+			t.Errorf("s1 DS: the result carries %s %s; only a DS owned by s1 may come back",
 				core.CanonicalizeName(rr.Header().Name), dns.TypeToString[rr.Header().Rrtype])
+		}
+	}
+}
+
+// A signed chain that ends in NODATA, with a signed NSEC proving it, is Secure:
+// every CNAME, the proof in AUTHORITY, and AD. The links go through the
+// positive rule and the denial through its own; AD needs both.
+func TestSecureCNAMEChainEndingInNODATAIsAuthenticated(t *testing.T) {
+	imr, _ := sigChainImr(t)
+	want := []string{"s1.sigchain.example. CNAME", "s2.sigchain.example. CNAME"}
+	for _, path := range []string{"fresh", "cached"} {
+		m, _ := askChain(t, imr, "s1."+sigChainZone, dns.TypeTXT)
+		if m.Rcode != dns.RcodeSuccess || !sameOrder(answerOrder(m), want) {
+			t.Fatalf("%s: rcode %s, answer %v; want NOERROR with %v", path, dns.RcodeToString[m.Rcode], answerOrder(m), want)
+		}
+		var nsec bool
+		for _, rr := range m.Ns {
+			if n, ok := rr.(*dns.NSEC); ok && core.EqualNames(n.Hdr.Name, "s3."+sigChainZone) {
+				nsec = true
+			}
+		}
+		if !nsec {
+			t.Errorf("%s: AUTHORITY %v lacks s3's NSEC", path, m.Ns)
+		}
+		if !m.AuthenticatedData {
+			t.Errorf("%s: AD not set on a signed chain ending in a proven NODATA", path)
+		}
+	}
+}
+
+// A chain whose links are Secure but whose NODATA comes from an unsigned zone
+// is not: no AD.
+func TestCNAMEChainEndingInAnUnsignedNODATAIsNotAuthenticated(t *testing.T) {
+	imr, _ := sigChainImr(t)
+	want := []string{"out.sigchain.example. CNAME"}
+	for _, path := range []string{"fresh", "cached"} {
+		m, _ := askChain(t, imr, "out."+sigChainZone, dns.TypeTXT)
+		if m.Rcode != dns.RcodeSuccess || !sameOrder(answerOrder(m), want) {
+			t.Fatalf("%s: rcode %s, answer %v; want NOERROR with %v", path, dns.RcodeToString[m.Rcode], answerOrder(m), want)
+		}
+		if m.AuthenticatedData {
+			t.Errorf("%s: AD set on a chain whose NODATA comes from an unsigned zone", path)
 		}
 	}
 }
