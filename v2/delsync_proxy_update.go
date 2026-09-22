@@ -438,10 +438,11 @@ func (zd *ZoneData) currentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR
 // restated and ZSKs are not hashed.
 //
 // analysis is the comparison that triggered the sync; only the NS records it
-// saw leave are read from it (proxyRemovedNS). The served zone cannot say
-// that, and without it the replace form never deletes a withdrawn
-// nameserver's glue (#665). nil means nothing was removed.
-func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis) DelegationSyncStatus {
+// saw leave are read from it, together with parentOnly, the ones the parent
+// still serves (proxyRemovedNS). The served zone cannot say that, and without
+// it the replace form never deletes a withdrawn nameserver's glue (#665, #722).
+// nil for both means nothing was removed.
+func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis, parentOnly []dns.RR) DelegationSyncStatus {
 	newNS, newA, newAAAA, newDS := zd.currentDelegationRRs()
 	return DelegationSyncStatus{
 		ZoneName:   zd.ZoneName,
@@ -451,7 +452,7 @@ func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis) Del
 		NewAAAA:    newAAAA,
 		NewDS:      newDS,
 		NewDSKnown: !zd.hasDnskeyRRset() || len(newDS) > 0,
-		NsRemoves:  proxyRemovedNS(analysis),
+		NsRemoves:  proxyRemovedNS(analysis, parentOnly),
 	}
 }
 
@@ -511,12 +512,18 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 // out which transports pass their gate; SyncWithParent walks them. That is what
 // removed the repeated discovery (three to four per sync, all returning the
 // same RRset) and the fallback that never fired.
-func (zd *ZoneData) ProxyDelegationSync(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, imr *Imr, analysis *ProxyDelegationAnalysis) (string, error) {
+//
+// forwarded reports whether the change reached the parent: a scheme ran and
+// succeeded. A plan with no usable scheme is not an error -- SyncWithParent
+// returns "nothing forwarded" with a nil error -- but nothing was sent, and a
+// caller counting successes must not count it.
+func (zd *ZoneData) ProxyDelegationSync(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, imr *Imr, analysis *ProxyDelegationAnalysis) (msg string, forwarded bool, err error) {
 	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr, SyncRoleProxy)
 	if err != nil {
-		return "", fmt.Errorf("ProxyDelegationSync: %w", err)
+		return "", false, fmt.Errorf("ProxyDelegationSync: %w", err)
 	}
-	return zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis, nil)
+	msg, err = zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis, nil)
+	return msg, err == nil && plan.Usable(), err
 }
 
 // proxyUpdateMode returns the parent-update form for the proxy: the operator's
@@ -562,7 +569,7 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
 			return "delta: parent already in sync; nothing sent", nil
 		}
 	} else {
-		dss = zd.proxyReplaceSyncState(analysis)
+		dss = zd.proxyReplaceSyncState(analysis, zd.proxyParentOnlyNS(imr))
 	}
 
 	if err := zd.proxyEnsureParentBootstrap(ctx); err != nil {

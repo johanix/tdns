@@ -181,7 +181,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 				switch ds.Command {
 				case "PROXY-SYNC":
-					proxySync(ctx, zd, kdb, notifyq, imr(), ds)
+					proxySync(ctx, zd, kdb, notifyq, delsyncq, imr(), ds)
 				case "PROXY-UPDATE-SETUP":
 					proxyStartupReconcile(ctx, zd, kdb, notifyq, imr(), ds)
 				}
@@ -800,17 +800,75 @@ func requeueSetupAfter(ctx context.Context, delsyncq chan DelegationSyncRequest,
 	return done
 }
 
-// proxySync forwards a detected change to the parent on behalf of a
-// DSYNC-unaware primary, over whichever of UPDATE / API / NOTIFY is usable.
-func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan NotifyRequest,
-	imr *Imr, ds DelegationSyncRequest) {
+// proxySyncRetryDelays are the waits before each re-run of a proxy sync that
+// failed. Nothing else re-sends the change: the next transfer is compared with
+// a copy that already has it, so a failure that is not retried stays unsent
+// until the zone changes again (#722). Many failures are transient -- the
+// parent's DSYNC endpoint could not be discovered, the parent was briefly
+// unreachable -- so a handful of tries over some forty minutes, and then the
+// next change or a restart takes over.
+var proxySyncRetryDelays = []time.Duration{30 * time.Second, 2 * time.Minute, 8 * time.Minute, 30 * time.Minute}
 
-	msg, err := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr, ds.ProxyAnalysis)
-	if err != nil {
-		lgDns.Error("DelegationSyncher: proxy sync failed", "zone", ds.ZoneName, "err", err)
+// nextProxySyncRetry returns the request that re-runs a failed proxy sync and
+// how long to wait before it; ok is false once the retries have run out.
+func nextProxySyncRetry(ds DelegationSyncRequest, failedAt time.Time) (next DelegationSyncRequest, delay time.Duration, ok bool) {
+	if ds.Attempt >= len(proxySyncRetryDelays) {
+		return ds, 0, false
+	}
+	next = ds
+	next.Attempt++
+	next.FailedAt = failedAt
+	return next, proxySyncRetryDelays[ds.Attempt], true
+}
+
+// proxyRetrySuperseded reports whether a retry is redundant because a later
+// proxy sync for the zone has succeeded since the one it retries failed. Every
+// proxy sync declares the whole delegation and takes its withdrawals from the
+// parent as well as from its own trigger, so a later success covers whatever
+// the failed one was sending.
+func proxyRetrySuperseded(zd *ZoneData, ds DelegationSyncRequest) bool {
+	if ds.Attempt == 0 {
+		return false
+	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.proxyLastSyncOK.After(ds.FailedAt)
+}
+
+// proxySync forwards a detected change to the parent on behalf of a
+// DSYNC-unaware primary, over whichever of UPDATE / API / NOTIFY is usable. A
+// failure is retried (nextProxySyncRetry).
+func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan NotifyRequest,
+	delsyncq chan DelegationSyncRequest, imr *Imr, ds DelegationSyncRequest) {
+
+	if proxyRetrySuperseded(zd, ds) {
+		lgDns.Info("DelegationSyncher: proxy sync retry dropped; a later sync has succeeded",
+			"zone", ds.ZoneName, "attempt", ds.Attempt)
 		return
 	}
-	lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "msg", msg)
+	msg, forwarded, err := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr, ds.ProxyAnalysis)
+	if err != nil {
+		next, delay, ok := nextProxySyncRetry(ds, time.Now())
+		if !ok {
+			lgDns.Error("DelegationSyncher: proxy sync failed; no retries left, the next change or a restart will try again",
+				"zone", ds.ZoneName, "attempts", ds.Attempt+1, "err", err)
+			return
+		}
+		lgDns.Error("DelegationSyncher: proxy sync failed; will retry", "zone", ds.ZoneName,
+			"attempt", ds.Attempt+1, "retry_in", delay, "err", err)
+		requeueSetupAfter(ctx, delsyncq, next, delay)
+		return
+	}
+	// Only a sync that reached the parent supersedes a pending retry. "Nothing
+	// forwarded" (no usable scheme, for instance an empty DSYNC discovery) is
+	// not an error, but it sent nothing, and must not cancel a retry that
+	// might.
+	if forwarded {
+		zd.mu.Lock()
+		zd.proxyLastSyncOK = time.Now()
+		zd.mu.Unlock()
+	}
+	lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "forwarded", forwarded, "msg", msg)
 }
 
 // proxyStartupReconcile builds the sync plan on first load (which runs the

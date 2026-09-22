@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -123,7 +124,7 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 		"parent", parent, "target", endpoint.Target, "endpoint", endpoint.Url,
 		"dialect", endpoint.Dialect, "addrs", endpoint.Addrs)
 
-	rrsets := zd.proxyApiRRsets(analysis)
+	rrsets := zd.proxyApiRRsets(analysis, zd.proxyParentOnlyNS(imr))
 	if len(rrsets) == 0 {
 		// An empty request is refused as malformed by the endpoint, and rightly
 		// so: nothing to declare has to mean nothing, not "remove everything".
@@ -164,17 +165,62 @@ func (zd *ZoneData) ProxyApiParent(ctx context.Context, imr *Imr, dsynctarget *D
 }
 
 // proxyRemovedNS returns the NS records a proxy sync takes out of the
-// delegation, from whichever comparison triggered it: the transfer diff
-// (PreRefresh) or, at startup, the parent-versus-child analysis.
+// delegation: those the comparison that triggered it saw leave (the transfer
+// diff, or at startup the parent-versus-child analysis), and parentOnly, the
+// ones the parent still serves although the zone no longer has them
+// (proxyParentOnlyNS).
 //
 // The served zone cannot answer this. A withdrawn nameserver is simply absent
 // from it, so a payload built from it alone never deleted that nameserver's
-// glue at the parent (#665).
-func proxyRemovedNS(analysis *ProxyDelegationAnalysis) []dns.RR {
-	if analysis == nil {
+// glue at the parent (#665). And the triggering comparison alone is not
+// enough either: it describes one transfer, so a withdrawal whose sync failed
+// was in no later comparison, and every later payload left its glue behind for
+// the parent to refuse (#722). Duplicates, and names the zone has since taken
+// back, are dropped where the glue deletes are derived (withdrawnGlueOwners).
+func proxyRemovedNS(analysis *ProxyDelegationAnalysis, parentOnly []dns.RR) []dns.RR {
+	var out []dns.RR
+	if analysis != nil {
+		out = append(out, analysis.DelegationStatus.NsRemoves...)
+	}
+	return append(out, parentOnly...)
+}
+
+// proxyParentOnlyNS returns the NS records the parent serves for the zone that
+// the served zone no longer has: withdrawals the parent has not been told
+// about, whatever happened to the sync that should have told it (#722). nil
+// when the parent cannot be read; the triggering comparison is then all a sync
+// has to go on, as before.
+func (zd *ZoneData) proxyParentOnlyNS(imr *Imr) []dns.RR {
+	if imr == nil {
 		return nil
 	}
-	return analysis.DelegationStatus.NsRemoves
+	if err := zd.FetchParentData(imr); err != nil {
+		lgDns.Warn("parentsync-proxy: cannot read the parent's NS RRset; withdrawals come from the triggering change only",
+			"zone", zd.ZoneName, "err", err)
+		return nil
+	}
+	pns, _, err := zd.parentNSRRset()
+	if err != nil {
+		lgDns.Warn("parentsync-proxy: cannot read the parent's NS RRset; withdrawals come from the triggering change only",
+			"zone", zd.ZoneName, "err", err)
+		return nil
+	}
+	childNS, _, _, _ := zd.currentDelegationRRs()
+	return parentOnlyNS(zd.ZoneName, childNS, pns)
+}
+
+// parentOnlyNS returns the NS records in parentNS that childNS does not have.
+//
+// Nothing when childNS is empty. A delegation always has nameservers, so an
+// empty set is a view of the zone that failed, not a zone that withdrew every
+// nameserver -- and read as one, it would delete the glue of every nameserver
+// the parent has.
+func parentOnlyNS(zone string, childNS, parentNS []dns.RR) []dns.RR {
+	if len(childNS) == 0 {
+		return nil
+	}
+	_, _, removes := core.RRsetDiffer(zone, childNS, parentNS, dns.TypeNS, nil, false, false)
+	return removes
 }
 
 // proxyApiRRsets renders the served zone's delegation in the declarative form
@@ -208,7 +254,7 @@ func proxyRemovedNS(analysis *ProxyDelegationAnalysis) []dns.RR {
 // saw leave the delegation are read from it (proxyRemovedNS): that is the one
 // thing the served zone cannot say, and it is what deletes a withdrawn
 // nameserver's glue. nil means nothing was removed.
-func (zd *ZoneData) proxyApiRRsets(analysis *ProxyDelegationAnalysis) []DsyncApiRRset {
+func (zd *ZoneData) proxyApiRRsets(analysis *ProxyDelegationAnalysis, parentOnly []dns.RR) []DsyncApiRRset {
 	newNS, newA, newAAAA, _ := zd.currentDelegationRRs()
 
 	rrsets := DsyncApiRRsetsFromSyncStatus(zd.ZoneName, DelegationSyncStatus{
@@ -217,7 +263,7 @@ func (zd *ZoneData) proxyApiRRsets(analysis *ProxyDelegationAnalysis) []DsyncApi
 		NewNS:     newNS,
 		NewA:      newA,
 		NewAAAA:   newAAAA,
-		NsRemoves: proxyRemovedNS(analysis),
+		NsRemoves: proxyRemovedNS(analysis, parentOnly),
 	})
 
 	if !zd.hasDnskeyRRset() {
