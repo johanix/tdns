@@ -1,6 +1,7 @@
 # Forwarding and priming
 
-**Written 2026-09-22.** Proposal. Follows from #722, where a resolver whose root
+**Written 2026-09-22.** Proposal, revised the same day after review. Line
+references are to main at `a3e2dae5`. Follows from #722, where a resolver whose root
 is forwarded lost its root NS for up to 15 s at a time, and a delegation sync that
 fell into the gap failed. #723 fixes that by keeping a synthetic root alive. This
 document argues that a forwarded root should not need one, and proposes the
@@ -101,8 +102,16 @@ looks up a cut, and "no cut, no servers" is normal for a forwarded name.
 | `foo.` forwarded | hints + live `. NS` | yes | probe `foo.`'s upstreams | anchors at or below `foo.`: DNSKEY fetched through the forward |
 | `.` forwarded | **none** | **none** | probe `.`'s upstreams | root anchor: `. DNSKEY` fetched through the forward; no `. NS` step |
 
-- **No priming for a forwarded root**, not even the hints seed. `RefreshRoot`
-  idles while `.` is forwarded.
+- **No priming for a forwarded root**, not even the hints seed. `InitImrEngine`
+  neither calls `PrimeFromHintsOnly` nor reads `root-hints`, so a missing or
+  unreadable hints file no longer stops a forwarded-root resolver from starting.
+  Today a configured path that does not exist aborts init
+  (`v2/cache/rrset_cache.go:883`, surfacing at `v2/imrengine.go:305`). A
+  configured `root-hints` is kept for the reload that removes the `.` forward
+  (section 4). If it is missing at start-up, that is a warning: that reload
+  would fail to prime.
+- **`RefreshRoot` waits for a notification**, with no timer, while `.` is
+  forwarded (section 4).
 - **Trust anchors.** `processTrustAnchorZone` fetches and validates the anchored
   DNSKEY RRset, then validates the NS RRset (`validateNSRRsetForAnchor`,
   `v2/imrengine.go:2122`, non-fatal). For an anchor zone under a forward, the
@@ -110,8 +119,18 @@ looks up a cut, and "no cut, no servers" is normal for a forwarded name.
   delegation the resolver never uses. Today this step is also what replaces the
   hint copy of the root NS with the upstream's short-lived one: it sends a forced
   `. NS` query, which is forwarded, and caches the answer.
-- **Nothing blocks start-up.** The forward table is built, the probe runs
-  concurrently, and the resolver serves.
+- **Trust-anchor setup no longer holds back the listeners.** Today
+  `initializeImrTrustAnchors` runs to completion before `StartImrEngineListeners`
+  (`v2/imrengine.go:401`, `:406`). A validating resolver whose upstream is down
+  therefore waits out those fetches before it binds: the leftover noted in
+  `2026-08-31-imr-forward-startup-and-status.md` §5. S2 starts the listeners
+  first and runs the online half of trust-anchor setup (fetching and validating
+  the anchored DNSKEY RRsets) concurrently with the probe. The offline half
+  (`loadConfiguredTrustAnchors`, `v2/imrengine.go:292`) still runs first, so the
+  configured keys are in the cache before the first query. A query that arrives
+  before the online half has finished has its DNSKEY fetched and validated
+  against them on demand; S2's tests pin that. Neither the probe nor trust-anchor
+  setup is a gate.
 
 ### 3. Probing the upstreams
 
@@ -124,28 +143,43 @@ changes:
   whatever its rcode (`v2/imr_forward.go:58`). An upstream that answers REFUSED
   or SERVFAIL to the SOA of the zone it is supposed to serve therefore looks
   healthy. The probe should report three outcomes: unreachable (no response),
-  refusing (REFUSED, SERVFAIL, NOTAUTH, or NXDOMAIN for the apex), and answering
-  (the zone's SOA). The first two are warnings with different wording. Live
-  queries keep today's meaning of "reachable".
+  answering (the zone's SOA), and refusing (every other response: REFUSED,
+  SERVFAIL, NOTAUTH, NXDOMAIN or NODATA for the apex, FORMERR, NOTIMP, and so
+  on). Unreachable and refusing are warnings with different wording. Live queries
+  keep today's meaning of "reachable".
 - **Optionally, re-probe idle zones.** Reachability only changes with traffic,
   so a zone nobody asks about keeps its start-up verdict forever. A slow re-probe
   (for example every 15 minutes, only for zones with no successful exchange in
-  that window) keeps the status honest. The interval is an open question.
+  that window) keeps the status honest. Settled: yes, every 15 minutes, as a
+  separate step after the classification (S4). It blocks nothing.
 
 ### 4. Reload, and status
 
-- **Reload** (`v2/imr_reload.go`) swaps the forward table. The root state follows
-  the new table:
-  - `.` forward removed: prime now, and start refreshing. The reload nudges
-    `RefreshRoot` rather than waiting for its next wake-up.
-  - `.` forward added: stop refreshing. The old root data expires; nothing
-    depends on it.
+- **`RefreshRoot` gets a wake-up channel.** Today its loop waits only on
+  `ctx.Done` and `time.After` (`v2/imr_root_refresh.go:98`), so it can neither
+  idle nor react to a reload; with no root NS it would spin at its 1 ms yield.
+  On each wake it asks whether `.` is forwarded:
+  - forwarded: it waits on the channel and `ctx` only, with no timer;
+  - not forwarded: it runs its refresh pass as today, and waits on the channel,
+    `ctx` and the pass's timer.
+
+  The channel has a buffer of one, so a send never blocks and repeated sends
+  collapse into one wake-up.
+- **Reload** (`v2/imr_reload.go`) swaps the forward table and, when the answer to
+  "is `.` forwarded?" changes, sends on the channel:
+  - `.` forward removed: `RefreshRoot` wakes, finds an unforwarded root with no
+    root NS, and primes the way start-up does (hints, then the live `. NS`).
+  - `.` forward added: `RefreshRoot` wakes and goes idle. The old root data
+    expires; nothing depends on it.
   - another forward zone added or removed: probe the new zone's upstreams. No
     effect on priming.
+
+  **`RefreshRoot` owns priming after start-up.** The reload only notifies, so
+  there is one place that primes and no race between the two.
 - **Status.** `imr config status` reports "root forwarded: not primed, no root
   NS kept" instead of a root NS expiry that means nothing for a forwarded root.
 
-### 5. DS at a forward zone's apex (open question)
+### 5. DS at a forward zone's apex (settled: the parent's path)
 
 The forward decision uses the query name alone (`v2/dnslookup.go:1342`). A DS
 query for `foo.` therefore goes to `foo.`'s upstream, although DS is parent-side
@@ -171,19 +205,82 @@ servers for a DS.
   it is the only path that works. (When everything is forwarded, `.` is forwarded
   too, and the question does not arise.)
 
-**Proposed: the parent's path.** The maintainer's view is that sending it to
-`foo.`'s upstream is wrong, though it can be argued both ways. The rule would
-mirror `FindClosestKnownZoneFor`: for qtype DS, the forward decision looks at the
-parent of the query name. A DS for `foo.` then follows `.`'s path (the `.`
-forward if there is one, otherwise iteration), and a DS for `sub.foo.` still goes
-to `foo.`'s upstream.
+**Settled: the parent's path.** The maintainer's view is that sending it to
+`foo.`'s upstream is wrong, though it can be argued both ways; the review agrees.
+The rule mirrors `FindClosestKnownZoneFor`: for qtype DS, the forward decision
+looks at the parent of the query name. A DS for `foo.` then follows `.`'s path
+(the `.` forward if there is one, otherwise iteration), and a DS for `sub.foo.`
+still goes to `foo.`'s upstream. This is why the cache hook takes a qtype.
+
+An operator whose split-horizon `foo.` needs the child's view has two ways out:
+forward the parent too, or configure a trust anchor at `foo.`. The second only
+works once a trust anchor takes precedence over the parent's DS, which today it
+does not (section 6). S6 therefore depends on S5.
 
 This does not change how tdns treats data from a forward zone: unsigned data from
 a zone the operator configured is not held to a delegation proof from the public
 tree (`ConfiguredZone`; `v2/cache/delegation_proof.go`). The rule matters for a
 signed forward zone chained from a public trust anchor.
 
-### 6. What stays from #723
+### 6. Trust anchors under a forward zone
+
+The interesting case for section 5: `foo.` is forwarded **and** has a configured
+trust anchor. The configuration then says "send everything at and below `foo.` to
+this upstream, and trust `foo.` through this key". That is the operator's
+statement of how `foo.` is trusted, and it has to beat anything a parent says.
+It is the reason to configure one: a private `foo.` with no public delegation, a
+split-horizon `foo.` signed with other keys than the public one, or a parent that
+has not published the DS yet.
+
+**The rule.** A configured trust anchor at `foo.` governs `foo.` and everything
+below it, down to any more specific anchor:
+
+- `foo.`'s DNSKEY RRset is validated against the anchor, and only against it.
+- No DS for `foo.` is fetched for validation, and no parent-side data about
+  `foo.` counts: not a parent DS, not a parent's proof that there is no DS, not
+  an NXDOMAIN for `foo.` in the public tree. None of them can make `foo.`
+  Insecure or Bogus.
+- If `foo.`'s DNSKEY RRset does not validate against the anchor, `foo.` is Bogus.
+  There is no fallback to the parent's DS.
+
+**Today it is the other way round.** `ValidateDNSKEYs`
+(`v2/cache/rrset_validate.go:668`) consults the parent's DS first, and the
+configured anchor is only a fallback:
+
+| line | what happens | result |
+|---|---|---|
+| 707 | look for a cached DS for the zone | |
+| 721 | none cached: fetch one on demand (`backfillDS`) | |
+| 728 | the DS denial proves an insecure cut | **Insecure** |
+| 735 | a DS that is not Secure | its state |
+| 756 | a Secure DS matching no DNSKEY (EDE 9 at 792) | **Bogus** |
+| 803, 822 | only now: trust-anchor DNSKEYs, then a seeded DS | |
+
+This does not show at start-up, because trust-anchor setup validates `foo.`'s
+DNSKEY directly against the anchor. It shows when that DNSKEY RRset expires and
+is validated again. The routing makes it worse: `backfillDS` picks the parent's
+servers, but the forward hook decides by query name, so the DS query goes to
+`foo.`'s upstream after all. Depending on what that upstream answers for
+`foo. DS`, an anchored `foo.` can end up Insecure or Bogus. Not tested yet.
+
+The code already follows the rule in one place: `proofNames`
+(`v2/cache/unsigned_rrset.go:143`) leaves the zone out of the DS check when "a
+trust anchor vouches for the zone, which no DS removal undoes". `ValidateDNSKEYs`
+needs the same check, before anything about the DS: `hasTrustAnchor(name)` means
+validate against the anchor's keys or seeded DS, and stop.
+
+**Why this must come before section 5.** With today's order, sending `foo. DS`
+along the parent's path would make an anchored split-horizon `foo.` reliably
+Bogus: the public parent's DS matches none of the internal keys. With the anchor
+in charge, the routing of a DS query only matters where no anchor decides: a
+client's own DS query, and a forward zone without an anchor that is chained from
+the parent's.
+
+**`trust-ad` and an anchor on the same zone** contradict each other: one says
+"validate it yourself with this key", the other "trust the upstream's AD bit".
+The anchor wins, and the configuration gets a warning.
+
+### 7. What stays from #723
 
 Keep the hardening of the refresh for an **iterating** root:
 - A refresh whose new expiry is still inside the lead window is not a refresh.
@@ -210,10 +307,23 @@ unaffected.
   want of a root NS, over several hints-length periods.
 - `foo.` forwarded: the root is primed and refreshed; `foo.` names go to the
   upstream; the probe reports each of its three outcomes.
-- Reload in both directions: `.` forward removed primes at once; added stops the
-  refresh.
-- Section 5, if adopted: a DS query for `foo.` goes to the parent's path, one for
-  `sub.foo.` to `foo.`'s upstream.
+- Start-up with the only upstream down: the listeners bind without waiting for
+  trust-anchor fetches, and a query that arrives before the online half of
+  trust-anchor setup has finished still validates once the upstream is back.
+- `.` forwarded and `root-hints` pointing at a missing file: the resolver starts,
+  with a warning.
+- Reload in both directions, through the wake-up channel: removing the `.`
+  forward primes at once, not on a timer; adding it makes `RefreshRoot` idle
+  with no timer running.
+- Section 5: a DS query for `foo.` goes to the parent's path, one for `sub.foo.`
+  to `foo.`'s upstream.
+- Section 6: `foo.` forwarded with a trust anchor at `foo.`. The upstream (or the
+  parent's path, after S6) answers `foo. DS` with NODATA, with NXDOMAIN, with a DS
+  that matches no DNSKEY, and with a matching DS. `foo.` stays Secure in all four,
+  both at start-up and after its DNSKEY RRset expires and is validated again.
+  With no anchor at `foo.`, the parent's answer decides, as today.
+- Section 6: `trust-ad` plus an anchor on the same zone: the anchor decides, and
+  the configuration warns.
 - The iterating-root hardening, as in #723.
 
 ## Staging
@@ -221,16 +331,26 @@ unaffected.
 | step | content | depends on |
 |---|---|---|
 | S1 | forward-first decision in the seven callers, the cache hook | — |
-| S2 | no priming or refresh for a forwarded root; trust anchors through the forward; reload transitions; status | S1 |
+| S2 | no priming or refresh for a forwarded root; `root-hints` not read; `RefreshRoot` wake-up channel and reload notification; trust-anchor setup after the listeners, through the forward; status | S1 |
 | S3 | the iterating-root hardening from #723 | — |
-| S4 | probe classification; optional idle re-probe | — |
-| S5 | DS at a forward apex follows the parent's path | decision on section 5 |
+| S4 | probe classification; then the idle re-probe | classification: —; re-probe: S1–S3 |
+| S5 | a configured trust anchor governs its zone; parent-side DS data cannot override it | — |
+| S6 | DS at a forward apex follows the parent's path | S5 |
 
-S1 and S2 replace #723's forwarded-root half. S3 is #723's other half.
+S1 and S2 replace #723's forwarded-root half. S3 is #723's other half. S1 alone
+closes #722's lookup failures; S2 removes the synthetic root. S5 must land before
+S6.
 
-## Open questions
+## Settled questions
 
-1. DS at a forward apex: parent's path (proposed) or the forward's upstream.
-2. The idle re-probe: whether to have it, and at what interval.
-3. Whether `root-hints` should be rejected or warned about when `.` is forwarded,
-   since it is then unused.
+Settled in review, 2026-09-22.
+
+1. **DS at a forward apex:** the parent's path (S6), after trust-anchor
+   precedence (S5). A split-horizon operator who needs the child's view forwards
+   the parent too, or configures a trust anchor at the child.
+2. **Idle re-probe:** yes, every 15 minutes, only for a zone with no successful
+   live exchange in that window. It blocks nothing and comes after the start-up
+   classification (S4).
+3. **`root-hints` when `.` is forwarded:** warn, do not reject. The file is
+   unused while `.` is forwarded, and it is what the reload that removes the
+   forward primes from. A missing file must not stop start-up.
