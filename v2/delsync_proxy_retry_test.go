@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -63,5 +64,40 @@ func TestProxyRetrySuperseded(t *testing.T) {
 	zd.proxyLastSyncOK = failedAt.Add(time.Minute)
 	if !proxyRetrySuperseded(zd, retry) {
 		t.Error("a retry survived a later successful sync")
+	}
+}
+
+// A proxy sync that forwarded nothing is not a success for the retry rule
+// (review of #724, C1). With no usable scheme -- here no IMR, so no DSYNC
+// discovery -- SyncWithParent returns "nothing forwarded" with a nil error.
+// Counting that as a success would let a later no-op cancel a queued retry
+// although nothing had reached the parent.
+func TestProxyNoopSyncDoesNotSupersedeARetry(t *testing.T) {
+	zd := testZone(t, withdrawalChild, withdrawalAfter)
+
+	msg, forwarded, err := zd.ProxyDelegationSync(context.Background(), nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("ProxyDelegationSync with no IMR: %v", err)
+	}
+	if forwarded {
+		t.Errorf("a plan with no usable scheme reported forwarded=true (%q)", msg)
+	}
+
+	// Through proxySync itself: the no-op must not stamp proxyLastSyncOK.
+	delsyncq := make(chan DelegationSyncRequest, 1)
+	proxySync(context.Background(), zd, nil, nil, delsyncq, nil,
+		DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName, ZoneData: zd})
+	zd.mu.Lock()
+	stamped := !zd.proxyLastSyncOK.IsZero()
+	zd.mu.Unlock()
+	if stamped {
+		t.Error("a sync that forwarded nothing was recorded as a success")
+	}
+
+	// And so a retry of an earlier failure still runs.
+	retry, _, _ := nextProxySyncRetry(DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName},
+		time.Now().Add(-time.Minute))
+	if proxyRetrySuperseded(zd, retry) {
+		t.Error("a retry was dropped after a sync that forwarded nothing")
 	}
 }

@@ -846,7 +846,7 @@ func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan Notif
 			"zone", ds.ZoneName, "attempt", ds.Attempt)
 		return
 	}
-	msg, err := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr, ds.ProxyAnalysis)
+	msg, forwarded, err := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr, ds.ProxyAnalysis)
 	if err != nil {
 		next, delay, ok := nextProxySyncRetry(ds, time.Now())
 		if !ok {
@@ -859,10 +859,16 @@ func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan Notif
 		requeueSetupAfter(ctx, delsyncq, next, delay)
 		return
 	}
-	zd.mu.Lock()
-	zd.proxyLastSyncOK = time.Now()
-	zd.mu.Unlock()
-	lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "msg", msg)
+	// Only a sync that reached the parent supersedes a pending retry. "Nothing
+	// forwarded" (no usable scheme, for instance an empty DSYNC discovery) is
+	// not an error, but it sent nothing, and must not cancel a retry that
+	// might.
+	if forwarded {
+		zd.mu.Lock()
+		zd.proxyLastSyncOK = time.Now()
+		zd.mu.Unlock()
+	}
+	lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "forwarded", forwarded, "msg", msg)
 }
 
 // proxyStartupReconcile builds the sync plan on first load (which runs the

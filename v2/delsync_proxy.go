@@ -209,7 +209,7 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 		ProxyAnalysis: analysis,
 	}:
 	default:
-		zd.Logger.Printf("ProxyDelegationPostRefresh: DelegationSyncQ full for %s; dropping proxy sync (will re-detect on next transfer)", zd.ZoneName)
+		zd.Logger.Printf("ProxyDelegationPostRefresh: DelegationSyncQ full for %s; dropping this proxy sync trigger (the next proxy sync declares the whole delegation and takes withdrawals from the parent)", zd.ZoneName)
 	}
 }
 
