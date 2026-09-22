@@ -596,12 +596,14 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 	lgImr.Debug("ImrQuery: not in cache, querying", "qname", qname, "qtype", dns.TypeToString[qtype])
 
 	// Apply per-query wall-time budget at the top-level public entry,
-	// not just at IterativeDNSQueryWithLoopDetection. Sub-queries
-	// spawned by resolveNSAddresses / CollectNSAddresses go back
-	// through this same ImrQuery on the parent ctx; wrapping here
+	// not just at IterativeDNSQueryWithLoopDetection. Sub-queries made on
+	// the parent ctx go back through this same ImrQuery; wrapping here
 	// bounds the whole logical request. context.WithTimeout takes
 	// min(parent.Deadline, now+budget), so nested ImrQuery calls
-	// inherit the outermost deadline cleanly.
+	// inherit the outermost deadline cleanly. Nameserver address lookups
+	// (nsLookup) are the exception: they run on a detached context with
+	// their own deadline, and a query that waits for one stops waiting
+	// when its own budget runs out.
 	if budget := imr.Tuning.QueryBudget; budget > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, budget)
@@ -792,88 +794,69 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 	}
 }
 
-// processAddressRecords processes A and AAAA records from an RRset and adds them to authservers
-func (imr *Imr) processAddressRecords(rrset *core.RRset, authservers map[string]*cache.AuthServer) {
-	if rrset == nil {
-		return
-	}
-	for _, rr := range rrset.RRs {
-		var nsname string
-		var addr string
-		var rrType string
-		var ttl uint32
-		switch rr := rr.(type) {
-		case *dns.A:
-			nsname = rr.Header().Name
-			addr = rr.A.String()
-			rrType = "A"
-			ttl = rr.Header().Ttl
-		case *dns.AAAA:
-			nsname = rr.Header().Name
-			addr = rr.AAAA.String()
-			rrType = "AAAA"
-			ttl = rr.Header().Ttl
-		default:
-			continue
-		}
-
-		// Use shared AuthServer instance (ensures single instance per nameserver)
-		server := imr.Cache.GetOrCreateAuthServer(nsname)
-		server.AddAddr(addr)
-		server.SetSrc("answer")
-		server.SetExpire(time.Now().Add(time.Duration(ttl) * time.Second))
-		authservers[cache.ServerKey(nsname)] = server
-		lgImr.Debug("processAddressRecords: using resolved address", "rrtype", rrType, "nsname", nsname, "addr", addr)
-	}
-}
-
-// resolveNSAddresses resolves nameserver addresses when authservers is empty.
-// It calls onResponse for each successful address resolution, allowing the caller
-// to handle the response appropriately. Returns true if a response was successfully
-// handled, false if no usable address was found, and an error if something went wrong.
+// resolveNSAddresses resolves the addresses of bestmatch's nameservers when
+// the zone's server map has none. It calls onResponse each time a nameserver
+// gets an address, with authservers holding every server that has one so far,
+// and stops when onResponse is done. Returns true if a response was handled,
+// false if no usable address was found, and an error if something went wrong.
+//
+// The lookups run at once, one per nameserver name (nsLookup): a name whose
+// lookup is already running, typically started by the referral that brought
+// the query here, is joined rather than looked up a second time, and a name
+// whose shared server already has addresses needs no lookup at all. A lookup
+// goes on after this returns, and stores what it finds in the zone's map.
 func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname string, qtype uint16,
 	authservers map[string]*cache.AuthServer,
 	onResponse func(authservers map[string]*cache.AuthServer) (bool, error)) (bool, error) {
 
 	lgImr.Info("resolveNSAddresses: no server addresses", "zone", bestmatch, "qname", qname)
 	cnsrrset := imr.Cache.Get(bestmatch, dns.TypeNS)
-	if cnsrrset == nil {
+	if cnsrrset == nil || cnsrrset.RRset == nil {
 		lgImr.Warn("resolveNSAddresses: no nameservers either, giving up", "zone", bestmatch)
 		return false, fmt.Errorf("no nameservers for zone %q", bestmatch)
 	}
 
 	lgImr.Debug("resolveNSAddresses: have nameserver names", "zone", bestmatch, "count", len(cnsrrset.RRset.RRs))
 
-	// Create response channel for A and AAAA queries
-	respch := make(chan *ImrResponse, len(cnsrrset.RRset.RRs)*2) // *2 for both A and AAAA
-	// Note: We don't need to close the channel here as it will be garbage collected
-	// when it goes out of scope, even if there are still pending writes to it
-
-	// Launch parallel queries for each nameserver
-	err := imr.CollectNSAddresses(ctx, cnsrrset.RRset, respch)
-	if err != nil {
-		lgImr.Error("resolveNSAddresses: CollectNSAddresses failed", "err", err)
-		return false, err
+	// Each nameserver's shared server is sent here once its lookup has ended
+	// (or at once, if it needs none). Buffered for all of them, so a sender
+	// never blocks on a receiver that has returned.
+	resolved := make(chan *cache.AuthServer, len(cnsrrset.RRset.RRs))
+	want := 0
+	for _, rr := range cnsrrset.RRset.RRs {
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			continue
+		}
+		want++
+		srv := imr.Cache.GetOrCreateAuthServer(ns.Ns)
+		if len(srv.GetAddrs()) > 0 {
+			resolved <- srv
+			continue
+		}
+		go func(ctx context.Context, srv *cache.AuthServer, done <-chan struct{}) {
+			select {
+			case <-done:
+				resolved <- srv
+			case <-ctx.Done():
+			}
+		}(ctx, srv, imr.nsLookup(ctx, ns.Ns, bestmatch))
 	}
 
-	// Process a bounded number of responses until we get a usable address
-	want := len(cnsrrset.RRset.RRs) * 2
 	for i := 0; i < want; i++ {
-		var rrresp *ImrResponse
+		var srv *cache.AuthServer
 		select {
 		case <-ctx.Done():
 			return false, ctx.Err()
-		case rrresp = <-respch:
-		case <-time.After(3 * time.Second):
-			rrresp = nil
+		case srv = <-resolved:
 		}
-		if rrresp == nil || rrresp.RRset == nil {
+		if len(srv.GetAddrs()) == 0 {
 			continue
 		}
 
-		// Process A/AAAA records and add to authservers, and to the zone's
-		// cached server map: authservers is the caller's copy (#682).
-		imr.processAddressRecords(rrresp.RRset, authservers)
+		// Add it to authservers, and to the zone's cached server map:
+		// authservers is the caller's copy (#682).
+		authservers[cache.ServerKey(srv.Name)] = srv
 		imr.storeZoneServers(bestmatch, authservers)
 
 		// Call the callback to handle the response
