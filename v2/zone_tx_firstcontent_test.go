@@ -197,6 +197,23 @@ func TestATransactionIsRefusedOnAZoneThatMayNotOriginate(t *testing.T) {
 			t.Errorf("CommitTx on %s: %v", c.name, err)
 		}
 	}
+
+	// A commit is never refused on those grounds: a hold that got open while
+	// the zone could originate content is closable after it no longer can.
+	// Through the queue, where the begin is refused.
+	if res := sendTx(t, kdb, UpdateRequest{Cmd: UpdateCmdTxBegin, ZoneName: zone, TxID: "writer-2", TxFlags: TxUrgent}, true); res.Err != nil {
+		t.Fatalf("a queued TX-BEGIN on a primary: %v", res.Err)
+	}
+	zd.mu.Lock()
+	zd.ZoneType = Secondary
+	delete(zd.Options, OptInlineSigning)
+	zd.mu.Unlock()
+	if res := sendTx(t, kdb, UpdateRequest{Cmd: UpdateCmdTxCommit, ZoneName: zone, TxID: "writer-2"}, true); res.Err != nil {
+		t.Errorf("a TX-COMMIT on a zone that may no longer originate content was refused: %v", res.Err)
+	}
+	if n := zd.txOpenCount(); n != 0 {
+		t.Errorf("%d transaction(s) still open after the commit", n)
+	}
 }
 
 // A plain commit on a busy Ready zone asks the gate, and the publish happens in

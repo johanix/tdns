@@ -127,6 +127,25 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 		return fmt.Errorf("zone %s already exists", catalogZoneName)
 	}
 
+	// Everything that can fail without a zone comes first. Between the held
+	// creation and the commit there is then no exit but the commit's own, which
+	// cleans up: a return in that stretch would leave a registered zone holding
+	// a transaction nobody commits, which fails closed at the hold's limit.
+	//
+	// Version TXT record: version.{catalog} IN TXT "2" (RFC 9432 requirement)
+	versionOwner := fmt.Sprintf("version.%s", catalogZoneName)
+	versionTxtStr := fmt.Sprintf("%s 0 IN TXT \"2\"", versionOwner)
+	versionTxt, err := dns.NewRR(versionTxtStr)
+	if err != nil {
+		return fmt.Errorf("failed to create version TXT record: %v", err)
+	}
+	rrset := core.RRset{
+		Name:   versionOwner,
+		RRtype: dns.TypeTXT,
+		Class:  dns.ClassINET,
+		RRs:    []dns.RR{versionTxt},
+	}
+
 	// The catalog's first content is a transaction: created held, it is not
 	// visible as SOA and NS before its version record is there. This creator
 	// stages in-process, so it commits in-process (and could not do otherwise:
@@ -140,21 +159,6 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 	// Mark it as a catalog zone
 	zd.Options[OptCatalogZone] = true
 
-	// Add version TXT record: version.{catalog} IN TXT "2" (RFC 9432 requirement)
-	versionOwner := fmt.Sprintf("version.%s", catalogZoneName)
-	versionTxtStr := fmt.Sprintf("%s 0 IN TXT \"2\"", versionOwner)
-	versionTxt, err := dns.NewRR(versionTxtStr)
-	if err != nil {
-		return fmt.Errorf("failed to create version TXT record: %v", err)
-	}
-
-	// Create or update TXT RRset
-	rrset := core.RRset{
-		Name:   versionOwner,
-		RRtype: dns.TypeTXT,
-		Class:  dns.ClassINET,
-		RRs:    []dns.RR{versionTxt},
-	}
 	zd.mu.Lock()
 	zd.ensureWorkingSet()
 	zd.stageRRsetLocked(versionOwner, rrset)

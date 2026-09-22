@@ -380,8 +380,8 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// returns through here. No waiters, which is every zone that opens no
 	// transaction, and nothing is deferred.
 	if len(zd.tx.commitWaiters) > 0 {
-		before := zd.snapshot.Load()
-		defer func() { zd.txPublishDoneLocked(before) }()
+		before, errBefore := zd.snapshot.Load(), zd.ErrorMsg
+		defer func() { zd.txPublishDoneLocked(before, errBefore) }()
 	}
 	if zd.workingSet == nil {
 		zd.publishQueued = false
@@ -1259,14 +1259,17 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 			"zone", zd.ZoneName, "open", len(zd.tx.open))
 		return
 	}
-	// A zone created held gets its first snapshot from a publish, never from
-	// here, also once its hold has closed: after a first content that could not
-	// be signed, the zone has no hold and no snapshot until a signing pass or a
-	// repeated commit installs it. zd.Data is the creation's template, SOA and
-	// NS alone, which is the partial zone the transaction exists to hide.
-	if zd.tx.createdHeld && zd.snapshot.Load() == nil {
-		lg.Error("InstallInitialSnapshot: the zone was created held and has never published; its first snapshot comes from a publish",
-			"zone", zd.ZoneName)
+	// A zone created held takes every snapshot from a publish of its working
+	// set, never from here. zd.Data is the creation's template, SOA and NS
+	// alone; the zone's content lives in its working set and its snapshots.
+	// Before the first snapshot (after a first content that could not be
+	// signed, the zone has no hold and no snapshot until a signing pass or a
+	// repeated commit installs it) this would install the partial zone the
+	// transaction exists to hide. After it, it would put the template back over
+	// the zone's content.
+	if zd.tx.createdHeld {
+		lg.Error("InstallInitialSnapshot: the zone was created held; its snapshots come from publishes",
+			"zone", zd.ZoneName, "published", zd.snapshot.Load() != nil)
 		return
 	}
 
