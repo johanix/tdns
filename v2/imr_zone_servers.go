@@ -141,11 +141,11 @@ const nsAddrLookupFallbackBudget = 8 * time.Second
 // out-of-bailiwick nameservers a referral to zone carried no addresses for,
 // and adds each one that gets an address to zone's server map.
 //
-// The lookups run on a context detached from ctx: the query that met the
-// referral returns long before they finish, and its deferred cancel used to
-// end every one of them. Each nameserver gets its own deadline, the query
+// The lookups run on a detached context (detachedContext): the query that met
+// the referral returns long before they finish, and its deferred cancel used
+// to end every one of them. Each nameserver gets its own deadline, the query
 // budget per address type.
-func (imr *Imr) resolveZoneServersInBackground(ctx context.Context, zone string, nsnames []string) {
+func (imr *Imr) resolveZoneServersInBackground(zone string, nsnames []string) {
 	budget := imr.Tuning.QueryBudget
 	if budget <= 0 {
 		budget = nsAddrLookupFallbackBudget
@@ -157,7 +157,7 @@ func (imr *Imr) resolveZoneServersInBackground(ctx context.Context, zone string,
 			continue
 		}
 		go func(nsname string) {
-			lctx, cancel := asyncContextFromQuery(ctx, 2*budget)
+			lctx, cancel := detachedContext(2 * budget)
 			defer cancel()
 			srv := imr.Cache.GetOrCreateAuthServer(nsname)
 			srv.SetSrc("referral-oob")
