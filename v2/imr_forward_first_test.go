@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/johanix/tdns/v2/cache"
@@ -281,8 +282,9 @@ func TestTrustAnchorDNSKEYIsFetchedThroughTheForward(t *testing.T) {
 }
 
 // The cache's Forwarded hook answers as the resolver decides: a name under a
-// forward zone is forwarded, a name under a more specific stub zone is not, and
-// with no forward zones nothing is.
+// forward zone is forwarded, a name under a more specific stub zone is not, a
+// name outside a forward zone below the root is not, and with no forward zones
+// nothing is.
 func TestCacheForwardedHookFollowsTheZoneTable(t *testing.T) {
 	imr := newForwardTestImr(t, rootForward("192.0.2.53", 53))
 	imr.setZoneTable(imr.ForwardZones(), []string{"stub.example."}, nil)
@@ -301,8 +303,81 @@ func TestCacheForwardedHookFollowsTheZoneTable(t *testing.T) {
 		}
 	}
 
+	// Only fwd.example. forwarded, and nothing cached: its names go out with
+	// no servers, and every other name is iterated, with no servers to ask.
+	sub := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.53", Port: 53}}},
+	})
+	if !sub.Cache.Forwarded("www.fwd.example.", dns.TypeA) {
+		t.Error("a name under the forward zone is not forwarded")
+	}
+	if servers, ok := sub.Cache.ServersFor("www.fwd.example.", dns.TypeA); !ok || len(servers) != 0 {
+		t.Errorf("ServersFor(www.fwd.example.) = %d servers, %v; want none, and forwarded", len(servers), ok)
+	}
+	if sub.Cache.Forwarded("www.example.", dns.TypeA) {
+		t.Error("a name outside the forward zone is forwarded")
+	}
+	if _, ok := sub.Cache.ServersFor("www.example.", dns.TypeA); ok {
+		t.Error("ServersFor(www.example.) has something to ask, with nothing cached")
+	}
+	if _, _, forwarded, _ := sub.serversForQuestion("www.example.", dns.TypeA); forwarded {
+		t.Error("serversForQuestion forwards a name outside the forward zone")
+	}
+
 	none := newForwardTestImr(t, nil)
 	if none.Cache.Forwarded("www.example.", dns.TypeA) {
 		t.Error("forwarded with no forward zones")
+	}
+}
+
+// A path that finds a question forwarded sends it with no servers, and the
+// forward hook in IterativeDNSQuery decides again. A reload that removes the
+// forward in between left the question with neither, and the query failed with
+// nothing tried (CodeRabbit on #726). It is iterated instead, from the closest
+// cached zone cut, as it would be if it were asked after the reload.
+func TestAQuestionWhoseForwardWasRemovedIsIterated(t *testing.T) {
+	const zone, qname = "example.", "www.example."
+	a := fwdSecRR(t, qname+" 300 IN A 192.0.2.10")
+	for _, c := range []struct {
+		name string
+		pick func(imr *Imr) (map[string]*cache.AuthServer, bool)
+	}{
+		{"the fetchers (ServersFor)", func(imr *Imr) (map[string]*cache.AuthServer, bool) {
+			return imr.Cache.ServersFor(qname, dns.TypeA)
+		}},
+		{"imrQuery and ImrResponder (serversForQuestion)", func(imr *Imr) (map[string]*cache.AuthServer, bool) {
+			_, servers, forwarded, _ := imr.serversForQuestion(qname, dns.TypeA)
+			return servers, forwarded
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			port, stop := startAnswerDouble(t, zone, dns.TypeA, []dns.RR{a})
+			defer stop()
+			imr := newForwardTestImr(t, rootForward("192.0.2.53", 53))
+			p := strconv.Itoa(port)
+			imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, p, nil)
+			imr.Cache.DNSClient[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, p, nil)
+			// The cut the question falls back to, which it passes over while
+			// "." is forwarded.
+			if err := imr.Cache.AddStub(zone, []cache.AuthServer{
+				{Name: "ns." + zone, Addrs: []string{"127.0.0.1"}, Alpn: []string{"do53"}},
+			}); err != nil {
+				t.Fatalf("AddStub: %v", err)
+			}
+
+			servers, forwarded := c.pick(imr)
+			if !forwarded || len(servers) != 0 {
+				t.Fatalf("test setup: before the reload, %d servers and forwarded %v; want none, forwarded", len(servers), forwarded)
+			}
+			imr.setZoneTable(nil, nil, nil) // the reload: no forward zones
+
+			rrset, _, _, _, err := imr.IterativeDNSQuery(context.Background(), qname, dns.TypeA, servers, false, edns0.PrivacyNone)
+			if err != nil {
+				t.Fatalf("IterativeDNSQuery after the forward was removed: %v", err)
+			}
+			if rrset == nil || len(rrset.RRs) != 1 {
+				t.Fatalf("no answer from the cut: %v", rrset)
+			}
+		})
 	}
 }

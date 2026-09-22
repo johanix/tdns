@@ -1398,6 +1398,13 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	if fz := imr.forwardZoneForQuestion(qname, qtype); fz != nil {
 		return imr.forwardQuery(ctx, qname, qtype, fz, force, privacy)
 	}
+	// A caller that found the question forwarded sent it with no servers. A
+	// reload that has removed the forward since leaves it to be iterated after
+	// all, from the closest cached zone cut, as it would be if asked now: with
+	// no servers, the walk below would have nothing to try.
+	if len(serverMap) == 0 {
+		_, serverMap, _ = imr.Cache.FindClosestKnownZoneFor(qname, qtype)
+	}
 
 	var rrset core.RRset
 	var rcode int

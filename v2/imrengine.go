@@ -703,7 +703,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		bestmatch, authservers, forwarded, err := imr.serversForQuestion(qname, qtype)
 		if err != nil {
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZoneFor: %v", err)
+			resp.ErrorMsg = fmt.Sprintf("Error finding the zone cut: %v", err)
 			return &resp, err
 		}
 		lgImr.Debug("ImrQuery: best zone match", "qname", qname, "bestmatch", bestmatch, "forwarded", forwarded)
