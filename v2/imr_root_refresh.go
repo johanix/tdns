@@ -59,39 +59,7 @@ func (imr *Imr) RefreshRoot(ctx context.Context, hintsfile string) {
 	}
 
 	for {
-		var wait time.Duration
-
-		switch crrset := imr.Cache.Get(".", dns.TypeNS); {
-		case crrset == nil:
-			// Already gone. Nothing can be fetched without a root server
-			// address, so this is the one case that needs the hints -- and
-			// reaching it at all means a refresh was missed.
-			lgImr.Warn("RefreshRoot: the root NS RRset is gone; re-priming from hints",
-				"hintsfile", hintsfile)
-			if err := imr.Cache.PrimeFromHintsOnly(hintsfile); err != nil {
-				lgImr.Error("RefreshRoot: re-priming from hints failed", "err", err)
-				wait = rootRefreshRetry
-			} else {
-				imr.PrimedVia = "hints (re-primed after expiry)"
-				imr.PrimedAt = time.Now()
-				lgImr.Info("RefreshRoot: re-primed from hints; the next refresh" +
-					" will upgrade to the live roots")
-				wait = 0
-			}
-
-		case time.Until(crrset.Expiration) > rootRefreshLead:
-			// Healthy, and not due yet. Sleep until the lead window opens.
-			wait = time.Until(crrset.Expiration) - rootRefreshLead
-
-		default:
-			// Inside the lead window: refresh from the roots we still have.
-			if imr.refreshRootFromLiveRoots(ctx, imr.rootNSQuery) {
-				wait = 0 // re-read the new expiry on the next pass
-			} else {
-				wait = rootRefreshRetry
-			}
-		}
-
+		wait := imr.rootRefreshPass(ctx, hintsfile, imr.rootNSQuery)
 		if wait <= 0 {
 			wait = time.Millisecond // yield, then re-evaluate
 		}
@@ -101,6 +69,42 @@ func (imr *Imr) RefreshRoot(ctx context.Context, hintsfile string) {
 			return
 		case <-time.After(wait):
 		}
+	}
+}
+
+// rootRefreshPass is one turn of RefreshRoot: it acts on the root NS as the
+// cache holds it now, and returns how long to wait before the next turn.
+// query is a parameter for the same reason as in refreshRootFromLiveRoots.
+func (imr *Imr) rootRefreshPass(ctx context.Context, hintsfile string,
+	query func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error)) time.Duration {
+
+	switch crrset := imr.Cache.Get(".", dns.TypeNS); {
+	case crrset == nil:
+		// Already gone. Nothing can be fetched without a root server
+		// address, so this is the one case that needs the hints -- and
+		// reaching it at all means a refresh was missed.
+		lgImr.Warn("RefreshRoot: the root NS RRset is gone; re-priming from hints",
+			"hintsfile", hintsfile)
+		if err := imr.Cache.PrimeFromHintsOnly(hintsfile); err != nil {
+			lgImr.Error("RefreshRoot: re-priming from hints failed", "err", err)
+			return rootRefreshRetry
+		}
+		imr.PrimedVia = "hints (re-primed after expiry)"
+		imr.PrimedAt = time.Now()
+		lgImr.Info("RefreshRoot: re-primed from hints; the next refresh" +
+			" will upgrade to the live roots")
+		return 0
+
+	case time.Until(crrset.Expiration) > rootRefreshLead:
+		// Healthy, and not due yet. Sleep until the lead window opens.
+		return time.Until(crrset.Expiration) - rootRefreshLead
+
+	default:
+		// Inside the lead window: refresh from the roots we still have.
+		if imr.refreshRootFromLiveRoots(ctx, query) {
+			return 0 // re-read the new expiry on the next pass
+		}
+		return rootRefreshRetry
 	}
 }
 
