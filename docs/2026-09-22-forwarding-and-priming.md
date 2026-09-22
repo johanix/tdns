@@ -404,6 +404,30 @@ S1 and S2 replace #723's forwarded-root half. S3 is #723's other half. S1 alone
 closes #722's lookup failures; S2 removes the synthetic root. S5 must land before
 S6, and S7 after both.
 
+## Size
+
+Estimated lines added, in the codebase's style: production counts include the
+comments, which run to a third or half of it, as in #723 (290 lines: about 150
+production, 170 test). Test counts assume the fixtures that already exist: the
+signed forward upstream (`startSignedForwardUpstream`,
+`v2/imr_forward_validation_test.go:71`), the `ImrResponder` tests' writer, the
+cache package's signed-zone helpers, and the reload tests.
+
+| stage | production | tests | basis |
+|---|---|---|---|
+| S1 | 110–140 | 250–350 | Seven call sites at 10–20 lines each, the cache hook and its wiring (about 10), one decision function (about 20). One test per caller with no root server map, the validator paths through the signed upstream. |
+| S2 | 120–170 | 180–250 | Start-up priming branch and `root-hints` warning (about 25); `RefreshRoot` wake-up channel and idle state (about 40); reload notification (about 15); trust-anchor setup after the listeners, without the NS step for a forwarded anchor (about 30); status in the API and the CLI (about 20). Tests: start with no hints file, idle with no timer, both reload transitions, a dead upstream at start-up, status. |
+| S3 | 60–80 | 90–110 | Written already in #723 (`rootRefreshPass`, `rootRetryWait`, the lead-window check), plus the 1 s floor and the wait taken after the attempt (about 10). Mostly a cherry-pick, tests included. |
+| S4 | 100–140 | 120–180 | Classifying the probe's answer and reporting it (60–80); the idle re-probe timer (40–60). Tests: one upstream double per outcome, and the timer. |
+| S5 | 40–70 | 180–260 | Move the trust-anchor branch of `ValidateDNSKEYs` (lines 803–938) ahead of the DS path behind `hasTrustAnchor`: mostly moved code, about 30 new; the `trust-ad` warning (about 15). Tests: four DS answers, at start-up and after re-validation, a control with no anchor, and `trust-ad`. |
+| S6 | 20–40 | 60–90 | The DS rule in the decision function, and its callers passing the qtype. Tests: `foo.` and `sub.foo.`, with `.` iterated, with `.` forwarded, and with a nested forward. |
+| S7 | 90–130 | 150–220 | Collecting the anchor's DS set, including DNSKEY to SHA-256 DS (about 30); the answer with CD, DO and AD handling, and the EDE (about 50); the hook in `ImrResponder` (about 15). Tests: the cases in the Tests section. |
+| **total** | **540–770** | **1030–1460** | About 1600–2200 lines over seven PRs. |
+
+S1 and S2 together, which close #722 and remove the synthetic root, are about
+230–310 production lines and 430–600 test lines. Almost nothing is deleted: the
+priming branch for a forwarded root (about 15 lines) is the only code that goes.
+
 ## Settled questions
 
 Settled in review, 2026-09-22.
