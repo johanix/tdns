@@ -397,23 +397,10 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 	}
 	imr := conf.Internal.ImrEngine
 
-	// Initialize trust anchors (DS/DNSKEY) and validate root (.) DNSKEY and NS
-	if err := imr.initializeImrTrustAnchors(ctx, conf); err != nil {
-		lgImr.Warn("trust anchor initialization failed", "err", err)
-	}
-
-	// Start the ImrEngine (i.e. the recursive nameserver responding to queries with RD bit set)
-	go imr.StartImrEngineListeners(ctx, conf)
-
-	// Verify the forward upstreams are reachable, concurrently with normal
-	// operation: failures WARN and mark `config status` DEGRADED, they do
-	// not stop the resolver.
-	go imr.ProbeForwardUpstreams(ctx)
-
-	// Keep the root NS alive. Priming above runs once; without this, the root
-	// NS expires on its TTL and cannot be re-fetched, because fetching ". NS"
-	// needs a root server address. See imr_root_refresh.go.
-	go imr.RefreshRoot(ctx, conf.Imr.RootHints)
+	imr.startServing(ctx, conf, func(ctx context.Context) {
+		// The recursive nameserver responding to queries with RD bit set.
+		imr.StartImrEngineListeners(ctx, conf)
+	})
 
 	for {
 		select {
@@ -435,6 +422,29 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 			go imr.handleRecursorRequest(ctx, rrq)
 		}
 	}
+}
+
+// startServing starts what runs beside ImrEngine's request loop once the Imr
+// is built: trust-anchor set-up, the listeners, the forward probe and the root
+// refresh. listen starts the listeners; it is a parameter so that a test can
+// see when it is called.
+func (imr *Imr) startServing(ctx context.Context, conf *Config, listen func(context.Context)) {
+	// Initialize trust anchors (DS/DNSKEY) and validate root (.) DNSKEY and NS
+	if err := imr.initializeImrTrustAnchors(ctx, conf); err != nil {
+		lgImr.Warn("trust anchor initialization failed", "err", err)
+	}
+
+	go listen(ctx)
+
+	// Verify the forward upstreams are reachable, concurrently with normal
+	// operation: failures WARN and mark `config status` DEGRADED, they do
+	// not stop the resolver.
+	go imr.ProbeForwardUpstreams(ctx)
+
+	// Keep the root NS alive. Priming above runs once; without this, the root
+	// NS expires on its TTL and cannot be re-fetched, because fetching ". NS"
+	// needs a root server address. See imr_root_refresh.go.
+	go imr.RefreshRoot(ctx, conf.Imr.RootHints)
 }
 
 // handleRecursorRequest answers a single RecursorCh request. Runs
