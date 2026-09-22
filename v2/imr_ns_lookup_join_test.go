@@ -238,3 +238,35 @@ func TestNestedCallForTheSameNameRegistersItsZone(t *testing.T) {
 		t.Errorf("%s A was queried %d times, want 1", oobNSName, n)
 	}
 }
+
+// A server that had no address when the query's first pass started, and has
+// one by the time the fallback runs -- another lookup filled in the shared
+// server meanwhile -- was never tried: the fallback counts it, so the query
+// retries, and no query is sent for its address. It used to be skipped as
+// "already has addresses", and the query gave up beside a usable server. A
+// server that had its address at the start was tried, and still counts 0.
+func TestExpandCountsAServerThatGainedAnAddressDuringTheFirstPass(t *testing.T) {
+	d := startOOBAuthDouble(t, 0)
+	imr := newOOBTestImr(t, d)
+	cacheDelegation(imr.Cache, oobZone)
+	if err := imr.Cache.AddServers(oobZone, map[string]*cache.AuthServer{}); err != nil {
+		t.Fatalf("AddServers: %v", err)
+	}
+	key := cache.ServerKey(oobNSName)
+	srv := imr.Cache.GetOrCreateAuthServer(oobNSName)
+	serverMap := map[string]*cache.AuthServer{key: srv}
+	addresslessAtStart := map[string]bool{key: true}
+	srv.AddAddr(d.host) // another lookup, during the first pass
+
+	if got := imr.expandServerMapWithMissingNSSince(context.Background(), "host."+oobZone, dns.TypeA,
+		serverMap, addresslessAtStart); got != 1 {
+		t.Errorf("a server that gained its address during the first pass counts %d, want 1", got)
+	}
+	if n := d.nsAQueries(); n != 0 {
+		t.Errorf("%s A was queried %d times, want 0: the server already has its address", oobNSName, n)
+	}
+	if got := imr.expandServerMapWithMissingNSSince(context.Background(), "host."+oobZone, dns.TypeA,
+		serverMap, map[string]bool{}); got != 0 {
+		t.Errorf("a server that had its address at the start counts %d, want 0", got)
+	}
+}

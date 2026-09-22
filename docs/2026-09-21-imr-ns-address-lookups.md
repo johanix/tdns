@@ -30,6 +30,7 @@ This function starts the address lookup for `nsname`, or joins the one already r
 
 - `resolveZoneServersInBackground` calls `nsLookup` for each chosen name and does not wait.
 - `expandServerMapWithMissingNS` counts a missing name whose shared server already has addresses, with no query. It calls `nsLookup` for every other missing name, then waits for all of them, bounded by its context.
+  `IterativeDNSQuery` notes which servers in its map have no address as its first pass starts, and calls the fallback as `expandServerMapWithMissingNSSince`. A server on that list that has an address by the time the fallback runs (another lookup filled in the shared server) was never tried, so it counts too.
 - `resolveNSAddresses` does the same for every nameserver of the zone. It hands each server to `onResponse` as soon as that server's lookup ends with an address.
 - `CollectNSAddresses` and `processAddressRecords` have no callers left and are removed.
 
@@ -56,3 +57,4 @@ Two lookups started independently can still wait on each other in a cycle. Those
 | a lookup needing its own name ends at once | 16 s (with the chain check disabled) |
 | two zones naming one nameserver share one lookup, and both get the server | passed; covers the waiting-zones set |
 | a nested call for a name on its own chain returns at once and still registers its zone | the second zone never got the server |
+| a server that gained its address during the first pass counts, with no query; one that had it at the start still counts 0 | counted 0, and the query gave up |

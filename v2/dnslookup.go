@@ -1164,7 +1164,25 @@ func maxInt(a, b int) int {
 //
 // The servers that get addresses are also stored in that zone's cached server
 // map (storeZoneServers).
+//
+// This form has no first pass to compare with: a server already in serverMap
+// with addresses counts 0. IterativeDNSQuery uses
+// expandServerMapWithMissingNSSince.
 func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer) int {
+	return imr.expandServerMapWithMissingNSSince(ctx, qname, qtype, serverMap, nil)
+}
+
+// expandServerMapWithMissingNSSince is expandServerMapWithMissingNS for a
+// query whose first pass has already run: addresslessAtStart holds the keys
+// of the servers that had no address when it did.
+//
+// Such a server can be in serverMap with addresses by now. The map holds
+// shared AuthServer instances, and another lookup may have filled this one in
+// while the first pass ran. It was never tried, so it counts like a server
+// the fallback resolved itself; skipped as "already have addresses", it left
+// the count at 0 and the query gave up beside a usable server. A server that
+// had its addresses at the start was tried, and counts 0.
+func (imr *Imr) expandServerMapWithMissingNSSince(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, addresslessAtStart map[string]bool) int {
 	if imr == nil || imr.Cache == nil || serverMap == nil {
 		return 0
 	}
@@ -1191,16 +1209,17 @@ func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, 
 		}
 		nsname := dns.Fqdn(ns.Ns)
 		srv, present := serverMap[cache.ServerKey(nsname)]
-		if present && len(srv.GetAddrs()) > 0 {
-			continue // already have addresses, nothing to do
+		if present && len(srv.GetAddrs()) > 0 && !addresslessAtStart[cache.ServerKey(nsname)] {
+			continue // had its addresses at the start, and was tried
 		}
 		if srv == nil {
 			srv = imr.Cache.GetOrCreateAuthServer(nsname)
 			serverMap[cache.ServerKey(nsname)] = srv
 		}
 		if len(srv.GetAddrs()) > 0 {
-			// The shared server already has addresses, from another zone's
-			// glue or an earlier lookup: usable now, no query needed.
+			// The shared server has addresses by now -- from another zone's
+			// glue, an earlier lookup, or one that finished while the first
+			// pass ran: usable, not tried, and no query needed.
 			added++
 			usable[cache.ServerKey(nsname)] = srv
 			continue
@@ -1446,6 +1465,16 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// by resolved (addr, transport) to avoid re-querying an identical path that
 	// just failed.
 	dnskeyAttempted := map[cache.AddrXport]bool{}
+	// The servers that have no address as the first pass starts. Should one
+	// gain an address before the fallback runs (another lookup filling in the
+	// shared server), the fallback counts it: it was never tried
+	// (expandServerMapWithMissingNSSince).
+	addresslessAtStart := map[string]bool{}
+	for key, srv := range serverMap {
+		if len(srv.GetAddrs()) == 0 {
+			addresslessAtStart[key] = true
+		}
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		zoneName, zone, prioritized = imr.prioritizeServers(qname, qtype, serverMap, privacy)
 		if Globals.Debug {
@@ -1634,7 +1663,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		// missing (typical for out-of-bailiwick NS that the parent could
 		// not glue) and retry. If nothing new was added, give up.
 		if attempt == 0 {
-			added := imr.expandServerMapWithMissingNS(ctx, qname, qtype, serverMap)
+			added := imr.expandServerMapWithMissingNSSince(ctx, qname, qtype, serverMap, addresslessAtStart)
 			if added > 0 {
 				if Globals.Debug {
 					lg.Printf("IterativeDNSQuery: expanded serverMap with %d previously-unresolved NS addresses; retrying", added)
