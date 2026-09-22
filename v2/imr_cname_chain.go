@@ -197,22 +197,60 @@ func (imr *Imr) answerViaCNAME(ctx context.Context, qname string, qtype uint16, 
 	return final, rcode, context, chaseTransport, nil, true
 }
 
-// chainAt assembles from the cache the chain that starts at qname: its links
-// in order, and the entry for <last name, qtype>, holding data or a denial. ok
-// is false when qname holds no CNAME, or when some part of the chain is not in
-// the cache, so that the caller resolves it. err reports a loop, or a chain
-// longer than maxCNAMEChain.
-//
-// Under strict privacy an entry that arrived in cleartext counts as missing.
-func (imr *Imr) chainAt(qname string, qtype uint16, privacy edns0.PrivacyLevel) (links []*cache.CachedRRset, final *cache.CachedRRset, ok bool, err error) {
-	usable := func(e *cache.CachedRRset) bool {
-		return e != nil && !(privacy == edns0.PrivacyStrict && !core.IsEncryptedTransport(e.Transport))
+// chainOutcome is what serveChain did.
+type chainOutcome int
+
+const (
+	chainAbsent     chainOutcome = iota // qname holds no CNAME; nothing written
+	chainIncomplete                     // qname is a CNAME, part of the chain is missing; nothing written
+	chainServed                         // a response has been written
+)
+
+// chainFreshGraceDefault is the grace freshChainGrace gives when the IMR has
+// no query budget configured: the query-budget default.
+const chainFreshGraceDefault = 8 * time.Second
+
+// freshChainGrace is how long past its expiry an entry still counts when
+// answering the query that has just resolved it: one query budget. An entry
+// that expired longer ago than that was not valid at any moment of this
+// query. A record with TTL 0 is stored already expired, and is still the
+// answer to the query that fetched it.
+func (imr *Imr) freshChainGrace() time.Duration {
+	if b := imr.Tuning.QueryBudget; b > 0 {
+		return b
 	}
+	return chainFreshGraceDefault
+}
+
+// chainEntry reads <name, t> for a chain. grace 0 reads the cache as it
+// stands (Get): an expired entry is missing. A grace above 0 is for the query
+// that has just resolved the chain: an entry that expired less than grace ago
+// still counts (freshChainGrace). Under strict privacy an entry that arrived
+// in cleartext counts as missing.
+func (imr *Imr) chainEntry(name string, t uint16, privacy edns0.PrivacyLevel, grace time.Duration) *cache.CachedRRset {
+	var e *cache.CachedRRset
+	if grace <= 0 {
+		e = imr.Cache.Get(name, t)
+	} else if e = imr.Cache.Peek(name, t); e != nil && e.Expiration.Before(time.Now().Add(-grace)) {
+		e = nil
+	}
+	if e == nil || (privacy == edns0.PrivacyStrict && !core.IsEncryptedTransport(e.Transport)) {
+		return nil
+	}
+	return e
+}
+
+// chainAt assembles from the cache the chain that starts at qname: its links
+// in order, and the entry for <last name, qtype>, holding data or a denial.
+// Entries are read with chainEntry and grace. started reports that qname holds
+// a CNAME; final is nil when some part of the chain is missing. err reports a
+// loop, or a chain longer than maxCNAMEChain.
+func (imr *Imr) chainAt(qname string, qtype uint16, privacy edns0.PrivacyLevel, grace time.Duration) (links []*cache.CachedRRset, final *cache.CachedRRset, started bool, err error) {
 	name := qname
 	seen := map[string]bool{core.CanonicalizeName(qname): true}
 	for {
 		if len(links) > 0 {
-			if e := imr.Cache.Get(name, qtype); usable(e) {
+			if e := imr.chainEntry(name, qtype, privacy, grace); e != nil {
 				switch {
 				case e.Context == cache.ContextAnswer && e.RRset != nil && e.RRset.RRtype == qtype && len(e.RRset.RRs) > 0:
 					return links, e, true, nil
@@ -221,24 +259,24 @@ func (imr *Imr) chainAt(qname string, qtype uint16, privacy edns0.PrivacyLevel) 
 				}
 			}
 		}
-		link := imr.Cache.Get(name, dns.TypeCNAME)
-		if !usable(link) || link.Context != cache.ContextAnswer {
-			return nil, nil, false, nil
+		link := imr.chainEntry(name, dns.TypeCNAME, privacy, grace)
+		target, isCNAME := "", false
+		if link != nil && link.Context == cache.ContextAnswer {
+			target, isCNAME = cnameTarget(link.RRset)
 		}
-		target, isCNAME := cnameTarget(link.RRset)
 		if !isCNAME {
-			return nil, nil, false, nil
+			return nil, nil, len(links) > 0, nil
 		}
-		if link.SynthesizedFrom != "" && !usable(imr.Cache.Get(link.SynthesizedFrom, dns.TypeDNAME)) {
-			return nil, nil, false, nil
+		if link.SynthesizedFrom != "" && imr.chainEntry(link.SynthesizedFrom, dns.TypeDNAME, privacy, grace) == nil {
+			return nil, nil, true, nil
 		}
 		if len(links) == maxCNAMEChain {
-			return nil, nil, false, fmt.Errorf("CNAME chain from %s is longer than %d", qname, maxCNAMEChain)
+			return nil, nil, true, fmt.Errorf("CNAME chain from %s is longer than %d", qname, maxCNAMEChain)
 		}
 		links = append(links, link)
 		t := core.CanonicalizeName(target)
 		if seen[t] {
-			return nil, nil, false, fmt.Errorf("CNAME loop: %s leads back to %s", name, target)
+			return nil, nil, true, fmt.Errorf("CNAME loop: %s leads back to %s", name, target)
 		}
 		seen[t] = true
 		name = target
@@ -246,8 +284,9 @@ func (imr *Imr) chainAt(qname string, qtype uint16, privacy edns0.PrivacyLevel) 
 }
 
 // serveChain answers r for <qname, qtype> when qname is a CNAME, from the
-// chain in the cache (chainAt). It reports false, having written nothing, when
-// there is no such chain or part of it is missing.
+// chain in the cache (chainAt, with grace as there). It writes nothing when
+// qname holds no CNAME (chainAbsent) or part of the chain is missing
+// (chainIncomplete).
 //
 // Each part is judged by the rule for a single answer:
 //   - a positive part (a link, or the data at the end) by dispositionFor, with
@@ -260,17 +299,20 @@ func (imr *Imr) chainAt(qname string, qtype uint16, privacy edns0.PrivacyLevel) 
 // Any part that fails fails the answer, with that part's EDE. AD is set only
 // when every part is Secure. The rcode is that of the chain's last name (RFC
 // 6604).
-func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions, status edns0.PrivacyStatus) bool {
-	links, final, ok, err := imr.chainAt(qname, qtype, msgoptions.Privacy)
+func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions, status edns0.PrivacyStatus, grace time.Duration) chainOutcome {
+	links, final, started, err := imr.chainAt(qname, qtype, msgoptions.Privacy, grace)
 	if err != nil {
 		lgImr.Info("ImrResponder: refusing a CNAME chain", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
 		m.Answer, m.Ns = nil, nil
 		m.SetRcode(r, dns.RcodeServerFailure)
 		w.WriteMsg(m)
-		return true
+		return chainServed
 	}
-	if !ok {
-		return false
+	if !started {
+		return chainAbsent
+	}
+	if final == nil {
+		return chainIncomplete
 	}
 
 	secure := true
@@ -313,15 +355,15 @@ func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.
 	for _, link := range links {
 		verdict := link
 		if link.SynthesizedFrom != "" {
-			dname := imr.Cache.Get(link.SynthesizedFrom, dns.TypeDNAME)
+			dname := imr.chainEntry(link.SynthesizedFrom, dns.TypeDNAME, msgoptions.Privacy, grace)
 			if dname == nil {
-				return false // expired since chainAt looked
+				return chainIncomplete // gone since chainAt looked
 			}
 			verdict = dname
 			answer = append(answer, dname.ServeAnswer(now, msgoptions.DO)...)
 		}
 		if !judge(verdict) {
-			return true
+			return chainServed
 		}
 		answer = append(answer, link.ServeAnswer(now, msgoptions.DO)...)
 		lastName, _ = cnameTarget(link.RRset)
@@ -331,7 +373,7 @@ func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.
 	case cache.ContextNXDOMAIN, cache.ContextNoErrNoAns:
 		if bogusDenial(final, msgoptions) {
 			writeBogusDenial(w, r, m)
-			return true
+			return chainServed
 		}
 		rcode := dns.RcodeSuccess
 		if final.Context == cache.ContextNXDOMAIN {
@@ -343,7 +385,7 @@ func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.
 		m.AuthenticatedData = m.AuthenticatedData && secure && adWanted(r, msgoptions)
 	default:
 		if !judge(final) {
-			return true
+			return chainServed
 		}
 		m.SetRcode(r, dns.RcodeSuccess)
 		m.Answer = append(answer, final.ServeAnswer(now, msgoptions.DO)...)
@@ -351,5 +393,5 @@ func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.
 	}
 	setPrivacyStatus(m, msgoptions, status)
 	w.WriteMsg(m)
-	return true
+	return chainServed
 }

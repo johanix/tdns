@@ -458,6 +458,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 							imr.Cache.Set(qname, qtype, &cache.CachedRRset{
 								Name:      qname,
 								RRtype:    qtype,
+								Rcode:     uint8(dns.RcodeNameError),
 								RRset:     nil,
 								Context:   cache.ContextNXDOMAIN,
 								State:     cache.ValidationStateNone,
@@ -694,6 +695,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 				imr.Cache.Set(qname, qtype, &cache.CachedRRset{
 					Name:       qname,
 					RRtype:     qtype,
+					Rcode:      uint8(dns.RcodeNameError),
 					RRset:      nil,
 					Context:    cache.ContextNXDOMAIN,
 					Expiration: time.Now().Add(time.Duration(ttl) * time.Second),

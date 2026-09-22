@@ -404,3 +404,71 @@ func TestCNAMEChainEndingInAnUnsignedNODATAIsNotAuthenticated(t *testing.T) {
 		}
 	}
 }
+
+// A chain whose records carry TTL 0 is answered in full. Such records are
+// stored already expired, so the answer to the query that fetched them cannot
+// come from the cache as it stands; and the end of the chain alone would
+// answer a different name.
+func TestCNAMEChainWithZeroTTLIsAnswered(t *testing.T) {
+	imr, _ := chainImr(t)
+	want := []string{"z0.chain.test. CNAME", "z1.chain.test. A"}
+	for _, ask := range []string{"first", "second"} {
+		m, _ := askChain(t, imr, "z0."+chainZone, dns.TypeA)
+		if m.Rcode != dns.RcodeSuccess || !sameOrder(answerOrder(m), want) {
+			t.Errorf("%s ask: rcode %s, answer %v; want NOERROR with %v", ask, dns.RcodeToString[m.Rcode], answerOrder(m), want)
+		}
+	}
+}
+
+// freshAnswer hands ProcessAuthDNSResponse what IterativeDNSQuery returned for
+// <qname, qtype> and returns the response.
+func freshAnswer(t *testing.T, imr *Imr, qname string, qtype uint16, rrset *core.RRset, rcode int, cctx cache.CacheContext) *dns.Msg {
+	t.Helper()
+	r, opts := verdictQuery{do: true}.msgFor(qname, qtype)
+	w := &fakeResponseWriter{}
+	_, _ = imr.ProcessAuthDNSResponse(context.Background(), qname, qtype, rrset, rcode, cctx, opts, new(dns.Msg), w, r, core.TransportDo53)
+	if w.msg == nil {
+		t.Fatalf("%s %s: nothing written", qname, dns.TypeToString[qtype])
+	}
+	return w.msg
+}
+
+// A chain that was followed but cannot be put together -- here the data at its
+// end is gone from the cache by the time the answer is built -- is a SERVFAIL.
+// Serving that data alone, as it did, answered a different name than the one
+// asked.
+func TestIncompleteCNAMEChainIsNotAnsweredWithItsEnd(t *testing.T) {
+	imr := verdictImr(t, false)
+	imr.Cache.Set("q.example.", dns.TypeCNAME, &cache.CachedRRset{
+		Name: "q.example.", RRtype: dns.TypeCNAME, Context: cache.ContextAnswer, State: cache.ValidationStateInsecure,
+		RRset: &core.RRset{Name: "q.example.", Class: dns.ClassINET, RRtype: dns.TypeCNAME,
+			RRs: []dns.RR{mustRR(t, "q.example. 60 IN CNAME t.example.")}},
+	})
+	end := &core.RRset{Name: "t.example.", Class: dns.ClassINET, RRtype: dns.TypeA,
+		RRs: []dns.RR{mustRR(t, "t.example. 60 IN A 192.0.2.1")}}
+
+	m := freshAnswer(t, imr, "q.example.", dns.TypeA, end, dns.RcodeSuccess, cache.ContextAnswer)
+	if m.Rcode != dns.RcodeServerFailure || len(m.Answer) != 0 {
+		t.Errorf("rcode %s, answer %v; want SERVFAIL and no answer, not t.example.'s A for q.example.",
+			dns.RcodeToString[m.Rcode], answerOrder(m))
+	}
+}
+
+// A CNAME that expired longer ago than one query budget is not part of this
+// query's chain: a denial for qname is served as a denial, not failed as an
+// incomplete chain.
+func TestAStaleCNAMEDoesNotFailADenial(t *testing.T) {
+	imr := verdictImr(t, false)
+	imr.Tuning.QueryBudget = 10 * time.Millisecond
+	imr.Cache.Set("q.example.", dns.TypeCNAME, &cache.CachedRRset{
+		Name: "q.example.", RRtype: dns.TypeCNAME, Context: cache.ContextAnswer, State: cache.ValidationStateInsecure,
+		RRset: &core.RRset{Name: "q.example.", Class: dns.ClassINET, RRtype: dns.TypeCNAME,
+			RRs: []dns.RR{mustRR(t, "q.example. 0 IN CNAME t.example.")}},
+	})
+	time.Sleep(30 * time.Millisecond)
+
+	m := freshAnswer(t, imr, "q.example.", dns.TypeA, nil, dns.RcodeNameError, cache.ContextNXDOMAIN)
+	if m.Rcode != dns.RcodeNameError {
+		t.Errorf("rcode %s; want NXDOMAIN: the CNAME expired before this query and is not its chain", dns.RcodeToString[m.Rcode])
+	}
+}
