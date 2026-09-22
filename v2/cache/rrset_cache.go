@@ -147,6 +147,18 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 	return &crrset
 }
 
+// Peek returns the entry for <qname, qtype> as it is stored, expired or not,
+// and leaves it in place. Get drops an expired entry, and a record with TTL 0
+// is stored already expired: a caller that must see what it has itself just
+// cached, whatever the TTL, reads it here and judges its age itself.
+func (rrcache *RRsetCacheT) Peek(qname string, qtype uint16) *CachedRRset {
+	crrset, ok := rrcache.RRsets.Get(rrsetKey(qname, qtype))
+	if !ok {
+		return nil
+	}
+	return &crrset
+}
+
 const rrsetCacheMaxEntries = 50000
 
 func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset) {

@@ -6,6 +6,8 @@ package cache
 
 import (
 	"context"
+	"crypto"
+	"errors"
 	"log"
 	"os"
 	"testing"
@@ -282,5 +284,170 @@ func TestValidateDNSKEYs_BackfillsMissingDS(t *testing.T) {
 	}
 	if !askedDS {
 		t.Fatalf("ValidateDNSKEYs did not fetch the missing DS for %s on a cache miss — DS-backfill regression", child)
+	}
+}
+
+// kidZone is a signed child, kid.sec.example., with one key that signs everything
+// in it. The resolver does not hold the key: only a DS in sec.example. could make
+// it trusted.
+type kidZone struct {
+	dnskey *core.RRset
+	www    *core.RRset // www.kid.sec.example. A, signed
+}
+
+func newKidZone(t *testing.T) kidZone {
+	t.Helper()
+	ksk := &dns.DNSKEY{Hdr: dns.RR_Header{Name: secKid, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
+		Flags: 257, Protocol: 3, Algorithm: dns.ED25519}
+	priv, err := ksk.Generate(256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := &zoneKey{zone: secKid, key: ksk, priv: priv.(crypto.Signer)}
+	return kidZone{dnskey: k.sign(t, ksk), www: k.sign(t, rrFrom(t, kidWWW+" 300 IN A 192.0.2.7"))}
+}
+
+// kidInsecureNSEC is sec.example.'s NSEC at kid: a delegation with no DS.
+func kidInsecureNSEC(t *testing.T, k *zoneKey) *core.RRset {
+	return k.sign(t, rrFrom(t, secKid+" 300 IN NSEC "+secWWW+" NS RRSIG NSEC"))
+}
+
+// forwardedDSFetcher answers the DS question at kid as a forwarding IMR does
+// (#702): forwardQuery hands the denial to handleNegative, which caches it with
+// its verdict, and returns no RRset. The DNSKEY question gets kid's keys,
+// unvalidated. It counts the DS questions.
+func forwardedDSFetcher(t *testing.T, rrcache *RRsetCacheT, kid kidZone, denial []*core.RRset, dsQuestions *int) RRsetFetcher {
+	return func(_ context.Context, qname string, qtype uint16, _ map[string]*AuthServer) (*core.RRset, error) {
+		switch {
+		case core.EqualNames(qname, secKid) && qtype == dns.TypeDS:
+			*dsQuestions++
+			seedDSDenial(t, rrcache, secKid, denial...)
+			return nil, nil
+		case core.EqualNames(qname, secKid) && qtype == dns.TypeDNSKEY:
+			return kid.dnskey, nil
+		}
+		return nil, errors.New("no answer")
+	}
+}
+
+// TestValidateDNSKEYs_SecureDSDenialIsInsecureCut is the regression for a
+// forwarding IMR that SERVFAILs a signed child whose parent has no DS (#702).
+// The parent's NSEC denial of DS validates Secure; ValidateDNSKEYs treated that
+// cache entry as a DS RRset, found no matching DS, and marked the DNSKEYs Bogus
+// (EDE 9). A denial of DS that proves an insecure delegation makes the zone
+// Insecure, answered without AD.
+func TestValidateDNSKEYs_SecureDSDenialIsInsecureCut(t *testing.T) {
+	rrcache, k := secCache(t)
+	seedDSDenial(t, rrcache, secKid, k.sign(t, soaFor(t, secZone)), kidInsecureNSEC(t, k))
+
+	got, err := rrcache.ValidateDNSKEYs(context.Background(), newKidZone(t).dnskey, nil)
+	if err != nil {
+		t.Fatalf("ValidateDNSKEYs: %v", err)
+	}
+	if got != ValidationStateInsecure {
+		t.Fatalf("got %s, want insecure: a secure denial of DS is a proven insecure cut, not EDE 9 bogus", ValidationStateToString[got])
+	}
+	if z, ok := rrcache.ZoneMap.Get(secKid); !ok || z.GetState() != ValidationStateInsecure {
+		t.Fatalf("zone %s is not in ZoneMap as insecure", secKid)
+	}
+}
+
+// The same denial, not yet cached: in forward mode no referral arrives, and the
+// DS question is asked by backfillDS. Its fetch caches the denial and returns
+// no RRset, and backfillDS used to return nil for it, so the first pass came out
+// Indeterminate and only a second validation of the same keys found the proof.
+func TestValidateDNSKEYs_FetchedDSDenialIsInsecureCut(t *testing.T) {
+	rrcache, k := secCache(t)
+	kid := newKidZone(t)
+	var n int
+	fetch := forwardedDSFetcher(t, rrcache, kid, []*core.RRset{k.sign(t, soaFor(t, secZone)), kidInsecureNSEC(t, k)}, &n)
+
+	got, err := rrcache.ValidateDNSKEYs(context.Background(), kid.dnskey, fetch)
+	if err != nil {
+		t.Fatalf("ValidateDNSKEYs: %v", err)
+	}
+	if got != ValidationStateInsecure {
+		t.Fatalf("got %s on the first pass, want insecure", ValidationStateToString[got])
+	}
+	if n != 1 {
+		t.Errorf("%d DS question(s), want 1", n)
+	}
+	if z, ok := rrcache.ZoneMap.Get(secKid); !ok || z.GetState() != ValidationStateInsecure {
+		t.Fatalf("zone %s is not in ZoneMap as insecure", secKid)
+	}
+}
+
+// And from the data, validated once: the keys are fetched and judged in
+// validateRRsetWithRRSIG with nothing validated before them.
+func TestValidateRRset_SignedDataBelowAFetchedDSDenialIsInsecure(t *testing.T) {
+	rrcache, k := secCache(t)
+	kid := newKidZone(t)
+	var n int
+	fetch := forwardedDSFetcher(t, rrcache, kid, []*core.RRset{k.sign(t, soaFor(t, secZone)), kidInsecureNSEC(t, k)}, &n)
+
+	got, err := rrcache.ValidateRRset(context.Background(), kid.www, fetch)
+	if err != nil {
+		t.Fatalf("ValidateRRset: %v", err)
+	}
+	if got != ValidationStateInsecure {
+		t.Fatalf("got %s, want insecure", ValidationStateToString[got])
+	}
+}
+
+// The parent side's denial of the DS at kid decides the zone, NSEC or NSEC3.
+// Every NSEC3 denial validates Indeterminate, and ValidateDNSKEYs used to give
+// the zone that state before looking at the proof: a signed child of an
+// NSEC3-signed parent with no DS was SERVFAIL (EDE 5) through a forwarding IMR.
+// A proof that does not show an insecure delegation, or does not validate,
+// must leave the zone anything but Insecure.
+func TestValidateDNSKEYs_DSDenialProofs(t *testing.T) {
+	const optOut = 1
+	cases := []struct {
+		name     string
+		denial   func(t *testing.T, rrcache *RRsetCacheT, k *zoneKey) []*core.RRset
+		insecure bool
+	}{
+		{"NSEC3 at kid, NS and no DS", func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []*core.RRset {
+			return []*core.RRset{k.sign(t, nsec3In(secZone, secKid, false, 0, 0, dns.TypeNS))}
+		}, true},
+		{"NSEC3 Opt-Out span covering kid", func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []*core.RRset {
+			return []*core.RRset{k.sign(t, apexNSEC3(secZone)), k.sign(t, nsec3In(secZone, secKid, true, optOut, 0, dns.TypeA, dns.TypeRRSIG))}
+		}, true},
+		{"NSEC3 at kid, no NS", func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []*core.RRset {
+			return []*core.RRset{k.sign(t, nsec3In(secZone, secKid, false, 0, 0, dns.TypeA, dns.TypeRRSIG))}
+		}, false},
+		{"NSEC3 at kid, signed with a stray key", func(t *testing.T, _ *RRsetCacheT, _ *zoneKey) []*core.RRset {
+			return []*core.RRset{strayKey(t, secZone).sign(t, nsec3In(secZone, secKid, false, 0, 0, dns.TypeNS))}
+		}, false},
+		{"NSEC3 at kid, signed by kid", func(t *testing.T, rrcache *RRsetCacheT, _ *zoneKey) []*core.RRset {
+			return []*core.RRset{newZoneKey(t, rrcache, secKid, false).sign(t, nsec3In(secZone, secKid, false, 0, 0, dns.TypeNS))}
+		}, false},
+		{"NSEC at kid, no NS", func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []*core.RRset {
+			return []*core.RRset{k.sign(t, rrFrom(t, secKid+" 300 IN NSEC "+secWWW+" A RRSIG NSEC"))}
+		}, false},
+		{"NSEC at kid, signed with a stray key", func(t *testing.T, _ *RRsetCacheT, _ *zoneKey) []*core.RRset {
+			return []*core.RRset{strayKey(t, secZone).sign(t, rrFrom(t, secKid+" 300 IN NSEC "+secWWW+" NS RRSIG NSEC"))}
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rrcache, k := secCache(t)
+			seedDSDenial(t, rrcache, secKid, append([]*core.RRset{k.sign(t, soaFor(t, secZone))}, c.denial(t, rrcache, k)...)...)
+
+			got, err := rrcache.ValidateDNSKEYs(context.Background(), newKidZone(t).dnskey, nil)
+			if err != nil {
+				t.Fatalf("ValidateDNSKEYs: %v", err)
+			}
+			z, _ := rrcache.ZoneMap.Get(secKid)
+			switch {
+			case c.insecure && got != ValidationStateInsecure:
+				t.Fatalf("got %s, want insecure", ValidationStateToString[got])
+			case c.insecure && z.GetState() != ValidationStateInsecure:
+				t.Fatalf("zone %s is not in ZoneMap as insecure", secKid)
+			case !c.insecure && (got == ValidationStateInsecure || z.GetState() == ValidationStateInsecure):
+				t.Fatalf("got %s (zone %s): the denial proves no insecure delegation", ValidationStateToString[got],
+					ValidationStateToString[z.GetState()])
+			}
+		})
 	}
 }
