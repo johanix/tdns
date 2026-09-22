@@ -51,17 +51,7 @@ func newChildKskFixture(t *testing.T) *childKskFixture {
 		zsk: newSignerTestKey(t, child, 256),
 	}
 
-	parentZone := "example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200\n" +
-		"example. 3600 IN NS ns.example.\n" +
-		"ns.example. 3600 IN A 192.0.2.1\n" +
-		child + " 3600 IN NS ns." + child + "\n" +
-		"ns." + child + " 3600 IN A 192.0.2.53\n" +
-		f.ksk.dnskey.ToDS(dns.SHA256).String() + "\n"
-	f.zd = testZone(t, "example.", parentZone)
-	f.cdd = f.zd.FindDelegation(child, true)
-	if f.cdd == nil || len(f.cdd.A_glue) == 0 || f.cdd.DS_rrset == nil || len(f.cdd.DS_rrset.RRs) == 0 {
-		t.Fatalf("FindDelegation(%s) = %+v, want NS, glue and DS", child, f.cdd)
-	}
+	f.zd, f.cdd = childKskParent(t, f.ksk.dnskey.ToDS(dns.SHA256))
 
 	f.sig0 = newSignerTestSig0Key(t, child)
 	keys := f.zsk.sign(t, f.sig0)
@@ -232,5 +222,73 @@ func TestValidateUpdateChildDnskeysUnknownKeyTag(t *testing.T) {
 		if s.Validated {
 			t.Errorf("signer %s::%d validated", s.Name, s.KeyId)
 		}
+	}
+}
+
+// childKskParent is example., delegating victim.example. with glue and ds.
+func childKskParent(t *testing.T, ds ...*dns.DS) (*ZoneData, *ChildDelegationData) {
+	t.Helper()
+	const child = childKskChild
+	parentZone := "example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200\n" +
+		"example. 3600 IN NS ns.example.\n" +
+		"ns.example. 3600 IN A 192.0.2.1\n" +
+		child + " 3600 IN NS ns." + child + "\n" +
+		"ns." + child + " 3600 IN A 192.0.2.53\n"
+	for _, d := range ds {
+		parentZone += d.String() + "\n"
+	}
+	zd := testZone(t, "example.", parentZone)
+	cdd := zd.FindDelegation(child, true)
+	if cdd == nil || len(cdd.A_glue) == 0 || cdd.DS_rrset == nil || len(cdd.DS_rrset.RRs) != len(ds) {
+		t.Fatalf("FindDelegation(%s) = %+v, want NS, glue and %d DS", child, cdd, len(ds))
+	}
+	return zd, cdd
+}
+
+// RFC 4035 section 5.2 also asks that the DS's algorithm match the DNSKEY's.
+// The digest covers the key's algorithm field but not the DS's, so a DS
+// naming another algorithm still matched the key by key tag and digest.
+func TestChildDnskeysDSAlgorithmMatchesKSK(t *testing.T) {
+	f := newChildKskFixture(t)
+	now := time.Now()
+	f.dnskeys = signedDnskeys(t, []*signerTestKey{f.ksk, f.zsk}, []*signerTestKey{f.ksk},
+		now.Add(-time.Hour), now.Add(time.Hour))
+
+	ds := f.ksk.dnskey.ToDS(dns.SHA256)
+	otherAlg := f.ksk.dnskey.ToDS(dns.SHA256)
+	otherAlg.Algorithm = dns.ECDSAP256SHA256
+
+	for _, tc := range []struct {
+		what string
+		ds   []*dns.DS
+		want bool
+	}{
+		{"a DS naming the KSK's algorithm", []*dns.DS{ds}, true},
+		{"a DS naming another algorithm", []*dns.DS{otherAlg}, false},
+		{"a DS naming another algorithm, and one naming the KSK's", []*dns.DS{otherAlg, ds}, true},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			zd, cdd := childKskParent(t, tc.ds...)
+
+			t.Run("ValidateChildDnskeys", func(t *testing.T) {
+				dkc := signerTestDnskeyCache(t)
+				valid, err := zd.ValidateChildDnskeys(cdd, false)
+				if valid != tc.want {
+					t.Errorf("ValidateChildDnskeys(%s) = %v (err %v), want %v", childKskChild, valid, err, tc.want)
+				}
+				if held := dkc.Get(childKskChild, f.ksk.dnskey.KeyTag()) != nil; held != tc.want {
+					t.Errorf("KSK %d held: %v, want %v", f.ksk.dnskey.KeyTag(), held, tc.want)
+				}
+			})
+
+			t.Run("FindSig0KeyViaDNS", func(t *testing.T) {
+				signerTestDnskeyCache(t)
+				k, err := zd.FindSig0KeyViaDNS(childKskChild, f.sig0.KeyTag())
+				if validated := err == nil && k != nil && k.Validated; validated != tc.want {
+					t.Errorf("FindSig0KeyViaDNS(%s, %d) = (%+v, %v), validated %v, want %v",
+						childKskChild, f.sig0.KeyTag(), k, err, validated, tc.want)
+				}
+			})
+		})
 	}
 }
