@@ -202,3 +202,39 @@ func TestTwoZonesShareOneLookup(t *testing.T) {
 		t.Errorf("%s holds %s with addresses %v, want %s", otherZone, oobNSName, got, d.host)
 	}
 }
+
+// Inside a lookup, a referral to a second zone that names the same nameserver
+// finds the name on its chain: it must not wait on the running lookup (that is
+// waiting on itself), but it still registers the second zone, which gets the
+// server when the lookup ends. It used to be left out.
+func TestNestedCallForTheSameNameRegistersItsZone(t *testing.T) {
+	d := startOOBAuthDouble(t, 300*time.Millisecond)
+	imr := newOOBTestImr(t, d)
+	const otherZone = "oob2.test."
+	cacheDelegation(imr.Cache, oobZone)
+	cacheDelegation(imr.Cache, otherZone)
+
+	done := imr.nsLookup(context.Background(), oobNSName, oobZone)
+
+	// As the lookup's own walk would call it: the name is on the chain.
+	nested := context.WithValue(context.Background(), nsLookupChainKey{}, []string{cache.ServerKey(oobNSName)})
+	select {
+	case <-imr.nsLookup(nested, oobNSName, otherZone):
+	case <-time.After(time.Second):
+		t.Fatal("the nested call waited on the running lookup")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lookup did not end")
+	}
+	for _, zone := range []string{oobZone, otherZone} {
+		if addrs := storedServerAddrs(imr.Cache, zone); len(addrs) == 0 {
+			t.Errorf("the cached server map for %s has no %s with addresses", zone, oobNSName)
+		}
+	}
+	if n := d.nsAQueries(); n != 1 {
+		t.Errorf("%s A was queried %d times, want 1", oobNSName, n)
+	}
+}

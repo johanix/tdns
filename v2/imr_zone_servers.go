@@ -145,6 +145,22 @@ func (l *nsAddrLookups) end(nsname string) []string {
 	return zones
 }
 
+// join registers zone with nsname's lookup if one is running, and reports
+// whether one was. Unlike begin it never starts one.
+func (l *nsAddrLookups) join(nsname, zone string) bool {
+	key := cache.ServerKey(nsname)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	lookup := l.running[key]
+	if lookup == nil {
+		return false
+	}
+	if zone != "" {
+		lookup.zones[core.CanonicalizeName(zone)] = true
+	}
+	return true
+}
+
 // nsLookupChainKey carries, on a lookup's context, the nameservers whose
 // lookups it is nested in: the lookup's own name last.
 type nsLookupChainKey struct{}
@@ -161,24 +177,28 @@ const nsAddrLookupFallbackBudget = 8 * time.Second
 // It does not wait: the returned channel is closed when the lookup has ended
 // and its server is stored. The server is the shared instance for nsname.
 //
-// The lookup runs on a detached context with its own deadline (twice the query
-// budget, one per address type), so a caller that stops waiting leaves it
-// running, and its result is stored all the same.
+// The lookup runs on a detached context, so a caller that stops waiting leaves
+// it running, and its result is stored all the same. Its A and AAAA queries go
+// out together, and each ImrQuery is bounded by one query budget; the
+// context's deadline of twice the budget is only the outer cap.
 //
 // A lookup can come to need its own name: resolving ns1.example. may start at
 // example., which is served by ns1.example. (a nameserver without glue), or by
 // a zone that is served by names in example. (a cycle). Joining the running
 // lookup would then wait on itself until its deadline. So a lookup's context
-// carries the chain of names it is nested in, and nsLookup starts nothing for
-// a name already on ctx's chain. Two lookups that were started independently
-// can still wait on each other; those waits end when the lookups' own queries
-// run out of budget, and such a delegation has no address to find anyway.
+// carries the chain of names it is nested in, and nsLookup starts nothing and
+// waits for nothing for a name already on ctx's chain. It still registers zone
+// with the running lookup, which stores the server there when it ends. Two
+// lookups that were started independently can still wait on each other; those
+// waits end when the lookups' own queries run out of budget, and such a
+// delegation has no address to find anyway.
 func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct{} {
 	key := cache.ServerKey(nsname)
 	chain, _ := ctx.Value(nsLookupChainKey{}).([]string)
 	if slices.Contains(chain, key) {
 		lgDns.Debug("nsLookup: nameserver is already being looked up on this chain",
-			"ns", nsname, "chain", chain)
+			"ns", nsname, "zone", zone, "chain", chain)
+		imr.nsAddrLookups.join(nsname, zone)
 		return ended
 	}
 	lookup, start := imr.nsAddrLookups.begin(nsname, zone)

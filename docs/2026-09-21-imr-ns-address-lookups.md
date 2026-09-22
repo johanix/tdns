@@ -22,9 +22,9 @@ The referral starts the background lookup and returns with an empty server map. 
 
 This function starts the address lookup for `nsname`, or joins the one already running. It registers `zone` to receive the server once the server has an address. It never waits: the channel it returns is closed when the lookup has ended and the server has been stored.
 
-- **Detached.** The lookup runs on `detachedContext` with a deadline of twice the query budget. A caller that stops waiting (its context ends) leaves the lookup running, and the result is still stored in every registered zone's map.
-- **One per name.** `nsAddrLookups` maps each nameserver name to its running lookup: a `done` channel and the set of registered zones. `begin` returns the running lookup or creates one; `end` removes it and returns the zones.
-- **A and AAAA at once.** `lookupServerAddrs` sends the two queries concurrently.
+- **Detached.** The lookup runs on `detachedContext`. A caller that stops waiting (its context ends) leaves the lookup running, and the result is still stored in every registered zone's map.
+- **One per name.** `nsAddrLookups` maps each nameserver name to its running lookup: a `done` channel and the set of registered zones. `begin` returns the running lookup or creates one; `join` registers a zone with a running lookup and never creates one; `end` removes it and returns the zones.
+- **A and AAAA at once.** `lookupServerAddrs` sends the two queries concurrently. Each `ImrQuery` is bounded by one query budget, so a lookup takes at most about one budget; the context's deadline of twice the budget is only an outer cap.
 
 ### Callers
 
@@ -38,6 +38,8 @@ This function starts the address lookup for `nsname`, or joins the one already r
 Resolving `ns1.example.` can start at `example.`, and `example.` can be served by `ns1.example.` itself (a nameserver without glue) or by a zone whose nameservers are named in `example.` (a cycle). The lookup's own walk then reaches a fallback for the same name. Joining the running lookup would wait on itself until the deadline.
 
 To prevent this, a lookup's context carries the chain of nameserver names it is nested in (`nsLookupChainKey`). This is the one value put on a detached context, and it is put there on purpose. `nsLookup` starts nothing for a name already on the chain and returns a closed channel. In the test with a glueless in-bailiwick nameserver, the fallback returns at once; without the check it waited the full 16 s deadline.
+
+It does register the zone it was called for with the running lookup (`join`). The walk may meet a referral to a second zone that names the same nameserver; that zone then gets the server when the running lookup ends, as a zone registered by an independent caller does.
 
 Two lookups started independently can still wait on each other in a cycle. Those waits end when each lookup's own queries run out of budget. That is no worse than before, when the recursion also ran until the budget, and such a delegation has no address to find anyway.
 
@@ -53,3 +55,4 @@ Two lookups started independently can still wait on each other in a cycle. Those
 | a waiter that gives up still leaves the server stored | never stored |
 | a lookup needing its own name ends at once | 16 s (with the chain check disabled) |
 | two zones naming one nameserver share one lookup, and both get the server | passed; covers the waiting-zones set |
+| a nested call for a name on its own chain returns at once and still registers its zone | the second zone never got the server |
