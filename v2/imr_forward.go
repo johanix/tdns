@@ -390,6 +390,12 @@ const (
 	// why one is not enough and three is.
 	forwardSliceTimeoutsBeforeFailing = 3
 
+	// forwardReloadProbeBudget caps the probe of the zones a reload added or
+	// changed. Generous, because it covers every one of those zones and each
+	// upstream's own timeout inside them, and bounded, because the probe runs
+	// in the background and nothing waits for it.
+	forwardReloadProbeBudget = 30 * time.Second
+
 	// forwardDefaultBudget is what gets divided when the caller's context
 	// carries no deadline. It is the client timeout, so a single upstream
 	// behaves exactly as it did before this split existed.

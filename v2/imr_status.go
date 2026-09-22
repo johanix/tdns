@@ -16,8 +16,13 @@ import (
 // resolver's state is observable wherever it runs.
 type ImrStatus struct {
 	Primed    bool      `json:"primed"`
-	PrimedVia string    `json:"primed_via,omitempty"` // "hints+fetch" or "hints-only (root forwarded)"
+	PrimedVia string    `json:"primed_via,omitempty"` // "hints+fetch", or how RefreshRoot re-primed
 	PrimedAt  time.Time `json:"primed_at,omitzero"`
+
+	// RootForwarded: "." is covered by a forward zone, so nothing is iterated.
+	// The root is not primed and no root NS is kept, and the RootNS* fields
+	// below say nothing about whether the resolver can answer.
+	RootForwarded bool `json:"root_forwarded,omitempty"`
 
 	// RootNS* describe what the cache holds for ". NS" RIGHT NOW. Primed
 	// above says only that priming once happened, which stayed true for
@@ -76,6 +81,7 @@ func (imr *Imr) StatusReport() *ImrStatus {
 	st := &ImrStatus{
 		PrimedVia:     imr.PrimedVia,
 		PrimedAt:      imr.PrimedAt,
+		RootForwarded: imr.forwardZoneFor(".") != nil,
 		StubZones:     append([]string(nil), table.stubs...),
 		ZonesLoadedAt: table.loadedAt,
 	}

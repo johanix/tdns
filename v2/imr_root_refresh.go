@@ -58,22 +58,97 @@ const (
 // not quietly become the source of truth. Hints stay what they are -- the
 // cold-start mechanism -- and are used here only if the root is already gone,
 // which is the state this function exists to prevent.
+//
+// While "." is forwarded it does nothing, with no timer, until a reload wakes
+// it (notifyRootRefresh). Nothing is iterated then, so there is no root NS to
+// keep, and a refresh through the forward could only fetch the upstream's copy,
+// whose TTL counts down (#722). When a reload removes the forward, it primes
+// the way start-up does. RefreshRoot owns priming after start-up: a reload only
+// wakes it, so there is one place that primes.
 func (imr *Imr) RefreshRoot(ctx context.Context, hintsfile string) {
 	if imr == nil || imr.Cache == nil {
 		return
 	}
+	imr.refreshRootLoop(ctx, hintsfile, imr.rootNSQuery)
+}
 
+// refreshRootLoop is RefreshRoot's loop, with the ". NS" query as a parameter
+// for the same reason as in refreshRootFromLiveRoots.
+func (imr *Imr) refreshRootLoop(ctx context.Context, hintsfile string,
+	query func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error)) {
+
+	wake := imr.rootWakeCh()
+	forwarded := false
 	for {
-		wait := imr.rootRefreshPass(ctx, hintsfile, imr.rootNSQuery)
+		wasForwarded := forwarded
+		forwarded = imr.forwardZoneFor(".") != nil
+		if forwarded {
+			if !wasForwarded {
+				lgImr.Info("RefreshRoot: the root is forwarded; idle until a reload changes that")
+			}
+			select {
+			case <-ctx.Done():
+				lgImr.Info("RefreshRoot: terminating (context cancelled)")
+				return
+			case <-wake:
+			}
+			continue
+		}
+		if wasForwarded {
+			imr.primeRoot(ctx, hintsfile, query)
+		}
+
+		wait := imr.rootRefreshPass(ctx, hintsfile, query)
 		if wait <= 0 {
 			wait = time.Millisecond // yield, then re-evaluate
 		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			lgImr.Info("RefreshRoot: terminating (context cancelled)")
 			return
-		case <-time.After(wait):
+		case <-wake:
+			timer.Stop()
+		case <-timer.C:
 		}
+	}
+}
+
+// primeRoot primes a root that is no longer forwarded the way start-up does:
+// the hints, then a live ". NS" through query. On the hints alone, the root NS
+// would be the hints' own until its first refresh.
+func (imr *Imr) primeRoot(ctx context.Context, hintsfile string,
+	query func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error)) {
+
+	lgImr.Info("RefreshRoot: the root is no longer forwarded; priming", "hintsfile", hintsfile)
+	if err := imr.Cache.PrimeFromHintsOnly(hintsfile); err != nil {
+		lgImr.Error("RefreshRoot: priming from hints failed", "err", err)
+		return
+	}
+	imr.PrimedVia = "hints (the root forward was removed)"
+	imr.PrimedAt = time.Now()
+	servers, _ := imr.Cache.ServerMapCopy(".")
+	if _, err := query(ctx, servers); err != nil {
+		lgImr.Warn("RefreshRoot: the live . NS fetch failed; the root NS is the hints' until its first refresh",
+			"err", err)
+		return
+	}
+	imr.PrimedVia = "hints+fetch (the root forward was removed)"
+}
+
+// rootWakeCh is the channel that wakes RefreshRoot, made on first use.
+func (imr *Imr) rootWakeCh() chan struct{} {
+	imr.rootWakeOnce.Do(func() { imr.rootWake = make(chan struct{}, 1) })
+	return imr.rootWake
+}
+
+// notifyRootRefresh wakes RefreshRoot. It never blocks: the channel holds one
+// wake-up, and a send while one is pending is dropped.
+func (imr *Imr) notifyRootRefresh() {
+	select {
+	case imr.rootWakeCh() <- struct{}{}:
+	default:
 	}
 }
 

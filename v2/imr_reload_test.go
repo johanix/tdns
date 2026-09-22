@@ -18,6 +18,7 @@ import (
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 func newReloadTestImr(t *testing.T) *Imr {
@@ -329,4 +330,71 @@ func TestStubZoneWithoutTrailingDot(t *testing.T) {
 	if zones := imr.StubZones(); len(zones) != 1 || zones[0] != "internal.example." {
 		t.Errorf("StubZones = %v, want [internal.example.]", zones)
 	}
+}
+
+// A zone the reload adds, or changes, gets its upstreams probed, as start-up
+// probes the zones it starts with. Without it a dead upstream of a newly
+// configured zone was in no report at all until a query needed it: the reload
+// reported the zone added, and its upstream showed no exchanges rather than
+// being unreachable. A zone the reload leaves alone is not re-probed: its
+// state is live and still true.
+func TestReloadProbesTheZonesItAddedOrChanged(t *testing.T) {
+	probedSOA := func(t *testing.T, logr *upstreamLog, zone string) bool {
+		t.Helper()
+		return len(logr.find(zone, dns.TypeSOA)) > 0
+	}
+
+	t.Run("added", func(t *testing.T) {
+		oldAddr, oldPort, oldLog, stopOld := startTestUpstream(t)
+		defer stopOld()
+		newAddr, newPort, newLog, stopNew := startTestUpstream(t)
+		defer stopNew()
+
+		imr := newReloadTestImr(t)
+		if _, err := imr.ReloadZones(nil, []ImrForwardConf{fwdConf("fwd.example.", oldAddr, oldPort)}); err != nil {
+			t.Fatalf("first reload: %v", err)
+		}
+		waitFor(t, 2*time.Second, "the first zone probed", func() bool {
+			return probedSOA(t, oldLog, "fwd.example.")
+		})
+
+		res, err := imr.ReloadZones(nil, []ImrForwardConf{
+			fwdConf("fwd.example.", oldAddr, oldPort), // untouched
+			fwdConf("other.example.", newAddr, newPort),
+		})
+		if err != nil {
+			t.Fatalf("second reload: %v", err)
+		}
+		if len(res.ForwardsAdded) != 1 || res.ForwardsAdded[0] != "other.example." {
+			t.Fatalf("forwards added = %v, want [other.example.]", res.ForwardsAdded)
+		}
+		waitFor(t, 2*time.Second, "the added zone probed", func() bool {
+			return probedSOA(t, newLog, "other.example.")
+		})
+		if n := len(oldLog.find("fwd.example.", dns.TypeSOA)); n != 1 {
+			t.Errorf("the untouched zone was probed %d times, want 1 (at its own reload)", n)
+		}
+	})
+
+	t.Run("changed", func(t *testing.T) {
+		oldAddr, oldPort, _, stopOld := startTestUpstream(t)
+		defer stopOld()
+		newAddr, newPort, newLog, stopNew := startTestUpstream(t)
+		defer stopNew()
+
+		imr := newReloadTestImr(t)
+		if _, err := imr.ReloadZones(nil, []ImrForwardConf{fwdConf("fwd.example.", oldAddr, oldPort)}); err != nil {
+			t.Fatalf("first reload: %v", err)
+		}
+		res, err := imr.ReloadZones(nil, []ImrForwardConf{fwdConf("fwd.example.", newAddr, newPort)})
+		if err != nil {
+			t.Fatalf("second reload: %v", err)
+		}
+		if len(res.ForwardsChanged) != 1 {
+			t.Fatalf("forwards changed = %v, want [fwd.example.]", res.ForwardsChanged)
+		}
+		waitFor(t, 2*time.Second, "the changed zone's new upstream probed", func() bool {
+			return probedSOA(t, newLog, "fwd.example.")
+		})
+	})
 }
