@@ -2571,31 +2571,44 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		case dns.TypeCNAME:
 			rrset.RRs = append(rrset.RRs, rr)
 			target := rr.(*dns.CNAME).Target
-			tmprrset, rcode, context, chaseTransport, err := imr.chaseCNAME(ctx, target, qtype, force, privacy)
+			tmprrset, rcode, context, chaseTransport, err := imr.chaseCNAME(ctx, rr.Header().Name, target, qtype, force, privacy)
 			if err != nil {
 				return nil, rcode, context, transport, err, true
 			}
-			if tmprrset != nil && len(tmprrset.RRs) != 0 {
+			// Combine transports: downgrade to unencrypted if any hop was unencrypted
+			combinedTransport := chaseTransport
+			if !core.IsEncryptedTransport(transport) || !core.IsEncryptedTransport(chaseTransport) {
+				combinedTransport = core.TransportDo53
+			}
+			if tmprrset != nil {
 				rrset.RRs = append(rrset.RRs, tmprrset.RRs...)
-				if tmprrset.RRs[0].Header().Rrtype != dns.TypeCNAME {
-					// Combine transports: downgrade to unencrypted if any hop was unencrypted
-					combinedTransport := chaseTransport
-					if !core.IsEncryptedTransport(transport) || !core.IsEncryptedTransport(chaseTransport) {
-						combinedTransport = core.TransportDo53
-					}
-					imr.Cache.Set(qname, qtype, &cache.CachedRRset{
-						Name:    qname,
-						RRtype:  qtype,
-						Rcode:   uint8(rcode),
-						RRset:   &rrset,
-						Context: cache.ContextAnswer,
-						// Should there not be some state here? State:      vstate,
-						State:      cache.ValidationStateNone, // XXX: propagate state from chaseCNAME?
-						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
-						Transport:  combinedTransport, // Combined transport from initial query and CNAME chase
-					})
-					return &rrset, rcode, cache.ContextAnswer, combinedTransport, nil, true
-				}
+			}
+			if rcode == dns.RcodeNameError || context == cache.ContextNXDOMAIN || context == cache.ContextNoErrNoAns {
+				// The chain ends in a name that does not exist, or has no data
+				// of this type. The answer is the CNAMEs, with the rcode of the
+				// chain's last name (RFC 6604). The last name's denial is
+				// cached under that name; nothing is cached for this one.
+				//
+				// This used to fall through to the bottom of the function and
+				// validate and cache the CNAMEs as though they were <qname,
+				// qtype>: NXDOMAIN at the end of the chain reached the client
+				// as NOERROR.
+				return &rrset, rcode, context, combinedTransport, nil, true
+			}
+			if tmprrset != nil && len(tmprrset.RRs) != 0 {
+				// The target's data, or the rest of a chain that ends in data.
+				imr.Cache.Set(qname, qtype, &cache.CachedRRset{
+					Name:    qname,
+					RRtype:  qtype,
+					Rcode:   uint8(rcode),
+					RRset:   &rrset,
+					Context: cache.ContextAnswer,
+					// Should there not be some state here? State:      vstate,
+					State:      cache.ValidationStateNone, // XXX: propagate state from chaseCNAME?
+					Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+					Transport:  combinedTransport, // Combined transport from initial query and CNAME chase
+				})
+				return &rrset, rcode, cache.ContextAnswer, combinedTransport, nil, true
 			}
 		default:
 			imr.Cache.Logger.Printf("Got a %s RR when looking for %s %s", dns.TypeToString[t], qname, dns.TypeToString[qtype])
@@ -3568,25 +3581,70 @@ func nsecCoversName(name string, nsec *dns.NSEC) bool {
 	return strings.Compare(target, owner) >= 0 || strings.Compare(target, next) < 0
 }
 
-func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, force bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
-	maxchase := 10
-	cur := target
+// maxCNAMEChain is the most CNAMEs one answer follows, as BIND's default
+// max-query-restarts.
+const maxCNAMEChain = 11
+
+// cnameChainKey carries, on the context of a CNAME chase, the chain it is
+// following: canonical names, the query name first and the current target
+// last.
+type cnameChainKey struct{}
+
+// extendCNAMEChain returns the chain with target appended, continuing the
+// chain on ctx when owner is its last name. Any other chase -- say, the lookup
+// of a nameserver's address made while resolving one link -- is a chain of its
+// own and starts from owner. It fails on a name the chain has already visited,
+// and on a chain of more than maxCNAMEChain CNAMEs.
+//
+// The chain has to be carried on the context because the chase nests: the
+// query for each target goes through IterativeDNSQuery and handleAnswer, which
+// chase that target's own CNAME. Counted per call, a loop never ended: every
+// link was answered from the cache and the stack overflowed.
+func extendCNAMEChain(ctx context.Context, owner, target string) ([]string, error) {
+	chain, _ := ctx.Value(cnameChainKey{}).([]string)
+	if len(chain) == 0 || chain[len(chain)-1] != core.CanonicalizeName(owner) {
+		chain = []string{core.CanonicalizeName(owner)}
+	}
+	t := core.CanonicalizeName(target)
+	if slices.Contains(chain, t) {
+		return nil, fmt.Errorf("CNAME loop: %s leads back to %s", owner, target)
+	}
+	if len(chain) > maxCNAMEChain {
+		return nil, fmt.Errorf("CNAME chain from %s is longer than %d", chain[0], maxCNAMEChain)
+	}
+	return append(slices.Clone(chain), t), nil
+}
+
+// chaseCNAME resolves <target, qtype>, where target is the CNAME target of
+// owner. It returns what IterativeDNSQuery returns for the target: its data,
+// the rest of the chain when the target is itself a CNAME (IterativeDNSQuery
+// has already followed it), or a negative end -- no RRset, and the rcode and
+// context of the name that does not exist (NXDOMAIN) or has no qtype (NODATA).
+func (imr *Imr) chaseCNAME(ctx context.Context, owner, target string, qtype uint16, force bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
+	chain, err := extendCNAMEChain(ctx, owner, target)
+	if err != nil {
+		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, err
+	}
+	ctx = context.WithValue(ctx, cnameChainKey{}, chain)
+	// A referral IterativeDNSQuery could not follow yet is retried; nothing
+	// else is.
+	const maxAttempts = 10
 	var combinedTransport core.Transport = core.TransportDoQ // Start with encrypted, will downgrade if needed
 	hasUnencryptedHop := false
-	for i := 0; i < maxchase; i++ {
+	for i := 0; i < maxAttempts; i++ {
 		select {
 		case <-ctx.Done():
 			return nil, 0, cache.ContextFailure, core.TransportDo53, ctx.Err()
 		default:
 		}
-		imr.Cache.Logger.Printf("*** IterativeDNSQuery: found CNAME target: %s, chasing.", cur)
-		bestmatch, tmpservers, err := imr.Cache.FindClosestKnownZoneFor(cur, qtype)
+		imr.Cache.Logger.Printf("*** IterativeDNSQuery: found CNAME target: %s, chasing.", target)
+		bestmatch, tmpservers, err := imr.Cache.FindClosestKnownZoneFor(target, qtype)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from FindClosestKnownZoneFor: %v", err)
 			return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, err
 		}
-		imr.Cache.Logger.Printf("*** IterativeDNSQuery: best match for target %s is %s", cur, bestmatch)
-		tmprrset, rcode, context, hopTransport, err := imr.IterativeDNSQuery(ctx, cur, qtype, tmpservers, force, privacy)
+		imr.Cache.Logger.Printf("*** IterativeDNSQuery: best match for target %s is %s", target, bestmatch)
+		tmprrset, rcode, context, hopTransport, err := imr.IterativeDNSQuery(ctx, target, qtype, tmpservers, force, privacy)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from IterativeDNSQuery: %v", err)
 			return nil, rcode, context, core.TransportDo53, err
@@ -3600,18 +3658,22 @@ func (imr *Imr) chaseCNAME(ctx context.Context, target string, qtype uint16, for
 			combinedTransport = hopTransport
 		}
 		if tmprrset != nil && len(tmprrset.RRs) != 0 {
-			if tmprrset.RRs[0].Header().Rrtype == dns.TypeCNAME {
-				cur = tmprrset.RRs[0].(*dns.CNAME).Target
-				continue
-			}
+			// The target's data, or -- when the target is itself a CNAME --
+			// the rest of the chain, which IterativeDNSQuery has already
+			// followed. Chasing that chain's first target again repeated every
+			// later link.
 			return tmprrset, rcode, context, combinedTransport, nil
 		}
-		if rcode == dns.RcodeNameError {
-			// Cache negative for the original qname will be handled by caller
+		// A chain that ends in a name that does not exist, or in a name
+		// without data of this type. Only NXDOMAIN ended the chase before:
+		// NODATA sent it back to the same name until the attempts ran out,
+		// and the client got a SERVFAIL.
+		if rcode == dns.RcodeNameError || context == cache.ContextNXDOMAIN || context == cache.ContextNoErrNoAns {
 			return nil, rcode, context, combinedTransport, nil
 		}
 	}
-	return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, fmt.Errorf("CNAME chase exceeded max depth")
+	return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
+		fmt.Errorf("CNAME target %s: no answer after %d attempts", target, maxAttempts)
 }
 
 func (imr *Imr) DefaultDNSKEYFetcher(ctx context.Context, name string) (*core.RRset, error) {
