@@ -8,7 +8,6 @@ import (
 	"context"
 	"io"
 	"log"
-	"os"
 	"testing"
 	"time"
 
@@ -239,16 +238,6 @@ func TestRootNSQueryIsNotSatisfiedFromCache(t *testing.T) {
 	}
 }
 
-// untilRootRefreshHardened skips a test of the root refresh hardening until it
-// is in. TDNS_TEST_ROOT_REFRESH=1 runs it anyway, to show how it fails without
-// it.
-func untilRootRefreshHardened(t *testing.T) {
-	t.Helper()
-	if os.Getenv("TDNS_TEST_ROOT_REFRESH") == "" {
-		t.Skip("the root refresh hardening (S3) is not implemented yet")
-	}
-}
-
 // rootNSAnswer returns a query double that stores a root NS RRset with the
 // given TTL, as a force=true query does, and hands it back.
 func rootNSAnswer(c *cache.RRsetCacheT, ttl uint32) func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error) {
@@ -274,7 +263,6 @@ func failingRootNSQuery(context.Context, map[string]*cache.AuthServer) (*core.RR
 // further. Counted as success, the next turn refreshed again at once, and the
 // loop spun at query rate until the RRset expired. (From #723.)
 func TestRefreshWithinTheLeadIsNotARefresh(t *testing.T) {
-	untilRootRefreshHardened(t)
 	c := rootNSCache(t, 20)
 	seedRootServers(t, c)
 	imr := &Imr{Cache: c}
@@ -293,7 +281,6 @@ func TestRefreshWithinTheLeadIsNotARefresh(t *testing.T) {
 // answer with a TTL that counts down, or a TTL of 0. (From #723, which took the
 // expiry from before the turn.)
 func TestRootRetryWaitStopsAtTheExpiry(t *testing.T) {
-	untilRootRefreshHardened(t)
 	cases := []struct {
 		name     string
 		ttl      uint32 // of the root NS the turn starts with
@@ -334,7 +321,6 @@ func TestRootRetryWaitStopsAtTheExpiry(t *testing.T) {
 // interval with neither (#722). The turn that stored it leaves both, and the
 // next turn drops the expired copy and re-primes from the hints at once.
 func TestAnExpiredRefreshLeavesTheRootServerMapToTheNextTurn(t *testing.T) {
-	untilRootRefreshHardened(t)
 	c := rootNSCache(t, 40)
 	seedRootServers(t, c)
 	imr := &Imr{Cache: c}
