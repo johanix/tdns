@@ -26,6 +26,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"sort"
@@ -255,6 +256,31 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 	// A dropped upstream must not keep an aggregate DEGRADED alive, and a
 	// newly configured one starts unprobed rather than failing.
 	imr.updateForwardUpstreamError()
+
+	// Probe the zones this reload added or changed. Their upstreams have never
+	// been probed, so until a query needed one, a dead upstream was in no
+	// report: `config status` stayed clean and `forward status` showed an
+	// upstream with no exchanges rather than an unreachable one. Start-up
+	// probes for exactly this reason (ProbeForwardUpstreams), and the design
+	// asks the reload to do the same (section 4 of
+	// docs/2026-09-22-forwarding-and-priming.md).
+	//
+	// In the background, and on a context of its own: a reload must not wait
+	// on a dead upstream's timeout, and the context of the caller that asked
+	// for the reload ends with its API response.
+	if probeZones := slices.Concat(res.ForwardsAdded, res.ForwardsChanged); len(probeZones) > 0 {
+		probeCtx, cancel := context.WithTimeout(context.Background(), forwardReloadProbeBudget)
+		go func(ctx context.Context, zones []string) {
+			defer cancel()
+			for _, zone := range zones {
+				// A zone a later reload has removed is no longer there to
+				// probe, which is not a failure of this one.
+				if _, err := imr.ProbeForwardUpstreamsReport(ctx, zone); err != nil {
+					lgImr.Warn("probing a reloaded forward zone failed", "zone", zone, "err", err)
+				}
+			}
+		}(probeCtx, probeZones)
+	}
 
 	if res.Changed() {
 		lgImr.Info("imrengine zones reloaded", "summary", res.Summary())

@@ -510,3 +510,15 @@ Settled in review, 2026-09-22.
    forward primes from. A missing file must not stop start-up.
 4. **A DS query at an anchored zone** (section 7, 2026-09-22): answered from the
    anchor for CD=0, and along the parent's path for CD=1.
+
+## Amendment 2026-09-22: the reload's probe of a forward zone
+
+Section 4 says that a reload which adds or removes a forward zone probes the new
+zone's upstreams, and the Staging table assigned that to no step. It went into
+S2 (#728): after the swap, `ReloadZones` probes the zones it reports as added or
+changed, in the background and on a context of its own, with the same probe
+start-up uses. Without it, the upstreams of a newly configured zone had never
+been probed, so a dead one was in no report until a query needed it. A zone the
+reload leaves untouched is not re-probed: its reachability state is live.
+
+The probe's classification of what an upstream answers is still S4's.

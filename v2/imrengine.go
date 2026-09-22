@@ -465,9 +465,11 @@ func (imr *Imr) startServing(ctx context.Context, conf *Config, listen func(cont
 	// not stop the resolver.
 	go imr.ProbeForwardUpstreams(ctx)
 
-	// Keep the root NS alive. Priming above runs once; without this, the root
-	// NS expires on its TTL and cannot be re-fetched, because fetching ". NS"
-	// needs a root server address. See imr_root_refresh.go.
+	// Keep an iterated root NS alive: start-up primes it once, and without
+	// this it expires on its TTL and cannot be re-fetched, because fetching
+	// ". NS" needs a root server address. While "." is forwarded there is
+	// nothing to keep, and this idles instead. It also primes a root that a
+	// reload stops forwarding. See imr_root_refresh.go.
 	go imr.RefreshRoot(ctx, conf.Imr.RootHints)
 }
 
