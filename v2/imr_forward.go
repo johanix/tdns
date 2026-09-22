@@ -654,6 +654,29 @@ func (imr *Imr) forwardZoneFor(qname string) *ForwardZone {
 	return best
 }
 
+// forwardZoneForQuestion returns the forward zone that the question <qname,
+// qtype> is sent to, or nil when it is resolved by iteration. It is the one
+// place that decides "forwarded?" for a question: the forward hook in
+// IterativeDNSQuery asks it, and so does every path that picks servers, before
+// it looks for a cached zone cut. A forwarded question needs no servers from a
+// cut, and "no cut, no servers" is normal for it. The paths that looked for the
+// cut first gave up without one, which for a forwarded root is whenever the
+// root NS it holds has expired (#722). The cache's validator asks through
+// RRsetCacheT.Forwarded.
+//
+// The question is decided by its name. The qtype is for the rule that sends a
+// DS along its parent's path (docs/2026-09-22-forwarding-and-priming.md,
+// section 5), which is not in place yet.
+func (imr *Imr) forwardZoneForQuestion(qname string, qtype uint16) *ForwardZone {
+	return imr.forwardZoneFor(qname)
+}
+
+// forwarded reports whether the question <qname, qtype> is forwarded. The
+// cache's validator asks, through RRsetCacheT.Forwarded.
+func (imr *Imr) forwarded(qname string, qtype uint16) bool {
+	return imr.forwardZoneForQuestion(qname, qtype) != nil
+}
+
 // forwardQuery resolves <qname, qtype> by sending a recursive query to the
 // forward zone's upstreams, in configured order, until one produces a usable
 // response. The return signature matches IterativeDNSQueryWithLoopDetection,

@@ -1392,9 +1392,18 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// this entry point so every internal consumer (responder, ImrQuery, CNAME
 	// chase, NS-address resolution, the validator's fetcher) forwards
 	// consistently. The serverMap argument is deliberately ignored here: a
-	// forward zone outranks whatever zone cut the caller had found.
-	if fz := imr.forwardZoneFor(qname); fz != nil {
+	// forward zone outranks whatever zone cut the caller had found. The callers
+	// that pick servers decide the same way before they look for a cut, and
+	// send a forwarded question with none (forwardZoneForQuestion).
+	if fz := imr.forwardZoneForQuestion(qname, qtype); fz != nil {
 		return imr.forwardQuery(ctx, qname, qtype, fz, force, privacy)
+	}
+	// A caller that found the question forwarded sent it with no servers. A
+	// reload that has removed the forward since leaves it to be iterated after
+	// all, from the closest cached zone cut, as it would be if asked now: with
+	// no servers, the walk below would have nothing to try.
+	if len(serverMap) == 0 {
+		_, serverMap, _ = imr.Cache.FindClosestKnownZoneFor(qname, qtype)
 	}
 
 	var rrset core.RRset
@@ -3664,18 +3673,9 @@ func (imr *Imr) chaseCNAME(ctx context.Context, owner, target string, qtype uint
 }
 
 func (imr *Imr) DefaultDNSKEYFetcher(ctx context.Context, name string) (*core.RRset, error) {
-	// implement with your IterativeDNSQuery + server selection
-	best, servers, err := imr.Cache.FindClosestKnownZone(name)
-	if err != nil {
-		return nil, fmt.Errorf("FindClosestKnownZone error for %s: %v", name, err)
-	}
-	_ = best // could be used for logging
-	if len(servers) == 0 {
-		if sm, ok := imr.Cache.ServerMapCopy("."); ok {
-			servers = sm
-		}
-	}
-	if len(servers) == 0 {
+	// A forwarded name is fetched without servers (ServersFor).
+	servers, ok := imr.Cache.ServersFor(name, dns.TypeDNSKEY)
+	if !ok {
 		return nil, fmt.Errorf("no servers for %s", name)
 	}
 	rr, _, _, _, err := imr.IterativeDNSQuery(ctx, name, dns.TypeDNSKEY, servers, false, edns0.PrivacyNone) // privacy is a client signal; DNSKEY fetches are our own traffic
@@ -3686,18 +3686,9 @@ func (imr *Imr) DefaultDNSKEYFetcher(ctx context.Context, name string) (*core.RR
 }
 
 func (imr *Imr) DefaultRRsetFetcher(ctx context.Context, qname string, qtype uint16) (*core.RRset, error) {
-	// implement with your IterativeDNSQuery + server selection
-	best, servers, err := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
-	if err != nil {
-		return nil, fmt.Errorf("FindClosestKnownZoneFor error for %s %s: %v", qname, dns.TypeToString[qtype], err)
-	}
-	_ = best // could be used for logging
-	if len(servers) == 0 {
-		if sm, ok := imr.Cache.ServerMapCopy("."); ok {
-			servers = sm
-		}
-	}
-	if len(servers) == 0 {
+	// A forwarded question is fetched without servers (ServersFor).
+	servers, ok := imr.Cache.ServersFor(qname, qtype)
+	if !ok {
 		return nil, fmt.Errorf("no servers for %s", qname)
 	}
 	rr, _, _, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, servers, false, edns0.PrivacyNone) // privacy is a client signal; the fetcher is our own traffic

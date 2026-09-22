@@ -221,11 +221,8 @@ func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string,
 	crr := rrcache.Get(name, dns.TypeDS)
 	if crr == nil && ctx != nil && fetcher != nil {
 		// The fetch caches what it gets, answer or denial, with its verdict.
-		_, servers, err := rrcache.FindClosestKnownZoneFor(name, dns.TypeDS)
-		if err == nil && len(servers) == 0 {
-			servers, _ = rrcache.ServerMapCopy(".")
-		}
-		if err == nil && len(servers) > 0 {
+		// A forwarded DS is fetched without servers (ServersFor).
+		if servers, ok := rrcache.ServersFor(name, dns.TypeDS); ok {
 			if _, err := fetcher(ctx, name, dns.TypeDS, servers); err != nil && rrcache.Verbose {
 				log.Printf("ValidateRRset: DS query for %q failed: %v", name, err)
 			}

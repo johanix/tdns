@@ -1167,6 +1167,30 @@ func (rrcache *RRsetCacheT) FindClosestKnownZoneFor(qname string, qtype uint16) 
 	return rrcache.FindClosestKnownZone(qname)
 }
 
+// ServersFor returns the servers that the resolver's own fetch of <qname,
+// qtype> is sent to, and whether there is anything to send it to. A forwarded
+// question is sent without servers, and no zone cut is looked for: the fetcher
+// forwards it (Forwarded). Any other goes to the closest cached zone that holds
+// it (FindClosestKnownZoneFor), or to the root's servers when that zone has
+// none.
+//
+// The fetches used to look for the cut first and give up without servers,
+// which for a forwarded root is whenever the root NS it holds has expired: the
+// root server map goes with it (#722).
+func (rrcache *RRsetCacheT) ServersFor(qname string, qtype uint16) (map[string]*AuthServer, bool) {
+	if rrcache.Forwarded != nil && rrcache.Forwarded(qname, qtype) {
+		return nil, true
+	}
+	_, servers, err := rrcache.FindClosestKnownZoneFor(qname, qtype)
+	if err != nil {
+		return nil, false
+	}
+	if len(servers) == 0 {
+		servers, _ = rrcache.ServerMapCopy(".")
+	}
+	return servers, len(servers) > 0
+}
+
 func GetMinTTL(rrs []dns.RR) time.Duration {
 	if len(rrs) == 0 {
 		return 0
