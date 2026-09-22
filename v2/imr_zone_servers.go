@@ -69,7 +69,7 @@ func (imr *Imr) lookupServerAddrs(ctx context.Context, srv *cache.AuthServer, ns
 	var wg sync.WaitGroup
 	for _, atype := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		wg.Add(1)
-		go func(atype uint16) {
+		go func(ctx context.Context, atype uint16) {
 			defer wg.Done()
 			resp, err := imr.ImrQuery(ctx, nsname, atype, dns.ClassINET, nil)
 			if err != nil || resp == nil || resp.RRset == nil {
@@ -87,7 +87,7 @@ func (imr *Imr) lookupServerAddrs(ctx context.Context, srv *cache.AuthServer, ns
 					srv.AddAddr(a.AAAA.String())
 				}
 			}
-		}(atype)
+		}(ctx, atype)
 	}
 	wg.Wait()
 }
@@ -209,14 +209,16 @@ func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct
 	if budget <= 0 {
 		budget = nsAddrLookupFallbackBudget
 	}
-	go func() {
+	// The lookup's own context: detached, with its deadline, and carrying the
+	// chain of names it is nested in with its own name added.
+	lctx, cancel := detachedContext(2 * budget)
+	lctx = context.WithValue(lctx, nsLookupChainKey{}, append(slices.Clone(chain), key))
+	go func(ctx context.Context, cancel context.CancelFunc) {
 		defer close(lookup.done)
-		lctx, cancel := detachedContext(2 * budget)
 		defer cancel()
-		lctx = context.WithValue(lctx, nsLookupChainKey{}, append(slices.Clone(chain), key))
 		srv := imr.Cache.GetOrCreateAuthServer(nsname)
 		srv.SetSrc("ns-lookup")
-		imr.lookupServerAddrs(lctx, srv, nsname)
+		imr.lookupServerAddrs(ctx, srv, nsname)
 		zones := imr.nsAddrLookups.end(nsname)
 		if len(srv.GetAddrs()) == 0 {
 			lgDns.Debug("nsLookup: no address for nameserver", "ns", nsname, "zones", zones)
@@ -225,7 +227,7 @@ func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct
 		for _, z := range zones {
 			imr.storeZoneServers(z, map[string]*cache.AuthServer{key: srv})
 		}
-	}()
+	}(lctx, cancel)
 	return lookup.done
 }
 

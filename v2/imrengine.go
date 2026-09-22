@@ -834,13 +834,13 @@ func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname 
 			resolved <- srv
 			continue
 		}
-		go func(srv *cache.AuthServer, done <-chan struct{}) {
+		go func(ctx context.Context, srv *cache.AuthServer, done <-chan struct{}) {
 			select {
 			case <-done:
 				resolved <- srv
 			case <-ctx.Done():
 			}
-		}(srv, imr.nsLookup(ctx, ns.Ns, bestmatch))
+		}(ctx, srv, imr.nsLookup(ctx, ns.Ns, bestmatch))
 	}
 
 	for i := 0; i < want; i++ {
