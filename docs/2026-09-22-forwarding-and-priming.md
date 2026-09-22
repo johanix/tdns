@@ -9,6 +9,9 @@ document argues that a forwarded root should not need one, and proposes the
 shape of the resolver's start-up, refresh and lookup paths once forwarding is
 treated as what it is: a replacement for delegation discovery.
 
+**Status:** adopted; merged as `f3af2129` (#725). Implemented in stages; each
+stage's status is in the Staging table.
+
 ## The principle
 
 Priming bootstraps iteration: it tells the resolver where the delegation tree
@@ -454,15 +457,15 @@ unaffected.
 
 ## Staging
 
-| step | content | depends on |
-|---|---|---|
-| S1 | forward-first decision in the seven callers, the cache hook | — |
-| S2 | no priming or refresh for a forwarded root; `root-hints` not read; `RefreshRoot` wake-up channel and reload notification; trust-anchor setup after the listeners, through the forward; status | S1 |
-| S3 | the iterating-root hardening from #723 | — |
-| S4 | probe classification; then the idle re-probe | classification: —; re-probe: S1–S3 |
-| S5 | a configured trust anchor governs its zone; parent-side DS data cannot override it: the anchor store, anchor-first `ValidateDNSKEYs`, no `trust-ad` path under a non-root anchor inside the forward zone | — |
-| S6 | DS at a forward apex follows the parent's path | S5 |
-| S7 | a client's DS query at an anchored zone: the anchor's DS for CD=0, the parent's path for CD=1; responder only, marked with an EDE | S5, S6 |
+| step | content | depends on | status |
+|---|---|---|---|
+| S1 | forward-first decision in the seven callers, the cache hook | — | implemented in #726 |
+| S2 | no priming or refresh for a forwarded root; `root-hints` not read; `RefreshRoot` wake-up channel and reload notification; trust-anchor setup after the listeners, through the forward; status | S1 | not started |
+| S3 | the iterating-root hardening from #723 | — | not started |
+| S4 | probe classification; then the idle re-probe | classification: —; re-probe: S1–S3 | not started |
+| S5 | a configured trust anchor governs its zone; parent-side DS data cannot override it: the anchor store, anchor-first `ValidateDNSKEYs`, no `trust-ad` path under a non-root anchor inside the forward zone | — | not started |
+| S6 | DS at a forward apex follows the parent's path | S5 | not started |
+| S7 | a client's DS query at an anchored zone: the anchor's DS for CD=0, the parent's path for CD=1; responder only, marked with an EDE | S5, S6 | not started |
 
 S1 and S2 replace #723's forwarded-root half. S3 is #723's other half. S1 alone
 closes #722's lookup failures; S2 removes the synthetic root. S5 must land before
