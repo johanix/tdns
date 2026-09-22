@@ -459,7 +459,7 @@ unaffected.
 
 | step | content | depends on | status |
 |---|---|---|---|
-| S1 | forward-first decision in the seven callers, the cache hook | — | in review in #726 |
+| S1 | forward-first decision in the seven callers, the cache hook | — | implemented in #726 |
 | S2 | no priming or refresh for a forwarded root; `root-hints` not read; `RefreshRoot` wake-up channel and reload notification; trust-anchor setup after the listeners, through the forward; status | S1 | not started |
 | S3 | the iterating-root hardening from #723 | — | implemented in #727 |
 | S4 | probe classification; then the idle re-probe | classification: —; re-probe: S1–S3 | not started |

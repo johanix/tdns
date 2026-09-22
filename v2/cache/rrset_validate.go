@@ -166,28 +166,15 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 		if rrcache.Verbose {
 			log.Printf("ValidateRRset: signer DNSKEY %q::%d not in cache; attempting to obtain keys", signer, keyid)
 		}
-		// Attempt to fetch the signer's DNSKEY to populate cache (chain trust evaluated by caller)
-		_, servers, err := rrcache.FindClosestKnownZone(signer)
-		if err != nil {
-			log.Printf("ValidateRRset: FindClosestKnownZone(%q) failed: %v", signer, err)
-			// Check zone state again - might have been marked indeterminate
-			if zone, ok := rrcache.ZoneMap.Get(signer); ok && zone.GetState() == ValidationStateIndeterminate {
-				return false, true, ValidationStateIndeterminate, nil
-			}
-			// Couldn't reach the signer zone — chain unavailable, not a sig
-			// verification failure. The outer loop uses this distinction to
-			// pick Indeterminate over Bogus when no actual verify happened.
-			return false, false, ValidationStateIndeterminate, nil
-		}
+		// Attempt to fetch the signer's DNSKEY to populate cache (chain trust
+		// evaluated by caller). A forwarded signer zone is fetched without
+		// servers (ServersFor). With nothing to ask, the chain is unavailable
+		// (below).
+		servers, canFetch := rrcache.ServersFor(signer, dns.TypeDNSKEY)
 		if rrcache.Debug {
-			log.Printf("ValidateRRset: FindClosestKnownZone(%q) returned %d servers", signer, len(servers))
+			log.Printf("ValidateRRset: %d servers to fetch the DNSKEY of %q from (fetch: %v)", len(servers), signer, canFetch)
 		}
-		if len(servers) == 0 {
-			if sm, ok := rrcache.ServerMapCopy("."); ok {
-				servers = sm
-			}
-		}
-		if len(servers) > 0 && fetcher != nil {
+		if canFetch && fetcher != nil {
 			// Final check before issuing query: if signer zone is indeterminate or insecure, don't query
 			if zone, ok := rrcache.ZoneMap.Get(signer); ok {
 				switch zone.GetState() {
@@ -1006,19 +993,13 @@ func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher
 	// lame delegation, putting the (addr, transport) into a zone backoff, after
 	// which prioritizeServers had nothing left to offer and every subsequent
 	// query for the zone failed without a single auth-server attempt.
-	_, servers, err := rrcache.FindClosestKnownZoneFor(name, dns.TypeDS)
-	if err != nil {
+	// ServersFor asks for the parent's servers (FindClosestKnownZoneFor), or
+	// none for a forwarded DS.
+	servers, ok := rrcache.ServersFor(name, dns.TypeDS)
+	if !ok {
 		if rrcache.Verbose {
-			log.Printf("backfillDS: FindClosestKnownZoneFor(%q, DS) failed: %v", name, err)
+			log.Printf("backfillDS: no servers to ask for the DS of %q", name)
 		}
-		return nil
-	}
-	if len(servers) == 0 {
-		if sm, ok := rrcache.ServerMapCopy("."); ok {
-			servers = sm
-		}
-	}
-	if len(servers) == 0 {
 		return nil
 	}
 	fetched, err := fetcher(ctx, name, dns.TypeDS, servers)
