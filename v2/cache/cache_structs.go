@@ -51,6 +51,10 @@ type CachedRRset struct {
 	EDECode    uint16
 	EDEText    string
 	Transport  core.Transport // Transport used to receive this data (for privacy tracking)
+	// SynthesizedFrom is set on a CNAME synthesized from a DNAME (RFC 6672):
+	// the owner of that DNAME. The CNAME itself is unsigned. The DNAME's own
+	// entry carries the signature and the verdict, and is served beside it.
+	SynthesizedFrom string
 }
 
 type RRsetCacheT struct {
