@@ -237,3 +237,112 @@ func TestRootNSQueryIsNotSatisfiedFromCache(t *testing.T) {
 			" would read back the entry it is trying to replace")
 	}
 }
+
+// rootNSAnswer returns a query double that stores a root NS RRset with the
+// given TTL, as a force=true query does, and hands it back.
+func rootNSAnswer(c *cache.RRsetCacheT, ttl uint32) func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error) {
+	return func(ctx context.Context, servers map[string]*cache.AuthServer) (*core.RRset, error) {
+		rr := &dns.NS{
+			Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: ttl},
+			Ns:  "a.root.",
+		}
+		set := &core.RRset{Name: ".", RRtype: dns.TypeNS, RRs: []dns.RR{rr}}
+		c.Set(".", dns.TypeNS, &cache.CachedRRset{Name: ".", RRtype: dns.TypeNS, RRset: set})
+		return set, nil
+	}
+}
+
+// failingRootNSQuery is a query double for a refresh that gets no answer.
+func failingRootNSQuery(context.Context, map[string]*cache.AuthServer) (*core.RRset, error) {
+	return nil, context.DeadlineExceeded
+}
+
+// An answer whose expiry moved, but not out of the lead window, is not a
+// refresh (#722). A cache -- a forward's upstream -- answers ". NS" with a TTL
+// that counts down: every answer moves the expiry by the round trip and no
+// further. Counted as success, the next turn refreshed again at once, and the
+// loop spun at query rate until the RRset expired. (From #723.)
+func TestRefreshWithinTheLeadIsNotARefresh(t *testing.T) {
+	c := rootNSCache(t, 20)
+	seedRootServers(t, c)
+	imr := &Imr{Cache: c}
+
+	if imr.refreshRootFromLiveRoots(context.Background(), rootNSAnswer(c, 30)) {
+		t.Error("a refreshed root NS that expires inside the lead window was" +
+			" counted as a refresh; the loop would query again at once")
+	}
+}
+
+// After a turn that did not renew the root NS, the loop waits the retry
+// interval, but never past the expiry of the root NS the cache holds after the
+// turn, and never less than a second (#722). Sleeping a full interval through
+// that expiry left the resolver with no root NS until the interval ran out,
+// and the copy that expires first can be the one the turn itself stored: an
+// answer with a TTL that counts down, or a TTL of 0. (From #723, which took the
+// expiry from before the turn.)
+func TestRootRetryWaitStopsAtTheExpiry(t *testing.T) {
+	cases := []struct {
+		name     string
+		ttl      uint32 // of the root NS the turn starts with
+		query    func(c *cache.RRsetCacheT) func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error)
+		min, max time.Duration
+	}{
+		{"a failure far from the expiry waits the retry interval", 40,
+			func(*cache.RRsetCacheT) func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error) {
+				return failingRootNSQuery
+			}, rootRefreshRetry, rootRefreshRetry},
+		{"a failure 5s before the expiry wakes at the expiry", 5,
+			func(*cache.RRsetCacheT) func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error) {
+				return failingRootNSQuery
+			}, time.Second, 5 * time.Second},
+		{"an answer that expires sooner wakes at its expiry", 40,
+			func(c *cache.RRsetCacheT) func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error) {
+				return rootNSAnswer(c, 8)
+			}, time.Second, 8 * time.Second},
+		{"an answer of TTL 0 waits one second", 40,
+			func(c *cache.RRsetCacheT) func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error) {
+				return rootNSAnswer(c, 0)
+			}, time.Second, time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := rootNSCache(t, tc.ttl)
+			seedRootServers(t, c)
+			imr := &Imr{Cache: c}
+			if w := imr.rootRefreshPass(context.Background(), "", tc.query(c)); w < tc.min || w > tc.max {
+				t.Errorf("waits %s, want between %s and %s", w, tc.min, tc.max)
+			}
+		})
+	}
+}
+
+// A TTL-0 answer is stored already expired. Reading it back with Get dropped
+// it, and the root server map with it, and the resolver then waited the retry
+// interval with neither (#722). The turn that stored it leaves both, and the
+// next turn drops the expired copy and re-primes from the hints at once.
+func TestAnExpiredRefreshLeavesTheRootServerMapToTheNextTurn(t *testing.T) {
+	c := rootNSCache(t, 40)
+	seedRootServers(t, c)
+	imr := &Imr{Cache: c}
+
+	if w := imr.rootRefreshPass(context.Background(), "", rootNSAnswer(c, 0)); w > time.Second {
+		t.Errorf("waits %s after a TTL-0 answer", w)
+	}
+	if _, ok := c.ServerMapCopy("."); !ok {
+		t.Error("the turn that stored a TTL-0 root NS dropped the root server map")
+	}
+
+	notCalled := func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error) {
+		t.Error("the next turn queried instead of re-priming")
+		return nil, nil
+	}
+	if w := imr.rootRefreshPass(context.Background(), "", notCalled); w > 0 {
+		t.Errorf("the next turn waits %s after re-priming; want an immediate re-read", w)
+	}
+	if c.Get(".", dns.TypeNS) == nil {
+		t.Error("no root NS after the next turn")
+	}
+	if _, ok := c.ServerMapCopy("."); !ok {
+		t.Error("no root server map after the next turn")
+	}
+}
