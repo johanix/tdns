@@ -1,6 +1,7 @@
 # Forwarding and priming
 
-**Written 2026-09-22.** Proposal, revised the same day after review. Line
+**Written 2026-09-22.** Proposal, revised the same day after review and
+re-review. Line
 references are to main at `a3e2dae5`. Follows from #722, where a resolver whose root
 is forwarded lost its root NS for up to 15 s at a time, and a delegation sync that
 fell into the gap failed. #723 fixes that by keeping a synthetic root alive. This
@@ -266,8 +267,33 @@ servers, but the forward hook decides by query name, so the DS query goes to
 The code already follows the rule in one place: `proofNames`
 (`v2/cache/unsigned_rrset.go:143`) leaves the zone out of the DS check when "a
 trust anchor vouches for the zone, which no DS removal undoes". `ValidateDNSKEYs`
-needs the same check, before anything about the DS: `hasTrustAnchor(name)` means
-validate against the anchor's keys or seeded DS, and stop.
+needs the same check, before anything about the DS. Three things stand in the
+way today:
+
+- **A DS-form anchor lives where parent data overwrites it.**
+  `seedDSRRsetFromTrustAnchors` (`v2/imrengine.go:1901`) writes the configured DS
+  into the cache's ordinary DS slot for the name, marked Secure. `backfillDS`, a
+  CD=1 client query and S6's routing all write that same slot, and replace the
+  seed with whatever the parent says.
+- **`hasTrustAnchor` cannot see a DS-form anchor.** It only looks at trust-anchor
+  flags in the DNSKEY cache (`v2/cache/unsigned_rrset.go:156`), which a DS-form
+  anchor only gets once a key has been fetched and matched.
+- **An earlier verdict short-circuits the check.** `ValidateDNSKEYs` returns
+  early for a zone already marked Insecure or Indeterminate
+  (`v2/cache/rrset_validate.go:696`–`703`), before any anchor is looked at. A
+  parent's DS denial seen earlier therefore keeps an anchored zone Insecure.
+
+So S5:
+
+1. **Keeps the configured anchors in their own store**, DS-form and DNSKEY-form,
+   filled from the configuration and changed only by a reload. Nothing learnt
+   from the network writes to it. `seedDSRRsetFromTrustAnchors` fills this store
+   instead of the cache's DS slot.
+2. **`hasTrustAnchor` reads that store.**
+3. **In `ValidateDNSKEYs`, an anchored zone is decided by its anchor first**:
+   validate the DNSKEY RRset against the anchor's keys or DS, and stop. No cached
+   or fetched DS, no DS denial, and no earlier Insecure or Indeterminate verdict
+   applies. A zone marked Insecure before is validated again against its anchor.
 
 **Why this must come before section 5.** With today's order, sending `foo. DS`
 along the parent's path would make an anchored split-horizon `foo.` reliably
@@ -276,9 +302,19 @@ in charge, the routing of a DS query only matters where no anchor decides: a
 client's own DS query, and a forward zone without an anchor that is chained from
 the parent's.
 
-**`trust-ad` and an anchor on the same zone** contradict each other: one says
-"validate it yourself with this key", the other "trust the upstream's AD bit".
-The anchor wins, and the configuration gets a warning.
+**`trust-ad` and an anchor** contradict each other: one says "validate it
+yourself with this key", the other "trust the upstream's AD bit". The anchor
+wins, but that needs a mechanism: a `trust-ad` forward never reaches
+`ValidateDNSKEYs`. `forwardQuery` sends CD=0 and takes the upstream's AD bit as
+the cache verdict (`v2/imr_forward.go:694`, `:840`–`:860`). The rule:
+
+- **Names at or below a configured anchor never take the `trust-ad` path.** They
+  are queried with CD=1 and validated locally against the anchor, exactly as in a
+  forward zone without `trust-ad`.
+- **That includes an anchor below a `trust-ad` forward zone:** names under the
+  anchor are validated locally, and the rest of the zone keeps trusting the
+  upstream's AD bit.
+- **The configuration gets a warning**, since the operator asked for both.
 
 ### 7. Answering a DS query at an anchored zone
 
@@ -300,8 +336,9 @@ has no DS, a different one, or does not exist at all.
 
 **The CD bit decides which view a client gets.**
 
-- **CD=0: the anchor's DS**, with AD=1 when the query had DO or AD set, and no
-  RRSIG.
+- **CD=0: the anchor's DS**, with AD=1 when the query had DO or AD set, AA=0,
+  and no RRSIG. AA=0 because a recursive answer is not authoritative; AA=1 on a
+  DS the resolver made up would look as if it owned `foo.`.
 - **CD=1: the parent's path**, exactly as without an anchor. CD=1 asks for the
   data so that the client can judge it. A DS the resolver made up carries no
   signature from the parent, so a validating client would find it Bogus.
@@ -315,6 +352,8 @@ benefit are stubs, resolvers that trust the AD bit, and diagnostics.
 
 **Rules for the implementation:**
 
+- **From the anchor store** (section 6), the same one the validator uses, so
+  the answer is exactly what the resolver trusts.
 - **Client-facing only.** The DS is built in the responder at answer time. It is
   never cached, and nothing inside tdns sees it: not the validator (which, after
   section 6, uses the anchor directly), and not any code that asks the IMR for a
@@ -359,7 +398,9 @@ unaffected.
   upstream; the probe reports each of its three outcomes.
 - Start-up with the only upstream down: the listeners bind without waiting for
   trust-anchor fetches, and a query that arrives before the online half of
-  trust-anchor setup has finished still validates once the upstream is back.
+  trust-anchor setup has finished still validates once the upstream is back. The
+  test's parent publishes no DS that conflicts with the anchor, so that it does
+  not depend on S5.
 - `.` forwarded and `root-hints` pointing at a missing file: the resolver starts,
   with a warning.
 - Reload in both directions, through the wake-up channel: removing the `.`
@@ -372,11 +413,18 @@ unaffected.
   that matches no DNSKEY, and with a matching DS. `foo.` stays Secure in all four,
   both at start-up and after its DNSKEY RRset expires and is validated again.
   With no anchor at `foo.`, the parent's answer decides, as today.
-- Section 6: `trust-ad` plus an anchor on the same zone: the anchor decides, and
-  the configuration warns.
+- Section 6, the anchor store:
+  - a parent DS fetched after start-up (by `backfillDS`, or a CD=1 client query)
+    does not displace a DS-form anchor, and `hasTrustAnchor` sees a DS-form
+    anchor before any key has been matched;
+  - a zone marked Insecure by an earlier parent denial is validated again against
+    its anchor, and comes out Secure.
+- Section 6, `trust-ad` plus an anchor: queries for names at or below the anchor
+  go out with CD=1 and validate locally; names elsewhere in the forward zone keep
+  the upstream's AD bit; the configuration warns.
 - Section 7, with an anchor at `foo.`:
   - a DS-form anchor: `foo. DS` with CD=0 returns the configured DS, AD=1 when
-    DO or AD was set, no RRSIG, and the EDE; with CD=1 it returns the parent's
+    DO or AD was set, AA=0, no RRSIG, and the EDE; with CD=1 it returns the parent's
     path answer (a different DS, a denial or NXDOMAIN);
   - a DNSKEY-form anchor: CD=0 returns the SHA-256 DS of the key; CD=1 as
     above;
@@ -396,7 +444,7 @@ unaffected.
 | S2 | no priming or refresh for a forwarded root; `root-hints` not read; `RefreshRoot` wake-up channel and reload notification; trust-anchor setup after the listeners, through the forward; status | S1 |
 | S3 | the iterating-root hardening from #723 | — |
 | S4 | probe classification; then the idle re-probe | classification: —; re-probe: S1–S3 |
-| S5 | a configured trust anchor governs its zone; parent-side DS data cannot override it | — |
+| S5 | a configured trust anchor governs its zone; parent-side DS data cannot override it: the anchor store, anchor-first `ValidateDNSKEYs`, no `trust-ad` path under an anchor | — |
 | S6 | DS at a forward apex follows the parent's path | S5 |
 | S7 | a client's DS query at an anchored zone: the anchor's DS for CD=0, the parent's path for CD=1; responder only, marked with an EDE | S5, S6 |
 
@@ -419,10 +467,10 @@ cache package's signed-zone helpers, and the reload tests.
 | S2 | 120–170 | 180–250 | Start-up priming branch and `root-hints` warning (about 25); `RefreshRoot` wake-up channel and idle state (about 40); reload notification (about 15); trust-anchor setup after the listeners, without the NS step for a forwarded anchor (about 30); status in the API and the CLI (about 20). Tests: start with no hints file, idle with no timer, both reload transitions, a dead upstream at start-up, status. |
 | S3 | 60–80 | 90–110 | Written already in #723 (`rootRefreshPass`, `rootRetryWait`, the lead-window check), plus the 1 s floor and the wait taken after the attempt (about 10). Mostly a cherry-pick, tests included. |
 | S4 | 100–140 | 120–180 | Classifying the probe's answer and reporting it (60–80); the idle re-probe timer (40–60). Tests: one upstream double per outcome, and the timer. |
-| S5 | 40–70 | 180–260 | Move the trust-anchor branch of `ValidateDNSKEYs` (lines 803–938) ahead of the DS path behind `hasTrustAnchor`: mostly moved code, about 30 new; the `trust-ad` warning (about 15). Tests: four DS answers, at start-up and after re-validation, a control with no anchor, and `trust-ad`. |
+| S5 | 100–150 | 250–340 | The anchor store, filled from the configuration and read by `hasTrustAnchor` (40–60); move the trust-anchor branch of `ValidateDNSKEYs` (lines 803–938) ahead of the DS path and past the early return: mostly moved code, about 30 new; no `trust-ad` path under an anchor, and the warning (15–25). Tests: four DS answers at start-up and after re-validation, a control with no anchor, the store surviving parent fetches, re-validation of a zone marked Insecure, and `trust-ad`. |
 | S6 | 20–40 | 60–90 | The DS rule in the decision function, and its callers passing the qtype. Tests: `foo.` and `sub.foo.`, with `.` iterated, with `.` forwarded, and with a nested forward. |
 | S7 | 90–130 | 150–220 | Collecting the anchor's DS set, including DNSKEY to SHA-256 DS (about 30); the answer with CD, DO and AD handling, and the EDE (about 50); the hook in `ImrResponder` (about 15). Tests: the cases in the Tests section. |
-| **total** | **540–770** | **1030–1460** | About 1600–2200 lines over seven PRs. |
+| **total** | **600–850** | **1100–1540** | About 1700–2400 lines over seven PRs. |
 
 S1 and S2 together, which close #722 and remove the synthetic root, are about
 230–310 production lines and 430–600 test lines. Almost nothing is deleted: the
