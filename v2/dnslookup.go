@@ -458,6 +458,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 							imr.Cache.Set(qname, qtype, &cache.CachedRRset{
 								Name:      qname,
 								RRtype:    qtype,
+								Rcode:     uint8(dns.RcodeNameError),
 								RRset:     nil,
 								Context:   cache.ContextNXDOMAIN,
 								State:     cache.ValidationStateNone,
@@ -694,6 +695,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 				imr.Cache.Set(qname, qtype, &cache.CachedRRset{
 					Name:       qname,
 					RRtype:     qtype,
+					Rcode:      uint8(dns.RcodeNameError),
 					RRset:      nil,
 					Context:    cache.ContextNXDOMAIN,
 					Expiration: time.Now().Add(time.Duration(ttl) * time.Second),
@@ -1329,6 +1331,18 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	} else {
 		if Globals.Debug {
 			lg.Printf("IterativeDNSQuery: forcing re-query of <%s, %s>, bypassing cache", qname, dns.TypeToString[qtype])
+		}
+	}
+
+	// qname is a CNAME we hold: follow it from the cache rather than asking
+	// qname's servers for it again. A chain is cached link by link, never as
+	// one entry under <qname, qtype> (serveChain).
+	if !force && followsCNAME(qtype) {
+		if link := imr.Cache.Get(qname, dns.TypeCNAME); link != nil && link.Context == cache.ContextAnswer &&
+			!(privacy == edns0.PrivacyStrict && !core.IsEncryptedTransport(link.Transport)) {
+			if target, ok := cnameTarget(link.RRset); ok {
+				return imr.chaseCNAME(ctx, qname, target, qtype, force, privacy)
+			}
 		}
 	}
 
@@ -2561,6 +2575,15 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 	if Globals.Debug {
 		imr.Cache.Logger.Printf("*** handleAnswer: qname=%s, qtype=%s, rcode=%s, r: %s", qname, dns.TypeToString[qtype], dns.RcodeToString[r.MsgHdr.Rcode], PrintMsgFull(r, imr.LineWidth))
 	}
+	// qname is a CNAME: cache the link and follow the chain. Decided before
+	// anything is collected, so that the link's RRSIG -- which follows it in
+	// the section -- and a DNAME that synthesized it are both still there
+	// (answerViaCNAME).
+	if followsCNAME(qtype) {
+		if cn := cnameAt(r, qname); cn != nil {
+			return imr.answerViaCNAME(ctx, qname, qtype, r, cn, force, transport, privacy)
+		}
+	}
 	var rrset core.RRset
 	for _, rr := range r.Answer {
 		switch t := rr.Header().Rrtype; t {
@@ -2568,48 +2591,6 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 			rrset.RRs = append(rrset.RRs, rr)
 		case dns.TypeRRSIG:
 			rrset.RRSIGs = append(rrset.RRSIGs, rr)
-		case dns.TypeCNAME:
-			rrset.RRs = append(rrset.RRs, rr)
-			target := rr.(*dns.CNAME).Target
-			tmprrset, rcode, context, chaseTransport, err := imr.chaseCNAME(ctx, rr.Header().Name, target, qtype, force, privacy)
-			if err != nil {
-				return nil, rcode, context, transport, err, true
-			}
-			// Combine transports: downgrade to unencrypted if any hop was unencrypted
-			combinedTransport := chaseTransport
-			if !core.IsEncryptedTransport(transport) || !core.IsEncryptedTransport(chaseTransport) {
-				combinedTransport = core.TransportDo53
-			}
-			if tmprrset != nil {
-				rrset.RRs = append(rrset.RRs, tmprrset.RRs...)
-			}
-			if rcode == dns.RcodeNameError || context == cache.ContextNXDOMAIN || context == cache.ContextNoErrNoAns {
-				// The chain ends in a name that does not exist, or has no data
-				// of this type. The answer is the CNAMEs, with the rcode of the
-				// chain's last name (RFC 6604). The last name's denial is
-				// cached under that name; nothing is cached for this one.
-				//
-				// This used to fall through to the bottom of the function and
-				// validate and cache the CNAMEs as though they were <qname,
-				// qtype>: NXDOMAIN at the end of the chain reached the client
-				// as NOERROR.
-				return &rrset, rcode, context, combinedTransport, nil, true
-			}
-			if tmprrset != nil && len(tmprrset.RRs) != 0 {
-				// The target's data, or the rest of a chain that ends in data.
-				imr.Cache.Set(qname, qtype, &cache.CachedRRset{
-					Name:    qname,
-					RRtype:  qtype,
-					Rcode:   uint8(rcode),
-					RRset:   &rrset,
-					Context: cache.ContextAnswer,
-					// Should there not be some state here? State:      vstate,
-					State:      cache.ValidationStateNone, // XXX: propagate state from chaseCNAME?
-					Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
-					Transport:  combinedTransport, // Combined transport from initial query and CNAME chase
-				})
-				return &rrset, rcode, cache.ContextAnswer, combinedTransport, nil, true
-			}
 		default:
 			imr.Cache.Logger.Printf("Got a %s RR when looking for %s %s", dns.TypeToString[t], qname, dns.TypeToString[qtype])
 		}
@@ -3616,10 +3597,11 @@ func extendCNAMEChain(ctx context.Context, owner, target string) ([]string, erro
 }
 
 // chaseCNAME resolves <target, qtype>, where target is the CNAME target of
-// owner. It returns what IterativeDNSQuery returns for the target: its data,
-// the rest of the chain when the target is itself a CNAME (IterativeDNSQuery
-// has already followed it), or a negative end -- no RRset, and the rcode and
-// context of the name that does not exist (NXDOMAIN) or has no qtype (NODATA).
+// owner. It returns what the chain ends in: the data at its last name (when
+// target is itself a CNAME, IterativeDNSQuery has followed it that far), or a
+// negative end -- no RRset, and the rcode and context of the name that does
+// not exist (NXDOMAIN) or has no qtype (NODATA). Each link is cached on the
+// way (cacheCNAMELink); the client's answer is built from them (serveChain).
 func (imr *Imr) chaseCNAME(ctx context.Context, owner, target string, qtype uint16, force bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	chain, err := extendCNAMEChain(ctx, owner, target)
 	if err != nil {
@@ -3658,10 +3640,9 @@ func (imr *Imr) chaseCNAME(ctx context.Context, owner, target string, qtype uint
 			combinedTransport = hopTransport
 		}
 		if tmprrset != nil && len(tmprrset.RRs) != 0 {
-			// The target's data, or -- when the target is itself a CNAME --
-			// the rest of the chain, which IterativeDNSQuery has already
-			// followed. Chasing that chain's first target again repeated every
-			// later link.
+			// The data at the chain's last name. When target is itself a
+			// CNAME, IterativeDNSQuery has already followed the rest of the
+			// chain; chasing it again repeated every later link.
 			return tmprrset, rcode, context, combinedTransport, nil
 		}
 		// A chain that ends in a name that does not exist, or in a name

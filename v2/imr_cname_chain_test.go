@@ -26,6 +26,7 @@ import (
 //	loop1 -> loop2 -> loop1
 //	m0 -> m1 -> ... -> m11      11 CNAMEs, m11 has an A
 //	x0 -> x1 -> ... -> x12      12 CNAMEs, x12 has an A
+//	z0 -> z1                    both with TTL 0, z1 has an A
 const chainZone = "chain.test."
 
 type chainDouble struct {
@@ -49,6 +50,11 @@ func startChainDouble(t *testing.T) (*chainDouble, string) {
 		"loop2." + chainZone: "loop1." + chainZone,
 	}
 	addrs := map[string]net.IP{"c." + chainZone: net.IPv4(192, 0, 2, 1)}
+	// z0 -> z1, and z1's A, carry TTL 0: usable for the answer at hand, and
+	// not to be kept.
+	cnames["z0."+chainZone] = "z1." + chainZone
+	addrs["z1."+chainZone] = net.IPv4(192, 0, 2, 10)
+	zeroTTL := map[string]bool{"z0." + chainZone: true, "z1." + chainZone: true}
 	for i := 0; i < 11; i++ {
 		cnames[fmt.Sprintf("m%d.%s", i, chainZone)] = fmt.Sprintf("m%d.%s", i+1, chainZone)
 	}
@@ -72,18 +78,22 @@ func startChainDouble(t *testing.T) (*chainDouble, string) {
 		d.queries[name+"/"+dns.TypeToString[q.Qtype]]++
 		d.mu.Unlock()
 
+		ttl := uint32(60)
+		if zeroTTL[name] {
+			ttl = 0
+		}
 		m := new(dns.Msg)
 		m.SetReply(r)
 		m.Authoritative = true
 		switch {
 		case cnames[name] != "":
 			m.Answer = append(m.Answer, &dns.CNAME{
-				Hdr:    dns.RR_Header{Name: q.Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60},
+				Hdr:    dns.RR_Header{Name: q.Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: ttl},
 				Target: cnames[name],
 			})
 		case addrs[name] != nil && q.Qtype == dns.TypeA:
 			m.Answer = append(m.Answer, &dns.A{
-				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: ttl},
 				A:   addrs[name],
 			})
 		case addrs[name] != nil || name == chainZone:
