@@ -4,7 +4,6 @@
 package tdns
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -34,40 +33,6 @@ func TestForwardServfailLogThrottle(t *testing.T) {
 	fz2 := &ForwardZone{Zone: "other.example."}
 	if !fz2.noteAllUpstreamsFailed("x.other.example.", dns.TypeA, 1, 1, fmt.Errorf("timeout")) {
 		t.Error("second zone's first SERVFAIL suppressed by the first zone's throttle")
-	}
-}
-
-// InitImrEngine must CHOOSE hints-only priming when a forward zone covers
-// the root — this pins the dispatch itself, not just the helper: with the
-// condition inverted, init would run the live priming fetch through the
-// forward (PrimedVia "hints+fetch", a '. NS' at the upstream) and both
-// assertions below fail.
-func TestInitImrEngineHintsOnlyDispatch(t *testing.T) {
-	addr, port, logr, stop := startTestUpstream(t)
-	defer stop()
-
-	savedImr := Globals.ImrEngine
-	defer func() { Globals.ImrEngine = savedImr }()
-
-	conf := &Config{}
-	conf.Imr.Forward = []ImrForwardConf{
-		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
-	}
-	if err := conf.InitImrEngine(context.Background(), true); err != nil {
-		t.Fatalf("InitImrEngine: %v", err)
-	}
-	imr := conf.Internal.ImrEngine
-	if imr == nil || !imr.Cache.IsPrimed() {
-		t.Fatalf("engine not initialized/primed: %+v", imr)
-	}
-	if imr.PrimedVia != "hints-only (root forwarded)" {
-		t.Errorf("dispatch took the wrong priming path: PrimedVia = %q", imr.PrimedVia)
-	}
-	logr.mu.Lock()
-	n := len(logr.queries)
-	logr.mu.Unlock()
-	if n != 0 {
-		t.Errorf("init sent %d query(ies) to the upstream; hints-only priming must be offline: %+v", n, logr.queries)
 	}
 }
 

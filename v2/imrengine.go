@@ -73,10 +73,15 @@ type Imr struct {
 	// running on these values until it is restarted.
 	bootConf ImrEngineConf
 	// PrimedVia and PrimedAt record how and when the cache was primed
-	// ("hints+fetch", or "hints-only" when the root is forwarded), for the
-	// config-status report.
+	// ("hints+fetch" at start-up, or how RefreshRoot re-primed it), for the
+	// config-status report. A resolver whose root is forwarded is not primed.
 	PrimedVia string
 	PrimedAt  time.Time
+	// rootWake wakes RefreshRoot when a reload changes whether "." is
+	// forwarded (notifyRootRefresh). Buffered for one, so a send never blocks
+	// and several collapse into one wake-up. Made on first use (rootWakeCh).
+	rootWake     chan struct{}
+	rootWakeOnce sync.Once
 	// errorRegistry is the daemon-wide ServerErrorRegistry
 	// (conf.Internal.ServerErrors), set at init. The IMR owns the
 	// Upstream/ImrPriming and Upstream/ImrForward entries. Nil-safe.
@@ -293,26 +298,23 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 
 	if !rrcache.IsPrimed() {
 		if imr.forwardZoneFor(".") != nil {
-			// The root is covered by a forward zone: the hint-seeded root
-			// server map is never consulted (the forward outranks it), so
-			// the live ". NS" priming fetch would add nothing but a
-			// startup-time network dependency on the upstream — a resolver
-			// whose upstream was briefly down at boot stayed a husk until
-			// restarted. Seed the hints offline and let queries (and the
-			// upstream probe) take it from there.
-			lgImr.Info("root is covered by a forward zone: seeding hints only, skipping the live priming fetch")
-			if err := rrcache.PrimeFromHintsOnly(conf.Imr.RootHints); err != nil {
-				return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
-			}
-			imr.PrimedVia = "hints-only (root forwarded)"
+			// The root is covered by a forward zone, so nothing is iterated:
+			// the root NS is never used to send a query, and there is nothing
+			// to prime. Not even the hints are read. They used to be seeded
+			// here, only so that lookups which looked for a cached zone cut
+			// before asking the forward would find one (#722); those look at
+			// the forward first now. RefreshRoot primes if a reload removes
+			// the forward.
+			lgImr.Info("root is covered by a forward zone: not priming, and not reading root-hints")
+			warnUnreadableRootHints(conf.Imr.RootHints)
 		} else {
 			err := rrcache.PrimeWithHints(ctx, conf.Imr.RootHints, imr.IterativeDNSQueryFetcher())
 			if err != nil {
 				return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
 			}
 			imr.PrimedVia = "hints+fetch"
+			imr.PrimedAt = time.Now()
 		}
-		imr.PrimedAt = time.Now()
 		if len(conf.Imr.Stubs) > 0 {
 			applied := make(map[string]string, len(conf.Imr.Stubs))
 			for _, stub := range conf.Imr.Stubs {
@@ -341,6 +343,20 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	conf.publishImr(imr)
 	lgImr.Info("InitImrEngine: IMR initialized and available")
 	return nil
+}
+
+// warnUnreadableRootHints warns when the configured root-hints file cannot be
+// read while the root is forwarded. It is not read now, but a reload that
+// removes the "." forward primes from it. An empty path means the compiled-in
+// hints.
+func warnUnreadableRootHints(hintsfile string) {
+	if hintsfile == "" {
+		return
+	}
+	if _, err := os.Stat(hintsfile); err != nil {
+		lgImr.Warn("root-hints cannot be read; it is not needed while the root is forwarded,"+
+			" but a reload that removes the . forward will fail to prime", "root-hints", hintsfile, "err", err)
+	}
 }
 
 // publishImr stores the finished Imr and announces it, in that order.
@@ -429,12 +445,20 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 // refresh. listen starts the listeners; it is a parameter so that a test can
 // see when it is called.
 func (imr *Imr) startServing(ctx context.Context, conf *Config, listen func(context.Context)) {
-	// Initialize trust anchors (DS/DNSKEY) and validate root (.) DNSKEY and NS
-	if err := imr.initializeImrTrustAnchors(ctx, conf); err != nil {
-		lgImr.Warn("trust anchor initialization failed", "err", err)
-	}
-
 	go listen(ctx)
+
+	// Trust anchors: fetch and validate the anchored zones' DNSKEY RRsets.
+	// This needs the network, and it used to run to completion first, so a
+	// validating resolver whose upstream was down waited out those fetches
+	// before it bound its listeners. It runs beside them now, and beside the
+	// forward probe. The configured keys themselves are in the cache already
+	// (loadConfiguredTrustAnchors, in InitImrEngine): a query that arrives
+	// first has its DNSKEY RRset fetched and validated against them on demand.
+	go func(ctx context.Context) {
+		if err := imr.initializeImrTrustAnchors(ctx, conf); err != nil {
+			lgImr.Warn("trust anchor initialization failed", "err", err)
+		}
+	}(ctx)
 
 	// Verify the forward upstreams are reachable, concurrently with normal
 	// operation: failures WARN and mark `config status` DEGRADED, they do
@@ -2275,8 +2299,13 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 	imr.Cache.ZoneMap.Set(anchorName, z)
 	lgImr.Debug("zone added to ZoneMap as secure via DS trust anchor", "zone", anchorName)
 
-	// Validate NS RRset (non-fatal)
-	imr.validateNSRRsetForAnchor(ctx, anchorName, serverMap)
+	// Validate NS RRset (non-fatal). Not for a forwarded anchor zone: that
+	// validates a delegation the resolver never uses, and for a forwarded root
+	// it sent a forced ". NS" through the forward and cached the upstream's
+	// short-lived copy (#722).
+	if imr.forwardZoneForQuestion(anchorName, dns.TypeNS) == nil {
+		imr.validateNSRRsetForAnchor(ctx, anchorName, serverMap)
+	}
 
 	return nil
 }

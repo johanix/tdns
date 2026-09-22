@@ -218,7 +218,13 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 		}
 	}
 
+	rootWasForwarded := imr.forwardZoneFor(".") != nil
 	imr.setZoneTable(newForwards, newStubs, appliedFP)
+	// RefreshRoot idles while "." is forwarded and primes when it no longer
+	// is; the reload only tells it that the answer has changed.
+	if (imr.forwardZoneFor(".") != nil) != rootWasForwarded {
+		imr.notifyRootRefresh()
+	}
 	// After the swap: the aggregates describe the table that is now live.
 	// Quarantine cannot survive a reload that refuses whole, but a reload
 	// that succeeds can still clear one that startup set.

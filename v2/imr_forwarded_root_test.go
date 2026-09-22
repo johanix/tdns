@@ -6,7 +6,6 @@ package tdns
 import (
 	"context"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -25,16 +24,6 @@ import (
 // to prime, and a refresh through the forward only ever gets the upstream's
 // copy, which counts down. RefreshRoot idles while "." is forwarded, and a
 // reload that removes the forward wakes it to prime the way start-up does.
-
-// untilForwardedRootIdles skips a test of a forwarded root that is neither
-// primed nor refreshed until it is so. TDNS_TEST_FORWARDED_ROOT=1 runs it
-// anyway, to show how it fails without it.
-func untilForwardedRootIdles(t *testing.T) {
-	t.Helper()
-	if os.Getenv("TDNS_TEST_FORWARDED_ROOT") == "" {
-		t.Skip("a forwarded root that is neither primed nor refreshed (S2) is not implemented yet")
-	}
-}
 
 // countingRootNSQuery is a ". NS" query double that counts its calls and, as
 // a force=true query does, stores a root NS RRset with the given TTL in c.
@@ -75,7 +64,6 @@ func runRefreshRootLoop(t *testing.T, imr *Imr, query func(context.Context, map[
 // root-hints: a configured file that does not exist is not a reason to stop.
 // It still applies its stub zones, and resolves through the forward.
 func TestForwardedRootStartsWithoutRootHints(t *testing.T) {
-	untilForwardedRootIdles(t)
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 
@@ -118,7 +106,6 @@ func TestForwardedRootStartsWithoutRootHints(t *testing.T) {
 // RefreshRoot neither seeds nor queries a forwarded root. With only a zone
 // below the root forwarded, the root is iterated and refreshed as before.
 func TestRefreshRootIdlesWhileTheRootIsForwarded(t *testing.T) {
-	untilForwardedRootIdles(t)
 	t.Run(". forwarded", func(t *testing.T) {
 		imr := newForwardTestImr(t, rootForward("192.0.2.53", 53))
 		var calls atomic.Int32
@@ -151,7 +138,6 @@ func TestRefreshRootIdlesWhileTheRootIsForwarded(t *testing.T) {
 // back puts RefreshRoot to sleep with no timer: a root NS that is due is not
 // refreshed.
 func TestReloadMovesTheRootBetweenForwardedAndIterated(t *testing.T) {
-	untilForwardedRootIdles(t)
 	imr := newForwardTestImr(t, rootForward("192.0.2.53", 53))
 	var calls atomic.Int32
 	runRefreshRootLoop(t, imr, countingRootNSQuery(imr.Cache, 900, &calls))
@@ -233,7 +219,6 @@ func startGatedSignedForwardUpstream(t *testing.T, answers map[string]*dns.Msg, 
 // RRset is fetched on demand and checked against the configured anchor, which
 // was loaded before anything else.
 func TestListenersDoNotWaitForTrustAnchorSetup(t *testing.T) {
-	untilForwardedRootIdles(t)
 	parent := newFwdSecKey(t, fwdSecParent)
 	www := parent.sign(t, fwdSecRR(t, "www."+fwdSecParent+" 300 IN A 192.0.2.11"))
 	var open atomic.Bool
@@ -290,7 +275,6 @@ func TestListenersDoNotWaitForTrustAnchorSetup(t *testing.T) {
 // sent a forced ". NS" through the forward and cached the upstream's
 // short-lived copy.
 func TestForwardedAnchorZoneSkipsTheNSStep(t *testing.T) {
-	untilForwardedRootIdles(t)
 	root := newFwdSecKey(t, ".")
 	logr := &upstreamLog{}
 	addr, port := startLoggedSignedForwardUpstream(t, map[string]*dns.Msg{
@@ -314,4 +298,18 @@ func TestForwardedAnchorZoneSkipsTheNSStep(t *testing.T) {
 		t.Errorf("trust-anchor set-up cached a root NS for a forwarded root: %+v", crr)
 	}
 	requireAsked(t, logr, ".", dns.TypeDNSKEY)
+}
+
+// config status says that a forwarded root is not primed and keeps no root NS,
+// instead of a root NS expiry that means nothing for it.
+func TestStatusReportsAForwardedRoot(t *testing.T) {
+	if st := newForwardTestImr(t, rootForward("192.0.2.53", 53)).StatusReport(); !st.RootForwarded {
+		t.Error("a forwarded root is not reported as forwarded")
+	}
+	sub := newForwardTestImr(t, []ImrForwardConf{
+		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.53", Port: 53}}},
+	})
+	if st := sub.StatusReport(); st.RootForwarded {
+		t.Error("an iterated root is reported as forwarded")
+	}
 }

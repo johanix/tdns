@@ -115,29 +115,7 @@ func renderImrStatus(st *tdns.ImrStatus) {
 	if st == nil {
 		return
 	}
-	primed := "not primed"
-	if st.Primed {
-		primed = "primed"
-		if st.PrimedVia != "" {
-			primed += " via " + st.PrimedVia
-		}
-		if !st.PrimedAt.IsZero() {
-			primed += " at " + st.PrimedAt.Format(tdns.TimeLayout)
-		}
-	}
-	fmt.Printf("IMR: %s\n", primed)
-
-	// The line that matters when a resolver has stopped resolving. "primed at
-	// <boot>" is about the past; this is about whether an iteration can still
-	// be started at all.
-	if st.RootNSPresent {
-		left := time.Until(st.RootNSExpires).Round(time.Second)
-		fmt.Printf("IMR: root NS: %d server(s), expires %s (in %s)\n",
-			st.RootNSCount, st.RootNSExpires.Format(tdns.TimeLayout), left)
-	} else {
-		fmt.Printf("IMR: root NS: ABSENT -- iteration cannot start;" +
-			" every uncached name will SERVFAIL\n")
-	}
+	fmt.Print(imrRootStatusLines(st))
 
 	if !st.ZonesLoadedAt.IsZero() {
 		fmt.Printf("IMR: stub/forward zones loaded at %s\n", st.ZonesLoadedAt.Format(tdns.TimeLayout))
@@ -148,6 +126,40 @@ func renderImrStatus(st *tdns.ImrStatus) {
 	for _, fz := range st.ForwardZones {
 		printForwardZoneStatus(fz, "IMR: ")
 	}
+}
+
+// imrRootStatusLines renders the root part of the IMR block: how the cache was
+// primed and what it holds for the root NS, or that the root is forwarded.
+func imrRootStatusLines(st *tdns.ImrStatus) string {
+	// A forwarded root is neither primed nor kept: nothing is iterated, so a
+	// root NS expiry says nothing about whether the resolver can answer.
+	if st.RootForwarded {
+		return "IMR: root forwarded: not primed, no root NS kept\n"
+	}
+	primed := "not primed"
+	if st.Primed {
+		primed = "primed"
+		if st.PrimedVia != "" {
+			primed += " via " + st.PrimedVia
+		}
+		if !st.PrimedAt.IsZero() {
+			primed += " at " + st.PrimedAt.Format(tdns.TimeLayout)
+		}
+	}
+	out := fmt.Sprintf("IMR: %s\n", primed)
+
+	// The line that matters when a resolver has stopped resolving. "primed at
+	// <boot>" is about the past; this is about whether an iteration can still
+	// be started at all.
+	if st.RootNSPresent {
+		left := time.Until(st.RootNSExpires).Round(time.Second)
+		out += fmt.Sprintf("IMR: root NS: %d server(s), expires %s (in %s)\n",
+			st.RootNSCount, st.RootNSExpires.Format(tdns.TimeLayout), left)
+	} else {
+		out += "IMR: root NS: ABSENT -- iteration cannot start;" +
+			" every uncached name will SERVFAIL\n"
+	}
+	return out
 }
 
 // printForwardZoneStatus renders one forward zone's reachability block.

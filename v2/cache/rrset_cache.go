@@ -1072,10 +1072,9 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 }
 
 // PrimeFromHintsOnly seeds the cache from the root hints and marks it primed
-// WITHOUT the live ". NS" upgrade fetch. For a resolver whose root is covered
-// by a forward zone: the hint-seeded root server map is never consulted (the
-// forward outranks it in every lookup), so a live fetch would add nothing but
-// a startup-time network dependency on the upstream.
+// WITHOUT the live ". NS" upgrade fetch. The resolver uses it to re-prime a root
+// NS that is gone, and as the first half of priming a root that a reload has
+// stopped forwarding. A resolver whose root is forwarded does not prime at all.
 func (rrcache *RRsetCacheT) PrimeFromHintsOnly(hintsfile string) error {
 	if _, err := rrcache.seedFromHints(hintsfile); err != nil {
 		return err
