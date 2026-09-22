@@ -70,8 +70,18 @@ func fwdSecRR(t *testing.T, s string) dns.RR {
 // built before the server starts: the handler runs outside the test goroutine.
 func startSignedForwardUpstream(t *testing.T, answers map[string]*dns.Msg) (string, uint16) {
 	t.Helper()
+	return startLoggedSignedForwardUpstream(t, answers, nil)
+}
+
+// startLoggedSignedForwardUpstream is startSignedForwardUpstream that also
+// records every question it is asked in logr, when logr is not nil.
+func startLoggedSignedForwardUpstream(t *testing.T, answers map[string]*dns.Msg, logr *upstreamLog) (string, uint16) {
+	t.Helper()
 	h := func(w dns.ResponseWriter, r *dns.Msg) {
 		q := r.Question[0]
+		if logr != nil {
+			logr.add(upstreamQuery{Qname: q.Name, Qtype: q.Qtype, RD: r.RecursionDesired, CD: r.CheckingDisabled})
+		}
 		m := new(dns.Msg)
 		m.SetReply(r)
 		m.RecursionAvailable = true
