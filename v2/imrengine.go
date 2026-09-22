@@ -237,7 +237,7 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		largeAlgs:       conf.Internal.LargeAlgorithms,
 		dnskeyTransport: conf.Internal.DNSKEYTransport,
 	}
-	rrcache.ConfiguredZone = imr.configuredZone
+	imr.attachCacheHooks()
 
 	if conf.Imr.Logging.Enabled {
 		imr.DebugLog = imrDebugLogger(conf.Imr.Logging.File)
@@ -700,18 +700,17 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		} else {
 			maxiter--
 		}
-		// For, not the bare name: a DS is asked of the parent's servers.
-		bestmatch, authservers, err := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
+		bestmatch, authservers, forwarded, err := imr.serversForQuestion(qname, qtype)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZoneFor: %v", err)
 			return &resp, err
 		}
-		lgImr.Debug("ImrQuery: best zone match", "qname", qname, "bestmatch", bestmatch)
+		lgImr.Debug("ImrQuery: best zone match", "qname", qname, "bestmatch", bestmatch, "forwarded", forwarded)
 		// ss := servers
 
 		switch {
-		case len(authservers) == 0:
+		case len(authservers) == 0 && !forwarded:
 			// Use helper function to resolve NS addresses
 			done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
 				rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
@@ -872,6 +871,24 @@ func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname 
 	// If we get here, we tried all responses without finding a usable address
 	lgImr.Warn("resolveNSAddresses: failed to resolve query using any nameserver address", "qname", qname, "qtype", dns.TypeToString[qtype])
 	return false, nil
+}
+
+// serversForQuestion is where imrQuery and ImrResponder send <qname, qtype>.
+// A forwarded question goes to its forward zone, named in zone, with no
+// servers: IterativeDNSQuery forwards it, and no zone cut is looked for. Any
+// other goes to the closest cached zone cut that holds it, with that zone's
+// servers, which may be none yet (resolveNSAddresses).
+//
+// The cut came first once. With no servers there, resolveNSAddresses needs the
+// cut's NS RRset, and for a forwarded root whose root NS had expired that was
+// `no nameservers for zone ""` before the forward was consulted (#722).
+func (imr *Imr) serversForQuestion(qname string, qtype uint16) (zone string, servers map[string]*cache.AuthServer, forwarded bool, err error) {
+	if fz := imr.forwardZoneForQuestion(qname, qtype); fz != nil {
+		return fz.Zone, nil, true, nil
+	}
+	// For, not the bare name: a DS is asked of the parent's servers.
+	zone, servers, err = imr.Cache.FindClosestKnownZoneFor(qname, qtype)
+	return zone, servers, false, err
 }
 
 // setPrivacyStatus tells a client that asked for privacy what it actually got:
@@ -1099,8 +1116,9 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			}
 			// For, not the bare name: a DS is PARENT-side data, and asking the
 			// qname's own servers for it got REFUSED from a child that is not
-			// also the parent, and a SERVFAIL for the client (#150).
-			bestmatch, authservers, err := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
+			// also the parent, and a SERVFAIL for the client (#150). A
+			// forwarded question has no servers here, and needs none.
+			bestmatch, authservers, forwarded, err := imr.serversForQuestion(qname, qtype)
 			if err != nil {
 				// resp.Error = true
 				// resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
@@ -1108,10 +1126,10 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				w.WriteMsg(m)
 				return
 			}
-			lgImr.Debug("ImrResponder: best zone match", "qname", qname, "bestmatch", bestmatch)
+			lgImr.Debug("ImrResponder: best zone match", "qname", qname, "bestmatch", bestmatch, "forwarded", forwarded)
 
 			switch {
-			case len(authservers) == 0:
+			case len(authservers) == 0 && !forwarded:
 				// Use helper function to resolve NS addresses
 				// Note: The callback is called after processing each A/AAAA response.
 				// We try the query for each address we discover, similar to the original code.
@@ -2195,13 +2213,20 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 		imr.seedDSRRsetFromTrustAnchors(anchorName, dslist)
 	}
 
-	// Fetch the DNSKEY RRset for the anchor, using current known servers
-	serverMap, ok := imr.Cache.ServerMapCopy(anchorName)
-	if !ok || len(serverMap) == 0 {
-		// fallback to root servers if we do not have a server mapping for this name yet
-		serverMap, ok = imr.Cache.ServerMapCopy(".")
+	// Fetch the DNSKEY RRset for the anchor. A forwarded anchor zone needs no
+	// servers: IterativeDNSQuery forwards the query. Without the check, a
+	// forwarded root whose root server map was gone failed here (#722).
+	// Otherwise use the current known servers.
+	var serverMap map[string]*cache.AuthServer
+	if imr.forwardZoneForQuestion(anchorName, dns.TypeDNSKEY) == nil {
+		var ok bool
+		serverMap, ok = imr.Cache.ServerMapCopy(anchorName)
 		if !ok || len(serverMap) == 0 {
-			return fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
+			// fallback to root servers if we do not have a server mapping for this name yet
+			serverMap, ok = imr.Cache.ServerMapCopy(".")
+			if !ok || len(serverMap) == 0 {
+				return fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
+			}
 		}
 	}
 	rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeDNSKEY, serverMap, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic

@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/johanix/tdns/v2/cache"
@@ -24,16 +23,6 @@ import (
 // map, which is where a forwarding resolver is whenever the root NS it holds
 // has expired: the upstream's copy counts down, and every few minutes it is
 // gone for a while. Nothing is primed, and no hints are seeded.
-
-// untilForwardFirst skips a test of a forward-first path until those paths are
-// forward-first. TDNS_TEST_FORWARD_FIRST=1 runs them anyway, to show how they
-// fail without it.
-func untilForwardFirst(t *testing.T) {
-	t.Helper()
-	if os.Getenv("TDNS_TEST_FORWARD_FIRST") == "" {
-		t.Skip("forward-first server selection (S1) is not implemented yet")
-	}
-}
 
 // rootForward is a forward of "." to the upstream at addr:port.
 func rootForward(addr string, port uint16) []ImrForwardConf {
@@ -118,7 +107,6 @@ func signedRRset(rrs []dns.RR) *core.RRset {
 // the root NS gone that failed with `no nameservers for zone ""` before the
 // forward was consulted. (From #723.)
 func TestImrQueryForwardsWithoutARootServerMap(t *testing.T) {
-	untilForwardFirst(t)
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 
@@ -138,7 +126,6 @@ func TestImrQueryForwardsWithoutARootServerMap(t *testing.T) {
 // Gate: ImrResponder. The same path as imrQuery's, and the client got a
 // SERVFAIL.
 func TestImrResponderForwardsWithoutARootServerMap(t *testing.T) {
-	untilForwardFirst(t)
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 
@@ -161,7 +148,6 @@ func TestImrResponderForwardsWithoutARootServerMap(t *testing.T) {
 
 // Gate: DefaultRRsetFetcher, which answered "no servers for" a forwarded name.
 func TestDefaultRRsetFetcherForwardsWithoutARootServerMap(t *testing.T) {
-	untilForwardFirst(t)
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 
@@ -180,7 +166,6 @@ func TestDefaultRRsetFetcherForwardsWithoutARootServerMap(t *testing.T) {
 
 // Gate: DefaultDNSKEYFetcher, the same.
 func TestDefaultDNSKEYFetcherForwardsWithoutARootServerMap(t *testing.T) {
-	untilForwardFirst(t)
 	s := newSignedRootForward(t, func(parent, _ *fwdSecKey) map[string]*dns.Msg {
 		return map[string]*dns.Msg{
 			fwdSecParent + " DNSKEY": {Answer: parent.sign(t, dns.Copy(parent.dnskey))},
@@ -202,7 +187,6 @@ func TestDefaultDNSKEYFetcherForwardsWithoutARootServerMap(t *testing.T) {
 // no servers for the signer's zone it never fetched, and data signed by a zone
 // anchored by a DS was Indeterminate.
 func TestValidatorFetchesASignersDNSKEYThroughTheForward(t *testing.T) {
-	untilForwardFirst(t)
 	s := newSignedRootForward(t, func(parent, _ *fwdSecKey) map[string]*dns.Msg {
 		return map[string]*dns.Msg{
 			fwdSecParent + " DNSKEY": {Answer: parent.sign(t, dns.Copy(parent.dnskey))},
@@ -226,7 +210,6 @@ func TestValidatorFetchesASignersDNSKEYThroughTheForward(t *testing.T) {
 // the parent it never fetched, and a signed child of an anchored zone was
 // Indeterminate.
 func TestValidatorFetchesADSThroughTheForward(t *testing.T) {
-	untilForwardFirst(t)
 	s := newSignedRootForward(t, func(parent, kid *fwdSecKey) map[string]*dns.Msg {
 		return map[string]*dns.Msg{
 			fwdSecKid + " DS": {Answer: parent.sign(t, kid.dnskey.ToDS(dns.SHA256))},
@@ -249,7 +232,6 @@ func TestValidatorFetchesADSThroughTheForward(t *testing.T) {
 // (delegationEvidence). With no servers for the parent it asked nothing, and
 // data from an insecure delegation of an anchored zone was Bogus.
 func TestUnsignedDataAsksForItsDelegationThroughTheForward(t *testing.T) {
-	untilForwardFirst(t)
 	s := newSignedRootForward(t, func(parent, _ *fwdSecKey) map[string]*dns.Msg {
 		soa := fwdSecRR(t, fwdSecParent+" 300 IN SOA ns."+fwdSecParent+" hostmaster."+fwdSecParent+" 1 7200 1800 604800 300")
 		nsec := fwdSecRR(t, fwdSecKid+" 300 IN NSEC zzz."+fwdSecParent+" NS RRSIG NSEC")
@@ -276,7 +258,6 @@ func TestUnsignedDataAsksForItsDelegationThroughTheForward(t *testing.T) {
 // failed: `no known servers for "." to fetch DNSKEY`. The upstream does not
 // answer the ". NS" that set-up asks next, which is not fatal.
 func TestTrustAnchorDNSKEYIsFetchedThroughTheForward(t *testing.T) {
-	untilForwardFirst(t)
 	root := newFwdSecKey(t, ".")
 	logr := &upstreamLog{}
 	addr, port := startLoggedSignedForwardUpstream(t, map[string]*dns.Msg{
@@ -297,4 +278,31 @@ func TestTrustAnchorDNSKEYIsFetchedThroughTheForward(t *testing.T) {
 		t.Errorf(". DNSKEY is not cached Secure: %+v", crr)
 	}
 	requireAsked(t, logr, ".", dns.TypeDNSKEY)
+}
+
+// The cache's Forwarded hook answers as the resolver decides: a name under a
+// forward zone is forwarded, a name under a more specific stub zone is not, and
+// with no forward zones nothing is.
+func TestCacheForwardedHookFollowsTheZoneTable(t *testing.T) {
+	imr := newForwardTestImr(t, rootForward("192.0.2.53", 53))
+	imr.setZoneTable(imr.ForwardZones(), []string{"stub.example."}, nil)
+	for _, c := range []struct {
+		qname string
+		qtype uint16
+		want  bool
+	}{
+		{"www.example.", dns.TypeA, true},
+		{"example.", dns.TypeDNSKEY, true},
+		{"www.stub.example.", dns.TypeA, false},
+		{"stub.example.", dns.TypeDNSKEY, false},
+	} {
+		if got := imr.Cache.Forwarded(c.qname, c.qtype); got != c.want {
+			t.Errorf("Forwarded(%s, %s) = %v, want %v", c.qname, dns.TypeToString[c.qtype], got, c.want)
+		}
+	}
+
+	none := newForwardTestImr(t, nil)
+	if none.Cache.Forwarded("www.example.", dns.TypeA) {
+		t.Error("forwarded with no forward zones")
+	}
 }

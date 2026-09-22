@@ -93,6 +93,12 @@ type RRsetCacheT struct {
 	// not held to a delegation proof from the public tree, which does not speak
 	// for it (unsignedRRsetState). Nil when there are none.
 	ConfiguredZone func(name string) bool
+	// Forwarded reports whether the question <name, qtype> is sent to a
+	// forward zone's upstream rather than resolved by iteration. A forwarded
+	// question needs no servers from a zone cut: the validator hands it to its
+	// fetcher without any, and the fetcher forwards it (ServersFor). Nil when
+	// there are no forward zones.
+	Forwarded func(name string, qtype uint16) bool
 	//Options                map[ImrOption]string
 	Primed               bool
 	Logger               *log.Logger
