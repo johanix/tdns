@@ -280,7 +280,57 @@ the parent's.
 "validate it yourself with this key", the other "trust the upstream's AD bit".
 The anchor wins, and the configuration gets a warning.
 
-### 7. What stays from #723
+### 7. Answering a DS query at an anchored zone
+
+A client asks the resolver for `foo. DS`, and a trust anchor is configured at
+`foo.`. The anchor is the resolver's statement of which key identifies `foo.`;
+section 6 makes it the only thing that decides `foo.`'s validation. The DS answer
+should say the same thing:
+
+- **A trust anchor at `foo.`: answer from it.** A DS-form anchor is returned as
+  configured. For a DNSKEY-form anchor the DS is computed with SHA-256, the
+  digest every validator supports. With several anchors for `foo.`, as during a
+  key roll, all of them are returned.
+- **No trust anchor at `foo.`: the parent's path** (section 5).
+
+This makes the answer agree with how the resolver itself trusts `foo.`. Without
+it, a client could get AD=1 data for names under `foo.` (validated from the
+anchor) together with an AD=1 answer from the public parent saying that `foo.`
+has no DS, a different one, or does not exist at all.
+
+**The CD bit decides which view a client gets.**
+
+- **CD=0: the anchor's DS**, with AD=1 when the query had DO or AD set, and no
+  RRSIG.
+- **CD=1: the parent's path**, exactly as without an anchor. CD=1 asks for the
+  data so that the client can judge it. A DS the resolver made up carries no
+  signature from the parent, so a validating client would find it Bogus.
+
+**What this does not do.** It does not let a downstream validating resolver that
+knows nothing of the forward validate `foo.`. That resolver validates from its own
+root anchor, and a DS with no parent signature under a signed parent is Bogus to
+it. Such a downstream either trusts this resolver's AD bit (a tdns forward with
+`trust-ad`), and then needs no DS, or carries the anchor itself. The clients that
+benefit are stubs, resolvers that trust the AD bit, and diagnostics.
+
+**Rules for the implementation:**
+
+- **Client-facing only.** The DS is built in the responder at answer time. It is
+  never cached, and nothing inside tdns sees it: not the validator (which, after
+  section 6, uses the anchor directly), and not any code that asks the IMR for a
+  DS because it wants the parent's real one.
+- **Marked.** The answer carries an EDE (Other, with extra text saying it comes
+  from a configured trust anchor). As far as we know other resolvers do not
+  answer DS queries from their trust anchors, so a tdns answer of "DS present"
+  where the parent publishes none should say why.
+- **TTL:** fixed at 3600 s, since the anchor has none of its own. Open to change
+  in review of the implementation.
+- **Scope:** any name below the root that has a configured anchor, whether it is
+  forwarded or iterated. The root has no DS.
+- **Configuration, not state.** The answer reflects the configured anchor, even
+  when `foo.`'s DNSKEY RRset currently fails to validate against it.
+
+### 8. What stays from #723
 
 Keep the hardening of the refresh for an **iterating** root:
 - A refresh whose new expiry is still inside the lead window is not a refresh.
@@ -324,6 +374,18 @@ unaffected.
   With no anchor at `foo.`, the parent's answer decides, as today.
 - Section 6: `trust-ad` plus an anchor on the same zone: the anchor decides, and
   the configuration warns.
+- Section 7, with an anchor at `foo.`:
+  - a DS-form anchor: `foo. DS` with CD=0 returns the configured DS, AD=1 when
+    DO or AD was set, no RRSIG, and the EDE; with CD=1 it returns the parent's
+    path answer (a different DS, a denial or NXDOMAIN);
+  - a DNSKEY-form anchor: CD=0 returns the SHA-256 DS of the key; CD=1 as
+    above;
+  - two anchors for `foo.`: both DS records are returned;
+  - the cache never holds the synthesized DS, and an internal DS lookup through
+    the IMR gets the parent's answer;
+  - `sub.foo. DS`, with no anchor at `sub.foo.`: not synthesized.
+- Section 7, with no anchor at `foo.`: CD=0 and CD=1 both get the parent's path
+  answer.
 - The iterating-root hardening, as in #723.
 
 ## Staging
@@ -336,10 +398,11 @@ unaffected.
 | S4 | probe classification; then the idle re-probe | classification: —; re-probe: S1–S3 |
 | S5 | a configured trust anchor governs its zone; parent-side DS data cannot override it | — |
 | S6 | DS at a forward apex follows the parent's path | S5 |
+| S7 | a client's DS query at an anchored zone: the anchor's DS for CD=0, the parent's path for CD=1; responder only, marked with an EDE | S5, S6 |
 
 S1 and S2 replace #723's forwarded-root half. S3 is #723's other half. S1 alone
 closes #722's lookup failures; S2 removes the synthetic root. S5 must land before
-S6.
+S6, and S7 after both.
 
 ## Settled questions
 
@@ -354,3 +417,5 @@ Settled in review, 2026-09-22.
 3. **`root-hints` when `.` is forwarded:** warn, do not reject. The file is
    unused while `.` is forwarded, and it is what the reload that removes the
    forward primes from. A missing file must not stop start-up.
+4. **A DS query at an anchored zone** (section 7, 2026-09-22): answered from the
+   anchor for CD=0, and along the parent's path for CD=1.
