@@ -1,7 +1,7 @@
 # Forwarding and priming
 
-**Written 2026-09-22.** Proposal, revised the same day after review and
-re-review. Line
+**Written 2026-09-22.** Proposal, revised the same day after three rounds of
+review. Line
 references are to main at `a3e2dae5`. Follows from #722, where a resolver whose root
 is forwarded lost its root NS for up to 15 s at a time, and a delegation sync that
 fell into the gap failed. #723 fixes that by keeping a synthetic root alive. This
@@ -308,13 +308,24 @@ wins, but that needs a mechanism: a `trust-ad` forward never reaches
 `ValidateDNSKEYs`. `forwardQuery` sends CD=0 and takes the upstream's AD bit as
 the cache verdict (`v2/imr_forward.go:694`, `:840`–`:860`). The rule:
 
-- **Names at or below a configured anchor never take the `trust-ad` path.** They
-  are queried with CD=1 and validated locally against the anchor, exactly as in a
+- **Skip `trust-ad` when the closest configured anchor covering the query name
+  is not the root and lies at or below the forward zone's apex.** Such names are
+  queried with CD=1 and validated locally against the anchor, exactly as in a
   forward zone without `trust-ad`.
-- **That includes an anchor below a `trust-ad` forward zone:** names under the
-  anchor are validated locally, and the rest of the zone keeps trusting the
-  upstream's AD bit.
-- **The configuration gets a warning**, since the operator asked for both.
+- **A root anchor never turns `trust-ad` off.** Practically every validating
+  resolver has one, configured or the compiled-in IANA key; if it counted,
+  `trust-ad` would never apply anywhere. The same goes for any anchor above the
+  forward zone: the `trust-ad` forward is then the more specific statement. When
+  a non-root anchor sits at the forward zone's own apex, the anchor wins.
+- **The configuration gets a warning** when a non-root anchor lies at or below
+  a `trust-ad` forward zone's apex, since the operator asked for both.
+
+| configuration | result |
+|---|---|
+| root anchor only; `trust-ad` forward for `.` or `foo.` | `trust-ad` as today |
+| anchor at `foo.`; `trust-ad` forward for `.` | `foo.` and below validated locally; everything else keeps the AD bit |
+| anchor at `bar.foo.`; `trust-ad` forward for `foo.` | `bar.foo.` and below validated locally; the rest of `foo.` keeps the AD bit |
+| anchor at `com.`; `trust-ad` forward for `foo.com.` | `trust-ad` as today: the forward is more specific |
 
 ### 7. Answering a DS query at an anchored zone
 
@@ -419,9 +430,14 @@ unaffected.
     anchor before any key has been matched;
   - a zone marked Insecure by an earlier parent denial is validated again against
     its anchor, and comes out Secure.
-- Section 6, `trust-ad` plus an anchor: queries for names at or below the anchor
-  go out with CD=1 and validate locally; names elsewhere in the forward zone keep
-  the upstream's AD bit; the configuration warns.
+- Section 6, `trust-ad` plus an anchor:
+  - a non-root anchor at or below the forward zone's apex: queries for names at
+    or below it go out with CD=1 and validate locally; names elsewhere in the
+    forward zone keep the upstream's AD bit; the configuration warns;
+  - a root anchor with a `trust-ad` forward, for `.` and for `foo.`: the
+    upstream's AD bit is taken, as today;
+  - an anchor above the forward zone (at `com.`, forward for `foo.com.`): the
+    upstream's AD bit is taken, as today.
 - Section 7, with an anchor at `foo.`:
   - a DS-form anchor: `foo. DS` with CD=0 returns the configured DS, AD=1 when
     DO or AD was set, AA=0, no RRSIG, and the EDE; with CD=1 it returns the parent's
@@ -444,7 +460,7 @@ unaffected.
 | S2 | no priming or refresh for a forwarded root; `root-hints` not read; `RefreshRoot` wake-up channel and reload notification; trust-anchor setup after the listeners, through the forward; status | S1 |
 | S3 | the iterating-root hardening from #723 | — |
 | S4 | probe classification; then the idle re-probe | classification: —; re-probe: S1–S3 |
-| S5 | a configured trust anchor governs its zone; parent-side DS data cannot override it: the anchor store, anchor-first `ValidateDNSKEYs`, no `trust-ad` path under an anchor | — |
+| S5 | a configured trust anchor governs its zone; parent-side DS data cannot override it: the anchor store, anchor-first `ValidateDNSKEYs`, no `trust-ad` path under a non-root anchor inside the forward zone | — |
 | S6 | DS at a forward apex follows the parent's path | S5 |
 | S7 | a client's DS query at an anchored zone: the anchor's DS for CD=0, the parent's path for CD=1; responder only, marked with an EDE | S5, S6 |
 
