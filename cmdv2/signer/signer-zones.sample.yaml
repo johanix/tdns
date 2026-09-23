@@ -14,10 +14,11 @@
 # immutable" (docs/2026-07-25-secondary-zones-immutable.md). Without it the
 # zone is refused the right to add RRSIGs and is served exactly as received.
 #
-# ORDER OF OPERATIONS: on each refresh the server transfers the zone in,
-# publishes it, and signs it in a second publish. A downstream reacting to the
-# first NOTIFY can therefore transfer a not-yet-signed zone. That window is
-# tdns#512 -- it applies to every inline-signing secondary -- and #514 is the fix.
+# ORDER OF OPERATIONS: on each changed refresh the server transfers the zone
+# in, signs it, and only then publishes it and NOTIFYs its downstreams. Until
+# then the previous signed version is served, so a downstream never sees a
+# half-signed zone. (Builds before tdns#514 published first and signed in a
+# second publish: tdns#512.)
 #
 # Note `zones:` is a LIST of entries each carrying its own `name:`, not a map
 # keyed by zone name. See auth-zones.sample.yaml for the full property list and
