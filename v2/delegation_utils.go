@@ -132,28 +132,35 @@ func (zd *ZoneData) parentNSRRset() ([]dns.RR, string, error) {
 	return p_nsrrs, pserver, nil
 }
 
-func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error) {
-	var resp = DelegationSyncStatus{
+// analyseNSAndGlue is the NS-and-glue part of AnalyseZoneDelegation: the
+// served zone's NS RRset and in-bailiwick glue against the parent's, and the
+// declarative form of the child's delegation. It sets no DS field, so a status
+// it returns has NewDSKnown false: declareDelegationFromChild takes no DS, and
+// only compareParentDS fills in that dimension. It also returns the parent
+// server that answered and the served apex, for the DS step.
+func (zd *ZoneData) analyseNSAndGlue(imr *Imr) (resp DelegationSyncStatus, pserver string, apex *OwnerData, err error) {
+	resp = DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
 		Time:     time.Now(),
 	}
 
-	err := zd.FetchParentData(imr)
+	err = zd.FetchParentData(imr)
 	if err != nil {
-		return resp, err
+		return resp, "", nil, err
 	}
 
 	resp.Parent = zd.GetParent()
 
 	// 1. Compare NS RRsets between parent and child
-	p_nsrrs, pserver, err := zd.parentNSRRset()
+	var p_nsrrs []dns.RR
+	p_nsrrs, pserver, err = zd.parentNSRRset()
 	if err != nil {
-		return resp, err
+		return resp, pserver, nil, err
 	}
 
-	apex, err := zd.GetOwner(zd.ZoneName)
+	apex, err = zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return resp, err
+		return resp, pserver, nil, err
 	}
 
 	differ, adds, removes := core.RRsetDiffer(zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs,
@@ -212,6 +219,17 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 			resp.AAAARemoves = append(resp.AAAARemoves, removes...)
 		}
 	}
+	return resp, pserver, apex, nil
+}
+
+// AnalyseZoneDelegation compares the served zone's delegation with the
+// parent's: NS and glue (analyseNSAndGlue), then DS.
+func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error) {
+	resp, pserver, apex, err := zd.analyseNSAndGlue(imr)
+	if err != nil {
+		return resp, err
+	}
+
 	// 4. Compare DS RRsets between parent and child -- unless a KSK rollover is
 	// in flight, in which case the DS RRset is not this function's to have an
 	// opinion about.
