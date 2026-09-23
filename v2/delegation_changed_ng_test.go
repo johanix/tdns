@@ -273,3 +273,76 @@ func TestDelegationDataChangedNGFirstLoadIsNoChange(t *testing.T) {
 		t.Errorf("first load reported %d additions, want none", n)
 	}
 }
+
+// The split: diffNSAndGlue reports DelegationDataChangedNG's NS and glue deltas
+// exactly, and nothing of DS. A change to the keys alone, which is what a
+// transfer from an unsigned upstream into a zone that signs itself looks like,
+// is no NS or glue change.
+func TestDiffNSAndGlueIsTheNSAndGluePartAlone(t *testing.T) {
+	cases := []struct {
+		name     string
+		incoming string
+		nsOrGlue bool
+	}{
+		{"serial only", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A), false},
+		{"nameserver added", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNS3, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A, ddcngNS3A), true},
+		{"nameserver removed", ddcngZone(2, ddcngNS1, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS1A, ddcngNS1AAAA), true},
+		{"glue changed", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS1A2, ddcngNS1AAAA, ddcngNS2A), true},
+		{"keys gone", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A), false},
+		{"KSK replaced", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngKSK2, ddcngZSK1, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := testZone(t, ddcngZoneName, ddcngServedZone())
+			newzd := ddcngIncoming(t, tc.incoming)
+
+			_, whole, err := zd.DelegationDataChangedNG(newzd)
+			if err != nil {
+				t.Fatalf("DelegationDataChangedNG: %v", err)
+			}
+			oldapex, newapex, err := zd.delegationApexes(newzd)
+			if err != nil || oldapex == nil || newapex == nil {
+				t.Fatalf("delegationApexes: %v, %v, %v", oldapex, newapex, err)
+			}
+			part := DelegationSyncStatus{InSync: true}
+			zd.diffNSAndGlue(newzd, oldapex, newapex, &part)
+
+			if part.InSync == tc.nsOrGlue {
+				t.Errorf("InSync = %v, want %v", part.InSync, !tc.nsOrGlue)
+			}
+			for _, f := range []struct {
+				field       string
+				part, whole []dns.RR
+			}{
+				{"NsAdds", part.NsAdds, whole.NsAdds},
+				{"NsRemoves", part.NsRemoves, whole.NsRemoves},
+				{"AAdds", part.AAdds, whole.AAdds},
+				{"ARemoves", part.ARemoves, whole.ARemoves},
+				{"AAAAAdds", part.AAAAAdds, whole.AAAAAdds},
+				{"AAAARemoves", part.AAAARemoves, whole.AAAARemoves},
+			} {
+				if p, w := ddcngRRs(f.part), ddcngRRs(f.whole); !slices.Equal(p, w) {
+					t.Errorf("%s: diffNSAndGlue %q, DelegationDataChangedNG %q", f.field, p, w)
+				}
+			}
+			if n := len(part.DSAdds) + len(part.DSRemoves) + len(part.NewDS); n != 0 || part.NewDSKnown {
+				t.Errorf("diffNSAndGlue set DS fields: %d records, NewDSKnown %v", n, part.NewDSKnown)
+			}
+		})
+	}
+}
+
+// There is nothing to compare on a first load, and when the incoming zone has
+// no apex.
+func TestDelegationApexesNothingToCompare(t *testing.T) {
+	served := &ZoneData{ZoneName: ddcngZoneName, ZoneStore: MapZone} // not Ready
+	if o, n, err := served.delegationApexes(ddcngIncoming(t, ddcngServedZone())); o != nil || n != nil || err != nil {
+		t.Errorf("first load: %v, %v, %v; want nil, nil, nil", o, n, err)
+	}
+
+	zd := testZone(t, ddcngZoneName, ddcngServedZone())
+	apexless := &ZoneData{ZoneName: ddcngZoneName, ZoneStore: MapZone, Ready: true}
+	if o, n, err := zd.delegationApexes(apexless); o != nil || n != nil || err != nil {
+		t.Errorf("no incoming apex: %v, %v, %v; want nil, nil, nil", o, n, err)
+	}
+}
