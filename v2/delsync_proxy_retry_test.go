@@ -17,10 +17,10 @@ func TestNextProxySyncRetry(t *testing.T) {
 	ds := DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: "child.test."}
 	failedAt := time.Now()
 	var last time.Duration
-	for i := range proxySyncRetryDelays {
-		next, delay, ok := nextProxySyncRetry(ds, failedAt)
+	for i := range delegationSyncRetryDelays {
+		next, delay, ok := nextDelegationSyncRetry(ds, failedAt)
 		if !ok {
-			t.Fatalf("attempt %d: retries ran out after %d of %d", i+1, i, len(proxySyncRetryDelays))
+			t.Fatalf("attempt %d: retries ran out after %d of %d", i+1, i, len(delegationSyncRetryDelays))
 		}
 		if next.Attempt != ds.Attempt+1 || !next.FailedAt.Equal(failedAt) {
 			t.Errorf("attempt %d: next = {Attempt %d, FailedAt %v}", i+1, next.Attempt, next.FailedAt)
@@ -34,7 +34,7 @@ func TestNextProxySyncRetry(t *testing.T) {
 		last = delay
 		ds = next
 	}
-	if _, _, ok := nextProxySyncRetry(ds, failedAt); ok {
+	if _, _, ok := nextDelegationSyncRetry(ds, failedAt); ok {
 		t.Error("retries never run out")
 	}
 }
@@ -47,22 +47,22 @@ func TestProxyRetrySuperseded(t *testing.T) {
 	failedAt := time.Now()
 
 	first := DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName}
-	retry, _, _ := nextProxySyncRetry(first, failedAt)
+	retry, _, _ := nextDelegationSyncRetry(first, failedAt)
 
-	if proxyRetrySuperseded(zd, first) {
+	if delegationSyncRetrySuperseded(zd, first) {
 		t.Error("a first attempt was treated as a superseded retry")
 	}
-	if proxyRetrySuperseded(zd, retry) {
+	if delegationSyncRetrySuperseded(zd, retry) {
 		t.Error("a retry was dropped with no later success")
 	}
 
-	zd.proxyLastSyncOK = failedAt.Add(-time.Minute)
-	if proxyRetrySuperseded(zd, retry) {
+	zd.delegationLastSyncOK = failedAt.Add(-time.Minute)
+	if delegationSyncRetrySuperseded(zd, retry) {
 		t.Error("a retry was dropped because of a success from BEFORE the failure")
 	}
 
-	zd.proxyLastSyncOK = failedAt.Add(time.Minute)
-	if !proxyRetrySuperseded(zd, retry) {
+	zd.delegationLastSyncOK = failedAt.Add(time.Minute)
+	if !delegationSyncRetrySuperseded(zd, retry) {
 		t.Error("a retry survived a later successful sync")
 	}
 }
@@ -83,21 +83,21 @@ func TestProxyNoopSyncDoesNotSupersedeARetry(t *testing.T) {
 		t.Errorf("a plan with no usable scheme reported forwarded=true (%q)", msg)
 	}
 
-	// Through proxySync itself: the no-op must not stamp proxyLastSyncOK.
+	// Through proxySync itself: the no-op must not stamp delegationLastSyncOK.
 	delsyncq := make(chan DelegationSyncRequest, 1)
 	proxySync(context.Background(), zd, nil, nil, delsyncq, nil,
 		DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName, ZoneData: zd})
 	zd.mu.Lock()
-	stamped := !zd.proxyLastSyncOK.IsZero()
+	stamped := !zd.delegationLastSyncOK.IsZero()
 	zd.mu.Unlock()
 	if stamped {
 		t.Error("a sync that forwarded nothing was recorded as a success")
 	}
 
 	// And so a retry of an earlier failure still runs.
-	retry, _, _ := nextProxySyncRetry(DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName},
+	retry, _, _ := nextDelegationSyncRetry(DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName},
 		time.Now().Add(-time.Minute))
-	if proxyRetrySuperseded(zd, retry) {
+	if delegationSyncRetrySuperseded(zd, retry) {
 		t.Error("a retry was dropped after a sync that forwarded nothing")
 	}
 }

@@ -1990,6 +1990,28 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		}
 	}
 
+	// Delegation sync on refresh, at load: one compare with the parent for a
+	// zone that syncs its own delegation. A first load compares nothing, as
+	// there is no served zone yet, so without this a change made while the
+	// server was down, or a sync that ran out of retries, would wait for the
+	// next NS or glue change. It compares first, so an in-sync parent gets
+	// nothing -- which matters, because this also runs when the configuration
+	// of a loaded zone is reloaded.
+	//
+	// Gated on the child-mode predicate, not placed in the branch above: that
+	// branch also admits a registered multi-provider agent app, and a request
+	// queued there would reach every such agent, not only the one tdns-mp
+	// elected. Queued after DELEGATION-SYNC-SETUP; with the UPDATE scheme a
+	// sync that reaches the parent before the SIG(0) key is trusted is
+	// refused, and the walk moves on or the retry covers it.
+	if delsyncq != nil && zd.childDelegationSyncEnabled() {
+		delsyncq <- DelegationSyncRequest{
+			Command:  "REFRESH-SYNC-DELEGATION",
+			ZoneName: zd.ZoneName,
+			ZoneData: zd,
+		}
+	}
+
 	// parentsync-proxy: a tdns-agent acting as a SECONDARY for a zone
 	// whose primary is DSYNC-unaware (BIND/Knot). The agent inspects incoming
 	// transfers for CDS/CSYNC (and NS/glue/DNSKEY) changes and forwards

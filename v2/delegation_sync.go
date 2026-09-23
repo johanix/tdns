@@ -165,6 +165,12 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					}
 				}
 
+			case "REFRESH-SYNC-DELEGATION":
+				// A parentsync child's compare with the parent, queued after a
+				// refresh changed its NS or glue, and once at load
+				// (delsync_refresh.go).
+				handleRefreshSyncDelegation(ctx, conf, delsyncq, kdb, notifyq, zd, ds)
+
 			case "PROXY-SYNC", "PROXY-UPDATE-SETUP":
 				// Both need an IMR: the parent's DSYNC records are discovered,
 				// not configured. At startup the zone's first transfer routinely
@@ -800,55 +806,58 @@ func requeueSetupAfter(ctx context.Context, delsyncq chan DelegationSyncRequest,
 	return done
 }
 
-// proxySyncRetryDelays are the waits before each re-run of a proxy sync that
-// failed. Nothing else re-sends the change: the next transfer is compared with
-// a copy that already has it, so a failure that is not retried stays unsent
-// until the zone changes again (#722). Many failures are transient -- the
-// parent's DSYNC endpoint could not be discovered, the parent was briefly
-// unreachable -- so a handful of tries over some forty minutes, and then the
-// next change or a restart takes over.
-var proxySyncRetryDelays = []time.Duration{30 * time.Second, 2 * time.Minute, 8 * time.Minute, 30 * time.Minute}
+// delegationSyncRetryDelays are the waits before each re-run of a delegation
+// sync that failed: a proxy sync, or a parentsync child's refresh sync. Nothing
+// else re-sends the change: the next refresh is compared with a copy that
+// already has it, so a failure that is not retried stays unsent until the zone
+// changes again (#722). Many failures are transient -- the parent's DSYNC
+// endpoint could not be discovered, the parent was briefly unreachable -- so a
+// handful of tries over some forty minutes, and then the next change or a
+// restart takes over.
+var delegationSyncRetryDelays = []time.Duration{30 * time.Second, 2 * time.Minute, 8 * time.Minute, 30 * time.Minute}
 
-// nextProxySyncRetry returns the request that re-runs a failed proxy sync and
-// how long to wait before it; ok is false once the retries have run out.
-func nextProxySyncRetry(ds DelegationSyncRequest, failedAt time.Time) (next DelegationSyncRequest, delay time.Duration, ok bool) {
-	if ds.Attempt >= len(proxySyncRetryDelays) {
+// nextDelegationSyncRetry returns the request that re-runs a failed delegation
+// sync and how long to wait before it; ok is false once the retries have run
+// out.
+func nextDelegationSyncRetry(ds DelegationSyncRequest, failedAt time.Time) (next DelegationSyncRequest, delay time.Duration, ok bool) {
+	if ds.Attempt >= len(delegationSyncRetryDelays) {
 		return ds, 0, false
 	}
 	next = ds
 	next.Attempt++
 	next.FailedAt = failedAt
-	return next, proxySyncRetryDelays[ds.Attempt], true
+	return next, delegationSyncRetryDelays[ds.Attempt], true
 }
 
-// proxyRetrySuperseded reports whether a retry is redundant because a later
-// proxy sync for the zone has succeeded since the one it retries failed. Every
+// delegationSyncRetrySuperseded reports whether a retry is redundant because a
+// later sync for the zone has succeeded since the one it retries failed. Every
 // proxy sync declares the whole delegation and takes its withdrawals from the
-// parent as well as from its own trigger, so a later success covers whatever
-// the failed one was sending.
-func proxyRetrySuperseded(zd *ZoneData, ds DelegationSyncRequest) bool {
+// parent as well as from its own trigger, and a refresh sync compares with the
+// parent before it sends, so a later success covers whatever the failed one was
+// sending.
+func delegationSyncRetrySuperseded(zd *ZoneData, ds DelegationSyncRequest) bool {
 	if ds.Attempt == 0 {
 		return false
 	}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return zd.proxyLastSyncOK.After(ds.FailedAt)
+	return zd.delegationLastSyncOK.After(ds.FailedAt)
 }
 
 // proxySync forwards a detected change to the parent on behalf of a
 // DSYNC-unaware primary, over whichever of UPDATE / API / NOTIFY is usable. A
-// failure is retried (nextProxySyncRetry).
+// failure is retried (nextDelegationSyncRetry).
 func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan NotifyRequest,
 	delsyncq chan DelegationSyncRequest, imr *Imr, ds DelegationSyncRequest) {
 
-	if proxyRetrySuperseded(zd, ds) {
+	if delegationSyncRetrySuperseded(zd, ds) {
 		lgDns.Info("DelegationSyncher: proxy sync retry dropped; a later sync has succeeded",
 			"zone", ds.ZoneName, "attempt", ds.Attempt)
 		return
 	}
 	msg, forwarded, err := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr, ds.ProxyAnalysis)
 	if err != nil {
-		next, delay, ok := nextProxySyncRetry(ds, time.Now())
+		next, delay, ok := nextDelegationSyncRetry(ds, time.Now())
 		if !ok {
 			lgDns.Error("DelegationSyncher: proxy sync failed; no retries left, the next change or a restart will try again",
 				"zone", ds.ZoneName, "attempts", ds.Attempt+1, "err", err)
@@ -865,7 +874,7 @@ func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan Notif
 	// might.
 	if forwarded {
 		zd.mu.Lock()
-		zd.proxyLastSyncOK = time.Now()
+		zd.delegationLastSyncOK = time.Now()
 		zd.mu.Unlock()
 	}
 	lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "forwarded", forwarded, "msg", msg)
