@@ -99,7 +99,10 @@ func (f *FamilyTracker) RecordResult(addr string, success bool) {
 	if success {
 		stats.recentSuccesses = append(stats.recentSuccesses, now)
 		if !stats.suspectUntil.IsZero() && now.Before(stats.suspectUntil) {
-			log.Printf("FamilyTracker: IPv%d is reachable again (a query to %s succeeded)", fam, addr)
+			// "Success" here means the path answered, which includes a refused
+			// connection: the host was reached, whatever it said. Do not claim
+			// the query succeeded.
+			log.Printf("FamilyTracker: IPv%d is reachable again (path to %s)", fam, addr)
 		}
 		stats.suspectUntil = time.Time{}
 		return
