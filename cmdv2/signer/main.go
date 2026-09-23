@@ -37,10 +37,13 @@ import (
 // its primary, signs, and NOTIFYs its downstreams; the signer needs no new
 // engine.
 //
-// NOTE on ordering: on a changed refresh the zone is published BEFORE it is
-// re-signed, so a downstream can transfer a not-yet-signed zone during that
-// window. That is tdns#512, a property of every inline-signing secondary
-// rather than of this binary, and #514 is the fix. Nothing here changes it.
+// NOTE on ordering: a changed refresh is signed BEFORE it is published (#514).
+// The transferred zone is staged, signed and installed as one version, and at
+// most one NOTIFY per version goes to the downstreams after that (best effort:
+// a full queue drops it, and the SOA refresh timer covers the gap). So no
+// downstream can transfer a half-signed zone. That is a property of every inline-signing secondary, not
+// of this binary. Builds before #514 published first and signed in a second
+// publish (tdns#512).
 //
 // WHY THIS IS A SEPARATE BINARY AT ALL: Globals.App.Name is what
 // GetDefaultConfigFile derives the config path from, and it is a compile-time

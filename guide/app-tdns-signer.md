@@ -127,21 +127,30 @@ ERROR.
 Complete examples: `cmdv2/signer/tdns-signer.sample.yaml` and
 `cmdv2/signer/signer-zones.sample.yaml`.
 
-## Ordering, and a window you need to know about
+## Ordering: signed before it is published
+
+A changed refresh is signed before anything serves it. The signer stages the
+transferred zone and signs it: the whole zone after an AXFR, only the names
+the delta touched after an IXFR. It then installs the signed result as one new
+version and sends its downstreams at most one NOTIFY for it. NOTIFY is best
+effort: if the notifier's queue is full, it is dropped, and the downstream picks
+the change up on its SOA refresh timer. Until that moment the
+previous signed version is what queries and transfers get. If signing fails,
+the new version is not published, and the previous one stays.
 
 On a first load the zone is not advertised as ready until it has been signed,
 so nothing can be pulled before then.
 
-**On every later refresh there is a window during which the zone is published
-but not yet re-signed, and a downstream can transfer it.** This is tdns
-issue [#512][512] — a property of every inline-signing secondary, not of this
-binary — and the fix is [#514][514]. If you run a signer with downstreams,
-run it on a build that carries #514.
+So no downstream can transfer a half-signed zone. What signing time does cost
+is delay: a change reaches the downstreams only after it has been signed. That
+takes a moment for a delta or a small zone, and over a minute for a full re-sign
+of a 100k-name zone.
 
-The window is proportional to zone size, because the whole zone is re-signed
-after each changed refresh: milliseconds on a small zone, over a minute on a
-100k-name zone. Queries are protected (the responder returns SERVFAIL rather
-than an unsigned answer); transfers are not.
+This holds from [#514][514] (merged 2026-09-11). Earlier builds published the
+transferred zone first and signed it in a second publish. In between, a
+downstream could transfer a zone whose apex SOA was signed but whose other
+RRsets were not ([#512][512]). A signer with downstreams must run a build that
+carries #514.
 
 [512]: https://github.com/johanix/tdns/issues/512
 [514]: https://github.com/johanix/tdns/pull/514
@@ -226,18 +235,14 @@ dig @127.0.0.1 -p 5364 TXT new.example.com.         # on the primary
 dig @127.0.0.1 -p 5365 +dnssec TXT new.example.com. # signed, on the signer
 ```
 
-**Ask about the RRset you changed, not about the SOA.** The apex SOA is signed
-throughout the window described above, so a signed SOA says nothing about
-whether the rest of the zone has caught up: a mid-flight AXFR can carry a signed
-SOA over tens of thousands of unsigned RRsets, and it is logged as a complete
-transfer. Measured on a 100k-name zone: 25 seconds after the first NOTIFY, a
-transfer returned 337k records of an eventual 475k. Polling the SOA RRSIG is
-what made an earlier check of this look green.
+**Ask about the RRset you changed.** A signed answer for it shows both that
+the change has arrived and that it was signed. A signed SOA shows only that
+*some* signed version is being served; it does not say whether that version
+contains your change yet, because the previous version stays in service while
+the new one is signed.
 
-The two `dig`s above are the right shape because they name the record that
-changed. Nothing below a delegation is signed either, and legitimately so, so
-"are there unsigned RRsets in this transfer" is not the question — "is the RRset
-I just changed signed yet" is.
+"Are there unsigned RRsets in this transfer" is not a useful check either.
+Nothing below a delegation is signed, and legitimately so.
 
 A transfer refused with `zone status loading` immediately after start-up is
 normal: the zone is not advertised as ready until its first publish completes.

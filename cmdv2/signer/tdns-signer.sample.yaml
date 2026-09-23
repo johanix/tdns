@@ -24,9 +24,10 @@
 # option: it refreshes from the primary, signs the result, and serves and
 # transfers the signed zone onward.
 #
-# NOTE: on a changed refresh the zone is published before it is re-signed, so a
-# downstream can transfer a not-yet-signed zone during that window. See
-# tdns#512; #514 is the fix. Run a build with #514 if you have downstreams.
+# NOTE: a changed refresh is signed before it is published, and the previous
+# signed version is served until then, so a downstream never transfers a
+# half-signed zone. This holds from tdns#514; older builds had a window in which
+# a downstream could (tdns#512). Run a build with #514 if you have downstreams.
 #
 # ---------------------------------------------------------------------------
 # RUNNING ALONGSIDE tdns-auth ON ONE HOST
