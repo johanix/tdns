@@ -481,6 +481,14 @@ the NOTIFY scheme's NS sync means anything.
   "skipped, not stripped" (4.3) testable.
 - **In sync counts as a success.** A parent found in sync drops an older retry,
   as a sent difference does: either way the parent holds what the zone says.
+- **Unread glue is a failure.** A parent glue query that fails makes the
+  refresh sync's comparison fail (`errParentGlueUnread`): nothing is sent and it
+  is retried, rather than called in sync. `AnalyseZoneDelegation` passes over
+  that error as it always did, so the explicit sync, the status command and
+  tdns-mp are unchanged.
+- **Left open: #744.** A nameserver that stays in the NS set but loses every
+  record queues a compare, but the compare skips a nameserver with no records,
+  so the parent keeps its old glue.
 - **Log wording.** The child-mode hooks log `parentsync: NS or glue changed in
   a refresh ...`; the arm logs `DelegationSyncher: refresh sync ...`. Neither
   matches `request for delegation sync` or `SyncZoneDelegation completed`. The
