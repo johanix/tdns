@@ -9,7 +9,7 @@ change.
 **Status:** merged as #734, after an external review (adopt; the predicate
 for multi-provider zones and the reason this is independent of KLO are now
 pinned, and Q-c is decided). Stage 1 is in review (#740); stages 2 and 3 are
-implemented on a branch stacked on it (§10), not yet run live (L1, L2).
+in review (#742, stacked on #740; §10), not yet run live (L1, L2).
 Amended 2026-09-23, at the end.
 
 ## Summary
@@ -418,8 +418,8 @@ KLO is paused at the moment. Nothing here needs it restarted.
 | # | Change | Size (non-test) | Status |
 |---|---|---|---|
 | 1 | The NS-and-glue comparison as its own function; `DelegationDataChangedNG` calls it. No change in behaviour. | ~40 | in review, #740 |
-| 2 | Child mode and its predicate, `REFRESH-SYNC-DELEGATION` with the NS-and-glue analysis, shared retry helpers. | ~110 | implemented, stacked on #740 |
-| 3 | The startup compare-with-parent from `SetupZoneSync`. | ~20 | implemented, stacked on #740 |
+| 2 | Child mode and its predicate, `REFRESH-SYNC-DELEGATION` with the NS-and-glue analysis, shared retry helpers. | ~110 | in review, #742 (stacked on #740) |
+| 3 | The startup compare-with-parent from `SetupZoneSync`. | ~20 | in review, #742 (stacked on #740) |
 
 Stage 1 is a refactor with no change in behaviour, and the existing tests pin
 it. Stages 2 and 3 can go in one PR. #557 is independent, but needed before
