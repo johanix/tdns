@@ -58,7 +58,8 @@ type ZoneJournalInfo struct {
 	// Overlay is true for an inline-signing secondary on tdns-auth. Its
 	// journal is not a chain from a file: its own records in it are applied
 	// to every full transfer (docs/2026-09-24-journal-overlay-on-transfer.md).
-	// Replayable and Replayed describe a file's chain and do not apply.
+	// Replayable is then true, since the journal stays in effect across a
+	// restart, and Replayed does not apply.
 	Overlay bool
 
 	// PersistenceActive is false when the deployment-wide kill-switch
@@ -101,6 +102,7 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 	fileSerial := zd.fileSerial
 	served := zd.CurrentSerial
 	replayed := zd.deltasReplayed
+	overlay := zd.isOverlayZoneLocked()
 	zd.mu.Unlock()
 
 	info := &ZoneJournalInfo{
@@ -111,6 +113,7 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 		ServedSerial:      served,
 		Replayed:          replayed,
 		Replayable:        true,
+		Overlay:           overlay,
 		PersistenceActive: JournalActive(),
 	}
 
@@ -136,9 +139,13 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 
 		// The same check the load path runs, from the same function, so the
 		// answer here cannot drift away from what actually happens at startup.
-		if err := validateDeltaChain(zd.ZoneName, deltas, fileSerial); err != nil {
-			info.Replayable = false
-			info.Diagnosis = err.Error()
+		// An overlay zone's load does not run it: its journal is applied to
+		// every full transfer instead, so it stays in effect across a restart.
+		if !overlay {
+			if err := validateDeltaChain(zd.ZoneName, deltas, fileSerial); err != nil {
+				info.Replayable = false
+				info.Diagnosis = err.Error()
+			}
 		}
 	}
 
@@ -206,6 +213,16 @@ func (zd *ZoneData) JournalPurge(force bool) (*ZoneJournalPurgeResult, error) {
 		return &ZoneJournalPurgeResult{}, nil
 	}
 
+	if info.Overlay && !force {
+		// There is no zone file to sync them into: a secondary's content comes
+		// from its upstream, and these records exist only here.
+		return nil, fmt.Errorf("zone %s: the journal holds %d change(s) in %d delta(s), and"+
+			" this server's own records among them (CDS, CDNSKEY, CSYNC) are applied to every"+
+			" full transfer. Purging it takes them out of the zone at the next full transfer,"+
+			" and a CDS published under rollover method none is not published again. Repeat"+
+			" with --force if you really mean to discard them",
+			zd.ZoneName, info.Records, info.Deltas)
+	}
 	if info.Replayable && !force {
 		return nil, fmt.Errorf("zone %s: the journal holds %d change(s) in %d delta(s) that are"+
 			" NOT in the zone file, and it would replay cleanly on restart. Purging discards them."+

@@ -28,13 +28,6 @@ import (
 
 const ovZone = "example."
 
-// overlayPending skips a test of what is not built yet. The commit that
-// implements the overlay removes it.
-func overlayPending(t *testing.T) {
-	t.Helper()
-	t.Skip("journal overlay on transfer (#732): not implemented yet")
-}
-
 // ovUpstreamZone is the upstream's zone at serial, with extra records.
 func ovUpstreamZone(serial uint32, extra ...string) string {
 	var b strings.Builder
@@ -206,7 +199,6 @@ func ovConfigWarning(zd *ZoneData) string {
 // full transfer: a forced AXFR, and an IXFR request the upstream answers with
 // the whole zone (it has no chain to serve from).
 func TestJournalOverlayCDSSurvivesFullTransfer(t *testing.T) {
-	overlayPending(t)
 	for _, tc := range []struct {
 		name  string
 		force bool
@@ -259,7 +251,6 @@ func TestJournalOverlayCDSSurvivesFullTransfer(t *testing.T) {
 // transfer from an upstream that has moved on, serves the CDS, and the load's
 // journal step raises no ConfigWarning. L1 is the real restart.
 func TestJournalOverlayCDSSurvivesRestart(t *testing.T) {
-	overlayPending(t)
 	zd := ixSigningSecondary(t, ixApplyZone)
 	cds := ovCDS(t, 1)
 	if err := ovPublishCDS(t, zd, cds); err != nil {
@@ -282,7 +273,6 @@ func TestJournalOverlayCDSSurvivesRestart(t *testing.T) {
 // T3. Empty journal, upstream serial ahead of the served one: a local change
 // is applied (doc §3, first case).
 func TestJournalOverlayLocalChangeWithUpstreamAhead(t *testing.T) {
-	overlayPending(t)
 	zd := ixSigningSecondary(t, ixApplyZone)
 	ovTransfer(t, zd, ovUpstreamZone(2026092401), true)
 	if n := len(ovJournal(t, zd)); n != 0 {
@@ -302,7 +292,6 @@ func TestJournalOverlayLocalChangeWithUpstreamAhead(t *testing.T) {
 // §3, second case). Three CDS publishes leave the tail at 11. The upstream has
 // moved on to 8, so the restarted zone's first load serves 8, below the tail.
 func TestJournalOverlayLocalChangeWithJournalAhead(t *testing.T) {
-	overlayPending(t)
 	zd := ixSigningSecondary(t, ixApplyZone)
 	for i := 1; i <= 3; i++ {
 		if err := ovPublishCDS(t, zd, ovCDS(t, i)); err != nil {
@@ -394,7 +383,6 @@ func ovCaptureLog(t *testing.T) *bytes.Buffer {
 // T5. Net effect: three CDS publishes and one full transfer serve one CDS,
 // the last, and leave the journal as one delta holding one add.
 func TestJournalOverlayNetEffect(t *testing.T) {
-	overlayPending(t)
 	zd := ixSigningSecondary(t, ixApplyZone)
 	for i := 1; i <= 3; i++ {
 		if err := ovPublishCDS(t, zd, ovCDS(t, i)); err != nil {
@@ -414,7 +402,6 @@ func TestJournalOverlayNetEffect(t *testing.T) {
 // a KEY the keystore does not hold are not; nor is a local edit of the
 // upstream's A record.
 func TestJournalOverlayAllowlist(t *testing.T) {
-	overlayPending(t)
 	zd := ixSigningSecondary(t, ixApplyZone)
 	cds := ovCDS(t, 1)
 	if err := ovPublishCDS(t, zd, cds); err != nil {
@@ -453,7 +440,6 @@ func TestJournalOverlayAllowlist(t *testing.T) {
 // record is logged, once. It does not win for the upstream's own data: a local
 // delete of an upstream A record is undone by the next full transfer.
 func TestJournalOverlayOwnCopyWins(t *testing.T) {
-	overlayPending(t)
 	zd := ixSigningSecondary(t, ixApplyZone)
 	upstreamCDS := ovCDS(t, 9)
 	ovTransfer(t, zd, ovUpstreamZone(20, ovCDSText(9)), true)
@@ -583,7 +569,6 @@ func TestJournalOverlayNotOnAppliedIxfr(t *testing.T) {
 // T10. A persisted copy adopted at first bind already carries the CDS: the
 // overlay does not double it, and the load raises no ConfigWarning.
 func TestJournalOverlayPersistedCopyAtFirstBind(t *testing.T) {
-	overlayPending(t)
 	zd := ixSigningSecondary(t, ixApplyZone)
 	cds := ovCDS(t, 1)
 	if err := ovPublishCDS(t, zd, cds); err != nil {
@@ -616,7 +601,6 @@ func TestJournalOverlayPersistedCopyAtFirstBind(t *testing.T) {
 // is refused leaves the journal as it was.
 func TestJournalOverlayCompaction(t *testing.T) {
 	t.Run("empty net effect", func(t *testing.T) {
-		overlayPending(t)
 		zd := ixSigningSecondary(t, ixApplyZone)
 		if err := ovPublishCDS(t, zd, ovCDS(t, 1)); err != nil {
 			t.Fatalf("CDS publish: %v", err)
@@ -631,7 +615,6 @@ func TestJournalOverlayCompaction(t *testing.T) {
 	})
 
 	t.Run("other types dropped", func(t *testing.T) {
-		overlayPending(t)
 		zd := ixSigningSecondary(t, ixApplyZone)
 		if err := ovUpdate(t, zd, mustRR(t, "new.example.\t3600\tIN\tA\t10.0.0.7")); err != nil {
 			t.Fatalf("local add: %v", err)
@@ -668,7 +651,6 @@ func TestJournalOverlayCompaction(t *testing.T) {
 // T12. An add the transfer already has is kept in the compacted journal, and
 // the record comes back once the upstream withdraws it.
 func TestJournalOverlayKeepsAddTheTransferHas(t *testing.T) {
-	overlayPending(t)
 	zd := ixSigningSecondary(t, ixApplyZone)
 	cds := ovCDS(t, 1)
 	if err := ovPublishCDS(t, zd, cds); err != nil {
@@ -712,7 +694,6 @@ func TestJournalOverlayJournalInactive(t *testing.T) {
 	})
 
 	t.Run("rows from before the switch", func(t *testing.T) {
-		overlayPending(t)
 		zd := ixSigningSecondary(t, ixApplyZone)
 		cds := ovCDS(t, 1)
 		if err := ovPublishCDS(t, zd, cds); err != nil {
@@ -732,7 +713,6 @@ func TestJournalOverlayJournalInactive(t *testing.T) {
 // takes the zone's own records away at the next full transfer, asks for
 // --force as it does for a journal that would replay.
 func TestJournalOverlayStatusAndPurge(t *testing.T) {
-	overlayPending(t)
 	zd := ixSigningSecondary(t, ixApplyZone)
 	if err := ovPublishCDS(t, zd, ovCDS(t, 1)); err != nil {
 		t.Fatalf("CDS publish: %v", err)

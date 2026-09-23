@@ -33,7 +33,11 @@ func AttachZoneJournalCmds(c *cobra.Command, role string) {
 		Long: `The delta journal holds zone changes that have not yet reached the zone file.
 
 It is written when an update is published and replayed over the file on load, so
-a restart loses nothing. "zone sync" folds it into the file and empties it.`,
+a restart loses nothing. "zone sync" folds it into the file and empties it.
+
+On an inline-signing secondary it is instead applied to every full transfer,
+where it keeps the zone's own CDS, CDNSKEY and CSYNC. "zone sync" leaves it
+alone there.`,
 	}
 
 	status := &cobra.Command{
@@ -74,7 +78,10 @@ as ADD/DEL instructions. Nothing is lost silently: replay what you want back wit
 A journal that would replay cleanly holds changes that exist nowhere else, so
 purging one needs --force. Prefer "zone sync", which folds the same changes into
 the zone file and loses nothing. A journal that would NOT replay needs no flag:
-its changes are already absent from what the zone serves.`,
+its changes are already absent from what the zone serves.
+
+On an inline-signing secondary, purging needs --force as well: it takes the
+zone's own CDS, CDNSKEY and CSYNC out at the next full transfer.`,
 		Args: cobra.NoArgs,
 		Run:  func(cmd *cobra.Command, args []string) { runZoneJournal(role, "purge") },
 	}
@@ -188,6 +195,18 @@ func printJournalInfo(info *tdns.ZoneJournalInfo, detail bool) {
 
 	fmt.Printf("Zone %s journal:\n", info.Zone)
 	fmt.Printf("  deltas:        %d (%d records)\n", info.Deltas, info.Records)
+	if info.Overlay {
+		// Not a chain from a file: its serials only order its rows.
+		fmt.Printf("  serials:       %d -> %d\n", info.AnchorSerial, info.HeadSerial)
+		fmt.Printf("  upstream:      serial %d\n", info.FileSerial)
+		fmt.Printf("  serving:       %d\n", info.ServedSerial)
+		fmt.Printf("  applied:       to every full transfer: this server's own CDS, CDNSKEY and\n")
+		fmt.Printf("                 CSYNC at the apex (inline-signing secondary)\n")
+		fmt.Printf("  purge:         takes them out of the zone at the next full transfer; a CDS\n")
+		fmt.Printf("                 published under rollover method none is not published again\n")
+		printJournalDeltas(info, detail)
+		return
+	}
 	fmt.Printf("  chain:         %d -> %d\n", info.AnchorSerial, info.HeadSerial)
 	fmt.Printf("  zone file:     %s (serial %d)\n", info.Zonefile, info.FileSerial)
 	fmt.Printf("  serving:       %d\n", info.ServedSerial)
@@ -204,17 +223,22 @@ func printJournalInfo(info *tdns.ZoneJournalInfo, detail bool) {
 		fmt.Printf("                 the zone is currently serving\n")
 	}
 
-	if detail {
-		fmt.Printf("\n")
-		for _, d := range info.Deltalist {
-			fmt.Printf("  %d -> %d  (%d add, %d del)\n", d.FromSerial, d.ToSerial, d.Adds, d.Dels)
-			for _, rr := range d.RRs {
-				kw := tdns.InstrAdd
-				if rr.Action == tdns.ZoneDeltaDel {
-					kw = tdns.InstrDel
-				}
-				fmt.Printf("      %s %s\n", kw, rr.RR)
+	printJournalDeltas(info, detail)
+}
+
+func printJournalDeltas(info *tdns.ZoneJournalInfo, detail bool) {
+	if !detail {
+		return
+	}
+	fmt.Printf("\n")
+	for _, d := range info.Deltalist {
+		fmt.Printf("  %d -> %d  (%d add, %d del)\n", d.FromSerial, d.ToSerial, d.Adds, d.Dels)
+		for _, rr := range d.RRs {
+			kw := tdns.InstrAdd
+			if rr.Action == tdns.ZoneDeltaDel {
+				kw = tdns.InstrDel
 			}
+			fmt.Printf("      %s %s\n", kw, rr.RR)
 		}
 	}
 }

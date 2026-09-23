@@ -626,8 +626,17 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 				// later one anchors to the journal's own tail. The chain is
 				// then continuous by construction and starts where the next
 				// load will actually begin.
+				//
+				// Except on an overlay zone (journal_overlay.go). Its journal
+				// is not a chain from a file: it is applied to every full
+				// transfer, and its serials only order its rows. Its fileSerial
+				// is the upstream's serial and its tail can be ahead of what it
+				// serves after a restart, and either refuses the change. The
+				// served serial the change was computed from always advances.
 				fromSerial := zd.fileSerial
-				if last, have, lerr := zd.KeyDB.LastZoneDeltaSerial(zd.ZoneName); lerr != nil {
+				if zd.isOverlayZoneLocked() {
+					fromSerial = oldSnap.Serial
+				} else if last, have, lerr := zd.KeyDB.LastZoneDeltaSerial(zd.ZoneName); lerr != nil {
 					// Refusing here rather than guessing: a wrong base is
 					// silent data loss at the next restart, which is exactly
 					// what this whole path exists to prevent.
@@ -909,9 +918,13 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		// A TRANSFERRED zone is excluded deliberately. Its serial is its own,
 		// not upstream's -- an inline-signing secondary re-signs what it
 		// receives and advances in its own space (see the MUST-NOT-MODIFY
-		// design), and off tdns-auth the whole gate stands down. Nothing there
-		// anchors a journal to the received serial, so there is nothing to
-		// floor.
+		// design), and off tdns-auth the whole gate stands down. Its journal
+		// needs no floor either: an overlay zone journals from the serial it
+		// serves (publishWorkingSetLocked, journal_overlay.go). A journalling
+		// secondary outside the overlay -- multi-provider, or a derived app's --
+		// still anchors to the received serial, and a local change there is
+		// refused whenever that serial, or the journal's tail, is ahead of the
+		// one it serves.
 		next := zd.CurrentSerial
 		if fromZoneFile && serialNewer(zd.fileSerial, next) {
 			next = zd.fileSerial
@@ -926,6 +939,17 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	zd.ApexLen = new_zd.ApexLen
 	zd.ZoneStore = new_zd.ZoneStore
 	zd.ZoneType = new_zd.ZoneType
+
+	// An overlay zone's own records, from its journal, go into the content
+	// this replacement publishes (journal_overlay.go). Not for an applied IXFR:
+	// its content is the published snapshot plus the delta, so it carries them
+	// already, and that path signs only the owners the delta touched. A whole
+	// zone sent in answer to an IXFR request is a full replacement and does
+	// get the overlay.
+	var overlay *journalOverlay
+	if zd.KeyDB != nil && !new_zd.ixfrDerived && zd.isOverlayZoneLocked() {
+		overlay = zd.applyJournalOverlayLocked(new_zd)
+	}
 
 	zd.workingSet = snapshotMapFromData(new_zd.Data)
 	// A refresh replaces zone data wholesale; carry the synthesized-signal
@@ -980,7 +1004,17 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	default:
 		zd.wsNeedsFullSign, zd.wsSignOwners = true, nil
 	}
+	before := zd.snapshot.Load()
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
+
+	// Compact the journal the overlay read, under the lock it was read under.
+	// Only when the publish took the content: it installed it, or an open
+	// transaction holds it staged (a zone created held, at its first load).
+	// After a refused publish the zone serves what it served before, and the
+	// journal is left as it was for the next full replacement.
+	if overlay != nil && (zd.snapshot.Load() != before || (zd.workingSet != nil && zd.txHeldLocked())) {
+		zd.compactOverlayJournalLocked(overlay)
+	}
 
 	// Only advertise the zone as Ready once a snapshot actually exists. If the
 	// publish was dropped (zone no longer live / generation guard), leaving
