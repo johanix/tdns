@@ -9,7 +9,8 @@ change.
 **Status:** merged as #734, after an external review (adopt; the predicate
 for multi-provider zones and the reason this is independent of KLO are now
 pinned, and Q-c is decided). Stage 1 is in review (#740); stages 2 and 3 are
-not started (§10). Amended 2026-09-23, at the end.
+implemented on a branch stacked on it (§10), not yet run live (L1, L2).
+Amended 2026-09-23, at the end.
 
 ## Summary
 
@@ -417,8 +418,8 @@ KLO is paused at the moment. Nothing here needs it restarted.
 | # | Change | Size (non-test) | Status |
 |---|---|---|---|
 | 1 | The NS-and-glue comparison as its own function; `DelegationDataChangedNG` calls it. No change in behaviour. | ~40 | in review, #740 |
-| 2 | Child mode and its predicate, `REFRESH-SYNC-DELEGATION` with the NS-and-glue analysis, shared retry helpers. | ~110 | not started |
-| 3 | The startup compare-with-parent from `SetupZoneSync`. | ~20 | not started |
+| 2 | Child mode and its predicate, `REFRESH-SYNC-DELEGATION` with the NS-and-glue analysis, shared retry helpers. | ~110 | implemented, stacked on #740 |
+| 3 | The startup compare-with-parent from `SetupZoneSync`. | ~20 | implemented, stacked on #740 |
 
 Stage 1 is a refactor with no change in behaviour, and the existing tests pin
 it. Stages 2 and 3 can go in one PR. #557 is independent, but needed before
@@ -464,3 +465,28 @@ the NOTIFY scheme's NS sync means anything.
   not 350: no fake parent exists for `AnalyseZoneDelegation` (T1, T3, T4, T8),
   and the syncher arm needs a seam, because `SyncZoneDelegation` discovers
   DSYNC through the IMR.
+
+## Amendment, 2026-09-23: stages 2 and 3 as built (#731)
+
+- **Where.** `v2/delsync_refresh.go`: `childDelegationSyncPredicate`, the
+  two-mode `registerDelegationChangeHooks` (moved from `delsync_proxy.go`), the
+  child-mode hooks and the `REFRESH-SYNC-DELEGATION` arm. The analysis is
+  `analyseNSAndGlue`, split out of `AnalyseZoneDelegation` (4.3). The retry
+  helpers are `delegationSyncRetryDelays`, `nextDelegationSyncRetry`,
+  `delegationSyncRetrySuperseded` and `zd.delegationLastSyncOK` (4.4).
+- **The trigger reads the delta lists, not `InSync`.** A nameserver that stays
+  but loses every record has its glue listed while `InSync` stays true (stage
+  1's pinned case), so a trigger read from `InSync` would miss it.
+- **No DS query.** The arm never asks the parent for DS, which is what makes
+  "skipped, not stripped" (4.3) testable.
+- **In sync counts as a success.** A parent found in sync drops an older retry,
+  as a sent difference does: either way the parent holds what the zone says.
+- **Log wording.** The child-mode hooks log `parentsync: NS or glue changed in
+  a refresh ...`; the arm logs `DelegationSyncher: refresh sync ...`. Neither
+  matches `request for delegation sync` or `SyncZoneDelegation completed`. The
+  per-scheme lines inside `SyncZoneDelegation` are shared with the UPDATE and
+  API path, as before.
+- **Tests.** §9's T1-T8 in `v2/delsync_refresh_test.go`, plus the IMR wait.
+  The analysis runs against a fake parent on a local UDP port; presetting the
+  parent, its NS names and its addresses skips the IMR. L1 and L2 have not
+  been run.
