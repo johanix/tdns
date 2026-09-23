@@ -355,39 +355,29 @@ func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, 
 	return nil
 }
 
-// XXX: This is similar to ChildDelegationDataUnsynched, but instead of querying the
-//      child and parent primaries we compare the delegation data in the *ZoneData
-//      structs.
-
-// DelegationDataChanged() compares the delegation data in the old vs new *ZoneData structs.
-// Returns unsynched bool, adds, removes []dns.RR, error
-
-func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSyncStatus, error) {
-	lgDns.Debug("entering DelegationDataChangedNG", "zone", newzd.ZoneName)
-	var dss = DelegationSyncStatus{
-		Time:     time.Now(),
-		ZoneName: zd.ZoneName,
-		InSync:   true,
-	}
-
-	oldapex, err := zd.GetOwner(zd.ZoneName)
+// delegationApexes returns the served zone's apex and the incoming zone's, for
+// a comparison of their delegation data. Both are nil, with no error, when
+// there is nothing to compare: on a first load, when there is no served zone
+// yet, and when the incoming zone has no apex.
+func (zd *ZoneData) delegationApexes(newzd *ZoneData) (oldapex, newapex *OwnerData, err error) {
+	oldapex, err = zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		if errors.Is(err, ErrZoneNotReady) {
 			lgDns.Debug("DDCNG: old zone not ready (initial load), no delegation change", "zone", zd.ZoneName)
-			return false, dss, nil
+			return nil, nil, nil
 		}
-		return false, dss, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
+		return nil, nil, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 	if oldapex == nil {
 		lgDns.Debug("DDCNG: old apexdata was nil, this is the initial zone load", "zone", zd.ZoneName)
-		return false, dss, nil
+		return nil, nil, nil
 	}
 
 	// ownerForAnalysis, not GetOwner: newzd is the not-yet-published incoming
 	// zone, and GetOwner would read its (absent) snapshot and return nil.
-	newapex, err := newzd.ownerForAnalysis(zd.ZoneName)
+	newapex, err = newzd.ownerForAnalysis(zd.ZoneName)
 	if err != nil {
-		return false, dss, fmt.Errorf("error from newzd.ownerForAnalysis(%s): %v", zd.ZoneName, err)
+		return nil, nil, fmt.Errorf("error from newzd.ownerForAnalysis(%s): %v", zd.ZoneName, err)
 	}
 	if newapex == nil {
 		// An incoming zone with no apex is a broken or empty transfer. It is
@@ -395,9 +385,16 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 		// drive a withdrawal of the delegation at the parent.
 		lgDns.Warn("DDCNG: no apex in the incoming zone; treating as no delegation change",
 			"zone", zd.ZoneName)
-		return false, dss, nil
+		return nil, nil, nil
 	}
 
+	return oldapex, newapex, nil
+}
+
+// diffNSAndGlue records in dss how the NS RRset and the in-bailiwick glue differ
+// between the served zone and newzd, and clears dss.InSync when they do. It
+// looks at nothing else: no DNSKEY, no CDS, no DS.
+func (zd *ZoneData) diffNSAndGlue(newzd *ZoneData, oldapex, newapex *OwnerData, dss *DelegationSyncStatus) {
 	lgDns.Debug("DDCNG: comparing NS RRtypes", "zone", zd.ZoneName)
 	// dump.P(oldapex.RRtypes[dns.TypeNS])
 	// dump.P(newapex.RRtypes[dns.TypeNS])
@@ -407,7 +404,9 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 	nsdiff, dss.NsAdds, dss.NsRemoves = core.RRsetDiffer(zd.ZoneName, newapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs,
 		oldapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs, dns.TypeNS, zd.Logger, Globals.Verbose, Globals.Debug)
 
-	dss.InSync = !nsdiff
+	if nsdiff {
+		dss.InSync = false
+	}
 
 	for _, ns := range dss.NsRemoves {
 		lgDns.Debug("DDCNG: removed NS", "ns", ns.String())
@@ -493,6 +492,31 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 			dss.InSync = false
 		}
 	}
+}
+
+// XXX: This is similar to ChildDelegationDataUnsynched, but instead of querying the
+//      child and parent primaries we compare the delegation data in the *ZoneData
+//      structs.
+
+// DelegationDataChanged() compares the delegation data in the old vs new *ZoneData structs.
+// Returns unsynched bool, adds, removes []dns.RR, error
+//
+// The NS and glue part is diffNSAndGlue. The DS part, derived from the SEP
+// DNSKEYs on each side, stays here: tdns-mp's pre-refresh hook reads it.
+func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSyncStatus, error) {
+	lgDns.Debug("entering DelegationDataChangedNG", "zone", newzd.ZoneName)
+	var dss = DelegationSyncStatus{
+		Time:     time.Now(),
+		ZoneName: zd.ZoneName,
+		InSync:   true,
+	}
+
+	oldapex, newapex, err := zd.delegationApexes(newzd)
+	if err != nil || oldapex == nil || newapex == nil {
+		return false, dss, err
+	}
+
+	zd.diffNSAndGlue(newzd, oldapex, newapex, &dss)
 
 	// Compare KSK DNSKEYs and compute DS diff
 	oldkeys := oldapex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs
