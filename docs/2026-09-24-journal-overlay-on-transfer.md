@@ -2,10 +2,11 @@
 
 **Written 2026-09-24.** For #732. Line references are to main at `ff4c4b1a`.
 
-**Status:** proposal, reviewed externally (2026-09-24: sound). Nothing
-implemented. The review is applied: the overlay is limited to the server's
-own records (Q1, decided), the journal read, publish and compaction are pinned
-to one lock (4.3, 4.4), and Q2 and Q3 are answered (§10).
+**Status:** merged as #746, after an external review (sound) and a re-review
+(merge). Nothing implemented. The review is applied: the overlay is limited to
+the server's own records (Q1, decided), the journal read, publish and
+compaction are pinned to one lock (4.3, 4.4), and Q2 and Q3 are answered
+(§10).
 
 ## Summary
 
