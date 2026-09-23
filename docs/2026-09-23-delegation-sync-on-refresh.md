@@ -426,11 +426,15 @@ the NOTIFY scheme's NS sync means anything.
 ## 11. Open questions
 
 - **Q-a.** Skip the proxy's comparison on a first load, so a restart stops
-  re-sending (§6). It changes tdns-agent: filed as #735.
+  re-sending (§6). It changes tdns-agent: filed as #735. It has to follow
+  #737's B2: until the startup reconcile has a DS dimension, the re-send is
+  what resyncs DS at restart.
 - **Q-b.** Move the ZoneUpdater's `SYNC-DELEGATION` (UPDATE and API changes) to
   the compare-with-parent command, for its retries? Parent-first NS removal
   and `ParentSyncDone` have to keep working, so it is not a one-line change.
 - **Q-c.** Decided: leave DS out of the refresh-triggered sync (4.3, §8).
 - **Q-d.** The proxy follows the primary's DNSKEYs rather than its CDS for DS
-  (§6). The review calls it a real proxy defect, not this design's; it needs
-  an issue of its own.
+  (§6). Filed as #737, with the rule already agreed in
+  `docs/2026-08-23-proxy-delegation-sync-scope.md` (B1, B2): deliver CDS or
+  CDNSKEY when present, no DS opinion when a signed child has none, and
+  remove the parent's DS for a child with no DNSKEY RRset.
