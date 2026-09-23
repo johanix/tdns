@@ -67,7 +67,7 @@ package tdns
 //     transfer, and hands the differences to the push engine
 //     (childsync_proxy.go). Self-gates on OptChildSyncProxy.
 func (zdp *ZoneData) registerStandardRefreshHooks(delsyncq chan DelegationSyncRequest) {
-	zdp.registerProxyDelegationHooks(delsyncq)
+	zdp.registerDelegationChangeHooks(delsyncq)
 	zdp.registerSignalReconcileHook()
 	zdp.registerChildSyncProxyHook()
 }

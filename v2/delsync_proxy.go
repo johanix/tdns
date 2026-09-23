@@ -49,7 +49,7 @@ func (a *ProxyDelegationAnalysis) anyChange() bool {
 func (a *ProxyDelegationAnalysis) wantCDSNotify() bool   { return a.CdsChanged || a.DnskeyChanged }
 func (a *ProxyDelegationAnalysis) wantCSYNCNotify() bool { return a.CsyncChanged || a.NsOrGlueChanged }
 
-// registerProxyDelegationHooks appends the parentsync-proxy pre/post-refresh
+// registerDelegationChangeHooks appends the parentsync-proxy pre/post-refresh
 // callbacks to zdp.
 //
 // Not called directly: registerStandardRefreshHooks (v2/zone_hooks.go) is the
@@ -69,7 +69,7 @@ func (a *ProxyDelegationAnalysis) wantCSYNCNotify() bool { return a.CsyncChanged
 // on reload take effect without a restart -- a config reload replaces zd.Options
 // wholesale under zd.mu, and the closures run with no lock held, so the read is
 // race-free and cannot deadlock.
-func (zdp *ZoneData) registerProxyDelegationHooks(delsyncq chan DelegationSyncRequest) {
+func (zdp *ZoneData) registerDelegationChangeHooks(delsyncq chan DelegationSyncRequest) {
 	zdp.OnZonePreRefresh = append(zdp.OnZonePreRefresh,
 		func(zd, new_zd *ZoneData) {
 			if !zd.proxyDelegationEnabled() {

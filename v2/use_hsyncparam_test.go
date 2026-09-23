@@ -141,7 +141,7 @@ func TestRefreshHooksRegisterAtFirstLoad(t *testing.T) {
 	zdp := &ZoneData{ZoneName: "z.example."}
 
 	zdp.registerSignalReconcileHook()
-	zdp.registerProxyDelegationHooks(make(chan DelegationSyncRequest, 1))
+	zdp.registerDelegationChangeHooks(make(chan DelegationSyncRequest, 1))
 
 	// One signal post-refresh hook + one proxy pre/post pair.
 	if pre := len(zdp.OnZonePreRefresh); pre != 1 {
@@ -172,7 +172,7 @@ func TestProxyRefreshClosureGatesOnOption(t *testing.T) {
 	// Register the hooks as ParseZones would, then invoke the pre-refresh
 	// closure directly.
 	zdp := &ZoneData{ZoneName: "reg.example."}
-	zdp.registerProxyDelegationHooks(make(chan DelegationSyncRequest, 1))
+	zdp.registerDelegationChangeHooks(make(chan DelegationSyncRequest, 1))
 	if len(zdp.OnZonePreRefresh) != 1 {
 		t.Fatalf("expected 1 pre-refresh closure, got %d", len(zdp.OnZonePreRefresh))
 	}
