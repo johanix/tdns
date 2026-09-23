@@ -38,9 +38,10 @@ import (
 // engine.
 //
 // NOTE on ordering: a changed refresh is signed BEFORE it is published (#514).
-// The transferred zone is staged, signed and installed as one version, and the
-// downstreams are NOTIFYed once, after that. So no downstream can transfer a
-// half-signed zone. That is a property of every inline-signing secondary, not
+// The transferred zone is staged, signed and installed as one version, and at
+// most one NOTIFY per version goes to the downstreams after that (best effort:
+// a full queue drops it, and the SOA refresh timer covers the gap). So no
+// downstream can transfer a half-signed zone. That is a property of every inline-signing secondary, not
 // of this binary. Builds before #514 published first and signed in a second
 // publish (tdns#512).
 //

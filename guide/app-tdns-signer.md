@@ -132,7 +132,9 @@ Complete examples: `cmdv2/signer/tdns-signer.sample.yaml` and
 A changed refresh is signed before anything serves it. The signer stages the
 transferred zone and signs it: the whole zone after an AXFR, only the names
 the delta touched after an IXFR. It then installs the signed result as one new
-version, and sends its downstreams one NOTIFY for it. Until that moment the
+version and sends its downstreams at most one NOTIFY for it. NOTIFY is best
+effort: if the notifier's queue is full, it is dropped, and the downstream picks
+the change up on its SOA refresh timer. Until that moment the
 previous signed version is what queries and transfers get. If signing fails,
 the new version is not published, and the previous one stays.
 
