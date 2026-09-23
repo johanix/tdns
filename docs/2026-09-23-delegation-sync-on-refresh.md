@@ -6,7 +6,9 @@ secondaries. Any `parentsync` zone whose content changes by a refresh, whether
 a transfer or a zone-file reload, never tells its parent about an NS or glue
 change.
 
-**Status:** proposal. Nothing is implemented.
+**Status:** proposal, revised the same day after an external review (adopt;
+the predicate for multi-provider zones and the reason this is independent of
+KLO are now pinned, and Q-c is decided). Nothing is implemented.
 
 ## Summary
 
@@ -24,8 +26,9 @@ change.
   with a test: one `DS … NONE` in the UPDATE for the zone's only KSK.
 - **Proposal:** the same hooks, with a second mode for children.
   - It compares NS and glue only.
-  - It acts by comparing the zone with the parent (`AnalyseZoneDelegation`),
-    not by sending the difference between two versions.
+  - It acts by comparing the zone's NS and glue with the parent
+    (`AnalyseZoneDelegation` without its DS step), not by sending the
+    difference between two versions.
   - It leaves DS out of what it sends.
   - It retries a failure the way the proxy does.
   - It runs once at startup as well, which the child side has never done.
@@ -130,6 +133,20 @@ closures pick a mode at each refresh:
 The two options are already mutually exclusive (`v2/parseoptions.go:408`).
 Multi-provider zones are left to tdns-mp's own hooks.
 
+**The child-mode predicate, stated once:** `parentsync` and not
+`multi-provider` and not `parentsync-proxy`, on the authoritative app types
+(`AppTypeAuth` today; the #558 predicate, which adds tdns-signer, later). Every
+place that queues or runs `REFRESH-SYNC-DELEGATION` uses this one function:
+the post-refresh closure, the startup queue (4.5) and the syncher arm (4.3).
+
+It is **not** the condition of `SetupZoneSync`'s `parentsync` branch
+(`v2/zone_utils.go:1966-1968`). That branch also admits a registered
+multi-provider agent app with a `multi-provider` zone (pinned by
+`TestZoneSyncSetupRunsForARegisteredMultiProviderAgentApp`), for KLO S5's
+setup on the tdns-mp agent. Anything queued inside that branch would reach
+every multi-provider agent, not only the elected leader, and send around
+tdns-mp's leader gate (KLO Q2).
+
 Child mode compares no DNSKEY, CDS or DS, for any zone. For a zone that signs
 its own content, those are ours (§2). For a zone that does not sign, tdns
 holds no keys, so its DS intent is unknown, and the parent's DS is not ours to
@@ -151,11 +168,16 @@ changed". The action does not use the comparison's contents (4.3).
 
 After the swap, child mode queues `REFRESH-SYNC-DELEGATION`. The syncher's arm:
 
-1. **Waits for the IMR**, as the `PROXY-SYNC` arm does (`delegation_sync.go:176-185`).
-2. **Compares the served zone with the parent** (`AnalyseZoneDelegation`).
-3. **Removes DS from the result:** `DSAdds`, `DSRemoves` and `NewDS` are
-   cleared, `NewDSKnown` is set false, and `InSync` is recomputed from NS and
-   glue.
+1. **Refuses a zone that fails the child-mode predicate** (4.1), a
+   `multi-provider` or owned zone above all, so a stray request cannot send.
+2. **Waits for the IMR**, as the `PROXY-SYNC` arm does (`delegation_sync.go:176-185`).
+3. **Compares the served zone's NS and glue with the parent.** This is
+   `AnalyseZoneDelegation` without its DS step (`compareParentDS`,
+   `v2/delegation_utils.go:236`). A parameter or a split function; the NS and
+   glue steps are shared. The DS fields are then empty and `NewDSKnown` is
+   false by construction: `declareDelegationFromChild` deliberately takes no DS
+   (`v2/delegation_utils.go:47-59`), and only `compareParentDS` sets them. This
+   also saves the parent DS query and the DS-intent lookup.
 4. **Stops if in sync.** Otherwise it calls `SyncZoneDelegation`.
 5. **Retries a failure** (4.4).
 
@@ -173,11 +195,13 @@ After the swap, child mode queues `REFRESH-SYNC-DELEGATION`. The syncher's arm:
   cheap and needs no network. The parent is queried only after an NS or glue
   change, not after every content change.
 
-**Why leave DS out.** The trigger is NS and glue, so the action is too. DS
-belongs to the DS engine and the rollover engine. DS engine design step 2 (KLO
-§6, S6) moves the rollover engine's pushes into the syncher, and that is the
-place to decide how DS and NS syncs combine. Every scheme supports "DS
-unknown":
+**Why leave DS out (decided, Q-c).** The trigger is NS and glue, so the action
+is too. DS belongs to the DS engine and the rollover engine. Sending it here
+would make this path a second DS sender beside the rollover engine, with its
+own view of the DS set. During a multi-DS roll, that view could undo a DS the
+rollover had just placed. DS engine design step 2 (KLO §6, S6) moves the
+rollover engine's pushes into the syncher, and that is the place to decide how
+DS and NS syncs combine. Every scheme supports "DS unknown":
 
 - **delta UPDATE** carries no DS records;
 - **replace UPDATE** with `NewDSKnown` false leaves the parent's DS untouched
@@ -200,7 +224,10 @@ general names. Both arms use them. Same delays, same superseding rule.
 
 In child mode, the first load compares nothing, because there is no served
 zone yet (`DelegationDataChangedNG` returns false). So `SetupZoneSync` queues
-one `REFRESH-SYNC-DELEGATION` after `DELEGATION-SYNC-SETUP`, for every scheme.
+one `REFRESH-SYNC-DELEGATION` after `DELEGATION-SYNC-SETUP`, for every scheme,
+**gated on the child-mode predicate (4.1) and not placed inside the
+`parentsync` branch's condition**. A multi-provider agent still gets its SETUP
+and gets no `REFRESH-SYNC-DELEGATION`.
 Because it compares with the parent, it sends nothing when the parent is
 already in sync, and it catches changes made while the server was down:
 file edits, and syncs that ran out of retries. It is the child's version of
@@ -247,7 +274,7 @@ Two things are not as the code describes them:
   "the next change or a restart will try again" (`v2/delegation_sync.go:853`)
   true. The fix is to skip the proxy's comparison on a first load, since the
   startup reconcile already covers it. That is a change to tdns-agent, so it
-  is left out of this proposal (Q-a).
+  is left out of this proposal (Q-a, #735).
 - **Out of scope, noted.** The proxy's UPDATE and API derive the DS set from the
   served SEP DNSKEYs (`currentDelegationRRs`, `v2/delsync_proxy_update.go:403`),
   not from the primary's CDS. A primary whose CDS says something else (a
@@ -288,7 +315,7 @@ policy.
 
   The DS engine design names the gap: its step 3, periodic reconciliation of
   each zone's DS target with the parent (`docs/2026-09-13-ds-engine-design.md`),
-  is not implemented.
+  is not implemented. Filed as #736.
 
 ### 7.1 Unsigned primary
 
@@ -342,18 +369,21 @@ through the same compare-with-parent command, to get retries, is Q-b.
 
 ## 8. Question 3: fix this before key lifecycle ownership is complete?
 
-Yes. The NS and glue sync proposed here is independent of KLO:
+Yes. The NS and glue sync proposed here is independent of KLO, and **the
+independence comes from this command never sending DS**. It does not come
+from KLO being about multi-provider zones: S1a, S1b, S2 and S6 are tdns
+changes, and S6 (DS engine design step 2) moves the rollover engine's parent
+pushes into this same syncher. That is why Q-c is decided as "leave DS out".
 
-- **KLO is about multi-provider zones.** It moves their key state machine to
-  tdns-mp (KLO §2, D1). Child mode excludes `multi-provider` zones, and
-  tdns-mp keeps its own pre-refresh hook.
-- **For tdns's own zones, it leaves DS alone.** The DS engine and the rollover
-  engine keep that job. The one planned change there, the rollover engine's
-  pushes moving into the syncher (KLO §6, S6, not started), is where DS and NS
-  syncs get combined. The shared retry helpers (4.4) are something S6 can use.
-- **It does not touch the keystore interface or DS intent.** `AnalyseZoneDelegation`'s
-  DS comparison, which KLO S2 made owner-aware, runs but its result is
-  discarded.
+- **It never sends DS, for any zone.** The DS engine and the rollover engine
+  keep that job, and S6 is where DS and NS syncs get combined. The shared retry
+  helpers (4.4) are something S6 can use.
+- **It never queues or sends for a `multi-provider` zone** (the predicate in
+  4.1, at every place the command is queued or run). tdns-mp keeps its own
+  pre-refresh hook, and its leader gate (KLO Q2) sees no second sender.
+- **It does not touch the keystore interface or DS intent.** The analysis it
+  runs skips the DS step (4.3), so `DSIntentForZone`, which KLO S2 made
+  owner-aware, is not even called.
 - **`DelegationDataChangedNG` keeps its behaviour** (4.2), so tdns-mp's call
   site sees no change.
 
@@ -370,14 +400,14 @@ KLO is paused at the moment. Nothing here needs it restarted.
 
 | # | Test |
 |---|---|
-| T1 | Child mode, signer after AXFR: the served zone has DNSKEY and CDS, the incoming zone has neither, same NS and glue. No trigger. (The case §2 measured, with the opposite outcome.) |
+| T1 | Child mode, signer after AXFR: the served zone has DNSKEY and CDS, the incoming zone has neither, same NS and glue. No trigger. And the arm, run on that zone anyway against a fake parent holding its DS, sends nothing that touches DS. (The case §2 measured, with the opposite outcome.) |
 | T2 | Child mode: an added NS with glue, a removed NS, and a changed glue address each trigger; a serial-only change does not. Run on the AXFR shape and the IXFR shape. |
-| T3 | The DS strip: from an `AnalyseZoneDelegation` result carrying NS and DS differences, the delta UPDATE carries no DS record, the replace UPDATE leaves DS alone, and the API payload declares no DS. |
-| T4 | In sync after the strip, with a DS difference only: nothing is sent. |
+| T3 | No DS in what is sent: with the parent holding a different DS and a different NS set, the analysis reports only the NS difference; the delta UPDATE carries no DS record, the replace UPDATE has `NewDSKnown` false and leaves DS alone, and the API payload declares no DS. |
+| T4 | NS and glue in sync, DS different: nothing is sent. |
 | T5 | Retry: a failure is re-queued on the proxy's schedule; a retry is dropped after a later success. Both arms. |
-| T6 | Gates: a `parentsync-proxy` zone still runs proxy mode with all four comparisons (the existing `delsync_proxy_*_test.go` stay green unchanged); `multi-provider` and no-`parentsync` zones run neither mode. |
+| T6 | Gates: a `parentsync-proxy` zone still runs proxy mode with all four comparisons (the existing `delsync_proxy_*_test.go` stay green unchanged); `multi-provider` and no-`parentsync` zones run neither mode. The syncher arm refuses a `multi-provider` zone handed to it directly. |
 | T7 | `FetchFromFile` on a primary with `parentsync` and an edited file triggers. |
-| T8 | Startup: first load queues one `REFRESH-SYNC-DELEGATION` after `DELEGATION-SYNC-SETUP`; a parent already in sync gets nothing. |
+| T8 | Startup: first load queues one `REFRESH-SYNC-DELEGATION` after `DELEGATION-SYNC-SETUP`; a parent already in sync gets nothing. A registered multi-provider agent app with a `parentsync` + `multi-provider` zone queues SETUP and no `REFRESH-SYNC-DELEGATION`. |
 | L1 | Live: tdns-signer behind an unsigned primary. The primary adds an NS; the parent follows. The signer's KSK stays at the parent across an AXFR. |
 | L2 | Live: a tdns-auth primary with an edited zone file and `zone reload`; the parent follows. Restart with an offline edit; the parent follows once, and not again on the next restart. |
 
@@ -386,7 +416,7 @@ KLO is paused at the moment. Nothing here needs it restarted.
 | # | Change | Size (non-test) |
 |---|---|---|
 | 1 | The NS-and-glue comparison as its own function; `DelegationDataChangedNG` calls it. No change in behaviour. | ~40 |
-| 2 | Child mode, `REFRESH-SYNC-DELEGATION` with the DS strip, shared retry helpers. | ~110 |
+| 2 | Child mode and its predicate, `REFRESH-SYNC-DELEGATION` with the NS-and-glue analysis, shared retry helpers. | ~110 |
 | 3 | The startup compare-with-parent from `SetupZoneSync`. | ~20 |
 
 Stage 1 is a refactor with no change in behaviour, and the existing tests pin
@@ -396,12 +426,11 @@ the NOTIFY scheme's NS sync means anything.
 ## 11. Open questions
 
 - **Q-a.** Skip the proxy's comparison on a first load, so a restart stops
-  re-sending (§6). It changes tdns-agent, so it needs an issue of its own.
+  re-sending (§6). It changes tdns-agent: filed as #735.
 - **Q-b.** Move the ZoneUpdater's `SYNC-DELEGATION` (UPDATE and API changes) to
   the compare-with-parent command, for its retries? Parent-first NS removal
   and `ParentSyncDone` have to keep working, so it is not a one-line change.
-- **Q-c.** Leave DS out of the refresh-triggered sync (recommended), or send it
-  as `delegation sync` does? Sending it would make this path a second DS
-  pusher beside the rollover engine, until S6.
+- **Q-c.** Decided: leave DS out of the refresh-triggered sync (4.3, §8).
 - **Q-d.** The proxy follows the primary's DNSKEYs rather than its CDS for DS
-  (§6). File it?
+  (§6). The review calls it a real proxy defect, not this design's; it needs
+  an issue of its own.
