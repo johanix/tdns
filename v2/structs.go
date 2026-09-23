@@ -211,10 +211,15 @@ type ZoneData struct {
 	// at the apex. Cleared when the KEY leaves the apex so a later
 	// WAITING→READY transition runs the ceremony again.
 	proxySig0ParentBootstrapped bool
-	// delegationLastSyncOK is when a parentsync-proxy sync last succeeded. A retry
-	// of a sync that failed before it is dropped (delegationSyncRetrySuperseded).
-	// Guarded by mu.
+	// delegationLastSyncOK is when a delegation sync of this zone last
+	// succeeded: a parentsync-proxy sync, or a parentsync child's refresh sync
+	// (a zone is one or the other). A retry of a sync that failed before it is
+	// dropped (delegationSyncRetrySuperseded). Guarded by mu.
 	delegationLastSyncOK time.Time
+	// childRefreshNSGlueChanged is what the child-mode pre-refresh hook saw:
+	// the incoming zone's NS or glue differs from the served zone's. Consumed
+	// and cleared by the post-refresh hook (delsync_refresh.go). Guarded by mu.
+	childRefreshNSGlueChanged bool
 	// parentFirstMu serialises the updates to a zone that syncs its own
 	// delegation (lockDelegationChanges, delegation_parent_first.go). Between
 	// computing a removal's transaction for the parent and applying it here,
@@ -1191,10 +1196,11 @@ type DelegationSyncRequest struct {
 	// Attempt counts re-enqueues of a DELEGATION-SYNC-SETUP whose SIG(0)
 	// bootstrap was deferred because the parent's SVCB advertisement could not
 	// be looked up (errBootstrapAdvertisementLookup), and re-runs of a
-	// PROXY-SYNC that failed (nextDelegationSyncRetry). Zero on the first try.
+	// PROXY-SYNC or REFRESH-SYNC-DELEGATION that failed
+	// (nextDelegationSyncRetry). Zero on the first try.
 	Attempt int
-	// FailedAt is when the PROXY-SYNC this request retries failed. Zero on the
-	// first try.
+	// FailedAt is when the PROXY-SYNC or REFRESH-SYNC-DELEGATION this request
+	// retries failed. Zero on the first try.
 	FailedAt time.Time
 	// ReBootstrapRound counts re-enqueues of a DELEGATION-SYNC-SETUP after the
 	// parent reported the key's validation failed (errBootstrapValidationFailed),

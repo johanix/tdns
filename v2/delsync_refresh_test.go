@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,12 +23,6 @@ import (
 // Delegation sync on refresh, stages 2 and 3
 // (docs/2026-09-23-delegation-sync-on-refresh.md): the tests of §9, T1-T8.
 // The zones are the deleg.example. fixtures of delegation_changed_ng_test.go.
-
-// stage2Pending skips a test until stage 2 is implemented.
-func stage2Pending(t *testing.T) {
-	t.Helper()
-	t.Skip("delegation sync on refresh, stage 2: not implemented yet")
-}
 
 const refreshSyncCmd = "REFRESH-SYNC-DELEGATION"
 
@@ -103,10 +98,23 @@ func runRefresh(t *testing.T, served, incoming *ZoneData) []DelegationSyncReques
 	return drainRequests(q)
 }
 
+// parentQueries is what a fakeParent was asked, by query type.
+type parentQueries struct {
+	mu    sync.Mutex
+	types []uint16
+}
+
+func (p *parentQueries) asked(rrtype uint16) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Contains(p.types, rrtype)
+}
+
 // fakeParent answers what the NS-and-glue analysis asks the parent: the
 // zone's NS RRset, the glue of its in-bailiwick nameservers, and its DS, over
 // UDP as AuthQuery asks. zd is pointed at it, so FetchParentData needs no IMR.
-func fakeParent(t *testing.T, zd *ZoneData, rrs []string) {
+// It records the types it was asked for.
+func fakeParent(t *testing.T, zd *ZoneData, rrs []string) *parentQueries {
 	t.Helper()
 	key := func(name string, rrtype uint16) string {
 		return strings.ToLower(dns.Fqdn(name)) + "/" + dns.TypeToString[rrtype]
@@ -121,11 +129,15 @@ func fakeParent(t *testing.T, zd *ZoneData, rrs []string) {
 	if err != nil {
 		t.Fatalf("listen udp: %v", err)
 	}
+	queries := &parentQueries{}
 	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
 		m.SetReply(r)
 		m.Authoritative = true
 		if len(r.Question) == 1 {
+			queries.mu.Lock()
+			queries.types = append(queries.types, r.Question[0].Qtype)
+			queries.mu.Unlock()
 			m.Answer = data[key(r.Question[0].Name, r.Question[0].Qtype)]
 		}
 		_ = w.WriteMsg(m)
@@ -143,6 +155,7 @@ func fakeParent(t *testing.T, zd *ZoneData, rrs []string) {
 	zd.SetParent("example.")
 	zd.ParentNS = []string{"ns.parent.example."}
 	zd.ParentServers = []string{pc.LocalAddr().String()}
+	return queries
 }
 
 // armRecord is what the REFRESH-SYNC-DELEGATION arm did.
@@ -184,12 +197,10 @@ func runArm(t *testing.T, zd *ZoneData, ds DelegationSyncRequest,
 	return rec
 }
 
-// realAnalyse is the arm's own analysis: NS and glue against the parent.
+// realAnalyse is the arm's own analysis, as the syncher wires it. With no
+// IMR it reaches only the parent fakeParent set up.
 func realAnalyse(zd *ZoneData) func() (DelegationSyncStatus, error) {
-	return func() (DelegationSyncStatus, error) {
-		resp, _, _, err := zd.analyseNSAndGlue(nil)
-		return resp, err
-	}
+	return refreshSyncStepsFor(context.Background(), &Config{}, nil, nil, nil, zd).analyse
 }
 
 func refreshRequest(zd *ZoneData) DelegationSyncRequest {
@@ -201,7 +212,6 @@ func refreshRequest(zd *ZoneData) DelegationSyncRequest {
 // NS and glue are the same. The whole comparison reads that as the DS removed
 // (§2); child mode must queue nothing.
 func TestRefreshSyncKeysOnlyTransferIsNoTrigger(t *testing.T) {
-	stage2Pending(t)
 	withApp(t, AppTypeAuth)
 	served := childZone(t, ddcngSignedServedZone(t), OptParentSync)
 	incoming := ddcngIncoming(t, ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A))
@@ -219,7 +229,6 @@ func TestRefreshSyncKeysOnlyTransferIsNoTrigger(t *testing.T) {
 // not this command's to send. The startup compare (stage 3) is this same arm,
 // so a parent already in sync gets nothing at startup either.
 func TestRefreshSyncInSyncParentGetsNothingWhateverItsDS(t *testing.T) {
-	stage2Pending(t)
 	withApp(t, AppTypeAuth)
 	for _, tc := range []struct {
 		name string
@@ -249,7 +258,6 @@ func TestRefreshSyncInSyncParentGetsNothingWhateverItsDS(t *testing.T) {
 // incoming zone has none of the zone's own keys, after an IXFR (the published
 // snapshot plus the delta) it still has them.
 func TestRefreshSyncTriggers(t *testing.T) {
-	stage2Pending(t)
 	withApp(t, AppTypeAuth)
 	shapes := []struct {
 		name  string
@@ -266,6 +274,10 @@ func TestRefreshSyncTriggers(t *testing.T) {
 		{"nameserver added with glue", []string{ddcngNS1, ddcngNS2, ddcngNS3, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A, ddcngNS3A}, true},
 		{"nameserver removed", []string{ddcngNS1, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA}, true},
 		{"glue address changed", []string{ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A2, ddcngNS1AAAA, ddcngNS2A}, true},
+		// Its glue is listed for removal while InSync stays true (pinned in
+		// delegation_changed_ng_test.go), so a trigger read from InSync would
+		// miss it.
+		{"nameserver kept, all its records gone", []string{ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS2A}, true},
 		{"serial only", []string{ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A}, false},
 	}
 	for _, shape := range shapes {
@@ -294,16 +306,22 @@ func TestRefreshSyncTriggers(t *testing.T) {
 // arm hands exactly that to the send step, and no scheme's payload built from
 // it touches DS.
 func TestRefreshSyncSendsNoDS(t *testing.T) {
-	stage2Pending(t)
 	withApp(t, AppTypeAuth)
 	const withdrawn = "deleg.example. 3600 IN NS ns.old.example."
 	zd := childZone(t, ddcngSignedServedZone(t), OptParentSync)
-	fakeParent(t, zd, []string{ddcngNS1, ddcngNS2, ddcngNSOut, withdrawn,
+	parent := fakeParent(t, zd, []string{ddcngNS1, ddcngNS2, ddcngNSOut, withdrawn,
 		ddcngNS1A, ddcngNS1AAAA, ddcngNS2A, ddcngDS(t, ddcngKSK2)})
 
 	rec := runArm(t, zd, refreshRequest(zd), realAnalyse(zd), nil)
 	if len(rec.synced) != 1 {
 		t.Fatalf("the arm sent %d times, want 1", len(rec.synced))
+	}
+	// The DS step is skipped, not run and stripped: the parent is never asked.
+	if !parent.asked(dns.TypeNS) {
+		t.Fatal("the parent was never asked for the NS RRset, so the analysis did not run against it")
+	}
+	if parent.asked(dns.TypeDS) {
+		t.Error("the analysis asked the parent for the zone's DS")
 	}
 	dss := rec.synced[0]
 	if got, want := ddcngRRs(dss.NsRemoves), ddcngWant(t, "", withdrawn); !slices.Equal(got, want) {
@@ -351,7 +369,6 @@ func TestRefreshSyncSendsNoDS(t *testing.T) {
 // once a later sync has succeeded. The proxy arm's use of the same helpers is
 // pinned in delsync_proxy_retry_test.go.
 func TestRefreshSyncRetries(t *testing.T) {
-	stage2Pending(t)
 	withApp(t, AppTypeAuth)
 	zd := childZone(t, ddcngServedZone(), OptParentSync)
 	outOfSync := func() (DelegationSyncStatus, error) {
@@ -402,12 +419,32 @@ func TestRefreshSyncRetries(t *testing.T) {
 	}
 }
 
+// The arm waits for the IMR, as the proxy arm does: at startup the request
+// routinely arrives before the IMR is up, and the parent is found through it.
+func TestRefreshSyncWaitsForTheImr(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	zd := childZone(t, ddcngServedZone(), OptParentSync)
+	analysed := false
+	ctx, cancel := context.WithCancel(context.Background())
+	done := handleRefreshSyncDelegationWith(ctx, NewImrReadiness(), make(chan DelegationSyncRequest, 1), zd,
+		refreshRequest(zd), refreshSyncSteps{
+			analyse: func() (DelegationSyncStatus, error) { analysed = true; return DelegationSyncStatus{}, nil },
+		})
+	if done == nil {
+		t.Fatal("with no IMR the arm did not defer the request")
+	}
+	if analysed {
+		t.Error("the arm asked the parent before the IMR was up")
+	}
+	cancel()
+	<-done
+}
+
 // T6. Which mode a zone's refresh runs. parentsync-proxy runs the proxy mode as
 // before (the delsync_proxy_* tests pin what it compares); a parentsync zone on
 // tdns-auth runs child mode; a multi-provider zone, a zone without parentsync,
 // and parentsync on any app other than tdns-auth run neither.
 func TestRefreshSyncModeGates(t *testing.T) {
-	stage2Pending(t)
 	const mpAgent AppType = 251 // an app type tdns does not know, as tdns-mp's agent is to tdns
 	RegisterMultiProviderAgentAppType(mpAgent)
 	nsAdded := ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNS3, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A, ddcngNS3A)
@@ -438,7 +475,6 @@ func TestRefreshSyncModeGates(t *testing.T) {
 // T6. The arm itself refuses a zone outside child mode, a multi-provider zone
 // above all, so a request that reaches it some other way sends nothing.
 func TestRefreshSyncArmRefusesZonesOutsideChildMode(t *testing.T) {
-	stage2Pending(t)
 	withApp(t, AppTypeAuth)
 	for _, tc := range []struct {
 		name string
@@ -465,7 +501,6 @@ func TestRefreshSyncArmRefusesZonesOutsideChildMode(t *testing.T) {
 // first load queues nothing (there is nothing to compare with; the startup
 // compare is SetupZoneSync's, T8), and neither does a serial-only reload.
 func TestRefreshSyncZoneFileEditTriggers(t *testing.T) {
-	stage2Pending(t)
 	withApp(t, AppTypeAuth)
 	kdb := newTestKeyDB(t)
 	path := filepath.Join(t.TempDir(), "deleg.example.zone")
@@ -524,7 +559,6 @@ func TestRefreshSyncZoneFileEditTriggers(t *testing.T) {
 // SETUP and gets no compare: that branch admits it, the child-mode predicate
 // does not.
 func TestRefreshSyncStartupQueue(t *testing.T) {
-	stage2Pending(t)
 	oldConf := delegationSyncConf.Load()
 	t.Cleanup(func() { delegationSyncConf.Store(oldConf) })
 	const mpAgent AppType = 251
