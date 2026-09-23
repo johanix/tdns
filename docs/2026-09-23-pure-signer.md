@@ -30,8 +30,8 @@ management, zone provisioning, operational verbs and read-only inspection.
   points, not a tighter version of that predicate.
 - **Child-side delegation sync, which the signer keeps, does not work fully on
   a signing secondary.** Four existing defects (§5): an NS or glue change that
-  arrives by transfer never triggers a parent sync; the DS engine's CDS is
-  dropped by every inbound AXFR; the CSYNC for the NOTIFY scheme is published
+  arrives by transfer never triggers a parent sync (#731); the DS engine's CDS
+  is dropped by every inbound AXFR (#732); the CSYNC for the NOTIFY scheme is published
   only with `allow-updates` (#557), which a pure signer refuses; and CDNSKEY is
   never generated. They affect tdns-signer as it is today and inline-signing
   secondaries on tdns-auth, independently of this change, and should be fixed
@@ -347,7 +347,7 @@ hook (`delsync_proxy.go:73-136`), which is agent-only. On a signer, whose only
 input is a transfer, NS/glue sync therefore happens only when an operator runs
 `/delegation sync`. The fix: a post-refresh hook for secondaries with
 `parentsync` that runs `DelegationDataChangedNG` (`delegation_utils.go:365`)
-and enqueues `SYNC-DELEGATION`, as the proxy hook does. Not filed.
+and enqueues `SYNC-DELEGATION`, as the proxy hook does. Filed as #731.
 
 **D2 — The DS engine's CDS is dropped by every inbound AXFR.** An AXFR
 rebuilds the working set from the transfer (`zone_mutation.go:930`) and puts
@@ -363,7 +363,7 @@ push, and its own comment records the churn
 IXFR with a full transfer, and any fallback to AXFR. During that window a parent
 that scans for CDS sees none. The fix is to carry the DS engine's
 current CDS through `CollectDynamicRRs` for signing zones, as it already does for
-owned zones. Not filed.
+owned zones. Filed as #732.
 
 **D3 — CSYNC is published only with `allow-updates`.**
 `SyncZoneDelegationViaNotify` publishes the CSYNC under `if
@@ -505,7 +505,7 @@ estimated from the sites above, not measured.
 
 | # | Stage | Tier | Size | Depends on |
 |---|---|---|---|---|
-| 0 | D1, D2 (new issues), D3 (#557) | R | D1 ~150, D2 ~40, D3 ~10 | — |
+| 0 | D1 (#731), D2 (#732), D3 (#557) | R | D1 ~150, D2 ~40, D3 ~10 | — |
 | 1 | #558 steps 1–4: `AppTypeSigner`, predicate over the 18 sites, guard test, `StartSigner` as an exact clone of `StartAuth`, CLI role wiring | S + G | ~200 | — |
 | 2 | `StartSigner` drops UpdateHandler, ScannerEngine, DsyncApiListener; UPDATE → NOTIMP; NOTIFY(CDS/CSYNC/DNSKEY) refused | S | ~60 | 1 |
 | 3 | refuse primary zones (static, dynamic, persisted) and the refused options on all four paths; signer config check | G + S | ~150 | 1 |
