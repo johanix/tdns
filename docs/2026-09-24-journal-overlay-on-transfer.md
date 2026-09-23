@@ -2,7 +2,10 @@
 
 **Written 2026-09-24.** For #732. Line references are to main at `ff4c4b1a`.
 
-**Status:** proposal. Nothing implemented.
+**Status:** proposal, reviewed externally (2026-09-24: sound). Nothing
+implemented. The review is applied: the overlay is limited to the server's
+own records (Q1, decided), the journal read, publish and compaction are pinned
+to one lock (4.3, 4.4), and Q2 and Q3 are answered (§10).
 
 ## Summary
 
@@ -20,22 +23,23 @@
     zone with no file (§2).
 - **A second defect, found while checking this.** The journal anchors to the
   upstream's serial, while a signing secondary publishes in its own serial
-  space. When the two disagree, the next local change is refused outright: no
-  CDS, no CSYNC, no SIG(0) KEY. Confirmed for an empty journal behind an
+  space. When the two disagree, the next local change is refused outright, so
+  no CDS or CSYNC can be published. Confirmed for an empty journal behind an
   upstream whose serial is ahead and, with a stand-in for a restart, for a
   journal left ahead of the served serial (§3).
 - **Proposal: the journal as an overlay.** On a signing secondary the journal
   holds exactly what this server added to its upstream's zone, because
   transfers are never journalled. So:
-  - apply its net effect to every full transfer, before the one publish that
-    transfer makes;
+  - apply the net effect of its own records (CDS, CDNSKEY, CSYNC) to every
+    full transfer, before the one publish that transfer makes;
   - keep the journal in the zone's own serial space, and compact it at every
     full transfer;
   - skip the file-oriented replay and merge for such zones (§4).
 
-  It keeps the records across transfers and restarts (#732), and ends the
-  refused publishes.
-- **Size:** about 200 lines of non-test code and 450–550 of tests, in one PR
+  It keeps those records across transfers and restarts (#732), and ends the
+  refused publishes. Local edits to the upstream's data are still lost at a
+  full transfer, as today.
+- **Size:** about 165 lines of non-test code and 450–550 of tests, in one PR
   (§9). It touches neither the keystore nor DS intent, so it is independent of
   key lifecycle ownership (KLO).
 
@@ -129,8 +133,11 @@ A signing secondary's served serial is its own, not the upstream's
   scratch test with a fresh zone on the same keystore as a stand-in for a
   restart: refused, "11 -> 9". A real restart is still to be run.
 
-Either way the DS engine cannot publish a CDS, delegation sync cannot publish a
-CSYNC, and the SIG(0) KEY cannot be published.
+Either way the DS engine cannot publish a CDS, and delegation sync cannot
+publish a CSYNC. A SIG(0) KEY already served is not taken away:
+`CollectDynamicRRs` puts the keystore's KEY back at every refresh, so #742's
+UPDATE scheme keeps its key. A newly created key waits for the next refresh.
+CDS and CSYNC have no second source.
 
 ## 4. Proposal: the journal as the zone's overlay
 
@@ -149,31 +156,36 @@ records of its own:
 Primaries, plain secondaries, multi-provider zones and other apps keep today's
 behaviour.
 
+The overlay needs the journal. With `journal: active: false` nothing is
+journalled, so nothing is overlaid and the CDS is lost at a full transfer as
+today; §3 does not occur either.
+
 ### 4.2 What is overlaid
 
-The journal's **net effect**, not its history:
+**The server's own records only** (Q1, decided 2026-09-24): CDS, CDNSKEY and
+CSYNC at the apex. These are the records this server originates for its
+parent, and nothing else puts them back.
 
+- **An allowlist, not a filter.** Every other type in the journal is left out.
+  That covers:
+  - DNSKEY and KEY, which `CollectDynamicRRs` supplies from the keystore. An
+    overlay of the journal's copy could bring back a key the keystore has
+    since retired;
+  - derived and serial records;
+  - local edits to the upstream's data, through the API or DNS UPDATE. These
+    stay as today: lost at a full transfer, kept across an applied IXFR. Making
+    them survive every transfer would be a new feature, not #732.
+- **CDNSKEY is not generated today** (#730 D4). It is on the list so that a
+  later DS-engine change that journals one is covered without another change
+  here.
 - **Net effect.** One instruction per record: the last one wins, compared as
   `rrKey` does (`v2/zone_merge.go`: owner, type, canonical RDATA, TTL ignored).
   Three CDS publishes overlay as one CDS, not as three adds and two deletes.
-- **Filtered.** Types that have a source of their own are left out, whatever
-  the journal says about them:
-  - the types `CollectDynamicRRs` supplies from the keystore or the served
-    zone (DNSKEY, KEY, transport signals);
-  - derived and serial records (SOA, RRSIG, NSEC, NSEC3, NSEC3PARAM, a managed
-    ZONEMD). Most never reach the journal.
-
-  Without this filter the overlay could bring back a DNSKEY or SIG(0) KEY the
-  keystore has since retired.
-- **Conflicts, as a primary's merge decides them.** A conflict is a record the
-  upstream has and the journal deletes (`findMergeConflicts`,
-  `v2/zone_merge.go:123`). The zone's existing option decides it
-  (`applicableInstructions`, `v2/zone_merge.go:551`):
-  - `on-conflict-db-wins` (the default): the local delete stands;
-  - `on-conflict-zonefile-wins`: the upstream's record stays.
-
-  There is no zone file to write a `.rejected` artefact beside, so the
-  conflicts are logged, one line per zone with the records.
+- **The server's copy wins for these types.** Its journalled deletes remove
+  the transfer's record, and its adds are applied. No conflict policy is
+  involved: the zone's `on-conflict-*` option stays a primary's file-merge
+  setting. When the transfer carried a record of these types that the overlay
+  removed, one log line per zone names it (Q2).
 
 ### 4.3 Where
 
@@ -189,13 +201,17 @@ both.
   and no second NOTIFY: the costs #514 removed from this path.
 - **Signed with the rest.** A full replacement on a signing zone signs
   everything (`wsNeedsFullSign`, `v2/zone_mutation.go:978-982`).
-- **The journal is read under `zd.mu`.** Journal writes happen under the same
-  lock (`v2/zone_mutation.go:576-583`), so no local change can fall between
-  the read and the replacement.
+- **One lock for all of it.** Read the journal, apply the overlay, publish
+  (`publishWorkingSetLocked`), compact (4.4): all inside
+  `applyRefreshReplacementLocked`, under the `zd.mu` its caller already holds.
+  Journal writes happen under the same lock (`v2/zone_mutation.go:576-583`),
+  so no local change can fall between the read and the compaction.
 - **Not for an applied IXFR.** Its scratch zone is the published snapshot plus
   the delta, so it already carries the overlay. Overlaying it again could
   reach owners outside the touched set, which that path signs alone
-  (`wsSignOwners`).
+  (`wsSignOwners`). A whole-zone answer to an IXFR request is not an applied
+  IXFR: `adoptFullZoneRRs` (`v2/ixfr_in.go:782`) leaves `ixfrDerived` unset,
+  so it is a full replacement and gets the overlay.
 
 ### 4.4 The journal in the zone's own serial space
 
@@ -206,17 +222,28 @@ file. Its serials only order its rows. Two changes follow:
   (`oldSnap.Serial`), not from `fileSerial` or the journal's tail
   (`v2/zone_mutation.go:629-646`). The delta then always advances, which is
   what ends §3.
-- **Every full replacement compacts the journal**, after its publish. The
-  journal becomes one delta holding the net effect (§4.2) from served−1 to
-  served (`ReplaceZoneJournal`, `v2/zone_delta_store.go:472`, bounded by the
-  row id it read), or it is cleared when nothing is left. Deletes of records
-  the upstream no longer has are dropped: they do nothing now, and must not
-  delete the record if the upstream adds it again later. This bounds the
-  journal, and no old row can collide with a later serial.
+- **Every full replacement compacts the journal**, right after its publish,
+  under the same lock (4.3).
+  - **The result:** one delta holding the net effect of the overlaid types
+    (4.2), from `CurrentSerial`−1 to `CurrentSerial`, written with
+    `ReplaceZoneJournal` (`v2/zone_delta_store.go:472`) and bounded by the row
+    id the overlay read.
+  - **When nothing is left,** the journal is cleared with
+    `DeleteZoneDeltasThroughID`, bounded the same way. `ReplaceZoneJournal`
+    refuses an empty replacement (`v2/zone_delta_store.go:506`).
+  - **What is kept:**
+    - adds, even an add the transfer already has. That is local intent: if
+      the upstream later withdraws the same record, the next full transfer
+      must put it back;
+    - deletes of records the transfer has.
+  - **What is dropped:**
+    - deletes of records the transfer does not have. They do nothing now, and
+      must not delete the record if the upstream adds it again later;
+    - rows of every other type, which the transfer has superseded.
 
-A first load whose publish installs nothing yet compacts where the replay runs
-today, after the policy binds (`completeFirstZonePolicyAndLoad`,
-`v2/refreshengine.go:413`).
+  This bounds the journal, and no old row can collide with a later serial. A
+  first load compacts the same way. It anchors to `CurrentSerial` whether or
+  not that publish installed a snapshot yet.
 
 ### 4.5 First load and restart
 
@@ -240,7 +267,7 @@ disappear at the next full transfer. For a CDS under `none` that is the case
 
 | Zone | Today | With this |
 |---|---|---|
-| tdns-auth or tdns-signer, inline-signing secondary | own records lost on full transfer; journal refused at restart with a false warning; local changes refused when the serials disagree | own records kept across transfers and restarts; local changes accepted |
+| tdns-auth or tdns-signer, inline-signing secondary | CDS and CSYNC lost on full transfer; journal refused at restart with a false warning; local changes refused when the serials disagree | CDS, CDNSKEY and CSYNC kept across transfers and restarts; local changes accepted; local edits to the upstream's data still lost at a full transfer |
 | primary (signed or not) | journal replayed or merged over its file | unchanged |
 | plain secondary | nothing journalled | unchanged |
 | multi-provider zone | arrow 1 restores an owned zone's CDS | unchanged |
@@ -276,26 +303,37 @@ primary relies on. What is missing is reading it back.
   still needed.
 - **#742.** A signing secondary now syncs NS and glue after every transfer,
   over UPDATE or API. The SIG(0) KEY that UPDATE needs is kept by
-  `CollectDynamicRRs`, but §3 could refuse its first publish.
+  `CollectDynamicRRs`, even when §3 refuses its publish (§3).
 - **#557.** Unchanged. The CSYNC is overlaid like any local record, but it is
   still published only with `allow-updates`.
 - **#736.** Unchanged. Under `none` nothing publishes a first CDS on its own.
   This only keeps the one a delegation sync did publish.
+- **#730 D2.** Its suggestion, restoring the CDS in `CollectDynamicRRs`, is
+  alternative A, superseded here. D3 (#557) and D4 (CDNSKEY) stay as they are.
+- **`childsync` on a signing secondary.** Out of scope, same kind of loss.
+  `SetupZoneSync` publishes the DSYNC advertisement into the zone's own copy
+  (`v2/zone_utils.go:1933`), and a full transfer drops it. The code warns
+  about this only for an agent secondary. The childsync-proxy design (§3.1)
+  says where a secondary's advertisement belongs. DSYNC is not on the
+  allowlist (4.2).
 
 ## 8. Tests
 
 | # | Test |
 |---|---|
 | T1 | A CDS published on an inline-signing secondary survives an AXFR from an upstream without one; the transfer publishes once (§2's table, inverted). |
-| T2 | Restart: a new zone on the same keystore, first loaded by transfer from an upstream that has moved on, serves the CDS; no ConfigWarning. |
+| T2 | Restart stand-in: a new zone on the same keystore, first loaded by transfer from an upstream that has moved on, serves the CDS; no ConfigWarning. L1 is the real restart. |
 | T3 | Empty journal, upstream serial ahead of the served one: a local change is applied (§3, first case, inverted). |
 | T4 | Journal tail ahead of the served serial: a local change is applied (§3, second case, inverted). |
 | T5 | Net effect: three CDS publishes, one AXFR: one CDS served, and the journal is one delta with one add. |
-| T6 | Filter: a DNSKEY or KEY in the journal that the keystore no longer has is not overlaid. |
-| T7 | Conflict: a local delete of an upstream record stands under db-wins, the upstream's record stays under zonefile-wins; both logged. |
+| T6 | Allowlist: a DNSKEY or KEY in the journal that the keystore no longer has is not overlaid, and a journalled local edit of an upstream A record is not overlaid either. |
+| T7 | The server's copy wins for its own types: an upstream CDS is replaced by the journal's, and logged. A local delete of an upstream A record does not survive a full transfer. |
 | T8 | Unchanged: primary reload merge and replay (the existing `zone_reload_reconcile` tests), plain secondary, multi-provider zone, non-auth app. |
 | T9 | IXFR: the CDS survives as today, no overlay applied, only the touched owners re-signed. |
 | T10 | Persisted copy at first bind: the overlay is not doubled; no ConfigWarning. |
+| T11 | Compaction with an empty net effect clears the journal (`DeleteZoneDeltasThroughID`), and one with rows of other types drops them. |
+| T12 | An add the transfer already has is kept in the compacted journal, and the record is back after the upstream withdraws it. |
+| T13 | `journal: active: false`: nothing is overlaid, and nothing is refused. |
 | L1 | Live: a signing secondary behind an upstream that answers IXFR with the whole zone. The CDS stays across upstream changes and across a restart after one, and the DS engine's publishes succeed after the restart. |
 
 The harness exists: `ixSigningSecondary`, `ixfrTestPrimary` and a real keystore
@@ -306,29 +344,30 @@ The harness exists: `ixSigningSecondary`, `ixfrTestPrimary` and a real keystore
 | Part | Non-test lines |
 |---|---|
 | overlay-zone predicate (4.1) | ~10 |
-| net effect, filter, conflicts, log (4.2), reusing `findMergeConflicts` and `applicableInstructions` | ~70 |
+| net effect of the allowlisted types, log (4.2) | ~35 |
 | apply to the scratch zone in the replacement (4.3) | ~40 |
 | journalled from the served serial (4.4) | ~10 |
 | compaction after a full replacement and at first load (4.4) | ~40 |
 | skip replay and merge (4.5) | ~10 |
 | `zone journal status` (4.6), and the comment at `v2/zone_mutation.go:909` | ~20 |
-| **total** | **~200** |
+| **total** | **~165** |
 
-Tests: T1–T10, about 450–550 lines.
+Tests: T1–T13, about 450–550 lines.
 
 One PR. §3's fix and the overlay depend on each other: without compaction,
 journalling from the served serial collides with old rows after a restart; and
 without the overlay, compacting would discard what the journal is for.
 
-## 10. Open questions
+## 10. Decided
 
-- **Q1.** For an overlay zone, should a local change to the upstream's own data
-  win (db-wins, the default, as for a primary)? Or should the upstream always
-  win for types the server does not originate? This proposes the existing
-  option, so an operator can choose.
-- **Q2.** Should the conflict log also become a ConfigWarning, as a primary's
-  merge makes it (`v2/refreshengine.go:627, 636`)? It would repeat at every full
-  transfer while the conflict lasts.
-- **Q3.** Should a CSYNC be overlaid at all, or dropped once the parent has
-  read it? Overlaying keeps the primary's behaviour. A stale CSYNC is
-  harmless, and the next NS sync replaces it.
+- **Q1 (2026-09-24).** Overlay only the server's own records: CDS, CDNSKEY
+  and CSYNC (4.2). A local change to the upstream's own data does not survive
+  a full transfer, as today. The external review argued for this: the primary's
+  `on-conflict-db-wins` default would make a local delete of an upstream
+  record survive every later transfer. That would be a new feature, not #732.
+- **Q2.** No ConfigWarning. A primary's warning points at a `.rejected` file
+  the operator can edit. Here there is no such file, and the warning would
+  repeat at every full transfer. One log line per zone, and
+  `zone journal status`.
+- **Q3.** Overlay the CSYNC, as a primary keeps it. A stale CSYNC is harmless,
+  and the next NS sync replaces it.
