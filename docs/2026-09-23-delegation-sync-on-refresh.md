@@ -1,14 +1,15 @@
 # Delegation sync on refresh: the proxy's detector for every child
 
-**Written 2026-09-23.** Proposal, for review. Line references are to main at
+**Written 2026-09-23.** Merged as #734. Line references are to main at
 `f255d19a`. For #731, which it widens: the gap is not specific to signing
 secondaries. Any `parentsync` zone whose content changes by a refresh, whether
 a transfer or a zone-file reload, never tells its parent about an NS or glue
 change.
 
-**Status:** proposal, revised the same day after an external review (adopt;
-the predicate for multi-provider zones and the reason this is independent of
-KLO are now pinned, and Q-c is decided). Nothing is implemented.
+**Status:** merged as #734, after an external review (adopt; the predicate
+for multi-provider zones and the reason this is independent of KLO are now
+pinned, and Q-c is decided). Stage 1 is in review (#740); stages 2 and 3 are
+not started (§10). Amended 2026-09-23, at the end.
 
 ## Summary
 
@@ -413,11 +414,11 @@ KLO is paused at the moment. Nothing here needs it restarted.
 
 ## 10. Staging
 
-| # | Change | Size (non-test) |
-|---|---|---|
-| 1 | The NS-and-glue comparison as its own function; `DelegationDataChangedNG` calls it. No change in behaviour. | ~40 |
-| 2 | Child mode and its predicate, `REFRESH-SYNC-DELEGATION` with the NS-and-glue analysis, shared retry helpers. | ~110 |
-| 3 | The startup compare-with-parent from `SetupZoneSync`. | ~20 |
+| # | Change | Size (non-test) | Status |
+|---|---|---|---|
+| 1 | The NS-and-glue comparison as its own function; `DelegationDataChangedNG` calls it. No change in behaviour. | ~40 | in review, #740 |
+| 2 | Child mode and its predicate, `REFRESH-SYNC-DELEGATION` with the NS-and-glue analysis, shared retry helpers. | ~110 | not started |
+| 3 | The startup compare-with-parent from `SetupZoneSync`. | ~20 | not started |
 
 Stage 1 is a refactor with no change in behaviour, and the existing tests pin
 it. Stages 2 and 3 can go in one PR. #557 is independent, but needed before
@@ -438,3 +439,28 @@ the NOTIFY scheme's NS sync means anything.
   `docs/2026-08-23-proxy-delegation-sync-scope.md` (B1, B2): deliver CDS or
   CDNSKEY when present, no DS opinion when a signed child has none, and
   remove the parent's DS for a child with no DNSKEY RRset.
+
+## Amendment, 2026-09-23: stage 1, and what the code showed (#731)
+
+- **Stage 1 needed tests of its own.** §10 says the existing tests pin it.
+  They pinned only `NsAdds`, `NsRemoves` and the proxy's `NsOrGlueChanged`.
+  Nothing asserted `DelegationDataChangedNG`'s glue deltas, the record form of
+  a removal, or its DS block, which tdns-mp reads. Stage 1 adds them first
+  (`v2/delegation_changed_ng_test.go`).
+- **Names.** The NS-and-glue comparison is `diffNSAndGlue`. The apex lookup it
+  shares with `DelegationDataChangedNG` is `delegationApexes`.
+- **Pinned as found.** An in-bailiwick nameserver that stays in the NS set but
+  loses every record has its glue listed for removal, while the delegation is
+  reported unchanged. Stage 1 keeps that.
+- **4.3 is a split, not a parameter.** tdns-mp calls `AnalyseZoneDelegation`
+  with one argument.
+- **4.4 and T6.** The rename in 4.4 reaches `delsync_proxy_retry_test.go`,
+  which T6 says stays unchanged. Decided 2026-09-23: rename the references
+  there and in `use_hsyncparam_test.go`, and change no assertion.
+- **4.5 runs on reload too.** `SetupZoneSync` also runs when the configuration
+  of a loaded zone is reloaded, so the compare-with-parent runs then as well.
+  An in-sync parent gets nothing.
+- **Sizes.** The non-test estimates hold. Tests come to about 500–600 lines,
+  not 350: no fake parent exists for `AnalyseZoneDelegation` (T1, T3, T4, T8),
+  and the syncher arm needs a seam, because `SyncZoneDelegation` discovers
+  DSYNC through the IMR.
