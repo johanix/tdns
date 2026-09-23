@@ -1260,6 +1260,7 @@ func (rrcache *RRsetCacheT) MarkRRsetBogus(qname string, qtype uint16, rrset *co
 		}
 	}
 	var cached *CachedRRset
+	var keepExpiry time.Time
 	if cached = rrcache.Get(qname, qtype); cached == nil {
 		cached = &CachedRRset{
 			Name:    qname,
@@ -1267,6 +1268,8 @@ func (rrcache *RRsetCacheT) MarkRRsetBogus(qname string, qtype uint16, rrset *co
 			Rcode:   uint8(dns.RcodeSuccess),
 			Context: ContextAnswer,
 		}
+	} else {
+		keepExpiry = cached.Expiration
 	}
 	cached.State = ValidationStateBogus
 	if edeCode != 0 {
@@ -1277,6 +1280,17 @@ func (rrcache *RRsetCacheT) MarkRRsetBogus(qname string, qtype uint16, rrset *co
 		cached.RRset = rrset.Clone()
 	}
 	rrcache.Set(qname, qtype, cached)
+	// Marking an entry bogus must not extend its life. Set recomputes the
+	// expiry from the TTLs, so a stale DNSKEY RRset re-marked on every failed
+	// validation was never let go: a child that had re-keyed kept being
+	// checked against its old keys for as long as anything kept asking (#694).
+	if !keepExpiry.IsZero() {
+		key := rrsetKey(qname, qtype)
+		if stored, ok := rrcache.RRsets.Get(key); ok && stored.Expiration.After(keepExpiry) {
+			stored.Expiration = keepExpiry
+			rrcache.RRsets.Set(key, stored)
+		}
+	}
 	return edeCode, edeText
 }
 
