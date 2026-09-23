@@ -324,6 +324,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					// has written the row. So this is the same promise the
 					// ZONE-UPDATE path makes.
 					ur.respond(true, nil)
+					invalidateImrDelegations(ur.ZoneName, ur.Actions)
 					// OptDirty is managed by the backend: 'direct' sets
 					// then clears it via WriteZone after persisting; DB-
 					// and zonefile-backends don't touch in-memory zone
@@ -405,6 +406,9 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					// follow-up, not part of the promise.
 					ur.respond(updated, err)
 
+					if updated {
+						invalidateImrDelegations(zd.ZoneName, ur.Actions)
+					}
 					if updated && !ur.InternalUpdate {
 						lg.Debug("ZoneUpdater: zone updated, setting dirty flag", "zone", zd.ZoneName)
 						zd.SetOption(OptDirty, true)
@@ -1995,4 +1999,37 @@ func rrPresentIn(list []dns.RR, rr dns.RR) bool {
 		}
 	}
 	return false
+}
+
+// invalidateImrDelegations drops what this server's own resolver holds about
+// the delegations an update to zone just changed: everything cached at and
+// below each child whose DS or NS moved, and the child's validation state.
+//
+// The resolver learned those from this very zone and is never told when the
+// zone changes under it. So it went on validating a child against the
+// delegation as it was -- a denial of the DS cached before the DS was added, a
+// DNSKEY RRset from before a key roll -- until the entries ran out. For a child
+// just made Secure that meant every CDS and CSYNC refused as "indeterminate" for
+// up to half an hour, and a child that had re-keyed could not roll (#694).
+func invalidateImrDelegations(zone string, actions []dns.RR) {
+	imr := Globals.ImrEngine
+	if imr == nil || imr.Cache == nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, rr := range actions {
+		h := rr.Header()
+		if h.Rrtype != dns.TypeDS && h.Rrtype != dns.TypeNS {
+			continue
+		}
+		child := core.CanonicalizeName(h.Name)
+		if core.EqualNames(child, zone) || seen[child] {
+			continue
+		}
+		seen[child] = true
+		if n, err := imr.Cache.FlushDomain(child, false); err == nil {
+			lg.Info("ZoneUpdater: dropped the resolver's view of a changed delegation",
+				"zone", zone, "child", child, "entries", n)
+		}
+	}
 }

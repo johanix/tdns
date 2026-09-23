@@ -5,6 +5,7 @@
 package cache
 
 import (
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -97,11 +98,24 @@ func (f *FamilyTracker) RecordResult(addr string, success bool) {
 	f.expire(stats, now)
 	if success {
 		stats.recentSuccesses = append(stats.recentSuccesses, now)
+		if !stats.suspectUntil.IsZero() && now.Before(stats.suspectUntil) {
+			// "Success" here means the path answered, which includes a refused
+			// connection: the host was reached, whatever it said. Do not claim
+			// the query succeeded.
+			log.Printf("FamilyTracker: IPv%d is reachable again (path to %s)", fam, addr)
+		}
 		stats.suspectUntil = time.Time{}
 		return
 	}
 	stats.recentFailures = append(stats.recentFailures, now)
 	if len(stats.recentFailures) >= f.threshold && len(stats.recentSuccesses) == 0 {
+		// The transition is worth a line: while suspect, every tuple on the
+		// family is skipped, and without this the only trace is a zone that
+		// answers SERVFAIL (#703).
+		if stats.suspectUntil.IsZero() || !now.Before(stats.suspectUntil) {
+			log.Printf("FamilyTracker: IPv%d marked suspect for %v: %d failures in %v and no success (last: %s)",
+				fam, f.suspectDuration, len(stats.recentFailures), f.window, addr)
+		}
 		stats.suspectUntil = now.Add(f.suspectDuration)
 	}
 }
