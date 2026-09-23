@@ -748,3 +748,29 @@ func TestJournalOverlayStatusAndPurge(t *testing.T) {
 		t.Errorf("the journal is not empty after purge --force:%s", ovJournalString(deltas))
 	}
 }
+
+// `zone write`, and `zone sync` and freeze through it, leave an overlay zone's
+// journal alone. A primary's file takes its journalled changes in, so the
+// write drops them (TestZoneDeltaDroppedOnWriteZone). An overlay zone's
+// journal is not relative to a file, and dropping it would take the zone's own
+// records out at the next full transfer.
+func TestJournalOverlayZoneWriteKeepsJournal(t *testing.T) {
+	zd := ixSigningSecondary(t, ixApplyZone)
+	cds := ovCDS(t, 1)
+	if err := ovPublishCDS(t, zd, cds); err != nil {
+		t.Fatalf("CDS publish: %v", err)
+	}
+	zd.Zonefile = filepath.Join(t.TempDir(), "example.zone")
+	before := ovJournalString(ovJournal(t, zd))
+
+	if _, err := zd.WriteZone(false, true); err != nil {
+		t.Fatalf("WriteZone: %v", err)
+	}
+	if after := ovJournalString(ovJournal(t, zd)); after != before {
+		t.Errorf("the zone write changed the journal:\nbefore:%s\nafter:%s", before, after)
+	}
+	ovTransfer(t, zd, ovUpstreamZone(20), true)
+	if !ovHas(ovServed(t, zd, ovZone, dns.TypeCDS), cds) {
+		t.Error("the CDS is gone at the full transfer after a zone write")
+	}
+}

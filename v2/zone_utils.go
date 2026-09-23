@@ -1268,6 +1268,7 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 		// and reused for the identity record below: is the file still what the
 		// zone is serving?
 		fileIsCurrent := zd.CurrentSerial == wroteSerial
+		overlay := zd.isOverlayZoneLocked()
 		// Clean only if the file caught up with what the zone is serving. A
 		// publish can land WHILE this write runs: we then wrote serial 11 while
 		// the zone moved to 12, and clearing the flag unconditionally would
@@ -1356,7 +1357,12 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 		// contains. Adds are idempotent, deletes of absent records are
 		// no-ops, so the replayed result matches -- but it is still wrong
 		// enough to log loudly.
-		if zd.KeyDB != nil {
+		//
+		// Not on an overlay zone (journal_overlay.go). Its journal is not
+		// relative to a file: it holds the zone's own records, applied to every
+		// full transfer, and a load of this file applies it again. Dropping it
+		// would take those records out at the next full transfer.
+		if zd.KeyDB != nil && !overlay {
 			// Bound the drop by the serial actually WRITTEN, not by a ceiling
 			// read beforehand. A ceiling has a window: a publish can land in
 			// the file after the ceiling is read, and its delta row then
