@@ -132,12 +132,22 @@ func (zd *ZoneData) parentNSRRset() ([]dns.RR, string, error) {
 	return p_nsrrs, pserver, nil
 }
 
+// errParentGlueUnread says the parent's glue could not be read for at least
+// one in-bailiwick nameserver, so an analysis that reports the delegation in
+// sync may be wrong about it.
+var errParentGlueUnread = errors.New("could not read the parent's glue")
+
 // analyseNSAndGlue is the NS-and-glue part of AnalyseZoneDelegation: the
 // served zone's NS RRset and in-bailiwick glue against the parent's, and the
 // declarative form of the child's delegation. It sets no DS field, so a status
 // it returns has NewDSKnown false: declareDelegationFromChild takes no DS, and
 // only compareParentDS fills in that dimension. It also returns the parent
 // server that answered and the served apex, for the DS step.
+//
+// A glue query to the parent that fails is passed over, and reported after the
+// loop as errParentGlueUnread with the status filled in as far as it got.
+// AnalyseZoneDelegation carries on past it, as it always has; the refresh sync
+// treats it as a comparison that failed.
 func (zd *ZoneData) analyseNSAndGlue(imr *Imr) (resp DelegationSyncStatus, pserver string, apex *OwnerData, err error) {
 	resp = DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
@@ -181,6 +191,7 @@ func (zd *ZoneData) analyseNSAndGlue(imr *Imr) (resp DelegationSyncStatus, pserv
 	// parent_inb, _ := BailiwickNS(zd.ZoneName, apex.RRtypes[dns.TypeNS].RRs)
 
 	// 3. Compare A and AAAA glue for in child in-bailiwick nameservers
+	var glueErrs error
 	for _, ns := range child_inb {
 		owner, err := zd.GetOwner(ns)
 		if err != nil {
@@ -195,6 +206,7 @@ func (zd *ZoneData) analyseNSAndGlue(imr *Imr) (resp DelegationSyncStatus, pserv
 		parent_a_glue, err := AuthQuery(ns, pserver, dns.TypeA)
 		if err != nil {
 			lgDns.Warn("error from AuthQuery for A glue", "server", pserver, "ns", ns, "err", err)
+			glueErrs = errors.Join(glueErrs, fmt.Errorf("%s A: %w", ns, err))
 			continue
 		}
 		gluediff, adds, removes := core.RRsetDiffer(ns, child_a_glue, parent_a_glue,
@@ -209,6 +221,7 @@ func (zd *ZoneData) analyseNSAndGlue(imr *Imr) (resp DelegationSyncStatus, pserv
 		parent_aaaa_glue, err := AuthQuery(ns, pserver, dns.TypeAAAA)
 		if err != nil {
 			lgDns.Warn("error from AuthQuery for AAAA glue", "server", pserver, "ns", ns, "err", err)
+			glueErrs = errors.Join(glueErrs, fmt.Errorf("%s AAAA: %w", ns, err))
 			continue
 		}
 		differ, adds, removes = core.RRsetDiffer(ns, child_aaaa_glue, parent_aaaa_glue,
@@ -219,6 +232,9 @@ func (zd *ZoneData) analyseNSAndGlue(imr *Imr) (resp DelegationSyncStatus, pserv
 			resp.AAAARemoves = append(resp.AAAARemoves, removes...)
 		}
 	}
+	if glueErrs != nil {
+		return resp, pserver, apex, fmt.Errorf("%w from %s: %w", errParentGlueUnread, pserver, glueErrs)
+	}
 	return resp, pserver, apex, nil
 }
 
@@ -226,7 +242,10 @@ func (zd *ZoneData) analyseNSAndGlue(imr *Imr) (resp DelegationSyncStatus, pserv
 // parent's: NS and glue (analyseNSAndGlue), then DS.
 func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error) {
 	resp, pserver, apex, err := zd.analyseNSAndGlue(imr)
-	if err != nil {
+	// A glue query that failed has been logged and passed over, as it always
+	// was here: the explicit sync, the status command and tdns-mp all read
+	// this analysis.
+	if err != nil && !errors.Is(err, errParentGlueUnread) {
 		return resp, err
 	}
 

@@ -124,8 +124,9 @@ func (p *parentQueries) asked(rrtype uint16) bool {
 // fakeParent answers what the NS-and-glue analysis asks the parent: the
 // zone's NS RRset, the glue of its in-bailiwick nameservers, and its DS, over
 // UDP as AuthQuery asks. zd is pointed at it, so FetchParentData needs no IMR.
-// It records the types it was asked for.
-func fakeParent(t *testing.T, zd *ZoneData, rrs []string) *parentQueries {
+// It records the types it was asked for. Each servfail entry, "name/TYPE",
+// is answered with SERVFAIL.
+func fakeParent(t *testing.T, zd *ZoneData, rrs []string, servfail ...string) *parentQueries {
 	t.Helper()
 	key := func(name string, rrtype uint16) string {
 		return strings.ToLower(dns.Fqdn(name)) + "/" + dns.TypeToString[rrtype]
@@ -149,7 +150,12 @@ func fakeParent(t *testing.T, zd *ZoneData, rrs []string) *parentQueries {
 			queries.mu.Lock()
 			queries.types = append(queries.types, r.Question[0].Qtype)
 			queries.mu.Unlock()
-			m.Answer = data[key(r.Question[0].Name, r.Question[0].Qtype)]
+			k := key(r.Question[0].Name, r.Question[0].Qtype)
+			if slices.Contains(servfail, k) {
+				m.Rcode = dns.RcodeServerFailure
+			} else {
+				m.Answer = data[k]
+			}
 		}
 		_ = w.WriteMsg(m)
 	})}
@@ -260,6 +266,40 @@ func TestRefreshSyncInSyncParentGetsNothingWhateverItsDS(t *testing.T) {
 				t.Errorf("an in-sync parent got %d sends and %d retries, want none", len(rec.synced), len(rec.requeued))
 			}
 		})
+	}
+}
+
+// A parent glue query that fails leaves the comparison incomplete: the parent
+// may hold glue the zone no longer has. The arm must not call that in sync:
+// nothing is sent, no success is recorded, and it retries. AnalyseZoneDelegation,
+// which the explicit sync, the status command and tdns-mp read, passes over the
+// failed query as it always did.
+func TestRefreshSyncUnreadParentGlueIsAFailure(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	zd := childZone(t, ddcngServedZone(), OptParentSync)
+	fakeParent(t, zd, []string{ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A},
+		"ns2.deleg.example./A")
+
+	rec := runArm(t, zd, refreshRequest(zd), realAnalyse(zd), nil)
+	if len(rec.synced) != 0 {
+		t.Errorf("an incomplete comparison was sent %d times, want none", len(rec.synced))
+	}
+	if len(rec.requeued) != 1 {
+		t.Errorf("an incomplete comparison was re-queued %d times, want 1", len(rec.requeued))
+	}
+	zd.mu.Lock()
+	lastOK := zd.delegationLastSyncOK
+	zd.mu.Unlock()
+	if !lastOK.IsZero() {
+		t.Error("an incomplete comparison was recorded as a success")
+	}
+
+	resp, err := zd.AnalyseZoneDelegation(nil)
+	if err != nil {
+		t.Fatalf("AnalyseZoneDelegation now fails on an unread glue query: %v", err)
+	}
+	if !resp.InSync {
+		t.Error("AnalyseZoneDelegation's verdict changed: the delegation is no longer in sync")
 	}
 }
 
@@ -465,7 +505,11 @@ func TestRefreshSyncWaitsForTheImr(t *testing.T) {
 		t.Error("the arm asked the parent before the IMR was up")
 	}
 	cancel()
-	<-done
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the deferred request did not exit after the context was cancelled")
+	}
 }
 
 // T6. Which mode a zone's refresh runs. parentsync-proxy runs the proxy mode as

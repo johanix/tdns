@@ -224,7 +224,9 @@ func refreshSyncStepsFor(ctx context.Context, conf *Config, delsyncq chan Delega
 //  3. It compares the served zone's NS and glue with the parent. The DS step
 //     is not run, so the status has no DS opinion and NewDSKnown is false:
 //     delta UPDATEs carry no DS, replace UPDATEs leave the parent's DS alone,
-//     the API payload declares none, and NOTIFY(CDS) is not sent.
+//     the API payload declares none, and NOTIFY(CDS) is not sent. A comparison
+//     that could not read the parent's glue (errParentGlueUnread) has failed:
+//     nothing is sent and it is retried, rather than called in sync.
 //  4. It stops if the parent is in sync, and otherwise sends the difference.
 //  5. A failure is retried on the proxy's schedule. A parent found in sync
 //     counts as a success, as a sent difference does, for dropping an older
