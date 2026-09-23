@@ -35,9 +35,14 @@ change.
 - The three questions asked about this (answered in §6–§8):
   - **Does tdns-agent do the right thing?** In steady state, yes. One
     deviation: it re-sends to the parent on every restart.
-  - **Does a tdns-auth primary?** Only for changes that arrive by DNS UPDATE or
-    the API, and even then a failed sync is not retried. Zone-file edits never
-    reach the parent.
+  - **Does tdns-auth?** Per configuration:
+    - **Unsigned primary:** partly. NS and glue reach the parent only when they
+      change by DNS UPDATE or the API, and a failed sync is not retried.
+    - **Signing primary:** the same, and in addition, under the default
+      `rollover.method: none`, no DS reaches the parent without a manual
+      `delegation sync`.
+    - **Signing secondary:** no. NS and glue never reach the parent, and the
+      CDS is lost at every AXFR.
   - **Should this wait for key lifecycle ownership (KLO)?** No: the NS and
     glue sync proposed here is independent of it. The CDS half (#732) is not,
     and should be coordinated with it.
@@ -128,8 +133,9 @@ Multi-provider zones are left to tdns-mp's own hooks.
 Child mode compares no DNSKEY, CDS or DS, for any zone. For a zone that signs
 its own content, those are ours (§2). For a zone that does not sign, tdns
 holds no keys, so its DS intent is unknown, and the parent's DS is not ours to
-change (`compareParentDS`, `v2/delegation_utils.go:297`). Either way, DS
-reaches the parent through the DS engine and the rollover engine.
+change (`compareParentDS`, `v2/delegation_utils.go:297`). Either way, DS is
+the DS engine's and the rollover engine's to send. §7 says how much of that
+happens today.
 
 ### 4.2 A comparison of NS and glue alone
 
@@ -236,31 +242,103 @@ Two things are not as the code describes them:
   `ProxyStartupReconcile`, whose comment says it catches drift "WITHOUT
   re-sending on every restart" (`v2/delsync_proxy_update.go:461`).
 
-  The result is not wrong: replace UPDATEs repeat harmlessly, a repeated
-  NOTIFY costs the parent a scan, and it is also what makes the log's "the
-  next change or a restart will try again" (`v2/delegation_sync.go:853`)
-  true. But it is load on the parent at every restart, and the code says
-  otherwise. The fix is to skip the proxy's comparison on a first load, since
-  the reconcile covers it. That is a change to tdns-agent, so it is left out
-  of this proposal (Q-a).
+  Bad, but idempotent: replace UPDATEs repeat harmlessly, and a repeated
+  NOTIFY costs the parent a scan. It is also, by accident, what makes the log's
+  "the next change or a restart will try again" (`v2/delegation_sync.go:853`)
+  true. The fix is to skip the proxy's comparison on a first load, since the
+  startup reconcile already covers it. That is a change to tdns-agent, so it
+  is left out of this proposal (Q-a).
 - **Out of scope, noted.** The proxy's UPDATE and API derive the DS set from the
   served SEP DNSKEYs (`currentDelegationRRs`, `v2/delsync_proxy_update.go:403`),
   not from the primary's CDS. A primary whose CDS says something else (a
   delete, or a KSK it is not ready to put at the parent) is not followed.
 
-## 7. Question 2: does a tdns-auth primary do the right thing today?
+## 7. Question 2: does tdns-auth do the right thing today?
 
-Partly:
+Per configuration, for a zone with `parentsync`. "Yes" means the change
+reaches the parent with nobody running `delegation sync` by hand.
+
+**What all three have in common: NS and glue.**
 
 | Change arrives by | Reaches the parent? |
 |---|---|
 | DNS UPDATE or API `update` | Yes: ZoneUpdater → `SYNC-DELEGATION`, delta by default. NS removals go to the parent first (`applyParentFirst`). A failure is dropped with no retry (`v2/delegation_sync.go:88`). |
 | Zone-file edit, picked up by `zone reload`, SIGHUP, config reload or the daily re-stat (`FindSoaRefresh`, `v2/refreshengine.go:1438`) | **No.** `FetchFromFile` runs the pre- and post-refresh hooks, but only the proxy mode is attached. |
+| Inbound transfer (a secondary's only way in) | **No**, for the same reason. |
 | Anything, while the server was down | **No.** Startup bootstraps the SIG(0) key and never compares with the parent (§3). |
-| Its own KSK changes | Through the rollover engine and the DS engine; not in scope here. |
 
-The design fixes the second and third rows. The first keeps its path. Routing
-it through the same compare-with-parent command, to get retries, is Q-b.
+**What differs: DS.** It depends on `rollover.method` in the zone's DNSSEC
+policy.
+
+- **`multi-ds`:** the rollover engine keeps the parent's DS in step with its
+  target and pushes it itself, with its own scheme selection and retries. That
+  path is not examined here.
+- **`none`**, which is the default: `rollover.method` unset parses as `none`
+  (`v2/ksk_rollover_policy.go:403-404`). **Nothing sends DS to the parent
+  automatically**, neither the first DS after the zone is signed nor a KSK
+  changed by hand:
+  - The rollover engine returns at once for `none`
+    (`v2/ksk_rollover_automated.go:87-89`).
+  - The DS engine serves a CDS only once delegation sync has asked for one
+    (`v2/ds_engine.go:443-448`), and delegation sync asks only on the NOTIFY
+    scheme, for a sync that carries a DS difference
+    (`v2/delegation_sync.go:621-622`). Only an explicit `delegation sync`, or a
+    DNS UPDATE that changes DNSKEYs, produces such a sync.
+  - Until then, a parent that scans for CDS finds none.
+
+  The DS engine design names the gap: its step 3, periodic reconciliation of
+  each zone's DS target with the parent (`docs/2026-09-13-ds-engine-design.md`),
+  is not implemented.
+
+### 7.1 Unsigned primary
+
+**Partly.**
+
+- **NS and glue:** synced when the change comes by UPDATE or the API. Not
+  synced when it comes by a zone-file edit or while the server was down. A
+  failed sync is not retried.
+- **DS:** nothing to do.
+- **Schemes:** NOTIFY is left out of the plan for an unsigned zone
+  (`zoneIsSigned`, `v2/delegation_sync_plan.go:383`), so only UPDATE and API
+  are used.
+
+### 7.2 Signing primary
+
+**Partly, and not at all for DS under the default policy.**
+
+- **NS and glue:** as for the unsigned primary. The NOTIFY scheme also has
+  #557: the CSYNC is published only with `allow-updates`, so a zone changed
+  through the API alone (`allow-api-updates`) gets a NOTIFY(CSYNC) with no
+  CSYNC behind it.
+- **DS:** fine with `multi-ds`. With `none`, nothing is sent until an operator
+  runs `delegation sync` (above).
+- **CDS:** survives a zone-file reload. Every applied ZONE-UPDATE, the DS
+  engine's internal ones included, is written to the journal
+  (`v2/zone_updater.go:944`), and a reload merges the journal back over the
+  file (`MergeJournalOverNewFile`, `ReplayPersistedDeltas`,
+  `v2/refreshengine.go:576, 643`).
+
+### 7.3 Signing secondary (bump-on-the-wire)
+
+**No.**
+
+- **NS and glue:** never synced. Transfers are its only input (#731).
+- **DS:** as for the signing primary: fine with `multi-ds`, manual with `none`.
+  The signer's sample policies set no `rollover.method`
+  (`cmdv2/signer/tdns-signer.sample.yaml:139`), so they are `none`.
+- **CDS:** lost at every AXFR (#732). A secondary has no journal merge on
+  transfer, and a signing secondary requests IXFR by default but falls back to
+  AXFR.
+- **CSYNC:** the same loss, and #557.
+- **CDNSKEY:** never generated.
+- **The signer's sample config turns the IMR off**
+  (`cmdv2/signer/tdns-signer.sample.yaml:90`), and delegation sync cannot run
+  without it (`docs/2026-09-23-pure-signer.md` §4.2).
+
+The design fixes the NS and glue rows for all three. It leaves DS where it is:
+the DS engine's step 3 is the DS counterpart of §4.5's compare-with-parent,
+and S6 (§8) is where the two senders meet. Routing the UPDATE and API path
+through the same compare-with-parent command, to get retries, is Q-b.
 
 ## 8. Question 3: fix this before key lifecycle ownership is complete?
 
@@ -318,7 +396,7 @@ the NOTIFY scheme's NS sync means anything.
 ## 11. Open questions
 
 - **Q-a.** Skip the proxy's comparison on a first load, so a restart stops
-  re-sending (§6)? It changes tdns-agent. A separate issue if wanted.
+  re-sending (§6). It changes tdns-agent, so it needs an issue of its own.
 - **Q-b.** Move the ZoneUpdater's `SYNC-DELEGATION` (UPDATE and API changes) to
   the compare-with-parent command, for its retries? Parent-first NS removal
   and `ParentSyncDone` have to keep working, so it is not a one-line change.
