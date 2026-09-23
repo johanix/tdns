@@ -53,7 +53,7 @@ func TestExplainNoTuplesNamesTheReason(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := explainNoTuples(tc.serverMap, nil, "www.example.", edns0.PrivacyNone)
+			got := explainNoTuples(tc.serverMap, nil, nil, "www.example.", edns0.PrivacyNone)
 			if !strings.Contains(got, tc.want) {
 				t.Errorf("explanation %q does not mention %q", got, tc.want)
 			}
@@ -68,7 +68,7 @@ func TestExplainNoTuplesNamesTheServer(t *testing.T) {
 		"ns1.example.": {Name: "ns1.example."},
 		"ns2.example.": {Name: "ns2.example.", Addrs: []string{"192.0.2.2"}},
 	}
-	got := explainNoTuples(sm, nil, "www.example.", edns0.PrivacyNone)
+	got := explainNoTuples(sm, nil, nil, "www.example.", edns0.PrivacyNone)
 	for _, ns := range []string{"ns1.example.", "ns2.example."} {
 		if !strings.Contains(got, ns) {
 			t.Errorf("explanation %q does not name %s", got, ns)
