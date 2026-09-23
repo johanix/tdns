@@ -55,6 +55,12 @@ type ZoneJournalInfo struct {
 	// database but NOT in what the zone is serving.
 	Replayed bool
 
+	// Overlay is true for an inline-signing secondary on tdns-auth. Its
+	// journal is not a chain from a file: its own records in it are applied
+	// to every full transfer (docs/2026-09-24-journal-overlay-on-transfer.md).
+	// Replayable and Replayed describe a file's chain and do not apply.
+	Overlay bool
+
 	// PersistenceActive is false when the deployment-wide kill-switch
 	// (journal: active: false) is set. A server quietly not persisting is the
 	// thing this whole subsystem exists to prevent, so it is reported rather
