@@ -282,14 +282,18 @@ func TestDiffNSAndGlueIsTheNSAndGluePartAlone(t *testing.T) {
 	cases := []struct {
 		name     string
 		incoming string
-		nsOrGlue bool
+		inSync   bool
 	}{
-		{"serial only", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A), false},
-		{"nameserver added", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNS3, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A, ddcngNS3A), true},
-		{"nameserver removed", ddcngZone(2, ddcngNS1, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS1A, ddcngNS1AAAA), true},
-		{"glue changed", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS1A2, ddcngNS1AAAA, ddcngNS2A), true},
-		{"keys gone", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A), false},
-		{"KSK replaced", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngKSK2, ddcngZSK1, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A), false},
+		{"serial only", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A), true},
+		{"nameserver added", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNS3, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A, ddcngNS3A), false},
+		{"nameserver removed", ddcngZone(2, ddcngNS1, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS1A, ddcngNS1AAAA), false},
+		{"glue changed", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS1A2, ddcngNS1AAAA, ddcngNS2A), false},
+		// As found, and pinned above: the glue is listed for removal while
+		// InSync stays true. A caller that wants "NS or glue changed" has to
+		// read the lists, not InSync.
+		{"nameserver kept, all its records gone", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngKSK1, ddcngZSK1, ddcngNS2A), true},
+		{"keys gone", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A), true},
+		{"KSK replaced", ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngKSK2, ddcngZSK1, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -307,8 +311,8 @@ func TestDiffNSAndGlueIsTheNSAndGluePartAlone(t *testing.T) {
 			part := DelegationSyncStatus{InSync: true}
 			zd.diffNSAndGlue(newzd, oldapex, newapex, &part)
 
-			if part.InSync == tc.nsOrGlue {
-				t.Errorf("InSync = %v, want %v", part.InSync, !tc.nsOrGlue)
+			if part.InSync != tc.inSync {
+				t.Errorf("InSync = %v, want %v", part.InSync, tc.inSync)
 			}
 			for _, f := range []struct {
 				field       string
