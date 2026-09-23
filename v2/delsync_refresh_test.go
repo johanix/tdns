@@ -34,6 +34,17 @@ func withApp(t *testing.T, app AppType) {
 	t.Cleanup(func() { Globals.App.Type = old })
 }
 
+// registerTestMultiProviderAgentApp registers app as a multi-provider agent
+// app for the rest of the test only: the registry is process-wide.
+func registerTestMultiProviderAgentApp(t *testing.T, app AppType) {
+	t.Helper()
+	if multiProviderAgentApp(app) {
+		t.Fatalf("app type %d is already registered as a multi-provider agent app", app)
+	}
+	RegisterMultiProviderAgentAppType(app)
+	t.Cleanup(func() { delete(multiProviderAgentAppTypes, app) })
+}
+
 // ddcngCDS is the CDS for a DNSKEY record, as the zone would publish it.
 func ddcngCDS(t *testing.T, key string) string {
 	t.Helper()
@@ -353,6 +364,23 @@ func TestRefreshSyncSendsNoDS(t *testing.T) {
 		}
 	}
 
+	// NOTIFY: a CSYNC for the NS change and no CDS, since the status has no DS
+	// difference. No KeyDB: a NOTIFY(CDS) would have to ask the DS engine for
+	// its CDS first, and fail without one.
+	notifyq := make(chan NotifyRequest, 4)
+	if _, _, err := zd.SyncZoneDelegationViaNotify(context.Background(), nil, notifyq, dss,
+		&DsyncTarget{Addresses: []string{"192.0.2.53:53"}}); err != nil {
+		t.Fatalf("NOTIFY scheme: %v", err)
+	}
+	close(notifyq)
+	var notified []string
+	for req := range notifyq {
+		notified = append(notified, dns.TypeToString[req.RRtype])
+	}
+	if !slices.Equal(notified, []string{"CSYNC"}) {
+		t.Errorf("the NOTIFY scheme sent %q, want only CSYNC", notified)
+	}
+
 	// The rollover engine's API push carries a DS RRset and nothing else
 	// (pushDSRRsetViaApi), so a payload of NS and glue can never name the same
 	// RRset as one of its pushes.
@@ -446,7 +474,7 @@ func TestRefreshSyncWaitsForTheImr(t *testing.T) {
 // and parentsync on any app other than tdns-auth run neither.
 func TestRefreshSyncModeGates(t *testing.T) {
 	const mpAgent AppType = 251 // an app type tdns does not know, as tdns-mp's agent is to tdns
-	RegisterMultiProviderAgentAppType(mpAgent)
+	registerTestMultiProviderAgentApp(t, mpAgent)
 	nsAdded := ddcngZone(2, ddcngNS1, ddcngNS2, ddcngNS3, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A, ddcngNS3A)
 	for _, tc := range []struct {
 		name string
@@ -562,7 +590,7 @@ func TestRefreshSyncStartupQueue(t *testing.T) {
 	oldConf := delegationSyncConf.Load()
 	t.Cleanup(func() { delegationSyncConf.Store(oldConf) })
 	const mpAgent AppType = 251
-	RegisterMultiProviderAgentAppType(mpAgent)
+	registerTestMultiProviderAgentApp(t, mpAgent)
 
 	for _, tc := range []struct {
 		name    string
