@@ -2,7 +2,7 @@
 
 **Written 2026-09-24.** Line references are to main at `81a22644`.
 
-**Status:** proposal, reviewed. Johan answered §8 on 2026-09-24. He then decided that the CDS is always published, with telling the parent gated by `parentsync` (1.2 (a), (c)), and answered Q10. The doc is written to those decisions. Nothing implemented.
+**Status:** proposal, reviewed. Johan answered §8 on 2026-09-24. He then decided that the CDS is always published, with telling the parent gated by `parentsync` (1.2 (a), (c)), and answered Q10. The doc is written to those decisions and to three external reviews. Nothing implemented.
 
 ## Summary
 
@@ -76,7 +76,10 @@ For these zones `followKeysWithCDS` loses its rule that a zone serving no CDS is
 - **An empty intent** withdraws the CDS, as today.
 - **Multi-DS zones** keep the rollover engine's CDS, unchanged.
 - **One consequence:** a parent that bootstraps a delegation from CDS (RFC 9615, or a registry's own policy) can now make a signed zone secure without `parentsync`.
-- **A policy setting turns (a) off (Q10).** `dnssec.policies.<p>.cds: true | false`, default `true`. With `false`, a zone under that policy publishes a CDS only when delegation sync asks for one, as today. It is for an operator who signs a zone but is not ready for a parent to act on its CDS. It governs (a) only: delegation sync, the rollover engine and an owned zone's CDS are unchanged.
+- **A policy setting turns (a) off (Q10).** `dnssec.policies.<p>.cds: true | false`, default `true`. It is for an operator who signs a zone but is not ready for a parent to act on its CDS. Two limits keep it from reopening #752 and #736:
+  - **It suppresses only (a)'s own publish** of a CDS the zone does not serve. A CDS the zone already serves, whether published by hand or by delegation sync, is still followed by (b). Otherwise a manual roll under `false` would be the bogus-zone path again.
+  - **It has no effect on a `parentsync` zone,** which publishes as under `true` and logs once at Info that the setting was ignored. `parentsync` is the operator asking tdns to tell the parent, and (c) learns of a KSK going to standby or being rolled only through the CDS changing. Without a CDS, an UPDATE or API parent would again never hear of either.
+  - It governs (a) only: delegation sync, the rollover engine and an owned zone's CDS are unchanged. The re-re-review recommended no setting at all; Johan chose to have it.
 
 **(b) Tell the DS engine whenever keys may have changed.** "Keys changed" is a hint, not a result. The engine compares the DS intent with the served CDS and publishes only when they differ (`followKeysWithCDS`, `v2/ds_engine.go:470-472`), so extra hints cost a comparison and nothing more.
 
@@ -117,9 +120,12 @@ The rest of (c):
 - **A dropped send is retried by the DS engine.** A full `DelegationSyncQ` puts the zone on a sync-pending list that only the DS engine's goroutine touches. Whenever the engine runs for a zone on that list, it tries the send again, whether or not the CDS changed this time; a send that gets through takes the zone off the list. The backstop in (b) runs the engine for every CDS-serving zone each tick, so a dropped send is retried within `kasp.check-interval`. Without the list, the next tick would find the CDS matching the intent, return, and never tell the parent. Whether the parent is in step is `AnalyseZoneDelegation`'s question, not the DS engine's.
 - **A withdrawal (an empty intent) queues nothing,** and takes the zone off the sync-pending list. For a zone whose keys tdns manages, the explicit sync treats an empty intent as an instruction to remove the parent's DS (`v2/delegation_utils.go:385-389`, `NewDS` is authoritative even when empty). Going insecure stays an operator's action.
 - **Multi-DS zones are untouched.** `followKeysWithCDS` returns early for them, and the rollover engine pushes their DS itself.
-- **At startup, one compare (#736).** The engine's first run for a zone after the server starts counts as a change: for a zone in child delegation-sync mode whose intent is non-empty, it queues one `EXPLICIT-SYNC-DELEGATION`, whether or not the CDS changed. This is the reconciliation step of the DS engine design (`docs/2026-09-13-ds-engine-design.md`, step 3), done once per start. It covers the first DS after signing, and a KSK changed while the server was down.
+- **At startup, one compare (#736).** The engine's first run for a zone counts as a change. That is the first run for that `ZoneData` after it is loaded and signed, not after the server starts. A zone added later, or a secondary that finishes its first signing well after start, gets its compare too. A flag on the `ZoneData`, set by the engine's goroutine, records that the run happened.
+  - On that run, a zone in child delegation-sync mode whose intent is non-empty queues one `EXPLICIT-SYNC-DELEGATION`, whether or not the CDS changed.
+  - A first run that also publishes the zone's first CDS queues one sync, not one for the publish and another for the first run.
+  - This is the reconciliation step of the DS engine design (`docs/2026-09-13-ds-engine-design.md`, step 3), done once per zone load. It covers the first DS after signing, and a KSK changed while the server was down.
   - The sync compares first. A parent that already holds the intent costs one DS lookup, and is sent no NOTIFY, UPDATE or API request.
-  - It waits for the resolver to be ready, on the same signal the proxy's deferred requests wait on (`deferForImr`, `v2/delegation_sync.go:714`).
+  - It waits for the resolver to be ready. Today the `EXPLICIT-SYNC-DELEGATION` arm does not wait (`v2/delegation_sync.go:94-133`), so the wait is added to the arm for every explicit sync, on the signal the proxy's deferred requests use (`deferForImr`, `v2/delegation_sync.go:714`). A follow-keys change right after start has the same window. The DS engine itself never waits.
   - One `DelegationSyncher` serves the queue, so the startup syncs run one after another rather than as a burst. A full queue is retried from the sync-pending list.
   - Nothing about the parent is persisted. The parent's DS in DNS is the record. A stored "in step" would go stale when the parent changes without us (registrar, operator) and would suppress the one check that notices. It would save a DS lookup, not a request, because the sync compares first anyway.
 
@@ -136,8 +142,10 @@ The rest of (c):
 
   That is how the hook recognises them, with no extra marker.
 - **Which zones.** Those for which `childDelegationSyncPredicate` holds, read under `zd.mu`. Multi-provider zones are excluded, so tdns-mp's use is untouched.
-- **What counts as an edit.** Before applying, the ZoneUpdater reads the served apex RRsets of the three types; it does so only when an action names the apex with one of them, or `ANY`. It reads them again after the apply. A type whose RRset differs has been edited, so an identical republish sends nothing.
+- **What counts as an edit.** Before applying, the ZoneUpdater reads the served apex RRsets of the three types; it does so only when an action names the apex with one of them, or `ANY`. After the apply it reads what the apply staged: the working set's apex when one is left, otherwise the served zone the apply just published. Under a transaction hold the served zone is still the old one, so a second read of it would see no edit. A type whose RRset differs has been edited, so an identical republish sends nothing.
 - **What is queued.** One `SIGNALS-EDITED` request on `DelegationSyncQ`, naming the edited types. It uses the same cancellable enqueue as the `SYNC-DELEGATION` beside it.
+
+**Nothing goes out before the edit is served.** A NOTIFY(CDS) tells the parent to come and read the CDS, so it must not precede the publish, the rule `SyncZoneDelegationViaNotify` already follows. When the zone has an open transaction, the handler does nothing yet. It re-queues the request from its own goroutine once the hold ends, as `deferForImr` does for the resolver; a hold is bounded by `txHoldLimit`. When it runs, it reads the served RRsets again.
 
 The `DelegationSyncher` handles `SIGNALS-EDITED` according to what was edited:
 - **CDS or CDNSKEY, on a zone whose keys tdns manages** (`DSIntentForZone(…).Known`):
@@ -145,6 +153,7 @@ The `DelegationSyncher` handles `SIGNALS-EDITED` according to what was edited:
   - The handler runs the `EXPLICIT-SYNC-DELEGATION` path. A NOTIFY parent gets `ensureCDS`, which publishes the intent's CDS if the edit differs, then NOTIFY(CDS). An UPDATE or API parent gets the DS. A parent already in step gets nothing.
   - It then marks the DS engine (`KeysChanged`), so an edit that differs from the intent is replaced now rather than at the next tick.
   - Sync first, then mark. When the sync ran `ensureCDS`, the CDS already matches the intent, the engine finds nothing to change, and (c) queues no second sync. The parent gets one NOTIFY.
+  - With the parent already in step, the sync sends nothing; the mark then restores the CDS, and (c) queues a sync that finds the parent in step and sends nothing either. That extra sync is accepted. Marking before the sync would avoid it, but would send two NOTIFYs when the parent is behind.
 - **CDS or CDNSKEY, on a zone whose keys tdns does not manage:**
   - Here the CDS is the operator's, and `AnalyseZoneDelegation` leaves the parent's DS alone (`v2/delegation_utils.go:340-373`). So the handler sends the NOTIFY itself.
   - If either RRset is non-empty, it looks up the parent's NOTIFY target (`LookupDSYNCTarget(ctx, zone, dns.TypeCDS, core.SchemeNotify)`, `v2/dsync_lookup.go:200`) and hands one NOTIFY(CDS) to the notifier. RFC 9859 uses NOTIFY(CDS) for both types.
@@ -172,7 +181,7 @@ For (a):
 1. **First signing.** A zone with keys tdns manages, `none`, no `parentsync`, serving no CDS: once loaded and signed, it serves the intent's CDS.
 2. **Restart.** The same zone restarted with its CDS already served: nothing is published, the serial is unchanged, nothing is journalled.
 3. **Not covered:** a zone whose keys tdns does not manage, an unsigned zone and a multi-DS zone get no CDS from (a).
-4. **`cds: false`:** a zone under such a policy, serving no CDS, gets none from (a) at signing, at startup or on a key change. A delegation sync over NOTIFY still publishes one when it asks.
+4. **`cds: false`:** a zone without `parentsync` under such a policy, serving no CDS, gets none from (a) at signing, at startup or on a key change. Once it serves one (published by hand), a manual KSK roll moves that CDS to the new key. A `parentsync` zone under `false` publishes as under `true`, and logs once that the setting was ignored.
 
 For (b):
 
@@ -189,26 +198,30 @@ For (c):
 12. **A full queue:** a follow-keys change with `DelegationSyncQ` full does not block the DS engine. Once the queue has room, the next engine run for the zone, with the CDS now unchanged, queues the `EXPLICIT-SYNC-DELEGATION`. The run after that queues none.
 13. **Startup, parent in step:** a child-sync zone whose parent holds the intent: one DS lookup, and no NOTIFY, UPDATE or API request.
 14. **Startup, parent behind:** the parent holds the old KSK's DS: one sync, through the parent's scheme.
-15. **Startup, no `parentsync`:** the CDS is published (test 1), and nothing is queued for the parent. The same for a `parentsync-proxy` zone.
-16. **Multi-DS and not-managed zones** are unchanged: the existing `TestAPublishedCdsFollowsTheKeys` cases pass.
+15. **Loaded after start:** a child-sync zone added after the server started, or a secondary first signed after start, whose served CDS already matches and whose parent is behind: one sync on the engine's first run for it.
+16. **First run that publishes:** a child-sync zone serving no CDS, parent behind: its first run publishes the CDS and queues exactly one sync.
+17. **Resolver not ready:** an `EXPLICIT-SYNC-DELEGATION` queued before the resolver is ready waits, then runs once it is. The DS engine does not wait.
+18. **Startup, no `parentsync`:** the CDS is published (test 1), and nothing is queued for the parent. The same for a `parentsync-proxy` zone.
+19. **Multi-DS and not-managed zones** are unchanged: the existing `TestAPublishedCdsFollowsTheKeys` cases pass.
 
 For (d), with a child-sync zone and a parent advertising NOTIFY for CDS and CSYNC:
 
-17. **Not managed, CDS edited:** a CDS added through the management API sends one NOTIFY(CDS). So does the same edit through DNS UPDATE.
-18. **Identical republish:** the same API edit repeated sends nothing.
-19. **Managed, edit differs from the intent:** the served CDS goes back to the intent's. With the parent's DS differing from the intent, exactly one NOTIFY(CDS) goes out, after the zone serves the intent's CDS. With the parent in step, none.
-20. **CSYNC edited:** one NOTIFY(CSYNC).
-21. **Removed:** deleting the CDS RRset, or the CSYNC, sends nothing.
-22. **Internal writers:** a DS engine publish, a rollover publish and `PublishCsyncRR` queue no `SIGNALS-EDITED`.
-23. **Other zones:** a multi-provider zone, and a zone without the `parentsync` option, queue nothing.
-24. **No NOTIFY target:** a parent advertising only UPDATE for CDS gets nothing from an edit on an unmanaged zone, and the log says so.
+20. **Not managed, CDS edited:** a CDS added through the management API sends one NOTIFY(CDS). So does the same edit through DNS UPDATE.
+21. **Identical republish:** the same API edit repeated sends nothing.
+22. **Managed, edit differs from the intent:** the served CDS goes back to the intent's. With the parent's DS differing from the intent, exactly one NOTIFY(CDS) goes out, after the zone serves the intent's CDS. With the parent in step, none.
+23. **CSYNC edited:** one NOTIFY(CSYNC).
+24. **Removed:** deleting the CDS RRset, or the CSYNC, sends nothing.
+25. **Internal writers:** a DS engine publish, a rollover publish, `PublishCsyncRR` and the RFC 9615 republisher queue no `SIGNALS-EDITED`.
+26. **Inside a transaction:** a CDS edit through the API while the zone has an open transaction sends nothing until the commit publishes it, then one NOTIFY(CDS).
+27. **Other zones:** a multi-provider zone, and a zone without the `parentsync` option, queue nothing.
+28. **No NOTIFY target:** a parent advertising only UPDATE for CDS gets nothing from an edit on an unmanaged zone, and the log says so.
 
 For (e), a `parentsync-proxy` zone whose upstream serves DNSKEY {A retired, B active, C standby} and CDS {B, C}:
 
-25. **UPDATE:** the replace-form UPDATE carries DS {B, C}, not {A, B, C}.
-26. **No CDS served:** the DS comes from the SEP keys, as today.
-27. **Startup:** with the parent holding {A}, the startup reconcile finds the DS out of step and syncs.
-28. **Algorithm 0:** a served CDS with an algorithm-0 record leaves the parent's DS alone.
+29. **UPDATE:** the replace-form UPDATE carries DS {B, C}, not {A, B, C}.
+30. **No CDS served:** the DS comes from the SEP keys, as today.
+31. **Startup:** with the parent holding {A}, the startup reconcile finds the DS out of step and syncs.
+32. **Algorithm 0:** a served CDS with an algorithm-0 record leaves the parent's DS alone.
 
 ## 2. #755: only an exact delete CDS deletes
 
@@ -419,7 +432,7 @@ One PR per part, in the table's order. Part 1 is the fix that matters in the sho
 
 | Part | Non-test code | Tests |
 |---|---|---|
-| 1 (#752, #736) | ~260: always publish (a) with its policy setting ~25, hints ~10, backstop ~20, NOTIFY after follow ~40, sync-pending list ~20, `ensureCDS` short-circuit ~10, startup compare ~25, operator edits (d) ~70, proxy DS from CDS (e) ~40 | ~650 |
+| 1 (#752, #736) | ~290: always publish (a) with its policy setting ~25, hints ~10, backstop ~20, NOTIFY after follow ~40, sync-pending list ~20, `ensureCDS` short-circuit ~10, first-run compare ~25, resolver wait on the explicit-sync arm ~10, operator edits (d) with the hold wait ~90, proxy DS from CDS (e) ~40 | ~750 |
 | 2 (#755) | ~40 | ~120 |
 | 3 (#757) | ~80 | ~140 |
 | 4 (#753) | ~200: child ~130, parent ~70 | ~300 |
@@ -440,7 +453,7 @@ Johan answered Q1–Q9 on 2026-09-24, after the external review of the first ver
 | Q7 | The EDE mapping | As proposed | 5.2 |
 | Q8 | The root names: a one-release fallback or a clean switch? | Clean switch | 3.2 |
 | Q9 | UPDATE=2, SCANNER=3, API=4, unassigned at IANA: keep, move into 128–255, or request assignments? | Keep for now. The review recommended moving them | 3.2 |
-| Q10 | A policy setting to turn (a) off, for an operator who signs a zone but does not yet want a parent that bootstraps from CDS to act on it? Proposed: `dnssec.policies.<p>.cds: true \| false`, default `true`; `false` restores today's behaviour, a CDS only when delegation sync asks for one | Yes, in the DNSSEC policy | 1.2 (a) |
+| Q10 | A policy setting to turn (a) off, for an operator who signs a zone but does not yet want a parent that bootstraps from CDS to act on it? Proposed: `dnssec.policies.<p>.cds: true \| false`, default `true`; `false` restores today's behaviour, a CDS only when delegation sync asks for one | Yes, in the DNSSEC policy. Limited after the re-re-review, which recommended no setting: it suppresses only a first publish, never the following of a served CDS, and has no effect on a `parentsync` zone | 1.2 (a) |
 
 ## 9. Not in scope
 
