@@ -750,6 +750,13 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 		}
 		zd.mu.Unlock()
 	}()
+	// Not on top of a staged replacement: this change is journalled, and the
+	// replacement would be journalled with it (#748). A replay is not.
+	if !ur.Replay {
+		if err = zd.flushStagedReplacementLocked(); err != nil {
+			return false, err
+		}
+	}
 	zd.ensureWorkingSet()
 
 	// A CSYNC/DSYNC-driven child update can create or remove a delegation, and
@@ -956,6 +963,13 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 		}
 		zd.mu.Unlock()
 	}()
+	// Not on top of a staged replacement: this change is journalled, and the
+	// replacement would be journalled with it (#748). A replay is not.
+	if !ur.Replay {
+		if err = zd.flushStagedReplacementLocked(); err != nil {
+			return false, err
+		}
+	}
 	zd.ensureWorkingSet()
 
 	lg.Debug("ApplyZoneUpdateToZoneData: processing actions", "zone", zd.ZoneName, "count", len(ur.Actions))

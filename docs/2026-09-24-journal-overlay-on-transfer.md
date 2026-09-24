@@ -377,7 +377,8 @@ without the overlay, compacting would discard what the journal is for.
 ## 11. Amendment, 2026-09-24: what the implementation settled
 
 Implemented in #747. These points were not settled above. Johan answered the
-first four; the last two are the implementation's choices.
+first five, the fifth after an external review; the last two are the
+implementation's choices.
 
 - **`zone journal purge` asks for `--force` on an overlay zone.** The journal
   is the only copy of the zone's own records, as a replaying journal is for a
@@ -396,10 +397,18 @@ first four; the last two are the implementation's choices.
   `WriteZone` drops a primary's journalled changes once its file holds them. An
   overlay zone's journal is not relative to a file, and dropping it would take
   the zone's own records out at the next full transfer.
+- **A replacement is never journalled as a local change (#748).** The overlay
+  rests on the journal holding only this server's own records. A transfer or
+  reload refused at signing stays staged, and an update applied on top of it
+  was journalled together with it; the overlay would then have kept an
+  upstream CDS as the server's own. A zone-updater change now publishes the
+  staged replacement first, and is refused while it still cannot be
+  published. A replacement also drops the journal flag of an update that was
+  refused at signing before it, whose staged change it replaces.
 - **An unreadable journal row** is not applied, and the journal is not
   compacted, since compacting would drop it.
 - **The Q2 log line** is at Warn.
 
 The tests are in `v2/journal_overlay_test.go`: T1–T13, a CSYNC through the
 same path as the CDS, an unreadable row, `zone journal status` and purge, and
-`zone write`.
+`zone write`. #748's are in `v2/staged_replacement_test.go`.

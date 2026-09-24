@@ -15,6 +15,7 @@ func (zd *ZoneData) ensureWorkingSet() {
 	if zd.workingSet != nil {
 		return
 	}
+	zd.wsFromReplacement = false
 	snap := zd.snapshot.Load()
 	if snap == nil {
 		zd.workingSet = snapshotMapFromData(zd.Data)
@@ -27,6 +28,33 @@ func (zd *ZoneData) ensureWorkingSet() {
 	if zd.wsSignalSynth == nil {
 		zd.wsSignalSynth = cloneSignalSynth(snap.signalSynth)
 	}
+}
+
+// flushStagedReplacementLocked publishes a replacement that is still staged,
+// before a zone-updater change that will be journalled is applied. The caller
+// holds zd.mu.
+//
+// A replacement whose publish was refused stays staged for a later publish to
+// retry (refuseUnsignableWorkingSetLocked, refuseUnrepairableChainLocked). An
+// update applied on top of it would be journalled together with it, because
+// the journal records the difference from the published snapshot (#748). So
+// the replacement is published first, unjournalled, as any retry of it would
+// be. If it still cannot be published, the update is refused: applied on top,
+// it would publish with the replacement or not at all.
+//
+// An open transaction decides for itself, as it does for every publish: its
+// hold stops this one.
+func (zd *ZoneData) flushStagedReplacementLocked() error {
+	if zd.workingSet == nil || !zd.wsFromReplacement || zd.txHeldLocked() {
+		return nil
+	}
+	zd.publishWorkingSetLocked(zd.generation.Load(), false)
+	if zd.workingSet != nil && zd.wsFromReplacement {
+		return fmt.Errorf("zone %s: a refreshed copy of the zone is waiting to be published and"+
+			" still cannot be (see the zone's errors); this change is refused until it has been,"+
+			" so that the refreshed content is not recorded as a local change", zd.ZoneName)
+	}
+	return nil
 }
 
 // cloneOwner returns a fresh, mutable copy of one owner in the working set.
@@ -693,6 +721,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.snapshot.Store(snap)
 
 	zd.workingSet = nil
+	zd.wsFromReplacement = false
 	zd.wsSignalSynth = nil
 	zd.publishQueued = false
 	zd.publishUrgent = false
@@ -952,6 +981,13 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	}
 
 	zd.workingSet = snapshotMapFromData(new_zd.Data)
+	zd.wsFromReplacement = true
+	// Whatever was staged before is gone with the working set it was staged
+	// in, and so is its claim to be journalled: an update refused at signing
+	// leaves wsPersistDelta set, and this publish would otherwise record the
+	// replacement as that update (#748). A replacement is never journalled.
+	zd.wsPersistDelta = false
+	zd.wsPersistErr = nil
 	// A refresh replaces zone data wholesale; carry the synthesized-signal
 	// fallback over from the current snapshot so it survives until the transport
 	// postpass recomputes it. The stored _dns.<ns> owner RRsets are preserved
