@@ -550,3 +550,48 @@ func TestOnlyAChildSyncZoneTellsTheParent(t *testing.T) {
 		})
 	}
 }
+
+// Tests 13 and 14, the analysis half. The first run's explicit sync compares
+// first: against a parent still holding a KSK the zone no longer uses it finds
+// the DS out of step, and against a parent already holding the zone's DS it
+// finds nothing to send. Sending through the parent's scheme needs the parent's
+// DSYNC, which needs an IMR; that half is a lab test.
+func TestTheFirstRunsCompareFindsTheParentBehindOrInStep(t *testing.T) {
+	old := testKSK("example.", pubB) // a KSK the zone no longer has
+	cases := []struct {
+		name     string
+		parentDS func(r *signingRig) *dns.DS
+		inSync   bool
+	}{
+		{"behind", func(r *signingRig) *dns.DS { return old.ToDS(dns.SHA256) }, false},
+		{"in step", func(r *signingRig) *dns.DS { return r.kskA.ToDS(dns.SHA256) }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newChildSyncRig(t, 4)
+			stageCDS(t, r.zd, cdsOfKeys("example.", r.kskA))
+			fakeParent(t, r.zd, []string{"example. 3600 IN NS ns.example.", "ns.example. 3600 IN A 192.0.2.1",
+				tc.parentDS(r).String()})
+
+			r.kdb.followKeysWithCDS(context.Background(), r.zd)
+			if n := queuedSyncs(t, r.zd); n != 1 {
+				t.Fatalf("%d explicit syncs queued on the first run, want 1", n)
+			}
+
+			resp, err := r.zd.AnalyseZoneDelegation(nil)
+			if err != nil {
+				t.Fatalf("AnalyseZoneDelegation: %v", err)
+			}
+			if resp.InSync != tc.inSync {
+				t.Fatalf("in sync = %v, want %v (adds %v, removes %v)", resp.InSync, tc.inSync, resp.DSAdds, resp.DSRemoves)
+			}
+			if tc.inSync {
+				return
+			}
+			if !sameRecords(resp.DSAdds, []dns.RR{r.kskA.ToDS(dns.SHA256)}) ||
+				!sameRecords(resp.DSRemoves, []dns.RR{old.ToDS(dns.SHA256)}) {
+				t.Errorf("adds %v, removes %v; want +the zone's KSK -the old one", resp.DSAdds, resp.DSRemoves)
+			}
+		})
+	}
+}
