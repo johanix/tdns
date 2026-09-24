@@ -12,8 +12,9 @@ cd cmdv2 && make
 
 Builds `tdns-genalgs` first, then `tdns-auth`, `tdns-agent`, `tdns-imr`,
 `tdns-cli`, and `dog`. Each app links the algorithms named in its
-`algs.list`; C-backed libraries are detected at generate time and recorded
-in that app's `algs-libs.mk`. The shared `algs-env.mk` caches
+`algs.list`, on top of those every binary has (the classical algorithms,
+ED448 and ML-DSA-44); C-backed libraries are detected at generate time
+and recorded in that app's `algs-libs.mk`. The shared `algs-env.mk` caches
 `ALGREPO` (path to the `dnssec-algorithms` checkout).
 
 **First build** on a host (no `algs-env.mk` yet):

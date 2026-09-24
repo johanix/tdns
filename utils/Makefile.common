@@ -41,8 +41,9 @@ GENALGS ?= $(GENALGS_DIR)/tdns-genalgs
 #
 # The presence and content of algs.list select one of three behaviors:
 #
-#   * No algs.list file at all: the app wants only the classical built-in
-#     algorithms. genalgs is NOT run and dnssec-algorithms is NOT needed
+#   * No algs.list file at all: the app wants only the algorithms every
+#     tdns binary has (the classical ones, ED448 and ML-DSA-44).
+#     genalgs is NOT run and dnssec-algorithms is NOT needed
 #     at all — tdns builds fully standalone. This is the default for any
 #     app that has not opted into the PQ algorithm registry.
 #
