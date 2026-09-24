@@ -78,8 +78,19 @@ GENALGS ?= $(GENALGS_DIR)/tdns-genalgs
 # switch, clean<->dirty transition — anything `git describe --dirty`
 # reflects). Left untouched otherwise so no-change rebuilds stay
 # no-ops. `make version` still forces a rewrite with a fresh appDate.
+#
+# The go build itself runs in a sub-make (gobuild). This make read
+# algs-libs.mk when it started, before `generate` ran. In an app with no
+# generated files the file did not exist yet, so ALGS_ENV was empty and the
+# build could not find the C libraries (`Package liboqs-go was not found in
+# the pkg-config search path`); a second `make` then worked. The sub-make
+# reads the Makefiles afresh, and with them the algs-libs.mk that `generate`
+# has just written.
 build: generate
 	@/bin/sh ../../utils/make-version.sh --if-changed $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
+	@$(MAKE) gobuild
+
+gobuild:
 	$(ALGS_ENV) $(GO) build $(GOFLAGS) -o ${PROG}
 
 # Ensure the generator binary exists AND IS CURRENT.
