@@ -720,6 +720,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.updateIxfrChainLocked(oldSnap, serial, data)
 
 	snap := zd.buildSnapshotLocked(serial, data, zd.wsSignalSynth)
+	snap.prepareDenialIndex()
 	zd.snapshot.Store(snap)
 
 	zd.workingSet = nil
@@ -1367,6 +1368,7 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 	// IXFR epoch by definition (no delta links the previous snapshot to it).
 	zd.IxfrChain = nil
 	snap := zd.buildSnapshotLocked(zd.CurrentSerial, data, nil)
+	snap.prepareDenialIndex()
 	zd.snapshot.Store(snap)
 	zd.markReadyIfServableLocked(snap)
 }

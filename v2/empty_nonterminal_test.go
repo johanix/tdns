@@ -104,9 +104,13 @@ func TestEmptyNonTerminalIsNodata(t *testing.T) {
 // will only contain RRSIG and NSEC." NXNAME in that bitmap is the signed half
 // of the bug: a validator holds cryptographic proof of non-existence for a name
 // whose descendant validates.
+//
+// The zone is signed here with black-lies, the one kind of zone whose denials
+// are compact. An unsigned zone's denials carry no NSEC at all
+// (TestUnsignedZoneDenials), and a zone with a chain proves an ENT with the
+// NSEC that covers it (TestChainDenial).
 func TestEmptyNonTerminalProofCarriesNoNXNAME(t *testing.T) {
-	kdb := newTestKeyDB(t)
-	zd := testSnapshotZone(t, "example.", entZone)
+	zd, kdb := compactDenialZone(t, "example.", entZone)
 
 	for _, co := range []bool{false, true} {
 		name := "DO"
@@ -221,10 +225,10 @@ func TestEntNamesFrom(t *testing.T) {
 // It reaches QueryResponder by a different route: the name IS in Data, so
 // nameExistsFrom sends it past the ENT check to the Count() == 0 branch, which
 // used to answer NXDOMAIN with NXNAME. A snapshot is built directly here
-// because a zone file cannot express an owner with no records.
+// because a zone file cannot express an owner with no records. The zone is
+// signed here with black-lies, so its denials are compact.
 func TestEmptyOwnerNodeWithDescendantsIsNodata(t *testing.T) {
-	kdb := newTestKeyDB(t)
-	zd := testSnapshotZone(t, "example.", entZone)
+	zd, kdb := compactDenialZone(t, "example.", entZone)
 
 	base := zd.publishedSnapshot()
 	if base == nil {
@@ -263,10 +267,10 @@ func TestEmptyOwnerNodeWithDescendantsIsNodata(t *testing.T) {
 // #594 landed the CO echo and this PR landed the ENT answer; they meet on the
 // same response. A CO client asking about an ENT gets the flag (RFC 9824
 // §5.1 puts it on every response to a CO query) and a bitmap with no NXNAME
-// (§3.2). Neither change can quietly undo the other.
+// (§3.2). Neither change can quietly undo the other. The zone is signed here
+// with black-lies, so its denials are compact.
 func TestEmptyNonTerminalAnswersACOClient(t *testing.T) {
-	kdb := newTestKeyDB(t)
-	zd := testSnapshotZone(t, "example.", entZone)
+	zd, kdb := compactDenialZone(t, "example.", entZone)
 
 	m := entAsk(t, zd, kdb, "a.example.", dns.TypeA, true, true)
 	if m.Rcode != dns.RcodeSuccess {

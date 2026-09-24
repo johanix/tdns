@@ -36,7 +36,7 @@ func TestSendReferral_SecureDelegationIncludesDS(t *testing.T) {
 
 	w := &fakeRW{remote: udpAddr("127.0.0.1")}
 	m := new(dns.Msg)
-	zd.sendReferral(m, w, cdd, nil, &edns0.MsgOptions{DO: true}, signFunc)
+	zd.sendReferral(m, w, cdd, nil, nil, &edns0.MsgOptions{DO: true}, signFunc)
 
 	if w.written == nil {
 		t.Fatal("sendReferral wrote no response")
@@ -75,7 +75,7 @@ func TestSendReferral_NonDNSSECHasNoDS(t *testing.T) {
 
 	w := &fakeRW{remote: udpAddr("127.0.0.1")}
 	m := new(dns.Msg)
-	zd.sendReferral(m, w, cdd, nil, &edns0.MsgOptions{DO: false}, signFunc)
+	zd.sendReferral(m, w, cdd, nil, nil, &edns0.MsgOptions{DO: false}, signFunc)
 
 	if w.written == nil {
 		t.Fatal("sendReferral wrote no response")
@@ -106,7 +106,7 @@ func TestSendReferral_SignFailureIsNonFatal(t *testing.T) {
 
 	w := &fakeRW{remote: udpAddr("127.0.0.1")}
 	m := new(dns.Msg)
-	zd.sendReferral(m, w, cdd, nil, &edns0.MsgOptions{DO: true}, signFunc)
+	zd.sendReferral(m, w, cdd, nil, nil, &edns0.MsgOptions{DO: true}, signFunc)
 
 	if w.written == nil {
 		t.Fatal("sendReferral wrote no response")
@@ -130,10 +130,13 @@ func TestSendReferral_SignFailureIsNonFatal(t *testing.T) {
 
 // TestSendReferral_InsecureDelegationHasNSEC confirms the insecure branch: a DO=1
 // referral for a delegation with no DS carries an NSEC proving no DS (RFC 9824
-// §3.4) and no DS. addReferralNSEC reads apex.RRtypes for the SOA min-TTL, so a
-// non-nil apex is required.
+// §3.4) and no DS. The zone is signed here with black-lies, so the NSEC is
+// synthesized (a zone with a chain serves the chain's NSEC at the cut instead,
+// TestChainDenial). addReferralNSEC reads apex.RRtypes for the SOA
+// min-TTL, so a non-nil apex is required.
 func TestSendReferral_InsecureDelegationHasNSEC(t *testing.T) {
-	zd := &ZoneData{ZoneName: "pq.axfr.net."}
+	zd := &ZoneData{ZoneName: "pq.axfr.net.",
+		Options: map[ZoneOption]bool{OptOnlineSigning: true, OptBlackLies: true}}
 	const child = "insecure.pq.axfr.net."
 	nsRR := mustRR(t, child+" 3600 IN NS ns.pq.axfr.net.")
 	cdd := &ChildDelegationData{
@@ -157,7 +160,7 @@ func TestSendReferral_InsecureDelegationHasNSEC(t *testing.T) {
 
 	w := &fakeRW{remote: udpAddr("127.0.0.1")}
 	m := new(dns.Msg)
-	zd.sendReferral(m, w, cdd, apex, &edns0.MsgOptions{DO: true}, signFunc)
+	zd.sendReferral(m, w, cdd, apex, nil, &edns0.MsgOptions{DO: true}, signFunc)
 
 	if w.written == nil {
 		t.Fatal("sendReferral wrote no response")

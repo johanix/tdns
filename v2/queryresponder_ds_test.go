@@ -211,10 +211,12 @@ lonely.example.	3600	IN	NS	ns.lonely.example.
 lonely.example.	3600	IN	DS	12345 8 2 E2D3C916F6DEEAC73294E8268FB5885044A833FC5459588F4A9184CFC41A5766
 ns.lonely.example.	3600	IN	A	192.0.2.5
 `
-		childZd := testSnapshotZone(t, "lonely.example.", child)
+		// Signed here with black-lies, so the denial is synthesized; the
+		// synthesis is where the bitmap has to leave the apex DS out.
+		childZd, kdb := compactDenialZone(t, "lonely.example.", child)
 
 		rw := &fakeRW{}
-		if err := childZd.handleDSQuery(new(dns.Msg), rw, "lonely.example.", &edns0.MsgOptions{DO: true}, nil); err != nil {
+		if err := childZd.handleDSQuery(new(dns.Msg), rw, "lonely.example.", &edns0.MsgOptions{DO: true}, kdb); err != nil {
 			t.Fatalf("handleDSQuery: %v", err)
 		}
 		resp := rw.written

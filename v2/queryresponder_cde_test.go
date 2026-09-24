@@ -124,8 +124,9 @@ ns.example. 3600 IN A 10.0.0.1
 // with no way to record the capability from a NODATA, which section 5.1 asks
 // downstream resolvers to do.
 func TestQueryResponderEchoesCO(t *testing.T) {
-	kdb := newTestKeyDB(t)
-	zd := testSnapshotZone(t, "example.", `example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200
+	// Signed here with black-lies: the compact denial is what makes a DO
+	// client without CO get NOERROR for a name that does not exist.
+	zd, kdb := compactDenialZone(t, "example.", `example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200
 example. 3600 IN NS ns.example.
 ns.example. 3600 IN A 10.0.0.1
 www.example. 3600 IN A 10.0.0.2

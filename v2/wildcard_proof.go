@@ -24,13 +24,19 @@ import (
 )
 
 // addWildcardProof adds to AUTHORITY the NSEC proving that qname, answered
-// from wildcard, does not exist.
+// from wildcard, does not exist. Where it comes from is the zone's denial
+// source (denialSourceFor), as for every other proof:
 //
-// A zone with an NSEC chain proves it with the chain's own record, the one
-// that covers qname, served with the signature it already carries. That
-// works on a secondary too, which holds no key. A black-lies zone has no
-// chain; it gets an NSEC covering only the next closer name, synthesised and
-// signed for this response as its denials are.
+//   - A zone with an NSEC chain that this server does not sign proves it with
+//     the chain's own record, the one that covers qname, served as it is
+//     stored. That works on a secondary, which holds no key. A missing record,
+//     or one without a signature, is a gap: what exists is served, and the
+//     serial gets its one warning. A cover is never synthesized in its place;
+//     it could not be signed.
+//   - A zone that is signed but holds no chain has no proof to give.
+//   - A zone signed here serves its chain's record when that carries a
+//     signature, and otherwise synthesizes an NSEC covering only the next
+//     closer name, signed for this response as its denials are.
 //
 // The error is from signing that NSEC. A zone that must be signed and cannot
 // sign the proof is broken, and the caller answers SERVFAIL, as for a denial
@@ -38,6 +44,37 @@ import (
 // coverNextCloser) the answer goes out without one.
 func (zd *ZoneData) addWildcardProof(m *dns.Msg, snap *zoneSnapshot, apex *OwnerData, qname, wildcard string,
 	signFunc func(core.RRset, string) (core.RRset, error)) error {
+	switch zd.denialSourceFor(apex) {
+	case denialChain:
+		nsec, ok := nsecCoveringFrom(snap, qname)
+		var gap string
+		switch {
+		case !ok:
+			gap = fmt.Sprintf("no NSEC covers %s", qname)
+		case len(nsec.RRSIGs) == 0:
+			gap = fmt.Sprintf("the NSEC at %s has no RRSIG", nsec.RRs[0].Header().Name)
+		}
+		if gap != "" && zd.signsHere() {
+			lgHandler.Error("the zone's own NSEC chain cannot prove a wildcard answer; serving SERVFAIL",
+				"zone", zd.ZoneName, "qname", qname, "reason", gap)
+			return errDenialUnproven
+		}
+		if ok {
+			m.Ns = append(m.Ns, nsec.RRs...)
+			m.Ns = append(m.Ns, nsec.RRSIGs...)
+		}
+		if gap != "" {
+			snap.warnDenial(zd.ZoneName, gap, qname)
+		}
+		return nil
+	case denialNoChain:
+		snap.warnDenial(zd.ZoneName, noChainReason(apex), qname)
+		return nil
+	case denialUnsigned:
+		return nil
+	}
+
+	// A zone signed here.
 	if !zd.Options[OptBlackLies] {
 		if nsec, ok := nsecCoveringFrom(snap, qname); ok && len(nsec.RRSIGs) > 0 {
 			m.Ns = append(m.Ns, nsec.RRs...)

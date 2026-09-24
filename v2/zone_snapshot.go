@@ -37,12 +37,17 @@ type zoneSnapshot struct {
 	ents map[string]struct{}
 
 	// nsecIndex lists the owners that carry a stored NSEC, in the order the
-	// chain was built in, for finding the chain record that proves a wildcard
-	// answer (nsecCoveringFrom). Built on first use, since only a signed
-	// wildcard answer needs it; a snapshot does not change once published,
-	// so neither does its index.
+	// chain was built in, for finding the chain record that proves a denial
+	// or a wildcard answer (nsecCoveringFrom). Built before the snapshot is
+	// published when its apex holds an NSEC (prepareDenialIndex), and on
+	// first use for any other; a snapshot does not change once published, so
+	// neither does its index.
 	nsecOnce  sync.Once
 	nsecIndex []nsecIndexEntry
+
+	// denialWarn keeps warnDenial to one warning per snapshot about negative
+	// answers it cannot fully prove.
+	denialWarn sync.Once
 }
 
 // entNamesFrom collects the zone's empty non-terminals from its owner map: for

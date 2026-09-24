@@ -109,28 +109,22 @@ func TestUnsignedZoneWithoutKeyDBAnswersDO(t *testing.T) {
 	if m := respondWith(t, zd, "ns.neg.example.", dns.TypeA, true); m.Rcode != dns.RcodeSuccess || len(m.Answer) == 0 {
 		t.Errorf("positive answer: rcode %s answer %v; want the A record", dns.RcodeToString[m.Rcode], m.Answer)
 	}
-	// The denial is the one a DO query gets from any zone: without the CO flag,
-	// NOERROR with the SOA and a synthesized NSEC at the qname whose bitmap
-	// holds NXNAME (RFC 9824) -- NOERROR rather than NXDOMAIN, because the NSEC
-	// makes the name look as if it exists to a validator that does not know
-	// NXNAME.
+	// The denial is the one a query without DO gets: the rcode and the SOA,
+	// and no NSEC. There is no key to sign one with, and an unsigned NSEC
+	// beside NOERROR is what resolvers used to cache as NODATA for a name that
+	// does not exist (#771).
 	m := respondWith(t, zd, "nope.neg.example.", dns.TypeA, true)
 	var soa bool
-	var nxname bool
 	for _, rr := range m.Ns {
-		switch x := rr.(type) {
+		switch rr.(type) {
 		case *dns.SOA:
 			soa = true
 		case *dns.NSEC:
-			if x.Hdr.Name == "nope.neg.example." {
-				for _, t := range x.TypeBitMap {
-					nxname = nxname || t == dns.TypeNXNAME
-				}
-			}
+			t.Errorf("an unsigned zone served an NSEC: %s", rr)
 		}
 	}
-	if m.Rcode != dns.RcodeSuccess || !soa || !nxname {
-		t.Errorf("denial: rcode %s authority %v; want NOERROR with the SOA and an NXNAME NSEC at nope.neg.example.",
+	if m.Rcode != dns.RcodeNameError || !soa {
+		t.Errorf("denial: rcode %s authority %v; want NXDOMAIN with the SOA",
 			dns.RcodeToString[m.Rcode], m.Ns)
 	}
 }
