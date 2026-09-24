@@ -500,6 +500,17 @@ func (zd *ZoneData) reconcileZoneFileWithJournal(verdict ZoneFileVerdict, prev *
 		return
 	}
 
+	// An overlay zone's journal is not reconciled with a file. The replacement
+	// that loaded the zone has applied it already, whether the content came by
+	// transfer or from a persisted copy at first bind (journal_overlay.go).
+	// The replay would refuse it as soon as the upstream had moved on, and
+	// report the zone file as edited.
+	if zd.isOverlayZone() {
+		lg.Debug("journal overlay: the journal was applied with the zone's content; not replaying it",
+			"zone", zd.ZoneName)
+		return
+	}
+
 	// One locked read for the log lines below. zd.fileSerial is written by the
 	// parse paths under zd.mu, so reading it bare here is a race -- and a
 	// pointless one, since every use is a log field.

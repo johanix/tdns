@@ -354,6 +354,15 @@ type ZoneData struct {
 	// replay that re-persisted what it just replayed would double the stored
 	// history on every restart.
 	wsPersistDelta bool
+	// wsFromReplacement marks a working set built from a replacement -- a
+	// transfer, or a reload of the zone's file -- that has not been published
+	// yet: its publish was refused (it could not be signed, or its chain could
+	// not be repaired) and it stays staged for a later publish. A replacement
+	// is not a local change, so a zone-updater change must not be applied on
+	// top of it: the journal records a change as the difference from the
+	// published snapshot, and would record the replacement with it (#748).
+	// See flushStagedReplacementLocked. Guarded by mu.
+	wsFromReplacement bool
 	// fileSerial is the SOA serial of the zone FILE as last read from or
 	// written to disk. It is NOT CurrentSerial: a zone that re-signs or
 	// republishes during load advances CurrentSerial well past what the file

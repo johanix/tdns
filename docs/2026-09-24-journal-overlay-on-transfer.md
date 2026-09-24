@@ -3,7 +3,8 @@
 **Written 2026-09-24.** For #732. Line references are to main at `ff4c4b1a`.
 
 **Status:** merged as #746, after an external review (sound) and a re-review
-(merge). Nothing implemented. The review is applied: the overlay is limited to
+(merge). Implemented in #747; §11 records what the implementation settled.
+L1 has not been run. The review is applied: the overlay is limited to
 the server's own records (Q1, decided), the journal read, publish and
 compaction are pinned to one lock (4.3, 4.4), and Q2 and Q3 are answered
 (§10).
@@ -372,3 +373,43 @@ without the overlay, compacting would discard what the journal is for.
   `zone journal status`.
 - **Q3.** Overlay the CSYNC, as a primary keeps it. A stale CSYNC is harmless,
   and the next NS sync replaces it.
+
+## 11. Amendment, 2026-09-24: what the implementation settled
+
+Implemented in #747. These points were not settled above. Johan answered the
+first five, the fifth after an external review; the last two are the
+implementation's choices.
+
+- **`zone journal purge` asks for `--force` on an overlay zone.** The journal
+  is the only copy of the zone's own records, as a replaying journal is for a
+  primary. The refusal says what purging costs and does not point at
+  `zone sync`. `zone journal status` reports the journal as applied to every
+  full transfer, with the same warning, in place of the replay lines (4.6).
+- **`journal: active: false` with rows from before the switch.** They are
+  still overlaid and compacted. Reads are not gated, as the replay is not, and
+  the primary's merge rewrites the journal whatever the switch says.
+- **No compaction after a refused publish.** Compaction follows a publish that
+  installed the content, or one that an open transaction holds staged (a zone
+  created held, at its first load). A publish refused because the zone cannot
+  be signed, its chain cannot be repaired, it has no apex or it is no longer
+  live leaves the journal as it was, for the next full replacement.
+- **`zone write`, `zone sync` and freeze keep an overlay zone's journal.**
+  `WriteZone` drops a primary's journalled changes once its file holds them. An
+  overlay zone's journal is not relative to a file, and dropping it would take
+  the zone's own records out at the next full transfer.
+- **A replacement is never journalled as a local change (#748).** The overlay
+  rests on the journal holding only this server's own records. A transfer or
+  reload refused at signing stays staged, and an update applied on top of it
+  was journalled together with it; the overlay would then have kept an
+  upstream CDS as the server's own. A zone-updater change now publishes the
+  staged replacement first, at a new serial, and is refused while it still
+  cannot be published, including while a transaction holds the zone. A
+  replacement also drops the journal flag of an update that was refused at
+  signing before it, whose staged change it replaces.
+- **An unreadable journal row** is not applied, and the journal is not
+  compacted, since compacting would drop it.
+- **The Q2 log line** is at Warn.
+
+The tests are in `v2/journal_overlay_test.go`: T1–T13, a CSYNC through the
+same path as the CDS, an unreadable row, `zone journal status` and purge, and
+`zone write`. #748's are in `v2/staged_replacement_test.go`.
