@@ -661,6 +661,9 @@ func (zd *ZoneData) proxyDSFromCDS() (ds []dns.RR, served, usable bool) {
 		}
 		d := c.DS
 		d.Hdr = dns.RR_Header{Name: dns.Fqdn(zd.ZoneName), Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: c.Hdr.Ttl}
+		// Lower case, as the wire gives it: the parent's DS comes from the wire,
+		// and the comparison with it is case-sensitive (newCdsTuple).
+		d.Digest = strings.ToLower(d.Digest)
 		ds = append(ds, &d)
 	}
 	return ds, true, true

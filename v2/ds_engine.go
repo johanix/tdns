@@ -460,6 +460,12 @@ func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
 		return
 	}
 	current, err := currentCdsTuples(zd)
+	if errors.Is(err, ErrZoneNotReady) {
+		// A zone's first signing marks it before the zone is Ready. Not an
+		// error: the next hint, or the backstop a tick later, runs it again.
+		lgDSEngine.Debug("the zone is not ready yet; the CDS is looked at on the next run", "zone", zd.ZoneName)
+		return
+	}
 	if err != nil {
 		lgDSEngine.Warn("could not read the published CDS", "zone", zd.ZoneName, "err", err)
 		return
@@ -800,12 +806,7 @@ func cdsTuplesOf(rrs []dns.RR) map[cdsTuple]struct{} {
 		if !ok {
 			continue
 		}
-		out[cdsTuple{
-			KeyTag:     c.DS.KeyTag,
-			Algorithm:  c.DS.Algorithm,
-			DigestType: c.DS.DigestType,
-			Digest:     c.DS.Digest,
-		}] = struct{}{}
+		out[newCdsTuple(c.DS.KeyTag, c.DS.Algorithm, c.DS.DigestType, c.DS.Digest)] = struct{}{}
 	}
 	return out
 }

@@ -3,6 +3,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -120,7 +121,17 @@ type cdsTuple struct {
 	KeyTag     uint16
 	Algorithm  uint8
 	DigestType uint8
-	Digest     string
+	Digest     string // lower-case hex; build with newCdsTuple
+}
+
+// newCdsTuple is the comparison tuple of one DS-shaped record. The digest is
+// hex, and hex has no case: ToDS and the wire give lower case, while the DNS
+// library prints a DS digest in upper case, so a CDS read back from text -- a
+// journal replay at a restart, a zone file -- carries upper case. Compared
+// as written, the same CDS looked different after every restart and was
+// republished.
+func newCdsTuple(keyTag uint16, algorithm, digestType uint8, digest string) cdsTuple {
+	return cdsTuple{KeyTag: keyTag, Algorithm: algorithm, DigestType: digestType, Digest: strings.ToLower(digest)}
 }
 
 // expectedCdsTuplesForRange recomputes the CDS tuples from the KSK
@@ -156,12 +167,7 @@ func expectedCdsTuplesForRange(kdb *KeyDB, zone string, low, high int) (map[cdsT
 		if ds == nil {
 			continue
 		}
-		out[cdsTuple{
-			KeyTag:     ds.KeyTag,
-			Algorithm:  ds.Algorithm,
-			DigestType: ds.DigestType,
-			Digest:     ds.Digest,
-		}] = struct{}{}
+		out[newCdsTuple(ds.KeyTag, ds.Algorithm, ds.DigestType, ds.Digest)] = struct{}{}
 	}
 	return out, nil
 }
@@ -187,12 +193,7 @@ func currentCdsTuples(zd *ZoneData) (map[cdsTuple]struct{}, error) {
 		if !ok {
 			continue
 		}
-		out[cdsTuple{
-			KeyTag:     c.DS.KeyTag,
-			Algorithm:  c.DS.Algorithm,
-			DigestType: c.DS.DigestType,
-			Digest:     c.DS.Digest,
-		}] = struct{}{}
+		out[newCdsTuple(c.DS.KeyTag, c.DS.Algorithm, c.DS.DigestType, c.DS.Digest)] = struct{}{}
 	}
 	return out, nil
 }

@@ -155,3 +155,14 @@ func TestAProxysDelegationAnalysisComparesTheParentsDSWithTheCds(t *testing.T) {
 		t.Errorf("adds %v, removes %v; want +KSK2 -KSK1", resp.DSAdds, resp.DSRemoves)
 	}
 }
+
+// A proxy zone's CDS read back from text (upper-case digest) is in step with a
+// parent holding the same DS from the wire (lower case).
+func TestAProxyComparesDigestsWithoutCase(t *testing.T) {
+	zd := proxyCdsZone(t, fromText(t, cdsFor("example.", pubB)))
+	resp := DelegationSyncStatus{InSync: true}
+	zd.proxyCompareDS(&resp, dsOfKeys(pubB))
+	if !resp.InSync {
+		t.Errorf("in sync = false (adds %v, removes %v); a digest's case is not a difference", resp.DSAdds, resp.DSRemoves)
+	}
+}

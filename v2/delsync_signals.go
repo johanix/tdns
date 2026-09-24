@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -93,7 +94,7 @@ func sameRecords(a, b []dns.RR) bool {
 	for _, x := range a {
 		found := false
 		for _, y := range b {
-			if dns.IsDuplicate(x, y) {
+			if dns.IsDuplicate(caselessDigest(x), caselessDigest(y)) {
 				found = true
 				break
 			}
@@ -103,6 +104,23 @@ func sameRecords(a, b []dns.RR) bool {
 		}
 	}
 	return true
+}
+
+// caselessDigest is rr with a DS-shaped digest in lower case: hex has no case,
+// and the DNS library prints it upper, so the same CDS read back from text
+// would otherwise differ from itself (newCdsTuple).
+func caselessDigest(rr dns.RR) dns.RR {
+	switch v := rr.(type) {
+	case *dns.CDS:
+		c := *v
+		c.Digest = strings.ToLower(c.Digest)
+		return &c
+	case *dns.DS:
+		c := *v
+		c.Digest = strings.ToLower(c.Digest)
+		return &c
+	}
+	return rr
 }
 
 // signalsEditedSteps are what the SIGNALS-EDITED handler does, separated so

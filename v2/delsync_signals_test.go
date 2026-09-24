@@ -288,3 +288,13 @@ func TestEditedSignalTypesIgnoresTTL(t *testing.T) {
 		t.Errorf("a removal counted as %v, want CDS", got)
 	}
 }
+
+// An identical CDS written with the other case is no edit.
+func TestEditedSignalTypesIgnoresDigestCase(t *testing.T) {
+	lower := mustRR(t, editCDS)
+	upper := mustRR(t, lower.String()) // String prints the digest in upper case
+	if got := editedSignalTypes(map[uint16][]dns.RR{dns.TypeCDS: {lower}},
+		map[uint16][]dns.RR{dns.TypeCDS: {upper}}); len(got) != 0 {
+		t.Errorf("a digest's case counted as an edit of %v", got)
+	}
+}

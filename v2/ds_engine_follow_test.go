@@ -595,3 +595,36 @@ func TestTheFirstRunsCompareFindsTheParentBehindOrInStep(t *testing.T) {
 		})
 	}
 }
+
+// fromText is rrs printed and parsed back, as a journal replay or a zone file
+// load gives them: the DNS library prints a DS digest in upper case, and ToDS
+// and wire unpacking give lower case.
+func fromText(t *testing.T, rrs []dns.RR) []dns.RR {
+	t.Helper()
+	var out []dns.RR
+	for _, rr := range rrs {
+		out = append(out, mustRR(t, rr.String()))
+	}
+	return out
+}
+
+// Test 2, as the lab found it: after a restart the CDS comes back from the
+// journal, parsed from text, with its digest in upper case. That is the same
+// CDS, and neither the follow-keys run nor ensureCDS may publish it again.
+func TestACdsReadBackFromTextIsTheSameCds(t *testing.T) {
+	r := newSigningRig(t, false)
+	served := fromText(t, cdsOfKeys("example.", r.kskA))
+	if c := served[0].(*dns.CDS); c.Digest == cdsOfKeys("example.", r.kskA)[0].(*dns.CDS).Digest {
+		t.Fatal("the round trip kept the digest's case; this test needs it changed")
+	}
+	stageCDS(t, r.zd, served)
+
+	r.kdb.followKeysWithCDS(context.Background(), r.zd)
+	if res := r.kdb.ensureCDS(context.Background(), r.zd); res.err != nil {
+		t.Fatalf("ensureCDS: %v", res.err)
+	}
+
+	if events := r.log.snapshot(); len(events) != 0 {
+		t.Errorf("a CDS read back from text was republished: %v", events)
+	}
+}
