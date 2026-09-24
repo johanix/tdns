@@ -1753,9 +1753,10 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 
 	ImrHandler := imr.createImrHandler(ctx, conf)
 
-	// Create a local ServeMux for ImrEngine to avoid conflicts with other engines
-	imrMux := dns.NewServeMux()
-	imrMux.HandleFunc(".", ImrHandler)
+	// Create a local ServeMux for ImrEngine to avoid conflicts with other engines.
+	// It truncates oversized UDP answers to the client's buffer size; the
+	// DoT/DoH/DoQ engines below get the unwrapped ImrHandler.
+	imrMux := newImrDo53Mux(ImrHandler)
 
 	if CaseFoldContains(conf.Listeners.Transports, "do53") {
 		lgImr.Info("starting Do53 listeners", "addresses", addresses)

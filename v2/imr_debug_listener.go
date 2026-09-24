@@ -59,9 +59,7 @@ func (imr *Imr) startImrDebugListener(ctx context.Context, addr string, conf *Co
 		lgImr.Error("refusing to start the imr debug listener", "err", err)
 		return nil, err
 	}
-	handler := imr.createImrDebugHandler(ctx, conf)
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", handler)
+	mux := newImrDo53Mux(imr.createImrDebugHandler(ctx, conf))
 
 	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {
