@@ -4,9 +4,9 @@
 `0847c04e`.
 
 **Status:** merged as #772, after an external review (sound) and a
-re-review (merge). Stage 1 is implemented in #774, not merged (§12). Stage 2
-is implemented on branch `claude/770-denial-stage2`, stacked on #774, not
-merged (§13).
+re-review (merge). Stage 1 is merged as #774 (1c82e9cd), after a review
+(merge) (§12). Stage 2 is implemented in #775, reviewed (merge after #774),
+not merged (§13).
 
 **Revisions:**
 - r1 2026-09-25: first version (PR #772).
