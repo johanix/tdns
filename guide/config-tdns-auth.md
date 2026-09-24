@@ -447,10 +447,40 @@ not sign.
 | Option | Effect |
 |--------|--------|
 | `fold-case` | Case-insensitive owner-name matching |
-| `black-lies` | Compact denial of existence: synthesize a minimally covering NSEC rather than serving precomputed NSEC records |
+| `black-lies` | Compact denial of existence (RFC 9824) for a zone signed here: synthesize and sign an NSEC for each negative answer rather than serving the zone's NSEC chain, and generate no chain. No effect on a zone this server does not sign. See "Negative answers" below |
 | `add-transport-signal` | Synthesize SVCB transport-signal RRs into the Additional section |
 | `publish-zonemd` | Maintain the apex ZONEMD RRset (RFC 8976). See below |
 | `verify-zonemd` | Check a zone's apex ZONEMD before adopting it, on every load and inbound transfer. See below |
+
+**Negative answers**
+
+A negative answer to a query with DO set carries the proof that the name or
+type does not exist. Where it comes from depends on the zone:
+
+| Zone | Proof in a negative answer |
+|------|----------------------------|
+| signed here, with `black-lies` | a compact denial, synthesized and signed per answer; NOERROR for a missing name unless the query set CO |
+| signed here, without `black-lies` | the NSEC chain the signer keeps for the zone, with its stored signatures |
+| not signed here, with an NSEC chain (a secondary of a signed zone) | the chain it was given, with the signatures it came with |
+| not signed here, signed but without an NSEC chain (NSEC3, or a compact-denial primary) | none: the rcode and the signed SOA, and one warning in the log per serial |
+| unsigned | none: the same answer as without DO |
+
+Proofs from a chain follow RFC 4035 section 3.1.3: a missing name gets
+NXDOMAIN, whatever the CO flag says. When the chain lacks a record a proof
+needs, a zone signed here answers SERVFAIL, and any other zone serves what it
+holds and logs one warning per serial. `black-lies` can be set per zone or in
+a template:
+
+```yaml
+zones:
+   - name:            example.com.
+     type:            primary
+     zonefile:        /etc/tdns/zones/example.com
+     dnssecpolicy:    default
+     options:
+        - online-signing
+        - black-lies    # compact denials instead of the NSEC chain
+```
 
 **Zone-owner signaling**
 
