@@ -65,3 +65,17 @@ func udpTruncate(next func(dns.ResponseWriter, *dns.Msg)) func(dns.ResponseWrite
 		next(w, r)
 	}
 }
+
+// newImrDo53Mux returns the mux for an IMR Do53 (UDP+TCP) listener: handler
+// on ".", behind udpTruncate. Used by the IMR service listener and by the
+// imr-debug-address window.
+//
+// Do53 only. DoT, DoH and DoQ take the unwrapped handler: a DoQ connection's
+// remote address is UDP too, so udpTruncate there would truncate QUIC
+// answers. The auth side builds its own Do53 mux (do53.go) because
+// TsigSigningHandler must wrap outside the truncation.
+func newImrDo53Mux(handler func(dns.ResponseWriter, *dns.Msg)) *dns.ServeMux {
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", udpTruncate(handler))
+	return mux
+}
