@@ -2,7 +2,7 @@
 
 **Written 2026-09-24.** Line references are to main at `81a22644`.
 
-**Status:** proposal. Nothing implemented.
+**Status:** proposal, reviewed. Johan answered §8 on 2026-09-24, and the doc is written to those answers. Nothing implemented.
 
 ## Summary
 
@@ -10,15 +10,15 @@ A check of tdns against RFCs 7344, 8078, 9615, 9975, 8901 and 9859 found gaps on
 
 | Part | Issue | What | Priority |
 |---|---|---|---|
-| 1 | #752 | A served CDS goes stale when a KSK's DS status changes without a DNSKEY change, and a follow-keys change sends no NOTIFY(CDS) | **first; a route to a bogus zone** |
+| 1 | #752 | A served CDS goes stale when a KSK's DS status changes without a DNSKEY change; neither a follow-keys change nor an operator's edit of CDS, CDNSKEY or CSYNC tells the parent | **first; a route to a bogus zone** |
 | 2 | #755 | The parent treats any algorithm-0 CDS as the delete signal | second; small and dangerous |
 | 3 | #757 | DSYNC RR presentation, port 0, the root's `_dsync` name | third |
 | 4 | #753 | The child publishes CDS but never CDNSKEY; the parent never checks CDNSKEY | fourth |
 | 5 | #756 | NOTIFY receiver: no rate limiting, multi-zone NOTIFY accepted, Report-Channel unused | fifth |
 
-Each part is its own PR, in that order. Part 1 is small and stands alone.
+Each part is its own PR, in that order. Part 1 stands alone.
 
-Sizes are in §7 and the questions for Johan in §8.
+Sizes are in §7, and the questions with Johan's answers in §8.
 
 ## 1. #752: keep the CDS in step with the keys, and tell the parent
 
@@ -47,7 +47,7 @@ The exported `KeysChanged` (`v2/ds_engine.go:214`) exists for this purpose, but 
 
 There is a second reason the trigger is late. After a keystore change, the DNSKEY RRset is republished only by the next signing pass. `republishSigningKeysForZone` (`v2/signing_keys_snapshot.go:102`) rebuilds the signing-key snapshot and publishes nothing.
 
-When `followKeysWithCDS` does change the CDS, it sends no NOTIFY (RFC 9859 §4.2, SHOULD).
+When `followKeysWithCDS` does change the CDS, it sends no NOTIFY (RFC 9859 §4.2, SHOULD). Nor does an operator's edit of the CDS, CDNSKEY or CSYNC through the management API or DNS UPDATE.
 
 ### 1.2 Design
 
@@ -71,22 +71,59 @@ The marks coalesce per zone (`dsEngineKeysChanged`), so the backstop adds at mos
 
 This is only for zones that serve a CDS or are owned, and followKeysWithCDS returns before the query for any other zone.
 
-**One consequence to accept.** A CDS an operator published by hand on a zone whose keys tdns manages is now replaced within a tick. Today it is replaced only at the next SEP change. That follows from the existing rule that the DS engine owns the CDS RRset. It is documented, not guarded against.
+**One consequence to accept.** A CDS an operator published by hand on a zone whose keys tdns manages is now replaced within a tick, or at once when the edit came through the API or DNS UPDATE (c). Today it is replaced only at the next SEP change. That follows from the existing rule that the DS engine owns the CDS RRset. It is documented, not guarded against.
 
 **(b) Tell the parent after a follow-keys change.** When `followKeysWithCDS` has published a **changed, non-empty** CDS, it queues an `EXPLICIT-SYNC-DELEGATION` for the zone. Only for zones in child delegation-sync mode (`childDelegationSyncPredicate`, `v2/delsync_refresh.go:34`), read under `zd.mu`.
 
 The explicit sync compares the parent's DS with the DS intent (`AnalyseZoneDelegation`, `v2/delegation_utils.go:243`; the DS comparison is at `:375-389`). It then syncs through whatever scheme the parent advertises:
-- **NOTIFY:** `ensureCDS`, which finds the CDS already published, then NOTIFY(CDS) (`v2/delegation_sync.go:626-671`);
+- **NOTIFY:** `ensureCDS`, then NOTIFY(CDS) (`v2/delegation_sync.go:626-671`);
 - **UPDATE or API:** the DS directly.
+
+The explicit sync covers the whole delegation, so a follow-keys change also pushes an NS or glue difference that was already there. That is accepted. There is no CDS-only variant of the command.
+
+**`ensureCDS` stops republishing a CDS that is already served.** Today it always calls `publishCDSAndWait` (`v2/ds_engine.go:417-418`). That update deletes the CDS RRset and adds it back, so the updater sees a change even when the records are identical: another serial and another journal row. After a follow-keys change the parent's DS is still the old one, so the explicit sync is out of step and would do exactly that. `ensureCDS` therefore compares the CDS it wants with the served one (`cdsTupleSetsEqual`, as `followKeysWithCDS` does) and returns the served set without publishing when they match. That holds for every model that builds its CDS from the intent: `none`, and an owned multi-provider zone. The NOTIFY then goes out as before.
 
 No new NOTIFY path is needed.
 
 The rest of (b):
-- **The queue is not blocked on.** The DS engine sends with `select … default`. A full `DelegationSyncQ` is logged, and the next backstop tick tries again if the parent is still out of step. A blocking send could deadlock the DS engine against a `DelegationSyncher` that is itself waiting in `askDSEngine`.
-- **A withdrawal (an empty intent) queues nothing.** For a zone whose keys tdns manages, the explicit sync treats an empty intent as an instruction to remove the parent's DS (`v2/delegation_utils.go:385-389`, `NewDS` is authoritative even when empty). Going insecure stays an operator's action.
+- **The queue is not blocked on.** The DS engine sends with `select … default`. A blocking send could deadlock the DS engine against a `DelegationSyncher` that is itself waiting in `askDSEngine`.
+- **A dropped send is retried by the DS engine.** A full `DelegationSyncQ` puts the zone on a sync-pending list that only the DS engine's goroutine touches. Whenever the engine runs for a zone on that list, it tries the send again, whether or not the CDS changed this time; a send that gets through takes the zone off the list. The backstop in (a) runs the engine for every CDS-serving zone each tick, so a dropped send is retried within `kasp.check-interval`. Without the list, the next tick would find the CDS matching the intent, return, and never tell the parent. Whether the parent is in step is `AnalyseZoneDelegation`'s question, not the DS engine's.
+- **A withdrawal (an empty intent) queues nothing,** and takes the zone off the sync-pending list. For a zone whose keys tdns manages, the explicit sync treats an empty intent as an instruction to remove the parent's DS (`v2/delegation_utils.go:385-389`, `NewDS` is authoritative even when empty). Going insecure stays an operator's action.
 - **Multi-DS zones are untouched.** `followKeysWithCDS` returns early for them, and the rollover engine pushes their DS itself.
 
-**(c) Not in this part.** A CDS, CDNSKEY or CSYNC edited directly through the API or DNS UPDATE still sends no NOTIFY. The clean place for that is a publish-level hook: "this publish changed an apex CDS, CDNSKEY or CSYNC RRset of a child-sync zone". But the rollover push and the NOTIFY scheme already send their own NOTIFY for the same change, so the hook needs a way to recognise those. That is §8 Q3.
+**(c) Tell the parent after an operator edits CDS, CDNSKEY or CSYNC.** This covers an edit through the management API (`v2/zone_update_api.go:80`) or through DNS UPDATE admitted by `allow-updates`.
+
+- **Where.** In the ZoneUpdater's `ZONE-UPDATE` arm, after a successful apply, beside the existing `SYNC-DELEGATION` enqueue (`v2/zone_updater.go:468`).
+- **Which updates.** Only those without `InternalUpdate`. Every tdns writer of these RRsets sets it, and sends its own NOTIFY where one is due:
+  - the DS engine;
+  - the rollover push;
+  - the CSYNC publisher (`v2/ops_csync.go:130`);
+  - `PublishCdsRRs` for tdns-mp (`v2/ops_cds.go:93`);
+  - the RFC 9615 republisher;
+  - journal replay and zone merge.
+
+  That is how the hook recognises them, with no extra marker.
+- **Which zones.** Those for which `childDelegationSyncPredicate` holds, read under `zd.mu`. Multi-provider zones are excluded, so tdns-mp's use is untouched.
+- **What counts as an edit.** Before applying, the ZoneUpdater reads the served apex RRsets of the three types; it does so only when an action names the apex with one of them, or `ANY`. It reads them again after the apply. A type whose RRset differs has been edited, so an identical republish sends nothing.
+- **What is queued.** One `SIGNALS-EDITED` request on `DelegationSyncQ`, naming the edited types. It uses the same cancellable enqueue as the `SYNC-DELEGATION` beside it.
+
+The `DelegationSyncher` handles `SIGNALS-EDITED` according to what was edited:
+- **CDS or CDNSKEY, on a zone whose keys tdns manages** (`DSIntentForZone(…).Known`):
+  - The DS engine owns this CDS, so the parent is told the intent, not the edit.
+  - The handler runs the `EXPLICIT-SYNC-DELEGATION` path. A NOTIFY parent gets `ensureCDS`, which publishes the intent's CDS if the edit differs, then NOTIFY(CDS). An UPDATE or API parent gets the DS. A parent already in step gets nothing.
+  - It then marks the DS engine (`KeysChanged`), so an edit that differs from the intent is replaced now rather than at the next tick.
+  - Sync first, then mark. When the sync ran `ensureCDS`, the CDS already matches the intent, the engine finds nothing to change, and (b) queues no second sync. The parent gets one NOTIFY.
+- **CDS or CDNSKEY, on a zone whose keys tdns does not manage:**
+  - Here the CDS is the operator's, and `AnalyseZoneDelegation` leaves the parent's DS alone (`v2/delegation_utils.go:340-373`). So the handler sends the NOTIFY itself.
+  - If either RRset is non-empty, it looks up the parent's NOTIFY target (`LookupDSYNCTarget(ctx, zone, dns.TypeCDS, core.SchemeNotify)`, `v2/dsync_lookup.go:200`) and hands one NOTIFY(CDS) to the notifier. RFC 9859 uses NOTIFY(CDS) for both types.
+  - A parent that advertises no NOTIFY target for CDS gets nothing, and that is logged at Info. The UPDATE and API schemes carry a DS, not a pointer to the CDS, and tdns does not turn an operator's CDS into a DS.
+  - A hand-published delete CDS is non-empty and is announced. Q2 is about tdns taking a zone insecure on its own; a delete CDS the operator published is the operator's action.
+- **CSYNC:** if non-empty, NOTIFY(CSYNC) to the parent's NOTIFY target for CSYNC, in the same way.
+- **An RRset removed:** nothing is sent. Under RFC 8078, removing the CDS means "no change".
+
+If the same update also changed the DNSKEY RRset, the `SYNC-DELEGATION` beside it runs as well. The two do not conflict, because each sync compares with the parent first.
+
+A CDS, CDNSKEY or CSYNC that arrives by zone reload or transfer is not covered. Nor is an edit on a zone not in child delegation-sync mode.
 
 Also out of this part: the manual KSK roll itself does not check that the parent has the new key's DS before it retires the old one. With (a), the standby's DS is offered by CDS as soon as the key becomes standby, so a parent that follows the CDS has it by the time an operator rolls. Whether `RolloverKey` for a KSK should refuse without a confirmed DS is a separate question.
 
@@ -97,9 +134,21 @@ Also out of this part: the manual KSK roll itself does not check that the parent
 3. **Backstop.** A `ds` change made directly in the database with no hook: within one `checkAndTransitionKeys` the CDS follows.
 4. **No churn.** A tick with nothing changed publishes nothing: the zone serial is unchanged and nothing is journalled.
 5. **NOTIFY.** With a child-sync zone and a parent advertising NOTIFY for CDS, a follow-keys change queues one `EXPLICIT-SYNC-DELEGATION`. It then leads to one NOTIFY(CDS), using the DS engine rig with `serveNotify` (`v2/ds_engine_test.go:31`).
-6. **No NOTIFY on withdrawal:** an intent that goes empty queues nothing.
-7. **A full queue:** a follow-keys change with `DelegationSyncQ` full does not block the DS engine.
-8. **Multi-DS and not-managed zones** are unchanged: the existing `TestAPublishedCdsFollowsTheKeys` cases pass.
+6. **No second publish.** In test 5, the explicit sync's `ensureCDS` publishes nothing: the serial is the one the follow-keys change produced, and it journalled one change.
+7. **No NOTIFY on withdrawal:** an intent that goes empty queues nothing.
+8. **A full queue:** a follow-keys change with `DelegationSyncQ` full does not block the DS engine. Once the queue has room, the next engine run for the zone, with the CDS now unchanged, queues the `EXPLICIT-SYNC-DELEGATION`. The run after that queues none.
+9. **Multi-DS and not-managed zones** are unchanged: the existing `TestAPublishedCdsFollowsTheKeys` cases pass.
+
+For (c), with a child-sync zone and a parent advertising NOTIFY for CDS and CSYNC:
+
+10. **Not managed, CDS edited:** a CDS added through the management API sends one NOTIFY(CDS). So does the same edit through DNS UPDATE.
+11. **Identical republish:** the same API edit repeated sends nothing.
+12. **Managed, edit differs from the intent:** the served CDS goes back to the intent's. With the parent's DS differing from the intent, exactly one NOTIFY(CDS) goes out, after the zone serves the intent's CDS. With the parent in step, none.
+13. **CSYNC edited:** one NOTIFY(CSYNC).
+14. **Removed:** deleting the CDS RRset, or the CSYNC, sends nothing.
+15. **Internal writers:** a DS engine publish, a rollover publish and `PublishCsyncRR` queue no `SIGNALS-EDITED`.
+16. **Other zones:** a multi-provider zone, and a zone without the `parentsync` option, queue nothing.
+17. **No NOTIFY target:** a parent advertising only UPDATE for CDS gets nothing from an edit on an unmanaged zone, and the log says so.
 
 ## 2. #755: only an exact delete CDS deletes
 
@@ -146,7 +195,7 @@ Part 4 adds the CDNSKEY delete form, `0 3 0 AA==` on the wire, when the parent s
 A scratch test against `v2/core/rr_dsync.go` showed:
 - **Parsing:**
   - The null scheme 0, unassigned schemes (for example 5) and private-use schemes (for example 200) fail to parse (`:92-95`).
-  - `TYPE59` fails.
+  - An RRtype field in `TYPEnnn` form fails, for example `TYPE59` (CDS's number). That is the first field of the DSYNC's rdata, the type it signals for, not the DSYNC type itself.
   - The port is not range-checked: 70000 becomes 4464, and -1 becomes 65535.
 - **Printing:** a scheme without a mnemonic prints as an empty field (`:79-81`).
 - **Unpacking:** truncated rdata returns early without an error (`:140-175`).
@@ -161,7 +210,7 @@ Consumers ignore scheme 0 and unknown schemes, by exact matching, but not port 0
 ### 3.2 Design
 
 - **`Parse`:**
-  - RRtype: a mnemonic, or `TYPEnnn`.
+  - RRtype field: a mnemonic, or `TYPEnnn`.
   - Scheme: a mnemonic, or a decimal 0–255 (`strconv.ParseUint(…, 10, 8)`).
   - Port: a decimal 0–65535 (`ParseUint(…, 10, 16)`).
   - Target: unchanged.
@@ -173,16 +222,17 @@ Consumers ignore scheme 0 and unknown schemes, by exact matching, but not port 0
   - the scheme match in `v2/dsync_lookup.go:216`.
 - **Root names:**
   - The owner of the root's DSYNC becomes `_dsync.`, and a TLD's per-child name `<tld>._dsync.`.
-  - Discovery tries the RFC name first. For one release it also falls back to the old `…_dsync.root.` names, and logs when it has to. That is §8 Q8.
-  - The publisher publishes only the RFC names.
-- **The scheme numbers** UPDATE=2, SCANNER=3 and API=4 (`v2/core/rr_dsync.go:40-48`) are unassigned in the IANA registry. What to do about them is §8 Q9. The code change is one table if they move.
+  - A clean switch (Q8): the publisher publishes only the RFC names, and discovery looks up only the RFC names, with no fallback to `…_dsync.root.`. There is no installed base to carry.
+  - A root zone's publisher logs at Info, once, that its DSYNC is at `_dsync.` and no longer at `_dsync.root.`, so a test set up against an older build shows why it finds nothing.
+  - A root and its TLD children therefore move to a build with this change together.
+- **The scheme numbers** UPDATE=2, SCANNER=3 and API=4 (`v2/core/rr_dsync.go:40-48`) stay as they are for now (Q9). They are unassigned in the IANA registry, whose 2–127 range is the IETF's to assign, and 128–255 is private use (RFC 9859 §6.2). Moving them is one table when that is decided.
 
 ### 3.3 Tests
 
 - **Parse and print round trip:** scheme 0, 5, 200 and every mnemonic; `TYPE59`; ports 0, 65535 and 65536 (the last refused).
 - **Unpack of truncated rdata:** an error.
 - **Port 0:** a DSYNC with port 0 is never selected; with a second, usable record, that one is selected.
-- **The root:** a root zone publishes at `_dsync.`, discovery for a TLD child queries `<tld>._dsync.`, and the legacy fallback is found and logged.
+- **The root:** a root zone publishes at `_dsync.` and nothing at `_dsync.root.`; discovery for a TLD child queries `<tld>._dsync.` and `_dsync.`, and never a `…_dsync.root.` name.
 
 ## 4. #753: CDNSKEY alongside CDS
 
@@ -213,7 +263,7 @@ The parent reads CDS only and never fetches CDNSKEY.
   - the withdrawals: `releaseRolloverCDS`, `withdrawUnclaimedCDS`.
 - **Comparisons stay on the CDS.** Rollover claims and the follow-keys comparison keep comparing CDS; the CDNSKEY follows it.
 - **The exported helpers stay as they are:** `PublishCdsRRs` and `UnpublishCdsRRs` (`v2/ops_cds.go:67`, used by tdns-mp), and `PublishCDSAndWait`. Each also writes the CDNSKEY when it can derive one.
-- **A policy setting.** `dnssec.policies.<p>.cdnskey: true | false`, default `true`. RFC 7344 lets a child that knows its parent reads only CDS publish CDS alone (§8 Q5).
+- **A policy setting.** `dnssec.policies.<p>.cdnskey: true | false`, default `true` (Q5). RFC 7344 lets a child that knows its parent reads only CDS publish CDS alone. The default is what lets a tdns child pass a parent that applies RFC 9975 strictly.
 - **The key-row invariant** check I7 (`v2/keyrow_check.go:291-330`) also compares the served CDNSKEY with the CDS.
 - **Already in place:**
   - the journal overlay's allowlist has CDNSKEY (`v2/journal_overlay.go:52-56`);
@@ -223,9 +273,12 @@ The parent reads CDS only and never fetches CDNSKEY.
 
 ### 4.3 Design, parent
 
-The scanner keeps consuming CDS; RFC 7344 §6 lets it choose. It also fetches CDNSKEY from the same servers, through the same fetch, to check consistency (RFC 9975 §3.1):
-- **CDNSKEY served somewhere:** the keys it names, turned into SHA-256 DS, must equal the keys the CDS names (SHA-256 records). Otherwise the state is inconsistent and nothing changes.
-- **CDNSKEY absent at every server that answered:** a CDS-only child, accepted. That is this doc's reading of 9975: the requirement applies when both types are published. §8 Q4.
+The scanner keeps consuming CDS; RFC 7344 §6 lets it choose. It also fetches CDNSKEY from the same servers, through the same fetch, to check consistency.
+
+A parent that fetches both types is bound by RFC 9975 §3.1: a key referenced in the CDS but not the CDNSKEY, or the other way round, makes the state inconsistent, and a NODATA answer counts as an answer. A CDS served everywhere with no CDNSKEY anywhere is therefore inconsistent under 9975. What follows departs from that in one case, as local policy (Q4):
+- **CDNSKEY served by any server:** 9975 applies strictly. The keys the CDNSKEY names, turned into SHA-256 DS, must equal the keys the SHA-256 CDS records name. Otherwise the state is inconsistent and nothing changes.
+- **CDNSKEY absent at every server that answered:** accepted as a CDS-only child. This is **local policy, not a reading of 9975**. It keeps existing CDS-only children working, tdns children of older builds among them. It is logged at Info as a 9975 exception.
+- **Digest types.** Only SHA-256 CDS records take part in the comparison. 9975 checks only the digest types marked MUST, and CDS records of other digest types are ignored for it. They still go to the DS the way they do today (`v2/scanner.go:1177-1195`).
 - **The CDNSKEY delete** `0 3 0 AA==` counts as a delete only alongside an exact delete CDS (Part 2). A CDNSKEY-only child is still not processed. That is unchanged, and allowed.
 
 Until #754 lands, the fetch has #754's limits: the first address, and skipped servers.
@@ -241,8 +294,9 @@ Until #754 lands, the fetch has #754's limits: the first address, and skipped se
 - **Parent:**
   - CDS and CDNSKEY matching → accepted.
   - A key in CDS only, with a non-empty CDNSKEY → inconsistent.
-  - CDNSKEY absent everywhere → accepted.
+  - CDNSKEY absent everywhere → accepted, with the local-policy log line.
   - CDNSKEY served by one server only → inconsistent.
+  - A CDS with SHA-256 and SHA-384 records, and a CDNSKEY matching the keys: the SHA-384 records do not make it inconsistent.
 
 ## 5. #756: the NOTIFY receiver
 
@@ -258,13 +312,17 @@ Until #754 lands, the fetch has #754's limits: the first address, and skipped se
   - **per source:** IPv4 /32, IPv6 /64;
   - **per child zone.**
 
-  Configuration: `scanner.notify-limit: { per-source: "10/s", per-source-burst: 50, per-zone: "1/10s", per-zone-burst: 3 }`, with those defaults. Idle entries are pruned. A limited NOTIFY is still answered NOERROR (§4.3 option 2: acknowledge to stop retries), with no scan queued. It is counted, logged at Debug, and reported with EDE 15 (Blocked) when the Report-Channel allows. NOTIFY(SOA) is left out (§8 Q6).
+  Configuration: `scanner.notify-limit: { per-source: "10/s", per-source-burst: 50, per-zone: "1/10s", per-zone-burst: 3 }`, with those defaults. Idle entries are pruned. A limited NOTIFY is still answered NOERROR (§4.3 option 2: acknowledge to stop retries), with no scan queued. It is counted, logged at Debug, and reported with EDE 15 (Blocked) when the Report-Channel allows. NOTIFY(SOA) is left out (Q6, deferred).
 - **Coalescing.** A NOTIFY for a child that already has a scan of the same type queued or running queues no second one. Fewer scans, and a NOTIFY storm for one zone costs one scan.
+- **The order** is per-source bucket, then coalescing, then per-zone bucket, then the queue:
+  - Every NOTIFY takes a per-source token, a coalesced one included. It is a message received from that source.
+  - Only a NOTIFY that would queue a scan takes a per-zone token. The per-zone bucket bounds scans, and a coalesced NOTIFY would otherwise spend the zone's burst on messages that start nothing.
+  - A coalesced NOTIFY is answered NOERROR like any other.
 - **Multi-question NOTIFY:** answered FORMERR, no action, for any NOTIFY opcode message with `len(Question) != 1`.
 - **Report-Channel:**
   - A NOTIFY-started scan that ends in a refusal or failure reports through `SendRfc9567ErrorReport`.
   - It does so only when the NOTIFY carried the option, and the agent domain is at or under one of the child's NS names in the parent zone. That check is added in the scanner, before sending, so `SendRfc9567ErrorReport` stays generic.
-  - Scan outcomes map to EDE codes through one table (§8 Q7). Proposed:
+  - Scan outcomes map to EDE codes through one table (Q7, as proposed):
 
 | Outcome | EDE |
 |---|---|
@@ -279,6 +337,7 @@ Until #754 lands, the fetch has #754's limits: the first address, and skipped se
 
 - **The limiter:** a burst beyond the per-zone bucket queues exactly the bucket's worth of scans. Every NOTIFY is still answered. Buckets for different sources and different zones are independent.
 - **Coalescing:** two NOTIFY(CDS) for one child, while its scan is running, queue one scan.
+- **Coalescing before the per-zone bucket:** NOTIFYs coalesced into a running scan leave the zone's per-zone tokens untouched, but each takes a per-source token.
 - **Multi-question NOTIFY:** FORMERR and no scan.
 - **Report-Channel:**
   - A refused scan with the option and a valid agent domain sends one report query, with the mapped EDE.
@@ -290,7 +349,7 @@ Until #754 lands, the fetch has #754's limits: the first address, and skipped se
 One PR per part, in the table's order. Part 1 is the fix that matters in the short term.
 
 - **Parts 1 and 2:** no dependencies between them or on anything else.
-- **Part 3:** no dependencies. Its root-name fallback is removed a release later.
+- **Part 3:** no dependencies. The root-name change is a clean switch, so there is nothing to remove later.
 - **Part 4, parent half:** uses Part 2's `classifyCDS` for the CDNSKEY delete form.
 - **Part 5:** its reporting covers Part 2's malformed-delete verdict. Otherwise independent.
 
@@ -300,27 +359,27 @@ One PR per part, in the table's order. Part 1 is the fix that matters in the sho
 
 | Part | Non-test code | Tests |
 |---|---|---|
-| 1 (#752) | ~70: hints ~10, backstop ~20, NOTIFY after follow ~40 | ~250 |
+| 1 (#752) | ~170: hints ~10, backstop ~20, NOTIFY after follow ~40, sync-pending list ~20, `ensureCDS` short-circuit ~10, operator edits (c) ~70 | ~450 |
 | 2 (#755) | ~40 | ~120 |
-| 3 (#757) | ~90 | ~150 |
+| 3 (#757) | ~80 | ~140 |
 | 4 (#753) | ~200: child ~130, parent ~70 | ~300 |
 | 5 (#756) | ~250: limiter ~100, coalescing ~40, FORMERR ~10, reporting ~70, config ~30 | ~300 |
 
-## 8. Questions for Johan
+## 8. Questions and answers
 
-1. **Part 1:**
-   - **Q1.** Both the prompt hints and the per-tick backstop, or the backstop alone? The backstop alone brings the CDS back in step within `kasp.check-interval`. The hints make it immediate. Proposed: both.
-   - **Q2.** No explicit sync after a follow-keys change that empties the CDS? Proposed: none; going insecure stays an operator's action.
-   - **Q3.** A NOTIFY for CDS, CDNSKEY or CSYNC edited directly through the API or DNS UPDATE: a publish-level hook later, as its own change? Proposed: later.
-2. **Part 4:**
-   - **Q4.** The parent's reading of an absent CDNSKEY under RFC 9975. Proposed: absent at every server that answered = a CDS-only child, consistent.
-   - **Q5.** The `cdnskey` policy setting, default `true`?
-3. **Part 5:**
-   - **Q6.** Rate-limit NOTIFY(SOA) too? Proposed: not in this part; the refresh path coalesces already.
-   - **Q7.** The EDE mapping in §5.2.
-4. **Part 3:**
-   - **Q8.** The root names: a one-release fallback to `…_dsync.root.`, or a clean switch?
-   - **Q9.** The scheme numbers UPDATE=2, SCANNER=3 and API=4, which are unassigned at IANA: keep them, move them into 128–255 until assigned, or request assignments?
+Johan answered on 2026-09-24, after the external review of the first version of this doc.
+
+| Q | Question | Answer | Where |
+|---|---|---|---|
+| Q1 | Both the prompt hints and the per-tick backstop, or the backstop alone? | Both | 1.2 (a) |
+| Q2 | No explicit sync after a follow-keys change that empties the CDS? | None; going insecure stays an operator's action | 1.2 (b) |
+| Q3 | A NOTIFY for a CDS, CDNSKEY or CSYNC edited through the API or DNS UPDATE: now or later? | **Now**, in Part 1. The first version proposed later | 1.2 (c) |
+| Q4 | The parent's reading of an absent CDNSKEY | Accept CDS-only, written as local policy and not as RFC 9975; strict once any server serves CDNSKEY | 4.3 |
+| Q5 | The `cdnskey` policy setting, default `true`? | Yes | 4.2 |
+| Q6 | Rate-limit NOTIFY(SOA) too? | Deferred; not in this part | 5.2 |
+| Q7 | The EDE mapping | As proposed | 5.2 |
+| Q8 | The root names: a one-release fallback or a clean switch? | Clean switch | 3.2 |
+| Q9 | UPDATE=2, SCANNER=3, API=4, unassigned at IANA: keep, move into 128–255, or request assignments? | Keep for now. The review recommended moving them | 3.2 |
 
 ## 9. Not in scope
 
