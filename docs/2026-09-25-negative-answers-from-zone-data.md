@@ -3,8 +3,8 @@
 **Written 2026-09-25.** For #770 and #771. Line references are to main at
 `0847c04e`.
 
-**Status:** proposal. Reviewed 2026-09-25 (sound); r3 applies that review.
-Nothing implemented.
+**Status:** merged as #772, after an external review (sound) and a
+re-review (merge). Nothing implemented; stage 1 is next.
 
 **Revisions:**
 - r1 2026-09-25: first version (PR #772).
@@ -14,6 +14,8 @@ Nothing implemented.
   §10 records its answers. NSEC3 is now #773. §8 item 10 is corrected: the
   existing compact-denial tests run on unsigned zones, so stage 1 has to move
   them.
+- r4 2026-09-25: the re-review's answer to Q7 is recorded, with where the
+  index is built (§3.5, §10), and the §3.2 wildcard-answer row is corrected.
 
 ## Summary
 
@@ -55,7 +57,7 @@ Nothing implemented.
   Stages 1 and 2 are small. Stage 3 is about as big as the other two
   together.
 - **Size:**
-  - Stage 1: about 250 lines of non-test code and 600 of tests, including
+  - Stage 1: about 260 lines of non-test code and 600 of tests, including
     moving the existing compact-denial tests.
   - Stage 2: about 20 lines, plus a rework of existing tests.
   - Stage 3: about 400 lines and 600 of tests (§9).
@@ -217,7 +219,7 @@ For row B, following RFC 4035 §3.1.3:
 | type does not exist | qname's own NSEC | NOERROR |
 | empty non-terminal | the NSEC covering qname, whose next name lies below qname | NOERROR |
 | wildcard match, type does not exist | the NSEC covering qname, and the wildcard owner's own NSEC; once if they are the same | NOERROR |
-| wildcard answer | the NSEC covering qname (`addWildcardProof`, unchanged) | NOERROR |
+| wildcard answer | the NSEC covering qname (`addWildcardProof`, changed as in §3.5) | NOERROR |
 | DS at an insecure delegation, or a referral to one | the parent chain's NSEC at the cut | NOERROR |
 | DS at our apex, parent not hosted | the apex's own NSEC | NOERROR |
 
@@ -330,6 +332,20 @@ zone signed here it is broken data, as below.
 - **`signRRsetForZone` and `isSynthesizedDenial`** are unchanged. Stored
   records never pass through them: a stored NSEC carries its RRSIGs, or §3.4
   applies.
+
+- **The chain index is built at publish (Q7).** It is built for a snapshot
+  whose apex has an NSEC, just before that snapshot is stored.
+  - Snapshots are stored in two places: `publishWorkingSetLocked`
+    (`v2/zone_mutation.go:723`) and `InstallInitialSnapshot` (`:1370`).
+  - A secondary's refreshes go through the first (`v2/refresh_run.go:169`,
+    `v2/refreshengine.go:266`), so the #770 case is covered.
+  - Until the new snapshot is stored, queries read the previous one, so no
+    query waits for the build.
+  - The build runs under the zone lock, so a concurrent update waits instead:
+    about 39 ms at 100k owners (§7). For a zone signed here, the restitch
+    already does whole-zone work at that point.
+  - `nsecOwners` keeps its `sync.Once` as a safety net for any snapshot built
+    elsewhere.
 
 In stage 1, `denialSourceFor` returns A for every zone signed here. Stage 2
 changes only that: it returns B when `black-lies` is off.
@@ -540,7 +556,7 @@ Test what a validator gets, not just the function that builds the answer:
 
 | Stage | Non-test code | Tests |
 |---|---|---|
-| 1 | about 250 lines: `denial.go` about 180, the call sites about 60, the snapshot's warning about 10 | about 600, including moving the existing compact-denial tests (§8, item 10) |
+| 1 | about 260 lines: `denial.go` about 180, the call sites about 60, the snapshot's warning about 10, the index at publish about 10 | about 600, including moving the existing compact-denial tests (§8, item 10) |
 | 2 | about 20 | about 150 to 250, mostly changes to existing tests |
 | 3 (#773) | about 400 | about 600 |
 
@@ -554,7 +570,7 @@ Test what a validator gets, not just the function that builds the answer:
 | Q4 | A gap in the chain on a secondary: serve what exists, or SERVFAIL? | Serve what exists, and warn (§3.4). | Agrees. |
 | Q5 | NSEC3: stage 3 of #770, or an issue of its own? | An issue of its own. #770 is reproduced with NSEC, and the §7.2.8 defect (§1.4) exists today whatever happens here. | Agrees. Filed as #773. |
 | Q6 | `black-lies` on a zone not signed here? | Ignore it, as today, and add a config-check warning. | Agrees. |
-| Q7 | Build the chain index on first use, as today, or at publish? | At publish, for zones with a chain. Almost every public zone gets negative queries, so the index gets built either way, and at publish the build does not stall a query (§7). | Not reviewed; added in r2. |
+| Q7 | Build the chain index on first use, as today, or at publish? | At publish, for zones with a chain. Almost every public zone gets negative queries, so the index gets built either way, and at publish the build does not stall a query (§7). | Re-review: agrees. At publish, meaning the moment a snapshot becomes the one `QueryResponder` reads, including a secondary's refresh; for a snapshot whose apex has an NSEC; in stage 1, without waiting for #547. Where it goes is in §3.5. |
 
 ## 11. Not in scope
 
