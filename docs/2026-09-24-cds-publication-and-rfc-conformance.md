@@ -2,7 +2,7 @@
 
 **Written 2026-09-24.** Line references are to main at `81a22644`.
 
-**Status:** proposal, reviewed. Johan answered §8 on 2026-09-24. He then decided that the CDS is always published, with telling the parent gated by `parentsync` (1.2 (a), (c)), and answered Q10. The doc is written to those decisions and to three external reviews. Nothing implemented.
+**Status:** proposal, reviewed. Johan answered §8 on 2026-09-24. He then decided that the CDS is always published, with telling the parent gated by `parentsync` (1.2 (a), (c)), and answered Q10. The doc is written to those decisions and to three external reviews. Part 1 is implemented in PR #761, not merged; Parts 2–5 are not implemented.
 
 ## Summary
 

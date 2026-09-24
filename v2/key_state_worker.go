@@ -126,6 +126,9 @@ func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propa
 	transitionRetiredToRemoved(ctx, conf, kdb, now, propagationDelay)
 
 	maintainStandbyKeys(ctx, conf, kdb, standbyZskCount, standbyKskCount)
+
+	// Last, so the backstop sees every transition this tick made.
+	markZonesForDSEngine(ctx, kdb)
 }
 
 // transitionPublishedToStandby transitions keys that have been in "published"
@@ -518,11 +521,17 @@ func countKeysForMaintain(keys []DnssecKeyWithTimestamps, expectedFlags uint16, 
 // the key-state worker, the keystore API -- so the reason is fixed here rather
 // than passed in.
 func triggerResign(conf *Config, zoneName string) {
+	zd, exists := Zones.Get(zoneName)
+	// A key state change may have moved a KSK's ds column, which the served
+	// DNSKEY RRset does not show; the DS engine decides whether the CDS
+	// follows (#752). Owners reach this through TriggerResign.
+	if exists {
+		conf.Internal.KeyDB.KeysChanged(zd)
+	}
 	if conf.Internal.ResignQ == nil {
 		return
 	}
 
-	zd, exists := Zones.Get(zoneName)
 	if !exists {
 		lgSigner.Warn("KeyStateWorker: zone not found for re-sign trigger", "zone", zoneName)
 		return

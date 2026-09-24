@@ -135,10 +135,13 @@ func (zd *ZoneData) publishDnskeyRRsLocked(dak *DnssecKeys) error {
 
 	// A zone that serves a CDS must not go on serving one that no longer
 	// matches its keys: a parent polling CDS would point the DS at keys the zone
-	// has stopped using. This is the one place the DNSKEY RRset is built from
-	// the keystore, so it is where a KSK change shows; the DS engine owns the CDS
-	// and decides what follows. It never blocks, which matters with zd.mu held.
-	if servesCds && !sameKeyIdentities(oldSEP, sepKeyIdentities(publishkeys)) {
+	// has stopped using. And a zone whose CDS the DS engine publishes on its own
+	// gets its first one here, at its first signing. This is the one place the
+	// DNSKEY RRset is built from the keystore, so it is where a KSK change
+	// shows; the DS engine owns the CDS and decides what follows. It never
+	// blocks, which matters with zd.mu held.
+	always, _ := cdsAlwaysPublishedLocked(zd)
+	if (servesCds || always) && !sameKeyIdentities(oldSEP, sepKeyIdentities(publishkeys)) {
 		zd.KeyDB.dsEngineKeysChanged(zd)
 	}
 

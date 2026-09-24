@@ -124,8 +124,10 @@ type dsEngineResult struct {
 //
 // In this first step it owns the CDS RRset. The KSK rollover engine asks it to
 // publish and to release the rollover target's CDS; delegation sync asks it for
-// the CDS a NOTIFY(CDS) points at; PublishDnskeyRRs marks zones that serve a CDS
-// and have changed their KSKs, and the engine brings their CDS back in step.
+// the CDS a NOTIFY(CDS) points at. Zones whose keys may have changed are marked
+// -- by PublishDnskeyRRs, by every keystore change (republishSigningKeysForZone),
+// by triggerResign, and by the key state worker's backstop every tick -- and the
+// engine brings their CDS in step with the keys (followKeysWithCDS).
 //
 // One goroutine serves every zone, one request at a time. That is the point:
 // what this replaces is two writers each replacing the whole CDS RRset from their
@@ -209,8 +211,10 @@ func (kdb *KeyDB) askDSEngine(ctx context.Context, req DSEngineRequest) dsEngine
 
 // KeysChanged tells the DS engine a zone's key rows changed in a way the
 // served DNSKEY RRset may not show: a key's ds column, which decides the
-// DS set of an owned zone (arrow 1). The owner calls it after such a
-// write; the DNSKEY publish path calls the same for a SEP change.
+// zone's DS intent. republishSigningKeysForZone and triggerResign call it
+// after every keystore change and key state transition, and an owner may
+// call it after a write of its own; the DNSKEY publish path does the same
+// for a SEP change. It never blocks.
 func (kdb *KeyDB) KeysChanged(zd *ZoneData) { kdb.dsEngineKeysChanged(zd) }
 
 // dsEngineKeysChanged records that zd's KSK set changed, for the DS engine to
@@ -414,6 +418,15 @@ func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 		return dsEngineResult{err: fmt.Errorf("zone %s: no key warrants a DS; withdrawing the DS through CDS"+
 			" needs an RFC 8078 delete CDS, which is not published", zd.ZoneName)}
 	}
+	// Already served: publishing again would delete and re-add identical
+	// records, and the updater counts that as a change -- another serial,
+	// another journal row. After a follow-keys change the parent is still
+	// behind, so every explicit sync that follows one would do exactly that.
+	if served, err := currentCdsTuples(zd); err == nil && cdsTupleSetsEqual(cdsTuplesOf(cds), served) {
+		lgDSEngine.Debug("the CDS for delegation sync is already served", "zone", zd.ZoneName,
+			"keyids", cdsKeyids(cds))
+		return dsEngineResult{cds: cds}
+	}
 	if err := zd.publishCDSAndWait(ctx, kdb, cds); err != nil {
 		return dsEngineResult{err: err}
 	}
@@ -422,30 +435,46 @@ func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 	return dsEngineResult{cds: cds}
 }
 
-// followKeysWithCDS brings a published CDS back in step with the zone's keys,
-// under the none model.
+// followKeysWithCDS makes the CDS a zone serves match what its keys call for,
+// and asks delegation sync to tell the parent when that is due
+// (docs/2026-09-24-cds-publication-and-rfc-conformance.md §1.2).
 //
-// Once delegation sync has asked for a CDS it stays published, and a CDS that no
-// longer matches the keys is the dangerous leftover: a parent that polls CDS
-// would point the DS at keys the zone has stopped using. A zone serving no CDS is
-// left alone -- a CDS appears only when delegation sync asks for one -- and so is
-// a zone whose keys tdns does not manage, whose CDS is not ours. Under multi-DS
-// the rollover engine's cleanup triggers look after its CDS; the other models are
-// not followed here.
+// The CDS follows the keys, not the history of the zone. A zone signed here
+// under the none model, whose keys tdns manages, serves the CDS of its DS
+// intent from its first signing on, whether or not it has parentsync
+// (cdsAlwaysPublishedLocked): the signer is not always what talks to the
+// parent, and a parentsync-proxy agent downstream acts only on the CDS it
+// transfers. Any other zone under none is followed once it serves a CDS,
+// published by hand or by delegation sync, so a stale one cannot outlive a KSK
+// change. An owned multi-provider zone signed here serves its owner's DS set
+// (arrow 1). A zone whose keys tdns does not manage is left alone: its CDS is
+// not ours. Under multi-DS the rollover engine's cleanup triggers look after
+// its CDS; the other models are not followed here.
+//
+// Runs on the DS engine's goroutine, which is the only one that touches
+// kdb.dsSyncPending.
 func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
-	if model := dsModelForZone(zd); model != DSModelNone && !(model == DSModelMultiProvider && ownedZoneSignedHere(zd)) {
+	model := dsModelForZone(zd)
+	owned := model == DSModelMultiProvider && ownedZoneSignedHere(zd)
+	if model != DSModelNone && !owned {
 		return
 	}
 	current, err := currentCdsTuples(zd)
+	if errors.Is(err, ErrZoneNotReady) {
+		// A zone's first signing marks it before the zone is Ready. Not an
+		// error: the next hint, or the backstop a tick later, runs it again.
+		lgDSEngine.Debug("the zone is not ready yet; the CDS is looked at on the next run", "zone", zd.ZoneName)
+		return
+	}
 	if err != nil {
 		lgDSEngine.Warn("could not read the published CDS", "zone", zd.ZoneName, "err", err)
 		return
 	}
-	// A zone tdns runs serves CDS only once delegation sync asked for it; an
-	// owned zone's signer serves the CDS of its DS set from the first key
-	// that warrants one (arrow 1), so a change of that set is followed
-	// whether or not a CDS is served yet.
-	if len(current) == 0 && !ownedZoneSignedHere(zd) {
+	zd.mu.Lock()
+	always, settingIgnored := cdsAlwaysPublishedLocked(zd)
+	zd.mu.Unlock()
+	always = owned || (always && servesApexType(zd, dns.TypeDNSKEY))
+	if len(current) == 0 && !always {
 		return
 	}
 	intent, err := DSIntentForZone(kdb, zd.ZoneName, dns.SHA256)
@@ -457,7 +486,17 @@ func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
 	if !intent.Known {
 		return
 	}
+	if settingIgnored {
+		kdb.noteCdsSettingIgnored(zd)
+	}
 	if len(intent.Set) == 0 {
+		// An empty intent is never passed on to the parent: for a zone whose
+		// keys tdns manages, the explicit sync reads it as "remove the DS", and
+		// going insecure stays an operator's action (§8 Q2).
+		delete(kdb.dsSyncPending, zd.ZoneName)
+		if len(current) == 0 {
+			return
+		}
 		if err := zd.unpublishCDSAndWait(ctx, kdb); err != nil {
 			lgDSEngine.Warn("could not withdraw the CDS of a zone whose keys warrant no DS",
 				"zone", zd.ZoneName, "err", err)
@@ -467,15 +506,152 @@ func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
 		return
 	}
 	want := cdsFromDS(zd.ZoneName, intent.Set)
-	if cdsTupleSetsEqual(cdsTuplesOf(want), current) {
+	changed := false
+	if !cdsTupleSetsEqual(cdsTuplesOf(want), current) {
+		if err := zd.publishCDSAndWait(ctx, kdb, want); err != nil {
+			lgDSEngine.Warn("could not bring the CDS in step with the keys", "zone", zd.ZoneName, "err", err)
+			return
+		}
+		lgDSEngine.Info("CDS brought in step with the keys", "zone", zd.ZoneName,
+			"was", tupleKeyids(current), "now", cdsKeyids(want))
+		changed = true
+	}
+	kdb.tellParentIfDue(zd, changed)
+}
+
+// cdsAlwaysPublishedLocked reports whether the DS engine publishes zd's CDS on
+// its own, before anything asked for one (§1.2 (a)): a zone signed here under
+// the none model. Whether tdns manages its keys, and whether it serves its
+// DNSKEY RRset yet, the caller checks.
+//
+// `cds: false` in the zone's policy turns that off, with two limits (§8 Q10).
+// It only stops a first publish: a CDS the zone serves is followed regardless,
+// or a manual KSK roll under it would leave a parent on a key that no longer
+// signs. And it has no effect on a zone in child delegation-sync mode, whose
+// parent hears of a KSK going to standby or being rolled only through the CDS
+// changing; settingIgnored reports that case. The caller holds zd.mu.
+func cdsAlwaysPublishedLocked(zd *ZoneData) (always, settingIgnored bool) {
+	if !(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) || dsModelForZone(zd) != DSModelNone {
+		return false, false
+	}
+	if zd.DnssecPolicy != nil && zd.DnssecPolicy.SuppressCDS {
+		if childDelegationSyncPredicate(Globals.App.Type, zd.Options) {
+			return true, true
+		}
+		return false, false
+	}
+	return true, false
+}
+
+// noteCdsSettingIgnored logs, once per zone, that its policy's `cds: false`
+// does not apply because the zone syncs its own delegation.
+func (kdb *KeyDB) noteCdsSettingIgnored(zd *ZoneData) {
+	if kdb.dsSettingNoted[zd.ZoneName] {
 		return
 	}
-	if err := zd.publishCDSAndWait(ctx, kdb, want); err != nil {
-		lgDSEngine.Warn("could not bring the CDS back in step with the keys", "zone", zd.ZoneName, "err", err)
+	if kdb.dsSettingNoted == nil {
+		kdb.dsSettingNoted = make(map[string]bool)
+	}
+	kdb.dsSettingNoted[zd.ZoneName] = true
+	lgDSEngine.Info("the policy's cds: false is ignored for a zone with parentsync: its parent learns"+
+		" of KSK changes through the CDS, so the CDS is published", "zone", zd.ZoneName)
+}
+
+// tellParentIfDue queues an EXPLICIT-SYNC-DELEGATION for a zone in child
+// delegation-sync mode whose parent may be out of step (§1.2 (c)): after the
+// CDS changed, on the engine's first run for this ZoneData, and while an
+// earlier send is still pending. The sync compares the parent's DS with the
+// keys first, so a parent already in step costs a lookup, not a request.
+//
+// The send never blocks. A DelegationSyncher waiting in askDSEngine on this
+// engine would otherwise deadlock against it. A send that finds the queue full
+// puts the zone on dsSyncPending, and the engine's next run for the zone, which
+// the key state worker's backstop makes at least once a tick, tries again
+// whether or not the CDS changed.
+func (kdb *KeyDB) tellParentIfDue(zd *ZoneData, changed bool) {
+	if !zd.childDelegationSyncEnabled() {
+		delete(kdb.dsSyncPending, zd.ZoneName)
 		return
 	}
-	lgDSEngine.Info("CDS brought back in step with the keys", "zone", zd.ZoneName,
-		"was", tupleKeyids(current), "now", cdsKeyids(want))
+	_, pending := kdb.dsSyncPending[zd.ZoneName]
+	firstRun := !zd.dsFirstRunDone.Load()
+	if !changed && !pending && !firstRun {
+		return
+	}
+	zd.dsFirstRunDone.Store(true)
+	if queueExplicitSync(zd) {
+		delete(kdb.dsSyncPending, zd.ZoneName)
+		return
+	}
+	if kdb.dsSyncPending == nil {
+		kdb.dsSyncPending = make(map[string]*ZoneData)
+	}
+	kdb.dsSyncPending[zd.ZoneName] = zd
+}
+
+// queueExplicitSync hands zd's delegation syncher an EXPLICIT-SYNC-DELEGATION
+// without waiting. It reports false only when the queue is full: a zone with no
+// syncher has nothing to retry.
+func queueExplicitSync(zd *ZoneData) bool {
+	q := zd.DelegationSyncQ
+	if q == nil {
+		lgDSEngine.Debug("no delegation syncher for this zone; the parent is not told", "zone", zd.ZoneName)
+		return true
+	}
+	select {
+	case q <- DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zd.ZoneName, ZoneData: zd}:
+		lgDSEngine.Info("asked delegation sync to compare the parent's DS with the keys", "zone", zd.ZoneName)
+		return true
+	default:
+		lgDSEngine.Warn("the delegation sync queue is full; the parent is told on the zone's next run",
+			"zone", zd.ZoneName)
+		return false
+	}
+}
+
+// markZonesForDSEngine is the DS engine's backstop (§1.2 (b)): at the end of
+// every key state worker tick it marks every zone the engine follows, so a
+// change to a key row that no hint reported -- the DS reconciliation after a
+// policy bind, an owner's UpdateKeyRow, a purge, an edit made to the database
+// outside tdns -- reaches the CDS within a tick. It also retries a pending
+// send (tellParentIfDue). The marks coalesce, and the engine publishes only
+// when the CDS differs from the intent, so a tick costs a comparison per zone.
+func markZonesForDSEngine(ctx context.Context, kdb *KeyDB) {
+	if kdb == nil {
+		return
+	}
+	for _, zd := range Zones.Items() {
+		if ctx.Err() != nil {
+			return
+		}
+		if zd.dsEngineFollows() {
+			kdb.dsEngineKeysChanged(zd)
+		}
+	}
+}
+
+// dsEngineFollows reports whether followKeysWithCDS has anything to do for zd.
+func (zd *ZoneData) dsEngineFollows() bool {
+	zd.mu.Lock()
+	model := dsModelForZone(zd)
+	always, _ := cdsAlwaysPublishedLocked(zd)
+	zd.mu.Unlock()
+	switch {
+	case model == DSModelMultiProvider:
+		return ownedZoneSignedHere(zd)
+	case model != DSModelNone:
+		return false
+	case always:
+		return true
+	}
+	return servesApexType(zd, dns.TypeCDS)
+}
+
+// servesApexType reports whether zd serves an RRset of this type at its apex.
+// Unknown reads as no.
+func servesApexType(zd *ZoneData, rrtype uint16) bool {
+	apex, err := zd.GetOwner(zd.ZoneName)
+	return err == nil && apex != nil && apex.RRtypes != nil && len(apex.RRtypes.GetOnlyRRSet(rrtype).RRs) > 0
 }
 
 // publishCDSAndWait replaces the zone's CDS RRset with cds, and returns once the
@@ -630,12 +806,7 @@ func cdsTuplesOf(rrs []dns.RR) map[cdsTuple]struct{} {
 		if !ok {
 			continue
 		}
-		out[cdsTuple{
-			KeyTag:     c.DS.KeyTag,
-			Algorithm:  c.DS.Algorithm,
-			DigestType: c.DS.DigestType,
-			Digest:     c.DS.Digest,
-		}] = struct{}{}
+		out[newCdsTuple(c.DS.KeyTag, c.DS.Algorithm, c.DS.DigestType, c.DS.Digest)] = struct{}{}
 	}
 	return out
 }

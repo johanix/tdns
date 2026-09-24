@@ -368,28 +368,56 @@ func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, 
 				resp.InSync = false
 				return nil
 			}
+			// A parentsync-proxy zone does have a view: the CDS its signer
+			// serves, which is what the proxy relays (#752, design §1.2 (e)).
+			// Comparing the parent's DS with it is what lets the startup
+			// reconcile catch a KSK change the proxy missed while it was
+			// down. A CDS the proxy cannot use yet (an algorithm-0 record)
+			// is no view.
+			if zd.proxyCompareDS(resp, p_dsrrs) {
+				return nil
+			}
 			lgDns.Debug("AnalyseZoneDelegation: no keystore KSKs for this zone; leaving the parent DS alone",
 				"zone", zd.ZoneName)
 			return nil
 		}
-		childDS := intent.Set
 
-		dsdiff, dsadds, dsremoves := core.RRsetDiffer(zd.ZoneName, childDS,
-			p_dsrrs, dns.TypeDS, zd.Logger, Globals.Verbose, Globals.Debug)
-		if dsdiff {
-			resp.InSync = false
-			resp.DSAdds = append(resp.DSAdds, dsadds...)
-			resp.DSRemoves = append(resp.DSRemoves, dsremoves...)
-		}
-
-		// Compute NewDS for replace mode. Authoritative even when empty: an
-		// un-signed zone whose keys tdns holds is a real instruction to
-		// withdraw the DS, not an absence of opinion.
-		resp.NewDS = childDS
-		resp.NewDSKnown = true
+		// NewDS is authoritative even when empty: an un-signed zone whose keys
+		// tdns holds is a real instruction to withdraw the DS, not an absence
+		// of opinion.
+		zd.recordDSDifference(resp, intent.Set, p_dsrrs)
 	}
 
 	return nil
+}
+
+// proxyCompareDS compares the parent's DS with the served CDS of a
+// parentsync-proxy zone, and reports whether it did: false for any other zone,
+// and for one serving no CDS it can use.
+func (zd *ZoneData) proxyCompareDS(resp *DelegationSyncStatus, parentDS []dns.RR) bool {
+	if zd.delegationChangeModeOf() != delegationChangeProxy {
+		return false
+	}
+	cdsDS, served, usable := zd.proxyDSFromCDS()
+	if !served || !usable {
+		return false
+	}
+	zd.recordDSDifference(resp, cdsDS, parentDS)
+	return true
+}
+
+// recordDSDifference records in resp how the parent's DS differs from childDS,
+// and childDS as the replace form's DS set.
+func (zd *ZoneData) recordDSDifference(resp *DelegationSyncStatus, childDS, parentDS []dns.RR) {
+	dsdiff, dsadds, dsremoves := core.RRsetDiffer(zd.ZoneName, childDS,
+		parentDS, dns.TypeDS, zd.Logger, Globals.Verbose, Globals.Debug)
+	if dsdiff {
+		resp.InSync = false
+		resp.DSAdds = append(resp.DSAdds, dsadds...)
+		resp.DSRemoves = append(resp.DSRemoves, dsremoves...)
+	}
+	resp.NewDS = childDS
+	resp.NewDSKnown = true
 }
 
 // delegationApexes returns the served zone's apex and the incoming zone's, for

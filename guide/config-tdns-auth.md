@@ -925,6 +925,7 @@ dnssec:
          clamping:
             enabled:  true
             margin:   1h           # REQUIRED when enabled
+         cds:        true          # publish a CDS of the zone's own (default true)
 ```
 
 `sigvalidity` is a **policy-level block keyed by RRtype**, with `default`
@@ -934,6 +935,18 @@ required. It is not a per-key-role setting: there is no `sigvalidity` under
 `mode` selects the key scheme: `ksk-zsk` (the default when omitted) uses
 separate Key-Signing and Zone-Signing keys; `csk` uses a single Combined-Signing
 Key for both roles. An invalid value is rejected at config load.
+
+`cds` decides whether a zone signed here publishes a CDS before anything asks
+for one. By default (`true`) every zone whose keys tdns manages, under
+`rollover.method: none`, serves the CDS its keys call for from its first
+signing on, and keeps it in step as keys go to standby, are rolled or retire,
+with or without `parentsync`: a parent that polls, or a `parentsync-proxy`
+agent downstream, reads only what the zone serves. `cds: false` is for a zone
+you sign but do not want a parent to act on yet. It only stops that first
+publish: a CDS the zone does serve (published by hand, or by delegation sync)
+is still kept in step with the keys, and a zone with `parentsync` publishes
+anyway, because its parent learns of KSK changes through the CDS. Telling the
+parent is a separate matter, and only a `parentsync` zone does it.
 
 Durations accept Go duration strings plus a `d` (days) or `w` (weeks) suffix on
 a plain integer: `14d`, `2w`, `90m`. Key lifetimes additionally accept
@@ -973,7 +986,8 @@ leaves of that block from the template. The policy's own values always win.
 The same zero-value caveat applies: a policy cannot override a template value
 back to `""`, `0` or `false`, because those read as "unset". A template that
 sets `clamping.enabled: true` cannot be switched off by a policy that inherits
-from it.
+from it. `cds` is the exception: an explicit `cds: false` or `cds: true` in the
+policy wins over the template.
 
 Templates are not usable policies. A zone cannot reference one, and an unknown
 template name quarantines just that policy.

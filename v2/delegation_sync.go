@@ -92,44 +92,15 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
 
 			case "EXPLICIT-SYNC-DELEGATION":
-				lgDns.Info("DelegationSyncher: request for explicit delegation sync", "zone", ds.ZoneName)
+				_ = handleExplicitSyncWith(ctx, conf.Internal.ImrReady, delsyncq, ds,
+					func() DelegationSyncStatus { return zd.runExplicitSync(ctx, kdb, notifyq, imr()) })
+				continue
 
-				syncstate, err := zd.AnalyseZoneDelegation(imr())
-				if err != nil {
-					lgDns.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
-					syncstate.Error = true
-					syncstate.ErrorMsg = err.Error()
-					if ds.Response != nil {
-						ds.Response <- syncstate
-					}
-					continue
-				}
-
-				if syncstate.InSync {
-					lgDns.Info("DelegationSyncher: delegation data in parent is in sync with child, no action needed",
-						"zone", syncstate.ZoneName, "parent", syncstate.Parent)
-					if ds.Response != nil {
-						ds.Response <- syncstate
-					}
-					continue
-				}
-
-				// Not in sync, let's fix that.
-				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, syncstate, imr())
-				if err != nil {
-					lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
-					syncstate.Error = true
-					syncstate.ErrorMsg = err.Error()
-					syncstate.UpdateResult = ur
-				} else {
-					lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
-				}
-				syncstate.Msg = msg
-				syncstate.Rcode = rcode
-
-				if ds.Response != nil {
-					ds.Response <- syncstate
-				}
+			case "SIGNALS-EDITED":
+				_ = handleSignalsEditedArm(ctx, conf.Internal.ImrReady, delsyncq, zd, ds,
+					func() {
+						handleSignalsEditedWith(zd, ds.SignalTypes, signalsEditedStepsFor(ctx, kdb, notifyq, imr(), zd))
+					})
 				continue
 
 			case "SYNC-DNSKEY-RRSET":
@@ -1114,4 +1085,129 @@ func (zd *ZoneData) finishDelegationSyncSetup(msg string, ur UpdateResult, err e
 	}
 	lgDns.Info("DelegationSyncSetup: SIG(0) key bootstrap complete", "zone", zd.ZoneName, "msg", msg)
 	return nil
+}
+
+// runExplicitSync compares the zone's delegation with the parent's and, when
+// they differ, sends the difference through the parent's scheme: the body of
+// EXPLICIT-SYNC-DELEGATION. It compares first, so a parent already in step
+// costs a lookup and is sent nothing.
+func (zd *ZoneData) runExplicitSync(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, imr *Imr) DelegationSyncStatus {
+	lgDns.Info("DelegationSyncher: request for explicit delegation sync", "zone", zd.ZoneName)
+
+	syncstate, err := zd.AnalyseZoneDelegation(imr)
+	if err != nil {
+		lgDns.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", zd.ZoneName, "err", err)
+		syncstate.Error = true
+		syncstate.ErrorMsg = err.Error()
+		return syncstate
+	}
+
+	if syncstate.InSync {
+		lgDns.Info("DelegationSyncher: delegation data in parent is in sync with child, no action needed",
+			"zone", syncstate.ZoneName, "parent", syncstate.Parent)
+		return syncstate
+	}
+
+	// Not in sync, let's fix that.
+	msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, syncstate, imr)
+	if err != nil {
+		lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", zd.ZoneName, "err", err)
+		syncstate.Error = true
+		syncstate.ErrorMsg = err.Error()
+		syncstate.UpdateResult = ur
+	} else {
+		lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", zd.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
+	}
+	syncstate.Msg = msg
+	syncstate.Rcode = rcode
+	return syncstate
+}
+
+// handleExplicitSyncWith is the EXPLICIT-SYNC-DELEGATION arm. The DS engine's
+// first-run compare lands in exactly the window before the IMR is up, and a
+// follow-keys change right after a start can too: such a request waits for it.
+// One an operator is waiting on is answered at once, with the analysis error,
+// as before: its caller gives up after four seconds. It returns the deferred
+// worker's done channel when it deferred, nil when it ran.
+func handleExplicitSyncWith(ctx context.Context, ready *ImrReadiness, delsyncq chan DelegationSyncRequest,
+	ds DelegationSyncRequest, run func() DelegationSyncStatus) <-chan struct{} {
+
+	if explicitSyncWaitsForImr(ready, ds) {
+		return deferForImr(ctx, delsyncq, ready, ds)
+	}
+	syncstate := run()
+	if ds.Response != nil {
+		ds.Response <- syncstate
+	}
+	return nil
+}
+
+// handleSignalsEditedArm is the SIGNALS-EDITED arm: an operator's edit of the
+// apex CDS, CDNSKEY or CSYNC (delsync_signals.go). Nothing goes out while a
+// transaction holds the zone -- the edit is not served yet, and a NOTIFY tells
+// the parent to come and read it -- nor before the IMR is up, which the parent's
+// DSYNC lookup needs. It returns the deferred worker's done channel when it
+// deferred, nil when it ran.
+func handleSignalsEditedArm(ctx context.Context, ready *ImrReadiness, delsyncq chan DelegationSyncRequest,
+	zd *ZoneData, ds DelegationSyncRequest, run func()) <-chan struct{} {
+
+	if zd.txOpenCount() > 0 {
+		return deferUntilHoldEnds(ctx, delsyncq, zd, ds)
+	}
+	if explicitSyncWaitsForImr(ready, ds) {
+		return deferForImr(ctx, delsyncq, ready, ds)
+	}
+	run()
+	return nil
+}
+
+// explicitSyncWaitsForImr reports whether a request that needs the IMR should
+// wait for it rather than run now. Only a request nobody is waiting on: an
+// operator's is answered at once. A process with no readiness signal at all
+// never waits, since nothing would ever end the wait.
+func explicitSyncWaitsForImr(ready *ImrReadiness, ds DelegationSyncRequest) bool {
+	return ds.Response == nil && ready != nil && !ready.Published()
+}
+
+// txHoldPollInterval is how often a request deferred by deferUntilHoldEnds
+// looks again. A variable only so a test need not wait.
+var txHoldPollInterval = 250 * time.Millisecond
+
+// deferUntilHoldEnds puts a request back on the queue once the zone has no open
+// transaction. Off the syncher's goroutine, like deferForImr, so a held zone
+// does not stall the others. A hold is bounded (txHoldLimit), so the wait is
+// too; it says so if it runs longer. The returned channel closes when the
+// worker exits, for tests.
+func deferUntilHoldEnds(ctx context.Context, delsyncq chan DelegationSyncRequest, zd *ZoneData,
+	ds DelegationSyncRequest) <-chan struct{} {
+
+	lgDns.Info("DelegationSyncher: the zone has an open transaction; deferring until it commits",
+		"zone", ds.ZoneName, "command", ds.Command)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(txHoldPollInterval)
+		defer tick.Stop()
+		warn := time.NewTimer(2 * txHoldLimit)
+		defer warn.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-warn.C:
+				lgDns.Warn("DelegationSyncher: still waiting for the zone's transaction to end",
+					"zone", ds.ZoneName, "command", ds.Command, "waited", 2*txHoldLimit)
+			case <-tick.C:
+				if zd.txOpenCount() > 0 {
+					continue
+				}
+				select {
+				case delsyncq <- ds:
+				case <-ctx.Done():
+				}
+				return
+			}
+		}
+	}()
+	return done
 }

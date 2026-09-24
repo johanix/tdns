@@ -257,6 +257,8 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 		out.TTLS.DNSKEY = uint32(d.Seconds())
 	}
 
+	out.SuppressCDS = conf.Cds != nil && !*conf.Cds
+
 	out.Clamping.Enabled = conf.Clamping.Enabled
 	if out.Clamping.Enabled {
 		// 4D: when clamping is enabled, margin is required. It is both the
