@@ -926,6 +926,7 @@ dnssec:
             enabled:  true
             margin:   1h           # REQUIRED when enabled
          cds:        true          # publish a CDS of the zone's own (default true)
+         cdnskey:    true          # publish the CDNSKEY with the CDS (default true)
 ```
 
 `sigvalidity` is a **policy-level block keyed by RRtype**, with `default`
@@ -947,6 +948,16 @@ publish: a CDS the zone does serve (published by hand, or by delegation sync)
 is still kept in step with the keys, and a zone with `parentsync` publishes
 anyway, because its parent learns of KSK changes through the CDS. Telling the
 parent is a separate matter, and only a `parentsync` zone does it.
+
+`cdnskey` decides whether every CDS tdns publishes comes with the CDNSKEY for
+the same keys, in the same update. RFC 7344 asks for both, and a parent that
+applies RFC 9975 treats a CDS without a matching CDNSKEY as inconsistent. The
+default (`true`) publishes both. `cdnskey: false` publishes the CDS alone, for a
+parent known to read only CDS. A CDS naming a key tdns holds no copy of also goes
+out alone, and the log says so. For a zone whose CDS the DS engine keeps in step
+with its keys, a change of the setting reaches the served CDNSKEY within a key
+state worker tick; under `rollover.method: multi-ds`, with the rollover's next
+CDS.
 
 Durations accept Go duration strings plus a `d` (days) or `w` (weeks) suffix on
 a plain integer: `14d`, `2w`, `90m`. Key lifetimes additionally accept
@@ -986,8 +997,8 @@ leaves of that block from the template. The policy's own values always win.
 The same zero-value caveat applies: a policy cannot override a template value
 back to `""`, `0` or `false`, because those read as "unset". A template that
 sets `clamping.enabled: true` cannot be switched off by a policy that inherits
-from it. `cds` is the exception: an explicit `cds: false` or `cds: true` in the
-policy wins over the template.
+from it. `cds` and `cdnskey` are the exceptions: an explicit `false` or `true`
+in the policy wins over the template.
 
 Templates are not usable policies. A zone cannot reference one, and an unknown
 template name quarantines just that policy.

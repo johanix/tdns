@@ -260,7 +260,7 @@ func TestNotifySchemePublishesTheCdsBeforeTheNotify(t *testing.T) {
 
 	waitForEvents(t, r.log, 3)
 	events := r.log.snapshot()
-	published, notified := eventIndex(events, "published CDS"), eventIndex(events, "notified CDS")
+	published, notified := eventIndex(events, "published CDS,CDNSKEY"), eventIndex(events, "notified CDS")
 	if published < 0 || notified < 0 || published > notified {
 		t.Fatalf("events = %v; the parent must be told to read a CDS only once it is published", events)
 	}
@@ -557,7 +557,7 @@ func TestRolloverNotifyPushWaitsUntilTheCdsIsServed(t *testing.T) {
 
 	waitForEvents(t, r.log, 2)
 	events := r.log.snapshot()
-	published, notified := eventIndex(events, "published CDS"), eventIndex(events, "notified CDS")
+	published, notified := eventIndex(events, "published CDS,CDNSKEY"), eventIndex(events, "notified CDS")
 	if published < 0 || notified < 0 || published > notified {
 		t.Fatalf("events = %v; NOTIFY(CDS) went out before the CDS was served", events)
 	}

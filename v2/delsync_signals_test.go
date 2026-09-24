@@ -277,6 +277,22 @@ func TestTheSignalsEditedHandler(t *testing.T) {
 	}
 }
 
+// The log names what was edited: a CDNSKEY edit is not reported as a CDS edit.
+func TestTheSignalsEditedLogNamesTheEditedType(t *testing.T) {
+	buf := captureDnsLog(t)
+	f := &fakeSignalsSteps{managed: true}
+	handleSignalsEditedWith(&ZoneData{ZoneName: "example."}, []uint16{dns.TypeCDNSKEY}, f.steps())
+	var line string
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(l, "SIGNALS-EDITED") {
+			line = l
+		}
+	}
+	if !strings.Contains(line, "types=[CDNSKEY]") {
+		t.Errorf("the SIGNALS-EDITED line does not name the CDNSKEY: %q", line)
+	}
+}
+
 // editedSignalTypes compares records, not TTLs.
 func TestEditedSignalTypesIgnoresTTL(t *testing.T) {
 	a := map[uint16][]dns.RR{dns.TypeCDS: {mustRR(t, editCDS)}}

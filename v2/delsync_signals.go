@@ -167,10 +167,12 @@ type signalsEditedSteps struct {
 // A removed RRset sends nothing: under RFC 8078, no CDS means no change.
 func handleSignalsEditedWith(zd *ZoneData, types []uint16, steps signalsEditedSteps) {
 	var cds, csync bool
+	var dsTypes []string // the edited ones of CDS and CDNSKEY, for the log
 	for _, t := range types {
 		switch t {
 		case dns.TypeCDS, dns.TypeCDNSKEY:
 			cds = true
+			dsTypes = append(dsTypes, dns.TypeToString[t])
 		case dns.TypeCSYNC:
 			csync = true
 		}
@@ -181,10 +183,10 @@ func handleSignalsEditedWith(zd *ZoneData, types []uint16, steps signalsEditedSt
 		switch {
 		case err != nil:
 			lgDns.Warn("SIGNALS-EDITED: could not tell whether tdns manages this zone's keys;"+
-				" the parent is not told of the CDS edit", "zone", zd.ZoneName, "err", err)
+				" the parent is not told of the edit", "zone", zd.ZoneName, "types", dsTypes, "err", err)
 		case managed:
-			lgDns.Info("SIGNALS-EDITED: CDS edited on a zone whose keys tdns manages;"+
-				" telling the parent what the keys call for", "zone", zd.ZoneName)
+			lgDns.Info("SIGNALS-EDITED: the CDS or CDNSKEY of a zone whose keys tdns manages was edited;"+
+				" telling the parent what the keys call for", "zone", zd.ZoneName, "types", dsTypes)
 			steps.explicitSync()
 			steps.markKeys()
 		case len(steps.served(dns.TypeCDS)) > 0 || len(steps.served(dns.TypeCDNSKEY)) > 0:

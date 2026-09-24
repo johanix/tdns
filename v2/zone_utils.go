@@ -2100,6 +2100,20 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 			RRtype: dns.TypeCDS,
 			RRs:    cds,
 		})
+		// And the CDNSKEY that goes with it (#753). Without the keys it is
+		// left out here; the DS engine's next run puts it in step.
+		cdnskey, _, err := zd.cdnskeyFor(zd.KeyDB, cds)
+		if err != nil {
+			lg.Warn("CollectDynamicRRs: no CDNSKEY for the restored CDS", "zone", zd.ZoneName, "err", err)
+		}
+		if len(cdnskey) > 0 {
+			dynamicRRs = append(dynamicRRs, &core.RRset{
+				Name:   zd.ZoneName,
+				Class:  dns.ClassINET,
+				RRtype: dns.TypeCDNSKEY,
+				RRs:    cdnskey,
+			})
+		}
 	}
 
 	if !zd.Options[OptDontPublishKey] {

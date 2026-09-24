@@ -1152,6 +1152,18 @@ func (scanner *Scanner) ProcessCDSNotify(ctx context.Context, tuple ScanTuple, p
 		return
 	}
 
+	// 2b'. The CDNSKEY (#753). RFC 9975 §3.1: a key the CDS names and the
+	// CDNSKEY does not, or the other way round, is an inconsistency, and
+	// nothing changes. Settled before the trust gate for the same reason as
+	// the shape: a strict parent neither validates nor bootstraps on a set
+	// it will not act on.
+	if err := scanner.checkCdnskey(ctx, childZone, nsRRset, cdsRRset, scanLog); err != nil {
+		scanLog.Printf("ProcessCDSNotify: %s: refused: %v", childZone, err)
+		refuseScan(&response, err)
+		responseCh <- response
+		return
+	}
+
 	// 2c. Trust gate: the parent zone's delegation policy decides whether this
 	// CDS may change the DS RRset (#637, scanner_trust.go).
 	pol := parentZD.boundDelegationPolicy()

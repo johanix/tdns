@@ -890,6 +890,10 @@ type DnssecPolicyConf struct {
 	// yet. Unset means true. A pointer so a template can fill it and an
 	// explicit false survives the merge.
 	Cds *bool `yaml:"cds" mapstructure:"cds"`
+
+	// Cdnskey: false publishes the CDS alone, without the CDNSKEY that goes
+	// with it (#753). Unset means true. A pointer for the same reason as Cds.
+	Cdnskey *bool `yaml:"cdnskey" mapstructure:"cdnskey"`
 }
 
 type KeyLifetime struct {
@@ -936,6 +940,10 @@ type DnssecPolicy struct {
 	// still followed, and a parentsync zone publishes regardless
 	// (cdsAlwaysPublishedLocked).
 	SuppressCDS bool
+
+	// SuppressCDNSKEY is `cdnskey: false`: every CDS the DS engine publishes
+	// goes out alone, for a parent known to read only CDS (RFC 7344 §4).
+	SuppressCDNSKEY bool
 
 	// suppressLoadWarnings is set by ParseDnssecPolicyConfQuiet so
 	// CLI tools that re-parse a daemon's policy don't duplicate the
