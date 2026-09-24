@@ -681,7 +681,10 @@ func servesApexType(zd *ZoneData, rrtype uint16) bool {
 // tdns holds no copy of; the latter is logged, since a parent that applies
 // RFC 9975 strictly refuses such a CDS.
 func (zd *ZoneData) publishCDSAndWait(ctx context.Context, kdb *KeyDB, cds []dns.RR) error {
-	cdnskey, unmatched := zd.cdnskeyFor(kdb, cds)
+	cdnskey, unmatched, err := zd.cdnskeyFor(kdb, cds)
+	if err != nil {
+		return fmt.Errorf("publishing the CDS for %s: %w", zd.ZoneName, err)
+	}
 	if len(unmatched) > 0 {
 		lgDSEngine.Warn("publishing the CDS without a CDNSKEY: tdns holds no DNSKEY for the CDS records"+
 			" of these keyids, and a parent that applies RFC 9975 strictly will refuse the CDS",

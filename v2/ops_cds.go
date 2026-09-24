@@ -75,7 +75,10 @@ func (zd *ZoneData) PublishCdsRRs() error {
 	}
 
 	// First delete any existing CDS and CDNSKEY RRsets, then add the new ones
-	cdnskey, _ := zd.cdnskeyFor(zd.KeyDB, cdsRRs)
+	cdnskey, _, err := zd.cdnskeyFor(zd.KeyDB, cdsRRs)
+	if err != nil {
+		return fmt.Errorf("PublishCdsRRs: %w", err)
+	}
 	actions := []dns.RR{cdsDeleteRR(zd.ZoneName), cdnskeyDeleteRR(zd.ZoneName)}
 	actions = append(actions, cdsRRs...)
 	actions = append(actions, cdnskey...)

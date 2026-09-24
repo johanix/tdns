@@ -28,7 +28,8 @@ import (
 // nothing on one. A child that serves no CDNSKEY at any nameserver is taken
 // as CDS-only: local policy, not RFC 9975.
 
-// cdnskeyOf is the CDNSKEY record for key at zone's apex, with the CDS's TTL.
+// cdnskeyOf is the CDNSKEY record for key at zone's apex, with the TTL tdns gives
+// every CDS it publishes, 120 (cdsFromDS).
 func cdnskeyOf(zone string, key *dns.DNSKEY) dns.RR {
 	c := &dns.CDNSKEY{DNSKEY: *key}
 	c.Hdr = dns.RR_Header{
@@ -98,25 +99,31 @@ const dsSignalKeysSql = `SELECT keyrr FROM DnssecKeyStore WHERE zonename = ?`
 // before its DNSKEY is published, and an owned zone's DS set names other
 // providers' keys, whose rows are foreign -- and the DNSKEY RRset the zone
 // serves.
-func (zd *ZoneData) dsSignalKeys(kdb *KeyDB) []*dns.DNSKEY {
+//
+// A keystore that cannot be read is an error, not a shorter list: for a key
+// that exists only in the keystore, a short list would make the caller publish
+// the CDS without its CDNSKEY, and put the CDNSKEY back on the next good read.
+func (zd *ZoneData) dsSignalKeys(kdb *KeyDB) ([]*dns.DNSKEY, error) {
 	var out []*dns.DNSKEY
 	if kdb != nil {
 		rows, err := kdb.Query(dsSignalKeysSql, dns.Fqdn(zd.ZoneName))
 		if err != nil {
-			lgDSEngine.Debug("could not read the keystore for the CDNSKEY", "zone", zd.ZoneName, "err", err)
-		} else {
-			for rows.Next() {
-				var keyrr string
-				if rows.Scan(&keyrr) != nil {
-					continue
-				}
-				if rr, err := dns.NewRR(keyrr); err == nil {
-					if k, ok := rr.(*dns.DNSKEY); ok {
-						out = append(out, k)
-					}
+			return nil, fmt.Errorf("zone %s: reading the keystore for the CDNSKEY: %w", zd.ZoneName, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var keyrr string
+			if err := rows.Scan(&keyrr); err != nil {
+				return nil, fmt.Errorf("zone %s: reading the keystore for the CDNSKEY: %w", zd.ZoneName, err)
+			}
+			if rr, err := dns.NewRR(keyrr); err == nil {
+				if k, ok := rr.(*dns.DNSKEY); ok {
+					out = append(out, k)
 				}
 			}
-			rows.Close()
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("zone %s: reading the keystore for the CDNSKEY: %w", zd.ZoneName, err)
 		}
 	}
 	if apex, err := zd.GetOwner(zd.ZoneName); err == nil && apex != nil && apex.RRtypes != nil {
@@ -126,7 +133,7 @@ func (zd *ZoneData) dsSignalKeys(kdb *KeyDB) []*dns.DNSKEY {
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // cdnskeyForCDS is the CDNSKEY RRset to publish with cds: for each CDS record,
@@ -165,11 +172,17 @@ func cdnskeyForCDS(zone string, cds []dns.RR, keys []*dns.DNSKEY) (cdnskey []dns
 
 // cdnskeyFor is the CDNSKEY RRset zd publishes with cds: none under
 // `cdnskey: false`, and none when the CDS names a key tdns holds no copy of.
-func (zd *ZoneData) cdnskeyFor(kdb *KeyDB, cds []dns.RR) (cdnskey []dns.RR, unmatched []uint16) {
+// An error means the keys could not be read, and nothing should be published.
+func (zd *ZoneData) cdnskeyFor(kdb *KeyDB, cds []dns.RR) (cdnskey []dns.RR, unmatched []uint16, err error) {
 	if !zd.publishesCdnskey() {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return cdnskeyForCDS(zd.ZoneName, cds, zd.dsSignalKeys(kdb))
+	keys, err := zd.dsSignalKeys(kdb)
+	if err != nil {
+		return nil, nil, err
+	}
+	cdnskey, unmatched = cdnskeyForCDS(zd.ZoneName, cds, keys)
+	return cdnskey, unmatched, nil
 }
 
 // cdnskeyInStep reports whether the zone serves the CDNSKEY RRset that goes
@@ -182,7 +195,10 @@ func (zd *ZoneData) cdnskeyInStep(kdb *KeyDB, cds []dns.RR) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	want, _ := zd.cdnskeyFor(kdb, cds)
+	want, _, err := zd.cdnskeyFor(kdb, cds)
+	if err != nil {
+		return false, err
+	}
 	return sameKeyIdentities(keyIdentities(want), keyIdentities(served)), nil
 }
 

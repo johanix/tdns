@@ -293,10 +293,17 @@ func checkSignatures(zd *ZoneData, zone string, rows []keyRowView) []KeyInvarian
 // no CDS is not judged (it may not publish one at all), and neither is a zone
 // with a SEP row whose ds is unknown. A served CDNSKEY must agree with the
 // served CDS as a parent applying RFC 9975 checks it, whatever the rows say
-// (#753).
+// (#753); and a CDNSKEY served with no CDS is reported, since tdns never
+// publishes one alone. A CDS with no CDNSKEY is legal: `cdnskey: false`.
 func checkServedCds(zd *ZoneData, zone string, rows []keyRowView) []KeyInvariantViolation {
 	rs, err := zd.RRsetForAnalysis(zone, dns.TypeCDS)
-	if err != nil || rs == nil || len(rs.RRs) == 0 {
+	if err != nil {
+		return nil
+	}
+	if rs == nil || len(rs.RRs) == 0 {
+		if ck, err := zd.RRsetForAnalysis(zone, dns.TypeCDNSKEY); err == nil && ck != nil && len(ck.RRs) > 0 {
+			return []KeyInvariantViolation{{Invariant: "I7", Zone: zone, Detail: "a CDNSKEY is served without a CDS"}}
+		}
 		return nil
 	}
 	var out []KeyInvariantViolation

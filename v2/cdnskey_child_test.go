@@ -403,3 +403,49 @@ func TestCheckerI7ServedCdnskeyMatchesTheCds(t *testing.T) {
 	stageApexRRset(t, c.zd, dns.TypeCDNSKEY, []dns.RR{cdnskeyOf(c.zd.ZoneName, created)}, nil)
 	expectOnly(t, CheckKeyInvariants(c.kdb, c.zd), "I7")
 }
+
+// A keystore that cannot be read is an error, not a shorter key list: the CDS
+// is not republished without its CDNSKEY, and what the zone serves stays.
+func TestAnUnreadableKeystorePublishesNothing(t *testing.T) {
+	ctx := context.Background()
+	r := newSigningRig(t, false)
+	r.kdb.followKeysWithCDS(ctx, r.zd)
+	assertDSSignals(t, r.zd, r.kskA)
+	before := len(r.log.snapshot())
+
+	if _, err := r.kdb.DB.Exec(`ALTER TABLE DnssecKeyStore RENAME TO DnssecKeyStoreGone`); err != nil {
+		t.Fatal(err)
+	}
+	cds := cdsOfKeys("example.", r.kskA)
+	if _, err := r.zd.cdnskeyInStep(r.kdb, cds); err == nil {
+		t.Error("cdnskeyInStep answered without the keystore")
+	}
+	if err := r.zd.publishCDSAndWait(ctx, r.kdb, cds); err == nil {
+		t.Error("publishCDSAndWait published without the keystore")
+	}
+	if err := r.zd.PublishCdsRRs(); err == nil {
+		t.Error("PublishCdsRRs published without the keystore")
+	}
+	r.kdb.followKeysWithCDS(ctx, r.zd)
+	if events := r.log.snapshot(); len(events) != before {
+		t.Errorf("updates were sent: %v", events[before:])
+	}
+	assertDSSignals(t, r.zd, r.kskA)
+}
+
+// I7 reports a CDNSKEY served with no CDS: tdns never publishes one alone. A
+// CDS with no CDNSKEY is legal (cdnskey: false) and is not reported.
+func TestCheckerI7ACdnskeyWithoutACds(t *testing.T) {
+	c := newCheckerZone(t)
+	active := parseRR(t, c.row(DnskeyStateActive, "KSK").KeyRR).(*dns.DNSKEY)
+	stageApexRRset(t, c.zd, dns.TypeCDNSKEY, []dns.RR{cdnskeyOf(c.zd.ZoneName, active)}, nil)
+	expectOnly(t, CheckKeyInvariants(c.kdb, c.zd), "I7")
+
+	c = newCheckerZone(t)
+	c.rawExec(t, `UPDATE DnssecKeyStore SET ds = CASE state WHEN 'active' THEN 1 ELSE 0 END WHERE zonename=? AND (flags & 1) = 1`, c.zd.ZoneName)
+	active = parseRR(t, c.row(DnskeyStateActive, "KSK").KeyRR).(*dns.DNSKEY)
+	stageApexRRset(t, c.zd, dns.TypeCDS, cdsOfKeys(c.zd.ZoneName, active), nil)
+	if vs := CheckKeyInvariants(c.kdb, c.zd); len(vs) != 0 {
+		t.Errorf("a CDS with no CDNSKEY: %s", violationList(vs))
+	}
+}
