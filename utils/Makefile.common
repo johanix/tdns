@@ -59,6 +59,11 @@ GENALGS ?= $(GENALGS_DIR)/tdns-genalgs
 #     plus Register calls for the selected ones, and (for C-backed algs)
 #     the library build env (algs-libs.mk).
 #
+# In both of those cases genalgs also rewrites algdeps.go, which unlike its
+# other output is committed: it keeps go mod tidy from dropping the
+# algorithm packages' requirements in a tree without registered_algs.go.
+# See genAlgDeps in cmdv2/genalgs/main.go.
+#
 # For the latter two (algs.list exists), genalgs is re-run whenever
 # registered_algs.go is missing or older than algs.list, using the
 # dnssec-algorithms path recorded as ALGREPO in the shared ../algs-env.mk
