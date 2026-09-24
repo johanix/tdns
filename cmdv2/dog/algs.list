@@ -3,8 +3,8 @@
 # One registry NAME per line (see dnssec-algorithms/registry/registry.go).
 # genalgs resolves each name to its codepoint, caps, package, and lib group,
 # checks the lib is installed, and emits registered_algs.go + metadata_algs.go.
+# ED448 and MLDSA44 are built into every tdns binary and need no line here.
 # Pure-Go (no lib needed):
-MLDSA44
 SLHDSA128S
 MLDSA65
 MLDSA87

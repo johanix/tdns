@@ -9,6 +9,7 @@ replace (
 )
 
 require (
+	github.com/cloudflare/circl v1.6.3
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
@@ -27,7 +28,6 @@ require (
 )
 
 require (
-	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
@@ -56,7 +56,7 @@ require (
 
 // Pinned at johanix/dns v1.1.72-johanix.2 — provides the pluggable
 // Algorithm interface and the registered oots SvcParamKey (12) /
-// dns.SVCBOots. ML-DSA-44 lives out-of-tree in
-// github.com/johanix/dnssec-algorithms/mldsa44 and is wired in by blank
-// import from each binary's main package.
+// dns.SVCBOots. The algorithms it does not implement are registered
+// through that interface: ED448 and ML-DSA-44 by v2/algorithms in every
+// binary, the rest by each binary's generated registration code.
 replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2

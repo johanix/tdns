@@ -28,6 +28,10 @@
 //     genalgs run lets every app Makefile re-run the generator without
 //     re-supplying --algrepo.
 //
+// The algorithms tdns registers itself in every binary (tdnsBuiltIns) are
+// left out of both .go files, whatever the registry holds for them. An
+// algs.list may still name them; genalgs notes that and ignores the entry.
+//
 // The generated .go / .mk files are build artifacts: regenerated per build
 // host, not committed.
 //
@@ -47,6 +51,32 @@ import (
 	"sort"
 	"strings"
 )
+
+// tdnsBuiltIns are the algorithms v2/algorithms registers itself, in every
+// binary (its init). genalgs generates nothing for them: a RegisterMetadata
+// or Register from here would only repeat that registration, and from an
+// older dnssec-algorithms checkout (ML-DSA-44 at 199, or KSK-only) it
+// would contradict it. ED448 has no registry row; ML-DSA-44 has one until
+// dnssec-algorithms drops it. Keep in step with v2/algorithms; one missing
+// here is still harmless while its row agrees with tdns, since
+// v2/algorithms ignores a repeat of its own registration.
+var tdnsBuiltIns = map[string]bool{
+	"ED448":   true,
+	"MLDSA44": true,
+}
+
+// withoutBuiltIns returns the registry rows that are not tdnsBuiltIns.
+func withoutBuiltIns(all []Alg) []Alg {
+	out := make([]Alg, 0, len(all))
+	for _, a := range all {
+		if tdnsBuiltIns[a.Name] {
+			vlog("registry row %s (codepoint %d) is built into tdns; generating nothing for it", a.Name, a.Codepoint)
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
 
 // verbose, when set by -v, makes genalgs trace each step it takes
 // (resolving paths, parsing the registry, reading the list, running each
@@ -108,15 +138,19 @@ func run(algrepo, listPath, outDir, pkgName string) error {
 		return fmt.Errorf("parsing registry %s: %w", registryFile, err)
 	}
 	vlog("registry has %d algorithms", len(all))
+	all = withoutBuiltIns(all)
 	byName := map[string]Alg{}
 	for _, a := range all {
 		byName[a.Name] = a
 	}
 
 	vlog("reading algorithm list %s", listPath)
-	selected, err := readList(listPath, byName)
+	selected, ignored, err := readList(listPath, byName)
 	if err != nil {
 		return err
+	}
+	for _, name := range ignored {
+		fmt.Fprintf(os.Stderr, "genalgs: %s: %s is built into tdns; ignoring the entry (it can be removed)\n", listPath, name)
 	}
 	for _, a := range selected {
 		vlog("  selected %s (codepoint %d, group %s, package %s)", a.Name, a.Codepoint, a.Group, a.Package)
@@ -183,15 +217,16 @@ func run(algrepo, listPath, outDir, pkgName string) error {
 }
 
 // readList parses the per-app list of algorithm NAMEs. Blank lines and
-// #-comments are ignored. Unknown or duplicate names are hard errors.
-func readList(path string, byName map[string]Alg) ([]Alg, error) {
+// #-comments are ignored. A tdnsBuiltIns name is not selected but returned
+// in ignored, whether or not the registry has a row for it. Other unknown
+// names, and duplicates, are hard errors.
+func readList(path string, byName map[string]Alg) (selected []Alg, ignored []string, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
+		return nil, nil, fmt.Errorf("reading %s: %w", path, err)
 	}
 	defer f.Close()
 
-	var out []Alg
 	seen := map[string]bool{}
 	sc := bufio.NewScanner(f)
 	line := 0
@@ -201,20 +236,24 @@ func readList(path string, byName map[string]Alg) ([]Alg, error) {
 		if s == "" || strings.HasPrefix(s, "#") {
 			continue
 		}
-		a, ok := byName[s]
-		if !ok {
-			return nil, fmt.Errorf("%s:%d: unknown algorithm %q (not in the registry)", path, line, s)
-		}
 		if seen[s] {
-			return nil, fmt.Errorf("%s:%d: duplicate algorithm %q", path, line, s)
+			return nil, nil, fmt.Errorf("%s:%d: duplicate algorithm %q", path, line, s)
 		}
 		seen[s] = true
-		out = append(out, a)
+		if tdnsBuiltIns[s] {
+			ignored = append(ignored, s)
+			continue
+		}
+		a, ok := byName[s]
+		if !ok {
+			return nil, nil, fmt.Errorf("%s:%d: unknown algorithm %q (not in the registry)", path, line, s)
+		}
+		selected = append(selected, a)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
+		return nil, nil, fmt.Errorf("reading %s: %w", path, err)
 	}
-	return out, nil
+	return selected, ignored, nil
 }
 
 func sortedGroups(set map[string]bool) []string {

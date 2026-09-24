@@ -12,8 +12,9 @@ and drive PQ key/algorithm rollovers. It is standalone; it supersedes the
 "Post-Quantum Algorithm Support" section that previously lived in
 [special-features.md](special-features.md).
 
-> **Experimental codepoints.** The DNSKEY algorithm numbers used here
-> (199–214) are in the IANA-Unassigned range and are coordinated only
+> **Codepoints.** ML-DSA-44 has its IANA-assigned DNSKEY algorithm
+> number, 18, and is built into every tdns binary. The other numbers used
+> here (200–214) are in the IANA-Unassigned range and are coordinated only
 > inside this project. They **will** change when the IETF assigns real
 > codepoints. Treat them, and PQ DNSSEC generally, as experimental.
 
@@ -66,6 +67,9 @@ distinct place in the source tree:
    register those algorithms at process start. An app gets exactly the
    algorithms it selected — no runtime configuration, no dynamic loading,
    no "enable everything" fallback ([§6](#6-registering-algorithms-the-generated-model)).
+   ML-DSA-44 is the exception: tdns implements it itself
+   (`v2/algorithms/mldsa44`) and registers it in every binary, as it does
+   ED448.
 
 The layering matters: layer 1 is a generic DNS-library capability
 (reusable by any miekg/dns consumer), layer 2 is a reusable algorithm
@@ -80,7 +84,7 @@ because sign and verify dispatch through the same registry.
 `dnssec-algorithms` is a standalone Go module
 ([github.com/johanix/dnssec-algorithms](https://github.com/johanix/dnssec-algorithms)),
 **not** a package inside the tdns tree. It is a repository of **unified Go
-wrappers**: each subpackage (`mldsa44`, `slhdsa128s`, `falcon512`, …)
+wrappers**: each subpackage (`mldsa65`, `slhdsa128s`, `falcon512`, …)
 implements the single `dns.Algorithm` interface ([§7](#7-the-dnsalgorithm-interface))
 over one underlying implementation, hiding whether that implementation is
 pure-Go CIRCL, a call into liboqs, or a call into the SQIsign or QR-UOV
@@ -115,20 +119,21 @@ It lives outside tdns for four reasons:
 A tdns build that selects no PQ algorithms (an app with no `algs.list`,
 [§6](#6-registering-algorithms-the-generated-model)) needs neither the
 module beyond the normal pin nor a local checkout — it builds standalone
-with the classical built-in algorithms only.
+with the classical algorithms, ED448 and ML-DSA-44.
 
 ---
 
 ## 3. Supported algorithms
 
-The algorithms implemented under
+ML-DSA-44 is implemented in tdns itself (`v2/algorithms/mldsa44`) and
+registered in every binary. The others are implemented under
 [dnssec-algorithms](https://github.com/johanix/dnssec-algorithms), as
 recorded in the authoritative registry
 (`dnssec-algorithms/registry/registry.go`):
 
 | DNSKEY # | Name | Backend | Roles | Family / status |
 |---------:|------|---------|-------|-----------------|
-| 199 | ML-DSA-44 (FIPS 204) | CIRCL (pure Go) | KSK | Lattice; FIPS 204 final |
+| 18 | ML-DSA-44 (FIPS 204) | CIRCL (pure Go), in tdns | KSK + ZSK | Lattice; FIPS 204 final; IANA-assigned; in every binary |
 | 200 | ML-DSA-65 (FIPS 204) | CIRCL (pure Go) | KSK | Lattice; FIPS 204 final |
 | 201 | ML-DSA-87 (FIPS 204) | CIRCL (pure Go) | KSK | Lattice; FIPS 204 final |
 | 202 | SLH-DSA-128s (FIPS 205) | CIRCL (pure Go) | KSK | Hash-based; FIPS 205 final |
@@ -145,7 +150,7 @@ recorded in the authoritative registry
 | 213 | QR-UOV (q=31, L=3) | QR-UOV C lib (cgo) | KSK + ZSK | Multivariate (UOV); NIST onramp |
 | 214 | CROSS RSDP-G-128-small | liboqs (cgo) | KSK | Code-based (RSDP-G); NIST onramp |
 
-**Codepoints (199–214) are experimental and project-internal** — they are
+**Codepoints 200–214 are experimental and project-internal** — they are
 in the IANA-Unassigned range and will change when the IETF assigns real
 numbers. The registry
 (`dnssec-algorithms/registry/registry.go`) is the source of truth for this
@@ -235,11 +240,15 @@ Selection is a per-app plain-text file, **`algs.list`**, one algorithm
 
 ```
 # cmdv2/auth/algs.list
-MLDSA44
+MLDSA65
 SLHDSA128S
 FALCON512
 CROSSRSDPG128SMALL
 ```
+
+ED448 and ML-DSA-44 need no line: every binary has them. A list that
+still names them is accepted; genalgs notes that the line can go and
+generates nothing for it.
 
 The `genalgs` generator (`cmdv2/genalgs`) reads two inputs — the
 authoritative registry in a local `dnssec-algorithms` checkout, and this
@@ -289,7 +298,7 @@ determine whether the generator runs at all:
 
 | `algs.list` | genalgs runs? | Needs dnssec-algorithms? |
 |-------------|---------------|--------------------------|
-| **absent** | no | **no** — builds standalone, classical algorithms only |
+| **absent** | no | **no** — builds standalone: classical algorithms, ED448, ML-DSA-44 |
 | present but empty (comments/blanks) | yes, metadata-only | yes (registry) |
 | present with entries | yes, full | yes |
 

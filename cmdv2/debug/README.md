@@ -106,5 +106,6 @@ make            # regenerates version.go, builds ./tdns-debug
 ```
 
 Pure client: no C-backed algorithms are selected (no `algs.list`);
-SIG(0) signing uses the standard algorithms miekg/dns provides
-natively. Never linked into a production binary.
+SIG(0) signing uses the algorithms every tdns binary has: the ones
+miekg/dns provides natively, plus ED448 and ML-DSA-44. Never linked into
+a production binary.
