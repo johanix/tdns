@@ -393,9 +393,10 @@ func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, 
 
 // proxyCompareDS compares the parent's DS with the served CDS of a
 // parentsync-proxy zone, and reports whether it did: false for any other zone,
-// and for one serving no CDS it can use.
+// for an unsigned one (its DS is withdrawn whatever CDS it serves), and for one
+// serving no CDS it can use.
 func (zd *ZoneData) proxyCompareDS(resp *DelegationSyncStatus, parentDS []dns.RR) bool {
-	if zd.delegationChangeModeOf() != delegationChangeProxy {
+	if zd.delegationChangeModeOf() != delegationChangeProxy || !zd.hasDnskeyRRset() {
 		return false
 	}
 	cdsDS, served, usable, _ := zd.proxyDSFromCDS()

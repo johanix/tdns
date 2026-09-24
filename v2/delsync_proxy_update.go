@@ -424,8 +424,11 @@ func (zd *ZoneData) currentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR
 
 	// DS from the served CDS: the signer's statement of what the parent should
 	// hold (#752, design §1.2 (e)). The SEP keys are not that: a retired KSK
-	// is still published, and so is one whose DS is not due yet.
-	if cdsDS, served, usable, _ := zd.proxyDSFromCDS(); served {
+	// is still published, and so is one whose DS is not due yet. Only for a
+	// signed zone: one that publishes no DNSKEY RRset has its DS withdrawn
+	// whatever CDS it still serves, or a leftover CDS would install a DS for
+	// an unsigned zone and make it bogus.
+	if cdsDS, served, usable, _ := zd.proxyDSFromCDS(); served && zd.hasDnskeyRRset() {
 		if usable {
 			newDS = cdsDS
 		}
@@ -458,8 +461,12 @@ func (zd *ZoneData) currentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR
 // nil for both means nothing was removed.
 func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis, parentOnly []dns.RR) DelegationSyncStatus {
 	newNS, newA, newAAAA, newDS := zd.currentDelegationRRs()
-	known := !zd.hasDnskeyRRset() || len(newDS) > 0
-	if _, served, usable, why := zd.proxyDSFromCDS(); served {
+	signed := zd.hasDnskeyRRset()
+	known := !signed || len(newDS) > 0
+	// An unsigned zone's DS is withdrawn whatever CDS it still serves, as the
+	// API form does (proxyApiRRsets): a malformed CDS must not keep a DS in
+	// place for a zone that publishes no DNSKEY RRset (review C1 of #766).
+	if _, served, usable, why := zd.proxyDSFromCDS(); served && signed {
 		// A usable CDS is a statement even when it asks for no DS: the RFC
 		// 8078 delete withdraws the parent's DS.
 		known = usable
