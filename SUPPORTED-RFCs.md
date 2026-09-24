@@ -119,12 +119,14 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 ## DNS Record Types
 
 ### RFC 9859 - Generalized NOTIFY (DSYNC)
-**Status**: ✅ Fully Supported  
-**Implementation**: `tdns/core/rr_dsync.go`  
+**Status**: ✅ Supported  
+**Implementation**: `tdns/v2/core/rr_dsync.go` (the record); `tdns/v2/ops_dsync.go` (publication); `tdns/v2/dsync_lookup.go` (discovery)  
 **Notes**: 
-- Complete implementation of the DSYNC record type
-- Used for child-to-parent synchronization
-- Supports delegation synchronization via DNS UPDATE
+- **The record:** the RRtype field is a mnemonic or `TYPEnnn`, the scheme a mnemonic or any number 0–255, the port 0–65535. Rdata that ends before the target is refused.
+- **Selection:** a record with the null scheme 0, port 0 or the root as its target is never used.
+- **Names:** `_dsync.<zone>` and `<child>._dsync.<zone>`; at the root, `_dsync.` and `<tld>._dsync.`.
+- **Schemes:** NOTIFY (1) as in the RFC. UPDATE (2), SCANNER (3) and API (4) are tdns's own and are not assigned in the IANA registry, whose 2–127 range is the IETF's to assign. MSUPDATE (129) and REPORT (130) are private use.
+- Used for child-to-parent synchronization by NOTIFY, DNS UPDATE and the API.
 
 ### RFC 7477 - Child-to-Parent Synchronization in DNS (CSYNC)
 **Status**: ✅ Partially Supported  

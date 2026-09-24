@@ -2,7 +2,7 @@
 
 **Written 2026-09-24.** Line references are to main at `81a22644`.
 
-**Status:** proposal, reviewed. Johan answered §8 on 2026-09-24. He then decided that the CDS is always published, with telling the parent gated by `parentsync` (1.2 (a), (c)), and answered Q10. The doc is written to those decisions and to three external reviews. Part 1 is implemented and merged (PR #761, 6d3e5aaf). Part 2 is implemented in the PR that adds §10, not merged. Parts 3–5 are not implemented.
+**Status:** proposal, reviewed. Johan answered §8 on 2026-09-24. He then decided that the CDS is always published, with telling the parent gated by `parentsync` (1.2 (a), (c)), and answered Q10. The doc is written to those decisions and to three external reviews. Part 1 is implemented and merged (PR #761, 6d3e5aaf). Part 2 is implemented and merged (PR #766, 18c23c11). Part 3 is implemented in the PR that adds its §10 entry, not merged. Parts 4 and 5 are not implemented.
 
 ## Summary
 
@@ -471,3 +471,15 @@ Johan answered Q1–Q9 on 2026-09-24, after the external review of the first ver
 ## 10. Amendments
 
 **Part 2, 2026-09-24.** §2.3's example malformed record `0 13 2 <digest>` is key tag 0 with algorithm 13, not algorithm 0. Under §2.2's rule it is an ordinary update record, and the implementation treats it as one. The test for "an algorithm-0 record with a real key tag, digest type and digest" uses `12345 0 2 <digest>` instead. Also in Part 2, as §6 says: the classifier replaces Part 1's interim algorithm-0 check in the proxy, so a `parentsync-proxy` agent delivers the exact delete as a DS withdrawal (#737) and leaves the parent alone on a malformed set.
+
+**Part 3, 2026-09-24.** Where the code differs from §3.2:
+- **The predicate** is a method, `(*core.DSYNC).Usable()`, not `dsyncUsable(rr)`, so that the CLI can use it too.
+- **Where it applies:** the three sites in §3.2, and two more that pick a record to act on:
+  - `advertisesDsyncNotify`: a parent whose own NOTIFY record has port 0 does not advertise NOTIFY;
+  - the REPORT lookup in `tdns-cli auth report`.
+- **Target templates:** only the owner names change. A `{ZONENAME}` in a target template still becomes `root` for the root zone, as before. A target is the operator's choice, not a name RFC 9859 fixes, and an empty expansion would make `dsync-api.{ZONENAME}` the invalid `dsync-api..`.
+- **Parse and print:**
+  - Mnemonics are case-insensitive, as elsewhere in a zone file.
+  - Every type prints as something that parses back. Types 0 and 65535 print as `TYPE0` and `TYPE65535`, because the DNS library's names for them, `None` and `Reserved`, do not parse. Both parse as `TYPEnnn`, since a record carrying either can arrive by transfer and be written to a zone file.
+  - The decimal entries in `StringToScheme` are gone, since the decimal parse covers them.
+- **A leftover `_dsync.root.`:** a root zone that still serves a DSYNC RRset at the old name gets a warning each time its publication is built. The RRset is not deleted: it may be the operator's, and one in the zone file would come back at the next load.
