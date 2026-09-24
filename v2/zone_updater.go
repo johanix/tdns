@@ -366,6 +366,15 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 						lg.Debug("ZoneUpdater: delegation sync status", "inSync", dss.InSync)
 					}
 
+					// An operator's edit of the apex CDS, CDNSKEY or CSYNC is
+					// passed on to the parent (delsync_signals.go). What the
+					// zone served before is read now; what the update left is
+					// read after it.
+					var signalsBefore map[uint16][]dns.RR
+					if !ur.InternalUpdate && touchesApexSignals(zd.ZoneName, ur.Actions) {
+						signalsBefore = zd.servedApexSignals()
+					}
+
 					var updated bool
 					var err error
 
@@ -483,6 +492,28 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 							lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
 						} else {
 							lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
+						}
+					}
+
+					// The operator's edit, compared with what the update staged
+					// rather than with the served zone: under a transaction
+					// hold the served zone is still the old one. The syncher
+					// sends nothing until the hold has ended.
+					if updated && signalsBefore != nil && zd.DelegationSyncQ != nil {
+						if types := editedSignalTypes(signalsBefore, zd.stagedApexSignals()); len(types) > 0 &&
+							zd.childDelegationSyncEnabled() {
+							lg.Debug("ZoneUpdater: an operator edited the zone's signals, sending SIGNALS-EDITED",
+								"zone", zd.ZoneName, "types", types)
+							if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
+								Command:     "SIGNALS-EDITED",
+								ZoneName:    zd.ZoneName,
+								ZoneData:    zd,
+								SignalTypes: types,
+							}) {
+								lg.Info("ZoneUpdater: context cancelled before the SIGNALS-EDITED enqueue", "zone", zd.ZoneName)
+								lg.Info("ZoneUpdater: terminating")
+								return nil
+							}
 						}
 					}
 				} else {

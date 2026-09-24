@@ -275,6 +275,11 @@ type ZoneData struct {
 	// wrong key, so NeedsResigning short-circuits and renewal finds nothing
 	// due. Set by triggerResign, cleared only by a replace that succeeded.
 	resignPending atomic.Bool
+	// dsFirstRunDone records that the DS engine has had its first run for this
+	// ZoneData, the one that compares the parent's DS with the keys once per
+	// zone load (followKeysWithCDS). Per ZoneData, not per process: a zone
+	// added or first signed after the server started gets its compare too.
+	dsFirstRunDone atomic.Bool
 	// signingKeys is the per-zone copy-on-write active DNSSEC key set (G3).
 	// Lock-free reads via SigningKeys() / ActiveDnssecKeys(); writers republish
 	// post-commit via republishSigningKeys. Separate from the zone-data snapshot.
@@ -880,6 +885,11 @@ type DnssecPolicyConf struct {
 	Rollover DnssecPolicyRolloverConf `yaml:"rollover" mapstructure:"rollover"`
 	Ttls     DnssecPolicyTtlsConf     `yaml:"ttls" mapstructure:"ttls"`
 	Clamping DnssecPolicyClampingConf `yaml:"clamping" mapstructure:"clamping"`
+
+	// Cds: false stops the DS engine publishing a CDS the zone does not serve
+	// yet. Unset means true. A pointer so a template can fill it and an
+	// explicit false survives the merge.
+	Cds *bool `yaml:"cds" mapstructure:"cds"`
 }
 
 type KeyLifetime struct {
@@ -920,6 +930,12 @@ type DnssecPolicy struct {
 	Rollover RolloverPolicy
 	TTLS     DnssecPolicyTTLS
 	Clamping ClampingPolicy
+
+	// SuppressCDS is `cds: false`. It suppresses only the DS engine's own
+	// publishing of a CDS the zone does not serve; a CDS the zone serves is
+	// still followed, and a parentsync zone publishes regardless
+	// (cdsAlwaysPublishedLocked).
+	SuppressCDS bool
 
 	// suppressLoadWarnings is set by ParseDnssecPolicyConfQuiet so
 	// CLI tools that re-parse a daemon's policy don't duplicate the
@@ -1218,6 +1234,9 @@ type DelegationSyncRequest struct {
 	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
 	// set the proxy NOTIFY action keys on (parentsync-proxy).
 	ProxyAnalysis *ProxyDelegationAnalysis
+	// SignalTypes is set for SIGNALS-EDITED: the apex RR types (CDS, CDNSKEY,
+	// CSYNC) an operator's update changed.
+	SignalTypes []uint16
 }
 
 type BumperData struct {
@@ -1362,6 +1381,12 @@ type KeyDB struct {
 	dsDirtyMu sync.Mutex
 	dsDirty   map[string]*ZoneData
 	dsWakeCh  chan struct{}
+	// dsSyncPending holds the zones whose EXPLICIT-SYNC-DELEGATION the DS engine
+	// could not queue, and dsSettingNoted the zones it has logged an ignored
+	// `cds: false` for; see followKeysWithCDS. Touched only on the DS engine's
+	// goroutine.
+	dsSyncPending  map[string]*ZoneData
+	dsSettingNoted map[string]bool
 	// options holds the parsed DnsEngine auth options. It is read on the hot
 	// query path (QueryResponder, per request) and replaced wholesale on config
 	// reload, so it is stored behind an atomic.Pointer for lock-free reads and a

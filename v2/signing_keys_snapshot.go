@@ -99,6 +99,12 @@ func (zd *ZoneData) republishSigningKeys(kdb *KeyDB) error {
 
 // republishSigningKeysForZone looks up the loaded ZoneData by FQDN and
 // republishes. If the zone is not loaded, this is a no-op.
+//
+// Every caller has just committed a change to the zone's key rows, so this is
+// also where the DS engine hears of it (#752). A change of a KSK's ds column
+// does not show in the served DNSKEY RRset -- published -> standby, a manual
+// roll -- and nothing else would tell the engine until the next tick. A hint,
+// not a result: the engine publishes only when the CDS differs from the keys.
 func republishSigningKeysForZone(kdb *KeyDB, zone string) error {
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	if zone == "." {
@@ -108,6 +114,7 @@ func republishSigningKeysForZone(kdb *KeyDB, zone string) error {
 	if !ok || zd == nil {
 		return nil
 	}
+	defer kdb.KeysChanged(zd)
 	return zd.republishSigningKeys(kdb)
 }
 

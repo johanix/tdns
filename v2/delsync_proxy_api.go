@@ -226,21 +226,24 @@ func parentOnlyNS(zone string, childNS, parentNS []dns.RR) []dns.RR {
 // proxyApiRRsets renders the served zone's delegation in the declarative form
 // the endpoint takes.
 //
-// DS is deliberately absent from the request, with one exception below.
+// The DS is the child's own statement about it, its CDS, when the child serves
+// one (#752, design docs/2026-09-24-cds-publication-and-rfc-conformance.md
+// §1.2 (e); B1 in docs/2026-08-23-proxy-delegation-sync-scope.md). A tdns
+// signer now publishes one for every zone whose keys it manages. A CDS holding
+// an algorithm-0 record is not delivered yet: which such set is the RFC 8078
+// delete is Part 2's classifier to decide.
 //
-// The proxy has no business asserting a DS set for a signed child. It sees only
-// the zone as transferred, and the DS the parent should hold is not derivable
-// from that: a multi-DS rollover puts the new DS at the parent BEFORE the
-// matching DNSKEY appears, so anything derived from published keys is missing
-// exactly the record the rollover just placed. Deriving it from SEP-flagged
-// keys is wrong a second way, since SEP is advisory -- a zone signed with a
-// flags-256 CSK yields an empty set, and declaring that empty set tells the
-// parent to delete the DS of a perfectly good child.
-//
-// The child's own statement about DS is its CDS/CDNSKEY RRset, and forwarding
-// that is B1 in docs/2026-08-23-proxy-delegation-sync-scope.md. Until it lands,
-// omitting DS leaves the parent holding what it already has, which is right in
-// every case except the one below.
+// With no CDS, DS is deliberately absent from the request, with one exception
+// below. The proxy has no business deriving a DS set for a signed child. It
+// sees only the zone as transferred, and the DS the parent should hold is not
+// derivable from that: a multi-DS rollover puts the new DS at the parent BEFORE
+// the matching DNSKEY appears, so anything derived from published keys is
+// missing exactly the record the rollover just placed. Deriving it from
+// SEP-flagged keys is wrong a second way, since SEP is advisory -- a zone
+// signed with a flags-256 CSK yields an empty set, and declaring that empty set
+// tells the parent to delete the DS of a perfectly good child. Omitting DS
+// leaves the parent holding what it already has, which is right in every case
+// except the one below.
 //
 // The exception: a child with NO DNSKEY RRset at all. There is no procedure
 // that produces "unsigned child, DS at the parent" on purpose, the state makes
@@ -257,16 +260,24 @@ func parentOnlyNS(zone string, childNS, parentNS []dns.RR) []dns.RR {
 func (zd *ZoneData) proxyApiRRsets(analysis *ProxyDelegationAnalysis, parentOnly []dns.RR) []DsyncApiRRset {
 	newNS, newA, newAAAA, _ := zd.currentDelegationRRs()
 
-	rrsets := DsyncApiRRsetsFromSyncStatus(zd.ZoneName, DelegationSyncStatus{
+	status := DelegationSyncStatus{
 		ZoneName:  zd.ZoneName,
 		Parent:    zd.GetParent(),
 		NewNS:     newNS,
 		NewA:      newA,
 		NewAAAA:   newAAAA,
 		NsRemoves: proxyRemovedNS(analysis, parentOnly),
-	})
+	}
+	// The DS the served CDS asks for, when there is one: the signer's
+	// statement of what the parent should hold (#752, design §1.2 (e)). With
+	// no CDS the payload declares no DS, as before.
+	signed := zd.hasDnskeyRRset()
+	if cdsDS, served, usable := zd.proxyDSFromCDS(); signed && served && usable {
+		status.NewDS, status.NewDSKnown = cdsDS, true
+	}
+	rrsets := DsyncApiRRsetsFromSyncStatus(zd.ZoneName, status)
 
-	if !zd.hasDnskeyRRset() {
+	if !signed {
 		lgDns.Info("parentsync-proxy: child publishes no DNSKEY RRset;"+
 			" declaring an empty DS so the parent stops making it bogus", "zone", zd.ZoneName)
 		rrsets = append(rrsets, DsyncApiRRset{

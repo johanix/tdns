@@ -708,12 +708,24 @@ func TestPublishDnskeyRRsTellsTheDSEngineWhenAKskChanges(t *testing.T) {
 		}
 	})
 
-	t.Run("a zone serving no CDS", func(t *testing.T) {
+	// A signing zone serving no CDS gets its first one from the DS engine
+	// (design §1.2 (a)), so its first signing marks it too.
+	t.Run("a signing zone serving no CDS", func(t *testing.T) {
 		zd, kdb := newZone(t, false)
 		seedKey(t, kdb, "example.", DnskeyStatePublished, 257, pubA)
 		publish(t, zd)
+		if got := dirtyZoneNames(kdb); len(got) != 1 || got[0] != "example." {
+			t.Errorf("marked zones = %v, want [example.]", got)
+		}
+	})
+
+	t.Run("a zone serving no CDS under cds: false", func(t *testing.T) {
+		zd, kdb := newZone(t, false)
+		zd.DnssecPolicy = &DnssecPolicy{SuppressCDS: true}
+		seedKey(t, kdb, "example.", DnskeyStatePublished, 257, pubA)
+		publish(t, zd)
 		if got := dirtyZoneNames(kdb); len(got) != 0 {
-			t.Errorf("marked %v, a zone with no CDS to follow", got)
+			t.Errorf("marked %v, a zone whose policy publishes no CDS of its own", got)
 		}
 	})
 

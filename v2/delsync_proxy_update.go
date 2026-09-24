@@ -397,9 +397,11 @@ func (zd *ZoneData) proxyKeyStatusMessage(state ProxyUpdateState, kdb *KeyDB) (s
 // rediscover it.
 //
 // Reads the apex NS, the in-bailiwick glue (A/AAAA) for those nameservers, and
-// the DS derived from the apex DNSKEY SEP keys. These are the replace-form UPDATE's "new members" — the
-// payload never depends on the parent's state (that is the point of replace).
-// For an unsigned zone newDS is empty (no DNSKEYs), which is correct.
+// the DS: what the served CDS asks for when the zone serves one, otherwise the
+// DS of the apex DNSKEY SEP keys (proxyDSFromCDS). These are the replace-form
+// UPDATE's "new members" — the payload never depends on the parent's state
+// (that is the point of replace). For an unsigned zone newDS is empty (no
+// DNSKEYs), which is correct; so it is for a CDS the proxy cannot use yet.
 func (zd *ZoneData) currentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR) {
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || apex == nil {
@@ -419,7 +421,18 @@ func (zd *ZoneData) currentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR
 		}
 	}
 
-	// DS from the apex DNSKEY SEP keys (signed zones only).
+	// DS from the served CDS: the signer's statement of what the parent should
+	// hold (#752, design §1.2 (e)). The SEP keys are not that: a retired KSK
+	// is still published, and so is one whose DS is not due yet.
+	if cdsDS, served, usable := zd.proxyDSFromCDS(); served {
+		if usable {
+			newDS = cdsDS
+		}
+		return newNS, newA, newAAAA, newDS
+	}
+
+	// No CDS: a signer that publishes none (another implementation, an older
+	// tdns). DS from the apex DNSKEY SEP keys (signed zones only), as before.
 	for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
 		if dnskey, ok := rr.(*dns.DNSKEY); ok && dnskey.Flags&dns.SEP != 0 {
 			if ds := dnskey.ToDS(dns.SHA256); ds != nil {
@@ -444,6 +457,10 @@ func (zd *ZoneData) currentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR
 // nil for both means nothing was removed.
 func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis, parentOnly []dns.RR) DelegationSyncStatus {
 	newNS, newA, newAAAA, newDS := zd.currentDelegationRRs()
+	if _, served, usable := zd.proxyDSFromCDS(); served && !usable {
+		lgDns.Warn("parentsync-proxy: the served CDS holds an algorithm-0 record;"+
+			" leaving the parent's DS alone", "zone", zd.ZoneName)
+	}
 	return DelegationSyncStatus{
 		ZoneName:   zd.ZoneName,
 		Parent:     zd.GetParent(),
@@ -617,4 +634,34 @@ func parentBootstrapResult(ur UpdateResult, err error) error {
 		return fmt.Errorf("bootstrap SIG(0) key with parent: rcode %s", dns.RcodeToString[ur.Rcode])
 	}
 	return nil
+}
+
+// proxyDSFromCDS is the DS RRset the served CDS asks for (#752, design
+// §1.2 (e)). served reports whether the zone serves a CDS at all. usable is
+// false for a set holding an algorithm-0 record: which of those is the RFC 8078
+// delete is Part 2's classifier to decide, and until then the proxy leaves the
+// parent's DS alone rather than guess. A zone whose apex cannot be read serves
+// no CDS, as far as this is concerned: the caller falls back to the SEP keys.
+func (zd *ZoneData) proxyDSFromCDS() (ds []dns.RR, served, usable bool) {
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil || apex.RRtypes == nil {
+		return nil, false, false
+	}
+	cdsRRs := apex.RRtypes.GetOnlyRRSet(dns.TypeCDS).RRs
+	if len(cdsRRs) == 0 {
+		return nil, false, false
+	}
+	for _, rr := range cdsRRs {
+		c, ok := rr.(*dns.CDS)
+		if !ok {
+			continue
+		}
+		if c.Algorithm == 0 {
+			return nil, true, false
+		}
+		d := c.DS
+		d.Hdr = dns.RR_Header{Name: dns.Fqdn(zd.ZoneName), Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: c.Hdr.Ttl}
+		ds = append(ds, &d)
+	}
+	return ds, true, true
 }
