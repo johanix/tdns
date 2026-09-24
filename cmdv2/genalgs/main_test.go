@@ -36,7 +36,7 @@ var kskOnly = Caps{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: false}
 const base = "github.com/johanix/dnssec-algorithms/"
 
 var Algorithms = []Alg{
-	{199, "MLDSA44", dnssec, base + "mldsa44", PureGo},
+	{18, "MLDSA44", dnssec, base + "mldsa44", PureGo},
 	{200, "SLHDSA128S", kskOnly, base + "slhdsa128s", PureGo},
 	{201, "FALCON512", dnssec, base + "falcon512", Liboqs},
 	{214, "CROSSX", Caps{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: false}, base + "crossx", Liboqs},
@@ -57,12 +57,18 @@ var AlgorithmFacts = map[string]Facts{
 
 func writeFixture(t *testing.T) string {
 	t.Helper()
+	return writeFixtureWith(t, registryFixture)
+}
+
+// writeFixtureWith writes a fixture repo whose registry.go is src.
+func writeFixtureWith(t *testing.T, src string) string {
+	t.Helper()
 	dir := t.TempDir()
 	reg := filepath.Join(dir, "registry")
 	if err := os.MkdirAll(reg, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(reg, "registry.go"), []byte(registryFixture), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(reg, "registry.go"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return dir
@@ -84,7 +90,7 @@ func TestParseRegistry(t *testing.T) {
 	}
 
 	// Named shorthand resolved.
-	if got := byName["MLDSA44"]; got.Codepoint != 199 || !got.Caps.ForZSK || got.Package != "github.com/johanix/dnssec-algorithms/mldsa44" || got.Group != "purego" {
+	if got := byName["MLDSA44"]; got.Codepoint != 18 || !got.Caps.ForZSK || got.Package != "github.com/johanix/dnssec-algorithms/mldsa44" || got.Group != "purego" {
 		t.Errorf("MLDSA44 parsed wrong: %+v", got)
 	}
 	// kskOnly shorthand → ForZSK false.
@@ -166,22 +172,104 @@ func TestReadListErrors(t *testing.T) {
 
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.list")
-	os.WriteFile(good, []byte("MLDSA44\n# comment\n\nFALCON512\n"), 0o644)
-	sel, err := readList(good, byName)
+	os.WriteFile(good, []byte("SLHDSA128S\n# comment\n\nFALCON512\n"), 0o644)
+	sel, _, err := readList(good, byName)
 	if err != nil || len(sel) != 2 {
 		t.Fatalf("good list: sel=%d err=%v", len(sel), err)
 	}
 
 	bad := filepath.Join(dir, "bad.list")
 	os.WriteFile(bad, []byte("NOSUCH\n"), 0o644)
-	if _, err := readList(bad, byName); err == nil {
+	if _, _, err := readList(bad, byName); err == nil {
 		t.Error("expected error for unknown alg")
 	}
 
 	dup := filepath.Join(dir, "dup.list")
-	os.WriteFile(dup, []byte("MLDSA44\nMLDSA44\n"), 0o644)
-	if _, err := readList(dup, byName); err == nil {
+	os.WriteFile(dup, []byte("FALCON512\nFALCON512\n"), 0o644)
+	if _, _, err := readList(dup, byName); err == nil {
 		t.Error("expected error for duplicate alg")
+	}
+}
+
+// An algs.list naming an algorithm tdns builds in is not an error, even
+// with no registry row for it: the name comes back as ignored, and only the
+// rest is selected.
+func TestReadListIgnoresBuiltIns(t *testing.T) {
+	algrepo := writeFixture(t)
+	all, err := parseRegistry(filepath.Join(algrepo, "registry", "registry.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Alg{}
+	for _, a := range withoutBuiltIns(all) {
+		byName[a.Name] = a
+	}
+	if _, ok := byName["MLDSA44"]; ok {
+		t.Fatal("withoutBuiltIns kept the MLDSA44 row")
+	}
+
+	list := filepath.Join(t.TempDir(), "algs.list")
+	os.WriteFile(list, []byte("MLDSA44\nED448\nSLHDSA128S\n"), 0o644)
+	sel, ignored, err := readList(list, byName)
+	if err != nil {
+		t.Fatalf("a list naming built-ins was refused: %v", err)
+	}
+	if len(sel) != 1 || sel[0].Name != "SLHDSA128S" {
+		t.Errorf("selected = %+v, want only SLHDSA128S", sel)
+	}
+	if strings.Join(ignored, ",") != "MLDSA44,ED448" {
+		t.Errorf("ignored = %v, want [MLDSA44 ED448]", ignored)
+	}
+}
+
+// Whatever the checkout's registry holds for ML-DSA-44 -- the row at its
+// IANA codepoint, the row at 199 from before the assignment, or no row at
+// all -- run() succeeds with it in the list and generates nothing for it.
+// Generated code that registered it would repeat, or at 199 contradict,
+// the registration v2/algorithms makes in every binary.
+func TestRunGeneratesNothingForBuiltIns(t *testing.T) {
+	const row = `	{18, "MLDSA44", dnssec, base + "mldsa44", PureGo},` + "\n"
+	if !strings.Contains(registryFixture, row) {
+		t.Fatal("fixture no longer has the MLDSA44 row this test rewrites")
+	}
+	for _, tc := range []struct {
+		name     string
+		registry string
+	}{
+		{"row at 18", registryFixture},
+		{"row at 199", strings.Replace(registryFixture, row, strings.Replace(row, "{18,", "{199,", 1), 1)},
+		{"no row", strings.Replace(registryFixture, row, "", 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			algrepo := writeFixtureWith(t, tc.registry)
+			outDir := filepath.Join(t.TempDir(), "app")
+			if err := os.Mkdir(outDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			listPath := filepath.Join(outDir, "algs.list")
+			os.WriteFile(listPath, []byte("MLDSA44\nSLHDSA128S\n"), 0o644)
+
+			if err := run(algrepo, listPath, outDir, "main"); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			meta, err := os.ReadFile(filepath.Join(outDir, "metadata_algs.go"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			reg, err := os.ReadFile(filepath.Join(outDir, "registered_algs.go"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(meta), "MLDSA44") {
+				t.Errorf("metadata_algs.go registers MLDSA44:\n%s", meta)
+			}
+			if strings.Contains(string(reg), "mldsa44") {
+				t.Errorf("registered_algs.go registers MLDSA44:\n%s", reg)
+			}
+			if !strings.Contains(string(reg), "slhdsa128s.New()") {
+				t.Errorf("registered_algs.go lost the rest of the selection:\n%s", reg)
+			}
+		})
 	}
 }
 
