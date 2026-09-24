@@ -3,10 +3,17 @@
 **Written 2026-09-25.** For #770 and #771. Line references are to main at
 `0847c04e`.
 
-**Status:** proposal, not reviewed. Nothing implemented.
+**Status:** proposal. Reviewed 2026-09-25 (sound); r3 applies that review.
+Nothing implemented.
 
-**Revisions:** r1 2026-09-25, first version (PR #772). r2 2026-09-25: §7
-gains the cost of the chain index and the relation to #547, and Q7 is new.
+**Revisions:**
+- r1 2026-09-25: first version (PR #772).
+- r2 2026-09-25: §7 gains the cost of the chain index and the relation to
+  #547, and Q7 is new.
+- r3 2026-09-25: the review's S1–S3 and C1–C3 are applied (§3.4–§3.6), and
+  §10 records its answers. NSEC3 is now #773. §8 item 10 is corrected: the
+  existing compact-denial tests run on unsigned zones, so stage 1 has to move
+  them.
 
 ## Summary
 
@@ -25,7 +32,7 @@ gains the cost of the chain index and the relation to #547, and Q7 is new.
     use it either. The guide defines `black-lies` as the option that turns
     the chain off (§1.3).
   - A secondary of an NSEC3 zone has the §1.1 problem, and also treats every
-    hashed NSEC3 owner name as a name that exists (§1.4).
+    hashed NSEC3 owner name as a name that exists (§1.4, #773).
 - **One case already works.** A signed wildcard answer carries the stored
   NSEC that covers the query name (89199fa8). That NSEC goes out with the
   signature it arrived with, so this works on a secondary too (§2).
@@ -43,12 +50,13 @@ gains the cost of the chain index and the relation to #547, and Q7 is new.
 - **Stages.**
   1. Zones not signed here: the #770 secondary and the unsigned zone.
   2. Zones signed here without `black-lies` answer from their chain.
-  3. NSEC3 on secondaries (§4).
+  3. NSEC3 on secondaries, tracked as #773 (§4).
 
   Stages 1 and 2 are small. Stage 3 is about as big as the other two
   together.
 - **Size:**
-  - Stage 1: about 250 lines of non-test code and 500 of tests.
+  - Stage 1: about 250 lines of non-test code and 600 of tests, including
+    moving the existing compact-denial tests.
   - Stage 2: about 20 lines, plus a rework of existing tests.
   - Stage 3: about 400 lines and 600 of tests (§9).
 
@@ -127,6 +135,10 @@ result:
   with a synthesized NSEC whose bitmap lists NSEC3. RFC 5155 §7.2.8 requires
   a Name Error response.
 
+This is tracked as #773. Stage 1 already improves the first point: it
+answers such a zone as row D (§3.1), so a missing name gets NXDOMAIN and the
+signed SOA instead of an unsigned NSEC. The second point is left to #773.
+
 ## 2. Why
 
 Every negative answer goes through `addCDEResponse`
@@ -173,7 +185,7 @@ options decide. For any other zone, the pinned snapshot does:
 | A | signed here | `black-lies` | compact denial, synthesized and signed per response: today's `addCDEResponse` |
 | B | signed here | no `black-lies` | its own NSEC chain (stage 2; until then, A) |
 | B | not signed here | the apex has an NSEC | the chain's records, with their stored RRSIGs |
-| C | not signed here | the apex has NSEC3PARAM | NSEC3 records (stage 3; until then, D) |
+| C | not signed here | the apex has NSEC3PARAM | NSEC3 records (#773; until then, D) |
 | D | not signed here | the apex SOA has RRSIGs | none: the rcode and the signed SOA |
 | E | not signed here | none of the above | none: the rcode and the SOA |
 
@@ -186,7 +198,7 @@ options decide. For any other zone, the pinned snapshot does:
   - a secondary of a zone whose primary uses compact denial: there is no
     chain to transfer, and without the key the secondary cannot synthesize
     one;
-  - an NSEC3 zone before stage 3.
+  - an NSEC3 zone, until #773.
 
   In both, a non-validating client at least gets the right rcode.
 - **Row E** is the unsigned zone. It answers a DO query exactly as it answers
@@ -226,25 +238,36 @@ For row B, following RFC 4035 §3.1.3:
 
 ### 3.3 Rcode and CO
 
-The rcode is set according to the denial source, no longer inside
-`addCDEResponse`:
+The rcode follows the denial source:
 
 - **Row A:** as today. NOERROR for a name that does not exist, unless the
-  query set CO (RFC 9824 §3.1, §5.1).
+  query set CO (RFC 9824 §3.1, §5.1). The rule stays where it is, in
+  `addCDEResponse`.
 - **Rows B to E:** NXDOMAIN for a name that does not exist, whether or not CO
-  is set. CO asks for NXDOMAIN to be restored next to a compact denial. These
-  answers are not compact denials, so there is nothing to restore.
+  is set; `addDenial` sets it. CO asks for NXDOMAIN to be restored next to a
+  compact denial. These answers are not compact denials, so there is nothing
+  to restore.
 
 The CO flag in the response is echoed as today (`respondEDNS`).
 
-### 3.4 A proof record that is not there
+### 3.4 A proof record that is missing or wrong
 
 A chain can lack a record that an answer needs. Examples: a transfer that
-omitted it, an NSEC without an RRSIG, a zone in the middle of a key or
-denial transition.
+omitted it, or a zone in the middle of a key or denial transition.
+
+A record that is there but does not prove the claim counts as missing, and
+is not attached to the answer:
+- a NODATA owner's NSEC whose bitmap lists the qtype, or CNAME;
+- an empty non-terminal's cover whose next name is not below qname;
+- a record that does not cover the name it is meant to cover.
+  `nsecCoveringFrom` already refuses those.
+
+A stored NSEC without RRSIGs is different. In a zone not signed here it is
+served as stored, as a positive RRset without RRSIGs is in such a zone. In a
+zone signed here it is broken data, as below.
 
 - **Not signed here (rows B to D):** serve what the zone holds (the SOA and
-  whichever proof records exist) and warn (§3.6).
+  whichever proof records exist, as stored) and warn (§3.6).
   - This matches the positive path, which serves a stored RRset without
     RRSIGs as it is for such a zone (`:177-183`).
   - A SERVFAIL would also take the right rcode away from non-validating
@@ -264,20 +287,46 @@ denial transition.
     entry point for every negative answer.
     - `q` names the case from §3.2 and carries what that case needs: qname,
       the owner, the wildcard owner, or the cut.
-    - It sets the rcode, adds the SOA's RRSIGs and adds the proof from the
-      zone's source.
+    - It sets the rcode for rows B to E, adds the SOA's RRSIGs and adds the
+      proof from the zone's source.
     - Its error keeps today's meaning: a denial that must be signed and
       cannot be. The caller turns it into a SERVFAIL with
       `failUnsignedDenial`, as now.
+- **`sendTypeNodata` is two cases of §3.2.** It is called with the name that
+  was asked and an owner. `addDenial` tells the two apart by that owner:
+  - exact NODATA, where the owner is the query name: the owner's NSEC;
+  - wildcard NODATA, where the owner is the wildcard node that matched
+    (from `:1316`, `:1334`, and `answerRRSIG` at `:660`): the NSEC covering
+    the query name, plus the owner's NSEC (RFC 4035 §3.1.3.4). If both are
+    the same record, it goes out once.
+
+  Looking up an NSEC at the query name, as compact denial does, is wrong for
+  the wildcard case.
 - **`addCDEResponse` and `addReferralNSEC`** become the row A builders and
-  nothing else. The rcode handling moves out of `addCDEResponse` into
-  `addDenial`.
+  nothing else. `addCDEResponse` keeps row A's rcode rule, so
+  `TestAddCDEResponseFollowsCO` still applies to it as it is.
 - **The eight sites in §2** call `addDenial` instead.
+- **The empty-owner NXDOMAIN** (`:1262`) calls `sendNXDOMAIN` instead of
+  repeating it, so there is one NXDOMAIN builder.
+  - Today that path also checks the SOA. It passes the SOA through the
+    signing function, which answers SERVFAIL when a zone signed here has an
+    SOA without RRSIGs.
+  - `addDenial` makes that check for every negative answer in a zone signed
+    here. For a zone whose SOA is signed, this changes nothing.
 - **`sendReferral`** takes the snapshot as a new argument, so it can find the
   NSEC at the cut. All three callers already have one (`:394`, `:1192`,
   `:1281`).
 - **`addWildcardProof`** asks `denialSourceFor` instead of testing
   `black-lies` itself.
+  - It synthesizes a cover (`coverNextCloser`) for row A only. For rows B to
+    E it serves the stored cover, and a missing one is handled as in §3.4.
+  - Today a stored cover without RRSIGs is skipped, and a cover is
+    synthesized in its place. On a secondary, that synthesized cover cannot
+    be signed and is dropped (`v2/wildcard_proof.go:71`), so the answer goes
+    out with no proof.
+  - In a zone signed here without `black-lies` (stage 2), the synthesized
+    cover would be signed. It would hide the gap that Q3 says must be a
+    SERVFAIL.
 - **`signRRsetForZone` and `isSynthesizedDenial`** are unchanged. Stored
   records never pass through them: a stored NSEC carries its RRSIGs, or §3.4
   applies.
@@ -287,18 +336,22 @@ changes only that: it returns B when `black-lies` is off.
 
 ### 3.6 Warnings
 
-- **When:** on a snapshot's first negative answer, if the source is row D,
-  or if a proof record is missing (§3.4).
-- **How often:** once per snapshot, guarded by a `sync.Once` on the snapshot,
-  like the chain index. A warning per query would flood the log at resolver
-  rates. Once per serial is enough to show that a zone is broken or not
-  supported.
+- **When:** only when there is something to warn about: the source is row D,
+  or a proof record is missing or wrong (§3.4).
+  - The snapshot's `sync.Once` is called at that point, not on every
+    snapshot's first negative answer.
+  - So a row D serial warns on its first negative answer. A row B serial
+    whose first negative answers prove fine still warns at its first gap.
+- **How often:** at most once per snapshot. A warning per query would flood
+  the log at resolver rates. Once per serial is enough to show that a zone is
+  broken or not supported.
 - **Contents:** the zone, the serial, and the reason: no chain, NSEC3 not yet
   supported, or the first name the zone could not prove.
 
-## 4. NSEC3 (stage 3)
+## 4. NSEC3 (stage 3, #773)
 
-This is a sketch, to be worked out in detail when the stage is scheduled.
+This stage is tracked as #773. What follows is a sketch, to be worked out in
+detail there.
 
 - **Parameters.** Take them from the apex NSEC3PARAM (RFC 5155 §7.3). If
   there are several, pick one, and use only the NSEC3 records with those
@@ -330,20 +383,27 @@ This is a sketch, to be worked out in detail when the stage is scheduled.
 |---|---|---|
 | 1 | §3 for zones not signed here: rows B, D and E, with C answered as D | secondaries of signed zones (#770), and unsigned zones (#771) |
 | 2 | zones signed here without `black-lies` answer from their chain | every signing zone without `black-lies` |
-| 3 | NSEC3 on secondaries | secondaries of NSEC3 zones |
+| 3 | NSEC3 on secondaries (#773) | secondaries of NSEC3 zones |
 
-- Each stage is one PR.
+- Each stage is one PR. Stage 3 belongs to #773, not to #770.
 - Stage 1 depends on neither of the others.
 - Stage 2 is separate so that its timing can be chosen. It is the documented
   behaviour, but it changes the answers of every signing primary configured
-  without `black-lies`.
+  without `black-lies`:
+  - its negative answers come from the stored chain, with no signature made
+    at query time;
+  - a primary that serves the zone alone can then be walked through its
+    chain, as any of its secondaries already can after stage 1;
+  - operators who want today's compact denials set `black-lies`. The sample
+    configurations are not changed to set it in the same PR: that would keep
+    the documentation and the configurations in contradiction.
 
 ## 6. Alternatives
 
 - **Serve stored NSECs on secondaries and change nothing else.** This
-  covers the #770 case only. The unsigned zone would still answer NODATA for names that do
-  not exist, and the signing zone would still contradict its own option. The
-  source table costs no more than the special case would.
+  covers the #770 case only. The unsigned zone would still answer NODATA for
+  names that do not exist, and the signing zone would still contradict its
+  own option. The source table costs no more than the special case would.
 - **Synthesize on the secondary as well.** Impossible: a secondary has no
   private key, which is the whole issue.
 - **SERVFAIL when a secondary cannot prove a denial.** This is consistent
@@ -362,8 +422,8 @@ This is a sketch, to be worked out in detail when the stage is scheduled.
   - #593 asks for NXNAME to be left out when CO is clear, so it has to be
     settled against the RFC on its own.
   - Row A keeps today's bitmap either way.
-- **The wildcard proof (89199fa8)** is reused as it stands. The only change
-  is that it asks `denialSourceFor`.
+- **The wildcard proof (89199fa8)** is reused. It asks `denialSourceFor`,
+  and synthesizes a cover for row A only (§3.5).
 - **`docs/2026-08-22-nsec-chain-correctness.md`.**
   - Its §1 says that a secondary answers denials from the chain it received.
     For a tdns-auth secondary, that is only true once stage 1 is in.
@@ -386,7 +446,7 @@ This is a sketch, to be worked out in detail when the stage is scheduled.
     wait out of the query path (Q7). It leaves the allocation. Removing that
     takes ordered storage shared between snapshots, as #547 proposes; the
     measurements are recorded in a comment there.
-  - NSEC3 (stage 3) also needs an index in hash order, which canonical name
+  - NSEC3 (#773) also needs an index in hash order, which canonical name
     order does not give.
 - **The IMR** (`negativeRcode`, `v2/imrengine.go:1455`) chooses the rcode
   based on whether an answer is a compact denial. Answers from a chain do not
@@ -416,7 +476,7 @@ Test what a validator gets, not just the function that builds the answer:
 3. Empty non-terminal: NOERROR, with the covering NSEC whose next name is
    below qname.
 4. Wildcard match, type does not exist: the qname cover and the wildcard's
-   own NSEC.
+   own NSEC, not an NSEC looked up at the query name (§3.5).
 5. DS at an insecure cut, a referral to an insecure delegation, DS at an
    in-zone name, and DS at our apex with the parent not hosted.
 6. Each of 1 to 5 with CO set: the same proofs, NXDOMAIN where 1 has it, and
@@ -428,21 +488,50 @@ Test what a validator gets, not just the function that builds the answer:
    NSEC, and one warning per serial.
 9. A secondary whose chain has a gap: what exists is served, the rcode is
    right, and one warning is logged.
-10. Zones signed here are unchanged in stage 1: the existing compact-denial,
-    empty non-terminal and unsignable-denial tests pass as they are.
+10. Zones signed here keep compact denial in stage 1. But several of the
+    tests that check compact-denial answers run on unsigned zones, and
+    stage 1 changes those zones' answers (#771):
+    - the empty non-terminal tests (`v2/empty_nonterminal_test.go`);
+    - `TestQueryResponderEchoesCO`, whose NXDOMAIN case for DO without CO
+      expects NOERROR;
+    - the DO case of `TestHandleDSQueryParentSelection`, which expects a
+      synthesized NSEC at the child apex;
+    - `TestUnsignedZoneWithoutKeyDBAnswersDO` (item 7).
+
+    Each of these moves to a zone signed here with `black-lies`, signed so
+    that its SOA carries RRSIGs (§3.5), and keeps checking what it checks.
+    `TestAddCDEResponseFollowsCO` and `TestUnsignableDenialIsServfail` pass
+    as they are.
 11. On a running server, the #770 reproduction: a tdns-auth secondary of a
     zone signed by another signer, queried through a validating resolver.
     Name Error and NODATA answers validate instead of failing with SERVFAIL.
+12. A wildcard answer on a secondary whose covering NSEC has no RRSIG: the
+    stored NSEC goes out as it is, and no cover is synthesized (§3.5).
+13. A stored record that contradicts the answer, such as a NODATA owner's
+    NSEC that lists the qtype, is not attached, and a warning is logged
+    (§3.4).
+14. A row B serial whose first negative answers prove, and which later hits
+    a gap: one warning, logged at the gap (§3.6).
+15. The empty-owner name (`:1262`) is still NXDOMAIN after it goes through
+    `sendNXDOMAIN`. A zone signed here whose SOA has no RRSIG answers
+    SERVFAIL on every negative path (§3.5).
 
 **Stage 2:**
 - A zone signed here without `black-lies` answers cases 1 to 6 from its
   chain, with no signing at query time.
 - With `black-lies`, the answers are unchanged.
 - A gap in the zone's own chain gives SERVFAIL.
-- Existing tests that build an online-signing zone and expect a synthesized
-  denial either set `black-lies` or are changed to expect the chain.
+- Existing tests that build a zone signed here and expect a synthesized
+  denial either set `black-lies` or are changed to expect the chain. No test
+  zone may stay signed here without `black-lies` and still expect an NSEC
+  owned by the query name. Two fixtures are known to be affected:
+  - `qtypesSignedZone` (`v2/queryresponder_qtypes_test.go`): inline-signing
+    with a chain, so its negative answers come from the chain;
+  - the healthy zone in `TestWildcardAnswerFailClosed`
+    (`v2/zone_snapshot_test.go`): online-signing with no chain, so its
+    wildcard answer becomes a gap unless it sets `black-lies`.
 
-**Stage 3:**
+**Stage 3 (#773):**
 - Each RFC 5155 §7.2 case, with and without Opt-Out.
 - A hashed owner name gets a Name Error response.
 - A zone with two NSEC3PARAM records.
@@ -451,25 +540,26 @@ Test what a validator gets, not just the function that builds the answer:
 
 | Stage | Non-test code | Tests |
 |---|---|---|
-| 1 | about 250 lines: `denial.go` about 180, the call sites about 60, the snapshot's warning about 10 | about 500 |
+| 1 | about 250 lines: `denial.go` about 180, the call sites about 60, the snapshot's warning about 10 | about 600, including moving the existing compact-denial tests (§8, item 10) |
 | 2 | about 20 | about 150 to 250, mostly changes to existing tests |
-| 3 | about 400 | about 600 |
+| 3 (#773) | about 400 | about 600 |
 
 ## 10. Questions
 
-| # | Question | Recommendation |
-|---|---|---|
-| Q1 | Change the unsigned zone's DO answer (§1.2, #771) in stage 1, together with #770? | Yes. It is the same code and the same fix, and resolvers cache the wrong answer. |
-| Q2 | Stage 2: should zones signed here without `black-lies` answer from their chain? | Yes. That is what the option is documented to mean. Make it a separate PR, timed apart from stage 1. |
-| Q3 | A gap in the chain of a zone signed here: SERVFAIL, or synthesize? | SERVFAIL (§3.4). |
-| Q4 | A gap in the chain on a secondary: serve what exists, or SERVFAIL? | Serve what exists, and warn (§3.4). |
-| Q5 | NSEC3: stage 3 of #770, or an issue of its own? | An issue of its own. #770 is reproduced with NSEC, and the §7.2.8 defect (§1.4) exists today whatever happens here. |
-| Q6 | `black-lies` on a zone not signed here? | Ignore it, as today, and add a config-check warning. |
-| Q7 | Build the chain index on first use, as today, or at publish? | At publish, for zones with a chain. Almost every public zone gets negative queries, so the index gets built either way, and at publish the build does not stall a query (§7). |
+| # | Question | Recommendation | Review, 2026-09-25 |
+|---|---|---|---|
+| Q1 | Change the unsigned zone's DO answer (§1.2, #771) in stage 1, together with #770? | Yes. It is the same code and the same fix, and resolvers cache the wrong answer. | Agrees. |
+| Q2 | Stage 2: should zones signed here without `black-lies` answer from their chain? | Yes. That is what the option is documented to mean. Make it a separate PR, timed apart from stage 1. | Agrees: its own PR, after stage 1. The consequences are in §5. |
+| Q3 | A gap in the chain of a zone signed here: SERVFAIL, or synthesize? | SERVFAIL (§3.4). | Agrees. |
+| Q4 | A gap in the chain on a secondary: serve what exists, or SERVFAIL? | Serve what exists, and warn (§3.4). | Agrees. |
+| Q5 | NSEC3: stage 3 of #770, or an issue of its own? | An issue of its own. #770 is reproduced with NSEC, and the §7.2.8 defect (§1.4) exists today whatever happens here. | Agrees. Filed as #773. |
+| Q6 | `black-lies` on a zone not signed here? | Ignore it, as today, and add a config-check warning. | Agrees. |
+| Q7 | Build the chain index on first use, as today, or at publish? | At publish, for zones with a chain. Almost every public zone gets negative queries, so the index gets built either way, and at publish the build does not stall a query (§7). | Not reviewed; added in r2. |
 
 ## 11. Not in scope
 
 - Row A's answers (compact denial), including #593's bitmap question (§7).
+- NSEC3 on secondaries, which is #773 (§4).
 - Wildcard answers under compact denial. RFC 9824 §3.3 signs them as exact
   matches; tdns proves them with a synthesized cover instead (89199fa8). Both
   validate.
