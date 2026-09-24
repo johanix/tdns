@@ -35,8 +35,11 @@ The primary stays exactly as it is.
   preferred (it lands the change in one round-trip and works for unsigned
   zones).
 - For the NOTIFY scheme: the PRIMARY publishes CDS/CDNSKEY and/or CSYNC when
-  it wants the parent updated (its own tooling). For the UPDATE scheme: the
-  agent needs a SIG(0) key the parent trusts (see "UPDATE proxy" below).
+  it wants the parent updated (its own tooling). A tdns signer (tdns-auth,
+  tdns-signer) publishes the CDS its keys call for on its own, for every zone
+  whose keys it manages, whether or not it has `parentsync` (the DNSSEC
+  policy's `cds:` setting). For the UPDATE scheme: the agent needs a SIG(0)
+  key the parent trusts (see "UPDATE proxy" below).
 - The AGENT is a secondary for the zone (transfers it from the primary)
   and can reach the parent's advertised target.
 
@@ -115,6 +118,16 @@ delegation records (NS + glue + DS) to the parent directly in a signed DNS
 UPDATE, rather than asking it to re-scan. This is preferred over NOTIFY
 when available, and — unlike NOTIFY — it works for an UNSIGNED zone too
 (there is no CDS/CSYNC to scan, but the NS/glue can still be synced).
+
+The DS it sends is what the zone's CDS asks for, when the primary publishes
+one: that is the primary's statement of what the parent should hold. A
+retired KSK is still published, and so is one whose DS is not due yet, so
+the published keys are not that statement. Without a CDS, the DS is that of
+the published SEP keys. A CDS holding an algorithm-0 record (the RFC 8078
+delete form, or a malformed set) leaves the parent's DS alone for now. The
+API scheme sends the same DS from the CDS, and no DS without one. At startup
+the agent compares the parent's DS with the CDS, so a KSK change it missed
+while it was down is caught.
 
 The parent must trust the UPDATE. It does so by the SIG(0) key that signs
 it: the agent signs AS the child, with a key whose public KEY is published
