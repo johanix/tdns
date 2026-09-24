@@ -774,3 +774,78 @@ func TestJournalOverlayZoneWriteKeepsJournal(t *testing.T) {
 		t.Error("the CDS is gone at the full transfer after a zone write")
 	}
 }
+
+// ovCSYNCText is a CSYNC record at the apex, told apart by soaSerial.
+func ovCSYNCText(soaSerial int) string {
+	return fmt.Sprintf("example.\t3600\tIN\tCSYNC\t%d 3 A NS AAAA", soaSerial)
+}
+
+// ovPublishCSYNC replaces the apex CSYNC RRset, deleting the RRset and adding
+// the new one, as the CDS is published.
+func ovPublishCSYNC(t *testing.T, zd *ZoneData, csync dns.RR) error {
+	t.Helper()
+	anti := &dns.CSYNC{Hdr: dns.RR_Header{
+		Name: dns.Fqdn(zd.ZoneName), Rrtype: dns.TypeCSYNC, Class: dns.ClassANY,
+	}}
+	return ovUpdate(t, zd, anti, csync)
+}
+
+// The CSYNC is overlaid as the CDS is (Q3): two publishes and one full
+// transfer serve the last one, and the journal is compacted to its add. An
+// upstream's CSYNC that the journal removed is replaced by the server's.
+func TestJournalOverlayCSYNC(t *testing.T) {
+	zd := ixSigningSecondary(t, ixApplyZone)
+	ovTransfer(t, zd, ovUpstreamZone(20, ovCSYNCText(99)), true)
+	for _, n := range []int{11, 12} {
+		if err := ovPublishCSYNC(t, zd, mustRR(t, ovCSYNCText(n))); err != nil {
+			t.Fatalf("CSYNC publish %d: %v", n, err)
+		}
+	}
+
+	ovTransfer(t, zd, ovUpstreamZone(21, ovCSYNCText(99)), true)
+
+	served := ovServed(t, zd, ovZone, dns.TypeCSYNC)
+	if len(served) != 1 || !ovHas(served, mustRR(t, ovCSYNCText(12))) {
+		t.Errorf("served CSYNC %v, want the last one published, alone", served)
+	}
+	assertPublishedRRsetVerifies(t, zd, ovZone, dns.TypeCSYNC)
+	// The upstream's CSYNC is still in the transfer, so its delete is kept.
+	ovRowsAre(t, ovOneDelta(t, zd),
+		ovAdd(ovCSYNCText(12)), ZoneDeltaRR{Action: ZoneDeltaDel, RR: ovCSYNCText(99)})
+}
+
+// A journal row that cannot be read is not applied, and it stops the
+// compaction, which would drop it: the rest of the overlay is applied, and the
+// journal is left exactly as it was.
+func TestJournalOverlayUnreadableRow(t *testing.T) {
+	for _, tc := range []struct {
+		name, action, rr string
+	}{
+		{"record does not parse", ZoneDeltaAdd, "example.\t3600\tIN\tCDS\tnot a cds"},
+		{"unknown action", "replace", ovCDSText(7)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := ixSigningSecondary(t, ixApplyZone)
+			cds := ovCDS(t, 1)
+			if err := ovPublishCDS(t, zd, cds); err != nil {
+				t.Fatalf("CDS publish: %v", err)
+			}
+			if _, err := zd.KeyDB.DB.Exec(`INSERT INTO ZoneDelta
+				(zone, fromserial, toserial, seq, action, rr) VALUES (?, ?, ?, ?, ?, ?)`,
+				ovZone, 1000, 1001, 0, tc.action, tc.rr); err != nil {
+				t.Fatalf("plant the row: %v", err)
+			}
+			before := ovJournalString(ovJournal(t, zd))
+
+			ovTransfer(t, zd, ovUpstreamZone(20), true)
+
+			if !ovHas(ovServed(t, zd, ovZone, dns.TypeCDS), cds) {
+				t.Error("the readable rows were not applied")
+			}
+			if after := ovJournalString(ovJournal(t, zd)); after != before {
+				t.Errorf("the journal was compacted over a row it could not read:\nbefore:%s\nafter:%s",
+					before, after)
+			}
+		})
+	}
+}

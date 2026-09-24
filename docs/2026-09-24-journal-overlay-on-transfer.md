@@ -400,5 +400,6 @@ first four; the last two are the implementation's choices.
   compacted, since compacting would drop it.
 - **The Q2 log line** is at Warn.
 
-The tests are in `v2/journal_overlay_test.go`: T1–T13, `zone journal status`
-and purge, and `zone write`.
+The tests are in `v2/journal_overlay_test.go`: T1–T13, a CSYNC through the
+same path as the CDS, an unreadable row, `zone journal status` and purge, and
+`zone write`.
