@@ -401,7 +401,8 @@ func (zd *ZoneData) proxyKeyStatusMessage(state ProxyUpdateState, kdb *KeyDB) (s
 // DS of the apex DNSKEY SEP keys (proxyDSFromCDS). These are the replace-form
 // UPDATE's "new members" — the payload never depends on the parent's state
 // (that is the point of replace). For an unsigned zone newDS is empty (no
-// DNSKEYs), which is correct; so it is for a CDS the proxy cannot use yet.
+// DNSKEYs), which is correct; so it is for the RFC 8078 delete CDS, and for a
+// malformed one, which proxyReplaceSyncState tells apart.
 func (zd *ZoneData) currentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR) {
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || apex == nil {
@@ -424,7 +425,7 @@ func (zd *ZoneData) currentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR
 	// DS from the served CDS: the signer's statement of what the parent should
 	// hold (#752, design §1.2 (e)). The SEP keys are not that: a retired KSK
 	// is still published, and so is one whose DS is not due yet.
-	if cdsDS, served, usable := zd.proxyDSFromCDS(); served {
+	if cdsDS, served, usable, _ := zd.proxyDSFromCDS(); served {
 		if usable {
 			newDS = cdsDS
 		}
@@ -457,9 +458,15 @@ func (zd *ZoneData) currentDelegationRRs() (newNS, newA, newAAAA, newDS []dns.RR
 // nil for both means nothing was removed.
 func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis, parentOnly []dns.RR) DelegationSyncStatus {
 	newNS, newA, newAAAA, newDS := zd.currentDelegationRRs()
-	if _, served, usable := zd.proxyDSFromCDS(); served && !usable {
-		lgDns.Warn("parentsync-proxy: the served CDS holds an algorithm-0 record;"+
-			" leaving the parent's DS alone", "zone", zd.ZoneName)
+	known := !zd.hasDnskeyRRset() || len(newDS) > 0
+	if _, served, usable, why := zd.proxyDSFromCDS(); served {
+		// A usable CDS is a statement even when it asks for no DS: the RFC
+		// 8078 delete withdraws the parent's DS.
+		known = usable
+		if !usable {
+			lgDns.Warn("parentsync-proxy: the served CDS RRset is malformed;"+
+				" leaving the parent's DS alone", "zone", zd.ZoneName, "why", why)
+		}
 	}
 	return DelegationSyncStatus{
 		ZoneName:   zd.ZoneName,
@@ -468,7 +475,7 @@ func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis, par
 		NewA:       newA,
 		NewAAAA:    newAAAA,
 		NewDS:      newDS,
-		NewDSKnown: !zd.hasDnskeyRRset() || len(newDS) > 0,
+		NewDSKnown: known,
 		NsRemoves:  proxyRemovedNS(analysis, parentOnly),
 	}
 }
@@ -637,27 +644,33 @@ func parentBootstrapResult(ur UpdateResult, err error) error {
 }
 
 // proxyDSFromCDS is the DS RRset the served CDS asks for (#752, design
-// §1.2 (e)). served reports whether the zone serves a CDS at all. usable is
-// false for a set holding an algorithm-0 record: which of those is the RFC 8078
-// delete is Part 2's classifier to decide, and until then the proxy leaves the
-// parent's DS alone rather than guess. A zone whose apex cannot be read serves
-// no CDS, as far as this is concerned: the caller falls back to the SEP keys.
-func (zd *ZoneData) proxyDSFromCDS() (ds []dns.RR, served, usable bool) {
+// §1.2 (e)), read the way the parent reads it (classifyCDS, #755). served
+// reports whether the zone serves a CDS at all. The exact RFC 8078 delete is
+// usable and asks for no DS at all: the child withdrawing its DS, which the
+// proxy delivers like any other CDS (#737). A malformed set is not usable, and
+// why says what is wrong with it: the parent's DS is left alone, as RFC 7344
+// §4.1 has the parent ignore such a set. A zone whose apex cannot be read
+// serves no CDS, as far as this is concerned: the caller falls back to the SEP
+// keys.
+func (zd *ZoneData) proxyDSFromCDS() (ds []dns.RR, served, usable bool, why string) {
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || apex == nil || apex.RRtypes == nil {
-		return nil, false, false
+		return nil, false, false, ""
 	}
 	cdsRRs := apex.RRtypes.GetOnlyRRSet(dns.TypeCDS).RRs
 	if len(cdsRRs) == 0 {
-		return nil, false, false
+		return nil, false, false, ""
+	}
+	switch kind, why := classifyCDS(cdsRRs); kind {
+	case cdsMalformed:
+		return nil, true, false, why
+	case cdsDelete:
+		return nil, true, true, ""
 	}
 	for _, rr := range cdsRRs {
 		c, ok := rr.(*dns.CDS)
 		if !ok {
 			continue
-		}
-		if c.Algorithm == 0 {
-			return nil, true, false
 		}
 		d := c.DS
 		d.Hdr = dns.RR_Header{Name: dns.Fqdn(zd.ZoneName), Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: c.Hdr.Ttl}
@@ -667,5 +680,5 @@ func (zd *ZoneData) proxyDSFromCDS() (ds []dns.RR, served, usable bool) {
 		d.Digest = strings.ToLower(d.Digest)
 		ds = append(ds, &d)
 	}
-	return ds, true, true
+	return ds, true, true, ""
 }

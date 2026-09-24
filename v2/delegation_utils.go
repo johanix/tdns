@@ -372,8 +372,8 @@ func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, 
 			// serves, which is what the proxy relays (#752, design §1.2 (e)).
 			// Comparing the parent's DS with it is what lets the startup
 			// reconcile catch a KSK change the proxy missed while it was
-			// down. A CDS the proxy cannot use yet (an algorithm-0 record)
-			// is no view.
+			// down. A malformed CDS (classifyCDS) is no view; the exact RFC
+			// 8078 delete is one, of no DS at all.
 			if zd.proxyCompareDS(resp, p_dsrrs) {
 				return nil
 			}
@@ -398,7 +398,7 @@ func (zd *ZoneData) proxyCompareDS(resp *DelegationSyncStatus, parentDS []dns.RR
 	if zd.delegationChangeModeOf() != delegationChangeProxy {
 		return false
 	}
-	cdsDS, served, usable := zd.proxyDSFromCDS()
+	cdsDS, served, usable, _ := zd.proxyDSFromCDS()
 	if !served || !usable {
 		return false
 	}

@@ -1132,10 +1132,20 @@ func (scanner *Scanner) ProcessCDSNotify(ctx context.Context, tuple ScanTuple, p
 
 	hasDS := tuple.CurrentData.DS != nil && len(tuple.CurrentData.DS.RRs) > 0
 
-	// 2b. The removal sentinel for a child with no DS asks for no change, and a
-	// no-op needs no authentication. Settled before the trust gate, so a strict
-	// parent does not report refusing it on every NOTIFY.
-	if cdsIsRemoval(cdsRRset) && !hasDS {
+	// 2b. The shape of the set, before anything else (#755). A set holding an
+	// algorithm-0 record in any shape but the exact RFC 8078 delete breaks the
+	// rules, and RFC 7344 §4.1 says to ignore it: no change, with or without a
+	// DS, so a mixed set neither deletes nor bootstraps. The delete for a
+	// child with no DS asks for no change, and a no-op needs no
+	// authentication. Both are settled before the trust gate, so a strict
+	// parent neither validates nor bootstraps on a set it will not act on.
+	switch kind, why := classifyCDS(cdsRRset.RRs); {
+	case kind == cdsMalformed:
+		scanLog.Printf("ProcessCDSNotify: %s: refused: malformed CDS RRset: %s", childZone, why)
+		refuseScan(&response, refusef("the CDS RRset breaks RFC 8078 §4: %s; ignored, as RFC 7344 §4.1 requires", why))
+		responseCh <- response
+		return
+	case kind == cdsDelete && !hasDS:
 		scanLog.Printf("ProcessCDSNotify: %s: CDS removal sentinel but no existing DS", childZone)
 		response.DataChanged = false
 		responseCh <- response
@@ -1156,9 +1166,17 @@ func (scanner *Scanner) ProcessCDSNotify(ctx context.Context, tuple ScanTuple, p
 	response.Validation, response.ValidationReason = validation, reason
 	scanLog.Printf("ProcessCDSNotify: %s: CDS accepted, %s: %s", childZone, validation, reason)
 
-	// 3. CDS removal sentinel (algorithm 0 per RFC 8078). The RFC 9615 path
-	// acts on the signaling-name copy, so this is asked again.
-	if cdsIsRemoval(cdsRRset) {
+	// 3. The RFC 8078 delete. The RFC 9615 path acts on the signaling-name
+	// copy, so the set is classified again; the copy must match the direct
+	// answer, so a malformed copy here is a backstop, not a path.
+	kind, why := classifyCDS(cdsRRset.RRs)
+	if kind == cdsMalformed {
+		scanLog.Printf("ProcessCDSNotify: %s: refused: malformed CDS RRset: %s", childZone, why)
+		refuseScan(&response, refusef("the CDS RRset breaks RFC 8078 §4: %s; ignored, as RFC 7344 §4.1 requires", why))
+		responseCh <- response
+		return
+	}
+	if kind == cdsDelete {
 		if !hasDS {
 			scanLog.Printf("ProcessCDSNotify: %s: CDS removal sentinel but no existing DS", childZone)
 			response.DataChanged = false

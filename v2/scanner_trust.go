@@ -113,17 +113,6 @@ func (p DelegationPolicy) hasMechanism(mech string) bool {
 	return false
 }
 
-// cdsIsRemoval reports whether cds carries the RFC 8078 §4 removal sentinel
-// (algorithm 0).
-func cdsIsRemoval(cds *core.RRset) bool {
-	for _, rr := range cds.RRs {
-		if c, ok := rr.(*dns.CDS); ok && c.Algorithm == 0 {
-			return true
-		}
-	}
-	return false
-}
-
 // askChild asks every nameserver in nsRRset for (qname, qtype) and reports
 // whether they agree. The RRset carries the RRSIGs of the first answer.
 func (scanner *Scanner) askChild(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, lg *log.Logger) (*core.RRset, bool, error) {
