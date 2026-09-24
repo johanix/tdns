@@ -22,6 +22,9 @@
 //   - --out/registered_algs.go: Register(...) for every SELECTED algorithm,
 //     one flat file, no build tags. Register promotes the metadata entry
 //     to a real, usable algorithm (see v2/algorithms record()).
+//   - --out/algdeps.go: a blank import of every SELECTED algorithm's
+//     package, behind a build tag no build sets, so that go mod tidy keeps
+//     their requirements (see genAlgDeps).
 //   - --out/algs-libs.mk: per-app Makefile fragment exporting PKG_CONFIG_PATH /
 //     CGO_LDFLAGS / LD_LIBRARY_PATH for the libraries this app's selection needs.
 //   - --out/../algs-env.mk (cmdv2/algs-env.mk): shared ALGREPO cache so one
@@ -29,11 +32,12 @@
 //     re-supplying --algrepo.
 //
 // The algorithms tdns registers itself in every binary (tdnsBuiltIns) are
-// left out of both .go files, whatever the registry holds for them. An
+// left out of all three .go files, whatever the registry holds for them. An
 // algs.list may still name them; genalgs notes that and ignores the entry.
 //
 // The generated .go / .mk files are build artifacts: regenerated per build
-// host, not committed.
+// host, not committed. algdeps.go is the exception: it is committed, and
+// changes only when algs.list (or a package path in the registry) does.
 //
 // Usage:
 //
@@ -197,6 +201,11 @@ func run(algrepo, listPath, outDir, pkgName string) error {
 	if err := writeFormatted(regPath, genRegistered(pkgName, selected)); err != nil {
 		return err
 	}
+	depsPath := filepath.Join(outDir, algDepsFile)
+	vlog("writing %s (module requirements for %d packages; committed)", depsPath, len(selected))
+	if err := writeFormatted(depsPath, genAlgDeps(pkgName, selected)); err != nil {
+		return err
+	}
 	// Shared ALGREPO cache under cmdv2/ (parent of the app --out dir).
 	sharedMk := filepath.Join(filepath.Clean(outDir), "..", "algs-env.mk")
 	vlog("writing %s (shared ALGREPO=%s)", sharedMk, algrepo)
@@ -351,6 +360,56 @@ func genRegistered(pkgName string, selected []Alg) []byte {
 		fmt.Fprintf(&b, "\talgs.Register(%d, %s.New(), %s, %s)\n", a.Codepoint, pkgIdent, capsLiteral(a.Caps), factsLiteral(a.Facts))
 	}
 	b.WriteString("}\n")
+	return b.Bytes()
+}
+
+// algDepsFile and algDepsTag name the committed module-requirements file
+// and the build constraint that keeps it out of every build.
+const (
+	algDepsFile = "algdeps.go"
+	algDepsTag  = "algdeps"
+)
+
+// genAlgDeps builds algdeps.go: a blank import of each selected
+// algorithm's package, behind a build constraint that no build sets.
+//
+// registered_algs.go is the only other code that imports these packages,
+// and it is gitignored. go mod tidy in a tree without it (a fresh clone,
+// or Dependabot) therefore sees no use for them: it demotes
+// dnssec-algorithms to indirect and drops liboqs-go from go.mod and
+// go.sum, and the next PQ build fails on a missing go.sum entry. tidy
+// reads every file whatever its build constraints (except "ignore"), so
+// committing this file keeps the requirements, and since no build sets
+// the tag nothing in it is ever compiled -- a host without the C
+// libraries builds and vets as before.
+//
+// Each import carries the algorithm's registry name as a line comment, so
+// a test can check the committed file against algs.list without a
+// dnssec-algorithms checkout.
+func genAlgDeps(pkgName string, selected []Alg) []byte {
+	sorted := append([]Alg(nil), selected...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Package < sorted[j].Package })
+
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "//go:build %s\n\n", algDepsTag)
+	b.WriteString(doNotEdit)
+	b.WriteString("//\n// Committed, unlike the other genalgs output. registered_algs.go imports\n")
+	b.WriteString("// the same packages but is gitignored, so without this file go mod tidy\n")
+	b.WriteString("// in a fresh clone would drop their requirements from go.mod and go.sum.\n")
+	b.WriteString("// tidy reads a file whatever its build tags; no build sets \"" + algDepsTag + "\",\n")
+	b.WriteString("// so nothing here is compiled. genalgs rewrites this file from algs.list:\n")
+	b.WriteString("// commit it together with the list.\n\n")
+	fmt.Fprintf(&b, "package %s\n", pkgName)
+
+	if len(sorted) == 0 {
+		b.WriteString("\n// No algorithm implementations selected (metadata-only build).\n")
+		return b.Bytes()
+	}
+	b.WriteString("\nimport (\n")
+	for _, a := range sorted {
+		fmt.Fprintf(&b, "\t_ %q // %s\n", a.Package, a.Name)
+	}
+	b.WriteString(")\n")
 	return b.Bytes()
 }
 

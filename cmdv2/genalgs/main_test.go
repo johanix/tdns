@@ -1,9 +1,13 @@
 package main
 
 import (
+	"go/build"
 	"go/format"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -276,6 +280,158 @@ func TestRunGeneratesNothingForBuiltIns(t *testing.T) {
 			}
 			if !strings.Contains(string(reg), "slhdsa128s.New()") {
 				t.Errorf("registered_algs.go lost the rest of the selection:\n%s", reg)
+			}
+			deps, err := os.ReadFile(filepath.Join(outDir, algDepsFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(deps), "mldsa44") {
+				t.Errorf("%s imports MLDSA44:\n%s", algDepsFile, deps)
+			}
+			if !strings.Contains(string(deps), `"github.com/johanix/dnssec-algorithms/slhdsa128s"`) {
+				t.Errorf("%s lost the rest of the selection:\n%s", algDepsFile, deps)
+			}
+		})
+	}
+}
+
+// algDepsImports parses an algdeps.go and returns its imports as import
+// path -> the registry name in the import's comment. It fails the test on
+// anything but a blank import with a name comment.
+func algDepsImports(t *testing.T, path string) map[string]string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	out := map[string]string{}
+	for _, imp := range f.Imports {
+		if imp.Name == nil || imp.Name.Name != "_" {
+			t.Errorf("%s: import %s is not a blank import", path, imp.Path.Value)
+		}
+		name := strings.TrimSpace(imp.Comment.Text())
+		if name == "" {
+			t.Errorf("%s: import %s has no algorithm-name comment", path, imp.Path.Value)
+		}
+		out[strings.Trim(imp.Path.Value, `"`)] = name
+	}
+	return out
+}
+
+// sortedNames returns the registry names of algDepsImports' result, sorted.
+func sortedNames(imports map[string]string) []string {
+	names := make([]string, 0, len(imports))
+	for _, n := range imports {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// checkOnlyForTidy fails unless the go.build rules skip dir/algDepsFile
+// in a default build and take it with the algDepsTag tag, i.e. the file is
+// seen by go mod tidy (which reads every tag) and compiled by nothing.
+func checkOnlyForTidy(t *testing.T, dir string) {
+	t.Helper()
+	ctx := build.Default
+	ctx.BuildTags = nil
+	if ok, err := ctx.MatchFile(dir, algDepsFile); err != nil || ok {
+		t.Errorf("%s: a default build takes the file (match=%v, err=%v)", filepath.Join(dir, algDepsFile), ok, err)
+	}
+	ctx.BuildTags = []string{algDepsTag}
+	if ok, err := ctx.MatchFile(dir, algDepsFile); err != nil || !ok {
+		t.Errorf("%s: not matched with -tags %s (match=%v, err=%v)", filepath.Join(dir, algDepsFile), algDepsTag, ok, err)
+	}
+}
+
+func TestGenAlgDepsOnlyForTidy(t *testing.T) {
+	algrepo := writeFixture(t)
+	all, err := parseRegistry(filepath.Join(algrepo, "registry", "registry.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, algDepsFile)
+	if err := writeFormatted(path, genAlgDeps("main", withoutBuiltIns(all))); err != nil {
+		t.Fatalf("generated %s not valid Go: %v", algDepsFile, err)
+	}
+	checkOnlyForTidy(t, dir)
+	got := algDepsImports(t, path)
+	want := map[string]string{
+		"github.com/johanix/dnssec-algorithms/crossx":     "CROSSX",
+		"github.com/johanix/dnssec-algorithms/falcon512":  "FALCON512",
+		"github.com/johanix/dnssec-algorithms/slhdsa128s": "SLHDSA128S",
+	}
+	if len(got) != len(want) {
+		t.Errorf("imports = %v, want %v", got, want)
+	}
+	for pkg, name := range want {
+		if got[pkg] != name {
+			t.Errorf("import %s carries name %q, want %q", pkg, got[pkg], name)
+		}
+	}
+}
+
+// An empty selection must still produce a file that parses: it is
+// committed for metadata-only apps too.
+func TestGenAlgDepsEmptySelection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, algDepsFile)
+	if err := writeFormatted(path, genAlgDeps("main", nil)); err != nil {
+		t.Fatalf("empty-selection %s not valid Go: %v", algDepsFile, err)
+	}
+	checkOnlyForTidy(t, dir)
+	if imports := algDepsImports(t, path); len(imports) != 0 {
+		t.Errorf("empty selection imports %v", imports)
+	}
+}
+
+// listNames returns the entries of an algs.list that genalgs would
+// select, sorted: every non-blank, non-comment line except the built-ins.
+func listNames(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, line := range strings.Split(string(data), "\n") {
+		s := strings.TrimSpace(line)
+		if s == "" || strings.HasPrefix(s, "#") || tdnsBuiltIns[s] {
+			continue
+		}
+		names = append(names, s)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TestCommittedAlgDepsMatchLists checks every cmdv2 app's committed
+// algdeps.go against its algs.list. genalgs rewrites the file whenever the
+// list changes and make runs, but a list edited and committed without a
+// build would leave it stale -- and go mod tidy would then drop the
+// requirements of any algorithm the list gained. No dnssec-algorithms
+// checkout is needed: the file names each algorithm in a comment.
+func TestCommittedAlgDepsMatchLists(t *testing.T) {
+	lists, err := filepath.Glob(filepath.Join("..", "*", "algs.list"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lists) == 0 {
+		t.Fatal("no ../*/algs.list: this test expects to run in cmdv2/genalgs")
+	}
+	for _, list := range lists {
+		dir := filepath.Dir(list)
+		t.Run(filepath.Base(dir), func(t *testing.T) {
+			path := filepath.Join(dir, algDepsFile)
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("%s has an algs.list but no committed %s: run make there and commit it", dir, algDepsFile)
+			}
+			checkOnlyForTidy(t, dir)
+			got, want := sortedNames(algDepsImports(t, path)), listNames(t, list)
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Errorf("%s imports %v but %s selects %v: run make in %s and commit the regenerated %s",
+					path, got, list, want, dir, algDepsFile)
 			}
 		})
 	}

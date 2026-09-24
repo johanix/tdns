@@ -252,7 +252,7 @@ generates nothing for it.
 
 The `genalgs` generator (`cmdv2/genalgs`) reads two inputs — the
 authoritative registry in a local `dnssec-algorithms` checkout, and this
-`algs.list` — and emits three files into the app directory:
+`algs.list` — and emits these files:
 
 - **`metadata_algs.go`** — `RegisterMetadata(...)` for **every** registry
   algorithm (name, codepoint, role). Pure data, compiled into every app,
@@ -274,8 +274,23 @@ These are **build artifacts** — gitignored, regenerated per build host so
 the linked algorithm set always matches that host's installed libraries.
 The committed input is `algs.list`.
 
+One more file is generated but **committed**:
+
+- **`algdeps.go`** — a blank import of each selected algorithm's package,
+  behind the build tag `algdeps`, which no build sets. `registered_algs.go`
+  is the only other code importing these packages, so without this file
+  `go mod tidy` in a fresh clone, such as the one Dependabot works in,
+  would drop their requirements, `liboqs-go` among them, from `go.mod` and
+  `go.sum`, and the next PQ build would fail on a missing `go.sum` entry.
+  tidy reads files whatever their build tags, so it keeps them; nothing in
+  the file is ever compiled. genalgs rewrites it along with the rest: when you change
+  `algs.list`, run `make` and commit both. A genalgs test
+  (`cd cmdv2/genalgs && go test`) fails if any app's `algdeps.go` no longer
+  matches its `algs.list`.
+
 **Adding a new algorithm** to an app is therefore one line in that app's
-`algs.list` (plus, if the algorithm is new to the project, one row in the
+`algs.list`, committed with the `algdeps.go` that `make` regenerates from
+it (plus, if the algorithm is new to the project, one row in the
 registry). No codepoints are edited by hand, no cross-app synchronization
 is needed, and there is no separate CLI name list to keep in step.
 
