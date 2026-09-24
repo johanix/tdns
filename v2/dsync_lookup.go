@@ -213,7 +213,7 @@ func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype u
 	var dsync *core.DSYNC
 
 	for _, dsyncrr := range dsync_res.Rdata {
-		if dsyncrr.Scheme == scheme && dsyncrr.Type == dtype {
+		if dsyncrr.Scheme == scheme && dsyncrr.Type == dtype && dsyncrr.Usable() {
 			found = true
 			dsync = dsyncrr
 			break

@@ -38,7 +38,8 @@ type schemeChoice struct {
 // would otherwise make the API DNSSEC gate untestable.
 func selectRolloverDsyncRRs(dsync DsyncResult, zoneName string) (updateRR, notifyRR, apiRR *core.DSYNC) {
 	for _, rr := range dsync.Rdata {
-		if rr == nil {
+		// Port 0 or the root as the target: nowhere to push to (#757).
+		if !rr.Usable() {
 			continue
 		}
 		switch rr.Scheme {

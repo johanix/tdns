@@ -44,7 +44,7 @@ func (zd *ZoneData) advertisesDsyncNotify(qtype uint16) bool {
 		if !ok {
 			continue
 		}
-		if ds.Scheme != core.SchemeNotify {
+		if ds.Scheme != core.SchemeNotify || !ds.Usable() {
 			continue
 		}
 		if ds.Type == qtype || ds.Type == dns.TypeANY {

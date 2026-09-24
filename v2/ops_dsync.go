@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -102,6 +103,9 @@ func (p *DsyncPublication) Empty() bool {
 	return len(p.DsyncRRs) == 0 && len(p.SVCBRRs) == 0 && len(p.AddressRRs) == 0
 }
 
+// rootDsyncOwnerNotice says once per process where a root zone's DSYNC now is.
+var rootDsyncOwnerNotice sync.Once
+
 // Every RR added to the DSYNC RRset below goes through core.RRset.Add, which
 // refuses a duplicate, rather than through a plain append.
 //
@@ -119,6 +123,13 @@ func (p *DsyncPublication) Empty() bool {
 // refresh.
 func (zd *ZoneData) BuildDsyncPublication() (*DsyncPublication, error) {
 	lg.Debug("BuildDsyncPublication", "zone", zd.ZoneName)
+	if dns.Fqdn(zd.ZoneName) == "." {
+		rootDsyncOwnerNotice.Do(func() {
+			lg.Info("the root's DSYNC RRset is published at _dsync. (RFC 9859), no longer at _dsync.root.;"+
+				" a child on an older build looks for it at the old name and finds nothing",
+				"zone", zd.ZoneName)
+		})
+	}
 	rrset := core.RRset{
 		Name: zd.ZoneName,
 	}
@@ -413,26 +424,40 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 	return nil
 }
 
-func dsyncOwnerLabel(zonename string) string {
-	if zonename == "." {
-		return "root"
-	}
-	return zonename
-}
-
+// dsyncOwnerName is the owner of a zone's DSYNC RRset, and
+// dsyncPerChildLookupName a child's own name under it: _dsync.<zone> and
+// <child>._dsync.<zone>, and at the root _dsync. and <tld>._dsync. (RFC 9859).
+//
+// The root's used to be _dsync.root. and <tld>._dsync.root. That was a clean
+// switch (#757): nothing publishes or looks up the old names.
 func dsyncOwnerName(zonename string) string {
-	return dns.Fqdn("_dsync." + dsyncOwnerLabel(zonename))
+	return dsyncNameUnder("_dsync", zonename)
 }
 
 func dsyncPerChildLookupName(childLabel, parent string) string {
-	return dns.Fqdn(childLabel + "._dsync." + dsyncOwnerLabel(parent))
+	return dsyncNameUnder(childLabel+"._dsync", parent)
 }
 
+func dsyncNameUnder(prefix, zonename string) string {
+	if zonename = dns.Fqdn(zonename); zonename == "." {
+		return prefix + "."
+	}
+	return prefix + "." + zonename
+}
+
+// expandDsyncTemplate fills {ZONENAME} in a target template. A target is any
+// name the operator picks, not one RFC 9859 fixes, so the root keeps its
+// "root" spelling here: "{ZONENAME}" as "" would make "updates.{ZONENAME}"
+// the TLD updates. and "dsync-api.{ZONENAME}" the broken "dsync-api..".
 func expandDsyncTemplate(tpl, zonename string) string {
 	if tpl == "" {
 		return ""
 	}
-	return dns.Fqdn(strings.Replace(tpl, "{ZONENAME}", dsyncOwnerLabel(zonename), 1))
+	label := zonename
+	if dns.Fqdn(zonename) == "." {
+		label = "root"
+	}
+	return dns.Fqdn(strings.Replace(tpl, "{ZONENAME}", label, 1))
 }
 
 // DsyncUpdateTargetName computes the DSYNC UPDATE target name for a parent zone

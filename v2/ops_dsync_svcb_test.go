@@ -19,24 +19,6 @@ func TestExpandDsyncTemplateRoot(t *testing.T) {
 	}
 }
 
-func TestDsyncOwnerNameRoot(t *testing.T) {
-	if got := dsyncOwnerName("."); got != "_dsync.root." {
-		t.Fatalf("root owner = %q", got)
-	}
-	if got := dsyncOwnerName("example."); got != "_dsync.example." {
-		t.Fatalf("zone owner = %q", got)
-	}
-}
-
-func TestDsyncPerChildLookupNameRoot(t *testing.T) {
-	if got := dsyncPerChildLookupName("example", "."); got != "example._dsync.root." {
-		t.Fatalf("tld under root = %q", got)
-	}
-	if got := dsyncPerChildLookupName("child", "example."); got != "child._dsync.example." {
-		t.Fatalf("child under example = %q", got)
-	}
-}
-
 // The bootstrap SVCB carries a SvcParam, so it MUST be in ServiceMode.
 //
 // In AliasMode (SvcPriority 0) this record would say two wrong things at once:

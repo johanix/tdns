@@ -254,10 +254,16 @@ func zoneIsSigned(zd *ZoneData) bool {
 	return zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] || zoneLooksSigned(zd)
 }
 
-// findDsync returns the first advertised DSYNC RR for a scheme, or nil.
+// findDsync returns the first advertised, usable DSYNC RR for a scheme, or
+// nil. A record with port 0 or the root as its target names nowhere to send
+// anything and is passed over (#757).
 func findDsync(res DsyncResult, scheme core.DsyncScheme, wantNotifyType bool) *core.DSYNC {
 	for _, drr := range res.Rdata {
 		if drr.Scheme != scheme {
+			continue
+		}
+		if !drr.Usable() {
+			lgDns.Debug("findDsync: passing over an unusable DSYNC record", "dsync", drr.String())
 			continue
 		}
 		// NOTIFY is only actionable for the types that can be signalled about.

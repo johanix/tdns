@@ -79,7 +79,7 @@ var ReportCmd = &cobra.Command{
 			// Find DSYNC record with REPORT scheme
 			var reportDSYNC *core.DSYNC
 			for _, ds := range dsyncRes.Rdata {
-				if ds.Scheme == core.SchemeReport {
+				if ds.Scheme == core.SchemeReport && ds.Usable() {
 					reportDSYNC = ds
 					break
 				}
