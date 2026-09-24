@@ -93,9 +93,9 @@ func TestAProxyComparesTheParentsDSWithTheCds(t *testing.T) {
 	}
 }
 
-// Test 32. A CDS holding an algorithm-0 record leaves the parent's DS alone
-// until Part 2 decides which such sets are the delete: no DS in the UPDATE, no
-// comparison, no DS in the API payload.
+// Test 32. A malformed CDS -- here the RFC 8078 delete beside a real record,
+// which classifyCDS refuses -- leaves a signed zone's parent DS alone: no DS
+// in the UPDATE, no comparison, no DS in the API payload.
 func TestAProxyLeavesTheDSAloneForAnAlgorithmZeroCds(t *testing.T) {
 	zd := proxyCdsZone(t, append(cdsFor("example.", pubB), mustRR(t, "example. 120 IN CDS 0 0 0 00")))
 
@@ -164,5 +164,80 @@ func TestAProxyComparesDigestsWithoutCase(t *testing.T) {
 	zd.proxyCompareDS(&resp, dsOfKeys(pubB))
 	if !resp.InSync {
 		t.Errorf("in sync = false (adds %v, removes %v); a digest's case is not a difference", resp.DSAdds, resp.DSRemoves)
+	}
+}
+
+// Part 2: the exact RFC 8078 delete CDS is the child asking for its DS to go,
+// and the proxy delivers it like any other CDS (#737): a withdrawal in the
+// UPDATE form and in the API payload, and a parent still holding a DS is out
+// of step. Any other algorithm-0 set still leaves the parent alone (test 32).
+func TestAProxyDeliversAnExactDeleteCds(t *testing.T) {
+	zd := proxyCdsZone(t, rrs(t, "example. 120 IN CDS 0 0 0 00"))
+
+	if dss := zd.proxyReplaceSyncState(nil, nil); !dss.NewDSKnown || len(dss.NewDS) != 0 {
+		t.Errorf("UPDATE: NewDS = %v (known %v), want a known empty DS set", dss.NewDS, dss.NewDSKnown)
+	}
+	found := false
+	for _, rrset := range zd.proxyApiRRsets(nil, nil) {
+		if rrset.Type == "DS" {
+			found = true
+			if len(rrset.RRs) != 0 {
+				t.Errorf("API: DS RRset %v, want an empty one (a withdrawal)", rrset.RRs)
+			}
+		}
+	}
+	if !found {
+		t.Error("API: no DS RRset declared; a withdrawal is an empty one")
+	}
+	resp := DelegationSyncStatus{InSync: true}
+	if !zd.proxyCompareDS(&resp, dsOfKeys(pubB)) {
+		t.Fatal("the parent's DS was not compared with a delete CDS")
+	}
+	if resp.InSync || len(resp.DSAdds) != 0 || !sameDS(resp.DSRemoves, dsOfKeys(pubB)) {
+		t.Errorf("in sync %v, adds %v, removes %v; want out of step, -B", resp.InSync, resp.DSAdds, resp.DSRemoves)
+	}
+}
+
+// Review C1 of #766. A zone that publishes no DNSKEY RRset is unsigned, and the
+// parent's DS is withdrawn whatever CDS it still serves (#737: "no DNSKEY RRset
+// at all: remove the parent's DS"). A leftover CDS -- malformed, or an
+// ordinary one naming keys the zone no longer publishes -- must not keep a DS
+// in place, nor install one, on the UPDATE form any more than on the API.
+func TestAnUnsignedProxyZoneWithdrawsTheDSWhateverItsCds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cds  []dns.RR
+	}{
+		{"a malformed CDS", append(cdsFor("example.", pubB), mustRR(t, "example. 120 IN CDS 0 0 0 00"))},
+		{"an ordinary CDS", cdsFor("example.", pubB)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := testZone(t, "example.", csyncTestZone)
+			registerZones(t, zd)
+			zd.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
+			stageCDS(t, zd, tc.cds)
+			if zd.hasDnskeyRRset() {
+				t.Fatal("the zone publishes a DNSKEY RRset; this test needs it unsigned")
+			}
+
+			if dss := zd.proxyReplaceSyncState(nil, nil); !dss.NewDSKnown || len(dss.NewDS) != 0 {
+				t.Errorf("UPDATE: NewDS = %v (known %v), want a known empty DS set", dss.NewDS, dss.NewDSKnown)
+			}
+			found := false
+			for _, rrset := range zd.proxyApiRRsets(nil, nil) {
+				if rrset.Type == "DS" {
+					found = true
+					if len(rrset.RRs) != 0 {
+						t.Errorf("API: DS RRset %v, want an empty one", rrset.RRs)
+					}
+				}
+			}
+			if !found {
+				t.Error("API: no DS RRset declared; a withdrawal is an empty one")
+			}
+			if zd.proxyCompareDS(&DelegationSyncStatus{}, dsOfKeys(pubB)) {
+				t.Error("an unsigned zone's parent DS was compared with its CDS")
+			}
+		})
 	}
 }

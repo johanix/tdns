@@ -123,9 +123,11 @@ The DS it sends is what the zone's CDS asks for, when the primary publishes
 one: that is the primary's statement of what the parent should hold. A
 retired KSK is still published, and so is one whose DS is not due yet, so
 the published keys are not that statement. Without a CDS, the DS is that of
-the published SEP keys. A CDS holding an algorithm-0 record (the RFC 8078
-delete form, or a malformed set) leaves the parent's DS alone for now. The
-API scheme sends the same DS from the CDS, and no DS without one. At startup
+the published SEP keys. The RFC 8078 delete CDS, exactly one record
+`0 0 0 00`, withdraws the parent's DS. Any other CDS RRset holding an
+algorithm-0 record is malformed, and leaves the parent's DS alone, as a parent
+reading it would. The API scheme sends the same DS from the CDS (an empty DS
+RRset for the delete), and no DS without one. At startup
 the agent compares the parent's DS with the CDS, so a KSK change it missed
 while it was down is caught.
 

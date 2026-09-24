@@ -229,9 +229,9 @@ func parentOnlyNS(zone string, childNS, parentNS []dns.RR) []dns.RR {
 // The DS is the child's own statement about it, its CDS, when the child serves
 // one (#752, design docs/2026-09-24-cds-publication-and-rfc-conformance.md
 // §1.2 (e); B1 in docs/2026-08-23-proxy-delegation-sync-scope.md). A tdns
-// signer now publishes one for every zone whose keys it manages. A CDS holding
-// an algorithm-0 record is not delivered yet: which such set is the RFC 8078
-// delete is Part 2's classifier to decide.
+// signer now publishes one for every zone whose keys it manages. The exact RFC
+// 8078 delete is delivered as a withdrawal, an empty DS RRset; a malformed set
+// (any other with an algorithm-0 record, classifyCDS) is not delivered.
 //
 // With no CDS, DS is deliberately absent from the request, with one exception
 // below. The proxy has no business deriving a DS set for a signed child. It
@@ -272,7 +272,7 @@ func (zd *ZoneData) proxyApiRRsets(analysis *ProxyDelegationAnalysis, parentOnly
 	// statement of what the parent should hold (#752, design §1.2 (e)). With
 	// no CDS the payload declares no DS, as before.
 	signed := zd.hasDnskeyRRset()
-	if cdsDS, served, usable := zd.proxyDSFromCDS(); signed && served && usable {
+	if cdsDS, served, usable, _ := zd.proxyDSFromCDS(); signed && served && usable {
 		status.NewDS, status.NewDSKnown = cdsDS, true
 	}
 	rrsets := DsyncApiRRsetsFromSyncStatus(zd.ZoneName, status)
