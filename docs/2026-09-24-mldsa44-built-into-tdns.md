@@ -268,7 +268,11 @@ Dated design docs are left as they are.
   `TestRegisteringABuiltInAgainIsIgnored` fail. Without the genalgs list,
   `TestReadListIgnoresBuiltIns` and all three cases of
   `TestRunGeneratesNothingForBuiltIns` fail. Without §2.3,
-  `TestRegisteringABuiltInAgainIsIgnored` panics.
+  `TestRegisteringABuiltInAgainIsIgnored` panics. After the external
+  review, two more: `TestReadListErrors` refuses a list naming MLDSA44
+  twice (it fails if the built-in check comes first), and
+  `TestBuiltInNameAtAnotherCodepointPanics` pins the 199 case (it fails if
+  the repeat check matches the name alone).
 - **Application builds.** Every app under `cmdv2` built, and its
   `--version` lists MLDSA44 at 18: auth, imr, dog and signer with their
   lists minus SQISIGN1 and QRUOV_Q31_L3 (those libraries were not

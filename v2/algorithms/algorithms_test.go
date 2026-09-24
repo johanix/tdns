@@ -294,6 +294,27 @@ func TestRegisteringABuiltInAgainIsIgnored(t *testing.T) {
 	}
 }
 
+// Only a repeat at the built-in's own codepoint is ignored. The same name at
+// another codepoint still panics: ML-DSA-44 at 199 is what generated code
+// from a dnssec-algorithms checkout older than the IANA assignment carries,
+// and genalgs is what keeps it out. RegisterMetadata is the call a stale
+// metadata_algs.go makes, and it panics before changing anything (Register
+// would first register the codepoint with miekg/dns).
+func TestBuiltInNameAtAnotherCodepointPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("RegisterMetadata(199, MLDSA44) did not panic, with MLDSA44 registered at 18")
+		}
+		if num, _ := AlgorithmNumber("MLDSA44"); num != MLDSA44 {
+			t.Errorf("MLDSA44 now resolves to %d, want %d", num, MLDSA44)
+		}
+		if _, ok := AlgorithmName(199); ok {
+			t.Error("codepoint 199 was recorded before the panic")
+		}
+	}()
+	RegisterMetadata(199, "MLDSA44", Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true}, Facts{})
+}
+
 // ED448 is not a miekg/dns built-in: it has to be registered for real, or it
 // is listed as usable and fails at the first key.
 func TestED448RegisteredForReal(t *testing.T) {

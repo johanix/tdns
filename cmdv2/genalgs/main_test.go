@@ -189,6 +189,14 @@ func TestReadListErrors(t *testing.T) {
 	if _, _, err := readList(dup, byName); err == nil {
 		t.Error("expected error for duplicate alg")
 	}
+
+	// A built-in is ignored rather than selected, but naming it twice is
+	// still a duplicate: the seen-check comes before the built-in check.
+	dupBuiltIn := filepath.Join(dir, "dupbuiltin.list")
+	os.WriteFile(dupBuiltIn, []byte("MLDSA44\nMLDSA44\n"), 0o644)
+	if _, _, err := readList(dupBuiltIn, byName); err == nil {
+		t.Error("expected error for a built-in named twice")
+	}
 }
 
 // An algs.list naming an algorithm tdns builds in is not an error, even
