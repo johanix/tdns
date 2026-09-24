@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,10 +124,13 @@ func TestFirstSigningPublishesTheCds(t *testing.T) {
 }
 
 // Test 2. A restart that finds the CDS already served, and right, publishes
-// nothing: no serial, no journal row.
+// nothing: no serial, no journal row. Right includes the CDNSKEY that goes with
+// it (#753); a zone serving the CDS alone gets its CDNSKEY
+// (TestACdsInStepWithoutItsCdnskeyIsCompleted).
 func TestARestartWithTheCdsServedPublishesNothing(t *testing.T) {
 	r := newSigningRig(t, false)
 	stageCDS(t, r.zd, cdsOfKeys("example.", r.kskA))
+	stageCdnskey(t, r.zd, r.kskA)
 
 	r.kdb.followKeysWithCDS(context.Background(), r.zd)
 
@@ -323,7 +327,7 @@ func TestAFollowKeysChangeTellsTheParentOnce(t *testing.T) {
 	cdsPublishes := func() int {
 		n := 0
 		for _, e := range r.log.snapshot() {
-			if e == "published CDS" {
+			if strings.HasPrefix(e, "published CDS") {
 				n++
 			}
 		}
@@ -411,6 +415,7 @@ func TestAFullSyncQueueIsRetriedOnTheNextRun(t *testing.T) {
 func TestTheFirstRunForAZoneComparesWithTheParentOnce(t *testing.T) {
 	r := newChildSyncRig(t, 4)
 	stageCDS(t, r.zd, cdsOfKeys("example.", r.kskA))
+	stageCdnskey(t, r.zd, r.kskA)
 
 	r.kdb.followKeysWithCDS(context.Background(), r.zd)
 	if n := queuedSyncs(t, r.zd); n != 1 {
@@ -426,6 +431,7 @@ func TestTheFirstRunForAZoneComparesWithTheParentOnce(t *testing.T) {
 
 	later := newChildSyncRig(t, 4) // another ZoneData, loaded after the first ran
 	stageCDS(t, later.zd, cdsOfKeys("example.", later.kskA))
+	stageCdnskey(t, later.zd, later.kskA)
 	later.kdb.followKeysWithCDS(context.Background(), later.zd)
 	if n := queuedSyncs(t, later.zd); n != 1 {
 		t.Errorf("%d explicit syncs queued on a later zone's first run, want 1", n)
@@ -618,6 +624,7 @@ func TestACdsReadBackFromTextIsTheSameCds(t *testing.T) {
 		t.Fatal("the round trip kept the digest's case; this test needs it changed")
 	}
 	stageCDS(t, r.zd, served)
+	stageApexRRset(t, r.zd, dns.TypeCDNSKEY, fromText(t, []dns.RR{cdnskeyOf("example.", r.kskA)}), nil)
 
 	r.kdb.followKeysWithCDS(context.Background(), r.zd)
 	if res := r.kdb.ensureCDS(context.Background(), r.zd); res.err != nil {

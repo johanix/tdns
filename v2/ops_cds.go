@@ -58,7 +58,8 @@ func (zd *ZoneData) SynthesizeCdsRRs() ([]dns.RR, error) {
 }
 
 // PublishCdsRRs publishes the CDS for every SEP key of the served DNSKEY RRset,
-// replacing any CDS RRset already there.
+// replacing any CDS RRset already there, and the CDNSKEY for the same keys
+// unless the zone's policy says `cdnskey: false` (#753).
 //
 // Inside tdns every CDS write goes through the DS engine (ds_engine.go), which
 // asks the zone's DS model what the CDS should hold. PublishCdsRRs,
@@ -73,17 +74,11 @@ func (zd *ZoneData) PublishCdsRRs() error {
 		return nil
 	}
 
-	// First delete any existing CDS RRset, then add the new one
-	antiCds := &dns.CDS{}
-	antiCds.Hdr = dns.RR_Header{
-		Name:   zd.ZoneName,
-		Rrtype: dns.TypeCDS,
-		Class:  dns.ClassANY, // Delete entire CDS RRset
-		Ttl:    0,
-	}
-
-	actions := []dns.RR{antiCds}
+	// First delete any existing CDS and CDNSKEY RRsets, then add the new ones
+	cdnskey, _ := zd.cdnskeyFor(zd.KeyDB, cdsRRs)
+	actions := []dns.RR{cdsDeleteRR(zd.ZoneName), cdnskeyDeleteRR(zd.ZoneName)}
 	actions = append(actions, cdsRRs...)
+	actions = append(actions, cdnskey...)
 
 	select {
 	case zd.KeyDB.UpdateQ <- UpdateRequest{
@@ -99,21 +94,13 @@ func (zd *ZoneData) PublishCdsRRs() error {
 	return nil
 }
 
-// UnpublishCdsRRs removes the CDS RRset from the zone apex.
+// UnpublishCdsRRs removes the CDS and CDNSKEY RRsets from the zone apex.
 func (zd *ZoneData) UnpublishCdsRRs() error {
-	antiCds := &dns.CDS{}
-	antiCds.Hdr = dns.RR_Header{
-		Name:   zd.ZoneName,
-		Rrtype: dns.TypeCDS,
-		Class:  dns.ClassANY, // Delete entire CDS RRset
-		Ttl:    0,
-	}
-
 	select {
 	case zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
-		Actions:        []dns.RR{antiCds},
+		Actions:        []dns.RR{cdsDeleteRR(zd.ZoneName), cdnskeyDeleteRR(zd.ZoneName)},
 		InternalUpdate: true,
 	}:
 	case <-time.After(5 * time.Second):

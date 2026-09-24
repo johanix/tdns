@@ -49,8 +49,7 @@ func (zd *ZoneData) isOverlayZone() bool {
 // only ones overlaid. An allowlist, not a filter: DNSKEY and KEY come from the
 // keystore, and the journal's copy could bring back a key it has retired;
 // local edits to the upstream's data stay lost at a full transfer, as they
-// always were. CDNSKEY is not generated today. It is listed so that a DS-engine
-// change that journals one is covered.
+// always were. The DS engine publishes CDNSKEY with CDS (#753).
 var overlayTypes = map[uint16]bool{
 	dns.TypeCDS:     true,
 	dns.TypeCDNSKEY: true,

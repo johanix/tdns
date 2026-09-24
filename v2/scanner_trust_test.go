@@ -32,6 +32,10 @@ type trustNet struct {
 	laterVerdict  map[string]cache.ValidationState
 	laterDisagree map[string]bool
 	queried       map[string]int
+
+	// disagree: the nameservers do not agree on the key, from the first
+	// query on.
+	disagree map[string]bool
 }
 
 func trustKey(name string, qtype uint16) string { return name + "/" + dns.TypeToString[qtype] }
@@ -44,7 +48,7 @@ func (n *trustNet) query(_ context.Context, qname string, qtype uint16, _ *core.
 	n.queried[k]++
 	// Data nobody serves comes back the way queryAllNSAndCompare reports every
 	// nameserver answering that there is none: an empty RRset, in sync.
-	inSync := !(n.queried[k] > 1 && n.laterDisagree[k])
+	inSync := !n.disagree[k] && !(n.queried[k] > 1 && n.laterDisagree[k])
 	return &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: n.served[k]}, inSync, nil
 }
 

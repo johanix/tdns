@@ -2100,6 +2100,15 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 			RRtype: dns.TypeCDS,
 			RRs:    cds,
 		})
+		// And the CDNSKEY that goes with it (#753).
+		if cdnskey, _ := zd.cdnskeyFor(zd.KeyDB, cds); len(cdnskey) > 0 {
+			dynamicRRs = append(dynamicRRs, &core.RRset{
+				Name:   zd.ZoneName,
+				Class:  dns.ClassINET,
+				RRtype: dns.TypeCDNSKEY,
+				RRs:    cdnskey,
+			})
+		}
 	}
 
 	if !zd.Options[OptDontPublishKey] {

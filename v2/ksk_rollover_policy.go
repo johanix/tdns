@@ -258,6 +258,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 	}
 
 	out.SuppressCDS = conf.Cds != nil && !*conf.Cds
+	out.SuppressCDNSKEY = conf.Cdnskey != nil && !*conf.Cdnskey
 
 	out.Clamping.Enabled = conf.Clamping.Enabled
 	if out.Clamping.Enabled {

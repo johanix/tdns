@@ -141,10 +141,19 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 **Status**: ✅ Partially Supported  
 **Implementation**: `tdns/v2/ops_cds.go`, `tdns/v2/ds_engine.go` (child); `tdns/v2/scanner.go` (`ProcessCDSNotify`), `tdns/v2/scanner_trust.go` (parent)  
 **Notes**: 
-- **Child:** the DS engine publishes CDS records derived from the zone's KSKs.
-- **Parent:** a NOTIFY(CDS) starts a scan that turns the CDS RRset every child nameserver serves into the child's DS RRset.
+- **Child (§4):** the DS engine publishes CDS records derived from the zone's KSKs, and the CDNSKEY for the same keys in the same update. Under a DNSSEC policy with `cdnskey: false` the CDS goes out alone. A CDS naming a key tdns holds no copy of also goes out alone, and the log says so.
+- **Parent:** a NOTIFY(CDS) starts a scan that turns the CDS RRset every child nameserver serves into the child's DS RRset. The CDNSKEY is checked against it (RFC 9975 below).
 - **DNSSEC (§6.2):** for a child that has a DS, the CDS must validate Secure under a parent zone delegation policy with `require-dnssec: true`.
 - **Not yet:** the §4.1 signer rule, a key in the DS RRset signing the CDS. tdns signs CDS with its ZSKs, so the signer and the parent's check change together: [tdns#641](https://github.com/johanix/tdns/issues/641).
+
+### RFC 9975 - Consistency of CDS/CDNSKEY and CSYNC
+**Status**: ✅ Partially Supported  
+**Implementation**: `tdns/v2/cdnskey.go`, `tdns/v2/scanner.go` (`ProcessCDSNotify`)  
+**Notes**: 
+- **§3.1, CDS and CDNSKEY:** the parent fetches the CDNSKEY from the nameservers the CDS came from. Nameservers that disagree on it, or a CDNSKEY whose keys are not the keys the SHA-256 CDS records name, make the scan change nothing. CDS records of other digest types take no part.
+- **Local policy, not 9975:** a child that serves no CDNSKEY at any nameserver is accepted as CDS-only, and the scan log says so. This keeps CDS-only children working, tdns children of older builds among them.
+- **Child:** publishes CDS and CDNSKEY together, so they agree by construction.
+- **Not yet ([tdns#754](https://github.com/johanix/tdns/issues/754)):** every address of every nameserver, retries, the CSYNC consistency rules and the older-CDS guard.
 
 ### RFC 8078 - Managing DS Records from the Parent via CDS/CDNSKEY (CDNSKEY)
 **Status**: ✅ Partially Supported  
@@ -152,7 +161,7 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 **Notes**: 
 - **Delete (§4):** only the exact delete, one CDS record `0 0 0 00` (a digest of one zero byte on the wire), removes the child's DS RRset; for a child with no DS it changes nothing. Any other CDS RRset holding an algorithm-0 record (a delete beside real records, two deletes, an algorithm-0 record with a real key tag, digest type or digest) breaks §4 and is refused, with or without a DS, as RFC 7344 §4.1 requires. A `parentsync-proxy` agent delivers the exact delete as a DS withdrawal. tdns does not publish the delete CDS as a child.
 - **Bootstrap (§3):** a child with no DS gets its first DS only through a mechanism the parent zone's delegation policy lists. `at-apex` accepts the apex CDS after one check under `require-dnssec: false`, and refuses when `scanner.at-apex.checks` is above 1, since repeated checks (§3.3) are not implemented. Under `require-dnssec: true` the apex CDS of a child without a DS is not Secure, so the first DS comes through `at-ns` (RFC 9615).
-- **CDNSKEY:** served and queryable. The parent acts on CDS only, and a child publishes no CDNSKEY of its own; a secondary republishes a customer's CDNSKEY at the RFC 9615 signaling names.
+- **CDNSKEY:** a child publishes the CDNSKEY with its CDS. The parent acts on CDS and reads the CDNSKEY only to check it against the CDS. The CDNSKEY delete `0 3 0 AA==` agrees only with the exact delete CDS. A secondary republishes a customer's CDNSKEY at the RFC 9615 signaling names.
 
 ### RFC 9460 - Service Binding and Parameter Specification via the DNS (SVCB)
 **Status**: ✅ Supported  

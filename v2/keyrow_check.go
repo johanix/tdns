@@ -291,11 +291,19 @@ func checkSignatures(zd *ZoneData, zone string, rows []keyRowView) []KeyInvarian
 // checkServedCds is I7: when the zone serves a CDS RRset and every SEP row
 // has ds set, the served CDS names exactly the ds=1 keys. A zone that serves
 // no CDS is not judged (it may not publish one at all), and neither is a zone
-// with a SEP row whose ds is unknown.
+// with a SEP row whose ds is unknown. A served CDNSKEY must agree with the
+// served CDS as a parent applying RFC 9975 checks it, whatever the rows say
+// (#753).
 func checkServedCds(zd *ZoneData, zone string, rows []keyRowView) []KeyInvariantViolation {
 	rs, err := zd.RRsetForAnalysis(zone, dns.TypeCDS)
 	if err != nil || rs == nil || len(rs.RRs) == 0 {
 		return nil
+	}
+	var out []KeyInvariantViolation
+	if ck, err := zd.RRsetForAnalysis(zone, dns.TypeCDNSKEY); err == nil && ck != nil && len(ck.RRs) > 0 {
+		if ok, why := cdnskeyAgreesWithCDS(rs.RRs, ck.RRs); !ok {
+			out = append(out, KeyInvariantViolation{Invariant: "I7", Zone: zone, Detail: "the served CDNSKEY does not match the served CDS: " + why})
+		}
 	}
 	want := map[string]uint16{}
 	for _, r := range rows {
@@ -303,7 +311,7 @@ func checkServedCds(zd *ZoneData, zone string, rows []keyRowView) []KeyInvariant
 			continue
 		}
 		if !r.DS.Valid {
-			return nil
+			return out
 		}
 		if r.DS.Int64 != 0 {
 			want[fmt.Sprintf("%d/%d", r.Keyid, r.Alg)] = r.Keyid
@@ -317,7 +325,6 @@ func checkServedCds(zd *ZoneData, zone string, rows []keyRowView) []KeyInvariant
 		}
 		served[fmt.Sprintf("%d/%d", cds.KeyTag, cds.Algorithm)] = cds.KeyTag
 	}
-	var out []KeyInvariantViolation
 	for k, keyid := range want {
 		if _, ok := served[k]; !ok {
 			out = append(out, KeyInvariantViolation{Invariant: "I7", Zone: zone, KeyID: keyid, Detail: "ds is set but the served CDS has no record for the key"})

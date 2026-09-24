@@ -422,10 +422,13 @@ func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 	// records, and the updater counts that as a change -- another serial,
 	// another journal row. After a follow-keys change the parent is still
 	// behind, so every explicit sync that follows one would do exactly that.
+	// The CDNSKEY that goes with it counts too (#753).
 	if served, err := currentCdsTuples(zd); err == nil && cdsTupleSetsEqual(cdsTuplesOf(cds), served) {
-		lgDSEngine.Debug("the CDS for delegation sync is already served", "zone", zd.ZoneName,
-			"keyids", cdsKeyids(cds))
-		return dsEngineResult{cds: cds}
+		if inStep, err := zd.cdnskeyInStep(kdb, cds); err == nil && inStep {
+			lgDSEngine.Debug("the CDS for delegation sync is already served", "zone", zd.ZoneName,
+				"keyids", cdsKeyids(cds))
+			return dsEngineResult{cds: cds}
+		}
 	}
 	if err := zd.publishCDSAndWait(ctx, kdb, cds); err != nil {
 		return dsEngineResult{err: err}
@@ -494,7 +497,7 @@ func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
 		// keys tdns manages, the explicit sync reads it as "remove the DS", and
 		// going insecure stays an operator's action (§8 Q2).
 		delete(kdb.dsSyncPending, zd.ZoneName)
-		if len(current) == 0 {
+		if len(current) == 0 && !servesApexType(zd, dns.TypeCDNSKEY) {
 			return
 		}
 		if err := zd.unpublishCDSAndWait(ctx, kdb); err != nil {
@@ -506,15 +509,25 @@ func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
 		return
 	}
 	want := cdsFromDS(zd.ZoneName, intent.Set)
-	changed := false
-	if !cdsTupleSetsEqual(cdsTuplesOf(want), current) {
+	// The parent is told only when the CDS changed: a CDNSKEY brought in step
+	// with an unchanged CDS asks the parent for nothing new.
+	changed := !cdsTupleSetsEqual(cdsTuplesOf(want), current)
+	cdnskeyInStep, err := zd.cdnskeyInStep(kdb, want)
+	if err != nil {
+		lgDSEngine.Warn("could not read the published CDNSKEY", "zone", zd.ZoneName, "err", err)
+		return
+	}
+	if changed || !cdnskeyInStep {
 		if err := zd.publishCDSAndWait(ctx, kdb, want); err != nil {
 			lgDSEngine.Warn("could not bring the CDS in step with the keys", "zone", zd.ZoneName, "err", err)
 			return
 		}
-		lgDSEngine.Info("CDS brought in step with the keys", "zone", zd.ZoneName,
-			"was", tupleKeyids(current), "now", cdsKeyids(want))
-		changed = true
+		if changed {
+			lgDSEngine.Info("CDS brought in step with the keys", "zone", zd.ZoneName,
+				"was", tupleKeyids(current), "now", cdsKeyids(want))
+		} else {
+			lgDSEngine.Info("CDNSKEY brought in step with the CDS", "zone", zd.ZoneName, "keyids", cdsKeyids(want))
+		}
 	}
 	kdb.tellParentIfDue(zd, changed)
 }
@@ -654,18 +667,30 @@ func servesApexType(zd *ZoneData, rrtype uint16) bool {
 	return err == nil && apex != nil && apex.RRtypes != nil && len(apex.RRtypes.GetOnlyRRSet(rrtype).RRs) > 0
 }
 
-// publishCDSAndWait replaces the zone's CDS RRset with cds, and returns once the
-// zone serves exactly that RRset.
+// publishCDSAndWait replaces the zone's CDS RRset with cds, and its CDNSKEY
+// RRset with the one that goes with it (#753), and returns once the zone serves
+// exactly those.
 //
 // Delete then add, in one update, so the apex never holds a mixture of old and
-// new. And the postcondition is checked rather than inferred from the reply: the
-// zone updater answers "not applied" both for an identical republish, where the
-// CDS is there, and for an update it declined, where it is not -- the lesson of
-// PublishCsyncRRAndWait.
+// new, or a CDS and a CDNSKEY that disagree. And the postcondition is checked
+// rather than inferred from the reply: the zone updater answers "not applied"
+// both for an identical republish, where the CDS is there, and for an update it
+// declined, where it is not -- the lesson of PublishCsyncRRAndWait.
+//
+// The CDNSKEY is left out under `cdnskey: false`, and when the CDS names a key
+// tdns holds no copy of; the latter is logged, since a parent that applies
+// RFC 9975 strictly refuses such a CDS.
 func (zd *ZoneData) publishCDSAndWait(ctx context.Context, kdb *KeyDB, cds []dns.RR) error {
-	actions := make([]dns.RR, 0, 1+len(cds))
-	actions = append(actions, cdsDeleteRR(zd.ZoneName))
+	cdnskey, unmatched := zd.cdnskeyFor(kdb, cds)
+	if len(unmatched) > 0 {
+		lgDSEngine.Warn("publishing the CDS without a CDNSKEY: tdns holds no DNSKEY for the CDS records"+
+			" of these keyids, and a parent that applies RFC 9975 strictly will refuse the CDS",
+			"zone", zd.ZoneName, "keyids", unmatched)
+	}
+	actions := make([]dns.RR, 0, 2+len(cds)+len(cdnskey))
+	actions = append(actions, cdsDeleteRR(zd.ZoneName), cdnskeyDeleteRR(zd.ZoneName))
 	actions = append(actions, cds...)
+	actions = append(actions, cdnskey...)
 	if err := kdb.applyInternalUpdateAndWait(ctx, zd, actions); err != nil {
 		return fmt.Errorf("publishing the CDS for %s: %w", zd.ZoneName, err)
 	}
@@ -677,13 +702,21 @@ func (zd *ZoneData) publishCDSAndWait(ctx context.Context, kdb *KeyDB, cds []dns
 		return fmt.Errorf("publishing the CDS for %s: the update was accepted but the zone serves"+
 			" CDS for keyids %v, not the requested %v", zd.ZoneName, tupleKeyids(got), cdsKeyids(cds))
 	}
+	served, err := servedCdnskeyRRs(zd)
+	if err != nil {
+		return fmt.Errorf("publishing the CDS for %s: reading the CDNSKEY back: %w", zd.ZoneName, err)
+	}
+	if !sameKeyIdentities(keyIdentities(cdnskey), keyIdentities(served)) {
+		return fmt.Errorf("publishing the CDS for %s: the update was accepted but the zone serves"+
+			" %d CDNSKEY records, not the %d that go with the CDS", zd.ZoneName, len(served), len(cdnskey))
+	}
 	return nil
 }
 
-// unpublishCDSAndWait removes the zone's CDS RRset and returns once the zone
-// serves none.
+// unpublishCDSAndWait removes the zone's CDS and CDNSKEY RRsets and returns
+// once the zone serves neither.
 func (zd *ZoneData) unpublishCDSAndWait(ctx context.Context, kdb *KeyDB) error {
-	if err := kdb.applyInternalUpdateAndWait(ctx, zd, []dns.RR{cdsDeleteRR(zd.ZoneName)}); err != nil {
+	if err := kdb.applyInternalUpdateAndWait(ctx, zd, []dns.RR{cdsDeleteRR(zd.ZoneName), cdnskeyDeleteRR(zd.ZoneName)}); err != nil {
 		return fmt.Errorf("withdrawing the CDS for %s: %w", zd.ZoneName, err)
 	}
 	got, err := currentCdsTuples(zd)
@@ -693,6 +726,10 @@ func (zd *ZoneData) unpublishCDSAndWait(ctx context.Context, kdb *KeyDB) error {
 	if len(got) != 0 {
 		return fmt.Errorf("withdrawing the CDS for %s: the update was accepted but the zone still serves"+
 			" CDS for keyids %v", zd.ZoneName, tupleKeyids(got))
+	}
+	if served, err := servedCdnskeyRRs(zd); err != nil || len(served) != 0 {
+		return fmt.Errorf("withdrawing the CDS for %s: the zone still serves %d CDNSKEY records (%v)",
+			zd.ZoneName, len(served), err)
 	}
 	return nil
 }

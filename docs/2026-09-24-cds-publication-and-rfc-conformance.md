@@ -2,7 +2,7 @@
 
 **Written 2026-09-24.** Line references are to main at `81a22644`.
 
-**Status:** proposal, reviewed. Johan answered §8 on 2026-09-24. He then decided that the CDS is always published, with telling the parent gated by `parentsync` (1.2 (a), (c)), and answered Q10. The doc is written to those decisions and to three external reviews. Part 1 is implemented and merged (PR #761, 6d3e5aaf). Part 2 is implemented and merged (PR #766, 18c23c11). Part 3 is implemented in the PR that adds its §10 entry, not merged. Parts 4 and 5 are not implemented.
+**Status:** proposal, reviewed. Johan answered §8 on 2026-09-24. He then decided that the CDS is always published, with telling the parent gated by `parentsync` (1.2 (a), (c)), and answered Q10. The doc is written to those decisions and to three external reviews. Part 1 is implemented and merged (PR #761, 6d3e5aaf). Part 2 is implemented and merged (PR #766, 18c23c11). Part 3 is implemented and merged (PR #768, 0847c04e). Part 4 is implemented in the PR that adds its §10 entry, not merged. Part 5 is not implemented.
 
 ## Summary
 
@@ -483,3 +483,11 @@ Johan answered Q1–Q9 on 2026-09-24, after the external review of the first ver
   - Every type prints as something that parses back. Types 0 and 65535 print as `TYPE0` and `TYPE65535`, because the DNS library's names for them, `None` and `Reserved`, do not parse. Both parse as `TYPEnnn`, since a record carrying either can arrive by transfer and be written to a zone file.
   - The decimal entries in `StringToScheme` are gone, since the decimal parse covers them.
 - **A leftover `_dsync.root.`:** a root zone that still serves a DSYNC RRset at the old name gets a warning each time its publication is built. The RRset is not deleted: it may be the operator's, and one in the zone file would come back at the next load.
+
+**Part 4, 2026-09-24.** Where the code differs from §4.2 and §4.3:
+- **Where the CDNSKEY comes from.** `DSIntent` gains no `Keys`, and `publishCDSAndWait` keeps its name and signature. It derives the CDNSKEY from the CDS it is given, matching each record by digest against every key tdns holds for the zone: its keystore rows in any state, `foreign` included, and the DNSKEY RRset it serves. So the two agree by construction, as §4.2 wanted, and every writer gets the CDNSKEY without a change: the DS engine's own writers, the rollover's, and `PublishCDSAndWait` for an owner. A CDS record that matches no key sends the CDS out alone, with a warning naming its key tags. That is §4.2's owned-zone rule, applied to every zone.
+- **The "already in step" checks cover the CDNSKEY.** §4.2 kept the comparisons on the CDS. The follow-keys run and `ensureCDS` also republish when the served CDNSKEY is not the one that goes with the CDS. Otherwise a zone signed by a build from before this part, serving the right CDS and no CDNSKEY, would get none until its keys changed; the same goes for a change of the `cdnskey` setting and a hand-added CDNSKEY. The parent is told only when the CDS changed. The rollover's claims still compare the CDS alone.
+- **Where the parent checks.** Before the trust gate, beside Part 2's shape check: a set the scan will refuse is neither validated nor bootstrapped on. The CDNSKEY is not validated. It can stop a change but never make one.
+- **A CDNSKEY the parent cannot fetch** is a refusal, like nameservers that disagree on it.
+- **I7** compares the served CDNSKEY with the served CDS whatever the key rows say. The comparison with the rows' `ds` column is unchanged.
+- **`SUPPORTED-RFCs.md`** gains its RFC 9975 entry here. §6 put it in the first of the part PRs; none of Parts 1–3 added it.
