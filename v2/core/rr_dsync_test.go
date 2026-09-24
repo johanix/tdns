@@ -14,7 +14,8 @@ import (
 // The DSYNC presentation form (RFC 9859, #757): the RRtype as a mnemonic or
 // TYPEnnn, the scheme as a mnemonic or a decimal 0-255, the port as a decimal
 // 0-65535. Every record goes text -> RR -> text -> RR through the zone-file
-// parser, and the second text is the first one printed back.
+// parser, and the second text is the first one printed back; and through the
+// wire, which gives back the same record.
 
 func dsyncOf(t *testing.T, rr dns.RR) *DSYNC {
 	t.Helper()
@@ -54,6 +55,10 @@ func TestDsyncPresentationRoundTrip(t *testing.T) {
 		// mnemonic prints back as TYPEnnn.
 		{"TYPE59 NOTIFY 53 ns.example.", DSYNC{dns.TypeCDS, SchemeNotify, 53, "ns.example."}, "CDS NOTIFY 53 ns.example."},
 		{"TYPE4000 NOTIFY 53 ns.example.", DSYNC{4000, SchemeNotify, 53, "ns.example."}, "TYPE4000 NOTIFY 53 ns.example."},
+		// Types 0 and 65535 are reserved but can arrive by transfer. The
+		// library names them None and Reserved, which do not read back.
+		{"TYPE0 NOTIFY 53 ns.example.", DSYNC{0, SchemeNotify, 53, "ns.example."}, "TYPE0 NOTIFY 53 ns.example."},
+		{"TYPE65535 NOTIFY 53 ns.example.", DSYNC{65535, SchemeNotify, 53, "ns.example."}, "TYPE65535 NOTIFY 53 ns.example."},
 		// Mnemonics are case-insensitive, as elsewhere in a zone file.
 		{"cds notify 53 ns.example.", DSYNC{dns.TypeCDS, SchemeNotify, 53, "ns.example."}, "CDS NOTIFY 53 ns.example."},
 		// The port's whole range.
@@ -81,6 +86,39 @@ func TestDsyncPresentationRoundTrip(t *testing.T) {
 		if got := *dsyncOf(t, again); got != tc.want {
 			t.Errorf("%q printed and parsed again is %+v, want %+v", tc.rdata, got, tc.want)
 		}
+
+		m := new(dns.Msg)
+		m.SetQuestion("_dsync.example.", TypeDSYNC)
+		m.Answer = []dns.RR{rr}
+		wire, err := m.Pack()
+		if err != nil {
+			t.Errorf("%q does not pack: %v", tc.rdata, err)
+			continue
+		}
+		back := new(dns.Msg)
+		if err := back.Unpack(wire); err != nil || len(back.Answer) != 1 {
+			t.Errorf("%q does not unpack: %v", tc.rdata, err)
+			continue
+		}
+		if got := *dsyncOf(t, back.Answer[0]); got != tc.want {
+			t.Errorf("%q through the wire is %+v, want %+v", tc.rdata, got, tc.want)
+		}
+	}
+}
+
+// Whatever type a DSYNC carries prints as something that parses back to it:
+// every type the DNS library has a name for, and the ones it does not.
+func TestDsyncEveryTypePrintsAsItParses(t *testing.T) {
+	types := []uint16{0, 4000, 65280, 65535}
+	for rrtype := range dns.TypeToString {
+		types = append(types, rrtype)
+	}
+	for _, rrtype := range types {
+		d := DSYNC{rrtype, SchemeNotify, 53, "ns.example."}
+		var back DSYNC
+		if err := back.Parse(strings.Fields(d.String())); err != nil || back != d {
+			t.Errorf("type %d prints as %q, which parses to %+v, %v", rrtype, d.String(), back, err)
+		}
 	}
 }
 
@@ -96,7 +134,7 @@ func TestDsyncPresentationRefusals(t *testing.T) {
 		"NOSUCH NOTIFY 53 ns.example.",
 		"TYPE65536 NOTIFY 53 ns.example.",
 		"TYPE NOTIFY 53 ns.example.",
-		"TYPE0 NOTIFY 53 ns.example.", // type 0 is reserved
+		"NONE NOTIFY 53 ns.example.", // the library's name for type 0; not a mnemonic
 		"CDS NOTIFY 53",
 	} {
 		if rr, err := dns.NewRR("_dsync.example. 3600 IN DSYNC " + rdata); err == nil {

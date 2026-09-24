@@ -76,7 +76,19 @@ func NewDSYNC() dns.PrivateRdata { return new(DSYNC) }
 // mnemonic or, for a scheme without one, its decimal: every value the rdata
 // can hold prints as something Parse reads back.
 func (rd DSYNC) String() string {
-	return fmt.Sprintf("%s\t%s %d %s", dns.Type(rd.Type).String(), dsyncSchemeString(rd.Scheme), rd.Port, rd.Target)
+	return fmt.Sprintf("%s\t%s %d %s", dsyncTypeString(rd.Type), dsyncSchemeString(rd.Scheme), rd.Port, rd.Target)
+}
+
+// dsyncTypeString prints the RRtype field as its mnemonic when that reads back
+// as the same type, and as TYPEnnn otherwise. The DNS library names type 0
+// "None" and type 65535 "Reserved", and a zone file can hold neither.
+func dsyncTypeString(t uint16) string {
+	if name, ok := dns.TypeToString[t]; ok {
+		if back, ok := dns.StringToType[strings.ToUpper(name)]; ok && back == t {
+			return name
+		}
+	}
+	return "TYPE" + strconv.Itoa(int(t))
 }
 
 func dsyncSchemeString(s DsyncScheme) string {
@@ -118,15 +130,17 @@ func (rd *DSYNC) Parse(txt []string) error {
 	return nil
 }
 
-// parseDsyncType reads the RRtype field: a mnemonic, or TYPEnnn (RFC 3597).
-// Type 0 is reserved and refused either way.
+// parseDsyncType reads the RRtype field: a mnemonic, or TYPEnnn (RFC 3597)
+// for any 16-bit value. Type 0 is reserved, but it arrives by transfer like any
+// other and must read back from a zone file once written to one, so it parses
+// like the null scheme does.
 func parseDsyncType(s string) (uint16, error) {
 	u := strings.ToUpper(s)
-	if t := dns.StringToType[u]; t != 0 {
+	if t, ok := dns.StringToType[u]; ok {
 		return t, nil
 	}
 	if num, ok := strings.CutPrefix(u, "TYPE"); ok {
-		if t, err := strconv.ParseUint(num, 10, 16); err == nil && t != 0 {
+		if t, err := strconv.ParseUint(num, 10, 16); err == nil {
 			return uint16(t), nil
 		}
 	}

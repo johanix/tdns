@@ -106,6 +106,9 @@ func (p *DsyncPublication) Empty() bool {
 // rootDsyncOwnerNotice says once per process where a root zone's DSYNC now is.
 var rootDsyncOwnerNotice sync.Once
 
+// legacyRootDsyncOwner is where builds before #757 put the root's DSYNC RRset.
+const legacyRootDsyncOwner = "_dsync.root."
+
 // Every RR added to the DSYNC RRset below goes through core.RRset.Add, which
 // refuses a duplicate, rather than through a plain append.
 //
@@ -129,6 +132,17 @@ func (zd *ZoneData) BuildDsyncPublication() (*DsyncPublication, error) {
 				" a child on an older build looks for it at the old name and finds nothing",
 				"zone", zd.ZoneName)
 		})
+		// A DSYNC RRset still at the old name is left alone: it may be the
+		// operator's, and one in the zone file would come back at the next
+		// load. But while it is served, a child on an older build still acts
+		// on it, so say so every time.
+		if old, err := zd.GetOwner(legacyRootDsyncOwner); err == nil {
+			if rrs := publishedDsyncRRs(old); len(rrs) > 0 {
+				lg.Warn("the root zone serves a DSYNC RRset at "+legacyRootDsyncOwner+", the name builds before #757 used;"+
+					" the root's DSYNC is at _dsync. and the old RRset should be removed",
+					"zone", zd.ZoneName, "owner", legacyRootDsyncOwner, "records", len(rrs))
+			}
+		}
 	}
 	rrset := core.RRset{
 		Name: zd.ZoneName,

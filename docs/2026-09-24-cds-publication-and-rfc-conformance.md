@@ -478,7 +478,8 @@ Johan answered Q1–Q9 on 2026-09-24, after the external review of the first ver
   - `advertisesDsyncNotify`: a parent whose own NOTIFY record has port 0 does not advertise NOTIFY;
   - the REPORT lookup in `tdns-cli auth report`.
 - **Target templates:** only the owner names change. A `{ZONENAME}` in a target template still becomes `root` for the root zone, as before. A target is the operator's choice, not a name RFC 9859 fixes, and an empty expansion would make `dsync-api.{ZONENAME}` the invalid `dsync-api..`.
-- **Parse:**
+- **Parse and print:**
   - Mnemonics are case-insensitive, as elsewhere in a zone file.
-  - Type 0 is refused, in either form.
+  - Every type prints as something that parses back. Types 0 and 65535 print as `TYPE0` and `TYPE65535`, because the DNS library's names for them, `None` and `Reserved`, do not parse. Both parse as `TYPEnnn`, since a record carrying either can arrive by transfer and be written to a zone file.
   - The decimal entries in `StringToScheme` are gone, since the decimal parse covers them.
+- **A leftover `_dsync.root.`:** a root zone that still serves a DSYNC RRset at the old name gets a warning each time its publication is built. The RRset is not deleted: it may be the operator's, and one in the zone file would come back at the next load.

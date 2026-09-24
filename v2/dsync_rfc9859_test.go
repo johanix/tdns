@@ -4,7 +4,9 @@
 package tdns
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net"
 	"slices"
 	"strconv"
@@ -150,6 +152,56 @@ _dsync.root. 7200 IN DSYNC ANY UPDATE 5302 updates.root.
 		if strings.HasSuffix(strings.ToLower(rr.Header().Name), "_dsync.root.") {
 			t.Errorf("an action at the old name: %s", rr)
 		}
+	}
+}
+
+// A root zone that still serves a DSYNC RRset at _dsync.root. is warned about
+// on every build of its publication; the RRset is left alone. A root zone
+// without one is not.
+func TestTheRootWarnsAboutALeftoverDsyncRoot(t *testing.T) {
+	allSchemesChildSync(t)
+	var buf bytes.Buffer
+	prev := lg
+	lg = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { lg = prev })
+
+	const apex = `. 3600 IN SOA a.root. hostmaster.root. 1 7200 1800 604800 7200
+. 3600 IN NS a.root.
+a.root. 3600 IN A 192.0.2.1
+`
+	warnings := func(zone string) (int, *DsyncPublication) {
+		t.Helper()
+		buf.Reset()
+		zd := testZone(t, ".", zone)
+		p := DefaultDelegationPolicy()
+		zd.DelegationPolicy = &p
+		pub, err := zd.BuildDsyncPublication()
+		if err != nil {
+			t.Fatalf("BuildDsyncPublication: %v", err)
+		}
+		n := 0
+		for _, line := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(line, "level=WARN") && strings.Contains(line, "_dsync.root.") {
+				n++
+			}
+		}
+		return n, pub
+	}
+
+	n, pub := warnings(apex + "_dsync.root. 7200 IN DSYNC ANY UPDATE 5302 updates.root.\n")
+	if n != 1 {
+		t.Errorf("a leftover _dsync.root. RRset: %d warnings, want 1\n%s", n, buf.String())
+	}
+	for _, rr := range pub.Actions() {
+		if strings.EqualFold(rr.Header().Name, "_dsync.root.") {
+			t.Errorf("the publication touches the old RRset: %s", rr)
+		}
+	}
+	if n, _ := warnings(apex); n != 0 {
+		t.Errorf("no RRset at _dsync.root.: %d warnings, want none\n%s", n, buf.String())
+	}
+	if n, _ := warnings(apex + "_dsync.root. 7200 IN TXT \"not a DSYNC\"\n"); n != 0 {
+		t.Errorf("only a TXT at _dsync.root.: %d warnings, want none\n%s", n, buf.String())
 	}
 }
 
