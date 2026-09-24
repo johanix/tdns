@@ -4,7 +4,8 @@
 `0847c04e`.
 
 **Status:** merged as #772, after an external review (sound) and a
-re-review (merge). Nothing implemented; stage 1 is next.
+re-review (merge). Stage 1 is implemented on branch
+`claude/770-denial-stage1`, not merged (§12). Stage 2 is not implemented.
 
 **Revisions:**
 - r1 2026-09-25: first version (PR #772).
@@ -582,3 +583,32 @@ Test what a validator gets, not just the function that builds the answer:
 - TTLs. Stored proof records keep the TTLs they arrived with.
 - Showing the denial source in `zone desc`. This is a small addition once
   `denialSourceFor` exists.
+
+## 12. Amendment, 2026-09-25: stage 1 as implemented
+
+Stage 1 follows §3 as written. What the code calls things, and what it
+settled:
+
+- `v2/denial.go` holds `denialSourceFor`, `addDenial` (with its `denial`
+  descriptor: `denyName`, `denyType`, `denyENT`), `addChainProof`,
+  `addReferralDenial` and `prepareDenialIndex`. Rows C and D are one source,
+  `denialNoChain`; the warning says which of the two it is.
+- `sendTypeNodata` gained the qtype, which the §3.4 check needs: a NODATA
+  owner's NSEC must list neither it nor CNAME.
+- A zone signed here stays on compact denial in stage 1, including in
+  `addWildcardProof`, which keeps today's order for it: the stored cover when
+  that is signed, otherwise a synthesized one. The chain branch, with its
+  SERVFAIL for a gap, is in place for zones signed here but unreachable until
+  stage 2 changes `denialSourceFor`.
+- The warning goes through `logDenialGap`, a variable so that tests can count
+  the calls.
+- `config check` warns about `black-lies` on a zone that is not signed here
+  (Q6).
+
+Checked with a validator as well as with the unit tests: a pre-signed
+secondary served through `QueryResponder`, queried with `delv` (BIND 9.20)
+and the zone's KSK as trust anchor. On main, every negative answer failed
+validation, and only the wildcard answer validated. With stage 1, NXDOMAIN
+(with one covering NSEC and with two), NODATA, the empty non-terminal,
+wildcard NODATA, the wildcard answer, and DS at an insecure cut and at an
+in-zone name were all fully validated.

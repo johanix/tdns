@@ -976,6 +976,16 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 			}
 		}
 
+		// black-lies selects compact denial: an NSEC synthesized and signed
+		// for each negative answer. A zone this server does not sign has no
+		// key to sign it with, so there the option does nothing. Such a
+		// zone's negative answers use its own NSEC chain when it has one,
+		// and carry no proof when it has none.
+		if zoneOptionsEnabled(eff.OptionsStrs)[tdns.OptBlackLies] && !hasSigningOption(eff.OptionsStrs) {
+			rep.warn(g, zname, "black-lies has no effect on a zone this server does not sign: there is no key to sign a synthesized NSEC with — negative answers use the zone's own NSEC chain when it has one, and carry no denial proof otherwise",
+				"drop black-lies, or sign the zone here with online-signing or inline-signing")
+		}
+
 		// parentsync and parentsync-proxy are mutually exclusive: a zone with
 		// both gets a ConfigError from parseZoneOptions and is quarantined at
 		// startup. Checked here rather than in checkAgentZoneOptions because

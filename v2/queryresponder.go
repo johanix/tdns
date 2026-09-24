@@ -340,14 +340,17 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 			w.WriteMsg(m)
 			return nil
 		}
-		// Insecure delegation: delegation exists, no DS. Authenticated NODATA
-		// (compact NSEC at qname: NS present, DS absent).
+		// Insecure delegation: delegation exists, no DS. Authenticated NODATA:
+		// a denial at qname showing NS present and DS absent, which in a zone
+		// with a chain is the chain's NSEC at the cut.
 		lgHandler.Debug("QueryResponder: DS query, insecure delegation (no DS) — authenticated NODATA",
 			"qname", qname, "parent", pzd.ZoneName)
 		m.MsgHdr.Rcode = dns.RcodeSuccess
 		m.Ns = append(m.Ns, pzd.soaForResponseFrom(psnap, papex).RRs...)
 		if msgoptions.DO {
-			if err := pzd.addCDEResponse(m, qname, papex, []uint16{dns.TypeNS}, msgoptions, pSign); err != nil {
+			d := denial{kind: denyType, qname: qname, qtype: dns.TypeDS,
+				owner: getOwnerFrom(psnap, qname), types: []uint16{dns.TypeNS}}
+			if err := pzd.addDenial(m, psnap, papex, d, msgoptions, pSign); err != nil {
 				failUnsignedDenial(m)
 			}
 		}
@@ -364,7 +367,9 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 			m.Ns = append(m.Ns, pzd.soaForResponseFrom(psnap, papex).RRs...)
 			if msgoptions.DO {
 				// Existing types at qname (DS is not among them) → NODATA proof.
-				if err := pzd.addCDEResponse(m, qname, papex, owner.RRtypes.Keys(), msgoptions, pSign); err != nil {
+				d := denial{kind: denyType, qname: qname, qtype: dns.TypeDS,
+					owner: owner, types: owner.RRtypes.Keys()}
+				if err := pzd.addDenial(m, psnap, papex, d, msgoptions, pSign); err != nil {
 					failUnsignedDenial(m)
 				}
 			}
@@ -391,7 +396,7 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		lgHandler.Debug("QueryResponder: DS query, referring to unhosted parent",
 			"qname", qname, "parent", cdd.ChildName, "grandparent", pzd.ZoneName)
 		m.MsgHdr.Rcode = dns.RcodeSuccess
-		pzd.sendReferral(m, w, cdd, papex, msgoptions, pSign)
+		pzd.sendReferral(m, w, cdd, papex, psnap, msgoptions, pSign)
 		return nil
 	}
 }
@@ -441,7 +446,8 @@ func (zd *ZoneData) sendChildApexDSNodata(m *dns.Msg, w dns.ResponseWriter, qnam
 		sign := func(rrset core.RRset, name string) (core.RRset, error) {
 			return zd.signRRsetForZone(rrset, name, msgoptions, kdb, nil)
 		}
-		if err := zd.addCDEResponse(m, qname, apex, types, msgoptions, sign); err != nil {
+		d := denial{kind: denyType, qname: qname, qtype: dns.TypeDS, owner: apex, types: types}
+		if err := zd.addDenial(m, snap, apex, d, msgoptions, sign); err != nil {
 			failUnsignedDenial(m)
 		}
 	}
@@ -449,9 +455,10 @@ func (zd *ZoneData) sendChildApexDSNodata(m *dns.Msg, w dns.ResponseWriter, qnam
 	return nil
 }
 
-// sendReferral sends a referral response for a child delegation.
+// sendReferral sends a referral response for a child delegation. snap is the
+// snapshot apex and cdd come from, where the NSEC at the cut is found.
 func (zd *ZoneData) sendReferral(m *dns.Msg, w dns.ResponseWriter, cdd *ChildDelegationData, apex *OwnerData,
-	msgoptions *edns0.MsgOptions,
+	snap *zoneSnapshot, msgoptions *edns0.MsgOptions,
 	signFunc func(core.RRset, string) (core.RRset, error)) {
 	lgHandler.Debug("sending referral", "child", cdd.ChildName)
 	m.MsgHdr.Authoritative = false
@@ -477,11 +484,11 @@ func (zd *ZoneData) sendReferral(m *dns.Msg, w dns.ResponseWriter, cdd *ChildDel
 				m.Ns = append(m.Ns, signed.RRSIGs...)
 			}
 		} else {
-			// Insecure delegation (RFC 9824 §3.4): NSEC proving no DS exists.
-			// Unlike the DS above, this is synthesized now, and a zone that
-			// must be signed and cannot sign it is broken right now: SERVFAIL,
-			// as for every other denial.
-			if err := addReferralNSEC(m, cdd, apex, zd.ZoneName, signFunc); err != nil {
+			// Insecure delegation: an NSEC at the cut proving no DS exists,
+			// from the zone's chain or synthesized (RFC 9824 §3.4). A zone
+			// that must be signed and cannot prove it is broken right now:
+			// SERVFAIL, as for every other denial.
+			if err := zd.addReferralDenial(m, snap, cdd, apex, signFunc); err != nil {
 				failUnsignedDenial(m)
 			}
 		}
@@ -521,8 +528,10 @@ func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string,
 	soaRRset := zd.soaForResponseFrom(snap, apex)
 	m.Ns = append(m.Ns, soaRRset.RRs...)
 	if msgoptions.DO {
-		// RFC 9824: Compact denial if CO bit is set, otherwise traditional DNSSEC negative response
-		if err := zd.addCDEResponse(m, qname, apex, nil, msgoptions, signFunc); err != nil {
+		// The proof comes from the zone's denial source (addDenial). Only a
+		// compact denial turns the NXDOMAIN into NOERROR, for a client that
+		// has not set CO.
+		if err := zd.addDenial(m, snap, apex, denial{kind: denyName, qname: qname}, msgoptions, signFunc); err != nil {
 			failUnsignedDenial(m)
 		}
 	}
@@ -534,18 +543,17 @@ func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string,
 // against the label tree, RFC 4592 section 2.2.2 names the case -- so the
 // answer is NODATA, and NXDOMAIN would be a lie the zone signs.
 //
-// The rrtypeList is empty but NOT nil, which is the whole difference from
-// sendNXDOMAIN: addCDEResponse reads nil as "the name does not exist" and puts
-// NXNAME in the bitmap, and a non-nil list as "these are the types here". An
-// empty one therefore yields NOERROR with a bitmap of exactly RRSIG and NSEC,
-// which is what RFC 9824 section 3.2 specifies for an ENT.
+// Under compact denial the synthesized NSEC is owned by qname and its bitmap
+// holds exactly RRSIG and NSEC, which is what RFC 9824 section 3.2 specifies
+// for an ENT, and never NXNAME. A zone with a chain proves it with the NSEC
+// that covers qname, whose next name lies below it (addChainProof).
 func (zd *ZoneData) sendENTNodata(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData, snap *zoneSnapshot,
 	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
 	m.MsgHdr.Rcode = dns.RcodeSuccess
 	soaRRset := zd.soaForResponseFrom(snap, apex)
 	m.Ns = append(m.Ns, soaRRset.RRs...)
 	if msgoptions.DO {
-		if err := zd.addCDEResponse(m, qname, apex, []uint16{}, msgoptions, signFunc); err != nil {
+		if err := zd.addDenial(m, snap, apex, denial{kind: denyENT, qname: qname}, msgoptions, signFunc); err != nil {
 			failUnsignedDenial(m)
 		}
 	}
@@ -619,16 +627,16 @@ func (zd *ZoneData) sendAnswer(m, r *dns.Msg, w dns.ResponseWriter, qname, origq
 }
 
 // sendTypeNodata answers NODATA for a qtype the owner does not hold: the SOA in
-// AUTHORITY and, for a DO query, the denial whose bitmap lists the types the
-// owner does hold. qname is the name that was asked.
-func (zd *ZoneData) sendTypeNodata(m *dns.Msg, w dns.ResponseWriter, qname string, owner, apex *OwnerData, snap *zoneSnapshot,
+// AUTHORITY and, for a DO query, the denial showing the types the owner does
+// hold. qname and qtype are what was asked. owner is qname's own node, or the
+// wildcard that matched it, and addDenial tells the two apart: through a
+// wildcard, a zone with a chain also proves that qname does not exist.
+func (zd *ZoneData) sendTypeNodata(m *dns.Msg, w dns.ResponseWriter, qname string, qtype uint16, owner, apex *OwnerData, snap *zoneSnapshot,
 	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
 	m.Ns = append(m.Ns, zd.soaForResponseFrom(snap, apex).RRs...)
 	if msgoptions.DO {
-		// RFC 9824: Compact denial if CO bit is set, otherwise traditional DNSSEC negative response
-		rrtypeList := []uint16{}
-		rrtypeList = append(rrtypeList, owner.RRtypes.Keys()...)
-		if err := zd.addCDEResponse(m, qname, apex, rrtypeList, msgoptions, signFunc); err != nil {
+		d := denial{kind: denyType, qname: qname, qtype: qtype, owner: owner, types: owner.RRtypes.Keys()}
+		if err := zd.addDenial(m, snap, apex, d, msgoptions, signFunc); err != nil {
 			failUnsignedDenial(m)
 		}
 	}
@@ -657,7 +665,7 @@ func (zd *ZoneData) answerRRSIG(m *dns.Msg, w dns.ResponseWriter, qname, origqna
 		rrsigs = append(rrsigs, owner.NSEC.RRSIGs...)
 	}
 	if len(rrsigs) == 0 {
-		zd.sendTypeNodata(m, w, origqname, owner, apex, snap, msgoptions, signFunc)
+		zd.sendTypeNodata(m, w, origqname, dns.TypeRRSIG, owner, apex, snap, msgoptions, signFunc)
 		return
 	}
 	if wildcard {
@@ -1189,7 +1197,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 		// If there is delegation data and an NS RRset is present, return a referral
 		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
-			zd.sendReferral(m, w, cdd, apex, msgoptions, MaybeSignRRset)
+			zd.sendReferral(m, w, cdd, apex, snap, msgoptions, MaybeSignRRset)
 			return nil
 		}
 
@@ -1240,30 +1248,11 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			zd.sendENTNodata(m, w, origqname, apex, snap, msgoptions, MaybeSignRRset)
 			return nil
 		}
-		soaRRset, err := MaybeSignRRset(zd.soaForResponseFrom(snap, apex), zd.ZoneName)
-		if err != nil {
-			lgHandler.Error("failed to sign SOA RRset", "zone", zd.ZoneName, "err", err)
-			if msgoptions.DO {
-				m.MsgHdr.Rcode = dns.RcodeServerFailure
-				w.WriteMsg(m)
-				return fmt.Errorf("failed to sign SOA RRset before NXDOMAIN: %v", err)
-			}
-		}
-		m.Ns = append(m.Ns, soaRRset.RRs...)
-		// Rcode BEFORE the denial is built. addCDEResponse decides, from the
-		// client's CO flag, whether an NXDOMAIN may stand beside the
-		// owner=qname NSEC it synthesises, and downgrades to NOERROR when it
-		// may not. Set afterwards, as it was, NXDOMAIN overrode that decision
-		// on this path alone (sendNXDOMAIN had the order right), and a DO
-		// client without CO was handed a proof that the name exists next to
-		// an rcode saying it does not.
-		m.MsgHdr.Rcode = dns.RcodeNameError
-		if msgoptions.DO {
-			if err := zd.addCDEResponse(m, origqname, apex, nil, msgoptions, MaybeSignRRset); err != nil {
-				failUnsignedDenial(m)
-			}
-		}
-		w.WriteMsg(m)
+		// Otherwise the name does not exist, and it gets the NXDOMAIN every
+		// other name that does not exist gets. A zone signed here whose SOA
+		// has no signature answers SERVFAIL there (addDenial), as this path
+		// used to decide on its own.
+		zd.sendNXDOMAIN(m, w, origqname, apex, snap, msgoptions, MaybeSignRRset)
 		return nil
 	}
 
@@ -1278,7 +1267,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 		// If there is delegation data and an NS RRset is present, return a referral
 		if cdd != nil && cdd.NS_rrset != nil && qtype != dns.TypeDS && qtype != core.TypeDELEG {
-			zd.sendReferral(m, w, cdd, apex, msgoptions, MaybeSignRRset)
+			zd.sendReferral(m, w, cdd, apex, snap, msgoptions, MaybeSignRRset)
 			return nil
 		}
 
@@ -1313,7 +1302,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	if qtype == dns.TypeANY {
 		rrsets := zd.anyRRsets(owner, snap, apex, core.EqualNames(qname, zd.ZoneName), qname != origqname, allowAnyQueries)
 		if len(rrsets) == 0 {
-			zd.sendTypeNodata(m, w, origqname, owner, apex, snap, msgoptions, MaybeSignRRset)
+			zd.sendTypeNodata(m, w, origqname, qtype, owner, apex, snap, msgoptions, MaybeSignRRset)
 			return nil
 		}
 		zd.sendAnswer(m, r, w, qname, origqname, rrsets, apex, snap, sigs, msgoptions, minimalResponses, MaybeSignRRset)
@@ -1331,7 +1320,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			return nil
 		}
 		lgHandler.Debug("no exact match for qname+qtype", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName)
-		zd.sendTypeNodata(m, w, origqname, owner, apex, snap, msgoptions, MaybeSignRRset)
+		zd.sendTypeNodata(m, w, origqname, qtype, owner, apex, snap, msgoptions, MaybeSignRRset)
 		return nil
 	}
 
