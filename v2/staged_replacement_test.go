@@ -58,11 +58,19 @@ func srRefusedTransfer(t *testing.T, zd *ZoneData) {
 // the upstream withdraws it.
 func TestStagedReplacementIsNotJournalledByAnUpdate(t *testing.T) {
 	zd := ixSigningSecondary(t, ixApplyZone)
+	servedBefore := ovServedSerial(t, zd)
 	srRefusedTransfer(t, zd)
 
 	local := mustRR(t, "local.example.\t3600\tIN\tA\t10.0.0.7")
 	if err := ovUpdate(t, zd, local); err != nil {
 		t.Fatalf("local update: %v", err)
+	}
+	// The update's delta starts at the serial the flush published the
+	// transfer at. A downstream holding the serial served before the window
+	// must see a newer one, or it never fetches the transfer.
+	if deltas := ovJournal(t, zd); len(deltas) == 1 && !serialNewer(deltas[0].FromSerial, servedBefore) {
+		t.Errorf("the transfer was published at serial %d, not newer than the %d served before it",
+			deltas[0].FromSerial, servedBefore)
 	}
 	if !ovHas(ovServed(t, zd, "fresh.example.", dns.TypeA), mustRR(t, srFresh)) {
 		t.Error("the staged transfer is not served after the update")
@@ -97,6 +105,31 @@ func TestStagedReplacementRefusesAnUpdateWhileItCannotPublish(t *testing.T) {
 	zd.mu.Unlock()
 	if !staged {
 		t.Error("the refused update dropped the staged transfer")
+	}
+}
+
+// Under an open transaction the flush cannot publish the staged transfer, since
+// the hold stops every publish. The update is refused rather than applied on
+// top of it; the commit then publishes the transfer and journals nothing.
+func TestStagedReplacementRefusesAnUpdateUnderAHold(t *testing.T) {
+	zd := ixSigningSecondary(t, ixApplyZone)
+	id, err := zd.BeginTx(TxUrgent)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	ovTransfer(t, zd, ovUpstreamZone(20, ovCDSText(9), srFresh), true)
+
+	if err := ovUpdate(t, zd, mustRR(t, "local.example.\t3600\tIN\tA\t10.0.0.7")); err == nil {
+		t.Error("a local change was accepted on top of a transfer staged under a hold")
+	}
+	if err := zd.CommitTx(id); err != nil {
+		t.Fatalf("CommitTx: %v", err)
+	}
+	if !ovHas(ovServed(t, zd, "fresh.example.", dns.TypeA), mustRR(t, srFresh)) {
+		t.Error("the commit did not publish the transfer")
+	}
+	if deltas := ovJournal(t, zd); len(deltas) != 0 {
+		t.Errorf("the transfer was journalled:%s", ovJournalString(deltas))
 	}
 }
 

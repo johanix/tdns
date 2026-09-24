@@ -402,9 +402,10 @@ implementation's choices.
   reload refused at signing stays staged, and an update applied on top of it
   was journalled together with it; the overlay would then have kept an
   upstream CDS as the server's own. A zone-updater change now publishes the
-  staged replacement first, and is refused while it still cannot be
-  published. A replacement also drops the journal flag of an update that was
-  refused at signing before it, whose staged change it replaces.
+  staged replacement first, at a new serial, and is refused while it still
+  cannot be published, including while a transaction holds the zone. A
+  replacement also drops the journal flag of an update that was refused at
+  signing before it, whose staged change it replaces.
 - **An unreadable journal row** is not applied, and the journal is not
   compacted, since compacting would drop it.
 - **The Q2 log line** is at Warn.

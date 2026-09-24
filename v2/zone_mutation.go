@@ -34,25 +34,27 @@ func (zd *ZoneData) ensureWorkingSet() {
 // before a zone-updater change that will be journalled is applied. The caller
 // holds zd.mu.
 //
-// A replacement whose publish was refused stays staged for a later publish to
-// retry (refuseUnsignableWorkingSetLocked, refuseUnrepairableChainLocked). An
-// update applied on top of it would be journalled together with it, because
-// the journal records the difference from the published snapshot (#748). So
-// the replacement is published first, unjournalled, as any retry of it would
-// be. If it still cannot be published, the update is refused: applied on top,
-// it would publish with the replacement or not at all.
-//
-// An open transaction decides for itself, as it does for every publish: its
-// hold stops this one.
+// A replacement stays staged when its publish was refused
+// (refuseUnsignableWorkingSetLocked, refuseUnrepairableChainLocked) or stopped
+// by an open transaction. An update applied on top of it would be journalled
+// together with it, because the journal records the difference from the
+// published snapshot (#748). So the replacement is published first,
+// unjournalled, as the publisher's retry publishes it: at a new serial. If it
+// is still staged after that -- it still cannot be signed, or a transaction
+// holds the zone and no publish may pass -- the update is refused. Applied on
+// top, it would publish with the replacement or not at all.
 func (zd *ZoneData) flushStagedReplacementLocked() error {
-	if zd.workingSet == nil || !zd.wsFromReplacement || zd.txHeldLocked() {
+	if zd.workingSet == nil || !zd.wsFromReplacement {
 		return nil
 	}
-	zd.publishWorkingSetLocked(zd.generation.Load(), false)
+	if !zd.txHeldLocked() {
+		zd.publishLocked(zd.generation.Load())
+	}
 	if zd.workingSet != nil && zd.wsFromReplacement {
-		return fmt.Errorf("zone %s: a refreshed copy of the zone is waiting to be published and"+
-			" still cannot be (see the zone's errors); this change is refused until it has been,"+
-			" so that the refreshed content is not recorded as a local change", zd.ZoneName)
+		return fmt.Errorf("zone %s: a refreshed copy of the zone is staged and not published yet"+
+			" (it cannot be signed, or a transaction holds the zone); this change is refused until"+
+			" it has been published, so that the refreshed content is not recorded as a local"+
+			" change", zd.ZoneName)
 	}
 	return nil
 }
