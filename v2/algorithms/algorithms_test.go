@@ -1,8 +1,10 @@
 package algorithms
 
 import (
+	"crypto"
 	"testing"
 
+	"github.com/johanix/tdns/v2/algorithms/mldsa44"
 	"github.com/miekg/dns"
 )
 
@@ -221,6 +223,75 @@ func contains(xs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// ML-DSA-44 is in every binary: this test binary has no generated
+// registration code, as a build without an algs.list has none.
+func TestMLDSA44IsBuiltIn(t *testing.T) {
+	if num, ok := AlgorithmNumber("MLDSA44"); !ok || num != 18 {
+		t.Fatalf("AlgorithmNumber(MLDSA44) = %d, %v; want 18, true", num, ok)
+	}
+	caps, ok := CapsReal(MLDSA44)
+	if !ok {
+		t.Fatal("CapsReal(18): ML-DSA-44 is not registered as real")
+	}
+	if want := (Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}); caps != want {
+		t.Errorf("caps = %+v, want %+v", caps, want)
+	}
+	if got := dns.AlgorithmToString[MLDSA44]; got != "MLDSA44" {
+		t.Errorf("dns.AlgorithmToString[18] = %q, want MLDSA44", got)
+	}
+	found := false
+	for _, a := range All() {
+		if a.Number == MLDSA44 {
+			found = true
+			if a.Facts.SigBytes != 2420 || a.Facts.PubKeyBytes != 1312 {
+				t.Errorf("facts = %+v, want the ML-DSA-44 sizes", a.Facts)
+			}
+		}
+	}
+	if !found {
+		t.Error("All() does not list ML-DSA-44")
+	}
+
+	// Wired into miekg/dns: a key generates, signs and verifies.
+	key := &dns.DNSKEY{Hdr: dns.RR_Header{Name: "example.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600}, Flags: 257, Protocol: 3, Algorithm: MLDSA44}
+	priv, err := key.Generate(0)
+	if err != nil {
+		t.Fatalf("ML-DSA-44 is recorded but not wired into miekg/dns: %v", err)
+	}
+	txt := &dns.TXT{Hdr: dns.RR_Header{Name: "example.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600}, Txt: []string{"x"}}
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Name: "example.", Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
+		Algorithm: MLDSA44, KeyTag: key.KeyTag(), SignerName: "example.", Inception: 1, Expiration: 2}
+	if err := sig.Sign(priv.(crypto.Signer), []dns.RR{txt}); err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := sig.Verify(key, []dns.RR{txt}); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+}
+
+// Generated registration code registers ML-DSA-44 again when it comes from
+// an older genalgs or from a dnssec-algorithms checkout that still has the
+// row, possibly with the capabilities of an older checkout (KSK only). That
+// is ignored; the built-in registration stands.
+func TestRegisteringABuiltInAgainIsIgnored(t *testing.T) {
+	kskOnly := Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true}
+	RegisterMetadata(MLDSA44, "MLDSA44", kskOnly, Facts{})
+	Register(MLDSA44, mldsa44.New(), kskOnly, Facts{})
+	if caps, ok := CapsReal(MLDSA44); !ok || !caps.ForZSK {
+		t.Errorf("CapsReal(18) = %+v, %v after the repeats; the built-in registration must stand", caps, ok)
+	}
+
+	if !isSelfRegistered(dns.ED448, "ED448") {
+		t.Error("ED448 is not marked as registered by this package")
+	}
+	if isSelfRegistered(dns.ED25519, "ED25519") {
+		t.Error("ED25519 is a miekg/dns built-in, not registered by this package")
+	}
+	if isSelfRegistered(MLDSA44, "SOMETHING-ELSE") {
+		t.Error("a different name at 18 must not count as the built-in")
+	}
 }
 
 // ED448 is not a miekg/dns built-in: it has to be registered for real, or it

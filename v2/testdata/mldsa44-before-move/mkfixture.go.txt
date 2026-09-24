@@ -1,0 +1,60 @@
+// mkfixture writes an ML-DSA-44 key, and data signed with it, using
+// github.com/johanix/dnssec-algorithms/mldsa44 at 4d74f08 -- the package
+// tdns used before ML-DSA-44 was built in.
+package main
+
+import (
+	"crypto"
+	"encoding/pem"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/johanix/dnssec-algorithms/mldsa44"
+	dnsalgpkcs8 "github.com/johanix/dnssec-algorithms/pkcs8"
+	"github.com/miekg/dns"
+)
+
+func main() {
+	out := os.Args[1]
+	must(dns.RegisterAlgorithm(18, mldsa44.New()))
+	const owner = "mldsa44.example."
+	key := &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: owner, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags:     257,
+		Protocol:  3,
+		Algorithm: 18,
+	}
+	priv, err := key.Generate(0)
+	must(err)
+	der, err := dnsalgpkcs8.Marshal(priv)
+	must(err)
+	txt := &dns.TXT{
+		Hdr: dns.RR_Header{Name: owner, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
+		Txt: []string{"signed before ML-DSA-44 moved into tdns"},
+	}
+	sig := &dns.RRSIG{
+		Hdr:        dns.RR_Header{Name: owner, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
+		Algorithm:  18,
+		KeyTag:     key.KeyTag(),
+		SignerName: owner,
+		Inception:  1790208000, // 2026-09-24
+		Expiration: 2105827200, // 2036-09-24
+	}
+	must(sig.Sign(priv.(crypto.Signer), []dns.RR{txt}))
+	must(sig.Verify(key, []dns.RR{txt}))
+
+	write(out, "private.pem", string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})))
+	write(out, "private.bind", key.PrivateKeyString(priv))
+	write(out, "dnskey.txt", key.String()+"\n")
+	write(out, "signed.txt", txt.String()+"\n"+sig.String()+"\n")
+	fmt.Printf("keytag %d\n", key.KeyTag())
+}
+
+func write(dir, name, s string) { must(os.WriteFile(filepath.Join(dir, name), []byte(s), 0o644)) }
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
