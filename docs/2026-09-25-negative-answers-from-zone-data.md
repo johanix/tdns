@@ -5,6 +5,9 @@
 
 **Status:** proposal, not reviewed. Nothing implemented.
 
+**Revisions:** r1 2026-09-25, first version (PR #772). r2 2026-09-25: §7
+gains the cost of the chain index and the relation to #547, and Q7 is new.
+
 ## Summary
 
 - **What goes wrong.** Every negative answer to a DO query is built by one
@@ -367,12 +370,24 @@ This is a sketch, to be worked out in detail when the stage is scheduled.
   - Stage 2 makes the primary serve its chain too. That document's point is
     that querying the primary proves nothing about the chain; after stage 2,
     it does.
-- **#547 (restitch cost, owner storage order).**
+- **#547 (owner storage order).**
   - The covering lookup needs the canonical-order index that each snapshot
-    builds on first use: one sort of the chain's owners per published serial.
-  - The wildcard proof already pays that cost. Stage 1 makes the first
-    negative answer of every serial pay it.
-  - An ordered snapshot (#547) would remove the cost.
+    builds on first use. Measured on an Apple M4 with a synthetic zone:
+    - 100k owners: 39 ms, 40 MB and 500k allocations;
+    - 1M owners: 0.46 s, 400 MB and 5M allocations;
+    - the lookup itself, once the index exists: about 0.5 µs.
+  - The wildcard proof already pays that cost, but wildcard answers are rare.
+    Stage 1 makes the first negative answer of every serial pay it, inside
+    the query. Every other query that needs the index on that snapshot waits
+    for it.
+  - Stage 1 also brings the cost to secondaries, which never needed canonical
+    order before.
+  - Building the index at publish time, for zones with a chain, takes the
+    wait out of the query path (Q7). It leaves the allocation. Removing that
+    takes ordered storage shared between snapshots, as #547 proposes; the
+    measurements are recorded in a comment there.
+  - NSEC3 (stage 3) also needs an index in hash order, which canonical name
+    order does not give.
 - **The IMR** (`negativeRcode`, `v2/imrengine.go:1455`) chooses the rcode
   based on whether an answer is a compact denial. Answers from a chain do not
   affect it.
@@ -450,6 +465,7 @@ Test what a validator gets, not just the function that builds the answer:
 | Q4 | A gap in the chain on a secondary: serve what exists, or SERVFAIL? | Serve what exists, and warn (§3.4). |
 | Q5 | NSEC3: stage 3 of #770, or an issue of its own? | An issue of its own. #770 is reproduced with NSEC, and the §7.2.8 defect (§1.4) exists today whatever happens here. |
 | Q6 | `black-lies` on a zone not signed here? | Ignore it, as today, and add a config-check warning. |
+| Q7 | Build the chain index on first use, as today, or at publish? | At publish, for zones with a chain. Almost every public zone gets negative queries, so the index gets built either way, and at publish the build does not stall a query (§7). |
 
 ## 11. Not in scope
 
