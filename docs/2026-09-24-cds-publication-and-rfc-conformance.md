@@ -2,7 +2,7 @@
 
 **Written 2026-09-24.** Line references are to main at `81a22644`.
 
-**Status:** proposal, reviewed. Johan answered §8 on 2026-09-24. He then decided that the CDS is always published, with telling the parent gated by `parentsync` (1.2 (a), (c)), and answered Q10. The doc is written to those decisions and to three external reviews. Part 1 is implemented in PR #761, not merged; Parts 2–5 are not implemented.
+**Status:** proposal, reviewed. Johan answered §8 on 2026-09-24. He then decided that the CDS is always published, with telling the parent gated by `parentsync` (1.2 (a), (c)), and answered Q10. The doc is written to those decisions and to three external reviews. Part 1 is implemented and merged (PR #761, 6d3e5aaf). Part 2 is implemented in the PR that adds §10, not merged. Parts 3–5 are not implemented.
 
 ## Summary
 
@@ -467,3 +467,7 @@ Johan answered Q1–Q9 on 2026-09-24, after the external review of the first ver
   - the RFC 9615 producer;
   - the served serial going down at a restart in `keep` mode;
   - an unsigned CDS on a signing failure.
+
+## 10. Amendments
+
+**Part 2, 2026-09-24.** §2.3's example malformed record `0 13 2 <digest>` is key tag 0 with algorithm 13, not algorithm 0. Under §2.2's rule it is an ordinary update record, and the implementation treats it as one. The test for "an algorithm-0 record with a real key tag, digest type and digest" uses `12345 0 2 <digest>` instead. Also in Part 2, as §6 says: the classifier replaces Part 1's interim algorithm-0 check in the proxy, so a `parentsync-proxy` agent delivers the exact delete as a DS withdrawal (#737) and leaves the parent alone on a malformed set.

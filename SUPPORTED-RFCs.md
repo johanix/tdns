@@ -148,7 +148,7 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 **Status**: ✅ Partially Supported  
 **Implementation**: `tdns/v2/scanner.go`, `tdns/v2/scanner_trust.go` (parent)  
 **Notes**: 
-- **Delete (§4):** a CDS with algorithm 0 removes the child's DS RRset; for a child with no DS it changes nothing. tdns does not publish the delete CDS as a child.
+- **Delete (§4):** only the exact delete, one CDS record `0 0 0 00` (a digest of one zero byte on the wire), removes the child's DS RRset; for a child with no DS it changes nothing. Any other CDS RRset holding an algorithm-0 record (a delete beside real records, two deletes, an algorithm-0 record with a real key tag, digest type or digest) breaks §4 and is refused, with or without a DS, as RFC 7344 §4.1 requires. A `parentsync-proxy` agent delivers the exact delete as a DS withdrawal. tdns does not publish the delete CDS as a child.
 - **Bootstrap (§3):** a child with no DS gets its first DS only through a mechanism the parent zone's delegation policy lists. `at-apex` accepts the apex CDS after one check under `require-dnssec: false`, and refuses when `scanner.at-apex.checks` is above 1, since repeated checks (§3.3) are not implemented. Under `require-dnssec: true` the apex CDS of a child without a DS is not Secure, so the first DS comes through `at-ns` (RFC 9615).
 - **CDNSKEY:** served and queryable. The parent acts on CDS only, and a child publishes no CDNSKEY of its own; a secondary republishes a customer's CDNSKEY at the RFC 9615 signaling names.
 
