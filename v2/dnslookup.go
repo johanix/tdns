@@ -40,6 +40,30 @@ var lgDns = Logger("dns")
 // the EDE.
 var ErrPrivacyUnavailable = errors.New("strict privacy requested but no encrypted transport available")
 
+// PrivacyUnavailableError is a strict-privacy dead end together with the zone
+// it happened in: the zone whose servers offered no encrypted transport, or
+// none that answered. It matches ErrPrivacyUnavailable, so errors.Is still
+// finds the sentinel, and errors.As finds the zone for the EDE.
+//
+// The zone has to travel with the error because the responder does not know
+// it. It knows the zone it started from, and the walk follows referrals on its
+// own: the EDE named the parent of the zone that had actually failed (#776).
+type PrivacyUnavailableError struct {
+	Zone   string
+	Detail string
+}
+
+func (e *PrivacyUnavailableError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrPrivacyUnavailable, e.Detail)
+}
+
+func (e *PrivacyUnavailableError) Unwrap() error { return ErrPrivacyUnavailable }
+
+// privacyUnavailable builds the strict-privacy error for zone.
+func privacyUnavailable(zone, format string, args ...any) error {
+	return &PrivacyUnavailableError{Zone: zone, Detail: fmt.Sprintf(format, args...)}
+}
+
 // 1. Is the RRset in a zone that we're auth for? If so we claim that the data is valid
 // 2. Is the RRset in a child zone? If so, start by fetching and validating the child DNSKEYs.
 
@@ -1028,6 +1052,9 @@ func candidateTransports(server *cache.AuthServer, qname string, privacy edns0.P
 		w int
 	}
 
+	// Read under the server's lock: the transport-signal lookups write these
+	// in the background while queries read them.
+	transports, weights := server.GetTransportSignal()
 	seen := map[core.Transport]bool{}
 	var encrypted []wt
 	encSum := 0
@@ -1036,7 +1063,7 @@ func candidateTransports(server *cache.AuthServer, qname string, privacy edns0.P
 			return
 		}
 		seen[t] = true
-		w := server.TransportWeights[t]
+		w := weights[t]
 		// -03: MAY attempt connections over any transport with weight > 1.
 		if w <= 1 {
 			return
@@ -1044,10 +1071,10 @@ func candidateTransports(server *cache.AuthServer, qname string, privacy edns0.P
 		encrypted = append(encrypted, wt{t: t, w: int(w)})
 		encSum += int(w)
 	}
-	for _, t := range server.Transports {
+	for _, t := range transports {
 		consider(t)
 	}
-	for t := range server.TransportWeights {
+	for t := range weights {
 		consider(t)
 	}
 	sort.SliceStable(encrypted, func(i, j int) bool {
@@ -1132,6 +1159,18 @@ func candidateTransports(server *cache.AuthServer, qname string, privacy edns0.P
 		}
 	}
 	return out
+}
+
+// hasStrictCandidate reports whether any server in serverMap can carry a
+// strict-privacy query for qname: whether it has an encrypted transport that
+// candidateTransports would pick.
+func hasStrictCandidate(serverMap map[string]*cache.AuthServer, qname string) bool {
+	for _, server := range serverMap {
+		if len(candidateTransports(server, qname, edns0.PrivacyStrict)) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func maxInt(a, b int) int {
@@ -1436,23 +1475,23 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// generic dead end. Opportunistic privacy has no such precondition --
 	// falling back to cleartext is exactly what it asked for.
 	//
-	// Availability is asked of candidateTransports rather than computed here,
-	// so the precheck and the tuple selection below cannot disagree. A
-	// hand-rolled scan did disagree in two ways: it read server.Transports
-	// without a nil check, where candidateTransports handles a nil entry (as
-	// prioritizeServers does), and it counted an encrypted transport of
-	// weight 0 or 1 as available, where candidateTransports excludes it.
-	if privacy == edns0.PrivacyStrict {
-		hasEncrypted := false
-		for _, server := range serverMap {
-			if len(candidateTransports(server, qname, edns0.PrivacyStrict)) > 0 {
-				hasEncrypted = true
-				break
-			}
-		}
-		if !hasEncrypted {
-			return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, fmt.Errorf("%w: no servers have encrypted transports available", ErrPrivacyUnavailable)
-		}
+	// Availability is asked of candidateTransports (hasStrictCandidate) rather
+	// than computed here, so the precheck and the tuple selection below cannot
+	// disagree. A hand-rolled scan did disagree in two ways: it read
+	// server.Transports without a nil check, where candidateTransports handles
+	// a nil entry (as prioritizeServers does), and it counted an encrypted
+	// transport of weight 0 or 1 as available, where candidateTransports
+	// excludes it.
+	//
+	// A server may also have no encrypted transport only because it has not
+	// told us yet: the zone was met a moment ago, through the referral that
+	// brought us here. Its transports are learned before the query gives up on
+	// it, or the first strict query to every new zone failed (#776).
+	if privacy == edns0.PrivacyStrict && !hasStrictCandidate(serverMap, qname) &&
+		!imr.awaitTransportSignals(ctx, qname, serverMap) {
+		zoneName, _, _ := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
+		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
+			privacyUnavailable(zoneName, "no servers have encrypted transports available (zone=%s)", zoneName)
 	}
 
 	// Prioritize (server, addr, transport) tuples. The privacy level is
@@ -1696,7 +1735,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// bare "no Answers found" / "context deadline exceeded" and have to
 	// dig through the IMR log to find out what happened.
 	if privacy == edns0.PrivacyStrict {
-		base := fmt.Errorf("%w: no answers found from any server with encrypted transport for '%s %s'", ErrPrivacyUnavailable, qname, dns.TypeToString[qtype])
+		base := privacyUnavailable(zoneName, "no answers found from any server with encrypted transport for '%s %s'", qname, dns.TypeToString[qtype])
 		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, walkErr(zoneName, lastNS, lastAddr, lastTransport, attempts, lastErr, base)
 	}
 	base := fmt.Errorf("IterativeDNSQuery: no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
@@ -2210,15 +2249,16 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"qtype", dns.TypeToString[qtype])
 	}
 	if !imr.Quiet {
+		weights := server.GetTransportWeights()
 		lgDns.Debug("IMR: query",
 			"query", qname,
 			"rrtype", dns.TypeToString[qtype],
 			"name", server.Name,
 			"transport", core.TransportToString[eff],
-			"doq", server.TransportWeights[core.TransportDoQ],
-			"dot", server.TransportWeights[core.TransportDoT],
-			"doh", server.TransportWeights[core.TransportDoH],
-			"do53", server.TransportWeights[core.TransportDo53])
+			"doq", weights[core.TransportDoQ],
+			"dot", weights[core.TransportDoT],
+			"doh", weights[core.TransportDoH],
+			"do53", weights[core.TransportDo53])
 	}
 	for _, hook := range getImrOutboundQueryHooks() {
 		if err := hook(ctx, qname, qtype, server.Name, addr, eff); err != nil {
@@ -2338,9 +2378,7 @@ func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8)
 	if len(weights) == 0 {
 		return false
 	}
-	server.Transports = transports
-	server.Alpn = alpnOrder
-	server.TransportWeights = weights
+	server.SetTransportSignal(transports, alpnOrder, weights)
 	return true
 }
 
@@ -2362,33 +2400,7 @@ func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*cache.A
 	if !ok {
 		return
 	}
-	weights := map[core.Transport]uint8{}
-	var order []string
-	tokens := strings.Split(alpnCSV, ",")
-	for _, tok := range tokens {
-		k := strings.TrimSpace(tok)
-		if k == "" {
-			continue
-		}
-		t, err := core.StringToTransport(k)
-		if err != nil {
-			continue
-		}
-		weights[t] = 100
-		order = append(order, k)
-	}
-	if len(order) == 0 {
-		return
-	}
-	server.TransportWeights = weights
-	server.Alpn = order
-	server.Transports = nil
-	for _, k := range order {
-		if t, err := core.StringToTransport(k); err == nil {
-			server.Transports = append(server.Transports, t)
-		}
-	}
-	serverMap[cache.ServerKey(owner)] = server
+	applyAlpnSignalToServer(server, alpnCSV)
 }
 
 // applyAlpnSignalToServer applies 100-weight transports from a comma-separated ALPN list to a specific server pointer
@@ -2415,14 +2427,13 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 	if len(order) == 0 {
 		return
 	}
-	server.TransportWeights = weights
-	server.Alpn = order
-	server.Transports = nil
+	var transports []core.Transport
 	for _, k := range order {
 		if t, err := core.StringToTransport(k); err == nil {
-			server.Transports = append(server.Transports, t)
+			transports = append(transports, t)
 		}
 	}
+	server.SetTransportSignal(transports, order, weights)
 }
 
 // parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section.

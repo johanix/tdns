@@ -328,6 +328,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				"discovery": map[string]interface{}{
 					"retry_after_failure": t.Discovery.RetryAfterFailure.String(),
 					"max_failures":        t.Discovery.MaxFailures,
+					"strict_wait":         t.Discovery.StrictWait.String(),
 				},
 				"query_budget":                t.QueryBudget.String(),
 				"upgrade_indirect_cache_hits": upgradeStr,

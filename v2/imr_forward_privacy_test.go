@@ -95,6 +95,11 @@ func TestForwardStrictPrivacyReturnsSentinel(t *testing.T) {
 	if !errors.Is(err, ErrPrivacyUnavailable) {
 		t.Errorf("got err %v, want one wrapping ErrPrivacyUnavailable", err)
 	}
+	// The EDE names the forward zone, not whatever zone the responder had
+	// found for the question.
+	if got := privacyErrZone(err); got != "example." {
+		t.Errorf("error names zone %q, want %q", got, "example.")
+	}
 	if rcode != dns.RcodeServerFailure {
 		t.Errorf("got rcode %s, want SERVFAIL", dns.RcodeToString[rcode])
 	}
@@ -183,6 +188,9 @@ func TestForwardStrictPrivacyExhaustionWrapsSentinel(t *testing.T) {
 	}
 	if !errors.Is(err, ErrPrivacyUnavailable) {
 		t.Errorf("got err %v, want one wrapping ErrPrivacyUnavailable", err)
+	}
+	if got := privacyErrZone(err); got != "fwd.example." {
+		t.Errorf("error names zone %q, want %q", got, "fwd.example.")
 	}
 	if rcode != dns.RcodeServerFailure {
 		t.Errorf("got rcode %s, want SERVFAIL", dns.RcodeToString[rcode])

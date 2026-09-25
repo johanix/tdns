@@ -708,7 +708,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 	// attaches the EDE.
 	if privacy == edns0.PrivacyStrict && !fz.hasEncryptedUpstream() {
 		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
-			fmt.Errorf("%w: no upstream of forward zone %s is encrypted", ErrPrivacyUnavailable, fz.Zone)
+			privacyUnavailable(fz.Zone, "no upstream of forward zone %s is encrypted", fz.Zone)
 	}
 
 	m := new(dns.Msg)
@@ -916,8 +916,8 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 	// path does when its encrypted tuples run out.
 	if privacy == edns0.PrivacyStrict {
 		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
-			fmt.Errorf("%w: forward zone %s had no usable response for '%s %s' from any of its encrypted upstreams (attempts=%d%s, last error: %v)",
-				ErrPrivacyUnavailable, fz.Zone, qname, dns.TypeToString[qtype], attempts, starvedNote, lastErr)
+			privacyUnavailable(fz.Zone, "forward zone %s had no usable response for '%s %s' from any of its encrypted upstreams (attempts=%d%s, last error: %v)",
+				fz.Zone, qname, dns.TypeToString[qtype], attempts, starvedNote, lastErr)
 	}
 	return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
 		fmt.Errorf("forward zone %s: no usable response for '%s %s' from any of its %d usable upstreams (attempts=%d%s, last error: %v)",

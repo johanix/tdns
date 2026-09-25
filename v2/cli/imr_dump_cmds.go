@@ -386,6 +386,7 @@ var dumpTuningCmd = &cobra.Command{
 		fmt.Println("Discovery state machine:")
 		fmt.Printf("  retry-after-failure : %s\n", t.Discovery.RetryAfterFailure)
 		fmt.Printf("  max-failures        : %d\n", t.Discovery.MaxFailures)
+		fmt.Printf("  strict-wait         : %s\n", t.Discovery.StrictWait)
 		fmt.Println()
 		fmt.Printf("Per-query budget   : %s\n", t.QueryBudget)
 		upgradeStr := "true (legacy default)"

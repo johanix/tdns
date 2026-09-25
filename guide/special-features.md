@@ -940,6 +940,17 @@ enable active discovery:
   was observed. This is more aggressive and generates
   additional queries.
 
+A query with strict privacy (the PRIVACY option, level
+strict) looks for signals even when neither option is set.
+It uses only servers with an encrypted transport. When no
+server of the zone is known to have one, the IMR looks up
+the signals of the servers it knows nothing about, and waits
+for them. It waits up to `tuning.discovery.strict-wait`
+(default 2s), and never past the query's own deadline. Only
+then does the query fail, with SERVFAIL and an EDE naming the
+zone. The lookups go out in cleartext and ask only about the
+servers, never about the client's name.
+
 Additional options:
 
 - `transport-signal-type` -- Selects which record type to
