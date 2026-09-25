@@ -18,8 +18,11 @@ feature set:
 
 2. Respond correctly to non-DNSSEC queries.
 
-3. Respond mostly correctly to queries with DO=1 to DNSSEC-signed
-   zones. The support for negative responses is not quite complete.
+3. Respond to queries with DO=1 to DNSSEC-signed zones, negative
+   answers included: from the zone's NSEC chain, or as compact denials
+   for a zone signed here with `black-lies` (see "Negative answers" in
+   config-tdns-auth.md). A secondary of an NSEC3-signed zone does not
+   serve NSEC3 proofs yet.
 
 4. TDNS-AUTH is able to sign (including generating the NSEC chain) a zone 
    via a command from "**tdns-cli**". It is also able to perform online 

@@ -7,11 +7,12 @@
  * signatures, showing that the name or the type is not there (RFC 4035
  * section 3.1.3). Which records depends on the zone, not on the query:
  *
- *   - a zone this server signs synthesizes a compact denial for each response
- *     and signs it (RFC 9824);
+ *   - a zone this server signs with black-lies synthesizes a compact denial
+ *     for each response and signs it (RFC 9824);
  *   - a zone with a stored NSEC chain proves it with the chain's own records,
  *     served with the signatures they already carry. That is the only proof a
- *     secondary can give, since it holds no key;
+ *     secondary can give, since it holds no key, and it is how a zone signed
+ *     here without black-lies answers, from the chain the signer keeps;
  *   - a signed zone with no chain this server can read -- a secondary of a
  *     compact-denial primary, or an NSEC3 zone -- has no proof to give;
  *   - an unsigned zone has none to give either, and answers a DO query as it
@@ -65,13 +66,18 @@ func (zd *ZoneData) signsHere() bool {
 
 // denialSourceFor says where zd's negative answers get their proof, given the
 // apex of the snapshot being answered from. For a zone signed here its options
-// decide; for any other zone its data does.
+// decide: black-lies selects compact denial, and without it the zone answers
+// from the NSEC chain the signer builds and keeps for it, which is what the
+// option is documented to mean. For any other zone its data decides.
 //
 // black-lies on a zone that is not signed here changes nothing: there is no
 // key to sign a synthesized NSEC with.
 func (zd *ZoneData) denialSourceFor(apex *OwnerData) denialSource {
 	if zd.signsHere() {
-		return denialCompact
+		if zd.Options[OptBlackLies] {
+			return denialCompact
+		}
+		return denialChain
 	}
 	switch {
 	case apex == nil || apex.RRtypes == nil:

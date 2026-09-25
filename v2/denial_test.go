@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -262,15 +263,12 @@ func countDenialWarnings(t *testing.T) *int {
 	return &n
 }
 
-// A secondary of a zone signed elsewhere answers every kind of negative from
-// the chain it received, with the signatures the chain carries, and a
-// validator accepts each answer (#770). Before, it answered with an NSEC it
-// made up at the query name and could not sign.
-func TestChainDenial(t *testing.T) {
-	sec, keys := presignedSecondary(t, nil)
-	kdb := newTestKeyDB(t) // the secondary's own KeyDB, with no keys for the zone
-	warnings := countDenialWarnings(t)
-
+// checkChainDenials asks zd for every kind of negative answer, with and
+// without CO, and checks each the way a validator does: the rcode, the RRSIGs
+// in AUTHORITY against the zone's keys, and the NSECs against the claim --
+// covering what does not exist, owned by what does, never NXNAME.
+func checkChainDenials(t *testing.T, zd *ZoneData, kdb *KeyDB, keys []*dns.DNSKEY) {
+	t.Helper()
 	for _, co := range []bool{false, true} {
 		mode := "DO"
 		if co {
@@ -296,7 +294,7 @@ func TestChainDenial(t *testing.T) {
 			}
 
 			t.Run("name does not exist", func(t *testing.T) {
-				nsecs := check(t, denialAsk(t, sec, kdb, "nx.example.", dns.TypeA, co), dns.RcodeNameError)
+				nsecs := check(t, denialAsk(t, zd, kdb, "nx.example.", dns.TypeA, co), dns.RcodeNameError)
 				var name, wild bool
 				for _, n := range nsecs {
 					name = name || nsecCovers(t, n, "nx.example.")
@@ -310,14 +308,14 @@ func TestChainDenial(t *testing.T) {
 			t.Run("name does not exist, one NSEC covers both", func(t *testing.T) {
 				// zz.www.example. and *.www.example. both sort after the last
 				// owner, www.example., whose NSEC wraps to the apex.
-				nsecs := check(t, denialAsk(t, sec, kdb, "zz.www.example.", dns.TypeA, co), dns.RcodeNameError)
+				nsecs := check(t, denialAsk(t, zd, kdb, "zz.www.example.", dns.TypeA, co), dns.RcodeNameError)
 				if len(nsecs) != 1 || !nsecCovers(t, nsecs[0], "zz.www.example.") || !nsecCovers(t, nsecs[0], "*.www.example.") {
 					t.Errorf("want the one NSEC covering both, once; got %v", nsecs)
 				}
 			})
 
 			t.Run("type does not exist", func(t *testing.T) {
-				nsecs := check(t, denialAsk(t, sec, kdb, "www.example.", dns.TypeTXT, co), dns.RcodeSuccess)
+				nsecs := check(t, denialAsk(t, zd, kdb, "www.example.", dns.TypeTXT, co), dns.RcodeSuccess)
 				if len(nsecs) != 1 || !strings.EqualFold(nsecs[0].Hdr.Name, "www.example.") ||
 					nsecHas(nsecs[0], dns.TypeTXT) || nsecHas(nsecs[0], dns.TypeCNAME) {
 					t.Errorf("want www.example.'s own NSEC, without TXT; got %v", nsecs)
@@ -325,7 +323,7 @@ func TestChainDenial(t *testing.T) {
 			})
 
 			t.Run("empty non-terminal", func(t *testing.T) {
-				nsecs := check(t, denialAsk(t, sec, kdb, "ent.example.", dns.TypeA, co), dns.RcodeSuccess)
+				nsecs := check(t, denialAsk(t, zd, kdb, "ent.example.", dns.TypeA, co), dns.RcodeSuccess)
 				if len(nsecs) != 1 || !nsecCovers(t, nsecs[0], "ent.example.") ||
 					!dns.IsSubDomain("ent.example.", nsecs[0].NextDomain) {
 					t.Errorf("want the NSEC covering ent.example. with its next name below it; got %v", nsecs)
@@ -333,7 +331,7 @@ func TestChainDenial(t *testing.T) {
 			})
 
 			t.Run("wildcard, type does not exist", func(t *testing.T) {
-				nsecs := check(t, denialAsk(t, sec, kdb, "foo.wild.example.", dns.TypeA, co), dns.RcodeSuccess)
+				nsecs := check(t, denialAsk(t, zd, kdb, "foo.wild.example.", dns.TypeA, co), dns.RcodeSuccess)
 				wild := findNSEC(nsecs, "*.wild.example.")
 				var cover bool
 				for _, n := range nsecs {
@@ -345,7 +343,7 @@ func TestChainDenial(t *testing.T) {
 			})
 
 			t.Run("DS at an insecure delegation", func(t *testing.T) {
-				nsecs := check(t, denialAsk(t, sec, kdb, "insecure.example.", dns.TypeDS, co), dns.RcodeSuccess)
+				nsecs := check(t, denialAsk(t, zd, kdb, "insecure.example.", dns.TypeDS, co), dns.RcodeSuccess)
 				if n := findNSEC(nsecs, "insecure.example."); n == nil || len(nsecs) != 1 ||
 					!nsecHas(n, dns.TypeNS) || nsecHas(n, dns.TypeDS) {
 					t.Errorf("want the NSEC at the cut, NS without DS; got %v", nsecs)
@@ -353,21 +351,21 @@ func TestChainDenial(t *testing.T) {
 			})
 
 			t.Run("DS at an in-zone name", func(t *testing.T) {
-				nsecs := check(t, denialAsk(t, sec, kdb, "www.example.", dns.TypeDS, co), dns.RcodeSuccess)
+				nsecs := check(t, denialAsk(t, zd, kdb, "www.example.", dns.TypeDS, co), dns.RcodeSuccess)
 				if n := findNSEC(nsecs, "www.example."); n == nil || len(nsecs) != 1 || nsecHas(n, dns.TypeDS) {
 					t.Errorf("want www.example.'s own NSEC, without DS; got %v", nsecs)
 				}
 			})
 
 			t.Run("DS at the apex, parent not hosted", func(t *testing.T) {
-				nsecs := check(t, denialAsk(t, sec, kdb, "example.", dns.TypeDS, co), dns.RcodeSuccess)
+				nsecs := check(t, denialAsk(t, zd, kdb, "example.", dns.TypeDS, co), dns.RcodeSuccess)
 				if n := findNSEC(nsecs, "example."); n == nil || len(nsecs) != 1 || nsecHas(n, dns.TypeDS) {
 					t.Errorf("want the apex's own NSEC, without DS; got %v", nsecs)
 				}
 			})
 
 			t.Run("referral to an insecure delegation", func(t *testing.T) {
-				m := denialAsk(t, sec, kdb, "www.insecure.example.", dns.TypeA, co)
+				m := denialAsk(t, zd, kdb, "www.insecure.example.", dns.TypeA, co)
 				if m.Rcode != dns.RcodeSuccess || m.Authoritative {
 					t.Fatalf("want a referral; got rcode %s aa %v", dns.RcodeToString[m.Rcode], m.Authoritative)
 				}
@@ -380,7 +378,7 @@ func TestChainDenial(t *testing.T) {
 			})
 
 			t.Run("wildcard answer", func(t *testing.T) {
-				m := denialAsk(t, sec, kdb, "foo.wild.example.", dns.TypeTXT, co)
+				m := denialAsk(t, zd, kdb, "foo.wild.example.", dns.TypeTXT, co)
 				if m.Rcode != dns.RcodeSuccess || len(m.Answer) == 0 {
 					t.Fatalf("want the wildcard's TXT; got rcode %s answer %v", dns.RcodeToString[m.Rcode], m.Answer)
 				}
@@ -392,7 +390,17 @@ func TestChainDenial(t *testing.T) {
 			})
 		})
 	}
+}
 
+// A secondary of a zone signed elsewhere answers every kind of negative from
+// the chain it received, with the signatures the chain carries, and a
+// validator accepts each answer (#770). Before, it answered with an NSEC it
+// made up at the query name and could not sign.
+func TestChainDenial(t *testing.T) {
+	sec, keys := presignedSecondary(t, nil)
+	warnings := countDenialWarnings(t)
+	// The secondary's own KeyDB, with no keys for the zone.
+	checkChainDenials(t, sec, newTestKeyDB(t), keys)
 	if *warnings != 0 {
 		t.Errorf("a complete chain logged %d warnings", *warnings)
 	}
@@ -625,5 +633,99 @@ func TestEmptyOwnerNodeIsNXDOMAINFromTheChain(t *testing.T) {
 	}
 	if !cover {
 		t.Errorf("no NSEC covering vestigial.example.: %v", m.Ns)
+	}
+}
+
+// A zone signed here without black-lies answers every negative from the NSEC
+// chain the signer keeps for it, as black-lies is documented to mean (stage
+// 2). It is asked with no KeyDB at all: every proof is stored, and nothing is
+// signed at query time.
+func TestSignedHereChainDenial(t *testing.T) {
+	zd, _ := signedTestZone(t, "example.", denialZone, false)
+	var keys []*dns.DNSKEY
+	for _, rr := range getRRsetFrom(zd.publishedSnapshot(), "example.", dns.TypeDNSKEY).RRs {
+		keys = append(keys, rr.(*dns.DNSKEY))
+	}
+	warnings := countDenialWarnings(t)
+	checkChainDenials(t, zd, nil, keys)
+	if *warnings != 0 {
+		t.Errorf("a complete chain logged %d warnings", *warnings)
+	}
+}
+
+// With black-lies, a zone signed here keeps compact denial: an NSEC owned by
+// the name asked, bearing NXNAME, signed per response, and NOERROR unless the
+// client set CO (RFC 9824).
+func TestSignedHereBlackLiesKeepsCompactDenial(t *testing.T) {
+	zd, kdb := compactDenialZone(t, "example.", denialZone)
+	var keys []*dns.DNSKEY
+	for _, rr := range getRRsetFrom(zd.publishedSnapshot(), "example.", dns.TypeDNSKEY).RRs {
+		keys = append(keys, rr.(*dns.DNSKEY))
+	}
+	for _, tc := range []struct {
+		co    bool
+		rcode int
+	}{{false, dns.RcodeSuccess}, {true, dns.RcodeNameError}} {
+		m := denialAsk(t, zd, kdb, "nx.example.", dns.TypeA, tc.co)
+		if m.Rcode != tc.rcode {
+			t.Errorf("CO %v: rcode %s, want %s", tc.co, dns.RcodeToString[m.Rcode], dns.RcodeToString[tc.rcode])
+		}
+		nsecs := nsecsIn(m.Ns)
+		if len(nsecs) != 1 || !strings.EqualFold(nsecs[0].Hdr.Name, "nx.example.") || !nsecHas(nsecs[0], dns.TypeNXNAME) {
+			t.Errorf("CO %v: want one compact NSEC at nx.example. with NXNAME; got %v", tc.co, nsecs)
+		}
+		verifySection(t, m.Ns, keys)
+	}
+}
+
+// A gap in the chain of a zone signed here is the zone's own defect: every
+// answer that needs the missing record is a SERVFAIL, and no NSEC is
+// synthesized to cover the gap (the design's Q3). Answers the chain still
+// proves are unaffected, and nothing is logged as a secondary's warning.
+func TestSignedHereChainGapIsServfail(t *testing.T) {
+	zd, _ := signedTestZone(t, "example.", denialZone, false)
+	base := zd.publishedSnapshot()
+	data := map[string]*OwnerData{}
+	for k, v := range base.Data {
+		data[k] = v
+	}
+	strip := func(name string, sigsOnly bool) {
+		od := *data[name]
+		if sigsOnly {
+			od.NSEC.RRSIGs = nil
+		} else {
+			od.NSEC = core.RRset{}
+		}
+		data[name] = &od
+	}
+	strip("www.example.", false)      // a NODATA at www.example. has no proof
+	strip("a.wild.example.", true)    // the cover of foo.wild.example. is unsigned
+	strip("insecure.example.", false) // the cut has no NSEC
+	zd.snapshot.Store(zd.buildSnapshotLocked(base.Serial, data, nil))
+	warnings := countDenialWarnings(t)
+
+	for _, tc := range []struct {
+		qname string
+		qtype uint16
+		rcode int
+	}{
+		{"www.example.", dns.TypeTXT, dns.RcodeServerFailure},
+		{"foo.wild.example.", dns.TypeTXT, dns.RcodeServerFailure}, // a wildcard answer
+		{"foo.wild.example.", dns.TypeA, dns.RcodeServerFailure},   // a wildcard NODATA
+		{"insecure.example.", dns.TypeDS, dns.RcodeServerFailure},
+		{"www.insecure.example.", dns.TypeA, dns.RcodeServerFailure}, // a referral
+		{"nx.example.", dns.TypeA, dns.RcodeNameError},               // still proved
+	} {
+		m := denialAsk(t, zd, nil, tc.qname, tc.qtype, false)
+		if m.Rcode != tc.rcode {
+			t.Errorf("%s %s: rcode %s, want %s; authority %v", tc.qname, dns.TypeToString[tc.qtype],
+				dns.RcodeToString[m.Rcode], dns.RcodeToString[tc.rcode], m.Ns)
+		}
+		if tc.rcode == dns.RcodeServerFailure && len(m.Ns) != 0 {
+			t.Errorf("%s %s: a SERVFAIL carried authority records: %v", tc.qname, dns.TypeToString[tc.qtype], m.Ns)
+		}
+	}
+	if *warnings != 0 {
+		t.Errorf("a zone signed here logged %d secondary warnings; its gaps are errors", *warnings)
 	}
 }

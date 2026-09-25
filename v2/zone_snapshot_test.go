@@ -647,7 +647,10 @@ ns.signed-wild.example. 3600 IN A 10.0.0.1
 *.signed-wild.example. 3600 IN A 10.0.0.5
 *.signed-wild.example. 3600 IN RRSIG A 13 2 3600 20260801000000 20260701000000 12345 signed-wild.example. AwEAAcBadDummySignatureBytesForTestingWildcardRRSIGPresence0000000000000000000000000000AA==
 `)
-		zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+		// black-lies: the zone has no stored chain, so the NSEC proving the
+		// wildcard answer is synthesized. Without it the zone would answer
+		// from its chain, and a zone signed here with no chain is broken.
+		zd.Options = map[ZoneOption]bool{OptOnlineSigning: true, OptBlackLies: true}
 		zd.KeyDB = kdb
 		// Healthy means it can sign, too: the answer carries an NSEC proving
 		// host.signed-wild.example. does not exist, and with no stored chain

@@ -4,8 +4,9 @@
 `0847c04e`.
 
 **Status:** merged as #772, after an external review (sound) and a
-re-review (merge). Stage 1 is implemented on branch
-`claude/770-denial-stage1`, not merged (§12). Stage 2 is not implemented.
+re-review (merge). Stage 1 is merged as #774 (1c82e9cd), after a review
+(merge) (§12). Stage 2 is merged as #775, after a review (merge after
+#774) (§13). #770 and #771 are closed; NSEC3 (#773) is still open.
 
 **Revisions:**
 - r1 2026-09-25: first version (PR #772).
@@ -612,3 +613,26 @@ validation, and only the wildcard answer validated. With stage 1, NXDOMAIN
 (with one covering NSEC and with two), NODATA, the empty non-terminal,
 wildcard NODATA, the wildcard answer, and DS at an insecure cut and at an
 in-zone name were all fully validated.
+
+## 13. Amendment, 2026-09-25: stage 2 as implemented
+
+Stage 2 is the change §3.5 describes: `denialSourceFor` returns the chain
+(row B) for a zone signed here without `black-lies`, and compact denial only
+with it.
+
+- The chain branch that stage 1 put in place for zones signed here is now
+  reached: a gap in their own chain is a SERVFAIL (`errDenialUnproven`), and
+  it is logged as an error, not as a secondary's once-per-serial warning.
+- `addWildcardProof` loses the branch that served a zone signed here its
+  stored cover and synthesized one when that was missing. A zone signed here
+  now either has a chain (row B, no synthesis) or has `black-lies` and no
+  chain (row A, synthesis only).
+- Of the existing tests, only the healthy zone in
+  `TestWildcardAnswerFailClosed` needed a change: it is online-signing with
+  no chain, so it now sets `black-lies`. `qtypesSignedZone` (inline-signing
+  with a chain) answers from its chain and its assertions hold unchanged.
+- New tests: a zone signed here answers every negative from its chain with no
+  KeyDB at all (nothing is signed at query time); with `black-lies` it keeps
+  compact denial; and gaps in its own chain are SERVFAILs.
+- `guide/config-tdns-auth.md` gains a "Negative answers" section, with the
+  source for each kind of zone and how to set `black-lies`.
