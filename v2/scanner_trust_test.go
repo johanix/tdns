@@ -36,11 +36,17 @@ type trustNet struct {
 	// disagree: the nameservers do not agree on the key, from the first
 	// query on.
 	disagree map[string]bool
+
+	// denial: the verdict on the proof that comes with an empty answer for
+	// the key. Absent: the empty answer comes with no proof. denialsJudged
+	// lists the keys whose proof was handed to the validator.
+	denial        map[string]cache.ValidationState
+	denialsJudged []string
 }
 
 func trustKey(name string, qtype uint16) string { return name + "/" + dns.TypeToString[qtype] }
 
-func (n *trustNet) query(_ context.Context, qname string, qtype uint16, _ *core.RRset) (*core.RRset, bool, error) {
+func (n *trustNet) query(_ context.Context, qname string, qtype uint16, _ *core.RRset) (*core.RRset, []*core.RRset, bool, error) {
 	k := trustKey(qname, qtype)
 	if n.queried == nil {
 		n.queried = map[string]int{}
@@ -49,7 +55,23 @@ func (n *trustNet) query(_ context.Context, qname string, qtype uint16, _ *core.
 	// Data nobody serves comes back the way queryAllNSAndCompare reports every
 	// nameserver answering that there is none: an empty RRset, in sync.
 	inSync := !n.disagree[k] && !(n.queried[k] > 1 && n.laterDisagree[k])
-	return &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: n.served[k]}, inSync, nil
+	var proof []*core.RRset
+	if _, ok := n.denial[k]; ok && len(n.served[k]) == 0 {
+		// Stands in for the NSEC and its RRSIG; validateDenial judges it by key.
+		proof = []*core.RRset{{Name: qname, Class: dns.ClassINET, RRtype: dns.TypeNSEC}}
+	}
+	return &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: n.served[k]}, proof, inSync, nil
+}
+
+// validateDenial stands in for the IMR's cache.ValidateNegativeResponse,
+// which also refuses to judge a proof that is not there.
+func (n *trustNet) validateDenial(_ context.Context, qname string, qtype uint16, proof []*core.RRset) (cache.ValidationState, error) {
+	k := trustKey(qname, qtype)
+	n.denialsJudged = append(n.denialsJudged, k)
+	if len(proof) == 0 {
+		return cache.ValidationStateNone, fmt.Errorf("no negative authority RRsets to validate")
+	}
+	return n.denial[k], nil
 }
 
 func (n *trustNet) validate(_ context.Context, rrset *core.RRset) (cache.ValidationState, error) {
@@ -136,6 +158,7 @@ func trustScanner(n *trustNet) *Scanner {
 	sc.Log["CDS"], sc.Log["CSYNC"] = quiet, quiet
 	sc.queryChild = n.query
 	sc.validateRRset = n.validate
+	sc.validateDenial = n.validateDenial
 	return sc
 }
 

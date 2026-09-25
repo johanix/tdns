@@ -117,7 +117,7 @@ func (a *appliedChanges) count(child string, scanType ScanType) int {
 func pollScanner(n *trustNet) (*Scanner, *appliedChanges) {
 	sc := trustScanner(n)
 	var mu sync.Mutex
-	sc.queryChild = func(ctx context.Context, qname string, qtype uint16, ns *core.RRset) (*core.RRset, bool, error) {
+	sc.queryChild = func(ctx context.Context, qname string, qtype uint16, ns *core.RRset) (*core.RRset, []*core.RRset, bool, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		return n.query(ctx, qname, qtype, ns)
@@ -126,6 +126,11 @@ func pollScanner(n *trustNet) (*Scanner, *appliedChanges) {
 		mu.Lock()
 		defer mu.Unlock()
 		return n.validate(ctx, rrset)
+	}
+	sc.validateDenial = func(ctx context.Context, qname string, qtype uint16, proof []*core.RRset) (cache.ValidationState, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return n.validateDenial(ctx, qname, qtype, proof)
 	}
 	applied := &appliedChanges{}
 	sc.OnDelegationChange = applied.record

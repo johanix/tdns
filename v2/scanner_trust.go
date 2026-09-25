@@ -116,10 +116,18 @@ func (p DelegationPolicy) hasMechanism(mech string) bool {
 // askChild asks every nameserver in nsRRset for (qname, qtype) and reports
 // whether they agree. The RRset carries the RRSIGs of the first answer.
 func (scanner *Scanner) askChild(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, lg *log.Logger) (*core.RRset, bool, error) {
+	rrset, _, inSync, err := scanner.askChildWithDenial(ctx, qname, qtype, nsRRset, lg)
+	return rrset, inSync, err
+}
+
+// askChildWithDenial is askChild, and when the first answer is empty, the
+// proof that nameserver sent that there is no such RRset: the authority
+// section of its NODATA answer, grouped into RRsets.
+func (scanner *Scanner) askChildWithDenial(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, lg *log.Logger) (*core.RRset, []*core.RRset, bool, error) {
 	if scanner.queryChild != nil {
 		return scanner.queryChild(ctx, qname, qtype, nsRRset)
 	}
-	return scanner.queryAllNSAndCompare(ctx, qname, qtype, nsRRset, scanner.imr(), lg)
+	return scanner.queryAllNSAndCompareWithDenial(ctx, qname, qtype, nsRRset, scanner.imr(), lg)
 }
 
 // validateChildData runs the IMR's validator over an RRset fetched from the
@@ -133,6 +141,59 @@ func (scanner *Scanner) validateChildData(ctx context.Context, rrset *core.RRset
 		return cache.ValidationStateNone, errors.New("no IMR available to validate with")
 	}
 	return imr.Cache.ValidateRRsetWithParentZone(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
+}
+
+// validateChildDenial runs the IMR's validator over the proof a child
+// nameserver sent that there is no qname qtype RRset.
+func (scanner *Scanner) validateChildDenial(ctx context.Context, qname string, qtype uint16, proof []*core.RRset) (cache.ValidationState, error) {
+	if scanner.validateDenial != nil {
+		return scanner.validateDenial(ctx, qname, qtype, proof)
+	}
+	imr := scanner.imr()
+	if imr == nil || imr.Cache == nil {
+		return cache.ValidationStateNone, errors.New("no IMR available to validate with")
+	}
+	state, _, err := imr.Cache.ValidateNegativeResponse(ctx, qname, qtype, dns.RcodeSuccess, proof, imr.IterativeDNSQueryFetcher())
+	return state, err
+}
+
+// absenceNotProven: the child's nameservers agree that they serve no such
+// RRset, and under a policy that requires DNSSEC the proof of that did not
+// validate Secure. Not a refusal (scanRefusal): nothing is copied from the
+// child on it, and the glue it concerns stays as the parent holds it.
+type absenceNotProven struct{ msg string }
+
+func (e *absenceNotProven) Error() string { return e.msg }
+
+func isAbsenceNotProven(err error) bool {
+	var a *absenceNotProven
+	return errors.As(err, &a)
+}
+
+// proveAbsent returns nil when proof, the authority section a child
+// nameserver sent with an empty answer, validates as a Secure denial of qname
+// qtype, and an absenceNotProven otherwise.
+//
+// RFC 7477 §3.2.2 removes a glue type the child no longer serves, and §3 wants
+// everything the parent acts on validated, the absence included (#779). A
+// proof that does not validate Secure changes nothing, whatever the verdict.
+// Bogus included: a secondary that sends no NSEC records for a signed zone,
+// as tdns secondaries did before #770, has its denials judged Bogus, and
+// refusing the whole CSYNC over one would block every change the child makes
+// while it keeps that nameserver.
+func (scanner *Scanner) proveAbsent(ctx context.Context, qname string, qtype uint16, proof []*core.RRset) error {
+	what := fmt.Sprintf("%s %s", qname, dns.TypeToString[qtype])
+	state, err := scanner.validateChildDenial(ctx, qname, qtype, proof)
+	switch {
+	case state == cache.ValidationStateSecure && err == nil:
+		return nil
+	case len(proof) == 0:
+		return &absenceNotProven{msg: fmt.Sprintf("no %s served, and no proof that there is none", what)}
+	case err != nil:
+		return &absenceNotProven{msg: fmt.Sprintf("no %s served, and the proof that there is none is %s: %v", what, validationStateName(state), err)}
+	default:
+		return &absenceNotProven{msg: fmt.Sprintf("no %s served, and the proof that there is none is %s", what, validationStateName(state))}
+	}
 }
 
 func validationStateName(s cache.ValidationState) string {
@@ -167,24 +228,30 @@ func (scanner *Scanner) requireSecureBecause(ctx context.Context, rrset *core.RR
 // if it validates Secure (RFC 7477 §2: the parental agent "MUST perform DNSSEC
 // validation of any data to be copied from the child to the parent").
 //
-// An empty answer has no signature to validate, so it is an error rather than
-// data: the NS pass stops on it, and the glue pass leaves that nameserver's
-// glue as it is. queryAllNSAndCompare reports an empty RRset the nameservers
-// agree on as data; here it stops counting as proof of absence, because the
-// denial behind it is not validated.
+// An empty RRset the nameservers agree on is handed on only if the proof the
+// first of them sent, its NSEC or NSEC3 records, validates as a Secure denial
+// (proveAbsent): RFC 7477 wants the absence validated too. Otherwise it is an
+// absenceNotProven error, and the glue pass leaves that nameserver's glue of
+// that type as it is (computeCsyncDelta).
 func (scanner *Scanner) securedChildRRsetFetcher(pol DelegationPolicy, nsRRset *core.RRset, lg *log.Logger) childRRsetFetcher {
 	return func(ctx context.Context, name string, qtype uint16) ([]dns.RR, bool, error) {
-		rrset, inSync, err := scanner.askChild(ctx, name, qtype, nsRRset, lg)
+		rrset, denial, inSync, err := scanner.askChildWithDenial(ctx, name, qtype, nsRRset, lg)
 		if err != nil {
 			return nil, false, err
-		}
-		if rrset == nil || len(rrset.RRs) == 0 {
-			return nil, false, fmt.Errorf("no %s %s served, nothing to validate", name, dns.TypeToString[qtype])
 		}
 		if !inSync {
 			// Every caller stops on a disagreement; there is no one RRset to
 			// validate.
+			if rrset == nil {
+				return nil, false, nil
+			}
 			return rrset.RRs, false, nil
+		}
+		if rrset == nil || len(rrset.RRs) == 0 {
+			if err := scanner.proveAbsent(ctx, name, qtype, denial); err != nil {
+				return nil, false, err
+			}
+			return nil, true, nil
 		}
 		if err := scanner.requireSecure(ctx, rrset, pol); err != nil {
 			return nil, false, err

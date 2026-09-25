@@ -72,12 +72,14 @@ type Scanner struct {
 	pendingApplies sync.Map         // canonical child name -> <-chan ZoneUpdateResult; see awaitPendingApply
 	poll           scannerPollState // scanner_poll.go
 
-	// queryChild and validateRRset stand in, in tests, for the network behind
-	// the CDS and CSYNC paths: asking every child nameserver
-	// (queryAllNSAndCompare) and the IMR's validator. Nil in production; see
-	// askChild and validateChildData.
-	queryChild    func(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset) (*core.RRset, bool, error)
-	validateRRset func(ctx context.Context, rrset *core.RRset) (cache.ValidationState, error)
+	// queryChild, validateRRset and validateDenial stand in, in tests, for the
+	// network behind the CDS and CSYNC paths: asking every child nameserver
+	// (queryAllNSAndCompareWithDenial) and the IMR's validator. Nil in
+	// production; see askChildWithDenial, validateChildData and
+	// validateChildDenial.
+	queryChild     func(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset) (*core.RRset, []*core.RRset, bool, error)
+	validateRRset  func(ctx context.Context, rrset *core.RRset) (cache.ValidationState, error)
+	validateDenial func(ctx context.Context, qname string, qtype uint16, proof []*core.RRset) (cache.ValidationState, error)
 }
 
 // imr resolves the IMR at the point of use.
@@ -467,6 +469,15 @@ func (imr *Imr) findEnclosingZoneNS(ctx context.Context, qname string, lg *log.L
 // compares the responses, and returns a representative RRset and whether all NS were in sync.
 // Returns: (responseRRset, allInSync, error)
 func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, imr *Imr, lg *log.Logger) (*core.RRset, bool, error) {
+	rrset, _, inSync, err := scanner.queryAllNSAndCompareWithDenial(ctx, qname, qtype, nsRRset, imr, lg)
+	return rrset, inSync, err
+}
+
+// queryAllNSAndCompareWithDenial is queryAllNSAndCompare, and when the
+// representative RRset is empty, the proof its nameserver sent that there is
+// no such RRset (authQueryWithDenial). The proof goes with the first answer,
+// as the RRSIGs of a non-empty RRset do.
+func (scanner *Scanner) queryAllNSAndCompareWithDenial(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, imr *Imr, lg *log.Logger) (*core.RRset, []*core.RRset, bool, error) {
 	// IMR may be disabled or the generalized-NOTIFY path may have
 	// reached the scanner before the IMR singleton was initialized;
 	// without this guard the subsequent imr.ImrQuery(...) call
@@ -474,7 +485,7 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 	// from inside a server handler goroutine, killing the daemon on
 	// otherwise-accepted NOTIFY(CDS/CSYNC) traffic.
 	if imr == nil {
-		return nil, false, fmt.Errorf("queryAllNSAndCompare: no IMR available yet; cannot compare child NS data")
+		return nil, nil, false, fmt.Errorf("queryAllNSAndCompare: no IMR available yet; cannot compare child NS data")
 	}
 	// Extract nameserver names from NS RRset
 	var nsNames []string
@@ -485,7 +496,7 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 	}
 
 	if len(nsNames) == 0 {
-		return nil, false, fmt.Errorf("no nameservers found in NS RRset")
+		return nil, nil, false, fmt.Errorf("no nameservers found in NS RRset")
 	}
 
 	if lg != nil {
@@ -499,6 +510,7 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 	// cannot be reached, or answers with an error or without authority, is left
 	// out, and named in the error when no nameserver answered.
 	var answers []*core.RRset
+	var denials [][]*core.RRset // denials[i] goes with answers[i]
 	var queryErrors []string
 
 	for _, nsName := range nsNames {
@@ -534,7 +546,7 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 
 		// Query from the first available address for this nameserver
 		// (In a production system, you might want to try all addresses)
-		rrset, err := scanner.AuthQueryNG(qname, nsAddrs[0], qtype, "tcp")
+		rrset, denial, err := scanner.authQueryWithDenial(qname, nsAddrs[0], qtype, "tcp")
 		if err != nil {
 			if lg != nil {
 				lg.Printf("queryAllNSAndCompare: error querying %s %s from %s (%s): %v", qname, dns.TypeToString[qtype], nsName, nsAddrs[0], err)
@@ -549,9 +561,15 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 			lg.Printf("queryAllNSAndCompare: %s serves no %s %s", nsName, qname, dns.TypeToString[qtype])
 		}
 		answers = append(answers, rrset)
+		denials = append(denials, denial)
 	}
 
-	return compareChildAnswers(qname, qtype, answers, queryErrors, lg, scanner.Verbose, scanner.Debug)
+	base, inSync, err := compareChildAnswers(qname, qtype, answers, queryErrors, lg, scanner.Verbose, scanner.Debug)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	// compareChildAnswers returns the first answer as the representative one.
+	return base, denials[0], inSync, nil
 }
 
 // compareChildAnswers is the verdict half of queryAllNSAndCompare: the first
@@ -1026,10 +1044,11 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	response.NSRemoves = nsRemoves
 	response.GlueAdds = glueAdds
 	response.GlueRemoves = glueRemoves
+	response.GlueSkipped = delta.GlueSkipped
 	response.AllNSInSync = true
 	if pol.RequireDnssec {
 		response.Validation = ScanValidated
-		response.ValidationReason = fmt.Sprintf("the SOA, the CSYNC and the NS and glue copied from the child validated Secure (delegation policy %q)", pol.Name)
+		response.ValidationReason = fmt.Sprintf("the SOA, the CSYNC and the NS and glue copied from the child validated Secure, and so did the proof of each glue type it no longer serves (delegation policy %q)", pol.Name)
 	} else {
 		response.Validation = ScanUnvalidated
 		response.ValidationReason = fmt.Sprintf("delegation policy %q does not require DNSSEC", pol.Name)
