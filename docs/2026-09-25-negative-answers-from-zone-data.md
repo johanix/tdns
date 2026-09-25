@@ -5,8 +5,8 @@
 
 **Status:** merged as #772, after an external review (sound) and a
 re-review (merge). Stage 1 is merged as #774 (1c82e9cd), after a review
-(merge) (§12). Stage 2 is implemented in #775, reviewed (merge after #774),
-not merged (§13).
+(merge) (§12). Stage 2 is merged as #775, after a review (merge after
+#774) (§13). #770 and #771 are closed; NSEC3 (#773) is still open.
 
 **Revisions:**
 - r1 2026-09-25: first version (PR #772).
