@@ -53,14 +53,68 @@ func (imr *Imr) TransportSignalRRType() uint16 {
 	return dns.TypeSVCB
 }
 
+// TransportSignalCached reports whether the cache holds owner's transport
+// signal. A cached denial is not one (cachedTransportSignal).
 func (imr *Imr) TransportSignalCached(owner string) bool {
 	if owner == "" || imr == nil {
 		return false
 	}
-	if c := imr.Cache.Get(owner, imr.TransportSignalRRType()); c != nil && c.RRset != nil && len(c.RRset.RRs) > 0 {
-		return true
+	signal, _ := imr.cachedTransportSignal(owner)
+	return signal != nil
+}
+
+// cachedTransportSignal reads what the cache holds for owner's transport
+// signal: the signal itself, or a denial that there is one.
+//
+// A denial stands for "signals nothing" until its entry expires, and no
+// lookup is made before then: RFC 2308 negative caching, with the lifetime
+// the cache gives denials (#523). Nothing else may keep that verdict longer,
+// or a zone that publishes a signal afterwards is never seen to (#776).
+//
+// Only an answer of the signal's own type is a signal. A denial's entry holds
+// the SOA that proves it, and ImrQuery hands that SOA back as though it were
+// the answer (#698).
+func (imr *Imr) cachedTransportSignal(owner string) (signal *cache.CachedRRset, denied bool) {
+	if imr.Cache == nil || owner == "" {
+		return nil, false
 	}
-	return false
+	rrtype := imr.TransportSignalRRType()
+	c := imr.Cache.Get(owner, rrtype)
+	if c == nil {
+		return nil, false
+	}
+	switch c.Context {
+	case cache.ContextAnswer:
+		if c.RRset != nil && c.RRset.RRtype == rrtype && len(c.RRset.RRs) > 0 {
+			return c, false
+		}
+	case cache.ContextNXDOMAIN, cache.ContextNoErrNoAns:
+		return nil, true
+	}
+	return nil, false
+}
+
+// settleTransportSignalLookup records in the tracker how a lookup of owner's
+// transport signal ended.
+//
+// A signal found is a success. A denial is not a failure: the zone has
+// answered, and its cached denial says "no signal" for as long as it lives.
+// The tracker forgets the owner, so the first query after the denial expires
+// looks again at once. Recording the denial as a success was terminal, and as
+// a failure it added the backoff meant for servers that do not answer; either
+// way the verdict outlived the denial. Anything else is a failure, retried
+// after the backoff.
+func (imr *Imr) settleTransportSignalLookup(owner string, resp *ImrResponse, err error) {
+	if err == nil && resp != nil && resp.RRset != nil &&
+		resp.RRset.RRtype == imr.TransportSignalRRType() && len(resp.RRset.RRs) > 0 {
+		imr.TransportSignalDiscovery.Succeed(owner)
+		return
+	}
+	if _, denied := imr.cachedTransportSignal(owner); err == nil && denied {
+		imr.TransportSignalDiscovery.Reset(owner)
+		return
+	}
+	imr.TransportSignalDiscovery.Fail(owner, err)
 }
 
 func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, reason string) {
@@ -97,7 +151,7 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 	if owner == "" || ctx == nil || imr.Cache == nil {
 		return
 	}
-	if imr.TransportSignalCached(owner) {
+	if signal, denied := imr.cachedTransportSignal(owner); signal != nil || denied {
 		return
 	}
 	if !imr.TransportSignalDiscovery.Begin(owner) {
@@ -111,14 +165,10 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 			imr.Cache.Logger.Printf("Transport signal query (%s): querying %s %s", reason, owner, dns.TypeToString[rrtype])
 		}
 		resp, err := imr.ImrQuery(queryCtx, owner, rrtype, dns.ClassINET, nil)
-		if err != nil || resp == nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 {
-			if imr.Cache.Debug {
-				imr.Cache.Logger.Printf("Transport signal query (%s) failed for %s %s: %v", reason, owner, dns.TypeToString[rrtype], err)
-			}
-			imr.TransportSignalDiscovery.Fail(owner, err)
-			return
+		if imr.Cache.Debug && (err != nil || resp == nil || resp.RRset == nil || resp.RRset.RRtype != rrtype) {
+			imr.Cache.Logger.Printf("Transport signal query (%s) found no signal for %s %s: %v", reason, owner, dns.TypeToString[rrtype], err)
 		}
-		imr.TransportSignalDiscovery.Succeed(owner)
+		imr.settleTransportSignalLookup(owner, resp, err)
 	}()
 }
 
@@ -137,9 +187,10 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 //
 // The lookup itself goes out through ImrQuery, which never asks for privacy,
 // so it cannot come back here and wait on itself. A server whose signal is
-// known is not looked up again, whatever the signal says, and neither is one
-// whose lookup failed and is cooling down: for a zone that signals nothing,
-// only the first query waits.
+// known is not looked up again, whatever the signal says. Nor is one whose
+// signal the cache holds a denial of, until the denial expires, or one whose
+// lookup failed and is cooling down. For a zone that signals nothing, only
+// the first query after each denial expires waits.
 func (imr *Imr) awaitTransportSignals(ctx context.Context, qname string, serverMap map[string]*cache.AuthServer) bool {
 	if imr.Cache == nil || imr.Options[ImrOptUseTransportSignals] == "false" {
 		return false
@@ -154,9 +205,14 @@ func (imr *Imr) awaitTransportSignals(ctx context.Context, qname string, serverM
 			continue
 		}
 		// A signal already in the cache that never reached this server: the
-		// server was not in any zone's map when the answer was applied.
-		if c := imr.Cache.Get(owner, imr.TransportSignalRRType()); c != nil && c.RRset != nil && len(c.RRset.RRs) > 0 {
-			imr.applyTransportRRsetFromAnswer(owner, c.RRset, c.State)
+		// server was not in any zone's map when the answer was applied. A
+		// cached denial: the server signals nothing, until it expires.
+		signal, denied := imr.cachedTransportSignal(owner)
+		if signal != nil {
+			imr.applyTransportRRsetFromAnswer(owner, signal.RRset, signal.State)
+			continue
+		}
+		if denied {
 			continue
 		}
 		imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonStrictPrivacy)

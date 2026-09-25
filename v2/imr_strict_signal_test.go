@@ -275,3 +275,120 @@ func TestPrivacyUnavailableZone(t *testing.T) {
 		t.Error("the error with a zone no longer matches the sentinel")
 	}
 }
+
+// cacheSignalDenial caches the child zone's denial that strictChildOwner has
+// a transport signal, as handleNegative stores one: an NXDOMAIN entry whose
+// RRset is the SOA that proves it. The entry lives for the SOA's TTL.
+func cacheSignalDenial(t *testing.T, imr *Imr, ttl uint32) *core.RRset {
+	t.Helper()
+	soa, err := dns.NewRR(fmt.Sprintf("%s %d IN SOA ns.%s hostmaster.%s 1 3600 600 86400 %d",
+		strictChildZone, ttl, strictChildZone, strictChildZone, ttl))
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	soaRRset := &core.RRset{Name: strictChildZone, Class: dns.ClassINET, RRtype: dns.TypeSOA, RRs: []dns.RR{soa}}
+	imr.Cache.Set(strictChildOwner, dns.TypeSVCB, &cache.CachedRRset{
+		Name:       strictChildOwner,
+		RRtype:     dns.TypeSVCB,
+		Rcode:      uint8(dns.RcodeNameError),
+		RRset:      soaRRset,
+		Context:    cache.ContextNXDOMAIN,
+		State:      cache.ValidationStateNone,
+		Expiration: time.Now().Add(time.Duration(ttl) * time.Second),
+	})
+	return soaRRset
+}
+
+// A zone that signalled nothing when first asked, and publishes a signal
+// afterwards, must be seen to. The order is the natural one: a strict query
+// meets the zone, its signal lookup is denied, the zone publishes, the client
+// asks again. The "no signal" verdict stood for good: the lookup that met the
+// denial got its proving SOA back as the answer (#698) and was recorded as a
+// success, which the tracker never retries.
+//
+// The denial holds the verdict while it is cached, so a strict query fails at
+// once and nothing is looked up. Not a moment longer: once it expires, the
+// next strict query looks again, waits, and goes out encrypted.
+func TestStrictPrivacySeesASignalPublishedAfterADenial(t *testing.T) {
+	imr, server, serverMap := newStrictTestImr(t, 5*time.Second)
+	soa := cacheSignalDenial(t, imr, 1)
+	// The first lookup ends in the denial, reported the way ImrQuery reports a
+	// cached one: with the proving SOA in the answer's place.
+	if !imr.TransportSignalDiscovery.Begin(strictChildOwner) {
+		t.Fatal("setup: could not start the first lookup")
+	}
+	imr.settleTransportSignalLookup(strictChildOwner, &ImrResponse{RRset: soa}, nil)
+
+	start := time.Now()
+	_, _, _, _, err := imr.IterativeDNSQuery(context.Background(), "www."+strictChildZone, dns.TypeA, serverMap, true, edns0.PrivacyStrict)
+	if err == nil || !strings.Contains(err.Error(), strictPrecheck) {
+		t.Fatalf("while the denial is cached: got %v, want the precheck's error", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("waited %s while the denial was cached", elapsed)
+	}
+	if snap := imr.TransportSignalDiscovery.Snapshot(); len(snap) != 0 {
+		t.Errorf("while the denial is cached the tracker holds state of its own (a lookup, or a verdict): %v", snap)
+	}
+
+	// The zone publishes its signal, and the denial expires.
+	time.Sleep(1100 * time.Millisecond)
+
+	// The next strict query must be free to look again. The lookup here is
+	// the test's (nothing reaches the network), and brings the new signal.
+	if !imr.TransportSignalDiscovery.Begin(strictChildOwner) {
+		t.Fatal("the denial has expired, but the tracker still holds the owner back: no lookup can start")
+	}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		server.SetTransportSignal([]core.Transport{core.TransportDoT, core.TransportDo53}, nil,
+			map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100})
+		imr.TransportSignalDiscovery.Succeed(strictChildOwner)
+	}()
+	_, _, _, _, err = imr.IterativeDNSQuery(context.Background(), "www."+strictChildZone, dns.TypeA, serverMap, true, edns0.PrivacyStrict)
+	if err != nil && strings.Contains(err.Error(), strictPrecheck) {
+		t.Fatalf("after the denial expired: the precheck still gave up: %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "/dot") {
+		t.Errorf("after the denial expired: got %v, want an attempt over DoT", err)
+	}
+}
+
+// How a lookup's end is recorded. Only a signal is a success, and a success is
+// never retried. A denial is neither: its cached entry carries the verdict for
+// its lifetime, and the tracker must not outlive it with state of its own.
+func TestSettleTransportSignalLookup(t *testing.T) {
+	signal, err := dns.NewRR(strictChildOwner + ` 3600 IN SVCB 1 . oots="do53:100,dot:50"`)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	svcb := &core.RRset{Name: strictChildOwner, Class: dns.ClassINET, RRtype: dns.TypeSVCB, RRs: []dns.RR{signal}}
+
+	for name, tc := range map[string]struct {
+		deny bool
+		resp func(soa *core.RRset) *ImrResponse
+		err  error
+		want string // tracker status, or "" for no state
+	}{
+		"signal found":       {resp: func(*core.RRset) *ImrResponse { return &ImrResponse{RRset: svcb} }, want: "succeeded"},
+		"fresh denial":       {deny: true, resp: func(*core.RRset) *ImrResponse { return &ImrResponse{} }, want: ""},
+		"cached denial SOA":  {deny: true, resp: func(soa *core.RRset) *ImrResponse { return &ImrResponse{RRset: soa} }, want: ""},
+		"lookup error":       {resp: func(*core.RRset) *ImrResponse { return &ImrResponse{Error: true} }, err: errors.New("timeout"), want: "failed"},
+		"nothing, no denial": {resp: func(*core.RRset) *ImrResponse { return &ImrResponse{} }, want: "failed"},
+	} {
+		imr, _, _ := newStrictTestImr(t, time.Second)
+		var soa *core.RRset
+		if tc.deny {
+			soa = cacheSignalDenial(t, imr, 3600)
+		}
+		imr.TransportSignalDiscovery.Begin(strictChildOwner)
+		imr.settleTransportSignalLookup(strictChildOwner, tc.resp(soa), tc.err)
+		got := ""
+		if st, ok := imr.TransportSignalDiscovery.Snapshot()[strictChildOwner]; ok {
+			got = cache.DiscoveryStatusToString[st.Status]
+		}
+		if got != tc.want {
+			t.Errorf("%s: tracker says %q, want %q", name, got, tc.want)
+		}
+	}
+}

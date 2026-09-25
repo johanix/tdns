@@ -949,7 +949,10 @@ for them. It waits up to `tuning.discovery.strict-wait`
 (default 2s), and never past the query's own deadline. Only
 then does the query fail, with SERVFAIL and an EDE naming the
 zone. The lookups go out in cleartext and ask only about the
-servers, never about the client's name.
+servers, never about the client's name. A lookup answered
+with NXDOMAIN or NODATA is cached like any other negative
+answer: until it expires, strict queries to that zone fail
+at once, and the first one after it looks again.
 
 Additional options:
 
