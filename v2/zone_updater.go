@@ -860,6 +860,12 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 				RRs:    []dns.RR{},
 				RRSIGs: []dns.RR{},
 			}
+		} else {
+			// Get returns an RRset whose slices alias the published snapshot
+			// (cloneOwner shares them). The TTL normalisation below writes
+			// into the RRs themselves, so clone before mutating -- as the zone
+			// path does.
+			rrset = cloneRRset(rrset)
 		}
 
 		switch class {
@@ -909,9 +915,21 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 				break
 			}
 		}
+		changed := false
 		if !dup {
 			lg.Debug("ApplyChildUpdateToZoneData: adding RR", "rrtype", rrtypestr, "rr", rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
+			changed = true
+		}
+		// One TTL per RRset (RFC 2181 §5.2): the child-policy TTL the new RR
+		// was given applies to the whole RRset. Also on a duplicate add, since
+		// dns.IsDuplicate ignores the TTL. #767
+		if unifyRRsetTTL(rrset.RRs, rrcopy.Header().Ttl) {
+			lg.Debug("ApplyChildUpdateToZoneData: normalised RRset TTL", "owner", ownerName,
+				"rrtype", rrtypestr, "ttl", rrcopy.Header().Ttl)
+			changed = true
+		}
+		if changed {
 			rrset.RRSIGs = []dns.RR{}
 			// See the removal branch above: only the DS at a delegation
 			// point is ours to sign.
@@ -1284,9 +1302,26 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 			}
 		}
 
+		changed := false
 		if !dup {
 			lg.Debug("ApplyZoneUpdateToZoneData: adding RR", "rrtype", rrtypestr, "rr", rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
+			changed = true
+		}
+		// All RRs in an RRset must share one TTL (RFC 2181 §5.2). The added
+		// RR's TTL wins: over DDNS that is the update-policy TTL (the parent
+		// decides how long child data is cached), on the API and internal
+		// channels it is the TTL the caller chose deliberately. Also applied
+		// when the add was a duplicate: dns.IsDuplicate ignores the TTL, so
+		// re-adding an existing RR is how a mixed-TTL RRset gets repaired.
+		// The RRs are safe to mutate: cloneRRset above deep-copies them. #767
+		if unifyRRsetTTL(rrset.RRs, rrcopy.Header().Ttl) {
+			lg.Debug("ApplyZoneUpdateToZoneData: normalised RRset TTL", "owner", ownerName,
+				"rrtype", rrtypestr, "ttl", rrcopy.Header().Ttl)
+			changed = true
+		}
+
+		if changed {
 			// rrset.RRSIGs = []dns.RR{} // XXX: The RRset changed, so any old RRSIGs are now invalid.
 			if zd.signableLocked(ownerName, rrtype) {
 				_, err = zd.SignRRset(&rrset, ownerName, dak, true, nil)
@@ -1316,6 +1351,19 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 	lg.Debug("ApplyZoneUpdateToZoneData done", "updated", updated)
 
 	return updated, nil
+}
+
+// unifyRRsetTTL sets the TTL of every RR in rrs to ttl, so the RRset obeys
+// RFC 2181 §5.2. It reports whether any RR changed.
+func unifyRRsetTTL(rrs []dns.RR, ttl uint32) bool {
+	changed := false
+	for _, rr := range rrs {
+		if rr.Header().Ttl != ttl {
+			rr.Header().Ttl = ttl
+			changed = true
+		}
+	}
+	return changed
 }
 
 // reconcileDelegationChangesLocked repairs the RRSIGs below a delegation this
