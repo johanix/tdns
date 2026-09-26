@@ -36,11 +36,18 @@ type trustNet struct {
 	// disagree: the nameservers do not agree on the key, from the first
 	// query on.
 	disagree map[string]bool
+
+	// denial: the verdict on the proof that comes with an empty answer for
+	// the key. Absent: the empty answer comes with no proof. denialsJudged
+	// lists the keys whose proof was handed to the validator.
+	denial        map[string]cache.ValidationState
+	denialsJudged []string
+	zone          string // the child, whose SOA and NSEC the proof carries
 }
 
 func trustKey(name string, qtype uint16) string { return name + "/" + dns.TypeToString[qtype] }
 
-func (n *trustNet) query(_ context.Context, qname string, qtype uint16, _ *core.RRset) (*core.RRset, bool, error) {
+func (n *trustNet) query(_ context.Context, qname string, qtype uint16, _ *core.RRset) (*core.RRset, []*core.RRset, bool, error) {
 	k := trustKey(qname, qtype)
 	if n.queried == nil {
 		n.queried = map[string]int{}
@@ -49,7 +56,35 @@ func (n *trustNet) query(_ context.Context, qname string, qtype uint16, _ *core.
 	// Data nobody serves comes back the way queryAllNSAndCompare reports every
 	// nameserver answering that there is none: an empty RRset, in sync.
 	inSync := !n.disagree[k] && !(n.queried[k] > 1 && n.laterDisagree[k])
-	return &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: n.served[k]}, inSync, nil
+	var proof []*core.RRset
+	if _, ok := n.denial[k]; ok && len(n.served[k]) == 0 {
+		// Shaped like the child's own NODATA (childNodataProof): its SOA, and
+		// its signed NSEC at qname without the type. validateDenial judges it
+		// by key; the signature is never checked.
+		proof = []*core.RRset{
+			{Name: n.zone, Class: dns.ClassINET, RRtype: dns.TypeSOA, RRs: []dns.RR{
+				&dns.SOA{Hdr: dns.RR_Header{Name: n.zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 300}},
+			}},
+			{Name: qname, Class: dns.ClassINET, RRtype: dns.TypeNSEC,
+				RRs: []dns.RR{&dns.NSEC{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: 300},
+					NextDomain: n.zone, TypeBitMap: []uint16{dns.TypeRRSIG, dns.TypeNSEC}}},
+				RRSIGs: []dns.RR{&dns.RRSIG{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 300},
+					TypeCovered: dns.TypeNSEC, SignerName: n.zone}},
+			},
+		}
+	}
+	return &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: n.served[k]}, proof, inSync, nil
+}
+
+// validateDenial stands in for the IMR's cache.ValidateNegativeResponse,
+// which also refuses to judge a proof that is not there.
+func (n *trustNet) validateDenial(_ context.Context, qname string, qtype uint16, proof []*core.RRset) (cache.ValidationState, error) {
+	k := trustKey(qname, qtype)
+	n.denialsJudged = append(n.denialsJudged, k)
+	if len(proof) == 0 {
+		return cache.ValidationStateNone, fmt.Errorf("no negative authority RRsets to validate")
+	}
+	return n.denial[k], nil
 }
 
 func (n *trustNet) validate(_ context.Context, rrset *core.RRset) (cache.ValidationState, error) {
@@ -136,6 +171,7 @@ func trustScanner(n *trustNet) *Scanner {
 	sc.Log["CDS"], sc.Log["CSYNC"] = quiet, quiet
 	sc.queryChild = n.query
 	sc.validateRRset = n.validate
+	sc.validateDenial = n.validateDenial
 	return sc
 }
 

@@ -24,9 +24,18 @@ import (
 // records, an OPT record when the query had one, and the given AA bit.
 func testAuthServer(t *testing.T, authoritative bool, answer ...string) string {
 	t.Helper()
-	var records []dns.RR
+	return testAuthServerWithAuthority(t, authoritative, answer, nil)
+}
+
+// testAuthServerWithAuthority is testAuthServer with authority records as well.
+func testAuthServerWithAuthority(t *testing.T, authoritative bool, answer, authority []string) string {
+	t.Helper()
+	var records, nsRecords []dns.RR
 	for _, s := range answer {
 		records = append(records, mustRR(t, s))
+	}
+	for _, s := range authority {
+		nsRecords = append(nsRecords, mustRR(t, s))
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -42,6 +51,7 @@ func testAuthServer(t *testing.T, authoritative bool, answer ...string) string {
 			m.SetReply(r)
 			m.Authoritative = authoritative
 			m.Answer = records
+			m.Ns = nsRecords
 			if opt := r.IsEdns0(); opt != nil {
 				m.SetEdns0(opt.UDPSize(), opt.Do())
 			}
@@ -267,7 +277,7 @@ func TestScansOfOneChildAreSerialised(t *testing.T) {
 
 	var mu sync.Mutex
 	var events []string
-	sc.queryChild = func(ctx context.Context, qname string, qtype uint16, ns *core.RRset) (*core.RRset, bool, error) {
+	sc.queryChild = func(ctx context.Context, qname string, qtype uint16, ns *core.RRset) (*core.RRset, []*core.RRset, bool, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if qtype == dns.TypeCSYNC {

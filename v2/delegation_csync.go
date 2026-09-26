@@ -147,6 +147,13 @@ type csyncDelta struct {
 	NSAdds, NSRemoves     []dns.RR
 	GlueAdds, GlueRemoves []dns.RR
 	Changed               bool
+	// GlueSkipped: glue left as the parent holds it, and why, as
+	// "<nameserver> <type>: <reason>".
+	GlueSkipped []string
+	// GlueGone: "<nameserver> <type>" for each glue type removed because the
+	// child serves none of it any more. Under a policy that requires DNSSEC,
+	// each rests on a proof of that absence (proveAbsent).
+	GlueGone []string
 }
 
 // computeCsyncDelta runs RFC 7477 §3.2 for the parent: for each type in
@@ -158,10 +165,11 @@ type csyncDelta struct {
 //     terminal (RFC 7477 §3.2.1 rejects an empty NS RRset).
 //   - A / AAAA: glue only for nameservers inside the child zone, per
 //     nameserver of the resulting NS set. A glue fetch that fails or on which
-//     the child's nameservers disagree skips THAT nameserver and continues.
-//     An RRset they agree is empty removes that type's glue (RFC 7477 §3.2.2:
-//     the result "should be an empty set"). A nameserver no longer in the NS
-//     set has its stored glue removed.
+//     the child's nameservers disagree skips THAT nameserver's glue of that
+//     type and continues; the skip is reported in GlueSkipped. An RRset they
+//     agree is empty removes that type's glue (RFC 7477 §3.2.2: the result
+//     "should be an empty set"). A nameserver no longer in the NS set has its
+//     stored glue removed.
 //   - any other type is refused. csyncTypes refuses such a bitmap before
 //     anything is fetched; this refuses it too, for a caller that builds its
 //     own type list.
@@ -175,9 +183,12 @@ type csyncDelta struct {
 // The DNSSEC requirement lives in the fetcher the scanner passes, not in this
 // rule. The UPDATE path (CheckDelegationNSCoherence) authenticates the change
 // by the child's SIG(0) signature instead, and checks coherence with plain
-// agreement. Under a policy that requires DNSSEC the fetcher reports an empty
-// answer as an error, because RFC 7477 wants the absence proven and the proof
-// is not validated, so there a glue type is never removed this way.
+// agreement. Under a policy that requires DNSSEC the fetcher hands on an
+// empty RRset only when the proof of the absence validates Secure (#779), and
+// reports any other as an absenceNotProven error. That glue type is then kept
+// where the parent holds it, and the skip reported. Where the parent holds
+// none, or the nameserver is new, there is nothing an empty RRset would
+// change, and nothing is reported.
 //
 // currentNS is the NS RRset the parent publishes for the child now. When the
 // bitmap does not list NS it is also the resulting NS set: the NS RRset stays
@@ -250,12 +261,22 @@ func computeCsyncDelta(ctx context.Context, childZone string, types []uint16, cu
 					lg.Printf("ProcessCSYNCNotify: %s: %s for %s refused: %v", childZone, typeStr, nsName, err)
 					return csyncDelta{}, err
 				}
+				if isAbsenceNotProven(err) {
+					// Only glue the parent holds can go stale. A new nameserver
+					// without this type has nothing to add, and one the parent
+					// holds no such glue for has nothing to remove.
+					if current, _ := currentGlue(nsName, t); !oldNSSet[nsCanon] || len(current) == 0 {
+						continue
+					}
+				}
 				if err != nil {
 					lg.Printf("ProcessCSYNCNotify: %s: error querying %s for %s: %v", childZone, typeStr, nsName, err)
+					d.GlueSkipped = append(d.GlueSkipped, fmt.Sprintf("%s %s: %v", nsName, typeStr, err))
 					continue
 				}
 				if !glueInSync {
 					lg.Printf("ProcessCSYNCNotify: %s: child NS not in sync for %s %s, skipping", childZone, nsName, typeStr)
+					d.GlueSkipped = append(d.GlueSkipped, fmt.Sprintf("%s %s: the child's nameservers do not agree on it", nsName, typeStr))
 					continue
 				}
 
@@ -267,6 +288,9 @@ func computeCsyncDelta(ctx context.Context, childZone string, types []uint16, cu
 						d.GlueAdds = append(d.GlueAdds, adds...)
 						d.GlueRemoves = append(d.GlueRemoves, removes...)
 						d.Changed = true
+						if len(newGlue) == 0 {
+							d.GlueGone = append(d.GlueGone, nsName+" "+typeStr)
+						}
 						lg.Printf("ProcessCSYNCNotify: %s: %s glue for %s changed: %d adds, %d removes", childZone, typeStr, nsName, len(adds), len(removes))
 					}
 				} else if len(newGlue) > 0 {

@@ -110,7 +110,10 @@ type AuthQueryRequest struct {
 
 type AuthQueryResponse struct {
 	rrset *core.RRset
-	err   error
+	// denial: for an authoritative answer with no records of the type, the
+	// authority section that proves it, grouped into RRsets.
+	denial []*core.RRset
+	err    error
 }
 
 func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
@@ -159,7 +162,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 					drainTimer.Reset(500 * time.Millisecond)
 				}
 				rrset := core.RRset{Name: req.qname}
-				req.response <- &AuthQueryResponse{&rrset, ctx.Err()}
+				req.response <- &AuthQueryResponse{rrset: &rrset, err: ctx.Err()}
 				continue
 			}
 
@@ -192,12 +195,12 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 			}
 
 			if err != nil {
-				req.response <- &AuthQueryResponse{&rrset, err}
+				req.response <- &AuthQueryResponse{rrset: &rrset, err: err}
 				continue
 			}
 
 			if res.Rcode != dns.RcodeSuccess {
-				req.response <- &AuthQueryResponse{&rrset, fmt.Errorf("Query for %s %s received rcode: %s",
+				req.response <- &AuthQueryResponse{rrset: &rrset, err: fmt.Errorf("Query for %s %s received rcode: %s",
 					req.qname, dns.TypeToString[req.rrtype], dns.RcodeToString[res.Rcode])}
 				continue
 			}
@@ -207,7 +210,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 			// its referral, would otherwise have its records -- in that case the
 			// parent's NS set -- compared as the child's.
 			if !res.Authoritative {
-				req.response <- &AuthQueryResponse{&rrset, fmt.Errorf("non-authoritative response for %s %s: the server is not authoritative for the zone",
+				req.response <- &AuthQueryResponse{rrset: &rrset, err: fmt.Errorf("non-authoritative response for %s %s: the server is not authoritative for the zone",
 					req.qname, dns.TypeToString[req.rrtype])}
 				continue
 			}
@@ -226,7 +229,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 						lg.Warn("AuthQueryEngine: answer is not expected RR type", "expectedRrtype", dns.TypeToString[req.rrtype], "rr", rr.String())
 					}
 				}
-				req.response <- &AuthQueryResponse{&rrset, nil}
+				req.response <- &AuthQueryResponse{rrset: &rrset}
 				continue
 			}
 
@@ -243,7 +246,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 					}
 				}
 				if len(rrset.RRs) > 0 {
-					req.response <- &AuthQueryResponse{&rrset, nil}
+					req.response <- &AuthQueryResponse{rrset: &rrset}
 					continue
 				}
 			}
@@ -260,23 +263,32 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 						rrset.RRSIGs = append(rrset.RRSIGs, rr)
 					}
 				}
-				req.response <- &AuthQueryResponse{&rrset, nil}
-				continue
 			}
 
-			req.response <- &AuthQueryResponse{&rrset, nil}
+			resp := &AuthQueryResponse{rrset: &rrset}
+			if len(rrset.RRs) == 0 {
+				// An authoritative NODATA. The authority section is the
+				// proof of it: the SOA, and in a signed zone the NSEC or
+				// NSEC3 records and their RRSIGs. Kept, so that a scan that
+				// must see an absence proven can validate it (#779).
+				resp.denial = authorityRRsets(res.Ns)
+			}
+			req.response <- resp
 		}
 	}
 }
 
 func (scanner *Scanner) AuthQueryNG(qname, ns string, rrtype uint16, transport string) (*core.RRset, error) {
-	//	requests := make(chan AuthQueryRequest)
-	//defer close(requests)
+	rrset, _, err := scanner.authQueryWithDenial(qname, ns, rrtype, transport)
+	return rrset, err
+}
 
+// authQueryWithDenial is AuthQueryNG, and for an authoritative answer with no
+// records of the type, the authority section that proves there are none,
+// grouped into RRsets (authorityRRsets).
+func (scanner *Scanner) authQueryWithDenial(qname, ns string, rrtype uint16, transport string) (*core.RRset, []*core.RRset, error) {
 	response := make(chan *AuthQueryResponse)
 	defer close(response)
-
-	//	go AuthQueryEngine(requests)
 
 	scanner.AuthQueryQ <- AuthQueryRequest{
 		qname:     qname,
@@ -287,5 +299,5 @@ func (scanner *Scanner) AuthQueryNG(qname, ns string, rrtype uint16, transport s
 	}
 
 	resp := <-response
-	return resp.rrset, resp.err
+	return resp.rrset, resp.denial, resp.err
 }
