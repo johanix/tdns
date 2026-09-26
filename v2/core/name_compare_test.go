@@ -101,8 +101,12 @@ func TestEqualNamesDoesNotAllocate(t *testing.T) {
 
 // Differential test against miekg's own canonicalisation. equal() is
 // unexported, but dns.CanonicalName is exported and folds by the same
-// ASCII-only rule (RFC 4034 §6.2), so the two must agree on every input. If
-// they ever diverge, this copy has drifted from the library it was lifted from.
+// ASCII-only rule (RFC 4034 §6.2), so the two must agree on every name written
+// without an escape. If they diverge there, this copy has drifted from the
+// library it was lifted from. With an escape they differ on purpose:
+// dns.CanonicalName compares the escape's text and EqualNames the octet it
+// spells, so a\065 is aa to one and not to the other. Escapes are checked
+// against CanonicalizeName instead (TestCanonicalizeNameAgreesWithEqualNames).
 func TestEqualNamesAgreesWithCanonicalName(t *testing.T) {
 	// Mixed deliberately: ASCII letters either side of the fold, digits and
 	// hyphens adjacent to them in the table, the two Unicode traps, an escape
@@ -122,6 +126,10 @@ func TestEqualNamesAgreesWithCanonicalName(t *testing.T) {
 	checked := 0
 	for _, a := range built {
 		for _, b := range built {
+			// dns.CanonicalName compares an escape's text, not its octet.
+			if strings.Contains(a, `\`) || strings.Contains(b, `\`) {
+				continue
+			}
 			want := dns.CanonicalName(a) == dns.CanonicalName(b)
 			if got := EqualNames(a, b); got != want {
 				t.Fatalf("EqualNames(%q, %q) = %v, but CanonicalName equality says %v",

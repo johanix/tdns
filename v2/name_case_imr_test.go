@@ -127,6 +127,11 @@ func TestParseOwnerNameStripsThePrefixItMatched(t *testing.T) {
 		{"_Dns.NS1.Example.", "NS1.Example.", true},
 		{"_DNS.NS1.EXAMPLE.", "NS1.EXAMPLE.", true},
 
+		// An escaped prefix is the prefix too, and comes off as one label
+		// however many bytes spell it.
+		{`\_dns.ns1.example.`, "ns1.example.", true},
+		{`\095DNS.NS1.example.`, "NS1.example.", true},
+
 		// Not a signal owner: left alone entirely.
 		{"ns1.example.", "ns1.example.", false},
 		{"_dnsx.ns1.example.", "_dnsx.ns1.example.", false},

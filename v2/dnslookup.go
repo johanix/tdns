@@ -1777,15 +1777,17 @@ const oobTransportPrefix = "_dns."
 // Returns: baseName, isOOTSOwner, originalOwner
 func parseOwnerName(owner string) (baseName string, isOOTSOwner bool, originalOwner string) {
 	originalOwner = owner
-	// Fold to TEST the prefix, then slice the ORIGINAL by the prefix's length.
-	// strings.TrimPrefix would compare bytes again and strip nothing from
-	// _DNS.ns1.example. -- the name would clear the test and then keep its
-	// prefix, so baseName stayed the whole owner and every lookup on it missed.
-	// Slicing preserves the leftover case, which is the point: the base name is
-	// a nameserver name, and we serve back what arrived.
+	// Fold to TEST the prefix, then cut it off the ORIGINAL. strings.TrimPrefix
+	// would compare bytes again and strip nothing from _DNS.ns1.example. -- the
+	// name would clear the test and then keep its prefix, so baseName stayed the
+	// whole owner and every lookup on it missed. Cutting the original preserves
+	// the leftover spelling, which is the point: the base name is a nameserver
+	// name, and we serve back what arrived. The cut counts labels, not the
+	// prefix's bytes, because not every spelling of the prefix is as long as
+	// the canonical one (core.TrimLeadingLabels).
 	if strings.HasPrefix(core.CanonicalizeName(owner), oobTransportPrefix) {
 		isOOTSOwner = true
-		baseName = owner[len(oobTransportPrefix):]
+		baseName = core.TrimLeadingLabels(owner, dns.CountLabel(oobTransportPrefix))
 	} else {
 		baseName = owner
 	}
@@ -2515,8 +2517,8 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 	if !strings.HasPrefix(core.CanonicalizeName(owner), oobTransportPrefix) {
 		return
 	}
-	// Sliced, not TrimPrefix'd: see parseOwnerName.
-	base := owner[len(oobTransportPrefix):]
+	// Cut by labels, not TrimPrefix'd: see parseOwnerName.
+	base := core.TrimLeadingLabels(owner, dns.CountLabel(oobTransportPrefix))
 	if base == "" {
 		return
 	}

@@ -64,12 +64,15 @@ func entNamesFrom(apexName string, data map[string]*OwnerData) map[string]struct
 	for name := range data {
 		n := name
 		for {
-			idx := strings.Index(n, ".")
-			if idx < 0 {
+			// The next label, not the next dot: a dot inside a label is part
+			// of the label. Keys are canonical, which spells such a dot \., and
+			// dns.NextLabel counts the backslashes before each dot.
+			off, end := dns.NextLabel(n, 0)
+			if end {
 				break
 			}
-			n = n[idx+1:]
-			if n == "" || n == apex {
+			n = n[off:]
+			if n == apex {
 				break
 			}
 			// "Owns nothing" is about RECORDS, not about having a node.
