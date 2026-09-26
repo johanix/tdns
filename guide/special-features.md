@@ -954,6 +954,16 @@ with NXDOMAIN or NODATA is cached like any other negative
 answer: until it expires, strict queries to that zone fail
 at once, and the first one after it looks again.
 
+The same rule holds for every zone the query passes on the
+way. A delegation the IMR has cached is followed without a
+query. A zone whose delegation is not cached is asked for
+the client's name, so its servers must offer an encrypted
+transport too. On a cold cache that starts at the root.
+Where the root and TLD servers signal nothing, as on
+today's Internet, strict queries fail with an EDE naming
+the zone (`.` for the root) until ordinary queries have
+cached the delegations above the zone.
+
 Additional options:
 
 - `transport-signal-type` -- Selects which record type to
