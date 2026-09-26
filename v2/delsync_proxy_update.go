@@ -151,7 +151,9 @@ func (zd *ZoneData) proxySig0PublicationState(kdb *KeyDB) (ProxyUpdateState, err
 	if ierr != nil {
 		lgDns.Error("proxy update precondition: could not build operator instruction", "zone", zd.ZoneName, "err", ierr)
 	}
-	msg := "DSYNC UPDATE proxy waiting: publish the KEY + HSYNCPARAM pubkey at the primary (see log / `keystore dnssec proxy-key`)"
+	// Name the command that prints the records, with this zone filled in.
+	// It used to point at "keystore dnssec proxy-key", which does not exist.
+	msg := fmt.Sprintf("DSYNC UPDATE proxy waiting: publish the KEY + HSYNCPARAM pubkey at the primary (see log / `tdns-cli agent zone proxy-key -z %s`)", zd.ZoneName)
 	zd.SetError(DelegationSyncWarning, "%s", msg)
 	lgDns.Warn("proxy update precondition: waiting for KEY publication at primary",
 		"zone", zd.ZoneName, "instruction", instr)
