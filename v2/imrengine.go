@@ -696,9 +696,11 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 	// freshDenial answers a denial IterativeDNSQuery has just returned. It
 	// has also cached it, with the verdict on its proof (handleNegative), and
 	// that verdict is read back here, as the cache-hit branch reads it.
+	// Peek, not Get: a denial whose SOA has TTL 0 is stored already expired,
+	// and Get would drop it and report no verdict.
 	freshDenial := func(kind cache.CacheContext) {
 		var state cache.ValidationState
-		if c := imr.Cache.Get(qname, qtype); c != nil && c.Context == kind {
+		if c := imr.Cache.Peek(qname, qtype); c != nil && c.Context == kind {
 			state = c.State
 		}
 		resp.denied(kind, state)

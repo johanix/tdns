@@ -24,18 +24,18 @@ import (
 
 // startDenialAuthDouble is an authoritative double for zone on 127.0.0.1 that
 // has no data: NXDOMAIN for nxname, NODATA for any other name, both with the
-// zone SOA in AUTHORITY. The counter records the queries for <qname, qtype>,
-// so the validator's own lookups do not count.
-func startDenialAuthDouble(t *testing.T, zone, nxname, qname string, qtype uint16) (int, *atomic.Int32) {
+// zone SOA in AUTHORITY, its TTL and MINIMUM both soaTTL. The counter records
+// the queries for <qname, qtype>, so the validator's own lookups do not count.
+func startDenialAuthDouble(t *testing.T, zone, nxname, qname string, qtype uint16, soaTTL uint32) (int, *atomic.Int32) {
 	t.Helper()
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Skipf("cannot listen on 127.0.0.1: %v", err)
 	}
 	soa := &dns.SOA{
-		Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 60},
+		Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: soaTTL},
 		Ns:  "ns." + zone, Mbox: "hostmaster." + zone,
-		Serial: 1, Refresh: 3600, Retry: 600, Expire: 86400, Minttl: 60,
+		Serial: 1, Refresh: 3600, Retry: 600, Expire: 86400, Minttl: soaTTL,
 	}
 	var asked atomic.Int32
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
@@ -81,6 +81,22 @@ func startDenialAuthDouble(t *testing.T, zone, nxname, qname string, qtype uint1
 	return pc.LocalAddr().(*net.UDPAddr).Port, &asked
 }
 
+// denialTestImr is a resolver that knows zone only as a stub pointing at the
+// denial double on 127.0.0.1:port.
+func denialTestImr(t *testing.T, zone string, port int) *Imr {
+	t.Helper()
+	imr := newTestImr(t)
+	p := strconv.Itoa(port)
+	imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, p, nil)
+	imr.Cache.DNSClient[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, p, nil)
+	if err := imr.Cache.AddStub(zone, []cache.AuthServer{
+		{Name: "ns." + zone, Addrs: []string{"127.0.0.1"}, Alpn: []string{"do53"}},
+	}); err != nil {
+		t.Fatalf("AddStub(%s): %v", zone, err)
+	}
+	return imr
+}
+
 func TestImrQueryAnswersADenialTheSameWayTwice(t *testing.T) {
 	const zone = "denial.example."
 	const nxname = "nope." + zone
@@ -93,16 +109,8 @@ func TestImrQueryAnswersADenialTheSameWayTwice(t *testing.T) {
 		{"NXDOMAIN", nxname, cache.ContextNXDOMAIN},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			port, asked := startDenialAuthDouble(t, zone, nxname, tc.qname, dns.TypeTXT)
-			imr := newTestImr(t)
-			p := strconv.Itoa(port)
-			imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, p, nil)
-			imr.Cache.DNSClient[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, p, nil)
-			if err := imr.Cache.AddStub(zone, []cache.AuthServer{
-				{Name: "ns." + zone, Addrs: []string{"127.0.0.1"}, Alpn: []string{"do53"}},
-			}); err != nil {
-				t.Fatalf("AddStub(%s): %v", zone, err)
-			}
+			port, asked := startDenialAuthDouble(t, zone, nxname, tc.qname, dns.TypeTXT, 60)
+			imr := denialTestImr(t, zone, port)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -126,6 +134,12 @@ func TestImrQueryAnswersADenialTheSameWayTwice(t *testing.T) {
 					t.Errorf("ask %d: Denial %q, want %q", i+1,
 						cache.CacheContextToString[resp.Denial], cache.CacheContextToString[tc.want])
 				}
+				// Equal answers could both be the verdict nobody set. The
+				// zone is unsigned and no trust anchor is known: Insecure.
+				if resp.ValidationState != cache.ValidationStateInsecure || resp.Validated {
+					t.Errorf("ask %d: verdict %s/%v, want insecure/false", i+1,
+						cache.ValidationStateToString[resp.ValidationState], resp.Validated)
+				}
 			}
 			first, second := resps[0], resps[1]
 			if first.ValidationState != second.ValidationState || first.Validated != second.Validated || first.Msg != second.Msg {
@@ -134,6 +148,28 @@ func TestImrQueryAnswersADenialTheSameWayTwice(t *testing.T) {
 					cache.ValidationStateToString[second.ValidationState], second.Validated, second.Msg)
 			}
 		})
+	}
+}
+
+// A denial whose SOA has TTL 0 is cached already expired. The fresh answer
+// still carries the verdict handleNegative stored with it.
+func TestAFreshDenialWithTTLZeroKeepsItsVerdict(t *testing.T) {
+	const zone = "zerottl.example."
+	const qname = "www." + zone
+	port, _ := startDenialAuthDouble(t, zone, "", qname, dns.TypeTXT, 0)
+	imr := denialTestImr(t, zone, port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := imr.ImrQuery(ctx, qname, dns.TypeTXT, dns.ClassINET, nil)
+	if err != nil || resp == nil || resp.Error {
+		t.Fatalf("err=%v resp=%+v", err, resp)
+	}
+	if resp.Denial != cache.ContextNoErrNoAns {
+		t.Errorf("Denial %q, want NODATA", cache.CacheContextToString[resp.Denial])
+	}
+	if resp.ValidationState != cache.ValidationStateInsecure {
+		t.Errorf("verdict %q, want insecure", cache.ValidationStateToString[resp.ValidationState])
 	}
 }
 
