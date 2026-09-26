@@ -5,7 +5,7 @@ Follows from #781: tdns-imr keeps a transport signal it has learned for as long
 as it runs, and never refreshes it. It also sets the frame for #466 (delegation
 prefetch), which wants the same kind of machinery for NS RRsets.
 
-**Status:** proposal, revision 2, not implemented.
+**Status:** proposal, revision 2.1, not implemented.
 
 **Revisions:**
 - **r1**, 2026-09-26: merged as `9a168618` (#783).
@@ -22,6 +22,14 @@ prefetch), which wants the same kind of machinery for NS RRsets.
     (§The OOTS opt-in);
   - r1's five open questions are settled (§Decisions), and the tests and a
     must-not-regress list are extended.
+- **r2.1**, 2026-09-26, after a re-review of r2:
+  - an expired signal is not unknown: it keeps its last weights to compare
+    against, only unknown takes a first signal, and the first use after an
+    idle expiry starts a lookup (§The life of a server's signal,
+    §Harvesting, §Expiry);
+  - a refresh not completed by the end of the TTL is grace, however far it
+    got, and signal jitter stays inside the window (§The grace, §Shape);
+  - the message copy in `tryServer` is a deep one (§The OOTS opt-in).
 
 ## The principles
 
@@ -98,11 +106,11 @@ waits until Do53 stops being mandatory.
 
 | state | weights in the draw | OOTS on queries to it | leaves the state when |
 |---|---|---|---|
-| unknown | none (Do53 default) | yes | a signal is harvested or looked up: **fresh** |
+| unknown: never learned, or a denial has expired | none (Do53 default) | yes | a signal is harvested or looked up: **fresh** |
 | fresh | the signal's | **no** | the refresh window opens: **window** |
-| window | the signal's | yes | an equal signal arrives over an encrypted transport: **fresh**, expiry renewed. The fallback lookup answers: **fresh**. It is denied: **denied**. It fails: **grace**. The TTL runs out with the server not in use: **expired** |
-| grace | the signal's | yes | a lookup answers: **fresh**. A lookup is denied: **denied**. The grace ends: **expired** |
-| expired | none; a note of the transports the server offered | yes | a signal arrives, judged as for **unknown**: **fresh** |
+| window | the signal's | yes | an equal signal arrives over an encrypted transport: **fresh**, expiry renewed. The fallback lookup answers: **fresh**. It is denied: **denied**. It fails: **grace**. The TTL runs out with the server in use and no refresh completed: **grace**. The TTL runs out with the server not in use: **expired** |
+| grace | the signal's | yes | a lookup answers, or an equal signal arrives over an encrypted transport: **fresh**. A lookup is denied: **denied**. The grace ends: **expired** |
+| expired | none; the last signal is kept to compare against, and as the note of the transports the server offered | yes | the server is used: **grace**, with a lookup started (§Expiry) |
 | denied | none | no | the cached denial expires (#777): **unknown** |
 
 **A denial is a withdrawal.** A fallback or verifying lookup answered with
@@ -110,14 +118,18 @@ NXDOMAIN or NODATA means the operator has taken the signal down. The weights
 are dropped at once, with no grace, and the server gets no opt-in while the
 denial is cached, the lifetime #777 already gives it.
 
-**The grace** is only for a lookup that failed:
-- a timeout or SERVFAIL;
-- an answer from a signed owner zone that is not Secure;
-- an answer whose expiry does not move forward (#727's rule).
+**The grace** is only for a refresh that has not succeeded:
+- a lookup that failed: a timeout or SERVFAIL, an answer from a signed owner
+  zone that is not Secure, or an answer whose expiry does not move forward
+  (#727's rule);
+- a server in use whose refresh has not completed when the TTL runs out,
+  whether its lookup is in flight, queued behind the worker limit, or not yet
+  started. A busy engine must not turn into Do53 for that server;
+- the lookup started by the first use after an idle expiry (§Expiry).
 
 It lasts the smaller of one TTL and five minutes. The engine retries with
-`DiscoveryTracker`'s backoff inside it. A lookup still in flight when the TTL
-runs out also counts as grace. This is the only use of a signal past its TTL.
+`DiscoveryTracker`'s backoff inside it. This is the only use of a signal past
+its TTL.
 
 ### The refresh window
 
@@ -160,7 +172,10 @@ Decided per server in `tryServer`, from that server's state:
 The question's message is shared by every server a lookup tries
 (`buildQuery`, `v2/dnslookup.go:2201`). `tryServer` therefore adds or removes
 the option on a copy, never on the shared message: a question that tries one
-fresh server and one in its window sends the option to the second only.
+fresh server and one in its window sends the option to the second only. The
+copy is a deep one (`dns.Msg.Copy`), with an OPT RR of its own; a shallow
+copy shares `Extra`, and adding the option to it would add it to the shared
+message.
 
 ### Harvesting
 
@@ -181,10 +196,16 @@ has it (`wireTransport`).
   the old signal after the operator has changed it, and keep `dot:5` alive
   when the operator has moved to `dot:50`.
 - **Different:** not applied. It starts one verifying lookup.
-- **For a server in unknown or expired:** applied, as today. A forged first
-  signal can only steer queries between the server's own transports:
+- **For a server in unknown:** applied, as today. A forged first signal can
+  only steer queries between the server's own transports:
   `applyTransportMapToServer` sets transports, ALPN order and weights, and
   never addresses. Do53 stays the last resort.
+
+These rules hold in every state that has a signal to compare against: fresh,
+window, grace, and expired, where the comparison is with the last signal.
+**Only unknown takes a first signal.** Treating an expired server as unknown
+would accept a signal over Do53 after an idle spell: the replay that "equal,
+over Do53" refuses while the signal is live.
 
 After a verifying lookup has confirmed the current signal, further mismatches
 start no new lookup for a short cooldown: a few minutes, never longer than the
@@ -228,23 +249,33 @@ would leave them with no refresh at all.
 
 ### Expiry, first use, and strict privacy
 
-**Expiry.** An expired signal's weights leave the draw. What stays is a note of
-the transports the server offered. The next query to the server carries the
-OOTS option and goes over one of those transports, so the first use after a
-long idle spell is neither in cleartext nor delayed by a separate lookup. Its
-response brings the current signal. If the server no longer runs that
-transport, the query falls back as its privacy level allows, and the
-fallback's response carries the new signal. This is one query per server per
-expiry, which does not undermine the operator's load control.
+**Expiry.** An expired signal's weights leave the draw, and its engine item is
+dropped. The signal itself is kept: it is what a later signal is compared
+against, and it is the note of the transports the server offered.
 
-**First use with nothing noted.** A non-strict query goes over Do53 with the
+**First use after an idle expiry.** When the server is used again:
+- it moves to **grace**, and the last weights return to the draw for as long
+  as the grace lasts;
+- its engine item is re-created, and the `_dns` lookup starts at once;
+- its queries carry the OOTS option, so a server that echoes can settle the
+  grace with an equal signal over an encrypted transport before the lookup
+  answers;
+- a server that does not echo gets its weights back from the lookup. Without
+  it, such a server would stay expired, and the operator's changes would
+  never be learned.
+
+The grace here lasts as long as the lookup: normally well under a second, and
+never longer than the grace's cap. The alternative, no weights until the
+lookup answers, would send those queries over Do53.
+
+**First use of an unknown server.** A non-strict query goes over Do53 with the
 opt-in. That is one query, its response carries the signal, and a client that
 did not ask for strict privacy has accepted cleartext. It does not wait.
 
 **Strict privacy** keeps #777's behaviour: for a server in **unknown**, the
-precheck looks the signal up and waits for it. A server in **expired** with an
-encrypted transport in its note can carry a strict query at once, over that
-transport.
+precheck looks the signal up and waits for it. A server in **expired** whose
+last signal offered an encrypted transport can carry a strict query at once:
+its first use puts it in grace, with the last weights.
 
 ### Known limits
 
@@ -276,11 +307,14 @@ query-driven; they are not engine clients.
 - **Items.** One per thing to keep fresh: a kind, a key (the owner name),
   its expiry, the last time it was used, the last refresh, and backoff state.
   An item is created when its data is learned, and dropped when the data
-  expires idle or is withdrawn. `AuthServerMap` is never pruned, so without
+  expires idle or is withdrawn. A signal's item is re-created when its server
+  is used again after an idle expiry. `AuthServerMap` is never pruned, so without
   that the scheduler would grow with every nameserver ever seen.
 - **One scheduler goroutine.** A queue ordered by due time, one timer for the
   earliest item, and a wake-up channel for items added or moved. Due times get
   jitter, so a burst of entries cached together does not refresh together.
+  The jitter is bounded per kind: a signal item's due time stays inside its
+  window.
 - **Kinds.** Each kind supplies:
   - when an item is due;
   - whether it is in use: always, or used since the last refresh;
@@ -332,8 +366,9 @@ r1's open questions, settled in r2:
 3. **The grace is the smaller of one TTL and five minutes.**
 4. **Out-of-bailiwick owners are looked up**, opportunistically, validated
    when their zone is signed. They are never left to expire instead.
-5. **A non-strict first use with nothing noted goes over Do53 with the
-   opt-in.** Strict keeps #777's wait.
+5. **A non-strict first use of an unknown server goes over Do53 with the
+   opt-in.** Strict keeps #777's wait. (r2.1: an expired server is not
+   unknown; see §Expiry.)
 
 ## Tests
 
@@ -355,8 +390,17 @@ what they are asked:
   window still gets its fallback lookup, and its signal does not expire.
 - **Idle costs nothing:** a server idle for the whole TTL gets no lookup, its
   signal expires, and its engine item is gone.
-- **First use after expiry:** the query goes over a noted encrypted transport,
-  carries the opt-in, and its response renews the signal.
+- **First use after an idle expiry, a server that echoes:** the server is in
+  grace with its last weights, its queries carry the opt-in, and an equal
+  signal over an encrypted transport makes it fresh.
+- **First use after an idle expiry, a server that does not echo:** a `_dns`
+  lookup runs, and the weights come back from that lookup, or from an equal
+  signal over an encrypted transport, never from a signal over Do53.
+- **After an idle expiry, a signal over Do53:** equal or different, it is not
+  applied; it starts at most one verifying lookup.
+- **A refresh late at the end of the TTL:** a server in use whose fallback is
+  still queued (worker limit, jitter) when the TTL runs out is in grace, not
+  expired, and no query to it goes over Do53 unless the draw picks it.
 - **The parent's referral:** a first child signal is applied; a later equal
   one over Do53 to the parent renews nothing; a later different one starts one
   verifying lookup and is not applied.
@@ -393,6 +437,8 @@ move the expiry counting as a failure, all on the test clock.
   ignores signals in the Additional section.
 - `applyTransportMapToServer` still does not touch addresses: a signal must
   never become a redirect.
+- Only a server in unknown takes a first signal. An expired server is judged
+  against its last signal.
 - `RefreshRoot` is untouched in E1: the 60 s lead, the 15 s retry, the 1 s
   floor, no refresh while `.` is forwarded, a fetch whose new expiry is still
   inside the lead not counting, and `force=true`.
@@ -420,11 +466,11 @@ Estimated lines added, in the codebase's style, comments included:
 
 | step | production | tests |
 |---|---|---|
-| E1 | 780–880 | about 1000 |
+| E1 | 800–900 | about 1050 |
 | E2 | about 150 changed | about 100 |
 | E3 | about 350 | about 350 |
 
-r2 adds to E1 the harvest from the parent's referral and from every response
-kind, the per-server copy of the message, the withdrawal path, and the tests
-for them. E1 could be split in two PRs: the engine with an in-test client
+r2 and r2.1 add to E1 the harvest from the parent's referral and from every
+response kind, the per-server copy of the message, the withdrawal path, the
+expired state's comparison and first-use lookup, and the tests for them. E1 could be split in two PRs: the engine with an in-test client
 first, then signals.
