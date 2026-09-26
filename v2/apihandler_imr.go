@@ -438,11 +438,10 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 					data["rrsigs"] = sigs
 				}
 			}
-			// A denial is cached with its own context and verdict; say which.
-			if c := imr.Cache.Get(qname, qtype); c != nil &&
-				(c.Context == cache.ContextNXDOMAIN || c.Context == cache.ContextNoErrNoAns) {
-				data["negative"] = cache.CacheContextToString[c.Context]
-				data["state"] = cache.ValidationStateToString[c.State]
+			// A denial carries its own verdict in ValidationState; say which
+			// denial it was.
+			if ir != nil && ir.Denial != 0 {
+				data["negative"] = cache.CacheContextToString[ir.Denial]
 			}
 			resp.Data = data
 			switch {
