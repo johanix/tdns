@@ -40,6 +40,18 @@ type DiscoveryState struct {
 	LastAttemptAt time.Time // wall-clock of the most recent Begin
 	NextAttemptAt time.Time // earliest time Begin will return true again after Fail
 	LastError     string    // populated by Fail (empty string allowed)
+	// done is closed when the attempt in progress ends (Succeed, Fail or
+	// Reset), so a caller can wait for it (Pending). Nil when none is.
+	done chan struct{}
+}
+
+// finish ends the attempt in progress, if any, releasing its waiters.
+// Callers hold d.mu.
+func (s *DiscoveryState) finish() {
+	if s.done != nil {
+		close(s.done)
+		s.done = nil
+	}
 }
 
 // DiscoveryTracker replaces the prior "in-flight mutex" pattern with a
@@ -96,6 +108,7 @@ func (d *DiscoveryTracker) Begin(owner string) bool {
 			Status:        DiscoveryInProgress,
 			AttemptCount:  1,
 			LastAttemptAt: now,
+			done:          make(chan struct{}),
 		}
 		return true
 	}
@@ -112,7 +125,24 @@ func (d *DiscoveryTracker) Begin(owner string) bool {
 	s.Status = DiscoveryInProgress
 	s.AttemptCount++
 	s.LastAttemptAt = now
+	s.done = make(chan struct{})
 	return true
+}
+
+// Pending returns a channel that is closed when the attempt in progress for
+// owner ends, or nil when no attempt is in progress. A caller that cannot go
+// on without the result waits on it; nothing else needs to.
+func (d *DiscoveryTracker) Pending(owner string) <-chan struct{} {
+	if d == nil || owner == "" {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	s, ok := d.states[owner]
+	if !ok || s.Status != DiscoveryInProgress || s.done == nil {
+		return nil
+	}
+	return s.done
 }
 
 // Succeed records a successful attempt for owner. Subsequent Begin calls
@@ -136,6 +166,7 @@ func (d *DiscoveryTracker) Succeed(owner string) {
 	}
 	s.Status = DiscoverySucceeded
 	s.LastError = ""
+	s.finish()
 }
 
 // Fail records a failed attempt. Subsequent Begin calls return false until
@@ -158,6 +189,7 @@ func (d *DiscoveryTracker) Fail(owner string, err error) {
 		d.states[owner] = s
 	} else {
 		s.Status = DiscoveryFailed
+		s.finish()
 	}
 	if err != nil {
 		s.LastError = err.Error()
@@ -181,6 +213,9 @@ func (d *DiscoveryTracker) Reset(owner string) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if s, ok := d.states[owner]; ok {
+		s.finish()
+	}
 	delete(d.states, owner)
 }
 

@@ -993,15 +993,6 @@ func setPrivacyStatus(m *dns.Msg, msgoptions *edns0.MsgOptions, status edns0.Pri
 	}
 }
 
-// attachPrivacyUnavailableEDE turns a strict-privacy dead end into the
-// response the client asked for: SERVFAIL carrying EDE
-// EDEPrivacyRequestedUnavailable, naming the zone whose servers offered no
-// encrypted transport.
-//
-// Shared by both paths that can hit that dead end -- the direct query and the
-// one that first has to resolve NS addresses. Without it the second path
-// answered a bare SERVFAIL, indistinguishable from any other failure, for a
-// client that had explicitly asked to be told why.
 // privacyStatusFor maps the transport an answer actually arrived over onto the
 // response-direction PRIVACY status.
 func privacyStatusFor(transport core.Transport) edns0.PrivacyStatus {
@@ -1011,6 +1002,27 @@ func privacyStatusFor(transport core.Transport) edns0.PrivacyStatus {
 	return edns0.PrivacyCleartext
 }
 
+// privacyUnavailableZone is the zone a strict-privacy failure belongs to: the
+// one the error names (PrivacyUnavailableError), else fallback. The responder
+// passes the zone it started from, which is right only when the walk never
+// left it: a referral followed on the way made the EDE name the parent (#776).
+func privacyUnavailableZone(err error, fallback string) string {
+	var pe *PrivacyUnavailableError
+	if errors.As(err, &pe) && pe.Zone != "" {
+		return pe.Zone
+	}
+	return fallback
+}
+
+// attachPrivacyUnavailableEDE turns a strict-privacy dead end into the
+// response the client asked for: SERVFAIL carrying EDE
+// EDEPrivacyRequestedUnavailable, naming the zone whose servers offered no
+// encrypted transport.
+//
+// Shared by both paths that can hit that dead end -- the direct query and the
+// one that first has to resolve NS addresses. Without it the second path
+// answered a bare SERVFAIL, indistinguishable from any other failure, for a
+// client that had explicitly asked to be told why.
 func attachPrivacyUnavailableEDE(m, r *dns.Msg, zone string, msgoptions *edns0.MsgOptions) {
 	m.SetRcode(r, dns.RcodeServerFailure)
 	// An EDE has nowhere to live in a response to a query that carried no OPT.
@@ -1239,7 +1251,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				})
 				if err != nil {
 					if errors.Is(err, ErrPrivacyUnavailable) {
-						attachPrivacyUnavailableEDE(m, r, bestmatch, msgoptions)
+						attachPrivacyUnavailableEDE(m, r, privacyUnavailableZone(err, bestmatch), msgoptions)
 					} else {
 						m.SetRcode(r, dns.RcodeServerFailure)
 					}
@@ -1252,7 +1264,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				// If we get here, we tried all responses without finding a usable address
 				lgImr.Warn("ImrResponder: failed to resolve query using any nameserver address", "qname", qname, "qtype", dns.TypeToString[qtype])
 				if privacyErr != nil {
-					attachPrivacyUnavailableEDE(m, r, bestmatch, msgoptions)
+					attachPrivacyUnavailableEDE(m, r, privacyUnavailableZone(privacyErr, bestmatch), msgoptions)
 				} else {
 					m.SetRcode(r, dns.RcodeServerFailure)
 				}
@@ -1268,7 +1280,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				// available: SERVFAIL + EDE, rather than quietly leaking the
 				// query in cleartext.
 				if errors.Is(err, ErrPrivacyUnavailable) {
-					attachPrivacyUnavailableEDE(m, r, bestmatch, msgoptions)
+					attachPrivacyUnavailableEDE(m, r, privacyUnavailableZone(err, bestmatch), msgoptions)
 					w.WriteMsg(m)
 					return
 				}
