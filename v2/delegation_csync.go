@@ -150,6 +150,10 @@ type csyncDelta struct {
 	// GlueSkipped: glue left as the parent holds it, and why, as
 	// "<nameserver> <type>: <reason>".
 	GlueSkipped []string
+	// GlueGone: "<nameserver> <type>" for each glue type removed because the
+	// child serves none of it any more. Under a policy that requires DNSSEC,
+	// each rests on a proof of that absence (proveAbsent).
+	GlueGone []string
 }
 
 // computeCsyncDelta runs RFC 7477 §3.2 for the parent: for each type in
@@ -284,6 +288,9 @@ func computeCsyncDelta(ctx context.Context, childZone string, types []uint16, cu
 						d.GlueAdds = append(d.GlueAdds, adds...)
 						d.GlueRemoves = append(d.GlueRemoves, removes...)
 						d.Changed = true
+						if len(newGlue) == 0 {
+							d.GlueGone = append(d.GlueGone, nsName+" "+typeStr)
+						}
 						lg.Printf("ProcessCSYNCNotify: %s: %s glue for %s changed: %d adds, %d removes", childZone, typeStr, nsName, len(adds), len(removes))
 					}
 				} else if len(newGlue) > 0 {

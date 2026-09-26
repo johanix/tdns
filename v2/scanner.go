@@ -803,7 +803,7 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	scanner.noteIgnoredOptions(pol, parentZD.ZoneName, childZone)
 	fetch := scanner.childRRsetFetcher(nsRRset, scanLog)
 	if pol.RequireDnssec {
-		fetch = scanner.securedChildRRsetFetcher(pol, nsRRset, scanLog)
+		fetch = scanner.securedChildRRsetFetcher(pol, childZone, nsRRset, scanLog)
 	}
 	// fail reports err as a refusal when the policy refused the data, and as
 	// an error otherwise.
@@ -1048,7 +1048,13 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	response.AllNSInSync = true
 	if pol.RequireDnssec {
 		response.Validation = ScanValidated
-		response.ValidationReason = fmt.Sprintf("the SOA, the CSYNC and the NS and glue copied from the child validated Secure, and so did the proof of each glue type it no longer serves (delegation policy %q)", pol.Name)
+		reason := "the SOA, the CSYNC and the NS and glue copied from the child validated Secure"
+		if len(delta.GlueGone) > 0 {
+			// Only when a removal rested on a proof: glue kept for want of
+			// one is in GlueSkipped, not here (#780 review, F2).
+			reason += fmt.Sprintf(", and so did the child's proof that it no longer serves %s", strings.Join(delta.GlueGone, ", "))
+		}
+		response.ValidationReason = fmt.Sprintf("%s (delegation policy %q)", reason, pol.Name)
 	} else {
 		response.Validation = ScanUnvalidated
 		response.ValidationReason = fmt.Sprintf("delegation policy %q does not require DNSSEC", pol.Name)

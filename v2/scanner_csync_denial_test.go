@@ -102,6 +102,7 @@ func csyncDropA(t *testing.T, child string, parentHoldsA bool) (*ZoneData, *trus
 		},
 		verdict: map[string]cache.ValidationState{},
 		denial:  map[string]cache.ValidationState{},
+		zone:    child,
 	}
 	n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeSOA), trustKey(child, dns.TypeCSYNC),
 		trustKey(child, dns.TypeNS), trustKey(ns1, dns.TypeAAAA))
@@ -134,6 +135,9 @@ func TestScanCSYNCRemovesGlueWhoseAbsenceIsProven(t *testing.T) {
 	}
 	if !slices.Contains(n.denialsJudged, trustKey(ns1, dns.TypeA)) {
 		t.Errorf("the proof for %s A was never validated (judged: %v)", ns1, n.denialsJudged)
+	}
+	if want := "the child's proof that it no longer serves " + ns1 + " A"; !strings.Contains(resp.ValidationReason, want) {
+		t.Errorf("reason %q does not say %q", resp.ValidationReason, want)
 	}
 }
 
@@ -170,6 +174,10 @@ func TestScanCSYNCKeepsGlueWhoseAbsenceIsNotProven(t *testing.T) {
 			}
 			if s := resp.GlueSkipped[0]; !strings.HasPrefix(s, ns1+" A: ") || !strings.Contains(s, tc.why) {
 				t.Errorf("glue skipped %q, want it to name %s A and say %q", s, ns1, tc.why)
+			}
+			// Nothing was removed on a proof, so the reason claims none (F2).
+			if strings.Contains(resp.ValidationReason, "no longer serves") {
+				t.Errorf("reason %q claims a proven absence, and none was", resp.ValidationReason)
 			}
 		})
 	}
@@ -241,10 +249,11 @@ func TestScanResultNamesSkippedGlueAtInfo(t *testing.T) {
 	}
 }
 
-// The IMR's own validator. An NSEC at the nameserver's name whose bitmap lacks
-// the type proves it gone. The same NSEC does not prove a type it lists gone,
-// and without its signature it proves nothing.
-func TestProveAbsentWithTheImrValidator(t *testing.T) {
+// validatorScanner is a scanner with a real IMR that holds a trust anchor for
+// each of zones. sign signs an RRset with the named zone's key, so a test can
+// hand proveAbsent proofs that the IMR's own validator judges.
+func validatorScanner(t *testing.T, zones ...string) (*Scanner, *Imr, func(zone string, set []dns.RR) dns.RR) {
+	t.Helper()
 	prevGlobal := Globals.ImrEngine
 	t.Cleanup(func() { Globals.ImrEngine = prevGlobal })
 
@@ -255,55 +264,73 @@ func TestProveAbsentWithTheImrValidator(t *testing.T) {
 	sc := NewScanner(nil, false, false)
 	sc.conf = conf
 
-	const zone = "signed.example."
-	const ns1 = "ns1." + zone
-	key := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     257,
-		Protocol:  3,
-		Algorithm: dns.ECDSAP256SHA256,
+	type zoneKey struct {
+		key  *dns.DNSKEY
+		priv crypto.Signer
 	}
-	priv, err := key.Generate(256)
-	if err != nil {
-		t.Fatal(err)
+	keys := map[string]zoneKey{}
+	for _, zone := range zones {
+		key := &dns.DNSKEY{
+			Hdr:       dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+			Flags:     257,
+			Protocol:  3,
+			Algorithm: dns.ECDSAP256SHA256,
+		}
+		priv, err := key.Generate(256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		imr.Cache.DnskeyCache.Set(zone, key.KeyTag(), &cache.CachedDnskeyRRset{
+			Name: zone, Keyid: key.KeyTag(), State: cache.ValidationStateSecure, TrustAnchor: true,
+			Dnskey: *key, Expiration: time.Now().Add(time.Hour),
+		})
+		keys[zone] = zoneKey{key, priv.(crypto.Signer)}
 	}
-	imr.Cache.DnskeyCache.Set(zone, key.KeyTag(), &cache.CachedDnskeyRRset{
-		Name: zone, Keyid: key.KeyTag(), State: cache.ValidationStateSecure, TrustAnchor: true,
-		Dnskey: *key, Expiration: time.Now().Add(time.Hour),
-	})
-	sign := func(set []dns.RR) dns.RR {
+	sign := func(zone string, set []dns.RR) dns.RR {
 		t.Helper()
+		zk := keys[zone]
 		h := set[0].Header()
 		sig := &dns.RRSIG{
 			Hdr:         dns.RR_Header{Name: h.Name, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: h.Ttl},
 			TypeCovered: h.Rrtype,
-			Algorithm:   key.Algorithm,
+			Algorithm:   zk.key.Algorithm,
 			Labels:      uint8(dns.CountLabel(h.Name)),
 			OrigTtl:     h.Ttl,
 			Inception:   uint32(time.Now().Add(-time.Hour).Unix()),
 			Expiration:  uint32(time.Now().Add(time.Hour).Unix()),
-			KeyTag:      key.KeyTag(),
+			KeyTag:      zk.key.KeyTag(),
 			SignerName:  zone,
 		}
-		if err := sig.Sign(priv.(crypto.Signer), set); err != nil {
+		if err := sig.Sign(zk.priv, set); err != nil {
 			t.Fatal(err)
 		}
 		return sig
 	}
+	return sc, imr, sign
+}
+
+// signedSet is set followed by its RRSIG from zone's key.
+func signedSet(sign func(string, []dns.RR) dns.RR, zone string, set []dns.RR) []dns.RR {
+	return append(append([]dns.RR{}, set...), sign(zone, set))
+}
+
+// The IMR's own validator. An NSEC at the nameserver's name whose bitmap lacks
+// the type proves it gone. The same NSEC does not prove a type it lists gone,
+// and without its signature it proves nothing.
+func TestProveAbsentWithTheImrValidator(t *testing.T) {
+	const zone = "signed.example."
+	const ns1 = "ns1." + zone
+	sc, _, sign := validatorScanner(t, zone)
 
 	soa := rrs(t, zone+" 300 IN SOA "+ns1+" h."+zone+" 7 3600 600 604800 300")
 	nsec := rrs(t, ns1+" 300 IN NSEC "+zone+" AAAA RRSIG NSEC")
-	var signed, unsigned []dns.RR
-	signed = append(signed, soa...)
-	signed = append(signed, sign(soa))
-	signed = append(signed, nsec...)
-	signed = append(signed, sign(nsec))
-	unsigned = append(append(unsigned, soa...), nsec...)
+	signed := append(signedSet(sign, zone, soa), signedSet(sign, zone, nsec)...)
+	unsigned := append(append([]dns.RR{}, soa...), nsec...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := sc.proveAbsent(ctx, ns1, dns.TypeA, authorityRRsets(signed)); err != nil {
+	if err := sc.proveAbsent(ctx, zone, ns1, dns.TypeA, authorityRRsets(signed)); err != nil {
 		t.Errorf("A, absent from a signed NSEC at %s: %v; want it proven", ns1, err)
 	}
 	for _, tc := range []struct {
@@ -315,7 +342,45 @@ func TestProveAbsentWithTheImrValidator(t *testing.T) {
 		{"the NSEC without its signature", dns.TypeA, authorityRRsets(unsigned)},
 		{"no proof", dns.TypeA, nil},
 	} {
-		if err := sc.proveAbsent(ctx, ns1, tc.qtype, tc.proof); !isAbsenceNotProven(err) {
+		if err := sc.proveAbsent(ctx, zone, ns1, tc.qtype, tc.proof); !isAbsenceNotProven(err) {
+			t.Errorf("%s: %v; want the absence not proven", tc.name, err)
+		}
+	}
+}
+
+// Review F1. The parent's own NSEC at the zone cut covers every name below it,
+// the wildcard included, and it validates wherever the parent is trusted --
+// which, for the scanner, is always: the parent is the zone it runs for. A
+// child nameserver that answers NODATA with the parent's SOA and cut NSEC must
+// not get live glue removed. Nor may an unsigned NSEC at the nameserver name
+// placed beside them.
+func TestProveAbsentRefusesTheParentsCutNSEC(t *testing.T) {
+	const parent = "example."
+	const child = "child." + parent
+	const ns1 = "ns1." + child
+	sc, imr, sign := validatorScanner(t, parent)
+
+	soa := rrs(t, parent+" 300 IN SOA ns."+parent+" h."+parent+" 1 3600 600 604800 300")
+	cut := rrs(t, child+" 300 IN NSEC other."+parent+" NS DS RRSIG NSEC")
+	replay := append(signedSet(sign, parent, soa), signedSet(sign, parent, cut)...)
+	planted := append(append([]dns.RR{}, replay...), rrs(t, ns1+" 300 IN NSEC ns2."+child+" AAAA RRSIG NSEC")...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// What makes this a hole: the validator itself calls the replay Secure.
+	state, _, verr := imr.Cache.ValidateNegativeResponse(ctx, ns1, dns.TypeA, dns.RcodeSuccess,
+		authorityRRsets(replay), imr.IterativeDNSQueryFetcher())
+	t.Logf("validator on the replayed cut NSEC: %s (err %v)", cache.ValidationStateToString[state], verr)
+
+	for _, tc := range []struct {
+		name  string
+		proof []dns.RR
+	}{
+		{"the parent's SOA and cut NSEC", replay},
+		{"the same, with an unsigned NSEC at the nameserver name", planted},
+	} {
+		if err := sc.proveAbsent(ctx, child, ns1, dns.TypeA, authorityRRsets(tc.proof)); !isAbsenceNotProven(err) {
 			t.Errorf("%s: %v; want the absence not proven", tc.name, err)
 		}
 	}

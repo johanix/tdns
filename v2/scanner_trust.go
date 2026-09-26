@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
@@ -172,7 +173,8 @@ func isAbsenceNotProven(err error) bool {
 
 // proveAbsent returns nil when proof, the authority section a child
 // nameserver sent with an empty answer, validates as a Secure denial of qname
-// qtype, and an absenceNotProven otherwise.
+// qtype and is the child zone's own NODATA for it (childNodataProof), and an
+// absenceNotProven otherwise.
 //
 // RFC 7477 §3.2.2 removes a glue type the child no longer serves, and §3 wants
 // everything the parent acts on validated, the absence included (#779). A
@@ -181,11 +183,14 @@ func isAbsenceNotProven(err error) bool {
 // as tdns secondaries did before #770, has its denials judged Bogus, and
 // refusing the whole CSYNC over one would block every change the child makes
 // while it keeps that nameserver.
-func (scanner *Scanner) proveAbsent(ctx context.Context, qname string, qtype uint16, proof []*core.RRset) error {
+func (scanner *Scanner) proveAbsent(ctx context.Context, childZone, qname string, qtype uint16, proof []*core.RRset) error {
 	what := fmt.Sprintf("%s %s", qname, dns.TypeToString[qtype])
 	state, err := scanner.validateChildDenial(ctx, qname, qtype, proof)
 	switch {
 	case state == cache.ValidationStateSecure && err == nil:
+		if !childNodataProof(proof, childZone, qname, qtype) {
+			return &absenceNotProven{msg: fmt.Sprintf("no %s served, and the proof that there is none is not %s's own NSEC at %s", what, childZone, qname)}
+		}
 		return nil
 	case len(proof) == 0:
 		return &absenceNotProven{msg: fmt.Sprintf("no %s served, and no proof that there is none", what)}
@@ -194,6 +199,49 @@ func (scanner *Scanner) proveAbsent(ctx context.Context, qname string, qtype uin
 	default:
 		return &absenceNotProven{msg: fmt.Sprintf("no %s served, and the proof that there is none is %s", what, validationStateName(state))}
 	}
+}
+
+// childNodataProof reports whether proof is what a NODATA answer from the
+// child zone is made of: the child's SOA, and an NSEC the child signed, owned
+// by qname, whose bitmap lists neither qtype nor CNAME (RFC 4035 §5.4).
+//
+// The validator's Secure verdict says the proof's signatures hold, not that it
+// proves this. It takes any ancestor's SOA, and an NSEC that covers qname as a
+// proof that qname does not exist, whatever rcode was asked about. The
+// parent's own NSEC at the zone cut covers every name below it, and the
+// scanner runs for the parent, so that NSEC always validates: replayed by a
+// child nameserver that still serves the glue, it would have the glue removed
+// (#780 review, F1). An NSEC without the child's signature proves nothing
+// here, even beside one that validated.
+func childNodataProof(proof []*core.RRset, childZone, qname string, qtype uint16) bool {
+	var childSOA, nodata bool
+	for _, set := range proof {
+		switch set.RRtype {
+		case dns.TypeSOA:
+			childSOA = childSOA || core.EqualNames(set.Name, childZone)
+		case dns.TypeNSEC:
+			if !core.EqualNames(set.Name, qname) || !signedBy(set, childZone) {
+				continue
+			}
+			for _, rr := range set.RRs {
+				nsec, ok := rr.(*dns.NSEC)
+				if ok && !slices.Contains(nsec.TypeBitMap, qtype) && !slices.Contains(nsec.TypeBitMap, dns.TypeCNAME) {
+					nodata = true
+				}
+			}
+		}
+	}
+	return childSOA && nodata
+}
+
+// signedBy reports whether set carries an RRSIG made by zone.
+func signedBy(set *core.RRset, zone string) bool {
+	for _, rr := range set.RRSIGs {
+		if sig, ok := rr.(*dns.RRSIG); ok && core.EqualNames(sig.SignerName, zone) {
+			return true
+		}
+	}
+	return false
 }
 
 func validationStateName(s cache.ValidationState) string {
@@ -229,11 +277,11 @@ func (scanner *Scanner) requireSecureBecause(ctx context.Context, rrset *core.RR
 // validation of any data to be copied from the child to the parent").
 //
 // An empty RRset the nameservers agree on is handed on only if the proof the
-// first of them sent, its NSEC or NSEC3 records, validates as a Secure denial
-// (proveAbsent): RFC 7477 wants the absence validated too. Otherwise it is an
-// absenceNotProven error, and the glue pass leaves that nameserver's glue of
-// that type as it is (computeCsyncDelta).
-func (scanner *Scanner) securedChildRRsetFetcher(pol DelegationPolicy, nsRRset *core.RRset, lg *log.Logger) childRRsetFetcher {
+// first of them sent validates Secure and is childZone's own NODATA for the
+// name (proveAbsent): RFC 7477 wants the absence validated too. Otherwise it
+// is an absenceNotProven error, and the glue pass leaves that nameserver's
+// glue of that type as it is (computeCsyncDelta).
+func (scanner *Scanner) securedChildRRsetFetcher(pol DelegationPolicy, childZone string, nsRRset *core.RRset, lg *log.Logger) childRRsetFetcher {
 	return func(ctx context.Context, name string, qtype uint16) ([]dns.RR, bool, error) {
 		rrset, denial, inSync, err := scanner.askChildWithDenial(ctx, name, qtype, nsRRset, lg)
 		if err != nil {
@@ -248,7 +296,7 @@ func (scanner *Scanner) securedChildRRsetFetcher(pol DelegationPolicy, nsRRset *
 			return rrset.RRs, false, nil
 		}
 		if rrset == nil || len(rrset.RRs) == 0 {
-			if err := scanner.proveAbsent(ctx, name, qtype, denial); err != nil {
+			if err := scanner.proveAbsent(ctx, childZone, name, qtype, denial); err != nil {
 				return nil, false, err
 			}
 			return nil, true, nil
