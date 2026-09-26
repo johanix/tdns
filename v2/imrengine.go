@@ -145,10 +145,28 @@ type ImrResponse struct {
 	// ran). Consumers that must tell an UNSIGNED zone apart from a FAILED
 	// signature -- the parentsync zone deciding what "allow-insecure"
 	// may waive -- read this; Bogus is an attack signal, Insecure is not.
+	// For a denial it is the verdict on the proof of the denial.
 	ValidationState cache.ValidationState
-	Error           bool
-	ErrorMsg        string
-	Msg             string
+	// Denial is set when the answer is that the data does not exist:
+	// cache.ContextNXDOMAIN (no such name) or cache.ContextNoErrNoAns (the
+	// name exists, the type does not). Zero otherwise. A denial has no RRset:
+	// the SOA that proves it is not an answer to the question.
+	Denial   cache.CacheContext
+	Error    bool
+	ErrorMsg string
+	Msg      string
+}
+
+// denied makes resp the answer "no such data": no RRset, the kind of denial,
+// and the verdict on its proof. A fresh denial and a cached one both come
+// here, so the first ask and every later one within the negative TTL get the
+// same response (#698).
+func (resp *ImrResponse) denied(kind cache.CacheContext, state cache.ValidationState) {
+	resp.RRset = nil
+	resp.Denial = kind
+	resp.ValidationState = state
+	resp.Validated = state == cache.ValidationStateSecure
+	resp.Msg = cache.CacheContextToString[kind]
 }
 
 // The ImrEngine is a simple caching DNS recursor. It is not a fully fledged, all singing,
@@ -541,6 +559,10 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 				RRset:     crrset.RRset,
 				Validated: crrset.State == cache.ValidationStateSecure,
 			}
+			if crrset.Context != cache.ContextAnswer {
+				// The SOA that proves a denial is not the answer (#698).
+				resp.denied(crrset.Context, crrset.State)
+			}
 			sendResp(*resp)
 			return
 		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint:
@@ -671,6 +693,19 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		}
 	}
 
+	// freshDenial answers a denial IterativeDNSQuery has just returned. It
+	// has also cached it, with the verdict on its proof (handleNegative), and
+	// that verdict is read back here, as the cache-hit branch reads it.
+	// Peek, not Get: a denial whose SOA has TTL 0 is stored already expired,
+	// and Get would drop it and report no verdict.
+	freshDenial := func(kind cache.CacheContext) {
+		var state cache.ValidationState
+		if c := imr.Cache.Peek(qname, qtype); c != nil && c.Context == kind {
+			state = c.State
+		}
+		resp.denied(kind, state)
+	}
+
 	// If a response channel is provided, use it to send responses
 	if respch != nil {
 		defer func() {
@@ -694,8 +729,17 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		// Don't use referrals, glue, hints, priming, or failures - issue a direct query instead
 		// to get DNSSEC signatures and upgrade the quality of the data.
 		switch crrset.Context {
-		case cache.ContextAnswer, cache.ContextNoErrNoAns, cache.ContextNXDOMAIN:
-			// These are direct answers or negative responses - safe to use
+		case cache.ContextNoErrNoAns, cache.ContextNXDOMAIN:
+			// A negative entry's RRset is the SOA that proves the denial, not
+			// an answer to the question (#518 fixed the same thing in
+			// IterativeDNSQuery). The entry's state is the verdict on the
+			// whole proof. Validating the SOA alone replaced it with the
+			// SOA's own verdict: a Bogus denial in a signed zone came back
+			// Secure.
+			lgImr.Debug("ImrQuery: cache hit", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+			resp.denied(crrset.Context, crrset.State)
+			return &resp, nil
+		case cache.ContextAnswer:
 			lgImr.Debug("ImrQuery: cache hit", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 			resp.RRset = crrset.RRset
 			resp.ValidationState = crrset.State
@@ -761,16 +805,15 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 					return true, nil // Success, stop trying
 				}
 				if rcode == dns.RcodeNameError {
-					// this is a negative response, which we need to figure out how to represent
 					lgImr.Info("ImrQuery: received NXDOMAIN, no point in continuing", "qname", qname)
-					resp.Msg = "NXDOMAIN (negative response type 3)"
+					freshDenial(cache.ContextNXDOMAIN)
 					return true, nil // Success (negative response), stop trying
 				}
 				switch context {
 				case cache.ContextReferral:
 					return false, nil // Continue trying
 				case cache.ContextNoErrNoAns:
-					resp.Msg = "negative response type 0"
+					freshDenial(cache.ContextNoErrNoAns)
 					return true, nil // Success (negative response), stop trying
 				}
 				return false, nil // Continue trying
@@ -814,16 +857,15 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			return &resp, nil
 		}
 		if rcode == dns.RcodeNameError {
-			// this is a negative response, which we need to figure out how to represent
 			lgImr.Info("ImrQuery: received NXDOMAIN, no point in continuing", "qname", qname)
-			resp.Msg = "NXDOMAIN (negative response type 3)"
+			freshDenial(cache.ContextNXDOMAIN)
 			return &resp, nil
 		}
 		switch context {
 		case cache.ContextReferral:
 			continue // if all is good we will now hit the new referral and get further
 		case cache.ContextNoErrNoAns:
-			resp.Msg = cache.CacheContextToString[context]
+			freshDenial(cache.ContextNoErrNoAns)
 			return &resp, nil
 		}
 	}
@@ -951,15 +993,6 @@ func setPrivacyStatus(m *dns.Msg, msgoptions *edns0.MsgOptions, status edns0.Pri
 	}
 }
 
-// attachPrivacyUnavailableEDE turns a strict-privacy dead end into the
-// response the client asked for: SERVFAIL carrying EDE
-// EDEPrivacyRequestedUnavailable, naming the zone whose servers offered no
-// encrypted transport.
-//
-// Shared by both paths that can hit that dead end -- the direct query and the
-// one that first has to resolve NS addresses. Without it the second path
-// answered a bare SERVFAIL, indistinguishable from any other failure, for a
-// client that had explicitly asked to be told why.
 // privacyStatusFor maps the transport an answer actually arrived over onto the
 // response-direction PRIVACY status.
 func privacyStatusFor(transport core.Transport) edns0.PrivacyStatus {
@@ -969,6 +1002,27 @@ func privacyStatusFor(transport core.Transport) edns0.PrivacyStatus {
 	return edns0.PrivacyCleartext
 }
 
+// privacyUnavailableZone is the zone a strict-privacy failure belongs to: the
+// one the error names (PrivacyUnavailableError), else fallback. The responder
+// passes the zone it started from, which is right only when the walk never
+// left it: a referral followed on the way made the EDE name the parent (#776).
+func privacyUnavailableZone(err error, fallback string) string {
+	var pe *PrivacyUnavailableError
+	if errors.As(err, &pe) && pe.Zone != "" {
+		return pe.Zone
+	}
+	return fallback
+}
+
+// attachPrivacyUnavailableEDE turns a strict-privacy dead end into the
+// response the client asked for: SERVFAIL carrying EDE
+// EDEPrivacyRequestedUnavailable, naming the zone whose servers offered no
+// encrypted transport.
+//
+// Shared by both paths that can hit that dead end -- the direct query and the
+// one that first has to resolve NS addresses. Without it the second path
+// answered a bare SERVFAIL, indistinguishable from any other failure, for a
+// client that had explicitly asked to be told why.
 func attachPrivacyUnavailableEDE(m, r *dns.Msg, zone string, msgoptions *edns0.MsgOptions) {
 	m.SetRcode(r, dns.RcodeServerFailure)
 	// An EDE has nowhere to live in a response to a query that carried no OPT.
@@ -1197,7 +1251,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				})
 				if err != nil {
 					if errors.Is(err, ErrPrivacyUnavailable) {
-						attachPrivacyUnavailableEDE(m, r, bestmatch, msgoptions)
+						attachPrivacyUnavailableEDE(m, r, privacyUnavailableZone(err, bestmatch), msgoptions)
 					} else {
 						m.SetRcode(r, dns.RcodeServerFailure)
 					}
@@ -1210,7 +1264,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				// If we get here, we tried all responses without finding a usable address
 				lgImr.Warn("ImrResponder: failed to resolve query using any nameserver address", "qname", qname, "qtype", dns.TypeToString[qtype])
 				if privacyErr != nil {
-					attachPrivacyUnavailableEDE(m, r, bestmatch, msgoptions)
+					attachPrivacyUnavailableEDE(m, r, privacyUnavailableZone(privacyErr, bestmatch), msgoptions)
 				} else {
 					m.SetRcode(r, dns.RcodeServerFailure)
 				}
@@ -1226,7 +1280,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				// available: SERVFAIL + EDE, rather than quietly leaking the
 				// query in cleartext.
 				if errors.Is(err, ErrPrivacyUnavailable) {
-					attachPrivacyUnavailableEDE(m, r, bestmatch, msgoptions)
+					attachPrivacyUnavailableEDE(m, r, privacyUnavailableZone(err, bestmatch), msgoptions)
 					w.WriteMsg(m)
 					return
 				}

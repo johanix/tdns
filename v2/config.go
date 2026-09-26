@@ -462,6 +462,9 @@ type ImrTuningConf struct {
 // DefaultCacheMaxTTL is Unbound's cache-max-ttl default: one day.
 const DefaultCacheMaxTTL = 86400
 
+// defaultDiscoveryStrictWait is the default of DiscoveryConf.StrictWait.
+const defaultDiscoveryStrictWait = 2 * time.Second
+
 // BackoffConf tunes per-(address, transport) backoff behaviour
 // after a failed query. Replaces the hardcoded 2 min / 1 h constants
 // that lived in cache/authserver.go.
@@ -490,6 +493,10 @@ type AddressFamilyConf struct {
 type DiscoveryConf struct {
 	RetryAfterFailure time.Duration `yaml:"retry-after-failure" mapstructure:"retry-after-failure"`
 	MaxFailures       int           `yaml:"max-failures" mapstructure:"max-failures"`
+	// StrictWait bounds how long a strict-privacy query waits for the
+	// transport signals of servers it knows nothing about, before it gives
+	// up on them. The query's own deadline cuts it shorter. Default 2s.
+	StrictWait time.Duration `yaml:"strict-wait" mapstructure:"strict-wait"`
 }
 
 // LoadImrTuningDefaults fills missing or invalid fields with sensible
@@ -548,6 +555,9 @@ func LoadImrTuningDefaults(t *ImrTuningConf) {
 	}
 	if t.Discovery.MaxFailures <= 0 {
 		t.Discovery.MaxFailures = 3
+	}
+	if t.Discovery.StrictWait <= 0 {
+		t.Discovery.StrictWait = defaultDiscoveryStrictWait
 	}
 	// QueryBudget
 	if t.QueryBudget <= 0 {

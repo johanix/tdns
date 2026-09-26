@@ -394,6 +394,41 @@ func (as *AuthServer) SetTransportWeights(weights map[core.Transport]uint8) {
 	}
 }
 
+// SetTransportSignal installs what a transport signal says about the server:
+// its transports, their ALPN names and their weights, as one change under the
+// lock. The resolver reads them while background lookups write them, and a
+// reader must never see the weights of one signal with the transports of
+// another. The arguments are the caller's to give away. Thread-safe.
+func (as *AuthServer) SetTransportSignal(transports []core.Transport, alpn []string, weights map[core.Transport]uint8) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	as.Transports = transports
+	as.Alpn = alpn
+	as.TransportWeights = weights
+}
+
+// GetTransportSignal returns copies of the transports and their weights,
+// read together under the lock. Thread-safe.
+func (as *AuthServer) GetTransportSignal() ([]core.Transport, map[core.Transport]uint8) {
+	if as == nil {
+		return nil, nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	transports := append([]core.Transport(nil), as.Transports...)
+	var weights map[core.Transport]uint8
+	if len(as.TransportWeights) > 0 {
+		weights = make(map[core.Transport]uint8, len(as.TransportWeights))
+		for k, v := range as.TransportWeights {
+			weights[k] = v
+		}
+	}
+	return transports, weights
+}
+
 // SnapshotCounters returns a copy of the per-transport counters.
 func (as *AuthServer) SnapshotCounters() map[core.Transport]uint64 {
 	if as == nil {

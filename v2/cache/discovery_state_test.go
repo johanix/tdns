@@ -157,3 +157,69 @@ func TestDiscoveryTracker_NilSafe(t *testing.T) {
 		t.Error("Begin with empty owner should return false")
 	}
 }
+
+// Pending hands out a channel only while an attempt is in progress, and
+// every way the attempt can end closes it: a caller waiting on it must never
+// be left waiting on an attempt that is already over.
+func TestDiscoveryTracker_PendingClosesWhenTheAttemptEnds(t *testing.T) {
+	owner := "a.example."
+	for name, end := range map[string]func(d *DiscoveryTracker){
+		"succeed": func(d *DiscoveryTracker) { d.Succeed(owner) },
+		"fail":    func(d *DiscoveryTracker) { d.Fail(owner, errors.New("boom")) },
+		"reset":   func(d *DiscoveryTracker) { d.Reset(owner) },
+	} {
+		d := NewDiscoveryTracker(time.Second, 3)
+		if ch := d.Pending(owner); ch != nil {
+			t.Errorf("%s: Pending before any Begin returned a channel", name)
+		}
+		d.Begin(owner)
+		ch := d.Pending(owner)
+		if ch == nil {
+			t.Fatalf("%s: Pending during an attempt returned nil", name)
+		}
+		select {
+		case <-ch:
+			t.Fatalf("%s: channel closed before the attempt ended", name)
+		default:
+		}
+		end(d)
+		select {
+		case <-ch:
+		default:
+			t.Errorf("%s: channel still open after the attempt ended", name)
+		}
+		if ch := d.Pending(owner); ch != nil {
+			t.Errorf("%s: Pending after the attempt ended returned a channel", name)
+		}
+	}
+}
+
+// A retry after a failure is a new attempt with a channel of its own; the
+// one closed by the failure stays closed.
+func TestDiscoveryTracker_PendingIsPerAttempt(t *testing.T) {
+	owner := "a.example."
+	d := NewDiscoveryTracker(time.Millisecond, 3)
+	d.Begin(owner)
+	first := d.Pending(owner)
+	d.Fail(owner, errors.New("boom"))
+	d.mu.Lock()
+	d.states[owner].NextAttemptAt = time.Now().Add(-time.Second)
+	d.mu.Unlock()
+	if !d.Begin(owner) {
+		t.Fatal("Begin after the cooldown should return true")
+	}
+	second := d.Pending(owner)
+	if second == nil {
+		t.Fatal("Pending during the retry returned nil")
+	}
+	select {
+	case <-second:
+		t.Error("the retry's channel is already closed")
+	default:
+	}
+	select {
+	case <-first:
+	default:
+		t.Error("the failed attempt's channel is open again")
+	}
+}
