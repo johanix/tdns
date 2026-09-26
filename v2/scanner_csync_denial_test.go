@@ -368,10 +368,15 @@ func TestProveAbsentRefusesTheParentsCutNSEC(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// What makes this a hole: the validator itself calls the replay Secure.
+	// What makes this a hole, and what childNodataProof is there for: the
+	// validator itself calls the replay Secure (#784). Pinned, so the guard
+	// below keeps testing the case it exists for.
 	state, _, verr := imr.Cache.ValidateNegativeResponse(ctx, ns1, dns.TypeA, dns.RcodeSuccess,
 		authorityRRsets(replay), imr.IterativeDNSQueryFetcher())
-	t.Logf("validator on the replayed cut NSEC: %s (err %v)", cache.ValidationStateToString[state], verr)
+	if state != cache.ValidationStateSecure || verr != nil {
+		t.Errorf("the validator no longer calls the parent's cut NSEC a Secure denial of %s A (%s, err %v): if #784 is fixed, make this require that it refuses it",
+			ns1, cache.ValidationStateToString[state], verr)
+	}
 
 	for _, tc := range []struct {
 		name  string
