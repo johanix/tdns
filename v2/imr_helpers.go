@@ -71,9 +71,8 @@ func (imr *Imr) TransportSignalCached(owner string) bool {
 // the cache gives denials (#523). Nothing else may keep that verdict longer,
 // or a zone that publishes a signal afterwards is never seen to (#776).
 //
-// Only an answer of the signal's own type is a signal. A denial's entry holds
-// the SOA that proves it, and ImrQuery hands that SOA back as though it were
-// the answer (#698).
+// Only an answer of the signal's own type is a signal: a denial's entry holds
+// the SOA that proves it, in the place the signal would have.
 func (imr *Imr) cachedTransportSignal(owner string) (signal *cache.CachedRRset, denied bool) {
 	if imr.Cache == nil || owner == "" {
 		return nil, false
@@ -100,21 +99,22 @@ func (imr *Imr) cachedTransportSignal(owner string) (signal *cache.CachedRRset, 
 // A signal found is a success. A denial is not a failure: the zone has
 // answered, and its cached denial says "no signal" for as long as it lives.
 // The tracker forgets the owner, so the first query after the denial expires
-// looks again at once. Recording the denial as a success was terminal, and as
-// a failure it added the backoff meant for servers that do not answer; either
-// way the verdict outlived the denial. Anything else is a failure, retried
-// after the backoff.
+// looks again at once. A denial with TTL 0 is not cached at all, and the next
+// query looks again straight away. Recording a denial as a success was
+// terminal (ImrQuery used to hand back a cached denial's SOA as the answer,
+// #698), and as a failure it added the backoff meant for servers that do not
+// answer; either way the verdict outlived the denial. Anything else is a
+// failure, retried after the backoff.
 func (imr *Imr) settleTransportSignalLookup(owner string, resp *ImrResponse, err error) {
-	if err == nil && resp != nil && resp.RRset != nil &&
-		resp.RRset.RRtype == imr.TransportSignalRRType() && len(resp.RRset.RRs) > 0 {
+	switch {
+	case err == nil && resp != nil && resp.RRset != nil &&
+		resp.RRset.RRtype == imr.TransportSignalRRType() && len(resp.RRset.RRs) > 0:
 		imr.TransportSignalDiscovery.Succeed(owner)
-		return
-	}
-	if _, denied := imr.cachedTransportSignal(owner); err == nil && denied {
+	case err == nil && resp != nil && resp.Denial != 0:
 		imr.TransportSignalDiscovery.Reset(owner)
-		return
+	default:
+		imr.TransportSignalDiscovery.Fail(owner, err)
 	}
-	imr.TransportSignalDiscovery.Fail(owner, err)
 }
 
 func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, reason string) {
