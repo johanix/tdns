@@ -13,7 +13,6 @@ import (
 	"strconv"
 
 	tdns "github.com/johanix/tdns/v2"
-	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -66,33 +65,7 @@ func newDelStatusCmd() *cobra.Command {
 			}
 
 			fmt.Printf("%s\n", dr.Msg)
-			if dr.SyncStatus.InSync {
-				fmt.Printf("Delegation information in parent %s is in sync with child %s. No action needed.\n",
-					dr.SyncStatus.Parent, dr.SyncStatus.ZoneName)
-				os.Exit(0)
-			}
-			fmt.Printf("Delegation information in parent %q is NOT in sync with child %q. Changes needed:\n",
-				dr.SyncStatus.Parent, dr.SyncStatus.ZoneName)
-			out := []string{"Change|RR"}
-			for _, rr := range dr.SyncStatus.NsAddsStr {
-				out = append(out, fmt.Sprintf("ADD NS|%s", rr))
-			}
-			for _, rr := range dr.SyncStatus.NsRemovesStr {
-				out = append(out, fmt.Sprintf("DEL NS|%s", rr))
-			}
-			for _, rr := range dr.SyncStatus.AAddsStr {
-				out = append(out, fmt.Sprintf("ADD IPv4 GLUE|%s", rr))
-			}
-			for _, rr := range dr.SyncStatus.ARemovesStr {
-				out = append(out, fmt.Sprintf("DEL IPv4 GLUE|%s", rr))
-			}
-			for _, rr := range dr.SyncStatus.AAAAAddsStr {
-				out = append(out, fmt.Sprintf("ADD IPv6 GLUE|%s", rr))
-			}
-			for _, rr := range dr.SyncStatus.AAAARemovesStr {
-				out = append(out, fmt.Sprintf("DEL IPv6 GLUE|%s", rr))
-			}
-			fmt.Printf("%s\n", columnize.SimpleFormat(out))
+			printDelegationDelta(os.Stdout, dr.SyncStatus)
 		},
 	}
 }

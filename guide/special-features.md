@@ -489,7 +489,8 @@ signed DNS UPDATE (the agent sends the delegation records
 directly, which also covers unsigned zones). The UPDATE
 scheme needs a SIG(0) key the parent trusts -- the agent
 generates it and the operator publishes its KEY at the
-primary (a one-time `zone proxy-key` bootstrap). For the
+primary (a one-time bootstrap; `zone parentsync status`
+prints the records). For the
 full operator how-to -- configuration, the UPDATE
 KEY-bootstrap, limitations, and verification -- see
 [Agent as a DSYNC proxy](agent-dsync-proxy.md).

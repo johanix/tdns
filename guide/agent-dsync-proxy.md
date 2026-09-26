@@ -145,16 +145,18 @@ it once at the primary.
 2. Ask the agent what to publish:
 
    ```
-   tdns-cli ... zone proxy-key -z child.example.
+   tdns-cli agent zone parentsync status -z child.example.
    ```
 
-   In the waiting state this prints two records to add at the primary apex:
+   The report lists the schemes in `parentsync.schemes` order, each usable
+   or skipped with the reason, then the detail for each. In the waiting
+   state the UPDATE part prints two records to add at the primary apex:
    the agent's **KEY** RR, and an **HSYNCPARAM** record with the `pubkey`
    flag. (The `pubkey` flag tells every provider of the zone to republish
    the apex KEY — so the bootstrap works even with multiple providers.)
 3. Add those two records to the zone at the primary. They transfer in to the
    agent on the next refresh.
-4. Once the agent sees its KEY at the apex, `proxy-key` reports READY. On that
+4. Once the agent sees its KEY at the apex, `parentsync status` reports READY. On that
    transition the agent runs the self-signed SIG(0) ceremony with the parent —
    once per zone, before the first proxied UPDATE — and then starts proxying.
 
@@ -167,10 +169,14 @@ the UPDATE scheme is skipped and the log says which; NOTIFY may still apply.
 Once the parent does trust the key, a later `BADKEY` re-runs the ceremony
 automatically, with no operator action.
 
-`proxy-key` reports one of four states: `update-unsupported` (parent
-advertises no UPDATE — use NOTIFY), `waiting` (publish the printed records),
-`ready` (operating), or `foreign-key` (a KEY the agent does not own occupies
-the apex — remove it, or UPDATE-proxy cannot work; NOTIFY may still apply).
+The UPDATE part of `parentsync status` reports one of three states:
+`waiting-for-key` (publish the printed records), `ready` (operating), or
+`foreign-key` (a KEY the agent does not own occupies the apex — remove it, or
+UPDATE-proxy cannot work; NOTIFY may still apply). It is there only when
+`update` is in `parentsync.schemes` and the parent advertises UPDATE; when the
+parent does not, the UPDATE line says so and there is nothing to publish.
+`zone proxy-key`, which printed the UPDATE part alone (with a fourth state,
+`update-unsupported`, for a parent without UPDATE), is a deprecated alias.
 
 On startup the agent also does a one-time parent-vs-child reconcile: if the
 delegation drifted while the agent was down, it sends one UPDATE to fix it
@@ -197,5 +203,7 @@ delegation drifted while the agent was down, it sends one UPDATE to fix it
   the scanner (`CheckCDS` / `ProcessCSYNCNotify`), which queries the child
   and applies the change. For the UPDATE scheme the parent applies the
   records directly after validating the SIG(0) signature.
-- `tdns-cli ... zone proxy-key -z <zone>` reports the current UPDATE-proxy
-  state at any time.
+- `tdns-cli agent zone parentsync status -z <zone>` reports at any time which
+  schemes can reach the parent and why the others cannot, the UPDATE-proxy
+  state, whether the parent's delegation is in sync with the zone, and the
+  zone's `delegation-sync-warning`.
