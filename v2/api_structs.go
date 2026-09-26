@@ -807,6 +807,12 @@ type ScanTupleResponse struct {
 	// the scan stopped before a decision (see scanner_trust.go).
 	Validation       ScanValidation `json:",omitempty"`
 	ValidationReason string         `json:",omitempty"` // why, for all three
+
+	// GlueSkipped: the glue a CSYNC scan left as the parent holds it, and
+	// why, as "<nameserver> <type>: <reason>". A nameserver that could not
+	// be asked, nameservers that disagree, or, under a policy that requires
+	// DNSSEC, an absence whose proof did not validate (#779).
+	GlueSkipped []string `json:",omitempty"`
 }
 
 type ScannerPost struct {

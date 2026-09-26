@@ -3360,6 +3360,38 @@ func classifyResponse(qname string, qtype uint16, r *dns.Msg) responseKind {
 	}
 }
 
+// authorityRRsets groups the records of an authority section into RRsets, in
+// the order each owner and type first appears, each with the RRSIGs that cover
+// it. A negative answer's proof is read this way: the SOA, the NSEC or NSEC3
+// records, and their signatures, as cache.ValidateNegativeResponse takes them.
+func authorityRRsets(rrs []dns.RR) []*core.RRset {
+	sets := make(map[string]*core.RRset)
+	var out []*core.RRset
+	setFor := func(name string, rrtype uint16) *core.RRset {
+		key := fmt.Sprintf("%s::%d", name, rrtype)
+		if rs, ok := sets[key]; ok {
+			return rs
+		}
+		rs := &core.RRset{Name: name, Class: dns.ClassINET, RRtype: rrtype}
+		sets[key] = rs
+		out = append(out, rs)
+		return rs
+	}
+	for _, rr := range rrs {
+		if rr == nil {
+			continue
+		}
+		if sig, ok := rr.(*dns.RRSIG); ok {
+			set := setFor(sig.Header().Name, sig.TypeCovered)
+			set.RRSIGs = append(set.RRSIGs, dns.Copy(sig))
+			continue
+		}
+		set := setFor(rr.Header().Name, rr.Header().Rrtype)
+		set.RRs = append(set.RRs, dns.Copy(rr))
+	}
+	return out
+}
+
 func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport core.Transport) (cache.CacheContext, int, bool) {
 	if r == nil {
 		return cache.ContextFailure, dns.RcodeServerFailure, false
@@ -3382,59 +3414,33 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 		return cache.ContextFailure, r.MsgHdr.Rcode, false
 	}
 
+	// The authority section is the proof of the denial. Its first SOA names
+	// the zone that denies, and the SOAs set how long the denial is cached.
+	negAuthority := authorityRRsets(r.Ns)
 	var (
 		ttl      uint32
 		soaOwner string
 		soaMin   uint32
 		soarrset *core.RRset
-		negSets  = make(map[string]*core.RRset)
-		negOrder []string
 	)
-
-	getNegKey := func(name string, rrtype uint16) string {
-		return fmt.Sprintf("%s::%d", name, rrtype)
-	}
-	getNegSet := func(name string, rrtype uint16) *core.RRset {
-		key := getNegKey(name, rrtype)
-		if rs, ok := negSets[key]; ok {
-			return rs
-		}
-		rs := &core.RRset{
-			Name:   name,
-			Class:  dns.ClassINET,
-			RRtype: rrtype,
-		}
-		negSets[key] = rs
-		negOrder = append(negOrder, key)
-		return rs
-	}
-
-	for _, rawrr := range r.Ns {
-		if rawrr == nil {
-			continue
-		}
-		switch rr := rawrr.(type) {
-		case *dns.SOA:
-			set := getNegSet(rr.Header().Name, dns.TypeSOA)
-			set.RRs = append(set.RRs, dns.Copy(rr))
+	for _, set := range negAuthority {
+		for _, rr := range set.RRs {
+			soa, ok := rr.(*dns.SOA)
+			if !ok {
+				continue
+			}
 			if soarrset == nil {
 				soarrset = set
-				soaOwner = rr.Header().Name
-				ttl = rr.Header().Ttl
-			} else if rr.Header().Ttl < ttl || ttl == 0 {
-				ttl = rr.Header().Ttl
+				soaOwner = soa.Header().Name
+				ttl = soa.Header().Ttl
+			} else if soa.Header().Ttl < ttl || ttl == 0 {
+				ttl = soa.Header().Ttl
 			}
-			if rr.Minttl != 0 {
-				if soaMin == 0 || rr.Minttl < soaMin {
-					soaMin = rr.Minttl
+			if soa.Minttl != 0 {
+				if soaMin == 0 || soa.Minttl < soaMin {
+					soaMin = soa.Minttl
 				}
 			}
-		case *dns.RRSIG:
-			set := getNegSet(rr.Header().Name, rr.TypeCovered)
-			set.RRSIGs = append(set.RRSIGs, dns.Copy(rr))
-		default:
-			set := getNegSet(rr.Header().Name, rr.Header().Rrtype)
-			set.RRs = append(set.RRs, dns.Copy(rr))
 		}
 	}
 
@@ -3471,16 +3477,6 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	}
 
 	expiration := time.Now().Add(time.Duration(ttl) * time.Second)
-
-	var negAuthority []*core.RRset
-	for _, key := range negOrder {
-		if rs, ok := negSets[key]; ok && rs != nil {
-			if len(rs.RRs) == 0 && len(rs.RRSIGs) == 0 {
-				continue
-			}
-			negAuthority = append(negAuthority, rs)
-		}
-	}
 
 	// RFC 9824: a compact denial of existence proves that qname does not
 	// exist with an NSEC owned by qname itself, and the authoritative server

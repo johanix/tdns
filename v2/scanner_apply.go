@@ -6,6 +6,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -124,10 +125,17 @@ func (scanner *Scanner) scanChildAndApply(ctx context.Context, parent *ZoneData,
 // nothing to do: it is not processed here, and a poll would otherwise report it
 // on every round. How a scan got to its result is in the scan log, which is
 // silent unless scanner.verbose is set.
+//
+// Glue a CSYNC scan left as it is (GlueSkipped) is named on the line, which is
+// then at Info even without a change: that glue may be stale, and the scan log
+// that says why is off by default (#779).
 func logScanResult(parent *ZoneData, scanType ScanType, resp ScanTupleResponse) {
 	args := []any{"parent", parent.ZoneName, "child", resp.Qname, "type", ScanTypeToString[scanType]}
 	if resp.Validation != "" {
 		args = append(args, "validation", string(resp.Validation))
+	}
+	if len(resp.GlueSkipped) > 0 {
+		args = append(args, "glue-skipped", strings.Join(resp.GlueSkipped, "; "))
 	}
 	switch {
 	case resp.Error && resp.ErrorMsg == errCsyncNotImmediate.Error():
@@ -140,6 +148,8 @@ func logScanResult(parent *ZoneData, scanType ScanType, resp ScanTupleResponse) 
 			"ns", fmt.Sprintf("+%d -%d", len(resp.NSAdds), len(resp.NSRemoves)),
 			"glue", fmt.Sprintf("+%d -%d", len(resp.GlueAdds), len(resp.GlueRemoves)),
 			"reason", resp.ValidationReason)...)
+	case len(resp.GlueSkipped) > 0:
+		lg.Info("ScannerEngine: scan result", append(args, "outcome", "no change")...)
 	default:
 		lg.Debug("ScannerEngine: scan result", append(args, "outcome", "no change")...)
 	}
