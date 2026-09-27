@@ -419,17 +419,19 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 	// configured outbound-soa-serial mode would have to be fought over twice).
 	//
 	// LoadOutgoingSerial is the durable record of what secondaries have been
-	// handed. Without this floor the merged zone can publish BELOW a serial one
-	// of them already holds, and a secondary refreshes on a serial increase and
-	// nothing else -- so it would serve the pre-merge zone indefinitely.
+	// handed: every publish of a zone that originates content records its
+	// serial there, in every outbound-soa-serial mode (#655). Without this
+	// floor the merged zone can publish BELOW a serial one of them already
+	// holds, and a secondary refreshes on a serial increase and nothing else --
+	// so it would serve the pre-merge zone indefinitely.
 	//
 	// Raising CurrentSerial rather than setting the final value: every bump
 	// mode only ever moves forward, so starting the publish one below the floor
 	// guarantees it lands at or above it whatever the mode.
-	// A zone that has never notified a secondary has no outgoing serial, and
-	// that is the normal case rather than a failure -- sql.ErrNoRows here means
-	// "nothing has been served yet", so the floor is simply the file's own
-	// serial. Only a real database error is worth warning about.
+	// A zone that has never published has no record, and that is the normal
+	// case rather than a failure -- sql.ErrNoRows here means "nothing has been
+	// served yet", so the floor is simply the file's own serial. Only a real
+	// database error is worth warning about.
 	outgoing, oerr := kdb.LoadOutgoingSerial(zd.ZoneName)
 	if oerr != nil {
 		outgoing = 0

@@ -304,11 +304,12 @@ type AuthEngineConf struct {
 	// transfers and NOTIFYs. One of:
 	//   keep     — outbound = inbound serial (default; current behavior).
 	//   unixtime — outbound = time.Now().Unix() at parse.
-	//   persist  — outbound = previously-saved outbound serial (from the
-	//              OutgoingSerials DB table). Every BumpSerial writes the
-	//              new value back. On clean restart with no zone change,
-	//              the serial stays put — secondaries don't see a regression
-	//              and don't trigger an unnecessary AXFR.
+	//   persist  — kept as an equivalent name for keep. What it used to add,
+	//              a restart that never goes below the last serial served,
+	//              now applies to every mode: each publish records its serial
+	//              in the OutgoingSerials DB table, and the first load lands
+	//              past it (#655). On a clean restart with no zone change the
+	//              serial stays put.
 	OutboundSoaSerial string `yaml:"outbound-soa-serial,omitempty" mapstructure:"outbound-soa-serial" validate:"omitempty,oneof=keep unixtime persist"`
 
 	// TransferSrc is the server-global source address for OUTBOUND zone

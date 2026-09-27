@@ -1756,8 +1756,9 @@ func (zd *ZoneData) EffectiveOutboundSoaSerialWithSource() (mode, source string)
 // nextOutboundSerial returns the next SOA serial that should be advertised
 // to downstreams given zd.CurrentSerial and the effective outbound-soa-serial
 // mode (per-zone, else server-global):
-//   - "" / "keep" / "persist": prev + 1 (legacy behaviour; "persist" only
-//     differs in that the resulting serial is also written to OutgoingSerials)
+//   - "" / "keep" / "persist": prev + 1. Every mode records the published
+//     serial in OutgoingSerials (recordPublishedSerialLocked, #655), so
+//     "persist" no longer differs here.
 //   - "unixtime": time.Now().Unix(), unless that would not advance the serial
 //     (e.g. multiple bumps within the same wallclock second), in which case
 //     fall back to prev + 1 to preserve monotonicity.

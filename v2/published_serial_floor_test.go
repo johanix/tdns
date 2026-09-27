@@ -598,3 +598,38 @@ func TestPurgeKeepsTheRecord(t *testing.T) {
 		t.Fatalf("after a purge and a restart the zone serves %d, not past %d", got, high)
 	}
 }
+
+// T11: `zone journal status` reports the published serial beside the
+// journal's head, and whether a restart will lift past it.
+func TestJournalStatusReportsThePublishedSerial(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := restartedPrimary(t, kdb, reloadBase, "")
+	head := mustUpdate(t, zd, kdb, "journal.example. 3600 IN A 10.1.1.1")
+	unjournaledPublish(t, zd)
+	high := unjournaledPublish(t, zd)
+
+	info, err := zd.JournalInfo(false)
+	if err != nil {
+		t.Fatalf("JournalInfo: %v", err)
+	}
+	if info.HeadSerial != head || !info.HavePublished || info.PublishedSerial != high {
+		t.Fatalf("head %d published %d/%v, want head %d published %d",
+			info.HeadSerial, info.PublishedSerial, info.HavePublished, head, high)
+	}
+	if !info.RestartLifts {
+		t.Error("a zone published past its file does not report that a restart lifts")
+	}
+
+	// Written out: the file holds the published serial, and a restart lifts nothing.
+	if _, err := zd.WriteZone(true, true); err != nil {
+		t.Fatalf("WriteZone: %v", err)
+	}
+	info, err = zd.JournalInfo(false)
+	if err != nil {
+		t.Fatalf("JournalInfo: %v", err)
+	}
+	if info.PublishedSerial != info.FileSerial || info.RestartLifts {
+		t.Fatalf("after a write: published %d, file %d, lifts %v; want equal and no lift",
+			info.PublishedSerial, info.FileSerial, info.RestartLifts)
+	}
+}

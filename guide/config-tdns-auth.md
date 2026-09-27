@@ -897,10 +897,18 @@ a route to private keys and TSIG secrets. Use `127.0.0.1:6060`, and forward a
 port over ssh to profile a remote host.
 
 `outbound-soa-serial` controls the SOA serial advertised to secondaries.
-`keep` sends the inbound serial unchanged. `unixtime` uses the load time.
-`persist` remembers the last serial in the database, so a restart with no zone
-change does not regress the serial and does not provoke a needless AXFR — the
-right choice for a primary with BIND/Knot/NSD secondaries.
+`keep` sends the inbound serial unchanged. `unixtime` uses the load time, and
+never moves the serial backwards. `persist` is kept as an equivalent name for
+`keep`: what it used to add now applies to every mode.
+
+In every mode, a zone that tdns originates content for (a primary, or an
+inline-signing secondary) records each serial it publishes. After a restart it
+comes back past the highest one, so it never publishes again a serial a
+secondary may already hold, with other content. A restart when nothing was
+published since the zone file was written lifts nothing. A zone file whose
+serial is newer is kept, so the RFC 1982 procedure for changing a serial scheme
+works as before. `zone journal status` shows the serial a restart comes back
+past.
 
 Three `options:` values are recognized:
 

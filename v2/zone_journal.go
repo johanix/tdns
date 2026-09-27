@@ -45,6 +45,16 @@ type ZoneJournalInfo struct {
 	FileSerial   uint32
 	ServedSerial uint32
 
+	// PublishedSerial is the highest serial the zone is known to have
+	// published: the newer of the recorded published serial and the journal's
+	// head (#655). HavePublished is false when nothing is known. A restart
+	// lands past PublishedSerial whenever it is ahead of the zone file's
+	// serial, which RestartLifts says -- so an operator can see before a
+	// restart what the zone will come back at.
+	PublishedSerial uint32
+	HavePublished   bool
+	RestartLifts    bool
+
 	// Replayable answers the question an operator actually has: will this
 	// journal survive a restart? Diagnosis says why not when it will not.
 	Replayable bool
@@ -116,6 +126,13 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 		Overlay:           overlay,
 		PersistenceActive: JournalActive(),
 	}
+
+	published, havePublished, err := zd.KeyDB.PublishedSerialFloor(zd.ZoneName)
+	if err != nil {
+		return nil, err
+	}
+	info.PublishedSerial, info.HavePublished = published, havePublished
+	info.RestartLifts = havePublished && serialNewer(published, fileSerial)
 
 	for _, d := range deltas {
 		info.Records += len(d.RRs)
