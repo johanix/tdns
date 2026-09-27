@@ -1431,6 +1431,8 @@ func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, d
 					continue
 				}
 				rrset.RRtype = rrt
+				// rrset's RRs are borrowed from the published snapshot;
+				// SignRRset's storage contract keeps them unwritten (#797).
 				if _, serr := zd.SignRRset(&rrset, name, dak, true, nil); serr != nil {
 					lg.Error("reconcileDelegationChangesLocked: signing a name the moved delegation uncovered failed",
 						"zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[rrt], "error", serr)

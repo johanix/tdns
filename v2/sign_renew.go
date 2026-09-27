@@ -126,9 +126,10 @@ func (zd *ZoneData) RenewZoneSignatures(ctx context.Context, kdb *KeyDB) (int, e
 	// at least one signature has actually been written, which is what keeps a
 	// pass that renews nothing from bumping the serial -- and what keeps this
 	// pass from writing through to the snapshot that is being served right now.
-	// ensureWorkingSet is a SHALLOW copy and SignRRset rewrites TTLs in place
-	// without rolling them back on the success path, so an RRset that shares
-	// storage with the snapshot must never be handed to it.
+	// ensureWorkingSet is a SHALLOW copy, so what was collected shares storage
+	// with the snapshot. SignRRset used to rewrite TTLs in place, which made
+	// this clone mandatory; since #797 its storage contract rules that out for
+	// every caller, and the clone stays as a second line of defence.
 	signed := make([]renewalTarget, 0, len(due))
 	for _, t := range due {
 		rs := cloneRRset(t.rrset)
@@ -204,8 +205,8 @@ func (zd *ZoneData) RenewZoneSignatures(ctx context.Context, kdb *KeyDB) (int, e
 //
 // Read-only. The RRsets it returns share storage with the published snapshot --
 // the RRset struct is copied by value but its RRs and RRSIGs slices are not, and
-// a working set is a shallow copy of the snapshot -- so every one of them MUST
-// be cloned before it is signed.
+// a working set is a shallow copy of the snapshot. The caller clones each one
+// before signing it (see there), and must not write into them in any other way.
 //
 // It also returns when the zone's earliest-crossing signature next enters that
 // window, over every RRset it considered -- due or not. That is the value the

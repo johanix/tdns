@@ -84,10 +84,12 @@ func (zd *ZoneData) cloneOwner(name string) *OwnerData {
 		// would fall out of the chain on the next publish without anything
 		// having asked for that.
 		//
-		// Deep-copied, because the published snapshot shares these records and
-		// signing rewrites them: applyClampToRRset assigns Header().Ttl in
-		// place, so a shared RR would have its TTL changed underneath a
-		// snapshot that is being served right now.
+		// Deep-copied, because the published snapshot shares these records.
+		// This copy used to be what kept the TTL clamp from rewriting a served
+		// NSEC in place; signing no longer writes into records it is handed
+		// (SignRRset's storage contract, #797), and the copy is kept -- it is
+		// one small RRset per owner, and the RRtypes entries above are still
+		// shared with the snapshot, so a writer here must not assume otherwise.
 		nod.NSEC = cloneRRset(src.NSEC)
 	}
 	zd.workingSet[key] = nod
