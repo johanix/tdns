@@ -38,6 +38,11 @@ type ProxyDelegationAnalysis struct {
 	// DelegationStatus carries the NS/glue/DS deltas from DelegationDataChangedNG,
 	// kept for the future UPDATE-proxy path (it is not needed to decide a NOTIFY).
 	DelegationStatus DelegationSyncStatus
+	// KeyChanged: the apex KEY RRset changed. Not a delegation change and not
+	// a NOTIFY trigger, so anyChange ignores it. It is the input to the §10.8
+	// UPDATE gate: the operator publishing the agent's KEY at the primary is
+	// what moves the zone from waiting-for-key to ready (#790).
+	KeyChanged bool
 }
 
 // anyChange reports whether any dimension that drives a NOTIFY changed.
@@ -85,6 +90,8 @@ func (zd *ZoneData) ProxyDelegationPreRefresh(new_zd *ZoneData) {
 	} else {
 		analysis.DnskeyChanged = changed
 	}
+
+	analysis.KeyChanged = zd.apexRRsetChanged(new_zd, dns.TypeKEY)
 
 	zd.mu.Lock()
 	zd.ProxyRefreshAnalysis = analysis
@@ -134,7 +141,17 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 	zd.ProxyRefreshAnalysis = nil
 	zd.mu.Unlock()
 
-	if analysis == nil || !analysis.anyChange() {
+	if analysis == nil {
+		return
+	}
+	if !analysis.anyChange() {
+		// A transfer that changed only the apex KEY re-runs the UPDATE gate
+		// and nothing else. One that also changed the delegation needs no
+		// separate request: the PROXY-SYNC below builds the plan, and the plan
+		// runs the same gate.
+		if analysis.KeyChanged {
+			zd.queueProxyUpdateGate(delsyncq)
+		}
 		return
 	}
 	if delsyncq == nil {
@@ -166,6 +183,37 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 	}:
 	default:
 		zd.Logger.Printf("ProxyDelegationPostRefresh: DelegationSyncQ full for %s; dropping this proxy sync trigger (the next proxy sync declares the whole delegation and takes withdrawals from the parent)", zd.ZoneName)
+	}
+}
+
+// queueProxyUpdateGate asks the delegation syncher to re-run the §10.8 UPDATE
+// gate, after a transfer changed the apex KEY.
+//
+// Without it the zone's warning outlived the state it describes. The gate sets
+// "waiting for the KEY" when it runs and clears it when it finds the KEY, but
+// it runs only when a plan is built -- at startup, and for a delegation change
+// -- so after the operator published the KEY the warning stayed until the next
+// proxied change. Before #790 the status command re-ran the gate as a side
+// effect, which is what an operator checking their work happened to trigger.
+// Status no longer changes the zone, so the agent has to notice for itself.
+//
+// Off the refresh path like PROXY-SYNC, and for the same reason: the gate
+// starts with the parent's DSYNC records, which are network.
+func (zd *ZoneData) queueProxyUpdateGate(delsyncq chan DelegationSyncRequest) {
+	if delsyncq == nil {
+		zd.Logger.Printf("ProxyDelegationPostRefresh: DelegationSyncQ unavailable for %s; cannot re-run the UPDATE gate", zd.ZoneName)
+		return
+	}
+	lgDns.Info("parentsync-proxy: apex KEY changed in transfer; queueing a re-run of the UPDATE gate",
+		"zone", zd.ZoneName)
+	select {
+	case delsyncq <- DelegationSyncRequest{
+		Command:  "PROXY-UPDATE-GATE",
+		ZoneName: zd.ZoneName,
+		ZoneData: zd,
+	}:
+	default:
+		zd.Logger.Printf("ProxyDelegationPostRefresh: DelegationSyncQ full for %s; dropping the UPDATE gate re-run (the next plan runs the gate)", zd.ZoneName)
 	}
 }
 

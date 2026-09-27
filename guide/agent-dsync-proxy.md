@@ -156,9 +156,10 @@ it once at the primary.
    the apex KEY — so the bootstrap works even with multiple providers.)
 3. Add those two records to the zone at the primary. They transfer in to the
    agent on the next refresh.
-4. Once the agent sees its KEY at the apex, `parentsync status` reports READY. On that
-   transition the agent runs the self-signed SIG(0) ceremony with the parent —
-   once per zone, before the first proxied UPDATE — and then starts proxying.
+4. Once the agent sees its KEY at the apex, `parentsync status` reports READY,
+   and the waiting warning on the zone clears with the transfer that brought
+   the KEY in. The agent runs the self-signed SIG(0) ceremony with the parent
+   once per zone, before the first proxied UPDATE, and then starts proxying.
 
 **READY means "the agent can sign", not "the parent trusts it".** The ceremony
 is a separate step and can be refused: the parent may require manual bootstrap,

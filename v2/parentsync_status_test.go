@@ -261,6 +261,41 @@ func TestReportModeStillGeneratesTheWaitingKey(t *testing.T) {
 	}
 }
 
+// The warning follows the KEY without anyone running status. After a transfer
+// changes the apex KEY the syncher re-runs the gate, which clears "waiting" once
+// the KEY is the agent's -- but only for a zone that configures UPDATE.
+func TestProxyUpdateGateRerunClearsTheWaitingWarning(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := genProxySig0Key(t, kdb, proxyUpdZone)
+	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone()+key.String()+"\n")
+	zd.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
+	const waiting = "DSYNC UPDATE proxy waiting: publish the KEY + HSYNCPARAM pubkey at the primary"
+	zd.SetError(DelegationSyncWarning, "%s", waiting)
+
+	// The gate as it runs once the parent's UPDATE receiver is known; the DSYNC
+	// lookup in front of it is network.
+	called := false
+	check := func() (ProxyUpdateState, error) {
+		called = true
+		return zd.proxySig0PublicationState(kdb)
+	}
+
+	setParentSyncSchemes(t, "notify")
+	proxyUpdateGate(zd.ZoneName, check)
+	if called {
+		t.Error("the UPDATE gate ran for a zone that does not configure UPDATE")
+	}
+
+	setParentSyncSchemes(t, "update")
+	proxyUpdateGate(zd.ZoneName, check)
+	if !called {
+		t.Fatal("the UPDATE gate did not run")
+	}
+	if got := zd.delegationSyncWarningMsg(); got != "" {
+		t.Errorf("the waiting warning outlived the KEY: %q", got)
+	}
+}
+
 // proxy-key goes through the same report mode now: running it cannot clear
 // another source's warning.
 func TestProxyKeyStatusLeavesTheWarningAlone(t *testing.T) {
