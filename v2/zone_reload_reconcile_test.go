@@ -743,32 +743,26 @@ operator.example.	3600	IN	A	10.9.9.9
 }
 
 // TestAFailedReplacementLeavesTheZoneAbleToTryAgain. The replacement can fail
-// on one database write -- persisting the outgoing serial -- after the file has
-// been read and before anything is published. The zone still serves what it
-// served before, so it must not be left looking mid-load, and it must not be
-// left believing it has already dealt with a file it could not adopt.
+// on one database read -- the published serial a first load lands past (#655)
+// -- after the file has been read and before anything is published. The zone
+// must not be left looking mid-load, and it must not be left believing it has
+// already dealt with a file it could not adopt.
+//
+// This used to be driven by a failed persist-mode WRITE on a reload. That
+// write is gone: the publish records the serial now, in every mode, and a
+// failed record there is a warning rather than a refused replacement.
 func TestAFailedReplacementLeavesTheZoneAbleToTryAgain(t *testing.T) {
 	kdb := newTestKeyDB(t)
-	zd := reloadZone(t, kdb, reloadBase)
-	// persist mode is what makes the replacement write to the database at all.
-	zd.OutboundSoaSerial = OutboundSoaSerialPersist
-	refreshOnce(t, zd)
+	zd, _ := firstLoadFileZone(t, kdb, reloadBase)
 
 	before := zd.GetStatus()
 
-	// Break the database under it. The read side degrades to "no basis for
-	// comparison", so the serial has to move for the file to be adopted at all
-	// -- which is what gets us to the write that fails.
-	if err := kdb.DB.Close(); err != nil {
-		t.Fatalf("closing the database: %v", err)
+	// Break the read the first load makes before it publishes.
+	if _, err := kdb.DB.Exec(`ALTER TABLE OutgoingSerials RENAME TO OutgoingSerialsAway`); err != nil {
+		t.Fatalf("hiding the table: %v", err)
 	}
-	operatorEdit(t, zd, `example.	3600	IN	SOA	ns.example. hostmaster.example. 101 7200 1800 604800 7200
-example.	3600	IN	NS	ns.example.
-www.example.	3600	IN	A	192.0.2.1
-broken.example.	3600	IN	A	10.16.0.1
-`)
 
-	updated, err := zd.Refresh(context.Background(), false, false, false, &Config{})
+	updated, err := zd.FetchFromFile(context.Background(), false, false, true, nil)
 	if err == nil {
 		t.Fatal("the replacement did not fail, so this test proves nothing")
 	}
@@ -786,4 +780,10 @@ broken.example.	3600	IN	A	10.16.0.1
 		t.Error("a failed replacement left the cached stat in place; the next refresh would" +
 			" skip the file and the zone would never adopt it")
 	}
+
+	// And the retry adopts the file once the read works.
+	if _, err := kdb.DB.Exec(`ALTER TABLE OutgoingSerialsAway RENAME TO OutgoingSerials`); err != nil {
+		t.Fatalf("restoring the table: %v", err)
+	}
+	firstLoadFromFile(t, zd)
 }

@@ -239,10 +239,17 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 			serialChanged := false
 			switch zd.EffectiveOutboundSoaSerial() {
 			case OutboundSoaSerialUnixtime:
-				zd.CurrentSerial = uint32(time.Now().Unix())
-				lgEngine.Info("zone loaded; outbound-soa-serial=unixtime",
-					"zone", zone, "serial", zd.CurrentSerial)
-				serialChanged = true
+				// Forward only, as nextOutboundSerial is. The first load may
+				// have lifted the serial past what this zone published before
+				// the restart, and a clock stepped back, or a burst of
+				// publishes that ran ahead of it, would otherwise undo that
+				// (#655).
+				if now := uint32(time.Now().Unix()); serialNewer(now, zd.CurrentSerial) {
+					zd.CurrentSerial = now
+					lgEngine.Info("zone loaded; outbound-soa-serial=unixtime",
+						"zone", zone, "serial", zd.CurrentSerial)
+					serialChanged = true
+				}
 			case OutboundSoaSerialPersist:
 				// Only restore the persisted serial when it is *ahead* of
 				// the freshly loaded inbound serial. If upstream advanced

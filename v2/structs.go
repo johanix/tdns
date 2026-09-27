@@ -359,6 +359,12 @@ type ZoneData struct {
 	// replay that re-persisted what it just replayed would double the stored
 	// history on every restart.
 	wsPersistDelta bool
+	// serialRecordFailed is set while the last attempt to record the published
+	// serial failed and its ConfigWarning is raised; serialRecordPrevWarning is
+	// the ConfigWarning that warning displaced, put back once a record lands.
+	// See recordPublishedSerialLocked. Guarded by mu.
+	serialRecordFailed      bool
+	serialRecordPrevWarning map[ErrorType]ZoneError
 	// wsFromReplacement marks a working set built from a replacement -- a
 	// transfer, or a reload of the zone's file -- that has not been published
 	// yet: its publish was refused (it could not be signed, or its chain could

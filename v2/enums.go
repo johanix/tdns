@@ -266,7 +266,7 @@ var StringToAuthOption = map[string]AuthOption{
 const (
 	OutboundSoaSerialKeep     = "keep"     // outbound = inbound serial (default)
 	OutboundSoaSerialUnixtime = "unixtime" // outbound = time.Now().Unix()
-	OutboundSoaSerialPersist  = "persist"  // outbound = previous outbound serial; bumps written to OutgoingSerials
+	OutboundSoaSerialPersist  = "persist"  // equivalent to keep: every mode now records its serials and floors on them at a restart (#655)
 )
 
 type AppType uint8
