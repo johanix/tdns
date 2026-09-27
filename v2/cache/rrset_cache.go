@@ -927,18 +927,17 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 			nsRecords = append(nsRecords, rr)
 			nsname := rr.(*dns.NS).Ns
 			nsMap[nsname] = true
-			// Use shared AuthServer instance (ensures single instance per nameserver)
+			// Use shared AuthServer instance (ensures single instance per nameserver).
+			// A root refresh seeds from the hints while queries run, so
+			// everything below goes through the server's lock.
 			server := rrcache.GetOrCreateAuthServer(nsname)
-			if server.Src == "" || server.Src == "unknown" {
-				server.Src = "hint"
-			}
-			if len(server.Transports) == 0 {
-				server.Transports = []core.Transport{core.TransportDo53}
-			}
+			server.SetSrc("hint")
+			server.SetTransportsIfNone([]core.Transport{core.TransportDo53})
 			authMap[nsname] = server
 			rootns = append(rootns, nsname)
 			if rrcache.Debug {
-				log.Printf("PrimeWithHints: adding server for root: name %q: %+v", nsname, authMap[nsname])
+				log.Printf("PrimeWithHints: adding server for root: name %q: src %s, transports %v",
+					nsname, server.GetSrc(), server.GetTransports())
 			}
 
 		case dns.TypeA, dns.TypeAAAA:
