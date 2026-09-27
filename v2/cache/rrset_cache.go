@@ -927,18 +927,18 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 			nsRecords = append(nsRecords, rr)
 			nsname := rr.(*dns.NS).Ns
 			nsMap[nsname] = true
-			// Use shared AuthServer instance (ensures single instance per nameserver)
+			// Use shared AuthServer instance (ensures single instance per nameserver).
+			// A root refresh seeds from the hints while queries run, so the
+			// server is changed only through its locked setters, here and for
+			// the glue below.
 			server := rrcache.GetOrCreateAuthServer(nsname)
-			if server.Src == "" || server.Src == "unknown" {
-				server.Src = "hint"
-			}
-			if len(server.Transports) == 0 {
-				server.Transports = []core.Transport{core.TransportDo53}
-			}
+			server.SetSrc("hint")
+			server.SetTransportsIfNone([]core.Transport{core.TransportDo53})
 			authMap[nsname] = server
 			rootns = append(rootns, nsname)
 			if rrcache.Debug {
-				log.Printf("PrimeWithHints: adding server for root: name %q: %+v", nsname, authMap[nsname])
+				log.Printf("PrimeWithHints: adding server for root: name %q: src %s, transports %v",
+					nsname, server.GetSrc(), server.GetTransports())
 			}
 
 		case dns.TypeA, dns.TypeAAAA:
@@ -988,7 +988,9 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 			continue
 		}
 
-		// Group records by type (A or AAAA)
+		// Group records by type (A or AAAA). AddAddr adds only the addresses
+		// the server lacks: a re-seed fills gaps, keeps what the server has
+		// learned since, and never lists an address twice.
 		typeGroups := map[uint16][]dns.RR{}
 		tmpsrv := authMap[name]
 		for _, rr := range rrs {
@@ -997,15 +999,15 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 			switch rr.Header().Rrtype {
 			case dns.TypeA:
 				servers = append(servers, net.JoinHostPort(rr.(*dns.A).A.String(), "53"))
-				tmpsrv.Addrs = append(tmpsrv.Addrs, rr.(*dns.A).A.String())
+				tmpsrv.AddAddr(rr.(*dns.A).A.String())
 			case dns.TypeAAAA:
 				servers = append(servers, net.JoinHostPort(rr.(*dns.AAAA).AAAA.String(), "53"))
-				tmpsrv.Addrs = append(tmpsrv.Addrs, rr.(*dns.AAAA).AAAA.String())
+				tmpsrv.AddAddr(rr.(*dns.AAAA).AAAA.String())
 			}
 		}
 		authMap[name] = tmpsrv
 		if rrcache.Debug {
-			log.Printf("PrimeWithHints: adding addrs to server for root: name %q: %+v", name, authMap[name])
+			log.Printf("PrimeWithHints: adding addrs to server for root: name %q: addrs %v", name, tmpsrv.GetAddrs())
 		}
 
 		// Create RRset for each type

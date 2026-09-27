@@ -248,6 +248,22 @@ func (as *AuthServer) SetTransports(transports []core.Transport) {
 	copy(as.Transports, transports)
 }
 
+// SetTransportsIfNone sets the transports slice only when the server has
+// none, checking and setting under one lock so that a transport signal
+// installed meanwhile is not replaced. Thread-safe.
+func (as *AuthServer) SetTransportsIfNone(transports []core.Transport) {
+	if as == nil || len(transports) == 0 {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.Transports) > 0 {
+		return
+	}
+	as.Transports = make([]core.Transport, len(transports))
+	copy(as.Transports, transports)
+}
+
 // GetSrc returns the source string. Thread-safe.
 func (as *AuthServer) GetSrc() string {
 	if as == nil {

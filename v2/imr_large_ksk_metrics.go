@@ -212,7 +212,7 @@ func serverAdvertises(server *cache.AuthServer, t core.Transport) bool {
 	if server == nil {
 		return false
 	}
-	for _, a := range server.Transports {
+	for _, a := range server.GetTransports() {
 		if a == t {
 			return true
 		}
