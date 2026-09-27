@@ -7,6 +7,7 @@ package cache
 import (
 	"log"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 
@@ -17,7 +18,10 @@ import (
 // the root servers are the shared instances every query to the root uses.
 // seedFromHints used to read and write their Src and Transports without the
 // server's lock, so a transport signal or a source upgrade applied to a root
-// server meanwhile was a data race (#714).
+// server meanwhile was a data race (#714). It also appended the hint glue to
+// Addrs without the lock, racing every query that read the addresses, and
+// appended it again on every re-seed, so each one listed each address once
+// more.
 func TestHintSeedingWhileRootServersChange(t *testing.T) {
 	rrcache := NewRRsetCache(log.New(os.Stderr, "test ", log.LstdFlags), false, false)
 	rrcache.Quiet = true
@@ -29,18 +33,24 @@ func TestHintSeedingWhileRootServersChange(t *testing.T) {
 	if !ok {
 		t.Fatalf("%s not in the AuthServerMap after priming", nsname)
 	}
+	addrs := server.GetAddrs()
+	if len(addrs) == 0 {
+		t.Fatalf("%s has no addresses after priming", nsname)
+	}
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		// What a transport signal and an answer naming the server do
-		// meanwhile. At least once, so the check below has a signal to find.
+		// meanwhile, and what every query to the root reads. At least once,
+		// so the check below has a signal to find.
 		defer wg.Done()
 		for {
 			server.SetTransportSignal([]core.Transport{core.TransportDoT, core.TransportDo53},
 				[]string{"dot", "do53"}, map[core.Transport]uint8{core.TransportDoT: 50})
 			server.ForceSetSrc("answer")
+			_ = server.GetAddrs()
 			select {
 			case <-stop:
 				return
@@ -61,6 +71,9 @@ func TestHintSeedingWhileRootServersChange(t *testing.T) {
 	// signal installed.
 	if got := server.GetTransports(); len(got) != 2 || got[0] != core.TransportDoT {
 		t.Errorf("transports after seeding = %v, want the signal's [DoT Do53]", got)
+	}
+	if got := server.GetAddrs(); !slices.Equal(got, addrs) {
+		t.Errorf("addresses after 50 re-seeds = %v, want the first seed's %v", got, addrs)
 	}
 }
 
