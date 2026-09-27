@@ -255,7 +255,8 @@ func showParentSyncStatus(api *tdns.ApiClient, errPrefix string) {
 // DELEGATION-STATUS answer.
 func printDelegationDelta(w io.Writer, dss tdns.DelegationSyncStatus) {
 	if dss.InSync {
-		fmt.Fprintf(w, "Delegation information in parent %s is in sync with child %s. No action needed.\n",
+		// A semicolon, not a full stop: the names end in one already.
+		fmt.Fprintf(w, "Delegation information in parent %s is in sync with child %s; no action needed.\n",
 			dss.Parent, dss.ZoneName)
 		return
 	}

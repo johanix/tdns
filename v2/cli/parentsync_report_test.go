@@ -59,8 +59,11 @@ func TestParentSyncReportProxy(t *testing.T) {
 		"UPDATE  usable:  update.example. port 53\n",
 		proxyReadyText, // word for word, as proxy-key prints it
 		"NOTIFY: the zone is signed; it publishes CDS: no, CSYNC: no\n",
-		"Delegation information in parent example. is in sync with child child.example.",
+		"Delegation information in parent example. is in sync with child child.example.; no action needed.\n",
 	)
+	if strings.Contains(out, "..") {
+		t.Errorf("a name ending in a dot got a full stop after it:\n%s", out)
+	}
 }
 
 // Johan's point that started #790: a NOTIFY-only setup sees its NOTIFY state,
