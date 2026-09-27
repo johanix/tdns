@@ -633,3 +633,44 @@ func TestJournalStatusReportsThePublishedSerial(t *testing.T) {
 			info.PublishedSerial, info.FileSerial, info.RestartLifts)
 	}
 }
+
+// The merge floors on the same helper as the first load and the replay. With
+// no record -- a database written before this change -- a merge over a
+// replaced file still lands past the journal's tail.
+func TestMergeWithoutARecordFloorsOnTheJournalTail(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	const replaced = `example.	3600	IN	SOA	ns.example. hostmaster.example. 3 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+www.example.	3600	IN	A	192.0.2.1
+old.example.	3600	IN	TXT	"remove me"
+operator.example.	3600	IN	A	10.9.9.9
+`
+	zd := mergeTestZone(t, kdb, replaced, []string{
+		"j1.example. 3600 IN A 10.1.1.1",
+		"j2.example. 3600 IN A 10.1.1.2",
+		"j3.example. 3600 IN A 10.1.1.3",
+		"j4.example. 3600 IN A 10.1.1.4",
+		"j5.example. 3600 IN A 10.1.1.5",
+	}, nil)
+	tail, have, err := kdb.LastZoneDeltaSerial("example.")
+	if err != nil || !have {
+		t.Fatalf("precondition: no journal tail (err %v)", err)
+	}
+	if !serialNewer(tail, 3) {
+		t.Fatalf("precondition: the journal's tail %d is not ahead of the file's serial 3", tail)
+	}
+	if err := kdb.DeleteOutgoingSerial("example."); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := zd.MergeJournalOverNewFile(kdb); err != nil {
+		t.Fatalf("MergeJournalOverNewFile: %v", err)
+	}
+	if !serialNewer(zd.CurrentSerial, tail) {
+		t.Fatalf("with no record the merged zone serves %d, not past the journal's tail %d",
+			zd.CurrentSerial, tail)
+	}
+	if !psfHasOwner(zd, "operator.example.") || !psfHasOwner(zd, "j5.example.") {
+		t.Error("the merge did not keep both the file's record and the journal's")
+	}
+}

@@ -6,8 +6,6 @@ package tdns
 
 import (
 	"bytes"
-	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -418,35 +416,38 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 	// afterwards (which secondaries would see as two changes, and which the
 	// configured outbound-soa-serial mode would have to be fought over twice).
 	//
-	// LoadOutgoingSerial is the durable record of what secondaries have been
-	// handed: every publish of a zone that originates content records its
-	// serial there, in every outbound-soa-serial mode (#655). Without this
-	// floor the merged zone can publish BELOW a serial one of them already
-	// holds, and a secondary refreshes on a serial increase and nothing else --
-	// so it would serve the pre-merge zone indefinitely.
+	// PublishedSerialFloor is the highest serial this zone is known to have
+	// handed to secondaries: the newer of the record every publish of a zone
+	// that originates content writes, in every outbound-soa-serial mode, and
+	// the journal's tail (#655). The same helper the first load and the replay
+	// read, so the three cannot disagree -- and the tail is what a database
+	// written before the record existed still has. Without this floor the
+	// merged zone can publish BELOW a serial a secondary already holds, and a
+	// secondary refreshes on a serial increase and nothing else -- so it would
+	// serve the pre-merge zone indefinitely.
 	//
 	// Raising CurrentSerial rather than setting the final value: every bump
 	// mode only ever moves forward, so starting the publish one below the floor
 	// guarantees it lands at or above it whatever the mode.
-	// A zone that has never published has no record, and that is the normal
-	// case rather than a failure -- sql.ErrNoRows here means "nothing has been
-	// served yet", so the floor is simply the file's own serial. Only a real
-	// database error is worth warning about.
-	outgoing, oerr := kdb.LoadOutgoingSerial(zd.ZoneName)
-	if oerr != nil {
-		outgoing = 0
-		if !errors.Is(oerr, sql.ErrNoRows) {
-			lg.Warn("could not read the outgoing serial; the merged zone may publish below"+
-				" a serial some secondary already holds",
-				"zone", zd.ZoneName, "error", oerr)
-		}
+	//
+	// Nothing known stands in as the file's own serial, not as 0: in RFC 1982
+	// order 0 is newer than every serial from 2^31 up, and would pull the floor
+	// down to 1. Only a real database error is worth warning about.
+	published, havePublished, perr := kdb.PublishedSerialFloor(zd.ZoneName)
+	if perr != nil {
+		lg.Warn("could not read the published serial; the merged zone may publish below"+
+			" a serial some secondary already holds",
+			"zone", zd.ZoneName, "error", perr)
+	}
+	if perr != nil || !havePublished {
+		published = fileSerial
 	}
 	zd.mu.Lock()
-	floor := mergeSerialFloor(fileSerial, outgoing, zd.CurrentSerial)
+	floor := mergeSerialFloor(fileSerial, published, zd.CurrentSerial)
 	if serialNewer(floor-1, zd.CurrentSerial) {
 		lg.Info("lifting the merged zone's serial clear of what has already been served",
 			"zone", zd.ZoneName, "from", zd.CurrentSerial, "floor", floor,
-			"file_serial", fileSerial, "outgoing_serial", outgoing)
+			"file_serial", fileSerial, "published_serial", published)
 		zd.CurrentSerial = floor - 1
 	}
 	zd.mu.Unlock()
