@@ -130,7 +130,7 @@ func (zd *ZoneData) proxySig0PublicationState(kdb *KeyDB) (ProxyUpdateState, err
 		}
 		zd.proxySig0ParentBootstrapped = false
 		// Foreign KEY: do not mint a competing key; degrade, don't fail.
-		msg := "DSYNC UPDATE proxy not operable: a foreign KEY occupies the apex (no matching private key); NOTIFY proxy may still apply"
+		msg := proxyUpdateWarningPrefix + "not operable: a foreign KEY occupies the apex (no matching private key); NOTIFY proxy may still apply"
 		zd.SetError(DelegationSyncWarning, "%s", msg)
 		lgDns.Warn("proxy update precondition: foreign KEY at apex", "zone", zd.ZoneName)
 		return ProxyUpdateForeignKey, nil
@@ -142,7 +142,7 @@ func (zd *ZoneData) proxySig0PublicationState(kdb *KeyDB) (ProxyUpdateState, err
 	if err := zd.proxyEnsureSig0Key(kdb); err != nil {
 		// Keygen failure is a genuine internal error; still don't take the zone
 		// down — degrade with a warning.
-		msg := fmt.Sprintf("DSYNC UPDATE proxy not operable: failed to prepare SIG(0) key: %v", err)
+		msg := fmt.Sprintf("%snot operable: failed to prepare SIG(0) key: %v", proxyUpdateWarningPrefix, err)
 		zd.SetError(DelegationSyncWarning, "%s", msg)
 		lgDns.Error("proxy update precondition: keygen failed", "zone", zd.ZoneName, "err", err)
 		return ProxyUpdateWaiting, err
@@ -153,7 +153,7 @@ func (zd *ZoneData) proxySig0PublicationState(kdb *KeyDB) (ProxyUpdateState, err
 	}
 	// Name the command that prints the records, with this zone filled in.
 	// It used to point at "keystore dnssec proxy-key", which does not exist.
-	msg := fmt.Sprintf("DSYNC UPDATE proxy waiting: publish the KEY + HSYNCPARAM pubkey at the primary (see log / `tdns-cli agent zone proxy-key -z %s`)", zd.ZoneName)
+	msg := fmt.Sprintf("%swaiting: publish the KEY + HSYNCPARAM pubkey at the primary (see log / `tdns-cli agent zone proxy-key -z %s`)", proxyUpdateWarningPrefix, zd.ZoneName)
 	zd.SetError(DelegationSyncWarning, "%s", msg)
 	lgDns.Warn("proxy update precondition: waiting for KEY publication at primary",
 		"zone", zd.ZoneName, "instruction", instr)
@@ -303,10 +303,17 @@ record in RFC 3597 form:
 `, keyRR.String(), zd.proxyHsyncparamPubkeyRR(), core.TypeHSYNCPARAM, unknown), nil
 }
 
-// clearProxyUpdateWarning removes any parentsync-proxy UPDATE warning set
-// on the zone (when the state becomes ready or update-unsupported).
+// proxyUpdateWarningPrefix starts every DelegationSyncWarning the UPDATE proxy
+// sets. It is the wording the messages already had, so what operators see on
+// `zone list` does not change.
+const proxyUpdateWarningPrefix = "DSYNC UPDATE proxy "
+
+// clearProxyUpdateWarning removes the parentsync-proxy UPDATE warning when the
+// state becomes ready or update-unsupported, and only that warning:
+// DelegationSyncWarning is shared by several sources, and the proxy being
+// ready says nothing about the others.
 func (zd *ZoneData) clearProxyUpdateWarning() {
-	zd.ClearError(DelegationSyncWarning)
+	zd.clearPrefixedWarning(proxyUpdateWarningPrefix)
 }
 
 // ProxyKeyStatus is the operator-facing report for the `proxy-key` command: the

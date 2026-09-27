@@ -376,6 +376,61 @@ func TestProxySig0PublicationStateClearsBootstrappedFlag(t *testing.T) {
 	}
 }
 
+// DelegationSyncWarning is shared by several sources. The proxy reaching
+// READY clears the warning it set itself, and leaves another source's alone.
+func TestProxyReadyClearsOnlyItsOwnWarning(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := genProxySig0Key(t, kdb, proxyUpdZone)
+	foreign, _ := genForeignProxyKey(t)
+
+	// The proxy's own warnings, as the state machine words them.
+	ownWarning := func(zoneStr string, want ProxyUpdateState) string {
+		t.Helper()
+		zd := proxyUpdZoneData(t, kdb, zoneStr)
+		if state, err := zd.proxySig0PublicationState(kdb); err != nil || state != want {
+			t.Fatalf("state = %q (err %v), want %q", state, err, want)
+		}
+		ze, ok := zd.Errors[DelegationSyncWarning]
+		if !ok {
+			t.Fatalf("%s set no DelegationSyncWarning", want)
+		}
+		return ze.Msg
+	}
+	own := []string{
+		ownWarning(proxyUpdBaseZone(), ProxyUpdateWaiting),
+		ownWarning(proxyUpdBaseZone()+foreign.String()+"\n", ProxyUpdateForeignKey),
+	}
+
+	ready := proxyUpdZoneData(t, kdb, proxyUpdBaseZone()+key.String()+"\n")
+	toReady := func() {
+		t.Helper()
+		if state, err := ready.proxySig0PublicationState(kdb); err != nil || state != ProxyUpdateReady {
+			t.Fatalf("state = %q (err %v), want %q", state, err, ProxyUpdateReady)
+		}
+	}
+
+	for _, msg := range own {
+		ready.SetError(DelegationSyncWarning, "%s", msg)
+		toReady()
+		if ready.HasError(DelegationSyncWarning) {
+			t.Errorf("READY left the proxy's own warning in place: %q", msg)
+		}
+	}
+
+	for _, other := range []string{
+		childSyncProxyWarningPrefix + "waiting for the receiver's KEY",
+		parentPushWarningPrefix + "upd.example. DS: connection refused",
+		delegationSeedWarningPrefix + "backend unavailable",
+	} {
+		ready.SetError(DelegationSyncWarning, "%s", other)
+		toReady()
+		ze, ok := ready.Errors[DelegationSyncWarning]
+		if !ok || ze.Msg != other {
+			t.Errorf("READY cleared another source's warning: had %q, now %q (present %v)", other, ze.Msg, ok)
+		}
+	}
+}
+
 // --- The proxy-key report (#541) -----------------------------------------
 
 // The KEY and the HSYNCPARAM used to appear only while WAITING. READY is the
