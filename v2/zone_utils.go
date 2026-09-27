@@ -759,8 +759,8 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	firstLoad := zd.FirstZoneLoad
 	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad, true); err != nil {
 		zd.mu.Unlock()
-		// Nothing was published: the errors that path returns come from
-		// reading or persisting the outgoing serial, both before the working set
+		// Nothing was published: the error that path returns comes from
+		// reading the published serial on a first load, before the working set
 		// is swapped in, so the zone still serves exactly what it did before.
 		//
 		// Put the status back, as the two failure returns above already do.
