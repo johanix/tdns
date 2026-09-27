@@ -2,7 +2,19 @@
 
 **Written 2026-09-27.** For #655. Line references are to main at `2cf0ffa2`.
 
-**Status:** proposal, revision 1, not implemented.
+**Status:** proposal, revision 2, not implemented.
+
+**Revisions:**
+- **r1**, 2026-09-27: `a5e7f887` (#794).
+- **r2**, 2026-09-27, after an external review of r1 (verdict: sound):
+  - the journal-tail fallback applies to every originating zone that has a
+    tail, overlay zones included, not only to file-backed ones (§3.3);
+  - a failed record write raises a `ConfigWarning` and leaves Ready alone
+    (§3.2);
+  - purge and write-zone/sync never delete the record (§3.2);
+  - commit 2 deletes a stale sentence in the replay's header (§5);
+  - §9 records the answers, provisional until the doc is merged;
+  - three tests added and T12 sharpened (§8).
 
 ## Summary
 
@@ -197,13 +209,21 @@ first restart onto a build with this change (§4).
   the journal follows. Today the write runs after the swap (`:737`), so a
   crash between the two can leave a served serial unrecorded. Written but not
   served, which is the reverse, costs one extra serial at the next restart.
-- **On failure:** log it and raise a zone error (`SetError`), then publish
-  anyway. Refusing would stop re-signing, which takes the zone bogus when its
-  signatures expire, a worse failure than a possible regression at a later
-  restart. The next publish writes the current serial again, so one failed
-  write corrects itself.
+- **On failure:** log it, raise a `ConfigWarning` so it shows on
+  `zone status`, and publish anyway. Ready is not touched: the zone keeps
+  serving. That is the same class the replay already uses for its
+  unsigned-replay warning. Refusing the publish, or an error that takes the
+  zone out of Ready, would stop re-signing or serving to protect a later
+  restart, which is the worse failure. The next publish writes the current
+  serial again, so one failed write corrects itself, and a successful write
+  clears the warning.
 - **Not tied to `journal: active`.** The record is about serial
   monotonicity, not content. The kill-switch stops deltas, not this.
+- **Never deleted with the journal.** `zone journal purge`, `truncate` and
+  write-zone/sync remove `ZoneDelta` rows only. They must never delete the
+  `OutgoingSerials` row. After a sync the record equals the served serial,
+  so a clean restart lifts nothing. After a purge the record is the only
+  floor left, and deleting it would bring #655 back.
 - **Redundant write:** the refresh replacement's own `persist` write
   (`zone_mutation.go:965`–`969`) is covered by the publish it performs and
   can go.
@@ -220,11 +240,17 @@ Then:
 
 ```
 high := record
-if the zone is file-backed and the journal's tail is newer than high:
+if the journal has a tail and it is newer than high:
         high = tail            // a deployment upgraded from a build without the record
 if serialNewer(high, CurrentSerial):
         CurrentSerial = high + 1
 ```
+
+The tail counts for every originating zone that has one, not only for
+file-backed zones. An overlay zone (an inline-signing secondary,
+#732/#746) journals in the serial space it serves, so its tail is a serial it
+published. On the first restart onto this build it has no record either,
+and without the tail it would have no floor at all.
 
 - **Clean restarts burn nothing.** If nothing was published since the file
   was written, the record equals the file's serial and no lift happens.
@@ -291,7 +317,7 @@ At a restart, all three modes floor on the record. `persist`'s restore logic
 (`zone_mutation.go:901`, `refreshengine.go:246`, `refresh_run.go:158`) then
 finds nothing newer than the served serial and never fires. The value stays
 accepted. The guide should say that the restart protection now applies to
-every mode. Whether to deprecate `persist` is a separate decision (§9).
+every mode. `persist` is not deprecated in this change (§9).
 
 ## 4. Upgrade, and until then
 
@@ -319,7 +345,10 @@ One PR, two commits.
 
    This commit alone is enough for both of the cases in #655.
 2. **Visibility.**
-   - The replay's floor and log fields.
+   - The replay's floor and log fields. Delete the sentence in the replay's
+     header saying replay runs before the load-time signing. It has not
+     been true since the policy bind and the sign moved ahead of the replay
+     (§2.2), and it invites a floor inside the replay again.
    - The merge comment.
    - `zone journal status` and its CLI output.
    - The guide paragraph on `outbound-soa-serial`.
@@ -358,7 +387,7 @@ One PR, two commits.
   serial that a reload already has.
 - **Journal overlay on transfer (#732, #746):** an overlay zone journals
   from the serial it serves and skips the replay. It gets the first-load
-  floor like any other originating zone.
+  floor like any other originating zone, including the tail fallback.
 - **Secondary serial mirroring (MUST-NOT-MODIFY):** unchanged. A mirror
   writes no record, and its row is still deleted.
 - **Derived apps:** `zoneMayOriginateContent` is true for every zone outside
@@ -396,10 +425,37 @@ Unit tests, in the files that already cover each path:
   - **T10:** in `keep` mode, a merged zone lands past the record.
 - **`zone_journal_test.go`**
   - **T11:** `zone journal status` reports the record and the tail.
-  - **T12:** after a failed record write, the publish goes ahead, the zone
-    error is set, and the next publish writes the record.
+  - **T12:** after a failed record write:
+    - the publish goes out at the new serial;
+    - Ready stays true;
+    - a `ConfigWarning` is set;
+    - the next successful publish writes the record and clears the warning.
   - **T13:** with no record but a journal tail (a pre-upgrade database), the
     floor is the tail.
+  - **T14:** an overlay zone (inline-signing secondary) with no record and a
+    journal tail ahead of the serial it loads: the first served serial is
+    past the tail. This is T13's twin for a zone that is not file-backed.
+  - **T15:** `zone journal purge` leaves the `OutgoingSerials` row in place.
+    A restart after a purge followed by unjournaled publishes still lifts
+    past them.
+
+**Must not regress:**
+- A mirroring secondary still deletes its row and still takes the
+  upstream's serial (the MUST-NOT-MODIFY branch of
+  `applyRefreshReplacementLocked`). T7.
+- `journal: active: false` still skips `PersistZoneDelta` and still logs
+  that the change will not survive a restart. The record is still written.
+- The existing `persist`-mode first-load tests still pass. They are the
+  model for T4.
+- `signOnceAfterPolicyBind` still skips a zone that is already properly
+  signed: a file with valid signatures whose serial was not lifted. T5 on a
+  signed zone must not force a re-sign and a bump.
+- `updateIxfrChainLocked` still treats two contents at one serial as an
+  error.
+- `nextOutboundSerial` is unchanged. Only the two unconditional `unixtime`
+  assignments get the forward-only guard.
+- `zone sync --force` still writes the file and empties the journal
+  through it.
 
 **Test deployment:** a signed primary with one secondary:
 - publish unjournaled changes (re-signs) past the last journaled one;
@@ -408,21 +464,29 @@ Unit tests, in the files that already cover each path:
 
 The secondary must transfer it without an AXFR being forced.
 
-## 9. Questions
+## 9. Decisions
 
-1. **Deprecate `persist`?** After this change it differs from `keep` in
-   nothing an operator can observe at a restart. The recommendation is to
-   keep it accepted and documented as equivalent for now, and decide later.
-2. **Derived apps.** tdns-mp zones would get the floor in every mode (§7).
-   Is there a zone there that must follow its upstream's serial across a
-   restart? If so, tdns-mp opts out through its own origination predicate,
-   not through a mode.
-3. **An operator who wants a lower serial on purpose.** The RFC 1982
-   procedure works through the floor, because each step is "newer". A plain
-   step backwards is refused, silently lifted past the record. The
-   recommendation is no new command in this change. Such an operator also
-   has to force every secondary to AXFR, which is a manual procedure in any
-   case.
+Answered after the r1 review. **Provisional, pending Johan at doc merge.**
+If he overrules one, the code follows.
+
+1. **Deprecate `persist`? No, not in this change.** It stays accepted.
+   After this change it differs from `keep` in nothing an operator can
+   observe at a restart. The two later restore sites
+   (`refreshengine.go:246`, `refresh_run.go:158`) then find nothing newer
+   than the served serial and never fire; they stay as they are. The guide
+   says the restart protection applies to every mode, and that `persist` is
+   kept as an equivalent name. Deprecation is decided later, once that code
+   is demonstrably dead.
+2. **Derived apps and tdns-mp get the floor.** `zoneMayOriginateContent` is
+   true outside tdns-auth on purpose (`zone_origination.go:46`). A zone that
+   must follow its upstream's serial across a restart is a MUST-NOT-MODIFY
+   zone, and opts out through that predicate. There is no mode exception.
+3. **No command to force a lower serial.** The RFC 1982 procedure passes
+   the floor, because each step is "newer" (T6). A plain step backwards is
+   lifted past the record, which is the point of #655. An operator who
+   really wants a lower serial also has to force every secondary to AXFR.
+   That stays a manual procedure, and no command makes the dangerous half
+   easy.
 
 ## 10. Not in scope
 
