@@ -495,8 +495,7 @@ The secondary must transfer it without an AXFR being forced.
 
 ## 9. Decisions
 
-Answered after the r1 review. **Provisional, pending Johan at doc merge.**
-If he overrules one, the code follows.
+Answered after the r1 review. **Decided 2026-09-27 (Johan): as proposed.**
 
 1. **Deprecate `persist`? No, not in this change.** It stays accepted.
    After this change it differs from `keep` in nothing an operator can
