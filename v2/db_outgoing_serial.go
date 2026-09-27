@@ -10,6 +10,28 @@ func (kdb *KeyDB) SaveOutgoingSerial(zone string, serial uint32) error {
 	return nil
 }
 
+// RaiseOutgoingSerial records serial for zone unless the record already holds
+// one newer than it, in RFC 1982 order. The record is the highest serial the
+// zone has published, and the floor its next start lands past (#655), so a
+// write never lowers it: a zone recreated under the same name, or parsed
+// straight into a live ZoneData, can publish below it, and the secondaries
+// that hold the higher serial still need the floor.
+//
+// One statement, so the comparison and the write cannot interleave with
+// another writer. The WHERE clause is serialNewer: (new - old) mod 2^32 in
+// [1, 2^31).
+func (kdb *KeyDB) RaiseOutgoingSerial(zone string, serial uint32) error {
+	_, err := kdb.DB.Exec(`
+INSERT INTO OutgoingSerials (zone, serial, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(zone) DO UPDATE SET serial = excluded.serial, updated_at = CURRENT_TIMESTAMP
+WHERE ((excluded.serial - OutgoingSerials.serial) % 4294967296 + 4294967296) % 4294967296
+      BETWEEN 1 AND 2147483647`, zone, serial)
+	if err != nil {
+		return fmt.Errorf("RaiseOutgoingSerial: %w", err)
+	}
+	return nil
+}
+
 func (kdb *KeyDB) LoadOutgoingSerial(zone string) (uint32, error) {
 	var serial uint32
 	err := kdb.DB.QueryRow(`SELECT serial FROM OutgoingSerials WHERE zone = ?`, zone).Scan(&serial)

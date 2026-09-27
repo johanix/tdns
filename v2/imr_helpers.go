@@ -297,7 +297,7 @@ func tlsaOwnersForServer(base string, server *cache.AuthServer) []string {
 		owners[owner] = struct{}{}
 	}
 	if server != nil {
-		for _, t := range server.Transports {
+		for _, t := range server.GetTransports() {
 			switch t {
 			case core.TransportDoT:
 				addOwner("tcp")

@@ -2,7 +2,6 @@ package tdns
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -495,7 +494,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.CurrentSerial = nextOutboundSerial(zd)
 		serial = zd.CurrentSerial
 	}
-	zd.setWorkingSetSOASerial(serial)
+	soaSerialChanged := zd.setWorkingSetSOASerial(serial)
 
 	// One resolution for the whole publish; every signing step below consumes
 	// it. A real failure refuses the publish; "cannot sign yet" is nil and
@@ -505,6 +504,16 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	if kerr != nil {
 		zd.refuseUnsignableWorkingSetLocked(prevSerial, kerr)
 		return
+	}
+
+	// An SOA whose serial was just rewritten and cannot be re-signed keeps the
+	// RRSIG it came with, which covers the OLD serial and fails validation. The
+	// servable gate counts any SOA RRSIG as signed, so a first load that lifts
+	// the serial before the policy binds would go Ready on it, and the sign
+	// after the bind would then skip the zone as already signed (#655). Drop
+	// it: the zone stays not Ready until it is signed.
+	if sm == nil && soaSerialChanged && zd.signsItsOwnContent() {
+		zd.dropWorkingSetSOASignaturesLocked()
 	}
 
 	// The first snapshot of a zone created held (zone_tx.go) that signs its own
@@ -715,6 +724,12 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		}
 	}
 
+	// Record the serial before it becomes visible, for the same reason the
+	// delta above is persisted first: a serial a secondary may already hold
+	// must survive a crash, or the restart publishes it again with other
+	// content (#655).
+	zd.recordPublishedSerialLocked(serial)
+
 	// Maintain the IXFR delta history BEFORE building the snapshot so the
 	// chain copied into it ends exactly at this publish's serial (Project C).
 	zd.updateIxfrChainLocked(oldSnap, serial, data)
@@ -731,15 +746,6 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.lastPublish = time.Now()
 	if zd.tx.createdHeld && oldSnap == nil {
 		zd.txFirstSnapshotInstalledLocked()
-	}
-
-	// Persist only for a zone that may originate: a mirroring secondary's
-	// serial is upstream's property, not ours to record and later restore.
-	if zd.KeyDB != nil && zoneMayOriginateContent(zd) &&
-		zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
-		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-			lg.Error("publish: failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
-		}
 	}
 
 	if loaded := zd.snapshot.Load(); loaded != nil && loaded.Serial != zd.CurrentSerial {
@@ -851,24 +857,21 @@ func (zd *ZoneData) snapshotContentIsServableLocked(snap *zoneSnapshot) bool {
 // delta journal to the content it has just loaded.
 func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset,
 	firstLoad, fromZoneFile bool) error {
-	// The persisted outbound serial a first load may restore, read before this
-	// function changes anything: a read that fails must leave the zone exactly
-	// as it was, IncomingSerial included, or the retry would take the
-	// upstream's serial as already held and never transfer again. Only a
-	// missing row means nothing was saved. Any other error fails the load, as
-	// a refresh that cannot save its serial does below: carrying on would let
-	// the first publish persist the upstream's serial over the saved one.
+	// The highest serial this zone has published, which a first load must
+	// land past (#655), read before this function changes anything: a read
+	// that fails must leave the zone exactly as it was, IncomingSerial
+	// included, or the retry would take the upstream's serial as already held
+	// and never transfer again. Only a missing record means nothing was
+	// published. Any other error fails the load: carrying on would let the
+	// first publish record a lower serial over the one already served.
 	var restoreSerial uint32
 	var haveRestoreSerial bool
-	if firstLoad && zd.KeyDB != nil && zoneMayOriginateContent(zd) &&
-		zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
-		saved, err := zd.KeyDB.LoadOutgoingSerial(zd.ZoneName)
-		switch {
-		case err == nil:
-			restoreSerial, haveRestoreSerial = saved, true
-		case !errors.Is(err, sql.ErrNoRows):
-			return fmt.Errorf("read the persisted outgoing serial for zone %s: %w", zd.ZoneName, err)
+	if firstLoad && zd.KeyDB != nil && zd.KeyDB.DB != nil && zoneMayOriginateContent(zd) {
+		high, have, err := zd.KeyDB.PublishedSerialFloor(zd.ZoneName)
+		if err != nil {
+			return fmt.Errorf("read the published serial for zone %s: %w", zd.ZoneName, err)
 		}
+		restoreSerial, haveRestoreSerial = high, have
 	}
 	// The zone has just been re-read; whatever was replayed on top of the
 	// PREVIOUS file no longer applies to this one, so a replay for the new file
@@ -883,24 +886,29 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	switch {
 	case firstLoad:
 		zd.CurrentSerial = new_zd.CurrentSerial
-		// A zone that originates content and persists its outbound serial
-		// takes the saved one back when it is newer than the upstream's, in
-		// RFC 1982 order. The first publish, below, persists CurrentSerial:
-		// left at the upstream's serial it would record that over the saved
-		// one before the engine's own restore looked, and the zone would come
-		// back from a restart below the serial it served -- its downstreams
-		// then ignore every NOTIFY until it catches up.
+		// A zone that originates content lands past the highest serial it
+		// published before this start, in every outbound-soa-serial mode,
+		// whenever that serial is newer than the one just loaded, in RFC 1982
+		// order. The file, or the upstream's copy, lags what was served:
+		// re-signs, DNSKEY publishes and serial bumps advance the serial
+		// without reaching the file or the journal, and a serial reused after
+		// a restart is one a secondary holding it never transfers (#655).
 		//
-		// One past the saved serial, not the saved serial itself: the content
-		// may have changed while the zone was down, and a downstream that
-		// already holds the saved serial would otherwise never fetch it. One
-		// extra transfer per restart is the price. The two later restores, in
-		// initialLoadZone and after a refresh, keep a restored serial as it
-		// is; by the time either runs, the serial chosen here or by the
-		// refresh has been persisted, so they find nothing newer.
+		// HERE, before the first publish of the load, not in the replay: the
+		// load publishes several times before the replay runs, and each of
+		// those would otherwise reuse a served serial.
+		//
+		// One past it, not the serial itself: the content may have changed
+		// while the zone was down, and a downstream that already holds that
+		// serial would otherwise never fetch it. One extra transfer per restart
+		// is the price, paid only when something was published after the file
+		// was written. A file whose serial is newer is kept, which is what lets
+		// the RFC 1982 procedure change a serial scheme. The two later
+		// restores for outbound-soa-serial=persist, in initialLoadZone and
+		// after a refresh, then find nothing newer than what is served.
 		if haveRestoreSerial && serialNewer(restoreSerial, zd.CurrentSerial) {
-			lg.Info("first load; outbound-soa-serial=persist (restored saved serial, plus one)",
-				"zone", zd.ZoneName, "incoming", zd.CurrentSerial, "persisted", restoreSerial, "serving", restoreSerial+1)
+			lg.Info("first load; lifting the serial past the highest one this zone has published",
+				"zone", zd.ZoneName, "loaded", zd.CurrentSerial, "published", restoreSerial, "serving", restoreSerial+1)
 			zd.CurrentSerial = restoreSerial + 1
 		}
 		zd.FirstZoneLoad = false
@@ -962,11 +970,6 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 			next = zd.fileSerial
 		}
 		zd.CurrentSerial = next + 1
-		if zd.KeyDB != nil && zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
-			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-				return fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
-			}
-		}
 	}
 	zd.ApexLen = new_zd.ApexLen
 	zd.ZoneStore = new_zd.ZoneStore
@@ -1288,7 +1291,35 @@ func (zd *ZoneData) buildSnapshotLocked(serial uint32, data map[string]*OwnerDat
 	}
 }
 
-func (zd *ZoneData) setWorkingSetSOASerial(serial uint32) {
+// setWorkingSetSOASerial writes serial into the working set's apex SOA, and
+// reports whether that changed the serial the SOA carried.
+func (zd *ZoneData) setWorkingSetSOASerial(serial uint32) bool {
+	if zd.workingSet == nil {
+		return false
+	}
+	apex := zd.workingSet[zd.ZoneName]
+	if apex == nil {
+		return false
+	}
+	rs := cloneRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA))
+	if len(rs.RRs) == 0 {
+		return false
+	}
+	soa, ok := rs.RRs[0].(*dns.SOA)
+	if !ok {
+		return false
+	}
+	changed := soa.Serial != serial
+	soa.Serial = serial
+	// Stage into a cloned apex owner rather than writing through the shared
+	// snapshot store — the previous in-place Set tore concurrent readers.
+	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, rs)
+	return changed
+}
+
+// dropWorkingSetSOASignaturesLocked removes the RRSIGs from the working set's
+// apex SOA. See the call in publishWorkingSetLocked.
+func (zd *ZoneData) dropWorkingSetSOASignaturesLocked() {
 	if zd.workingSet == nil {
 		return
 	}
@@ -1297,16 +1328,10 @@ func (zd *ZoneData) setWorkingSetSOASerial(serial uint32) {
 		return
 	}
 	rs := cloneRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA))
-	if len(rs.RRs) == 0 {
+	if len(rs.RRSIGs) == 0 {
 		return
 	}
-	soa, ok := rs.RRs[0].(*dns.SOA)
-	if !ok {
-		return
-	}
-	soa.Serial = serial
-	// Stage into a cloned apex owner rather than writing through the shared
-	// snapshot store — the previous in-place Set tore concurrent readers.
+	rs.RRSIGs = nil
 	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, rs)
 }
 

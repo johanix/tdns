@@ -446,10 +446,16 @@ func TestFirstLoadRestoresThePersistedSerialForAnOriginatingSecondary(t *testing
 // refresher that starts the first load.
 func persistPrimary(t *testing.T, zoneStr string, saved uint32) (zd *ZoneData, conf *Config, load func()) {
 	t.Helper()
+	return modePrimary(t, OutboundSoaSerialPersist, zoneStr, saved)
+}
+
+// modePrimary is persistPrimary for any outbound-soa-serial mode.
+func modePrimary(t *testing.T, mode, zoneStr string, saved uint32) (zd *ZoneData, conf *Config, load func()) {
+	t.Helper()
 	authApp(t)
 	kdb := Conf.Internal.KeyDB
-	if err := applyOutboundSoaSerial(kdb, OutboundSoaSerialPersist); err != nil {
-		t.Fatalf("persist mode: %v", err)
+	if err := applyOutboundSoaSerial(kdb, mode); err != nil {
+		t.Fatalf("%s mode: %v", mode, err)
 	}
 	if saved != 0 {
 		if err := kdb.SaveOutgoingSerial("example.", saved); err != nil {
