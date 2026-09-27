@@ -35,7 +35,7 @@ func mustAppearInOrder(t *testing.T, out string, wants ...string) {
 }
 
 const proxyReadyText = "zone child.example.: UPDATE proxy READY — the agent's KEY is published at the apex and" +
-	" the agent holds its private key.\n\nRecords for the primary to serve at the apex:\n\n" +
+	" the agent holds its private key.\n\nPublished at the primary's apex (for reference):\n\n" +
 	"child.example.\t3600\tIN\tKEY\t256 3 15 abc=\n"
 
 func TestParentSyncReportProxy(t *testing.T) {
@@ -59,7 +59,7 @@ func TestParentSyncReportProxy(t *testing.T) {
 		"UPDATE  usable:  update.example. port 53\n",
 		proxyReadyText, // word for word, as proxy-key prints it
 		"NOTIFY: the zone is signed; it publishes CDS: no, CSYNC: no\n",
-		"Delegation information in parent example. is in sync with child child.example.; no action needed.\n",
+		"Delegation: parent example. is in sync with child.example.\n",
 	)
 	if strings.Contains(out, "..") {
 		t.Errorf("a name ending in a dot got a full stop after it:\n%s", out)
@@ -133,7 +133,7 @@ func TestParentSyncReportDelegationOutOfSync(t *testing.T) {
 		Warning: "DSYNC UPDATE proxy waiting: publish the KEY",
 	})
 	mustAppearInOrder(t, out,
-		`Delegation information in parent "example." is NOT in sync with child "child.example."`,
+		"Delegation: parent example. is NOT in sync with child.example.; changes needed:\n",
 		"ADD NS", "ns2.child.example.",
 		"DEL IPv4 GLUE", "192.0.2.1",
 		"ADD DS", "4711 15 2 ab",
@@ -172,6 +172,27 @@ func TestParentSyncReportHasNoHardCodedLines(t *testing.T) {
 		if strings.Contains(out, gone) {
 			t.Errorf("report still says %q:\n%s", gone, out)
 		}
+	}
+}
+
+// The report words its own delegation verdict; "no action needed" belongs to
+// the delta commands, whose sentence stays as it was.
+func TestReportAndDeltaWordTheirVerdictsApart(t *testing.T) {
+	inSync := tdns.DelegationSyncStatus{InSync: true, Parent: "example.", ZoneName: "child.example."}
+	out := renderReport(&tdns.ParentSyncReport{
+		Role:       "parentsync-proxy",
+		Parent:     "example.",
+		Update:     &tdns.ParentSyncUpdateReport{ProxyReport: "zone child.example.: UPDATE proxy WAITING — publish\n"},
+		Delegation: &inSync,
+	})
+	if strings.Contains(out, "no action needed") {
+		t.Errorf("the report says \"no action needed\" next to a publish instruction:\n%s", out)
+	}
+
+	var b bytes.Buffer
+	printDelegationDelta(&b, inSync)
+	if got, want := b.String(), "Delegation information in parent example. is in sync with child child.example.; no action needed.\n"; got != want {
+		t.Errorf("parentsync delta changed:\n got %q\nwant %q", got, want)
 	}
 }
 

@@ -314,6 +314,19 @@ func rrToRFC3597(rr dns.RR) (string, error) {
 // Returns ("", nil) when no key has been generated -- the caller says so in
 // its own words, since what that means depends on the state.
 func (zd *ZoneData) proxyKeyPublishBlock(kdb *KeyDB) (string, error) {
+	return zd.proxyKeyPublishBlockHeaded(kdb, proxyPublishHeading)
+}
+
+const (
+	proxyPublishHeading = "Records for the primary to serve at the apex:"
+	// In READY the records are already there. They are shown to compare with
+	// what the primary serves, and a heading that tells the operator to serve
+	// them read as if something were still left to do (#790).
+	proxyPublishedHeading = "Published at the primary's apex (for reference):"
+)
+
+// proxyKeyPublishBlockHeaded is proxyKeyPublishBlock under a given heading.
+func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string) (string, error) {
 	keyRR, err := zd.proxyAgentKeyRR(kdb)
 	if err != nil {
 		return "", err
@@ -325,7 +338,7 @@ func (zd *ZoneData) proxyKeyPublishBlock(kdb *KeyDB) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf(`Records for the primary to serve at the apex:
+	return fmt.Sprintf(`%s
 
 %s
 %s
@@ -334,7 +347,7 @@ HSYNCPARAM is a private type (%d). For a primary that cannot parse it, the same
 record in RFC 3597 form:
 
 %s
-`, keyRR.String(), zd.proxyHsyncparamPubkeyRR(), core.TypeHSYNCPARAM, unknown), nil
+`, heading, keyRR.String(), zd.proxyHsyncparamPubkeyRR(), core.TypeHSYNCPARAM, unknown), nil
 }
 
 // clearProxyUpdateWarning removes any parentsync-proxy UPDATE warning set
@@ -379,7 +392,11 @@ func (zd *ZoneData) ProxyKeyStatus(ctx context.Context, kdb *KeyDB, imr *Imr) (s
 // and no other arm -- which left the assembled text for the three states this
 // change is about untested.
 func (zd *ZoneData) proxyKeyStatusMessage(state ProxyUpdateState, kdb *KeyDB) (string, error) {
-	block, berr := zd.proxyKeyPublishBlock(kdb)
+	heading := proxyPublishHeading
+	if state == ProxyUpdateReady {
+		heading = proxyPublishedHeading
+	}
+	block, berr := zd.proxyKeyPublishBlockHeaded(kdb, heading)
 	if berr != nil {
 		return "", berr
 	}

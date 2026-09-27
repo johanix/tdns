@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -547,6 +548,44 @@ func TestProxyKeyStatusMessagePerState(t *testing.T) {
 		if !strings.Contains(msg, "No SIG(0) key has been generated") {
 			t.Errorf("%s with no key does not say so:\n%s", state, msg)
 		}
+	}
+}
+
+// #790: operator documentation quotes the WAITING block and people paste from
+// it, so its text is pinned word for word. READY shows the same records under a heading that does not
+// read as an instruction; nothing else in it changes.
+func TestProxyKeyStatusWaitingPinnedReadyHeading(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := genProxySig0Key(t, kdb, proxyUpdZone)
+	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
+	zd.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
+
+	unknown, err := zd.proxyHsyncparamPubkeyRFC3597()
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := key.String() + "\n" + zd.proxyHsyncparamPubkeyRR() + "\n\n" +
+		fmt.Sprintf("HSYNCPARAM is a private type (%d). For a primary that cannot parse it, the same\n", core.TypeHSYNCPARAM) +
+		"record in RFC 3597 form:\n\n" + unknown + "\n"
+
+	waiting, err := zd.proxyKeyStatusMessage(ProxyUpdateWaiting, kdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWaiting := "zone upd.example.: UPDATE proxy WAITING — publish the following at the primary apex, then the agent" +
+		" will proxy UPDATEs once it sees the KEY.\n\nRecords for the primary to serve at the apex:\n\n" + records
+	if waiting != wantWaiting {
+		t.Errorf("WAITING text changed:\n got %q\nwant %q", waiting, wantWaiting)
+	}
+
+	ready, err := zd.proxyKeyStatusMessage(ProxyUpdateReady, kdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReady := "zone upd.example.: UPDATE proxy READY — the agent's KEY is published at the apex and the agent" +
+		" holds its private key.\n\nPublished at the primary's apex (for reference):\n\n" + records
+	if ready != wantReady {
+		t.Errorf("READY text:\n got %q\nwant %q", ready, wantReady)
 	}
 }
 

@@ -250,9 +250,10 @@ func showParentSyncStatus(api *tdns.ApiClient, errPrefix string) {
 }
 
 // printDelegationDelta renders a parent-vs-zone comparison: the verdict, and
-// when out of sync the changes the parent needs. Shared by "parentsync delta",
-// "ddns del status" and "parentsync status", which all read the same
-// DELEGATION-STATUS answer.
+// when out of sync the changes the parent needs. Shared by "parentsync delta"
+// and "ddns del status". "parentsync status" reads the same DELEGATION-STATUS
+// answer and shares the change table, but words its own verdict
+// (printParentSyncReport).
 func printDelegationDelta(w io.Writer, dss tdns.DelegationSyncStatus) {
 	if dss.InSync {
 		// A semicolon, not a full stop: the names end in one already.
@@ -359,11 +360,19 @@ func printParentSyncReport(w io.Writer, zone string, r *tdns.ParentSyncReport, t
 		sections = append(sections, strings.Join(other, "\n")+"\n")
 	}
 
+	// Its own verdict, not the delta commands' sentence: their "no action
+	// needed" is about the delegation alone, and here it sat next to the
+	// instruction to publish the KEY. No full stop after a name, which ends in
+	// one already.
 	b.Reset()
-	if r.Delegation != nil {
-		printDelegationDelta(&b, *r.Delegation)
-	} else {
+	switch d := r.Delegation; {
+	case d == nil:
 		fmt.Fprintf(&b, "Delegation: could not compare with the parent: %s\n", r.DelegationError)
+	case d.InSync:
+		fmt.Fprintf(&b, "Delegation: parent %s is in sync with %s\n", d.Parent, d.ZoneName)
+	default:
+		fmt.Fprintf(&b, "Delegation: parent %s is NOT in sync with %s; changes needed:\n", d.Parent, d.ZoneName)
+		fmt.Fprintf(&b, "%s\n", columnize.SimpleFormat(delegationChangeRows(*d)))
 	}
 	sections = append(sections, b.String())
 
