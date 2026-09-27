@@ -1158,11 +1158,17 @@ func APIzoneParentSyncWith(ctx context.Context, app *AppDetails, refreshq chan Z
 			return
 		}
 
+		// Every command but status needs the parent up front. Status reports
+		// an unresolvable parent itself -- no IMR, or a discovery that failed
+		// -- and that is the answer an operator asking why a zone cannot sync
+		// came for. A bare handler error in its place told them nothing.
 		var err error
-		if _, err = zd.ResolveParent(); err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Zone %q: %v", zd.ZoneName, err)
-			return
+		if req.Command != "status" {
+			if _, err = zd.ResolveParent(); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Zone %q: %v", zd.ZoneName, err)
+				return
+			}
 		}
 
 		switch req.Command {

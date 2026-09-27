@@ -47,10 +47,16 @@ func (zd *ZoneData) ParentSyncStatus(ctx context.Context, kdb *KeyDB, imr *Imr,
 	ctx, cancel := context.WithTimeout(ctx, parentSyncStatusTimeout)
 	defer cancel()
 
+	// The handler does not resolve the parent for status, so it may be unknown
+	// here; the plan below resolves it when it can.
+	parent := zd.GetParent()
+	if parent == "." { // the old "not looked up" sentinel
+		parent = ""
+	}
 	role := SyncRoleChild
 	rep := &ParentSyncReport{
 		Role:    ZoneOptionToString[OptParentSync],
-		Parent:  zd.GetParent(),
+		Parent:  parent,
 		Warning: warning,
 	}
 	if zd.Options[OptParentSyncProxy] {

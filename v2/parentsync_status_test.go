@@ -593,4 +593,20 @@ func TestParentSyncStatusHandler(t *testing.T) {
 			t.Errorf("the response still says %q", gone)
 		}
 	}
+
+	// A parent that cannot be resolved (no cached value, no IMR) is part of
+	// the status answer, not a handler error in place of it. The other
+	// commands, which need the parent to act at all, still refuse.
+	zd.SetParent("")
+	resp = postParentSync(t, ZoneParentSyncPost{Command: "status", Zone: proxyUpdZone})
+	if resp.Error {
+		t.Fatalf("status with no known parent: handler error %q instead of a report", resp.ErrorMsg)
+	}
+	if resp.Report == nil || resp.Report.Parent != "" || !strings.Contains(resp.Report.PlanNote, "no IMR") {
+		t.Errorf("status with no known parent: report = %+v, want no parent and the missing IMR named", resp.Report)
+	}
+	if resp := postParentSync(t, ZoneParentSyncPost{Command: "inquire", Zone: proxyUpdZone}); !resp.Error ||
+		!strings.Contains(resp.ErrorMsg, "parent") {
+		t.Errorf("inquire with no known parent: %+v, want the parent named in an error", resp)
+	}
 }
