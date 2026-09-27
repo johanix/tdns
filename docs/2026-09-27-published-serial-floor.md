@@ -2,7 +2,9 @@
 
 **Written 2026-09-27.** For #655. Line references are to main at `2cf0ffa2`.
 
-**Status:** proposal, revision 2, not implemented.
+**Status:** proposal, revision 2.1. Implemented in #795, not merged. A test
+deployment has covered an inline-signing secondary (§4); a primary with a
+journal is covered by the unit tests only so far.
 
 **Revisions:**
 - **r1**, 2026-09-27: `a5e7f887` (#794).
@@ -15,6 +17,10 @@
   - commit 2 deletes a stale sentence in the replay's header (§5);
   - §9 records the answers, provisional until the doc is merged;
   - three tests added and T12 sharpened (§8).
+- **r2.1**, 2026-09-27, after a test deployment of #795: the upgrade note in
+  §4 said a zone sync protects the first restart onto the new build. It does
+  for a zone loaded from its own file, not for an inline-signing secondary.
+  §4 now says so and gives two ways to protect such a zone.
 
 ## Summary
 
@@ -325,12 +331,35 @@ every mode. `persist` is not deprecated in this change (§9).
   for `keep` and `unixtime` zones. The floor then falls back to the journal's
   tail, which is today's behaviour. The record is written from the first
   publish on.
-- **Before that restart, and before any planned restart until then:** run
-  `tdns-cli auth zone sync -z <zone> --force` immediately before stopping.
+- **A zone loaded from its own file** (a primary): run
+  `tdns-cli auth zone sync -z <zone> --force` immediately before that stop.
   This writes the published snapshot, so the file's serial is the served
   serial, the journal is emptied through it, and the restart loads at the
   serial last served. It is safe as long as nothing publishes between the
-  write and the stop.
+  write and the stop. The same step protects any planned restart on a build
+  without this change.
+- **An inline-signing secondary** (an overlay zone): the sync does not help.
+  Its first load takes the upstream's serial, not the file's, and it has no
+  journal tail to fall back on unless it has published records of its own.
+  A test deployment showed exactly that: the upgrade restart came back far
+  below the serial its secondaries held, and they stopped following. Use one
+  of these instead:
+  - **On the old build, record first.** Set `outbound-soa-serial: persist`
+    (per zone, or `authengine.outbound-soa-serial` globally; a config reload
+    applies it), then publish once, with `tdns-cli auth zone bump -z <zone>`
+    or by waiting for a re-sign. In `persist` mode the old build records
+    every publish of an originating zone, inline-signing secondaries
+    included, and the new build lifts past that record. This needs an old
+    build with per-zone `outbound-soa-serial` and the unconditional
+    `OutgoingSerials` table; check the old build's commit first. Leaving
+    `persist` set afterwards is harmless: it is equivalent to `keep` (§3.7).
+  - **Between stop and start, seed the record.** Stop the old build, read
+    the serial the secondaries hold, and write it for the zone (its name as
+    an FQDN, with the trailing dot):
+    `INSERT OR REPLACE INTO OutgoingSerials (zone, serial, updated_at)
+    VALUES ('<zone>.', <serial>, CURRENT_TIMESTAMP)`. The new build then
+    starts one past it. This works on any build, and for a primary too.
+- A zone first started on a build with this change needs none of this.
 
 ## 5. Stages
 
