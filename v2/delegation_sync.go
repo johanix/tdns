@@ -142,7 +142,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				// (delsync_refresh.go).
 				handleRefreshSyncDelegation(ctx, conf, delsyncq, kdb, notifyq, zd, ds)
 
-			case "PROXY-SYNC", "PROXY-UPDATE-SETUP":
+			case "PROXY-SYNC", "PROXY-UPDATE-SETUP", "PROXY-UPDATE-GATE":
 				// Both need an IMR: the parent's DSYNC records are discovered,
 				// not configured. At startup the zone's first transfer routinely
 				// arrives before InitImrEngine has finished priming, and the
@@ -161,6 +161,10 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					proxySync(ctx, zd, kdb, notifyq, delsyncq, imr(), ds)
 				case "PROXY-UPDATE-SETUP":
 					proxyStartupReconcile(ctx, zd, kdb, notifyq, imr(), ds)
+				case "PROXY-UPDATE-GATE":
+					proxyUpdateGate(ds.ZoneName, func() (ProxyUpdateState, error) {
+						return zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr())
+					})
 				}
 
 			default:
@@ -849,6 +853,26 @@ func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan Notif
 		zd.mu.Unlock()
 	}
 	lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "forwarded", forwarded, "msg", msg)
+}
+
+// proxyUpdateGate re-runs the §10.8 UPDATE gate for a parentsync-proxy zone
+// whose apex KEY changed in a transfer (queueProxyUpdateGate). check is the
+// gate: ProxyUpdatePreconditionCheck, which asks whether the parent advertises
+// UPDATE and then sets or clears the zone's warning for the state it finds.
+//
+// Only when UPDATE is configured. A zone that syncs by NOTIFY or API alone has
+// no use for the agent's KEY, and a warning asking the operator to publish one
+// would be wrong.
+func proxyUpdateGate(zone string, check func() (ProxyUpdateState, error)) {
+	if !configuredSchemes(ParentSyncConfig().Schemes)["update"] {
+		return
+	}
+	state, err := check()
+	if err != nil {
+		lgDns.Error("DelegationSyncher: proxy UPDATE gate failed after an apex KEY change", "zone", zone, "err", err)
+		return
+	}
+	lgDns.Info("DelegationSyncher: proxy UPDATE gate re-run after an apex KEY change", "zone", zone, "state", state)
 }
 
 // proxyStartupReconcile builds the sync plan on first load (which runs the
