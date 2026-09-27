@@ -2,9 +2,17 @@
 
 **Written 2026-09-27.** For #655. Line references are to main at `2cf0ffa2`.
 
-**Status:** proposal, revision 2.1. Implemented in #795, not merged. A test
-deployment has covered an inline-signing secondary (§4); a primary with a
-journal is covered by the unit tests only so far.
+**Status:** done, 2026-09-27.
+- The design merged as `a928079e` (#794) and the implementation as
+  `6c9db48d` (#795). #655 is closed.
+- Two things the implementation settled beyond the text:
+  - the record is written raise-only, in RFC 1982 order, so no publish can
+    lower it (§3.2 does not say so);
+  - the zone-file merge reads the same floor as the first load and the
+    replay (`PublishedSerialFloor`, commit `acd7d80a`), so §3.5's "no code
+    change" for the merge no longer holds.
+- A test deployment covered an inline-signing secondary (§4). A primary with
+  a journal is covered by the unit tests only.
 
 **Revisions:**
 - **r1**, 2026-09-27: `a5e7f887` (#794).
