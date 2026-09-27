@@ -19,9 +19,9 @@ import (
 // Tests for the published-serial floor (#655,
 // docs/2026-09-27-published-serial-floor.md).
 
-// soaSignatureVerifies reports why the snapshot's apex SOA is not validly
+// psfSOASignatureVerifies reports why the snapshot's apex SOA is not validly
 // signed by one of its own DNSKEYs, or nil when it is.
-func soaSignatureVerifies(snap *zoneSnapshot) error {
+func psfSOASignatureVerifies(snap *zoneSnapshot) error {
 	if snap == nil || snap.Apex == nil {
 		return fmt.Errorf("no snapshot or no apex")
 	}
@@ -59,10 +59,10 @@ func soaSignatureVerifies(snap *zoneSnapshot) error {
 	return last
 }
 
-// signedZoneFile loads reloadBase as a signing primary, signs it, writes it to
+// psfSignedZoneFile loads reloadBase as a signing primary, signs it, writes it to
 // its file and returns that file's text and serial: the file a signed zone
 // leaves behind for its next start.
-func signedZoneFile(t *testing.T, kdb *KeyDB) (string, uint32) {
+func psfSignedZoneFile(t *testing.T, kdb *KeyDB) (string, uint32) {
 	t.Helper()
 	zd, _ := firstLoadFileZone(t, kdb, reloadBase)
 	zd.Options[OptOnlineSigning] = true
@@ -109,7 +109,7 @@ func TestLiftedFirstLoadServesAValidlySignedSOA(t *testing.T) {
 func liftedFirstLoadServesAValidlySignedSOA(t *testing.T, mode string) {
 	kdb := newTestKeyDB(t)
 	withLivePolicies(t, map[string]DnssecPolicy{"base": kskzsk(dns.ED25519, dns.ED25519)})
-	text, fileSerial := signedZoneFile(t, kdb)
+	text, fileSerial := psfSignedZoneFile(t, kdb)
 
 	// After the write the zone went on publishing: re-signs, say, that the
 	// journal never saw. The record is ahead of the file.
@@ -125,7 +125,7 @@ func liftedFirstLoadServesAValidlySignedSOA(t *testing.T, mode string) {
 	zd.OutboundSoaSerial = mode
 	firstLoadFromFile(t, zd)
 	if zd.Ready {
-		if err := soaSignatureVerifies(zd.publishedSnapshot()); err != nil {
+		if err := psfSOASignatureVerifies(zd.publishedSnapshot()); err != nil {
 			t.Fatalf("the zone went Ready at its first-load publish with a bad SOA signature: %v", err)
 		}
 	}
@@ -141,18 +141,18 @@ func liftedFirstLoadServesAValidlySignedSOA(t *testing.T, mode string) {
 	if !serialNewer(snap.Serial, recorded) {
 		t.Fatalf("served serial %d is not newer than the recorded %d", snap.Serial, recorded)
 	}
-	if err := soaSignatureVerifies(snap); err != nil {
+	if err := psfSOASignatureVerifies(snap); err != nil {
 		t.Fatalf("after the lifted first load: %v", err)
 	}
 }
 
 // --- helpers --------------------------------------------------------------
 
-// restartedPrimary loads zoneText as an unsigned file-backed primary that
+// psfRestartedPrimary loads zoneText as an unsigned file-backed primary that
 // accepts updates, exactly as a start does: first load, then the completion
 // that binds the policy and reconciles the journal. mode is the zone's
 // outbound-soa-serial ("" for the default).
-func restartedPrimary(t *testing.T, kdb *KeyDB, zoneText, mode string) *ZoneData {
+func psfRestartedPrimary(t *testing.T, kdb *KeyDB, zoneText, mode string) *ZoneData {
 	t.Helper()
 	zd, _ := firstLoadFileZone(t, kdb, zoneText)
 	zd.Options[OptAllowUpdates] = true
@@ -167,16 +167,16 @@ func restartedPrimary(t *testing.T, kdb *KeyDB, zoneText, mode string) *ZoneData
 	return zd
 }
 
-// stopped takes zd out of service, as the process ending does.
-func stopped(zd *ZoneData) {
+// psfStopped takes zd out of service, as the process ending does.
+func psfStopped(zd *ZoneData) {
 	zd.stopPublisher()
 	Zones.Remove(zd.ZoneName)
 }
 
-// unjournaledPublish publishes with a serial bump and no content change: what
+// psfUnjournaledPublish publishes with a serial bump and no content change: what
 // a re-sign, a DNSKEY publish or `zone bump` does as far as the journal is
 // concerned. Returns the serial published.
-func unjournaledPublish(t *testing.T, zd *ZoneData) uint32 {
+func psfUnjournaledPublish(t *testing.T, zd *ZoneData) uint32 {
 	t.Helper()
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
@@ -185,7 +185,7 @@ func unjournaledPublish(t *testing.T, zd *ZoneData) uint32 {
 	return zd.CurrentSerial
 }
 
-func servedSerial(t *testing.T, zd *ZoneData) uint32 {
+func psfServedSerial(t *testing.T, zd *ZoneData) uint32 {
 	t.Helper()
 	snap := zd.publishedSnapshot()
 	if snap == nil {
@@ -194,15 +194,15 @@ func servedSerial(t *testing.T, zd *ZoneData) uint32 {
 	return snap.Serial
 }
 
-func mustUpdate(t *testing.T, zd *ZoneData, kdb *KeyDB, rr string) uint32 {
+func psfUpdate(t *testing.T, zd *ZoneData, kdb *KeyDB, rr string) uint32 {
 	t.Helper()
 	if err := apiUpdate(t, zd, kdb, rr); err != nil {
 		t.Fatalf("update %q: %v", rr, err)
 	}
-	return servedSerial(t, zd)
+	return psfServedSerial(t, zd)
 }
 
-func zoneFileText(t *testing.T, zd *ZoneData) string {
+func psfZoneFileText(t *testing.T, zd *ZoneData) string {
 	t.Helper()
 	b, err := os.ReadFile(zd.Zonefile)
 	if err != nil {
@@ -211,7 +211,7 @@ func zoneFileText(t *testing.T, zd *ZoneData) string {
 	return string(b)
 }
 
-func hasOwner(zd *ZoneData, name string) bool {
+func psfHasOwner(zd *ZoneData, name string) bool {
 	od, err := zd.GetOwner(name)
 	return err == nil && od != nil && ownerHasData(od)
 }
@@ -222,18 +222,18 @@ func hasOwner(zd *ZoneData, name string) bool {
 // N+2), then a restart. The zone must come back past N+2, not past N.
 func TestRestartLandsPastUnjournaledPublishes(t *testing.T) {
 	kdb := newTestKeyDB(t)
-	live := restartedPrimary(t, kdb, reloadBase, "")
-	mustUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
-	unjournaledPublish(t, live)
-	high := unjournaledPublish(t, live)
-	stopped(live)
+	live := psfRestartedPrimary(t, kdb, reloadBase, "")
+	psfUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
+	psfUnjournaledPublish(t, live)
+	high := psfUnjournaledPublish(t, live)
+	psfStopped(live)
 
-	again := restartedPrimary(t, kdb, reloadBase, "")
-	if got := servedSerial(t, again); !serialNewer(got, high) {
+	again := psfRestartedPrimary(t, kdb, reloadBase, "")
+	if got := psfServedSerial(t, again); !serialNewer(got, high) {
 		t.Fatalf("after the restart the zone serves %d, not past %d, the last serial it"+
 			" served before it", got, high)
 	}
-	if !hasOwner(again, "journal.example.") {
+	if !psfHasOwner(again, "journal.example.") {
 		t.Error("the journaled change was not replayed")
 	}
 }
@@ -243,21 +243,21 @@ func TestRestartLandsPastUnjournaledPublishes(t *testing.T) {
 // the serial.
 func TestRestartWithAnEmptyJournalLandsPastUnjournaledPublishes(t *testing.T) {
 	kdb := newTestKeyDB(t)
-	live := restartedPrimary(t, kdb, reloadBase, "")
-	mustUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
+	live := psfRestartedPrimary(t, kdb, reloadBase, "")
+	psfUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
 	if _, err := live.WriteZone(true, true); err != nil {
 		t.Fatalf("WriteZone: %v", err)
 	}
 	if deltas, _ := kdb.LoadZoneDeltas("example."); len(deltas) != 0 {
 		t.Fatalf("precondition: the write left %d deltas in the journal", len(deltas))
 	}
-	unjournaledPublish(t, live)
-	high := unjournaledPublish(t, live)
-	text := zoneFileText(t, live)
-	stopped(live)
+	psfUnjournaledPublish(t, live)
+	high := psfUnjournaledPublish(t, live)
+	text := psfZoneFileText(t, live)
+	psfStopped(live)
 
-	again := restartedPrimary(t, kdb, text, "")
-	if got := servedSerial(t, again); !serialNewer(got, high) {
+	again := psfRestartedPrimary(t, kdb, text, "")
+	if got := psfServedSerial(t, again); !serialNewer(got, high) {
 		t.Fatalf("after the restart the zone serves %d, not past %d", got, high)
 	}
 }
@@ -268,14 +268,14 @@ func TestRestartWithAnEmptyJournalLandsPastUnjournaledPublishes(t *testing.T) {
 // landed on a reused serial.
 func TestAChangeAfterARestartGetsASerialNeverServed(t *testing.T) {
 	kdb := newTestKeyDB(t)
-	live := restartedPrimary(t, kdb, reloadBase, "")
-	mustUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
-	unjournaledPublish(t, live)
-	high := unjournaledPublish(t, live)
-	stopped(live)
+	live := psfRestartedPrimary(t, kdb, reloadBase, "")
+	psfUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
+	psfUnjournaledPublish(t, live)
+	high := psfUnjournaledPublish(t, live)
+	psfStopped(live)
 
-	again := restartedPrimary(t, kdb, reloadBase, "")
-	got := mustUpdate(t, again, kdb, "after.example. 3600 IN A 10.1.1.2")
+	again := psfRestartedPrimary(t, kdb, reloadBase, "")
+	got := psfUpdate(t, again, kdb, "after.example. 3600 IN A 10.1.1.2")
 	if !serialNewer(got, high) {
 		t.Fatalf("the first change after the restart landed on %d, a serial the zone had"+
 			" already served (up to %d)", got, high)
@@ -321,23 +321,23 @@ func TestFirstLoadFloorAppliesInEveryMode(t *testing.T) {
 func TestCleanRestartLiftsNothing(t *testing.T) {
 	t.Run("unsigned", func(t *testing.T) {
 		kdb := newTestKeyDB(t)
-		live := restartedPrimary(t, kdb, reloadBase, "")
-		written := mustUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
+		live := psfRestartedPrimary(t, kdb, reloadBase, "")
+		written := psfUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
 		if _, err := live.WriteZone(true, true); err != nil {
 			t.Fatalf("WriteZone: %v", err)
 		}
-		text := zoneFileText(t, live)
-		stopped(live)
+		text := psfZoneFileText(t, live)
+		psfStopped(live)
 
-		again := restartedPrimary(t, kdb, text, "")
-		if got := servedSerial(t, again); got != written {
+		again := psfRestartedPrimary(t, kdb, text, "")
+		if got := psfServedSerial(t, again); got != written {
 			t.Fatalf("a clean restart serves %d, want the written %d", got, written)
 		}
 	})
 	t.Run("signed", func(t *testing.T) {
 		kdb := newTestKeyDB(t)
 		withLivePolicies(t, map[string]DnssecPolicy{"base": kskzsk(dns.ED25519, dns.ED25519)})
-		text, written := signedZoneFile(t, kdb)
+		text, written := psfSignedZoneFile(t, kdb)
 
 		zd, _ := firstLoadFileZone(t, kdb, text)
 		zd.Options[OptOnlineSigning] = true
@@ -352,7 +352,7 @@ func TestCleanRestartLiftsNothing(t *testing.T) {
 		if snap.Serial != written {
 			t.Fatalf("a clean restart of a signed zone serves %d, want the written %d", snap.Serial, written)
 		}
-		if err := soaSignatureVerifies(snap); err != nil {
+		if err := psfSOASignatureVerifies(snap); err != nil {
 			t.Fatalf("after a clean restart: %v", err)
 		}
 	})
@@ -481,19 +481,19 @@ func TestUnixtimeNeverMovesTheSerialBackwards(t *testing.T) {
 // mode, lands past everything served before the restart.
 func TestMergeAfterRestartLandsPastTheRecord(t *testing.T) {
 	kdb := newTestKeyDB(t)
-	live := restartedPrimary(t, kdb, reloadBase, "")
-	mustUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
-	unjournaledPublish(t, live)
-	high := unjournaledPublish(t, live)
-	stopped(live)
+	live := psfRestartedPrimary(t, kdb, reloadBase, "")
+	psfUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
+	psfUnjournaledPublish(t, live)
+	high := psfUnjournaledPublish(t, live)
+	psfStopped(live)
 
 	replaced := strings.Replace(reloadBase, " 100 ", " 50 ", 1) +
 		"extra.example.\t3600\tIN\tA\t192.0.2.50\n"
-	again := restartedPrimary(t, kdb, replaced, "")
-	if got := servedSerial(t, again); !serialNewer(got, high) {
+	again := psfRestartedPrimary(t, kdb, replaced, "")
+	if got := psfServedSerial(t, again); !serialNewer(got, high) {
 		t.Fatalf("after a restart onto a replaced file the zone serves %d, not past %d", got, high)
 	}
-	if !hasOwner(again, "extra.example.") || !hasOwner(again, "journal.example.") {
+	if !psfHasOwner(again, "extra.example.") || !psfHasOwner(again, "journal.example.") {
 		t.Error("the merge did not keep both the file's record and the journal's")
 	}
 }
@@ -503,16 +503,16 @@ func TestMergeAfterRestartLandsPastTheRecord(t *testing.T) {
 // successfully clears it and puts back the warning it displaced.
 func TestAFailedSerialRecordWarnsAndKeepsServing(t *testing.T) {
 	kdb := newTestKeyDB(t)
-	zd := restartedPrimary(t, kdb, reloadBase, "")
+	zd := psfRestartedPrimary(t, kdb, reloadBase, "")
 	zd.SetError(ConfigWarning, "an earlier warning")
-	before := servedSerial(t, zd)
+	before := psfServedSerial(t, zd)
 
 	if _, err := kdb.DB.Exec(`ALTER TABLE OutgoingSerials RENAME TO OutgoingSerialsAway`); err != nil {
 		t.Fatalf("hiding the table: %v", err)
 	}
-	failed := unjournaledPublish(t, zd)
-	if failed != before+1 || servedSerial(t, zd) != failed {
-		t.Fatalf("the publish did not go out: served %d, want %d", servedSerial(t, zd), before+1)
+	failed := psfUnjournaledPublish(t, zd)
+	if failed != before+1 || psfServedSerial(t, zd) != failed {
+		t.Fatalf("the publish did not go out: served %d, want %d", psfServedSerial(t, zd), before+1)
 	}
 	if !zd.Ready {
 		t.Fatal("a failed record write took the zone out of Ready")
@@ -524,7 +524,7 @@ func TestAFailedSerialRecordWarnsAndKeepsServing(t *testing.T) {
 	if _, err := kdb.DB.Exec(`ALTER TABLE OutgoingSerialsAway RENAME TO OutgoingSerials`); err != nil {
 		t.Fatalf("restoring the table: %v", err)
 	}
-	next := unjournaledPublish(t, zd)
+	next := psfUnjournaledPublish(t, zd)
 	if got, err := kdb.LoadOutgoingSerial("example."); err != nil || got != next {
 		t.Fatalf("the next publish recorded %d (err %v), want %d", got, err, next)
 	}
@@ -537,15 +537,15 @@ func TestAFailedSerialRecordWarnsAndKeepsServing(t *testing.T) {
 // no record; the journal's tail is the floor.
 func TestPreUpgradeDatabaseFloorsOnTheJournalTail(t *testing.T) {
 	kdb := newTestKeyDB(t)
-	live := restartedPrimary(t, kdb, reloadBase, "")
-	tail := mustUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
-	stopped(live)
+	live := psfRestartedPrimary(t, kdb, reloadBase, "")
+	tail := psfUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
+	psfStopped(live)
 	if err := kdb.DeleteOutgoingSerial("example."); err != nil {
 		t.Fatal(err)
 	}
 
-	again := restartedPrimary(t, kdb, reloadBase, "")
-	if got := servedSerial(t, again); !serialNewer(got, tail) {
+	again := psfRestartedPrimary(t, kdb, reloadBase, "")
+	if got := psfServedSerial(t, again); !serialNewer(got, tail) {
 		t.Fatalf("with no record the zone serves %d, not past the journal's tail %d", got, tail)
 	}
 }
@@ -580,21 +580,21 @@ func TestOverlayZoneWithoutARecordFloorsOnTheJournalTail(t *testing.T) {
 // more unjournaled publishes still lands past them.
 func TestPurgeKeepsTheRecord(t *testing.T) {
 	kdb := newTestKeyDB(t)
-	live := restartedPrimary(t, kdb, reloadBase, "")
-	mustUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
-	purgedAt := unjournaledPublish(t, live)
+	live := psfRestartedPrimary(t, kdb, reloadBase, "")
+	psfUpdate(t, live, kdb, "journal.example. 3600 IN A 10.1.1.1")
+	purgedAt := psfUnjournaledPublish(t, live)
 	if _, err := live.JournalPurge(true); err != nil {
 		t.Fatalf("JournalPurge: %v", err)
 	}
 	if got, err := kdb.LoadOutgoingSerial("example."); err != nil || got != purgedAt {
 		t.Fatalf("after the purge the record is %d (err %v), want %d", got, err, purgedAt)
 	}
-	unjournaledPublish(t, live)
-	high := unjournaledPublish(t, live)
-	stopped(live)
+	psfUnjournaledPublish(t, live)
+	high := psfUnjournaledPublish(t, live)
+	psfStopped(live)
 
-	again := restartedPrimary(t, kdb, reloadBase, "")
-	if got := servedSerial(t, again); !serialNewer(got, high) {
+	again := psfRestartedPrimary(t, kdb, reloadBase, "")
+	if got := psfServedSerial(t, again); !serialNewer(got, high) {
 		t.Fatalf("after a purge and a restart the zone serves %d, not past %d", got, high)
 	}
 }
@@ -603,10 +603,10 @@ func TestPurgeKeepsTheRecord(t *testing.T) {
 // journal's head, and whether a restart will lift past it.
 func TestJournalStatusReportsThePublishedSerial(t *testing.T) {
 	kdb := newTestKeyDB(t)
-	zd := restartedPrimary(t, kdb, reloadBase, "")
-	head := mustUpdate(t, zd, kdb, "journal.example. 3600 IN A 10.1.1.1")
-	unjournaledPublish(t, zd)
-	high := unjournaledPublish(t, zd)
+	zd := psfRestartedPrimary(t, kdb, reloadBase, "")
+	head := psfUpdate(t, zd, kdb, "journal.example. 3600 IN A 10.1.1.1")
+	psfUnjournaledPublish(t, zd)
+	high := psfUnjournaledPublish(t, zd)
 
 	info, err := zd.JournalInfo(false)
 	if err != nil {
