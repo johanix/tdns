@@ -1,6 +1,8 @@
 # Scope: per-client transport counters in the resolver, and a delegation-sync log on the parent
 
-2026-09-28. Status: scope, r2. Nothing is implemented. Base: `main` at 700b15ef.
+2026-09-28. Status: scope, r2, amended. All three parts are implemented and
+merged: part 0 in #802 (merge dd7de680), part 2 in #804 (merge 55af56bc),
+part 1 in #805 (merge f3f206a0). Base of r2: `main` at 700b15ef.
 
 **Revisions**
 - **r1:** the scope.
@@ -8,6 +10,9 @@
   - its five pins are written in: S1 in part 0, S2–S3 in part 1, S4–S5 in part 2;
   - its four considerations are decided where they apply (C1–C4);
   - a second DoH/DoQ defect found while implementing part 0 is added, as part 0b.
+- **Amended** the same day, after the reviews of the three implementations:
+  [A1–A5](#amendments-2026-09-28) at the end. The text above them is r2 as
+  reviewed, unchanged.
 
 ## Summary
 
@@ -105,6 +110,8 @@ implementing 0a.
 ---
 
 ## 1. Resolver: per-client transport counters
+
+*Amended: [A4](#amendments-2026-09-28) (the CLI command), A5 (`max-clients`).*
 
 ### What it records
 
@@ -256,6 +263,9 @@ TOTAL                 1520        14   902   118    36    2590
 
 ## 2. Parent: delegation-sync log
 
+*Amended: [A1](#amendments-2026-09-28) (polls), A2 (`queued`), A3 (no
+full-queue refusal).*
+
 ### What it records
 
 One event per thing that happens to a child's delegation at the parent:
@@ -382,3 +392,44 @@ All four places already hold the information.
 - **Exporting either as metrics** (Prometheus or similar). The shapes allow it
   later.
 - **Rate limiting of NOTIFY**, which is a separate open issue.
+
+---
+
+## Amendments (2026-09-28)
+
+Where the implementations differ from r2, or r2 was wrong, as found in the
+reviews of #804 and #805. Each describes the code as implemented.
+
+**A1. Part 2: polls are quiet** (#804). r2 said a scan that decides nothing is
+recorded at once, as *no change* or *not processed*.
+- **A NOTIFY-started scan** is recorded every time, *no change* included.
+- **A poll** that finds no change is not recorded. With many children polled
+  every round, those lines would be most of the ring.
+- **A poll's *not processed*** is recorded. A repeat with the same reason, for
+  the same child and mechanism, is recorded at most once an hour.
+- **A change** is always recorded.
+- **A scan that stops before it reads the child** is recorded as *not
+  processed*, with the reason. That is either an earlier change to the child
+  still queued at the zone updater, or a delegation that cannot be read. For a
+  poll, the hourly rule above applies.
+
+**A2. Part 2: `queued`** (#804). The outcome list gains **queued**: a change the
+scan handed to the zone updater, with no answer yet when the scan stopped
+waiting.
+- When the answer comes, a second event records *applied* or *apply failed*,
+  marked "answered late".
+- The first event is not edited.
+- r2's "recorded once its result is known" would have shown nothing during the
+  wait.
+
+**A3. Part 2: no full-queue refusal.** The hooks table lists "a full scanner
+queue" among NOTIFY refusals. There is no such refusal: `NotifyResponder` waits
+for room on the scanner queue. A non-blocking refusal, if one is added, needs
+the refusal hook as well.
+
+**A4. Part 1: the CLI command** (#805) is
+`tdns-cli imr stats client-stats`, next to `transport-stats`, not
+`tdns-cli imr client-stats`. The flags are as in r2.
+
+**A5. Part 1: `max-clients`** (#805). A negative value is a config error, at
+load and in `ValidateConfig`. 0 means the default, 4096.
