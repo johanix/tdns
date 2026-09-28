@@ -124,7 +124,11 @@ func applyValidationFailure(m *dns.Msg, us *UpdateStatus) {
 }
 
 func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
-	w := dur.ResponseWriter
+	// A child's UPDATE is recorded in the delegation-sync log with the answer
+	// it gets, whenever that is written: see syncLogUpdateWriter. Updates that
+	// turn out not to be a child's are not recorded.
+	slw := &syncLogUpdateWriter{ResponseWriter: dur.ResponseWriter}
+	w := dns.ResponseWriter(slw)
 	r := dur.Msg
 	qname := dur.Qname
 
@@ -233,6 +237,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	if child, ok := zd.classifyTruststoreUpdate(r.Ns); ok {
 		lgHandler.Info("update carries child key material", "child", child)
 		dur.Status.Type = "TRUSTSTORE-UPDATE"
+		slw.setChild(zd.ZoneName, child, SyncMechUpdateKey, r.Ns)
 		// Deliberately not gated on allow-child-updates: a truststore update
 		// writes no zone content at all. ApproveTrustUpdate is its gate.
 	} else if keyRR := zd.childKeyRR(r.Ns); keyRR != nil {
@@ -244,6 +249,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		// the only thing standing between a child's KEY and the parent zone.
 		lgHandler.Warn("update rejected: child key material that does not identify a single child",
 			"zone", zd.ZoneName, "owner", keyRR.Header().Name, "updateRRs", len(r.Ns))
+		slw.setChild(zd.ZoneName, keyRR.Header().Name, SyncMechUpdateKey, r.Ns)
 		m.SetRcode(r, dns.RcodeRefused)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdateRRtypeNotAllowed)
 		w.WriteMsg(m)
@@ -256,6 +262,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		if isChildUpdate && childDel != "" {
 			lgHandler.Info("update targets child delegation", "child", childDel)
 			dur.Status.Type = "CHILD-UPDATE"
+			slw.setChild(zd.ZoneName, childDel, SyncMechUpdate, r.Ns)
 			if !zd.Options[OptAllowChildUpdates] {
 				lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "child", childDel)
 				m.SetRcode(r, dns.RcodeRefused)
@@ -292,6 +299,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the name of an existing child zone",
 			zd.ZoneName, qname)
 		dur.Status.Type = "CHILD-UPDATE"
+		slw.setChild(zd.ZoneName, qname, SyncMechUpdate, r.Ns)
 		if !zd.Options[OptAllowChildUpdates] {
 			lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "qname", qname)
 			m.SetRcode(r, dns.RcodeRefused)

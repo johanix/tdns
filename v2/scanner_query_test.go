@@ -285,11 +285,12 @@ func TestScansOfOneChildAreSerialised(t *testing.T) {
 		}
 		return n.query(ctx, qname, qtype, ns)
 	}
-	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) {
+	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) delegationApplyResult {
 		time.Sleep(50 * time.Millisecond)
 		mu.Lock()
 		defer mu.Unlock()
 		events = append(events, "applied")
+		return delegationApplyResult{Applied: true}
 	}
 
 	var wg sync.WaitGroup
@@ -366,8 +367,8 @@ func TestAScanWaitsForAChangeAnEarlierScanLeftQueued(t *testing.T) {
 	zd.KeyDB = &KeyDB{UpdateQ: q}
 	sc := trustScanner(n)
 	ctx := context.Background()
-	sc.OnDelegationChange = func(parentZone string, zd *ZoneData, resp ScanTupleResponse) {
-		sc.applyDelegationChange(ctx, parentZone, zd, resp)
+	sc.OnDelegationChange = func(parentZone string, zd *ZoneData, resp ScanTupleResponse) delegationApplyResult {
+		return sc.applyDelegationChange(ctx, parentZone, zd, resp)
 	}
 	csyncQueries := func() int { return n.queried[trustKey(child, dns.TypeCSYNC)] }
 
@@ -418,7 +419,10 @@ func TestCDSScanReadsTheCurrentDSFromTheBackend(t *testing.T) {
 	n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS), trustKey(child, dns.TypeDNSKEY))
 	sc := trustScanner(n)
 	var applied int
-	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) { applied++ }
+	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) delegationApplyResult {
+		applied++
+		return delegationApplyResult{Applied: true}
+	}
 
 	resp := sc.scanChildAndApply(context.Background(), zd, ScanCDS, ScanTuple{Zone: child}, nil, nil)
 
@@ -437,7 +441,10 @@ func TestCDSScanOfAnUnreadableDelegationIsNotRun(t *testing.T) {
 	n := cdsNet(t, child)
 	sc := trustScanner(n)
 	applied := false
-	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) { applied = true }
+	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) delegationApplyResult {
+		applied = true
+		return delegationApplyResult{Applied: true}
+	}
 
 	resp := sc.scanChildAndApply(context.Background(), zd, ScanCDS, ScanTuple{Zone: child}, nil, nil)
 

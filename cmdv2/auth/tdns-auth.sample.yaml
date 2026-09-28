@@ -194,6 +194,11 @@ childsync:
    # in parent zones, we support these schemes, and will publish DSYNC RRs
    # if allowed to:
    schemes:  [ notify, update ]
+   # The delegation-sync log: what this parent received from its children
+   # (UPDATE, NOTIFY, scans, the DSYNC API) and what it did with it, kept in
+   # memory. "tdns-cli zone delegation sync-log" shows it. Default 10000
+   # events; 0 turns it off.
+   # sync-log: 10000
    notify:
       types:      [ CDS, CSYNC ]
       port:       5354                      # MUST be a port the listeners: block listens on
