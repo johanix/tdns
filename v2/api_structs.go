@@ -686,11 +686,16 @@ type ReloadGuardrailRole struct {
 }
 
 type DelegationPost struct {
-	Command string // status | sync | export | ...
+	Command string // status | sync | export | sync-log | ...
 	Scheme  uint8  // 1=notify | 2=update
 	Zone    string
 	Force   bool
 	Outfile string `json:"outfile,omitempty"` // for "export": destination file path
+
+	// For "sync-log". Zone, when set, selects the parent.
+	Child string `json:"child,omitempty"`
+	Since string `json:"since,omitempty"` // a duration back from now ("10m") or an RFC 3339 time
+	Limit int    `json:"limit,omitempty"`
 }
 
 type DelegationResponse struct {
@@ -698,6 +703,7 @@ type DelegationResponse struct {
 	Time       time.Time
 	Zone       string
 	SyncStatus DelegationSyncStatus
+	SyncLog    *SyncLogReport `json:",omitempty"` // for "sync-log"
 	Msg        string
 	Error      bool
 	ErrorMsg   string

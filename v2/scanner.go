@@ -59,7 +59,7 @@ type Scanner struct {
 	Options            []string
 	AtApexChecks       int
 	AtApexInterval     time.Duration
-	OnDelegationChange func(parentZone string, zd *ZoneData, resp ScanTupleResponse)
+	OnDelegationChange func(parentZone string, zd *ZoneData, resp ScanTupleResponse) delegationApplyResult
 	LogFile            string
 	LogTemplate        string
 	Log                map[string]*log.Logger
@@ -70,6 +70,7 @@ type Scanner struct {
 
 	childLocks     sync.Map         // canonical child name -> *sync.Mutex; see scanChildAndApply
 	pendingApplies sync.Map         // canonical child name -> <-chan ZoneUpdateResult; see awaitPendingApply
+	pendingEvents  sync.Map         // canonical child name -> SyncLogEvent of the change still queued
 	poll           scannerPollState // scanner_poll.go
 
 	// queryChild, validateRRset and validateDenial stand in, in tests, for the
@@ -196,8 +197,8 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 
 	// Wire callback to apply delegation changes via CHILD-UPDATE.
 	// Handles both CDS (DS adds/removes) and CSYNC (NS/glue adds/removes).
-	scanner.OnDelegationChange = func(parentZone string, zd *ZoneData, resp ScanTupleResponse) {
-		scanner.applyDelegationChange(ctx, parentZone, zd, resp)
+	scanner.OnDelegationChange = func(parentZone string, zd *ZoneData, resp ScanTupleResponse) delegationApplyResult {
+		return scanner.applyDelegationChange(ctx, parentZone, zd, resp)
 	}
 
 	// Finish initialising BEFORE publishing. Publication is what other
