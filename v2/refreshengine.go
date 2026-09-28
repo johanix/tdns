@@ -506,6 +506,14 @@ func (zd *ZoneData) reconcileZoneFileWithJournal(verdict ZoneFileVerdict, prev *
 	if zd == nil || zd.KeyDB == nil {
 		return
 	}
+	// The zone's content has just been read afresh, and this settles it with
+	// the journal: whatever a publish that panicked left between the two is
+	// gone once it returns, whichever way it returns (PublishError).
+	defer func() {
+		if zd.HasError(PublishError) {
+			zd.ClearError(PublishError)
+		}
+	}()
 
 	// An overlay zone's journal is not reconciled with a file. The replacement
 	// that loaded the zone has applied it already, whether the content came by

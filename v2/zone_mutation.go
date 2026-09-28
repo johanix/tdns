@@ -1783,6 +1783,37 @@ func (s *batchStager) DeleteOwner(name string) {
 	s.zd.stageOwnerDeleteLocked(name)
 }
 
+// stagingSave is what a zone's working set held before a writer began staging,
+// so that a writer that fails part-way can be unwound without dropping somebody
+// else's staged work along with its own. Staging replaces an owner with a clone
+// before it changes it (cloneOwner), so a copy of the map is enough. The common
+// case is nothing: the working set is nil between publishes, and restoring nil
+// is what discards the failed writer's changes.
+type stagingSave struct {
+	workingSet    map[string]*OwnerData
+	wsSignalSynth map[string]*core.RRset
+}
+
+// saveStagingLocked records what the working set holds now. The caller holds
+// zd.mu.
+func (zd *ZoneData) saveStagingLocked() stagingSave {
+	s := stagingSave{wsSignalSynth: zd.wsSignalSynth}
+	if zd.workingSet != nil {
+		s.workingSet = make(map[string]*OwnerData, len(zd.workingSet))
+		for k, v := range zd.workingSet {
+			s.workingSet[k] = v
+		}
+	}
+	return s
+}
+
+// restoreStagingLocked puts the working set back as saveStagingLocked found it.
+// The caller holds zd.mu.
+func (zd *ZoneData) restoreStagingLocked(s stagingSave) {
+	zd.workingSet = s.workingSet
+	zd.wsSignalSynth = s.wsSignalSynth
+}
+
 // StageBatch runs fn with zd.mu held and publishes once, through the same
 // path as Publish, if fn reports a change. On a draft it writes Data and
 // publishes nothing: the refresh publish that consumes the draft is the
@@ -1826,24 +1857,15 @@ func (zd *ZoneData) StageBatch(fn func(s Stager) (changed bool, err error)) (Bum
 	draft := zd.isDraftLocked()
 	s := &batchStager{zd: zd, draft: draft}
 
-	// What was pending when the batch started, so a failed batch can be
-	// unwound without dropping somebody else's staged work along with it.
-	// The common case is nothing: the working set is nil between publishes,
-	// and restoring nil is what discards the failed batch's writes.
-	var saved map[string]*OwnerData
-	savedSynth := zd.wsSignalSynth
-	if !draft && zd.workingSet != nil {
-		saved = make(map[string]*OwnerData, len(zd.workingSet))
-		for k, v := range zd.workingSet {
-			saved[k] = v
-		}
+	var saved stagingSave
+	if !draft {
+		saved = zd.saveStagingLocked()
 	}
 
 	changed, err := fn(s)
 	if err != nil {
 		if !draft {
-			zd.workingSet = saved
-			zd.wsSignalSynth = savedSynth
+			zd.restoreStagingLocked(saved)
 		}
 		resp.Error = true
 		resp.ErrorMsg = err.Error()
