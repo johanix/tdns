@@ -68,10 +68,21 @@ type pollScan struct {
 // only with scanner.poll.bootstrap set. A child that had a DS when the round
 // listed it and has lost it since -- a NOTIFY-started scan applied a CDS delete
 // first, say -- is held to that rule here.
-func (scanner *Scanner) scanChildAndApply(ctx context.Context, parent *ZoneData, scanType ScanType, tuple ScanTuple, options *edns0.MsgOptions, poll *pollScan) ScanTupleResponse {
+//
+// A panic in the scan, reached from the child's data, fails this scan alone
+// (see scanner_panic.go).
+func (scanner *Scanner) scanChildAndApply(ctx context.Context, parent *ZoneData, scanType ScanType, tuple ScanTuple, options *edns0.MsgOptions, poll *pollScan) (resp ScanTupleResponse) {
 	mu := scanner.childLock(tuple.Zone)
 	mu.Lock()
 	defer mu.Unlock()
+	// Deferred after the unlock, so it runs first: a scan that panicked is
+	// recorded under the child's lock, like every other.
+	defer func() {
+		if rec := recover(); rec != nil {
+			resp = scanPanicResponse(parentZoneName(parent), scanType, tuple, rec)
+			recordPanickedScan(parent, scanType, resp, poll != nil)
+		}
+	}()
 
 	// A scan that stops before it reads the child is recorded too. The child
 	// that sent the NOTIFY got NOERROR, and "I notified and the parent did
@@ -117,7 +128,7 @@ func (scanner *Scanner) scanChildAndApply(ctx context.Context, parent *ZoneData,
 	default:
 		return failed("a %s scan does not change a delegation", ScanTypeToString[scanType])
 	}
-	resp := <-ch
+	resp = <-ch
 	logScanResult(parent, scanType, resp)
 	ev := scanSyncLogEvent(parent, scanType, resp, poll != nil)
 	if scanResponseChangesDelegation(resp) {

@@ -314,6 +314,10 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 					lg.Debug("ScannerEngine: processing zone", "zone", tuple.Zone, "currentData", fmt.Sprintf("%+v", tuple.CurrentData))
 					wg.Add(1)
 
+					// Each scan runs in its own goroutine, under runScanJob: a
+					// panic there fails that scan alone (scanner_panic.go).
+					parentName := parentZoneName(sr.ZoneData)
+
 					switch sr.ScanType {
 					/*
 						case ScanRRtype:
@@ -340,22 +344,25 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 						if sr.ZoneData != nil {
 							lg.Debug("ScannerEngine: dispatching a CDS scan", "child", tuple.Zone)
 							go func(t ScanTuple, parentZD *ZoneData) {
-								defer wg.Done()
-								responseCh <- scanner.scanChildAndApply(ctx, parentZD, sr.ScanType, t, sr.Edns0Options, nil)
+								runScanJob(&wg, responseCh, parentName, sr.ScanType, t, func() {
+									responseCh <- scanner.scanChildAndApply(ctx, parentZD, sr.ScanType, t, sr.Edns0Options, nil)
+								})
 							}(tuple, sr.ZoneData)
 						} else {
 							lg.Debug("ScannerEngine: dispatching CheckCDS")
 							go func(t ScanTuple) {
-								defer wg.Done()
-								scanner.CheckCDS(ctx, t, sr.ScanType, sr.Edns0Options, responseCh)
+								runScanJob(&wg, responseCh, parentName, sr.ScanType, t, func() {
+									scanner.CheckCDS(ctx, t, sr.ScanType, sr.Edns0Options, responseCh)
+								})
 							}(tuple)
 						}
 					case ScanCSYNC:
 						if sr.ZoneData != nil {
 							lg.Debug("ScannerEngine: dispatching a CSYNC scan", "child", tuple.Zone)
 							go func(t ScanTuple, parentZD *ZoneData) {
-								defer wg.Done()
-								responseCh <- scanner.scanChildAndApply(ctx, parentZD, sr.ScanType, t, sr.Edns0Options, nil)
+								runScanJob(&wg, responseCh, parentName, sr.ScanType, t, func() {
+									responseCh <- scanner.scanChildAndApply(ctx, parentZD, sr.ScanType, t, sr.Edns0Options, nil)
+								})
 							}(tuple, sr.ZoneData)
 						} else {
 							lg.Warn("ScannerEngine: CSYNC scan without parent zone data not yet supported")
@@ -372,8 +379,9 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 					case ScanDNSKEY:
 						lg.Debug("ScannerEngine: dispatching CheckDNSKEY")
 						go func(t ScanTuple) {
-							defer wg.Done()
-							scanner.CheckDNSKEY(ctx, t, sr.ScanType, sr.Edns0Options, responseCh)
+							runScanJob(&wg, responseCh, parentName, sr.ScanType, t, func() {
+								scanner.CheckDNSKEY(ctx, t, sr.ScanType, sr.Edns0Options, responseCh)
+							})
 						}(tuple)
 					}
 				}
