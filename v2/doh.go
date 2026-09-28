@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -129,7 +130,7 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, p
 
 		// Create a response writer abstraction for DoH
 		var buf bytes.Buffer
-		rw := &dohResponseWriter{&buf}
+		rw := newDoHResponseWriter(&buf, r, msg)
 
 		lgDns.Debug("DoH: received message", "opcode", dns.OpcodeToString[msg.Opcode], "qname", msg.Question[0].Name, "rrtype", dns.TypeToString[msg.Question[0].Qtype])
 
@@ -223,8 +224,29 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, p
 	return nil
 }
 
+// dohResponseWriter answers one DoH request. It is not a miekg dns.Server
+// connection, so the client's address has to be supplied here. The checks that
+// authorize by address -- inbound NOTIFY (allow-notify) and transfers
+// (downstreams) -- read RemoteAddr, and a fixed loopback address let every DoH
+// client pass an entry for 127.0.0.1.
 type dohResponseWriter struct {
-	buf *bytes.Buffer
+	buf    *bytes.Buffer
+	local  net.Addr
+	remote net.Addr
+}
+
+// newDoHResponseWriter takes the client's address from the HTTP request and the
+// listener's from its context. Either falls back to dummyAddr only when it
+// cannot be read.
+func newDoHResponseWriter(buf *bytes.Buffer, r *http.Request, msg *dns.Msg) *dohResponseWriter {
+	w := &dohResponseWriter{buf: buf, local: dummyAddr{}, remote: dummyAddr{}}
+	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
+		w.remote = net.TCPAddrFromAddrPort(ap)
+	}
+	if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok && la != nil {
+		w.local = la
+	}
+	return w
 }
 
 func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error {
@@ -247,14 +269,17 @@ func (w *dohResponseWriter) Close() error { return nil }
 func (w *dohResponseWriter) TsigStatus() error         { return nil }
 func (w *dohResponseWriter) TsigTimersOnly(bool)       {}
 func (w *dohResponseWriter) Hijack()                   {}
-func (w *dohResponseWriter) LocalAddr() net.Addr       { return dummyAddr{} }
-func (w *dohResponseWriter) RemoteAddr() net.Addr      { return dummyAddr{} }
+func (w *dohResponseWriter) LocalAddr() net.Addr       { return w.local }
+func (w *dohResponseWriter) RemoteAddr() net.Addr      { return w.remote }
 func (w *dohResponseWriter) Write([]byte) (int, error) { return 0, nil }
 func (w *dohResponseWriter) WriteMsgWithTsig(*dns.Msg, string, bool) error {
 	return errors.New("not implemented")
 }
 
+// dummyAddr stands in for an address the HTTP layer did not give us in a
+// readable form. It is not an address anyone can match: authorization by
+// address fails on it (peerIP cannot parse it).
 type dummyAddr struct{}
 
 func (dummyAddr) Network() string { return "doh" }
-func (dummyAddr) String() string  { return "127.0.0.1:443" }
+func (dummyAddr) String() string  { return "doh-unknown" }
