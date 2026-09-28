@@ -314,7 +314,7 @@ func rrToRFC3597(rr dns.RR) (string, error) {
 // Returns ("", nil) when no key has been generated -- the caller says so in
 // its own words, since what that means depends on the state.
 func (zd *ZoneData) proxyKeyPublishBlock(kdb *KeyDB) (string, error) {
-	return zd.proxyKeyPublishBlockHeaded(kdb, proxyPublishHeading)
+	return zd.proxyKeyPublishBlockHeaded(kdb, proxyPublishHeading, false)
 }
 
 const (
@@ -326,7 +326,15 @@ const (
 )
 
 // proxyKeyPublishBlockHeaded is proxyKeyPublishBlock under a given heading.
-func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string) (string, error) {
+//
+// served=true is for READY, where the records are already at the primary's
+// apex and are shown to compare with what it serves. There each record carries
+// the TTL the zone serves it with, as the agent sees it in its copy of the
+// zone, not the TTL of the agent's own template (3600): printing the template
+// claimed the primary served the records at 3600 when it served them at, say,
+// 300. A record not found at the apex has no served TTL to show, and is
+// printed without one.
+func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string, served bool) (string, error) {
 	keyRR, err := zd.proxyAgentKeyRR(kdb)
 	if err != nil {
 		return "", err
@@ -338,6 +346,14 @@ func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string) (stri
 	if err != nil {
 		return "", err
 	}
+	keyLine, hsyncLine := keyRR.String(), zd.proxyHsyncparamPubkeyRR()
+	if served {
+		ttl, ok := zd.proxyServedKeyTTL(keyRR)
+		keyLine = rrTextWithTTL(keyLine, ttl, ok)
+		ttl, ok = zd.apexRRsetTTL(core.TypeHSYNCPARAM)
+		hsyncLine = rrTextWithTTL(hsyncLine, ttl, ok)
+		unknown = rrTextWithTTL(unknown, ttl, ok)
+	}
 	return fmt.Sprintf(`%s
 
 %s
@@ -347,7 +363,44 @@ HSYNCPARAM is a private type (%d). For a primary that cannot parse it, the same
 record in RFC 3597 form:
 
 %s
-`, heading, keyRR.String(), zd.proxyHsyncparamPubkeyRR(), core.TypeHSYNCPARAM, unknown), nil
+`, heading, keyLine, hsyncLine, core.TypeHSYNCPARAM, unknown), nil
+}
+
+// proxyServedKeyTTL returns the TTL of the apex KEY that is the agent's key
+// (same key tag and algorithm), as served in the zone.
+func (zd *ZoneData) proxyServedKeyTTL(ours *dns.KEY) (uint32, bool) {
+	for _, rr := range zd.proxyApexKEYs() {
+		k, ok := rr.(*dns.KEY)
+		if ok && k.Algorithm == ours.Algorithm && k.KeyTag() == ours.KeyTag() {
+			return k.Hdr.Ttl, true
+		}
+	}
+	return 0, false
+}
+
+// apexRRsetTTL returns the TTL of the apex RRset of rrtype, as served in the
+// zone.
+func (zd *ZoneData) apexRRsetTTL(rrtype uint16) (uint32, bool) {
+	rrs := zd.apexRRs(rrtype)
+	if len(rrs) == 0 {
+		return 0, false
+	}
+	return rrs[0].Header().Ttl, true
+}
+
+// rrTextWithTTL rewrites the TTL field of one record in tab-separated
+// presentation form ("owner<TAB>ttl<TAB>..."): to ttl when known, or drops the
+// field when not (a TTL is optional in a zone file). Text of any other shape
+// is returned unchanged.
+func rrTextWithTTL(text string, ttl uint32, known bool) string {
+	f := strings.SplitN(text, "\t", 3)
+	if len(f) != 3 {
+		return text
+	}
+	if !known {
+		return f[0] + "\t" + f[2]
+	}
+	return fmt.Sprintf("%s\t%d\t%s", f[0], ttl, f[2])
 }
 
 // clearProxyUpdateWarning removes any parentsync-proxy UPDATE warning set
@@ -396,7 +449,7 @@ func (zd *ZoneData) proxyKeyStatusMessage(state ProxyUpdateState, kdb *KeyDB) (s
 	if state == ProxyUpdateReady {
 		heading = proxyPublishedHeading
 	}
-	block, berr := zd.proxyKeyPublishBlockHeaded(kdb, heading)
+	block, berr := zd.proxyKeyPublishBlockHeaded(kdb, heading, state == ProxyUpdateReady)
 	if berr != nil {
 		return "", berr
 	}
