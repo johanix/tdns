@@ -1,8 +1,8 @@
 # Scope: per-client transport counters in the resolver, and a delegation-sync log on the parent
 
-2026-09-28. Status: scope, r2, amended. Part 0 is implemented and merged
-(#802, merge dd7de680). Part 2 (#804) and part 1 (#805) are implemented and
-not yet merged. Base of r2: `main` at 700b15ef.
+2026-09-28. Status: scope, r2, amended. All three parts are implemented and
+merged: part 0 in #802 (merge dd7de680), part 2 in #804 (merge 55af56bc),
+part 1 in #805 (merge f3f206a0). Base of r2: `main` at 700b15ef.
 
 **Revisions**
 - **r1:** the scope.
