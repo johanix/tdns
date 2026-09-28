@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -129,7 +130,7 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, p
 
 		// Create a response writer abstraction for DoH
 		var buf bytes.Buffer
-		rw := &dohResponseWriter{&buf}
+		rw := newDoHResponseWriter(&buf, r, msg)
 
 		lgDns.Debug("DoH: received message", "opcode", dns.OpcodeToString[msg.Opcode], "qname", msg.Question[0].Name, "rrtype", dns.TypeToString[msg.Question[0].Qtype])
 
@@ -223,8 +224,33 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, p
 	return nil
 }
 
+// dohResponseWriter answers one DoH request. It is not a miekg dns.Server
+// connection, so two things a handler relies on have to be supplied here:
+//   - the client's address. The checks that authorize by address -- inbound
+//     NOTIFY (allow-notify) and transfers (downstreams) -- read RemoteAddr, and
+//     a fixed loopback address let every DoH client pass an entry for 127.0.0.1;
+//   - the TSIG status. Nothing verifies a TSIG here (see TsigStatus).
 type dohResponseWriter struct {
-	buf *bytes.Buffer
+	buf    *bytes.Buffer
+	local  net.Addr
+	remote net.Addr
+	tsig   bool // the request carried a TSIG RR
+}
+
+// newDoHResponseWriter takes the client's address from the HTTP request: the
+// peer of the DoH connection, never a header such as X-Forwarded-For, which
+// would let any client name its own address. The listener's address comes from
+// the request context. Either falls back to dummyAddr only when it cannot be
+// read.
+func newDoHResponseWriter(buf *bytes.Buffer, r *http.Request, msg *dns.Msg) *dohResponseWriter {
+	w := &dohResponseWriter{buf: buf, local: dummyAddr{}, remote: dummyAddr{}, tsig: msg.IsTsig() != nil}
+	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
+		w.remote = dohPeerAddr{ap}
+	}
+	if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok && la != nil {
+		w.local = la
+	}
+	return w
 }
 
 func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error {
@@ -238,23 +264,46 @@ func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error {
 
 func (w *dohResponseWriter) Close() error { return nil }
 
-// TODO(tsig): DoH is served by this buffer-backed writer, not a miekg
-// dns.Server, so miekg's conn-level TSIG (verify-on-read, MAC-on-write) does not
-// apply and TsigStatus is a stub. Supporting TSIG over DoH would mean manually
-// dns.TsigVerify'ing the inbound message and dns.TsigGenerate'ing the reply
-// (request-MAC prefixed) in this path. Deferred: encrypted transports usually
-// authenticate peers via TLS/mTLS, and tdns replication (AXFR/NOTIFY) is Do53.
-func (w *dohResponseWriter) TsigStatus() error         { return nil }
+// TsigStatus fails closed. DoH is served by this buffer-backed writer, not a
+// miekg dns.Server, so miekg's conn-level TSIG (verify-on-read, MAC-on-write)
+// does not apply and nothing here has checked a TSIG's MAC. A nil status would
+// tell every check that trusts it (checkInboundTSIG, the transfer ACL) that the
+// MAC verified. A signed request therefore reports errTsigUnverified, and a
+// TSIG-authenticated operation over DoH is refused rather than accepted
+// unchecked. An unsigned request reports nil, as miekg does.
+//
+// TODO(tsig): supporting TSIG over DoH would mean dns.TsigVerify'ing the
+// inbound message and dns.TsigGenerate'ing the reply (request-MAC prefixed) in
+// this path. Deferred: encrypted transports usually authenticate peers via
+// TLS/mTLS, and tdns replication (AXFR/NOTIFY) is Do53.
+func (w *dohResponseWriter) TsigStatus() error {
+	if w.tsig {
+		return errTsigUnverified
+	}
+	return nil
+}
 func (w *dohResponseWriter) TsigTimersOnly(bool)       {}
 func (w *dohResponseWriter) Hijack()                   {}
-func (w *dohResponseWriter) LocalAddr() net.Addr       { return dummyAddr{} }
-func (w *dohResponseWriter) RemoteAddr() net.Addr      { return dummyAddr{} }
+func (w *dohResponseWriter) LocalAddr() net.Addr       { return w.local }
+func (w *dohResponseWriter) RemoteAddr() net.Addr      { return w.remote }
 func (w *dohResponseWriter) Write([]byte) (int, error) { return 0, nil }
 func (w *dohResponseWriter) WriteMsgWithTsig(*dns.Msg, string, bool) error {
 	return errors.New("not implemented")
 }
 
+// dohPeerAddr is a DoH client's address: host and port of the HTTP connection.
+// It is a type of its own rather than a *net.TCPAddr because DoH need not run
+// on TCP (HTTP/3 does not). Its String is host:port, which peerIP reads like
+// any other source address.
+type dohPeerAddr struct{ ap netip.AddrPort }
+
+func (a dohPeerAddr) Network() string { return "doh" }
+func (a dohPeerAddr) String() string  { return a.ap.String() }
+
+// dummyAddr stands in for an address the HTTP layer did not give us in a
+// readable form. It is not an address anyone can match: authorization by
+// address fails on it (peerIP cannot parse it).
 type dummyAddr struct{}
 
 func (dummyAddr) Network() string { return "doh" }
-func (dummyAddr) String() string  { return "127.0.0.1:443" }
+func (dummyAddr) String() string  { return "doh-unknown" }
