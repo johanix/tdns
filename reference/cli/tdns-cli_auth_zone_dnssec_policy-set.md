@@ -6,7 +6,7 @@ Set a zone's DNSSEC policy at runtime (persists as an override, not in YAML)
 
 Apply a DNSSEC policy to a zone in the running server. The change is stored
 as a per-zone override in the keystore and survives restart, but does NOT
-update the zone's dnssec_policy in the YAML config — update that separately
+update the zone's dnssecpolicy in the YAML config — update that separately
 to make the new policy the permanent base. If the new policy uses different
 key algorithms, the old keys are retired (their signatures kept until the
 KeyStateWorker removes them) and new keys take over; the zone stays signed

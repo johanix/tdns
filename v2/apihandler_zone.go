@@ -710,7 +710,7 @@ func setZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName str
 	if algChanged {
 		b.WriteString("WARNING: this change has caused multiple signatures on RRsets (new keys+sigs added alongside the old).\n")
 	}
-	fmt.Fprintf(&b, "NOTE #1: update the zone's dnssec_policy in YAML to make %q the permanent policy.", policyName)
+	fmt.Fprintf(&b, "NOTE #1: update the zone's dnssecpolicy in YAML to make %q the permanent policy.", policyName)
 	if algChanged {
 		fmt.Fprintf(&b, "\nNOTE #2: to clean up keys and signatures from the previous policy use \"... keystore dnssec policy-cleanup -z %s\" (note that this may break DNSSEC validation).", zd.ZoneName)
 	}
@@ -888,7 +888,7 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 		b.WriteString("Algorithms unchanged; new policy timings take effect. No algorithm roll is triggered.\n")
 	}
 	b.WriteString("WARNING: the policy change is stored in the keystore, not the zone config.\n")
-	fmt.Fprintf(&b, "NOTE: update the zone's dnssec_policy in YAML to make %q the permanent policy.", policyName)
+	fmt.Fprintf(&b, "NOTE: update the zone's dnssecpolicy in YAML to make %q the permanent policy.", policyName)
 	return b.String(), nil
 }
 
@@ -951,7 +951,7 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	if zoneOwned(zd) {
 		return "", ownedRefusal(zd, "policy-reset")
 	}
-	// Resolve the zone's CONFIG-base policy (its YAML dnssec_policy) — what the
+	// Resolve the zone's CONFIG-base policy (its YAML dnssecpolicy) — what the
 	// zone falls back to once the override + applied records are cleared. Read
 	// the name from Conf.Zones (as the list-zones handler does) and the struct
 	// from the ConfLive() snapshot (lock-free). These guards run for the dry-run
@@ -972,14 +972,14 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	}
 	confMu.RUnlock()
 	if configName == "" {
-		return "", fmt.Errorf("policy-reset: zone %s has no config-base dnssec_policy to reset to (dynamic/API-managed zones are not supported)", zd.ZoneName)
+		return "", fmt.Errorf("policy-reset: zone %s has no config-base dnssecpolicy to reset to (dynamic/API-managed zones are not supported)", zd.ZoneName)
 	}
 	pol, ok := ConfLive().DnssecPolicies[configName]
 	if !ok {
-		return "", fmt.Errorf("policy-reset: config dnssec_policy %q for zone %s does not exist", configName, zd.ZoneName)
+		return "", fmt.Errorf("policy-reset: config dnssecpolicy %q for zone %s does not exist", configName, zd.ZoneName)
 	}
 	if pol.Error != "" {
-		return "", fmt.Errorf("policy-reset: config dnssec_policy %q for zone %s is broken: %s", configName, zd.ZoneName, pol.Error)
+		return "", fmt.Errorf("policy-reset: config dnssecpolicy %q for zone %s is broken: %s", configName, zd.ZoneName, pol.Error)
 	}
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return "", fmt.Errorf("policy-reset: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)

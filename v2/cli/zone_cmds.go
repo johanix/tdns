@@ -192,7 +192,7 @@ updates refused until you thaw.`,
 		Short: "Set a zone's DNSSEC policy at runtime (persists as an override, not in YAML)",
 		Long: `Apply a DNSSEC policy to a zone in the running server. The change is stored
 as a per-zone override in the keystore and survives restart, but does NOT
-update the zone's dnssec_policy in the YAML config — update that separately
+update the zone's dnssecpolicy in the YAML config — update that separately
 to make the new policy the permanent base. If the new policy uses different
 key algorithms, the old keys are retired (their signatures kept until the
 KeyStateWorker removes them) and new keys take over; the zone stays signed
@@ -210,7 +210,7 @@ throughout.`,
 	policyReset := &cobra.Command{
 		Use:   "policy-reset",
 		Short: "Reset a zone's DNSSEC keys to its config policy, per role (dry-run without --confirm)",
-		Long: `Force a zone onto its config dnssec_policy: for each key role whose algorithm no
+		Long: `Force a zone onto its config dnssecpolicy: for each key role whose algorithm no
 longer matches config, drop and regenerate that role's keys and re-sign; any
 role whose algorithm is already correct is kept. It also clears the runtime
 override and records the config policy as applied.

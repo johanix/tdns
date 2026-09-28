@@ -314,7 +314,7 @@ func rrToRFC3597(rr dns.RR) (string, error) {
 // Returns ("", nil) when no key has been generated -- the caller says so in
 // its own words, since what that means depends on the state.
 func (zd *ZoneData) proxyKeyPublishBlock(kdb *KeyDB) (string, error) {
-	return zd.proxyKeyPublishBlockHeaded(kdb, proxyPublishHeading)
+	return zd.proxyKeyPublishBlockHeaded(kdb, proxyPublishHeading, false)
 }
 
 const (
@@ -326,7 +326,15 @@ const (
 )
 
 // proxyKeyPublishBlockHeaded is proxyKeyPublishBlock under a given heading.
-func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string) (string, error) {
+//
+// served=true is for READY, where the records are already at the primary's
+// apex and are shown to compare with what it serves. There each record carries
+// the TTL the zone serves it with, as the agent sees it in its copy of the
+// zone, not the TTL of the agent's own template (3600): printing the template
+// claimed the primary served the records at 3600 when it served them at, say,
+// 300. A record the apex does not serve -- no record there with the same
+// RDATA -- has no served TTL to show, and is printed without one.
+func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string, served bool) (string, error) {
 	keyRR, err := zd.proxyAgentKeyRR(kdb)
 	if err != nil {
 		return "", err
@@ -338,6 +346,14 @@ func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string) (stri
 	if err != nil {
 		return "", err
 	}
+	keyLine, hsyncLine := keyRR.String(), zd.proxyHsyncparamPubkeyRR()
+	if served {
+		ttl, ok := zd.proxyServedKeyTTL(keyRR)
+		keyLine = rrTextWithTTL(keyLine, ttl, ok)
+		ttl, ok = zd.proxyServedHsyncparamTTL()
+		hsyncLine = rrTextWithTTL(hsyncLine, ttl, ok)
+		unknown = rrTextWithTTL(unknown, ttl, ok)
+	}
 	return fmt.Sprintf(`%s
 
 %s
@@ -347,7 +363,61 @@ HSYNCPARAM is a private type (%d). For a primary that cannot parse it, the same
 record in RFC 3597 form:
 
 %s
-`, heading, keyRR.String(), zd.proxyHsyncparamPubkeyRR(), core.TypeHSYNCPARAM, unknown), nil
+`, heading, keyLine, hsyncLine, core.TypeHSYNCPARAM, unknown), nil
+}
+
+// proxyServedKeyTTL returns the TTL of the apex KEY that is the agent's key
+// (same RDATA), as served in the zone.
+func (zd *ZoneData) proxyServedKeyTTL(ours *dns.KEY) (uint32, bool) {
+	for _, rr := range zd.proxyApexKEYs() {
+		if k, ok := rr.(*dns.KEY); ok && sameKeyRdata(k, ours) {
+			return k.Hdr.Ttl, true
+		}
+	}
+	return 0, false
+}
+
+// proxyServedHsyncparamTTL returns the TTL of the apex HSYNCPARAM that is the
+// record the report prints (the pubkey flag, proxyHsyncparamPubkeyRR), as
+// served in the zone. An HSYNCPARAM with other contents says nothing about
+// how the primary serves this one, so its TTL is not borrowed.
+func (zd *ZoneData) proxyServedHsyncparamTTL() (uint32, bool) {
+	ours, err := dns.NewRR(zd.proxyHsyncparamPubkeyRR())
+	if err != nil {
+		return 0, false
+	}
+	for _, rr := range zd.apexRRs(core.TypeHSYNCPARAM) {
+		if sameRdata(rr, ours) {
+			return rr.Header().Ttl, true
+		}
+	}
+	return 0, false
+}
+
+// sameRdata reports whether two records carry the same RDATA, compared in
+// wire form. dns.IsDuplicate cannot be used here: it never matches a private
+// type such as HSYNCPARAM.
+func sameRdata(a, b dns.RR) bool {
+	ua, ub := new(dns.RFC3597), new(dns.RFC3597)
+	if ua.ToRFC3597(a) != nil || ub.ToRFC3597(b) != nil {
+		return false
+	}
+	return ua.Hdr.Rrtype == ub.Hdr.Rrtype && ua.Rdata == ub.Rdata
+}
+
+// rrTextWithTTL rewrites the TTL field of one record in tab-separated
+// presentation form ("owner<TAB>ttl<TAB>..."): to ttl when known, or drops the
+// field when not (a TTL is optional in a zone file). Text of any other shape
+// is returned unchanged.
+func rrTextWithTTL(text string, ttl uint32, known bool) string {
+	f := strings.SplitN(text, "\t", 3)
+	if len(f) != 3 {
+		return text
+	}
+	if !known {
+		return f[0] + "\t" + f[2]
+	}
+	return fmt.Sprintf("%s\t%d\t%s", f[0], ttl, f[2])
 }
 
 // clearProxyUpdateWarning removes any parentsync-proxy UPDATE warning set
@@ -396,7 +466,7 @@ func (zd *ZoneData) proxyKeyStatusMessage(state ProxyUpdateState, kdb *KeyDB) (s
 	if state == ProxyUpdateReady {
 		heading = proxyPublishedHeading
 	}
-	block, berr := zd.proxyKeyPublishBlockHeaded(kdb, heading)
+	block, berr := zd.proxyKeyPublishBlockHeaded(kdb, heading, state == ProxyUpdateReady)
 	if berr != nil {
 		return "", berr
 	}
