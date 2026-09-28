@@ -90,6 +90,30 @@ func TestDoHNotifyFromElsewhereIsNotTakenForLoopback(t *testing.T) {
 	}
 }
 
+// The client is the HTTP connection's peer. A header naming another address
+// (X-Forwarded-For, as a proxy would add, or anyone else could) is not taken
+// for it: trusting a proxy is a decision the DoH listener does not make.
+func TestDoHIgnoresXForwardedFor(t *testing.T) {
+	zd := &ZoneData{AllowNotify: []AclEntry{{Prefix: "127.0.0.1/32", Key: NOKEY}}}
+	notify := new(dns.Msg)
+	notify.SetNotify("example.test.")
+
+	req := httptest.NewRequest(http.MethodPost, DefaultDoHPath, nil)
+	req.RemoteAddr = "192.0.2.7:51234"
+	for _, h := range []string{"X-Forwarded-For", "X-Real-IP"} {
+		req.Header.Set(h, "127.0.0.1")
+	}
+	req.Header.Set("Forwarded", "for=127.0.0.1")
+	w := newDoHResponseWriter(new(bytes.Buffer), req, notify)
+
+	if got := w.RemoteAddr().String(); got != "192.0.2.7:51234" {
+		t.Errorf("RemoteAddr %q, want the HTTP peer 192.0.2.7:51234", got)
+	}
+	if ok, _, _, reason := zd.authorizeInboundNotify(w, notify); ok {
+		t.Errorf("NOTIFY over DoH from 192.0.2.7 claiming X-Forwarded-For 127.0.0.1 accepted by allow-notify 127.0.0.1 (reason %q)", reason)
+	}
+}
+
 // DoH and DoQ verify no TSIG, so a signed request must not look verified. A nil
 // TsigStatus used to say it was, and a request naming an approved key with any
 // MAC at all passed checkInboundTSIG and the transfer ACL.
@@ -128,5 +152,20 @@ func TestTransferOverDoHNeedsAVerifiedTSIG(t *testing.T) {
 
 	if err := zd.authorizeTransfer(context.Background(), dohWriterFrom(t, "192.0.2.7:51234", axfr), axfr, nil); err == nil {
 		t.Error("an AXFR over DoH naming key k with an unchecked MAC was authorized")
+	}
+}
+
+// The transfer ACL's twin of the NOTIFY test: a downstream entry for 127.0.0.1
+// must not match a DoH request from elsewhere.
+func TestDoHTransferFromElsewhereIsNotTakenForLoopback(t *testing.T) {
+	zd := &ZoneData{ZoneName: "example.test.", Downstreams: []AclEntry{{Prefix: "127.0.0.1/32", Key: NOKEY}}}
+	axfr := new(dns.Msg)
+	axfr.SetAxfr("example.test.")
+
+	if err := zd.authorizeTransfer(context.Background(), dohWriterFrom(t, "192.0.2.7:51234", axfr), axfr, nil); err == nil {
+		t.Error("an AXFR over DoH from 192.0.2.7 was authorized by downstream 127.0.0.1")
+	}
+	if err := zd.authorizeTransfer(context.Background(), dohWriterFrom(t, "127.0.0.1:51234", axfr), axfr, nil); err != nil {
+		t.Errorf("an AXFR over DoH from 127.0.0.1 was refused by downstream 127.0.0.1: %v", err)
 	}
 }
