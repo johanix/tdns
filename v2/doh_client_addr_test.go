@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -52,9 +53,11 @@ func TestDoHWriterReportsTheClientsAddress(t *testing.T) {
 			}
 			continue
 		}
-		tcp, ok := ra.(*net.TCPAddr)
-		if !ok || tcp.String() != tc.want {
-			t.Errorf("remote %q: got %T %v, want *net.TCPAddr %s", tc.remote, ra, ra, tc.want)
+		if _, ok := ra.(dohPeerAddr); !ok || ra.String() != tc.want {
+			t.Errorf("remote %q: got %T %v, want the DoH peer %s", tc.remote, ra, ra, tc.want)
+		}
+		if src, ok := peerIP(ra.String()); !ok || src.String() != strings.Trim(tc.want[:strings.LastIndex(tc.want, ":")], "[]") {
+			t.Errorf("remote %q: peerIP(%q) = %v, %v; want the client's address", tc.remote, ra, src, ok)
 		}
 	}
 
@@ -79,6 +82,11 @@ func TestDoHNotifyFromElsewhereIsNotTakenForLoopback(t *testing.T) {
 	}
 	if ok, _, _, reason := zd.authorizeInboundNotify(dohWriterFrom(t, "127.0.0.1:51234", notify), notify); !ok {
 		t.Errorf("NOTIFY over DoH from 127.0.0.1 refused: %s", reason)
+	}
+	// A peer the HTTP layer gave in no readable form must not match the
+	// loopback entry either: authorization by address fails on it.
+	if ok, _, _, _ := zd.authorizeInboundNotify(dohWriterFrom(t, "not-an-address", notify), notify); ok {
+		t.Error("NOTIFY over DoH from an unparseable peer accepted by allow-notify 127.0.0.1")
 	}
 }
 

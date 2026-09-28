@@ -237,13 +237,15 @@ type dohResponseWriter struct {
 	tsig   bool // the request carried a TSIG RR
 }
 
-// newDoHResponseWriter takes the client's address from the HTTP request and the
-// listener's from its context. Either falls back to dummyAddr only when it
-// cannot be read.
+// newDoHResponseWriter takes the client's address from the HTTP request: the
+// peer of the DoH connection, never a header such as X-Forwarded-For, which
+// would let any client name its own address. The listener's address comes from
+// the request context. Either falls back to dummyAddr only when it cannot be
+// read.
 func newDoHResponseWriter(buf *bytes.Buffer, r *http.Request, msg *dns.Msg) *dohResponseWriter {
 	w := &dohResponseWriter{buf: buf, local: dummyAddr{}, remote: dummyAddr{}, tsig: msg.IsTsig() != nil}
 	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
-		w.remote = net.TCPAddrFromAddrPort(ap)
+		w.remote = dohPeerAddr{ap}
 	}
 	if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok && la != nil {
 		w.local = la
@@ -288,6 +290,15 @@ func (w *dohResponseWriter) Write([]byte) (int, error) { return 0, nil }
 func (w *dohResponseWriter) WriteMsgWithTsig(*dns.Msg, string, bool) error {
 	return errors.New("not implemented")
 }
+
+// dohPeerAddr is a DoH client's address: host and port of the HTTP connection.
+// It is a type of its own rather than a *net.TCPAddr because DoH need not run
+// on TCP (HTTP/3 does not). Its String is host:port, which peerIP reads like
+// any other source address.
+type dohPeerAddr struct{ ap netip.AddrPort }
+
+func (a dohPeerAddr) Network() string { return "doh" }
+func (a dohPeerAddr) String() string  { return a.ap.String() }
 
 // dummyAddr stands in for an address the HTTP layer did not give us in a
 // readable form. It is not an address anyone can match: authorization by
