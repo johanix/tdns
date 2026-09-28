@@ -504,6 +504,17 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 			lgApi.Warn("error decoding delegation post", "err", err)
 		}
 
+		// The delegation-sync log is not about one zone: the parent is an
+		// optional filter, so it is answered before the zone lookup below.
+		if dp.Command == "sync-log" {
+			resp := DelegationResponse{Time: time.Now(), Zone: dp.Zone}
+			resp.SyncLog, resp.ErrorMsg = delegationSyncLogReport(dp)
+			resp.Error = resp.ErrorMsg != ""
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
 		dp.Zone = dns.Fqdn(dp.Zone)
 		lgApi.Debug("received /delegation request", "cmd", dp.Command, "from", r.RemoteAddr)
 
