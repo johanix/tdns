@@ -353,13 +353,15 @@ func TestNotifyDrivenFirstLoadBindsTheRegisteredPolicy(t *testing.T) {
 		zd.mu.Lock()
 		ready, pol, name := zd.Ready, zd.DnssecPolicy, zd.DnssecPolicyName
 		zd.mu.Unlock()
-		_, _, applied, aerr := GetZoneAppliedPolicy(kdb, "example.")
-		if aerr != nil {
-			t.Fatalf("GetZoneAppliedPolicy: %v", aerr)
-		}
 		bound := ready && pol != nil && name == "base"
-		if bound && applied {
-			break
+		if bound {
+			_, _, applied, aerr := GetZoneAppliedPolicy(kdb, "example.")
+			if aerr != nil {
+				t.Fatalf("GetZoneAppliedPolicy: %v", aerr)
+			}
+			if applied {
+				break
+			}
 		}
 		if time.Now().After(deadline) {
 			if bound {
