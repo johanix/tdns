@@ -225,21 +225,23 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, p
 }
 
 // dohResponseWriter answers one DoH request. It is not a miekg dns.Server
-// connection, so the client's address has to be supplied here. The checks that
-// authorize by address -- inbound NOTIFY (allow-notify) and transfers
-// (downstreams) -- read RemoteAddr, and a fixed loopback address let every DoH
-// client pass an entry for 127.0.0.1.
+// connection, so two things a handler relies on have to be supplied here:
+//   - the client's address. The checks that authorize by address -- inbound
+//     NOTIFY (allow-notify) and transfers (downstreams) -- read RemoteAddr, and
+//     a fixed loopback address let every DoH client pass an entry for 127.0.0.1;
+//   - the TSIG status. Nothing verifies a TSIG here (see TsigStatus).
 type dohResponseWriter struct {
 	buf    *bytes.Buffer
 	local  net.Addr
 	remote net.Addr
+	tsig   bool // the request carried a TSIG RR
 }
 
 // newDoHResponseWriter takes the client's address from the HTTP request and the
 // listener's from its context. Either falls back to dummyAddr only when it
 // cannot be read.
 func newDoHResponseWriter(buf *bytes.Buffer, r *http.Request, msg *dns.Msg) *dohResponseWriter {
-	w := &dohResponseWriter{buf: buf, local: dummyAddr{}, remote: dummyAddr{}}
+	w := &dohResponseWriter{buf: buf, local: dummyAddr{}, remote: dummyAddr{}, tsig: msg.IsTsig() != nil}
 	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
 		w.remote = net.TCPAddrFromAddrPort(ap)
 	}
@@ -260,13 +262,24 @@ func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error {
 
 func (w *dohResponseWriter) Close() error { return nil }
 
-// TODO(tsig): DoH is served by this buffer-backed writer, not a miekg
-// dns.Server, so miekg's conn-level TSIG (verify-on-read, MAC-on-write) does not
-// apply and TsigStatus is a stub. Supporting TSIG over DoH would mean manually
-// dns.TsigVerify'ing the inbound message and dns.TsigGenerate'ing the reply
-// (request-MAC prefixed) in this path. Deferred: encrypted transports usually
-// authenticate peers via TLS/mTLS, and tdns replication (AXFR/NOTIFY) is Do53.
-func (w *dohResponseWriter) TsigStatus() error         { return nil }
+// TsigStatus fails closed. DoH is served by this buffer-backed writer, not a
+// miekg dns.Server, so miekg's conn-level TSIG (verify-on-read, MAC-on-write)
+// does not apply and nothing here has checked a TSIG's MAC. A nil status would
+// tell every check that trusts it (checkInboundTSIG, the transfer ACL) that the
+// MAC verified. A signed request therefore reports errTsigUnverified, and a
+// TSIG-authenticated operation over DoH is refused rather than accepted
+// unchecked. An unsigned request reports nil, as miekg does.
+//
+// TODO(tsig): supporting TSIG over DoH would mean dns.TsigVerify'ing the
+// inbound message and dns.TsigGenerate'ing the reply (request-MAC prefixed) in
+// this path. Deferred: encrypted transports usually authenticate peers via
+// TLS/mTLS, and tdns replication (AXFR/NOTIFY) is Do53.
+func (w *dohResponseWriter) TsigStatus() error {
+	if w.tsig {
+		return errTsigUnverified
+	}
+	return nil
+}
 func (w *dohResponseWriter) TsigTimersOnly(bool)       {}
 func (w *dohResponseWriter) Hijack()                   {}
 func (w *dohResponseWriter) LocalAddr() net.Addr       { return w.local }

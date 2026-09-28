@@ -6,6 +6,7 @@ package tdns
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -78,5 +79,46 @@ func TestDoHNotifyFromElsewhereIsNotTakenForLoopback(t *testing.T) {
 	}
 	if ok, _, _, reason := zd.authorizeInboundNotify(dohWriterFrom(t, "127.0.0.1:51234", notify), notify); !ok {
 		t.Errorf("NOTIFY over DoH from 127.0.0.1 refused: %s", reason)
+	}
+}
+
+// DoH and DoQ verify no TSIG, so a signed request must not look verified. A nil
+// TsigStatus used to say it was, and a request naming an approved key with any
+// MAC at all passed checkInboundTSIG and the transfer ACL.
+func TestSignedRequestOverDoHOrDoQIsNotVerified(t *testing.T) {
+	signed := signedMsg("k")
+	for name, w := range map[string]dns.ResponseWriter{
+		"DoH": dohWriterFrom(t, "192.0.2.7:51234", signed),
+		"DoQ": &doqResponseWriter{tsig: signed.IsTsig() != nil},
+	} {
+		if err := w.TsigStatus(); !errors.Is(err, errTsigUnverified) {
+			t.Errorf("%s: TsigStatus of a signed request = %v, want errTsigUnverified", name, err)
+		}
+		if err := checkInboundTSIG(w, signed, []string{"k"}); err == nil {
+			t.Errorf("%s: an unverified TSIG under the approved key passed checkInboundTSIG", name)
+		}
+	}
+
+	// Unsigned requests are unaffected: miekg also reports nil for them.
+	for name, w := range map[string]dns.ResponseWriter{
+		"DoH": dohWriterFrom(t, "192.0.2.7:51234", queryMsg()),
+		"DoQ": &doqResponseWriter{},
+	} {
+		if err := w.TsigStatus(); err != nil {
+			t.Errorf("%s: TsigStatus of an unsigned request = %v, want nil", name, err)
+		}
+	}
+}
+
+// The transfer ACL: an entry that requires key k must not match a DoH request
+// that merely names k.
+func TestTransferOverDoHNeedsAVerifiedTSIG(t *testing.T) {
+	zd := &ZoneData{ZoneName: "example.test.", Downstreams: []AclEntry{{Prefix: "0.0.0.0/0", Key: "k"}}}
+	axfr := new(dns.Msg)
+	axfr.SetAxfr("example.test.")
+	axfr.SetTsig("k.", dns.HmacSHA256, 300, 0)
+
+	if err := zd.authorizeTransfer(context.Background(), dohWriterFrom(t, "192.0.2.7:51234", axfr), axfr, nil); err == nil {
+		t.Error("an AXFR over DoH naming key k with an unchecked MAC was authorized")
 	}
 }

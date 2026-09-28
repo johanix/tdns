@@ -11,6 +11,7 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"net/netip"
@@ -272,6 +273,12 @@ func (zd *ZoneData) notifyKeyFor(target string) string {
 	}
 	return NOKEY
 }
+
+// errTsigUnverified is the TsigStatus of a signed request that arrived over a
+// transport whose writer cannot verify TSIG (DoH, DoQ). It is an error, not nil:
+// nil means "the MAC verified", and checkInboundTSIG and the transfer ACL trust
+// exactly that.
+var errTsigUnverified = errors.New("TSIG is not verified on this transport")
 
 // checkInboundTSIG verifies that an inbound request — already ACL-allowed — is
 // authenticated by ONE OF the keys approved for its source. approvedKeys is the set
