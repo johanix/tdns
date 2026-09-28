@@ -648,7 +648,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// kasp, and the named policies) into conf.Internal.*. The zone-reload
 	// paths call this same helper so reloading zones also refreshes the
 	// policy definitions they depend on. ParseZones (later) validates zone
-	// dnssec_policy references against the resolved map.
+	// dnssecpolicy references against the resolved map.
 	if err := conf.parseDnssecConfig(); err != nil {
 		return err
 	}

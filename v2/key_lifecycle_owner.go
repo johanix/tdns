@@ -192,7 +192,7 @@ func SetZonePolicyForOwner(ctx context.Context, zd *ZoneData, kdb *KeyDB, policy
 		return "", fmt.Errorf("owner policy-set: %w", err)
 	}
 	if oldName != "" && oldName != policyName {
-		return fmt.Sprintf("Zone %s: DNSSEC policy changed from %q to %q by its key lifecycle owner (%d new RRSIGs). Update the zone's dnssec_policy in YAML to make %q permanent.", zd.ZoneName, oldName, policyName, newrrsigs, policyName), nil
+		return fmt.Sprintf("Zone %s: DNSSEC policy changed from %q to %q by its key lifecycle owner (%d new RRSIGs). Update the zone's dnssecpolicy in YAML to make %q permanent.", zd.ZoneName, oldName, policyName, newrrsigs, policyName), nil
 	}
-	return fmt.Sprintf("Zone %s: DNSSEC policy set to %q by its key lifecycle owner (%d new RRSIGs). Update the zone's dnssec_policy in YAML to make %q permanent.", zd.ZoneName, policyName, newrrsigs, policyName), nil
+	return fmt.Sprintf("Zone %s: DNSSEC policy set to %q by its key lifecycle owner (%d new RRSIGs). Update the zone's dnssecpolicy in YAML to make %q permanent.", zd.ZoneName, policyName, newrrsigs, policyName), nil
 }

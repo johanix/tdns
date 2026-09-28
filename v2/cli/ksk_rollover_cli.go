@@ -287,7 +287,7 @@ or 2s / 60s / 1h when those are unset.
 			z := dns.Fqdn(tdns.Globals.Zonename)
 			pol := dnssecPolicyForZone(&Conf, kdb, z)
 			if pol == nil {
-				log.Fatal("no dnssec policy for this zone (dnssec_policy in zone config)")
+				log.Fatal("no dnssec policy for this zone (dnssecpolicy in zone config)")
 			}
 
 			agent := strings.TrimSpace(parentAgentFlag)

@@ -134,7 +134,7 @@ type DnssecConf struct {
 	Templates map[string]DnssecPolicyConf `yaml:"templates" mapstructure:"templates"`
 
 	// Policies are the named DNSSEC policies a zone references via its
-	// dnssec_policy field. YAML: dnssec.policies:.
+	// dnssecpolicy field. YAML: dnssec.policies:.
 	Policies map[string]DnssecPolicyConf `yaml:"policies" mapstructure:"policies"`
 
 	// Kasp is the Key and Signing Policy controlling the KeyStateWorker.
