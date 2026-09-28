@@ -220,10 +220,10 @@ var storeTrustKey = (*KeyDB).Sig0TrustMgmt
 // loop that stopped would leave every writer of every zone waiting on UpdateQ.
 //
 // Recovering is safe only because what a panic unwinds through leaves nothing
-// behind. The appliers stage and publish through stageAndPublishLocked, the
-// delegation store's transaction ends in endTx, the truststore's is rolled back
-// below, and zd.mu is released by a defer wherever something that can panic
-// runs under it.
+// behind. The appliers stage and publish through stageAndPublishLocked, a
+// TX-COMMIT publishes under withLockPublishing, the delegation store's
+// transaction ends in endTx, the truststore's is rolled back below, and zd.mu
+// is released by a defer wherever something that can panic runs under it.
 func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool) {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -763,9 +763,10 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 		// the caller when the zone is not Ready or the hold was urgent,
 		// and otherwise by the gate's publish, in the publisher's
 		// goroutine, where this handler cannot see the outcome.
-		// Under a defer: the commit can publish, and a publish that panicked
-		// must not leave the zone locked (#808).
-		err := zd.withLock(func() error { return zd.commitTxLocked(ur.TxID, ur.Resp) })
+		// The commit can publish (txHoldClosedLocked), so it is guarded like
+		// the appliers' publish: a panic must not leave the zone locked, nor
+		// leave what it had staged to go out with a later publish (#808).
+		err := zd.withLockPublishing(func() error { return zd.commitTxLocked(ur.TxID, ur.Resp) })
 		if err != nil {
 			lg.Error("ZoneUpdater: TX-COMMIT refused", "zone", ur.ZoneName, "error", err)
 			ur.respond(false, err)
@@ -784,11 +785,9 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 
 // ApplyChildUpdateToZoneData applies one child update's actions to the zone.
 //
-// A change that could not be persisted is reported as not applied (updated
-// false), never as applied: on the DSYNC API path "applied" is answered 200,
-// which is precisely the promise the persistence work exists to keep. The
-// publish used to run from a defer, and the results are named from the time
-// when that defer had to reach them.
+// A change that could not be persisted is an error, never "applied": on the
+// DSYNC API path "applied" is answered 200, which is precisely the promise the
+// persistence work exists to keep.
 func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (updated bool, err error) {
 
 	lg.Debug("ApplyChildUpdateToZoneData", "request", fmt.Sprintf("%+v", ur))
@@ -824,8 +823,14 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 	var persistErr error
 	updated, persistErr, err = zd.stageAndPublishLocked(ur, func() bool { return zd.stageChildUpdateLocked(ur, dak) })
 	if persistErr != nil {
+		// An error, not just updated=false: the direct backend, this
+		// applier's caller, reads only the error, and the ZoneUpdater would
+		// answer the child's DSYNC API or RFC 2136 request with success for a
+		// change the zone neither serves nor saved.
 		lg.Error("child update not applied: could not persist the change",
 			"zone", zd.ZoneName, "error", persistErr)
+		err = fmt.Errorf("zone %s: child update not applied: could not persist the change: %w",
+			zd.ZoneName, persistErr)
 	}
 	return updated, err
 }
@@ -1494,6 +1499,28 @@ func (zd *ZoneData) withLock(fn func() error) error {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 	return fn()
+}
+
+// withLockPublishing is withLock for an fn that may publish on the ZoneUpdater's
+// goroutine, where a panic is recovered: a panic in fn is handled as a publish
+// that panicked (publishPanickedLocked) before the lock is released and the
+// panic goes on.
+//
+// Only this goroutine's publishes are guarded. StageBatch, the publisher, and
+// the refresh and signing engines publish on goroutines that are not the
+// ZoneUpdater's; this change does not touch what a panic does there.
+func (zd *ZoneData) withLockPublishing(fn func() error) error {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	done := false
+	defer func() {
+		if !done {
+			zd.publishPanickedLocked()
+		}
+	}()
+	err := fn()
+	done = true
+	return err
 }
 
 // unifyRRsetTTL sets the TTL of every RR in rrs to ttl, so the RRset obeys

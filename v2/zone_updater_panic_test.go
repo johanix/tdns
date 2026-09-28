@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -228,6 +229,94 @@ func TestPublishThatPanicsDropsTheWorkingSetAndFlagsTheZone(t *testing.T) {
 	zd.reconcileZoneFileWithJournal(ZoneFileUnchanged, nil, nil)
 	if zd.HasError(PublishError) {
 		t.Error("PublishError survived a reconcile with the journal")
+	}
+}
+
+// A TX-COMMIT that publishes, and panics in the publish, is cleaned up like an
+// applier's publish: the zone is not left locked, what the transaction staged
+// is dropped rather than left to go out with a later publish, and the zone
+// carries a PublishError.
+func TestTxCommitWhosePublishPanicsIsCleanedUp(t *testing.T) {
+	zd, kdb := panicTestZone(t)
+	broken := privateTestRR(t, "PANICTEXT", typePANICTEXT, func() dns.PrivateRdata { return new(panicTextRdata) }, "broken.example.")
+	ctx := context.Background()
+
+	// Urgent, so that the commit publishes on the updater's goroutine rather
+	// than through the gate.
+	if stop := kdb.applyUpdate(ctx, UpdateRequest{Cmd: UpdateCmdTxBegin, ZoneName: "example.", TxID: "t1", TxFlags: TxUrgent}); stop {
+		t.Fatal("the updater was told to stop on a TX-BEGIN")
+	}
+	// What a writer leaves staged under the hold: its own publish was stopped
+	// by the hold, with the change and its journal flag still staged.
+	zd.mu.Lock()
+	zd.stageRRsetLocked("broken.example.", core.RRset{Name: "broken.example.", RRtype: typePANICTEXT,
+		Class: dns.ClassINET, RRs: []dns.RR{broken}})
+	zd.wsPersistDelta = true
+	zd.mu.Unlock()
+
+	resp := make(chan ZoneUpdateResult, 1)
+	if stop := kdb.applyUpdate(ctx, UpdateRequest{Cmd: UpdateCmdTxCommit, ZoneName: "example.", TxID: "t1", Resp: resp}); stop {
+		t.Fatal("the updater was told to stop after a TX-COMMIT panicked")
+	}
+
+	select {
+	case res := <-resp:
+		if res.Applied || res.Err == nil {
+			t.Errorf("answer %+v, want the commit failed", res)
+		}
+	default:
+		t.Error("the commit whose publish panicked got no answer")
+	}
+	if !zd.mu.TryLock() {
+		t.Fatal("the zone is still locked after the commit's publish panicked")
+	}
+	staged := zd.workingSet != nil
+	zd.mu.Unlock()
+	if staged {
+		t.Error("what the transaction staged was kept, for a later publish to send")
+	}
+	if !zd.HasError(PublishError) {
+		t.Error("no PublishError on a zone whose commit publish panicked")
+	}
+}
+
+// panicSiteForEndTxTest is where the panic in TestEndTxKeepsThePanicSiteOnTheStack
+// starts. Not inlined, so that it is a frame of its own.
+//
+//go:noinline
+func panicSiteForEndTxTest() { panic(updatePanicMsg) }
+
+// endTx recovers, rolls back and panics again. The ZoneUpdater's recover logs
+// the stack, and it must still show where the panic started, not only endTx:
+// the frames of the first panic are still on the stack when the second begins.
+func TestEndTxKeepsThePanicSiteOnTheStack(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	var stack string
+	func() {
+		defer func() {
+			if recover() != nil {
+				stack = string(debug.Stack())
+			}
+		}()
+		_ = func() (err error) {
+			tx, err := kdb.Begin("endTx stack test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer endTx(tx, &err)
+			panicSiteForEndTxTest()
+			return nil
+		}()
+	}()
+
+	if !strings.Contains(stack, "endTx") || !strings.Contains(stack, "panicSiteForEndTxTest") {
+		t.Errorf("the stack after endTx's panic does not show both endTx and where the panic started:\n%s", stack)
+	}
+	kdb.mu.Lock()
+	open := kdb.Ctx
+	kdb.mu.Unlock()
+	if open != "" {
+		t.Errorf("KeyDB transaction %q still open after endTx", open)
 	}
 }
 

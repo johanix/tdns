@@ -384,6 +384,9 @@ func aAddrs(t *testing.T, zd *ZoneData, owner string) []string {
 // on a local the caller never saw. A child update that could not be made
 // durable was reported as applied -- and on the DSYNC API path, answered 200,
 // which is exactly the promise this persistence work exists to keep.
+//
+// updated=false alone was not enough either: the direct backend, the child
+// applier's caller, reads only the error. The failure is an error now.
 func TestChildUpdatePersistFailureRefusesPublish(t *testing.T) {
 	kdb := newTestKeyDB(t)
 
@@ -420,8 +423,10 @@ func TestChildUpdatePersistFailureRefusesPublish(t *testing.T) {
 	updated, err := zd.ApplyChildUpdateToZoneData(UpdateRequest{
 		Cmd: "CHILD-UPDATE", ZoneName: "example.", Actions: []dns.RR{ns},
 	}, kdb)
-	if err != nil {
-		t.Fatalf("ApplyChildUpdateToZoneData: %v", err)
+	// An error, not only updated=false: the direct backend reads only the
+	// error, and would have answered the child with success.
+	if err == nil || !strings.Contains(err.Error(), "could not persist") {
+		t.Errorf("err = %v, want the persist failure as an error", err)
 	}
 	if updated {
 		t.Error("updated=true despite the publish being refused -- the deferred" +
