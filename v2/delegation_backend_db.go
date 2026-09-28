@@ -36,7 +36,7 @@ func (b *DBDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateReque
 	// The named return is what makes a failed commit the caller's error
 	// rather than a log line. Acceptance means recorded (design D-2): a
 	// child must not hear NOERROR for a change the store did not keep.
-	defer func() { err = finishTx(tx, err) }()
+	defer endTx(tx, &err)
 
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
@@ -141,7 +141,7 @@ func (b *DBDelegationBackend) AdoptChildDelegation(parentZone, childZone string,
 	if err != nil {
 		return 0, err
 	}
-	defer func() { err = finishTx(tx, err) }()
+	defer endTx(tx, &err)
 
 	var existing int
 	if err = tx.QueryRow(countsql, parentZone, childZone).Scan(&existing); err != nil {
@@ -179,6 +179,26 @@ func finishTx(tx *Tx, err error) error {
 		return fmt.Errorf("committing the delegation store: %w", cerr)
 	}
 	return nil
+}
+
+// endTx is finishTx for a defer: deferred right after the transaction begins,
+// with the function's named error, it ends the transaction by the outcome the
+// function returns with.
+//
+// And by a panic. While one unwinds, the named error is still nil, so a
+// deferred finishTx COMMITTED the actions applied before it: half a child's
+// update, durable, just before the process died (#808). endTx rolls back and
+// lets the panic go on, to the ZoneUpdater's recover. Re-panicking from here
+// keeps the frames of the original panic on the stack, so the recover still
+// logs where it came from.
+func endTx(tx *Tx, errp *error) {
+	if rec := recover(); rec != nil {
+		if rerr := tx.Rollback(); rerr != nil {
+			lg.Error("DBDelegationBackend: tx.Rollback after a panic failed", "error", rerr)
+		}
+		panic(rec)
+	}
+	*errp = finishTx(tx, *errp)
 }
 
 // delegationOrigins reports where each stored RR for a child came from,

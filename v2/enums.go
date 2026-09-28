@@ -406,6 +406,14 @@ const (
 	// that carries DnssecError. Cleared by the publish that installs the first
 	// snapshot.
 	FirstPublishError
+	// PublishError: a publish of the zone panicked part-way, and the
+	// ZoneUpdater recovered (#808). The zone still serves its last published
+	// content, but the publish may already have written its change to the
+	// journal, so what the zone serves may disagree with what a reload or a
+	// restart would give it. Visibility-only. Cleared when a reload reconciles
+	// the zone file with the journal (reconcileZoneFileWithJournal), and not
+	// when that reconcile fails to bring the journal's changes in.
+	PublishError
 )
 
 var ErrorTypeToString = map[ErrorType]string{
@@ -420,6 +428,7 @@ var ErrorTypeToString = map[ErrorType]string{
 	DelegationSyncWarning:   "delegation-sync-warning",
 	ConfigWarning:           "config-warning",
 	FirstPublishError:       "first-publish",
+	PublishError:            "publish",
 }
 
 // errorTypeReportOrder defines the deterministic order in which the
@@ -433,6 +442,7 @@ var errorTypeReportOrder = []ErrorType{
 	AgentError,
 	DnssecError,
 	FirstPublishError,
+	PublishError,
 	RolloverPolicyViolation,
 	RolloverParentBlocker,
 	DnssecPolicyWarning,
