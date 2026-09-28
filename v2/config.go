@@ -429,6 +429,16 @@ type ImrEngineConf struct {
 	// address-family tracking, discovery state, etc.). All fields
 	// are optional in YAML; LoadImrTuningDefaults fills zero values.
 	Tuning ImrTuningConf `yaml:"tuning" mapstructure:"tuning"`
+	// ClientStats: per-client transport counters (imr_client_stats.go).
+	ClientStats ImrClientStatsConf `yaml:"client-stats" mapstructure:"client-stats"`
+}
+
+// ImrClientStatsConf switches the per-client transport counters on. They
+// record client addresses, so they are off by default. They are set up with
+// the listeners, at startup: changing Enabled needs a restart, not a reload.
+type ImrClientStatsConf struct {
+	Enabled    bool `yaml:"enabled" mapstructure:"enabled"`
+	MaxClients int  `yaml:"max-clients" mapstructure:"max-clients"` // 0: DefaultImrClientStatsMax
 }
 
 // ImrTuningConf holds runtime-tunable behaviour knobs for the IMR.
