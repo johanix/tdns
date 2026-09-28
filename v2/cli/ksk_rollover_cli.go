@@ -1182,11 +1182,12 @@ func printStateTable(s *tdns.RolloverStatus) {
 		}
 		left = append(left, kv{"last push:", v})
 	}
-	if s.ExpectedBy != "" {
-		left = append(left, kv{"expected by:", formatRolloverTime(s.ExpectedBy)})
+	now := time.Now()
+	if v, ok := rolloverDeadlineValue(s.ExpectedBy, s.Phase, now); ok {
+		left = append(left, kv{"expected by:", v})
 	}
-	if s.AttemptTimeout != "" {
-		left = append(left, kv{"attempt timeout:", formatRolloverTime(s.AttemptTimeout)})
+	if v, ok := rolloverDeadlineValue(s.AttemptTimeout, s.Phase, now); ok {
+		left = append(left, kv{"attempt timeout:", v})
 	}
 	// Per-scheme lines: DS UPDATE / CDS published / DS observed.
 	// Each is rendered as (kidPart [+timePart]). The bracket parts
@@ -1660,6 +1661,40 @@ func formatRolloverTime(s string) string {
 	default:
 		return fmt.Sprintf("%s (%s ago)", formatted, -delta)
 	}
+}
+
+// rolloverDeadlineValue renders one of the attempt deadlines ("expected by",
+// "attempt timeout") for the status table; ok=false leaves the line out.
+//
+// Both are measured from the start of the last push attempt. A deadline that
+// has not yet come is shown as it always was. One that has passed used to be
+// shown the same way, and read as if the engine were still waiting for it:
+//
+//   - In pending-parent-push no push of the current attempt has been accepted
+//     (the engine is retrying, or has armed a new cycle), so a passed deadline
+//     belongs to an earlier attempt and describes nothing the engine is
+//     waiting for. The line is left out; "last push:" still says when the
+//     last attempt started.
+//   - In any other phase (pending-parent-observe) a passed deadline still
+//     means something -- the parent is late, or the observation is about to
+//     time out -- so it is kept and marked "passed".
+func rolloverDeadlineValue(deadline, phase string, now time.Time) (string, bool) {
+	deadline = strings.TrimSpace(deadline)
+	if deadline == "" {
+		return "", false
+	}
+	t, err := time.Parse(time.RFC3339, deadline)
+	if err != nil || t.After(now) {
+		return formatRolloverTime(deadline), true
+	}
+	if phase == "pending-parent-push" {
+		return "", false
+	}
+	v := formatRolloverTime(deadline)
+	if strings.HasSuffix(v, ")") {
+		return strings.TrimSuffix(v, ")") + ", passed)", true
+	}
+	return v + " (passed)", true
 }
 
 // formatRolloverTimeAbsolute is like formatRolloverTime but adds the
