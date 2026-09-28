@@ -455,6 +455,34 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				resp.Msg = fmt.Sprintf("%s %s", qname, dns.TypeToString[qtype])
 			}
 
+		case "imr-client-stats":
+			// Per-client transport counters. "clients" (addresses or
+			// prefixes) only filters what is returned; "reset" clears the
+			// whole store afterwards, whatever the filter.
+			imr := Globals.ImrEngine
+			if imr == nil || imr.ClientStats == nil {
+				resp.Error = true
+				resp.ErrorMsg = "per-client transport counters are off (imrengine.client-stats.enabled; it takes effect at restart)"
+				return
+			}
+			var specs []string
+			if list, ok := amp.Data["clients"].([]interface{}); ok {
+				for _, v := range list {
+					if s, ok := v.(string); ok {
+						specs = append(specs, s)
+					}
+				}
+			}
+			filter, err := ParseClientFilter(specs)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			reset, _ := amp.Data["reset"].(bool)
+			rep := imr.ClientStats.Snapshot(filter, reset)
+			resp.Data = rep
+
 		case "imr-transport-stats":
 			imr := Globals.ImrEngine
 			if imr == nil || imr.Cache == nil {
