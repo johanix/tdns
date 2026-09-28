@@ -9,7 +9,7 @@ replace (
 	github.com/johanix/tdns/v2/edns0 => ../edns0
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.3
 
 require (
 	github.com/go-sql-driver/mysql v1.9.3
