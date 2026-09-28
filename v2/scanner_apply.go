@@ -73,9 +73,15 @@ func (scanner *Scanner) scanChildAndApply(ctx context.Context, parent *ZoneData,
 	mu.Lock()
 	defer mu.Unlock()
 
+	// A scan that stops before it reads the child is recorded too. The child
+	// that sent the NOTIFY got NOERROR, and "I notified and the parent did
+	// nothing" is what the log is there to answer. A poll's repeats of the same
+	// failure are rate-limited by AddPoll.
 	failed := func(format string, args ...any) ScanTupleResponse {
-		return ScanTupleResponse{Qname: tuple.Zone, ScanType: scanType, Options: tuple.Options,
+		resp := ScanTupleResponse{Qname: tuple.Zone, ScanType: scanType, Options: tuple.Options,
 			Error: true, ErrorMsg: fmt.Sprintf(format, args...)}
+		recordScan(scanSyncLogEvent(parent, scanType, resp, poll != nil), poll != nil)
+		return resp
 	}
 
 	if err := scanner.awaitPendingApply(ctx, tuple.Zone); err != nil {

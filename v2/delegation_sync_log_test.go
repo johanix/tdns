@@ -234,6 +234,50 @@ func TestScanEventsNameTheMechanismAndWhatBecameOfTheChange(t *testing.T) {
 	}
 }
 
+// A scan that stops before it reads the child is in the log: the child that
+// sent the NOTIFY got NOERROR, and without a line the parent would seem to
+// have done nothing. A poll's repeat of the same failure is recorded once.
+func TestScanThatStopsEarlyIsRecorded(t *testing.T) {
+	const child = "unreadable.example."
+	l := withSyncLog(t, 100)
+	zd := trustParent(t, child, trustLax())
+	zd.DelegationBackend = &unreadableBackend{}
+	sc := trustScanner(cdsNet(t, child))
+
+	sc.scanChildAndApply(context.Background(), zd, ScanCDS, ScanTuple{Zone: child}, nil, nil)
+	rep := l.Query(SyncLogQuery{})
+	if len(rep.Events) != 1 {
+		t.Fatalf("%d events for a NOTIFY-started scan of an unreadable delegation, want 1", len(rep.Events))
+	}
+	if ev := rep.Events[0]; ev.Mechanism != SyncMechNotifyCDS || ev.Outcome != SyncNotProcessed ||
+		!strings.Contains(ev.Reason, "cannot read the current delegation") {
+		t.Errorf("event %+v, want NOTIFY(CDS) not processed: cannot read the current delegation", ev)
+	}
+
+	for i := 0; i < 3; i++ {
+		sc.scanChildAndApply(context.Background(), zd, ScanCDS, ScanTuple{Zone: child}, nil, &pollScan{})
+	}
+	rep = l.Query(SyncLogQuery{})
+	if len(rep.Events) != 2 || rep.Events[0].Mechanism != SyncMechScanCDS || rep.Events[0].Outcome != SyncNotProcessed {
+		t.Errorf("after three polls: %+v, want one scan(CDS) not processed line added", rep.Events)
+	}
+
+	// An earlier change to the child still queued: the scan does not run.
+	prev := scanApplyTimeout
+	scanApplyTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { scanApplyTimeout = prev })
+	const other = "queued.example."
+	zd = trustParent(t, other, trustLax())
+	sc = trustScanner(cdsNet(t, other))
+	sc.notePendingApply(other, make(chan ZoneUpdateResult)) // never answered
+	sc.scanChildAndApply(context.Background(), zd, ScanCSYNC, ScanTuple{Zone: other}, nil, nil)
+	rep = l.Query(SyncLogQuery{Child: other})
+	if len(rep.Events) != 1 || rep.Events[0].Mechanism != SyncMechNotifyCSYNC || rep.Events[0].Outcome != SyncNotProcessed ||
+		!strings.Contains(rep.Events[0].Reason, "still queued") {
+		t.Errorf("events %+v, want NOTIFY(CSYNC) not processed: an earlier change still queued", rep.Events)
+	}
+}
+
 // A NOTIFY refused before any scan is recorded, once (review S5).
 func TestRefusedNotifyIsRecorded(t *testing.T) {
 	l := withSyncLog(t, 100)
