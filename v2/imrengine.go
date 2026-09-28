@@ -1821,9 +1821,11 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 	handlers := listenerHandlers(ImrHandler, imr.ClientStats)
 
 	// Create a local ServeMux for ImrEngine to avoid conflicts with other engines.
-	// It truncates oversized UDP answers to the client's buffer size; the
-	// DoT/DoH/DoQ engines below get the unwrapped ImrHandler. UDP and TCP get
-	// muxes of their own only when their handlers differ (the counters are on).
+	// It truncates oversized UDP answers to the client's buffer size. The
+	// DoT/DoH/DoQ engines below get handlers.dot/.doh/.doq without a mux:
+	// ImrHandler itself when the counters are off, its counting wrappers when
+	// they are on. UDP and TCP get muxes of their own only when their handlers
+	// differ (the counters are on).
 	imrMux := newImrDo53Mux(handlers.udp)
 	imrMuxTCP := imrMux
 	if imr.ClientStats != nil {

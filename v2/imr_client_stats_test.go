@@ -128,6 +128,18 @@ func TestParseClientFilter(t *testing.T) {
 	}
 }
 
+// A negative max-clients is a config error, not the default.
+func TestClientStatsConfRefusesANegativeMax(t *testing.T) {
+	for _, tc := range []struct {
+		max int
+		ok  bool
+	}{{0, true}, {10, true}, {-1, false}} {
+		if err := (ImrClientStatsConf{Enabled: true, MaxClients: tc.max}).Validate(); (err == nil) != tc.ok {
+			t.Errorf("max-clients %d: error %v, want ok=%v", tc.max, err, tc.ok)
+		}
+	}
+}
+
 // Off: every listener gets the handler itself, not a wrapper. On: each
 // transport's handler counts into its own column -- DoH by the HTTP peer.
 func TestListenerHandlers(t *testing.T) {

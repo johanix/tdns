@@ -622,6 +622,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return err
 	}
 
+	if err := conf.Imr.ClientStats.Validate(); err != nil {
+		return err
+	}
+
 	if len(md.Unused) > 0 {
 		// Split the unused keys into two buckets: keys that match a known
 		// DEPRECATED/RENAMED config shape (the config lags the code — emit

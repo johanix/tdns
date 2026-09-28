@@ -441,6 +441,15 @@ type ImrClientStatsConf struct {
 	MaxClients int  `yaml:"max-clients" mapstructure:"max-clients"` // 0: DefaultImrClientStatsMax
 }
 
+// Validate refuses a negative max-clients rather than taking it for the
+// default: a sign typo should not quietly become 4096.
+func (c ImrClientStatsConf) Validate() error {
+	if c.MaxClients < 0 {
+		return fmt.Errorf("imrengine.client-stats.max-clients: %d is negative; use 0 for the default (%d)", c.MaxClients, DefaultImrClientStatsMax)
+	}
+	return nil
+}
+
 // ImrTuningConf holds runtime-tunable behaviour knobs for the IMR.
 // Fields are exposed as YAML / mapstructure for config files;
 // LoadImrTuningDefaults fills zero values with sensible defaults so
