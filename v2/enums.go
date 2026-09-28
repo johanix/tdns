@@ -411,7 +411,8 @@ const (
 	// content, but the publish may already have written its change to the
 	// journal, so what the zone serves may disagree with what a reload or a
 	// restart would give it. Visibility-only. Cleared when a reload reconciles
-	// the zone file with the journal (reconcileZoneFileWithJournal).
+	// the zone file with the journal (reconcileZoneFileWithJournal), and not
+	// when that reconcile fails to bring the journal's changes in.
 	PublishError
 )
 

@@ -232,6 +232,39 @@ func TestPublishThatPanicsDropsTheWorkingSetAndFlagsTheZone(t *testing.T) {
 	}
 }
 
+// A reconcile that cannot bring the journal in -- its replay or its merge
+// fails -- leaves the zone serving its file without the journal's changes. The
+// zone still disagrees with its journal, so PublishError must stay; the
+// failure's own ConfigWarning says why.
+func TestPublishErrorSurvivesAReconcileThatFails(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		verdict ZoneFileVerdict
+		prev    *ZoneFileIdentity // a CHANGED verdict comes with the previous file's identity
+	}{
+		{"replay", ZoneFileUnchanged, nil},
+		{"merge", ZoneFileChanged, &ZoneFileIdentity{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zd, kdb := panicTestZone(t)
+			zd.SetError(PublishError, "a publish of the zone failed part-way")
+			// A keystore that cannot be read: the journal cannot be brought in.
+			if err := kdb.DB.Close(); err != nil {
+				t.Fatalf("closing test db: %v", err)
+			}
+
+			zd.reconcileZoneFileWithJournal(tc.verdict, tc.prev, nil)
+
+			if !zd.HasError(ConfigWarning) {
+				t.Fatal("the reconcile did not fail; the test no longer reaches the case it is for")
+			}
+			if !zd.HasError(PublishError) {
+				t.Error("PublishError was cleared by a reconcile that could not bring the journal in")
+			}
+		})
+	}
+}
+
 // A TX-COMMIT that publishes, and panics in the publish, is cleaned up like an
 // applier's publish: the zone is not left locked, what the transaction staged
 // is dropped rather than left to go out with a later publish, and the zone

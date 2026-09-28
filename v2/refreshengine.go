@@ -507,10 +507,14 @@ func (zd *ZoneData) reconcileZoneFileWithJournal(verdict ZoneFileVerdict, prev *
 		return
 	}
 	// The zone's content has just been read afresh, and this settles it with
-	// the journal: whatever a publish that panicked left between the two is
-	// gone once it returns, whichever way it returns (PublishError).
+	// the journal, so whatever a publish that panicked left between the two is
+	// gone (PublishError). Unless the journal could not be brought in: a merge
+	// or a replay that failed leaves the zone serving its file without the
+	// journal's changes, and says so in a ConfigWarning of its own. The zone
+	// then still disagrees with its journal, and PublishError stays.
+	reconciled := true
 	defer func() {
-		if zd.HasError(PublishError) {
+		if reconciled && zd.HasError(PublishError) {
 			zd.ClearError(PublishError)
 		}
 	}()
@@ -606,6 +610,7 @@ func (zd *ZoneData) reconcileZoneFileWithJournal(verdict ZoneFileVerdict, prev *
 				"zone", zd.ZoneName, "error", merr)
 			zd.SetError(ConfigWarning,
 				"zone file changed and its deltas could not be merged: %v", merr)
+			reconciled = false
 			return
 		}
 		if merr != nil {
@@ -673,6 +678,7 @@ func (zd *ZoneData) reconcileZoneFileWithJournal(verdict ZoneFileVerdict, prev *
 			"zone", zd.ZoneName, "error", err)
 		zd.SetError(ConfigWarning,
 			"persisted zone deltas could not be replayed; serving the zone file alone: %v", err)
+		reconciled = false
 		return
 	}
 	recordFileIdentity()
