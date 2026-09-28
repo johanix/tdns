@@ -1034,10 +1034,13 @@ func printZoneGlobalHeader(s *tdns.RolloverStatus, verbose bool) {
 			printed = true
 			continue
 		}
-		// Describe the count as published ZSKs (the live keys in the DNSKEY RRset).
+		// Name what is counted: the live ZSKs, i.e. standby, active and
+		// retired (zskAlgRollLiveStates). A key still in state "published"
+		// is not counted, so calling these "published ZSKs" read as if a
+		// just-published new-algorithm key had been missed ("0 of 2").
 		line := fmt.Sprintf("Algorithm rollover: %s %s -> %s  (in progress)", t.Role, t.FromAlg, t.ToAlg)
 		if t.Total > 0 {
-			line += fmt.Sprintf(", %d of %d published ZSKs on new algorithm", t.Done, t.Total)
+			line += fmt.Sprintf(", %d of %d live ZSKs (standby/active/retired) on new algorithm", t.Done, t.Total)
 		}
 		fmt.Println(line)
 		printed = true
