@@ -617,6 +617,19 @@ func TestProxyKeyStatusWaitingPinnedReadyHeading(t *testing.T) {
 	if ready != wantReady {
 		t.Errorf("READY text, no HSYNCPARAM served:\n got %q\nwant %q", ready, wantReady)
 	}
+
+	// The apex serves an HSYNCPARAM, but not this one (pubcds, no pubkey). Its
+	// TTL says nothing about the record the report prints, so that record
+	// carries no TTL, the same as when there is no HSYNCPARAM at all.
+	other := proxyUpdZoneData(t, kdb, proxyUpdBaseZone()+servedKey.String()+"\n"+
+		proxyUpdZone+"\t300\tIN\tHSYNCPARAM\tpubcds\n")
+	ready, err = other.proxyKeyStatusMessage(ProxyUpdateReady, kdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready != wantReady {
+		t.Errorf("READY text, a different HSYNCPARAM served:\n got %q\nwant %q", ready, wantReady)
+	}
 }
 
 // genForeignProxyKey mints a KEY RR at the proxy test zone's apex whose private

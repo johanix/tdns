@@ -332,8 +332,8 @@ const (
 // the TTL the zone serves it with, as the agent sees it in its copy of the
 // zone, not the TTL of the agent's own template (3600): printing the template
 // claimed the primary served the records at 3600 when it served them at, say,
-// 300. A record not found at the apex has no served TTL to show, and is
-// printed without one.
+// 300. A record the apex does not serve -- no record there with the same
+// RDATA -- has no served TTL to show, and is printed without one.
 func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string, served bool) (string, error) {
 	keyRR, err := zd.proxyAgentKeyRR(kdb)
 	if err != nil {
@@ -350,7 +350,7 @@ func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string, serve
 	if served {
 		ttl, ok := zd.proxyServedKeyTTL(keyRR)
 		keyLine = rrTextWithTTL(keyLine, ttl, ok)
-		ttl, ok = zd.apexRRsetTTL(core.TypeHSYNCPARAM)
+		ttl, ok = zd.proxyServedHsyncparamTTL()
 		hsyncLine = rrTextWithTTL(hsyncLine, ttl, ok)
 		unknown = rrTextWithTTL(unknown, ttl, ok)
 	}
@@ -367,25 +367,42 @@ record in RFC 3597 form:
 }
 
 // proxyServedKeyTTL returns the TTL of the apex KEY that is the agent's key
-// (same key tag and algorithm), as served in the zone.
+// (same RDATA), as served in the zone.
 func (zd *ZoneData) proxyServedKeyTTL(ours *dns.KEY) (uint32, bool) {
 	for _, rr := range zd.proxyApexKEYs() {
-		k, ok := rr.(*dns.KEY)
-		if ok && k.Algorithm == ours.Algorithm && k.KeyTag() == ours.KeyTag() {
+		if k, ok := rr.(*dns.KEY); ok && sameKeyRdata(k, ours) {
 			return k.Hdr.Ttl, true
 		}
 	}
 	return 0, false
 }
 
-// apexRRsetTTL returns the TTL of the apex RRset of rrtype, as served in the
-// zone.
-func (zd *ZoneData) apexRRsetTTL(rrtype uint16) (uint32, bool) {
-	rrs := zd.apexRRs(rrtype)
-	if len(rrs) == 0 {
+// proxyServedHsyncparamTTL returns the TTL of the apex HSYNCPARAM that is the
+// record the report prints (the pubkey flag, proxyHsyncparamPubkeyRR), as
+// served in the zone. An HSYNCPARAM with other contents says nothing about
+// how the primary serves this one, so its TTL is not borrowed.
+func (zd *ZoneData) proxyServedHsyncparamTTL() (uint32, bool) {
+	ours, err := dns.NewRR(zd.proxyHsyncparamPubkeyRR())
+	if err != nil {
 		return 0, false
 	}
-	return rrs[0].Header().Ttl, true
+	for _, rr := range zd.apexRRs(core.TypeHSYNCPARAM) {
+		if sameRdata(rr, ours) {
+			return rr.Header().Ttl, true
+		}
+	}
+	return 0, false
+}
+
+// sameRdata reports whether two records carry the same RDATA, compared in
+// wire form. dns.IsDuplicate cannot be used here: it never matches a private
+// type such as HSYNCPARAM.
+func sameRdata(a, b dns.RR) bool {
+	ua, ub := new(dns.RFC3597), new(dns.RFC3597)
+	if ua.ToRFC3597(a) != nil || ub.ToRFC3597(b) != nil {
+		return false
+	}
+	return ua.Hdr.Rrtype == ub.Hdr.Rrtype && ua.Rdata == ub.Rdata
 }
 
 // rrTextWithTTL rewrites the TTL field of one record in tab-separated
