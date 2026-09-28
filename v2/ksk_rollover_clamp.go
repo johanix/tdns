@@ -33,8 +33,9 @@ func ClampedDuration(configured, R, margin time.Duration) time.Duration {
 //     ttls.max-served; ceiling = MaxServedTTL.
 //
 // SignRRset takes the minimum of (UnclampedTTL, K*Margin if K>0,
-// MaxServedTTL if >0) and writes that to every RR header TTL before
-// generating the RRSIG.
+// MaxServedTTL if >0) and signs the RRset at that TTL. RRs whose TTL must
+// change are replaced by copies in a new slice (applyClampToRRset); the
+// caller's RRs are never written (#797).
 //
 // nil means no clamp at all (zone has clamping.enabled: false AND no
 // max-served set AND no rollover scheduled).
