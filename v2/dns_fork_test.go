@@ -124,21 +124,39 @@ func TestEveryLiveModuleUsesTheDNSFork(t *testing.T) {
 // of DNSKEYs from other zones, so such a key is attacker-controlled input.
 // .3 guards the slice and gives the key tag 0.
 func TestKeyTagDoesNotPanicOnAShortRSAMD5Key(t *testing.T) {
-	for _, key := range []string{"AAA=", "AA==", "AAAA"} { // 2, 1 and 3 bytes
-		rr, err := dns.NewRR("example. 3600 IN DNSKEY 257 3 1 " + key)
+	// The RSAMD5 tag is the big-endian uint16 at modulus[len-3:len-1]
+	// (RFC 4034 B.1). A key shorter than 3 bytes has no tag and gets 0.
+	for _, tc := range []struct {
+		key string
+		tag uint16
+	}{
+		{"AA==", 0},          // 1 byte
+		{"AAA=", 0},          // 2 bytes: panicked in .2
+		{"AAAA", 0},          // 3 zero bytes
+		{"AQID", 0x0102},     // 3 bytes 01 02 03
+		{"AQIDBA==", 0x0203}, // 4 bytes 01 02 03 04
+	} {
+		rr, err := dns.NewRR("example. 3600 IN DNSKEY 257 3 1 " + tc.key)
 		if err != nil {
-			t.Fatalf("parsing the DNSKEY with key %q: %v", key, err)
+			t.Fatalf("parsing the DNSKEY with key %q: %v", tc.key, err)
 		}
 		k := rr.(*dns.DNSKEY)
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					t.Errorf("key %q: KeyTag or ToDS panicked: %v", key, r)
+					t.Errorf("key %q: KeyTag or ToDS panicked: %v", tc.key, r)
 				}
 			}()
-			tag := k.KeyTag()
-			if ds := k.ToDS(dns.SHA256); ds != nil && ds.KeyTag != tag {
-				t.Errorf("key %q: DS key tag %d, DNSKEY key tag %d", key, ds.KeyTag, tag)
+			if got := k.KeyTag(); got != tc.tag {
+				t.Errorf("key %q: KeyTag() = %d, want %d", tc.key, got, tc.tag)
+			}
+			ds := k.ToDS(dns.SHA256)
+			if ds == nil {
+				t.Errorf("key %q: ToDS returned nil", tc.key)
+				return
+			}
+			if ds.KeyTag != tc.tag {
+				t.Errorf("key %q: DS key tag %d, want %d", tc.key, ds.KeyTag, tc.tag)
 			}
 		}()
 	}
