@@ -19,6 +19,7 @@ module_policy_pass_deny.rpl            Knot Resolver module
 module_policy_tc.rpl                   Knot Resolver module
 module_renumber.rpl                    Knot Resolver module
 module_workarounds_disable_0x20.rpl    Knot Resolver module
+iter_unexpectedrrtype.rpl              reply answers only another type: tdns-imr rejects it and tries other servers (SERVFAIL); the scenario expects scrubbing to NODATA
 val_ta_sentinel_insecure.rpl           QNAME minimisation on: tdns-imr has none
 world_cz_lidovky_www.rpl               negative trust anchor, and no stub-addr to template root hints from
 world_mx_nic_www.rpl                   negative trust anchor: tdns-imr has none

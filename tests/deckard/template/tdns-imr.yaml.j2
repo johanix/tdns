@@ -31,3 +31,8 @@ apiserver:
 log:
    file:  "{{WORKING_DIR}}/tdns-imr.log"
    level: debug
+   # log.level alone raises no subsystem logger; the resolver logs as
+   # "engine" (imrengine.go) and "dns" (dnslookup.go).
+   subsystems:
+      engine: debug
+      dns:    debug
