@@ -104,6 +104,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 		RRsets:               core.NewCmap[CachedRRset](),
 		Servers:              core.NewNameMap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
 		ServerMap:            core.NewNameMap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
+		stubZones:            core.NewNameMap[struct{}](),               // the zones AddStub stored a server map for
 		AuthServerMap:        core.NewNameMap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 		ZoneMap:              core.NewNameMap[*Zone](),                  // zone -> *Zone
 		ServerTLSA:           core.NewNameMap[*ServerTLSARecords](),     // nsname -> validated TLSA cache
@@ -137,11 +138,15 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 		}
 		// If an NS RRset expired, also remove its server mappings for that
 		// zone, unless the operator configured them (keepsServerMap)
-		if qtype == dns.TypeNS && !rrcache.keepsServerMap(qname) {
-			rrcache.ServerMap.Remove(qname)
-			if rrcache.Debug {
-				log.Printf("RRsetCache: Removed ServerMap entry for zone %s due to NS expiry", qname)
+		if qtype == dns.TypeNS {
+			rrcache.serverMapMu.Lock()
+			if !rrcache.keepsServerMap(qname) {
+				rrcache.ServerMap.Remove(qname)
+				if rrcache.Debug {
+					log.Printf("RRsetCache: Removed ServerMap entry for zone %s due to NS expiry", qname)
+				}
 			}
+			rrcache.serverMapMu.Unlock()
 		}
 		return nil
 	}
@@ -246,9 +251,10 @@ func (rrcache *RRsetCacheT) evictOldestRRset() {
 }
 
 // keepsServerMap reports whether zone's server map is configuration, which a
-// flush and an NS expiry leave alone: that of a configured stub (StubZone).
+// flush and an NS expiry leave alone: a stub's (stubZones). The caller holds
+// serverMapMu from the check until the delete it decides.
 func (rrcache *RRsetCacheT) keepsServerMap(zone string) bool {
-	return rrcache.StubZone != nil && rrcache.StubZone(zone)
+	return rrcache.stubZones.Has(zone)
 }
 
 // FlushDomain removes cached RRsets at or below the provided domain.
@@ -320,6 +326,7 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 			rrcache.Servers.Remove(key)
 		}
 		auxKeys = auxKeys[:0]
+		rrcache.serverMapMu.Lock()
 		for item := range rrcache.ServerMap.IterBuffered() {
 			if isSubdomainOf(item.Key, domain) && !rrcache.keepsServerMap(item.Key) {
 				auxKeys = append(auxKeys, item.Key)
@@ -328,6 +335,7 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 		for _, key := range auxKeys {
 			rrcache.ServerMap.Remove(key)
 		}
+		rrcache.serverMapMu.Unlock()
 	}
 
 	return removed, nil
@@ -395,6 +403,7 @@ func (rrcache *RRsetCacheT) FlushAll() int {
 		rrcache.Servers.Remove(key)
 	}
 	auxKeys = auxKeys[:0]
+	rrcache.serverMapMu.Lock()
 	for item := range rrcache.ServerMap.IterBuffered() {
 		if dns.CanonicalName(item.Key) != "." && !rrcache.keepsServerMap(item.Key) {
 			auxKeys = append(auxKeys, item.Key)
@@ -403,6 +412,7 @@ func (rrcache *RRsetCacheT) FlushAll() int {
 	for _, key := range auxKeys {
 		rrcache.ServerMap.Remove(key)
 	}
+	rrcache.serverMapMu.Unlock()
 
 	rrcache.forgetZoneStates(".")
 
@@ -616,8 +626,19 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 	}
 	rrcache.serverMapMu.Lock()
 	rrcache.ServerMap.Set(zone, authservers)
+	rrcache.stubZones.Set(zone, struct{}{})
 	rrcache.serverMapMu.Unlock()
 	return nil
+}
+
+// RemoveStub drops a stub zone's server map and the record that it is a stub,
+// for a stub the configuration no longer has. Ordinary iteration re-learns the
+// zone's servers from a referral on the next query into it.
+func (rrcache *RRsetCacheT) RemoveStub(zone string) {
+	rrcache.serverMapMu.Lock()
+	rrcache.ServerMap.Remove(zone)
+	rrcache.stubZones.Remove(zone)
+	rrcache.serverMapMu.Unlock()
 }
 
 func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) error {

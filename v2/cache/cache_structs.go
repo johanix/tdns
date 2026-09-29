@@ -82,7 +82,16 @@ type RRsetCacheT struct {
 	// reason. A bare ServerMap.Get is for read-only inspection that stays
 	// local (a status dump, a membership test) and must not escape into a
 	// query — that asymmetry between the accessors, undocumented, is #345.
-	ServerMap     *core.NameMap[map[string]*AuthServer]
+	ServerMap *core.NameMap[map[string]*AuthServer]
+	// stubZones names the zones whose server map AddStub stored. That map is
+	// configuration, where every other zone's is learned from referrals: a
+	// flush and the expiry of the zone's NS RRset leave it in place
+	// (keepsServerMap). Dropping it lost the stub for good, while the stub
+	// still kept its names from any forward above it (#832). AddStub records a
+	// zone here in the same step as it stores the map, and RemoveStub forgets
+	// both, holding serverMapMu. The flushes check and delete under it too, so
+	// none of them can delete a stub stored after its check.
+	stubZones     *core.NameMap[struct{}]
 	AuthServerMap *core.NameMap[*AuthServer]        // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 	ZoneMap       *core.NameMap[*Zone]              // map[zone]*Zone
 	ServerTLSA    *core.NameMap[*ServerTLSARecords] // nsname -> validated TLSA cache, decoupled from AuthServer instances
@@ -100,13 +109,6 @@ type RRsetCacheT struct {
 	// fetcher without any, and the fetcher forwards it (ServersFor). Nil only
 	// in a cache that no resolver is attached to, which forwards nothing.
 	Forwarded func(name string, qtype uint16) bool
-	// StubZone reports whether a name is a configured stub zone. Its server map
-	// is configuration, put there by AddStub, where every other zone's is
-	// learned from referrals: a flush and the expiry of the zone's NS RRset
-	// leave it in place (keepsServerMap). Dropping it lost the stub for good,
-	// while the stub still kept its names from any forward above it (#832).
-	// Nil only in a cache that no resolver is attached to, which has no stubs.
-	StubZone func(name string) bool
 	//Options                map[ImrOption]string
 	Primed               bool
 	Logger               *log.Logger
@@ -116,7 +118,7 @@ type RRsetCacheT struct {
 	Quiet                bool // if true, suppress informational logging (useful for CLI tools)
 	nsRevalidateMu       sync.Mutex
 	nsRevalidateInFlight map[string]struct{}
-	serverMapMu          sync.Mutex // serializes the ServerMap writers; see ServerMap
+	serverMapMu          sync.Mutex // serializes the ServerMap writers; see ServerMap and stubZones
 }
 
 // ServerTLSARecords is the validated TLSA cache for one nameserver, keyed by

@@ -19,6 +19,11 @@ import (
 // it (#832). Each of the three places that drop server maps -- a domain flush,
 // a full flush and the expiry of a zone's NS RRset -- must leave it alone, and
 // must still drop a learned one beside it.
+//
+// The cache knows the zone is a stub from AddStub alone, with no resolver and
+// no zone table attached. It once asked the resolver's table, which a reload
+// publishes only after AddStub has stored the servers: a flush in between
+// deleted them (CodeRabbit on #833).
 func TestConfiguredStubServerMapIsKept(t *testing.T) {
 	const (
 		stub    = "kid.parent.example."
@@ -27,7 +32,6 @@ func TestConfiguredStubServerMapIsKept(t *testing.T) {
 	mk := func(t *testing.T) *RRsetCacheT {
 		t.Helper()
 		c := NewRRsetCache(log.New(io.Discard, "", 0), false, false)
-		c.StubZone = func(name string) bool { return core.EqualNames(name, stub) }
 		if err := c.AddStub(stub, []AuthServer{{Name: "ns." + stub, Addrs: []string{"192.0.2.53"}}}); err != nil {
 			t.Fatalf("AddStub: %v", err)
 		}
@@ -93,14 +97,22 @@ func TestConfiguredStubServerMapIsKept(t *testing.T) {
 		requireMaps(t, c, "the expiry of the zone's NS RRset")
 	})
 
-	t.Run("no resolver attached", func(t *testing.T) {
+	t.Run("RemoveStub", func(t *testing.T) {
 		c := mk(t)
-		c.StubZone = nil
-		if _, err := c.FlushDomain(stub, false); err != nil {
-			t.Fatalf("FlushDomain: %v", err)
-		}
+		c.RemoveStub(stub)
 		if _, ok := c.ServerMap.Get(stub); ok {
-			t.Error("with no StubZone hook, a flush kept a server map: nothing is configuration there")
+			t.Fatal("RemoveStub left the stub's server map")
+		}
+		// No longer a stub: what iteration learns there is flushed like any
+		// other learned map.
+		srv := c.GetOrCreateAuthServer("ns." + stub)
+		srv.AddAddr("192.0.2.55")
+		if err := c.AddServers(stub, map[string]*AuthServer{"ns." + stub: srv}); err != nil {
+			t.Fatalf("AddServers: %v", err)
+		}
+		c.FlushAll()
+		if _, ok := c.ServerMap.Get(stub); ok {
+			t.Error("a flush kept the learned server map of a zone that is no longer a stub")
 		}
 	})
 }

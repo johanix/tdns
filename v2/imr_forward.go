@@ -666,9 +666,10 @@ func (imr *Imr) forwardZoneFor(qname string) *ForwardZone {
 // them a question for a name in the stub goes to the closest cached zone cut
 // above the stub, and under a forwarded root there is none: every lookup ended
 // in `no nameservers for zone ""` (#832). The forward is the better route
-// then. The cache keeps a stub's servers (RRsetCacheT.StubZone), so this is
-// the fallback for a server map lost some other way, or never stored because
-// AddStub refused it. A resolver without a cache keeps the stub's claim.
+// then. The cache keeps the servers AddStub stored through flushes and NS
+// expiry, so this is the fallback for a server map lost some other way, or
+// never stored because AddStub refused it. A resolver without a cache keeps
+// the stub's claim.
 func (imr *Imr) stubServersCached(zone string) bool {
 	if imr.Cache == nil {
 		return true

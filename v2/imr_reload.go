@@ -93,19 +93,12 @@ func (imr *Imr) configuredZone(name string) bool {
 	return slices.ContainsFunc(table.stubs, func(z string) bool { return core.EqualNames(z, name) })
 }
 
-// stubZone reports whether name is a configured stub zone. The cache asks,
-// through RRsetCacheT.StubZone, before it drops a zone's server map.
-func (imr *Imr) stubZone(name string) bool {
-	return slices.ContainsFunc(imr.zoneTable().stubs, func(z string) bool { return core.EqualNames(z, name) })
-}
-
 // attachCacheHooks gives the cache what it needs to know of the zone table:
-// which names are the apex of a configured zone, which are stub zones, and
-// which questions are forwarded. The hooks read the live table on each call,
-// so a reload needs no new ones.
+// which names are the apex of a configured zone, and which questions are
+// forwarded. Both hooks read the live table on each call, so a reload needs no
+// new ones.
 func (imr *Imr) attachCacheHooks() {
 	imr.Cache.ConfiguredZone = imr.configuredZone
-	imr.Cache.StubZone = imr.stubZone
 	imr.Cache.Forwarded = imr.forwarded
 }
 
@@ -243,7 +236,8 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 	// servers have already been dropped. Dropping the ServerMap entry is not
 	// destructive: it is cache, and ordinary iteration re-learns the
 	// delegation on the next query — which is exactly what should happen once
-	// the zone is no longer stubbed.
+	// the zone is no longer stubbed. RemoveStub also tells the cache the zone
+	// is no stub any more, so a flush may drop what iteration learns there.
 	for zone := range old.stubFP {
 		if _, kept := appliedFP[zone]; kept {
 			continue
@@ -256,7 +250,7 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 			lgImr.Warn("stub zone for the root removed from config; keeping its server map (re-priming needs a restart)")
 			continue
 		}
-		imr.Cache.ServerMap.Remove(zone)
+		imr.Cache.RemoveStub(zone)
 	}
 
 	sort.Strings(res.StubsRemoved)
