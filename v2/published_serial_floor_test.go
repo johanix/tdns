@@ -17,7 +17,7 @@ import (
 )
 
 // Tests for the published-serial floor (#655,
-// docs/2026-09-27-published-serial-floor.md).
+// docs/2026-09-27-DONE-published-serial-floor.md).
 
 // psfSOASignatureVerifies reports why the snapshot's apex SOA is not validly
 // signed by one of its own DNSKEYs, or nil when it is.

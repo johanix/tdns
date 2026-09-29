@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// The published-serial floor (#655, docs/2026-09-27-published-serial-floor.md).
+// The published-serial floor (#655, docs/2026-09-27-DONE-published-serial-floor.md).
 //
 // A zone that originates content must never publish, after a restart, a serial
 // at or below one it published before the restart: a secondary holding that
