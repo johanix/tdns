@@ -884,7 +884,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 
 		switch classifyResponse(qname, qtype, r) {
 		case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
-			if cctx, rcode, handled := imr.handleNegative(qname, qtype, r, up.Transport); handled {
+			if cctx, rcode, handled := imr.handleNegative(qname, qtype, r, up.Transport, ""); handled {
 				if fz.TrustAD {
 					imr.applyTrustADToNegative(qname, qtype, r.MsgHdr.AuthenticatedData)
 				}

@@ -1669,7 +1669,11 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				continue
 			}
 
-			if len(r.Ns) != 0 {
+			// A negative answer with an empty authority section (RFC 2308
+			// types 3, and the NODATA form of it) is classified too when it is
+			// authoritative (#830); anything else without an authority section
+			// falls through as before.
+			if len(r.Ns) != 0 || (r.Authoritative && (rcode == dns.RcodeNameError || rcode == dns.RcodeSuccess)) {
 				kind := classifyResponse(qname, qtype, r)
 				lgDns.Debug("IterativeDNSQuery: classified response",
 					"qname", qname, "qtype", dns.TypeToString[qtype],
@@ -1678,7 +1682,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 
 				switch kind {
 				case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
-					if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r, wireTransport); handled {
+					if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r, wireTransport, zoneName); handled {
 						return nil, rcodeNeg, ctxNeg, wireTransport, nil
 					}
 					// If not handled, fall through to try next server
@@ -1690,13 +1694,23 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				case responseKindReferral:
 					// A referral hands the lookup to a zone below the one these
 					// servers serve. An NS RRset for that zone itself, or for
-					// one above it, is not a referral: the server is lame for
-					// the zone, or (with AA set) answering NODATA with the
-					// zone's own NS RRset. Following it would reach the loop
-					// check in handleReferral, which aborts the whole lookup
-					// (#829). Try the next server instead; the fallback below
-					// still resolves the zone's glue-less nameservers.
+					// one above it, is not a referral. Following it would reach
+					// the loop check in handleReferral, which aborts the whole
+					// lookup (#829).
 					if _, refZone, _ := extractReferral(r, qname, qtype); !referralLeavesZone(refZone, zoneName) {
+						// With AA set and the zone's own NS RRset, the server is
+						// answering NODATA without an SOA (#830). A referral
+						// below the zone keeps its meaning even with AA set, as
+						// some servers set it on referrals; NS for a zone above
+						// is an upward referral, and lame whatever the AA bit.
+						if r.Authoritative && rcode == dns.RcodeSuccess && core.EqualNames(refZone, zoneName) {
+							if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r, wireTransport, zoneName); handled {
+								return nil, rcodeNeg, ctxNeg, wireTransport, nil
+							}
+						}
+						// Otherwise the server is lame for the zone: try the
+						// next one. The fallback below still resolves the
+						// zone's glue-less nameservers.
 						lgDns.Debug("IterativeDNSQuery: NS RRset does not lead below the zone being queried;"+
 							" treating the server as lame and trying the next one",
 							"qname", qname, "qtype", dns.TypeToString[qtype],
@@ -3332,9 +3346,17 @@ func classifyResponse(qname string, qtype uint16, r *dns.Msg) responseKind {
 
 	rcode := r.MsgHdr.Rcode
 
-	// No Authority section: can't be a referral or a well-formed negative.
+	// No Authority section: not a referral. An authoritative NXDOMAIN or
+	// NODATA with nothing in authority is still a denial (RFC 2308 section 2.1
+	// type 3, and the NODATA form of it); handleNegative serves it uncached
+	// (#830). Without AA it says nothing.
 	if len(r.Ns) == 0 {
-		if rcode == dns.RcodeSuccess {
+		switch {
+		case r.Authoritative && rcode == dns.RcodeNameError:
+			return responseKindNegativeNXDOMAIN
+		case r.Authoritative && rcode == dns.RcodeSuccess:
+			return responseKindNegativeNoData
+		case rcode == dns.RcodeSuccess:
 			return responseKindUnknown
 		}
 		return responseKindError
@@ -3376,8 +3398,14 @@ func classifyResponse(qname string, qtype uint16, r *dns.Msg) responseKind {
 		if soaSpeaksForQname() {
 			return responseKindNegativeNXDOMAIN
 		}
-		// NXDOMAIN without any SOA should be treated as an error and
-		// the caller will typically try the next server.
+		// An authoritative NXDOMAIN without an SOA is still a denial: RFC 2308
+		// section 2.1 lists it with an empty authority section (type 3) and
+		// with NS records only (type 4). handleNegative serves it without
+		// caching it (#830). Without AA it says nothing, and the caller tries
+		// the next server.
+		if r.Authoritative {
+			return responseKindNegativeNXDOMAIN
+		}
 		return responseKindError
 
 	case dns.RcodeSuccess:
@@ -3430,11 +3458,16 @@ func authorityRRsets(rrs []dns.RR) []*core.RRset {
 	return out
 }
 
-func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport core.Transport) (cache.CacheContext, int, bool) {
+// handleNegative caches a negative answer and reports how it was read.
+//
+// zone is the zone the answering servers serve, when the caller knows it. It is
+// what judges an authoritative denial that carries no SOA (negativeWithoutSOA);
+// without it such a denial is not used.
+func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport core.Transport, zone string) (cache.CacheContext, int, bool) {
 	if r == nil {
 		return cache.ContextFailure, dns.RcodeServerFailure, false
 	}
-	if len(r.Ns) == 0 {
+	if len(r.Ns) == 0 && !r.Authoritative {
 		return cache.ContextFailure, r.MsgHdr.Rcode, false
 	}
 
@@ -3483,6 +3516,9 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	}
 
 	if soarrset == nil || len(soarrset.RRs) == 0 {
+		if r.Authoritative && zone != "" {
+			return imr.negativeWithoutSOA(qname, qtype, r, negContext, zone, transport)
+		}
 		lgDns.Debug("handleNegative: no SOA found in authority for \" \" ()",
 			"qname", qname,
 			"s", dns.TypeToString[qtype],
@@ -3619,6 +3655,42 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	})
 
 	return negContext, int(cachedRcode), true
+}
+
+// negativeWithoutSOA serves an authoritative NXDOMAIN or NODATA that carries no
+// SOA (RFC 2308 section 2.1 types 3 and 4, and the NODATA forms of the same).
+//
+// It is not cached: without an SOA there is no negative TTL, and section 5 says
+// such an answer should not be cached. It is stored already expired, which is
+// what lets this query -- and a CNAME chain it ends -- be answered from it
+// (freshChainGrace), while no later query sees it. Its authority section is not
+// kept: there is no proof in it to serve.
+//
+// With nothing to validate, it gets the verdict unsigned data from zone gets:
+// Insecure outside a zone held Secure, Bogus below one unless an insecure
+// delegation is proven on the way down. A Bogus one is not used, and the caller
+// tries the next server.
+func (imr *Imr) negativeWithoutSOA(qname string, qtype uint16, r *dns.Msg, negContext cache.CacheContext, zone string, transport core.Transport) (cache.CacheContext, int, bool) {
+	vstate := imr.Cache.UnsignedDenialState(context.Background(), zone, qname, qtype, imr.IterativeDNSQueryFetcher())
+	if vstate == cache.ValidationStateBogus {
+		lgDns.Debug("handleNegative: denial without an SOA from a zone that must sign its denials; not used",
+			"qname", qname, "qtype", dns.TypeToString[qtype], "zone", zone,
+			"rcode", dns.RcodeToString[r.MsgHdr.Rcode])
+		return cache.ContextFailure, r.MsgHdr.Rcode, false
+	}
+	imr.Cache.Set(qname, qtype, &cache.CachedRRset{
+		Name:       qname,
+		RRtype:     qtype,
+		Rcode:      uint8(r.MsgHdr.Rcode),
+		Context:    negContext,
+		State:      vstate,
+		Expiration: time.Now(),
+		Transport:  transport,
+	})
+	lgDns.Debug("handleNegative: serving a denial without an SOA, uncached",
+		"qname", qname, "qtype", dns.TypeToString[qtype], "zone", zone,
+		"rcode", dns.RcodeToString[r.MsgHdr.Rcode], "state", cache.ValidationStateToString[vstate])
+	return negContext, r.MsgHdr.Rcode, true
 }
 
 func nsecCoversName(name string, nsec *dns.NSEC) bool {
