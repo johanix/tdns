@@ -9,10 +9,11 @@ replace (
 	github.com/johanix/tdns/v2/edns0 => ../edns0
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.3
 
 require (
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v2/core v0.0.0-00010101000000-000000000000
 	github.com/miekg/dns v1.1.70
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -30,7 +31,6 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-00010101000000-000000000000 // indirect
-	github.com/johanix/tdns/v2/core v0.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect

@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// lifetimeForeverNote is the next-transition note for a transition only a key
+// lifetime would schedule, when that lifetime is "forever".
+const lifetimeForeverNote = "not scheduled (lifetime forever)"
+
 // populateNextTransitions fills NextTransition / NextTransitionAt /
 // NextTransitionNote on every KSK entry in out.KSKs. Best-effort: a
 // missing prerequisite (no active key, no policy, no observation)
@@ -31,6 +35,12 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 		return
 	}
 	lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
+	// "forever" is a large finite sentinel, not zero, so it gets past the
+	// guard above. The engine never schedules a roll on it
+	// (lifetimeSchedulesRoll): the lifetime-driven transitions below happen
+	// only when an operator asks for one (asap). Timing them from the
+	// sentinel printed active_at + 10000h as if it were a real date.
+	scheduled := lifetimeSchedulesRoll(pol.KSK.Lifetime)
 
 	// Anchor: active KSK's active_at. Without it we can't time any
 	// of the standby/active/retired transitions. During a KSK algorithm
@@ -139,6 +149,10 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 				e.NextTransitionNote = "no active key — bootstrap pending"
 				break
 			}
+			if !scheduled {
+				e.NextTransitionNote = lifetimeForeverNote
+				break
+			}
 			if !dnskeyTTLKnown {
 				e.NextTransitionNote = "after first SignZone records DNSKEY TTL"
 				break
@@ -169,6 +183,10 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 			e.NextTransition = "standby → active"
 			if activeAt == nil {
 				e.NextTransitionNote = "no active key — bootstrap pending"
+				break
+			}
+			if !scheduled {
+				e.NextTransitionNote = lifetimeForeverNote
 				break
 			}
 			slot := slotFromKid(dnskeyInZoneKids, e.KeyID) // 1-based; 1 = next-up
@@ -218,6 +236,10 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 				break
 			}
 			e.NextTransition = "active → retired"
+			if !scheduled {
+				e.NextTransitionNote = lifetimeForeverNote
+				break
+			}
 			if activeAt == nil {
 				break
 			}
@@ -427,6 +449,9 @@ func populateZskNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, po
 		return
 	}
 	lifetime := time.Duration(pol.ZSK.Lifetime) * time.Second
+	// "forever" gets past the guard above; the engine never rolls on it
+	// (zskRollDue), so a roll time from it would be a date nothing acts on.
+	scheduled := lifetimeSchedulesRoll(pol.ZSK.Lifetime)
 
 	var activeAt *time.Time
 	for i := range out.ZSKs {
@@ -447,6 +472,11 @@ func populateZskNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, po
 		e := &out.ZSKs[i]
 		switch e.State {
 		case DnskeyStateActive:
+			if !scheduled {
+				e.NextTransition = "ZSK roll (standby → active)"
+				e.NextTransitionNote = lifetimeForeverNote
+				break
+			}
 			if activeAt == nil {
 				e.NextTransitionNote = "no active_at — roll timing unknown"
 				break
@@ -455,6 +485,11 @@ func populateZskNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, po
 			t := activeAt.Add(lifetime)
 			e.NextTransitionAt = t.UTC().Format(time.RFC3339)
 		case DnskeyStateStandby:
+			if !scheduled {
+				e.NextTransition = "promote on ZSK roll"
+				e.NextTransitionNote = lifetimeForeverNote
+				break
+			}
 			if activeAt != nil {
 				e.NextTransition = "promote on ZSK roll"
 				e.NextTransitionAt = activeAt.Add(lifetime).UTC().Format(time.RFC3339)

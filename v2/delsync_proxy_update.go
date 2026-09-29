@@ -90,6 +90,13 @@ func (zd *ZoneData) proxyHoldsPrivateKeyFor(kdb *KeyDB, apexKeys []dns.RR) bool 
 // states and clears it when ready; it never returns a hard error for an
 // operationally-degraded state (only for genuine internal failures).
 func (zd *ZoneData) ProxyUpdatePreconditionCheck(ctx context.Context, kdb *KeyDB, imr *Imr) (ProxyUpdateState, error) {
+	return zd.proxyUpdatePrecondition(ctx, kdb, imr, false)
+}
+
+// proxyUpdatePrecondition is ProxyUpdatePreconditionCheck; report=true runs it
+// for an operator report, without touching the zone's warning or bootstrap
+// flag (see proxySig0PublicationStateFor).
+func (zd *ZoneData) proxyUpdatePrecondition(ctx context.Context, kdb *KeyDB, imr *Imr, report bool) (ProxyUpdateState, error) {
 	// Step 1 (gate): does the parent advertise a DSYNC UPDATE receiver?
 	// LookupDSYNCTarget with SchemeUpdate both detects support and would resolve
 	// the target; here we only need the yes/no. A lookup error or no target ⇒
@@ -101,10 +108,12 @@ func (zd *ZoneData) ProxyUpdatePreconditionCheck(ctx context.Context, kdb *KeyDB
 	if err != nil || target == nil {
 		lgDns.Debug("proxy update precondition: parent advertises no DSYNC UPDATE target",
 			"zone", zd.ZoneName, "err", err)
-		zd.clearProxyUpdateWarning()
+		if !report {
+			zd.clearProxyUpdateWarning()
+		}
 		return ProxyUpdateUnsupported, nil
 	}
-	return zd.proxySig0PublicationState(kdb)
+	return zd.proxySig0PublicationStateFor(kdb, report)
 }
 
 // proxySig0PublicationState is the §10.8 state machine from step 2 onwards: the
@@ -120,40 +129,65 @@ func (zd *ZoneData) ProxyUpdatePreconditionCheck(ctx context.Context, kdb *KeyDB
 // Side-effecting in the WAITING state only: it generates a SIG(0) keypair if
 // the keystore has none, so the operator instruction can be produced.
 func (zd *ZoneData) proxySig0PublicationState(kdb *KeyDB) (ProxyUpdateState, error) {
+	return zd.proxySig0PublicationStateFor(kdb, false)
+}
+
+// proxySig0PublicationStateFor is proxySig0PublicationState with the zone's
+// bookkeeping made optional.
+//
+// report=true is for the parentsync status command (#790), which must show the
+// zone as it is rather than change it. It sets and clears no warning --
+// otherwise the report would rewrite the delegation-sync-warning it is about to
+// print -- and leaves the parent-bootstrap flag alone. It keeps the keygen in
+// WAITING: that is what the agent's next sync does anyway, and without a key
+// the report has no records to tell the operator to publish.
+func (zd *ZoneData) proxySig0PublicationStateFor(kdb *KeyDB, report bool) (ProxyUpdateState, error) {
 	// Step 2: inspect the apex KEY RRset.
 	apexKeys := zd.proxyApexKEYs()
 	if len(apexKeys) > 0 {
 		if zd.proxyHoldsPrivateKeyFor(kdb, apexKeys) {
-			zd.clearProxyUpdateWarning()
-			lgDns.Info("proxy update precondition: ready (KEY at apex, private key held)", "zone", zd.ZoneName)
+			if !report {
+				zd.clearProxyUpdateWarning()
+				lgDns.Info("proxy update precondition: ready (KEY at apex, private key held)", "zone", zd.ZoneName)
+			}
 			return ProxyUpdateReady, nil
 		}
-		zd.proxySig0ParentBootstrapped = false
-		// Foreign KEY: do not mint a competing key; degrade, don't fail.
-		msg := "DSYNC UPDATE proxy not operable: a foreign KEY occupies the apex (no matching private key); NOTIFY proxy may still apply"
-		zd.SetError(DelegationSyncWarning, "%s", msg)
-		lgDns.Warn("proxy update precondition: foreign KEY at apex", "zone", zd.ZoneName)
+		if !report {
+			zd.proxySig0ParentBootstrapped = false
+			// Foreign KEY: do not mint a competing key; degrade, don't fail.
+			msg := "DSYNC UPDATE proxy not operable: a foreign KEY occupies the apex (no matching private key); NOTIFY proxy may still apply"
+			zd.SetError(DelegationSyncWarning, "%s", msg)
+			lgDns.Warn("proxy update precondition: foreign KEY at apex", "zone", zd.ZoneName)
+		}
 		return ProxyUpdateForeignKey, nil
 	}
 
-	zd.proxySig0ParentBootstrapped = false
+	if !report {
+		zd.proxySig0ParentBootstrapped = false
+	}
 
 	// No KEY at the apex: ensure we have a keypair, then instruct the operator.
 	if err := zd.proxyEnsureSig0Key(kdb); err != nil {
 		// Keygen failure is a genuine internal error; still don't take the zone
 		// down — degrade with a warning.
-		msg := fmt.Sprintf("DSYNC UPDATE proxy not operable: failed to prepare SIG(0) key: %v", err)
-		zd.SetError(DelegationSyncWarning, "%s", msg)
+		if !report {
+			msg := fmt.Sprintf("DSYNC UPDATE proxy not operable: failed to prepare SIG(0) key: %v", err)
+			zd.SetError(DelegationSyncWarning, "%s", msg)
+		}
 		lgDns.Error("proxy update precondition: keygen failed", "zone", zd.ZoneName, "err", err)
 		return ProxyUpdateWaiting, err
+	}
+	if report {
+		return ProxyUpdateWaiting, nil
 	}
 	instr, ierr := zd.proxyBootstrapInstruction(kdb)
 	if ierr != nil {
 		lgDns.Error("proxy update precondition: could not build operator instruction", "zone", zd.ZoneName, "err", ierr)
 	}
 	// Name the command that prints the records, with this zone filled in.
-	// It used to point at "keystore dnssec proxy-key", which does not exist.
-	msg := fmt.Sprintf("DSYNC UPDATE proxy waiting: publish the KEY + HSYNCPARAM pubkey at the primary (see log / `tdns-cli agent zone proxy-key -z %s`)", zd.ZoneName)
+	// It used to point at "keystore dnssec proxy-key", which does not exist,
+	// and then at "zone proxy-key", which is now a deprecated alias (#790).
+	msg := fmt.Sprintf("DSYNC UPDATE proxy waiting: publish the KEY + HSYNCPARAM pubkey at the primary (see log / `tdns-cli agent zone parentsync status -z %s`)", zd.ZoneName)
 	zd.SetError(DelegationSyncWarning, "%s", msg)
 	lgDns.Warn("proxy update precondition: waiting for KEY publication at primary",
 		"zone", zd.ZoneName, "instruction", instr)
@@ -280,6 +314,27 @@ func rrToRFC3597(rr dns.RR) (string, error) {
 // Returns ("", nil) when no key has been generated -- the caller says so in
 // its own words, since what that means depends on the state.
 func (zd *ZoneData) proxyKeyPublishBlock(kdb *KeyDB) (string, error) {
+	return zd.proxyKeyPublishBlockHeaded(kdb, proxyPublishHeading, false)
+}
+
+const (
+	proxyPublishHeading = "Records for the primary to serve at the apex:"
+	// In READY the records are already there. They are shown to compare with
+	// what the primary serves, and a heading that tells the operator to serve
+	// them read as if something were still left to do (#790).
+	proxyPublishedHeading = "Published at the primary's apex (for reference):"
+)
+
+// proxyKeyPublishBlockHeaded is proxyKeyPublishBlock under a given heading.
+//
+// served=true is for READY, where the records are already at the primary's
+// apex and are shown to compare with what it serves. There each record carries
+// the TTL the zone serves it with, as the agent sees it in its copy of the
+// zone, not the TTL of the agent's own template (3600): printing the template
+// claimed the primary served the records at 3600 when it served them at, say,
+// 300. A record the apex does not serve -- no record there with the same
+// RDATA -- has no served TTL to show, and is printed without one.
+func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string, served bool) (string, error) {
 	keyRR, err := zd.proxyAgentKeyRR(kdb)
 	if err != nil {
 		return "", err
@@ -291,7 +346,15 @@ func (zd *ZoneData) proxyKeyPublishBlock(kdb *KeyDB) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf(`Records for the primary to serve at the apex:
+	keyLine, hsyncLine := keyRR.String(), zd.proxyHsyncparamPubkeyRR()
+	if served {
+		ttl, ok := zd.proxyServedKeyTTL(keyRR)
+		keyLine = rrTextWithTTL(keyLine, ttl, ok)
+		ttl, ok = zd.proxyServedHsyncparamTTL()
+		hsyncLine = rrTextWithTTL(hsyncLine, ttl, ok)
+		unknown = rrTextWithTTL(unknown, ttl, ok)
+	}
+	return fmt.Sprintf(`%s
 
 %s
 %s
@@ -300,7 +363,61 @@ HSYNCPARAM is a private type (%d). For a primary that cannot parse it, the same
 record in RFC 3597 form:
 
 %s
-`, keyRR.String(), zd.proxyHsyncparamPubkeyRR(), core.TypeHSYNCPARAM, unknown), nil
+`, heading, keyLine, hsyncLine, core.TypeHSYNCPARAM, unknown), nil
+}
+
+// proxyServedKeyTTL returns the TTL of the apex KEY that is the agent's key
+// (same RDATA), as served in the zone.
+func (zd *ZoneData) proxyServedKeyTTL(ours *dns.KEY) (uint32, bool) {
+	for _, rr := range zd.proxyApexKEYs() {
+		if k, ok := rr.(*dns.KEY); ok && sameKeyRdata(k, ours) {
+			return k.Hdr.Ttl, true
+		}
+	}
+	return 0, false
+}
+
+// proxyServedHsyncparamTTL returns the TTL of the apex HSYNCPARAM that is the
+// record the report prints (the pubkey flag, proxyHsyncparamPubkeyRR), as
+// served in the zone. An HSYNCPARAM with other contents says nothing about
+// how the primary serves this one, so its TTL is not borrowed.
+func (zd *ZoneData) proxyServedHsyncparamTTL() (uint32, bool) {
+	ours, err := dns.NewRR(zd.proxyHsyncparamPubkeyRR())
+	if err != nil {
+		return 0, false
+	}
+	for _, rr := range zd.apexRRs(core.TypeHSYNCPARAM) {
+		if sameRdata(rr, ours) {
+			return rr.Header().Ttl, true
+		}
+	}
+	return 0, false
+}
+
+// sameRdata reports whether two records carry the same RDATA, compared in
+// wire form. dns.IsDuplicate cannot be used here: it never matches a private
+// type such as HSYNCPARAM.
+func sameRdata(a, b dns.RR) bool {
+	ua, ub := new(dns.RFC3597), new(dns.RFC3597)
+	if ua.ToRFC3597(a) != nil || ub.ToRFC3597(b) != nil {
+		return false
+	}
+	return ua.Hdr.Rrtype == ub.Hdr.Rrtype && ua.Rdata == ub.Rdata
+}
+
+// rrTextWithTTL rewrites the TTL field of one record in tab-separated
+// presentation form ("owner<TAB>ttl<TAB>..."): to ttl when known, or drops the
+// field when not (a TTL is optional in a zone file). Text of any other shape
+// is returned unchanged.
+func rrTextWithTTL(text string, ttl uint32, known bool) string {
+	f := strings.SplitN(text, "\t", 3)
+	if len(f) != 3 {
+		return text
+	}
+	if !known {
+		return f[0] + "\t" + f[2]
+	}
+	return fmt.Sprintf("%s\t%d\t%s", f[0], ttl, f[2])
 }
 
 // clearProxyUpdateWarning removes any parentsync-proxy UPDATE warning set
@@ -309,24 +426,27 @@ func (zd *ZoneData) clearProxyUpdateWarning() {
 	zd.ClearError(DelegationSyncWarning)
 }
 
-// ProxyKeyStatus is the operator-facing report for the `proxy-key` command: the
-// current UPDATE-proxy state, and the records the operator must serve at the
-// primary apex -- the agent's KEY RR, the HSYNCPARAM pubkey flag, and the
-// HSYNCPARAM in RFC 3597 form.
+// ProxyKeyStatus is the operator-facing report for the deprecated `proxy-key`
+// command: the current UPDATE-proxy state, and the records the operator must
+// serve at the primary apex -- the agent's KEY RR, the HSYNCPARAM pubkey flag,
+// and the HSYNCPARAM in RFC 3597 form. `parentsync status` prints the same text
+// for a parentsync-proxy zone whose parent advertises UPDATE (#790).
 //
 // The records are reported in every state, not only while waiting. READY is
 // the state an operator reads when the primary looks fine and the agent still
 // cannot proxy, and a verdict with no record leaves nothing to compare against
 // what the primary serves.
 //
-// It runs the §10.8 precondition check, which is the only thing here that
-// generates a keypair, and only in the waiting state. Every other state
-// reports the absence of a key rather than filling it.
+// It runs the §10.8 precondition check in report mode: the zone's warning and
+// bootstrap flag are left as they are. The one thing it may change is the
+// keystore -- in the waiting state it generates the agent's keypair if there is
+// none, as the agent's next sync would, so that there are records to print.
+// Every other state reports the absence of a key rather than filling it.
 func (zd *ZoneData) ProxyKeyStatus(ctx context.Context, kdb *KeyDB, imr *Imr) (string, error) {
 	if !zd.Options[OptParentSyncProxy] {
 		return "", fmt.Errorf("zone %s does not have the parentsync-proxy option", zd.ZoneName)
 	}
-	state, err := zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr)
+	state, err := zd.proxyUpdatePrecondition(ctx, kdb, imr, true)
 	if err != nil {
 		return "", err
 	}
@@ -342,7 +462,11 @@ func (zd *ZoneData) ProxyKeyStatus(ctx context.Context, kdb *KeyDB, imr *Imr) (s
 // and no other arm -- which left the assembled text for the three states this
 // change is about untested.
 func (zd *ZoneData) proxyKeyStatusMessage(state ProxyUpdateState, kdb *KeyDB) (string, error) {
-	block, berr := zd.proxyKeyPublishBlock(kdb)
+	heading := proxyPublishHeading
+	if state == ProxyUpdateReady {
+		heading = proxyPublishedHeading
+	}
+	block, berr := zd.proxyKeyPublishBlockHeaded(kdb, heading, state == ProxyUpdateReady)
 	if berr != nil {
 		return "", berr
 	}

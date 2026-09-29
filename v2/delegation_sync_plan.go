@@ -104,6 +104,55 @@ type ParentSyncPlan struct {
 	Validated  bool // the DSYNC RRset itself DNSSEC-validated
 	Candidates []SyncCandidate
 	Skipped    []SkippedScheme
+	// Outcomes is every configured scheme's verdict in the operator's order,
+	// usable and skipped together. Candidates and Skipped split them apart,
+	// which is what the walk needs; the status report needs the order (#790).
+	// A plan that stopped before looking at any scheme (no IMR, no DSYNC
+	// records, nothing configured) has none; its reason is in Skipped as "all".
+	Outcomes []SchemeOutcome
+
+	// report: built for the status command, which must not change the zone.
+	// The proxy UPDATE gate then leaves the zone's warning and bootstrap flag
+	// alone (proxySig0PublicationStateFor).
+	report bool
+	// resolve replaces the IMR address lookup for a DSYNC target. Tests only:
+	// nil means resolveDsyncTarget.
+	resolve func(ctx context.Context, rr *core.DSYNC) (*DsyncTarget, error)
+}
+
+// SchemeOutcome is one configured scheme's verdict.
+type SchemeOutcome struct {
+	Scheme string
+	Usable bool
+	Target *DsyncTarget // set when Usable
+	Reason string       // set when not
+	// Advertised: the parent publishes a usable DSYNC record for the scheme,
+	// whatever happened after that. Lets the report tell "the parent does not
+	// offer it" from "this host cannot use it" without matching on Reason.
+	Advertised bool
+}
+
+// use records a transport that passed its gate.
+func (p *ParentSyncPlan) use(c SyncCandidate) {
+	p.Candidates = append(p.Candidates, c)
+	p.Outcomes = append(p.Outcomes, SchemeOutcome{
+		Scheme: c.Scheme, Usable: true, Target: c.Target, Advertised: true})
+}
+
+// skip records a transport that did not, and why.
+func (p *ParentSyncPlan) skip(scheme, reason string, advertised bool) {
+	p.Skipped = append(p.Skipped, SkippedScheme{Scheme: scheme, Reason: reason})
+	p.Outcomes = append(p.Outcomes, SchemeOutcome{
+		Scheme: scheme, Reason: reason, Advertised: advertised})
+}
+
+// resolveTarget resolves a DSYNC target's addresses through the IMR, or
+// through the test's resolver when one is set.
+func (p *ParentSyncPlan) resolveTarget(ctx context.Context, imr *Imr, rr *core.DSYNC) (*DsyncTarget, error) {
+	if p.resolve != nil {
+		return p.resolve(ctx, rr)
+	}
+	return resolveDsyncTarget(ctx, imr, rr)
 }
 
 // Usable reports whether any transport survived its gate.
@@ -140,8 +189,16 @@ func (p *ParentSyncPlan) Summary() string {
 // discovery failure is returned as an error.
 func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Imr,
 	role SyncRole) (*ParentSyncPlan, error) {
+	return zd.buildParentSyncPlan(ctx, kdb, imr, role, false)
+}
 
-	plan := &ParentSyncPlan{}
+// buildParentSyncPlan is BuildParentSyncPlan, with report set for the status
+// command: the same discovery and the same gates, but nothing on the zone is
+// changed by building it.
+func (zd *ZoneData) buildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Imr,
+	role SyncRole, report bool) (*ParentSyncPlan, error) {
+
+	plan := &ParentSyncPlan{report: report}
 
 	// No IMR means no discovery is possible at all. Not an error: it is how a
 	// zone behaves before the resolver is up, and the caller reports it as the
@@ -167,11 +224,6 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 	if plan.Parent == "" {
 		plan.Parent = dsyncRes.Parent
 	}
-	if len(dsyncRes.Rdata) == 0 {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{
-			Scheme: "all", Reason: fmt.Sprintf("parent %s publishes no DSYNC records", plan.Parent)})
-		return plan, nil
-	}
 
 	// The typed config, not viper. config_delegationsync.go states the rule:
 	// this block is modelled in full and that struct is its only reader, with
@@ -184,11 +236,27 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 	// The failure was total and silent: no schemes meant SkippedScheme{"all"},
 	// an unusable plan, and every configured transport ignored. zone_utils.go
 	// reads the same setting through ParentSyncConfig(); now so does this.
-	schemes := ParentSyncConfig().Schemes
+	zd.evaluateSchemes(ctx, kdb, imr, dsyncRes, ParentSyncConfig().Schemes, plan, role)
+	return plan, nil
+}
+
+// evaluateSchemes runs every configured scheme through its gate against one
+// DSYNC result, recording each verdict in plan.
+//
+// Split from the discovery in buildParentSyncPlan so that a DsyncResult in hand
+// is enough to exercise it: the discovery is network, the decisions are not.
+func (zd *ZoneData) evaluateSchemes(ctx context.Context, kdb *KeyDB, imr *Imr,
+	dsyncRes DsyncResult, schemes []string, plan *ParentSyncPlan, role SyncRole) {
+
+	if len(dsyncRes.Rdata) == 0 {
+		plan.Skipped = append(plan.Skipped, SkippedScheme{
+			Scheme: "all", Reason: fmt.Sprintf("parent %s publishes no DSYNC records", plan.Parent)})
+		return
+	}
 	if len(schemes) == 0 {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{
 			Scheme: "all", Reason: "no schemes configured in parentsync.schemes"})
-		return plan, nil
+		return
 	}
 
 	// Order is the OPERATOR's preference, preserved as configured. The one
@@ -204,11 +272,9 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 		case "notify":
 			zd.planConsiderNotify(ctx, imr, dsyncRes, plan, role)
 		default:
-			plan.Skipped = append(plan.Skipped, SkippedScheme{
-				Scheme: scheme, Reason: "unknown scheme name in parentsync.schemes"})
+			plan.skip(scheme, "unknown scheme name in parentsync.schemes", false)
 		}
 	}
-	return plan, nil
 }
 
 // updateGateBlocked is the one role-dependent gate: whether this host can sign
@@ -228,10 +294,16 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 // The gate that used to sit at the top of the state machine -- "does the parent
 // advertise UPDATE?" -- is the caller's findDsync, so nothing here rediscovers.
 func (zd *ZoneData) updateGateBlocked(kdb *KeyDB, role SyncRole) (string, bool) {
+	return zd.updateGateBlockedFor(kdb, role, false)
+}
+
+// updateGateBlockedFor is updateGateBlocked; report=true asks the question
+// without the bookkeeping (see proxySig0PublicationStateFor).
+func (zd *ZoneData) updateGateBlockedFor(kdb *KeyDB, role SyncRole, report bool) (string, bool) {
 	if role != SyncRoleProxy {
 		return "", false
 	}
-	state, err := zd.proxySig0PublicationState(kdb)
+	state, err := zd.proxySig0PublicationStateFor(kdb, report)
 	if err != nil {
 		return fmt.Sprintf("key state: %v", err), true
 	}
@@ -293,25 +365,25 @@ func (zd *ZoneData) planConsiderUpdate(ctx context.Context, kdb *KeyDB, imr *Imr
 
 	drr := findDsync(res, core.SchemeUpdate, false)
 	if drr == nil {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{"UPDATE", "parent does not advertise it"})
+		plan.skip("UPDATE", "parent does not advertise it", false)
 		return
 	}
-	if reason, blocked := zd.updateGateBlocked(kdb, role); blocked {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{"UPDATE", reason})
+	if reason, blocked := zd.updateGateBlockedFor(kdb, role, plan.report); blocked {
+		plan.skip("UPDATE", reason, true)
 		return
 	}
-	target, terr := resolveDsyncTarget(ctx, imr, drr)
+	target, terr := plan.resolveTarget(ctx, imr, drr)
 	if terr != nil {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{"UPDATE", terr.Error()})
+		plan.skip("UPDATE", terr.Error(), true)
 		return
 	}
-	plan.Candidates = append(plan.Candidates, SyncCandidate{Scheme: "UPDATE", Target: target})
+	plan.use(SyncCandidate{Scheme: "UPDATE", Target: target})
 }
 
 func (zd *ZoneData) planConsiderApi(res DsyncResult, plan *ParentSyncPlan) {
 	drr := findDsync(res, core.SchemeAPI, false)
 	if drr == nil {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{"API", "parent does not advertise it"})
+		plan.skip("API", "parent does not advertise it", false)
 		return
 	}
 	// THE gate that makes API different from the other two, and the one thing
@@ -330,9 +402,8 @@ func (zd *ZoneData) planConsiderApi(res DsyncResult, plan *ParentSyncPlan) {
 	// its own requireDnssec, so one setting governs the whole path rather than
 	// half of it.
 	if !res.Validated && !ParentSyncConfig().Api.AllowInsecure {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{"API",
-			"the DSYNC lookup did not DNSSEC-validate and" +
-				" parentsync.api.allow-insecure is not set"})
+		plan.skip("API", "the DSYNC lookup did not DNSSEC-validate and"+
+			" parentsync.api.allow-insecure is not set", true)
 		return
 	}
 	// The credential arrives out of band by definition (§10), so its absence
@@ -340,15 +411,15 @@ func (zd *ZoneData) planConsiderApi(res DsyncResult, plan *ParentSyncPlan) {
 	// for and nothing to retry.
 	cred, ok := ParentSyncConfig().Api.CredentialForChild(zd.GetParent(), zd.ZoneName)
 	if !ok || !cred.Usable() {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{"API",
-			fmt.Sprintf("no usable credential for parent %s (parentsync.api.credentials)", zd.GetParent())})
+		plan.skip("API", fmt.Sprintf("no usable credential for parent %s (parentsync.api.credentials)",
+			zd.GetParent()), true)
 		return
 	}
 	// No address resolution for API (§16.7): the DSYNC target is a service
 	// description point, and the URI published there names the host that
 	// actually resolves. Requiring A/AAAA here would fail on a CORRECTLY
 	// configured parent.
-	plan.Candidates = append(plan.Candidates, SyncCandidate{
+	plan.use(SyncCandidate{
 		Scheme: "API",
 		Target: &DsyncTarget{Name: drr.Target, Port: drr.Port, RR: drr, Scheme: drr.Scheme},
 	})
@@ -372,7 +443,7 @@ func zoneHasCdsOrCsync(zd *ZoneData) bool {
 func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncResult, plan *ParentSyncPlan, role SyncRole) {
 	drr := findDsync(res, core.SchemeNotify, true)
 	if drr == nil {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{"NOTIFY", "parent does not advertise it"})
+		plan.skip("NOTIFY", "parent does not advertise it", false)
 		return
 	}
 	// THE gate that makes NOTIFY different from the other two. NOTIFY carries
@@ -387,8 +458,7 @@ func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncR
 	// tried. So it is removed from the list, not merely ranked below the
 	// others.
 	if !zoneIsSigned(zd) {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{"NOTIFY",
-			"zone is unsigned; a NOTIFY would leave the parent nothing it can validate"})
+		plan.skip("NOTIFY", "zone is unsigned; a NOTIFY would leave the parent nothing it can validate", true)
 		return
 	}
 	// The other half of the same gate, and the one the proxy actually meets.
@@ -409,16 +479,15 @@ func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncR
 	// is none to point at, so the same test there would only race that
 	// publication.
 	if role == SyncRoleProxy && !zoneHasCdsOrCsync(zd) {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{"NOTIFY",
-			"proxied zone publishes neither CDS nor CSYNC; a NOTIFY would leave the parent nothing to read"})
+		plan.skip("NOTIFY", "proxied zone publishes neither CDS nor CSYNC; a NOTIFY would leave the parent nothing to read", true)
 		return
 	}
-	target, terr := resolveDsyncTarget(ctx, imr, drr)
+	target, terr := plan.resolveTarget(ctx, imr, drr)
 	if terr != nil {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{"NOTIFY", terr.Error()})
+		plan.skip("NOTIFY", terr.Error(), true)
 		return
 	}
-	plan.Candidates = append(plan.Candidates, SyncCandidate{Scheme: "NOTIFY", Target: target})
+	plan.use(SyncCandidate{Scheme: "NOTIFY", Target: target})
 }
 
 // Address resolution for the DNS-carrying schemes reuses resolveDsyncTarget

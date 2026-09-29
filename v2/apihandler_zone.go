@@ -710,7 +710,7 @@ func setZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName str
 	if algChanged {
 		b.WriteString("WARNING: this change has caused multiple signatures on RRsets (new keys+sigs added alongside the old).\n")
 	}
-	fmt.Fprintf(&b, "NOTE #1: update the zone's dnssec_policy in YAML to make %q the permanent policy.", policyName)
+	fmt.Fprintf(&b, "NOTE #1: update the zone's dnssecpolicy in YAML to make %q the permanent policy.", policyName)
 	if algChanged {
 		fmt.Fprintf(&b, "\nNOTE #2: to clean up keys and signatures from the previous policy use \"... keystore dnssec policy-cleanup -z %s\" (note that this may break DNSSEC validation).", zd.ZoneName)
 	}
@@ -888,7 +888,7 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 		b.WriteString("Algorithms unchanged; new policy timings take effect. No algorithm roll is triggered.\n")
 	}
 	b.WriteString("WARNING: the policy change is stored in the keystore, not the zone config.\n")
-	fmt.Fprintf(&b, "NOTE: update the zone's dnssec_policy in YAML to make %q the permanent policy.", policyName)
+	fmt.Fprintf(&b, "NOTE: update the zone's dnssecpolicy in YAML to make %q the permanent policy.", policyName)
 	return b.String(), nil
 }
 
@@ -951,7 +951,7 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	if zoneOwned(zd) {
 		return "", ownedRefusal(zd, "policy-reset")
 	}
-	// Resolve the zone's CONFIG-base policy (its YAML dnssec_policy) — what the
+	// Resolve the zone's CONFIG-base policy (its YAML dnssecpolicy) — what the
 	// zone falls back to once the override + applied records are cleared. Read
 	// the name from Conf.Zones (as the list-zones handler does) and the struct
 	// from the ConfLive() snapshot (lock-free). These guards run for the dry-run
@@ -972,14 +972,14 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	}
 	confMu.RUnlock()
 	if configName == "" {
-		return "", fmt.Errorf("policy-reset: zone %s has no config-base dnssec_policy to reset to (dynamic/API-managed zones are not supported)", zd.ZoneName)
+		return "", fmt.Errorf("policy-reset: zone %s has no config-base dnssecpolicy to reset to (dynamic/API-managed zones are not supported)", zd.ZoneName)
 	}
 	pol, ok := ConfLive().DnssecPolicies[configName]
 	if !ok {
-		return "", fmt.Errorf("policy-reset: config dnssec_policy %q for zone %s does not exist", configName, zd.ZoneName)
+		return "", fmt.Errorf("policy-reset: config dnssecpolicy %q for zone %s does not exist", configName, zd.ZoneName)
 	}
 	if pol.Error != "" {
-		return "", fmt.Errorf("policy-reset: config dnssec_policy %q for zone %s is broken: %s", configName, zd.ZoneName, pol.Error)
+		return "", fmt.Errorf("policy-reset: config dnssecpolicy %q for zone %s is broken: %s", configName, zd.ZoneName, pol.Error)
 	}
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return "", fmt.Errorf("policy-reset: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
@@ -1100,7 +1100,18 @@ var validRollKeyActions = map[string]bool{
 	"update-local": true,
 }
 
+// APIzoneParentSync is APIzoneParentSyncWith without the delegation syncher, so
+// the status report says the parent-vs-zone comparison is not available. Kept
+// for callers built against this signature (tdns-mp registers it).
 func APIzoneParentSync(ctx context.Context, app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+	return APIzoneParentSyncWith(ctx, app, refreshq, kdb, nil)
+}
+
+// APIzoneParentSyncWith serves /zone/parentsync. delsyncq is the delegation
+// syncher's queue; "status" sends it the same DELEGATION-STATUS request that
+// /delegation does for "parentsync delta".
+func APIzoneParentSyncWith(ctx context.Context, app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB,
+	delsyncq chan DelegationSyncRequest) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var req ZoneParentSyncPost
@@ -1147,43 +1158,28 @@ func APIzoneParentSync(ctx context.Context, app *AppDetails, refreshq chan ZoneR
 			return
 		}
 
+		// Every command but status needs the parent up front. Status reports
+		// an unresolvable parent itself -- no IMR, or a discovery that failed
+		// -- and that is the answer an operator asking why a zone cannot sync
+		// came for. A bare handler error in its place told them nothing.
 		var err error
-		parent, err := zd.ResolveParent()
-		if err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Zone %q: %v", zd.ZoneName, err)
-			return
+		if req.Command != "status" {
+			if _, err = zd.ResolveParent(); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Zone %q: %v", zd.ZoneName, err)
+				return
+			}
 		}
 
 		switch req.Command {
 		case "status":
-			keyrrset, err := zd.GetRRset(zd.ZoneName, dns.TypeKEY)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
-				return
-			}
-			resp.Msg = fmt.Sprintf("Zone %s: current delegation sync status", req.Zone)
-			if keyrrset != nil && len(keyrrset.RRs) > 0 {
-				resp.Functions["SIG(0) key publication"] = "done"
-			} else if zd.ZoneType == Secondary {
-				if zd.Options[OptParentSync] {
-					resp.Functions["SIG(0) key publication"] = "not done; KEY record must be added to zone at primary server"
-					// No apex KEY to quote: GetRRset already reported none.
-					resp.Todo = append(resp.Todo, fmt.Sprintf("Add the zone's SIG(0) KEY record to %s at the primary server", zd.ZoneName))
-				} else {
-					resp.Functions["SIG(0) key publication"] = "disabled by policy (parentsync=false)"
-				}
-			} else if zd.ZoneType == Primary {
-				if zd.Options[OptAllowUpdates] {
-					resp.Functions["SIG(0) key publication"] = "failed"
-				} else {
-					resp.Functions["SIG(0) key publication"] = "disabled by policy (allow-updates=false)"
-				}
-			}
-			resp.Functions["Latest delegation sync transaction"] = "successful"
-			resp.Functions["Time of latest delegation sync"] = "2024-05-01 12:00:00"
-			resp.Functions["Current delegation status"] = fmt.Sprintf("parent %q is in sync with %q (the child)", parent, zd.ZoneName)
+			// The whole answer is in Report (#790). Functions stays empty: a
+			// map cannot carry the order the schemes are tried in, and the
+			// three lines it used to carry beyond the KEY check were
+			// hard-coded -- a sync time from 2024 and an unconditional "in
+			// sync" for every zone.
+			resp.Msg = fmt.Sprintf("Zone %s: delegation sync status", zd.ZoneName)
+			resp.Report, resp.Todo = zd.ParentSyncStatus(r.Context(), kdb, Globals.ImrEngine, delsyncq)
 
 		case "bootstrap":
 			switch req.Scheme {

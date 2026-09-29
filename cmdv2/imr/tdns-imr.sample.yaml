@@ -40,6 +40,14 @@ imrengine:
 
    # Optional: path to a root hints file. If empty, uses compiled-in hints.
    root-hints:          "/etc/tdns/root.hints"
+   # Per-client transport counters: for each client address, how many queries
+   # arrived over Do53 (UDP, TCP), DoT, DoQ and DoH, since startup or the last
+   # reset ("tdns-cli imr stats client-stats"). They record client addresses,
+   # never query names, and are off by default. Read at startup: changing
+   # "enabled" needs a restart, not a reload.
+   # client-stats:
+   #    enabled:     false
+   #    max-clients: 4096      # least recently seen evicted into a total
 
    # IMR Options (all are boolean flags, no values needed):
    # - query-for-transport: Query for transport signals opportunistically when observed

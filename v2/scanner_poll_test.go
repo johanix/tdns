@@ -94,10 +94,11 @@ type appliedChanges struct {
 	responses []ScanTupleResponse
 }
 
-func (a *appliedChanges) record(_ string, _ *ZoneData, resp ScanTupleResponse) {
+func (a *appliedChanges) record(_ string, _ *ZoneData, resp ScanTupleResponse) delegationApplyResult {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.responses = append(a.responses, resp)
+	return delegationApplyResult{Applied: true}
 }
 
 func (a *appliedChanges) count(child string, scanType ScanType) int {

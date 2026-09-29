@@ -507,6 +507,76 @@ type ZoneParentSyncResponse struct {
 	KeyState      uint8
 	StateName     string
 	Authenticated bool
+	// Report is the answer to "status" (#790). Functions is left empty for it:
+	// a map cannot carry the order the schemes are tried in.
+	Report *ParentSyncReport `json:",omitempty"`
+}
+
+// ParentSyncReport answers one question for a zone that syncs its delegation
+// with its parent: can a change reach the parent now, by which scheme, and if
+// not, why not. The same shape for every scheme and for both roles.
+type ParentSyncReport struct {
+	Role      string // the zone option: "parentsync" or "parentsync-proxy"
+	Parent    string
+	Validated bool // the parent's DSYNC RRset DNSSEC-validated
+	// PlanError: the DSYNC discovery failed, so no scheme was evaluated.
+	// PlanNote: discovery ran (or could not start) and stopped before any
+	// scheme -- no IMR, no DSYNC records, nothing configured.
+	PlanError string `json:",omitempty"`
+	PlanNote  string `json:",omitempty"`
+	// Schemes lists every configured scheme in parentsync.schemes order.
+	Schemes []ParentSyncSchemeReport
+	// Per-scheme detail, each present only when that scheme is configured.
+	Update *ParentSyncUpdateReport `json:",omitempty"`
+	Notify *ParentSyncNotifyReport `json:",omitempty"`
+	Api    *ParentSyncApiReport    `json:",omitempty"`
+	// Delegation is the parent-vs-zone comparison, as "parentsync delta"
+	// computes it; DelegationError when it could not be made.
+	Delegation      *DelegationSyncStatus `json:",omitempty"`
+	DelegationError string                `json:",omitempty"`
+	// Warning is the zone's delegation-sync-warning, read before anything
+	// else in the report ran.
+	Warning string `json:",omitempty"`
+}
+
+// ParentSyncSchemeReport is one scheme's line in the report.
+type ParentSyncSchemeReport struct {
+	Scheme string
+	Usable bool
+	Target string `json:",omitempty"` // "name port N", when usable
+	Reason string `json:",omitempty"` // why not, when not
+}
+
+// ParentSyncUpdateReport is the UPDATE detail.
+type ParentSyncUpdateReport struct {
+	// ProxyReport (parentsync-proxy): the same text as the deprecated
+	// "zone proxy-key" -- the §10.8 state and the records to publish at the
+	// primary. Empty when the parent does not advertise UPDATE.
+	ProxyReport string `json:",omitempty"`
+
+	// The rest is the parentsync (child) role: the zone's own SIG(0) key.
+	HaveActiveKey bool
+	ActiveKeyID   uint16
+	ApexKeyIDs    []uint16 // keytags of the KEY RRs published at the apex
+	// The parent's view of the active key, as "parentsync inquire" reports it.
+	// ParentKeyError when the inquiry was not made or failed.
+	ParentKeyState         string `json:",omitempty"`
+	ParentKeyAuthenticated bool
+	ParentKeyError         string `json:",omitempty"`
+}
+
+// ParentSyncNotifyReport is the NOTIFY detail: what a NOTIFY would give the
+// parent to act on.
+type ParentSyncNotifyReport struct {
+	Signed         bool
+	PublishesCDS   bool
+	PublishesCSYNC bool
+}
+
+// ParentSyncApiReport is the API detail.
+type ParentSyncApiReport struct {
+	CredentialConfigured bool // parentsync.api.credentials has a usable one for this parent
+	AllowInsecure        bool // parentsync.api.allow-insecure
 }
 
 // ZoneChildSyncPost is the request type for /zone/childsync (parent-side operations).
@@ -616,11 +686,16 @@ type ReloadGuardrailRole struct {
 }
 
 type DelegationPost struct {
-	Command string // status | sync | export | ...
+	Command string // status | sync | export | sync-log | ...
 	Scheme  uint8  // 1=notify | 2=update
 	Zone    string
 	Force   bool
 	Outfile string `json:"outfile,omitempty"` // for "export": destination file path
+
+	// For "sync-log". Zone, when set, selects the parent.
+	Child string `json:"child,omitempty"`
+	Since string `json:"since,omitempty"` // a duration back from now ("10m") or an RFC 3339 time
+	Limit int    `json:"limit,omitempty"`
 }
 
 type DelegationResponse struct {
@@ -628,6 +703,7 @@ type DelegationResponse struct {
 	Time       time.Time
 	Zone       string
 	SyncStatus DelegationSyncStatus
+	SyncLog    *SyncLogReport `json:",omitempty"` // for "sync-log"
 	Msg        string
 	Error      bool
 	ErrorMsg   string

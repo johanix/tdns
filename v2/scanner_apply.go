@@ -68,14 +68,31 @@ type pollScan struct {
 // only with scanner.poll.bootstrap set. A child that had a DS when the round
 // listed it and has lost it since -- a NOTIFY-started scan applied a CDS delete
 // first, say -- is held to that rule here.
-func (scanner *Scanner) scanChildAndApply(ctx context.Context, parent *ZoneData, scanType ScanType, tuple ScanTuple, options *edns0.MsgOptions, poll *pollScan) ScanTupleResponse {
+//
+// A panic in the scan, reached from the child's data, fails this scan alone
+// (see scanner_panic.go).
+func (scanner *Scanner) scanChildAndApply(ctx context.Context, parent *ZoneData, scanType ScanType, tuple ScanTuple, options *edns0.MsgOptions, poll *pollScan) (resp ScanTupleResponse) {
 	mu := scanner.childLock(tuple.Zone)
 	mu.Lock()
 	defer mu.Unlock()
+	// Deferred after the unlock, so it runs first: a scan that panicked is
+	// recorded under the child's lock, like every other.
+	defer func() {
+		if rec := recover(); rec != nil {
+			resp = scanPanicResponse(parentZoneName(parent), scanType, tuple, rec)
+			recordPanickedScan(parent, scanType, resp, poll != nil)
+		}
+	}()
 
+	// A scan that stops before it reads the child is recorded too. The child
+	// that sent the NOTIFY got NOERROR, and "I notified and the parent did
+	// nothing" is what the log is there to answer. A poll's repeats of the same
+	// failure are rate-limited by AddPoll.
 	failed := func(format string, args ...any) ScanTupleResponse {
-		return ScanTupleResponse{Qname: tuple.Zone, ScanType: scanType, Options: tuple.Options,
+		resp := ScanTupleResponse{Qname: tuple.Zone, ScanType: scanType, Options: tuple.Options,
 			Error: true, ErrorMsg: fmt.Sprintf(format, args...)}
+		recordScan(scanSyncLogEvent(parent, scanType, resp, poll != nil), poll != nil)
+		return resp
 	}
 
 	if err := scanner.awaitPendingApply(ctx, tuple.Zone); err != nil {
@@ -111,12 +128,43 @@ func (scanner *Scanner) scanChildAndApply(ctx context.Context, parent *ZoneData,
 	default:
 		return failed("a %s scan does not change a delegation", ScanTypeToString[scanType])
 	}
-	resp := <-ch
+	resp = <-ch
 	logScanResult(parent, scanType, resp)
-	if scanner.OnDelegationChange != nil && scanResponseChangesDelegation(resp) {
-		scanner.OnDelegationChange(parent.ZoneName, parent, resp)
+	ev := scanSyncLogEvent(parent, scanType, resp, poll != nil)
+	if scanResponseChangesDelegation(resp) {
+		// The scan decided on a change; the event says what became of it.
+		// "applied" only once the CHILD-UPDATE has landed.
+		if scanner.OnDelegationChange == nil {
+			ev.Outcome = SyncApplyFailed
+			ev.Reason = "no delegation updater"
+		} else {
+			res := scanner.OnDelegationChange(parent.ZoneName, parent, resp)
+			switch {
+			case res.Applied:
+				ev.Outcome = SyncApplied
+			case res.Pending:
+				ev.Outcome = SyncQueued
+				ev.Reason = res.Reason
+				// The late answer is recorded by awaitPendingApply, with
+				// this event's details.
+				scanner.pendingEvents.Store(childKey(resp.Qname), ev)
+			default:
+				ev.Outcome = SyncApplyFailed
+				ev.Reason = res.Reason
+			}
+		}
 	}
+	recordScan(ev, poll != nil)
 	return resp
+}
+
+// delegationApplyResult is what became of a change a scan handed to
+// OnDelegationChange: applied, still queued at the zone updater (Pending), or
+// neither, with the reason.
+type delegationApplyResult struct {
+	Applied bool
+	Pending bool
+	Reason  string
 }
 
 // logScanResult logs what one scan of a child decided, in one line: at Info
@@ -177,10 +225,10 @@ func currentDelegationDS(parent *ZoneData, child string) (*core.RRset, error) {
 // a CHILD-UPDATE through the zone's updater: DS adds and removes from a CDS
 // scan, NS and glue adds and removes from a CSYNC scan. ScannerEngine wires it
 // as OnDelegationChange, so it runs under the child's scan lock.
-func (scanner *Scanner) applyDelegationChange(ctx context.Context, parentZone string, zd *ZoneData, resp ScanTupleResponse) {
+func (scanner *Scanner) applyDelegationChange(ctx context.Context, parentZone string, zd *ZoneData, resp ScanTupleResponse) delegationApplyResult {
 	if zd.KeyDB == nil || zd.KeyDB.UpdateQ == nil {
 		lg.Error("ScannerEngine: OnDelegationChange: no UpdateQ for zone", "zone", parentZone)
-		return
+		return delegationApplyResult{Reason: "no update queue for the zone"}
 	}
 	var actions []dns.RR
 	// DS changes (from CDS scan)
@@ -230,7 +278,7 @@ func (scanner *Scanner) applyDelegationChange(ctx context.Context, parentZone st
 	// lock, and the next scan of the child has to read a delegation that
 	// includes it (scanChildAndApply). A change still queued when the wait
 	// ends is waited for by that next scan.
-	_, pending := applyScanChildUpdate(ctx, zd.KeyDB.UpdateQ, UpdateRequest{
+	applied, pending, reason := queueScanChildUpdate(ctx, zd.KeyDB.UpdateQ, UpdateRequest{
 		Cmd:            "CHILD-UPDATE",
 		UpdateType:     updateType,
 		ZoneName:       parentZone,
@@ -242,6 +290,7 @@ func (scanner *Scanner) applyDelegationChange(ctx context.Context, parentZone st
 	if pending != nil {
 		scanner.notePendingApply(resp.Qname, pending)
 	}
+	return delegationApplyResult{Applied: applied, Pending: pending != nil, Reason: reason}
 }
 
 // applyScanChildUpdate queues a scan's CHILD-UPDATE and waits until the zone
@@ -250,6 +299,13 @@ func (scanner *Scanner) applyDelegationChange(ctx context.Context, parentZone st
 // answered in time, pending is where the answer will arrive; the updater may
 // still apply it.
 func applyScanChildUpdate(ctx context.Context, updateq chan UpdateRequest, ur UpdateRequest) (applied bool, pending <-chan ZoneUpdateResult) {
+	applied, pending, _ = queueScanChildUpdate(ctx, updateq, ur)
+	return applied, pending
+}
+
+// queueScanChildUpdate is applyScanChildUpdate, with the reason a change was not
+// applied, for the delegation-sync log.
+func queueScanChildUpdate(ctx context.Context, updateq chan UpdateRequest, ur UpdateRequest) (applied bool, pending <-chan ZoneUpdateResult, reason string) {
 	resp := make(chan ZoneUpdateResult, 1)
 	ur.Resp = resp
 	timeout := time.NewTimer(scanApplyTimeout)
@@ -258,25 +314,49 @@ func applyScanChildUpdate(ctx context.Context, updateq chan UpdateRequest, ur Up
 	select {
 	case updateq <- ur:
 	case <-ctx.Done():
-		return false, nil
+		return false, nil, "not queued: " + ctx.Err().Error()
 	case <-timeout.C:
 		lg.Error("ScannerEngine: timed out queueing a CHILD-UPDATE", "zone", ur.ZoneName, "description", ur.Description, "timeout", scanApplyTimeout)
-		return false, nil
+		return false, nil, fmt.Sprintf("timed out after %s queueing the CHILD-UPDATE", scanApplyTimeout)
 	}
 
 	select {
 	case res := <-resp:
 		if res.Err != nil {
 			lg.Error("ScannerEngine: CHILD-UPDATE not applied", "zone", ur.ZoneName, "description", ur.Description, "error", res.Err)
+			return res.Applied, nil, res.Err.Error()
 		}
-		return res.Applied, nil
+		if !res.Applied {
+			return false, nil, "the zone updater did not apply the CHILD-UPDATE"
+		}
+		return true, nil, ""
 	case <-ctx.Done():
-		return false, nil
+		return false, nil, "stopped waiting: " + ctx.Err().Error()
 	case <-timeout.C:
 		// Not cancelled: it is queued, and the updater may still apply it.
 		lg.Warn("ScannerEngine: CHILD-UPDATE not confirmed in time; it is still queued", "zone", ur.ZoneName, "description", ur.Description, "timeout", scanApplyTimeout)
-		return false, resp
+		return false, resp, fmt.Sprintf("not confirmed within %s; still queued at the zone updater", scanApplyTimeout)
 	}
+}
+
+// recordLateApply records what became of a change that was recorded as queued:
+// the same event, with the outcome the zone updater gave late.
+func (scanner *Scanner) recordLateApply(key string, res ZoneUpdateResult) {
+	v, ok := scanner.pendingEvents.LoadAndDelete(key)
+	if !ok {
+		return
+	}
+	ev := v.(SyncLogEvent)
+	ev.Time = time.Time{}
+	switch {
+	case res.Err != nil:
+		ev.Outcome, ev.Reason = SyncApplyFailed, "answered late: "+res.Err.Error()
+	case res.Applied:
+		ev.Outcome, ev.Reason = SyncApplied, "answered late"
+	default:
+		ev.Outcome, ev.Reason = SyncApplyFailed, "answered late: not applied"
+	}
+	syncLog().Add(ev)
 }
 
 // notePendingApply records that a change to child is still queued, with the
@@ -306,6 +386,7 @@ func (scanner *Scanner) awaitPendingApply(ctx context.Context, child string) err
 		} else {
 			lg.Info("ScannerEngine: an earlier CHILD-UPDATE was answered late", "child", child, "applied", res.Applied)
 		}
+		scanner.recordLateApply(key, res)
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

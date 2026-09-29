@@ -395,7 +395,9 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 			}
 		}
 
-		fmt.Printf("Using leftpad = %d\n", leftpad)
+		if Globals.Debug {
+			fmt.Printf("Using leftpad = %d\n", leftpad)
+		}
 
 		for _, rr := range envelope.RR {
 			if options["multi"] == "true" {

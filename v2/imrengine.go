@@ -28,6 +28,10 @@ import (
 var lgImr = Logger("engine")
 
 type Imr struct {
+	// ClientStats holds the per-client transport counters, or nil when they
+	// are off (imrengine.client-stats). See imr_client_stats.go.
+	ClientStats *ImrClientStats
+
 	Cache       *cache.RRsetCacheT
 	DnskeyCache *cache.DnskeyCacheT
 	Options     map[ImrOption]string
@@ -1807,10 +1811,26 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 
 	ImrHandler := imr.createImrHandler(ctx, conf)
 
+	// The per-client transport counters, when on, wrap each listener's handler
+	// with one that knows its transport. When off, every listener gets
+	// ImrHandler itself, exactly as before.
+	if conf.Imr.ClientStats.Enabled {
+		imr.ClientStats = newImrClientStats(conf.Imr.ClientStats.MaxClients)
+		lgImr.Info("per-client transport counters are on", "max-clients", imr.ClientStats.max)
+	}
+	handlers := listenerHandlers(ImrHandler, imr.ClientStats)
+
 	// Create a local ServeMux for ImrEngine to avoid conflicts with other engines.
-	// It truncates oversized UDP answers to the client's buffer size; the
-	// DoT/DoH/DoQ engines below get the unwrapped ImrHandler.
-	imrMux := newImrDo53Mux(ImrHandler)
+	// It truncates oversized UDP answers to the client's buffer size. The
+	// DoT/DoH/DoQ engines below get handlers.dot/.doh/.doq without a mux:
+	// ImrHandler itself when the counters are off, its counting wrappers when
+	// they are on. UDP and TCP get muxes of their own only when their handlers
+	// differ (the counters are on).
+	imrMux := newImrDo53Mux(handlers.udp)
+	imrMuxTCP := imrMux
+	if imr.ClientStats != nil {
+		imrMuxTCP = newImrDo53Mux(handlers.tcp)
+	}
 
 	if CaseFoldContains(conf.Listeners.Transports, "do53") {
 		lgImr.Info("starting Do53 listeners", "addresses", addresses)
@@ -1818,10 +1838,14 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 
 		for _, addr := range addresses {
 			for _, net := range []string{"udp", "tcp"} {
+				mux := imrMux
+				if net == "tcp" {
+					mux = imrMuxTCP
+				}
 				server := &dns.Server{
 					Addr:    addr,
 					Net:     net,
-					Handler: imrMux, // Use local mux instead of global handler
+					Handler: mux, // Use local mux instead of global handler
 					// MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
 				}
 				servers = append(servers, server)
@@ -1897,7 +1921,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		addresses = tmp
 
 		if CaseFoldContains(conf.Listeners.Transports, "dot") {
-			err := DnsDoTEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoT), &cert, ImrHandler, false)
+			err := DnsDoTEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoT), &cert, handlers.dot, false)
 			if err != nil {
 				lgImr.Error("failed to setup DoT server", "err", err)
 			}
@@ -1906,7 +1930,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		}
 
 		if CaseFoldContains(conf.Listeners.Transports, "doh") {
-			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), conf.Listeners.DoHPath, certFile, keyFile, ImrHandler)
+			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), conf.Listeners.DoHPath, certFile, keyFile, handlers.doh)
 			if err != nil {
 				lgImr.Error("failed to setup DoH server", "err", err)
 			}
@@ -1915,7 +1939,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		}
 
 		if CaseFoldContains(conf.Listeners.Transports, "doq") {
-			err := DnsDoQEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoQ), &cert, ImrHandler)
+			err := DnsDoQEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoQ), &cert, handlers.doq)
 			if err != nil {
 				lgImr.Error("failed to setup DoQ server", "err", err)
 			}

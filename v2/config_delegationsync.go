@@ -169,6 +169,12 @@ type ChildSyncConf struct {
 	// CompiledPolicies is derived, never decoded: SetDelegationSyncConfig fills
 	// it from Policies.
 	CompiledPolicies map[string]DelegationPolicy `yaml:"-" mapstructure:"-"`
+
+	// SyncLog is how many delegation-sync events the server keeps in memory
+	// (see delegation_sync_log.go): what the parent received from its children
+	// and what it did with it. Unset means DefaultSyncLogSize; 0 turns the log
+	// off.
+	SyncLog *int `yaml:"sync-log" mapstructure:"sync-log"`
 }
 
 type ParentSyncConf struct {
@@ -570,6 +576,13 @@ var delegationSyncConf atomic.Pointer[delegationSyncRuntime]
 // blocks. Called from ParseConfig on both first start and reload. On error the
 // previous pair stays installed.
 func SetDelegationSyncConfig(cs ChildSyncConf, ps ParentSyncConf) error {
+	syncLogSize := DefaultSyncLogSize
+	if cs.SyncLog != nil {
+		if *cs.SyncLog < 0 {
+			return fmt.Errorf("childsync.sync-log: %d is negative; use 0 to turn the delegation-sync log off", *cs.SyncLog)
+		}
+		syncLogSize = *cs.SyncLog
+	}
 	compiled, err := compileDelegationPolicies(cs.Policies)
 	if err != nil {
 		return err
@@ -581,6 +594,7 @@ func SetDelegationSyncConfig(cs ChildSyncConf, ps ParentSyncConf) error {
 	cs.CompiledPolicies = compiled
 	ps.CompiledMethods = methods
 	delegationSyncConf.Store(&delegationSyncRuntime{ChildSync: cs, ParentSync: ps})
+	installSyncLog(syncLogSize)
 	rebindLiveDelegationPolicies()
 	return nil
 }

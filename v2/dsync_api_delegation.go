@@ -211,6 +211,14 @@ func nameWithinPrincipalForRead(principal, owner string) bool {
 func DsyncApiPostDelegation() func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		child := dns.Fqdn(strings.TrimSpace(mux.Vars(r)["child"]))
+
+		// Every answer is recorded in the delegation-sync log, with the
+		// status and text the client got. GETs are not: they change nothing.
+		rec := &syncLogAPIWriter{ResponseWriter: w}
+		w = rec
+		var parent, asked string
+		defer func() { recordDsyncApiPost(parent, child, asked, rec) }()
+
 		cred := dsyncApiCredentialFrom(r)
 		if cred == nil {
 			dsyncApiError(w, http.StatusInternalServerError, "no authenticated principal")
@@ -222,6 +230,7 @@ func DsyncApiPostDelegation() func(w http.ResponseWriter, r *http.Request) {
 			dsyncApiError(w, http.StatusNotFound, "%v", err)
 			return
 		}
+		parent = zd.ZoneName
 
 		zd.mu.Lock()
 		frozen := zd.Options[OptFrozen]
@@ -243,9 +252,10 @@ func DsyncApiPostDelegation() func(w http.ResponseWriter, r *http.Request) {
 		}
 		// Before any check, so a refusal below can be read against what was
 		// actually asked for rather than reconstructed from the error text.
+		asked = dsyncApiRRsetsForLog(req.RRsets)
 		lgDsyncApi.Info("DSYNC API delegation request received",
 			"zone", zd.ZoneName, "child", child, "principal", cred.Principal,
-			"rrsets", dsyncApiRRsetsForLog(req.RRsets))
+			"rrsets", asked)
 
 		// The child in the body must agree with the child in the path, if it
 		// is given at all. Two names that disagree is a client that has built
@@ -483,4 +493,61 @@ var edeToDsyncApiReason = map[uint16]string{
 	edns0.EDEZoneUpdateRRtypeNotAllowed:   "the parent zone's update policy does not allow this RR type to be changed",
 	edns0.EDEZoneUpdateOwnerOutsidePolicy: "the parent zone's update policy does not place this name under your principal",
 	edns0.EDEZoneUpdatesNotAllowed:        "the parent zone's update policy does not allow updates",
+}
+
+// syncLogAPIWriter captures the status and error text of a DSYNC API answer,
+// for the delegation-sync log.
+type syncLogAPIWriter struct {
+	http.ResponseWriter
+	status int
+	body   strings.Builder
+}
+
+func (w *syncLogAPIWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *syncLogAPIWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	// An error is a short text line; a success is the delegation as JSON,
+	// which the log does not need.
+	if w.status != http.StatusOK && w.body.Len() < 512 {
+		w.body.Write(b)
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// recordDsyncApiPost records what a DSYNC API POST was answered. asked is the
+// request's rrsets as the handler logs them, when it got as far as reading
+// them.
+func recordDsyncApiPost(parent, child, asked string, rec *syncLogAPIWriter) {
+	ev := SyncLogEvent{
+		Parent:    parent,
+		Child:     child,
+		Mechanism: SyncMechAPI,
+		Changes:   asked,
+		Reason:    strings.TrimSpace(rec.body.String()),
+	}
+	switch {
+	case rec.status == 0:
+		// Only the client leaving mid-apply writes nothing, and then the
+		// update is queued and not cancelled.
+		ev.Outcome = SyncOutcomeUnsure
+		ev.Reason = "the client went away while the update was being applied; it was not cancelled"
+	case rec.status == http.StatusOK:
+		ev.Outcome = SyncApplied
+	case rec.status == http.StatusServiceUnavailable:
+		ev.Outcome = SyncApplyFailed
+	default:
+		ev.Outcome = SyncRefused
+	}
+	if rec.status != 0 {
+		ev.Rcode = fmt.Sprintf("HTTP %d", rec.status)
+	}
+	syncLog().Add(ev)
 }
