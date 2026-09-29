@@ -1,15 +1,15 @@
-## tdns-cli imr stats auth-transports
+## tdns-cli imr stats transport-stats suffix
 
-Show per-transport query counters for auth servers in a zone
+Show transport-usage stats for zones whose name ends in suffix
 
 ```
-tdns-cli imr stats auth-transports [zone] [flags]
+tdns-cli imr stats transport-stats suffix [suffix] [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for auth-transports
+  -h, --help   help for suffix
 ```
 
 ### Options inherited from parent commands
@@ -26,5 +26,5 @@ tdns-cli imr stats auth-transports [zone] [flags]
 
 ### SEE ALSO
 
-* [tdns-cli imr stats](tdns-cli_imr_stats.md)	 - Show IMR statistics
+* [tdns-cli imr stats transport-stats](tdns-cli_imr_stats_transport-stats.md)	 - Show per-server transport-usage stats for a running tdns-imr
 

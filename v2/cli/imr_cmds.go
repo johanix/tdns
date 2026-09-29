@@ -216,7 +216,7 @@ var ImrStatsCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		printLargeKskImrMetrics(tdns.LargeKskImrMetricsSnapshot())
 		fmt.Println()
-		fmt.Println("Subcommands: large-ksk, auth-transports, auth-servers")
+		fmt.Println("Subcommands: large-ksk, auth-servers, auth-transports, transport-stats, client-stats")
 	},
 }
 
@@ -261,14 +261,6 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 			}
 		}
 	},
-}
-
-// Alias with requested name that prints the same information as auth-transports
-var imrStatsAuthServersCmd = &cobra.Command{
-	Use:   "auth-servers [zone]",
-	Short: "Show per-transport query counters and signal for auth servers",
-	Args:  cobra.MaximumNArgs(1),
-	Run:   imrStatsAuthTransportsCmd.Run,
 }
 
 var ImrShowCmd = &cobra.Command{
@@ -617,7 +609,6 @@ func init() {
 
 	ImrStatsCmd.AddCommand(imrStatsLargeKskCmd)
 	ImrStatsCmd.AddCommand(imrStatsAuthTransportsCmd)
-	ImrStatsCmd.AddCommand(imrStatsAuthServersCmd)
 	ImrShowCmd.AddCommand(imrShowOptionsCmd)
 	ImrShowCmd.AddCommand(imrShowConfigCmd)
 	ImrFlushCmd.AddCommand(imrFlushCommonCmd, imrFlushAllCmd)

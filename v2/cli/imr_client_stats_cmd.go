@@ -154,10 +154,15 @@ func formatClientStats(rep tdns.ImrClientStatsReport, sortBy string) string {
 
 // lastSeen is when the client was last seen, and over which transport.
 func lastSeen(r tdns.ImrClientStatsRow) string {
+	return lastOver(r.LastSeen)
+}
+
+// lastOver is the latest of a per-transport set of times, and its transport.
+func lastOver(last map[string]time.Time) string {
 	var latest time.Time
 	var via string
 	for _, t := range tdns.ImrClientTransports {
-		if ts, ok := r.LastSeen[t]; ok && ts.After(latest) {
+		if ts, ok := last[t]; ok && ts.After(latest) {
 			latest, via = ts, t
 		}
 	}

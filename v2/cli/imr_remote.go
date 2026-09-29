@@ -25,7 +25,7 @@ import (
 // that was up and serving.
 //
 // flush and "stats transport-stats" already dispatched to the daemon's API. This
-// does the same for "query" and "stats auth-servers"/"auth-transports", and makes
+// does the same for "query" and "stats auth-transports", and makes
 // the commands that have no API equivalent say so instead of printing tdns-cli's
 // state.
 
@@ -71,16 +71,14 @@ func dispatchRemote(c *cobra.Command, remote func(cmd *cobra.Command, args []str
 func init() {
 	dispatchRemote(ImrQueryCmd, queryViaApi)
 
-	authServersRemote := func(cmd *cobra.Command, args []string) {
+	// "stats auth-servers" chooses between the two paths itself, as client-stats does.
+	dispatchRemote(imrStatsAuthTransportsCmd, func(cmd *cobra.Command, args []string) {
 		var f transportStatsFilter
 		if len(args) == 1 {
 			f.zone = dns.Fqdn(args[0])
 		}
 		renderTransportStatsRemote(cmd.Context(), f)
-	}
-	// Both: auth-servers copied auth-transports' Run when the vars were built.
-	dispatchRemote(imrStatsAuthTransportsCmd, authServersRemote)
-	dispatchRemote(imrStatsAuthServersCmd, authServersRemote)
+	})
 
 	guardInProcess(ImrStatsCmd, "imr stats", `"tdns-cli imr stats transport-stats"`)
 	guardInProcess(imrStatsLargeKskCmd, "imr stats large-ksk", "")

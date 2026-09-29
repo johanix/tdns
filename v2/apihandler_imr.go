@@ -483,6 +483,34 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			rep := imr.ClientStats.Snapshot(filter, reset)
 			resp.Data = rep
 
+		case "imr-auth-servers":
+			// Per-server transport counters, one row per server rather than
+			// per zone. "servers" (names, each selecting the servers at and
+			// below it) only filters what is returned; "reset" clears every
+			// server's counters afterwards, whatever the filter.
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			var specs []string
+			if list, ok := amp.Data["servers"].([]interface{}); ok {
+				for _, v := range list {
+					if s, ok := v.(string); ok {
+						specs = append(specs, s)
+					}
+				}
+			}
+			filter, err := ParseServerFilter(specs)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			reset, _ := amp.Data["reset"].(bool)
+			resp.Data = ImrAuthServersSnapshot(imr.Cache, filter, reset)
+
 		case "imr-transport-stats":
 			imr := Globals.ImrEngine
 			if imr == nil || imr.Cache == nil {

@@ -219,8 +219,10 @@ zone reload.
 |---------|--------|
 | `stats` | Large-KSK metrics, and lists the subcommands |
 | `stats large-ksk` | DNSKEY-over-TCP counters for large algorithms |
-| `stats auth-transports <zone>` | Per-transport counters |
-| `stats auth-servers <zone>` | Alias of the above |
+| `stats auth-servers [-s name] [--pct]` | One row per auth server: answers per transport, failures, truncations and last use, next to the server's transport signal (OOTS). `--pct` shows shares instead of counts; `--reset` starts a new period for every server |
+| `stats auth-transports [zone]` | The same counters listed per zone, attempted/used/failed; a server serving several zones repeats under each |
+| `stats transport-stats [zone]` | As `auth-transports`; `suffix <name>` selects zones by suffix |
+| `stats client-stats [-c addr]` | Queries per client address and transport (off unless `imrengine.client-stats.enabled`) |
 
 **Inspection and settings**
 
