@@ -3,8 +3,9 @@
 **Written 2026-09-28.** Line references are to main at `4711137e`. Deckard
 references are to its repository at `e51f539` (2026-06-25).
 
-**Status:** proposal, revision 2, not implemented. The questions in §9 were
-decided 2026-09-28.
+**Status:** proposal, revision 2. The questions in §9 were decided
+2026-09-28. Stage 1, the harness, ran 2026-09-29: see §11, which amends the
+S4 prediction.
 
 **Revisions:**
 - **r1**, 2026-09-28: `f89c6fea` (#822).
@@ -512,3 +513,27 @@ Decided 2026-09-28 (Johan):
 - **QNAME minimisation, NTAs and a validation-off mode.**
 - **The RD=1 on iterative queries (#817).** It does not affect Deckard, whose
   scripted entries never match on a query's flags.
+
+## 11. Amendment, 2026-09-29: what stage 1 showed
+
+The harness (`tests/deckard/`) ran the clock-free set on main at `a62d9585`.
+The record is `tests/deckard/RESULTS.md`.
+
+- **S4 is needed by every scenario, not 15.**
+  - Deckard starts the resolver and waits for it to accept TCP on port 53
+    before it starts the scenario's servers (`process_file` calls
+    `setup_daemons`, then `run_testcase`).
+  - At start-up there is therefore nothing to answer. tdns-imr primes before
+    it opens its listeners, and retries after 5 s, so it never becomes ready.
+  - §4 counted the scenarios that do not script `. NS`. The timing makes S4 a
+    precondition for all of them, and it comes first in stage 2.
+- **S2 has the same cause.** The anchor prefetch also runs at start-up, while
+  no server answers. Its queries are lost rather than counted as unscripted.
+  The first DNSSEC run will show whether that matters.
+- **With an experimental S4, 31 of the 40 clock-free scenarios pass.**
+  - The 9 that fail get the answer wrong (SERVFAIL where NOERROR or NXDOMAIN
+    is expected, or NOERROR where SERVFAIL is), or time out.
+  - None failed on an unscripted query or on a header flag.
+  - So S1 and S5 did not come up either: no scenario in this set failed on
+    an AAAA lookup or on a nameserver pick.
+
