@@ -169,12 +169,20 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	// This is a DNS UPDATE, so the Query Section becomes the Zone Section
 	zone := qname
 
-	if len(r.Ns) == 1 {
-		qname = r.Ns[0].Header().Name // If there is only one RR in the update, we will use that name as the qname
-	}
-	// 1. Is qname inside or below a zone that we're auth for?
-	// Let's see if we can find the zone. OrRoot: a single-RR UPDATE of a
-	// TLD's delegation arrives here as the TLD's name, and its zone is ".".
+	// 1. RFC 2136 §2.3: the zone section names the zone to be updated, however
+	// many records the update section holds. Routing a one-record update by
+	// its owner instead sent a parent's DS change for a child this server
+	// also serves to the child zone, which refused it as an update of its own
+	// data.
+	//
+	// The lookup is FindZone's longest match, not an exact one. A zone
+	// section that names a zone served here finds that zone. One that names
+	// a name inside a served zone -- a sender that puts the child's name
+	// there for its KEY or delegation, or a TLD's name for its delegation --
+	// finds the zone that contains it. RFC 2136 would answer NOTAUTH; this is
+	// a tolerance, and the NOTZONE check below keeps it to records inside the
+	// zone it finds. OrRoot: a hosted root is the zone for any name no more
+	// specific hosted zone covers.
 	zd := FindZoneOrRoot(qname)
 	if zd == nil {
 		lgHandler.Warn("zone not found", "qname", qname)
@@ -182,6 +190,24 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)
 		w.WriteMsg(m)
 		return nil // didn't find any zone for that qname
+	}
+	// From here on the zone being updated is the one found. It differs from
+	// the zone section when that names a name inside a served zone, and the
+	// updater looks the zone up by this name.
+	zone = zd.ZoneName
+
+	// RFC 2136 §3.4.1.3: every record in the update section must be in the
+	// zone being updated. Nothing else enforces it: the classifiers look only
+	// at names relative to the zone they were given, so an out-of-zone record
+	// would be judged as that zone's own data, with only the update policy's
+	// signer check between it and the zone.
+	for _, rr := range r.Ns {
+		if !dns.IsSubDomain(zd.ZoneName, rr.Header().Name) {
+			lgHandler.Warn("update rejected: record outside the zone", "zone", zd.ZoneName, "owner", rr.Header().Name)
+			m.SetRcode(r, dns.RcodeNotZone)
+			w.WriteMsg(m)
+			return nil
+		}
 	}
 
 	// Refuse UPDATE on a service-impacting error, or when the zone holds
