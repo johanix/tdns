@@ -334,9 +334,7 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 
 	// c := dns.Client{Net: "tcp"}
 
-	m := new(dns.Msg)
-	m.SetQuestion(qname, rrtype)
-	m.SetEdns0(4096, true)
+	m := authQueryMsg(qname, rrtype)
 	for _, ns := range nameservers {
 		if ns[len(ns)-3:] != ":53" {
 			ns = net.JoinHostPort(ns, "53")
@@ -400,9 +398,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 
 	// c := dns.Client{Net: "tcp"}
 
-	m := new(dns.Msg)
-	m.SetQuestion(qname, qtype)
-	m.SetEdns0(4096, true)
+	m := authQueryMsg(qname, qtype)
 	for _, ns := range nameservers {
 		if ns[len(ns)-3:] != ":53" {
 			ns = net.JoinHostPort(ns, "53")
@@ -2198,10 +2194,24 @@ func RecursiveDNSQuery(server, qname string, qtype uint16, timeout time.Duration
 }
 
 // Helpers
-func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
+
+// authQueryMsg is a query for an authoritative server: the resolver's own
+// iterative traffic, including priming, trust-anchor and DNSKEY fetches, and
+// nameserver address lookups. RD is cleared. miekg's SetQuestion sets it, and
+// a server that also recurses answers an RD=1 query from its recursive side,
+// handing back something other than its own data and referrals (#817). The
+// forwarding paths ask a server to recurse; they build their own messages and
+// keep RD set.
+func authQueryMsg(qname string, qtype uint16) *dns.Msg {
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
+	m.RecursionDesired = false
 	m.SetEdns0(4096, true)
+	return m
+}
+
+func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
+	m := authQueryMsg(qname, qtype)
 	if withOOTS {
 		if err := edns0.AddOOTSToMessage(m); err != nil {
 			return nil, err
