@@ -3,11 +3,16 @@
 **Written 2026-09-17.** #653. **Status: r4.** r3 was merged with #695. r4 was
 written before any code, which is why it revises the text in place and is not
 an amendment, and it arrived together with step 1 of "Size and order of work"
-(transactions and held creation). **Step 1 is implemented and merged**
-(2026-09-21, tdns #700 → 368a28ce). Amendment 1 (tdns #711 → e635f202) and
-Amendment 2, at the end, record what changed in it after the reviews. Steps 2
-to 4 are not implemented; step 2 is tdns-mp's. What the reviews of step 1
-carried to them is listed under "Size and order of work".
+(transactions and held creation). **Steps 1 and 2 are implemented and
+merged.** Step 1: 2026-09-21, tdns #700 → 368a28ce; Amendment 1 (tdns #711 →
+e635f202) and Amendment 2, at the end, record what changed in it after the
+reviews. Step 2: 2026-09-29, tdns-mp #97 → 3e21fe8: the identity zone is
+created held and published once, the agent's and the auditor's first hello
+waits for that publish, and the zone's parentsync work starts after it. It was
+checked on a multi-host test deployment: seven cold starts, seven converged,
+each identity one complete transfer at its secondary, none of #653's
+cached-denial warnings. Steps 3 and 4 are not implemented; what the reviews of
+step 1 carried to them is listed under "Size and order of work".
 Updates §1.3 and §1.6 of `2026-07-02-DONE-zone-mutation-snapshot-correctness.md`
 ("the July design"), which stays as it is.
 
