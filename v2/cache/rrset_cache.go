@@ -135,8 +135,9 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 		if rrcache.Debug {
 			log.Printf("RRsetCache: Removed expired key %s (%s)", lookupKey, dns.TypeToString[qtype])
 		}
-		// If an NS RRset expired, also remove its server mappings for that zone
-		if qtype == dns.TypeNS {
+		// If an NS RRset expired, also remove its server mappings for that
+		// zone, unless the operator configured them (keepsServerMap)
+		if qtype == dns.TypeNS && !rrcache.keepsServerMap(qname) {
 			rrcache.ServerMap.Remove(qname)
 			if rrcache.Debug {
 				log.Printf("RRsetCache: Removed ServerMap entry for zone %s due to NS expiry", qname)
@@ -244,11 +245,18 @@ func (rrcache *RRsetCacheT) evictOldestRRset() {
 	}
 }
 
+// keepsServerMap reports whether zone's server map is configuration, which a
+// flush and an NS expiry leave alone: that of a configured stub (StubZone).
+func (rrcache *RRsetCacheT) keepsServerMap(zone string) bool {
+	return rrcache.StubZone != nil && rrcache.StubZone(zone)
+}
+
 // FlushDomain removes cached RRsets at or below the provided domain.
 // When keepStructural is true, NS/DS/DNSKEY RRsets and the address
 // records for their nameservers are preserved. When it is false, the
 // validation states of the zones at or below the domain go as well; see
-// forgetZoneStates.
+// forgetZoneStates. So do the server maps of the zones there, except a
+// configured stub's (keepsServerMap).
 func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int, error) {
 	if rrcache == nil {
 		return 0, fmt.Errorf("rrcache is nil")
@@ -313,7 +321,7 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 		}
 		auxKeys = auxKeys[:0]
 		for item := range rrcache.ServerMap.IterBuffered() {
-			if isSubdomainOf(item.Key, domain) {
+			if isSubdomainOf(item.Key, domain) && !rrcache.keepsServerMap(item.Key) {
 				auxKeys = append(auxKeys, item.Key)
 			}
 		}
@@ -326,9 +334,9 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 }
 
 // FlushAll removes all cached data except root zone priming data (NS for ".",
-// root server A/AAAA records), along with the validation state of every zone
-// without a trust anchor (see forgetZoneStates). Returns the number of RRsets
-// removed.
+// root server A/AAAA records) and the configured stubs' server maps
+// (keepsServerMap), along with the validation state of every zone without a
+// trust anchor (see forgetZoneStates). Returns the number of RRsets removed.
 func (rrcache *RRsetCacheT) FlushAll() int {
 	if rrcache == nil {
 		return 0
@@ -388,7 +396,7 @@ func (rrcache *RRsetCacheT) FlushAll() int {
 	}
 	auxKeys = auxKeys[:0]
 	for item := range rrcache.ServerMap.IterBuffered() {
-		if dns.CanonicalName(item.Key) != "." {
+		if dns.CanonicalName(item.Key) != "." && !rrcache.keepsServerMap(item.Key) {
 			auxKeys = append(auxKeys, item.Key)
 		}
 	}

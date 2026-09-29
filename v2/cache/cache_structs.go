@@ -100,6 +100,13 @@ type RRsetCacheT struct {
 	// fetcher without any, and the fetcher forwards it (ServersFor). Nil only
 	// in a cache that no resolver is attached to, which forwards nothing.
 	Forwarded func(name string, qtype uint16) bool
+	// StubZone reports whether a name is a configured stub zone. Its server map
+	// is configuration, put there by AddStub, where every other zone's is
+	// learned from referrals: a flush and the expiry of the zone's NS RRset
+	// leave it in place (keepsServerMap). Dropping it lost the stub for good,
+	// while the stub still kept its names from any forward above it (#832).
+	// Nil only in a cache that no resolver is attached to, which has no stubs.
+	StubZone func(name string) bool
 	//Options                map[ImrOption]string
 	Primed               bool
 	Logger               *log.Logger

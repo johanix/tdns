@@ -632,7 +632,8 @@ func placeholderUpstream(u ImrUpstreamConf, reason string) *ForwardUpstream {
 // forwardZoneFor returns the forward zone responsible for qname, or nil when
 // the query should be resolved iteratively. The most specific configured
 // forward zone wins; a configured stub zone that is MORE specific than that
-// forward zone wins over it (its names are reachable by direct iteration).
+// forward zone wins over it (its names are reachable by direct iteration),
+// for as long as the cache holds the stub's servers (stubServersCached).
 func (imr *Imr) forwardZoneFor(qname string) *ForwardZone {
 	// One snapshot for the whole decision: a reload swapping the table
 	// mid-way must not let a stub from the new table veto a forward from
@@ -653,11 +654,27 @@ func (imr *Imr) forwardZoneFor(qname string) *ForwardZone {
 		return nil
 	}
 	for _, sz := range table.stubs {
-		if dns.CountLabel(sz) > best.Labels && dns.IsSubDomain(sz, q) {
+		if dns.CountLabel(sz) > best.Labels && dns.IsSubDomain(sz, q) && imr.stubServersCached(sz) {
 			return nil
 		}
 	}
 	return best
+}
+
+// stubServersCached reports whether the cache holds servers for the stub zone,
+// which a stub needs before it can take its names away from a forward. Without
+// them a question for a name in the stub goes to the closest cached zone cut
+// above the stub, and under a forwarded root there is none: every lookup ended
+// in `no nameservers for zone ""` (#832). The forward is the better route
+// then. The cache keeps a stub's servers (RRsetCacheT.StubZone), so this is
+// the fallback for a server map lost some other way, or never stored because
+// AddStub refused it. A resolver without a cache keeps the stub's claim.
+func (imr *Imr) stubServersCached(zone string) bool {
+	if imr.Cache == nil {
+		return true
+	}
+	servers, ok := imr.Cache.ServerMap.Get(zone)
+	return ok && len(servers) > 0
 }
 
 // forwardZoneForQuestion returns the forward zone that the question <qname,
