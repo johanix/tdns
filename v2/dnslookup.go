@@ -1653,7 +1653,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				}
 				// If not done, fall-through to process referral glue embedded with answers
 				nsRRs, zonename, nsMap := extractReferral(r, qname, qtype)
-				if len(nsRRs.RRs) > 0 {
+				if len(nsRRs.RRs) > 0 && referralLeavesZone(zonename, zoneName) {
 					serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRs, zonename, nsMap, r)
 					if err != nil {
 						lgDns.Error("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional",
@@ -1688,6 +1688,22 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					}
 					continue
 				case responseKindReferral:
+					// A referral hands the lookup to a zone below the one these
+					// servers serve. An NS RRset for that zone itself, or for
+					// one above it, is not a referral: the server is lame for
+					// the zone, or (with AA set) answering NODATA with the
+					// zone's own NS RRset. Following it would reach the loop
+					// check in handleReferral, which aborts the whole lookup
+					// (#829). Try the next server instead; the fallback below
+					// still resolves the zone's glue-less nameservers.
+					if _, refZone, _ := extractReferral(r, qname, qtype); !referralLeavesZone(refZone, zoneName) {
+						lgDns.Debug("IterativeDNSQuery: NS RRset does not lead below the zone being queried;"+
+							" treating the server as lame and trying the next one",
+							"qname", qname, "qtype", dns.TypeToString[qtype],
+							"zone", zoneName, "ns_owner", refZone, "server", nsname, "addr", addr,
+							"aa", r.Authoritative)
+						continue
+					}
 					return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, wireTransport, privacy)
 				case responseKindError:
 					lgDns.Debug("IterativeDNSQuery: treating response as error",
@@ -2208,6 +2224,18 @@ func authQueryMsg(qname string, qtype uint16) *dns.Msg {
 	m.RecursionDesired = false
 	m.SetEdns0(4096, true)
 	return m
+}
+
+// referralLeavesZone reports whether an NS RRset owned by refZone, returned by
+// a server of zone, is a referral: whether refZone lies strictly below zone.
+// With either name unknown it says yes, which is how every NS RRset was read
+// before the zone was compared.
+func referralLeavesZone(refZone, zone string) bool {
+	if refZone == "" || zone == "" {
+		return true
+	}
+	ref, cur := dns.CanonicalName(refZone), dns.CanonicalName(zone)
+	return ref != cur && dns.IsSubDomain(cur, ref)
 }
 
 func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
