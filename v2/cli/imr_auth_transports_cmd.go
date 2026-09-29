@@ -15,24 +15,26 @@ import (
 	"text/tabwriter"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
 
 var (
-	authServersServers []string
-	authServersReset   bool
-	authServersSort    string
-	authServersJSON    bool
-	authServersPct     bool
+	authTransportsServers []string
+	authTransportsReset   bool
+	authTransportsSort    string
+	authTransportsJSON    bool
+	authTransportsPct     bool
 )
 
-// imrStatsAuthServersCmd shows, per auth server, which transports a running
+// imrStatsAuthTransportsCmd shows, per auth server, which transports a running
 // tdns-imr's own queries went over, next to the transport signal the server
-// gave. Like client-stats it works in-process (the tdns-imr REPL) and remotely
-// (tdns-cli, over the /imr API).
-var imrStatsAuthServersCmd = &cobra.Command{
-	Use:   "auth-servers",
-	Short: "Show which transports this resolver uses to reach each auth server",
+// gave. Like client-transports it works in-process (the tdns-imr REPL) and
+// remotely (tdns-cli, over the /imr API).
+var imrStatsAuthTransportsCmd = &cobra.Command{
+	Use:     "auth-transports [zone]",
+	Aliases: []string{"auth-servers"},
+	Short:   "Show which transports this resolver uses to reach each auth server",
 	Long: `Show, per authoritative server, how many of the resolver's queries were
 answered over each transport (Do53 over UDP and TCP, DoT, DoQ, DoH), how many
 attempts failed (FAIL), how many Do53/UDP answers were truncated and retried
@@ -45,44 +47,52 @@ of the queries, and Do53 the rest. --pct shows each transport's share of the
 server's answers instead of a count, which compares directly with the signal.
 A client that asks for privacy moves queries off Do53 whatever the signal says.
 
-Each server is one row, however many zones it serves (ZONES); the per-zone
-listing of the same counters is "auth-transports". A stub zone's server is
-counted apart from the same name found by resolution, and is marked (stub).
+Each server is one row, however many zones it serves (ZONES); [zone] shows only
+the servers of that zone. The per-zone listing of the same counters, attempted
+and failed per transport included, is "transport-stats". A stub zone's server
+is counted apart from the same name found by resolution, and is marked (stub).
 
 -s selects servers by name, and may be given more than once: a name selects
 that server and every server below it. With none, all servers are shown.
 --reset clears the counters after showing them -- ALL of them, every server,
-whatever -s selected, including those auth-transports shows -- so the next run
-covers a new period.`,
-	Args: cobra.NoArgs,
+whatever [zone] and -s selected, including those transport-stats shows -- so
+the next run covers a new period.`,
+	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		runAuthServers(cmd.Context())
+		var zone string
+		if len(args) == 1 {
+			zone = dns.Fqdn(args[0])
+		}
+		runAuthTransports(cmd.Context(), zone)
 	},
 }
 
-func runAuthServers(ctx context.Context) {
-	switch authServersSort {
+func runAuthTransports(ctx context.Context, zone string) {
+	switch authTransportsSort {
 	case "name", "total", "last":
 	default:
 		// Refused before anything is fetched: a typo must not cost a --reset.
-		fmt.Printf("Error: --sort %q: use name, total or last\n", authServersSort)
+		fmt.Printf("Error: --sort %q: use name, total or last\n", authTransportsSort)
 		return
 	}
-	var rep tdns.ImrAuthServersReport
+	var rep tdns.ImrAuthTransportsReport
 	if imr := tdns.Globals.ImrEngine; imr != nil && imr.Cache != nil {
 		// In-process: the REPL has no reason to call its own API.
-		filter, err := tdns.ParseServerFilter(authServersServers)
+		filter, err := tdns.ParseServerFilter(authTransportsServers)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			return
 		}
-		rep = tdns.ImrAuthServersSnapshot(imr.Cache, filter, authServersReset)
+		rep = tdns.ImrAuthTransportsSnapshot(imr.Cache, filter, zone, authTransportsReset)
 	} else {
-		data := map[string]interface{}{"reset": authServersReset}
-		if len(authServersServers) > 0 {
-			data["servers"] = authServersServers
+		data := map[string]interface{}{"reset": authTransportsReset}
+		if len(authTransportsServers) > 0 {
+			data["servers"] = authTransportsServers
 		}
-		amr, err := SendImrMgmtCmd(ctx, "imr", &tdns.ImrMgmtPost{Command: "imr-auth-servers", Data: data})
+		if zone != "" {
+			data["zone"] = zone
+		}
+		amr, err := SendImrMgmtCmd(ctx, "imr", &tdns.ImrMgmtPost{Command: "imr-auth-transports", Data: data})
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -99,22 +109,26 @@ func runAuthServers(ctx context.Context) {
 			log.Fatalf("failed to parse response: %v", err)
 		}
 	}
-	if authServersJSON {
+	if authTransportsJSON {
 		out, _ := json.MarshalIndent(rep, "", "  ")
 		fmt.Println(string(out))
 		return
 	}
-	fmt.Print(formatAuthServers(rep, authServersSort, authServersPct))
+	fmt.Print(formatAuthTransports(rep, authTransportsSort, authTransportsPct))
 }
 
-// formatAuthServers renders a report as a table, sorted by name, total or last
+// formatAuthTransports renders a report as a table, sorted by name, total or last
 // used; with pct, the transport columns are shares of each row's TOTAL.
-func formatAuthServers(rep tdns.ImrAuthServersReport, sortBy string, pct bool) string {
+func formatAuthTransports(rep tdns.ImrAuthTransportsReport, sortBy string, pct bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Auth server transport counters since %s: %d servers held, %d shown\n\n",
-		rep.Since.Format("2006-01-02 15:04:05"), rep.Servers, len(rep.Rows))
+	var of string
+	if rep.Zone != "" {
+		of = " for zone " + rep.Zone
+	}
+	fmt.Fprintf(&b, "Auth server transport counters%s since %s: %d servers held, %d shown\n\n",
+		of, rep.Since.Format("2006-01-02 15:04:05"), rep.Servers, len(rep.Rows))
 
-	rows := append([]tdns.ImrAuthServerRow(nil), rep.Rows...)
+	rows := append([]tdns.ImrAuthTransportsRow(nil), rep.Rows...)
 	switch sortBy {
 	case "total":
 		sort.SliceStable(rows, func(i, j int) bool { return rows[i].Total > rows[j].Total })
@@ -161,7 +175,7 @@ func formatAuthServers(rep tdns.ImrAuthServersReport, sortBy string, pct bool) s
 
 // authServerLabel is the server's name, marked when the row is a stub zone's
 // private instance rather than the one resolution shares.
-func authServerLabel(r tdns.ImrAuthServerRow) string {
+func authServerLabel(r tdns.ImrAuthTransportsRow) string {
 	if r.Shared {
 		return r.Server
 	}
@@ -221,10 +235,10 @@ func formatOOTSSignal(signal map[string]uint8) string {
 }
 
 func init() {
-	imrStatsAuthServersCmd.Flags().StringSliceVarP(&authServersServers, "server", "s", nil, "Server name, selecting it and every server below it; may be repeated")
-	imrStatsAuthServersCmd.Flags().BoolVar(&authServersReset, "reset", false, "Clear ALL auth-server counters after showing them")
-	imrStatsAuthServersCmd.Flags().StringVar(&authServersSort, "sort", "name", "Sort by name, total or last")
-	imrStatsAuthServersCmd.Flags().BoolVar(&authServersJSON, "json", false, "Print the report as JSON")
-	imrStatsAuthServersCmd.Flags().BoolVar(&authServersPct, "pct", false, "Show each transport's share of the server's answers instead of counts")
-	ImrStatsCmd.AddCommand(imrStatsAuthServersCmd)
+	imrStatsAuthTransportsCmd.Flags().StringSliceVarP(&authTransportsServers, "server", "s", nil, "Server name, selecting it and every server below it; may be repeated")
+	imrStatsAuthTransportsCmd.Flags().BoolVar(&authTransportsReset, "reset", false, "Clear ALL auth-server counters after showing them")
+	imrStatsAuthTransportsCmd.Flags().StringVar(&authTransportsSort, "sort", "name", "Sort by name, total or last")
+	imrStatsAuthTransportsCmd.Flags().BoolVar(&authTransportsJSON, "json", false, "Print the report as JSON")
+	imrStatsAuthTransportsCmd.Flags().BoolVar(&authTransportsPct, "pct", false, "Show each transport's share of the server's answers instead of counts")
+	ImrStatsCmd.AddCommand(imrStatsAuthTransportsCmd)
 }

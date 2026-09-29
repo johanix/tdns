@@ -31,8 +31,9 @@ var (
 // since startup or the last reset. Like transport-stats it works in-process
 // (the tdns-imr REPL) and remotely (tdns-cli, over the /imr API).
 var imrStatsClientStatsCmd = &cobra.Command{
-	Use:   "client-stats",
-	Short: "Show which transports clients use to reach this resolver",
+	Use:     "client-transports",
+	Aliases: []string{"client-stats"},
+	Short:   "Show which transports clients use to reach this resolver",
 	Long: `Show, per client address, how many queries arrived over each transport
 (Do53 over UDP and TCP, DoT, DoQ, DoH) and when each was last used, since the
 resolver started or the counters were last reset.

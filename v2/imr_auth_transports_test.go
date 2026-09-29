@@ -21,7 +21,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func authServersTestCache(t *testing.T) *cache.RRsetCacheT {
+func authTransportsTestCache(t *testing.T) *cache.RRsetCacheT {
 	t.Helper()
 	rc := cache.NewRRsetCache(log.New(io.Discard, "", 0), false, false)
 	ns1 := rc.GetOrCreateAuthServer("ns1.example.net.")
@@ -42,8 +42,8 @@ func authServersTestCache(t *testing.T) *cache.RRsetCacheT {
 
 // Rows carry the counts under the client-stats column names, Do53 over UDP and
 // TCP apart, the signal as given, and "no signal" as no signal.
-func TestImrAuthServersSnapshot(t *testing.T) {
-	rep := ImrAuthServersSnapshot(authServersTestCache(t), nil, false)
+func TestImrAuthTransportsSnapshot(t *testing.T) {
+	rep := ImrAuthTransportsSnapshot(authTransportsTestCache(t), nil, "", false)
 	if rep.Servers != 3 || len(rep.Rows) != 3 {
 		t.Fatalf("report %+v, want 3 servers held and shown", rep)
 	}
@@ -71,32 +71,37 @@ func TestImrAuthServersSnapshot(t *testing.T) {
 }
 
 // A name selects the servers at and below it, never a partial label.
-func TestImrAuthServersFilter(t *testing.T) {
+func TestImrAuthTransportsFilter(t *testing.T) {
 	filter, err := ParseServerFilter([]string{"example.net", " "})
 	if err != nil || len(filter) != 1 || filter[0] != "example.net." {
 		t.Fatalf("ParseServerFilter = %v, %v; want [example.net.]", filter, err)
 	}
-	rep := ImrAuthServersSnapshot(authServersTestCache(t), filter, false)
+	rep := ImrAuthTransportsSnapshot(authTransportsTestCache(t), filter, "", false)
 	if rep.Servers != 3 || len(rep.Rows) != 2 || rep.Rows[0].Server != "ns1.example.net." || rep.Rows[1].Server != "ns2.example.net." {
 		t.Errorf("filter example.net.: %d held, rows %+v; want 3 held, ns1 and ns2 shown", rep.Servers, rep.Rows)
 	}
 	filter, _ = ParseServerFilter([]string{"ample.net."})
-	if rep := ImrAuthServersSnapshot(authServersTestCache(t), filter, false); len(rep.Rows) != 0 {
+	if rep := ImrAuthTransportsSnapshot(authTransportsTestCache(t), filter, "", false); len(rep.Rows) != 0 {
 		t.Errorf("filter ample.net. matched %+v; a partial label must not match", rep.Rows)
 	}
 	if _, err := ParseServerFilter([]string{"bad..name"}); err == nil {
 		t.Error("ParseServerFilter accepted bad..name")
 	}
+	// A zone selects the servers it lists, whatever the case it is typed in.
+	rep = ImrAuthTransportsSnapshot(authTransportsTestCache(t), nil, "EXAMPLE.NET.", false)
+	if len(rep.Rows) != 1 || rep.Rows[0].Server != "ns1.example.net." || rep.Zone != "EXAMPLE.NET." {
+		t.Errorf("zone example.net.: rows %+v, want ns1.example.net. alone (ns2 serves no zone)", rep.Rows)
+	}
 }
 
 // A reset through a filter still clears every server.
-func TestImrAuthServersResetIgnoresFilter(t *testing.T) {
-	rc := authServersTestCache(t)
+func TestImrAuthTransportsResetIgnoresFilter(t *testing.T) {
+	rc := authTransportsTestCache(t)
 	filter, _ := ParseServerFilter([]string{"ns2.example.net."})
-	if rep := ImrAuthServersSnapshot(rc, filter, true); !rep.Reset || len(rep.Rows) != 1 {
+	if rep := ImrAuthTransportsSnapshot(rc, filter, "", true); !rep.Reset || len(rep.Rows) != 1 {
 		t.Fatalf("reset report %+v, want Reset and one row", rep)
 	}
-	for _, r := range ImrAuthServersSnapshot(rc, nil, false).Rows {
+	for _, r := range ImrAuthTransportsSnapshot(rc, nil, "", false).Rows {
 		if r.Total != 0 || r.FailedTotal != 0 || r.Truncated != 0 {
 			t.Errorf("%s after a filtered reset: %+v, want all counters cleared", r.Server, r)
 		}
@@ -104,12 +109,12 @@ func TestImrAuthServersResetIgnoresFilter(t *testing.T) {
 }
 
 // The API command: filters, refuses a bad name, and says so without an engine.
-func TestImrAuthServersAPI(t *testing.T) {
+func TestImrAuthTransportsAPI(t *testing.T) {
 	prev := Globals.ImrEngine
 	t.Cleanup(func() { Globals.ImrEngine = prev })
-	call := func(servers ...string) (ImrMgmtResponse, string) {
+	call := func(zone string, servers ...string) (ImrMgmtResponse, string) {
 		t.Helper()
-		body, _ := json.Marshal(ImrMgmtPost{Command: "imr-auth-servers", Data: map[string]interface{}{"servers": servers}})
+		body, _ := json.Marshal(ImrMgmtPost{Command: "imr-auth-transports", Data: map[string]interface{}{"servers": servers, "zone": zone}})
 		rec := httptest.NewRecorder()
 		(&Config{}).APIimr()(rec, httptest.NewRequest(http.MethodPost, "/imr", bytes.NewReader(body)))
 		var resp ImrMgmtResponse
@@ -120,17 +125,17 @@ func TestImrAuthServersAPI(t *testing.T) {
 	}
 
 	Globals.ImrEngine = &Imr{}
-	if resp, _ := call(); !resp.Error {
+	if resp, _ := call(""); !resp.Error {
 		t.Error("no cache, yet the command answered without an error")
 	}
 
-	Globals.ImrEngine = &Imr{Cache: authServersTestCache(t)}
-	if resp, _ := call("bad..name"); !resp.Error {
+	Globals.ImrEngine = &Imr{Cache: authTransportsTestCache(t)}
+	if resp, _ := call("", "bad..name"); !resp.Error {
 		t.Error("a bad server name was accepted")
 	}
-	resp, body := call("x.test.")
+	resp, body := call("", "x.test.")
 	raw, _ := json.Marshal(resp.Data)
-	var rep ImrAuthServersReport
+	var rep ImrAuthTransportsReport
 	if err := json.Unmarshal(raw, &rep); err != nil || resp.Error {
 		t.Fatalf("response %+v: %v", resp, err)
 	}
@@ -140,11 +145,17 @@ func TestImrAuthServersAPI(t *testing.T) {
 	if strings.Contains(body, "last_any") {
 		t.Errorf("an idle server carries a last_any: %s", body)
 	}
+	resp, _ = call("example.net")
+	raw, _ = json.Marshal(resp.Data)
+	rep = ImrAuthTransportsReport{}
+	if err := json.Unmarshal(raw, &rep); err != nil || len(rep.Rows) != 1 || rep.Rows[0].Server != "ns1.example.net." || rep.Zone != "example.net." {
+		t.Errorf("zone example.net over the API: %+v (%v), want ns1.example.net. alone", rep, err)
+	}
 }
 
 // The join: an answer from a real query lands in the report, under the server
 // that gave it. The stub's server is a private instance, marked as such.
-func TestImrAuthServersCountsARealQuery(t *testing.T) {
+func TestImrAuthTransportsCountsARealQuery(t *testing.T) {
 	const zone = "counted.example."
 	port, _ := startDenialAuthDouble(t, zone, "nope."+zone, "www."+zone, dns.TypeTXT, 60)
 	imr := denialTestImr(t, zone, port)
@@ -155,7 +166,7 @@ func TestImrAuthServersCountsARealQuery(t *testing.T) {
 	}
 
 	filter, _ := ParseServerFilter([]string{zone})
-	rep := ImrAuthServersSnapshot(imr.Cache, filter, false)
+	rep := ImrAuthTransportsSnapshot(imr.Cache, filter, "", false)
 	if len(rep.Rows) != 1 {
 		t.Fatalf("rows %+v, want the one server of %s", rep.Rows, zone)
 	}

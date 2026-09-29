@@ -1,4 +1,4 @@
-## tdns-cli imr stats client-stats
+## tdns-cli imr stats client-transports
 
 Show which transports clients use to reach this resolver
 
@@ -18,14 +18,14 @@ The counters must be switched on in the resolver's configuration
 client addresses, never query names.
 
 ```
-tdns-cli imr stats client-stats [flags]
+tdns-cli imr stats client-transports [flags]
 ```
 
 ### Options
 
 ```
   -c, --client strings   Client address or prefix; may be repeated
-  -h, --help             help for client-stats
+  -h, --help             help for client-transports
       --json             Print the report as JSON
       --reset            Clear ALL counters after showing them
       --sort string      Sort by addr, total or last (default "addr")

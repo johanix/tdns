@@ -18,13 +18,13 @@ import (
 // authoritative server, how many answers came back over which transport, how
 // many attempts failed, and the transport signal (OOTS) the server gave -- so
 // that what a server asked for and what the resolver did can be read side by
-// side. They are the counters "imr stats auth-transports" lists per zone, read
+// side. They are the counters "imr stats transport-stats" lists per zone, read
 // once per server: a server serving five zones is one row here, not five.
 
-// ImrAuthServerRow is one auth server in a report. Counts, LastUsed and Failed
+// ImrAuthTransportsRow is one auth server in a report. Counts, LastUsed and Failed
 // are keyed by the names in ImrClientTransports (Do53 over UDP and TCP apart);
 // a transport never used is absent.
-type ImrAuthServerRow struct {
+type ImrAuthTransportsRow struct {
 	Server      string               `json:"server"`
 	Src         string               `json:"src,omitempty"`    // "answer", "glue", "hint", "priming", "stub", ...
 	Shared      bool                 `json:"shared"`           // false: a stub zone's private instance, counted apart
@@ -39,15 +39,16 @@ type ImrAuthServerRow struct {
 	Truncated   uint64               `json:"truncated"` // Do53/UDP answers TC=1, retried over TCP
 }
 
-// ImrAuthServersReport is a snapshot of the per-server counters.
-type ImrAuthServersReport struct {
-	Since   time.Time          `json:"since"`   // resolver start or the last reset
-	Servers int                `json:"servers"` // servers held, before any filter
-	Rows    []ImrAuthServerRow `json:"rows"`    // the servers that matched, by name
-	Reset   bool               `json:"reset,omitempty"`
+// ImrAuthTransportsReport is a snapshot of the per-server counters.
+type ImrAuthTransportsReport struct {
+	Since   time.Time              `json:"since"`          // resolver start or the last reset
+	Zone    string                 `json:"zone,omitempty"` // only the servers of this zone were selected
+	Servers int                    `json:"servers"`        // servers held, before any filter
+	Rows    []ImrAuthTransportsRow `json:"rows"`           // the servers that matched, by name
+	Reset   bool                   `json:"reset,omitempty"`
 }
 
-// ParseServerFilter reads server names for ImrAuthServersSnapshot. A name
+// ParseServerFilter reads server names for ImrAuthTransportsSnapshot. A name
 // selects that server and every server below it, as a prefix does for an
 // address: "example.net." selects ns1.example.net. and ns2.example.net.
 func ParseServerFilter(specs []string) ([]string, error) {
@@ -66,19 +67,22 @@ func ParseServerFilter(specs []string) ([]string, error) {
 	return out, nil
 }
 
-// ImrAuthServersSnapshot returns the counters of the servers filter selects
-// (all when it is empty). With reset, EVERY server's counters are cleared
-// afterwards, whatever the filter, as with the client counters: clearing only
-// the selected servers would let an operator believe a new period had started
-// when it had not.
-func ImrAuthServersSnapshot(rc *cache.RRsetCacheT, filter []string, reset bool) ImrAuthServersReport {
+// ImrAuthTransportsSnapshot returns the counters of the servers filter selects
+// (all when it is empty), and with zone only those of the servers zone lists.
+// With reset, EVERY server's counters are cleared afterwards, whatever the
+// selection, as with the client counters: clearing only the selected servers
+// would let an operator believe a new period had started when it had not.
+func ImrAuthTransportsSnapshot(rc *cache.RRsetCacheT, filter []string, zone string, reset bool) ImrAuthTransportsReport {
 	since, stats := rc.AuthServerStats(reset)
-	rep := ImrAuthServersReport{Since: since, Servers: len(stats), Reset: reset}
+	rep := ImrAuthTransportsReport{Since: since, Zone: zone, Servers: len(stats), Reset: reset}
 	for _, s := range stats {
 		if len(filter) > 0 && !namesCover(filter, s.Name) {
 			continue
 		}
-		row := ImrAuthServerRow{
+		if zone != "" && !zonesInclude(s.Zones, zone) {
+			continue
+		}
+		row := ImrAuthTransportsRow{
 			Server:    s.Name,
 			Src:       s.Src,
 			Shared:    s.Shared,
@@ -126,6 +130,15 @@ func authTransportColumn(t core.Transport) string {
 		return ImrClientTransports[ctDoH]
 	}
 	return transportName(t)
+}
+
+func zonesInclude(zones []string, zone string) bool {
+	for _, z := range zones {
+		if core.EqualNames(z, zone) {
+			return true
+		}
+	}
+	return false
 }
 
 func namesCover(names []string, name string) bool {

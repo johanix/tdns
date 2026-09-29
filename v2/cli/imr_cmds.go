@@ -216,50 +216,7 @@ var ImrStatsCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		printLargeKskImrMetrics(tdns.LargeKskImrMetricsSnapshot())
 		fmt.Println()
-		fmt.Println("Subcommands: large-ksk, auth-servers, auth-transports, transport-stats, client-stats")
-	},
-}
-
-var imrStatsAuthTransportsCmd = &cobra.Command{
-	Use:   "auth-transports [zone]",
-	Short: "Show per-transport query counters for auth servers in a zone",
-	Args:  cobra.MaximumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		if Conf.Internal.RRsetCache == nil {
-			fmt.Println("RecursorCache is nil")
-			return
-		}
-		if len(args) == 1 {
-			zone := dns.Fqdn(args[0])
-			serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(zone)
-			if !ok {
-				fmt.Printf("No auth servers recorded for zone %q\n", zone)
-				return
-			}
-			fmt.Printf("Auth server transport counters for zone %s\n", zone)
-			for name, server := range serverMap {
-				fmt.Printf("\nServer: %s\n", name)
-				// Show received transport percentage signal (pct). If none: do53=100
-				fmt.Printf("  signal: %s\n", renderSignal(server))
-				fmt.Printf("  %s\n", formatTransportCounters(server))
-			}
-			return
-		}
-		// No zone provided: list all zones
-		fmt.Printf("Auth server transport counters for all zones\n")
-		for item := range Conf.Internal.RRsetCache.ServerMap.IterBuffered() {
-			zone := item.Key
-			serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(zone)
-			if !ok {
-				continue // removed between the iteration and the copy
-			}
-			fmt.Printf("\nZone: %s\n", zone)
-			for name, server := range serverMap {
-				fmt.Printf("  Server: %s\n", name)
-				fmt.Printf("    signal: %s\n", renderSignal(server))
-				fmt.Printf("    %s\n", formatTransportCounters(server))
-			}
-		}
+		fmt.Println("Subcommands: large-ksk, auth-transports, client-transports, transport-stats")
 	},
 }
 
@@ -608,7 +565,6 @@ func init() {
 	}
 
 	ImrStatsCmd.AddCommand(imrStatsLargeKskCmd)
-	ImrStatsCmd.AddCommand(imrStatsAuthTransportsCmd)
 	ImrShowCmd.AddCommand(imrShowOptionsCmd)
 	ImrShowCmd.AddCommand(imrShowConfigCmd)
 	ImrFlushCmd.AddCommand(imrFlushCommonCmd, imrFlushAllCmd)

@@ -11,11 +11,11 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 )
 
-func authServersTestReport() tdns.ImrAuthServersReport {
+func authTransportsTestReport() tdns.ImrAuthTransportsReport {
 	at := time.Date(2026, 9, 29, 11, 23, 47, 0, time.UTC)
-	return tdns.ImrAuthServersReport{
+	return tdns.ImrAuthTransportsReport{
 		Since: at.Add(-time.Hour), Servers: 4,
-		Rows: []tdns.ImrAuthServerRow{
+		Rows: []tdns.ImrAuthTransportsRow{
 			{Server: "ns1.example.net.", Shared: true, Zones: []string{"example.net."},
 				Signal:   map[string]uint8{"doh": 0, "dot": 40, "do53": 100, "doq": 30},
 				Counts:   map[string]uint64{"do53/udp": 345, "dot": 12, "doq": 1},
@@ -41,8 +41,8 @@ func lineStarting(out, prefix string) string {
 	return ""
 }
 
-func TestFormatAuthServers(t *testing.T) {
-	out := formatAuthServers(authServersTestReport(), "name", false)
+func TestFormatAuthTransports(t *testing.T) {
+	out := formatAuthTransports(authTransportsTestReport(), "name", false)
 	for _, want := range []string{
 		"4 servers held, 3 shown",
 		"AUTH SERVER", "ZONES", "DO53/UDP", "DO53/TCP", "DOH", "FAIL", "TC", "LAST USED", "OOTS",
@@ -71,8 +71,8 @@ func TestFormatAuthServers(t *testing.T) {
 	}
 }
 
-func TestFormatAuthServersPct(t *testing.T) {
-	out := formatAuthServers(authServersTestReport(), "name", true)
+func TestFormatAuthTransportsPct(t *testing.T) {
+	out := formatAuthTransports(authTransportsTestReport(), "name", true)
 	f := strings.Fields(lineStarting(out, "ns1.example.net. "))
 	// ns1.example.net. 1 | 96% 0% 3% <1% 0% | 358 7 2 ...
 	if len(f) < 10 || f[2] != "96%" || f[3] != "0%" || f[4] != "3%" || f[5] != "<1%" || f[6] != "0%" || f[7] != "358" {
@@ -89,12 +89,12 @@ func TestFormatAuthServersPct(t *testing.T) {
 	}
 }
 
-func TestFormatAuthServersSort(t *testing.T) {
-	out := formatAuthServers(authServersTestReport(), "total", false)
+func TestFormatAuthTransportsSort(t *testing.T) {
+	out := formatAuthTransports(authTransportsTestReport(), "total", false)
 	if strings.Index(out, "ns2.example.net.") > strings.Index(out, "ns1.example.net.") {
 		t.Errorf("sort by total: ns2 (900) should come before ns1 (358):\n%s", out)
 	}
-	out = formatAuthServers(authServersTestReport(), "last", false)
+	out = formatAuthTransports(authTransportsTestReport(), "last", false)
 	if strings.Index(out, "ns1.example.net.") > strings.Index(out, "ns2.example.net.") {
 		t.Errorf("sort by last: ns1 (11:23:47) should come before ns2 (10:23:47):\n%s", out)
 	}

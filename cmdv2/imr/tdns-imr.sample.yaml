@@ -42,7 +42,7 @@ imrengine:
    root-hints:          "/etc/tdns/root.hints"
    # Per-client transport counters: for each client address, how many queries
    # arrived over Do53 (UDP, TCP), DoT, DoQ and DoH, since startup or the last
-   # reset ("tdns-cli imr stats client-stats"). They record client addresses,
+   # reset ("tdns-cli imr stats client-transports"). They record client addresses,
    # never query names, and are off by default. Read at startup: changing
    # "enabled" needs a restart, not a reload.
    # client-stats:

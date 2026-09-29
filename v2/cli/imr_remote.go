@@ -25,9 +25,9 @@ import (
 // that was up and serving.
 //
 // flush and "stats transport-stats" already dispatched to the daemon's API. This
-// does the same for "query" and "stats auth-transports", and makes
-// the commands that have no API equivalent say so instead of printing tdns-cli's
-// state.
+// does the same for "query", and makes the commands that have no API equivalent
+// say so instead of printing tdns-cli's state. ("stats auth-transports" and
+// "stats client-transports" choose their path themselves.)
 
 // imrIsRemote reports whether this command runs in tdns-cli, reaching the
 // resolver over its API, rather than inside the resolver's own shell.
@@ -70,15 +70,6 @@ func dispatchRemote(c *cobra.Command, remote func(cmd *cobra.Command, args []str
 
 func init() {
 	dispatchRemote(ImrQueryCmd, queryViaApi)
-
-	// "stats auth-servers" chooses between the two paths itself, as client-stats does.
-	dispatchRemote(imrStatsAuthTransportsCmd, func(cmd *cobra.Command, args []string) {
-		var f transportStatsFilter
-		if len(args) == 1 {
-			f.zone = dns.Fqdn(args[0])
-		}
-		renderTransportStatsRemote(cmd.Context(), f)
-	})
 
 	guardInProcess(ImrStatsCmd, "imr stats", `"tdns-cli imr stats transport-stats"`)
 	guardInProcess(imrStatsLargeKskCmd, "imr stats large-ksk", "")
