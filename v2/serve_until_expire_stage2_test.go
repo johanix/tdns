@@ -627,6 +627,12 @@ func TestFirstBindCompletesEvenWhenTheTransferFails(t *testing.T) {
 		t.Fatal("the zone never came to hold data: a restart with the primary " +
 			"down still serves nothing")
 	}
+	// The copy is published inside the refresh. The first-bind completion
+	// runs after it, and the engine records the RefreshError after that, last:
+	// wait for the error before looking at what the completion left.
+	for !zd.HasError(RefreshError) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
 	if !zd.HasError(RefreshError) {
 		t.Error("expected RefreshError to be recorded for the failed transfer")
 	}
