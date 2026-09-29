@@ -268,6 +268,28 @@ delegated without a DS costs one DS query per interval for as long as it is in
 use. Flushing a zone without keeping its structural records, or resetting the
 cache, drops these verdicts at once.
 
+## Test-harness switches
+
+`imrengine.testing:` holds switches for black-box test harnesses, such as
+`tests/deckard/`. None of them is for production, and `config check` warns
+about any that is set.
+
+```yaml
+imrengine:
+   testing:
+      priming: false
+```
+
+- **What `priming: false` does.** It seeds the cache from `root-hints` as
+  they stand and marks it primed, without asking the roots for their NS
+  RRset.
+- **Why a harness needs it.** A harness that starts its scripted servers only
+  once the resolver accepts connections needs this switch. Otherwise the
+  resolver opens its listeners only after priming has succeeded, and never
+  becomes ready.
+- **What still happens.** The root NS is still refreshed from the live roots
+  before the hints' copy expires.
+
 ## large-algorithms
 
 Not part of `imrengine:` — it lives in the shared top-level `dnssec:` block.
