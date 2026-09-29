@@ -1199,16 +1199,21 @@ func (rrcache *RRsetCacheT) FindClosestKnownZoneFor(qname string, qtype uint16) 
 }
 
 // ServersFor returns the servers that the resolver's own fetch of <qname,
-// qtype> is sent to, and whether there is anything to send it to. A forwarded
-// question is sent without servers, and no zone cut is looked for: the fetcher
-// forwards it (Forwarded). Any other goes to the closest cached zone that holds
-// it (FindClosestKnownZoneFor), or to the root's servers when that zone has
-// none.
+// qtype> is sent to, and whether there is anything to send it to. A question
+// the server answers from its own zone is sent without servers, and so is a
+// forwarded one, and for neither is a zone cut looked for: the fetcher answers
+// the first from the zone (AnsweredLocally) and forwards the second
+// (Forwarded). Any other goes to the closest cached zone that holds it
+// (FindClosestKnownZoneFor), or to the root's servers when that zone has none.
 //
 // The fetches used to look for the cut first and give up without servers,
 // which for a forwarded root is whenever the root NS it holds has expired: the
-// root server map goes with it (#722).
+// root server map goes with it (#722). A parent's own DS for a child, which it
+// needs to validate the child's keys, was given up on the same way (#842).
 func (rrcache *RRsetCacheT) ServersFor(qname string, qtype uint16) (map[string]*AuthServer, bool) {
+	if rrcache.AnsweredLocally != nil && rrcache.AnsweredLocally(qname, qtype) {
+		return nil, true
+	}
 	if rrcache.Forwarded != nil && rrcache.Forwarded(qname, qtype) {
 		return nil, true
 	}

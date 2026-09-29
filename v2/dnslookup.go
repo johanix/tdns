@@ -1430,6 +1430,15 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		}
 	}
 
+	// A question about a zone this server is authoritative for is answered
+	// from that zone, in process: it is neither forwarded nor iterated
+	// (imr_own_zone.go, #842). Ahead of the forward hook below, and here for
+	// the same reason it is: every internal consumer comes through this entry
+	// point.
+	if rrset, rcode, cacheCtx, transport, err, ok := imr.answerFromOwnZone(ctx, qname, qtype, force, privacy); ok {
+		return rrset, rcode, cacheCtx, transport, err
+	}
+
 	// Forwarding: when qname falls under a configured forward zone, hand the
 	// query to that zone's upstream resolver(s) instead of iterating. Placed
 	// after the cache check so cached answers still short-circuit, and inside
