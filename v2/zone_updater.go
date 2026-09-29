@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -821,7 +822,18 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 	// recorded, and would silently roll back at the next restart while every
 	// other kind of change survived.
 	var persistErr error
-	updated, persistErr, err = zd.stageAndPublishLocked(ur, func() bool { return zd.stageChildUpdateLocked(ur, dak) })
+	var absent []dns.RR
+	updated, persistErr, err = zd.stageAndPublishLocked(ur, func() bool {
+		// Before anything is staged: a refused update applies none of its
+		// actions.
+		if absent = zd.absentChildDeletesLocked(ur.Actions); len(absent) > 0 {
+			return false
+		}
+		return zd.stageChildUpdateLocked(ur, dak)
+	})
+	if len(absent) > 0 {
+		err = &ChildDeleteNotInZoneError{Zone: zd.ZoneName, Records: absent}
+	}
 	if persistErr != nil {
 		// An error, not just updated=false: the direct backend, this
 		// applier's caller, reads only the error, and the ZoneUpdater would
@@ -833,6 +845,64 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 			zd.ZoneName, persistErr)
 	}
 	return updated, err
+}
+
+// ChildDeleteNotInZoneError refuses a child update that deletes a record the
+// zone does not hold (absentChildDeletesLocked). Nothing in the update was
+// applied. The RFC 2136 responder answers it NXRRSET.
+type ChildDeleteNotInZoneError struct {
+	Zone    string
+	Records []dns.RR // the class-NONE deletes that named no record in the zone
+}
+
+func (e *ChildDeleteNotInZoneError) Error() string {
+	recs := make([]string, 0, len(e.Records))
+	for _, rr := range e.Records {
+		rrcopy := dns.Copy(rr)
+		rrcopy.Header().Class = dns.ClassINET
+		recs = append(recs, rrcopy.String())
+	}
+	return fmt.Sprintf("zone %s does not hold the record the update deletes, so nothing in it was applied: %s",
+		e.Zone, strings.Join(recs, "; "))
+}
+
+// absentChildDeletesLocked returns the class-NONE deletes in a child update
+// that name a record the working set does not hold. The caller holds zd.mu.
+//
+// RFC 2136 §3.4.2.4 lets such a delete pass as a no-op, answered NOERROR. But a
+// child's delegation syncher deletes a record it saw the parent serve, and takes
+// NOERROR to mean the parent serves it no longer: it does not send the delete
+// again. A delete that matched nothing while the record stayed in the zone was
+// answered exactly so (#843). So the update is refused, as a failed "RR exists"
+// prerequisite is, and nothing in it is applied.
+func (zd *ZoneData) absentChildDeletesLocked(actions []dns.RR) []dns.RR {
+	var absent []dns.RR
+	for _, rr := range actions {
+		if rr.Header().Class != dns.ClassNONE {
+			continue
+		}
+		// A type the policy denies is skipped by the staging, delete or not.
+		if _, ok := zd.UpdatePolicy.Child.RRtypes[rr.Header().Rrtype]; !ok {
+			continue
+		}
+		held := false
+		if owner := zd.stagedOwner(rr.Header().Name); owner != nil {
+			if rrset, exists := owner.RRtypes.Get(rr.Header().Rrtype); exists {
+				want := dns.Copy(rr)
+				want.Header().Class = dns.ClassINET
+				for _, have := range rrset.RRs {
+					if core.IsDuplicate(have, want) {
+						held = true
+						break
+					}
+				}
+			}
+		}
+		if !held {
+			absent = append(absent, rr)
+		}
+	}
+	return absent
 }
 
 // stageChildUpdateLocked stages the actions of a child update in the working
@@ -923,7 +993,12 @@ func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (u
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
 			lg.Debug("ApplyChildUpdateToZoneData: Remove RR", "owner", ownerName, "rrtype", rrtypestr, "rr", rrcopy.String())
-			rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) // Cannot remove rr, because it is in the wrong class.
+			if !rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) { // Cannot remove rr, because it is in the wrong class.
+				// The zone held it (absentChildDeletesLocked), so an earlier
+				// action in this update removed it. Nothing left to change.
+				lg.Debug("ApplyChildUpdateToZoneData: RR already removed by this update", "owner", ownerName, "rrtype", rrtypestr)
+				continue
+			}
 			if len(rrset.RRs) == 0 {
 				zd.stageDeleteLocked(ownerName, rrtype)
 			} else {
@@ -960,7 +1035,9 @@ func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (u
 
 		dup := false
 		for _, oldrr := range rrset.RRs {
-			if dns.IsDuplicate(oldrr, rrcopy) {
+			// core.IsDuplicate: a DS read from the zone file matches the same
+			// DS from the wire (#843), and is not added a second time.
+			if core.IsDuplicate(oldrr, rrcopy) {
 				lg.Debug("ApplyChildUpdateToZoneData: not adding duplicate", "rrtype", rrtypestr, "rr", rrcopy.String())
 				dup = true
 				break
