@@ -761,14 +761,13 @@ func hostLocalAddr(addr string) bool {
 }
 
 // mayQueryAddr reports whether a query may go to server at addr. An address on
-// this host is used only for a configured stub's servers, or with the
-// allow-loopback-nameservers option: a referral, glue or an address lookup
-// must not be able to point the resolver at services on its own host (#831).
-// A stub's servers are private instances that referrals and glue never add
-// addresses to (RRsetCacheT.AddStub), so their Src says where every address
-// came from.
+// this host is used only if the operator configured it for the server (a
+// stub's, RRsetCacheT.AddStub), or with the allow-loopback-nameservers option:
+// a referral, glue or an address lookup must not be able to point the resolver
+// at services on its own host (#831). The test is the address, not the server:
+// glue can add addresses to a stub's server too.
 func mayQueryAddr(server *cache.AuthServer, addr string, allowHostLocal bool) bool {
-	return allowHostLocal || !hostLocalAddr(addr) || server.GetSrc() == "stub"
+	return allowHostLocal || !hostLocalAddr(addr) || server.IsConfiguredAddr(addr)
 }
 
 // allowHostLocalServers reports whether allow-loopback-nameservers is set.

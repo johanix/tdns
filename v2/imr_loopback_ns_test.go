@@ -48,6 +48,7 @@ func TestMayQueryAddr(t *testing.T) {
 	glue.SetSrc("glue")
 	stub := cache.NewAuthServer("ns.stub.example.")
 	stub.ForceSetSrc("stub")
+	stub.SetConfiguredAddrs([]string{"127.0.0.1", "0:0::1"})
 	for _, tc := range []struct {
 		name   string
 		server *cache.AuthServer
@@ -59,12 +60,40 @@ func TestMayQueryAddr(t *testing.T) {
 		{"glue, v6 loopback", glue, "::1", false, false},
 		{"glue, unspecified", glue, "0.0.0.0", false, false},
 		{"glue, elsewhere", glue, "192.0.2.1", false, true},
-		{"stub, loopback", stub, "127.0.0.1", false, true},
+		{"stub, configured loopback", stub, "127.0.0.1", false, true},
+		{"stub, configured v6 loopback, other spelling", stub, "::1", false, true},
+		{"stub, loopback added by glue", stub, "127.0.0.2", false, false},
 		{"glue, loopback, allowed", glue, "127.0.0.1", true, true},
 	} {
 		if got := mayQueryAddr(tc.server, tc.addr, tc.allow); got != tc.want {
 			t.Errorf("%s: mayQueryAddr = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// Glue can add an address to a stub's server. A loopback address added that
+// way is not queried: only the configured ones are exempt.
+func TestLoopbackGlueOnAStubServerIsNotQueried(t *testing.T) {
+	imr := newTestImr(t)
+	delete(imr.Options, ImrOptAllowLoopbackNameservers)
+	const zone = "stub831.test."
+	if err := imr.Cache.AddStub(zone, []cache.AuthServer{
+		{Name: "ns." + zone, Addrs: []string{"127.0.0.1"}, Alpn: []string{"do53"}},
+	}); err != nil {
+		t.Fatalf("AddStub: %v", err)
+	}
+	sm, ok := imr.Cache.ServerMap.Get(zone)
+	if !ok || sm[cache.ServerKey("ns."+zone)] == nil {
+		t.Fatal("precondition: no stub server map")
+	}
+	sm[cache.ServerKey("ns."+zone)].AddAddr("127.0.0.2") // as glue would
+	_, _, tuples := imr.prioritizeServers("www."+zone, dns.TypeA, sm, edns0.PrivacyNone)
+	var addrs []string
+	for _, tup := range tuples {
+		addrs = append(addrs, tup.Addr)
+	}
+	if !slices.Equal(addrs, []string{"127.0.0.1"}) {
+		t.Errorf("tuples go to %v, want only the configured 127.0.0.1", addrs)
 	}
 }
 
