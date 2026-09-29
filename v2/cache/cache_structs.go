@@ -119,6 +119,8 @@ type RRsetCacheT struct {
 	nsRevalidateMu       sync.Mutex
 	nsRevalidateInFlight map[string]struct{}
 	serverMapMu          sync.Mutex // serializes the ServerMap writers; see ServerMap and stubZones
+	statsMu              sync.Mutex // serializes AuthServerStats, so two resets cannot interleave
+	statsSince           time.Time  // start of the auth-server counting period: creation or the last reset
 }
 
 // ServerTLSARecords is the validated TLSA cache for one nameserver, keyed by

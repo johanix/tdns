@@ -115,6 +115,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 		Debug:                debug,
 		DNSClient:            client,
 		nsRevalidateInFlight: make(map[string]struct{}),
+		statsSince:           time.Now(),
 	}
 }
 

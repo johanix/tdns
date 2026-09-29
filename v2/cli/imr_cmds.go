@@ -216,59 +216,8 @@ var ImrStatsCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		printLargeKskImrMetrics(tdns.LargeKskImrMetricsSnapshot())
 		fmt.Println()
-		fmt.Println("Subcommands: large-ksk, auth-transports, auth-servers")
+		fmt.Println("Subcommands: large-ksk, auth-transports, client-transports, transport-stats")
 	},
-}
-
-var imrStatsAuthTransportsCmd = &cobra.Command{
-	Use:   "auth-transports [zone]",
-	Short: "Show per-transport query counters for auth servers in a zone",
-	Args:  cobra.MaximumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		if Conf.Internal.RRsetCache == nil {
-			fmt.Println("RecursorCache is nil")
-			return
-		}
-		if len(args) == 1 {
-			zone := dns.Fqdn(args[0])
-			serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(zone)
-			if !ok {
-				fmt.Printf("No auth servers recorded for zone %q\n", zone)
-				return
-			}
-			fmt.Printf("Auth server transport counters for zone %s\n", zone)
-			for name, server := range serverMap {
-				fmt.Printf("\nServer: %s\n", name)
-				// Show received transport percentage signal (pct). If none: do53=100
-				fmt.Printf("  signal: %s\n", renderSignal(server))
-				fmt.Printf("  %s\n", formatTransportCounters(server))
-			}
-			return
-		}
-		// No zone provided: list all zones
-		fmt.Printf("Auth server transport counters for all zones\n")
-		for item := range Conf.Internal.RRsetCache.ServerMap.IterBuffered() {
-			zone := item.Key
-			serverMap, ok := Conf.Internal.RRsetCache.ServerMapCopy(zone)
-			if !ok {
-				continue // removed between the iteration and the copy
-			}
-			fmt.Printf("\nZone: %s\n", zone)
-			for name, server := range serverMap {
-				fmt.Printf("  Server: %s\n", name)
-				fmt.Printf("    signal: %s\n", renderSignal(server))
-				fmt.Printf("    %s\n", formatTransportCounters(server))
-			}
-		}
-	},
-}
-
-// Alias with requested name that prints the same information as auth-transports
-var imrStatsAuthServersCmd = &cobra.Command{
-	Use:   "auth-servers [zone]",
-	Short: "Show per-transport query counters and signal for auth servers",
-	Args:  cobra.MaximumNArgs(1),
-	Run:   imrStatsAuthTransportsCmd.Run,
 }
 
 var ImrShowCmd = &cobra.Command{
@@ -616,8 +565,6 @@ func init() {
 	}
 
 	ImrStatsCmd.AddCommand(imrStatsLargeKskCmd)
-	ImrStatsCmd.AddCommand(imrStatsAuthTransportsCmd)
-	ImrStatsCmd.AddCommand(imrStatsAuthServersCmd)
 	ImrShowCmd.AddCommand(imrShowOptionsCmd)
 	ImrShowCmd.AddCommand(imrShowConfigCmd)
 	ImrFlushCmd.AddCommand(imrFlushCommonCmd, imrFlushAllCmd)
