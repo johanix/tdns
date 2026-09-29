@@ -10,7 +10,10 @@ package tdns
 
 import (
 	"context"
+	"log"
+	"os"
 	"testing"
+	"time"
 
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -81,14 +84,29 @@ func TestDelegationUpdateGoesToTheZoneInTheZoneSection(t *testing.T) {
 	}
 }
 
-// A zone section that names no zone served here: a one-record update is still
-// routed by its owner, as before. The child is not served; its delegation is.
-func TestOneRecordUpdateNamingAnUnservedZoneRoutesByOwner(t *testing.T) {
+// A zone section naming the child, which is not served here but delegated from
+// a zone that is: the parent takes the update, as the child's delegation.
+//
+// The glue record is the case that tells routing by the zone section from
+// routing by the record's owner. Routed by its owner, the glue was neither the
+// parent's apex nor a delegation point, so it became a ZONE-UPDATE of the
+// parent's own data.
+func TestZoneSectionInsideAServedZoneFindsThatZone(t *testing.T) {
 	childKeyParent(t)
 
-	dur, _ := updateNamed(t, "child.parent.example.", mustRR(t, "child.parent.example. 3600 IN DS 2 15 2 0000"))
-	if dur.Status.Type != "CHILD-UPDATE" {
-		t.Errorf("classified as %q, want CHILD-UPDATE of parent.example.", dur.Status.Type)
+	for _, tc := range []struct {
+		name string
+		rr   string
+	}{
+		{"DS at the delegation", "child.parent.example. 3600 IN DS 2 15 2 0000"},
+		{"glue below it", "ns1.child.parent.example. 3600 IN A 192.0.2.9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dur, _ := updateNamed(t, "child.parent.example.", mustRR(t, tc.rr))
+			if dur.Status.Type != "CHILD-UPDATE" {
+				t.Errorf("classified as %q, want CHILD-UPDATE of parent.example.", dur.Status.Type)
+			}
+		})
 	}
 }
 
@@ -114,6 +132,71 @@ func TestRecordOutsideTheZoneIsNotZone(t *testing.T) {
 			dur, resp := updateNamed(t, "parent.example.", tc.rrs...)
 			if resp.Rcode != dns.RcodeNotZone {
 				t.Errorf("rcode %s (type %q), want NOTZONE", dns.RcodeToString[resp.Rcode], dur.Status.Type)
+			}
+		})
+	}
+}
+
+// The updater is asked to change the zone the responder found, not the name
+// in the zone section. When the zone section names a name inside a served
+// zone, the request used to carry that name, and the updater, which looks the
+// zone up by it, refused it as unknown.
+//
+// Signed by a trusted key with the verifier stubbed, as in
+// TestUpdateResponderReleasesOnShutdownRatherThanBlocking: nothing short of
+// an approved update reaches the queue.
+func TestApprovedUpdateIsQueuedForTheZoneFound(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := cuParentZone(t)
+	registerZones(t, zd)
+	zd.KeyDB = kdb
+	zd.Logger = log.New(os.Stderr, "", 0)
+	zd.Options = map[ZoneOption]bool{OptAllowUpdates: true}
+	zd.UpdatePolicy = UpdatePolicy{
+		Zone: UpdatePolicyDetail{Type: "selfsub", RRtypes: map[uint16]bool{dns.TypeA: true}, TTL: 3600},
+	}
+
+	key := mustRR(t, "example. 3600 IN KEY 256 3 15 kR7NlEmXPWWDCFZmJqFhOJjHtBSKuLnCJHBTLzNJnUE=").(*dns.KEY)
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "sig0", SubCommand: "add", Keyname: "example.",
+		Keyid: int(key.KeyTag()), Src: "file", KeyRR: key.String(),
+	}); err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "trust", Keyname: "example.",
+		Keyid: int(key.KeyTag()),
+	}); err != nil {
+		t.Fatalf("trust key: %v", err)
+	}
+	stubSig0Verify(t)
+
+	// The zone itself, and a name in it that is not a zone served here.
+	for _, zone := range []string{"example.", "www.example."} {
+		t.Run(zone, func(t *testing.T) {
+			m := signedUpdateFrom(t, zone, "example.", key.KeyTag())
+			m.Ns = []dns.RR{mustRR(t, "www.example. 3600 IN A 192.0.2.1")}
+			dur := &DnsUpdateRequest{ResponseWriter: &captureWriter{}, Msg: m, Qname: zone, Status: &UpdateStatus{}}
+
+			updateq := make(chan UpdateRequest, 1)
+			returned := make(chan error, 1)
+			go func() { returned <- UpdateResponder(context.Background(), dur, updateq) }()
+
+			select {
+			case req := <-updateq:
+				if req.ZoneName != zd.ZoneName {
+					t.Errorf("queued for zone %q, want %q, the zone that was found", req.ZoneName, zd.ZoneName)
+				}
+				req.respond(true, nil)
+			case err := <-returned:
+				t.Fatalf("the responder returned before queueing the update (%v)", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("the update was never queued")
+			}
+			select {
+			case <-returned:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the responder did not return after the update was answered")
 			}
 		})
 	}
