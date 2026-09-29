@@ -1,0 +1,24 @@
+# Deckard resolver scenarios that are not run against tdns-imr.
+# One scenario per line: the file name, then the reason. Reasons are
+# structural: the scenario needs something tdns-imr or this harness cannot
+# express. A scenario that fails for another reason stays in the run, and its
+# failure is recorded (README.md), or it gets an issue.
+fwd_val_cname_sibling.rpl              forwarding scenario, and no stub-addr to template root hints from
+iter_minim_a.rpl                       QNAME minimisation on: tdns-imr has none
+iter_minim_a_nxdomain.rpl              QNAME minimisation on: tdns-imr has none
+iter_minim_nonempty.rpl                QNAME minimisation on: tdns-imr has none
+iter_minim_ns.rpl                      QNAME minimisation on: tdns-imr has none
+module_dns64.rpl                       Knot Resolver module
+module_hint_static.rpl                 Knot Resolver module
+module_policy_deny_all.rpl             Knot Resolver module
+module_policy_deny_suff_comm.rpl       Knot Resolver module
+module_policy_deny_suff_patt.rpl       Knot Resolver module
+module_policy_drop.rpl                 Knot Resolver module
+module_policy_forward.rpl              Knot Resolver module
+module_policy_pass_deny.rpl            Knot Resolver module
+module_policy_tc.rpl                   Knot Resolver module
+module_renumber.rpl                    Knot Resolver module
+module_workarounds_disable_0x20.rpl    Knot Resolver module
+val_ta_sentinel_insecure.rpl           QNAME minimisation on: tdns-imr has none
+world_cz_lidovky_www.rpl               negative trust anchor, and no stub-addr to template root hints from
+world_mx_nic_www.rpl                   negative trust anchor: tdns-imr has none

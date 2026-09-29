@@ -1,0 +1,33 @@
+# tdns-imr config, rendered by Deckard for one scenario run.
+# Source: tests/deckard/template/tdns-imr.yaml.j2 in the tdns repository.
+listeners:
+   addresses:  [ {% if ':' in SELF_ADDR %}'[{{SELF_ADDR}}]:53'{% else %}'{{SELF_ADDR}}:53'{% endif %} ]
+   transports: [ do53 ]
+
+imrengine:
+   # Deckard's template/hints_zone.j2: ". NS <ROOT_NAME>" plus its address.
+   root-hints: "{{WORKING_DIR}}/hints.zone"
+{% if TRUST_ANCHORS %}
+   # One DS or DNSKEY per line, from the scenario's trust-anchor entries.
+   trust-anchor-file: "{{WORKING_DIR}}/ta.keys"
+{% endif %}
+   # Keeps the experimental transport-signal option off outgoing queries.
+   options: [ "use-transport-signals:false" ]
+   # Designed in docs/2026-09-28-imr-deckard-test-clock-and-switches.md and not
+   # implemented yet. Until they exist, tdns-imr logs these as unknown keys at
+   # start-up and ignores them.
+   address-families: [ {% if DO_IP4 == "true" %}ipv4{% endif %}{% if DO_IP4 == "true" and DO_IP6 == "true" %}, {% endif %}{% if DO_IP6 == "true" %}ipv6{% endif %} ]
+   testing:
+      faketime:        true
+      anchor-prefetch: false
+      root-refresh:    false
+      priming:         false
+      ns-pick:         ordered
+      forward-probe:   false
+
+apiserver:
+   apikey: "deckard"
+
+log:
+   file:  "{{WORKING_DIR}}/tdns-imr.log"
+   level: debug
