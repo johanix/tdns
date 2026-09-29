@@ -3,8 +3,21 @@
 **Written 2026-09-28.** Line references are to main at `4711137e`. Deckard
 references are to its repository at `e51f539` (2026-06-25).
 
-**Status:** proposal, not implemented. The questions in §9 were decided
-2026-09-28.
+**Status:** proposal, revision 2, not implemented. The questions in §9 were
+decided 2026-09-28.
+
+**Revisions:**
+- **r1**, 2026-09-28: `f89c6fea` (#822).
+- **r2**, 2026-09-29, after an external review of r1 (verdict: sound, merge):
+  - `rrset_cache.go:74`, `DnskeyCacheT.Set`, is data time (§3.2);
+  - S3 is required whenever the clock is on, not only to stop a query
+    (§3.3, §4);
+  - S4 is the existing `PrimeFromHintsOnly` at start-up, not a new priming
+    path (§4);
+  - header-flag mismatches under `MATCH all` are named as their own class
+    (§6, §7);
+  - notes on unknown config keys in stage 1 (§6) and on short TIME_PASSES
+    steps (§3.3).
 
 ## Summary
 
@@ -160,7 +173,10 @@ These have to move together. With only the validity window on the fake clock,
 comes out negative for a 2010 signature, and is cast to `uint32`.
 
 **Cache expiry:**
-- `cache/rrset_cache.go:50`, `:54`, `:74`, `:133`, `:183`, `:801` and `:840`;
+- `cache/rrset_cache.go:50`, `:54`, `:74`, `:133`, `:183`, `:801` and `:840`.
+  `:74` is `DnskeyCacheT.Set`, which caps a learned key's expiration with
+  `limits.bound(..., now)`. Left on real time, a 2010 clock would keep the
+  DNSKEY cache's lifetimes in the present;
 - `RemainingTTL(now)` (`cache/cached_ttl.go:27`) already takes `now`, and its
   callers pass `cache.Now()`;
 - the verdict age: `cache/cache_structs.go:156-173` and
@@ -176,9 +192,7 @@ expiry.
 - backoffs: `cache/authserver.go`, `cache/zone_errors.go`,
   `cache/family_tracker.go`;
 - discovery cool-downs: `cache/discovery_state.go`;
-- RTT, timeouts and timers across `v2/imr*.go` and `v2/dnslookup.go`;
-- `rrset_cache.go:74` needs a look. It is read with the others, and whether it
-  is data time depends on what it stamps.
+- RTT, timeouts and timers across `v2/imr*.go` and `v2/dnslookup.go`.
 
 **Scale:** about 42 clock reads in `cache` and 66 in the IMR files of `v2`.
 Roughly a third are data time. The rest are left alone and listed as such in
@@ -203,6 +217,17 @@ clock set decades back.
   - The resolver starts a moment after Deckard, so the two clocks differ by
     seconds. That is irrelevant to validity windows of days and to TTL steps
     of hours.
+  - The real time a test takes adds to every TIME_PASSES step. Under
+    libfaketime that is true for every resolver. It matters only for short
+    steps: 5 scenarios advance by 5–25 s. Before a near-expiry miss there is
+    treated as a cache or validator bug, measure how far the fake clock had
+    run.
+  - **The root refresh is off while the clock is on** (S3, §4). Its wait is
+    `time.Until(crrset.Expiration)` (`imr_root_refresh.go:178-180`): an
+    expiry stamped by `cache.Now()` measured against the real clock. Setting
+    `faketime` turns the refresh off, and `root-refresh: true` beside it is a
+    config error. In production both stay on real time, so the refresh keeps
+    `time.Until`.
 - **Re-reading.** `FAKETIME_NO_CACHE=1` asks for a re-read on every clock
   read.
   - The source stats the file on each `Now()` and re-parses when its mtime,
@@ -245,8 +270,8 @@ clock, and `config check` flags them.
 |---|---|---|---|---|
 | S1 | `imrengine.address-families: [ ipv4 ]` (default both) | AAAA lookups for nameserver names; use of AAAA glue and AAAA hints | 156 (`do-ip6: no`), 5 (`do-ip4: no`) | `lookupServerAddrs` (`imr_zone_servers.go:70`), glue at `dnslookup.go:680-700` and `:2040-2060`, hints seeding (`cache/rrset_cache.go:881-1040`), `AuthServer.AddAddr` (`cache/authserver.go:132`) |
 | S2 | `testing.anchor-prefetch: false` | the start-up NS and DNSKEY fetch for each anchored zone | most of the 81 anchored below the root | `imrengine.go:479-483`, `:2270`, `:2347` |
-| S3 | `testing.root-refresh: false` | the `. NS` refresh before expiry | TIME_PASSES scenarios; under the clock, any | `imrengine.go:495`, `imr_root_refresh.go` |
-| S4 | `testing.priming: false` | the priming `. NS` query | 15 without a scripted `. NS` | `PrimeWithHints` (`cache/rrset_cache.go:1047`), `imrengine.go:321-339` |
+| S3 | `testing.root-refresh: false`, implied by `faketime` | the `. NS` refresh before expiry, and its mixed-clock arithmetic | every scenario run with the clock | `imrengine.go:495`, `imr_root_refresh.go:178-180` |
+| S4 | `testing.priming: false` | the priming `. NS` query | 15 without a scripted `. NS` | `InitImrEngine` calls `PrimeFromHintsOnly` (`cache/rrset_cache.go:1076-1085`) instead of `PrimeWithHints` (`:1047`); `imrengine.go:321-339` |
 | S5 | `testing.ns-pick: ordered` | the random choice of nameserver names to resolve | referrals without glue | `dnslookup.go:3001-3021` |
 | S6 | `testing.forward-probe: false` | the SOA probe of forward upstreams | 1 (`forward-addr`) | `imrengine.go:488` |
 
@@ -271,18 +296,31 @@ clock, and `config check` flags them.
 - The comment at `imrengine.go:472-478` says an anchored zone's DNSKEY is
   fetched on demand when no prefetch happened. S2 relies on that path.
 
-**S3, root refresh.** It re-queries `. NS` 60 s before expiry, on a real
-timer against the cached TTL. Under the fake clock a TIME_PASSES jump expires
-the root NS at once, and the refresh then sends a query the scenario did not
-script.
+**S3, root refresh.**
+- It re-queries `. NS` 60 s before expiry, on a real timer against the cached
+  TTL.
+- Under the fake clock it is wrong as well as noisy. Its wait,
+  `time.Until(crrset.Expiration)` (`imr_root_refresh.go:178-180`), measures a
+  fake-time expiry against the real clock.
+  - On a 2010 clock every root NS already looks expired.
+  - After a TIME_PASSES jump the cache has expired the root while the refresh
+    still counts in real time.
+- So `faketime` implies S3 (§3.3), and the switch also exists on its own for
+  runs without the clock.
 
 **S4, priming.**
 - The listeners start only after priming succeeds (`imrengine.go:430-441`),
   and a failed priming retries after 5 s (`imr_init_retry.go:27-42`).
 - A scenario without a scripted `. NS` therefore never becomes ready within
   Deckard's 5 s.
-- With S4 the cache is seeded from the hints as they stand. Knot Resolver's
-  Deckard template disables priming the same way (`kresd.j2:103-121`).
+- S4 needs no new code path.
+  - `PrimeFromHintsOnly` (`cache/rrset_cache.go:1076-1085`) seeds the cache
+    from the hints and marks it primed without the `. NS` fetch. `RefreshRoot`
+    already uses it to re-prime a root that is gone.
+  - With S4, `InitImrEngine` calls it instead of `PrimeWithHints`, and
+    nothing fetches `. NS`.
+- Knot Resolver's Deckard template disables priming the same way
+  (`kresd.j2:103-121`).
 
 **S5, ordered picks.**
 - When a referral arrives without glue for out-of-bailiwick nameservers, the
@@ -380,6 +418,16 @@ log:
    - 49 of the 50 clock-free scenarios say `do-ip6: no`. Where every
      nameserver has A glue, tdns-imr sends no AAAA lookups, so some will pass
      even before S1.
+   - The template can carry the full `testing:` block and `address-families`
+     from the start. At start-up an unknown config key is logged as a
+     warning ("unknown config keys ignored") and skipped, so the keys do
+     nothing until they exist. A reload decodes `imrengine` strictly and
+     would reject them, but Deckard never reloads.
+   - Until S4, the priming `. NS` query goes out. The 15 scenarios that do not
+     script it fail on that alone.
+   - Sort the failures by cause. A header flag (RA, AA, AD) that differs
+     under `MATCH all` is its own class (§7): neither the clock nor a switch
+     fixes it, so it must not be chased as either.
 2. **S1 to S6**, one commit each, with unit tests. S1 also documents
    `address-families` in the guide.
    - Re-run `iter_*`, and add the scenarios that now pass to the expected set.
@@ -410,7 +458,11 @@ log:
 | DSA (algorithm 3) keys | 9 | expected to fail until the validator has DSA; confirm in stage 3 |
 | NSEC3 denials with an expected AD | to be counted in stage 3 | tdns-imr validates NSEC3 denials as Indeterminate (`cache/rrset_validate.go:1214-1221`) |
 
+| Header flags under `MATCH all` | counted in stage 1 and 3 | about 235 answer checks compare every header flag; an RA, AA or AD that differs from the scenario is a behaviour difference, not a clock or switch problem |
+
 Anything else that fails goes on the list with its reason, or gets an issue.
+A flag mismatch that shows a tdns-imr bug gets an issue. One that reflects a
+deliberate difference stays on the list, with its reason.
 
 ## 8. Tests (unit, in tdns)
 
@@ -433,8 +485,11 @@ Anything else that fails goes on the list with its reason, or gets an issue.
 - **S2–S4, S6:** each switch removes its query from the double's log, and
   start-up still completes.
 - **S5:** two runs over the same referral send the same address lookups.
-- **Activation:** `faketime: true` with no file fails start-up. Without
-  `testing:`, `cache.Now()` is real time.
+- **Activation:**
+  - `faketime: true` with no file fails start-up;
+  - `faketime: true` turns the root refresh off, and `root-refresh: true`
+    beside it is a config error;
+  - without `testing:`, `cache.Now()` is real time.
 
 ## 9. Decisions
 
