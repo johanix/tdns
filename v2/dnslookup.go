@@ -353,6 +353,10 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 		if r == nil {
 			continue
 		}
+		if qerr := replyMatchesQuery(r, m); qerr != nil {
+			lg.Printf("AuthDNSQuery: discarding a reply from %s: %v", ns, qerr)
+			continue
+		}
 		rcode = r.MsgHdr.Rcode
 		if len(r.Answer) != 0 {
 			lg.Printf("*** AuthDNSQuery: there is stuff in Answer section:")
@@ -415,6 +419,10 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 		}
 
 		if r == nil {
+			continue
+		}
+		if qerr := replyMatchesQuery(r, m); qerr != nil {
+			lg.Printf("AuthDNSQuery: discarding a reply from %s: %v", ns, qerr)
 			continue
 		}
 		rcode = r.MsgHdr.Rcode
@@ -2210,6 +2218,28 @@ func authQueryMsg(qname string, qtype uint16) *dns.Msg {
 	return m
 }
 
+// replyMatchesQuery reports why r is not an answer to query's question, or nil
+// when it is: r must carry exactly one question, with the query's name
+// (compared case-insensitively), type and class (RFC 1035 section 7.3, RFC 5452
+// section 3). A reply that fails this says nothing about the name that was
+// asked, and is not used: taking its records for the queried name is how a
+// server answering some other question -- or none -- would reach the cache.
+func replyMatchesQuery(r, query *dns.Msg) error {
+	if len(r.Question) != 1 {
+		return fmt.Errorf("reply carries %d questions, want 1", len(r.Question))
+	}
+	if len(query.Question) != 1 {
+		return nil
+	}
+	rq, q := r.Question[0], query.Question[0]
+	if !strings.EqualFold(rq.Name, q.Name) || rq.Qtype != q.Qtype || rq.Qclass != q.Qclass {
+		return fmt.Errorf("reply is for %s %s %s, the query was for %s %s %s",
+			rq.Name, dns.ClassToString[rq.Qclass], dns.TypeToString[rq.Qtype],
+			q.Name, dns.ClassToString[q.Qclass], dns.TypeToString[q.Qtype])
+	}
+	return nil
+}
+
 func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 	m := authQueryMsg(qname, qtype)
 	if withOOTS {
@@ -2337,6 +2367,19 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 		return nil, rtt, eff, err
 	}
 	if r != nil {
+		// A reply to some other question, or to none, is a failed attempt at
+		// this server: nothing below may read it as an answer to ours.
+		if qerr := replyMatchesQuery(r, m); qerr != nil {
+			lgDns.Warn("tryServer: discarding a reply that does not answer the query",
+				"qname", qname,
+				"qtype", dns.TypeToString[qtype],
+				"addr", addr,
+				"transport", core.TransportToString[eff],
+				"error", qerr)
+			server.RecordAddressFailure(addr, eff, qerr)
+			server.IncrementFailedCounter(xres.WireTransport)
+			return nil, rtt, eff, qerr
+		}
 		server.RecordAddressSuccess(addr, eff)
 		server.IncrementUsedCounter(xres.WireTransport)
 		server.RecordRTT(addr, eff, rtt)
@@ -2460,7 +2503,9 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 		return
 	}
 	lgDns.Debug("parseTransportForServerFromAdditional: inspecting server", "server", server.Name, "addrs", server.GetAddrs())
-	lgDns.Debug("pTFSA: looking for transport signal in response", "qname", r.Question[0].Name, "qtype", dns.TypeToString[r.Question[0].Qtype], "additionalRRs", len(r.Extra))
+	if len(r.Question) > 0 {
+		lgDns.Debug("pTFSA: looking for transport signal in response", "qname", r.Question[0].Name, "qtype", dns.TypeToString[r.Question[0].Qtype], "additionalRRs", len(r.Extra))
+	}
 	if len(r.Extra) == 0 {
 		lgDns.Debug("*** parseTransportForServerFromAdditional: no Additional section in response")
 		return

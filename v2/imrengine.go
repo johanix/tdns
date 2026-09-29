@@ -2455,6 +2455,17 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 	//	kdb := conf.Internal.KeyDB
 
 	return func(w dns.ResponseWriter, r *dns.Msg) {
+		// The Do53 server rejects a query without exactly one question before
+		// it gets here, but not every path in does: the debug listener hands
+		// such a query straight to this handler. Answer FORMERR rather than
+		// index an empty question section.
+		if len(r.Question) != 1 {
+			m := new(dns.Msg)
+			m.Id, m.Response, m.Opcode = r.Id, true, r.Opcode
+			m.Rcode = dns.RcodeFormatError
+			_ = w.WriteMsg(m)
+			return
+		}
 		qname := r.Question[0].Name
 		// var dnssec_ok bool
 		msgoptions, err := edns0.ExtractFlagsAndEDNS0Options(r)
