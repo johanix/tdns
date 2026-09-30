@@ -94,6 +94,43 @@ func TestCoherenceRefusesWhenTheParentCannotReadItsOwnDS(t *testing.T) {
 	}
 }
 
+// The same swap through the UPDATE path, as the child receives it: the real
+// approval, the resolver's Insecure answer as it hands it over, and the rcode
+// and EDE the child is sent. A parent that is not Ready has checked nothing, so
+// the update is not approved and the child is told to try again.
+func TestApproveChildUpdateRefusesWhenTheParentCannotReadItsOwnDS(t *testing.T) {
+	const child = "child.parent.example."
+	live := newSignerTestKey(t, child, 257)
+	rogue := newSignerTestKey(t, child, 257)
+	now := time.Now()
+	zd := childDSParent(t, dsForKey(t, live))
+	zd.Ready = false
+	resolverAnswers(t, child, signedDnskeys(t, testKeys(rogue), testKeys(rogue), now.Add(-time.Hour), now.Add(time.Hour)),
+		cache.ValidationStateInsecure)
+
+	r := new(dns.Msg)
+	r.SetUpdate(zd.ZoneName)
+	r.Ns = []dns.RR{delOneDS(dsForKey(t, live)), addDS(dsForKey(t, rogue))}
+	us := &UpdateStatus{
+		Type:                  "CHILD-UPDATE",
+		Validated:             true,
+		ValidatedByTrustedKey: true,
+		SignerName:            child,
+		ValidationRcode:       dns.RcodeSuccess,
+	}
+	approved, _, err := zd.ApproveChildUpdate(zd.ZoneName, us, r)
+	if approved {
+		t.Fatal("the DS swap was approved by a parent that could not read its DS")
+	}
+	if !errors.Is(err, ErrZoneNotReady) {
+		t.Errorf("refused, but not for the unreadable DS: %v", err)
+	}
+	if us.ValidationRcode != dns.RcodeRefused || us.RejectionEDE != edns0.EDEDelegationUnverifiable {
+		t.Errorf("rcode %s, EDE %d; want REFUSED with EDE %d",
+			dns.RcodeToString[int(us.ValidationRcode)], us.RejectionEDE, edns0.EDEDelegationUnverifiable)
+	}
+}
+
 // And "no DS" still means bootstrap when it is true: a child with no DS at its
 // owner, and a child with no owner at all, may add its first DS on an
 // unvalidated answer.
