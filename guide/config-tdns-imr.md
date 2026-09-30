@@ -143,6 +143,13 @@ specific stub zone wins over a forward zone (so a lab stub can punch a hole
 in a `zone: .` forward). Zone cuts learned from referrals never override a
 configured forward.
 
+In a daemon that serves zones, such as tdns-auth, a question about a zone
+the server serves comes before both: it is answered from the zone. A zone
+with the option `modified-downstream`, whose published version is signed or
+changed downstream of the server, is not answered from, and its questions go
+to stubs, forwards or the root like any other
+([zone options](config-tdns-auth.md#zone-options)).
+
 Per upstream:
 
 | Key | Default | Meaning |

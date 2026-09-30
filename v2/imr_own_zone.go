@@ -7,6 +7,7 @@ import (
 	"context"
 	"net"
 	"slices"
+	"strings"
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
@@ -71,7 +72,7 @@ func (imr *Imr) ownZoneForQuestion(qname string, qtype uint16) *ZoneData {
 	} else {
 		zd = FindZoneOrRoot(qname)
 	}
-	if zd == nil || !zd.servesQueries() {
+	if zd == nil || !zd.servesQueries() || zd.modifiedDownstream() {
 		return nil
 	}
 	snap := zd.publishedSnapshot()
@@ -100,10 +101,52 @@ func (imr *Imr) ownZonePending(conf *Config, zone string) bool {
 	if Globals.App.Type == AppTypeAgent || imr.ownZoneForQuestion(zone, dns.TypeDNSKEY) != nil {
 		return false
 	}
-	if Zones.Has(zone) {
-		return true
+	// A zone modified downstream is never answered from, loaded or not.
+	if zd, ok := Zones.Get(zone); ok {
+		return !zd.modifiedDownstream()
 	}
-	return conf != nil && slices.ContainsFunc(conf.Internal.AllZones, func(z string) bool { return core.EqualNames(z, zone) })
+	if conf == nil || !slices.ContainsFunc(conf.Internal.AllZones, func(z string) bool { return core.EqualNames(z, zone) }) {
+		return false
+	}
+	for i := range conf.Zones {
+		if core.EqualNames(conf.Zones[i].Name, zone) && slices.ContainsFunc(conf.Zones[i].OptionsStrs, func(o string) bool {
+			return strings.EqualFold(strings.TrimSpace(o), ZoneOptionToString[OptModifiedDownstream])
+		}) {
+			return false
+		}
+	}
+	return true
+}
+
+// modifiedDownstream reports whether zd carries the zone option
+// modified-downstream: the copy held here is not the zone the world sees,
+// because downstream of this server it is signed or changed in ways this
+// server does not know of -- the source of a multi-provider zone, whose
+// providers add the keys and signatures, or a primary behind a signer. The
+// resolver never answers a question about such a zone from it: the question
+// goes where any other goes, and the answer is the published zone's, through
+// the parent's delegation and validated through the parent's DS (#863).
+func (zd *ZoneData) modifiedDownstream() bool {
+	return zd != nil && zd.Options[OptModifiedDownstream]
+}
+
+// forgetResolverSource drops what the running resolver holds about zone, after
+// a reload turned modified-downstream on or off for it: it came from the source
+// the resolver no longer uses. Turned on, that is what the copy answered --
+// NODATA for the keys it lacks, its data, the zone held Insecure, which never
+// lapses -- and until it expired the parent went on refusing the child's
+// updates. Turned off, it is the published zone's answers, which the copy gives
+// now. The next question goes to the new source, as a changed delegation's does
+// (invalidateImrDelegations).
+func forgetResolverSource(zone string) {
+	imr := Globals.ImrEngine
+	if imr == nil || imr.Cache == nil {
+		return
+	}
+	if n, err := imr.Cache.FlushDomain(zone, false); err == nil {
+		lgImr.Info("modified-downstream changed; dropped what the resolver held about the zone",
+			"zone", zone, "entries", n)
+	}
 }
 
 // servesQueries reports whether zd answers queries now, by the tests

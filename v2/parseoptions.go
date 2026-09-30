@@ -209,6 +209,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			OptBlackLies,
 			OptDontPublishKey,
 			OptAddTransportSignal,
+			OptModifiedDownstream,
 			// Conflict resolution carries no condition of its own here. The
 			// pair is mutually exclusive and db-wins is materialised when
 			// neither is given, but both of those are decided in

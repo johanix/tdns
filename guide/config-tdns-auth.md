@@ -770,6 +770,47 @@ This is separate from `multi-provider`. The full HSYNC role model -- `servers`,
 | `catalog-member-auto-create` | Auto-create member zones from this catalog. Only valid on a zone that also has `catalog-zone` |
 | `catalog-member-auto-delete` | Auto-delete member zones removed from this catalog. Same requirement |
 
+**The server's own resolver**
+
+| Option | Effect |
+|--------|--------|
+| `modified-downstream` | The copy of the zone held here is not the zone the world sees. The server's resolver never answers a question about the zone from it |
+
+The resolver built into tdns-auth answers a question about a zone the server
+serves from the zone itself, before any stub or forward: the server does not
+ask anyone else about its own data. That is right when the copy here is the
+zone the world sees. It is wrong when the zone is signed or changed downstream
+of this server, in ways the server does not know of:
+
+- the source of a multi-provider zone, which the providers' signers publish
+  with their own DNSKEY, KEY and signatures;
+- a primary behind a signer.
+
+Such a copy has none of what is added downstream: answered from it, the
+zone has no DNSKEY and no KEY RRset. A parent that holds such a copy of its
+child, without the option, can then neither verify the child's SIG(0) key nor
+confirm that a DS UPDATE leaves the child validating, and refuses the UPDATE.
+
+With `modified-downstream`, the resolver asks about the zone as it would if
+the server did not hold it: through a stub or forward that covers it, or by
+iterating from the root and following the parent's delegation to the
+published servers. The answers are validated through the parent's DS. The DS
+itself is the parent's data, answered from the parent when the server serves
+the parent too.
+
+```yaml
+zones:
+   - name:      child.parent.example.
+     type:      primary
+     zonefile:  /etc/tdns/zones/child.parent.example
+     options:   [ modified-downstream ]
+```
+
+A reload that turns the option on or off takes effect at once: the resolver
+drops what it holds about the zone, which came from the source it no longer
+uses. The option changes nothing about how the zone is served, transferred or
+updated.
+
 **Options you cannot set.** `dirty`, `frozen`, `automatic-zone`,
 `api-managed-zone`, `multi-signer` and `dont-publish-jwk` are real zone options,
 but the server sets them itself. Putting any of them in `options:` is rejected

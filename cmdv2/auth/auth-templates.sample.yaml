@@ -237,6 +237,18 @@
 #                           Changes signing and rollover behaviour; the
 #                           multi-provider machinery lives in tdns-mp.
 #
+# RESOLVER OPTIONS:
+#   modified-downstream:     The copy of the zone held here is not the zone
+#                           the world sees: downstream of this server it is
+#                           signed or changed in ways the server does not know
+#                           of (the source of a multi-provider zone, a primary
+#                           behind a signer). The server's own resolver, which
+#                           answers questions about the zones it serves from
+#                           the zones themselves, does not answer this zone's
+#                           from it: they go to stubs, forwards or the root
+#                           like any other, and are validated through the
+#                           parent's DS. Serving is unchanged.
+#
 # CATALOG ZONE OPTIONS (RFC 9432):
 #   catalog-zone:            Mark zone as RFC 9432 catalog zone
 #                           (REQUIRED: catalog: configuration section must exist)

@@ -122,6 +122,12 @@ const (
 	// instead of into its own copy. Implies OptChildSync, which
 	// parseZoneOptions materialises. docs/2026-09-08-childsync-proxy.md.
 	OptChildSyncProxy
+	// OptModifiedDownstream: the copy of the zone held here is not the zone the
+	// world sees. Downstream of this server it is signed or changed in ways this
+	// server does not know of -- the source of a multi-provider zone, or a
+	// primary behind a signer -- so the server's resolver never answers a
+	// question about the zone from it, and resolves it as any other (#863).
+	OptModifiedDownstream
 	optZoneOptionTdnsSentinel
 )
 
@@ -164,6 +170,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptNoRequestIxfr:           "no-request-ixfr",
 	OptUseHsyncparam:           "use-hsyncparam",
 	OptChildSyncProxy:          "childsync-proxy",
+	OptModifiedDownstream:      "modified-downstream",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -201,6 +208,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"no-request-ixfr":            OptNoRequestIxfr,
 	"use-hsyncparam":             OptUseHsyncparam,
 	"childsync-proxy":            OptChildSyncProxy,
+	"modified-downstream":        OptModifiedDownstream,
 }
 
 // deprecatedZoneOptionNames maps old option spellings to the canonical name
