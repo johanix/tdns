@@ -109,6 +109,12 @@ type RRsetCacheT struct {
 	// fetcher without any, and the fetcher forwards it (ServersFor). Nil only
 	// in a cache that no resolver is attached to, which forwards nothing.
 	Forwarded func(name string, qtype uint16) bool
+	// AnsweredLocally reports whether the question <name, qtype> is answered
+	// in process, from a zone the server this resolver runs in is
+	// authoritative for. Like a forwarded question it needs no servers from a
+	// zone cut (ServersFor). Nil only in a cache that no resolver is attached
+	// to, which answers nothing locally.
+	AnsweredLocally func(name string, qtype uint16) bool
 	//Options                map[ImrOption]string
 	Primed               bool
 	Logger               *log.Logger
