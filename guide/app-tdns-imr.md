@@ -219,9 +219,9 @@ zone reload.
 |---------|--------|
 | `stats` | Large-KSK metrics, and lists the subcommands |
 | `stats large-ksk` | DNSKEY-over-TCP counters for large algorithms |
-| `stats auth-transports [zone] [-s name] [--pct]` | One row per auth server (only those of `[zone]` when given): answers per transport, failures, truncations and last use, next to the server's transport signal (OOTS). `--pct` shows shares instead of counts; `--reset` starts a new period for every server. Alias `auth-servers` |
+| `stats auth-transports [zone] [-s name] [--pct] [--privacy]` | One row per auth server (only those of `[zone]` when given): answers per transport, failures, truncations and last use, next to the transport signal as the server gave it (OOTS). `--pct` shows shares instead of counts, and what selection would give (EXPECTED); `--privacy` splits each server's answers by the client's PRIVACY level, with the resolver's own lookups as `internal`; `--reset` starts a new period for every server. Alias `auth-servers` |
 | `stats transport-stats [zone]` | The same counters listed per zone, attempted/used/failed; a server serving several zones repeats under each. `suffix <name>` selects zones by suffix |
-| `stats client-transports [-c addr]` | Queries per client address and transport (off unless `imrengine.client-stats.enabled`). Alias `client-stats` |
+| `stats client-transports [-c addr] [--pct] [--privacy]` | Queries per client address and transport (off unless `imrengine.client-stats.enabled`); `--privacy` splits them by the PRIVACY level they carried. Alias `client-stats` |
 
 **Inspection and settings**
 

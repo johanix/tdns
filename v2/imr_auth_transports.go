@@ -11,6 +11,7 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -25,18 +26,28 @@ import (
 // are keyed by the names in ImrClientTransports (Do53 over UDP and TCP apart);
 // a transport never used is absent.
 type ImrAuthTransportsRow struct {
-	Server      string               `json:"server"`
-	Src         string               `json:"src,omitempty"`    // "answer", "glue", "hint", "priming", "stub", ...
-	Shared      bool                 `json:"shared"`           // false: a stub zone's private instance, counted apart
-	Zones       []string             `json:"zones,omitempty"`  // the zones that list this server
-	Signal      map[string]uint8     `json:"signal,omitempty"` // absent: the server gave no transport signal
-	Counts      map[string]uint64    `json:"counts"`           // answers carried, by actual wire transport
-	LastUsed    map[string]time.Time `json:"last_used"`
-	LastAny     time.Time            `json:"last_any,omitzero"`
-	Total       uint64               `json:"total"`
-	Failed      map[string]uint64    `json:"failed,omitempty"` // attempts that errored, by actual wire transport
-	FailedTotal uint64               `json:"failed_total"`
-	Truncated   uint64               `json:"truncated"` // Do53/UDP answers TC=1, retried over TCP
+	Server       string            `json:"server"`
+	Src          string            `json:"src,omitempty"`           // "answer", "glue", "hint", "priming", "stub", ...
+	Shared       bool              `json:"shared"`                  // false: a stub zone's private instance, counted apart
+	Zones        []string          `json:"zones,omitempty"`         // the zones that list this server
+	Signal       map[string]uint8  `json:"signal,omitempty"`        // the signal as given: only the transports it named. Absent: none
+	SignalSource string            `json:"signal_source,omitempty"` // "oots", "alpn", "config" (a stub), "operator" (set server transport)
+	Counts       map[string]uint64 `json:"counts"`                  // answers carried, by actual wire transport
+	// ByPrivacy splits Counts by whose query it was: a client's PRIVACY level
+	// ("none", "opportunistic", "strict") or "internal" (the resolver's own).
+	// Only the classes with answers are present.
+	ByPrivacy map[string]map[string]uint64 `json:"by_privacy,omitempty"`
+	// Expected is the share, in percent, of first picks selection gives each
+	// transport (do53, dot, doq, doh) for a query at each privacy level, from
+	// the weights it uses. "strict" is absent when the server cannot carry a
+	// strict query.
+	Expected    map[string]map[string]uint8 `json:"expected,omitempty"`
+	LastUsed    map[string]time.Time        `json:"last_used"`
+	LastAny     time.Time                   `json:"last_any,omitzero"`
+	Total       uint64                      `json:"total"`
+	Failed      map[string]uint64           `json:"failed,omitempty"` // attempts that errored, by actual wire transport
+	FailedTotal uint64                      `json:"failed_total"`
+	Truncated   uint64                      `json:"truncated"` // Do53/UDP answers TC=1, retried over TCP
 }
 
 // ImrAuthTransportsReport is a snapshot of the per-server counters.
@@ -87,14 +98,36 @@ func ImrAuthTransportsSnapshot(rc *cache.RRsetCacheT, filter []string, zone stri
 			Src:       s.Src,
 			Shared:    s.Shared,
 			Zones:     s.Zones,
-			Signal:    transportWeightsToStrings(s.Weights),
 			Counts:    map[string]uint64{},
 			LastUsed:  map[string]time.Time{},
 			Truncated: s.Truncated,
+			Expected:  map[string]map[string]uint8{},
+		}
+		if s.Received != nil {
+			row.Signal = transportWeightsToStrings(s.Received.Weights)
+			row.SignalSource = s.Received.Source
+		}
+		for _, level := range []edns0.PrivacyLevel{edns0.PrivacyNone, edns0.PrivacyOpportunistic, edns0.PrivacyStrict} {
+			if shares := expectedShares(s.Transports, s.Weights, level); shares != nil {
+				row.Expected[level.String()] = transportWeightsToStrings(shares)
+			}
 		}
 		for t, c := range s.Used {
 			row.Counts[authTransportColumn(t)] += c
 			row.Total += c
+		}
+		for class, used := range s.UsedByClass {
+			if len(used) == 0 {
+				continue
+			}
+			if row.ByPrivacy == nil {
+				row.ByPrivacy = map[string]map[string]uint64{}
+			}
+			counts := map[string]uint64{}
+			for t, c := range used {
+				counts[authTransportColumn(t)] += c
+			}
+			row.ByPrivacy[cache.TrafficClass(class).String()] = counts
 		}
 		for t, at := range s.LastUsed {
 			row.LastUsed[authTransportColumn(t)] = at

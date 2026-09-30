@@ -15,6 +15,18 @@ import (
 // - Duplicate keys are rejected
 // - Absence defaults (draft-johani-dnsop-svcb-oots): do53→100, others→0
 func ParseTransportString(s string) (map[string]uint8, error) {
+	transports, err := ParseTransportStringRaw(s)
+	if err != nil {
+		return nil, err
+	}
+	ApplyTransportDefaults(transports)
+	return transports, nil
+}
+
+// ParseTransportStringRaw is ParseTransportString without the absence
+// defaults: the map holds only the transports the string names, as a record of
+// what a signal said. Selection wants the defaults; use ParseTransportString.
+func ParseTransportStringRaw(s string) (map[string]uint8, error) {
 	transports := make(map[string]uint8)
 	s = strings.TrimSpace(s)
 	if s != "" {
@@ -42,7 +54,6 @@ func ParseTransportString(s string) (map[string]uint8, error) {
 			transports[k] = uint8(v64)
 		}
 	}
-	ApplyTransportDefaults(transports)
 	return transports, nil
 }
 

@@ -24,6 +24,8 @@ var (
 	clientStatsReset   bool
 	clientStatsSort    string
 	clientStatsJSON    bool
+	clientStatsPct     bool
+	clientStatsPrivacy bool
 )
 
 // imrStatsClientStatsCmd shows the per-client transport counters of a running
@@ -37,6 +39,12 @@ var imrStatsClientStatsCmd = &cobra.Command{
 	Long: `Show, per client address, how many queries arrived over each transport
 (Do53 over UDP and TCP, DoT, DoQ, DoH) and when each was last used, since the
 resolver started or the counters were last reset.
+
+--pct shows each transport's share of the row's queries instead of a count.
+--privacy shows one row per PRIVACY level a client's queries carried: "none"
+(also without the option), "opp." (opportunistic) and "strict". A client that
+never asks for privacy stays one row. Privacy asked for over a cleartext hop to
+the resolver (strict over Do53) shows as such.
 
 -c selects clients by address or prefix, and may be given more than once; with
 none, all clients are shown. --reset clears the counters after showing them --
@@ -52,6 +60,8 @@ client addresses, never query names.`,
 	},
 }
 
+// runClientStats fetches the report -- from the live counters in the tdns-imr
+// shell, over the /imr API from tdns-cli -- and prints it as the flags say.
 func runClientStats(ctx context.Context) {
 	var rep tdns.ImrClientStatsReport
 	if imr := tdns.Globals.ImrEngine; imr != nil && imr.ClientStats != nil {
@@ -89,12 +99,13 @@ func runClientStats(ctx context.Context) {
 		fmt.Println(string(out))
 		return
 	}
-	fmt.Print(formatClientStats(rep, clientStatsSort))
+	fmt.Print(formatClientStats(rep, clientStatsSort, clientStatsPct, clientStatsPrivacy))
 }
 
 // formatClientStats renders a report as a table, sorted by address, total or
-// last seen.
-func formatClientStats(rep tdns.ImrClientStatsReport, sortBy string) string {
+// last seen. With pct the transport columns are shares of each row's TOTAL;
+// with privacy each client has a row per PRIVACY level it used.
+func formatClientStats(rep tdns.ImrClientStatsReport, sortBy string, pct, privacy bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Client transport counters since %s: %d clients held, %d shown, %d evicted\n\n",
 		rep.Since.Format("2006-01-02 15:04:05"), rep.Clients, len(rep.Rows), rep.EvictedClients)
@@ -109,44 +120,68 @@ func formatClientStats(rep tdns.ImrClientStatsReport, sortBy string) string {
 
 	tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
 	header := []string{"CLIENT"}
+	if privacy {
+		header = append(header, "PRIVACY")
+	}
 	for _, t := range tdns.ImrClientTransports {
 		header = append(header, strings.ToUpper(t))
 	}
 	header = append(header, "TOTAL", "LAST SEEN")
 	fmt.Fprintln(tw, strings.Join(header, "\t"))
 
-	totals := map[string]uint64{}
-	var total uint64
-	for _, r := range rows {
-		cols := []string{r.Client}
-		for _, t := range tdns.ImrClientTransports {
-			cols = append(cols, fmt.Sprint(r.Counts[t]))
-			totals[t] += r.Counts[t]
+	totals := newLevelTotals()
+	unsplit := false
+	group := func(label string, counts map[string]uint64, total uint64, byPrivacy map[string]map[string]uint64, last string) {
+		if privacy && total > 0 && byPrivacy == nil {
+			unsplit = true
 		}
-		total += r.Total
-		cols = append(cols, fmt.Sprint(r.Total), lastSeen(r))
-		fmt.Fprintln(tw, strings.Join(cols, "\t"))
+		for i, cr := range countRows(counts, total, byPrivacy, privacy) {
+			totals.add(cr)
+			cols := []string{""}
+			if i == 0 {
+				cols[0] = label
+			}
+			if privacy {
+				cols = append(cols, privacyLabel(cr.level))
+			}
+			cols = append(cols, transportCells(cr.counts, cr.total, pct)...)
+			cols = append(cols, fmt.Sprint(cr.total))
+			if i == 0 {
+				cols = append(cols, last)
+			}
+			fmt.Fprintln(tw, joinCells(cols, len(header)))
+		}
+	}
+	for _, r := range rows {
+		group(r.Client, r.Counts, r.Total, r.ByPrivacy, lastSeen(r))
 	}
 	if rep.EvictedClients > 0 {
-		cols := []string{fmt.Sprintf("(%d evicted)", rep.EvictedClients)}
 		var n uint64
-		for _, t := range tdns.ImrClientTransports {
-			cols = append(cols, fmt.Sprint(rep.EvictedCounts[t]))
-			totals[t] += rep.EvictedCounts[t]
-			n += rep.EvictedCounts[t]
+		for _, c := range rep.EvictedCounts {
+			n += c
 		}
-		total += n
-		cols = append(cols, fmt.Sprint(n), "")
-		fmt.Fprintln(tw, strings.Join(cols, "\t"))
+		group(fmt.Sprintf("(%d evicted)", rep.EvictedClients), rep.EvictedCounts, n, rep.EvictedByPrivacy, "")
 	}
-	cols := []string{"TOTAL"}
-	for _, t := range tdns.ImrClientTransports {
-		cols = append(cols, fmt.Sprint(totals[t]))
+	for i, cr := range totals.rows() {
+		cols := []string{""}
+		if i == 0 {
+			cols[0] = "TOTAL"
+		}
+		if privacy {
+			cols = append(cols, privacyLabel(cr.level))
+		}
+		cols = append(cols, transportCells(cr.counts, cr.total, pct)...)
+		cols = append(cols, fmt.Sprint(cr.total))
+		fmt.Fprintln(tw, joinCells(cols, len(header)))
 	}
-	cols = append(cols, fmt.Sprint(total), "")
-	fmt.Fprintln(tw, strings.Join(cols, "\t"))
 	tw.Flush()
+	table := trimLineEnds(b.String())
+	b.Reset()
+	b.WriteString(table)
 
+	if unsplit {
+		b.WriteString("\nThe resolver does not count queries by privacy level (it predates --privacy): its rows are not split.\n")
+	}
 	if rep.Reset {
 		b.WriteString("\nThe counters were reset after this snapshot: a new period starts now.\n")
 	}
@@ -178,5 +213,7 @@ func init() {
 	imrStatsClientStatsCmd.Flags().BoolVar(&clientStatsReset, "reset", false, "Clear ALL counters after showing them")
 	imrStatsClientStatsCmd.Flags().StringVar(&clientStatsSort, "sort", "addr", "Sort by addr, total or last")
 	imrStatsClientStatsCmd.Flags().BoolVar(&clientStatsJSON, "json", false, "Print the report as JSON")
+	imrStatsClientStatsCmd.Flags().BoolVar(&clientStatsPct, "pct", false, "Show each transport's share of the row's queries instead of counts")
+	imrStatsClientStatsCmd.Flags().BoolVar(&clientStatsPrivacy, "privacy", false, "One row per PRIVACY level a client's queries carried (none, opp., strict)")
 	ImrStatsCmd.AddCommand(imrStatsClientStatsCmd)
 }

@@ -58,14 +58,20 @@ type AuthServer struct {
 	// When provided in config, this overrides Alpn for building Transports/TransportWeights.
 	TransportSignal string   `yaml:"transport" mapstructure:"transport"`
 	ConnMode        ConnMode `yaml:"connmode" mapstructure:"connmode"`
+	// Received is the transport signal as the server sent it (or the stub's
+	// configuration gave it), before the absence defaults that
+	// TransportWeights carries for selection; nil when there was none.
+	// Guarded by mu, and set in the same step as the weights.
+	Received *ReceivedSignal
 	// Stats (guarded by mu)
 	mu                sync.Mutex
-	TransportCounters map[core.Transport]uint64    // queries ATTEMPTED per transport (transport chosen)
-	UsedCounters      map[core.Transport]uint64    // queries whose answer was CARRIED, by actual wire transport
-	LastUsed          map[core.Transport]time.Time // when an answer was last CARRIED, by actual wire transport
-	FailedCounters    map[core.Transport]uint64    // attempts that ERRORED, by actual wire transport (see tryServer)
-	TruncatedCount    uint64                       // Do53/UDP responses TC=1 truncated and retried over TCP
-	Src               string                       // "answer", "glue", "hint", "priming", "stub", ...
+	TransportCounters map[core.Transport]uint64                    // queries ATTEMPTED per transport (transport chosen)
+	UsedCounters      map[core.Transport]uint64                    // queries whose answer was CARRIED, by actual wire transport
+	LastUsed          map[core.Transport]time.Time                 // when an answer was last CARRIED, by actual wire transport
+	UsedByClass       [NumTrafficClasses]map[core.Transport]uint64 // UsedCounters split by whose query it was
+	FailedCounters    map[core.Transport]uint64                    // attempts that ERRORED, by actual wire transport (see tryServer)
+	TruncatedCount    uint64                                       // Do53/UDP responses TC=1 truncated and retried over TCP
+	Src               string                                       // "answer", "glue", "hint", "priming", "stub", ...
 	// configuredAddrs holds the addresses the operator configured for this
 	// server (a stub's, via AddStub), in canonical form. Addresses added
 	// later, from glue or a lookup, are not in it.
@@ -452,11 +458,12 @@ func (as *AuthServer) SetTransportWeights(weights map[core.Transport]uint8) {
 }
 
 // SetTransportSignal installs what a transport signal says about the server:
-// its transports, their ALPN names and their weights, as one change under the
-// lock. The resolver reads them while background lookups write them, and a
-// reader must never see the weights of one signal with the transports of
-// another. The arguments are the caller's to give away. Thread-safe.
-func (as *AuthServer) SetTransportSignal(transports []core.Transport, alpn []string, weights map[core.Transport]uint8) {
+// its transports, their ALPN names, their weights, and the signal as received,
+// as one change under the lock. The resolver reads them while background
+// lookups write them, and a reader must never see the weights of one signal
+// with the transports of another. The arguments are the caller's to give away.
+// Thread-safe.
+func (as *AuthServer) SetTransportSignal(transports []core.Transport, alpn []string, weights map[core.Transport]uint8, received *ReceivedSignal) {
 	if as == nil {
 		return
 	}
@@ -465,6 +472,44 @@ func (as *AuthServer) SetTransportSignal(transports []core.Transport, alpn []str
 	as.Transports = transports
 	as.Alpn = alpn
 	as.TransportWeights = weights
+	as.Received = received
+}
+
+// SetReceivedSignal records the signal as received, for the paths that set the
+// weights by other means (a stub's configuration, an operator's override).
+// Thread-safe.
+func (as *AuthServer) SetReceivedSignal(received *ReceivedSignal) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	as.Received = received
+}
+
+// GetSignalState returns copies of the transports, their weights and the
+// signal as received, read together under the lock, so that a report never
+// pairs the weights of one signal with the received form of another.
+// Thread-safe.
+func (as *AuthServer) GetSignalState() ([]core.Transport, map[core.Transport]uint8, *ReceivedSignal) {
+	if as == nil {
+		return nil, nil, nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	transports := append([]core.Transport(nil), as.Transports...)
+	return transports, copyMap(as.TransportWeights), as.Received.clone()
+}
+
+// GetReceivedSignal returns a copy of the signal as received, or nil.
+// Thread-safe.
+func (as *AuthServer) GetReceivedSignal() *ReceivedSignal {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	return as.Received.clone()
 }
 
 // GetTransportSignal returns copies of the transports and their weights,
@@ -541,9 +586,15 @@ func (as *AuthServer) IncrementTransportCounter(t core.Transport) {
 
 // IncrementUsedCounter records that a query's answer was carried over transport
 // t — the ACTUAL wire transport, which for Do53 may be Do53TCP after a fallback.
-func (as *AuthServer) IncrementUsedCounter(t core.Transport) {
+//
+// class says whose query it was: a client's, by the PRIVACY level it carried,
+// or the resolver's own.
+func (as *AuthServer) IncrementUsedCounter(t core.Transport, class TrafficClass) {
 	if as == nil {
 		return
+	}
+	if class >= NumTrafficClasses {
+		class = ClassInternal
 	}
 	now := time.Now()
 	as.mu.Lock()
@@ -554,6 +605,10 @@ func (as *AuthServer) IncrementUsedCounter(t core.Transport) {
 	}
 	as.UsedCounters[t]++
 	as.LastUsed[t] = now
+	if as.UsedByClass[class] == nil {
+		as.UsedByClass[class] = make(map[core.Transport]uint64)
+	}
+	as.UsedByClass[class][t]++
 }
 
 // IncrementFailedCounter records a failed attempt over transport t (e.g. an
@@ -589,11 +644,12 @@ func (as *AuthServer) IncrementTruncated() {
 // attempts that errored (by the actual wire transport); Truncated = Do53/UDP
 // responses TC=1 truncated and retried over TCP.
 type TransportStats struct {
-	Attempted map[core.Transport]uint64
-	Used      map[core.Transport]uint64
-	LastUsed  map[core.Transport]time.Time
-	Failed    map[core.Transport]uint64
-	Truncated uint64
+	Attempted   map[core.Transport]uint64
+	Used        map[core.Transport]uint64
+	UsedByClass [NumTrafficClasses]map[core.Transport]uint64 // Used, split by TrafficClass
+	LastUsed    map[core.Transport]time.Time
+	Failed      map[core.Transport]uint64
+	Truncated   uint64
 }
 
 // SnapshotTransportStats returns a consistent copy of all per-transport usage
@@ -607,6 +663,9 @@ func (as *AuthServer) SnapshotTransportStats() TransportStats {
 	defer as.mu.Unlock()
 	ts.Attempted = copyMap(as.TransportCounters)
 	ts.Used = copyMap(as.UsedCounters)
+	for c := range as.UsedByClass {
+		ts.UsedByClass[c] = copyMap(as.UsedByClass[c])
+	}
 	ts.LastUsed = copyMap(as.LastUsed)
 	ts.Failed = copyMap(as.FailedCounters)
 	ts.Truncated = as.TruncatedCount
@@ -625,13 +684,15 @@ func (as *AuthServer) TakeTransportStats() TransportStats {
 	defer as.mu.Unlock()
 	// The maps are handed over, not copied: the counters start again from nil.
 	ts = TransportStats{
-		Attempted: as.TransportCounters,
-		Used:      as.UsedCounters,
-		LastUsed:  as.LastUsed,
-		Failed:    as.FailedCounters,
-		Truncated: as.TruncatedCount,
+		Attempted:   as.TransportCounters,
+		Used:        as.UsedCounters,
+		UsedByClass: as.UsedByClass,
+		LastUsed:    as.LastUsed,
+		Failed:      as.FailedCounters,
+		Truncated:   as.TruncatedCount,
 	}
 	as.TransportCounters, as.UsedCounters, as.LastUsed, as.FailedCounters = nil, nil, nil, nil
+	as.UsedByClass = [NumTrafficClasses]map[core.Transport]uint64{}
 	as.TruncatedCount = 0
 	return ts
 }

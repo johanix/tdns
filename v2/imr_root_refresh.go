@@ -229,7 +229,7 @@ func rootRetryWait(expiration time.Time) time.Duration {
 // cache" -- the fetcher it calls does not pass force. This is where copying
 // that fetcher went wrong.
 func (imr *Imr) rootNSQuery(ctx context.Context, servers map[string]*cache.AuthServer) (*core.RRset, error) {
-	rrset, _, _, _, err := imr.IterativeDNSQueryInZone(ctx, ".", dns.TypeNS, servers, ".", true, edns0.PrivacyNone) // privacy is a client signal; root refresh is our own traffic
+	rrset, _, _, _, err := imr.IterativeDNSQueryInZone(withOwnTraffic(ctx), ".", dns.TypeNS, servers, ".", true, edns0.PrivacyNone) // privacy is a client signal; root refresh is our own traffic
 	return rrset, err
 }
 

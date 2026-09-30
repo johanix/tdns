@@ -22,12 +22,12 @@ func TestTransportStatsCounters(t *testing.T) {
 
 	// One query attempted DoT (failed), fell back to Do53 (carried the answer);
 	// plus one Do53/UDP query that was TC=1 truncated and answered over Do53TCP.
-	s.IncrementTransportCounter(core.TransportDoT)  // attempted DoT
-	s.IncrementFailedCounter(core.TransportDoT)     // DoT failed (capability)
-	s.IncrementTransportCounter(core.TransportDo53) // attempted Do53
-	s.IncrementUsedCounter(core.TransportDo53)      // Do53 carried it
-	s.IncrementTransportCounter(core.TransportDo53) // attempted Do53 (the truncated one)
-	s.IncrementUsedCounter(core.TransportDo53TCP)   // truncation-upgraded answer
+	s.IncrementTransportCounter(core.TransportDoT)           // attempted DoT
+	s.IncrementFailedCounter(core.TransportDoT)              // DoT failed (capability)
+	s.IncrementTransportCounter(core.TransportDo53)          // attempted Do53
+	s.IncrementUsedCounter(core.TransportDo53, ClassNone)    // Do53 carried it
+	s.IncrementTransportCounter(core.TransportDo53)          // attempted Do53 (the truncated one)
+	s.IncrementUsedCounter(core.TransportDo53TCP, ClassNone) // truncation-upgraded answer
 	s.IncrementTruncated()
 
 	ts := s.SnapshotTransportStats()
@@ -52,7 +52,7 @@ func TestTransportStatsCounters(t *testing.T) {
 
 	// The snapshot must be an isolated copy: mutating the server afterwards
 	// must not change the returned snapshot.
-	s.IncrementUsedCounter(core.TransportDo53)
+	s.IncrementUsedCounter(core.TransportDo53, ClassNone)
 	if ts.Used[core.TransportDo53] != 1 {
 		t.Fatalf("snapshot not isolated: used Do53 changed to %d", ts.Used[core.TransportDo53])
 	}
@@ -75,9 +75,9 @@ func TestAuthServerStatsOneRowPerInstance(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddStub: %v", err)
 	}
-	rc.GetOrCreateAuthServer("orphan.example.").IncrementUsedCounter(core.TransportDoT)
-	shared.IncrementUsedCounter(core.TransportDo53)
-	shared.IncrementUsedCounter(core.TransportDo53)
+	rc.GetOrCreateAuthServer("orphan.example.").IncrementUsedCounter(core.TransportDoT, ClassNone)
+	shared.IncrementUsedCounter(core.TransportDo53, ClassNone)
+	shared.IncrementUsedCounter(core.TransportDo53, ClassNone)
 
 	_, stats := rc.AuthServerStats(false)
 	if len(stats) != 3 {
@@ -110,7 +110,7 @@ func TestAuthServerStatsReset(t *testing.T) {
 	rc := NewRRsetCache(log.New(io.Discard, "", 0), false, false)
 	s := rc.GetOrCreateAuthServer("ns.example.")
 	s.IncrementTransportCounter(core.TransportDoQ)
-	s.IncrementUsedCounter(core.TransportDoQ)
+	s.IncrementUsedCounter(core.TransportDoQ, ClassNone)
 	s.IncrementFailedCounter(core.TransportDoT)
 	s.IncrementTruncated()
 
@@ -125,7 +125,7 @@ func TestAuthServerStatsReset(t *testing.T) {
 	if !since2.After(since1) {
 		t.Errorf("since %v after the reset, want later than %v", since2, since1)
 	}
-	s.IncrementUsedCounter(core.TransportDo53)
+	s.IncrementUsedCounter(core.TransportDo53, ClassNone)
 	if _, stats := rc.AuthServerStats(false); stats[0].Used[core.TransportDo53] != 1 {
 		t.Errorf("counting after a reset: used do53 = %d, want 1", stats[0].Used[core.TransportDo53])
 	}
@@ -143,7 +143,7 @@ func TestAuthServerStatsResetLosesNothing(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < per; i++ {
-				s.IncrementUsedCounter(core.TransportDo53)
+				s.IncrementUsedCounter(core.TransportDo53, ClassNone)
 			}
 		}()
 	}
@@ -163,4 +163,49 @@ func TestAuthServerStatsResetLosesNothing(t *testing.T) {
 	if seen != writers*per {
 		t.Errorf("counted %d answers across the resets, want %d", seen, writers*per)
 	}
+}
+
+// The stats read a server's weights and its signal as received together: with
+// signals installed concurrently, a snapshot never pairs one signal's weights
+// with another's received form.
+func TestSignalStateIsReadTogether(t *testing.T) {
+	s := NewAuthServer("ns.example.")
+	install := func(tr core.Transport, w uint8) {
+		s.SetTransportSignal([]core.Transport{tr, core.TransportDo53}, nil,
+			map[core.Transport]uint8{tr: w, core.TransportDo53: 100},
+			&ReceivedSignal{Source: "oots", Weights: map[core.Transport]uint8{tr: w}})
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if i%2 == 0 {
+				install(core.TransportDoT, 50)
+			} else {
+				install(core.TransportDoQ, 30)
+			}
+		}
+	}()
+	for i := 0; i < 20000; i++ {
+		_, weights, received := s.GetSignalState()
+		if received == nil {
+			continue
+		}
+		for tr, w := range received.Weights {
+			if weights[tr] != w {
+				close(stop)
+				wg.Wait()
+				t.Fatalf("snapshot pairs received %v with weights %v", received.Weights, weights)
+			}
+		}
+	}
+	close(stop)
+	wg.Wait()
 }

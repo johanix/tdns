@@ -809,7 +809,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		case len(authservers) == 0 && !serverless:
 			// Use helper function to resolve NS addresses
 			done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
-				rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(ctx, qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
+				rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(withOwnTraffic(ctx), qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
 				if err != nil {
 					lgImr.Error("IterativeDNSQuery failed", "err", err)
 					// return false, nil // Continue trying
@@ -858,7 +858,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 
 		lgImr.Debug("ImrQuery: sending query to auth servers", "qname", qname, "qtype", dns.TypeToString[qtype], "count", len(authservers))
 
-		rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(ctx, qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
+		rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(withOwnTraffic(ctx), qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
 		// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 		if err != nil {
 			resp.Error = true
@@ -1063,6 +1063,10 @@ func attachPrivacyUnavailableEDE(m, r *dns.Msg, zone string, msgoptions *edns0.M
 }
 
 func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions) {
+	// A client's query: the answers it causes are counted under its privacy
+	// level (see trafficClass), except those of the resolver's own lookups
+	// inside it, which mark themselves.
+	ctx = withClientQuery(ctx)
 	m := new(dns.Msg)
 	m.RecursionAvailable = true
 
@@ -2296,7 +2300,7 @@ func (imr *Imr) updateDNSKEYCacheFromRRset(anchorName string, rrset *core.RRset,
 // serversZone is the zone serverMap serves (IterativeDNSQueryInZone).
 func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string, serverMap map[string]*cache.AuthServer, serversZone string) {
 	// Fetch and validate the NS RRset for the anchor zone (non-fatal - continue even if it fails)
-	nsRRset, _, _, _, err := imr.IterativeDNSQueryInZone(ctx, anchorName, dns.TypeNS, serverMap, serversZone, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
+	nsRRset, _, _, _, err := imr.IterativeDNSQueryInZone(withOwnTraffic(ctx), anchorName, dns.TypeNS, serverMap, serversZone, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
 	if err != nil {
 		lgImr.Warn("failed to fetch NS RRset for trust anchor zone", "zone", anchorName, "err", err)
 		return
@@ -2378,7 +2382,7 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 			}
 		}
 	}
-	rrset, _, _, _, err := imr.IterativeDNSQueryInZone(ctx, anchorName, dns.TypeDNSKEY, serverMap, serversZone, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
+	rrset, _, _, _, err := imr.IterativeDNSQueryInZone(withOwnTraffic(ctx), anchorName, dns.TypeDNSKEY, serverMap, serversZone, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
 	if err != nil {
 		return fmt.Errorf("failed to fetch %s DNSKEY: %v", anchorName, err)
 	}
