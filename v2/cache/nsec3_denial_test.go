@@ -144,6 +144,23 @@ func TestValidateDenialNSEC3ThatDoesNotCount(t *testing.T) {
 	}
 }
 
+// With the default limit, a zone signed with 12 iterations -- RFC 5155's
+// example zone uses 12 -- is over it: its denials are Insecure, with EDE 27.
+func TestValidateDenialNSEC3DefaultLimit(t *testing.T) {
+	if got := NSEC3MaxIterations(); got != DefaultNSEC3MaxIterations {
+		t.Fatalf("the limit is %d, not the default %d", got, DefaultNSEC3MaxIterations)
+	}
+	rrcache, k := secCache(t)
+	v, _ := rrcache.ValidateDenial(context.Background(), n3NX, dns.TypeA, dns.RcodeNameError, n3Denial(t, k, n3NameError(0, 12)...), nil)
+	if v.State != ValidationStateInsecure || v.EDECode != edeUnsupportedNSEC3Iterations {
+		t.Errorf("12 iterations: %s EDE %d, want insecure EDE %d", ValidationStateToString[v.State], v.EDECode, edeUnsupportedNSEC3Iterations)
+	}
+	v, _ = rrcache.ValidateDenial(context.Background(), n3NX, dns.TypeA, dns.RcodeNameError, n3Denial(t, k, n3NameError(0, 5)...), nil)
+	if v.State != ValidationStateSecure {
+		t.Errorf("5 iterations: %s, want secure", ValidationStateToString[v.State])
+	}
+}
+
 // The iteration limit is the configured one.
 func TestValidateDenialNSEC3ConfiguredLimit(t *testing.T) {
 	t.Cleanup(func() { SetNSEC3MaxIterations(DefaultNSEC3MaxIterations) })

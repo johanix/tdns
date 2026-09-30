@@ -23,9 +23,10 @@ import (
 
 // DefaultNSEC3MaxIterations is the most NSEC3 hash iterations a proof is
 // computed for unless configured otherwise. RFC 9276 section 3.2 lets a
-// validator stop at a limit of its choosing; 150 was the limit validators
+// validator stop at a limit of its choosing, and asks zones for 0 iterations;
+// deployed zones rarely use more than a few. 150 was the limit validators
 // shared when RFC 9276 was written.
-const DefaultNSEC3MaxIterations = 150
+const DefaultNSEC3MaxIterations = 10
 
 var nsec3MaxIterations atomic.Uint32
 
@@ -40,8 +41,8 @@ func SetNSEC3MaxIterations(n uint16) { nsec3MaxIterations.Store(uint32(n)) }
 // NSEC3MaxIterations returns the iteration limit.
 func NSEC3MaxIterations() uint16 { return uint16(nsec3MaxIterations.Load()) }
 
-// nsec3HashBudget is the most hash computations one proof may make. At the
-// default iteration limit that is about 1.5 ms of SHA-1, and it covers a
+// nsec3HashBudget is the most hash computations one proof may make. With the
+// iteration limit raised to 150 that is about 1.5 ms of SHA-1, and it covers a
 // qname 127 labels deep under two parameter sets. A proof that runs out is
 // not judged (nsec3OverBudget).
 const nsec3HashBudget = 256

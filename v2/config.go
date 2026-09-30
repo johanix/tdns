@@ -550,7 +550,7 @@ type ImrTuningConf struct {
 	// NSEC3MaxIterations is the most NSEC3 hash iterations the validator
 	// computes a proof for (RFC 9276 section 3.2). A denial that needs NSEC3
 	// records above it is served without AD, with EDE 27; a zone cut they
-	// would prove is not judged. Default 150 (cache.DefaultNSEC3MaxIterations);
+	// would prove is not judged. Default 10 (cache.DefaultNSEC3MaxIterations);
 	// 0 is allowed, and then only zones with no extra iterations validate.
 	NSEC3MaxIterations *uint16 `yaml:"nsec3-max-iterations" mapstructure:"nsec3-max-iterations"`
 }
