@@ -15,6 +15,14 @@ import (
 // Wraps dns.IsDuplicate but fixes PrivateRR comparison: miekg/dns
 // PrivateRR.isDuplicate always returns false, so we compare by
 // wire format instead.
+//
+// It also fixes records whose RDATA is the same on the wire but not in the
+// struct: dns.IsDuplicate compares fields the library keeps as presentation
+// text as strings. A DS digest read from text (a zone file, the journal) keeps
+// the case it was written in, and the library writes it upper case; one
+// unpacked from the wire is lower case. The same DS then did not match itself,
+// and a child's delete of it removed nothing (#843). Other hex and base32
+// fields (SSHFP, TLSA, NSEC3, ...) have the same trap.
 func IsDuplicate(r1, r2 dns.RR) bool {
 	p1, ok1 := r1.(*dns.PrivateRR)
 	p2, ok2 := r2.(*dns.PrivateRR)
@@ -37,7 +45,21 @@ func IsDuplicate(r1, r2 dns.RR) bool {
 		}
 		return bytes.Equal(buf1[:n1], buf2[:n2])
 	}
-	return dns.IsDuplicate(r1, r2)
+	if dns.IsDuplicate(r1, r2) {
+		return true
+	}
+	h1, h2 := r1.Header(), r2.Header()
+	if h1.Rrtype != h2.Rrtype || h1.Class != h2.Class || !EqualNames(h1.Name, h2.Name) {
+		return false
+	}
+	// Through RFC 3597 form: the RDATA is packed and read back as hex, and the
+	// records themselves are not written to (dns.PackRR sets Rdlength on its
+	// argument, and these may be records a published zone is serving).
+	u1, u2 := new(dns.RFC3597), new(dns.RFC3597)
+	if u1.ToRFC3597(r1) != nil || u2.ToRFC3597(r2) != nil {
+		return false
+	}
+	return u1.Rdata == u2.Rdata
 }
 
 // RRsetDiffer compares old and new DNS resource record slices for a given RR type in a zone, ignoring RRSIG records.
@@ -253,7 +275,8 @@ func (rrset *RRset) RRSIGsDiffer(newrrset *RRset) bool {
 	return false
 }
 
-func (rrset *RRset) RemoveRR(rr dns.RR, verbose, debug bool) {
+// RemoveRR removes rr from the RRset, and reports whether it was there.
+func (rrset *RRset) RemoveRR(rr dns.RR, verbose, debug bool) bool {
 	if debug {
 		log.Printf("RemoveRR: Trying to remove '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
 	}
@@ -265,9 +288,10 @@ func (rrset *RRset) RemoveRR(rr dns.RR, verbose, debug bool) {
 			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
 			rrset.RRSIGs = []dns.RR{}
 			log.Printf("RemoveRR: *REMOVED* '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
-			return
+			return true
 		}
 	}
+	return false
 }
 
 // Add adds a RR to the RRset if it is not already present.
