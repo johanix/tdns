@@ -1995,6 +1995,14 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		}
 		return map[string]*cache.AuthServer{}, nil
 	}
+	// A stub's servers are configuration: the glue and transport signals in a
+	// response do not change them, and the lookup goes on to the configured
+	// servers. The map's entries are the stub's own AuthServer instances, so
+	// the processing below would add to them in place.
+	if imr.Cache.IsStubZone(zonename) {
+		serverMap, _ := imr.Cache.ServerMapCopy(zonename)
+		return serverMap, nil
+	}
 
 	if Globals.Debug && !imr.Quiet {
 		lgDns.Debug("*** ParseAdditionalForNSAddrs: zonename: \nnsMap", "zonename", zonename, "nnsmap", nsMap)
@@ -3080,7 +3088,9 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	// are not already present in cache. In-bailiwick NS should primarily use
 	// glue (and, when ImrOptRevalidateNS is enabled, will later be
 	// revalidated by scheduleReferralNSRevalidation / revalidateInBailiwickGlue).
-	if nsRRset != nil && zonename != "" && len(nsRRset.RRs) > 0 {
+	// Not for a stub: its servers are the configured ones, whatever the
+	// referral names.
+	if nsRRset != nil && zonename != "" && len(nsRRset.RRs) > 0 && !imr.Cache.IsStubZone(zonename) {
 		inBailiwick := func(host, zone string) bool {
 			return dns.IsSubDomain(dns.Fqdn(zone), dns.Fqdn(host))
 		}

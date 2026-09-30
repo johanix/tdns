@@ -258,6 +258,13 @@ func (rrcache *RRsetCacheT) keepsServerMap(zone string) bool {
 	return rrcache.stubZones.Has(zone)
 }
 
+// IsStubZone reports whether zone is a configured stub. Its server map is
+// configuration (AddStub): nothing the resolver learns from a referral, glue,
+// a transport signal or an address lookup changes it.
+func (rrcache *RRsetCacheT) IsStubZone(zone string) bool {
+	return rrcache.stubZones.Has(zone)
+}
+
 // FlushDomain removes cached RRsets at or below the provided domain.
 // When keepStructural is true, NS/DS/DNSKEY RRsets and the address
 // records for their nameservers are preserved. When it is false, the
@@ -643,9 +650,15 @@ func (rrcache *RRsetCacheT) RemoveStub(zone string) {
 	rrcache.serverMapMu.Unlock()
 }
 
+// AddServers merges sm into zone's server map. A stub's map is left as
+// configured (keepsServerMap): servers learned from a referral or a lookup do
+// not join it.
 func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) error {
 	rrcache.serverMapMu.Lock()
 	defer rrcache.serverMapMu.Unlock()
+	if rrcache.keepsServerMap(zone) {
+		return nil
+	}
 	serverMapOrig, ok := rrcache.ServerMap.Get(zone)
 
 	// Create a copy of the map to avoid concurrent map read/write errors
