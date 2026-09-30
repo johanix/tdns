@@ -806,7 +806,9 @@ zones:
      options:   [ modified-downstream ]
 ```
 
-The option changes nothing about how the zone is served, transferred or
+A reload that turns the option on or off takes effect at once: the resolver
+drops what it holds about the zone, which came from the source it no longer
+uses. The option changes nothing about how the zone is served, transferred or
 updated.
 
 **Options you cannot set.** `dirty`, `frozen`, `automatic-zone`,

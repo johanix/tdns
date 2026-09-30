@@ -124,6 +124,50 @@ func TestChildCopyIsAnsweredFromWithoutTheOption(t *testing.T) {
 	}
 }
 
+// A reload that adds the option swaps the zone's options while the resolver
+// runs. What it cached from the copy -- the child's missing keys, its data, the
+// zone held Insecure -- must not outlive the switch.
+func TestModifiedDownstreamTakesEffectOnReload(t *testing.T) {
+	rig := newOwnZoneRig(t)
+	child := hostChildCopy(t, false)
+	ctx := context.Background()
+	prev := Globals.ImrEngine
+	Globals.ImrEngine = rig.imr // the running resolver, as the reload finds it
+	t.Cleanup(func() { Globals.ImrEngine = prev })
+
+	// Answered from the copy: no DNSKEY, the copy's address.
+	if resp, err := rig.imr.ImrQuery(ctx, ownChild, dns.TypeDNSKEY, dns.ClassINET, nil); err != nil || resp.RRset != nil {
+		t.Fatalf("%s DNSKEY from the copy: %+v (err %v), want NODATA", ownChild, resp, err)
+	}
+	if resp, err := rig.imr.ImrQuery(ctx, "www."+ownChild, dns.TypeA, dns.ClassINET, nil); err != nil || resp.RRset == nil {
+		t.Fatalf("www.%s A from the copy: %+v (err %v)", ownChild, resp, err)
+	}
+
+	conf := &Config{Zones: []ZoneConf{{Name: ownChild, Type: "primary", Store: "map",
+		Zonefile: "/nonexistent", OptionsStrs: []string{"modified-downstream"}}}}
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+	if _, _, err := conf.ParseZones(ctx, true); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !child.modifiedDownstream() || !child.servesQueries() {
+		t.Fatalf("after the reload: modified-downstream %v, serving %v; want both",
+			child.modifiedDownstream(), child.servesQueries())
+	}
+
+	resp, err := rig.imr.ImrQuery(ctx, ownChild, dns.TypeDNSKEY, dns.ClassINET, nil)
+	if err != nil || resp.RRset == nil || !resp.Validated {
+		t.Errorf("%s DNSKEY after the reload: %+v (err %v), want the published keys, validated", ownChild, resp, err)
+	}
+	resp, err = rig.imr.ImrQuery(ctx, "www."+ownChild, dns.TypeA, dns.ClassINET, nil)
+	if err != nil || resp.RRset == nil || rdataOf(resp.RRset.RRs[0]) != "192.0.2.55" || !resp.Validated {
+		t.Errorf("www.%s A after the reload: %+v (err %v), want the published 192.0.2.55, validated", ownChild, resp, err)
+	}
+	next := newFwdSecKey(t, ownChild).dnskey.ToDS(dns.SHA256)
+	if err := rig.parent.CheckDelegationCoherenceForUpdate([]dns.RR{next}, imrDnskeyFetcher(rig.imr)); err != nil {
+		t.Errorf("coherence check after the reload: %v", err)
+	}
+}
+
 // Which questions a zone modified downstream leaves to the resolver: all of
 // its own, a DS below it included. The DS at its apex is its parent's.
 func TestOwnZoneForQuestionModifiedDownstream(t *testing.T) {

@@ -1413,6 +1413,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zonemdChanged := zonemdSettingsDiffer(
 			zdp.Options[OptPublishZonemd], zdp.zonemdScheme, zdp.zonemdAlgs,
 			newOpts[OptPublishZonemd], zonemdSet.Scheme, zonemdSet.Algorithms)
+		// Likewise whether the resolver's source for the zone changes: what it
+		// holds about the zone came from the source it no longer uses.
+		sourceChanged := zdp.Options[OptModifiedDownstream] != newOpts[OptModifiedDownstream]
 		zdp.Options = newOpts
 		zdp.publishCadence = publishCadence
 		zdp.ixfrChainMaxBytes = zconf.IxfrChainMaxBytes
@@ -1432,6 +1435,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			lgConfig.Info("zonemd configuration changed; republishing the zone to apply it",
 				"zone", zname, "publish", newOpts[OptPublishZonemd])
 			zdp.requestPublish(false)
+		}
+		if sourceChanged {
+			forgetResolverSource(zname)
 		}
 
 		invokeOptionHandlers(zname, options)

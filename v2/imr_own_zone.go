@@ -130,6 +130,25 @@ func (zd *ZoneData) modifiedDownstream() bool {
 	return zd != nil && zd.Options[OptModifiedDownstream]
 }
 
+// forgetResolverSource drops what the running resolver holds about zone, after
+// a reload turned modified-downstream on or off for it: it came from the source
+// the resolver no longer uses. Turned on, that is what the copy answered --
+// NODATA for the keys it lacks, its data, the zone held Insecure, which never
+// lapses -- and until it expired the parent went on refusing the child's
+// updates. Turned off, it is the published zone's answers, which the copy gives
+// now. The next question goes to the new source, as a changed delegation's does
+// (invalidateImrDelegations).
+func forgetResolverSource(zone string) {
+	imr := Globals.ImrEngine
+	if imr == nil || imr.Cache == nil {
+		return
+	}
+	if n, err := imr.Cache.FlushDomain(zone, false); err == nil {
+		lgImr.Info("modified-downstream changed; dropped what the resolver held about the zone",
+			"zone", zone, "entries", n)
+	}
+}
+
 // servesQueries reports whether zd answers queries now, by the tests
 // DefaultQueryHandler applies before it hands one to QueryResponder: the zone
 // has published data, no service-impacting error, and has not passed SOA
