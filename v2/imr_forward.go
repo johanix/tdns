@@ -872,6 +872,16 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			lgImr.Info("forward upstream recovered", "zone", fz.Zone, "upstream", up.Label)
 			imr.updateForwardUpstreamError()
 		}
+		// A reply that does not answer the question asked is not used (RFC 5452
+		// section 3), as in tryServer. It is still a DNS response, so the
+		// upstream stays reachable (recordSuccess above): like an unusable
+		// rcode, it only sends the query on to the next upstream.
+		if qerr := replyMatchesQuery(r, m); qerr != nil {
+			lastErr = fmt.Errorf("upstream %s: %w", up.Label, qerr)
+			lgDns.Debug("forwardQuery: reply does not answer the question", "qname", qname,
+				"qtype", dns.TypeToString[qtype], "upstream", up.Label, "err", qerr)
+			continue
+		}
 		for _, hook := range getImrResponseHooks() {
 			hook(ctx, qname, qtype, up.Label, up.Addr, up.Transport, r, r.MsgHdr.Rcode)
 		}
@@ -902,7 +912,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 
 		switch classifyResponse(qname, qtype, r) {
 		case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
-			if cctx, rcode, handled := imr.handleNegative(qname, qtype, r, up.Transport); handled {
+			if cctx, rcode, handled := imr.handleNegative(qname, qtype, r, up.Transport, ""); handled {
 				if fz.TrustAD {
 					imr.applyTrustADToNegative(qname, qtype, r.MsgHdr.AuthenticatedData)
 				}

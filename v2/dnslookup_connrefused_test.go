@@ -53,7 +53,7 @@ func TestExplainNoTuplesNamesASuspectFamily(t *testing.T) {
 	if !ft.IsSuspect(cache.FamilyV6) {
 		t.Fatal("setup: v6 should be suspect after one failure with threshold 1")
 	}
-	got := explainNoTuples(map[string]*cache.AuthServer{"ns1.example.": srv}, nil, ft, "www.example.", edns0.PrivacyNone)
+	got := explainNoTuples(map[string]*cache.AuthServer{"ns1.example.": srv}, nil, ft, "www.example.", edns0.PrivacyNone, false)
 	if !regexp.MustCompile(`[1-9][0-9]* in server backoff`).MatchString(got) {
 		t.Errorf("explanation %q does not count the v4 address in server backoff", got)
 	}

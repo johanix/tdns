@@ -529,7 +529,22 @@ func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req
 
 	select {
 	case res := <-respch:
-		if res.Err != nil {
+		var notInZone *ChildDeleteNotInZoneError
+		switch {
+		case errors.As(res.Err, &notInZone):
+			// A delete of a record the zone does not hold: refused, nothing
+			// in the update applied, as a failed "RR exists" prerequisite is
+			// (RFC 2136 §3.2.5). Not SERVFAIL, which the child would retry
+			// unchanged.
+			lgHandler.Warn("update deletes a record the zone does not hold; answering NXRRSET",
+				"zone", req.ZoneName, "error", res.Err)
+			m.SetRcode(m, dns.RcodeNXRrset)
+			text := res.Err.Error()
+			if len(text) > 300 {
+				text = text[:300]
+			}
+			edns0.AttachEDEToResponseWithText(m, edns0.EDEZoneUpdateNotApplied, text, false)
+		case res.Err != nil:
 			// The update was refused or could not be made durable. SERVFAIL is
 			// the honest answer: the client learns to retry or escalate,
 			// instead of believing a change that was never made.
@@ -537,7 +552,7 @@ func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req
 				"zone", req.ZoneName, "error", res.Err)
 			m.SetRcode(m, dns.RcodeServerFailure)
 			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdateNotApplied)
-		} else {
+		default:
 			m.SetRcode(m, finalRcode)
 		}
 

@@ -54,6 +54,10 @@ imrengine:
    # - always-query-for-transport: Always query for new auth servers
    # - query-for-transport-tlsa: Query for TLSA records for encrypted transports
    # - transport-signal-type: Specify "svcb" (default) or "tsync"
+   # - allow-loopback-nameservers: Also query nameserver addresses on this host
+   #   (127.0.0.0/8, ::1, 0.0.0.0, ::) that come from referrals, glue or address
+   #   lookups. Off by default: a delegation cannot point the resolver at
+   #   services on its own host. A stub's configured servers are always queried.
    # Transport signal processing is always enabled - signals in Additional are automatically applied
    options:
       # - query-for-transport

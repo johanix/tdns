@@ -222,15 +222,17 @@ const (
 	ImrOptTransportSignalType
 	ImrOptQueryForTransportTLSA
 	ImrOptUseTransportSignals
+	ImrOptAllowLoopbackNameservers
 )
 
 var ImrOptionToString = map[ImrOption]string{
-	ImrOptRevalidateNS:            "revalidate-ns",
-	ImrOptQueryForTransport:       "query-for-transport",
-	ImrOptAlwaysQueryForTransport: "always-query-for-transport",
-	ImrOptTransportSignalType:     "transport-signal-type",
-	ImrOptQueryForTransportTLSA:   "query-for-transport-tlsa",
-	ImrOptUseTransportSignals:     "use-transport-signals",
+	ImrOptRevalidateNS:             "revalidate-ns",
+	ImrOptQueryForTransport:        "query-for-transport",
+	ImrOptAlwaysQueryForTransport:  "always-query-for-transport",
+	ImrOptTransportSignalType:      "transport-signal-type",
+	ImrOptQueryForTransportTLSA:    "query-for-transport-tlsa",
+	ImrOptUseTransportSignals:      "use-transport-signals",
+	ImrOptAllowLoopbackNameservers: "allow-loopback-nameservers",
 }
 
 var StringToImrOption = map[string]ImrOption{
@@ -240,6 +242,7 @@ var StringToImrOption = map[string]ImrOption{
 	"transport-signal-type":      ImrOptTransportSignalType,
 	"query-for-transport-tlsa":   ImrOptQueryForTransportTLSA,
 	"use-transport-signals":      ImrOptUseTransportSignals,
+	"allow-loopback-nameservers": ImrOptAllowLoopbackNameservers,
 }
 
 type AuthOption uint8
