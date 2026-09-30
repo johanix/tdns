@@ -15,11 +15,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-// dnskeyFlagSEP is the "Secure Entry Point" (KSK) flag bit for DNSKEY RRs.
-// miekg/dns does not currently export a symbolic constant for this, so we
-// define it locally for clarity.
-const dnskeyFlagSEP = 1 << 8
-
 // RRsetFetcher is a function type for fetching RRsets by querying authoritative servers.
 // It takes a context, query name, query type, and a map of authoritative servers,
 // and returns the fetched RRset or an error.
@@ -546,11 +541,15 @@ func ValidateDNSKEYRRsetUsingDS(rrset *core.RRset, ds *dns.DS, signerName string
 		if !ok {
 			continue
 		}
-		if dk.KeyTag() != keyid {
+		// RFC 4035 section 5.2: key tag and algorithm, then the digest. The
+		// digest covers the key's algorithm field but not the DS's, so a DS
+		// naming another algorithm would otherwise still match the key.
+		if dk.KeyTag() != keyid || dk.Algorithm != ds.Algorithm {
 			continue
 		}
-		// Require SEP (KSK) bit set for DS-backed keys
-		if dk.Flags&dnskeyFlagSEP == 0 {
+		// A DS refers to a zone key (RFC 4034 section 5.2): the Zone Key flag,
+		// 256. The SEP flag (1) is only a hint, and is not checked.
+		if dk.Flags&dns.ZONE == 0 {
 			continue
 		}
 		// Check that DS digest matches this DNSKEY

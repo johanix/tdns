@@ -51,6 +51,12 @@ type taRoot struct {
 // the start-up fetch never got an answer.
 func anchorImr(t *testing.T, anchor *refKey, serve taRoot, startup bool) *Imr {
 	t.Helper()
+	return anchorImrDS(t, anchor.key.ToDS(dns.SHA256), serve, startup)
+}
+
+// anchorImrDS is anchorImr with the root's trust anchor given as a DS.
+func anchorImrDS(t *testing.T, ds *dns.DS, serve taRoot, startup bool) *Imr {
+	t.Helper()
 	soa := mustRR(t, ". 300 IN SOA "+taRootNS+" hostmaster.root-ta.test. 1 7200 1800 604800 300")
 	unsigned := mustRR(t, taUnsigned+" 300 IN A 192.0.2.53")
 	port := startRefDouble(t, net.IPv4(127, 0, 0, 1), 0, func(w dns.ResponseWriter, r *dns.Msg) {
@@ -80,7 +86,6 @@ func anchorImr(t *testing.T, anchor *refKey, serve taRoot, startup bool) *Imr {
 	srv.SetAddrs([]string{"127.0.0.1"})
 	imr.Cache.ServerMap.Set(".", map[string]*cache.AuthServer{cache.ServerKey(taRootNS): srv})
 
-	ds := anchor.key.ToDS(dns.SHA256)
 	ds.Hdr.Ttl = 3600
 	dsByName := map[string][]*dns.DS{".": {ds}}
 	imr.seedDSRRsetFromTrustAnchors(".", dsByName["."])
