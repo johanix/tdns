@@ -246,6 +246,15 @@ func TestForwardedReplyMustAnswerTheQuestion(t *testing.T) {
 			if badQueries.Load() == 0 {
 				t.Error("the first upstream was not asked")
 			}
+			// It answered, so it is reachable: a mismatched reply is not a
+			// transport failure (ForwardUpstream's reachability contract).
+			bad := imr.ForwardZones()[0].Upstreams[0]
+			bad.mu.Lock()
+			failures, failing := bad.failures, bad.failing
+			bad.mu.Unlock()
+			if failures != 0 || failing {
+				t.Errorf("the first upstream was counted as failing: failures=%d failing=%v", failures, failing)
+			}
 
 			// With that upstream alone, the query fails and nothing is cached.
 			alone := newForwardTestImr(t, []ImrForwardConf{

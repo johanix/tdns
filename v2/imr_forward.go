@@ -810,13 +810,6 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		if err == nil && r == nil {
 			err = fmt.Errorf("nil response from upstream %s", up.Label)
 		}
-		if err == nil {
-			// A reply that does not answer the question asked is not used
-			// (RFC 5452 section 3): a failed attempt, as in tryServer.
-			if qerr := replyMatchesQuery(r, m); qerr != nil {
-				err = fmt.Errorf("upstream %s: %w", up.Label, qerr)
-			}
-		}
 		if err != nil && truncated {
 			starved++
 			lastErr = fmt.Errorf("upstream %s did not answer within its %v of the budget",
@@ -860,6 +853,16 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		if up.recordSuccess() {
 			lgImr.Info("forward upstream recovered", "zone", fz.Zone, "upstream", up.Label)
 			imr.updateForwardUpstreamError()
+		}
+		// A reply that does not answer the question asked is not used (RFC 5452
+		// section 3), as in tryServer. It is still a DNS response, so the
+		// upstream stays reachable (recordSuccess above): like an unusable
+		// rcode, it only sends the query on to the next upstream.
+		if qerr := replyMatchesQuery(r, m); qerr != nil {
+			lastErr = fmt.Errorf("upstream %s: %w", up.Label, qerr)
+			lgDns.Debug("forwardQuery: reply does not answer the question", "qname", qname,
+				"qtype", dns.TypeToString[qtype], "upstream", up.Label, "err", qerr)
+			continue
 		}
 		for _, hook := range getImrResponseHooks() {
 			hook(ctx, qname, qtype, up.Label, up.Addr, up.Transport, r, r.MsgHdr.Rcode)
