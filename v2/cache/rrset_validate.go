@@ -958,7 +958,9 @@ func (rrcache *RRsetCacheT) dsCacheIsInsecureCut(ctx context.Context, name strin
 	case ContextNoErrNoAns, ContextNXDOMAIN:
 		return rrcache.denialEvidence(ctx, name, dsRRs, fetcher) == evidenceInsecureCut
 	}
-	return false
+	// A DS RRset in which no DS is usable proves as much as a denial of the
+	// DS (RFC 4035 section 5.2; ds_usable.go).
+	return parentDSWithNoUsableDS(dsRRs)
 }
 
 // parentOf returns the parent zone name of a domain name. The root is its own

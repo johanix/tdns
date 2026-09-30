@@ -315,6 +315,11 @@ func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string,
 	}
 	switch state {
 	case ValidationStateSecure:
+		// No DS the resolver can use: as if the parent had proven there is
+		// none (RFC 4035 section 5.2; ds_usable.go).
+		if (crr.Context == ContextAnswer || crr.Context == ContextReferral) && noUsableDS(crr.RRset.RRs) {
+			return evidenceInsecureCut
+		}
 		return evidenceSecureCut
 	case ValidationStateInsecure, ValidationStateIndeterminate:
 		if !rrcache.parentSideSecure(name) {
