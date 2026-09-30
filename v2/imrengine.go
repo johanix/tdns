@@ -329,6 +329,18 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 			// the forward.
 			lgImr.Info("root is covered by a forward zone: not priming, and not reading root-hints")
 			warnUnreadableRootHints(conf.Imr.RootHints)
+		} else if conf.Imr.Testing.SkipPriming() {
+			// Test harnesses only (imrengine.testing.priming: false). The
+			// hints are used as they stand, and nothing asks the root for its
+			// NS RRset. RefreshRoot upgrades to the live roots when the hints'
+			// copy nears expiry, as it does after re-priming from hints.
+			if err := rrcache.PrimeFromHintsOnly(conf.Imr.RootHints); err != nil {
+				return fmt.Errorf("failed to seed RecursorCache from root hints: %v", err)
+			}
+			lgImr.Warn("imrengine.testing.priming is false: seeded from the root hints without priming;" +
+				" a test-harness switch, not for production")
+			imr.PrimedVia = "hints only (testing.priming: false)"
+			imr.PrimedAt = time.Now()
 		} else {
 			err := rrcache.PrimeWithHints(ctx, conf.Imr.RootHints, imr.IterativeDNSQueryFetcher())
 			if err != nil {
