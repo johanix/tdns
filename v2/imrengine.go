@@ -2092,6 +2092,7 @@ func (imr *Imr) seedDSRRsetFromTrustAnchors(anchorName string, dslist []*dns.DS)
 		Expiration: time.Now().Add(time.Duration(minTTL) * time.Second),
 	})
 	lgImr.Debug("seeded validated DS RRset from trust anchors", "zone", anchorName, "count", len(rrds), "ttl", minTTL)
+	imr.Cache.AddTrustAnchorDS(anchorName, dslist)
 	imr.markAnchorZoneSecure(anchorName, "DS")
 }
 

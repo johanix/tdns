@@ -106,6 +106,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 		ServerMap:            core.NewNameMap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
 		stubZones:            core.NewNameMap[struct{}](),               // the zones AddStub stored a server map for
 		anchorZones:          core.NewNameMap[struct{}](),               // the zones a configured trust anchor vouches for
+		anchorDS:             core.NewNameMap[[]*dns.DS](),              // the DS records of the DS trust anchors
 		AuthServerMap:        core.NewNameMap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 		ZoneMap:              core.NewNameMap[*Zone](),                  // zone -> *Zone
 		ServerTLSA:           core.NewNameMap[*ServerTLSARecords](),     // nsname -> validated TLSA cache
@@ -455,10 +456,17 @@ func (rrcache *RRsetCacheT) forgetZoneStates(domain string) {
 	}
 }
 
-// trustAnchorZones returns the canonical names of the zones with a trust anchor
-// in the DNSKEY cache.
+// trustAnchorZones returns the canonical names of the zones a configured trust
+// anchor vouches for: those recorded by AddTrustAnchorZone, and those with a
+// trust anchor key in the DNSKEY cache. A DS anchor has no such key until its
+// zone's DNSKEY RRset has matched it, and a flush dropped its zone's state.
 func (rrcache *RRsetCacheT) trustAnchorZones() map[string]struct{} {
 	zones := map[string]struct{}{}
+	if rrcache.anchorZones != nil {
+		for _, zone := range rrcache.anchorZones.Keys() {
+			zones[core.CanonicalizeName(zone)] = struct{}{}
+		}
+	}
 	if rrcache.DnskeyCache == nil {
 		return zones
 	}

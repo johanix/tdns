@@ -695,7 +695,14 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	// For root, there is no DS by definition, so skip this check
 	var dsRRs *CachedRRset
 	if name != "." {
-		dsRRs = rrcache.Get(name, dns.TypeDS)
+		// A zone with a DS trust anchor has the anchor's DS, whatever its
+		// parent says: an island of security usually has no DS there at all,
+		// and asking for one proved the anchor's zone an insecure delegation
+		// once the seeded copy had expired.
+		dsRRs = rrcache.trustAnchorDSRRset(name)
+		if dsRRs == nil {
+			dsRRs = rrcache.Get(name, dns.TypeDS)
+		}
 		if dsRRs == nil {
 			// Backfill: the DS for this zone is not cached, so the chain of
 			// trust cannot be anchored yet. Fetch and validate it on demand
@@ -800,9 +807,12 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	}
 	// Check for seeded DS RRset (indicates DS-based TA initialization).
 	// A Secure denial of DS is not a seeded DS; actualDSRecords keeps it out.
+	// The seeded copy expires and is flushed; the anchor itself is used then.
 	if dsRRs == nil || dsRRs.State != ValidationStateSecure {
 		if seededDS := rrcache.Get(name, dns.TypeDS); seededDS != nil && seededDS.State == ValidationStateSecure && len(actualDSRecords(seededDS)) > 0 {
 			seededDSs = append(seededDSs, seededDS)
+		} else if anchor := rrcache.trustAnchorDSRRset(name); anchor != nil {
+			seededDSs = append(seededDSs, anchor)
 		}
 	}
 

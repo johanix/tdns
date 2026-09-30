@@ -242,3 +242,108 @@ func TestUnfetchableKeysUnderATrustAnchorAreServfail(t *testing.T) {
 	imr := anchorImr(t, root, serve, false)
 	wantServfail(t, imr, askType(t, imr, ".", dns.TypeNS))
 }
+
+// expireCached makes the cached <name, qtype> entry expired, as time passing
+// would. It writes the entry directly: Set would compute a new expiration.
+func expireCached(t *testing.T, imr *Imr, name string, qtype uint16) {
+	t.Helper()
+	for item := range imr.Cache.RRsets.IterBuffered() {
+		if core.EqualNames(item.Val.Name, name) && item.Val.RRtype == qtype {
+			expired := item.Val
+			expired.Expiration = time.Now().Add(-time.Minute)
+			imr.Cache.RRsets.Set(item.Key, expired)
+			if imr.Cache.Get(name, qtype) != nil {
+				t.Fatalf("precondition: %s %s is still cached", name, dns.TypeToString[qtype])
+			}
+			return
+		}
+	}
+	t.Fatalf("precondition: no cached %s %s", name, dns.TypeToString[qtype])
+}
+
+func wantSecure(t *testing.T, got *dns.Msg) {
+	t.Helper()
+	if got.Rcode != dns.RcodeSuccess || len(got.Answer) == 0 || !got.AuthenticatedData {
+		t.Errorf("got %s, AD=%v, %d answers; want NOERROR with AD:\n%s",
+			dns.RcodeToString[got.Rcode], got.AuthenticatedData, len(got.Answer), got)
+	}
+}
+
+// A flush leaves an anchor whose keys were never matched in force: its zone
+// stays Secure, so unsigned data under it is still SERVFAIL, and its signed data
+// still validates, from the anchor's DS (FlushAll removes the seeded copy). The
+// flushes kept the anchor zones they found through a trust anchor key, which a
+// DS anchor does not have until its keys have matched it.
+func TestAFlushLeavesATrustAnchorInForce(t *testing.T) {
+	for name, flush := range map[string]func(*Imr){
+		"FlushAll":       func(imr *Imr) { imr.Cache.FlushAll() },
+		"FlushDomain(.)": func(imr *Imr) { _, _ = imr.Cache.FlushDomain(".", false) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := newRefKey(t, ".")
+			imr := anchorImr(t, root, rootServing(t, root, true, true), false)
+			flush(imr)
+			if state := zoneStateOf(imr, "."); state != cache.ValidationStateToString[cache.ValidationStateSecure] {
+				t.Errorf("after the flush the root is %s, want secure", state)
+			}
+			wantServfail(t, imr, askType(t, imr, taUnsigned, dns.TypeA))
+			wantSecure(t, askType(t, imr, ".", dns.TypeNS))
+		})
+	}
+}
+
+// The DS RRset seeded from a DS anchor expires like any other RRset. The anchor
+// does not: signed data under it still validates.
+func TestATrustAnchorOutlivesItsSeededDS(t *testing.T) {
+	root := newRefKey(t, ".")
+	imr := anchorImr(t, root, rootServing(t, root, true, true), false)
+	expireCached(t, imr, ".", dns.TypeDS)
+	wantSecure(t, askType(t, imr, ".", dns.TypeNS))
+}
+
+// A DS anchor for a zone below the root, whose parent publishes no DS for it
+// (an island of security). Once the seeded DS had expired, the DS was asked of
+// the parent, whose denial made the zone an insecure delegation and undid the
+// anchor. The zone's data still validates.
+func TestAnIslandAnchorOutlivesItsSeededDS(t *testing.T) {
+	const zone, zoneNS = "island.test.", "ns.island.test."
+	key := newRefKey(t, zone)
+	now := time.Now()
+	dnskey := key.signWithin(t, now.Add(-time.Hour), now.Add(time.Hour), key.key)
+	ns := key.signWithin(t, now.Add(-time.Hour), now.Add(time.Hour), mustRR(t, zone+" 300 IN NS "+zoneNS))
+	parentSOA := mustRR(t, "test. 300 IN SOA ns.test. hostmaster.test. 1 7200 1800 604800 300")
+	port := startRefDouble(t, net.IPv4(127, 0, 0, 1), 0, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Authoritative = true
+		switch q := r.Question[0]; {
+		case dns.CanonicalName(q.Name) == zone && q.Qtype == dns.TypeDNSKEY:
+			m.Answer = append(m.Answer, dnskey...)
+		case dns.CanonicalName(q.Name) == zone && q.Qtype == dns.TypeNS:
+			m.Answer = append(m.Answer, ns...)
+		default: // the parent side: no DS for the island, unsigned
+			m.Ns = append(m.Ns, parentSOA)
+		}
+		_ = w.WriteMsg(m)
+	})
+	imr := verdictImr(t, false)
+	imr.DnskeyCache = imr.Cache.DnskeyCache
+	p := strconv.Itoa(port)
+	imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, p, nil)
+	imr.Cache.DNSClient[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, p, nil)
+	for z, nsname := range map[string]string{zone: zoneNS, ".": taRootNS} {
+		srv := imr.Cache.GetOrCreateAuthServer(nsname)
+		srv.SetAddrs([]string{"127.0.0.1"})
+		imr.Cache.ServerMap.Set(z, map[string]*cache.AuthServer{cache.ServerKey(nsname): srv})
+	}
+	imr.Cache.ZoneMap.Set(".", &cache.Zone{ZoneName: ".", State: cache.ValidationStateIndeterminate})
+	ds := key.key.ToDS(dns.SHA256)
+	ds.Hdr.Ttl = 3600
+	imr.seedDSRRsetFromTrustAnchors(zone, []*dns.DS{ds})
+	expireCached(t, imr, zone, dns.TypeDS)
+
+	wantSecure(t, askType(t, imr, zone, dns.TypeNS))
+	if state := zoneStateOf(imr, zone); state != cache.ValidationStateToString[cache.ValidationStateSecure] {
+		t.Errorf("%s is %s, want secure", zone, state)
+	}
+}

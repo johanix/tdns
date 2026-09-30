@@ -7,6 +7,7 @@ import (
 	"context"
 	"log"
 	"slices"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -169,6 +170,42 @@ func (rrcache *RRsetCacheT) proofNames(zoneName, name string) []string {
 func (rrcache *RRsetCacheT) AddTrustAnchorZone(zone string) {
 	if rrcache.anchorZones != nil {
 		rrcache.anchorZones.Set(zone, struct{}{})
+	}
+}
+
+// AddTrustAnchorDS records the DS records of a DS trust anchor for zone,
+// replacing any recorded before.
+func (rrcache *RRsetCacheT) AddTrustAnchorDS(zone string, ds []*dns.DS) {
+	if rrcache.anchorDS != nil && len(ds) > 0 {
+		rrcache.anchorDS.Set(zone, slices.Clone(ds))
+	}
+}
+
+// trustAnchorDSRRset is the DS RRset of the DS trust anchor for zone, Secure,
+// or nil when zone has none. The copy seeded in the cache expires and is
+// flushed like any other RRset; the anchor is configuration and does neither.
+// Without it, a zone whose keys had not been matched yet, or had expired from
+// the DnskeyCache, could not be validated again, and a zone below the root
+// asked its parent for a DS the anchor is there to stand in for.
+func (rrcache *RRsetCacheT) trustAnchorDSRRset(zone string) *CachedRRset {
+	if rrcache.anchorDS == nil {
+		return nil
+	}
+	list, ok := rrcache.anchorDS.Get(zone)
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	rrs := make([]dns.RR, 0, len(list))
+	for _, ds := range list {
+		rrs = append(rrs, ds)
+	}
+	return &CachedRRset{
+		Name:       dns.Fqdn(zone),
+		RRtype:     dns.TypeDS,
+		RRset:      &core.RRset{Name: dns.Fqdn(zone), Class: dns.ClassINET, RRtype: dns.TypeDS, RRs: rrs},
+		Context:    ContextPriming,
+		State:      ValidationStateSecure,
+		Expiration: time.Now().Add(time.Hour),
 	}
 }
 
