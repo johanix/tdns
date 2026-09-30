@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"net"
 	"strconv"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	"github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -142,5 +144,83 @@ func TestOnlyLameServersEndInServfail(t *testing.T) {
 	}
 	if took := time.Since(start); took > 3*time.Second {
 		t.Errorf("SERVFAIL took %v", took)
+	}
+}
+
+const (
+	zsParent = "p836.test."
+	zsKid    = "kid.p836.test."
+	zsKidNS  = "ns.kid.p836.test."
+	zsWWW    = "www.kid.p836.test."
+)
+
+// A referral is judged against the zone of the servers that were asked, not
+// the closest zone the cache knows for the name. Here the cache knows the
+// child already (an empty server map, as a lookup in progress leaves it), and
+// the question goes to the parent's servers: their referral into the child is
+// a referral, and the child's answer comes through. The same with AA set on
+// the referral, as some servers do: it is not the child's NODATA either.
+func TestReferralIsJudgedAgainstTheServersZone(t *testing.T) {
+	for _, aa := range []bool{false, true} {
+		t.Run("aa="+strconv.FormatBool(aa), func(t *testing.T) { referralJudgedAgainstServersZone(t, aa) })
+	}
+}
+
+func referralJudgedAgainstServersZone(t *testing.T, aa bool) {
+	delegation := mustRR(t, zsKid+" 300 IN NS "+zsKidNS)
+	glue := mustRR(t, zsKidNS+" 300 IN AAAA ::1")
+	answer := mustRR(t, zsWWW+" 300 IN A 192.0.2.36")
+	kidSOA := mustRR(t, zsKid+" 300 IN SOA "+zsKidNS+" hostmaster."+zsKid+" 1 7200 1800 604800 300")
+	parentSOA := mustRR(t, zsParent+" 300 IN SOA ns."+zsParent+" hostmaster."+zsParent+" 1 7200 1800 604800 300")
+
+	port := startRefDouble(t, net.IPv4(127, 0, 0, 1), 0, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		q := r.Question[0]
+		if name := dns.CanonicalName(q.Name); dns.IsSubDomain(zsKid, name) && !(name == zsKid && q.Qtype == dns.TypeDS) {
+			m.Authoritative = aa
+			m.Ns = append(m.Ns, delegation)
+			m.Extra = append(m.Extra, glue)
+		} else {
+			m.Authoritative = true
+			m.Ns = append(m.Ns, parentSOA)
+		}
+		_ = w.WriteMsg(m)
+	})
+	startRefDouble(t, net.IPv6loopback, port, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Authoritative = true
+		if q := r.Question[0]; dns.CanonicalName(q.Name) == zsWWW && q.Qtype == dns.TypeA {
+			m.Answer = append(m.Answer, answer)
+		} else {
+			m.Ns = append(m.Ns, kidSOA)
+		}
+		_ = w.WriteMsg(m)
+	})
+
+	imr := verdictImr(t, false)
+	p := strconv.Itoa(port)
+	imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, p, nil)
+	imr.Cache.DNSClient[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, p, nil)
+	if err := imr.Cache.AddStub(zsParent, []cache.AuthServer{
+		{Name: "ns." + zsParent, Addrs: []string{"127.0.0.1"}, Alpn: []string{"do53"}},
+	}); err != nil {
+		t.Fatalf("AddStub %s: %v", zsParent, err)
+	}
+	imr.Cache.ZoneMap.Set(".", &cache.Zone{ZoneName: ".", State: cache.ValidationStateIndeterminate})
+	imr.Cache.ServerMap.Set(zsKid, map[string]*cache.AuthServer{})
+	if closest, _, _ := imr.Cache.FindClosestKnownZoneFor(zsWWW, dns.TypeA); closest != zsKid {
+		t.Fatalf("precondition: the closest known zone for %s is %q, want %s", zsWWW, closest, zsKid)
+	}
+	parentServers, _ := imr.Cache.ServerMapCopy(zsParent)
+
+	rrset, rcode, _, _, err := imr.IterativeDNSQueryInZone(context.Background(), zsWWW, dns.TypeA,
+		parentServers, zsParent, false, edns0.PrivacyNone)
+	if err != nil || rcode != dns.RcodeSuccess || rrset == nil || len(rrset.RRs) != 1 {
+		t.Fatalf("got rcode %s, rrset %v, err %v; want the child's answer", dns.RcodeToString[rcode], rrset, err)
+	}
+	if a, ok := rrset.RRs[0].(*dns.A); !ok || a.A.String() != "192.0.2.36" {
+		t.Fatalf("answer %v, want 192.0.2.36", rrset.RRs[0])
 	}
 }
