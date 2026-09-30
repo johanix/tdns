@@ -90,3 +90,31 @@ func TestCorrelateStatusDoHPath(t *testing.T) {
 		})
 	}
 }
+
+// `config check` warns when a test-harness switch is set.
+func TestConfigCheckImrTestingPriming(t *testing.T) {
+	on, off := true, false
+	for _, tc := range []struct {
+		name    string
+		priming *bool
+		warn    bool
+	}{{"unset", nil, false}, {"true", &on, false}, {"false", &off, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &tdns.Config{}
+			cfg.Listeners.Addresses = []string{"127.0.0.1:53"}
+			cfg.Listeners.Transports = []string{"do53"}
+			cfg.Imr.Testing.Priming = tc.priming
+			rep := newCCReport()
+			checkImrEngine(cfg, rep)
+			warned := false
+			for _, r := range rep.byGroup["IMR engine"] {
+				if r.check == "testing" && r.level == ccWARN {
+					warned = true
+				}
+			}
+			if warned != tc.warn {
+				t.Errorf("priming=%v: warned=%v, want %v", tc.priming, warned, tc.warn)
+			}
+		})
+	}
+}
