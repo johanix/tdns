@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/johanix/tdns/v2/edns0"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -38,9 +39,9 @@ func rowFor(t *testing.T, rep ImrClientStatsReport, client string) ImrClientStat
 func TestClientStatsCountsOneClientOnce(t *testing.T) {
 	s := newImrClientStats(10)
 	now := time.Now()
-	s.record(udpFrom("192.0.2.10"), ctDo53UDP, now)
-	s.record(tcpFrom("::ffff:192.0.2.10"), ctDoT, now.Add(time.Second))
-	s.record(tcpFrom("::ffff:192.0.2.10"), ctDoT, now.Add(2*time.Second))
+	s.record(udpFrom("192.0.2.10"), ctDo53UDP, edns0.PrivacyNone, now)
+	s.record(tcpFrom("::ffff:192.0.2.10"), ctDoT, edns0.PrivacyNone, now.Add(time.Second))
+	s.record(tcpFrom("::ffff:192.0.2.10"), ctDoT, edns0.PrivacyNone, now.Add(2*time.Second))
 
 	rep := s.Snapshot(nil, false)
 	if len(rep.Rows) != 1 {
@@ -63,10 +64,10 @@ func TestClientStatsCountsOneClientOnce(t *testing.T) {
 func TestClientStatsEvictsTheLeastRecentlySeenOnAnyTransport(t *testing.T) {
 	s := newImrClientStats(2)
 	t0 := time.Now()
-	s.record(udpFrom("192.0.2.1"), ctDo53UDP, t0)                  // A: UDP long ago...
-	s.record(udpFrom("192.0.2.2"), ctDo53UDP, t0.Add(time.Second)) // B
-	s.record(tcpFrom("192.0.2.1"), ctDoT, t0.Add(2*time.Second))   // ...but A was on DoT just now
-	s.record(udpFrom("192.0.2.3"), ctDo53UDP, t0.Add(3*time.Second))
+	s.record(udpFrom("192.0.2.1"), ctDo53UDP, edns0.PrivacyNone, t0)                  // A: UDP long ago...
+	s.record(udpFrom("192.0.2.2"), ctDo53UDP, edns0.PrivacyNone, t0.Add(time.Second)) // B
+	s.record(tcpFrom("192.0.2.1"), ctDoT, edns0.PrivacyNone, t0.Add(2*time.Second))   // ...but A was on DoT just now
+	s.record(udpFrom("192.0.2.3"), ctDo53UDP, edns0.PrivacyNone, t0.Add(3*time.Second))
 
 	rep := s.Snapshot(nil, false)
 	if rep.Clients != 2 || rep.EvictedClients != 1 {
@@ -85,7 +86,7 @@ func TestClientStatsResetClearsTheWholeStore(t *testing.T) {
 	s := newImrClientStats(10)
 	now := time.Now()
 	for _, ip := range []string{"192.0.2.1", "192.0.2.2", "198.51.100.1"} {
-		s.record(udpFrom(ip), ctDo53UDP, now)
+		s.record(udpFrom(ip), ctDo53UDP, edns0.PrivacyNone, now)
 	}
 	filter, err := ParseClientFilter([]string{"192.0.2.0/24"})
 	if err != nil {
@@ -183,7 +184,7 @@ func TestClientStatsConcurrentUse(t *testing.T) {
 		go func(g int) {
 			defer wg.Done()
 			for i := 0; i < 500; i++ {
-				s.record(udpFrom(fmt.Sprintf("10.0.%d.%d", g, i%100)), clientTransport(i%int(numClientTransports)), time.Now())
+				s.record(udpFrom(fmt.Sprintf("10.0.%d.%d", g, i%100)), clientTransport(i%int(numClientTransports)), edns0.PrivacyLevel(i%numPrivacyLevels), time.Now())
 				if i%100 == 0 {
 					s.Snapshot(nil, i%200 == 0)
 				}
@@ -218,8 +219,8 @@ func TestImrClientStatsAPI(t *testing.T) {
 	}
 
 	Globals.ImrEngine = &Imr{ClientStats: newImrClientStats(10)}
-	Globals.ImrEngine.ClientStats.record(udpFrom("192.0.2.1"), ctDo53UDP, time.Now())
-	Globals.ImrEngine.ClientStats.record(udpFrom("198.51.100.1"), ctDo53UDP, time.Now())
+	Globals.ImrEngine.ClientStats.record(udpFrom("192.0.2.1"), ctDo53UDP, edns0.PrivacyNone, time.Now())
+	Globals.ImrEngine.ClientStats.record(udpFrom("198.51.100.1"), ctDo53UDP, edns0.PrivacyNone, time.Now())
 	resp := call()
 	raw, _ := json.Marshal(resp.Data)
 	var rep ImrClientStatsReport
@@ -250,4 +251,50 @@ func BenchmarkImrHandlerWithClientStats(b *testing.B) {
 			h(w, q)
 		}
 	})
+}
+
+// #855: each query is counted under the PRIVACY level it carried, read from the
+// query itself by the listener's wrapper; the totals stay what they were.
+func TestClientStatsByPrivacy(t *testing.T) {
+	s := newImrClientStats(10)
+	on := listenerHandlers(func(dns.ResponseWriter, *dns.Msg) {}, s)
+	withPrivacy := func(level edns0.PrivacyLevel) *dns.Msg {
+		q := queryMsg()
+		q.SetEdns0(1232, false)
+		if err := edns0.AddPrivacyLevelToMessage(q, level); err != nil {
+			t.Fatalf("AddPrivacyLevelToMessage: %v", err)
+		}
+		return q
+	}
+	on.udp(&fakeRW{remote: udpFrom("192.0.2.6")}, queryMsg())                       // no EDNS at all
+	on.udp(&fakeRW{remote: udpFrom("192.0.2.6")}, withPrivacy(edns0.PrivacyStrict)) // strict over cleartext
+	on.doh(dohWriterFrom(t, "192.0.2.6:44321", queryMsg()), withPrivacy(edns0.PrivacyOpportunistic))
+	on.doh(dohWriterFrom(t, "192.0.2.6:44321", queryMsg()), withPrivacy(edns0.PrivacyStrict))
+	on.dot(&fakeRW{remote: tcpFrom("192.0.2.1")}, queryMsg())
+
+	rep := s.Snapshot(nil, false)
+	r := rowFor(t, rep, "192.0.2.6")
+	if r.Total != 4 || r.Counts["do53/udp"] != 2 || r.Counts["doh"] != 2 {
+		t.Errorf("192.0.2.6 totals %v (%d), want do53/udp 2, doh 2", r.Counts, r.Total)
+	}
+	bp := r.ByPrivacy
+	if bp["none"]["do53/udp"] != 1 || bp["strict"]["do53/udp"] != 1 || bp["opportunistic"]["doh"] != 1 || bp["strict"]["doh"] != 1 || len(bp) != 3 {
+		t.Errorf("192.0.2.6 by privacy %v, want none do53/udp 1, strict do53/udp 1 and doh 1, opportunistic doh 1", bp)
+	}
+	// A client that never asked for privacy has one level.
+	if bp := rowFor(t, rep, "192.0.2.1").ByPrivacy; len(bp) != 1 || bp["none"]["dot"] != 1 {
+		t.Errorf("192.0.2.1 by privacy %v, want none dot 1 alone", bp)
+	}
+}
+
+// An evicted client's counts keep their levels in the evicted totals.
+func TestClientStatsEvictionKeepsPrivacy(t *testing.T) {
+	s := newImrClientStats(1)
+	now := time.Now()
+	s.record(udpFrom("192.0.2.1"), ctDoT, edns0.PrivacyStrict, now)
+	s.record(udpFrom("192.0.2.2"), ctDo53UDP, edns0.PrivacyNone, now.Add(time.Second)) // evicts .1
+	rep := s.Snapshot(nil, false)
+	if rep.EvictedClients != 1 || rep.EvictedCounts["dot"] != 1 || rep.EvictedByPrivacy["strict"]["dot"] != 1 {
+		t.Errorf("evicted %d %v %v, want one client, strict dot 1", rep.EvictedClients, rep.EvictedCounts, rep.EvictedByPrivacy)
+	}
 }

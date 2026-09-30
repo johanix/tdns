@@ -1087,56 +1087,10 @@ func candidateTransports(server *cache.AuthServer, qname string, privacy edns0.P
 		return []core.Transport{core.TransportDo53}
 	}
 
-	type wt struct {
-		t core.Transport
-		w int
-	}
-
 	// Read under the server's lock: the transport-signal lookups write these
 	// in the background while queries read them.
 	transports, weights := server.GetTransportSignal()
-	seen := map[core.Transport]bool{}
-	var encrypted []wt
-	encSum := 0
-	consider := func(t core.Transport) {
-		if seen[t] || !core.IsEncryptedTransport(t) {
-			return
-		}
-		seen[t] = true
-		w := weights[t]
-		// -03: MAY attempt connections over any transport with weight > 1.
-		if w <= 1 {
-			return
-		}
-		encrypted = append(encrypted, wt{t: t, w: int(w)})
-		encSum += int(w)
-	}
-	for _, t := range transports {
-		consider(t)
-	}
-	for t := range weights {
-		consider(t)
-	}
-	sort.SliceStable(encrypted, func(i, j int) bool {
-		return encrypted[i].t < encrypted[j].t
-	})
-
-	var pool []wt
-	if privacy != edns0.PrivacyNone {
-		// Opportunistic and strict both draw only from the encrypted
-		// transports; they part company over whether Do53 may be appended
-		// after them, below.
-		pool = encrypted
-	} else {
-		do53Share := 100 - encSum
-		if do53Share < 0 {
-			do53Share = 0
-		}
-		if do53Share > 0 {
-			pool = append(pool, wt{t: core.TransportDo53, w: do53Share})
-		}
-		pool = append(pool, encrypted...)
-	}
+	pool := transportPool(transports, weights, privacy)
 
 	if len(pool) == 0 {
 		if privacy == edns0.PrivacyStrict {
@@ -1166,7 +1120,7 @@ func candidateTransports(server *cache.AuthServer, qname string, privacy edns0.P
 		}
 	}
 
-	rest := make([]wt, 0, len(pool)-1)
+	rest := make([]poolEntry, 0, len(pool)-1)
 	for i, c := range pool {
 		if i == winnerIdx {
 			continue
@@ -1197,6 +1151,90 @@ func candidateTransports(server *cache.AuthServer, qname string, privacy edns0.P
 		if !hasDo53 {
 			out = append(out, core.TransportDo53)
 		}
+	}
+	return out
+}
+
+// poolEntry is a transport and its weight in the draw candidateTransports
+// makes.
+type poolEntry struct {
+	t core.Transport
+	w int
+}
+
+// transportPool is the weighted pool candidateTransports draws a server's
+// first transport from, given the server's signal (transports and weights,
+// absence defaults included) and the client's privacy level. It is shared with
+// the transport stats, which show the shares it implies, so that the two
+// cannot drift apart.
+//
+// Each encrypted transport with a weight above 1 is in the pool with its
+// weight. Without privacy, Do53 is in it with what the encrypted weights leave
+// of 100, whatever weight the signal gave Do53 itself. With privacy
+// (opportunistic or strict) only the encrypted transports are.
+func transportPool(transports []core.Transport, weights map[core.Transport]uint8, privacy edns0.PrivacyLevel) []poolEntry {
+	seen := map[core.Transport]bool{}
+	var encrypted []poolEntry
+	encSum := 0
+	consider := func(t core.Transport) {
+		if seen[t] || !core.IsEncryptedTransport(t) {
+			return
+		}
+		seen[t] = true
+		w := weights[t]
+		// -03: MAY attempt connections over any transport with weight > 1.
+		if w <= 1 {
+			return
+		}
+		encrypted = append(encrypted, poolEntry{t: t, w: int(w)})
+		encSum += int(w)
+	}
+	for _, t := range transports {
+		consider(t)
+	}
+	for t := range weights {
+		consider(t)
+	}
+	sort.SliceStable(encrypted, func(i, j int) bool {
+		return encrypted[i].t < encrypted[j].t
+	})
+
+	if privacy != edns0.PrivacyNone {
+		// Opportunistic and strict both draw only from the encrypted
+		// transports; they part company over whether Do53 may be appended
+		// after them (candidateTransports).
+		return encrypted
+	}
+	var pool []poolEntry
+	do53Share := 100 - encSum
+	if do53Share < 0 {
+		do53Share = 0
+	}
+	if do53Share > 0 {
+		pool = append(pool, poolEntry{t: core.TransportDo53, w: do53Share})
+	}
+	return append(pool, encrypted...)
+}
+
+// expectedShares is the share of first picks, in percent, that
+// candidateTransports gives each transport of a server with this signal under
+// privacy: the pool's weights, normalised. With an empty pool the pick is Do53
+// (100) unless privacy is strict, where the server is not used at all (nil).
+func expectedShares(transports []core.Transport, weights map[core.Transport]uint8, privacy edns0.PrivacyLevel) map[core.Transport]uint8 {
+	pool := transportPool(transports, weights, privacy)
+	if len(pool) == 0 {
+		if privacy == edns0.PrivacyStrict {
+			return nil
+		}
+		return map[core.Transport]uint8{core.TransportDo53: 100}
+	}
+	total := 0
+	for _, e := range pool {
+		total += e.w
+	}
+	out := make(map[core.Transport]uint8, len(pool))
+	for _, e := range pool {
+		out[e.t] = uint8((e.w*100 + total/2) / total)
 	}
 	return out
 }
@@ -1666,7 +1704,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					addr, nsname, core.TransportToString[effTransport], server.GetAlpn(), qname, dns.TypeToString[qtype])
 			}
 
-			r, _, wireTransport, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype, dnskeyBypass)
+			r, _, wireTransport, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
 			lastTransport = wireTransport
 			if err != nil {
 				lastErr = err
@@ -1926,7 +1964,7 @@ func (imr *Imr) parseSVCBTransportSignal(rr *dns.SVCB, serverName string, server
 		return false
 	}
 
-	if m, ok, err := GetTransportParam(rr); ok && err == nil {
+	if m, ok, err := GetTransportParamRaw(rr); ok && err == nil {
 		if !imr.Quiet {
 			lgDns.Debug("SVCB oots for", "servername", serverName, "value", MarshalTransport(m))
 		}
@@ -2392,7 +2430,9 @@ func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 // tryServer executes one query attempt for an explicit (server, addr,
 // transport) tuple selected upstream by prioritizeServers. It records the
 // outcome against the server's per-(addr, transport) backoff map.
-func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool) (*dns.Msg, time.Duration, core.Transport, error) {
+//
+// class is whose query it is, for the per-class answer counters.
+func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass) (*dns.Msg, time.Duration, core.Transport, error) {
 	eff := t
 	if dnskeyBypass {
 		// DNSKEY transport policy bypasses this server's probabilistic
@@ -2520,7 +2560,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			return nil, rtt, eff, qerr
 		}
 		server.RecordAddressSuccess(addr, eff)
-		server.IncrementUsedCounter(xres.WireTransport)
+		server.IncrementUsedCounter(xres.WireTransport, class)
 		server.RecordRTT(addr, eff, rtt)
 	} else if Globals.Debug {
 		lgDns.Debug("*** tryServer: query returned no response",
@@ -2538,7 +2578,7 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 	if server == nil || s == "" {
 		return false
 	}
-	kvMap, err := core.ParseTransportString(s)
+	kvMap, err := core.ParseTransportStringRaw(s)
 	if err != nil {
 		lgDns.Debug("applyTransportSignalToServer: invalid transport string for :", "name", server.Name, "s", s, "q", err)
 		return false
@@ -2550,14 +2590,28 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 // all weights (including do53). The do53 share and the per-query transport
 // pick are computed later, at selection time, by candidateTransports — this
 // just records the decoded weights and the set of transports (any order).
+//
+// kvMap is the signal as received: only the transports it names. The absence
+// defaults (do53 100, the others 0) are applied here, to a copy, for
+// selection; the signal itself is kept beside the weights, so that the stats
+// can show what the server said rather than what the defaults made of it.
 func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8) bool {
-	if server == nil || len(kvMap) == 0 {
+	if server == nil || kvMap == nil {
 		return false
 	}
+	received := &cache.ReceivedSignal{Source: "oots", Weights: map[core.Transport]uint8{}}
+	full := make(map[string]uint8, len(kvMap)+4)
+	for k, v := range kvMap {
+		full[k] = v
+		if t, err := core.StringToTransport(k); err == nil {
+			received.Weights[t] = v
+		}
+	}
+	core.ApplyTransportDefaults(full)
 	weights := map[core.Transport]uint8{}
 	var transports []core.Transport
 	var alpnOrder []string
-	for k, v := range kvMap {
+	for k, v := range full {
 		t, err := core.StringToTransport(k)
 		if err != nil {
 			lgDns.Debug("applyTransportMapToServer: unknown transport", "name", server.Name, "proto", k)
@@ -2570,7 +2624,7 @@ func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8)
 	if len(weights) == 0 {
 		return false
 	}
-	server.SetTransportSignal(transports, alpnOrder, weights)
+	server.SetTransportSignal(transports, alpnOrder, weights, received)
 	return true
 }
 
@@ -2625,7 +2679,11 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 			transports = append(transports, t)
 		}
 	}
-	server.SetTransportSignal(transports, order, weights)
+	received := &cache.ReceivedSignal{Source: "alpn", Weights: make(map[core.Transport]uint8, len(weights))}
+	for t, w := range weights {
+		received.Weights[t] = w
+	}
+	server.SetTransportSignal(transports, order, weights, received)
 }
 
 // parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section.
@@ -2662,7 +2720,7 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 		switch x := rr.(type) {
 		case *dns.SVCB:
 			lgDns.Debug("**** parseTransportForServerFromAdditional: x", "x", x)
-			if m, ok, err := GetTransportParam(x); ok && err == nil {
+			if m, ok, err := GetTransportParamRaw(x); ok && err == nil {
 				lgDns.Debug("parseTransportForServerFromAdditional: parsing SVCB oots", "value", MarshalTransport(m))
 				if applyTransportMapToServer(server, m) {
 					server.PromoteConnMode(cache.ConnModeOpportunistic)
@@ -2731,7 +2789,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 				if !ok {
 					continue
 				}
-				if m, ok, err := GetTransportParam(svcb); ok && err == nil {
+				if m, ok, err := GetTransportParamRaw(svcb); ok && err == nil {
 					if applyTransportMapToServer(server, m) {
 						applied = true
 					}
@@ -3418,7 +3476,7 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, zonename, host string, rrt
 	hostServerMap := map[string]*cache.AuthServer{
 		server.Name: server,
 	}
-	rrset, _, _, _, err := imr.IterativeDNSQueryInZone(ctx, host, rrtype, hostServerMap, zonename, force, edns0.PrivacyNone) // privacy is a client signal; glue revalidation is our own traffic
+	rrset, _, _, _, err := imr.IterativeDNSQueryInZone(withOwnTraffic(ctx), host, rrtype, hostServerMap, zonename, force, edns0.PrivacyNone) // privacy is a client signal; glue revalidation is our own traffic
 	if err != nil || rrset == nil || len(rrset.RRs) == 0 {
 		return
 	}
@@ -3961,7 +4019,7 @@ func (imr *Imr) DefaultDNSKEYFetcher(ctx context.Context, name string) (*core.RR
 	if !ok {
 		return nil, fmt.Errorf("no servers for %s", name)
 	}
-	rr, _, _, _, err := imr.IterativeDNSQuery(ctx, name, dns.TypeDNSKEY, servers, false, edns0.PrivacyNone) // privacy is a client signal; DNSKEY fetches are our own traffic
+	rr, _, _, _, err := imr.IterativeDNSQuery(withOwnTraffic(ctx), name, dns.TypeDNSKEY, servers, false, edns0.PrivacyNone) // privacy is a client signal; DNSKEY fetches are our own traffic
 	if err != nil || rr == nil || len(rr.RRs) == 0 {
 		return nil, fmt.Errorf("dnskey fetch failed for %s: %v", name, err)
 	}
@@ -3974,7 +4032,7 @@ func (imr *Imr) DefaultRRsetFetcher(ctx context.Context, qname string, qtype uin
 	if !ok {
 		return nil, fmt.Errorf("no servers for %s", qname)
 	}
-	rr, _, _, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, servers, false, edns0.PrivacyNone) // privacy is a client signal; the fetcher is our own traffic
+	rr, _, _, _, err := imr.IterativeDNSQuery(withOwnTraffic(ctx), qname, qtype, servers, false, edns0.PrivacyNone) // privacy is a client signal; the fetcher is our own traffic
 	if err != nil || rr == nil || len(rr.RRs) == 0 {
 		return nil, fmt.Errorf("fetch failed for %s %s: %v", qname, dns.TypeToString[qtype], err)
 	}
@@ -3985,7 +4043,7 @@ func (imr *Imr) DefaultRRsetFetcher(ctx context.Context, qname string, qtype uin
 // It discards the rcode and CacheContext return values, only returning the RRset and error.
 func (imr *Imr) IterativeDNSQueryFetcher() cache.RRsetFetcher {
 	return func(ctx context.Context, qname string, qtype uint16, servers map[string]*cache.AuthServer) (*core.RRset, error) {
-		rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, servers, false, edns0.PrivacyNone) // privacy is a client signal; RRsetFetcher is our own traffic
+		rrset, _, _, _, err := imr.IterativeDNSQuery(withOwnTraffic(ctx), qname, qtype, servers, false, edns0.PrivacyNone) // privacy is a client signal; RRsetFetcher is our own traffic
 		return rrset, err
 	}
 }

@@ -25,6 +25,7 @@ var (
 	authTransportsSort    string
 	authTransportsJSON    bool
 	authTransportsPct     bool
+	authTransportsPrivacy bool
 )
 
 // imrStatsAuthTransportsCmd shows, per auth server, which transports a running
@@ -39,13 +40,33 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 answered over each transport (Do53 over UDP and TCP, DoT, DoQ, DoH), how many
 attempts failed (FAIL), how many Do53/UDP answers were truncated and retried
 over TCP (TC), and when the server last answered -- next to the transport
-signal the server gave (OOTS), so that the two can be compared. "none" means
-the server gave no signal.
+signal the server gave (OOTS), so that the two can be compared.
 
-Selection gives each encrypted transport its signalled weight as a percentage
-of the queries, and Do53 the rest. --pct shows each transport's share of the
-server's answers instead of a count, which compares directly with the signal.
-A client that asks for privacy moves queries off Do53 whatever the signal says.
+OOTS is the signal as the server gave it: only the transports it named, with
+their weights. "none" means it gave none. "alpn:" is an SVCB with an ALPN list
+and no weights (each counts as 100), and "set:" an operator's override (imr set
+server transport). A stub's row shows its configured signal. A weight of 1 is
+marked (ignored): selection uses only weights above 1. Nor is the do53 weight
+a share: Do53 gets what the encrypted weights leave of 100.
+
+--pct shows each transport's share of the row's answers instead of a count,
+and adds EXPECTED: the shares selection gives a query without PRIVACY (with
+--privacy, at the row's level). Without PRIVACY, each encrypted transport gets
+its weight as a percentage and Do53 the rest; with PRIVACY (opportunistic or
+strict) only the encrypted transports are drawn, in proportion to their
+weights. A server's shares still differ from EXPECTED when:
+  - its zone has several nameservers. Each server's pick for a query competes
+    with the others' on round-trip time, so a pick of a slower transport tends
+    to lose the query to another server: the shares lean to the faster ones;
+  - few names are asked for. A name always gets the same pick at a server;
+  - queries fail and fall back, and when answers come from the cache (they
+    send no query).
+
+--privacy shows one row per class of query under each server: "none", "opp."
+and "strict" for a client's PRIVACY level, and "internal" for the resolver's
+own lookups (DNSKEY and DS for validation, nameserver addresses, transport
+signals, priming, and lookups by the scanner, the DSYNC code and "imr query").
+FAIL and TC are the server's, on its first row.
 
 Each server is one row, however many zones it serves (ZONES); [zone] shows only
 the servers of that zone. The per-zone listing of the same counters, attempted
@@ -114,12 +135,14 @@ func runAuthTransports(ctx context.Context, zone string) {
 		fmt.Println(string(out))
 		return
 	}
-	fmt.Print(formatAuthTransports(rep, authTransportsSort, authTransportsPct))
+	fmt.Print(formatAuthTransports(rep, authTransportsSort, authTransportsPct, authTransportsPrivacy))
 }
 
-// formatAuthTransports renders a report as a table, sorted by name, total or last
-// used; with pct, the transport columns are shares of each row's TOTAL.
-func formatAuthTransports(rep tdns.ImrAuthTransportsReport, sortBy string, pct bool) string {
+// formatAuthTransports renders a report as a table, sorted by name, total or
+// last used. With pct the transport columns are shares of each row's TOTAL,
+// and EXPECTED shows what selection would give; with privacy each server has a
+// row per class of query.
+func formatAuthTransports(rep tdns.ImrAuthTransportsReport, sortBy string, pct, privacy bool) string {
 	var b strings.Builder
 	var of string
 	if rep.Zone != "" {
@@ -138,35 +161,77 @@ func formatAuthTransports(rep tdns.ImrAuthTransportsReport, sortBy string, pct b
 
 	tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
 	header := []string{"AUTH SERVER", "ZONES"}
+	if privacy {
+		header = append(header, "PRIVACY")
+	}
 	for _, t := range tdns.ImrClientTransports {
 		header = append(header, strings.ToUpper(t))
 	}
-	header = append(header, "TOTAL", "FAIL", "TC", "LAST USED", "OOTS")
+	header = append(header, "TOTAL", "FAIL", "TC", "LAST USED")
+	if pct {
+		header = append(header, "EXPECTED")
+	}
+	header = append(header, "OOTS")
 	fmt.Fprintln(tw, strings.Join(header, "\t"))
 
-	totals := map[string]uint64{}
-	var total, failed, truncated uint64
+	totals := newLevelTotals()
+	var failed, truncated uint64
+	unsplit := false
 	for _, r := range rows {
-		cols := []string{authServerLabel(r), fmt.Sprint(len(r.Zones))}
-		for _, t := range tdns.ImrClientTransports {
-			cols = append(cols, countOrShare(r.Counts[t], r.Total, pct))
-			totals[t] += r.Counts[t]
+		if privacy && r.Total > 0 && r.ByPrivacy == nil {
+			unsplit = true
 		}
-		total += r.Total
 		failed += r.FailedTotal
 		truncated += r.Truncated
-		cols = append(cols, fmt.Sprint(r.Total), fmt.Sprint(r.FailedTotal), fmt.Sprint(r.Truncated),
-			lastOver(r.LastUsed), formatOOTSSignal(r.Signal))
-		fmt.Fprintln(tw, strings.Join(cols, "\t"))
+		for i, cr := range countRows(r.Counts, r.Total, r.ByPrivacy, privacy) {
+			totals.add(cr)
+			first := i == 0
+			cols := []string{"", ""}
+			if first {
+				cols = []string{authServerLabel(r), fmt.Sprint(len(r.Zones))}
+			}
+			if privacy {
+				cols = append(cols, privacyLabel(cr.level))
+			}
+			cols = append(cols, transportCells(cr.counts, cr.total, pct)...)
+			cols = append(cols, fmt.Sprint(cr.total))
+			if first {
+				cols = append(cols, fmt.Sprint(r.FailedTotal), fmt.Sprint(r.Truncated), lastOver(r.LastUsed))
+			} else {
+				cols = append(cols, "", "", "")
+			}
+			if pct {
+				cols = append(cols, formatExpected(r.Expected, cr.level))
+			}
+			if first {
+				cols = append(cols, formatOOTSSignal(r.Signal, r.SignalSource))
+			}
+			fmt.Fprintln(tw, joinCells(cols, len(header)))
+		}
 	}
-	cols := []string{"TOTAL", ""}
-	for _, t := range tdns.ImrClientTransports {
-		cols = append(cols, countOrShare(totals[t], total, pct))
+	for i, cr := range totals.rows() {
+		cols := []string{"", ""}
+		if i == 0 {
+			cols[0] = "TOTAL"
+		}
+		if privacy {
+			cols = append(cols, privacyLabel(cr.level))
+		}
+		cols = append(cols, transportCells(cr.counts, cr.total, pct)...)
+		cols = append(cols, fmt.Sprint(cr.total))
+		if i == 0 {
+			cols = append(cols, fmt.Sprint(failed), fmt.Sprint(truncated))
+		}
+		fmt.Fprintln(tw, joinCells(cols, len(header)))
 	}
-	cols = append(cols, fmt.Sprint(total), fmt.Sprint(failed), fmt.Sprint(truncated))
-	fmt.Fprintln(tw, strings.Join(cols, "\t"))
 	tw.Flush()
+	table := trimLineEnds(b.String())
+	b.Reset()
+	b.WriteString(table)
 
+	if unsplit {
+		b.WriteString("\nThe resolver does not count answers by privacy level (it predates --privacy): its rows are not split.\n")
+	}
 	if rep.Reset {
 		b.WriteString("\nThe counters were reset after this snapshot: a new period starts now.\n")
 	}
@@ -186,50 +251,54 @@ func authServerLabel(r tdns.ImrAuthTransportsRow) string {
 	return fmt.Sprintf("%s (%s)", r.Server, src)
 }
 
-// countOrShare is n, or with pct n's share of total. A share that rounds to 0
-// or 100 without being either says so, so that a few queries are not hidden.
-func countOrShare(n, total uint64, pct bool) string {
-	if !pct {
-		return fmt.Sprint(n)
-	}
-	if total == 0 {
-		return "-"
-	}
-	p := (n*100 + total/2) / total
-	switch {
-	case n > 0 && p == 0:
-		return "<1%"
-	case n < total && p == 100:
-		return ">99%"
-	}
-	return fmt.Sprintf("%d%%", p)
-}
-
-// formatOOTSSignal renders a server's transport signal in the order of the
-// table's columns, zero weights included: a zero is what the server said.
-// "none" when it gave no signal, which the per-zone listing shows as do53=100.
-func formatOOTSSignal(signal map[string]uint8) string {
+// formatOOTSSignal renders a server's transport signal as it was given, in the
+// order of the table's columns: only the transports it named, an explicit zero
+// included. An encrypted transport's weight of 1 is marked: selection uses only
+// weights above 1. "none" when there was no signal.
+func formatOOTSSignal(signal map[string]uint8, source string) string {
 	if len(signal) == 0 {
 		return "none"
 	}
-	order := []string{"do53", "dot", "doq", "doh"}
-	known := map[string]bool{}
+	if source == "alpn" {
+		return "alpn:" + strings.Join(orderedTransports(signal), ",")
+	}
 	var parts []string
-	for _, t := range order {
-		known[t] = true
-		if w, ok := signal[t]; ok {
-			parts = append(parts, fmt.Sprintf("%s:%d", t, w))
+	for _, t := range orderedTransports(signal) {
+		w := signal[t]
+		part := fmt.Sprintf("%s:%d", t, w)
+		if t != "do53" && w == 1 {
+			part += " (ignored)"
 		}
+		parts = append(parts, part)
 	}
-	var rest []string
-	for t := range signal {
-		if !known[t] {
-			rest = append(rest, t)
+	out := strings.Join(parts, " ")
+	if source == "operator" {
+		out = "set: " + out
+	}
+	return out
+}
+
+// formatExpected renders the shares selection gives a query at level (the
+// row's; "none" without --privacy), leaving out the transports that get none.
+// "-" when the server cannot carry such a query; empty for the resolver's own
+// lookups, which follow no one client's level, and for a resolver that
+// predates EXPECTED.
+func formatExpected(expected map[string]map[string]uint8, level string) string {
+	if len(expected) == 0 || level == "internal" {
+		return ""
+	}
+	if level == "" || level == "-" {
+		level = "none"
+	}
+	shares, ok := expected[level]
+	if !ok {
+		return "-"
+	}
+	var parts []string
+	for _, t := range orderedTransports(shares) {
+		if shares[t] > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", t, shares[t]))
 		}
-	}
-	sort.Strings(rest)
-	for _, t := range rest {
-		parts = append(parts, fmt.Sprintf("%s:%d", t, signal[t]))
 	}
 	return strings.Join(parts, " ")
 }
@@ -239,6 +308,7 @@ func init() {
 	imrStatsAuthTransportsCmd.Flags().BoolVar(&authTransportsReset, "reset", false, "Clear ALL auth-server counters after showing them")
 	imrStatsAuthTransportsCmd.Flags().StringVar(&authTransportsSort, "sort", "name", "Sort by name, total or last")
 	imrStatsAuthTransportsCmd.Flags().BoolVar(&authTransportsJSON, "json", false, "Print the report as JSON")
-	imrStatsAuthTransportsCmd.Flags().BoolVar(&authTransportsPct, "pct", false, "Show each transport's share of the server's answers instead of counts")
+	imrStatsAuthTransportsCmd.Flags().BoolVar(&authTransportsPct, "pct", false, "Show each transport's share of the row's answers instead of counts, and what selection would give (EXPECTED)")
+	imrStatsAuthTransportsCmd.Flags().BoolVar(&authTransportsPrivacy, "privacy", false, "One row per class of query: a client's PRIVACY level (none, opp., strict) or internal")
 	ImrStatsCmd.AddCommand(imrStatsAuthTransportsCmd)
 }

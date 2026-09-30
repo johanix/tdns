@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -51,9 +52,15 @@ const (
 // ImrClientTransports names the transports, in the order the counters use.
 var ImrClientTransports = [numClientTransports]string{"do53/udp", "do53/tcp", "dot", "doq", "doh"}
 
+// numPrivacyLevels is the number of PRIVACY levels a query is counted under:
+// none (also when the option is absent), opportunistic and strict, indexed by
+// edns0.PrivacyLevel. ExtractPrivacyLevel maps a level it does not know to
+// none, as the resolver treats it.
+const numPrivacyLevels = int(edns0.PrivacyStrict) + 1
+
 type clientStatsEntry struct {
 	addr    netip.Addr
-	counts  [numClientTransports]uint64
+	counts  [numClientTransports][numPrivacyLevels]uint64
 	last    [numClientTransports]time.Time
 	lastAny time.Time // the latest of last: what eviction goes by
 	elem    *list.Element
@@ -68,7 +75,7 @@ type ImrClientStats struct {
 	lru     *list.List // front: the most recently seen client
 
 	evictedClients uint64
-	evicted        [numClientTransports]uint64
+	evicted        [numClientTransports][numPrivacyLevels]uint64
 }
 
 func newImrClientStats(max int) *ImrClientStats {
@@ -107,8 +114,8 @@ func clientAddr(ra net.Addr) (netip.Addr, bool) {
 	return peerIP(ra.String()) // peerIP unmaps
 }
 
-// record counts one query from ra over t.
-func (s *ImrClientStats) record(ra net.Addr, t clientTransport, now time.Time) {
+// record counts one query from ra over t, carrying PRIVACY level.
+func (s *ImrClientStats) record(ra net.Addr, t clientTransport, level edns0.PrivacyLevel, now time.Time) {
 	addr, ok := clientAddr(ra)
 	if !ok {
 		return
@@ -126,7 +133,10 @@ func (s *ImrClientStats) record(ra net.Addr, t clientTransport, now time.Time) {
 	} else {
 		s.lru.MoveToFront(e.elem)
 	}
-	e.counts[t]++
+	if int(level) >= numPrivacyLevels {
+		level = edns0.PrivacyNone
+	}
+	e.counts[t][level]++
 	e.last[t] = now
 	e.lastAny = now
 }
@@ -142,17 +152,32 @@ func (s *ImrClientStats) evictOldestLocked() {
 	s.lru.Remove(back)
 	delete(s.clients, e.addr)
 	s.evictedClients++
-	for i, c := range e.counts {
-		s.evicted[i] += c
+	for i := range e.counts {
+		for l, c := range e.counts[i] {
+			s.evicted[i][l] += c
+		}
 	}
 }
 
 // wrap returns handler, counting each query by its client and t first.
 func (s *ImrClientStats) wrap(handler func(dns.ResponseWriter, *dns.Msg), t clientTransport) func(dns.ResponseWriter, *dns.Msg) {
 	return func(w dns.ResponseWriter, r *dns.Msg) {
-		s.record(w.RemoteAddr(), t, time.Now())
+		s.record(w.RemoteAddr(), t, queryPrivacy(r), time.Now())
 		handler(w, r)
 	}
+}
+
+// queryPrivacy is the PRIVACY level a query carries: none without the option.
+func queryPrivacy(r *dns.Msg) edns0.PrivacyLevel {
+	if r == nil {
+		return edns0.PrivacyNone
+	}
+	opt := r.IsEdns0()
+	if opt == nil {
+		return edns0.PrivacyNone
+	}
+	level, _ := edns0.ExtractPrivacyLevel(opt)
+	return level
 }
 
 // imrListenerHandlers are the handlers the resolver's listeners get.
@@ -179,11 +204,14 @@ func listenerHandlers(handler func(dns.ResponseWriter, *dns.Msg), cs *ImrClientS
 // by the names in ImrClientTransports; a transport the client never used is
 // absent.
 type ImrClientStatsRow struct {
-	Client   string               `json:"client"`
-	Counts   map[string]uint64    `json:"counts"`
-	LastSeen map[string]time.Time `json:"last_seen"`
-	LastAny  time.Time            `json:"last_any"`
-	Total    uint64               `json:"total"`
+	Client string            `json:"client"`
+	Counts map[string]uint64 `json:"counts"`
+	// ByPrivacy splits Counts by the PRIVACY level the queries carried
+	// ("none", "opportunistic", "strict"); only the levels used are present.
+	ByPrivacy map[string]map[string]uint64 `json:"by_privacy,omitempty"`
+	LastSeen  map[string]time.Time         `json:"last_seen"`
+	LastAny   time.Time                    `json:"last_any"`
+	Total     uint64                       `json:"total"`
 }
 
 // ImrClientStatsReport is a snapshot of the counters.
@@ -193,7 +221,9 @@ type ImrClientStatsReport struct {
 	Rows           []ImrClientStatsRow `json:"rows"`    // the clients that matched, by address
 	EvictedClients uint64              `json:"evicted_clients"`
 	EvictedCounts  map[string]uint64   `json:"evicted_counts,omitempty"`
-	Reset          bool                `json:"reset,omitempty"` // the counters were cleared after this snapshot
+	// EvictedByPrivacy splits EvictedCounts as ByPrivacy splits a row's.
+	EvictedByPrivacy map[string]map[string]uint64 `json:"evicted_by_privacy,omitempty"`
+	Reset            bool                         `json:"reset,omitempty"` // the counters were cleared after this snapshot
 }
 
 // ParseClientFilter reads addresses and prefixes for Snapshot.
@@ -240,25 +270,18 @@ func (s *ImrClientStats) Snapshot(filter []netip.Prefix, reset bool) ImrClientSt
 	defer s.mu.Unlock()
 	rep := ImrClientStatsReport{Since: s.since, Clients: len(s.clients), EvictedClients: s.evictedClients}
 	if s.evictedClients > 0 {
-		rep.EvictedCounts = map[string]uint64{}
-		for i, c := range s.evicted {
-			if c > 0 {
-				rep.EvictedCounts[ImrClientTransports[i]] = c
-			}
-		}
+		rep.EvictedCounts, rep.EvictedByPrivacy, _ = splitCounts(&s.evicted)
 	}
 	for addr, e := range s.clients {
 		if len(filter) > 0 && !prefixesContain(filter, addr) {
 			continue
 		}
-		row := ImrClientStatsRow{Client: addr.String(), Counts: map[string]uint64{}, LastSeen: map[string]time.Time{}, LastAny: e.lastAny}
-		for i, c := range e.counts {
-			if c == 0 {
-				continue
+		row := ImrClientStatsRow{Client: addr.String(), LastSeen: map[string]time.Time{}, LastAny: e.lastAny}
+		row.Counts, row.ByPrivacy, row.Total = splitCounts(&e.counts)
+		for i := range e.counts {
+			if row.Counts[ImrClientTransports[i]] > 0 {
+				row.LastSeen[ImrClientTransports[i]] = e.last[i]
 			}
-			row.Counts[ImrClientTransports[i]] = c
-			row.LastSeen[ImrClientTransports[i]] = e.last[i]
-			row.Total += c
 		}
 		rep.Rows = append(rep.Rows, row)
 	}
@@ -271,11 +294,39 @@ func (s *ImrClientStats) Snapshot(filter []netip.Prefix, reset bool) ImrClientSt
 		s.clients = map[netip.Addr]*clientStatsEntry{}
 		s.lru.Init()
 		s.evictedClients = 0
-		s.evicted = [numClientTransports]uint64{}
+		s.evicted = [numClientTransports][numPrivacyLevels]uint64{}
 		s.since = time.Now()
 		rep.Reset = true
 	}
 	return rep
+}
+
+// splitCounts reads a counter block into the report's form: the totals per
+// transport, the counts per privacy level and transport (only the levels used;
+// nil when nothing was counted), and the sum.
+func splitCounts(c *[numClientTransports][numPrivacyLevels]uint64) (map[string]uint64, map[string]map[string]uint64, uint64) {
+	counts := map[string]uint64{}
+	var byPrivacy map[string]map[string]uint64
+	var total uint64
+	for i := range c {
+		for l, n := range c[i] {
+			if n == 0 {
+				continue
+			}
+			name := ImrClientTransports[i]
+			counts[name] += n
+			total += n
+			level := edns0.PrivacyLevel(l).String()
+			if byPrivacy == nil {
+				byPrivacy = map[string]map[string]uint64{}
+			}
+			if byPrivacy[level] == nil {
+				byPrivacy[level] = map[string]uint64{}
+			}
+			byPrivacy[level][name] += n
+		}
+	}
+	return counts, byPrivacy, total
 }
 
 func prefixesContain(ps []netip.Prefix, a netip.Addr) bool {

@@ -22,12 +22,12 @@ func TestTransportStatsCounters(t *testing.T) {
 
 	// One query attempted DoT (failed), fell back to Do53 (carried the answer);
 	// plus one Do53/UDP query that was TC=1 truncated and answered over Do53TCP.
-	s.IncrementTransportCounter(core.TransportDoT)  // attempted DoT
-	s.IncrementFailedCounter(core.TransportDoT)     // DoT failed (capability)
-	s.IncrementTransportCounter(core.TransportDo53) // attempted Do53
-	s.IncrementUsedCounter(core.TransportDo53)      // Do53 carried it
-	s.IncrementTransportCounter(core.TransportDo53) // attempted Do53 (the truncated one)
-	s.IncrementUsedCounter(core.TransportDo53TCP)   // truncation-upgraded answer
+	s.IncrementTransportCounter(core.TransportDoT)           // attempted DoT
+	s.IncrementFailedCounter(core.TransportDoT)              // DoT failed (capability)
+	s.IncrementTransportCounter(core.TransportDo53)          // attempted Do53
+	s.IncrementUsedCounter(core.TransportDo53, ClassNone)    // Do53 carried it
+	s.IncrementTransportCounter(core.TransportDo53)          // attempted Do53 (the truncated one)
+	s.IncrementUsedCounter(core.TransportDo53TCP, ClassNone) // truncation-upgraded answer
 	s.IncrementTruncated()
 
 	ts := s.SnapshotTransportStats()
@@ -52,7 +52,7 @@ func TestTransportStatsCounters(t *testing.T) {
 
 	// The snapshot must be an isolated copy: mutating the server afterwards
 	// must not change the returned snapshot.
-	s.IncrementUsedCounter(core.TransportDo53)
+	s.IncrementUsedCounter(core.TransportDo53, ClassNone)
 	if ts.Used[core.TransportDo53] != 1 {
 		t.Fatalf("snapshot not isolated: used Do53 changed to %d", ts.Used[core.TransportDo53])
 	}
@@ -75,9 +75,9 @@ func TestAuthServerStatsOneRowPerInstance(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddStub: %v", err)
 	}
-	rc.GetOrCreateAuthServer("orphan.example.").IncrementUsedCounter(core.TransportDoT)
-	shared.IncrementUsedCounter(core.TransportDo53)
-	shared.IncrementUsedCounter(core.TransportDo53)
+	rc.GetOrCreateAuthServer("orphan.example.").IncrementUsedCounter(core.TransportDoT, ClassNone)
+	shared.IncrementUsedCounter(core.TransportDo53, ClassNone)
+	shared.IncrementUsedCounter(core.TransportDo53, ClassNone)
 
 	_, stats := rc.AuthServerStats(false)
 	if len(stats) != 3 {
@@ -110,7 +110,7 @@ func TestAuthServerStatsReset(t *testing.T) {
 	rc := NewRRsetCache(log.New(io.Discard, "", 0), false, false)
 	s := rc.GetOrCreateAuthServer("ns.example.")
 	s.IncrementTransportCounter(core.TransportDoQ)
-	s.IncrementUsedCounter(core.TransportDoQ)
+	s.IncrementUsedCounter(core.TransportDoQ, ClassNone)
 	s.IncrementFailedCounter(core.TransportDoT)
 	s.IncrementTruncated()
 
@@ -125,7 +125,7 @@ func TestAuthServerStatsReset(t *testing.T) {
 	if !since2.After(since1) {
 		t.Errorf("since %v after the reset, want later than %v", since2, since1)
 	}
-	s.IncrementUsedCounter(core.TransportDo53)
+	s.IncrementUsedCounter(core.TransportDo53, ClassNone)
 	if _, stats := rc.AuthServerStats(false); stats[0].Used[core.TransportDo53] != 1 {
 		t.Errorf("counting after a reset: used do53 = %d, want 1", stats[0].Used[core.TransportDo53])
 	}
@@ -143,7 +143,7 @@ func TestAuthServerStatsResetLosesNothing(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < per; i++ {
-				s.IncrementUsedCounter(core.TransportDo53)
+				s.IncrementUsedCounter(core.TransportDo53, ClassNone)
 			}
 		}()
 	}

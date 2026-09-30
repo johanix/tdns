@@ -53,24 +53,33 @@ func GetAlpn(svcb *dns.SVCB) []string {
 
 // GetTransportParam fetches and parses the oots SvcParam from the SVCB RR, if present.
 func GetTransportParam(svcb *dns.SVCB) (map[string]uint8, bool, error) {
+	m, ok, err := GetTransportParamRaw(svcb)
+	if ok && err == nil {
+		core.ApplyTransportDefaults(m)
+	}
+	return m, ok, err
+}
+
+// GetTransportParamRaw is GetTransportParam without the absence defaults: the
+// map holds only the transports the oots SvcParam names, as a record of what
+// the server said. Selection wants the defaults; use GetTransportParam.
+func GetTransportParamRaw(svcb *dns.SVCB) (map[string]uint8, bool, error) {
 	if svcb == nil {
 		return nil, false, fmt.Errorf("GetTransportParam: nil svcb")
 	}
 	for _, kv := range svcb.Value {
 		if oots, ok := kv.(*dns.SVCBOots); ok {
-			m := svcbOotsToTransportMap(oots)
-			return m, true, nil
+			return svcbOotsToRawMap(oots), true, nil
 		}
 	}
 	return nil, false, nil
 }
 
-// svcbOotsToTransportMap converts a parsed SVCBOots value into a weight map
-// with -03 absence defaults applied.
-func svcbOotsToTransportMap(oots *dns.SVCBOots) map[string]uint8 {
+// svcbOotsToRawMap converts a parsed SVCBOots value into a weight map of the
+// transports it names, weights clamped to 100.
+func svcbOotsToRawMap(oots *dns.SVCBOots) map[string]uint8 {
 	m := make(map[string]uint8)
 	if oots == nil {
-		core.ApplyTransportDefaults(m)
 		return m
 	}
 	for _, e := range oots.Oots {
@@ -80,7 +89,6 @@ func svcbOotsToTransportMap(oots *dns.SVCBOots) map[string]uint8 {
 		}
 		m[strings.ToLower(e.Proto)] = w
 	}
-	core.ApplyTransportDefaults(m)
 	return m
 }
 

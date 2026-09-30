@@ -607,6 +607,16 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				tmpauthserver.SetAlpn(alpnOrder)
 				tmpauthserver.SetTransports(transports)
 				tmpauthserver.MergeTransportWeights(weights)
+				// The configured signal as written, for the transport stats.
+				if raw, err := core.ParseTransportStringRaw(server.TransportSignal); err == nil {
+					received := &ReceivedSignal{Source: "config", Weights: map[core.Transport]uint8{}}
+					for k, v := range raw {
+						if t, err := core.StringToTransport(k); err == nil {
+							received.Weights[t] = v
+						}
+					}
+					tmpauthserver.SetReceivedSignal(received)
+				}
 			}
 		} else {
 			// Back-compat: use ALPN order to set transports (no weights)
@@ -626,6 +636,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				}
 				tmpauthserver.SetTransports(transports)
 				tmpauthserver.MergeTransportWeights(weights)
+				tmpauthserver.SetReceivedSignal(&ReceivedSignal{Source: "config", Weights: copyMap(weights)})
 			}
 		}
 		authservers[ServerKey(server.Name)] = tmpauthserver

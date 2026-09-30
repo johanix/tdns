@@ -69,7 +69,7 @@ func startSignalLookup(t *testing.T, imr *Imr, server *cache.AuthServer) func(de
 			for tr := range weights {
 				transports = append(transports, tr)
 			}
-			server.SetTransportSignal(transports, nil, weights)
+			server.SetTransportSignal(transports, nil, weights, nil)
 			imr.TransportSignalDiscovery.Succeed(strictChildOwner)
 		}()
 	}
@@ -199,7 +199,7 @@ func TestAwaitTransportSignalsAppliesACachedSignal(t *testing.T) {
 // would wait.
 func TestAwaitTransportSignalsLeavesKnownServersAlone(t *testing.T) {
 	imr, server, serverMap := newStrictTestImr(t, 5*time.Second)
-	server.SetTransportSignal([]core.Transport{core.TransportDo53}, []string{"do53"}, map[core.Transport]uint8{core.TransportDo53: 100})
+	server.SetTransportSignal([]core.Transport{core.TransportDo53}, []string{"do53"}, map[core.Transport]uint8{core.TransportDo53: 100}, nil)
 
 	start := time.Now()
 	if imr.awaitTransportSignals(context.Background(), "www."+strictChildZone, serverMap) {
@@ -352,7 +352,7 @@ func TestStrictPrivacySeesASignalPublishedAfterADenial(t *testing.T) {
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		server.SetTransportSignal([]core.Transport{core.TransportDoT, core.TransportDo53}, nil,
-			map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100})
+			map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100}, nil)
 		imr.TransportSignalDiscovery.Succeed(strictChildOwner)
 	}()
 	_, _, _, _, err = imr.IterativeDNSQuery(context.Background(), "www."+strictChildZone, dns.TypeA, serverMap, true, edns0.PrivacyStrict)

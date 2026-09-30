@@ -48,7 +48,7 @@ func TestHintSeedingWhileRootServersChange(t *testing.T) {
 		defer wg.Done()
 		for {
 			server.SetTransportSignal([]core.Transport{core.TransportDoT, core.TransportDo53},
-				[]string{"dot", "do53"}, map[core.Transport]uint8{core.TransportDoT: 50})
+				[]string{"dot", "do53"}, map[core.Transport]uint8{core.TransportDoT: 50}, nil)
 			server.ForceSetSrc("answer")
 			_ = server.GetAddrs()
 			select {
