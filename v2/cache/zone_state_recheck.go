@@ -91,7 +91,7 @@ func (z *Zone) claimInsecureRecheck() bool {
 	if z.State != ValidationStateInsecure {
 		return false
 	}
-	now := Now()
+	now := time.Now()
 	if z.stateSince.IsZero() {
 		// Written by a struct literal: the clock starts now.
 		z.stateSince = now

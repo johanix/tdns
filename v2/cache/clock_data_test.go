@@ -85,3 +85,53 @@ func TestA2010SignatureValidatesOnA2010Clock(t *testing.T) {
 		t.Errorf("TTL %d, want the signature's remaining lifetime, about 600", ttl)
 	}
 }
+
+// How long a zone's verdict is held before it is looked at again paces the
+// resolver's retries, and runs on real time. A jump of the test clock lapses no
+// Indeterminate verdict and claims no Insecure recheck; the interval passing in
+// real time does both.
+func TestVerdictCooldownsRunOnRealTime(t *testing.T) {
+	_, path := useFaketime(t, faketime2010)
+	SetZoneStateRecheck(200 * time.Millisecond)
+	t.Cleanup(func() { SetZoneStateRecheck(0) })
+	indeterminate, insecure := &Zone{ZoneName: secZone}, &Zone{ZoneName: secKid}
+	indeterminate.SetState(ValidationStateIndeterminate)
+	insecure.SetState(ValidationStateInsecure)
+
+	writeFaketime(t, path, faketime2010.Add(time.Hour))
+	if s := indeterminate.GetState(); s != ValidationStateIndeterminate {
+		t.Errorf("an hour on in data time, the Indeterminate verdict is %s: it lapsed", ValidationStateToString[s])
+	}
+	if insecure.claimInsecureRecheck() {
+		t.Error("an hour on in data time, the Insecure verdict was claimed for a recheck")
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	if s := indeterminate.GetState(); s != ValidationStateNone {
+		t.Errorf("the recheck interval has passed in real time, and the Indeterminate verdict is still %s", ValidationStateToString[s])
+	}
+	if !insecure.claimInsecureRecheck() {
+		t.Error("the recheck interval has passed in real time, and the Insecure verdict was not claimed for a recheck")
+	}
+}
+
+// The TTL cap of a signature is its remaining lifetime at the reading of the
+// clock the validity window was checked with, in whole seconds, and zero once
+// it has ended: never a negative lifetime, which a uint32 TTL would wrap.
+func TestSignatureTTLCap(t *testing.T) {
+	exp := uint32(faketime2010.Unix())
+	for _, c := range []struct {
+		now  time.Time
+		want time.Duration
+	}{
+		{faketime2010.Add(-600*time.Second - 700*time.Millisecond), 600 * time.Second},
+		{faketime2010.Add(-time.Second), time.Second},
+		{faketime2010, 0},
+		{faketime2010.Add(5 * time.Second), 0},
+		{faketime2010.Add(24 * time.Hour), 0},
+	} {
+		if got := signatureTTLCap(exp, c.now); got != c.want {
+			t.Errorf("signatureTTLCap(expiry, expiry%+v) = %v, want %v", c.now.Sub(faketime2010), got, c.want)
+		}
+	}
+}

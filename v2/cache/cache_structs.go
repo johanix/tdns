@@ -182,8 +182,8 @@ func (z *Zone) GetState() ValidationState {
 	switch z.State {
 	case ValidationStateIndeterminate, ValidationStateInsecure:
 		if z.stateSince.IsZero() {
-			z.stateSince = Now()
-		} else if z.State == ValidationStateIndeterminate && Now().Sub(z.stateSince) > ZoneStateRecheck() {
+			z.stateSince = time.Now()
+		} else if z.State == ValidationStateIndeterminate && time.Since(z.stateSince) > ZoneStateRecheck() {
 			return ValidationStateNone
 		}
 	}
@@ -199,7 +199,7 @@ func (z *Zone) SetState(state ValidationState) {
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	z.State = state
-	z.stateSince = Now()
+	z.stateSince = time.Now()
 }
 
 type CacheContext uint8

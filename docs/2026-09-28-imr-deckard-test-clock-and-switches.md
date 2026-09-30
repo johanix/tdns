@@ -32,8 +32,14 @@ S4 prediction.
 - S1 changed no outcome in the whole resolver set: the scenarios already
   script the AAAA lookups tdns-imr makes, and the `do-ip6: no` scenarios that
   fail need the clock.
-- The clock (§3) and S3 are implemented on `feature/imr-test-clock`, as
-  designed, with these differences:
+- The clock (§3) and S3 are implemented in #866, as designed, with these
+  differences:
+  - Verdict ages (`ZoneStateRecheck`) stay on real time, unlike §3.1's list.
+    The interval paces the resolver's retries: on data time, one TIME_PASSES
+    jump would lapse every Indeterminate verdict and recheck every Insecure
+    zone at once, with queries the scenario did not script.
+  - The validator checks a signature's validity window and computes its TTL
+    cap from one reading of the clock, and the cap is never below zero.
   - `faketime-file` turns the clock on by itself; `faketime: true` alone reads
     `$FAKETIME_TIMESTAMP_FILE`.
   - The clock is reported in `config status`, from the resolver's status

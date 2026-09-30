@@ -21,13 +21,15 @@ import (
 //
 // Data time is compared with DNS data: an RRSIG's inception and expiration,
 // a cache entry's expiry and the TTL served from it, the TTL cap to a
-// signature's expiry, a verdict's age, a server address's expiry. It is read
-// through Now.
+// signature's expiry, a server address's expiry. It is read through Now.
 //
 // Elapsed time measures the resolver's own work: query timeouts, RTT samples,
 // backoffs, cool-downs, timers, statistics. It stays on time.Now. A test that
 // moves the clock an hour ahead must not time out every query in flight, nor
-// lift every backoff at once.
+// lift every backoff at once. The cool-downs include how long a zone's
+// verdict is held before it is looked at again (ZoneStateRecheck): that paces
+// the resolver's retries, and on data time a jump would retry every zone at
+// once.
 //
 // A data-time value must not be compared with a time.Now value: under a test
 // clock the two are decades apart.
@@ -48,7 +50,8 @@ func Until(t time.Time) time.Duration {
 	return t.Sub(Now())
 }
 
-// SetDataClock makes c the source of data time. nil restores real time.
+// SetDataClock makes c the source of data time. nil restores real time. The
+// clock is process-wide: tests that set it must not run in parallel.
 func SetDataClock(c *FileClock) {
 	dataClock.Store(c)
 }
