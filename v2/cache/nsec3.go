@@ -126,41 +126,61 @@ type nsec3Proof struct {
 }
 
 // newNSEC3Proof keeps the records in rrs that count toward a proof about
-// names in zone (RFC 5155 sections 8.1 and 8.2): owned directly below zone,
-// hash algorithm SHA-1, flags 0 or 1, a 20-octet hash, and an owner label and
-// next hashed owner that decode as base32hex to it. Others are ignored.
-// Records over maxIter iterations are set aside, and the proof remembers that.
-// The caller has validated every record in rrs with a signature by zone.
+// names in zone (nsec3Usable). Records over maxIter iterations are set aside,
+// and the proof remembers that. The caller has validated every record in rrs
+// with a signature by zone.
 func newNSEC3Proof(zone string, rrs []*dns.NSEC3, maxIter uint16) *nsec3Proof {
 	p := &nsec3Proof{zone: dns.Fqdn(zone), memo: map[string][]byte{}, budget: nsec3HashBudget}
 	for _, rr := range rrs {
-		if rr == nil || rr.Hash != dns.SHA1 || rr.Flags > 1 || rr.HashLength != nsec3HashLen {
-			continue
-		}
-		labels := dns.SplitDomainName(rr.Hdr.Name)
-		if len(labels) == 0 || !core.EqualNames(parentOf(dns.Fqdn(rr.Hdr.Name)), p.zone) {
-			continue
-		}
-		owner, ok := decodeNSEC3Hash(labels[0])
-		if !ok {
-			continue
-		}
-		next, ok := decodeNSEC3Hash(rr.NextDomain)
-		if !ok {
-			continue
-		}
-		salt, err := hex.DecodeString(rr.Salt)
-		if err != nil {
-			continue
-		}
-		if rr.Iterations > maxIter {
+		switch rec, use := nsec3Usable(p.zone, rr, maxIter); use {
+		case nsec3Counts:
+			p.records = append(p.records, rec)
+		case nsec3OverTheLimit:
 			p.setAside = true
-			continue
 		}
-		p.records = append(p.records, nsec3Record{rr: rr, owner: owner, next: next,
-			params: nsec3Params{alg: rr.Hash, iterations: rr.Iterations, salt: string(salt)}})
 	}
 	return p
+}
+
+// nsec3Use is whether an NSEC3 record counts toward a proof.
+type nsec3Use int
+
+const (
+	nsec3Ignored      nsec3Use = iota // RFC 5155 sections 8.1 and 8.2, or malformed
+	nsec3Counts                       // counts
+	nsec3OverTheLimit                 // would count, but is over the iteration limit
+)
+
+// nsec3Usable reports whether rr counts toward a proof about names in zone
+// (RFC 5155 sections 8.1 and 8.2): owned directly below zone, hash algorithm
+// SHA-1, flags 0 or 1, a 20-octet hash, and an owner label and next hashed
+// owner that decode as base32hex to it. Other records are ignored. One over
+// maxIter iterations is set aside (RFC 9276).
+func nsec3Usable(zone string, rr *dns.NSEC3, maxIter uint16) (nsec3Record, nsec3Use) {
+	if rr == nil || rr.Hash != dns.SHA1 || rr.Flags > 1 || rr.HashLength != nsec3HashLen {
+		return nsec3Record{}, nsec3Ignored
+	}
+	labels := dns.SplitDomainName(rr.Hdr.Name)
+	if len(labels) == 0 || !core.EqualNames(parentOf(dns.Fqdn(rr.Hdr.Name)), zone) {
+		return nsec3Record{}, nsec3Ignored
+	}
+	owner, ok := decodeNSEC3Hash(labels[0])
+	if !ok {
+		return nsec3Record{}, nsec3Ignored
+	}
+	next, ok := decodeNSEC3Hash(rr.NextDomain)
+	if !ok {
+		return nsec3Record{}, nsec3Ignored
+	}
+	salt, err := hex.DecodeString(rr.Salt)
+	if err != nil {
+		return nsec3Record{}, nsec3Ignored
+	}
+	if rr.Iterations > maxIter {
+		return nsec3Record{}, nsec3OverTheLimit
+	}
+	return nsec3Record{rr: rr, owner: owner, next: next,
+		params: nsec3Params{alg: rr.Hash, iterations: rr.Iterations, salt: string(salt)}}, nsec3Counts
 }
 
 // decodeNSEC3Hash decodes a base32hex hash of nsec3HashLen octets, in either

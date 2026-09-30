@@ -272,7 +272,7 @@ var evidenceToString = map[cutEvidence]string{
 //     an empty non-terminal, or does not exist -- means no delegation at name.
 //   - An NSEC3 denial is read the same way (nsec3CutProof): a matching NSEC3, or
 //     an Opt-Out span covering name, proves an insecure delegation.
-//   - A proof over maxNSEC3Iterations cannot be judged, nor can a DS that
+//   - A proof over the NSEC3 iteration limit cannot be judged, nor can a DS that
 //     validated Insecure or Indeterminate when the zone above name is not held
 //     Secure either.
 //   - Everything else is bogus. The parent side of name lies inside the signed
