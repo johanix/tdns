@@ -8,9 +8,10 @@ import (
 	"strings"
 )
 
-// ParseAddressFamilies reads imrengine.address-families: the address families
-// the resolver uses to reach authoritative servers, ipv4, ipv6 or both. Both is
-// the default, and what an empty list means.
+// ParseAddressFamilies reads imrengine.outbound-address-families: the address
+// families the resolver sends its queries to authoritative servers over, ipv4,
+// ipv6 or both. Both is the default, and what an empty list means. What the
+// resolver listens on is listeners.addresses.
 //
 // On a host where one family does not work -- an IPv6 address and default
 // route that lead nowhere, say -- leaving it out stops the queries and address
@@ -33,7 +34,8 @@ func ParseAddressFamilies(list []string) (v4, v6 bool, err error) {
 	return v4, v6, nil
 }
 
-// sameAddressFamilies reports whether two address-families lists mean the same.
+// sameAddressFamilies reports whether two outbound-address-families lists mean
+// the same.
 func sameAddressFamilies(a, b []string) bool {
 	a4, a6, aerr := ParseAddressFamilies(a)
 	b4, b6, berr := ParseAddressFamilies(b)

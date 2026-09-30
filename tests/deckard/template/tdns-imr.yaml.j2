@@ -14,7 +14,7 @@ imrengine:
    # Keeps the experimental transport-signal option off outgoing queries.
    options: [ "use-transport-signals:false" ]
    # The scenario's do-ip4 and do-ip6.
-   address-families: [ {% if DO_IP4 == "true" %}ipv4{% endif %}{% if DO_IP4 == "true" and DO_IP6 == "true" %}, {% endif %}{% if DO_IP6 == "true" %}ipv6{% endif %} ]
+   outbound-address-families: [ {% if DO_IP4 == "true" %}ipv4{% endif %}{% if DO_IP4 == "true" and DO_IP6 == "true" %}, {% endif %}{% if DO_IP6 == "true" %}ipv6{% endif %} ]
    # Designed in docs/2026-09-28-imr-deckard-test-clock-and-switches.md. Only
    # priming is implemented so far; tdns-imr logs the others as unknown keys at
    # start-up and ignores them.

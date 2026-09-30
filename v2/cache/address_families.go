@@ -9,12 +9,12 @@ import (
 	"github.com/miekg/dns"
 )
 
-// familyPolicy is which address families the resolver uses
-// (imrengine.address-families). Every AuthServer the cache creates shares its
-// cache's policy, and AddAddr and SetAddrs drop an address of a family the
-// policy leaves out. The family is then simply absent: the address is never
-// queried, and a nameserver left with no address of its own family is looked
-// up as one that came without glue.
+// familyPolicy is which address families the resolver sends its queries over
+// (imrengine.outbound-address-families). Every AuthServer the cache creates
+// shares its cache's policy, and AddAddr and SetAddrs drop an address of a
+// family the policy leaves out. The family is then simply absent: the address
+// is never queried, and a nameserver left with no address of its own family is
+// looked up as one that came without glue.
 type familyPolicy struct {
 	noV4 atomic.Bool
 	noV6 atomic.Bool

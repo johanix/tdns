@@ -20,6 +20,19 @@ S4 prediction.
   - notes on unknown config keys in stage 1 (§6) and on short TIME_PASSES
     steps (§3.3).
 
+**Amended 2026-09-30:**
+- S4 is implemented (#828).
+- S1 is implemented in #862, not merged, under another name:
+  `imrengine.outbound-address-families`. The setting covers only the queries
+  the resolver sends; what it listens on is `listeners.addresses`. The rest of
+  this document keeps the name S1 was designed under.
+- In #862 the family is dropped where addresses are added (`AddAddr`,
+  `SetAddrs`): the backstop of §4 is the main mechanism. A nameserver whose
+  glue is all of the family left out is then looked up like one without glue.
+- S1 changed no outcome in the whole resolver set: the scenarios already
+  script the AAAA lookups tdns-imr makes, and the `do-ip6: no` scenarios that
+  fail need the clock.
+
 ## Summary
 
 - **Deckard.** CZ.NIC's black-box test harness for recursive resolvers. It

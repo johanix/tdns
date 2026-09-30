@@ -20,7 +20,8 @@ import (
 	"github.com/miekg/dns"
 )
 
-// imrengine.address-families: a family left out is neither looked up nor used.
+// imrengine.outbound-address-families: a family left out is neither looked up
+// nor used.
 
 func TestParseAddressFamilies(t *testing.T) {
 	for _, tc := range []struct {
@@ -44,7 +45,7 @@ func TestParseAddressFamilies(t *testing.T) {
 }
 
 func TestAddressFamiliesChangeNeedsARestart(t *testing.T) {
-	boot := ImrEngineConf{AddressFamilies: []string{"ipv4", "ipv6"}}
+	boot := ImrEngineConf{OutboundAddressFamilies: []string{"ipv4", "ipv6"}}
 	for _, tc := range []struct {
 		families []string
 		restart  bool
@@ -54,10 +55,10 @@ func TestAddressFamiliesChangeNeedsARestart(t *testing.T) {
 		{[]string{"ipv4"}, true},
 	} {
 		current := boot
-		current.AddressFamilies = tc.families
-		got := slices.Contains(imrRestartRequiredKeys(boot, current), "imrengine.address-families")
+		current.OutboundAddressFamilies = tc.families
+		got := slices.Contains(imrRestartRequiredKeys(boot, current), "imrengine.outbound-address-families")
 		if got != tc.restart {
-			t.Errorf("address-families %v: restart required %v, want %v", tc.families, got, tc.restart)
+			t.Errorf("outbound-address-families %v: restart required %v, want %v", tc.families, got, tc.restart)
 		}
 	}
 }
@@ -276,10 +277,10 @@ func TestGlueRevalidationAsksOnlyTheFamiliesInUse(t *testing.T) {
 // built anything.
 func TestAnUnknownAddressFamilyStopsTheStart(t *testing.T) {
 	conf := &Config{}
-	conf.Imr.AddressFamilies = []string{"ipv4", "ipv5"}
+	conf.Imr.OutboundAddressFamilies = []string{"ipv4", "ipv5"}
 	err := conf.InitImrEngine(context.Background(), true)
-	if err == nil || !strings.Contains(err.Error(), "imrengine.address-families") {
-		t.Fatalf("InitImrEngine: %v, want an error naming imrengine.address-families", err)
+	if err == nil || !strings.Contains(err.Error(), "imrengine.outbound-address-families") {
+		t.Fatalf("InitImrEngine: %v, want an error naming imrengine.outbound-address-families", err)
 	}
 	if conf.Internal.ImrEngine != nil {
 		t.Error("the resolver was built")

@@ -28,18 +28,18 @@ func TestConfigCheckImrAddressFamilies(t *testing.T) {
 			cfg := &tdns.Config{}
 			cfg.Listeners.Addresses = []string{"127.0.0.1:53"}
 			cfg.Listeners.Transports = []string{"do53"}
-			cfg.Imr.AddressFamilies = tc.families
+			cfg.Imr.OutboundAddressFamilies = tc.families
 			rep := newCCReport()
 			checkImrEngine(cfg, rep)
-			levels := levelsFor(rep, "IMR engine", "address-families")
+			levels := levelsFor(rep, "IMR engine", "outbound-address-families")
 			if !tc.reported {
 				if len(levels) != 0 {
-					t.Errorf("address-families %v: reported %v, want nothing", tc.families, levels)
+					t.Errorf("outbound-address-families %v: reported %v, want nothing", tc.families, levels)
 				}
 				return
 			}
 			if len(levels) != 1 || levels[0] != tc.want {
-				t.Errorf("address-families %v: levels %v, want [%v]", tc.families, levels, tc.want)
+				t.Errorf("outbound-address-families %v: levels %v, want [%v]", tc.families, levels, tc.want)
 			}
 		})
 	}

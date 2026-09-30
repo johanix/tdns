@@ -400,14 +400,14 @@ func ValidateTransferSrc(where string, srcs []string) error {
 type ImrEngineConf struct {
 	Active    *bool  `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
 	RootHints string `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
-	// AddressFamilies is which address families the resolver uses to reach
-	// authoritative servers: ipv4, ipv6, or both (the default). See
-	// ParseAddressFamilies.
-	AddressFamilies []string             `yaml:"address-families" mapstructure:"address-families"`
-	Stubs           []ImrStubConf        `yaml:"stubs"`
-	Forward         []ImrForwardConf     `yaml:"forward" mapstructure:"forward"`
-	OptionsStrs     []string             `yaml:"options" mapstructure:"options"`
-	Options         map[ImrOption]string `yaml:"-" mapstructure:"-"`
+	// OutboundAddressFamilies is which address families the resolver sends its
+	// queries to authoritative servers over: ipv4, ipv6, or both (the default).
+	// What it listens on is listeners.addresses. See ParseAddressFamilies.
+	OutboundAddressFamilies []string             `yaml:"outbound-address-families" mapstructure:"outbound-address-families"`
+	Stubs                   []ImrStubConf        `yaml:"stubs"`
+	Forward                 []ImrForwardConf     `yaml:"forward" mapstructure:"forward"`
+	OptionsStrs             []string             `yaml:"options" mapstructure:"options"`
+	Options                 map[ImrOption]string `yaml:"-" mapstructure:"-"`
 	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
 	// full RR text (zonefile format). DS is preferred as it is more convenient.
 	// Both tags are load bearing, because Config is decoded by two different

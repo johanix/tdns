@@ -567,7 +567,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 		}
 		tmpauthserver.families = rrcache.families
 		if kept := rrcache.families.filter(server.Addrs); len(kept) < len(server.Addrs) {
-			log.Printf("AddStub: zone %s server %s: addresses of an address family not in use are left out (imrengine.address-families)", zone, server.Name)
+			log.Printf("AddStub: zone %s server %s: addresses of an address family not in use are left out (imrengine.outbound-address-families)", zone, server.Name)
 		}
 		// Override defaults with config values
 		tmpauthserver.SetAddrs(server.Addrs)
