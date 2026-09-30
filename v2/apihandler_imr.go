@@ -335,6 +335,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				"cache_max_ttl":               t.CacheMaxTTL,
 				"cache_min_ttl":               t.CacheMinTTL,
 				"zone_state_recheck":          t.ZoneStateRecheck.String(),
+				"nsec3_max_iterations":        cache.NSEC3MaxIterations(),
 			}
 			resp.Data = data
 			resp.Msg = "IMR tuning snapshot"

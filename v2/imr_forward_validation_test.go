@@ -66,7 +66,8 @@ func fwdSecRR(t *testing.T, s string) dns.RR {
 }
 
 // startSignedForwardUpstream serves the answers in sections, keyed by
-// "qname qtype", with RA set, and SERVFAIL to anything else. The records are
+// "qname qtype", with RA set and the answer's rcode, and SERVFAIL to anything
+// else. The records are
 // built before the server starts: the handler runs outside the test goroutine.
 func startSignedForwardUpstream(t *testing.T, answers map[string]*dns.Msg) (string, uint16) {
 	t.Helper()
@@ -86,7 +87,7 @@ func startLoggedSignedForwardUpstream(t *testing.T, answers map[string]*dns.Msg,
 		m.SetReply(r)
 		m.RecursionAvailable = true
 		if a, ok := answers[strings.ToLower(q.Name)+" "+dns.TypeToString[q.Qtype]]; ok {
-			m.Answer, m.Ns = a.Answer, a.Ns
+			m.Answer, m.Ns, m.Rcode = a.Answer, a.Ns, a.Rcode
 		} else {
 			m.Rcode = dns.RcodeServerFailure
 		}
@@ -132,6 +133,11 @@ func TestForwardValidatesASignedZoneWithNoDSAsInsecure(t *testing.T) {
 				Hash: dns.SHA1, HashLength: 20, NextDomain: dns.HashName("zzz."+fwdSecParent, dns.SHA1, 0, ""),
 				TypeBitMap: []uint16{dns.TypeNS}}
 			return &dns.Msg{Ns: parent.sign(t, nsec3)}
+		}, false},
+		{"NSEC3 Opt-Out span over the DS", func(t *testing.T, parent, _ *fwdSecKey) *dns.Msg {
+			apex := n3RR(fwdSecParent, fwdSecParent, false, 0, 0, dns.TypeNS, dns.TypeSOA, dns.TypeRRSIG, dns.TypeDNSKEY, dns.TypeNSEC3PARAM)
+			span := n3RR(fwdSecParent, fwdSecKid, true, 1, 0, dns.TypeA, dns.TypeRRSIG)
+			return &dns.Msg{Ns: append(parent.sign(t, apex), parent.sign(t, span)...)}
 		}, false},
 		{"a DS", func(t *testing.T, parent, kid *fwdSecKey) *dns.Msg {
 			return &dns.Msg{Answer: parent.sign(t, kid.dnskey.ToDS(dns.SHA256))}

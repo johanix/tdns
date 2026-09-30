@@ -18,8 +18,9 @@ import (
 // 514, and the whole block after it drifted with it. Adding a standard code
 // here can no longer renumber the private codes. See TestEDECodeValues.
 const (
-	EDEDNSSECIndeterminate uint16 = 5 // RFC 8914: DNSSEC Indeterminate
-	EDEDNSSECBogus         uint16 = 6 // RFC 8914: DNSSEC Bogus
+	EDEDNSSECIndeterminate        uint16 = 5  // RFC 8914: DNSSEC Indeterminate
+	EDEDNSSECBogus                uint16 = 6  // RFC 8914: DNSSEC Bogus
+	EDEUnsupportedNSEC3Iterations uint16 = 27 // RFC 9276: Unsupported NSEC3 Iterations Value
 )
 
 // Private EDE codes (above 512). The first entry pins the base; the rest follow
@@ -133,8 +134,9 @@ const (
 // already emitted to clients and sitting in someone's logs.
 
 var EDECodeToString = map[uint16]string{
-	EDEDNSSECIndeterminate:         "DNSSEC Indeterminate", // RFC 8914
-	EDEDNSSECBogus:                 "DNSSEC Bogus",         // RFC 8914
+	EDEDNSSECIndeterminate:         "DNSSEC Indeterminate",               // RFC 8914
+	EDEDNSSECBogus:                 "DNSSEC Bogus",                       // RFC 8914
+	EDEUnsupportedNSEC3Iterations:  "Unsupported NSEC3 Iterations Value", // RFC 9276
 	EDESig0KeyNotKnown:             "SIG(0) key not known",
 	EDESig0KeyKnownButNotTrusted:   "SIG(0) key known, but not yet trusted",
 	EDEDelegationSyncNotSupported:  "Delegation sync via DNS UPDATE is not supported",

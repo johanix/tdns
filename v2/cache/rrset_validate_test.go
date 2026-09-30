@@ -395,9 +395,11 @@ func TestValidateRRset_SignedDataBelowAFetchedDSDenialIsInsecure(t *testing.T) {
 }
 
 // The parent side's denial of the DS at kid decides the zone, NSEC or NSEC3.
-// Every NSEC3 denial validates Indeterminate, and ValidateDNSKEYs used to give
+// Every NSEC3 denial used to validate Indeterminate, and ValidateDNSKEYs gave
 // the zone that state before looking at the proof: a signed child of an
 // NSEC3-signed parent with no DS was SERVFAIL (EDE 5) through a forwarding IMR.
+// An NSEC3 denial through an Opt-Out span now validates Insecure, and its proof
+// is read all the same.
 // A proof that does not show an insecure delegation, or does not validate,
 // must leave the zone anything but Insecure.
 func TestValidateDNSKEYs_DSDenialProofs(t *testing.T) {

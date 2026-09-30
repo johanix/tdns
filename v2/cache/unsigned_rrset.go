@@ -334,15 +334,27 @@ func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string,
 // denialEvidence is delegationEvidence for a cached denial of the DS at name,
 // and its proof decides (cutProof). A denial that validated Secure with no
 // proof about name in it shows that name is no delegation: ordinary data, an
-// empty non-terminal, or no name at all. One that validated Indeterminate --
-// every NSEC3 denial does, as does a chain that could not be followed -- and
-// holds no proof that validates is bogus below a Secure zone: an NSEC3 denial
-// that proves nothing about name, or a signature made with a key the zone does
-// not have, is not a reason to serve unsigned data.
+// empty non-terminal, or no name at all. One that validated Indeterminate -- a
+// chain that could not be followed -- and holds no proof that validates is
+// bogus below a Secure zone: a signature made with a key the zone does not
+// have is not a reason to serve unsigned data.
+//
+// An NSEC3 denial of the DS through an Opt-Out span is Insecure (RFC 5155
+// section 9.2), and so is one over the iteration limit (RFC 9276). Their
+// records validate, and the NSEC3 reading of them decides (nsec3CutProof): an
+// Opt-Out span is an insecure cut, records over the limit are unjudged. Any
+// other Insecure denial -- unsigned, or from a zone held Insecure -- has no
+// records that validate Secure, and is bogus evidence as it always was. The
+// NSEC reading of an Insecure denial is not consulted.
 func (rrcache *RRsetCacheT) denialEvidence(ctx context.Context, name string, crr *CachedRRset, fetcher RRsetFetcher) cutEvidence {
 	switch crr.State {
 	case ValidationStateSecure, ValidationStateIndeterminate:
-	case ValidationStateBogus, ValidationStateInsecure:
+	case ValidationStateInsecure:
+		if ev := rrcache.nsec3CutProof(ctx, name, crr.NegAuthority, fetcher); ev != evidenceNone {
+			return ev
+		}
+		return evidenceBogus
+	case ValidationStateBogus:
 		return evidenceBogus
 	default:
 		return evidenceNone

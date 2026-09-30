@@ -522,8 +522,9 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 	// defaults in before it snapshots bootConf, while the reload decodes the
 	// file raw, so an absent or partial tuning: block differed from the
 	// snapshot on every defaulted knob and every reload asked for a restart.
-	// t is a copy; the one pointer in it, UpgradeIndirectCacheHits, is left
-	// alone by LoadImrTuningDefaults.
+	// t is a copy. Of its pointers, LoadImrTuningDefaults leaves
+	// UpgradeIndirectCacheHits alone, and replaces a nil NSEC3MaxIterations
+	// with a new one.
 	effective := func(t ImrTuningConf) ImrTuningConf {
 		LoadImrTuningDefaults(&t)
 		return t
@@ -552,6 +553,9 @@ func imrTuningEqual(a, b ImrTuningConf) bool {
 		a.Discovery != b.Discovery || a.QueryBudget != b.QueryBudget ||
 		a.CacheMaxTTL != b.CacheMaxTTL || a.CacheMinTTL != b.CacheMinTTL ||
 		a.ZoneStateRecheck != b.ZoneStateRecheck {
+		return false
+	}
+	if i, j := a.NSEC3MaxIterations, b.NSEC3MaxIterations; (i == nil) != (j == nil) || (i != nil && *i != *j) {
 		return false
 	}
 	x, y := a.UpgradeIndirectCacheHits, b.UpgradeIndirectCacheHits
