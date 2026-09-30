@@ -224,3 +224,88 @@ func referralJudgedAgainstServersZone(t *testing.T, aa bool) {
 		t.Fatalf("answer %v, want 192.0.2.36", rrset.RRs[0])
 	}
 }
+
+const (
+	rfRootNS = "a.root836.test."
+	rfTLD    = "tld836."
+	rfTLDNS  = "ns.tld836."
+	rfCut    = "cut.tld836."
+	rfWWW    = "www.cut.tld836."
+)
+
+// rootFallbackImr: the root's server map holds a double on 127.0.0.1, which
+// refers everything under rfTLD to rfTLDNS (glue ::1), a double that answers
+// rfWWW. The cache knows rfCut with an empty server map, as a zone whose
+// nameservers are all out of bailiwick has until their addresses are found.
+func rootFallbackImr(t *testing.T) *Imr {
+	t.Helper()
+	delegation := mustRR(t, rfTLD+" 300 IN NS "+rfTLDNS)
+	glue := mustRR(t, rfTLDNS+" 300 IN AAAA ::1")
+	answer := mustRR(t, rfWWW+" 300 IN A 192.0.2.83")
+	tldSOA := mustRR(t, rfTLD+" 300 IN SOA "+rfTLDNS+" hostmaster."+rfTLD+" 1 7200 1800 604800 300")
+	port := startRefDouble(t, net.IPv4(127, 0, 0, 1), 0, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Ns = append(m.Ns, delegation)
+		m.Extra = append(m.Extra, glue)
+		_ = w.WriteMsg(m)
+	})
+	startRefDouble(t, net.IPv6loopback, port, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Authoritative = true
+		if q := r.Question[0]; dns.CanonicalName(q.Name) == rfWWW && q.Qtype == dns.TypeA {
+			m.Answer = append(m.Answer, answer)
+		} else {
+			m.Ns = append(m.Ns, tldSOA)
+		}
+		_ = w.WriteMsg(m)
+	})
+	imr := verdictImr(t, false)
+	p := strconv.Itoa(port)
+	imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, p, nil)
+	imr.Cache.DNSClient[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, p, nil)
+	root := imr.Cache.GetOrCreateAuthServer(rfRootNS)
+	root.SetAddrs([]string{"127.0.0.1"})
+	imr.Cache.ServerMap.Set(".", map[string]*cache.AuthServer{cache.ServerKey(rfRootNS): root})
+	imr.Cache.ZoneMap.Set(".", &cache.Zone{ZoneName: ".", State: cache.ValidationStateIndeterminate})
+	imr.Cache.ServerMap.Set(rfCut, map[string]*cache.AuthServer{})
+	return imr
+}
+
+func TestZoneOfServers(t *testing.T) {
+	imr := rootFallbackImr(t)
+	rootServers, _ := imr.Cache.ServerMapCopy(".")
+	other := cache.NewAuthServer("ns.elsewhere836.test.")
+	for _, tc := range []struct {
+		name    string
+		servers map[string]*cache.AuthServer
+		want    string
+	}{
+		{"the root's servers, for a name below an empty cut", rootServers, "."},
+		{"servers held by no zone", map[string]*cache.AuthServer{cache.ServerKey(other.Name): other}, ""},
+		{"no servers", nil, rfCut},
+	} {
+		if got := imr.zoneOfServers(rfWWW, dns.TypeA, tc.servers); got != tc.want {
+			t.Errorf("%s: zoneOfServers = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A proof or data fetch below a zone cut with no servers goes to the root's
+// servers (ServersFor), with no zone named. Their referral towards the cut is
+// a referral: judged against the empty cut, it looked lame, and the fetch
+// failed.
+func TestFetchThroughTheRootFallbackFollowsTheRootsReferral(t *testing.T) {
+	imr := rootFallbackImr(t)
+	if closest, _, _ := imr.Cache.FindClosestKnownZoneFor(rfWWW, dns.TypeA); closest != rfCut {
+		t.Fatalf("precondition: the closest known zone for %s is %q, want %s", rfWWW, closest, rfCut)
+	}
+	rrset, err := imr.DefaultRRsetFetcher(context.Background(), rfWWW, dns.TypeA)
+	if err != nil || rrset == nil || len(rrset.RRs) != 1 {
+		t.Fatalf("fetch: rrset %v, err %v; want the answer through the root's referral", rrset, err)
+	}
+	if a, ok := rrset.RRs[0].(*dns.A); !ok || a.A.String() != "192.0.2.83" {
+		t.Fatalf("answer %v, want 192.0.2.83", rrset.RRs[0])
+	}
+}
