@@ -5,7 +5,15 @@ package tdns
 
 import "fmt"
 
-type ZoneOption uint8
+// ZoneOption is a uint16, with 512 values per repo. It was a uint8 with 32
+// per repo, and tdns filled its 32. The width costs nothing: an option is a
+// map key, and its number is never stored -- configurations, the API's input,
+// catalog zones and dynamic zones all name options by their strings.
+//
+// The number does leave the process in API responses (the zone list), where a
+// []ZoneOption is now a JSON array of numbers; as a uint8 it was a base64
+// string. A CLI and a server built from the same source agree either way.
+type ZoneOption uint16
 
 // Range allocation for ZoneOption across the tdns ecosystem.
 // Each downstream repo gets a numeric range starting one past the
@@ -15,12 +23,13 @@ type ZoneOption uint8
 //
 // and use a compile-time gate to ensure they stay in their range
 // (see enums.go in each downstream package). Resizing a range:
-// change the value here and recompile.
+// change the value here and recompile. Every downstream value moves
+// with it, which is harmless as long as no number is stored.
 const (
-	TdnsZoneOptionMax   ZoneOption = 32
-	TdnsMpZoneOptionMax ZoneOption = 64
-	TdnsNmZoneOptionMax ZoneOption = 96
-	TdnsEsZoneOptionMax ZoneOption = 128
+	TdnsZoneOptionMax   ZoneOption = 512
+	TdnsMpZoneOptionMax ZoneOption = 1024
+	TdnsNmZoneOptionMax ZoneOption = 1536
+	TdnsEsZoneOptionMax ZoneOption = 2048
 )
 
 const (
