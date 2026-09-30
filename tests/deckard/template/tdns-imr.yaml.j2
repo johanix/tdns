@@ -15,9 +15,11 @@ imrengine:
    options: [ "use-transport-signals:false" ]
    # The scenario's do-ip4 and do-ip6.
    outbound-address-families: [ {% if DO_IP4 == "true" %}ipv4{% endif %}{% if DO_IP4 == "true" and DO_IP6 == "true" %}, {% endif %}{% if DO_IP6 == "true" %}ipv6{% endif %} ]
-   # Designed in docs/2026-09-28-imr-deckard-test-clock-and-switches.md. Only
-   # priming is implemented so far; tdns-imr logs the others as unknown keys at
-   # start-up and ignores them.
+   # Designed in docs/2026-09-28-imr-deckard-test-clock-and-switches.md.
+   # priming, faketime and root-refresh are implemented. faketime reads the
+   # clock Deckard writes to $FAKETIME_TIMESTAMP_FILE, and implies
+   # root-refresh: false. tdns-imr logs the others as unknown keys at start-up
+   # and ignores them.
    testing:
       faketime:        true
       anchor-prefetch: false

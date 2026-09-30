@@ -131,7 +131,7 @@ func synthesizeFromDNAME(qname, owner, target string) string {
 // as the DNAME synthesizes it: a CNAME that says otherwise is replaced by the
 // synthesized one (RFC 6672 §3.2).
 func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn *dns.CNAME, transport core.Transport) (string, error) {
-	now := time.Now()
+	now := cache.Now()
 	link := &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: dns.TypeCNAME}
 	var vstate cache.ValidationState
 	var synthesizedFrom string
@@ -231,7 +231,7 @@ func (imr *Imr) chainEntry(name string, t uint16, privacy edns0.PrivacyLevel, gr
 	var e *cache.CachedRRset
 	if grace <= 0 {
 		e = imr.Cache.Get(name, t)
-	} else if e = imr.Cache.Peek(name, t); e != nil && e.Expiration.Before(time.Now().Add(-grace)) {
+	} else if e = imr.Cache.Peek(name, t); e != nil && e.Expiration.Before(cache.Now().Add(-grace)) {
 		e = nil
 	}
 	if e == nil || (privacy == edns0.PrivacyStrict && !core.IsEncryptedTransport(e.Transport)) {
@@ -349,7 +349,7 @@ func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.
 		return true
 	}
 
-	now := time.Now()
+	now := cache.Now()
 	var answer []dns.RR
 	lastName := qname
 	for _, link := range links {

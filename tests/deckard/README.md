@@ -85,6 +85,11 @@ opens its listeners only once priming succeeds, so without the priming switch
 (S4 in the design) it never becomes ready, and every scenario fails at
 start-up.
 
+The DNSSEC scenarios and those with TIME_PASSES need the scenario's time.
+Deckard fakes it with libfaketime, which a Go binary ignores, so tdns-imr reads
+Deckard's timestamp file itself (`imrengine.testing.faketime`, in the
+template). Without it, their signatures from 2007–2021 have expired.
+
 ## Results
 
 See `RESULTS.md` for the recorded runs.

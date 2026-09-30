@@ -316,18 +316,49 @@ setting it to `true`, is that default and draws no warning.
 ```yaml
 imrengine:
    testing:
-      priming: false
+      priming:       false
+      faketime:      true           # the clock in $FAKETIME_TIMESTAMP_FILE
+      # faketime-file: /tmp/.time   # or name the file
+      root-refresh:  false
 ```
 
-- **What `priming: false` does.** It seeds the cache from `root-hints` as
-  they stand and marks it primed, without asking the roots for their NS
-  RRset.
+A change to any of them takes a restart.
+
+**`priming: false`**
+- **What it does.** It seeds the cache from `root-hints` as they stand and
+  marks it primed, without asking the roots for their NS RRset.
 - **Why a harness needs it.** A harness that starts its scripted servers only
   once the resolver accepts connections needs this switch. Otherwise the
   resolver opens its listeners only after priming has succeeded, and never
   becomes ready.
 - **What still happens.** The root NS is still refreshed from the live roots
-  before the hints' copy expires.
+  before the hints' copy expires, unless `root-refresh` is false.
+
+**`faketime`, a test clock**
+- **What it does.** The resolver's data time becomes a clock read from a
+  libfaketime timestamp file. Data time is what DNS data is measured against:
+  a signature's validity, a cache entry's expiry, the TTL served from the
+  cache.
+  - The file holds `@YYYY-MM-DD HH:MM:SS`, in local time.
+  - The clock is the file's time plus the real time since the resolver
+    started.
+  - The file is checked on every read, so a harness moves the clock by
+    rewriting it.
+  - Timeouts, RTTs and backoffs stay on real time.
+- **Why a harness needs it.** Deckard fakes the time with libfaketime, which
+  a Go binary ignores, and its DNSSEC scenarios are signed in 2007–2021.
+- **Which file.** `faketime-file`, which turns the clock on by itself, or else
+  `$FAKETIME_TIMESTAMP_FILE`, which Deckard sets.
+- **When it stops the start.** No file, or one that does not parse. A file
+  that later cannot be read leaves the last time in force.
+- **What it turns off.** The root NS refresh, which waits in real time for an
+  expiry in data time. `root-refresh: true` beside it stops the start.
+- **Where it shows.** A warning at start and every hour, and a line in
+  `config status`.
+
+**`root-refresh: false`**
+- **What it does.** It stops the refresh of the root NS before it expires.
+  The test clock implies it.
 
 ## large-algorithms
 

@@ -148,7 +148,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				"rcode":      dns.RcodeToString[int(crrset.Rcode)],
 				"ttl":        crrset.Ttl,
 				"expiration": crrset.Expiration.Format(time.RFC3339),
-				"expires_in": time.Until(crrset.Expiration).Truncate(time.Second).String(),
+				"expires_in": cache.Until(crrset.Expiration).Truncate(time.Second).String(),
 				"context":    fmt.Sprintf("%d", crrset.Context),
 				"state":      fmt.Sprintf("%d", crrset.State),
 			}
@@ -285,7 +285,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 					"rcode":      dns.RcodeToString[int(cr.Rcode)],
 					"ttl":        cr.Ttl,
 					"expiration": cr.Expiration.Format(time.RFC3339),
-					"expires_in": time.Until(cr.Expiration).Truncate(time.Second).String(),
+					"expires_in": cache.Until(cr.Expiration).Truncate(time.Second).String(),
 				}
 				if cr.RRset != nil {
 					var rrs []string

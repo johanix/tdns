@@ -214,6 +214,12 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		return nil
 	}
 
+	// The test clock, if one is asked for, before anything is cached: priming
+	// stamps expirations in data time.
+	if err := startDataClock(ctx, conf.Imr.Testing); err != nil {
+		return fmt.Errorf("imrengine.testing: %w", err)
+	}
+
 	// 1. Create the cache
 	rrcache := cache.NewRRsetCache(log.Default(), conf.Imr.Verbose, conf.Imr.Debug)
 	rrcache.Quiet = quiet
@@ -515,6 +521,14 @@ func (imr *Imr) startServing(ctx context.Context, conf *Config, listen func(cont
 	// ". NS" needs a root server address. While "." is forwarded there is
 	// nothing to keep, and this idles instead. It also primes a root that a
 	// reload stops forwarding. See imr_root_refresh.go.
+	//
+	// Not under a test harness that says so (testing.root-refresh: false), nor
+	// on the test clock: the refresh waits in real time for an expiry in data
+	// time.
+	if conf.Imr.Testing.SkipRootRefresh() {
+		lgImr.Warn("imrengine.testing: the root NS is not refreshed; a test-harness setting, not for production")
+		return
+	}
 	go imr.RefreshRoot(ctx, conf.Imr.RootHints)
 }
 
@@ -1173,7 +1187,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			}
 			// Served straight from the entry, so the proof carries the
 			// entry's remaining lifetime like any other cached record.
-			applyRemainingTTL(m.Ns, negStart, crrset.RemainingTTL(time.Now()))
+			applyRemainingTTL(m.Ns, negStart, crrset.RemainingTTL(cache.Now()))
 			// if dnssec_ok && len(crrset.NegAuthority) > 0 && imr.Cache.ValidateNegativeResponse(ctx, qname, qtype, crrset.NegAuthority, imr.IterativeDNSQueryFetcher()) {
 			//	m.AuthenticatedData = true
 			// } else if crrset.Validated {
@@ -1209,7 +1223,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			}
 			// Served straight from the entry, so the proof carries the
 			// entry's remaining lifetime like any other cached record.
-			applyRemainingTTL(m.Ns, negStart, crrset.RemainingTTL(time.Now()))
+			applyRemainingTTL(m.Ns, negStart, crrset.RemainingTTL(cache.Now()))
 			// if dnssec_ok && len(crrset.NegAuthority) > 0 && imr.Cache.ValidateNegativeResponse(ctx, qname, qtype, crrset.NegAuthority, imr.IterativeDNSQueryFetcher()) {
 			//	m.AuthenticatedData = true
 			// } else if crrset.Validated {
@@ -1398,9 +1412,9 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		// to the stored TTLs, which is what this path did for every answer
 		// before.
 		if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil {
-			m.Answer = c.ServeRRs(rrset.RRs, time.Now())
+			m.Answer = c.ServeRRs(rrset.RRs, cache.Now())
 			if msgoptions.DO {
-				m.Answer = append(m.Answer, c.ServeRRs(rrset.RRSIGs, time.Now())...)
+				m.Answer = append(m.Answer, c.ServeRRs(rrset.RRSIGs, cache.Now())...)
 			}
 		} else {
 			m.Answer = rrset.RRs
@@ -1683,7 +1697,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 		if cached != nil && cached.RRset != nil {
 			start := len(resp.Ns)
 			appendSOAToMessage(cached.RRset, msgoptions, resp)
-			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(time.Now()))
+			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(cache.Now()))
 			return true
 		}
 		appendSOAFromMsg(src, msgoptions, resp)
@@ -1694,7 +1708,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 		if cached != nil && cached.RRset != nil {
 			start := len(resp.Ns)
 			appendSOAToMessage(cached.RRset, msgoptions, resp)
-			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(time.Now()))
+			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(cache.Now()))
 			resp.AuthenticatedData = negativeAD(cached, src, msgoptions)
 			attachNegativeEDE(resp, msgoptions, cached, src)
 			return true
@@ -1709,7 +1723,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 		neg = cached.NegAuthority
 		start := len(resp.Ns)
 		if appendNegAuthorityToMessage(resp, neg, msgoptions) {
-			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(time.Now()))
+			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(cache.Now()))
 			if cached.State == cache.ValidationStateSecure && msgoptions.DO {
 				resp.AuthenticatedData = true
 			}
@@ -1720,7 +1734,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 	if cached != nil && cached.RRset != nil {
 		start := len(resp.Ns)
 		appendSOAToMessage(cached.RRset, msgoptions, resp)
-		applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(time.Now()))
+		applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(cache.Now()))
 		if cached.State == cache.ValidationStateSecure {
 			resp.AuthenticatedData = true
 		}
@@ -2050,7 +2064,7 @@ func (imr *Imr) parseTrustAnchorsFromConfig(conf *Config) (map[string][]*dns.DS,
 func (imr *Imr) addDirectDNSKEYTrustAnchors(dnskeysByName map[string][]*dns.DNSKEY) {
 	for name, list := range dnskeysByName {
 		lgImr.Info("zone has DNSKEY trust anchors", "zone", name)
-		exp := time.Now().Add(365 * 24 * time.Hour)
+		exp := cache.Now().Add(365 * 24 * time.Hour)
 		for _, dk := range list {
 			lgImr.Info("adding DNSKEY trust anchor", "zone", name, "keyid", dk.KeyTag())
 			imr.DnskeyCache.Set(name, dk.KeyTag(), &cache.CachedDnskeyRRset{
@@ -2111,7 +2125,7 @@ func (imr *Imr) seedDSRRsetFromTrustAnchors(anchorName string, dslist []*dns.DS)
 		RRset:      dsRRset,
 		Context:    cache.ContextPriming,
 		State:      cache.ValidationStateSecure,
-		Expiration: time.Now().Add(time.Duration(minTTL) * time.Second),
+		Expiration: cache.Now().Add(time.Duration(minTTL) * time.Second),
 	})
 	lgImr.Debug("seeded validated DS RRset from trust anchors", "zone", anchorName, "count", len(rrds), "ttl", minTTL)
 	imr.Cache.AddTrustAnchorDS(anchorName, dslist)
@@ -2207,7 +2221,7 @@ func (imr *Imr) createOrUpdateCachedDNSKEYRRset(anchorName string, rrset *core.R
 			RRset:      rrset,
 			Context:    cache.ContextPriming,
 			State:      vstate,
-			Expiration: time.Now().Add(minTTL),
+			Expiration: cache.Now().Add(minTTL),
 		}
 	}
 	// Update existing cached RRset
@@ -2352,7 +2366,7 @@ func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string,
 				RRset:      nsRRset,
 				Context:    cache.ContextPriming,
 				State:      nsVstate,
-				Expiration: time.Now().Add(minTTL),
+				Expiration: cache.Now().Add(minTTL),
 			}
 		} else {
 			// Update existing cached RRset
@@ -2402,7 +2416,7 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 	}
 
 	minTTL := cache.GetMinTTL(rrset.RRs)
-	exp := time.Now().Add(minTTL)
+	exp := cache.Now().Add(minTTL)
 
 	// If DS present, match and add corresponding DNSKEY(s) to the TA store (trusted)
 	if dslist := dsByName[anchorName]; len(dslist) > 0 {

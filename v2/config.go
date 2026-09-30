@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -449,10 +450,58 @@ type ImrTestingConf struct {
 	// resolver listens only once priming has succeeded: without this switch it
 	// never becomes ready there.
 	Priming *bool `yaml:"priming" mapstructure:"priming"`
+
+	// Faketime makes the resolver's data time -- what signatures, cache
+	// expiry and served TTLs are measured against -- a test clock read from
+	// a libfaketime timestamp file: $FAKETIME_TIMESTAMP_FILE, or FaketimeFile.
+	// Deckard fakes the time this way, and libfaketime cannot reach a Go
+	// binary. Timeouts, backoffs and RTTs stay on real time.
+	Faketime bool `yaml:"faketime" mapstructure:"faketime"`
+	// FaketimeFile names the timestamp file, and turns the test clock on.
+	FaketimeFile string `yaml:"faketime-file" mapstructure:"faketime-file"`
+
+	// RootRefresh false stops the refresh of the root NS before it expires.
+	// The test clock implies it: the refresh waits in real time for an
+	// expiry stamped in data time.
+	RootRefresh *bool `yaml:"root-refresh" mapstructure:"root-refresh"`
 }
 
 // SkipPriming reports whether testing.priming is set to false.
 func (t ImrTestingConf) SkipPriming() bool { return t.Priming != nil && !*t.Priming }
+
+// FaketimeOn reports whether the test clock is configured.
+func (t ImrTestingConf) FaketimeOn() bool { return t.Faketime || t.FaketimeFile != "" }
+
+// FaketimePath is the timestamp file the test clock reads: faketime-file, or
+// else $FAKETIME_TIMESTAMP_FILE.
+func (t ImrTestingConf) FaketimePath() string {
+	if t.FaketimeFile != "" {
+		return t.FaketimeFile
+	}
+	return os.Getenv("FAKETIME_TIMESTAMP_FILE")
+}
+
+// SkipRootRefresh reports whether the root NS refresh is off: root-refresh is
+// false, or the test clock is on.
+func (t ImrTestingConf) SkipRootRefresh() bool {
+	return t.FaketimeOn() || (t.RootRefresh != nil && !*t.RootRefresh)
+}
+
+// Validate refuses a root refresh asked for beside the test clock, which
+// cannot run it.
+func (t ImrTestingConf) Validate() error {
+	if t.FaketimeOn() && t.RootRefresh != nil && *t.RootRefresh {
+		return fmt.Errorf("root-refresh: true cannot be combined with faketime: the refresh waits in real time for an expiry in data time")
+	}
+	return nil
+}
+
+// imrTestingEqual reports whether two testing blocks ask for the same thing.
+func imrTestingEqual(a, b ImrTestingConf) bool {
+	sameBool := func(x, y *bool) bool { return (x == nil) == (y == nil) && (x == nil || *x == *y) }
+	return sameBool(a.Priming, b.Priming) && sameBool(a.RootRefresh, b.RootRefresh) &&
+		a.Faketime == b.Faketime && a.FaketimeFile == b.FaketimeFile
+}
 
 // ImrClientStatsConf switches the per-client transport counters on. They
 // record client addresses, so they are off by default. They are set up with

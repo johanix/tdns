@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"context"
-	"time"
 
 	"github.com/johanix/tdns/v2/cache"
 	edns0 "github.com/johanix/tdns/v2/edns0"
@@ -152,7 +151,7 @@ func (imr *Imr) serveCachedPositive(ctx context.Context, w dns.ResponseWriter, r
 		return
 	}
 	m.SetRcode(r, dns.RcodeSuccess)
-	m.Answer = crrset.ServeAnswer(time.Now(), msgoptions.DO)
+	m.Answer = crrset.ServeAnswer(cache.Now(), msgoptions.DO)
 	m.AuthenticatedData = disp == answerServeSecure && adWanted(r, msgoptions)
 	setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 	w.WriteMsg(m)

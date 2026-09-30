@@ -475,7 +475,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 									RRset:      &rrset,
 									Context:    cache.ContextAnswer,
 									State:      cache.ValidationStateNone,
-									Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+									Expiration: cache.Now().Add(cache.GetMinTTL(rrset.RRs)),
 									Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 								})
 								return &rrset, rcode, cache.ContextAnswer, nil
@@ -520,7 +520,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 				RRset:      &rrset,
 				Context:    cache.ContextAnswer,
 				State:      cache.ValidationStateNone,
-				Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+				Expiration: cache.Now().Add(cache.GetMinTTL(rrset.RRs)),
 				Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 			})
 			return &rrset, rcode, cache.ContextAnswer, nil
@@ -566,7 +566,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 								Context:    cache.ContextNoErrNoAns,
 								State:      cache.ValidationStateNone,
 								Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
-								Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+								Expiration: cache.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 							})
 							return nil, rcode, cache.ContextNoErrNoAns, nil
 						} else {
@@ -588,7 +588,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						RRset:      &rrset,
 						Context:    cache.ContextReferral,
 						State:      cache.ValidationStateIndeterminate,
-						Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+						Expiration: cache.Now().Add(cache.GetMinTTL(rrset.RRs)),
 						Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 					})
 				}
@@ -681,7 +681,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						RRset:      &rrset,
 						Context:    cache.ContextGlue,
 						State:      cache.ValidationStateIndeterminate,
-						Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+						Expiration: cache.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 						Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 					})
 				}
@@ -697,7 +697,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						RRset:      &rrset,
 						Context:    cache.ContextGlue,
 						State:      cache.ValidationStateIndeterminate,
-						Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+						Expiration: cache.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 						Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 					})
 				}
@@ -727,7 +727,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 					Rcode:      uint8(dns.RcodeNameError),
 					RRset:      nil,
 					Context:    cache.ContextNXDOMAIN,
-					Expiration: time.Now().Add(time.Duration(ttl) * time.Second),
+					Expiration: cache.Now().Add(time.Duration(ttl) * time.Second),
 					Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 				})
 
@@ -2068,7 +2068,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	// the shared instances, which other queries and the background address
 	// lookups read and write concurrently: every access goes through the
 	// accessors, which hold the server's lock.
-	now := time.Now()
+	now := cache.Now()
 	for name, srv := range serverMap {
 		if expire := srv.GetExpire(); !expire.IsZero() && expire.Before(now) {
 			delete(serverMap, name)
@@ -2169,7 +2169,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			srv := serverMap[cache.ServerKey(serverName)]
 			srv.AddAddr(rr.A.String())
 			// set expiry for this server mapping from glue TTL
-			srv.SetExpire(time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second))
+			srv.SetExpire(cache.Now().Add(time.Duration(rr.Header().Ttl) * time.Second))
 			tmp := glue4Map[serverName]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue4Map[serverName] = tmp
@@ -2178,7 +2178,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			srv := serverMap[cache.ServerKey(serverName)]
 			srv.AddAddr(rr.AAAA.String())
 			// set expiry for this server mapping from glue TTL
-			srv.SetExpire(time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second))
+			srv.SetExpire(cache.Now().Add(time.Duration(rr.Header().Ttl) * time.Second))
 			tmp := glue6Map[serverName]
 			tmp.RRs = append(tmp.RRs, rr)
 			glue6Map[serverName] = tmp
@@ -2215,7 +2215,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			RRset:      &rrset,
 			Context:    cache.ContextGlue,
 			State:      cache.ValidationStateIndeterminate,
-			Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+			Expiration: cache.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 			Transport:  core.TransportDo53, // Glue records from Additional - default to Do53
 		})
 	}
@@ -2234,7 +2234,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			RRset:      &rrset,
 			Context:    cache.ContextGlue,
 			State:      cache.ValidationStateIndeterminate,
-			Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
+			Expiration: cache.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 			Transport:  core.TransportDo53, // Glue records from Additional - default to Do53
 		})
 	}
@@ -2927,7 +2927,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 			RRset:      &rrset,
 			Context:    cache.ContextAnswer,
 			State:      vstate,
-			Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+			Expiration: cache.Now().Add(cache.GetMinTTL(rrset.RRs)),
 			Transport:  transport,
 		}
 		imr.Cache.Set(qname, qtype, cr)
@@ -3073,7 +3073,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			RRset:      nsRRset,
 			Context:    cache.ContextReferral,
 			State:      vstate,
-			Expiration: time.Now().Add(cache.GetMinTTL(nsRRset.RRs)),
+			Expiration: cache.Now().Add(cache.GetMinTTL(nsRRset.RRs)),
 			Transport:  transport,
 		})
 	}
@@ -3107,7 +3107,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			RRset:      dsRRset,
 			Context:    cache.ContextReferral,
 			State:      vstate,
-			Expiration: time.Now().Add(cache.GetMinTTL(dsRRs)),
+			Expiration: cache.Now().Add(cache.GetMinTTL(dsRRs)),
 			Transport:  transport,
 		})
 		// A DS that validated makes the child Secure. Any other verdict proves
@@ -3401,7 +3401,7 @@ func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serve
 			RRset:      rrset,
 			Context:    cache.ContextAnswer,
 			State:      vstate,
-			Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+			Expiration: cache.Now().Add(cache.GetMinTTL(rrset.RRs)),
 			Transport:  core.TransportDo53, // revalidateReferralNS - default to Do53
 		})
 	}
@@ -3504,8 +3504,8 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, zonename, host string, rrt
 		RRset:      rrset,
 		Context:    cache.ContextAnswer,
 		State:      vstate,
-		Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)), // XXX: This will be overridden by imr.Cache.Set(). TODO: Fix this.
-		Transport:  core.TransportDo53,                         // revalidateGlueRR - default to Do53
+		Expiration: cache.Now().Add(cache.GetMinTTL(rrset.RRs)), // XXX: This will be overridden by imr.Cache.Set(). TODO: Fix this.
+		Transport:  core.TransportDo53,                          // revalidateGlueRR - default to Do53
 	})
 }
 
@@ -3769,7 +3769,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 		}
 	}
 
-	expiration := time.Now().Add(time.Duration(ttl) * time.Second)
+	expiration := cache.Now().Add(time.Duration(ttl) * time.Second)
 
 	// RFC 9824: a compact denial of existence proves that qname does not
 	// exist with an NSEC owned by qname itself, and the authoritative server
@@ -3903,7 +3903,7 @@ func (imr *Imr) negativeWithoutSOA(qname string, qtype uint16, r *dns.Msg, negCo
 		Rcode:      uint8(r.MsgHdr.Rcode),
 		Context:    negContext,
 		State:      vstate,
-		Expiration: time.Now(),
+		Expiration: cache.Now(),
 		Transport:  transport,
 	})
 	lgDns.Debug("handleNegative: serving a denial without an SOA, uncached",

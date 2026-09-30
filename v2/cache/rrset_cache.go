@@ -47,11 +47,11 @@ func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 	if !ok {
 		return nil
 	}
-	if !tmp.TrustAnchor && tmp.Expiration.Before(time.Now()) {
+	if !tmp.TrustAnchor && tmp.Expiration.Before(Now()) {
 		// Under the shard lock, so a trust anchor stored since the read above
 		// is not removed in its place.
 		dkc.Map.RemoveCb(lookupKey, func(_ string, v CachedDnskeyRRset, exists bool) bool {
-			return exists && !v.TrustAnchor && v.Expiration.Before(time.Now())
+			return exists && !v.TrustAnchor && v.Expiration.Before(Now())
 		})
 		return nil
 	}
@@ -71,7 +71,7 @@ func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRset) {
 	lookupKey := dnskeyKey(zonename, keyid)
 	limits := GetTTLLimits()
-	now := time.Now()
+	now := Now()
 	dkc.Map.Upsert(lookupKey, *cdr, func(exists bool, old, entry CachedDnskeyRRset) CachedDnskeyRRset {
 		if exists && old.TrustAnchor {
 			entry.TrustAnchor = true
@@ -135,7 +135,7 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 		return nil
 	}
 	// Expiration-based eviction
-	if crrset.Expiration.Before(time.Now()) {
+	if crrset.Expiration.Before(Now()) {
 		rrcache.RRsets.Remove(lookupKey)
 		if rrcache.Debug {
 			log.Printf("RRsetCache: Removed expired key %s (%s)", lookupKey, dns.TypeToString[qtype])
@@ -190,7 +190,7 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 	// cache-min-ttl / cache-max-ttl, for data learned from the network. The
 	// lifetime decided here is also the TTL every client is served, so this is
 	// the one place the limits need to be applied.
-	now := time.Now()
+	now := Now()
 	bounded := ttlBounded(crrset.Context)
 	limits := GetTTLLimits()
 
@@ -873,7 +873,7 @@ func (rrcache *RRsetCacheT) StoreTLSAForServer(base, owner string, rrset *core.R
 	}
 	// Bounded like the copy of the same RRset in the RRset cache, so a DANE pin
 	// does not outlive the data it was taken from.
-	now := time.Now()
+	now := Now()
 	exp, _, _ := GetTTLLimits().bound(now.Add(GetMinTTL(rrset.RRs)), now)
 	st.mu.Lock()
 	st.recs[owner] = &CachedRRset{
@@ -912,7 +912,7 @@ func (rrcache *RRsetCacheT) LookupTLSAForServer(base, owner string) *CachedRRset
 	st.mu.RLock()
 	rec := st.recs[owner]
 	st.mu.RUnlock()
-	if rec == nil || time.Now().After(rec.Expiration) {
+	if rec == nil || Now().After(rec.Expiration) {
 		return nil
 	}
 	return rec
