@@ -115,6 +115,9 @@ func renderImrStatus(st *tdns.ImrStatus) {
 	if st == nil {
 		return
 	}
+	if st.DataClock != "" {
+		fmt.Printf("IMR: data time is a TEST CLOCK (%s)\n", st.DataClock)
+	}
 	fmt.Print(imrRootStatusLines(st))
 
 	if !st.ZonesLoadedAt.IsZero() {

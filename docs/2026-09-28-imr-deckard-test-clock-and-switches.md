@@ -32,6 +32,16 @@ S4 prediction.
 - S1 changed no outcome in the whole resolver set: the scenarios already
   script the AAAA lookups tdns-imr makes, and the `do-ip6: no` scenarios that
   fail need the clock.
+- The clock (§3) and S3 are implemented on `feature/imr-test-clock`, as
+  designed, with these differences:
+  - `faketime-file` turns the clock on by itself; `faketime: true` alone reads
+    `$FAKETIME_TIMESTAMP_FILE`.
+  - The clock is reported in `config status`, from the resolver's status
+    block.
+  - The expiries that the debug listener and the cache API show are in data
+    time too.
+  - Not moved: `chase.go`, `dnssec_validate.go` and `sig0_validate.go`, which
+    are not the resolver's.
 
 ## Summary
 

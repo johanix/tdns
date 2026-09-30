@@ -162,14 +162,14 @@ func debugMetaTXT(owner string, cr *cache.CachedRRset) dns.RR {
 			dns.TypeToString[cr.RRtype],
 			cache.CacheContextToString[cr.Context],
 			cache.ValidationStateToString[cr.State],
-			time.Until(cr.Expiration).Truncate(time.Second))},
+			cache.Until(cr.Expiration).Truncate(time.Second))},
 	}
 }
 
 // ttlAdjusted copies rrs with TTLs set to the entry's remaining lifetime —
 // half the point of a cache peek. Expired-but-not-yet-reaped entries show 0.
 func ttlAdjusted(rrs []dns.RR, expiration time.Time) []dns.RR {
-	remaining := time.Until(expiration)
+	remaining := cache.Until(expiration)
 	if remaining < 0 {
 		remaining = 0
 	}

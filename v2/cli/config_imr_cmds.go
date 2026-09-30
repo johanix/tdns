@@ -230,9 +230,29 @@ func checkImrEngine(cfg *tdns.Config, rep *ccReport) {
 	case !v4:
 		rep.pass(g, "outbound-address-families", "IPv6 only: IPv4 addresses of authoritative servers are neither looked up nor used")
 	}
-	if cfg.Imr.Testing.SkipPriming() {
+	t := cfg.Imr.Testing
+	if t.SkipPriming() {
 		rep.warn(g, "testing",
 			"imrengine.testing.priming is false: the resolver seeds its cache from the root hints and never primes."+
+				" This is a test-harness switch, not for production",
+			"remove imrengine.testing from a production config")
+	}
+	switch err := t.Validate(); {
+	case err != nil:
+		rep.fail(g, "testing", "imrengine.testing: "+err.Error()+" — the resolver would not start",
+			"remove root-refresh, or faketime")
+	case t.FaketimeOn():
+		file := t.FaketimePath()
+		if file == "" {
+			file = "$FAKETIME_TIMESTAMP_FILE, which is not set here"
+		}
+		rep.warn(g, "testing",
+			"imrengine.testing.faketime is on: signatures, cache expiry and served TTLs follow a test clock read from "+file+
+				", and the root NS is not refreshed. This is a test-harness switch, not for production",
+			"remove imrengine.testing from a production config")
+	case t.SkipRootRefresh():
+		rep.warn(g, "testing",
+			"imrengine.testing.root-refresh is false: the root NS is not refreshed before it expires."+
 				" This is a test-harness switch, not for production",
 			"remove imrengine.testing from a production config")
 	}

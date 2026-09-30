@@ -540,6 +540,7 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 	check("debug", boot.Debug == current.Debug)
 	check("logging", boot.Logging == current.Logging)
 	check("tuning", imrTuningEqual(effective(boot.Tuning), effective(current.Tuning)))
+	check("testing", imrTestingEqual(boot.Testing, current.Testing))
 	return keys
 }
 

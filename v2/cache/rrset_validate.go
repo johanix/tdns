@@ -199,7 +199,7 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 				}
 				// Add fetched keys to cache only after DS-based validation has been performed.
 				// Compute min TTL for expiration.
-				exp := time.Now().Add(GetMinTTL(dkeys.RRs))
+				exp := Now().Add(GetMinTTL(dkeys.RRs))
 
 				// Attempt to validate the fetched DNSKEY RRset using DS before adding to DnskeyCache
 				// Only add validated/secure DNSKEYs to DnskeyCache, as it's used for validation of other data
@@ -312,7 +312,7 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 		return false, false, ValidationStateBogus, nil
 	}
 	// Time validity
-	if WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
+	if WithinValidityPeriod(sig.Inception, sig.Expiration, Now().UTC()) {
 		if rrcache.Debug {
 			log.Printf("ValidateRRset: signature verify OK and within validity window for %s %s using %s::%d",
 				rrset.Name, dns.TypeToString[rrset.RRtype], signer, keyid)
@@ -334,7 +334,7 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 		}
 		// cap ttl to the signature expiration
 		expirationTime := time.Unix(int64(sig.Expiration), 0)
-		remaining := time.Until(expirationTime)
+		remaining := Until(expirationTime)
 		ttl := time.Duration(remaining.Seconds()) * time.Second
 		if ttl < GetMinTTL(rrset.RRs) {
 			for _, rr := range rrset.RRs {
@@ -345,7 +345,7 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 	}
 	if rrcache.Verbose {
 		log.Printf("ValidateRRset: signature time INVALID for %s %s using %s::%d (inc=%d exp=%d now=%d)",
-			rrset.Name, dns.TypeToString[rrset.RRtype], signer, keyid, sig.Inception, sig.Expiration, time.Now().UTC().Unix())
+			rrset.Name, dns.TypeToString[rrset.RRtype], signer, keyid, sig.Inception, sig.Expiration, Now().UTC().Unix())
 	}
 	// Signature inception/expiration window is invalid (premature or
 	// expired). The crypto verified, but the sig is not currently
@@ -392,7 +392,7 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 	if cached != nil && cached.State > ValidationStateNone && cached.State != ValidationStateIndeterminate {
 		// Get() already checks expiration and returns nil if expired, so if cached is not nil, it's not expired
 		// But we double-check expiration to be explicit about the semantics
-		if cached.Expiration.Before(time.Now()) {
+		if cached.Expiration.Before(Now()) {
 			if rrcache.Verbose {
 				log.Printf("ValidateRRset: cached RRset for %s %s has expired, re-validating", rrset.Name, dns.TypeToString[rrset.RRtype])
 			}
@@ -617,10 +617,10 @@ func ValidateDNSKEYRRsetSignature(rrset *core.RRset, keyid uint16, signerName st
 	}
 
 	// Check time validity
-	if !WithinValidityPeriod(sigForKey.Inception, sigForKey.Expiration, time.Now().UTC()) {
+	if !WithinValidityPeriod(sigForKey.Inception, sigForKey.Expiration, Now().UTC()) {
 		if verbose {
 			log.Printf("validateDNSKEYRRsetSignature: signature time INVALID for %s with keytag=%d (inc=%d exp=%d now=%d)",
-				name, keyid, sigForKey.Inception, sigForKey.Expiration, time.Now().UTC().Unix())
+				name, keyid, sigForKey.Inception, sigForKey.Expiration, Now().UTC().Unix())
 		}
 		return false, sigForKey
 	}
@@ -628,7 +628,7 @@ func ValidateDNSKEYRRsetSignature(rrset *core.RRset, keyid uint16, signerName st
 	// Cap TTL to signature expiration
 	minTTL := GetMinTTL(rrset.RRs)
 	expirationTime := time.Unix(int64(sigForKey.Expiration), 0)
-	remaining := time.Until(expirationTime)
+	remaining := Until(expirationTime)
 	expttl := time.Duration(remaining.Seconds()) * time.Second
 	if expttl < minTTL {
 		if len(rrset.RRs) > 0 {
@@ -760,7 +760,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			}
 			// Add all DNSKEYs from the validated RRset to DnskeyCache
 			minTTL := GetMinTTL(rrset.RRs)
-			exp := time.Now().Add(minTTL)
+			exp := Now().Add(minTTL)
 			for _, krr := range rrset.RRs {
 				if dk, ok := krr.(*dns.DNSKEY); ok {
 					dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
@@ -827,7 +827,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			// Add all DNSKEYs from the validated RRset to DnskeyCache
 			// Preserve TrustAnchor flag if DNSKEY was already in cache as trust anchor
 			minTTL := GetMinTTL(rrset.RRs)
-			exp := time.Now().Add(minTTL)
+			exp := Now().Add(minTTL)
 			for _, krr := range rrset.RRs {
 				if dk, ok := krr.(*dns.DNSKEY); ok {
 					keyid := dk.KeyTag()
@@ -887,7 +887,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 				}
 				// Add all DNSKEYs from the validated RRset to DnskeyCache
 				minTTL := GetMinTTL(rrset.RRs)
-				exp := time.Now().Add(minTTL)
+				exp := Now().Add(minTTL)
 				for _, krr := range rrset.RRs {
 					if dk, ok := krr.(*dns.DNSKEY); ok {
 						dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
@@ -1036,7 +1036,7 @@ func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher
 		RRset:      fetched,
 		Context:    ContextAnswer,
 		State:      vstate,
-		Expiration: time.Now().Add(GetMinTTL(fetched.RRs)),
+		Expiration: Now().Add(GetMinTTL(fetched.RRs)),
 	}
 	rrcache.Set(name, dns.TypeDS, entry)
 	if rrcache.Verbose {
@@ -1248,7 +1248,7 @@ const year68 = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bit
 func WithinValidityPeriod(inc, exp uint32, t time.Time) bool {
 	var utc int64
 	if t.IsZero() {
-		utc = time.Now().UTC().Unix()
+		utc = Now().UTC().Unix()
 	} else {
 		utc = t.UTC().Unix()
 	}

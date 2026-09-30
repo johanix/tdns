@@ -1111,7 +1111,7 @@ func (imr *Imr) acceptForwardedAnswer(qname string, qtype uint16, r *dns.Msg, tr
 		RRset:      &rrset,
 		Context:    cache.ContextAnswer,
 		State:      state,
-		Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+		Expiration: cache.Now().Add(cache.GetMinTTL(rrset.RRs)),
 		Transport:  transport,
 	})
 	return &rrset, r.MsgHdr.Rcode, cache.ContextAnswer, transport

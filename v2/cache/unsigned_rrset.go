@@ -205,7 +205,7 @@ func (rrcache *RRsetCacheT) trustAnchorDSRRset(zone string) *CachedRRset {
 		RRset:      &core.RRset{Name: dns.Fqdn(zone), Class: dns.ClassINET, RRtype: dns.TypeDS, RRs: rrs},
 		Context:    ContextPriming,
 		State:      ValidationStateSecure,
-		Expiration: time.Now().Add(time.Hour),
+		Expiration: Now().Add(time.Hour),
 	}
 }
 

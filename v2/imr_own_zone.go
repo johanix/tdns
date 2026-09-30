@@ -8,7 +8,6 @@ import (
 	"net"
 	"slices"
 	"strings"
-	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
@@ -252,7 +251,7 @@ func (imr *Imr) holdOwnZoneKeys(ctx context.Context, zd *ZoneData) *dns.Msg {
 	}
 
 	if len(keys.RRs) > 0 {
-		exp := time.Now().Add(cache.GetMinTTL(keys.RRs))
+		exp := cache.Now().Add(cache.GetMinTTL(keys.RRs))
 		imr.Cache.Set(apex, dns.TypeDNSKEY, &cache.CachedRRset{
 			Name:       apex,
 			RRtype:     dns.TypeDNSKEY,
