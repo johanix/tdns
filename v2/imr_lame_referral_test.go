@@ -158,8 +158,15 @@ const (
 // the closest zone the cache knows for the name. Here the cache knows the
 // child already (an empty server map, as a lookup in progress leaves it), and
 // the question goes to the parent's servers: their referral into the child is
-// a referral, and the child's answer comes through.
+// a referral, and the child's answer comes through. The same with AA set on
+// the referral, as some servers do: it is not the child's NODATA either.
 func TestReferralIsJudgedAgainstTheServersZone(t *testing.T) {
+	for _, aa := range []bool{false, true} {
+		t.Run("aa="+strconv.FormatBool(aa), func(t *testing.T) { referralJudgedAgainstServersZone(t, aa) })
+	}
+}
+
+func referralJudgedAgainstServersZone(t *testing.T, aa bool) {
 	delegation := mustRR(t, zsKid+" 300 IN NS "+zsKidNS)
 	glue := mustRR(t, zsKidNS+" 300 IN AAAA ::1")
 	answer := mustRR(t, zsWWW+" 300 IN A 192.0.2.36")
@@ -171,6 +178,7 @@ func TestReferralIsJudgedAgainstTheServersZone(t *testing.T) {
 		m.SetReply(r)
 		q := r.Question[0]
 		if name := dns.CanonicalName(q.Name); dns.IsSubDomain(zsKid, name) && !(name == zsKid && q.Qtype == dns.TypeDS) {
+			m.Authoritative = aa
 			m.Ns = append(m.Ns, delegation)
 			m.Extra = append(m.Extra, glue)
 		} else {
