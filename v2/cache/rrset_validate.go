@@ -689,6 +689,19 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		}
 	}
 
+	// A zone with a DNSKEY trust anchor is validated with the anchor's keys
+	// before any DS is looked up. The anchor vouches for the zone, and an
+	// island of security below the root usually has no DS at its parent. The
+	// DS used to be looked up first, and fetched when it was not cached: a
+	// question to the parent side that the anchor makes unnecessary, and one
+	// that took the resolver to the zone's own servers when the parent side
+	// answered it with a referral. An anchor that validates no key leaves the
+	// zone to the DS below, as before.
+	taKeys := rrcache.trustAnchorKeys(name)
+	if len(taKeys) > 0 && rrcache.validateWithTrustAnchorKeys(rrset, name, taKeys) {
+		return ValidationStateSecure, nil
+	}
+
 	// OPTIMIZATION: Check for cached DS first (common case)
 	// For root, there is no DS by definition, so skip this check
 	var dsRRs *CachedRRset
@@ -793,16 +806,9 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	}
 
 	// No cached DS or DS not secure - check for TA initialization alternatives
-	// Check for trust anchor DNSKEYs and seeded DS records
-	var taKeys []*CachedDnskeyRRset
+	// Check for trust anchor DNSKEYs (taKeys, above) and seeded DS records
 	var seededDSs []*CachedRRset
 
-	// Check for trust anchor DNSKEYs
-	for item := range dkc.Map.IterBuffered() {
-		if core.EqualNames(item.Val.Name, name) && item.Val.TrustAnchor && item.Val.State == ValidationStateSecure {
-			taKeys = append(taKeys, &item.Val)
-		}
-	}
 	// Check for seeded DS RRset (indicates DS-based TA initialization).
 	// A Secure denial of DS is not a seeded DS; actualDSRecords keeps it out.
 	// The seeded copy expires and is flushed; the anchor itself is used then.
@@ -814,40 +820,9 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		}
 	}
 
-	// If we have direct DNSKEY trust anchors, try those first
+	// A DNSKEY trust anchor was tried before the DS. The DS did not validate
+	// the keys either.
 	if len(taKeys) > 0 {
-		for _, taKey := range taKeys {
-			// Validate using direct DNSKEY trust anchor
-			valid, _ := ValidateDNSKEYRRsetSignature(rrset, taKey.Keyid, name, &taKey.Dnskey, rrcache.Verbose)
-			if !valid {
-				continue
-			}
-			// Add all DNSKEYs from the validated RRset to DnskeyCache
-			// Preserve TrustAnchor flag if DNSKEY was already in cache as trust anchor
-			minTTL := GetMinTTL(rrset.RRs)
-			exp := Now().Add(minTTL)
-			for _, krr := range rrset.RRs {
-				if dk, ok := krr.(*dns.DNSKEY); ok {
-					keyid := dk.KeyTag()
-					trustAnchor := false
-					if existing := dkc.Get(name, keyid); existing != nil {
-						trustAnchor = existing.TrustAnchor
-					}
-					dkc.Set(dns.Fqdn(dk.Hdr.Name), keyid, &CachedDnskeyRRset{
-						Name:        dns.Fqdn(dk.Hdr.Name),
-						Keyid:       keyid,
-						State:       ValidationStateSecure,
-						TrustAnchor: trustAnchor, // Preserve trust anchor flag
-						Dnskey:      *dk,
-						Expiration:  exp,
-					})
-				}
-			}
-			if rrcache.Verbose {
-				log.Printf("ValidateDNSKEYs: added %d DNSKEYs to DnskeyCache for %q", len(rrset.RRs), name)
-			}
-			return ValidationStateSecure, nil
-		}
 		// none of the TA keys validated, return bogus
 		// Store the DNSKEY RRset as bogus with EDE code 9 (DNSKEY Missing/No DNSKEY matches DS)
 		// This ensures that dependent RRsets can retrieve the EDE info via lookupDnskeyEDE
@@ -930,6 +905,57 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		}
 	}
 	return ValidationStateIndeterminate, nil
+}
+
+// trustAnchorKeys returns the DNSKEY trust anchors held for zone.
+func (rrcache *RRsetCacheT) trustAnchorKeys(zone string) []*CachedDnskeyRRset {
+	if rrcache.DnskeyCache == nil {
+		return nil
+	}
+	var keys []*CachedDnskeyRRset
+	for item := range rrcache.DnskeyCache.Map.IterBuffered() {
+		if core.EqualNames(item.Val.Name, zone) && item.Val.TrustAnchor && item.Val.State == ValidationStateSecure {
+			keys = append(keys, &item.Val)
+		}
+	}
+	return keys
+}
+
+// validateWithTrustAnchorKeys validates the DNSKEY RRset of zone with one of
+// its trust anchor keys, and on success adds every key in it to the
+// DnskeyCache as Secure, keeping the trust anchor flag of those that have it.
+func (rrcache *RRsetCacheT) validateWithTrustAnchorKeys(rrset *core.RRset, zone string, taKeys []*CachedDnskeyRRset) bool {
+	dkc := rrcache.DnskeyCache
+	for _, taKey := range taKeys {
+		if valid, _ := ValidateDNSKEYRRsetSignature(rrset, taKey.Keyid, zone, &taKey.Dnskey, rrcache.Verbose); !valid {
+			continue
+		}
+		exp := Now().Add(GetMinTTL(rrset.RRs))
+		for _, krr := range rrset.RRs {
+			dk, ok := krr.(*dns.DNSKEY)
+			if !ok {
+				continue
+			}
+			keyid := dk.KeyTag()
+			trustAnchor := false
+			if existing := dkc.Get(zone, keyid); existing != nil {
+				trustAnchor = existing.TrustAnchor
+			}
+			dkc.Set(dns.Fqdn(dk.Hdr.Name), keyid, &CachedDnskeyRRset{
+				Name:        dns.Fqdn(dk.Hdr.Name),
+				Keyid:       keyid,
+				State:       ValidationStateSecure,
+				TrustAnchor: trustAnchor,
+				Dnskey:      *dk,
+				Expiration:  exp,
+			})
+		}
+		if rrcache.Verbose {
+			log.Printf("ValidateDNSKEYs: added %d DNSKEYs to DnskeyCache for %q", len(rrset.RRs), zone)
+		}
+		return true
+	}
+	return false
 }
 
 // actualDSRecords returns the DS records in a cached DS entry. SOA/NSEC/NSEC3
