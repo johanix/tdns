@@ -417,10 +417,8 @@ func (p *nsec3Proof) noData(qname string, qtype uint16) nsec3Verdict {
 		}
 		return nsec3Proven
 	}
-	if p.spent {
-		return nsec3OverBudget
-	}
-	// qname is not matched, so a proof has a next closer name.
+	// qname is not matched, so a proof has a next closer name. A budget that
+	// ran out on the way shows in the closest encloser proof (finish).
 	ce, v := p.closestEncloser(qname)
 	switch {
 	case v == nsec3InsecureDelegation && qtype != dns.TypeDS:
@@ -439,9 +437,9 @@ func (p *nsec3Proof) noData(qname string, qtype uint16) nsec3Verdict {
 		}
 		return nsec3Proven
 	}
-	if p.spent {
-		return nsec3OverBudget
-	}
+	// Were the budget to run out looking for the wildcard, an Opt-Out span
+	// would make the answer Insecure whatever it found, and finish reports it
+	// otherwise.
 	if ce.ncRec.optOut() {
 		return nsec3OptOut
 	}

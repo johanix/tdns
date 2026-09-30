@@ -242,9 +242,6 @@ func (rrcache *RRsetCacheT) nsec3CutProof(ctx context.Context, name string, sets
 		}
 		return evidenceNoCut
 	}
-	if p.spent {
-		return evidenceUnjudged
-	}
 	nextCloser := name
 	for ce := parentOf(name); dns.IsSubDomain(zone, ce); ce = parentOf(ce) {
 		if rec := p.matching(ce); rec != nil {
@@ -259,18 +256,17 @@ func (rrcache *RRsetCacheT) nsec3CutProof(ctx context.Context, name string, sets
 				}
 				return evidenceNoCut
 			}
-			if p.spent {
-				return evidenceUnjudged
-			}
-			return unproven
-		}
-		if p.spent {
-			return evidenceUnjudged
+			break
 		}
 		if core.EqualNames(ce, zone) {
 			break
 		}
 		nextCloser = ce
+	}
+	// A proof that ran out of hashes on the way is not judged, as one over
+	// the iteration limit is not.
+	if p.spent {
+		return evidenceUnjudged
 	}
 	return unproven
 }

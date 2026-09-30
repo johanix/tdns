@@ -108,17 +108,25 @@ func TestValidateDenialNSEC3(t *testing.T) {
 // NSEC3 records that do not count leave the denial without a proof: the
 // answer is not used (an error), and never Secure. Signed by another zone,
 // unsigned beside a signed SOA.
+//
+// The zone above can sign a record named in the zone below when the resolver
+// does not hold the zone below as Secure: its signature then validates. It
+// still does not count: a zone's NSEC3 chain is its own.
 func TestValidateDenialNSEC3ThatDoesNotCount(t *testing.T) {
-	for name, sets := range map[string]func(t *testing.T, rrcache *RRsetCacheT, k *zoneKey) []*core.RRset{
-		"signed by the zone above": func(t *testing.T, rrcache *RRsetCacheT, k *zoneKey) []*core.RRset {
+	for name, sets := range map[string]func(t *testing.T, rrcache *RRsetCacheT) []*core.RRset{
+		"signed by the zone above": func(t *testing.T, rrcache *RRsetCacheT) []*core.RRset {
 			above := newZoneKey(t, rrcache, "example.", true)
+			rrcache.ZoneMap.Set("example.", &Zone{ZoneName: "example.", State: ValidationStateSecure})
+			k := newZoneKey(t, rrcache, secZone, false)
 			var out []*core.RRset
 			for _, r := range n3NameError(0, 0) {
 				out = append(out, above.sign(t, r))
 			}
 			return append([]*core.RRset{k.sign(t, soaFor(t, secZone))}, out...)
 		},
-		"unsigned beside a signed SOA": func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []*core.RRset {
+		"unsigned beside a signed SOA": func(t *testing.T, rrcache *RRsetCacheT) []*core.RRset {
+			k := newZoneKey(t, rrcache, secZone, true)
+			rrcache.ZoneMap.Set(secZone, &Zone{ZoneName: secZone, State: ValidationStateSecure})
 			out := []*core.RRset{k.sign(t, soaFor(t, secZone))}
 			for _, r := range n3NameError(0, 0) {
 				out = append(out, unsigned(r))
@@ -127,8 +135,8 @@ func TestValidateDenialNSEC3ThatDoesNotCount(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			rrcache, k := secCache(t)
-			v, err := rrcache.ValidateDenial(context.Background(), n3NX, dns.TypeA, dns.RcodeNameError, sets(t, rrcache, k), nil)
+			rrcache := negCache(t)
+			v, err := rrcache.ValidateDenial(context.Background(), n3NX, dns.TypeA, dns.RcodeNameError, sets(t, rrcache), nil)
 			if v.State == ValidationStateSecure || err == nil {
 				t.Errorf("state %s, err %v: want an answer that is not used", ValidationStateToString[v.State], err)
 			}
