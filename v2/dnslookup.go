@@ -353,6 +353,10 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 		if r == nil {
 			continue
 		}
+		if qerr := replyMatchesQuery(r, m); qerr != nil {
+			lg.Printf("AuthDNSQuery: discarding a reply from %s: %v", ns, qerr)
+			continue
+		}
 		rcode = r.MsgHdr.Rcode
 		if len(r.Answer) != 0 {
 			lg.Printf("*** AuthDNSQuery: there is stuff in Answer section:")
@@ -415,6 +419,10 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 		}
 
 		if r == nil {
+			continue
+		}
+		if qerr := replyMatchesQuery(r, m); qerr != nil {
+			lg.Printf("AuthDNSQuery: discarding a reply from %s: %v", ns, qerr)
 			continue
 		}
 		rcode = r.MsgHdr.Rcode
@@ -749,10 +757,37 @@ type ServerAddrXportTuple struct {
 	Rank      int
 }
 
+// hostLocalAddr reports whether addr, a bare IP literal, reaches this host: a
+// loopback address (127.0.0.0/8, ::1), or an unspecified one (0.0.0.0, ::),
+// which the kernel also delivers locally.
+func hostLocalAddr(addr string) bool {
+	if i := strings.IndexByte(addr, '%'); i >= 0 {
+		addr = addr[:i] // an IPv6 zone
+	}
+	ip := net.ParseIP(addr)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
+}
+
+// mayQueryAddr reports whether a query may go to server at addr. An address on
+// this host is used only if the operator configured it for the server (a
+// stub's, RRsetCacheT.AddStub), or with the allow-loopback-nameservers option:
+// a referral, glue or an address lookup must not be able to point the resolver
+// at services on its own host (#831). The test is the address, not the server:
+// glue can add addresses to a stub's server too.
+func mayQueryAddr(server *cache.AuthServer, addr string, allowHostLocal bool) bool {
+	return allowHostLocal || !hostLocalAddr(addr) || server.IsConfiguredAddr(addr)
+}
+
+// allowHostLocalServers reports whether allow-loopback-nameservers is set.
+func (imr *Imr) allowHostLocalServers() bool {
+	return imr.Options[ImrOptAllowLoopbackNameservers] == "true"
+}
+
 // prioritizeServers returns a flat, prioritized list of
 // (server, addr, transport) tuples for the IMR to try in order.
 //
 // For each (server, addr):
+//   - Skip an address on this host, unless mayQueryAddr allows it.
 //   - Emit one tuple per available transport, filtered against the
 //     per-(addr, transport) backoff on both the server and the
 //     enclosing zone (lame-delegation tracking).
@@ -775,6 +810,7 @@ func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[stri
 		}
 	}
 
+	allowHostLocal := imr.allowHostLocalServers()
 	var tuples []ServerAddrXportTuple
 	var suspectTuples []ServerAddrXportTuple
 	for nsname, server := range serverMap {
@@ -803,6 +839,10 @@ func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[stri
 			continue
 		}
 		for _, addr := range addrs {
+			if !mayQueryAddr(server, addr, allowHostLocal) {
+				noteServerProblem(zoneName, nsname, "address "+addr+" is on this host (allow-loopback-nameservers is not set)")
+				continue
+			}
 			for rank, t := range transports {
 				if !server.IsAddrXportAvailable(addr, t) {
 					if Globals.Debug {
@@ -848,7 +888,7 @@ func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[stri
 	if len(tuples) == 0 && len(suspectTuples) == 0 {
 		lgDns.Warn("prioritizeServers: no usable (server, addr, transport) tuples; the query cannot be sent",
 			"qname", qname, "zone", zoneName, "servers", len(serverMap),
-			"privacy", privacy.String(), "why", explainNoTuples(serverMap, zone, imr.FamilyTracker, qname, privacy))
+			"privacy", privacy.String(), "why", explainNoTuples(serverMap, zone, imr.FamilyTracker, qname, privacy, allowHostLocal))
 	}
 
 	sortTuplesByRankThenRTT(tuples)
@@ -902,7 +942,7 @@ func sortTuplesByRankThenRTT(tuples []ServerAddrXportTuple) {
 // the map and named in the logs, but yields nothing -- which until now looked
 // identical to having no server at all.
 func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
-	ft *cache.FamilyTracker, qname string, privacy edns0.PrivacyLevel) string {
+	ft *cache.FamilyTracker, qname string, privacy edns0.PrivacyLevel, allowHostLocal bool) string {
 
 	if len(serverMap) == 0 {
 		return "no servers in the map for this zone"
@@ -927,9 +967,13 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 		// skip it for, so the counts add up. The family count used to be
 		// missing: "2 addr(s), 1 in server backoff" read as a contradiction when
 		// the other address was on a family the tracker held suspect (#703).
-		var serverBackoff, zoneBackoff, familySuspect int
+		var hostLocal, serverBackoff, zoneBackoff, familySuspect int
 		for _, addr := range addrs {
 			for _, t := range candidateTransports(server, qname, privacy) {
+				if !mayQueryAddr(server, addr, allowHostLocal) {
+					hostLocal++
+					continue
+				}
 				if !server.IsAddrXportAvailable(addr, t) {
 					serverBackoff++
 					continue
@@ -943,8 +987,8 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 				}
 			}
 		}
-		reasons = append(reasons, fmt.Sprintf("%s: %d addr(s), %d in server backoff, %d in zone backoff, %d on a suspect address family",
-			nsname, len(addrs), serverBackoff, zoneBackoff, familySuspect))
+		reasons = append(reasons, fmt.Sprintf("%s: %d addr(s), %d on this host, %d in server backoff, %d in zone backoff, %d on a suspect address family",
+			nsname, len(addrs), hostLocal, serverBackoff, zoneBackoff, familySuspect))
 	}
 	sort.Strings(reasons)
 	return strings.Join(reasons, "; ")
@@ -1299,15 +1343,61 @@ func (imr *Imr) expandServerMapWithMissingNSSince(ctx context.Context, qname str
 // an encrypted transport, cleartext accepted) or strict (encrypted or fail).
 // Returns: rrset, rcode, context, transport, error
 func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, force bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
-	rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, make(map[string]bool), privacy)
-	return rrset, rcode, cacheCtx, transport, err
+	return imr.IterativeDNSQueryInZone(ctx, qname, qtype, serverMap, "", force, privacy)
+}
+
+// IterativeDNSQueryInZone is IterativeDNSQuery for a caller that knows the zone
+// serverMap serves (serversZone). A referral in a reply is judged against that
+// zone (referralLeavesZone). With serversZone "", as from IterativeDNSQuery,
+// it is found from the servers when the lookup starts (zoneOfServers).
+func (imr *Imr) IterativeDNSQueryInZone(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, serversZone string, force bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
+	return imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, serversZone, force, make(map[string]bool), privacy)
+}
+
+// zoneOfServers returns the zone serverMap serves, for a caller that did not
+// say: the closest zone at or above the closest known zone for the question
+// whose cached server map holds every server in serverMap. The closest known
+// zone alone is not enough. ServersFor hands out the root's servers for a zone
+// cut whose map is empty, and judged against that cut the root's referral
+// towards it would look lame. With no such zone the result is "", and
+// referralLeavesZone then follows every referral, as before #829.
+func (imr *Imr) zoneOfServers(qname string, qtype uint16, serverMap map[string]*cache.AuthServer) string {
+	zone, _, _ := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
+	if zone == "" || len(serverMap) == 0 {
+		return zone
+	}
+	for {
+		if held, ok := imr.Cache.ServerMap.Get(zone); ok && holdsServers(held, serverMap) {
+			return zone
+		}
+		labels := dns.Split(zone)
+		if len(labels) <= 1 {
+			if zone == "." {
+				return ""
+			}
+			zone = "."
+			continue
+		}
+		zone = zone[labels[1]:]
+	}
+}
+
+// holdsServers reports whether held has every server that servers has.
+func holdsServers(held, servers map[string]*cache.AuthServer) bool {
+	for key := range servers {
+		if _, ok := held[key]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // IterativeDNSQueryWithLoopDetection is the internal implementation with loop detection
+// serversZone is the zone serverMap serves, or "" (see IterativeDNSQueryInZone)
 // visitedZones tracks which zones we've been referred to for this qname (format: "qname:zone")
 // privacy is the client's PRIVACY EDNS(0) level (see IterativeDNSQuery)
 // Returns: rrset, rcode, context, transport, error
-func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, force bool, visitedZones map[string]bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
+func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, serversZone string, force bool, visitedZones map[string]bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	lg := imr.Cache.Logger
 
 	// Apply per-query wall-time budget. context.WithTimeout takes
@@ -1456,7 +1546,14 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// all, from the closest cached zone cut, as it would be if asked now: with
 	// no servers, the walk below would have nothing to try.
 	if len(serverMap) == 0 {
-		_, serverMap, _ = imr.Cache.FindClosestKnownZoneFor(qname, qtype)
+		serversZone, serverMap, _ = imr.Cache.FindClosestKnownZoneFor(qname, qtype)
+	}
+	// The zone of serverMap, for the referral checks below. The zoneName that
+	// prioritizeServers returns is looked up again on each pass: a zone below
+	// the servers' own, learned meanwhile by another lookup, would make a
+	// referral into it from these servers look like a lame answer.
+	if serversZone == "" {
+		serversZone = imr.zoneOfServers(qname, qtype, serverMap)
 	}
 
 	var rrset core.RRset
@@ -1662,7 +1759,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				}
 				// If not done, fall-through to process referral glue embedded with answers
 				nsRRs, zonename, nsMap := extractReferral(r, qname, qtype)
-				if len(nsRRs.RRs) > 0 {
+				if len(nsRRs.RRs) > 0 && referralLeavesZone(zonename, serversZone) {
 					serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRs, zonename, nsMap, r)
 					if err != nil {
 						lgDns.Error("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional",
@@ -1672,13 +1769,17 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					if len(serverMap) == 0 {
 						return nil, rcode, cache.ContextReferral, wireTransport, nil
 					}
-					rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones, privacy)
+					rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, zonename, force, visitedZones, privacy)
 					return rrset, rcode, cacheCtx, transport, err
 				}
 				continue
 			}
 
-			if len(r.Ns) != 0 {
+			// A negative answer with an empty authority section (RFC 2308
+			// types 3, and the NODATA form of it) is classified too when it is
+			// authoritative (#830); anything else without an authority section
+			// falls through as before.
+			if len(r.Ns) != 0 || (r.Authoritative && (rcode == dns.RcodeNameError || rcode == dns.RcodeSuccess)) {
 				kind := classifyResponse(qname, qtype, r)
 				lgDns.Debug("IterativeDNSQuery: classified response",
 					"qname", qname, "qtype", dns.TypeToString[qtype],
@@ -1687,7 +1788,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 
 				switch kind {
 				case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
-					if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r, wireTransport); handled {
+					if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r, wireTransport, serversZone); handled {
 						return nil, rcodeNeg, ctxNeg, wireTransport, nil
 					}
 					// If not handled, fall through to try next server
@@ -1697,6 +1798,32 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					}
 					continue
 				case responseKindReferral:
+					// A referral hands the lookup to a zone below the one these
+					// servers serve. An NS RRset for that zone itself, or for
+					// one above it, is not a referral. Following it would reach
+					// the loop check in handleReferral, which aborts the whole
+					// lookup (#829).
+					if _, refZone, _ := extractReferral(r, qname, qtype); !referralLeavesZone(refZone, serversZone) {
+						// With AA set and the zone's own NS RRset, the server is
+						// answering NODATA without an SOA (#830). A referral
+						// below the zone keeps its meaning even with AA set, as
+						// some servers set it on referrals; NS for a zone above
+						// is an upward referral, and lame whatever the AA bit.
+						if r.Authoritative && rcode == dns.RcodeSuccess && core.EqualNames(refZone, serversZone) {
+							if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r, wireTransport, serversZone); handled {
+								return nil, rcodeNeg, ctxNeg, wireTransport, nil
+							}
+						}
+						// Otherwise the server is lame for the zone: try the
+						// next one. The fallback below still resolves the
+						// zone's glue-less nameservers.
+						lgDns.Debug("IterativeDNSQuery: NS RRset does not lead below the zone being queried;"+
+							" treating the server as lame and trying the next one",
+							"qname", qname, "qtype", dns.TypeToString[qtype],
+							"zone", serversZone, "ns_owner", refZone, "server", nsname, "addr", addr,
+							"aa", r.Authoritative)
+						continue
+					}
 					return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, wireTransport, privacy)
 				case responseKindError:
 					lgDns.Debug("IterativeDNSQuery: treating response as error",
@@ -1876,6 +2003,14 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			lgDns.Debug("ParseAdditionalForNSAddrs: empty zonename; skipping glue collection")
 		}
 		return map[string]*cache.AuthServer{}, nil
+	}
+	// A stub's servers are configuration: the glue and transport signals in a
+	// response do not change them, and the lookup goes on to the configured
+	// servers. The map's entries are the stub's own AuthServer instances, so
+	// the processing below would add to them in place.
+	if imr.Cache.IsStubZone(zonename) {
+		serverMap, _ := imr.Cache.ServerMapCopy(zonename)
+		return serverMap, nil
 	}
 
 	if Globals.Debug && !imr.Quiet {
@@ -2219,6 +2354,40 @@ func authQueryMsg(qname string, qtype uint16) *dns.Msg {
 	return m
 }
 
+// referralLeavesZone reports whether an NS RRset owned by refZone, returned by
+// a server of zone, is a referral: whether refZone lies strictly below zone.
+// With either name unknown it says yes, which is how every NS RRset was read
+// before the zone was compared.
+func referralLeavesZone(refZone, zone string) bool {
+	if refZone == "" || zone == "" {
+		return true
+	}
+	ref, cur := dns.CanonicalName(refZone), dns.CanonicalName(zone)
+	return ref != cur && dns.IsSubDomain(cur, ref)
+}
+
+// replyMatchesQuery reports why r is not an answer to query's question, or nil
+// when it is: r must carry exactly one question, with the query's name
+// (compared case-insensitively), type and class (RFC 1035 section 7.3, RFC 5452
+// section 3). A reply that fails this says nothing about the name that was
+// asked, and is not used: taking its records for the queried name is how a
+// server answering some other question -- or none -- would reach the cache.
+func replyMatchesQuery(r, query *dns.Msg) error {
+	if len(r.Question) != 1 {
+		return fmt.Errorf("reply carries %d questions, want 1", len(r.Question))
+	}
+	if len(query.Question) != 1 {
+		return nil
+	}
+	rq, q := r.Question[0], query.Question[0]
+	if !strings.EqualFold(rq.Name, q.Name) || rq.Qtype != q.Qtype || rq.Qclass != q.Qclass {
+		return fmt.Errorf("reply is for %s %s %s, the query was for %s %s %s",
+			rq.Name, dns.ClassToString[rq.Qclass], dns.TypeToString[rq.Qtype],
+			q.Name, dns.ClassToString[q.Qclass], dns.TypeToString[q.Qtype])
+	}
+	return nil
+}
+
 func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 	m := authQueryMsg(qname, qtype)
 	if withOOTS {
@@ -2346,6 +2515,19 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 		return nil, rtt, eff, err
 	}
 	if r != nil {
+		// A reply to some other question, or to none, is a failed attempt at
+		// this server: nothing below may read it as an answer to ours.
+		if qerr := replyMatchesQuery(r, m); qerr != nil {
+			lgDns.Warn("tryServer: discarding a reply that does not answer the query",
+				"qname", qname,
+				"qtype", dns.TypeToString[qtype],
+				"addr", addr,
+				"transport", core.TransportToString[eff],
+				"error", qerr)
+			server.RecordAddressFailure(addr, eff, qerr)
+			server.IncrementFailedCounter(xres.WireTransport)
+			return nil, rtt, eff, qerr
+		}
 		server.RecordAddressSuccess(addr, eff)
 		server.IncrementUsedCounter(xres.WireTransport)
 		server.RecordRTT(addr, eff, rtt)
@@ -2469,7 +2651,9 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 		return
 	}
 	lgDns.Debug("parseTransportForServerFromAdditional: inspecting server", "server", server.Name, "addrs", server.GetAddrs())
-	lgDns.Debug("pTFSA: looking for transport signal in response", "qname", r.Question[0].Name, "qtype", dns.TypeToString[r.Question[0].Qtype], "additionalRRs", len(r.Extra))
+	if len(r.Question) > 0 {
+		lgDns.Debug("pTFSA: looking for transport signal in response", "qname", r.Question[0].Name, "qtype", dns.TypeToString[r.Question[0].Qtype], "additionalRRs", len(r.Extra))
+	}
 	if len(r.Extra) == 0 {
 		lgDns.Debug("*** parseTransportForServerFromAdditional: no Additional section in response")
 		return
@@ -2913,7 +3097,9 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	// are not already present in cache. In-bailiwick NS should primarily use
 	// glue (and, when ImrOptRevalidateNS is enabled, will later be
 	// revalidated by scheduleReferralNSRevalidation / revalidateInBailiwickGlue).
-	if nsRRset != nil && zonename != "" && len(nsRRset.RRs) > 0 {
+	// Not for a stub: its servers are the configured ones, whatever the
+	// referral names.
+	if nsRRset != nil && zonename != "" && len(nsRRset.RRs) > 0 && !imr.Cache.IsStubZone(zonename) {
 		inBailiwick := func(host, zone string) bool {
 			return dns.IsSubDomain(dns.Fqdn(zone), dns.Fqdn(host))
 		}
@@ -3047,7 +3233,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	// rrcache.Logger.Printf("*** handleReferral: calling revalidateReferralNS for zone %s, serverMap: %+v", zonename, serverMap)
 	imr.scheduleReferralNSRevalidation(zonename, serverMap)
 	//rrcache.Logger.Printf("*** handleReferral: revalidateReferralNS returned, calling IterativeDNSQuery for zone %s, serverMap: %+v", zonename, serverMap)
-	rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones, privacy)
+	rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, zonename, force, visitedZones, privacy)
 	return rrset, rcode, cacheCtx, transport, err
 }
 
@@ -3117,7 +3303,7 @@ func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serve
 		return
 	}
 	// rrcache.Logger.Printf("*** revalidateReferralNS: existing context is %s, collecting server addresses for revalidation", CacheContextToString[existing.Context])
-	addrs := collectServerAddressesForRevalidation(serverMap)
+	addrs := collectServerAddressesForRevalidation(serverMap, imr.allowHostLocalServers())
 	if len(addrs) == 0 {
 		return
 	}
@@ -3165,7 +3351,9 @@ func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serve
 	imr.revalidateInBailiwickGlue(ctx, zonename, serverMap, true)
 }
 
-func collectServerAddressesForRevalidation(serverMap map[string]*cache.AuthServer) []string {
+// collectServerAddressesForRevalidation returns the host:port of each address
+// in serverMap that mayQueryAddr allows.
+func collectServerAddressesForRevalidation(serverMap map[string]*cache.AuthServer, allowHostLocal bool) []string {
 	if len(serverMap) == 0 {
 		return nil
 	}
@@ -3176,9 +3364,14 @@ func collectServerAddressesForRevalidation(serverMap map[string]*cache.AuthServe
 			if raw == "" {
 				continue
 			}
-			hostPort := raw
-			if _, _, err := net.SplitHostPort(raw); err != nil {
+			host, hostPort := raw, raw
+			if h, _, err := net.SplitHostPort(raw); err == nil {
+				host = h
+			} else {
 				hostPort = net.JoinHostPort(raw, "53")
+			}
+			if !mayQueryAddr(server, host, allowHostLocal) {
+				continue
 			}
 			if _, ok := seen[hostPort]; ok {
 				continue
@@ -3217,12 +3410,12 @@ func (imr *Imr) revalidateInBailiwickGlue(ctx context.Context, zonename string, 
 	}
 	for _, host := range hosts {
 		server := serverMap[cache.ServerKey(host)]
-		imr.revalidateGlueRR(ctx, host, dns.TypeA, server, force)
-		imr.revalidateGlueRR(ctx, host, dns.TypeAAAA, server, force)
+		imr.revalidateGlueRR(ctx, zonename, host, dns.TypeA, server, force)
+		imr.revalidateGlueRR(ctx, zonename, host, dns.TypeAAAA, server, force)
 	}
 }
 
-func (imr *Imr) revalidateGlueRR(ctx context.Context, host string, rrtype uint16, server *cache.AuthServer, force bool) {
+func (imr *Imr) revalidateGlueRR(ctx context.Context, zonename, host string, rrtype uint16, server *cache.AuthServer, force bool) {
 	select {
 	case <-ctx.Done():
 		return
@@ -3234,7 +3427,7 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, host string, rrtype uint16
 	hostServerMap := map[string]*cache.AuthServer{
 		server.Name: server,
 	}
-	rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, host, rrtype, hostServerMap, force, edns0.PrivacyNone) // privacy is a client signal; glue revalidation is our own traffic
+	rrset, _, _, _, err := imr.IterativeDNSQueryInZone(ctx, host, rrtype, hostServerMap, zonename, force, edns0.PrivacyNone) // privacy is a client signal; glue revalidation is our own traffic
 	if err != nil || rrset == nil || len(rrset.RRs) == 0 {
 		return
 	}
@@ -3313,9 +3506,17 @@ func classifyResponse(qname string, qtype uint16, r *dns.Msg) responseKind {
 
 	rcode := r.MsgHdr.Rcode
 
-	// No Authority section: can't be a referral or a well-formed negative.
+	// No Authority section: not a referral. An authoritative NXDOMAIN or
+	// NODATA with nothing in authority is still a denial (RFC 2308 section 2.1
+	// type 3, and the NODATA form of it); handleNegative serves it uncached
+	// (#830). Without AA it says nothing.
 	if len(r.Ns) == 0 {
-		if rcode == dns.RcodeSuccess {
+		switch {
+		case r.Authoritative && rcode == dns.RcodeNameError:
+			return responseKindNegativeNXDOMAIN
+		case r.Authoritative && rcode == dns.RcodeSuccess:
+			return responseKindNegativeNoData
+		case rcode == dns.RcodeSuccess:
 			return responseKindUnknown
 		}
 		return responseKindError
@@ -3357,8 +3558,14 @@ func classifyResponse(qname string, qtype uint16, r *dns.Msg) responseKind {
 		if soaSpeaksForQname() {
 			return responseKindNegativeNXDOMAIN
 		}
-		// NXDOMAIN without any SOA should be treated as an error and
-		// the caller will typically try the next server.
+		// An authoritative NXDOMAIN without an SOA is still a denial: RFC 2308
+		// section 2.1 lists it with an empty authority section (type 3) and
+		// with NS records only (type 4). handleNegative serves it without
+		// caching it (#830). Without AA it says nothing, and the caller tries
+		// the next server.
+		if r.Authoritative {
+			return responseKindNegativeNXDOMAIN
+		}
 		return responseKindError
 
 	case dns.RcodeSuccess:
@@ -3411,11 +3618,16 @@ func authorityRRsets(rrs []dns.RR) []*core.RRset {
 	return out
 }
 
-func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport core.Transport) (cache.CacheContext, int, bool) {
+// handleNegative caches a negative answer and reports how it was read.
+//
+// zone is the zone the answering servers serve, when the caller knows it. It is
+// what judges an authoritative denial that carries no SOA (negativeWithoutSOA);
+// without it such a denial is not used.
+func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport core.Transport, zone string) (cache.CacheContext, int, bool) {
 	if r == nil {
 		return cache.ContextFailure, dns.RcodeServerFailure, false
 	}
-	if len(r.Ns) == 0 {
+	if len(r.Ns) == 0 && !r.Authoritative {
 		return cache.ContextFailure, r.MsgHdr.Rcode, false
 	}
 
@@ -3464,6 +3676,9 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	}
 
 	if soarrset == nil || len(soarrset.RRs) == 0 {
+		if r.Authoritative && zone != "" {
+			return imr.negativeWithoutSOA(qname, qtype, r, negContext, zone, transport)
+		}
 		lgDns.Debug("handleNegative: no SOA found in authority for \" \" ()",
 			"qname", qname,
 			"s", dns.TypeToString[qtype],
@@ -3602,6 +3817,42 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	return negContext, int(cachedRcode), true
 }
 
+// negativeWithoutSOA serves an authoritative NXDOMAIN or NODATA that carries no
+// SOA (RFC 2308 section 2.1 types 3 and 4, and the NODATA forms of the same).
+//
+// It is not cached: without an SOA there is no negative TTL, and section 5 says
+// such an answer should not be cached. It is stored already expired, which is
+// what lets this query -- and a CNAME chain it ends -- be answered from it
+// (freshChainGrace), while no later query sees it. Its authority section is not
+// kept: there is no proof in it to serve.
+//
+// With nothing to validate, it gets the verdict unsigned data from zone gets:
+// Insecure outside a zone held Secure, Bogus below one unless an insecure
+// delegation is proven on the way down. A Bogus one is not used, and the caller
+// tries the next server.
+func (imr *Imr) negativeWithoutSOA(qname string, qtype uint16, r *dns.Msg, negContext cache.CacheContext, zone string, transport core.Transport) (cache.CacheContext, int, bool) {
+	vstate := imr.Cache.UnsignedDenialState(context.Background(), zone, qname, qtype, imr.IterativeDNSQueryFetcher())
+	if vstate == cache.ValidationStateBogus {
+		lgDns.Debug("handleNegative: denial without an SOA from a zone that must sign its denials; not used",
+			"qname", qname, "qtype", dns.TypeToString[qtype], "zone", zone,
+			"rcode", dns.RcodeToString[r.MsgHdr.Rcode])
+		return cache.ContextFailure, r.MsgHdr.Rcode, false
+	}
+	imr.Cache.Set(qname, qtype, &cache.CachedRRset{
+		Name:       qname,
+		RRtype:     qtype,
+		Rcode:      uint8(r.MsgHdr.Rcode),
+		Context:    negContext,
+		State:      vstate,
+		Expiration: time.Now(),
+		Transport:  transport,
+	})
+	lgDns.Debug("handleNegative: serving a denial without an SOA, uncached",
+		"qname", qname, "qtype", dns.TypeToString[qtype], "zone", zone,
+		"rcode", dns.RcodeToString[r.MsgHdr.Rcode], "state", cache.ValidationStateToString[vstate])
+	return negContext, r.MsgHdr.Rcode, true
+}
+
 func nsecCoversName(name string, nsec *dns.NSEC) bool {
 	if nsec == nil {
 		return false
@@ -3682,7 +3933,7 @@ func (imr *Imr) chaseCNAME(ctx context.Context, owner, target string, qtype uint
 			return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, err
 		}
 		imr.Cache.Logger.Printf("*** IterativeDNSQuery: best match for target %s is %s", target, bestmatch)
-		tmprrset, rcode, context, hopTransport, err := imr.IterativeDNSQuery(ctx, target, qtype, tmpservers, force, privacy)
+		tmprrset, rcode, context, hopTransport, err := imr.IterativeDNSQueryInZone(ctx, target, qtype, tmpservers, bestmatch, force, privacy)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from IterativeDNSQuery: %v", err)
 			return nil, rcode, context, core.TransportDo53, err
