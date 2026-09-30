@@ -1305,9 +1305,47 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 // IterativeDNSQueryInZone is IterativeDNSQuery for a caller that knows the zone
 // serverMap serves (serversZone). A referral in a reply is judged against that
 // zone (referralLeavesZone). With serversZone "", as from IterativeDNSQuery,
-// it is the closest known zone for qname, looked up when the lookup starts.
+// it is found from the servers when the lookup starts (zoneOfServers).
 func (imr *Imr) IterativeDNSQueryInZone(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, serversZone string, force bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	return imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, serversZone, force, make(map[string]bool), privacy)
+}
+
+// zoneOfServers returns the zone serverMap serves, for a caller that did not
+// say: the closest zone at or above the closest known zone for the question
+// whose cached server map holds every server in serverMap. The closest known
+// zone alone is not enough. ServersFor hands out the root's servers for a zone
+// cut whose map is empty, and judged against that cut the root's referral
+// towards it would look lame. With no such zone the result is "", and
+// referralLeavesZone then follows every referral, as before #829.
+func (imr *Imr) zoneOfServers(qname string, qtype uint16, serverMap map[string]*cache.AuthServer) string {
+	zone, _, _ := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
+	if zone == "" || len(serverMap) == 0 {
+		return zone
+	}
+	for {
+		if held, ok := imr.Cache.ServerMap.Get(zone); ok && holdsServers(held, serverMap) {
+			return zone
+		}
+		labels := dns.Split(zone)
+		if len(labels) <= 1 {
+			if zone == "." {
+				return ""
+			}
+			zone = "."
+			continue
+		}
+		zone = zone[labels[1]:]
+	}
+}
+
+// holdsServers reports whether held has every server that servers has.
+func holdsServers(held, servers map[string]*cache.AuthServer) bool {
+	for key := range servers {
+		if _, ok := held[key]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // IterativeDNSQueryWithLoopDetection is the internal implementation with loop detection
@@ -1462,7 +1500,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// the servers' own, learned meanwhile by another lookup, would make a
 	// referral into it from these servers look like a lame answer.
 	if serversZone == "" {
-		serversZone, _, _ = imr.Cache.FindClosestKnownZoneFor(qname, qtype)
+		serversZone = imr.zoneOfServers(qname, qtype, serverMap)
 	}
 
 	var rrset core.RRset
