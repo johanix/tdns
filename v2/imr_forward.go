@@ -810,6 +810,13 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		if err == nil && r == nil {
 			err = fmt.Errorf("nil response from upstream %s", up.Label)
 		}
+		if err == nil {
+			// A reply that does not answer the question asked is not used
+			// (RFC 5452 section 3): a failed attempt, as in tryServer.
+			if qerr := replyMatchesQuery(r, m); qerr != nil {
+				err = fmt.Errorf("upstream %s: %w", up.Label, qerr)
+			}
+		}
 		if err != nil && truncated {
 			starved++
 			lastErr = fmt.Errorf("upstream %s did not answer within its %v of the budget",
