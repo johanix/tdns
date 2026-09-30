@@ -91,7 +91,12 @@ type RRsetCacheT struct {
 	// zone here in the same step as it stores the map, and RemoveStub forgets
 	// both, holding serverMapMu. The flushes check and delete under it too, so
 	// none of them can delete a stub stored after its check.
-	stubZones     *core.NameMap[struct{}]
+	stubZones *core.NameMap[struct{}]
+	// anchorZones names the zones a configured trust anchor vouches for, DNSKEY
+	// or DS (AddTrustAnchorZone). A DS anchor puts no key in the DnskeyCache
+	// until its zone's DNSKEY RRset has been fetched and has matched it, so the
+	// cache alone did not show it.
+	anchorZones   *core.NameMap[struct{}]
 	AuthServerMap *core.NameMap[*AuthServer]        // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 	ZoneMap       *core.NameMap[*Zone]              // map[zone]*Zone
 	ServerTLSA    *core.NameMap[*ServerTLSARecords] // nsname -> validated TLSA cache, decoupled from AuthServer instances

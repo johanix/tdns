@@ -132,15 +132,19 @@ func (rrcache *RRsetCacheT) belowSecureZone(ctx context.Context, zoneName, name,
 }
 
 // closestKnownZone is the ZoneMap entry at name or nearest above it that decides
-// for the names below it (judgedZone). The root is not looked up, as it was not
-// before: unsigned data that no zone below the root claims stays Indeterminate.
+// for the names below it (judgedZone), the root included. The root used to be
+// passed over, and unsigned data that no zone below it claimed -- the root's
+// own, or a name under a TLD not met yet -- was Indeterminate and served, even
+// with the root held Secure under its trust anchor.
 func (rrcache *RRsetCacheT) closestKnownZone(name string) (string, *Zone) {
-	for n := dns.Fqdn(name); n != "."; n = parentOf(n) {
+	for n := dns.Fqdn(name); ; n = parentOf(n) {
 		if zone, ok := rrcache.ZoneMap.Get(n); ok && rrcache.judgedZone(n, zone) {
 			return n, zone
 		}
+		if n == "." {
+			return "", nil
+		}
 	}
-	return "", nil
 }
 
 // proofNames lists, top down, the names whose DS decides whether unsigned data
@@ -160,8 +164,26 @@ func (rrcache *RRsetCacheT) proofNames(zoneName, name string) []string {
 	return names
 }
 
-// hasTrustAnchor reports whether a configured trust anchor vouches for zone.
+// AddTrustAnchorZone records that a configured trust anchor, DNSKEY or DS,
+// vouches for zone.
+func (rrcache *RRsetCacheT) AddTrustAnchorZone(zone string) {
+	if rrcache.anchorZones != nil {
+		rrcache.anchorZones.Set(zone, struct{}{})
+	}
+}
+
+// HasTrustAnchors reports whether a configured trust anchor has been loaded
+// (AddTrustAnchorZone).
+func (rrcache *RRsetCacheT) HasTrustAnchors() bool {
+	return rrcache.anchorZones != nil && !rrcache.anchorZones.IsEmpty()
+}
+
+// hasTrustAnchor reports whether a configured trust anchor vouches for zone:
+// one recorded by AddTrustAnchorZone, or a trust anchor key in the DnskeyCache.
 func (rrcache *RRsetCacheT) hasTrustAnchor(zone string) bool {
+	if rrcache.anchorZones != nil && rrcache.anchorZones.Has(zone) {
+		return true
+	}
 	if rrcache.DnskeyCache == nil {
 		return false
 	}
