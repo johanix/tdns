@@ -96,10 +96,12 @@ func (imr *Imr) configuredZone(name string) bool {
 // attachCacheHooks gives the cache what it needs to know of the zone table:
 // which names are the apex of a configured zone, and which questions are
 // forwarded. Both hooks read the live table on each call, so a reload needs no
-// new ones.
+// new ones. And which questions the server answers from its own zones, which
+// reads the live Zones map the same way.
 func (imr *Imr) attachCacheHooks() {
 	imr.Cache.ConfiguredZone = imr.configuredZone
 	imr.Cache.Forwarded = imr.forwarded
+	imr.Cache.AnsweredLocally = imr.answeredLocally
 }
 
 // setZoneTable publishes a table directly. Init and tests only; a reload goes

@@ -7,6 +7,7 @@ import (
 	"context"
 	"log"
 	"slices"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -132,15 +133,19 @@ func (rrcache *RRsetCacheT) belowSecureZone(ctx context.Context, zoneName, name,
 }
 
 // closestKnownZone is the ZoneMap entry at name or nearest above it that decides
-// for the names below it (judgedZone). The root is not looked up, as it was not
-// before: unsigned data that no zone below the root claims stays Indeterminate.
+// for the names below it (judgedZone), the root included. The root used to be
+// passed over, and unsigned data that no zone below it claimed -- the root's
+// own, or a name under a TLD not met yet -- was Indeterminate and served, even
+// with the root held Secure under its trust anchor.
 func (rrcache *RRsetCacheT) closestKnownZone(name string) (string, *Zone) {
-	for n := dns.Fqdn(name); n != "."; n = parentOf(n) {
+	for n := dns.Fqdn(name); ; n = parentOf(n) {
 		if zone, ok := rrcache.ZoneMap.Get(n); ok && rrcache.judgedZone(n, zone) {
 			return n, zone
 		}
+		if n == "." {
+			return "", nil
+		}
 	}
-	return "", nil
 }
 
 // proofNames lists, top down, the names whose DS decides whether unsigned data
@@ -160,8 +165,62 @@ func (rrcache *RRsetCacheT) proofNames(zoneName, name string) []string {
 	return names
 }
 
-// hasTrustAnchor reports whether a configured trust anchor vouches for zone.
+// AddTrustAnchorZone records that a configured trust anchor, DNSKEY or DS,
+// vouches for zone.
+func (rrcache *RRsetCacheT) AddTrustAnchorZone(zone string) {
+	if rrcache.anchorZones != nil {
+		rrcache.anchorZones.Set(zone, struct{}{})
+	}
+}
+
+// AddTrustAnchorDS records the DS records of a DS trust anchor for zone,
+// replacing any recorded before.
+func (rrcache *RRsetCacheT) AddTrustAnchorDS(zone string, ds []*dns.DS) {
+	if rrcache.anchorDS != nil && len(ds) > 0 {
+		rrcache.anchorDS.Set(zone, slices.Clone(ds))
+	}
+}
+
+// trustAnchorDSRRset is the DS RRset of the DS trust anchor for zone, Secure,
+// or nil when zone has none. The copy seeded in the cache expires and is
+// flushed like any other RRset; the anchor is configuration and does neither.
+// Without it, a zone whose keys had not been matched yet, or had expired from
+// the DnskeyCache, could not be validated again, and a zone below the root
+// asked its parent for a DS the anchor is there to stand in for.
+func (rrcache *RRsetCacheT) trustAnchorDSRRset(zone string) *CachedRRset {
+	if rrcache.anchorDS == nil {
+		return nil
+	}
+	list, ok := rrcache.anchorDS.Get(zone)
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	rrs := make([]dns.RR, 0, len(list))
+	for _, ds := range list {
+		rrs = append(rrs, ds)
+	}
+	return &CachedRRset{
+		Name:       dns.Fqdn(zone),
+		RRtype:     dns.TypeDS,
+		RRset:      &core.RRset{Name: dns.Fqdn(zone), Class: dns.ClassINET, RRtype: dns.TypeDS, RRs: rrs},
+		Context:    ContextPriming,
+		State:      ValidationStateSecure,
+		Expiration: time.Now().Add(time.Hour),
+	}
+}
+
+// HasTrustAnchors reports whether a configured trust anchor has been loaded
+// (AddTrustAnchorZone).
+func (rrcache *RRsetCacheT) HasTrustAnchors() bool {
+	return rrcache.anchorZones != nil && !rrcache.anchorZones.IsEmpty()
+}
+
+// hasTrustAnchor reports whether a configured trust anchor vouches for zone:
+// one recorded by AddTrustAnchorZone, or a trust anchor key in the DnskeyCache.
 func (rrcache *RRsetCacheT) hasTrustAnchor(zone string) bool {
+	if rrcache.anchorZones != nil && rrcache.anchorZones.Has(zone) {
+		return true
+	}
 	if rrcache.DnskeyCache == nil {
 		return false
 	}

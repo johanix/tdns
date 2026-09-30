@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"testing"
 
+	cache "github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -25,10 +27,10 @@ func TestDsyncApiCoherenceStatus(t *testing.T) {
 		want  int
 	}{
 		{"the child's DNSKEY lookup failed (not at its nameservers yet)",
-			func(string) ([]dns.RR, bool, error) { return nil, false, errors.New("i/o timeout") },
+			func(string) (*core.RRset, cache.ValidationState, error) { return nil, 0, errors.New("i/o timeout") },
 			http.StatusServiceUnavailable},
 		{"this server's resolver has not started",
-			func(string) ([]dns.RR, bool, error) { return nil, false, ErrNoImrEngine },
+			func(string) (*core.RRset, cache.ValidationState, error) { return nil, 0, ErrNoImrEngine },
 			http.StatusServiceUnavailable},
 		{"no resolver at all", nil, http.StatusConflict},
 		{"the resulting DS set matches no published key", fetcherFor(other), http.StatusConflict},

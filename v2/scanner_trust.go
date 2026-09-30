@@ -316,8 +316,9 @@ func (scanner *Scanner) securedChildRRsetFetcher(pol DelegationPolicy, childZone
 // The rule is the one a DS change by DNS UPDATE or the API meets
 // (CheckDelegationCoherence): at least one DS of the resulting RRset matches a
 // published key, an empty RRset (going insecure) is allowed, and for a child
-// that already has a DS the DNSKEY RRset must validate. The DNSKEYs are asked
-// of the child's nameservers, as the CDS was, and they must agree on them.
+// that already has a DS the DNSKEY RRset must validate, or be signed by a key
+// matching the DS the parent holds. The DNSKEYs are asked of the child's
+// nameservers, as the CDS was, and they must agree on them.
 func (scanner *Scanner) checkDSMatchesChildKeys(ctx context.Context, childZone string, nsRRset *core.RRset,
 	currentDS, adds, removes []dns.RR, lg *log.Logger) error {
 	var actions []dns.RR
@@ -331,25 +332,29 @@ func (scanner *Scanner) checkDSMatchesChildKeys(ctx context.Context, childZone s
 		cp.Header().Class = dns.ClassNONE
 		actions = append(actions, cp)
 	}
-	fetch := func(child string) ([]dns.RR, bool, error) {
+	fetch := func(child string) (*core.RRset, cache.ValidationState, error) {
 		keys, inSync, err := scanner.askChild(ctx, child, dns.TypeDNSKEY, nsRRset, lg)
 		if err != nil {
-			return nil, false, err
+			return nil, 0, err
 		}
 		if !inSync {
-			return nil, false, errors.New("the child's nameservers do not agree on its DNSKEY RRset")
+			return nil, 0, errors.New("the child's nameservers do not agree on its DNSKEY RRset")
 		}
 		if keys == nil || len(keys.RRs) == 0 {
-			return nil, false, fmt.Errorf("%s publishes no DNSKEY RRset", child)
+			return nil, 0, fmt.Errorf("%s publishes no DNSKEY RRset", child)
 		}
 		// Validation matters only where a DS already exists (see
 		// CheckDelegationCoherence); a child waiting for its first DS has no
 		// chain to validate through.
 		if len(currentDS) == 0 {
-			return keys.RRs, false, nil
+			return keys, 0, nil
 		}
 		state, err := scanner.validateChildData(ctx, keys)
-		return keys.RRs, err == nil && state == cache.ValidationStateSecure, nil
+		if err != nil {
+			// No verdict. The DS the parent holds still decides.
+			return keys, 0, nil
+		}
+		return keys, state, nil
 	}
 	if err := CheckDelegationCoherence(childZone, currentDS, actions, fetch); err != nil {
 		return refusef("%v", err)

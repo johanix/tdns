@@ -796,17 +796,17 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		} else {
 			maxiter--
 		}
-		bestmatch, authservers, forwarded, err := imr.serversForQuestion(qname, qtype)
+		bestmatch, authservers, serverless, err := imr.serversForQuestion(qname, qtype)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error finding the zone cut: %v", err)
 			return &resp, err
 		}
-		lgImr.Debug("ImrQuery: best zone match", "qname", qname, "bestmatch", bestmatch, "forwarded", forwarded)
+		lgImr.Debug("ImrQuery: best zone match", "qname", qname, "bestmatch", bestmatch, "serverless", serverless)
 		// ss := servers
 
 		switch {
-		case len(authservers) == 0 && !forwarded:
+		case len(authservers) == 0 && !serverless:
 			// Use helper function to resolve NS addresses
 			done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
 				rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(withOwnTraffic(ctx), qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
@@ -968,15 +968,21 @@ func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname 
 }
 
 // serversForQuestion is where imrQuery and ImrResponder send <qname, qtype>.
-// A forwarded question goes to its forward zone, named in zone, with no
-// servers: IterativeDNSQuery forwards it, and no zone cut is looked for. Any
-// other goes to the closest cached zone cut that holds it, with that zone's
-// servers, which may be none yet (resolveNSAddresses).
+// A question about a zone this server is authoritative for goes to that zone,
+// with no servers: IterativeDNSQuery answers it from the zone (#842). A
+// forwarded question goes to its forward zone, named in zone, with no servers
+// either: IterativeDNSQuery forwards it. serverless reports both, and for
+// neither is a zone cut looked for. Any other question goes to the closest
+// cached zone cut that holds it, with that zone's servers, which may be none
+// yet (resolveNSAddresses).
 //
 // The cut came first once. With no servers there, resolveNSAddresses needs the
 // cut's NS RRset, and for a forwarded root whose root NS had expired that was
 // `no nameservers for zone ""` before the forward was consulted (#722).
-func (imr *Imr) serversForQuestion(qname string, qtype uint16) (zone string, servers map[string]*cache.AuthServer, forwarded bool, err error) {
+func (imr *Imr) serversForQuestion(qname string, qtype uint16) (zone string, servers map[string]*cache.AuthServer, serverless bool, err error) {
+	if zd := imr.ownZoneForQuestion(qname, qtype); zd != nil {
+		return zd.ZoneName, nil, true, nil
+	}
 	if fz := imr.forwardZoneForQuestion(qname, qtype); fz != nil {
 		return fz.Zone, nil, true, nil
 	}
@@ -1227,8 +1233,9 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			// For, not the bare name: a DS is PARENT-side data, and asking the
 			// qname's own servers for it got REFUSED from a child that is not
 			// also the parent, and a SERVFAIL for the client (#150). A
-			// forwarded question has no servers here, and needs none.
-			bestmatch, authservers, forwarded, err := imr.serversForQuestion(qname, qtype)
+			// forwarded question has no servers here, and needs none; nor
+			// does one this server answers from its own zone.
+			bestmatch, authservers, serverless, err := imr.serversForQuestion(qname, qtype)
 			if err != nil {
 				// resp.Error = true
 				// resp.ErrorMsg = fmt.Sprintf("Error from FindClosestKnownZone: %v", err)
@@ -1236,10 +1243,10 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				w.WriteMsg(m)
 				return
 			}
-			lgImr.Debug("ImrResponder: best zone match", "qname", qname, "bestmatch", bestmatch, "forwarded", forwarded)
+			lgImr.Debug("ImrResponder: best zone match", "qname", qname, "bestmatch", bestmatch, "serverless", serverless)
 
 			switch {
-			case len(authservers) == 0 && !forwarded:
+			case len(authservers) == 0 && !serverless:
 				// Use helper function to resolve NS addresses
 				// Note: The callback is called after processing each A/AAAA response.
 				// We try the query for each address we discover, similar to the original code.
@@ -2045,18 +2052,25 @@ func (imr *Imr) addDirectDNSKEYTrustAnchors(dnskeysByName map[string][]*dns.DNSK
 			})
 			lgImr.Info("added DNSKEY trust anchor", "zone", name, "keyid", dk.KeyTag(), "expires", exp)
 		}
-		// Add zone to ZoneMap as secure when DNSKEY trust anchor is added
-		z, exists := imr.Cache.ZoneMap.Get(name)
-		if !exists {
-			z = &cache.Zone{
-				ZoneName: name,
-				State:    cache.ValidationStateSecure,
-			}
-		}
-		z.SetState(cache.ValidationStateSecure)
-		imr.Cache.ZoneMap.Set(name, z)
-		lgImr.Debug("zone added to ZoneMap as secure via DNSKEY trust anchor", "zone", name)
+		imr.markAnchorZoneSecure(name, "DNSKEY")
 	}
+}
+
+// markAnchorZoneSecure records a trust anchor's zone as vouched for
+// (RRsetCacheT.AddTrustAnchorZone) and enters it in the ZoneMap as Secure.
+// The anchor says the zone is signed: data in it that does not validate is
+// Bogus, whether or not the zone's DNSKEY RRset has been fetched yet. Without
+// the entry, data the validator found no Secure key for was served as
+// unvalidated.
+func (imr *Imr) markAnchorZoneSecure(name, kind string) {
+	imr.Cache.AddTrustAnchorZone(name)
+	z, exists := imr.Cache.ZoneMap.Get(name)
+	if !exists {
+		z = &cache.Zone{ZoneName: name}
+	}
+	z.SetState(cache.ValidationStateSecure)
+	imr.Cache.ZoneMap.Set(name, z)
+	lgImr.Debug("zone added to ZoneMap as secure via trust anchor", "zone", name, "anchor", kind)
 }
 
 // seedDSRRsetFromTrustAnchors seeds the DS RRset from trust anchors into the cache.
@@ -2089,6 +2103,8 @@ func (imr *Imr) seedDSRRsetFromTrustAnchors(anchorName string, dslist []*dns.DS)
 		Expiration: time.Now().Add(time.Duration(minTTL) * time.Second),
 	})
 	lgImr.Debug("seeded validated DS RRset from trust anchors", "zone", anchorName, "count", len(rrds), "ttl", minTTL)
+	imr.Cache.AddTrustAnchorDS(anchorName, dslist)
+	imr.markAnchorZoneSecure(anchorName, "DS")
 }
 
 // matchDSTrustAnchorsToDNSKEYs matches DS trust anchors to DNSKEYs in the fetched RRset.
@@ -2347,11 +2363,13 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 
 	// Fetch the DNSKEY RRset for the anchor. A forwarded anchor zone needs no
 	// servers: IterativeDNSQuery forwards the query. Without the check, a
-	// forwarded root whose root server map was gone failed here (#722).
-	// Otherwise use the current known servers.
+	// forwarded root whose root server map was gone failed here (#722). Nor
+	// does an anchor zone this server is authoritative for, which
+	// IterativeDNSQuery answers from the zone (#842). Otherwise use the
+	// current known servers.
 	var serverMap map[string]*cache.AuthServer
 	var serversZone string // the zone serverMap serves
-	if imr.forwardZoneForQuestion(anchorName, dns.TypeDNSKEY) == nil {
+	if imr.ownZoneForQuestion(anchorName, dns.TypeDNSKEY) == nil && imr.forwardZoneForQuestion(anchorName, dns.TypeDNSKEY) == nil {
 		var ok bool
 		serversZone = anchorName
 		serverMap, ok = imr.Cache.ServerMapCopy(anchorName)
@@ -2459,14 +2477,28 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 	}
 	lgImr.Info("processing trust anchor zones", "count", len(anchorNames), "names", anchorNames)
 
-	// Process each trust anchor zone
+	// Process each trust anchor zone. One that fails does not stop the others:
+	// every anchor zone is Secure from the moment it was loaded, and one whose
+	// DNSKEY RRset was not fetched here has it fetched on demand.
+	var errs []error
 	for _, anchorName := range anchorNames {
+		// An anchor zone this server hosts is its own trust point once it
+		// answers (holdOwnZoneKeys). The resolver starts before the zones
+		// load, and fetching the keys of one that has not loaded yet asked
+		// the forward about the server's own zone (#842). The anchor itself
+		// is in place already, for any question that comes first.
+		if imr.ownZonePending(conf, anchorName) {
+			lgImr.Info("trust anchor zone is hosted here and not loaded yet: its keys will come from the zone", "zone", anchorName)
+			if dslist := dsByName[anchorName]; len(dslist) > 0 {
+				imr.seedDSRRsetFromTrustAnchors(anchorName, dslist)
+			}
+			continue
+		}
 		if err := imr.processTrustAnchorZone(ctx, anchorName, dsByName, dnskeysByName); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("trust anchor %s: %w", anchorName, err))
 		}
 	}
-
-	return nil
+	return errors.Join(errs...)
 }
 
 func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {

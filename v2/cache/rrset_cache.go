@@ -105,6 +105,8 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 		Servers:              core.NewNameMap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
 		ServerMap:            core.NewNameMap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
 		stubZones:            core.NewNameMap[struct{}](),               // the zones AddStub stored a server map for
+		anchorZones:          core.NewNameMap[struct{}](),               // the zones a configured trust anchor vouches for
+		anchorDS:             core.NewNameMap[[]*dns.DS](),              // the DS records of the DS trust anchors
 		AuthServerMap:        core.NewNameMap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 		ZoneMap:              core.NewNameMap[*Zone](),                  // zone -> *Zone
 		ServerTLSA:           core.NewNameMap[*ServerTLSARecords](),     // nsname -> validated TLSA cache
@@ -454,10 +456,17 @@ func (rrcache *RRsetCacheT) forgetZoneStates(domain string) {
 	}
 }
 
-// trustAnchorZones returns the canonical names of the zones with a trust anchor
-// in the DNSKEY cache.
+// trustAnchorZones returns the canonical names of the zones a configured trust
+// anchor vouches for: those recorded by AddTrustAnchorZone, and those with a
+// trust anchor key in the DNSKEY cache. A DS anchor has no such key until its
+// zone's DNSKEY RRset has matched it, and a flush dropped its zone's state.
 func (rrcache *RRsetCacheT) trustAnchorZones() map[string]struct{} {
 	zones := map[string]struct{}{}
+	if rrcache.anchorZones != nil {
+		for _, zone := range rrcache.anchorZones.Keys() {
+			zones[core.CanonicalizeName(zone)] = struct{}{}
+		}
+	}
 	if rrcache.DnskeyCache == nil {
 		return zones
 	}
@@ -1224,16 +1233,21 @@ func (rrcache *RRsetCacheT) FindClosestKnownZoneFor(qname string, qtype uint16) 
 }
 
 // ServersFor returns the servers that the resolver's own fetch of <qname,
-// qtype> is sent to, and whether there is anything to send it to. A forwarded
-// question is sent without servers, and no zone cut is looked for: the fetcher
-// forwards it (Forwarded). Any other goes to the closest cached zone that holds
-// it (FindClosestKnownZoneFor), or to the root's servers when that zone has
-// none.
+// qtype> is sent to, and whether there is anything to send it to. A question
+// the server answers from its own zone is sent without servers, and so is a
+// forwarded one, and for neither is a zone cut looked for: the fetcher answers
+// the first from the zone (AnsweredLocally) and forwards the second
+// (Forwarded). Any other goes to the closest cached zone that holds it
+// (FindClosestKnownZoneFor), or to the root's servers when that zone has none.
 //
 // The fetches used to look for the cut first and give up without servers,
 // which for a forwarded root is whenever the root NS it holds has expired: the
-// root server map goes with it (#722).
+// root server map goes with it (#722). A parent's own DS for a child, which it
+// needs to validate the child's keys, was given up on the same way (#842).
 func (rrcache *RRsetCacheT) ServersFor(qname string, qtype uint16) (map[string]*AuthServer, bool) {
+	if rrcache.AnsweredLocally != nil && rrcache.AnsweredLocally(qname, qtype) {
+		return nil, true
+	}
 	if rrcache.Forwarded != nil && rrcache.Forwarded(qname, qtype) {
 		return nil, true
 	}

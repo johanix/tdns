@@ -91,7 +91,16 @@ type RRsetCacheT struct {
 	// zone here in the same step as it stores the map, and RemoveStub forgets
 	// both, holding serverMapMu. The flushes check and delete under it too, so
 	// none of them can delete a stub stored after its check.
-	stubZones     *core.NameMap[struct{}]
+	stubZones *core.NameMap[struct{}]
+	// anchorZones names the zones a configured trust anchor vouches for, DNSKEY
+	// or DS (AddTrustAnchorZone). A DS anchor puts no key in the DnskeyCache
+	// until its zone's DNSKEY RRset has been fetched and has matched it, so the
+	// cache alone did not show it.
+	anchorZones *core.NameMap[struct{}]
+	// anchorDS holds the DS records of each DS trust anchor (AddTrustAnchorDS).
+	// The DS RRset seeded in the cache from them expires and is flushed like
+	// any other; the anchor does neither (trustAnchorDSRRset).
+	anchorDS      *core.NameMap[[]*dns.DS]
 	AuthServerMap *core.NameMap[*AuthServer]        // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 	ZoneMap       *core.NameMap[*Zone]              // map[zone]*Zone
 	ServerTLSA    *core.NameMap[*ServerTLSARecords] // nsname -> validated TLSA cache, decoupled from AuthServer instances
@@ -109,6 +118,12 @@ type RRsetCacheT struct {
 	// fetcher without any, and the fetcher forwards it (ServersFor). Nil only
 	// in a cache that no resolver is attached to, which forwards nothing.
 	Forwarded func(name string, qtype uint16) bool
+	// AnsweredLocally reports whether the question <name, qtype> is answered
+	// in process, from a zone the server this resolver runs in is
+	// authoritative for. Like a forwarded question it needs no servers from a
+	// zone cut (ServersFor). Nil only in a cache that no resolver is attached
+	// to, which answers nothing locally.
+	AnsweredLocally func(name string, qtype uint16) bool
 	//Options                map[ImrOption]string
 	Primed               bool
 	Logger               *log.Logger
