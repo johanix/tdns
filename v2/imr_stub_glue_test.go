@@ -159,3 +159,36 @@ func TestReferralToAStubZoneUsesTheConfiguredServers(t *testing.T) {
 		t.Errorf("the referral's %s was added to the lookup", sgOOBNS)
 	}
 }
+
+// With the loopback rule on (#839), a stub on 127.0.0.1 is queried because its
+// address is configured on the stub's own server. A referral into the stub
+// zone used to swap that server for the shared one of the same name, which has
+// no configured addresses, and the stub was refused from then on. The stub
+// stays queryable: a later client query for another name in the zone is
+// answered by it.
+func TestReferralIntoALoopbackStubLeavesItQueryable(t *testing.T) {
+	imr := sgImr(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Authoritative = true
+		if q := r.Question[0]; q.Qtype == dns.TypeA && dns.IsSubDomain(sgZone, dns.CanonicalName(q.Name)) {
+			m.Answer = append(m.Answer, mustRR(t, dns.CanonicalName(q.Name)+" 300 IN A "+sgAnswer))
+		} else {
+			m.Ns = append(m.Ns, mustRR(t, sgZone+" 300 IN SOA "+sgNS+" hostmaster."+sgZone+" 1 7200 1800 604800 300"))
+		}
+		_ = w.WriteMsg(m)
+	})
+	delete(imr.Options, ImrOptAllowLoopbackNameservers)
+	configured := configuredStubServer(t, imr)
+
+	if _, rcode, _, _, err := imr.handleReferral(context.Background(), sgWWW, dns.TypeA, sgReferral(t),
+		false, map[string]bool{}, core.TransportDo53, edns0.PrivacyNone); err != nil || rcode != dns.RcodeSuccess {
+		t.Fatalf("the referral: rcode %s, err %v; want the stub's answer", dns.RcodeToString[rcode], err)
+	}
+	got := askReferralImr(t, imr, "mail."+sgZone)
+	if got.Rcode != dns.RcodeSuccess || len(got.Answer) != 1 {
+		t.Fatalf("after the referral: got %s with %d answers, want the stub's answer:\n%s",
+			dns.RcodeToString[got.Rcode], len(got.Answer), got)
+	}
+	stubUnchanged(t, imr, configured)
+}
