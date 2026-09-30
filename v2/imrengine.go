@@ -2048,18 +2048,25 @@ func (imr *Imr) addDirectDNSKEYTrustAnchors(dnskeysByName map[string][]*dns.DNSK
 			})
 			lgImr.Info("added DNSKEY trust anchor", "zone", name, "keyid", dk.KeyTag(), "expires", exp)
 		}
-		// Add zone to ZoneMap as secure when DNSKEY trust anchor is added
-		z, exists := imr.Cache.ZoneMap.Get(name)
-		if !exists {
-			z = &cache.Zone{
-				ZoneName: name,
-				State:    cache.ValidationStateSecure,
-			}
-		}
-		z.SetState(cache.ValidationStateSecure)
-		imr.Cache.ZoneMap.Set(name, z)
-		lgImr.Debug("zone added to ZoneMap as secure via DNSKEY trust anchor", "zone", name)
+		imr.markAnchorZoneSecure(name, "DNSKEY")
 	}
+}
+
+// markAnchorZoneSecure records a trust anchor's zone as vouched for
+// (RRsetCacheT.AddTrustAnchorZone) and enters it in the ZoneMap as Secure.
+// The anchor says the zone is signed: data in it that does not validate is
+// Bogus, whether or not the zone's DNSKEY RRset has been fetched yet. Without
+// the entry, data the validator found no Secure key for was served as
+// unvalidated.
+func (imr *Imr) markAnchorZoneSecure(name, kind string) {
+	imr.Cache.AddTrustAnchorZone(name)
+	z, exists := imr.Cache.ZoneMap.Get(name)
+	if !exists {
+		z = &cache.Zone{ZoneName: name}
+	}
+	z.SetState(cache.ValidationStateSecure)
+	imr.Cache.ZoneMap.Set(name, z)
+	lgImr.Debug("zone added to ZoneMap as secure via trust anchor", "zone", name, "anchor", kind)
 }
 
 // seedDSRRsetFromTrustAnchors seeds the DS RRset from trust anchors into the cache.
@@ -2092,6 +2099,8 @@ func (imr *Imr) seedDSRRsetFromTrustAnchors(anchorName string, dslist []*dns.DS)
 		Expiration: time.Now().Add(time.Duration(minTTL) * time.Second),
 	})
 	lgImr.Debug("seeded validated DS RRset from trust anchors", "zone", anchorName, "count", len(rrds), "ttl", minTTL)
+	imr.Cache.AddTrustAnchorDS(anchorName, dslist)
+	imr.markAnchorZoneSecure(anchorName, "DS")
 }
 
 // matchDSTrustAnchorsToDNSKEYs matches DS trust anchors to DNSKEYs in the fetched RRset.
@@ -2464,7 +2473,10 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 	}
 	lgImr.Info("processing trust anchor zones", "count", len(anchorNames), "names", anchorNames)
 
-	// Process each trust anchor zone
+	// Process each trust anchor zone. One that fails does not stop the others:
+	// every anchor zone is Secure from the moment it was loaded, and one whose
+	// DNSKEY RRset was not fetched here has it fetched on demand.
+	var errs []error
 	for _, anchorName := range anchorNames {
 		// An anchor zone this server hosts is its own trust point once it
 		// answers (holdOwnZoneKeys). The resolver starts before the zones
@@ -2479,11 +2491,10 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, conf *Config) err
 			continue
 		}
 		if err := imr.processTrustAnchorZone(ctx, anchorName, dsByName, dnskeysByName); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("trust anchor %s: %w", anchorName, err))
 		}
 	}
-
-	return nil
+	return errors.Join(errs...)
 }
 
 func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.ResponseWriter, r *dns.Msg) {

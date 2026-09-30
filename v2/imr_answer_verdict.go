@@ -159,9 +159,18 @@ func (imr *Imr) serveCachedPositive(ctx context.Context, w dns.ResponseWriter, r
 }
 
 // hasTrustAnchors reports whether this resolver holds any trust anchor, i.e.
-// whether a signed answer could ever be Secure here.
+// whether a signed answer could ever be Secure here. A configured anchor counts
+// from the moment it is loaded: a DS anchor has no key in the DNSKEY cache
+// until its zone's DNSKEY RRset has been fetched and matched it, and until then
+// the resolver used to serve what it could not validate as if it had no anchor.
 func (imr *Imr) hasTrustAnchors() bool {
-	if imr == nil || imr.Cache == nil || imr.Cache.DnskeyCache == nil {
+	if imr == nil || imr.Cache == nil {
+		return false
+	}
+	if imr.Cache.HasTrustAnchors() {
+		return true
+	}
+	if imr.Cache.DnskeyCache == nil {
 		return false
 	}
 	for _, v := range imr.Cache.DnskeyCache.Map.Items() {
