@@ -287,6 +287,11 @@ func TestTrustAnchorDNSKEYIsFetchedThroughTheForward(t *testing.T) {
 // nothing is.
 func TestCacheForwardedHookFollowsTheZoneTable(t *testing.T) {
 	imr := newForwardTestImr(t, rootForward("192.0.2.53", 53))
+	// A stub takes its names from the forward only with its servers in the
+	// cache (stubServersCached), as start-up and a reload put them there.
+	if err := imr.Cache.AddStub("stub.example.", []cache.AuthServer{{Name: "ns.stub.example.", Addrs: []string{"192.0.2.54"}}}); err != nil {
+		t.Fatalf("AddStub: %v", err)
+	}
 	imr.setZoneTable(imr.ForwardZones(), []string{"stub.example."}, nil)
 	for _, c := range []struct {
 		qname string

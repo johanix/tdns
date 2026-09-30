@@ -236,7 +236,8 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 	// servers have already been dropped. Dropping the ServerMap entry is not
 	// destructive: it is cache, and ordinary iteration re-learns the
 	// delegation on the next query — which is exactly what should happen once
-	// the zone is no longer stubbed.
+	// the zone is no longer stubbed. RemoveStub also tells the cache the zone
+	// is no stub any more, so a flush may drop what iteration learns there.
 	for zone := range old.stubFP {
 		if _, kept := appliedFP[zone]; kept {
 			continue
@@ -249,7 +250,7 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 			lgImr.Warn("stub zone for the root removed from config; keeping its server map (re-priming needs a restart)")
 			continue
 		}
-		imr.Cache.ServerMap.Remove(zone)
+		imr.Cache.RemoveStub(zone)
 	}
 
 	sort.Strings(res.StubsRemoved)

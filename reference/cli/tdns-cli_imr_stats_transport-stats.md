@@ -1,15 +1,15 @@
-## tdns-cli imr stats auth-servers
+## tdns-cli imr stats transport-stats
 
-Show per-transport query counters and signal for auth servers
+Show per-server transport-usage stats for a running tdns-imr
 
 ```
-tdns-cli imr stats auth-servers [zone] [flags]
+tdns-cli imr stats transport-stats [zone] [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for auth-servers
+  -h, --help   help for transport-stats
 ```
 
 ### Options inherited from parent commands
@@ -20,10 +20,12 @@ tdns-cli imr stats auth-servers [zone] [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
 ### SEE ALSO
 
 * [tdns-cli imr stats](tdns-cli_imr_stats.md)	 - Show IMR statistics
+* [tdns-cli imr stats transport-stats suffix](tdns-cli_imr_stats_transport-stats_suffix.md)	 - Show transport-usage stats for zones whose name ends in suffix
 

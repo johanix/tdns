@@ -59,11 +59,12 @@ type AuthServer struct {
 	ConnMode        ConnMode `yaml:"connmode" mapstructure:"connmode"`
 	// Stats (guarded by mu)
 	mu                sync.Mutex
-	TransportCounters map[core.Transport]uint64 // queries ATTEMPTED per transport (transport chosen)
-	UsedCounters      map[core.Transport]uint64 // queries whose answer was CARRIED, by actual wire transport
-	FailedCounters    map[core.Transport]uint64 // attempts that ERRORED, by attempted transport
-	TruncatedCount    uint64                    // Do53/UDP responses TC=1 truncated and retried over TCP
-	Src               string                    // "answer", "glue", "hint", "priming", "stub", ...
+	TransportCounters map[core.Transport]uint64    // queries ATTEMPTED per transport (transport chosen)
+	UsedCounters      map[core.Transport]uint64    // queries whose answer was CARRIED, by actual wire transport
+	LastUsed          map[core.Transport]time.Time // when an answer was last CARRIED, by actual wire transport
+	FailedCounters    map[core.Transport]uint64    // attempts that ERRORED, by actual wire transport (see tryServer)
+	TruncatedCount    uint64                       // Do53/UDP responses TC=1 truncated and retried over TCP
+	Src               string                       // "answer", "glue", "hint", "priming", "stub", ...
 	Expire            time.Time
 	Debug             bool // If true, store error messages in AddressBackoff.LastError
 	// Backoff tracking (guarded by mu). Keyed by (address, transport): a
@@ -504,16 +505,20 @@ func (as *AuthServer) IncrementUsedCounter(t core.Transport) {
 	if as == nil {
 		return
 	}
+	now := time.Now()
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.UsedCounters == nil {
 		as.UsedCounters = make(map[core.Transport]uint64)
+		as.LastUsed = make(map[core.Transport]time.Time)
 	}
 	as.UsedCounters[t]++
+	as.LastUsed[t] = now
 }
 
-// IncrementFailedCounter records a failed attempt over transport t (the
-// transport we chose to try; e.g. an unreachable DoQ the server advertised).
+// IncrementFailedCounter records a failed attempt over transport t (e.g. an
+// unreachable DoQ the server advertised). tryServer passes the actual wire
+// transport, so a TC=1-then-TCP failure counts against Do53TCP.
 func (as *AuthServer) IncrementFailedCounter(t core.Transport) {
 	if as == nil {
 		return
@@ -540,11 +545,13 @@ func (as *AuthServer) IncrementTruncated() {
 // TransportStats is a consistent point-in-time snapshot of a server's
 // per-transport usage counters plus its truncation count. Attempted = queries
 // initiated (by the transport chosen); Used = queries whose answer was carried
-// (by the actual wire transport); Failed = attempts that errored (by the chosen
-// transport); Truncated = Do53/UDP responses TC=1 truncated and retried over TCP.
+// (by the actual wire transport), and LastUsed when each was last; Failed =
+// attempts that errored (by the actual wire transport); Truncated = Do53/UDP
+// responses TC=1 truncated and retried over TCP.
 type TransportStats struct {
 	Attempted map[core.Transport]uint64
 	Used      map[core.Transport]uint64
+	LastUsed  map[core.Transport]time.Time
 	Failed    map[core.Transport]uint64
 	Truncated uint64
 }
@@ -558,21 +565,46 @@ func (as *AuthServer) SnapshotTransportStats() TransportStats {
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	cp := func(m map[core.Transport]uint64) map[core.Transport]uint64 {
-		if len(m) == 0 {
-			return nil
-		}
-		out := make(map[core.Transport]uint64, len(m))
-		for k, v := range m {
-			out[k] = v
-		}
-		return out
-	}
-	ts.Attempted = cp(as.TransportCounters)
-	ts.Used = cp(as.UsedCounters)
-	ts.Failed = cp(as.FailedCounters)
+	ts.Attempted = copyMap(as.TransportCounters)
+	ts.Used = copyMap(as.UsedCounters)
+	ts.LastUsed = copyMap(as.LastUsed)
+	ts.Failed = copyMap(as.FailedCounters)
 	ts.Truncated = as.TruncatedCount
 	return ts
+}
+
+// TakeTransportStats returns the same snapshot as SnapshotTransportStats and
+// clears the counters in the same step, so that no query counted between the
+// two is lost: it lands either in this snapshot or in the next period.
+func (as *AuthServer) TakeTransportStats() TransportStats {
+	var ts TransportStats
+	if as == nil {
+		return ts
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	// The maps are handed over, not copied: the counters start again from nil.
+	ts = TransportStats{
+		Attempted: as.TransportCounters,
+		Used:      as.UsedCounters,
+		LastUsed:  as.LastUsed,
+		Failed:    as.FailedCounters,
+		Truncated: as.TruncatedCount,
+	}
+	as.TransportCounters, as.UsedCounters, as.LastUsed, as.FailedCounters = nil, nil, nil, nil
+	as.TruncatedCount = 0
+	return ts
+}
+
+func copyMap[V any](m map[core.Transport]V) map[core.Transport]V {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[core.Transport]V, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // SnapshotTransportCounters returns a thread-safe copy of the transport counters.
