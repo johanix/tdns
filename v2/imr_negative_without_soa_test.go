@@ -5,12 +5,14 @@
 package tdns
 
 import (
+	"context"
 	"net"
 	"strconv"
 	"testing"
 
 	"github.com/johanix/tdns/v2/cache"
 	"github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -205,4 +207,40 @@ func TestAuthoritativeNSRRsetOutsideTheZoneIsNotNoData(t *testing.T) {
 		t.Errorf("AA upward referral: got %s, want SERVFAIL from the only, lame, server:\n%s",
 			dns.RcodeToString[got.Rcode], got)
 	}
+}
+
+// The NODATA rule compares the NS owner with the zone of the servers asked,
+// not the closest zone the cache knows. Here the cache knows only the parent,
+// the child's servers come from the caller (as for a trust anchor), and the
+// child's server answers AA with the parent's NS RRset: an upward referral
+// from a lame server, not the parent's NODATA.
+func TestUpwardNSRRsetIsNotNoDataWhenOnlyTheParentIsKnown(t *testing.T) {
+	const parent, kid, www = "up837.test.", "kid.up837.test.", "www.kid.up837.test."
+	parentNS := mustRR(t, parent+" 300 IN NS ns."+parent)
+	port := startRefDouble(t, net.IPv4(127, 0, 0, 1), 0, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Authoritative = true
+		m.Ns = append(m.Ns, parentNS)
+		_ = w.WriteMsg(m)
+	})
+	imr := verdictImr(t, false)
+	p := strconv.Itoa(port)
+	imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, p, nil)
+	imr.Cache.DNSClient[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, p, nil)
+	imr.Cache.ZoneMap.Set(".", &cache.Zone{ZoneName: ".", State: cache.ValidationStateIndeterminate})
+	imr.Cache.ServerMap.Set(parent, map[string]*cache.AuthServer{})
+	if closest, _, _ := imr.Cache.FindClosestKnownZoneFor(www, dns.TypeA); closest != parent {
+		t.Fatalf("precondition: the closest known zone for %s is %q, want %s", www, closest, parent)
+	}
+	srv := cache.NewAuthServer("ns." + kid)
+	srv.SetAddrs([]string{"127.0.0.1"})
+
+	_, rcode, cctx, _, err := imr.IterativeDNSQueryInZone(context.Background(), www, dns.TypeA,
+		map[string]*cache.AuthServer{cache.ServerKey(srv.Name): srv}, kid, false, edns0.PrivacyNone)
+	if err == nil {
+		t.Fatalf("got %s (%s) and no error, want the lookup to fail: the only server is lame",
+			dns.RcodeToString[rcode], cache.CacheContextToString[cctx])
+	}
+	notCached(t, imr, www, dns.TypeA)
 }
