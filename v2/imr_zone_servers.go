@@ -67,7 +67,7 @@ func (imr *Imr) storeZoneServers(zone string, servers map[string]*cache.AuthServ
 // adds the addresses to srv.
 func (imr *Imr) lookupServerAddrs(ctx context.Context, srv *cache.AuthServer, nsname string) {
 	var wg sync.WaitGroup
-	for _, atype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+	for _, atype := range imr.Cache.AddressTypes() {
 		wg.Add(1)
 		go func(ctx context.Context, atype uint16) {
 			defer wg.Done()

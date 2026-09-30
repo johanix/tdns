@@ -218,6 +218,17 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	rrcache := cache.NewRRsetCache(log.Default(), conf.Imr.Verbose, conf.Imr.Debug)
 	rrcache.Quiet = quiet
 
+	// The address families in use, before anything adds a server address:
+	// priming seeds the root hints'.
+	v4, v6, err := ParseAddressFamilies(conf.Imr.OutboundAddressFamilies)
+	if err != nil {
+		return fmt.Errorf("imrengine.outbound-address-families: %w", err)
+	}
+	rrcache.SetAddressFamilies(v4, v6)
+	if !v4 || !v6 {
+		lgImr.Info("address families limited by imrengine.outbound-address-families", "ipv4", v4, "ipv6", v6)
+	}
+
 	conf.Internal.RRsetCache = rrcache
 	requireDnssec := true // default: enforce DNSSEC validation
 	if conf.Imr.RequireDnssecValidation != nil {

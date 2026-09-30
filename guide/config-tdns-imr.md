@@ -210,6 +210,37 @@ imrengine:
       file:     /var/log/tdns/imr-debug.log   # this is the default when enabled
 ```
 
+## Outbound address families
+
+`outbound-address-families` says which IP versions the resolver sends its
+queries to authoritative servers over: `ipv4`, `ipv6`, or both, which is the
+default. What the resolver listens on is `listeners.addresses`, which binds
+exactly the addresses listed.
+
+```yaml
+imrengine:
+   outbound-address-families: [ ipv4 ]   # or [ ipv6 ], or [ ipv4, ipv6 ]
+```
+
+- **What leaving a family out does.** The resolver neither looks up nor uses
+  addresses of that family. Glue and root hints of that family are dropped as
+  they are read, and a nameserver's addresses are looked up only for the
+  family in use. A nameserver whose glue is all of the family left out is
+  looked up like one that came without glue.
+- **When to use it.** On a host where one family does not work. A host can
+  have an IPv6 address and a default route that lead nowhere, while IPv4
+  works. With both families in use, such a resolver keeps sending AAAA
+  lookups and IPv6 queries that can only fail, until the `address-family`
+  tuning group below marks the family as suspect.
+- **One family as a measurement.** With `[ ipv6 ]` the resolver reaches only
+  what IPv6 alone reaches, which shows how much is lost without IPv4.
+- **What it does not touch.** The listeners, as above. A forward zone's
+  upstreams are used as configured. A stub zone's servers are not: an
+  address of a family left out is dropped, with a log line.
+
+An unknown value is an error: the resolver does not start, and
+`config check` reports it. Changing the list takes a restart.
+
 ## Tuning
 
 Every key under `imrengine.tuning:` is optional. The values below **are** the

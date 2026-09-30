@@ -398,12 +398,16 @@ func ValidateTransferSrc(where string, srcs []string) error {
 // tdns-agent) is internal by design — its only listener is the loopback
 // listeners.imr-debug-address window.
 type ImrEngineConf struct {
-	Active      *bool                `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
-	RootHints   string               `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
-	Stubs       []ImrStubConf        `yaml:"stubs"`
-	Forward     []ImrForwardConf     `yaml:"forward" mapstructure:"forward"`
-	OptionsStrs []string             `yaml:"options" mapstructure:"options"`
-	Options     map[ImrOption]string `yaml:"-" mapstructure:"-"`
+	Active    *bool  `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
+	RootHints string `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
+	// OutboundAddressFamilies is which address families the resolver sends its
+	// queries to authoritative servers over: ipv4, ipv6, or both (the default).
+	// What it listens on is listeners.addresses. See ParseAddressFamilies.
+	OutboundAddressFamilies []string             `yaml:"outbound-address-families" mapstructure:"outbound-address-families"`
+	Stubs                   []ImrStubConf        `yaml:"stubs"`
+	Forward                 []ImrForwardConf     `yaml:"forward" mapstructure:"forward"`
+	OptionsStrs             []string             `yaml:"options" mapstructure:"options"`
+	Options                 map[ImrOption]string `yaml:"-" mapstructure:"-"`
 	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
 	// full RR text (zonefile format). DS is preferred as it is more convenient.
 	// Both tags are load bearing, because Config is decoded by two different

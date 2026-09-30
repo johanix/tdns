@@ -221,6 +221,15 @@ func checkImrEngine(cfg *tdns.Config, rep *ccReport) {
 	if cfg.Imr.RootHints != "" {
 		checkFileExists(rep, g, "root-hints", cfg.Imr.RootHints)
 	}
+	switch v4, v6, err := tdns.ParseAddressFamilies(cfg.Imr.OutboundAddressFamilies); {
+	case err != nil:
+		rep.fail(g, "outbound-address-families", "imrengine.outbound-address-families: "+err.Error()+" — the resolver would not start",
+			"list ipv4, ipv6, or both, e.g. [ ipv4, ipv6 ]")
+	case !v6:
+		rep.pass(g, "outbound-address-families", "IPv4 only: IPv6 addresses of authoritative servers are neither looked up nor used")
+	case !v4:
+		rep.pass(g, "outbound-address-families", "IPv6 only: IPv4 addresses of authoritative servers are neither looked up nor used")
+	}
 	if cfg.Imr.Testing.SkipPriming() {
 		rep.warn(g, "testing",
 			"imrengine.testing.priming is false: the resolver seeds its cache from the root hints and never primes."+
