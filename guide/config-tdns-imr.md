@@ -272,7 +272,8 @@ cache, drops these verdicts at once.
 
 `imrengine.testing:` holds switches for black-box test harnesses, such as
 `tests/deckard/`. None of them is for production, and `config check` warns
-about any that is set.
+about any that is not at its production default. Leaving `priming` out, or
+setting it to `true`, is that default and draws no warning.
 
 ```yaml
 imrengine:
