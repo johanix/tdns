@@ -221,6 +221,12 @@ func checkImrEngine(cfg *tdns.Config, rep *ccReport) {
 	if cfg.Imr.RootHints != "" {
 		checkFileExists(rep, g, "root-hints", cfg.Imr.RootHints)
 	}
+	if cfg.Imr.Testing.SkipPriming() {
+		rep.warn(g, "testing",
+			"imrengine.testing.priming is false: the resolver seeds its cache from the root hints and never primes."+
+				" This is a test-harness switch, not for production",
+			"remove imrengine.testing from a production config")
+	}
 }
 
 // checkImrTrustAnchors flags the classic imr footgun: DNSSEC validation is on

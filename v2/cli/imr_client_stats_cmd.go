@@ -31,8 +31,9 @@ var (
 // since startup or the last reset. Like transport-stats it works in-process
 // (the tdns-imr REPL) and remotely (tdns-cli, over the /imr API).
 var imrStatsClientStatsCmd = &cobra.Command{
-	Use:   "client-stats",
-	Short: "Show which transports clients use to reach this resolver",
+	Use:     "client-transports",
+	Aliases: []string{"client-stats"},
+	Short:   "Show which transports clients use to reach this resolver",
 	Long: `Show, per client address, how many queries arrived over each transport
 (Do53 over UDP and TCP, DoT, DoQ, DoH) and when each was last used, since the
 resolver started or the counters were last reset.
@@ -154,10 +155,15 @@ func formatClientStats(rep tdns.ImrClientStatsReport, sortBy string) string {
 
 // lastSeen is when the client was last seen, and over which transport.
 func lastSeen(r tdns.ImrClientStatsRow) string {
+	return lastOver(r.LastSeen)
+}
+
+// lastOver is the latest of a per-transport set of times, and its transport.
+func lastOver(last map[string]time.Time) string {
 	var latest time.Time
 	var via string
 	for _, t := range tdns.ImrClientTransports {
-		if ts, ok := r.LastSeen[t]; ok && ts.After(latest) {
+		if ts, ok := last[t]; ok && ts.After(latest) {
 			latest, via = ts, t
 		}
 	}
