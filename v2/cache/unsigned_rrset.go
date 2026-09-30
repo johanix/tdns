@@ -232,6 +232,20 @@ func (rrcache *RRsetCacheT) hasTrustAnchor(zone string) bool {
 	return false
 }
 
+// UnderTrustAnchor reports whether a configured trust anchor vouches for zone
+// or for a zone above it: whether the chain of trust for data signed in zone
+// has an anchor to lead to at all.
+func (rrcache *RRsetCacheT) UnderTrustAnchor(zone string) bool {
+	for n := dns.Fqdn(zone); ; n = parentOf(n) {
+		if rrcache.hasTrustAnchor(n) {
+			return true
+		}
+		if n == "." {
+			return false
+		}
+	}
+}
+
 func (rrcache *RRsetCacheT) markZoneInsecure(name string) {
 	if rrcache.ZoneMap.SetIfAbsent(name, &Zone{ZoneName: name, State: ValidationStateInsecure}) {
 		return

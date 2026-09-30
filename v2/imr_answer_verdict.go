@@ -84,14 +84,16 @@ func negativeAD(c *cache.CachedRRset, r *dns.Msg, msgoptions *edns0.MsgOptions) 
 // rule for positive answers:
 //
 //   - Bogus: SERVFAIL, EDE 6.
-//   - Indeterminate, signed, on a resolver with trust anchors: SERVFAIL, EDE
-//     5. The chain could not be followed, which is not the same as the zone
-//     being unsigned.
+//   - Indeterminate, signed, from a zone at or below a trust anchor: SERVFAIL,
+//     EDE 5. The chain could not be followed, which is not the same as the
+//     zone being unsigned.
 //   - With CD the client validates for itself, and every denial is served.
 //
 // Everything else is served: Secure, Insecure (an unsigned zone, an insecure
 // delegation, an NSEC3 Opt-Out span or iteration count), an unsigned
-// Indeterminate one, and any denial on a resolver without trust anchors.
+// Indeterminate one, and a signed one from a zone no trust anchor is above --
+// outside an island of security, or on a resolver without trust anchors --
+// whose chain has nothing to lead to.
 //
 // A bogus denial used to be served, without AD. handleNegative refuses a
 // denial only when validation fails with an error, and a stripped denial from
@@ -106,10 +108,16 @@ func (imr *Imr) denialServfail(c *cache.CachedRRset, msgoptions *edns0.MsgOption
 	switch {
 	case c.State == cache.ValidationStateBogus:
 		return true, edns0.EDEDNSSECBogus
-	case c.State == cache.ValidationStateIndeterminate && denialSigned(c) && imr.hasTrustAnchors():
+	case c.State == cache.ValidationStateIndeterminate && denialSigned(c) && imr.denialUnderTrustAnchor(c):
 		return true, edns0.EDEDNSSECIndeterminate
 	}
 	return false, 0
+}
+
+// denialUnderTrustAnchor reports whether a trust anchor is at or above the
+// zone a cached denial comes from, its SOA's owner.
+func (imr *Imr) denialUnderTrustAnchor(c *cache.CachedRRset) bool {
+	return imr.Cache != nil && c.RRset != nil && imr.Cache.UnderTrustAnchor(c.RRset.Name)
 }
 
 // denialSigned reports whether a cached denial arrived with signatures: on

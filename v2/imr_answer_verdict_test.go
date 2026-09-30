@@ -280,10 +280,11 @@ func TestCachedDSAndIndirectAnswersFollowTheSameRule(t *testing.T) {
 // A denial gets the same response fresh and cached. Both used to set AD for a
 // secure proof whatever the client asked for, and the cached path dropped the
 // EDE the fresh one attaches. A bogus denial is SERVFAIL unless the client set
-// CD; both paths used to serve it. A signed denial held Indeterminate, on a
-// resolver with trust anchors, is SERVFAIL with EDE 5, as a positive answer
-// is; it used to be served, when every NSEC3 proof validated Indeterminate. An
-// unsigned one, or one on a resolver without trust anchors, is served.
+// CD; both paths used to serve it. A signed denial held Indeterminate, from a
+// zone at or below a trust anchor, is SERVFAIL with EDE 5, as a positive
+// answer is; it used to be served, when every NSEC3 proof validated
+// Indeterminate. An unsigned one, or one from a zone no anchor is above, is
+// served.
 func TestFreshAndCachedDenialsAgree(t *testing.T) {
 	const denied = "nx.verdict.example."
 	soa, err := dns.NewRR("verdict.example. 900 IN SOA ns1.verdict.example. hostmaster.verdict.example. 1 7200 1800 604800 900")
@@ -302,34 +303,40 @@ func TestFreshAndCachedDenialsAgree(t *testing.T) {
 		TypeCovered: dns.TypeSOA, Algorithm: dns.ED25519, Labels: 2, OrigTtl: 900, KeyTag: 4711, SignerName: "verdict.example.",
 		Inception: uint32(time.Now().Add(-time.Hour).Unix()), Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	verdicts := []struct {
-		name       string
-		state      cache.ValidationState
-		edeCode    uint16
-		q          verdictQuery
-		ad         bool
-		servfail   uint16 // the EDE of a SERVFAIL, 0 for an answer served
-		signed     bool
-		unanchored bool
+		name     string
+		state    cache.ValidationState
+		edeCode  uint16
+		q        verdictQuery
+		ad       bool
+		servfail uint16 // the EDE of a SERVFAIL, 0 for an answer served
+		signed   bool
+		anchor   string // the zone of the trust anchor; "." when empty, none when "-"
 	}{
-		{"secure, plain query", cache.ValidationStateSecure, 0, verdictQuery{}, false, 0, false, false},
-		{"secure, AD bit", cache.ValidationStateSecure, 0, verdictQuery{ad: true}, true, 0, false, false},
-		{"secure, DO", cache.ValidationStateSecure, 0, verdictQuery{do: true}, true, 0, false, false},
-		{"insecure, DO", cache.ValidationStateInsecure, 0, verdictQuery{do: true}, false, 0, false, false},
-		{"insecure, signed, DO", cache.ValidationStateInsecure, 0, verdictQuery{do: true}, false, 0, true, false},
-		{"indeterminate, unsigned, DO", cache.ValidationStateIndeterminate, 0, verdictQuery{do: true}, false, 0, false, false},
-		{"indeterminate, signed, DO", cache.ValidationStateIndeterminate, 0, verdictQuery{do: true}, false, edns0.EDEDNSSECIndeterminate, true, false},
-		{"indeterminate, signed, no DO", cache.ValidationStateIndeterminate, 0, verdictQuery{}, false, edns0.EDEDNSSECIndeterminate, true, false},
-		{"indeterminate, signed, CD", cache.ValidationStateIndeterminate, 0, verdictQuery{do: true, cd: true}, false, 0, true, false},
-		{"indeterminate, signed, no trust anchors", cache.ValidationStateIndeterminate, 0, verdictQuery{do: true}, false, 0, true, true},
-		{"DNSKEY missing, DO", cache.ValidationStateNone, 9, verdictQuery{do: true}, false, 0, true, false},
-		{"bogus, DO", cache.ValidationStateBogus, 0, verdictQuery{do: true}, false, edns0.EDEDNSSECBogus, false, false},
-		{"bogus, no DO", cache.ValidationStateBogus, 0, verdictQuery{}, false, edns0.EDEDNSSECBogus, false, false},
-		{"bogus, CD", cache.ValidationStateBogus, 0, verdictQuery{do: true, cd: true}, false, 0, false, false},
+		{"secure, plain query", cache.ValidationStateSecure, 0, verdictQuery{}, false, 0, false, ""},
+		{"secure, AD bit", cache.ValidationStateSecure, 0, verdictQuery{ad: true}, true, 0, false, ""},
+		{"secure, DO", cache.ValidationStateSecure, 0, verdictQuery{do: true}, true, 0, false, ""},
+		{"insecure, DO", cache.ValidationStateInsecure, 0, verdictQuery{do: true}, false, 0, false, ""},
+		{"insecure, signed, DO", cache.ValidationStateInsecure, 0, verdictQuery{do: true}, false, 0, true, ""},
+		{"indeterminate, unsigned, DO", cache.ValidationStateIndeterminate, 0, verdictQuery{do: true}, false, 0, false, ""},
+		{"indeterminate, signed, DO", cache.ValidationStateIndeterminate, 0, verdictQuery{do: true}, false, edns0.EDEDNSSECIndeterminate, true, ""},
+		{"indeterminate, signed, no DO", cache.ValidationStateIndeterminate, 0, verdictQuery{}, false, edns0.EDEDNSSECIndeterminate, true, ""},
+		{"indeterminate, signed, CD", cache.ValidationStateIndeterminate, 0, verdictQuery{do: true, cd: true}, false, 0, true, ""},
+		{"indeterminate, signed, no trust anchors", cache.ValidationStateIndeterminate, 0, verdictQuery{do: true}, false, 0, true, "-"},
+		{"indeterminate, signed, anchor at the zone", cache.ValidationStateIndeterminate, 0, verdictQuery{do: true}, false, edns0.EDEDNSSECIndeterminate, true, "verdict.example."},
+		{"indeterminate, signed, anchor on an island below", cache.ValidationStateIndeterminate, 0, verdictQuery{do: true}, false, 0, true, "island.verdict.example."},
+		{"DNSKEY missing, DO", cache.ValidationStateNone, 9, verdictQuery{do: true}, false, 0, true, ""},
+		{"bogus, DO", cache.ValidationStateBogus, 0, verdictQuery{do: true}, false, edns0.EDEDNSSECBogus, false, ""},
+		{"bogus, no DO", cache.ValidationStateBogus, 0, verdictQuery{}, false, edns0.EDEDNSSECBogus, false, ""},
+		{"bogus, CD", cache.ValidationStateBogus, 0, verdictQuery{do: true, cd: true}, false, 0, false, ""},
 	}
 	for _, k := range kinds {
 		for _, v := range verdicts {
 			t.Run(k.name+"/"+v.name, func(t *testing.T) {
-				imr := verdictImr(t, !v.unanchored)
+				imr := verdictImr(t, v.anchor == "")
+				if a := v.anchor; a != "" && a != "-" {
+					imr.Cache.DnskeyCache.Set(a, 1, &cache.CachedDnskeyRRset{Name: a, Keyid: 1, TrustAnchor: true,
+						State: cache.ValidationStateSecure, Expiration: time.Now().Add(time.Hour)})
+				}
 				entry := &cache.CachedRRset{
 					Name: denied, RRtype: dns.TypeA, Rcode: uint8(k.rcode),
 					RRset:   &core.RRset{Name: "verdict.example.", Class: dns.ClassINET, RRtype: dns.TypeSOA, RRs: []dns.RR{soa}},
