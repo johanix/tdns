@@ -141,8 +141,9 @@ func newOOBTestImr(t *testing.T, d *oobAuthDouble) *Imr {
 		t.Fatalf("AddStub(%s): %v", oobNSZone, err)
 	}
 	return &Imr{
-		Cache: c,
-		Quiet: true,
+		Cache:   c,
+		Quiet:   true,
+		Options: loopbackTestOptions(),
 		FamilyTracker: cache.NewFamilyTracker(
 			10*time.Minute, 10*time.Minute, 30*time.Second, 5),
 	}

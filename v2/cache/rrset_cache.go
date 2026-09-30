@@ -550,6 +550,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 		}
 		// Override defaults with config values
 		tmpauthserver.SetAddrs(server.Addrs)
+		tmpauthserver.SetConfiguredAddrs(server.Addrs)
 		tmpauthserver.SetAlpn(server.Alpn)
 		tmpauthserver.ForceSetSrc("stub")
 		tmpauthserver.PromoteConnMode(server.ConnMode)

@@ -757,10 +757,37 @@ type ServerAddrXportTuple struct {
 	Rank      int
 }
 
+// hostLocalAddr reports whether addr, a bare IP literal, reaches this host: a
+// loopback address (127.0.0.0/8, ::1), or an unspecified one (0.0.0.0, ::),
+// which the kernel also delivers locally.
+func hostLocalAddr(addr string) bool {
+	if i := strings.IndexByte(addr, '%'); i >= 0 {
+		addr = addr[:i] // an IPv6 zone
+	}
+	ip := net.ParseIP(addr)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
+}
+
+// mayQueryAddr reports whether a query may go to server at addr. An address on
+// this host is used only if the operator configured it for the server (a
+// stub's, RRsetCacheT.AddStub), or with the allow-loopback-nameservers option:
+// a referral, glue or an address lookup must not be able to point the resolver
+// at services on its own host (#831). The test is the address, not the server:
+// glue can add addresses to a stub's server too.
+func mayQueryAddr(server *cache.AuthServer, addr string, allowHostLocal bool) bool {
+	return allowHostLocal || !hostLocalAddr(addr) || server.IsConfiguredAddr(addr)
+}
+
+// allowHostLocalServers reports whether allow-loopback-nameservers is set.
+func (imr *Imr) allowHostLocalServers() bool {
+	return imr.Options[ImrOptAllowLoopbackNameservers] == "true"
+}
+
 // prioritizeServers returns a flat, prioritized list of
 // (server, addr, transport) tuples for the IMR to try in order.
 //
 // For each (server, addr):
+//   - Skip an address on this host, unless mayQueryAddr allows it.
 //   - Emit one tuple per available transport, filtered against the
 //     per-(addr, transport) backoff on both the server and the
 //     enclosing zone (lame-delegation tracking).
@@ -783,6 +810,7 @@ func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[stri
 		}
 	}
 
+	allowHostLocal := imr.allowHostLocalServers()
 	var tuples []ServerAddrXportTuple
 	var suspectTuples []ServerAddrXportTuple
 	for nsname, server := range serverMap {
@@ -811,6 +839,10 @@ func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[stri
 			continue
 		}
 		for _, addr := range addrs {
+			if !mayQueryAddr(server, addr, allowHostLocal) {
+				noteServerProblem(zoneName, nsname, "address "+addr+" is on this host (allow-loopback-nameservers is not set)")
+				continue
+			}
 			for rank, t := range transports {
 				if !server.IsAddrXportAvailable(addr, t) {
 					if Globals.Debug {
@@ -856,7 +888,7 @@ func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[stri
 	if len(tuples) == 0 && len(suspectTuples) == 0 {
 		lgDns.Warn("prioritizeServers: no usable (server, addr, transport) tuples; the query cannot be sent",
 			"qname", qname, "zone", zoneName, "servers", len(serverMap),
-			"privacy", privacy.String(), "why", explainNoTuples(serverMap, zone, imr.FamilyTracker, qname, privacy))
+			"privacy", privacy.String(), "why", explainNoTuples(serverMap, zone, imr.FamilyTracker, qname, privacy, allowHostLocal))
 	}
 
 	sortTuplesByRankThenRTT(tuples)
@@ -910,7 +942,7 @@ func sortTuplesByRankThenRTT(tuples []ServerAddrXportTuple) {
 // the map and named in the logs, but yields nothing -- which until now looked
 // identical to having no server at all.
 func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
-	ft *cache.FamilyTracker, qname string, privacy edns0.PrivacyLevel) string {
+	ft *cache.FamilyTracker, qname string, privacy edns0.PrivacyLevel, allowHostLocal bool) string {
 
 	if len(serverMap) == 0 {
 		return "no servers in the map for this zone"
@@ -935,9 +967,13 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 		// skip it for, so the counts add up. The family count used to be
 		// missing: "2 addr(s), 1 in server backoff" read as a contradiction when
 		// the other address was on a family the tracker held suspect (#703).
-		var serverBackoff, zoneBackoff, familySuspect int
+		var hostLocal, serverBackoff, zoneBackoff, familySuspect int
 		for _, addr := range addrs {
 			for _, t := range candidateTransports(server, qname, privacy) {
+				if !mayQueryAddr(server, addr, allowHostLocal) {
+					hostLocal++
+					continue
+				}
 				if !server.IsAddrXportAvailable(addr, t) {
 					serverBackoff++
 					continue
@@ -951,8 +987,8 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 				}
 			}
 		}
-		reasons = append(reasons, fmt.Sprintf("%s: %d addr(s), %d in server backoff, %d in zone backoff, %d on a suspect address family",
-			nsname, len(addrs), serverBackoff, zoneBackoff, familySuspect))
+		reasons = append(reasons, fmt.Sprintf("%s: %d addr(s), %d on this host, %d in server backoff, %d in zone backoff, %d on a suspect address family",
+			nsname, len(addrs), hostLocal, serverBackoff, zoneBackoff, familySuspect))
 	}
 	sort.Strings(reasons)
 	return strings.Join(reasons, "; ")
@@ -3248,7 +3284,7 @@ func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serve
 		return
 	}
 	// rrcache.Logger.Printf("*** revalidateReferralNS: existing context is %s, collecting server addresses for revalidation", CacheContextToString[existing.Context])
-	addrs := collectServerAddressesForRevalidation(serverMap)
+	addrs := collectServerAddressesForRevalidation(serverMap, imr.allowHostLocalServers())
 	if len(addrs) == 0 {
 		return
 	}
@@ -3296,7 +3332,9 @@ func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serve
 	imr.revalidateInBailiwickGlue(ctx, zonename, serverMap, true)
 }
 
-func collectServerAddressesForRevalidation(serverMap map[string]*cache.AuthServer) []string {
+// collectServerAddressesForRevalidation returns the host:port of each address
+// in serverMap that mayQueryAddr allows.
+func collectServerAddressesForRevalidation(serverMap map[string]*cache.AuthServer, allowHostLocal bool) []string {
 	if len(serverMap) == 0 {
 		return nil
 	}
@@ -3307,9 +3345,14 @@ func collectServerAddressesForRevalidation(serverMap map[string]*cache.AuthServe
 			if raw == "" {
 				continue
 			}
-			hostPort := raw
-			if _, _, err := net.SplitHostPort(raw); err != nil {
+			host, hostPort := raw, raw
+			if h, _, err := net.SplitHostPort(raw); err == nil {
+				host = h
+			} else {
 				hostPort = net.JoinHostPort(raw, "53")
+			}
+			if !mayQueryAddr(server, host, allowHostLocal) {
+				continue
 			}
 			if _, ok := seen[hostPort]; ok {
 				continue
