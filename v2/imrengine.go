@@ -2141,8 +2141,10 @@ func (imr *Imr) matchDSTrustAnchorsToDNSKEYs(anchorName string, dslist []*dns.DS
 		}
 		keyid := dk.KeyTag()
 		for _, ds := range dslist {
-			// match keytag first
-			if ds.KeyTag != keyid {
+			// RFC 4035 section 5.2: key tag and algorithm, then the digest.
+			// The digest covers the key's algorithm field but not the DS's,
+			// so a DS naming another algorithm would otherwise still match.
+			if ds.KeyTag != keyid || ds.Algorithm != dk.Algorithm {
 				continue
 			}
 			computed := dk.ToDS(ds.DigestType)
