@@ -78,10 +78,12 @@ type levelTotals struct {
 	total  map[string]uint64
 }
 
+// newLevelTotals is an empty set of TOTAL rows.
 func newLevelTotals() *levelTotals {
 	return &levelTotals{counts: map[string]map[string]uint64{}, total: map[string]uint64{}}
 }
 
+// add counts a row into the TOTAL row of its level.
 func (lt *levelTotals) add(r countRow) {
 	if r.level == "-" && r.total == 0 {
 		return // a row with nothing counted, split or not: no TOTAL row of its own

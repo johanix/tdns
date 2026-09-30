@@ -67,11 +67,9 @@ Examples:
 		}
 
 		if setReset {
-			// Reset to defaults - clear all weights
-			server.SetTransportWeights(nil) // Clear by setting to nil
-			server.SetReceivedSignal(nil)
-			server.SetTransports([]core.Transport{core.TransportDo53})
-			server.SetAlpn([]string{"do53"})
+			// Reset to defaults - clear all weights. One install, as signal
+			// discovery does it: a reader never sees half of the change.
+			server.SetTransportSignal([]core.Transport{core.TransportDo53}, []string{"do53"}, nil, nil)
 			fmt.Printf("Transport signal reset for server %s\n", setServerName)
 			fmt.Printf("  Transports: [do53:100]\n")
 			fmt.Printf("  Connection mode: %s\n", server.ConnectionMode().String())
@@ -122,11 +120,10 @@ Examples:
 			alpnOrder = append(alpnOrder, p.k)
 		}
 
-		// Apply to server (complete replacement, not merge)
-		server.SetTransports(transports)
-		server.SetAlpn(alpnOrder)
-		server.SetTransportWeights(weights) // Use SetTransportWeights to replace, not merge
-		server.SetReceivedSignal(receivedSignal("operator", setTransportSig))
+		// Apply to server (complete replacement, not merge), in one install as
+		// signal discovery does it: selection and the transport stats never see
+		// the transports, weights or signal of one override with another's.
+		server.SetTransportSignal(transports, alpnOrder, weights, receivedSignal("operator", setTransportSig))
 		server.PromoteConnMode(cache.ConnModeOpportunistic)
 
 		// Display result

@@ -60,6 +60,8 @@ client addresses, never query names.`,
 	},
 }
 
+// runClientStats fetches the report -- from the live counters in the tdns-imr
+// shell, over the /imr API from tdns-cli -- and prints it as the flags say.
 func runClientStats(ctx context.Context) {
 	var rep tdns.ImrClientStatsReport
 	if imr := tdns.Globals.ImrEngine; imr != nil && imr.ClientStats != nil {

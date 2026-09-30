@@ -88,6 +88,8 @@ the next run covers a new period.`,
 	},
 }
 
+// runAuthTransports fetches the report -- from the live cache in the tdns-imr
+// shell, over the /imr API from tdns-cli -- and prints it as the flags say.
 func runAuthTransports(ctx context.Context, zone string) {
 	switch authTransportsSort {
 	case "name", "total", "last":
@@ -254,9 +256,13 @@ func authServerLabel(r tdns.ImrAuthTransportsRow) string {
 // formatOOTSSignal renders a server's transport signal as it was given, in the
 // order of the table's columns: only the transports it named, an explicit zero
 // included. An encrypted transport's weight of 1 is marked: selection uses only
-// weights above 1. "none" when there was no signal.
+// weights above 1. "none" when there was no signal, and "empty" when there was
+// one that named no transport (an oots SvcParam without entries).
 func formatOOTSSignal(signal map[string]uint8, source string) string {
 	if len(signal) == 0 {
+		if source != "" {
+			return "empty"
+		}
 		return "none"
 	}
 	if source == "alpn" {

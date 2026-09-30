@@ -30,6 +30,7 @@ const (
 // TrafficClassNames names the classes, in their order.
 var TrafficClassNames = [NumTrafficClasses]string{"none", "opportunistic", "strict", "internal"}
 
+// String is the class's name, as TrafficClassNames has it.
 func (c TrafficClass) String() string {
 	if c < NumTrafficClasses {
 		return TrafficClassNames[c]
@@ -47,6 +48,7 @@ type ReceivedSignal struct {
 	Weights map[core.Transport]uint8 // the transports named, with their weights
 }
 
+// clone is a copy of r that shares nothing with it; nil for nil.
 func (r *ReceivedSignal) clone() *ReceivedSignal {
 	if r == nil {
 		return nil
@@ -120,7 +122,7 @@ func (rrcache *RRsetCacheT) AuthServerStats(reset bool) (time.Time, []AuthServer
 	for _, as := range order {
 		e := byInstance[as]
 		sort.Strings(e.zones)
-		transports, weights := as.GetTransportSignal()
+		transports, weights, received := as.GetSignalState()
 		s := AuthServerStats{
 			Name:       as.Name,
 			Src:        as.GetSrc(),
@@ -128,7 +130,7 @@ func (rrcache *RRsetCacheT) AuthServerStats(reset bool) (time.Time, []AuthServer
 			Zones:      e.zones,
 			Transports: transports,
 			Weights:    weights,
-			Received:   as.GetReceivedSignal(),
+			Received:   received,
 		}
 		if reset {
 			s.TransportStats = as.TakeTransportStats()

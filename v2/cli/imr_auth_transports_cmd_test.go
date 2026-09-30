@@ -44,6 +44,7 @@ func authTransportsTestReport() tdns.ImrAuthTransportsReport {
 	}
 }
 
+// lineStarting is the first line of out that starts with prefix.
 func lineStarting(out, prefix string) string {
 	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(line, prefix) {
@@ -169,6 +170,8 @@ func TestFormatAuthTransportsPrivacyFromAnOlderResolver(t *testing.T) {
 	}
 }
 
+// The OOTS column: the signal as given, a weight of 1 marked, an ALPN-only
+// signal and an override said as such, and no signal told from an empty one.
 func TestFormatOOTSSignal(t *testing.T) {
 	for _, tc := range []struct {
 		signal map[string]uint8
@@ -176,6 +179,7 @@ func TestFormatOOTSSignal(t *testing.T) {
 		want   string
 	}{
 		{nil, "", "none"},
+		{nil, "oots", "empty"},
 		{map[string]uint8{"do53": 100, "dot": 10, "doq": 10, "doh": 1}, "oots", "do53:100 dot:10 doq:10 doh:1 (ignored)"},
 		{map[string]uint8{"doq": 50, "doh": 30}, "oots", "doq:50 doh:30"},
 		{map[string]uint8{"doq": 100, "dot": 100}, "alpn", "alpn:dot,doq"},

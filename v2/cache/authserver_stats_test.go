@@ -164,3 +164,48 @@ func TestAuthServerStatsResetLosesNothing(t *testing.T) {
 		t.Errorf("counted %d answers across the resets, want %d", seen, writers*per)
 	}
 }
+
+// The stats read a server's weights and its signal as received together: with
+// signals installed concurrently, a snapshot never pairs one signal's weights
+// with another's received form.
+func TestSignalStateIsReadTogether(t *testing.T) {
+	s := NewAuthServer("ns.example.")
+	install := func(tr core.Transport, w uint8) {
+		s.SetTransportSignal([]core.Transport{tr, core.TransportDo53}, nil,
+			map[core.Transport]uint8{tr: w, core.TransportDo53: 100},
+			&ReceivedSignal{Source: "oots", Weights: map[core.Transport]uint8{tr: w}})
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if i%2 == 0 {
+				install(core.TransportDoT, 50)
+			} else {
+				install(core.TransportDoQ, 30)
+			}
+		}
+	}()
+	for i := 0; i < 20000; i++ {
+		_, weights, received := s.GetSignalState()
+		if received == nil {
+			continue
+		}
+		for tr, w := range received.Weights {
+			if weights[tr] != w {
+				close(stop)
+				wg.Wait()
+				t.Fatalf("snapshot pairs received %v with weights %v", received.Weights, weights)
+			}
+		}
+	}
+	close(stop)
+	wg.Wait()
+}

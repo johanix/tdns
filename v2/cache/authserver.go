@@ -487,6 +487,20 @@ func (as *AuthServer) SetReceivedSignal(received *ReceivedSignal) {
 	as.Received = received
 }
 
+// GetSignalState returns copies of the transports, their weights and the
+// signal as received, read together under the lock, so that a report never
+// pairs the weights of one signal with the received form of another.
+// Thread-safe.
+func (as *AuthServer) GetSignalState() ([]core.Transport, map[core.Transport]uint8, *ReceivedSignal) {
+	if as == nil {
+		return nil, nil, nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	transports := append([]core.Transport(nil), as.Transports...)
+	return transports, copyMap(as.TransportWeights), as.Received.clone()
+}
+
 // GetReceivedSignal returns a copy of the signal as received, or nil.
 // Thread-safe.
 func (as *AuthServer) GetReceivedSignal() *ReceivedSignal {
