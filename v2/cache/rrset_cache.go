@@ -107,6 +107,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 		stubZones:            core.NewNameMap[struct{}](),               // the zones AddStub stored a server map for
 		anchorZones:          core.NewNameMap[struct{}](),               // the zones a configured trust anchor vouches for
 		anchorDS:             core.NewNameMap[[]*dns.DS](),              // the DS records of the DS trust anchors
+		families:             &familyPolicy{},                           // both address families until SetAddressFamilies says otherwise
 		AuthServerMap:        core.NewNameMap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 		ZoneMap:              core.NewNameMap[*Zone](),                  // zone -> *Zone
 		ServerTLSA:           core.NewNameMap[*ServerTLSARecords](),     // nsname -> validated TLSA cache
@@ -564,6 +565,10 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 		if tmpauthserver == nil {
 			continue // Skip invalid server names
 		}
+		tmpauthserver.families = rrcache.families
+		if kept := rrcache.families.filter(server.Addrs); len(kept) < len(server.Addrs) {
+			log.Printf("AddStub: zone %s server %s: addresses of an address family not in use are left out (imrengine.address-families)", zone, server.Name)
+		}
 		// Override defaults with config values
 		tmpauthserver.SetAddrs(server.Addrs)
 		tmpauthserver.SetConfiguredAddrs(server.Addrs)
@@ -736,6 +741,9 @@ func (rrcache *RRsetCacheT) GetOrCreateAuthServer(nsname string) *AuthServer {
 
 	// No instance exists - create a new one
 	newServer := NewAuthServer(nsname)
+	if newServer != nil {
+		newServer.families = rrcache.families
+	}
 
 	// Store it in the global map (use SetIfAbsent to handle race conditions)
 	if rrcache.AuthServerMap.SetIfAbsent(nsname, newServer) {

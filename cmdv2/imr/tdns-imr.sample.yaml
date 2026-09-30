@@ -40,6 +40,10 @@ imrengine:
 
    # Optional: path to a root hints file. If empty, uses compiled-in hints.
    root-hints:          "/etc/tdns/root.hints"
+   # Which IP versions to reach authoritative servers over: ipv4, ipv6, or both
+   # (the default). Leave out a family that does not work on this host, e.g. an
+   # IPv6 default route that leads nowhere. Takes a restart.
+   # address-families:  [ ipv4, ipv6 ]
    # Per-client transport counters: for each client address, how many queries
    # arrived over Do53 (UDP, TCP), DoT, DoQ and DoH, since startup or the last
    # reset ("tdns-cli imr stats client-transports"). They record client addresses,

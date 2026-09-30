@@ -3410,8 +3410,9 @@ func (imr *Imr) revalidateInBailiwickGlue(ctx context.Context, zonename string, 
 	}
 	for _, host := range hosts {
 		server := serverMap[cache.ServerKey(host)]
-		imr.revalidateGlueRR(ctx, zonename, host, dns.TypeA, server, force)
-		imr.revalidateGlueRR(ctx, zonename, host, dns.TypeAAAA, server, force)
+		for _, atype := range imr.Cache.AddressTypes() {
+			imr.revalidateGlueRR(ctx, zonename, host, atype, server, force)
+		}
 	}
 }
 

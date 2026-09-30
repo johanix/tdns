@@ -100,7 +100,10 @@ type RRsetCacheT struct {
 	// anchorDS holds the DS records of each DS trust anchor (AddTrustAnchorDS).
 	// The DS RRset seeded in the cache from them expires and is flushed like
 	// any other; the anchor does neither (trustAnchorDSRRset).
-	anchorDS      *core.NameMap[[]*dns.DS]
+	anchorDS *core.NameMap[[]*dns.DS]
+	// families is which address families the resolver uses (SetAddressFamilies).
+	// Every AuthServer the cache creates shares it.
+	families      *familyPolicy
 	AuthServerMap *core.NameMap[*AuthServer]        // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 	ZoneMap       *core.NameMap[*Zone]              // map[zone]*Zone
 	ServerTLSA    *core.NameMap[*ServerTLSARecords] // nsname -> validated TLSA cache, decoupled from AuthServer instances

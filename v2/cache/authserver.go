@@ -70,8 +70,12 @@ type AuthServer struct {
 	// server (a stub's, via AddStub), in canonical form. Addresses added
 	// later, from glue or a lookup, are not in it.
 	configuredAddrs map[string]struct{}
-	Expire          time.Time
-	Debug           bool // If true, store error messages in AddressBackoff.LastError
+	// families is the policy of the cache that created the server
+	// (familyPolicy): AddAddr and SetAddrs drop an address of a family it
+	// leaves out. Nil allows every family.
+	families *familyPolicy
+	Expire   time.Time
+	Debug    bool // If true, store error messages in AddressBackoff.LastError
 	// Backoff tracking (guarded by mu). Keyed by (address, transport): a
 	// failure on (1.2.3.4:53, DoT) does not block (1.2.3.4:53, Do53).
 	AddressBackoffs map[AddrXport]*AddressBackoff
@@ -134,9 +138,10 @@ func (as *AuthServer) GetAddrs() []string {
 	return addrs
 }
 
-// AddAddr adds an address if it doesn't already exist. Thread-safe.
+// AddAddr adds an address if it doesn't already exist, and if the server's
+// address-family policy allows it. Thread-safe.
 func (as *AuthServer) AddAddr(addr string) {
-	if as == nil || addr == "" {
+	if as == nil || addr == "" || !as.families.allows(addr) {
 		return
 	}
 	as.mu.Lock()
@@ -149,11 +154,13 @@ func (as *AuthServer) AddAddr(addr string) {
 	as.Addrs = append(as.Addrs, addr)
 }
 
-// SetAddrs sets the addresses slice. Thread-safe.
+// SetAddrs sets the addresses slice, less those the server's address-family
+// policy leaves out. Thread-safe.
 func (as *AuthServer) SetAddrs(addrs []string) {
 	if as == nil {
 		return
 	}
+	addrs = as.families.filter(addrs)
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if len(addrs) == 0 {

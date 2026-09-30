@@ -530,6 +530,7 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 	}
 	check("active", bothNil(boot.Active, current.Active))
 	check("root-hints", boot.RootHints == current.RootHints)
+	check("address-families", sameAddressFamilies(boot.AddressFamilies, current.AddressFamilies))
 	check("options", slices.Equal(boot.OptionsStrs, current.OptionsStrs))
 	check("trust-anchor-ds", boot.TrustAnchorDS == current.TrustAnchorDS)
 	check("trust-anchor-dnskey", boot.TrustAnchorDNSKEY == current.TrustAnchorDNSKEY)
