@@ -31,6 +31,10 @@ import (
 const (
 	ownParent = "parent.example."
 	ownChild  = "child.parent.example."
+
+	// ownChildKEY is the public key of the KEY the child's server publishes at
+	// the child's apex: the child's SIG(0) key, as at-apex looks it up.
+	ownChildKEY = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="
 )
 
 const ownParentZone = `parent.example.	3600	IN	SOA	ns.parent.example. hostmaster.parent.example. 1 7200 1800 604800 300
@@ -63,7 +67,8 @@ func newOwnZoneRig(t *testing.T) *ownZoneRig {
 	childLog := &upstreamLog{}
 	childAddr, childPort := startLoggedSignedForwardUpstream(t, map[string]*dns.Msg{
 		ownChild + " DNSKEY":     {Answer: childKey.sign(t, childKey.dnskey)},
-		"www." + ownChild + " A": {Answer: []dns.RR{fwdSecRR(t, "www."+ownChild+" 300 IN A 192.0.2.55")}},
+		ownChild + " KEY":        {Answer: childKey.sign(t, fwdSecRR(t, ownChild+" 300 IN KEY 256 3 15 "+ownChildKEY))},
+		"www." + ownChild + " A": {Answer: childKey.sign(t, fwdSecRR(t, "www."+ownChild+" 300 IN A 192.0.2.55"))},
 	}, childLog)
 
 	imr := newForwardTestImr(t, rootForward(upAddr, upPort))
