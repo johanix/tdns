@@ -256,32 +256,54 @@ func (zd *ZoneData) ValidateChildDnskeys(cdd *ChildDelegationData, verbose bool)
 // and is within its validity period. Every signature is tried: during a KSK
 // rollover the RRset also carries one by a KSK the DS does not name yet.
 func (zd *ZoneData) dnskeysSignedByKsk(rrset *core.RRset, ksks []*dns.DNSKEY, verbose bool) bool {
-	now := time.Now().UTC()
+	ksk, err := signedByOneOf(rrset, ksks, time.Now().UTC())
+	if err != nil {
+		zd.Logger.Printf("ValidateChildDnskeys: DNSKEY RRset not verified by a KSK matching the DS: %v", err)
+		return false
+	}
+	if verbose {
+		zd.Logger.Printf("ValidateChildDnskeys: DNSKEY RRset verified by KSK %d", ksk.KeyTag())
+	}
+	return true
+}
+
+// signedByOneOf returns the key in keys that made one of rrset's signatures,
+// for a signature that verifies and is within its validity period at now; or
+// why none did. Every signature is tried, not only the first that names a key.
+// Which keys may authenticate rrset is the caller's to decide: this says only
+// that one of them signed it. Shared by ValidateChildDnskeys and the
+// delegation coherence check (signedByPublishedDS).
+func signedByOneOf(rrset *core.RRset, keys []*dns.DNSKEY, now time.Time) (*dns.DNSKEY, error) {
+	var why []string
 	for _, rr := range rrset.RRSIGs {
 		rrsig, ok := rr.(*dns.RRSIG)
 		if !ok {
 			continue
 		}
-		for _, ksk := range ksks {
-			// Verify checks these too; checked here so that only a KSK the
+		for _, key := range keys {
+			// Verify checks these too; checked here so that only a key the
 			// signature names is tried.
-			if rrsig.KeyTag != ksk.KeyTag() || rrsig.Algorithm != ksk.Algorithm ||
-				!core.EqualNames(rrsig.SignerName, ksk.Header().Name) {
+			if rrsig.KeyTag != key.KeyTag() || rrsig.Algorithm != key.Algorithm ||
+				!core.EqualNames(rrsig.SignerName, key.Header().Name) {
 				continue
 			}
-			if err := rrsig.Verify(ksk, rrset.RRs); err != nil {
-				zd.Logger.Printf("ValidateChildDnskeys: RRSIG by KSK %d does not verify: %v", ksk.KeyTag(), err)
+			if err := rrsig.Verify(key, rrset.RRs); err != nil {
+				why = append(why, fmt.Sprintf("the RRSIG by key %d does not verify: %v", key.KeyTag(), err))
 				continue
 			}
 			if !cache.WithinValidityPeriod(rrsig.Inception, rrsig.Expiration, now) {
-				zd.Logger.Printf("ValidateChildDnskeys: RRSIG by KSK %d is not within its validity period", ksk.KeyTag())
+				why = append(why, fmt.Sprintf("the RRSIG by key %d is outside its validity period", key.KeyTag()))
 				continue
 			}
-			if verbose {
-				zd.Logger.Printf("ValidateChildDnskeys: DNSKEY RRset verified by KSK %d", ksk.KeyTag())
-			}
-			return true
+			return key, nil
 		}
 	}
-	return false
+	if len(why) == 0 {
+		tags := make([]string, 0, len(keys))
+		for _, key := range keys {
+			tags = append(tags, fmt.Sprint(key.KeyTag()))
+		}
+		return nil, fmt.Errorf("no RRSIG by key %s", strings.Join(tags, " or "))
+	}
+	return nil, errors.New(strings.Join(why, "; "))
 }

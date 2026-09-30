@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -32,17 +33,19 @@ import (
 // point. A check performed by the requesting client is not a check, and a
 // client cannot know a given parent's local requirements anyway.
 
-// dnskeyFetcher returns the DNSKEY RRset the child currently publishes, and
-// whether that answer DNSSEC-validated.
+// dnskeyFetcher returns the DNSKEY RRset the child currently publishes, with
+// its RRSIGs, and the resolver's verdict on it: cache.ValidationStateSecure
+// when it DNSSEC-validated, the zero value when validation was not attempted.
 //
 // The two travel together because only the caller can decide what an
-// unvalidated answer means: for a child that already has a DS it is an attack,
-// and for a child that has none it is the normal state of affairs. A fetcher
-// that decided on its own could only get one of those right.
+// unvalidated answer means: for a child that already has a DS it must be
+// authenticated some other way, and for a child that has none it is the normal
+// state of affairs. A fetcher that decided on its own could only get one of
+// those right. The RRSIGs are what the other way checks (signedByPublishedDS).
 //
 // Injected rather than called directly so the rule below can be tested without
 // a network, and so the parent can choose how it looks the child up.
-type dnskeyFetcher func(child string) (keys []dns.RR, validated bool, err error)
+type dnskeyFetcher func(child string) (dnskeys *core.RRset, state cache.ValidationState, err error)
 
 // dsAfterActions applies the DS-affecting records of an RFC 2136 update to the
 // parent's current DS RRset for child, and reports the result.
@@ -252,17 +255,39 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 		return fmt.Errorf("cannot verify that %s would still validate: %w: %w", child, errNoDnskeyFetcher, ErrDelegationUnverifiable)
 	}
 
-	keys, validated, err := fetch(child)
+	dnskeys, state, err := fetch(child)
 	if err != nil {
 		return fmt.Errorf("cannot verify that %s would still validate: DNSKEY lookup failed: %w: %w", child, err, ErrDelegationUnverifiable)
+	}
+	var keys []dns.RR
+	if dnskeys != nil {
+		keys = dnskeys.RRs
 	}
 
 	// An unvalidated DNSKEY answer is only meaningful when there is something to
 	// validate against.
 	//
-	// If the parent already publishes a DS, a chain exists, the answer must
-	// chain through it, and an unvalidated one is exactly what an attacker would
-	// supply to make a bogus DS look fine.
+	// If the parent already publishes a DS, the answer must be authenticated
+	// through it: an unauthenticated one is exactly what an attacker would
+	// supply to make a bogus DS look fine. The resolver's Secure does that, but
+	// only for a parent inside the resolver's chain of trust, and a DS does not
+	// put the parent there. At a parent that is unsigned, or that no trust
+	// anchor of its resolver covers, the child is never Secure however correct
+	// its keys, and every DS change after the first was refused for good
+	// (#838). So on any verdict short of Secure the parent takes the step a
+	// validator takes at this delegation point itself, with the DS it
+	// publishes and is the authority for: the DNSKEY RRset must be signed,
+	// within the signature's validity period, by a key matching that DS
+	// (signedByPublishedDS). The conclusion holds for this check only; nothing
+	// is cached.
+	//
+	// That includes Bogus. The check is made on the RRset in hand, so a forged
+	// or altered one, or one whose signatures have expired, fails it whatever
+	// the resolver said. An RRset that passes it and is still Bogus to the
+	// resolver is a disagreement about the chain rather than the keys -- the
+	// resolver holding an older copy of this parent's DS RRset, or a break
+	// above this parent -- which the child cannot fix and this change does not
+	// touch. It is logged.
 	//
 	// If the parent publishes no DS, the child is insecure -- and demanding a
 	// validated answer would make it permanently so. That is RFC 8078
@@ -277,10 +302,22 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 	// authenticated and authorised, and the DS must match a key the child
 	// actually publishes. It is the same carve-out the CDS scanner makes for
 	// onboarding when no DS exists.
-	if len(currentDS) > 0 && !validated {
-		return fmt.Errorf(
-			"the DNSKEY RRset for %s did not DNSSEC-validate, and it already has a DS"+
-				" at this parent: an unvalidated answer cannot authorise changing it", child)
+	if len(currentDS) > 0 && state != cache.ValidationStateSecure {
+		if err := signedByPublishedDS(dnskeys, currentDS); err != nil {
+			return fmt.Errorf(
+				"the DNSKEY RRset for %s did not DNSSEC-validate (resolver: %s), and it is not"+
+					" signed by a key matching the DS this parent publishes (%v): with a DS in"+
+					" place, an unvalidated answer cannot authorise changing it",
+				child, validationStateName(state), err)
+		}
+		if state == cache.ValidationStateBogus {
+			lgHandler.Warn("delegation coherence: the resolver holds the child's DNSKEY RRset bogus,"+
+				" but a key matching the DS this parent publishes signs it; the parent's DS decides",
+				"child", child)
+		} else {
+			lgHandler.Info("delegation coherence: DNSKEY RRset authenticated by the DS this parent publishes",
+				"child", child, "resolver", validationStateName(state))
+		}
 	}
 
 	for _, dsrr := range resulting {
@@ -289,24 +326,7 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 			continue
 		}
 		for _, keyrr := range keys {
-			dk, ok := keyrr.(*dns.DNSKEY)
-			if !ok {
-				continue
-			}
-			// Deliberately not filtered on the SEP bit. SEP is advisory and
-			// validators ignore it, so a DS hashing a flags-256 CSK is a
-			// perfectly usable entry point. Requiring SEP here would refuse a
-			// working delegation on the strength of a hint.
-			if dk.Flags&dns.ZONE == 0 {
-				continue
-			}
-			computed := dk.ToDS(ds.DigestType)
-			if computed == nil {
-				continue
-			}
-			if computed.KeyTag == ds.KeyTag &&
-				computed.Algorithm == ds.Algorithm &&
-				equalFoldASCII(computed.Digest, ds.Digest) {
+			if dk, ok := keyrr.(*dns.DNSKEY); ok && dsMatchesKey(ds, dk) {
 				return nil
 			}
 		}
@@ -315,6 +335,54 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 	return fmt.Errorf(
 		"the resulting DS RRset for %s matches none of the %d DNSKEY(s) it publishes;"+
 			" applying it would make the whole child zone bogus", child, len(keys))
+}
+
+// dsMatchesKey reports whether ds is the DS of dk: key tag, algorithm and
+// digest.
+//
+// Deliberately not filtered on the SEP bit. SEP is advisory and validators
+// ignore it, so a DS hashing a flags-256 CSK is a perfectly usable entry point.
+// Requiring SEP here would refuse a working delegation on the strength of a
+// hint.
+func dsMatchesKey(ds *dns.DS, dk *dns.DNSKEY) bool {
+	if dk.Flags&dns.ZONE == 0 {
+		return false
+	}
+	computed := dk.ToDS(ds.DigestType)
+	return computed != nil &&
+		computed.KeyTag == ds.KeyTag &&
+		computed.Algorithm == ds.Algorithm &&
+		equalFoldASCII(computed.Digest, ds.Digest)
+}
+
+// signedByPublishedDS returns nil when the DNSKEY RRset dnskeys is signed by
+// one of its own keys that matches a DS in currentDS, with a signature that
+// verifies and is within its validity period; otherwise why not. That is the
+// step a validator takes at the delegation point (RFC 4035 §5.2), taken with
+// the DS this parent publishes rather than one a resolver learned. It only
+// reads dnskeys: what it concludes goes no further than the caller.
+func signedByPublishedDS(dnskeys *core.RRset, currentDS []dns.RR) error {
+	if dnskeys == nil || len(dnskeys.RRs) == 0 {
+		return errors.New("there is no DNSKEY RRset")
+	}
+	var entry []*dns.DNSKEY
+	for _, keyrr := range dnskeys.RRs {
+		dk, ok := keyrr.(*dns.DNSKEY)
+		if !ok {
+			continue
+		}
+		for _, dsrr := range currentDS {
+			if ds, ok := dsrr.(*dns.DS); ok && dsMatchesKey(ds, dk) {
+				entry = append(entry, dk)
+				break
+			}
+		}
+	}
+	if len(entry) == 0 {
+		return fmt.Errorf("none of its %d DNSKEY(s) matches that DS", len(dnskeys.RRs))
+	}
+	_, err := signedByOneOf(dnskeys, entry, time.Now().UTC())
+	return err
 }
 
 // equalFoldASCII compares two hex digests without allocating. DS digests are
@@ -358,8 +426,8 @@ func coherenceDnskeyFetcher(conf *Config) dnskeyFetcher {
 	if conf.Imr.Active != nil && !*conf.Imr.Active {
 		return nil
 	}
-	return func(child string) ([]dns.RR, bool, error) {
-		return nil, false, fmt.Errorf("this server's resolver is not running yet: %w", ErrNoImrEngine)
+	return func(child string) (*core.RRset, cache.ValidationState, error) {
+		return nil, 0, fmt.Errorf("this server's resolver is not running yet: %w", ErrNoImrEngine)
 	}
 }
 
@@ -373,24 +441,25 @@ func imrDnskeyFetcher(imr *Imr) dnskeyFetcher {
 	if imr == nil {
 		return nil
 	}
-	return func(child string) ([]dns.RR, bool, error) {
+	return func(child string) (*core.RRset, cache.ValidationState, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		resp, err := imr.ImrQuery(ctx, dns.Fqdn(child), dns.TypeDNSKEY, dns.ClassINET, nil)
 		if err != nil {
-			return nil, false, err
+			return nil, 0, err
 		}
 		if resp == nil || resp.RRset == nil {
-			return nil, false, fmt.Errorf("no DNSKEY RRset returned for %s", child)
+			return nil, 0, fmt.Errorf("no DNSKEY RRset returned for %s", child)
 		}
 		if resp.Error {
-			return nil, false, fmt.Errorf("DNSKEY lookup for %s failed: %s", child, resp.ErrorMsg)
+			return nil, 0, fmt.Errorf("DNSKEY lookup for %s failed: %s", child, resp.ErrorMsg)
 		}
-		// Report whether it validated; do not decide what that means. Only the
-		// caller knows whether the child already has a DS, which is what
-		// separates an attack from an ordinary bootstrap.
-		return resp.RRset.RRs, resp.Validated, nil
+		// Report the verdict; do not decide what it means. Only the caller
+		// knows whether the child already has a DS, which is what separates an
+		// attack from an ordinary bootstrap. The RRset may be the resolver's
+		// cached one, so the caller only reads it.
+		return resp.RRset, resp.ValidationState, nil
 	}
 }
 
