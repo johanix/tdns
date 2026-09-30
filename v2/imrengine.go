@@ -329,6 +329,18 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 			// the forward.
 			lgImr.Info("root is covered by a forward zone: not priming, and not reading root-hints")
 			warnUnreadableRootHints(conf.Imr.RootHints)
+		} else if conf.Imr.Testing.SkipPriming() {
+			// Test harnesses only (imrengine.testing.priming: false). The
+			// hints are used as they stand, and nothing asks the root for its
+			// NS RRset. RefreshRoot upgrades to the live roots when the hints'
+			// copy nears expiry, as it does after re-priming from hints.
+			if err := rrcache.PrimeFromHintsOnly(conf.Imr.RootHints); err != nil {
+				return fmt.Errorf("failed to seed RecursorCache from root hints: %v", err)
+			}
+			lgImr.Warn("imrengine.testing.priming is false: seeded from the root hints without priming;" +
+				" a test-harness switch, not for production")
+			imr.PrimedVia = "hints only (testing.priming: false)"
+			imr.PrimedAt = time.Now()
 		} else {
 			err := rrcache.PrimeWithHints(ctx, conf.Imr.RootHints, imr.IterativeDNSQueryFetcher())
 			if err != nil {
@@ -797,7 +809,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		case len(authservers) == 0 && !forwarded:
 			// Use helper function to resolve NS addresses
 			done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
-				rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
+				rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(ctx, qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
 				if err != nil {
 					lgImr.Error("IterativeDNSQuery failed", "err", err)
 					// return false, nil // Continue trying
@@ -846,7 +858,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 
 		lgImr.Debug("ImrQuery: sending query to auth servers", "qname", qname, "qtype", dns.TypeToString[qtype], "count", len(authservers))
 
-		rrset, rcode, context, _, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
+		rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(ctx, qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
 		// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 		if err != nil {
 			resp.Error = true
@@ -1236,7 +1248,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				var privacyErr error
 				done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
 					// Try querying with the current set of authservers
-					rrset, rcode, context, transport, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, msgoptions.Privacy)
+					rrset, rcode, context, transport, err := imr.IterativeDNSQueryInZone(ctx, qname, qtype, authservers, bestmatch, false, msgoptions.Privacy)
 					if err != nil {
 						if errors.Is(err, ErrPrivacyUnavailable) {
 							privacyErr = err
@@ -1277,7 +1289,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			}
 
 			lgImr.Debug("ImrResponder: sending query to authservers", "qname", qname, "qtype", dns.TypeToString[qtype], "count", len(authservers), "zone", bestmatch)
-			rrset, rcode, context, transport, err := imr.IterativeDNSQuery(ctx, qname, qtype, authservers, false, msgoptions.Privacy)
+			rrset, rcode, context, transport, err := imr.IterativeDNSQueryInZone(ctx, qname, qtype, authservers, bestmatch, false, msgoptions.Privacy)
 			// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 			if err != nil {
 				// Strict privacy was requested and no encrypted transport was
@@ -2265,9 +2277,10 @@ func (imr *Imr) updateDNSKEYCacheFromRRset(anchorName string, rrset *core.RRset,
 }
 
 // validateNSRRsetForAnchor validates the NS RRset for a trust anchor zone.
-func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string, serverMap map[string]*cache.AuthServer) {
+// serversZone is the zone serverMap serves (IterativeDNSQueryInZone).
+func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string, serverMap map[string]*cache.AuthServer, serversZone string) {
 	// Fetch and validate the NS RRset for the anchor zone (non-fatal - continue even if it fails)
-	nsRRset, _, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeNS, serverMap, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
+	nsRRset, _, _, _, err := imr.IterativeDNSQueryInZone(ctx, anchorName, dns.TypeNS, serverMap, serversZone, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
 	if err != nil {
 		lgImr.Warn("failed to fetch NS RRset for trust anchor zone", "zone", anchorName, "err", err)
 		return
@@ -2333,18 +2346,21 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 	// forwarded root whose root server map was gone failed here (#722).
 	// Otherwise use the current known servers.
 	var serverMap map[string]*cache.AuthServer
+	var serversZone string // the zone serverMap serves
 	if imr.forwardZoneForQuestion(anchorName, dns.TypeDNSKEY) == nil {
 		var ok bool
+		serversZone = anchorName
 		serverMap, ok = imr.Cache.ServerMapCopy(anchorName)
 		if !ok || len(serverMap) == 0 {
 			// fallback to root servers if we do not have a server mapping for this name yet
+			serversZone = "."
 			serverMap, ok = imr.Cache.ServerMapCopy(".")
 			if !ok || len(serverMap) == 0 {
 				return fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
 			}
 		}
 	}
-	rrset, _, _, _, err := imr.IterativeDNSQuery(ctx, anchorName, dns.TypeDNSKEY, serverMap, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
+	rrset, _, _, _, err := imr.IterativeDNSQueryInZone(ctx, anchorName, dns.TypeDNSKEY, serverMap, serversZone, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
 	if err != nil {
 		return fmt.Errorf("failed to fetch %s DNSKEY: %v", anchorName, err)
 	}
@@ -2385,7 +2401,7 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 	// it sent a forced ". NS" through the forward and cached the upstream's
 	// short-lived copy (#722).
 	if imr.forwardZoneForQuestion(anchorName, dns.TypeNS) == nil {
-		imr.validateNSRRsetForAnchor(ctx, anchorName, serverMap)
+		imr.validateNSRRsetForAnchor(ctx, anchorName, serverMap, serversZone)
 	}
 
 	return nil
@@ -2455,6 +2471,17 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 	//	kdb := conf.Internal.KeyDB
 
 	return func(w dns.ResponseWriter, r *dns.Msg) {
+		// The Do53 server rejects a query without exactly one question before
+		// it gets here, but not every path in does: the debug listener hands
+		// such a query straight to this handler. Answer FORMERR rather than
+		// index an empty question section.
+		if len(r.Question) != 1 {
+			m := new(dns.Msg)
+			m.Id, m.Response, m.Opcode = r.Id, true, r.Opcode
+			m.Rcode = dns.RcodeFormatError
+			_ = w.WriteMsg(m)
+			return
+		}
 		qname := r.Question[0].Name
 		// var dnssec_ok bool
 		msgoptions, err := edns0.ExtractFlagsAndEDNS0Options(r)

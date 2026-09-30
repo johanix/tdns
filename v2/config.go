@@ -431,7 +431,24 @@ type ImrEngineConf struct {
 	Tuning ImrTuningConf `yaml:"tuning" mapstructure:"tuning"`
 	// ClientStats: per-client transport counters (imr_client_stats.go).
 	ClientStats ImrClientStatsConf `yaml:"client-stats" mapstructure:"client-stats"`
+	// Testing holds switches for black-box test harnesses, not for production.
+	// `config check` warns about any that is set. See
+	// docs/2026-09-28-imr-deckard-test-clock-and-switches.md.
+	Testing ImrTestingConf `yaml:"testing" mapstructure:"testing"`
 }
+
+// ImrTestingConf holds the resolver's test-harness switches.
+type ImrTestingConf struct {
+	// Priming false seeds the cache from the root hints and marks it primed,
+	// without the live ". NS" query. A harness such as Deckard starts its
+	// scripted servers only once the resolver accepts connections, and the
+	// resolver listens only once priming has succeeded: without this switch it
+	// never becomes ready there.
+	Priming *bool `yaml:"priming" mapstructure:"priming"`
+}
+
+// SkipPriming reports whether testing.priming is set to false.
+func (t ImrTestingConf) SkipPriming() bool { return t.Priming != nil && !*t.Priming }
 
 // ImrClientStatsConf switches the per-client transport counters on. They
 // record client addresses, so they are off by default. They are set up with

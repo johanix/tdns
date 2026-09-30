@@ -6,6 +6,7 @@ package cache
 import (
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -65,8 +66,12 @@ type AuthServer struct {
 	FailedCounters    map[core.Transport]uint64    // attempts that ERRORED, by actual wire transport (see tryServer)
 	TruncatedCount    uint64                       // Do53/UDP responses TC=1 truncated and retried over TCP
 	Src               string                       // "answer", "glue", "hint", "priming", "stub", ...
-	Expire            time.Time
-	Debug             bool // If true, store error messages in AddressBackoff.LastError
+	// configuredAddrs holds the addresses the operator configured for this
+	// server (a stub's, via AddStub), in canonical form. Addresses added
+	// later, from glue or a lookup, are not in it.
+	configuredAddrs map[string]struct{}
+	Expire          time.Time
+	Debug           bool // If true, store error messages in AddressBackoff.LastError
 	// Backoff tracking (guarded by mu). Keyed by (address, transport): a
 	// failure on (1.2.3.4:53, DoT) does not block (1.2.3.4:53, Do53).
 	AddressBackoffs map[AddrXport]*AddressBackoff
@@ -157,6 +162,41 @@ func (as *AuthServer) SetAddrs(addrs []string) {
 	}
 	as.Addrs = make([]string, len(addrs))
 	copy(as.Addrs, addrs)
+}
+
+// canonicalAddr returns an IP literal in canonical form ("0:0::1" → "::1"), and
+// anything else unchanged.
+func canonicalAddr(addr string) string {
+	if ip := net.ParseIP(addr); ip != nil {
+		return ip.String()
+	}
+	return addr
+}
+
+// SetConfiguredAddrs records addrs as the addresses the operator configured
+// for this server. Thread-safe.
+func (as *AuthServer) SetConfiguredAddrs(addrs []string) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	as.configuredAddrs = make(map[string]struct{}, len(addrs))
+	for _, a := range addrs {
+		as.configuredAddrs[canonicalAddr(a)] = struct{}{}
+	}
+}
+
+// IsConfiguredAddr reports whether the operator configured addr for this
+// server (SetConfiguredAddrs). Thread-safe.
+func (as *AuthServer) IsConfiguredAddr(addr string) bool {
+	if as == nil {
+		return false
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	_, ok := as.configuredAddrs[canonicalAddr(addr)]
+	return ok
 }
 
 // GetAlpn returns a copy of the ALPN slice. Thread-safe.

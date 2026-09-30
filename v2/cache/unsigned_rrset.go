@@ -71,6 +71,14 @@ func (rrcache *RRsetCacheT) unsignedRRsetState(ctx context.Context, rrset *core.
 // data, and is judged from the zone above, as an unsigned DS is. That also keeps
 // the DS questions asked for a DS denial strictly above the name denied, so the
 // denials those questions draw cannot lead back to it.
+// UnsignedDenialState is unsignedDenialState for the resolver: the verdict for a
+// denial from zone that carries nothing to validate. The resolver uses it for a
+// negative answer without an SOA, whose zone is known only from the servers
+// that sent it.
+func (rrcache *RRsetCacheT) UnsignedDenialState(ctx context.Context, zone, qname string, qtype uint16, fetcher RRsetFetcher) ValidationState {
+	return rrcache.unsignedDenialState(ctx, zone, dns.CanonicalName(qname), qtype, fetcher)
+}
+
 func (rrcache *RRsetCacheT) unsignedDenialState(ctx context.Context, zone, qname string, qtype uint16, fetcher RRsetFetcher) ValidationState {
 	name := dns.Fqdn(zone)
 	if qtype == dns.TypeDS && core.EqualNames(name, qname) {
