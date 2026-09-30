@@ -234,3 +234,60 @@ func TestAnInsecureDSDenialWithoutValidRecordsIsBogusEvidence(t *testing.T) {
 		t.Errorf("evidence %s, want %s", evidenceToString[ev], evidenceToString[evidenceBogus])
 	}
 }
+
+// A wildcard answer for a.z.w.sec.example, synthesised from *.w.sec.example
+// (Labels 3): an NSEC3 must cover z.w.sec.example (RFC 5155 section 8.8).
+func TestNSEC3WildcardProof(t *testing.T) {
+	const (
+		qname = "a.z.w." + secZone
+		nc    = "z.w." + secZone
+	)
+	cases := []struct {
+		name string
+		sets func(t *testing.T, k *zoneKey) []*core.RRset
+		want ValidationState
+		ede  uint16
+	}{
+		{"the next closer name covered", func(t *testing.T, k *zoneKey) []*core.RRset {
+			return []*core.RRset{k.sign(t, synthNSEC3(secZone, nc, true, 0, 0, ""))}
+		}, ValidationStateSecure, 0},
+		{"covered through Opt-Out", func(t *testing.T, k *zoneKey) []*core.RRset {
+			return []*core.RRset{k.sign(t, synthNSEC3(secZone, nc, true, 1, 0, ""))}
+		}, ValidationStateInsecure, 0},
+		{"not covered", func(t *testing.T, k *zoneKey) []*core.RRset {
+			return []*core.RRset{k.sign(t, synthNSEC3(secZone, qname, true, 0, 0, ""))}
+		}, ValidationStateBogus, 0},
+		{"no NSEC3 at all", func(t *testing.T, k *zoneKey) []*core.RRset { return nil }, ValidationStateBogus, 0},
+		{"over the iteration limit", func(t *testing.T, k *zoneKey) []*core.RRset {
+			return []*core.RRset{k.sign(t, synthNSEC3(secZone, nc, true, 0, DefaultNSEC3MaxIterations+1, ""))}
+		}, ValidationStateInsecure, edeUnsupportedNSEC3Iterations},
+		{"signed with a key the zone does not have", func(t *testing.T, _ *zoneKey) []*core.RRset {
+			return []*core.RRset{strayKey(t, secZone).sign(t, synthNSEC3(secZone, nc, true, 0, 0, ""))}
+		}, ValidationStateIndeterminate, 0},
+		{"unsigned", func(t *testing.T, _ *zoneKey) []*core.RRset {
+			return []*core.RRset{unsigned(synthNSEC3(secZone, nc, true, 0, 0, ""))}
+		}, ValidationStateBogus, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rrcache, k := secCache(t)
+			state, ede := rrcache.NSEC3WildcardProof(context.Background(), secZone, qname, 3, c.sets(t, k), nil)
+			if state != c.want || ede != c.ede {
+				t.Errorf("%s EDE %d, want %s EDE %d", ValidationStateToString[state], ede, ValidationStateToString[c.want], c.ede)
+			}
+		})
+	}
+}
+
+// An NSEC3 signed by the zone above, whose signature validates because the
+// zone below is not held Secure, does not count toward a wildcard proof in
+// the zone below.
+func TestNSEC3WildcardProofCountsOnlyTheZonesOwnRecords(t *testing.T) {
+	rrcache := negCache(t)
+	above := newZoneKey(t, rrcache, "example.", true)
+	rrcache.ZoneMap.Set("example.", &Zone{ZoneName: "example.", State: ValidationStateSecure})
+	rec := synthNSEC3(secZone, "z.w."+secZone, true, 0, 0, "")
+	if state, _ := rrcache.NSEC3WildcardProof(context.Background(), secZone, "a.z.w."+secZone, 3, []*core.RRset{above.sign(t, rec)}, nil); state == ValidationStateSecure {
+		t.Errorf("a cover signed by the zone above: %s, want not secure", ValidationStateToString[state])
+	}
+}

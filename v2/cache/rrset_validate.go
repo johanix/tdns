@@ -1315,6 +1315,54 @@ func (rrcache *RRsetCacheT) ValidateDenial(ctx context.Context, qname string, qt
 	return DenialVerdict{State: ValidationStateInsecure, Rcode: rcode}, fmt.Errorf("no NSECs or NSEC3, so we are insecure") // XXX: Need to know if zone is secure, but for now: No NSECs or NSEC3, so we are insecure
 }
 
+// NSEC3WildcardProof reports what the NSEC3 RRsets in authority prove about an
+// answer for qname that zone synthesised from a wildcard (RFC 5155 section
+// 8.8). labels is the Labels field of the answer's RRSIG: the wildcard's
+// closest encloser is qname's last labels labels, and an NSEC3 must cover the
+// next closer name, one label longer.
+//
+// Only NSEC3 RRsets owned directly below zone count, validated with zone's
+// signatures alone; one that does not validate Secure decides the verdict. A
+// cover through an Opt-Out span is Insecure (section 9.2), and so is a proof
+// that needs records over the iteration limit, with EDE 27 (RFC 9276). No
+// cover is Bogus. The EDE code is 0 otherwise.
+//
+// The positive answer path can call it for a wildcard-expanded RRset; nothing
+// does yet.
+func (rrcache *RRsetCacheT) NSEC3WildcardProof(ctx context.Context, zone, qname string, labels uint8,
+	authority []*core.RRset, fetcher RRsetFetcher) (ValidationState, uint16) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	zone = dns.Fqdn(zone)
+	var recs []*dns.NSEC3
+	for _, set := range authority {
+		if set == nil || set.RRtype != dns.TypeNSEC3 || !core.EqualNames(parentOf(dns.Fqdn(set.Name)), zone) {
+			continue
+		}
+		zs := signedBy(set, zone)
+		if zs == nil {
+			continue
+		}
+		if state, err := rrcache.ValidateRRset(ctx, zs, fetcher); err != nil || state != ValidationStateSecure {
+			if err != nil {
+				return ValidationStateIndeterminate, 0
+			}
+			return state, 0
+		}
+		for _, rr := range zs.RRs {
+			if n, ok := rr.(*dns.NSEC3); ok {
+				recs = append(recs, n)
+			}
+		}
+	}
+	v := newNSEC3Proof(zone, recs, NSEC3MaxIterations()).wildcardAnswer(dns.CanonicalName(qname), labels)
+	if v == nsec3OverLimit {
+		return v.state(), edeUnsupportedNSEC3Iterations
+	}
+	return v.state(), 0
+}
+
 // From Mieks DNS lib:
 // const year68 = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits.
 
