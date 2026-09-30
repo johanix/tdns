@@ -1177,8 +1177,9 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	if crrset != nil {
 		switch {
 		case crrset.Rcode == uint8(dns.RcodeNameError) && crrset.Context == cache.ContextNXDOMAIN:
-			if bogusDenial(crrset, msgoptions) {
-				writeBogusDenial(w, r, m)
+			crrset = imr.revalidateDenial(ctx, crrset, msgoptions)
+			if servfail, ede := imr.denialServfail(crrset, msgoptions); servfail {
+				writeDenialServfail(w, r, m, ede)
 				return
 			}
 			m.SetRcode(r, negativeRcode(crrset, msgoptions))
@@ -1213,8 +1214,9 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 		// that HAS one is cached as ContextAnswer and handled by the case
 		// below.
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextNoErrNoAns:
-			if bogusDenial(crrset, msgoptions) {
-				writeBogusDenial(w, r, m)
+			crrset = imr.revalidateDenial(ctx, crrset, msgoptions)
+			if servfail, ede := imr.denialServfail(crrset, msgoptions); servfail {
+				writeDenialServfail(w, r, m, ede)
 				return
 			}
 			m.SetRcode(r, dns.RcodeSuccess)
@@ -1513,8 +1515,8 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		// then come from different answers. A miss serves the NXDOMAIN the
 		// context stands for, with no proof beside it to contradict.
 		cached := imr.Cache.Get(qname, qtype)
-		if bogusDenial(cached, msgoptions) {
-			writeBogusDenial(w, r, m)
+		if servfail, ede := imr.denialServfail(cached, msgoptions); servfail {
+			writeDenialServfail(w, r, m, ede)
 			return true, nil
 		}
 		rc := dns.RcodeNameError
@@ -1531,8 +1533,8 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		return false, nil
 	case cache.ContextNoErrNoAns:
 		cached := imr.Cache.Get(qname, qtype)
-		if bogusDenial(cached, msgoptions) {
-			writeBogusDenial(w, r, m)
+		if servfail, ede := imr.denialServfail(cached, msgoptions); servfail {
+			writeDenialServfail(w, r, m, ede)
 			return true, nil
 		}
 		m.SetRcode(r, dns.RcodeSuccess)

@@ -5,6 +5,9 @@ package tdns
 
 import (
 	"context"
+	"net"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -257,5 +260,121 @@ func TestNSEC3MaxIterationsReachesTheCache(t *testing.T) {
 	}
 	if got := cache.NSEC3MaxIterations(); got != limit {
 		t.Errorf("the cache validates with a limit of %d, want the configured %d", got, limit)
+	}
+}
+
+// startForwardUpstreamFunc is startSignedForwardUpstream with the answer to
+// each question from answer, which is called on the server's goroutine; nil
+// is SERVFAIL.
+func startForwardUpstreamFunc(t *testing.T, answer func(qname string, qtype uint16) *dns.Msg) (string, uint16) {
+	t.Helper()
+	h := func(w dns.ResponseWriter, r *dns.Msg) {
+		q := r.Question[0]
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.RecursionAvailable = true
+		if a := answer(strings.ToLower(q.Name), q.Qtype); a != nil {
+			m.Answer, m.Ns, m.Rcode = a.Answer, a.Ns, a.Rcode
+		} else {
+			m.Rcode = dns.RcodeServerFailure
+		}
+		_ = w.WriteMsg(m)
+	}
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	host, port := splitHostPort(t, pc.LocalAddr().String())
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(h), NotifyStartedFunc: func() { close(started) }}
+	go func() { _ = srv.ActivateAndServe() }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("test upstream did not start")
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	})
+	return host, port
+}
+
+// A signed denial whose signer's key cannot be followed to the trust anchor
+// is Indeterminate, and SERVFAIL with EDE 5, fresh and from the cache. When
+// the key can be followed again, the cached denial is validated again as it
+// is served, and goes out Secure, with AD: a moment's gap does not fail the
+// name for the whole negative TTL.
+//
+// The anchor is the zone's KSK; the denial is signed by a ZSK that the first
+// DNSKEY RRset, with a TTL of one second, does not hold.
+func TestAnIndeterminateDenialIsValidatedAgainFromTheCache(t *testing.T) {
+	ksk, zsk := newFwdSecKey(t, fwdSecParent), newFwdSecKey(t, fwdSecParent)
+	denial := n3Denial(t, zsk, dns.RcodeNameError, n3NameErrorRecs(0, 0)...)
+	short := dns.Copy(ksk.dnskey).(*dns.DNSKEY)
+	short.Hdr.Ttl = 1
+	withoutZSK := &dns.Msg{Answer: ksk.sign(t, short)}
+	withZSK := &dns.Msg{Answer: ksk.sign(t, dns.Copy(ksk.dnskey), dns.Copy(zsk.dnskey))}
+	var keysBack atomic.Bool
+	addr, port := startForwardUpstreamFunc(t, func(qname string, qtype uint16) *dns.Msg {
+		switch {
+		case qname == n3NX && qtype == dns.TypeA:
+			return denial
+		case qname == fwdSecParent && qtype == dns.TypeDNSKEY && keysBack.Load():
+			return withZSK
+		case qname == fwdSecParent && qtype == dns.TypeDNSKEY:
+			return withoutZSK
+		}
+		return nil
+	})
+	imr := newForwardTestImr(t, []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}})
+	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
+	imr.DnskeyCache = imr.Cache.DnskeyCache
+	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
+		t.Fatalf("PrimeFromHintsOnly: %v", err)
+	}
+	imr.addDirectDNSKEYTrustAnchors(map[string][]*dns.DNSKEY{fwdSecParent: {ksk.dnskey}})
+
+	for _, from := range []string{"fresh", "cached"} {
+		if m := n3Ask(t, imr, n3NX, dns.TypeA, true, false); m.Rcode != dns.RcodeServerFailure || edeOf(m) != edns0.EDEDNSSECIndeterminate {
+			t.Fatalf("%s, the ZSK unknown: %s EDE %d, want SERVFAIL EDE %d", from, dns.RcodeToString[m.Rcode], edeOf(m), edns0.EDEDNSSECIndeterminate)
+		}
+	}
+	if c := imr.Cache.Get(n3NX, dns.TypeA); c == nil || c.State != cache.ValidationStateIndeterminate {
+		t.Fatalf("the denial is not cached as indeterminate")
+	}
+	expiry := imr.Cache.Get(n3NX, dns.TypeA).Expiration
+
+	keysBack.Store(true)
+	time.Sleep(1100 * time.Millisecond) // the DNSKEY RRset without the ZSK expires
+	if m := n3Ask(t, imr, n3NX, dns.TypeA, true, false); m.Rcode != dns.RcodeNameError || !m.AuthenticatedData {
+		t.Fatalf("the ZSK known: %s AD=%v EDE %d, want NXDOMAIN with AD", dns.RcodeToString[m.Rcode], m.AuthenticatedData, edeOf(m))
+	}
+	c := imr.Cache.Get(n3NX, dns.TypeA)
+	if c == nil || c.State != cache.ValidationStateSecure {
+		t.Fatalf("the cached denial was not updated to secure")
+	}
+	if !c.Expiration.Equal(expiry) {
+		t.Errorf("validating the cached denial again moved its expiry from %v to %v", expiry, c.Expiration)
+	}
+}
+
+// A DNSKEY denial handleNegative did not validate is held as None, not
+// Indeterminate, and is served as it is: validating it would call it Bogus
+// (ValidateDenial does not validate DNSKEY denials).
+func TestADNSKEYDenialIsNotValidatedAgain(t *testing.T) {
+	zone := newFwdSecKey(t, fwdSecParent)
+	imr := n3Rig(t, func(*fwdSecKey) map[string]*dns.Msg { return map[string]*dns.Msg{} })
+	d := n3Denial(t, zone, dns.RcodeSuccess, n3RR(fwdSecParent, n3WWW, false, 0, 0, dns.TypeA, dns.TypeRRSIG))
+	sets := authorityRRsets(d.Ns)
+	imr.Cache.Set(n3WWW, dns.TypeDNSKEY, &cache.CachedRRset{Name: n3WWW, RRtype: dns.TypeDNSKEY, Rcode: uint8(dns.RcodeSuccess),
+		RRset: sets[0], NegAuthority: sets, Context: cache.ContextNoErrNoAns, State: cache.ValidationStateNone,
+		Expiration: time.Now().Add(time.Minute)})
+	if m := n3Ask(t, imr, n3WWW, dns.TypeDNSKEY, true, false); m.Rcode != dns.RcodeSuccess {
+		t.Errorf("DNSKEY denial: %s EDE %d, want NOERROR", dns.RcodeToString[m.Rcode], edeOf(m))
+	}
+	if c := imr.Cache.Get(n3WWW, dns.TypeDNSKEY); c == nil || c.State != cache.ValidationStateNone {
+		t.Errorf("the DNSKEY denial's verdict changed")
 	}
 }

@@ -1376,6 +1376,18 @@ func (rrcache *RRsetCacheT) MarkRRsetBogus(qname string, qtype uint16, rrset *co
 	return edeCode, edeText
 }
 
+// SetVerdict changes the validation state, and the EDE, of the entry for
+// qname and qtype, and nothing else. Set recomputes the expiry from the TTLs,
+// and a verdict changed on every serve must not extend the entry's life (see
+// MarkRRsetBogus).
+func (rrcache *RRsetCacheT) SetVerdict(qname string, qtype uint16, state ValidationState, edeCode uint16, edeText string) {
+	key := rrsetKey(qname, qtype)
+	if stored, ok := rrcache.RRsets.Get(key); ok {
+		stored.State, stored.EDECode, stored.EDEText = state, edeCode, edeText
+		rrcache.RRsets.Set(key, stored)
+	}
+}
+
 func (rrcache *RRsetCacheT) lookupDnskeyEDE(rrset *core.RRset) (uint16, string, bool) {
 	if rrcache == nil || rrset == nil {
 		return 0, "", false

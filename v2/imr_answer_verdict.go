@@ -68,39 +68,99 @@ func adWanted(r *dns.Msg, msgoptions *edns0.MsgOptions) bool {
 }
 
 // negativeAD reports whether a denial served from entry c may carry AD: only a
-// Secure proof, and only to a client that can take the bit.
+// Secure proof, and only to a client that can take the bit. A proof through an
+// NSEC3 Opt-Out span, or over the NSEC3 iteration limit, is Insecure, and
+// gets none.
 //
-// Denials do not go through dispositionFor. A bogus one is SERVFAIL
-// (bogusDenial), the only EDE a cached denial carries is served beside it
-// rather than instead of it, and ValidateNegativeResponse still returns
-// Indeterminate for every NSEC3 proof -- SERVFAIL for a signed, Indeterminate
-// denial would fail every NXDOMAIN from an NSEC3-signed zone.
+// Denials do not go through dispositionFor: the only EDE a cached denial
+// carries (27, or 9 on a DNSKEY denial) is served beside it rather than
+// instead of it. Which denials are SERVFAIL is denialServfail's.
 func negativeAD(c *cache.CachedRRset, r *dns.Msg, msgoptions *edns0.MsgOptions) bool {
 	return c != nil && c.State == cache.ValidationStateSecure && adWanted(r, msgoptions)
 }
 
-// bogusDenial reports whether a denial cached as c is answered SERVFAIL rather
-// than served: its verdict is Bogus, and the client did not set CD, which asks
-// for the records to validate them itself.
+// denialServfail reports whether a denial cached as c is answered SERVFAIL
+// rather than served, and with which EDE. Denials follow dispositionFor's
+// rule for positive answers:
 //
-// A bogus denial used to be served, without AD. handleNegative refuses a denial
-// only when validation fails with an error, and a stripped denial from a zone
-// known to be signed is not an error but a verdict: it was cached as Bogus, and
-// the name an attacker wanted gone was gone for every client that does not
-// validate for itself.
-func bogusDenial(c *cache.CachedRRset, msgoptions *edns0.MsgOptions) bool {
-	return c != nil && c.State == cache.ValidationStateBogus && (msgoptions == nil || !msgoptions.CD)
+//   - Bogus: SERVFAIL, EDE 6.
+//   - Indeterminate, signed, on a resolver with trust anchors: SERVFAIL, EDE
+//     5. The chain could not be followed, which is not the same as the zone
+//     being unsigned.
+//   - With CD the client validates for itself, and every denial is served.
+//
+// Everything else is served: Secure, Insecure (an unsigned zone, an insecure
+// delegation, an NSEC3 Opt-Out span or iteration count), an unsigned
+// Indeterminate one, and any denial on a resolver without trust anchors.
+//
+// A bogus denial used to be served, without AD. handleNegative refuses a
+// denial only when validation fails with an error, and a stripped denial from
+// a zone known to be signed is not an error but a verdict: it was cached as
+// Bogus, and the name was gone for every client that does not validate for
+// itself. And an Indeterminate one was served because every NSEC3 proof
+// validated Indeterminate; they are validated now.
+func (imr *Imr) denialServfail(c *cache.CachedRRset, msgoptions *edns0.MsgOptions) (bool, uint16) {
+	if c == nil || (msgoptions != nil && msgoptions.CD) {
+		return false, 0
+	}
+	switch {
+	case c.State == cache.ValidationStateBogus:
+		return true, edns0.EDEDNSSECBogus
+	case c.State == cache.ValidationStateIndeterminate && denialSigned(c) && imr.hasTrustAnchors():
+		return true, edns0.EDEDNSSECIndeterminate
+	}
+	return false, 0
 }
 
-// writeBogusDenial answers r with a SERVFAIL carrying EDE 6 (DNSSEC Bogus), as a
-// bogus answer is answered (dispositionFor).
-func writeBogusDenial(w dns.ResponseWriter, r, m *dns.Msg) {
+// denialSigned reports whether a cached denial arrived with signatures: on
+// its SOA, or anywhere in its proof.
+func denialSigned(c *cache.CachedRRset) bool {
+	if c.RRset != nil && len(c.RRset.RRSIGs) > 0 {
+		return true
+	}
+	for _, set := range c.NegAuthority {
+		if set != nil && len(set.RRSIGs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// writeDenialServfail answers r with a SERVFAIL carrying ede, as a failing
+// answer is answered (dispositionFor).
+func writeDenialServfail(w dns.ResponseWriter, r, m *dns.Msg, ede uint16) {
 	m.Answer, m.Ns = nil, nil
 	m.SetRcode(r, dns.RcodeServerFailure)
 	if r.IsEdns0() != nil {
-		edns0.AttachEDEToResponse(m, edns0.EDEDNSSECBogus)
+		edns0.AttachEDEToResponse(m, ede)
 	}
 	w.WriteMsg(m)
+}
+
+// revalidateDenial validates a cached denial held Indeterminate again as it is
+// served, as serveCachedPositive does a positive entry, and returns the entry
+// with the new verdict. Indeterminate says the chain could not be followed
+// when the denial was cached -- a DNSKEY fetch that failed, a zone not judged
+// yet -- and denialServfail answers it SERVFAIL; held as it was, a moment's
+// gap would fail the name for the whole negative TTL.
+//
+// The verdict and EDE are updated in the cache without extending the entry's
+// life. Only Indeterminate, and only a signed denial: State None marks a DNSKEY
+// denial handleNegative did not validate, and it stays as it is. With CD the
+// client validates for itself.
+func (imr *Imr) revalidateDenial(ctx context.Context, c *cache.CachedRRset, msgoptions *edns0.MsgOptions) *cache.CachedRRset {
+	if c == nil || c.State != cache.ValidationStateIndeterminate || !denialSigned(c) ||
+		(msgoptions != nil && msgoptions.CD) || imr.Cache == nil || len(c.NegAuthority) == 0 {
+		return c
+	}
+	v, _ := imr.Cache.ValidateDenial(ctx, c.Name, c.RRtype, c.Rcode, c.NegAuthority, imr.IterativeDNSQueryFetcher())
+	if v.State == cache.ValidationStateNone || v.State == c.State {
+		return c
+	}
+	imr.Cache.SetVerdict(c.Name, c.RRtype, v.State, v.EDECode, v.EDEText)
+	updated := *c
+	updated.State, updated.EDECode, updated.EDEText = v.State, v.EDECode, v.EDEText
+	return &updated
 }
 
 // verdictReusable reports whether a cached verdict can be served as it stands.
