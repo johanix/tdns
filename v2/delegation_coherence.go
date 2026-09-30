@@ -188,8 +188,6 @@ func childrenWithDSChanges(parent string, actions []dns.RR) []string {
 	return out
 }
 
-// CheckDelegationCoherenceForUpdate applies the coherence rule to every
-// delegation whose DS the update touches.
 // ErrDelegationUnverifiable marks a coherence failure the parent could not
 // DECIDE, as opposed to one it decided against.
 //
@@ -203,9 +201,23 @@ func childrenWithDSChanges(parent string, actions []dns.RR) []string {
 // that had just approved the update (#571).
 var ErrDelegationUnverifiable = errors.New("the delegation could not be verified")
 
+// CheckDelegationCoherenceForUpdate applies the coherence rule to every
+// delegation whose DS the update touches.
+//
+// The DS the parent publishes for the child is what the rule measures against,
+// so a parent that cannot read it has not checked anything and refuses. It must
+// not go on as if there were no DS: "no DS" is the bootstrap case, which accepts
+// an unvalidated DNSKEY answer, and for a child that has a DS that answer is
+// exactly the one the rule exists to refuse (#848). The DS set the update would
+// leave is also computed from the current one, so it would be wrong as well.
 func (zd *ZoneData) CheckDelegationCoherenceForUpdate(actions []dns.RR, fetch dnskeyFetcher) error {
 	for _, child := range childrenWithDSChanges(zd.ZoneName, actions) {
-		if err := CheckDelegationCoherence(child, zd.currentChildDS(child), actions, fetch); err != nil {
+		currentDS, err := zd.currentChildDS(child)
+		if err != nil {
+			return fmt.Errorf("cannot verify that %s would still validate: cannot read the DS this parent publishes for it: %w: %w",
+				child, err, ErrDelegationUnverifiable)
+		}
+		if err := CheckDelegationCoherence(child, currentDS, actions, fetch); err != nil {
 			return err
 		}
 	}
@@ -465,10 +477,23 @@ func imrDnskeyFetcher(imr *Imr) dnskeyFetcher {
 
 // currentChildDS returns the DS RRset the parent currently publishes for child.
 // The parent is authoritative for it, so this is a local read.
-func (zd *ZoneData) currentChildDS(child string) []dns.RR {
-	owner, err := zd.GetOwner(dns.Fqdn(child))
-	if err != nil || owner == nil || owner.RRtypes == nil {
-		return nil
+//
+// A child with no owner in the zone, or no DS at its owner, has no DS: nil and
+// no error. A parent that cannot read its own zone returns an error instead,
+// because to the caller nil means "no DS" (#848). A zone store with no owner
+// index can never answer, which errParentDSUnreadable marks; a zone that is not
+// Ready yet can once it is, and keeps ErrZoneNotReady.
+func (zd *ZoneData) currentChildDS(child string) ([]dns.RR, error) {
+	if zd.ZoneStore != MapZone {
+		return nil, fmt.Errorf("zone %s is a %s, which holds no owner index: %w",
+			zd.ZoneName, ZoneStoreToString[zd.ZoneStore], errParentDSUnreadable)
 	}
-	return owner.RRtypes.GetOnlyRRSet(dns.TypeDS).RRs
+	owner, err := zd.GetOwner(dns.Fqdn(child))
+	if err != nil {
+		return nil, err
+	}
+	if owner == nil || owner.RRtypes == nil {
+		return nil, nil
+	}
+	return owner.RRtypes.GetOnlyRRSet(dns.TypeDS).RRs, nil
 }
