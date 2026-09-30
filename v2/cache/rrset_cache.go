@@ -566,7 +566,10 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 			continue // Skip invalid server names
 		}
 		tmpauthserver.families = rrcache.families
-		if kept := rrcache.families.filter(server.Addrs); len(kept) < len(server.Addrs) {
+		switch kept := rrcache.families.filter(server.Addrs); {
+		case len(kept) == 0 && len(server.Addrs) > 0:
+			log.Printf("AddStub: zone %s server %s: WARNING: every configured address is of an address family not in use; the server cannot be queried (imrengine.outbound-address-families)", zone, server.Name)
+		case len(kept) < len(server.Addrs):
 			log.Printf("AddStub: zone %s server %s: addresses of an address family not in use are left out (imrengine.outbound-address-families)", zone, server.Name)
 		}
 		// Override defaults with config values
