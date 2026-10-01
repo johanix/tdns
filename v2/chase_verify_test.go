@@ -974,3 +974,19 @@ func TestChaseDenials(t *testing.T) {
 		wantStatus(t, "result", res.Status, ChainStatusSecure)
 	})
 }
+
+// Whether an answer was synthesized from a wildcard is the resolver's call
+// (cache.ExpansionSignature): the wildcard asked for by its own name is not
+// an expansion, a name it answers for is.
+func TestChaseExpansionIsTheResolversCall(t *testing.T) {
+	tr := denialTree(t)
+	res := tr.chase("*.w.sec.example.", dns.TypeA)
+	wantStatus(t, "the wildcard by name", res.Leaf.Status, ChainStatusSecure)
+	if hasNote(res.Leaf.Notes, "synthesized") {
+		t.Errorf("the wildcard asked for by name taken for an expansion: %q", res.Leaf.Notes)
+	}
+	res = tr.chase("x.w.sec.example.", dns.TypeA)
+	if !hasNote(res.Leaf.Notes, "synthesized from *.w.sec.example.") {
+		t.Errorf("an expansion not reported: %q", res.Leaf.Notes)
+	}
+}

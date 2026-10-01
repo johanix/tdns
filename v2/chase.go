@@ -827,10 +827,10 @@ func (w *chainWalk) answerOwn(leaf *ChainLeaf, deepest *ChainLink) ChainStatus {
 		return ChainStatusBogus
 	}
 	leaf.Notes = append(leaf.Notes, fmt.Sprintf("sig keytag=%d verified", sig.KeyTag))
-	if wildcard, ok := expandedFrom(sig, leaf.Qname); ok {
+	if cache.ExpansionSignature(sig, leaf.Qname) {
 		// RFC 4035 section 5.3.4: valid for the wildcard, the signature does
 		// not show that the name itself does not exist.
-		leaf.Notes = append(leaf.Notes, fmt.Sprintf("synthesized from %s; the proof that the name does not exist is not checked", wildcard))
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("synthesized from %s; the proof that the name does not exist is not checked", wildcardOf(sig, leaf.Qname)))
 		return ChainStatusIndeterminate
 	}
 	return ChainStatusSecure
@@ -852,23 +852,16 @@ func signersOf(rrset *core.RRset) []string {
 	return out
 }
 
-// expandedFrom reports whether sig, over records owned by owner, was made
-// over a wildcard (RFC 4034 section 3.1.3, RFC 4035 section 5.3.2): its Labels
-// field is below the label count of owner, a leading "*" not counted. It
-// returns the wildcard.
-func expandedFrom(sig *dns.RRSIG, owner string) (string, bool) {
+// wildcardOf names the wildcard an expansion signature (cache.ExpansionSignature)
+// over records owned by owner was made over, for the output: "*." and the
+// last Labels labels of owner.
+func wildcardOf(sig *dns.RRSIG, owner string) string {
 	labels := dns.SplitDomainName(dns.Fqdn(owner))
-	n := len(labels)
-	if n > 0 && labels[0] == "*" {
-		n--
+	n := min(int(sig.Labels), len(labels))
+	if n == 0 {
+		return "*."
 	}
-	if int(sig.Labels) >= n {
-		return "", false
-	}
-	if sig.Labels == 0 {
-		return "*.", true
-	}
-	return "*." + dns.Fqdn(strings.Join(labels[len(labels)-int(sig.Labels):], ".")), true
+	return "*." + dns.Fqdn(strings.Join(labels[len(labels)-n:], "."))
 }
 
 // negativeKind names a negative answer by its rcode.

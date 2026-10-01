@@ -99,7 +99,7 @@ func (rrcache *RRsetCacheT) validateExpansion(ctx context.Context, rrset *core.R
 	if err != nil || state != ValidationStateSecure || sig == nil {
 		return v, err
 	}
-	if !isExpansion(sig, owner) {
+	if !ExpansionSignature(sig, owner) {
 		v.Proof = nil
 		return v, nil
 	}
@@ -272,9 +272,12 @@ func ownerLabels(owner string) int {
 	return len(labels)
 }
 
-// isExpansion reports whether sig, over records owned by owner, was made over
-// a wildcard.
-func isExpansion(sig *dns.RRSIG, owner string) bool {
+// ExpansionSignature reports whether sig, over records owned by owner, was
+// made over a wildcard: its Labels field is below owner's label count, a
+// leading "*" label not counted (RFC 4034 section 3.1.3, RFC 4035 section
+// 5.3.2). The chain walk of dog +sigchase asks it too, so that the two cannot
+// tell expansions apart differently.
+func ExpansionSignature(sig *dns.RRSIG, owner string) bool {
 	return int(sig.Labels) < ownerLabels(owner)
 }
 
@@ -284,7 +287,7 @@ func splitExpansionSignatures(rrset *core.RRset) (rest, expansion []dns.RR) {
 	owner := answerOwner(rrset)
 	for _, rr := range rrset.RRSIGs {
 		if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == rrset.RRtype &&
-			core.EqualNames(dns.Fqdn(sig.Hdr.Name), owner) && isExpansion(sig, owner) {
+			core.EqualNames(dns.Fqdn(sig.Hdr.Name), owner) && ExpansionSignature(sig, owner) {
 			expansion = append(expansion, rr)
 			continue
 		}
