@@ -249,6 +249,33 @@ func (zd *ZoneData) workingOwnerNamesLocked() []string {
 	return names
 }
 
+// publishOrQueueLocked is the gate's entry for a writer that has staged a
+// change (docs/2026-09-17-publish-gate-and-transactions.md). It reports
+// whether the publish ran here, in the caller:
+//
+//   - a held zone: the publish is stopped inside (step 1's hold), and the
+//     commit that closes the hold carries the change;
+//   - now, a zone that is not Ready, or an idle zone (no publish within the
+//     cadence): the publish runs here, under the zd.mu the caller holds,
+//     exactly as every publish did before the gate;
+//   - otherwise the change stays staged, marked queued, and runPublisher
+//     publishes it at lastPublish + cadence with everything staged by then.
+//
+// A caller whose publish did not run here hands its Resp to zd.waiters, and
+// what it would do after a publish to zd.afterPublish. Caller holds zd.mu.
+func (zd *ZoneData) publishOrQueueLocked(gen uint64, now bool) bool {
+	if zd.txHeldLocked() {
+		zd.publishLocked(gen)
+		return false
+	}
+	if now || !zd.Ready || zd.lastPublish.IsZero() || time.Since(zd.lastPublish) >= publishCadenceForZone(zd) {
+		zd.publishLocked(gen)
+		return true
+	}
+	zd.requestPublishLocked()
+	return false
+}
+
 func (zd *ZoneData) requestPublish(urgent bool) {
 	if urgent {
 		_, _ = zd.publishSync()
@@ -406,13 +433,13 @@ func (zd *ZoneData) publishLocked(gen uint64) {
 // false the caller has already set zd.CurrentSerial (refresh flips, transport
 // signal synthesis without a content serial change).
 func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
-	// Commits waiting to learn that their transaction is published (zone_tx.go)
-	// are answered by this publish, however it ends: every refusal below
-	// returns through here. No waiters, which is every zone that opens no
-	// transaction, and nothing is deferred.
-	if len(zd.tx.commitWaiters) > 0 {
+	// The changes waiting to be published (updates the gate deferred, commits
+	// waiting for their transaction: zone_tx.go) are answered by this publish,
+	// however it ends: every refusal below returns through here. Nothing
+	// waiting, and nothing is deferred.
+	if len(zd.waiters) > 0 || len(zd.afterPublish) > 0 {
 		before, errBefore := zd.snapshot.Load(), zd.ErrorMsg
-		defer func() { zd.txPublishDoneLocked(before, errBefore) }()
+		defer func() { zd.publishDoneLocked(before, errBefore) }()
 	}
 	if zd.workingSet == nil {
 		zd.publishQueued = false
@@ -1482,7 +1509,9 @@ func (zd *ZoneData) runPublisher() {
 		for {
 			zd.mu.Lock()
 			if !zd.publishQueued {
+				acts := zd.takeAfterPublishReadyLocked()
 				zd.mu.Unlock()
+				runAfterPublish(acts)
 				break
 			}
 			urgent := zd.publishUrgent
@@ -1491,15 +1520,37 @@ func (zd *ZoneData) runPublisher() {
 			if urgent || zd.lastPublish.IsZero() || since >= cadence {
 				gen := zd.generation.Load()
 				zd.publishLocked(gen)
+				// The waiters were answered inside, with the journal's error
+				// if it refused; left behind, the next update's applier would
+				// read that error as its own.
+				zd.wsPersistErr = nil
+				acts := zd.takeAfterPublishReadyLocked()
 				zd.mu.Unlock()
+				runAfterPublish(acts)
 				continue
 			}
 			wait := cadence - since
+			acts := zd.takeAfterPublishReadyLocked()
 			zd.mu.Unlock()
+			runAfterPublish(acts)
 			timer = time.NewTimer(wait)
 			timerC = timer.C
 			break
 		}
+	}
+}
+
+// takeAfterPublishReadyLocked hands over what a publish has made runnable.
+// Caller holds zd.mu, and runs them after releasing it.
+func (zd *ZoneData) takeAfterPublishReadyLocked() []func() {
+	acts := zd.afterPublishReady
+	zd.afterPublishReady = nil
+	return acts
+}
+
+func runAfterPublish(acts []func()) {
+	for _, f := range acts {
+		f()
 	}
 }
 

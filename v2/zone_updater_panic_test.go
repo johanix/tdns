@@ -187,7 +187,7 @@ func TestPublishThatPanicsDropsTheWorkingSetAndFlagsTheZone(t *testing.T) {
 	rec := recovered(func() {
 		zd.mu.Lock()
 		defer zd.mu.Unlock()
-		_, _, _ = zd.stageAndPublishLocked(UpdateRequest{ZoneName: "example."}, func() bool {
+		_, _, _, _ = zd.stageAndPublishLocked(UpdateRequest{ZoneName: "example."}, func() bool {
 			// Staged directly: the appliers print what they stage. The publish
 			// prints it too, to journal it, after it has moved the serial.
 			zd.stageRRsetLocked("broken.example.", core.RRset{Name: "broken.example.", RRtype: typePANICTEXT,
