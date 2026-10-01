@@ -2,9 +2,8 @@
 
 **Written 2026-10-01.** Line references are to main at `995c15c6`.
 
-**Status:** items 1-5 and 8 implemented on branch
-`fix/dog-chase-verification` (PR 1). Items 6 and 7 are not implemented: PR 2,
-after #873 and #874 merge.
+**Status:** items 1-5 and 8 implemented in PR #881; items 6 and 7 in a
+second PR after #873 and #874.
 
 **Revisions:**
 - **r1**, 2026-10-01: the proposal, approved the same day with the decisions
