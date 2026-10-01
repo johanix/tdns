@@ -24,7 +24,9 @@ import (
 // instead of being skipped in silence.
 
 // AuthQueryEngine keeps the authority section of an authoritative NODATA, the
-// proof that there is no such RRset, and keeps none for an answer with data.
+// proof that there is no such RRset. It keeps the authority section of an
+// answer with data too: for one synthesized from a wildcard, it holds the
+// proof that goes with it.
 func TestAuthQueryEngineKeepsTheProofOfANodata(t *testing.T) {
 	sc := NewScanner(startAuthQueryEngine(t), false, false)
 	const name = "ns1.child.example."
@@ -49,8 +51,8 @@ func TestAuthQueryEngineKeepsTheProofOfANodata(t *testing.T) {
 
 	a := name + " 300 IN A 192.0.2.1"
 	_, proof, err = sc.authQueryWithDenial(name, testAuthServerWithAuthority(t, true, []string{a}, []string{soa}), dns.TypeA, "tcp")
-	if err != nil || len(proof) != 0 {
-		t.Errorf("an answer with data: proof %v, err %v; want no proof", proof, err)
+	if err != nil || len(proof) != 1 || proof[0].RRtype != dns.TypeSOA {
+		t.Errorf("an answer with data: authority %v, err %v; want its authority section, the SOA", proof, err)
 	}
 }
 
