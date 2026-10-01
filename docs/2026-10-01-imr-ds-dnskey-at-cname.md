@@ -1,9 +1,9 @@
 # tdns-imr: DS and DNSKEY questions at a CNAME owner
 
 **Written 2026-10-01.** Refs #875, #717. Line references are to main at
-`995c15c6`, before this change. The design was written against main at
-`9d9d34b3` with #870–#874 applied; #872 and #874, which change
-`handleAnswer`, are not merged yet.
+`6d74bd13` (#870–#874 merged), before this change. The design was written
+against main at `9d9d34b3` with #870–#874 applied, which has the same line
+numbers.
 
 **Status:** implemented in PR #879 (branch `fix/imr-ds-dnskey-at-cname`),
 with the changes in §13.
@@ -13,6 +13,8 @@ with the changes in §13.
   in §12.
 - **Amended 2026-10-01** (§13): how the implementation differs, Johan's
   decision on the API's `imr query`, and the live checks.
+- **Amended 2026-10-01, later** (§13.3, §13.7): main merged forward after
+  #872, #873 and #874; the live checks again, with a CNAME into a wildcard.
 
 ## Summary
 
@@ -49,8 +51,8 @@ with the changes in §13.
 that answers the client's question:
 
 - the walk (`IterativeDNSQueryInZone`, `imrengine.go:1290`, `1331`);
-- referral continuations (`dnslookup.go:1810`, `3294`);
-- the chase (`chaseCNAME`, `dnslookup.go:4002`);
+- referral continuations (`dnslookup.go:1810`, `3311`);
+- the chase (`chaseCNAME`, `dnslookup.go:4010`);
 - the forward and own-zone paths, which call `handleAnswer` with the same
   context.
 
@@ -67,11 +69,11 @@ owns a CNAME:
 | Caller | Question | The name owns a CNAME when | Gets |
 |---|---|---|---|
 | `delegationEvidence` (`cache/unsigned_rrset.go:301`), from `belowSecureZone` (unsigned RRsets and unsigned denials) and `ReferralChildState` (`cache/delegation_proof.go`) | DS at each name from the closest Secure zone down to the owner | the CNAME being validated is unsigned (the #717 case); a CNAME owner above the data (legal, rare) | §4.2 |
-| `backfillDS` (`cache/rrset_validate.go:1041`), from `ValidateDNSKEYs` and `recheckInsecureZone` | DS at a zone apex | never in valid data | no DS: what an unanswered question gives today |
+| `backfillDS` (`cache/rrset_validate.go:1065`), from `ValidateDNSKEYs` and `recheckInsecureZone` | DS at a zone apex | never in valid data | no DS: what an unanswered question gives today |
 | `validateRRsetWithRRSIG` (`cache/rrset_validate.go:191`) | DNSKEY at the RRSIG's signer | never in valid data; a CNAME whose RRSIG names its own owner as signer leads here | no DNSKEY: Indeterminate, as for a failed fetch |
-| trust-anchor setup (`imrengine.go:2415`) | DNSKEY at an anchor | a configuration error | no DNSKEY: the error it reports today |
+| trust-anchor setup (`imrengine.go:2441`) | DNSKEY at an anchor | a configuration error | no DNSKEY: the error it reports today |
 | `ImrQuery` (`imrengine.go:676`): the API's `imr query`, a child's DNSKEY (`delegation_coherence.go:460`), the scanner and the DSYNC code | any type | a child or a target that is a CNAME | a NODATA (`Denial` = `ContextNoErrNoAns`), no RRset, `ValidationState` = the link's verdict (§4.3) |
-| `DefaultDNSKEYFetcher` (`dnslookup.go:4033`) | DNSKEY | — | no caller in v2; as the row above |
+| `DefaultDNSKEYFetcher` (`dnslookup.go:4041`) | DNSKEY | — | no caller in v2; as the row above |
 
 All of them go through the fetchers (`IterativeDNSQueryFetcher`,
 `DefaultDNSKEYFetcher`, `DefaultRRsetFetcher`) or through `imrQuery`, and each
@@ -105,7 +107,7 @@ Nothing new: once `followsCNAME` is true, the #717 code runs as it does for A.
   `<target, qtype>`.
 - **The DS at the chain's end is asked at the parent side.** `chaseCNAME`
   picks servers with `FindClosestKnownZoneFor(target, DS)`, which starts from
-  the target's parent (`cache/rrset_cache.go:1239`). For `www.sidn.nl DS`
+  the target's parent (`cache/rrset_cache.go:1251`). For `www.sidn.nl DS`
   that is `nl.`. The DS that comes back is validated as any answer is
   (`ValidateAnswer`). Its signer must be a strict ancestor
   (`SignerHoldsRRset`), here `nl.`. It is cached at `<sidn.nl, DS>`. A
@@ -239,7 +241,7 @@ again, asks for the DS at X again.
 ## 6. The retry storm
 
 **Why it happens.** `handleAnswer` returns `ContextFailure, done=false,
-err=nil` (`dnslookup.go:2947`). The walk then looks for a referral in the
+err=nil` (`dnslookup.go:2964`). The walk then looks for a referral in the
 response (`dnslookup.go:1800`), finds none, and moves on to the next (server,
 address, transport) tuple. Once every tuple has been tried, it resolves the
 nameservers that had no glue and tries again (`:1893`). Then it returns
@@ -445,6 +447,18 @@ This was implemented on main at `995c15c6`. On that main, `handleAnswer` and
 of the CNAME response. When #872 and #874 merge, main is merged forward into
 the branch.
 
+**Merged forward, 2026-10-01** (main at `6d74bd13`, with #872, #873 and
+#874). There were no conflicts. `cacheCNAMELink` now validates a link, or the
+DNAME that synthesized it, with `ValidateAnswer` and the response's authority
+section, as #874 has it. It keeps the proof of a link synthesized from a
+wildcard (`WildcardProof`), and adds the validation mark of §5 on top. The
+resolver's own question takes that path too (`cnameAsNoData` calls
+`cacheCNAMELink`), so its link keeps its proof the same way: see
+`TestOwnDSQuestionAtAWildcardCNAMEKeepsItsProof`. That test fails if the
+authority section is not passed. `handleAnswer` keeps #872's rule (an answer
+is built only from the records owned by qname) after the CNAME branches. §3
+holds as written.
+
 ### 13.4 Smaller differences
 
 - The cache step in `IterativeDNSQueryWithLoopDetection` reads the link
@@ -497,3 +511,39 @@ Run with this branch's tdns-imr on port 1199 (API on 8184), and compared with
   `imr query www.sidn.nl DS` with `no Answers found … (zone=sidn.nl.
   attempts=6 …)`.
 - The log has no `Got a CNAME RR` lines.
+
+### 13.7 Live checks after the merge
+
+Run with this branch's tdns-imr, built at the merge commit, on port 1199 and
+compared with 1.1.1.1:
+
+- **Unchanged from §13.6:** `www.sidn.nl DS` and `DNSKEY`, and
+  `www.internetstiftelsen.se DS`, give the same answers. A cold
+  `www.sidn.nl DS` sent `www.sidn.nl DS` to three servers on the walk (root,
+  `nl`, `sidn.nl`); the second ask sent none.
+- **A CNAME into a wildcard.** The owner is a CNAME in an unsigned zone
+  hosted at Cloudflare. Its target is a name under `codeberg.page` that the
+  signed wildcard `*.codeberg.page` answers, with NSEC3 proofs.
+  - A question: the CNAME, then the wildcard A with its RRSIG (labels 2) and
+    the NSEC3 proof, without AD (the link is Insecure). This matches 1.1.1.1.
+  - DS question: the CNAME, then the NODATA at the target from
+    `codeberg.page` (SOA and two NSEC3s), without AD. This matches 1.1.1.1;
+    `delv` gives the same result against both. A second ask sent nothing
+    upstream.
+  - A DS question at a wildcard name itself (`qx7zq4.codeberg.page`): a
+    secure NODATA with AD, as from 1.1.1.1. `delv` says "negative response,
+    fully validated".
+- **A DNSKEY question at the same CNAME owner differs from 1.1.1.1.**
+  Cloudflare's servers answer a DNSKEY question at a CNAME owner with a
+  NODATA, not the CNAME, and 1.1.1.1, 9.9.9.9 and 8.8.8.8 pass that NODATA
+  on. tdns-imr held the link from the A question, so it answered from the
+  link: the CNAME, then the NODATA at the target. A CNAME owner holds no
+  other data (RFC 1034 §3.6.2). On a cold cache, tdns-imr gets the server's
+  NODATA too.
+- **`tdns-cli imr query`** over the API: `www.sidn.nl DS` and `DNSKEY` give
+  the records at the chain's end, secure. A chain that ends in a NODATA is
+  printed as NODATA with an empty state. `imrQuery` reads the verdict from
+  `<qname, qtype>`, and a followed chain has nothing cached there. Asking an
+  A question through a chain that ends in a NODATA already did the same
+  before this change. This is part of the API not showing the chain (§13.1),
+  and is not changed here.
