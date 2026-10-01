@@ -103,6 +103,24 @@ func (m *ConcurrentMap[K, V]) Upsert(key K, value V, cb UpsertCb[V]) (res V) {
 	return res
 }
 
+// UpdateIf calls cb with the value stored under key while holding the key's
+// shard lock, and stores what cb returns when cb says to. A key that is absent
+// stays absent, and cb is not called. It reports whether anything was stored.
+func (m *ConcurrentMap[K, V]) UpdateIf(key K, cb func(stored V) (V, bool)) bool {
+	shard := m.GetShard(key)
+	shard.Lock()
+	defer shard.Unlock()
+	stored, ok := shard.items[key]
+	if !ok {
+		return false
+	}
+	updated, apply := cb(stored)
+	if apply {
+		shard.items[key] = updated
+	}
+	return apply
+}
+
 // Sets the given value under the specified key if no value was associated with it.
 func (m *ConcurrentMap[K, V]) SetIfAbsent(key K, value V) bool {
 	// Get map shard.

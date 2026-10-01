@@ -150,12 +150,12 @@ func TestScanCSYNCKeepsGlueWhoseAbsenceIsNotProven(t *testing.T) {
 		verdict cache.ValidationState // zero: the NODATA comes with no proof
 		why     string
 	}{
-		{"an NSEC3 proof, which the validator does not verify yet", cache.ValidationStateIndeterminate, "indeterminate"},
+		{"a proof whose chain could not be followed", cache.ValidationStateIndeterminate, "indeterminate"},
 		{"a proof that fails validation", cache.ValidationStateBogus, "bogus"},
 		{"no proof at all", 0, "no proof"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			child := []string{"nsec3.example.", "bogus.example.", "noproof.example."}[i]
+			child := []string{"indeterminate.example.", "bogus.example.", "noproof.example."}[i]
 			ns1 := "ns1." + child
 			zd, n := csyncDropA(t, child, true)
 			if tc.verdict != 0 {

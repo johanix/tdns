@@ -294,7 +294,8 @@ func (imr *Imr) chainAt(qname string, qtype uint16, privacy edns0.PrivacyLevel, 
 //     serveCachedPositive does;
 //   - a synthesized CNAME by the verdict of its DNAME, which is served ahead of
 //     it;
-//   - a denial at the end by bogusDenial, and served with serveNegativeResponse.
+//   - a denial at the end by denialServfail, validated again when it is held
+//     Indeterminate (revalidateDenial), and served with serveNegativeResponse.
 //
 // Any part that fails fails the answer, with that part's EDE. AD is set only
 // when every part is Secure. The rcode is that of the chain's last name (RFC
@@ -371,8 +372,9 @@ func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.
 
 	switch final.Context {
 	case cache.ContextNXDOMAIN, cache.ContextNoErrNoAns:
-		if bogusDenial(final, msgoptions) {
-			writeBogusDenial(w, r, m)
+		final = imr.revalidateDenial(ctx, final, msgoptions)
+		if servfail, ede := imr.denialServfail(final, msgoptions); servfail {
+			writeDenialServfail(w, r, m, ede)
 			return chainServed
 		}
 		rcode := dns.RcodeSuccess

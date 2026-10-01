@@ -128,7 +128,22 @@ func TestNSEC3ProofOfAZoneCut(t *testing.T) {
 			return []*core.RRset{k.sign(t, withRec(nsec3In(secZone, secKid, false, 0, 0, dns.TypeNS), func(r *dns.NSEC3) { r.Flags = 2 }))}
 		}, evidenceNone},
 		{"iterations over the limit", secKid, func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []*core.RRset {
-			return []*core.RRset{k.sign(t, nsec3In(secZone, secKid, false, 0, maxNSEC3Iterations+1, dns.TypeNS))}
+			return []*core.RRset{k.sign(t, nsec3In(secZone, secKid, false, 0, DefaultNSEC3MaxIterations+1, dns.TypeNS))}
+		}, evidenceUnjudged},
+		{"Opt-Out span, hashes in mixed case", secKid, func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []*core.RRset {
+			rec := nsec3In(secZone, secKid, true, optOut, 0, dns.TypeA, dns.TypeRRSIG)
+			rec.Hdr.Name = strings.ToLower(rec.Hdr.Name)
+			rec.NextDomain = strings.ToLower(rec.NextDomain[:16]) + rec.NextDomain[16:]
+			return []*core.RRset{k.sign(t, apexNSEC3(secZone)), k.sign(t, rec)}
+		}, evidenceInsecureCut},
+		{"a proof that runs out of hashes", strings.Repeat("a.", 110) + secZone, func(t *testing.T, _ *RRsetCacheT, k *zoneKey) []*core.RRset {
+			// Three parameter sets: every name on the way up is hashed three
+			// times, and the apex is 110 labels up.
+			var sets []*core.RRset
+			for _, salt := range []string{"", "00", "0000"} {
+				sets = append(sets, k.sign(t, synthNSEC3(secZone, secZone, false, 0, 0, salt, dns.TypeNS, dns.TypeSOA)))
+			}
+			return sets
 		}, evidenceUnjudged},
 		{"signed by the child", secKid, func(t *testing.T, rrcache *RRsetCacheT, _ *zoneKey) []*core.RRset {
 			return []*core.RRset{newZoneKey(t, rrcache, secKid, false).sign(t, nsec3In(secZone, secKid, false, 0, 0, dns.TypeNS))}

@@ -279,6 +279,7 @@ imrengine:
       cache-max-ttl:             86400  # seconds; ceiling on cached lifetimes
       cache-min-ttl:             0      # seconds; floor on cached lifetimes (0 = none)
       zone-state-recheck:        30s    # how long an insecure or indeterminate zone verdict stands
+      nsec3-max-iterations:      10     # NSEC3 proofs above this are not judged (RFC 9276)
 ```
 
 The `address-family` group is what demotes a broken IPv6 (or IPv4) path: once
@@ -305,6 +306,13 @@ recheck, so a zone that stays unsigned costs nothing, while a signed zone still
 delegated without a DS costs one DS query per interval for as long as it is in
 use. Flushing a zone without keeping its structural records, or resetting the
 cache, drops these verdicts at once.
+
+`nsec3-max-iterations` is the most NSEC3 hash iterations the validator computes
+a proof for. RFC 9276 asks zones to use 0, and deployed zones rarely use more
+than a few. A denial whose proof needs NSEC3 records above the limit is served
+without AD, with EDE 27 (Unsupported NSEC3 Iterations Value), once the records'
+signatures have validated; a zone cut such records would prove is not judged,
+and the zone below it is treated as indeterminate. 0 is allowed.
 
 ## Test-harness switches
 

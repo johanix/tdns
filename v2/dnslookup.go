@@ -3802,7 +3802,14 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	vstate := cache.ValidationStateNone
 	negRcode := uint8(r.MsgHdr.Rcode)
 	if !skipDNSKEYValidation && len(negAuthority) > 0 {
-		vstate, negRcode, err = imr.Cache.ValidateNegativeResponse(context.Background(), qname, qtype, negRcode, negAuthority, imr.IterativeDNSQueryFetcher())
+		var verdict cache.DenialVerdict
+		verdict, err = imr.Cache.ValidateDenial(context.Background(), qname, qtype, negRcode, negAuthority, imr.IterativeDNSQueryFetcher())
+		vstate, negRcode = verdict.State, verdict.Rcode
+		// An NSEC3 proof over the iteration limit is served, Insecure, with
+		// EDE 27 beside it (RFC 9276).
+		if verdict.EDECode != 0 {
+			edeCode, edeText = verdict.EDECode, verdict.EDEText
+		}
 		if err != nil {
 			// If validation returns ValidationStateIndeterminate (e.g., no trust anchors),
 			// we should still cache and return the response, not treat it as a failure.

@@ -13,6 +13,10 @@ imrengine:
 {% endif %}
    # Keeps the experimental transport-signal option off outgoing queries.
    options: [ "use-transport-signals:false" ]
+   # The scenarios predate RFC 9276, and RFC 5155's example zone uses 12 NSEC3
+   # iterations: 150 instead of the default 10, so their proofs are judged.
+   tuning:
+      nsec3-max-iterations: 150
    # The scenario's do-ip4 and do-ip6.
    outbound-address-families: [ {% if DO_IP4 == "true" %}ipv4{% endif %}{% if DO_IP4 == "true" and DO_IP6 == "true" %}, {% endif %}{% if DO_IP6 == "true" %}ipv6{% endif %} ]
    # Designed in docs/2026-09-28-imr-deckard-test-clock-and-switches.md.
