@@ -323,18 +323,33 @@ func TestCNAMEChainThroughWildcards(t *testing.T) {
 }
 
 // revalidateGlueRR caches again an address it has just looked up; a glue
-// address synthesized from a wildcard keeps the proof that came with it.
+// address synthesized from a wildcard keeps the proof that came with it, and
+// lives no longer than that proof. Under *.v the proof has TTL 0: the lookup
+// stores the address already expired, and validation must not lose the proof
+// on the way. (ns.y.v: the proof under v covers x.v to zz.v.)
 func TestRevalidatedGlueKeepsItsProof(t *testing.T) {
-	imr := wildcardImr(t)
-	host := "ns.g." + wcnZone
-	servers, ok := imr.Cache.ServerMap.Get(wcnZone)
-	if !ok || servers["ns."+wcnZone] == nil {
-		t.Fatalf("test setup: no stub server for %s", wcnZone)
-	}
-	imr.revalidateGlueRR(context.Background(), wcnZone, host, dns.TypeA, servers["ns."+wcnZone], true)
-	c := imr.Cache.Peek(host, dns.TypeA)
-	if c == nil || c.State != cache.ValidationStateSecure || len(c.WildcardProof) == 0 {
-		t.Errorf("after revalidateGlueRR: %+v; want Secure, with the proof", c)
+	for _, c := range []struct {
+		host     string
+		proofTTL time.Duration
+	}{
+		{"ns.g." + wcnZone, 300 * time.Second},
+		{"ns.y.v." + wcnZone, 0},
+	} {
+		t.Run(c.host, func(t *testing.T) {
+			imr := wildcardImr(t)
+			servers, ok := imr.Cache.ServerMap.Get(wcnZone)
+			if !ok || servers["ns."+wcnZone] == nil {
+				t.Fatalf("test setup: no stub server for %s", wcnZone)
+			}
+			imr.revalidateGlueRR(context.Background(), wcnZone, c.host, dns.TypeA, servers["ns."+wcnZone], true)
+			e := imr.Cache.Peek(c.host, dns.TypeA)
+			if e == nil || e.State != cache.ValidationStateSecure || len(e.WildcardProof) == 0 {
+				t.Fatalf("after revalidateGlueRR: %+v; want Secure, with the proof", e)
+			}
+			if e.Expiration.After(cache.Now().Add(c.proofTTL)) {
+				t.Errorf("the address expires at %v, after its proof (TTL %v)", e.Expiration, c.proofTTL)
+			}
+		})
 	}
 }
 

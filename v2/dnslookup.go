@@ -3508,17 +3508,19 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, zonename, host string, rrt
 		return
 	}
 
+	// The entry replaced is the one the lookup just made or read; an answer
+	// synthesized from a wildcard keeps the proof that came with it. Read
+	// before validation: its Get drops an entry stored already expired (a
+	// proof with TTL 0), and the proof with it.
+	var proof []*core.RRset
+	if c := imr.Cache.Peek(host, rrtype); c != nil && c.RRset == rrset {
+		proof = c.WildcardProof
+	}
 	// Always call ValidateRRset - it will check zone state even when there are no RRSIGs
 	var vstate cache.ValidationState
 	vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 	if err != nil {
 		imr.Cache.Logger.Printf("*** revalidateGlueRR: Error from ValidateRRset: %v", err)
-	}
-	// The entry replaced is the one the lookup just made or read; an answer
-	// synthesized from a wildcard keeps the proof that came with it.
-	var proof []*core.RRset
-	if c := imr.Cache.Peek(host, rrtype); c != nil && c.RRset == rrset {
-		proof = c.WildcardProof
 	}
 	imr.Cache.Set(host, rrtype, &cache.CachedRRset{
 		Name:          host,
