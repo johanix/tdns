@@ -43,9 +43,10 @@ func AlgorithmSupported(alg uint8) bool {
 	return true
 }
 
-// dsUsable reports whether ds names an algorithm the resolver can verify and a
-// digest type it can compute.
-func dsUsable(ds *dns.DS) bool {
+// DSUsable reports whether ds names an algorithm the resolver can verify and a
+// digest type it can compute. The chain walk (dog +sigchase) asks it too, so
+// that it treats a DS RRset as the resolver does.
+func DSUsable(ds *dns.DS) bool {
 	switch ds.DigestType {
 	case dns.SHA1, dns.SHA256, dns.SHA384:
 	default:
@@ -53,6 +54,9 @@ func dsUsable(ds *dns.DS) bool {
 	}
 	return AlgorithmSupported(ds.Algorithm)
 }
+
+// dsUsable is DSUsable, under the name the cache's own callers use.
+func dsUsable(ds *dns.DS) bool { return DSUsable(ds) }
 
 // noUsableDS reports whether rrs holds DS records and none of them is usable.
 func noUsableDS(rrs []dns.RR) bool {

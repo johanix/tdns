@@ -95,17 +95,40 @@ verify — is an answer, and asking again cannot change it.
 
 ## DNSSEC chain validation
 
-`+sigchase` bypasses the ordinary query path: dog resolves through a recursive
-resolver with DO=1, walks the delegation chain, and prints a per-link verdict of
-secure, insecure, indeterminate or bogus.
+`+sigchase` does not take the ordinary query path: dog asks a recursive
+resolver for the name, and for the DS and DNSKEY of each zone above it, and
+verifies the chain itself. Every query sets DO and CD: with CD the resolver
+returns the data it has whatever its own verdict, so dog's verdict is its own.
 
 ```console
 $ dog www.iis.se A +sigchase
 $ dog www.iis.se A +algchase          # same, with alg=214 (CROSSRSDPG128SMALL)
 ```
 
+The output names the trust anchor used, then prints a tree: each zone cut from
+the root down, then the answer, each with a verdict of secure, insecure,
+indeterminate or bogus, and notes on how it was reached. The last line is the
+worst of them.
+
+- A zone cut is read from the parent's answer to the DS question: DS records, a
+  proof (NSEC or NSEC3) that the delegation has no DS, or neither. A name that
+  is no zone cut is noted on the zone above it, with what showed it.
+- A zone is secure when its parent signed its DS RRset, a DS matches a key of
+  the zone, and that key signed the zone's DNSKEY RRset. It is never better than
+  the zone above it.
+- A delegation the parent proves to have no DS, or whose DS records all name an
+  algorithm or a digest type this dog cannot use, is insecure, and nothing below
+  it is checked. `dog --version` lists the algorithms the binary can verify.
+- The answer is secure when the zone that holds it signed it. An unsigned answer
+  from a signed zone is bogus.
+- A CNAME is verified and its target chased in turn, each in a section of its
+  own. A CNAME synthesized from a DNAME is not followed.
+- The proofs of NXDOMAIN and NODATA answers, and of answers synthesized from a
+  wildcard, are not checked yet: such answers are indeterminate.
+
 Trust anchors are taken, in order of priority, from `--trust-anchor <file>`, the
-IMR config file, and finally the compiled-in root KSK DS.
+IMR config file, and finally the compiled-in root KSK DS. The first line of the
+output says which.
 
 ## Post-quantum algorithms
 
