@@ -709,6 +709,9 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		ctx, cancel = context.WithTimeout(ctx, budget)
 		defer cancel()
 	}
+	// What the lookups below run as: the resolver's own lookup, or a DNS
+	// client's when the caller asked for that (asClientQuery).
+	lookupCtx := imrQueryContext(ctx)
 
 	maxiter := 12
 
@@ -740,10 +743,18 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 	// that verdict is read back here, as the cache-hit branch reads it.
 	// Peek, not Get: a denial whose SOA has TTL 0 is stored already expired,
 	// and Get would drop it and report no verdict.
+	//
+	// A DS or DNSKEY question at a name that is a CNAME is denied by the link
+	// itself, and nothing is cached under <qname, qtype> (cnameDeniesType).
+	// Its verdict is the link's.
 	freshDenial := func(kind cache.CacheContext) {
 		var state cache.ValidationState
 		if c := imr.Cache.Peek(qname, qtype); c != nil && c.Context == kind {
 			state = c.State
+		} else if kind == cache.ContextNoErrNoAns && cnameDeniesType(lookupCtx, qtype) {
+			if l := imr.Cache.Peek(qname, dns.TypeCNAME); l != nil && l.Context == cache.ContextAnswer {
+				state = l.State
+			}
 		}
 		resp.denied(kind, state)
 	}
@@ -835,7 +846,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		case len(authservers) == 0 && !serverless:
 			// Use helper function to resolve NS addresses
 			done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
-				rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(withOwnTraffic(ctx), qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
+				rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(lookupCtx, qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal, and ImrQuery has none to pass on
 				if err != nil {
 					lgImr.Error("IterativeDNSQuery failed", "err", err)
 					// return false, nil // Continue trying
@@ -884,7 +895,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 
 		lgImr.Debug("ImrQuery: sending query to auth servers", "qname", qname, "qtype", dns.TypeToString[qtype], "count", len(authservers))
 
-		rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(withOwnTraffic(ctx), qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal; NS-address resolution is our own traffic
+		rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(lookupCtx, qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal, and ImrQuery has none to pass on
 		// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 		if err != nil {
 			resp.Error = true
@@ -1144,7 +1155,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	// qname is a CNAME and the whole chain is in the cache: answer from its
 	// links (serveChain). A chain that is not complete in the cache falls
 	// through to be resolved.
-	if crrset == nil && followsCNAME(qtype) && imr.serveChain(ctx, w, r, m, qname, qtype, msgoptions, edns0.PrivacyCached, 0) == chainServed {
+	if crrset == nil && followsCNAME(ctx, qtype) && imr.serveChain(ctx, w, r, m, qname, qtype, msgoptions, edns0.PrivacyCached, 0) == chainServed {
 		return
 	}
 	// Optional fast return for indirect cache hits. By default
@@ -1377,7 +1388,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 	// When the chain cannot be put together, or data owned by another name
 	// came back with no chain to it, the answer is a SERVFAIL: the data alone
 	// would answer a different name than the one asked.
-	if followsCNAME(qtype) && (rrset == nil || len(rrset.RRs) == 0 || !core.EqualNames(rrset.Name, qname)) {
+	if followsCNAME(ctx, qtype) && (rrset == nil || len(rrset.RRs) == 0 || !core.EqualNames(rrset.Name, qname)) {
 		outcome := imr.serveChain(ctx, w, r, m, qname, qtype, msgoptions, privacyStatusFor(transport), imr.freshChainGrace())
 		if outcome == chainServed {
 			return true, nil
