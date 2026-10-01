@@ -2889,13 +2889,25 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 			return imr.answerViaCNAME(ctx, qname, qtype, r, cn, force, transport, privacy)
 		}
 	}
+	// The answer is built only from the records owned by qname, the name asked
+	// for: its records of qtype, and its RRSIGs that cover qtype. Records of
+	// qtype owned by another name are not part of it, nor are signatures over
+	// another RRset. The RRset is validated, cached and served as qname's.
 	var rrset core.RRset
+	owner := dns.Fqdn(qname)
 	for _, rr := range r.Answer {
-		switch t := rr.Header().Rrtype; t {
-		case qtype:
+		t := rr.Header().Rrtype
+		owned := core.EqualNames(rr.Header().Name, owner)
+		switch {
+		case t == qtype && owned:
 			rrset.RRs = append(rrset.RRs, rr)
-		case dns.TypeRRSIG:
-			rrset.RRSIGs = append(rrset.RRSIGs, rr)
+		case t == qtype:
+			imr.Cache.Logger.Printf("handleAnswer: a %s RR owned by %s is not part of the answer for %s %s",
+				dns.TypeToString[t], rr.Header().Name, qname, dns.TypeToString[qtype])
+		case t == dns.TypeRRSIG:
+			if sig, ok := rr.(*dns.RRSIG); ok && owned && sig.TypeCovered == qtype {
+				rrset.RRSIGs = append(rrset.RRSIGs, rr)
+			}
 		default:
 			imr.Cache.Logger.Printf("Got a %s RR when looking for %s %s", dns.TypeToString[t], qname, dns.TypeToString[qtype])
 		}
