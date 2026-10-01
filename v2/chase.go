@@ -535,38 +535,135 @@ func (w *chainWalk) judgeKeys(link *ChainLink) {
 }
 
 // judgeLeaf judges the answer for name and qtype against the deepest link of
-// chain.
+// chain, the zone that holds it (RFC 4035 sections 4.3 and 5):
+//
+//   - below an insecure delegation it is Insecure, signed or not: no chain of
+//     trust leads to it;
+//   - an answer is Secure when an RRSIG by the deepest zone verifies with its
+//     keys, and Bogus when none does, or when there is no RRSIG although the
+//     zone is signed;
+//   - in any case no better than the deepest link.
 func (w *chainWalk) judgeLeaf(name string, qtype uint16, ans chaseAnswer, chain []*ChainLink) ChainLeaf {
 	leaf := ChainLeaf{Qname: name, Qtype: qtype, Rcode: ans.rcode}
-	switch {
-	case ans.err != nil:
+	if ans.err != nil {
 		leaf.Status = ChainStatusIndeterminate
 		leaf.Notes = append(leaf.Notes, fmt.Sprintf("answer query failed: %v", ans.err))
 		return leaf
-	case len(ans.rrs) == 0:
+	}
+	if len(ans.rrs) > 0 {
+		leaf.RRset = &core.RRset{
+			Name:   name,
+			Class:  dns.ClassINET,
+			RRtype: qtype,
+			RRs:    ans.rrs,
+			RRSIGs: rrsigsToRRs(ans.sigs),
+		}
+	}
+	if len(chain) == 0 {
 		leaf.Status = ChainStatusIndeterminate
-		leaf.Notes = append(leaf.Notes, fmt.Sprintf("no answer RRs (%s)", negativeKind(ans.rcode)))
+		leaf.Notes = append(leaf.Notes, "no zone to verify the answer with")
 		return leaf
 	}
-	leaf.RRset = &core.RRset{
-		Name:   name,
-		Class:  dns.ClassINET,
-		RRtype: qtype,
-		RRs:    ans.rrs,
-		RRSIGs: rrsigsToRRs(ans.sigs),
+	deepest := chain[len(chain)-1]
+	if w.insecure(deepest) {
+		leaf.Status = deepest.Status
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("zone %s is insecure: no chain of trust leads to the answer", deepest.Zone))
+		return leaf
 	}
-	switch {
-	case len(ans.sigs) == 0:
-		leaf.Status = ChainStatusInsecure
-		leaf.Notes = append(leaf.Notes, "no RRSIG present on answer")
-	case len(chain) == 0 || len(chain[len(chain)-1].DNSKEY) == 0:
-		leaf.Status = ChainStatusIndeterminate
-		leaf.Notes = append(leaf.Notes, "no DNSKEY available for deepest zone — cannot verify")
-	default:
-		deepest := chain[len(chain)-1]
-		leaf.Status, leaf.Notes = verifyLeafSig(leaf.RRset.RRs, ans.sigs, deepest.DNSKEY, deepest.Zone)
+	var own ChainStatus
+	if leaf.RRset == nil {
+		own = ChainStatusIndeterminate
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s: the proof of the denial is not checked", negativeKind(ans.rcode)))
+	} else {
+		own = w.answerOwn(&leaf, deepest)
+	}
+	leaf.Status = worstStatus(deepest.Status, own)
+	if leaf.Status != own {
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("zone %s is %s; the answer can be no better", deepest.Zone, deepest.Status))
 	}
 	return leaf
+}
+
+// insecure reports whether link was proven an insecure delegation.
+func (w *chainWalk) insecure(link *ChainLink) bool {
+	d, ok := w.cuts[core.CanonicalizeName(link.Zone)]
+	return ok && d.insecure
+}
+
+// answerOwn is the verdict on leaf's answer RRset alone, with the keys of
+// deepest, the zone that holds it.
+func (w *chainWalk) answerOwn(leaf *ChainLeaf, deepest *ChainLink) ChainStatus {
+	rrset := leaf.RRset
+	if len(rrset.RRSIGs) == 0 {
+		if deepest.Status == ChainStatusSecure {
+			leaf.Notes = append(leaf.Notes, fmt.Sprintf("no RRSIG, and zone %s is signed", deepest.Zone))
+			return ChainStatusBogus
+		}
+		leaf.Notes = append(leaf.Notes, "no RRSIG")
+		return ChainStatusIndeterminate
+	}
+	if len(deepest.DNSKEY) == 0 {
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("no DNSKEY of %s to verify the answer with", deepest.Zone))
+		return ChainStatusIndeterminate
+	}
+	if !hasSigner(rrset, deepest.Zone) {
+		for _, signer := range signersOf(rrset) {
+			if dns.IsSubDomain(deepest.Zone, signer) {
+				leaf.Notes = append(leaf.Notes, fmt.Sprintf("signed by %s, which the chain did not reach", signer))
+			} else {
+				leaf.Notes = append(leaf.Notes, fmt.Sprintf("signed by %s, not by %s, the zone that holds it", signer, deepest.Zone))
+			}
+		}
+		return ChainStatusBogus
+	}
+	sig, err := zoneSignature(rrset, deepest.Zone, deepest.DNSKEY, w.now)
+	if err != nil {
+		leaf.Notes = append(leaf.Notes, err.Error())
+		return ChainStatusBogus
+	}
+	leaf.Notes = append(leaf.Notes, fmt.Sprintf("sig keytag=%d verified", sig.KeyTag))
+	if wildcard, ok := expandedFrom(sig, leaf.Qname); ok {
+		// RFC 4035 section 5.3.4: valid for the wildcard, the signature does
+		// not show that the name itself does not exist.
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("synthesized from %s; the proof that the name does not exist is not checked", wildcard))
+		return ChainStatusIndeterminate
+	}
+	return ChainStatusSecure
+}
+
+// hasSigner reports whether an RRSIG over rrset names zone as its signer.
+func hasSigner(rrset *core.RRset, zone string) bool {
+	return slices.ContainsFunc(signersOf(rrset), func(s string) bool { return core.EqualNames(s, zone) })
+}
+
+// signersOf is the signer names of the RRSIGs over rrset, each once.
+func signersOf(rrset *core.RRset) []string {
+	var out []string
+	for _, rr := range rrset.RRSIGs {
+		if sig, ok := rr.(*dns.RRSIG); ok && !core.EqualNamesContains(out, sig.SignerName) {
+			out = append(out, dns.Fqdn(sig.SignerName))
+		}
+	}
+	return out
+}
+
+// expandedFrom reports whether sig, over records owned by owner, was made
+// over a wildcard (RFC 4034 section 3.1.3, RFC 4035 section 5.3.2): its Labels
+// field is below the label count of owner, a leading "*" not counted. It
+// returns the wildcard.
+func expandedFrom(sig *dns.RRSIG, owner string) (string, bool) {
+	labels := dns.SplitDomainName(dns.Fqdn(owner))
+	n := len(labels)
+	if n > 0 && labels[0] == "*" {
+		n--
+	}
+	if int(sig.Labels) >= n {
+		return "", false
+	}
+	if sig.Labels == 0 {
+		return "*.", true
+	}
+	return "*." + dns.Fqdn(strings.Join(labels[len(labels)-int(sig.Labels):], ".")), true
 }
 
 // negativeKind names a negative answer by its rcode.
@@ -661,38 +758,6 @@ func ownedDNSKEY(rrs []dns.RR, zone string) ([]*dns.DNSKEY, []*dns.RRSIG) {
 		}
 	}
 	return keys, sigs
-}
-
-// verifyLeafSig verifies the answer RRset's RRSIG against the deepest
-// zone's DNSKEY RRset. Tries each (sig, key) pair until one validates,
-// then returns Secure. If a sig was present but no key verified, returns
-// Bogus. Otherwise Indeterminate.
-func verifyLeafSig(rrs []dns.RR, sigs []*dns.RRSIG, keys []*dns.DNSKEY, zone string) (ChainStatus, []string) {
-	var notes []string
-	for _, sig := range sigs {
-		for _, key := range keys {
-			if sig.KeyTag != key.KeyTag() {
-				continue
-			}
-			if !core.EqualNames(dns.Fqdn(sig.SignerName), dns.Fqdn(zone)) {
-				continue
-			}
-			if err := sig.Verify(key, rrs); err != nil {
-				notes = append(notes, fmt.Sprintf("sig keytag=%d verify failed: %v", sig.KeyTag, err))
-				continue
-			}
-			if !cache.WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
-				notes = append(notes, fmt.Sprintf("sig keytag=%d outside validity window (inception=%d expiration=%d)", sig.KeyTag, sig.Inception, sig.Expiration))
-				continue
-			}
-			notes = append(notes, fmt.Sprintf("sig keytag=%d verified", sig.KeyTag))
-			return ChainStatusSecure, notes
-		}
-	}
-	if len(sigs) > 0 {
-		return ChainStatusBogus, notes
-	}
-	return ChainStatusIndeterminate, append(notes, "no usable signatures")
 }
 
 // zoneCutsFromRoot returns the candidate zone names from "." down to qname,

@@ -525,3 +525,103 @@ func TestChaseNameInAZoneIsNotACut(t *testing.T) {
 	}
 	wantStatus(t, "result", res.Status, ChainStatusSecure)
 }
+
+// An answer without RRSIG is Insecure only below an insecure delegation; from
+// a signed zone it is Bogus, and it is never better than the zone that holds
+// it (item 5 of #876).
+func TestChaseAnswerVerdicts(t *testing.T) {
+	t.Run("unsigned, zone secure", func(t *testing.T) {
+		tr := secureTree(t)
+		tr.edit("www.sec.example.", dns.TypeA, stripSigs(dns.TypeA))
+		res := tr.chase("www.sec.example.", dns.TypeA)
+		wantStatus(t, "leaf", res.Leaf.Status, ChainStatusBogus)
+		if !hasNote(res.Leaf.Notes, "no RRSIG, and zone sec.example. is signed") {
+			t.Errorf("leaf notes %q", res.Leaf.Notes)
+		}
+	})
+	t.Run("unsigned, zone insecure", func(t *testing.T) {
+		tr := kidTree(t)
+		res := tr.chase("www.kid.sec.example.", dns.TypeA)
+		wantStatus(t, "leaf", res.Leaf.Status, ChainStatusInsecure)
+		if !hasNote(res.Leaf.Notes, "zone kid.sec.example. is insecure") {
+			t.Errorf("leaf notes %q", res.Leaf.Notes)
+		}
+		wantStatus(t, "result", res.Status, ChainStatusInsecure)
+	})
+	t.Run("unsigned, zone indeterminate", func(t *testing.T) {
+		tr := secureTree(t)
+		tr.edit("www.sec.example.", dns.TypeA, stripSigs(dns.TypeA))
+		res, err := NewChaser(tr, "192.0.2.1", nil).Chase("www.sec.example.", dns.TypeA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantStatus(t, "leaf", res.Leaf.Status, ChainStatusIndeterminate)
+	})
+	t.Run("signed, zone indeterminate", func(t *testing.T) {
+		tr := secureTree(t)
+		res, err := NewChaser(tr, "192.0.2.1", nil).Chase("www.sec.example.", dns.TypeA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantStatus(t, "leaf", res.Leaf.Status, ChainStatusIndeterminate)
+		if !hasNote(res.Leaf.Notes, "sig keytag=") || !hasNote(res.Leaf.Notes, "the answer can be no better") {
+			t.Errorf("leaf notes %q", res.Leaf.Notes)
+		}
+	})
+	t.Run("changed after signing", func(t *testing.T) {
+		tr := secureTree(t)
+		tr.edit("www.sec.example.", dns.TypeA, changeRR(dns.TypeA, func(rr dns.RR) {
+			rr.(*dns.A).A = rr.(*dns.A).A.To4()
+			rr.(*dns.A).A[3]++
+		}))
+		res := tr.chase("www.sec.example.", dns.TypeA)
+		wantStatus(t, "leaf", res.Leaf.Status, ChainStatusBogus)
+		if !hasNote(res.Leaf.Notes, "does not verify") {
+			t.Errorf("leaf notes %q", res.Leaf.Notes)
+		}
+	})
+	// A delegation whose DS denial carries no proof is taken as part of the
+	// zone above, and that cannot make its data Secure: unsigned, it is
+	// Bogus; signed by the child, the signature is not the zone above's.
+	t.Run("below an unproven delegation, unsigned", func(t *testing.T) {
+		tr := kidTree(t)
+		tr.edit("kid.sec.example.", dns.TypeDS, dropProof)
+		res := tr.chase("www.kid.sec.example.", dns.TypeA)
+		wantStatus(t, "result", res.Status, ChainStatusBogus)
+		if !hasNote(res.Leaf.Notes, "no RRSIG, and zone sec.example. is signed") {
+			t.Errorf("leaf notes %q", res.Leaf.Notes)
+		}
+	})
+	t.Run("below an unproven delegation, signed", func(t *testing.T) {
+		tr := secureTree(t)
+		tr.zone("kid.sec.example.").add("www.kid.sec.example. 300 IN A 192.0.2.30")
+		z := tr.zones["sec.example."]
+		tr.script("kid.sec.example.", dns.TypeDS, func() *dns.Msg {
+			return &dns.Msg{Ns: z.sign(z.get("sec.example.", dns.TypeSOA))}
+		})
+		res := tr.chase("www.kid.sec.example.", dns.TypeA)
+		wantStatus(t, "result", res.Status, ChainStatusBogus)
+		if !hasNote(res.Leaf.Notes, "signed by kid.sec.example., which the chain did not reach") {
+			t.Errorf("leaf notes %q", res.Leaf.Notes)
+		}
+	})
+	// Until the proof of an expansion is checked, an answer synthesized from
+	// a wildcard is not Secure on its signature alone (item 7 of #876).
+	t.Run("synthesized from a wildcard", func(t *testing.T) {
+		tr := secureTree(t)
+		tr.zones["sec.example."].add("*.sec.example. 300 IN A 192.0.2.40")
+		res := tr.chase("any.sec.example.", dns.TypeA)
+		wantStatus(t, "leaf", res.Leaf.Status, ChainStatusIndeterminate)
+		if !hasNote(res.Leaf.Notes, "synthesized from *.sec.example.") {
+			t.Errorf("leaf notes %q", res.Leaf.Notes)
+		}
+	})
+	t.Run("a denial", func(t *testing.T) {
+		tr := secureTree(t)
+		res := tr.chase("nx.sec.example.", dns.TypeA)
+		wantStatus(t, "leaf", res.Leaf.Status, ChainStatusIndeterminate)
+		if res.Leaf.Rcode != dns.RcodeNameError || !hasNote(res.Leaf.Notes, "NXDOMAIN: the proof of the denial is not checked") {
+			t.Errorf("leaf rcode %d, notes %q", res.Leaf.Rcode, res.Leaf.Notes)
+		}
+	})
+}
