@@ -547,6 +547,12 @@ type ImrTuningConf struct {
 	// Indeterminate zone has its chain followed afresh, an Insecure one has its
 	// parent asked for a DS. Default 30s. See cache.ZoneStateRecheck.
 	ZoneStateRecheck time.Duration `yaml:"zone-state-recheck" mapstructure:"zone-state-recheck"`
+	// NSEC3MaxIterations is the most NSEC3 hash iterations the validator
+	// computes a proof for (RFC 9276 section 3.2). A denial that needs NSEC3
+	// records above it is served without AD, with EDE 27; a zone cut they
+	// would prove is not judged. Default 10 (cache.DefaultNSEC3MaxIterations);
+	// 0 is allowed, and then only zones with no extra iterations validate.
+	NSEC3MaxIterations *uint16 `yaml:"nsec3-max-iterations" mapstructure:"nsec3-max-iterations"`
 }
 
 // DefaultCacheMaxTTL is Unbound's cache-max-ttl default: one day.
@@ -592,7 +598,9 @@ type DiscoveryConf struct {
 // LoadImrTuningDefaults fills missing or invalid fields with sensible
 // defaults. Any non-positive duration, zero/negative integer count,
 // or out-of-range Multiplier / JitterFraction is treated as "unset"
-// and replaced. UpgradeIndirectCacheHits is left nil intentionally —
+// and replaced, and an absent NSEC3MaxIterations gets the default. 0 is a
+// valid NSEC3MaxIterations, so it is a pointer. UpgradeIndirectCacheHits is
+// left nil intentionally —
 // callers check nil-vs-explicit to distinguish "use legacy
 // behaviour" from an explicit toggle. Safe to call repeatedly.
 func LoadImrTuningDefaults(t *ImrTuningConf) {
@@ -664,6 +672,10 @@ func LoadImrTuningDefaults(t *ImrTuningConf) {
 	}
 	if t.ZoneStateRecheck <= 0 {
 		t.ZoneStateRecheck = cache.DefaultZoneStateRecheck
+	}
+	if t.NSEC3MaxIterations == nil {
+		n := uint16(cache.DefaultNSEC3MaxIterations)
+		t.NSEC3MaxIterations = &n
 	}
 }
 

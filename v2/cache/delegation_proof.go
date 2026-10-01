@@ -12,12 +12,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-// maxNSEC3Iterations is the most NSEC3 hash iterations a proof is computed for.
-// RFC 9276 section 3.2 lets a validator stop at a limit of its choosing; a proof
-// above it is not judged. 150 was the limit validators shared when RFC 9276 was
-// written.
-const maxNSEC3Iterations = 150
-
 // dsProofKey marks a context as inside ReferralChildState's questions to the
 // parent side.
 type dsProofKey struct{}
@@ -37,7 +31,7 @@ type dsProofKey struct{}
 //     parent side's answer to the DS question, asked for each name from the
 //     parent down to the child as unsignedRRsetState asks it. A DS that
 //     validates makes the child Secure, a proof of no DS Insecure, and a proof
-//     over maxNSEC3Iterations Indeterminate.
+//     over the NSEC3 iteration limit (NSEC3MaxIterations) Indeterminate.
 //   - Bogus, or a Secure parent that proves nothing: the child is not entered,
 //     and its data is judged when it arrives (unsignedRRsetState).
 //
@@ -158,7 +152,8 @@ func (rrcache *RRsetCacheT) judgedZone(name string, zone *Zone) bool {
 //     of the same (nsec3CutProof).
 //   - evidenceNoCut: an NSEC at name, or an NSEC3 proof, that shows no insecure
 //     delegation at name.
-//   - evidenceUnjudged: NSEC3 records over maxNSEC3Iterations and nothing else.
+//   - evidenceUnjudged: NSEC3 records over the iteration limit and nothing
+//     else, or an NSEC3 proof that ran out of hashes (nsec3HashBudget).
 //   - evidenceNone: nothing in sets proves anything about name.
 func (rrcache *RRsetCacheT) cutProof(ctx context.Context, name string, sets []*core.RRset, fetcher RRsetFetcher) cutEvidence {
 	for _, set := range sets {
@@ -191,13 +186,16 @@ func (rrcache *RRsetCacheT) cutProof(ctx context.Context, name string, sets []*c
 // no insecure delegation at name.
 //
 // Only NSEC3 records owned directly below the zone that signed them, a zone
-// above name, count, and only those that validate. Records with an unknown hash
-// algorithm or unknown flags are ignored (sections 8.1 and 8.2): HashName has no
-// hash for them, and Cover would compare the empty string.
+// above name, count, and only those that validate. Which records count, and how
+// names are hashed and compared, is nsec3.go's: records with an unknown hash
+// algorithm or unknown flags are ignored (sections 8.1 and 8.2), cover is
+// strict, and hashes compare as octets. Records over the iteration limit are
+// set aside, and a proof that needs them, or runs out of hashes, is unjudged.
 func (rrcache *RRsetCacheT) nsec3CutProof(ctx context.Context, name string, sets []*core.RRset, fetcher RRsetFetcher) cutEvidence {
 	var zone string
 	var proven []*dns.NSEC3
 	overLimit := false
+	maxIter := NSEC3MaxIterations()
 	for _, set := range sets {
 		if set == nil || set.RRtype != dns.TypeNSEC3 || len(set.RRs) == 0 {
 			continue
@@ -217,13 +215,16 @@ func (rrcache *RRsetCacheT) nsec3CutProof(ctx context.Context, name string, sets
 			continue
 		}
 		for _, rr := range proof.RRs {
-			switch n, ok := rr.(*dns.NSEC3); {
-			case !ok || n.Hash != dns.SHA1 || n.Flags > 1:
-			case n.Iterations > maxNSEC3Iterations:
-				overLimit = true
-			default:
+			n, ok := rr.(*dns.NSEC3)
+			if !ok {
+				continue
+			}
+			switch _, use := nsec3Usable(setZone, n, maxIter); use {
+			case nsec3Counts:
 				zone = setZone
 				proven = append(proven, n)
+			case nsec3OverTheLimit:
+				overLimit = true
 			}
 		}
 	}
@@ -234,43 +235,38 @@ func (rrcache *RRsetCacheT) nsec3CutProof(ctx context.Context, name string, sets
 	if len(proven) == 0 {
 		return unproven
 	}
-	matching := func(n string) *dns.NSEC3 {
-		for _, rr := range proven {
-			if rr.Match(n) {
-				return rr
-			}
-		}
-		return nil
-	}
-	if rr := matching(name); rr != nil {
-		if insecureDelegationBitmap(rr.TypeBitMap) {
+	p := newNSEC3Proof(zone, proven, maxIter)
+	if rec := p.matching(name); rec != nil {
+		if insecureDelegationBitmap(rec.rr.TypeBitMap) {
 			return evidenceInsecureCut
 		}
 		return evidenceNoCut
 	}
 	nextCloser := name
 	for ce := parentOf(name); dns.IsSubDomain(zone, ce); ce = parentOf(ce) {
-		if rr := matching(ce); rr != nil {
+		if rec := p.matching(ce); rec != nil {
 			// The closest encloser is no DNAME and no delegation: one that is
 			// would be speaking for names the zone does not hold (section 8.3).
-			if slices.Contains(rr.TypeBitMap, dns.TypeDNAME) ||
-				(slices.Contains(rr.TypeBitMap, dns.TypeNS) && !slices.Contains(rr.TypeBitMap, dns.TypeSOA)) {
+			if rec.has(dns.TypeDNAME) || rec.delegation() {
 				return evidenceNone
 			}
-			for _, cover := range proven {
-				if cover.Cover(nextCloser) {
-					if cover.Flags&1 == 1 {
-						return evidenceInsecureCut
-					}
-					return evidenceNoCut
+			if cover := p.covering(nextCloser); cover != nil {
+				if cover.optOut() {
+					return evidenceInsecureCut
 				}
+				return evidenceNoCut
 			}
-			return unproven
+			break
 		}
 		if core.EqualNames(ce, zone) {
 			break
 		}
 		nextCloser = ce
+	}
+	// A proof that ran out of hashes on the way is not judged, as one over
+	// the iteration limit is not.
+	if p.spent {
+		return evidenceUnjudged
 	}
 	return unproven
 }

@@ -71,6 +71,11 @@ func TestEDECodeValues(t *testing.T) {
 		got  uint16
 		want uint16
 	}{
+		// Standard codes (RFC 8914 registry).
+		{"EDEDNSSECIndeterminate", EDEDNSSECIndeterminate, 5},
+		{"EDEDNSSECBogus", EDEDNSSECBogus, 6},
+		{"EDEUnsupportedNSEC3Iterations", EDEUnsupportedNSEC3Iterations, 27},
+
 		// The two codes the delegation-mgmt-via-ddns draft names directly.
 		{"EDESig0KeyNotKnown", EDESig0KeyNotKnown, 513},
 		{"EDESig0KeyKnownButNotTrusted", EDESig0KeyKnownButNotTrusted, 514},
