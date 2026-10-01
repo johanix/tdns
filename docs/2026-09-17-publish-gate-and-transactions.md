@@ -3,8 +3,8 @@
 **Written 2026-09-17.** #653. **Status: r4.** r3 was merged with #695. r4 was
 written before any code, which is why it revises the text in place and is not
 an amendment, and it arrived together with step 1 of "Size and order of work"
-(transactions and held creation). **Steps 1 and 2 are implemented and
-merged; step 3 is implemented (tdns #884).** Step 1: 2026-09-21, tdns #700 →
+(transactions and held creation). **Steps 1 to 3 are merged; step 4 is
+implemented (tdns #888), and with it the design.** Step 1: 2026-09-21, tdns #700 →
 368a28ce; Amendment 1 (tdns #711 → e635f202) and Amendment 2, at the end,
 record what changed in it after the reviews. Step 2: 2026-09-29, tdns-mp #97 →
 3e21fe8: the identity zone is created held and published once, the agent's and
@@ -12,12 +12,14 @@ the auditor's first hello waits for that publish, and the zone's parentsync
 work starts after it. It was checked on a multi-host test deployment: seven
 cold starts in all (the PR records the first five), all converged, each
 identity one complete transfer at its secondary, none of #653's cached-denial
-warnings. Step 3: 2026-10-01, tdns
-#884: every update asks the gate, the waiters are the zone's, a refresh under
-a hold is refused, the hold's age is capped, and the two items the step-1
-reviews carried to it are in; Amendment 3 records what it settled. Step 4 is
-not implemented; what the reviews carried to it is listed under "Size and
-order of work".
+warnings. Step 3: 2026-10-01, tdns #884 → 89b078a6: every update asks the
+gate, the waiters are the zone's, a refresh under a hold is refused, the hold's
+age is capped, and the two items the step-1 reviews carried to it are in;
+Amendment 3 records what it settled. Step 4: 2026-10-01, tdns #888: the signing
+passes, the catalog and the batch API through the gate, the transaction log
+with the hold and the gate's state, the operator's page
+(`2026-10-01-publish-cadence-what-an-operator-sees.md`), and the item the
+step-1 reviews carried to it; Amendment 4 records what it settled.
 Updates §1.3 and §1.6 of `2026-07-02-DONE-zone-mutation-snapshot-correctness.md`
 ("the July design"), which stays as it is.
 
@@ -544,7 +546,8 @@ In four steps, each a PR that is green on its own:
   hold's age, from its first begin, closes it. **Done in step 3 (Amendment 3).**
 - **Step 4:** the operator's `BumpSerial` and `Publish` on a held zone return
   success with the serial unchanged and nothing that says why. The
-  `BumperResponse` should say the zone is held.
+  `BumperResponse` should say the zone is held. **Done in step 4 (Amendment
+  4).**
 
 Signing is "behind the gate from the start" in the sense that matters for
 correctness from step 1: no pass publishes a held zone. Step 4 adds the rate
@@ -740,3 +743,47 @@ What the reviews of the step-3 PR changed (tdns #884, before its merge):
   zone's first content.
 - **The management API** was the eighth sender and waited `UpdateApplyTimeout`
   alone; it waits the one bound.
+
+## Amendment 4 (2026-10-01): what step 4 settled
+
+Step 4 (tdns #888) put the remaining publishers behind the gate, added the
+transactions and the gate's state to what an operator can see, and wrote the
+operator's page (`2026-10-01-publish-cadence-what-an-operator-sees.md`). With it
+the design is implemented. What it decided beyond, or differently from, the
+text:
+
+- **Nothing waits on a signing pass.** The passes ask the gate and return; their
+  callers (the resigner, the API's sign-zone and resign-zone, the key-state
+  worker, the keystore and the rollovers that strip signatures) only log or
+  check the error, and none reads the zone back right after. A pass on a busy
+  zone goes out with the next publish, sharing its serial with whatever an
+  update staged: the rate limit the text left to this step. Rule 5 holds: the
+  first signing of a zone that signs finds no snapshot and publishes at once.
+- **The catalog's zone file and dynamic config follow the publish** that carries
+  a member change, registered with the stage under the zone's lock when the
+  publish is the gate's, as the engine's file write does since step 3.
+- **`StageBatch` reports a new serial only when its publish ran in the caller.**
+  tdns-mp's combiner already read it that way (step 2's log line).
+- **`Publish` is not `BumpSerial`.** `Publish` asks the gate for what is staged
+  and bumps nothing of its own; with nothing staged there is nothing to
+  publish; on a held zone it is stopped, which the hold counts, and the response
+  says held. `BumpSerial` stays the operator's immediate publish; on a held zone
+  its response says the zone is held instead of success with the serial
+  unchanged (the item the step-1 reviews carried here), and the API passes that
+  message on.
+- **The package's default cadence is an exported variable**
+  (`DefaultPublishCadence`), so a test package that reads a zone back right
+  after a change can zero it, as this package's `TestMain` does; tdns-mp's
+  tests need that on the re-pin. A per-zone `publish-cadence: 0` keeps its
+  meaning, unset.
+- **Observability.** `pendingChanges()`, the API's `zone-txlog` view and
+  `tdns-cli <role> debug zone-txlog` show, besides the owners a pending publish
+  changes: when a queued publish is due and the cadence; the senders waiting for
+  it and the follow-ups it will run; whether the zone is held and since when,
+  the cap and the publishes the hold stopped; each open transaction with its
+  start, age and limit, overdue when the cap ran out on a never-published zone.
+  A held zone with nothing staged shows its hold.
+- **Not done, recorded:** tdns-mp's own automated `BumpSerialOnly` calls use the
+  operator's immediate path from a program (four sites in the combiner); left as
+  they are, to revisit if the fleet shows them as churn. The resigner's own
+  scheduling is unchanged.
