@@ -264,15 +264,24 @@ func (p *nsec3Proof) matching(name string) *nsec3Record {
 }
 
 // covering returns a record whose interval holds the hash of name, strictly
-// (see covers), or nil.
+// (see covers), or nil. When more than one does -- records of two parameter
+// sets, while a zone changes its NSEC3PARAM -- one with Opt-Out comes first:
+// the zone has signed that unsigned delegations may exist in that span, and a
+// proof through it claims no more than that (RFC 5155 section 9.2).
 func (p *nsec3Proof) covering(name string) *nsec3Record {
+	var found *nsec3Record
 	for i := range p.records {
 		r := &p.records[i]
 		if h := p.hash(name, r.params); h != nil && covers(r, h) {
-			return r
+			if r.optOut() {
+				return r
+			}
+			if found == nil {
+				found = r
+			}
 		}
 	}
-	return nil
+	return found
 }
 
 // covers reports whether h lies strictly between r's owner hash and its next

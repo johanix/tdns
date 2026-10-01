@@ -681,6 +681,17 @@ are the design as approved; this is how the code differs.
     iterations) still takes the path over the limit.
   - The work budget (§8) is still 256 hash computations. With a limit of 10,
     it costs far less than the 1.5 ms §8 gives for 150.
+  - **A change takes a restart**, like every key under `imrengine.tuning`.
+    §3 says the limit is applied "at start and on reload", as
+    `zone-state-recheck` is. That was wrong for both: `InitImrEngine` applies
+    them at start, and a reload that changes either reports that a restart is
+    needed.
+- **§2.3, Q4: Opt-Out among several covering records.** Records of two
+  parameter sets can both cover a name while a zone changes its NSEC3PARAM.
+  A record with Opt-Out is then the one the proof is made through, wherever
+  it comes in the response: the zone has signed that unsigned delegations may
+  exist in that span, so the proof gives no AD, and a cut proof reads an
+  insecure delegation. The first covering record decided before.
 - **§6: SERVFAIL only below a trust anchor.** A signed denial held
   Indeterminate is SERVFAIL when a trust anchor is at or above its zone, the
   SOA's owner (`UnderTrustAnchor`), not on any resolver with a trust anchor.

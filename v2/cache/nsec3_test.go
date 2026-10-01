@@ -391,6 +391,19 @@ func TestNSEC3ParameterSets(t *testing.T) {
 	if got := newNSEC3Proof("example.", rrs, 150).nameError("a.c.x.w.example."); got != nsec3Unproven {
 		t.Errorf("qname matched in the other set: %s, want unproven", nsec3VerdictToString[got])
 	}
+	// The next closer name, c.x.w, covered by a record of each set, and only
+	// the second set's has Opt-Out: the proof is made through Opt-Out, whichever
+	// record comes first.
+	optOutNC := synthNSEC3("example.", "c.x.w.example.", true, 1, 3, "")
+	for _, rrs := range [][]*dns.NSEC3{
+		append(rfcRecords(t, 0, "0p9m", "b4um", "35mt"), optOutNC),
+		append([]*dns.NSEC3{optOutNC}, rfcRecords(t, 0, "0p9m", "b4um", "35mt")...),
+	} {
+		if got := newNSEC3Proof("example.", rrs, 150).nameError("a.c.x.w.example."); got != nsec3OptOut {
+			t.Errorf("NC covered by two sets, one with Opt-Out: %s, want %s",
+				nsec3VerdictToString[got], nsec3VerdictToString[nsec3OptOut])
+		}
+	}
 }
 
 // Each name is hashed once per parameter set and proof, and a proof stops at
