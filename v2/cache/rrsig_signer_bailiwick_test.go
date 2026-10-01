@@ -87,6 +87,9 @@ func TestRRSIGSignerMustHoldTheOwner(t *testing.T) {
 		{"zone apex", "victim.example.", true, "victim.example. 300 IN TXT \"apex\"", "victim.example.", "", ValidationStateSecure},
 		{"DS signed by the parent", "example.", true, "victim.example." + bailiwickDS, "victim.example.", "", ValidationStateSecure},
 		{"DS signed by the root", ".", true, "example." + bailiwickDS, "example.", "", ValidationStateSecure},
+		// A wildcard expansion's signature is accepted. The answer then needs
+		// the proof that its name does not exist (wildcard_answer.go), which
+		// these cases do not have: that is TestValidateAnswer*'s business.
 		{"wildcard expansion", "victim.example.", true, "*.victim.example. 300 IN A 192.0.2.66", "a.b.victim.example.", "", ValidationStateSecure},
 		{"owner in another case", "victim.example.", true, victim + " 300 IN A 192.0.2.66", "WWW.Victim.EXAMPLE.", "", ValidationStateSecure},
 	}
@@ -108,6 +111,9 @@ func TestRRSIGSignerMustHoldTheOwner(t *testing.T) {
 			rrset := s.signAs(t, c.text, c.served, name)
 
 			got, err := rrcache.ValidateRRset(context.Background(), rrset, nil)
+			if hasExpansionSignature(rrset) {
+				got, _, err = rrcache.validateSignatures(context.Background(), rrset, rrset.RRSIGs, rrcache.DnskeyCache, nil)
+			}
 			if err != nil {
 				t.Fatalf("ValidateRRset: %v", err)
 			}
