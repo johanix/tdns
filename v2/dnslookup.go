@@ -3931,22 +3931,6 @@ func (imr *Imr) negativeWithoutSOA(qname string, qtype uint16, r *dns.Msg, negCo
 	return negContext, r.MsgHdr.Rcode, true
 }
 
-func nsecCoversName(name string, nsec *dns.NSEC) bool {
-	if nsec == nil {
-		return false
-	}
-	owner := dns.CanonicalName(nsec.Hdr.Name)
-	next := dns.CanonicalName(nsec.NextDomain)
-	target := dns.CanonicalName(name)
-	if owner == next {
-		return true
-	}
-	if strings.Compare(owner, next) < 0 {
-		return strings.Compare(target, owner) >= 0 && strings.Compare(target, next) < 0
-	}
-	return strings.Compare(target, owner) >= 0 || strings.Compare(target, next) < 0
-}
-
 // maxCNAMEChain is the most CNAMEs one answer follows, as BIND's default
 // max-query-restarts.
 const maxCNAMEChain = 11

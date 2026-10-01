@@ -1288,15 +1288,26 @@ func (rrcache *RRsetCacheT) ValidateDenial(ctx context.Context, qname string, qt
 			}
 		}
 
+		// No data at a name that owns no NSEC here: an empty non-terminal, or a
+		// wildcard without qtype (nsecNoData). For NOERROR only: neither proof
+		// is a name error.
+		if rcode == dns.RcodeSuccess && nsecNoData(qnameCanon, qtype, zoneName, nsecs) {
+			return DenialVerdict{State: ValidationStateSecure, Rcode: rcode}, nil
+		}
+
 		// Traditional denial (NXDOMAIN), RFC 4035 §5.4: an NSEC covering qname,
 		// and one covering the wildcard at the closest encloser that NSEC
 		// proves. The wildcard used to be the one at the zone apex, which is the
 		// right name only when the closest encloser IS the apex: a denial below
 		// an existing name was declared bogus for lacking a record it does not
 		// need.
+		//
+		// A cover whose next name lies below qname shows that qname has a
+		// descendant (nsecNextBelow): qname is an empty non-terminal and exists,
+		// and that cover is no part of a name error proof.
 		var qnameCover *dns.NSEC
 		for _, nsec := range nsecs {
-			if nsecCoversName(qnameCanon, nsec) {
+			if nsecCoversName(qnameCanon, nsec) && !nsecNextBelow(qnameCanon, nsec) {
 				qnameCover = nsec
 				break
 			}
