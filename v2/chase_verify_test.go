@@ -331,3 +331,76 @@ func TestChaseLinkIsNoBetterThanItsParent(t *testing.T) {
 		}
 	})
 }
+
+// setDS replaces the DS records the parent of child holds for it.
+func setDS(tr *chaseTree, child string, dss ...*dns.DS) {
+	parent := tr.zoneAbove(child)
+	var rrs []dns.RR
+	for _, ds := range dss {
+		rrs = append(rrs, ds)
+	}
+	parent.data[child][dns.TypeDS] = rrs
+}
+
+// withDS is the DS of key, with its algorithm and digest type changed as
+// given (and the digest kept: it matches nothing once either changes).
+func withDS(key *fwdSecKey, alg, digestType uint8) *dns.DS {
+	ds := key.dnskey.ToDS(dns.SHA256)
+	ds.Algorithm, ds.DigestType = alg, digestType
+	return ds
+}
+
+// A DS RRset that holds no DS this binary can use, once verified, is an
+// insecure delegation (RFC 4035 section 5.2, RFC 6840 section 5.2), not a
+// DS that matches no key (item 4 of #876). Below it nothing is checked.
+func TestChaseUnusableDS(t *testing.T) {
+	const unsupportedAlg = 250
+	for _, c := range []struct {
+		name string
+		ds   func(key *fwdSecKey) []*dns.DS
+		edit func(*dns.Msg)
+		want ChainStatus
+		note string
+	}{
+		{"digest type not supported", func(k *fwdSecKey) []*dns.DS {
+			return []*dns.DS{withDS(k, k.dnskey.Algorithm, 99)}
+		}, nil, ChainStatusInsecure, "digest type 99 not supported"},
+		{"algorithm not supported", func(k *fwdSecKey) []*dns.DS {
+			return []*dns.DS{withDS(k, unsupportedAlg, dns.SHA256)}
+		}, nil, ChainStatusInsecure, "algorithm not supported by this binary"},
+		{"a usable DS beside them matches", func(k *fwdSecKey) []*dns.DS {
+			return []*dns.DS{withDS(k, unsupportedAlg, dns.SHA256), k.dnskey.ToDS(dns.SHA256)}
+		}, nil, ChainStatusSecure, "matches KSK"},
+		{"a usable DS beside them matches no key", func(k *fwdSecKey) []*dns.DS {
+			return []*dns.DS{withDS(k, unsupportedAlg, dns.SHA256), newFwdSecKey(t, "sec.example.").dnskey.ToDS(dns.SHA256)}
+		}, nil, ChainStatusBogus, "no matching DNSKEY"},
+		{"not verified", func(k *fwdSecKey) []*dns.DS {
+			return []*dns.DS{withDS(k, unsupportedAlg, dns.SHA256)}
+		}, stripSigs(dns.TypeDS), ChainStatusBogus, "no RRSIG by example."},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tr := secureTree(t)
+			setDS(tr, "sec.example.", c.ds(tr.zones["sec.example."].key)...)
+			if c.edit != nil {
+				tr.edit("sec.example.", dns.TypeDS, c.edit)
+			}
+			res := tr.chase("www.sec.example.", dns.TypeA)
+			l := linkNamed(res.Links, "sec.example.")
+			if l == nil {
+				t.Fatalf("no link for sec.example.; links %v", zonesOf(res.Links))
+			}
+			wantStatus(t, "sec.example.", l.Status, c.want)
+			if !hasNote(l.Notes, c.note) {
+				t.Errorf("sec.example. notes %q, want one with %q", l.Notes, c.note)
+			}
+			if c.want == ChainStatusInsecure {
+				if tr.askedFor("www.sec.example.", dns.TypeDS) {
+					t.Errorf("a name below the insecure delegation was asked about")
+				}
+				if res.Status == ChainStatusSecure {
+					t.Errorf("result secure below an insecure delegation")
+				}
+			}
+		})
+	}
+}

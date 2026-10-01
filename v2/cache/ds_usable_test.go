@@ -37,6 +37,10 @@ func TestDSUsable(t *testing.T) {
 		if got := dsUsable(ds(c.alg, c.digest)); got != c.usable {
 			t.Errorf("DS algorithm %d digest type %d: usable %v, want %v", c.alg, c.digest, got, c.usable)
 		}
+		// The exported name, which the chain walk calls, is the same rule.
+		if got := DSUsable(ds(c.alg, c.digest)); got != c.usable {
+			t.Errorf("DSUsable: DS algorithm %d digest type %d: usable %v, want %v", c.alg, c.digest, got, c.usable)
+		}
 	}
 	if noUsableDS([]dns.RR{ds(208, dns.SHA256), ds(dns.ED25519, dns.SHA256)}) {
 		t.Error("one usable DS beside an unusable one: reported as none usable")

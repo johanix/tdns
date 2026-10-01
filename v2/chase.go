@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -148,6 +149,10 @@ type chainWalk struct {
 // chain, or nothing (link nil), when the candidate is no zone cut.
 type cutDecision struct {
 	link *ChainLink
+	// insecure is set for a delegation proven to have no DS the walk can
+	// use: no chain of trust leads below it, and nothing below it is
+	// checked.
+	insecure bool
 }
 
 // chaseAnswer is the response to the question about the leaf, read by owner:
@@ -185,9 +190,17 @@ func (w *chainWalk) walkName(name string, qtype uint16) ([]*ChainLink, ChainLeaf
 // links decides each candidate zone, root first, and returns the zone cuts
 // among them. A candidate decided earlier in the same Chase is not asked
 // about again.
+//
+// Below an insecure delegation nothing is checked, except a zone with a trust
+// anchor of its own.
 func (w *chainWalk) links(zones []string) []*ChainLink {
 	var chain []*ChainLink
+	insecure := false
 	for _, zone := range zones {
+		if insecure && len(w.c.TrustAnchors[zone]) == 0 {
+			addNote(chain[len(chain)-1], "names below an insecure delegation are not checked")
+			continue
+		}
 		key := core.CanonicalizeName(zone)
 		d, ok := w.cuts[key]
 		if !ok {
@@ -196,9 +209,18 @@ func (w *chainWalk) links(zones []string) []*ChainLink {
 		}
 		if d.link != nil {
 			chain = append(chain, d.link)
+			insecure = d.insecure
 		}
 	}
 	return chain
+}
+
+// addNote adds note to link, unless it has it already: a link can be reached
+// again by another name of the chase.
+func addNote(link *ChainLink, note string) {
+	if !slices.Contains(link.Notes, note) {
+		link.Notes = append(link.Notes, note)
+	}
 }
 
 // decide works out whether zone is a zone cut below chain, the links decided
@@ -284,10 +306,49 @@ func (w *chainWalk) decideOwn(link, above *ChainLink) *cutDecision {
 	dsState := ChainStatusSecure
 	if len(link.DS) > 0 {
 		dsState = w.verifyDS(link, above)
+		if unusable := unusableDS(link.DS); len(unusable) == len(link.DS) {
+			return noUsableDS(link, dsState, unusable)
+		}
 	}
 	w.judgeKeys(link)
 	link.Status = worstStatus(link.Status, dsState)
 	return &cutDecision{link: link}
+}
+
+// unusableDS describes each DS in dss that names an algorithm this binary
+// cannot verify or a digest type it cannot compute (cache.DSUsable).
+func unusableDS(dss []*dns.DS) []string {
+	var out []string
+	for _, ds := range dss {
+		if cache.DSUsable(ds) {
+			continue
+		}
+		why := fmt.Sprintf("digest type %d not supported", ds.DigestType)
+		if !cache.AlgorithmSupported(ds.Algorithm) {
+			why = "algorithm not supported by this binary"
+		}
+		out = append(out, fmt.Sprintf("keytag=%d %s: %s", ds.KeyTag, algField(ds.Algorithm, true), why))
+	}
+	return out
+}
+
+// noUsableDS judges a link whose DS RRset holds no DS this binary can use.
+// Verified, it is an insecure delegation: there is no supported path from
+// the parent to the child, and the child is treated as if the parent had
+// proven it has no DS (RFC 4035 section 5.2, RFC 6840 section 5.2). Not
+// verified, it proves nothing, and the link takes dsState, the DS RRset's
+// verdict. A trust anchor is not judged here: one that matches no key stays
+// an error.
+func noUsableDS(link *ChainLink, dsState ChainStatus, unusable []string) *cutDecision {
+	note := "no DS this binary can use (" + strings.Join(unusable, "; ") + ")"
+	if dsState != ChainStatusSecure {
+		link.Status = dsState
+		link.Notes = append(link.Notes, note)
+		return &cutDecision{link: link}
+	}
+	link.Status = ChainStatusInsecure
+	link.Notes = append(link.Notes, note+": an insecure delegation (RFC 4035 section 5.2)")
+	return &cutDecision{link: link, insecure: true}
 }
 
 // verifyDS checks the RRSIG over link's DS RRset with the keys of above, the
