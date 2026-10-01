@@ -6,12 +6,9 @@ package tdns
 
 import (
 	"fmt"
-	"io"
-	"sort"
 	"strings"
 	"time"
 
-	algorithms "github.com/johanix/tdns/v2/algorithms"
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -51,7 +48,7 @@ func (s ChainStatus) String() string {
 // the verdict of validating the zone's DNSKEY RRset against that match.
 type ChainLink struct {
 	Zone       string        // FQDN of the zone at this cut
-	ParentZone string        // FQDN of the immediate parent zone; "" for root
+	ParentZone string        // the zone of the link above this one; "" for the root
 	DS         []*dns.DS     // DS records seen at the parent for this zone (may be empty for insecure / root)
 	DNSKEY     []*dns.DNSKEY // DNSKEY records published by this zone
 	DNSKEYSigs []*dns.RRSIG  // RRSIG(DNSKEY) records
@@ -65,7 +62,8 @@ type ChainLink struct {
 type ChainLeaf struct {
 	Qname  string
 	Qtype  uint16
-	RRset  *core.RRset
+	RRset  *core.RRset // nil when the name has no records of the type
+	Rcode  int         // the rcode of the answer: NOERROR or NXDOMAIN
 	Status ChainStatus
 	Notes  []string
 }
@@ -73,6 +71,8 @@ type ChainLeaf struct {
 // ChainResult is the full structured chase output. Status is the overall
 // verdict (worst of any link plus the leaf).
 type ChainResult struct {
+	Qname  string      // the name asked for
+	Qtype  uint16      // the type asked for
 	Links  []ChainLink // root-first, leaf zone last
 	Leaf   ChainLeaf
 	Status ChainStatus
@@ -114,7 +114,47 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 		return nil, fmt.Errorf("chase: nil client")
 	}
 	qname = dns.Fqdn(qname)
-	zones := zoneCutsFromRoot(qname) // root-first
+	w := &chainWalk{c: c, cuts: map[string]*cutDecision{}}
+	links, leaf := w.walkName(qname, qtype)
+	result := &ChainResult{Qname: qname, Qtype: qtype, Leaf: leaf, Status: ChainStatusSecure}
+	for _, link := range links {
+		result.Links = append(result.Links, *link)
+		result.Status = worstStatus(result.Status, link.Status)
+	}
+	result.Status = worstStatus(result.Status, leaf.Status)
+	return result, nil
+}
+
+// chainWalk is the state of one Chase: what was decided about each candidate
+// zone cut, so that no candidate is asked about twice.
+type chainWalk struct {
+	c    *Chaser
+	cuts map[string]*cutDecision // by candidate name, canonical form
+}
+
+// cutDecision is what the walk made of a candidate zone cut: a link in the
+// chain, or nothing (link nil), when the candidate is no zone cut.
+type cutDecision struct {
+	link *ChainLink
+}
+
+// chaseAnswer is the response to the question about the leaf, read by owner:
+// only records the name asked for owns count.
+type chaseAnswer struct {
+	rrs   []dns.RR     // records of the type asked for
+	sigs  []*dns.RRSIG // the RRSIGs over them
+	rcode int          // NOERROR or NXDOMAIN
+	err   error        // the query failed: no response, or another rcode
+}
+
+// walkName asks for name and qtype, walks the zone cuts from the root down to
+// name, and judges the answer against the deepest of them.
+//
+// The answer is asked for first: what the name owns tells which candidates
+// can be zone cuts at all.
+func (w *chainWalk) walkName(name string, qtype uint16) ([]*ChainLink, ChainLeaf) {
+	ans := w.c.ask(name, qtype)
+	zones := zoneCutsFromRoot(name) // root-first
 	// DS records live at the PARENT zone, not at qname's own zone. So
 	// for a DS leaf query, drop qname from the zone chain — the parent
 	// becomes the deepest validated zone, and the leaf RRset is then
@@ -126,219 +166,279 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 	if qtype == dns.TypeDS && len(zones) > 1 {
 		zones = zones[:len(zones)-1]
 	}
-	result := &ChainResult{Status: ChainStatusSecure}
+	links := w.links(zones)
+	return links, w.judgeLeaf(name, qtype, ans, links)
+}
 
-	for i, zone := range zones {
-		link := ChainLink{Zone: zone}
-		if i > 0 {
-			link.ParentZone = zones[i-1]
+// links decides each candidate zone, root first, and returns the zone cuts
+// among them. A candidate decided earlier in the same Chase is not asked
+// about again.
+func (w *chainWalk) links(zones []string) []*ChainLink {
+	var chain []*ChainLink
+	for _, zone := range zones {
+		key := core.CanonicalizeName(zone)
+		d, ok := w.cuts[key]
+		if !ok {
+			d = w.decide(zone, chain)
+			w.cuts[key] = d
 		}
-
-		// Fetch DS from the parent (skip for root).
-		if i > 0 {
-			ds, dsRRSIGs, err := c.queryDSAtParent(zone)
-			if err != nil {
-				link.Status = ChainStatusIndeterminate
-				link.Notes = append(link.Notes, fmt.Sprintf("DS query failed: %v", err))
-				result.Links = append(result.Links, link)
-				result.Status = worstStatus(result.Status, ChainStatusIndeterminate)
-				continue
-			}
-			link.DS = ds
-			if len(ds) == 0 {
-				// No DS at parent. Two very different cases:
-				//
-				//   (a) `zone` is not a zone cut at all — just a label
-				//       boundary within the parent (e.g. www.iis.se, which
-				//       has no NS/SOA of its own). It must NOT appear in the
-				//       chain: the queried leaf is served from the enclosing
-				//       zone, and its RRSIG validates against THAT zone's
-				//       keys. Skip this candidate entirely, leaving the
-				//       previous (real) zone as the deepest.
-				//
-				//   (b) `zone` is a genuine delegation with no DS — an
-				//       unsigned/insecure child. Without NSEC/NSEC3 proof
-				//       support here we report Indeterminate rather than
-				//       Insecure (a full proof-of-no-DS walk is future work).
-				cut, cutErr := c.isZoneCut(zone)
-				if cutErr == nil && !cut {
-					continue // case (a): confirmed non-cut, drop it
-				}
-				// Case (b), or the zone-cut check itself failed: keep the
-				// candidate on the Indeterminate path. A lookup failure must
-				// not be mistaken for a non-cut (which would silently drop a
-				// possibly-real delegation), so we do NOT skip on error.
-				link.Status = ChainStatusIndeterminate
-				if cutErr != nil {
-					link.Notes = append(link.Notes, fmt.Sprintf("no DS at parent; zone-cut check failed: %v", cutErr))
-				} else {
-					link.Notes = append(link.Notes, "no DS record at parent (and no NSEC proof checked)")
-				}
-				result.Links = append(result.Links, link)
-				result.Status = worstStatus(result.Status, ChainStatusIndeterminate)
-				continue
-			}
-			_ = dsRRSIGs // future: validate DS signature against parent's DNSKEYs
+		if d.link != nil {
+			chain = append(chain, d.link)
 		}
+	}
+	return chain
+}
 
-		// Fetch DNSKEY for this zone.
-		dnskeys, sigs, err := c.queryDNSKEY(zone)
+// decide works out whether zone is a zone cut below chain, the links decided
+// above it, and judges it if it is.
+func (w *chainWalk) decide(zone string, chain []*ChainLink) *cutDecision {
+	link := &ChainLink{Zone: zone}
+	if len(chain) > 0 {
+		link.ParentZone = chain[len(chain)-1].Zone
+	}
+
+	// Fetch DS from the parent (skip for root).
+	if zone != "." {
+		resp, err := w.c.query(zone, dns.TypeDS)
 		if err != nil {
 			link.Status = ChainStatusIndeterminate
-			link.Notes = append(link.Notes, fmt.Sprintf("DNSKEY query failed: %v", err))
-			result.Links = append(result.Links, link)
-			result.Status = worstStatus(result.Status, ChainStatusIndeterminate)
-			continue
+			link.Notes = append(link.Notes, fmt.Sprintf("DS query failed: %v", err))
+			return &cutDecision{link: link}
 		}
-		link.DNSKEY = dnskeys
-		link.DNSKEYSigs = sigs
-
-		// Match DS (if any) to a DNSKEY and verify the DNSKEY RRset
-		// signature with that KSK.
-		if len(link.DS) > 0 {
-			rrsetForValidate := dnskeyRRsetForValidator(zone, dnskeys, sigs)
-			matched := false
-			for _, ds := range link.DS {
-				ok, ksk := cache.ValidateDNSKEYRRsetUsingDS(rrsetForValidate, ds, zone, false)
-				if ok && ksk != nil {
-					link.MatchedKSK = ksk
-					link.Status = ChainStatusSecure
-					link.Notes = append(link.Notes, fmt.Sprintf("DS keytag=%d matches KSK; DNSKEY RRset signature OK", ds.KeyTag))
-					matched = true
-					break
-				}
+		ds, _ := ownedDS(resp.Answer, zone)
+		if len(ds) == 0 {
+			// No DS at parent. Two very different cases:
+			//
+			//   (a) `zone` is not a zone cut at all — just a label
+			//       boundary within the parent (e.g. www.iis.se, which
+			//       has no NS/SOA of its own). It must NOT appear in the
+			//       chain: the queried leaf is served from the enclosing
+			//       zone, and its RRSIG validates against THAT zone's
+			//       keys. Skip this candidate entirely, leaving the
+			//       previous (real) zone as the deepest.
+			//
+			//   (b) `zone` is a genuine delegation with no DS — an
+			//       unsigned/insecure child. Without NSEC/NSEC3 proof
+			//       support here we report Indeterminate rather than
+			//       Insecure (a full proof-of-no-DS walk is future work).
+			cut, cutErr := w.c.isZoneCut(zone)
+			if cutErr == nil && !cut {
+				return &cutDecision{} // case (a): confirmed non-cut, drop it
 			}
-			if !matched {
-				link.Status = ChainStatusBogus
-				link.Notes = append(link.Notes, "DS at parent has no matching DNSKEY (or DNSKEY RRSIG failed)")
-				result.Status = worstStatus(result.Status, ChainStatusBogus)
-			}
-		} else if tas := c.TrustAnchors[zone]; len(tas) > 0 {
-			// TA-anchored zone (typically root). Treat the configured
-			// DS records exactly the same way as a parent's
-			// referral-supplied DS: match against the zone's DNSKEY
-			// RRset and validate the RRset's signature with the
-			// matched KSK. This is what makes the root link reach
-			// Secure for a fully-signed chain.
-			link.DS = tas
-			rrsetForValidate := dnskeyRRsetForValidator(zone, dnskeys, sigs)
-			matched := false
-			for _, ds := range tas {
-				ok, ksk := cache.ValidateDNSKEYRRsetUsingDS(rrsetForValidate, ds, zone, false)
-				if ok && ksk != nil {
-					link.MatchedKSK = ksk
-					link.Status = ChainStatusSecure
-					link.Notes = append(link.Notes, fmt.Sprintf("trust-anchor DS keytag=%d matches KSK; DNSKEY RRset signature OK", ds.KeyTag))
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				link.Status = ChainStatusBogus
-				link.Notes = append(link.Notes, "trust-anchor DS has no matching DNSKEY at this zone (KSK rolled? wrong TA?)")
-				result.Status = worstStatus(result.Status, ChainStatusBogus)
-			}
-		} else {
-			// No TA configured for this zone (typically the root).
-			// Without a TA we have no way to anchor the chain; report
-			// the link as Indeterminate so the overall verdict
-			// reflects the missing anchor.
+			// Case (b), or the zone-cut check itself failed: keep the
+			// candidate on the Indeterminate path. A lookup failure must
+			// not be mistaken for a non-cut (which would silently drop a
+			// possibly-real delegation), so we do NOT skip on error.
 			link.Status = ChainStatusIndeterminate
-			link.Notes = append(link.Notes, "no trust anchor configured for this zone")
-			result.Status = worstStatus(result.Status, ChainStatusIndeterminate)
+			if cutErr != nil {
+				link.Notes = append(link.Notes, fmt.Sprintf("no DS at parent; zone-cut check failed: %v", cutErr))
+			} else {
+				link.Notes = append(link.Notes, "no DS record at parent (and no NSEC proof checked)")
+			}
+			return &cutDecision{link: link}
 		}
-		result.Links = append(result.Links, link)
+		link.DS = ds
 	}
 
-	// Leaf: query the target and verify the RRSIG against the deepest
-	// zone's DNSKEY.
-	leaf := ChainLeaf{Qname: qname, Qtype: qtype}
-	rrs, sigs, err := c.queryRRset(qname, qtype)
-	if err != nil {
-		leaf.Status = ChainStatusIndeterminate
-		leaf.Notes = append(leaf.Notes, fmt.Sprintf("answer query failed: %v", err))
-	} else if len(rrs) == 0 {
-		leaf.Status = ChainStatusIndeterminate
-		leaf.Notes = append(leaf.Notes, "no answer RRs")
-	} else {
-		leaf.RRset = &core.RRset{
-			Name:   qname,
-			Class:  dns.ClassINET,
-			RRtype: qtype,
-			RRs:    rrs,
-			RRSIGs: rrsigsToRRs(sigs),
-		}
-		if len(sigs) == 0 {
-			leaf.Status = ChainStatusInsecure
-			leaf.Notes = append(leaf.Notes, "no RRSIG present on answer")
-		} else if len(result.Links) == 0 || len(result.Links[len(result.Links)-1].DNSKEY) == 0 {
-			leaf.Status = ChainStatusIndeterminate
-			leaf.Notes = append(leaf.Notes, "no DNSKEY available for deepest zone — cannot verify")
-		} else {
-			deepest := result.Links[len(result.Links)-1]
-			leaf.Status, leaf.Notes = verifyLeafSig(leaf.RRset.RRs, sigs, deepest.DNSKEY, deepest.Zone)
-		}
-	}
-	result.Leaf = leaf
-	result.Status = worstStatus(result.Status, leaf.Status)
-	return result, nil
+	w.judgeKeys(link)
+	return &cutDecision{link: link}
 }
 
-// queryRRset issues qname/qtype +dnssec against the chaser's server and
-// extracts the answer RRs and their RRSIGs.
-func (c *Chaser) queryRRset(qname string, qtype uint16) ([]dns.RR, []*dns.RRSIG, error) {
+// judgeKeys fetches the DNSKEY RRset of link's zone and matches it against
+// the DS records the parent gave, or against the trust anchor configured for
+// the zone.
+func (w *chainWalk) judgeKeys(link *ChainLink) {
+	zone := link.Zone
+	resp, err := w.c.query(zone, dns.TypeDNSKEY)
+	if err != nil {
+		link.Status = ChainStatusIndeterminate
+		link.Notes = append(link.Notes, fmt.Sprintf("DNSKEY query failed: %v", err))
+		return
+	}
+	dnskeys, sigs := ownedDNSKEY(resp.Answer, zone)
+	link.DNSKEY = dnskeys
+	link.DNSKEYSigs = sigs
+
+	// Match DS (if any) to a DNSKEY and verify the DNSKEY RRset
+	// signature with that KSK.
+	if len(link.DS) > 0 {
+		rrsetForValidate := dnskeyRRsetForValidator(zone, dnskeys, sigs)
+		matched := false
+		for _, ds := range link.DS {
+			ok, ksk := cache.ValidateDNSKEYRRsetUsingDS(rrsetForValidate, ds, zone, false)
+			if ok && ksk != nil {
+				link.MatchedKSK = ksk
+				link.Status = ChainStatusSecure
+				link.Notes = append(link.Notes, fmt.Sprintf("DS keytag=%d matches KSK; DNSKEY RRset signature OK", ds.KeyTag))
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			link.Status = ChainStatusBogus
+			link.Notes = append(link.Notes, "DS at parent has no matching DNSKEY (or DNSKEY RRSIG failed)")
+		}
+	} else if tas := w.c.TrustAnchors[zone]; len(tas) > 0 {
+		// TA-anchored zone (typically root). Treat the configured
+		// DS records exactly the same way as a parent's
+		// referral-supplied DS: match against the zone's DNSKEY
+		// RRset and validate the RRset's signature with the
+		// matched KSK. This is what makes the root link reach
+		// Secure for a fully-signed chain.
+		link.DS = tas
+		rrsetForValidate := dnskeyRRsetForValidator(zone, dnskeys, sigs)
+		matched := false
+		for _, ds := range tas {
+			ok, ksk := cache.ValidateDNSKEYRRsetUsingDS(rrsetForValidate, ds, zone, false)
+			if ok && ksk != nil {
+				link.MatchedKSK = ksk
+				link.Status = ChainStatusSecure
+				link.Notes = append(link.Notes, fmt.Sprintf("trust-anchor DS keytag=%d matches KSK; DNSKEY RRset signature OK", ds.KeyTag))
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			link.Status = ChainStatusBogus
+			link.Notes = append(link.Notes, "trust-anchor DS has no matching DNSKEY at this zone (KSK rolled? wrong TA?)")
+		}
+	} else {
+		// No TA configured for this zone (typically the root).
+		// Without a TA we have no way to anchor the chain; report
+		// the link as Indeterminate so the overall verdict
+		// reflects the missing anchor.
+		link.Status = ChainStatusIndeterminate
+		link.Notes = append(link.Notes, "no trust anchor configured for this zone")
+	}
+}
+
+// judgeLeaf judges the answer for name and qtype against the deepest link of
+// chain.
+func (w *chainWalk) judgeLeaf(name string, qtype uint16, ans chaseAnswer, chain []*ChainLink) ChainLeaf {
+	leaf := ChainLeaf{Qname: name, Qtype: qtype, Rcode: ans.rcode}
+	switch {
+	case ans.err != nil:
+		leaf.Status = ChainStatusIndeterminate
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("answer query failed: %v", ans.err))
+		return leaf
+	case len(ans.rrs) == 0:
+		leaf.Status = ChainStatusIndeterminate
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("no answer RRs (%s)", negativeKind(ans.rcode)))
+		return leaf
+	}
+	leaf.RRset = &core.RRset{
+		Name:   name,
+		Class:  dns.ClassINET,
+		RRtype: qtype,
+		RRs:    ans.rrs,
+		RRSIGs: rrsigsToRRs(ans.sigs),
+	}
+	switch {
+	case len(ans.sigs) == 0:
+		leaf.Status = ChainStatusInsecure
+		leaf.Notes = append(leaf.Notes, "no RRSIG present on answer")
+	case len(chain) == 0 || len(chain[len(chain)-1].DNSKEY) == 0:
+		leaf.Status = ChainStatusIndeterminate
+		leaf.Notes = append(leaf.Notes, "no DNSKEY available for deepest zone — cannot verify")
+	default:
+		deepest := chain[len(chain)-1]
+		leaf.Status, leaf.Notes = verifyLeafSig(leaf.RRset.RRs, ans.sigs, deepest.DNSKEY, deepest.Zone)
+	}
+	return leaf
+}
+
+// negativeKind names a negative answer by its rcode.
+func negativeKind(rcode int) string {
+	if rcode == dns.RcodeNameError {
+		return "NXDOMAIN"
+	}
+	return "NODATA"
+}
+
+// query asks the chaser's server for name and qtype, with DO set, and with
+// CD set: a validator sets CD on its queries (RFC 6840 section 5.9), so that
+// the server returns the data it has whatever its own verdict, and the walk
+// judges it. A response with an rcode other than NOERROR or NXDOMAIN is an
+// error: it says nothing about name, and it must not read as an absence.
+func (c *Chaser) query(name string, qtype uint16) (*dns.Msg, error) {
 	m := new(dns.Msg)
-	m.SetQuestion(qname, qtype)
+	m.SetQuestion(name, qtype)
 	m.SetEdns0(4096, true)
+	m.CheckingDisabled = true
 	resp, _, err := c.Client.Exchange(m, c.Server, false)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if resp == nil {
-		return nil, nil, fmt.Errorf("nil response")
+		return nil, fmt.Errorf("nil response")
 	}
-	var rrs []dns.RR
-	var sigs []*dns.RRSIG
-	for _, rr := range resp.Answer {
-		if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == qtype {
-			sigs = append(sigs, sig)
-			continue
-		}
-		if rr.Header().Rrtype == qtype {
-			rrs = append(rrs, rr)
-		}
+	switch resp.Rcode {
+	case dns.RcodeSuccess, dns.RcodeNameError:
+		return resp, nil
 	}
-	return rrs, sigs, nil
+	rcode, ok := dns.RcodeToString[resp.Rcode]
+	if !ok {
+		rcode = fmt.Sprintf("rcode %d", resp.Rcode)
+	}
+	return nil, fmt.Errorf("%s", rcode)
 }
 
-// queryDSAtParent fetches the DS RRset for `zone` (and any RRSIGs).
-func (c *Chaser) queryDSAtParent(zone string) ([]*dns.DS, []*dns.RRSIG, error) {
-	rrs, sigs, err := c.queryRRset(zone, dns.TypeDS)
+// ask is query for the leaf, read by owner.
+func (c *Chaser) ask(name string, qtype uint16) chaseAnswer {
+	resp, err := c.query(name, qtype)
 	if err != nil {
-		return nil, nil, err
+		return chaseAnswer{err: err}
 	}
-	var dss []*dns.DS
+	rrs, sigs := ownedRRs(resp.Answer, name, qtype)
+	return chaseAnswer{rrs: rrs, sigs: sigs, rcode: resp.Rcode}
+}
+
+// ownedRRs returns the records of rrtype that name owns in rrs, and the
+// RRSIGs over them that name owns. A response can hold records of the type
+// asked for owned by another name -- the target of a CNAME -- and those are
+// not the name's.
+func ownedRRs(rrs []dns.RR, name string, rrtype uint16) ([]dns.RR, []*dns.RRSIG) {
+	var out []dns.RR
+	var sigs []*dns.RRSIG
 	for _, rr := range rrs {
+		if rr == nil || !core.EqualNames(rr.Header().Name, name) {
+			continue
+		}
+		if sig, ok := rr.(*dns.RRSIG); ok {
+			if sig.TypeCovered == rrtype {
+				sigs = append(sigs, sig)
+			}
+			continue
+		}
+		if rr.Header().Rrtype == rrtype {
+			out = append(out, rr)
+		}
+	}
+	return out, sigs
+}
+
+// ownedDS returns the DS records zone owns in rrs, and their RRSIGs.
+func ownedDS(rrs []dns.RR, zone string) ([]*dns.DS, []*dns.RRSIG) {
+	recs, sigs := ownedRRs(rrs, zone, dns.TypeDS)
+	var dss []*dns.DS
+	for _, rr := range recs {
 		if ds, ok := rr.(*dns.DS); ok {
 			dss = append(dss, ds)
 		}
 	}
-	return dss, sigs, nil
+	return dss, sigs
 }
 
-// queryDNSKEY fetches the DNSKEY RRset for `zone` (and any RRSIGs).
-func (c *Chaser) queryDNSKEY(zone string) ([]*dns.DNSKEY, []*dns.RRSIG, error) {
-	rrs, sigs, err := c.queryRRset(zone, dns.TypeDNSKEY)
-	if err != nil {
-		return nil, nil, err
-	}
+// ownedDNSKEY returns the DNSKEY records zone owns in rrs, and their RRSIGs.
+func ownedDNSKEY(rrs []dns.RR, zone string) ([]*dns.DNSKEY, []*dns.RRSIG) {
+	recs, sigs := ownedRRs(rrs, zone, dns.TypeDNSKEY)
 	var keys []*dns.DNSKEY
-	for _, rr := range rrs {
+	for _, rr := range recs {
 		if k, ok := rr.(*dns.DNSKEY); ok {
 			keys = append(keys, k)
 		}
 	}
-	return keys, sigs, nil
+	return keys, sigs
 }
 
 // isZoneCut reports whether name is an actual zone apex — i.e. a
@@ -355,14 +455,14 @@ func (c *Chaser) queryDNSKEY(zone string) ([]*dns.DNSKEY, []*dns.RRSIG, error) {
 // be silently dropped. The caller keeps such a candidate on the
 // Indeterminate path instead of skipping it.
 func (c *Chaser) isZoneCut(name string) (bool, error) {
-	if rrs, _, err := c.queryRRset(name, dns.TypeSOA); err != nil {
-		return false, err
-	} else if len(rrs) > 0 {
+	if ans := c.ask(name, dns.TypeSOA); ans.err != nil {
+		return false, ans.err
+	} else if len(ans.rrs) > 0 {
 		return true, nil
 	}
-	if rrs, _, err := c.queryRRset(name, dns.TypeNS); err != nil {
-		return false, err
-	} else if len(rrs) > 0 {
+	if ans := c.ask(name, dns.TypeNS); ans.err != nil {
+		return false, ans.err
+	} else if len(ans.rrs) > 0 {
 		return true, nil
 	}
 	return false, nil
@@ -400,14 +500,10 @@ func verifyLeafSig(rrs []dns.RR, sigs []*dns.RRSIG, keys []*dns.DNSKEY, zone str
 	return ChainStatusIndeterminate, append(notes, "no usable signatures")
 }
 
-// zoneCutsFromRoot returns the zone names from "." down to qname (the
-// closest enclosing zone). E.g. for "p.axfr.net." returns
-// [".", "net.", "axfr.net.", "p.axfr.net."]. For a leaf-only query
-// where the qname IS a zone apex, the qname is included; for a query
-// for a non-zone-apex name like "www.example.com." we cannot know
-// without querying, so we conservatively include qname's parent
-// (example.com.) as the deepest zone — the caller may want a NS lookup
-// to refine this.
+// zoneCutsFromRoot returns the candidate zone names from "." down to qname,
+// one per label: for "www.example.com." it returns [".", "com.",
+// "example.com.", "www.example.com."]. Which of them are zone cuts the walk
+// works out from what the DS question at each of them gets.
 func zoneCutsFromRoot(qname string) []string {
 	qname = dns.Fqdn(qname)
 	if qname == "." {
@@ -468,79 +564,4 @@ func worstStatus(a, b ChainStatus) ChainStatus {
 		return a
 	}
 	return b
-}
-
-// algField formats an algorithm number for chain display. When
-// algNames is set (dog +algchase), it appends the algorithm's registered
-// name, e.g. "alg=214 (CROSSRSDPG128SMALL)" — or "alg=250 (unknown)" for
-// a codepoint this binary has no metadata for. Otherwise it is the bare
-// "alg=N".
-func algField(alg uint8, algNames bool) string {
-	if !algNames {
-		return fmt.Sprintf("alg=%d", alg)
-	}
-	name, ok := algorithms.AlgorithmName(alg)
-	if !ok {
-		name = "unknown"
-	}
-	return fmt.Sprintf("alg=%d (%s)", alg, name)
-}
-
-// RenderChain formats a ChainResult as a human-readable tree on w. When
-// algNames is set (dog +algchase), algorithm numbers in the DS and
-// DNSKEY summaries are annotated with their registered names.
-// Used by `dog sigchase` and (soon) by `imr explain`.
-func RenderChain(result *ChainResult, w io.Writer, algNames bool) {
-	if result == nil {
-		fmt.Fprintln(w, "chain: nil result")
-		return
-	}
-	fmt.Fprintf(w, "Chain validation for %s %s:\n\n", result.Leaf.Qname, dns.TypeToString[result.Leaf.Qtype])
-	indent := ""
-	for i, link := range result.Links {
-		label := link.Zone
-		if i == 0 {
-			label = ". (root)"
-		}
-		fmt.Fprintf(w, "%s%s    [%s]\n", indent, label, link.Status)
-		// Show DS / DNSKEY / matched-KSK summary
-		if len(link.DS) > 0 {
-			tags := make([]string, 0, len(link.DS))
-			for _, ds := range link.DS {
-				tags = append(tags, fmt.Sprintf("keytag=%d %s digest_type=%d", ds.KeyTag, algField(ds.Algorithm, algNames), ds.DigestType))
-			}
-			sort.Strings(tags)
-			fmt.Fprintf(w, "%s   DS at parent:   %s\n", indent, strings.Join(tags, ", "))
-		}
-		if len(link.DNSKEY) > 0 {
-			tags := make([]string, 0, len(link.DNSKEY))
-			for _, k := range link.DNSKEY {
-				role := "ZSK"
-				if k.Flags&257 == 257 {
-					role = "KSK"
-				}
-				tags = append(tags, fmt.Sprintf("%s keytag=%d %s", role, k.KeyTag(), algField(k.Algorithm, algNames)))
-			}
-			sort.Strings(tags)
-			fmt.Fprintf(w, "%s   DNSKEY:         %s\n", indent, strings.Join(tags, ", "))
-		}
-		if link.MatchedKSK != nil {
-			fmt.Fprintf(w, "%s   Matched KSK:    keytag=%d\n", indent, link.MatchedKSK.KeyTag())
-		}
-		for _, note := range link.Notes {
-			fmt.Fprintf(w, "%s   note:           %s\n", indent, note)
-		}
-		fmt.Fprintln(w)
-		indent += "  "
-	}
-	fmt.Fprintf(w, "%s%s %s    [%s]\n", indent, result.Leaf.Qname, dns.TypeToString[result.Leaf.Qtype], result.Leaf.Status)
-	if result.Leaf.RRset != nil {
-		for _, rr := range result.Leaf.RRset.RRs {
-			fmt.Fprintf(w, "%s   %s\n", indent, rr.String())
-		}
-	}
-	for _, note := range result.Leaf.Notes {
-		fmt.Fprintf(w, "%s   note:           %s\n", indent, note)
-	}
-	fmt.Fprintf(w, "\nResult: %s\n", result.Status)
 }
