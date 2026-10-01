@@ -270,7 +270,7 @@ func (w *chainWalk) walkName(name string, qtype uint16) ([]*ChainLink, ChainLeaf
 		}
 		return links, leaf, ""
 	}
-	cname := chaseAnswer{rrs: ans.cname, sigs: ans.cnameSigs, rcode: ans.rcode}
+	cname := chaseAnswer{rrs: ans.cname, sigs: ans.cnameSigs, rcode: ans.rcode, authority: ans.authority}
 	return links, w.judgeLeaf(name, dns.TypeCNAME, cname, links), ans.cname[0].(*dns.CNAME).Target
 }
 
@@ -692,7 +692,7 @@ func (w *chainWalk) judgeLeaf(name string, qtype uint16, ans chaseAnswer, chain 
 	if leaf.RRset == nil {
 		own = w.denialOwn(&leaf, ans, deepest)
 	} else {
-		own = w.answerOwn(&leaf, deepest)
+		own = w.answerOwn(&leaf, ans.authority, deepest)
 	}
 	leaf.Status = worstStatus(deepest.Status, own)
 	if leaf.Status != own {
@@ -740,28 +740,13 @@ func (w *chainWalk) denialOwn(leaf *ChainLeaf, ans chaseAnswer, deepest *ChainLi
 		leaf.Notes = append(leaf.Notes, fmt.Sprintf("no DNSKEY of %s to verify the denial with", deepest.Zone))
 		return ChainStatusIndeterminate
 	}
-	var nsecs []*dns.NSEC
-	var nsec3s []*dns.NSEC3
-	for _, set := range sets {
-		if !hasSigner(set, deepest.Zone) {
-			continue // another zone's records prove nothing about this one
-		}
-		if _, err := zoneSignature(set, deepest.Zone, deepest.DNSKEY, w.now); err != nil {
-			leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s %s in the denial: %v", set.Name, dns.TypeToString[set.RRtype], err))
-			return ChainStatusBogus
-		}
-		for _, rr := range set.RRs {
-			switch r := rr.(type) {
-			case *dns.NSEC:
-				nsecs = append(nsecs, r)
-				leaf.Proof = append(leaf.Proof, r)
-			case *dns.NSEC3:
-				nsec3s = append(nsec3s, r)
-				leaf.Proof = append(leaf.Proof, r)
-			}
-		}
+	nsecs, nsec3s, records, err := w.zoneProof(sets, deepest)
+	leaf.Proof = records
+	if err != nil {
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s in the denial: %v", kind, err))
+		return ChainStatusBogus
 	}
-	if len(nsecs) == 0 && len(nsec3s) == 0 {
+	if len(records) == 0 {
 		leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s with no NSEC or NSEC3 proof", kind))
 		return ChainStatusBogus
 	}
@@ -796,8 +781,9 @@ func (w *chainWalk) insecure(link *ChainLink) bool {
 }
 
 // answerOwn is the verdict on leaf's answer RRset alone, with the keys of
-// deepest, the zone that holds it.
-func (w *chainWalk) answerOwn(leaf *ChainLeaf, deepest *ChainLink) ChainStatus {
+// deepest, the zone that holds it, and for an answer synthesized from a
+// wildcard, the proof in authority, the authority section it came with.
+func (w *chainWalk) answerOwn(leaf *ChainLeaf, authority []dns.RR, deepest *ChainLink) ChainStatus {
 	rrset := leaf.RRset
 	if len(rrset.RRSIGs) == 0 {
 		if deepest.Status == ChainStatusSecure {
@@ -821,19 +807,104 @@ func (w *chainWalk) answerOwn(leaf *ChainLeaf, deepest *ChainLink) ChainStatus {
 		}
 		return ChainStatusBogus
 	}
-	sig, err := zoneSignature(rrset, deepest.Zone, deepest.DNSKEY, w.now)
+	// Signatures made over the owner itself are tried first, as the resolver
+	// tries them (ValidateAnswer): one that verifies makes the records the
+	// owner's own, and no proof is needed.
+	var own, expansion []dns.RR
+	for _, rr := range rrset.RRSIGs {
+		if sig, ok := rr.(*dns.RRSIG); ok && cache.ExpansionSignature(sig, leaf.Qname) {
+			expansion = append(expansion, rr)
+			continue
+		}
+		own = append(own, rr)
+	}
+	ordered := &core.RRset{Name: rrset.Name, Class: rrset.Class, RRtype: rrset.RRtype, RRs: rrset.RRs, RRSIGs: append(own, expansion...)}
+	sig, err := zoneSignature(ordered, deepest.Zone, deepest.DNSKEY, w.now)
 	if err != nil {
 		leaf.Notes = append(leaf.Notes, err.Error())
 		return ChainStatusBogus
 	}
 	leaf.Notes = append(leaf.Notes, fmt.Sprintf("sig keytag=%d verified", sig.KeyTag))
 	if cache.ExpansionSignature(sig, leaf.Qname) {
-		// RFC 4035 section 5.3.4: valid for the wildcard, the signature does
-		// not show that the name itself does not exist.
-		leaf.Notes = append(leaf.Notes, fmt.Sprintf("synthesized from %s; the proof that the name does not exist is not checked", wildcardOf(sig, leaf.Qname)))
-		return ChainStatusIndeterminate
+		return w.wildcardOwn(leaf, sig, authority, deepest)
 	}
 	return ChainStatusSecure
+}
+
+// wildcardOwn is the verdict on an answer synthesized from a wildcard, whose
+// signature sig verified: valid for the wildcard, it does not show that the
+// name itself does not exist, nor any name between it and the wildcard. The
+// NSEC or NSEC3 records of the authority section, verified with the keys of
+// deepest, must prove that (RFC 4035 section 5.3.4, RFC 5155 section 8.8), as
+// the resolver reads them (cache.ProveWildcardAnswer).
+func (w *chainWalk) wildcardOwn(leaf *ChainLeaf, sig *dns.RRSIG, authority []dns.RR, deepest *ChainLink) ChainStatus {
+	wildcard := wildcardOf(sig, leaf.Qname)
+	var sets []*core.RRset
+	for _, set := range authorityRRsets(authority) {
+		if set.RRtype == dns.TypeNSEC || set.RRtype == dns.TypeNSEC3 {
+			sets = append(sets, set)
+		}
+	}
+	nsecs, nsec3s, records, err := w.zoneProof(sets, deepest)
+	leaf.Proof = records
+	if err != nil {
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("synthesized from %s; %v", wildcard, err))
+		return ChainStatusBogus
+	}
+	if len(records) == 0 {
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("synthesized from %s, with no NSEC or NSEC3 proof that the name does not exist", wildcard))
+		return ChainStatusBogus
+	}
+	state, ede := cache.ProveWildcardAnswer(deepest.Zone, leaf.Qname, sig.Labels, nsecs, nsec3s)
+	by := proofKind(nsecs)
+	switch state {
+	case cache.ValidationStateSecure:
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("synthesized from %s; the %s proof that the name does not exist holds", wildcard, by))
+		return ChainStatusSecure
+	case cache.ValidationStateInsecure:
+		if ede != 0 {
+			leaf.Notes = append(leaf.Notes, fmt.Sprintf("synthesized from %s; NSEC3 iterations above the limit of %d, so the proof cannot be judged: insecure (RFC 9276)",
+				wildcard, cache.NSEC3MaxIterations()))
+		} else {
+			leaf.Notes = append(leaf.Notes, fmt.Sprintf("synthesized from %s; proven through an NSEC3 Opt-Out span: insecure (RFC 5155 section 9.2)", wildcard))
+		}
+		return ChainStatusInsecure
+	case cache.ValidationStateIndeterminate:
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("synthesized from %s; the NSEC3 proof needs more hashes than allowed: cannot judge", wildcard))
+		return ChainStatusIndeterminate
+	}
+	leaf.Notes = append(leaf.Notes, fmt.Sprintf("synthesized from %s; the %s proof that the name does not exist does not hold", wildcard, by))
+	return ChainStatusBogus
+}
+
+// zoneProof verifies the RRsets of sets that the zone of link signed, with its
+// keys, and returns the NSEC and NSEC3 records among them, and the same
+// records for the output. RRsets signed only by other zones are passed over:
+// they prove nothing about this one. One the zone signed that does not verify
+// is an error, and decides the verdict, as in the resolver.
+func (w *chainWalk) zoneProof(sets []*core.RRset, link *ChainLink) ([]*dns.NSEC, []*dns.NSEC3, []dns.RR, error) {
+	var nsecs []*dns.NSEC
+	var nsec3s []*dns.NSEC3
+	var records []dns.RR
+	for _, set := range sets {
+		if !hasSigner(set, link.Zone) {
+			continue
+		}
+		if _, err := zoneSignature(set, link.Zone, link.DNSKEY, w.now); err != nil {
+			return nil, nil, nil, fmt.Errorf("%s %s: %v", set.Name, dns.TypeToString[set.RRtype], err)
+		}
+		for _, rr := range set.RRs {
+			switch r := rr.(type) {
+			case *dns.NSEC:
+				nsecs = append(nsecs, r)
+				records = append(records, r)
+			case *dns.NSEC3:
+				nsec3s = append(nsec3s, r)
+				records = append(records, r)
+			}
+		}
+	}
+	return nsecs, nsec3s, records, nil
 }
 
 // hasSigner reports whether an RRSIG over rrset names zone as its signer.

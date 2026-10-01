@@ -606,17 +606,6 @@ func TestChaseAnswerVerdicts(t *testing.T) {
 			t.Errorf("leaf notes %q", res.Leaf.Notes)
 		}
 	})
-	// Until the proof of an expansion is checked, an answer synthesized from
-	// a wildcard is not Secure on its signature alone (item 7 of #876).
-	t.Run("synthesized from a wildcard", func(t *testing.T) {
-		tr := secureTree(t)
-		tr.zones["sec.example."].add("*.sec.example. 300 IN A 192.0.2.40")
-		res := tr.chase("any.sec.example.", dns.TypeA)
-		wantStatus(t, "leaf", res.Leaf.Status, ChainStatusIndeterminate)
-		if !hasNote(res.Leaf.Notes, "synthesized from *.sec.example.") {
-			t.Errorf("leaf notes %q", res.Leaf.Notes)
-		}
-	})
 }
 
 // cnameTree is the root, example., sec.example. and other.example., all
@@ -989,4 +978,90 @@ func TestChaseExpansionIsTheResolversCall(t *testing.T) {
 	if !hasNote(res.Leaf.Notes, "synthesized from *.w.sec.example.") {
 		t.Errorf("an expansion not reported: %q", res.Leaf.Notes)
 	}
+}
+
+// wcScript answers x.w.sec.example. A with the A synthesized from
+// *.w.sec.example., signed, and with the NSEC3 records recs, signed by
+// sec.example., as its proof.
+func wcScript(tr *chaseTree, recs ...*dns.NSEC3) {
+	z := tr.zones["sec.example."]
+	tr.script("x.w.sec.example.", dns.TypeA, func() *dns.Msg {
+		m := &dns.Msg{Answer: expand(z.sign(z.get("*.w.sec.example.", dns.TypeA)), "x.w.sec.example.")}
+		for _, r := range recs {
+			m.Ns = append(m.Ns, z.sign([]dns.RR{r})...)
+		}
+		return m
+	})
+}
+
+// An answer synthesized from a wildcard is Secure only with the proof that the
+// name does not exist, nor any name between it and the wildcard (RFC 4035
+// section 5.3.4, RFC 5155 section 8.8; item 7 of #876).
+func TestChaseWildcardAnswers(t *testing.T) {
+	const optOut = 1
+	nc := func(flags uint8, iterations uint16) *dns.NSEC3 {
+		return n3RR("sec.example.", "x.w.sec.example.", true, flags, iterations)
+	}
+	for _, c := range []struct {
+		name  string
+		setup func(tr *chaseTree)
+		want  ChainStatus
+		note  string
+	}{
+		{"NSEC proof", nil, ChainStatusSecure, "synthesized from *.w.sec.example.; the NSEC proof that the name does not exist holds"},
+		{"proof missing", func(tr *chaseTree) { tr.edit("x.w.sec.example.", dns.TypeA, dropProof) },
+			ChainStatusBogus, "with no NSEC or NSEC3 proof that the name does not exist"},
+		{"proof changed after signing", func(tr *chaseTree) {
+			tr.edit("x.w.sec.example.", dns.TypeA, changeRR(dns.TypeNSEC, func(rr dns.RR) {
+				rr.(*dns.NSEC).NextDomain = "z.sec.example."
+			}))
+		}, ChainStatusBogus, "does not verify"},
+		{"an NSEC that does not cover the name", func(tr *chaseTree) {
+			z := tr.zones["sec.example."]
+			tr.script("x.w.sec.example.", dns.TypeA, func() *dns.Msg {
+				other := &dns.NSEC{Hdr: dns.RR_Header{Name: "a.sec.example.", Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: 300},
+					NextDomain: "b.c.sec.example.", TypeBitMap: []uint16{dns.TypeA, dns.TypeRRSIG, dns.TypeNSEC}}
+				return &dns.Msg{Answer: expand(z.sign(z.get("*.w.sec.example.", dns.TypeA)), "x.w.sec.example."),
+					Ns: z.sign([]dns.RR{other})}
+			})
+		}, ChainStatusBogus, "the NSEC proof that the name does not exist does not hold"},
+		{"NSEC3 proof", func(tr *chaseTree) { wcScript(tr, nc(0, 0)) }, ChainStatusSecure, "the NSEC3 proof that the name does not exist holds"},
+		{"NSEC3 Opt-Out", func(tr *chaseTree) { wcScript(tr, nc(optOut, 0)) }, ChainStatusInsecure, "Opt-Out span"},
+		{"NSEC3 over the iteration limit", func(tr *chaseTree) { wcScript(tr, nc(0, 11)) }, ChainStatusInsecure, "iterations above the limit of 10"},
+		{"NSEC3 covering another name", func(tr *chaseTree) {
+			wcScript(tr, n3RR("sec.example.", "y.w.sec.example.", true, 0, 0))
+		}, ChainStatusBogus, "does not hold"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tr := denialTree(t)
+			if c.setup != nil {
+				c.setup(tr)
+			}
+			res := tr.chase("x.w.sec.example.", dns.TypeA)
+			wantStatus(t, "leaf", res.Leaf.Status, c.want)
+			if !hasNote(res.Leaf.Notes, c.note) {
+				t.Errorf("leaf notes %q, want one with %q", res.Leaf.Notes, c.note)
+			}
+		})
+	}
+
+	// A CNAME synthesized from a wildcard is a part like any other: its proof
+	// is read, and its target walked.
+	t.Run("a CNAME from a wildcard", func(t *testing.T) {
+		tr := denialTree(t)
+		tr.zones["sec.example."].add("*.cn.sec.example. 300 IN CNAME www.sec.example.")
+		res := tr.chase("x.cn.sec.example.", dns.TypeA)
+		if len(res.Aliases) != 1 {
+			t.Fatalf("%d aliases, want 1", len(res.Aliases))
+		}
+		cn := res.Aliases[0].Leaf
+		wantStatus(t, "CNAME", cn.Status, ChainStatusSecure)
+		if !hasNote(cn.Notes, "synthesized from *.cn.sec.example.; the NSEC proof that the name does not exist holds") {
+			t.Errorf("CNAME notes %q", cn.Notes)
+		}
+		wantStatus(t, "result", res.Status, ChainStatusSecure)
+
+		tr.edit("x.cn.sec.example.", dns.TypeA, dropProof)
+		wantStatus(t, "result without the proof", tr.chase("x.cn.sec.example.", dns.TypeA).Status, ChainStatusBogus)
+	})
 }

@@ -162,6 +162,24 @@ func (rrcache *RRsetCacheT) WildcardAnswerProof(ctx context.Context, zone, qname
 			}
 		}
 	}
+	return ProveWildcardAnswer(zone, qname, labels, nsecs, nsec3s)
+}
+
+// ProveWildcardAnswer reads what nsecs and nsec3s, records of zone whose
+// signatures by zone the caller has verified, prove about an answer for qname
+// that zone synthesized from a wildcard; labels is the Labels field of the
+// RRSIG that verified the answer. It is the reading WildcardAnswerProof makes
+// of the records that validate, for a caller that checks signatures with keys
+// of its own, not the cache's: the chain walk of dog +sigchase. It looks at no
+// signatures, cache or network.
+//
+// An NSEC that proves it (nsecWildcardAnswer): Secure. Otherwise the NSEC3
+// verdict: Secure, Insecure through an Opt-Out span (RFC 5155 section 9.2),
+// Insecure with EDE 27 over the iteration limit (RFC 9276). No proof: Bogus.
+// The EDE code is 0 unless 27.
+func ProveWildcardAnswer(zone, qname string, labels uint8, nsecs []*dns.NSEC, nsec3s []*dns.NSEC3) (ValidationState, uint16) {
+	zone = dns.Fqdn(zone)
+	qname = dns.CanonicalName(qname)
 	if nsecWildcardAnswer(qname, labels, zone, nsecs) {
 		return ValidationStateSecure, 0
 	}
