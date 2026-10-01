@@ -121,10 +121,28 @@ type Chaser struct {
 func NewChaser(client core.DNSClienter, server string, trustAnchors []*dns.DS) *Chaser {
 	tas := map[string][]*dns.DS{}
 	for _, ds := range trustAnchors {
-		name := dns.Fqdn(ds.Hdr.Name)
+		name := core.CanonicalizeName(dns.Fqdn(ds.Hdr.Name))
 		tas[name] = append(tas[name], ds)
 	}
 	return &Chaser{Client: client, Server: server, TrustAnchors: tas}
+}
+
+// anchorsFor returns the trust anchors configured for zone. Names compare
+// without regard to case, as everywhere else in the walk: the zone comes from
+// the query name, in the case it was asked in. NewChaser stores canonical
+// keys; a map a caller filled itself is searched when the direct lookup
+// misses.
+func (c *Chaser) anchorsFor(zone string) []*dns.DS {
+	zone = dns.Fqdn(zone)
+	if tas, ok := c.TrustAnchors[core.CanonicalizeName(zone)]; ok {
+		return tas
+	}
+	for name, tas := range c.TrustAnchors {
+		if core.EqualNames(dns.Fqdn(name), zone) {
+			return tas
+		}
+	}
+	return nil
 }
 
 // Chase walks the chain from the root toward qname and verifies each
@@ -276,7 +294,7 @@ func (w *chainWalk) links(zones []string) []*ChainLink {
 	var chain []*ChainLink
 	insecure := false
 	for _, zone := range zones {
-		if insecure && len(w.c.TrustAnchors[zone]) == 0 {
+		if insecure && len(w.c.anchorsFor(zone)) == 0 {
 			addNote(chain[len(chain)-1], "names below an insecure delegation are not checked")
 			continue
 		}
@@ -317,7 +335,7 @@ func (w *chainWalk) decide(zone string, chain []*ChainLink) *cutDecision {
 		link.ParentZone = above.Zone
 	}
 	d := w.decideOwn(link, above)
-	if d.link != nil && above != nil && len(w.c.TrustAnchors[zone]) == 0 {
+	if d.link != nil && above != nil && len(w.c.anchorsFor(zone)) == 0 {
 		capBelow(d.link, above)
 	}
 	return d
@@ -340,7 +358,7 @@ func (w *chainWalk) decideOwn(link, above *ChainLink) *cutDecision {
 	// Fetch DS from the parent (skip for root, and for a zone with a trust
 	// anchor of its own: the anchor vouches for its keys, as it does in the
 	// resolver, which asks for no DS there either).
-	if zone != "." && len(w.c.TrustAnchors[zone]) == 0 {
+	if zone != "." && len(w.c.anchorsFor(zone)) == 0 {
 		resp, err := w.c.query(zone, dns.TypeDS)
 		if err != nil {
 			link.Status = ChainStatusIndeterminate
@@ -587,7 +605,7 @@ func (w *chainWalk) judgeKeys(link *ChainLink) {
 			link.Status = ChainStatusBogus
 			link.Notes = append(link.Notes, "DS at parent has no matching DNSKEY (or DNSKEY RRSIG failed)")
 		}
-	} else if tas := w.c.TrustAnchors[zone]; len(tas) > 0 {
+	} else if tas := w.c.anchorsFor(zone); len(tas) > 0 {
 		// TA-anchored zone (typically root). Treat the configured
 		// DS records exactly the same way as a parent's
 		// referral-supplied DS: match against the zone's DNSKEY
