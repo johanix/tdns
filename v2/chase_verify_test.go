@@ -617,14 +617,6 @@ func TestChaseAnswerVerdicts(t *testing.T) {
 			t.Errorf("leaf notes %q", res.Leaf.Notes)
 		}
 	})
-	t.Run("a denial", func(t *testing.T) {
-		tr := secureTree(t)
-		res := tr.chase("nx.sec.example.", dns.TypeA)
-		wantStatus(t, "leaf", res.Leaf.Status, ChainStatusIndeterminate)
-		if res.Leaf.Rcode != dns.RcodeNameError || !hasNote(res.Leaf.Notes, "NXDOMAIN: the proof of the denial is not checked") {
-			t.Errorf("leaf rcode %d, notes %q", res.Leaf.Rcode, res.Leaf.Notes)
-		}
-	})
 }
 
 // cnameTree is the root, example., sec.example. and other.example., all
@@ -828,4 +820,157 @@ func TestRenderChainCNAME(t *testing.T) {
 	if n := strings.Count(text, ". (root)"); n != 1 {
 		t.Errorf("the root printed %d times, want 1:\n%s", n, text)
 	}
+}
+
+// dropNSECAt removes the NSEC owned by owner, and its RRSIG, from the
+// authority section.
+func dropNSECAt(owner string) func(*dns.Msg) {
+	return func(m *dns.Msg) {
+		m.Ns = slices.DeleteFunc(m.Ns, func(rr dns.RR) bool {
+			if !strings.EqualFold(rr.Header().Name, owner) {
+				return false
+			}
+			if sig, ok := rr.(*dns.RRSIG); ok {
+				return sig.TypeCovered == dns.TypeNSEC
+			}
+			return rr.Header().Rrtype == dns.TypeNSEC
+		})
+	}
+}
+
+// denialTree is secureTree with a.sec.example. and b.c.sec.example. (which
+// makes c.sec.example. an empty non-terminal), and *.w.sec.example. with an A.
+func denialTree(t *testing.T) *chaseTree {
+	t.Helper()
+	tr := secureTree(t)
+	tr.zones["sec.example."].add(
+		"a.sec.example. 300 IN A 192.0.2.11",
+		"b.c.sec.example. 300 IN A 192.0.2.12",
+		"*.w.sec.example. 300 IN A 192.0.2.13",
+	)
+	return tr
+}
+
+// n3SecDenial scripts the answer to qname and qtype as a denial from
+// sec.example. signed with NSEC3: rcode, the SOA, and recs.
+func n3SecDenial(tr *chaseTree, qname string, qtype uint16, rcode int, recs ...*dns.NSEC3) {
+	z := tr.zones["sec.example."]
+	tr.script(qname, qtype, func() *dns.Msg {
+		m := &dns.Msg{MsgHdr: dns.MsgHdr{Rcode: rcode}, Ns: z.sign(z.get("sec.example.", dns.TypeSOA))}
+		for _, r := range recs {
+			m.Ns = append(m.Ns, z.sign([]dns.RR{r})...)
+		}
+		return m
+	})
+}
+
+// A negative answer is proven by the NSEC or NSEC3 records in its authority
+// section, verified with the keys of the zone that holds the name, as the
+// resolver reads them (item 6 of #876).
+func TestChaseDenials(t *testing.T) {
+	const optOut = 1
+	apex3 := func(iterations uint16) *dns.NSEC3 {
+		return n3RR("sec.example.", "sec.example.", false, 0, iterations, dns.TypeNS, dns.TypeSOA, dns.TypeRRSIG, dns.TypeDNSKEY, dns.TypeNSEC3PARAM)
+	}
+	nameError3 := func(flags uint8, iterations uint16) []*dns.NSEC3 {
+		return []*dns.NSEC3{apex3(iterations),
+			n3RR("sec.example.", "nx.sec.example.", true, flags, iterations),
+			n3RR("sec.example.", "*.sec.example.", true, flags, iterations)}
+	}
+	for _, c := range []struct {
+		name  string
+		qname string
+		qtype uint16
+		setup func(tr *chaseTree)
+		want  ChainStatus
+		note  string
+	}{
+		{"NSEC name error", "nx.sec.example.", dns.TypeA, nil, ChainStatusSecure, "NXDOMAIN proven by NSEC"},
+		{"NSEC no data", "www.sec.example.", dns.TypeMX, nil, ChainStatusSecure, "NODATA proven by NSEC"},
+		{"NSEC no data at an empty non-terminal", "c.sec.example.", dns.TypeA, nil, ChainStatusSecure, "NODATA proven by NSEC"},
+		{"NSEC no data at a wildcard", "x.w.sec.example.", dns.TypeAAAA, nil, ChainStatusSecure, "NODATA proven by NSEC"},
+		{"NSEC no DS, as the leaf", "www.sec.example.", dns.TypeDS, nil, ChainStatusSecure, "NODATA proven by NSEC"},
+		{"NSEC compact denial", "nx.sec.example.", dns.TypeA, func(tr *chaseTree) {
+			z := tr.zones["sec.example."]
+			tr.script("nx.sec.example.", dns.TypeA, func() *dns.Msg {
+				nsec := &dns.NSEC{Hdr: dns.RR_Header{Name: "nx.sec.example.", Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: 300},
+					NextDomain: "\\000.nx.sec.example.", TypeBitMap: []uint16{dns.TypeRRSIG, dns.TypeNSEC, dns.TypeNXNAME}}
+				return &dns.Msg{Ns: append(z.sign(z.get("sec.example.", dns.TypeSOA)), z.sign([]dns.RR{nsec})...)}
+			})
+		}, ChainStatusSecure, "name error (RFC 9824 compact denial) proven by NSEC"},
+		{"NSEC3 name error", "nx.sec.example.", dns.TypeA, func(tr *chaseTree) {
+			n3SecDenial(tr, "nx.sec.example.", dns.TypeA, dns.RcodeNameError, nameError3(0, 0)...)
+		}, ChainStatusSecure, "NXDOMAIN proven by NSEC3"},
+		{"NSEC3 no data", "www.sec.example.", dns.TypeMX, func(tr *chaseTree) {
+			n3SecDenial(tr, "www.sec.example.", dns.TypeMX, dns.RcodeSuccess,
+				n3RR("sec.example.", "www.sec.example.", false, 0, 0, dns.TypeA, dns.TypeRRSIG))
+		}, ChainStatusSecure, "NODATA proven by NSEC3"},
+		{"NSEC3 name error through Opt-Out", "nx.sec.example.", dns.TypeA, func(tr *chaseTree) {
+			n3SecDenial(tr, "nx.sec.example.", dns.TypeA, dns.RcodeNameError, nameError3(optOut, 0)...)
+		}, ChainStatusInsecure, "Opt-Out span"},
+		{"NSEC3 over the iteration limit", "nx.sec.example.", dns.TypeA, func(tr *chaseTree) {
+			n3SecDenial(tr, "nx.sec.example.", dns.TypeA, dns.RcodeNameError, nameError3(0, 11)...)
+		}, ChainStatusInsecure, "iterations above the limit of 10"},
+		{"NSEC3 without the wildcard cover", "nx.sec.example.", dns.TypeA, func(tr *chaseTree) {
+			n3SecDenial(tr, "nx.sec.example.", dns.TypeA, dns.RcodeNameError, nameError3(0, 0)[:2]...)
+		}, ChainStatusBogus, "the NSEC3 proof does not hold"},
+		{"proof missing", "nx.sec.example.", dns.TypeA, func(tr *chaseTree) {
+			tr.edit("nx.sec.example.", dns.TypeA, dropProof)
+		}, ChainStatusBogus, "NXDOMAIN with no NSEC or NSEC3 proof"},
+		{"the wildcard cover missing", "nx.sec.example.", dns.TypeA, func(tr *chaseTree) {
+			tr.edit("nx.sec.example.", dns.TypeA, dropNSECAt("sec.example."))
+		}, ChainStatusBogus, "the NSEC proof does not hold"},
+		{"an NSEC changed after signing", "nx.sec.example.", dns.TypeA, func(tr *chaseTree) {
+			tr.edit("nx.sec.example.", dns.TypeA, changeRR(dns.TypeNSEC, func(rr dns.RR) {
+				rr.(*dns.NSEC).NextDomain = "z.sec.example."
+			}))
+		}, ChainStatusBogus, "does not verify"},
+		{"no RRSIG at all", "nx.sec.example.", dns.TypeA, func(tr *chaseTree) {
+			tr.edit("nx.sec.example.", dns.TypeA, func(m *dns.Msg) {
+				stripSigs(dns.TypeSOA)(m)
+				dropProof(m)
+			})
+		}, ChainStatusBogus, "NXDOMAIN with no RRSIG, and zone sec.example. is signed"},
+		{"the SOA of another zone", "nx.sec.example.", dns.TypeA, func(tr *chaseTree) {
+			parent := tr.zones["example."]
+			tr.script("nx.sec.example.", dns.TypeA, func() *dns.Msg {
+				return &dns.Msg{MsgHdr: dns.MsgHdr{Rcode: dns.RcodeNameError}, Ns: parent.sign(parent.get("example.", dns.TypeSOA))}
+			})
+		}, ChainStatusBogus, "NXDOMAIN from example., not from sec.example."},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tr := denialTree(t)
+			if c.setup != nil {
+				c.setup(tr)
+			}
+			res := tr.chase(c.qname, c.qtype)
+			wantStatus(t, "leaf", res.Leaf.Status, c.want)
+			if !hasNote(res.Leaf.Notes, c.note) {
+				t.Errorf("leaf notes %q, want one with %q", res.Leaf.Notes, c.note)
+			}
+			if c.want == ChainStatusSecure && len(res.Leaf.Proof) == 0 {
+				t.Errorf("a proven denial with no proof records kept")
+			}
+		})
+	}
+
+	t.Run("in an insecure zone", func(t *testing.T) {
+		tr := kidTree(t)
+		res := tr.chase("nx.kid.sec.example.", dns.TypeA)
+		wantStatus(t, "leaf", res.Leaf.Status, ChainStatusInsecure)
+	})
+
+	// A name proven not to exist has nothing below it (RFC 8020): the walk
+	// asks about no name below it.
+	t.Run("nothing below a name error", func(t *testing.T) {
+		tr := denialTree(t)
+		res := tr.chase("y.nx.sec.example.", dns.TypeA)
+		if l := linkNamed(res.Links, "sec.example."); !hasNote(l.Notes, "nx.sec.example.: does not exist (NXDOMAIN proven by NSEC)") {
+			t.Errorf("sec.example. notes %q", l.Notes)
+		}
+		if tr.askedFor("y.nx.sec.example.", dns.TypeDS) {
+			t.Errorf("asked for the DS of a name below one that does not exist")
+		}
+		wantStatus(t, "result", res.Status, ChainStatusSecure)
+	})
 }

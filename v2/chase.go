@@ -62,10 +62,13 @@ type ChainLink struct {
 // ChainLeaf is the final answer: the qname/qtype RRset and the result of
 // verifying its RRSIG against the deepest zone's keys.
 type ChainLeaf struct {
-	Qname  string
-	Qtype  uint16
-	RRset  *core.RRset // nil when the name has no records of the type
-	Rcode  int         // the rcode of the answer: NOERROR or NXDOMAIN
+	Qname string
+	Qtype uint16
+	RRset *core.RRset // nil when the name has no records of the type
+	Rcode int         // the rcode of the answer: NOERROR or NXDOMAIN
+	// Proof holds the NSEC and NSEC3 records, without their RRSIGs, that a
+	// negative answer was judged with.
+	Proof  []dns.RR
 	Status ChainStatus
 	Notes  []string
 }
@@ -207,6 +210,10 @@ type cutDecision struct {
 	// use: no chain of trust leads below it, and nothing below it is
 	// checked.
 	insecure bool
+	// absent is set, with no link, for a candidate proven not to exist:
+	// nothing exists below it either (RFC 8020), and nothing below it is
+	// asked about.
+	absent bool
 }
 
 // chaseAnswer is the response to the question about the leaf, read by owner:
@@ -217,6 +224,7 @@ type chaseAnswer struct {
 	cname     []dns.RR     // without rrs: the CNAME the name owns
 	cnameSigs []*dns.RRSIG // its RRSIGs
 	dname     string       // the owner of a DNAME above the name that synthesized the CNAME
+	authority []dns.RR     // the authority section: a denial's proof, or a wildcard answer's
 	rcode     int          // NOERROR or NXDOMAIN
 	err       error        // the query failed: no response, or another rcode
 }
@@ -270,14 +278,16 @@ func (w *chainWalk) walkName(name string, qtype uint16) ([]*ChainLink, ChainLeaf
 // among them. A candidate decided earlier in the same Chase is not asked
 // about again.
 //
-// Below an insecure delegation nothing is checked, except a zone with a trust
-// anchor of its own.
+// Below an insecure delegation nothing is checked, nor below a name proven
+// not to exist, except a zone with a trust anchor of its own.
 func (w *chainWalk) links(zones []string) []*ChainLink {
 	var chain []*ChainLink
-	insecure := false
+	insecure, absent := false, false
 	for _, zone := range zones {
-		if insecure && len(w.c.TrustAnchors[zone]) == 0 {
-			addNote(chain[len(chain)-1], "names below an insecure delegation are not checked")
+		if (insecure || absent) && len(w.c.TrustAnchors[zone]) == 0 {
+			if insecure {
+				addNote(chain[len(chain)-1], "names below an insecure delegation are not checked")
+			}
 			continue
 		}
 		key := core.CanonicalizeName(zone)
@@ -288,8 +298,9 @@ func (w *chainWalk) links(zones []string) []*ChainLink {
 		}
 		if d.link != nil {
 			chain = append(chain, d.link)
-			insecure = d.insecure
+			insecure, absent = d.insecure, false
 		}
+		absent = absent || d.absent
 	}
 	return chain
 }
@@ -400,7 +411,8 @@ func (w *chainWalk) withoutDS(link, above *ChainLink, resp *dns.Msg) *cutDecisio
 		return &cutDecision{link: link}
 	}
 	nsecs, nsec3s := w.verifiedProof(resp.Ns, above)
-	switch cache.ProveDelegation(zone, above.Zone, nsecs, nsec3s) {
+	proof := cache.ProveDelegation(zone, above.Zone, nsecs, nsec3s)
+	switch proof {
 	case cache.DelegationInsecure:
 		link.Status = ChainStatusInsecure
 		link.Notes = append(link.Notes, insecureProofNote(zone, nsecs))
@@ -410,12 +422,31 @@ func (w *chainWalk) withoutDS(link, above *ChainLink, resp *dns.Msg) *cutDecisio
 		link.Notes = append(link.Notes, fmt.Sprintf("no DS; the NSEC3 proof about it needs records over the iteration limit of %d, or more hashes than allowed: cannot judge",
 			cache.NSEC3MaxIterations()))
 		return &cutDecision{link: link}
-	case cache.DelegationNone:
+	}
+	// The denial of the DS itself, read as the resolver reads a denial
+	// (cache.ProveDenial): a proven name error means nothing exists at or
+	// below zone (RFC 8020), and the walk goes no further; any other proven
+	// denial shows that zone is no delegation, as a proof read above does.
+	denial := cache.ProveDenial(zone, dns.TypeDS, uint8(resp.Rcode), above.Zone, nsecs, nsec3s)
+	switch {
+	case denial.State == cache.ValidationStateSecure && denial.Rcode == dns.RcodeNameError:
+		addNote(above, fmt.Sprintf("%s: does not exist (NXDOMAIN proven by %s); names below it are not checked", zone, proofKind(nsecs)))
+		return &cutDecision{absent: true}
+	case proof == cache.DelegationNone, denial.State == cache.ValidationStateSecure:
 		addNote(above, fmt.Sprintf("%s: no DS, and the denial shows no delegation there", zone))
 	default:
 		addNote(above, fmt.Sprintf("%s: no DS and no proof about a cut; taken as part of %s", zone, above.Zone))
 	}
 	return &cutDecision{}
+}
+
+// proofKind names the records a proof was read from: NSEC when there are any,
+// as the proofs read them first, NSEC3 otherwise.
+func proofKind(nsecs []*dns.NSEC) string {
+	if len(nsecs) > 0 {
+		return "NSEC"
+	}
+	return "NSEC3"
 }
 
 // verifiedProof returns the NSEC and NSEC3 records in authority, a message
@@ -659,8 +690,7 @@ func (w *chainWalk) judgeLeaf(name string, qtype uint16, ans chaseAnswer, chain 
 	}
 	var own ChainStatus
 	if leaf.RRset == nil {
-		own = ChainStatusIndeterminate
-		leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s: the proof of the denial is not checked", negativeKind(ans.rcode)))
+		own = w.denialOwn(&leaf, ans, deepest)
 	} else {
 		own = w.answerOwn(&leaf, deepest)
 	}
@@ -669,6 +699,94 @@ func (w *chainWalk) judgeLeaf(name string, qtype uint16, ans chaseAnswer, chain 
 		leaf.Notes = append(leaf.Notes, fmt.Sprintf("zone %s is %s; the answer can be no better", deepest.Zone, deepest.Status))
 	}
 	return leaf
+}
+
+// denialOwn is the verdict on a negative answer alone, from the authority
+// section that came with it, with the keys of deepest, the zone that holds
+// the name (RFC 4035 section 5.4, RFC 5155 section 8, RFC 9824):
+//
+//   - an SOA, when there is one, must be the deepest zone's;
+//   - a denial with no RRSIG at all is Bogus when that zone is signed, and
+//     takes the zone's verdict otherwise;
+//   - every RRset the zone signed must verify with its keys;
+//   - the NSEC and NSEC3 records among them must prove the denial, as the
+//     resolver reads them (cache.ProveDenial): Secure, Insecure through an
+//     NSEC3 Opt-Out span or over the iteration limit (RFC 9276), Bogus when
+//     the proof is missing or does not hold.
+func (w *chainWalk) denialOwn(leaf *ChainLeaf, ans chaseAnswer, deepest *ChainLink) ChainStatus {
+	kind := negativeKind(ans.rcode)
+	sets := authorityRRsets(ans.authority)
+	signed := false
+	for _, set := range sets {
+		if set.RRtype == dns.TypeSOA && !core.EqualNames(set.Name, deepest.Zone) {
+			if dns.IsSubDomain(deepest.Zone, set.Name) {
+				leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s from %s, which the chain did not reach", kind, set.Name))
+			} else {
+				leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s from %s, not from %s, the zone that holds the name", kind, set.Name, deepest.Zone))
+			}
+			return ChainStatusBogus
+		}
+		signed = signed || len(set.RRSIGs) > 0
+	}
+	if !signed {
+		if deepest.Status == ChainStatusSecure {
+			leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s with no RRSIG, and zone %s is signed", kind, deepest.Zone))
+			return ChainStatusBogus
+		}
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s with no RRSIG", kind))
+		return ChainStatusIndeterminate
+	}
+	if len(deepest.DNSKEY) == 0 {
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("no DNSKEY of %s to verify the denial with", deepest.Zone))
+		return ChainStatusIndeterminate
+	}
+	var nsecs []*dns.NSEC
+	var nsec3s []*dns.NSEC3
+	for _, set := range sets {
+		if !hasSigner(set, deepest.Zone) {
+			continue // another zone's records prove nothing about this one
+		}
+		if _, err := zoneSignature(set, deepest.Zone, deepest.DNSKEY, w.now); err != nil {
+			leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s %s in the denial: %v", set.Name, dns.TypeToString[set.RRtype], err))
+			return ChainStatusBogus
+		}
+		for _, rr := range set.RRs {
+			switch r := rr.(type) {
+			case *dns.NSEC:
+				nsecs = append(nsecs, r)
+				leaf.Proof = append(leaf.Proof, r)
+			case *dns.NSEC3:
+				nsec3s = append(nsec3s, r)
+				leaf.Proof = append(leaf.Proof, r)
+			}
+		}
+	}
+	if len(nsecs) == 0 && len(nsec3s) == 0 {
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s with no NSEC or NSEC3 proof", kind))
+		return ChainStatusBogus
+	}
+	v := cache.ProveDenial(leaf.Qname, leaf.Qtype, uint8(ans.rcode), deepest.Zone, nsecs, nsec3s)
+	by := proofKind(nsecs)
+	if v.Rcode == dns.RcodeNameError && ans.rcode != dns.RcodeNameError {
+		kind = "name error (RFC 9824 compact denial)"
+	}
+	switch v.State {
+	case cache.ValidationStateSecure:
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s proven by %s", kind, by))
+		return ChainStatusSecure
+	case cache.ValidationStateInsecure:
+		if v.EDEText != "" {
+			leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s: %s, so the proof cannot be judged: insecure (RFC 9276)", kind, v.EDEText))
+		} else {
+			leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s proven through an NSEC3 Opt-Out span: insecure (RFC 5155 section 9.2)", kind))
+		}
+		return ChainStatusInsecure
+	case cache.ValidationStateIndeterminate:
+		leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s: the NSEC3 proof needs more hashes than allowed: cannot judge", kind))
+		return ChainStatusIndeterminate
+	}
+	leaf.Notes = append(leaf.Notes, fmt.Sprintf("%s: the %s proof does not hold", kind, by))
+	return ChainStatusBogus
 }
 
 // insecure reports whether link was proven an insecure delegation.
@@ -796,7 +914,7 @@ func (c *Chaser) ask(name string, qtype uint16) chaseAnswer {
 	if err != nil {
 		return chaseAnswer{err: err}
 	}
-	ans := chaseAnswer{rcode: resp.Rcode}
+	ans := chaseAnswer{rcode: resp.Rcode, authority: resp.Ns}
 	ans.rrs, ans.sigs = ownedRRs(resp.Answer, name, qtype)
 	if len(ans.rrs) > 0 || qtype == dns.TypeCNAME {
 		return ans
