@@ -54,6 +54,13 @@ const (
 // transaction begins and kept with it, so the limit's timer never reads it.
 var txHoldLimit = 30 * time.Second
 
+// txHoldAgeCap bounds the hold itself, from its first begin: the limit is per
+// transaction, and a writer that opens its next transaction before the last
+// is released would otherwise hold a published zone without end. Internal
+// writers only, so a bug and not an attack; the cap turns it into a WARN and
+// a release. A zone that has never published fails closed, as at the limit.
+var txHoldAgeCap = 2 * txHoldLimit
+
 // zoneTx is one open transaction.
 type zoneTx struct {
 	start time.Time
@@ -68,6 +75,12 @@ type zoneTxState struct {
 	// open is the hold: the zone is held while it is not empty.
 	open map[TxID]*zoneTx
 	seq  uint64
+	// holdStart is when the current hold opened: the begin that found no
+	// transaction open. Zero while nothing is held. capReported: the cap ran
+	// out on a zone that has never published; such a hold is not released,
+	// and it is reported once.
+	holdStart   time.Time
+	capReported bool
 	// urgent: some transaction of the current hold carried TxUrgent.
 	urgent bool
 	// stopped counts the publishes holds have stopped on this zone. Nothing
@@ -158,6 +171,9 @@ func (zd *ZoneData) beginTxLocked(id TxID, flags TxFlags) error {
 	if zd.tx.open == nil {
 		zd.tx.open = map[TxID]*zoneTx{}
 	}
+	if len(zd.tx.open) == 0 {
+		zd.tx.holdStart = time.Now()
+	}
 	zd.tx.open[id] = &zoneTx{start: time.Now(), limit: txHoldLimit}
 	if flags&TxUrgent != 0 {
 		zd.tx.urgent = true
@@ -233,6 +249,8 @@ func (zd *ZoneData) txHoldClosedLocked(by string, committed bool) {
 	zd.txStopTimerLocked()
 	urgent := zd.tx.urgent
 	zd.tx.urgent = false
+	zd.tx.holdStart = time.Time{}
+	zd.tx.capReported = false
 
 	neverPublished := zd.snapshot.Load() == nil
 	if zd.workingSet == nil {
@@ -439,6 +457,11 @@ func (zd *ZoneData) txArmTimerLocked() {
 			next = due
 		}
 	}
+	if !zd.tx.holdStart.IsZero() && !zd.tx.capReported {
+		if due := zd.tx.holdStart.Add(txHoldAgeCap); next.IsZero() || due.Before(next) {
+			next = due
+		}
+	}
 	if next.IsZero() {
 		return
 	}
@@ -473,6 +496,36 @@ func (zd *ZoneData) txLimitReached(gen uint64) {
 	now := time.Now()
 	neverPublished := zd.snapshot.Load() == nil
 	released := ""
+	// The hold's age, before the transactions' own limits: every open
+	// transaction goes with it.
+	if !zd.tx.holdStart.IsZero() && !zd.tx.capReported && now.Sub(zd.tx.holdStart) >= txHoldAgeCap {
+		ids := make([]string, 0, len(zd.tx.open))
+		for id := range zd.tx.open {
+			ids = append(ids, string(id))
+		}
+		if neverPublished {
+			zd.tx.capReported = true
+			for _, tx := range zd.tx.open {
+				tx.overdue = true
+			}
+			lg.Error("the hold on a zone that has never published is past its age cap and no commit has closed it;"+
+				" the zone stays unpublished (SERVFAIL) until one does",
+				"zone", zd.ZoneName, "open", ids, "cap", txHoldAgeCap)
+			zd.setErrorLocked(FirstPublishError,
+				"first content not published: the zone has been held for more than %v without a commit closing the hold (open: %v)",
+				txHoldAgeCap, ids)
+			zd.txArmTimerLocked()
+			return
+		}
+		lg.Warn("the hold is past its age cap and no commit has closed it;"+
+			" releasing every open transaction, what is staged publishes through the gate",
+			"zone", zd.ZoneName, "open", ids, "cap", txHoldAgeCap)
+		for id := range zd.tx.open {
+			delete(zd.tx.open, id)
+		}
+		zd.txHoldClosedLocked("hold age cap", false)
+		return
+	}
 	for id, tx := range zd.tx.open {
 		if tx.overdue || now.Sub(tx.start) < tx.limit {
 			continue

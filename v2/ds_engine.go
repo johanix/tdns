@@ -762,8 +762,8 @@ func (kdb *KeyDB) applyInternalUpdateAndWait(ctx context.Context, zd *ZoneData, 
 		return res.Err
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(UpdateApplyTimeout):
-		return fmt.Errorf("timed out after %s waiting for the update to be applied", UpdateApplyTimeout)
+	case <-time.After(updateWaitBound(zd.ZoneName)):
+		return fmt.Errorf("timed out after %s waiting for the update to be applied", updateWaitBound(zd.ZoneName))
 	}
 }
 

@@ -308,7 +308,9 @@ func applyScanChildUpdate(ctx context.Context, updateq chan UpdateRequest, ur Up
 func queueScanChildUpdate(ctx context.Context, updateq chan UpdateRequest, ur UpdateRequest) (applied bool, pending <-chan ZoneUpdateResult, reason string) {
 	resp := make(chan ZoneUpdateResult, 1)
 	ur.Resp = resp
-	timeout := time.NewTimer(scanApplyTimeout)
+	// The larger of the scan's own bound and twice the zone's cadence: the
+	// change may wait for the gate's publish.
+	timeout := time.NewTimer(max(scanApplyTimeout, twiceCadence(ur.ZoneName)))
 	defer timeout.Stop()
 
 	select {

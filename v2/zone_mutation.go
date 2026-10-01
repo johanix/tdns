@@ -34,8 +34,9 @@ func (zd *ZoneData) ensureWorkingSet() {
 // holds zd.mu.
 //
 // A replacement stays staged when its publish was refused
-// (refuseUnsignableWorkingSetLocked, refuseUnrepairableChainLocked) or stopped
-// by an open transaction. An update applied on top of it would be journalled
+// (refuseUnsignableWorkingSetLocked, refuseUnrepairableChainLocked); a refresh
+// that meets an open transaction is refused instead (ErrRefreshHeld), but a
+// transaction can open after a refusal. An update applied on top of it would be journalled
 // together with it, because the journal records the difference from the
 // published snapshot (#748). So the replacement is published first,
 // unjournalled, as the publisher's retry publishes it: at a new serial. If it
@@ -884,8 +885,30 @@ func (zd *ZoneData) snapshotContentIsServableLocked(snap *zoneSnapshot) bool {
 // than transferred from an upstream. It governs the serial floor in the default
 // branch below and nothing else, because only a file-backed zone anchors its
 // delta journal to the content it has just loaded.
+// ErrRefreshHeld: the zone has an open transaction, so the refresh was
+// refused before it touched anything, and is to be tried again shortly
+// (publish gate, step 3). A hold on a published zone ends within its limit,
+// so the refresh is late by that much at most; a zone that has never
+// published has nothing to refresh. Waiting would tie an inbound transfer to
+// a local writer's hold; replacing would discard what the transaction staged
+// (tdns #749).
+var ErrRefreshHeld = errors.New("the zone has an open transaction; the refresh is refused and retried")
+
 func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset,
 	firstLoad, fromZoneFile bool) error {
+	// Under a hold the refresh is refused before it touches anything: the
+	// commit that closes the hold carries what the transaction staged, and
+	// the refresh engine tries again shortly (ErrRefreshHeld).
+	if zd.txHeldLocked() {
+		return fmt.Errorf("zone %s: %w", zd.ZoneName, ErrRefreshHeld)
+	}
+	// A local change staged and waiting for the gate is published first, so
+	// it is served and journalled and its waiters answered, before the
+	// replacement takes the working set it was staged in. A replacement that
+	// is itself still staged (refused at signing) is simply replaced.
+	if zd.workingSet != nil && !zd.wsFromReplacement {
+		zd.publishLocked(zd.generation.Load())
+	}
 	// The highest serial this zone has published, which a first load must
 	// land past (#655), read before this function changes anything: a read
 	// that fails must leave the zone exactly as it was, IncomingSerial
