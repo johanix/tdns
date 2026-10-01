@@ -167,14 +167,22 @@ func (rrcache *RRsetCacheT) cutProof(ctx context.Context, name string, sets []*c
 		if state, err := rrcache.ValidateRRset(ctx, proof, fetcher); err != nil || state != ValidationStateSecure {
 			continue
 		}
-		for _, rr := range proof.RRs {
-			if nsec, ok := rr.(*dns.NSEC); ok && insecureDelegationBitmap(nsec.TypeBitMap) {
-				return evidenceInsecureCut
-			}
-		}
-		return evidenceNoCut
+		return nsecCutEvidence(proof.RRs)
 	}
 	return rrcache.nsec3CutProof(ctx, name, sets, fetcher)
+}
+
+// nsecCutEvidence reads the NSEC records at a name, from the zone above it,
+// that have validated: a delegation with no DS when a bitmap has NS and
+// neither DS nor SOA (RFC 4035 section 5.2, RFC 6840 section 4.4), no
+// delegation otherwise.
+func nsecCutEvidence(rrs []dns.RR) cutEvidence {
+	for _, rr := range rrs {
+		if nsec, ok := rr.(*dns.NSEC); ok && insecureDelegationBitmap(nsec.TypeBitMap) {
+			return evidenceInsecureCut
+		}
+	}
+	return evidenceNoCut
 }
 
 // nsec3CutProof is cutProof for a parent signed with NSEC3 (RFC 5155 section
@@ -228,6 +236,13 @@ func (rrcache *RRsetCacheT) nsec3CutProof(ctx context.Context, name string, sets
 			}
 		}
 	}
+	return nsec3CutEvidence(name, zone, proven, overLimit, maxIter)
+}
+
+// nsec3CutEvidence is nsec3CutProof's reading of proven, the NSEC3 records of
+// zone that validated and count (nsec3Usable), when overLimit records over the
+// iteration limit were set aside.
+func nsec3CutEvidence(name, zone string, proven []*dns.NSEC3, overLimit bool, maxIter uint16) cutEvidence {
 	unproven := evidenceNone
 	if overLimit {
 		unproven = evidenceUnjudged
@@ -269,6 +284,83 @@ func (rrcache *RRsetCacheT) nsec3CutProof(ctx context.Context, name string, sets
 		return evidenceUnjudged
 	}
 	return unproven
+}
+
+// DelegationProof is what NSEC or NSEC3 records of a zone show about a zone
+// cut at a name below it (ProveDelegation).
+type DelegationProof uint8
+
+const (
+	DelegationUnproven DelegationProof = iota // the records show nothing about a cut at the name
+	DelegationNone                            // no delegation at the name
+	DelegationInsecure                        // a delegation without DS, or an Opt-Out span that may hold one
+	DelegationUnjudged                        // needs NSEC3 records over the iteration limit, or ran out of hashes
+)
+
+var delegationProofToString = map[DelegationProof]string{
+	DelegationUnproven: "unproven",
+	DelegationNone:     "no delegation",
+	DelegationInsecure: "an insecure delegation",
+	DelegationUnjudged: "cannot be judged",
+}
+
+func (p DelegationProof) String() string { return delegationProofToString[p] }
+
+// ProveDelegation reads what nsecs and nsec3s, records of zone whose
+// signatures by zone the caller has verified, show about a zone cut at name, a
+// name below zone. It is the reading cutProof and nsec3CutProof make of the
+// records that validate, for a caller that checks signatures with keys of its
+// own, not the cache's: the chain walk of dog +sigchase. It looks at no
+// signatures, cache or network.
+//
+//   - An NSEC owned by name: DelegationInsecure when its bitmap has NS and
+//     neither DS nor SOA, DelegationNone otherwise (nsecCutEvidence).
+//   - Otherwise the NSEC3 records owned directly below zone (nsec3Usable,
+//     nsec3CutEvidence): a matching record with that bitmap, or an Opt-Out
+//     span covering the next closer name, is DelegationInsecure (RFC 5155
+//     sections 8.6, 8.9 and 9.2); a match or cover without it,
+//     DelegationNone; records over the iteration limit, or a proof that ran
+//     out of hashes, DelegationUnjudged.
+//   - Nothing about name: DelegationUnproven.
+func ProveDelegation(name, zone string, nsecs []*dns.NSEC, nsec3s []*dns.NSEC3) DelegationProof {
+	name, zone = dns.Fqdn(name), dns.Fqdn(zone)
+	if !dns.IsSubDomain(zone, name) || core.EqualNames(zone, name) {
+		return DelegationUnproven
+	}
+	var at []dns.RR
+	for _, nsec := range nsecs {
+		if nsec != nil && core.EqualNames(nsec.Hdr.Name, name) {
+			at = append(at, nsec)
+		}
+	}
+	if len(at) > 0 {
+		return delegationProofOf(nsecCutEvidence(at))
+	}
+	maxIter := NSEC3MaxIterations()
+	var proven []*dns.NSEC3
+	overLimit := false
+	for _, n := range nsec3s {
+		switch _, use := nsec3Usable(zone, n, maxIter); use {
+		case nsec3Counts:
+			proven = append(proven, n)
+		case nsec3OverTheLimit:
+			overLimit = true
+		}
+	}
+	return delegationProofOf(nsec3CutEvidence(name, zone, proven, overLimit, maxIter))
+}
+
+// delegationProofOf is the DelegationProof for what cutProof reads.
+func delegationProofOf(ev cutEvidence) DelegationProof {
+	switch ev {
+	case evidenceInsecureCut:
+		return DelegationInsecure
+	case evidenceNoCut:
+		return DelegationNone
+	case evidenceUnjudged:
+		return DelegationUnjudged
+	}
+	return DelegationUnproven
 }
 
 // insecureDelegationBitmap reports whether the type bitmap of an NSEC or NSEC3

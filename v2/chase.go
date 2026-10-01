@@ -270,35 +270,7 @@ func (w *chainWalk) decideOwn(link, above *ChainLink) *cutDecision {
 		}
 		ds, dsSigs := ownedDS(resp.Answer, zone)
 		if len(ds) == 0 {
-			// No DS at parent. Two very different cases:
-			//
-			//   (a) `zone` is not a zone cut at all — just a label
-			//       boundary within the parent (e.g. www.iis.se, which
-			//       has no NS/SOA of its own). It must NOT appear in the
-			//       chain: the queried leaf is served from the enclosing
-			//       zone, and its RRSIG validates against THAT zone's
-			//       keys. Skip this candidate entirely, leaving the
-			//       previous (real) zone as the deepest.
-			//
-			//   (b) `zone` is a genuine delegation with no DS — an
-			//       unsigned/insecure child. Without NSEC/NSEC3 proof
-			//       support here we report Indeterminate rather than
-			//       Insecure (a full proof-of-no-DS walk is future work).
-			cut, cutErr := w.c.isZoneCut(zone)
-			if cutErr == nil && !cut {
-				return &cutDecision{} // case (a): confirmed non-cut, drop it
-			}
-			// Case (b), or the zone-cut check itself failed: keep the
-			// candidate on the Indeterminate path. A lookup failure must
-			// not be mistaken for a non-cut (which would silently drop a
-			// possibly-real delegation), so we do NOT skip on error.
-			link.Status = ChainStatusIndeterminate
-			if cutErr != nil {
-				link.Notes = append(link.Notes, fmt.Sprintf("no DS at parent; zone-cut check failed: %v", cutErr))
-			} else {
-				link.Notes = append(link.Notes, "no DS record at parent (and no NSEC proof checked)")
-			}
-			return &cutDecision{link: link}
+			return w.withoutDS(link, above, resp)
 		}
 		link.DS, link.DSSigs = ds, dsSigs
 	}
@@ -313,6 +285,94 @@ func (w *chainWalk) decideOwn(link, above *ChainLink) *cutDecision {
 	w.judgeKeys(link)
 	link.Status = worstStatus(link.Status, dsState)
 	return &cutDecision{link: link}
+}
+
+// withoutDS decides zone, a candidate the parent side has no DS for, from
+// the NSEC or NSEC3 records of the denial, verified with the keys of above,
+// the link of the zone they must come from (RFC 4035 section 5.2, RFC 6840
+// section 4.4, RFC 5155 sections 8.6, 8.9 and 9.2; cache.ProveDelegation,
+// the resolver's reading of them):
+//
+//   - a delegation without DS, or an Opt-Out span that may hold one: an
+//     Insecure link, and nothing below it is checked;
+//   - a proof that needs NSEC3 records over the iteration limit, or more
+//     hashes than allowed: an Indeterminate link;
+//   - no delegation there, or nothing proven about one: no link, with a note
+//     on the link above.
+//
+// Taking a candidate nothing is proven about as part of the zone above is
+// safe: if it is in fact a zone cut, its data is signed with its own keys or
+// not at all, and judged with the keys of the zone above it does not come out
+// Secure. This replaces asking each candidate for its SOA and NS (#379),
+// which took a name owning a CNAME for a zone cut.
+func (w *chainWalk) withoutDS(link, above *ChainLink, resp *dns.Msg) *cutDecision {
+	zone := link.Zone
+	if above == nil {
+		link.Status = ChainStatusIndeterminate
+		link.Notes = append(link.Notes, "no DS, and no zone above to read a proof from")
+		return &cutDecision{link: link}
+	}
+	nsecs, nsec3s := w.verifiedProof(resp.Ns, above)
+	switch cache.ProveDelegation(zone, above.Zone, nsecs, nsec3s) {
+	case cache.DelegationInsecure:
+		link.Status = ChainStatusInsecure
+		link.Notes = append(link.Notes, insecureProofNote(zone, nsecs))
+		return &cutDecision{link: link, insecure: true}
+	case cache.DelegationUnjudged:
+		link.Status = ChainStatusIndeterminate
+		link.Notes = append(link.Notes, fmt.Sprintf("no DS; the NSEC3 proof about it needs records over the iteration limit of %d, or more hashes than allowed: cannot judge",
+			cache.NSEC3MaxIterations()))
+		return &cutDecision{link: link}
+	case cache.DelegationNone:
+		addNote(above, fmt.Sprintf("%s: no DS, and the denial shows no delegation there", zone))
+	default:
+		addNote(above, fmt.Sprintf("%s: no DS and no proof about a cut; taken as part of %s", zone, above.Zone))
+	}
+	return &cutDecision{}
+}
+
+// verifiedProof returns the NSEC and NSEC3 records in authority, a message
+// section, whose RRSIG by the zone of above verifies with its keys. Records
+// signed by any other zone, or not at all, prove nothing here.
+func (w *chainWalk) verifiedProof(authority []dns.RR, above *ChainLink) ([]*dns.NSEC, []*dns.NSEC3) {
+	var nsecs []*dns.NSEC
+	var nsec3s []*dns.NSEC3
+	if len(above.DNSKEY) == 0 {
+		return nil, nil
+	}
+	for _, set := range authorityRRsets(authority) {
+		if set.RRtype != dns.TypeNSEC && set.RRtype != dns.TypeNSEC3 {
+			continue
+		}
+		if _, err := zoneSignature(set, above.Zone, above.DNSKEY, w.now); err != nil {
+			continue
+		}
+		for _, rr := range set.RRs {
+			switch r := rr.(type) {
+			case *dns.NSEC:
+				nsecs = append(nsecs, r)
+			case *dns.NSEC3:
+				nsec3s = append(nsec3s, r)
+			}
+		}
+	}
+	return nsecs, nsec3s
+}
+
+// insecureProofNote says what proved zone an insecure delegation: the NSEC
+// at it, or the NSEC3 records.
+func insecureProofNote(zone string, nsecs []*dns.NSEC) string {
+	for _, nsec := range nsecs {
+		if core.EqualNames(nsec.Hdr.Name, zone) {
+			types := make([]string, 0, len(nsec.TypeBitMap))
+			for _, t := range nsec.TypeBitMap {
+				types = append(types, dns.TypeToString[t])
+			}
+			return fmt.Sprintf("no DS; NSEC %s -> %s %s: a delegation without DS (RFC 4035 section 5.2)",
+				nsec.Hdr.Name, nsec.NextDomain, strings.Join(types, " "))
+		}
+	}
+	return "no DS; NSEC3 proves a delegation without DS, or an Opt-Out span that may hold one (RFC 5155 sections 8.6 and 9.2)"
 }
 
 // unusableDS describes each DS in dss that names an algorithm this binary
@@ -601,33 +661,6 @@ func ownedDNSKEY(rrs []dns.RR, zone string) ([]*dns.DNSKEY, []*dns.RRSIG) {
 		}
 	}
 	return keys, sigs
-}
-
-// isZoneCut reports whether name is an actual zone apex — i.e. a
-// delegation point — rather than merely a label boundary within a zone.
-// A candidate like "www.iis.se" is NOT a zone cut: it has no NS/SOA of its
-// own, so it must not be treated as a zone in the chase (doing so invents
-// a phantom zone with no DS/DNSKEY and derails validation of the leaf,
-// which is actually served from the enclosing zone). A cut exists when the
-// name has an SOA (its own apex) or NS records (a delegation).
-//
-// The returned error distinguishes "definitely not a cut" (false, nil)
-// from "could not determine" (false, err): a transient SOA/NS lookup
-// failure must NOT be mistaken for a non-cut, or a real delegation could
-// be silently dropped. The caller keeps such a candidate on the
-// Indeterminate path instead of skipping it.
-func (c *Chaser) isZoneCut(name string) (bool, error) {
-	if ans := c.ask(name, dns.TypeSOA); ans.err != nil {
-		return false, ans.err
-	} else if len(ans.rrs) > 0 {
-		return true, nil
-	}
-	if ans := c.ask(name, dns.TypeNS); ans.err != nil {
-		return false, ans.err
-	} else if len(ans.rrs) > 0 {
-		return true, nil
-	}
-	return false, nil
 }
 
 // verifyLeafSig verifies the answer RRset's RRSIG against the deepest

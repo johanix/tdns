@@ -404,3 +404,124 @@ func TestChaseUnusableDS(t *testing.T) {
 		})
 	}
 }
+
+// kidTree is secureTree with kid.sec.example., unsigned, delegated from
+// sec.example. without a DS, holding www.kid.sec.example. A.
+func kidTree(t *testing.T) *chaseTree {
+	t.Helper()
+	tr := secureTree(t)
+	tr.unsignedZone("kid.sec.example.").add("www.kid.sec.example. 300 IN A 192.0.2.30")
+	return tr
+}
+
+// n3KidDenial scripts the denial of the DS at kid.sec.example. as an NSEC3
+// zone gives it: the SOA, and recs, signed by sec.example.
+func n3KidDenial(t *testing.T, tr *chaseTree, recs ...*dns.NSEC3) {
+	z := tr.zones["sec.example."]
+	tr.script("kid.sec.example.", dns.TypeDS, func() *dns.Msg {
+		m := &dns.Msg{Ns: z.sign(z.get("sec.example.", dns.TypeSOA))}
+		for _, r := range recs {
+			m.Ns = append(m.Ns, z.sign([]dns.RR{r})...)
+		}
+		return m
+	})
+}
+
+// A delegation without DS is read from the parent's proof in the DS denial
+// (item 3 of #876): an NSEC or NSEC3 at the name with NS and neither DS nor
+// SOA, or an NSEC3 Opt-Out span over it, makes it an Insecure link, and the
+// names below it are not asked about.
+func TestChaseUnsignedDelegation(t *testing.T) {
+	const optOut = 1
+	apex := func() *dns.NSEC3 {
+		return n3RR("sec.example.", "sec.example.", false, 0, 0, dns.TypeNS, dns.TypeSOA, dns.TypeRRSIG, dns.TypeDNSKEY, dns.TypeNSEC3PARAM)
+	}
+	for _, c := range []struct {
+		name  string
+		setup func(t *testing.T, tr *chaseTree)
+		note  string
+	}{
+		{"NSEC", func(*testing.T, *chaseTree) {}, "NSEC kid.sec.example. -> "},
+		{"NSEC3 match", func(t *testing.T, tr *chaseTree) {
+			n3KidDenial(t, tr, n3RR("sec.example.", "kid.sec.example.", false, 0, 0, dns.TypeNS))
+		}, "NSEC3 proves a delegation without DS"},
+		{"NSEC3 Opt-Out", func(t *testing.T, tr *chaseTree) {
+			n3KidDenial(t, tr, apex(), n3RR("sec.example.", "kid.sec.example.", true, optOut, 0, dns.TypeA, dns.TypeRRSIG))
+		}, "Opt-Out span"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tr := kidTree(t)
+			c.setup(t, tr)
+			res := tr.chase("www.kid.sec.example.", dns.TypeA)
+			l := linkNamed(res.Links, "kid.sec.example.")
+			if l == nil {
+				t.Fatalf("no link for kid.sec.example.; links %v", zonesOf(res.Links))
+			}
+			wantStatus(t, "kid.sec.example.", l.Status, ChainStatusInsecure)
+			if !hasNote(l.Notes, c.note) {
+				t.Errorf("kid.sec.example. notes %q, want one with %q", l.Notes, c.note)
+			}
+			if tr.askedFor("www.kid.sec.example.", dns.TypeDS) {
+				t.Errorf("a name below the insecure delegation was asked about")
+			}
+			wantStatus(t, "result", res.Status, ChainStatusInsecure)
+		})
+	}
+
+	t.Run("NSEC3 over the iteration limit", func(t *testing.T) {
+		tr := kidTree(t)
+		n3KidDenial(t, tr, n3RR("sec.example.", "kid.sec.example.", false, 0, 11, dns.TypeNS))
+		res := tr.chase("www.kid.sec.example.", dns.TypeA)
+		l := linkNamed(res.Links, "kid.sec.example.")
+		if l == nil {
+			t.Fatalf("no link for kid.sec.example.; links %v", zonesOf(res.Links))
+		}
+		wantStatus(t, "kid.sec.example.", l.Status, ChainStatusIndeterminate)
+		if !hasNote(l.Notes, "cannot judge") {
+			t.Errorf("kid.sec.example. notes %q", l.Notes)
+		}
+	})
+
+	// Without a proof, or with one that does not verify, the name is taken as
+	// part of the zone above, and the note on that zone's link says so.
+	for _, c := range []struct {
+		name string
+		edit func(*dns.Msg)
+	}{
+		{"proof missing", dropProof},
+		{"proof changed", changeRR(dns.TypeNSEC, func(rr dns.RR) {
+			rr.(*dns.NSEC).TypeBitMap = []uint16{dns.TypeA, dns.TypeRRSIG, dns.TypeNSEC}
+		})},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tr := kidTree(t)
+			tr.edit("kid.sec.example.", dns.TypeDS, c.edit)
+			res := tr.chase("www.kid.sec.example.", dns.TypeA)
+			if linkNamed(res.Links, "kid.sec.example.") != nil {
+				t.Errorf("kid.sec.example. is a link without a proof; links %v", zonesOf(res.Links))
+			}
+			if l := linkNamed(res.Links, "sec.example."); !hasNote(l.Notes, "kid.sec.example.: no DS and no proof about a cut; taken as part of sec.example.") {
+				t.Errorf("sec.example. notes %q", l.Notes)
+			}
+		})
+	}
+}
+
+// A name in a zone is not a zone cut, and the NSEC in the denial of its DS
+// says so (#379): no SOA or NS question is asked to find out.
+func TestChaseNameInAZoneIsNotACut(t *testing.T) {
+	tr := secureTree(t)
+	res := tr.chase("www.sec.example.", dns.TypeA)
+	if linkNamed(res.Links, "www.sec.example.") != nil {
+		t.Errorf("www.sec.example. is a link; links %v", zonesOf(res.Links))
+	}
+	if l := linkNamed(res.Links, "sec.example."); !hasNote(l.Notes, "www.sec.example.: no DS, and the denial shows no delegation there") {
+		t.Errorf("sec.example. notes %q", l.Notes)
+	}
+	for _, m := range tr.asked {
+		if q := m.Question[0]; q.Qtype == dns.TypeSOA || q.Qtype == dns.TypeNS {
+			t.Errorf("asked %s %s", q.Name, dns.TypeToString[q.Qtype])
+		}
+	}
+	wantStatus(t, "result", res.Status, ChainStatusSecure)
+}
