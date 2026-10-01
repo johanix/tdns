@@ -88,10 +88,11 @@ func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 		lgEngine.Info("zone refresh cancelled", "zone", zone)
 		return false
 	}
-	if errors.Is(err, ErrRefreshHeld) {
+	if refreshDeferred(err) {
 		// Not a failure of the zone: a local writer holds it, for its limit at
-		// most. The next attempt comes soon (nextRefreshAfterFailure).
-		lgEngine.Info("zone refresh deferred: the zone has an open transaction", "zone", zone)
+		// most, or a change of its own waits for the pass that can publish
+		// it. The next attempt comes soon (nextRefreshAfterFailure).
+		lgEngine.Info("zone refresh deferred", "zone", zone, "reason", err)
 		return false
 	}
 	lgEngine.Error(msg, "zone", zone, "error", err)
@@ -1413,7 +1414,7 @@ var refreshHeldRetrySeconds uint32 = 5
 // nextRefreshAfterFailure is when the next attempt comes after a refresh
 // that failed: the SOA retry, or soon after a hold refused it.
 func nextRefreshAfterFailure(rc *RefreshCounter, err error) uint32 {
-	if errors.Is(err, ErrRefreshHeld) {
+	if refreshDeferred(err) {
 		return refreshHeldRetrySeconds
 	}
 	return refreshCounterRetry(rc)

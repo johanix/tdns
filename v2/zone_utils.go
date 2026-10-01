@@ -1206,8 +1206,8 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 		// status goes back too (a refresh refused by an open transaction is
 		// not an error of the zone, and is retried shortly).
 		zd.SetStatus(prevStatus)
-		if errors.Is(err, ErrRefreshHeld) {
-			lg.Info("the refreshed zone was not applied: the zone has an open transaction; retrying shortly", "zone", zd.ZoneName)
+		if refreshDeferred(err) {
+			lg.Info("the refreshed zone was not applied; retrying shortly", "zone", zd.ZoneName, "reason", err)
 		} else {
 			lg.Error("could not apply the refreshed zone; nothing was published", "zone", zd.ZoneName, "err", err)
 		}

@@ -42,6 +42,12 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
+func (s *syncBuffer) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.b.Reset()
+}
+
 // captureTxLogs routes the package's loggers into a buffer for one test. They
 // resolve slog.Default() per record, so swapping the default is enough.
 func captureTxLogs(t *testing.T) *syncBuffer {
@@ -81,7 +87,10 @@ func withTxHoldLimit(t *testing.T, d time.Duration) {
 func cleanupTxZone(t *testing.T, zd *ZoneData) {
 	t.Helper()
 	t.Cleanup(func() {
+		// Joined: an after-publish action still running would outlive the
+		// test and race with the next one, or write into a removed temp dir.
 		zd.stopPublisher()
+		zd.joinPublisher()
 		Zones.Remove(zd.ZoneName)
 	})
 }

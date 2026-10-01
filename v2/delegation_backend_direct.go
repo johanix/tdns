@@ -20,7 +20,15 @@ type DirectDelegationBackend struct {
 func (b *DirectDelegationBackend) Name() string { return "direct" }
 
 func (b *DirectDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateRequest) error {
-	updated, deferred, err := b.zd.applyChildUpdate(ur, b.kdb)
+	// Deferred, the zone file follows the publish that carries the change
+	// (the gate's, or the commit's): the zone runs this then, outside its
+	// lock, registered with the stage. It holds the request's Resp and
+	// answers it from that publish.
+	updated, deferred, err := b.zd.applyChildUpdate(ur, b.kdb, func() {
+		if err := b.writeZoneFileAfterChildUpdate(); err != nil {
+			lg.Warn("DirectDelegationBackend: after the deferred publish", "zone", b.zd.ZoneName, "error", err)
+		}
+	})
 	if err != nil {
 		return err
 	}
@@ -28,16 +36,6 @@ func (b *DirectDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateR
 		return nil
 	}
 	if deferred {
-		// The zone file follows the publish that carries the change (the
-		// gate's, or the commit's): the zone runs this then, outside its
-		// lock. It holds the request's Resp and answers it from that publish.
-		b.zd.mu.Lock()
-		b.zd.afterPublish = append(b.zd.afterPublish, func() {
-			if err := b.writeZoneFileAfterChildUpdate(); err != nil {
-				lg.Warn("DirectDelegationBackend: after the deferred publish", "zone", b.zd.ZoneName, "error", err)
-			}
-		})
-		b.zd.mu.Unlock()
 		return errUpdateDeferred
 	}
 	return b.writeZoneFileAfterChildUpdate()

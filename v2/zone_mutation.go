@@ -894,6 +894,18 @@ func (zd *ZoneData) snapshotContentIsServableLocked(snap *zoneSnapshot) bool {
 // (tdns #749).
 var ErrRefreshHeld = errors.New("the zone has an open transaction; the refresh is refused and retried")
 
+// ErrRefreshStaged: the zone holds a change of its own that its publish refused
+// and kept staged for a later pass (one it cannot sign yet, or whose NSEC
+// chain it cannot repair), so the refresh was refused rather than let the
+// replacement take that change. The refresh engine tries again shortly.
+var ErrRefreshStaged = errors.New("the zone has a staged change it could not publish; the refresh is refused and retried")
+
+// refreshDeferred reports whether err is one of the two refusals that are not
+// a failure of the zone and are retried shortly.
+func refreshDeferred(err error) bool {
+	return errors.Is(err, ErrRefreshHeld) || errors.Is(err, ErrRefreshStaged)
+}
+
 func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset,
 	firstLoad, fromZoneFile bool) error {
 	// Under a hold the refresh is refused before it touches anything: the
@@ -905,9 +917,16 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// A local change staged and waiting for the gate is published first, so
 	// it is served and journalled and its waiters answered, before the
 	// replacement takes the working set it was staged in. A replacement that
-	// is itself still staged (refused at signing) is simply replaced.
+	// is itself still staged (refused at signing) is simply replaced. A local
+	// change the publish refused and kept staged (unsignable yet, chain not
+	// repairable) is not taken either: the refresh is refused and retried
+	// shortly, and the change waits for the pass that can publish it. Not at
+	// first load, where the transfer is the zone's first content.
 	if zd.workingSet != nil && !zd.wsFromReplacement {
 		zd.publishLocked(zd.generation.Load())
+		if !firstLoad && zd.workingSet != nil && !zd.wsFromReplacement {
+			return fmt.Errorf("zone %s: %w", zd.ZoneName, ErrRefreshStaged)
+		}
 	}
 	// The highest serial this zone has published, which a first load must
 	// land past (#655), read before this function changes anything: a read
@@ -1478,6 +1497,7 @@ func (zd *ZoneData) startPublisher() {
 	zd.publisherOnce.Do(func() {
 		zd.publishWake = make(chan struct{}, 1)
 		zd.publishStop = make(chan struct{})
+		zd.publishDone = make(chan struct{})
 		go zd.runPublisher()
 	})
 }
@@ -1510,7 +1530,20 @@ func (zd *ZoneData) wakePublisher() {
 	}
 }
 
+// joinPublisher waits for the publisher goroutine to have returned after
+// stopPublisher, so that nothing it was running, an after-publish action
+// included, outlives the caller. Not from the publisher itself.
+func (zd *ZoneData) joinPublisher() {
+	zd.mu.Lock()
+	done := zd.publishDone
+	zd.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
 func (zd *ZoneData) runPublisher() {
+	defer close(zd.publishDone)
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	for {

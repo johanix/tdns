@@ -10,8 +10,9 @@ record what changed in it after the reviews. Step 2: 2026-09-29, tdns-mp #97 →
 3e21fe8: the identity zone is created held and published once, the agent's and
 the auditor's first hello waits for that publish, and the zone's parentsync
 work starts after it. It was checked on a multi-host test deployment: seven
-cold starts, seven converged, each identity one complete transfer at its
-secondary, none of #653's cached-denial warnings. Step 3: 2026-10-01, tdns
+cold starts in all (the PR records the first five), all converged, each
+identity one complete transfer at its secondary, none of #653's cached-denial
+warnings. Step 3: 2026-10-01, tdns
 #884: every update asks the gate, the waiters are the zone's, a refresh under
 a hold is refused, the hold's age is capped, and the two items the step-1
 reviews carried to it are in; Amendment 3 records what it settled. Step 4 is
@@ -719,3 +720,23 @@ text:
 - **Not in step 3:** the open transactions and their age in `pendingChanges()`
   and `debug zone-txlog`, and the guide; both are step 4's, with the rest of
   observability.
+
+What the reviews of the step-3 PR changed (tdns #884, before its merge):
+
+- **The follow-up of a deferred update is registered with the stage,** under
+  the lock the stage ran under, by `stageAndPublishLocked`. Registered in a
+  second lock section, as first written, the gate's publisher could publish
+  between the two and the follow-up would attach to a later publish, be
+  dropped with a refusal, or never run.
+- **The resolver's view of a changed delegation is dropped after the publish**
+  that carries the change (#694), by the zone, on both update paths. Dropped at
+  the stage, a lookup in the window before a deferred publish re-cached the old
+  delegation for its TTL.
+- **A refresh does not take a change the zone could not publish.** A local
+  change refused at its publish and kept staged for a later pass (unsignable
+  yet, chain not repairable) was overwritten by the replacement, without a
+  trace. The refresh is refused (`ErrRefreshStaged`) and retried after the same
+  short wait as under a hold; not at first load, where the transfer is the
+  zone's first content.
+- **The management API** was the eighth sender and waited `UpdateApplyTimeout`
+  alone; it waits the one bound.

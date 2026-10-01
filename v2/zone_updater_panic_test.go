@@ -193,7 +193,7 @@ func TestPublishThatPanicsDropsTheWorkingSetAndFlagsTheZone(t *testing.T) {
 			zd.stageRRsetLocked("broken.example.", core.RRset{Name: "broken.example.", RRtype: typePANICTEXT,
 				Class: dns.ClassINET, RRs: []dns.RR{broken}})
 			return true
-		})
+		}, nil)
 	})
 
 	if rec == nil {

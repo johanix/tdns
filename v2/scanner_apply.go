@@ -310,7 +310,8 @@ func queueScanChildUpdate(ctx context.Context, updateq chan UpdateRequest, ur Up
 	ur.Resp = resp
 	// The larger of the scan's own bound and twice the zone's cadence: the
 	// change may wait for the gate's publish.
-	timeout := time.NewTimer(max(scanApplyTimeout, twiceCadence(ur.ZoneName)))
+	bound := max(scanApplyTimeout, twiceCadence(ur.ZoneName))
+	timeout := time.NewTimer(bound)
 	defer timeout.Stop()
 
 	select {
@@ -318,8 +319,8 @@ func queueScanChildUpdate(ctx context.Context, updateq chan UpdateRequest, ur Up
 	case <-ctx.Done():
 		return false, nil, "not queued: " + ctx.Err().Error()
 	case <-timeout.C:
-		lg.Error("ScannerEngine: timed out queueing a CHILD-UPDATE", "zone", ur.ZoneName, "description", ur.Description, "timeout", scanApplyTimeout)
-		return false, nil, fmt.Sprintf("timed out after %s queueing the CHILD-UPDATE", scanApplyTimeout)
+		lg.Error("ScannerEngine: timed out queueing a CHILD-UPDATE", "zone", ur.ZoneName, "description", ur.Description, "timeout", bound)
+		return false, nil, fmt.Sprintf("timed out after %s queueing the CHILD-UPDATE", bound)
 	}
 
 	select {
@@ -336,8 +337,8 @@ func queueScanChildUpdate(ctx context.Context, updateq chan UpdateRequest, ur Up
 		return false, nil, "stopped waiting: " + ctx.Err().Error()
 	case <-timeout.C:
 		// Not cancelled: it is queued, and the updater may still apply it.
-		lg.Warn("ScannerEngine: CHILD-UPDATE not confirmed in time; it is still queued", "zone", ur.ZoneName, "description", ur.Description, "timeout", scanApplyTimeout)
-		return false, resp, fmt.Sprintf("not confirmed within %s; still queued at the zone updater", scanApplyTimeout)
+		lg.Warn("ScannerEngine: CHILD-UPDATE not confirmed in time; it is still queued", "zone", ur.ZoneName, "description", ur.Description, "timeout", bound)
+		return false, resp, fmt.Sprintf("not confirmed within %s; still queued at the zone updater", bound)
 	}
 }
 
