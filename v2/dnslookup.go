@@ -1450,6 +1450,15 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	if Globals.Debug {
 		lg.Printf("IterativeDNSQuery: looking up <%s, %s> using %d servers", qname, dns.TypeToString[qtype], len(serverMap))
 	}
+
+	// The resolver's own DS or DNSKEY question at the owner of a CNAME link
+	// that is being validated (cnameValidationKey): the name is a CNAME, and
+	// holds neither. Answered without asking, and nothing is cached. Asking
+	// returned the link, which was then validated again, without end (#717).
+	if cnameDeniesType(ctx, qtype) && validatingCNAME(ctx, qname) {
+		lgDns.Debug("IterativeDNSQuery: the name is a CNAME being validated; not asking for its "+dns.TypeToString[qtype], "qname", qname)
+		return nil, dns.RcodeSuccess, cache.ContextNoErrNoAns, core.TransportDo53, nil
+	}
 	var servernames []string
 	for k := range serverMap {
 		servernames = append(servernames, k)
@@ -1548,12 +1557,16 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 
 	// qname is a CNAME we hold: follow it from the cache rather than asking
 	// qname's servers for it again. A chain is cached link by link, never as
-	// one entry under <qname, qtype> (serveChain).
-	if !force && followsCNAME(qtype) {
-		if link := imr.Cache.Get(qname, dns.TypeCNAME); link != nil && link.Context == cache.ContextAnswer &&
-			!(privacy == edns0.PrivacyStrict && !core.IsEncryptedTransport(link.Transport)) {
-			if target, ok := cnameTarget(link.RRset); ok {
+	// one entry under <qname, qtype> (serveChain). For the resolver's own DS
+	// or DNSKEY question the link is the answer: there is none at qname
+	// (cnameDeniesType).
+	if !force {
+		if link, target, ok := imr.cachedLink(qname, privacy); ok {
+			switch {
+			case followsCNAME(ctx, qtype):
 				return imr.chaseCNAME(ctx, qname, target, qtype, force, privacy)
+			case cnameDeniesType(ctx, qtype):
+				return nil, dns.RcodeSuccess, cache.ContextNoErrNoAns, link.Transport, nil
 			}
 		}
 	}
@@ -2883,19 +2896,35 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 	// qname is a CNAME: cache the link and follow the chain. Decided before
 	// anything is collected, so that the link's RRSIG -- which follows it in
 	// the section -- and a DNAME that synthesized it are both still there
-	// (answerViaCNAME).
-	if followsCNAME(qtype) {
-		if cn := cnameAt(r, qname); cn != nil {
+	// (answerViaCNAME). The resolver's own DS or DNSKEY question is answered
+	// by the CNAME itself: there is none at qname (cnameAsNoData).
+	if cn := cnameAt(r, qname); cn != nil {
+		switch {
+		case followsCNAME(ctx, qtype):
 			return imr.answerViaCNAME(ctx, qname, qtype, r, cn, force, transport, privacy)
+		case cnameDeniesType(ctx, qtype):
+			return imr.cnameAsNoData(ctx, qname, qtype, r, cn, transport)
 		}
 	}
+	// The answer is built only from the records owned by qname, the name asked
+	// for: its records of qtype, and its RRSIGs that cover qtype. Records of
+	// qtype owned by another name are not part of it, nor are signatures over
+	// another RRset. The RRset is validated, cached and served as qname's.
 	var rrset core.RRset
+	owner := dns.Fqdn(qname)
 	for _, rr := range r.Answer {
-		switch t := rr.Header().Rrtype; t {
-		case qtype:
+		t := rr.Header().Rrtype
+		owned := core.EqualNames(rr.Header().Name, owner)
+		switch {
+		case t == qtype && owned:
 			rrset.RRs = append(rrset.RRs, rr)
-		case dns.TypeRRSIG:
-			rrset.RRSIGs = append(rrset.RRSIGs, rr)
+		case t == qtype:
+			imr.Cache.Logger.Printf("handleAnswer: a %s RR owned by %s is not part of the answer for %s %s",
+				dns.TypeToString[t], rr.Header().Name, qname, dns.TypeToString[qtype])
+		case t == dns.TypeRRSIG:
+			if sig, ok := rr.(*dns.RRSIG); ok && owned && sig.TypeCovered == qtype {
+				rrset.RRSIGs = append(rrset.RRSIGs, rr)
+			}
 		default:
 			imr.Cache.Logger.Printf("Got a %s RR when looking for %s %s", dns.TypeToString[t], qname, dns.TypeToString[qtype])
 		}
@@ -2908,11 +2937,13 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		// Validate the RRset (if possible) using DnskeyCache
 		// Always call ValidateRRset - it will check zone state even when there are no RRSIGs
 		var vstate cache.ValidationState
-		var err error
 		if Globals.Debug {
 			imr.Cache.Logger.Printf("*** handleAnswer: validating RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
 		}
-		vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, &rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
+		// With the authority section: an answer synthesized from a wildcard
+		// is validated with the proof that came with it, which is kept.
+		verdict, err := imr.Cache.ValidateAnswer(ctx, &rrset, authorityRRsets(r.Ns), imr.IterativeDNSQueryFetcher())
+		vstate = verdict.State
 		if err != nil {
 			lgDns.Error("handleAnswer: failed to validate RRset", "rrset", err)
 			return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err, false
@@ -2921,14 +2952,17 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 			imr.Cache.Logger.Printf("*** handleAnswer: validated RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
 		}
 		cr := &cache.CachedRRset{
-			Name:       qname,
-			RRtype:     qtype,
-			Rcode:      uint8(r.MsgHdr.Rcode),
-			RRset:      &rrset,
-			Context:    cache.ContextAnswer,
-			State:      vstate,
-			Expiration: cache.Now().Add(cache.GetMinTTL(rrset.RRs)),
-			Transport:  transport,
+			Name:          qname,
+			RRtype:        qtype,
+			Rcode:         uint8(r.MsgHdr.Rcode),
+			RRset:         &rrset,
+			Context:       cache.ContextAnswer,
+			State:         vstate,
+			EDECode:       verdict.EDECode,
+			EDEText:       verdict.EDEText,
+			WildcardProof: verdict.Proof,
+			Expiration:    cache.Now().Add(cache.GetMinTTL(rrset.RRs)),
+			Transport:     transport,
 		}
 		imr.Cache.Set(qname, qtype, cr)
 		if qtype == dns.TypeSVCB || qtype == core.TypeTSYNC {
@@ -3491,6 +3525,14 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, zonename, host string, rrt
 		return
 	}
 
+	// The entry replaced is the one the lookup just made or read; an answer
+	// synthesized from a wildcard keeps the proof that came with it. Read
+	// before validation: its Get drops an entry stored already expired (a
+	// proof with TTL 0), and the proof with it.
+	var proof []*core.RRset
+	if c := imr.Cache.Peek(host, rrtype); c != nil && c.RRset == rrset {
+		proof = c.WildcardProof
+	}
 	// Always call ValidateRRset - it will check zone state even when there are no RRSIGs
 	var vstate cache.ValidationState
 	vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
@@ -3498,14 +3540,15 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, zonename, host string, rrt
 		imr.Cache.Logger.Printf("*** revalidateGlueRR: Error from ValidateRRset: %v", err)
 	}
 	imr.Cache.Set(host, rrtype, &cache.CachedRRset{
-		Name:       host,
-		RRtype:     rrtype,
-		Rcode:      uint8(dns.RcodeSuccess),
-		RRset:      rrset,
-		Context:    cache.ContextAnswer,
-		State:      vstate,
-		Expiration: cache.Now().Add(cache.GetMinTTL(rrset.RRs)), // XXX: This will be overridden by imr.Cache.Set(). TODO: Fix this.
-		Transport:  core.TransportDo53,                          // revalidateGlueRR - default to Do53
+		Name:          host,
+		RRtype:        rrtype,
+		Rcode:         uint8(dns.RcodeSuccess),
+		RRset:         rrset,
+		Context:       cache.ContextAnswer,
+		State:         vstate,
+		WildcardProof: proof,
+		Expiration:    cache.Now().Add(cache.GetMinTTL(rrset.RRs)), // XXX: This will be overridden by imr.Cache.Set(). TODO: Fix this.
+		Transport:     core.TransportDo53,                          // revalidateGlueRR - default to Do53
 	})
 }
 
@@ -3917,22 +3960,6 @@ func (imr *Imr) negativeWithoutSOA(qname string, qtype uint16, r *dns.Msg, negCo
 		"qname", qname, "qtype", dns.TypeToString[qtype], "zone", zone,
 		"rcode", dns.RcodeToString[r.MsgHdr.Rcode], "state", cache.ValidationStateToString[vstate])
 	return negContext, r.MsgHdr.Rcode, true
-}
-
-func nsecCoversName(name string, nsec *dns.NSEC) bool {
-	if nsec == nil {
-		return false
-	}
-	owner := dns.CanonicalName(nsec.Hdr.Name)
-	next := dns.CanonicalName(nsec.NextDomain)
-	target := dns.CanonicalName(name)
-	if owner == next {
-		return true
-	}
-	if strings.Compare(owner, next) < 0 {
-		return strings.Compare(target, owner) >= 0 && strings.Compare(target, next) < 0
-	}
-	return strings.Compare(target, owner) >= 0 || strings.Compare(target, next) < 0
 }
 
 // maxCNAMEChain is the most CNAMEs one answer follows, as BIND's default

@@ -298,8 +298,18 @@ var evidenceToString = map[cutEvidence]string{
 //     there, a verdict an RRSIG earns unverified by naming a signer held
 //     Insecure. And so does no answer at all, because whoever can strip the
 //     signatures can as easily drop the question.
+//
+// A CNAME at name answers the DS question too (cnameCutEvidence). The resolver
+// caches it as the link it is, at <name, CNAME>, and nothing under <name, DS>
+// (#875); so with no DS entry, a cached link decides, before a question is
+// asked and after one.
 func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string, fetcher RRsetFetcher) cutEvidence {
 	crr := rrcache.Get(name, dns.TypeDS)
+	if crr == nil {
+		if link := rrcache.cnameLinkAt(name); link != nil {
+			return rrcache.cnameCutEvidence(name, link)
+		}
+	}
 	if crr == nil && ctx != nil && fetcher != nil {
 		// The fetch caches what it gets, answer or denial, with its verdict.
 		// A forwarded DS is fetched without servers (ServersFor).
@@ -308,6 +318,11 @@ func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string,
 				log.Printf("ValidateRRset: DS query for %q failed: %v", name, err)
 			}
 			crr = rrcache.Get(name, dns.TypeDS)
+			if crr == nil {
+				if link := rrcache.cnameLinkAt(name); link != nil {
+					return rrcache.cnameCutEvidence(name, link)
+				}
+			}
 		}
 	}
 	if crr == nil {
@@ -343,6 +358,75 @@ func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string,
 		}
 	}
 	return evidenceBogus
+}
+
+// cnameLinkAt returns the CNAME link cached at name: an answer holding a CNAME
+// owned by name. nil if there is none.
+func (rrcache *RRsetCacheT) cnameLinkAt(name string) *CachedRRset {
+	link := rrcache.Get(name, dns.TypeCNAME)
+	if link == nil || link.Context != ContextAnswer || link.RRset == nil {
+		return nil
+	}
+	for _, rr := range link.RRset.RRs {
+		if c, ok := rr.(*dns.CNAME); ok && core.EqualNames(c.Hdr.Name, name) {
+			return link
+		}
+	}
+	return nil
+}
+
+// cnameCutEvidence is delegationEvidence for a name that owns a CNAME, link. A
+// CNAME owner is no delegation (RFC 2181 §10.1), so the parent side's CNAME is
+// as good a proof of no cut as its NSEC would be -- when it validates, and was
+// signed by a zone above name:
+//
+//   - Secure, with every RRSIG made by a zone strictly above name: no cut.
+//     A link synthesized from a DNAME has no RRSIGs of its own; its DNAME's
+//     count, and the DNAME sits above name by construction.
+//   - Secure, but signed by name itself: the signer would be a zone whose apex
+//     holds a CNAME, which there cannot be. Bogus.
+//   - Bogus: bogus.
+//   - Insecure or Indeterminate: the rule a DS RRset with that verdict gets.
+//     Below a zone held Secure it is bogus; elsewhere it cannot be judged.
+func (rrcache *RRsetCacheT) cnameCutEvidence(name string, link *CachedRRset) cutEvidence {
+	switch link.State {
+	case ValidationStateSecure:
+		signed := link.RRset
+		if link.SynthesizedFrom != "" {
+			dname := rrcache.Get(link.SynthesizedFrom, dns.TypeDNAME)
+			if dname == nil {
+				return evidenceNone
+			}
+			signed = dname.RRset
+		}
+		if signedOnlyFromAbove(signed, name) {
+			return evidenceNoCut
+		}
+		return evidenceBogus
+	case ValidationStateBogus:
+		return evidenceBogus
+	case ValidationStateInsecure, ValidationStateIndeterminate:
+		if !rrcache.parentSideSecure(name) {
+			return evidenceUnjudged
+		}
+		return evidenceBogus
+	}
+	return evidenceNone
+}
+
+// signedOnlyFromAbove reports whether set has RRSIGs, and every one of them
+// names a signer strictly above name.
+func signedOnlyFromAbove(set *core.RRset, name string) bool {
+	if set == nil || len(set.RRSIGs) == 0 {
+		return false
+	}
+	for _, rr := range set.RRSIGs {
+		sig, ok := rr.(*dns.RRSIG)
+		if !ok || !dns.IsSubDomain(sig.SignerName, name) || core.EqualNames(sig.SignerName, name) {
+			return false
+		}
+	}
+	return true
 }
 
 // denialEvidence is delegationEvidence for a cached denial of the DS at name,

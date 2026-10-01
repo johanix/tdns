@@ -422,7 +422,11 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				resp.ErrorMsg = fmt.Sprintf("unknown RR type: %s", qtypeStr)
 				return
 			}
-			ir, err := imr.ImrQuery(r.Context(), qname, qtype, dns.ClassINET, nil)
+			// Asked as a DNS client asks (asClientQuery), so that it is
+			// answered as dig is: a DS or DNSKEY question at a CNAME owner
+			// follows the CNAME (#875). It is counted as client traffic too,
+			// with no PRIVACY level.
+			ir, err := imr.ImrQuery(asClientQuery(r.Context()), qname, qtype, dns.ClassINET, nil)
 			data := map[string]interface{}{"qname": qname, "qtype": dns.TypeToString[qtype]}
 			if ir != nil {
 				data["state"] = cache.ValidationStateToString[ir.ValidationState]

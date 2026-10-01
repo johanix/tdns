@@ -55,6 +55,13 @@ type CachedRRset struct {
 	// the owner of that DNAME. The CNAME itself is unsigned. The DNAME's own
 	// entry carries the signature and the verdict, and is served beside it.
 	SynthesizedFrom string
+	// WildcardProof is set on an answer whose RRSIGs include one made over a
+	// wildcard (RFC 4035 section 5.3.2): the NSEC or NSEC3 RRsets, with their
+	// RRSIGs, that the zone sent in the authority section to prove that the
+	// name does not exist (wildcard_answer.go). Served beside the answer to DO
+	// clients, and read when the answer is validated again. The entry lives
+	// no longer than the proof's lowest TTL (Set).
+	WildcardProof []*core.RRset
 }
 
 type RRsetCacheT struct {
