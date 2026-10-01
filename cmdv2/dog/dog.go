@@ -114,7 +114,9 @@ Zone transfers:
                           names rather than the SOA's
 
 DNSSEC chain validation:
-  +sigchase, +sigcha, +sc walk and validate the chain, per-link verdict
+  +sigchase, +sigcha, +sc walk and validate the chain, per-link verdict;
+                          asks with DO and CD set, follows CNAMEs, and
+                          names the trust anchor it used (-k)
   +algchase, +algcha, +ac as +sigchase, naming each algorithm number
 
 Output:
@@ -631,7 +633,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&showVersion, "version", false, "print version and supported algorithms, then exit")
 	rootCmd.PersistentFlags().BoolVarP(&short, "short", "", false, "Only list RRs that are part of the Answer section")
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")
-	rootCmd.PersistentFlags().StringVarP(&trustAnchorFile, "trust-anchor", "k", "", "Path to DNSSEC trust anchor file (zone-file format DS or DNSKEY records). Used by +sigchase. Default: read from "+tdns.DefaultImrCfgFile+" or fall back to compiled-in root KSK DS records.")
+	rootCmd.PersistentFlags().StringVarP(&trustAnchorFile, "trust-anchor", "k", "", "Path to DNSSEC trust anchor file (zone-file format DS or DNSKEY records). Used by +sigchase, which prints the source it used. Default: read from "+tdns.DefaultImrCfgFile+" or fall back to compiled-in root KSK DS records.")
 	rootCmd.PersistentFlags().StringVarP(&tsigKeyFlag, "tsig", "y", "", "TSIG-sign the query. Format [algorithm:]name:secret (dig-compatible); algorithm defaults to hmac-sha256. Do53/Do53-TCP/DoT only.")
 }
 
