@@ -65,8 +65,9 @@ weights. A server's shares still differ from EXPECTED when:
 --privacy shows one row per class of query under each server: "none", "opp."
 and "strict" for a client's PRIVACY level, and "internal" for the resolver's
 own lookups (DNSKEY and DS for validation, nameserver addresses, transport
-signals, priming, and lookups by the scanner, the DSYNC code and "imr query").
-FAIL and TC are the server's, on its first row.
+signals, priming, and lookups by the scanner, the DSYNC code and the in-process
+"imr query"). "tdns-cli imr query", sent over the API, counts as a client's
+query without PRIVACY: "none". FAIL and TC are the server's, on its first row.
 
 Each server is one row, however many zones it serves (ZONES); [zone] shows only
 the servers of that zone. The per-zone listing of the same counters, attempted

@@ -1450,6 +1450,15 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	if Globals.Debug {
 		lg.Printf("IterativeDNSQuery: looking up <%s, %s> using %d servers", qname, dns.TypeToString[qtype], len(serverMap))
 	}
+
+	// The resolver's own DS or DNSKEY question at the owner of a CNAME link
+	// that is being validated (cnameValidationKey): the name is a CNAME, and
+	// holds neither. Answered without asking, and nothing is cached. Asking
+	// returned the link, which was then validated again, without end (#717).
+	if cnameDeniesType(ctx, qtype) && validatingCNAME(ctx, qname) {
+		lgDns.Debug("IterativeDNSQuery: the name is a CNAME being validated; not asking for its "+dns.TypeToString[qtype], "qname", qname)
+		return nil, dns.RcodeSuccess, cache.ContextNoErrNoAns, core.TransportDo53, nil
+	}
 	var servernames []string
 	for k := range serverMap {
 		servernames = append(servernames, k)
@@ -1548,12 +1557,16 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 
 	// qname is a CNAME we hold: follow it from the cache rather than asking
 	// qname's servers for it again. A chain is cached link by link, never as
-	// one entry under <qname, qtype> (serveChain).
-	if !force && followsCNAME(qtype) {
-		if link := imr.Cache.Get(qname, dns.TypeCNAME); link != nil && link.Context == cache.ContextAnswer &&
-			!(privacy == edns0.PrivacyStrict && !core.IsEncryptedTransport(link.Transport)) {
-			if target, ok := cnameTarget(link.RRset); ok {
+	// one entry under <qname, qtype> (serveChain). For the resolver's own DS
+	// or DNSKEY question the link is the answer: there is none at qname
+	// (cnameDeniesType).
+	if !force {
+		if link, target, ok := imr.cachedLink(qname, privacy); ok {
+			switch {
+			case followsCNAME(ctx, qtype):
 				return imr.chaseCNAME(ctx, qname, target, qtype, force, privacy)
+			case cnameDeniesType(ctx, qtype):
+				return nil, dns.RcodeSuccess, cache.ContextNoErrNoAns, link.Transport, nil
 			}
 		}
 	}
@@ -2883,10 +2896,14 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 	// qname is a CNAME: cache the link and follow the chain. Decided before
 	// anything is collected, so that the link's RRSIG -- which follows it in
 	// the section -- and a DNAME that synthesized it are both still there
-	// (answerViaCNAME).
-	if followsCNAME(qtype) {
-		if cn := cnameAt(r, qname); cn != nil {
+	// (answerViaCNAME). The resolver's own DS or DNSKEY question is answered
+	// by the CNAME itself: there is none at qname (cnameAsNoData).
+	if cn := cnameAt(r, qname); cn != nil {
+		switch {
+		case followsCNAME(ctx, qtype):
 			return imr.answerViaCNAME(ctx, qname, qtype, r, cn, force, transport, privacy)
+		case cnameDeniesType(ctx, qtype):
+			return imr.cnameAsNoData(ctx, qname, qtype, r, cn, transport)
 		}
 	}
 	// The answer is built only from the records owned by qname, the name asked

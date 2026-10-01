@@ -6,6 +6,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,25 +29,86 @@ import (
 // type, no signatures past the first hop and no verdict. Its middle links were
 // dropped, and it never came out Secure.
 
-// followsCNAME reports whether a query for qtype follows a CNAME at the query
-// name.
+// followsCNAME reports whether a query for qtype, asked on ctx, follows a
+// CNAME at the query name.
 //
 //   - A CNAME query asks for the CNAME itself.
 //   - RRSIG and NSEC are the two types that sit beside a CNAME at its owner
 //     (RFC 4035 §2.5).
-//   - DS and DNSKEY are the validator's own questions, and a CNAME answers
-//     neither. A DS is the parent's data about a delegation, which a CNAME
-//     owner cannot be; a DNSKEY sits at a zone apex, which cannot be a CNAME
-//     (RFC 2181 §10.1). Following one answered the question with another
-//     name's records. It also recursed without end: validating an unsigned
-//     link asks for the link owner's DS, and the answer to that was the link
-//     again.
-func followsCNAME(qtype uint16) bool {
+//   - DS and DNSKEY follow when a DNS client asks (isClientQuery), as any
+//     other type does: the answer is the chain, and the DS or DNSKEY at its
+//     end (#875). Other validating resolvers answer the same.
+//   - The resolver's own DS and DNSKEY questions do not follow
+//     (cnameDeniesType). They ask about the name itself: a DS is the parent's
+//     data about a delegation at it, a DNSKEY the keys of a zone with its apex
+//     there. Following answered them with another name's records (#717).
+func followsCNAME(ctx context.Context, qtype uint16) bool {
 	switch qtype {
-	case dns.TypeCNAME, dns.TypeRRSIG, dns.TypeNSEC, dns.TypeDS, dns.TypeDNSKEY:
+	case dns.TypeCNAME, dns.TypeRRSIG, dns.TypeNSEC:
 		return false
+	case dns.TypeDS, dns.TypeDNSKEY:
+		return isClientQuery(ctx)
 	}
 	return true
+}
+
+// cnameDeniesType reports whether a CNAME at the query name is itself the
+// answer to a query for qtype asked on ctx: that the name holds no qtype. So it
+// is for the DS and DNSKEY questions the resolver asks for itself. A CNAME
+// owner is neither a delegation nor a zone apex (RFC 2181 §10.1), so it holds
+// neither a DS nor a DNSKEY.
+//
+// The answer is read from the link, cached at <name, CNAME> with its verdict
+// like any other link (cnameAsNoData). Nothing is stored under <name, DS> or
+// <name, DNSKEY>: the responder reads those first, and a client asking the
+// same question is answered with the chain.
+func cnameDeniesType(ctx context.Context, qtype uint16) bool {
+	return (qtype == dns.TypeDS || qtype == dns.TypeDNSKEY) && !isClientQuery(ctx)
+}
+
+// cnameValidationKey carries, on the context of a CNAME link's validation, the
+// owners of the links being validated (cacheCNAMELink).
+//
+// Validating an unsigned link at X asks the parent side for the DS at X
+// (belowSecureZone), and validating one whose RRSIG names X as its signer asks
+// for the DNSKEY at X. Either question is answered with the link itself, which
+// would then be validated again, and so on without end (#717). A DS or DNSKEY
+// question the resolver asks for itself at a name on this list is answered
+// "none there" without asking (IterativeDNSQueryWithLoopDetection): X is a
+// CNAME, so it has neither, and the validation going on above decides whether
+// the CNAME is authentic.
+type cnameValidationKey struct{}
+
+// withCNAMEValidation adds owner to the links being validated on ctx.
+func withCNAMEValidation(ctx context.Context, owner string) context.Context {
+	owners, _ := ctx.Value(cnameValidationKey{}).([]string)
+	return context.WithValue(ctx, cnameValidationKey{}, append(slices.Clone(owners), core.CanonicalizeName(owner)))
+}
+
+// validatingCNAME reports whether the link owned by name is being validated on
+// ctx.
+func validatingCNAME(ctx context.Context, name string) bool {
+	if ctx == nil {
+		return false
+	}
+	owners, _ := ctx.Value(cnameValidationKey{}).([]string)
+	return slices.Contains(owners, core.CanonicalizeName(name))
+}
+
+// cachedLink returns the link qname owns in the cache, and its target: an
+// answer holding a CNAME. Under strict privacy a link that arrived in
+// cleartext does not count.
+func (imr *Imr) cachedLink(qname string, privacy edns0.PrivacyLevel) (*cache.CachedRRset, string, bool) {
+	link := imr.Cache.Get(qname, dns.TypeCNAME)
+	if link == nil || link.Context != cache.ContextAnswer ||
+		(privacy == edns0.PrivacyStrict && !core.IsEncryptedTransport(link.Transport)) {
+		return nil, "", false
+	}
+	target, ok := cnameTarget(link.RRset)
+	if !ok {
+		return nil, "", false
+	}
+	return link, target, true
 }
 
 // cnameTarget returns the target of the CNAME in rrset, if it holds one.
@@ -130,7 +192,12 @@ func synthesizeFromDNAME(qname, owner, target string) string {
 // CNAME takes its verdict (SynthesizedFrom). The chain follows the CNAME only
 // as the DNAME synthesizes it: a CNAME that says otherwise is replaced by the
 // synthesized one (RFC 6672 §3.2).
+//
+// The link is validated with qname on the context as a link being validated
+// (cnameValidationKey): the resolver's own DS or DNSKEY question at qname,
+// asked by that validation, is answered without being sent.
 func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn *dns.CNAME, transport core.Transport) (string, error) {
+	ctx = withCNAMEValidation(ctx, qname)
 	now := cache.Now()
 	link := &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: dns.TypeCNAME}
 	// A link, or the DNAME that synthesized it, synthesized from a wildcard
@@ -200,6 +267,25 @@ func (imr *Imr) answerViaCNAME(ctx context.Context, qname string, qtype uint16, 
 		chaseTransport = core.TransportDo53
 	}
 	return final, rcode, context, chaseTransport, nil, true
+}
+
+// cnameAsNoData answers the resolver's own DS or DNSKEY question at qname when
+// qname is a CNAME (cnameDeniesType): the link is validated and cached as any
+// link is (cacheCNAMELink), and the answer is that qname holds no qtype. The
+// rcode is NOERROR whatever r's is: r's rcode belongs to the chain's last name
+// (RFC 6604), and qname exists.
+//
+// The walk stops here, on the first server that answered. It used to find no
+// qtype in the answer, try every other server, and fail; and as nothing was
+// cached, the next question did the same (#875). The next question is now
+// answered from the link (IterativeDNSQueryWithLoopDetection).
+func (imr *Imr) cnameAsNoData(ctx context.Context, qname string, qtype uint16, r *dns.Msg, cn *dns.CNAME, transport core.Transport) (*core.RRset, int, cache.CacheContext, core.Transport, error, bool) {
+	if _, err := imr.cacheCNAMELink(ctx, qname, r, cn, transport); err != nil {
+		lgDns.Error("handleAnswer: failed to validate a CNAME link", "qname", qname, "err", err)
+		return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err, false
+	}
+	lgDns.Debug("handleAnswer: the name is a CNAME, which holds no "+dns.TypeToString[qtype], "qname", qname)
+	return nil, dns.RcodeSuccess, cache.ContextNoErrNoAns, transport, nil, true
 }
 
 // chainOutcome is what serveChain did.
