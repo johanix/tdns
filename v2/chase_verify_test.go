@@ -1065,3 +1065,33 @@ func TestChaseWildcardAnswers(t *testing.T) {
 		wantStatus(t, "result without the proof", tr.chase("x.cn.sec.example.", dns.TypeA).Status, ChainStatusBogus)
 	})
 }
+
+// Below a delegation proven unsigned, the answer takes the link's verdict,
+// and the note says that verdict: Insecure under a Secure zone, but no
+// better than a zone above that is Bogus or Indeterminate (review of #881).
+func TestChaseUnsignedDelegationBelowAZoneNotSecure(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		anchors func(tr *chaseTree) []*dns.DS
+		want    ChainStatus
+	}{
+		{"wrong anchor", func(*chaseTree) []*dns.DS { return []*dns.DS{newFwdSecKey(t, ".").dnskey.ToDS(dns.SHA256)} }, ChainStatusBogus},
+		{"no anchor", func(*chaseTree) []*dns.DS { return nil }, ChainStatusIndeterminate},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tr := kidTree(t)
+			res, err := NewChaser(tr, "192.0.2.1", c.anchors(tr)).Chase("www.kid.sec.example.", dns.TypeA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantStatus(t, "kid.sec.example.", linkNamed(res.Links, "kid.sec.example.").Status, c.want)
+			wantStatus(t, "leaf", res.Leaf.Status, c.want)
+			if hasNote(res.Leaf.Notes, "is insecure") {
+				t.Errorf("leaf notes %q say insecure for a %s answer", res.Leaf.Notes, c.want)
+			}
+			if !hasNote(res.Leaf.Notes, "zone kid.sec.example. is "+c.want.String()+": a delegation with no DS") {
+				t.Errorf("leaf notes %q", res.Leaf.Notes)
+			}
+		})
+	}
+}

@@ -684,8 +684,16 @@ func (w *chainWalk) judgeLeaf(name string, qtype uint16, ans chaseAnswer, chain 
 	}
 	deepest := chain[len(chain)-1]
 	if w.insecure(deepest) {
+		// An unsigned delegation is Insecure only below a Secure zone; below
+		// one that is not, the link was capped, and the note says what the
+		// verdict is.
 		leaf.Status = deepest.Status
-		leaf.Notes = append(leaf.Notes, fmt.Sprintf("zone %s is insecure: no chain of trust leads to the answer", deepest.Zone))
+		if deepest.Status == ChainStatusInsecure {
+			leaf.Notes = append(leaf.Notes, fmt.Sprintf("zone %s is insecure: no chain of trust leads to the answer", deepest.Zone))
+		} else {
+			leaf.Notes = append(leaf.Notes, fmt.Sprintf("zone %s is %s: a delegation with no DS this binary can use, below a zone that is not secure",
+				deepest.Zone, deepest.Status))
+		}
 		return leaf
 	}
 	var own ChainStatus
