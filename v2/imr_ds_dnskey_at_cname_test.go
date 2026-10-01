@@ -354,3 +354,22 @@ func TestImrQueryContextByCaller(t *testing.T) {
 		}
 	}
 }
+
+// The resolver's own DS question at a CNAME synthesized from a wildcard: the
+// link is validated with the proof that came with it in the authority section,
+// as any link is (#874), and cached Secure with that proof. The question is
+// NODATA, as at any CNAME owner.
+func TestOwnDSQuestionAtAWildcardCNAMEKeepsItsProof(t *testing.T) {
+	imr := wildcardImr(t)
+	qname := "x.c." + wcnZone
+	_, servers, _ := imr.Cache.FindClosestKnownZoneFor(qname, dns.TypeDS)
+	rrset, rcode, cctx, _, err := imr.IterativeDNSQuery(context.Background(), qname, dns.TypeDS, servers, false, edns0.PrivacyNone)
+	if err != nil || rcode != dns.RcodeSuccess || cctx != cache.ContextNoErrNoAns || (rrset != nil && len(rrset.RRs) > 0) {
+		t.Fatalf("rrset %v, rcode %s, context %s, err %v; want no RRset, NOERROR, NODATA and no error",
+			rrset, dns.RcodeToString[rcode], cache.CacheContextToString[cctx], err)
+	}
+	link := imr.Cache.Peek(qname, dns.TypeCNAME)
+	if link == nil || link.State != cache.ValidationStateSecure || len(link.WildcardProof) == 0 {
+		t.Errorf("the link is not cached Secure with its proof: %+v", link)
+	}
+}
