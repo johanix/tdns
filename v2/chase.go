@@ -50,6 +50,7 @@ type ChainLink struct {
 	Zone       string        // FQDN of the zone at this cut
 	ParentZone string        // the zone of the link above this one; "" for the root
 	DS         []*dns.DS     // DS records seen at the parent for this zone (may be empty for insecure / root)
+	DSSigs     []*dns.RRSIG  // RRSIG(DS) records, by the parent
 	DNSKEY     []*dns.DNSKEY // DNSKEY records published by this zone
 	DNSKEYSigs []*dns.RRSIG  // RRSIG(DNSKEY) records
 	MatchedKSK *dns.DNSKEY   // DNSKEY whose tag+digest matched a DS at the parent
@@ -120,7 +121,7 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 		return nil, fmt.Errorf("chase: nil client")
 	}
 	qname = dns.Fqdn(qname)
-	w := &chainWalk{c: c, cuts: map[string]*cutDecision{}}
+	w := &chainWalk{c: c, now: time.Now().UTC(), cuts: map[string]*cutDecision{}}
 	links, leaf := w.walkName(qname, qtype)
 	result := &ChainResult{Qname: qname, Qtype: qtype, TrustAnchorSource: c.TrustAnchorSource,
 		Leaf: leaf, Status: ChainStatusSecure}
@@ -139,6 +140,7 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 // zone cut, so that no candidate is asked about twice.
 type chainWalk struct {
 	c    *Chaser
+	now  time.Time               // the time signatures are checked at
 	cuts map[string]*cutDecision // by candidate name, canonical form
 }
 
@@ -201,21 +203,50 @@ func (w *chainWalk) links(zones []string) []*ChainLink {
 
 // decide works out whether zone is a zone cut below chain, the links decided
 // above it, and judges it if it is.
+//
+// A link is no better than the link above it (RFC 4035 section 5.2): its DS
+// RRset is the parent's data, and proves something only when the parent's
+// keys are trusted. The root has no link above, and a zone with a trust
+// anchor of its own is vouched for by the anchor.
 func (w *chainWalk) decide(zone string, chain []*ChainLink) *cutDecision {
 	link := &ChainLink{Zone: zone}
+	var above *ChainLink
 	if len(chain) > 0 {
-		link.ParentZone = chain[len(chain)-1].Zone
+		above = chain[len(chain)-1]
+		link.ParentZone = above.Zone
 	}
+	d := w.decideOwn(link, above)
+	if d.link != nil && above != nil && len(w.c.TrustAnchors[zone]) == 0 {
+		capBelow(d.link, above)
+	}
+	return d
+}
 
-	// Fetch DS from the parent (skip for root).
-	if zone != "." {
+// capBelow makes link no better than above, the link above it, and says so
+// when that changes its verdict.
+func capBelow(link, above *ChainLink) {
+	capped := worstStatus(link.Status, above.Status)
+	if capped != link.Status {
+		link.Notes = append(link.Notes, fmt.Sprintf("zone %s above is %s; this link can be no better", above.Zone, above.Status))
+		link.Status = capped
+	}
+}
+
+// decideOwn is decide for the link on its own: link.Status is its own
+// verdict, before the link above caps it.
+func (w *chainWalk) decideOwn(link, above *ChainLink) *cutDecision {
+	zone := link.Zone
+	// Fetch DS from the parent (skip for root, and for a zone with a trust
+	// anchor of its own: the anchor vouches for its keys, as it does in the
+	// resolver, which asks for no DS there either).
+	if zone != "." && len(w.c.TrustAnchors[zone]) == 0 {
 		resp, err := w.c.query(zone, dns.TypeDS)
 		if err != nil {
 			link.Status = ChainStatusIndeterminate
 			link.Notes = append(link.Notes, fmt.Sprintf("DS query failed: %v", err))
 			return &cutDecision{link: link}
 		}
-		ds, _ := ownedDS(resp.Answer, zone)
+		ds, dsSigs := ownedDS(resp.Answer, zone)
 		if len(ds) == 0 {
 			// No DS at parent. Two very different cases:
 			//
@@ -247,11 +278,71 @@ func (w *chainWalk) decide(zone string, chain []*ChainLink) *cutDecision {
 			}
 			return &cutDecision{link: link}
 		}
-		link.DS = ds
+		link.DS, link.DSSigs = ds, dsSigs
 	}
 
+	dsState := ChainStatusSecure
+	if len(link.DS) > 0 {
+		dsState = w.verifyDS(link, above)
+	}
 	w.judgeKeys(link)
+	link.Status = worstStatus(link.Status, dsState)
 	return &cutDecision{link: link}
+}
+
+// verifyDS checks the RRSIG over link's DS RRset with the keys of above, the
+// link of the parent zone: the parent signed it (RFC 4035 sections 5.2 and
+// 5.3.1). It returns Secure when a signature verifies, Bogus when none does,
+// and Indeterminate when the parent's keys are not there to check it with.
+func (w *chainWalk) verifyDS(link, above *ChainLink) ChainStatus {
+	if above == nil || len(above.DNSKEY) == 0 {
+		parent := "the parent"
+		if above != nil {
+			parent = above.Zone
+		}
+		link.Notes = append(link.Notes, fmt.Sprintf("DS RRset not verified: no DNSKEY of %s to verify it with", parent))
+		return ChainStatusIndeterminate
+	}
+	set := &core.RRset{Name: link.Zone, Class: dns.ClassINET, RRtype: dns.TypeDS, RRSIGs: rrsigsToRRs(link.DSSigs)}
+	for _, ds := range link.DS {
+		set.RRs = append(set.RRs, ds)
+	}
+	sig, err := zoneSignature(set, above.Zone, above.DNSKEY, w.now)
+	if err != nil {
+		link.Notes = append(link.Notes, fmt.Sprintf("DS RRset: %v", err))
+		return ChainStatusBogus
+	}
+	link.Notes = append(link.Notes, fmt.Sprintf("DS RRset signed by %s keytag=%d: verified", above.Zone, sig.KeyTag))
+	return ChainStatusSecure
+}
+
+// zoneSignature checks the RRSIGs over rrset that zone made, with keys, the
+// zone's DNSKEY RRset (RFC 4035 section 5.3.1): only signatures whose signer
+// is zone and can hold the RRset (cache.SignerHoldsRRset), and only keys with
+// the Zone flag and protocol 3. It returns the signature that verified within
+// its validity period at now, or why none did.
+func zoneSignature(rrset *core.RRset, zone string, keys []*dns.DNSKEY, now time.Time) (*dns.RRSIG, error) {
+	var sigs []dns.RR
+	for _, rr := range rrset.RRSIGs {
+		sig, ok := rr.(*dns.RRSIG)
+		if !ok || sig.TypeCovered != rrset.RRtype || !core.EqualNames(sig.SignerName, zone) ||
+			!cache.SignerHoldsRRset(rrset, sig) {
+			continue
+		}
+		sigs = append(sigs, sig)
+	}
+	if len(sigs) == 0 {
+		return nil, fmt.Errorf("no RRSIG by %s", zone)
+	}
+	var zoneKeys []*dns.DNSKEY
+	for _, k := range keys {
+		if k.Flags&dns.ZONE != 0 && k.Protocol == 3 {
+			zoneKeys = append(zoneKeys, k)
+		}
+	}
+	signed := &core.RRset{Name: rrset.Name, Class: rrset.Class, RRtype: rrset.RRtype, RRs: rrset.RRs, RRSIGs: sigs}
+	sig, _, err := signatureByOneOf(signed, zoneKeys, now)
+	return sig, err
 }
 
 // judgeKeys fetches the DNSKEY RRset of link's zone and matches it against

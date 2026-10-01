@@ -274,6 +274,14 @@ func (zd *ZoneData) dnskeysSignedByKsk(rrset *core.RRset, ksks []*dns.DNSKEY, ve
 // that one of them signed it. Shared by ValidateChildDnskeys and the
 // delegation coherence check (signedByPublishedDS).
 func signedByOneOf(rrset *core.RRset, keys []*dns.DNSKEY, now time.Time) (*dns.DNSKEY, error) {
+	_, key, err := signatureByOneOf(rrset, keys, now)
+	return key, err
+}
+
+// signatureByOneOf is signedByOneOf, returning the signature that verified
+// as well as the key that made it. The chain walk (chase.go) reads the
+// signature: its key tag for the output, its Labels field for a wildcard.
+func signatureByOneOf(rrset *core.RRset, keys []*dns.DNSKEY, now time.Time) (*dns.RRSIG, *dns.DNSKEY, error) {
 	var why []string
 	for _, rr := range rrset.RRSIGs {
 		rrsig, ok := rr.(*dns.RRSIG)
@@ -295,7 +303,7 @@ func signedByOneOf(rrset *core.RRset, keys []*dns.DNSKEY, now time.Time) (*dns.D
 				why = append(why, fmt.Sprintf("the RRSIG by key %d is outside its validity period", key.KeyTag()))
 				continue
 			}
-			return key, nil
+			return rrsig, key, nil
 		}
 	}
 	if len(why) == 0 {
@@ -303,7 +311,7 @@ func signedByOneOf(rrset *core.RRset, keys []*dns.DNSKEY, now time.Time) (*dns.D
 		for _, key := range keys {
 			tags = append(tags, fmt.Sprint(key.KeyTag()))
 		}
-		return nil, fmt.Errorf("no RRSIG by key %s", strings.Join(tags, " or "))
+		return nil, nil, fmt.Errorf("no RRSIG by key %s", strings.Join(tags, " or "))
 	}
-	return nil, errors.New(strings.Join(why, "; "))
+	return nil, nil, errors.New(strings.Join(why, "; "))
 }

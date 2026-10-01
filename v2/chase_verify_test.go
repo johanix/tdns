@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -207,4 +208,126 @@ func TestRenderChainTrustAnchorSource(t *testing.T) {
 	if !strings.HasPrefix(out.String(), "Trust anchor: none\n") {
 		t.Errorf("output without anchors does not say so:\n%s", out.String())
 	}
+}
+
+// signedAt is key.sign with a signature valid from inception to expiration.
+func signedAt(t *testing.T, key *fwdSecKey, inception, expiration time.Time, rrs ...dns.RR) []dns.RR {
+	t.Helper()
+	sig := &dns.RRSIG{Algorithm: key.dnskey.Algorithm, KeyTag: key.dnskey.KeyTag(), SignerName: key.dnskey.Hdr.Name,
+		Inception: uint32(inception.Unix()), Expiration: uint32(expiration.Unix())}
+	if err := sig.Sign(key.priv, rrs); err != nil {
+		t.Fatal(err)
+	}
+	return append(append([]dns.RR{}, rrs...), sig)
+}
+
+// A DS RRset is the parent's data, and the parent's keys must have signed
+// it (item 2 of #876).
+func TestChaseDSRRsetSignature(t *testing.T) {
+	t.Run("signed by the parent", func(t *testing.T) {
+		tr := secureTree(t)
+		res := tr.chase("www.sec.example.", dns.TypeA)
+		l := linkNamed(res.Links, "sec.example.")
+		wantStatus(t, "sec.example.", l.Status, ChainStatusSecure)
+		if !hasNote(l.Notes, "DS RRset signed by example. keytag=") {
+			t.Errorf("sec.example. notes %q", l.Notes)
+		}
+	})
+	t.Run("no RRSIG", func(t *testing.T) {
+		tr := secureTree(t)
+		tr.edit("sec.example.", dns.TypeDS, stripSigs(dns.TypeDS))
+		res := tr.chase("www.sec.example.", dns.TypeA)
+		l := linkNamed(res.Links, "sec.example.")
+		wantStatus(t, "sec.example.", l.Status, ChainStatusBogus)
+		if !hasNote(l.Notes, "DS RRset: no RRSIG by example.") {
+			t.Errorf("sec.example. notes %q", l.Notes)
+		}
+		wantStatus(t, "result", res.Status, ChainStatusBogus)
+	})
+	t.Run("DS changed after signing", func(t *testing.T) {
+		tr := secureTree(t)
+		// Another key's DS, in place of the one the parent signed: the child
+		// would match it, the parent's signature does not.
+		other := newFwdSecKey(t, "sec.example.")
+		tr.zones["sec.example."].put(other.dnskey)
+		tr.edit("sec.example.", dns.TypeDS, changeRR(dns.TypeDS, func(rr dns.RR) {
+			*rr.(*dns.DS) = *other.dnskey.ToDS(dns.SHA256)
+		}))
+		res := tr.chase("www.sec.example.", dns.TypeA)
+		l := linkNamed(res.Links, "sec.example.")
+		wantStatus(t, "sec.example.", l.Status, ChainStatusBogus)
+		if !hasNote(l.Notes, "does not verify") {
+			t.Errorf("sec.example. notes %q", l.Notes)
+		}
+	})
+	t.Run("signed with a key the parent does not have", func(t *testing.T) {
+		tr := secureTree(t)
+		stray := newFwdSecKey(t, "example.")
+		parent := tr.zones["example."]
+		tr.script("sec.example.", dns.TypeDS, func() *dns.Msg {
+			return &dns.Msg{Answer: stray.sign(t, parent.get("sec.example.", dns.TypeDS)...)}
+		})
+		res := tr.chase("www.sec.example.", dns.TypeA)
+		wantStatus(t, "sec.example.", linkNamed(res.Links, "sec.example.").Status, ChainStatusBogus)
+	})
+	t.Run("signature expired", func(t *testing.T) {
+		tr := secureTree(t)
+		parent := tr.zones["example."]
+		tr.script("sec.example.", dns.TypeDS, func() *dns.Msg {
+			return &dns.Msg{Answer: signedAt(t, parent.key, time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour),
+				parent.get("sec.example.", dns.TypeDS)...)}
+		})
+		res := tr.chase("www.sec.example.", dns.TypeA)
+		l := linkNamed(res.Links, "sec.example.")
+		wantStatus(t, "sec.example.", l.Status, ChainStatusBogus)
+		if !hasNote(l.Notes, "outside its validity period") {
+			t.Errorf("sec.example. notes %q", l.Notes)
+		}
+	})
+}
+
+// A link is no better than the link above it: a child whose own DS and keys
+// check out is Indeterminate under an Indeterminate parent and Bogus under a
+// Bogus one, and says why.
+func TestChaseLinkIsNoBetterThanItsParent(t *testing.T) {
+	t.Run("no anchor", func(t *testing.T) {
+		tr := secureTree(t)
+		res, err := NewChaser(tr, "192.0.2.1", nil).Chase("www.sec.example.", dns.TypeA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, zone := range []string{"example.", "sec.example."} {
+			l := linkNamed(res.Links, zone)
+			wantStatus(t, zone, l.Status, ChainStatusIndeterminate)
+			if !hasNote(l.Notes, "DS RRset signed by") || !hasNote(l.Notes, "above is indeterminate; this link can be no better") {
+				t.Errorf("%s notes %q", zone, l.Notes)
+			}
+		}
+	})
+	t.Run("parent bogus", func(t *testing.T) {
+		tr := secureTree(t)
+		tr.edit("example.", dns.TypeDNSKEY, stripSigs(dns.TypeDNSKEY))
+		res := tr.chase("www.sec.example.", dns.TypeA)
+		wantStatus(t, "example.", linkNamed(res.Links, "example.").Status, ChainStatusBogus)
+		l := linkNamed(res.Links, "sec.example.")
+		wantStatus(t, "sec.example.", l.Status, ChainStatusBogus)
+		if !hasNote(l.Notes, "zone example. above is bogus") {
+			t.Errorf("sec.example. notes %q", l.Notes)
+		}
+	})
+	t.Run("own trust anchor", func(t *testing.T) {
+		// A zone with an anchor of its own is vouched for by it, whatever
+		// the zone above it is; no DS is asked for.
+		tr := secureTree(t)
+		tr.edit("example.", dns.TypeDNSKEY, stripSigs(dns.TypeDNSKEY))
+		anchors := append(tr.anchors(), tr.zones["sec.example."].key.dnskey.ToDS(dns.SHA256))
+		res, err := NewChaser(tr, "192.0.2.1", anchors).Chase("www.sec.example.", dns.TypeA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantStatus(t, "sec.example.", linkNamed(res.Links, "sec.example.").Status, ChainStatusSecure)
+		if tr.askedFor("sec.example.", dns.TypeDS) {
+			t.Errorf("asked for the DS of a zone with its own trust anchor")
+		}
+	})
 }
