@@ -20,8 +20,8 @@ import (
 // (ImrResponder), and the own lookups that run inside a client's query mark
 // theirs back. A context without a mark is not a DNS client's: the transport
 // signal and TLSA lookups start from a context of their own, and the embedded
-// users (the scanner, the DSYNC lookups, "imr query" over the API) never had
-// one.
+// users (the scanner, the DSYNC lookups) never had one. "imr query" over the
+// API is asked as a client's (asClientQuery, #875).
 //
 // The mark also decides one thing about the answer: whether a DS or DNSKEY
 // question follows a CNAME at the query name (followsCNAME, #875). A client's
@@ -75,11 +75,11 @@ type imrQueryAsClientKey struct{}
 // the answers are counted under the client classes. Lookups nested inside
 // that query are the resolver's own again (imrQueryContext).
 //
-// No caller uses it yet. ImrQuery's callers -- the scanner, the delegation
-// checks, the DSYNC lookups, "imr query" over the API -- ask about the name
-// itself, and a DS or DNSKEY at a CNAME owner comes back as "none there", with
-// the CNAME's verdict (#875). A caller that wants the answer a DNS client gets
-// puts this mark on its context.
+// The API's "imr query" uses it (#875): a DS or DNSKEY question asked there
+// at a CNAME owner is answered as a DNS client's is, through the CNAME. The
+// embedded users -- the scanner, the delegation checks, the DSYNC lookups --
+// do not: they ask about the name itself, and a CNAME there is "none there",
+// with the CNAME's verdict.
 func asClientQuery(ctx context.Context) context.Context {
 	return context.WithValue(ctx, imrQueryAsClientKey{}, true)
 }
