@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -36,7 +37,8 @@ const (
 //     never with AD.
 //   - Bogus, or an entry already carrying an EDE, is SERVFAIL -- whether or not
 //     the client set DO. A validating resolver protects the clients that do not
-//     validate for themselves, and that is most of them.
+//     validate for themselves, and that is most of them. The exception is an
+//     EDE that goes out beside the answer (edeBeside).
 //   - Indeterminate means the chain could not be followed. For a signed RRset,
 //     on a resolver that has trust anchors, that is a failure (EDE 5); it is
 //     not the same as the zone being unsigned. Without trust anchors nothing
@@ -50,7 +52,7 @@ func (imr *Imr) dispositionFor(state cache.ValidationState, edeCode uint16, sign
 		return answerServe, 0
 	}
 	switch {
-	case edeCode != 0:
+	case edeCode != 0 && !edeBeside(state, edeCode):
 		return answerServfail, edeCode
 	case state == cache.ValidationStateBogus:
 		return answerServfail, edns0.EDEDNSSECBogus
@@ -58,6 +60,59 @@ func (imr *Imr) dispositionFor(state cache.ValidationState, edeCode uint16, sign
 		return answerServfail, edns0.EDEDNSSECIndeterminate
 	}
 	return answerServe, 0
+}
+
+// edeBeside reports whether an EDE on a positive entry is served beside the
+// answer rather than instead of it: 27, Unsupported NSEC3 Iterations Value, on
+// an answer that is Insecure because the proof that came with it, for an
+// answer synthesized from a wildcard, needs NSEC3 records over the iteration
+// limit (RFC 9276). A denial carries it the same way (attachNegativeEDE).
+func edeBeside(state cache.ValidationState, ede uint16) bool {
+	return state == cache.ValidationStateInsecure && ede == edns0.EDEUnsupportedNSEC3Iterations
+}
+
+// attachAnswerEDE attaches to a served answer the EDE that goes out beside it
+// (edeBeside), when the query has EDNS.
+func attachAnswerEDE(m, r *dns.Msg, state cache.ValidationState, ede uint16, text string, msgoptions *edns0.MsgOptions) {
+	if m == nil || r == nil || r.IsEdns0() == nil || !edeBeside(state, ede) {
+		return
+	}
+	if opt := m.IsEdns0(); opt != nil {
+		for _, o := range opt.Option {
+			if e, ok := o.(*dns.EDNS0_EDE); ok && e.InfoCode == ede {
+				return // a denial at the end of a CNAME chain carries it already
+			}
+		}
+	}
+	edns0.AttachEDEToResponseWithText(m, ede, text, msgoptions != nil && msgoptions.DO)
+}
+
+// appendWildcardProof appends to m's authority section, for a client that set
+// DO, the proof kept with c: for an answer synthesized from a wildcard, the
+// NSEC or NSEC3 RRsets, and their RRSIGs, that prove the name does not exist.
+// The records carry the entry's remaining lifetime, as the answer does. An
+// RRset already in the section, from another part of a CNAME chain, goes in
+// once.
+func appendWildcardProof(m *dns.Msg, c *cache.CachedRRset, msgoptions *edns0.MsgOptions) {
+	if m == nil || c == nil || len(c.WildcardProof) == 0 || msgoptions == nil || !msgoptions.DO {
+		return
+	}
+	have := map[string]bool{}
+	key := func(name string, t uint16) string { return core.CanonicalizeName(name) + "/" + dns.TypeToString[t] }
+	for _, rr := range m.Ns {
+		if rr != nil {
+			have[key(rr.Header().Name, rr.Header().Rrtype)] = true
+		}
+	}
+	now := cache.Now()
+	for _, set := range c.WildcardProof {
+		if set == nil || len(set.RRs) == 0 || have[key(set.RRs[0].Header().Name, set.RRtype)] {
+			continue
+		}
+		have[key(set.RRs[0].Header().Name, set.RRtype)] = true
+		m.Ns = append(m.Ns, c.ServeRRs(set.RRs, now)...)
+		m.Ns = append(m.Ns, c.ServeRRs(set.RRSIGs, now)...)
+	}
 }
 
 // adWanted reports whether a secure answer to r may carry AD: only if the client
@@ -200,14 +255,15 @@ func verdictReusable(state cache.ValidationState) bool {
 // glue, hint) served without upgrading. The last two used to set AD from the
 // entry's state for every client, and served a bogus entry as NOERROR.
 func (imr *Imr) serveCachedPositive(ctx context.Context, w dns.ResponseWriter, r, m *dns.Msg, qname string, qtype uint16, crrset *cache.CachedRRset, msgoptions *edns0.MsgOptions) {
-	state := crrset.State
+	state, edeCode, edeText := crrset.State, crrset.EDECode, crrset.EDEText
 	signed := crrset.RRset != nil && len(crrset.RRset.RRSIGs) > 0
 	if !verdictReusable(state) && signed && !msgoptions.CD && imr.Cache != nil {
-		if v, err := imr.Cache.ValidateRRsetWithParentZone(ctx, crrset.RRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone); err == nil {
-			state = v
+		// With the proof kept for an answer synthesized from a wildcard.
+		if v, err := imr.Cache.ValidateAnswer(ctx, crrset.RRset, crrset.WildcardProof, imr.IterativeDNSQueryFetcher()); err == nil {
+			state, edeCode, edeText = v.State, v.EDECode, v.EDEText
 		}
 	}
-	disp, ede := imr.dispositionFor(state, crrset.EDECode, signed, msgoptions)
+	disp, ede := imr.dispositionFor(state, edeCode, signed, msgoptions)
 	if disp == answerServfail {
 		lgImr.Debug("ImrResponder: returning SERVFAIL for cached data that did not validate",
 			"qname", qname, "qtype", dns.TypeToString[qtype], "edeCode", ede,
@@ -216,8 +272,8 @@ func (imr *Imr) serveCachedPositive(ctx context.Context, w dns.ResponseWriter, r
 		m.Ns = nil
 		m.SetRcode(r, dns.RcodeServerFailure)
 		if r.IsEdns0() != nil {
-			if crrset.EDECode != 0 && crrset.EDEText != "" {
-				edns0.AttachEDEToResponseWithText(m, crrset.EDECode, crrset.EDEText, msgoptions.DO)
+			if edeCode != 0 && edeText != "" {
+				edns0.AttachEDEToResponseWithText(m, edeCode, edeText, msgoptions.DO)
 			} else {
 				edns0.AttachEDEToResponse(m, ede)
 			}
@@ -227,6 +283,8 @@ func (imr *Imr) serveCachedPositive(ctx context.Context, w dns.ResponseWriter, r
 	}
 	m.SetRcode(r, dns.RcodeSuccess)
 	m.Answer = crrset.ServeAnswer(cache.Now(), msgoptions.DO)
+	appendWildcardProof(m, crrset, msgoptions)
+	attachAnswerEDE(m, r, state, edeCode, edeText, msgoptions)
 	m.AuthenticatedData = disp == answerServeSecure && adWanted(r, msgoptions)
 	setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 	w.WriteMsg(m)

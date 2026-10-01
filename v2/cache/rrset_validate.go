@@ -372,51 +372,14 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 		return ValidationStateNone, fmt.Errorf("rrset is nil; nothing to validate")
 	}
 
-	// Check cache first - if we already have this RRset validated and it hasn't changed or expired, reuse the validation state.
-	// Note: the ValidationState enum starts at iota+1, so the zero value
-	// (Go-default-initialised) is 0, NOT ValidationStateNone (=1). A cached
-	// entry written without an explicit State field has State==0 and must be
-	// treated as "not validated yet", not as a usable cached verdict.
-	//
-	// Indeterminate is not reused either. It records that the chain could not be
-	// followed when the entry was made -- a DNSKEY fetch that timed out, an
-	// anchor not loaded yet -- and reusing it turned a moment's gap into the
-	// verdict for the rest of the entry's lifetime.
-	cached := rrcache.Get(rrset.Name, rrset.RRtype)
-	if cached != nil && cached.State > ValidationStateNone && cached.State != ValidationStateIndeterminate {
-		// Get() already checks expiration and returns nil if expired, so if cached is not nil, it's not expired
-		// But we double-check expiration to be explicit about the semantics
-		if cached.Expiration.Before(Now()) {
-			if rrcache.Verbose {
-				log.Printf("ValidateRRset: cached RRset for %s %s has expired, re-validating", rrset.Name, dns.TypeToString[rrset.RRtype])
-			}
-			// Fall through to re-validate
-		} else if cached.RRset != nil {
-			// Check if the RRset content has changed by comparing RRs and RRSIGs
-			// Use RRsetDiffer for RRs (it skips RRSIGs, which is what we want for data comparison)
-			// Then separately compare RRSIGs
-			rrsetDiffer, _, _ := cached.RRset.RRsetDiffer(rrset, log.Default(), false, false)
-			// XXX: Should we really care about comparing RRSIGs? Or perhaps only compare inception?
-			rrsigDiffer := cached.RRset.RRSIGsDiffer(rrset)
+	// An RRset synthesized from a wildcard is judged with the proof kept on
+	// its cache entry (wildcard_answer.go).
+	if rrset.RRtype != dns.TypeDNSKEY && hasExpansionSignature(rrset) {
+		return rrcache.validateWithKeptProof(ctx, rrset, fetcher)
+	}
 
-			if !rrsetDiffer && !rrsigDiffer {
-				// RRset hasn't changed and hasn't expired - reuse cached validation state
-				if rrcache.Debug {
-					log.Printf("ValidateRRset: using cached validation state %s for %s %s (RRset unchanged, not expired)", ValidationStateToString[cached.State], rrset.Name, dns.TypeToString[rrset.RRtype])
-				}
-				return cached.State, nil
-			} else {
-				if rrcache.Debug {
-					log.Printf("ValidateRRset: cached RRset for %s %s has changed (RRs differ: %v, RRSIGs differ: %v), re-validating", rrset.Name, dns.TypeToString[rrset.RRtype], rrsetDiffer, rrsigDiffer)
-				}
-				// Fall through to re-validate
-			}
-		} else {
-			// Cached RRset is nil - fall through to validate
-			if rrcache.Debug {
-				log.Printf("ValidateRRset: cached entry for %s %s has no RRset, re-validating", rrset.Name, dns.TypeToString[rrset.RRtype])
-			}
-		}
+	if state, ok := rrcache.reusableVerdict(rrset); ok {
+		return state, nil
 	}
 
 	dkc := rrcache.DnskeyCache
@@ -469,6 +432,67 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 		return rrcache.unsignedRRsetState(ctx, rrset, fetcher), nil
 	}
 
+	state, _, err := rrcache.validateSignatures(ctx, rrset, rrset.RRSIGs, dkc, fetcher)
+	return state, err
+}
+
+// reusableVerdict returns the verdict cached for rrset, when the entry holds
+// the same RRs and RRSIGs, has not expired, and its verdict can be reused.
+func (rrcache *RRsetCacheT) reusableVerdict(rrset *core.RRset) (ValidationState, bool) {
+	// Check cache first - if we already have this RRset validated and it hasn't changed or expired, reuse the validation state.
+	// Note: the ValidationState enum starts at iota+1, so the zero value
+	// (Go-default-initialised) is 0, NOT ValidationStateNone (=1). A cached
+	// entry written without an explicit State field has State==0 and must be
+	// treated as "not validated yet", not as a usable cached verdict.
+	//
+	// Indeterminate is not reused either. It records that the chain could not be
+	// followed when the entry was made -- a DNSKEY fetch that timed out, an
+	// anchor not loaded yet -- and reusing it turned a moment's gap into the
+	// verdict for the rest of the entry's lifetime.
+	cached := rrcache.Get(rrset.Name, rrset.RRtype)
+	if cached != nil && cached.State > ValidationStateNone && cached.State != ValidationStateIndeterminate {
+		// Get() already checks expiration and returns nil if expired, so if cached is not nil, it's not expired
+		// But we double-check expiration to be explicit about the semantics
+		if cached.Expiration.Before(Now()) {
+			if rrcache.Verbose {
+				log.Printf("ValidateRRset: cached RRset for %s %s has expired, re-validating", rrset.Name, dns.TypeToString[rrset.RRtype])
+			}
+			// Fall through to re-validate
+		} else if cached.RRset != nil {
+			// Check if the RRset content has changed by comparing RRs and RRSIGs
+			// Use RRsetDiffer for RRs (it skips RRSIGs, which is what we want for data comparison)
+			// Then separately compare RRSIGs
+			rrsetDiffer, _, _ := cached.RRset.RRsetDiffer(rrset, log.Default(), false, false)
+			// XXX: Should we really care about comparing RRSIGs? Or perhaps only compare inception?
+			rrsigDiffer := cached.RRset.RRSIGsDiffer(rrset)
+
+			if !rrsetDiffer && !rrsigDiffer {
+				// RRset hasn't changed and hasn't expired - reuse cached validation state
+				if rrcache.Debug {
+					log.Printf("ValidateRRset: using cached validation state %s for %s %s (RRset unchanged, not expired)", ValidationStateToString[cached.State], rrset.Name, dns.TypeToString[rrset.RRtype])
+				}
+				return cached.State, true
+			} else {
+				if rrcache.Debug {
+					log.Printf("ValidateRRset: cached RRset for %s %s has changed (RRs differ: %v, RRSIGs differ: %v), re-validating", rrset.Name, dns.TypeToString[rrset.RRtype], rrsetDiffer, rrsigDiffer)
+				}
+				// Fall through to re-validate
+			}
+		} else {
+			// Cached RRset is nil - fall through to validate
+			if rrcache.Debug {
+				log.Printf("ValidateRRset: cached entry for %s %s has no RRset, re-validating", rrset.Name, dns.TypeToString[rrset.RRtype])
+			}
+		}
+	}
+
+	return ValidationStateNone, false
+}
+
+// validateSignatures tries sigs, in order, on rrset. It returns Secure, and
+// the signature, at the first that validates and is time-valid; otherwise the
+// verdict the failures add up to.
+func (rrcache *RRsetCacheT) validateSignatures(ctx context.Context, rrset *core.RRset, sigs []dns.RR, dkc *DnskeyCacheT, fetcher RRsetFetcher) (ValidationState, *dns.RRSIG, error) {
 	// Track the failure category across all RRSIGs. The inner function
 	// returns ValidationStateBogus when a sig actually failed verification
 	// or its validity window is invalid, and ValidationStateIndeterminate
@@ -478,7 +502,7 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 	// attempted.
 	sawSigFail := false  // at least one sig actually failed verification
 	sawChainGap := false // at least one sig couldn't be attempted at all
-	for _, rr := range rrset.RRSIGs {
+	for _, rr := range sigs {
 		sig, ok := rr.(*dns.RRSIG)
 		if !ok {
 			if rrcache.Debug {
@@ -488,13 +512,13 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 		}
 		valid, shouldReturnEarly, returnState, err := rrcache.validateRRsetWithRRSIG(ctx, rrset, sig, dkc, fetcher)
 		if err != nil {
-			return returnState, err
+			return returnState, nil, err
 		}
 		if shouldReturnEarly {
-			return returnState, nil
+			return returnState, nil, nil
 		}
 		if valid {
-			return ValidationStateSecure, nil
+			return ValidationStateSecure, sig, nil
 		}
 		switch returnState {
 		case ValidationStateBogus:
@@ -513,12 +537,12 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 	//   - neither (no sigs at all, or all returned an unexpected state):
 	//     default to Bogus, matching the prior conservative behaviour.
 	if sawSigFail {
-		return ValidationStateBogus, nil
+		return ValidationStateBogus, nil, nil
 	}
 	if sawChainGap {
-		return ValidationStateIndeterminate, nil
+		return ValidationStateIndeterminate, nil, nil
 	}
-	return ValidationStateBogus, nil
+	return ValidationStateBogus, nil, nil
 }
 
 // ValidateDNSKEYRRsetUsingDS validates a DNSKEY RRset using a DS record.
@@ -1327,40 +1351,16 @@ func (rrcache *RRsetCacheT) ValidateDenial(ctx context.Context, qname string, qt
 // that needs records over the iteration limit, with EDE 27 (RFC 9276). No
 // cover is Bogus. The EDE code is 0 otherwise.
 //
-// The positive answer path can call it for a wildcard-expanded RRset; nothing
-// does yet.
+// It is WildcardAnswerProof over the NSEC3 RRsets alone.
 func (rrcache *RRsetCacheT) NSEC3WildcardProof(ctx context.Context, zone, qname string, labels uint8,
 	authority []*core.RRset, fetcher RRsetFetcher) (ValidationState, uint16) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	zone = dns.Fqdn(zone)
-	var recs []*dns.NSEC3
+	var nsec3 []*core.RRset
 	for _, set := range authority {
-		if set == nil || set.RRtype != dns.TypeNSEC3 || !core.EqualNames(parentOf(dns.Fqdn(set.Name)), zone) {
-			continue
-		}
-		zs := signedBy(set, zone)
-		if zs == nil {
-			continue
-		}
-		if state, err := rrcache.ValidateRRset(ctx, zs, fetcher); err != nil || state != ValidationStateSecure {
-			if err != nil {
-				return ValidationStateIndeterminate, 0
-			}
-			return state, 0
-		}
-		for _, rr := range zs.RRs {
-			if n, ok := rr.(*dns.NSEC3); ok {
-				recs = append(recs, n)
-			}
+		if set != nil && set.RRtype == dns.TypeNSEC3 {
+			nsec3 = append(nsec3, set)
 		}
 	}
-	v := newNSEC3Proof(zone, recs, NSEC3MaxIterations()).wildcardAnswer(dns.CanonicalName(qname), labels)
-	if v == nsec3OverLimit {
-		return v.state(), edeUnsupportedNSEC3Iterations
-	}
-	return v.state(), 0
+	return rrcache.WildcardAnswerProof(ctx, zone, qname, labels, nsec3, fetcher)
 }
 
 // From Mieks DNS lib:

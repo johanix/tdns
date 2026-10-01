@@ -2920,11 +2920,13 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		// Validate the RRset (if possible) using DnskeyCache
 		// Always call ValidateRRset - it will check zone state even when there are no RRSIGs
 		var vstate cache.ValidationState
-		var err error
 		if Globals.Debug {
 			imr.Cache.Logger.Printf("*** handleAnswer: validating RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
 		}
-		vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, &rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
+		// With the authority section: an answer synthesized from a wildcard
+		// is validated with the proof that came with it, which is kept.
+		verdict, err := imr.Cache.ValidateAnswer(ctx, &rrset, authorityRRsets(r.Ns), imr.IterativeDNSQueryFetcher())
+		vstate = verdict.State
 		if err != nil {
 			lgDns.Error("handleAnswer: failed to validate RRset", "rrset", err)
 			return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err, false
@@ -2933,14 +2935,17 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 			imr.Cache.Logger.Printf("*** handleAnswer: validated RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
 		}
 		cr := &cache.CachedRRset{
-			Name:       qname,
-			RRtype:     qtype,
-			Rcode:      uint8(r.MsgHdr.Rcode),
-			RRset:      &rrset,
-			Context:    cache.ContextAnswer,
-			State:      vstate,
-			Expiration: cache.Now().Add(cache.GetMinTTL(rrset.RRs)),
-			Transport:  transport,
+			Name:          qname,
+			RRtype:        qtype,
+			Rcode:         uint8(r.MsgHdr.Rcode),
+			RRset:         &rrset,
+			Context:       cache.ContextAnswer,
+			State:         vstate,
+			EDECode:       verdict.EDECode,
+			EDEText:       verdict.EDEText,
+			WildcardProof: verdict.Proof,
+			Expiration:    cache.Now().Add(cache.GetMinTTL(rrset.RRs)),
+			Transport:     transport,
 		}
 		imr.Cache.Set(qname, qtype, cr)
 		if qtype == dns.TypeSVCB || qtype == core.TypeTSYNC {
@@ -3509,15 +3514,22 @@ func (imr *Imr) revalidateGlueRR(ctx context.Context, zonename, host string, rrt
 	if err != nil {
 		imr.Cache.Logger.Printf("*** revalidateGlueRR: Error from ValidateRRset: %v", err)
 	}
+	// The entry replaced is the one the lookup just made or read; an answer
+	// synthesized from a wildcard keeps the proof that came with it.
+	var proof []*core.RRset
+	if c := imr.Cache.Peek(host, rrtype); c != nil && c.RRset == rrset {
+		proof = c.WildcardProof
+	}
 	imr.Cache.Set(host, rrtype, &cache.CachedRRset{
-		Name:       host,
-		RRtype:     rrtype,
-		Rcode:      uint8(dns.RcodeSuccess),
-		RRset:      rrset,
-		Context:    cache.ContextAnswer,
-		State:      vstate,
-		Expiration: cache.Now().Add(cache.GetMinTTL(rrset.RRs)), // XXX: This will be overridden by imr.Cache.Set(). TODO: Fix this.
-		Transport:  core.TransportDo53,                          // revalidateGlueRR - default to Do53
+		Name:          host,
+		RRtype:        rrtype,
+		Rcode:         uint8(dns.RcodeSuccess),
+		RRset:         rrset,
+		Context:       cache.ContextAnswer,
+		State:         vstate,
+		WildcardProof: proof,
+		Expiration:    cache.Now().Add(cache.GetMinTTL(rrset.RRs)), // XXX: This will be overridden by imr.Cache.Set(). TODO: Fix this.
+		Transport:     core.TransportDo53,                          // revalidateGlueRR - default to Do53
 	})
 }
 
