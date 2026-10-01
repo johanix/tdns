@@ -1425,7 +1425,13 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		// the owner off the wire IS the qname. A key that misses falls back
 		// to the stored TTLs, which is what this path did for every answer
 		// before.
-		if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil {
+		//
+		// Read with freshEntry, not Get: an answer with TTL 0, or one its
+		// proof gives a lifetime of 0, is stored already expired, and is
+		// still the answer to the query that fetched it. Its verdict and the
+		// proof kept with it are read from the same entry, below.
+		entry := imr.freshEntry(rrset.Name, rrset.RRtype)
+		if c := entry; c != nil {
 			m.Answer = c.ServeRRs(rrset.RRs, cache.Now())
 			if msgoptions.DO {
 				m.Answer = append(m.Answer, c.ServeRRs(rrset.RRSIGs, cache.Now())...)
@@ -1462,11 +1468,17 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		var edeCode uint16
 		var edeText string
 		if imr.Cache != nil {
-			if c := imr.Cache.Get(rrset.Name, rrset.RRtype); c != nil && verdictReusable(c.State) {
+			if c := entry; c != nil && verdictReusable(c.State) {
 				vstate, edeCode, edeText = c.State, c.EDECode, c.EDEText
 			} else {
-				var err error
-				vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
+				// With the proof kept for an answer synthesized from a
+				// wildcard.
+				var proof []*core.RRset
+				if entry != nil {
+					proof = entry.WildcardProof
+				}
+				v, err := imr.Cache.ValidateAnswer(ctx, rrset, proof, imr.IterativeDNSQueryFetcher())
+				vstate, edeCode, edeText = v.State, v.EDECode, v.EDEText
 				if err != nil && !msgoptions.CD {
 					lgImr.Error("failed to validate RRset", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
 					m.Answer = nil
@@ -1504,6 +1516,8 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 			w.WriteMsg(m)
 			return true, nil
 		}
+		appendWildcardProof(m, entry, msgoptions)
+		attachAnswerEDE(m, r, vstate, edeCode, edeText, msgoptions)
 		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil
@@ -1555,6 +1569,18 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		return true, nil
 	}
 	return false, nil
+}
+
+// freshEntry reads the cache entry for <name, t> that the query being answered
+// has just made or read. An entry that expired less than one query budget ago
+// still counts (freshChainGrace), as for the links of a CNAME chain: a record
+// with TTL 0 is stored already expired.
+func (imr *Imr) freshEntry(name string, t uint16) *cache.CachedRRset {
+	c := imr.Cache.Peek(name, t)
+	if c != nil && c.Expiration.Before(cache.Now().Add(-imr.freshChainGrace())) {
+		return nil
+	}
+	return c
 }
 
 // negativeRcode is the rcode a cached negative entry is served with to THIS

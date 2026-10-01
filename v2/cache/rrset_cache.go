@@ -202,6 +202,18 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 				minTTL = rr.Header().Ttl
 			}
 		}
+		// An answer synthesized from a wildcard lives no longer than the proof
+		// kept with it, which is served beside it.
+		for _, set := range crrset.WildcardProof {
+			if set == nil {
+				continue
+			}
+			for _, rr := range set.RRs {
+				if rr.Header().Ttl < minTTL {
+					minTTL = rr.Header().Ttl
+				}
+			}
+		}
 		// Apply a small TTL floor for NS RRsets only when learned via referral, to avoid instant drop
 		if qtype == dns.TypeNS && crrset.Context == ContextReferral && minTTL == 0 {
 			if rrcache.Debug {

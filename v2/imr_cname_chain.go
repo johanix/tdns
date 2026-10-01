@@ -200,18 +200,22 @@ func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn
 	ctx = withCNAMEValidation(ctx, qname)
 	now := cache.Now()
 	link := &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: dns.TypeCNAME}
-	var vstate cache.ValidationState
+	// A link, or the DNAME that synthesized it, synthesized from a wildcard
+	// is validated with the proof in the authority section, which is kept.
+	authority := authorityRRsets(r.Ns)
+	var verdict cache.AnswerVerdict
 	var synthesizedFrom string
 	if dname := dnameAbove(r, qname); dname != nil {
 		d := dname.RRs[0].(*dns.DNAME)
-		state, err := imr.Cache.ValidateRRsetWithParentZone(ctx, dname, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
+		v, err := imr.Cache.ValidateAnswer(ctx, dname, authority, imr.IterativeDNSQueryFetcher())
 		if err != nil {
 			return "", fmt.Errorf("DNAME %s: %w", dname.Name, err)
 		}
 		imr.Cache.Set(dname.Name, dns.TypeDNAME, &cache.CachedRRset{
 			Name: dname.Name, RRtype: dns.TypeDNAME, Rcode: uint8(dns.RcodeSuccess), RRset: dname,
-			Context: cache.ContextAnswer, State: state,
-			Expiration: now.Add(cache.GetMinTTL(dname.RRs)), Transport: transport,
+			Context: cache.ContextAnswer, State: v.State, EDECode: v.EDECode, EDEText: v.EDEText,
+			WildcardProof: v.Proof,
+			Expiration:    now.Add(cache.GetMinTTL(dname.RRs)), Transport: transport,
 		})
 		target := synthesizeFromDNAME(qname, dname.Name, d.Target)
 		if !core.EqualNames(cn.Target, target) {
@@ -222,20 +226,21 @@ func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn
 			Hdr:    dns.RR_Header{Name: qname, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: d.Hdr.Ttl},
 			Target: target,
 		}}
-		vstate, synthesizedFrom = state, dname.Name
+		verdict, synthesizedFrom = cache.AnswerVerdict{State: v.State}, dname.Name
 	} else {
 		link.RRs = []dns.RR{cn}
 		link.RRSIGs = sigsFor(r.Answer, qname, dns.TypeCNAME)
-		state, err := imr.Cache.ValidateRRsetWithParentZone(ctx, link, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
+		v, err := imr.Cache.ValidateAnswer(ctx, link, authority, imr.IterativeDNSQueryFetcher())
 		if err != nil {
 			return "", fmt.Errorf("CNAME %s: %w", qname, err)
 		}
-		vstate = state
+		verdict = v
 	}
 	imr.Cache.Set(qname, dns.TypeCNAME, &cache.CachedRRset{
 		Name: qname, RRtype: dns.TypeCNAME, Rcode: uint8(dns.RcodeSuccess), RRset: link,
-		Context: cache.ContextAnswer, State: vstate,
-		Expiration: now.Add(cache.GetMinTTL(link.RRs)), Transport: transport,
+		Context: cache.ContextAnswer, State: verdict.State, EDECode: verdict.EDECode, EDEText: verdict.EDEText,
+		WildcardProof: verdict.Proof,
+		Expiration:    now.Add(cache.GetMinTTL(link.RRs)), Transport: transport,
 		SynthesizedFrom: synthesizedFrom,
 	})
 	target, _ := cnameTarget(link)
@@ -403,17 +408,27 @@ func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.
 	}
 
 	secure := true
+	// The parts whose proofs, for answers synthesized from a wildcard, go in
+	// the authority section; and an EDE that goes out beside the answer
+	// (edeBeside), from any part.
+	var proven []*cache.CachedRRset
+	var beside struct {
+		state cache.ValidationState
+		code  uint16
+		text  string
+	}
 	// judge applies the positive-answer rule to one part. False means the
 	// part fails the answer, which has been written as a SERVFAIL.
 	judge := func(e *cache.CachedRRset) bool {
-		state := e.State
+		state, edeCode, edeText := e.State, e.EDECode, e.EDEText
 		signed := e.RRset != nil && len(e.RRset.RRSIGs) > 0
 		if !verdictReusable(state) && signed && !msgoptions.CD {
-			if v, err := imr.Cache.ValidateRRsetWithParentZone(ctx, e.RRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone); err == nil {
-				state = v
+			// With the proof kept for a part synthesized from a wildcard.
+			if v, err := imr.Cache.ValidateAnswer(ctx, e.RRset, e.WildcardProof, imr.IterativeDNSQueryFetcher()); err == nil {
+				state, edeCode, edeText = v.State, v.EDECode, v.EDEText
 			}
 		}
-		disp, ede := imr.dispositionFor(state, e.EDECode, signed, msgoptions)
+		disp, ede := imr.dispositionFor(state, edeCode, signed, msgoptions)
 		switch disp {
 		case answerServfail:
 			lgImr.Debug("ImrResponder: returning SERVFAIL for a CNAME chain with a part that did not validate",
@@ -422,8 +437,8 @@ func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.
 			m.Answer, m.Ns = nil, nil
 			m.SetRcode(r, dns.RcodeServerFailure)
 			if r.IsEdns0() != nil {
-				if e.EDECode != 0 && e.EDEText != "" {
-					edns0.AttachEDEToResponseWithText(m, e.EDECode, e.EDEText, msgoptions.DO)
+				if edeCode != 0 && edeText != "" {
+					edns0.AttachEDEToResponseWithText(m, edeCode, edeText, msgoptions.DO)
 				} else {
 					edns0.AttachEDEToResponse(m, ede)
 				}
@@ -432,6 +447,10 @@ func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.
 			return false
 		case answerServe:
 			secure = false
+		}
+		proven = append(proven, e)
+		if edeBeside(state, edeCode) {
+			beside.state, beside.code, beside.text = state, edeCode, edeText
 		}
 		return true
 	}
@@ -479,6 +498,12 @@ func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.
 		m.Answer = append(answer, final.ServeAnswer(now, msgoptions.DO)...)
 		m.AuthenticatedData = secure && adWanted(r, msgoptions)
 	}
+	// Each part's proof once, after the denial's own records when the chain
+	// ends in one.
+	for _, e := range proven {
+		appendWildcardProof(m, e, msgoptions)
+	}
+	attachAnswerEDE(m, r, beside.state, beside.code, beside.text, msgoptions)
 	setPrivacyStatus(m, msgoptions, status)
 	w.WriteMsg(m)
 	return chainServed

@@ -482,10 +482,12 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 	return rrset, inSync, err
 }
 
-// queryAllNSAndCompareWithDenial is queryAllNSAndCompare, and when the
-// representative RRset is empty, the proof its nameserver sent that there is
-// no such RRset (authQueryWithDenial). The proof goes with the first answer,
-// as the RRSIGs of a non-empty RRset do.
+// queryAllNSAndCompareWithDenial is queryAllNSAndCompare, and the authority
+// section the nameserver of the representative RRset sent with it
+// (authQueryWithDenial): when the RRset is empty, the proof that there is no
+// such RRset; when it was synthesized from a wildcard, the proof that goes
+// with it. It goes with the first answer, as the RRSIGs of a non-empty RRset
+// do.
 func (scanner *Scanner) queryAllNSAndCompareWithDenial(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, imr *Imr, lg *log.Logger) (*core.RRset, []*core.RRset, bool, error) {
 	// IMR may be disabled or the generalized-NOTIFY path may have
 	// reached the scanner before the IMR singleton was initialized;
