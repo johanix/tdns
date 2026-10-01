@@ -360,6 +360,54 @@ func TestAnIndeterminateDenialIsValidatedAgainFromTheCache(t *testing.T) {
 	}
 }
 
+// A cached denial held Indeterminate that, validated again, fails in a way
+// the fresh path would not take -- signed, but with neither NSEC nor NSEC3 --
+// is Bogus: SERVFAIL, not served.
+func TestADenialThatFailsWhenValidatedAgainIsBogus(t *testing.T) {
+	ksk, zsk := newFwdSecKey(t, fwdSecParent), newFwdSecKey(t, fwdSecParent)
+	denial := n3Denial(t, zsk, dns.RcodeNameError) // the SOA alone
+	short := dns.Copy(ksk.dnskey).(*dns.DNSKEY)
+	short.Hdr.Ttl = 1
+	withoutZSK := &dns.Msg{Answer: ksk.sign(t, short)}
+	withZSK := &dns.Msg{Answer: ksk.sign(t, dns.Copy(ksk.dnskey), dns.Copy(zsk.dnskey))}
+	var keysBack atomic.Bool
+	addr, port := startForwardUpstreamFunc(t, func(qname string, qtype uint16) *dns.Msg {
+		switch {
+		case qname == n3NX && qtype == dns.TypeA:
+			return denial
+		case qname == fwdSecParent && qtype == dns.TypeDNSKEY && keysBack.Load():
+			return withZSK
+		case qname == fwdSecParent && qtype == dns.TypeDNSKEY:
+			return withoutZSK
+		}
+		return nil
+	})
+	imr := newForwardTestImr(t, []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}})
+	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
+	imr.DnskeyCache = imr.Cache.DnskeyCache
+	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
+		t.Fatalf("PrimeFromHintsOnly: %v", err)
+	}
+	imr.addDirectDNSKEYTrustAnchors(map[string][]*dns.DNSKEY{fwdSecParent: {ksk.dnskey}})
+
+	if m := n3Ask(t, imr, n3NX, dns.TypeA, true, false); m.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("the ZSK unknown: %s, want SERVFAIL", dns.RcodeToString[m.Rcode])
+	}
+	if c := imr.Cache.Get(n3NX, dns.TypeA); c == nil || c.State != cache.ValidationStateIndeterminate {
+		t.Fatalf("the denial is not cached as indeterminate")
+	}
+
+	keysBack.Store(true)
+	time.Sleep(1100 * time.Millisecond) // the DNSKEY RRset without the ZSK expires
+	if m := n3Ask(t, imr, n3NX, dns.TypeA, true, false); m.Rcode != dns.RcodeServerFailure || edeOf(m) != edns0.EDEDNSSECBogus {
+		t.Errorf("validated again, without NSEC or NSEC3: %s EDE %d, want SERVFAIL EDE %d",
+			dns.RcodeToString[m.Rcode], edeOf(m), edns0.EDEDNSSECBogus)
+	}
+	if c := imr.Cache.Get(n3NX, dns.TypeA); c == nil || c.State != cache.ValidationStateBogus {
+		t.Errorf("the cached denial is not Bogus after validating it again")
+	}
+}
+
 // A DNSKEY denial handleNegative did not validate is held as None, not
 // Indeterminate, and is served as it is: validating it would call it Bogus
 // (ValidateDenial does not validate DNSKEY denials).

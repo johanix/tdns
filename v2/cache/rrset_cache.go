@@ -1376,16 +1376,27 @@ func (rrcache *RRsetCacheT) MarkRRsetBogus(qname string, qtype uint16, rrset *co
 	return edeCode, edeText
 }
 
-// SetVerdict changes the validation state, and the EDE, of the entry for
-// qname and qtype, and nothing else. Set recomputes the expiry from the TTLs,
-// and a verdict changed on every serve must not extend the entry's life (see
-// MarkRRsetBogus).
-func (rrcache *RRsetCacheT) SetVerdict(qname string, qtype uint16, state ValidationState, edeCode uint16, edeText string) {
-	key := rrsetKey(qname, qtype)
-	if stored, ok := rrcache.RRsets.Get(key); ok {
-		stored.State, stored.EDECode, stored.EDEText = state, edeCode, edeText
-		rrcache.RRsets.Set(key, stored)
+// SetVerdict changes the validation state, and the EDE, of the cached entry
+// judged was read from, and nothing else. Set recomputes the expiry from the
+// TTLs, and a verdict changed on every serve must not extend the entry's life
+// (see MarkRRsetBogus).
+//
+// The verdict is stored only while that entry is still the one cached: the
+// same records, the same expiry and the state judged had. Validation can take
+// a while, and another query may have replaced the entry meanwhile; a verdict
+// reached for one entry is never written onto another. It reports whether the
+// verdict was stored.
+func (rrcache *RRsetCacheT) SetVerdict(judged *CachedRRset, state ValidationState, edeCode uint16, edeText string) bool {
+	if judged == nil {
+		return false
 	}
+	return rrcache.RRsets.UpdateIf(rrsetKey(judged.Name, judged.RRtype), func(stored CachedRRset) (CachedRRset, bool) {
+		if stored.RRset != judged.RRset || !stored.Expiration.Equal(judged.Expiration) || stored.State != judged.State {
+			return stored, false
+		}
+		stored.State, stored.EDECode, stored.EDEText = state, edeCode, edeText
+		return stored, true
+	})
 }
 
 func (rrcache *RRsetCacheT) lookupDnskeyEDE(rrset *core.RRset) (uint16, string, bool) {

@@ -161,11 +161,18 @@ func (imr *Imr) revalidateDenial(ctx context.Context, c *cache.CachedRRset, msgo
 		(msgoptions != nil && msgoptions.CD) || imr.Cache == nil || len(c.NegAuthority) == 0 {
 		return c
 	}
-	v, _ := imr.Cache.ValidateDenial(ctx, c.Name, c.RRtype, c.Rcode, c.NegAuthority, imr.IterativeDNSQueryFetcher())
+	v, err := imr.Cache.ValidateDenial(ctx, c.Name, c.RRtype, c.Rcode, c.NegAuthority, imr.IterativeDNSQueryFetcher())
+	if err != nil && v.State != cache.ValidationStateIndeterminate {
+		// handleNegative does not take a denial that fails to validate this
+		// way; one already cached is Bogus.
+		v = cache.DenialVerdict{State: cache.ValidationStateBogus, Rcode: c.Rcode}
+	}
 	if v.State == cache.ValidationStateNone || v.State == c.State {
 		return c
 	}
-	imr.Cache.SetVerdict(c.Name, c.RRtype, v.State, v.EDECode, v.EDEText)
+	// Stored only if c is still the entry cached; the answer being built is
+	// made from c either way.
+	imr.Cache.SetVerdict(c, v.State, v.EDECode, v.EDEText)
 	updated := *c
 	updated.State, updated.EDECode, updated.EDEText = v.State, v.EDECode, v.EDEText
 	return &updated
