@@ -70,15 +70,29 @@ type ChainLeaf struct {
 	Notes  []string
 }
 
+// ChainHop is the chain walked for one name of a CNAME chain, and the CNAME
+// that name owns, as its leaf.
+type ChainHop struct {
+	Links []ChainLink
+	Leaf  ChainLeaf
+}
+
 // ChainResult is the full structured chase output. Status is the overall
-// verdict (worst of any link plus the leaf).
+// verdict: the worst of every link and leaf, of every name in the CNAME
+// chain (RFC 4035 section 3.2.3).
 type ChainResult struct {
-	Qname             string      // the name asked for
-	Qtype             uint16      // the type asked for
-	TrustAnchorSource string      // where the trust anchors came from (Chaser.TrustAnchorSource), or "none"
-	Links             []ChainLink // root-first, leaf zone last
-	Leaf              ChainLeaf
-	Status            ChainStatus
+	Qname             string // the name asked for
+	Qtype             uint16 // the type asked for
+	TrustAnchorSource string // where the trust anchors came from (Chaser.TrustAnchorSource), or "none"
+	// Aliases are the names of the CNAME chain before the last, in order,
+	// each with the CNAME it owns as its leaf. Empty when qname owns no
+	// CNAME.
+	Aliases []ChainHop
+	// Links and Leaf are for the last name of the chain: qname, or the
+	// target of the last CNAME. Leaf.RRset is the answer.
+	Links  []ChainLink // root-first, leaf zone last
+	Leaf   ChainLeaf
+	Status ChainStatus
 }
 
 // Chaser walks a DNSSEC chain by issuing DO=1 queries against a recursive
@@ -123,17 +137,57 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 	}
 	qname = dns.Fqdn(qname)
 	w := &chainWalk{c: c, now: time.Now().UTC(), cuts: map[string]*cutDecision{}}
-	links, leaf := w.walkName(qname, qtype)
 	result := &ChainResult{Qname: qname, Qtype: qtype, TrustAnchorSource: c.TrustAnchorSource,
-		Leaf: leaf, Status: ChainStatusSecure}
+		Status: ChainStatusSecure}
 	if result.TrustAnchorSource == "" && len(c.TrustAnchors) == 0 {
 		result.TrustAnchorSource = "none"
 	}
-	for _, link := range links {
-		result.Links = append(result.Links, *link)
-		result.Status = worstStatus(result.Status, link.Status)
+
+	// Each name of the CNAME chain is walked in turn, with the zone cuts
+	// decided for the names before it, up to the resolver's limit on the
+	// length of a chain (maxCNAMEChain).
+	type hop struct {
+		links []*ChainLink
+		leaf  ChainLeaf
 	}
-	result.Status = worstStatus(result.Status, leaf.Status)
+	var hops []hop
+	seen := map[string]bool{}
+	for name := qname; ; {
+		seen[core.CanonicalizeName(name)] = true
+		links, leaf, target := w.walkName(name, qtype)
+		hops = append(hops, hop{links, leaf})
+		if target == "" {
+			break
+		}
+		end := ""
+		switch {
+		case seen[core.CanonicalizeName(target)]:
+			end = fmt.Sprintf("CNAME loop: %s is earlier in the chain", target)
+		case len(hops) > maxCNAMEChain:
+			end = fmt.Sprintf("CNAME chain longer than %d", maxCNAMEChain)
+		}
+		if end != "" {
+			hops = append(hops, hop{leaf: ChainLeaf{Qname: target, Qtype: qtype, Status: ChainStatusIndeterminate, Notes: []string{end}}})
+			break
+		}
+		name = target
+	}
+
+	// The links are copied once the whole chain is walked: a link reached
+	// again for a later name may have gained notes.
+	for i, h := range hops {
+		ch := ChainHop{Leaf: h.leaf}
+		for _, link := range h.links {
+			ch.Links = append(ch.Links, *link)
+			result.Status = worstStatus(result.Status, link.Status)
+		}
+		result.Status = worstStatus(result.Status, h.leaf.Status)
+		if i < len(hops)-1 {
+			result.Aliases = append(result.Aliases, ch)
+			continue
+		}
+		result.Links, result.Leaf = ch.Links, ch.Leaf
+	}
 	return result, nil
 }
 
@@ -158,10 +212,13 @@ type cutDecision struct {
 // chaseAnswer is the response to the question about the leaf, read by owner:
 // only records the name asked for owns count.
 type chaseAnswer struct {
-	rrs   []dns.RR     // records of the type asked for
-	sigs  []*dns.RRSIG // the RRSIGs over them
-	rcode int          // NOERROR or NXDOMAIN
-	err   error        // the query failed: no response, or another rcode
+	rrs       []dns.RR     // records of the type asked for
+	sigs      []*dns.RRSIG // the RRSIGs over them
+	cname     []dns.RR     // without rrs: the CNAME the name owns
+	cnameSigs []*dns.RRSIG // its RRSIGs
+	dname     string       // the owner of a DNAME above the name that synthesized the CNAME
+	rcode     int          // NOERROR or NXDOMAIN
+	err       error        // the query failed: no response, or another rcode
 }
 
 // walkName asks for name and qtype, walks the zone cuts from the root down to
@@ -169,8 +226,14 @@ type chaseAnswer struct {
 //
 // The answer is asked for first: what the name owns tells which candidates
 // can be zone cuts at all.
-func (w *chainWalk) walkName(name string, qtype uint16) ([]*ChainLink, ChainLeaf) {
+//
+// A name that owns a CNAME is no zone cut: a CNAME owner holds no other data
+// (RFC 2181 section 10.1), neither the NS of a delegation nor the SOA of an
+// apex. Its CNAME is the leaf, and walkName returns its target. A CNAME
+// synthesized from a DNAME is not followed.
+func (w *chainWalk) walkName(name string, qtype uint16) ([]*ChainLink, ChainLeaf, string) {
 	ans := w.c.ask(name, qtype)
+	alias := len(ans.cname) > 0
 	zones := zoneCutsFromRoot(name) // root-first
 	// DS records live at the PARENT zone, not at qname's own zone. So
 	// for a DS leaf query, drop qname from the zone chain — the parent
@@ -180,11 +243,27 @@ func (w *chainWalk) walkName(name string, qtype uint16) ([]*ChainLink, ChainLeaf
 	// (a redundant second wire query to fetch what the leaf will get),
 	// and even on success would attempt leaf verification against the
 	// child zone's DNSKEYs — which never signed the DS.
-	if qtype == dns.TypeDS && len(zones) > 1 {
+	if (qtype == dns.TypeDS || alias) && len(zones) > 1 {
 		zones = zones[:len(zones)-1]
 	}
 	links := w.links(zones)
-	return links, w.judgeLeaf(name, qtype, ans, links)
+	if !alias {
+		return links, w.judgeLeaf(name, qtype, ans, links), ""
+	}
+	if len(links) > 0 {
+		addNote(links[len(links)-1], fmt.Sprintf("%s: owns a CNAME, not a zone cut", name))
+	}
+	if ans.dname != "" && len(ans.cnameSigs) == 0 {
+		leaf := ChainLeaf{Qname: name, Qtype: dns.TypeCNAME, Rcode: ans.rcode, Status: ChainStatusIndeterminate,
+			RRset: &core.RRset{Name: name, Class: dns.ClassINET, RRtype: dns.TypeCNAME, RRs: ans.cname},
+			Notes: []string{fmt.Sprintf("synthesized from the DNAME at %s; a DNAME is not followed", ans.dname)}}
+		if len(links) > 0 && w.insecure(links[len(links)-1]) {
+			leaf.Status = links[len(links)-1].Status
+		}
+		return links, leaf, ""
+	}
+	cname := chaseAnswer{rrs: ans.cname, sigs: ans.cnameSigs, rcode: ans.rcode}
+	return links, w.judgeLeaf(name, dns.TypeCNAME, cname, links), ans.cname[0].(*dns.CNAME).Target
 }
 
 // links decides each candidate zone, root first, and returns the zone cuts
@@ -269,6 +348,14 @@ func (w *chainWalk) decideOwn(link, above *ChainLink) *cutDecision {
 			return &cutDecision{link: link}
 		}
 		ds, dsSigs := ownedDS(resp.Answer, zone)
+		if cname, _ := ownedRRs(resp.Answer, zone, dns.TypeCNAME); len(ds) == 0 && len(cname) > 0 {
+			// A resolver that follows the CNAME for a DS question answers
+			// with it, and the target's DS: the name is no zone cut.
+			if above != nil {
+				addNote(above, fmt.Sprintf("%s: owns a CNAME, not a zone cut", zone))
+			}
+			return &cutDecision{}
+		}
 		if len(ds) == 0 {
 			return w.withoutDS(link, above, resp)
 		}
@@ -702,14 +789,44 @@ func (c *Chaser) query(name string, qtype uint16) (*dns.Msg, error) {
 	return nil, fmt.Errorf("%s", rcode)
 }
 
-// ask is query for the leaf, read by owner.
+// ask is query for the leaf, read by owner: the records of qtype name owns,
+// or else the CNAME it owns, and the DNAME above it that synthesized that.
 func (c *Chaser) ask(name string, qtype uint16) chaseAnswer {
 	resp, err := c.query(name, qtype)
 	if err != nil {
 		return chaseAnswer{err: err}
 	}
-	rrs, sigs := ownedRRs(resp.Answer, name, qtype)
-	return chaseAnswer{rrs: rrs, sigs: sigs, rcode: resp.Rcode}
+	ans := chaseAnswer{rcode: resp.Rcode}
+	ans.rrs, ans.sigs = ownedRRs(resp.Answer, name, qtype)
+	if len(ans.rrs) > 0 || qtype == dns.TypeCNAME {
+		return ans
+	}
+	ans.cname, ans.cnameSigs = ownedRRs(resp.Answer, name, dns.TypeCNAME)
+	if len(ans.cname) > 0 {
+		ans.dname = dnameSynthesizing(resp.Answer, name, ans.cname[0].(*dns.CNAME).Target)
+	}
+	return ans
+}
+
+// dnameSynthesizing returns the owner of the DNAME in rrs, above name, that
+// synthesizes a CNAME from name to target (RFC 6672 section 2.2), or "".
+func dnameSynthesizing(rrs []dns.RR, name, target string) string {
+	labels := dns.SplitDomainName(dns.Fqdn(name))
+	for _, rr := range rrs {
+		d, ok := rr.(*dns.DNAME)
+		if !ok || core.EqualNames(d.Hdr.Name, name) || !dns.IsSubDomain(d.Hdr.Name, name) {
+			continue
+		}
+		prefix := labels[:len(labels)-dns.CountLabel(d.Hdr.Name)]
+		synthesized := strings.Join(prefix, ".") + "." + dns.Fqdn(d.Target)
+		if d.Target == "." {
+			synthesized = dns.Fqdn(strings.Join(prefix, "."))
+		}
+		if core.EqualNames(target, synthesized) {
+			return d.Hdr.Name
+		}
+	}
+	return ""
 }
 
 // ownedRRs returns the records of rrtype that name owns in rrs, and the

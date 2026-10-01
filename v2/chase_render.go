@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	algorithms "github.com/johanix/tdns/v2/algorithms"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -47,22 +48,53 @@ func RenderChain(result *ChainResult, w io.Writer, algNames bool) {
 		fmt.Fprintf(w, "Trust anchor: %s\n", result.TrustAnchorSource)
 	}
 	fmt.Fprintf(w, "Chain validation for %s %s:\n\n", qname, dns.TypeToString[qtype])
+	shown := map[string]bool{}
+	hops := append(append([]ChainHop{}, result.Aliases...), ChainHop{Links: result.Links, Leaf: result.Leaf})
+	for i, hop := range hops {
+		if i > 0 {
+			fmt.Fprintf(w, "\nCNAME target %s %s:\n\n", hop.Leaf.Qname, dns.TypeToString[qtype])
+		}
+		renderHop(w, hop, shown, algNames)
+	}
+	fmt.Fprintf(w, "\nResult: %s\n", result.Status)
+}
+
+// renderHop prints the chain of one name of a CNAME chain, and its leaf.
+// Links printed for an earlier name are not repeated: the deepest of them is
+// one line, marked "(as above)", and the new links follow it.
+func renderHop(w io.Writer, hop ChainHop, shown map[string]bool, algNames bool) {
+	lastShown := -1
+	for i, link := range hop.Links {
+		if shown[core.CanonicalizeName(link.Zone)] {
+			lastShown = i
+		}
+	}
 	indent := ""
-	for _, link := range result.Links {
-		renderLink(w, link, indent, algNames)
+	for i, link := range hop.Links {
+		switch {
+		case i < lastShown:
+		case i == lastShown:
+			fmt.Fprintf(w, "%s%s    [%s]    (as above)\n\n", indent, linkLabel(link), link.Status)
+		default:
+			renderLink(w, link, indent, algNames)
+			shown[core.CanonicalizeName(link.Zone)] = true
+		}
 		indent += "  "
 	}
-	renderLeaf(w, result.Leaf, indent)
-	fmt.Fprintf(w, "\nResult: %s\n", result.Status)
+	renderLeaf(w, hop.Leaf, indent)
+}
+
+// linkLabel is how a link is named in the output.
+func linkLabel(link ChainLink) string {
+	if link.Zone == "." {
+		return ". (root)"
+	}
+	return link.Zone
 }
 
 // renderLink prints one link of the chain, its DS, DNSKEY and notes.
 func renderLink(w io.Writer, link ChainLink, indent string, algNames bool) {
-	label := link.Zone
-	if link.Zone == "." {
-		label = ". (root)"
-	}
-	fmt.Fprintf(w, "%s%s    [%s]\n", indent, label, link.Status)
+	fmt.Fprintf(w, "%s%s    [%s]\n", indent, linkLabel(link), link.Status)
 	// Show DS / DNSKEY / matched-KSK summary
 	if len(link.DS) > 0 {
 		tags := make([]string, 0, len(link.DS))

@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -624,4 +625,207 @@ func TestChaseAnswerVerdicts(t *testing.T) {
 			t.Errorf("leaf rcode %d, notes %q", res.Leaf.Rcode, res.Leaf.Notes)
 		}
 	})
+}
+
+// cnameTree is the root, example., sec.example. and other.example., all
+// signed: www.sec.example. is a CNAME to sec.example., which has an A, and
+// _443._tcp.www.sec.example. a TLSA below the CNAME owner. ext.sec.example.
+// is a CNAME to www.other.example.
+func cnameTree(t *testing.T) *chaseTree {
+	t.Helper()
+	tr := newChaseTree(t)
+	tr.zone("example.")
+	tr.zone("sec.example.").add(
+		"sec.example. 300 IN A 192.0.2.50",
+		"www.sec.example. 300 IN CNAME sec.example.",
+		"_443._tcp.www.sec.example. 300 IN TLSA 3 1 1 "+strings.Repeat("ab", 32),
+		"ext.sec.example. 300 IN CNAME www.other.example.",
+	)
+	tr.zone("other.example.").add("www.other.example. 300 IN A 192.0.2.60")
+	return tr
+}
+
+// A name that owns a CNAME is no zone cut: its CNAME is verified with the
+// keys of the zone that holds it, and its target is walked in turn (item 1
+// of #876). The result is the worst of every part.
+func TestChaseCNAME(t *testing.T) {
+	// A resolver that answers a DS question at a CNAME owner with the CNAME
+	// and the target's DS (#875, and 1.1.1.1), and one that answers SERVFAIL
+	// (tdns-imr before #875): the walk never asks.
+	for _, shape := range []string{"CNAME and the target's DS", "SERVFAIL"} {
+		t.Run("in zone, "+shape, func(t *testing.T) {
+			tr := cnameTree(t)
+			if shape == "SERVFAIL" {
+				tr.edit("www.sec.example.", dns.TypeDS, rcodeOnly(dns.RcodeServerFailure))
+			}
+			res := tr.chase("www.sec.example.", dns.TypeA)
+			if len(res.Aliases) != 1 {
+				t.Fatalf("%d aliases, want 1", len(res.Aliases))
+			}
+			alias := res.Aliases[0]
+			if alias.Leaf.Qtype != dns.TypeCNAME || alias.Leaf.Qname != "www.sec.example." {
+				t.Errorf("alias leaf %s %s", alias.Leaf.Qname, dns.TypeToString[alias.Leaf.Qtype])
+			}
+			wantStatus(t, "CNAME", alias.Leaf.Status, ChainStatusSecure)
+			if linkNamed(alias.Links, "www.sec.example.") != nil {
+				t.Errorf("the CNAME owner is a link")
+			}
+			if l := linkNamed(alias.Links, "sec.example."); !hasNote(l.Notes, "www.sec.example.: owns a CNAME, not a zone cut") {
+				t.Errorf("sec.example. notes %q", l.Notes)
+			}
+			if res.Leaf.Qname != "sec.example." || res.Leaf.RRset == nil {
+				t.Fatalf("final leaf %s, RRset %v", res.Leaf.Qname, res.Leaf.RRset)
+			}
+			wantStatus(t, "A", res.Leaf.Status, ChainStatusSecure)
+			wantStatus(t, "result", res.Status, ChainStatusSecure)
+			if tr.askedFor("www.sec.example.", dns.TypeDS) || tr.askedFor("www.sec.example.", dns.TypeSOA) {
+				t.Errorf("asked about the CNAME owner as a zone cut")
+			}
+		})
+	}
+	t.Run("to another zone", func(t *testing.T) {
+		tr := cnameTree(t)
+		res := tr.chase("ext.sec.example.", dns.TypeA)
+		if got, want := zonesOf(res.Links), []string{".", "example.", "other.example."}; !slices.Equal(got, want) {
+			t.Errorf("final links %v, want %v", got, want)
+		}
+		wantStatus(t, "result", res.Status, ChainStatusSecure)
+		// Each zone is asked about once for the whole chain.
+		n := 0
+		for _, m := range tr.asked {
+			if q := m.Question[0]; q.Qtype == dns.TypeDNSKEY && q.Name == "example." {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("example. DNSKEY asked %d times, want 1", n)
+		}
+	})
+	t.Run("CNAME without RRSIG", func(t *testing.T) {
+		tr := cnameTree(t)
+		tr.edit("www.sec.example.", dns.TypeA, stripSigs(dns.TypeCNAME))
+		res := tr.chase("www.sec.example.", dns.TypeA)
+		wantStatus(t, "CNAME", res.Aliases[0].Leaf.Status, ChainStatusBogus)
+		wantStatus(t, "result", res.Status, ChainStatusBogus)
+	})
+	t.Run("CNAME changed after signing", func(t *testing.T) {
+		tr := cnameTree(t)
+		tr.edit("www.sec.example.", dns.TypeA, changeRR(dns.TypeCNAME, func(rr dns.RR) {
+			rr.(*dns.CNAME).Target = "ext.sec.example."
+		}))
+		res := tr.chase("www.sec.example.", dns.TypeA)
+		wantStatus(t, "CNAME", res.Aliases[0].Leaf.Status, ChainStatusBogus)
+		wantStatus(t, "result", res.Status, ChainStatusBogus)
+	})
+	t.Run("loop", func(t *testing.T) {
+		tr := cnameTree(t)
+		tr.zones["sec.example."].add("a.sec.example. 300 IN CNAME b.sec.example.", "b.sec.example. 300 IN CNAME a.sec.example.")
+		res := tr.chase("a.sec.example.", dns.TypeA)
+		wantStatus(t, "result", res.Status, ChainStatusIndeterminate)
+		if !hasNote(res.Leaf.Notes, "CNAME loop") {
+			t.Errorf("final leaf %s, notes %q", res.Leaf.Qname, res.Leaf.Notes)
+		}
+	})
+	t.Run("longer than the limit", func(t *testing.T) {
+		tr := cnameTree(t)
+		z := tr.zones["sec.example."]
+		for i := 0; i <= maxCNAMEChain; i++ {
+			z.add(fmt.Sprintf("c%d.sec.example. 300 IN CNAME c%d.sec.example.", i, i+1))
+		}
+		z.add(fmt.Sprintf("c%d.sec.example. 300 IN A 192.0.2.70", maxCNAMEChain+1))
+		res := tr.chase("c0.sec.example.", dns.TypeA)
+		wantStatus(t, "result", res.Status, ChainStatusIndeterminate)
+		if !hasNote(res.Leaf.Notes, fmt.Sprintf("CNAME chain longer than %d", maxCNAMEChain)) {
+			t.Errorf("final leaf %s, notes %q", res.Leaf.Qname, res.Leaf.Notes)
+		}
+
+		// One CNAME fewer is followed to the end.
+		res = tr.chase("c1.sec.example.", dns.TypeA)
+		wantStatus(t, "result, one fewer", res.Status, ChainStatusSecure)
+	})
+	t.Run("a CNAME query", func(t *testing.T) {
+		tr := cnameTree(t)
+		res := tr.chase("www.sec.example.", dns.TypeCNAME)
+		if len(res.Aliases) != 0 || res.Leaf.RRset == nil {
+			t.Fatalf("%d aliases, leaf RRset %v", len(res.Aliases), res.Leaf.RRset)
+		}
+		wantStatus(t, "result", res.Status, ChainStatusSecure)
+	})
+}
+
+// A name below a CNAME owner (a TLSA at _443._tcp under it, as DANE has it):
+// the DS question at the CNAME owner is answered with the CNAME by a resolver
+// that follows it, which shows the owner is no zone cut; one that answers
+// SERVFAIL leaves the walk a failed query, which it reports.
+func TestChaseBelowACNAMEOwner(t *testing.T) {
+	const name = "_443._tcp.www.sec.example."
+	t.Run("CNAME and the target's DS", func(t *testing.T) {
+		tr := cnameTree(t)
+		res := tr.chase(name, dns.TypeTLSA)
+		if linkNamed(res.Links, "www.sec.example.") != nil {
+			t.Errorf("the CNAME owner is a link")
+		}
+		if l := linkNamed(res.Links, "sec.example."); !hasNote(l.Notes, "www.sec.example.: owns a CNAME, not a zone cut") {
+			t.Errorf("sec.example. notes %q", l.Notes)
+		}
+		wantStatus(t, "result", res.Status, ChainStatusSecure)
+	})
+	t.Run("SERVFAIL", func(t *testing.T) {
+		tr := cnameTree(t)
+		tr.edit("www.sec.example.", dns.TypeDS, rcodeOnly(dns.RcodeServerFailure))
+		res := tr.chase(name, dns.TypeTLSA)
+		l := linkNamed(res.Links, "www.sec.example.")
+		if l == nil || !hasNote(l.Notes, "DS query failed: SERVFAIL") {
+			t.Fatalf("www.sec.example. link %+v", l)
+		}
+		wantStatus(t, "result", res.Status, ChainStatusIndeterminate)
+	})
+}
+
+// An answer synthesized from a DNAME is reported, not followed.
+func TestChaseDNAMEIsNotFollowed(t *testing.T) {
+	tr := cnameTree(t)
+	z := tr.zones["sec.example."]
+	z.add("d.sec.example. 300 IN DNAME other.example.")
+	tr.script("www.d.sec.example.", dns.TypeA, func() *dns.Msg {
+		answer := z.sign(z.get("d.sec.example.", dns.TypeDNAME))
+		answer = append(answer, mustRR(t, "www.d.sec.example. 300 IN CNAME www.other.example."))
+		return &dns.Msg{Answer: answer}
+	})
+	res := tr.chase("www.d.sec.example.", dns.TypeA)
+	if len(res.Aliases) != 0 || res.Leaf.Qtype != dns.TypeCNAME {
+		t.Fatalf("%d aliases, final leaf %s %s", len(res.Aliases), res.Leaf.Qname, dns.TypeToString[res.Leaf.Qtype])
+	}
+	wantStatus(t, "leaf", res.Leaf.Status, ChainStatusIndeterminate)
+	if !hasNote(res.Leaf.Notes, "synthesized from the DNAME at d.sec.example.; a DNAME is not followed") {
+		t.Errorf("leaf notes %q", res.Leaf.Notes)
+	}
+	if tr.askedFor("www.other.example.", dns.TypeA) {
+		t.Errorf("the DNAME's target was followed")
+	}
+}
+
+// The output of a CNAME chain: a section per target, and links already
+// printed are not repeated.
+func TestRenderChainCNAME(t *testing.T) {
+	tr := cnameTree(t)
+	res := tr.chase("www.sec.example.", dns.TypeA)
+	var out strings.Builder
+	RenderChain(res, &out, false)
+	text := out.String()
+	for _, want := range []string{
+		"Chain validation for www.sec.example. A:",
+		"www.sec.example. CNAME    [secure]",
+		"\nCNAME target sec.example. A:\n",
+		"sec.example.    [secure]    (as above)",
+		"sec.example. A    [secure]",
+		"Result: secure",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("output lacks %q:\n%s", want, text)
+		}
+	}
+	if n := strings.Count(text, ". (root)"); n != 1 {
+		t.Errorf("the root printed %d times, want 1:\n%s", n, text)
+	}
 }
