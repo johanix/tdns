@@ -12,6 +12,13 @@ import (
 
 const DefaultPublishCadence = 5 * time.Second
 
+// defaultPublishCadence is what publishCadenceForZone returns for a zone with
+// no cadence of its own. A variable so that the package's tests, which apply a
+// change and read the zone back as if every publish were synchronous, can set
+// it to zero in TestMain: a zone with a zero cadence is never busy, so the gate
+// publishes in the caller. The gate's own tests set a cadence on their zones.
+var defaultPublishCadence = DefaultPublishCadence
+
 // zoneSnapshot is the immutable reader-facing view of a zone at one serial
 // boundary. Published snapshots are never mutated in place. The type is
 // unexported so callers cannot mutate served data without going through publish.
@@ -332,7 +339,7 @@ func copyIxfrChain(chain []Ixfr) []Ixfr {
 
 func publishCadenceForZone(zd *ZoneData) time.Duration {
 	if zd == nil || zd.publishCadence == 0 {
-		return DefaultPublishCadence
+		return defaultPublishCadence
 	}
 	return zd.publishCadence
 }

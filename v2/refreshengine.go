@@ -88,6 +88,13 @@ func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 		lgEngine.Info("zone refresh cancelled", "zone", zone)
 		return false
 	}
+	if refreshDeferred(err) {
+		// Not a failure of the zone: a local writer holds it, for its limit at
+		// most, or a change of its own waits for the pass that can publish
+		// it. The next attempt comes soon (nextRefreshAfterFailure).
+		lgEngine.Info("zone refresh deferred", "zone", zone, "reason", err)
+		return false
+	}
 	lgEngine.Error(msg, "zone", zone, "error", err)
 	zd.SetError(RefreshError, "refresh error: %v", err)
 	zd.LatestError = time.Now()
@@ -1315,7 +1322,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 				// can least afford it: skipped while in flight, then made to
 				// wait a full interval again.
 				if out.Err != nil {
-					rc.CurRefresh = refreshCounterRetry(rc)
+					rc.CurRefresh = nextRefreshAfterFailure(rc, out.Err)
 				} else {
 					rc.CurRefresh = rc.SOARefresh
 				}
@@ -1399,6 +1406,20 @@ func jitteredFirstRefresh(refresh uint32) uint32 {
 // interval when there is no retry value -- a counter created before this field
 // existed, or one whose zone had no readable SOA. Falling back to REFRESH keeps
 // the old behaviour rather than retrying immediately in a tight loop.
+// refreshHeldRetrySeconds is how soon a refresh refused by an open
+// transaction is tried again: well inside the hold's limit, where the SOA
+// retry would be minutes.
+var refreshHeldRetrySeconds uint32 = 5
+
+// nextRefreshAfterFailure is when the next attempt comes after a refresh
+// that failed: the SOA retry, or soon after a hold refused it.
+func nextRefreshAfterFailure(rc *RefreshCounter, err error) uint32 {
+	if refreshDeferred(err) {
+		return refreshHeldRetrySeconds
+	}
+	return refreshCounterRetry(rc)
+}
+
 func refreshCounterRetry(rc *RefreshCounter) uint32 {
 	if rc.SOARetry > 0 {
 		return rc.SOARetry

@@ -331,6 +331,35 @@ func TestChaseLinkIsNoBetterThanItsParent(t *testing.T) {
 			t.Errorf("asked for the DS of a zone with its own trust anchor")
 		}
 	})
+	// The anchor is found whatever the case of its owner name: given to
+	// NewChaser, or put in Chaser.TrustAnchors by the caller.
+	for _, c := range []struct {
+		name  string
+		chase func(tr *chaseTree, ds *dns.DS) (*ChainResult, error)
+	}{
+		{"own trust anchor in another case, NewChaser", func(tr *chaseTree, ds *dns.DS) (*ChainResult, error) {
+			ds.Hdr.Name = "SEC.Example."
+			return NewChaser(tr, "192.0.2.1", append(tr.anchors(), ds)).Chase("www.sec.example.", dns.TypeA)
+		}},
+		{"own trust anchor in another case, TrustAnchors", func(tr *chaseTree, ds *dns.DS) (*ChainResult, error) {
+			c := NewChaser(tr, "192.0.2.1", tr.anchors())
+			c.TrustAnchors["SEC.EXAMPLE."] = []*dns.DS{ds}
+			return c.Chase("www.sec.example.", dns.TypeA)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tr := secureTree(t)
+			tr.edit("example.", dns.TypeDNSKEY, stripSigs(dns.TypeDNSKEY))
+			res, err := c.chase(tr, tr.zones["sec.example."].key.dnskey.ToDS(dns.SHA256))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantStatus(t, "sec.example.", linkNamed(res.Links, "sec.example.").Status, ChainStatusSecure)
+			if tr.askedFor("sec.example.", dns.TypeDS) {
+				t.Errorf("asked for the DS of a zone with its own trust anchor")
+			}
+		})
+	}
 }
 
 // setDS replaces the DS records the parent of child holds for it.

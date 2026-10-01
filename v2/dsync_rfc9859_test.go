@@ -4,7 +4,6 @@
 package tdns
 
 import (
-	"bytes"
 	"context"
 	"log/slog"
 	"net"
@@ -160,7 +159,7 @@ _dsync.root. 7200 IN DSYNC ANY UPDATE 5302 updates.root.
 // without one is not.
 func TestTheRootWarnsAboutALeftoverDsyncRoot(t *testing.T) {
 	allSchemesChildSync(t)
-	var buf bytes.Buffer
+	var buf syncBuffer // the updater goroutine logs after it has answered; the read must not race its last line
 	prev := lg
 	lg = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	t.Cleanup(func() { lg = prev })

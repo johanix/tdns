@@ -308,6 +308,19 @@ type ZoneData struct {
 	// tx is the zone's transactions: the publish hold, and what a zone created
 	// held remembers about its first content. See zone_tx.go. Guarded by mu.
 	tx zoneTxState
+	// waiters are the Resp channels of the changes staged on this zone and
+	// not yet published: updates whose publish the gate deferred or a hold
+	// stopped, and commits waiting for their transaction (zone_tx.go).
+	// Answered by the publish that carries them, with the journal's error if
+	// it refused, or by whatever drops the working set.
+	waiters []chan ZoneUpdateResult
+	// afterPublish is what the updater does after an update once its publish
+	// has happened (the API-managed zone's file, the delegation sync), for an
+	// update whose publish the gate deferred. The publish that carries the
+	// change moves them to afterPublishReady; the publisher's goroutine runs
+	// those outside zd.mu. A publish that refuses drops them with the change.
+	afterPublish      []func()
+	afterPublishReady []func()
 	// ixfrDerived marks a transfer scratch zone whose contents were produced by
 	// applying an inbound difference sequence to the copy we already served,
 	// rather than by receiving a whole zone. Set on the scratch zone by the
@@ -465,6 +478,7 @@ type ZoneData struct {
 	publisherOnce   sync.Once
 	publishStop     chan struct{}
 	publishStopOnce sync.Once
+	publishDone     chan struct{} // closed when runPublisher returns
 	// RemoteDNSKEYs holds DNSKEY RRs from other signers (multi-signer mode 4).
 	// These are DNSKEYs found in the incoming zone that do not match keys in our
 	// local keystore. They are preserved across resignings and merged into the

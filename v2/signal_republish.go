@@ -345,6 +345,7 @@ func (target *ZoneData) publishSignalRRs(ctx context.Context, owner string, rrty
 	case <-ctx.Done():
 		return fmt.Errorf("cancelled while queueing the signal update for %s: %w", owner, ctx.Err())
 	}
+	bound := max(signalPublishApplyTimeout, twiceCadence(target.ZoneName))
 	select {
 	case res := <-respch:
 		if res.Err != nil {
@@ -353,8 +354,9 @@ func (target *ZoneData) publishSignalRRs(ctx context.Context, owner string, rrty
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("cancelled while the signal update for %s was being applied: %w", owner, ctx.Err())
-	case <-time.After(signalPublishApplyTimeout):
-		return fmt.Errorf("timed out after %s waiting for the signal update for %s to be applied", signalPublishApplyTimeout, owner)
+	case <-time.After(bound):
+		return fmt.Errorf("timed out after %s waiting for the signal update for %s to be applied",
+			bound, owner)
 	}
 }
 
