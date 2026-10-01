@@ -380,12 +380,12 @@ func DsyncApiPostDelegation() func(w http.ResponseWriter, r *http.Request) {
 			lgDsyncApi.Warn("DSYNC API client went away mid-apply; the update is NOT cancelled",
 				"zone", zd.ZoneName, "child", child)
 			return
-		case <-time.After(UpdateApplyTimeout):
+		case <-time.After(updateWaitBound(zd.ZoneName)):
 			lgDsyncApi.Error("DSYNC API update timed out while being applied",
-				"zone", zd.ZoneName, "child", child, "timeout", UpdateApplyTimeout)
+				"zone", zd.ZoneName, "child", child, "timeout", updateWaitBound(zd.ZoneName))
 			dsyncApiError(w, http.StatusServiceUnavailable,
 				"timed out after %s waiting for the update to be applied;"+
-					" it may or may not have taken effect", UpdateApplyTimeout)
+					" it may or may not have taken effect", updateWaitBound(zd.ZoneName))
 			return
 		}
 

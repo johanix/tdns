@@ -556,7 +556,7 @@ func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req
 			m.SetRcode(m, finalRcode)
 		}
 
-	case <-time.After(UpdateApplyTimeout):
+	case <-time.After(updateWaitBound(req.ZoneName)):
 		// The updater is a single goroutine serving every zone, so a slow or
 		// wedged apply shows up here. Do NOT answer NOERROR on a timeout: the
 		// update may yet be applied, but we no longer know, and the whole point
@@ -564,7 +564,7 @@ func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req
 		// an RFC 2136 update is idempotent, so a retry that arrives after a
 		// late apply is harmless.
 		lgHandler.Error("timed out waiting for the update to be applied; answering SERVFAIL",
-			"zone", req.ZoneName, "timeout", UpdateApplyTimeout)
+			"zone", req.ZoneName, "timeout", updateWaitBound(req.ZoneName))
 		m.SetRcode(m, dns.RcodeServerFailure)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdateApplyTimeout)
 	}
@@ -632,9 +632,9 @@ func dnsZoneUpdateSubmitter(updateq chan UpdateRequest) zoneUpdateSubmitter {
 			return res, nil
 		case <-ctx.Done():
 			return ZoneUpdateResult{}, fmt.Errorf("stopped waiting for the update to %s: %w", ur.ZoneName, ctx.Err())
-		case <-time.After(UpdateApplyTimeout):
+		case <-time.After(updateWaitBound(ur.ZoneName)):
 			return ZoneUpdateResult{}, fmt.Errorf("timed out after %s waiting for the update to %s to be applied;"+
-				" it may or may not have taken effect", UpdateApplyTimeout, ur.ZoneName)
+				" it may or may not have taken effect", updateWaitBound(ur.ZoneName), ur.ZoneName)
 		}
 	}
 }
@@ -644,6 +644,23 @@ func dnsZoneUpdateSubmitter(updateq chan UpdateRequest) zoneUpdateSubmitter {
 // answering SERVFAIL. Generous: the wait covers a database write and, on a
 // signed zone, re-signing the affected RRsets.
 const UpdateApplyTimeout = 10 * time.Second
+
+// twiceCadence is twice the zone's publish cadence, the longest a change can
+// wait for the gate's publish plus one cadence of margin; zero for a zone
+// that is not registered.
+func twiceCadence(zone string) time.Duration {
+	if zd, ok := Zones.Get(zone); ok && zd != nil {
+		return 2 * publishCadenceForZone(zd)
+	}
+	return 0
+}
+
+// updateWaitBound is how long a sender waits for its change to be applied,
+// persisted and published: the larger of UpdateApplyTimeout and twice the
+// zone's cadence. A wait equal to the cadence loses the race with the gate.
+func updateWaitBound(zone string) time.Duration {
+	return max(UpdateApplyTimeout, twiceCadence(zone))
+}
 
 // Returns approved, updatezone, error
 func (zd *ZoneData) ApproveUpdate(zone string, us *UpdateStatus, r *dns.Msg) (bool, bool, error) {

@@ -98,14 +98,25 @@ func TestTheMarkersTravelTheUpdateQueue(t *testing.T) {
 		t.Error("a second TX-BEGIN with an id that is already open was accepted")
 	}
 
+	// The updates' own Resps are answered by the commit's publish (step 3):
+	// nothing arrives while the zone is held.
+	var resps []chan ZoneUpdateResult
 	for i := 0; i < 3; i++ {
 		ur := txtUpdate(t, zd, fmt.Sprintf("r%d.%s", i, zone), "queued")
-		if res := sendTx(t, kdb, ur, true); res.Err != nil {
-			t.Fatalf("update %d: %v", i, res.Err)
-		}
+		ur.Resp = make(chan ZoneUpdateResult, 1)
+		resps = append(resps, ur.Resp)
+		sendTx(t, kdb, ur, false)
 	}
+	waitFor(t, 5*time.Second, "the three updates to be staged under the hold", func() bool {
+		return zd.txStoppedPublishes() >= 3
+	})
 	if readPublishState(zd).snap != before.snap {
 		t.Fatal("a queued update published a held zone")
+	}
+	for i, resp := range resps {
+		if r, early := answeredWithin(resp, 50*time.Millisecond); early {
+			t.Fatalf("update %d was answered (applied=%v err=%v) while the zone was held", i, r.Applied, r.Err)
+		}
 	}
 
 	if res := sendTx(t, kdb, UpdateRequest{Cmd: UpdateCmdTxCommit, ZoneName: zone, TxID: "no-such-writer"}, true); res.Err == nil {
@@ -123,6 +134,9 @@ func TestTheMarkersTravelTheUpdateQueue(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		if owner := fmt.Sprintf("r%d.%s", i, zone); !served(zd, owner, dns.TypeTXT) {
 			t.Errorf("%s is not served when the commit's Resp arrives", owner)
+		}
+		if r, ok := answeredWithin(resps[i], 2*time.Second); !ok || r.Err != nil || !r.Applied {
+			t.Errorf("update %d's Resp after the commit: answered=%v applied=%v err=%v", i, ok, r.Applied, r.Err)
 		}
 	}
 	after := readPublishState(zd)

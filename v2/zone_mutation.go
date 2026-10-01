@@ -34,8 +34,9 @@ func (zd *ZoneData) ensureWorkingSet() {
 // holds zd.mu.
 //
 // A replacement stays staged when its publish was refused
-// (refuseUnsignableWorkingSetLocked, refuseUnrepairableChainLocked) or stopped
-// by an open transaction. An update applied on top of it would be journalled
+// (refuseUnsignableWorkingSetLocked, refuseUnrepairableChainLocked); a refresh
+// that meets an open transaction is refused instead (ErrRefreshHeld), but a
+// transaction can open after a refusal. An update applied on top of it would be journalled
 // together with it, because the journal records the difference from the
 // published snapshot (#748). So the replacement is published first,
 // unjournalled, as the publisher's retry publishes it: at a new serial. If it
@@ -249,6 +250,33 @@ func (zd *ZoneData) workingOwnerNamesLocked() []string {
 	return names
 }
 
+// publishOrQueueLocked is the gate's entry for a writer that has staged a
+// change (docs/2026-09-17-publish-gate-and-transactions.md). It reports
+// whether the publish ran here, in the caller:
+//
+//   - a held zone: the publish is stopped inside (step 1's hold), and the
+//     commit that closes the hold carries the change;
+//   - now, a zone that is not Ready, or an idle zone (no publish within the
+//     cadence): the publish runs here, under the zd.mu the caller holds,
+//     exactly as every publish did before the gate;
+//   - otherwise the change stays staged, marked queued, and runPublisher
+//     publishes it at lastPublish + cadence with everything staged by then.
+//
+// A caller whose publish did not run here hands its Resp to zd.waiters, and
+// what it would do after a publish to zd.afterPublish. Caller holds zd.mu.
+func (zd *ZoneData) publishOrQueueLocked(gen uint64, now bool) bool {
+	if zd.txHeldLocked() {
+		zd.publishLocked(gen)
+		return false
+	}
+	if now || !zd.Ready || zd.lastPublish.IsZero() || time.Since(zd.lastPublish) >= publishCadenceForZone(zd) {
+		zd.publishLocked(gen)
+		return true
+	}
+	zd.requestPublishLocked()
+	return false
+}
+
 func (zd *ZoneData) requestPublish(urgent bool) {
 	if urgent {
 		_, _ = zd.publishSync()
@@ -406,13 +434,13 @@ func (zd *ZoneData) publishLocked(gen uint64) {
 // false the caller has already set zd.CurrentSerial (refresh flips, transport
 // signal synthesis without a content serial change).
 func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
-	// Commits waiting to learn that their transaction is published (zone_tx.go)
-	// are answered by this publish, however it ends: every refusal below
-	// returns through here. No waiters, which is every zone that opens no
-	// transaction, and nothing is deferred.
-	if len(zd.tx.commitWaiters) > 0 {
+	// The changes waiting to be published (updates the gate deferred, commits
+	// waiting for their transaction: zone_tx.go) are answered by this publish,
+	// however it ends: every refusal below returns through here. Nothing
+	// waiting, and nothing is deferred.
+	if len(zd.waiters) > 0 || len(zd.afterPublish) > 0 {
 		before, errBefore := zd.snapshot.Load(), zd.ErrorMsg
-		defer func() { zd.txPublishDoneLocked(before, errBefore) }()
+		defer func() { zd.publishDoneLocked(before, errBefore) }()
 	}
 	if zd.workingSet == nil {
 		zd.publishQueued = false
@@ -857,8 +885,49 @@ func (zd *ZoneData) snapshotContentIsServableLocked(snap *zoneSnapshot) bool {
 // than transferred from an upstream. It governs the serial floor in the default
 // branch below and nothing else, because only a file-backed zone anchors its
 // delta journal to the content it has just loaded.
+// ErrRefreshHeld: the zone has an open transaction, so the refresh was
+// refused before it touched anything, and is to be tried again shortly
+// (publish gate, step 3). A hold on a published zone ends within its limit,
+// so the refresh is late by that much at most; a zone that has never
+// published has nothing to refresh. Waiting would tie an inbound transfer to
+// a local writer's hold; replacing would discard what the transaction staged
+// (tdns #749).
+var ErrRefreshHeld = errors.New("the zone has an open transaction; the refresh is refused and retried")
+
+// ErrRefreshStaged: the zone holds a change of its own that its publish refused
+// and kept staged for a later pass (one it cannot sign yet, or whose NSEC
+// chain it cannot repair), so the refresh was refused rather than let the
+// replacement take that change. The refresh engine tries again shortly.
+var ErrRefreshStaged = errors.New("the zone has a staged change it could not publish; the refresh is refused and retried")
+
+// refreshDeferred reports whether err is one of the two refusals that are not
+// a failure of the zone and are retried shortly.
+func refreshDeferred(err error) bool {
+	return errors.Is(err, ErrRefreshHeld) || errors.Is(err, ErrRefreshStaged)
+}
+
 func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset,
 	firstLoad, fromZoneFile bool) error {
+	// Under a hold the refresh is refused before it touches anything: the
+	// commit that closes the hold carries what the transaction staged, and
+	// the refresh engine tries again shortly (ErrRefreshHeld).
+	if zd.txHeldLocked() {
+		return fmt.Errorf("zone %s: %w", zd.ZoneName, ErrRefreshHeld)
+	}
+	// A local change staged and waiting for the gate is published first, so
+	// it is served and journalled and its waiters answered, before the
+	// replacement takes the working set it was staged in. A replacement that
+	// is itself still staged (refused at signing) is simply replaced. A local
+	// change the publish refused and kept staged (unsignable yet, chain not
+	// repairable) is not taken either: the refresh is refused and retried
+	// shortly, and the change waits for the pass that can publish it. Not at
+	// first load, where the transfer is the zone's first content.
+	if zd.workingSet != nil && !zd.wsFromReplacement {
+		zd.publishLocked(zd.generation.Load())
+		if !firstLoad && zd.workingSet != nil && !zd.wsFromReplacement {
+			return fmt.Errorf("zone %s: %w", zd.ZoneName, ErrRefreshStaged)
+		}
+	}
 	// The highest serial this zone has published, which a first load must
 	// land past (#655), read before this function changes anything: a read
 	// that fails must leave the zone exactly as it was, IncomingSerial
@@ -1428,6 +1497,7 @@ func (zd *ZoneData) startPublisher() {
 	zd.publisherOnce.Do(func() {
 		zd.publishWake = make(chan struct{}, 1)
 		zd.publishStop = make(chan struct{})
+		zd.publishDone = make(chan struct{})
 		go zd.runPublisher()
 	})
 }
@@ -1460,7 +1530,20 @@ func (zd *ZoneData) wakePublisher() {
 	}
 }
 
+// joinPublisher waits for the publisher goroutine to have returned after
+// stopPublisher, so that nothing it was running, an after-publish action
+// included, outlives the caller. Not from the publisher itself.
+func (zd *ZoneData) joinPublisher() {
+	zd.mu.Lock()
+	done := zd.publishDone
+	zd.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
 func (zd *ZoneData) runPublisher() {
+	defer close(zd.publishDone)
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	for {
@@ -1482,7 +1565,9 @@ func (zd *ZoneData) runPublisher() {
 		for {
 			zd.mu.Lock()
 			if !zd.publishQueued {
+				acts := zd.takeAfterPublishReadyLocked()
 				zd.mu.Unlock()
+				runAfterPublish(acts)
 				break
 			}
 			urgent := zd.publishUrgent
@@ -1491,15 +1576,37 @@ func (zd *ZoneData) runPublisher() {
 			if urgent || zd.lastPublish.IsZero() || since >= cadence {
 				gen := zd.generation.Load()
 				zd.publishLocked(gen)
+				// The waiters were answered inside, with the journal's error
+				// if it refused; left behind, the next update's applier would
+				// read that error as its own.
+				zd.wsPersistErr = nil
+				acts := zd.takeAfterPublishReadyLocked()
 				zd.mu.Unlock()
+				runAfterPublish(acts)
 				continue
 			}
 			wait := cadence - since
+			acts := zd.takeAfterPublishReadyLocked()
 			zd.mu.Unlock()
+			runAfterPublish(acts)
 			timer = time.NewTimer(wait)
 			timerC = timer.C
 			break
 		}
+	}
+}
+
+// takeAfterPublishReadyLocked hands over what a publish has made runnable.
+// Caller holds zd.mu, and runs them after releasing it.
+func (zd *ZoneData) takeAfterPublishReadyLocked() []func() {
+	acts := zd.afterPublishReady
+	zd.afterPublishReady = nil
+	return acts
+}
+
+func runAfterPublish(acts []func()) {
+	for _, f := range acts {
+		f()
 	}
 }
 

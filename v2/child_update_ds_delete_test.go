@@ -11,7 +11,6 @@
 package tdns
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -268,7 +267,7 @@ func TestChildUpdateDeleteOfAbsentRecordAnswersNXRRSET(t *testing.T) {
 	zd, kdb := dsdParentZone(t)
 	zd.Notify = []PeerConf{{Addr: aDownstream}}
 
-	var logbuf bytes.Buffer
+	var logbuf syncBuffer // the updater goroutine logs after it has answered; the read must not race its last line
 	prev := lg
 	lg = slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	t.Cleanup(func() { lg = prev })

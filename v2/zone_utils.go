@@ -1202,7 +1202,15 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 	firstLoad := zd.FirstZoneLoad
 	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad, false); err != nil {
 		zd.mu.Unlock()
-		lg.Error("could not apply the refreshed zone; nothing was published", "zone", zd.ZoneName, "err", err)
+		// Nothing was published: the zone serves what it did before, so its
+		// status goes back too (a refresh refused by an open transaction is
+		// not an error of the zone, and is retried shortly).
+		zd.SetStatus(prevStatus)
+		if refreshDeferred(err) {
+			lg.Info("the refreshed zone was not applied; retrying shortly", "zone", zd.ZoneName, "reason", err)
+		} else {
+			lg.Error("could not apply the refreshed zone; nothing was published", "zone", zd.ZoneName, "err", err)
+		}
 		return false, err
 	}
 	if firstLoad {

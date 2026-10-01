@@ -54,6 +54,13 @@ const (
 // transaction begins and kept with it, so the limit's timer never reads it.
 var txHoldLimit = 30 * time.Second
 
+// txHoldAgeCap bounds the hold itself, from its first begin: the limit is per
+// transaction, and a writer that opens its next transaction before the last
+// is released would otherwise hold a published zone without end. Internal
+// writers only, so a bug and not an attack; the cap turns it into a WARN and
+// a release. A zone that has never published fails closed, as at the limit.
+var txHoldAgeCap = 2 * txHoldLimit
+
 // zoneTx is one open transaction.
 type zoneTx struct {
 	start time.Time
@@ -68,18 +75,18 @@ type zoneTxState struct {
 	// open is the hold: the zone is held while it is not empty.
 	open map[TxID]*zoneTx
 	seq  uint64
+	// holdStart is when the current hold opened: the begin that found no
+	// transaction open. Zero while nothing is held. capReported: the cap ran
+	// out on a zone that has never published; such a hold is not released,
+	// and it is reported once.
+	holdStart   time.Time
+	capReported bool
 	// urgent: some transaction of the current hold carried TxUrgent.
 	urgent bool
 	// stopped counts the publishes holds have stopped on this zone. Nothing
 	// has to remember that one was wanted: the commit that closes the hold
 	// publishes whatever is staged.
 	stopped uint64
-	// commitWaiters are the commits waiting to learn that their transaction is
-	// published: those that left other transactions open, and the one that
-	// closed the hold and had to ask the gate. Answered by the publish that
-	// carries them, or by the refusal that does not. The seed of the design's
-	// "waiters on the zone"; in this step it holds commits only.
-	commitWaiters []chan ZoneUpdateResult
 	// timer is the hold's limit, one per zone, armed for the open transaction
 	// whose limit runs out first. timerGen tells a callback that was already
 	// on its way when the timer was stopped that it is stale.
@@ -164,6 +171,9 @@ func (zd *ZoneData) beginTxLocked(id TxID, flags TxFlags) error {
 	if zd.tx.open == nil {
 		zd.tx.open = map[TxID]*zoneTx{}
 	}
+	if len(zd.tx.open) == 0 {
+		zd.tx.holdStart = time.Now()
+	}
 	zd.tx.open[id] = &zoneTx{start: time.Now(), limit: txHoldLimit}
 	if flags&TxUrgent != 0 {
 		zd.tx.urgent = true
@@ -213,7 +223,7 @@ func (zd *ZoneData) commitTxLocked(id TxID, resp chan ZoneUpdateResult) error {
 		return fmt.Errorf("zone %s: no open transaction %q", zd.ZoneName, id)
 	}
 	if resp != nil {
-		zd.tx.commitWaiters = append(zd.tx.commitWaiters, resp)
+		zd.waiters = append(zd.waiters, resp)
 	}
 	if zd.txHeldLocked() {
 		// Several may be open on one zone, and it publishes when the last one
@@ -239,13 +249,15 @@ func (zd *ZoneData) txHoldClosedLocked(by string, committed bool) {
 	zd.txStopTimerLocked()
 	urgent := zd.tx.urgent
 	zd.tx.urgent = false
+	zd.tx.holdStart = time.Time{}
+	zd.tx.capReported = false
 
 	neverPublished := zd.snapshot.Load() == nil
 	if zd.workingSet == nil {
 		if !neverPublished {
 			// An empty hold on a published zone: nothing was staged, so there
 			// is nothing to publish and no serial to spend on it.
-			zd.txAnswerCommitWaitersLocked(ZoneUpdateResult{Applied: true})
+			zd.answerWaitersLocked(ZoneUpdateResult{Applied: true})
 			return
 		}
 		// A first content nobody added to is still a first content: the zone
@@ -299,37 +311,54 @@ func (zd *ZoneData) txStopPublishLocked() bool {
 	return true
 }
 
-// txPublishDoneLocked answers the waiting commits after a publish attempt.
-// before is the snapshot the attempt started from, and errBefore the zone's
-// reported error at that point: an error the zone had already says nothing
-// about this publish. A publish that a hold stopped answers nobody: those
-// transactions are not published yet, and the commit that closes the new hold
-// will carry them. Caller holds zd.mu.
-func (zd *ZoneData) txPublishDoneLocked(before *zoneSnapshot, errBefore string) {
-	if len(zd.tx.commitWaiters) == 0 || zd.txHeldLocked() {
+// publishDoneLocked answers the zone's waiters after a publish attempt, and
+// settles what was to follow the publish. before is the snapshot the attempt
+// started from, and errBefore the zone's reported error at that point: an
+// error the zone had already says nothing about this publish. A publish that
+// a hold stopped settles nothing: those changes are not published yet, and
+// the commit that closes the hold will carry them. Caller holds zd.mu.
+func (zd *ZoneData) publishDoneLocked(before *zoneSnapshot, errBefore string) {
+	if zd.txHeldLocked() {
+		return
+	}
+	if zd.snapshot.Load() != before {
+		zd.answerWaitersLocked(ZoneUpdateResult{Applied: true})
+		// What follows the publish runs in the publisher's goroutine, outside
+		// zd.mu, whoever's publish this was.
+		if len(zd.afterPublish) > 0 {
+			zd.afterPublishReady = append(zd.afterPublishReady, zd.afterPublish...)
+			zd.afterPublish = nil
+			zd.startPublisher()
+			zd.wakePublisher()
+		}
+		return
+	}
+	// Refused: the change is gone, and so is what was to follow it.
+	zd.afterPublish = nil
+	if len(zd.waiters) == 0 {
 		return
 	}
 	res := ZoneUpdateResult{}
 	switch {
-	case zd.snapshot.Load() != before:
-		res.Applied = true
 	case zd.wsPersistErr != nil:
 		// Read, not cleared: the applier whose publish this may have been
 		// reads it too.
-		res.Err = fmt.Errorf("zone %s: the transaction was not published: could not persist the change: %w",
+		res.Err = fmt.Errorf("zone %s: the change was not published: could not persist it: %w",
 			zd.ZoneName, zd.wsPersistErr)
 	case zd.tx.firstErr != nil:
 		res.Err = zd.tx.firstErr
 	case zd.ErrorMsg != "" && zd.ErrorMsg != errBefore:
-		res.Err = fmt.Errorf("zone %s: the transaction was not published: %s", zd.ZoneName, zd.ErrorMsg)
+		res.Err = fmt.Errorf("zone %s: the change was not published: %s", zd.ZoneName, zd.ErrorMsg)
 	default:
-		res.Err = fmt.Errorf("zone %s: the transaction was not published: the publish was refused", zd.ZoneName)
+		res.Err = fmt.Errorf("zone %s: the change was not published: the publish was refused", zd.ZoneName)
 	}
-	zd.txAnswerCommitWaitersLocked(res)
+	zd.answerWaitersLocked(res)
 }
 
-func (zd *ZoneData) txAnswerCommitWaitersLocked(res ZoneUpdateResult) {
-	for _, ch := range zd.tx.commitWaiters {
+// answerWaitersLocked sends res to every waiter and forgets them. Caller
+// holds zd.mu.
+func (zd *ZoneData) answerWaitersLocked(res ZoneUpdateResult) {
+	for _, ch := range zd.waiters {
 		// Non-blocking, like UpdateRequest.respond: a waiter that gave up must
 		// never hold up a publish.
 		select {
@@ -337,7 +366,7 @@ func (zd *ZoneData) txAnswerCommitWaitersLocked(res ZoneUpdateResult) {
 		default:
 		}
 	}
-	zd.tx.commitWaiters = nil
+	zd.waiters = nil
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +457,11 @@ func (zd *ZoneData) txArmTimerLocked() {
 			next = due
 		}
 	}
+	if !zd.tx.holdStart.IsZero() && !zd.tx.capReported {
+		if due := zd.tx.holdStart.Add(txHoldAgeCap); next.IsZero() || due.Before(next) {
+			next = due
+		}
+	}
 	if next.IsZero() {
 		return
 	}
@@ -462,6 +496,36 @@ func (zd *ZoneData) txLimitReached(gen uint64) {
 	now := time.Now()
 	neverPublished := zd.snapshot.Load() == nil
 	released := ""
+	// The hold's age, before the transactions' own limits: every open
+	// transaction goes with it.
+	if !zd.tx.holdStart.IsZero() && !zd.tx.capReported && now.Sub(zd.tx.holdStart) >= txHoldAgeCap {
+		ids := make([]string, 0, len(zd.tx.open))
+		for id := range zd.tx.open {
+			ids = append(ids, string(id))
+		}
+		if neverPublished {
+			zd.tx.capReported = true
+			for _, tx := range zd.tx.open {
+				tx.overdue = true
+			}
+			lg.Error("the hold on a zone that has never published is past its age cap and no commit has closed it;"+
+				" the zone stays unpublished (SERVFAIL) until one does",
+				"zone", zd.ZoneName, "open", ids, "cap", txHoldAgeCap)
+			zd.setErrorLocked(FirstPublishError,
+				"first content not published: the zone has been held for more than %v without a commit closing the hold (open: %v)",
+				txHoldAgeCap, ids)
+			zd.txArmTimerLocked()
+			return
+		}
+		lg.Warn("the hold is past its age cap and no commit has closed it;"+
+			" releasing every open transaction, what is staged publishes through the gate",
+			"zone", zd.ZoneName, "open", ids, "cap", txHoldAgeCap)
+		for id := range zd.tx.open {
+			delete(zd.tx.open, id)
+		}
+		zd.txHoldClosedLocked("hold age cap", false)
+		return
+	}
 	for id, tx := range zd.tx.open {
 		if tx.overdue || now.Sub(tx.start) < tx.limit {
 			continue

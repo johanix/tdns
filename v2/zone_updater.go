@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"slices"
@@ -351,7 +352,15 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 			ur.respond(false, fmt.Errorf("zone %s has no delegation backend", ur.ZoneName))
 			return false
 		}
-		if err := backend.ApplyChildUpdate(ur.ZoneName, ur); err != nil {
+		if err := backend.ApplyChildUpdate(ur.ZoneName, ur); errors.Is(err, errUpdateDeferred) {
+			// Staged, its publish deferred to the gate or to a commit: the
+			// zone answers the request from the publish that carries it.
+			// The resolver's view of the delegation is dropped by the zone
+			// after the publish that carries the change (applyChildUpdate).
+			lg.Debug("ZoneUpdater: CHILD-UPDATE staged, its publish deferred",
+				"zone", ur.ZoneName, "backend", backend.Name())
+			logUpdateActions("CHILD-UPDATE", ur.Actions)
+		} else if err != nil {
 			lg.Error("ZoneUpdater: DelegationBackend.ApplyChildUpdate failed",
 				"backend", backend.Name(), "error", err)
 			ur.respond(false, err)
@@ -414,6 +423,78 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 				signalsBefore = zd.servedApexSignals()
 			}
 
+			// What follows a publish. API-managed primaries persist updated
+			// content (the mirror of the CHILD-UPDATE 'direct' backend
+			// persist); internal updates are included, since they change
+			// zone data too but never set OptDirty, so they need force.
+			// Then the delegation sync, cancellable: the only reader of that
+			// queue exits on the same cancellation, so a plain send at
+			// shutdown would block this engine forever; dropping it costs a
+			// round of parent sync, not correctness. The operator's signal
+			// edit is compared with what the update staged, not with the
+			// served zone. Under the gate the publish may be the publisher's,
+			// later: then the zone runs this after the publish that carried
+			// the change, outside zd.mu, registered with the stage so that no
+			// publish can slip in between. It reports whether the engine is to
+			// stop, which is only when ctx ends during an enqueue, and only
+			// matters inline. Defined before the apply: it reads the zone when
+			// it runs, and dss and signalsBefore were read before the apply.
+			afterPublish := func() (stop bool) {
+				zd.mu.Lock()
+				apiPrimary := zd.ZoneType == Primary && zd.Options[OptApiManagedZone]
+				zonefile := zd.Zonefile
+				zd.mu.Unlock()
+				if apiPrimary && zonefile != "" {
+					if _, werr := zd.WriteZone(true, ur.InternalUpdate); werr != nil {
+						// Visible in zone list, deliberately NOT service-impacting
+						// (the memory state is good).
+						lg.Warn("ZoneUpdater: failed to persist API-managed primary after ZONE-UPDATE (updated content is in memory only until the next successful write)", "zone", zd.ZoneName, "file", zonefile, "error", werr)
+						zd.SetError(RefreshError, "failed to persist zone after update: %v", werr)
+						zd.LatestError = time.Now()
+					} else {
+						zd.ClearError(RefreshError)
+						lg.Debug("ZoneUpdater: persisted API-managed primary after ZONE-UPDATE", "zone", zd.ZoneName, "file", zonefile, "internal", ur.InternalUpdate)
+					}
+				}
+
+				if !ur.InternalUpdate && zd.Options[OptParentSync] && !dss.InSync &&
+					(!ur.ParentSyncDone || len(dss.DNSKEYAdds)+len(dss.DNSKEYRemoves) > 0) {
+					lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
+					if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
+						Command:    "SYNC-DELEGATION",
+						ZoneName:   zd.ZoneName,
+						ZoneData:   zd,
+						SyncStatus: dss,
+					}) {
+						lg.Info("ZoneUpdater: context cancelled before the delegation-sync enqueue; the parent will be re-synced on the next load",
+							"zone", zd.ZoneName)
+						return true
+					}
+					if err := zd.PublishCsyncRR(); err != nil {
+						lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
+					} else {
+						lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
+					}
+				}
+
+				if signalsBefore != nil && zd.DelegationSyncQ != nil {
+					if types := editedSignalTypes(signalsBefore, zd.stagedApexSignals()); len(types) > 0 &&
+						zd.childDelegationSyncEnabled() {
+						lg.Debug("ZoneUpdater: an operator edited the zone's signals, sending SIGNALS-EDITED",
+							"zone", zd.ZoneName, "types", types)
+						if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
+							Command:     "SIGNALS-EDITED",
+							ZoneName:    zd.ZoneName,
+							ZoneData:    zd,
+							SignalTypes: types,
+						}) {
+							lg.Info("ZoneUpdater: context cancelled before the SIGNALS-EDITED enqueue", "zone", zd.ZoneName)
+							return true
+						}
+					}
+				}
+				return false
+			}
 			var updated bool
 			var err error
 
@@ -431,9 +512,10 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 			// and the DSYNC API turns that into a 200. Worse, its
 			// `err :=` shadowed the err this switch returns, so even a
 			// real failure could not have reached ur.respond (#554).
+			var deferred bool
 			switch zd.ZoneType {
 			case Primary, Secondary:
-				updated, err = zd.ApplyZoneUpdateToZoneData(ur, kdb)
+				updated, deferred, err = zd.applyZoneUpdate(ur, kdb, func() { afterPublish() })
 				if err != nil {
 					lg.Error("ZoneUpdater: ApplyZoneUpdateToZoneData failed", "error", err)
 				}
@@ -446,15 +528,23 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 				lg.Error("ZoneUpdater: zone update on a zone with no zone type",
 					"zone", zd.ZoneName, "cmd", ur.Cmd, "actions", len(ur.Actions))
 			}
-			// The change is now durable AND visible, or it failed. This is
-			// the earliest point at which a caller may honestly answer
-			// its own client, so release any waiter here rather than at
-			// the end of the case: the remaining work below (zonefile
-			// write-back for API-managed primaries, delegation sync) is
-			// follow-up, not part of the promise.
-			ur.respond(updated, err)
+			// The change is durable and visible, or it failed, or its publish
+			// is deferred to the gate. In the first two cases this is the
+			// earliest point at which a caller may honestly answer its own
+			// client, so the waiter is released here rather than at the end of
+			// the case: the remaining work (the zone file of an API-managed
+			// primary, the delegation sync) is follow-up, not part of the
+			// promise. In the third the zone holds the request's Resp and
+			// answers it from the publish that carries the change.
+			if !deferred {
+				ur.respond(updated, err)
+			}
 
-			if updated {
+			// The resolver's view of a changed delegation is dropped once the
+			// change is served, never before: a lookup in between would cache
+			// the old delegation again, for its TTL. Deferred, the zone does it
+			// after the publish that carries the change (applyZoneUpdate).
+			if updated && !deferred {
 				invalidateImrDelegations(zd.ZoneName, ur.Actions)
 			}
 			if updated && !ur.InternalUpdate {
@@ -463,96 +553,13 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 				logUpdateActions("ZONE-UPDATE", ur.Actions)
 			}
 
-			// API-managed primaries persist updated content
-			// immediately (the mirror of the CHILD-UPDATE 'direct'
-			// backend persist): without this, updated content lives
-			// only in RAM until a freeze/manual write and is lost on
-			// restart. Internal updates (CSYNC/KEY publication etc.)
-			// are included — they change zone data too but never set
-			// OptDirty, so they need force. WriteZone clears OptDirty
-			// on success, which also un-blocks the dirty-primary
-			// reload refusal. The persistence decision reads a
-			// zd.mu-protected snapshot (RefreshEngine mutates these
-			// fields under that lock on reload); the lock is NOT held
-			// across WriteZone, which reacquires it.
-			if updated {
-				zd.mu.Lock()
-				apiPrimary := zd.ZoneType == Primary && zd.Options[OptApiManagedZone]
-				zonefile := zd.Zonefile
-				zd.mu.Unlock()
-				if apiPrimary && zonefile != "" {
-					if _, werr := zd.WriteZone(true, ur.InternalUpdate); werr != nil {
-						// The client response is long gone (async queue),
-						// so surface the persistence failure durably:
-						// visible in zone list, deliberately NOT
-						// service-impacting (memory state is good).
-						lg.Warn("ZoneUpdater: failed to persist API-managed primary after ZONE-UPDATE (updated content is in memory only until the next successful write)", "zone", zd.ZoneName, "file", zonefile, "error", werr)
-						zd.SetError(RefreshError, "failed to persist zone after update: %v", werr)
-						zd.LatestError = time.Now()
-					} else {
-						// A successful persist is the primary-zone
-						// analogue of a successful refresh (both are
-						// file I/O): clear RefreshError, same as the
-						// refresh paths do.
-						zd.ClearError(RefreshError)
-						lg.Debug("ZoneUpdater: persisted API-managed primary after ZONE-UPDATE", "zone", zd.ZoneName, "file", zonefile, "internal", ur.InternalUpdate)
-					}
-				}
-			}
-
-			// Enqueue delegation sync after successful apply.
-			//
-			// Cancellable, and safe to be: the waiter was released
-			// above and the change is already durable, so this is
-			// follow-up work. A plain send is not safe. The only reader
-			// of this queue is DelegationSyncher, which exits on the
-			// SAME cancellation, so a full queue at shutdown left this
-			// engine blocked forever on a request nobody would ever
-			// take -- and ZoneUpdaterEngine never returned.
-			//
-			// Dropping it costs a round of parent sync, not
-			// correctness: the drift is still in the zone, and the next
-			// load re-detects it.
-			if updated && !ur.InternalUpdate && zd.Options[OptParentSync] && !dss.InSync &&
-				(!ur.ParentSyncDone || len(dss.DNSKEYAdds)+len(dss.DNSKEYRemoves) > 0) {
-				lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
-				if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
-					Command:    "SYNC-DELEGATION",
-					ZoneName:   zd.ZoneName,
-					ZoneData:   zd,
-					SyncStatus: dss,
-				}) {
-					lg.Info("ZoneUpdater: context cancelled before the delegation-sync enqueue; the parent will be re-synced on the next load",
-						"zone", zd.ZoneName)
+			// Published in the caller: what follows runs now. Deferred: the zone
+			// registered it with the stage, and runs it after the publish that
+			// carries the change.
+			if updated && !deferred {
+				if afterPublish() {
 					lg.Info("ZoneUpdater: terminating")
 					return true
-				}
-				if err := zd.PublishCsyncRR(); err != nil {
-					lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
-				} else {
-					lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
-				}
-			}
-
-			// The operator's edit, compared with what the update staged
-			// rather than with the served zone: under a transaction
-			// hold the served zone is still the old one. The syncher
-			// sends nothing until the hold has ended.
-			if updated && signalsBefore != nil && zd.DelegationSyncQ != nil {
-				if types := editedSignalTypes(signalsBefore, zd.stagedApexSignals()); len(types) > 0 &&
-					zd.childDelegationSyncEnabled() {
-					lg.Debug("ZoneUpdater: an operator edited the zone's signals, sending SIGNALS-EDITED",
-						"zone", zd.ZoneName, "types", types)
-					if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
-						Command:     "SIGNALS-EDITED",
-						ZoneName:    zd.ZoneName,
-						ZoneData:    zd,
-						SignalTypes: types,
-					}) {
-						lg.Info("ZoneUpdater: context cancelled before the SIGNALS-EDITED enqueue", "zone", zd.ZoneName)
-						lg.Info("ZoneUpdater: terminating")
-						return true
-					}
 				}
 			}
 		} else {
@@ -790,6 +797,15 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 // DSYNC API path "applied" is answered 200, which is precisely the promise the
 // persistence work exists to keep.
 func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (updated bool, err error) {
+	updated, _, err = zd.applyChildUpdate(ur, kdb, nil)
+	return updated, err
+}
+
+// applyChildUpdate is ApplyChildUpdateToZoneData, reporting a deferred
+// publish (see applyZoneUpdate). after, if given, follows the publish that
+// carries the change when that publish is deferred; the caller runs its own
+// follow-up when the publish was in the caller.
+func (zd *ZoneData) applyChildUpdate(ur UpdateRequest, kdb *KeyDB, after func()) (updated, deferred bool, err error) {
 
 	lg.Debug("ApplyChildUpdateToZoneData", "request", fmt.Sprintf("%+v", ur))
 
@@ -804,10 +820,10 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 			dak, err = zd.EnsureActiveDnssecKeys(kdb, false)
 			if err != nil {
 				lg.Error("ApplyChildUpdateToZoneData: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "error", err)
-				return false, err
+				return false, false, err
 			}
 			if dak == nil || len(dak.ZSKs) == 0 {
-				return false, fmt.Errorf("zone %s has no active ZSKs and signing is enabled. child update is rejected", zd.ZoneName)
+				return false, false, fmt.Errorf("zone %s has no active ZSKs and signing is enabled. child update is rejected", zd.ZoneName)
 			}
 		}
 	}
@@ -823,14 +839,14 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 	// other kind of change survived.
 	var persistErr error
 	var absent []dns.RR
-	updated, persistErr, err = zd.stageAndPublishLocked(ur, func() bool {
+	updated, deferred, persistErr, err = zd.stageAndPublishLocked(ur, func() bool {
 		// Before anything is staged: a refused update applies none of its
 		// actions.
 		if absent = zd.absentChildDeletesLocked(ur.Actions); len(absent) > 0 {
 			return false
 		}
 		return zd.stageChildUpdateLocked(ur, dak)
-	})
+	}, zd.followsPublish(ur, after))
 	if len(absent) > 0 {
 		err = &ChildDeleteNotInZoneError{Zone: zd.ZoneName, Records: absent}
 	}
@@ -844,7 +860,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 		err = fmt.Errorf("zone %s: child update not applied: could not persist the change: %w",
 			zd.ZoneName, persistErr)
 	}
-	return updated, err
+	return updated, deferred, err
 }
 
 // ChildDeleteNotInZoneError refuses a child update that deletes a record the
@@ -1086,7 +1102,25 @@ func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (u
 // The publish can fail: a change whose delta cannot be persisted is refused
 // rather than served (see publishWorkingSetLocked), and that has to surface as
 // an error here rather than as a successful-looking (true, nil).
+//
+// For a caller that reads the zone back (a replay, a merge, the tests) the
+// publish is in this call: a replay publishes at once, and a zone that is
+// idle or not Ready publishes in the caller. On a busy zone the publish is
+// deferred to the gate and "updated" says the change is staged; the
+// ZoneUpdater uses applyZoneUpdate, which says so, and lets the zone answer
+// the request.
 func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (updated bool, err error) {
+	updated, _, err = zd.applyZoneUpdate(ur, kdb, nil)
+	return updated, err
+}
+
+// applyZoneUpdate is ApplyZoneUpdateToZoneData, reporting a deferred publish.
+// after, if given, follows the publish that carries the change when that
+// publish is deferred: it is registered with the stage, under the same lock, so
+// that no publish can come between the two. When the publish was in the
+// caller, the caller runs its own follow-up. The resolver's view of a changed
+// delegation is dropped the same way (invalidateImrDelegations).
+func (zd *ZoneData) applyZoneUpdate(ur UpdateRequest, kdb *KeyDB, after func()) (updated, deferred bool, err error) {
 
 	// dump.P(ur)
 	// log.Printf("**** ApplyZoneUpdateToZoneData: ur=%+v", ur)
@@ -1103,11 +1137,11 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 		dak, err = zd.EnsureActiveDnssecKeys(kdb, false)
 		if err != nil {
 			lg.Error("ApplyZoneUpdateToZoneData: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "error", err)
-			return false, err
+			return false, false, err
 		}
 		if dak == nil || len(dak.KSKs) == 0 {
 			lg.Error("ApplyZoneUpdateToZoneData: still no active KSKs after EnsureActiveDnssecKeys", "zone", zd.ZoneName)
-			return false, fmt.Errorf("zone %s has no active KSKs and online-signing is enabled. zone update is rejected", zd.ZoneName)
+			return false, false, fmt.Errorf("zone %s has no active KSKs and online-signing is enabled. zone update is rejected", zd.ZoneName)
 		}
 	}
 
@@ -1116,7 +1150,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 	// staged, so the update is rejected whole rather than half-applied.
 	filteredActions, zerr := zd.filterManagedZonemdActions(ur.Actions, ur.Replay)
 	if zerr != nil {
-		return false, zerr
+		return false, false, zerr
 	}
 	ur.Actions = filteredActions
 
@@ -1125,7 +1159,8 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 	// publish that panics included (#808).
 	defer zd.mu.Unlock()
 	var persistErr error
-	updated, persistErr, err = zd.stageAndPublishLocked(ur, func() bool { return zd.stageZoneUpdateLocked(ur, dak) })
+	updated, deferred, persistErr, err = zd.stageAndPublishLocked(ur, func() bool { return zd.stageZoneUpdateLocked(ur, dak) },
+		zd.followsPublish(ur, after))
 	if persistErr != nil {
 		// Phase 2: the publish writes the delta durably BEFORE making the
 		// change visible, and refuses the publish if that write fails -- see
@@ -1135,7 +1170,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 		err = fmt.Errorf("zone %s: update not applied: could not persist the change: %w",
 			zd.ZoneName, persistErr)
 	}
-	return updated, err
+	return updated, deferred, err
 }
 
 // stageZoneUpdateLocked stages the actions of a zone update in the working
@@ -1498,7 +1533,14 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (up
 // updated was set -- and stage sets it action by action. A panic part-way
 // through published and journalled a partial change, just before the process
 // died, and a panic in that publish skipped the unlock.
-func (zd *ZoneData) stageAndPublishLocked(ur UpdateRequest, stage func() bool) (updated bool, persistErr, err error) {
+// errUpdateDeferred is what a DelegationBackend's ApplyChildUpdate returns
+// when the change is staged and its publish deferred: the zone holds the
+// request's Resp and answers it from the publish that carries the change.
+var errUpdateDeferred = errors.New("the update is staged; its publish is deferred and the zone answers for it")
+
+// after, if not nil, is registered to follow the publish when stage's work is
+// left for the gate's publish or a commit, under the lock the stage ran under.
+func (zd *ZoneData) stageAndPublishLocked(ur UpdateRequest, stage func() bool, after func()) (updated, deferred bool, persistErr, err error) {
 	const (
 		flushing = iota
 		staging
@@ -1521,7 +1563,7 @@ func (zd *ZoneData) stageAndPublishLocked(ur UpdateRequest, stage func() bool) (
 	if !ur.Replay {
 		if err = zd.flushStagedReplacementLocked(); err != nil {
 			step = finished
-			return false, nil, err
+			return false, false, nil, err
 		}
 	}
 
@@ -1530,19 +1572,48 @@ func (zd *ZoneData) stageAndPublishLocked(ur UpdateRequest, stage func() bool) (
 	updated = stage()
 	step = finished
 	if !updated {
-		return false, nil, nil
+		return false, false, nil, nil
 	}
 
-	zd.wsPersistDelta = !ur.Replay
+	// Accumulated, not assigned: under the gate a replayed update staged after
+	// a fresh one is published with it, and that publish journals the fresh
+	// change.
+	zd.wsPersistDelta = zd.wsPersistDelta || !ur.Replay
 	step = publishing
-	zd.publishLocked(zd.generation.Load())
+	published := zd.publishOrQueueLocked(zd.generation.Load(), ur.Replay)
 	step = finished
+	if !published {
+		// Staged and waiting for the gate's publish, or for the commit that
+		// closes the hold. The outcome, the journal's error included, reaches
+		// the sender through the zone's waiters.
+		if ur.Resp != nil {
+			zd.waiters = append(zd.waiters, ur.Resp)
+		}
+		if after != nil {
+			zd.afterPublish = append(zd.afterPublish, after)
+		}
+		return true, true, nil, nil
+	}
 	if zd.wsPersistErr != nil {
 		persistErr = zd.wsPersistErr
 		zd.wsPersistErr = nil
-		return false, persistErr, nil
+		return false, false, persistErr, nil
 	}
-	return true, nil, nil
+	return true, false, nil, nil
+}
+
+// followsPublish is what runs after the publish that carries a deferred
+// update: the resolver's view of any delegation the update changed is dropped
+// (it would otherwise re-cache the old one in the window before the publish),
+// then the caller's own follow-up. Run by the publisher, outside zd.mu.
+func (zd *ZoneData) followsPublish(ur UpdateRequest, after func()) func() {
+	imr := Globals.ImrEngine // read here, on the staging goroutine, not on the publisher's
+	return func() {
+		invalidateDelegationsIn(imr, zd.ZoneName, ur.Actions)
+		if after != nil {
+			after()
+		}
+	}
 }
 
 // publishPanickedLocked is what is left to do after a publish panicked, before
@@ -1557,6 +1628,8 @@ func (zd *ZoneData) stageAndPublishLocked(ur UpdateRequest, stage func() bool) (
 // The serial stays where the publish left it: going back could reuse a serial
 // the journal already holds, and a skipped serial is harmless.
 func (zd *ZoneData) publishPanickedLocked() {
+	zd.answerWaitersLocked(ZoneUpdateResult{Err: fmt.Errorf("zone %s: a publish of the zone failed part-way", zd.ZoneName)})
+	zd.afterPublish = nil
 	zd.workingSet = nil
 	zd.wsSignalSynth = nil
 	zd.wsFromReplacement = false
@@ -2354,7 +2427,14 @@ func rrPresentIn(list []dns.RR, rr dns.RR) bool {
 // just made Secure that meant every CDS and CSYNC refused as "indeterminate" for
 // up to half an hour, and a child that had re-keyed could not roll (#694).
 func invalidateImrDelegations(zone string, actions []dns.RR) {
-	imr := Globals.ImrEngine
+	invalidateDelegationsIn(Globals.ImrEngine, zone, actions)
+}
+
+// invalidateDelegationsIn is invalidateImrDelegations on a resolver read by
+// the caller: a follow-up that runs on the publisher's goroutine takes the
+// resolver when it is registered, on the goroutine that staged the change,
+// and never reads the global from another.
+func invalidateDelegationsIn(imr *Imr, zone string, actions []dns.RR) {
 	if imr == nil || imr.Cache == nil {
 		return
 	}
