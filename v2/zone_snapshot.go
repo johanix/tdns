@@ -131,18 +131,58 @@ func wildcardSourceFrom(snap *zoneSnapshot, zoneName, qname string) string {
 type PendingChanges struct {
 	PublishedSerial uint32
 	PublishQueued   bool
-	Added           []string
-	Replaced        []pendingOwnerChange
-	Deleted         []pendingOwnerChange
+	// The gate: when the queued publish is due, the zone's cadence, and what
+	// that publish will answer (Resps) and run (follow-ups).
+	NextPublishAt time.Time
+	Cadence       time.Duration
+	Waiters       int
+	FollowUps     int
+	// The hold: its start and cap, the publishes it has stopped, and the open
+	// transactions, oldest first.
+	Held         bool
+	HoldSince    time.Time
+	HoldCap      time.Duration
+	HoldStopped  uint64
+	Transactions []pendingTx
+	Added        []string
+	Replaced     []pendingOwnerChange
+	Deleted      []pendingOwnerChange
+}
+
+// pendingTx is one open transaction as pendingChanges reports it.
+type pendingTx struct {
+	ID      TxID
+	Started time.Time
+	Limit   time.Duration
+	Overdue bool
+}
+
+// PendingTxJSON is pendingTx for the API.
+type PendingTxJSON struct {
+	ID           string    `json:"id"`
+	Started      time.Time `json:"started"`
+	AgeSeconds   float64   `json:"age_seconds"`
+	LimitSeconds float64   `json:"limit_seconds"`
+	Overdue      bool      `json:"overdue,omitempty"`
 }
 
 // PendingChangesView is the JSON/API representation of pendingChanges().
 type PendingChangesView struct {
-	PublishedSerial uint32                   `json:"published_serial"`
-	PublishQueued   bool                     `json:"publish_queued"`
-	Added           []string                 `json:"added,omitempty"`
-	Replaced        []PendingOwnerChangeJSON `json:"replaced,omitempty"`
-	Deleted         []PendingOwnerChangeJSON `json:"deleted,omitempty"`
+	PublishedSerial      uint32                   `json:"published_serial"`
+	PublishQueued        bool                     `json:"publish_queued"`
+	NextPublishAt        *time.Time               `json:"next_publish_at,omitempty"`
+	CadenceSeconds       float64                  `json:"cadence_seconds"`
+	Waiters              int                      `json:"waiters"`
+	FollowUps            int                      `json:"follow_ups"`
+	Held                 bool                     `json:"held"`
+	HoldSince            *time.Time               `json:"hold_since,omitempty"`
+	HoldAgeSeconds       float64                  `json:"hold_age_seconds,omitempty"`
+	HoldCapSeconds       float64                  `json:"hold_cap_seconds,omitempty"`
+	HoldStoppedPublishes uint64                   `json:"hold_stopped_publishes,omitempty"`
+	Transactions         []PendingTxJSON          `json:"transactions,omitempty"`
+	Added                []string                 `json:"added,omitempty"`
+	Replaced             []PendingOwnerChangeJSON `json:"replaced,omitempty"`
+	Deleted              []PendingOwnerChangeJSON `json:"deleted,omitempty"`
 }
 
 func pendingChangesView(pc *PendingChanges) *PendingChangesView {
@@ -150,9 +190,30 @@ func pendingChangesView(pc *PendingChanges) *PendingChangesView {
 		return nil
 	}
 	v := &PendingChangesView{
-		PublishedSerial: pc.PublishedSerial,
-		PublishQueued:   pc.PublishQueued,
-		Added:           append([]string(nil), pc.Added...),
+		PublishedSerial:      pc.PublishedSerial,
+		PublishQueued:        pc.PublishQueued,
+		CadenceSeconds:       pc.Cadence.Seconds(),
+		Waiters:              pc.Waiters,
+		FollowUps:            pc.FollowUps,
+		Held:                 pc.Held,
+		HoldStoppedPublishes: pc.HoldStopped,
+		Added:                append([]string(nil), pc.Added...),
+	}
+	if !pc.NextPublishAt.IsZero() {
+		at := pc.NextPublishAt
+		v.NextPublishAt = &at
+	}
+	if pc.Held {
+		since := pc.HoldSince
+		v.HoldSince = &since
+		v.HoldAgeSeconds = time.Since(pc.HoldSince).Seconds()
+		v.HoldCapSeconds = pc.HoldCap.Seconds()
+	}
+	for _, tx := range pc.Transactions {
+		v.Transactions = append(v.Transactions, PendingTxJSON{
+			ID: string(tx.ID), Started: tx.Started,
+			AgeSeconds: time.Since(tx.Started).Seconds(), LimitSeconds: tx.Limit.Seconds(), Overdue: tx.Overdue,
+		})
 	}
 	for _, ch := range pc.Replaced {
 		v.Replaced = append(v.Replaced, pendingOwnerChangeJSON(ch))
@@ -181,7 +242,27 @@ func FormatPendingChanges(pc *PendingChanges) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "published serial: %d\n", pc.PublishedSerial)
-	fmt.Fprintf(&b, "publish queued: %v\n", pc.PublishQueued)
+	if pc.PublishQueued {
+		fmt.Fprintf(&b, "publish queued: true (due in %s, cadence %s)\n",
+			time.Until(pc.NextPublishAt).Round(time.Millisecond), pc.Cadence)
+	} else {
+		fmt.Fprintf(&b, "publish queued: false\n")
+	}
+	if pc.Waiters > 0 || pc.FollowUps > 0 {
+		fmt.Fprintf(&b, "waiting for the publish: %d waiter(s), %d follow-up(s)\n", pc.Waiters, pc.FollowUps)
+	}
+	if pc.Held {
+		fmt.Fprintf(&b, "held: since %s ago (cap %s), %d publish(es) stopped\n",
+			time.Since(pc.HoldSince).Round(time.Millisecond), pc.HoldCap, pc.HoldStopped)
+		for _, tx := range pc.Transactions {
+			overdue := ""
+			if tx.Overdue {
+				overdue = ", overdue"
+			}
+			fmt.Fprintf(&b, "transaction %s: age %s, limit %s%s\n", tx.ID,
+				time.Since(tx.Started).Round(time.Millisecond), tx.Limit, overdue)
+		}
+	}
 	for _, name := range pc.Added {
 		fmt.Fprintf(&b, "added owner: %s\n", name)
 	}

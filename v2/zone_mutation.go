@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -119,7 +120,8 @@ func (zd *ZoneData) pendingChanges() *PendingChanges {
 }
 
 func (zd *ZoneData) pendingChangesLocked() *PendingChanges {
-	if zd.workingSet == nil {
+	held := zd.txHeldLocked()
+	if zd.workingSet == nil && !zd.publishQueued && !held {
 		return nil
 	}
 	snap := zd.snapshot.Load()
@@ -130,6 +132,25 @@ func (zd *ZoneData) pendingChangesLocked() *PendingChanges {
 	pc := &PendingChanges{
 		PublishedSerial: publishedSerial,
 		PublishQueued:   zd.publishQueued,
+		Cadence:         publishCadenceForZone(zd),
+		Waiters:         len(zd.waiters),
+		FollowUps:       len(zd.afterPublish),
+		Held:            held,
+		HoldSince:       zd.tx.holdStart,
+		HoldStopped:     zd.tx.stopped,
+	}
+	if pc.PublishQueued {
+		pc.NextPublishAt = zd.lastPublish.Add(pc.Cadence)
+	}
+	if held {
+		pc.HoldCap = txHoldAgeCap
+		for id, tx := range zd.tx.open {
+			pc.Transactions = append(pc.Transactions, pendingTx{ID: id, Started: tx.start, Limit: tx.limit, Overdue: tx.overdue})
+		}
+		sort.Slice(pc.Transactions, func(i, j int) bool { return pc.Transactions[i].Started.Before(pc.Transactions[j].Started) })
+	}
+	if zd.workingSet == nil {
+		return pc
 	}
 	published := map[string]*OwnerData{}
 	if snap != nil {
@@ -157,7 +178,7 @@ func (zd *ZoneData) pendingChangesLocked() *PendingChanges {
 		}
 		pc.Deleted = append(pc.Deleted, pendingOwnerChange{Owner: name, RRtypes: pubOd.RRtypes.Keys()})
 	}
-	if len(pc.Added) == 0 && len(pc.Replaced) == 0 && len(pc.Deleted) == 0 && !pc.PublishQueued {
+	if len(pc.Added) == 0 && len(pc.Replaced) == 0 && len(pc.Deleted) == 0 && !pc.PublishQueued && !held {
 		return nil
 	}
 	return pc
@@ -1788,12 +1809,14 @@ func (zd *ZoneData) Publish() (BumperResponse, error) {
 	defer zd.mu.Unlock()
 	resp.OldSerial, resp.NewSerial = zd.CurrentSerial, zd.CurrentSerial
 	switch {
-	case zd.txHeldLocked():
-		resp.Msg = fmt.Sprintf("zone %s is held by an open transaction; nothing published until its commit", zd.ZoneName)
-	case zd.workingSet == nil:
+	case zd.workingSet == nil && !zd.txHeldLocked():
 		resp.Msg = fmt.Sprintf("zone %s: nothing staged, nothing to publish", zd.ZoneName)
 	case zd.publishOrQueueLocked(zd.generation.Load(), false):
 		resp.NewSerial = zd.CurrentSerial
+	case zd.txHeldLocked():
+		// Asked, and stopped by the hold, which counts it; the commit that
+		// closes the hold carries what is staged.
+		resp.Msg = fmt.Sprintf("zone %s is held by an open transaction; nothing published until its commit", zd.ZoneName)
 	default:
 		resp.Msg = fmt.Sprintf("zone %s: staged; the gate publishes it at the next cadence", zd.ZoneName)
 	}
