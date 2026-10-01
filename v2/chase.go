@@ -71,11 +71,12 @@ type ChainLeaf struct {
 // ChainResult is the full structured chase output. Status is the overall
 // verdict (worst of any link plus the leaf).
 type ChainResult struct {
-	Qname  string      // the name asked for
-	Qtype  uint16      // the type asked for
-	Links  []ChainLink // root-first, leaf zone last
-	Leaf   ChainLeaf
-	Status ChainStatus
+	Qname             string      // the name asked for
+	Qtype             uint16      // the type asked for
+	TrustAnchorSource string      // where the trust anchors came from (Chaser.TrustAnchorSource), or "none"
+	Links             []ChainLink // root-first, leaf zone last
+	Leaf              ChainLeaf
+	Status            ChainStatus
 }
 
 // Chaser walks a DNSSEC chain by issuing DO=1 queries against a recursive
@@ -90,6 +91,11 @@ type Chaser struct {
 	// the root link reports Secure instead of Indeterminate. nil =
 	// no anchors configured; the root link stays Indeterminate.
 	TrustAnchors map[string][]*dns.DS
+	// TrustAnchorSource says where TrustAnchors came from, for the output:
+	// a file, a resolver's configuration, or the anchors compiled in. A
+	// verdict reached with other anchors than the operator meant is one
+	// that cannot be told apart from the right one otherwise.
+	TrustAnchorSource string
 }
 
 // NewChaser returns a Chaser that talks to the given recursive resolver
@@ -116,7 +122,11 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 	qname = dns.Fqdn(qname)
 	w := &chainWalk{c: c, cuts: map[string]*cutDecision{}}
 	links, leaf := w.walkName(qname, qtype)
-	result := &ChainResult{Qname: qname, Qtype: qtype, Leaf: leaf, Status: ChainStatusSecure}
+	result := &ChainResult{Qname: qname, Qtype: qtype, TrustAnchorSource: c.TrustAnchorSource,
+		Leaf: leaf, Status: ChainStatusSecure}
+	if result.TrustAnchorSource == "" && len(c.TrustAnchors) == 0 {
+		result.TrustAnchorSource = "none"
+	}
 	for _, link := range links {
 		result.Links = append(result.Links, *link)
 		result.Status = worstStatus(result.Status, link.Status)

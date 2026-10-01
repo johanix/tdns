@@ -43,6 +43,9 @@ func RenderChain(result *ChainResult, w io.Writer, algNames bool) {
 	if qname == "" {
 		qname, qtype = result.Leaf.Qname, result.Leaf.Qtype
 	}
+	if result.TrustAnchorSource != "" {
+		fmt.Fprintf(w, "Trust anchor: %s\n", result.TrustAnchorSource)
+	}
 	fmt.Fprintf(w, "Chain validation for %s %s:\n\n", qname, dns.TypeToString[qtype])
 	indent := ""
 	for _, link := range result.Links {

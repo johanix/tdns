@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -179,4 +180,31 @@ func TestChaseFailedQueries(t *testing.T) {
 		}
 		wantStatus(t, "result", res.Status, ChainStatusIndeterminate)
 	})
+}
+
+// The output says where the trust anchors came from (#379): a chase run with
+// other anchors than the operator meant otherwise looks like any other.
+func TestRenderChainTrustAnchorSource(t *testing.T) {
+	tr := secureTree(t)
+	c := tr.chaser()
+	c.TrustAnchorSource = "file /etc/anchors (1 DS)"
+	res, err := c.Chase("www.sec.example.", dns.TypeA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	RenderChain(res, &out, false)
+	if !strings.HasPrefix(out.String(), "Trust anchor: file /etc/anchors (1 DS)\n") {
+		t.Errorf("output does not start with the anchor source:\n%s", out.String())
+	}
+
+	res, err = NewChaser(tr, "192.0.2.1", nil).Chase("www.sec.example.", dns.TypeA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	RenderChain(res, &out, false)
+	if !strings.HasPrefix(out.String(), "Trust anchor: none\n") {
+		t.Errorf("output without anchors does not say so:\n%s", out.String())
+	}
 }
