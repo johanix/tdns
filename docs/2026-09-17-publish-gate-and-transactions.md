@@ -3,11 +3,20 @@
 **Written 2026-09-17.** #653. **Status: r4.** r3 was merged with #695. r4 was
 written before any code, which is why it revises the text in place and is not
 an amendment, and it arrived together with step 1 of "Size and order of work"
-(transactions and held creation). **Step 1 is implemented and merged**
-(2026-09-21, tdns #700 → 368a28ce). Amendment 1 (tdns #711 → e635f202) and
-Amendment 2, at the end, record what changed in it after the reviews. Steps 2
-to 4 are not implemented; step 2 is tdns-mp's. What the reviews of step 1
-carried to them is listed under "Size and order of work".
+(transactions and held creation). **Steps 1 and 2 are implemented and
+merged; step 3 is implemented (tdns #884).** Step 1: 2026-09-21, tdns #700 →
+368a28ce; Amendment 1 (tdns #711 → e635f202) and Amendment 2, at the end,
+record what changed in it after the reviews. Step 2: 2026-09-29, tdns-mp #97 →
+3e21fe8: the identity zone is created held and published once, the agent's and
+the auditor's first hello waits for that publish, and the zone's parentsync
+work starts after it. It was checked on a multi-host test deployment: seven
+cold starts, seven converged, each identity one complete transfer at its
+secondary, none of #653's cached-denial warnings. Step 3: 2026-10-01, tdns
+#884: every update asks the gate, the waiters are the zone's, a refresh under
+a hold is refused, the hold's age is capped, and the two items the step-1
+reviews carried to it are in; Amendment 3 records what it settled. Step 4 is
+not implemented; what the reviews carried to it is listed under "Size and
+order of work".
 Updates §1.3 and §1.6 of `2026-07-02-DONE-zone-mutation-snapshot-correctness.md`
 ("the July design"), which stays as it is.
 
@@ -381,6 +390,7 @@ have never published, have no journal and are written by the send-and-forget
 publishers. An identity zone does allow updates, though, so a wire UPDATE that
 arrives inside its hold is answered NOERROR early. Step 3 closes it. Doing it
 sooner would put step 3's plumbing on the updater's path for every zone.
+**Closed in step 3 (Amendment 3).**
 
 **Observability.** `pendingChanges()` and `tdns-cli debug zone-txlog` exist
 for exactly this: what is staged and not yet served. They gain the open
@@ -525,11 +535,12 @@ In four steps, each a PR that is green on its own:
   so a refused journal write there is later read by an update's applier whose
   own publish succeeded, and reported as "not applied". Latent while the only
   holders have no journal; step 3 makes the gate's path the normal one. Clear
-  it in `runPublisher` once the waiters have it.
+  it in `runPublisher` once the waiters have it. **Done in step 3 (Amendment
+  3).**
 - **Step 3:** the hold's limit is per transaction, so a writer that opens its
   next transaction before its last is released keeps a published zone held
   without end. Internal writers only, so a bug and not an attack. A cap on the
-  hold's age, from its first begin, closes it.
+  hold's age, from its first begin, closes it. **Done in step 3 (Amendment 3).**
 - **Step 4:** the operator's `BumpSerial` and `Publish` on a held zone return
   success with the serial unchanged and nothing that says why. The
   `BumperResponse` should say the zone is held.
@@ -648,3 +659,63 @@ No caller in tdns reaches any of them today.
   zone,** so the one exit between the held creation and the commit is the
   commit's own, which cleans up. Before, a failure there would have left a
   registered zone holding a transaction nobody commits.
+
+## Amendment 3 (2026-10-01): what step 3 settled
+
+Step 3 (tdns #884) put every update behind the gate, moved the waiters onto
+the zone, and took the refresh rule, the hold's age cap and the two items the
+step-1 reviews carried to it. What it decided beyond, or differently from, the
+text:
+
+- **A replay publishes in the caller.** "An idle zone's publish stays in the
+  caller" is the text's rule. A replay, the journal's at start-up and a
+  merge's, publishes in the caller even on a busy zone: it is not churn, and
+  what runs after it reads the zone back. Everything else staged on a busy zone
+  waits for the gate, which publishes it at `lastPublish` + cadence, in one
+  serial with one NOTIFY.
+- **The post-publish actions follow the publish.** The zone updater's engine
+  wrote the API-managed primary's zone file and queued the delegation sync,
+  the CSYNC and the operator's signal edit straight after its apply. Under a
+  deferred publish they would have run ahead of what is served. They now wait
+  on the zone and run in the publisher's goroutine once the publish that
+  carries the change has installed its snapshot, outside the zone's lock; a
+  refused publish drops them with the change.
+- **The updater answers only what it published in its own call.** A deferred
+  publish, or one a hold stopped, leaves the `Resp` with the zone, which
+  answers it from the carrying publish or from the refusal that drops the
+  working set. The direct delegation backend reports a deferred child update
+  to the engine the same way. The known limit of steps 1 and 2 ("Waiters") is
+  closed.
+- **Existing tests (R5).** The package's tests read a zone back after one
+  change as if every publish were synchronous. Rather than adapting each, the
+  package's `TestMain` sets the default cadence to zero, so no zone is busy
+  there and the gate publishes in the caller; the gate's own tests set a
+  cadence on their zones.
+- **A refresh under a hold is refused with `ErrRefreshHeld`** before it touches
+  the working set, as "A refresh must not drop what is staged" says. The retry
+  is a short fixed wait, 5 s, not the SOA retry: the hold ends within its
+  limit, and the SOA retry can be hours. The refusal sets no `RefreshError`,
+  restores the zone's status, is not charged to the refresh counter, and is
+  logged at Info. This replaces what #747 did for the case (the transfer
+  staged under the hold, and the update refused instead; its test is removed)
+  and settles both halves of #749: the transaction's change is kept and
+  journalled, the transfer is not. The overlay design
+  (`2026-09-24-journal-overlay-on-transfer.md`, §11, "A replacement is never
+  journalled as a local change") said a zone-updater change is refused while a
+  staged replacement cannot be published "including while a transaction holds
+  the zone"; under a hold there is no staged replacement any more.
+- **The hold's age cap is twice the hold's limit** (60 s with the default
+  30 s), from the hold's first begin. On a published zone the cap releases
+  every open transaction with a WARN, and what is staged publishes through the
+  gate; on a zone that has never published it fails closed as the limit does,
+  with `FirstPublishError`, and the commit still installs the first snapshot.
+- **`wsPersistErr` is cleared by `runPublisher`** after its publish, once the
+  waiters have it; and `wsPersistDelta` accumulates under coalescing, so a
+  replayed update staged after a fresh change does not switch the journal off
+  for the publish that carries both.
+- **The one bound** is `max(UpdateApplyTimeout, 2 × cadence)` at every sender
+  that waits on a `Resp`, as "Waiters" says; the scanner and the signal
+  republisher keep their own base timeouts under the same `max`.
+- **Not in step 3:** the open transactions and their age in `pendingChanges()`
+  and `debug zone-txlog`, and the guide; both are step 4's, with the rest of
+  observability.
