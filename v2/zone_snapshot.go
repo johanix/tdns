@@ -10,14 +10,12 @@ import (
 	"github.com/miekg/dns"
 )
 
-const DefaultPublishCadence = 5 * time.Second
-
-// defaultPublishCadence is what publishCadenceForZone returns for a zone with
-// no cadence of its own. A variable so that the package's tests, which apply a
-// change and read the zone back as if every publish were synchronous, can set
-// it to zero in TestMain: a zone with a zero cadence is never busy, so the gate
-// publishes in the caller. The gate's own tests set a cadence on their zones.
-var defaultPublishCadence = DefaultPublishCadence
+// DefaultPublishCadence is what publishCadenceForZone returns for a zone with
+// no publish-cadence of its own. A variable, not a constant, so that a test
+// package that reads a zone back right after a change can set it to zero (no
+// zone is ever busy then, and the gate publishes in the caller), as this
+// package's TestMain does and tdns-mp's may.
+var DefaultPublishCadence = 5 * time.Second
 
 // zoneSnapshot is the immutable reader-facing view of a zone at one serial
 // boundary. Published snapshots are never mutated in place. The type is
@@ -339,7 +337,7 @@ func copyIxfrChain(chain []Ixfr) []Ixfr {
 
 func publishCadenceForZone(zd *ZoneData) time.Duration {
 	if zd == nil || zd.publishCadence == 0 {
-		return defaultPublishCadence
+		return DefaultPublishCadence
 	}
 	return zd.publishCadence
 }

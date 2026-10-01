@@ -568,20 +568,31 @@ func regenerateCatalogZone(catalogZoneName string) error {
 		}
 	}
 
-	zd.publishLocked(zd.generation.Load())
-
-	// Write zone file if persistence is enabled
+	// The gate: an idle catalog publishes here, a busy one at the next
+	// cadence. The zone file and the dynamic config follow the publish that
+	// carries the change, so the file is never ahead of what is served: here
+	// when the publish was here, else registered for the publisher, which runs
+	// them outside zd.mu once that publish has installed its snapshot.
+	published := zd.publishOrQueueLocked(zd.generation.Load(), false)
 	if Conf.ShouldPersistZone(zd) {
-		_, err := zd.WriteDynamicZoneFile(Conf.DynamicZones.ZoneDirectory)
-		if err != nil {
-			lgApi.Warn("failed to write catalog zone file", "zone", catalogZoneName, "err", err)
-			// Don't fail the operation, just log the warning
+		persist := func() {
+			if _, err := zd.WriteDynamicZoneFile(Conf.DynamicZones.ZoneDirectory); err != nil {
+				lgApi.Warn("failed to write catalog zone file", "zone", catalogZoneName, "err", err)
+				// Don't fail the operation, just log the warning
+			}
+			if err := Conf.AddDynamicZoneToConfig(zd); err != nil {
+				lgApi.Warn("failed to update dynamic config file", "zone", catalogZoneName, "err", err)
+				// Don't fail the operation, just log the warning
+			}
 		}
-
-		// Write dynamic config file
-		if err := Conf.AddDynamicZoneToConfig(zd); err != nil {
-			lgApi.Warn("failed to update dynamic config file", "zone", catalogZoneName, "err", err)
-			// Don't fail the operation, just log the warning
+		if published {
+			persist()
+		} else {
+			zd.afterPublish = append(zd.afterPublish, func() {
+				zd.mu.Lock()
+				defer zd.mu.Unlock()
+				persist()
+			})
 		}
 	}
 

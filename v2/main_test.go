@@ -15,6 +15,6 @@ import (
 // so the gate publishes in the caller and those tests keep their reading. The
 // gate's own tests set a cadence on their zones.
 func TestMain(m *testing.M) {
-	defaultPublishCadence = 0
+	DefaultPublishCadence = 0
 	os.Exit(m.Run())
 }

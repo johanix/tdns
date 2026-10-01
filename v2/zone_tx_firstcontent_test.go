@@ -241,8 +241,8 @@ func TestACommitsRespIsAnsweredByTheGatesPublish(t *testing.T) {
 	zd.mu.Lock()
 	zd.publishCadence = 400 * time.Millisecond
 	zd.mu.Unlock()
-	if _, err := zd.Publish(); err != nil { // busy: it published just now
-		t.Fatalf("Publish: %v", err)
+	if _, err := zd.BumpSerial(); err != nil { // busy: the operator's bump published just now
+		t.Fatalf("BumpSerial: %v", err)
 	}
 	busy := readPublishState(zd)
 
