@@ -1490,11 +1490,11 @@ func (zd *ZoneData) stripRRSIGsLocked(name string, rrt uint16, rrset core.RRset)
 	return removed
 }
 
-// nsecTTLLocked returns the TTL an NSEC record should carry: the SOA minimum
-// (RFC 4034 §4), which is the zone's negative-caching TTL and so the right
-// lifetime for a record that proves absence. Falls back to the apex SOA's own
-// header TTL if the zone has no readable SOA, which should not happen on a
-// path that is about to sign.
+// nsecTTLLocked returns the TTL an NSEC record should carry: the zone's
+// negative TTL, the smaller of the SOA minimum and the SOA's own TTL (RFC 9077,
+// updating RFC 4034 §4), which is the right lifetime for a record that proves
+// absence. Falls back to the apex SOA's own header TTL if the zone has no
+// readable SOA, which should not happen on a path that is about to sign.
 func (zd *ZoneData) nsecTTLLocked() uint32 {
 	od := zd.stagedOwner(zd.ZoneName)
 	if od == nil {
@@ -1505,7 +1505,7 @@ func (zd *ZoneData) nsecTTLLocked() uint32 {
 		return 3600
 	}
 	if s, ok := soa.RRs[0].(*dns.SOA); ok {
-		return s.Minttl
+		return negativeTTL(s)
 	}
 	return soa.RRs[0].Header().Ttl
 }

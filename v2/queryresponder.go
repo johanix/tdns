@@ -346,7 +346,7 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		lgHandler.Debug("QueryResponder: DS query, insecure delegation (no DS) — authenticated NODATA",
 			"qname", qname, "parent", pzd.ZoneName)
 		m.MsgHdr.Rcode = dns.RcodeSuccess
-		m.Ns = append(m.Ns, pzd.soaForResponseFrom(psnap, papex).RRs...)
+		m.Ns = append(m.Ns, pzd.soaForDenialFrom(psnap, papex).RRs...)
 		if msgoptions.DO {
 			d := denial{kind: denyType, qname: qname, qtype: dns.TypeDS,
 				owner: getOwnerFrom(psnap, qname), types: []uint16{dns.TypeNS}}
@@ -364,7 +364,7 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		if owner := getOwnerFrom(psnap, qname); owner != nil {
 			m.MsgHdr.Authoritative = true
 			m.MsgHdr.Rcode = dns.RcodeSuccess
-			m.Ns = append(m.Ns, pzd.soaForResponseFrom(psnap, papex).RRs...)
+			m.Ns = append(m.Ns, pzd.soaForDenialFrom(psnap, papex).RRs...)
 			if msgoptions.DO {
 				// Existing types at qname (DS is not among them) → NODATA proof.
 				d := denial{kind: denyType, qname: qname, qtype: dns.TypeDS,
@@ -432,7 +432,7 @@ func (zd *ZoneData) sendChildApexDSNodata(m *dns.Msg, w dns.ResponseWriter, qnam
 		"qname", qname, "zone", zd.ZoneName)
 	m.MsgHdr.Authoritative = true
 	m.MsgHdr.Rcode = dns.RcodeSuccess
-	m.Ns = append(m.Ns, zd.soaForResponseFrom(snap, apex).RRs...)
+	m.Ns = append(m.Ns, zd.soaForDenialFrom(snap, apex).RRs...)
 	if msgoptions.DO {
 		// The apex's own types, never DS: a DS stored at the apex is parent-side
 		// data that does not belong in the child, and a bitmap listing it would
@@ -525,7 +525,7 @@ func respondEDNS(m, r *dns.Msg, msgoptions *edns0.MsgOptions) {
 func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData, snap *zoneSnapshot,
 	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
 	m.MsgHdr.Rcode = dns.RcodeNameError
-	soaRRset := zd.soaForResponseFrom(snap, apex)
+	soaRRset := zd.soaForDenialFrom(snap, apex)
 	m.Ns = append(m.Ns, soaRRset.RRs...)
 	if msgoptions.DO {
 		// The proof comes from the zone's denial source (addDenial). Only a
@@ -550,7 +550,7 @@ func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string,
 func (zd *ZoneData) sendENTNodata(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData, snap *zoneSnapshot,
 	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
 	m.MsgHdr.Rcode = dns.RcodeSuccess
-	soaRRset := zd.soaForResponseFrom(snap, apex)
+	soaRRset := zd.soaForDenialFrom(snap, apex)
 	m.Ns = append(m.Ns, soaRRset.RRs...)
 	if msgoptions.DO {
 		if err := zd.addDenial(m, snap, apex, denial{kind: denyENT, qname: qname}, msgoptions, signFunc); err != nil {
@@ -633,7 +633,7 @@ func (zd *ZoneData) sendAnswer(m, r *dns.Msg, w dns.ResponseWriter, qname, origq
 // wildcard, a zone with a chain also proves that qname does not exist.
 func (zd *ZoneData) sendTypeNodata(m *dns.Msg, w dns.ResponseWriter, qname string, qtype uint16, owner, apex *OwnerData, snap *zoneSnapshot,
 	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
-	m.Ns = append(m.Ns, zd.soaForResponseFrom(snap, apex).RRs...)
+	m.Ns = append(m.Ns, zd.soaForDenialFrom(snap, apex).RRs...)
 	if msgoptions.DO {
 		d := denial{kind: denyType, qname: qname, qtype: qtype, owner: owner, types: owner.RRtypes.Keys()}
 		if err := zd.addDenial(m, snap, apex, d, msgoptions, signFunc); err != nil {
@@ -1359,7 +1359,7 @@ func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zone
 	var soaMinTTL uint32 = 3600
 	if soaRR, ok := apex.RRtypes.Get(dns.TypeSOA); ok && len(soaRR.RRs) > 0 {
 		if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
-			soaMinTTL = soa.Minttl
+			soaMinTTL = negativeTTL(soa)
 		}
 	}
 
@@ -1412,7 +1412,7 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 
 	if soaRR, ok := apex.RRtypes.Get(dns.TypeSOA); ok && len(soaRR.RRs) > 0 {
 		if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
-			soaMinTTL = soa.Minttl
+			soaMinTTL = negativeTTL(soa)
 			lgHandler.Debug("negative TTL from SOA", "zone", zd.ZoneName, "minTTL", soaMinTTL)
 		}
 	}
@@ -1459,7 +1459,7 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 		}(),
 	}
 	m.Ns = append(m.Ns, nsecRR)
-	m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
+	m.Ns = append(m.Ns, denialSOASigs(apex)...)
 
 	nsecRRset, err := signFunc(core.RRset{RRs: []dns.RR{nsecRR}}, zd.ZoneName)
 	if err != nil {
