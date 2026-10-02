@@ -154,6 +154,8 @@ func TestIsSubdomainOfIsADNSTest(t *testing.T) {
 		{"WWW.EXAMPLE.COM.", "example.com.", true, "case must not matter"},
 		{"www.example.com.", "EXAMPLE.COM.", true, "either side"},
 		{"anything.", ".", true, "everything is under the root"},
+		{`www.x\255.example.`, "x\xff.example.", true, "an escape against the raw octet it stands for"},
+		{"www.x\xff.example.", `X\255.example.`, true, "either side"},
 
 		{"example.com.", "ample.com.", false, "NOT a subdomain: the byte suffix matches but the label does not"},
 		{"notexample.com.", "example.com.", false, "same trap"},
@@ -249,6 +251,7 @@ func TestBaseFromTLSAOwnerIgnoresCase(t *testing.T) {
 		{"_853._tcp.ns1.example.com.", "ns1.example.com."},
 		{"_853._TCP.ns1.example.com.", "ns1.example.com."},
 		{"_853._UDP.NS1.Example.COM.", "NS1.Example.COM."},
+		{`\_853._udp.ns1.example.com.`, "ns1.example.com."}, // escaped, and still two labels
 		{"ns1.example.com.", ""},
 		{".", ""},
 	} {
