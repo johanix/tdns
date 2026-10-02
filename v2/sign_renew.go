@@ -171,7 +171,17 @@ func (zd *ZoneData) RenewZoneSignatures(ctx context.Context, kdb *KeyDB) (int, e
 	// new serial and recomputes the ZONEMD -- which is why a publish-owned
 	// signature coming due is on its own a reason to publish, with nothing
 	// staged at all.
-	zd.publishLocked(zd.generation.Load())
+	// The gate: an idle zone publishes here; a busy zone's signatures leave
+	// with the next publish, inside one cadence. That publish renews what it
+	// owns (the SOA, a managed ZONEMD) and installs the snapshot the pass
+	// after it recomputes the schedule from. Until then the served snapshot
+	// is the one this pass found due, so nothing below reads it, and the
+	// estimate would describe a version that is not published: unknown, as
+	// for a pass over a pending working set.
+	if !zd.publishOrQueueLocked(zd.generation.Load(), false) {
+		zd.setResignSchedule(time.Time{}, 0)
+		return len(signed) + publishOwned, nil
+	}
 
 	// A publish that did not renew what it owns would put this pass in a loop,
 	// publishing and bumping the serial on every tick because the same

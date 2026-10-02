@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -119,7 +120,8 @@ func (zd *ZoneData) pendingChanges() *PendingChanges {
 }
 
 func (zd *ZoneData) pendingChangesLocked() *PendingChanges {
-	if zd.workingSet == nil {
+	held := zd.txHeldLocked()
+	if zd.workingSet == nil && !zd.publishQueued && !held {
 		return nil
 	}
 	snap := zd.snapshot.Load()
@@ -130,6 +132,25 @@ func (zd *ZoneData) pendingChangesLocked() *PendingChanges {
 	pc := &PendingChanges{
 		PublishedSerial: publishedSerial,
 		PublishQueued:   zd.publishQueued,
+		Cadence:         publishCadenceForZone(zd),
+		Waiters:         len(zd.waiters),
+		FollowUps:       len(zd.afterPublish),
+		Held:            held,
+		HoldSince:       zd.tx.holdStart,
+		HoldStopped:     zd.tx.stopped,
+	}
+	if pc.PublishQueued {
+		pc.NextPublishAt = zd.lastPublish.Add(pc.Cadence)
+	}
+	if held {
+		pc.HoldCap = txHoldAgeCap
+		for id, tx := range zd.tx.open {
+			pc.Transactions = append(pc.Transactions, pendingTx{ID: id, Started: tx.start, Limit: tx.limit, Overdue: tx.overdue})
+		}
+		sort.Slice(pc.Transactions, func(i, j int) bool { return pc.Transactions[i].Started.Before(pc.Transactions[j].Started) })
+	}
+	if zd.workingSet == nil {
+		return pc
 	}
 	published := map[string]*OwnerData{}
 	if snap != nil {
@@ -157,7 +178,7 @@ func (zd *ZoneData) pendingChangesLocked() *PendingChanges {
 		}
 		pc.Deleted = append(pc.Deleted, pendingOwnerChange{Owner: name, RRtypes: pubOd.RRtypes.Keys()})
 	}
-	if len(pc.Added) == 0 && len(pc.Replaced) == 0 && len(pc.Deleted) == 0 && !pc.PublishQueued {
+	if len(pc.Added) == 0 && len(pc.Replaced) == 0 && len(pc.Deleted) == 0 && !pc.PublishQueued && !held {
 		return nil
 	}
 	return pc
@@ -327,7 +348,13 @@ func (zd *ZoneData) publishSync() (BumperResponse, error) {
 	resp := BumperResponse{Zone: zd.ZoneName}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	resp.OldSerial = zd.CurrentSerial
+	resp.OldSerial, resp.NewSerial = zd.CurrentSerial, zd.CurrentSerial
+	if zd.txHeldLocked() {
+		// The hold would stop the publish inside; say so instead of reporting
+		// success with the serial unchanged.
+		resp.Msg = fmt.Sprintf("zone %s is held by an open transaction; nothing published until its commit", zd.ZoneName)
+		return resp, nil
+	}
 	if zd.workingSet == nil {
 		zd.ensureWorkingSet()
 	}
@@ -1770,8 +1797,30 @@ func (zd *ZoneData) StageOwnerDelete(name string) {
 // one from the served snapshot and republishes identical content under a new
 // serial. A caller that may have staged nothing should use StageBatch, whose
 // callback reports whether anything changed.
+// Publish asks the gate for what is staged: an idle zone publishes in the
+// caller and the response carries the new serial; a busy zone's publish is the
+// gate's, at the next cadence, and the response says so with the serial
+// unchanged; a held zone publishes nothing until its commit. It bumps nothing
+// of its own: with nothing staged there is nothing to publish. The operator's
+// bump (BumpSerial) is the immediate call.
 func (zd *ZoneData) Publish() (BumperResponse, error) {
-	return zd.publishSync()
+	resp := BumperResponse{Zone: zd.ZoneName}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	resp.OldSerial, resp.NewSerial = zd.CurrentSerial, zd.CurrentSerial
+	switch {
+	case zd.workingSet == nil && !zd.txHeldLocked():
+		resp.Msg = fmt.Sprintf("zone %s: nothing staged, nothing to publish", zd.ZoneName)
+	case zd.publishOrQueueLocked(zd.generation.Load(), false):
+		resp.NewSerial = zd.CurrentSerial
+	case zd.txHeldLocked():
+		// Asked, and stopped by the hold, which counts it; the commit that
+		// closes the hold carries what is staged.
+		resp.Msg = fmt.Sprintf("zone %s is held by an open transaction; nothing published until its commit", zd.ZoneName)
+	default:
+		resp.Msg = fmt.Sprintf("zone %s: staged; the gate publishes it at the next cadence", zd.ZoneName)
+	}
+	return resp, nil
 }
 
 // StopPublisher terminates the zone's coalescing publisher goroutine, the one
@@ -1947,8 +1996,10 @@ func (zd *ZoneData) restoreStagingLocked(s stagingSave) {
 // must undo its own writes.
 //
 // The response carries the serials before and after. NewSerial == OldSerial
-// means nothing was published: no change reported, a draft, or a publish the
-// zone refused (an apex-less or unsignable working set, which is logged).
+// means this call published nothing: no change reported, a draft, a publish
+// the zone refused (an apex-less or unsignable working set, which is logged),
+// or a busy zone, where the batch is staged and the gate's publish carries it
+// at the next cadence, with its own serial.
 func (zd *ZoneData) StageBatch(fn func(s Stager) (changed bool, err error)) (BumperResponse, error) {
 	resp := BumperResponse{Zone: zd.ZoneName}
 	if fn == nil {
@@ -1988,7 +2039,8 @@ func (zd *ZoneData) StageBatch(fn func(s Stager) (changed bool, err error)) (Bum
 		zd.dropBareWorkingSetLocked()
 		return resp, nil
 	}
-	zd.publishLocked(zd.generation.Load())
-	resp.NewSerial = zd.CurrentSerial
+	if zd.publishOrQueueLocked(zd.generation.Load(), false) {
+		resp.NewSerial = zd.CurrentSerial
+	}
 	return resp, nil
 }

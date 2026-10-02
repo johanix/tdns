@@ -87,7 +87,11 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = err.Error()
 				return
 			}
-			resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zp.Zone, br.OldSerial, br.NewSerial)
+			if br.Msg != "" {
+				resp.Msg = br.Msg
+			} else {
+				resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zp.Zone, br.OldSerial, br.NewSerial)
+			}
 
 		// "sync" is an alias for "write-zone": spool the current zone content
 		// out to disk, without the freeze/thaw ritual around it. Named for

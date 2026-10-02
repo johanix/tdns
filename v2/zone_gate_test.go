@@ -29,8 +29,8 @@ func busyZone(t *testing.T, zone string, cadence time.Duration) (*ZoneData, *Key
 	zd.publishCadence = cadence
 	zd.mu.Unlock()
 	stageTxt(t, zd, "warm."+zone, "x")
-	if _, err := zd.Publish(); err != nil {
-		t.Fatalf("Publish: %v", err)
+	if _, err := zd.BumpSerial(); err != nil { // the operator's immediate publish warms the zone
+		t.Fatalf("BumpSerial: %v", err)
 	}
 	return zd, kdb
 }

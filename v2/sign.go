@@ -872,7 +872,7 @@ func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
 		}
 	}
 
-	zd.publishLocked(zd.generation.Load())
+	zd.publishOrQueueLocked(zd.generation.Load(), false) // the gate: a busy zone's pass goes out with the next publish
 
 	lgSigner.Info("ResignZone completed",
 		"zone", zd.ZoneName, "rrsigs_written", newrrsigs)
@@ -939,7 +939,7 @@ func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG)
 		}
 	}
 	if removed > 0 {
-		zd.publishLocked(zd.generation.Load())
+		zd.publishOrQueueLocked(zd.generation.Load(), false) // the gate: a busy zone's pass goes out with the next publish
 		lgSigner.Info("stripped orphan RRSIGs from zone", "zone", zd.ZoneName, "count", removed)
 	}
 	return removed, nil
@@ -1010,7 +1010,7 @@ func (zd *ZoneData) SignZone(ctx context.Context, kdb *KeyDB, force bool) (int, 
 		return 0, err
 	}
 
-	zd.publishLocked(zd.generation.Load())
+	zd.publishOrQueueLocked(zd.generation.Load(), false) // the gate: a busy zone's pass goes out with the next publish
 
 	if err := UpsertZoneSigningMaxTTL(kdb, zd.ZoneName, maxObservedTTL); err != nil {
 		lgSigner.Warn("SignZone: persist max_observed_ttl", "zone", zd.ZoneName, "err", err)
