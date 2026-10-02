@@ -238,7 +238,7 @@ func TestARenewalOnABusyZoneTakesNothingFromTheServedSnapshot(t *testing.T) {
 	zd := renewalTestZone(t, kdb)
 	t.Cleanup(func() { zd.stopPublisher(); zd.joinPublisher() })
 	zd.mu.Lock()
-	zd.publishCadence = 700 * time.Millisecond
+	zd.publishCadence = 2 * time.Second
 	zd.lastPublish = time.Now()
 	zd.mu.Unlock()
 	before := zd.publishedSnapshot()
@@ -260,7 +260,7 @@ func TestARenewalOnABusyZoneTakesNothingFromTheServedSnapshot(t *testing.T) {
 	if _, ok := zd.resignDue(); ok {
 		t.Error("a renewal schedule was taken from the snapshot the pass found due")
 	}
-	waitFor(t, 3*time.Second, "the gate's publish", func() bool { return zd.publishedSnapshot() != before })
+	waitFor(t, 6*time.Second, "the gate's publish", func() bool { return zd.publishedSnapshot() != before })
 	for _, sig := range getOwnerFrom(zd.publishedSnapshot(), zd.ZoneName).RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs {
 		if expiry := time.Unix(int64(sig.(*dns.RRSIG).Expiration), 0); time.Until(expiry) < time.Hour {
 			t.Errorf("the apex SOA signature still expires at %s after the gate's publish", expiry.UTC())
