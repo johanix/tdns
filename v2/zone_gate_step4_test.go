@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,5 +222,48 @@ func TestPublishAsksTheGate(t *testing.T) {
 	}
 	if resp.NewSerial != resp.OldSerial+1 || !served(zd, "b."+zone, dns.TypeTXT) {
 		t.Errorf("Publish on an idle zone: serial %d -> %d, served=%v; want the publish in the caller", resp.OldSerial, resp.NewSerial, served(zd, "b."+zone, dns.TypeTXT))
+	}
+}
+
+// A renewal pass on a busy zone takes nothing from the served snapshot: its
+// signatures leave with the gate's publish, which renews what it owns, and
+// the still-due check and the schedule that read the snapshot after a publish
+// wait for the pass that follows it (the step-4 review's C1).
+func TestARenewalOnABusyZoneTakesNothingFromTheServedSnapshot(t *testing.T) {
+	var logs syncBuffer
+	prev := lgSigner
+	lgSigner = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { lgSigner = prev })
+	kdb := newTestKeyDB(t)
+	zd := renewalTestZone(t, kdb)
+	t.Cleanup(func() { zd.stopPublisher(); zd.joinPublisher() })
+	zd.mu.Lock()
+	zd.publishCadence = 700 * time.Millisecond
+	zd.lastPublish = time.Now()
+	zd.mu.Unlock()
+	before := zd.publishedSnapshot()
+	ageApexSoaSignature(t, zd)
+
+	renewed, err := zd.RenewZoneSignatures(context.Background(), kdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renewed == 0 {
+		t.Fatal("reported nothing to do while the apex SOA signature was about to expire")
+	}
+	if zd.publishedSnapshot() != before {
+		t.Fatal("the pass published in the caller on a busy zone")
+	}
+	if strings.Contains(logs.String(), "STILL due") {
+		t.Errorf("the pass read the served snapshot before the gate's publish and reported a false error:\n%s", logs.String())
+	}
+	if _, ok := zd.resignDue(); ok {
+		t.Error("a renewal schedule was taken from the snapshot the pass found due")
+	}
+	waitFor(t, 3*time.Second, "the gate's publish", func() bool { return zd.publishedSnapshot() != before })
+	for _, sig := range getOwnerFrom(zd.publishedSnapshot(), zd.ZoneName).RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs {
+		if expiry := time.Unix(int64(sig.(*dns.RRSIG).Expiration), 0); time.Until(expiry) < time.Hour {
+			t.Errorf("the apex SOA signature still expires at %s after the gate's publish", expiry.UTC())
+		}
 	}
 }

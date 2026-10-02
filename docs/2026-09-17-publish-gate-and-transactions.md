@@ -755,7 +755,11 @@ text:
 - **Nothing waits on a signing pass.** The passes ask the gate and return; their
   callers (the resigner, the API's sign-zone and resign-zone, the key-state
   worker, the keystore and the rollovers that strip signatures) only log or
-  check the error, and none reads the zone back right after. A pass on a busy
+  check the error, and none reads the zone back right after. The renewal pass
+  itself does, after its publish, to check what the publish owns and to
+  schedule the next pass; when the publish is the gate's it does neither, and
+  leaves the schedule unknown for the pass that follows the publish (the
+  external review's C1). A pass on a busy
   zone goes out with the next publish, sharing its serial with whatever an
   update staged: the rate limit the text left to this step. Rule 5 holds: the
   first signing of a zone that signs finds no snapshot and publishes at once.
