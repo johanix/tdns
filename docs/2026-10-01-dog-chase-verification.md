@@ -2,14 +2,16 @@
 
 **Written 2026-10-01.** Line references are to main at `995c15c6`.
 
-**Status:** items 1-5 and 8 implemented in PR #881; items 6 and 7 in a
-second PR after #873 and #874.
+**Status:** items 1-5 and 8 implemented in PR #881; items 6 and 7 implemented
+in PR #887, stacked on #881.
 
 **Revisions:**
 - **r1**, 2026-10-01: the proposal, approved the same day with the decisions
   in §10 and the conditions in §11.1.
 - **Amended 2026-10-01** (§11): how PR 1 differs from r1, its tests and the
   live checks.
+- **Amended 2026-10-01** (§12): PR 2, items 6 and 7 and two review findings
+  on #881: how it differs from r1, its tests and the live checks.
 
 Refs #876 (all eight items) and #379 (items 3 and 8 cover it).
 
@@ -640,4 +642,103 @@ dog built from this branch with `make`, against tdns-imr (main with #872,
 With `-k` naming a file whose DS matches no root key, the first line names the
 file and every link is Bogus. With `-k` naming a missing file, dog says so on
 stderr and the first line names the source it fell back to.
+
+## 12. Amendment, 2026-10-01: PR 2 as implemented
+
+PR #887, stacked on #881, after #873, #874 and #879 (the resolver's answer to
+a DS or DNSKEY question at a CNAME owner) had merged.
+
+### 12.1 Scope and commits
+
+Items 6 and 7, and two findings of the review of #881:
+
+- **C1**: below an unsigned delegation capped by a Bogus or Indeterminate
+  zone above, the answer's note said "zone X is insecure". It now names the
+  verdict.
+- **C2**: the walk read the RRSIG Labels field with a check of its own
+  (`expandedFrom`). #874's `isExpansion` is exported as
+  `cache.ExpansionSignature`, and the walk asks it.
+
+One commit each, in the order 6, C2, 7, C1, then the guide and this document.
+C2 comes before 7, which builds on it.
+
+### 12.2 Where the code differs from r1
+
+a. **`ProveDenial` and `ValidateDenial`.** The reading moves into an
+   unexported `proveDenial` that takes a log function: `ValidateDenial` passes
+   its own when the cache debugs, so its debug lines are unchanged, and
+   `ProveDenial` passes none. `ValidateDenial` keeps its branch for a denial
+   with neither NSEC nor NSEC3 (`Insecure` with an error); `ProveDenial` given
+   no records returns Bogus.
+b. **`ProveWildcardAnswer` does not filter records by owner.** Its callers
+   hand it records of the zone: the resolver filters the RRsets first
+   (`proofOwnedIn`), and the walk passes only records the zone signed.
+c. **A denial in the walk** (§2.1): RRsets signed only by other zones are
+   passed over; one the zone signed that does not verify makes the answer
+   Bogus, as a failing RRset decides in the resolver. A denial with no RRSIG
+   at all takes the zone's verdict when the zone is not Secure, as an
+   unsigned answer does. A denial without an SOA is read with the deepest
+   zone's records; an SOA, when present, must be the deepest zone's.
+d. **A proven DS denial at a candidate**: a name error stops the walk, as r1
+   said (RFC 8020); any other proven denial of the DS, with nothing proven
+   about a cut, shows the candidate is no delegation, as the resolver's
+   `denialEvidence` reads it.
+e. **No rcode in the leaf line** (r1 §6): the note names it ("NXDOMAIN
+   proven by NSEC3"), and the proof records are printed under the leaf
+   (`ChainLeaf.Proof`).
+f. **Answers synthesized from a wildcard**: signatures over the owner are
+   tried before expansion signatures, as `ValidateAnswer` tries them. What is
+   left of the walk's own Labels code names the wildcard for the output
+   (`wildcardOf`), and decides nothing.
+g. **The test tree** also synthesizes CNAMEs from wildcards.
+h. **Size**: code +323 -82, tests +581 -19. `chase.go` is 1,134 lines.
+
+### 12.3 Tests
+
+- `v2/cache/prove_denial_agree_test.go`: `ProveDenial` and `ValidateDenial` on
+  the same records. NSEC3, 10 cases: name error, through Opt-Out, without the
+  wildcard cover, no data, the type present, over the iteration limit, a
+  cover owned in another zone, and the DS denials of a matching record, an
+  Opt-Out span and a cover without Opt-Out. NSEC, 16 cases: name errors with
+  and without a cover, no data at the name and at a delegation, empty
+  non-terminals (no data, DS, name error), wildcard no data in six shapes,
+  and RFC 9824 compact name error and no data. And `ProveDenial` with no
+  records.
+- `v2/cache/prove_wildcard_agree_test.go`: `ProveWildcardAnswer` and
+  `WildcardAnswerProof` on the same records, 10 NSEC and 4 NSEC3 cases, and
+  `ExpansionSignature` on its own. A record whose signature fails decides
+  both verdicts before any proof is read, and is not compared.
+- `v2/chase_verify_test.go`: denials and wildcard answers with the proof
+  present, missing and changed after signing; NSEC3 Opt-Out and the iteration
+  limit; an SOA from another zone; a denial with no RRSIG; nothing asked
+  below a proven name error; a CNAME from a wildcard; the expansion rule
+  (C2); the capped note (C1).
+- `go vet` and `go test` pass in `v2`, `v2/cache`, `v2/cli` and `cmdv2/dog`
+  (`TestStandbyAndAManualRollReachTheCds` failed once in the full `v2` run and
+  passed on its own); `make` builds dog.
+
+### 12.4 Live checks
+
+dog from this branch, against a tdns-imr built from main at `df4f2caf` (with
+#879), run on a port of its own with only the root hints and trust anchor
+configured, and against 1.1.1.1. Every row came out as expected:
+
+| Query | tdns-imr (main) | 1.1.1.1 |
+|---|---|---|
+| `www.sidn.nl AAAA` | secure | secure |
+| `www.sidn.nl DS` | secure: CNAME hop, then the DS of `sidn.nl` | secure |
+| `_443._tcp.www.sidn.nl TLSA` | secure | secure |
+| `www.iis.se A`, `sidn.nl DS` | secure | secure |
+| `google.se A` (NSEC), `google.nl A` (NSEC3) | insecure | insecure |
+| `<random>.com A` (Opt-Out) | insecure | insecure |
+| `dnssec-failed.org A` | bogus | bogus |
+| `<random>.nl A` | secure: NXDOMAIN proven by NSEC3 | secure |
+| `nl NAPTR`, `google.nl DS` | secure: NODATA proven by NSEC3 | secure |
+| `<random>.sidn.nl A` | secure: NXDOMAIN proven by NSEC | secure |
+| `<random>.codeberg.page A` | secure: synthesized from `*.codeberg.page.`, the NSEC3 proof holds | secure |
+| an NSEC-signed wildcard test zone | secure: the NSEC proof holds | secure |
+
+The `www.sidn.nl` rows now match 1.1.1.1. The first chase of the NSEC wildcard
+test zone against the freshly started resolver came out Indeterminate once;
+eight further runs, one of them right after a cold restart, were Secure.
 
