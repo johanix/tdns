@@ -203,7 +203,7 @@ func ProveWildcardAnswer(zone, qname string, labels uint8, nsecs []*dns.NSEC, ns
 //   - has a next name that does not lie below qname, which would make qname
 //     an empty non-terminal, a name that exists;
 //   - has neither DNAME nor NS without SOA when its owner is an ancestor of
-//     qname: the names below such an owner are not the zone's.
+//     qname: the names below such an owner are not the zone's (nsecAboveCut).
 func nsecWildcardAnswer(qname string, labels uint8, zone string, nsecs []*dns.NSEC) bool {
 	ql := dns.SplitDomainName(qname)
 	if int(labels) >= len(ql) {
@@ -217,11 +217,8 @@ func nsecWildcardAnswer(qname string, labels uint8, zone string, nsecs []*dns.NS
 		if canonicalNameCompare(closestEncloser(qname, nsec, zone), ce) != 0 {
 			continue
 		}
-		if dns.IsSubDomain(nsec.Hdr.Name, qname) {
-			bm := nsec.TypeBitMap
-			if typeInList(dns.TypeDNAME, bm) || (typeInList(dns.TypeNS, bm) && !typeInList(dns.TypeSOA, bm)) {
-				continue
-			}
+		if nsecAboveCut(qname, nsec) {
+			continue
 		}
 		return true
 	}

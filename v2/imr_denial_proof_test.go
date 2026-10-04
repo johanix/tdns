@@ -88,3 +88,43 @@ func TestHandleNegativeReadsOnlyTheDenyingZonesNSEC(t *testing.T) {
 	handleDenial(t, imr, q, dns.TypeA, denialReply(q, dns.TypeA, dns.RcodeNameError, append(append(ns[:0:0], ns...), own...)), zone).
 		secure(t, q+" with the zone's own NSEC beside another's", dns.RcodeNameError)
 }
+
+// The zone above's NSEC at a cut is no proof about the names below it, nor
+// about any type at the cut but the DS: with a DS at the cut the denial is
+// Bogus, without one Insecure. The DS question at the cut is still answered
+// by it.
+func TestHandleNegativeReadsNothingBelowAZoneCut(t *testing.T) {
+	const parent = "example."
+	const child = "child." + parent
+	soa := func(t *testing.T) []dns.RR {
+		return rrs(t, parent+" 300 IN SOA ns."+parent+" h."+parent+" 1 3600 600 604800 300")
+	}
+	for _, c := range []struct {
+		name  string
+		types string
+		qname string
+		qtype uint16
+		rcode int
+		state cache.ValidationState
+	}{
+		{"below a signed cut, no data", "NS DS RRSIG NSEC", "ns1." + child, dns.TypeA, dns.RcodeSuccess, cache.ValidationStateBogus},
+		{"below a signed cut, name error", "NS DS RRSIG NSEC", "www." + child, dns.TypeA, dns.RcodeNameError, cache.ValidationStateBogus},
+		{"at a signed cut, another type", "NS DS RRSIG NSEC", child, dns.TypeMX, dns.RcodeSuccess, cache.ValidationStateBogus},
+		{"below an unsigned cut, no data", "NS RRSIG NSEC", "ns1." + child, dns.TypeA, dns.RcodeSuccess, cache.ValidationStateInsecure},
+		{"at an unsigned cut, no DS", "NS RRSIG NSEC", child, dns.TypeDS, dns.RcodeSuccess, cache.ValidationStateSecure},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, imr, sign := validatorScanner(t, parent)
+			cut := rrs(t, child+" 300 IN NSEC other."+parent+" "+c.types)
+			ns := append(signedSet(sign, parent, soa(t)), signedSet(sign, parent, cut)...)
+			// Asked of the zone above's servers: what the SOA says matches them.
+			o := handleDenial(t, imr, c.qname, c.qtype, denialReply(c.qname, c.qtype, c.rcode, ns), parent)
+			if o.cached == nil {
+				t.Fatalf("not cached")
+			}
+			if o.cached.State != c.state {
+				t.Errorf("cached %s, want %s", cache.ValidationStateToString[o.cached.State], cache.ValidationStateToString[c.state])
+			}
+		})
+	}
+}

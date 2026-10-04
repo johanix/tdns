@@ -1312,6 +1312,11 @@ func (rrcache *RRsetCacheT) ValidateDenial(ctx context.Context, qname string, qt
 // section 5.4). Otherwise the NSEC3 proofs of RFC 5155 section 8, through an
 // Opt-Out span Insecure, over the iteration limit Insecure with EDE 27 (RFC
 // 9276). With neither, nothing is proven: Bogus.
+//
+// An NSEC at a zone cut or a DNAME proves nothing about the names below it,
+// nor one at a cut anything at the cut but the DS (RFC 6840 section 4.1):
+// Insecure below a cut without DS, Bogus otherwise (cutDenial). The DS at a
+// zone's apex is denied by the zone above, never by the zone itself.
 func ProveDenial(qname string, qtype uint16, rcode uint8, zone string, nsecs []*dns.NSEC, nsec3s []*dns.NSEC3) DenialVerdict {
 	return proveDenial(qname, qtype, rcode, dns.CanonicalName(zone), nsecs, nsec3s, nil)
 }
@@ -1325,6 +1330,14 @@ func proveDenial(qname string, qtype uint16, rcode uint8, zoneName string, nsecs
 		logf = func(string, ...any) {}
 	}
 	qnameCanon := dns.CanonicalName(qname)
+
+	// A DS is the zone above's data (RFC 4035 section 5.2): a zone's own
+	// denial of the DS at its apex, its apex NSEC or NSEC3 without DS, is the
+	// child side answering, and proves nothing about the delegation.
+	if qtype == dns.TypeDS && qnameCanon == zoneName && zoneName != "." {
+		logf("ValidateDenial: a denial of the DS at %s from %s itself, not the zone above", qname, zoneName)
+		return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}
+	}
 
 	// NSEC case: Check for traditional denial (NXDOMAIN) or compact denial (RFC 9824)
 	if len(nsecs) > 0 {
@@ -1347,6 +1360,15 @@ func proveDenial(qname string, qtype uint16, rcode uint8, zoneName string, nsecs
 					return DenialVerdict{State: ValidationStateSecure, Rcode: dns.RcodeNameError}
 				}
 
+				// At a zone cut the zone above holds the delegation and its DS,
+				// nothing else: any other type at the name is the child's
+				// (RFC 6840 section 4.1). Without DS the child is proven
+				// unsigned, and nothing about it can be Secure.
+				if qtype != dns.TypeDS && delegationBitmap(nsec.TypeBitMap) {
+					logf("ValidateDenial: the NSEC at %s is the zone cut seen from %s: no proof about %s", qname, zoneName, dns.TypeToString[qtype])
+					return DenialVerdict{State: cutDenial(nsec), Rcode: rcode}
+				}
+
 				// Check for compact denial NODATA: qtype is NOT in the type bitmap
 				if !typeInBitmap(qtype, nsec.TypeBitMap) {
 					logf("ValidateNegativeResponse: compact denial NODATA (RFC 9824) validated for %s %s: name exists but no data for type", qname, dns.TypeToString[qtype])
@@ -1356,6 +1378,16 @@ func proveDenial(qname string, qtype uint16, rcode uint8, zoneName string, nsecs
 				// If owner == qname but qtype IS in bitmap, this is not a negative response
 				// (should not happen in negative authority section, but handle gracefully)
 				logf("ValidateNegativeResponse: NSEC owner matches qname but qtype %s is in bitmap - not a compact denial", dns.TypeToString[qtype])
+			}
+		}
+
+		// Below a zone cut or a DNAME the zone holds no names. Its NSEC there
+		// covers every name below in canonical order, and proves nothing about
+		// them (nsecAboveCut, cutDenial).
+		for _, nsec := range nsecs {
+			if nsecAboveCut(qnameCanon, nsec) && nsecCoversName(qnameCanon, nsec) {
+				logf("ValidateDenial: %s lies below %s, a zone cut or DNAME in %s: the NSEC there is no proof about it", qname, nsec.Hdr.Name, zoneName)
+				return DenialVerdict{State: cutDenial(nsec), Rcode: rcode}
 			}
 		}
 
@@ -1388,7 +1420,7 @@ func proveDenial(qname string, qtype uint16, rcode uint8, zoneName string, nsecs
 		}
 		wildcard := wildcardAt(closestEncloser(qnameCanon, qnameCover, zoneName))
 		for _, nsec := range nsecs {
-			if nsecCoversName(wildcard, nsec) {
+			if nsecCoversName(wildcard, nsec) && !nsecAboveCut(wildcard, nsec) {
 				// Every record used here validated Secure above.
 				return DenialVerdict{State: ValidationStateSecure, Rcode: rcode}
 			}
