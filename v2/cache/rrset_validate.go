@@ -1135,8 +1135,9 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 // from its authority section grouped into RRsets.
 //
 // The SOA names the zone that denies. Every signed RRset must validate, and
-// only records that validate Secure prove anything: an NSEC proof (RFC 4035
-// section 5.4, RFC 9824), or an NSEC3 proof (RFC 5155 section 8; nsec3.go).
+// only that zone's own records that validate Secure, with its signatures,
+// prove anything: an NSEC proof (RFC 4035 section 5.4, RFC 9824), or an NSEC3
+// proof (RFC 5155 section 8; nsec3.go). A signed denial with none is Bogus.
 // An NSEC3 proof through an Opt-Out span is Insecure (section 9.2), and so is
 // one that needs records over the iteration limit, with EDE 27 (RFC 9276). A
 // denial with no signatures, or with records from a zone held Insecure, is
@@ -1215,10 +1216,15 @@ func (rrcache *RRsetCacheT) ValidateDenial(ctx context.Context, qname string, qt
 	// AD from a zone that has no chain of trust.
 	//
 	//
-	// NSEC3 records count only when they are owned directly below the SOA's
-	// zone and a signature by that zone validates them, as nsec3CutProof has
-	// it. Those are validated with that zone's signatures alone. Other NSEC3
-	// records are validated as any other RRset, and never count.
+	// A denial is read from records of the zone that denies, the one the SOA
+	// names. NSEC3 records count only when they are owned directly below that
+	// zone, NSEC records only when they are owned at or below it, and either
+	// only when a signature by that zone validates them, as nsec3CutProof and
+	// WildcardAnswerProof have it. Those are validated with that zone's
+	// signatures alone. Other NSEC and NSEC3 records are validated as any
+	// other RRset, and never count: another zone's NSEC chain says nothing
+	// about the names of this one, and its last NSEC, or the NSEC of a zone of
+	// one name, covers names far outside it in canonical order.
 	var provenNsecs []*dns.NSEC
 	var provenNsec3s []*dns.NSEC3
 	provenNsec3 := false
@@ -1230,10 +1236,12 @@ func (rrcache *RRsetCacheT) ValidateDenial(ctx context.Context, qname string, qt
 		if len(set.RRSIGs) == 0 {
 			continue
 		}
-		nsec3Counts := false
-		if set.RRtype == dns.TypeNSEC3 && core.EqualNames(parentOf(dns.Fqdn(set.Name)), zoneName) {
+		nsecCounts, nsec3Counts := false, false
+		if (set.RRtype == dns.TypeNSEC || set.RRtype == dns.TypeNSEC3) && proofOwnedIn(set, zoneName) {
 			if zs := signedBy(set, zoneName); zs != nil {
-				set, nsec3Counts = zs, true
+				set = zs
+				nsecCounts = set.RRtype == dns.TypeNSEC
+				nsec3Counts = set.RRtype == dns.TypeNSEC3
 			}
 		}
 		vstate, err := rrcache.ValidateRRset(ctx, set, fetcher)
@@ -1251,6 +1259,9 @@ func (rrcache *RRsetCacheT) ValidateDenial(ctx context.Context, qname string, qt
 		}
 		switch set.RRtype {
 		case dns.TypeNSEC:
+			if !nsecCounts {
+				continue
+			}
 			for _, rr := range set.RRs {
 				if nsec, ok := rr.(*dns.NSEC); ok {
 					provenNsecs = append(provenNsecs, nsec)
@@ -1283,8 +1294,10 @@ func (rrcache *RRsetCacheT) ValidateDenial(ctx context.Context, qname string, qt
 		return proveDenial(qname, qtype, rcode, zoneName, nsecs, provenNsec3s, logf), nil
 	}
 
-	// No NSEC, no NSEC3, must know if zone is secure or insecure
-	return DenialVerdict{State: ValidationStateInsecure, Rcode: rcode}, fmt.Errorf("no NSECs or NSEC3, so we are insecure") // XXX: Need to know if zone is secure, but for now: No NSECs or NSEC3, so we are insecure
+	// Every signed RRset validated Secure, and none of them is an NSEC or NSEC3
+	// record of the zone that denies: a signed denial without its proof. The
+	// error keeps handleNegative from caching it, so the next server is asked.
+	return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}, fmt.Errorf("no NSEC or NSEC3 record of %s proves the denial for %s", zoneName, qname)
 }
 
 // ProveDenial reads what nsecs and nsec3s, records of zone whose signatures by
