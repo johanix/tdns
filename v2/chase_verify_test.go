@@ -1098,8 +1098,12 @@ func TestChaseWildcardAnswers(t *testing.T) {
 // Below a delegation proven unsigned, the answer takes the link's verdict,
 // and the note says that verdict: Insecure under a Secure zone, but no
 // better than a zone above that is Bogus or Indeterminate (review of #881).
+// The note also says what made the delegation an insecure one: the parent's
+// NSEC, its NSEC3, or a DS RRset with no DS this binary can use (review of
+// #887).
 func TestChaseUnsignedDelegationBelowAZoneNotSecure(t *testing.T) {
-	for _, c := range []struct {
+	const unsupportedAlg = 250
+	for _, a := range []struct {
 		name    string
 		anchors func(tr *chaseTree) []*dns.DS
 		want    ChainStatus
@@ -1107,20 +1111,36 @@ func TestChaseUnsignedDelegationBelowAZoneNotSecure(t *testing.T) {
 		{"wrong anchor", func(*chaseTree) []*dns.DS { return []*dns.DS{newFwdSecKey(t, ".").dnskey.ToDS(dns.SHA256)} }, ChainStatusBogus},
 		{"no anchor", func(*chaseTree) []*dns.DS { return nil }, ChainStatusIndeterminate},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			tr := kidTree(t)
-			res, err := NewChaser(tr, "192.0.2.1", c.anchors(tr)).Chase("www.kid.sec.example.", dns.TypeA)
-			if err != nil {
-				t.Fatal(err)
-			}
-			wantStatus(t, "kid.sec.example.", linkNamed(res.Links, "kid.sec.example.").Status, c.want)
-			wantStatus(t, "leaf", res.Leaf.Status, c.want)
-			if hasNote(res.Leaf.Notes, "is insecure") {
-				t.Errorf("leaf notes %q say insecure for a %s answer", res.Leaf.Notes, c.want)
-			}
-			if !hasNote(res.Leaf.Notes, "zone kid.sec.example. is "+c.want.String()+": a delegation with no DS") {
-				t.Errorf("leaf notes %q", res.Leaf.Notes)
-			}
-		})
+		for _, p := range []struct {
+			name  string
+			setup func(t *testing.T, tr *chaseTree)
+			why   string
+		}{
+			{"NSEC", func(*testing.T, *chaseTree) {}, "a delegation the parent's NSEC proves has no DS"},
+			{"NSEC3", func(t *testing.T, tr *chaseTree) {
+				n3KidDenial(t, tr, n3RR("sec.example.", "kid.sec.example.", false, 0, 0, dns.TypeNS))
+			}, "a delegation the parent's NSEC3 proves has no DS, or an NSEC3 Opt-Out span that may hold one"},
+			{"unusable DS", func(t *testing.T, tr *chaseTree) {
+				setDS(tr, "kid.sec.example.", withDS(newFwdSecKey(t, "kid.sec.example."), unsupportedAlg, dns.SHA256))
+			}, "a delegation with no DS this binary can use"},
+		} {
+			t.Run(a.name+"/"+p.name, func(t *testing.T) {
+				tr := kidTree(t)
+				p.setup(t, tr)
+				res, err := NewChaser(tr, "192.0.2.1", a.anchors(tr)).Chase("www.kid.sec.example.", dns.TypeA)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantStatus(t, "kid.sec.example.", linkNamed(res.Links, "kid.sec.example.").Status, a.want)
+				wantStatus(t, "leaf", res.Leaf.Status, a.want)
+				if hasNote(res.Leaf.Notes, "is insecure") {
+					t.Errorf("leaf notes %q say insecure for a %s answer", res.Leaf.Notes, a.want)
+				}
+				want := "zone kid.sec.example. is " + a.want.String() + ": " + p.why + ", below a zone that is not secure"
+				if !hasNote(res.Leaf.Notes, want) {
+					t.Errorf("leaf notes %q, want %q", res.Leaf.Notes, want)
+				}
+			})
+		}
 	}
 }

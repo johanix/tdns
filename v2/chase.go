@@ -226,8 +226,9 @@ type cutDecision struct {
 	link *ChainLink
 	// insecure is set for a delegation proven to have no DS the walk can
 	// use: no chain of trust leads below it, and nothing below it is
-	// checked.
+	// checked. why says what proved it, for the note on an answer below it.
 	insecure bool
+	why      string
 	// absent is set, with no link, for a candidate proven not to exist:
 	// nothing exists below it either (RFC 8020), and nothing below it is
 	// asked about.
@@ -434,7 +435,7 @@ func (w *chainWalk) withoutDS(link, above *ChainLink, resp *dns.Msg) *cutDecisio
 	case cache.DelegationInsecure:
 		link.Status = ChainStatusInsecure
 		link.Notes = append(link.Notes, insecureProofNote(zone, nsecs))
-		return &cutDecision{link: link, insecure: true}
+		return &cutDecision{link: link, insecure: true, why: insecureProofWhy(zone, nsecs)}
 	case cache.DelegationUnjudged:
 		link.Status = ChainStatusIndeterminate
 		link.Notes = append(link.Notes, fmt.Sprintf("no DS; the NSEC3 proof about it needs records over the iteration limit of %d, or more hashes than allowed: cannot judge",
@@ -511,6 +512,17 @@ func insecureProofNote(zone string, nsecs []*dns.NSEC) string {
 	return "no DS; NSEC3 proves a delegation without DS, or an Opt-Out span that may hold one (RFC 5155 sections 8.6 and 9.2)"
 }
 
+// insecureProofWhy says in a few words what insecureProofNote says in full:
+// what proved zone an insecure delegation, for the note on an answer below it.
+func insecureProofWhy(zone string, nsecs []*dns.NSEC) string {
+	for _, nsec := range nsecs {
+		if core.EqualNames(nsec.Hdr.Name, zone) {
+			return "a delegation the parent's NSEC proves has no DS"
+		}
+	}
+	return "a delegation the parent's NSEC3 proves has no DS, or an NSEC3 Opt-Out span that may hold one"
+}
+
 // unusableDS describes each DS in dss that names an algorithm this binary
 // cannot verify or a digest type it cannot compute (cache.DSUsable).
 func unusableDS(dss []*dns.DS) []string {
@@ -544,7 +556,7 @@ func noUsableDS(link *ChainLink, dsState ChainStatus, unusable []string) *cutDec
 	}
 	link.Status = ChainStatusInsecure
 	link.Notes = append(link.Notes, note+": an insecure delegation (RFC 4035 section 5.2)")
-	return &cutDecision{link: link, insecure: true}
+	return &cutDecision{link: link, insecure: true, why: "a delegation with no DS this binary can use"}
 }
 
 // verifyDS checks the RRSIG over link's DS RRset with the keys of above, the
@@ -709,8 +721,8 @@ func (w *chainWalk) judgeLeaf(name string, qtype uint16, ans chaseAnswer, chain 
 		if deepest.Status == ChainStatusInsecure {
 			leaf.Notes = append(leaf.Notes, fmt.Sprintf("zone %s is insecure: no chain of trust leads to the answer", deepest.Zone))
 		} else {
-			leaf.Notes = append(leaf.Notes, fmt.Sprintf("zone %s is %s: a delegation with no DS this binary can use, below a zone that is not secure",
-				deepest.Zone, deepest.Status))
+			leaf.Notes = append(leaf.Notes, fmt.Sprintf("zone %s is %s: %s, below a zone that is not secure",
+				deepest.Zone, deepest.Status, w.insecureWhy(deepest)))
 		}
 		return leaf
 	}
@@ -804,6 +816,14 @@ func (w *chainWalk) denialOwn(leaf *ChainLeaf, ans chaseAnswer, deepest *ChainLi
 func (w *chainWalk) insecure(link *ChainLink) bool {
 	d, ok := w.cuts[core.CanonicalizeName(link.Zone)]
 	return ok && d.insecure
+}
+
+// insecureWhy is what proved link an insecure delegation (cutDecision.why).
+func (w *chainWalk) insecureWhy(link *ChainLink) string {
+	if d, ok := w.cuts[core.CanonicalizeName(link.Zone)]; ok && d.why != "" {
+		return d.why
+	}
+	return "an insecure delegation"
 }
 
 // answerOwn is the verdict on leaf's answer RRset alone, with the keys of
