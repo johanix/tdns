@@ -251,7 +251,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 	// says whether someone does.
 	signedElsewhere := dak == nil && apexIsSigned(apex)
 
-	staged := 0
+	staged, aliases := 0, 0
 	synth := map[string]*core.RRset{}
 	for _, rr := range nsRRset.RRs {
 		ns, ok := rr.(*dns.NS)
@@ -299,6 +299,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		if od := zd.stagedOwner(ownerName); od != nil {
 			if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); svcbHasAlias(rs) {
 				lgDns.Debug("createTransportSignalSVCB: keeping operator SVCB alias", "owner", ownerName, "zone", zd.ZoneName)
+				aliases++
 				for _, tgt := range signalChaseTargets(rs) {
 					id := strings.TrimPrefix(tgt, "_dns.")
 					if !CaseFoldContains(conf.Service.Identities, id) || Globals.ServerSVCB == nil || FindZone(tgt) != nil {
@@ -361,8 +362,10 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		staged++
 	}
 	if staged == 0 && len(synth) == 0 {
-		lgDns.Warn("createTransportSignalSVCB: add-transport-signal is set, but no NS name of the zone resolves to this server's listeners and none is one of its identities; nothing to publish (a hidden primary should not carry the option)",
-			"zone", zd.ZoneName)
+		if aliases == 0 {
+			lgDns.Warn("createTransportSignalSVCB: add-transport-signal is set, but no NS name of the zone resolves to this server's listeners and none is one of its identities; nothing to publish (a hidden primary should not carry the option)",
+				"zone", zd.ZoneName)
+		}
 		return nil
 	}
 	zd.publishTransportSignalLocked(bare, synth)
@@ -400,11 +403,49 @@ func svcbMixesModes(rs core.RRset) bool {
 	return alias && service
 }
 
-// svcbWouldMixModes reports whether adding add to existing makes a mixed set.
-func svcbWouldMixModes(existing core.RRset, add *dns.SVCB) bool {
-	rs := existing
-	rs.RRs = append(append([]dns.RR{}, existing.RRs...), add)
-	return svcbMixesModes(rs)
+// refuseMixedSvcbUpdateLocked applies an update's SVCB actions to a copy of
+// each owner's staged SVCB RRset, in order and with RFC 2136 semantics (class
+// ANY deletes the RRset, class NONE one record, class IN adds one), and
+// refuses the update if any owner would end up mixing AliasMode and
+// ServiceMode records. Nothing is staged by this; the caller holds zd.mu.
+func (zd *ZoneData) refuseMixedSvcbUpdateLocked(actions []dns.RR) error {
+	sets := map[string][]dns.RR{}
+	load := func(owner string) []dns.RR {
+		if rrs, ok := sets[owner]; ok {
+			return rrs
+		}
+		var rrs []dns.RR
+		if od := zd.stagedOwner(owner); od != nil {
+			rrs = append(rrs, od.RRtypes.GetOnlyRRSet(dns.TypeSVCB).RRs...)
+		}
+		sets[owner] = rrs
+		return rrs
+	}
+	for _, rr := range actions {
+		h := rr.Header()
+		switch {
+		case h.Class == dns.ClassANY && (h.Rrtype == dns.TypeANY || h.Rrtype == dns.TypeSVCB):
+			sets[h.Name] = nil
+		case h.Rrtype != dns.TypeSVCB:
+			continue
+		case h.Class == dns.ClassNONE:
+			kept := load(h.Name)[:0:0]
+			for _, have := range load(h.Name) {
+				if have.String() != rr.String() {
+					kept = append(kept, have)
+				}
+			}
+			sets[h.Name] = kept
+		case h.Class == dns.ClassINET:
+			sets[h.Name] = append(load(h.Name), rr)
+		}
+	}
+	for owner, rrs := range sets {
+		if svcbMixesModes(core.RRset{Name: owner, RRtype: dns.TypeSVCB, RRs: rrs}) {
+			return fmt.Errorf("zone %s: update refused: %s would hold an SVCB RRset mixing AliasMode and ServiceMode records, which a client ignores (RFC 9460 section 2.4.1)", zd.ZoneName, owner)
+		}
+	}
+	return nil
 }
 
 // TSYNC path. See CreateTransportSignalRRs for the storage/injection model.

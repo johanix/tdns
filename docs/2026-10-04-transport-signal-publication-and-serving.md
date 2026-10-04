@@ -186,5 +186,7 @@ start-ups.
   it knows (configured per NS, or exchanged between the servers). That solves
   case 4 properly and covers secondaries running other software. Its own design
   round; it changes who authors what.
-- TSYNC follows every rule above exactly as SVCB does; the code paths are
-  parallel.
+- **TSYNC is not covered by this round.** Its pass keeps the earlier
+  behaviour (it stops at the first name it stores and has neither the
+  signed-elsewhere rule nor the alias handling); the TSYNC signal is to be
+  removed in its own PR rather than brought up to these rules.

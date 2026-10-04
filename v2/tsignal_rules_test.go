@@ -211,9 +211,30 @@ _dns.ns1.`+z2+`	300	IN	SVCB	0 _dns.ns.provider.example.
 `, "127.0.0.1:53")
 	kdb := newTestKeyDB(t)
 	ur := UpdateRequest{Cmd: "ZONE-UPDATE", ZoneName: z2, InternalUpdate: true,
-		Actions: []dns.RR{txTestRR(t, "_dns.ns1."+z2+" 300 IN SVCB 1 . alpn=dot")}}
-	zd.applyZoneUpdate(ur, kdb, nil)
+		Actions: []dns.RR{
+			txTestRR(t, "other."+z2+` 300 IN TXT "rides along"`),
+			txTestRR(t, "_dns.ns1."+z2+" 300 IN SVCB 1 . alpn=dot"),
+		}}
+	updated, _, err := zd.applyZoneUpdate(ur, kdb, nil)
+	if err == nil || !strings.Contains(err.Error(), "AliasMode") || updated {
+		t.Fatalf("an update that would mix an SVCB RRset was not refused to the sender: updated=%v err=%v", updated, err)
+	}
 	if rrs := svcbRecords(zd, "_dns.ns1."+z2); len(rrs) != 1 || rrs[0].(*dns.SVCB).Priority != 0 {
-		t.Fatalf("an update made a mixed SVCB RRset: %v", rrs)
+		t.Fatalf("a refused update changed the SVCB RRset: %v", rrs)
+	}
+	if served(zd, "other."+z2, dns.TypeTXT) {
+		t.Fatal("a refused update applied its other records")
+	}
+
+	// Replacing the alias by a ServiceMode record in one update is not a
+	// mix: the RRset is deleted before the add.
+	del := &dns.SVCB{Hdr: dns.RR_Header{Name: "_dns.ns1." + z2, Rrtype: dns.TypeSVCB, Class: dns.ClassANY}}
+	ur = UpdateRequest{Cmd: "ZONE-UPDATE", ZoneName: z2, InternalUpdate: true,
+		Actions: []dns.RR{del, txTestRR(t, "_dns.ns1."+z2+" 300 IN SVCB 1 . alpn=dot")}}
+	if _, _, err := zd.applyZoneUpdate(ur, kdb, nil); err != nil {
+		t.Fatalf("a replacement was refused: %v", err)
+	}
+	if rrs := svcbRecords(zd, "_dns.ns1."+z2); len(rrs) != 1 || rrs[0].(*dns.SVCB).Priority != 1 {
+		t.Fatalf("the replacement did not land: %v", rrs)
 	}
 }

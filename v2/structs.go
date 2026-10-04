@@ -654,10 +654,11 @@ type ZoneConf struct {
 	ApiManaged bool `yaml:"apimanaged" mapstructure:"apimanaged"`
 	// PublishCadence is the minimum interval between the gate's publishes of a
 	// busy zone: a change staged within it waits for the next publish, which
-	// carries everything staged by then (default 5s when unset; 0 publishes
-	// every change at once). An idle zone, a zone that is not Ready, a replay,
-	// the operator's bump and an urgent transaction commit publish regardless
-	// (docs/2026-09-17-publish-gate-and-transactions.md).
+	// carries everything staged by then. Unset means the package default
+	// (DefaultPublishCadence, 5s); a configured value below one second is
+	// rejected at config load. An idle zone, a zone that is not Ready, a
+	// replay, the operator's bump and an urgent transaction commit publish
+	// regardless (docs/2026-09-17-publish-gate-and-transactions.md).
 	PublishCadence string `yaml:"publish-cadence" mapstructure:"publish-cadence"`
 	// IxfrChainMaxBytes bounds the retained outbound-IXFR delta history for
 	// this zone (estimated wire bytes). 0/unset => 1 MiB default; negative =>

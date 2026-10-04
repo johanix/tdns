@@ -1158,6 +1158,12 @@ func (zd *ZoneData) applyZoneUpdate(ur UpdateRequest, kdb *KeyDB, after func()) 
 	// A defer of its own, so that the lock is released however this ends, a
 	// publish that panics included (#808).
 	defer zd.mu.Unlock()
+	// Refused whole, before anything is staged, and the sender is told: an
+	// update that would leave an SVCB RRset mixing AliasMode and ServiceMode
+	// records (RFC 9460 section 2.4.1), as the zone load refuses such a file.
+	if err := zd.refuseMixedSvcbUpdateLocked(ur.Actions); err != nil {
+		return false, false, err
+	}
 	var persistErr error
 	updated, deferred, persistErr, err = zd.stageAndPublishLocked(ur, func() bool { return zd.stageZoneUpdateLocked(ur, dak) },
 		zd.followsPublish(ur, after))
@@ -1226,21 +1232,6 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (up
 			lg.Warn("ApplyZoneUpdateToZoneData: refusing to add a KEY at a delegation point as zone content; a child's KEY belongs in the truststore",
 				"zone", zd.ZoneName, "owner", ownerName)
 			continue
-		}
-
-		// An SVCB that would make the owner's RRset mix AliasMode and
-		// ServiceMode records is refused: a client ignores the ServiceMode
-		// ones beside an alias (RFC 9460 section 2.4.1).
-		if rrtype == dns.TypeSVCB && class == dns.ClassINET {
-			existing := core.RRset{}
-			if od := zd.stagedOwner(ownerName); od != nil {
-				existing = od.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
-			}
-			if svcb, ok := rr.(*dns.SVCB); ok && svcbWouldMixModes(existing, svcb) {
-				lg.Warn("ApplyZoneUpdateToZoneData: refusing an SVCB that would mix AliasMode and ServiceMode records at one owner; a client ignores the ServiceMode ones (RFC 9460 section 2.4.1)",
-					"zone", zd.ZoneName, "owner", ownerName)
-				continue
-			}
 		}
 
 		// CDS-publication observability: trace the apex CDS RRset's
