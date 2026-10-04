@@ -333,26 +333,38 @@ func (zd *ZoneData) publishDoneLocked(before *zoneSnapshot, errBefore string) {
 		}
 		return
 	}
-	// Refused: the change is gone, and so is what was to follow it.
-	zd.afterPublish = nil
+	// Refused. What was to follow the change stays with it: a refusal that
+	// keeps the working set (unsignable, an unrepairable chain, unsigned
+	// first content) leaves the change staged for the next publish, which
+	// then runs the follow-ups registered for it; a refusal that drops the
+	// working set (the journal, a zone no longer live) drops them with it.
+	if zd.workingSet == nil {
+		zd.afterPublish = nil
+	}
 	if len(zd.waiters) == 0 {
 		return
 	}
-	res := ZoneUpdateResult{}
+	zd.answerWaitersLocked(ZoneUpdateResult{Err: zd.publishRefusalErrorLocked(errBefore)})
+}
+
+// publishRefusalErrorLocked spells why the publish that just ran installed
+// nothing, for the waiter it answers or the caller it returns to. errBefore
+// is the zone's error before that publish, so that an older error is not
+// reported as this refusal's. Caller holds zd.mu.
+func (zd *ZoneData) publishRefusalErrorLocked(errBefore string) error {
 	switch {
 	case zd.wsPersistErr != nil:
 		// Read, not cleared: the applier whose publish this may have been
 		// reads it too.
-		res.Err = fmt.Errorf("zone %s: the change was not published: could not persist it: %w",
+		return fmt.Errorf("zone %s: the change was not published: could not persist it: %w",
 			zd.ZoneName, zd.wsPersistErr)
 	case zd.tx.firstErr != nil:
-		res.Err = zd.tx.firstErr
+		return zd.tx.firstErr
 	case zd.ErrorMsg != "" && zd.ErrorMsg != errBefore:
-		res.Err = fmt.Errorf("zone %s: the change was not published: %s", zd.ZoneName, zd.ErrorMsg)
+		return fmt.Errorf("zone %s: the change was not published: %s", zd.ZoneName, zd.ErrorMsg)
 	default:
-		res.Err = fmt.Errorf("zone %s: the change was not published: the publish was refused", zd.ZoneName)
+		return fmt.Errorf("zone %s: the change was not published: the publish was refused", zd.ZoneName)
 	}
-	zd.answerWaitersLocked(res)
 }
 
 // answerWaitersLocked sends res to every waiter and forgets them. Caller

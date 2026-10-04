@@ -573,7 +573,7 @@ func regenerateCatalogZone(catalogZoneName string) error {
 	// carries the change, so the file is never ahead of what is served: here
 	// when the publish was here, else registered for the publisher, which runs
 	// them outside zd.mu once that publish has installed its snapshot.
-	published := zd.publishOrQueueLocked(zd.generation.Load(), false)
+	outcome := zd.publishOrQueueLocked(zd.generation.Load(), false)
 	if Conf.ShouldPersistZone(zd) {
 		persist := func() {
 			if _, err := zd.WriteDynamicZoneFile(Conf.DynamicZones.ZoneDirectory); err != nil {
@@ -585,9 +585,11 @@ func regenerateCatalogZone(catalogZoneName string) error {
 				// Don't fail the operation, just log the warning
 			}
 		}
-		if published {
+		if outcome == publishedHere {
 			persist()
 		} else {
+			// Queued, held, or refused with the change kept staged: the
+			// file and the config follow the publish that carries it.
 			zd.afterPublish = append(zd.afterPublish, func() {
 				zd.mu.Lock()
 				defer zd.mu.Unlock()

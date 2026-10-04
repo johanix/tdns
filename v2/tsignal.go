@@ -73,6 +73,11 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 	}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	// Bare: no working set before this pass, so the one seeded below holds
+	// nothing but what the pass stages, and its publish can stay serial-less.
+	// A working set that already exists carries another writer's change,
+	// which the gate has not published yet (see commitTransportSignalLocked).
+	bare := zd.workingSet == nil
 	zd.ensureWorkingSet()
 
 	switch conf.Service.Transport.Type {
@@ -81,9 +86,9 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 			"zone", zd.ZoneName)
 		return nil
 	case "svcb":
-		return zd.createTransportSignalSVCB(conf, dak)
+		return zd.createTransportSignalSVCB(conf, dak, bare)
 	case "tsync":
-		return zd.createTransportSignalTSYNC(conf, dak)
+		return zd.createTransportSignalTSYNC(conf, dak, bare)
 	default:
 		lgDns.Debug("CreateTransportSignalRRs: unknown transport type, skipping",
 			"type", conf.Service.Transport.Type,
@@ -95,11 +100,23 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 // commitTransportSignalLocked stages a signal owner RRset and/or records a
 // synthesized fallback, then publishes.
 //
+//	bare:        the working set was seeded by this pass (CreateTransportSignalRRs)
 //	storedOwner: "_dns.<ns>" owner to stage `stored` under ("" stages nothing)
 //	stored:      the already-signed SVCB/TSYNC RRset for storedOwner
 //	synthName:   "_dns.<ns>" name for a synthesized fallback signal ("" = none)
 //	synth:       the synthesized (unsigned) RRset for synthName (Case A only)
-func (zd *ZoneData) commitTransportSignalLocked(storedOwner string, stored core.RRset, synthName string, synth *core.RRset) {
+//
+// The signal is derived state, recomputed at every start, so its publish is
+// serial-less: bumping for it would make every restart a new serial, a NOTIFY
+// round and a transfer for content that is not zone data. That holds only
+// when the working set is bare. One that already existed carries another
+// writer's change the gate has not published (docs/2026-09-17-publish-gate-
+// and-transactions.md, Amendment 5), and a serial-less publish would install
+// that change at the served serial -- refused by the journal and dropped, or
+// installed where no secondary transfers it. Then the signal is staged like
+// any other change and asks the gate: it rides with the carrying publish, at
+// that publish's serial.
+func (zd *ZoneData) commitTransportSignalLocked(bare bool, storedOwner string, stored core.RRset, synthName string, synth *core.RRset) {
 	if storedOwner != "" && len(stored.RRs) > 0 {
 		zd.stageRRsetLocked(storedOwner, stored)
 	}
@@ -108,6 +125,10 @@ func (zd *ZoneData) commitTransportSignalLocked(storedOwner string, stored core.
 			zd.wsSignalSynth = map[string]*core.RRset{}
 		}
 		zd.wsSignalSynth[synthName] = synth
+	}
+	if !bare {
+		zd.publishOrQueueLocked(zd.generation.Load(), false)
+		return
 	}
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 }
@@ -198,7 +219,7 @@ func transportSignalToSVCBOots(sig string) (*dns.SVCBOots, error) {
 }
 
 // SVCB path. See CreateTransportSignalRRs for the storage/injection model.
-func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) error {
+func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bare bool) error {
 	apex := zd.stagedOwner(zd.ZoneName)
 	if apex == nil {
 		return fmt.Errorf("zone apex not found")
@@ -238,7 +259,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) err
 			}
 			lgDns.Debug("createTransportSignalSVCB: synthesized fallback signal for out-of-bailiwick identity NS",
 				"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
-			zd.commitTransportSignalLocked("", core.RRset{}, ownerName, synth)
+			zd.commitTransportSignalLocked(bare, "", core.RRset{}, ownerName, synth)
 			return nil
 		}
 
@@ -304,14 +325,14 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) err
 		}
 		lgDns.Debug("createTransportSignalSVCB: stored synthesized server SVCB",
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
-		zd.commitTransportSignalLocked(ownerName, *stored, "", nil)
+		zd.commitTransportSignalLocked(bare, ownerName, *stored, "", nil)
 		return nil
 	}
 	return nil
 }
 
 // TSYNC path. See CreateTransportSignalRRs for the storage/injection model.
-func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys) error {
+func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys, bare bool) error {
 	apex := zd.stagedOwner(zd.ZoneName)
 	if apex == nil {
 		return fmt.Errorf("zone apex not found")
@@ -393,7 +414,7 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys) er
 		}
 		lgDns.Debug("createTransportSignalTSYNC: stored synthesized TSYNC",
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName, "rr", trr.String())
-		zd.commitTransportSignalLocked(ownerName, stored, "", nil)
+		zd.commitTransportSignalLocked(bare, ownerName, stored, "", nil)
 		return nil
 	}
 	return nil
