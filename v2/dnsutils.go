@@ -867,6 +867,16 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 		zd.fileDigest = digest
 	}
 
+	// An SVCB RRset that mixes an AliasMode record with ServiceMode ones is
+	// refused with the load: a client ignores the ServiceMode records beside
+	// the alias (RFC 9460 section 2.4.1), so the zone would serve records
+	// nobody uses, and the operator would not know.
+	for name, od := range zd.Data.Items() {
+		if rs, ok := od.RRtypes.Get(dns.TypeSVCB); ok && svcbMixesModes(rs) {
+			return false, 0, fmt.Errorf("zone %s: %s: an SVCB RRset mixing AliasMode and ServiceMode records; a client ignores the ServiceMode ones (RFC 9460 section 2.4.1)", zd.ZoneName, name)
+		}
+	}
+
 	// Return true only if serial changed (indicates actual update)
 	// If force=true but serial unchanged, return false (validated but no update)
 	// This prevents unnecessary zone file writes on config reload when zone hasn't changed

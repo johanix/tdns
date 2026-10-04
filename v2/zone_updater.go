@@ -1228,6 +1228,21 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (up
 			continue
 		}
 
+		// An SVCB that would make the owner's RRset mix AliasMode and
+		// ServiceMode records is refused: a client ignores the ServiceMode
+		// ones beside an alias (RFC 9460 section 2.4.1).
+		if rrtype == dns.TypeSVCB && class == dns.ClassINET {
+			existing := core.RRset{}
+			if od := zd.stagedOwner(ownerName); od != nil {
+				existing = od.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
+			}
+			if svcb, ok := rr.(*dns.SVCB); ok && svcbWouldMixModes(existing, svcb) {
+				lg.Warn("ApplyZoneUpdateToZoneData: refusing an SVCB that would mix AliasMode and ServiceMode records at one owner; a client ignores the ServiceMode ones (RFC 9460 section 2.4.1)",
+					"zone", zd.ZoneName, "owner", ownerName)
+				continue
+			}
+		}
+
 		// CDS-publication observability: trace the apex CDS RRset's
 		// lifecycle through the update path so we can see whether the
 		// engine's queued publish is landing on disk and surviving.
