@@ -826,6 +826,22 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 // ZoneConf that arrives without it must not render as a blank cell in a column
 // whose whole purpose is to be scanned. "unknown" is the zero value's own name
 // and says what is true: the state was not reported.
+// zoneOptionStrings is a zone's options as the zone listings print them,
+// sorted. A server-wide add-transport-signal is not one of the zone's own
+// options, so the server never sends it in Options; it is added here, marked
+// "(global)", or the listing would show the option off on a zone that has it.
+func zoneOptionStrings(zconf tdns.ZoneConf) []string {
+	opts := []string{}
+	for _, opt := range zconf.Options {
+		opts = append(opts, tdns.ZoneOptionToString[opt])
+	}
+	if zconf.AddTransportSignalSource == "global" {
+		opts = append(opts, tdns.ZoneOptionToString[tdns.OptAddTransportSignal]+"(global)")
+	}
+	sort.Strings(opts)
+	return opts
+}
+
 func zoneStateOrUnknown(zconf tdns.ZoneConf) string {
 	if zconf.Provisioning == "" {
 		return tdns.ZoneStatusToString[tdns.ZoneStatusUnknown]
@@ -870,11 +886,7 @@ func ListZones(cr tdns.ZoneResponse) {
 		// it emitted a fixed six fields and skipped the optional Primary /
 		// Notify / Zonefile columns, so under -p, -n or -f the ERROR row's
 		// remaining cells landed under the wrong headers.
-		opts := []string{}
-		for _, opt := range zconf.Options {
-			opts = append(opts, tdns.ZoneOptionToString[opt])
-		}
-		sort.Strings(opts)
+		opts := zoneOptionStrings(zconf)
 		line := fmt.Sprintf("%s|%s|%s|", zname, zconf.Type, zoneStateOrUnknown(zconf))
 		if showprimary {
 			line += fmt.Sprintf("%s|", peerConfAddrsString(zconf.Primaries))
@@ -944,11 +956,7 @@ func zoneBaseDetail(name string, zconf tdns.ZoneConf) string {
 		fmt.Fprintf(&b, " [%s: %s]", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
 	}
 	fmt.Fprintf(&b, "\n")
-	opts := []string{}
-	for _, opt := range zconf.Options {
-		opts = append(opts, tdns.ZoneOptionToString[opt])
-	}
-	sort.Strings(opts)
+	opts := zoneOptionStrings(zconf)
 	fmt.Fprintf(&b, "\tType: %s\tStore: %s\tOptions: %v\n", zconf.Type, zconf.Store, opts)
 
 	// Serial visibility (design doc §7). Emitted only when there is something

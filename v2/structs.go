@@ -635,7 +635,12 @@ type ZoneConf struct {
 	// the value and why it applies.
 	EffectiveOutboundSoaSerial string `yaml:"-"`
 	OutboundSoaSerialSource    string `yaml:"-"`
-	Template                   string `yaml:"template" mapstructure:"template"`
+	// AddTransportSignalSource is where the zone's add-transport-signal comes
+	// from: "zone", "global" (authengine.options), or "" when it is off. Only
+	// "zone" appears in Options; "global" is never written into a zone's
+	// options, so this is how a listing shows it.
+	AddTransportSignalSource string `yaml:"-"`
+	Template                 string `yaml:"template" mapstructure:"template"`
 	// DynamicZones marks a TEMPLATE as instantiable via the dynamic-zones API
 	// (zone add --type primary --template <name>). It is the per-template
 	// opt-in gate: an API client can only pick among operator-blessed

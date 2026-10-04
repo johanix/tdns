@@ -144,12 +144,44 @@ func (conf *Config) ParseAuthOptions() {
 				lg.Warn("Auth option has invalid value, defaulting to false", "option", key, "value", optval)
 				clean[authOpt] = "false"
 			}
+		case AuthOptAddTransportSignal:
+			// Off on an invalid value, like allow-any-queries: a mistyped
+			// value must not start publishing into every zone the server
+			// serves.
+			val := strings.ToLower(optval)
+			switch val {
+			case "", "true":
+				clean[authOpt] = "true"
+			case "false":
+				clean[authOpt] = "false"
+			default:
+				lg.Warn("Auth option has invalid value, defaulting to false", "option", key, "value", optval)
+				clean[authOpt] = "false"
+			}
 		default:
 			clean[authOpt] = optval
 		}
 	}
 
 	conf.AuthEngine.Options = clean
+}
+
+// refuseAuthOptionsForApp refuses the auth options an app cannot honour.
+//
+// add-transport-signal is tdns-auth's alone. The safeguards that keep a
+// secondary serving exactly what it received are tdns-auth's too; on
+// tdns-agent every zone may originate content, so a server-wide default would
+// publish transport signals into every secondary the agent serves. Any value,
+// "false" included, is refused, so the config says what the app does.
+func refuseAuthOptionsForApp(appType AppType, opts map[AuthOption]string) error {
+	if appType != AppTypeAgent {
+		return nil
+	}
+	if _, ok := opts[AuthOptAddTransportSignal]; ok {
+		return fmt.Errorf("authengine option %q is not supported by tdns-agent: it would publish transport signals into every zone the agent serves, secondaries included",
+			AuthOptionToString[AuthOptAddTransportSignal])
+	}
+	return nil
 }
 
 // parseZoneOptions validates and applies zone-specific option strings, updating zconf.Options and returning a map of enabled ZoneOption flags.

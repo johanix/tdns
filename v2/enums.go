@@ -268,18 +268,23 @@ const (
 	AuthOptParentUpdate AuthOption = iota + 1
 	AuthOptMinimalResponses
 	AuthOptAllowAnyQueries
+	// AuthOptAddTransportSignal turns the zone option add-transport-signal on
+	// for every zone the server serves. tdns-auth only: tdns-agent refuses it.
+	AuthOptAddTransportSignal
 )
 
 var AuthOptionToString = map[AuthOption]string{
-	AuthOptParentUpdate:     "parent-update",
-	AuthOptMinimalResponses: "minimal-responses",
-	AuthOptAllowAnyQueries:  "allow-any-queries",
+	AuthOptParentUpdate:       "parent-update",
+	AuthOptMinimalResponses:   "minimal-responses",
+	AuthOptAllowAnyQueries:    "allow-any-queries",
+	AuthOptAddTransportSignal: "add-transport-signal",
 }
 
 var StringToAuthOption = map[string]AuthOption{
-	"parent-update":     AuthOptParentUpdate,
-	"minimal-responses": AuthOptMinimalResponses,
-	"allow-any-queries": AuthOptAllowAnyQueries,
+	"parent-update":        AuthOptParentUpdate,
+	"minimal-responses":    AuthOptMinimalResponses,
+	"allow-any-queries":    AuthOptAllowAnyQueries,
+	"add-transport-signal": AuthOptAddTransportSignal,
 }
 
 // outbound-soa-serial mode values for DnsEngine.OutboundSoaSerial.
