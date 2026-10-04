@@ -415,10 +415,12 @@ func svcbMixesModes(rs core.RRset) bool {
 }
 
 // refuseMixedSvcbUpdateLocked applies an update's SVCB actions to a copy of
-// each owner's staged SVCB RRset, in order and with RFC 2136 semantics (class
-// ANY deletes the RRset, class NONE one record, class IN adds one), and
-// refuses the update if any owner would end up mixing AliasMode and
-// ServiceMode records. Nothing is staged by this; the caller holds zd.mu.
+// each owner's staged SVCB RRset, in order and with the applier's own rules
+// (RFC 2136: class ANY deletes the RRset, class NONE one record, class IN
+// adds one; owners by canonical name; a record matches regardless of TTL, as
+// the applier's IsDuplicate does), and refuses the update if any owner would
+// end up mixing AliasMode and ServiceMode records. Nothing is staged by this;
+// the caller holds zd.mu.
 func (zd *ZoneData) refuseMixedSvcbUpdateLocked(actions []dns.RR) error {
 	sets := map[string][]dns.RR{}
 	load := func(owner string) []dns.RR {
@@ -434,21 +436,26 @@ func (zd *ZoneData) refuseMixedSvcbUpdateLocked(actions []dns.RR) error {
 	}
 	for _, rr := range actions {
 		h := rr.Header()
+		owner := core.CanonicalizeName(h.Name)
 		switch {
 		case h.Class == dns.ClassANY && (h.Rrtype == dns.TypeANY || h.Rrtype == dns.TypeSVCB):
-			sets[h.Name] = nil
+			sets[owner] = nil
 		case h.Rrtype != dns.TypeSVCB:
 			continue
 		case h.Class == dns.ClassNONE:
-			kept := load(h.Name)[:0:0]
-			for _, have := range load(h.Name) {
-				if have.String() != rr.String() {
+			// As the applier compares: the record brought to class IN, the
+			// TTL ignored by IsDuplicate.
+			want := dns.Copy(rr)
+			want.Header().Class = dns.ClassINET
+			kept := load(owner)[:0:0]
+			for _, have := range load(owner) {
+				if !dns.IsDuplicate(have, want) {
 					kept = append(kept, have)
 				}
 			}
-			sets[h.Name] = kept
+			sets[owner] = kept
 		case h.Class == dns.ClassINET:
-			sets[h.Name] = append(load(h.Name), rr)
+			sets[owner] = append(load(owner), rr)
 		}
 	}
 	for owner, rrs := range sets {

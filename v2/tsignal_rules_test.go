@@ -226,6 +226,20 @@ _dns.ns1.`+z2+`	300	IN	SVCB	0 _dns.ns.provider.example.
 		t.Fatal("a refused update applied its other records")
 	}
 
+	// The pre-check follows the applier's rules: the owner's spelling does
+	// not get a second RRset past it, and a class NONE delete matches the
+	// record whatever its TTL.
+	ur = UpdateRequest{Cmd: "ZONE-UPDATE", ZoneName: z2, InternalUpdate: true,
+		Actions: []dns.RR{txTestRR(t, "_DNS.NS1."+strings.ToUpper(z2)+" 300 IN SVCB 1 . alpn=dot")}}
+	if _, _, err := zd.applyZoneUpdate(ur, kdb, nil); err == nil || !strings.Contains(err.Error(), "AliasMode") {
+		t.Fatalf("a differently spelled owner got a mixed RRset past the pre-check: %v", err)
+	}
+	none := txTestRR(t, "_dns.ns1."+z2+" 0 IN SVCB 0 _dns.ns.provider.example.")
+	none.Header().Class = dns.ClassNONE
+	if err := zd.refuseMixedSvcbUpdateLocked([]dns.RR{none, txTestRR(t, "_dns.ns1."+z2+" 300 IN SVCB 1 . alpn=dot")}); err != nil {
+		t.Fatalf("a class NONE delete with another TTL did not count as removing the alias: %v", err)
+	}
+
 	// Replacing the alias by a ServiceMode record in one update is not a
 	// mix: the RRset is deleted before the add.
 	del := &dns.SVCB{Hdr: dns.RR_Header{Name: "_dns.ns1." + z2, Rrtype: dns.TypeSVCB, Class: dns.ClassANY}}
