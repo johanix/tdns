@@ -128,3 +128,47 @@ func TestHandleNegativeReadsNothingBelowAZoneCut(t *testing.T) {
 		})
 	}
 }
+
+// The rcode a denial is cached with is the one its proof supports. An NSEC
+// at the name shows that it exists: no name error. And the RFC 9824 compact
+// denial reading, made from the shape of the section before validation, does
+// not set the rcode of a proof that validated: an NXNAME NSEC that did not
+// count, here an unsigned one whose owner differs in case from the zone's
+// signed NSEC at the name, leaves the denial unused.
+func TestHandleNegativeCachesTheRcodeTheProofSupports(t *testing.T) {
+	const zone = "signed.example."
+	const www = "www." + zone
+	_, imr, sign := validatorScanner(t, zone)
+	soa := signedSet(sign, zone, rrs(t, zone+" 300 IN SOA ns."+zone+" h."+zone+" 7 3600 600 604800 300"))
+	noData := signedSet(sign, zone, rrs(t, www+" 300 IN NSEC zzz."+zone+" A RRSIG NSEC"))
+	join := func(sets ...[]dns.RR) []dns.RR {
+		var out []dns.RR
+		for _, s := range sets {
+			out = append(out, s...)
+		}
+		return out
+	}
+
+	handleDenial(t, imr, www, dns.TypeAAAA, denialReply(www, dns.TypeAAAA, dns.RcodeNameError, join(soa, noData)), zone).
+		notSecure(t, "a name error proven by the NSEC at the name")
+
+	stray := rrs(t, "WWW."+zone+" 300 IN NSEC \\000.www."+zone+" RRSIG NSEC NXNAME")
+	o := handleDenial(t, imr, www, dns.TypeMX, denialReply(www, dns.TypeMX, dns.RcodeSuccess, join(soa, noData, stray)), zone)
+	if o.used {
+		state := "nothing cached"
+		if o.cached != nil {
+			state = cache.ValidationStateToString[o.cached.State] + " " + dns.RcodeToString[int(o.cached.Rcode)]
+		}
+		t.Errorf("a proof of no data beside an NXNAME NSEC that does not count: used (%s), want not used", state)
+	}
+
+	// A compact denial the zone signed is a name error, as before.
+	const nope = "nope." + zone
+	compact := signedSet(sign, zone, rrs(t, nope+" 300 IN NSEC \\000."+nope+" RRSIG NSEC NXNAME"))
+	handleDenial(t, imr, nope, dns.TypeA, denialReply(nope, dns.TypeA, dns.RcodeSuccess, join(soa, compact)), zone).
+		secure(t, "a compact denial", dns.RcodeNameError)
+
+	// And a proof of no data is one, under NOERROR.
+	handleDenial(t, imr, www, dns.TypeTXT, denialReply(www, dns.TypeTXT, dns.RcodeSuccess, join(soa, noData)), zone).
+		secure(t, "no data at the name", dns.RcodeSuccess)
+}

@@ -1339,46 +1339,50 @@ func proveDenial(qname string, qtype uint16, rcode uint8, zoneName string, nsecs
 		return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}
 	}
 
-	// NSEC case: Check for traditional denial (NXDOMAIN) or compact denial (RFC 9824)
+	// NSEC case (RFC 4035 section 5.4, RFC 9824). The proof must match the
+	// rcode: a name error needs a proof that qname does not exist, and an
+	// answer of no data a proof that it exists without qtype.
 	if len(nsecs) > 0 {
-		// First, check for compact denial of existence (RFC 9824)
+		// An NSEC owned by qname. Its bitmap says what qname holds.
 		for _, nsec := range nsecs {
-			nsecOwner := dns.CanonicalName(nsec.Hdr.Name)
-			// Check if this is a compact denial NSEC: owner == qname
-			if nsecOwner == qnameCanon {
-				// Compact denial has two cases:
-				// 1. NXDOMAIN: bitmap contains exactly RRSIG, NSEC, and NXNAME
-				//    This proves the name does not exist
-				// 2. NODATA: bitmap doesn't include qtype (but may include other types)
-				//    This proves the name exists but has no data for the queried type
-
-				// Check for compact denial NXDOMAIN: bitmap contains exactly RRSIG, NSEC, and NXNAME
-				if isCompactDenialNXDOMAIN(nsec.TypeBitMap) {
-					logf("ValidateNegativeResponse: compact denial NXDOMAIN (RFC 9824) validated for %s: name does not exist", qname)
-					// Note: The Rcode should be NXDOMAIN, but this function only validates
-					// the negative authority section. The caller should set Rcode appropriately.
-					return DenialVerdict{State: ValidationStateSecure, Rcode: dns.RcodeNameError}
-				}
-
-				// At a zone cut the zone above holds the delegation and its DS,
-				// nothing else: any other type at the name is the child's
-				// (RFC 6840 section 4.1). Without DS the child is proven
-				// unsigned, and nothing about it can be Secure.
-				if qtype != dns.TypeDS && delegationBitmap(nsec.TypeBitMap) {
-					logf("ValidateDenial: the NSEC at %s is the zone cut seen from %s: no proof about %s", qname, zoneName, dns.TypeToString[qtype])
-					return DenialVerdict{State: cutDenial(nsec), Rcode: rcode}
-				}
-
-				// Check for compact denial NODATA: qtype is NOT in the type bitmap
-				if !typeInBitmap(qtype, nsec.TypeBitMap) {
-					logf("ValidateNegativeResponse: compact denial NODATA (RFC 9824) validated for %s %s: name exists but no data for type", qname, dns.TypeToString[qtype])
-					return DenialVerdict{State: ValidationStateSecure, Rcode: rcode}
-				}
-
-				// If owner == qname but qtype IS in bitmap, this is not a negative response
-				// (should not happen in negative authority section, but handle gracefully)
-				logf("ValidateNegativeResponse: NSEC owner matches qname but qtype %s is in bitmap - not a compact denial", dns.TypeToString[qtype])
+			if dns.CanonicalName(nsec.Hdr.Name) != qnameCanon {
+				continue
 			}
+			bm := nsec.TypeBitMap
+			// An RFC 9824 compact denial: the bitmap is RRSIG, NSEC and NXNAME
+			// alone, and qname does not exist, whatever rcode the server put
+			// on it (NOERROR, unless the query set CO).
+			if isCompactDenialNXDOMAIN(bm) {
+				logf("ValidateDenial: compact denial (RFC 9824) for %s: the name does not exist", qname)
+				return DenialVerdict{State: ValidationStateSecure, Rcode: dns.RcodeNameError}
+			}
+
+			// At a zone cut the zone above holds the delegation and its DS,
+			// nothing else: any other type at the name is the child's
+			// (RFC 6840 section 4.1). Without DS the child is proven
+			// unsigned, and nothing about it can be Secure.
+			if qtype != dns.TypeDS && delegationBitmap(bm) {
+				logf("ValidateDenial: the NSEC at %s is the zone cut seen from %s: no proof about %s", qname, zoneName, dns.TypeToString[qtype])
+				return DenialVerdict{State: cutDenial(nsec), Rcode: rcode}
+			}
+
+			// Any other NSEC at qname shows that qname exists. It proves no
+			// data of qtype, and so an answer of NOERROR, when neither qtype
+			// nor CNAME is in its bitmap: a CNAME at qname answers every type
+			// (RFC 6840 section 4.3). It is no proof of a name error.
+			switch {
+			case rcode != dns.RcodeSuccess:
+				logf("ValidateDenial: the NSEC at %s shows that it exists, and the rcode is %s", qname, dns.RcodeToString[int(rcode)])
+				return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}
+			case typeInList(qtype, bm):
+				logf("ValidateDenial: the NSEC at %s lists %s", qname, dns.TypeToString[qtype])
+				return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}
+			case typeInList(dns.TypeCNAME, bm):
+				logf("ValidateDenial: the NSEC at %s lists a CNAME, which answers %s", qname, dns.TypeToString[qtype])
+				return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}
+			}
+			logf("ValidateDenial: the NSEC at %s proves no %s there", qname, dns.TypeToString[qtype])
+			return DenialVerdict{State: ValidationStateSecure, Rcode: rcode}
 		}
 
 		// Below a zone cut or a DNAME the zone holds no names. Its NSEC there
@@ -1396,6 +1400,13 @@ func proveDenial(qname string, qtype uint16, rcode uint8, zoneName string, nsecs
 		// is a name error.
 		if rcode == dns.RcodeSuccess && nsecNoData(qnameCanon, qtype, zoneName, nsecs) {
 			return DenialVerdict{State: ValidationStateSecure, Rcode: rcode}
+		}
+
+		// What is left is a name error proof, which an answer of NOERROR
+		// contradicts: there qname exists.
+		if rcode != dns.RcodeNameError {
+			logf("ValidateDenial: no proof that %s exists without %s, and the rcode is %s", qname, dns.TypeToString[qtype], dns.RcodeToString[int(rcode)])
+			return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}
 		}
 
 		// Traditional denial (NXDOMAIN), RFC 4035 §5.4: an NSEC covering qname,
@@ -1534,21 +1545,6 @@ func nsecCoversName(name string, nsec *dns.NSEC) bool {
 	}
 }
 
-// typeInBitmap checks if a given record type is present in an NSEC type bitmap.
-// The type bitmap is a sorted slice of uint16 values representing record types.
-func typeInBitmap(qtype uint16, bitmap []uint16) bool {
-	for _, t := range bitmap {
-		if t == qtype {
-			return true
-		}
-		// Bitmap is sorted, so if we've passed qtype, it's not present
-		if t > qtype {
-			return false
-		}
-	}
-	return false
-}
-
 // isCompactDenialNXDOMAIN checks if the type bitmap indicates compact denial NXDOMAIN.
 // According to RFC 9824, compact denial NXDOMAIN is indicated when the bitmap contains
 // exactly RRSIG, NSEC, and NXNAME (and no other types).
@@ -1596,8 +1592,9 @@ func isCompactDenialNXDOMAIN(bitmap []uint16) bool {
 // puts on such a response (NOERROR, unless the query set CO) describes how the
 // NSEC reads to a validator without NXNAME support, not what it proves; and
 // which name a denial is for has to be known whether or not the proof can be
-// validated. ValidateNegativeResponse makes the same check on the way to the
-// AD bit; this one decides what gets cached.
+// validated. ValidateDenial reads the same form from the records that count,
+// and when its verdict is Secure, handleNegative caches only the rcode that
+// verdict supports; this reading decides what gets cached otherwise.
 func CompactDenialNXDOMAIN(qname string, negAuthority []*core.RRset) bool {
 	// core.CanonicalizeName, not dns.CanonicalName: the latter rewrites every
 	// octet that is not valid UTF-8 into U+FFFD, so two distinct binary labels

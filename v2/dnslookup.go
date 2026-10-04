@@ -3877,6 +3877,19 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 		negContext = cache.ContextNXDOMAIN
 	}
 
+	// A Secure proof supports one rcode, and the denial is cached with that one
+	// or not at all. The compact denial reading above is made from the shape
+	// of every NSEC in the section before validation, and an NSEC that did not
+	// count there -- unsigned, or another zone's -- must not set the rcode of a
+	// proof that validated. ValidateDenial reads the RFC 9824 form from the
+	// records that count.
+	if vstate == cache.ValidationStateSecure && negRcode != cachedRcode {
+		lgDns.Debug("handleNegative: the proof that validated does not support the rcode; not used",
+			"qname", qname, "qtype", dns.TypeToString[qtype],
+			"proof", dns.RcodeToString[int(negRcode)], "rcode", dns.RcodeToString[int(cachedRcode)])
+		return cache.ContextFailure, r.MsgHdr.Rcode, false
+	}
+
 	// Ensure RCODE matches the context we're caching
 	// If we're caching as NXDOMAIN, the RCODE must be NXDOMAIN
 	// If we're caching as NODATA, the RCODE must be NOERROR
