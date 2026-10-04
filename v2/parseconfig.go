@@ -732,6 +732,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent:
 		conf.ParseAuthOptions()
+		// Before the options reach the KeyDB below, so a refused option
+		// never takes effect, on a reload either.
+		if err := refuseAuthOptionsForApp(Globals.App.Type, conf.AuthEngine.Options); err != nil {
+			return err
+		}
 	}
 
 	// KDC and KRS configuration parsing has been moved to tdns-nm

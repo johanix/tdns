@@ -2,7 +2,8 @@
 
 **Date:** 2026-10-04. **Status:** design, agreed; implementation follows in the
 publish-gate follow-up PR (Refs #653) together with Amendment 5 of
-`2026-09-17-publish-gate-and-transactions.md`.
+`2026-09-17-publish-gate-and-transactions.md`. Amendment 1 (the server-wide
+option) is at the end.
 
 The transport signal is the SVCB (RFC 9460, RFC 9461) or TSYNC RRset under the
 `_dns.` label of a nameserver's name, telling a resolver which transports that
@@ -199,3 +200,52 @@ start-ups.
   behaviour (it stops at the first name it stores and has neither the
   signed-elsewhere rule nor the alias handling); the TSYNC signal is to be
   removed in its own PR rather than brought up to these rules.
+
+## Amendment 1, 2026-10-04: the server-wide option
+
+Everything above stands. It speaks of "a zone with `add-transport-signal`";
+since this amendment a zone has the option when it sets it itself **or** when
+the server sets it for every zone, in `authengine: options:` of tdns-auth.
+
+- **Where it is resolved.** `zd.addsTransportSignal()`, the single reader of
+  the option, and `zd.transportSignalSource()` beside it, which says where the
+  value comes from: `zone` (the zone's own option, possibly via its template),
+  `global` (the server's), or empty when it is off. A zone that sets the option
+  itself reports `zone` even when the server sets it too. The server's value is
+  read from the KeyDB at the point of use and never written into
+  `zd.Options`: the option finalization sites are many, and `zd.Options` is
+  persisted with dynamic zones, which would turn a server default into each
+  zone's own setting.
+- **No per-zone opt-out.** A zone under the server-wide option cannot turn it
+  off.
+- **A wildcard listener names this host, not every address.** Section 1's
+  "the name's A and AAAA records are this server's listener addresses" used to
+  hold for any address when the server listened on `0.0.0.0` or `[::]`, so
+  such a server took every in-bailiwick NS name as its own and, in a zone
+  shared with another provider, published its transports under the other
+  provider's name. The server-wide option would have done that in every
+  zone. A wildcard listener now matches the host's interface addresses, read
+  at most once a minute (the responder asks per response); when they cannot
+  be read, it matches nothing.
+- **The rules of sections 1 to 5 apply unchanged.** The server still speaks
+  only about itself, and stores into a zone only where it may originate
+  content and signs the zone or the zone is unsigned. A secondary under the
+  server-wide option therefore gets the injection and at most the unsigned
+  fallback, as under its own option.
+- **The start-up warning of section 5** ("no NS name of the zone is this
+  server") is for an option the zone set itself: a stray option, say on a
+  hidden primary. Under the server-wide option such a zone is ordinary, and
+  the pass says so at debug level instead of warning once per zone.
+- **tdns-agent refuses it.** The agent shares the `authengine` block, but the
+  safeguards that keep a secondary serving what it received are tdns-auth's;
+  on the agent every zone may originate content, so the server-wide option
+  would publish into every secondary it serves. `ParseConfig` refuses the
+  option, any value, before the options reach the KeyDB, at a start and at a
+  reload alike.
+- **Listing.** The zone listing carries the source
+  (`ZoneConf.AddTransportSignalSource`), and `zone list` shows a server-wide
+  option as `add-transport-signal(global)` among the zone's options.
+- **A reload.** A reload that turns the server-wide option on or off reaches
+  injection at once. Stored signals follow at the next run of the pass, which
+  runs after a zone's first load: the next start, or a zone added later. A
+  zone option changed by a reload waits for the same run.

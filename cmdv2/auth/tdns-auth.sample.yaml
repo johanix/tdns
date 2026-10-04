@@ -106,6 +106,14 @@ authengine:
    #                              a single RRset (RFC 8482). Bool; absence =
    #                              false, and an invalid value also reads as
    #                              false.
+   #   add-transport-signal     — the zone option add-transport-signal for
+   #                              every zone this server serves, secondaries
+   #                              included (where it injects and never stores
+   #                              into the zone). The server signals only for
+   #                              NS names that are its own. `zone list` shows
+   #                              it as add-transport-signal(global). Bool;
+   #                              absence = false, and an invalid value also
+   #                              reads as false. tdns-agent refuses it.
    #   parent-update:delta      — parent delegation update mode (delta only).
    # options:
    #    - minimal-responses

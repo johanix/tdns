@@ -561,6 +561,7 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 		IncomingSerial:             zd.IncomingSerial,
 		EffectiveOutboundSoaSerial: outboundMode,
 		OutboundSoaSerialSource:    outboundSource,
+		AddTransportSignalSource:   zd.transportSignalSource(),
 	}
 }
 
