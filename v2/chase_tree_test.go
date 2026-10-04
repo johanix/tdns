@@ -200,6 +200,17 @@ func (tr *chaseTree) resolve(m *dns.Msg, name string, qtype uint16, hops int) {
 	}
 	if wild := "*." + z.closestEncloser(name); !z.exists(name) && z.owns(wild) {
 		cover := z.sign([]dns.RR{z.nsec(z.prev(name))})
+		if cn := z.get(wild, dns.TypeCNAME); len(cn) > 0 && qtype != dns.TypeCNAME {
+			// A CNAME synthesized from the wildcard, followed.
+			m.Answer = append(m.Answer, expand(z.sign(cn), name)...)
+			if z.key != nil {
+				m.Ns = append(m.Ns, cover...)
+			}
+			if hops < 10 {
+				tr.resolve(m, cn[0].(*dns.CNAME).Target, qtype, hops+1)
+			}
+			return
+		}
 		if rrs := z.get(wild, qtype); len(rrs) > 0 {
 			// An answer synthesized from the wildcard, with the NSEC that
 			// shows name does not exist.

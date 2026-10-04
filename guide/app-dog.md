@@ -123,8 +123,12 @@ worst of them.
   from a signed zone is bogus.
 - A CNAME is verified and its target chased in turn, each in a section of its
   own. A CNAME synthesized from a DNAME is not followed.
-- The proofs of NXDOMAIN and NODATA answers, and of answers synthesized from a
-  wildcard, are not checked yet: such answers are indeterminate.
+- An NXDOMAIN or NODATA answer is secure when the NSEC or NSEC3 records that
+  came with it, signed by the zone, prove it. An answer synthesized from a
+  wildcard needs the same kind of proof that the name itself does not exist.
+  A proof through an NSEC3 Opt-Out span, or one that needs more NSEC3
+  iterations than the limit of 10, is insecure. A name proven not to exist
+  ends the walk: nothing exists below it.
 
 Trust anchors are taken, in order of priority, from `--trust-anchor <file>`, the
 IMR config file, and finally the compiled-in root KSK DS. The first line of the
