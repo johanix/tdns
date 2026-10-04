@@ -61,6 +61,8 @@ func TestTdnsAgentRefusesTheServerWideTransportSignal(t *testing.T) {
 		err := loader.ParseConfig(false)
 		if err == nil || !strings.Contains(err.Error(), "not supported by tdns-agent") {
 			t.Errorf("tdns-agent with authengine option %q: err = %v, want the option refused", opt, err)
+		} else if !strings.Contains(err.Error(), `"add-transport-signal"`) {
+			t.Errorf("the refusal does not name the option: %v", err)
 		}
 	}
 

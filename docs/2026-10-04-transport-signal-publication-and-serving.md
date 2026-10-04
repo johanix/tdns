@@ -218,6 +218,15 @@ the server sets it for every zone, in `authengine: options:` of tdns-auth.
   zone's own setting.
 - **No per-zone opt-out.** A zone under the server-wide option cannot turn it
   off.
+- **A wildcard listener names this host, not every address.** Section 1's
+  "the name's A and AAAA records are this server's listener addresses" used to
+  hold for any address when the server listened on `0.0.0.0` or `[::]`, so
+  such a server took every in-bailiwick NS name as its own and, in a zone
+  shared with another provider, published its transports under the other
+  provider's name. The server-wide option would have done that in every
+  zone. A wildcard listener now matches the host's interface addresses, read
+  at most once a minute (the responder asks per response); when they cannot
+  be read, it matches nothing.
 - **The rules of sections 1 to 5 apply unchanged.** The server still speaks
   only about itself, and stores into a zone only where it may originate
   content and signs the zone or the zone is unsigned. A secondary under the
