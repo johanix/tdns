@@ -172,3 +172,64 @@ func TestHandleNegativeCachesTheRcodeTheProofSupports(t *testing.T) {
 	handleDenial(t, imr, www, dns.TypeTXT, denialReply(www, dns.TypeTXT, dns.RcodeSuccess, join(soa, noData)), zone).
 		secure(t, "no data at the name", dns.RcodeSuccess)
 }
+
+// A denial carries the SOA of the zone that denies, and the servers of a zone
+// answer for it and for the zones below it they serve. A denial from the
+// servers of child.example. with the SOA of example. is not theirs: it is not
+// used, and the next server is asked. The same denial from the servers of
+// example. is read as any other. Servers of a configured stub zone are the
+// operator's, and the rule does not apply to them.
+func TestHandleNegativeRefusesAnSOAFromAboveTheServersZone(t *testing.T) {
+	const parent = "example."
+	const child = "child." + parent
+	const nope = "nope." + parent
+	soa := rrs(t, parent+" 300 IN SOA ns."+parent+" h."+parent+" 1 3600 600 604800 300")
+	apex := rrs(t, parent+" 300 IN NSEC zzz."+parent+" SOA NS RRSIG NSEC DNSKEY")
+
+	for _, c := range []struct {
+		name        string
+		qname       string
+		serversZone string
+		stub        bool
+		used        bool
+	}{
+		{"the zone above's SOA, from the child's servers", "www." + child, child, false, false},
+		{"the zone above's SOA, from its own servers", nope, parent, false, true},
+		{"servers of an unknown zone", nope, "", false, true},
+		{"the zone above's SOA, from a stub zone's servers", "www." + child, child, true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, imr, sign := validatorScanner(t, parent)
+			if c.stub {
+				imr.setZoneTable(imr.ForwardZones(), []string{child}, nil)
+			}
+			ns := append(signedSet(sign, parent, soa), signedSet(sign, parent, apex)...)
+			o := handleDenial(t, imr, c.qname, dns.TypeA, denialReply(c.qname, dns.TypeA, dns.RcodeNameError, ns), c.serversZone)
+			if o.used != c.used {
+				t.Errorf("used %v, want %v", o.used, c.used)
+			}
+			if !c.used && o.cached != nil {
+				t.Errorf("cached %s, want nothing", cache.ValidationStateToString[o.cached.State])
+			}
+		})
+	}
+}
+
+func TestSOAAboveServersZone(t *testing.T) {
+	for _, c := range []struct {
+		soa, zone string
+		want      bool
+	}{
+		{"example.", "child.example.", true},
+		{".", "example.", true},
+		{"example.", "example.", false},
+		{"Example.", "example.", false},
+		{"child.example.", "example.", false},
+		{"example.", "", false},
+		{"", "example.", false},
+	} {
+		if got := soaAboveServersZone(c.soa, c.zone); got != c.want {
+			t.Errorf("soaAboveServersZone(%q, %q) = %v, want %v", c.soa, c.zone, got, c.want)
+		}
+	}
+}

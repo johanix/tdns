@@ -3724,7 +3724,8 @@ func authorityRRsets(rrs []dns.RR) []*core.RRset {
 //
 // zone is the zone the answering servers serve, when the caller knows it. It is
 // what judges an authoritative denial that carries no SOA (negativeWithoutSOA);
-// without it such a denial is not used.
+// without it such a denial is not used. And a denial whose SOA names a zone
+// above it is not used either (soaAboveServersZone).
 func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport core.Transport, zone string) (cache.CacheContext, int, bool) {
 	if r == nil {
 		return cache.ContextFailure, dns.RcodeServerFailure, false
@@ -3784,6 +3785,12 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 		lgDns.Debug("handleNegative: no SOA found in authority for \" \" ()",
 			"qname", qname,
 			"s", dns.TypeToString[qtype],
+			"rcode", dns.RcodeToString[r.MsgHdr.Rcode])
+		return cache.ContextFailure, r.MsgHdr.Rcode, false
+	}
+	if soaAboveServersZone(soaOwner, zone) && !imr.configuredZone(zone) {
+		lgDns.Debug("handleNegative: the denial's SOA is from a zone above the one the servers serve; not used",
+			"qname", qname, "qtype", dns.TypeToString[qtype], "soa", soaOwner, "zone", zone,
 			"rcode", dns.RcodeToString[r.MsgHdr.Rcode])
 		return cache.ContextFailure, r.MsgHdr.Rcode, false
 	}
@@ -3937,6 +3944,23 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	})
 
 	return negContext, int(cachedRcode), true
+}
+
+// soaAboveServersZone reports whether soaOwner, the SOA of a denial, names a
+// zone above zone, the one the servers that sent it serve. Those servers
+// answer for zone, and for any zone below it they also serve; a denial from a
+// zone above is not theirs to give. It comes from a server that also serves
+// that zone and answers from it for a cut it no longer holds, or it is a reply
+// that does not belong to the question. The caller asks the next server. With
+// zone unknown ("") nothing is judged.
+//
+// A configured stub zone's servers are the operator's, and may serve the zone
+// above the stub's apex; handleNegative does not ask this of them.
+func soaAboveServersZone(soaOwner, zone string) bool {
+	if zone == "" || soaOwner == "" {
+		return false
+	}
+	return dns.IsSubDomain(soaOwner, zone) && !core.EqualNames(soaOwner, zone)
 }
 
 // negativeWithoutSOA serves an authoritative NXDOMAIN or NODATA that carries no
