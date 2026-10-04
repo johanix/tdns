@@ -604,6 +604,12 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						lgDns.Debug("*** AuthDNSQuery: non-glue record in Additional", "additional", rr.String())
 						continue
 					}
+					// The zone of the servers asked is not known here, so
+					// only in-domain glue is used (imr_referral_glue.go).
+					if !withinGlueZone(name, referralGlueZone("", zonename)) {
+						lgDns.Debug("AuthDNSQuery: record outside the delegated zone not used", "additional", rr.String(), "zone", zonename)
+						continue
+					}
 					switch rr := rr.(type) {
 					case *dns.A:
 						addr := rr.A.String()
@@ -675,6 +681,9 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						continue
 					}
 					rr := rrset.RRs[0]
+					if !glueMayReplace(imr.Cache.Peek(nsname, dns.TypeA)) {
+						continue
+					}
 					imr.Cache.Set(nsname, dns.TypeA, &cache.CachedRRset{
 						Name:       nsname,
 						RRtype:     dns.TypeA,
@@ -691,6 +700,9 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						continue
 					}
 					rr := rrset.RRs[0]
+					if !glueMayReplace(imr.Cache.Peek(nsname, dns.TypeAAAA)) {
+						continue
+					}
 					imr.Cache.Set(nsname, dns.TypeAAAA, &cache.CachedRRset{
 						Name:       nsname,
 						RRtype:     dns.TypeAAAA,
@@ -1811,7 +1823,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				// If not done, fall-through to process referral glue embedded with answers
 				nsRRs, zonename, nsMap := extractReferral(r, qname, qtype)
 				if len(nsRRs.RRs) > 0 && referralLeavesZone(zonename, serversZone) {
-					serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRs, zonename, nsMap, r)
+					serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRs, zonename, serversZone, nsMap, r)
 					if err != nil {
 						lgDns.Error("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional",
 							"collectnsaddressesfromadditional", err)
@@ -1875,7 +1887,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 							"aa", r.Authoritative)
 						continue
 					}
-					return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, wireTransport, privacy)
+					return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, serversZone, wireTransport, privacy)
 				case responseKindError:
 					lgDns.Debug("IterativeDNSQuery: treating response as error",
 						"qname", qname, "qtype", dns.TypeToString[qtype],
@@ -2040,7 +2052,13 @@ func (imr *Imr) parseTSYNCTransportSignal(rr *dns.PrivateRR, serverName string, 
 	return true
 }
 
-func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrset *core.RRset, zonename string,
+// ParseAdditionalForNSAddrs reads the additional section of r, a referral to
+// zonename whose NS RRset is nsrrset (the nameserver names in nsMap), for the
+// nameservers' addresses (glue) and transport signals, and stores what it uses
+// in zonename's cached server map, which it returns. referringZone is the zone
+// of the servers that sent r, or "" when it is not known: a record is used only
+// when its owner lies within that zone (imr_referral_glue.go).
+func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrset *core.RRset, zonename, referringZone string,
 	nsMap map[string]bool, r *dns.Msg) (map[string]*cache.AuthServer, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -2092,6 +2110,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	}
 
 	// Single pass through Additional section: handle glue records and transport signals
+	glueZone := referralGlueZone(referringZone, zonename)
 	for _, rr := range r.Extra {
 		owner := rr.Header().Name
 		baseName, isOOTSOwner, _ := parseOwnerName(owner)
@@ -2145,6 +2164,17 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			}
 		default:
 			// Unknown record type, skip
+			continue
+		}
+
+		// Only for a name within the referring zone (imr_referral_glue.go).
+		// For a nameserver outside it the record is not used, and its
+		// addresses are looked up as for a referral without glue.
+		if !withinGlueZone(owner, glueZone) {
+			if !imr.Quiet {
+				lgDns.Debug("ParseAdditionalForNSAddrs: record outside the referring zone not used",
+					"rr", rr.String(), "zone", zonename, "referring_zone", referringZone)
+			}
 			continue
 		}
 
@@ -2219,6 +2249,10 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			continue
 		}
 		rr := rrset.RRs[0]
+		// Not over a live authoritative answer for the name (glueMayReplace).
+		if !glueMayReplace(imr.Cache.Peek(nsname, dns.TypeA)) {
+			continue
+		}
 		if Globals.Debug && !imr.Quiet {
 			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, A> (adding glue)\n", nsname)
 		}
@@ -2238,6 +2272,10 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			continue
 		}
 		rr := rrset.RRs[0]
+		// Not over a live authoritative answer for the name (glueMayReplace).
+		if !glueMayReplace(imr.Cache.Peek(nsname, dns.TypeAAAA)) {
+			continue
+		}
 		if Globals.Debug && !imr.Quiet {
 			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, AAAA> (adding glue)\n", nsname)
 		}
@@ -3055,7 +3093,11 @@ func zoneHasVerdict(z *cache.Zone) bool {
 	return false
 }
 
-func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, transport core.Transport, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
+// handleReferral follows r, a referral for qname from servers of serversZone
+// ("" when that is not known), and caches what it carries: the delegated zone's
+// NS RRset, its DS, and the glue and transport signals that may be used
+// (ParseAdditionalForNSAddrs).
+func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, serversZone string, transport core.Transport, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	if Globals.Debug && !imr.Quiet {
 		imr.Cache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
 	}
@@ -3178,7 +3220,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			}
 		}
 	}
-	serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRset, zonename, nsMap, r)
+	serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRset, zonename, serversZone, nsMap, r)
 	if err != nil {
 		lgDns.Error("*** handleReferral: Error from CollectNSAddressesFromAdditional",
 			"collectnsaddressesfromadditional", err)
@@ -3216,11 +3258,14 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 				// by scheduleReferralNSRevalidation below.
 				continue
 			}
-			// Out-of-bailiwick: the parent zone cannot legally provide glue
-			// for these names (RFC 9156), so they did not appear in
-			// ParseAdditionalForNSAddrs's output. We have two cases:
+			// Out-of-bailiwick, outside the delegated zone. The referral's
+			// glue for such a name is used only when the name lies within the
+			// referring zone (sibling glue, RFC 9471); ParseAdditionalForNSAddrs
+			// cached it, and it is found below. For a name outside the
+			// referring zone the glue is not used (imr_referral_glue.go), and
+			// the addresses come from the cache or a lookup. We have two cases:
 			//
-			//   1. Addresses already cached (from a prior direct query) -
+			//   1. Addresses already cached (from glue or a prior query) -
 			//      seed serverMap so prioritizeServers can try this NS.
 			//      Previously this was a `continue` that silently dropped
 			//      the known-good address on the floor, leading to "no
