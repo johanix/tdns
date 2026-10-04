@@ -133,6 +133,9 @@ func renderLeaf(w io.Writer, leaf ChainLeaf, indent string) {
 			fmt.Fprintf(w, "%s   %s\n", indent, rr.String())
 		}
 	}
+	for _, rr := range leaf.Proof {
+		fmt.Fprintf(w, "%s   %s\n", indent, rr.String())
+	}
 	for _, note := range leaf.Notes {
 		fmt.Fprintf(w, "%s   note:           %s\n", indent, note)
 	}
