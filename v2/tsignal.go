@@ -364,8 +364,16 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		staged++
 	}
 	if staged == 0 && len(synth) == 0 {
-		if aliases == 0 {
+		// A warning only when the zone set the option itself: then it is a
+		// stray option, say on a hidden primary. Under the server-wide
+		// option a zone that does not name this server is ordinary and
+		// says so at debug level, or a server whose zones mostly name
+		// other servers would warn once per zone.
+		if aliases == 0 && zd.transportSignalSource() == "zone" {
 			lgDns.Warn("createTransportSignalSVCB: add-transport-signal is set, but no NS name of the zone resolves to this server's listeners and none is one of its identities; nothing to publish (a hidden primary should not carry the option)",
+				"zone", zd.ZoneName)
+		} else if aliases == 0 {
+			lgDns.Debug("createTransportSignalSVCB: no NS name of the zone is this server; nothing to publish under the server-wide add-transport-signal",
 				"zone", zd.ZoneName)
 		}
 		return nil
@@ -375,12 +383,33 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 }
 
 // addsTransportSignal reports whether this zone publishes and injects transport
-// signals. Today that is the zone's own option; a server-wide default would
-// be resolved here, at the point of use, not into zd.Options (the option
-// finalization sites are many, and the option is persisted with dynamic
-// zones). Every reader of the option goes through this.
+// signals: the zone's own option, or the server-wide authengine option. Every
+// reader of the option goes through this.
 func (zd *ZoneData) addsTransportSignal() bool {
-	return zd.Options[OptAddTransportSignal]
+	return zd.transportSignalSource() != ""
+}
+
+// transportSignalSource says where this zone's add-transport-signal comes
+// from: "zone" (the zone's own option, possibly via its template), "global"
+// (authengine.options, every zone the server serves), or "" when it is off.
+// The words are the ones EffectiveOutboundSoaSerialWithSource uses.
+//
+// The server-wide option is resolved here, at the point of use, never into
+// zd.Options: the option finalization sites are many, and zd.Options is
+// persisted with dynamic zones, which would turn a server default into each
+// zone's own setting. A zone that sets the option itself reports "zone" even
+// when the server sets it too: that is what an operator chose for this zone,
+// and what the start-up pass's warning is about.
+func (zd *ZoneData) transportSignalSource() string {
+	if zd.Options[OptAddTransportSignal] {
+		return "zone"
+	}
+	if zd.KeyDB != nil {
+		if v, ok := zd.KeyDB.AuthOption(AuthOptAddTransportSignal); ok && v == "true" {
+			return "global"
+		}
+	}
+	return ""
 }
 
 // apexIsSigned reports whether the zone is signed by anyone: it serves a

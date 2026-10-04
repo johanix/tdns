@@ -148,7 +148,8 @@
 #                           returning the zone's precomputed NSEC records
 #
 #   add-transport-signal:    Automatically synthesize SVCB RRs
-#                           (adds transport signals to Additional section)
+#                           (adds transport signals to Additional section).
+#                           authengine.options can set it for every zone.
 #
 # ZONEMD OPTIONS (RFC 8976):
 #   publish-zonemd:          Maintain the apex ZONEMD RRset. The digest is
