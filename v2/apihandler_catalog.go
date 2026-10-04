@@ -585,9 +585,13 @@ func regenerateCatalogZone(catalogZoneName string) error {
 				// Don't fail the operation, just log the warning
 			}
 		}
-		if outcome == publishedHere {
+		switch {
+		case outcome == publishedHere:
 			persist()
-		} else {
+		case outcome == publishRefused && zd.workingSet == nil:
+			// Refused and dropped (the journal, a zone no longer live):
+			// nothing will carry the change, so nothing follows it.
+		default:
 			// Queued, held, or refused with the change kept staged: the
 			// file and the config follow the publish that carries it.
 			zd.afterPublish = append(zd.afterPublish, func() {
