@@ -969,3 +969,22 @@ Notes from implementation:
   afterwards would overwrite a normalized value with the raw one — while keeping
   their different update rules (options replace only if provided; the serial
   mode is gated on `ConfigUpdate`, since empty means "inherit the global").
+
+
+## Amendment 1 (2026-10-04): `add-transport-signal` is not an origination option
+
+§4 classified `add-transport-signal` as origination, and the normalizer
+stripped it from every tdns-auth secondary that may not originate content. That
+read the option as "store a synthesized `_dns.<ns>` SVCB into the zone", which
+is indeed origination. But the option also means "inject a signal for this
+zone's NS names into responses", which is serving behaviour, and a secondary
+that cannot store a signal can still keep an unsigned fallback beside its
+snapshot and inject it: no zone content, nothing transferred, nothing a
+direct query answers (`2026-10-04-transport-signal-publication-and-serving.md`,
+section 1). Stripping the option made such a secondary silent.
+
+Now the option stays on every zone, and the storing is gated where it
+happens: the signal pass (`createTransportSignalSVCB`) stores a signal only
+when `zoneMayOriginateContent` holds, the same predicate as every other gate
+of this design; otherwise it keeps the fallback. The invariant is unchanged: a
+non-originating secondary still serves exactly what it received.

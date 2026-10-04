@@ -244,12 +244,14 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		return fmt.Errorf("no NS records found at zone apex")
 	}
 
-	// A zone that is signed, but not by this server: nothing this server
-	// synthesizes may be stored into it. An unsigned owner under a signed
-	// apex is bogus to a validator, and the signer's chain denies the name.
-	// dak == nil says only that THIS server does not sign the zone; the apex
-	// says whether someone does.
-	signedElsewhere := dak == nil && apexIsSigned(apex)
+	// Where nothing may be stored: a secondary that may not originate content
+	// (docs/2026-07-25-secondary-zones-immutable.md: it serves what it received,
+	// unmodified), and a zone that is signed but not by this server (an
+	// unsigned owner under a signed apex is bogus to a validator, and the
+	// signer's chain denies the name; dak == nil says only that THIS server
+	// does not sign, the apex says whether someone does). Such a server keeps
+	// its signal as an unsigned fallback beside the snapshot, injected only.
+	storeForbidden := !zoneMayOriginateContent(zd) || (dak == nil && apexIsSigned(apex))
 
 	staged, aliases := 0, 0
 	synth := map[string]*core.RRset{}
@@ -338,6 +340,11 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 			return err
 		}
 		switch {
+		case storeForbidden:
+			lgDns.Info("createTransportSignalSVCB: this server stores no signal into this zone (a secondary that may not originate content, or a zone signed by someone else); the signal is kept as an unsigned fallback beside the snapshot, injected only",
+				"zone", zd.ZoneName, "owner", ownerName)
+			synth[ownerName] = stored
+			continue
 		case dak != nil:
 			// Sign BEFORE staging so the snapshot freezes a signed signal; the
 			// resigner keeps its signature fresh thereafter. dak is resolved by
@@ -350,11 +357,6 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 					"owner", ownerName, "err", err)
 				return fmt.Errorf("createTransportSignalSVCB: failed to sign SVCB for %q: %w", ownerName, err)
 			}
-		case signedElsewhere:
-			lgDns.Info("createTransportSignalSVCB: the zone is signed and this server does not sign it; the signal is kept as an unsigned fallback beside the snapshot, not stored as zone content",
-				"zone", zd.ZoneName, "owner", ownerName)
-			synth[ownerName] = stored
-			continue
 		}
 		lgDns.Debug("createTransportSignalSVCB: stored synthesized server SVCB",
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
@@ -370,6 +372,15 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 	}
 	zd.publishTransportSignalLocked(bare, synth)
 	return nil
+}
+
+// addsTransportSignal reports whether this zone publishes and injects transport
+// signals. Today that is the zone's own option; a server-wide default would
+// be resolved here, at the point of use, not into zd.Options (the option
+// finalization sites are many, and the option is persisted with dynamic
+// zones). Every reader of the option goes through this.
+func (zd *ZoneData) addsTransportSignal() bool {
+	return zd.Options[OptAddTransportSignal]
 }
 
 // apexIsSigned reports whether the zone is signed by anyone: it serves a

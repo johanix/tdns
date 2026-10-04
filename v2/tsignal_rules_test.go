@@ -238,3 +238,42 @@ _dns.ns1.`+z2+`	300	IN	SVCB	0 _dns.ns.provider.example.
 		t.Fatalf("the replacement did not land: %v", rrs)
 	}
 }
+
+// The join, not the arm: a real tdns-auth secondary that may not originate
+// content, its options through the normalizer. The option is kept, nothing is
+// stored into the zone it mirrors, and the fallback is injected.
+func TestANonOriginatingSecondaryKeepsTheOptionAndStoresNothing(t *testing.T) {
+	const z = "mirror.sig.example."
+	prevApp := Globals.App.Type
+	Globals.App.Type = AppTypeAuth
+	t.Cleanup(func() { Globals.App.Type = prevApp })
+	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+ns1.`+z+`	3600	IN	A	127.0.0.1
+`, "127.0.0.1:53")
+	zd.ZoneType = Secondary
+	effective, _, suppressed, msg := normalizeOptionsForRole(AppTypeAuth, Secondary, zd.Options, "")
+	if !effective[OptAddTransportSignal] || suppressed[OptAddTransportSignal] {
+		t.Fatalf("the normalizer stripped add-transport-signal from a secondary: %v %q", suppressed, msg)
+	}
+	zd.Options = effective
+	if zoneMayOriginateContent(zd) {
+		t.Fatal("the test zone may originate content; it does not exercise the join")
+	}
+	before := zd.publishedSnapshot()
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if served(zd, "_dns.ns1."+z, dns.TypeSVCB) {
+		t.Fatal("a signal was stored into a zone the server may not modify")
+	}
+	snap := zd.publishedSnapshot()
+	if snap == before || snap.signalSynth["_dns.ns1."+z] == nil {
+		t.Fatal("the fallback was not published beside the snapshot")
+	}
+	if snap.Serial != before.Serial {
+		t.Fatalf("the fallback's publish moved the serial of a mirrored zone: %d -> %d", before.Serial, snap.Serial)
+	}
+	if got := zd.collectSignalRRsets(snap); len(got) != 1 {
+		t.Fatalf("the fallback is not injected: %d RRsets", len(got))
+	}
+}

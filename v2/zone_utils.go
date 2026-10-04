@@ -2153,7 +2153,7 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	// which does not include server-synthesized _dns.<ns> signals; carry them
 	// over so they survive until the transport postpass regenerates them. (The
 	// synthesized-fallback map is carried separately in applyRefreshReplacementLocked.)
-	if zd.Options[OptAddTransportSignal] {
+	if zd.addsTransportSignal() {
 		snap := zd.publishedSnapshot()
 		if snap == nil {
 			return dynamicRRs

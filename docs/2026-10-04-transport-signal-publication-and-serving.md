@@ -28,15 +28,22 @@ It never guesses, and it never asks anyone: **no recursive query is ever made
 to find a signal.** What the server does not have, it does not inject; the
 resolver chases what it is handed.
 
-**Zone content is signed by whoever signs the zone.** A server stores a
-synthesized signal as a real owner RRset in a zone only when the server itself
-signs that zone (then the signal is signed before it is staged, and the resigner
-keeps it fresh) or when the zone is unsigned. A server that does not sign a
-zone that is signed never stores anything into it: an unsigned owner under a
-signed apex is bogus to a validating resolver, and the signer's NSEC chain denies
-the name. Such a server may at most keep an unsigned fallback beside its
-snapshot, which is injected into the additional section and is never zone
-content, never transferred, and never an answer to a direct query.
+**Zone content is signed by whoever signs the zone, and a secondary serves
+what it received.** A server stores a synthesized signal as a real owner RRset
+in a zone only when it may originate content in that zone (a primary, or an
+inline-signing secondary: `2026-07-25-secondary-zones-immutable.md`) and
+either signs the zone itself (then the signal is signed before it is staged,
+and the resigner keeps it fresh) or the zone is unsigned. Any other server
+stores nothing into the zone: a secondary that may not originate would serve
+content that differs from upstream's at upstream's serial, and an unsigned
+owner under a signed apex is bogus to a validating resolver, with the
+signer's NSEC chain denying the name. Such a server keeps at most an unsigned
+fallback beside its snapshot, which is injected into the additional section
+and is never zone content, never transferred, and never an answer to a direct
+query. For that reason `add-transport-signal` is not an origination option:
+on a secondary that may not originate it means "serve a signal for this
+zone's NS names", and the option normalizer no longer strips it there
+(Amendment 1 of the 2026-07-25 design).
 
 ## 2. The cases
 
@@ -50,7 +57,7 @@ provider whose nameserver is `ns.provider.example`.
 | 2 | a hidden primary | nothing: no NS name resolves to its addresses. The zone should not carry `add-transport-signal`; if it does, the pass logs a warning once at start-up | nothing |
 | 3 | a signing secondary (`inline-signing`) | as 1, signed with its keys; a refresh carries the stored owners and their signatures across both an IXFR and a full replacement | the stored RRset |
 | 4 | a non-signing secondary of a zone signed elsewhere | **nothing into the zone** (section 1). At most the unsigned fallback | the fallback, or nothing |
-| 5 | a non-signing secondary of an unsigned zone | as 1, unsigned | the stored RRset |
+| 5 | a non-signing secondary of an unsigned zone | **nothing into the zone either**: it may not originate content (section 1). The unsigned fallback | the fallback |
 | 6 | one server with several NS names (`ns1` and `ns2.example.com`, two addresses) | one signal per name, each with that name's own addresses | all of them |
 | 7 | a nameserver reached through a vanity name (`ns2.example.com` is really `ns.provider.example`) | nothing synthesized at the vanity name when the operator has placed an alias there (section 3); without one, a ServiceMode signal under the vanity name, which is also correct | section 4 |
 
@@ -152,7 +159,8 @@ start-ups.
 | Today | This design |
 |---|---|
 | the pass returns after the first NS name it handles (a stored signal or an operator alias) | the pass walks every NS name |
-| `dak == nil` is read as "the zone is unsigned", so a non-signing secondary stores an unsigned owner into a signed zone | a server stores into a zone only if it signs it or the zone is unsigned; otherwise at most the fallback |
+| `dak == nil` is read as "the zone is unsigned", so a non-signing secondary stores an unsigned owner into a signed zone | a server stores into a zone only if it may originate content there and either signs it or the zone is unsigned; otherwise at most the fallback |
+| `add-transport-signal` is an origination option, stripped from every non-inline-signing secondary on tdns-auth, so such a secondary never runs the pass and injects nothing | the option stays on a secondary and means "serve"; the storing is gated in the pass; the three readers of the option go through one helper (`addsTransportSignal`), where a server-wide default can be resolved later |
 | the chaser prepends `_dns.` to an alias target | the target is chased literally (RFC 9460 section 3) |
 | a mixed AliasMode/ServiceMode RRset is accepted | refused at load and by an update (RFC 9460 section 2.4.1) |
 | an operator alias is injected unconditionally | injected only when it is about this server (section 4, two ways) |
@@ -165,8 +173,9 @@ start-ups.
 - an operator alias at one name and the server's own name after it: the alias
   kept, the own signal stored;
 - a non-signing secondary of a signed zone: nothing stored, the zone's
-  signatures untouched, the fallback injected; of an unsigned zone: stored
-  unsigned;
+  signatures untouched, the fallback injected; a real tdns-auth secondary of
+  an unsigned zone, its options through the normalizer: the option kept,
+  nothing stored, the fallback injected;
 - a signing secondary: stored signed, kept across a full replacement;
 - alias chasing: target used literally; a target with a prepended label is not
   looked up;

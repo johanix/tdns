@@ -789,7 +789,7 @@ func (zd *ZoneData) addTransportSignal(m *dns.Msg, sigs []core.RRset, msgoptions
 // cannot be resolved is still returned (the alias is authoritative and the
 // resolver can chase it / may already hold the target); SVCB fails safe.
 func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
-	if snap == nil || snap.Apex == nil || !zd.Options[OptAddTransportSignal] {
+	if snap == nil || snap.Apex == nil || !zd.addsTransportSignal() {
 		return nil
 	}
 	nsRRset := snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeNS)

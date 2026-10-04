@@ -50,7 +50,7 @@ func refreshWritesZoneToSourceFile(zd *ZoneData) bool {
 // After all zones are initialized, (re)compute transport signals across zones to resolve cross-zone dependencies.
 func runTransportSignalPostpass(conf *Config) {
 	for zname, zdz := range Zones.Items() {
-		if zdz != nil && zdz.Options[OptAddTransportSignal] {
+		if zdz != nil && zdz.addsTransportSignal() {
 			if err := zdz.CreateTransportSignalRRs(conf); err != nil {
 				lgEngine.Error("postpass CreateTransportSignalRRs failed", "zone", zname, "error", err)
 			}
