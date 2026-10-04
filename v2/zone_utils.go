@@ -2153,7 +2153,7 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	// which does not include server-synthesized _dns.<ns> signals; carry them
 	// over so they survive until the transport postpass regenerates them. (The
 	// synthesized-fallback map is carried separately in applyRefreshReplacementLocked.)
-	if zd.Options[OptAddTransportSignal] {
+	if zd.addsTransportSignal() {
 		snap := zd.publishedSnapshot()
 		if snap == nil {
 			return dynamicRRs
@@ -2262,14 +2262,22 @@ func (zd *ZoneData) repopulateWorkingSetLocked(dynamicRRs []*core.RRset) {
 }
 
 // RepopulateDynamicRRs repopulates dynamically generated RRsets and publishes.
+// Serial-less on a bare working set only; one that already carries another
+// writer's unpublished change asks the gate instead, exactly as
+// commitTransportSignalLocked does, and for the same reason.
 func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 	if len(dynamicRRs) == 0 {
 		return
 	}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	bare := zd.workingSet == nil
 	zd.ensureWorkingSet()
 	zd.repopulateWorkingSetLocked(dynamicRRs)
+	if !bare {
+		zd.publishOrQueueLocked(zd.generation.Load(), false)
+		return
+	}
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 }
 

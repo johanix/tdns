@@ -73,6 +73,11 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 	}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	// Bare: no working set before this pass, so the one seeded below holds
+	// nothing but what the pass stages, and its publish can stay serial-less.
+	// A working set that already exists carries another writer's change,
+	// which the gate has not published yet (see commitTransportSignalLocked).
+	bare := zd.workingSet == nil
 	zd.ensureWorkingSet()
 
 	switch conf.Service.Transport.Type {
@@ -81,9 +86,9 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 			"zone", zd.ZoneName)
 		return nil
 	case "svcb":
-		return zd.createTransportSignalSVCB(conf, dak)
+		return zd.createTransportSignalSVCB(conf, dak, bare)
 	case "tsync":
-		return zd.createTransportSignalTSYNC(conf, dak)
+		return zd.createTransportSignalTSYNC(conf, dak, bare)
 	default:
 		lgDns.Debug("CreateTransportSignalRRs: unknown transport type, skipping",
 			"type", conf.Service.Transport.Type,
@@ -95,19 +100,46 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 // commitTransportSignalLocked stages a signal owner RRset and/or records a
 // synthesized fallback, then publishes.
 //
+//	bare:        the working set was seeded by this pass (CreateTransportSignalRRs)
 //	storedOwner: "_dns.<ns>" owner to stage `stored` under ("" stages nothing)
 //	stored:      the already-signed SVCB/TSYNC RRset for storedOwner
 //	synthName:   "_dns.<ns>" name for a synthesized fallback signal ("" = none)
 //	synth:       the synthesized (unsigned) RRset for synthName (Case A only)
-func (zd *ZoneData) commitTransportSignalLocked(storedOwner string, stored core.RRset, synthName string, synth *core.RRset) {
+//
+// The signal is derived state, recomputed at every start, so its publish is
+// serial-less: bumping for it would make every restart a new serial, a NOTIFY
+// round and a transfer for content that is not zone data. That holds only
+// when the working set is bare. One that already existed carries another
+// writer's change the gate has not published (docs/2026-09-17-publish-gate-
+// and-transactions.md, Amendment 5), and a serial-less publish would install
+// that change at the served serial -- refused by the journal and dropped, or
+// installed where no secondary transfers it. Then the signal is staged like
+// any other change and asks the gate: it rides with the carrying publish, at
+// that publish's serial.
+func (zd *ZoneData) commitTransportSignalLocked(bare bool, storedOwner string, stored core.RRset, synthName string, synth *core.RRset) {
 	if storedOwner != "" && len(stored.RRs) > 0 {
 		zd.stageRRsetLocked(storedOwner, stored)
 	}
+	var m map[string]*core.RRset
 	if synthName != "" && synth != nil {
+		m = map[string]*core.RRset{synthName: synth}
+	}
+	zd.publishTransportSignalLocked(bare, m)
+}
+
+// publishTransportSignalLocked records the synthesized fallbacks for the next
+// snapshot and publishes what the pass staged: serial-less on a bare working
+// set, through the gate otherwise (see commitTransportSignalLocked).
+func (zd *ZoneData) publishTransportSignalLocked(bare bool, synth map[string]*core.RRset) {
+	for name, s := range synth {
 		if zd.wsSignalSynth == nil {
 			zd.wsSignalSynth = map[string]*core.RRset{}
 		}
-		zd.wsSignalSynth[synthName] = synth
+		zd.wsSignalSynth[name] = s
+	}
+	if !bare {
+		zd.publishOrQueueLocked(zd.generation.Load(), false)
+		return
 	}
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 }
@@ -197,8 +229,12 @@ func transportSignalToSVCBOots(sig string) (*dns.SVCBOots, error) {
 	return &dns.SVCBOots{Oots: entries}, nil
 }
 
-// SVCB path. See CreateTransportSignalRRs for the storage/injection model.
-func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) error {
+// SVCB path. See CreateTransportSignalRRs for the storage/injection model and
+// docs/2026-10-04-transport-signal-publication-and-serving.md for the rules:
+// the server speaks only about itself, zone content is signed by whoever signs
+// the zone, every NS name is visited, and nothing is ever looked up
+// recursively.
+func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bare bool) error {
 	apex := zd.stagedOwner(zd.ZoneName)
 	if apex == nil {
 		return fmt.Errorf("zone apex not found")
@@ -208,6 +244,17 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) err
 		return fmt.Errorf("no NS records found at zone apex")
 	}
 
+	// Where nothing may be stored: a secondary that may not originate content
+	// (docs/2026-07-25-secondary-zones-immutable.md: it serves what it received,
+	// unmodified), and a zone that is signed but not by this server (an
+	// unsigned owner under a signed apex is bogus to a validator, and the
+	// signer's chain denies the name; dak == nil says only that THIS server
+	// does not sign, the apex says whether someone does). Such a server keeps
+	// its signal as an unsigned fallback beside the snapshot, injected only.
+	storeForbidden := !zoneMayOriginateContent(zd) || (dak == nil && apexIsSigned(apex))
+
+	staged, aliases := 0, 0
+	synth := map[string]*core.RRset{}
 	for _, rr := range nsRRset.RRs {
 		ns, ok := rr.(*dns.NS)
 		if !ok {
@@ -217,43 +264,56 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) err
 		ownerName := "_dns." + nsName
 
 		if !dns.IsSubDomain(zd.ZoneName, nsName) {
-			// Out-of-bailiwick nameserver. Only advertise a signal for one of
-			// THIS server's own identities (Case A). If we also host the
-			// nameserver's own zone, its authoritative _dns.<ns> signal is
-			// injected directly at query time via FindZone — nothing to store
-			// here. Otherwise synthesize an (unsigned) fallback hint from the
-			// server's SVCB config; it can never be a signed owner RRset in this
-			// zone because _dns.<ns> is out of bailiwick.
+			// Out of bailiwick: the signal's home is the name's own zone.
+			// Only one of this server's identities is spoken for (Case A).
+			// Co-hosted, that zone's authoritative signal is injected at
+			// query time; otherwise an unsigned fallback is kept beside the
+			// snapshot, never as content of this zone.
 			if !CaseFoldContains(conf.Service.Identities, nsName) || Globals.ServerSVCB == nil {
 				continue
 			}
 			if tz := FindZone(ownerName); tz != nil {
 				lgDns.Debug("createTransportSignalSVCB: identity NS zone is co-hosted; will inject its authoritative signal",
 					"zone", zd.ZoneName, "ns", nsName)
-				return nil
+				continue
 			}
-			synth, err := zd.buildServerSVCB(conf, nsName, nil, nil)
+			s, err := zd.buildServerSVCB(conf, nsName, nil, nil)
 			if err != nil {
 				return err
 			}
 			lgDns.Debug("createTransportSignalSVCB: synthesized fallback signal for out-of-bailiwick identity NS",
 				"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
-			zd.commitTransportSignalLocked("", core.RRset{}, ownerName, synth)
-			return nil
+			synth[ownerName] = s
+			continue
 		}
 
-		// In-bailiwick nameserver.
+		// In bailiwick.
 		nsData := zd.stagedOwner(nsName)
 		if nsData == nil {
 			continue
 		}
-		// An operator-authored AliasMode SVCB at _dns.<ns> is a bridge to another
-		// nameserver's signal — leave it untouched; it is served on direct query
-		// and its target is chased at injection time.
-		if ownerData := zd.stagedOwner(ownerName); ownerData != nil {
-			if svcbHasAlias(ownerData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)) {
+		// An operator-authored AliasMode SVCB at _dns.<ns> is the operator's
+		// statement: left as it is, served on direct query, chased literally
+		// at injection time (RFC 9460 section 3). A target that is one of
+		// this server's identities whose zone is not hosted here gets the
+		// fallback an out-of-bailiwick NS name gets. The walk goes on: an
+		// alias at one name says nothing about the server's other names.
+		if od := zd.stagedOwner(ownerName); od != nil {
+			if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); svcbHasAlias(rs) {
 				lgDns.Debug("createTransportSignalSVCB: keeping operator SVCB alias", "owner", ownerName, "zone", zd.ZoneName)
-				return nil
+				aliases++
+				for _, tgt := range signalChaseTargets(rs) {
+					id := strings.TrimPrefix(tgt, "_dns.")
+					if !CaseFoldContains(conf.Service.Identities, id) || Globals.ServerSVCB == nil || FindZone(tgt) != nil {
+						continue
+					}
+					s, err := zd.buildServerSVCB(conf, id, nil, nil)
+					if err != nil {
+						return err
+					}
+					synth[tgt] = s
+				}
+				continue
 			}
 		}
 
@@ -279,23 +339,19 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) err
 		if err != nil {
 			return err
 		}
-		// Sign BEFORE staging so the snapshot freezes a signed signal; the
-		// resigner keeps its signature fresh thereafter. Store as a real
-		// _dns.<ns> owner RRset (replacing any prior synthesized server SVCB),
-		// so it is directly queryable and injected from the stored copy.
-		// Gate on dak, not on the static online/inline-signing options: this is
-		// deliberate and provably correct. CreateTransportSignalRRs resolves dak
-		// via EnsureActiveDnssecKeys, which for a signing zone returns non-nil
-		// keys or an error — never (nil, nil) — so a signing zone that is
-		// transiently keyless (bootstrap / mid policy-reset) errors out upstream
-		// and never reaches here with a nil dak; dak == nil is therefore exactly
-		// "the zone doesn't sign." Gating on dak is also what keeps a nil dak out
-		// of SignRRset, which under zd.mu would self-deadlock via PublishDnskeyRRs
-		// (the reason keys are resolved up in CreateTransportSignalRRs). An
-		// unsigned zone gets an unsigned transport signal, not a hard failure.
-		// (Revisit if EnsureActiveDnssecKeys is ever changed to return a nil dak
-		// for a signing zone.)
-		if dak != nil {
+		switch {
+		case storeForbidden:
+			lgDns.Info("createTransportSignalSVCB: this server stores no signal into this zone (a secondary that may not originate content, or a zone signed by someone else); the signal is kept as an unsigned fallback beside the snapshot, injected only",
+				"zone", zd.ZoneName, "owner", ownerName)
+			synth[ownerName] = stored
+			continue
+		case dak != nil:
+			// Sign BEFORE staging so the snapshot freezes a signed signal; the
+			// resigner keeps its signature fresh thereafter. dak is resolved by
+			// CreateTransportSignalRRs, outside zd.mu, and for a zone this
+			// server signs it is never nil here (EnsureActiveDnssecKeys returns
+			// keys or an error), which is what keeps a nil dak out of
+			// SignRRset under zd.mu (the PublishDnskeyRRs re-lock).
 			if _, err := zd.SignRRset(stored, "", dak, false, nil); err != nil {
 				lgDns.Error("createTransportSignalSVCB: error signing SVCB; not staging unsigned signal",
 					"owner", ownerName, "err", err)
@@ -304,14 +360,114 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) err
 		}
 		lgDns.Debug("createTransportSignalSVCB: stored synthesized server SVCB",
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
-		zd.commitTransportSignalLocked(ownerName, *stored, "", nil)
+		zd.stageRRsetLocked(ownerName, *stored)
+		staged++
+	}
+	if staged == 0 && len(synth) == 0 {
+		if aliases == 0 {
+			lgDns.Warn("createTransportSignalSVCB: add-transport-signal is set, but no NS name of the zone resolves to this server's listeners and none is one of its identities; nothing to publish (a hidden primary should not carry the option)",
+				"zone", zd.ZoneName)
+		}
 		return nil
+	}
+	zd.publishTransportSignalLocked(bare, synth)
+	return nil
+}
+
+// addsTransportSignal reports whether this zone publishes and injects transport
+// signals. Today that is the zone's own option; a server-wide default would
+// be resolved here, at the point of use, not into zd.Options (the option
+// finalization sites are many, and the option is persisted with dynamic
+// zones). Every reader of the option goes through this.
+func (zd *ZoneData) addsTransportSignal() bool {
+	return zd.Options[OptAddTransportSignal]
+}
+
+// apexIsSigned reports whether the zone is signed by anyone: it serves a
+// DNSKEY RRset, or its SOA carries a signature.
+func apexIsSigned(apex *OwnerData) bool {
+	if apex == nil {
+		return false
+	}
+	if rs, ok := apex.RRtypes.Get(dns.TypeDNSKEY); ok && len(rs.RRs) > 0 {
+		return true
+	}
+	return len(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs) > 0
+}
+
+// svcbMixesModes reports an SVCB RRset holding both an AliasMode record
+// (SvcPriority 0) and ServiceMode records. RFC 9460 section 2.4.1: all RRs of
+// an RRset should have the same mode, and a recipient MUST ignore the
+// ServiceMode records beside an AliasMode one. tdns refuses such a set rather
+// than serve records a client discards.
+func svcbMixesModes(rs core.RRset) bool {
+	alias, service := false, false
+	for _, rr := range rs.RRs {
+		if svcb, ok := rr.(*dns.SVCB); ok {
+			if svcb.Priority == 0 {
+				alias = true
+			} else {
+				service = true
+			}
+		}
+	}
+	return alias && service
+}
+
+// refuseMixedSvcbUpdateLocked applies an update's SVCB actions to a copy of
+// each owner's staged SVCB RRset, in order and with the applier's own rules
+// (RFC 2136: class ANY deletes the RRset, class NONE one record, class IN
+// adds one; owners by canonical name; a record matches regardless of TTL, as
+// the applier's IsDuplicate does), and refuses the update if any owner would
+// end up mixing AliasMode and ServiceMode records. Nothing is staged by this;
+// the caller holds zd.mu.
+func (zd *ZoneData) refuseMixedSvcbUpdateLocked(actions []dns.RR) error {
+	sets := map[string][]dns.RR{}
+	load := func(owner string) []dns.RR {
+		if rrs, ok := sets[owner]; ok {
+			return rrs
+		}
+		var rrs []dns.RR
+		if od := zd.stagedOwner(owner); od != nil {
+			rrs = append(rrs, od.RRtypes.GetOnlyRRSet(dns.TypeSVCB).RRs...)
+		}
+		sets[owner] = rrs
+		return rrs
+	}
+	for _, rr := range actions {
+		h := rr.Header()
+		owner := core.CanonicalizeName(h.Name)
+		switch {
+		case h.Class == dns.ClassANY && (h.Rrtype == dns.TypeANY || h.Rrtype == dns.TypeSVCB):
+			sets[owner] = nil
+		case h.Rrtype != dns.TypeSVCB:
+			continue
+		case h.Class == dns.ClassNONE:
+			// As the applier compares: the record brought to class IN, the
+			// TTL ignored by IsDuplicate.
+			want := dns.Copy(rr)
+			want.Header().Class = dns.ClassINET
+			kept := load(owner)[:0:0]
+			for _, have := range load(owner) {
+				if !dns.IsDuplicate(have, want) {
+					kept = append(kept, have)
+				}
+			}
+			sets[owner] = kept
+		case h.Class == dns.ClassINET:
+			sets[owner] = append(load(owner), rr)
+		}
+	}
+	for owner, rrs := range sets {
+		if svcbMixesModes(core.RRset{Name: owner, RRtype: dns.TypeSVCB, RRs: rrs}) {
+			return fmt.Errorf("zone %s: update refused: %s would hold an SVCB RRset mixing AliasMode and ServiceMode records, which a client ignores (RFC 9460 section 2.4.1)", zd.ZoneName, owner)
+		}
 	}
 	return nil
 }
 
 // TSYNC path. See CreateTransportSignalRRs for the storage/injection model.
-func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys) error {
+func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys, bare bool) error {
 	apex := zd.stagedOwner(zd.ZoneName)
 	if apex == nil {
 		return fmt.Errorf("zone apex not found")
@@ -393,7 +549,7 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys) er
 		}
 		lgDns.Debug("createTransportSignalTSYNC: stored synthesized TSYNC",
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName, "rr", trr.String())
-		zd.commitTransportSignalLocked(ownerName, stored, "", nil)
+		zd.commitTransportSignalLocked(bare, ownerName, stored, "", nil)
 		return nil
 	}
 	return nil

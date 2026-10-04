@@ -178,7 +178,7 @@ func (zd *ZoneData) RenewZoneSignatures(ctx context.Context, kdb *KeyDB) (int, e
 	// is the one this pass found due, so nothing below reads it, and the
 	// estimate would describe a version that is not published: unknown, as
 	// for a pass over a pending working set.
-	if !zd.publishOrQueueLocked(zd.generation.Load(), false) {
+	if zd.publishOrQueueLocked(zd.generation.Load(), false) != publishedHere {
 		zd.setResignSchedule(time.Time{}, 0)
 		return len(signed) + publishOwned, nil
 	}

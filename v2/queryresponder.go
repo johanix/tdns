@@ -789,7 +789,7 @@ func (zd *ZoneData) addTransportSignal(m *dns.Msg, sigs []core.RRset, msgoptions
 // cannot be resolved is still returned (the alias is authoritative and the
 // resolver can chase it / may already hold the target); SVCB fails safe.
 func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
-	if snap == nil || snap.Apex == nil || !zd.Options[OptAddTransportSignal] {
+	if snap == nil || snap.Apex == nil || !zd.addsTransportSignal() {
 		return nil
 	}
 	nsRRset := snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeNS)
@@ -813,17 +813,66 @@ func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
 			}
 			seen[key] = true
 			out = append(out, rs)
+			// RFC 9460 section 3: an AliasMode target is queried as written,
+			// "without additional prefixes". The operator spells it
+			// _dns.<ns>; nothing is added here.
 			for _, tgt := range signalChaseTargets(rs) {
-				add("_dns."+tgt, depth+1)
+				add(tgt, depth+1)
 			}
 		}
 	}
 	for _, rr := range nsRRset.RRs {
-		if ns, ok := rr.(*dns.NS); ok {
-			add("_dns."+ns.Ns, 0)
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			continue
 		}
+		owner := "_dns." + ns.Ns
+		if !zd.signalIsAboutThisServer(snap, ns.Ns, owner) {
+			continue
+		}
+		add(owner, 0)
 	}
 	return out
+}
+
+// signalIsAboutThisServer decides whether the signal at an NS name's owner is
+// injected: a server speaks only about itself and never asks anyone
+// (docs/2026-10-04-transport-signal-publication-and-serving.md). A stored
+// ServiceMode signal, a co-hosted zone's signal and the synthesized fallback
+// exist only because the pass found the name to be this server's, so they
+// are. An operator alias is the operator's statement and is injected only
+// when the server can know it is about itself: it holds the target's signal
+// (a co-hosted zone's, or its own fallback), which is injected with it, or the
+// NS name's own addresses in this zone are its listeners (the alias goes
+// alone; the resolver chases it).
+func (zd *ZoneData) signalIsAboutThisServer(snap *zoneSnapshot, nsName, owner string) bool {
+	rrsets := zd.lookupSignalRRsets(snap, owner)
+	alias := false
+	for _, rs := range rrsets {
+		if svcbHasAlias(rs) {
+			alias = true
+		}
+	}
+	if !alias {
+		return len(rrsets) > 0
+	}
+	for _, rs := range rrsets {
+		for _, tgt := range signalChaseTargets(rs) {
+			// Hosting the target's signal, not merely a zone around the
+			// target's name: what is injected with the alias is that signal.
+			if len(zd.lookupSignalRRsets(snap, tgt)) > 0 {
+				return true
+			}
+		}
+	}
+	if od := getOwnerFrom(snap, nsName); od != nil {
+		a := od.RRtypes.GetOnlyRRSet(dns.TypeA)
+		aaaa := od.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
+		if matchesConfiguredAddrs(Conf.Listeners.Addresses, &a) || matchesConfiguredAddrs(Conf.Listeners.Addresses, &aaaa) {
+			return true
+		}
+	}
+	return false
 }
 
 // lookupSignalRRsets returns the SVCB/TSYNC RRsets stored at a transport-signal
@@ -833,7 +882,16 @@ func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
 // synthesized fallback (Case A) is used.
 func (zd *ZoneData) lookupSignalRRsets(snap *zoneSnapshot, name string) []core.RRset {
 	if dns.IsSubDomain(zd.ZoneName, name) {
-		return signalRRsetsFromOwner(getOwnerFrom(snap, name))
+		if rrs := signalRRsetsFromOwner(getOwnerFrom(snap, name)); len(rrs) > 0 {
+			return rrs
+		}
+		// Nothing stored: the fallback a server keeps beside the snapshot
+		// for a zone it does not sign (it stores nothing into a zone signed
+		// by someone else), injected only, never content.
+		if rs, ok := snap.signalSynth[name]; ok && rs != nil {
+			return []core.RRset{*rs}
+		}
+		return nil
 	}
 	if tz := FindZone(name); tz != nil {
 		if tz == zd {

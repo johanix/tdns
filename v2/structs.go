@@ -652,8 +652,13 @@ type ZoneConf struct {
 	// add/delete/modify). Persisted so OptApiManagedZone can be re-derived on
 	// reload — a dedicated bool, not a SourceCatalog="api" sentinel.
 	ApiManaged bool `yaml:"apimanaged" mapstructure:"apimanaged"`
-	// PublishCadence is the minimum interval between coalesced snapshot publishes
-	// for this zone (default 5s when unset). RFC 2136 urgent publishes bypass.
+	// PublishCadence is the minimum interval between the gate's publishes of a
+	// busy zone: a change staged within it waits for the next publish, which
+	// carries everything staged by then. Unset means the package default
+	// (DefaultPublishCadence, 5s); a configured value below one second is
+	// rejected at config load. An idle zone, a zone that is not Ready, a
+	// replay, the operator's bump and an urgent transaction commit publish
+	// regardless (docs/2026-09-17-publish-gate-and-transactions.md).
 	PublishCadence string `yaml:"publish-cadence" mapstructure:"publish-cadence"`
 	// IxfrChainMaxBytes bounds the retained outbound-IXFR delta history for
 	// this zone (estimated wire bytes). 0/unset => 1 MiB default; negative =>

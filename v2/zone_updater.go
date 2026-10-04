@@ -1158,6 +1158,12 @@ func (zd *ZoneData) applyZoneUpdate(ur UpdateRequest, kdb *KeyDB, after func()) 
 	// A defer of its own, so that the lock is released however this ends, a
 	// publish that panics included (#808).
 	defer zd.mu.Unlock()
+	// Refused whole, before anything is staged, and the sender is told: an
+	// update that would leave an SVCB RRset mixing AliasMode and ServiceMode
+	// records (RFC 9460 section 2.4.1), as the zone load refuses such a file.
+	if err := zd.refuseMixedSvcbUpdateLocked(ur.Actions); err != nil {
+		return false, false, err
+	}
 	var persistErr error
 	updated, deferred, persistErr, err = zd.stageAndPublishLocked(ur, func() bool { return zd.stageZoneUpdateLocked(ur, dak) },
 		zd.followsPublish(ur, after))
@@ -1580,9 +1586,11 @@ func (zd *ZoneData) stageAndPublishLocked(ur UpdateRequest, stage func() bool, a
 	// change.
 	zd.wsPersistDelta = zd.wsPersistDelta || !ur.Replay
 	step = publishing
-	published := zd.publishOrQueueLocked(zd.generation.Load(), ur.Replay)
+	errBefore := zd.ErrorMsg
+	outcome := zd.publishOrQueueLocked(zd.generation.Load(), ur.Replay)
 	step = finished
-	if !published {
+	switch outcome {
+	case publishQueued, publishHeld:
 		// Staged and waiting for the gate's publish, or for the commit that
 		// closes the hold. The outcome, the journal's error included, reaches
 		// the sender through the zone's waiters.
@@ -1593,11 +1601,22 @@ func (zd *ZoneData) stageAndPublishLocked(ur UpdateRequest, stage func() bool, a
 			zd.afterPublish = append(zd.afterPublish, after)
 		}
 		return true, true, nil, nil
-	}
-	if zd.wsPersistErr != nil {
-		persistErr = zd.wsPersistErr
-		zd.wsPersistErr = nil
-		return false, false, persistErr, nil
+	case publishRefused:
+		if zd.wsPersistErr != nil {
+			persistErr = zd.wsPersistErr
+			zd.wsPersistErr = nil
+			return false, false, persistErr, nil
+		}
+		// Refused before the journal: the zone cannot sign the change, its
+		// NSEC chain cannot be repaired, a held zone's first content is still
+		// unsigned. Nothing is served and nothing is written, so the sender
+		// is told, with what the deferred path tells its waiter. The change
+		// stays staged when the refusal kept the working set, and so does
+		// its follow-up: the publish that carries the change runs it.
+		if after != nil && zd.workingSet != nil {
+			zd.afterPublish = append(zd.afterPublish, after)
+		}
+		return false, false, nil, zd.publishRefusalErrorLocked(errBefore)
 	}
 	return true, false, nil, nil
 }

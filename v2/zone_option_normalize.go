@@ -55,7 +55,12 @@ var originationOptions = []ZoneOption{
 	// around the MUST-NOT-MODIFY invariant that allow-updates already enforces
 	// for the DDNS channel.
 	OptAllowApiUpdates,
-	OptAddTransportSignal,
+	// add-transport-signal is NOT here (Amendment 1 of this design, 2026-10-04):
+	// on a secondary that may not originate content it means "serve a signal
+	// for this zone's NS names", never "store one". The storing is gated in
+	// the signal pass itself (createTransportSignalSVCB, zoneMayOriginateContent),
+	// and what such a secondary keeps is an unsigned fallback beside its
+	// snapshot, injected only, never content, never transferred.
 	OptChildSync,
 	OptParentSync,
 	OptOnlineSigning,

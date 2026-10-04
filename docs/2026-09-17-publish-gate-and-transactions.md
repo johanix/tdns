@@ -791,3 +791,54 @@ text:
   operator's immediate path from a program (four sites in the combiner); left as
   they are, to revisit if the fleet shows them as churn. The resigner's own
   scheduling is unchanged.
+
+## Amendment 5 (2026-10-04): the gate's result, and the serial-less publishers
+
+Two findings of the external final review of the merged design (tdns main
+1e5ce607, v0.9-rc8), implemented in the follow-up PR. Neither changes a rule
+above; both close a gap between what a rule promises and what the code
+reported.
+
+- **The gate's result is decided by the snapshot, not by the publish having
+  run.** `publishOrQueueLocked` reported "published in the caller" whenever it
+  ran the publish there, including when the publish was refused before the
+  journal (a zone that cannot sign the change, an NSEC chain that cannot be
+  repaired, a held zone's unsigned first content, an apex-less working set).
+  The update applier read only the journal's error after that and reported the
+  update as applied: NOERROR for a change neither served nor written, and the
+  follow-ups (the resolver's delegation cache dropped, the file written) run
+  for it. The deferred path answered its waiter with the zone's error, but
+  dropped the follow-ups unconditionally, which is right only for a refusal
+  that drops the working set. Now the gate reports one of four outcomes:
+  published here, refused here, queued, held. A refusal in the caller is
+  answered with the zone's error, exactly as the deferred path answers its
+  waiter (`publishRefusalErrorLocked`, shared); the follow-ups stay registered
+  when the refusal keeps the change staged (unsignable, unrepairable, unsigned
+  first content), so the publish that later carries the change runs them, and
+  go with a change the refusal dropped (the journal, a zone no longer live).
+  `StageBatch` and `Publish` put a refusal in `Msg` with the serial unchanged;
+  the renewal pass treats a refusal as it treats a queued publish (schedule
+  unknown); the catalog persists its file and config only on a publish that
+  installed a snapshot, else with the carrying publish. "What NOERROR
+  promises" now holds on the caller's path as it did on the deferred one.
+- **A serial-less publisher stays serial-less only on a bare working set.**
+  The transport-signal pass at start-up and the dynamic-RR repopulation
+  publish without a serial bump on purpose: derived state, recomputed at every
+  start, and a bump for it would make every restart a transfer. That was safe
+  while a working set never sat on another writer's change; under the gate it
+  can, for up to a cadence, and the start-up pass runs inside the cadence of
+  every zone's first load. A serial-less publish then installed the queued
+  change at the served serial: refused by the journal and dropped (a waiter
+  told, a fire-and-forget change lost), or installed where no secondary
+  transfers it. Now both publishers note whether the working set existed
+  before they seeded it. Bare, they publish serial-less as before. Not bare,
+  they stage their records and ask the gate: the signal or the repopulated
+  RRsets ride with the carrying publish, at that publish's serial. The
+  refresh's own serial-less publish (a wholesale replacement at the upstream's
+  serial) is unchanged: it is the designed one.
+- Tests: an update refused in the caller is answered with the error, runs no
+  follow-up, and the publish that later carries the kept change runs it; the
+  same on the deferred path; a refused batch and a refused `Publish` say so;
+  a signal commit and a repopulation over a queued change ride the gate and
+  the change gets its own serial; on a bare working set the signal commit
+  stays serial-less.

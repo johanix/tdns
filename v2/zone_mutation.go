@@ -271,31 +271,69 @@ func (zd *ZoneData) workingOwnerNamesLocked() []string {
 	return names
 }
 
+// publishOutcome is what publishOrQueueLocked reports to the writer that
+// asked it.
+type publishOutcome uint8
+
+const (
+	// publishedHere: the publish ran in the caller and installed a snapshot;
+	// the writer's change is served. (Also reported when nothing was staged:
+	// nothing to publish, nothing refused.)
+	publishedHere publishOutcome = iota
+	// publishRefused: the publish ran in the caller and installed nothing.
+	// The change is still staged when the refusal keeps the working set (a
+	// zone that cannot sign it, an NSEC chain that cannot be repaired, a held
+	// zone's unsigned first content) and gone when it does not (the journal, a
+	// zone no longer live): zd.workingSet tells which. The zone's error says
+	// why; publishRefusalErrorLocked spells it.
+	publishRefused
+	// publishQueued: the change stays staged, marked queued, and runPublisher
+	// publishes it at lastPublish + cadence with everything staged by then.
+	publishQueued
+	// publishHeld: stopped by an open transaction (step 1's hold); the commit
+	// that closes the hold carries the change.
+	publishHeld
+)
+
 // publishOrQueueLocked is the gate's entry for a writer that has staged a
-// change (docs/2026-09-17-publish-gate-and-transactions.md). It reports
-// whether the publish ran here, in the caller:
+// change (docs/2026-09-17-publish-gate-and-transactions.md, Amendment 5). It
+// reports what became of the publish:
 //
-//   - a held zone: the publish is stopped inside (step 1's hold), and the
-//     commit that closes the hold carries the change;
+//   - a held zone: the publish is stopped inside, and the commit that closes
+//     the hold carries the change (publishHeld);
 //   - now, a zone that is not Ready, or an idle zone (no publish within the
 //     cadence): the publish runs here, under the zd.mu the caller holds,
-//     exactly as every publish did before the gate;
+//     exactly as every publish did before the gate -- and the result says
+//     whether it installed a snapshot (publishedHere) or was refused
+//     (publishRefused): a refusal is decided by the snapshot, not by the
+//     publish having run;
 //   - otherwise the change stays staged, marked queued, and runPublisher
-//     publishes it at lastPublish + cadence with everything staged by then.
+//     publishes it at lastPublish + cadence with everything staged by then
+//     (publishQueued).
 //
 // A caller whose publish did not run here hands its Resp to zd.waiters, and
-// what it would do after a publish to zd.afterPublish. Caller holds zd.mu.
-func (zd *ZoneData) publishOrQueueLocked(gen uint64, now bool) bool {
+// what it would do after a publish to zd.afterPublish; so does one whose
+// publish was refused with the change kept staged, since the next publish
+// carries it. Caller holds zd.mu.
+func (zd *ZoneData) publishOrQueueLocked(gen uint64, now bool) publishOutcome {
 	if zd.txHeldLocked() {
 		zd.publishLocked(gen)
-		return false
+		return publishHeld
 	}
 	if now || !zd.Ready || zd.lastPublish.IsZero() || time.Since(zd.lastPublish) >= publishCadenceForZone(zd) {
+		if zd.workingSet == nil {
+			zd.publishLocked(gen)
+			return publishedHere
+		}
+		before := zd.snapshot.Load()
 		zd.publishLocked(gen)
-		return true
+		if zd.snapshot.Load() == before {
+			return publishRefused
+		}
+		return publishedHere
 	}
 	zd.requestPublishLocked()
-	return false
+	return publishQueued
 }
 
 func (zd *ZoneData) requestPublish(urgent bool) {
@@ -1789,35 +1827,34 @@ func (zd *ZoneData) StageOwnerDelete(name string) {
 	zd.stageOwnerDeleteLocked(name)
 }
 
-// Publish cuts a new snapshot from whatever is staged: one serial, one
-// snapshot, one IXFR delta, one NOTIFY. It is the same call as
-// BumpSerialOnly, under the name that says what it does.
-//
-// It bumps even when nothing is staged: with no working set, publishSync seeds
-// one from the served snapshot and republishes identical content under a new
-// serial. A caller that may have staged nothing should use StageBatch, whose
-// callback reports whether anything changed.
 // Publish asks the gate for what is staged: an idle zone publishes in the
-// caller and the response carries the new serial; a busy zone's publish is the
-// gate's, at the next cadence, and the response says so with the serial
-// unchanged; a held zone publishes nothing until its commit. It bumps nothing
-// of its own: with nothing staged there is nothing to publish. The operator's
-// bump (BumpSerial) is the immediate call.
+// caller and the response carries the new serial (one serial, one snapshot,
+// one IXFR delta, one NOTIFY); a busy zone's publish is the gate's, at the
+// next cadence, and the response says so with the serial unchanged; a held
+// zone publishes nothing until its commit; a publish refused in the caller
+// says why. It bumps nothing of its own: with nothing staged there is nothing
+// to publish, and the response says that too. The operator's bump
+// (BumpSerial) is the immediate call, and the one that bumps regardless.
 func (zd *ZoneData) Publish() (BumperResponse, error) {
 	resp := BumperResponse{Zone: zd.ZoneName}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 	resp.OldSerial, resp.NewSerial = zd.CurrentSerial, zd.CurrentSerial
-	switch {
-	case zd.workingSet == nil && !zd.txHeldLocked():
+	if zd.workingSet == nil && !zd.txHeldLocked() {
 		resp.Msg = fmt.Sprintf("zone %s: nothing staged, nothing to publish", zd.ZoneName)
-	case zd.publishOrQueueLocked(zd.generation.Load(), false):
+		return resp, nil
+	}
+	errBefore := zd.ErrorMsg
+	switch zd.publishOrQueueLocked(zd.generation.Load(), false) {
+	case publishedHere:
 		resp.NewSerial = zd.CurrentSerial
-	case zd.txHeldLocked():
+	case publishRefused:
+		resp.Msg = zd.publishRefusalErrorLocked(errBefore).Error()
+	case publishHeld:
 		// Asked, and stopped by the hold, which counts it; the commit that
 		// closes the hold carries what is staged.
 		resp.Msg = fmt.Sprintf("zone %s is held by an open transaction; nothing published until its commit", zd.ZoneName)
-	default:
+	case publishQueued:
 		resp.Msg = fmt.Sprintf("zone %s: staged; the gate publishes it at the next cadence", zd.ZoneName)
 	}
 	return resp, nil
@@ -2039,8 +2076,12 @@ func (zd *ZoneData) StageBatch(fn func(s Stager) (changed bool, err error)) (Bum
 		zd.dropBareWorkingSetLocked()
 		return resp, nil
 	}
-	if zd.publishOrQueueLocked(zd.generation.Load(), false) {
+	errBefore := zd.ErrorMsg
+	switch zd.publishOrQueueLocked(zd.generation.Load(), false) {
+	case publishedHere:
 		resp.NewSerial = zd.CurrentSerial
+	case publishRefused:
+		resp.Msg = zd.publishRefusalErrorLocked(errBefore).Error()
 	}
 	return resp, nil
 }
