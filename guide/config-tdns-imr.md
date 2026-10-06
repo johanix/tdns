@@ -295,6 +295,16 @@ cached lifetime, clients see the bounded TTL too. Root hints and trust anchors
 are configuration, not cached data, and are not bounded. When `cache-min-ttl`
 exceeds `cache-max-ttl`, the maximum wins.
 
+The lifetime they bound is the smallest TTL among the records an entry holds
+and serves. A denial lives for its negative TTL, the smaller of the SOA's TTL
+and its MINIMUM field (RFC 2308 section 5), and no longer than the records of
+its proof. An entry the resolver has authenticated lives no longer than the
+signatures that authenticated it allow (RFC 4035 section 5.3.3): their TTL and
+Original TTL count as TTLs, so `cache-min-ttl` raises them like any other, but
+the time left to their expiration is a bound that `cache-min-ttl` does not
+override. The resolver does not serve AD for data whose signatures have
+expired. `cache-max-ttl` still lowers the lifetime of such an entry.
+
 `zone-state-recheck` is how long the resolver acts on a zone's Indeterminate or
 Insecure DNSSEC verdict before it looks at the zone again. An Indeterminate zone,
 one whose chain of trust could not be followed, has its chain followed afresh. An

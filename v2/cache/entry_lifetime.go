@@ -16,7 +16,8 @@ import (
 // A denial is cached for its negative TTL (RFC 2308 section 5): the SOA's TTL
 // and its MINIMUM field, whichever is smaller, and no longer than any record
 // of the proof served with it. cache-min-ttl and cache-max-ttl bound the
-// result for data learned from the network (ttlBounded).
+// result for data learned from the network (ttlBounded). An entry held
+// Secure lives no longer than its signatures allow (signature_lifetime.go).
 //
 // The lifetime is computed from the records each time an entry is stored,
 // whatever its caller computed: a caller's own Expiration is not used for an
@@ -69,6 +70,17 @@ func entryLifetime(c *CachedRRset, qtype uint16, storedAt time.Time, limits TTLL
 			}
 		}
 	}
+	// An entry held Secure is bounded by the RRSIGs that can have
+	// authenticated it (signature_lifetime.go): their TTL and Original TTL
+	// here, as TTLs, and the time left to their expiration below.
+	var sigExpires time.Time
+	signed := false
+	if c.State == ValidationStateSecure {
+		var sigTTL uint32
+		if sigTTL, sigExpires, signed = signatureBounds(entrySignedSets(c), storedAt); signed {
+			lower(sigTTL)
+		}
+	}
 	// A small floor for an NS RRset learned from a referral, so that a TTL
 	// of 0 does not drop it at once.
 	if qtype == dns.TypeNS && c.Context == ContextReferral && ttl == 0 {
@@ -77,5 +89,12 @@ func entryLifetime(c *CachedRRset, qtype uint16, storedAt time.Time, limits TTLL
 	if bounded {
 		ttl = limits.Clamp(ttl)
 	}
-	return ttl, storedAt.Add(time.Duration(ttl) * time.Second)
+	expires := storedAt.Add(time.Duration(ttl) * time.Second)
+	// After cache-min-ttl: nothing serves an authenticated entry past its
+	// signatures.
+	if signed && sigExpires.Before(expires) {
+		expires = sigExpires
+		ttl = uint32(max(expires.Sub(storedAt), 0) / time.Second)
+	}
+	return ttl, expires
 }

@@ -57,7 +57,7 @@ func newNegSigner(t *testing.T, rrcache *RRsetCacheT) *negSigner {
 
 func (s *negSigner) sign(t *testing.T, rrs ...dns.RR) *core.RRset {
 	t.Helper()
-	sig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: s.key.KeyTag(), SignerName: negZone,
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: rrs[0].Header().Ttl}, Algorithm: dns.ED25519, KeyTag: s.key.KeyTag(), SignerName: negZone,
 		Inception:  uint32(time.Now().Add(-time.Hour).Unix()),
 		Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := sig.Sign(s.priv, rrs); err != nil {

@@ -89,6 +89,7 @@ func signedDnskeys(t *testing.T, members, signers []*signerTestKey, inception, e
 	}
 	for _, k := range signers {
 		sig := &dns.RRSIG{
+			Hdr:        dns.RR_Header{Ttl: rrset.RRs[0].Header().Ttl},
 			Algorithm:  k.dnskey.Algorithm,
 			Inception:  uint32(inception.Unix()),
 			Expiration: uint32(expiration.Unix()),

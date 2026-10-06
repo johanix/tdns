@@ -352,7 +352,7 @@ func TestValidateAnswerDNSKEYIsNotAWildcard(t *testing.T) {
 	rrcache.DnskeyCache.Set(zone, ksk.KeyTag(), &CachedDnskeyRRset{Name: zone, Keyid: ksk.KeyTag(),
 		State: ValidationStateSecure, TrustAnchor: true, Dnskey: *ksk, Expiration: time.Now().Add(time.Hour)})
 	rrs := []dns.RR{dns.Copy(ksk), dns.Copy(zsk)}
-	sig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: ksk.KeyTag(), SignerName: zone,
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: rrs[0].Header().Ttl}, Algorithm: dns.ED25519, KeyTag: ksk.KeyTag(), SignerName: zone,
 		Inception: uint32(time.Now().Add(-time.Hour).Unix()), Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := sig.Sign(priv.(crypto.Signer), rrs); err != nil {
 		t.Fatal(err)

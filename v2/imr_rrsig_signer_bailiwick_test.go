@@ -97,7 +97,7 @@ func TestResponderRefusesAnOutOfBailiwickSigner(t *testing.T) {
 			}
 			a := &dns.A{Hdr: dns.RR_Header{Name: c.owner, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
 				A: net.IPv4(192, 0, 2, 66)}
-			sig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: k.KeyTag(), SignerName: c.signer,
+			sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: a.Header().Ttl}, Algorithm: dns.ED25519, KeyTag: k.KeyTag(), SignerName: c.signer,
 				Inception:  uint32(time.Now().Add(-time.Hour).Unix()),
 				Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 			if err := sig.Sign(priv.(crypto.Signer), []dns.RR{a}); err != nil {

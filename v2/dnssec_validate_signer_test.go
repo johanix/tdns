@@ -65,6 +65,7 @@ func (k *signerTestKey) holdSecure(dkc *cache.DnskeyCacheT) {
 func (k *signerTestKey) sign(t *testing.T, rrs ...dns.RR) *core.RRset {
 	t.Helper()
 	sig := &dns.RRSIG{
+		Hdr:        dns.RR_Header{Ttl: rrs[0].Header().Ttl},
 		Algorithm:  k.dnskey.Algorithm,
 		Inception:  uint32(time.Now().Add(-time.Hour).Unix()),
 		Expiration: uint32(time.Now().Add(time.Hour).Unix()),

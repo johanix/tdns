@@ -33,7 +33,7 @@ type chain636 struct {
 
 func sign636(t *testing.T, key *dns.DNSKEY, priv crypto.PrivateKey, rrs ...dns.RR) *core.RRset {
 	t.Helper()
-	sig := &dns.RRSIG{Algorithm: key.Algorithm, KeyTag: key.KeyTag(), SignerName: key.Hdr.Name,
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: rrs[0].Header().Ttl}, Algorithm: key.Algorithm, KeyTag: key.KeyTag(), SignerName: key.Hdr.Name,
 		Inception: uint32(time.Now().Add(-time.Hour).Unix()), Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := sig.Sign(priv.(crypto.Signer), rrs); err != nil {
 		t.Fatal(err)

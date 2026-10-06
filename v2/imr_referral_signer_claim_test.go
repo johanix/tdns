@@ -23,7 +23,7 @@ func dsSignedInTheNameOf(ds dns.RR, signer string) []dns.RR {
 	if err != nil {
 		panic(err)
 	}
-	sig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: k.KeyTag(), SignerName: signer,
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: ds.Header().Ttl}, Algorithm: dns.ED25519, KeyTag: k.KeyTag(), SignerName: signer,
 		Inception:  uint32(time.Now().Add(-time.Hour).Unix()),
 		Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := sig.Sign(p.(crypto.Signer), []dns.RR{ds}); err != nil {

@@ -48,7 +48,7 @@ func newFwdSecKey(t *testing.T, zone string) *fwdSecKey {
 // sign returns rrs followed by their RRSIG, as a message section carries them.
 func (k *fwdSecKey) sign(t *testing.T, rrs ...dns.RR) []dns.RR {
 	t.Helper()
-	sig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: k.dnskey.KeyTag(), SignerName: k.dnskey.Hdr.Name,
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: rrs[0].Header().Ttl}, Algorithm: dns.ED25519, KeyTag: k.dnskey.KeyTag(), SignerName: k.dnskey.Hdr.Name,
 		Inception: uint32(time.Now().Add(-time.Hour).Unix()), Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := sig.Sign(k.priv, rrs); err != nil {
 		t.Fatal(err)
