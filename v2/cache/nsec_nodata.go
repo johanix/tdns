@@ -25,7 +25,8 @@ import (
 //
 // Every NSEC in nsecs has validated Secure. Neither proof is a name error:
 // the first shows that qname exists, the second that a wildcard answers for
-// it.
+// it. A cover at a zone cut or DNAME above qname is not read here: proveDenial
+// has judged that one already (nsecAboveCut).
 func nsecNoData(qname string, qtype uint16, zone string, nsecs []*dns.NSEC) bool {
 	var cover *dns.NSEC
 	for _, nsec := range nsecs {
@@ -48,8 +49,7 @@ func nsecNoData(qname string, qtype uint16, zone string, nsecs []*dns.NSEC) bool
 			continue
 		}
 		bm := nsec.TypeBitMap
-		delegation := slices.Contains(bm, dns.TypeNS) && !slices.Contains(bm, dns.TypeSOA)
-		return !slices.Contains(bm, qtype) && !slices.Contains(bm, dns.TypeCNAME) && !delegation
+		return !slices.Contains(bm, qtype) && !slices.Contains(bm, dns.TypeCNAME) && !delegationBitmap(bm)
 	}
 	return false
 }

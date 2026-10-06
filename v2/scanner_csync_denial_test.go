@@ -364,27 +364,28 @@ func TestProveAbsentRefusesTheParentsCutNSEC(t *testing.T) {
 
 	soa := rrs(t, parent+" 300 IN SOA ns."+parent+" h."+parent+" 1 3600 600 604800 300")
 	cut := rrs(t, child+" 300 IN NSEC other."+parent+" NS DS RRSIG NSEC")
-	replay := append(signedSet(sign, parent, soa), signedSet(sign, parent, cut)...)
-	planted := append(append([]dns.RR{}, replay...), rrs(t, ns1+" 300 IN NSEC ns2."+child+" AAAA RRSIG NSEC")...)
+	parentProof := append(signedSet(sign, parent, soa), signedSet(sign, parent, cut)...)
+	planted := append(append([]dns.RR{}, parentProof...), rrs(t, ns1+" 300 IN NSEC ns2."+child+" AAAA RRSIG NSEC")...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// What makes this a hole, and what childNodataProof is there for: the
-	// validator itself calls the replay Secure (#784). Pinned, so the guard
-	// below keeps testing the case it exists for.
+	// The validator itself reads nothing about a name below the cut from the
+	// parent's NSEC there (RFC 6840 section 4.1, #784): the cut has a DS, so
+	// the denial is Bogus. It used to call it Secure, and childNodataProof was
+	// the only guard; it stays, as a second one.
 	state, _, verr := imr.Cache.ValidateNegativeResponse(ctx, ns1, dns.TypeA, dns.RcodeSuccess,
-		authorityRRsets(replay), imr.IterativeDNSQueryFetcher())
-	if state != cache.ValidationStateSecure || verr != nil {
-		t.Errorf("the validator no longer calls the parent's cut NSEC a Secure denial of %s A (%s, err %v): if #784 is fixed, make this require that it refuses it",
-			ns1, cache.ValidationStateToString[state], verr)
+		authorityRRsets(parentProof), imr.IterativeDNSQueryFetcher())
+	if state != cache.ValidationStateBogus {
+		t.Errorf("the validator reads the parent's cut NSEC as a %s denial of %s A (err %v), want bogus: the names below the cut are the child's",
+			cache.ValidationStateToString[state], ns1, verr)
 	}
 
 	for _, tc := range []struct {
 		name  string
 		proof []dns.RR
 	}{
-		{"the parent's SOA and cut NSEC", replay},
+		{"the parent's SOA and cut NSEC", parentProof},
 		{"the same, with an unsigned NSEC at the nameserver name", planted},
 	} {
 		if err := sc.proveAbsent(ctx, child, ns1, dns.TypeA, authorityRRsets(tc.proof)); !isAbsenceNotProven(err) {
