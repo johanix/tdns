@@ -1361,9 +1361,13 @@ func (rrcache *RRsetCacheT) MarkRRsetBogus(qname string, qtype uint16, rrset *co
 }
 
 // SetVerdict changes the validation state, and the EDE, of the cached entry
-// judged was read from, and nothing else. Set recomputes the expiry from the
-// TTLs, and a verdict changed on every serve must not extend the entry's life
-// (see MarkRRsetBogus).
+// judged was read from. A verdict changed on every serve must not extend the
+// entry's life (see MarkRRsetBogus). It may shorten it: an entry the verdict
+// makes Secure lives no longer than its signatures allow, as it would had it
+// been Secure when it was stored (entryLifetime, signature_lifetime.go). The
+// lifetime is computed from the time the entry was stored, never moved later,
+// and written back into judged as well, so an answer built from it is served
+// with what is left of it.
 //
 // The verdict is stored only while that entry is still the one cached: the
 // same records, the same expiry and the state judged had. Validation can take
@@ -1374,13 +1378,22 @@ func (rrcache *RRsetCacheT) SetVerdict(judged *CachedRRset, state ValidationStat
 	if judged == nil {
 		return false
 	}
-	return rrcache.RRsets.UpdateIf(rrsetKey(judged.Name, judged.RRtype), func(stored CachedRRset) (CachedRRset, bool) {
+	stored := rrcache.RRsets.UpdateIf(rrsetKey(judged.Name, judged.RRtype), func(stored CachedRRset) (CachedRRset, bool) {
 		if stored.RRset != judged.RRset || !stored.Expiration.Equal(judged.Expiration) || stored.State != judged.State {
 			return stored, false
 		}
 		stored.State, stored.EDECode, stored.EDEText = state, edeCode, edeText
+		if stored.RRset != nil && len(stored.RRset.RRs) > 0 {
+			storedAt := stored.Expiration.Add(-time.Duration(stored.Ttl) * time.Second)
+			ttl, exp := entryLifetime(&stored, judged.RRtype, storedAt, GetTTLLimits(), ttlBounded(stored.Context))
+			if exp.Before(stored.Expiration) {
+				stored.Ttl, stored.Expiration = ttl, exp
+			}
+		}
+		judged.Ttl, judged.Expiration = stored.Ttl, stored.Expiration
 		return stored, true
 	})
+	return stored
 }
 
 func (rrcache *RRsetCacheT) lookupDnskeyEDE(rrset *core.RRset) (uint16, string, bool) {
