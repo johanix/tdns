@@ -1020,7 +1020,18 @@ func printZoneGlobalHeader(s *tdns.RolloverStatus, verbose bool) {
 			if s.AlgRollFromAlg != "" {
 				fmt.Printf("  started %s; old KSK %d (%s, still signing) / new KSK %d (%s)\n",
 					formatRolloverTime(s.AlgRollStartedAt), s.AlgRollOldHeadKeyID, s.AlgRollFromAlg, s.AlgRollHeadKeyID, s.AlgRollToAlg)
+				if s.AlgRollParentInsecure {
+					fmt.Println("  the parent holds no DS for the zone: the roll does not wait for the parent")
+				}
 				switch {
+				case s.AlgRollParentInsecure && s.AlgRollProjectedRemoveAt != "":
+					fmt.Printf("  parent step done %s (no DS at the parent); old KSK removal expected %s\n",
+						formatRolloverTime(s.AlgRollOldHeadRetireAt), formatRolloverTime(s.AlgRollProjectedRemoveAt))
+				case s.AlgRollParentInsecure && s.AlgRollOldHeadRetireAt != "":
+					fmt.Printf("  parent step done %s (no DS at the parent); old KSK removal awaits the served DNSKEY TTL\n",
+						formatRolloverTime(s.AlgRollOldHeadRetireAt))
+				case s.AlgRollParentInsecure:
+					fmt.Println("  awaiting the next parent poll; the drain starts if it still shows no DS")
 				case s.AlgRollProjectedRemoveAt != "":
 					fmt.Printf("  parent confirmed %s; old KSK removal expected %s\n",
 						formatRolloverTime(s.AlgRollOldHeadRetireAt), formatRolloverTime(s.AlgRollProjectedRemoveAt))

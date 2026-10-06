@@ -224,11 +224,15 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 				// retired -- it keeps signing to the end (plan A2).
 				e.NextTransition = "active → removed"
 				switch {
+				case algRoll.OldHeadRetireAt == nil && algRoll.ParentInsecure:
+					e.NextTransitionNote = "after the next parent poll shows it still holds no DS"
 				case algRoll.OldHeadRetireAt == nil:
 					e.NextTransitionNote = "after the parent serves only the new-algorithm DS"
 				default:
-					if at, ok := projectedAlgRollRemoveAt(kdb, zone, pol, algRoll); ok {
+					if at, ok := projectedAlgRollRemoveAt(kdb, zone, pol, algRoll, propagationDelay); ok {
 						e.NextTransitionAt = at.UTC().Format(time.RFC3339)
+					} else if algRoll.ParentInsecure {
+						e.NextTransitionNote = "awaiting the served DNSKEY TTL"
 					} else {
 						e.NextTransitionNote = "awaiting parent DS TTL observation"
 					}

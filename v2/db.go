@@ -286,6 +286,13 @@ func dbMigrateSchema(db *sql.DB) {
 		{"RolloverZoneState", "alg_roll_new_head_keyid", "ALTER TABLE RolloverZoneState ADD COLUMN alg_roll_new_head_keyid INTEGER"},
 		{"RolloverZoneState", "alg_roll_old_head_keyid", "ALTER TABLE RolloverZoneState ADD COLUMN alg_roll_old_head_keyid INTEGER"},
 		{"RolloverZoneState", "alg_roll_old_head_retire_at", "ALTER TABLE RolloverZoneState ADD COLUMN alg_roll_old_head_retire_at TEXT"},
+		// The KSK algorithm rollover was started against a parent that,
+		// by the engine's own last poll, held no DS for the zone
+		// (docs/2026-10-06-first-ds-publication-does-not-block.md). 1 =
+		// the parent step needs no DS swap and the drain needs no parent
+		// DS TTL; cleared to 0 as soon as the parent is seen holding a DS.
+		// NULL for existing rows and rolls: an ordinary, secure roll.
+		{"RolloverZoneState", "alg_roll_parent_insecure", "ALTER TABLE RolloverZoneState ADD COLUMN alg_roll_parent_insecure INTEGER"},
 		// Split of the old "standby" state into "published" (DNSKEY in
 		// zone, propagation incomplete) + "standby" (propagation
 		// complete, ready for AtomicRollover). published_at carries

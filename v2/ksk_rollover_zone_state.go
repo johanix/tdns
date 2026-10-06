@@ -80,6 +80,10 @@ type RolloverZoneRow struct {
 	AlgRollNewHeadKeyID    sql.NullInt64
 	AlgRollOldHeadKeyID    sql.NullInt64
 	AlgRollOldHeadRetireAt sql.NullString
+	// AlgRollParentInsecure records that the roll was started against a
+	// parent with no DS for the zone (KskAlgRollState.ParentInsecure).
+	// NULL on rows written before the column existed: a secure roll.
+	AlgRollParentInsecure sql.NullBool
 }
 
 // KskAlgRollState is the typed view of the alg_roll_* columns on
@@ -92,6 +96,15 @@ type RolloverZoneRow struct {
 // OldHeadRetireAt, stamped when the parent is seen serving only the
 // new-algorithm DS (A4), is the clock its removal is measured from. Nil
 // until then.
+//
+// ParentInsecure is the decision made once, at the spawn, that the parent
+// held no DS for the zone by the engine's own last poll: there is no DS
+// at the parent to swap, so the parent step confirms on an answer with
+// no DS in it and the drain needs no parent DS TTL. It is cleared, and
+// the roll carries on as an ordinary one, the first time the parent is
+// seen holding any DS. Deciding at the spawn is what keeps a transient
+// empty answer during a secure roll from ever reading as an insecure
+// delegation.
 type KskAlgRollState struct {
 	FromAlg         uint8
 	ToAlg           uint8
@@ -99,6 +112,7 @@ type KskAlgRollState struct {
 	NewHeadKeyID    uint16
 	OldHeadKeyID    uint16
 	OldHeadRetireAt *time.Time
+	ParentInsecure  bool
 }
 
 // kskAlgRollFromRow projects the alg_roll_* columns of an already-loaded
@@ -111,10 +125,11 @@ func kskAlgRollFromRow(row *RolloverZoneRow) (*KskAlgRollState, error) {
 		return nil, nil
 	}
 	// The alg_roll_* columns are all-or-nothing: setKskAlgRollTx writes
-	// the five together and clearKskAlgRollTx NULLs all six. A marker with
-	// a companion missing or out of range is a corrupt record, and reading
-	// it as a roll of key 0 would send the withdraw arm after a key that
-	// does not exist and make the target-DS filter drop nothing.
+	// them together and clearKskAlgRollTx NULLs all of them (the insecure
+	// flag aside, which is NULL on rolls recorded before it existed). A
+	// marker with a companion missing or out of range is a corrupt record,
+	// and reading it as a roll of key 0 would send the withdraw arm after a
+	// key that does not exist and make the target-DS filter drop nothing.
 	if !row.AlgRollToAlg.Valid || !row.AlgRollNewHeadKeyID.Valid || !row.AlgRollOldHeadKeyID.Valid || !row.AlgRollStartedAt.Valid {
 		return nil, fmt.Errorf("incomplete KSK algorithm-roll record: alg_roll_from_alg is set but a companion column is NULL")
 	}
@@ -134,6 +149,9 @@ func kskAlgRollFromRow(row *RolloverZoneRow) (*KskAlgRollState, error) {
 		StartedAt:    started,
 		NewHeadKeyID: uint16(row.AlgRollNewHeadKeyID.Int64),
 		OldHeadKeyID: uint16(row.AlgRollOldHeadKeyID.Int64),
+		// NULL is a roll recorded before the column existed, which was
+		// started as an ordinary secure roll.
+		ParentInsecure: row.AlgRollParentInsecure.Valid && row.AlgRollParentInsecure.Bool,
 	}
 	if row.AlgRollOldHeadRetireAt.Valid {
 		// Present but unparsable is corrupt, not absent: read as absent, the
@@ -162,16 +180,50 @@ func LoadKskAlgRollState(kdb *KeyDB, zone string) (*KskAlgRollState, error) {
 // (EnsureRolloverZoneRow). OldHeadRetireAt is written NULL: it is
 // stamped later, at DS confirm, by setKskAlgRollOldHeadRetireAtTx.
 func setKskAlgRollTx(tx *Tx, zone string, st KskAlgRollState) error {
+	insecure := 0
+	if st.ParentInsecure {
+		insecure = 1
+	}
 	_, err := tx.Exec(`UPDATE RolloverZoneState
 SET alg_roll_from_alg = ?,
     alg_roll_to_alg = ?,
     alg_roll_started_at = ?,
     alg_roll_new_head_keyid = ?,
     alg_roll_old_head_keyid = ?,
-    alg_roll_old_head_retire_at = NULL
+    alg_roll_old_head_retire_at = NULL,
+    alg_roll_parent_insecure = ?
 WHERE zone = ?`,
 		int(st.FromAlg), int(st.ToAlg), st.StartedAt.UTC().Format(time.RFC3339),
-		int(st.NewHeadKeyID), int(st.OldHeadKeyID), zone)
+		int(st.NewHeadKeyID), int(st.OldHeadKeyID), insecure, zone)
+	return err
+}
+
+// clearKskAlgRollParentInsecure turns an insecure algorithm roll into an
+// ordinary one: the parent has been seen holding a DS for the zone, so
+// from here on the roll waits for the parent to serve the new-algorithm
+// DS and drains for the parent DS TTL, like any other. One way only; a
+// later answer without DS does not turn it back. A no-op when no roll is
+// recorded.
+func clearKskAlgRollParentInsecure(kdb *KeyDB, zone string) error {
+	_, err := kdb.DB.Exec(clearKskAlgRollParentInsecureSQL, zone)
+	return err
+}
+
+// clearKskAlgRollParentInsecureTx is clearKskAlgRollParentInsecure on an
+// existing TX.
+func clearKskAlgRollParentInsecureTx(tx *Tx, zone string) error {
+	_, err := tx.Exec(clearKskAlgRollParentInsecureSQL, zone)
+	return err
+}
+
+const clearKskAlgRollParentInsecureSQL = `UPDATE RolloverZoneState SET alg_roll_parent_insecure = 0
+WHERE zone = ? AND alg_roll_from_alg IS NOT NULL`
+
+// clearKskAlgRollOldHeadRetireAtTx stops the old-algorithm head's removal
+// clock: the roll is back before its parent confirm
+// (reopenAlgRollParentStep).
+func clearKskAlgRollOldHeadRetireAtTx(tx *Tx, zone string) error {
+	_, err := tx.Exec(`UPDATE RolloverZoneState SET alg_roll_old_head_retire_at = NULL WHERE zone = ?`, zone)
 	return err
 }
 
@@ -194,7 +246,8 @@ SET alg_roll_from_alg = NULL,
     alg_roll_started_at = NULL,
     alg_roll_new_head_keyid = NULL,
     alg_roll_old_head_keyid = NULL,
-    alg_roll_old_head_retire_at = NULL
+    alg_roll_old_head_retire_at = NULL,
+    alg_roll_parent_insecure = NULL
 WHERE zone = ?`, zone)
 	return err
 }
@@ -252,7 +305,8 @@ SELECT zone,
        last_ds_observed_keyids, last_ds_observed_at,
        parent_advertises_update, parent_advertises_notify,
        alg_roll_from_alg, alg_roll_to_alg, alg_roll_started_at,
-       alg_roll_new_head_keyid, alg_roll_old_head_keyid, alg_roll_old_head_retire_at
+       alg_roll_new_head_keyid, alg_roll_old_head_keyid, alg_roll_old_head_retire_at,
+       alg_roll_parent_insecure
 FROM RolloverZoneState WHERE zone = ?`
 	var r RolloverZoneRow
 	var inProg int
@@ -271,6 +325,7 @@ FROM RolloverZoneState WHERE zone = ?`
 		&r.ParentAdvertisesUpdate, &r.ParentAdvertisesNotify,
 		&r.AlgRollFromAlg, &r.AlgRollToAlg, &r.AlgRollStartedAt,
 		&r.AlgRollNewHeadKeyID, &r.AlgRollOldHeadKeyID, &r.AlgRollOldHeadRetireAt,
+		&r.AlgRollParentInsecure,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
