@@ -87,7 +87,7 @@ func TestAReferralWithADSMakesAnInsecureZoneSecure(t *testing.T) {
 		} else {
 			m.Ns = append(m.Ns, nsec, nsecSig)
 		}
-		imr.handleReferral(ctx, "www."+child, dns.TypeA, m, false, map[string]bool{}, core.TransportDo53, edns0.PrivacyNone)
+		imr.handleReferral(ctx, "www."+child, dns.TypeA, m, false, map[string]bool{}, "", core.TransportDo53, edns0.PrivacyNone)
 	}
 	state := func() cache.ValidationState {
 		z, ok := imr.Cache.ZoneMap.Get(child)
