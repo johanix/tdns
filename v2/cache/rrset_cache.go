@@ -215,7 +215,19 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 		}
 	}
 
-	rrcache.RRsets.Set(lookupKey, *crrset)
+	// Storing the entry that is cached again -- the same RRset, as a Get hands
+	// it out and a caller hands it back with other fields changed -- keeps
+	// the expiry it has: a re-store never extends an entry's life. The
+	// lifetime computed above wins when it is shorter, as a verdict that
+	// makes the entry Secure can make it. Fresh data always arrives in an
+	// RRset of its own, and is given its full lifetime.
+	stored := rrcache.RRsets.Upsert(lookupKey, *crrset, func(exist bool, cached, entry CachedRRset) CachedRRset {
+		if exist && entry.RRset != nil && cached.RRset == entry.RRset && cached.Expiration.Before(entry.Expiration) {
+			entry.Ttl, entry.Expiration = cached.Ttl, cached.Expiration
+		}
+		return entry
+	})
+	crrset.Ttl, crrset.Expiration = stored.Ttl, stored.Expiration
 }
 
 // evictOldestRRset removes the entry with the earliest expiration time from the RRsets cache.
