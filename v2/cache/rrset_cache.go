@@ -194,41 +194,13 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 	bounded := ttlBounded(crrset.Context)
 	limits := GetTTLLimits()
 
-	// Compute min TTL and set Expiration accordingly when RRset present
+	// An entry with records lives as long as they do (entryLifetime); one
+	// without, as long as its caller says.
 	if crrset.RRset != nil && len(crrset.RRset.RRs) > 0 {
-		minTTL := crrset.RRset.RRs[0].Header().Ttl
-		for _, rr := range crrset.RRset.RRs[1:] {
-			if rr.Header().Ttl < minTTL {
-				minTTL = rr.Header().Ttl
-			}
-		}
-		// An answer synthesized from a wildcard lives no longer than the proof
-		// kept with it, which is served beside it.
-		for _, set := range crrset.WildcardProof {
-			if set == nil {
-				continue
-			}
-			for _, rr := range set.RRs {
-				if rr.Header().Ttl < minTTL {
-					minTTL = rr.Header().Ttl
-				}
-			}
-		}
-		// Apply a small TTL floor for NS RRsets only when learned via referral, to avoid instant drop
-		if qtype == dns.TypeNS && crrset.Context == ContextReferral && minTTL == 0 {
-			if rrcache.Debug {
-				log.Printf("RRsetCache:Set: NS minTTL was 0 for %q (Context=Referral); applying floor 10s", qname)
-			}
-			minTTL = 10
-		}
-		if bounded {
-			minTTL = limits.Clamp(minTTL)
-		}
+		crrset.Ttl, crrset.Expiration = entryLifetime(crrset, qtype, now, limits, bounded)
 		if rrcache.Debug && qtype == dns.TypeNS {
-			log.Printf("RRsetCache:Set: NS minTTL=%ds for zone %q (Context=%s)", minTTL, qname, CacheContextToString[crrset.Context])
+			log.Printf("RRsetCache:Set: NS lifetime %ds for zone %q (Context=%s)", crrset.Ttl, qname, CacheContextToString[crrset.Context])
 		}
-		crrset.Ttl = minTTL
-		crrset.Expiration = now.Add(time.Duration(minTTL) * time.Second)
 	} else {
 		if crrset.Expiration.IsZero() && crrset.Ttl > 0 {
 			// For negative/no-RRset entries, if Expiration not set but TTL is provided
