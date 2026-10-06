@@ -172,6 +172,21 @@ func (rrcache *RRsetCacheT) Peek(qname string, qtype uint16) *CachedRRset {
 const rrsetCacheMaxEntries = 50000
 
 func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset) {
+	rrcache.set(qname, qtype, crrset, nil)
+}
+
+// SetUnless stores crrset for <qname, qtype> unless keep says that the entry
+// the cache holds there must stay. keep is called only when there is such an
+// entry, with that entry, under the lock that the write takes too: deciding
+// and writing are one step, so an entry stored in between by another writer
+// is judged, not overwritten unseen. keep must not touch the cache. SetUnless
+// reports whether crrset was stored.
+func (rrcache *RRsetCacheT) SetUnless(qname string, qtype uint16, crrset *CachedRRset, keep func(stored CachedRRset) bool) bool {
+	return rrcache.set(qname, qtype, crrset, keep)
+}
+
+// set is Set, and SetUnless when keep is not nil.
+func (rrcache *RRsetCacheT) set(qname string, qtype uint16, crrset *CachedRRset, keep func(stored CachedRRset) bool) bool {
 	lookupKey := rrsetKey(qname, qtype)
 	if rrcache.Debug {
 		fmt.Printf("rrcache: Adding key %s (%s) to cache\n", lookupKey, dns.TypeToString[qtype])
@@ -179,7 +194,7 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 
 	if crrset == nil {
 		log.Printf("RRsetCache:Set: nil crrset for key %s - ignored", lookupKey)
-		return
+		return false
 	}
 
 	// Evict oldest entry if cache exceeds max size (and this is a new key)
@@ -243,7 +258,19 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 		}
 	}
 
-	rrcache.RRsets.Set(lookupKey, *crrset)
+	if keep == nil {
+		rrcache.RRsets.Set(lookupKey, *crrset)
+		return true
+	}
+	stored := false
+	rrcache.RRsets.Upsert(lookupKey, *crrset, func(exist bool, inMap, value CachedRRset) CachedRRset {
+		if exist && keep(inMap) {
+			return inMap
+		}
+		stored = true
+		return value
+	})
+	return stored
 }
 
 // evictOldestRRset removes the entry with the earliest expiration time from the RRsets cache.

@@ -681,10 +681,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						continue
 					}
 					rr := rrset.RRs[0]
-					if !glueMayReplace(imr.Cache.Peek(nsname, dns.TypeA)) {
-						continue
-					}
-					imr.Cache.Set(nsname, dns.TypeA, &cache.CachedRRset{
+					imr.Cache.SetUnless(nsname, dns.TypeA, &cache.CachedRRset{
 						Name:       nsname,
 						RRtype:     dns.TypeA,
 						RRset:      &rrset,
@@ -692,7 +689,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						State:      cache.ValidationStateIndeterminate,
 						Expiration: cache.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 						Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
-					})
+					}, glueKeeps) // not over a live answer (glueMayReplace)
 				}
 
 				for nsname, rrset := range glue6Map {
@@ -700,10 +697,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						continue
 					}
 					rr := rrset.RRs[0]
-					if !glueMayReplace(imr.Cache.Peek(nsname, dns.TypeAAAA)) {
-						continue
-					}
-					imr.Cache.Set(nsname, dns.TypeAAAA, &cache.CachedRRset{
+					imr.Cache.SetUnless(nsname, dns.TypeAAAA, &cache.CachedRRset{
 						Name:       nsname,
 						RRtype:     dns.TypeAAAA,
 						RRset:      &rrset,
@@ -711,7 +705,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						State:      cache.ValidationStateIndeterminate,
 						Expiration: cache.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 						Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
-					})
+					}, glueKeeps) // not over a live answer (glueMayReplace)
 				}
 
 				return nil, rcode, cache.ContextReferral, nil
@@ -2249,14 +2243,10 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			continue
 		}
 		rr := rrset.RRs[0]
-		// Not over a live authoritative answer for the name (glueMayReplace).
-		if !glueMayReplace(imr.Cache.Peek(nsname, dns.TypeA)) {
-			continue
-		}
 		if Globals.Debug && !imr.Quiet {
-			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, A> (adding glue)\n", nsname)
+			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, A> (adding glue unless a live answer is cached)\n", nsname)
 		}
-		imr.Cache.Set(nsname, dns.TypeA, &cache.CachedRRset{
+		imr.Cache.SetUnless(nsname, dns.TypeA, &cache.CachedRRset{
 			Name:       nsname,
 			RRtype:     dns.TypeA,
 			RRset:      &rrset,
@@ -2264,7 +2254,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			State:      cache.ValidationStateIndeterminate,
 			Expiration: cache.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 			Transport:  core.TransportDo53, // Glue records from Additional - default to Do53
-		})
+		}, glueKeeps) // not over a live answer (glueMayReplace)
 	}
 
 	for nsname, rrset := range glue6Map {
@@ -2272,14 +2262,10 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			continue
 		}
 		rr := rrset.RRs[0]
-		// Not over a live authoritative answer for the name (glueMayReplace).
-		if !glueMayReplace(imr.Cache.Peek(nsname, dns.TypeAAAA)) {
-			continue
-		}
 		if Globals.Debug && !imr.Quiet {
-			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, AAAA> (adding glue)\n", nsname)
+			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, AAAA> (adding glue unless a live answer is cached)\n", nsname)
 		}
-		imr.Cache.Set(nsname, dns.TypeAAAA, &cache.CachedRRset{
+		imr.Cache.SetUnless(nsname, dns.TypeAAAA, &cache.CachedRRset{
 			Name:       nsname,
 			RRtype:     dns.TypeAAAA,
 			RRset:      &rrset,
@@ -2287,7 +2273,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			State:      cache.ValidationStateIndeterminate,
 			Expiration: cache.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 			Transport:  core.TransportDo53, // Glue records from Additional - default to Do53
-		})
+		}, glueKeeps) // not over a live answer (glueMayReplace)
 	}
 
 	if Globals.Debug && !imr.Quiet {

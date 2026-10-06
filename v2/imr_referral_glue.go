@@ -62,3 +62,11 @@ func glueMayReplace(existing *cache.CachedRRset) bool {
 	}
 	return true
 }
+
+// glueKeeps is glueMayReplace for SetUnless: whether the entry stored for a
+// name must stay when glue for that name is cached. SetUnless decides it under
+// the entry's lock, so an answer stored between a check and the write is not
+// overwritten.
+func glueKeeps(stored cache.CachedRRset) bool {
+	return !glueMayReplace(&stored)
+}
