@@ -490,13 +490,78 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		return nil
 	}
 
-	return answerAfterApply(ctx, w, m, req, updateq, finalRcode)
+	return answerWhenApplied(ctx, w, m, req, updateq, finalRcode)
+}
+
+// maxUpdatesAwaitingAnswer bounds how many DNS UPDATEs may wait for their
+// publish at once. Each holds a goroutine for at most updateWaitBound.
+const maxUpdatesAwaitingAnswer = 256
+
+// updatesAwaitingAnswer holds a slot per update that has been handed to the
+// ZoneUpdater and not yet answered.
+var updatesAwaitingAnswer = make(chan struct{}, maxUpdatesAwaitingAnswer)
+
+// answerWhenApplied hands an approved update to the ZoneUpdater and answers the
+// client once it has been applied, without holding up the next update.
+//
+// UpdateHandler is one goroutine serving every UPDATE on the server. Under the
+// publish gate an update to a busy zone is answered only after the publish
+// that carries it, up to a cadence later. Waiting for that here made every
+// UPDATE on the server, to any zone, queue behind the publish of the one
+// before it: a burst of N updates took N cadences, and a UDP client heard
+// nothing meanwhile and retransmitted.
+//
+// The hand-over stays on the caller's goroutine, so updates reach the
+// ZoneUpdater in the order they arrived. Only the wait for the outcome and the
+// answer move to a goroutine of their own. Past maxUpdatesAwaitingAnswer the
+// update is not handed over and the client is told SERVFAIL at once, which it
+// retries.
+func answerWhenApplied(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req UpdateRequest,
+	updateq chan UpdateRequest, finalRcode int) error {
+
+	slots := updatesAwaitingAnswer
+	select {
+	case slots <- struct{}{}:
+	default:
+		lgHandler.Warn("too many updates waiting to be applied; answering SERVFAIL",
+			"zone", req.ZoneName, "limit", maxUpdatesAwaitingAnswer)
+		m.SetRcode(m, dns.RcodeServerFailure)
+		edns0.AttachEDEToResponseWithText(m, edns0.EDEZoneUpdateNotApplied,
+			"too many updates waiting to be applied; retry", false)
+		w.WriteMsg(m)
+		return nil
+	}
+
+	respch, err := handOverUpdate(ctx, req, updateq)
+	if err != nil {
+		<-slots
+		return err
+	}
+	go func() {
+		defer func() { <-slots }()
+		answerUpdateOutcome(w, m, req, respch, finalRcode)
+	}()
+	return nil
 }
 
 // answerAfterApply hands an approved update to the ZoneUpdater and answers the
-// client once it has been applied.
+// client once it has been applied, waiting for that on the caller's goroutine.
+// For a caller that must not go on until the update is applied, such as one
+// holding the zone's delegation lock (answerOwnDelegationUpdate).
 func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req UpdateRequest,
 	updateq chan UpdateRequest, finalRcode int) error {
+
+	respch, err := handOverUpdate(ctx, req, updateq)
+	if err != nil {
+		return err
+	}
+	answerUpdateOutcome(w, m, req, respch, finalRcode)
+	return nil
+}
+
+// handOverUpdate puts an approved update on the ZoneUpdater's queue with a
+// reply channel, and returns that channel.
+func handOverUpdate(ctx context.Context, req UpdateRequest, updateq chan UpdateRequest) (chan ZoneUpdateResult, error) {
 
 	// RFC 2136 §3.4.2.5: a NOERROR response means the requested update HAS been
 	// made. Answering as soon as the request was queued makes that a statement
@@ -524,9 +589,14 @@ func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req
 	case <-ctx.Done():
 		lgHandler.Info("shutting down before the update could be handed to the updater",
 			"zone", req.ZoneName, "type", req.Cmd)
-		return fmt.Errorf("update for %s not queued: %w", req.ZoneName, ctx.Err())
+		return nil, fmt.Errorf("update for %s not queued: %w", req.ZoneName, ctx.Err())
 	}
+	return respch, nil
+}
 
+// answerUpdateOutcome waits for the outcome of a handed-over update, at most
+// updateWaitBound, and answers the client with it.
+func answerUpdateOutcome(w dns.ResponseWriter, m *dns.Msg, req UpdateRequest, respch chan ZoneUpdateResult, finalRcode int) {
 	select {
 	case res := <-respch:
 		var notInZone *ChildDeleteNotInZoneError
@@ -569,8 +639,6 @@ func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdateApplyTimeout)
 	}
 	w.WriteMsg(m)
-
-	return nil
 }
 
 // answerOwnDelegationUpdate applies an update to a zone that syncs its own
