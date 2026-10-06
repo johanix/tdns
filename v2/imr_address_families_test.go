@@ -223,7 +223,7 @@ func TestGlueOfAFamilyNotInUseIsLeftOut(t *testing.T) {
 		mustRR(t, ns2+" 300 IN AAAA 2001:db8::2"),
 	}
 	nsrrset := &core.RRset{Name: zone, Class: dns.ClassINET, RRtype: dns.TypeNS, RRs: r.Ns}
-	sm, err := imr.ParseAdditionalForNSAddrs(context.Background(), "authority", nsrrset, zone,
+	sm, err := imr.ParseAdditionalForNSAddrs(context.Background(), "authority", nsrrset, zone, "test.",
 		map[string]bool{ns1: true, ns2: true}, r)
 	if err != nil {
 		t.Fatalf("ParseAdditionalForNSAddrs: %v", err)

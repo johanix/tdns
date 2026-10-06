@@ -14,8 +14,10 @@ import (
 	"github.com/miekg/dns"
 )
 
-// A referral cannot carry addresses for a nameserver outside the delegated
-// zone, so a zone whose nameservers are all out-of-bailiwick arrives with none.
+// A referral's glue is used only for nameservers within the referring zone
+// (imr_referral_glue.go), and a referral often carries none for a nameserver
+// outside the delegated zone, so a zone whose nameservers are all
+// out-of-bailiwick often arrives with no addresses for them.
 // The functions here put those servers into the zone's cached server map once
 // their addresses are known, so the next query into the zone starts with a
 // server to send to (#682). Without them the map stayed empty for as long as

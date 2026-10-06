@@ -107,7 +107,7 @@ func TestGlueLeavesAStubAlone(t *testing.T) {
 	configured := configuredStubServer(t, imr)
 	r := sgReferral(t)
 	nsrrset := &core.RRset{Name: sgZone, Class: dns.ClassINET, RRtype: dns.TypeNS, RRs: r.Ns}
-	got, err := imr.ParseAdditionalForNSAddrs(context.Background(), "authority", nsrrset, sgZone,
+	got, err := imr.ParseAdditionalForNSAddrs(context.Background(), "authority", nsrrset, sgZone, "",
 		map[string]bool{sgNS: true, sgOOBNS: true}, r)
 	if err != nil {
 		t.Fatalf("ParseAdditionalForNSAddrs: %v", err)
@@ -144,7 +144,7 @@ func TestReferralToAStubZoneUsesTheConfiguredServers(t *testing.T) {
 	})
 
 	rrset, rcode, _, _, err := imr.handleReferral(context.Background(), sgWWW, dns.TypeA, sgReferral(t),
-		false, map[string]bool{}, core.TransportDo53, edns0.PrivacyNone)
+		false, map[string]bool{}, "", core.TransportDo53, edns0.PrivacyNone)
 	if err != nil || rcode != dns.RcodeSuccess || rrset == nil || len(rrset.RRs) != 1 {
 		t.Fatalf("handleReferral: rcode %s, rrset %v, err %v; want the stub's answer",
 			dns.RcodeToString[rcode], rrset, err)
@@ -182,7 +182,7 @@ func TestReferralIntoALoopbackStubLeavesItQueryable(t *testing.T) {
 	configured := configuredStubServer(t, imr)
 
 	if _, rcode, _, _, err := imr.handleReferral(context.Background(), sgWWW, dns.TypeA, sgReferral(t),
-		false, map[string]bool{}, core.TransportDo53, edns0.PrivacyNone); err != nil || rcode != dns.RcodeSuccess {
+		false, map[string]bool{}, "", core.TransportDo53, edns0.PrivacyNone); err != nil || rcode != dns.RcodeSuccess {
 		t.Fatalf("the referral: rcode %s, err %v; want the stub's answer", dns.RcodeToString[rcode], err)
 	}
 	got := askReferralImr(t, imr, "mail."+sgZone)

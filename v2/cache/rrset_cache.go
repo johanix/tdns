@@ -172,6 +172,21 @@ func (rrcache *RRsetCacheT) Peek(qname string, qtype uint16) *CachedRRset {
 const rrsetCacheMaxEntries = 50000
 
 func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset) {
+	rrcache.set(qname, qtype, crrset, nil)
+}
+
+// SetUnless stores crrset for <qname, qtype> unless keep says that the entry
+// the cache holds there must stay. keep is called only when there is such an
+// entry, with that entry, under the lock that the write takes too: deciding
+// and writing are one step, so an entry stored in between by another writer
+// is judged, not overwritten unseen. keep must not touch the cache. SetUnless
+// reports whether crrset was stored.
+func (rrcache *RRsetCacheT) SetUnless(qname string, qtype uint16, crrset *CachedRRset, keep func(stored CachedRRset) bool) bool {
+	return rrcache.set(qname, qtype, crrset, keep)
+}
+
+// set is Set, and SetUnless when keep is not nil.
+func (rrcache *RRsetCacheT) set(qname string, qtype uint16, crrset *CachedRRset, keep func(stored CachedRRset) bool) bool {
 	lookupKey := rrsetKey(qname, qtype)
 	if rrcache.Debug {
 		fmt.Printf("rrcache: Adding key %s (%s) to cache\n", lookupKey, dns.TypeToString[qtype])
@@ -179,7 +194,7 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 
 	if crrset == nil {
 		log.Printf("RRsetCache:Set: nil crrset for key %s - ignored", lookupKey)
-		return
+		return false
 	}
 
 	// Evict oldest entry if cache exceeds max size (and this is a new key)
@@ -215,19 +230,29 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 		}
 	}
 
-	// Storing the entry that is cached again -- the same RRset, as a Get hands
-	// it out and a caller hands it back with other fields changed -- keeps
-	// the expiry it has: a re-store never extends an entry's life. The
-	// lifetime computed above wins when it is shorter, as a verdict that
-	// makes the entry Secure can make it. Fresh data always arrives in an
-	// RRset of its own, and is given its full lifetime.
-	stored := rrcache.RRsets.Upsert(lookupKey, *crrset, func(exist bool, cached, entry CachedRRset) CachedRRset {
+	// keep (SetUnless) decides first: an entry it says must stay is left as it
+	// is. Otherwise, storing the entry that is cached again -- the same RRset,
+	// as a Get hands it out and a caller hands it back with other fields
+	// changed -- keeps the expiry it has: a re-store never extends an entry's
+	// life. The lifetime computed above wins when it is shorter, as a verdict
+	// that makes the entry Secure can make it. Fresh data always arrives in an
+	// RRset of its own, and is given its full lifetime. Both are decided under
+	// the lock the write takes.
+	stored := false
+	result := rrcache.RRsets.Upsert(lookupKey, *crrset, func(exist bool, cached, entry CachedRRset) CachedRRset {
+		if exist && keep != nil && keep(cached) {
+			return cached
+		}
+		stored = true
 		if exist && entry.RRset != nil && cached.RRset == entry.RRset && cached.Expiration.Before(entry.Expiration) {
 			entry.Ttl, entry.Expiration = cached.Ttl, cached.Expiration
 		}
 		return entry
 	})
-	crrset.Ttl, crrset.Expiration = stored.Ttl, stored.Expiration
+	if stored {
+		crrset.Ttl, crrset.Expiration = result.Ttl, result.Expiration
+	}
+	return stored
 }
 
 // evictOldestRRset removes the entry with the earliest expiration time from the RRsets cache.
