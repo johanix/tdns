@@ -168,9 +168,12 @@ func TestGlueDoesNotReplaceACachedAnswer(t *testing.T) {
 	const zone, ns = "kid.p.test.", "ns.kid.p.test."
 	seed := func(imr *Imr, ctx cache.CacheContext) {
 		cr := &cache.CachedRRset{Name: ns, RRtype: dns.TypeA, Context: ctx, State: cache.ValidationStateInsecure}
-		if ctx == cache.ContextNoErrNoAns {
+		switch ctx {
+		case cache.ContextNoErrNoAns:
 			cr.Ttl = 3600
-		} else {
+		case cache.ContextNXDOMAIN:
+			cr.Ttl, cr.Rcode = 3600, dns.RcodeNameError
+		default:
 			cr.RRset = &core.RRset{Name: ns, Class: dns.ClassINET, RRtype: dns.TypeA,
 				RRs: []dns.RR{mustRR(t, ns+" 3600 IN A 192.0.2.1")}}
 		}
@@ -184,6 +187,7 @@ func TestGlueDoesNotReplaceACachedAnswer(t *testing.T) {
 	}{
 		{"live answer", cache.ContextAnswer, false, false},
 		{"live negative answer", cache.ContextNoErrNoAns, false, false},
+		{"live name error", cache.ContextNXDOMAIN, false, false},
 		{"expired answer", cache.ContextAnswer, true, true},
 		{"earlier glue", cache.ContextGlue, false, true},
 	} {
