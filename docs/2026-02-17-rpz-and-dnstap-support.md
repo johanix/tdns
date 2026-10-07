@@ -2,6 +2,7 @@
 
 **Date**: 2026-02-17
 **Status**: Future project (effort estimate, not yet scheduled)
+**Updated**: 2026-10-01 — Part B (DNSTAP) re-scoped against current `v2/`. Part A (RPZ) has not been re-evaluated; only its stale line numbers were removed.
 
 ## Motivation
 
@@ -9,7 +10,7 @@ Two features that would significantly improve TDNS's utility as a production DNS
 
 1. **RPZ (Response Policy Zones)** — DNS-based policy enforcement in the recursive resolver (tdns-imr). Enables blocking, redirecting, or rewriting DNS responses based on policy rules distributed as standard DNS zone data. Widely used for security filtering, parental controls, and compliance.
 
-2. **DNSTAP** — Structured binary logging of DNS transactions across all TDNS applications. Provides low-overhead, machine-parseable visibility into query/response traffic, replacing or supplementing text-based logging. Supported by all major DNS implementations (BIND, Unbound, Knot, PowerDNS, CoreDNS).
+2. **DNSTAP** — Structured binary logging of DNS transactions in tdns-auth and tdns-imr. Provides low-overhead, machine-parseable visibility into query/response traffic, replacing or supplementing text-based logging. Supported by all major DNS implementations (BIND, Unbound, Knot, PowerDNS, CoreDNS).
 
 ---
 
@@ -73,9 +74,9 @@ Actions are encoded via RDATA:
 
 | File | Integration |
 |------|-------------|
-| `imrengine.go` | Pre-resolution QNAME check in `ImrResponder()` (~line 486) |
-| `dnslookup.go` | Post-resolution IP check in `handleAnswer()` (~line 1938) |
-| `dnslookup.go` | Optional NSDNAME/NSIP checks in `handleReferral()` (~line 2070) |
+| `imrengine.go` | Pre-resolution QNAME check in `ImrResponder()` |
+| `dnslookup.go` | Post-resolution IP check in `handleAnswer()` |
+| `dnslookup.go` | Optional NSDNAME/NSIP checks in `handleReferral()` |
 | `config.go` | RPZ zone configuration |
 | New: `imr_rpz.go` | Policy engine (matching, action decoding, zone management) |
 
@@ -108,57 +109,61 @@ RPZ uses standard DNS zone data. The existing zone file parser, ZoneData structu
 
 ---
 
-## Part B: DNSTAP Support in All TDNS Apps
+## Part B: DNSTAP Support in tdns-auth and tdns-imr
+
+*Re-scoped 2026-10-01 against `v2/` at `cf5bc243`. File names below are relative to `v2/`.*
 
 ### Overview
 
-DNSTAP captures DNS query/response pairs with metadata and streams them to a collector via Unix socket, TCP, or file. The [golang-dnstap](https://github.com/dnstap/golang-dnstap) library (v0.4.0, used by CoreDNS) provides Protocol Buffer encoding and Frame Streams framing.
+DNSTAP captures DNS query/response pairs with metadata and streams them to a collector via Unix socket, TCP, or file. The [golang-dnstap](https://github.com/dnstap/golang-dnstap) library provides Protocol Buffer encoding and Frame Streams framing.
+
+**Assessment: clean fit, no refactor.** Since the original estimate the code has grown the extension points dnstap needs: embedding `dns.ResponseWriter` wrappers (`truncatingResponseWriter` in `udp_truncate.go`, `tsigSignResponseWriter` in `tsig_peer.go`), per-transport handler wrapping in the IMR (`listenerHandlers()` in `imr_client_stats.go`), and a single outbound exchange path (`core.DNSClient.exchangeInner()`).
 
 ### DNSTAP message types relevant to TDNS
 
 | Message Type | App | When |
 |-------------|-----|------|
-| `AUTH_QUERY` / `AUTH_RESPONSE` | tdns-auth, tdns-agent, tdns-combiner | Authoritative query serving |
+| `AUTH_QUERY` / `AUTH_RESPONSE` | tdns-auth (and any other app that starts `DnsEngine()`) | Authoritative query serving |
+| `UPDATE_QUERY` / `UPDATE_RESPONSE` | tdns-auth | Dynamic UPDATE processing |
 | `CLIENT_QUERY` / `CLIENT_RESPONSE` | tdns-imr | Client queries to the resolver |
-| `RESOLVER_QUERY` / `RESOLVER_RESPONSE` | tdns-imr | Outgoing iterative queries during resolution |
-| `UPDATE_QUERY` / `UPDATE_RESPONSE` | tdns-auth, tdns-agent | Dynamic UPDATE processing |
+| `RESOLVER_QUERY` / `RESOLVER_RESPONSE` | tdns-imr | Outgoing iterative queries |
+| `FORWARDER_QUERY` / `FORWARDER_RESPONSE` | tdns-imr | Outgoing queries to forward-zone upstreams |
 
 ### Components
 
-1. **DNSTAP output manager** — Initialize and manage a dnstap output stream (Unix socket or TCP). Connection management, buffering, graceful shutdown. The golang-dnstap library provides `FrameStreamSockOutput` — this is thin wrapper code.
+1. **DNSTAP output manager** — Initialize and manage the output stream (Unix socket, TCP or file): reconnect, bounded channel, drop-on-full with counters, graceful shutdown on ctx cancel.
 
-2. **ResponseWriter wrapper** — A `dns.ResponseWriter` wrapper that intercepts `WriteMsg()`, captures the response alongside the original query, builds a `dnstap.Message`, and sends it to the output stream:
+2. **ResponseWriter wrapper** — One embedding wrapper, same shape as `truncatingResponseWriter`: emit the query frame on entry, override `WriteMsg()` to emit the response frame, forward to the inner writer.
 
    ```go
    type dnstapWriter struct {
        dns.ResponseWriter
+       out       *dnstapOutput
        query     *dns.Msg
-       output    *dnstap.Output
-       transport dnstap.SocketProtocol
+       proto     dnstap.SocketProtocol
+       mtype     dnstap.Message_Type // AUTH_*, UPDATE_*, CLIENT_*
        queryTime time.Time
-   }
-
-   func (w *dnstapWriter) WriteMsg(m *dns.Msg) error {
-       // Build dnstap.Message with query + response + metadata
-       // Send to output (non-blocking, buffered)
-       // Forward to wrapped ResponseWriter
-       return w.ResponseWriter.WriteMsg(m)
    }
    ```
 
-3. **Handler wrapping** — Wrap the DNS handler in `createAuthDnsHandler()` (do53.go) to inject the dnstap writer. **One wrapper point covers three apps** — tdns-auth, tdns-agent, and tdns-combiner all share `DnsEngine()`.
+   No transport-specific variants are needed: `dohResponseWriter` and `doqResponseWriter` implement `dns.ResponseWriter` in full, so the same wrapper embeds them. (The original estimate budgeted ~50 lines each for DoH and DoQ; that is no longer required.)
 
-4. **Transport-specific adaptations**:
-   - **Do53 (UDP/TCP)**: Standard `dns.ResponseWriter` — wrap directly
-   - **DoT**: Same (miekg/dns handles TLS transparently)
-   - **DoH**: Custom `dohResponseWriter` in doh.go — needs its own dnstap wrapper (~50 lines)
-   - **DoQ**: Custom `doqResponseWriter` in doq.go — needs its own dnstap wrapper (~50 lines)
+3. **Inbound wiring, tdns-auth** — Wrap the handler from `createAuthDnsHandler()` once per listener so the wrapper knows its transport. Four sites:
+   - Do53 mux in `DnsEngine()` (`do53.go`). Must be outermost: `dnstap(TsigSigningHandler(udpTruncate(h)))`, otherwise the frame holds the untruncated response.
+   - `DnsDoTEngine()` (`dot.go`), outside its `TsigSigningHandler`.
+   - `DnsDoHEngine()` (`doh.go`) and `DnsDoQEngine()` (`doq.go`), which take the bare handler.
 
-5. **IMR resolver hooks** — Two additional instrumentation points:
-   - Outgoing iterative queries in `tryServer()` (dnslookup.go) — capture RESOLVER_QUERY before sending, RESOLVER_RESPONSE after receiving
-   - Cache hits in `ImrResponder()` (imrengine.go) — capture CLIENT_RESPONSE when returning cached data
+4. **Inbound wiring, tdns-imr** — Extend `listenerHandlers()`, which already returns one handler per transport (udp/tcp/dot/doh/doq) for the client-stats counters. Because the wrapper sits at the listener, cache hits, CNAME-chain answers and error paths are covered without touching `ImrResponder()`.
 
-6. **Per-app configuration** — Add dnstap config to each app's config structure:
+5. **Outbound wiring, tdns-imr** — Two call sites:
+   - `tryServer()` (`dnslookup.go`), around `core.ExchangeCtxWithResult()` → `RESOLVER_*`
+   - `forwardQuery()` (`imr_forward.go`), around `core.ExchangeCtx()` → `FORWARDER_*`
+
+   Alternative: instrument once inside `core.DNSClient.exchangeInner()`. That records a UDP→TCP retry as two exchanges (more faithful), but puts dnstap in `core` and needs the message type passed down.
+
+   The existing `ImrOutboundQueryHookFunc` / `ImrResponseHookFunc` (`registration.go`) cannot be reused as-is: they carry neither the query message nor timing.
+
+6. **Configuration** — A `dnstap:` block per app, plus validation and a reload-guardrail entry:
    ```yaml
    dnstap:
      enabled: true
@@ -167,49 +172,46 @@ DNSTAP captures DNS query/response pairs with metadata and streams them to a col
      # or: file: /var/log/tdns/dnstap.log
    ```
 
-7. **CLI** — `<app> dnstap status` for runtime introspection.
+7. **API/CLI** — `<app> dnstap status` (connection state, frames sent, frames dropped).
 
 ### Key integration points
 
 | File | Integration |
 |------|-------------|
 | New: `dnstap.go` | Output manager, ResponseWriter wrapper, message builder |
-| `do53.go` | Wrap handler in `DnsEngine()` / `createAuthDnsHandler()` |
-| `doh.go` | Wrap `dohResponseWriter` |
-| `doq.go` | Wrap `doqResponseWriter` |
-| `imrengine.go` | Wrap handler in `StartImrEngineListeners()`, cache hit capture |
-| `dnslookup.go` | RESOLVER_QUERY/RESOLVER_RESPONSE in `tryServer()` |
-| Config files | Add dnstap configuration per app |
+| `do53.go`, `dot.go`, `doh.go`, `doq.go` | Wrap the handler at each listener |
+| `imr_client_stats.go` | Add the dnstap wrapper in `listenerHandlers()` |
+| `dnslookup.go` | `RESOLVER_*` in `tryServer()` |
+| `imr_forward.go` | `FORWARDER_*` in `forwardQuery()` |
+| `config.go`, `parseconfig.go`, `config_validate.go`, `config_reload_guardrail.go` | Configuration |
 
 ### Effort estimate
 
-**~600-900 lines of new code**
+**~600-900 lines of non-test code, ~1000-1400 with tests**
 
 | Component | Lines |
 |-----------|-------|
-| Output manager (init, connect, shutdown) | ~100-150 |
-| ResponseWriter wrapper + message builder | ~150-200 |
-| Handler wrapping in DnsEngine | ~50 |
-| DoH wrapper | ~50 |
-| DoQ wrapper | ~50 |
-| IMR resolver hooks | ~100-150 |
-| Config additions | ~50 |
-| CLI | ~50-100 |
-| Tests | ~200-300 |
+| Output manager + message builder | ~250-350 |
+| Inbound wrappers (auth + IMR) | ~100-150 |
+| IMR outbound (iterative + forwarder) | ~80-150 |
+| Config, validation, reload | ~80-120 |
+| Status API + CLI | ~100-150 |
+| Tests | ~300-500 |
 
-**Files**: 1 new file + 5-6 modified
+**Files**: 1 new file + 8-10 modified
 
-**Comparable to**: Phase 1a+1b (Transport Unification Foundation) — mechanical wiring across multiple files/apps. The golang-dnstap library handles all the heavy lifting (protobuf encoding, Frame Streams framing).
+### Limitations and open decisions
 
-### Risk factors
-
-- DoH and DoQ custom ResponseWriter types don't use the standard `dns.ResponseWriter` interface identically — the dnstap wrapper needs transport-specific variants
-- Buffer sizing and backpressure: if the dnstap collector is slow, the output buffer (default 10,000 messages in CoreDNS) can fill up. Drop policy needed (drop oldest vs. drop newest)
-- Wire-format DNS message capture: `WriteMsg()` receives a parsed `*dns.Msg` — need to call `Pack()` to get wire format for the dnstap protobuf. Minor performance cost per message
+- **Wire fidelity**: handlers see a parsed `*dns.Msg` in both directions, so frames carry a re-packed message, not the bytes on the wire. Costs one extra `Pack()` per message and is not byte-exact (compression, malformed input). Byte-exact capture needs raw bytes exposed by the `johanix/dns` fork.
+- **TSIG**: on Do53 and DoT the response MAC is added below the handler chain, so the frame holds the pre-TSIG message.
+- **Outbound local address**: `core.DNSClient` hides the connection, so the resolver-side source address/port is unavailable without extra plumbing.
+- **Stragglers**: bare `dns.Exchange()` calls in `dnslookup.go` (`AuthDNSQuery()` among them, and `RecursiveDNSQuery()`) bypass `core.DNSClient`. Auth-side outbound traffic (NOTIFY, SOA probes, UPDATE to the parent) is a separate set of sites if it should be covered.
+- **Unanswered queries and XFR**: a query dropped without `WriteMsg()` yields a query frame only; a zone transfer yields several response frames per query.
+- **Backpressure**: drop policy when the collector is slow (drop newest is simplest; count drops).
 
 ### New external dependency
 
-- `github.com/dnstap/golang-dnstap` — Protocol Buffers + Frame Streams for dnstap encoding/transport
+- `github.com/dnstap/golang-dnstap` — brings in `google.golang.org/protobuf` and `github.com/farsightsec/golang-framestream`
 
 ---
 
@@ -218,8 +220,8 @@ DNSTAP captures DNS query/response pairs with metadata and streams them to a col
 | Feature | New Code | Files | Complexity | Comparable Phase |
 |---------|----------|-------|------------|-----------------|
 | **RPZ** | ~1000-1500 lines | 1-2 new + 3-4 modified | Medium-High | Reliable Message Queue (Phases 5-9) |
-| **DNSTAP** | ~600-900 lines | 1 new + 5-6 modified | Medium | Transport Unification 1a+1b |
-| **Both** | ~1600-2400 lines | 2-3 new + 7-9 modified | — | Slightly less than full Transport Unification (Phases 1-2) |
+| **DNSTAP** | ~1000-1400 lines | 1 new + 8-10 modified | Low-Medium | Transport Unification 1a+1b |
+| **Both** | ~2000-2900 lines | 2-3 new + 10-13 modified | — | Slightly less than full Transport Unification (Phases 1-2) |
 
 ### Comparison to recent completed work
 
@@ -229,7 +231,7 @@ DNSTAP captures DNS query/response pairs with metadata and streams them to a col
 | Reliable Message Queue + Confirmations (Phases 5-9) | ~2000 | 11 | New state machine + integration |
 | Transport Unification Phase 1 (all sub-steps) | ~1500 | 8 | Architecture refactor |
 | CLI Peer Restructure | ~300 | 5 | Command tree reorganization |
-| **RPZ + DNSTAP (estimated)** | **~1600-2400** | **9-12** | **New subsystem + cross-app wiring** |
+| **RPZ + DNSTAP (estimated)** | **~2000-2900** | **12-16** | **New subsystem + cross-app wiring** |
 
 ### Suggested implementation order
 
@@ -239,9 +241,9 @@ DNSTAP captures DNS query/response pairs with metadata and streams them to a col
 ### Phasing sketch
 
 **DNSTAP** (2-3 phases):
-1. Core output manager + Do53/DoT wrapper (covers auth/agent/combiner)
-2. DoH + DoQ wrappers
-3. IMR resolver hooks (RESOLVER_QUERY/RESOLVER_RESPONSE)
+1. Core output manager + config + inbound wrapper on all tdns-auth listeners
+2. IMR inbound via `listenerHandlers()` (CLIENT_QUERY/CLIENT_RESPONSE)
+3. IMR outbound (RESOLVER_* and FORWARDER_*) + status API/CLI
 
 **RPZ** (3-4 phases):
 1. RPZ zone loader (reuse ZoneData) + QNAME trigger
