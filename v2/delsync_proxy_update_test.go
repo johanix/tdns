@@ -530,7 +530,15 @@ func TestProxyKeyStatusMessagePerState(t *testing.T) {
 			t.Errorf("%s: verdict %q missing from:\n%s", tc.state, tc.verdict, msg)
 		}
 		// The point of #541: the records are there whatever the verdict says.
-		for _, want := range []string{key.String(), "HSYNCPARAM", "TYPE65286"} {
+		// READY leaves out the RFC 3597 form, which is for an operator who
+		// still has to publish them.
+		wants := []string{key.String(), "HSYNCPARAM"}
+		if tc.state != ProxyUpdateReady {
+			wants = append(wants, "TYPE65286")
+		} else if strings.Contains(msg, "TYPE65286") {
+			t.Errorf("%s: report carries the RFC 3597 form", tc.state)
+		}
+		for _, want := range wants {
 			if !strings.Contains(msg, want) {
 				t.Errorf("%s: report does not carry %q", tc.state, want)
 			}
@@ -586,10 +594,10 @@ func TestProxyKeyStatusWaitingPinnedReadyHeading(t *testing.T) {
 	servedKey := dns.Copy(key).(*dns.KEY)
 	servedKey.Hdr.Ttl = 300
 	servedHsync := strings.Replace(zd.proxyHsyncparamPubkeyRR(), "\t3600\t", "\t300\t", 1)
-	readyRecords := func(keyLine, hsyncLine, unknownLine string) string {
-		return keyLine + "\n" + hsyncLine + "\n\n" +
-			fmt.Sprintf("HSYNCPARAM is a private type (%d). For a primary that cannot parse it, the same\n", core.TypeHSYNCPARAM) +
-			"record in RFC 3597 form:\n\n" + unknownLine + "\n"
+	// READY shows the served records only: no RFC 3597 form, which is for
+	// an operator who still has to publish them.
+	readyRecords := func(keyLine, hsyncLine, _ string) string {
+		return keyLine + "\n" + hsyncLine + "\n"
 	}
 
 	// The primary serves both records at 300.

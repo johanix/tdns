@@ -352,7 +352,15 @@ func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string, serve
 		keyLine = rrTextWithTTL(keyLine, ttl, ok)
 		ttl, ok = zd.proxyServedHsyncparamTTL()
 		hsyncLine = rrTextWithTTL(hsyncLine, ttl, ok)
-		unknown = rrTextWithTTL(unknown, ttl, ok)
+		// The records are already served, so they are shown only to compare
+		// with. The RFC 3597 form helps an operator who still has to put
+		// them on a primary that cannot parse the private type; in READY it
+		// only made "all done" look like "still to do".
+		return fmt.Sprintf(`%s
+
+%s
+%s
+`, heading, keyLine, hsyncLine), nil
 	}
 	return fmt.Sprintf(`%s
 
