@@ -50,7 +50,7 @@ func TestAReferralWithADSMakesAnInsecureZoneSecure(t *testing.T) {
 		t.Fatal(err)
 	}
 	ds := ck.ToDS(dns.SHA256)
-	dsSig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: pk.KeyTag(), SignerName: parent,
+	dsSig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: ds.Header().Ttl}, Algorithm: dns.ED25519, KeyTag: pk.KeyTag(), SignerName: parent,
 		Inception: uint32(time.Now().Add(-time.Hour).Unix()), Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := dsSig.Sign(ppriv.(crypto.Signer), []dns.RR{ds}); err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestAReferralWithADSMakesAnInsecureZoneSecure(t *testing.T) {
 	// proof (ReferralChildState).
 	nsec := &dns.NSEC{Hdr: dns.RR_Header{Name: child, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: 300},
 		NextDomain: "zzz." + parent, TypeBitMap: []uint16{dns.TypeNS, dns.TypeRRSIG, dns.TypeNSEC}}
-	nsecSig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: pk.KeyTag(), SignerName: parent,
+	nsecSig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: nsec.Header().Ttl}, Algorithm: dns.ED25519, KeyTag: pk.KeyTag(), SignerName: parent,
 		Inception: uint32(time.Now().Add(-time.Hour).Unix()), Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := nsecSig.Sign(ppriv.(crypto.Signer), []dns.RR{nsec}); err != nil {
 		t.Fatal(err)

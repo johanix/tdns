@@ -209,41 +209,13 @@ func (rrcache *RRsetCacheT) set(qname string, qtype uint16, crrset *CachedRRset,
 	bounded := ttlBounded(crrset.Context)
 	limits := GetTTLLimits()
 
-	// Compute min TTL and set Expiration accordingly when RRset present
+	// An entry with records lives as long as they do (entryLifetime); one
+	// without, as long as its caller says.
 	if crrset.RRset != nil && len(crrset.RRset.RRs) > 0 {
-		minTTL := crrset.RRset.RRs[0].Header().Ttl
-		for _, rr := range crrset.RRset.RRs[1:] {
-			if rr.Header().Ttl < minTTL {
-				minTTL = rr.Header().Ttl
-			}
-		}
-		// An answer synthesized from a wildcard lives no longer than the proof
-		// kept with it, which is served beside it.
-		for _, set := range crrset.WildcardProof {
-			if set == nil {
-				continue
-			}
-			for _, rr := range set.RRs {
-				if rr.Header().Ttl < minTTL {
-					minTTL = rr.Header().Ttl
-				}
-			}
-		}
-		// Apply a small TTL floor for NS RRsets only when learned via referral, to avoid instant drop
-		if qtype == dns.TypeNS && crrset.Context == ContextReferral && minTTL == 0 {
-			if rrcache.Debug {
-				log.Printf("RRsetCache:Set: NS minTTL was 0 for %q (Context=Referral); applying floor 10s", qname)
-			}
-			minTTL = 10
-		}
-		if bounded {
-			minTTL = limits.Clamp(minTTL)
-		}
+		crrset.Ttl, crrset.Expiration = entryLifetime(crrset, qtype, now, limits, bounded)
 		if rrcache.Debug && qtype == dns.TypeNS {
-			log.Printf("RRsetCache:Set: NS minTTL=%ds for zone %q (Context=%s)", minTTL, qname, CacheContextToString[crrset.Context])
+			log.Printf("RRsetCache:Set: NS lifetime %ds for zone %q (Context=%s)", crrset.Ttl, qname, CacheContextToString[crrset.Context])
 		}
-		crrset.Ttl = minTTL
-		crrset.Expiration = now.Add(time.Duration(minTTL) * time.Second)
 	} else {
 		if crrset.Expiration.IsZero() && crrset.Ttl > 0 {
 			// For negative/no-RRset entries, if Expiration not set but TTL is provided
@@ -258,18 +230,28 @@ func (rrcache *RRsetCacheT) set(qname string, qtype uint16, crrset *CachedRRset,
 		}
 	}
 
-	if keep == nil {
-		rrcache.RRsets.Set(lookupKey, *crrset)
-		return true
-	}
+	// keep (SetUnless) decides first: an entry it says must stay is left as it
+	// is. Otherwise, storing the entry that is cached again -- the same RRset,
+	// as a Get hands it out and a caller hands it back with other fields
+	// changed -- keeps the expiry it has: a re-store never extends an entry's
+	// life. The lifetime computed above wins when it is shorter, as a verdict
+	// that makes the entry Secure can make it. Fresh data always arrives in an
+	// RRset of its own, and is given its full lifetime. Both are decided under
+	// the lock the write takes.
 	stored := false
-	rrcache.RRsets.Upsert(lookupKey, *crrset, func(exist bool, inMap, value CachedRRset) CachedRRset {
-		if exist && keep(inMap) {
-			return inMap
+	result := rrcache.RRsets.Upsert(lookupKey, *crrset, func(exist bool, cached, entry CachedRRset) CachedRRset {
+		if exist && keep != nil && keep(cached) {
+			return cached
 		}
 		stored = true
-		return value
+		if exist && entry.RRset != nil && cached.RRset == entry.RRset && cached.Expiration.Before(entry.Expiration) {
+			entry.Ttl, entry.Expiration = cached.Ttl, cached.Expiration
+		}
+		return entry
 	})
+	if stored {
+		crrset.Ttl, crrset.Expiration = result.Ttl, result.Expiration
+	}
 	return stored
 }
 
@@ -1416,9 +1398,13 @@ func (rrcache *RRsetCacheT) MarkRRsetBogus(qname string, qtype uint16, rrset *co
 }
 
 // SetVerdict changes the validation state, and the EDE, of the cached entry
-// judged was read from, and nothing else. Set recomputes the expiry from the
-// TTLs, and a verdict changed on every serve must not extend the entry's life
-// (see MarkRRsetBogus).
+// judged was read from. A verdict changed on every serve must not extend the
+// entry's life (see MarkRRsetBogus). It may shorten it: an entry the verdict
+// makes Secure lives no longer than its signatures allow, as it would had it
+// been Secure when it was stored (entryLifetime, signature_lifetime.go). The
+// lifetime is computed from the time the entry was stored, never moved later,
+// and written back into judged as well, so an answer built from it is served
+// with what is left of it.
 //
 // The verdict is stored only while that entry is still the one cached: the
 // same records, the same expiry and the state judged had. Validation can take
@@ -1429,13 +1415,22 @@ func (rrcache *RRsetCacheT) SetVerdict(judged *CachedRRset, state ValidationStat
 	if judged == nil {
 		return false
 	}
-	return rrcache.RRsets.UpdateIf(rrsetKey(judged.Name, judged.RRtype), func(stored CachedRRset) (CachedRRset, bool) {
+	stored := rrcache.RRsets.UpdateIf(rrsetKey(judged.Name, judged.RRtype), func(stored CachedRRset) (CachedRRset, bool) {
 		if stored.RRset != judged.RRset || !stored.Expiration.Equal(judged.Expiration) || stored.State != judged.State {
 			return stored, false
 		}
 		stored.State, stored.EDECode, stored.EDEText = state, edeCode, edeText
+		if stored.RRset != nil && len(stored.RRset.RRs) > 0 {
+			storedAt := stored.Expiration.Add(-time.Duration(stored.Ttl) * time.Second)
+			ttl, exp := entryLifetime(&stored, judged.RRtype, storedAt, GetTTLLimits(), ttlBounded(stored.Context))
+			if exp.Before(stored.Expiration) {
+				stored.Ttl, stored.Expiration = ttl, exp
+			}
+		}
+		judged.Ttl, judged.Expiration = stored.Ttl, stored.Expiration
 		return stored, true
 	})
+	return stored
 }
 
 func (rrcache *RRsetCacheT) lookupDnskeyEDE(rrset *core.RRset) (uint16, string, bool) {

@@ -53,7 +53,7 @@ func startTestDataClock(t *testing.T, at time.Time) string {
 // expiration.
 func (k *fwdSecKey) signAt(t *testing.T, inception, expiration time.Time, rrs ...dns.RR) []dns.RR {
 	t.Helper()
-	sig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: k.dnskey.KeyTag(), SignerName: k.dnskey.Hdr.Name,
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: rrs[0].Header().Ttl}, Algorithm: dns.ED25519, KeyTag: k.dnskey.KeyTag(), SignerName: k.dnskey.Hdr.Name,
 		Inception: uint32(inception.Unix()), Expiration: uint32(expiration.Unix())}
 	if err := sig.Sign(k.priv, rrs); err != nil {
 		t.Fatal(err)

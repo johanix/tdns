@@ -352,7 +352,7 @@ func TestValidateAnswerDNSKEYIsNotAWildcard(t *testing.T) {
 	rrcache.DnskeyCache.Set(zone, ksk.KeyTag(), &CachedDnskeyRRset{Name: zone, Keyid: ksk.KeyTag(),
 		State: ValidationStateSecure, TrustAnchor: true, Dnskey: *ksk, Expiration: time.Now().Add(time.Hour)})
 	rrs := []dns.RR{dns.Copy(ksk), dns.Copy(zsk)}
-	sig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: ksk.KeyTag(), SignerName: zone,
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: rrs[0].Header().Ttl}, Algorithm: dns.ED25519, KeyTag: ksk.KeyTag(), SignerName: zone,
 		Inception: uint32(time.Now().Add(-time.Hour).Unix()), Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := sig.Sign(priv.(crypto.Signer), rrs); err != nil {
 		t.Fatal(err)
@@ -374,7 +374,6 @@ func TestValidateAnswerDNSKEYIsNotAWildcard(t *testing.T) {
 // An answer synthesized from a wildcard lives no longer than its proof.
 func TestSetBoundsAWildcardAnswerByItsProof(t *testing.T) {
 	rrcache, k := secCache(t)
-	answer := wcA(t, k) // TTL 300
 	proof := signedNSEC(t, k, "x.w."+secZone+" 60 IN NSEC zz.w."+secZone+" A RRSIG NSEC")
 	for _, c := range []struct {
 		name  string
@@ -385,6 +384,9 @@ func TestSetBoundsAWildcardAnswerByItsProof(t *testing.T) {
 		{"without", nil, 300 * time.Second},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			// A fresh answer each time: the same RRset stored again keeps the
+			// lifetime it was given (Set).
+			answer := wcA(t, k) // TTL 300
 			rrcache.Set(wcQname, dns.TypeA, &CachedRRset{Name: wcQname, RRtype: dns.TypeA, RRset: answer,
 				Context: ContextAnswer, State: ValidationStateSecure, WildcardProof: c.proof})
 			got := rrcache.Peek(wcQname, dns.TypeA).Expiration.Sub(Now())

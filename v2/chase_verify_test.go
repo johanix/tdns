@@ -214,7 +214,7 @@ func TestRenderChainTrustAnchorSource(t *testing.T) {
 // signedAt is key.sign with a signature valid from inception to expiration.
 func signedAt(t *testing.T, key *fwdSecKey, inception, expiration time.Time, rrs ...dns.RR) []dns.RR {
 	t.Helper()
-	sig := &dns.RRSIG{Algorithm: key.dnskey.Algorithm, KeyTag: key.dnskey.KeyTag(), SignerName: key.dnskey.Hdr.Name,
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: rrs[0].Header().Ttl}, Algorithm: key.dnskey.Algorithm, KeyTag: key.dnskey.KeyTag(), SignerName: key.dnskey.Hdr.Name,
 		Inception: uint32(inception.Unix()), Expiration: uint32(expiration.Unix())}
 	if err := sig.Sign(key.priv, rrs); err != nil {
 		t.Fatal(err)

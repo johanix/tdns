@@ -3780,31 +3780,18 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	}
 
 	// The authority section is the proof of the denial. Its first SOA names
-	// the zone that denies, and the SOAs set how long the denial is cached.
+	// the zone that denies. How long the denial is cached, the cache decides
+	// from the SOA and the proof (RFC 2308 section 5; cache entryLifetime).
 	negAuthority := authorityRRsets(r.Ns)
 	var (
-		ttl      uint32
 		soaOwner string
-		soaMin   uint32
 		soarrset *core.RRset
 	)
 	for _, set := range negAuthority {
 		for _, rr := range set.RRs {
-			soa, ok := rr.(*dns.SOA)
-			if !ok {
-				continue
-			}
-			if soarrset == nil {
+			if soa, ok := rr.(*dns.SOA); ok && soarrset == nil {
 				soarrset = set
 				soaOwner = soa.Header().Name
-				ttl = soa.Header().Ttl
-			} else if soa.Header().Ttl < ttl || ttl == 0 {
-				ttl = soa.Header().Ttl
-			}
-			if soa.Minttl != 0 {
-				if soaMin == 0 || soa.Minttl < soaMin {
-					soaMin = soa.Minttl
-				}
 			}
 		}
 	}
@@ -3825,12 +3812,6 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 			"rcode", dns.RcodeToString[r.MsgHdr.Rcode])
 		return cache.ContextFailure, r.MsgHdr.Rcode, false
 	}
-	if soaMin > 0 && (ttl == 0 || soaMin < ttl) {
-		ttl = soaMin
-	}
-	if ttl == 0 {
-		ttl = 60
-	}
 
 	skipDNSKEYValidation := qtype == dns.TypeDNSKEY
 	hasValidatedDS := false
@@ -3849,8 +3830,6 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 			return cache.ContextFailure, r.MsgHdr.Rcode, false
 		}
 	}
-
-	expiration := cache.Now().Add(time.Duration(ttl) * time.Second)
 
 	// RFC 9824: a compact denial of existence proves that qname does not
 	// exist with an NSEC owned by qname itself, and the authoritative server
@@ -3952,26 +3931,21 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 		CompactDenial: compactDenial,
 		Context:       negContext,
 		State:         vstate,
-		Expiration:    expiration, // XXX: This will be overridden by rrcache.Set(). TODO: Fix this.
 		EDECode:       edeCode,
 		EDEText:       edeText,
 		Transport:     transport,
 	})
 
-	// XXX: should do either of:
-	// push the computed TTL into the SOA RR header(s) before calling Set, or
-	// teach Set to respect a non-zero crrset.Ttl/Expiration for negative entries instead of recomputing it.
-
-	// Also cache the SOA RRset itself for future direct lookups.
+	// Also cache the SOA RRset itself for future direct lookups, for its own
+	// TTL: the negative TTL is the denial's.
 	imr.Cache.Set(soaOwner, dns.TypeSOA, &cache.CachedRRset{
-		Name:       soaOwner,
-		RRtype:     dns.TypeSOA,
-		Rcode:      uint8(dns.RcodeSuccess),
-		RRset:      soarrset,
-		Context:    cache.ContextAnswer,
-		State:      soaVstate,
-		Expiration: expiration, // XXX: This will be overridden by rrcache.Set(). TODO: Fix this.
-		Transport:  transport,
+		Name:      soaOwner,
+		RRtype:    dns.TypeSOA,
+		Rcode:     uint8(dns.RcodeSuccess),
+		RRset:     soarrset,
+		Context:   cache.ContextAnswer,
+		State:     soaVstate,
+		Transport: transport,
 	})
 
 	return negContext, int(cachedRcode), true

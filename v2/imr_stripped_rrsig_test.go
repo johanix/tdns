@@ -49,7 +49,7 @@ func newZoneSigner(t *testing.T, zone string) *zoneSigner {
 // sign returns rrs followed by their RRSIG.
 func (s *zoneSigner) sign(t *testing.T, rrs ...dns.RR) []dns.RR {
 	t.Helper()
-	sig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: s.key.KeyTag(), SignerName: s.zone,
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: rrs[0].Header().Ttl}, Algorithm: dns.ED25519, KeyTag: s.key.KeyTag(), SignerName: s.zone,
 		Inception:  uint32(time.Now().Add(-time.Hour).Unix()),
 		Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := sig.Sign(s.priv, rrs); err != nil {
