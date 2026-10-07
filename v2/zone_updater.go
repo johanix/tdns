@@ -1383,7 +1383,7 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (up
 			rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) // Cannot remove rr, because it is in the wrong class.
 			if len(rrset.RRs) == 0 {
 				zd.stageDeleteLocked(ownerName, rrtype)
-			} else if zd.signableLocked(ownerName, rrtype) {
+			} else if zd.signsHere() && zd.signableLocked(ownerName, rrtype) {
 				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
 				if err != nil {
 					lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
@@ -1487,7 +1487,9 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (up
 
 		if changed {
 			// rrset.RRSIGs = []dns.RR{} // XXX: The RRset changed, so any old RRSIGs are now invalid.
-			if zd.signableLocked(ownerName, rrtype) {
+			// An unsigned zone has nothing to sign with: asking SignRRset
+			// only logged an ERROR for every update to it.
+			if zd.signsHere() && zd.signableLocked(ownerName, rrtype) {
 				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
 				if err != nil {
 					lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
@@ -1766,7 +1768,7 @@ func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, d
 				}
 				// Ours now. Sign only what is actually unsigned: everything
 				// else under the cut was already correct before it moved.
-				if dak == nil || len(rrset.RRs) == 0 || len(rrset.RRSIGs) > 0 {
+				if !zd.signsHere() || dak == nil || len(rrset.RRs) == 0 || len(rrset.RRSIGs) > 0 {
 					continue
 				}
 				rrset.RRtype = rrt

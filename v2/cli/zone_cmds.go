@@ -58,13 +58,14 @@ func NewZoneProxyKeyCmd(role string) *cobra.Command {
 		Long: `For a zone with the parentsync-proxy option (a tdns-agent acting as a
 secondary for a DSYNC-unaware primary), report whether the agent can proxy
 DNS UPDATEs to the parent, and print the exact records to serve at the primary
-apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and the HSYNCPARAM again
-in RFC 3597 form for a primary that cannot parse the private type.
+apex: the agent's KEY RR, an HSYNCPARAM pubkey flag, and, until the records
+are served, the HSYNCPARAM again in RFC 3597 form for a primary that cannot
+parse the private type.
 
-The records are printed in every state, so that what the agent holds can be
-compared against what the primary actually serves — including in ready, where
-the two are supposed to agree. In foreign-key the KEY found at the apex is
-listed alongside them.
+The KEY and HSYNCPARAM are printed in every state, so that what the agent
+holds can be compared against what the primary actually serves — including in
+ready, where the two are supposed to agree and the RFC 3597 form is left out.
+In foreign-key the KEY found at the apex is listed alongside them.
 States: update-unsupported / ready / foreign-key / waiting-for-key.
 
 It changes nothing on the zone, with one exception: in waiting-for-key, if the
