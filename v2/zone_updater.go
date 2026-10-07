@@ -1768,7 +1768,7 @@ func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, d
 				}
 				// Ours now. Sign only what is actually unsigned: everything
 				// else under the cut was already correct before it moved.
-				if dak == nil || len(rrset.RRs) == 0 || len(rrset.RRSIGs) > 0 {
+				if !zd.signsHere() || dak == nil || len(rrset.RRs) == 0 || len(rrset.RRSIGs) > 0 {
 					continue
 				}
 				rrset.RRtype = rrt
