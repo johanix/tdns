@@ -178,7 +178,8 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	// holds none (firstDSPublicationWithoutParentDS) has nothing in flight
 	// either, and never goes idle on its own: the spawn takes over from
 	// that publication instead of waiting for it.
-	if algRoll == nil && !row.RolloverInProgress && (phase == rolloverPhaseIdle || firstDSPublicationWithoutParentDS(row)) {
+	firstDS := firstDSPublicationWithoutParentDS(row)
+	if algRoll == nil && !row.RolloverInProgress && (phase == rolloverPhaseIdle || firstDS) {
 		from, to, mismatch, blocked, err := kskAlgRollNeeded(kdb, zone, pol)
 		if err != nil {
 			lgSigner.Warn("rollover: KSK algorithm-roll check failed", "zone", zone, "err", err)
@@ -201,12 +202,27 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			// left on the wire. Released first, it still matches and is
 			// withdrawn -- the right outcome, since the zone no longer wants
 			// the old KSK's DS -- and the roll's own push publishes the CDS
-			// for the new KSK. A release that fails keeps its claim and the
-			// spawn goes ahead: a NOTIFY push replaces the CDS RRset whole,
-			// and otherwise the old CDS stays until the next publication
-			// replaces it, as after any failed release.
+			// for the new KSK.
+			//
+			// A release that fails keeps its claim. Taking over from the
+			// first DS publication, the spawn then waits: the roll it starts
+			// does not wait for the parent, so the old KSK could be gone
+			// while its CDS is still served, asking the parent for a DS that
+			// would make the zone bogus. Nothing else happens this tick, as
+			// after a failed spawn, and the next tick tries again. From
+			// idle the spawn goes ahead: that roll waits for the parent to
+			// serve only the new DS, and a NOTIFY push replaces the CDS
+			// RRset whole.
 			if row.LastPublishedCdsIndexLow.Valid && row.LastPublishedCdsIndexHigh.Valid {
-				cleanupCdsAfterConfirm(ctx, zd, kdb)
+				if err := releaseRolloverCDSClaim(ctx, zd, kdb); err != nil {
+					if firstDS {
+						lgSigner.Warn("rollover: not starting the KSK algorithm rollover yet; the first DS publication's CDS could not be withdrawn, will retry next tick",
+							"zone", zone, "err", err)
+						return nil
+					}
+					lgSigner.Warn("rollover: CDS release before the KSK algorithm rollover failed; the old CDS stays until the next publication replaces it",
+						"zone", zone, "err", err)
+				}
 			}
 			if _, err := SpawnKskAlgRollover(conf, kdb, zone, from, to); err != nil {
 				lgSigner.Error("rollover: KSK algorithm rollover spawn failed; will retry next tick", "zone", zone, "err", err)

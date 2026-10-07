@@ -30,17 +30,30 @@ func parentShowedNoDS(row *RolloverZoneRow) bool {
 	return strings.TrimSpace(row.LastDsObservedKeyids.String) == ""
 }
 
+// dsRangeEverConfirmed reports whether the engine has ever seen the parent
+// publish a DS set for the zone: last_ds_confirmed_* is set at every
+// confirm and only an insecure roll's confirm clears it.
+func dsRangeEverConfirmed(row *RolloverZoneRow) bool {
+	return row != nil && (row.LastConfirmedLow.Valid || row.LastConfirmedHigh.Valid)
+}
+
 // firstDSPublicationWithoutParentDS is the non-blocking state: the engine
 // is pushing (or retrying, or waiting to observe) the DS set of a zone with
 // no rollover of its own in flight, to a parent that held no DS for the zone
-// at the engine's last poll. Nothing at the parent depends on the keys yet,
-// so nothing here has to finish before the KSK algorithm may change.
+// at the engine's last poll and has never been seen to hold one. Nothing at
+// the parent depends on the keys, and nothing a validator can have cached
+// from the parent does either, so nothing here has to finish before the KSK
+// algorithm may change.
 //
 // A DS push to a parent that does hold DS for the zone -- multi-DS pipeline
 // maintenance, say -- is not this state, and still blocks: the parent is
-// part way through taking a DS set the zone has committed to.
+// part way through taking a DS set the zone has committed to. Nor is a push
+// to a parent that once held DS for the zone and no longer does: validators
+// may still have that DS cached, for up to the parent DS TTL, and no poll of
+// the parent can see their caches. An insecure roll from there would remove
+// the old KSK on a margin that does not cover it.
 func firstDSPublicationWithoutParentDS(row *RolloverZoneRow) bool {
-	if row == nil || row.RolloverInProgress || row.AlgRollFromAlg.Valid {
+	if row == nil || row.RolloverInProgress || row.AlgRollFromAlg.Valid || dsRangeEverConfirmed(row) {
 		return false
 	}
 	switch row.RolloverPhase {
@@ -53,9 +66,10 @@ func firstDSPublicationWithoutParentDS(row *RolloverZoneRow) bool {
 // kskAlgRollStartsInsecure is the decision SpawnKskAlgRollover records as
 // alg_roll_parent_insecure: the roll starts against a parent with no DS for
 // the zone. True from the non-blocking first-DS state, and from idle when
-// the engine's last poll showed no DS and no DS set has been confirmed
-// since -- the zone between the end of an earlier insecure roll and the tick
-// that re-arms its first DS publication.
+// the engine's last poll showed no DS and no DS set has ever been confirmed
+// -- the zone between the end of an earlier insecure roll and the tick that
+// re-arms its first DS publication. Both require that no DS was ever
+// confirmed (see firstDSPublicationWithoutParentDS).
 //
 // It is made once, here, so that an empty answer later in a secure roll (a
 // lagging parent nameserver, say) can never turn that roll insecure.
@@ -70,7 +84,7 @@ func kskAlgRollStartsInsecure(row *RolloverZoneRow) bool {
 	if phase == "" {
 		phase = rolloverPhaseIdle
 	}
-	return phase == rolloverPhaseIdle && !row.RolloverInProgress && !row.LastConfirmedLow.Valid
+	return phase == rolloverPhaseIdle && !row.RolloverInProgress && !dsRangeEverConfirmed(row)
 }
 
 // kskRolloverPolicyChangeBlock returns "" when the zone's KSK rollover state
@@ -99,6 +113,10 @@ func kskRolloverPolicyChangeBlock(zone string, row *RolloverZoneRow) string {
 	if !row.LastDsObservedAt.Valid {
 		return fmt.Sprintf("a DS push is in flight for zone %s (phase %s) and the engine is %s, but has not polled the parent yet; if the parent holds no DS for the zone, retry once a poll has shown that%s",
 			zone, phase, doing, nextPollSuffix(row))
+	}
+	if parentShowedNoDS(row) && dsRangeEverConfirmed(row) {
+		return fmt.Sprintf("a DS push is in flight for zone %s (phase %s) and the engine is %s; %s, but it has held DS for the zone before, and validators may still have that DS cached; wait for the parent to publish the DS set",
+			zone, phase, doing, lastParentObservation(row))
 	}
 	return fmt.Sprintf("a DS push is in flight for zone %s (phase %s) and the engine is %s; %s; wait for the parent to publish it",
 		zone, phase, doing, lastParentObservation(row))

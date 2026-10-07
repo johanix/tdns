@@ -44,12 +44,21 @@ is true when all of these hold:
   `parent-push-softfail`;
 - the engine's own last parent DS poll (`QueryParentAgentDS`, recorded by
   `setLastDsObserved`) returned no DS records: `last_ds_observed_at` is set
-  and `last_ds_observed_keyids` is the empty string.
+  and `last_ds_observed_keyids` is the empty string;
+- no DS set has ever been confirmed at the parent (`last_ds_confirmed_*`
+  NULL, `dsRangeEverConfirmed`).
 
 A zone that has never polled does not qualify; it has learned nothing about
 its parent. A DS push to a parent that does hold DS for the zone (multi-DS
 pipeline maintenance, say) does not qualify either and still blocks: the
 parent is part way through taking a DS set the zone has committed to.
+
+Nor does a zone whose parent once held DS for it and no longer does (a
+withdrawn DS, while the engine pushes a changed DS set). Validators may still
+have that DS cached, for up to the parent DS TTL, and no poll of the parent
+can see their caches: an insecure roll from there would remove the old KSK
+on a margin that does not cover them. Such a zone keeps blocking as before;
+see §11.
 
 "No DS at the parent" is judged only from the engine's own parent-agent poll.
 There is no validated (IMR) check of insecurity in this change.
@@ -64,6 +73,8 @@ non-blocking state, and otherwise a sentence saying what the engine is doing:
   publication, the drain before removal);
 - a DS push to a parent that holds DS: the phase, and which key tags the
   parent served at the last poll;
+- a DS push to a parent that served no DS at the last poll but held DS
+  before: that, and that validators may still have the old DS cached;
 - a DS push that has not polled the parent yet: that, and when the first poll
   is due, with the hint that a parent without DS is accepted once a poll has
   shown it.
@@ -102,9 +113,10 @@ the backoff threshold and a probe time already due.
 The spawn records, once, whether the roll starts against a parent with no DS
 (`kskAlgRollStartsInsecure`, persisted as `alg_roll_parent_insecure`):
 
-- true from the non-blocking state;
-- true from idle when the last poll showed no DS **and** no DS range has been
-  confirmed (`last_ds_confirmed_*` NULL). This is the zone between the end of
+- true from the non-blocking state (which itself requires that no DS range
+  was ever confirmed);
+- true from idle when the last poll showed no DS **and** no DS range has ever
+  been confirmed (`last_ds_confirmed_*` NULL). This is the zone between the end of
   an earlier insecure roll and the tick that re-arms its first DS publication;
   a bind landing in that window must not start a roll that waits for the
   parent;
@@ -130,8 +142,11 @@ removal. There is no immediate key swap.
 The insecure confirm differs from the ordinary one in what it records:
 
 - the confirmed range is **cleared**, not saved, and no created key advances:
-  the parent has confirmed nothing. With no confirmed range, the idle branch
-  arms the first DS publication for the new KSK once the roll is done (§8);
+  the parent has confirmed nothing. An insecure roll only starts with no
+  confirmed range, and gets none while it stays insecure, so this keeps it
+  NULL rather than changing anything. With no confirmed range, the idle
+  branch arms the first DS publication for the new KSK once the roll is done
+  (§8);
 - `last_success_at` is left alone;
 - the hardfail count, softfail context and `next_push_at` are cleared, as at
   any confirm;
@@ -220,9 +235,13 @@ old KSK's CDS would read as someone else's, and the claim would be dropped
 with that CDS left on the wire until the next CDS publication replaced it.
 A test pins this behaviour, so the ordering comment cannot silently go stale.
 
-A release that fails keeps its claim and the spawn goes ahead: a NOTIFY push
-replaces the CDS RRset whole, and otherwise the old CDS stays until the next
-publication replaces it, as after any failed release.
+A release that fails keeps its claim. Taking over from the first DS
+publication, the spawn then **holds**: nothing else happens that tick (as
+after a failed spawn) and the next tick tries again. The roll it would start
+does not wait for the parent, so the old KSK could be removed while its CDS
+was still served, asking the parent for a DS that would make the zone bogus.
+From idle the spawn goes ahead: that roll waits for the parent to serve only
+the new DS, and a NOTIFY push replaces the CDS RRset whole.
 
 At the insecure confirm the CDS for the new KSK is kept: the parent has not
 acted on it, so it is still the zone's standing request.
@@ -262,6 +281,10 @@ field `algRollParentInsecure` expose it.
 - The config path takes no rollover lock: it runs on the refresh engine, and
   the rollover tick can hold the lock across a DS push. Its gate is a
   read-then-apply, as before.
+- A zone whose parent once held DS for it, withdrew it, and is now being
+  pushed a changed DS set: it does not count as the first DS publication
+  (§2) and keeps blocking a KSK algorithm change until the parent publishes
+  the DS set. Handling that case is tdns#903.
 - A DS that appears at the parent after the insecure check before removal
   (§5.1) has nothing left to protect: the old KSK is gone by then, and a
   parent DS for it is the parent's error, like any stale DS. Withdrawing the
@@ -278,15 +301,16 @@ with an injected clock against a fake parent:
   as secure, the clear is one way, `clearKskAlgRollTx` NULLs it.
 - `TestFirstDSPublicationDoesNotBlockChangePolicy`: accepted with no DS at the
   parent; refused for a rollover of the zone's own, for a DS push to a parent
-  holding DS, and before the first poll.
+  holding DS, for a parent that held DS before and holds none now (and the
+  spawn refuses that case too), and before the first poll.
 - `TestSpawnFromFirstDSPublicationRecordsAnInsecureRoll`: from
   `pending-parent-observe` and from `parent-push-softfail`; the attempt group
   ends in the spawn's transaction.
 - `TestInsecureAlgRollCompletesWithoutParentDS`: the full roll; confirm on an
   empty answer; the old KSK stays until propagation + TTL, no poll during the
-  drain, one poll at the removal (still no DS), and the KSK goes; the stale
-  confirmed range does not survive; the first DS publication re-arms and does
-  not block a later change.
+  drain, one poll at the removal (still no DS), and the KSK goes; no range is
+  recorded as confirmed; the first DS publication re-arms and does not block
+  a later change.
 - `TestInsecureDrainFindsDSAndGoesBackToTheParent`: DS(old) appears at the
   parent during the insecure drain; the removal is blocked, the roll goes back
   to `pending-parent-push` as an ordinary roll, pushes {DS(new)}, waits while
@@ -303,5 +327,9 @@ with an injected clock against a fake parent:
   in the non-blocking state and still waits for a parent holding DS.
 - `TestSpawnReleasesTheFirstDSPublicationCDSFirst`: the CDS ordering, with a
   running DS engine.
+- `TestSpawnHoldsWhileTheFirstDSPublicationCDSCannotBeReleased`: the zone
+  updater refuses the CDS withdrawal; no roll starts, the first DS
+  publication, its claim and the old CDS are untouched; once the withdrawal
+  succeeds the roll starts.
 
 `TestKT7EffectiveMarginForRoll` gains the insecure-margin cases.

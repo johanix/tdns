@@ -34,13 +34,21 @@ import (
 // path; an orphaned CDS will eventually be replaced by the general
 // delegation-sync path or by another rollover attempt.
 func cleanupCdsAfterConfirm(ctx context.Context, zd *ZoneData, kdb *KeyDB) {
+	if err := releaseRolloverCDSClaim(ctx, zd, kdb); err != nil {
+		lgSigner.Warn("rollover: cleanupCdsAfterConfirm", "zone", dns.Fqdn(zd.ZoneName), "err", err)
+	}
+}
+
+// releaseRolloverCDSClaim is cleanupCdsAfterConfirm for a caller that must
+// know whether the release happened: the spawn of an algorithm roll from
+// the first DS publication does not go ahead while the old KSK's CDS may
+// still be served. nil means the claim is gone -- the CDS withdrawn, or
+// found to be someone else's and left to them.
+func releaseRolloverCDSClaim(ctx context.Context, zd *ZoneData, kdb *KeyDB) error {
 	if zd == nil || kdb == nil {
-		return
+		return nil
 	}
-	res := kdb.askDSEngine(ctx, DSEngineRequest{cmd: dsCmdReleaseRolloverCDS, zd: zd})
-	if res.err != nil {
-		lgSigner.Warn("rollover: cleanupCdsAfterConfirm", "zone", dns.Fqdn(zd.ZoneName), "err", res.err)
-	}
+	return kdb.askDSEngine(ctx, DSEngineRequest{cmd: dsCmdReleaseRolloverCDS, zd: zd}).err
 }
 
 // releaseRolloverCDS is cleanupCdsAfterConfirm's work, run by the DS

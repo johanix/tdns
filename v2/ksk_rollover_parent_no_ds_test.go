@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -197,8 +198,11 @@ func TestFirstDSPublicationPredicate(t *testing.T) {
 		{"observe, no DS", observed(""), rolloverPhasePendingParentObserve, nil, true, true, false},
 		{"push, no DS", observed(""), rolloverPhasePendingParentPush, nil, true, true, false},
 		{"softfail, no DS", observed(""), rolloverPhasePushSoftfail, nil, true, true, false},
+		// A parent that once held DS: validators may still have it cached.
 		{"softfail, no DS, a DS once confirmed", observed(""), rolloverPhasePushSoftfail,
-			func(r *RolloverZoneRow) { r.LastConfirmedLow, r.LastConfirmedHigh = confirmed, confirmed }, true, true, false},
+			func(r *RolloverZoneRow) { r.LastConfirmedLow, r.LastConfirmedHigh = confirmed, confirmed }, false, false, true},
+		{"observe, no DS, a DS once confirmed", observed(""), rolloverPhasePendingParentObserve,
+			func(r *RolloverZoneRow) { r.LastConfirmedLow, r.LastConfirmedHigh = confirmed, confirmed }, false, false, true},
 		{"observe, parent has DS", observed("12345"), rolloverPhasePendingParentObserve, nil, false, false, true},
 		{"push, never polled", RolloverZoneRow{}, rolloverPhasePendingParentPush, nil, false, false, true},
 		{"observe, no DS, own rollover", observed(""), rolloverPhasePendingParentObserve,
@@ -326,6 +330,47 @@ func TestFirstDSPublicationDoesNotBlockChangePolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("parent once held DS, holds none now: refused", func(t *testing.T) {
+		// The parent confirms DS(A), then withdraws it; a DS-set change (a
+		// second DS) sends the engine back to the parent, which now answers
+		// with no DS. Validators may still hold DS(A) cached.
+		r := newNoDSRig(t, 1)
+		r.parent.serve(r.dsOfActiveKSK(3600))
+		tPoll := r.firstDSPoll()
+		r.expectPhase("confirmed", rolloverPhaseIdle, false)
+		if !dsRangeEverConfirmed(r.row("confirmed")) {
+			t.Fatal("test premise: no confirmed DS range")
+		}
+		r.parent.serve(nil)
+		r.zd.DnssecPolicy.Rollover.NumDS = 2
+		r.tick("arm", tPoll.Add(time.Second))
+		r.expectPhase("arm", rolloverPhasePendingParentPush, false)
+		tPush := tPoll.Add(2 * time.Second)
+		r.tick("push", tPush)
+		r.tick("poll", tPush.Add(r.zd.DnssecPolicy.Rollover.ConfirmInitialWait+time.Second))
+		row := r.row("poll")
+		if row.RolloverPhase != rolloverPhasePendingParentObserve || !parentShowedNoDS(row) {
+			t.Fatalf("test premise: want pending-parent-observe after an empty answer: %+v", row)
+		}
+		if firstDSPublicationWithoutParentDS(row) || kskAlgRollStartsInsecure(row) {
+			t.Fatalf("a once-secure zone reads as the first DS publication: %+v", row)
+		}
+		_, err := r.changePolicy("newalg")
+		if err == nil || !strings.Contains(err.Error(), "held DS for the zone before") {
+			t.Fatalf("err = %v, want a refusal saying the parent held DS before", err)
+		}
+		if r.zd.DnssecPolicyName != "base" {
+			t.Fatalf("a refusal rebound the zone to %q", r.zd.DnssecPolicyName)
+		}
+		// Nor does the engine take over.
+		if _, err := SpawnKskAlgRollover(&Conf, r.kdb, ktAlgZone, dns.ED25519, dns.RSASHA256); err == nil {
+			t.Fatal("the spawn took over from a DS push to a parent that once held DS")
+		}
+		if st := r.roll("after refused spawn"); st != nil {
+			t.Fatalf("a roll was recorded: %+v", st)
+		}
+	})
+
 	t.Run("parent not polled yet: refused", func(t *testing.T) {
 		r := newNoDSRig(t, 1)
 		t0 := time.Now()
@@ -400,16 +445,6 @@ func TestSpawnFromFirstDSPublicationRecordsAnInsecureRoll(t *testing.T) {
 func TestInsecureAlgRollCompletesWithoutParentDS(t *testing.T) {
 	r := newNoDSRig(t, 1)
 	r.firstDSPoll()
-	// A parent that once held the active KSK's DS and has since dropped it:
-	// the confirmed range is stale. The predicate does not care, and the
-	// roll must not carry the stale range past its end.
-	idx, ok, err := RolloverIndexForKey(r.kdb, ktAlgZone, r.a)
-	if err != nil || !ok {
-		t.Fatalf("rollover_index of %d: %v %v", r.a, ok, err)
-	}
-	if err := saveLastDSConfirmedRange(r.kdb, ktAlgZone, idx, idx); err != nil {
-		t.Fatalf("saveLastDSConfirmedRange: %v", err)
-	}
 	st, tPush, _ := r.spawnAndPush()
 	b := st.NewHeadKeyID
 	if !st.ParentInsecure {
@@ -805,6 +840,63 @@ func TestInsecureDrainHoldsWhenTheParentCannotBeAsked(t *testing.T) {
 	r.tick("parent answers, no DS", tDue.Add(2*time.Minute))
 	r.expectKeyState("parent answers, no DS", r.a, DnskeyStateRemoved)
 	r.expectPhase("parent answers, no DS", rolloverPhaseIdle, false)
+}
+
+// A first DS publication whose CDS cannot be withdrawn does not give way to
+// the roll yet: the roll would not wait for the parent, and the old KSK's CDS
+// could outlive the old KSK. The tick holds and retries; once the release
+// succeeds the roll starts.
+func TestSpawnHoldsWhileTheFirstDSPublicationCDSCannotBeReleased(t *testing.T) {
+	r := newNoDSRig(t, 1)
+	r.kdb.UpdateQ = make(chan UpdateRequest, 8)
+	r.kdb.DSEngineQ = make(chan DSEngineRequest, 8)
+	var refuse atomic.Bool
+	serveQueue(t, r.kdb.UpdateQ, func(_ context.Context, ur UpdateRequest) {
+		if refuse.Load() {
+			ur.respond(false, errTestApplyRefused)
+			return
+		}
+		applyApexActions(r.zd, ur.Actions)
+		ur.respond(true, nil)
+	})
+	startDSEngine(t, r.kdb)
+	r.firstDSPoll()
+	cds, low, high, ok, err := ComputeTargetCDSSetForZone(r.kdb, ktAlgZone)
+	if err != nil || !ok || len(cds) == 0 {
+		t.Fatalf("target CDS: %v (%d records, range known %v)", err, len(cds), ok)
+	}
+	stageCDS(t, r.zd, cds)
+	if err := setPublishedCdsRange(r.kdb, ktAlgZone, low, high); err != nil {
+		t.Fatalf("setPublishedCdsRange: %v", err)
+	}
+	if _, err := r.changePolicy("newalg"); err != nil {
+		t.Fatalf("change-policy: %v", err)
+	}
+
+	refuse.Store(true)
+	r.tick("release fails", time.Now())
+	if st := r.roll("release fails"); st != nil {
+		t.Fatalf("the roll started although the old CDS could not be withdrawn: %+v", st)
+	}
+	row := r.row("release fails")
+	if !firstDSPublicationWithoutParentDS(row) || !row.LastPublishedCdsIndexLow.Valid {
+		t.Fatalf("release fails: want the first DS publication and its claim untouched: %+v", row)
+	}
+	if got := servedCDS(t, r.zd); len(got) != 1 {
+		t.Fatalf("release fails: served CDS keyids %v, want the old KSK's", tupleKeyids(got))
+	}
+	if seps := ktActiveSEPs(t, r.kdb, ktAlgZone); len(seps) != 1 {
+		t.Fatalf("release fails: %d active SEP keys, want 1", len(seps))
+	}
+
+	refuse.Store(false)
+	r.tick("release succeeds", time.Now())
+	if st := r.roll("release succeeds"); st == nil || !st.ParentInsecure {
+		t.Fatalf("release succeeds: no insecure roll: %+v", st)
+	}
+	if got := servedCDS(t, r.zd); len(got) != 0 {
+		t.Fatalf("release succeeds: the old KSK's CDS is still served: keyids %v", tupleKeyids(got))
+	}
 }
 
 // dsOfOldHead is the old head's DS, computed from its DNSKEY directly: once
