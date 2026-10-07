@@ -1,8 +1,7 @@
 # The first DS publication does not block a KSK algorithm change
 
 **Date:** 2026-10-06. Based on main `c062eb92`.
-**Status:** implemented in branch `fix/policy-change-insecure-delegation`
-(draft PR).
+**Status:** implemented in #900 (branch `fix/policy-change-insecure-delegation`).
 
 ## 1. Problem
 
@@ -276,7 +275,15 @@ field `algRollParentInsecure` expose it.
 
 - `policy-set`: deliberately ungated.
 - IMR-validated insecurity: "no DS" comes from the engine's own parent-agent
-  poll.
+  poll, which is the source every roll already trusts. The poll refuses an
+  answer that cannot be the parent's (`checkParentAgentAnswer`): one without
+  the AA bit, or an empty answer whose SOA is not a proper ancestor of the
+  child -- the child's own server says "no DS" for every query. Either is a
+  failed poll, which holds, so a misconfigured parent-agent shows as an error
+  instead of an insecure parent.
+- Zones with no parent DS path at all (the root, trust-anchor-only zones):
+  the engine requires a parent-agent, so it cannot roll their KSK. That needs
+  an explicit no-parent mode with RFC 5011 timing: #904.
 - Ending the first DS publication loop: it continues indefinitely, by design.
 - The config path takes no rollover lock: it runs on the refresh engine, and
   the rollover tick can hold the lock across a DS push. Its gate is a
