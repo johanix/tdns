@@ -147,6 +147,11 @@ type RolloverStatus struct {
 	AlgRollOldHeadKeyID      uint16 `json:"algRollOldHeadKeyid,omitempty"`
 	AlgRollOldHeadRetireAt   string `json:"algRollOldHeadRetireAt,omitempty"`
 	AlgRollProjectedRemoveAt string `json:"algRollProjectedRemoveAt,omitempty"`
+	// AlgRollParentInsecure: the roll was started against a parent with no
+	// DS for the zone. Its parent step confirms on an answer without DS,
+	// and its drain needs no parent DS TTL. Cleared if the parent is seen
+	// holding a DS.
+	AlgRollParentInsecure bool `json:"algRollParentInsecure,omitempty"`
 
 	// Policy summary. Verbose mode shows this; compact mode hides it.
 	Policy *PolicySummary `json:"policy,omitempty"`

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -113,7 +114,44 @@ func QueryParentAgentDS(ctx context.Context, childZone, agentAddr string) ([]dns
 	if res.Rcode != dns.RcodeSuccess {
 		return nil, fmt.Errorf("QueryParentAgentDS: rcode %s", dns.RcodeToString[res.Rcode])
 	}
+	if err := checkParentAgentAnswer(res, q, agentAddr); err != nil {
+		return nil, err
+	}
 	return res.Answer, nil
+}
+
+// checkParentAgentAnswer refuses an answer that cannot have come from the
+// parent's authoritative view of the child's DS. The engine reads an empty
+// answer as "the parent holds no DS" -- for an insecure roll that is what
+// lets the old KSK go -- so a misconfigured parent-agent must show up as a
+// failed poll, not as an insecure parent:
+//   - no AA bit: not authoritative (a resolver, a referral);
+//   - an empty answer whose SOA is not a proper ancestor of the child:
+//     typically the child's own server, which says "no DS" for every query
+//     because DS lives in the parent.
+func checkParentAgentAnswer(res *dns.Msg, child, agentAddr string) error {
+	if !res.Authoritative {
+		return fmt.Errorf("QueryParentAgentDS: %s did not answer authoritatively for the DS of %s; rollover.parent-agent must be the parent's authoritative server", agentAddr, child)
+	}
+	for _, rr := range res.Answer {
+		if rr.Header().Rrtype == dns.TypeDS {
+			return nil
+		}
+	}
+	soaOwner := ""
+	for _, rr := range res.Ns {
+		if soa, ok := rr.(*dns.SOA); ok {
+			soaOwner = soa.Hdr.Name
+			break
+		}
+	}
+	if soaOwner == "" {
+		return fmt.Errorf("QueryParentAgentDS: %s answered no DS for %s without an SOA, so it does not say which zone answered", agentAddr, child)
+	}
+	if strings.EqualFold(dns.Fqdn(soaOwner), dns.Fqdn(child)) || !dns.IsSubDomain(soaOwner, child) {
+		return fmt.Errorf("QueryParentAgentDS: %s answered no DS for %s from zone %s, not from its parent; rollover.parent-agent must be the parent's authoritative server", agentAddr, child, soaOwner)
+	}
+	return nil
 }
 
 func minDuration(a, b time.Duration) time.Duration {

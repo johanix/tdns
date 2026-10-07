@@ -739,6 +739,10 @@ func setZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName str
 //     a time (§4.1).
 //   - re-entrancy: a ZSK alg roll already in flight (fuller drain-window
 //     predicate): refused.
+//   - KSK alg target while a KSK rollover, or a DS push to a parent that
+//     holds DS for the zone, is in flight: refused, naming what the engine
+//     waits for. The engine's first DS publication to a parent with no DS
+//     does not block (firstDSPublicationWithoutParentDS).
 //   - KSK-only alg target / strict mode: deferred to the reconcile, which
 //     refuses (defensive backstop) — but we surface a clean error here too.
 func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
@@ -759,6 +763,23 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return "", fmt.Errorf("change-policy: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
+
+	// The gates below read the current binding and the rollover engines'
+	// state, and the bind changes what those engines act on. Hold the
+	// per-zone rollover lock -- the one the KSK and ZSK rollover ticks
+	// take -- from reading the binding to the end of the bind, so that
+	// neither a tick nor a second change-policy can move the zone out of
+	// the state a gate admitted it in before the bind lands.
+	rolloverLock := AcquireRolloverLock(zd.ZoneName)
+	rolloverLock.Lock()
+	rolloverLocked := true
+	unlockRollover := func() {
+		if rolloverLocked {
+			rolloverLocked = false
+			rolloverLock.Unlock()
+		}
+	}
+	defer unlockRollover()
 
 	// Capture the current (source) policy algorithms/mode.
 	zd.mu.Lock()
@@ -796,6 +817,13 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 	// may be in flight (K-3, both the DS dance and the drain); no ZSK
 	// algorithm roll may be draining (D-11, the shared check below); and
 	// the zone must not carry an engine-blocking error.
+	//
+	// The engine's first DS publication to a parent that holds no DS is
+	// not "in flight" in that sense (firstDSPublicationWithoutParentDS):
+	// it never ends on its own, and nothing at the parent depends on it,
+	// so it does not block. The roll it gives way to is recorded as
+	// insecure (kskAlgRollStartsInsecure).
+	var parentNoDS *RolloverZoneRow
 	if kskChanged {
 		if pol.Rollover.Method == RolloverMethodNone {
 			return "", fmt.Errorf("change-policy: policy %q has no auto-rollover engine (rollover.method: none); a KSK algorithm change for zone %s (%s→%s) is parent-coordinated and needs rollover.method multi-ds or double-signature",
@@ -805,9 +833,11 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 		if err != nil {
 			return "", fmt.Errorf("change-policy: reading rollover state for zone %s: %w", zd.ZoneName, err)
 		}
-		if row != nil && (row.RolloverInProgress || (row.RolloverPhase != "" && row.RolloverPhase != rolloverPhaseIdle)) {
-			return "", fmt.Errorf("change-policy: a KSK rollover is already in progress for zone %s (phase %s); wait for it to complete before changing the KSK algorithm",
-				zd.ZoneName, row.RolloverPhase)
+		if block := kskRolloverPolicyChangeBlock(zd.ZoneName, row); block != "" {
+			return "", fmt.Errorf("change-policy: cannot change the KSK algorithm yet: %s", block)
+		}
+		if kskAlgRollStartsInsecure(row) {
+			parentNoDS = row
 		}
 		if st, err := kskAlgRollInFlight(kdb, zd.ZoneName, curKSKAlg); err != nil {
 			return "", fmt.Errorf("change-policy: checking in-flight KSK algorithm roll for zone %s: %w", zd.ZoneName, err)
@@ -869,6 +899,8 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 	if _, err := applyZonePolicyTransactional(ctx, zd, kdb, &pol, policyName, PolicyApplySourceCommand); err != nil {
 		return "", fmt.Errorf("change-policy: %w", err)
 	}
+	// The bind is in; the parent lookup below need not hold up the engine.
+	unlockRollover()
 
 	var b strings.Builder
 	if oldName != "" && oldName != policyName {
@@ -881,6 +913,11 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 		fmt.Fprintf(&b, "KSK algorithm will roll %s → %s via DOUBLE-SIGNATURE: the rollover engine mints a %s KSK straight into active, double-signs the DNSKEY RRset with both keys, waits propagation-delay plus the served DNSKEY TTL, replaces the DS at the parent with the %s DS (RFC 6781 §4.1.4), and removes the %s KSK once the parent has confirmed the swap and the drain window (parent DS TTL included) has elapsed.\n",
 			dns.AlgorithmToString[curKSKAlg], dns.AlgorithmToString[pol.KSKAlgorithm],
 			dns.AlgorithmToString[pol.KSKAlgorithm], dns.AlgorithmToString[pol.KSKAlgorithm], dns.AlgorithmToString[curKSKAlg])
+		if parentNoDS != nil {
+			fmt.Fprintf(&b, "The parent held no DS for zone %s at the engine's last poll (%s), so the roll will not wait for the parent: the new KSK's DS is still requested, a poll that still shows no DS ends the parent step, and the %s KSK is removed after propagation-delay plus the DNSKEY/RRSIG TTL drain. Should the parent be seen holding a DS meanwhile, the roll continues as an ordinary one. Afterwards the first DS publication resumes for the %s KSK.\n",
+				zd.ZoneName, strings.TrimSpace(parentNoDS.LastDsObservedAt.String),
+				dns.AlgorithmToString[curKSKAlg], dns.AlgorithmToString[pol.KSKAlgorithm])
+		}
 		fmt.Fprintf(&b, "This command does NOT perform the roll; the engine starts it on its next tick. Watch it with \"auto-rollover status -z %s --ksk\".\n", zd.ZoneName)
 		if warn := kskAlgRollBindWarning(ctx, zd, &pol); warn != "" {
 			fmt.Fprintf(&b, "WARNING: %s\n", warn)

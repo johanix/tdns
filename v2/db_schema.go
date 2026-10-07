@@ -177,7 +177,8 @@ UNIQUE (keyname)
 		alg_roll_started_at            TEXT,
 		alg_roll_new_head_keyid        INTEGER,
 		alg_roll_old_head_keyid        INTEGER,
-		alg_roll_old_head_retire_at    TEXT
+		alg_roll_old_head_retire_at    TEXT,
+		alg_roll_parent_insecure       INTEGER
 	)`,
 
 	// ZoneSigningState holds per-zone signing-loop state. max_observed_ttl

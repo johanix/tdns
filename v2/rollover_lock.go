@@ -8,10 +8,11 @@ import (
 )
 
 // Per-zone mutex registry that serializes the rollover tick against API
-// mutating handlers. Both call sites — RolloverAutomatedTick at the top
-// of its per-zone work, and HTTP handlers for /rollover/asap, cancel,
-// reset, unstick before any DB write — acquire the same per-zone mutex
-// here, so a CLI-driven write cannot interleave with a tick advance.
+// mutating handlers. The call sites — RolloverAutomatedTick at the top
+// of its per-zone work, the HTTP handlers for /rollover/asap, cancel,
+// reset, unstick before any DB write, and change-policy from its gates
+// through the bind — acquire the same per-zone mutex here, so a
+// CLI-driven write cannot interleave with a tick advance.
 //
 // Granularity is per-zone, not global: each zone's tick work is
 // independent of every other zone's, so contention is naturally

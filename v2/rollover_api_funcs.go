@@ -115,7 +115,7 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 				out.AlgTransition = &zt // deprecated singular, one release
 			}
 		}
-		populateKskAlgRollDetail(out, kdb, zone, pol, algRoll)
+		populateKskAlgRollDetail(out, kdb, zone, pol, algRoll, propagationDelay)
 	}
 
 	var hiddenRemoved int
@@ -141,10 +141,11 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 // populateKskAlgRollDetail fills the AlgRoll* fields from the persisted
 // roll state, including the projected removal of the old-algorithm head
 // when the drain margin can be computed.
-func populateKskAlgRollDetail(out *RolloverStatus, kdb *KeyDB, zone string, pol *DnssecPolicy, algRoll *KskAlgRollState) {
+func populateKskAlgRollDetail(out *RolloverStatus, kdb *KeyDB, zone string, pol *DnssecPolicy, algRoll *KskAlgRollState, propagationDelay time.Duration) {
 	if algRoll == nil {
 		return
 	}
+	out.AlgRollParentInsecure = algRoll.ParentInsecure
 	out.AlgRollFromAlg = dns.AlgorithmToString[algRoll.FromAlg]
 	out.AlgRollToAlg = dns.AlgorithmToString[algRoll.ToAlg]
 	if !algRoll.StartedAt.IsZero() {
@@ -154,7 +155,7 @@ func populateKskAlgRollDetail(out *RolloverStatus, kdb *KeyDB, zone string, pol 
 	out.AlgRollOldHeadKeyID = algRoll.OldHeadKeyID
 	if algRoll.OldHeadRetireAt != nil {
 		out.AlgRollOldHeadRetireAt = algRoll.OldHeadRetireAt.UTC().Format(time.RFC3339)
-		if at, ok := projectedAlgRollRemoveAt(kdb, zone, pol, algRoll); ok {
+		if at, ok := projectedAlgRollRemoveAt(kdb, zone, pol, algRoll, propagationDelay); ok {
 			out.AlgRollProjectedRemoveAt = at.UTC().Format(time.RFC3339)
 		}
 	}
@@ -162,12 +163,12 @@ func populateKskAlgRollDetail(out *RolloverStatus, kdb *KeyDB, zone string, pol 
 
 // projectedAlgRollRemoveAt is old_head_retire_at + the algorithm-roll
 // drain margin, when both are known.
-func projectedAlgRollRemoveAt(kdb *KeyDB, zone string, pol *DnssecPolicy, algRoll *KskAlgRollState) (time.Time, bool) {
+func projectedAlgRollRemoveAt(kdb *KeyDB, zone string, pol *DnssecPolicy, algRoll *KskAlgRollState, propagationDelay time.Duration) (time.Time, bool) {
 	if algRoll == nil || algRoll.OldHeadRetireAt == nil || pol == nil {
 		return time.Time{}, false
 	}
 	zd, _ := Zones.Get(zone)
-	eff, ok, err := effectiveMarginForRoll(zd, kdb, zone, pol, algRoll)
+	eff, ok, err := effectiveMarginForRoll(zd, kdb, zone, pol, algRoll, propagationDelay)
 	if err != nil || !ok {
 		return time.Time{}, false
 	}
@@ -191,7 +192,13 @@ func populateKskAlgRollWarnings(out *RolloverStatus, kdb *KeyDB, zone string, po
 		return
 	}
 	zd, _ := Zones.Get(zone)
-	if _, known := resolveDSTTL(zd, pol); !known {
+	// An insecure roll's drain does not use the parent DS TTL, but it does
+	// ask the parent once more before the old KSK goes.
+	if algRoll.ParentInsecure && pol.Rollover.ParentAgent == "" {
+		out.Warnings = append(out.Warnings,
+			"rollover.parent-agent is unset: the parent holds no DS for the zone, and the old-algorithm KSK's removal waits for a parent DS poll that cannot be made -- set rollover.parent-agent")
+	}
+	if _, known := resolveDSTTL(zd, pol); !known && !algRoll.ParentInsecure {
 		if pol.Rollover.ParentAgent == "" {
 			out.Warnings = append(out.Warnings,
 				"E13: no parent DS TTL can be observed (rollover.parent-agent is unset) and ttls.parent-ds is not set; the old-algorithm KSK's removal will defer indefinitely -- set ttls.parent-ds")
@@ -469,10 +476,14 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 			out.ToKeyID = algRoll.NewHeadKeyID
 			out.Note = fmt.Sprintf("KSK algorithm rollover %s -> %s in progress (phase %s); next scheduled is its projected completion",
 				dns.AlgorithmToString[algRoll.FromAlg], dns.AlgorithmToString[algRoll.ToAlg], row.RolloverPhase)
-			if at, ok := projectedAlgRollRemoveAt(kdb, zone, pol, algRoll); ok {
+			if at, ok := projectedAlgRollRemoveAt(kdb, zone, pol, algRoll, Conf.KaspPropagationDelay()); ok {
 				out.NextScheduled = at.UTC().Format(time.RFC3339)
+			} else if algRoll.OldHeadRetireAt == nil && algRoll.ParentInsecure {
+				out.Note += "; completion is not projectable until the next parent poll (the parent holds no DS for the zone)"
 			} else if algRoll.OldHeadRetireAt == nil {
 				out.Note += "; completion is not projectable until the parent serves only the new-algorithm DS"
+			} else if algRoll.ParentInsecure {
+				out.Note += "; completion is not projectable until the served DNSKEY TTL is known"
 			} else {
 				out.Note += "; completion is not projectable until the parent DS TTL is observed"
 			}
@@ -669,6 +680,16 @@ func headlineForPhase(phase string) string {
 // than the same-algorithm ones and an operator would otherwise read them
 // as stuck.
 func hintForState(phase string, row *RolloverZoneRow, pol *DnssecPolicy, algRoll *KskAlgRollState, now time.Time) string {
+	if algRoll != nil && algRoll.ParentInsecure {
+		switch phase {
+		case rolloverPhasePendingChildPublish:
+			return "algorithm rollover (parent holds no DS): waiting propagation-delay + DNSKEY TTL so every resolver holds a DNSKEY RRset with the new key before the new key's DS is requested"
+		case rolloverPhasePendingParentPush, rolloverPhasePendingParentObserve, rolloverPhasePushSoftfail:
+			return "algorithm rollover (parent holds no DS): the new key's DS is requested, but the roll does not wait for the parent; the next poll that shows no DS starts the drain"
+		case rolloverPhasePendingChildWithdraw:
+			return "algorithm rollover (parent holds no DS): holding the old-algorithm KSK (still signing) for propagation-delay + the DNSKEY/RRSIG TTL drain, then asking the parent once more before removing it — waiting is correct"
+		}
+	}
 	if algRoll != nil {
 		switch phase {
 		case rolloverPhasePendingChildPublish:

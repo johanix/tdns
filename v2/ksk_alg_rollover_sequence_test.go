@@ -502,40 +502,50 @@ func TestKT18TargetDSSetExcludesOldHeadDuringRoll(t *testing.T) {
 	}
 }
 
-// KT-7: the withdraw margin, widened only for an algorithm roll.
+// KT-7: the withdraw margin, widened only for an algorithm roll. An
+// insecure roll (the parent holds no DS) waits out the zone's own TTLs
+// after propagation instead, and never the parent DS TTL.
 func TestKT7EffectiveMarginForRoll(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	if err := UpsertZoneSigningMaxTTL(kdb, ktAlgZone, 3600); err != nil {
 		t.Fatalf("UpsertZoneSigningMaxTTL: %v", err)
 	}
 	roll := &KskAlgRollState{FromAlg: dns.ED25519, ToAlg: dns.RSASHA256}
-	mk := func(margin time.Duration, dsDelay time.Duration, observed uint32, override uint32) (*ZoneData, *DnssecPolicy) {
+	insecure := &KskAlgRollState{FromAlg: dns.ED25519, ToAlg: dns.RSASHA256, ParentInsecure: true}
+	const prop = 10 * time.Minute
+	mk := func(margin time.Duration, dsDelay time.Duration, observed uint32, override uint32, dnskeyTTL uint32) (*ZoneData, *DnssecPolicy) {
 		pol := &DnssecPolicy{Clamping: ClampingPolicy{Margin: margin}}
 		pol.Rollover.DsPublishDelay = dsDelay
 		pol.TTLS.ParentDS = override
+		pol.TTLS.DNSKEY = dnskeyTTL
 		return &ZoneData{ZoneName: ktAlgZone, ParentDSTTLObserved: observed}, pol
 	}
 	cases := []struct {
-		name     string
-		margin   time.Duration
-		dsDelay  time.Duration
-		observed uint32
-		override uint32
-		roll     *KskAlgRollState
-		want     time.Duration
-		wantOK   bool
+		name      string
+		margin    time.Duration
+		dsDelay   time.Duration
+		observed  uint32
+		override  uint32
+		dnskeyTTL uint32
+		roll      *KskAlgRollState
+		want      time.Duration
+		wantOK    bool
 	}{
-		{"same-alg: max(margin, maxTTL)", 15 * time.Minute, 5 * time.Minute, 86400, 0, nil, time.Hour, true},
-		{"same-alg ignores DS TTL", 15 * time.Minute, 5 * time.Minute, 86400, 0, nil, time.Hour, true},
-		{"alg-roll: DS TTL unknown defers", 15 * time.Minute, 5 * time.Minute, 0, 0, roll, time.Hour, false},
-		{"alg-roll: DS TTL + delay widens", 15 * time.Minute, 5 * time.Minute, 86400, 0, roll, 24*time.Hour + 5*time.Minute, true},
-		{"alg-roll: margin already wider", 48 * time.Hour, 5 * time.Minute, 3600, 0, roll, 48 * time.Hour, true},
-		{"alg-roll: ttls.parent-ds override wins", 15 * time.Minute, 5 * time.Minute, 3600, 7200, roll, 2*time.Hour + 5*time.Minute, true},
+		{"same-alg: max(margin, maxTTL)", 15 * time.Minute, 5 * time.Minute, 86400, 0, 0, nil, time.Hour, true},
+		{"same-alg ignores DS TTL", 15 * time.Minute, 5 * time.Minute, 86400, 0, 0, nil, time.Hour, true},
+		{"alg-roll: DS TTL unknown defers", 15 * time.Minute, 5 * time.Minute, 0, 0, 0, roll, time.Hour, false},
+		{"alg-roll: DS TTL + delay widens", 15 * time.Minute, 5 * time.Minute, 86400, 0, 0, roll, 24*time.Hour + 5*time.Minute, true},
+		{"alg-roll: margin already wider", 48 * time.Hour, 5 * time.Minute, 3600, 0, 0, roll, 48 * time.Hour, true},
+		{"alg-roll: ttls.parent-ds override wins", 15 * time.Minute, 5 * time.Minute, 3600, 7200, 0, roll, 2*time.Hour + 5*time.Minute, true},
+		{"insecure: no DS TTL needed; propagation + max TTL", 15 * time.Minute, 5 * time.Minute, 0, 0, 0, insecure, prop + time.Hour, true},
+		{"insecure: a longer DNSKEY TTL wins", 15 * time.Minute, 5 * time.Minute, 0, 0, 7200, insecure, prop + 2*time.Hour, true},
+		{"insecure: ignores an observed DS TTL", 15 * time.Minute, 5 * time.Minute, 86400, 0, 0, insecure, prop + time.Hour, true},
+		{"insecure: margin already wider", 48 * time.Hour, 5 * time.Minute, 0, 0, 0, insecure, 48 * time.Hour, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			zd, pol := mk(c.margin, c.dsDelay, c.observed, c.override)
-			got, ok, err := effectiveMarginForRoll(zd, kdb, ktAlgZone, pol, c.roll)
+			zd, pol := mk(c.margin, c.dsDelay, c.observed, c.override, c.dnskeyTTL)
+			got, ok, err := effectiveMarginForRoll(zd, kdb, ktAlgZone, pol, c.roll, prop)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -553,6 +563,15 @@ func TestKT7EffectiveMarginForRoll(t *testing.T) {
 			}
 		})
 	}
+	// An insecure roll holds only when no TTL at all is known: a zone never
+	// signed, with no TTLs in its policy.
+	t.Run("insecure: no TTL known defers", func(t *testing.T) {
+		unsigned := newTestKeyDB(t)
+		zd, pol := mk(15*time.Minute, 5*time.Minute, 0, 0, 0)
+		if _, ok, err := effectiveMarginForRoll(zd, unsigned, ktAlgZone, pol, insecure, prop); err != nil || ok {
+			t.Fatalf("ok=%v err=%v, want a deferral", ok, err)
+		}
+	})
 }
 
 // KT-19 (external review A4): a KSK row without a rollover_index (an
