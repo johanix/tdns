@@ -78,7 +78,7 @@ func (zd *ZoneData) addWildcardProof(m *dns.Msg, snap *zoneSnapshot, apex *Owner
 	var ttl uint32 = 3600
 	if soaRR, ok := apex.RRtypes.Get(dns.TypeSOA); ok && len(soaRR.RRs) > 0 {
 		if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
-			ttl = soa.Minttl
+			ttl = negativeTTL(soa)
 		}
 	}
 	ce := "."

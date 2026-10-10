@@ -489,6 +489,63 @@ func (zd *ZoneData) soaForResponseFrom(snap *zoneSnapshot, apex *OwnerData) core
 	return rs
 }
 
+// soaForDenialFrom is soaForResponseFrom for a negative answer: the SOA goes
+// out with the zone's negative TTL, the smaller of its own TTL and its MINIMUM
+// field, which is what RFC 2308 section 3 asks of a server. A resolver holds a
+// denial for the TTL of the SOA it arrived with, so serving the record's own
+// TTL let a long-lived SOA stretch a short MINIMUM (#699). A positive answer
+// to an SOA query keeps the record's own TTL.
+//
+// The signatures are lowered with it, since an RRSIG carries the TTL of the
+// RRset it covers (RFC 4034 section 3). They stay valid: a validator checks
+// them against their Original TTL (RFC 4035 section 5.3.3). Both are copies;
+// the stored records are not touched.
+func (zd *ZoneData) soaForDenialFrom(snap *zoneSnapshot, apex *OwnerData) core.RRset {
+	rs := zd.soaForResponseFrom(snap, apex)
+	if len(rs.RRs) == 0 {
+		return rs
+	}
+	soa, ok := rs.RRs[0].(*dns.SOA)
+	if !ok {
+		return rs
+	}
+	ttl := negativeTTL(soa)
+	soa.Hdr.Ttl = ttl
+	for _, sig := range rs.RRSIGs {
+		sig.Header().Ttl = ttl
+	}
+	return rs
+}
+
+// denialSOASigs returns copies of the signatures over the apex SOA, with the
+// TTL the SOA has in a negative answer (soaForDenialFrom). It is what the proof
+// of a denial carries beside the SOA.
+func denialSOASigs(apex *OwnerData) []dns.RR {
+	if apex == nil || apex.RRtypes == nil {
+		return nil
+	}
+	rs := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	if len(rs.RRSIGs) == 0 {
+		return nil
+	}
+	out := make([]dns.RR, 0, len(rs.RRSIGs))
+	for _, sig := range rs.RRSIGs {
+		out = append(out, dns.Copy(sig))
+	}
+	if len(rs.RRs) == 0 {
+		return out
+	}
+	soa, ok := rs.RRs[0].(*dns.SOA)
+	if !ok {
+		return out
+	}
+	ttl := negativeTTL(soa)
+	for _, sig := range out {
+		sig.Header().Ttl = ttl
+	}
+	return out
+}
+
 // ownerForAnalysis returns the owner data for qname in a zone that may not have
 // published a snapshot yet.
 //
