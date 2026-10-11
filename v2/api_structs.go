@@ -155,6 +155,10 @@ type DnssecPolicyInfo struct {
 	KSKLifetime    string `json:"ksklifetime,omitempty"`
 	ZSKLifetime    string `json:"zsklifetime,omitempty"`
 	RolloverMethod string `json:"rollovermethod,omitempty"`
+	// StandbyZSKs and StandbyKSKs are the policy's own standby counts;
+	// absent when the global kasp count applies.
+	StandbyZSKs *int `json:"standbyzsks,omitempty"`
+	StandbyKSKs *int `json:"standbyksks,omitempty"`
 }
 
 // foreverLifetimeSecs is the seconds value GenKeyLifetime assigns to the
@@ -222,6 +226,8 @@ func DnssecPolicyToInfo(p DnssecPolicy) DnssecPolicyInfo {
 		KSKLifetime:    renderLifetime(p.KSK.Lifetime),
 		ZSKLifetime:    renderLifetime(p.ZSK.Lifetime),
 		RolloverMethod: p.Rollover.Method.String(),
+		StandbyZSKs:    p.StandbyZSKs,
+		StandbyKSKs:    p.StandbyKSKs,
 	}
 }
 

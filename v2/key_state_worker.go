@@ -53,14 +53,9 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 		}
 	}
 
-	standbyZskCount := defaultStandbyZskCount
-	if kasp.StandbyZskCount > 0 {
-		standbyZskCount = kasp.StandbyZskCount
-	}
-	standbyKskCount := defaultStandbyKskCount
-	if kasp.StandbyKskCount > 0 {
-		standbyKskCount = kasp.StandbyKskCount
-	}
+	// The global counts; a zone's policy may set its own (maintainStandbyKeys).
+	standbyZskCount := conf.kaspStandbyCount(false)
+	standbyKskCount := conf.kaspStandbyCount(true)
 
 	kdb := conf.Internal.KeyDB
 	if kdb == nil {
@@ -324,8 +319,10 @@ func transitionRetiredToRemoved(ctx context.Context, conf *Config, kdb *KeyDB, n
 }
 
 // maintainStandbyKeys ensures each signing zone has the configured number of
-// standby keys for both ZSKs and KSKs. If a zone has fewer standby keys than
-// required and no keys are in the published pipeline, new keys are generated.
+// standby keys for both ZSKs and KSKs: the zone's policy's standby-zsks and
+// standby-ksks when set, else the global standbyZskCount and standbyKskCount
+// passed in. If a zone has fewer standby keys than required and no keys are
+// in the published pipeline, new keys are generated.
 // Every signing zone, including one whose keys are steered by the lifecycle
 // hooks: for such a zone the generated key lands in the hooks' staged state
 // and that state counts as pipeline (maintainStandbyKeysForType).
@@ -352,6 +349,9 @@ func maintainStandbyKeys(ctx context.Context, conf *Config, kdb *KeyDB, standbyZ
 			continue
 		}
 
+		zskCount := standbyKeyCount(zd.DnssecPolicy, false, standbyZskCount)
+		kskCount := standbyKeyCount(zd.DnssecPolicy, true, standbyKskCount)
+
 		// RELAXED completeness counts standby ZSKs by ROLE only (algorithm-
 		// agnostic): N old-alg standbys satisfy the count, so an algorithm
 		// change generates nothing eagerly — the gradual FIFO roll mints the
@@ -359,23 +359,23 @@ func maintainStandbyKeys(ctx context.Context, conf *Config, kdb *KeyDB, standbyZ
 		// promoted). STRICT keeps per-(role,algorithm) counting (the maintained
 		// double-signature shape). See the algorithm-rollover plan §8.3 / D5.
 		relaxed := Conf.Internal.Completeness == CompletenessRelaxed
-		maintainStandbyKeysForType(ctx, conf, kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, standbyZskCount, relaxed)
+		maintainStandbyKeysForType(ctx, conf, kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, zskCount, relaxed)
 
 		// In relaxed mode, cap the standby-ZSK TOTAL (any algorithm) at
-		// standbyZskCount: with the algorithm-based deletion skipped, an
+		// zskCount: with the algorithm-based deletion skipped, an
 		// asap-faster-than-drain or stray extra could otherwise bloat the
-		// DNSKEY RRset. Keep the oldest standbyZskCount (FIFO, by published_at),
+		// DNSKEY RRset. Keep the oldest zskCount (FIFO, by published_at),
 		// delete the youngest surplus, NEVER by algorithm. Shares the same
 		// role-total count as the maintainer above so the two never oscillate.
 		if relaxed {
-			capStandbyZsksByCount(kdb, zoneName, standbyZskCount)
+			capStandbyZsksByCount(kdb, zoneName, zskCount)
 		}
 
-		if standbyKskCount > 0 && (zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method == RolloverMethodNone) {
+		if kskCount > 0 && (zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method == RolloverMethodNone) {
 			// KSK is always per-(role,algorithm): relaxed mode's role-only
 			// discipline is a ZSK-roll property (the ZSK signs the whole zone);
 			// a KSK algorithm change is refused, not gradually rolled, here.
-			maintainStandbyKeysForType(ctx, conf, kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, standbyKskCount, false)
+			maintainStandbyKeysForType(ctx, conf, kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, kskCount, false)
 		}
 	}
 }

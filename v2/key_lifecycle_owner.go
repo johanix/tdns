@@ -114,15 +114,27 @@ func keysOfUnownedZones(keys []DnssecKeyWithTimestamps) []DnssecKeyWithTimestamp
 
 // ownerPolicyFieldsDiffer reports whether two policies differ in a field
 // that is the owner's on an owned zone (design Q1): the algorithms, the
-// lifetimes and the rollover method. Signature validity, TTLs and the
-// clamp's signature parameters are mechanism and tdns's to apply.
+// lifetimes, the standby counts and the rollover method. Signature
+// validity, TTLs and the clamp's signature parameters are mechanism and
+// tdns's to apply. A standby count differs when one policy sets it and the
+// other leaves it to the global count, whatever that count is.
 func ownerPolicyFieldsDiffer(a, b *DnssecPolicy) bool {
 	if a == nil || b == nil {
 		return a != b
 	}
 	return a.Mode != b.Mode || a.Algorithm != b.Algorithm || a.KSKAlgorithm != b.KSKAlgorithm || a.ZSKAlgorithm != b.ZSKAlgorithm ||
 		a.KSK.Lifetime != b.KSK.Lifetime || a.ZSK.Lifetime != b.ZSK.Lifetime || a.CSK.Lifetime != b.CSK.Lifetime ||
-		a.Rollover.Method != b.Rollover.Method || a.Rollover.NumDS != b.Rollover.NumDS || a.Rollover.StandbyTime != b.Rollover.StandbyTime
+		a.Rollover.Method != b.Rollover.Method || a.Rollover.NumDS != b.Rollover.NumDS || a.Rollover.StandbyTime != b.Rollover.StandbyTime ||
+		!sameStandbyCount(a, b, false) || !sameStandbyCount(a, b, true)
+}
+
+// sameStandbyCount reports whether a and b say the same about the standby
+// count of a role: both leave it to the global count, or both set the same
+// number.
+func sameStandbyCount(a, b *DnssecPolicy, sep bool) bool {
+	an, aset := a.StandbyCount(sep)
+	bn, bset := b.StandbyCount(sep)
+	return aset == bset && an == bn
 }
 
 // What an owner needs from tdns (§3.5, "tdns exports what an owner needs").

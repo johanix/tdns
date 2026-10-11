@@ -260,6 +260,13 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 	out.SuppressCDS = conf.Cds != nil && !*conf.Cds
 	out.SuppressCDNSKEY = conf.Cdnskey != nil && !*conf.Cdnskey
 
+	if out.StandbyZSKs, err = parseStandbyCount(policyName, "standby-zsks", conf.StandbyZSKs); err != nil {
+		return err
+	}
+	if out.StandbyKSKs, err = parseStandbyCount(policyName, "standby-ksks", conf.StandbyKSKs); err != nil {
+		return err
+	}
+
 	out.Clamping.Enabled = conf.Clamping.Enabled
 	if out.Clamping.Enabled {
 		// 4D: when clamping is enabled, margin is required. It is both the
@@ -344,6 +351,39 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 
 	warnDnssecPolicyCoupling(policyName, out)
 	return nil
+}
+
+// parseStandbyCount validates one of a policy's standby counts: unset stays
+// unset (the global kasp count applies), 0 and any positive number are
+// kept, a negative number is refused. The value is copied so the resolved
+// policy does not share the conf's pointer.
+func parseStandbyCount(policyName, field string, v *int) (*int, error) {
+	if v == nil {
+		return nil, nil
+	}
+	if *v < 0 {
+		return nil, fmt.Errorf("dnssec policy %q: %s must be non-negative (got %d)", policyName, field, *v)
+	}
+	n := *v
+	return &n, nil
+}
+
+// StandbyCount is the policy's own standby count for a role (sep true for
+// the KSK, false for the ZSK) and whether the policy sets one; false means
+// the global kasp count applies, see Config.StandbyKeyCount. Safe on a nil
+// policy, for a zone without one.
+func (p *DnssecPolicy) StandbyCount(sep bool) (int, bool) {
+	if p == nil {
+		return 0, false
+	}
+	n := p.StandbyZSKs
+	if sep {
+		n = p.StandbyKSKs
+	}
+	if n == nil {
+		return 0, false
+	}
+	return *n, true
 }
 
 func parsePolicySigValidity(policyName string, conf DnssecPolicySigValidityConf) (PolicySigValidity, error) {
