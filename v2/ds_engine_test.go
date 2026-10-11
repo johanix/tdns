@@ -227,10 +227,6 @@ func TestDSModelForZone(t *testing.T) {
 		{"rollover method none", &ZoneData{DnssecPolicy: policy(RolloverMethodNone)}, DSModelNone},
 		{"multi-ds", &ZoneData{DnssecPolicy: policy(RolloverMethodMultiDS)}, DSModelMultiDS},
 		{"double-signature", &ZoneData{DnssecPolicy: policy(RolloverMethodDoubleSignature)}, DSModelDoubleSignature},
-		{"multi-provider wins over the rollover method", &ZoneData{
-			Options:      map[ZoneOption]bool{OptMultiProvider: true},
-			DnssecPolicy: policy(RolloverMethodMultiDS),
-		}, DSModelMultiProvider},
 	}
 	for _, tc := range cases {
 		if got := dsModelForZone(tc.zd); got != tc.want {
@@ -290,7 +286,7 @@ func TestNotifySchemeSendsNothingItCannotBackWithACds(t *testing.T) {
 		{"a multi-provider zone's DS set is not this zone's to decide", func(t *testing.T, r *dsEngineRig) {
 			seedKey(t, r.kdb, "example.", DnskeyStateActive, 257, pubA)
 			r.zd.Options[OptMultiProvider] = true
-		}, "multi-provider agent"},
+		}, "key lifecycle owner's to coordinate"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

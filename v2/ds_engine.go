@@ -36,11 +36,6 @@ const (
 	// before the DS is swapped. The policy parser accepts it; the rollover engine
 	// does not implement it.
 	DSModelDoubleSignature
-	// DSModelMultiProvider is a zone whose DNSKEY RRset carries every provider's
-	// keys: the zone's own, some of them mpdist (no DS until promoted), and the
-	// other providers' foreign keys, whose DS is theirs to decide. The
-	// multi-provider agent coordinates its DS set; this engine does not.
-	DSModelMultiProvider
 )
 
 func (m DSModel) String() string {
@@ -51,18 +46,15 @@ func (m DSModel) String() string {
 		return "multi-ds"
 	case DSModelDoubleSignature:
 		return "double-signature"
-	case DSModelMultiProvider:
-		return "multi-provider"
 	}
 	return fmt.Sprintf("unknown(%d)", int(m))
 }
 
-// dsModelForZone reports a zone's DS model. multi-provider wins over the
-// rollover method, as it does for the rollover engine, which skips such zones.
+// dsModelForZone reports a zone's DS model: the one its policy's rollover
+// method implies. A multi-provider zone has no model of its own here: its DS
+// set is its owner's (key lifecycle ownership design §4), and every caller
+// asks about ownership (zoneOwned, ownedZoneSignedHere) before the model.
 func dsModelForZone(zd *ZoneData) DSModel {
-	if zd.Options[OptMultiProvider] {
-		return DSModelMultiProvider
-	}
 	return dsModelOfPolicy(zd.DnssecPolicy)
 }
 
@@ -357,24 +349,15 @@ func (zd *ZoneData) withdrawUnclaimedCDS(ctx context.Context, kdb *KeyDB, cause 
 func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 	model := dsModelForZone(zd)
 	var cds []dns.RR
-	switch model {
-	case DSModelMultiDS:
-		// The rollover engine keeps this model's DS. While a phase is busy it is
-		// pushing it right now, and its own NOTIFY carries its own CDS.
-		if zd.rolloverOwnsDS() {
-			return dsEngineResult{deferred: "the KSK rollover engine is pushing this zone's DS"}
-		}
-		return kdb.publishRolloverCDS(ctx, zd, nil, true)
-	case DSModelDoubleSignature:
-		return dsEngineResult{err: fmt.Errorf("zone %s: %w: %s", zd.ZoneName, errDSModelNotImplemented, model)}
-	case DSModelMultiProvider:
-		// On the signer of an owned zone the CDS is the owner's DS set
-		// (arrow 1): the owner knows which of its own and the other
-		// providers' KSKs warrant a DS. Elsewhere it is not this zone's
-		// decision: the agent serves nothing the parent reads, and the
-		// DNSKEY RRset carries mpdist keys, which get no DS until promoted,
-		// and foreign keys, whose DS is their provider's; what is served
-		// as CDS is all a NOTIFY(CDS) may point the parent at.
+	switch {
+	case zd.Options[OptMultiProvider]:
+		// A multi-provider zone's DS set is its owner's (§4). On the signer
+		// of an owned zone the CDS is the owner's DS set (arrow 1): the
+		// owner knows which of its own and the other providers' KSKs
+		// warrant a DS. Elsewhere it is not this zone's decision: the agent
+		// serves nothing the parent reads, and the DNSKEY RRset carries
+		// keys in the owner's states, whose DS the owner decides; what is
+		// served as CDS is all a NOTIFY(CDS) may point the parent at.
 		if ownedZoneSignedHere(zd) {
 			intent, err := DSIntentForZone(kdb, zd.ZoneName, dns.SHA256)
 			if err != nil {
@@ -392,8 +375,17 @@ func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 		if len(served) > 0 {
 			return dsEngineResult{cds: served}
 		}
-		return dsEngineResult{err: fmt.Errorf("zone %s: %w: %s; the zone serves no CDS, and its DS set is"+
-			" the multi-provider agent's to coordinate", zd.ZoneName, errDSModelNotImplemented, model)}
+		return dsEngineResult{err: fmt.Errorf("zone %s: the zone serves no CDS, and its DS set is"+
+			" its key lifecycle owner's to coordinate", zd.ZoneName)}
+	case model == DSModelMultiDS:
+		// The rollover engine keeps this model's DS. While a phase is busy it is
+		// pushing it right now, and its own NOTIFY carries its own CDS.
+		if zd.rolloverOwnsDS() {
+			return dsEngineResult{deferred: "the KSK rollover engine is pushing this zone's DS"}
+		}
+		return kdb.publishRolloverCDS(ctx, zd, nil, true)
+	case model == DSModelDoubleSignature:
+		return dsEngineResult{err: fmt.Errorf("zone %s: %w: %s", zd.ZoneName, errDSModelNotImplemented, model)}
 	default:
 		intent, err := DSIntentForZone(kdb, zd.ZoneName, dns.SHA256)
 		if err != nil {
@@ -458,9 +450,8 @@ func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 // Runs on the DS engine's goroutine, which is the only one that touches
 // kdb.dsSyncPending.
 func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
-	model := dsModelForZone(zd)
-	owned := model == DSModelMultiProvider && ownedZoneSignedHere(zd)
-	if model != DSModelNone && !owned {
+	owned := ownedZoneSignedHere(zd)
+	if !owned && (zd.Options[OptMultiProvider] || dsModelForZone(zd) != DSModelNone) {
 		return
 	}
 	current, err := currentCdsTuples(zd)
@@ -545,7 +536,9 @@ func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
 // parent hears of a KSK going to standby or being rolled only through the CDS
 // changing; settingIgnored reports that case. The caller holds zd.mu.
 func cdsAlwaysPublishedLocked(zd *ZoneData) (always, settingIgnored bool) {
-	if !(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) || dsModelForZone(zd) != DSModelNone {
+	// A multi-provider zone's CDS is its owner's DS set (ownedZoneCDS), not
+	// this rule's.
+	if !(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) || zd.Options[OptMultiProvider] || dsModelForZone(zd) != DSModelNone {
 		return false, false
 	}
 	if zd.DnssecPolicy != nil && zd.DnssecPolicy.SuppressCDS {
@@ -651,7 +644,7 @@ func (zd *ZoneData) dsEngineFollows() bool {
 	always, _ := cdsAlwaysPublishedLocked(zd)
 	zd.mu.Unlock()
 	switch {
-	case model == DSModelMultiProvider:
+	case zd.Options[OptMultiProvider]:
 		return ownedZoneSignedHere(zd)
 	case model != DSModelNone:
 		return false
@@ -787,8 +780,7 @@ func cdsDeleteRR(zone string) dns.RR {
 // owner's DS set says (key lifecycle ownership design §4.1, arrow 1). The
 // agent of the same zone signs nothing and serves nothing the parent reads.
 func ownedZoneSignedHere(zd *ZoneData) bool {
-	return zd != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) &&
-		dsModelForZone(zd) == DSModelMultiProvider && zoneOwned(zd)
+	return zd != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && zoneOwned(zd)
 }
 
 // ownedZoneCDS is the CDS such a zone serves: the owner's DS set as CDS,

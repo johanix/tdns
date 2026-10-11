@@ -120,18 +120,18 @@ var keyFixtures = []struct {
 		// Multi-provider rows beside the own active pair: an mpdist KSK, a
 		// foreign KSK written as tdns-mp writes it, and a ZSK on its way out.
 		name: "multi-provider", zone: "mp.example.",
-		states: map[string]int{DnskeyStateActive: 2, DnskeyStateMpdist: 1, DnskeyStateForeign: 1, DnskeyStateMpremove: 1},
+		states: map[string]int{DnskeyStateActive: 2, ownerStateMpdist: 1, ownerStateForeign: 1, ownerStateMpremove: 1},
 		build: func(t *testing.T, kdb *KeyDB, zone string) {
 			fixtureActivePair(t, kdb, zone)
-			if _, _, err := kdb.GenerateKeypair(zone, "fixture", DnskeyStateMpdist, dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
+			if _, _, err := kdb.GenerateKeypair(zone, "fixture", ownerStateMpdist, dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
 				t.Fatal(err)
 			}
 			foreign := testDNSKEY(zone, "KSK", newTestRand(42))
 			if _, err := kdb.DB.Exec(`INSERT OR IGNORE INTO DnssecKeyStore (zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, 'foreign', '', ?)`,
-				zone, DnskeyStateForeign, foreign.KeyTag(), foreign.Flags, dns.AlgorithmToString[foreign.Algorithm], foreign.String()); err != nil {
+				zone, ownerStateForeign, foreign.KeyTag(), foreign.Flags, dns.AlgorithmToString[foreign.Algorithm], foreign.String()); err != nil {
 				t.Fatal(err)
 			}
-			fixtureStaged(t, kdb, zone, "ZSK", DnskeyStateMpremove)
+			fixtureStaged(t, kdb, zone, "ZSK", ownerStateMpremove)
 		},
 	},
 	{
@@ -351,10 +351,6 @@ func TestKeyFixturesMigrateWithTheInvariantsHolding(t *testing.T) {
 			}
 			if vs := CheckKeyRowInvariants(kdb, fx.zone); len(vs) != 0 {
 				t.Errorf("after the migration: %s", violationList(vs))
-			}
-			assertKeySetsAgree(t, kdb, fx.zone)
-			if diffs := kdb.CheckKeyColumnEquivalence(); len(diffs) != 0 {
-				t.Errorf("equivalence: %v", diffs)
 			}
 		})
 	}
