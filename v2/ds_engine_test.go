@@ -536,20 +536,19 @@ func TestRolloverCleanupKeepsItsClaimWhenItCannotCompare(t *testing.T) {
 
 // TestRolloverNotifyPushWaitsUntilTheCdsIsServed: the rollover's NOTIFY push
 // used to queue its CDS and notify at once, racing the parent's fetch against the
-// apply. The updater is slow on purpose.
+// apply. The updater is slow on purpose. The push is the delegation syncher's
+// DS delivery now (sendDSViaNotify); what it does is unchanged.
 func TestRolloverNotifyPushWaitsUntilTheCdsIsServed(t *testing.T) {
 	r := newDSEngineRig(t, 50*time.Millisecond, true)
 	keyid := seedKeyWithIndex(t, r.kdb, "example.", DnskeyStateActive, pubA, 0)
-	deps := RolloverEngineDeps{
-		Zone:            r.zd,
-		KDB:             r.kdb,
-		NotifyQ:         r.notifyq,
-		InternalUpdateQ: r.kdb.UpdateQ,
+	snap, err := loadRolloverTargetSnapshot(r.kdb, "example.")
+	if err != nil {
+		t.Fatalf("target snapshot: %v", err)
 	}
 
-	res, err := pushDSRRsetViaNotify(context.Background(), deps, testDsyncTarget)
+	res, err := r.zd.sendDSViaNotify(context.Background(), r.kdb, r.notifyq, snap, nil, testDsyncTarget)
 	if err != nil {
-		t.Fatalf("pushDSRRsetViaNotify: %v", err)
+		t.Fatalf("sendDSViaNotify: %v", err)
 	}
 	if res.Scheme != "NOTIFY" {
 		t.Errorf("scheme = %q, want NOTIFY", res.Scheme)

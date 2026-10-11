@@ -96,6 +96,13 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					func() DelegationSyncStatus { return zd.runExplicitSync(ctx, kdb, notifyq, imr()) })
 				continue
 
+			case "SYNC-DS":
+				// The KSK rollover engine's DS push (delsync_ds.go). The
+				// engine waits for the answer with a deadline, so this runs
+				// now and is never deferred.
+				handleDSSync(ctx, kdb, notifyq, imr(), ds)
+				continue
+
 			case "SIGNALS-EDITED":
 				_ = handleSignalsEditedArm(ctx, conf.Internal.ImrReady, delsyncq, zd, ds,
 					func() {

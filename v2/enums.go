@@ -405,10 +405,11 @@ const (
 	// RolloverParentBlocker: parent's published DSYNC RRset does not
 	// advertise a scheme matching the zone's
 	// rollover.dsync-scheme-preference. Set immediately on
-	// errNoUsableScheme; cleared on the next successful
-	// pickRolloverSchemes. The engine keeps retrying — this is a
-	// visibility signal, not a hardfail. Auto-rollover progression
-	// gates here because no scheme means no DS push is possible.
+	// errNoUsableScheme; cleared on the next DS delivery that finds a
+	// usable scheme (rolloverSchemeChoices). The engine keeps retrying;
+	// this is a visibility signal, not a hardfail. Auto-rollover
+	// progression gates here because no scheme means no DS push is
+	// possible.
 	RolloverParentBlocker
 	// DelegationSyncWarning: a delegation-sync function is degraded but the
 	// zone is otherwise fine. Used by the parentsync-proxy UPDATE path

@@ -947,12 +947,19 @@ func kskAlgRollBindWarning(ctx context.Context, zd *ZoneData, pol *DnssecPolicy)
 	}
 	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	choices, _, _, err := pickRolloverSchemes(lctx, zd, imr, pol)
+	// The same plan and the same choice the DS delivery makes (delsync_ds.go),
+	// built in report mode so nothing on the zone changes.
+	plan, err := zd.buildParentSyncPlan(lctx, zd.KeyDB, imr, SyncRoleChild, true)
 	if err != nil {
 		return fmt.Sprintf("could not check the parent's DSYNC advertisement (%v); if the parent advertises no usable scheme the roll will wait in parent-push-softfail until it does", err)
 	}
-	if len(choices) == 0 {
-		return "the parent advertises no usable DSYNC scheme; the roll will double-sign and then wait in parent-push-softfail until the parent advertises one"
+	choices, _, _, err := rolloverSchemeChoices(plan, pol)
+	if err != nil || len(choices) == 0 {
+		reason := plan.Summary()
+		if err != nil {
+			reason = err.Error()
+		}
+		return fmt.Sprintf("the parent advertises no DSYNC scheme the policy can use (%s); the roll will double-sign and then wait in parent-push-softfail until the parent advertises one", reason)
 	}
 	return ""
 }

@@ -39,19 +39,9 @@ func (zd *ZoneData) sendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 		return "", 0, UpdateResult{}, err
 	}
 
-	sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
-	if err != nil {
-		return "", 0, UpdateResult{}, fmt.Errorf("keystore lookup for %s: %w", zd.ZoneName, err)
-	}
-	if sak == nil || len(sak.Keys) == 0 {
-		return "", 0, UpdateResult{}, fmt.Errorf("no active SIG(0) key for %s", zd.ZoneName)
-	}
-	smsg, err := SignMsg(*m, zd.ZoneName, sak)
+	smsg, err := zd.signDelegationUpdate(kdb, m)
 	if err != nil {
 		return "", 0, UpdateResult{}, err
-	}
-	if smsg == nil {
-		return "", 0, UpdateResult{}, fmt.Errorf("signing UPDATE for %s produced no message and no error", zd.ZoneName)
 	}
 
 	lgDns.Info("SendDelegationUpdate: sending the signed update",
@@ -66,6 +56,55 @@ func (zd *ZoneData) sendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 	lgDns.Info("SendDelegationUpdate: update sent",
 		"zone", zd.ZoneName, "parent", parent, "mode", mode, "rcode", dns.RcodeToString[rcode])
 	return msg, uint8(rcode), ur, nil
+}
+
+// signDelegationUpdate signs an UPDATE for the parent with the zone's active
+// SIG(0) key: the one signing step for every UPDATE the child sends, the
+// delegation sync's and the DS delivery's alike.
+func (zd *ZoneData) signDelegationUpdate(kdb *KeyDB, m *dns.Msg) (*dns.Msg, error) {
+	sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
+	if err != nil {
+		return nil, fmt.Errorf("keystore lookup for %s: %w", zd.ZoneName, err)
+	}
+	if sak == nil || len(sak.Keys) == 0 {
+		return nil, fmt.Errorf("no active SIG(0) key for %s", zd.ZoneName)
+	}
+	smsg, err := SignMsg(*m, zd.ZoneName, sak)
+	if err != nil {
+		return nil, err
+	}
+	if smsg == nil {
+		return nil, fmt.Errorf("signing UPDATE for %s produced no message and no error", zd.ZoneName)
+	}
+	return smsg, nil
+}
+
+// BuildChildWholeDSUpdate builds a DNS UPDATE for the parent zone that
+// replaces the child's entire DS RRset: a DEL ANY DS at the delegation owner,
+// then the given set. It is the form a DS delivery takes (delsync_ds.go):
+// the whole set the parent should hold, and nothing about NS or glue.
+func BuildChildWholeDSUpdate(parent, child string, newDS []dns.RR) (*dns.Msg, error) {
+	parent = dns.Fqdn(parent)
+	child = dns.Fqdn(child)
+	if parent == "." || parent == "" {
+		return nil, fmt.Errorf("BuildChildWholeDSUpdate: parent zone empty")
+	}
+	if child == "." || child == "" {
+		return nil, fmt.Errorf("BuildChildWholeDSUpdate: child zone empty")
+	}
+
+	m := new(dns.Msg)
+	m.SetUpdate(parent)
+
+	rrDS := new(dns.DS)
+	rrDS.Hdr = dns.RR_Header{Name: child, Rrtype: dns.TypeDS, Class: dns.ClassANY, Ttl: 0}
+	m.RemoveRRset([]dns.RR{rrDS})
+
+	if len(newDS) > 0 {
+		m.Insert(newDS)
+	}
+	m.SetEdns0(1232, true)
+	return m, nil
 }
 
 func buildDelegationUpdate(parent, child string, syncstate DelegationSyncStatus, mode string) (*dns.Msg, error) {

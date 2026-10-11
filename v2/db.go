@@ -266,7 +266,7 @@ func dbMigrateSchema(db *sql.DB) {
 		{"RolloverZoneState", "last_ds_observed_keyids", "ALTER TABLE RolloverZoneState ADD COLUMN last_ds_observed_keyids TEXT"},
 		{"RolloverZoneState", "last_ds_observed_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_ds_observed_at TEXT"},
 		// Parent's DSYNC RRset advertisement state, snapshotted on every
-		// pickRolloverSchemes call (i.e. every push attempt). NULL means
+		// DS delivery (i.e. every push attempt). NULL means
 		// "never observed yet"; 0/1 reflect the most recent observation.
 		// Used by the auto-rollover status renderer to distinguish
 		// "parent doesn't advertise this scheme" from "engine hasn't

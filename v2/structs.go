@@ -1275,6 +1275,12 @@ type DelegationSyncRequest struct {
 	// SignalTypes is set for SIGNALS-EDITED: the apex RR types (CDS, CDNSKEY,
 	// CSYNC) an operator's update changed.
 	SignalTypes []uint16
+	// DSSync is set for SYNC-DS: the KSK rollover engine asking for its
+	// target's DS set to be delivered to the parent (delsync_ds.go). The
+	// answer goes to DSResponse, a channel with room for it, which the engine
+	// waits on.
+	DSSync     *DSSyncRequest
+	DSResponse chan DSSyncResponse
 }
 
 type BumperData struct {

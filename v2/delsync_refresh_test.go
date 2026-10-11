@@ -422,7 +422,7 @@ func TestRefreshSyncSendsNoDS(t *testing.T) {
 	}
 
 	// The rollover engine's API push carries a DS RRset and nothing else
-	// (pushDSRRsetViaApi), so a payload of NS and glue can never name the same
+	// (sendDSViaApi), so a payload of NS and glue can never name the same
 	// RRset as one of its pushes.
 	for _, rrset := range DsyncApiRRsetsFromSyncStatus(ddcngZoneName, dss) {
 		switch rrset.Type {

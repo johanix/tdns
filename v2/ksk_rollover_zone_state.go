@@ -63,8 +63,8 @@ type RolloverZoneRow struct {
 	LastDsObservedAt     sql.NullString
 
 	// ParentAdvertisesUpdate / ParentAdvertisesNotify are the most
-	// recent DSYNC RRset observation snapshotted by
-	// pickRolloverSchemes. NULL = never observed; valid 0/1 reflect
+	// recent DSYNC RRset observation snapshotted by the DS delivery
+	// (delsync_ds.go). NULL = never observed; valid 0/1 reflect
 	// whether the parent advertises that scheme. Renderer reads
 	// these to distinguish "parent doesn't advertise this scheme"
 	// from "engine hasn't pushed via this scheme yet".
@@ -253,8 +253,8 @@ WHERE zone = ?`, zone)
 }
 
 // setParentDsyncAdvertised snapshots the parent's DSYNC RRset
-// advertisement state observed by the most recent
-// pickRolloverSchemes call. Used by status output to distinguish
+// advertisement state observed by the most recent DS delivery
+// (delsync_ds.go). Used by status output to distinguish
 // "parent doesn't advertise this scheme" from "engine hasn't pushed
 // via this scheme yet". Best-effort; a write failure does not
 // affect push semantics.
@@ -1275,4 +1275,34 @@ func DnskeyRolloverPublishLabel(state string) string {
 	default:
 		return "?"
 	}
+}
+
+// saveLastDSSubmittedRange records the rollover index range of the DS set
+// the parent accepted, with the time.
+func saveLastDSSubmittedRange(kdb *KeyDB, zone string, low, high int) error {
+	const q = `
+INSERT INTO RolloverZoneState (zone, last_ds_submitted_index_low, last_ds_submitted_index_high, last_ds_submitted_at, rollover_phase, rollover_in_progress, next_rollover_index)
+VALUES (?, ?, ?, ?, 'idle', 0, 0)
+ON CONFLICT(zone) DO UPDATE SET
+  last_ds_submitted_index_low = excluded.last_ds_submitted_index_low,
+  last_ds_submitted_index_high = excluded.last_ds_submitted_index_high,
+  last_ds_submitted_at = excluded.last_ds_submitted_at`
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := kdb.DB.Exec(q, zone, low, high, now)
+	return err
+}
+
+// clearLastDSSubmittedRange wipes the persisted submitted-range columns when
+// an accepted DS set had contributors without a rollover_index, so that
+// range-based decisions and status output do not keep showing values from an
+// older submission.
+func clearLastDSSubmittedRange(kdb *KeyDB, zone string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	const q = `UPDATE RolloverZoneState
+SET last_ds_submitted_index_low = NULL,
+    last_ds_submitted_index_high = NULL,
+    last_ds_submitted_at = ?
+WHERE zone = ?`
+	_, err := kdb.DB.Exec(q, now, zone)
+	return err
 }

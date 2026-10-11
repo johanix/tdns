@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"slices"
@@ -54,7 +55,13 @@ func TestFindDsyncSkipsUnusableRecords(t *testing.T) {
 	}
 }
 
-func TestRolloverSelectionSkipsUnusableRecords(t *testing.T) {
+// The DS delivery takes its schemes from the parent sync plan, so a port-0
+// record is passed over there too: under "auto" the choices are the usable
+// UPDATE and NOTIFY targets, an API-only parent gives the usable API target,
+// and port-0 records alone give nothing to send over.
+func TestDSDeliverySkipsUnusableRecords(t *testing.T) {
+	zd := dsSyncTestZone(t)
+	setChildApiCredentials(t, ParentSyncApiCredentialConf{Parent: "example.", Username: "u", Key: "k"})
 	res := DsyncResult{Validated: true, Rdata: []*core.DSYNC{
 		parsedDsync(t, "ANY UPDATE 0 upd0.example."),
 		parsedDsync(t, "CDS NOTIFY 0 n0.example."),
@@ -63,20 +70,27 @@ func TestRolloverSelectionSkipsUnusableRecords(t *testing.T) {
 		parsedDsync(t, "CDS NOTIFY 53 n.example."),
 		parsedDsync(t, "CDS API 8443 api.example."),
 	}}
-	u, n, a := selectRolloverDsyncRRs(res, "child.example.")
-	if u == nil || u.Target != "upd.example." {
-		t.Errorf("UPDATE: selected %v, want the one at upd.example.", u)
+	choices, _, _, err := rolloverSchemeChoices(dsSyncPlanFor(t, zd, res, nil), dsSyncPolicy(DsyncSchemePreferenceAuto))
+	if err != nil {
+		t.Fatalf("scheme choice: %v", err)
 	}
-	if n == nil || n.Target != "n.example." {
-		t.Errorf("NOTIFY: selected %v, want the one at n.example.", n)
+	if got := dsSyncChoiceTargets(choices); !slices.Equal(got, []string{"UPDATE upd.example.", "NOTIFY n.example."}) {
+		t.Errorf("choices %v, want the usable UPDATE and NOTIFY targets", got)
 	}
-	if a == nil || a.Target != "api.example." {
-		t.Errorf("API: selected %v, want the one at api.example.", a)
+
+	apiOnly := DsyncResult{Validated: true, Rdata: []*core.DSYNC{res.Rdata[2], res.Rdata[5]}}
+	choices, _, _, err = rolloverSchemeChoices(dsSyncPlanFor(t, zd, apiOnly, nil), dsSyncPolicy(DsyncSchemePreferenceAuto))
+	if err != nil {
+		t.Fatalf("API only: scheme choice: %v", err)
+	}
+	if got := dsSyncChoiceTargets(choices); !slices.Equal(got, []string{"API api.example."}) {
+		t.Errorf("API only: choices %v, want the usable API target", got)
 	}
 
 	res.Rdata = res.Rdata[:3]
-	if u, n, a := selectRolloverDsyncRRs(res, "child.example."); u != nil || n != nil || a != nil {
-		t.Errorf("port 0 only: selected %v, %v, %v; want none", u, n, a)
+	_, _, _, err = rolloverSchemeChoices(dsSyncPlanFor(t, zd, res, nil), dsSyncPolicy(DsyncSchemePreferenceAuto))
+	if !errors.Is(err, errNoUsableScheme) {
+		t.Errorf("port 0 only: err = %v, want errNoUsableScheme", err)
 	}
 }
 

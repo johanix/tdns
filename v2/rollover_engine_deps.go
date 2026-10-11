@@ -30,25 +30,10 @@ type RolloverEngineDeps struct {
 	PropagationDelay time.Duration
 	Now              func() time.Time
 
-	// TargetKeySnapshot is an optional precomputed snapshot of the
-	// "keys belonging in the rollover-target DS RRset" query result.
-	// PushDSRRsetForRollover sets this before fanning out to the
-	// UPDATE and NOTIFY goroutines so both paths describe an identical
-	// key set. When nil, push paths fall back to recomputing via
-	// loadTargetKSKsForRollover. W5 tightens the auto-mode parallel
-	// dispatch race by removing the "each goroutine reloads
-	// independently" window.
-	TargetKeySnapshot *RolloverTargetKeySnapshot
-}
-
-// RolloverTargetKeySnapshot is the keystore-load result used by both
-// the UPDATE and NOTIFY DS-push paths. Captured once by the dispatcher,
-// shared by both goroutines — read-only after construction.
-type RolloverTargetKeySnapshot struct {
-	Rows            []kskForDSRow
-	IndexLow        int
-	IndexHigh       int
-	IndexRangeKnown bool
+	// DelegationSyncQ is the delegation syncher's queue, where the engine's
+	// DS push goes as a SYNC-DS (ksk_rollover_ds_request.go). When nil the
+	// zone's own queue is used, then the process-wide one.
+	DelegationSyncQ chan DelegationSyncRequest
 }
 
 // defaultAcquireRolloverLock is the tdns/v2 lock acquirer wired into
