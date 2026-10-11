@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -55,18 +54,14 @@ type KeyRow struct {
 	Replace     bool
 }
 
-// KeyColumnsStrict makes a mismatch between the key columns and the states
-// they were derived from refuse to open the keystore instead of being logged
-// (design R1). Test builds set it; TDNS_STRICT_KEY_COLUMNS sets it too.
-var KeyColumnsStrict bool
-
 // keyStateFlags is the flag table of design §3.4 for pub and sign: what each
 // lifecycle state means to the DNSKEY publisher and to the signer. ds is not
 // in it: it depends on the zone's DS model as well as on the state, and is
 // written by the state machine that owns the zone at the transition.
 //
-// The three multi-provider states are here while tdns still names them
-// (structs.go); an owner registers its own through RegisterKeyStateFlags.
+// Only tdns's own states are here. The states a key lifecycle owner stages
+// its rows in are the owner's: it registers them, with their flags, through
+// RegisterKeyStateFlags before the keystore opens.
 var keyStateFlags = map[string]KeyRowFlags{
 	DnskeyStateCreated:     {},
 	DnskeyStateDsPublished: {},
@@ -75,9 +70,6 @@ var keyStateFlags = map[string]KeyRowFlags{
 	DnskeyStateActive:      {Pub: true, Sign: true},
 	DnskeyStateRetired:     {Pub: true},
 	DnskeyStateRemoved:     {},
-	DnskeyStateMpdist:      {Pub: true},
-	DnskeyStateForeign:     {Pub: true},
-	DnskeyStateMpremove:    {},
 }
 
 var (
@@ -317,22 +309,6 @@ func backfillKeyRowFlags(db *sql.DB) (int64, error) {
 // insertKeyRowTx calls it afterwards. Returns the number of rows touched.
 func (kdb *KeyDB) BackfillKeyRowFlags() (int64, error) { return backfillKeyRowFlags(kdb.DB) }
 
-// The sets the code before the key columns computed from the states, kept
-// while S1a is the running code so that startup can compare them with the
-// columns (design R1). S4 removes them with the state names. The comparison
-// covers the states that code knew, tdns's own table: a state an owner
-// registers beyond them has no "old way" to compare with and is left out of
-// both sides.
-const (
-	stateSigningKeysSql = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state='active'`
-	stateServedKeysSql  = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state IN ('active','published','standby','retired','mpdist','foreign')`
-)
-
-var (
-	columnSigningKeysSql = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND sign=1 AND state IN (` + sqlStateList(keyStateFlags) + `)`
-	columnServedKeysSql  = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND pub=1 AND state IN (` + sqlStateList(keyStateFlags) + `)`
-)
-
 // sqlStateList renders the states of a flag table as a quoted, sorted SQL list.
 func sqlStateList(table map[string]KeyRowFlags) string {
 	var states []string
@@ -341,34 +317,6 @@ func sqlStateList(table map[string]KeyRowFlags) string {
 	}
 	sort.Strings(states)
 	return strings.Join(states, ",")
-}
-
-// CheckKeyColumnEquivalence compares, per zone, the signing set and the served
-// DNSKEY set computed from the states with the same sets computed from the
-// columns, and describes every difference.
-func (kdb *KeyDB) CheckKeyColumnEquivalence() []string {
-	zones, err := kdb.keystoreZones()
-	if err != nil {
-		return []string{fmt.Sprintf("listing keystore zones: %v", err)}
-	}
-	var diffs []string
-	for _, zone := range zones {
-		for _, c := range []struct{ what, ref, col string }{
-			{"signing set", stateSigningKeysSql, columnSigningKeysSql},
-			{"served DNSKEY set", stateServedKeysSql, columnServedKeysSql},
-		} {
-			ref, err1 := kdb.keyidList(c.ref, zone)
-			col, err2 := kdb.keyidList(c.col, zone)
-			if err1 != nil || err2 != nil {
-				diffs = append(diffs, fmt.Sprintf("zone %s: %s: %v %v", zone, c.what, err1, err2))
-				continue
-			}
-			if fmt.Sprint(ref) != fmt.Sprint(col) {
-				diffs = append(diffs, fmt.Sprintf("zone %s: %s from state %v, from the columns %v", zone, c.what, ref, col))
-			}
-		}
-	}
-	return diffs
 }
 
 func (kdb *KeyDB) keystoreZones() ([]string, error) {
@@ -388,29 +336,9 @@ func (kdb *KeyDB) keystoreZones() ([]string, error) {
 	return out, rows.Err()
 }
 
-func (kdb *KeyDB) keyidList(q, zone string) ([]int, error) {
-	rows, err := kdb.DB.Query(q, zone)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []int
-	for rows.Next() {
-		var k int
-		if err := rows.Scan(&k); err != nil {
-			return nil, err
-		}
-		out = append(out, k)
-	}
-	sort.Ints(out)
-	return out, rows.Err()
-}
-
 // checkKeyColumnsAtOpen guards the open: the columns must exist and every
 // row in a known state must carry pub and sign, or the signer and the DNSKEY
-// publisher would read nothing; that refuses the open in every mode. Then
-// the equivalence check runs: every difference is logged, and in strict
-// mode the open fails.
+// publisher would read nothing.
 func (kdb *KeyDB) checkKeyColumnsAtOpen() error {
 	for _, col := range []string{"pub", "sign", "ds"} {
 		if !dbColumnExists(kdb.DB, "DnssecKeyStore", col) {
@@ -430,16 +358,6 @@ func (kdb *KeyDB) checkKeyColumnsAtOpen() error {
 	}
 	if unset > 0 {
 		return fmt.Errorf("keystore: %d key row(s) in a known state have pub or sign unset; the backfill at open failed", unset)
-	}
-	diffs := kdb.CheckKeyColumnEquivalence()
-	if len(diffs) == 0 {
-		return nil
-	}
-	for _, d := range diffs {
-		lgConfig.Error("keystore: the key columns disagree with the states", "diff", d)
-	}
-	if KeyColumnsStrict || os.Getenv("TDNS_STRICT_KEY_COLUMNS") != "" {
-		return fmt.Errorf("keystore: the key columns disagree with the states (strict mode): %s", strings.Join(diffs, "; "))
 	}
 	return nil
 }
@@ -480,7 +398,7 @@ func UpdateKeyRowFrom(kdb *KeyDB, zonename string, keyid uint16, state, expectOl
 			tx.Rollback()
 		}
 	}()
-	oldstate, err := setKeyRowTxOpts(tx, zonename, keyid, state, flags, expectOld, true)
+	_, err = setKeyRowTxOpts(tx, zonename, keyid, state, flags, expectOld, true)
 	if err != nil {
 		if expectOld != "" && strings.Contains(err.Error(), "is not in state") {
 			return fmt.Errorf("%w: key %d of %s, expected %s: %v", ErrKeyRowStateChanged, keyid, zonename, expectOld, err)
@@ -491,7 +409,6 @@ func UpdateKeyRowFrom(kdb *KeyDB, zonename string, keyid uint16, state, expectOl
 		return fmt.Errorf("commit failed: %w", err)
 	}
 	committed = true
-	notifyKeyStateChange(zonename, keyid, oldstate, state)
 	if rerr := republishSigningKeysForZone(kdb, zonename); rerr != nil {
 		return fmt.Errorf("UpdateKeyRow: republish signing keys: %w", rerr)
 	}

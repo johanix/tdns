@@ -1338,7 +1338,6 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 		return fmt.Errorf("commit failed: %w", err)
 	}
 	committed = true
-	notifyKeyStateChange(zonename, keyid, oldstate, newstate)
 
 	// Post-commit signing-keys republish (own-tx; R1).
 	if rerr := republishSigningKeysForZone(kdb, zonename); rerr != nil {
@@ -1348,8 +1347,7 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 }
 
 // GenerateAndStageKey generates a new DNSSEC key and stages it: created →
-// published, or created → whatever state the registered StagedState hook
-// names for this zone (KeyLifecycleHooks).
+// published.
 func GenerateAndStageKey(kdb *KeyDB, zone, creator string, alg uint8, keytype string) (uint16, error) {
 	if zd, owned := zoneOwnedByName(zone); owned {
 		return 0, ownedRefusal(zd, "generate")
@@ -1360,13 +1358,11 @@ func GenerateAndStageKey(kdb *KeyDB, zone, creator string, alg uint8, keytype st
 	}
 
 	keyid := pkc.KeyId
-	staged := keyStagedStateFor(zone)
-
-	if err := UpdateDnssecKeyState(kdb, zone, keyid, staged); err != nil {
-		return 0, fmt.Errorf("GenerateAndStageKey: state transition to %s failed: %w", staged, err)
+	if err := UpdateDnssecKeyState(kdb, zone, keyid, DnskeyStatePublished); err != nil {
+		return 0, fmt.Errorf("GenerateAndStageKey: state transition to %s failed: %w", DnskeyStatePublished, err)
 	}
 
-	lgSigner.Info("generated and staged DNSSEC key", "zone", zone, "keyid", keyid, "keytype", keytype, "state", staged)
+	lgSigner.Info("generated and staged DNSSEC key", "zone", zone, "keyid", keyid, "keytype", keytype, "state", DnskeyStatePublished)
 	return keyid, nil
 }
 
@@ -1553,17 +1549,13 @@ func UpdateDnssecKeyState(kdb *KeyDB, zonename string, keyid uint16, newstate st
 		}
 	}()
 
-	oldstate, err := updateDnssecKeyStateTx(tx, kdb, zonename, keyid, newstate)
-	if err != nil {
+	if err := UpdateDnssecKeyStateTx(tx, kdb, zonename, keyid, newstate); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit failed: %w", err)
 	}
 	committed = true
-	// After the commit and before the republish: the change is durable, and
-	// a republish failure below is reported to the caller either way.
-	notifyKeyStateChange(zonename, keyid, oldstate, newstate)
 	if rerr := republishSigningKeysForZone(kdb, zonename); rerr != nil {
 		return fmt.Errorf("UpdateDnssecKeyState: republish signing keys: %w", rerr)
 	}
@@ -1577,27 +1569,17 @@ func UpdateDnssecKeyState(kdb *KeyDB, zonename string, keyid uint16, newstate st
 // Does NOT republish the signing-keys snapshot — the caller must call
 // republishSigningKeysForZone after their Commit (R1). Callers today:
 // DnssecKeyMgmt (policy-cleanup; R2 defer), AtomicRollover, KSK observe-advance.
-// Nor does it run the OnStateChange hook: that fires after a commit, and the
-// caller owns this one.
 func UpdateDnssecKeyStateTx(tx *Tx, kdb *KeyDB, zonename string, keyid uint16, newstate string) error {
-	_, err := updateDnssecKeyStateTx(tx, kdb, zonename, keyid, newstate)
-	return err
-}
-
-// updateDnssecKeyStateTx is the body of UpdateDnssecKeyStateTx, returning the
-// state the key was in, for the hook UpdateDnssecKeyState fires after its
-// commit.
-func updateDnssecKeyStateTx(tx *Tx, kdb *KeyDB, zonename string, keyid uint16, newstate string) (string, error) {
 	f, ok := keyFlagsForState(newstate)
 	if !ok {
-		return "", fmt.Errorf("key state %q has no flags in the flag table (zone %s, keyid %d); register it with RegisterKeyStateFlags", newstate, zonename, keyid)
+		return fmt.Errorf("key state %q has no flags in the flag table (zone %s, keyid %d); register it with RegisterKeyStateFlags", newstate, zonename, keyid)
 	}
 	oldstate, err := setKeyRowTx(tx, zonename, keyid, newstate, f, "")
 	if err != nil {
-		return "", err
+		return err
 	}
 	lgSigner.Info("DNSKEY state updated", "zone", zonename, "keyid", keyid, "oldstate", oldstate, "newstate", newstate)
-	return oldstate, nil
+	return nil
 }
 
 // RolloverKey performs a manual key rollover for the specified zone and key type.
