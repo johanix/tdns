@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -379,19 +380,14 @@ func TestNotOwnedZoneKeepsTodaysLifecycle(t *testing.T) {
 	}
 }
 
-// T2.3: a multi-provider zone the registered owner does not own keeps
-// today's behaviour, hooks included: the owner's rollout is per zone.
-func TestMultiProviderZoneNotOwnedKeepsHooks(t *testing.T) {
+// T2.3: a multi-provider zone the registered owner does not own gets tdns's
+// own lifecycle, as every other zone: a published key is promoted when its
+// role has no active key, and no lifecycle verb is refused.
+func TestMultiProviderZoneNotOwnedKeepsTdnsLifecycle(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := ownerZone(t, kdb, "notyet.example.")
 	owner := &testOwner{owns: map[string]bool{}} // registered, owns nothing
 	installOwner(t, owner)
-	held := map[uint16]bool{}
-	RegisterKeyLifecycleHooks(KeyLifecycleHooks{
-		MayPromote:  func(_ *ZoneData, keyid uint16) bool { return !held[keyid] },
-		MayGenerate: func(_ *ZoneData, _ string) bool { return false },
-	})
-	t.Cleanup(func() { RegisterKeyLifecycleHooks(KeyLifecycleHooks{}) })
 
 	for _, k := range activeKeytags(t, kdb, zd.ZoneName, true) {
 		if err := UpdateDnssecKeyState(kdb, zd.ZoneName, k, DnskeyStateRetired); err != nil {
@@ -399,15 +395,9 @@ func TestMultiProviderZoneNotOwnedKeepsHooks(t *testing.T) {
 		}
 	}
 	k := ktGenKSK(t, kdb, zd.ZoneName, DnskeyStatePublished, dns.ED25519)
-	held[k] = true
-	zd.EnsureActiveDnssecKeys(kdb, false)
-	if st := keyStateOf(t, kdb, zd.ZoneName, k); st != DnskeyStatePublished {
-		t.Errorf("the hook held the key back but it is %s: the owner's answer was not honoured as 'not owned'", st)
-	}
-	held[k] = false
 	zd.EnsureActiveDnssecKeys(kdb, false)
 	if st := keyStateOf(t, kdb, zd.ZoneName, k); st != DnskeyStateActive {
-		t.Errorf("with the hook releasing the key it is %s, want active: today's behaviour", st)
+		t.Errorf("the published KSK is %s, want active: the owner's answer was not honoured as 'not owned'", st)
 	}
 	// and a lifecycle verb is not refused
 	if _, _, err := kdb.RolloverKey(zd.ZoneName, "ZSK", nil); err != nil && errors.Is(err, ErrZoneOwned) {
@@ -553,12 +543,12 @@ func TestOwnedZoneSetstateNeedsTheColumns(t *testing.T) {
 		t.Errorf("the refused setstate wrote: %v", w)
 	}
 	yes, no := true, false
-	_, err = kdb.DnssecKeyMgmt(context.Background(), nil, KeystorePost{Command: "dnssec-mgmt", SubCommand: "setstate", Keyname: zd.ZoneName, Zone: zd.ZoneName, Keyid: k, State: "mpdist", Pub: &yes, Sign: &no, DS: &no})
+	_, err = kdb.DnssecKeyMgmt(context.Background(), nil, KeystorePost{Command: "dnssec-mgmt", SubCommand: "setstate", Keyname: zd.ZoneName, Zone: zd.ZoneName, Keyid: k, State: ownerStateMpdist, Pub: &yes, Sign: &no, DS: &no})
 	if err != nil {
 		t.Fatalf("setstate with the columns: %v", err)
 	}
 	pub, sign, ds := readKeyRowFlags(t, kdb, zd.ZoneName, k)
-	if keyStateOf(t, kdb, zd.ZoneName, k) != "mpdist" || pub == nil || *pub != 1 || sign == nil || *sign != 0 || ds == nil || *ds != 0 {
+	if keyStateOf(t, kdb, zd.ZoneName, k) != ownerStateMpdist || pub == nil || *pub != 1 || sign == nil || *sign != 0 || ds == nil || *ds != 0 {
 		t.Errorf("after setstate with the columns: state=%s pub=%s sign=%s ds=%s, want mpdist 1 0 0", keyStateOf(t, kdb, zd.ZoneName, k), flagString(pub), flagString(sign), flagString(ds))
 	}
 	if w := keystoreWrites(t, kdb); len(w) != 1 {
@@ -590,5 +580,125 @@ func TestOwnedZonePolicySetKeepsTheOwnersFields(t *testing.T) {
 		if _, err := setZonePolicy(context.Background(), zd, kdb, name); err != nil && errors.Is(err, ErrZoneOwned) {
 			t.Errorf("policy-set to %q, which keeps the owner's fields, was refused as owned: %v", name, err)
 		}
+	}
+}
+
+func countKeysByCreator(t *testing.T, kdb *KeyDB, zone, creator string) int {
+	t.Helper()
+	var n int
+	if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=? AND creator=?`, zone, creator).Scan(&n); err != nil {
+		t.Fatalf("count by creator: %v", err)
+	}
+	return n
+}
+
+// A zone whose keys its owner has not released must not have tdns mint an
+// active pair beside them on the first signing publish. The mint is deferred
+// (ErrKeyGenerationDeferred), the publish goes out unsigned and the zone
+// stays not Ready, the same "not yet" as an unbound policy, until the owner
+// releases a key of each role; on a Ready signing zone the same deferral is
+// a fault, and the publish is refused with the signed version kept.
+func TestOwnedZoneWithNoReleasedKeyPublishesUnsignedUntilReleased(t *testing.T) {
+	zd := loadIxfrTestZone(t, basicZone)
+	kdb := newTestKeyDB(t)
+	if zd.Options == nil {
+		zd.Options = map[ZoneOption]bool{}
+	}
+	zd.Options[OptOnlineSigning] = true
+	zd.Options[OptMultiProvider] = true
+	zd.KeyDB = kdb
+	zd.DnssecPolicy = &DnssecPolicy{
+		Mode:         DnssecPolicyModeKSKZSK,
+		KSKAlgorithm: dns.ED25519,
+		ZSKAlgorithm: dns.ED25519,
+		SigValidity:  PolicySigValidity{Default: 14 * 86400, DNSKEY: 14 * 86400, DS: 14 * 86400},
+	}
+	installOwner(t, &testOwner{owns: map[string]bool{zd.ZoneName: true}})
+	ksk := genKey(t, kdb, zd.ZoneName, ownerStateMpdist, "KSK")
+	zsk := genKey(t, kdb, zd.ZoneName, ownerStateMpdist, "ZSK")
+
+	_, err := zd.EnsureActiveDnssecKeys(kdb, false)
+	if !errors.Is(err, ErrKeyGenerationDeferred) {
+		t.Fatalf("EnsureActiveDnssecKeys with only the owner's staged keys: err=%v, want ErrKeyGenerationDeferred", err)
+	}
+	if n := countKeysByCreator(t, kdb, zd.ZoneName, "ensure-active-keys"); n != 0 {
+		t.Fatalf("%d keys minted beside the owner's keys", n)
+	}
+	if active, _ := GetDnssecKeysByState(kdb, zd.ZoneName, DnskeyStateActive); len(active) != 0 {
+		t.Fatalf("%d active keys; nothing should be active yet", len(active))
+	}
+
+	// The publish path on a zone that has never served signed content:
+	// unsigned, not Ready, and NOT a fault.
+	zd.mu.Lock()
+	zd.Ready = false
+	zd.mu.Unlock()
+	stageAndPublish(t, zd, stageAddA(t, zd, "one.example.test.", "192.0.2.11"))
+	if !zd.HasPublishedData() {
+		t.Fatal("the publish was refused; a deferred mint on a not-yet-servable zone is not a fault")
+	}
+	if zd.Ready {
+		t.Fatal("the zone became Ready on an unsigned snapshot")
+	}
+	if zd.HasError(DnssecError) {
+		t.Fatalf("DnssecError set for a deferred mint: %s", zd.ErrorMsg)
+	}
+	if soa := zd.publishedSnapshot().Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA); len(soa.RRSIGs) != 0 {
+		t.Fatal("the SOA was signed with no active key")
+	}
+	if n := countKeysByCreator(t, kdb, zd.ZoneName, "ensure-active-keys"); n != 0 {
+		t.Fatalf("the publish path minted %d keys", n)
+	}
+
+	// The owner releases the keys with its own write, naming the columns.
+	dsYes := sql.NullBool{Bool: true, Valid: true}
+	dsNo := sql.NullBool{Bool: false, Valid: true}
+	if err := UpdateKeyRow(kdb, zd.ZoneName, ksk, DnskeyStateActive, KeyRowFlags{Pub: true, Sign: true, DS: dsYes}); err != nil {
+		t.Fatalf("release the KSK: %v", err)
+	}
+	if err := UpdateKeyRow(kdb, zd.ZoneName, zsk, DnskeyStateActive, KeyRowFlags{Pub: true, Sign: true, DS: dsNo}); err != nil {
+		t.Fatalf("release the ZSK: %v", err)
+	}
+	dak, err := zd.EnsureActiveDnssecKeys(kdb, false)
+	if err != nil {
+		t.Fatalf("EnsureActiveDnssecKeys after the release: %v", err)
+	}
+	if len(dak.KSKs) != 1 || dak.KSKs[0].KeyId != ksk || len(dak.ZSKs) != 1 || dak.ZSKs[0].KeyId != zsk {
+		t.Fatalf("active set after the release: KSKs=%v ZSKs=%v, want %d and %d", dak.KSKs, dak.ZSKs, ksk, zsk)
+	}
+	if n := countKeysByCreator(t, kdb, zd.ZoneName, "ensure-active-keys"); n != 0 {
+		t.Fatalf("%d keys minted although the owner had released a pair", n)
+	}
+
+	// And now it signs, and becomes Ready, with those keys only.
+	if _, err := zd.SignZone(context.Background(), kdb, false); err != nil {
+		t.Fatalf("SignZone: %v", err)
+	}
+	if !zd.Ready {
+		t.Fatal("the zone is not Ready after signing with the released keys")
+	}
+	for _, tag := range zd.mustRRSIGKeytags(t, zd.ZoneName, dns.TypeSOA) {
+		if tag != ksk && tag != zsk {
+			t.Fatalf("SOA signed by key %d, which is neither released key", tag)
+		}
+	}
+
+	// On a READY signing zone the same deferral is a fault: refuse the
+	// publish and keep the signed version, rather than publish unsigned.
+	for _, id := range []uint16{ksk, zsk} {
+		if err := UpdateKeyRow(kdb, zd.ZoneName, id, ownerStateMpdist, KeyRowFlags{Pub: true, DS: dsNo}); err != nil {
+			t.Fatalf("withdraw key %d: %v", id, err)
+		}
+	}
+	serial := zd.CurrentSerial
+	stageAndPublish(t, zd, stageAddA(t, zd, "two.example.test.", "192.0.2.12"))
+	if zd.CurrentSerial != serial {
+		t.Fatalf("a Ready zone with no released key published serial %d over its signed %d", zd.CurrentSerial, serial)
+	}
+	if !zd.HasError(DnssecError) {
+		t.Fatal("the refused publish did not set DnssecError")
+	}
+	if soa := zd.publishedSnapshot().Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA); len(soa.RRSIGs) == 0 {
+		t.Fatal("the served version lost its signature")
 	}
 }

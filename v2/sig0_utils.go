@@ -395,9 +395,6 @@ INSERT INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator, privatekey
 		}
 		committed = true
 		if rrtype == dns.TypeDNSKEY {
-			// A row that did not exist before is a state change too, and the
-			// one a bootstrap-minted active key makes; from is "".
-			notifyKeyStateChange(owner, pkc.KeyId, "", state)
 			if rerr := republishSigningKeysForZone(kdb, owner); rerr != nil {
 				return pkc, msg, fmt.Errorf("GenerateKeypair: republish signing keys: %w", rerr)
 			}

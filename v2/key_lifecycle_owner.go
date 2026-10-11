@@ -24,8 +24,13 @@ import (
 // A zone is owned exactly when it carries OptMultiProvider, an owner is
 // registered, and the owner answers Owns. Registration happens before
 // MainInit, so it is in place before any zone's first refresh. With no owner
-// registered, or Owns false, a multi-provider zone keeps today's behaviour,
-// KeyLifecycleHooks included: that is how the owner rolls out zone by zone.
+// registered, or Owns false, a multi-provider zone gets tdns's own lifecycle,
+// as every other zone does: that is how the owner rolled out zone by zone
+// (S3), and since S4 every multi-provider zone is owned.
+//
+// The states an owner stages its rows in are its own: it registers them
+// with RegisterKeyStateFlags, and tdns reads the rows by their pub, sign and
+// ds columns without naming the states.
 type KeyLifecycleOwner interface {
 	// Name is how tdns names the owner in a refusal.
 	Name() string
@@ -44,6 +49,13 @@ type KeyLifecycleOwner interface {
 
 // ErrZoneOwned is in every refusal of a lifecycle verb on an owned zone.
 var ErrZoneOwned = errors.New("the zone's key lifecycle is owned")
+
+// ErrKeyGenerationDeferred reports that EnsureActiveDnssecKeys found no
+// active key of a role on an owned zone: the owner has not released one
+// yet, and tdns mints none beside it. Not a fault. The publish path reads it
+// as "not yet" on a zone that has not served a signed version: it publishes
+// unsigned and stays not Ready, exactly as it does before the policy binds.
+var ErrKeyGenerationDeferred = errors.New("key generation deferred: the zone's owner has not released a key of this role yet")
 
 var (
 	keyLifecycleOwnerMu sync.RWMutex

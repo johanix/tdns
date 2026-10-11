@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"sort"
 	"testing"
 
@@ -74,7 +75,7 @@ func TestServedDnskeyRRsetIsThePubRowsOnceEach(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := InsertKeyRowTx(tx, testKeyRow(zone, DnskeyStateForeign, "KSK", newTestRand(21))); err != nil {
+	if err := InsertKeyRowTx(tx, testKeyRow(zone, ownerStateForeign, "KSK", newTestRand(21))); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -156,4 +157,102 @@ func TestSigningKeysFollowTheSignColumnNotTheState(t *testing.T) {
 	if len(rowsSigning) != 2 {
 		t.Errorf("GetSigningKeyRows: %d rows, want 2", len(rowsSigning))
 	}
+}
+
+func genKey(t *testing.T, kdb *KeyDB, zone, state, role string) uint16 {
+	t.Helper()
+	pkc, _, err := kdb.GenerateKeypair(zone, "test", state, dns.TypeDNSKEY, dns.ED25519, role, nil)
+	if err != nil {
+		t.Fatalf("generate %s %s: %v", state, role, err)
+	}
+	return pkc.KeyId
+}
+
+func servedDnskeyTags(t *testing.T, zd *ZoneData) map[uint16]bool {
+	t.Helper()
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		t.Fatalf("GetOwner(apex): owner=%v err=%v", apex, err)
+	}
+	tags := map[uint16]bool{}
+	for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
+		tags[rr.(*dns.DNSKEY).KeyTag()] = true
+	}
+	return tags
+}
+
+// Rows in an owner's served-only states (another provider's foreign key, a
+// key of our own on its way out to the other providers) are in the served
+// DNSKEY RRset, from a sign and from a refresh, and neither ever signs
+// anything: the readers go by pub and sign, not by the state's name.
+func TestOwnerStateRowsAreServedAndNeverSign(t *testing.T) {
+	zd := loadIxfrTestZone(t, basicZone)
+	kdb := makeZoneSigning(t, zd)
+	active, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+	if err != nil || len(active.KSKs) != 1 || len(active.ZSKs) != 1 {
+		t.Fatalf("active keys: %v %v", active, err)
+	}
+	activeTags := map[uint16]bool{active.KSKs[0].KeyId: true, active.ZSKs[0].KeyId: true}
+
+	// A foreign key: another signer's public DNSKEY, no private half.
+	foreign, err := GenerateKeyMaterial(zd.ZoneName, dns.TypeDNSKEY, dns.ED25519, "ZSK")
+	if err != nil {
+		t.Fatalf("GenerateKeyMaterial: %v", err)
+	}
+	foreignTag := foreign.DnskeyRR.KeyTag()
+	// Written as an owner writes a foreign row: through InsertKeyRowTx, so
+	// the row carries pub from its registered state.
+	tx, err := kdb.Begin("foreign")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := InsertKeyRowTx(tx, KeyRow{
+		Zone: zd.ZoneName, State: ownerStateForeign, Keyid: foreignTag, Flags: 256,
+		Algorithm: dns.AlgorithmToString[dns.ED25519], Creator: "test", KeyRR: foreign.DnskeyRR.String(),
+	}); err != nil {
+		tx.Rollback()
+		t.Fatalf("insert foreign row: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	stagedTag := genKey(t, kdb, zd.ZoneName, ownerStateMpdist, "ZSK")
+
+	if _, err := zd.SignZone(context.Background(), kdb, false); err != nil {
+		t.Fatalf("SignZone: %v", err)
+	}
+	check := func(when string) {
+		t.Helper()
+		served := servedDnskeyTags(t, zd)
+		for tag, why := range map[uint16]string{foreignTag: ownerStateForeign, stagedTag: ownerStateMpdist, active.KSKs[0].KeyId: "active KSK", active.ZSKs[0].KeyId: "active ZSK"} {
+			if !served[tag] {
+				t.Errorf("%s: the %s key %d is not in the served DNSKEY RRset %v", when, why, tag, served)
+			}
+		}
+		for _, rrtype := range []uint16{dns.TypeSOA, dns.TypeDNSKEY} {
+			for _, tag := range zd.mustRRSIGKeytags(t, zd.ZoneName, rrtype) {
+				if !activeTags[tag] {
+					t.Errorf("%s: %s signed by key %d, which is not an active key", when, dns.TypeToString[rrtype], tag)
+				}
+			}
+		}
+		for _, tag := range zd.mustRRSIGKeytags(t, signedName, dns.TypeA) {
+			if !activeTags[tag] {
+				t.Errorf("%s: %s A signed by key %d, which is not an active key", when, signedName, tag)
+			}
+		}
+	}
+	check("after SignZone")
+
+	// A refresh rebuilds the RRset from the keystore: the same predicate, so
+	// the same set.
+	dynamic := zd.CollectDynamicRRs(&Config{})
+	newZd := draftZone(t, zd.ZoneName, basicZone)
+	zd.mu.Lock()
+	err = zd.applyRefreshReplacementLocked(newZd, dynamic, false, true)
+	zd.mu.Unlock()
+	if err != nil {
+		t.Fatalf("applyRefreshReplacementLocked: %v", err)
+	}
+	check("after a refresh")
 }

@@ -16,9 +16,11 @@ var wantKeyFlags = map[string]struct{ pub, sign bool }{
 	DnskeyStateActive:      {true, true},
 	DnskeyStateRetired:     {true, false},
 	DnskeyStateRemoved:     {false, false},
-	DnskeyStateMpdist:      {true, false},
-	DnskeyStateForeign:     {true, false},
-	DnskeyStateMpremove:    {false, false},
+	// The owner's states, as the test package registers them
+	// (keyrow_helpers_test.go), with the flags tdns-mp registers.
+	ownerStateMpdist:   {true, false},
+	ownerStateForeign:  {true, false},
+	ownerStateMpremove: {false, false},
 }
 
 func TestKeyFlagsTableFollowsTheDesign(t *testing.T) {

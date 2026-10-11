@@ -136,13 +136,9 @@ func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propa
 // (transitionPublishedToStandbyForZone) and the retired-ZSK hold
 // (zskRemovalMargin) already count the TTL.
 //
-// A global walk: it reaches every zone's published keys, including those of a
-// zone whose keys are steered by the lifecycle hooks (KeyLifecycleHooks). It
-// needs nothing from the hooks beyond the OnStateChange that
-// UpdateDnssecKeyState fires for it, and it must not grow a skip for such
-// zones: a key their owner has moved to "published" is one it wants on this
-// timer. A zone whose lifecycle is OWNED (KeyLifecycleOwner) is different:
-// its owner runs every timer, and this walk leaves its keys alone.
+// A global walk: it reaches every zone's published keys. A zone whose
+// lifecycle is OWNED (KeyLifecycleOwner) is different: its owner runs every
+// timer, and this walk leaves its keys alone.
 func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStatePublished)
 	if err != nil {
@@ -303,14 +299,9 @@ func transitionRetiredToRemoved(ctx context.Context, conf *Config, kdb *KeyDB, n
 			}
 		}
 
-		// "removed", or the state the RetiredState hook names for this zone
-		// (KeyLifecycleHooks): a key whose withdrawal the hook's owner still
-		// has to confirm parks there, out of the served RRset, and the owner
-		// moves it on.
-		next := keyRetiredStateFor(key.ZoneName)
-		lgSigner.Info("KeyStateWorker: transitioning retired→"+next, "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
-		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, next); err != nil {
-			lgSigner.Error("KeyStateWorker: retired→"+next+" failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
+		lgSigner.Info("KeyStateWorker: transitioning retired→removed", "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
+		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, DnskeyStateRemoved); err != nil {
+			lgSigner.Error("KeyStateWorker: retired→removed failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
 			continue
 		}
 
@@ -406,19 +397,6 @@ func maintainStandbyKeysForType(ctx context.Context, conf *Config, kdb *KeyDB, z
 		return
 	}
 	publishedCount := countKeysForMaintain(publishedKeys, expectedFlags, alg, roleOnly)
-
-	// The pipeline is `published` plus whatever state the StagedState hook
-	// stages new keys into (KeyLifecycleHooks): a key waiting there is a key
-	// on its way to standby, and minting another beside it would double the
-	// count the hook's owner is pacing.
-	if staged := keyStagedStateFor(zoneName); staged != DnskeyStatePublished {
-		stagedKeys, err := GetDnssecKeysByState(kdb, zoneName, staged)
-		if err != nil {
-			lgSigner.Error("KeyStateWorker: error getting staged keys", "zone", zoneName, "keytype", keytype, "state", staged, "err", err)
-			return
-		}
-		publishedCount += countKeysForMaintain(stagedKeys, expectedFlags, alg, roleOnly)
-	}
 
 	if publishedCount > 0 {
 		lgSigner.Debug("KeyStateWorker: keys in pipeline, not generating", "zone", zoneName, "keytype", keytype, "pipeline", publishedCount)
