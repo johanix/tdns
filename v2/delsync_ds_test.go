@@ -353,3 +353,19 @@ func TestTheSyncDSArmAnswersWhatItCannotRun(t *testing.T) {
 		t.Fatal("the arm blocked on a request with no response channel")
 	}
 }
+
+// The blocker line names the config when parentsync.schemes is empty (the
+// parent was never asked), and the parent otherwise.
+func TestRolloverBlockerTextNamesTheConfigWhenNoSchemeIsConfigured(t *testing.T) {
+	empty := &ParentSyncPlan{Parent: "example.", Skipped: []SkippedScheme{{Scheme: "all", Reason: reasonNoSchemesConfigured}}}
+	if got := rolloverBlockerText(empty, "auto"); !strings.Contains(got, "parentsync.schemes") || strings.Contains(got, "parent advertises") {
+		t.Errorf("empty config: %q, want the config named and not the parent", got)
+	}
+	silent := &ParentSyncPlan{Parent: "example.", Skipped: []SkippedScheme{{Scheme: "all", Reason: "parent example. publishes no DSYNC records"}}}
+	if got := rolloverBlockerText(silent, "prefer-notify"); !strings.Contains(got, "parent advertises no DSYNC scheme") || !strings.Contains(got, `"prefer-notify"`) {
+		t.Errorf("a parent with no DSYNC: %q, want the parent named with the preference", got)
+	}
+	if got := rolloverBlockerText(nil, "auto"); !strings.Contains(got, "parent advertises") {
+		t.Errorf("nil plan: %q", got)
+	}
+}

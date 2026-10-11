@@ -99,6 +99,12 @@ type SkippedScheme struct {
 	Reason string
 }
 
+// reasonNoSchemesConfigured is the "all" skip of a plan built with an empty
+// parentsync.schemes: the config names no scheme, so the parent was never
+// asked. The rollover's blocker line reads it to say the config, not the
+// parent (rolloverBlockerText).
+const reasonNoSchemesConfigured = "no schemes configured in parentsync.schemes"
+
 // ParentSyncPlan is the result of ONE DSYNC discovery: everything the caller
 // needs to get a delegation change to the parent, or to explain why it cannot.
 type ParentSyncPlan struct {
@@ -257,7 +263,7 @@ func (zd *ZoneData) evaluateSchemes(ctx context.Context, kdb *KeyDB, imr *Imr,
 	}
 	if len(schemes) == 0 {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{
-			Scheme: "all", Reason: "no schemes configured in parentsync.schemes"})
+			Scheme: "all", Reason: reasonNoSchemesConfigured})
 		return
 	}
 

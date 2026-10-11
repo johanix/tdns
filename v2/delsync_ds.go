@@ -184,8 +184,7 @@ func (zd *ZoneData) SyncDSWithParent(ctx context.Context, kdb *KeyDB, notifyq ch
 			if pref == "" {
 				pref = defaultDsyncSchemePreference
 			}
-			zd.SetError(RolloverParentBlocker,
-				"parent advertises no DSYNC scheme matching policy preference %q; rollover blocked", pref)
+			zd.SetError(RolloverParentBlocker, "%s", rolloverBlockerText(plan, pref))
 		}
 		return KSKDSPushResult{
 			Category: cat,
@@ -889,4 +888,19 @@ func recordDSSubmitted(kdb *KeyDB, zone string, snap *RolloverTargetKeySnapshot)
 		return fmt.Errorf("clear stale submitted range: %w", err)
 	}
 	return nil
+}
+
+// rolloverBlockerText is the RolloverParentBlocker line of a DS delivery that
+// found no usable scheme. The parent is the reason unless the plan stopped
+// because parentsync.schemes names no scheme: then the config is, and the
+// line says so, since the parent was never asked.
+func rolloverBlockerText(plan *ParentSyncPlan, pref string) string {
+	if plan != nil {
+		for _, s := range plan.Skipped {
+			if s.Scheme == "all" && s.Reason == reasonNoSchemesConfigured {
+				return fmt.Sprintf("no scheme is configured in parentsync.schemes, so no DS can reach the parent (policy preference %q); rollover blocked", pref)
+			}
+		}
+	}
+	return fmt.Sprintf("parent advertises no DSYNC scheme matching policy preference %q; rollover blocked", pref)
 }
