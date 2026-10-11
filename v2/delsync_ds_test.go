@@ -369,3 +369,18 @@ func TestRolloverBlockerTextNamesTheConfigWhenNoSchemeIsConfigured(t *testing.T)
 		t.Errorf("nil plan: %q", got)
 	}
 }
+
+// The plan's "all" skip for an empty parentsync.schemes is what both the
+// DS delivery's blocker line and the policy-bind warning read.
+func TestPlanNoSchemesConfigured(t *testing.T) {
+	var nilPlan *ParentSyncPlan
+	if nilPlan.noSchemesConfigured() {
+		t.Error("a nil plan says no schemes configured")
+	}
+	if (&ParentSyncPlan{Skipped: []SkippedScheme{{Scheme: "all", Reason: "parent x. publishes no DSYNC records"}}}).noSchemesConfigured() {
+		t.Error("a parent with no DSYNC records counts as no schemes configured")
+	}
+	if !(&ParentSyncPlan{Skipped: []SkippedScheme{{Scheme: "API", Reason: "no credential"}, {Scheme: "all", Reason: reasonNoSchemesConfigured}}}).noSchemesConfigured() {
+		t.Error("the empty-config skip was not recognised")
+	}
+}

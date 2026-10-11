@@ -895,12 +895,23 @@ func recordDSSubmitted(kdb *KeyDB, zone string, snap *RolloverTargetKeySnapshot)
 // because parentsync.schemes names no scheme: then the config is, and the
 // line says so, since the parent was never asked.
 func rolloverBlockerText(plan *ParentSyncPlan, pref string) string {
-	if plan != nil {
-		for _, s := range plan.Skipped {
-			if s.Scheme == "all" && s.Reason == reasonNoSchemesConfigured {
-				return fmt.Sprintf("no scheme is configured in parentsync.schemes, so no DS can reach the parent (policy preference %q); rollover blocked", pref)
-			}
-		}
+	if plan.noSchemesConfigured() {
+		return fmt.Sprintf("no scheme is configured in parentsync.schemes, so no DS can reach the parent (policy preference %q); rollover blocked", pref)
 	}
 	return fmt.Sprintf("parent advertises no DSYNC scheme matching policy preference %q; rollover blocked", pref)
+}
+
+// noSchemesConfigured reports whether the plan stopped before asking the
+// parent because parentsync.schemes names no scheme (the "all" skip the
+// plan records then). Nil-safe.
+func (p *ParentSyncPlan) noSchemesConfigured() bool {
+	if p == nil {
+		return false
+	}
+	for _, s := range p.Skipped {
+		if s.Scheme == "all" && s.Reason == reasonNoSchemesConfigured {
+			return true
+		}
+	}
+	return false
 }
