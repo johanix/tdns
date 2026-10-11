@@ -554,19 +554,11 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 	if len(dpk.KSKs) > 0 || len(dpk.ZSKs) > 0 {
 		lgSigner.Info("published DNSSEC keys available for promotion", "zone", zd.ZoneName)
 
-		// The lifecycle hooks may hold a published key back (KeyLifecycleHooks
-		// MayPromote): the first key of each role the hooks release is the one
-		// promoted. Nil hooks release every key, which is the promotion this
-		// has always made.
 		var promotedKskKeyId uint16
 		promotedKsk := false
 
-		// Promote the first promotable KSK from published to active
+		// Promote the first published KSK to active
 		for _, ksk := range dpk.KSKs {
-			if !keyMayPromote(zd, ksk.KeyId) {
-				lgSigner.Info("published KSK is not yet promotable, leaving it published", "zone", zd.ZoneName, "keyid", ksk.KeyId)
-				continue
-			}
 			promotedKskKeyId = ksk.KeyId
 			err = kdb.PromoteDnssecKey(zd.ZoneName, promotedKskKeyId, DnskeyStatePublished, DnskeyStateActive)
 			if err != nil {
@@ -578,14 +570,10 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 			break
 		}
 
-		// Promote the first promotable ZSK from published to active unless it
-		// has the same keyid as the promoted KSK
+		// Promote the first published ZSK to active unless it has the same
+		// keyid as the promoted KSK
 		for _, zsk := range dpk.ZSKs {
 			if promotedKsk && zsk.KeyId == promotedKskKeyId {
-				continue
-			}
-			if !keyMayPromote(zd, zsk.KeyId) {
-				lgSigner.Info("published ZSK is not yet promotable, leaving it published", "zone", zd.ZoneName, "keyid", zsk.KeyId)
 				continue
 			}
 			zskKeyId := zsk.KeyId
@@ -629,16 +617,9 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s: %w", zd.ZoneName, ErrDnssecPolicyNotBound)
 	}
 
-	// Generate KSK if still missing -- unless the lifecycle hooks say not to
-	// (KeyLifecycleHooks MayGenerate): a KSK that exists in a state the
-	// hooks' owner has not released is not a reason to mint a second one
-	// beside it, and the error says so. When allowed, the key is generated
-	// ACTIVE, as it always has been: a zone with no active key cannot sign,
-	// so the staged state is not on this path.
+	// Generate KSK if still missing. The key is generated ACTIVE, as it
+	// always has been: a zone with no active key cannot sign.
 	if len(dak.KSKs) == 0 {
-		if !keyMayGenerate(zd, "KSK") {
-			return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s: KSK: %w", zd.ZoneName, ErrKeyGenerationDeferred)
-		}
 		pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate KSK for zone %s: %v", zd.ZoneName, err)
@@ -665,11 +646,8 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		}
 	}
 
-	// Generate ZSK only if we have zero real ZSKs; same hook as for the KSK.
+	// Generate ZSK only if we have zero real ZSKs.
 	if realZSKCount == 0 {
-		if !keyMayGenerate(zd, "ZSK") {
-			return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s: ZSK: %w", zd.ZoneName, ErrKeyGenerationDeferred)
-		}
 		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate ZSK for zone %s: %v", zd.ZoneName, err)
