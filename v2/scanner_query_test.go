@@ -181,7 +181,7 @@ func TestScanCSYNCRefusesAnUnsupportedBitmapType(t *testing.T) {
 	if n.queried[trustKey(child, dns.TypeNS)] != 0 {
 		t.Error("the child's NS was asked for, but the CSYNC is not acted on")
 	}
-	if _, marked := csyncProcessedSerial(child); marked {
+	if csyncMarkedProcessed(child) {
 		t.Error("a refused CSYNC was recorded as processed")
 	}
 }
@@ -202,7 +202,7 @@ func TestScanCSYNCRefusesToLeaveANameserverWithoutGlue(t *testing.T) {
 	if scanResponseChangesDelegation(resp) {
 		t.Error("a refused CSYNC would be applied")
 	}
-	if _, marked := csyncProcessedSerial(child); marked {
+	if csyncMarkedProcessed(child) {
 		t.Error("a refused CSYNC was recorded as processed")
 	}
 }
@@ -225,10 +225,19 @@ func forgetCsyncProcessed(zone string) {
 	delete(csyncProcessed.serials, csyncProcessedKey(zone))
 }
 
+// csyncMarkedProcessed reports whether a CSYNC is recorded as processed for
+// zone, from any of its nameservers.
+func csyncMarkedProcessed(zone string) bool {
+	csyncProcessed.Lock()
+	defer csyncProcessed.Unlock()
+	return len(csyncProcessed.serials[csyncProcessedKey(zone)]) > 0
+}
+
 // Every scan runs in its own goroutine. Unsynchronised, these writes were a
 // fatal "concurrent map writes"; under -race a regression also shows as a race.
 func TestCsyncProcessedSerialsAreSafeForConcurrentScans(t *testing.T) {
 	zones := []string{"race0.example.", "race1.example.", "race2.example.", "race3.example."}
+	const ns = "ns.provider.net."
 	t.Cleanup(func() {
 		for _, z := range zones {
 			forgetCsyncProcessed(z)
@@ -242,26 +251,31 @@ func TestCsyncProcessedSerialsAreSafeForConcurrentScans(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			zone := zones[i%len(zones)]
-			recordCsyncProcessed(zone, uint32(i))
-			sc.ZoneCSYNCKnown(zone, &dns.CSYNC{Serial: uint32(i)})
+			recordCsyncProcessed(zone, map[string]uint32{ns: uint32(i)})
+			sc.ZoneCSYNCKnown(zone, ns, &dns.CSYNC{Serial: uint32(i)})
 		}(i)
 	}
 	wg.Wait()
 	for _, z := range zones {
-		if _, ok := csyncProcessedSerial(z); !ok {
+		if _, ok := csyncProcessedSerial(z, ns); !ok {
 			t.Errorf("%s: no serial recorded", z)
 		}
 	}
 
-	recordCsyncProcessed("Race0.Example", 100)
-	if serial, ok := csyncProcessedSerial("race0.example."); !ok || serial != 100 {
+	recordCsyncProcessed("Race0.Example", map[string]uint32{"NS.Provider.Net": 100})
+	if serial, ok := csyncProcessedSerial("race0.example.", ns); !ok || serial != 100 {
 		t.Errorf("serial %d, recorded %v; names are compared canonically", serial, ok)
 	}
-	if !sc.ZoneCSYNCKnown("race0.example.", &dns.CSYNC{Serial: 99}) {
+	if !sc.ZoneCSYNCKnown("race0.example.", ns, &dns.CSYNC{Serial: 99}) {
 		t.Error("a CSYNC older than the last one processed is processed again")
 	}
-	if sc.ZoneCSYNCKnown("race0.example.", &dns.CSYNC{Serial: 100}) {
+	if sc.ZoneCSYNCKnown("race0.example.", ns, &dns.CSYNC{Serial: 100}) {
 		t.Error("the CSYNC last processed is not processed again")
+	}
+	// The memory is per nameserver: a serial one nameserver served says
+	// nothing about a CSYNC another one serves.
+	if sc.ZoneCSYNCKnown("race0.example.", "ns2.provider.net.", &dns.CSYNC{Serial: 99}) {
+		t.Error("a CSYNC from one nameserver is held against the serial of another")
 	}
 }
 
@@ -280,10 +294,16 @@ func TestScansOfOneChildAreSerialised(t *testing.T) {
 	sc.queryChild = func(ctx context.Context, qname string, qtype uint16, ns *core.RRset) (*core.RRset, []*core.RRset, bool, error) {
 		mu.Lock()
 		defer mu.Unlock()
+		return n.query(ctx, qname, qtype, ns)
+	}
+	// The CSYNC is asked of each nameserver (queryChildServers).
+	sc.queryChildServers = func(ctx context.Context, qname string, qtype uint16, ns *core.RRset) ([]childAnswer, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		if qtype == dns.TypeCSYNC {
 			events = append(events, "scan")
 		}
-		return n.query(ctx, qname, qtype, ns)
+		return n.queryServers(ctx, qname, qtype, ns)
 	}
 	sc.OnDelegationChange = func(string, *ZoneData, ScanTupleResponse) delegationApplyResult {
 		time.Sleep(50 * time.Millisecond)
