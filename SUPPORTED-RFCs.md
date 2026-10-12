@@ -135,7 +135,7 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 - **Child:** publishes a CSYNC with the `immediate` flag and the type bitmap `A NS AAAA`, replacing the previous record rather than adding to it.
 - **Parent:** a NOTIFY(CSYNC) starts a scan that copies the child's NS RRset and in-bailiwick glue into the parent's delegation.
 - **DNSSEC (§2, §3):** under a parent zone delegation policy with `require-dnssec: true`, the SOA, the CSYNC and all data copied from the child must validate Secure, or nothing is processed. Under `require-dnssec: false` nothing is validated, and the scan result says so.
-- **Limits:** only immediate processing; `soaminimum` is honoured. Glue for a nameserver that cannot be reached is left as it is.
+- **Limits:** only immediate processing; `soaminimum` is honoured, per nameserver (RFC 9975 below). Glue for a nameserver that cannot be reached is left as it is.
 
 ### RFC 7344 - Automating DNSSEC Delegation Trust Maintenance (CDS)
 **Status**: ✅ Partially Supported  
@@ -148,12 +148,13 @@ This document tracks DNS-related RFCs that are implemented (or partially impleme
 
 ### RFC 9975 - Consistency of CDS/CDNSKEY and CSYNC
 **Status**: ✅ Partially Supported  
-**Implementation**: `tdns/v2/cdnskey.go`, `tdns/v2/scanner.go` (`ProcessCDSNotify`)  
+**Implementation**: `tdns/v2/cdnskey.go`, `tdns/v2/scanner.go` (`ProcessCDSNotify`, `ProcessCSYNCNotify`)  
 **Notes**: 
 - **§3.1, CDS and CDNSKEY:** the parent fetches the CDNSKEY from the nameservers the CDS came from. Nameservers that disagree on it, or a CDNSKEY whose keys are not the keys the SHA-256 CDS records name, make the scan change nothing. CDS records of other digest types take no part.
 - **Local policy, not 9975:** a child that serves no CDNSKEY at any nameserver is accepted as CDS-only, and the scan log says so. This keeps CDS-only children working, tdns children of older builds among them.
 - **Child:** publishes CDS and CDNSKEY together, so they agree by construction.
-- **Not yet ([tdns#754](https://github.com/johanix/tdns/issues/754)):** every address of every nameserver, retries, the CSYNC consistency rules and the older-CDS guard.
+- **§3.2, CSYNC:** the immediate flag and the type bitmap of the CSYNC, and the NS and glue it names, must be the same at every nameserver that answers. The SOA serial, the CSYNC serial field and the `soaminimum` flag may differ between nameservers, as they do for a zone that several providers sign: each nameserver's CSYNC is judged against the SOA that nameserver serves, and its SOA serial must be the same after the scan as before it. Nameservers that come to different answers on whether the CSYNC may be processed make the scan change nothing.
+- **Not yet ([tdns#754](https://github.com/johanix/tdns/issues/754)):** every address of every nameserver, retries and the older-CDS guard.
 
 ### RFC 8078 - Managing DS Records from the Parent via CDS/CDNSKEY (CDNSKEY)
 **Status**: ✅ Partially Supported  

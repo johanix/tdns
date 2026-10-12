@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"slices"
 	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -74,9 +75,42 @@ func csyncFlags(c *dns.CSYNC) (immediate, useSoaMinimum bool, err error) {
 
 // csyncSuppressedBySoaMinimum implements the soaminimum flag (RFC 7477
 // §2.1.1.2.1): with it set, a CSYNC whose serial is above the child's current
-// SOA serial is not to be processed yet.
+// SOA serial is not to be processed yet. The SOA serial is the one served by
+// the nameserver the CSYNC came from (RFC 9975 §3.2).
 func csyncSuppressedBySoaMinimum(useSoaMinimum bool, c *dns.CSYNC, soaSerial uint32) bool {
 	return useSoaMinimum && c.Serial > soaSerial
+}
+
+// nsCsync is the CSYNC record one nameserver of the child serves.
+type nsCsync struct {
+	NS    string
+	CSYNC *dns.CSYNC
+}
+
+// csyncSameRequest reports whether two CSYNC records, served by two
+// nameservers of one child, ask for the same thing: RFC 9975 §3.2 requires the
+// immediate flag and the type bitmap to be equal across the child's
+// nameservers. The serial field and the soaminimum flag may differ. Each
+// nameserver's are judged against the SOA that nameserver serves.
+func csyncSameRequest(a, b *dns.CSYNC) bool {
+	return a.Flags&csyncFlagImmediate == b.Flags&csyncFlagImmediate &&
+		slices.Equal(csyncTypeSet(a), csyncTypeSet(b))
+}
+
+// csyncTypeSet is the type bitmap as a sorted set.
+func csyncTypeSet(c *dns.CSYNC) []uint16 {
+	types := slices.Clone(c.TypeBitMap)
+	slices.Sort(types)
+	return slices.Compact(types)
+}
+
+// csyncRequestString is what csyncSameRequest compares, for a reason text.
+func csyncRequestString(c *dns.CSYNC) string {
+	var types []string
+	for _, t := range csyncTypeSet(c) {
+		types = append(types, dns.Type(t).String())
+	}
+	return fmt.Sprintf("immediate=%v types=%s", c.Flags&csyncFlagImmediate != 0, strings.Join(types, ","))
 }
 
 // errCsyncUnsupportedTypes refuses a CSYNC whose type bitmap lists types this
