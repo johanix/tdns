@@ -1132,6 +1132,44 @@ func (conf *Config) KaspPropagationDelay() time.Duration {
 	return d
 }
 
+// kaspStandbyCount is the global standby count for a role (sep true for the
+// KSK): kasp's standby-zsk-count or standby-ksk-count when positive, else
+// the default of one ZSK and no KSK.
+func (conf *Config) kaspStandbyCount(sep bool) int {
+	var kasp KaspConf
+	if conf != nil {
+		kasp = conf.Dnssec.Kasp
+	}
+	if sep {
+		if kasp.StandbyKskCount > 0 {
+			return kasp.StandbyKskCount
+		}
+		return defaultStandbyKskCount
+	}
+	if kasp.StandbyZskCount > 0 {
+		return kasp.StandbyZskCount
+	}
+	return defaultStandbyZskCount
+}
+
+// StandbyKeyCount is how many standby keys of a role (sep true for the KSK)
+// a zone bound to pol keeps: the policy's own standby-zsks or standby-ksks
+// when it sets one, else the global kasp count. The key state worker reads
+// it for the zones tdns runs; a key lifecycle owner reads it for the zones
+// it runs, in place of the global.
+func (conf *Config) StandbyKeyCount(pol *DnssecPolicy, sep bool) int {
+	return standbyKeyCount(pol, sep, conf.kaspStandbyCount(sep))
+}
+
+// standbyKeyCount is StandbyKeyCount for a caller that resolved the global
+// count once, such as the worker's walk over every zone.
+func standbyKeyCount(pol *DnssecPolicy, sep bool, global int) int {
+	if n, ok := pol.StandbyCount(sep); ok {
+		return n
+	}
+	return global
+}
+
 // ReloadConfig reloads the full configuration. Kept for existing callers and
 // SIGHUP-style triggers that cannot consent — it never sets confirm, so the
 // DNSSEC policy-algorithm guardrail (checkReloadPolicyGuardrail) holds a dangerous

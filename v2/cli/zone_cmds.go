@@ -1084,8 +1084,9 @@ func DescribeZone(zconf tdns.ZoneConf) string {
 // `zone desc`. It degrades gracefully: a zone with no bound policy prints
 // "not signed"; a bound policy name that the server could not resolve in the
 // running config prints "policy unavailable". Otherwise it renders mode, the
-// role algorithms (KSK/ZSK, or CSK in csk mode), key lifetimes and RRSIG
-// validity, and surfaces the policy's parse Error when set.
+// role algorithms (KSK/ZSK, or CSK in csk mode), key lifetimes, RRSIG
+// validity and the standby counts, and surfaces the policy's parse Error
+// when set.
 func describePolicyDetail(zconf tdns.ZoneConf) string {
 	pd := zconf.PolicyDetail
 	if pd == nil {
@@ -1113,6 +1114,7 @@ func describePolicyDetail(zconf tdns.ZoneConf) string {
 	}
 	fmt.Fprintf(&b, "\t\tSigValidity: default=%s DNSKEY=%s DS=%s\n",
 		secsToDuration(pd.SigValidityDefault), secsToDuration(pd.SigValidityDNSKEY), secsToDuration(pd.SigValidityDS))
+	fmt.Fprintf(&b, "\t\tStandby keys: ZSKs=%s KSKs=%s\n", standbyCountCell(pd.StandbyZSKs), standbyCountCell(pd.StandbyKSKs))
 	return b.String()
 }
 

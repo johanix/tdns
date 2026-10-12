@@ -123,7 +123,7 @@ func lifecyclePaths() []lifecyclePath {
 				return len(ks) > 0
 			}
 		}, func(t *testing.T, kdb *KeyDB, zd *ZoneData) {
-			maintainStandbyKeys(context.Background(), &Conf, kdb, 1, 0)
+			maintainStandbyKeys(context.Background(), &Conf, kdb, time.Minute, 1, 0)
 		}},
 		{"rollover walk ds-published->published", func(t *testing.T, kdb *KeyDB, zd *ZoneData) func(*testing.T) bool {
 			// the active KSK's lifetime is long past: the successor's DNSKEY is due

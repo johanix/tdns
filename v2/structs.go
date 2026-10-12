@@ -744,6 +744,10 @@ type DnssecPolicyView struct {
 	SigValidityDefault uint32 // seconds
 	SigValidityDNSKEY  uint32 // seconds
 	SigValidityDS      uint32 // seconds
+	// StandbyZSKs and StandbyKSKs are the policy's own standby counts; nil
+	// means the global kasp count applies.
+	StandbyZSKs *int
+	StandbyKSKs *int
 }
 
 type TemplateConf struct {
@@ -915,6 +919,14 @@ type DnssecPolicyConf struct {
 	// Cdnskey: false publishes the CDS alone, without the CDNSKEY that goes
 	// with it (#753). Unset means true. A pointer for the same reason as Cds.
 	Cdnskey *bool `yaml:"cdnskey" mapstructure:"cdnskey"`
+
+	// StandbyZSKs and StandbyKSKs are how many standby keys of each role a
+	// zone bound to this policy keeps. Unset leaves the global count to
+	// apply (dnssec.kasp standby-zsk-count and standby-ksk-count, with
+	// their defaults); 0 keeps none. Pointers for the same reason as Cds:
+	// a template can fill one, and an explicit 0 survives the merge.
+	StandbyZSKs *int `yaml:"standby-zsks" mapstructure:"standby-zsks"`
+	StandbyKSKs *int `yaml:"standby-ksks" mapstructure:"standby-ksks"`
 }
 
 type KeyLifetime struct {
@@ -965,6 +977,13 @@ type DnssecPolicy struct {
 	// SuppressCDNSKEY is `cdnskey: false`: every CDS the DS engine publishes
 	// goes out alone, for a parent known to read only CDS (RFC 7344 §4).
 	SuppressCDNSKEY bool
+
+	// StandbyZSKs and StandbyKSKs are the policy's own standby counts per
+	// role (standby-zsks, standby-ksks); nil means the global kasp count
+	// applies. Read through StandbyCount, or Config.StandbyKeyCount for the
+	// count with the fallback applied.
+	StandbyZSKs *int
+	StandbyKSKs *int
 
 	// suppressLoadWarnings is set by ParseDnssecPolicyConfQuiet so
 	// CLI tools that re-parse a daemon's policy don't duplicate the

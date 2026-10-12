@@ -618,6 +618,8 @@ func populateZoneDescDetail(ctx context.Context, zconf *ZoneConf, zd *ZoneData, 
 		SigValidityDefault: pol.SigValidity.Default,
 		SigValidityDNSKEY:  pol.SigValidity.DNSKEY,
 		SigValidityDS:      pol.SigValidity.DS,
+		StandbyZSKs:        pol.StandbyZSKs,
+		StandbyKSKs:        pol.StandbyKSKs,
 	}
 }
 
