@@ -428,9 +428,9 @@ scanner:
 # Standby keys:
 #   standby-zsks / standby-ksks: how many standby keys of each role a zone
 #     bound to the policy keeps. Unset: the global kasp.standby-zsk-count /
-#     kasp.standby-ksk-count applies. 0 keeps none. A negative number is
-#     refused. For a zone whose key lifecycle an owner runs, these are the
-#     owner's fields.
+#     kasp.standby-ksk-count applies. 0 keeps none (a due ZSK roll still gets
+#     its replacement, minted on demand). A negative number is refused. For
+#     a zone whose key lifecycle an owner runs, these are the owner's fields.
 #
 # All DNSSEC configuration lives under this one block: deployment-wide
 # guardrails (large-algorithms, split-algorithms), the named policies that

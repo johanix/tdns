@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -237,5 +238,35 @@ func TestPolicyInfoShowsStandbyCounts(t *testing.T) {
 	info := DnssecPolicyToInfo(DnssecPolicy{Name: "p", StandbyZSKs: intp(2)})
 	if info.StandbyZSKs == nil || *info.StandbyZSKs != 2 || info.StandbyKSKs != nil {
 		t.Errorf("info standby counts %v %v, want 2 and absent", info.StandbyZSKs, info.StandbyKSKs)
+	}
+}
+
+// A policy with standby-zsks 0 keeps no standby, but the roll still gets its
+// replacement: once the active ZSK's lifetime has elapsed the worker mints
+// one on demand; before that, nothing.
+func TestZeroStandbyZsksPreparesAReplacementWhenTheRollIsDue(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	pol := &DnssecPolicy{Name: "nostandby", Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519,
+		SigValidity: PolicySigValidity{Default: 14 * 86400, DNSKEY: 14 * 86400, DS: 14 * 86400}}
+	pol.StandbyZSKs = intp(0)
+	pol.ZSK.Lifetime = 3600
+	standbyZone(t, kdb, "sbdue.example.", pol)
+	standbyZone(t, kdb, "sbfresh.example.", pol)
+	// the due zone's active ZSK went active two lifetimes ago
+	old := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET active_at=? WHERE zonename=? AND flags=256 AND state=?`, old, "sbdue.example.", DnskeyStateActive); err != nil {
+		t.Fatalf("age the active ZSK: %v", err)
+	}
+
+	maintainStandbyKeys(context.Background(), noResignQ(), kdb, 1, 0)
+
+	if z := publishedOfRole(t, kdb, "sbdue.example.", false); z != 1 {
+		t.Errorf("the due zone: minted %d ZSKs, want 1 (the replacement prepared on demand)", z)
+	}
+	if z := publishedOfRole(t, kdb, "sbfresh.example.", false); z != 0 {
+		t.Errorf("the fresh zone: minted %d ZSKs, want 0 (no standby kept, roll not due)", z)
+	}
+	if !zskReplacementDue(kdb, "sbdue.example.", pol, time.Now()) || zskReplacementDue(kdb, "sbfresh.example.", pol, time.Now()) {
+		t.Error("zskReplacementDue disagrees with the setup")
 	}
 }

@@ -350,6 +350,12 @@ func maintainStandbyKeys(ctx context.Context, conf *Config, kdb *KeyDB, standbyZ
 		// promoted). STRICT keeps per-(role,algorithm) counting (the maintained
 		// double-signature shape). See the algorithm-rollover plan §8.3 / D5.
 		relaxed := Conf.Internal.Completeness == CompletenessRelaxed
+		// A policy that keeps no standby ZSK still rolls: the replacement
+		// is prepared on demand, once the roll is due, instead of kept in
+		// waiting; the roll promotes it and the count is zero again.
+		if zskCount == 0 && zskReplacementDue(kdb, zoneName, zd.DnssecPolicy, time.Now()) {
+			zskCount = 1
+		}
 		maintainStandbyKeysForType(ctx, conf, kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, zskCount, relaxed)
 
 		// In relaxed mode, cap the standby-ZSK TOTAL (any algorithm) at
@@ -533,4 +539,36 @@ func triggerResign(conf *Config, zoneName string) {
 		lgSigner.Warn("KeyStateWorker: ResignQ full, re-sign deferred to the next resigner pass",
 			"zone", zoneName)
 	}
+}
+
+// zskReplacementDue reports whether a zone whose policy keeps no standby
+// ZSK needs one now: its ZSK roll is due, by the active ZSK's lifetime or
+// by a manual request whose time has come (zskRollDue, the roll's own
+// test), so the worker prepares the replacement on demand. A zone with no
+// active ZSK is not this case: EnsureActiveDnssecKeys mints its first key.
+func zskReplacementDue(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Time) bool {
+	if kdb == nil || pol == nil {
+		return false
+	}
+	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
+	if err != nil {
+		return false
+	}
+	var activeAt *time.Time
+	found := false
+	for i := range active {
+		if active[i].Flags == 256 {
+			activeAt, found = active[i].ActiveAt, true
+			break
+		}
+	}
+	if !found {
+		return false
+	}
+	earliest := ""
+	if manual, err := LoadZskManualRollover(kdb, zone); err == nil {
+		earliest = manual.Earliest
+	}
+	due, _ := zskRollDue(now, activeAt, pol.ZSK.Lifetime, earliest)
+	return due
 }
