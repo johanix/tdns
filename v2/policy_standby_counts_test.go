@@ -157,7 +157,7 @@ func TestStandbyMaintenanceReadsTheZonesPolicy(t *testing.T) {
 	standbyZone(t, kdb, "sbmore.example.", more)
 	standbyZone(t, kdb, "sbnone.example.", none)
 
-	maintainStandbyKeys(context.Background(), noResignQ(), kdb, 1, 0)
+	maintainStandbyKeys(context.Background(), noResignQ(), kdb, time.Minute, 1, 0)
 
 	for _, tc := range []struct {
 		zone       string
@@ -241,32 +241,111 @@ func TestPolicyInfoShowsStandbyCounts(t *testing.T) {
 	}
 }
 
-// A policy with standby-zsks 0 keeps no standby, but the roll still gets its
-// replacement: once the active ZSK's lifetime has elapsed the worker mints
-// one on demand; before that, nothing.
-func TestZeroStandbyZsksPreparesAReplacementWhenTheRollIsDue(t *testing.T) {
+// A policy that keeps no standby ZSK: the replacement is minted once the
+// roll comes within the propagation window (propagation-delay plus the
+// served DNSKEY TTL, what published takes to reach standby), not before and
+// not at the lifetime, so it is standby when the roll fires; the roll
+// promotes it, and the zone keeps none again. A manual request is minted
+// at the request, with no lead. Lifetime 1 h, window 5 min + 10 min.
+func TestZeroStandbyZsksMintTheReplacementAheadOfTheRoll(t *testing.T) {
 	kdb := newTestKeyDB(t)
+	conf := noResignQ()
+	const propagation = 5 * time.Minute
 	pol := &DnssecPolicy{Name: "nostandby", Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519,
 		SigValidity: PolicySigValidity{Default: 14 * 86400, DNSKEY: 14 * 86400, DS: 14 * 86400}}
 	pol.StandbyZSKs = intp(0)
 	pol.ZSK.Lifetime = 3600
-	standbyZone(t, kdb, "sbdue.example.", pol)
-	standbyZone(t, kdb, "sbfresh.example.", pol)
-	// the due zone's active ZSK went active two lifetimes ago
-	old := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
-	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET active_at=? WHERE zonename=? AND flags=256 AND state=?`, old, "sbdue.example.", DnskeyStateActive); err != nil {
-		t.Fatalf("age the active ZSK: %v", err)
+	pol.TTLS.DNSKEY = 600
+	soon := standbyZone(t, kdb, "sbsoon.example.", pol)
+	standbyZone(t, kdb, "sbearly.example.", pol)
+	standbyZone(t, kdb, "sbmanual.example.", pol)
+	stamp := func(zone, column, state string, flags int, age time.Duration) {
+		t.Helper()
+		at := time.Now().UTC().Add(-age).Format(time.RFC3339)
+		if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET `+column+`=? WHERE zonename=? AND flags=? AND state=?`, at, zone, flags, state); err != nil {
+			t.Fatalf("%s: set %s: %v", zone, column, err)
+		}
+	}
+	zsks := func(zone, state string) int {
+		t.Helper()
+		keys, err := GetDnssecKeysByState(kdb, zone, state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, k := range keys {
+			if k.Flags == 256 {
+				n++
+			}
+		}
+		return n
+	}
+	activeZSK := func(zone string) uint16 {
+		t.Helper()
+		keys, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range keys {
+			if k.Flags == 256 {
+				return k.KeyTag
+			}
+		}
+		t.Fatalf("%s: no active ZSK", zone)
+		return 0
+	}
+	// soon's roll is due in 10 min, inside the 15 min window; early's in 20 min, outside it
+	stamp("sbsoon.example.", "active_at", DnskeyStateActive, 256, 50*time.Minute)
+	stamp("sbearly.example.", "active_at", DnskeyStateActive, 256, 40*time.Minute)
+
+	maintainStandbyKeys(context.Background(), conf, kdb, propagation, 1, 0)
+	if z := zsks("sbsoon.example.", DnskeyStatePublished); z != 1 {
+		t.Errorf("the zone whose roll is inside the window: minted %d ZSKs, want 1", z)
+	}
+	for _, zone := range []string{"sbearly.example.", "sbmanual.example."} {
+		if z := zsks(zone, DnskeyStatePublished); z != 0 {
+			t.Errorf("%s: minted %d ZSKs, want 0 (no standby kept, no roll in the window)", zone, z)
+		}
 	}
 
-	maintainStandbyKeys(context.Background(), noResignQ(), kdb, 1, 0)
+	// a manual request: minted at the request
+	if err := SetZskManualRolloverRequest(kdb, "sbmanual.example.", time.Now(), time.Now()); err != nil {
+		t.Fatalf("manual request: %v", err)
+	}
+	maintainStandbyKeys(context.Background(), conf, kdb, propagation, 1, 0)
+	if z := zsks("sbmanual.example.", DnskeyStatePublished); z != 1 {
+		t.Errorf("the manual request: minted %d ZSKs, want 1", z)
+	}
 
-	if z := publishedOfRole(t, kdb, "sbdue.example.", false); z != 1 {
-		t.Errorf("the due zone: minted %d ZSKs, want 1 (the replacement prepared on demand)", z)
+	// the window passes: the key is standby before the lifetime ends, and
+	// nothing more is minted while the roll waits for it
+	stamp("sbsoon.example.", "published_at", DnskeyStatePublished, 256, propagation+10*time.Minute+time.Second)
+	transitionPublishedToStandby(conf, kdb, time.Now(), propagation)
+	if s, p := zsks("sbsoon.example.", DnskeyStateStandby), zsks("sbsoon.example.", DnskeyStatePublished); s != 1 || p != 0 {
+		t.Fatalf("after the window: %d standby and %d published ZSKs, want 1 and 0", s, p)
 	}
-	if z := publishedOfRole(t, kdb, "sbfresh.example.", false); z != 0 {
-		t.Errorf("the fresh zone: minted %d ZSKs, want 0 (no standby kept, roll not due)", z)
+	maintainStandbyKeys(context.Background(), conf, kdb, propagation, 1, 0)
+	if p := zsks("sbsoon.example.", DnskeyStatePublished); p != 0 {
+		t.Errorf("with the replacement standing by: minted %d more, want 0", p)
 	}
-	if !zskReplacementDue(kdb, "sbdue.example.", pol, time.Now()) || zskReplacementDue(kdb, "sbfresh.example.", pol, time.Now()) {
-		t.Error("zskReplacementDue disagrees with the setup")
+
+	// the lifetime ends: the roll promotes the standby, and the zone keeps none again
+	old := activeZSK("sbsoon.example.")
+	stamp("sbsoon.example.", "active_at", DnskeyStateActive, 256, 61*time.Minute)
+	if err := rolloverZskForZone(context.Background(), conf, kdb, soon, propagation, time.Now()); err != nil {
+		t.Fatalf("the roll: %v", err)
+	}
+	if now := activeZSK("sbsoon.example."); now == old {
+		t.Errorf("the roll did not promote the standby: active ZSK still %d", old)
+	}
+	if s := zsks("sbsoon.example.", DnskeyStateStandby); s != 0 {
+		t.Errorf("after the roll: %d standby ZSKs, want 0", s)
+	}
+	if zskReplacementDue(kdb, "sbsoon.example.", pol, time.Now(), propagation) {
+		t.Error("after the roll the replacement is reported due")
+	}
+	maintainStandbyKeys(context.Background(), conf, kdb, propagation, 1, 0)
+	if p := zsks("sbsoon.example.", DnskeyStatePublished); p != 0 {
+		t.Errorf("after the roll: minted %d ZSKs, want 0", p)
 	}
 }

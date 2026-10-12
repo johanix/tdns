@@ -230,7 +230,7 @@ func TestStandbyMaintenanceStopsBetweenZonesOnCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	maintainStandbyKeys(ctx, conf, kdb, 1, 0)
+	maintainStandbyKeys(ctx, conf, kdb, time.Minute, 1, 0)
 
 	if got := countStandbyZsks(t, kdb, zd.ZoneName); got != before {
 		t.Errorf("standby ZSKs went %d -> %d after cancellation; the walk carried on"+
